@@ -23,13 +23,16 @@
 //! i.e. in compile/emit cost, hot-reload size, and runtime trace shape.
 
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
+use std::cell::Cell as ThreadCell;
 
-use bone_semantic::hir::BodyOwner;
-use bone_semantic::inference::{BodyInference, Workspace};
-use bone_semantic::prelude::{BoundNext, BoundTree, CompilerError};
+use bone_semantic::inference::Workspace;
+use bone_semantic::prelude::{BoundTree, CompilerError};
 use comfy_la_arena::Idx;
-use skull_mir::lower::{lower_emitted_body, EmittedBodyId, ScalarCtx, SpecKey, SpecSubst};
+use skull_mir::concrete::ConcretePlans;
+use skull_mir::instance::Instance;
+use skull_mir::lower::{BackendFnAbiPlan, ScalarCtx};
 use skull_mir::mir::*;
+use ustr::Ustr;
 
 use crate::top_level_blocks;
 
@@ -51,6 +54,33 @@ const MAX_INLINES_PER_FN: usize = 1000;
 /// the old (coloring-aware) skull validated across the corpus.
 const CELL_BUDGET: usize = 400;
 
+thread_local! {
+    static INLINE_OFF: ThreadCell<bool> = const { ThreadCell::new(false) };
+}
+
+pub struct InlineOffGuard {
+    previous: bool,
+}
+
+pub fn inline_off_guard() -> InlineOffGuard {
+    let previous = INLINE_OFF.with(|off| {
+        let previous = off.get();
+        off.set(true);
+        previous
+    });
+    InlineOffGuard { previous }
+}
+
+impl Drop for InlineOffGuard {
+    fn drop(&mut self) {
+        INLINE_OFF.with(|off| off.set(self.previous));
+    }
+}
+
+fn inline_disabled() -> bool {
+    INLINE_OFF.with(|off| off.get()) || std::env::var_os("SKULL_INLINE_OFF").is_some()
+}
+
 /// Whether a candidate callee is a single straight-line block or a CFG.
 #[derive(Copy, Clone, PartialEq)]
 enum Kind {
@@ -63,6 +93,11 @@ enum Kind {
 /// candidate).
 struct CalleeBody {
     func: MirFunc,
+    /// The concrete body this snapshot was lowered from. A declaration-level
+    /// snapshot is not a valid source for a concrete splice.
+    subject: Instance,
+    /// The one ABI plan both the snapshot and its call site must use.
+    abi: BackendFnAbiPlan,
     kind: Kind,
     /// Uniform `Return` value count (0 for void, 1 for a scalar, N for a
     /// scalarized value struct). Matched against the call site's result shape.
@@ -89,7 +124,7 @@ struct CalleeBody {
 }
 
 /// One splice the inliner performed, for the `skull-inline-stats` diagnostic
-/// (`inline_functions` returns these alongside its dependency set). Records the
+/// (`inline_functions_with_plans` returns these alongside its dependency set). Records the
 /// callee whose body was copied in, its shape, and how much code it added.
 pub struct SpliceRecord {
     pub callee: FuncRef,
@@ -105,11 +140,10 @@ pub struct SpliceRecord {
 /// whose body and scalar ABI are unchanged keeps its cached lowered body instead
 /// of re-lowering every edit. The driver [`invalidate`](Self::invalidate)s the
 /// affected callees per edit so no stale body is ever cloned.
-/// Cache key: a callee `FuncRef` plus its per-instantiation [`SpecKey`]. A
-/// non-specialized call keys on the EMPTY key (the shared generic / non-generic
-/// snapshot); each distinct value instantiation gets its own specialized snapshot,
-/// so compile cost scales with element types used, not call sites.
-type CacheKey = (FuncRef, SpecKey);
+/// Cache key: the callee [`Instance`] -- the same concrete-body identity the
+/// chunk cache and both emitters key on. Each distinct instantiation gets its
+/// own snapshot, so compile cost scales with element types used, not call sites.
+type CacheKey = Instance;
 
 #[derive(Default)]
 pub struct InlineCache {
@@ -124,7 +158,7 @@ impl InlineCache {
     /// incremental driver invalidates wholesale. A body edit must also drop the
     /// specialized snapshots keyed off it, so this matches on the `fref` component.
     pub fn invalidate(&mut self, fref: FuncRef) {
-        self.cands.retain(|(f, _), _| *f != fref);
+        self.cands.retain(|inst, _| inst.func != fref);
     }
 }
 
@@ -155,48 +189,34 @@ fn annotation_gate(has_inline: bool, has_pure: bool, size_heuristic: bool) -> Op
 /// eligible. Hard exclusions: extern, `inline(lua)`, `co fn`, lambda-bearing,
 /// self-recursive, or any reachable non-`Return`/`Goto`/`Branch`/`Switch`
 /// terminator (a reachable `Unreachable`/`Yield` would mis-lower to a bare
-/// `return` inside the caller). `@inline` bypasses the size caps only.
-/// **Inlining is OFF, for cut C+D step E1** (`docs/monomorphization-plan.md`
-/// Stage 3, "Gate: compiling with inlining DISABLED remains correct").
-///
-/// A splice carries the callee's body into the caller, and the spliced
-/// snapshot's generic calls were lowered against whatever instantiation the
-/// callee was lowered for. Now that every body is instance-owned that choice is
-/// the CALLER's, so a splice taken from the wrong instance spells a callee
-/// symbol nothing emits -- which is a nil global at runtime, not a slower
-/// program. Stage-0e already turned inlining off for exactly this reason and
-/// that gate is subsumed here.
-///
-/// E2 restores it over concrete instance bodies. At that point a residual call
-/// names a concrete definition with the same ABI plan, which is what makes
-/// [`arity_ok`] declining a splice correct behaviour rather than a miscompile.
-fn inlining_enabled() -> bool {
-    false
-}
-
-fn classify(ws: &Workspace, scx: &ScalarCtx, fref: FuncRef, key: &SpecKey) -> Option<CalleeBody> {
+fn classify(
+    ws: &Workspace,
+    scx: &ScalarCtx,
+    inst: &Instance,
+    concrete_plans: &ConcretePlans,
+) -> Option<CalleeBody> {
+    let fref = inst.func;
     let f = &ws.module(fref.module).functions[fref.func];
     if f.is_extern || f.inline_body.is_some() || f.is_coroutine {
         return None;
     }
-    if !inlining_enabled() {
-        return None;
-    }
     let has_inline = f.annotations.iter().any(|a| a.name.name.as_str() == "inline");
     let has_pure = f.annotations.iter().any(|a| a.name.name.as_str() == "pure");
-    // An `Iterator`-bounded fn exists ONLY monomorphized-by-inlining (its body
-    // holds placeholder bound-calls and it is never emitted standalone), so it
-    // is always eligible and always forced, annotation or not.
+    // An `Iterator`-bounded body carries placeholder calls until a concrete
+    // splice or standalone demand resolves them, so inline eligibility forces
+    // the optimization when the body is otherwise eligible.
     let has_bounds = f.generic_bounds.iter().any(Option::is_some);
     let force = match annotation_gate(has_inline, has_pure, size_heuristic()) {
         Some(force) => force || has_bounds,
         None if has_bounds => true,
         None => return None,
     };
-    // A specialized snapshot lowers the body as if hand-written for the concrete
-    // instantiation (`docs/flatvec-plan.md`); an all-`None` key is the shared
-    // snapshot, byte-identical to `lower_function`.
-    let mut mf = lower_emitted_body(ws, scx, &EmittedBodyId::new(fref, key.clone())).ok()?;
+    // A snapshot lowers the body as if hand-written for the concrete
+    // instantiation (`docs/flatvec-plan.md`); a non-generic instance's is the
+    // declaration's own body.
+    let plan = concrete_plans.get(inst)?;
+    let abi = BackendFnAbiPlan::for_concrete_plan(ws, scx, plan);
+    let mut mf = skull_mir::lower::lower_instance_with_plans(ws, scx, plan, concrete_plans).ok()?;
     // Cleanup first so the size gate reflects emitted size and the splice clones
     // a tight body (the caller re-runs cleanup over the whole result anyway).
     crate::cleanup(&mut mf);
@@ -273,7 +293,17 @@ fn classify(ws: &Workspace, scx: &ScalarCtx, fref: FuncRef, key: &SpecKey) -> Op
             Term::Return(vs) => vs.len(),
             _ => unreachable!(),
         };
-        Some(CalleeBody { func: mf, kind: Kind::Straight, ret_arity, reachable: Vec::new(), insts: reachable_insts, forced: force, coalescable_params })
+        Some(CalleeBody {
+            func: mf,
+            subject: inst.clone(),
+            abi,
+            kind: Kind::Straight,
+            ret_arity,
+            reachable: Vec::new(),
+            insts: reachable_insts,
+            forced: force,
+            coalescable_params,
+        })
     } else {
         // General: uniform return arity across every reachable Return.
         let mut arities = reachable
@@ -289,46 +319,75 @@ fn classify(ws: &Workspace, scx: &ScalarCtx, fref: FuncRef, key: &SpecKey) -> Op
         if !force && reachable_insts > GENERAL_INSTS {
             return None;
         }
-        Some(CalleeBody { func: mf, kind: Kind::General, ret_arity, reachable, insts: reachable_insts, forced: force, coalescable_params })
+        Some(CalleeBody {
+            func: mf,
+            subject: inst.clone(),
+            abi,
+            kind: Kind::General,
+            ret_arity,
+            reachable,
+            insts: reachable_insts,
+            forced: force,
+            coalescable_params,
+        })
     }
 }
 
-/// Get (lowering+classifying on first sight) the candidate for `(fref, key)`.
-/// A non-empty `key` builds the specialized snapshot for that instantiation.
+/// Get (lowering+classifying on first sight) the candidate for `inst`.
 fn get<'a>(
     cache: &'a mut InlineCache,
     ws: &Workspace,
     scx: &ScalarCtx,
-    fref: FuncRef,
-    key: &SpecKey,
+    inst: &Instance,
+    concrete_plans: &ConcretePlans,
 ) -> Option<&'a CalleeBody> {
-    let ck = (fref, key.clone());
-    if !cache.cands.contains_key(&ck) {
-        let v = classify(ws, scx, fref, key);
-        cache.cands.insert(ck.clone(), v);
+    if !cache.cands.contains_key(inst) {
+        let v = classify(ws, scx, inst, concrete_plans);
+        cache.cands.insert(inst.clone(), v);
     }
-    cache.cands[&ck].as_ref()
+    cache.cands[inst].as_ref()
 }
 
 /// One resolved, eligible call site in the caller, extracted before the splice.
-/// `key` is the site's instantiation (empty = the shared snapshot), read from the
-/// caller's `spec_bindings` so the splice clones the matching specialized body.
+/// `inst` is the concrete body it targets, read from the caller's
+/// `callee_instances`; a delivery record is only checked against it when one
+/// exists. A missing generic owner leaves the call residual rather than guessing
+/// a declaration-level body.
 enum Site {
     /// `Inst::Call` — single (or void) result; `call_id` is the call's value.
-    Single { bid: Idx<Block>, idx: usize, call_id: Idx<Inst>, fref: FuncRef, args: Vec<Idx<Inst>>, key: SpecKey },
+    Single {
+        bid: Idx<Block>,
+        idx: usize,
+        call_id: Idx<Inst>,
+        args: Vec<Idx<Inst>>,
+        inst: Instance,
+        abi: BackendFnAbiPlan,
+    },
     /// `Inst::CallMulti` — N leaves bound positionally into `dests`.
-    Multi { bid: Idx<Block>, idx: usize, call_id: Idx<Inst>, dests: Vec<Idx<Cell>>, fref: FuncRef, args: Vec<Idx<Inst>>, key: SpecKey },
+    Multi {
+        bid: Idx<Block>,
+        idx: usize,
+        call_id: Idx<Inst>,
+        dests: Vec<Idx<Cell>>,
+        args: Vec<Idx<Inst>>,
+        inst: Instance,
+        abi: BackendFnAbiPlan,
+    },
 }
 
 impl Site {
-    fn fref(&self) -> FuncRef {
+    fn inst(&self) -> &Instance {
         match self {
-            Site::Single { fref, .. } | Site::Multi { fref, .. } => *fref,
+            Site::Single { inst, .. } | Site::Multi { inst, .. } => inst,
         }
     }
-    fn key(&self) -> &SpecKey {
+    fn fref(&self) -> FuncRef {
+        self.inst().func
+    }
+
+    fn abi(&self) -> &BackendFnAbiPlan {
         match self {
-            Site::Single { key, .. } | Site::Multi { key, .. } => key,
+            Site::Single { abi, .. } | Site::Multi { abi, .. } => abi,
         }
     }
     fn pos(&self) -> (Idx<Block>, usize) {
@@ -341,6 +400,56 @@ impl Site {
             Site::Single { call_id, .. } | Site::Multi { call_id, .. } => *call_id,
         }
     }
+}
+
+/// Resolve a lowered call's authoritative concrete owner. The delivery map is
+/// only an agreement check: it is absent for valid residual concrete calls and
+/// must never be used to invent the candidate identity.
+fn call_target(
+    func: &MirFunc,
+    call_id: Idx<Inst>,
+    fref: FuncRef,
+    ws: &Workspace,
+) -> Result<Option<(Instance, BackendFnAbiPlan)>, CompilerError> {
+    let Some(owner) = func.callee_instances.get(&call_id) else {
+        return Ok(None);
+    };
+    if skull_mir::lower::canonical_variant(ws, owner.func)
+        != skull_mir::lower::canonical_variant(ws, fref)
+    {
+        return Err(CompilerError::new_no_location(format!(
+            "internal: call in `{}` records owner `{}` but targets another declaration",
+            func.name,
+            ws.module(owner.func.module).functions[owner.func.func].name,
+        )));
+    }
+    let declaration = &ws.module(fref.module).functions[fref.func];
+    if declaration.generics.is_empty() {
+        if !owner.args.is_empty() {
+            return Err(CompilerError::new_no_location(format!(
+                "internal: non-generic call target `{}` carries type arguments",
+                declaration.name,
+            )));
+        }
+    } else if owner.args.is_empty() {
+        return Ok(None);
+    }
+    let inst = owner.clone();
+    if let Some(delivery) = func.spec_bindings.get(&call_id) {
+        if delivery != &inst {
+            return Err(CompilerError::new_no_location(format!(
+                "internal: delivery instance for `{}` disagrees with its concrete call owner",
+                declaration.name,
+            )));
+        }
+    }
+    let abi = func.call_abi_plans.get(&call_id).cloned().ok_or_else(|| {
+        CompilerError::new_no_location(format!(
+            "internal: concrete call to `{}` has no lowered ABI plan",
+            declaration.name,
+        ))
+    })?;
+    Ok(Some((inst, abi)))
 }
 
 /// Whether candidate `cand` matches the call site's arg/result arity.
@@ -376,7 +485,8 @@ fn find_site(
     self_ref: FuncRef,
     top: &HashSet<Idx<Block>>,
     resume: Option<(Idx<Block>, usize)>,
-) -> Option<Site> {
+    concrete_plans: &ConcretePlans,
+) -> Result<Option<Site>, CompilerError> {
     let mut started = resume.is_none();
     for (bid, _) in func.blocks.iter() {
         if !top.contains(&bid) {
@@ -395,47 +505,53 @@ fn find_site(
         };
         let insts = func.blocks[bid].insts.clone();
         for (idx, iid) in insts.into_iter().enumerate().skip(start) {
-            let key = func.spec_bindings.get(&iid).cloned().unwrap_or_default();
             let site = match &func.insts[iid] {
-                Inst::Call { func: fref, args } if *fref != self_ref => Site::Single {
-                    bid,
-                    idx,
-                    call_id: iid,
-                    fref: *fref,
-                    args: args.clone(),
-                    key,
-                },
-                Inst::CallMulti { dests, func: fref, args } if *fref != self_ref => Site::Multi {
-                    bid,
-                    idx,
-                    call_id: iid,
-                    dests: dests.clone(),
-                    fref: *fref,
-                    args: args.clone(),
-                    key,
-                },
+                Inst::Call { func: fref, args } if *fref != self_ref => {
+                    let Some((inst, abi)) = call_target(func, iid, *fref, ws)? else {
+                        continue;
+                    };
+                    Site::Single { bid, idx, call_id: iid, args: args.clone(), inst, abi }
+                }
+                Inst::CallMulti { dests, func: fref, args } if *fref != self_ref => {
+                    let Some((inst, abi)) = call_target(func, iid, *fref, ws)? else {
+                        continue;
+                    };
+                    Site::Multi {
+                        bid,
+                        idx,
+                        call_id: iid,
+                        dests: dests.clone(),
+                        args: args.clone(),
+                        inst,
+                        abi,
+                    }
+                }
                 _ => continue,
             };
             let cell_count = func.cells.len();
-            match get(cache, ws, scx, site.fref(), site.key()) {
+            match get(cache, ws, scx, site.inst(), concrete_plans) {
                 // Decline a splice that would breach the per-caller cell budget
-                // (keep scanning — a smaller candidate may still fit). A SPECIALIZED
-                // call (non-empty spec key) is exempt: its args are splatted to
-                // leaves, so the shared generic body cannot serve it -- it MUST
-                // splice, and eligibility is a subset of `classify` so a candidate
-                // always exists. Declining it would leave a residual miscompile.
+                // (keep scanning — a smaller candidate may still fit). A concrete
+                // call with a scalarized ABI is exempt: its args are splatted to
+                // leaves, so a residual opaque delivery would be invalid -- it
+                // must splice, and eligibility is a subset of `classify` so a
+                // candidate always exists. Declining it would leave a residual
+                // miscompile.
                 Some(cand)
-                    if arity_ok(cand, &site)
-                        && (!site.key().is_empty()
+                    if cand.subject == *site.inst()
+                        && cand.abi == *site.abi()
+                        && cand.abi.result_lanes() == site.abi().result_lanes()
+                        && arity_ok(cand, &site)
+                        && (!site.inst().args.is_empty()
                             || cell_count + cand.func.cells.len() <= CELL_BUDGET) =>
                 {
-                    return Some(site)
+                    return Ok(Some(site))
                 }
                 _ => {}
             }
         }
     }
-    None
+    Ok(None)
 }
 
 /// Clone the callee's cells + insts into `caller` (NOT blocks — only the straight
@@ -516,6 +632,9 @@ fn clone_all(
         remap_term_clone(&mut term, &inst_map, &block_map);
         caller.blocks[nbid].term = term;
     }
+    caller
+        .for_iter_headers
+        .extend(callee.for_iter_headers.iter().map(|header| block_map[header]));
     (inst_map, cell_map, block_map)
 }
 
@@ -640,33 +759,30 @@ fn coalesce_overrides(
     (overrides, coalesced)
 }
 
-/// Resolve every `CallerGeneric` leaf of `tree` through the splice site's own
-/// tree `n` (recursively -- a `Concrete` node's sub-tree was built in the same
-/// body, so its leaves also refer to the SITE's enclosing generics). By the
-/// time a body is emitted (bounded fns never are), every site tree is fully
-/// concrete, so a leaf that `n` cannot resolve is a compiler bug -- reject.
-fn graft_bound_tree(tree: &BoundTree, n: &BoundTree) -> Result<BoundTree, CompilerError> {
-    let mut out = BoundTree::default();
-    for (g, bn) in &tree.next {
-        out.next.insert(*g, graft_bound_next(bn, n)?);
+fn graft_resolved_bound_tree(
+    tree: &skull_mir::bound::ResolvedBoundTree,
+    incoming: &skull_mir::bound::ResolvedBoundTree,
+) -> Result<skull_mir::bound::ResolvedBoundTree, CompilerError> {
+    let mut out = skull_mir::bound::ResolvedBoundTree::default();
+    for (&g, next) in &tree.next {
+        let next = match next {
+            skull_mir::bound::ResolvedBoundNext::Concrete { instance, sub } => {
+                skull_mir::bound::ResolvedBoundNext::Concrete {
+                    instance: instance.clone(),
+                    sub: graft_resolved_bound_tree(sub, incoming)?,
+                }
+            }
+            skull_mir::bound::ResolvedBoundNext::CallerGeneric(g) => {
+                incoming.get(*g).cloned().ok_or_else(|| {
+                    CompilerError::new_no_location(format!(
+                        "internal: unresolved concrete `Iterator` bound (generic #{g}) while inlining"
+                    ))
+                })?
+            }
+        };
+        out.next.insert(g, next);
     }
     Ok(out)
-}
-
-fn graft_bound_next(bn: &BoundNext, n: &BoundTree) -> Result<BoundNext, CompilerError> {
-    match bn {
-        BoundNext::Concrete { func, sub, next_generics } => Ok(BoundNext::Concrete {
-            func: *func,
-            sub: graft_bound_tree(sub, n)?,
-            next_generics: next_generics.clone(),
-        }),
-        BoundNext::CallerGeneric(g) => n.next.get(g).cloned().ok_or_else(|| {
-            CompilerError::new_no_location(format!(
-                "internal: unresolved `Iterator` bound (generic #{g}) while inlining -- \
-                 the splice site carries no resolution for it"
-            ))
-        }),
-    }
 }
 
 /// After cloning a callee body into the caller: substitute every cloned
@@ -679,18 +795,37 @@ fn resolve_cloned_bound_calls(
     callee: &MirFunc,
     inst_map: &HashMap<Idx<Inst>, Idx<Inst>>,
     site_tree: Option<&BoundTree>,
+    site_resolved_tree: Option<&skull_mir::bound::ResolvedBoundTree>,
     ws: &Workspace,
-    caller_inf: Option<&BodyInference>,
-    caller_subst: &SpecSubst,
+    scx: &ScalarCtx,
+    concrete_plans: &ConcretePlans,
 ) -> Result<(), CompilerError> {
     let empty = BoundTree::default();
     let n = site_tree.unwrap_or(&empty);
+    let incoming = match site_resolved_tree {
+        Some(tree) => tree.clone(),
+        None if n.is_empty() => Default::default(),
+        None => {
+            return Err(CompilerError::new_no_location(
+                "internal: concrete splice site has no resolved bound plan",
+            ));
+        }
+    };
+    let mut resolved_by_old: HashMap<Idx<Inst>, skull_mir::bound::ResolvedBoundTree> =
+        HashMap::default();
 
-    for (old_id, tree) in &callee.bound_trees {
+    for old_id in callee.bound_trees.keys() {
         let new_id = inst_map[old_id];
-        let grafted = graft_bound_tree(tree, n)?;
+        let resolved = callee.resolved_bound_trees.get(old_id).ok_or_else(|| {
+            CompilerError::new_no_location(format!(
+                "internal: concrete callee `{}` has a raw bound tree without its resolved plan",
+                callee.name
+            ))
+        })?;
+        let grafted = graft_resolved_bound_tree(resolved, &incoming)?;
         if !grafted.is_empty() {
-            func.bound_trees.insert(new_id, grafted);
+            func.resolved_bound_trees.insert(new_id, grafted.clone());
+            resolved_by_old.insert(*old_id, grafted);
         }
     }
 
@@ -700,39 +835,113 @@ fn resolve_cloned_bound_calls(
         };
         debug_assert!(matches!(callee.insts[old_id], Inst::CallBoundMulti { .. }));
         let g = *generic_idx as usize;
-        let Some(bn) = n.next.get(&g) else {
+        let tree = resolved_by_old.get(&old_id).unwrap_or(&incoming);
+        let Some(leaf) = tree.next.get(&g).cloned() else {
             return Err(CompilerError::new_no_location(format!(
                 "internal: placeholder bound-call (generic #{g}) has no concrete \
                  resolution at this splice site"
             )));
         };
-        // The sub-tree's leaves refer to the same site generics -- graft before
-        // attaching to the substituted call, so the fixpoint sees them.
-        if let BoundNext::Concrete { sub, .. } = bn {
+        if let skull_mir::bound::ResolvedBoundNext::Concrete { sub, .. } = &leaf {
             if !sub.is_empty() {
-                let grafted = graft_bound_tree(sub, n)?;
-                if !grafted.is_empty() {
-                    func.bound_trees.insert(new_id, grafted);
-                }
+                func.resolved_bound_trees.insert(new_id, sub.clone());
             }
         }
-        let leaf = skull_mir::bound::resolve_bound_next(
-            ws,
-            caller_inf,
-            caller_subst,
-            bn,
-            &Default::default(),
-        )?;
         crate::bound::substitute_bound_call(
             func,
             new_id,
             callee.bound_next_split.contains(&old_id),
             &leaf,
+            scx,
             ws,
+            scx.interner(),
+            concrete_plans,
             "at this splice site",
         )?;
     }
+    if let Some((&old_id, &new_id)) = inst_map.iter().find(|(_, new_id)| {
+        matches!(func.insts[**new_id], Inst::CallBoundMulti { .. })
+    }) {
+        return Err(CompilerError::new_no_location(format!(
+            "internal: cloned bounded placeholder {:?} from `{}` survived concrete splice as {:?}",
+            old_id, callee.name, new_id
+        )));
+    }
     Ok(())
+}
+
+fn collect_nested_names(nested: &[MirFunc], out: &mut Vec<Ustr>) {
+    for nf in nested {
+        out.push(nf.name);
+        collect_nested_names(&nf.nested_fns, out);
+    }
+}
+
+fn remap_nested_global(inst: &mut Inst, names: &HashMap<Ustr, Ustr>) {
+    if let Inst::Global(name) = inst {
+        if let Some(&new) = names.get(name) {
+            *name = new;
+        }
+    }
+}
+
+fn rename_nested_tree(nested: &mut [MirFunc], names: &HashMap<Ustr, Ustr>) {
+    for nf in nested {
+        if let Some(&new) = names.get(&nf.name) {
+            nf.name = new;
+        }
+        for (_, inst) in nf.insts.iter_mut() {
+            remap_nested_global(inst, names);
+        }
+        nf.hoisted_fn_globals = nf
+            .hoisted_fn_globals
+            .iter()
+            .map(|name| names.get(name).copied().unwrap_or(*name))
+            .collect();
+        rename_nested_tree(&mut nf.nested_fns, names);
+    }
+}
+
+/// Carry named nested bodies across a splice. Their names are private globals,
+/// so each splice needs a fresh namespace and every reference in the cloned
+/// parent and child arenas must move with it.
+fn import_nested_fns(
+    func: &mut MirFunc,
+    callee: &MirFunc,
+    inst_map: &HashMap<Idx<Inst>, Idx<Inst>>,
+) -> HashMap<Ustr, Ustr> {
+    if callee.nested_fns.is_empty() {
+        return HashMap::default();
+    }
+    let mut old_names = Vec::new();
+    collect_nested_names(&callee.nested_fns, &mut old_names);
+    let mut used = Vec::new();
+    collect_nested_names(&func.nested_fns, &mut used);
+    used.extend(func.hoisted_fn_globals.iter().copied());
+    used.extend(old_names.iter().copied());
+    let mut used: HashSet<Ustr> = used.into_iter().collect();
+    let mut names = HashMap::default();
+    let mut nonce = func.nested_fns.len();
+    for old in old_names {
+        if names.contains_key(&old) {
+            continue;
+        }
+        loop {
+            let new = Ustr::from(format!("{old}__inline{nonce}").as_str());
+            nonce += 1;
+            if used.insert(new) {
+                names.insert(old, new);
+                break;
+            }
+        }
+    }
+    for new_id in inst_map.values() {
+        remap_nested_global(&mut func.insts[*new_id], &names);
+    }
+    let mut nested = callee.nested_fns.clone();
+    rename_nested_tree(&mut nested, &names);
+    func.nested_fns.extend(nested);
+    names
 }
 
 /// Import the cloned callee body's `spec_bindings` into the caller (keys remapped
@@ -740,18 +949,14 @@ fn resolve_cloned_bound_calls(
 /// and specialized by the fixpoint -- the `spec_bindings` analogue of
 /// `resolve_cloned_bound_calls` importing `bound_trees`.
 ///
-/// **E2 must decide about `MirFunc::resolved_bound_trees`, which this does NOT
-/// import.** It carries the resolution a STANDALONE substitution attached to a
-/// retargeted call, and E1 runs with inlining disabled, so no cloned body has
-/// one yet and dropping it costs nothing today. Once inlining returns, a spliced
-/// body CAN carry one, and losing it here would file that call's demand with an
-/// empty tree -- the same defect `26abf43dd` fixed, arriving by the other path.
-/// Either remap it beside the maps below, or establish that a spliced body never
-/// holds one; do not leave it unexamined.
+/// Resolved bound trees are instruction-keyed too. They carry concrete leaves
+/// from a prior splice or standalone substitution, so dropping one would make
+/// the next splice re-derive a foreign tree from the caller's inference arena.
 fn import_spec_bindings(
     func: &mut MirFunc,
     callee: &MirFunc,
     inst_map: &HashMap<Idx<Inst>, Idx<Inst>>,
+    nested_names: &HashMap<Ustr, Ustr>,
 ) {
     for (old_id, key) in &callee.spec_bindings {
         if let Some(&new_id) = inst_map.get(old_id) {
@@ -765,6 +970,26 @@ fn import_spec_bindings(
             func.callee_instances.insert(new_id, inst.clone());
         }
     }
+    for (old_id, plan) in &callee.call_abi_plans {
+        if let Some(&new_id) = inst_map.get(old_id) {
+            func.call_abi_plans.insert(new_id, plan.clone());
+        }
+    }
+    for (old_id, plan) in &callee.call_rep_plans {
+        if let Some(&new_id) = inst_map.get(old_id) {
+            func.call_rep_plans.insert(new_id, plan.clone());
+        }
+    }
+    for (old_id, plan) in &callee.closure_env_plans {
+        if let Some(&new_id) = inst_map.get(old_id) {
+            func.closure_env_plans.insert(new_id, plan.clone());
+        }
+    }
+    for (old_id, tree) in &callee.resolved_bound_trees {
+        if let Some(&new_id) = inst_map.get(old_id) {
+            func.resolved_bound_trees.insert(new_id, tree.clone());
+        }
+    }
     // A minted fn-value symbol travels with the body that mints it: the callee's
     // `let f = adder` is still a reference to `adder` after the splice, and the
     // census joins it there. Dropping it would leave a spelled callee symbol in
@@ -776,8 +1001,9 @@ fn import_spec_bindings(
         }
     }
     for n in &callee.hoisted_fn_globals {
-        if !func.hoisted_fn_globals.contains(n) {
-            func.hoisted_fn_globals.push(*n);
+        let n = nested_names.get(n).copied().unwrap_or(*n);
+        if !func.hoisted_fn_globals.contains(&n) {
+            func.hoisted_fn_globals.push(n);
         }
     }
     // The callee's instruction spans come across with its body, so a rejection
@@ -818,15 +1044,15 @@ fn splice(
     site: Site,
     cand: &CalleeBody,
     ws: &Workspace,
-    caller_inf: Option<&BodyInference>,
-    caller_subst: &SpecSubst,
+    scx: &ScalarCtx,
+    concrete_plans: &ConcretePlans,
 ) -> Result<Vec<Idx<Block>>, CompilerError> {
     match cand.kind {
         Kind::Straight => {
-            splice_straight(func, site, cand, ws, caller_inf, caller_subst)?;
+            splice_straight(func, site, cand, ws, scx, concrete_plans)?;
             Ok(Vec::new())
         }
-        Kind::General => splice_general(func, site, cand, ws, caller_inf, caller_subst),
+        Kind::General => splice_general(func, site, cand, ws, scx, concrete_plans),
     }
 }
 
@@ -839,14 +1065,15 @@ fn splice_straight(
     site: Site,
     cand: &CalleeBody,
     ws: &Workspace,
-    caller_inf: Option<&BodyInference>,
-    caller_subst: &SpecSubst,
+    scx: &ScalarCtx,
+    concrete_plans: &ConcretePlans,
 ) -> Result<(), CompilerError> {
     let callee = &cand.func;
     let (bid, idx, args) = match &site {
         Site::Single { bid, idx, args, .. } | Site::Multi { bid, idx, args, .. } => (*bid, *idx, args.clone()),
     };
     let site_tree = func.bound_trees.remove(&site.call_id());
+    let site_resolved_tree = func.resolved_bound_trees.remove(&site.call_id());
     let (overrides, coalesced) = coalesce_overrides(func, cand, &args);
     let (inst_map, cell_map) = clone_cells_insts(func, callee, &overrides);
     resolve_cloned_bound_calls(
@@ -854,11 +1081,13 @@ fn splice_straight(
         callee,
         &inst_map,
         site_tree.as_ref(),
+        site_resolved_tree.as_ref(),
         ws,
-        caller_inf,
-        caller_subst,
+        scx,
+        concrete_plans,
     )?;
-    import_spec_bindings(func, callee, &inst_map);
+    let nested_names = import_nested_fns(func, callee, &inst_map);
+    import_spec_bindings(func, callee, &inst_map, &nested_names);
 
     // Arg -> param-cell stores (coalesced params are aliased to the caller cell,
     // so they need no copy).
@@ -925,14 +1154,15 @@ fn splice_general(
     site: Site,
     cand: &CalleeBody,
     ws: &Workspace,
-    caller_inf: Option<&BodyInference>,
-    caller_subst: &SpecSubst,
+    scx: &ScalarCtx,
+    concrete_plans: &ConcretePlans,
 ) -> Result<Vec<Idx<Block>>, CompilerError> {
     let callee = &cand.func;
     let (bid, idx, args) = match &site {
         Site::Single { bid, idx, args, .. } | Site::Multi { bid, idx, args, .. } => (*bid, *idx, args.clone()),
     };
     let site_tree = func.bound_trees.remove(&site.call_id());
+    let site_resolved_tree = func.resolved_bound_trees.remove(&site.call_id());
     let (overrides, coalesced) = coalesce_overrides(func, cand, &args);
     let (inst_map, cell_map, block_map) = clone_all(func, callee, &overrides);
     resolve_cloned_bound_calls(
@@ -940,11 +1170,13 @@ fn splice_general(
         callee,
         &inst_map,
         site_tree.as_ref(),
+        site_resolved_tree.as_ref(),
         ws,
-        caller_inf,
-        caller_subst,
+        scx,
+        concrete_plans,
     )?;
-    import_spec_bindings(func, callee, &inst_map);
+    let nested_names = import_nested_fns(func, callee, &inst_map);
+    import_spec_bindings(func, callee, &inst_map, &nested_names);
     let entry_clone = block_map[&callee.entry];
 
     // Split the caller block at the call.
@@ -1036,33 +1268,31 @@ fn splice_general(
 /// each, including ones the inlined bodies themselves introduced). These are the
 /// caller chunk's INLINE codegen dependencies: incremental emit must re-emit
 /// `func` when any of them change (`docs/skull-incremental-emit-plan.md`).
-pub fn inline_functions(
+pub fn inline_functions_with_plans(
     ws: &Workspace,
     scx: &ScalarCtx,
     self_ref: FuncRef,
     func: &mut MirFunc,
     cache: &mut InlineCache,
+    concrete_plans: &ConcretePlans,
 ) -> Result<(HashSet<FuncRef>, Vec<SpliceRecord>), CompilerError> {
-    inline_functions_with_subst(ws, scx, self_ref, func, cache, &SpecSubst::default())
+    inline_functions_inner(ws, scx, self_ref, func, cache, concrete_plans)
 }
 
-pub fn inline_functions_with_subst(
+fn inline_functions_inner(
     ws: &Workspace,
     scx: &ScalarCtx,
     self_ref: FuncRef,
     func: &mut MirFunc,
     cache: &mut InlineCache,
-    caller_subst: &SpecSubst,
+    concrete_plans: &ConcretePlans,
 ) -> Result<(HashSet<FuncRef>, Vec<SpliceRecord>), CompilerError> {
     let mut spliced = HashSet::default();
     let mut records: Vec<SpliceRecord> = Vec::new();
     // Kill-switch for perf attribution / bisecting a suspected inline bug.
-    if std::env::var("SKULL_INLINE_OFF").is_ok() {
+    if inline_disabled() {
         return Ok((spliced, records));
     }
-    let caller_inf = ws
-        .inference(self_ref.module)
-        .and_then(|result| result.per_fn.get(&BodyOwner::Function(self_ref.func)));
     // The caller's top-level blocks (excludes closure sub-CFGs), maintained
     // incrementally so neither find_site nor the loop recomputes reachability.
     let mut top: HashSet<Idx<Block>> = top_level_blocks(func).into_iter().collect();
@@ -1072,13 +1302,22 @@ pub fn inline_functions_with_subst(
     let mut resume: Option<(Idx<Block>, usize)> = None;
     let mut budget = MAX_INLINES_PER_FN;
     while budget > 0 {
-        let Some(site) = find_site(func, ws, scx, cache, self_ref, &top, resume) else {
+        let Some(site) = find_site(
+            func,
+            ws,
+            scx,
+            cache,
+            self_ref,
+            &top,
+            resume,
+            concrete_plans,
+        )? else {
             break;
         };
         let pos = site.pos();
         let fref = site.fref();
         // Re-borrow the candidate immutably for the splice (distinct from `func`).
-        let cand = cache.cands[&(fref, site.key().clone())]
+        let cand = cache.cands[site.inst()]
             .as_ref()
             .expect("site implies a cached candidate");
         // SAFETY-of-borrows: `splice` mutates `func`, reads `cand` (in `cache`);
@@ -1091,7 +1330,7 @@ pub fn inline_functions_with_subst(
             forced: cand.forced,
             callee_insts: cand.insts,
         });
-        let added = splice(func, site, cand, ws, caller_inf, caller_subst)?;
+        let added = splice(func, site, cand, ws, scx, concrete_plans)?;
         // The callee's `static` cells now live in THIS body: the spliced code
         // reads and writes them, and a `static` is one cell per owning fn, so
         // the cell is the same one every call site shares. Carrying them here is
@@ -1147,21 +1386,17 @@ pub fn validate_no_residual_bound_calls(
             match &mf.insts[iid] {
                 Inst::CallBoundMulti { .. } => {
                     return Err(CompilerError::new_no_location(format!(
-                        "`{}`: an `Iterator`-bounded call was not monomorphized (a bounded fn \
-                         only works inlined; is this a recursive bounded fn?)",
+                        "`{}`: an `Iterator`-bounded call retained unresolved placeholders \
+                         after neither concrete splicing nor standalone planning (is this a \
+                         recursive bounded fn?)",
                         f.name
                     )));
                 }
                 Inst::Call { func, .. } | Inst::CallMulti { func, .. } => {
                     let callee = &ws.module(func.module).functions[func.func];
-                    // A specialized name is the whole admission: `spec_fn_name`
-                    // is `None` for an all-`None` key, which spells the shared
-                    // body -- and a bounded fn has none.
-                    let named = mf
-                        .spec_bindings
-                        .get(&iid)
-                        .and_then(|key| skull_mir::mangle::spec_fn_name(ws, callee, key))
-                        .is_some();
+                    // A non-empty concrete owner is the admission: a bounded
+                    // call without one would have no resolved standalone body.
+                    let named = mf.spec_bindings.get(&iid).is_some_and(|i| !i.args.is_empty());
                     if fn_has_bounds(callee) && !named {
                         // Stage-0e: this rejection IS the ablation's
                         // unsupported-surface population, and it fires from
@@ -1247,5 +1482,60 @@ mod tests {
         assert_eq!(annotation_gate(true, false, true), Some(true));   // @inline -> forced
         assert_eq!(annotation_gate(false, true, true), Some(false));  // @pure inert in this mode
         assert_eq!(annotation_gate(true, true, true), Some(true));
+    }
+
+    fn resolved_tree_count(mf: &MirFunc) -> (usize, usize) {
+        let mut bodies = 1;
+        let mut trees = mf.resolved_bound_trees.len();
+        for nf in &mf.nested_fns {
+            let (child_bodies, child_trees) = resolved_tree_count(nf);
+            bodies += child_bodies;
+            trees += child_trees;
+        }
+        (bodies, trees)
+    }
+
+    #[test]
+    fn fresh_candidates_have_no_resolved_bound_trees_including_nested_bodies() {
+        let mut modules = vec![
+            skull_parser::parse_module_clean(
+                r#"
+@inline
+fn outer(x: int) -> int {
+    fn inner(y: int) -> int { return y }
+    return inner(x)
+}
+"#,
+                Ustr::from("<inline-test>"),
+            )
+            .expect("parse"),
+        ];
+        let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic");
+        let mid = *ws.module_ids.get(&Ustr::from("<inline-test>")).expect("module");
+        let (fid, _) = ws
+            .module(mid)
+            .functions
+            .iter()
+            .find(|(_, f)| f.name.as_str() == "outer")
+            .expect("outer");
+        let root = FuncRef { module: mid, func: fid };
+        let interner = std::sync::Arc::new(skull_mir::monoty::MonoInterner::new());
+        let graph = skull_graph::instance_graph::build_in(
+            &ws,
+            vec![root],
+            false,
+            std::sync::Arc::clone(&interner),
+        );
+        let concrete = skull_graph::concrete_body::build(&ws, &graph);
+        let scx = ScalarCtx::new(&ws).sharing(interner);
+        let plan = concrete
+            .plans
+            .get(&Instance::base(root))
+            .expect("inline fixture concrete plan");
+        let body = skull_mir::lower::lower_instance_with_plans(&ws, &scx, plan, &concrete.plans)
+            .expect("the inline fixture must lower");
+        let (bodies, trees) = resolved_tree_count(&body);
+        assert!(bodies > 1, "the candidate census did not include its nested body");
+        assert_eq!(trees, 0, "fresh candidate lowering already carried resolved trees");
     }
 }

@@ -17,7 +17,6 @@ use crate::bone_backend::{categorize, short_path};
 use crate::test_protocol::{parse_skull_markers, reason_histogram};
 use crate::Result;
 use colored::Colorize;
-use skull_mir::lower::ScalarCtx;
 use skull_mir::mir::FuncRef;
 use std::time::Instant;
 
@@ -329,7 +328,6 @@ fn js_run_tests(
     let mut fails: Vec<String> = Vec::new();
     let mut skips: Vec<(String, Vec<String>)> = Vec::new();
 
-    let scx = ScalarCtx::new(ws).with_target(bone_semantic::hir::FnBackend::Js);
     // (test index, per-test isolated defs) for tests emittable in ISOLATION.
     let mut supported: Vec<(usize, String)> = Vec::new();
     // Test indices that reject ONLY because they read a decorator-populated
@@ -340,7 +338,7 @@ fn js_run_tests(
         let js_name = format!("__t{i}");
         let roots = [(*fr, js_name)];
         let emitted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            skull_codegen_js::emit::emit_with_closure(ws, &scx, &roots)
+            skull_codegen_js::emit::emit_with_closure(ws, &roots)
         }));
         match emitted {
             Ok(Ok(js)) => supported.push((i, js)),
@@ -376,7 +374,7 @@ fn js_run_tests(
     } else {
         let roots: Vec<(FuncRef, String)> =
             run_idxs.iter().map(|&i| (tests[i].0, format!("__t{i}"))).collect();
-        match skull_codegen_js::emit::emit_program_with_roots(ws, &scx, &roots) {
+        match skull_codegen_js::emit::emit_program_with_roots(ws, &roots) {
             Ok(blob) => blob,
             Err(e) => {
                 // Whole-file emission rejected for something no single test hit
@@ -517,8 +515,7 @@ fn emit_js_program_single(path: &str) -> skull_codegen_js::emit::JsProgram {
         crate::ablation_report::exit_with_census(1);
     }
     let user_mid = crate::bone_backend::entry_module_id(&ws, user_file);
-    let scx = ScalarCtx::new(&ws).with_target(bone_semantic::hir::FnBackend::Js);
-    match skull_codegen_js::emit::emit_program(&ws, &scx, user_mid) {
+    match skull_codegen_js::emit::emit_program(&ws, user_mid) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("{}", crate::skull_backend::render_file_errs(path, &src, &[e]));
@@ -549,6 +546,17 @@ pub(crate) fn emit_js_program_project(
 pub(crate) fn try_emit_js_program_project(
     dir: &str,
 ) -> Result<(skull_codegen_js::emit::JsProgram, bone_semantic::inference::Workspace)> {
+    let (program, _cache, ws) = try_emit_js_program_project_cached(dir)?;
+    Ok((program, ws))
+}
+
+pub(crate) fn try_emit_js_program_project_cached(
+    dir: &str,
+) -> Result<(
+    skull_codegen_js::emit::JsProgram,
+    skull_codegen_js::emit::JsEmitCache,
+    bone_semantic::inference::Workspace,
+)> {
     use std::path::PathBuf;
     let spec = crate::unified_compile::SourceSpec::Directory(PathBuf::from(dir));
     let sources = crate::unified_compile::discover_sources(&spec)
@@ -574,15 +582,14 @@ pub(crate) fn try_emit_js_program_project(
     };
     crate::comptime::stamp_workspace(&mut ws, std::path::Path::new(dir))?;
     let user_mid = crate::bone_backend::entry_module_id(&ws, entry_file);
-    let scx = ScalarCtx::new(&ws).with_target(bone_semantic::hir::FnBackend::Js);
-    let prog = match skull_codegen_js::emit::emit_program(&ws, &scx, user_mid) {
+    let (prog, cache) = match skull_codegen_js::emit::emit_program_cached(&ws, user_mid) {
         Ok(p) => p,
         Err(e) => return Err(anyhow::anyhow!(
             "{}",
             crate::skull_backend::render_project_err(&sources, &e)
         )),
     };
-    Ok((prog, ws))
+    Ok((prog, cache, ws))
 }
 
 /// Node-specific glue for the engine-agnostic RNG prelude (`JS_RNG_RUNTIME`) and

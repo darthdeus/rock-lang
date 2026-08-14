@@ -21,6 +21,7 @@ log = { workspace = true }
 [dev-dependencies]
 ustr = { workspace = true }
 rock-host = { path = "../rock-host" }
+skull-graph = { path = "../skull-graph" }
 skull-parser = { path = "../skull-parser" }
 skull-transform = { path = "../skull-transform" }
 

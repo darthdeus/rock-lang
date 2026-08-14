@@ -29,16 +29,21 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use bone_semantic::hir::{BindingInfo, Body, Expr};
+use bone_semantic::hir::{BindingInfo, Body, BodyOwner, Expr, TypeExpr};
 use bone_semantic::inference::{BodyInference, Workspace};
-use bone_semantic::prelude::Span;
+use bone_semantic::prelude::{Span, TyId};
 use comfy_la_arena::{ArenaMap, Idx};
-use skull_mir::monoty::{MonoArena, MonoSubst, MonoTyId, MonoTyReason};
+use skull_mir::concrete::{
+    ConcreteAlwaysPlans, ConcreteBodyPlan, ConcreteOwner, ConcreteSignature, ConcreteTypeTables,
+};
+use skull_mir::monoty::{MonoArena, MonoCtor, MonoSubst, MonoTy, MonoTyId, MonoTyReason, TyEnv};
 use skull_mir::mir::FuncRef;
+use rustc_hash::{FxHashMap, FxHashSet};
+use ustr::Ustr;
 
 use crate::instance_graph::{
     boundary_class_for, function_body, is_spanless, BoundaryClass, FunctionBody, Instance,
-    InstanceGraph, Site, SiteOp, SiteOutcome,
+    InstanceGraph, Owner, Site, SiteDomain, SiteOp, SiteOutcome,
 };
 use crate::target_projection::CpuTargetSpec;
 
@@ -153,6 +158,8 @@ pub struct ConcreteBody {
     pub instance: Instance,
     pub expr_types: ArenaMap<Idx<Expr>, MonoTyId>,
     pub binding_types: ArenaMap<Idx<BindingInfo>, MonoTyId>,
+    pub untyped_exprs: FxHashSet<Idx<Expr>>,
+    pub untyped_bindings: FxHashSet<Idx<BindingInfo>>,
     pub direct_calls: BTreeMap<Site, Callee>,
     pub fn_values: BTreeMap<Site, Callee>,
     pub iterator_ops: BTreeMap<Site, ConcreteIteratorOp>,
@@ -243,6 +250,12 @@ pub struct MissingBody {
 #[derive(Default)]
 pub struct ConcreteBodies {
     pub bodies: BTreeMap<Instance, ConcreteBody>,
+    /// The plan production lowering consumes. It is stored beside the census
+    /// body so a graph update can retract a plan with its instance.
+    pub plans: BTreeMap<Instance, ConcreteBodyPlan>,
+    pub always_plans: ConcreteAlwaysPlans,
+    pub plan_failures: Vec<(Instance, MonoTyReason)>,
+    pub always_plan_failures: Vec<(ConcreteOwner, MonoTyReason)>,
     /// Slots that stayed non-concrete, WITH their instance. Flat rather than
     /// per-body because a body that failed a slot still has a table for the
     /// rest, and the failures are the finding.
@@ -278,6 +291,14 @@ pub struct ConcreteBodies {
 }
 
 impl ConcreteBodies {
+    pub fn plan_for(&self, instance: &Instance) -> Option<&ConcreteBodyPlan> {
+        self.plans.get(instance)
+    }
+
+    pub fn plan_for_owner(&self, owner: &ConcreteOwner) -> Option<&ConcreteBodyPlan> {
+        self.always_plans.get(owner)
+    }
+
     pub fn census(&self) -> BodyCensus {
         let mut c = BodyCensus {
             bodies: self.bodies.len(),
@@ -558,7 +579,7 @@ fn callee_tables(
     body: &mut ConcreteBody,
     out: &mut ConcreteBodies,
 ) {
-    let Some(sites) = g.call_sites.get(inst) else { return };
+    let Some(sites) = g.sites_of(inst) else { return };
     for (site, rec) in sites {
         out.sites_examined += 1;
         let target = match &rec.outcome {
@@ -628,19 +649,433 @@ fn callee_tables(
     }
 }
 
+fn concrete_signature(
+    ws: &Workspace,
+    g: &InstanceGraph,
+    inst: &Instance,
+    subst: &MonoSubst,
+) -> Result<ConcreteSignature, MonoTyReason> {
+    let f = &ws.module(inst.func.module).functions[inst.func.func];
+    g.interner().with_mut(|arena| {
+        let params = f
+            .param_decls
+            .iter()
+            .map(|param| arena.convert_decl(ws, param.ty, subst))
+            .collect::<Result<Vec<_>, _>>()?;
+        let param_tuple_spelled = f
+            .param_decls
+            .iter()
+            .map(|param| declared_tuple_param(ws, param.ty))
+            .collect::<Result<Vec<_>, _>>()?;
+        let result = f
+            .return_ty
+            .map(|ty| arena.convert_decl(ws, ty, subst))
+            .transpose()?;
+        Ok(ConcreteSignature { params, param_tuple_spelled, result })
+    })
+}
+
+fn declared_tuple_param(ws: &Workspace, ty: TyId) -> Result<bool, MonoTyReason> {
+    match TyEnv::Decl.decl_node(ws, ty)? {
+        TypeExpr::Tuple { .. } => Ok(true),
+        TypeExpr::Nullable(inner) => {
+            Ok(matches!(TyEnv::Decl.decl_node(ws, ty.with_idx(inner))?, TypeExpr::Tuple { .. }))
+        }
+        TypeExpr::Builtin(_)
+        | TypeExpr::App { .. }
+        | TypeExpr::Generic(..)
+        | TypeExpr::Infer(..)
+        | TypeExpr::Function { .. } => Ok(false),
+    }
+}
+
+/// Resolve the concrete signature a graph instance owns before a consumer
+/// needs a full body plan. This is used by graph-side helper accounting, whose
+/// pass runs before `ConcreteBodies::build` installs per-body tables.
+pub fn concrete_signature_for_instance(
+    ws: &Workspace,
+    g: &InstanceGraph,
+    inst: &Instance,
+) -> Result<ConcreteSignature, MonoTyReason> {
+    let subst = g.substitution(inst).ok_or(MonoTyReason::NoNode)?;
+    concrete_signature(ws, g, inst, subst)
+}
+
+fn concrete_tables(
+    ws: &Workspace,
+    g: &InstanceGraph,
+    inf: &BodyInference,
+    body: &Body,
+    subst: &MonoSubst,
+    declared_types: impl IntoIterator<Item = TyId>,
+) -> Result<ConcreteTypeTables, MonoTyReason> {
+    let converted = g.interner().with_mut(|arena| convert_body(arena, ws, inf, body, subst));
+    for failure in &converted.failures {
+        if !matches!(failure.reason, MonoTyReason::UnresolvedInfer(_)) {
+            return Err(failure.reason.clone());
+        }
+    }
+    let ty_types = concrete_ty_types(ws, g, inf, body, subst, declared_types)?;
+    let struct_field_types = concrete_struct_field_types(ws, g, body, &converted.expr_types)?;
+    let mut untyped_exprs: FxHashSet<_> = converted.untyped_exprs.iter().map(|u| u.expr).collect();
+    let mut untyped_bindings: FxHashSet<_> = converted.untyped_bindings.iter().copied().collect();
+    for failure in &converted.failures {
+        match (&failure.slot, &failure.reason) {
+            (Slot::Expr(expr), MonoTyReason::UnresolvedInfer(_)) => {
+                untyped_exprs.insert(*expr);
+            }
+            (Slot::Binding(binding), MonoTyReason::UnresolvedInfer(_)) => {
+                untyped_bindings.insert(*binding);
+            }
+            _ => {}
+        }
+    }
+    Ok(ConcreteTypeTables {
+        expr_types: converted.expr_types,
+        binding_types: converted.binding_types,
+        untyped_exprs,
+        untyped_bindings,
+        ty_types,
+        struct_field_types,
+    })
+}
+
+fn concrete_struct_field_types(
+    ws: &Workspace,
+    g: &InstanceGraph,
+    body: &Body,
+    expr_types: &ArenaMap<Idx<Expr>, MonoTyId>,
+) -> Result<ArenaMap<Idx<Expr>, FxHashMap<Ustr, MonoTyId>>, MonoTyReason> {
+    let mut out = ArenaMap::default();
+    for (expr, node) in body.expr_arena.iter() {
+        let Expr::StructLiteral { name, .. } = node else { continue };
+        let sid = *ws.struct_by_name.get(&name).ok_or(MonoTyReason::NoNode)?;
+        let def = &ws.modules[sid.module.index()].structs[sid.def];
+        let params = match expr_types.get(expr).copied() {
+            Some(ty_id) => {
+                let concrete = g.interner().get(ty_id);
+                let (payload, _) = concrete.peel_nullable();
+                let MonoTy::App { ctor: MonoCtor::Nominal(actual), params } = payload else {
+                    return Err(MonoTyReason::NoNode);
+                };
+                if *actual != *name || def.generics.len() != params.len() {
+                    return Err(MonoTyReason::NoNode);
+                }
+                params.to_vec()
+            }
+            None if def.generics.is_empty() => Vec::new(),
+            None => return Err(MonoTyReason::NoNode),
+        };
+        let mut subst = MonoSubst::default();
+        for (generic, param) in def.generics.iter().zip(params) {
+            let TypeExpr::Generic(var, _) = TyEnv::Decl.decl_node(ws, *generic)? else {
+                return Err(MonoTyReason::NoNode);
+            };
+            subst.insert(var, param.clone());
+        }
+        let fields = g.interner().with_mut(|arena| {
+            def.fields
+                .iter()
+                .map(|field| {
+                    arena
+                        .convert_decl(ws, field.ty, &subst)
+                        .map(|ty| (field.name, ty))
+                })
+                .collect::<Result<FxHashMap<_, _>, _>>()
+        })?;
+        out.insert(expr, fields);
+    }
+    Ok(out)
+}
+
+fn concrete_ty_types(
+    ws: &Workspace,
+    g: &InstanceGraph,
+    inf: &BodyInference,
+    body: &Body,
+    subst: &MonoSubst,
+    declared_types: impl IntoIterator<Item = TyId>,
+) -> Result<rustc_hash::FxHashMap<TyId, MonoTyId>, MonoTyReason> {
+    let mut nodes = FxHashSet::default();
+    for ty in inf.expr_types.values().chain(inf.binding_types.values()) {
+        collect_type_nodes(ws, inf, *ty, &mut nodes);
+    }
+    for ty in declared_types {
+        collect_type_nodes(ws, inf, ty, &mut nodes);
+    }
+    for (_, binding) in body.binding_arena.iter() {
+        if let Some(ty) = binding.declared_ty {
+            collect_type_nodes(ws, inf, ty, &mut nodes);
+        }
+    }
+    for (_, expr) in body.expr_arena.iter() {
+        if let Expr::As { target, .. } = expr {
+            collect_type_nodes(ws, inf, *target, &mut nodes);
+        }
+    }
+    g.interner().with_mut(|arena| {
+        nodes
+            .into_iter()
+            .filter_map(|ty| match arena.convert(ws, inf, ty, subst) {
+                Ok(id) => Some(Ok((ty, id))),
+                Err(MonoTyReason::UnresolvedInfer(_)) => None,
+                Err(reason) => Some(Err(reason)),
+            })
+            .collect::<Result<rustc_hash::FxHashMap<_, _>, _>>()
+    })
+}
+
+fn collect_type_nodes(
+    ws: &Workspace,
+    inf: &BodyInference,
+    ty: TyId,
+    out: &mut FxHashSet<TyId>,
+) {
+    if !out.insert(ty) {
+        return;
+    }
+    let node = match ty {
+        TyId::Static(mid, idx) => ws.module(mid).ty_arena[idx],
+        TyId::Local(idx) => inf.ty_arena[idx],
+    };
+    match node {
+        TypeExpr::Nullable(inner) => collect_type_nodes(ws, inf, ty.with_idx(inner), out),
+        TypeExpr::App { params, .. } => {
+            for param in params {
+                collect_type_nodes(ws, inf, ty.with_idx(param), out);
+            }
+        }
+        TypeExpr::Function { params, ret } => {
+            for param in params {
+                collect_type_nodes(ws, inf, ty.with_idx(param), out);
+            }
+            collect_type_nodes(ws, inf, ty.with_idx(ret), out);
+        }
+        TypeExpr::Tuple { elements } => {
+            for element in elements {
+                collect_type_nodes(ws, inf, ty.with_idx(element), out);
+            }
+        }
+        TypeExpr::Infer(var, _) => {
+            if let Some(next) = inf.substitutions.get(var) {
+                collect_type_nodes(ws, inf, next, out);
+            }
+        }
+        TypeExpr::Builtin(_) | TypeExpr::Generic(..) => {}
+    }
+}
+
+fn foreign_domain_tables<I>(
+    ws: &Workspace,
+    g: &InstanceGraph,
+    domains: I,
+) -> Result<BTreeMap<SiteDomain, ConcreteTypeTables>, MonoTyReason>
+where
+    I: IntoIterator<Item = SiteDomain>,
+{
+    let mut out = BTreeMap::new();
+    for domain in domains {
+        let SiteDomain::StructDefaults(module, def, args) = domain else { continue };
+        let owner = BodyOwner::StructDefaults(def);
+        let defaults_body = ws
+            .module(module)
+            .bodies
+            .get(&owner)
+            .ok_or(MonoTyReason::NoNode)?;
+        let defaults_inf = ws
+            .inference(module)
+            .and_then(|ir| ir.per_fn.get(&owner))
+            .ok_or(MonoTyReason::NoNode)?;
+        let defaults_subst = skull_mir::struct_defaults::slot_subst(Some(defaults_inf), &args);
+        let tables = concrete_tables(
+            ws,
+            g,
+            defaults_inf,
+            defaults_body,
+            &defaults_subst,
+            std::iter::empty(),
+        )?;
+        out.insert(SiteDomain::StructDefaults(module, def, args), tables);
+    }
+    Ok(out)
+}
+
+fn concrete_plan(
+    ws: &Workspace,
+    g: &InstanceGraph,
+    inst: &Instance,
+    subst: &MonoSubst,
+    inf: &BodyInference,
+    hir_body: &Body,
+    body: &ConcreteBody,
+) -> Result<ConcreteBodyPlan, MonoTyReason> {
+    let mut callees = BTreeMap::new();
+    let mut callee_signatures = BTreeMap::new();
+    for (site, callee) in body.callees() {
+        let instance = callee.instance().clone();
+        let subst = g.substitution(&instance).cloned().ok_or(MonoTyReason::NoNode)?;
+        callee_signatures.insert(site.clone(), concrete_signature(ws, g, &instance, &subst)?);
+        callees.insert(site, instance);
+    }
+    let failed_sites = g
+        .sites_of(inst)
+        .into_iter()
+        .flat_map(|sites| sites.iter())
+        .filter_map(|(site, record)| match &record.outcome {
+            SiteOutcome::Failed(reason) => Some((site.clone(), *reason)),
+            SiteOutcome::Resolved(_) => None,
+        })
+        .collect();
+    let f = &ws.module(inst.func.module).functions[inst.func.func];
+    let declared_types = f
+        .param_decls
+        .iter()
+        .map(|param| param.ty)
+        .chain(f.return_ty);
+    let ty_types = concrete_ty_types(ws, g, inf, hir_body, subst, declared_types)?;
+    let struct_field_types = concrete_struct_field_types(ws, g, hir_body, &body.expr_types)?;
+    let default_domains = g
+        .contributions
+        .get(&Owner::Instance(inst.clone()))
+        .into_iter()
+        .flat_map(|c| c.struct_default_domains.iter().cloned());
+    let site_domains = body.callees().into_iter().map(|(site, _)| site.domain);
+    let foreign_domains = foreign_domain_tables(ws, g, default_domains.chain(site_domains))?;
+    Ok(ConcreteBodyPlan {
+        owner: ConcreteOwner::Function(inst.clone()),
+        types: ConcreteTypeTables {
+            expr_types: body.expr_types.clone(),
+            binding_types: body.binding_types.clone(),
+            untyped_exprs: body.untyped_exprs.clone(),
+            untyped_bindings: body.untyped_bindings.clone(),
+            ty_types,
+            struct_field_types,
+        },
+        foreign_domains,
+        signature: concrete_signature(ws, g, inst, subst)?,
+        callees,
+        callee_signatures,
+        failed_sites,
+        bound_tree: g.bound_tree(inst).map_or_else(Default::default, |tree| tree.to_resolved()),
+    })
+}
+
+fn concrete_always_plan(
+    ws: &Workspace,
+    g: &InstanceGraph,
+    module: bone_semantic::prelude::ModuleId,
+    owner: BodyOwner,
+) -> Result<Option<ConcreteBodyPlan>, MonoTyReason> {
+    let body = ws.module(module).bodies.get(&owner).ok_or(MonoTyReason::NoNode)?;
+    if matches!(owner, BodyOwner::Global(_)) && body.root.is_none() {
+        return Ok(None);
+    }
+    let inf = ws
+        .inference(module)
+        .and_then(|ir| ir.per_fn.get(&owner))
+        .ok_or(MonoTyReason::NoNode)?;
+    let types = concrete_tables(
+        ws,
+        g,
+        inf,
+        body,
+        &MonoSubst::default(),
+        match owner {
+            BodyOwner::Global(index) => std::iter::once(ws.module(module).globals[index].ty)
+                .collect::<Vec<_>>()
+                .into_iter(),
+            _ => Vec::new().into_iter(),
+        },
+    )?;
+    let contribution = g
+        .contributions
+        .get(&Owner::AlwaysEmitted(module, owner))
+        .ok_or(MonoTyReason::NoNode)?;
+    let mut callees = BTreeMap::new();
+    let mut callee_signatures = BTreeMap::new();
+    let mut failed_sites = BTreeMap::new();
+    for (site, record) in &contribution.always_call_sites {
+        match &record.outcome {
+            SiteOutcome::Resolved(instance) => {
+                let subst = g.substitution(instance).cloned().ok_or(MonoTyReason::NoNode)?;
+                callee_signatures.insert(
+                    site.clone(),
+                    concrete_signature(ws, g, instance, &subst)?,
+                );
+                callees.insert(site.clone(), instance.clone());
+            }
+            SiteOutcome::Failed(reason) => {
+                failed_sites.insert(site.clone(), *reason);
+            }
+        }
+    }
+    let default_domains = contribution.struct_default_domains.iter().cloned();
+    let site_domains = contribution.always_call_sites.keys().map(|site| site.domain.clone());
+    let foreign_domains = foreign_domain_tables(ws, g, default_domains.chain(site_domains))?;
+    let signature = match owner {
+        BodyOwner::Global(gid) => {
+            let result = g.interner().with_mut(|arena| {
+                arena.convert_decl(ws, ws.module(module).globals[gid].ty, &MonoSubst::default())
+            })?;
+            ConcreteSignature {
+                params: Vec::new(),
+                param_tuple_spelled: Vec::new(),
+                result: Some(result),
+            }
+        }
+        BodyOwner::Decorator(did) => {
+            let mut params = Vec::new();
+            if let Some(target) = body.deco_target {
+                params.push(*types.binding_types.get(target).ok_or(MonoTyReason::NoNode)?);
+            }
+            for binding in body.param_bindings {
+                params.push(*types.binding_types.get(binding).ok_or(MonoTyReason::NoNode)?);
+            }
+            let _ = did;
+            ConcreteSignature {
+                param_tuple_spelled: vec![false; params.len()],
+                params,
+                result: None,
+            }
+        }
+        _ => return Ok(None),
+    };
+    let owner = match owner {
+        BodyOwner::Global(index) => ConcreteOwner::Global {
+            module,
+            index: index.into_raw().into_u32(),
+        },
+        BodyOwner::Decorator(index) => ConcreteOwner::Decorator {
+            module,
+            index: index.into_raw().into_u32(),
+        },
+        _ => unreachable!(),
+    };
+    Ok(Some(ConcreteBodyPlan {
+        owner,
+        types,
+        foreign_domains,
+        signature,
+        callees,
+        callee_signatures,
+        failed_sites,
+        bound_tree: Default::default(),
+    }))
+}
+
 /// Build a [`ConcreteBody`] for every instance the walk expanded.
 ///
-/// Takes the graph mutably because the tables intern into ITS arena: a second
-/// arena would hand out ids that mean nothing beside `Instance::args`.
-pub fn build(ws: &Workspace, g: &mut InstanceGraph) -> ConcreteBodies {
+/// The tables intern into the graph's arena: a second arena would hand out ids
+/// that mean nothing beside `Instance::args`.
+pub fn build(ws: &Workspace, g: &InstanceGraph) -> ConcreteBodies {
     let mut out = ConcreteBodies::default();
-    let expanded: Vec<Instance> = g.expanded.iter().cloned().collect();
+    let expanded: Vec<Instance> = g.expanded().cloned().collect();
     for inst in expanded {
-        if g.bound_tree_disagreements.iter().any(|d| d.instance == inst) {
+        if g.has_bound_tree_disagreement(&inst) {
             out.gaps.push(MissingBody { instance: inst, gap: BodyGap::InconsistentBounds });
             continue;
         }
-        let Some(subst) = g.substitutions.get(&inst).cloned() else {
+        let Some(subst) = g.substitution(&inst).cloned() else {
             out.gaps.push(MissingBody { instance: inst, gap: BodyGap::NoSubstitution });
             continue;
         };
@@ -659,7 +1094,7 @@ pub fn build(ws: &Workspace, g: &mut InstanceGraph) -> ConcreteBodies {
                 continue;
             }
         };
-        let c = convert_body(&mut g.arena, ws, inf, body, &subst);
+        let c = g.interner().with_mut(|a| convert_body(a, ws, inf, body, &subst));
         out.expr_examined += c.expr_examined;
         out.binding_examined += c.binding_examined;
         out.generics_bound += c.generics_bound;
@@ -668,18 +1103,32 @@ pub fn build(ws: &Workspace, g: &mut InstanceGraph) -> ConcreteBodies {
         out.untyped_bindings += c.untyped_bindings.len();
         out.expr_slots += body.expr_arena.len();
         out.binding_slots += body.binding_arena.len();
-        for f in c.failures {
-            out.free_types.push((inst.clone(), f));
+        let failures = c.failures;
+        for f in &failures {
+            out.free_types.push((inst.clone(), f.clone()));
         }
         let mut concrete = ConcreteBody {
             instance: inst.clone(),
             expr_types: c.expr_types,
             binding_types: c.binding_types,
+            untyped_exprs: untyped.iter().map(|u| u.expr).collect(),
+            untyped_bindings: c.untyped_bindings.iter().copied().collect(),
             direct_calls: BTreeMap::new(),
             fn_values: BTreeMap::new(),
             iterator_ops: BTreeMap::new(),
             synthesized_calls: BTreeMap::new(),
         };
+        for failure in failures {
+            match (failure.slot, failure.reason) {
+                (Slot::Expr(expr), MonoTyReason::UnresolvedInfer(_)) => {
+                    concrete.untyped_exprs.insert(expr);
+                }
+                (Slot::Binding(binding), MonoTyReason::UnresolvedInfer(_)) => {
+                    concrete.untyped_bindings.insert(binding);
+                }
+                _ => {}
+            }
+        }
         callee_tables(ws, g, &inst, &mut concrete, &mut out);
 
         // The question the type-table slice deferred: does a callee entry need
@@ -697,7 +1146,36 @@ pub fn build(ws: &Workspace, g: &mut InstanceGraph) -> ConcreteBodies {
         for u in untyped {
             out.untyped.push((inst.clone(), u));
         }
+        match concrete_plan(ws, g, &inst, &subst, inf, body, &concrete) {
+            Ok(plan) => {
+                out.plans.insert(inst.clone(), plan);
+            }
+            Err(reason) => out.plan_failures.push((inst.clone(), reason)),
+        }
         out.bodies.insert(inst, concrete);
+    }
+    for owner in g.contributions.keys() {
+        let Owner::AlwaysEmitted(module, body_owner) = owner else { continue };
+        match concrete_always_plan(ws, g, *module, *body_owner) {
+            Ok(Some(plan)) => {
+                out.always_plans.insert(plan.owner.clone(), plan);
+            }
+            Ok(None) => {}
+            Err(reason) => {
+                let owner = match body_owner {
+                    BodyOwner::Global(index) => ConcreteOwner::Global {
+                        module: *module,
+                        index: index.into_raw().into_u32(),
+                    },
+                    BodyOwner::Decorator(index) => ConcreteOwner::Decorator {
+                        module: *module,
+                        index: index.into_raw().into_u32(),
+                    },
+                    _ => continue,
+                };
+                out.always_plan_failures.push((owner, reason));
+            }
+        }
     }
     out
 }

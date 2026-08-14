@@ -24,9 +24,10 @@ use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::{Idx, ModuleId};
 use rustc_hash::{FxHashMap, FxHashSet};
 use skull_codegen_lua::{emit_function, emit_named, mangle_fn, CodegenCtx};
-use skull_mir::lower::EmittedBodyId;
+use skull_mir::instance::Instance;
 use skull_mir::mir::{FuncRef, Inst, MirFunc, Term};
-use skull_parser::CompilerError;
+use skull_parser::{CompilerError, CompilerErrorKind};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::time::{Duration, Instant};
 use ustr::Ustr;
@@ -312,6 +313,9 @@ enum ExternRet {
     /// so a handle used as a `Map<int, V>` key only ever hits on the box that
     /// was inserted (`b1_ffi_handle.rock`).
     Int,
+    /// Rock `uint` uses the same numeric bridge, but remains a distinct static
+    /// type so its caller-side normalization and ABI identity are preserved.
+    Uint,
     /// A `value` struct returned BY VALUE; the C ABI is then
     /// `void f(T* out, ..)`, so the wrapper bridges an out-param.
     ValueStruct(String),
@@ -382,6 +386,7 @@ fn extern_ret(
     for _ in 0..MAX_ALIAS_STEPS {
         let (name, params) = match arena.get(cur) {
             MonoTy::Int => return Ok(ExternRet::Int),
+            MonoTy::Uint => return Ok(ExternRet::Uint),
             MonoTy::App { ctor: MonoCtor::Nominal(name), params } => (*name, params.clone()),
             _ => return Ok(ExternRet::AsIs),
         };
@@ -534,6 +539,7 @@ fn emit_decorator_unit(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,
     cg: &CodegenCtx,
+    concrete: &crate::concrete_body::ConcreteBodies,
     mid: ModuleId,
     did: Idx<bone_semantic::hir::DecoratorDef>,
 ) -> UnitOut {
@@ -541,8 +547,22 @@ fn emit_decorator_unit(
     let d = &ws.module(mid).decorators[did];
     let deco_name = crate::decorator_fn_name(d.name.as_str());
     let tl = Instant::now();
-    let lowered =
-        skull_mir::lower::lower_decorator(ws, scx, mid, did, ustr::Ustr::from(deco_name.as_str()));
+    let owner = skull_mir::concrete::ConcreteOwner::Decorator {
+        module: mid,
+        index: did.into_raw().into_u32(),
+    };
+    let concrete_plan = concrete.plan_for_owner(&owner);
+    let lowered = concrete_plan
+        .ok_or_else(|| {
+            CompilerError::new_with_label(d.span, "no concrete plan for decorator".to_string())
+        })
+        .and_then(|plan| skull_mir::lower::lower_decorator_with_plans(
+            ws,
+            scx,
+            plan,
+            &concrete.plans,
+            ustr::Ustr::from(deco_name.as_str()),
+        ));
     out.times.lower = tl.elapsed();
     match lowered {
         Ok(mut mf) => {
@@ -555,9 +575,15 @@ fn emit_decorator_unit(
                 cg.mint_synthetic(nf.name.to_string());
             }
             out.times.cleanup = tc.elapsed();
-            let (subst, incoming) = Default::default();
             let owner = bone_semantic::hir::BodyOwner::Decorator(did);
-            let ctx = skull_mir::bound::body_ctx(ws, mid, owner, &subst, &incoming);
+            let plan = concrete_plan.expect("a lowered decorator has a concrete plan");
+            let ctx = skull_mir::bound::concrete_body_ctx(
+                ws,
+                mid,
+                owner,
+                &plan.bound_tree,
+                scx.interner(),
+            );
             if let Err(e) =
                 check_unit_spec_bindings(ws, &ctx, mid, &deco_name, &mf, d.span, &mut out.specs)
             {
@@ -566,8 +592,8 @@ fn emit_decorator_unit(
             }
             skull_codegen_lua::regalloc_time_reset();
             let te = Instant::now();
-            let mut lua = emit_named(ws, cg, &deco_name, &mf);
-            emit_pass_nested_fns(ws, cg, &mut mf.nested_fns, &mut lua);
+            let mut lua = emit_named(ws, cg, scx.interner(), &deco_name, &mf);
+            emit_pass_nested_fns(ws, cg, scx, &mut mf.nested_fns, &mut lua);
             emit_lowered(ws, &mut out, &mf, lua, Some(Ustr::from(&deco_name)), te.elapsed());
         }
         Err(e) => out.skipped = Some((deco_name, e.message)),
@@ -581,10 +607,14 @@ fn emit_decorator_unit(
 /// top-level names, so they go through the collision sink.
 fn global_init_target(
     ws: &Workspace,
+    scx: &skull_mir::lower::ScalarCtx,
     cg: &CodegenCtx,
     g: &bone_semantic::hir::GlobalDef,
 ) -> String {
-    match skull_mir::lower::nobox_global_leaves(ws, g.name, g.ty) {
+    match skull_mir::lower::GlobalPlan::for_declared_type(ws, scx, g.ty)
+        .ok()
+        .and_then(|plan| plan.leaf_names(g.name))
+    {
         Some(leaves) => leaves
             .iter()
             .map(|l| cg.mint_synthetic(l.to_string()))
@@ -599,6 +629,7 @@ fn emit_global_unit(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,
     cg: &CodegenCtx,
+    concrete: &crate::concrete_body::ConcreteBodies,
     mid: ModuleId,
     gid: Idx<bone_semantic::hir::GlobalDef>,
 ) -> UnitOut {
@@ -606,8 +637,30 @@ fn emit_global_unit(
     let g = &ws.module(mid).globals[gid];
     let init_name = crate::global_init_fn_name(g.name.as_str());
     let tl = Instant::now();
-    let lowered =
-        skull_mir::lower::lower_global(ws, scx, mid, gid, ustr::Ustr::from(init_name.as_str()));
+    let owner = skull_mir::concrete::ConcreteOwner::Global {
+        module: mid,
+        index: gid.into_raw().into_u32(),
+    };
+    let concrete_plan = concrete.plan_for_owner(&owner);
+    let lowered = match concrete_plan {
+        Some(plan) => skull_mir::lower::lower_global_with_plans(
+            ws,
+            scx,
+            plan,
+            &concrete.plans,
+            ustr::Ustr::from(init_name.as_str()),
+        ),
+        None if ws
+            .module(mid)
+            .bodies
+            .get(&bone_semantic::hir::BodyOwner::Global(gid))
+            .and_then(|body| body.root)
+            .is_none() => Ok(None),
+        None => Err(CompilerError::new_with_label(
+            g.name_span,
+            "no concrete plan for global initializer".to_string(),
+        )),
+    };
     out.times.lower = tl.elapsed();
     match lowered {
         Ok(Some(mut mf)) => {
@@ -625,9 +678,15 @@ fn emit_global_unit(
                 cg.mint_synthetic(nf.name.to_string());
             }
             out.times.cleanup = tc.elapsed();
-            let (subst, incoming) = Default::default();
             let owner = bone_semantic::hir::BodyOwner::Global(gid);
-            let ctx = skull_mir::bound::body_ctx(ws, mid, owner, &subst, &incoming);
+            let plan = concrete_plan.expect("a lowered global has a concrete plan");
+            let ctx = skull_mir::bound::concrete_body_ctx(
+                ws,
+                mid,
+                owner,
+                &plan.bound_tree,
+                scx.interner(),
+            );
             if let Err(e) =
                 check_unit_spec_bindings(ws, &ctx, mid, g.name.as_str(), &mf, g.name_span, &mut out.specs)
             {
@@ -637,8 +696,8 @@ fn emit_global_unit(
             let key = Ustr::from(&init_name);
             skull_codegen_lua::regalloc_time_reset();
             let te = Instant::now();
-            let mut lua = emit_named(ws, cg, &init_name, &mf);
-            emit_pass_nested_fns(ws, cg, &mut mf.nested_fns, &mut lua);
+            let mut lua = emit_named(ws, cg, scx.interner(), &init_name, &mf);
+            emit_pass_nested_fns(ws, cg, scx, &mut mf.nested_fns, &mut lua);
             emit_lowered(ws, &mut out, &mf, lua, Some(key), te.elapsed());
             // Hot-reload init line. A `const` is a compile-time constant: tweaking
             // the source literal should show the new value next reload, so its init
@@ -657,7 +716,7 @@ fn emit_global_unit(
             // detect the difference: a layout drift restarts the process upstream
             // (`shape_drift_tests::marking_a_type_nobox_requests_restart`), and a
             // respawn is a cold start that never reaches this branch.
-            let target = global_init_target(ws, cg, g);
+            let target = global_init_target(ws, scx, cg, g);
             let line = if g.is_const {
                 format!("{target} = {init_name}()\n")
             } else {
@@ -709,227 +768,6 @@ fn merge_units(
         calls.extend(u.calls);
         global_names.extend(u.global_names);
         times.add(&u.times);
-    }
-}
-
-/// The Lua half of [`skull_mir::reach`]. Unlike JS and GLSL this does NOT
-/// interleave lowering with discovery: `emit_full` has already lowered every body
-/// in parallel, so the call graph is final before the walk starts and `visit` is a
-/// cache lookup. (The "reachability cannot be a pre-pass" rule is about LOWERING
-/// order; once the chunks exist it no longer applies.) Keeping the parallel
-/// fan-out matters -- it is the edit loop's throughput -- and it leaves the chunk
-/// key set complete, which the incremental cache depends on.
-struct LuaReach<'a> {
-    ws: &'a Workspace,
-    cg: &'a CodegenCtx,
-    scx: &'a skull_mir::lower::ScalarCtx,
-    by_name: &'a FxHashMap<Ustr, Vec<FuncRef>>,
-    chunks: &'a FxHashMap<EmittedBodyId, Result<Chunk, CompilerError>>,
-    /// Specialized chunks this walk built, plus any it pulled from the cache.
-    built: FxHashMap<EmittedBodyId, Chunk>,
-    /// Specialized bodies that could not emit, by emitted name. Reported by the
-    /// renderer in name order, where a specialized rejection has always been
-    /// ordered against its siblings.
-    errs: Vec<(String, CompilerError)>,
-    inline_cache: skull_transform::InlineCache,
-    roots: Vec<EmittedBodyId>,
-    /// The bound-conformance tree each reached specialized body is emitted
-    /// under, from the demand that reached it, with the agreement check
-    /// `skull_mir::bound::DemandMap` carries.
-    demands: skull_mir::bound::DemandMap,
-}
-
-/// Global-name -> fns, keyed by BOTH the emitted (mangled) name and the source
-/// name. A fn taken as a VALUE lowers to `Inst::Global` carrying the name the Lua
-/// printer emits verbatim -- which is the MANGLED name for an ordinary fn
-/// (`double` -> `double_int_ret_int`) and the source name for a `@nomangle` one.
-/// Looking up only the source name silently misses every mangled fn value, which
-/// is how `let f: fn(int) -> int = double` first emitted a reference to a
-/// definition DCE had dropped.
-///
-/// A source name maps to its whole overload set: the read carries no signature, so
-/// this is conservative (it can keep a sibling the body never takes) but never
-/// drops a live one.
-fn build_name_index(ws: &Workspace) -> FxHashMap<Ustr, Vec<FuncRef>> {
-    let mut idx: FxHashMap<Ustr, Vec<FuncRef>> = FxHashMap::default();
-    for module in ws.modules.iter() {
-        if module.id == ModuleId::builtin() {
-            continue;
-        }
-        for (fid, f) in module.functions.iter() {
-            let fref = FuncRef { module: module.id, func: fid };
-            idx.entry(f.name).or_default().push(fref);
-            let mangled = Ustr::from(&mangle_fn(ws, f));
-            if mangled != f.name {
-                idx.entry(mangled).or_default().push(fref);
-            }
-        }
-    }
-    idx
-}
-
-fn fns_named<'a>(
-    by_name: &'a FxHashMap<Ustr, Vec<FuncRef>>,
-    name: Ustr,
-) -> impl Iterator<Item = FuncRef> + 'a {
-    by_name.get(&name).map(|v| v.as_slice()).unwrap_or(&[]).iter().copied()
-}
-
-impl skull_mir::reach::ReachPolicy for LuaReach<'_> {
-    type Node = EmittedBodyId;
-
-    fn roots(&mut self) -> Result<Vec<EmittedBodyId>, CompilerError> {
-        Ok(std::mem::take(&mut self.roots))
-    }
-
-    /// A body with no chunk (extern, `inline(lua)`, `Iterator`-bounded) has no
-    /// MIR to walk. It is still EMITTED if reached -- `is_leaf` only means
-    /// "expand no further", and those bodies reach onward only by bare name,
-    /// which the `@nomangle` root rule covers.
-    ///
-    /// A specialized body is never a leaf: [`Self::chunk_of`] builds one on
-    /// demand, so "no chunk yet" is not the same answer as "no body to walk".
-    fn is_leaf(&mut self, body: EmittedBodyId) -> Result<bool, CompilerError> {
-        Ok(match &body {
-            EmittedBodyId::Shared(fref) => {
-                let leaf = !matches!(self.chunks.get(&shared(*fref)), Some(Ok(_)));
-                if leaf {
-                    // A legitimate leaf is OPAQUE -- extern / `inline(lua)` --
-                    // and is still emitted, reaching onward by bare name. A
-                    // GENERIC Rock declaration is not: E1 left it with no body
-                    // at all, so arriving at its shared id means a call site
-                    // spelled the declaration's own symbol and nothing defines
-                    // it. Lua would emit that call and die at runtime on a nil
-                    // global with no diagnostic, which is how a witness that
-                    // recorded identity without DELIVERING its instantiation
-                    // stayed invisible for 59 Rock `@test`s. JS rejects the same
-                    // condition; this is the missing half.
-                    let f = &self.ws.module(fref.module).functions[fref.func];
-                    if is_generic(f) && !f.is_extern && f.inline_body.is_none() {
-                        let name = mangle_fn(self.ws, f);
-                        self.errs.push((
-                            name.clone(),
-                            CompilerError::new_with_label(
-                                f.name_span,
-                                format!(
-                                    "`{name}` is reached at its DECLARATION, and a generic \
-                                     declaration has no emitted body -- every call must name a \
-                                     concrete instantiation. Two things land here. Either a \
-                                     type argument is UNCONSTRAINED at the call (nothing pins \
-                                     it, e.g. a generic that appears only in the return type), \
-                                     which is a program error; or a call site recorded which \
-                                     instance it means without DELIVERING it, which is a \
-                                     compiler one. Check whether the call's type arguments are \
-                                     inferable first."
-                                ),
-                            ),
-                        ));
-                    }
-                }
-                leaf
-            }
-            EmittedBodyId::Specialized(..) => false,
-        })
-    }
-
-    /// Recursion is ordinary Rock.
-    fn on_cycle(&mut self, _body: EmittedBodyId) -> Result<(), CompilerError> {
-        Ok(())
-    }
-
-    fn visit(&mut self, body: EmittedBodyId) -> Result<Vec<EmittedBodyId>, CompilerError> {
-        let (calls, global_names, specs) = match self.chunk_of(&body) {
-            Some(chunk) => (chunk.calls.clone(), chunk.global_names.clone(), chunk.specs.clone()),
-            None => return Ok(Vec::new()),
-        };
-        // BEFORE the successors are returned: a specialized successor is BUILT
-        // when it is visited, and its tree has to be on the map by then.
-        for body in self.demands.record(&specs) {
-            self.errs.push(demand_clash(self.ws, &body));
-        }
-        let mut succs: Vec<EmittedBodyId> = calls.into_iter().map(shared).collect();
-        for name in global_names {
-            succs.extend(fns_named(self.by_name, name).map(shared));
-        }
-        // The edge a declaration-keyed walk could not carry: a specialized body
-        // is lowered under its instantiation, so it reaches callees, globals and
-        // FURTHER specializations no shared body mentions.
-        //
-        // It is also the edge that can fail to terminate. Polymorphic recursion
-        // demands a strictly deeper instantiation at every step, so each node is
-        // DISTINCT and the walk's own dedup can never close the loop -- before
-        // E1 the shared generic body absorbed the recursion, and removing it is
-        // what turned a compiling program into a hanging compiler. Bounded by
-        // the same `MAX_INSTANTIATION_DEPTH` over the same `MonoTy::depth` the
-        // instance graph uses, so the two agree on what does not terminate.
-        //
-        // Emission REJECTS where the graph merely declines to expand: the call
-        // site already spells the specialized name, so skipping the body would
-        // ship a call to a definition nothing writes.
-        for d in specs.iter() {
-            if let Some((name, err)) = too_deep_to_instantiate(self.ws, d) {
-                self.errs.push((name, err));
-                continue;
-            }
-            succs.push(EmittedBodyId::new(d.func, d.key.clone()));
-        }
-        Ok(succs)
-    }
-}
-
-impl<'a> LuaReach<'a> {
-    /// This body's chunk, BUILDING a specialized one that has none yet.
-    ///
-    /// The chicken-and-egg the previous two mechanisms avoided by cutting the
-    /// arrow: a specialized body's edges exist only once it is lowered, and it
-    /// was lowered only after DCE had already decided what to emit. One walk
-    /// cannot defer that, so it builds -- and the build is not wasted, because
-    /// the renderer downstream pulls the same chunk.
-    ///
-    /// A body that cannot emit contributes NO edges and is not recorded; the
-    /// renderer rebuilds it and reports the rejection there, which is the one
-    /// place a specialized rejection is ordered against its siblings.
-    fn chunk_of(&mut self, body: &EmittedBodyId) -> Option<&Chunk> {
-        if !self.built.contains_key(body) {
-            match body {
-                EmittedBodyId::Shared(fref) => {
-                    return match self.chunks.get(&shared(*fref)) {
-                        Some(Ok(chunk)) => Some(chunk),
-                        _ => None,
-                    };
-                }
-                EmittedBodyId::Specialized(fref, key) => {
-                    if let Some(Ok(chunk)) = self.chunks.get(body) {
-                        self.built.insert(body.clone(), chunk.clone());
-                    } else {
-                        let f = &self.ws.module(fref.module).functions[fref.func];
-                        let name = skull_mir::mangle::spec_fn_name(self.ws, f, key)?;
-                        let mut specs = Vec::new();
-                        let tree = self.demands.tree_of(body);
-                        let built = emit_spec_chunk(
-                            self.ws,
-                            self.cg,
-                            self.scx,
-                            body,
-                            &tree,
-                            &name,
-                            &mut self.inline_cache,
-                            &mut specs,
-                        );
-                        match built {
-                            Ok(chunk) => {
-                                self.built.insert(body.clone(), chunk);
-                            }
-                            Err(e) => {
-                                self.errs.push((name, e));
-                                return None;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        self.built.get(body)
     }
 }
 
@@ -995,42 +833,16 @@ pub(crate) fn is_emission_root(
     f.annotations.iter().any(|a| deco_map.contains_key(&a.name.name))
 }
 
-/// The fns whose definitions must appear in the emitted chunk: the roots plus
-/// everything they transitively call. `extra_roots` carries the call edges of the
-/// definitions that are always emitted regardless (decorator bodies, global
-/// initializers) and of the shader registrations.
-/// **Post-inline liveness over EMITTED BODIES** -- the one answer to "which
-/// definitions does this program need", for the shared body of a declaration and
-/// for a specialized instantiation alike.
-///
-/// There were two mechanisms. A `FuncRef` DCE walk decided shared bodies, and a
-/// demand closure seeded from the EMITTED chunks decided specialized ones, with
-/// the arrow between them cut: a declaration reached only by a specialized
-/// body's residual call was invisible to the walk. Measured before unifying, that
-/// arrow adds nothing on this corpus (0 such declarations over 8 projects), which
-/// is why one walk that carries it is byte-identical rather than a fix.
-///
-/// The walk BUILDS the specialized chunks it needs, so the answer is a fixpoint
-/// rather than one pass with a missing edge. Those chunks are handed back: the
-/// renderer downstream pulls them instead of lowering the same bodies again.
-struct LiveBodies {
-    /// Every emitted body a root reaches, both kinds.
-    bodies: FxHashSet<EmittedBodyId>,
-    /// Specialized chunks the walk built, for the renderer and the cache.
-    spec_chunks: FxHashMap<EmittedBodyId, Chunk>,
-    /// Specialized bodies that could not emit, by emitted name.
-    rejected: Vec<(String, CompilerError)>,
-}
-
 /// The diagnostic for a demand clash, at the declaration whose specialization
 /// two sites disagree about.
-fn demand_clash(ws: &Workspace, body: &EmittedBodyId) -> (String, CompilerError) {
-    let fref = body.decl();
+fn demand_clash(
+    ws: &Workspace,
+    scx: &skull_mir::lower::ScalarCtx,
+    body: &Instance,
+) -> (String, CompilerError) {
+    let fref = body.func;
     let f = &ws.module(fref.module).functions[fref.func];
-    let name = body
-        .key()
-        .and_then(|k| skull_mir::mangle::spec_fn_name(ws, f, k))
-        .unwrap_or_else(|| f.name.to_string());
+    let name = body.symbol(ws, scx.interner());
     (
         name.clone(),
         CompilerError::new_with_label(
@@ -1041,21 +853,6 @@ fn demand_clash(ws: &Workspace, body: &EmittedBodyId) -> (String, CompilerError)
             ),
         ),
     )
-}
-
-impl LiveBodies {
-    /// Whether this DECLARATION's own definition is emitted. The
-    /// validation-vs-emitted split rests on this being the ONLY thing liveness
-    /// gates: every declaration is still visited, reported on and rejected from.
-    fn emits(&self, fref: FuncRef) -> bool {
-        self.bodies.contains(&EmittedBodyId::Shared(fref))
-    }
-
-    /// The declarations whose definitions are emitted -- what the overlay's
-    /// `emitted` baseline records.
-    fn emitted_bodies(&self) -> FxHashSet<EmittedBodyId> {
-        self.bodies.clone()
-    }
 }
 
 /// The spanned rejection for a specialization demand whose type arguments have
@@ -1074,11 +871,13 @@ impl LiveBodies {
 /// diverges, and growth is exactly what depth measures.
 fn too_deep_to_instantiate(
     ws: &Workspace,
-    d: &skull_mir::bound::SpecDemand,
+    scx: &skull_mir::lower::ScalarCtx,
+    inst: &Instance,
 ) -> Option<(String, CompilerError)> {
-    let at = skull_mir::monoty::too_deep_to_instantiate(d.key.iter())?.render();
-    let f = &ws.module(d.func.module).functions[d.func.func];
-    let name = skull_mir::mangle::spec_fn_name(ws, f, &d.key).unwrap_or_else(|| f.name.to_string());
+    let args = inst.arg_types(scx.interner());
+    let at = skull_mir::monoty::too_deep_to_instantiate(args.iter())?.render();
+    let f = &ws.module(inst.func.module).functions[inst.func.func];
+    let name = inst.symbol(ws, scx.interner());
     Some((name, CompilerError::new_with_label(
         f.name_span,
         format!(
@@ -1093,94 +892,96 @@ fn too_deep_to_instantiate(
     )))
 }
 
-fn live_bodies(
+/// **Phase 2's specialized-body population, driven by SpecDemand closure over
+/// `cache.lua_view`'s retained ordinary population -- not by `lua_view.
+/// instances` directly, and not by a reachability walk.**
+///
+/// `lua_view` answers RETENTION (is this instance part of the program at
+/// all), which is a different question from DELIVERY (does it need a
+/// standalone Lua definition, or is every call to it spliced/inlined away at
+/// the call site). Delivery is decided per call site during ordinary lowering
+/// -- already done, once, in `emit_full`'s upfront parallel chunk build -- and
+/// is exactly what a chunk's own `specs: Vec<SpecDemand>` records. A generic
+/// instance the graph retains but nothing DEMANDS standalone (every caller
+/// spliced it) has no chunk to build at all: `map_new<int, IVec2>` is such a
+/// case in the shipped corpus (found empirically -- every real project
+/// reaches it only through a global's `Map<int, IVec2> = map_new()`
+/// initializer, which the column-storage inliner splices away entirely, so
+/// building it standalone hits a REAL rejection -- `transmute` cannot build a
+/// column-stored `Map` -- for an instance nothing ever calls that way).
+///
+/// `pending` seeds from the already-lowered chunk of every ordinary/coroutine
+/// declaration `should_emit_via_view` retains, plus every already-collected
+/// always-emitted (decorator/global) demand; each newly BUILT specialized
+/// chunk's own `.specs` extends the worklist, mirroring
+/// `emit_specialized_callees`'s render-time fixpoint but for BUILDING. Each
+/// instance's tree is the concrete plan's resolved bound tree, which the graph
+/// installs as part of that owner plan (never `DemandMap` -- sufficient per
+/// `instance_tree_to_resolved`'s doc, corpus-verified byte-identical against
+/// `DemandMap`-lowered text for every case both sides reach). A demand clash
+/// (`cache.graph.has_bound_tree_disagreement`) rejects
+/// that one instance rather than picking an arbitrary tree -- the
+/// graph-driven equivalent of `DemandMap`'s clash check.
+fn view_driven_specialized_chunks(
     ws: &Workspace,
     cg: &CodegenCtx,
     scx: &skull_mir::lower::ScalarCtx,
     cache: &SkullEmitCache,
-    deco_map: &DecoMap,
-    project_root: Option<&str>,
-    extra_roots: &[FuncRef],
-    extra_root_names: &[Ustr],
-    unit_specs: &[skull_mir::bound::SpecDemand],
-) -> Result<LiveBodies, CompilerError> {
-    let by_name = build_name_index(ws);
-    let mut roots: Vec<FuncRef> = Vec::new();
+    initial: &[skull_mir::bound::SpecDemand],
+) -> (FxHashMap<Instance, Chunk>, Vec<(String, CompilerError)>) {
+    let mut built: FxHashMap<Instance, Chunk> = FxHashMap::default();
+    let mut errs: Vec<(String, CompilerError)> = Vec::new();
+    let mut inline_cache = skull_transform::InlineCache::default();
+    let mut pending: Vec<Instance> = initial.iter().map(|d| d.inst.clone()).collect();
     for module in ws.modules.iter() {
         if module.id == ModuleId::builtin() {
             continue;
         }
         for (fid, f) in module.functions.iter() {
-            // A GENERIC declaration is never a root, however the root rule reads:
-            // it has no body to emit, so rooting it would ask for a shared
-            // generic snapshot that no longer exists. Its instances are reached
-            // through the demands of the bodies that call them, and a generic
-            // nothing instantiates emits nothing.
-            if is_generic(f) {
+            let self_ref = FuncRef { module: module.id, func: fid };
+            if !is_cached_emitted_body(f, &shared(self_ref))
+                || !should_emit_via_view(ws, &cache.lua_view, self_ref)
+            {
                 continue;
             }
-            if is_emission_root(module.file.as_str(), project_root, f, deco_map) {
-                roots.push(FuncRef { module: module.id, func: fid });
+            if let Some(Ok(c)) = cache.chunks.get(&shared(self_ref)) {
+                pending.extend(c.specs.iter().map(|d| d.inst.clone()));
             }
         }
     }
-    roots.extend(extra_roots.iter().copied());
-    roots.extend(cache.shader_registrations.dependencies.iter().copied());
-    // `sim_registration_lines` calls `register_sim` from generated text.
-    if !collect_sim_fns(ws).is_empty() {
-        roots.extend(register_sim_fn(ws));
-    }
-    for &name in extra_root_names {
-        roots.extend(fns_named(&by_name, name));
-    }
-
-    // The always-emitted units (decorator bodies, global initializers) are not
-    // reached through any chunk -- they emit unconditionally -- so the
-    // instantiations they ask for are roots in their own right.
-    let mut root_bodies: Vec<EmittedBodyId> = roots.iter().copied().map(shared).collect();
-    root_bodies
-        .extend(unit_specs.iter().map(|d| EmittedBodyId::new(d.func, d.key.clone())));
-
-    let mut policy = LuaReach {
-        ws,
-        cg,
-        scx,
-        by_name: &by_name,
-        chunks: &cache.chunks,
-        built: FxHashMap::default(),
-        errs: Vec::new(),
-        inline_cache: skull_transform::InlineCache::default(),
-        roots: root_bodies.clone(),
-        demands: skull_mir::bound::DemandMap::default(),
-    };
-    for body in policy.demands.record(unit_specs) {
-        policy.errs.push(demand_clash(ws, &body));
-    }
-    let order = skull_mir::reach::walk(&mut policy)?;
-
-    // `walk` returns only EXPANDED nodes. A root and a LEAF (extern, inline(lua),
-    // `Iterator`-bounded -- anything with no chunk) are reached and emittable
-    // too, so fold the roots and every expanded body's edges back in.
-    let mut bodies: FxHashSet<EmittedBodyId> = order.iter().cloned().collect();
-    bodies.extend(root_bodies);
-    for body in &order {
-        let chunk = match body {
-            EmittedBodyId::Shared(fref) => match cache.chunks.get(&shared(*fref)) {
-                Some(Ok(chunk)) => chunk,
-                _ => continue,
-            },
-            EmittedBodyId::Specialized(..) => match policy.built.get(body) {
-                Some(chunk) => chunk,
-                None => continue,
-            },
-        };
-        bodies.extend(chunk.calls.iter().copied().map(shared));
-        for &name in &chunk.global_names {
-            bodies.extend(fns_named(&by_name, name).map(shared));
+    let mut done: FxHashSet<Instance> = FxHashSet::default();
+    while let Some(inst) = pending.pop() {
+        if !done.insert(inst.clone()) {
+            continue;
         }
-        bodies.extend(chunk.specs.iter().map(|d| EmittedBodyId::new(d.func, d.key.clone())));
+        // Polymorphic recursion (plan S 0h: REJECT). The graph's own build
+        // silently CAPS a too-deep instance (`depth_capped`, no rejection --
+        // it is a target-neutral fact-recorder, not a diagnostic surface), so
+        // emission is where the spanned rejection has to live, same as before.
+        if let Some((name, err)) = too_deep_to_instantiate(ws, scx, &inst) {
+            errs.push((name, err));
+            continue;
+        }
+        if cache.graph.has_bound_tree_disagreement(&inst) {
+            errs.push(demand_clash(ws, scx, &inst));
+            continue;
+        }
+        if let Some(Ok(c)) = cache.chunks.get(&inst) {
+            pending.extend(c.specs.iter().map(|d| d.inst.clone()));
+            built.insert(inst, c.clone());
+            continue;
+        }
+        let name = inst.symbol(ws, scx.interner());
+        let mut specs = Vec::new();
+        match emit_spec_chunk(ws, cg, scx, &cache.concrete, &inst, &name, &mut inline_cache, &mut specs) {
+            Ok(chunk) => {
+                pending.extend(chunk.specs.iter().map(|d| d.inst.clone()));
+                built.insert(inst, chunk);
+            }
+            Err(e) => errs.push((name, e)),
+        }
     }
-    Ok(LiveBodies { bodies, spec_chunks: policy.built, rejected: policy.errs })
+    (built, errs)
 }
 
 /// Emit the whole workspace via the new (cell-model) path. `user_mid` is the
@@ -1202,7 +1003,17 @@ pub fn emit_workspace_mir_in(
     user_mid: ModuleId,
     project_root: Option<&str>,
 ) -> Result<MirEmit, CompilerError> {
-    emit_full_in(ws, user_mid, project_root).map(|(emit, _cache)| emit)
+    emit_workspace_mir_in_for_renderer(ws, user_mid, project_root, RendererTarget::Gl)
+}
+
+pub fn emit_workspace_mir_in_for_renderer(
+    ws: &Workspace,
+    user_mid: ModuleId,
+    project_root: Option<&str>,
+    renderer_target: RendererTarget,
+) -> Result<MirEmit, CompilerError> {
+    emit_full_in_for_renderer(ws, user_mid, project_root, renderer_target)
+        .map(|(emit, _cache)| emit)
 }
 
 /// One emitted ordinary/coroutine function definition plus the facts incremental
@@ -1233,11 +1044,6 @@ struct Chunk {
     /// set. Distinct from `deps`, which is an invalidation superset (it also holds
     /// everything inlined AWAY, and would keep spliced-out callees alive).
     calls: Vec<FuncRef>,
-    /// Module-global names this body reads/writes. A top-level fn used as a VALUE
-    /// lowers to an `Inst::Global`, not a call, so these are reachability edges
-    /// too -- without them a fn passed as an argument gets pruned out from under
-    /// a live reference.
-    global_names: Vec<Ustr>,
     /// Callees this body invokes through a SPECIALIZED instantiation that no
     /// splice served, so each needs a standalone specialized copy emitted.
     /// Deduplicated program-wide by [`assemble`] -- many bodies ask for the same
@@ -1245,23 +1051,108 @@ struct Chunk {
     specs: Vec<skull_mir::bound::SpecDemand>,
 }
 
+#[derive(Clone, Copy)]
+enum BodyMutation {
+    None,
+    #[cfg(test)]
+    RemoveCalleeOwner { caller: FuncRef, callee: FuncRef },
+    #[cfg(test)]
+    ClearCalleeOwnerKey { caller: FuncRef, callee: FuncRef },
+    #[cfg(test)]
+    ClearBoundPlan { body: FuncRef },
+    #[cfg(test)]
+    ClearCoroutineResultPlan { body: FuncRef },
+    #[cfg(test)]
+    ClearIteratorWitnessInstance { body: FuncRef },
+}
+
 /// The shared body of `fref` -- the id under which a declaration's own
 /// definition is cached. Written out at every chunk lookup so the day a
 /// SPECIALIZED body answers one of them is a visible change rather than a
 /// silent widening.
-fn shared(fref: FuncRef) -> EmittedBodyId {
-    EmittedBodyId::Shared(fref)
+fn shared(fref: FuncRef) -> Instance {
+    Instance::base(fref)
+}
+
+/// Whether `self_ref`'s OWN ordinary/coroutine chunk must be emitted, per
+/// `view` -- the exact predicate a population-source cutover would gate the
+/// module-fn loop's `emit_def` with. TWO independent reasons, matching this
+/// session's author decision:
+///
+/// - **call-serving**: `self_ref` is the declaration `realize_decl` SELECTED
+///   to serve calls to its canonical `Instance` (which may be a DIFFERENT
+///   `FuncRef` than `self_ref` when `self_ref` is a non-representative
+///   sibling, and vice versa when `self_ref` IS the representative but a
+///   same-name sibling serves calls instead).
+/// - **publication**: `self_ref` carries an explicit `@nomangle` root whose
+///   own bare-name promise the artifact must publish regardless of whether
+///   any resolved call reaches it that way.
+///
+/// A declaration can be neither (pruned), either, or -- the whole point of
+/// modeling publication separately -- BOTH under two different symbols.
+fn should_emit_via_view(ws: &Workspace, view: &crate::artifact::ArtifactView, self_ref: FuncRef) -> bool {
+    let canonical = skull_mir::lower::canonical_variant(ws, self_ref);
+    let call_serving = view
+        .realization
+        .get(&Instance::base(canonical))
+        .is_some_and(|r| r.decl == self_ref);
+    let publication = view.publications.contains_key(&Instance::base(self_ref));
+    call_serving || publication
+}
+
+/// Whether a FOREIGN (`inline(lua)`) body needs a standalone definition.
+///
+/// Retention alone over-emits here: a `@pure @inline` stdlib operator is
+/// retained (something calls `+`) and spliced away at every call site, so the
+/// question is delivery, not membership. Four independent reasons force a
+/// definition -- a bare-name publication promise, being a DECLARED root in its
+/// own right (an own-project `inline(lua)` fn is rooted with no caller at all,
+/// same reasoning as `main`/`@sim`/`@test`), a residual non-spliced call, or a
+/// FUNCTION-VALUE take, which is not a call and so has nothing to splice into:
+/// the program stores the definition itself under its own symbol.
+///
+/// `declared_roots`, not `roots`: the latter also carries the graph's own
+/// "callee of an always-emitted body, no incoming edge" category, which is an
+/// ordinary reached instance subject to the same splicing question (found
+/// empirically -- `__op_mul`/`__op_div`, reached from a global initializer's
+/// constant expression, are not declared roots and are spliced away
+/// everywhere). A generic declaration has no base instance and so is never in
+/// the set.
+///
+/// ONE oracle: the definition loop and the emitted-body census both call it, so
+/// they cannot disagree about what the assembly contains.
+fn emits_foreign_definition(
+    ws: &Workspace,
+    view: &crate::artifact::ArtifactView,
+    needed_foreign: &FxHashSet<Instance>,
+    self_ref: FuncRef,
+) -> bool {
+    let canonical = shared(skull_mir::lower::canonical_variant(ws, self_ref));
+    view.publications.contains_key(&shared(self_ref))
+        || view.declared_roots.contains(&canonical)
+        || view.fn_value_targets.contains(&canonical)
+        || needed_foreign.contains(&shared(self_ref))
 }
 
 /// Deterministic overlay order over emitted bodies. Reduces to the declaration
 /// order the overlay used before specializations could appear in it: a
-/// declaration's shared body sorts ahead of its own specializations, and those
-/// sort by their instantiation's canonical spelling, which is injective.
-fn overlay_order_key(body: &EmittedBodyId) -> (usize, u32, Option<String>) {
-    let fref = body.decl();
-    let key = body
-        .key()
-        .map(|k| k.iter().map(skull_mir::monoty::MonoTy::canonical).collect::<Vec<_>>().join(","));
+/// declaration's own body sorts ahead of its specializations, and those sort by
+/// their instantiation's canonical spelling, which is injective.
+fn overlay_order_key(
+    scx: &skull_mir::lower::ScalarCtx,
+    body: &Instance,
+) -> (usize, u32, Option<String>) {
+    let fref = body.func;
+    // The instantiation's canonical spelling, which is injective -- a
+    // declaration's own body sorts ahead of its specializations because it has
+    // no arguments to spell.
+    let key = (!body.args.is_empty()).then(|| {
+        body.arg_types(scx.interner())
+            .iter()
+            .map(skull_mir::monoty::MonoTy::canonical)
+            .collect::<Vec<_>>()
+            .join(",")
+    });
     (fref.module.index(), u32::from(fref.func.into_raw()), key)
 }
 
@@ -1273,48 +1164,56 @@ fn rebuild_chunk(
     ws: &Workspace,
     cg: &CodegenCtx,
     scx: &skull_mir::lower::ScalarCtx,
-    body: &EmittedBodyId,
+    concrete: &crate::concrete_body::ConcreteBodies,
+    body: &Instance,
     f: &bone_semantic::hir::Function,
     inline_cache: &mut skull_transform::InlineCache,
 ) -> Result<Chunk, CompilerError> {
-    match body {
-        EmittedBodyId::Shared(fref) => emit_body_chunk(ws, cg, scx, *fref, f, inline_cache),
-        EmittedBodyId::Specialized(fref, key) => {
+    match body.args.is_empty() {
+        true => emit_body_chunk(ws, cg, scx, concrete, body.func, f, inline_cache),
+        false => {
             // A rebuild that cannot emit DROPS the entry rather than storing the
             // rejection: assembly rebuilds a miss and reports the error from
             // there, which is the one place a specialized rejection is ordered
             // against its siblings.
-            let Some(name) = skull_mir::mangle::spec_fn_name(ws, f, key) else {
-                return Err(CompilerError::new_with_label(
-                    f.name_span,
-                    format!("internal: `{}` has a specialized chunk under an all-`None` key", f.name),
-                ));
-            };
-            let _ = fref;
+            let name = body.symbol(ws, scx.interner());
             let mut specs = Vec::new();
-            // The EMPTY tree, and that is not a fallback. A body with placeholders
-            // belongs to an `Iterator`-bounded declaration, and `is_cached_body`
-            // is false for one -- its caller DROPS the chunk instead of rebuilding
-            // it, so the liveness walk re-derives it WITH the demand's tree. If a
-            // body with placeholders ever did arrive here,
-            // `resolve_standalone_bound_calls` refuses it rather than emitting a
-            // definition that names no `next`.
-            emit_spec_chunk(ws, cg, scx, body, &Default::default(), &name, inline_cache, &mut specs)
+            emit_spec_chunk(ws, cg, scx, concrete, body, &name, inline_cache, &mut specs)
         }
     }
 }
 
 /// Per-body emit cache for incremental codegen: the expensive function chunks
-/// (ordinary + coroutine bodies), keyed by [`EmittedBodyId`]. `Err` records a body the
+/// (ordinary + coroutine bodies), keyed by [`Instance`]. `Err` records a body the
 /// new path could not lower (the parity gap). Everything else is regenerated by
 /// [`assemble`] every time. See `docs/skull-incremental-emit-plan.md`.
 pub struct SkullEmitCache {
-    chunks: FxHashMap<EmittedBodyId, Result<Chunk, CompilerError>>,
+    chunks: FxHashMap<Instance, Result<Chunk, CompilerError>>,
+    concrete: crate::concrete_body::ConcreteBodies,
+    /// **The authoritative instance graph, built EAGERLY by `emit_full_in`
+    /// before any chunk is lowered, and retained across body edits.**
+    ///
+    /// `emit_full_in` mints the arena, builds this graph into it FIRST, and
+    /// hands the same `Arc<MonoInterner>` to `scx` (`ScalarCtx::sharing`) --
+    /// that order is load-bearing, because an `Instance` the graph minted has
+    /// to mean something to lowering. There is no lazy/first-edit path: a
+    /// one-shot `rock compile` pays the build unconditionally, which is what
+    /// makes `lua_view` (below) a real production fact rather than a shadow
+    /// computed beside emission.
+    ///
+    /// Maintained in place by `update_bodies` on every edit -- never rebuilt,
+    /// which would invalidate every `Instance` key in this cache.
+    graph: crate::instance_graph::InstanceGraph,
+    /// The Lua artifact's realization of `graph`, from the SAME roots
+    /// `emit_full_in` builds the graph from. Recomputed by every full/edit
+    /// cycle that touches the graph, so it never drifts from what emission
+    /// actually discovers.
+    lua_view: crate::artifact::ArtifactView,
     /// Functions changed since the last full build (`emit_full`), accumulated by
     /// `emit_overlay` so the `incremental.lua` overlay always carries the latest
     /// version of every touched fn (not just the most recent edit). Reset to
     /// empty by `emit_full`. See `docs/skull-incremental-emit-split.md`.
-    changed_since_full: FxHashSet<EmittedBodyId>,
+    changed_since_full: FxHashSet<Instance>,
     /// Workspace overload set (drives mangling). Derived from function SIGNATURES,
     /// so it is byte-identical across every body edit and only changes on an
     /// interface/structural edit -- which routes to `emit_full` (a fresh cache).
@@ -1344,7 +1243,7 @@ pub struct SkullEmitCache {
     /// Built in `emit_full`, maintained as chunks re-emit. Sound on the body-edit
     /// path because the chunk key set is invariant between full builds.
     /// `docs/skull-incremental-emit-cache-plan.md` step 4.
-    dependents: FxHashMap<FuncRef, FxHashSet<EmittedBodyId>>,
+    dependents: FxHashMap<FuncRef, FxHashSet<Instance>>,
     /// `const` globals changed since the last full build (`emit_full`), accumulated
     /// by `emit_overlay`. The overlay re-emits each one's init UNGUARDED so the new
     /// literal takes effect on reload (mutable `global`s are NEVER here -- their
@@ -1360,16 +1259,15 @@ pub struct SkullEmitCache {
     /// `docs/static-hot-reload-overlay-bug.md`.
     static_key_baseline: FxHashMap<Ustr, String>,
     shader_registrations: ShaderRegistrations,
-    /// The definitions the last full assembly actually EMITTED (global DCE prunes
-    /// the rest), keyed by EMITTED BODY. `assemble_overlay` needs it: the overlay
-    /// redefines only CHANGED fns, so a body edit that newly reaches a
-    /// previously-pruned definition would otherwise leave it defined nowhere -- a
-    /// runtime nil call on reload.
+    shader_view: crate::shader_artifact::ShaderArtifactView,
+    /// The definitions the last assembly actually EMITTED (global DCE prunes
+    /// the rest), keyed by EMITTED BODY. Graph-delta materialization uses it to
+    /// distinguish a cached body that is newly retained from one already present
+    /// in the live program.
     ///
     /// By emitted body rather than by declaration, because a specialization is
-    /// its own definition with its own symbol. Keyed by `FuncRef`, the backfill
-    /// walk could only ever answer for shared bodies.
-    emitted: FxHashSet<EmittedBodyId>,
+    /// its own definition with its own symbol.
+    emitted: FxHashSet<Instance>,
     /// Comptime reads of the always-emitted units (global initializers,
     /// decorator defs), which have no Chunk. Feeds the watch set
     /// (`comptime_files`) and the overlay's stale-const re-init; refreshed by
@@ -1377,6 +1275,61 @@ pub struct SkullEmitCache {
     unit_comptime_reads: UnitComptimeReads,
     /// The compilation target's root directory; see [`is_library_module`].
     project_root: Option<String>,
+    renderer_target: RendererTarget,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RendererTarget {
+    Gl,
+    Wgpu,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct WgpuProjectionCensus {
+    pub examined: usize,
+    pub admitted: usize,
+    pub omitted: usize,
+    pub omissions: BTreeMap<String, String>,
+}
+
+enum WgpuProjection<T> {
+    Admitted(T),
+    Unsupported { capability: String },
+}
+
+fn classify_wgpu_projection<T>(result: Result<T, CompilerError>) -> Result<WgpuProjection<T>, CompilerError> {
+    match result {
+        Ok(value) => Ok(WgpuProjection::Admitted(value)),
+        Err(error) => match error.kind {
+            CompilerErrorKind::UnsupportedWgslProjection { capability } => {
+                Ok(WgpuProjection::Unsupported { capability })
+            }
+            _ => Err(error),
+        },
+    }
+}
+
+fn collect_wgpu_projections<T, K>(
+    items: impl IntoIterator<Item = (String, K)>,
+    mut project: impl FnMut(&str, K) -> Result<T, CompilerError>,
+) -> Result<(Vec<(String, T)>, WgpuProjectionCensus), CompilerError> {
+    let mut census = WgpuProjectionCensus::default();
+    let mut admitted = Vec::new();
+    for (key, input) in items {
+        census.examined += 1;
+        match classify_wgpu_projection(project(&key, input))? {
+            WgpuProjection::Admitted(value) => {
+                census.admitted += 1;
+                admitted.push((key, value));
+            }
+            WgpuProjection::Unsupported { capability } => {
+                census.omitted += 1;
+                census.omissions.insert(key, capability);
+            }
+        }
+    }
+    debug_assert_eq!(census.examined, census.admitted + census.omitted);
+    Ok((admitted, census))
 }
 
 #[derive(Default)]
@@ -1384,6 +1337,10 @@ struct ShaderRegistrations {
     lua: String,
     dependencies: FxHashSet<FuncRef>,
     callsites: FxHashSet<(ModuleId, BodyOwner)>,
+    roots: Vec<FuncRef>,
+    keys: BTreeSet<String>,
+    abi_wires: BTreeMap<String, String>,
+    wgpu_projection_census: Option<WgpuProjectionCensus>,
 }
 
 /// A `static` cell's reload key: rendered type + initializer content hash. Equal
@@ -1416,16 +1373,17 @@ fn collect_callee_frefs(mf: &MirFunc, out: &mut FxHashSet<FuncRef>) {
 /// coroutine object rather than running the body, which is why specialization
 /// here is delivered by a standalone definition instead of a splice. That is the
 /// whole difference from an ordinary specialization, and it is why this is not
-/// [`prepare_instance_body`] -- there is no inline pass, no `convert_closures`
+/// [`prepare_instance_body_with_plans`] -- there is no inline pass, no `convert_closures`
 /// (the step's lambdas convert framed, inside `emit_coroutine`) and no FORL
 /// recovery (codegen's relooper does it).
 ///
-/// `body` decides every symbol, through [`skull_mir::lower::plan_coroutine`].
+/// The concrete body plan decides the instance symbol and yield channel.
 fn emit_coroutine_chunk(
     ws: &Workspace,
     cg: &CodegenCtx,
+    scx: &skull_mir::lower::ScalarCtx,
     ctx: &skull_mir::bound::BoundCtx,
-    body: &EmittedBodyId,
+    concrete_plan: &skull_mir::concrete::ConcreteBodyPlan,
     f: &bone_semantic::hir::Function,
     mf: &mut MirFunc,
     mut times: PhaseTimes,
@@ -1441,17 +1399,29 @@ fn emit_coroutine_chunk(
     validate_emitted_body(ws, ctx, mf, &mut specs).map_err(|r| r.into_error(f.name_span, ""))?;
     skull_codegen_lua::regalloc_time_reset();
     let te = Instant::now();
-    let plan = skull_mir::lower::plan_coroutine(ws, body);
-    let lua = crate::coroutine_emit::emit_coroutine(ws, cg, &plan, mf);
+    let inst = concrete_plan
+        .function_instance()
+        .expect("a coroutine emission plan must own a function instance");
+    let plan = skull_mir::lower::CoroutinePlan::from_concrete_plan(
+        ws,
+        scx.interner(),
+        concrete_plan,
+        inst.symbol(ws, scx.interner()),
+    )
+    .map_err(|reason| {
+        CompilerError::new_with_label(
+            f.name_span,
+            format!("cannot build concrete coroutine plan for `{}`: {}", f.name, reason.bucket()),
+        )
+    })?;
+    let lua = crate::coroutine_emit::emit_coroutine(ws, cg, scx.interner(), &plan, mf);
     times.emit = te.elapsed();
     times.regalloc = skull_codegen_lua::regalloc_time_elapsed().min(times.emit);
-    // A specialization's chunk names the DECLARATION it specializes, so editing a
-    // generic `co fn` re-emits every instantiation of it; the shared body has no
-    // such edge to record and keeps its empty dep set.
-    let mut deps = FxHashSet::default();
-    if body.key().is_some() {
-        deps.insert(body.decl());
-    }
+    // No declaration edge here: "this instance instantiates that declaration" is
+    // the GRAPH's fact, and `update_chunk_cache` reads it through
+    // `instances_of`. `deps` carries only what codegen alone knows -- which
+    // bodies this chunk's TEXT contains.
+    let deps = FxHashSet::default();
     Ok(Chunk {
         lua,
         deps,
@@ -1461,7 +1431,6 @@ fn emit_coroutine_chunk(
         statics: mf.statics.clone(),
         comptime_reads: mf.comptime_reads.clone(),
         calls: skull_mir::reach::call_targets(mf),
-        global_names: skull_mir::reach::global_ref_names(mf),
         specs,
     })
 }
@@ -1474,24 +1443,97 @@ fn emit_body_chunk(
     ws: &Workspace,
     cg: &CodegenCtx,
     scx: &skull_mir::lower::ScalarCtx,
+    concrete: &crate::concrete_body::ConcreteBodies,
     self_ref: FuncRef,
     f: &bone_semantic::hir::Function,
     inline_cache: &mut skull_transform::InlineCache,
 ) -> Result<Chunk, CompilerError> {
+    emit_body_chunk_with_mutation(ws, cg, scx, concrete, self_ref, f, inline_cache, BodyMutation::None)
+}
+
+fn emit_body_chunk_with_mutation(
+    ws: &Workspace,
+    cg: &CodegenCtx,
+    scx: &skull_mir::lower::ScalarCtx,
+    concrete: &crate::concrete_body::ConcreteBodies,
+    self_ref: FuncRef,
+    f: &bone_semantic::hir::Function,
+    inline_cache: &mut skull_transform::InlineCache,
+    mutation: BodyMutation,
+) -> Result<Chunk, CompilerError> {
     let mut times = PhaseTimes::default();
     let tl = Instant::now();
-    let mut mf = skull_mir::lower::lower_function(ws, scx, self_ref.module, self_ref.func)?;
+    let plan = concrete
+        .plan_for(&shared(self_ref))
+        .ok_or_else(|| CompilerError::new_with_label(f.name_span, format!("no concrete plan for `{}`", f.name)))?;
+    let mut mf = skull_mir::lower::lower_function_with_plans(ws, scx, plan, &concrete.plans)?;
     times.lower = tl.elapsed();
+    match mutation {
+        BodyMutation::None => {}
+        #[cfg(test)]
+        BodyMutation::RemoveCalleeOwner { caller, callee }
+        | BodyMutation::ClearCalleeOwnerKey { caller, callee }
+            if caller == self_ref =>
+        {
+            let (call, owner) = mf
+                .callee_instances
+                .iter()
+                .find(|(_, owner)| owner.func == callee)
+                .map(|(call, owner)| (*call, owner.clone()))
+                .expect("the mutation fixture must lower a concrete generic call");
+            assert!(
+                !owner.args.is_empty(),
+                "the mutation fixture must have a complete concrete owner"
+            );
+            assert!(
+                mf.spec_bindings.contains_key(&call),
+                "the mutation must retain the specialized delivery record"
+            );
+            assert!(
+                mf.call_abi_plans.contains_key(&call),
+                "the mutation must retain the lowered ABI record"
+            );
+            match mutation {
+                BodyMutation::RemoveCalleeOwner { .. } => {
+                    mf.callee_instances.remove(&call);
+                }
+                BodyMutation::ClearCalleeOwnerKey { .. } => {
+                    mf.callee_instances
+                        .get_mut(&call)
+                        .expect("owner disappeared before key mutation")
+                        .args
+                        .clear();
+                }
+                BodyMutation::None => unreachable!(),
+                BodyMutation::ClearBoundPlan { .. } => unreachable!(),
+                BodyMutation::ClearCoroutineResultPlan { .. } => unreachable!(),
+                BodyMutation::ClearIteratorWitnessInstance { .. } => unreachable!(),
+            }
+        }
+        #[cfg(test)]
+        _ => {}
+    }
     if f.is_coroutine {
-        let (subst, incoming) = Default::default();
         let owner = BodyOwner::Function(self_ref.func);
-        let ctx = skull_mir::bound::body_ctx(ws, self_ref.module, owner, &subst, &incoming);
-        return emit_coroutine_chunk(ws, cg, &ctx, &shared(self_ref), f, &mut mf, times);
+        let ctx = skull_mir::bound::concrete_body_ctx(
+            ws,
+            self_ref.module,
+            owner,
+            &plan.bound_tree,
+            scx.interner(),
+        );
+        return emit_coroutine_chunk(ws, cg, scx, &ctx, plan, f, &mut mf, times);
     }
     // Inline eligible direct calls before cleanup so a hot loop traces with no
     // per-call frame (`docs/skull-inlining-plan.md`).
-    let (spliced, _splices) =
-        skull_transform::inline_functions(ws, scx, self_ref, &mut mf, inline_cache)?;
+    let (spliced, _splices) = skull_transform::inline_functions_with_plans(
+        ws,
+        scx,
+        self_ref,
+        &mut mf,
+        inline_cache,
+        &concrete.plans,
+    )?;
     let mut deps: FxHashSet<FuncRef> = spliced.into_iter().collect();
     let tc = Instant::now();
     skull_transform::cleanup_with_nobox(ws, &mut mf); // drop dead values + dead-cell stores
@@ -1522,31 +1564,43 @@ fn emit_body_chunk(
     // Correctness, not just an optimization: a call the lowerer gave the
     // specialized scalar ABI has no serviceable shared body, and for a
     // column-stored element the shared `next` reads a `_data` that does not exist.
-    inline_hoisted_bodies(ws, scx, self_ref, &mut mf.nested_fns, inline_cache, &mut deps)
+    inline_hoisted_bodies(
+        ws,
+        scx,
+        self_ref,
+        &mut mf.nested_fns,
+        inline_cache,
+        &concrete.plans,
+        &mut deps,
+    )
         .map_err(|msg| CompilerError::new_with_label(f.name_span, msg))?;
     times.cleanup = tc.elapsed();
     skull_transform::validate_no_residual_bound_calls(ws, f, &mf)?;
     let mut specs = Vec::new();
-    let (subst, incoming) = Default::default();
     let owner = BodyOwner::Function(self_ref.func);
-    let ctx = skull_mir::bound::body_ctx(ws, self_ref.module, owner, &subst, &incoming);
+    let ctx = skull_mir::bound::concrete_body_ctx(
+        ws,
+        self_ref.module,
+        owner,
+        &plan.bound_tree,
+        scx.interner(),
+    );
     validate_emitted_body(ws, &ctx, &mf, &mut specs).map_err(|r| r.into_error(f.name_span, ""))?;
     collect_callee_frefs(&mf, &mut deps);
     let (direct_globals, direct_calls) = direct_refs(ws, &mf);
     skull_codegen_lua::regalloc_time_reset();
     let te = Instant::now();
-    let mut lua = emit_function(ws, cg, self_ref, &mf);
+    let mut lua = emit_function(ws, cg, scx.interner(), self_ref, &mf);
     // Nested `fn`s are hoisted to sibling top-level Lua fns in the same chunk
     // (their `__local_*` names are already final -- emit_named, no mangling). Their
     // `static` cells fold into THIS chunk's `statics` so the hot-reload preamble +
     // overlay reset see them -- a nested-fn static is otherwise invisible to both.
     let mut statics = mf.statics.clone();
-    emit_nested_fns(ws, cg, &mut mf.nested_fns, &mut deps, &mut statics, &mut lua);
+    emit_nested_fns(ws, cg, scx, &mut mf.nested_fns, &mut deps, &mut statics, &mut lua);
     times.emit = te.elapsed();
     times.regalloc = skull_codegen_lua::regalloc_time_elapsed().min(times.emit);
     let calls = skull_mir::reach::call_targets(&mf);
-    let global_names = skull_mir::reach::global_ref_names(&mf);
-    Ok(Chunk { lua, deps, direct_globals, direct_calls, times, statics, comptime_reads: mf.comptime_reads.clone(), calls, global_names, specs })
+    Ok(Chunk { lua, deps, direct_globals, direct_calls, times, statics, comptime_reads: mf.comptime_reads.clone(), calls, specs })
 }
 
 /// Emit each hoisted nested `fn` (and its own nested fns, depth-first) as a
@@ -1557,6 +1611,7 @@ fn emit_body_chunk(
 fn emit_nested_fns(
     ws: &Workspace,
     cg: &CodegenCtx,
+    scx: &skull_mir::lower::ScalarCtx,
     nested: &mut [MirFunc],
     deps: &mut FxHashSet<FuncRef>,
     statics: &mut Vec<skull_mir::mir::StaticCell>,
@@ -1567,9 +1622,9 @@ fn emit_nested_fns(
         skull_transform::recover_counted_loops(ws, nf);
         collect_callee_frefs(nf, deps);
         statics.extend(nf.statics.iter().cloned());
-        out.push_str(&emit_named(ws, cg, nf.name.as_str(), nf));
+        out.push_str(&emit_named(ws, cg, scx.interner(), nf.name.as_str(), nf));
         let mut children = std::mem::take(&mut nf.nested_fns);
-        emit_nested_fns(ws, cg, &mut children, deps, statics, out);
+        emit_nested_fns(ws, cg, scx, &mut children, deps, statics, out);
     }
 }
 
@@ -1588,10 +1643,16 @@ fn collect_nested_statics(nested: &[MirFunc], out: &mut Vec<skull_mir::mir::Stat
     }
 }
 
-fn emit_pass_nested_fns(ws: &Workspace, cg: &CodegenCtx, nested: &mut [MirFunc], out: &mut String) {
+fn emit_pass_nested_fns(
+    ws: &Workspace,
+    cg: &CodegenCtx,
+    scx: &skull_mir::lower::ScalarCtx,
+    nested: &mut [MirFunc],
+    out: &mut String,
+) {
     for nf in nested.iter_mut() {
         skull_transform::cleanup_with_nobox(ws, nf);
-        out.push_str(&emit_named(ws, cg, nf.name.as_str(), nf));
+        out.push_str(&emit_named(ws, cg, scx.interner(), nf.name.as_str(), nf));
     }
 }
 
@@ -1618,11 +1679,11 @@ pub fn is_cached_body(f: &bone_semantic::hir::Function) -> bool {
 /// generic's specialized chunk on every edit: `is_cached_body` said false, the
 /// caller took its "regenerated, drop the chunk" branch, and the overlay then
 /// found nothing to redefine.
-pub fn is_cached_emitted_body(f: &bone_semantic::hir::Function, body: &EmittedBodyId) -> bool {
-    match body {
-        EmittedBodyId::Specialized(..) => !f.is_extern && f.inline_body.is_none(),
-        EmittedBodyId::Shared(_) => is_cached_body(f),
+pub fn is_cached_emitted_body(f: &bone_semantic::hir::Function, body: &Instance) -> bool {
+    if body.args.is_empty() {
+        return is_cached_body(f);
     }
+    !f.is_extern && f.inline_body.is_none()
 }
 
 /// Whether the fn declares generics, and so has NO declaration-owned body.
@@ -1666,7 +1727,7 @@ fn is_stdlib_module_file(file: &str) -> bool {
 /// A worklist, not a loop over the initial set: a specialized body is lowered
 /// under its own substitution and can therefore require further specializations
 /// that no shared body ever mentions (`Vec<Vec2>.remove_at` calling
-/// `__vec_data_set` at `T = Vec2`). `done` keys on the full `(FuncRef, SpecKey)`
+/// `__vec_data_set` at `T = Vec2`). `done` keys on the full `Instance`
 /// so each is defined exactly once no matter how many bodies requested it.
 ///
 /// A failing specialization does NOT stop the worklist: each instantiation is an
@@ -1698,29 +1759,59 @@ fn emit_spec_chunk(
     ws: &Workspace,
     cg: &CodegenCtx,
     scx: &skull_mir::lower::ScalarCtx,
-    body: &EmittedBodyId,
-    tree: &skull_mir::bound::ResolvedBoundTree,
+    concrete: &crate::concrete_body::ConcreteBodies,
+    body: &Instance,
     name: &str,
     inline_cache: &mut skull_transform::InlineCache,
     specs: &mut Vec<skull_mir::bound::SpecDemand>,
 ) -> Result<Chunk, CompilerError> {
-    let fref = body.decl();
+    let fref = body.func;
     let f = &ws.module(fref.module).functions[fref.func];
-    let subst = body.subst(ws);
-    let mut mf = skull_mir::lower::lower_emitted_body(ws, scx, body)
+    let plan = concrete
+        .plan_for(body)
+        .ok_or_else(|| CompilerError::new_with_label(f.name_span, format!("no concrete plan for `{name}`")))?;
+    let tree = &plan.bound_tree;
+    if fn_has_bounds(f) && tree.is_empty() {
+        return Err(CompilerError::new_with_label(
+            f.name_span,
+            format!("concrete plan has no resolved bound tree for specialized `{name}`"),
+        ));
+    }
+    let mut mf = skull_mir::lower::lower_instance_with_plans(ws, scx, plan, &concrete.plans)
         .map_err(|e| CompilerError::new_with_label(f.name_span, e.message))?;
     // BEFORE every transform: an `Iterator`-bounded body's placeholders are what
     // make it unemittable on its own, and the demand that reached here is what
     // resolves them. The splice path does the same substitution at the moment it
     // clones the body into a caller.
-    skull_transform::bound::resolve_standalone_bound_calls(ws, &mut mf, tree)
+    skull_transform::bound::resolve_standalone_bound_calls(
+        ws,
+        scx,
+        scx.interner(),
+        &mut mf,
+        tree,
+        &concrete.plans,
+    )
         .map_err(|e| CompilerError::new_with_label(f.name_span, e.message))?;
     let owner = BodyOwner::Function(fref.func);
-    let ctx = skull_mir::bound::body_ctx(ws, fref.module, owner, &subst, tree);
+    let ctx = skull_mir::bound::concrete_body_ctx(
+        ws,
+        fref.module,
+        owner,
+        tree,
+        scx.interner(),
+    );
     if f.is_coroutine {
-        return emit_coroutine_chunk(ws, cg, &ctx, body, f, &mut mf, PhaseTimes::default());
+        return emit_coroutine_chunk(ws, cg, scx, &ctx, plan, f, &mut mf, PhaseTimes::default());
     }
-    let mut deps = prepare_instance_body(ws, scx, fref, &subst, name, &mut mf, inline_cache)
+    let mut deps = prepare_instance_body_with_plans(
+        ws,
+        scx,
+        fref,
+        name,
+        &mut mf,
+        inline_cache,
+        &concrete.plans,
+    )
         .map_err(|e| CompilerError::new_with_label(f.name_span, e.message))?;
     let before = specs.len();
     // Discovered BEFORE the verdict, and handed back through `specs` even when
@@ -1729,12 +1820,11 @@ fn emit_spec_chunk(
     validate_emitted_body(ws, &ctx, &mf, specs)
         .map_err(|r| r.into_error(f.name_span, &format!("cannot emit specialized `{name}`: ")))?;
     let specs = specs[before..].to_vec();
-    let mut lua = emit_named(ws, cg, name, &mf);
+    let mut lua = emit_named(ws, cg, scx.interner(), name, &mf);
     let mut statics = mf.statics.clone();
     let mut nested = std::mem::take(&mut mf.nested_fns);
     collect_nested_statics(&nested, &mut statics);
-    emit_pass_nested_fns(ws, cg, &mut nested, &mut lua);
-    deps.insert(fref);
+    emit_pass_nested_fns(ws, cg, scx, &mut nested, &mut lua);
     collect_callee_frefs(&mf, &mut deps);
     Ok(Chunk {
         lua,
@@ -1745,7 +1835,6 @@ fn emit_spec_chunk(
         statics,
         comptime_reads: mf.comptime_reads.clone(),
         calls: skull_mir::reach::call_targets(&mf),
-        global_names: skull_mir::reach::global_ref_names(&mf),
         specs,
     })
 }
@@ -1761,28 +1850,27 @@ fn emit_spec_chunk(
 /// removes.
 fn emit_specialized_callees(
     ws: &Workspace,
+    scx: &skull_mir::lower::ScalarCtx,
     pending: &mut Vec<skull_mir::bound::SpecDemand>,
-    cached: &FxHashMap<EmittedBodyId, Result<Chunk, CompilerError>>,
-    live: &FxHashMap<EmittedBodyId, Chunk>,
+    cached: &FxHashMap<Instance, Result<Chunk, CompilerError>>,
+    live: &FxHashMap<Instance, Chunk>,
     rejected: &[(String, CompilerError)],
-    built: &mut Vec<(EmittedBodyId, Chunk)>,
+    built: &mut Vec<(Instance, Chunk)>,
     statics: &mut Vec<skull_mir::mir::StaticCell>,
     out: &mut String,
 ) -> Vec<CompilerError> {
-    let mut done: FxHashSet<EmittedBodyId> = FxHashSet::default();
+    let mut done: FxHashSet<Instance> = FxHashSet::default();
     let mut errs: Vec<(String, CompilerError)> = rejected.to_vec();
     let rejected_names: FxHashSet<&str> =
         rejected.iter().map(|(n, _)| n.as_str()).collect();
     while let Some(demand) = pending.pop() {
-        let (fref, key) = (demand.func, demand.key);
-        let body = EmittedBodyId::new(fref, key.clone());
+        let body = demand.inst;
+        let fref = body.func;
         if !done.insert(body.clone()) {
             continue;
         }
         let f = &ws.module(fref.module).functions[fref.func];
-        let Some(name) = skull_mir::mangle::spec_fn_name(ws, f, &key) else {
-            continue; // all-`None` key: the shared body already serves it
-        };
+        let name = body.symbol(ws, scx.interner());
         let Some(chunk) = live.get(&body).or_else(|| cached.get(&body).and_then(|c| c.as_ref().ok()))
         else {
             // Not a fallback: the walk either built this body or recorded why it
@@ -1824,17 +1912,18 @@ fn emit_specialized_callees(
 /// Everything after this point is rendering: `validate_emitted_body`,
 /// `emit_named` and the nested-fn emission. Nothing here mints a name or
 /// touches a `CodegenCtx`, which is what lets a read-only consumer run it.
-pub fn prepare_instance_body(
+pub fn prepare_instance_body_with_plans(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,
     fref: FuncRef,
-    subst: &skull_mir::lower::SpecSubst,
     name: &str,
     mf: &mut skull_mir::mir::MirFunc,
     cache: &mut skull_transform::InlineCache,
+    concrete_plans: &skull_mir::concrete::ConcretePlans,
 ) -> Result<FxHashSet<FuncRef>, CompilerError> {
-    let (spliced, _records) =
-        skull_transform::inline_functions_with_subst(ws, scx, fref, mf, cache, subst)?;
+    let (spliced, _records) = skull_transform::inline_functions_with_plans(
+        ws, scx, fref, mf, cache, concrete_plans,
+    )?;
     skull_transform::cleanup_with_nobox(ws, mf);
     skull_transform::convert_closures(mf, name);
     skull_transform::recover_counted_loops(ws, mf);
@@ -1888,15 +1977,23 @@ fn inline_hoisted_bodies(
     self_ref: FuncRef,
     nested: &mut [MirFunc],
     inline_cache: &mut skull_transform::InlineCache,
+    concrete_plans: &skull_mir::concrete::ConcretePlans,
     deps: &mut FxHashSet<FuncRef>,
 ) -> Result<(), String> {
     for nf in nested.iter_mut() {
-        let (spliced, _) = skull_transform::inline_functions(ws, scx, self_ref, nf, inline_cache)
-            .map_err(|e| e.message)?;
+        let (spliced, _) = skull_transform::inline_functions_with_plans(
+            ws,
+            scx,
+            self_ref,
+            nf,
+            inline_cache,
+            concrete_plans,
+        )
+        .map_err(|e| e.message)?;
         deps.extend(spliced);
         skull_transform::cleanup_with_nobox(ws, nf);
         let mut children = std::mem::take(&mut nf.nested_fns);
-        inline_hoisted_bodies(ws, scx, self_ref, &mut children, inline_cache, deps)?;
+        inline_hoisted_bodies(ws, scx, self_ref, &mut children, inline_cache, concrete_plans, deps)?;
         nf.nested_fns = children;
     }
     Ok(())
@@ -2037,7 +2134,7 @@ fn validate_emitted_body(
     // A demand this body cannot state in self-contained terms is a rejection,
     // not a demand that is quietly dropped: the callee would then be reached by
     // nothing and its call site would spell a definition the program lacks.
-    if let Err(e) = skull_mir::reach::spec_bound_calls(ws, ctx, mf, specs) {
+    if let Err(e) = skull_mir::reach::spec_bound_calls(ws, mf, specs) {
         acc.absorb(BodyRejection::gap(e.message));
     }
     if let Err(r) = validate_no_whole_element_column_access(mf).map_err(BodyRejection::gap) {
@@ -2207,6 +2304,61 @@ fn register_sim_fn(ws: &Workspace) -> Option<FuncRef> {
     })
 }
 
+/// Every function this build roots from, by the emitter's own predicate.
+///
+/// It lives in the DRIVER, not in `skull_graph`: which declarations a build
+/// roots from is a production decision (project layout, decorators, `@sim`,
+/// `@test`), and the graph takes roots as an INPUT precisely so it cannot make
+/// that decision itself. See [`all_roots`], which adds the generated-glue
+/// obligations on top.
+pub fn emission_roots(ws: &Workspace, project_root: Option<&str>) -> Vec<FuncRef> {
+    let (deco_map, _) = build_deco_map(ws);
+    let mut roots = Vec::new();
+    for module in ws.modules.iter() {
+        if module.id == ModuleId::builtin() {
+            continue;
+        }
+        for (fid, f) in module.functions.iter() {
+            if is_emission_root(module.file.as_str(), project_root, f, &deco_map)
+            {
+                roots.push(FuncRef { module: module.id, func: fid });
+            }
+        }
+    }
+    roots
+}
+
+/// The roots one Lua build is taken over: the declared emission roots plus the
+/// obligations GENERATED GLUE TEXT carries.
+///
+/// `sim_registration_lines` writes `register_sim("<wire>", <mangled>)` and
+/// `shader_registration_lines` writes a program whose stage entries and GLSL
+/// helpers are named by its graph-owned view. Neither is a Rock call site, so
+/// no amount of ordinary graph reachability can find them -- they are an
+/// artifact ROOT (plan S 11: "the target may change roots"), which is what
+/// `ArtifactRequest::roots` is for. Emitting the generated call while the
+/// definition is pruned is a nil call at load, which is exactly what happened.
+///
+/// The shader collection is therefore built BEFORE the graph, not beside the
+/// assembly that renders it.
+fn all_roots(
+    ws: &Workspace,
+    project_root: Option<&str>,
+    shader_roots: &[FuncRef],
+) -> Vec<FuncRef> {
+    let mut roots = emission_roots(ws, project_root);
+    let mut seen: FxHashSet<FuncRef> = roots.iter().copied().collect();
+    let mut glue: Vec<FuncRef> = Vec::new();
+    if !collect_sim_fns(ws).is_empty() {
+        glue.extend(register_sim_fn(ws));
+    }
+    glue.extend(shader_roots.iter().copied());
+    // Deterministic: `dependencies` is a hash set, so its iteration order is not.
+    glue.sort_by_key(|f| (f.module.index(), f.func.into_raw()));
+    roots.extend(glue.into_iter().filter(|f| seen.insert(*f)));
+    roots
+}
+
 fn sim_registration_lines(
     ws: &Workspace,
 ) -> Result<String, CompilerError> {
@@ -2248,45 +2400,155 @@ fn lua_long_bracket(s: &str) -> String {
     }
 }
 
+fn shader_programs(
+    collection: &skull_mir::lower::ShaderCollection,
+) -> Vec<crate::shader_artifact::ShaderProgram> {
+    collection
+        .pairs
+        .iter()
+        .map(|pair| crate::shader_artifact::ShaderProgram { vert: pair.vert, frag: pair.frag })
+        .collect()
+}
+
+fn compute_programs(
+    collection: &skull_mir::lower::ComputeCollection,
+) -> Vec<crate::shader_artifact::ComputeProgram> {
+    collection
+        .entries
+        .iter()
+        .map(|entry| crate::shader_artifact::ComputeProgram { entry: entry.entry })
+        .collect()
+}
+
+fn realize_shader_view(
+    ws: &Workspace,
+    graph: &crate::instance_graph::InstanceGraph,
+    programs: &[crate::shader_artifact::ShaderProgram],
+    compute: &[crate::shader_artifact::ComputeProgram],
+    scx: &skull_mir::lower::ScalarCtx,
+) -> Result<crate::shader_artifact::ShaderArtifactView, CompilerError> {
+    crate::shader_artifact::realize_shader_with_context_and_compute(
+        ws,
+        graph,
+        &crate::shader_artifact::ShaderArtifactRequest {
+            spec: crate::target_projection::TargetSpec {
+                shader: Some(crate::target_projection::ShaderTargetSpec::Glsl(
+                    skull_codegen_glsl::GlslProfile::Core330,
+                )),
+                ..crate::target_projection::LUAJIT_DESKTOP
+            },
+            programs,
+        },
+        scx,
+        compute,
+    )
+    .ok_or_else(|| CompilerError::new_no_location("GLSL shader view is unavailable".to_string()))
+}
+
+fn graph_rejection_error(
+    ws: &Workspace,
+    graph: &crate::instance_graph::InstanceGraph,
+) -> Option<CompilerError> {
+    for rejection in graph.rejections() {
+        let caller = &ws.module(rejection.at.func.module).functions[rejection.at.func.func];
+        if skull_mir::ablation::enabled() {
+            let category = match rejection.kind {
+                crate::instance_graph::RejectionKind::ChangingInstanceRecursion => {
+                    skull_mir::ablation::FatalCategory::PolymorphicGrowth
+                }
+                crate::instance_graph::RejectionKind::GenericFnValue
+                | crate::instance_graph::RejectionKind::UnconstrainedTypeVar => {
+                    skull_mir::ablation::FatalCategory::MissingGraphEdge
+                }
+                crate::instance_graph::RejectionKind::ConcreteTypeUnavailable => {
+                    skull_mir::ablation::FatalCategory::CompilerInvariant
+                }
+            };
+            skull_mir::ablation::note_examined();
+            skull_mir::ablation::record(
+                category,
+                if rejection.kind == crate::instance_graph::RejectionKind::ChangingInstanceRecursion {
+                    caller.name.as_str().to_string()
+                } else {
+                    rejection
+                        .message
+                        .split('`')
+                        .nth(1)
+                        .unwrap_or(caller.name.as_str())
+                        .to_string()
+                },
+                caller.name.as_str(),
+                rejection.span,
+                rejection.message.clone(),
+            );
+            continue;
+        }
+        if is_stdlib_module_file(ws.module(rejection.at.func.module).file.as_str()) {
+            continue;
+        }
+        return Some(CompilerError::new_with_label(
+            rejection.span,
+            rejection.message.clone(),
+        ));
+    }
+    None
+}
+
 /// `__rock_shader_register("<key>", <glsl>)` for every distinct `rock_shader`
 /// pair (docs/shaders.md). Emitted at module-init time after
 /// the `@sim` registrations, at chunk top level, so a reload re-`dofile`s them
 /// with the new source (the hot-reload-parity invariant). Deterministic
 /// sorted-by-key order (from `collect_shader_pairs`) keeps re-emission
-/// byte-identical. GLSL emission lives HERE, in the driver -- skull-mir surfaces
-/// only the resolved `FuncRef`s (the layering constraint). An emit error (tier
-/// violation, stage/collision) is a spanned `CompilerError` failing the compile,
-/// never skip-and-continue.
-fn shader_registration_lines(ws: &Workspace) -> Result<ShaderRegistrations, CompilerError> {
+/// byte-identical. The driver realizes the graph-owned shader view and passes
+/// it to GLSL; skull-mir still surfaces only the resolved `FuncRef`s. Selected
+/// WGPU projects every graph pair independently: GL registration remains
+/// unconditional, while a pair whose WGSL projection cannot represent its
+/// graph-owned interface is omitted from the WGPU artifact view and rejected
+/// by the runtime before effects.
+fn concrete_stage_input(
+    view: &skull_graph::shader::ShaderStageView,
+    concrete_plans: &std::sync::Arc<skull_mir::concrete::ConcretePlans>,
+) -> skull_codegen_shader::ConcreteStageInput {
+    skull_codegen_shader::ConcreteStageInput {
+        stage: view.stage,
+        entry: view.entry.clone(),
+        retained: view.retained.iter().cloned().collect(),
+        helpers: view.helpers.iter().cloned().collect(),
+        builtins: view.builtins.iter().cloned().collect(),
+        order: view.order.clone(),
+        dependencies: view.dependencies.clone(),
+        concrete_plans: std::sync::Arc::clone(concrete_plans),
+    }
+}
+
+fn shader_registration_lines(
+    ws: &Workspace,
+    scx: &skull_mir::lower::ScalarCtx,
+    collection: &skull_mir::lower::ShaderCollection,
+    compute_collection: &skull_mir::lower::ComputeCollection,
+    view: &crate::shader_artifact::ShaderArtifactView,
+    renderer_target: RendererTarget,
+) -> Result<ShaderRegistrations, CompilerError> {
     // Always Core330. The profile is a property of the GL context, which a build
     // cannot know: the engine rewrites #version + precision for GLES at
     // shader-compile time (stone-gl `adapt_source_for_gles`), and that header is
     // the ONLY difference between the two profiles.
     let profile = skull_codegen_glsl::GlslProfile::Core330;
-    let collection = skull_mir::lower::collect_shader_collection(ws)?;
+    if view.profile != profile || view.program_views.len() != collection.pairs.len() {
+        return Err(CompilerError::new_no_location(
+            "shader graph/view registration denominator differs from shader collection"
+                .to_string(),
+        ));
+    }
     let mut out = String::new();
     let mut dependencies = FxHashSet::default();
-    for pair in collection.pairs {
-        let fname = ws.module(pair.frag.module).functions[pair.frag.func].name;
+    let mut abi_wires = BTreeMap::new();
+    for (pair, program_view) in collection.pairs.iter().zip(&view.program_views) {
         // vert=None is the A3c single-arg fullscreen form -> the A1 single-entry
         // emitter (PIXEL body + fullscreen VERTEX passthrough).
         let emission = match pair.vert {
-            Some(vert) => {
-                let vname = ws.module(vert.module).functions[vert.func].name;
-                skull_codegen_glsl::emit_shader_pipeline_with_dependencies(
-                    ws,
-                    vert.module,
-                    vname.as_str(),
-                    fname.as_str(),
-                    profile,
-                )?
-            }
-            None => skull_codegen_glsl::emit_shader_entry_with_dependencies(
-                ws,
-                pair.frag.module,
-                fname.as_str(),
-                profile,
-            )?,
+            Some(_) => skull_codegen_glsl::emit_shader_pipeline_with_view(ws, scx, program_view, profile)?,
+            None => skull_codegen_glsl::emit_shader_entry_with_view(ws, scx, program_view, profile)?,
         };
         dependencies.extend(emission.dependencies);
         // Slot order is the engine's whole view of texture binding: it points
@@ -2299,9 +2561,11 @@ fn shader_registration_lines(ws: &Workspace) -> Result<ShaderRegistrations, Comp
         // with no group sends empty lists, which are still arguments; a short
         // call is what rock-cli/tests/shader_register_arity_gate.rs catches.
         let w = skull_codegen_glsl::BlockWire::of(emission.abi.uniform_blocks.iter(), emission.abi.uniform_array_blocks.iter());
+        let fullscreen = pair.vert.is_none();
+        let semantic_wire = emission.interface.semantic_wire(fullscreen);
         let _ = writeln!(
             out,
-            "__rock_shader_register({:?}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})",
+            "__rock_shader_register({:?}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})",
             pair.key,
             lua_long_bracket(&emission.source),
             skull_codegen_lua::lua_string_vec(&slot_names),
@@ -2315,13 +2579,174 @@ fn shader_registration_lines(ws: &Workspace) -> Result<ShaderRegistrations, Comp
             skull_codegen_lua::lua_int_vec(&w.member_kinds),
             skull_codegen_lua::lua_int_vec(&w.member_capacities),
             skull_codegen_lua::lua_int_vec(&w.member_strides),
-            pair.vert.is_none(),
+            fullscreen,
+            lua_long_bracket(&semantic_wire),
         );
+    }
+    let roots: Vec<FuncRef> = collection
+        .pairs
+        .iter()
+        .flat_map(|pair| pair.vert.into_iter().chain(std::iter::once(pair.frag)))
+        .collect();
+    let keys = collection
+        .pairs
+        .iter()
+        .map(|pair| pair.key.clone())
+        .chain(compute_collection.entries.iter().map(|entry| entry.key.clone()))
+        .collect();
+    let mut wgpu_projection_census = None;
+    if renderer_target == RendererTarget::Wgpu {
+        let items = collection
+            .pairs
+            .iter()
+            .zip(&view.program_views)
+            .map(|(pair, program_view)| {
+                (pair.key.clone(), (pair.vert.is_none(), program_view))
+            });
+        let (artifacts, census) = collect_wgpu_projections(items, |key, (fullscreen, program_view)| {
+            let emitted = (|| -> Result<(String, String, String, Vec<FuncRef>), CompilerError> {
+                if fullscreen {
+                    let stage_view = program_view
+                        .stages
+                        .iter()
+                        .find(|stage| stage.stage == skull_mir::shader_ir::ShaderStage::Fragment)
+                        .ok_or_else(|| {
+                            CompilerError::new_no_location(format!(
+                                "wgsl artifact {key} has no fragment stage view"
+                            ))
+                        })?;
+                    let input = concrete_stage_input(stage_view, &program_view.concrete_plans);
+                    let neutral = skull_codegen_shader::plan_fullscreen_fragment_from_concrete(
+                        ws,
+                        scx,
+                        &input,
+                        &skull_codegen_wgsl::WgslShaderPolicy,
+                    )?;
+                    let abi = skull_codegen_wgsl::WgslAbiPlan::wgsl(
+                        &neutral.interface,
+                        bone_semantic::prelude::Span::default(),
+                    )?;
+                    let emission = skull_codegen_wgsl::emit_fullscreen_shader(
+                        ws,
+                        &neutral.ir,
+                        &neutral.interface,
+                        &abi,
+                        bone_semantic::prelude::Span::default(),
+                    )?;
+                    Ok((
+                        emission.source,
+                        emission.abi.wire(),
+                        neutral.interface.semantic_wire(true),
+                        emission.dependencies,
+                    ))
+                } else {
+                    let glsl = skull_codegen_glsl::emit_shader_pipeline_with_view(
+                        ws,
+                        scx,
+                        program_view,
+                        profile,
+                    )?;
+                    let abi = skull_codegen_wgsl::WgslAbiPlan::explicit(
+                        &glsl.interface,
+                        "vertex_main",
+                        "fragment_main",
+                        bone_semantic::prelude::Span::default(),
+                    )?;
+                    let emission = skull_codegen_wgsl::emit_explicit_shader(
+                        ws,
+                        &glsl.ir,
+                        &glsl.interface,
+                        &abi,
+                        bone_semantic::prelude::Span::default(),
+                    )?;
+                    Ok((
+                        emission.source,
+                        emission.abi.wire(),
+                        glsl.interface.semantic_wire(false),
+                        emission.dependencies,
+                    ))
+                }
+            })();
+            emitted
+        })?;
+        for (shader_key, (source, wire, semantic_wire, emission_dependencies)) in artifacts {
+            dependencies.extend(emission_dependencies);
+            abi_wires.insert(shader_key.clone(), wire.clone());
+            let _ = writeln!(
+                out,
+                "__rock_wgpu_shader_register({}, {}, {}, {})",
+                skull_codegen_lua::lua_string(&shader_key),
+                skull_codegen_lua::lua_string(&source),
+                skull_codegen_lua::lua_string(&wire),
+                skull_codegen_lua::lua_string(&semantic_wire),
+            );
+        }
+        wgpu_projection_census = Some(census);
+    }
+    if view.compute_views.len() != compute_collection.entries.len() {
+        return Err(CompilerError::new_no_location(format!(
+            "compute graph/view registration denominator differs: {} views for {} roots",
+            view.compute_views.len(),
+            compute_collection.entries.len()
+        )));
+    }
+    let has_compute = !compute_collection.entries.is_empty();
+    if has_compute {
+        out.push_str("__rock_wgpu_compute_snapshot_begin()\n");
+    }
+    for (entry, compute_view) in compute_collection.entries.iter().zip(&view.compute_views) {
+        let input = concrete_stage_input(&compute_view.stage, &compute_view.concrete_plans);
+        let neutral = skull_codegen_shader::plan_compute_from_concrete(
+            ws,
+            scx,
+            &input,
+            &skull_codegen_wgsl::WgslShaderPolicy,
+        )?;
+        dependencies.extend(neutral.dependencies);
+        let logical_entry = neutral.entry.inst.symbol(ws, &neutral.ir.interner);
+        let abi = skull_codegen_wgsl::WgslAbiPlan::compute(
+            &neutral.interface,
+            &format!("{logical_entry}_compute"),
+            bone_semantic::prelude::Span::default(),
+        )?;
+        let emission = skull_codegen_wgsl::emit_compute_shader(
+            ws,
+            &neutral.ir,
+            &neutral.interface,
+            &abi,
+            bone_semantic::prelude::Span::default(),
+        )?;
+        dependencies.extend(emission.dependencies);
+        let wire = emission.abi.wire();
+        abi_wires.insert(entry.key.clone(), wire.clone());
+        let _ = writeln!(
+            out,
+            "__rock_wgpu_compute_register({}, {}, {}, {})",
+            skull_codegen_lua::lua_string(&entry.key),
+            skull_codegen_lua::lua_string(&emission.source),
+            skull_codegen_lua::lua_string(&wire),
+            skull_codegen_lua::lua_string(&neutral.interface.semantic_wire(false)),
+        );
+    }
+    if has_compute {
+        out.push_str("if not __rock_wgpu_compute_snapshot_end() then error(\"compiler compute snapshot failed\") end\n");
     }
     Ok(ShaderRegistrations {
         lua: out,
         dependencies,
-        callsites: collection.callsites.into_iter().collect(),
+        callsites: collection
+            .callsites
+            .iter()
+            .copied()
+            .chain(compute_collection.callsites.iter().copied())
+            .collect(),
+        roots: roots
+            .into_iter()
+            .chain(compute_collection.entries.iter().map(|entry| entry.entry))
+            .collect(),
+        keys,
+        abi_wires,
+        wgpu_projection_census,
     })
 }
 
@@ -2343,8 +2768,8 @@ fn assemble(
     cg: &CodegenCtx,
     scx: &skull_mir::lower::ScalarCtx,
     cache: &SkullEmitCache,
-    built_specs: &mut Vec<(EmittedBodyId, Chunk)>,
-) -> Result<(MirEmit, FxHashSet<EmittedBodyId>, UnitComptimeReads), CompilerError> {
+    built_specs: &mut Vec<(Instance, Chunk)>,
+) -> Result<(MirEmit, FxHashSet<Instance>, UnitComptimeReads), CompilerError> {
     // Per-stage lower/cleanup/emit/regalloc times: chunk times (captured during the
     // parallel `emit_full`/`emit_incremental` chunk build) summed in as chunks are
     // pulled, plus the decorator/global units re-emitted here. Under parallel emit
@@ -2381,7 +2806,7 @@ fn assemble(
     // module; the definition bodies themselves lower+emit in parallel.
     let (deco_map, deco_items) = build_deco_map(ws);
     let deco_results = par_map(deco_items, |(mid, did)| {
-        emit_decorator_unit(ws, scx, cg, mid, did)
+        emit_decorator_unit(ws, scx, cg, &cache.concrete, mid, did)
     });
     rejections.extend(unit_errors(&deco_results));
     needed_specs.extend(deco_results.iter().flat_map(|u| u.specs.iter().cloned()));
@@ -2415,7 +2840,7 @@ fn assemble(
         .collect();
     let global_keys = global_items.clone();
     let global_results = par_map(global_items, |(mid, gid)| {
-        emit_global_unit(ws, scx, cg, mid, gid)
+        emit_global_unit(ws, scx, cg, &cache.concrete, mid, gid)
     });
     // par_map preserves input order, so keys and results zip positionally --
     // the same pairing merge_units relies on for output order.
@@ -2432,12 +2857,59 @@ fn assemble(
     let mut global_skipped: Vec<(String, String)> = Vec::new();
     merge_units(global_results, &mut globals_lua, &mut global_skipped, &mut direct_globals, &mut direct_calls, &mut pending_inits, &mut always_emitted_calls, &mut always_emitted_names, &mut times);
 
-    // Whole-program DCE: emit a fn definition only if a root reaches it. ONE
-    // liveness answer, for shared and specialized bodies alike.
-    let live = live_bodies(
-        ws, cg, scx, cache, &deco_map, cache.project_root.as_deref(), &always_emitted_calls,
-        &always_emitted_names, &needed_specs,
-    )?;
+    // **Whole-program population, driven by `cache.lua_view` -- Phase 2.**
+    // `should_emit_via_view` decides every ordinary/coroutine/inline
+    // definition below; `view_driven_specialized_chunks` decides every
+    // specialized one. Corpus-verified before this cutover landed (every real
+    // `stick.toml` project, both directions: zero instances the old walk
+    // emitted that the view did not retain, and the reverse direction's only
+    // difference was instances nothing ever DEMANDS standalone -- see that
+    // fn's own doc). `_ = &always_emitted_calls` /`&always_emitted_names`:
+    // still collected above (decorator/global lowering needs its own direct
+    // calls for OTHER bookkeeping -- global-read ordering, static baselines --
+    // untouched by this cutover), but no longer fed to a root-discovery walk.
+    // Generated-glue obligations (`register_sim`, shader dependencies) are part
+    // of the ROOT INPUT the graph and the view were built from -- see
+    // [`all_roots`] -- so there is no second population source here.
+    let (spec_chunks, spec_rejected) =
+        view_driven_specialized_chunks(ws, cg, scx, cache, &needed_specs);
+
+    // **Foreign-body (`inline(lua)`/`extern`) DELIVERY, separate from
+    // RETENTION.** `lua_view` (and `should_emit_via_view`'s call-serving half)
+    // answers "is this declaration's canonical Instance part of the program",
+    // which is not the same question as "does anything call it in RESIDUAL
+    // (non-spliced) form" -- `@pure @inline` stdlib operators (`+`, `-`, ...)
+    // are retained (something calls `+`) but almost always fully spliced away
+    // at every call site, so a naive retention-only gate emitted them
+    // standalone anyway (found empirically: `__op_add_int_int_ret_int` and
+    // siblings newly appeared in every project's output the moment retention
+    // alone drove the inline-body gate). Splicing eligibility is a LOWERING
+    // decision the graph does not model (same class of fact as a generic's
+    // standalone-vs-spliced `SpecDemand`, just for a NON-generic body), so
+    // this is collected from what already-lowered chunks record they still
+    // call after inlining (`Chunk::calls`), exactly as `chunk.specs` seeds
+    // `view_driven_specialized_chunks` above.
+    let mut needed_foreign: FxHashSet<Instance> = FxHashSet::default();
+    needed_foreign.extend(always_emitted_calls.iter().map(|f| shared(*f)));
+    for module in ws.modules.iter() {
+        if module.id == ModuleId::builtin() {
+            continue;
+        }
+        for (fid, f) in module.functions.iter() {
+            let self_ref = FuncRef { module: module.id, func: fid };
+            if !is_cached_emitted_body(f, &shared(self_ref))
+                || !should_emit_via_view(ws, &cache.lua_view, self_ref)
+            {
+                continue;
+            }
+            if let Some(Ok(c)) = cache.chunks.get(&shared(self_ref)) {
+                needed_foreign.extend(c.calls.iter().map(|f| shared(*f)));
+            }
+        }
+    }
+    for c in spec_chunks.values() {
+        needed_foreign.extend(c.calls.iter().map(|f| shared(*f)));
+    }
 
     // Function definitions, every module (cached chunk for ordinary/coroutine,
     // regenerated for extern / inline(lua)). The cached chunks were built in
@@ -2456,15 +2928,18 @@ fn assemble(
             if f.backend == bone_semantic::hir::FnBackend::Js {
                 continue;
             }
-            // Whole-program DCE. Only the DEFINITION is gated: the bookkeeping
-            // below (global-init ordering facts, skip reporting, the hard error on
-            // an unlowerable user fn) runs for every fn exactly as before, so
-            // pruning can change which definitions are emitted and nothing else --
-            // in particular it never hides a diagnostic.
-            let emit_def = live.emits(self_ref);
+            // Whole-program DCE gates both chunk construction and definition
+            // emission. Retained bodies still fail hard when their plan or chunk
+            // is missing; pruned dependency bodies have neither by design.
+            let emit_def = should_emit_via_view(ws, &cache.lua_view, self_ref);
             if f.is_extern {
                 // An `extern(ffi, "lib")` fn needs a thin wrapper binding it to the
                 // loaded library handle. A non-ffi extern is a pre-existing global.
+                //
+                // Gated by the VIEW like every other definition. `is_emission_root`
+                // roots every `extern`, so in practice the view retains them all
+                // and this changes no output -- but an ungated write is a second
+                // population input, and one is the whole point of the cut.
                 if let Some(lib) = f.ffi_lib {
                     let nm = f.name.as_str();
                     let params = f.param_decls.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(", ");
@@ -2485,22 +2960,40 @@ fn assemble(
                             )
                         }
                         ExternRet::Int => format!("  return tonumber({lib}.{nm}({params}))"),
+                        ExternRet::Uint => format!("  return tonumber({lib}.{nm}({params}))"),
                         ExternRet::AsIs => format!("  return {lib}.{nm}({params})"),
                         ExternRet::None => format!("  {lib}.{nm}({params})"),
                     };
-                    let _ = writeln!(out, "function {nm}({params})\n{body}\nend");
+                    // The rejection above runs for EVERY extern; only the WRITE
+                    // is gated. Pruning may change which definitions are emitted
+                    // and nothing else -- gating the whole arm suppressed
+                    // `extern_ret`'s unbound-generic rejection, whose subject is
+                    // a generic declaration the view holds no base instance for.
+                    if emit_def {
+                        let _ = writeln!(out, "function {nm}({params})\n{body}\nend");
+                    }
                 }
                 continue;
             }
             if let Some((_, body)) = f.inline_body {
-                if !emit_def {
+                // Retention alone (`emit_def`) over-emits here -- see
+                // `needed_foreign`'s doc. Three independent reasons still force
+                // emission regardless of splicing eligibility: a publication
+                // obligation (`@nomangle`), a residual (non-spliced) demand, or
+                // being a ROOT in its own right (an own-project inline(lua) fn
+                // is unconditionally rooted by `is_emission_root` even with no
+                // caller at all -- same reasoning as `main`/`@sim`/`@test`;
+                // found empirically, `anvil`'s `sv_close`/`sv_is_eof` etc. have
+                // no call site anywhere in the corpus and are rooted purely by
+                // living in the project's own file).
+                if !emits_foreign_definition(ws, &cache.lua_view, &needed_foreign, self_ref) {
                     continue;
                 }
                 // inline(lua): emit the hand-written body verbatim, wrapping a
                 // value-returning bodyless-`return` and prepending default fills.
                 // (Js inline bodies were skipped above via the backend guard.)
                 let name = mangle_fn(ws, f);
-                let params = match skull_mir::lower::BackendFnAbiPlan::for_declaration(ws, scx, self_ref)
+                let params = match skull_mir::lower::BackendFnAbiPlan::for_boundary_declaration(ws, scx, self_ref)
                     .lua_param_names(ws)
                 {
                     Some(names) => names.join(", "),
@@ -2552,6 +3045,7 @@ fn assemble(
                         needed_specs.extend(chunk.specs.iter().cloned());
                     }
                 }
+                Some(Err(err)) if !emit_def => {}
                 Some(Err(err)) => {
                     // A GUARANTEE violation is never a known stdlib gap: silently
                     // dropping the body would leave callers calling a nil global.
@@ -2563,6 +3057,7 @@ fn assemble(
                         rejections.push(err.clone());
                     }
                 }
+                None if !emit_def => {}
                 None => {
                     if is_stdlib_module_file(module.file.as_str()) {
                         skipped.push((mangle_fn(ws, f), "not emitted (no cached chunk)".to_string()));
@@ -2579,10 +3074,11 @@ fn assemble(
 
     rejections.extend(emit_specialized_callees(
         ws,
+        scx,
         &mut needed_specs,
         &cache.chunks,
-        &live.spec_chunks,
-        &live.rejected,
+        &spec_chunks,
+        &spec_rejected,
         built_specs,
         &mut all_statics,
         &mut out,
@@ -2613,7 +3109,9 @@ fn assemble(
         .iter()
         .flat_map(|m| m.globals.iter())
         .flat_map(|(_, g)| {
-            skull_mir::lower::nobox_global_leaves(ws, g.name, g.ty)
+            skull_mir::lower::GlobalPlan::for_declared_type(ws, &cache.scx, g.ty)
+                .ok()
+                .and_then(|plan| plan.leaf_names(g.name))
                 .into_iter()
                 .flatten()
                 .map(move |l| (l, g.name))
@@ -2712,16 +3210,39 @@ fn assemble(
     // and in `emit_incremental`'s re-emit). Reject with a spanned diagnostic
     // rather than emit two clobbering top-level defs. Covers `emit_full` +
     // `emit_incremental` (both funnel through here); the overlay fast path drains
-    // in `emit_overlay` (can't return Err, so it warns).
+    // in `emit_overlay` and propagates the same error.
     if let Some(err) = cg.take_rejection() {
         return Err(err);
     }
-    Ok((MirEmit { lua: out, skipped, phases }, live.emitted_bodies(), unit_reads))
+    let mut emitted_bodies: FxHashSet<Instance> = FxHashSet::default();
+    for module in ws.modules.iter() {
+        if module.id == ModuleId::builtin() {
+            continue;
+        }
+        for (fid, f) in module.functions.iter() {
+            if f.backend == bone_semantic::hir::FnBackend::Js {
+                continue;
+            }
+            let self_ref = FuncRef { module: module.id, func: fid };
+            let actually_emitted = if f.is_extern {
+                should_emit_via_view(ws, &cache.lua_view, self_ref)
+            } else if f.inline_body.is_some() {
+                emits_foreign_definition(ws, &cache.lua_view, &needed_foreign, self_ref)
+            } else {
+                should_emit_via_view(ws, &cache.lua_view, self_ref)
+            };
+            if actually_emitted {
+                emitted_bodies.insert(shared(self_ref));
+            }
+        }
+    }
+    emitted_bodies.extend(spec_chunks.keys().cloned());
+    Ok((MirEmit { lua: out, skipped, phases }, emitted_bodies, unit_reads))
 }
 
-/// Full emit: populate the chunk cache for every ordinary/coroutine body, then
-/// assemble. Byte-identical to the pre-cache emit. Returns the cache so a later
-/// [`emit_incremental`] can reuse the unchanged chunks.
+/// Full emit: populate the chunk cache for every retained ordinary/coroutine
+/// body, then assemble. Byte-identical to the pre-cache emit. Returns the cache
+/// so a later [`emit_incremental`] can reuse the unchanged chunks.
 ///
 /// The per-body chunk emit runs in PARALLEL ([`par_map_with`], one
 /// [`InlineCache`](skull_transform::InlineCache) per rayon worker) by default;
@@ -2764,7 +3285,7 @@ pub fn emit_full(
     ws: &Workspace,
     user_mid: ModuleId,
 ) -> Result<(MirEmit, SkullEmitCache), CompilerError> {
-    emit_full_in(ws, user_mid, None)
+    emit_full_in_for_renderer(ws, user_mid, None, RendererTarget::Gl)
 }
 
 /// Absolutize `project_root` so it can be prefix-matched against module file
@@ -2802,6 +3323,40 @@ pub fn emit_full_in(
     user_mid: ModuleId,
     project_root: Option<&str>,
 ) -> Result<(MirEmit, SkullEmitCache), CompilerError> {
+    emit_full_in_for_renderer(ws, user_mid, project_root, RendererTarget::Gl)
+}
+
+pub fn emit_full_in_for_renderer(
+    ws: &Workspace,
+    user_mid: ModuleId,
+    project_root: Option<&str>,
+    renderer_target: RendererTarget,
+) -> Result<(MirEmit, SkullEmitCache), CompilerError> {
+    emit_full_in_with_mutation(
+        ws,
+        user_mid,
+        project_root,
+        BodyMutation::None,
+        renderer_target,
+    )
+}
+
+#[cfg(test)]
+fn emit_full_in_with_test_mutation(
+    ws: &Workspace,
+    user_mid: ModuleId,
+    mutation: BodyMutation,
+) -> Result<(MirEmit, SkullEmitCache), CompilerError> {
+    emit_full_in_with_mutation(ws, user_mid, None, mutation, RendererTarget::Gl)
+}
+
+fn emit_full_in_with_mutation(
+    ws: &Workspace,
+    user_mid: ModuleId,
+    project_root: Option<&str>,
+    mutation: BodyMutation,
+    renderer_target: RendererTarget,
+) -> Result<(MirEmit, SkullEmitCache), CompilerError> {
     let project_root = canonical_project_root(ws, project_root)?;
     let project_root = project_root.as_deref();
     validate_on_reload_nomangle(ws)?;
@@ -2812,16 +3367,7 @@ pub fn emit_full_in(
                 .to_string(),
         ));
     }
-    if let Some(err) = skull_mir::lower::struct_expand_rejection(ws, user_mid) {
-        return Err(err);
-    }
-    if let Some(err) = skull_mir::lower::shader_expand_rejection(ws, user_mid) {
-        return Err(err);
-    }
-    if let Some(err) = skull_mir::lower::vertex_expand_rejection(ws, user_mid) {
-        return Err(err);
-    }
-    if let Some(err) = skull_mir::lower::uniform_expand_rejection(ws, user_mid) {
+    if let Some(err) = skull_mir::lower::expansion_rejection(ws, user_mid) {
         return Err(err);
     }
     if let Some(err) = skull_mir::lower::comptime_input_rejection(ws, user_mid) {
@@ -2848,13 +3394,133 @@ pub fn emit_full_in(
     if let Some((msg, span)) = skull_mir::lower::gc_value_c_boundary(ws, user_mid) {
         return Err(CompilerError::new_with_label(span, msg));
     }
-    if let Some((msg, span)) = skull_mir::lower::native_buffer_alloc_reject(ws, user_mid) {
-        return Err(CompilerError::new_with_label(span, msg));
-    }
     let cg = CodegenCtx::new(ws);
+    // **The graph is built FIRST, into a fresh arena, and `scx` shares that
+    // arena rather than minting its own.** An `Instance` the graph mints has to
+    // mean something to lowering, and a second arena would be a second identity
+    // for the same instance. See `SkullEmitCache::graph`.
+    // Generated glue is part of the ROOT INPUT. Shader declarations are known
+    // before the graph; their GLSL bodies are rendered only after the view owns
+    // the retained instances.
+    let shader_collection = skull_mir::lower::collect_shader_collection(ws)?;
+    let shader_programs = shader_programs(&shader_collection);
+    let compute_collection = skull_mir::lower::collect_compute_collection(ws)?;
+    let compute_programs = compute_programs(&compute_collection);
+    let shader_roots: Vec<FuncRef> = shader_programs
+        .iter()
+        .flat_map(|program| program.vert.into_iter().chain(std::iter::once(program.frag)))
+        .chain(compute_programs.iter().map(|program| program.entry))
+        .collect();
+    let emission_roots = all_roots(ws, project_root, &shader_roots);
+    let mut graph = crate::instance_graph::build(ws, emission_roots.clone(), false);
+    if let Some(err) = graph_rejection_error(ws, &graph) {
+        return Err(err);
+    }
+    #[allow(unused_mut)]
+    let mut concrete = crate::concrete_body::build(ws, &mut graph);
+    #[cfg(test)]
+    if let BodyMutation::ClearBoundPlan { body } = mutation {
+        let mut matched = 0;
+        for (instance, plan) in &mut concrete.plans {
+            if instance.func != body || instance.args.is_empty() {
+                continue;
+            }
+            assert!(
+                !plan.bound_tree.is_empty(),
+                "bound-plan mutation found a specialized body with no witness tree"
+            );
+            plan.bound_tree = Default::default();
+            matched += 1;
+        }
+        assert!(
+            matched > 0,
+            "bound-plan mutation found no specialized instance for {body:?}; plans={:?}",
+            concrete
+                .plans
+                .keys()
+                .map(|instance| (instance.func, instance.args.len()))
+                .collect::<Vec<_>>()
+        );
+    }
+    #[cfg(test)]
+    if let BodyMutation::ClearCoroutineResultPlan { body } = mutation {
+        let mut matched = 0;
+        for (instance, plan) in &mut concrete.plans {
+            if instance.func == body {
+                assert!(
+                    plan.signature.result.is_some(),
+                    "coroutine-plan mutation found a body with no concrete result witness"
+                );
+                plan.signature.result = None;
+                matched += 1;
+            }
+        }
+        assert!(
+            matched > 0,
+            "coroutine-plan mutation found no concrete instance for {body:?}"
+        );
+    }
+    #[cfg(test)]
+    if let BodyMutation::ClearIteratorWitnessInstance { body } = mutation {
+        let mut matched = 0;
+        for (instance, plan) in &mut concrete.plans {
+            if instance.func != body {
+                continue;
+            }
+            let witness = plan
+                .bound_tree
+                .next
+                .values_mut()
+                .find_map(|next| match next {
+                    skull_mir::bound::ResolvedBoundNext::Concrete { instance, .. }
+                        if !instance.args.is_empty() => Some(instance),
+                    _ => None,
+                })
+                .expect("iterator-plan mutation found no concrete witness instance");
+            witness.args.clear();
+            matched += 1;
+        }
+        assert!(
+            matched > 0,
+            "iterator-plan mutation found no concrete instance for {body:?}"
+        );
+    }
+    if let Some((instance, reason)) = concrete.plan_failures.first() {
+        let f = &ws.module(instance.func.module).functions[instance.func.func];
+        return Err(CompilerError::new_with_label(
+            f.name_span,
+            format!("cannot build concrete lowering plan for `{}`: {:?}", f.name, reason),
+        ));
+    }
+    if let Some((owner, reason)) = concrete.always_plan_failures.first() {
+        return Err(CompilerError::new_no_location(format!(
+            "cannot build concrete always-emitted lowering plan for {owner:?}: {reason:?}"
+        )));
+    }
+    // Pruned dependency bodies have no concrete plan and must not enter the fanout.
+    let lua_view = crate::artifact::realize(
+        ws,
+        &graph,
+        &crate::artifact::ArtifactRequest::new(
+            crate::target_projection::LUAJIT_DESKTOP,
+            &emission_roots,
+        ),
+    );
     // The overload set lives in `cg` (computed once there); borrow it rather than
     // rescanning the workspace.
-    let scx = skull_mir::lower::ScalarCtx::new(ws);
+    let scx =
+        skull_mir::lower::ScalarCtx::new(ws).sharing(std::sync::Arc::clone(graph.interner()));
+    let shader_scx = skull_mir::lower::ScalarCtx::new_values_first_class(ws)
+        .sharing(std::sync::Arc::clone(graph.interner()));
+    let shader_view = realize_shader_view(ws, &graph, &shader_programs, &compute_programs, &shader_scx)?;
+    let shader_registrations = shader_registration_lines(
+        ws,
+        &shader_scx,
+        &shader_collection,
+        &compute_collection,
+        &shader_view,
+        renderer_target,
+    )?;
 
     // The emitted param list must be injective. Checked per SIGNATURE, over every
     // function rather than just the emitted set: a duplicate Lua param is illegal
@@ -2873,22 +3539,29 @@ pub fn emit_full_in(
         .iter()
         .filter(|m| m.id != ModuleId::builtin())
         .flat_map(|m| {
+            let view = &lua_view;
             m.functions
                 .iter()
-                .filter(|(_, f)| is_cached_body(f))
-                .map(move |(fid, f)| (FuncRef { module: m.id, func: fid }, f))
+                .filter_map(move |(fid, f)| {
+                    let self_ref = FuncRef { module: m.id, func: fid };
+                    (is_cached_body(f) && should_emit_via_view(ws, view, self_ref))
+                        .then_some((self_ref, f))
+                })
         })
         .collect();
     let chunks = par_map_with(
         fn_items,
         skull_transform::InlineCache::default,
         |inline_cache, (self_ref, f)| {
-            (shared(self_ref), emit_body_chunk(ws, &cg, &scx, self_ref, f, inline_cache))
+            (
+                shared(self_ref),
+                emit_body_chunk_with_mutation(ws, &cg, &scx, &concrete, self_ref, f, inline_cache, mutation),
+            )
         },
     );
-    let chunks: FxHashMap<EmittedBodyId, Result<Chunk, CompilerError>> = chunks.into_iter().collect();
+    let chunks: FxHashMap<Instance, Result<Chunk, CompilerError>> = chunks.into_iter().collect();
     // Seed the reverse dependency index from every chunk's codegen deps.
-    let mut dependents: FxHashMap<FuncRef, FxHashSet<EmittedBodyId>> = FxHashMap::default();
+    let mut dependents: FxHashMap<FuncRef, FxHashSet<Instance>> = FxHashMap::default();
     for (body, chunk) in &chunks {
         if let Ok(c) = chunk {
             for d in &c.deps {
@@ -2904,9 +3577,11 @@ pub fn emit_full_in(
             static_key_baseline.insert(sc.cell, static_cell_key(sc));
         }
     }
-    let shader_registrations = shader_registration_lines(ws)?;
     let cache = SkullEmitCache {
         chunks,
+        concrete,
+        graph,
+        lua_view,
         changed_since_full: FxHashSet::default(),
         cg,
         scx,
@@ -2915,11 +3590,13 @@ pub fn emit_full_in(
         changed_consts_since_full: FxHashSet::default(),
         static_key_baseline,
         shader_registrations,
+        shader_view,
         emitted: FxHashSet::default(),
         unit_comptime_reads: UnitComptimeReads::default(),
         project_root: project_root.map(str::to_string),
+        renderer_target,
     };
-    let mut built_specs: Vec<(EmittedBodyId, Chunk)> = Vec::new();
+    let mut built_specs: Vec<(Instance, Chunk)> = Vec::new();
     let (emit, emitted, unit_reads) = assemble(ws, &cache.cg, &cache.scx, &cache, &mut built_specs)?;
     let mut cache = cache;
     cache.emitted = emitted;
@@ -2998,6 +3675,54 @@ impl SkullEmitCache {
         out.into_iter().collect()
     }
 
+    /// The authoritative instance graph this cache emits against. Always
+    /// present -- there is no build in which production has no graph.
+    pub fn graph(&self) -> &crate::instance_graph::InstanceGraph {
+        &self.graph
+    }
+
+    /// The shader artifact view used by the current renderer registration.
+    pub fn shader_view(&self) -> &crate::shader_artifact::ShaderArtifactView {
+        &self.shader_view
+    }
+
+    /// The Lua artifact's realization of [`Self::graph`], from the same roots
+    /// the graph was built/updated from. Recomputed every edit; see the field.
+    pub fn lua_view(&self) -> &crate::artifact::ArtifactView {
+        &self.lua_view
+    }
+
+    /// A live shader registry cannot remove a key from the running process:
+    /// registration lines only add or replace entries. A key-set change must
+    /// therefore take the process-restarting reload path before any overlay is
+    /// written.
+    pub fn shader_registration_keys_changed(
+        &self,
+        ws: &Workspace,
+    ) -> Result<bool, CompilerError> {
+        let graphics = skull_mir::lower::collect_shader_pairs(ws)?
+            .into_iter()
+            .map(|pair| pair.key);
+        let compute = skull_mir::lower::collect_compute_collection(ws)?
+            .entries
+            .into_iter()
+            .map(|entry| entry.key);
+        let current: BTreeSet<String> = graphics.chain(compute).collect();
+        Ok(current != self.shader_registrations.keys)
+    }
+
+    /// The compiler-owned ABI contract for every WGPU artifact registered by
+    /// this cache. Body edits may replace source under the same contract; a
+    /// changed wire cannot be applied to a live registry/pipeline safely.
+    pub fn shader_registration_contracts(&self) -> BTreeMap<String, String> {
+        self.shader_registrations.abi_wires.clone()
+    }
+
+    pub fn wgpu_projection_census(&self) -> Option<&WgpuProjectionCensus> {
+        self.shader_registrations.wgpu_projection_census.as_ref()
+    }
+
+
 fn update_shader_registrations(
     &mut self,
     ws: &Workspace,
@@ -3014,18 +3739,72 @@ fn update_shader_registrations(
                         .contains(&FuncRef { module: mid, func: fid })
             )
             || skull_mir::lower::body_has_shader_pipeline_call(ws, mid, owner)
+            || skull_mir::lower::body_has_compute_artifact_call(ws, mid, owner)
     });
     if !affected {
         return Ok(false);
     }
-    self.shader_registrations = shader_registration_lines(ws)?;
+    let collection = skull_mir::lower::collect_shader_collection(ws)?;
+    let compute_collection = skull_mir::lower::collect_compute_collection(ws)?;
+    self.shader_registrations.roots = collection
+        .pairs
+        .iter()
+        .flat_map(|pair| pair.vert.into_iter().chain(std::iter::once(pair.frag)))
+        .chain(compute_collection.entries.iter().map(|entry| entry.entry))
+        .collect();
+    self.shader_registrations.callsites = collection
+        .callsites
+        .iter()
+        .copied()
+        .chain(compute_collection.callsites.iter().copied())
+        .collect();
     Ok(true)
 }
+
+    fn refresh_shader_registrations(
+        &mut self,
+        ws: &Workspace,
+    ) -> Result<(), CompilerError> {
+    let collection = skull_mir::lower::collect_shader_collection(ws)?;
+    let programs = shader_programs(&collection);
+    let compute_collection = skull_mir::lower::collect_compute_collection(ws)?;
+    let compute = compute_programs(&compute_collection);
+    let shader_scx = skull_mir::lower::ScalarCtx::new_values_first_class(ws)
+        .sharing(std::sync::Arc::clone(self.graph.interner()));
+    let view = realize_shader_view(ws, &self.graph, &programs, &compute, &shader_scx)?;
+    let registrations = shader_registration_lines(
+        ws,
+        &shader_scx,
+        &collection,
+        &compute_collection,
+        &view,
+        self.renderer_target,
+    )?;
+    self.shader_view = view;
+        self.shader_registrations = registrations;
+        Ok(())
+    }
+
+    fn shader_delta_affects_view(&self, update: &crate::instance_graph::UpdateStats) -> bool {
+        let shader_decls: FxHashSet<FuncRef> = self
+            .shader_view
+            .roots
+            .iter()
+            .chain(self.shader_view.helpers.iter())
+            .chain(self.shader_view.builtins.iter())
+            .map(|instance| instance.func)
+            .collect();
+        update
+            .added
+            .iter()
+            .chain(update.removed.iter())
+            .any(|instance| shader_decls.contains(&instance.func))
+    }
 
 /// Take the specialized chunks an assembly BUILT into the cache, with their
 /// reverse-dependency edges, so the next build reuses them and an edit to any
 /// declaration they depend on -- their own included -- invalidates them.
-fn absorb_spec_chunks(&mut self, built: Vec<(EmittedBodyId, Chunk)>) {
+fn absorb_spec_chunks(&mut self, built: Vec<(Instance, Chunk)>) {
     for (body, chunk) in built {
         for d in &chunk.deps {
             self.dependents.entry(*d).or_default().insert(body.clone());
@@ -3034,11 +3813,137 @@ fn absorb_spec_chunks(&mut self, built: Vec<(EmittedBodyId, Chunk)>) {
     }
 }
 
+/// Drop every trace of an instance the graph pruned: its chunk, its
+/// reverse-dependency edges, and its membership in the overlay/emitted sets.
+///
+/// Leaving the chunk behind is not harmless -- `emit_incremental` reassembles
+/// from the cache, so a stale entry re-emits a definition no call reaches, and
+/// `changed_since_full` would keep offering it to the overlay forever.
+fn forget_instance(&mut self, gone: &Instance) {
+    if let Some(Ok(c)) = self.chunks.get(gone) {
+        let deps: Vec<FuncRef> = c.deps.iter().copied().collect();
+        for d in deps {
+            if let Some(set) = self.dependents.get_mut(&d) {
+                set.remove(gone);
+            }
+        }
+    }
+    self.chunks.remove(gone);
+    self.changed_since_full.remove(gone);
+    self.emitted.remove(gone);
+}
+
+/// Materialize the bodies a graph update newly reached. The graph owns both
+/// the concrete substitution and the resolved iterator witnesses; the cache
+/// only stores the chunks those facts produce.
+fn build_graph_added_chunks(
+    cache: &mut SkullEmitCache,
+    ws: &Workspace,
+    added: &std::collections::BTreeSet<Instance>,
+) -> Vec<CompilerError> {
+    let mut pending: Vec<Instance> = added.iter().cloned().collect();
+    let mut seen: FxHashSet<Instance> = FxHashSet::default();
+    let mut built: Vec<(Instance, Chunk)> = Vec::new();
+    let mut errs = Vec::new();
+
+    while let Some(body) = pending.pop() {
+        if !seen.insert(body.clone()) {
+            continue;
+        }
+        let f = &ws.module(body.func.module).functions[body.func.func];
+        if !is_cached_emitted_body(f, &body) {
+            continue;
+        }
+        if cache.chunks.get(&body).is_some_and(|chunk| chunk.is_ok()) {
+            if !cache.emitted.contains(&body) {
+                cache.changed_since_full.insert(body.clone());
+            }
+            continue;
+        }
+        let chunk = if body.args.is_empty() {
+            match rebuild_chunk(
+                ws,
+                &cache.cg,
+                &cache.scx,
+                &cache.concrete,
+                &body,
+                f,
+                &mut cache.inline_cache,
+            ) {
+                Ok(chunk) => chunk,
+                Err(err) => {
+                    errs.push(err);
+                    continue;
+                }
+            }
+        } else {
+            let name = body.symbol(ws, cache.scx.interner());
+            let mut specs = Vec::new();
+            match emit_spec_chunk(
+                ws,
+                &cache.cg,
+                &cache.scx,
+                &cache.concrete,
+                &body,
+                &name,
+                &mut cache.inline_cache,
+                &mut specs,
+            ) {
+                Ok(chunk) => chunk,
+                Err(err) => {
+                    errs.push(err);
+                    continue;
+                }
+            }
+        };
+        let mut valid = true;
+        for demand in &chunk.specs {
+            if cache.graph.concreteness(&demand.inst)
+                == crate::instance_graph::Concreteness::Missing
+            {
+                errs.push(CompilerError::new_with_label(
+                    f.name_span,
+                    format!(
+                        "graph omitted added specialization `{}` demanded by `{}`",
+                        demand.inst.symbol(ws, cache.scx.interner()),
+                        body.symbol(ws, cache.scx.interner())
+                    ),
+                ));
+                valid = false;
+                continue;
+            }
+            pending.push(demand.inst.clone());
+        }
+        if valid {
+            built.push((body, chunk));
+        }
+    }
+
+    for (body, chunk) in built {
+        for dep in &chunk.deps {
+            cache.dependents.entry(*dep).or_default().insert(body.clone());
+        }
+        cache.chunks.insert(body.clone(), Ok(chunk));
+        cache.changed_since_full.insert(body);
+    }
+    errs
+}
+
+fn combine_errors(mut errors: Vec<CompilerError>) -> Option<CompilerError> {
+    let first = errors.first()?.clone();
+    errors.remove(0);
+    Some(first.with_siblings(errors))
+}
+
 fn update_chunk_cache(
     &mut self,
     ws: &Workspace,
     reinferred: &[(ModuleId, BodyOwner)],
-) -> FxHashSet<EmittedBodyId> {
+) -> (
+    FxHashSet<Instance>,
+    crate::instance_graph::UpdateStats,
+    Vec<CompilerError>,
+) {
     let cache = self;
     // Fold each re-inferred body's value-reference contribution into the cached
     // ScalarCtx. A name whose taken-by-ref membership flips changes scalar-ABI
@@ -3054,12 +3959,44 @@ fn update_chunk_cache(
             }
         }
     }
+    // **THE GRAPH IS MAINTAINED BEFORE THE CHUNK SET IS DECIDED.**
+    //
+    // A body edit can add an instantiation, strand one, or both, and only the
+    // graph knows which -- the chunk cache is downstream of that answer, not a
+    // second derivation of it. `update_bodies` re-walks the owners the edit
+    // invalidated against the SAME monotonic arena every key here indexes, so
+    // ids stay stable and the added/removed sets below are directly usable as
+    // cache keys.
+    //
+    // Rebuilding the graph instead of updating it is what the arc measured and
+    // rejected: 15-33 ms release against a sub-millisecond edit.
+    let _t_graph = Instant::now();
+    // `update_shader_registrations` runs BEFORE this (in `emit_incremental`), so
+    // the glue roots below are this edit's, not the previous build's.
+    let roots = all_roots(
+        ws,
+        cache.project_root.as_deref(),
+        &cache.shader_registrations.roots,
+    );
+    let update = cache.graph.update_bodies(ws, roots.clone(), reinferred);
+    cache.concrete = crate::concrete_body::build(ws, &mut cache.graph);
+    let _graph_ms = _t_graph.elapsed();
+
+    // Before any borrow of the cache's own fields, because it mutates several.
+    for gone in &update.removed {
+        cache.forget_instance(gone);
+    }
+
+    // The graph moved; the Lua view is this edit's realization of it, from the
+    // same roots. Kept in step with `graph` rather than a first-edit snapshot.
+    cache.lua_view = crate::artifact::realize(
+        ws,
+        &cache.graph,
+        &crate::artifact::ArtifactRequest::new(crate::target_projection::LUAJIT_DESKTOP, &roots),
+    );
+
     let scx = &cache.scx;
     let cg = &cache.cg;
-    // No valid-scan/retain: this path only ever sees BODY edits (an add/remove fn
-    // is interface-tier -> the caller routes to `emit_full`, a fresh cache), so the
-    // chunk key set -- and the `dependents` index built over it -- is invariant
-    // between full builds. There are no dangling `FuncRef`s to prune.
 
     let _t_aff = Instant::now();
     let mut changed: FxHashSet<FuncRef> = reinferred
@@ -3083,21 +4020,40 @@ fn update_chunk_cache(
         for (body, chunk) in cache.chunks.iter() {
             let Ok(chunk) = chunk else { continue };
             if comptime_reads_stale(ws, &chunk.comptime_reads, &mut file_hashes) {
-                changed.insert(body.decl());
+                changed.insert(body.func);
             }
         }
     }
 
-    // Affected = changed + every chunk that DEPENDS on a changed fn. The reverse
-    // `dependents` index turns this O(edit x fan-out) instead of the old O(chunks)
-    // scan. Each chunk's deps already encode its full inline closure, so one
-    // reverse hop is complete (no fixpoint) -- identical result to the prior scan.
-    let mut affected: FxHashSet<EmittedBodyId> = changed.iter().copied().map(shared).collect();
+    // **A changed declaration maps to its LIVE INSTANCES through the graph**,
+    // not to one declaration-shaped key. Editing a generic `co fn` with two
+    // instantiations must re-emit both bodies, and editing one specialization's
+    // declaration must not be indistinguishable from editing the other's.
+    // `Instance::base` is still taken for every changed fn: a non-generic one
+    // IS its base instance, and a declaration the graph never reached still has
+    // a chunk here that an edit can invalidate.
+    let mut affected: FxHashSet<Instance> = changed.iter().copied().map(shared).collect();
+    for c in &changed {
+        affected.extend(cache.graph.instances_of(*c).cloned());
+    }
+    // ...plus every chunk that DEPENDS on a changed fn. This is the CODEGEN
+    // reverse graph, which the instance graph does not hold and must not be
+    // confused with `Indices::preds`: `preds` is call edges between instances,
+    // while `deps` records that a chunk's TEXT contains another declaration's
+    // body (an inline splice) or specializes it. Neither is derivable from the
+    // other, so both survive.
     for c in &changed {
         if let Some(deps) = cache.dependents.get(c) {
             affected.extend(deps.iter().cloned());
         }
     }
+    // REMOVAL is the graph's to report and emission's alone cannot see it:
+    // nothing on this side knows an instance was stranded, so a surviving chunk
+    // makes `emit_incremental` re-emit a definition no call reaches. That is
+    // handled above, before the borrows.
+    //
+    // Construction of graph additions happens after invalidation below, so a
+    // newly reached body cannot reuse an inline decision made for the old body.
     let _aff_ms = _t_aff.elapsed();
 
     // The persistent InlineCache keeps unchanged callee bodies across edits; the
@@ -3107,7 +4063,7 @@ fn update_chunk_cache(
     // provably unchanged and reused.
     let _t_relow = Instant::now();
     for body in &affected {
-        cache.inline_cache.invalidate(body.decl());
+        cache.inline_cache.invalidate(body.func);
     }
     for body in &affected {
         // Drop this chunk's OLD reverse-dep edges -- re-emitting may change its
@@ -3121,12 +4077,12 @@ fn update_chunk_cache(
                 set.remove(body);
             }
         }
-        let fref = body.decl();
+        let fref = body.func;
         let f = &ws.module(fref.module).functions[fref.func];
         // An edit can flip a body between cached (ordinary/coroutine) and
         // regenerated (extern / inline(lua)); only the former has a chunk.
         if is_cached_emitted_body(f, body) {
-            let chunk = rebuild_chunk(ws, cg, scx, body, f, &mut cache.inline_cache);
+            let chunk = rebuild_chunk(ws, cg, scx, &cache.concrete, body, f, &mut cache.inline_cache);
             if let Ok(c) = &chunk {
                 let new_deps: Vec<FuncRef> = c.deps.iter().copied().collect();
                 for d in new_deps {
@@ -3138,16 +4094,20 @@ fn update_chunk_cache(
             cache.chunks.remove(body);
         }
     }
+    let added_errors = Self::build_graph_added_chunks(cache, ws, &update.added);
     if std::env::var("SKULL_EMIT_PROFILE").is_ok() {
         eprintln!(
-            "    update_chunk_cache: affected-scan {:.3}ms (O(edit), {} chunks) | re-lower {:.3}ms ({} affected)",
+            "    update_chunk_cache: graph {:.3}ms (+{} -{} instances) | affected-scan {:.3}ms (O(edit), {} chunks) | re-lower {:.3}ms ({} affected)",
+            _graph_ms.as_secs_f64() * 1000.0,
+            update.added.len(),
+            update.removed.len(),
             _aff_ms.as_secs_f64() * 1000.0,
             cache.chunks.len(),
             _t_relow.elapsed().as_secs_f64() * 1000.0,
             affected.len(),
         );
     }
-    affected
+    (affected, update, added_errors)
 }
 }
 
@@ -3157,15 +4117,24 @@ pub fn emit_incremental(
     reinferred: &[(ModuleId, BodyOwner)],
 ) -> Result<MirEmit, CompilerError> {
     let t_reemit = Instant::now();
-    let _affected = cache.update_chunk_cache(ws, reinferred);
-    cache.update_shader_registrations(ws, reinferred)?;
+    // Shader registrations FIRST: their dependencies are graph/view roots, so
+    // `update_chunk_cache`'s re-walk must see this edit's set, not the last
+    // build's.
+    let shader_changed = cache.update_shader_registrations(ws, reinferred)?;
+    let (_affected, update, added_errors) = cache.update_chunk_cache(ws, reinferred);
+    if let Some(err) = SkullEmitCache::combine_errors(added_errors) {
+        return Err(err);
+    }
+    if shader_changed || cache.shader_delta_affects_view(&update) {
+        cache.refresh_shader_registrations(ws)?;
+    }
     let reemit = t_reemit.elapsed();
 
     // Reassembly: the SAME work `emit_full` does (concat every cached chunk +
     // re-emit globals/decorators/prelude/entry), scaling with total output size.
     // The two-file split (`emit_overlay`) avoids it entirely on a body edit.
     let t_asm = Instant::now();
-    let mut built_specs: Vec<(EmittedBodyId, Chunk)> = Vec::new();
+    let mut built_specs: Vec<(Instance, Chunk)> = Vec::new();
     let (mut emit, emitted, unit_reads) = assemble(ws, &cache.cg, &cache.scx, cache, &mut built_specs)?;
     cache.emitted = emitted;
     cache.unit_comptime_reads = unit_reads;
@@ -3183,131 +4152,6 @@ pub fn emit_incremental(
 /// Loaded AFTER `main.lua`; redefined globals override their stale defs. Emits NO
 /// scaffold/globals -- those are unchanged on a body edit and live in main.lua.
 /// `docs/skull-incremental-emit-split.md`.
-/// Fns the changed chunks now reach that the last full build did not emit.
-/// Bounded by `cache.emitted`, which is the leaf set -- so the common case (an
-/// edit that calls nothing new) expands nothing.
-fn newly_reachable(cache: &SkullEmitCache) -> Vec<EmittedBodyId> {
-    struct Backfill<'a> {
-        cache: &'a SkullEmitCache,
-        roots: Vec<EmittedBodyId>,
-    }
-    impl skull_mir::reach::ReachPolicy for Backfill<'_> {
-        type Node = EmittedBodyId;
-        fn roots(&mut self) -> Result<Vec<EmittedBodyId>, CompilerError> {
-            Ok(std::mem::take(&mut self.roots))
-        }
-        fn is_leaf(&mut self, body: EmittedBodyId) -> Result<bool, CompilerError> {
-            Ok(self.cache.emitted.contains(&body)
-                || !matches!(self.cache.chunks.get(&body), Some(Ok(_))))
-        }
-        fn on_cycle(&mut self, _body: EmittedBodyId) -> Result<(), CompilerError> {
-            Ok(())
-        }
-        fn visit(&mut self, body: EmittedBodyId) -> Result<Vec<EmittedBodyId>, CompilerError> {
-            match self.cache.chunks.get(&body) {
-                Some(Ok(chunk)) => Ok(successors_of(chunk)),
-                _ => Ok(Vec::new()),
-            }
-        }
-    }
-    let mut roots: Vec<EmittedBodyId> = Vec::new();
-    for body in &cache.changed_since_full {
-        if let Some(Ok(chunk)) = cache.chunks.get(body) {
-            roots.extend(successors_of(chunk).into_iter().filter(|b| !cache.emitted.contains(b)));
-        }
-    }
-    if roots.is_empty() {
-        return Vec::new();
-    }
-    let mut policy = Backfill { cache, roots: roots.clone() };
-    // Infallible: every policy method returns Ok.
-    let mut out = skull_mir::reach::walk(&mut policy).unwrap_or_default();
-    out.extend(roots);
-    out.retain(|b| !cache.emitted.contains(b));
-    out
-}
-
-/// The emitted bodies a chunk reaches: its declaration callees AND the
-/// specializations it demands.
-///
-/// Both, keyed the same way. Walking only `calls` -- which are DECLARATIONS --
-/// is what made the overlay backfill a shared body and never a specialization.
-fn successors_of(chunk: &Chunk) -> Vec<EmittedBodyId> {
-    let mut out: Vec<EmittedBodyId> = chunk.calls.iter().copied().map(shared).collect();
-    out.extend(chunk.specs.iter().map(|d| EmittedBodyId::new(d.func, d.key.clone())));
-    out
-}
-
-/// BUILD every specialization the changed bodies now demand that the cache does
-/// not already hold, so [`newly_reachable`] has a chunk to find.
-///
-/// The overlay is loaded after `main.lua`, which carries only what the last full
-/// build emitted. An edit that adds the first call to a NEW instantiation
-/// therefore needs the definition ADDED, not redefined -- and its call site
-/// already spells the specialized symbol, so omitting it is a nil global on
-/// reload rather than a stale body.
-///
-/// This is where the demand's bound tree earns its keep: an `Iterator`-bounded
-/// callee reached for the first time by an edit cannot be lowered from its
-/// declaration alone.
-fn backfill_new_specializations(ws: &Workspace, cache: &mut SkullEmitCache) -> Vec<CompilerError> {
-    let mut errs = Vec::new();
-    let mut demands: Vec<skull_mir::bound::SpecDemand> = Vec::new();
-    for body in &cache.changed_since_full {
-        if let Some(Ok(chunk)) = cache.chunks.get(body) {
-            demands.extend(chunk.specs.iter().cloned());
-        }
-    }
-    let mut map = skull_mir::bound::DemandMap::default();
-    for body in map.record(&demands) {
-        errs.push(demand_clash(ws, &body).1);
-    }
-    // A worklist, not one pass: a specialization built here can demand further
-    // ones that no chunk in the cache mentions.
-    let mut queue: Vec<EmittedBodyId> =
-        demands.iter().map(|d| EmittedBodyId::new(d.func, d.key.clone())).collect();
-    let mut seen: FxHashSet<EmittedBodyId> = FxHashSet::default();
-    while let Some(body) = queue.pop() {
-        if !seen.insert(body.clone()) || cache.chunks.contains_key(&body) {
-            continue;
-        }
-        let EmittedBodyId::Specialized(fref, key) = &body else { continue };
-        let f = &ws.module(fref.module).functions[fref.func];
-        let Some(name) = skull_mir::mangle::spec_fn_name(ws, f, key) else { continue };
-        let tree = map.tree_of(&body);
-        let mut specs = Vec::new();
-        // Disjoint field borrows: the emitter reads `cg`/`scx` and mutates only
-        // `inline_cache`, so the chunk map stays free to be written below.
-        let built = emit_spec_chunk(
-            ws,
-            &cache.cg,
-            &cache.scx,
-            &body,
-            &tree,
-            &name,
-            &mut cache.inline_cache,
-            &mut specs,
-        );
-        for d in &specs {
-            queue.push(EmittedBodyId::new(d.func, d.key.clone()));
-        }
-        for b in map.record(&specs) {
-            errs.push(demand_clash(ws, &b).1);
-        }
-        match built {
-            Ok(chunk) => {
-                for d in &chunk.deps {
-                    cache.dependents.entry(*d).or_default().insert(body.clone());
-                }
-                cache.chunks.insert(body.clone(), Ok(chunk));
-                cache.changed_since_full.insert(body);
-            }
-            Err(e) => errs.push(e),
-        }
-    }
-    errs
-}
-
 fn assemble_overlay(
     ws: &Workspace,
     cache: &SkullEmitCache,
@@ -3317,20 +4161,14 @@ fn assemble_overlay(
     let mut skipped: Vec<(String, String)> = Vec::new();
 
     // Redefine the changed functions, deterministic order for a stable diff.
-    let mut order: Vec<EmittedBodyId> = cache.changed_since_full.iter().cloned().collect();
-    // ... plus anything they now reach that the last full build had PRUNED. The
-    // overlay redefines only changed fns, so without this a body edit that adds
-    // the first call to a dead fn leaves that fn defined nowhere and the reload
-    // dies on a nil call. The walk stops at every already-emitted fn (`is_leaf`),
-    // so on a normal edit it visits nothing.
-    order.extend(newly_reachable(cache));
-    order.sort_by_key(overlay_order_key);
+    let mut order: Vec<Instance> = cache.changed_since_full.iter().cloned().collect();
+    order.sort_by_key(|b| overlay_order_key(&cache.scx, b));
     order.dedup();
     for body in &order {
         match cache.chunks.get(body) {
             Some(Ok(chunk)) => out.push_str(&chunk.lua),
             Some(Err(err)) => {
-                let fref = body.decl();
+                let fref = body.func;
                 let f = &ws.module(fref.module).functions[fref.func];
                 skipped.push((mangle_fn(ws, f), err.message.clone()));
             }
@@ -3441,7 +4279,14 @@ fn assemble_overlay(
         let mut inits: Vec<GlobalInit> = Vec::new();
         for a in &affected {
             let line = if a.changed {
-                let unit = emit_global_unit(ws, &cache.scx, &cache.cg, a.mid, a.gid);
+                let unit = emit_global_unit(
+                    ws,
+                    &cache.scx,
+                    &cache.cg,
+                    &cache.concrete,
+                    a.mid,
+                    a.gid,
+                );
                 out.push_str(&unit.lua); // the (new) ginit fn def
                 if let Some(s) = unit.skipped {
                     skipped.push(s);
@@ -3453,7 +4298,7 @@ fn assemble_overlay(
                 let g = &ws.module(a.mid).globals[a.gid];
                 format!(
                     "{} = {}()\n",
-                    global_init_target(ws, &cache.cg, g),
+                    global_init_target(ws, &cache.scx, &cache.cg, g),
                     crate::global_init_fn_name(a.name.as_str())
                 )
             };
@@ -3482,7 +4327,7 @@ fn assemble_overlay(
     let (deco_map, _) = build_deco_map(ws);
     // A decorator rebind is a DECLARATION fact -- it names the system by its
     // source name -- so specializations of one declaration contribute it once.
-    let mut rebind_decls: Vec<FuncRef> = order.iter().map(EmittedBodyId::decl).collect();
+    let mut rebind_decls: Vec<FuncRef> = order.iter().map(|i| i.func).collect();
     rebind_decls.sort_by_key(|fr| (fr.module.index(), u32::from(fr.func.into_raw())));
     rebind_decls.dedup();
     out.push_str(&decorator_rebind_lines(ws, &deco_map, &rebind_decls));
@@ -3527,7 +4372,7 @@ pub fn emit_overlay(
     ws: &Workspace,
     cache: &mut SkullEmitCache,
     reinferred: &[(ModuleId, BodyOwner)],
-) -> MirEmit {
+) -> Result<MirEmit, CompilerError> {
     let t0 = Instant::now();
     // `cg` is cached (interface-derived, identical on body edits) -- no rebuild.
     let t_cg = t0.elapsed();
@@ -3536,15 +4381,18 @@ pub fn emit_overlay(
     // -- no whole-workspace rebuild.
     let t_scx = t1.elapsed();
     let t2 = Instant::now();
-    let affected = cache.update_chunk_cache(ws, reinferred);
+    // Shader registrations FIRST -- their dependencies are graph/view roots, so
+    // `update_chunk_cache`'s re-walk must see this edit's set.
+    let shader_changed = cache.update_shader_registrations(ws, reinferred)?;
+    let (affected, update, added_errors) = cache.update_chunk_cache(ws, reinferred);
+    if let Some(err) = SkullEmitCache::combine_errors(added_errors) {
+        return Err(err);
+    }
+    let shader_changed = shader_changed || cache.shader_delta_affects_view(&update);
+    if shader_changed {
+        cache.refresh_shader_registrations(ws)?;
+    }
     cache.changed_since_full.extend(affected);
-    let shader_changed = match cache.update_shader_registrations(ws, reinferred) {
-        Ok(changed) => changed,
-        Err(err) => {
-            eprintln!("skull overlay emit: rock_shader registration -- {}", err.message);
-            false
-        }
-    };
     // Accumulate changed `const` globals so the overlay re-emits their inits
     // (unguarded). A mutable `global` value edit is interface-tier (full rebuild),
     // so it never reaches here; even so, gate on `is_const` defensively.
@@ -3575,13 +4423,6 @@ pub fn emit_overlay(
             .collect();
         cache.changed_consts_since_full.extend(stale_consts);
     }
-    // A specialization the edit reached for the FIRST time has no chunk yet, so
-    // it must be BUILT before the overlay looks for one. Never swallowed: the
-    // overlay's signature cannot return `Err`, so a failure warns here and the
-    // next full/incremental rebuild rejects it authoritatively.
-    for err in backfill_new_specializations(ws, cache) {
-        eprintln!("skull overlay emit: specialization backfill -- {}", err.message);
-    }
     let t_relower = t2.elapsed();
     let t3 = Instant::now();
     let mut emit = assemble_overlay(ws, cache, shader_changed);
@@ -3601,12 +4442,10 @@ pub fn emit_overlay(
         cache.static_key_baseline.insert(cell, key);
     }
     let t_asm = t3.elapsed();
-    // Overlay can't return Err (its `MirEmit` return is baked into the watch
-    // fast-path callers), but a body edit that mints a newly-colliding synthetic
-    // name must not be swallowed. Warn (never-swallow); the next full/incremental
-    // rebuild rejects it authoritatively through `assemble`.
+    // A body edit that mints a newly-colliding synthetic name is not safe to
+    // deliver as an overlay.
     if let Some(err) = cache.cg.take_rejection() {
-        eprintln!("skull overlay emit: reserved-name collision -- {}", err.message);
+        return Err(err);
     }
     emit.phases = vec![
         ("CodegenCtx::new", t_cg),
@@ -3614,5 +4453,300 @@ pub fn emit_overlay(
         ("update_chunk_cache (re-lower changed)", t_relower),
         ("assemble_overlay (+build_deco_map)", t_asm),
     ];
-    emit
+    Ok(emit)
+}
+
+#[cfg(test)]
+mod wgpu_projection_tests {
+    use super::*;
+
+    #[test]
+    fn unexpected_emitter_failure_aborts_after_admission() {
+        let unexpected = CompilerError::new_no_location("unexpected WGSL emitter failure");
+        let mut visited = Vec::new();
+        let result = collect_wgpu_projections(
+            vec![("admitted".to_string(), true), ("unexpected".to_string(), false)],
+            |key, _| {
+                visited.push(key.to_string());
+                if key == "admitted" {
+                    Ok("artifact")
+                } else {
+                    Err(unexpected.clone())
+                }
+            },
+        );
+        let error = result.expect_err("an unexpected emitter error must fail the collection");
+        assert_eq!(error.message, "unexpected WGSL emitter failure");
+        assert_eq!(error.kind, CompilerErrorKind::Generic);
+        assert_eq!(visited, ["admitted", "unexpected"]);
+    }
+}
+
+#[cfg(test)]
+mod missing_owner_tests {
+    use super::*;
+    use bone_semantic::inference::Workspace;
+    use skull_mir::mir::FuncRef;
+    use skull_mir::monoty::MonoTy;
+    use skull_parser::CompilerError;
+    use ustr::Ustr;
+
+    const SRC: &str = r#"
+@inline
+fn wrap<T>(x: T) -> T { return x }
+
+fn top() -> int { return wrap(7) }
+fn main() { let result = top() }
+"#;
+
+    const BOUNDED_SRC: &str = r#"
+fn total<I: Iterator<int>>(it: I) -> int {
+    let sum = 0
+    for value in it { sum = sum + value }
+    return sum
+}
+
+fn top() -> int { return total([1, 2, 3].iter()) }
+fn main() { let result = top() }
+"#;
+
+    const COROUTINE_PLAN_SRC: &str = r#"
+enum Ev { Tick(string) }
+global R: int = 0
+
+co fn worker() -> Coroutine<Ev> {
+    let counter = 100
+    let add = (n: int) => n + counter
+    R = add(5)
+    yield Ev::Tick("x")
+}
+
+fn main() {
+    let c = worker()
+    let _ = c.resume()
+}
+"#;
+
+    static STDLIB: std::sync::LazyLock<Vec<skull_parser::Ast>> = std::sync::LazyLock::new(|| {
+        rock_host::stdlib_loader::stdlib_files()
+            .iter()
+            .map(|file| {
+                let id = Ustr::from(format!("<stdlib:{}>", file.name).as_str());
+                skull_parser::parse_module_clean(file.contents, id).expect("stdlib parse")
+            })
+            .collect()
+    });
+
+    static INLINE_OFF: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[allow(dead_code)]
+    struct InlineOff(std::sync::MutexGuard<'static, ()>, Option<String>);
+
+    impl InlineOff {
+        fn on() -> Self {
+            let guard = INLINE_OFF.lock().unwrap_or_else(|e| e.into_inner());
+            let previous = std::env::var("SKULL_INLINE_OFF").ok();
+            unsafe { std::env::set_var("SKULL_INLINE_OFF", "1") };
+            skull_mir::ablation::clear();
+            skull_mir::ablation::set_enabled(true);
+            Self(guard, previous)
+        }
+    }
+
+    impl Drop for InlineOff {
+        fn drop(&mut self) {
+            skull_mir::ablation::set_enabled(false);
+            skull_mir::ablation::clear();
+            match &self.1 {
+                Some(value) => unsafe { std::env::set_var("SKULL_INLINE_OFF", value) },
+                None => unsafe { std::env::remove_var("SKULL_INLINE_OFF") },
+            }
+        }
+    }
+
+    fn workspace() -> Workspace {
+        let mut modules = vec![
+            skull_parser::parse_module_clean(SRC, Ustr::from("<missing-owner-test>"))
+                .expect("parse"),
+        ];
+        bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic")
+    }
+
+    fn bounded_workspace() -> Workspace {
+        let mut modules = STDLIB.clone();
+        modules.push(
+            skull_parser::parse_module_clean(BOUNDED_SRC, Ustr::from("<bound-plan-test>"))
+                .expect("parse"),
+        );
+        bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic")
+    }
+
+    fn coroutine_workspace() -> Workspace {
+        let mut modules = STDLIB.clone();
+        modules.push(
+            skull_parser::parse_module_clean(COROUTINE_PLAN_SRC, Ustr::from("<coroutine-plan-test>"))
+                .expect("parse"),
+        );
+        bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic")
+    }
+
+    fn ref_for(ws: &Workspace, name: &str) -> FuncRef {
+        ws.modules
+            .iter()
+            .filter(|module| module.id != ModuleId::builtin())
+            .find_map(|module| {
+                module
+                    .functions
+                    .iter()
+                    .find(|(_, f)| f.name.as_str() == name)
+                    .map(|(func, _)| FuncRef { module: module.id, func })
+            })
+            .expect("function")
+    }
+
+    fn concrete_symbol(ws: &Workspace, cache: &SkullEmitCache, fref: FuncRef) -> String {
+        Instance::intern(cache.graph.interner(), fref, vec![MonoTy::Int])
+            .symbol(ws, cache.scx.interner())
+    }
+
+    fn assert_residual_definition_and_call(
+        ws: &Workspace,
+        cache: &SkullEmitCache,
+        emit: &MirEmit,
+        callee: FuncRef,
+    ) {
+        let symbol = concrete_symbol(ws, cache, callee);
+        assert!(
+            emit.lua.contains(&format!("function {symbol}(")),
+            "the concrete residual definition is missing: {symbol}\n{}",
+            emit.lua
+        );
+        assert!(
+            emit.lua
+                .lines()
+                .any(|line| !line.starts_with("function ") && line.contains(&format!("{symbol}("))),
+            "the residual call does not name the concrete definition: {symbol}\n{}",
+            emit.lua
+        );
+    }
+
+    fn emit_with_mutation(
+        mutation: BodyMutation,
+    ) -> Result<(Workspace, SkullEmitCache, MirEmit), CompilerError> {
+        let ws = workspace();
+        let mid = ws
+            .modules
+            .iter()
+            .find(|m| m.id != ModuleId::builtin())
+            .expect("test module")
+            .id;
+        let (emit, cache) = emit_full_in_with_test_mutation(&ws, mid, mutation)?;
+        Ok((ws, cache, emit))
+    }
+
+    fn assert_rejection_or_residual(
+        result: Result<(Workspace, SkullEmitCache, MirEmit), CompilerError>,
+        callee: FuncRef,
+    ) {
+        match result {
+            Err(err) => assert!(
+                err.message.contains("no concrete owner agreeing with its delivery instance"),
+                "owner loss must be an explicit rejection, not an unrelated emission gap: {err:?}"
+            ),
+            Ok((ws, cache, emit)) => assert_residual_definition_and_call(&ws, &cache, &emit, callee),
+        }
+    }
+
+    #[test]
+    fn missing_generic_callee_owner_rejects_or_emits_concrete_residual() {
+        let ws = workspace();
+        let caller = ref_for(&ws, "top");
+        let callee = ref_for(&ws, "wrap");
+        assert_rejection_or_residual(
+            emit_with_mutation(BodyMutation::RemoveCalleeOwner { caller, callee }),
+            callee,
+        );
+    }
+
+    #[test]
+    fn incomplete_generic_callee_owner_key_rejects_or_emits_concrete_residual() {
+        let ws = workspace();
+        let caller = ref_for(&ws, "top");
+        let callee = ref_for(&ws, "wrap");
+        assert_rejection_or_residual(
+            emit_with_mutation(BodyMutation::ClearCalleeOwnerKey { caller, callee }),
+            callee,
+        );
+    }
+
+    #[test]
+    fn emission_rejects_a_poisoned_concrete_bound_plan() {
+        let _inline = InlineOff::on();
+        let ws = bounded_workspace();
+        let mid = *ws
+            .module_ids
+            .get(&Ustr::from("<bound-plan-test>"))
+            .expect("test module");
+        let body = ref_for(&ws, "total");
+        let err = match emit_full_in_with_test_mutation(&ws, mid, BodyMutation::ClearBoundPlan { body }) {
+            Ok(_) => panic!("emission ignored the poisoned concrete bound plan"),
+            Err(err) => err,
+        };
+        assert!(
+            err.message.contains("concrete callee bound plan is empty for its site"),
+            "the poisoned plan must fail at the plan consumer, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn emission_consumes_a_concrete_coroutine_result_plan() {
+        let ws = coroutine_workspace();
+        let mid = *ws
+            .module_ids
+            .get(&Ustr::from("<coroutine-plan-test>"))
+            .expect("test module");
+        let body = ref_for(&ws, "worker");
+        let (intact, intact_cache) =
+            emit_full_in_with_test_mutation(&ws, mid, BodyMutation::None).expect("intact emission");
+        let symbol = Instance::base(body).symbol(&ws, intact_cache.scx.interner());
+        assert!(
+            intact.lua.contains(&format!("function {symbol}__advance(")),
+            "the intact coroutine fixture must exercise the concrete yield channel"
+        );
+        let err = match emit_full_in_with_test_mutation(
+            &ws,
+            mid,
+            BodyMutation::ClearCoroutineResultPlan { body },
+        ) {
+            Ok(_) => panic!("emission ignored the poisoned coroutine result plan"),
+            Err(err) => err,
+        };
+        assert!(
+            err.message.contains("concrete callee signature disagrees with its body plan"),
+            "the poisoned coroutine plan must fail closed at the concrete-plan join, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn emission_rejects_a_missing_concrete_iterator_witness_instance() {
+        let _inline = InlineOff::on();
+        let ws = bounded_workspace();
+        let mid = *ws
+            .module_ids
+            .get(&Ustr::from("<bound-plan-test>"))
+            .expect("test module");
+        let body = ref_for(&ws, "total");
+        let err = match emit_full_in_with_test_mutation(
+            &ws,
+            mid,
+            BodyMutation::ClearIteratorWitnessInstance { body },
+        ) {
+            Ok(_) => panic!("emission ignored the missing concrete iterator witness instance"),
+            Err(err) => err,
+        };
+        assert!(
+            err.message.contains("concrete ABI plan is missing for callee `next`"),
+            "the missing iterator bound plan must fail at its production consumer, got: {err:?}"
+        );
+    }
 }

@@ -17,11 +17,15 @@ sequential = []
 [dependencies]
 bone-semantic = { path = "../bone-semantic" }
 skull-mir = { path = "../skull-mir" }
+# The shared instance graph + artifact views, below every backend.
+skull-graph = { path = "../skull-graph" }
 skull-codegen-lua = { path = "../skull-codegen-lua" }
 # Driver-layer GLSL emission for `rock_shader` top-level registration
 # (docs/shaders.md). skull (the driver) may depend on the GLSL
 # backend; skull-mir must not -- the layering constraint.
 skull-codegen-glsl = { path = "../skull-codegen-glsl" }
+skull-codegen-shader = { path = "../skull-codegen-shader" }
+skull-codegen-wgsl = { path = "../skull-codegen-wgsl" }
 skull-transform = { path = "../skull-transform" }
 skull-parser = { path = "../skull-parser" }
 comfy-la-arena = { workspace = true }
@@ -33,6 +37,10 @@ smallvec = { workspace = true }
 [dev-dependencies]
 rock-host = { path = "../rock-host" }
 tempfile = "3.0"
+# The updater's tests drive real incremental inference rather than inventing a
+# reinferred-body set: `UpdateResult::reinferred` is exactly the population
+# `InstanceGraph::update_bodies` takes.
+bone-incremental = { path = "../bone-incremental" }
 
 [lints]
 workspace = true

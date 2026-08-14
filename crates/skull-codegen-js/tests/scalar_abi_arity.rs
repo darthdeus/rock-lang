@@ -12,6 +12,8 @@
 //! scalar ABI its own instantiation implies: measuring a spec-bound call against
 //! the shared body's arity reads every correct specialized call as a bug.
 
+use std::sync::Arc;
+
 use skull_mir::lower::ScalarCtx;
 use skull_mir::mir::FuncRef;
 
@@ -19,7 +21,6 @@ use crate::common::ws_with;
 
 fn emit_res(src: &str, root: &str) -> Result<String, String> {
     let ws = ws_with(src);
-    let scx = ScalarCtx::new(&ws).with_target(bone_semantic::hir::FnBackend::Js);
     let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
     let fid = ws
         .module(mid)
@@ -30,7 +31,6 @@ fn emit_res(src: &str, root: &str) -> Result<String, String> {
         .expect("root fn");
     skull_codegen_js::emit::emit_with_closure(
         &ws,
-        &scx,
         &[(FuncRef { module: mid, func: fid }, root.to_string())],
     )
     .map_err(|e| e.message)
@@ -109,7 +109,7 @@ fn main() {
 }
 "#,
     );
-    let scx = ScalarCtx::new(&ws).with_target(bone_semantic::hir::FnBackend::Js);
+    let interner = Arc::new(skull_mir::monoty::MonoInterner::new());
     let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
     let fid = ws
         .module(mid)
@@ -124,14 +124,36 @@ fn main() {
     // rejection would be measuring bone. What IS checkable here is that the
     // admission window did not widen for a callee with nothing to omit.
     let fr = FuncRef { module: mid, func: fid };
-    let body = skull_mir::lower::EmittedBodyId::Shared(fr);
+    let main = ws
+        .module(mid)
+        .functions
+        .iter()
+        .find(|(_, f)| f.name.as_str() == "main")
+        .map(|(fid, _)| FuncRef { module: mid, func: fid })
+        .expect("main");
+    let graph = skull_graph::instance_graph::build_in(
+        &ws,
+        vec![main],
+        false,
+        Arc::clone(&interner),
+    );
+    let concrete = skull_graph::concrete_body::build(&ws, &graph);
+    let scx = ScalarCtx::new(&ws)
+        .with_target(bone_semantic::hir::FnBackend::Js)
+        .sharing(interner);
     // A control on the fixture itself: `take` from the tests above HAS a default,
     // so its window is strictly wider at the same arity. Without this the
     // assertion below is satisfied by a `required_arg_count` that returns its
     // argument for every input.
+    let abi = concrete
+        .plans
+        .iter()
+        .find(|(inst, _)| inst.func == fr && !inst.args.is_empty())
+        .map(|(_, plan)| skull_mir::lower::BackendFnAbiPlan::for_concrete_plan(&ws, &scx, plan))
+        .expect("pair's concrete specialization plan");
     for arity in [1usize, 3, 5] {
         assert_eq!(
-            skull_codegen_js::emit::required_arg_count(&ws, &scx, body.clone(), arity),
+            skull_codegen_js::emit::required_arg_count(&ws, &abi, arity),
             arity,
             "a callee with no defaulted params must have a single-valued arity window"
         );
@@ -145,14 +167,35 @@ fn main() {
         .find(|(_, f)| f.name.as_str() == "take")
         .map(|(fid, _)| fid)
         .expect("take");
-    let dscx = ScalarCtx::new(&with_default).with_target(bone_semantic::hir::FnBackend::Js);
+    let dfr = FuncRef { module: dmid, func: dfid };
+    let dmain = with_default
+        .module(dmid)
+        .functions
+        .iter()
+        .find(|(_, f)| f.name.as_str() == "main")
+        .map(|(fid, _)| FuncRef { module: dmid, func: fid })
+        .expect("main");
+    let dinterner = Arc::new(skull_mir::monoty::MonoInterner::new());
+    let dgraph = skull_graph::instance_graph::build_in(
+        &with_default,
+        vec![dmain],
+        false,
+        Arc::clone(&dinterner),
+    );
+    let dconcrete = skull_graph::concrete_body::build(&with_default, &dgraph);
+    let dscx = ScalarCtx::new(&with_default)
+        .with_target(bone_semantic::hir::FnBackend::Js)
+        .sharing(dinterner);
+    let dabi = dconcrete
+        .plans
+        .iter()
+        .find(|(inst, _)| inst.func == dfr && !inst.args.is_empty())
+        .map(|(_, plan)| {
+            skull_mir::lower::BackendFnAbiPlan::for_concrete_plan(&with_default, &dscx, plan)
+        })
+        .expect("take's concrete specialization plan");
     assert!(
-        skull_codegen_js::emit::required_arg_count(
-            &with_default,
-            &dscx,
-            skull_mir::lower::EmittedBodyId::Shared(FuncRef { module: dmid, func: dfid }),
-            3,
-        ) < 3,
+        skull_codegen_js::emit::required_arg_count(&with_default, &dabi, 3) < 3,
         "a callee WITH a default must have a wider window, or the point above is \
          not a property of defaults at all"
     );

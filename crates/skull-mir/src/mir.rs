@@ -35,39 +35,31 @@ pub const VEC_COLUMN_REPR: &str = "columns";
 /// collide with a leaf path, and it shares that property with `@vec`.
 pub const VEC_COLUMN_PRESENCE_FIELD: &str = "@p";
 
-/// Every element type `mf` builds a column-stored `Vec` of, nested fns included.
-///
-/// Lives beside the header constants because it has to recognise BOTH shapes the
-/// header is built in -- the inline one in [`Inst::MakeVecColumns`] and the
-/// separately-emitted `{repr, elem, cap}` struct every other column ctor goes
-/// through -- and a collector that knows only one of them silently under-reports.
-/// The JS backend needs the set to emit its per-type element materializers; on
-/// luajit the runtime type table serves the same role, so nothing calls this.
-pub fn column_elem_types(mf: &MirFunc, out: &mut std::collections::BTreeSet<Ustr>) {
-    let str_const = |id: Idx<Inst>| match &mf.insts[id] {
-        Inst::Const(Lit::Str(s)) => Some(*s),
-        _ => None,
-    };
+/// Every element type `mf` builds a column-stored `Vec` of, nested fns included,
+/// together with the planner's no-box guarantee. The fact is carried by both
+/// column-producing instructions, including a header rebuilt from an input Vec.
+pub fn column_elem_plans(mf: &MirFunc, out: &mut std::collections::BTreeMap<Ustr, bool>) {
     for inst in mf.insts.values() {
         match inst {
-            Inst::MakeVecColumns { elem, .. } => {
-                out.insert(*elem);
-            }
-            Inst::MakeStruct { ty: None, fields } => {
-                let field = |n: &str| fields.iter().find(|(f, _)| f.as_str() == n).map(|(_, v)| *v);
-                let (Some(repr), Some(elem)) = (field("repr"), field("elem")) else { continue };
-                if str_const(repr).is_some_and(|r| r.as_str() == VEC_COLUMN_REPR) {
-                    if let Some(elem) = str_const(elem) {
-                        out.insert(elem);
-                    }
-                }
+            Inst::MakeVecColumns { elem, nobox, .. }
+            | Inst::MakeVecColumnHeader { elem, nobox, .. } => {
+                out.insert(*elem, *nobox);
             }
             _ => {}
         }
     }
     for nf in &mf.nested_fns {
-        column_elem_types(nf, out);
+        column_elem_plans(nf, out);
     }
+}
+
+/// Every element type `mf` builds a column-stored `Vec`, nested fns included.
+/// This is the name-only view used by inspect type definitions; representation
+/// decisions come from [`column_elem_plans`].
+pub fn column_elem_types(mf: &MirFunc, out: &mut std::collections::BTreeSet<Ustr>) {
+    let mut plans = std::collections::BTreeMap::new();
+    column_elem_plans(mf, &mut plans);
+    out.extend(plans.into_keys());
 }
 
 /// A resolved call target: which function in which module. Mangling (rock's
@@ -84,6 +76,7 @@ pub struct FuncRef {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Lit {
     Int(i64),
+    Uint(u32),
     Float(f64),
     Bool(bool),
     Str(Ustr),
@@ -142,17 +135,59 @@ pub enum ContainerKind {
 pub struct ColumnElem {
     pub name: Ustr,
     pub nullable: bool,
+    representation: crate::lower::RepId,
+    nobox: bool,
 }
 
 impl ColumnElem {
-    pub fn plain(name: Ustr) -> Self {
-        ColumnElem { name, nullable: false }
+    pub(crate) fn planned(
+        name: Ustr,
+        nullable: bool,
+        representation: crate::lower::RepId,
+        nobox: bool,
+    ) -> Self {
+        ColumnElem { name, nullable, representation, nobox }
+    }
+
+    pub fn representation(&self) -> crate::lower::RepId {
+        self.representation
+    }
+
+    pub fn is_nobox(&self) -> bool {
+        self.nobox
     }
 }
 
 impl std::fmt::Display for ColumnElem {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}{}", self.name, if self.nullable { "?" } else { "" })
+    }
+}
+
+/// The capture transport selected for one closure value. The transform owns the
+/// scope analysis; MIR retains the resulting plan so later closure, inline, and
+/// backend stages do not rediscover which cells cross the closure boundary.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClosureEnvPlan {
+    captures: Vec<Idx<Cell>>,
+    env_cell: Option<Idx<Cell>>,
+}
+
+impl ClosureEnvPlan {
+    pub fn new(captures: Vec<Idx<Cell>>, env_cell: Option<Idx<Cell>>) -> Self {
+        Self { captures, env_cell }
+    }
+
+    pub fn captures(&self) -> &[Idx<Cell>] {
+        &self.captures
+    }
+
+    pub fn env_cell(&self) -> Option<Idx<Cell>> {
+        self.env_cell
+    }
+
+    pub fn captures_cell(&self, cell: Idx<Cell>) -> bool {
+        self.captures.contains(&cell)
     }
 }
 
@@ -210,6 +245,11 @@ pub enum Inst {
     IntMul(Idx<Inst>, Idx<Inst>),
     IntDiv(Idx<Inst>, Idx<Inst>),
     IntMod(Idx<Inst>, Idx<Inst>),
+    UintAdd(Idx<Inst>, Idx<Inst>),
+    UintSub(Idx<Inst>, Idx<Inst>),
+    UintMul(Idx<Inst>, Idx<Inst>),
+    UintDiv(Idx<Inst>, Idx<Inst>),
+    UintMod(Idx<Inst>, Idx<Inst>),
     FloatAdd(Idx<Inst>, Idx<Inst>),
     FloatSub(Idx<Inst>, Idx<Inst>),
     FloatMul(Idx<Inst>, Idx<Inst>),
@@ -236,6 +276,10 @@ pub enum Inst {
     IntLeq(Idx<Inst>, Idx<Inst>),
     IntGt(Idx<Inst>, Idx<Inst>),
     IntGeq(Idx<Inst>, Idx<Inst>),
+    UintLt(Idx<Inst>, Idx<Inst>),
+    UintLeq(Idx<Inst>, Idx<Inst>),
+    UintGt(Idx<Inst>, Idx<Inst>),
+    UintGeq(Idx<Inst>, Idx<Inst>),
     FloatLt(Idx<Inst>, Idx<Inst>),
     FloatLeq(Idx<Inst>, Idx<Inst>),
     FloatGt(Idx<Inst>, Idx<Inst>),
@@ -259,11 +303,18 @@ pub enum Inst {
     /// materialize the conversion (GLSL: fold an int Const to float text, else
     /// wrap `float(...)`). See `docs/shaders.md`.
     IntToFloat(Idx<Inst>),
+    UintToFloat(Idx<Inst>),
+    IntToUint(Idx<Inst>),
+    UintToInt(Idx<Inst>),
+    FloatToUint(Idx<Inst>),
+    UintBitcastInt(Idx<Inst>),
+    IntBitcastUint(Idx<Inst>),
 
     // --- unary ---
     Neg(Idx<Inst>),
     Not(Idx<Inst>),
     BitNot(Idx<Inst>),
+    UintBitNot(Idx<Inst>),
 
     // --- bitwise (LuaJIT `bit.*`) ---
     BitAnd(Idx<Inst>, Idx<Inst>),
@@ -271,6 +322,11 @@ pub enum Inst {
     BitXor(Idx<Inst>, Idx<Inst>),
     Shl(Idx<Inst>, Idx<Inst>),
     Shr(Idx<Inst>, Idx<Inst>),
+    UintBitAnd(Idx<Inst>, Idx<Inst>),
+    UintBitOr(Idx<Inst>, Idx<Inst>),
+    UintBitXor(Idx<Inst>, Idx<Inst>),
+    UintShl(Idx<Inst>, Idx<Inst>),
+    UintShr(Idx<Inst>, Idx<Inst>),
 
     // --- calls ---
     // NOTE: args are a `Vec<Idx<Inst>>`, not the `IdxRange<Inst>` bone-mir-design
@@ -346,8 +402,17 @@ pub enum Inst {
     /// length `len`, in the element's declaration order.
     MakeVecColumns {
         elem: Ustr,
+        nobox: bool,
         columns: Vec<(Ustr, Vec<Idx<Inst>>)>,
         len: usize,
+        capacity: Idx<Inst>,
+    },
+    /// A column Vec header rebuilt from an existing Vec. It carries the same
+    /// planner fact as [`Inst::MakeVecColumns`] without changing the runtime
+    /// header shape.
+    MakeVecColumnHeader {
+        elem: Ustr,
+        nobox: bool,
         capacity: Idx<Inst>,
     },
     /// A struct value. `ty` is the nominal name for the `__ty` reflective field
@@ -377,8 +442,8 @@ pub enum Inst {
         /// exists only between the end of `cleanup` and emit, so no MIR pass sees
         /// it; luajit emits a generated `<name>_lct` and JS rebuilds the nested
         /// objects. Partial flattening is invalid: when any name is dotted the
-        /// sequence must equal `value_leaf_paths_of` exactly, which the Lua
-        /// emitter asserts.
+        /// sequence must equal the owned representation plan's leaf paths exactly, which the
+        /// Lua emitter asserts.
         fields: Vec<(Ustr, Idx<Inst>)>,
     },
     /// A value-struct box that is AUTHORIZED rather than implicit: requested by
@@ -691,6 +756,16 @@ pub fn comptime_value_hash(value: &str) -> u64 {
 pub struct MirFunc {
     pub name: Ustr,
     pub params: Vec<Idx<Cell>>,
+    /// The concrete function representation consumed by entry binding and
+    /// return lowering. Calls retain the same plan in `call_abi_plans`.
+    pub abi_plan: Option<crate::lower::BackendFnAbiPlan>,
+    /// The owned function representation for bodies without an `Instance`,
+    /// notably hoisted nested functions. Such a body still has a concrete ABI;
+    /// it just has no graph-owned top-level instance to wrap in
+    /// `BackendFnAbiPlan`.
+    pub abi_representation: Option<crate::lower::FunctionRepPlan>,
+    /// The owned result representation of an always-emitted global initializer.
+    pub global_plan: Option<crate::lower::GlobalPlan>,
     /// `static` cells declared in this fn's body (in source order).
     pub statics: Vec<StaticCell>,
     /// Comptime inputs this body's emitted code baked in (build_var /
@@ -718,7 +793,8 @@ pub struct MirFunc {
     /// pass (`skull_transform::recover_counted_loops`) is gated on these tags:
     /// only a desugared iterator loop may have its bound snapshot-hoisted
     /// (iterator invalidation is recorded UB), never a user-written `while`.
-    /// The id survives inlining: `splice_general` keeps the call block's id.
+    /// General splicing maps each cloned header through its block map; the
+    /// caller's original call block keeps its own id.
     pub for_iter_headers: Vec<Idx<Block>>,
     /// Per call inst of an `Iterator`-bounded callee: the resolution tree that
     /// substitutes the placeholder [`Inst::CallBoundMulti`]s inside that callee
@@ -735,19 +811,23 @@ pub struct MirFunc {
     /// `BoundTree`'s `next_generics` are `TyId`s in the arena that recorded it,
     /// so a tree arriving from another instantiation cannot be stated as one --
     /// which is the whole reason a demand carries a `ResolvedBoundTree`. The
-    /// splice path has no need of it: it clones the callee in place, so its
-    /// sub-tree is grafted as a raw tree in the caller's own arena.
+    /// splice path imports the resolved sub-tree beside the raw graft so a
+    /// later standalone demand or nested splice does not re-derive another
+    /// body's fact.
     pub resolved_bound_trees:
         bone_semantic::prelude::FxHashMap<Idx<Inst>, crate::bound::ResolvedBoundTree>,
-    /// Per call inst that the caller lowered with the SPECIALIZED scalar ABI: the
-    /// callee's per-generic instantiation key (`docs/flatvec-plan.md` call-site
-    /// specialization). The inliner reads it to splice the matching specialized
-    /// snapshot; a surviving (un-spliced) entry is a hard site-aware rejection
-    /// (its args are splatted, so the shared generic body cannot serve it).
-    pub spec_bindings: bone_semantic::prelude::FxHashMap<Idx<Inst>, crate::lower::SpecKey>,
-    /// Per call inst: the CONCRETE INSTANCE it targets -- the callee declaration
-    /// plus the substitution its own instantiation resolves to, in the same
-    /// `MonoSubst` vocabulary the instance graph records per instance.
+    /// Per call inst that the caller lowered with a scalarized delivery ABI:
+    /// **the concrete callee body it targets**. The inliner reads it to splice
+    /// the matching concrete snapshot; a surviving (un-spliced) entry is a
+    /// hard site-aware rejection because an opaque delivery cannot receive its
+    /// splatted args.
+    ///
+    /// An [`Instance`](crate::instance::Instance) rather than an instantiation
+    /// KEY, so the symbol a call renderer spells and the symbol the definition
+    /// was emitted under come from one object rather than from two derivations
+    /// of one encoder.
+    pub spec_bindings: bone_semantic::prelude::FxHashMap<Idx<Inst>, crate::instance::Instance>,
+    /// Per call inst: the CONCRETE INSTANCE it targets.
     ///
     /// Separate from [`Self::spec_bindings`], and deliberately so: that map is
     /// the DELIVERY record (which calls the lowerer chose to serve with a
@@ -757,7 +837,22 @@ pub struct MirFunc {
     /// which instance it means. Reading the delivery record as identity is what
     /// made a declined specialization indistinguishable from an unknown callee.
     pub callee_instances:
-        bone_semantic::prelude::FxHashMap<Idx<Inst>, crate::site::OwnerInstance>,
+        bone_semantic::prelude::FxHashMap<Idx<Inst>, crate::instance::Instance>,
+    /// The ABI plan the call lowering used for each direct call. This is kept
+    /// beside identity because reconstructing it from a later, possibly mutated
+    /// owner would make an ABI corruption look self-consistent.
+    pub call_abi_plans:
+        bone_semantic::prelude::FxHashMap<Idx<Inst>, crate::lower::BackendFnAbiPlan>,
+    /// The owned function-type representation used by an indirect call. A
+    /// function value has no declaration `Instance`, so its physical signature
+    /// is carried directly beside the `CallValue`/`CallValueMulti` instruction.
+    pub call_rep_plans:
+        bone_semantic::prelude::FxHashMap<Idx<Inst>, crate::lower::FunctionRepPlan>,
+    /// The owned capture transport for each closure creation instruction. The
+    /// closure transform consumes this instead of re-deriving captures from the
+    /// rewritten CFG.
+    pub closure_env_plans:
+        bone_semantic::prelude::FxHashMap<Idx<Inst>, ClosureEnvPlan>,
     /// Placeholder [`Inst::CallBoundMulti`]s whose element the LOWERING already
     /// split into leaf cells: `dests` is sized to the real return arity and the
     /// loop pattern is bound to the leaves, so the splice must leave both alone.
@@ -814,7 +909,7 @@ pub struct MirFunc {
     /// this body's own owner when it has one; inlining appends the spliced
     /// callee's owner and remaps its entries, so a body holds one entry per
     /// distinct instance whose calls it now contains.
-    pub site_owners: Vec<crate::site::OwnerInstance>,
+    pub site_owners: Vec<crate::instance::Instance>,
 }
 
 impl MirFunc {
@@ -824,6 +919,9 @@ impl MirFunc {
         Self {
             name,
             params: Vec::new(),
+            abi_plan: None,
+            abi_representation: None,
+            global_plan: None,
             statics: Vec::new(),
             comptime_reads: Vec::new(),
             insts: Arena::default(),
@@ -842,6 +940,9 @@ impl MirFunc {
             inst_spans: Default::default(),
             call_sites: Default::default(),
             callee_instances: Default::default(),
+            call_abi_plans: Default::default(),
+            call_rep_plans: Default::default(),
+            closure_env_plans: Default::default(),
             fn_value_symbols: Default::default(),
             hoisted_fn_globals: Vec::new(),
             site_owners: Vec::new(),

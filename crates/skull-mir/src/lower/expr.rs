@@ -22,48 +22,44 @@ impl Builder<'_> {
         // (the call-arg analog of `lower_for_user_iter`'s `iter_fn`).
         if let Some(w) = self.inf.and_then(|i| i.implicit_iter_args.get(&e)) {
             let (m, f) = w.func;
-            let generics = w.generics.clone();
             let iter_ref = FuncRef { module: m, func: f };
             // This coercion belongs to `e`, but the cursor was already restored
             // to the ENCLOSING expression above -- so set both halves of the
             // site explicitly rather than inheriting a cursor that names the
             // wrong expression.
             let outer_expr = self.cur_expr.replace(e);
+            // The instance is resolved BEFORE the arguments are shaped: they are
+            // splatted against the ABI of the body the call targets, not the
+            // declaration's.
+            let witness = self
+                .with_site_op(crate::site::SiteOp::ImplicitIter, |b| b.concrete_callee_for_site(e))?
+                .ok_or_else(|| gap("implicit iterator has no concrete callee"))?;
             let call = self.with_site_op(crate::site::SiteOp::ImplicitIter, |b| {
-                let args = b.iter_witness_args(iter_ref, ValueRepr::Scalar(v))?;
+                let args = b.iter_witness_args(&witness, ValueRepr::Scalar(v))?;
                 Ok::<_, CompilerError>(b.emit_cur(Inst::Call { func: iter_ref, args }))
             })?;
             // DELIVERY, exactly as the `for` head's witness does it. Both forms
             // are ordinary calls to a generic `iter`, so under instance-owned
             // emission both must name an instance; recording identity without
             // delivering it spells a symbol nothing defines.
-            let span = self
-                .body
-                .expr_spans
-                .get(e)
-                .copied()
-                .unwrap_or(self.ws.module(m).functions[f].name_span);
-            if let Some(key) = self.next_call_spec(iter_ref, &generics, span)? {
-                self.f.spec_bindings.insert(call, key);
+            if let Some(delivery) = self.concrete_delivery_instance(&witness) {
+                self.f.spec_bindings.insert(call, delivery);
             }
             // IDENTITY beside delivery, the plan's split, and the same pair the
             // `for` witness records. Delivery alone leaves the site's own claim
             // unstated, which the census reports as `callee-no-instance` -- it
             // was invisible only because the census runs POST-TRANSFORM and a
             // splice removed the site before it could be examined.
-            if let Some(inf) = self.inf {
-                if let Some(subst) = crate::lower::shape::witness_instance_subst(
-                    self.ws,
-                    inf,
-                    iter_ref,
-                    &generics,
-                    self.subst(),
-                )? {
-                    self.f
-                        .callee_instances
-                        .insert(call, crate::site::OwnerInstance { func: iter_ref, subst });
-                }
+            let iter_decl = &self.ws.module(m).functions[f];
+            if iter_decl.generics.is_empty() || !witness.args.is_empty() {
+                crate::site::record_call_owner(
+                    &mut self.f,
+                    call,
+                    &witness,
+                );
             }
+            let abi = self.callee_abi_plan_for_instance(&witness)?;
+            self.f.call_abi_plans.insert(call, abi);
             self.cur_expr = outer_expr;
             return Ok(call);
         }
@@ -73,7 +69,13 @@ impl Builder<'_> {
     pub(crate) fn lower_expr_inner(&mut self, e: Idx<Expr>) -> Result<Idx<Inst>, CompilerError> {
         match self.body.expr_arena[e].clone() {
             Expr::Unit | Expr::Null => Ok(self.emit_cur(Inst::Const(Lit::Nil))),
-            Expr::Int(i) => Ok(self.emit_cur(Inst::Const(Lit::Int(i)))),
+            Expr::Int(i) => {
+                if self.arith_ty(e) == Some(ArithTy::Uint) {
+                    Ok(self.emit_cur(Inst::Const(Lit::Uint(i as u32))))
+                } else {
+                    Ok(self.emit_cur(Inst::Const(Lit::Int(i))))
+                }
+            }
             Expr::Float(of) => Ok(self.emit_cur(Inst::Const(Lit::Float(of.0)))),
             Expr::Bool(x) => Ok(self.emit_cur(Inst::Const(Lit::Bool(x)))),
             Expr::String(s) => Ok(self.emit_cur(Inst::Const(Lit::Str(s)))),
@@ -114,22 +116,19 @@ impl Builder<'_> {
                 Ok(self.emit_cur(Inst::Load(cell)))
             }
             // A bare name resolving to a FUNCTION taken by value (`let f = adder`,
-            // passing `adder` as an arg, a `func: adder` field) must reference the
-            // fn's MANGLED emitted symbol -- every non-exempt fn mangles, so a bare
-            // `Inst::Global(name)` would read a nil global. The JS backend is the
-            // exception: it resolves fn-values through its own discovery keyed on
-            // the SURFACE name (`discover_globals` -> `callee_js_name`), so it keeps
-            // the bare name and mangles at its own emit boundary. A real global
-            // variable keeps its bare name on every target.
-            Expr::Global(name)
-                if self.scx.target != bone_semantic::hir::FnBackend::Js
-                    && self.ws.functions_by_name.contains_key(&name) =>
-            {
+            // passing `adder` as an arg, a `func: adder` field) is stamped as a
+            // FnValue site for every backend. The backend owns the emitted symbol,
+            // but the graph needs the target-neutral obligation before that choice.
+            Expr::Global(name) if self.ws.functions_by_name.contains_key(&name) => {
                 let fref = self.resolve_funcref(e, name).ok();
                 if let Some(fref) = fref {
                     self.reject_fn_value_abi_mismatch(e, fref)?;
                 }
-                let sym = self.fn_value_symbol(e, name)?;
+                let sym = if self.scx.target == bone_semantic::hir::FnBackend::Js {
+                    name.to_string()
+                } else {
+                    self.fn_value_symbol(e, name)?
+                };
                 let id = self.with_site_op(crate::site::SiteOp::FnValue, |b| {
                     b.emit_cur(Inst::Global(Ustr::from(sym.as_str())))
                 });
@@ -186,6 +185,9 @@ impl Builder<'_> {
                 let v = self.lower_expr(x)?;
                 match self.overload_target(e) {
                     Some(func) => Ok(self.emit_cur(Inst::Call { func, args: vec![v] })),
+                    None if self.arith_ty(x) == Some(ArithTy::Uint) => {
+                        Ok(self.emit_cur(Inst::UintBitNot(v)))
+                    }
                     None => Ok(self.emit_cur(Inst::BitNot(v))),
                 }
             }
@@ -226,7 +228,7 @@ impl Builder<'_> {
                 Ok(self.pack(repr))
             }
 
-            Expr::Call { callee, args } => self.lower_call(e, callee, args),
+            Expr::Call { callee, args, .. } => self.lower_call(e, callee, args),
 
             // --- aggregates + projections + container reads ---
             // A BOXED tuple slot can be observed for nil-ness (`t.0 == null`), so
@@ -244,7 +246,7 @@ impl Builder<'_> {
                 //
                 // `None` when nothing splats, which is every tuple that compiled
                 // before: those keep today's one-value-per-element box exactly.
-                let shape = self.tuple_box_shape(e);
+                let shape = self.tuple_box_shape(e)?;
                 let mut vs = Vec::new();
                 for (i, el) in elems.into_iter().enumerate() {
                     let r = self.lower_expr_repr(el)?;
@@ -319,7 +321,9 @@ impl Builder<'_> {
             // Lowering the payload args directly instead packs each one on its
             // own, which boxes a `nobox` payload the enum would have stored
             // splat (`tests/nobox_enum_payload_container.rock`).
-            Expr::EnumVariant { enum_name, .. } if flat_enum_shape(self.ws, enum_name).is_some() => {
+            Expr::EnumVariant { enum_name, .. }
+                if EnumPlan::for_name(self.ws, enum_name).is_some_and(|plan| plan.flat().is_some()) =>
+            {
                 let r = self.lower_expr_repr(e)?;
                 Ok(self.pack(r))
             }
@@ -384,10 +388,16 @@ impl Builder<'_> {
             Expr::Lambda { params, body } => {
                 // A `nobox` param arrives as leaves, so the lambda binds a Group
                 // over N cells instead of one -- the same shape a scalar-ABI fn
-                // gives its params. Decided by the lambda's own fn TYPE, which is
-                // what the call site reads too (`fn_value_abi`), so the two ends
-                // agree without either seeing the other.
-                let lam_abi = self.expr_fn_value_abi(e);
+                // gives its params. The lambda and call site read the same
+                // function-value representation plan.
+                let lam_ty = self
+                    .inf
+                    .and_then(|inf| inf.expr_types.get(e))
+                    .copied()
+                    .ok_or_else(|| gap("lambda has no inferred function type"))?;
+                let lam_plan = self
+                    .fn_value_rep_plan(lam_ty)?
+                    .ok_or_else(|| gap("lambda does not have a function representation"))?;
                 // Param shapes come from the param BINDINGS, which is where a
                 // lambda's param types actually land -- its own `fn(..) -> ..`
                 // node can still hold unresolved vars at this point, while the
@@ -395,9 +405,13 @@ impl Builder<'_> {
                 // types the call site reads off the fn type.
                 let param_slots: Vec<RetSlot> = params
                     .into_iter()
-                    .map(|pb| {
-                        self.binding_ty(pb)
-                            .map_or(RetSlot::Opaque, |t| self.nobox_param_slot_of_ty(t))
+                    .enumerate()
+                    .map(|(i, _)| {
+                        lam_plan
+                            .params()
+                            .get(i)
+                            .map(|id| self.scx.rep_arena().ret_slot(*id))
+                            .unwrap_or(RetSlot::Opaque)
                     })
                     .collect();
                 // A lambda's params land in the SAME cell namespace as the
@@ -419,10 +433,9 @@ impl Builder<'_> {
                 // statement, so the return machinery (`return_leaves`) must see the
                 // lambda's own return shape. A tuple-returning lambda splats N values
                 // so an indirect call site can capture them (multi-return ABI); the
-                // enclosing value-struct `ret_shape` never applies (a lambda is
+                // enclosing value-struct result never applies (a lambda is
                 // called through a boxed fn-value). Save/restore around the body.
-                let saved_ret_tuple = self.ret_tuple.take();
-                let saved_ret_shape = self.ret_shape.take();
+                let saved_ret_rep = self.ret_rep.take();
                 // Isolate the defer state, like `lower_nested_fn`. A lambda body
                 // is its OWN fn scope: bone desugars `() => e` to a block with
                 // `return e`, so the body's return runs `run_all_defers` -- which
@@ -441,12 +454,8 @@ impl Builder<'_> {
                 // now -- `convert_closures` splits it out and the inliner runs
                 // over the standalone body -- but that happens after lowering, so
                 // this decision cannot see the specialized callee it would need.
-                let saved_unspliced = std::mem::replace(&mut self.in_unspliced_ctx, true);
-                self.ret_tuple = self.lambda_ret_tuple_shape(e);
-                // A `nobox` return leaves as leaves, same multi-return wire the
-                // tuple ABI uses and the same fn-TYPE key.
-                self.ret_shape = lam_abi.as_ref().and_then(|(_, rs)| rs.clone());
-                if let Some(shape) = self.ret_shape.clone() {
+                self.ret_rep = lam_plan.result();
+                if let Some(shape) = self.result_shape() {
                     let r = self.lower_expr_repr(body)?;
                     if self.is_open() {
                         let leaves = self.repr_to_leaves(&r, &shape);
@@ -454,13 +463,11 @@ impl Builder<'_> {
                     }
                     self.defers = saved_defers;
                     self.in_defer_body = saved_in_defer;
-                    self.in_unspliced_ctx = saved_unspliced;
-                    self.ret_tuple = saved_ret_tuple;
-                    self.ret_shape = saved_ret_shape;
+                    self.ret_rep = saved_ret_rep;
                     self.cur = saved;
                     return Ok(self.emit_cur(Inst::Lambda { params: param_cells, entry }));
                 }
-                match self.ret_tuple.clone() {
+                match self.result_tuple() {
                     // A splatting tuple return needs the body as a repr, so a
                     // `nobox` element reaches the wire as leaves.
                     Some(shape) if shape.splats() => {
@@ -483,22 +490,52 @@ impl Builder<'_> {
                 }
                 self.defers = saved_defers;
                 self.in_defer_body = saved_in_defer;
-                self.in_unspliced_ctx = saved_unspliced;
-                self.ret_tuple = saved_ret_tuple;
-                self.ret_shape = saved_ret_shape;
+                self.ret_rep = saved_ret_rep;
                 self.cur = saved;
                 Ok(self.emit_cur(Inst::Lambda { params: param_cells, entry }))
             }
 
             // `as` is identity at runtime EXCEPT `float as int`, which floors
             // (Lua numbers are all doubles) — mirrors rock-codegen.
-            Expr::As { value, target, .. } => {
+            Expr::As { value, target, kind } => {
                 let v = self.lower_expr(value)?;
-                let to_int = matches!(self.resolve_ty(target), Some(TypeExpr::Builtin(BuiltinTy::Int)));
-                let from_float =
-                    matches!(self.expr_ty(value), Some(TypeExpr::Builtin(BuiltinTy::Float)));
-                if to_int && from_float {
+                let to_int = self
+                    .concrete_ty_id(target)
+                    .is_some_and(|ty| matches!(ty.peel_nullable().0, crate::monoty::MonoTy::Int));
+                let from_float = self
+                    .concrete_expr_ty(value)
+                    .is_some_and(|ty| matches!(ty.peel_nullable().0, crate::monoty::MonoTy::Float));
+                let to_uint = self
+                    .concrete_ty_id(target)
+                    .is_some_and(|ty| matches!(ty.peel_nullable().0, crate::monoty::MonoTy::Uint));
+                let from_uint = self
+                    .concrete_expr_ty(value)
+                    .is_some_and(|ty| matches!(ty.peel_nullable().0, crate::monoty::MonoTy::Uint));
+                let from_int = self
+                    .concrete_expr_ty(value)
+                    .is_some_and(|ty| matches!(ty.peel_nullable().0, crate::monoty::MonoTy::Int));
+                let to_float = self
+                    .concrete_ty_id(target)
+                    .is_some_and(|ty| matches!(ty.peel_nullable().0, crate::monoty::MonoTy::Float));
+                if kind == bone_semantic::hir::AsKind::Bitcast && to_int && from_uint {
+                    Ok(self.emit_cur(Inst::UintBitcastInt(v)))
+                } else if kind == bone_semantic::hir::AsKind::Bitcast && to_uint && from_int {
+                    Ok(self.emit_cur(Inst::IntBitcastUint(v)))
+                } else if kind == bone_semantic::hir::AsKind::Bitcast {
+                    Err(CompilerError::new_with_label(
+                        self.cur_span.unwrap_or_else(Span::unknown),
+                        "bitcast requires an `int` and a `uint` operand/target".to_string(),
+                    ))
+                } else if to_int && from_float {
                     Ok(self.emit_cur(Inst::FloatToInt(v)))
+                } else if to_uint && from_int {
+                    Ok(self.emit_cur(Inst::IntToUint(v)))
+                } else if to_int && from_uint {
+                    Ok(self.emit_cur(Inst::UintToInt(v)))
+                } else if to_uint && from_float {
+                    Ok(self.emit_cur(Inst::FloatToUint(v)))
+                } else if to_float && from_uint {
+                    Ok(self.emit_cur(Inst::UintToFloat(v)))
                 } else {
                     Ok(v)
                 }
@@ -554,9 +591,11 @@ impl Builder<'_> {
             // A range used as a VALUE (not a `for` iterable — `lower_for`
             // intercepts that) materializes to the stdlib Vec-shaped `__range`.
             Expr::Range { low, high } => {
+                let is_uint = matches!(self.arith_ty(low), Some(ArithTy::Uint))
+                    || matches!(self.arith_ty(high), Some(ArithTy::Uint));
                 let lo = self.lower_expr(low)?;
                 let hi = self.lower_expr(high)?;
-                let func = self.resolve_global_fn("__range")?;
+                let func = self.resolve_global_fn(if is_uint { "__range_uint" } else { "__range" })?;
                 Ok(self.emit_cur(Inst::Call { func, args: vec![lo, hi] }))
             }
 
@@ -756,7 +795,7 @@ impl Builder<'_> {
                     return s.map_column_store(b, i, value, elem);
                 }
                 if let ContainerKind::NativeBufferValue(elem) = kind {
-                    if s.is_leaf_addressed(elem) {
+                    if s.is_leaf_addressed(elem)? {
                         return s.nb_leaf_element_store(b, i, value, elem);
                     }
                 }
@@ -859,11 +898,11 @@ impl Builder<'_> {
                 self.emit_cur(Inst::StoreGlobal { name, value: new_v });
             }
             Expr::FieldAccess { base, field } => {
-                if let Some((buf, checked, _, addr)) = self.nb_leaf_rmw_place(target)? {
-                    let cur = self.nb_leaf_load(buf, checked, &addr);
+                if let Some((buf, checked, _, place)) = self.nb_leaf_rmw_place(target)? {
+                    let cur = self.nb_leaf_load(buf, checked, &place);
                     let rv = self.lower_expr(value)?;
                     let new_v = self.compound_combine(scalar, op_fn, overload, cur, rv)?;
-                    self.nb_leaf_store(buf, checked, &addr, new_v);
+                    self.nb_leaf_store(buf, checked, &place, new_v);
                     return Ok(());
                 }
                 let (pbase, key) = self.physical_field(base, field);
@@ -925,8 +964,8 @@ impl Builder<'_> {
         }
     }
 
-    /// `target++` / `target--` (prefix or postfix). Reads the target, adds +/-1
-    /// (typed: `IntAdd`/`FloatAdd` per the target's scalar type), writes it back,
+    /// `target++` / `target--` (prefix or postfix). Reads the target, adds or
+    /// subtracts one with the target's scalar instruction family, writes it back,
     /// and yields the OLD value (postfix) or NEW value (prefix). Var / global /
     /// field / index targets, mirroring assignment.
     pub(crate) fn lower_incdec(
@@ -937,20 +976,23 @@ impl Builder<'_> {
     ) -> Result<Idx<Inst>, CompilerError> {
         let ty = self
             .arith_ty(target)
-            .filter(|t| matches!(t, ArithTy::Int | ArithTy::Float))
-            .ok_or_else(|| gap("inc/dec of a non-int/float target"))?;
+            .filter(|t| matches!(t, ArithTy::Int | ArithTy::Uint | ArithTy::Float))
+            .ok_or_else(|| gap("inc/dec of a non-numeric target"))?;
         let bump = |s: &mut Self, old: Idx<Inst>| -> Idx<Inst> {
             let delta = match (ty, decrement) {
                 (ArithTy::Float, false) => Inst::Const(Lit::Float(1.0)),
                 (ArithTy::Float, true) => Inst::Const(Lit::Float(-1.0)),
+                (ArithTy::Uint, _) => Inst::Const(Lit::Uint(1)),
                 (_, false) => Inst::Const(Lit::Int(1)),
                 (_, true) => Inst::Const(Lit::Int(-1)),
             };
             let d = s.emit_cur(delta);
-            let inst = if ty == ArithTy::Float {
-                Inst::FloatAdd(old, d)
-            } else {
-                Inst::IntAdd(old, d)
+            let inst = match (ty, decrement) {
+                (ArithTy::Float, _) => Inst::FloatAdd(old, d),
+                (ArithTy::Uint, false) => Inst::UintAdd(old, d),
+                (ArithTy::Uint, true) => Inst::UintSub(old, d),
+                (ArithTy::Int, _) => Inst::IntAdd(old, d),
+                (ArithTy::Str, _) => unreachable!("inc/dec scalar filter admitted a string"),
             };
             s.emit_cur(inst)
         };
@@ -973,7 +1015,7 @@ impl Builder<'_> {
                 Ok(if postfix { old } else { new })
             }
             // A primitive leaf of a `nobox` global (`SPOT.x++`) is its own global.
-            // `arith_ty` already restricted the target to int/float, so a whole
+            // `arith_ty` already restricted the target to a scalar, so a whole
             // group can never reach here.
             _ if matches!(self.nobox_global_place(target), Some((_, None))) => {
                 let (leaves, _) = self.nobox_global_place(target).expect("guard matched");
@@ -990,10 +1032,10 @@ impl Builder<'_> {
                 Ok(if postfix { old } else { new })
             }
             Expr::FieldAccess { base, field } => {
-                if let Some((buf, checked, _, addr)) = self.nb_leaf_rmw_place(target)? {
-                    let old = self.nb_leaf_load(buf, checked, &addr);
+                if let Some((buf, checked, _, place)) = self.nb_leaf_rmw_place(target)? {
+                    let old = self.nb_leaf_load(buf, checked, &place);
                     let new = bump(self, old);
-                    self.nb_leaf_store(buf, checked, &addr, new);
+                    self.nb_leaf_store(buf, checked, &place, new);
                     return Ok(if postfix { old } else { new });
                 }
                 let (pbase, key) = self.physical_field(base, field);
@@ -1401,6 +1443,7 @@ impl Builder<'_> {
         let capacity = self.emit_cur(Inst::Const(Lit::Int(elems.len() as i64)));
         Ok(self.emit_cur(Inst::MakeVecColumns {
             elem: elem.name,
+            nobox: elem.is_nobox(),
             columns,
             len: elems.len(),
             capacity,
@@ -1486,29 +1529,35 @@ impl Builder<'_> {
             return Ok(());
         }
         let v = self.lower_expr(inner)?;
-        match self.expr_ty(inner) {
-            Some(TypeExpr::Tuple { elements }) => {
-                for i in 0..elements.into_iter().count() {
-                    let value = self.emit_cur(Inst::TupleIndex { base: v, index: i });
-                    self.append_spread_repr(arr, ValueRepr::Scalar(value), dest)?;
+        if let Some(ty) = self.concrete_expr_ty(inner) {
+            return match ty.peel_nullable().0 {
+                crate::monoty::MonoTy::Tuple(elements) => {
+                    for (index, _) in elements.into_iter().enumerate() {
+                        let value = self.emit_cur(Inst::TupleIndex { base: v, index });
+                        self.append_spread_repr(arr, ValueRepr::Scalar(value), dest)?;
+                    }
+                    Ok(())
                 }
-                Ok(())
-            }
-            Some(TypeExpr::App { ctor: TypeCtor::Array | TypeCtor::Map, .. }) => {
-                self.spread_array_loop(arr, inner, v, dest)
-            }
-            Some(TypeExpr::App { ctor: TypeCtor::Nominal(name), .. }) => {
-                let fields = self
-                    .struct_field_names(name)
-                    .ok_or_else(|| gap("spread of a non-struct nominal type"))?;
-                for field in fields {
-                    let value = self.emit_cur(Inst::Field { base: v, field });
-                    self.append_spread_repr(arr, ValueRepr::Scalar(value), dest)?;
+                crate::monoty::MonoTy::App {
+                    ctor: crate::monoty::MonoCtor::Array | crate::monoty::MonoCtor::Map,
+                    ..
+                } => self.spread_array_loop(arr, inner, v, dest),
+                crate::monoty::MonoTy::App {
+                    ctor: crate::monoty::MonoCtor::Nominal(name), ..
+                } => {
+                    let fields = self
+                        .struct_field_names(*name)
+                        .ok_or_else(|| gap("spread of a non-struct nominal type"))?;
+                    for field in fields {
+                        let value = self.emit_cur(Inst::Field { base: v, field });
+                        self.append_spread_repr(arr, ValueRepr::Scalar(value), dest)?;
+                    }
+                    Ok(())
                 }
-                Ok(())
-            }
-            _ => Err(gap("spread of an unsupported type")),
+                _ => Err(gap("spread of an unsupported type")),
+            };
         }
+        Err(gap("spread expression is missing from the concrete type plan"))
     }
 
     /// Runtime copy of every element of `src` (read per its `coll_kind`) into

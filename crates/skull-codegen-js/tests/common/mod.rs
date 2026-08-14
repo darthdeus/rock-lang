@@ -3,7 +3,21 @@
 
 #![allow(dead_code)] // every test file includes this module; none uses all of it.
 
-use skull_mir::lower::{lower_function, ScalarCtx};
+use std::sync::Arc;
+
+use skull_graph::instance_graph;
+use skull_mir::instance::Instance;
+use skull_mir::lower::{lower_instance_with_plans, ScalarCtx};
+use skull_mir::mir::{FuncRef, MirFunc};
+use skull_mir::monoty::MonoInterner;
+
+pub struct InlineOffGuard(#[allow(dead_code)] skull_transform::InlineOffGuard);
+
+impl InlineOffGuard {
+    pub fn on() -> Self {
+        InlineOffGuard(skull_transform::inline_off_guard())
+    }
+}
 
 /// Every `node` spawn in this crate's tests goes through here.
 ///
@@ -47,17 +61,36 @@ pub fn ws_with(src: &str) -> bone_semantic::inference::Workspace {
     bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass")
 }
 
+/// Lower one test root through the graph-owned concrete plan. Keeping this
+/// helper here makes every JS MIR fixture exercise the same entry as the
+/// production emitter, including the callee table and shared type arena.
+pub fn lower_test_ref(
+    ws: &bone_semantic::inference::Workspace,
+    mid: bone_semantic::prelude::ModuleId,
+    fid: comfy_la_arena::Idx<bone_semantic::hir::Function>,
+) -> MirFunc {
+    let root = FuncRef { module: mid, func: fid };
+    let interner = Arc::new(MonoInterner::new());
+    let graph = instance_graph::build_in(ws, vec![root], false, Arc::clone(&interner));
+    let scx = ScalarCtx::new(ws).sharing(interner);
+    let concrete = skull_graph::concrete_body::build(ws, &graph);
+    let plan = concrete
+        .plans
+        .get(&Instance::base(FuncRef { module: mid, func: fid }))
+        .unwrap_or_else(|| panic!("no concrete plan for <test> function {fid:?}"));
+    lower_instance_with_plans(ws, &scx, plan, &concrete.plans)
+        .unwrap_or_else(|e| panic!("lower concrete test root: {}", e.message))
+}
+
 /// Lower the fn named `name` in the `<test>` module (must be unique there).
 pub fn lower_test_fn(
     ws: &bone_semantic::inference::Workspace,
     name: &str,
 ) -> skull_mir::mir::MirFunc {
-    let scx = ScalarCtx::new(ws);
     let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
     for (fid, f) in ws.module(mid).functions.iter() {
         if f.name.as_str() == name {
-            return lower_function(ws, &scx, mid, fid)
-                .unwrap_or_else(|e| panic!("lower `{name}`: {}", e.message));
+            return lower_test_ref(ws, mid, fid);
         }
     }
     panic!("no fn `{name}` in <test> module");
@@ -87,7 +120,6 @@ pub fn emit_user_err(ws: &bone_semantic::inference::Workspace, name: &str) -> St
 /// The Vec overloads (multi-value return) reject, so the first that emits is the
 /// scalar one.
 pub fn emit_scalar(ws: &bone_semantic::inference::Workspace, name: &str, arity: usize) -> String {
-    let scx = ScalarCtx::new(ws);
     for (_, &mid) in ws.module_ids.iter() {
         let module = ws.module(mid);
         for (fid, f) in module.functions.iter() {
@@ -98,7 +130,10 @@ pub fn emit_scalar(ws: &bone_semantic::inference::Workspace, name: &str, arity: 
             {
                 continue;
             }
-            let Ok(mf) = lower_function(ws, &scx, mid, fid) else { continue };
+            let mf = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                lower_test_ref(ws, mid, fid)
+            }));
+            let Ok(mf) = mf else { continue };
             if let Ok(js) = skull_codegen_js::emit::emit_fn(ws, &mf, &format!("{name}_fb")) {
                 return js;
             }
@@ -106,4 +141,3 @@ pub fn emit_scalar(ws: &bone_semantic::inference::Workspace, name: &str, arity: 
     }
     panic!("no emittable scalar `{name}`/{arity} overload");
 }
-

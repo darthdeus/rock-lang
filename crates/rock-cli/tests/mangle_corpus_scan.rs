@@ -54,6 +54,7 @@ fn encode_ty(ws: &Workspace, ty: TyId, sep: &str) -> String {
             hir::BuiltinTy::Any => "any",
             hir::BuiltinTy::Unit => "unit",
             hir::BuiltinTy::Int => "int",
+            hir::BuiltinTy::Uint => "uint",
             hir::BuiltinTy::Float => "float",
             hir::BuiltinTy::Bool => "bool",
             hir::BuiltinTy::String => "string",

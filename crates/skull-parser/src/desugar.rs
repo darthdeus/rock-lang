@@ -35,7 +35,7 @@ pub fn desugar(ast: &mut Ast) {
 }
 
 /// Append `@pure @inline fn __op_*(a: NT, b: NT)` operators for every newtype
-/// over a primitive (int/float/string), mirroring rock's parser-side
+/// over a primitive (int/uint/float/string), mirroring rock's parser-side
 /// `synth_newtype_operator_items`. Newtypes are runtime-transparent, so each body
 /// is the raw Lua op over the unwrapped `a`/`b`. Self-returning arithmetic ops
 /// declare the newtype as their return; comparisons declare `bool`. Generic or
@@ -68,6 +68,21 @@ fn synth_newtype_operators(ast: &mut Ast) {
         ("__op_gt", "a > b", false),
         ("__op_ge", "a >= b", false),
     ];
+    let uint_specs: &[(&str, &str, bool)] = &[
+        ("__op_add", "(a + b) % 4294967296", true),
+        ("__op_sub", "(a - b) % 4294967296", true),
+        (
+            "__op_mul",
+            "local al = a % 65536\nlocal ah = math.floor(a / 65536)\nlocal bl = b % 65536\nlocal bh = math.floor(b / 65536)\nreturn (al * bl + ((al * bh + ah * bl) % 65536) * 65536) % 4294967296",
+            true,
+        ),
+        ("__op_idiv", "math.floor(a / b)", true),
+        ("__op_mod", "a % b", true),
+        ("__op_lt", "a < b", false),
+        ("__op_le", "a <= b", false),
+        ("__op_gt", "a > b", false),
+        ("__op_ge", "a >= b", false),
+    ];
     let string_specs: &[(&str, &str, bool)] = &[("__op_add", "a .. b", true)];
 
     // Collect targets first — the synthesis allocs into the type arena, so it
@@ -80,6 +95,7 @@ fn synth_newtype_operators(ast: &mut Ast) {
         }
         let specs = match ast.types[nt.wrapped].kind {
             TypeExprKind::Int => int_specs,
+            TypeExprKind::Uint => uint_specs,
             TypeExprKind::Float => float_specs,
             TypeExprKind::String => string_specs,
             _ => continue,
@@ -158,6 +174,7 @@ pub(crate) fn child_exprs(ast: &Ast, e: Idx<ExprData>) -> ExprEdges {
 
         ExprKind::Paren(x)
         | ExprKind::As(x, _)
+        | ExprKind::Bitcast(x, _)
         | ExprKind::TypeAscription(x, _)
         | ExprKind::Not(x)
         | ExprKind::BitNot(x)

@@ -26,6 +26,7 @@ fn raw<T>(i: Idx<T>) -> u32 {
 pub fn emit_coroutine(
     ws: &Workspace,
     ctx: &CodegenCtx,
+    interner: &skull_mir::monoty::MonoInterner,
     plan: &CoroutinePlan,
     func: &MirFunc,
 ) -> String {
@@ -37,8 +38,8 @@ pub fn emit_coroutine(
     let mut lowered = skull_transform::transform_coroutine(func, channel);
     let frame = FrameCtx {
         s_cell: lowered.s_cell,
-        fields: lowered.frame_cells.iter().copied().collect(),
-        slots: lowered.frame_slots.clone(),
+        fields: lowered.frame_plan.fields().iter().copied().collect(),
+        slots: lowered.frame_plan.slots().clone(),
         hoist_lambdas: true,
     };
     // Hooks/defers keep the pre-P1 emission (D5 of
@@ -86,8 +87,8 @@ pub fn emit_coroutine(
     // inline arm -- `aux_frame` was built above, before the pass mutated the arena.
     let frame_info = FrameInfo {
         s_cell: lowered.s_cell,
-        fields: lowered.frame_cells.iter().copied().collect(),
-        slots: lowered.frame_slots.clone(),
+        fields: lowered.frame_plan.fields().iter().copied().collect(),
+        slots: lowered.frame_plan.slots().clone(),
     };
     let pre_nested = lowered.step.nested_fns.len();
     skull_transform::convert_closures_framed(
@@ -101,7 +102,8 @@ pub fn emit_coroutine(
     for nf in lowered.step.nested_fns[pre_nested..].iter() {
         ctx.mint_synthetic(nf.name.to_string());
     }
-    let step_lua = emit_named_framed(ws, ctx, &step_name, &lowered.step, Some(&frame), None);
+    let step_lua =
+        emit_named_framed(ws, ctx, interner, &step_name, &lowered.step, Some(&frame), None);
     // Hoisted lambda bodies: frame-free sibling fns (the pass materialized their
     // frame accesses as `e.c<S>.c<slot>`, so they need no `FrameCtx`). cleanup
     // drops the clone's dead ROOT-region insts; a co fn's loops are recovered by
@@ -111,7 +113,8 @@ pub fn emit_coroutine(
     let mut hoisted = std::mem::take(&mut lowered.step.nested_fns);
     for nf in hoisted[pre_nested..].iter_mut() {
         skull_transform::cleanup_with_nobox(ws, nf);
-        nested_luas.push_str(&skull_codegen_lua::emit_named(ws, ctx, nf.name.as_str(), nf));
+        nested_luas
+            .push_str(&skull_codegen_lua::emit_named(ws, ctx, interner, nf.name.as_str(), nf));
     }
     lowered.step.nested_fns = hoisted;
     // Terminal-cleanup defers and lifecycle-hook lambdas
@@ -128,7 +131,15 @@ pub fn emit_coroutine(
     // `__rock_coroutine_run_defers` iterates the defers LIFO with per-body pcall.
     let s_params = [lowered.s_cell];
     let emit_aux = |aux_name: &str, entry: Idx<Block>| {
-        emit_named_framed(ws, ctx, aux_name, &lowered.step, Some(&aux_frame), Some((entry, &s_params)))
+        emit_named_framed(
+            ws,
+            ctx,
+            interner,
+            aux_name,
+            &lowered.step,
+            Some(&aux_frame),
+            Some((entry, &s_params)),
+        )
     };
     let mut defer_luas = String::new();
     for (k, (_, entry)) in lowered.step.coro_defers.iter().enumerate() {
@@ -172,12 +183,20 @@ fn emit_constructor(plan: &CoroutinePlan, step_name: &str, lowered: &CoroLowered
     let param_fields: Vec<String> = lowered
         .params
         .iter()
-        .map(|p| format!("c{}", lowered.frame_slots.get(p).expect("co-fn param must be a frame cell with a slot")))
+        .map(|p| {
+            format!(
+                "c{}",
+                lowered
+                    .frame_plan
+                    .slot(*p)
+                    .expect("co-fn param must be a frame cell with a slot")
+            )
+        })
         .collect();
     let mut init = vec![
         "__ty = \"Coroutine\"".to_string(),
         format!("{STATE} = 0"),
-        format!("__layout = {}", lowered.layout_hash),
+        format!("__layout = {}", lowered.frame_plan.layout_hash()),
     ];
     for pf in &param_fields {
         init.push(format!("{pf} = {pf}"));

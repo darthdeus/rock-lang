@@ -14,10 +14,9 @@
 //! the call was the bug -- an opaque body cannot be given a representation
 //! contract.
 //!
-//! DISCRIMINANT, measured: this was NOT about genericity and NOT about the
-//! specialization bail-out. The non-generic control fails identically, so
-//! `compute_call_spec`'s `inline_body.is_some()` arm was never the cause -- an
-//! `inline(lua)` body is an opaque string, so nothing can adapt it either way.
+//! DISCRIMINANT, measured: this is not about genericity or instance discovery.
+//! The non-generic control fails identically: an `inline(lua)` body is an opaque
+//! string, so the boundary plan must reject an unstated container contract.
 //! It is also not about the `nobox` mark: an UNMARKED value struct is
 //! column-eligible on the same terms, which is why the unmarked case is here
 //! rather than in a nobox-specific file.
@@ -194,8 +193,8 @@ fn a_generic_inline_lua_body_over_a_column_vec_rejects() {
     );
 }
 
-/// THE discriminant. Its rejecting identically is what keeps the defect attributed
-/// to the opaque boundary rather than to `compute_call_spec`'s bail-out.
+/// THE discriminant. Its rejecting identically keeps the defect attributed to
+/// the opaque boundary rather than to instance discovery.
 #[test]
 fn a_non_generic_inline_lua_body_over_a_column_vec_rejects_identically() {
     assert!(rejection(GUARDED_CONCRETE).contains("column-stored `[P]`"));

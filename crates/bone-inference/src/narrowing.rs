@@ -82,6 +82,7 @@ fn cond_has_effect(gamma: &Gamma, c: BodyCtx, e: Idx<Expr>) -> bool {
         Expr::Call {
             callee: Callee::Unresolved { name, .. },
             args,
+            ..
         } => {
             let candidates = resolve_callee(gamma, name);
             let callee_pure = !candidates.is_empty()
@@ -151,6 +152,7 @@ fn detect_null_narrow_inner(c: BodyCtx, cond: Idx<Expr>) -> (Vec<Narrow>, Vec<Na
         Expr::Call {
             callee: Callee::Unresolved { name, .. },
             args,
+            ..
         } if name.as_str() == "is_null" && args.len() == 1 => match path_key(c, args.start()) {
             Some(p) => (vec![], path_prefixes(p)),
             None => (vec![], vec![]),

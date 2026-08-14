@@ -1,9 +1,8 @@
 //! D-3: a generic `co fn` is emitted CONCRETELY, one body per instantiation.
 //!
-//! `compute_call_spec` (`crates/skull-mir/src/lower/shape.rs`) used to bail on
-//! `is_coroutine` before it could build a `SpecKey`, so every instantiation
-//! shared one erased body and one set of `__step`/`__resume` symbols. Two things
-//! followed, and they are the two arms here:
+//! The concrete graph used to be bypassed for coroutine bodies, so every
+//! instantiation shared one erased body and one set of `__step`/`__resume`
+//! symbols. Two things followed, and they are the two arms here:
 //!
 //! - A COLUMN-stored instantiation would read a `_data` that its representation
 //!   does not have, so the shared body is WRONG rather than slow. It must
@@ -85,6 +84,16 @@ fn main() {
     let ty = 0
     for v in cy { ty = v }
     print("{tx} {ty}")
+}
+"#;
+
+const GENERIC_CO_CONCRETE_RESULT_FALLOFF: &str = r#"
+co fn missing<T>(value: T) -> Coroutine<int, T> {
+    yield 1
+}
+
+fn main() {
+    let _c = missing(1)
 }
 "#;
 
@@ -222,5 +231,15 @@ fn a_generic_coroutine_over_boxed_elements_owns_a_family_per_instance() {
         distinct.len(),
         "no `__step` symbol may be defined twice -- the later definition would \
          clobber the earlier one: {steps:?}"
+    );
+}
+
+#[test]
+fn a_concrete_coroutine_result_rejects_a_reachable_falloff() {
+    let err = common::try_emit_module(GENERIC_CO_CONCRETE_RESULT_FALLOFF)
+        .expect_err("a concrete non-unit coroutine result cannot fall off");
+    assert!(
+        err.message.contains("can fall off") && err.message.contains("missing"),
+        "{err:?}"
     );
 }

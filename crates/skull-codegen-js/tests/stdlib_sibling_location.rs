@@ -178,11 +178,9 @@ fn sibling_facts_with(
             .annotations
             .iter()
             .map(|a| a.name.name.to_string())
-            // `@inline` is unreachable on a fn that HAS an inline body: both
-            // `classify` (skull-transform) and `compute_call_spec` (skull-mir)
-            // return early on `inline_body.is_some()` before they read it. So a
-            // sibling carrying it and one not carrying it behave identically,
-            // and gating on it would only assert a cosmetic difference.
+            // `@inline` is an optimization annotation, not a boundary or ABI
+            // discriminator. A sibling carrying it and one not carrying it
+            // must therefore behave identically here.
             // `@allow` is a lint suppression -- it scopes a diagnostic over the
             // body it sits on, so it is expected to differ between two bodies
             // written in different languages (`long_inline_lua` cannot apply to

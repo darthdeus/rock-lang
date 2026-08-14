@@ -105,8 +105,8 @@ fn web_out_file(project: &str, out: Option<&str>, ext: &str) -> PathBuf {
 /// Returns the written path and the asset count, so a caller can report and a
 /// test can assert a denominator.
 fn build_single_file(project: &str, out: Option<&str>) -> Result<(PathBuf, usize)> {
-    let (emitted, ws) = crate::js_test::try_emit_js_program_project(project)?;
-    let register_lines = shader_register_lines_js(&ws)?;
+    let (emitted, cache, ws) = crate::js_test::try_emit_js_program_project_cached(project)?;
+    let register_lines = shader_register_lines_js(&ws, &cache)?;
     let game_dir = web_game_dir(project);
     let assets = collect_web_assets(Path::new(project), &game_dir)?;
     let preload: Vec<String> = assets.iter().map(|asset| asset.key.clone()).collect();
@@ -294,8 +294,8 @@ fn build_web_bundle(
     copy_assets: bool,
     watch: bool,
 ) -> Result<Vec<WebAsset>> {
-    let (emitted, ws) = crate::js_test::try_emit_js_program_project(project)?;
-    write_web_bundle(project, out_dir, copy_assets, watch, &emitted, &ws)
+    let (emitted, cache, ws) = crate::js_test::try_emit_js_program_project_cached(project)?;
+    write_web_bundle(project, out_dir, copy_assets, watch, &emitted, &ws, &cache)
 }
 
 fn write_web_bundle(
@@ -305,8 +305,9 @@ fn write_web_bundle(
     watch: bool,
     emitted: &skull_codegen_js::emit::JsProgram,
     ws: &bone_semantic::inference::Workspace,
+    cache: &skull_codegen_js::emit::JsEmitCache,
 ) -> Result<Vec<WebAsset>> {
-    let register_lines = shader_register_lines_js(&ws)?;
+    let register_lines = shader_register_lines_js(ws, cache)?;
     let game_dir = web_game_dir(project);
     let assets = collect_web_assets(Path::new(project), &game_dir)?;
     let preload: Vec<String> = assets.iter().map(|asset| asset.key.clone()).collect();
@@ -358,19 +359,23 @@ impl WebCompiler {
         let include_tests =
             !rock_host::project::is_game_project(&PathBuf::from(project)).unwrap_or(false);
         let live = crate::live_project::LiveProject::init(project, include_tests)?;
-        let scx = skull_mir::lower::ScalarCtx::new(live.workspace())
-            .with_target(bone_semantic::hir::FnBackend::Js);
         let (emitted, cache) = skull_codegen_js::emit::emit_program_cached(
             live.workspace(),
-            &scx,
             live.entry_module(),
         )
         .map_err(|error| anyhow::anyhow!(
             "{}",
             crate::skull_backend::render_project_err(live.sources(), &error)
         ))?;
-        let assets =
-            write_web_bundle(project, out_dir, false, true, &emitted, live.workspace())?;
+        let assets = write_web_bundle(
+            project,
+            out_dir,
+            false,
+            true,
+            &emitted,
+            live.workspace(),
+            &cache,
+        )?;
         let main_js_name = emitted.main_js_name.clone();
         let mut compiler = Self {
             project: live,
@@ -416,11 +421,8 @@ impl WebCompiler {
                 Ok(WebCompile::Reload)
             }
             crate::live_project::LiveUpdate::BodyOnly { reinferred, .. } => {
-                let scx = skull_mir::lower::ScalarCtx::new(self.project.workspace())
-                    .with_target(bone_semantic::hir::FnBackend::Js);
                 match skull_codegen_js::emit::emit_overlay(
                     self.project.workspace(),
-                    &scx,
                     self.project.entry_module(),
                     &mut self.cache,
                     &reinferred,
@@ -430,7 +432,10 @@ impl WebCompiler {
                     crate::skull_backend::render_project_err(self.project.sources(), &error)
                 ))? {
                     skull_codegen_js::emit::JsReload::Overlay(mut overlay) => {
-                        overlay.push_str(&shader_register_lines_js(self.project.workspace())?);
+                        overlay.push_str(&shader_register_lines_js(
+                            self.project.workspace(),
+                            &self.cache,
+                        )?);
                         rock_host::project::write_atomic(
                             &out_dir.join("incremental.js"),
                             &overlay,
@@ -450,11 +455,8 @@ impl WebCompiler {
     }
 
     fn emit_full(&mut self, project: &str, out_dir: &Path) -> Result<Vec<WebAsset>> {
-        let scx = skull_mir::lower::ScalarCtx::new(self.project.workspace())
-            .with_target(bone_semantic::hir::FnBackend::Js);
         let (emitted, cache) = skull_codegen_js::emit::emit_program_cached(
             self.project.workspace(),
-            &scx,
             self.project.entry_module(),
         )
         .map_err(|error| anyhow::anyhow!(
@@ -468,6 +470,7 @@ impl WebCompiler {
             true,
             &emitted,
             self.project.workspace(),
+            &cache,
         )?;
         self.main_js_name = emitted.main_js_name;
         self.cache = cache;
@@ -482,7 +485,7 @@ impl WebCompiler {
             program: self.cache.current_program().to_string(),
             main_js_name: self.main_js_name.clone(),
         };
-        let register_lines = shader_register_lines_js(self.project.workspace())?;
+        let register_lines = shader_register_lines_js(self.project.workspace(), &self.cache)?;
         let game_js = assemble_web_program(&emitted, &register_lines, &preload, &game_dir);
         rock_host::project::write_atomic(&out_dir.join("game.js"), &game_js)?;
         Ok(())
@@ -920,29 +923,54 @@ fn js_int_vec(items: &[i64]) -> String {
 /// rewrite at shader-compile time, like the native GLES path). Emitted after
 /// the program (module load), before the boot line, so registrations queue in
 /// PENDING_SHADER_SRCS pre-GL exactly as on a native cold start.
-fn shader_register_lines_js(ws: &bone_semantic::inference::Workspace) -> Result<String> {
+fn shader_register_lines_js(
+    ws: &bone_semantic::inference::Workspace,
+    cache: &skull_codegen_js::emit::JsEmitCache,
+) -> Result<String> {
     use std::fmt::Write as _;
     let pairs =
         skull_mir::lower::collect_shader_pairs(ws).map_err(|e| anyhow::anyhow!(e.message))?;
+    let programs: Vec<skull::shader_artifact::ShaderProgram> = pairs
+        .iter()
+        .map(|pair| skull::shader_artifact::ShaderProgram {
+            vert: pair.vert,
+            frag: pair.frag,
+        })
+        .collect();
+    let shader_scx = skull_mir::lower::ScalarCtx::new_values_first_class(ws)
+        .sharing(cache.interner_handle());
+    let view = skull::shader_artifact::realize_shader_with_context(
+        ws,
+        cache.graph(),
+        &skull::shader_artifact::ShaderArtifactRequest {
+            spec: skull::target_projection::TargetSpec {
+                shader: Some(skull::target_projection::ShaderTargetSpec::Glsl(
+                    skull_codegen_glsl::GlslProfile::Core330,
+                )),
+                ..skull::target_projection::LUAJIT_DESKTOP
+            },
+            programs: &programs,
+        },
+        &shader_scx,
+    )
+    .ok_or_else(|| anyhow::anyhow!("GLSL shader view is unavailable for the JS session"))?;
+    if view.program_views.len() != pairs.len() {
+        anyhow::bail!("GLSL shader view/collection denominator differs for the JS session");
+    }
     let mut out = String::new();
     let profile = skull_codegen_glsl::GlslProfile::Core330;
-    for pair in pairs {
-        let fname = ws.module(pair.frag.module).functions[pair.frag.func].name;
+    for (pair, program_view) in pairs.iter().zip(&view.program_views) {
         let emission = match pair.vert {
-            Some(vert) => {
-                let vname = ws.module(vert.module).functions[vert.func].name;
-                skull_codegen_glsl::emit_shader_pipeline_with_dependencies(
-                    ws,
-                    vert.module,
-                    vname.as_str(),
-                    fname.as_str(),
-                    profile,
-                )
-            }
-            None => skull_codegen_glsl::emit_shader_entry_with_dependencies(
+            Some(_) => skull_codegen_glsl::emit_shader_pipeline_with_view(
                 ws,
-                pair.frag.module,
-                fname.as_str(),
+                &shader_scx,
+                program_view,
+                profile,
+            ),
+            None => skull_codegen_glsl::emit_shader_entry_with_view(
+                ws,
+                &shader_scx,
+                program_view,
                 profile,
             ),
         }
@@ -956,9 +984,11 @@ fn shader_register_lines_js(ws: &bone_semantic::inference::Workspace) -> Result<
             emission.abi.uniform_blocks.iter(),
             emission.abi.uniform_array_blocks.iter(),
         );
+        let fullscreen = pair.vert.is_none();
+        let semantic_wire = emission.interface.semantic_wire(fullscreen);
         let _ = writeln!(
             out,
-            "__rock_shader_register({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {});",
+            "__rock_shader_register({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {});",
             crate::js_test::js_str(&pair.key),
             crate::js_test::js_str(&emission.source),
             js_string_vec(&emission.abi.texture_units),
@@ -972,7 +1002,8 @@ fn shader_register_lines_js(ws: &bone_semantic::inference::Workspace) -> Result<
             js_int_vec(&w.member_kinds),
             js_int_vec(&w.member_capacities),
             js_int_vec(&w.member_strides),
-            pair.vert.is_none(),
+            fullscreen,
+            crate::js_test::js_str(&semantic_wire),
         );
     }
     Ok(out)
@@ -1082,6 +1113,156 @@ fn index_html(title: &str, watch: bool) -> String {
 </html>
 "#
     )
+}
+
+#[cfg(test)]
+mod shader_registration_removal_tests {
+    use super::*;
+    use std::collections::BTreeSet;
+    use std::sync::Arc;
+
+    const V0: &str = r#"
+@shader(fragment)
+fn frag_a(tc: Vec2) -> Vec4 {
+    return Vec4 { x: tc.x, y: 0.0, z: 0.0, w: 1.0 }
+}
+
+@shader(fragment)
+fn frag_b(tc: Vec2) -> Vec4 {
+    return Vec4 { x: 0.0, y: tc.x, z: 0.0, w: 1.0 }
+}
+
+fn choose_a() -> string { return rock_shader(frag_a) }
+fn choose_b() -> string { return rock_shader(frag_b) }
+fn main() { print(choose_a()); print(choose_b()) }
+
+@nomangle inline(js) fn __rock_shader_register(
+    key: string,
+    src: string,
+    texture_slots: [string],
+    names: [string],
+    bindings: [int],
+    sizes: [int],
+    fingerprints: [int],
+    counts: [int],
+    member_names: [string],
+    member_offsets: [int],
+    member_kinds: [int],
+    member_capacities: [int],
+    member_strides: [int]
+) = """
+    (globalThis.__ROCK_SHADERS = globalThis.__ROCK_SHADERS || {})[key] = src;
+"""
+"#;
+
+    fn v1() -> String {
+        V0.replace("return rock_shader(frag_b)", "return \"removed\"")
+    }
+
+    fn key(
+        ws: &bone_semantic::inference::Workspace,
+        program: &skull::shader_artifact::ShaderProgram,
+    ) -> String {
+        let name = |fref: skull_mir::mir::FuncRef| {
+            ws.module(fref.module).functions[fref.func].name.to_string()
+        };
+        match program.vert {
+            Some(vert) => format!("{}+{}", name(vert), name(program.frag)),
+            None => name(program.frag),
+        }
+    }
+
+    fn logical_keys(
+        ws: &bone_semantic::inference::Workspace,
+        graph: &skull::instance_graph::InstanceGraph,
+    ) -> BTreeSet<String> {
+        let pairs = skull_mir::lower::collect_shader_pairs(ws).expect("shader collection");
+        let programs: Vec<_> = pairs
+            .iter()
+            .map(|pair| skull::shader_artifact::ShaderProgram {
+                vert: pair.vert,
+                frag: pair.frag,
+            })
+            .collect();
+        let scx = skull_mir::lower::ScalarCtx::new_values_first_class(ws)
+            .sharing(Arc::clone(graph.interner()));
+        let view = skull::shader_artifact::realize_shader_with_context(
+            ws,
+            graph,
+            &skull::shader_artifact::ShaderArtifactRequest {
+                spec: skull::target_projection::TargetSpec {
+                    shader: Some(skull::target_projection::ShaderTargetSpec::Glsl(
+                        skull_codegen_glsl::GlslProfile::Core330,
+                    )),
+                    ..skull::target_projection::LUAJIT_DESKTOP
+                },
+                programs: &programs,
+            },
+            &scx,
+        )
+        .expect("shader artifact view");
+        assert!(
+            view.program_views
+                .iter()
+                .all(|program| !program.stages.is_empty())
+        );
+        view.program_views
+            .iter()
+            .map(|program| key(ws, &program.program))
+            .collect()
+    }
+
+    fn registration_keys(text: &str) -> BTreeSet<String> {
+        let prefix = "__rock_shader_register(\"";
+        text.lines()
+            .filter_map(|line| {
+                let start = line.find(prefix).map(|index| index + prefix.len())?;
+                let end = line[start..].find('"')?;
+                Some(line[start..start + end].to_string())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn web_reload_removing_one_shader_callsite_removes_one_runtime_key() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let project = dir.path().join("project");
+        let output = dir.path().join("web");
+        std::fs::create_dir_all(&project).expect("project");
+        std::fs::write(project.join("stick.toml"), "[package]\nname = \"shader-removal\"\n")
+            .expect("manifest");
+        let source = project.join("main.rock");
+        std::fs::write(&source, V0).expect("source");
+        let project_name = project.to_str().expect("project path");
+        let (mut compiler, _) =
+            WebCompiler::init(project_name, &output).expect("initial web build");
+        let baseline = std::fs::read_to_string(output.join("game.js")).expect("baseline game");
+        let wanted = BTreeSet::from(["frag_a".to_string(), "frag_b".to_string()]);
+        assert_eq!(registration_keys(&baseline), wanted);
+        assert_eq!(logical_keys(compiler.project.workspace(), compiler.cache.graph()), wanted);
+
+        std::fs::write(&source, v1()).expect("edited source");
+        let reload = compiler
+            .recompile(project_name, &output, std::slice::from_ref(&source))
+            .expect("web reload");
+        assert!(
+            matches!(reload, WebCompile::Reload),
+            "a shader key removal must require a page reload"
+        );
+
+        let current = BTreeSet::from(["frag_a".to_string()]);
+        assert_eq!(logical_keys(compiler.project.workspace(), compiler.cache.graph()), current);
+        let mut runtime = registration_keys(
+            &std::fs::read_to_string(output.join("game.js")).unwrap(),
+        );
+        let incremental = std::fs::read_to_string(output.join("incremental.js"))
+            .expect("incremental web artifact");
+        runtime.extend(registration_keys(&incremental));
+        assert_eq!(
+            runtime, current,
+            "web runtime registration population retained a removed key"
+        );
+    }
 }
 
 #[cfg(test)]

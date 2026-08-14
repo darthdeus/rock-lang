@@ -362,12 +362,16 @@ pub fn infer_expr_used(
         }
 
         Expr::BitNot(inner) => {
-            let int_ty = gamma.workspace.builtins.int();
             let inner_ty = infer_expr(c, gamma, *inner)?;
-
-            unify(gamma, inner_ty, int_ty, c.body.expr_spans[*inner])?;
-
-            int_ty
+            let resolved = resolve(gamma, inner_ty, c.body.expr_spans[*inner]);
+            match *gamma.get(resolved) {
+                TypeExpr::Builtin(BuiltinTy::Int) | TypeExpr::Builtin(BuiltinTy::Uint) => resolved,
+                _ => {
+                    let int_ty = gamma.workspace.builtins.int();
+                    unify(gamma, inner_ty, int_ty, c.body.expr_spans[*inner])?;
+                    int_ty
+                }
+            }
         }
 
         Expr::Spread(..) => comp_error!(expr_span, "spread is only valid inside an array literal"),
@@ -433,6 +437,9 @@ pub fn infer_expr_used(
 
             match *gamma.get(resolved) {
                 TypeExpr::Builtin(BuiltinTy::Int) | TypeExpr::Builtin(BuiltinTy::Float) => resolved,
+                TypeExpr::Builtin(BuiltinTy::Uint) => {
+                    comp_error!(expr_span, "unary minus is not defined for `uint`")
+                }
 
                 TypeExpr::App {
                     ctor: TypeCtor::Nominal(name),
@@ -487,7 +494,12 @@ pub fn infer_expr_used(
                 }
                 AsKind::Cast => {
                     let value_ty = infer_expr(c, gamma, value)?;
+                    check_numeric_literal_cast(c, gamma, value, target, expr_span)?;
                     check_cast(gamma, value_ty, target, expr_span)?;
+                }
+                AsKind::Bitcast => {
+                    let value_ty = infer_expr(c, gamma, value)?;
+                    check_bitcast(gamma, value_ty, target, expr_span)?;
                 }
             }
             target
@@ -598,15 +610,9 @@ pub fn infer_expr_used(
         }
 
         Expr::Range { low, high } => {
-            let int_ty = gamma.workspace.builtins.int();
-            let low_ty = infer_expr(c, gamma, *low)?;
-            unify(gamma, low_ty, int_ty, c.body.expr_spans[*low])?;
-
-            let high_ty = infer_expr(c, gamma, *high)?;
-            unify(gamma, high_ty, int_ty, c.body.expr_spans[*high])?;
-
-            let int_texp = *gamma.get(int_ty);
-            let params = alloc_contiguous(&mut gamma.out.ty_arena, [int_texp]);
+            let range_ty = infer_range_bounds(c, gamma, *low, *high)?;
+            let range_texp = *gamma.get(range_ty);
+            let params = alloc_contiguous(&mut gamma.out.ty_arena, [range_texp]);
 
             let arr = gamma.out.ty_arena.alloc(TypeExpr::App {
                 ctor: TypeCtor::Array,
@@ -704,6 +710,21 @@ pub fn infer_expr_used(
             hir::BinOp::Eq | hir::BinOp::NotEq => {
                 let lhs_ty = infer_expr(c, gamma, *lhs)?;
                 let rhs_ty = infer_expr(c, gamma, *rhs)?;
+                let mut lhs_ty = resolve(gamma, lhs_ty, c.body.expr_spans[*lhs]);
+                let mut rhs_ty = resolve(gamma, rhs_ty, c.body.expr_spans[*rhs]);
+                if matches!(gamma.get(lhs_ty), TypeExpr::Builtin(BuiltinTy::Uint))
+                    && matches!(gamma.get(rhs_ty), TypeExpr::Builtin(BuiltinTy::Int))
+                    && matches!(c.body.expr_arena[*rhs], Expr::Int(_))
+                {
+                    check_expr(c, gamma, *rhs, lhs_ty, c.body.expr_spans[*rhs])?;
+                    rhs_ty = lhs_ty;
+                } else if matches!(gamma.get(rhs_ty), TypeExpr::Builtin(BuiltinTy::Uint))
+                    && matches!(gamma.get(lhs_ty), TypeExpr::Builtin(BuiltinTy::Int))
+                    && matches!(c.body.expr_arena[*lhs], Expr::Int(_))
+                {
+                    check_expr(c, gamma, *lhs, rhs_ty, c.body.expr_spans[*lhs])?;
+                    lhs_ty = rhs_ty;
+                }
 
                 // Comparing a value KNOWN to be non-null against `null` is a
                 // category error: `null` can't inhabit it, so the check is dead.
@@ -758,18 +779,64 @@ pub fn infer_expr_used(
             | hir::BinOp::Shr => {
                 let int_ty = gamma.workspace.builtins.int();
                 let lhs_ty = infer_expr(c, gamma, *lhs)?;
-
-                unify(gamma, lhs_ty, int_ty, c.body.expr_spans[*lhs])?;
-
                 let rhs_ty = infer_expr(c, gamma, *rhs)?;
-                unify(gamma, rhs_ty, int_ty, c.body.expr_spans[*rhs])?;
-
-                int_ty
+                let mut lhs_ty = resolve(gamma, lhs_ty, c.body.expr_spans[*lhs]);
+                let mut rhs_ty = resolve(gamma, rhs_ty, c.body.expr_spans[*rhs]);
+                if matches!(gamma.get(lhs_ty), TypeExpr::Builtin(BuiltinTy::Uint))
+                    && matches!(gamma.get(rhs_ty), TypeExpr::Builtin(BuiltinTy::Int))
+                    && matches!(c.body.expr_arena[*rhs], Expr::Int(_))
+                {
+                    check_expr(c, gamma, *rhs, lhs_ty, c.body.expr_spans[*rhs])?;
+                    rhs_ty = lhs_ty;
+                } else if matches!(gamma.get(rhs_ty), TypeExpr::Builtin(BuiltinTy::Uint))
+                    && matches!(gamma.get(lhs_ty), TypeExpr::Builtin(BuiltinTy::Int))
+                    && matches!(c.body.expr_arena[*lhs], Expr::Int(_))
+                {
+                    check_expr(c, gamma, *lhs, rhs_ty, c.body.expr_spans[*lhs])?;
+                    lhs_ty = rhs_ty;
+                }
+                if matches!(gamma.get(lhs_ty), TypeExpr::Builtin(BuiltinTy::Uint))
+                    || matches!(gamma.get(rhs_ty), TypeExpr::Builtin(BuiltinTy::Uint))
+                {
+                    let uint_ty = gamma.workspace.builtins.uint();
+                    unify(gamma, lhs_ty, uint_ty, c.body.expr_spans[*lhs])?;
+                    unify(gamma, rhs_ty, uint_ty, c.body.expr_spans[*rhs])?;
+                    if matches!(op, hir::BinOp::Shl | hir::BinOp::Shr)
+                        && let Expr::Int(value) = c.body.expr_arena[*rhs]
+                        && !(0..=31).contains(&value)
+                    {
+                        comp_error!(
+                            c.body.expr_spans[*rhs],
+                            "uint shift count must be in the range 0..=31, found {}",
+                            value
+                        );
+                    }
+                    uint_ty
+                } else {
+                    unify(gamma, lhs_ty, int_ty, c.body.expr_spans[*lhs])?;
+                    unify(gamma, rhs_ty, int_ty, c.body.expr_spans[*rhs])?;
+                    int_ty
+                }
             }
 
             hir::BinOp::Lt | hir::BinOp::Leq | hir::BinOp::Gt | hir::BinOp::Geq => {
                 let lhs_ty = infer_expr(c, gamma, *lhs)?;
                 let rhs_ty = infer_expr(c, gamma, *rhs)?;
+                let mut lhs_ty = resolve(gamma, lhs_ty, c.body.expr_spans[*lhs]);
+                let mut rhs_ty = resolve(gamma, rhs_ty, c.body.expr_spans[*rhs]);
+                if matches!(gamma.get(lhs_ty), TypeExpr::Builtin(BuiltinTy::Uint))
+                    && matches!(gamma.get(rhs_ty), TypeExpr::Builtin(BuiltinTy::Int))
+                    && matches!(c.body.expr_arena[*rhs], Expr::Int(_))
+                {
+                    check_expr(c, gamma, *rhs, lhs_ty, c.body.expr_spans[*rhs])?;
+                    rhs_ty = lhs_ty;
+                } else if matches!(gamma.get(rhs_ty), TypeExpr::Builtin(BuiltinTy::Uint))
+                    && matches!(gamma.get(lhs_ty), TypeExpr::Builtin(BuiltinTy::Int))
+                    && matches!(c.body.expr_arena[*lhs], Expr::Int(_))
+                {
+                    check_expr(c, gamma, *lhs, rhs_ty, c.body.expr_spans[*lhs])?;
+                    lhs_ty = rhs_ty;
+                }
 
                 let joined = join(gamma, lhs_ty, rhs_ty, expr_span)?;
                 // unify(gamma, lhs_ty, rhs_ty, expr_span)?;
@@ -778,6 +845,7 @@ pub fn infer_expr_used(
 
                 let orderable = match *gamma.get(resolved) {
                     TypeExpr::Builtin(BuiltinTy::Int)
+                    | TypeExpr::Builtin(BuiltinTy::Uint)
                     | TypeExpr::Builtin(BuiltinTy::Float)
                     | TypeExpr::Generic(..) => true,
 
@@ -790,7 +858,9 @@ pub fn infer_expr_used(
 
                         matches!(
                             gamma.get(inner),
-                            TypeExpr::Builtin(BuiltinTy::Int) | TypeExpr::Builtin(BuiltinTy::Float)
+                            TypeExpr::Builtin(BuiltinTy::Int)
+                                | TypeExpr::Builtin(BuiltinTy::Uint)
+                                | TypeExpr::Builtin(BuiltinTy::Float)
                         )
                     }
 
@@ -978,12 +1048,21 @@ pub fn infer_expr_used(
             tuple_of(gamma, &tys, expr_span)
         }
 
-        Expr::Call { callee, args } => {
+        Expr::Call { callee, args, generic_args } => {
             let args = *args;
 
             match callee {
                 hir::Callee::Unresolved { name, .. } => {
-                    resolve_named_call(gamma, c, *name, None, args, e, expr_span)?
+                    resolve_named_call_with_generics(
+                        gamma,
+                        c,
+                        *name,
+                        None,
+                        args,
+                        *generic_args,
+                        e,
+                        expr_span,
+                    )?
                 }
 
                 hir::Callee::Local(binding) => {
@@ -1004,11 +1083,17 @@ pub fn infer_expr_used(
                             )
                         })?;
 
+                    if !generic_args.is_empty() {
+                        comp_error!(expr_span, "explicit type arguments require a named function call");
+                    }
                     call_fn_value(c, gamma, fn_ty, args, expr_span)?
                 }
 
                 hir::Callee::Value(callee) => {
                     let fn_ty = infer_expr(c, gamma, *callee)?;
+                    if !generic_args.is_empty() {
+                        comp_error!(expr_span, "explicit type arguments require a named function call");
+                    }
                     call_fn_value(c, gamma, fn_ty, args, expr_span)?
                 }
             }
@@ -1538,6 +1623,45 @@ pub fn infer_expr(c: BodyCtx, gamma: &mut Gamma, e: Idx<Expr>) -> Result<TyId, C
     infer_expr_used(c, gamma, e, Use::Value)
 }
 
+/// Infer the common scalar type of a half-open range's bounds. Integer
+/// literals are context-sensitive here, just as they are in an assignment or
+/// call argument; non-literal `int`/`uint` mixtures remain rejected.
+pub(crate) fn infer_range_bounds(
+    c: BodyCtx,
+    gamma: &mut Gamma,
+    low: Idx<Expr>,
+    high: Idx<Expr>,
+) -> Result<TyId, CompilerError> {
+    let low_ty = infer_expr(c, gamma, low)?;
+    let high_ty = infer_expr(c, gamma, high)?;
+    let low_r = resolve(gamma, low_ty, c.body.expr_spans[low]);
+    let high_r = resolve(gamma, high_ty, c.body.expr_spans[high]);
+    let uint = matches!(gamma.get(low_r), TypeExpr::Builtin(BuiltinTy::Uint))
+        || matches!(gamma.get(high_r), TypeExpr::Builtin(BuiltinTy::Uint));
+
+    if uint {
+        let uint_ty = gamma.workspace.builtins.uint();
+        if matches!(gamma.get(low_r), TypeExpr::Builtin(BuiltinTy::Int))
+            && matches!(c.body.expr_arena[low], Expr::Int(_))
+        {
+            check_expr(c, gamma, low, uint_ty, c.body.expr_spans[low])?;
+        }
+        if matches!(gamma.get(high_r), TypeExpr::Builtin(BuiltinTy::Int))
+            && matches!(c.body.expr_arena[high], Expr::Int(_))
+        {
+            check_expr(c, gamma, high, uint_ty, c.body.expr_spans[high])?;
+        }
+        unify(gamma, low_ty, uint_ty, c.body.expr_spans[low])?;
+        unify(gamma, high_ty, uint_ty, c.body.expr_spans[high])?;
+        Ok(uint_ty)
+    } else {
+        let int_ty = gamma.workspace.builtins.int();
+        unify(gamma, low_ty, int_ty, c.body.expr_spans[low])?;
+        unify(gamma, high_ty, int_ty, c.body.expr_spans[high])?;
+        Ok(int_ty)
+    }
+}
+
 /// True when `ty` is a concrete non-nullable type, so `??` / `?.` on it is
 /// redundant (dead). Skips `Nullable` (the meaningful case), unresolved `Infer`,
 /// and `Error`/`Never`/`Any` -- don't reject on uncertainty.
@@ -1653,6 +1777,29 @@ pub(crate) fn check_expr(
     expected: TyId,
     span: Span,
 ) -> Result<(), CompilerError> {
+    // Integer literals are int by default, but a non-negative literal in a
+    // uint context is admitted without widening arbitrary int values. The
+    // range check stays here, before inference can erase the literal's
+    // provenance or a backend can narrow it.
+    if let Expr::Int(value) = c.body.expr_arena[e] {
+        let expected_r = resolve(gamma, expected, span);
+        if matches!(gamma.get(expected_r), TypeExpr::Builtin(BuiltinTy::Uint)) {
+            if !(0..=u32::MAX as i64).contains(&value) {
+                comp_error!(
+                    span,
+                    "uint literal must be in the range 0..=4294967295, found {}",
+                    value
+                );
+            }
+            if gamma.out.expr_types.contains_idx(e) {
+                gamma.out.expr_types.insert(e, expected_r);
+            } else {
+                gamma.assign_expr_type(c, e, expected_r)?;
+            }
+            return Ok(());
+        }
+    }
+
     // A block fills the hole with its TAIL, so push `expected` through rather
     // than inferring the block and coercing the result -- otherwise the arms
     // below never see a tail expression, and a fn body whose tail is a lambda
@@ -1920,10 +2067,16 @@ pub(crate) fn check_cast(
     if matches!(
         (gamma.get(from_r), gamma.get(to_r)),
         (
-            TypeExpr::Builtin(BuiltinTy::Int),
+            TypeExpr::Builtin(BuiltinTy::Int | BuiltinTy::Uint),
             TypeExpr::Builtin(BuiltinTy::Float)
         ) | (
             TypeExpr::Builtin(BuiltinTy::Float),
+            TypeExpr::Builtin(BuiltinTy::Int | BuiltinTy::Uint)
+        ) | (
+            TypeExpr::Builtin(BuiltinTy::Int),
+            TypeExpr::Builtin(BuiltinTy::Uint)
+        ) | (
+            TypeExpr::Builtin(BuiltinTy::Uint),
             TypeExpr::Builtin(BuiltinTy::Int)
         )
     ) {
@@ -1945,10 +2098,92 @@ pub(crate) fn check_cast(
         span,
         format!(
             "cannot convert `{from_str}` to `{to_str}` with `as`; \
-             `as` converts only between `int` and `float`, or where `{from_str}` \
+             `as` converts only between numeric types, or where `{from_str}` \
              is already assignable to `{to_str}`"
         ),
     ))
+}
+
+fn check_bitcast(
+    gamma: &mut Gamma,
+    from: TyId,
+    to: TyId,
+    span: Span,
+) -> Result<(), CompilerError> {
+    let from_r = resolve(gamma, from, span);
+    let to_r = resolve(gamma, to, span);
+    if matches!(
+        (gamma.get(from_r), gamma.get(to_r)),
+        (
+            TypeExpr::Builtin(BuiltinTy::Int),
+            TypeExpr::Builtin(BuiltinTy::Uint)
+        ) | (
+            TypeExpr::Builtin(BuiltinTy::Uint),
+            TypeExpr::Builtin(BuiltinTy::Int)
+        )
+    ) {
+        return Ok(());
+    }
+    let (from_str, to_str) = (gamma.render(from_r), gamma.render(to_r));
+    Err(CompilerError::new_with_label(
+        span,
+        format!(
+            "cannot bitcast `{from_str}` to `{to_str}`: bitcast is only defined between `int` and `uint`"
+        ),
+    ))
+}
+
+fn check_numeric_literal_cast(
+    c: BodyCtx,
+    gamma: &mut Gamma,
+    value: Idx<Expr>,
+    target: TyId,
+    span: Span,
+) -> Result<(), CompilerError> {
+    let target = resolve(gamma, target, span);
+    let TypeExpr::Builtin(target) = *gamma.get(target) else {
+        return Ok(());
+    };
+    let message = |value: String| {
+        CompilerError::new_with_label(
+            span,
+            format!("numeric literal {value} is out of range for `{target:?}`"),
+        )
+    };
+    if let Some(value) = integer_literal_value(c, value) {
+        if matches!(target, BuiltinTy::Uint) && !(0..=u32::MAX as i64).contains(&value) {
+            return Err(message(value.to_string()));
+        }
+    }
+    if let Some(value) = float_literal_value(c, value) {
+        if matches!(target, BuiltinTy::Uint)
+            && (!value.is_finite() || value < 0.0 || value > u32::MAX as f64)
+        {
+            return Err(message(value.to_string()));
+        }
+        if matches!(target, BuiltinTy::Int)
+            && (!value.is_finite() || value < i64::MIN as f64 || value >= 9223372036854775808.0)
+        {
+            return Err(message(value.to_string()));
+        }
+    }
+    Ok(())
+}
+
+fn integer_literal_value(c: BodyCtx, e: Idx<Expr>) -> Option<i64> {
+    match c.body.expr_arena[e] {
+        Expr::Int(value) => Some(value),
+        Expr::UnaryMinus(inner) => integer_literal_value(c, inner)?.checked_neg(),
+        _ => None,
+    }
+}
+
+fn float_literal_value(c: BodyCtx, e: Idx<Expr>) -> Option<f64> {
+    match c.body.expr_arena[e] {
+        Expr::Float(value) => Some(value.0),
+        Expr::UnaryMinus(inner) => Some(-float_literal_value(c, inner)?),
+        _ => None,
+    }
 }
 
 // Find the `/` (float division) responsible for a `float` value flowing into an
@@ -1971,6 +2206,7 @@ pub(crate) fn find_float_div_span_rec(c: BodyCtx, e: Idx<Expr>, depth: usize) ->
         Expr::Call {
             callee: Callee::Unresolved { name, .. },
             args,
+            ..
         } => {
             let name = *name;
             let args = *args;

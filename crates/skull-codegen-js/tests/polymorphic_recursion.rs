@@ -11,14 +11,12 @@
 //! Both now read one oracle, `skull_mir::monoty::too_deep_to_instantiate`, so a
 //! future change to the bound cannot reach one backend and miss the other.
 
-use skull_mir::lower::ScalarCtx;
 use skull_mir::mir::FuncRef;
 
 use crate::common::ws_with;
 
 fn emit_res(src: &str, root: &str) -> Result<String, String> {
     let ws = ws_with(src);
-    let scx = ScalarCtx::new(&ws).with_target(bone_semantic::hir::FnBackend::Js);
     let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
     let fid = ws
         .module(mid)
@@ -29,7 +27,6 @@ fn emit_res(src: &str, root: &str) -> Result<String, String> {
         .expect("root fn");
     skull_codegen_js::emit::emit_with_closure(
         &ws,
-        &scx,
         &[(FuncRef { module: mid, func: fid }, root.to_string())],
     )
     .map_err(|e| e.message)

@@ -79,6 +79,7 @@ pub const JS_INTRINSICS: &[(&str, usize, &str)] = &[
     ("__nb_alloc_u16", 1, "new Uint16Array($1)"),
     ("__nb_alloc_i16", 1, "new Int16Array($1)"),
     ("__nb_alloc_u32", 1, "new Uint32Array($1)"),
+    ("native_buffer_uint", 1, "({ptr: new Uint32Array($1), len: $1})"),
     ("nb_get", 2, "$1.ptr[$2]"),
     ("nb_set", 3, "($1.ptr[$2] = $3)"),
     // StringBuilder: a Lua table used as an array accumulator IS a JS array.

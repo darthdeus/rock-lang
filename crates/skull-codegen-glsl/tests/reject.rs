@@ -21,7 +21,15 @@ fn emit(src: &str, roots: &[&str]) -> Result<String, String> {
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
     let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
     let roots: Vec<String> = roots.iter().map(|s| s.to_string()).collect();
-    skull_codegen_glsl::emit_shader_library(&ws, mid, &roots).map_err(|e| e.message)
+    let root_refs = roots
+        .iter()
+        .map(|root| skull_codegen_glsl::resolve_root(&ws, mid, root))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.message)?;
+    let session = skull_codegen_glsl::shader_library_session(&ws, root_refs)
+        .map_err(|e| e.message)?;
+    skull_codegen_glsl::emit_shader_library_with_view(&ws, &session.scx, &session.view)
+        .map_err(|e| e.message)
 }
 
 fn reject(src: &str, roots: &[&str], needle: &str) {

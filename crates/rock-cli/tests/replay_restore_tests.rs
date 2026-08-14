@@ -728,14 +728,16 @@ fn mag_main_menu_transition_survives_seek_resimulation() {
             let mut fields: Vec<&str> = line.split_whitespace().collect();
             assert_eq!(fields.len(), 8, "recorded tick shape changed: {line}");
             fields[1] = "0x1.999999999999ap-4";
-            fields[2] = "960";
-            fields[3] = "432";
+            fields[2] = if tick == 30 { "1100" } else { "960" };
+            fields[3] = if tick == 30 { "700" } else { "432" };
             fields[6] = match tick {
                 20 => "o",
+                28 => "down",
+                35 => "o",
                 50 => "escape",
                 _ => "-",
             };
-            fields[7] = if tick == 30 { "1" } else { "-" };
+            fields[7] = if tick == 30 || tick == 32 { "1" } else { "-" };
             tick += 1;
             fields.join(" ")
         })
@@ -757,7 +759,7 @@ fn mag_main_menu_transition_survives_seek_resimulation() {
     );
     assert_eq!(current_tick(&reference), i64::from(target));
     assert_eq!(reference["mag"]["SCREEN"].as_i64(), Some(2), "ordinary playback must activate Play");
-    // The recorded 'o' at tick 20 reaches the GAME and no longer reaches the
+    // The recorded 'o' at tick 35 reaches the GAME and no longer reaches the
     // engine's debug toggles, which read tool input: whether a recorded key can
     // drive a tool is owned by
     // `replay_timeline_tests::recorded_keys_cannot_toggle_engine_debug_windows`,
@@ -771,6 +773,9 @@ fn mag_main_menu_transition_survives_seek_resimulation() {
     let sim = sim_state_names(game, frames);
     for name in ["WORLD_MODE", "MOTES"] {
         assert!(sim.contains(name), "{name} must be admitted as simulation state");
+    }
+    for name in ["TALLY", "TELEMETRY_SESSION_OPEN", "TELEMETRY_LAST_FRAME_T"] {
+        assert!(!sim.contains(name), "{name} is telemetry side-channel state");
     }
     assert!(!sim.contains("ENGINE"), "render-only ENGINE settings must not be checkpointed");
     let drops = reference["mag"]["DROP_PARTICLES"].as_array().expect("drop particle arena");
@@ -864,15 +869,16 @@ fn mag_main_menu_transition_survives_seek_resimulation() {
             let mut fields: Vec<&str> = line.split_whitespace().collect();
             assert_eq!(fields.len(), 8, "recorded tick shape changed: {line}");
             fields[1] = "0x1.999999999999ap-4";
-            fields[2] = "0";
-            fields[3] = "0";
+            fields[2] = if tick == 24 { "1100" } else { "0" };
+            fields[3] = if tick == 24 { "700" } else { "0" };
             fields[6] = match tick {
-                28 | 30 | 50 | 52 => "down",
+                20 => "o",
+                23 | 28 | 30 | 50 | 52 => "down",
                 32 => "return",
                 45 => "escape",
                 _ => "-",
             };
-            fields[7] = "-";
+            fields[7] = if tick == 24 { "1" } else { "-" };
             tick += 1;
             fields.join(" ")
         })

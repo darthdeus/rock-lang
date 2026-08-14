@@ -11,6 +11,7 @@
 pub mod ablation;
 pub mod bound;
 pub mod cfg;
+pub mod concrete;
 pub mod decorator;
 pub mod gpu_layout;
 pub mod display;

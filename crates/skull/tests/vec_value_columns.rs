@@ -474,10 +474,8 @@ fn main() {
 
 /// `vec_new()` is the fourth representation-boundary primitive and the odd one
 /// out: its element type comes from the CALL's own type, not from a receiver, so
-/// `vec_column_elem_of` cannot read it off an argument. It is also `inline(lua)`,
-/// which `compute_call_spec` refuses to specialize -- so before the intercept the
-/// opaque body handed back a `_data` table and the very next column write indexed
-/// a nil.
+/// the container plan cannot read it off an argument. The concrete boundary
+/// plan must therefore construct the columns before the next column write.
 #[test]
 fn vec_new_at_a_column_element_builds_empty_columns() {
     let lua = crate::common::try_emit_module(VEC_NEW_COLUMN).expect("vec_new at [V2] must emit");

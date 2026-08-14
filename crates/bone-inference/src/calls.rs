@@ -81,7 +81,10 @@ pub(crate) fn fit_cost(gamma: &mut Gamma, arg: TyId, param: TyId, span: Span) ->
     let p = resolve(gamma, param, span);
 
     match (gamma.get(a), gamma.get(p)) {
-        (TypeExpr::Builtin(BuiltinTy::Int), TypeExpr::Builtin(BuiltinTy::Float)) => Some(1),
+        (
+            TypeExpr::Builtin(BuiltinTy::Int | BuiltinTy::Uint),
+            TypeExpr::Builtin(BuiltinTy::Float),
+        ) => Some(1),
         (_, TypeExpr::Builtin(BuiltinTy::Any)) => Some(2),
         _ => {
             let p_is_iface = match *gamma.get(p) {
@@ -262,6 +265,32 @@ pub(crate) fn select_overload(
     name: Ustr,
     span: Span,
 ) -> Result<(ModuleId, Idx<Function>), SelectError> {
+    select_overload_with_generics(
+        c,
+        gamma,
+        candidates,
+        recv_ty,
+        args,
+        arg_ty,
+        arg_tys_msg,
+        IdxRange::new_empty(),
+        name,
+        span,
+    )
+}
+
+pub(crate) fn select_overload_with_generics(
+    c: BodyCtx,
+    gamma: &mut Gamma,
+    candidates: &[(ModuleId, Idx<Function>)],
+    recv_ty: Option<TyId>,
+    args: &[Idx<Expr>],
+    arg_ty: &FxHashMap<Idx<Expr>, TyId>,
+    arg_tys_msg: &[TyId],
+    generic_args: IdxRange<TypeExpr>,
+    name: Ustr,
+    span: Span,
+) -> Result<(ModuleId, Idx<Function>), SelectError> {
     // Collapse backend-variant decls (same name, same signature, different
     // `backend`) to ONE representative BEFORE scoring, so a same-name pair like
     // `extern(ffi,..) fn f` + `extern(js) fn f` never scores as a tie. Each
@@ -282,8 +311,18 @@ pub(crate) fn select_overload(
     let mut bound_fail: Option<CompilerError> = None;
 
     for &(mid, fid) in candidates {
-        if let Some(cost) =
-            score_candidate(c, gamma, mid, fid, recv_ty, args, arg_ty, span, &mut bound_fail)
+        if let Some(cost) = score_candidate_with_generics(
+            c,
+            gamma,
+            mid,
+            fid,
+            recv_ty,
+            args,
+            arg_ty,
+            generic_args,
+            span,
+            &mut bound_fail,
+        )
         {
             match best_cost {
                 None => {
@@ -426,7 +465,7 @@ pub(crate) fn check_named_fields(
     Ok(())
 }
 
-pub(crate) fn score_candidate(
+pub(crate) fn score_candidate_with_generics(
     c: BodyCtx,
     gamma: &mut Gamma,
     mid: ModuleId,
@@ -434,6 +473,7 @@ pub(crate) fn score_candidate(
     recv_ty: Option<TyId>,
     args: &[Idx<Expr>],
     arg_ty: &FxHashMap<Idx<Expr>, TyId>,
+    generic_args: IdxRange<TypeExpr>,
     span: Span,
     bound_fail: &mut Option<CompilerError>,
 ) -> Option<usize> {
@@ -451,7 +491,7 @@ pub(crate) fn score_candidate(
 
     let bounded_vars = bounded_generic_vars(gamma, f);
 
-    let subs = match gamma.instantiate_generics(&f.generics, span) {
+    let subs = match instantiate_call_generics(gamma, f, generic_args, span) {
         Ok((s, _)) => s,
         Err(_) => {
             gamma.out.rollback_to(snap);
@@ -543,7 +583,16 @@ pub(crate) fn score_candidate(
 
                 let db =
                     declared_is_bounded_generic(gamma, declared[offset + i], &bounded_vars);
-                match fit_cost_with_iter_coercion(c, gamma, aty, pty, db, span) {
+                let pty_r = resolve(gamma, pty, span);
+                let contextual_uint = matches!(fill, SlotFill::Direct(arg)
+                    if matches!(c.body.expr_arena[*arg], Expr::Int(value)
+                        if (0..=u32::MAX as i64).contains(&value))
+                    && matches!(gamma.get(pty_r), TypeExpr::Builtin(BuiltinTy::Uint)));
+                match if contextual_uint {
+                    Some(1)
+                } else {
+                    fit_cost_with_iter_coercion(c, gamma, aty, pty, db, span)
+                } {
                     Some(c) => total += c,
                     None => {
                         gamma.out.rollback_to(snap);
@@ -608,6 +657,42 @@ pub(crate) fn score_candidate(
 
     gamma.out.rollback_to(snap);
     Some(total)
+}
+
+fn instantiate_call_generics(
+    gamma: &mut Gamma,
+    function: &Function,
+    generic_args: IdxRange<TypeExpr>,
+    span: Span,
+) -> Result<(FxHashMap<VarId, TyId>, Vec<TyId>), CompilerError> {
+    if generic_args.is_empty() {
+        return gamma.instantiate_generics(&function.generics, span);
+    }
+    if generic_args.len() != function.generics.len() {
+        return Err(CompilerError::new_with_label(
+            span,
+            format!(
+                "function `{}` expects {} explicit type argument(s), got {}",
+                function.name,
+                function.generics.len(),
+                generic_args.len()
+            ),
+        ));
+    }
+    let mut subs = FxHashMap::default();
+    let mut args = Vec::with_capacity(generic_args.len());
+    for (&generic, explicit) in function.generics.iter().zip(generic_args) {
+        let TypeExpr::Generic(var_id, _) = *gamma.get(generic) else {
+            return Err(CompilerError::new_with_label(
+                span,
+                format!("function `{}` has a malformed generic declaration", function.name),
+            ));
+        };
+        let ty = TyId::Local(explicit);
+        subs.insert(var_id, ty);
+        args.push(ty);
+    }
+    Ok((subs, args))
 }
 
 pub(crate) fn check_args(
@@ -830,7 +915,38 @@ pub(crate) fn resolve_named_call(
     call_expr: Idx<Expr>,
     span: Span,
 ) -> Result<TyId, CompilerError> {
-    let res = resolve_named_call_inner(gamma, c, name, recv_override, args, call_expr, span);
+    resolve_named_call_with_generics(
+        gamma,
+        c,
+        name,
+        recv_override,
+        args,
+        IdxRange::new_empty(),
+        call_expr,
+        span,
+    )
+}
+
+pub(crate) fn resolve_named_call_with_generics(
+    gamma: &mut Gamma,
+    c: BodyCtx,
+    name: Ustr,
+    recv_override: Option<TyId>,
+    args: IdxRange<Expr>,
+    generic_args: IdxRange<TypeExpr>,
+    call_expr: Idx<Expr>,
+    span: Span,
+) -> Result<TyId, CompilerError> {
+    let res = resolve_named_call_inner(
+        gamma,
+        c,
+        name,
+        recv_override,
+        args,
+        generic_args,
+        call_expr,
+        span,
+    );
 
     let Err(e) = res else { return res };
     if gamma.quiet {
@@ -950,11 +1066,20 @@ pub(crate) fn resolve_named_call_inner(
     name: Ustr,
     recv_override: Option<TyId>,
     args: IdxRange<Expr>,
+    generic_args: IdxRange<TypeExpr>,
     call_expr: Idx<Expr>,
     span: Span,
 ) -> Result<TyId, CompilerError> {
     let _span = tracing::info_span!("named_call", name = %name).entered();
-    let candidates = resolve_callee(gamma, name);
+    let all_candidates = resolve_callee(gamma, name);
+    let candidates: Vec<_> = if generic_args.is_empty() {
+        all_candidates.to_vec()
+    } else {
+        all_candidates
+            .into_iter()
+            .filter(|(mid, fid)| gamma.workspace.module(*mid).functions[*fid].generics.len() == generic_args.len())
+            .collect()
+    };
 
     // Method-syntax `recv.name(args)` / `recv?.name(args)`:
     // - a fn-typed FIELD on the receiver wins over free fns (UFCS is only a fallback)
@@ -1133,7 +1258,7 @@ pub(crate) fn resolve_named_call_inner(
             arg_list.push(a);
         }
 
-        match select_overload(
+        match select_overload_with_generics(
             c,
             gamma,
             &candidates,
@@ -1141,6 +1266,7 @@ pub(crate) fn resolve_named_call_inner(
             &arg_list,
             &arg_ty,
             &arg_tys,
+            generic_args,
             name,
             span,
         ) {
@@ -1205,6 +1331,7 @@ pub(crate) fn resolve_named_call_inner(
         recv_override,
         &arg_list,
         &preinferred,
+        generic_args,
         call_expr,
         span,
     )
@@ -1224,6 +1351,7 @@ pub(crate) fn commit_selected_call(
     recv_override: Option<TyId>,
     arg_list: &[Idx<Expr>],
     preinferred: &FxHashMap<Idx<Expr>, TyId>,
+    generic_args: IdxRange<TypeExpr>,
     call_expr: Idx<Expr>,
     span: Span,
 ) -> Result<TyId, CompilerError> {
@@ -1233,7 +1361,7 @@ pub(crate) fn commit_selected_call(
 
     let ws = gamma.workspace;
     let function = &ws.module(callee_mid).functions[callee_fn];
-    let (subs, _arg_tys) = gamma.instantiate_generics(&function.generics, span)?;
+    let (subs, _arg_tys) = instantiate_call_generics(gamma, function, generic_args, span)?;
 
     // Caller, for arg exprs
     let callee_module = &ws.module(callee_mid);

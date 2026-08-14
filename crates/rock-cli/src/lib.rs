@@ -21,7 +21,7 @@ pub use rock_host::process_management::*;
 pub use rock_host::source_files::{
     source_file_from_code, source_file_new_preprocessed, SourceFilesExt,
 };
-pub use rock_host::stick::StickConfig;
+pub use rock_host::stick::{RendererBackend, StickConfig};
 pub use std::collections::{HashMap, HashSet};
 pub use std::sync::mpsc::channel;
 pub use std::time::Duration;
@@ -53,7 +53,7 @@ pub mod package;
 pub mod zip_writer;
 mod test_protocol;
 mod lint_cmd;
-pub(crate) mod lint_union;
+pub mod lint_union;
 pub mod lint_pass;
 pub mod ablation_report;
 mod mono_manifest;
@@ -184,7 +184,7 @@ pub enum CliCommand {
     MonoTyCensus,
     /// `rock mono-manifest [root]` -- DIAGNOSTIC (Stage 0d,
     /// `docs/monomorphization-plan.md`): build the SHADOW instance graph over
-    /// the closed world (instances keyed by `MonoTy`, not `SpecKey`), and
+    /// the closed world (instances keyed by `MonoTy`), and
     /// report instance/edge counts, the edge-kind histogram and the recursion
     /// census. Changes no emission. See `mono_manifest::do_mono_manifest`.
     MonoManifest,
@@ -512,6 +512,10 @@ pub struct Args {
     pub perf_format: String,
     pub type_validation: bool,
     pub headless: bool,
+    /// Build and run game commands against this renderer without changing the
+    /// manifest default. The resolved choice feeds compiler, engine build, and
+    /// runtime preamble through rock-host's renderer authority.
+    pub renderer: Option<RendererBackend>,
     pub test_threads: Option<usize>,
     pub lib: Option<String>,
     pub clean: bool,
@@ -693,6 +697,8 @@ impl Args {
                 .help("Enable type validation warnings for unresolved types after inference"))
             .arg(Arg::new("headless").long("headless").action(ArgAction::SetTrue)
                 .help("Run frame command in headless mode (no display required)"))
+            .arg(Arg::new("renderer").long("renderer").value_parser(["gl", "wgpu"])
+                .help("Select the game renderer for this invocation (`gl` or `wgpu`); manifest default remains unchanged"))
             .arg(Arg::new("test-threads").long("test-threads").value_name("NUM")
                 .value_parser(clap::value_parser!(usize))
                 .help("Number of threads to use for running tests (default: number of CPU cores, use 1 for sequential)"))
@@ -805,6 +811,11 @@ impl Args {
             perf_format: m.get_one::<String>("perf-format").cloned().unwrap_or_else(|| "pretty".to_string()),
             type_validation: m.get_flag("type-validation"),
             headless: m.get_flag("headless"),
+            renderer: m.get_one::<String>("renderer").map(|value| match value.as_str() {
+                "gl" => RendererBackend::Gl,
+                "wgpu" => RendererBackend::Wgpu,
+                _ => unreachable!("renderer value parser admitted an unknown value"),
+            }),
             test_threads: m.get_one::<usize>("test-threads").copied(),
             lib: m.get_one::<String>("lib").cloned(),
             clean: m.get_flag("clean"),
@@ -879,6 +890,17 @@ mod arg_tests {
         };
         assert!(parse(&["rock", "stone", "bitgun", "--no-record"]).no_record);
         assert!(!parse(&["rock", "stone", "bitgun"]).no_record);
+    }
+
+    #[test]
+    fn renderer_override_parses_after_project_name() {
+        let args = Args::from_matches(
+            Args::command()
+                .try_get_matches_from(["rock", "frame", "mag", "--renderer", "wgpu", "-n", "30"])
+                .expect("parse"),
+        );
+        assert_eq!(args.renderer, Some(super::RendererBackend::Wgpu));
+        assert_eq!(args.frames, 30);
     }
 }
 

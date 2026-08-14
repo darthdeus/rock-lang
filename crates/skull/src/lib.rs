@@ -13,17 +13,18 @@
 //! goal is `rock test tests --backend skull` at 100% as bone grows. See
 //! `docs/skull-plan.md`.
 
-pub mod artifact;
-pub mod expr_subtree;
-pub mod concrete_body;
 pub mod coroutine_emit;
 pub mod inline_stats;
 pub mod graph_snapshot;
-pub mod instance_graph;
 pub mod shader_artifact;
 pub mod site_join;
-pub mod target_projection;
 pub mod mir_emit;
+
+// The shared graph layer, re-exported under its original paths. It moved BELOW
+// the backends (`skull-graph`) so the JS and GLSL emitters can realize the same
+// graph the luajit driver does; consumers name it the same way either side of
+// that move.
+pub use skull_graph::{artifact, concrete_body, expr_subtree, instance_graph, shader, target_projection};
 
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::ModuleId;
@@ -537,7 +538,7 @@ end
 /// Map a value-struct field type to a C type for `ffi.cdef`, or `None` when the
 /// field is not C-layout-mappable. Delegates to the single mappability oracle
 /// `skull_mir::lower::value_field_c_type` (shared with the GC-tier
-/// classification `value_struct_is_gc`, so the cdef view and the pack-site
+/// shared `ValueStorage` classification, so the cdef view and the pack-site
 /// `_ct`/`_vt` choice can never diverge).
 fn c_field_type(ws: &Workspace, ty: bone_semantic::prelude::TyId) -> Option<String> {
     skull_mir::lower::value_field_c_type(ws, ty)
@@ -628,7 +629,7 @@ fn leaf_ctor_def(name: ustr::Ustr, paths: &[ustr::Ustr]) -> String {
 ///   `ffi.metatype`/`ffi.istype` on an undeclared ctype errors).
 /// - `gc_emitted` -- the GC-carrying (table-repr) names, materialized by
 ///   `value_struct_gc_defs` as `<Name>_vt` table ctors (the tier is decided by
-///   `skull_mir::lower::value_struct_is_gc`; this replaces the old silent
+///   `skull_mir::lower::ValueStorage`; this replaces the old silent
 ///   skip-then-`Name_ct`-nil-crash, unfuck backlog #51).
 ///
 /// C requires a nested struct's typedef to precede its use, so FFI-clean
@@ -642,6 +643,7 @@ fn value_struct_defs(
 ) -> Result<(String, rustc_hash::FxHashSet<ustr::Ustr>, rustc_hash::FxHashSet<ustr::Ustr>), CompilerError>
 {
     let vstructs = canonical_value_structs(ws);
+    let rep_arena = skull_mir::lower::RepArena::default();
     let mut emitted: rustc_hash::FxHashSet<ustr::Ustr> = Default::default();
     let mut gc: rustc_hash::FxHashSet<ustr::Ustr> = Default::default();
     if vstructs.is_empty() {
@@ -652,7 +654,10 @@ fn value_struct_defs(
     // (`_vt`), never as cdef, so only FFI-clean structs enter the ordering.
     let mut ffi_structs = Vec::new();
     for s in vstructs {
-        if skull_mir::lower::value_struct_is_gc(ws, s.name) {
+        if !matches!(
+            rep_arena.nominal_value_storage(ws, bone_semantic::hir::FnBackend::Lua, s.name),
+            Some(skull_mir::lower::ValueStorage::CData)
+        ) {
             gc.insert(s.name);
         } else {
             ffi_structs.push(s);
@@ -672,9 +677,9 @@ fn value_struct_defs(
             let mut blocked = false;
             for f in &s.fields {
                 // An FFI-clean struct has every field C-mappable by construction
-                // (that is what `value_struct_is_gc == false` means).
+                // (that is what the `CData` storage plan means).
                 let ct = c_field_type(ws, f.ty).expect(
-                    "FFI-clean value-struct field must be C-mappable (value_struct_is_gc invariant)",
+                    "FFI-clean value-struct field must be C-mappable (CData storage invariant)",
                 );
                 let dep = ustr::Ustr::from(ct.as_str());
                 if ffi_names.contains(&dep) && !emitted.contains(&dep) {
@@ -692,7 +697,11 @@ fn value_struct_defs(
                 // write leaves instead, hoisting each nested reference once.
                 // Used by the normalization that keeps a `nobox` field from
                 // materializing when its parent boxes.
-                if let Some(paths) = skull_mir::lower::value_leaf_paths_of(ws, s.name) {
+                if let Some(paths) = rep_arena.nominal_value_leaf_paths(
+                    ws,
+                    bone_semantic::hir::FnBackend::Lua,
+                    s.name,
+                ) {
                     if paths.iter().any(|p| p.contains('.')) {
                         ctors.push_str(&leaf_ctor_def(s.name, &paths));
                     }
@@ -729,7 +738,7 @@ fn value_struct_defs(
 ///
 /// One walk, two emitted views. The registry states what a buffer of this
 /// element is made of; the assertions state that the model producing it agrees
-/// with LuaJIT. Deriving both from the same `value_leaf_layout_checked` result
+/// with LuaJIT. Deriving both from the same owned RepPlan C-layout result
 /// is what keeps them from describing different layouts.
 ///
 /// Leaf addressing (`docs/native-buffer-leaf-addressing-plan.md`) indexes typed
@@ -750,15 +759,18 @@ fn value_leaf_layout_checks(
     emitted: &rustc_hash::FxHashSet<ustr::Ustr>,
 ) -> Result<(String, String), CompilerError> {
     use std::fmt::Write as _;
+    let rep_arena = skull_mir::lower::RepArena::default();
     let mut names: Vec<ustr::Ustr> = emitted.iter().copied().collect();
     names.sort_by(|a, b| a.as_str().cmp(b.as_str()));
     let mut out = String::new();
     let mut storage = String::new();
     for name in names {
-        let (leaves, size, _align) = skull_mir::lower::value_leaf_layout_checked(ws, name)
+        let (leaves, size, _align) = rep_arena
+            .nominal_leaf_layout(ws, bone_semantic::hir::FnBackend::Lua, name)
             .map_err(|e| {
                 CompilerError::new_no_location(format!(
-                    "skull: cannot validate the C layout of FFI-clean value struct `{name}`: {e}"
+                    "skull: cannot validate the C layout of FFI-clean value struct `{name}`: {}",
+                    e.message
                 ))
             })?;
         let _ = writeln!(
@@ -795,6 +807,7 @@ fn value_leaf_layout_checks(
 /// table), so no `__ROCK_C_STRUCT` (ffi.istype) entry is needed.
 fn value_struct_gc_defs(ws: &Workspace, gc: &rustc_hash::FxHashSet<ustr::Ustr>) -> String {
     let mut out = String::new();
+    let rep_arena = skull_mir::lower::RepArena::default();
     for s in canonical_value_structs(ws) {
         if !gc.contains(&s.name) {
             continue;
@@ -804,8 +817,13 @@ fn value_struct_gc_defs(ws: &Workspace, gc: &rustc_hash::FxHashSet<ustr::Ustr>) 
         out.push_str(&format!("{mt} = {mt} or {{}}\n"));
         // A leaf-table struct has no declared-field keys to compare or print, so
         // both metamethods and its ctor run off the leaf paths instead.
-        if skull_mir::lower::value_struct_is_leaf_table(ws, n) {
-            let paths = skull_mir::lower::value_leaf_paths_of(ws, n).unwrap_or_default();
+        if matches!(
+            rep_arena.nominal_value_storage(ws, bone_semantic::hir::FnBackend::Lua, n),
+            Some(skull_mir::lower::ValueStorage::LeafTable)
+        ) {
+            let paths = rep_arena
+                .nominal_value_leaf_paths(ws, bone_semantic::hir::FnBackend::Lua, n)
+                .unwrap_or_default();
             out.push_str(&format!("{mt}.__eq = function(a, b)\n"));
             out.push_str(
                 "  if type(a) ~= \"table\" or type(b) ~= \"table\" then return false end\n",
@@ -829,8 +847,9 @@ fn value_struct_gc_defs(ws: &Workspace, gc: &rustc_hash::FxHashSet<ustr::Ustr>) 
             // and an absent literal both store. The scalar ABI spells absence
             // `false` on the wire, and two logically-equal absent values then
             // compared unequal (`__eq` is a per-key compare, and `false ~= nil`).
-            let presence =
-                skull_mir::lower::value_leaf_presence_flags_of(ws, n).unwrap_or_default();
+            let presence = rep_arena
+                .nominal_value_leaf_presence_flags(ws, bone_semantic::hir::FnBackend::Lua, n)
+                .unwrap_or_default();
             let assigns: Vec<String> = paths
                 .iter()
                 .enumerate()
@@ -913,7 +932,9 @@ fn enum_cdata_defs(ws: &Workspace) -> String {
     let mut typedefs = String::new();
     let mut ctors = String::new();
     for name in names {
-        if let Some(shape) = skull_mir::lower::enum_value_shape(ws, name) {
+        if let Some(shape) = skull_mir::lower::EnumPlan::for_name(ws, name)
+            .and_then(|plan| plan.cdata().cloned())
+        {
             let slots: String =
                 shape.slots.iter().map(|(nm, t)| format!(" {t} {nm};")).collect();
             typedefs.push_str(&format!("typedef struct {{ int __tag;{slots} }} {n};\n", n = name));
@@ -938,7 +959,9 @@ fn enum_cdata_metatypes(ws: &Workspace) -> String {
     let mut out = String::new();
     let mut any = false;
     for name in names {
-        let Some(shape) = skull_mir::lower::enum_value_shape(ws, name) else {
+        let Some(shape) = skull_mir::lower::EnumPlan::for_name(ws, name)
+            .and_then(|plan| plan.cdata().cloned())
+        else {
             continue;
         };
         if !any {
@@ -1090,7 +1113,9 @@ fn enum_runtime_defs(ws: &Workspace) -> String {
             // singleton or names table; its ctype defs come from
             // `enum_cdata_defs`, while `type_table_defs` records its physical
             // slots and logical variants for typed runtime consumers.
-            if skull_mir::lower::enum_value_shape(ws, e.name).is_some() {
+            if skull_mir::lower::EnumPlan::for_name(ws, e.name)
+                .is_some_and(|plan| plan.cdata().is_some())
+            {
                 continue;
             }
             let all_unit =
@@ -1144,7 +1169,9 @@ fn c_struct_inspect_defs(ws: &Workspace, emitted: &rustc_hash::FxHashSet<ustr::U
         let mut enums: Vec<ustr::Ustr> = ws.enums_by_name.keys().copied().collect();
         enums.sort_by(|a, b| a.as_str().cmp(b.as_str()));
         for name in enums {
-            let Some(shape) = skull_mir::lower::enum_value_shape(ws, name) else {
+            let Some(shape) = skull_mir::lower::EnumPlan::for_name(ws, name)
+                .and_then(|plan| plan.cdata().cloned())
+            else {
                 continue;
             };
             let copy_args: Vec<String> =
@@ -1383,6 +1410,7 @@ fn reflect_field_type(ws: &Workspace, ty: bone_semantic::prelude::TyId) -> (Stri
     };
     match resolve(ty) {
         Some(TypeExpr::Builtin(BuiltinTy::Int)) => ("int".into(), false),
+        Some(TypeExpr::Builtin(BuiltinTy::Uint)) => ("uint".into(), false),
         Some(TypeExpr::Builtin(BuiltinTy::Float)) => ("float".into(), false),
         Some(TypeExpr::Builtin(BuiltinTy::Bool)) => ("bool".into(), false),
         Some(TypeExpr::Builtin(BuiltinTy::String)) => ("string".into(), false),
@@ -1502,7 +1530,9 @@ fn type_table_defs(ws: &Workspace, gc: &rustc_hash::FxHashSet<ustr::Ustr>) -> St
         for (_, e) in module.enums.iter() {
             use bone_semantic::hir::VariantPayload;
 
-            let Some(shape) = skull_mir::lower::enum_value_shape(ws, e.name) else {
+            let Some(shape) = skull_mir::lower::EnumPlan::for_name(ws, e.name)
+                .and_then(|plan| plan.cdata().cloned())
+            else {
                 // A BOXED enum has no value shape, and until now no reflection
                 // entry at all -- so a serializer reaching one had nothing to
                 // ask about its payload and rendered every handle in it as a

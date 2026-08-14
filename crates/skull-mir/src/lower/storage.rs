@@ -38,7 +38,7 @@ impl Builder<'_> {
                     let ContainerKind::NativeBufferValue(elem) = self.nb_kind(ib) else {
                         return Ok(None);
                     };
-                    if !self.is_leaf_addressed(elem) {
+                    if !self.is_leaf_addressed(elem)? {
                         return Ok(None);
                     }
                     let (b, _) = self.lower_index_base(ib)?;
@@ -67,12 +67,17 @@ impl Builder<'_> {
         path: &str,
         value: Idx<Expr>,
     ) -> Result<(), CompilerError> {
-        let plan = leaf_addr_plan(self.ws, elem).map_err(gap)?;
+        let container = self.native_buffer_plan(elem)?;
+        let plan = container
+            .leaf_addresses()
+            .ok_or_else(|| gap("NativeBuffer element has no owned leaf address plan"))?;
         let dot = format!("{path}.");
-        let hit: Vec<LeafAddr> = plan
+        let hit: Vec<PlaceBundle> = plan
             .into_iter()
             .filter(|a| a.path.as_str() == path || a.path.as_str().starts_with(&dot))
-            .collect();
+            .cloned()
+            .map(|address| container.place(address).map_err(|e| gap(e.message)))
+            .collect::<Result<_, _>>()?;
         if hit.is_empty() {
             return Err(gap(format!("`{path}` is not a leaf of NativeBuffer<{elem}>")));
         }
@@ -81,12 +86,12 @@ impl Builder<'_> {
         // `<path>.<leaf>` -- so discriminating on hit COUNT lowers that field's
         // aggregate RHS as a scalar and writes the whole cdata through a
         // primitive view. Everything that is not an exact leaf is an aggregate.
-        let leaves = if hit.len() == 1 && hit[0].path.as_str() == path {
+        let leaves = if hit.len() == 1 && hit[0].address().path.as_str() == path {
             vec![self.lower_expr(value)?]
         } else {
             let sub = self
                 .value_aggregate_of(value)
-                .and_then(|n| value_shape(self.ws, n))
+                .and_then(|n| self.nominal_rep_shape(n, false))
                 .ok_or_else(|| {
                     gap(format!(
                         "whole write to `{path}` needs a value-struct or cdata-enum RHS"
@@ -103,7 +108,8 @@ impl Builder<'_> {
             )));
         }
         let mut views = HashMap::new();
-        for (a, leaf) in hit.iter().zip(leaves) {
+        for (place, leaf) in hit.iter().zip(leaves) {
+            let a = place.address();
             let at = self.leaf_index(checked, a);
             let view = self.leaf_view(buf, a.view_field, &mut views);
             self.emit_cur(Inst::StoreIndex {
@@ -124,10 +130,31 @@ impl Builder<'_> {
     ///
     /// Both targets. The views are `ffi.cast` pointers on luajit and TypedArrays
     /// over one ArrayBuffer on JS, but the ADDRESSING is the same C layout either
-    /// way -- `leaf_addr_plan`'s stride and offset are already in units of each
+    /// way -- the owned leaf-address projection's stride and offset are already in units of each
     /// view's own element type, so one lowering serves both.
-    pub(crate) fn is_leaf_addressed(&self, elem: Ustr) -> bool {
-        leaf_addr_plan(self.ws, elem).is_ok()
+    fn native_buffer_plan(&self, elem: Ustr) -> Result<ContainerPlan, CompilerError> {
+        let ty = MonoTy::App {
+            ctor: crate::monoty::MonoCtor::Nominal(Ustr::from("NativeBuffer")),
+            params: vec![MonoTy::App {
+                ctor: crate::monoty::MonoCtor::Nominal(elem),
+                params: Vec::new(),
+            }],
+        };
+        ContainerPlan::for_type(
+            self.ws,
+            self.scx.target,
+            &self.scx.rep_arena(),
+            ContainerFamily::NativeBuffer,
+            &ty,
+        )
+        .map_err(|error| match error.span.or(self.cur_span) {
+            Some(span) => CompilerError::new_with_label(span, error.message),
+            None => CompilerError::new_no_location(error.message),
+        })
+    }
+
+    pub(crate) fn is_leaf_addressed(&self, elem: Ustr) -> Result<bool, CompilerError> {
+        Ok(self.native_buffer_plan(elem)?.is_leaf_addressed())
     }
 
     /// Read `buf[i].<path>`'s single primitive leaf, for a read-modify-write
@@ -144,7 +171,7 @@ impl Builder<'_> {
     pub(crate) fn nb_leaf_rmw_place(
         &mut self,
         target: Idx<Expr>,
-    ) -> Result<Option<(Idx<Inst>, Idx<Inst>, Ustr, LeafAddr)>, CompilerError> {
+    ) -> Result<Option<(Idx<Inst>, Idx<Inst>, Ustr, PlaceBundle)>, CompilerError> {
         if self.scx.target != bone_semantic::hir::FnBackend::Js {
             return Ok(None);
         }
@@ -154,11 +181,16 @@ impl Builder<'_> {
         let Some((buf, checked, elem, path)) = self.nb_leaf_field_place(base, field)? else {
             return Ok(None);
         };
-        let plan = leaf_addr_plan(self.ws, elem).map_err(gap)?;
-        let Some(addr) = plan.into_iter().find(|a| a.path.as_str() == path) else {
+        let container = self.native_buffer_plan(elem)?;
+        let Some(addr) = container
+            .leaf_addresses()
+            .and_then(|plan| plan.iter().find(|a| a.path.as_str() == path))
+            .cloned()
+        else {
             return Ok(None);
         };
-        Ok(Some((buf, checked, elem, addr)))
+        let place = container.place(addr).map_err(|e| gap(e.message))?;
+        Ok(Some((buf, checked, elem, place)))
     }
 
     /// The load half of [`Self::nb_leaf_rmw_place`].
@@ -166,8 +198,9 @@ impl Builder<'_> {
         &mut self,
         buf: Idx<Inst>,
         checked: Idx<Inst>,
-        addr: &LeafAddr,
+        place: &PlaceBundle,
     ) -> Idx<Inst> {
+        let addr = place.address();
         let at = self.leaf_index(checked, addr);
         let view = self.leaf_view(buf, addr.view_field, &mut HashMap::new());
         self.emit_cur(Inst::Index { base: view, index: at, kind: ContainerKind::NativeBufferLeaf })
@@ -178,9 +211,10 @@ impl Builder<'_> {
         &mut self,
         buf: Idx<Inst>,
         checked: Idx<Inst>,
-        addr: &LeafAddr,
+        place: &PlaceBundle,
         value: Idx<Inst>,
     ) {
+        let addr = place.address();
         let at = self.leaf_index(checked, addr);
         let view = self.leaf_view(buf, addr.view_field, &mut HashMap::new());
         self.emit_cur(Inst::StoreIndex {
@@ -202,14 +236,23 @@ impl Builder<'_> {
         index: Idx<Inst>,
         elem: Ustr,
     ) -> Result<ValueRepr, CompilerError> {
-        let shape = value_shape(self.ws, elem)
+        let container = self.native_buffer_plan(elem)?;
+        let shape = container
+            .element_shape(&self.scx.rep_arena())
             .ok_or_else(|| gap("leaf-addressed element is not a value struct"))?;
-        let plan = leaf_addr_plan(self.ws, elem).map_err(gap)?;
+        let plan: Vec<PlaceBundle> = container
+            .leaf_addresses()
+            .ok_or_else(|| gap("leaf-addressed element has no owned leaf address plan"))?
+            .iter()
+            .cloned()
+            .map(|address| container.place(address).map_err(|e| gap(e.message)))
+            .collect::<Result<_, _>>()?;
         let checked = self.nb_checked_index(buf, index)?;
         let mut views = HashMap::new();
         let leaves: Vec<Idx<Inst>> = plan
             .iter()
-            .map(|a| {
+            .map(|place| {
+                let a = place.address();
                 let at = self.leaf_index(checked, a);
                 let view = self.leaf_view(buf, a.view_field, &mut views);
                 self.emit_cur(Inst::Index {
@@ -233,11 +276,20 @@ impl Builder<'_> {
         value: Idx<Expr>,
         elem: Ustr,
     ) -> Result<(), CompilerError> {
-        let shape = value_shape(self.ws, elem)
+        let container = self.native_buffer_plan(elem)?;
+        let shape = container
+            .element_shape(&self.scx.rep_arena())
             .ok_or_else(|| gap("leaf-addressed element is not a value struct"))?;
-        let plan = leaf_addr_plan(self.ws, elem).map_err(gap)?;
+        let plan: Vec<PlaceBundle> = container
+            .leaf_addresses()
+            .ok_or_else(|| gap("leaf-addressed element has no owned leaf address plan"))?
+            .iter()
+            .cloned()
+            .map(|address| container.place(address).map_err(|e| gap(e.message)))
+            .collect::<Result<_, _>>()?;
         let repr = self.lower_expr_repr(value)?;
-        let leaves = self.repr_to_leaves(&repr, &shape);
+        let bundle = ValueBundle::new(container.element_rep(), repr);
+        let leaves = self.repr_to_leaves_bundle(&bundle, &shape);
         if leaves.len() != plan.len() {
             return Err(gap(format!(
                 "leaf store arity mismatch for NativeBuffer<{elem}>: {} leaves vs {} slots",
@@ -249,7 +301,8 @@ impl Builder<'_> {
         // out-of-bounds writes happen first.
         let checked = self.nb_checked_index(buf, index)?;
         let mut views = HashMap::new();
-        for (a, leaf) in plan.iter().zip(leaves) {
+        for (place, leaf) in plan.iter().zip(leaves) {
+            let a = place.address();
             let at = self.leaf_index(checked, a);
             let view = self.leaf_view(buf, a.view_field, &mut views);
             self.emit_cur(Inst::StoreIndex {
@@ -521,7 +574,7 @@ impl Builder<'_> {
                 let Some(elem) = self.vec_column_elem_of(*recv)? else { return Ok(None) };
                 let vec = self.lower_expr(*recv)?;
                 let k = self.lower_expr(*key_fn)?;
-                if !self.is_nobox_struct(elem.name) {
+                if !elem.is_nobox() {
                     return Ok(Some(ValueRepr::Scalar(
                         self.call_spine("__rock_col_sort", vec![vec, k])?,
                     )));
@@ -541,7 +594,7 @@ impl Builder<'_> {
             }
             ("__rock_vec_to_lua_array", [recv]) => {
                 let Some(elem) = self.vec_column_elem_of(*recv)? else { return Ok(None) };
-                if self.is_nobox_struct(elem.name) {
+                if elem.is_nobox() {
                     return Err(CompilerError::new_with_label(
                         self.body.expr_spans[*recv],
                         format!(
@@ -561,15 +614,10 @@ impl Builder<'_> {
     }
 
     pub(crate) fn make_column_header(&mut self, elem: ColumnElem, capacity: Idx<Inst>) -> Idx<Inst> {
-        let repr = self.emit_cur(Inst::Const(Lit::Str(Ustr::from(VEC_COLUMN_REPR))));
-        let elem = self.emit_cur(Inst::Const(Lit::Str(elem.name)));
-        self.emit_cur(Inst::MakeStruct {
-            ty: None,
-            fields: vec![
-                (Ustr::from("repr"), repr),
-                (Ustr::from("elem"), elem),
-                (Ustr::from("cap"), capacity),
-            ],
+        self.emit_cur(Inst::MakeVecColumnHeader {
+            elem: elem.name,
+            nobox: elem.is_nobox(),
+            capacity,
         })
     }
 
@@ -589,6 +637,7 @@ impl Builder<'_> {
         let columns = column_leaf_paths(&shape).into_iter().map(|p| (p, Vec::new())).collect();
         Ok(self.emit_cur(Inst::MakeVecColumns {
             elem: elem.name,
+            nobox: elem.is_nobox(),
             columns,
             len: 0,
             capacity,
@@ -1016,7 +1065,7 @@ impl Builder<'_> {
         elem: ColumnElem,
     ) -> Result<ValueRepr, CompilerError> {
         let shape = self.column_shape(elem)?;
-        let unboxed = self.is_nobox_struct(elem.name);
+        let unboxed = elem.is_nobox();
         let slot = self.call_spine("__map_col_slot_of", vec![m, key])?;
         let zero = self.emit_cur(Inst::Const(Lit::Int(0)));
         let present = self.emit_cur(Inst::IntGeq(slot, zero));

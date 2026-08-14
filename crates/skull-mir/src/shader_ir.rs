@@ -23,12 +23,29 @@
 //! interface plan was a GLSL plan wearing another name.
 
 use ustr::Ustr;
+use std::fmt::Write as _;
+
+/// Which GLSL dialect an artifact packages (docs/shaders.md): the `#version`
+/// line plus the builtin/precision differences that follow from it. `Core330`
+/// is the desktop default; `Es300` is the mobile GLES target.
+///
+/// It lives on the NEUTRAL side because it is a property of the TARGET, not of
+/// the emitter: `skull_graph::target_projection::ShaderTargetSpec` names it as
+/// one axis of a target spec, and the graph layer must not depend on a backend
+/// to spell its own axes.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
+pub enum GlslProfile {
+    #[default]
+    Core330,
+    Es300,
+}
 
 use crate::gpu_layout::{ArrayMemberDecl, AttrKind, SamplerKind, WireKind};
-use crate::lower::SpecKey;
-use crate::mangle::spec_fn_name;
-use crate::mir::{FuncRef, MirFunc};
+use crate::instance::Instance;
+use crate::mir::{FuncRef, Lit, MirFunc};
+use crate::monoty::MonoInterner;
 use bone_semantic::inference::Workspace;
+use std::sync::Arc;
 
 /// A logical pipeline stage. Compute joins this enum rather than arriving as a
 /// GLSL qualifier or a string (plan Stage 3).
@@ -36,6 +53,7 @@ use bone_semantic::inference::Workspace;
 pub enum ShaderStage {
     Vertex,
     Fragment,
+    Compute,
 }
 
 impl ShaderStage {
@@ -43,54 +61,248 @@ impl ShaderStage {
         match self {
             ShaderStage::Vertex => "vertex",
             ShaderStage::Fragment => "fragment",
+            ShaderStage::Compute => "compute",
         }
+    }
+}
+
+/// The scalar vocabulary needed by the first compiler-authored compute lane.
+/// It is a logical value kind, not a target storage or byte-layout decision.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+pub enum ComputeValueKind {
+    F32,
+    I32,
+    U32,
+    /// A storage element whose access is governed by WGSL atomic rules.
+    /// Atomicity is an interface property, not a use-site reinterpretation of
+    /// an ordinary `u32` resource.
+    AtomicU32,
+    Bool,
+}
+
+impl ComputeValueKind {
+    fn code(self) -> u32 {
+        match self {
+            ComputeValueKind::F32 => 0,
+            ComputeValueKind::I32 => 1,
+            ComputeValueKind::U32 => 2,
+            ComputeValueKind::AtomicU32 => 3,
+            ComputeValueKind::Bool => 4,
+        }
+    }
+}
+
+/// Whether a compute resource is one value or an indexable homogeneous array.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+pub enum ComputeResourceShape {
+    Scalar(ComputeValueKind),
+    Array(ComputeValueKind),
+}
+
+impl ComputeResourceShape {
+    fn code(self) -> (u32, ComputeValueKind) {
+        match self {
+            ComputeResourceShape::Scalar(kind) => (0, kind),
+            ComputeResourceShape::Array(kind) => (1, kind),
+        }
+    }
+}
+
+/// The logical address space of a compute resource. Physical bindings and
+/// layout remain the target ABI's responsibility.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+pub enum ComputeAddressSpace {
+    Uniform,
+    Storage,
+}
+
+impl ComputeAddressSpace {
+    fn name(self) -> &'static str {
+        match self {
+            ComputeAddressSpace::Uniform => "uniform",
+            ComputeAddressSpace::Storage => "storage",
+        }
+    }
+}
+
+/// Access promised by a compute resource declaration.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+pub enum ComputeAccess {
+    Read,
+    Write,
+    ReadWrite,
+}
+
+impl ComputeAccess {
+    fn name(self) -> &'static str {
+        match self {
+            ComputeAccess::Read => "read",
+            ComputeAccess::Write => "write",
+            ComputeAccess::ReadWrite => "read_write",
+        }
+    }
+}
+
+/// Builtins a compute body may consume. Their target spellings are emitter
+/// concerns; this list is the logical invocation contract.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+pub enum ComputeBuiltin {
+    GlobalInvocationId,
+    LocalInvocationId,
+    WorkgroupId,
+    LocalInvocationIndex,
+    NumWorkgroups,
+}
+
+impl ComputeBuiltin {
+    fn name(self) -> &'static str {
+        match self {
+            ComputeBuiltin::GlobalInvocationId => "global_invocation_id",
+            ComputeBuiltin::LocalInvocationId => "local_invocation_id",
+            ComputeBuiltin::WorkgroupId => "workgroup_id",
+            ComputeBuiltin::LocalInvocationIndex => "local_invocation_index",
+            ComputeBuiltin::NumWorkgroups => "num_workgroups",
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+pub struct ComputeWorkgroupSize {
+    pub x: u32,
+    pub y: u32,
+    pub z: u32,
+}
+
+impl ComputeWorkgroupSize {
+    pub fn is_valid(self) -> bool {
+        self.x != 0 && self.y != 0 && self.z != 0
+    }
+}
+
+/// How a runtime dispatch supplies its extent. The contract carries no
+/// backend command object or binding number.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+pub enum ComputeDispatchContract {
+    Runtime { dimensions: u8 },
+    Fixed { x: u32, y: u32, z: u32 },
+}
+
+impl ComputeDispatchContract {
+    pub fn is_valid(self) -> bool {
+        match self {
+            ComputeDispatchContract::Runtime { dimensions } => (1..=3).contains(&dimensions),
+            ComputeDispatchContract::Fixed { x, y, z } => x != 0 && y != 0 && z != 0,
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Debug, Hash)]
+pub struct LogicalComputeResource {
+    pub name: Ustr,
+    pub shape: ComputeResourceShape,
+    pub address_space: ComputeAddressSpace,
+    pub access: ComputeAccess,
+}
+
+/// One compiler-owned workgroup-memory declaration. It is not a bindable
+/// resource: the neutral plan retains its element kind and fixed population so
+/// a target cannot reconstruct it from source text or a second side table.
+#[derive(Clone, PartialEq, Eq, Debug, Hash)]
+pub struct LogicalComputeWorkgroup {
+    pub name: Ustr,
+    pub kind: ComputeValueKind,
+    pub size: u32,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug, Hash)]
+pub struct ComputeInterfacePlan {
+    pub resources: Vec<LogicalComputeResource>,
+    pub workgroup: Vec<LogicalComputeWorkgroup>,
+    pub builtins: Vec<ComputeBuiltin>,
+    pub workgroup_size: ComputeWorkgroupSize,
+    pub dispatch: ComputeDispatchContract,
+}
+
+impl ComputeInterfacePlan {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if !self.workgroup_size.is_valid() {
+            return Err("compute workgroup size must be non-zero");
+        }
+        if !self.dispatch.is_valid() {
+            return Err("compute dispatch contract is invalid");
+        }
+        if self.resources.iter().any(|resource| {
+            resource.address_space == ComputeAddressSpace::Uniform
+                && resource.access != ComputeAccess::Read
+        }) {
+            return Err("uniform compute resources are read-only");
+        }
+        if self.resources.iter().any(|resource| {
+            let atomic = matches!(
+                resource.shape,
+                ComputeResourceShape::Array(ComputeValueKind::AtomicU32)
+                    | ComputeResourceShape::Scalar(ComputeValueKind::AtomicU32)
+            );
+            atomic
+                && (resource.address_space != ComputeAddressSpace::Storage
+                    || resource.shape != ComputeResourceShape::Array(ComputeValueKind::AtomicU32)
+                    || resource.access != ComputeAccess::ReadWrite)
+        }) {
+            return Err("atomic compute resources must be read_write storage arrays");
+        }
+        if self.workgroup.iter().any(|memory| {
+            memory.size == 0 || matches!(memory.kind, ComputeValueKind::AtomicU32)
+        }) {
+            return Err("compute workgroup arrays must have a positive non-atomic element kind");
+        }
+        Ok(())
     }
 }
 
 /// **One shader INSTANCE**: a declaration plus the instantiation a caller
 /// reached it at.
 ///
-/// The reachability node, the body key and the emitted name all come off this
-/// one value, so two instantiations of one generic helper are two functions and
-/// cannot be confused for one. An EMPTY key is the non-generic case and keeps
-/// the declaration's own name ([`spec_fn_name`] returns `None` for it).
+/// The reachability node, the body identity and the emitted name all come off
+/// this one value, so two instantiations of one generic helper are two
+/// functions and cannot be confused for one.
+///
+/// It IS the [`Instance`] every other emitter keys on -- a shader instance is
+/// an emitted body, one checked definition per instantiation, which is what
+/// `unchecked_generic` being deleted rests on. The wrapper survives only to
+/// carry GLSL's own vocabulary at the type level.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct ShaderInstance {
-    pub fref: FuncRef,
-    pub key: SpecKey,
+    pub inst: Instance,
 }
 
 impl ShaderInstance {
+    pub fn new(inst: Instance) -> Self {
+        ShaderInstance { inst }
+    }
+
     /// The declaration's own shape -- an entry, or a helper reached with no
     /// instantiation.
     pub fn plain(fref: FuncRef) -> Self {
-        ShaderInstance { fref, key: Vec::new() }
+        ShaderInstance { inst: Instance::base(fref) }
     }
 
-    pub fn subst(&self, ws: &Workspace) -> crate::lower::SpecSubst {
-        crate::lower::spec_subst_from_key(ws, self.fref, &self.key)
+    pub fn fref(&self) -> FuncRef {
+        self.inst.func
     }
 
-    /// The definition GLSL emits for this instance. A shader instance IS an
-    /// emitted body -- one checked, emitted definition per instantiation --
-    /// which is what `unchecked_generic` being deleted rests on.
-    /// An empty key is decided HERE rather than normalized downstream: a
-    /// non-generic shader instance has no arguments, which is a fact about this
-    /// instance and not something `EmittedBodyId::new` should infer from a
-    /// vector's length.
-    pub fn emitted_body(&self) -> crate::lower::EmittedBodyId {
-        if self.key.is_empty() {
-            return crate::lower::EmittedBodyId::Shared(self.fref);
-        }
-        crate::lower::EmittedBodyId::new(self.fref, self.key.clone())
+    pub fn subst(
+        &self,
+        ws: &Workspace,
+        interner: &crate::monoty::MonoInterner,
+    ) -> crate::lower::SpecSubst {
+        self.inst.subst(ws, interner)
     }
 
     /// The symbol this instance is emitted under. Target-neutral: it is the
     /// mangled declaration plus the instantiation, and a backend that needs a
     /// different spelling renames from here rather than re-deriving it.
-    pub fn symbol(&self, ws: &Workspace) -> String {
-        let f = &ws.module(self.fref.module).functions[self.fref.func];
-        spec_fn_name(ws, f, &self.key).unwrap_or_else(|| crate::mangle::mangle_fn(ws, f))
+    pub fn symbol(&self, ws: &Workspace, interner: &crate::monoty::MonoInterner) -> String {
+        self.inst.symbol(ws, interner)
     }
 }
 
@@ -106,6 +318,9 @@ pub struct ShaderStageIr {
     /// GLSL happens to need it because it has no forward declarations.
     pub order: Vec<ShaderInstance>,
     pub bodies: rustc_hash::FxHashMap<ShaderInstance, MirFunc>,
+    /// Literals proven by the target-neutral shader planner for immutable
+    /// globals read by this stage.
+    pub const_globals: rustc_hash::FxHashMap<Ustr, Lit>,
 }
 
 impl ShaderStageIr {
@@ -120,7 +335,7 @@ impl ShaderStageIr {
     pub fn declarations(&self) -> Vec<FuncRef> {
         let mut seen: rustc_hash::FxHashSet<(u32, u32)> = rustc_hash::FxHashSet::default();
         let mut out = Vec::new();
-        for f in self.order.iter().map(|i| i.fref).chain(std::iter::once(self.entry.fref)) {
+        for f in self.order.iter().map(|i| i.fref()).chain(std::iter::once(self.entry.fref())) {
             if seen.insert((f.module.raw(), f.func.into_raw().into_u32())) {
                 out.push(f);
             }
@@ -137,6 +352,9 @@ impl ShaderStageIr {
 /// second backend renders these rather than re-walking the entry.
 #[derive(Clone)]
 pub struct ShaderIR {
+    /// The arena that minted every `Instance` in these stages. A target emitter
+    /// must use this same handle for specialization symbols and substitutions.
+    pub interner: Arc<MonoInterner>,
     pub stages: Vec<ShaderStageIr>,
 }
 
@@ -175,6 +393,34 @@ pub struct LogicalUniformGroup {
     pub role: UniformRole,
     pub struct_name: Ustr,
     pub members: Vec<(Ustr, WireKind)>,
+}
+
+/// The identity of a logical uniform value group. Physical offsets, padding,
+/// bindings and block size are deliberately absent.
+pub fn semantic_uniform_group_fingerprint(
+    struct_name: Ustr,
+    members: &[(Ustr, WireKind)],
+) -> u64 {
+    let mut hash = 0xa5a5_5a5a_c3c3_3c3cu64;
+    for byte in struct_name.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    for (name, kind) in members {
+        for byte in name.as_bytes() {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+        hash ^= u64::from(kind.code());
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    (hash ^ (hash >> 53)) & ((1 << 53) - 1)
+}
+
+impl LogicalUniformGroup {
+    pub fn semantic_fingerprint(&self) -> u64 {
+        semantic_uniform_group_fingerprint(self.struct_name, &self.members)
+    }
 }
 
 /// A stage's `UniformArray<T>` members. Separate from the scalar group for a
@@ -262,6 +508,8 @@ pub struct ShaderInterfacePlan {
     /// one list would tell the engine it owns units it does not. A program may
     /// not mix the two, which is a rejection rather than a precedence.
     pub bare_samplers: Vec<LogicalSampler>,
+    /// The logical compute contract when `stages` contains `Compute`.
+    pub compute: Option<ComputeInterfacePlan>,
     /// How the fragment stage's colour output is shaped.
     pub fragment_output: FragmentOutput,
 }
@@ -308,5 +556,164 @@ impl ShaderInterfacePlan {
             self.bare_samplers.iter().filter(|s| s.stage == stage).map(|s| (s.name, s.kind)),
         );
         out
+    }
+
+    /// A stable identity for the logical interface plus the geometry form the
+    /// caller is allowed to submit. This deliberately hashes names, roles,
+    /// order and neutral kinds only; target bindings, offsets, sizes and
+    /// source text are not part of the semantic interface.
+    pub fn semantic_fingerprint(&self, fullscreen: bool) -> u64 {
+        let payload = self.semantic_payload(fullscreen);
+        let mut hash = 0xcbf2_9ce4_8422_2325u64;
+        for byte in payload.as_bytes() {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+        let folded = hash ^ (hash >> 53);
+        folded & ((1 << 53) - 1)
+    }
+
+    /// Serialize the compiler-owned logical interface for a runtime
+    /// registration. It is intentionally a separate wire from every target's
+    /// physical ABI wire; the runtime never parses GLSL or WGSL to recover it.
+    pub fn semantic_wire(&self, fullscreen: bool) -> String {
+        format!(
+            "SHADER_INTERFACE_V1\nfingerprint {}\n{}end\n",
+            self.semantic_fingerprint(fullscreen),
+            self.semantic_payload(fullscreen)
+        )
+    }
+
+    fn semantic_payload(&self, fullscreen: bool) -> String {
+        let mut out = String::new();
+        writeln!(out, "fullscreen {}", if fullscreen { 1 } else { 0 }).unwrap();
+
+        writeln!(out, "stages {}", self.stages.len()).unwrap();
+        for stage in &self.stages {
+            writeln!(out, "stage {}", stage.name()).unwrap();
+        }
+
+        writeln!(out, "vertex_inputs {}", self.vertex_inputs.len()).unwrap();
+        for input in &self.vertex_inputs {
+            let rate = match input.rate {
+                VertexRate::PerVertex => "vertex",
+                VertexRate::PerInstance => "instance",
+            };
+            writeln!(out, "vertex_input {} {} {}", input.struct_name, rate, input.attrs.len()).unwrap();
+            for (name, kind) in &input.attrs {
+                writeln!(out, "attr {} {}", name, attr_kind_code(*kind)).unwrap();
+            }
+        }
+
+        writeln!(out, "varyings {}", self.varyings.len()).unwrap();
+        for varying in &self.varyings {
+            writeln!(out, "varying {} {} {}", varying.name, varying.kind.code(), if varying.flat { 1 } else { 0 }).unwrap();
+        }
+
+        writeln!(out, "groups {}", self.uniform_groups.len()).unwrap();
+        for group in &self.uniform_groups {
+            writeln!(out, "group {} {} {} {}", uniform_role_name(group.role), group.struct_name, group.semantic_fingerprint(), group.members.len()).unwrap();
+            for (name, kind) in &group.members {
+                writeln!(out, "member {} {}", name, kind.code()).unwrap();
+            }
+        }
+
+        writeln!(out, "arrays {}", self.array_groups.len()).unwrap();
+        for group in &self.array_groups {
+            writeln!(out, "array {} {} {}", group.stage.name(), group.owner, group.members.len()).unwrap();
+            for member in &group.members {
+                writeln!(out, "array_member {} {} {}", member.name, member.elem.code(), member.capacity).unwrap();
+            }
+        }
+
+        match &self.compute {
+            Some(compute) => {
+                writeln!(out, "compute some").unwrap();
+                writeln!(out, "compute_workgroup {} {} {}", compute.workgroup_size.x, compute.workgroup_size.y, compute.workgroup_size.z).unwrap();
+                match compute.dispatch {
+                    ComputeDispatchContract::Runtime { dimensions } => {
+                        writeln!(out, "compute_dispatch runtime {dimensions}").unwrap();
+                    }
+                    ComputeDispatchContract::Fixed { x, y, z } => {
+                        writeln!(out, "compute_dispatch fixed {x} {y} {z}").unwrap();
+                    }
+                }
+                writeln!(out, "compute_builtins {}", compute.builtins.len()).unwrap();
+                for builtin in &compute.builtins {
+                    writeln!(out, "compute_builtin {}", builtin.name()).unwrap();
+                }
+                writeln!(out, "compute_resources {}", compute.resources.len()).unwrap();
+                for resource in &compute.resources {
+                    let (shape, kind) = resource.shape.code();
+                    writeln!(out, "compute_resource {} {} {} {} {}", resource.name, resource.address_space.name(), resource.access.name(), shape, kind.code()).unwrap();
+                }
+                writeln!(out, "compute_workgroup_arrays {}", compute.workgroup.len()).unwrap();
+                for memory in &compute.workgroup {
+                    writeln!(out, "compute_workgroup_array {} {} {}", memory.name, memory.kind.code(), memory.size).unwrap();
+                }
+            }
+            None => {}
+        }
+
+        match &self.textures {
+            Some(group) => {
+                let struct_name = group.struct_name.map(|name| name.as_str()).unwrap_or("none");
+                writeln!(out, "textures {} {}", struct_name, group.samplers.len()).unwrap();
+                for (name, kind) in &group.samplers {
+                    writeln!(out, "texture {} {}", name, sampler_kind_code(*kind)).unwrap();
+                }
+                writeln!(out, "texture_stages {}", group.stages.len()).unwrap();
+                for stage in &group.stages {
+                    writeln!(out, "texture_stage {}", stage.name()).unwrap();
+                }
+            }
+            None => {
+                writeln!(out, "textures none 0").unwrap();
+                writeln!(out, "texture_stages 0").unwrap();
+            }
+        }
+
+        writeln!(out, "bare_samplers {}", self.bare_samplers.len()).unwrap();
+        for sampler in &self.bare_samplers {
+            writeln!(out, "bare_sampler {} {} {}", sampler.stage.name(), sampler.name, sampler_kind_code(sampler.kind)).unwrap();
+        }
+
+        match &self.fragment_output {
+            FragmentOutput::None => writeln!(out, "output none").unwrap(),
+            FragmentOutput::Single(kind) => writeln!(out, "output single {}", kind.code()).unwrap(),
+            FragmentOutput::Mrt(outputs) => {
+                writeln!(out, "output mrt {}", outputs.len()).unwrap();
+                for (name, kind) in outputs {
+                    writeln!(out, "output_member {} {}", name, kind.code()).unwrap();
+                }
+            }
+        }
+        out
+    }
+}
+
+fn uniform_role_name(role: UniformRole) -> &'static str {
+    match role {
+        UniformRole::Engine => "engine",
+        UniformRole::Stage(ShaderStage::Vertex) => "vertex",
+        UniformRole::Stage(ShaderStage::Fragment) => "fragment",
+        UniformRole::Stage(ShaderStage::Compute) => "compute",
+    }
+}
+
+fn sampler_kind_code(kind: SamplerKind) -> u32 {
+    match kind {
+        SamplerKind::Float => 0,
+        SamplerKind::Int => 1,
+    }
+}
+
+fn attr_kind_code(kind: AttrKind) -> u32 {
+    match kind {
+        AttrKind::F32 => 0,
+        AttrKind::F32x2 => 1,
+        AttrKind::F32x3 => 2,
+        AttrKind::F32x4 => 3,
+        AttrKind::I32 => 4,
     }
 }

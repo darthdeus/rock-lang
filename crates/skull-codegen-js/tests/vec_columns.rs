@@ -7,10 +7,9 @@
 //! Emitted-shape assertions alone cannot tell "flat" from "boxed and unboxed
 //! again", so the round-trips below RUN under node.
 
-use skull_mir::lower::{lower_function, ScalarCtx};
 use skull_mir::mir::FuncRef;
 
-use crate::common::ws_with;
+use crate::common::{lower_test_ref, ws_with};
 
 const SRC: &str = r#"
 value V2 { x: float, y: float }
@@ -68,7 +67,6 @@ fn node_available() -> bool {
 /// question is reached.
 fn emit_js(name: &str) -> Result<String, String> {
     let ws = ws_with(SRC);
-    let scx = ScalarCtx::new(&ws).with_target(bone_semantic::hir::FnBackend::Js);
     let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
     let fid = ws
         .module(mid)
@@ -79,7 +77,6 @@ fn emit_js(name: &str) -> Result<String, String> {
         .expect("fn in <test>");
     skull_codegen_js::emit::emit_with_closure(
         &ws,
-        &scx,
         &[(FuncRef { module: mid, func: fid }, name.to_string())],
     )
     .map_err(|e| e.message)
@@ -89,7 +86,6 @@ fn emit_js(name: &str) -> Result<String, String> {
 /// columns on the backend that has always had them.
 fn lua_mir(name: &str) -> String {
     let ws = ws_with(SRC);
-    let scx = ScalarCtx::new(&ws);
     let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
     let fid = ws
         .module(mid)
@@ -98,9 +94,7 @@ fn lua_mir(name: &str) -> String {
         .find(|(_, f)| f.name.as_str() == name)
         .map(|(fid, _)| fid)
         .expect("fn in <test>");
-    lower_function(&ws, &scx, mid, fid)
-        .unwrap_or_else(|e| panic!("lower `{name}`: {}", e.message))
-        .to_string()
+    lower_test_ref(&ws, mid, fid).to_string()
 }
 
 /// Just `function <name>(` .. the next top-level `}`, so a body assertion is not

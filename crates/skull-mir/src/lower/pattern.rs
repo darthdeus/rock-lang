@@ -151,7 +151,9 @@ impl Builder<'_> {
                 // A cdata enum's payload lives in its `_<i>` C field (cut 1: `_0`);
                 // a table enum's is the positional `[i+1]` slot; a FLATTENED field's
                 // is the parent's `{prefix}__i` slot (see `scrut_payload`).
-                let cdata = en.is_some_and(|e| enum_value_shape(self.ws, e).is_some());
+                let cdata = en.is_some_and(|e| {
+                    EnumPlan::for_name(self.ws, e).is_some_and(|plan| plan.cdata().is_some())
+                });
                 for (i, sp) in sub.into_iter().enumerate() {
                     // A payload position widened to a `nobox` value's leaves binds
                     // THE LEAVES -- rebuilding a box here to bind one cell is the
@@ -169,7 +171,7 @@ impl Builder<'_> {
                     // Indexing by position read the widened value's second leaf
                     // and handed `nil` to the count.
                     let slot = en
-                        .and_then(|e| flat_enum_shape(self.ws, e))
+                        .and_then(|e| EnumPlan::for_name(self.ws, e).and_then(|plan| plan.flat().cloned()))
                         .map_or(i, |s| s.slot_offset(i));
                     let payload = self.scrut_payload(scrut, slot, cdata);
                     // Thread the sub-pattern's enum (from this variant's payload
@@ -212,7 +214,10 @@ impl Builder<'_> {
                 // A FLATTENED field reads its `{prefix}__<field>` slot; a cdata enum's
                 // record payload lives in `_<field>` C slots; a table enum (or a plain
                 // struct destructure, `name` = None) reads the field key directly.
-                let cdata = name.is_some() && en.is_some_and(|e| enum_value_shape(self.ws, e).is_some());
+                let cdata = name.is_some()
+                    && en.is_some_and(|e| {
+                        EnumPlan::for_name(self.ws, e).is_some_and(|plan| plan.cdata().is_some())
+                    });
                 for rfidx in fields {
                     let rpf = self.body.record_pat_field_arena[rfidx];
                     // An embed/nobox field has NO slot under its own name, so a
@@ -357,7 +362,7 @@ impl Builder<'_> {
         // constructed enum) matches from its cells -- no box.
         let r = self.lower_expr_repr(e)?;
         if let ValueRepr::Group { name, .. } = &r {
-            if let Some(shape) = flat_enum_shape(self.ws, *name) {
+            if let Some(shape) = EnumPlan::for_name(self.ws, *name).and_then(|plan| plan.flat().cloned()) {
                 let ValueRepr::Group { parts, .. } = r else { unreachable!() };
                 let cells = self.repr_group_to_cells(&shape, parts);
                 return Ok(Scrut::Cells {
@@ -403,7 +408,7 @@ impl Builder<'_> {
     ) -> Option<ValueShape> {
         use bone_semantic::hir::VariantPayload;
         let en = enum_name?;
-        let shape = flat_enum_shape(self.ws, en)?;
+        let shape = EnumPlan::for_name(self.ws, en).and_then(|plan| plan.flat().cloned())?;
         let eid = self.ws.enums_by_name.get(&en)?;
         let ed = &self.ws.modules[eid.module.index()].enums[eid.def];
         let v = ed.variants.iter().find(|v| v.name == variant)?;
@@ -506,7 +511,7 @@ impl Builder<'_> {
             return;
         }
         if let Some(ord) = enum_name
-            .and_then(|en| enum_value_shape(self.ws, en))
+            .and_then(|en| EnumPlan::for_name(self.ws, en).and_then(|plan| plan.cdata().cloned()))
             .and_then(|s| s.tag_of(variant))
         {
             let tag = self.emit_cur(Inst::Field { base: val, field: Ustr::from("__tag") });
@@ -657,16 +662,33 @@ impl Builder<'_> {
     ) -> Result<Option<TupleRetShape>, CompilerError> {
         let Expr::Call {
             callee: Callee::Unresolved { name, .. },
+            args,
             ..
         } = self.body.expr_arena[e]
         else {
             return Ok(None);
         };
-        let Ok(func) = self.resolve_funcref(e, name) else { return Ok(None) };
+        if self.ws.newtypes_by_name.contains_key(&name) {
+            return Ok(None);
+        }
+        let arg_idxs: Vec<_> = args.into_iter().collect();
+        let any_named = arg_idxs
+            .iter()
+            .any(|a| self.body.arg_names.contains_key(a) || self.body.spread_args.contains(a));
+        if !any_named
+            && arg_idxs
+                .first()
+                .is_some_and(|&recv| self.struct_field_is_fn(recv, name))
+        {
+            return Ok(None);
+        }
+        if !any_named && self.is_fn_global(name) {
+            return Ok(None);
+        }
         // The CALLEE's instantiation, via the same oracle `lower_call` uses --
         // not the enclosing body's `spec_subst`, which is empty in a
         // non-generic caller and left every slot `Opaque`.
-        let Some(shape) = self.call_ret_tuple_shape(e, func)? else { return Ok(None) };
+        let Some(shape) = self.call_ret_tuple_shape(e)? else { return Ok(None) };
         Ok(shape.nullable.then_some(shape))
     }
 
@@ -890,7 +912,13 @@ impl Builder<'_> {
         self.cur = header;
         let i_v = self.emit_cur(Inst::Load(i_cell));
         let h_v = self.emit_cur(Inst::Load(hi_cell));
-        let cmp = self.emit_cur(Inst::IntLt(i_v, h_v));
+        let is_uint = matches!(self.arith_ty(low), Some(ArithTy::Uint))
+            || matches!(self.arith_ty(high), Some(ArithTy::Uint));
+        let cmp = if is_uint {
+            self.emit_cur(Inst::UintLt(i_v, h_v))
+        } else {
+            self.emit_cur(Inst::IntLt(i_v, h_v))
+        };
         self.f.set_term(
             self.cur,
             Term::Branch {
@@ -910,8 +938,12 @@ impl Builder<'_> {
 
         self.cur = latch;
         let i_v2 = self.emit_cur(Inst::Load(i_cell));
-        let one = self.emit_cur(Inst::Const(Lit::Int(1)));
-        let inc = self.emit_cur(Inst::IntAdd(i_v2, one));
+        let one = self.emit_cur(Inst::Const(if is_uint { Lit::Uint(1) } else { Lit::Int(1) }));
+        let inc = if is_uint {
+            self.emit_cur(Inst::UintAdd(i_v2, one))
+        } else {
+            self.emit_cur(Inst::IntAdd(i_v2, one))
+        };
         self.emit_cur(Inst::Store {
             cell: i_cell,
             value: inc,

@@ -1,18 +1,16 @@
 //! `MonoTy` -- THE logical type (`docs/monomorphization-plan.md` Stage 1). Every
-//! concrete type identity in the compiler is one of these: `SpecKey` slots, the
+//! concrete type identity in the compiler is one of these: an `Instance`'s
+//! arguments, the
 //! substitutions specialized lowering reads, the symbols the emitters mangle,
 //! and the instance graph.
 //!
-//! There is ONE of these walks, and that is the point: a second, narrower one
-//! is free to answer `None` for a type it does not admit, and `None` is not a
-//! type -- it is the absence of one, which every binding that lands in it
-//! shares. `f<Vec2, unit>`, `f<Vec2, any>` and `f<Vec2, fn(int)->int>` are three
-//! instantiations, and a partial walk gives them one identity and one emitted
-//! body. So `SpecKey` slots are built from this conversion too
-//! ([`reify_type`](crate::lower::shape::reify_type)): WHETHER a call
-//! specializes is conditional (the `@inline`/`@pure` opt-in, the storage
-//! trigger), WHICH instantiation it names is not. Stage 4 deletes the rest of
-//! the policy.
+//! There is ONE logical-type conversion, and that is the point: a second,
+//! narrower walk is free to answer `None` for a type it does not admit, and
+//! `None` is not a type -- it is the absence of one, which every binding that
+//! lands in it shares. `f<Vec2, unit>`, `f<Vec2, any>` and
+//! `f<Vec2, fn(int)->int>` are three instantiations. Instance arguments and
+//! concrete lowering substitutions therefore use this conversion directly;
+//! representation and optimization policy are decided later by target plans.
 //!
 //! Three properties, in the order they matter:
 //!
@@ -68,6 +66,7 @@ pub enum MonoCtor {
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum MonoTy {
     Int,
+    Uint,
     Float,
     Bool,
     String,
@@ -96,6 +95,7 @@ impl MonoTy {
     fn write(&self, out: &mut String) {
         match self {
             MonoTy::Int => out.push_str("int"),
+            MonoTy::Uint => out.push_str("uint"),
             MonoTy::Float => out.push_str("float"),
             MonoTy::Bool => out.push_str("bool"),
             MonoTy::String => out.push_str("string"),
@@ -154,6 +154,7 @@ impl MonoTy {
     pub fn depth(&self) -> u32 {
         match self {
             MonoTy::Int
+            | MonoTy::Uint
             | MonoTy::Float
             | MonoTy::Bool
             | MonoTy::String
@@ -200,6 +201,7 @@ impl MonoTy {
         };
         match self {
             MonoTy::Int => prim(out, "int"),
+            MonoTy::Uint => prim(out, "uint"),
             MonoTy::Float => prim(out, "float"),
             MonoTy::Bool => prim(out, "bool"),
             MonoTy::String => prim(out, "string"),
@@ -291,6 +293,7 @@ impl MonoTy {
     pub fn prim_name(&self) -> Option<&'static str> {
         match self {
             Self::Int => Some("int"),
+            Self::Uint => Some("uint"),
             Self::Float => Some("float"),
             Self::Bool => Some("bool"),
             Self::String => Some("string"),
@@ -310,6 +313,7 @@ impl MonoTy {
     pub fn any_nominal(&self, pred: &impl Fn(Ustr) -> bool) -> bool {
         match self {
             Self::Int
+            | Self::Uint
             | Self::Float
             | Self::Bool
             | Self::String
@@ -330,16 +334,16 @@ impl MonoTy {
 }
 
 /// Why a type did not convert. Every variant is a distinct census bucket --
-/// `UnboundGeneric` in particular is DATA (it says the reader asked about a
-/// shared generic body), not an error to fold into the others.
+/// `UnboundGeneric` in particular is DATA (it says the reader asked about an
+/// uninstantiated generic context), not an error to fold into the others.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum MonoTyReason {
     /// `BuiltinTy::Error` -- inference recovery poison. An invalid program.
     RecoveryError,
     /// An inference variable with no substitution: inference did not finish.
     UnresolvedInfer(Ustr),
-    /// A declared generic absent from the enclosing substitution. Expected
-    /// wherever a shared generic body is read without an instantiation.
+    /// A declared generic absent from the enclosing substitution. Expected in
+    /// source-shaped generic contexts that have not selected an instance.
     UnboundGeneric(Ustr),
     /// The `TyId` names no node at all.
     NoNode,
@@ -592,12 +596,116 @@ impl MonoArena {
     }
 }
 
+/// **The one arena a whole build shares**, behind the interior mutability that
+/// sharing needs.
+///
+/// A [`MonoTyId`] means nothing without the arena that minted it, so an
+/// [`Instance`](crate::instance::Instance) is only an identity while one arena
+/// is reachable from everything that mints or reads one. Body lowering fans out
+/// across threads ([`par_map`](../../skull/src/mir_emit.rs)) and every body may
+/// name a callee instantiation, so the arena has to be shareable rather than
+/// owned by one walk -- and giving each walk its own would mint the second
+/// identity this stage exists to remove.
+///
+/// Reads happen throughout parallel lowering, while interning is confined to
+/// graph construction and the occasional newly discovered call target. Keep
+/// those populations apart so concrete-plan reads do not serialize on writes.
+///
+/// The arena is MONOTONIC and is never pruned. An entry outliving its last
+/// instance is what keeps ids stable across incremental edits, which is the
+/// property `InstanceGraph::update_bodies` rests on.
+pub struct MonoInterner {
+    arena: std::sync::RwLock<MonoArena>,
+}
+
+impl Default for MonoInterner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Debug for MonoInterner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "MonoInterner({} types)", self.len())
+    }
+}
+
+impl MonoInterner {
+    pub fn new() -> Self {
+        Self { arena: std::sync::RwLock::new(MonoArena::new()) }
+    }
+
+    /// Adopt an arena an [`InstanceGraph`](../../skull/src/instance_graph.rs)
+    /// build already filled. The graph and emission share ONE arena; a second
+    /// one would give the same type two ids and the same body two identities.
+    pub fn from_arena(arena: MonoArena) -> Self {
+        Self { arena: std::sync::RwLock::new(arena) }
+    }
+
+    pub fn len(&self) -> usize {
+        self.with(MonoArena::len)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn intern(&self, ty: MonoTy) -> MonoTyId {
+        self.arena.write().expect("mono arena poisoned").intern(ty)
+    }
+
+    /// One lock acquisition for a whole argument list, which is how an
+    /// instance's arguments arrive.
+    pub fn intern_all(&self, tys: impl IntoIterator<Item = MonoTy>) -> Vec<MonoTyId> {
+        let mut arena = self.arena.write().expect("mono arena poisoned");
+        tys.into_iter().map(|ty| arena.intern(ty)).collect()
+    }
+
+    /// The type an id names. Returns an OWNED [`MonoTy`] because the arena is
+    /// behind a lock; a [`MonoTy`] owns its children, so this is the same
+    /// self-contained value every other consumer already passes around.
+    pub fn get(&self, id: MonoTyId) -> MonoTy {
+        self.with(|a| a.get(id).clone())
+    }
+
+    /// The counterpart to [`Self::intern_all`], for reading an instance's
+    /// arguments back out as the types they are.
+    pub fn get_all(&self, ids: &[MonoTyId]) -> Vec<MonoTy> {
+        self.with(|a| ids.iter().map(|id| a.get(*id).clone()).collect())
+    }
+
+    /// The display rendering of an interned type. Not an identity -- see
+    /// [`MonoTy::render`].
+    pub fn render(&self, id: MonoTyId) -> String {
+        self.with(|a| a.render(id))
+    }
+
+    /// The canonical identity string of an interned type.
+    pub fn canonical(&self, id: MonoTyId) -> String {
+        self.with(|a| a.canonical(id))
+    }
+
+    /// Read-only access under one lock, for a caller doing several reads.
+    pub fn with<R>(&self, f: impl FnOnce(&MonoArena) -> R) -> R {
+        f(&self.arena.read().expect("mono arena poisoned"))
+    }
+
+    /// Mutable access under one lock, for a caller doing several interns.
+    pub fn with_mut<R>(&self, f: impl FnOnce(&mut MonoArena) -> R) -> R {
+        f(&mut self.arena.write().expect("mono arena poisoned"))
+    }
+
+    pub fn into_arena(self) -> MonoArena {
+        self.arena.into_inner().expect("mono arena poisoned")
+    }
+}
+
 /// Convert an inferred `TyId` to its total logical type.
 ///
 /// `subst` binds declared generics; a generic absent from it is
 /// [`MonoTyReason::UnboundGeneric`] rather than a guess, because the caller is
-/// the only one who knows whether that is expected (a shared generic body) or a
-/// defect (a missing instantiation).
+/// the only one who knows whether that is expected (an uninstantiated generic
+/// context) or a defect (a missing instantiation).
 pub fn convert<S: std::hash::BuildHasher>(
     ws: &Workspace,
     inf: &BodyInference,
@@ -658,6 +766,7 @@ fn convert_at<S: std::hash::BuildHasher>(
     Ok(match node {
         TypeExpr::Builtin(b) => match b {
             BuiltinTy::Int => MonoTy::Int,
+            BuiltinTy::Uint => MonoTy::Uint,
             BuiltinTy::Float => MonoTy::Float,
             BuiltinTy::Bool => MonoTy::Bool,
             BuiltinTy::String => MonoTy::String,
@@ -754,7 +863,7 @@ pub const MAX_INSTANTIATION_DEPTH: u32 = 12;
 ///
 /// Takes `&MonoTy` rather than a depth so the aggregation is here too. The graph
 /// holds `MonoTyId`s and reaches these through `MonoArena::get`; emission holds
-/// the owned trees of a `SpecKey` directly.
+/// the owned trees of an argument list directly.
 pub fn too_deep_to_instantiate<'a>(
     args: impl IntoIterator<Item = &'a MonoTy>,
 ) -> Option<&'a MonoTy> {

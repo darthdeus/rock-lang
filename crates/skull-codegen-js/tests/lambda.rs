@@ -6,7 +6,6 @@
 //! indirect call `(<callee>)(args)`. The structural pins fix the emitted shape;
 //! the node-executed behavioral checks are the correctness oracle.
 
-use skull_mir::lower::ScalarCtx;
 use skull_mir::mir::FuncRef;
 use crate::common::{emit_user, ws_with};
 
@@ -42,9 +41,8 @@ fn node_eval_int(defs: &str, call: &str) -> i64 {
 
 /// Co-emit `root` and its plain-Rock callees into one JS program.
 fn emit_closure(ws: &bone_semantic::inference::Workspace, root: &str) -> String {
-    let scx = ScalarCtx::new(ws);
     let r = test_fn_ref(ws, root);
-    skull_codegen_js::emit::emit_with_closure(ws, &scx, &[(r, root.to_string())])
+    skull_codegen_js::emit::emit_with_closure(ws, &[(r, root.to_string())])
         .unwrap_or_else(|e| panic!("closure emit `{root}`: {}", e.message))
 }
 

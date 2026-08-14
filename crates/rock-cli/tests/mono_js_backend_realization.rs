@@ -63,7 +63,7 @@ fn main() {
 "#;
 
 fn view(ws: &Workspace, wired: bool) -> artifact::ArtifactView {
-    let roots = instance_graph::emission_roots(ws, None);
+    let roots = skull::mir_emit::emission_roots(ws, None);
     let g = instance_graph::build(ws, roots.clone(), false);
     let supply = JsBackendRealization;
     let req = ArtifactRequest::new(skull::target_projection::JAVASCRIPT_WEB, &roots);

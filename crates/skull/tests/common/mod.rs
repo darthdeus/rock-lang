@@ -207,6 +207,49 @@ pub fn try_emit_with_stdlib_module(
     skull::mir_emit::emit_workspace_mir(&ws, mid).map(|e| e.lua)
 }
 
+/// Like [`ws_with_stdlib`] but ALSO loads `lib` as an extra stdlib module, so a
+/// case needs a body the emission-root predicate classifies as LIBRARY (and
+/// therefore prunable) rather than as own-project source.
+pub fn ws_with_stdlib_module(lib: &str, src: &str) -> Workspace {
+    let mut modules = STDLIB.clone();
+    modules.push(skull_parser::parse_module_clean(lib, Ustr::from("<stdlib:probe>")).expect("parse lib"));
+    modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
+    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
+    assert_no_bone_errors(&ws);
+    ws
+}
+
+pub fn ws_with_dependency_module(lib: &str, src: &str) -> Workspace {
+    let mut modules = STDLIB.clone();
+    modules.push(
+        skull_parser::parse_module_clean(lib, Ustr::from("/tmp/rock-mono-dependency/engine.rock"))
+            .expect("parse lib"),
+    );
+    modules.push(
+        skull_parser::parse_module_clean(src, Ustr::from("/tmp/rock-mono-project/main.rock"))
+            .expect("parse"),
+    );
+    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
+    assert_no_bone_errors(&ws);
+    ws
+}
+
+/// The `FuncRef` of the single workspace fn named `name`. Panics unless there is
+/// exactly one -- an ambiguous match would silently assert about another
+/// declaration.
+pub fn fn_ref(ws: &Workspace, name: &str) -> skull_mir::mir::FuncRef {
+    let mut found = Vec::new();
+    for m in ws.modules.iter() {
+        for (fid, f) in m.functions.iter() {
+            if f.name.as_str() == name {
+                found.push(skull_mir::mir::FuncRef { module: m.id, func: fid });
+            }
+        }
+    }
+    assert_eq!(found.len(), 1, "expected exactly one fn named `{name}`, got {}", found.len());
+    found[0]
+}
+
 /// Single-module workspace (no stdlib) for incremental / hot-reload tests.
 pub fn ws_of(src: &str) -> Workspace {
     let module = skull_parser::parse_module_clean(src, Ustr::from("<t>")).expect("parse");
@@ -242,6 +285,8 @@ pub fn run_luajit(prog: &str, tag: &str) -> String {
 /// in another's census.
 static ABLATION_MODE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+static INLINE_MODE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Hold the ablation mode for one test. `Drop` restores it even on a panicking
 /// assert, so a failing test cannot leave the flag on for the next one.
 pub struct AblationGuard(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
@@ -270,5 +315,28 @@ impl Drop for AblationGuard {
     fn drop(&mut self) {
         skull_mir::ablation::set_enabled(false);
         skull_mir::ablation::clear();
+    }
+}
+
+pub struct InlineOffGuard(
+    #[allow(dead_code)] std::sync::MutexGuard<'static, ()>,
+    Option<String>,
+);
+
+impl InlineOffGuard {
+    pub fn on() -> Self {
+        let guard = INLINE_MODE.lock().unwrap_or_else(|e| e.into_inner());
+        let previous = std::env::var("SKULL_INLINE_OFF").ok();
+        unsafe { std::env::set_var("SKULL_INLINE_OFF", "1") };
+        InlineOffGuard(guard, previous)
+    }
+}
+
+impl Drop for InlineOffGuard {
+    fn drop(&mut self) {
+        match &self.1 {
+            Some(value) => unsafe { std::env::set_var("SKULL_INLINE_OFF", value) },
+            None => unsafe { std::env::remove_var("SKULL_INLINE_OFF") },
+        }
     }
 }

@@ -23,6 +23,7 @@ ustr = { workspace = true }
 # Source of the real stdlib (`__op_*` overloads etc.) so arithmetic snippets
 # resolve in lowering tests, exactly as the real corpus loads it.
 rock-host = { path = "../rock-host" }
+skull-graph = { path = "../skull-graph" }
 
 [lints]
 workspace = true

@@ -47,6 +47,9 @@
 // luajit narrows through the ffi; a JS number is already the value.
 @pure @inline inline(js) fn int(value: int) -> int = "return value;"
 
+@intrinsic @inline inline(js) fn native_buffer_uint(n: int) -> NativeBuffer<uint> =
+    "return {ptr: new Uint32Array(n), len: n};"
+
 // There is no FFI pointer on JS at all, so what luajit reconstructs from a
 // `char*` is already a string here; `len` has nothing to bound.
 inline(js) fn ffi_string(ptr: any, len: int?) -> string = """

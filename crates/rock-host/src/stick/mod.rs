@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 pub mod build_vars;
 pub mod resolver;
@@ -14,6 +15,9 @@ pub struct StickConfig {
     /// bindgen — slow, only anvil needs it). Default: empty
     /// list = stone-rs only.
     pub engine: Option<EngineConfig>,
+    /// The renderer is a build-time choice, independent of optional engine
+    /// capabilities such as wgpu compute.
+    pub renderer: Option<RendererConfig>,
     /// Optional iOS bundle settings. Read by the deploy scripts
     /// (`tools/ios/*.sh`) when they write Info.plist -- orientation is a
     /// build-time property of the bundle, not something the running game can
@@ -62,6 +66,43 @@ pub const KNOWN_BUILD_BUILTINS: [&str; 2] = ["channel", "platform"];
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
     pub needs: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RendererConfig {
+    pub backend: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RendererBackend {
+    Gl,
+    Wgpu,
+}
+
+static RENDERER_OVERRIDE: OnceLock<Mutex<Option<RendererBackend>>> = OnceLock::new();
+
+fn renderer_override_slot() -> &'static Mutex<Option<RendererBackend>> {
+    RENDERER_OVERRIDE.get_or_init(|| Mutex::new(None))
+}
+
+/// Process-local selection installed by a CLI invocation. It is read by the
+/// same manifest resolver used by compiler, engine build, and generated game
+/// preamble, so an override cannot affect only the runtime half.
+pub struct RendererOverrideGuard {
+    previous: Option<RendererBackend>,
+}
+
+impl Drop for RendererOverrideGuard {
+    fn drop(&mut self) {
+        *renderer_override_slot().lock().expect("renderer override lock") = self.previous;
+    }
+}
+
+pub fn install_renderer_override(backend: Option<RendererBackend>) -> RendererOverrideGuard {
+    let mut slot = renderer_override_slot().lock().expect("renderer override lock");
+    let previous = *slot;
+    *slot = backend;
+    RendererOverrideGuard { previous }
 }
 
 #[derive(Debug, Clone)]
@@ -353,6 +394,33 @@ impl<'de> serde::Deserialize<'de> for ReleaseConfig {
     }
 }
 
+impl<'de> serde::Deserialize<'de> for RendererConfig {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct Vis;
+        impl<'de> serde::de::Visitor<'de> for Vis {
+            type Value = RendererConfig;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                write!(f, "RendererConfig struct")
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<RendererConfig, A::Error> {
+                let mut backend: Option<String> = None;
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "backend" => { backend = Some(map.next_value()?); }
+                        other => {
+                            return Err(serde::de::Error::custom(format!(
+                                "unknown key `{other}` in [renderer]; known keys: backend"
+                            )));
+                        }
+                    }
+                }
+                Ok(RendererConfig { backend })
+            }
+        }
+        d.deserialize_map(Vis)
+    }
+}
+
 impl<'de> serde::Deserialize<'de> for Package {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         struct Vis;
@@ -392,6 +460,7 @@ impl<'de> serde::Deserialize<'de> for StickConfig {
             fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<StickConfig, A::Error> {
                 let mut package: Option<Package> = None;
                 let mut engine: Option<EngineConfig> = None;
+                let mut renderer: Option<RendererConfig> = None;
                 let mut ios: Option<IosConfig> = None;
                 let mut build: Option<BuildConfig> = None;
                 let mut release: Option<ReleaseConfig> = None;
@@ -402,13 +471,14 @@ impl<'de> serde::Deserialize<'de> for StickConfig {
                         "build" => { build = Some(map.next_value()?); }
                         "release" => { release = Some(map.next_value()?); }
                         "engine" => { engine = map.next_value()?; }
+                        "renderer" => { renderer = map.next_value()?; }
                         "ios" => { ios = map.next_value()?; }
                         "dependencies" => { dependencies = map.next_value()?; }
                         _ => { let _ = map.next_value::<serde::de::IgnoredAny>()?; }
                     }
                 }
                 let package = package.ok_or_else(|| serde::de::Error::missing_field("package"))?;
-                Ok(StickConfig { package, engine, ios, build, release, dependencies })
+                Ok(StickConfig { package, engine, renderer, ios, build, release, dependencies })
             }
         }
         d.deserialize_map(Vis)
@@ -510,6 +580,24 @@ impl StickConfig {
         self.engine.as_ref()
             .map(|e| e.needs.iter().any(|n| n == lib))
             .unwrap_or(false)
+    }
+
+    pub fn renderer_backend(&self) -> Result<RendererBackend> {
+        if let Some(backend) = *renderer_override_slot().lock().expect("renderer override lock") {
+            return Ok(backend);
+        }
+        match self.renderer.as_ref().and_then(|r| r.backend.as_deref()).unwrap_or("gl") {
+            "gl" => Ok(RendererBackend::Gl),
+            "wgpu" => Ok(RendererBackend::Wgpu),
+            backend => anyhow::bail!(
+                "stick.toml: unknown [renderer] backend {:?}. Known: \"gl\", \"wgpu\"",
+                backend
+            ),
+        }
+    }
+
+    pub fn validate_renderer(&self) -> Result<()> {
+        self.renderer_backend().map(|_| ())
     }
 
     /// Recognised values for `[engine] needs = [...]`, read off the build table
@@ -984,6 +1072,27 @@ mod tests {
     fn validate_engine_needs_empty_is_ok() {
         let cfg = StickConfig::new_from_str("[package]\nname = \"x\"\n").unwrap();
         cfg.validate_engine_needs().expect("no engine section is fine");
+    }
+
+    #[test]
+    fn renderer_defaults_to_gl_and_accepts_wgpu() {
+        let gl = StickConfig::new_from_str("[package]\nname = \"x\"\n").unwrap();
+        assert_eq!(gl.renderer_backend().unwrap(), RendererBackend::Gl);
+
+        let wgpu = StickConfig::new_from_str(
+            "[package]\nname = \"x\"\n[renderer]\nbackend = \"wgpu\"\n",
+        ).unwrap();
+        assert_eq!(wgpu.renderer_backend().unwrap(), RendererBackend::Wgpu);
+        wgpu.validate_renderer().expect("wgpu is a known renderer");
+    }
+
+    #[test]
+    fn renderer_rejects_unknown_backend() {
+        let cfg = StickConfig::new_from_str(
+            "[package]\nname = \"x\"\n[renderer]\nbackend = \"vulkan\"\n",
+        ).unwrap();
+        let err = cfg.validate_renderer().expect_err("unknown renderer must reject");
+        assert!(format!("{err}").contains("vulkan"));
     }
 
     // RED-then-GREEN: from_path_optional must distinguish "no manifest"

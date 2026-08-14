@@ -13,7 +13,6 @@
 //! The live production instance is `__vbo_as_float_ptr(buf: NativeBuffer<Vertex>)`
 //! (`stone/engine/web/js_ffi.rock`), which the acceptance contract names.
 
-use skull_mir::lower::ScalarCtx;
 
 const FLATVEC_PARAM: &str = r#"
 value G { x: float, y: float }
@@ -96,7 +95,6 @@ fn main() {
 /// Emit the `main` closure for the JS target.
 fn js(src: &str) -> Result<(), String> {
     let ws = crate::common::ws_with(src);
-    let scx = ScalarCtx::new(&ws).with_target(bone_semantic::hir::FnBackend::Js);
     let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
     let root = ws
         .module(mid)
@@ -105,7 +103,7 @@ fn js(src: &str) -> Result<(), String> {
         .find(|(_, f)| f.name.as_str() == "main")
         .map(|(fid, _)| skull_mir::mir::FuncRef { module: mid, func: fid })
         .expect("main");
-    skull_codegen_js::emit::emit_with_closure(&ws, &scx, &[(root, "main".to_string())])
+    skull_codegen_js::emit::emit_with_closure(&ws, &[(root, "main".to_string())])
         .map(|_| ())
         .map_err(|e| e.message)
 }
@@ -144,10 +142,8 @@ fn the_same_native_buffer_body_is_admitted_on_lua() {
 /// The ELEMENT bound, on the target that rejects.
 #[test]
 fn a_primitive_element_buffer_is_admitted_on_js() {
-    assert!(
-        js(NATIVEBUFFER_PRIMITIVE).is_ok(),
-        "no leaf plan means no representation the boxed form does not have"
-    );
+    let result = js(NATIVEBUFFER_PRIMITIVE);
+    assert!(result.is_ok(), "no leaf plan means no representation the boxed form does not have: {result:?}");
 }
 
 /// The acceptance contract's "expansion intrinsics are exempt BY CONSTRUCTION",

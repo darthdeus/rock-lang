@@ -82,6 +82,7 @@ impl Builder<'_> {
         if let Expr::Call {
             callee: Callee::Unresolved { name, .. },
             args,
+            ..
         } = self.body.expr_arena[iter].clone()
         {
             if name.as_str() == "enumerate" {
@@ -179,7 +180,18 @@ impl Builder<'_> {
             Some((m, f)) => {
                 let iter_ref = FuncRef { module: m, func: f };
                 let repr = self.lower_expr_repr(iter_expr)?;
-                let args = self.iter_witness_args(iter_ref, repr)?;
+                // Resolved BEFORE the arguments are shaped, for the same reason
+                // the implicit-coercion form does it: the splat must match the
+                // body the call targets.
+                let witness = if info.iter.is_some() {
+                    self.with_site_op(crate::site::SiteOp::ForIter, |b| {
+                        b.concrete_callee_for_site(iter_expr)
+                    })?
+                    .ok_or_else(|| gap("for-iter has no concrete callee"))?
+                } else {
+                    crate::instance::Instance::base(iter_ref)
+                };
+                let args = self.iter_witness_args(&witness, repr)?;
                 // The `for` head's `iter` witness, not the head expression's
                 // own call: both live at one expression and share one span, so
                 // the operation is what keeps them distinguishable.
@@ -189,34 +201,20 @@ impl Builder<'_> {
                 // DELIVERY, from the same `IterWitness::generics` the identity
                 // record below reads. The witness is an ordinary call to a
                 // generic `iter`, so under instance-owned emission it must name
-                // an instance like any other -- it was the last call form still
-                // reaching a shared generic body by construction, and once that
-                // body stopped being emitted it named a nil global.
-                if let Some(w) = info.iter.as_ref() {
-                    let span = self
-                        .body
-                        .expr_spans
-                        .get(iter_expr)
-                        .copied()
-                        .unwrap_or(self.ws.module(m).functions[f].name_span);
-                    if let Some(key) = self.next_call_spec(iter_ref, &w.generics, span)? {
-                        self.f.spec_bindings.insert(call, key);
-                    }
+                // a concrete instance like any other.
+                if let Some(delivery) = self.concrete_delivery_instance(&witness) {
+                    self.f.spec_bindings.insert(call, delivery);
                 }
-                if let (Some(inf), Some(w)) = (self.inf, info.iter.as_ref()) {
-                    if let Some(subst) = crate::lower::shape::witness_instance_subst(
-                        self.ws,
-                        inf,
-                        iter_ref,
-                        &w.generics,
-                        self.subst(),
-                    )? {
-                        self.f.callee_instances.insert(
-                            call,
-                            crate::site::OwnerInstance { func: iter_ref, subst },
-                        );
-                    }
+                if self.ws.module(m).functions[f].generics.is_empty() || !witness.args.is_empty() {
+                    crate::site::record_call_owner(
+                        &mut self.f,
+                        call,
+                        &witness,
+                    );
                 }
+                self.f
+                    .call_abi_plans
+                    .insert(call, self.callee_abi_plan_for_instance(&witness)?);
                 call
             }
             None => self.lower_expr(iter_expr)?,
@@ -225,22 +223,17 @@ impl Builder<'_> {
         self.emit_cur(Inst::Store { cell: it_cell, value: it_val });
 
         // next returns `(bool, E)` / `(bool, A, B, ...)`. The shape is read under
-        // the SPECIALIZATION the emitted call will carry, not the caller's own:
-        // when the spec is dropped the call reaches the shared generic body,
-        // whose `E` is unbound and therefore never splats -- so the two sides
-        // agree about how many values come back.
-        let spec = match &info.next {
-            BoundNext::Concrete { func: (m, f), next_generics, .. } => self
-                .next_call_spec(
-                    FuncRef { module: *m, func: *f },
-                    next_generics,
-                    self.body
-                        .expr_spans
-                        .get(iter_expr)
-                        .copied()
-                        .unwrap_or(self.ws.module(*m).functions[*f].name_span),
-                )?,
-            BoundNext::CallerGeneric(_) => None,
+        // the concrete callee the emitted call will carry, not the caller's own:
+        // the witness result plan states how many values come back, so the two
+        // lowering sides agree without re-deriving the shape.
+        let concrete_next = if matches!(info.next, BoundNext::Concrete { .. }) {
+            self.with_site_op(crate::site::SiteOp::ForNext(Vec::new()), |b| {
+                b.concrete_callee_for_site(iter_expr)
+            })?
+            .ok_or_else(|| gap("for-next has no concrete callee"))?
+            .into()
+        } else {
+            None
         };
         // A placeholder next is `(bool, E)` by bound conformance, but `E`'s SHAPE
         // is this body's own specialization to answer -- the concrete callee is
@@ -250,18 +243,15 @@ impl Builder<'_> {
         // the shape is known; leaving it opaque forces the splice to rebuild an
         // aggregate, and a presence leaf has no field to rebuild into.
         let ret_shape = match &info.next {
-            BoundNext::Concrete { func: (m, f), .. } => {
-                let func = FuncRef { module: *m, func: *f };
-                let subst = spec
-                    .as_ref()
-                    .map(|k| spec_subst_from_key(self.ws, func, k))
-                    .unwrap_or_default();
-                self.ws.module(*m).functions[*f]
-                    .return_ty
-                    .and_then(|t| tuple_ret_shape(self.ws, &subst, t))
-                    .ok_or_else(|| gap("for-iter `next` must return a tuple"))?
-            }
-            BoundNext::CallerGeneric(gidx) => self.bound_next_tuple_shape(*gidx),
+            BoundNext::Concrete { .. } => self
+                .callee_abi_plan_for_instance(
+                    concrete_next
+                        .as_ref()
+                        .ok_or_else(|| gap("for-iter `next` has no concrete callee"))?,
+                )?
+                .ret_tuple()
+                .ok_or_else(|| gap("for-iter `next` must return a tuple"))?,
+            BoundNext::CallerGeneric(gidx) => self.bound_next_tuple_shape(*gidx)?,
         };
         if ret_shape.slots.len() < 2 {
             return Err(gap("for-iter `next` must return `(bool, E)`"));
@@ -279,8 +269,11 @@ impl Builder<'_> {
         let it_load = self.emit_cur(Inst::Load(it_cell));
         let dests: Vec<Idx<Cell>> = (0..n).map(|_| self.f.new_cell(None)).collect();
         match &info.next {
-            BoundNext::Concrete { func: (m, f), sub, next_generics, .. } => {
-                let func = FuncRef { module: *m, func: *f };
+            BoundNext::Concrete { func: (m, f), sub, .. } => {
+                let func = concrete_next
+                    .as_ref()
+                    .map(|owner| owner.func)
+                    .unwrap_or(FuncRef { module: *m, func: *f });
                 // The synthesized `next` call has no expr to key
                 // `call_generic_bindings` by, so its instantiation comes from
                 // bone's recorded `next_generics`. Without this the inliner
@@ -299,22 +292,19 @@ impl Builder<'_> {
                 if !sub.is_empty() {
                     self.f.bound_trees.insert(call, sub.clone());
                 }
-                if let Some(key) = spec {
-                    self.f.spec_bindings.insert(call, key);
+                let owner = concrete_next
+                    .as_ref()
+                    .ok_or_else(|| gap("concrete for-next has no callee instance"))?;
+                if !sub.is_empty() {
+                    self.record_callee_bound_tree(call, owner, true)?;
                 }
-                if let Some(inf) = self.inf {
-                    if let Some(subst) = crate::lower::shape::witness_instance_subst(
-                        self.ws,
-                        inf,
-                        func,
-                        next_generics,
-                        self.subst(),
-                    )? {
-                        self.f
-                            .callee_instances
-                            .insert(call, crate::site::OwnerInstance { func, subst });
-                    }
+                if let Some(delivery) = self.concrete_delivery_instance(owner) {
+                    self.f.spec_bindings.insert(call, delivery);
                 }
+                crate::site::record_call_owner(&mut self.f, call, owner);
+                self.f
+                    .call_abi_plans
+                    .insert(call, self.callee_abi_plan_for_instance(owner)?);
             }
             BoundNext::CallerGeneric(gidx) => {
                 // The same `for`-protocol `next` obligation its concrete sibling
@@ -362,11 +352,13 @@ impl Builder<'_> {
     /// The variant names of `e`'s enum type (empty if `e` is not an enum) — used
     /// to recognize an unqualified nullary-variant pattern at a match root.
     pub(crate) fn scrut_variants(&self, e: Idx<Expr>) -> HashSet<Ustr> {
-        if let Some(TypeExpr::App { ctor: TypeCtor::Nominal(name), .. }) = self.expr_ty(e) {
+        if let Some(ty) = self.concrete_expr_ty(e) {
+            let Some(name) = ty.peel_nullable().0.nominal() else { return HashSet::new() };
             if let Some(&eid) = self.ws.enums_by_name.get(&name) {
                 let ed = &self.ws.modules[eid.module.index()].enums[eid.def];
                 return ed.variants.iter().map(|v| v.name).collect();
             }
+            return HashSet::new();
         }
         HashSet::new()
     }
@@ -375,31 +367,35 @@ impl Builder<'_> {
     /// threaded into `match_pattern`/`test_tag` so a payload-free enum's tag test
     /// can int-compare the ordinal instead of reading `.__variant`.
     pub(crate) fn scrut_enum_name(&self, e: Idx<Expr>) -> Option<Ustr> {
-        match self.expr_ty(e) {
-            Some(TypeExpr::App { ctor: TypeCtor::Nominal(name), .. })
-                if self.ws.enums_by_name.contains_key(&name) =>
-            {
-                Some(name)
-            }
-            _ => None,
+        if let Some(ty) = self.concrete_expr_ty(e) {
+            let name = ty.peel_nullable().0.nominal()?;
+            return self.ws.enums_by_name.contains_key(&name).then_some(name);
         }
+        None
     }
 
     /// Whether `e`'s inferred type is a transparent newtype nominal.
     pub(crate) fn expr_is_newtype(&self, e: Idx<Expr>) -> bool {
-        matches!(
-            self.expr_ty(e),
-            Some(TypeExpr::App { ctor: TypeCtor::Nominal(name), .. })
-                if self.ws.newtypes_by_name.contains_key(&name)
-        )
+        if let Some(ty) = self.concrete_expr_ty(e) {
+            return ty
+                .peel_nullable()
+                .0
+                .nominal()
+                .is_some_and(|name| self.ws.newtypes_by_name.contains_key(&name));
+        }
+        false
     }
 
     /// Whether `iter`'s inferred type is an `Arena<T>` nominal.
     pub(crate) fn iter_is_arena(&self, iter: Idx<Expr>) -> bool {
-        matches!(
-            self.expr_ty(iter),
-            Some(TypeExpr::App { ctor: TypeCtor::Nominal(name), .. }) if name.as_str() == "Arena"
-        )
+        if let Some(ty) = self.concrete_expr_ty(iter) {
+            return ty
+                .peel_nullable()
+                .0
+                .nominal()
+                .is_some_and(|name| name.as_str() == "Arena");
+        }
+        false
     }
 
     /// `for (e, v) in arena` / `for item in arena` (optionally `enumerate(arena)`)

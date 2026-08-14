@@ -267,6 +267,7 @@ fn graft_expr_kind(src: &Ast, dst: &mut Ast, kind: &ExprKind) -> ExprKind {
         ),
         ExprKind::Paren(x) => ExprKind::Paren(ge(dst, *x)),
         ExprKind::As(x, t) => ExprKind::As(ge(dst, *x), gt(dst, *t)),
+        ExprKind::Bitcast(x, t) => ExprKind::Bitcast(ge(dst, *x), gt(dst, *t)),
         ExprKind::TypeAscription(x, t) => ExprKind::TypeAscription(ge(dst, *x), gt(dst, *t)),
         ExprKind::Not(x) => ExprKind::Not(ge(dst, *x)),
         ExprKind::BitNot(x) => ExprKind::BitNot(ge(dst, *x)),
@@ -289,8 +290,9 @@ fn graft_expr_kind(src: &Ast, dst: &mut Ast, kind: &ExprKind) -> ExprKind {
         ExprKind::ReturnExpr(o) => ExprKind::ReturnExpr(o.map(|e| ge(dst, e))),
         ExprKind::Yield(o) => ExprKind::Yield(o.map(|e| ge(dst, e))),
 
-        ExprKind::FunctionCall { func, args, syntax } => ExprKind::FunctionCall {
+        ExprKind::FunctionCall { func, generic_args, args, syntax } => ExprKind::FunctionCall {
             func: ge(dst, *func),
+            generic_args: generic_args.iter().map(|t| graft_type(src, dst, *t)).collect(),
             args: args
                 .iter()
                 .map(|a| FunctionCallArg {
@@ -425,6 +427,7 @@ fn graft_type_kind(src: &Ast, dst: &mut Ast, kind: &TypeExprKind) -> TypeExprKin
         | TypeExprKind::Unit
         | TypeExprKind::String
         | TypeExprKind::Int
+        | TypeExprKind::Uint
         | TypeExprKind::Float
         | TypeExprKind::Bool
         | TypeExprKind::Hole(_, _)

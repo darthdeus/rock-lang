@@ -9,7 +9,7 @@
 //! though they are not calls.
 //!
 //! **The phase is POST-TRANSFORM, and that is load-bearing.** Emission renders
-//! the body that comes out of [`crate::mir_emit::prepare_instance_body`] --
+//! the body that comes out of [`crate::mir_emit::prepare_instance_body_with_plans`] --
 //! inlined, cleaned, closure-converted, FORL-recovered -- so that is the only
 //! body whose calls are the ones actually emitted. Measuring the raw lowering
 //! output would count calls inlining deletes and miss calls it splices in, and
@@ -25,9 +25,9 @@
 //! from a join that quietly does not work.
 //!
 //! **The join FAILS CLOSED, and verifies the CALLEE.** [`resolve_owner`]
-//! demands an exact `(declaration, substitution)` match against the graph's own
-//! record, so an owner the graph does not have is reported rather than matched
-//! to another instance of the same declaration. And a site resolving is not
+//! demands an exact `Instance` match against the graph's own record, so an
+//! owner the graph does not have is reported rather than matched to another
+//! instance of the same declaration. And a site resolving is not
 //! enough: the resolved callee must equal the function the MIR call actually
 //! targets ([`Unjoined::CalleeMismatch`]), because a right site pointing at a
 //! wrong callee is the one failure instance-driven emission cannot tolerate.
@@ -41,8 +41,7 @@ use std::collections::{BTreeMap, HashMap};
 use bone_semantic::inference::Workspace;
 use skull_mir::lower::ScalarCtx;
 use skull_mir::mir::{Inst, MirFunc};
-use skull_mir::monoty::MonoSubst;
-use skull_mir::site::{CallSite, OwnerInstance, Site};
+use skull_mir::site::{CallSite, Site};
 
 use crate::concrete_body::{Callee, ConcreteBodies};
 use crate::instance_graph::{Instance, InstanceGraph};
@@ -58,8 +57,7 @@ pub enum Unjoined {
     /// have. A splice that failed to re-intern its owner lands here rather than
     /// silently reading the caller's entry 0.
     OwnerNotInTable,
-    /// The owner instance corresponds to no `Instance` in the graph -- the
-    /// substitution a body was lowered under is not one the walk recorded.
+    /// The owner instance corresponds to no `Instance` in the graph.
     OwnerNotAnInstance,
     /// The owning instance has no `ConcreteBody` (the walk did not expand it).
     NoBody,
@@ -499,15 +497,15 @@ struct CallRow {
     inst: bone_semantic::prelude::Idx<Inst>,
     site: Option<CallSite>,
     target: Option<skull_mir::mir::FuncRef>,
-    /// The call's OWN instantiation key (`MirFunc::spec_bindings`), which is
-    /// what makes the comparison instance-level rather than declaration-level.
+    /// The call's OWN delivery record (`MirFunc::spec_bindings`), which is what
+    /// makes the comparison instance-level rather than declaration-level.
     /// `None` when the lowerer recorded none.
-    spec_key: Option<skull_mir::lower::SpecKey>,
+    spec_key: Option<skull_mir::instance::Instance>,
     /// The call's own claim about WHICH concrete instance it targets
     /// (`MirFunc::callee_instances`). This is the identity record, recorded for
     /// every complete instantiation regardless of what the specialization
     /// POLICY decided, so it is what the comparison reads.
-    callee_inst: Option<OwnerInstance>,
+    callee_inst: Option<Instance>,
     /// For an indirect call, what produced the callee operand. `None` for a
     /// direct call.
     producer: Option<IndirectProducer>,
@@ -578,8 +576,8 @@ fn reachable_call_rows(mf: &MirFunc, out: &mut Vec<CallRow>) {
     }
 }
 
-/// `(declaration, substitution) -> Instance`, so an owner recorded by lowering
-/// can be resolved to the graph's instance identity.
+/// `declaration -> Instance`, so an owner recorded by lowering can be resolved
+/// to the graph's instance identity without rebuilding a substitution.
 ///
 /// Built from `InstanceGraph::substitutions`, which is the graph's own record,
 /// so this is a lookup rather than a second derivation of instance identity.
@@ -593,19 +591,19 @@ fn mangled_symbols(ws: &Workspace) -> std::collections::HashSet<ustr::Ustr> {
         .collect()
 }
 
-fn owner_index(g: &InstanceGraph) -> HashMap<skull_mir::mir::FuncRef, Vec<(MonoSubst, Instance)>> {
-    let mut ix: HashMap<skull_mir::mir::FuncRef, Vec<(MonoSubst, Instance)>> = HashMap::new();
-    for (inst, subst) in &g.substitutions {
-        ix.entry(inst.func).or_default().push((subst.clone(), inst.clone()));
+fn owner_index(g: &InstanceGraph) -> HashMap<skull_mir::mir::FuncRef, Vec<Instance>> {
+    let mut ix: HashMap<skull_mir::mir::FuncRef, Vec<Instance>> = HashMap::new();
+    for (inst, _) in g.substitutions() {
+        ix.entry(inst.func).or_default().push(inst.clone());
     }
     ix
 }
 
 fn resolve_owner<'a>(
-    ix: &'a HashMap<skull_mir::mir::FuncRef, Vec<(MonoSubst, Instance)>>,
-    owner: &OwnerInstance,
+    ix: &'a HashMap<skull_mir::mir::FuncRef, Vec<Instance>>,
+    owner: &Instance,
 ) -> Option<&'a Instance> {
-    ix.get(&owner.func)?.iter().find(|(s, _)| *s == owner.subst).map(|(_, i)| i)
+    ix.get(&owner.func)?.iter().find(|i| *i == owner)
 }
 
 /// Whether skull lowers a standalone body for this declaration at all.
@@ -630,7 +628,7 @@ fn has_lowered_body(ws: &Workspace, fref: skull_mir::mir::FuncRef) -> bool {
 /// mutation that stops at [`check_callee`] proves the comparison rather than
 /// that the corrupted record travels through `reachable_call_rows` and lands in
 /// a census bucket. `mf` must already be through
-/// [`crate::mir_emit::prepare_instance_body`], which is the phase the join is
+/// [`crate::mir_emit::prepare_instance_body_with_plans`], which is the phase the join is
 /// measured at.
 pub fn measure_prepared_body(
     ws: &Workspace,
@@ -660,7 +658,7 @@ fn measure_body_into(
     target_backend: bone_semantic::hir::FnBackend,
     c: &mut SiteJoinCensus,
     g: &InstanceGraph,
-    ix: &HashMap<skull_mir::mir::FuncRef, Vec<(MonoSubst, Instance)>>,
+    ix: &HashMap<skull_mir::mir::FuncRef, Vec<Instance>>,
     bodies: &ConcreteBodies,
     mangled: &std::collections::HashSet<ustr::Ustr>,
     inst: &Instance,
@@ -694,10 +692,10 @@ fn measure_body_into(
                     format!(
                         "{}/{}",
                         ws.module(o.func.module).functions[o.func.func].name,
-                        if o.subst.is_empty() {
+                        if o.args.is_empty() {
                             "EMPTY".to_string()
                         } else {
-                            o.subst.len().to_string()
+                            o.args.len().to_string()
                         }
                     )
                 })
@@ -711,9 +709,9 @@ fn measure_body_into(
                 .unwrap_or_else(|| "<indirect>".into());
             let key = match (&row.spec_key, &row.callee_inst) {
                 (None, None) => "nokey/noinst".to_string(),
-                (Some(k), None) => format!("key{}/noinst", k.len()),
-                (None, Some(i)) => format!("nokey/inst{}", i.subst.len()),
-                (Some(k), Some(i)) => format!("key{}/inst{}", k.len(), i.subst.len()),
+                (Some(k), None) => format!("key{}/noinst", k.args.len()),
+                (None, Some(i)) => format!("nokey/inst{}", i.args.len()),
+                (Some(k), Some(i)) => format!("key{}/inst{}", k.args.len(), i.args.len()),
             };
             c.rows.push(format!(
                 "{}\t{op}\t{span}\towner={owner}\ttarget={target}\t{key}\tin={}\t{note}",
@@ -736,12 +734,12 @@ fn measure_body_into(
                         let owner = mf.site_owners.get(cs.owner.0 as usize).map(|o| {
                             let f = &ws.module(o.func.module).functions[o.func.func];
                             format!(
-                                "owner `{}` subst {}",
+                                "owner `{}` args {}",
                                 f.name,
-                                if o.subst.is_empty() {
+                                if o.args.is_empty() {
                                     "EMPTY".to_string()
                                 } else {
-                                    format!("{}", o.subst.len())
+                                    format!("{}", o.args.len())
                                 }
                             )
                         });
@@ -794,7 +792,7 @@ pub fn census_detailed(
     let mangled = &mangled;
     let mut cache = skull_transform::InlineCache::default();
 
-    for inst in &g.expanded {
+    for inst in g.expanded() {
         let f = &ws.module(inst.func.module).functions[inst.func.func];
         let skip = |c: &mut SiteJoinCensus, why: BodySkip| {
             *c.bodies_skipped.entry(why).or_insert(0) += 1;
@@ -803,21 +801,24 @@ pub fn census_detailed(
             skip(&mut c, BodySkip::Coroutine);
             continue;
         }
+        // The graph must have a record, or this body is `NoSubstitution` rather
+        // than a lowering. The lowering itself then goes through the ONE entry
+        // every emitted body takes, against the arena this graph and `scx`
+        // share -- there is no second lowering route keyed on a foreign
+        // substitution any more.
+        if g.substitution(inst).is_none() {
+            skip(&mut c, BodySkip::NoSubstitution);
+            continue;
+        }
         if !has_lowered_body(ws, inst.func) {
             skip(&mut c, BodySkip::NoLoweredBody);
             continue;
         }
-        let Some(subst) = g.substitutions.get(inst) else {
-            skip(&mut c, BodySkip::NoSubstitution);
+        let Some(plan) = bodies.plan_for(inst) else {
+            skip(&mut c, BodySkip::LowerFailed);
             continue;
         };
-        let mut mf = match skull_mir::lower::lower_instance_body(
-            ws,
-            scx,
-            inst.func.module,
-            inst.func.func,
-            subst,
-        ) {
+        let mut mf = match skull_mir::lower::lower_instance_with_plans(ws, scx, plan, &bodies.plans) {
             Ok(mf) => mf,
             Err(_) => {
                 skip(&mut c, BodySkip::LowerFailed);
@@ -826,14 +827,14 @@ pub fn census_detailed(
         };
         // THE emitted body: the same sequence `emit_specialized_callees` runs.
         let name = skull_mir::mangle::mangle_fn(ws, f);
-        if crate::mir_emit::prepare_instance_body(
+        if crate::mir_emit::prepare_instance_body_with_plans(
             ws,
             scx,
             inst.func,
-            subst,
             &name,
             &mut mf,
             &mut cache,
+            &bodies.plans,
         )
         .is_err()
         {
@@ -907,14 +908,14 @@ pub enum Verified {
 /// Declaration equality is the WEAKER question: two instantiations of one
 /// generic compare equal under it, which is precisely the distinction
 /// instance-driven emission exists to make. So generic arguments participate
-/// whenever the call carries a complete key, and the absence of one is reported
+/// whenever the call carries a complete instance, and the absence of one is reported
 /// rather than treated as agreement.
 pub fn check_callee(
     ws: &Workspace,
     g: &InstanceGraph,
     callee: &Callee,
     target: skull_mir::mir::FuncRef,
-    call_inst: Option<&OwnerInstance>,
+    call_inst: Option<&Instance>,
     target_backend: bone_semantic::hir::FnBackend,
 ) -> CalleeCheck {
     let callee_inst = callee.instance();
@@ -939,7 +940,7 @@ pub fn check_callee(
     // instantiation it does not have. An opaque body -- `inline(lua)`,
     // `inline(js)`, `extern` -- is emitted once per declaration and target, so
     // its generic arguments do not participate in the symbol emission spells;
-    // demanding a `SpecKey` for one asked a Rock question of a non-Rock callee
+    // demanding an instantiation for one asked a Rock question of a non-Rock callee
     // and reported the absence as `callee-no-key` (bitgun: 215 sites over 18
     // declarations, `__vec_data_get`, `transmute`, `phantom` among them).
     //
@@ -953,21 +954,19 @@ pub fn check_callee(
     if generics == 0 {
         return CalleeCheck::NonGeneric;
     }
-    // A complete key has one reified entry per declared generic. Each way of
-    // falling short is its own answer: they have different causes and only one
-    // of them is conditional specialization.
-    // The call's OWN claim, in the graph's vocabulary. Not the `SpecKey`: that
-    // is the delivery record, present only where the policy chose to specialize,
-    // so reading it as identity made a DECLINED specialization look exactly like
-    // an uninferred callee.
+    // A complete instance has one argument per declared generic. Each way of
+    // falling short is its own answer: they have different causes.
+    // The call's OWN claim, in the graph's vocabulary. Not the delivery record:
+    // delivery is an optimization artifact, while identity is recorded for the
+    // concrete callee even when no splice is selected.
     let Some(claim) = call_inst else { return CalleeCheck::NoInstance };
     // A claim for another declaration is an invariant break, not a policy
     // consequence -- the record is written beside the call it belongs to.
     if claim.func != target {
         return CalleeCheck::ClaimDeclMismatch;
     }
-    match g.substitutions.get(callee_inst) {
-        Some(resolved) if *resolved == claim.subst => CalleeCheck::Instance,
+    match g.substitution(callee_inst) {
+        Some(_) if callee_inst.args == claim.args => CalleeCheck::Instance,
         Some(_) => CalleeCheck::InstanceMismatch,
         None => CalleeCheck::ResolvedUnrecorded,
     }
@@ -989,12 +988,12 @@ pub fn check_callee(
 ///   its declaration, class, target and spelling rather than a Rock
 ///   instantiation;
 /// - declaration agrees, is generic, and the call RECORDED its concrete
-///   instance (`MirFunc::callee_instances`) -> compare that substitution against
+///   instance (`MirFunc::callee_instances`) -> compare its arguments against
 ///   the resolved instance's own;
 /// - declaration agrees, is generic, and no instance was recorded, or the
 ///   record names another declaration -> UNVERIFIED, never a silent success,
 ///   under the cause that applies. The record is the IDENTITY one, not the
-///   `SpecKey` delivery record: reading delivery as identity made a declined
+///   delivery record: reading delivery as identity made a declined
 ///   specialization indistinguishable from an uninferred callee.
 fn classify(
     ws: &Workspace,
@@ -1002,7 +1001,7 @@ fn classify(
     c: &mut SiteJoinCensus,
     g: &InstanceGraph,
     mf: &MirFunc,
-    ix: &HashMap<skull_mir::mir::FuncRef, Vec<(MonoSubst, Instance)>>,
+    ix: &HashMap<skull_mir::mir::FuncRef, Vec<Instance>>,
     bodies: &ConcreteBodies,
     measured: &Instance,
     row: &CallRow,

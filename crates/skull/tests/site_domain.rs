@@ -38,11 +38,11 @@ fn check(src: &str) -> Workspace {
 /// An instance's arguments as one string, for comparison and for a failure
 /// message that names what was found rather than an opaque id.
 fn render_args(g: &InstanceGraph, args: &[skull_mir::monoty::MonoTyId]) -> String {
-    args.iter().map(|a| g.arena.render(*a)).collect::<Vec<_>>().join(",")
+    args.iter().map(|a| g.interner().render(*a)).collect::<Vec<_>>().join(",")
 }
 
 fn graph_of(ws: &Workspace) -> InstanceGraph {
-    let roots = instance_graph::emission_roots(ws, None);
+    let roots = skull::mir_emit::emission_roots(ws, None);
     instance_graph::build(ws, roots, false)
 }
 
@@ -50,7 +50,7 @@ fn census_of(src: &str) -> SiteJoinCensus {
     let ws = check(src);
     let mut g = graph_of(&ws);
     let bodies = skull::concrete_body::build(&ws, &mut g);
-    let scx = ScalarCtx::new(&ws);
+    let scx = ScalarCtx::new(&ws).sharing(g.interner().clone());
     site_join::census(&ws, &scx, &g, &bodies)
 }
 
@@ -63,13 +63,25 @@ fn prepared_body(ws: &Workspace, name: &str) -> MirFunc {
         .find(|(_, f)| f.name.as_str() == name)
         .expect("fn not found");
     let fref = skull_mir::mir::FuncRef { module: mid, func: fid };
-    let scx = ScalarCtx::new(ws);
-    let subst = skull_mir::lower::SpecSubst::default();
-    let mut mf = skull_mir::lower::lower_instance_body(ws, &scx, mid, fid, &subst).expect("lower");
+    let graph = graph_of(ws);
+    let bodies = skull::concrete_body::build(ws, &graph);
+    let scx = ScalarCtx::new(ws).sharing(graph.interner().clone());
+    let instance = skull_mir::instance::Instance::base(fref);
+    let plan = bodies.plans.get(&instance).expect("concrete plan");
+    let mut mf = skull_mir::lower::lower_instance_with_plans(ws, &scx, plan, &bodies.plans)
+        .expect("lower");
     let mangled = skull_mir::mangle::mangle_fn(ws, f);
     let mut cache = skull_transform::InlineCache::default();
-    skull::mir_emit::prepare_instance_body(ws, &scx, fref, &subst, &mangled, &mut mf, &mut cache)
-        .expect("prepare");
+    skull::mir_emit::prepare_instance_body_with_plans(
+        ws,
+        &scx,
+        fref,
+        &mangled,
+        &mut mf,
+        &mut cache,
+        &bodies.plans,
+    )
+    .expect("prepare");
     mf
 }
 
@@ -271,9 +283,8 @@ fn main() {
     let ws = check(src);
     let g = graph_of(&ws);
     let targets: std::collections::BTreeSet<String> = g
-        .call_sites
-        .values()
-        .flat_map(|sites| sites.iter())
+        .call_sites()
+        .flat_map(|(_, sites)| sites.iter())
         .filter(|(site, _)| matches!(site.domain, SiteDomain::StructDefaults(..)))
         .filter_map(|(_, rec)| match &rec.outcome {
             skull::instance_graph::SiteOutcome::Resolved(i) => Some(g.identity(&ws, i)),
@@ -462,8 +473,7 @@ fn main() {
     // The program is LEGAL, so the walk rejects nothing.
     let g = graph_of(&ws);
     let unconstrained = g
-        .rejections
-        .iter()
+        .rejections()
         .filter(|r| {
             matches!(r.kind, skull::instance_graph::RejectionKind::UnconstrainedTypeVar)
         })
@@ -472,7 +482,7 @@ fn main() {
         unconstrained, 0,
         "a legal generic-struct default is reported as an unconstrained type \
          variable: {:?}",
-        g.rejections
+        g.rejections().map(|r| r.message.clone()).collect::<Vec<_>>()
     );
 }
 
@@ -587,6 +597,7 @@ fn main() {{
 /// unjoined. The `for` arm is the control that already worked.
 #[test]
 fn both_iter_witness_forms_state_the_instance_they_target() {
+    let _inline = crate::common::InlineOffGuard::on();
     for (form, src) in [
         ("implicit coercion", "fn main() { let a: [int] = [1, 2]\n  print(\"{a.map(_ * 2).sum()}\") }"),
         ("`for` head", "fn main() { let a: [int] = [1, 2]\n  let s = 0\n  for v in a { s = s + v }\n  print(\"{s}\") }"),

@@ -7,6 +7,7 @@
 //! bounded depth here so a missing arm is found by the test rather than by a
 //! miscompile.
 
+use std::collections::BTreeSet;
 use std::sync::LazyLock;
 
 use bone_semantic::hir::BodyOwner;
@@ -78,6 +79,7 @@ fn main() {
     let f: float = 1.0
     let b: bool = true
     let s: string = "s"
+    let u: uint = 1 as uint
     let a: any = 1
     let n: int? = 1
     let t: (int, string) = (1, "s")
@@ -93,6 +95,27 @@ fn main() {
     let (ok, bad) = convert_module(&ws, mid, &mut arena);
     assert!(bad.is_empty(), "expected total conversion, got failures: {bad:?}");
     assert!(!ok.is_empty(), "nothing was converted -- the walk found no types");
+    let unique: BTreeSet<&str> = ok.iter().map(String::as_str).collect();
+    let expected: BTreeSet<&str> = [
+        "(int, string)",
+        "Holder",
+        "Map<string, int>",
+        "Vec<int>",
+        "any",
+        "bool",
+        "float",
+        "fn(int) -> int",
+        "fn(fn(int) -> int) -> int",
+        "int",
+        "int?",
+        "never",
+        "string",
+        "uint",
+        "unit",
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(unique, expected, "valid-type denominator or membership changed");
     for want in ["int", "float", "bool", "string", "any", "int?", "Vec<int>", "Holder"] {
         assert!(ok.iter().any(|r| r == want), "missing `{want}` among {ok:?}");
     }

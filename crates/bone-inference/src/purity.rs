@@ -236,7 +236,7 @@ pub(crate) fn reject_captures_expr(
             }
         }
 
-        Expr::Call { callee, args } => {
+        Expr::Call { callee, args, .. } => {
             match callee {
                 Callee::Value(ve) => go!(ve),
                 // Calling an enclosing local (a captured lambda) is a capture;
@@ -399,7 +399,7 @@ pub(crate) fn verify_pure_expr(
             ));
             go!(target);
         }
-        Expr::Call { callee, args } => {
+        Expr::Call { callee, args, .. } => {
             if let Some(&(mid, fid)) = resolved.get(&e) {
                 let callee_fn = &ws.module(mid).functions[fid];
                 if !fn_has_anno(callee_fn, "pure") && !fn_has_anno(callee_fn, "debug_impure") {

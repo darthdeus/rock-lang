@@ -860,6 +860,7 @@ fn expr_to_type_expr(ast: &mut Ast, e: Idx<ExprData>) -> Option<Idx<TypeExprData
         ExprKind::Ident(id) => {
             let k = match id.name.as_str() {
                 "int" => TypeExprKind::Int,
+                "uint" => TypeExprKind::Uint,
                 "float" => TypeExprKind::Float,
                 "string" => TypeExprKind::String,
                 "bool" => TypeExprKind::Bool,
@@ -1061,7 +1062,7 @@ fn subst_in_type_exprs_block(ast: &mut Ast, b: Idx<BlockData>, ty_subs: &HashMap
 
 fn subst_in_type_exprs(ast: &mut Ast, e: Idx<ExprData>, ty_subs: &HashMap<Ustr, Idx<TypeExprData>>) {
     match ast.exprs[e].kind.clone() {
-        ExprKind::As(inner, t) | ExprKind::TypeAscription(inner, t) => {
+        ExprKind::As(inner, t) | ExprKind::Bitcast(inner, t) | ExprKind::TypeAscription(inner, t) => {
             subst_in_type(ast, t, ty_subs);
             subst_in_type_exprs(ast, inner, ty_subs);
         }

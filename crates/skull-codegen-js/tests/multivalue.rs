@@ -8,13 +8,11 @@
 //! correctly REJECT (skip): a closure capturing a loop counter/cursor, a value
 //! struct (deferred to a future arc), a scalar-ABI arg/param count mismatch.
 
-use skull_mir::lower::ScalarCtx;
 use skull_mir::mir::FuncRef;
 use crate::common::{emit_user, ws_with};
 
 /// Co-emit `root` + its plain-Rock callees (needed for `push`), returning the JS.
 fn emit_closure(ws: &bone_semantic::inference::Workspace, root: &str) -> Result<String, String> {
-    let scx = ScalarCtx::new(ws);
     let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
     let mut r = None;
     for (fid, f) in ws.module(mid).functions.iter() {
@@ -22,7 +20,7 @@ fn emit_closure(ws: &bone_semantic::inference::Workspace, root: &str) -> Result<
             r = Some(FuncRef { module: mid, func: fid });
         }
     }
-    skull_codegen_js::emit::emit_with_closure(ws, &scx, &[(r.unwrap(), root.to_string())])
+    skull_codegen_js::emit::emit_with_closure(ws, &[(r.unwrap(), root.to_string())])
         .map_err(|e| e.message)
 }
 

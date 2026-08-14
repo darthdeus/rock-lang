@@ -50,6 +50,9 @@ pub enum ExpandKind {
     /// `__rock_shader_register(key, glsl)` per distinct pair
     /// (docs/shaders.md).
     ShaderPipeline,
+    /// `@shader_expand fn rock_compute<F>(entry: F) -> string` -> the direct
+    /// compute entry key; the driver owns its retained artifact.
+    ComputeArtifact,
     /// `@vertex_expand fn f<T>(v: FlatVec<T>) -> int | [int]` -> the element's
     /// vertex layout as a literal: the stride for an `int` return, the
     /// per-attribute component counts for `[int]`. Both from one
@@ -60,7 +63,7 @@ pub enum ExpandKind {
     /// DIRECT typed store per primitive leaf of `u`, at the std140 offsets
     /// `gpu_layout::uniform_block` computes. Never a per-leaf helper call. The
     /// views are params rather than looked up here, so the compiler names no
-    /// runtime field; the `set_uniform_block` macro is what pairs them with one
+    /// runtime field; the public generic setter is what pairs them with one
     /// scratch (docs/shader-binding-layout-plan.md).
     UniformBlock,
     /// `@build_var_expand fn build_var(name: string) -> string` -> the value
@@ -71,6 +74,9 @@ pub enum ExpandKind {
     /// contents as a string const, path resolved against
     /// `Workspace.comptime_inputs.embed_root` (docs/comptime-plan.md).
     EmbedString,
+    /// `@uniform_values fn f<T>(u: T) -> SemanticUniformBlock` -> one
+    /// compiler-owned canonical scalar leaf per logical uniform leaf.
+    UniformValues,
 }
 
 /// True iff `f` is an intrinsic in the mechanism's sense: declared `@intrinsic`,
@@ -91,7 +97,10 @@ pub fn expand_kind(f: &Function) -> Option<ExpandKind> {
         return Some(ExpandKind::StructPairs);
     }
     if has_anno(f, "shader_expand") {
-        return Some(ExpandKind::ShaderPipeline);
+        return match f.name.as_str() {
+            "rock_compute" => Some(ExpandKind::ComputeArtifact),
+            _ => Some(ExpandKind::ShaderPipeline),
+        };
     }
     if has_anno(f, "vertex_expand") {
         return Some(ExpandKind::VertexLayout);
@@ -104,6 +113,9 @@ pub fn expand_kind(f: &Function) -> Option<ExpandKind> {
     }
     if has_anno(f, "embed_expand") {
         return Some(ExpandKind::EmbedString);
+    }
+    if has_anno(f, "uniform_values") {
+        return Some(ExpandKind::UniformValues);
     }
     None
 }

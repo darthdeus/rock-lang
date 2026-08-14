@@ -118,7 +118,7 @@ fn walk_expr(body: &Body, e: Idx<Expr>, out: &mut FxHashSet<Idx<Expr>>) {
                 walk_expr(body, e, out);
             }
         }
-        Expr::Call { callee, args } => {
+        Expr::Call { callee, args, .. } => {
             if let Callee::Value(v) = callee {
                 walk_expr(body, v, out);
             }

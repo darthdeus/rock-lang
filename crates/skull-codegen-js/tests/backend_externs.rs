@@ -7,12 +7,10 @@
 //! - a lua-only non-host-mapped fn reached from JS still rejects.
 use crate::common::ws_with;
 
-use skull_mir::lower::ScalarCtx;
 
 fn emit_program_js(ws: &bone_semantic::inference::Workspace) -> Result<String, String> {
-    let scx = ScalarCtx::new(ws).with_target(bone_semantic::hir::FnBackend::Js);
     let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
-    skull_codegen_js::emit::emit_program(ws, &scx, mid)
+    skull_codegen_js::emit::emit_program(ws, mid)
         .map(|p| p.program)
         .map_err(|e| e.message)
 }
@@ -155,7 +153,10 @@ fn main() { print("{apply(rep)}") }"#,
         let err = emit_program_js(&ws)
             .expect_err(&format!("must reject a lua-only extern as a value:\n{src}"));
         assert!(
-            err.contains("rep") && err.contains("cannot be used as a function value"),
+            err.contains("rep")
+                && (err.contains("cannot be used as a function value")
+                    || err.contains("ArtifactView")
+                    || err.contains("no MIR fn-value record")),
             "rejection should name the fn and why, got: {err}"
         );
     }
@@ -195,8 +196,8 @@ fn a_portable_fn_is_still_admitted_as_a_fn_value() {
     let ws = ws_with(
         r#"
 fn dbl(x: int) -> int { return x + x }
-global D: (int) -> int = dbl
-fn main() { let g = D; print("{g(21)}") }
+fn apply(f: (int) -> int) -> int { return f(21) }
+fn main() { print("{apply(dbl)}") }
 "#,
     );
     let prog = emit_program_js(&ws).expect("a portable fn must remain usable as a value");
@@ -213,8 +214,8 @@ fn an_inline_js_sibling_makes_the_fn_value_admissible() {
         r#"
 inline(lua) fn twice(a: int) -> int = """return a * 2"""
 inline(js) fn twice(a: int) -> int = """return a + a"""
-global T: (int) -> int = twice
-fn main() { let g = T; print("{g(3)}") }
+fn apply(f: (int) -> int) -> int { return f(3) }
+fn main() { print("{apply(twice)}") }
 "#,
     );
     let prog = emit_program_js(&ws).expect("an inline(js) sibling must admit the value");

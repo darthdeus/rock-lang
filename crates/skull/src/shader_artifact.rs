@@ -25,27 +25,36 @@
 //! is why shader decisions may not reach CPU admission.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::sync::Arc;
 
 use bone_semantic::inference::Workspace;
 use skull_codegen_glsl::GlslProfile;
 use skull_mir::mir::FuncRef;
+use skull_mir::shader_ir::ShaderStage;
 use skull_parser::Span;
 
 use crate::instance_graph::{Concreteness, DeclKey, Instance, InstanceGraph, SiteOutcome};
 use crate::target_projection::{ShaderTargetSpec, TargetSpec};
 
-/// One registered shader program: a `(vertex, fragment)` pair, or the
-/// single-argument fullscreen form whose vertex stage the compiler supplies.
-///
-/// PAIRS, not a flat root list. A pipeline fragment's signature is classified
-/// against its vertex stage's varyings type -- as a standalone entry the same
-/// signature is refused outright -- so a view holding only the fragment could
-/// not ask GLSL the question emission asks.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct ShaderProgram {
-    pub vert: Option<FuncRef>,
-    pub frag: FuncRef,
+fn is_compute_builtin_name(name: &str) -> bool {
+    matches!(
+        name,
+        "global_invocation_id"
+            | "local_invocation_id"
+            | "workgroup_id"
+            | "local_invocation_index"
+            | "num_workgroups"
+            | "storage_load"
+            | "storage_store"
+            | "workgroup_array"
+            | "workgroup_load"
+            | "workgroup_store"
+            | "atomic_add"
+            | "workgroup_barrier"
+    )
 }
+
+pub use crate::shader::{ComputeProgram, ComputeProgramView, ShaderProgram, ShaderProgramView, ShaderStageView};
 
 /// Everything one shader artifact view is taken through.
 pub struct ShaderArtifactRequest<'a> {
@@ -55,6 +64,7 @@ pub struct ShaderArtifactRequest<'a> {
     /// collector; the view never re-derives them.
     pub programs: &'a [ShaderProgram],
 }
+
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum ShaderRejectionKind {
@@ -115,6 +125,11 @@ pub struct ShaderArtifactView {
     /// Call sites the retention walk traversed -- the denominator for
     /// `rejections`, so zero rejections over zero sites cannot read as clean.
     pub sites_walked: usize,
+    /// Per-program roots and retained populations, aligned with the request's
+    /// `programs` slice. Missing graph roots remain represented by an empty
+    /// stage list so a denominator cannot silently shrink.
+    pub program_views: Vec<ShaderProgramView>,
+    pub compute_views: Vec<ComputeProgramView>,
 }
 
 impl ShaderArtifactView {
@@ -144,6 +159,30 @@ pub fn realize_shader(
     g: &InstanceGraph,
     req: &ShaderArtifactRequest<'_>,
 ) -> Option<ShaderArtifactView> {
+    let scx = skull_mir::lower::ScalarCtx::new_values_first_class(ws)
+        .sharing(std::sync::Arc::clone(g.interner()));
+    realize_shader_with_context_and_compute(ws, g, req, &scx, &[])
+}
+
+/// Realize a shader view with the lowering context that shares the graph's
+/// interner. Production emission uses this entry point so concrete graph ids
+/// and lowered shader bodies are read from one arena.
+pub fn realize_shader_with_context(
+    ws: &Workspace,
+    g: &InstanceGraph,
+    req: &ShaderArtifactRequest<'_>,
+    scx: &skull_mir::lower::ScalarCtx,
+) -> Option<ShaderArtifactView> {
+    realize_shader_with_context_and_compute(ws, g, req, scx, &[])
+}
+
+pub fn realize_shader_with_context_and_compute(
+    ws: &Workspace,
+    g: &InstanceGraph,
+    req: &ShaderArtifactRequest<'_>,
+    scx: &skull_mir::lower::ScalarCtx,
+    compute_programs: &[ComputeProgram],
+) -> Option<ShaderArtifactView> {
     // The typed axis value. A non-GLSL shader target packages no GLSL artifact
     // -- and says so by being absent here rather than by defaulting to a
     // profile it does not have.
@@ -156,14 +195,14 @@ pub fn realize_shader(
         .programs
         .iter()
         .flat_map(|p| p.vert.into_iter().chain(std::iter::once(p.frag)))
+        .chain(compute_programs.iter().map(|p| p.entry))
         .map(|r| DeclKey(skull_mir::lower::canonical_variant(ws, r)))
         .collect();
     let roots: BTreeSet<Instance> =
         g.instances.iter().filter(|i| root_decls.contains(&DeclKey(i.func))).cloned().collect();
 
-    // Retention: the same walk shape the CPU view runs, over the same recorded
-    // call sites, from a DIFFERENT root set. A callee that renders inline is a
-    // leaf, which is `skull_codegen_glsl`'s own reachability rule (`Reach`).
+    // Retention: the same graph-site walk shape the CPU view runs, from a
+    // different shader root set. Inline callees are packaging leaves.
     let mut helpers: BTreeSet<Instance> = BTreeSet::new();
     let mut builtins: BTreeSet<Instance> = BTreeSet::new();
     let mut seen: BTreeSet<Instance> = roots.clone();
@@ -171,13 +210,17 @@ pub fn realize_shader(
     let mut edges: BTreeMap<Instance, Vec<(Instance, Span)>> = BTreeMap::new();
     let mut sites_walked = 0usize;
     while let Some(caller) = queue.pop_front() {
-        let Some(sites) = g.call_sites.get(&caller) else { continue };
+        let Some(sites) = g.sites_of(&caller) else { continue };
         for rec in sites.values() {
             sites_walked += 1;
             let SiteOutcome::Resolved(callee) = &rec.outcome else { continue };
             let f = &ws.module(callee.func.module).functions[callee.func.func];
-            if skull_codegen_glsl::renders_inline(f) {
+            let compute_builtin = is_compute_builtin_name(f.name.as_str());
+            if compute_builtin || skull_codegen_glsl::renders_inline_instance(ws, f, callee, g.interner()) {
                 builtins.insert(callee.clone());
+                continue;
+            }
+            if skull_codegen_glsl::is_lowered_native_operator(ws, f, callee, g.interner()) {
                 continue;
             }
             edges.entry(caller.clone()).or_default().push((callee.clone(), rec.span));
@@ -188,14 +231,59 @@ pub fn realize_shader(
         }
     }
 
+    let mut program_views = Vec::with_capacity(req.programs.len());
+    let concrete_plans = Arc::new(skull_graph::concrete_body::build(ws, g).plans);
+    for program in req.programs {
+        let entry_of = |r: FuncRef| -> Option<&Instance> {
+            let key = DeclKey(skull_mir::lower::canonical_variant(ws, r));
+            roots.iter().find(|i| DeclKey(i.func) == key)
+        };
+        let mut stages = Vec::new();
+        if let Some(vertex) = program.vert.and_then(entry_of) {
+            stages.push(stage_view(
+                ws,
+                g,
+                &edges,
+                vertex,
+                ShaderStage::Vertex,
+            ));
+        }
+        if let Some(fragment) = entry_of(program.frag) {
+            stages.push(stage_view(
+                ws,
+                g,
+                &edges,
+                fragment,
+                ShaderStage::Fragment,
+            ));
+        }
+        program_views.push(ShaderProgramView {
+            program: *program,
+            stages,
+            concrete_plans: Arc::clone(&concrete_plans),
+        });
+    }
+    let mut compute_views = Vec::with_capacity(compute_programs.len());
+    for program in compute_programs {
+        let key = DeclKey(skull_mir::lower::canonical_variant(ws, program.entry));
+        if let Some(entry) = roots.iter().find(|instance| DeclKey(instance.func) == key) {
+            compute_views.push(ComputeProgramView {
+                program: *program,
+                stage: stage_view(ws, g, &edges, entry, ShaderStage::Compute),
+                concrete_plans: Arc::clone(&concrete_plans),
+            });
+        }
+    }
+
     // THE PROFILE PASS IS EMISSION'S OWN, run per ENTRY.
-    // `check_entry_profile` is the whole of what `emit_shader_entry` does
+    // The view-aware checker is the whole of what the view-driven emitter does
     // before it writes GLSL: stage classification of the entry's signature (an
     // `@uniform` block param is legal there and is NOT a tier-0 leaf -- asking
     // the fn-library check of an entry rejected 1,539 real shaders), the
-    // entry's own lowering and tier-0 body pass, the same `Reach` walk over its
-    // callees (which rejects recursion, a foreign body with no GLSL mapping and
-    // a helper outside tier 0), and the stage-specific builtin validation.
+    // entry's own lowering and tier-0 body pass, the graph/view population
+    // over its callees (which rejects recursion, a foreign body with no GLSL
+    // mapping and a helper outside tier 0), and the stage-specific builtin
+    // validation.
     // A summary of those checks written here could disagree with the emitter;
     // this cannot.
     //
@@ -210,7 +298,7 @@ pub fn realize_shader(
     let mut checked = 0usize;
     let mut missing_substitutions: BTreeSet<Instance> = BTreeSet::new();
     let mut programs_unchecked = 0usize;
-    for program in req.programs {
+    for (program_index, program) in req.programs.iter().enumerate() {
         // The PROGRAM's own root instances -- the fragment entry, and the
         // vertex stage when the pair has one.
         let entry_of = |r: FuncRef| -> Option<&Instance> {
@@ -254,9 +342,10 @@ pub fn realize_shader(
         checked += 1;
         let entry_cycle = cyclic.contains(root)
             || reaches_cycle(root, &edges, &cyclic);
+        let program_view = &program_views[program_index];
         let outcome = match program.vert {
-            Some(v) => skull_codegen_glsl::check_pipeline_profile(ws, v, program.frag),
-            None => skull_codegen_glsl::check_entry_profile(ws, program.frag),
+            Some(_) => skull_codegen_glsl::check_pipeline_profile_with_view(ws, scx, program_view),
+            None => skull_codegen_glsl::check_entry_profile_with_view(ws, scx, program_view),
         };
         match outcome {
             Ok(()) => {
@@ -315,7 +404,87 @@ pub fn realize_shader(
         programs_unchecked,
         programs: req.programs.len(),
         sites_walked,
+        program_views,
+        compute_views,
     })
+}
+
+fn stage_view(
+    ws: &Workspace,
+    g: &InstanceGraph,
+    edges: &BTreeMap<Instance, Vec<(Instance, Span)>>,
+    entry: &Instance,
+    stage: ShaderStage,
+) -> ShaderStageView {
+    let retained = reachable_from(std::slice::from_ref(entry), edges);
+    let helpers: BTreeSet<Instance> = retained
+        .iter()
+        .filter(|i| *i != entry)
+        .cloned()
+        .collect();
+    let mut builtins = BTreeSet::new();
+    for caller in &retained {
+        let Some(sites) = g.sites_of(caller) else { continue };
+        for rec in sites.values() {
+            let SiteOutcome::Resolved(callee) = &rec.outcome else { continue };
+            let f = &ws.module(callee.func.module).functions[callee.func.func];
+            let compute_builtin = is_compute_builtin_name(f.name.as_str());
+            if compute_builtin
+                || (stage == ShaderStage::Compute && skull_mir::intrinsics::is_intrinsic(f))
+                || skull_codegen_glsl::renders_inline_instance(ws, f, callee, g.interner())
+            {
+                builtins.insert(callee.clone());
+            }
+            if skull_codegen_glsl::is_lowered_native_operator(ws, f, callee, g.interner()) {
+                continue;
+            }
+        }
+    }
+    let mut order = Vec::new();
+    let mut active = BTreeSet::new();
+    let mut done = BTreeSet::new();
+    postorder(entry, edges, &retained, &mut active, &mut done, &mut order);
+    order.retain(|i| i != entry);
+    let mut dependencies = Vec::new();
+    let mut seen = BTreeSet::new();
+    for instance in order.iter().chain(std::iter::once(entry)) {
+        let key = (instance.func.module.raw(), instance.func.func.into_raw().into_u32());
+        if seen.insert(key) {
+            dependencies.push(instance.func);
+        }
+    }
+    ShaderStageView {
+        stage,
+        entry: entry.clone(),
+        retained,
+        helpers,
+        builtins,
+        order,
+        dependencies,
+    }
+}
+
+fn postorder(
+    node: &Instance,
+    edges: &BTreeMap<Instance, Vec<(Instance, Span)>>,
+    retained: &BTreeSet<Instance>,
+    active: &mut BTreeSet<Instance>,
+    done: &mut BTreeSet<Instance>,
+    order: &mut Vec<Instance>,
+) {
+    if done.contains(node) || !active.insert(node.clone()) {
+        return;
+    }
+    for (callee, _) in edges.get(node).into_iter().flatten() {
+        if retained.contains(callee) {
+            postorder(callee, edges, retained, active, done, order);
+        }
+    }
+    active.remove(node);
+    done.insert(node.clone());
+    if !order.contains(node) {
+        order.push(node.clone());
+    }
 }
 
 /// The instances reachable from `roots` over the RETAINED shader call relation

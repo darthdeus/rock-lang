@@ -139,6 +139,8 @@ pub enum ExprKind {
 
     /// `expr as Type`
     As(Idx<ExprData>, Idx<TypeExprData>),
+    /// bitcast<Type>(expr) preserves the low 32 bits between int and uint.
+    Bitcast(Idx<ExprData>, Idx<TypeExprData>),
     /// `expr :: Type` type ascription
     TypeAscription(Idx<ExprData>, Idx<TypeExprData>),
 
@@ -167,6 +169,9 @@ pub enum ExprKind {
 
     FunctionCall {
         func: Idx<ExprData>,
+        /// Explicit type arguments in `f<A, B>(...)`. Empty for inferred
+        /// calls and for every operator/macro call that has no written types.
+        generic_args: Vec<Idx<TypeExprData>>,
         args: Vec<FunctionCallArg>,
         syntax: CallSyntax,
     },
@@ -463,6 +468,7 @@ pub enum TypeExprKind {
     Unit,
     String,
     Int,
+    Uint,
     Float,
     Bool,
     Ident(Ident),

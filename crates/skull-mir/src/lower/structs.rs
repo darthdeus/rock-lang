@@ -2,6 +2,7 @@
 //! value-struct predicates the walk consults, enum-variant packing, swizzles,
 //! and the compile-time `@struct_expand` / `@shader_expand` expansions.
 use super::*;
+use crate::monoty::MonoTy;
 
 impl Builder<'_> {
     pub(crate) fn lower_exprs(
@@ -185,10 +186,15 @@ impl Builder<'_> {
     /// Whether `e`'s type is a `value` struct -- the shape whose rvalue lowering
     /// packs a fresh cdata rather than handing back shared storage.
     pub(crate) fn expr_is_value_struct(&self, e: Idx<Expr>) -> bool {
-        match self.expr_ty(e) {
-            Some(TypeExpr::App { ctor: TypeCtor::Nominal(name), .. }) => self.is_value_struct(name),
-            _ => false,
+        if let Some(ty) = self.concrete_expr_ty(e) {
+            return matches!(
+                ty.peel_nullable().0,
+                MonoTy::App {
+                    ctor: crate::monoty::MonoCtor::Nominal(name), ..
+                } if self.is_value_struct(name.to_owned().into())
+            );
         }
+        false
     }
 
     pub(crate) fn is_value_struct(&self, name: Ustr) -> bool {
@@ -238,10 +244,11 @@ impl Builder<'_> {
     /// The value-struct type of `e` IGNORING nullability (`expr_ty` peels
     /// `Nullable`, so a `V?` resolves to `V` here).
     pub(crate) fn value_struct_name_of(&self, e: Idx<Expr>) -> Option<Ustr> {
-        let TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } = self.expr_ty(e)? else {
-            return None;
-        };
-        self.is_value_struct(name).then_some(name)
+        if let Some(ty) = self.concrete_expr_ty(e) {
+            let name = ty.peel_nullable().0.nominal()?;
+            return self.is_value_struct(name).then_some(name);
+        }
+        None
     }
 
     /// The value-struct type of a NULLABLE whole-value read out of a mutable place
@@ -281,10 +288,10 @@ impl Builder<'_> {
         if self.expr_is_nullable(e) {
             return None;
         }
-        let TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } = self.expr_ty(e)? else {
-            return None;
-        };
-        Some(name)
+        if let Some(ty) = self.concrete_expr_ty(e) {
+            return ty.peel_nullable().0.nominal();
+        }
+        None
     }
 
     /// Whether binding `b`'s bone type is a NON-nullable value struct -- the one
@@ -293,16 +300,21 @@ impl Builder<'_> {
     /// types return false (conservative).
     ///
     /// Nullability is asked through [`Self::is_nullable_ty`] and NOT off the
-    /// resolved node. An earlier spelling relied on "`resolve_tyid` chases
-    /// `Infer` but keeps `Nullable`", which held for a spelled-out `V?` and
-    /// stopped holding once a GENERIC could be bound to one: `ty_node` applies
-    /// the substitution and `mono_type_node` erases the `?`, so a `T` bound to
-    /// `BV2?` answered as a bare `BV2` and licensed SROA to rebuild an absent row
-    /// as `BV2_ct(nil, nil)`. `is_nullable_ty` reads `raw_ty_node` before the
-    /// substitution erases anything and consults the binding, which is why
-    /// `nobox_shape_of_ty` already routes this same question through it.
+    /// resolved node. The concrete slot is checked before structural source
+    /// lookup, so a generic bound to `BV2?` cannot be mistaken for a bare `BV2`
+    /// and license SROA to rebuild an absent row as `BV2_ct(nil, nil)`.
     pub(crate) fn binding_is_nonnull_value_struct(&self, b: Idx<BindingInfo>) -> bool {
         let Some(ty) = self.binding_ty(b) else { return false };
+        if let Some(concrete) = self.concrete_ty_id(ty) {
+            let (payload, nullable) = concrete.peel_nullable();
+            return !nullable
+                && matches!(
+                    payload,
+                    MonoTy::App {
+                        ctor: crate::monoty::MonoCtor::Nominal(name), ..
+                    } if self.is_value_struct(name.to_owned().into())
+                );
+        }
         if self.is_nullable_ty(ty) {
             return false;
         }
@@ -371,15 +383,31 @@ impl Builder<'_> {
         if generics == 0 {
             return Ok(Vec::new());
         }
-        let (Some(e), Some(inf)) = (self.cur_expr, self.inf) else {
+        let Some(e) = self.cur_expr else {
             return Err(gap(format!(
                 "generic struct `{struct_name}` injects a field default outside any \
                  typed expression, so its arguments cannot be determined"
             )));
         };
-        crate::struct_defaults::args_at(self.ws, inf, self.subst(), e, struct_name, generics)
-            .map(|a| a.to_vec())
-            .map_err(|e| gap(e.render(struct_name)))
+        let ty = self
+            .concrete_ty(e)?
+            .ok_or_else(|| gap("generic struct default has no concrete literal type"))?;
+        let (payload, _) = ty.peel_nullable();
+        let crate::monoty::MonoTy::App {
+            ctor: crate::monoty::MonoCtor::Nominal(name),
+            params,
+        } = payload
+        else {
+            return Err(gap(format!(
+                "generic struct default `{struct_name}` has a non-struct concrete type"
+            )));
+        };
+        if name.as_str() != struct_name.as_str() || params.len() != generics {
+            return Err(gap(format!(
+                "generic struct default `{struct_name}` has mismatched concrete arguments"
+            )));
+        }
+        Ok(params.to_vec())
     }
 
     /// Run `f` on a field's default INITIALIZER EXPRESSION with the defaults
@@ -416,15 +444,27 @@ impl Builder<'_> {
             .inference(sid.module)
             .and_then(|ir| ir.per_fn.get(&owner));
         let args = self.struct_default_args(struct_name, sid)?;
-        let slot_subst = crate::struct_defaults::slot_subst(defaults_inf, &args);
+        let domain = crate::site::SiteDomain::StructDefaults(sid.module, sid.def, args);
+        if let Some(defaults_inf) = defaults_inf {
+            let plan = self.concrete_plan;
+            let tables = plan
+                .domain_types(&domain)
+                .ok_or_else(|| gap(format!("concrete plan is missing type tables for site domain {domain:?}")))?;
+            super::validate_concrete_type_tables(
+                self.ws,
+                defaults_inf,
+                defaults_body,
+                tables,
+                "concrete struct-default plan",
+                std::iter::empty(),
+            )?;
+        }
         // Lower the default expr in the defaults body's context, into the current
         // block, then restore.
         let saved_body = self.body;
         let saved_inf = self.inf;
-        let saved_subst = self.struct_default_subst.take();
         self.body = defaults_body;
         self.inf = defaults_inf;
-        self.struct_default_subst = Some(slot_subst);
         // `site_owner` is NOT swapped -- the sites still belong to the enclosing
         // function INSTANCE -- but their `Idx<Expr>` now indexes THIS arena, so
         // they are stamped in the struct's own domain. The walk records the same
@@ -434,11 +474,9 @@ impl Builder<'_> {
         // The ARGUMENTS are part of that key: `Box<int>` and `Box<string>` inject
         // the same declaration's initializers and resolve different callees, so a
         // declaration-keyed domain would collapse them onto one obligation.
-        let domain = crate::site::SiteDomain::StructDefaults(sid.module, sid.def, args);
         let result = self.in_domain(domain, |s| f(s, def_expr));
         self.body = saved_body;
         self.inf = saved_inf;
-        self.struct_default_subst = saved_subst;
         result
     }
 
@@ -696,6 +734,18 @@ impl Builder<'_> {
         Ok(ValueRepr::Scalar(inst))
     }
 
+    pub(crate) fn expand_compute_artifact(
+        &mut self,
+        call: Idx<Expr>,
+        arg_idxs: &[Idx<Expr>],
+    ) -> Result<ValueRepr, CompilerError> {
+        let entry = resolve_compute_entry(self.ws, self.body, call, arg_idxs)?;
+        let key = self.emit_cur(Inst::Const(Lit::Str(Ustr::from(
+            self.ws.module(entry.module).functions[entry.func].name.as_str(),
+        ))));
+        Ok(ValueRepr::Scalar(key))
+    }
+
     /// `@uniform_expand` -> one direct typed store per primitive leaf of `u`,
     /// at its std140 element index. No helper call per leaf, and no pack: the
     /// Group's leaves go straight from registers into the views.
@@ -755,7 +805,8 @@ impl Builder<'_> {
         let plan = uniform_block_checked(self.ws, struct_name)
             .map_err(|m| reject(u_span, format!("`@uniform_expand`: {m}")))?;
 
-        let shape = value_shape(self.ws, struct_name)
+        let shape = self
+            .nominal_rep_shape(struct_name, false)
             .ok_or_else(|| reject(u_span, uniform_expand_arg_msg(fname)))?;
         let leaves = self.repr_to_leaves(&repr, &shape);
         let stores = plan.leaf_stores();
@@ -781,15 +832,98 @@ impl Builder<'_> {
             let base = match store.view {
                 crate::gpu_layout::WireView::Float => fv,
                 crate::gpu_layout::WireView::Int => iv,
+                crate::gpu_layout::WireView::Uint => iv,
+            };
+            let leaf = match store.view {
+                crate::gpu_layout::WireView::Uint => self.emit_cur(Inst::UintBitcastInt(*leaf)),
+                _ => *leaf,
             };
             self.emit_cur(Inst::StoreIndex {
                 base,
                 index: idx,
-                value: *leaf,
+                value: leaf,
                 kind: ContainerKind::NativeBufferLeaf,
             });
         }
         Ok(ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil))))
+    }
+
+    /// `@uniform_values` -> a typed packet of logical scalar leaves. The
+    /// physical target never sees this representation's offsets because there
+    /// are none; each backend projects the packet through its own live ABI.
+    pub(crate) fn expand_uniform_values(
+        &mut self,
+        call: Idx<Expr>,
+        func: FuncRef,
+        arg_idxs: &[Idx<Expr>],
+    ) -> Result<ValueRepr, CompilerError> {
+        let call_span = self.body.expr_spans[call];
+        let fname = self.ws.module(func.module).functions[func.func].name;
+        let reject = |span: Span, msg: String| CompilerError::new_with_label(span, msg);
+        let [u_e] = arg_idxs else {
+            return Err(reject(
+                call_span,
+                format!("`@uniform_values` fn `{fname}` takes exactly one uniform group"),
+            ));
+        };
+        let u_span = self.body.expr_spans[*u_e];
+        let Some(struct_name) = self.value_struct_name_of(*u_e) else {
+            return Err(reject(
+                u_span,
+                format!("`@uniform_values` fn `{fname}`'s argument must be a concrete value struct"),
+            ));
+        };
+        let members = uniform_semantic_checked(self.ws, struct_name)
+            .map_err(|m| reject(u_span, format!("`@uniform_values`: {m}")))?;
+        let Some(TypeExpr::App { ctor: TypeCtor::Nominal(block_name), .. }) = self.expr_ty(call) else {
+            return Err(reject(
+                call_span,
+                format!("`@uniform_values` fn `{fname}` must return the canonical packet struct"),
+            ));
+        };
+        let packet = uniform_values_return_shape(self.ws, block_name)
+            .map_err(|m| reject(call_span, format!("`@uniform_values`: {m}")))?;
+        let repr = self.lower_expr_repr(*u_e)?;
+        let shape = self
+            .nominal_rep_shape(struct_name, false)
+            .ok_or_else(|| reject(u_span, format!("`@uniform_values`: `{struct_name}` has no value shape")))?;
+        let leaves = self.repr_to_leaves(&repr, &shape);
+        let expected: Vec<crate::gpu_layout::WireKind> = members
+            .iter()
+            .flat_map(|(_, kind)| std::iter::repeat(*kind).take(kind.leaf_suffixes().len()))
+            .collect();
+        if leaves.len() != expected.len() {
+            return Err(reject(
+                u_span,
+                format!(
+                    "`@uniform_values`: `{struct_name}` lowered to {} leaves but its logical interface has {}",
+                    leaves.len(),
+                    expected.len()
+                ),
+            ));
+        }
+        let mut canonical = Vec::with_capacity(leaves.len());
+        for (leaf, kind) in leaves.into_iter().zip(expected) {
+            let variant = match kind {
+                crate::gpu_layout::WireKind::I32 => packet.int_variant,
+                crate::gpu_layout::WireKind::U32 => packet.uint_variant,
+                crate::gpu_layout::WireKind::Bool32 => packet.bool_variant,
+                crate::gpu_layout::WireKind::F32
+                | crate::gpu_layout::WireKind::F32x2
+                | crate::gpu_layout::WireKind::F32x3
+                | crate::gpu_layout::WireKind::F32x4
+                | crate::gpu_layout::WireKind::Mat4 => packet.float_variant,
+            };
+            canonical.push(self.make_single_payload_variant(packet.leaf_enum, variant, leaf)?);
+        }
+        let fingerprint = self.emit_cur(Inst::Const(Lit::Int(
+            crate::shader_ir::semantic_uniform_group_fingerprint(struct_name, &members) as i64,
+        )));
+        let values = self.emit_cur(Inst::MakeVec(canonical));
+        Ok(ValueRepr::Scalar(self.emit_cur(Inst::MakeStruct {
+            ty: Some(packet.block_name),
+            fields: vec![(packet.fingerprint_field, fingerprint), (packet.leaves_field, values)],
+        })))
     }
 
     /// `@vertex_expand` -> the element's vertex layout as a literal. The
@@ -855,7 +989,7 @@ impl Builder<'_> {
         variant: Ustr,
         payload: Idx<Inst>,
     ) -> Result<Idx<Inst>, CompilerError> {
-        if let Some(shape) = enum_value_shape(self.ws, enum_name) {
+        if let Some(shape) = EnumPlan::for_name(self.ws, enum_name).and_then(|plan| plan.cdata().cloned()) {
             let tag = shape
                 .tag_of(variant)
                 .ok_or_else(|| gap("struct_expand: variant not in cdata enum shape"))?;
@@ -894,7 +1028,7 @@ impl Builder<'_> {
         variant: Ustr,
         args: VariantArgs,
     ) -> Result<Idx<Inst>, CompilerError> {
-        if let Some(shape) = enum_value_shape(self.ws, enum_name) {
+        if let Some(shape) = EnumPlan::for_name(self.ws, enum_name).and_then(|plan| plan.cdata().cloned()) {
             let r = self.enum_cdata_repr(&shape, variant, args)?;
             return Ok(self.pack(r));
         }
@@ -947,10 +1081,11 @@ impl Builder<'_> {
         if field.len() == 1 && "xyzw".contains(field.as_str()) {
             return None;
         }
-        let TypeExpr::App { ctor: TypeCtor::Nominal(sname), .. } = self.expr_ty(base)? else {
-            return None;
-        };
-        bone_semantic::inference::vec_swizzle_components(sname.as_str(), field.as_str())
+        if let Some(ty) = self.concrete_expr_ty(base) {
+            let Some(name) = ty.peel_nullable().0.nominal() else { return None };
+            return bone_semantic::inference::vec_swizzle_components(name.as_str(), field.as_str());
+        }
+        None
     }
 
     /// Component `Field` reads off an already-lowered (packed) vec value, grouped

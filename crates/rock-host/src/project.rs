@@ -222,7 +222,10 @@ pub fn lib_path_value() -> String {
     }
 }
 
-/// `lib_path_value()` with the caller's inherited search path appended.
+/// `lib_path_value()` with platform graphics libraries and the caller's
+/// inherited search path appended.
+/// Linux also gets the system Vulkan loader and driver directories when they
+/// exist; the bundled LuaJIT does not receive NixOS's nix-ld defaults itself.
 ///
 /// Rock's own dirs (`tmp`, prebuilt gamelibs) come FIRST so the bundled
 /// luajit/cimgui libs always win; the inherited value follows so a
@@ -236,6 +239,13 @@ pub fn lib_path_value() -> String {
 pub fn lib_path_with_inherited() -> String {
     let mut value = lib_path_value();
     let sep = if cfg!(target_os = "windows") { ";" } else { ":" };
+
+    #[cfg(target_os = "linux")]
+    for path in linux_vulkan_library_paths() {
+        value.push_str(sep);
+        value.push_str(&path.to_string_lossy());
+    }
+
     if let Some(inherited) = std::env::var_os(lib_path_var()) {
         if !inherited.is_empty() {
             value.push_str(sep);
@@ -243,6 +253,38 @@ pub fn lib_path_with_inherited() -> String {
         }
     }
     value
+}
+
+#[cfg(target_os = "linux")]
+fn linux_vulkan_library_paths() -> Vec<PathBuf> {
+    linux_vulkan_library_paths_from(
+        Path::new("/nix/store"),
+        Path::new("/run/opengl-driver/lib"),
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn linux_vulkan_library_paths_from(nix_store: &Path, opengl_driver: &Path) -> Vec<PathBuf> {
+    let mut loader_paths = std::fs::read_dir(nix_store)
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.contains("-vulkan-loader-"))
+        })
+        .map(|path| path.join("lib"))
+        .filter(|path| path.is_dir())
+        .collect::<Vec<_>>();
+    loader_paths.sort();
+
+    let mut paths = loader_paths;
+    if opengl_driver.is_dir() {
+        paths.push(opengl_driver.to_path_buf());
+    }
+    paths
 }
 
 /// Get the environment variable name for the library search path.
@@ -684,5 +726,28 @@ mod tests {
                 None => std::env::remove_var("STONE_JV"),
             }
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_vulkan_library_paths_find_loader_and_driver_dirs() {
+        let temp = TempDir::new().unwrap();
+        let store = temp.path().join("store");
+        let driver = temp.path().join("opengl-driver/lib");
+        fs::create_dir_all(store.join("aaa-vulkan-loader-1/lib")).unwrap();
+        fs::create_dir_all(store.join("zzz-vulkan-loader-2/lib")).unwrap();
+        fs::create_dir_all(store.join("not-vulkan-1/lib")).unwrap();
+        fs::create_dir_all(&driver).unwrap();
+
+        let paths = linux_vulkan_library_paths_from(&store, &driver);
+
+        assert_eq!(
+            paths,
+            vec![
+                store.join("aaa-vulkan-loader-1/lib"),
+                store.join("zzz-vulkan-loader-2/lib"),
+                driver,
+            ]
+        );
     }
 }

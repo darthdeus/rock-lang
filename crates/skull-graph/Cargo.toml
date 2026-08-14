@@ -1,0 +1,21 @@
+[package]
+name = "skull-graph"
+version = "0.1.0"
+edition = "2021"
+
+# The TARGET-NEUTRAL instance graph and the per-artifact views over it
+# (`docs/monomorphization-plan.md` S 9, S 11). It sits BELOW every backend so
+# each one realizes the same graph: `skull` (luajit driver),
+# `skull-codegen-js` and `skull-codegen-glsl` all depend on this crate, and it
+# depends on none of them. Roots are an INPUT -- deciding what a build roots
+# from is the driver's job, so `emission_roots` stays in `skull`.
+[dependencies]
+bone-semantic = { path = "../bone-semantic" }
+skull-mir = { path = "../skull-mir" }
+skull-parser = { path = "../skull-parser" }
+comfy-la-arena = { workspace = true }
+ustr = { workspace = true }
+rustc-hash = { workspace = true }
+
+[lints]
+workspace = true
