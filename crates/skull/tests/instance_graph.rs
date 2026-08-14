@@ -510,10 +510,8 @@ fn main() { let c = ticker(); let _ = c.resume() }
 ///
 /// This holds BY CONSTRUCTION -- `instance_graph::build` walks bone's HIR and
 /// inference and never runs the inliner -- and "by construction" is a claim
-/// about code that can be edited, which is what this pins. The mode is toggled
-/// rather than mocked: `ROCK_MONO_ABLATION` is what disables inlining in a real
-/// build (`skull_transform::inline::classify`), so the test exercises the same
-/// switch the corpus run does.
+/// about code that can be edited, which is what this pins. The scoped ablation
+/// context is the same mode that a `ROCK_MONO_ABLATION` process run installs.
 ///
 /// Corpus result recorded alongside it: all 23 project digests are identical
 /// between a normal `rock mono-manifest .` and one under
