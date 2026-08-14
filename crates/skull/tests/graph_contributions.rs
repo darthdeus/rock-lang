@@ -165,6 +165,54 @@ fn the_operational_censuses_are_sums_of_the_primary_records() {
         census.first_owner_visits > 1 && census.body_exprs_scanned > census.first_owner_visits,
         "the fixture did not expose repeated source-body materialization: {census:?}"
     );
+    assert!(census.frontier_count > 1, "the fixture exposed no wavefront expansion: {census:?}");
+    assert_eq!(
+        census.frontier_ready_owners + census.frontier_same_frontier_dependency_owners,
+        census.expanded,
+        "frontier readiness did not partition expanded owners: {census:?}"
+    );
+    assert!(
+        census.ordinary_owner_visits > 0
+            && census.always_emitted_owner_visits > 0
+            && census.frontier_owner_p95 >= census.frontier_owner_p50
+            && census.frontier_owner_max >= census.frontier_owner_p95,
+        "owner-class or frontier-size census is empty: {census:?}"
+    );
+    assert!(
+        census.expansion_ns_total > 0
+            && census.expansion_ns_p50 > 0
+            && census.expansion_ns_p95 >= census.expansion_ns_p50
+            && census.expansion_ns_max >= census.expansion_ns_p95,
+        "per-owner expansion census is empty: {census:?}"
+    );
+    assert!(
+        census.mono_intern_attempts > 0
+            && census.mono_new_types > 0
+            && census.mono_write_acqs > 0
+            && census.mono_read_acqs > 0
+            && census.mono_elapsed_ns > 0,
+        "graph interner census is empty: {census:?}"
+    );
+    assert!(
+        census.contribution_reached > 0
+            && census.contribution_bound_trees > 0
+            && census.contribution_edges > 0
+            && census.contribution_sites > 0
+            && census.contribution_always_emitted_targets > 0,
+        "contribution population census is empty: {census:?}"
+    );
+    assert!(
+        census.index_subst_unique > 0
+            && census.index_trees_unique > 0
+            && census.index_always_emitted_unique > 0
+            && census.index_preds_unique > 0
+            && census.index_decls_unique > 0,
+        "unique graph-index census is empty: {census:?}"
+    );
+    assert!(
+        census.index_erased_updates >= census.index_erased_unique,
+        "erased-entry unique count exceeds its update denominator: {census:?}"
+    );
     assert!(
         census.duplicate_pending_suppressed > 0,
         "the fixture must expose duplicate pending owners before deduplication"

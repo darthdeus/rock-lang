@@ -433,6 +433,7 @@ pub struct ExpandTiming {
     pub admissibility_ns: u64,
     pub body_prep_ns: u64,
     pub signature_type_conversion_ns: u64,
+    pub interner_ns: u64,
     pub call_site_resolution_ns: u64,
     pub witness_bound_tree_ns: u64,
     pub walk_body_edges_ns: u64,
@@ -449,6 +450,22 @@ fn elapsed_ns(start: Option<Instant>) -> u64 {
 
 fn add_elapsed(slot: &mut u64, start: Option<Instant>) {
     *slot += elapsed_ns(start);
+}
+
+fn percentile_usize(values: &mut [usize], percentile: usize) -> usize {
+    if values.is_empty() {
+        return 0;
+    }
+    values.sort_unstable();
+    values[(values.len() - 1) * percentile / 100]
+}
+
+fn percentile_u64(values: &mut [u64], percentile: usize) -> u64 {
+    if values.is_empty() {
+        return 0;
+    }
+    values.sort_unstable();
+    values[(values.len() - 1) * percentile / 100]
 }
 
 /// **The one walk context.** A full build and an incremental re-walk both run
@@ -469,6 +486,13 @@ struct Walk<'a> {
 impl Walk<'_> {
     fn timer(&self) -> Option<Instant> {
         self.timing_enabled.then(Instant::now)
+    }
+
+    fn with_interner_mut<R>(&mut self, f: impl FnOnce(&mut MonoArena) -> R) -> R {
+        let started = Instant::now();
+        let result = self.interner.with_mut(f);
+        self.out.timing.interner_ns += started.elapsed().as_nanos() as u64;
+        result
     }
 
     /// Record what one source operation resolved to.
@@ -1513,6 +1537,49 @@ pub fn build_in(
             stats.bound_call_rows,
             stats.iterator_rows,
         );
+        log::debug!(
+            "graph wavefront census: {} frontiers, owners p50/p95/max {}/{}/{}, singleton {}; \
+             ordinary {}, always {}, ready {}, same-frontier dependency {}; expansion us total/p50/p95/max \
+             {}/{}/{}/{}; mono attempts/new/read/write {}/{}/{}/{}",
+            stats.frontier_count,
+            stats.frontier_owner_p50,
+            stats.frontier_owner_p95,
+            stats.frontier_owner_max,
+            stats.singleton_frontiers,
+            stats.ordinary_owner_visits,
+            stats.always_emitted_owner_visits,
+            stats.frontier_ready_owners,
+            stats.frontier_same_frontier_dependency_owners,
+            stats.expansion_ns_total / 1_000,
+            stats.expansion_ns_p50 / 1_000,
+            stats.expansion_ns_p95 / 1_000,
+            stats.expansion_ns_max / 1_000,
+            stats.mono_intern_attempts,
+            stats.mono_new_types,
+            stats.mono_read_acqs,
+            stats.mono_write_acqs,
+        );
+        log::debug!(
+            "graph contribution/index census: reached {}, bound trees {}, edges {}, sites {}, \
+             failures {}, always targets {}; unique index keys subst/trees/erased/always/preds/decls \
+             {}/{}/{}/{}/{}/{}; phases uninstall/index/derive/post-pass {:.3}/{:.3}/{:.3}/{:.3}ms",
+            stats.contribution_reached,
+            stats.contribution_bound_trees,
+            stats.contribution_edges,
+            stats.contribution_sites,
+            stats.contribution_failures,
+            stats.contribution_always_emitted_targets,
+            stats.index_subst_unique,
+            stats.index_trees_unique,
+            stats.index_erased_unique,
+            stats.index_always_emitted_unique,
+            stats.index_preds_unique,
+            stats.index_decls_unique,
+            stats.uninstall_ns as f64 / 1_000_000.0,
+            stats.index_maintenance_ns as f64 / 1_000_000.0,
+            stats.derive_ns as f64 / 1_000_000.0,
+            stats.post_pass_ns as f64 / 1_000_000.0,
+        );
     }
     g
 }
@@ -1642,6 +1709,7 @@ impl InstanceGraph {
     /// changed. One driver, so the two cannot walk differently.
     fn run(&mut self, ws: &Workspace, mut pending: Vec<Owner>) -> RunStats {
         let mut stats = RunStats::default();
+        let mono_before = self.interner.stats();
         for i in self.root_instances.clone() {
             if !self.contributions.contains_key(&Owner::Instance(i.clone())) {
                 pending.push(Owner::Instance(i));
@@ -1669,10 +1737,47 @@ impl InstanceGraph {
         // here and re-checked below rather than assumed away by walk order.
         let mut walked_with: BTreeMap<Instance, InstanceBoundTree> = BTreeMap::new();
         let mut rounds = 0usize;
+        let mut frontier_sizes = Vec::new();
+        let mut expansion_times = Vec::new();
         loop {
-            while let Some(owner) = pending.pop() {
+            if pending.is_empty() {
+                let stale: Vec<Owner> = walked_with
+                    .iter()
+                    .filter(|(i, used)| {
+                        self.contributions.contains_key(&Owner::Instance((*i).clone()))
+                            && self.bound_tree(i).unwrap_or(&InstanceBoundTree::default()) != *used
+                    })
+                    .map(|(i, _)| Owner::Instance(i.clone()))
+                    .collect();
+                if stale.is_empty() {
+                    break;
+                }
+                rounds += 1;
+                stats.settle_rounds = rounds;
+                assert!(
+                    rounds < 64,
+                    "conformance witnesses did not settle after {rounds} rounds; \
+                     {} owners still disagree with what they were walked with",
+                    stale.len()
+                );
+                pending = stale;
+                queued = pending.iter().cloned().collect();
+                continue;
+            }
+            let frontier = std::mem::take(&mut pending);
+            frontier_sizes.push(frontier.len());
+            let frontier_owners: BTreeSet<Owner> = frontier.iter().cloned().collect();
+            let mut same_frontier_dependencies = BTreeSet::new();
+            let mut expanded_in_frontier = BTreeSet::new();
+            let mut next_pending = Vec::new();
+            let mut frontier = frontier;
+            while let Some(owner) = frontier.pop() {
                 queued.remove(&owner);
                 stats.owner_visits += 1;
+                match owner {
+                    Owner::Instance(_) => stats.ordinary_owner_visits += 1,
+                    Owner::AlwaysEmitted(..) => stats.always_emitted_owner_visits += 1,
+                }
                 // **An instance that lost its last namer DURING this run is not
                 // walkable, and is not an invariant break.**
                 //
@@ -1707,10 +1812,12 @@ impl InstanceGraph {
                 } else {
                     VisitKind::FirstOwner
                 };
-                let visit_start = timing_enabled.then(Instant::now);
+                let visit_start = Instant::now();
                 let c = self.expand(ws, &owner, timing_enabled);
-                let visit_ns = elapsed_ns(visit_start);
+                let visit_ns = visit_start.elapsed().as_nanos() as u64;
+                expansion_times.push(visit_ns);
                 stats.expanded += 1;
+                expanded_in_frontier.insert(owner.clone());
                 match visit_kind {
                     VisitKind::FirstOwner => {
                         stats.first_owner_visits += 1;
@@ -1732,6 +1839,7 @@ impl InstanceGraph {
                 stats.admissibility_ns += c.timing.admissibility_ns;
                 stats.body_prep_ns += c.timing.body_prep_ns;
                 stats.signature_type_conversion_ns += c.timing.signature_type_conversion_ns;
+                stats.mono_elapsed_ns += c.timing.interner_ns;
                 stats.call_site_resolution_ns += c.timing.call_site_resolution_ns;
                 stats.witness_bound_tree_ns += c.timing.witness_bound_tree_ns;
                 stats.walk_body_edges_ns += c.timing.walk_body_edges_ns;
@@ -1745,6 +1853,15 @@ impl InstanceGraph {
                 stats.bound_tree_rows += c.bound_tree_rows;
                 stats.bound_call_rows += c.bound_call_rows;
                 stats.iterator_rows += c.iterator_rows;
+                stats.contribution_reached += c.reached.len();
+                stats.contribution_bound_trees += c.bound_trees.len();
+                stats.contribution_edges += c.edges.len();
+                stats.contribution_sites += c.call_sites.len() + c.always_call_sites.len();
+                stats.contribution_failures += c.rejections.len()
+                    + c.unresolved.len()
+                    + c.storage_failures.len()
+                    + c.always_emitted_holes.len();
+                stats.contribution_always_emitted_targets += c.always_emitted_targets.len();
                 let (demanded, install_timing) = self.install(owner, c, timing_enabled);
                 stats.uninstall_ns += install_timing.uninstall_ns;
                 stats.index_maintenance_ns += install_timing.index.total_ns();
@@ -1762,37 +1879,23 @@ impl InstanceGraph {
                 stats.index_preds_updates += install_timing.index.preds_updates;
                 stats.index_decls_updates += install_timing.index.decls_updates;
                 for owner in demanded {
+                    if frontier_owners.contains(&owner) {
+                        same_frontier_dependencies.insert(owner.clone());
+                    }
                     if queued.insert(owner.clone()) {
-                        pending.push(owner);
+                        next_pending.push(owner);
                     } else {
                         stats.duplicate_pending_suppressed += 1;
                     }
                 }
             }
-            // The fixpoint: an owner whose witnesses moved while it was already
-            // walked must be walked again, or its callees are the ones the old
-            // witnesses selected.
-            let stale: Vec<Owner> = walked_with
-                .iter()
-                .filter(|(i, used)| {
-                    self.contributions.contains_key(&Owner::Instance((*i).clone()))
-                        && self.bound_tree(i).unwrap_or(&InstanceBoundTree::default()) != *used
-                })
-                .map(|(i, _)| Owner::Instance(i.clone()))
-                .collect();
-            if stale.is_empty() {
-                break;
-            }
-            rounds += 1;
-            stats.settle_rounds = rounds;
-            assert!(
-                rounds < 64,
-                "conformance witnesses did not settle after {rounds} rounds; \
-                 {} owners still disagree with what they were walked with",
-                stale.len()
-            );
-            pending = stale;
-            queued = pending.iter().cloned().collect();
+            let same_frontier_dependencies = same_frontier_dependencies
+                .intersection(&expanded_in_frontier)
+                .count();
+            stats.frontier_same_frontier_dependency_owners += same_frontier_dependencies;
+            stats.frontier_ready_owners +=
+                expanded_in_frontier.len().saturating_sub(same_frontier_dependencies);
+            pending = next_pending;
         }
         assert_eq!(
             stats.owner_visits,
@@ -1811,6 +1914,28 @@ impl InstanceGraph {
                 + stats.incremental_forced_rewalks,
             "graph census expanded denominator lost a population"
         );
+        let mono_after = self.interner.stats();
+        stats.mono_intern_attempts = mono_after
+            .intern_attempts
+            .saturating_sub(mono_before.intern_attempts);
+        stats.mono_new_types = mono_after.intern_new.saturating_sub(mono_before.intern_new);
+        stats.mono_read_acqs = mono_after.read_acqs.saturating_sub(mono_before.read_acqs);
+        stats.mono_write_acqs = mono_after.write_acqs.saturating_sub(mono_before.write_acqs);
+        stats.frontier_count = frontier_sizes.len();
+        stats.frontier_owner_p50 = percentile_usize(&mut frontier_sizes, 50);
+        stats.frontier_owner_p95 = percentile_usize(&mut frontier_sizes, 95);
+        stats.frontier_owner_max = frontier_sizes.iter().copied().max().unwrap_or(0);
+        stats.singleton_frontiers = frontier_sizes.iter().filter(|n| **n == 1).count();
+        stats.expansion_ns_total = expansion_times.iter().sum();
+        stats.expansion_ns_p50 = percentile_u64(&mut expansion_times, 50);
+        stats.expansion_ns_p95 = percentile_u64(&mut expansion_times, 95);
+        stats.expansion_ns_max = expansion_times.iter().copied().max().unwrap_or(0);
+        stats.index_subst_unique = self.index.subst.len();
+        stats.index_trees_unique = self.index.trees.len();
+        stats.index_erased_unique = self.index.erased.len();
+        stats.index_always_emitted_unique = self.index.always_emitted.len();
+        stats.index_preds_unique = self.index.preds.len();
+        stats.index_decls_unique = self.index.decls.len();
         stats
     }
 
@@ -2123,6 +2248,7 @@ impl InstanceGraph {
     /// derivation cut removes: one indexing path, taken by install and replace
     /// alike. Returns the instances it pruned.
     fn derive(&mut self, ws: &Workspace, incremental: bool) -> Prune {
+        let derive_start = Instant::now();
         let lost: Vec<Instance> = std::mem::take(&mut self.lost).into_iter().collect();
         // A FRESH build prunes nothing by construction: `run` only ever walks
         // owners a root or an always-emitted seed demanded, so every owner it
@@ -2227,12 +2353,16 @@ impl InstanceGraph {
             }
         }
 
+        self.run_stats.derive_ns = derive_start.elapsed().as_nanos() as u64;
+        let post_pass_start = Instant::now();
         record_inline_body_deps(self, ws, &decls_entered);
         record_inline_body_nomangle_roots(self, ws, decls_entered.iter().map(|decl| decl.0));
         self.refresh_erased_entries();
         detect_changing_instance_recursion(self, ws);
         classify_boundaries(self, ws, &decls_entered);
         record_coroutine_helpers(self, ws, &entered, &left);
+        self.run_stats.post_pass_ns = post_pass_start.elapsed().as_nanos() as u64;
+        self.run_stats.derive_ns += self.run_stats.post_pass_ns;
         Prune { pruned, region }
     }
 
@@ -2742,6 +2872,19 @@ pub struct RunStats {
     /// Every owner popped from the pending worklist, including stranded skips.
     pub owner_visits: usize,
     pub expanded: usize,
+    pub frontier_count: usize,
+    pub frontier_owner_p50: usize,
+    pub frontier_owner_p95: usize,
+    pub frontier_owner_max: usize,
+    pub singleton_frontiers: usize,
+    pub frontier_ready_owners: usize,
+    pub frontier_same_frontier_dependency_owners: usize,
+    pub ordinary_owner_visits: usize,
+    pub always_emitted_owner_visits: usize,
+    pub expansion_ns_total: u64,
+    pub expansion_ns_p50: u64,
+    pub expansion_ns_p95: u64,
+    pub expansion_ns_max: u64,
     pub first_owner_visits: usize,
     pub duplicate_pending_visits: usize,
     pub duplicate_pending_suppressed: usize,
@@ -2752,6 +2895,17 @@ pub struct RunStats {
     pub duplicate_pending_ns: u64,
     pub witness_settlement_ns: u64,
     pub incremental_forced_ns: u64,
+    pub mono_intern_attempts: u64,
+    pub mono_new_types: u64,
+    pub mono_read_acqs: u64,
+    pub mono_write_acqs: u64,
+    pub mono_elapsed_ns: u64,
+    pub contribution_reached: usize,
+    pub contribution_bound_trees: usize,
+    pub contribution_edges: usize,
+    pub contribution_sites: usize,
+    pub contribution_failures: usize,
+    pub contribution_always_emitted_targets: usize,
     pub admissibility_ns: u64,
     pub body_prep_ns: u64,
     pub signature_type_conversion_ns: u64,
@@ -2774,6 +2928,14 @@ pub struct RunStats {
     pub index_always_emitted_updates: usize,
     pub index_preds_updates: usize,
     pub index_decls_updates: usize,
+    pub index_subst_unique: usize,
+    pub index_trees_unique: usize,
+    pub index_erased_unique: usize,
+    pub index_always_emitted_unique: usize,
+    pub index_preds_unique: usize,
+    pub index_decls_unique: usize,
+    pub derive_ns: u64,
+    pub post_pass_ns: u64,
     pub body_exprs_scanned: usize,
     pub resolved_overload_rows: usize,
     pub fn_value_rows: usize,
@@ -3123,7 +3285,7 @@ fn record_call_impl(
     }
     let cf = &ws.module(callee.module).functions[callee.func];
     let conversion_start = w.timer();
-    let instantiated = w.interner.with_mut(|a| {
+    let instantiated = w.with_interner_mut(|a| {
         instantiate(a, ws, inf, callee.module, callee.func, cf, bindings, subst)
     });
     add_elapsed(&mut w.out.timing.signature_type_conversion_ns, conversion_start);
@@ -3324,7 +3486,7 @@ fn record_witness(
     let callee = rep;
     let cf = &ws.module(callee.module).functions[callee.func];
     let conversion_start = w.timer();
-    let instantiated = w.interner.with_mut(|a| {
+    let instantiated = w.with_interner_mut(|a| {
         instantiate_witness(a, ws, inf, resolved, cf, &witness.generics, subst)
     });
     add_elapsed(&mut w.out.timing.signature_type_conversion_ns, conversion_start);
@@ -3597,7 +3759,7 @@ fn record_bound_next(
         w.out.always_emitted_seeds += 1;
     }
     let conversion_start = w.timer();
-    let instantiated = w.interner.with_mut(|a| {
+    let instantiated = w.with_interner_mut(|a| {
         instantiate_witness(a, ws, inf, resolved, cf, next_generics, subst)
     });
     add_elapsed(&mut w.out.timing.signature_type_conversion_ns, conversion_start);
