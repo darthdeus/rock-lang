@@ -1470,7 +1470,8 @@ pub fn build_in(
              stranded-skipped {}; phases admissibility {:.3}ms, body-prep {:.3}ms, \
              signature/type {:.3}ms, call-resolution {:.3}ms, witness/bound {:.3}ms, \
              body-walk {:.3}ms, struct-default-walk {:.3}ms, uninstall {:.3}ms, \
-             index-maintenance {:.3}ms",
+             index-maintenance {:.3}ms [subst {:.3}, trees {:.3}, erased {:.3}, \
+             always {:.3}, preds {:.3}, decls {:.3}, commit {:.3}]",
             stats.first_owner_visits,
             stats.first_owner_ns as f64 / 1_000_000.0,
             stats.duplicate_pending_visits,
@@ -1490,6 +1491,13 @@ pub fn build_in(
             stats.walk_struct_default_edges_ns as f64 / 1_000_000.0,
             stats.uninstall_ns as f64 / 1_000_000.0,
             stats.index_maintenance_ns as f64 / 1_000_000.0,
+            stats.index_subst_ns as f64 / 1_000_000.0,
+            stats.index_trees_ns as f64 / 1_000_000.0,
+            stats.index_erased_ns as f64 / 1_000_000.0,
+            stats.index_always_emitted_ns as f64 / 1_000_000.0,
+            stats.index_preds_ns as f64 / 1_000_000.0,
+            stats.index_decls_ns as f64 / 1_000_000.0,
+            stats.index_commit_ns as f64 / 1_000_000.0,
         );
         log::debug!(
             "graph body-fact census: expression rows {}, overload rows {}, fn-value rows {}, \
@@ -1739,7 +1747,20 @@ impl InstanceGraph {
                 stats.iterator_rows += c.iterator_rows;
                 let (demanded, install_timing) = self.install(owner, c, timing_enabled);
                 stats.uninstall_ns += install_timing.uninstall_ns;
-                stats.index_maintenance_ns += install_timing.index_maintenance_ns;
+                stats.index_maintenance_ns += install_timing.index.total_ns();
+                stats.index_subst_ns += install_timing.index.subst_ns;
+                stats.index_trees_ns += install_timing.index.trees_ns;
+                stats.index_erased_ns += install_timing.index.erased_ns;
+                stats.index_always_emitted_ns += install_timing.index.always_emitted_ns;
+                stats.index_preds_ns += install_timing.index.preds_ns;
+                stats.index_decls_ns += install_timing.index.decls_ns;
+                stats.index_commit_ns += install_timing.index.commit_ns;
+                stats.index_subst_updates += install_timing.index.subst_updates;
+                stats.index_trees_updates += install_timing.index.trees_updates;
+                stats.index_erased_updates += install_timing.index.erased_updates;
+                stats.index_always_emitted_updates += install_timing.index.always_emitted_updates;
+                stats.index_preds_updates += install_timing.index.preds_updates;
+                stats.index_decls_updates += install_timing.index.decls_updates;
                 for owner in demanded {
                     if queued.insert(owner.clone()) {
                         pending.push(owner);
@@ -1924,11 +1945,13 @@ impl InstanceGraph {
         let uninstall_start = timing_enabled.then(Instant::now);
         self.uninstall(&owner);
         let uninstall_ns = elapsed_ns(uninstall_start);
-        let index_start = timing_enabled.then(Instant::now);
+        let mut index = IndexMaintenanceTiming::default();
         // Every callee is in `reached`, an always-emitted body's included --
         // `always_emitted_targets` marks which of them are ROOTS, it is not a
         // second population.
+        let lane_start = timing_enabled.then(Instant::now);
         for (to, subst) in &c.reached {
+            index.subst_updates += 1;
             match self.index.subst.get_mut(to) {
                 Some(a) => a.assert_by(owner.clone(), subst),
                 None => {
@@ -1936,7 +1959,10 @@ impl InstanceGraph {
                 }
             }
         }
+        index.subst_ns = elapsed_ns(lane_start);
+        let lane_start = timing_enabled.then(Instant::now);
         for (i, tree) in &c.bound_trees {
+            index.trees_updates += 1;
             match self.index.trees.get_mut(i) {
                 Some(a) => a.assert_by(owner.clone(), tree),
                 None => {
@@ -1944,19 +1970,35 @@ impl InstanceGraph {
                 }
             }
         }
+        index.trees_ns = elapsed_ns(lane_start);
+        let lane_start = timing_enabled.then(Instant::now);
         for name in &c.erased_entries {
+            index.erased_updates += 1;
             self.index.erased.entry(name.clone()).or_default().insert(owner.clone());
         }
+        index.erased_ns = elapsed_ns(lane_start);
+        let lane_start = timing_enabled.then(Instant::now);
         for to in &c.always_emitted_targets {
+            index.always_emitted_updates += 1;
             self.index.always_emitted.entry(to.clone()).or_default().insert(owner.clone());
         }
+        index.always_emitted_ns = elapsed_ns(lane_start);
+        let lane_start = timing_enabled.then(Instant::now);
         if let Some(from) = owner.instance() {
             for e in &c.edges {
+                index.preds_updates += 1;
                 self.index.preds.entry(e.to.clone()).or_default().insert(from.clone());
                 self.lost.remove(&e.to);
             }
+        }
+        index.preds_ns = elapsed_ns(lane_start);
+        let lane_start = timing_enabled.then(Instant::now);
+        if let Some(from) = owner.instance() {
+            index.decls_updates += 1;
             *self.index.decls.entry(DeclKey(from.func)).or_insert(0) += 1;
         }
+        index.decls_ns = elapsed_ns(lane_start);
+        let lane_start = timing_enabled.then(Instant::now);
         for to in &c.always_emitted_targets {
             self.lost.remove(to);
         }
@@ -1973,9 +2015,10 @@ impl InstanceGraph {
             .collect();
         demanded.sort();
         demanded.dedup();
+        index.commit_ns = elapsed_ns(lane_start);
         (
             demanded,
-            InstallTiming { uninstall_ns, index_maintenance_ns: elapsed_ns(index_start) },
+            InstallTiming { uninstall_ns, index },
         )
     }
 
@@ -2658,9 +2701,38 @@ enum VisitKind {
 }
 
 #[derive(Default)]
+struct IndexMaintenanceTiming {
+    subst_ns: u64,
+    trees_ns: u64,
+    erased_ns: u64,
+    always_emitted_ns: u64,
+    preds_ns: u64,
+    decls_ns: u64,
+    commit_ns: u64,
+    subst_updates: usize,
+    trees_updates: usize,
+    erased_updates: usize,
+    always_emitted_updates: usize,
+    preds_updates: usize,
+    decls_updates: usize,
+}
+
+impl IndexMaintenanceTiming {
+    fn total_ns(&self) -> u64 {
+        self.subst_ns
+            + self.trees_ns
+            + self.erased_ns
+            + self.always_emitted_ns
+            + self.preds_ns
+            + self.decls_ns
+            + self.commit_ns
+    }
+}
+
+#[derive(Default)]
 struct InstallTiming {
     uninstall_ns: u64,
-    index_maintenance_ns: u64,
+    index: IndexMaintenanceTiming,
 }
 
 /// What one [`InstanceGraph::run`] actually walked. Operational, and the check
@@ -2689,6 +2761,19 @@ pub struct RunStats {
     pub walk_struct_default_edges_ns: u64,
     pub uninstall_ns: u64,
     pub index_maintenance_ns: u64,
+    pub index_subst_ns: u64,
+    pub index_trees_ns: u64,
+    pub index_erased_ns: u64,
+    pub index_always_emitted_ns: u64,
+    pub index_preds_ns: u64,
+    pub index_decls_ns: u64,
+    pub index_commit_ns: u64,
+    pub index_subst_updates: usize,
+    pub index_trees_updates: usize,
+    pub index_erased_updates: usize,
+    pub index_always_emitted_updates: usize,
+    pub index_preds_updates: usize,
+    pub index_decls_updates: usize,
     pub body_exprs_scanned: usize,
     pub resolved_overload_rows: usize,
     pub fn_value_rows: usize,

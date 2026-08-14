@@ -190,4 +190,22 @@ fn the_operational_censuses_are_sums_of_the_primary_records() {
             + census.incremental_forced_rewalks,
         "the graph census expanded denominator lost an owner population"
     );
+    assert!(
+        census.index_subst_updates > 0
+            && census.index_trees_updates > 0
+            && census.index_always_emitted_updates > 0
+            && census.index_preds_updates > 0
+            && census.index_decls_updates > 0,
+        "the graph fixture did not expose the maintained-index populations: {census:?}"
+    );
+    assert_eq!(
+        census.index_maintenance_ns,
+        census.index_subst_ns
+            + census.index_trees_ns
+            + census.index_erased_ns
+            + census.index_always_emitted_ns
+            + census.index_preds_ns
+            + census.index_decls_ns,
+        "graph index timing attribution lost or double-counted a lane: {census:?}"
+    );
 }
