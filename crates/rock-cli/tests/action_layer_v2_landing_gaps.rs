@@ -107,5 +107,5 @@ fn binding_changes_survive_a_fresh_process() {
 #[test]
 fn controller_only_traversal_reaches_production_consumers() {
     let output = run_sim("controller_traversal");
-    assert_eq!(assert_sim_pass("controller_traversal", &output), (61, 61));
+    assert_eq!(assert_sim_pass("controller_traversal", &output), (63, 63));
 }
