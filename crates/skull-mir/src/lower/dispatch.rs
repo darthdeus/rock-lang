@@ -44,6 +44,7 @@ pub struct DispatchCtx<'a> {
     pub concrete_plan: Option<&'a ConcreteBodyPlan>,
     pub concrete_types: Option<&'a ConcreteTypeTables>,
     pub concrete_type_cache: Option<&'a super::ConcreteTypeCache>,
+    pub lower_attribution: Option<&'a std::cell::RefCell<super::LowerAttribution>>,
     pub interner: Option<&'a crate::monoty::MonoInterner>,
     pub rep_arena: &'a RepArena,
     pub target: bone_semantic::hir::FnBackend,
@@ -297,15 +298,34 @@ impl<'a> DispatchCtx<'a> {
     }
 
     pub(crate) fn concrete_mono(&self, id: crate::monoty::MonoTyId) -> Option<crate::monoty::MonoTy> {
+        if let Some(stats) = self.lower_attribution {
+            stats.borrow_mut().concrete_mono_requests += 1;
+        }
         if let Some(cache) = self.concrete_type_cache {
             if let Some(ty) = cache.borrow().get(&id).cloned() {
+                if let Some(stats) = self.lower_attribution {
+                    let mut stats = stats.borrow_mut();
+                    stats.concrete_mono_cache_hits += 1;
+                    stats.concrete_mono_cloned_nodes += super::mono_ty_node_count(&ty);
+                }
                 return Some(ty);
             }
             let ty = self.interner?.get(id);
+            if let Some(stats) = self.lower_attribution {
+                let mut stats = stats.borrow_mut();
+                stats.concrete_mono_derivations += 1;
+                stats.concrete_mono_cloned_nodes += 2 * super::mono_ty_node_count(&ty);
+            }
             cache.borrow_mut().insert(id, ty.clone());
             return Some(ty);
         }
-        Some(self.interner?.get(id))
+        let ty = self.interner?.get(id);
+        if let Some(stats) = self.lower_attribution {
+            let mut stats = stats.borrow_mut();
+            stats.concrete_mono_derivations += 1;
+            stats.concrete_mono_cloned_nodes += super::mono_ty_node_count(&ty);
+        }
+        Some(ty)
     }
 
     /// The stored HIR node. Concrete plan consumers use `concrete_ty` or

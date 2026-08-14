@@ -728,6 +728,7 @@ pub struct StaticCell {
 pub struct MirFunc {
     pub name: Ustr,
     pub params: Vec<Idx<Cell>>,
+    pub lower_attribution: crate::lower::LowerAttribution,
     /// The concrete function representation consumed by entry binding and
     /// return lowering. Calls retain the same plan in `call_abi_plans`.
     pub abi_plan: Option<crate::lower::BackendFnAbiPlanHandle>,
@@ -888,6 +889,7 @@ impl MirFunc {
         Self {
             name,
             params: Vec::new(),
+            lower_attribution: Default::default(),
             abi_plan: None,
             abi_representation: None,
             global_plan: None,
@@ -925,12 +927,22 @@ impl MirFunc {
     /// first store). Use [`Self::new_cell_typed`] at a binding site with a
     /// declared/inferred type.
     pub fn new_cell(&mut self, name: Option<Ustr>) -> Idx<Cell> {
-        self.cells.alloc(Cell { name, loop_binding: false, ty: None, nonnull_value_struct: false })
+        let capacity = self.cells.capacity();
+        let id = self.cells.alloc(Cell { name, loop_binding: false, ty: None, nonnull_value_struct: false });
+        if self.cells.capacity() != capacity {
+            self.lower_attribution.mir_cell_reallocations += 1;
+        }
+        id
     }
 
     /// Allocate a fresh variable cell carrying bone's type for the binding.
     pub fn new_cell_typed(&mut self, name: Option<Ustr>, ty: Option<TyId>) -> Idx<Cell> {
-        self.cells.alloc(Cell { name, loop_binding: false, ty, nonnull_value_struct: false })
+        let capacity = self.cells.capacity();
+        let id = self.cells.alloc(Cell { name, loop_binding: false, ty, nonnull_value_struct: false });
+        if self.cells.capacity() != capacity {
+            self.lower_attribution.mir_cell_reallocations += 1;
+        }
+        id
     }
 
     /// Tag a cell as a `for`-desugaring loop binding (DESUGAR PROVENANCE; see
@@ -947,12 +959,21 @@ impl MirFunc {
 
     /// Allocate a fresh (empty, `Unreachable`-terminated) block.
     pub fn new_block(&mut self) -> Idx<Block> {
-        self.blocks.alloc(Block::new())
+        let capacity = self.blocks.capacity();
+        let id = self.blocks.alloc(Block::new());
+        if self.blocks.capacity() != capacity {
+            self.lower_attribution.mir_block_reallocations += 1;
+        }
+        id
     }
 
     /// Allocate an instruction and append it to `block`; return its id (=value).
     pub fn emit(&mut self, block: Idx<Block>, inst: Inst) -> Idx<Inst> {
+        let capacity = self.insts.capacity();
         let id = self.insts.alloc(inst);
+        if self.insts.capacity() != capacity {
+            self.lower_attribution.mir_instruction_reallocations += 1;
+        }
         self.blocks[block].insts.push(id);
         id
     }

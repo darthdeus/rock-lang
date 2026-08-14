@@ -40,6 +40,77 @@ fn gap(msg: impl std::fmt::Display) -> CompilerError {
     CompilerError::new_no_location(format!("skull-mir: lowering gap: {msg}"))
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LowerAttribution {
+    pub concrete_mono_requests: usize,
+    pub concrete_mono_cache_hits: usize,
+    pub concrete_mono_derivations: usize,
+    pub concrete_mono_cloned_nodes: usize,
+    pub abi_param_copy_volume: usize,
+    pub mir_instruction_allocations: usize,
+    pub mir_instruction_reallocations: usize,
+    pub mir_instruction_capacity: usize,
+    pub mir_cell_allocations: usize,
+    pub mir_cell_reallocations: usize,
+    pub mir_cell_capacity: usize,
+    pub mir_block_allocations: usize,
+    pub mir_block_reallocations: usize,
+    pub mir_block_capacity: usize,
+}
+
+impl LowerAttribution {
+    pub(crate) fn add_assign(&mut self, other: &Self) {
+        self.concrete_mono_requests += other.concrete_mono_requests;
+        self.concrete_mono_cache_hits += other.concrete_mono_cache_hits;
+        self.concrete_mono_derivations += other.concrete_mono_derivations;
+        self.concrete_mono_cloned_nodes += other.concrete_mono_cloned_nodes;
+        self.abi_param_copy_volume += other.abi_param_copy_volume;
+        self.mir_instruction_allocations += other.mir_instruction_allocations;
+        self.mir_instruction_reallocations += other.mir_instruction_reallocations;
+        self.mir_instruction_capacity += other.mir_instruction_capacity;
+        self.mir_cell_allocations += other.mir_cell_allocations;
+        self.mir_cell_reallocations += other.mir_cell_reallocations;
+        self.mir_cell_capacity += other.mir_cell_capacity;
+        self.mir_block_allocations += other.mir_block_allocations;
+        self.mir_block_reallocations += other.mir_block_reallocations;
+        self.mir_block_capacity += other.mir_block_capacity;
+    }
+}
+
+fn mono_ty_node_count(ty: &MonoTy) -> usize {
+    match ty {
+        MonoTy::Int
+        | MonoTy::Uint
+        | MonoTy::Float
+        | MonoTy::Bool
+        | MonoTy::String
+        | MonoTy::Any
+        | MonoTy::Unit
+        | MonoTy::Never => 1,
+        MonoTy::Nullable(inner) => 1 + mono_ty_node_count(inner),
+        MonoTy::Tuple(parts) | MonoTy::App { params: parts, .. } => {
+            1 + parts.iter().map(mono_ty_node_count).sum::<usize>()
+        }
+        MonoTy::Function { params, ret } => {
+            1 + params.iter().map(mono_ty_node_count).sum::<usize>() + mono_ty_node_count(ret)
+        }
+    }
+}
+
+fn finish_lower_attribution(mut f: MirFunc, mut stats: LowerAttribution) -> MirFunc {
+    stats.mir_instruction_allocations += f.insts.len();
+    stats.mir_instruction_capacity += f.insts.capacity();
+    stats.mir_cell_allocations += f.cells.len();
+    stats.mir_cell_capacity += f.cells.capacity();
+    stats.mir_block_allocations += f.blocks.len();
+    stats.mir_block_capacity += f.blocks.capacity();
+    stats.mir_instruction_reallocations += f.lower_attribution.mir_instruction_reallocations;
+    stats.mir_cell_reallocations += f.lower_attribution.mir_cell_reallocations;
+    stats.mir_block_reallocations += f.lower_attribution.mir_block_reallocations;
+    f.lower_attribution = stats;
+    f
+}
+
 // --- scalarized value ABI (rock parity) -------------------------------------
 //
 // A `value` struct is passed/returned as its flattened primitive LEAF scalars
@@ -1240,6 +1311,10 @@ fn lower_body(
         concrete_plan,
         concrete_plans,
         concrete_type_cache: RefCell::new(rustc_hash::FxHashMap::default()),
+        lower_attribution: RefCell::new(LowerAttribution {
+            abi_param_copy_volume: param_reps.len(),
+            ..LowerAttribution::default()
+        }),
         generic_bounds: &func.generic_bounds,
         body,
         inf,
@@ -1284,7 +1359,8 @@ fn lower_body(
     b.lower_params();
     b.fill_param_defaults()?;
     b.lower_root()?;
-    Ok(b.f)
+    let stats = b.lower_attribution.into_inner();
+    Ok(finish_lower_attribution(b.f, stats))
 }
 
 /// Lower an always-emitted global from its graph-owned concrete plan.
@@ -1335,6 +1411,7 @@ fn lower_global_inner(
         concrete_plan,
         concrete_plans,
         concrete_type_cache: RefCell::new(rustc_hash::FxHashMap::default()),
+        lower_attribution: RefCell::new(LowerAttribution::default()),
         generic_bounds: &[],
         body,
         inf,
@@ -1380,7 +1457,8 @@ fn lower_global_inner(
     b.ret_rep = (!scx.values_first_class)
         .then(|| b.f.global_plan.as_ref().expect("global plan").representation());
     b.lower_root()?;
-    Ok(Some(b.f))
+    let stats = b.lower_attribution.into_inner();
+    Ok(Some(finish_lower_attribution(b.f, stats)))
 }
 
 /// Lower an always-emitted decorator from its graph-owned concrete plan.
@@ -1642,6 +1720,7 @@ fn lower_decorator_inner(
         concrete_plan,
         concrete_plans,
         concrete_type_cache: RefCell::new(rustc_hash::FxHashMap::default()),
+        lower_attribution: RefCell::new(LowerAttribution::default()),
         generic_bounds: &[],
         body,
         inf,
@@ -1678,7 +1757,8 @@ fn lower_decorator_inner(
     b.lower_params();
     b.fill_param_defaults()?;
     b.lower_root()?;
-    Ok(b.f)
+    let stats = b.lower_attribution.into_inner();
+    Ok(finish_lower_attribution(b.f, stats))
 }
 
 struct Builder<'a> {
@@ -1687,6 +1767,7 @@ struct Builder<'a> {
     concrete_plan: &'a ConcreteBodyPlan,
     concrete_plans: &'a ConcretePlans,
     concrete_type_cache: ConcreteTypeCache,
+    lower_attribution: RefCell<LowerAttribution>,
     /// The enclosing fn's `generic_bounds`, parallel to its `generics`:
     /// `Some(elem)` where a generic is declared `I: Iterator<elem>`. THE declared
     /// source for a placeholder `next`'s element shape -- the call's inferred
@@ -1898,11 +1979,20 @@ impl Builder<'_> {
     /// so the instance walk asking the same question cannot get a second answer
     /// (`skull_mir::lower::dispatch`).
     pub(crate) fn concrete_mono(&self, id: MonoTyId) -> MonoTy {
+        self.lower_attribution.borrow_mut().concrete_mono_requests += 1;
         let cache = &self.concrete_type_cache;
         if let Some(ty) = cache.borrow().get(&id).cloned() {
+            let mut stats = self.lower_attribution.borrow_mut();
+            stats.concrete_mono_cache_hits += 1;
+            stats.concrete_mono_cloned_nodes += mono_ty_node_count(&ty);
             return ty;
         }
         let ty = self.scx.interner().get(id);
+        {
+            let mut stats = self.lower_attribution.borrow_mut();
+            stats.concrete_mono_derivations += 1;
+            stats.concrete_mono_cloned_nodes += 2 * mono_ty_node_count(&ty);
+        }
         cache.borrow_mut().insert(id, ty.clone());
         ty
     }
@@ -1915,6 +2005,7 @@ impl Builder<'_> {
             concrete_plan: Some(self.concrete_plan),
             concrete_types: self.concrete_plan.domain_types(&self.cur_domain),
             concrete_type_cache: Some(&self.concrete_type_cache),
+            lower_attribution: Some(&self.lower_attribution),
             interner: Some(self.scx.interner()),
             rep_arena: self.scx.rep_arena.as_ref(),
             target: self.scx.target,

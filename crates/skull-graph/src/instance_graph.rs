@@ -4070,6 +4070,7 @@ fn dispatched_sites(
         concrete_plan: None,
         concrete_types: None,
         concrete_type_cache: None,
+        lower_attribution: None,
         interner: None,
         rep_arena: &rep_arena,
         target: bone_semantic::hir::FnBackend::Any,

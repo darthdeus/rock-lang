@@ -527,6 +527,20 @@ pub struct AttributionPhase {
     pub p50_us: u64,
     pub p95_us: u64,
     pub max_us: u64,
+    pub concrete_mono_requests: usize,
+    pub concrete_mono_cache_hits: usize,
+    pub concrete_mono_derivations: usize,
+    pub concrete_mono_cloned_nodes: usize,
+    pub abi_param_copy_volume: usize,
+    pub mir_instruction_allocations: usize,
+    pub mir_instruction_reallocations: usize,
+    pub mir_instruction_capacity: usize,
+    pub mir_cell_allocations: usize,
+    pub mir_cell_reallocations: usize,
+    pub mir_cell_capacity: usize,
+    pub mir_block_allocations: usize,
+    pub mir_block_reallocations: usize,
+    pub mir_block_capacity: usize,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -660,6 +674,7 @@ struct UnitAttribution {
     times: PhaseTimes,
     hir_nodes: usize,
     mir_instructions: usize,
+    lower_facts: skull_mir::lower::LowerAttribution,
     inline: InlineWork,
 }
 
@@ -753,6 +768,20 @@ impl AttributionAccumulator {
             unit.hir_nodes,
             unit.mir_instructions,
         );
+        self.result.lower.concrete_mono_requests += unit.lower_facts.concrete_mono_requests;
+        self.result.lower.concrete_mono_cache_hits += unit.lower_facts.concrete_mono_cache_hits;
+        self.result.lower.concrete_mono_derivations += unit.lower_facts.concrete_mono_derivations;
+        self.result.lower.concrete_mono_cloned_nodes += unit.lower_facts.concrete_mono_cloned_nodes;
+        self.result.lower.abi_param_copy_volume += unit.lower_facts.abi_param_copy_volume;
+        self.result.lower.mir_instruction_allocations += unit.lower_facts.mir_instruction_allocations;
+        self.result.lower.mir_instruction_reallocations += unit.lower_facts.mir_instruction_reallocations;
+        self.result.lower.mir_instruction_capacity += unit.lower_facts.mir_instruction_capacity;
+        self.result.lower.mir_cell_allocations += unit.lower_facts.mir_cell_allocations;
+        self.result.lower.mir_cell_reallocations += unit.lower_facts.mir_cell_reallocations;
+        self.result.lower.mir_cell_capacity += unit.lower_facts.mir_cell_capacity;
+        self.result.lower.mir_block_allocations += unit.lower_facts.mir_block_allocations;
+        self.result.lower.mir_block_reallocations += unit.lower_facts.mir_block_reallocations;
+        self.result.lower.mir_block_capacity += unit.lower_facts.mir_block_capacity;
         record_phase(
             &mut self.result.inline_phase,
             &mut self.inline_samples,
@@ -969,6 +998,7 @@ fn emit_decorator_unit(
             out.attribution.examined = true;
             out.attribution.hir_nodes = hir_nodes_for_owner(ws, mid, BodyOwner::Decorator(did));
             out.attribution.mir_instructions = mf.insts.len();
+            out.attribution.lower_facts = mf.lower_attribution.clone();
             out.times.lower_work = out.attribution.mir_instructions > 0;
             let cleanup_before = mir_live_instructions(&mf);
             let tc = Instant::now();
@@ -1086,6 +1116,7 @@ fn emit_global_unit(
             out.attribution.examined = true;
             out.attribution.hir_nodes = hir_nodes_for_owner(ws, mid, BodyOwner::Global(gid));
             out.attribution.mir_instructions = mf.insts.len();
+            out.attribution.lower_facts = mf.lower_attribution.clone();
             out.times.lower_work = out.attribution.mir_instructions > 0;
             let cleanup_before = mir_live_instructions(&mf);
             let tc = Instant::now();
@@ -1917,6 +1948,7 @@ fn emit_body_chunk_with_mutation(
     attribution.examined = true;
     attribution.hir_nodes = hir_nodes_for_owner(ws, self_ref.module, BodyOwner::Function(self_ref.func));
     attribution.mir_instructions = mf.insts.len();
+    attribution.lower_facts = mf.lower_attribution.clone();
     match mutation {
         BodyMutation::None => {}
         #[cfg(test)]
@@ -2299,6 +2331,7 @@ fn emit_spec_chunk(
         examined: true,
         hir_nodes: hir_nodes_for_owner(ws, fref.module, BodyOwner::Function(fref.func)),
         mir_instructions: mf.insts.len(),
+        lower_facts: mf.lower_attribution.clone(),
         ..UnitAttribution::default()
     };
     // BEFORE every transform: an `Iterator`-bounded body's placeholders are what
@@ -5641,6 +5674,16 @@ fn main() { let result = first() }
                 && attribution.lower.p95_us <= attribution.lower.max_us,
             "lowering duration distribution is empty or unordered: {attribution:?}"
         );
+        assert!(
+            attribution.lower.concrete_mono_requests > 0
+                && attribution.lower.concrete_mono_derivations > 0
+                && attribution.lower.concrete_mono_requests
+                    == attribution.lower.concrete_mono_cache_hits
+                        + attribution.lower.concrete_mono_derivations
+                && attribution.lower.mir_instruction_allocations > 0
+                && attribution.lower.mir_instruction_capacity >= attribution.lower.instructions_visited,
+            "lowerer ownership census has no production population: {attribution:?}"
+        );
     }
 
     #[test]
@@ -5659,6 +5702,11 @@ fn main() { let result = first() }
             "counted-loop recovery did not report a rewritten body: {:?}",
             bounded_emit.attribution
         );
+        assert!(
+            bounded_emit.attribution.lower.abi_param_copy_volume > 0,
+            "the parameter-representation copy census has no bounded-body population: {:?}",
+            bounded_emit.attribution
+        );
 
         let closure = closure_workspace();
         let closure_mid = *closure
@@ -5672,6 +5720,35 @@ fn main() { let result = first() }
             closure_emit.attribution.closure.bodies_with_work > 0,
             "closure conversion did not report a hoisted body: {:?}",
             closure_emit.attribution
+        );
+    }
+
+    #[test]
+    fn body_attribution_includes_explicit_nested_lowering() {
+        const NESTED_SRC: &str = r#"
+fn outer(x: int) -> int {
+    fn inner(y: int) -> int { return y }
+    return inner(x)
+}
+fn main() { let result = outer(1) }
+"#;
+        let mut modules = vec![
+            skull_parser::parse_module_clean(NESTED_SRC, Ustr::from("<nested-lower-test>")).expect("parse"),
+        ];
+        let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic");
+        let mid = ws
+            .modules
+            .iter()
+            .find(|m| m.id != ModuleId::builtin())
+            .expect("test module")
+            .id;
+        let (emit, _) = emit_full_in_with_test_mutation(&ws, mid, BodyMutation::None)
+            .expect("nested emission");
+        assert!(
+            emit.attribution.lower.mir_instruction_allocations
+                > emit.attribution.lower.instructions_visited,
+            "nested lowering was omitted from the arena census: {:?}",
+            emit.attribution
         );
     }
 

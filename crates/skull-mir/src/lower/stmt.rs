@@ -124,12 +124,17 @@ impl Builder<'_> {
 
         let mf = MirFunc::new(hoisted);
         let entry = mf.entry();
+        let param_reps = abi.representation.params().to_vec();
         let mut child = Builder {
             ws: self.ws,
             scx: self.scx,
             concrete_plan: self.concrete_plan,
             concrete_plans: self.concrete_plans,
             concrete_type_cache: std::cell::RefCell::new(rustc_hash::FxHashMap::default()),
+            lower_attribution: std::cell::RefCell::new(LowerAttribution {
+                abi_param_copy_volume: param_reps.len(),
+                ..LowerAttribution::default()
+            }),
             generic_bounds: self.generic_bounds,
             body: self.body,
             inf: self.inf,
@@ -143,7 +148,7 @@ impl Builder<'_> {
             resume_arg: None,
             // A hoisted nested fn is emitted via `emit_nested_fns`, which never
             // runs `inline_functions` -- box value args.
-            param_reps: abi.representation.params().to_vec(),
+            param_reps,
             ret_rep: abi.representation.result(),
             // A nested fn is emitted as a sibling top-level Lua fn and is never a
             // GLSL callee (referenced indirectly), so a return coercion here is
@@ -189,7 +194,12 @@ impl Builder<'_> {
         }
         child.defers.pop();
 
-        self.f.nested_fns.push(child.f);
+        let child_stats = child.lower_attribution.into_inner();
+        let child_f = super::finish_lower_attribution(child.f, child_stats);
+        self.lower_attribution
+            .borrow_mut()
+            .add_assign(&child_f.lower_attribution);
+        self.f.nested_fns.push(child_f);
         Ok(())
     }
 

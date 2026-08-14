@@ -358,6 +358,11 @@ impl<T> Arena<T> {
         self.data.len()
     }
 
+    /// Returns the allocated backing capacity.
+    pub fn capacity(&self) -> usize {
+        self.data.capacity()
+    }
+
     /// Returns whether the arena contains no elements.
     ///
     /// ```

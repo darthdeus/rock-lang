@@ -189,6 +189,23 @@ fn print_attribution(attribution: &skull::mir_emit::EmitAttribution) {
     phase("regalloc", &attribution.regalloc);
     phase("stringify", &attribution.stringify);
     println!(
+        "    lower facts: concrete_mono {} requests, {} cache hits, {} derivations, {} cloned nodes; ABI param copy {}; MIR inst/cell/block alloc {}/{}/{} realloc {}/{}/{} capacity {}/{}/{}",
+        attribution.lower.concrete_mono_requests,
+        attribution.lower.concrete_mono_cache_hits,
+        attribution.lower.concrete_mono_derivations,
+        attribution.lower.concrete_mono_cloned_nodes,
+        attribution.lower.abi_param_copy_volume,
+        attribution.lower.mir_instruction_allocations,
+        attribution.lower.mir_cell_allocations,
+        attribution.lower.mir_block_allocations,
+        attribution.lower.mir_instruction_reallocations,
+        attribution.lower.mir_cell_reallocations,
+        attribution.lower.mir_block_reallocations,
+        attribution.lower.mir_instruction_capacity,
+        attribution.lower.mir_cell_capacity,
+        attribution.lower.mir_block_capacity,
+    );
+    println!(
         "    inline results: {} accepted splices, {} copied instructions, {} arena allocations",
         attribution.inline.accepted_splices,
         attribution.inline.copied_instructions,
