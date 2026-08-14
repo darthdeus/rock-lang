@@ -6083,8 +6083,6 @@ fn host_fn_template(cf: &bone_semantic::hir::Function) -> Option<&'static str> {
         // Materialized `a..b` range -> a Vec-shaped object (runtime helper).
         ("__range", 2) => Some("__range($1, $2)"),
         ("__range_uint", 2) => Some("__range($1, $2)"),
-        // The JS harness has no release mode (`_G.__ROCK_RELEASE` is never set).
-        ("is_release_mode", 0) => Some("false"),
         // `pcall(f); return not ok` -- did `f` error? A JS throw is the failure.
         ("try_call", 1) => Some("__try_call($1)"),
         // Coroutine consumers (stdlib inline(lua) readers of the frame object).

@@ -65,7 +65,9 @@ fn validate_one(
             test_args(anno)
         }
         "pure" | "nomangle" | "ignore" | "debug_impure" | "intrinsic" | "native_required"
-        | "struct_expand" | "shader_expand" | "vertex_expand" | "uniform_expand" | "uniform_values"
+        | "struct_expand" | "shader_expand" | "vertex_expand" | "uniform_expand"
+        | "build_var_expand" | "embed_expand"
+        | "uniform_values"
         | "materialize" | "gpu_only"
         | "scalar_abi" | "inline" | "sim"
         | "sim_render" => {

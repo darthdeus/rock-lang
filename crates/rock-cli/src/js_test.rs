@@ -223,10 +223,16 @@ fn js_build_file(file: &str) -> JsUnitOutcome {
         Err(e) => return js_compile_failure(file, &src, &[e]),
     };
     let user_file = user.file;
-    let ws = match crate::bone_backend::check_with_stdlib([user]) {
+    let mut ws = match crate::bone_backend::check_with_stdlib([user]) {
         Ok(ws) => ws,
         Err(errs) => return js_compile_failure(file, &src, &errs),
     };
+    if let Err(e) = crate::comptime::stamp_workspace(&mut ws, std::path::Path::new(file)) {
+        return JsUnitOutcome::UnitFail {
+            reason: "build var resolution failed".to_string(),
+            rendered: format!("build var resolution failed for {file}: {e:#}"),
+        };
+    }
     let user_mid = crate::bone_backend::entry_module_id(&ws, user_file);
     // A discovery error (malformed `@test` annotation on a bone-accepted file)
     // is a rejection, never an expected compile failure -- so it does NOT route
@@ -269,7 +275,7 @@ fn js_build_package(dir: &str) -> JsUnitOutcome {
             }
         }
     };
-    let ws = match crate::bone_backend::check_modules(&mut modules) {
+    let mut ws = match crate::bone_backend::check_modules(&mut modules) {
         Ok(ws) => ws,
         Err(errs) => {
             return JsUnitOutcome::UnitFail {
@@ -278,6 +284,12 @@ fn js_build_package(dir: &str) -> JsUnitOutcome {
             }
         }
     };
+    if let Err(e) = crate::comptime::stamp_workspace(&mut ws, std::path::Path::new(dir)) {
+        return JsUnitOutcome::UnitFail {
+            reason: "build var resolution failed".to_string(),
+            rendered: format!("build var resolution failed for {dir}: {e:#}"),
+        };
+    }
     let tests = match crate::skull_backend::collect_package_test_fns(&ws, dir) {
         Ok(tests) => tests,
         Err(e) => {
@@ -489,13 +501,19 @@ fn emit_js_program_single(path: &str) -> skull_codegen_js::emit::JsProgram {
         }
     };
     let user_file = user.file;
-    let ws = match crate::bone_backend::check_with_stdlib([user]) {
+    let mut ws = match crate::bone_backend::check_with_stdlib([user]) {
         Ok(ws) => ws,
         Err(errs) => {
             eprintln!("{}", crate::skull_backend::render_file_errs(path, &src, &errs));
             crate::ablation_report::exit_with_census(1);
         }
     };
+    // Single-file runs resolve from the file's enclosing project (walk-up), so
+    // a file inside a [build.vars] project behaves the same on both backends.
+    if let Err(e) = crate::comptime::stamp_workspace(&mut ws, std::path::Path::new(path)) {
+        log::error!(target: "JS", "build var resolution failed for {}: {:#}", path, e);
+        crate::ablation_report::exit_with_census(1);
+    }
     let user_mid = crate::bone_backend::entry_module_id(&ws, user_file);
     match skull_codegen_js::emit::emit_program(&ws, user_mid) {
         Ok(p) => p,
@@ -555,13 +573,14 @@ pub(crate) fn try_emit_js_program_project_cached(
             crate::skull_backend::render_project_errs(&sources, &errs)
         )),
     };
-    let ws = match crate::bone_backend::check_modules(&mut modules) {
+    let mut ws = match crate::bone_backend::check_modules(&mut modules) {
         Ok(ws) => ws,
         Err(errs) => return Err(anyhow::anyhow!(
             "{}",
             crate::skull_backend::render_project_errs(&sources, &errs)
         )),
     };
+    crate::comptime::stamp_workspace(&mut ws, std::path::Path::new(dir))?;
     let user_mid = crate::bone_backend::entry_module_id(&ws, entry_file);
     let (prog, cache) = match skull_codegen_js::emit::emit_program_cached(&ws, user_mid) {
         Ok(p) => p,

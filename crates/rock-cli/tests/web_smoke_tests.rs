@@ -2,15 +2,16 @@
 //! excluded from the default nextest profile like game_snapshot_tests -- runs
 //! under `-P full`):
 //!
-//! - `web_chrome_screenshot_nonblank`: headless Chrome renders the build and
-//!   the screenshot must not be blank (>= 8 distinct colors: board tiles +
-//!   frame + background). Skips with a log when chrome is absent.
+//! - browser screenshots wait for runtime observables, then must not be blank
+//!   (>= 8 distinct colors: board tiles + frame + background). Skips with a
+//!   log when chrome is absent.
 //!
 //! The fast node/fake-GL half lives in `web_fake_gl_tests` and runs in the
 //! DEFAULT profile -- see that file's header for why the split exists.
 
 use std::path::PathBuf;
-use std::process::Command;
+
+use crate::web_test_process;
 
 fn rock_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_rock"))
@@ -21,7 +22,7 @@ fn repo_root() -> PathBuf {
 }
 
 fn build_web(game: &str, out: &std::path::Path) {
-    let status = Command::new(rock_bin())
+    let status = web_test_process::command(rock_bin())
         .current_dir(repo_root())
         .args(["web", game, "--out", out.to_str().unwrap()])
         .status()
@@ -31,82 +32,13 @@ fn build_web(game: &str, out: &std::path::Path) {
     assert!(out.join("index.html").is_file(), "index.html not emitted");
 }
 
-// One headless-Chrome screenshot smoke: build the game's web dir, serve it over
-// HTTP (`fetch` of preloaded assets is CORS-blocked on file:// -- "serve with
-// any static file server" is the deliverable's contract), screenshot after
-// `budget_ms` of virtual time, and assert (a) the canvas2d glyph atlas baked
-// (real TTF fetched + baked) and (b) the frame clears the >=8-quantized-color
-// blank bar. Budget note: software-WebGL (swiftshader) boot can outlast a small
-// budget (blank pre-first-frame capture), while a much larger one over-runs
-// swiftshader's staging pool after the frame is already captured -- 10s works
-// for match3/chess; mag's larger preload gets 30s.
-fn run_chrome_screenshot(game: &str, budget_ms: u32, subject: &str) {
-    let chrome = ["google-chrome", "google-chrome-stable", "chromium"]
-        .iter()
-        .find(|c| Command::new(c).arg("--version").output().map(|o| o.status.success()).unwrap_or(false));
-    let Some(chrome) = chrome else {
-        eprintln!("SKIP chrome screenshot ({game}): no chrome on PATH");
-        return;
-    };
-    let dir = tempfile::tempdir().expect("tempdir");
-    build_web(game, dir.path());
-
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
-    let mut server = Command::new("python3")
-        .args(["-m", "http.server", &port.to_string(), "-d"])
-        .arg(dir.path())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .expect("spawn http.server");
-    std::thread::sleep(std::time::Duration::from_millis(300));
-
-    let shot = dir.path().join("shot.png");
-    let out = Command::new(chrome)
-        .args([
-            "--headless=new",
-            "--no-sandbox",
-            "--enable-unsafe-swiftshader",
-            "--enable-logging=stderr",
-            "--v=0",
-            "--window-size=1280,720",
-        ])
-        .arg(format!("--virtual-time-budget={budget_ms}"))
-        .arg(format!("--screenshot={}", shot.display()))
-        .arg(format!("http://127.0.0.1:{port}/index.html"))
-        .output()
-        .expect("spawn chrome");
-    let _ = server.kill();
-    let _ = server.wait();
-    assert!(out.status.success(), "chrome exited non-zero ({game})");
-
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("font atlas baked"),
-        "canvas2d glyph atlas did not bake ({game}).\nchrome stderr tail:\n{}",
-        &stderr[stderr.len().saturating_sub(2000)..]
-    );
-
-    let img = image::open(&shot).expect("read screenshot").to_rgba8();
-    let mut colors = std::collections::HashSet::new();
-    for p in img.pixels() {
-        colors.insert((p[0] / 16, p[1] / 16, p[2] / 16));
-        if colors.len() >= 8 {
-            break;
-        }
-    }
-    assert!(
-        colors.len() >= 8,
-        "screenshot looks blank ({} distinct quantized colors); {subject} should produce many",
-        colors.len()
-    );
-}
-
 #[test]
 fn web_chrome_screenshot_nonblank_with_text() {
-    run_chrome_screenshot("games/match3", 10000, "match3 tiles");
+    run_cdp_screenshot_when_ready(
+        "games/match3",
+        "web_chrome_screenshot_nonblank_with_text",
+        "match3 tiles",
+    );
 }
 
 // Chess in real headless Chrome: 14 MB of book/opening/sound assets + font are
@@ -114,15 +46,28 @@ fn web_chrome_screenshot_nonblank_with_text() {
 // panels) must clear the color bar.
 #[test]
 fn web_chrome_screenshot_nonblank_chess() {
-    run_chrome_screenshot("games/chess", 10000, "the chess board");
+    run_cdp_screenshot_when_ready(
+        "games/chess",
+        "web_chrome_screenshot_nonblank_chess",
+        "the chess board",
+    );
 }
 
 // Build `game`, serve it, and drive it with tools/web/chrome_cdp_smoke.js.
 // Returns the tempdir (keep it alive -- the screenshot lives in it) and the
 // screenshot path, or None when node/chrome is absent.
 fn run_cdp(game: &str, test: &str, args: &[&str]) -> Option<(tempfile::TempDir, PathBuf)> {
-    if Command::new("node").arg("--version").output().map(|o| !o.status.success()).unwrap_or(true) {
+    if web_test_process::node()
+        .arg("--version")
+        .output()
+        .map(|o| !o.status.success())
+        .unwrap_or(true)
+    {
         eprintln!("SKIP {test}: node not on PATH");
+        return None;
+    }
+    if !web_test_process::chrome_available(&repo_root()) {
+        eprintln!("SKIP {test}: no chrome on PATH");
         return None;
     }
     let dir = tempfile::tempdir().expect("tempdir");
@@ -131,7 +76,7 @@ fn run_cdp(game: &str, test: &str, args: &[&str]) -> Option<(tempfile::TempDir, 
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
     let port = listener.local_addr().unwrap().port();
     drop(listener);
-    let mut server = Command::new("python3")
+    let mut server = web_test_process::command("python3")
         .args(["-m", "http.server", &port.to_string(), "-d"])
         .arg(dir.path())
         .stdout(std::process::Stdio::null())
@@ -141,7 +86,7 @@ fn run_cdp(game: &str, test: &str, args: &[&str]) -> Option<(tempfile::TempDir, 
     std::thread::sleep(std::time::Duration::from_millis(300));
 
     let shot = dir.path().join("shot.png");
-    let out = Command::new("node")
+    let out = web_test_process::node()
         .arg(repo_root().join("tools/web/chrome_cdp_smoke.js"))
         .arg(format!("http://127.0.0.1:{port}/index.html"))
         .arg(&shot)
@@ -161,6 +106,23 @@ fn run_cdp(game: &str, test: &str, args: &[&str]) -> Option<(tempfile::TempDir, 
         "{test} CDP smoke failed.\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
     Some((dir, shot))
+}
+
+fn run_cdp_screenshot_when_ready(game: &str, test: &str, subject: &str) {
+    let Some((_dir, shot)) = run_cdp(
+        game,
+        test,
+        &[
+            "--frames",
+            // The counter advances before frameFn, so 3 witnesses two returned frames.
+            "3",
+            "--ready-expr",
+            "Object.keys((globalThis.__SW && __SW.fonts) || {}).length > 0",
+        ],
+    ) else {
+        return;
+    };
+    assert_not_blank(&shot, subject);
 }
 
 fn assert_not_blank(shot: &std::path::Path, subject: &str) {
@@ -436,13 +398,17 @@ fn web_chrome_screenshot_and_click_pick_mag() {
 
 #[test]
 fn web_chrome_hot_reload_preserves_state() {
-    if Command::new("node")
+    if web_test_process::node()
         .arg("--version")
         .output()
         .map(|output| !output.status.success())
         .unwrap_or(true)
     {
         eprintln!("SKIP web_chrome_hot_reload_preserves_state: node not on PATH");
+        return;
+    }
+    if !web_test_process::chrome_available(&repo_root()) {
+        eprintln!("SKIP web_chrome_hot_reload_preserves_state: no chrome on PATH");
         return;
     }
     let dir = tempfile::tempdir().expect("tempdir");
@@ -464,7 +430,7 @@ fn web_chrome_hot_reload_preserves_state() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     drop(listener);
-    let mut server = Command::new(rock_bin())
+    let mut server = web_test_process::command(rock_bin())
         .current_dir(repo_root())
         .args([
             "web",
@@ -487,7 +453,7 @@ fn web_chrome_hot_reload_preserves_state() {
     assert!(out.join("index.html").is_file(), "web watch did not build");
 
     let driver = repo_root().join("tools/web/chrome_hot_reload_smoke.js");
-    let mut smoke = Command::new("node")
+    let mut smoke = web_test_process::node()
         .arg(driver)
         .arg(format!("http://127.0.0.1:{port}/index.html"))
         .arg(&ready)
@@ -548,12 +514,21 @@ fn web_chrome_hot_reload_preserves_state() {
 /// on that exact mutation (2.3s PASS -> 120s timeout).
 #[test]
 fn web_chrome_single_file_boots_from_a_file_url() {
-    if Command::new("node").arg("--version").output().map(|o| !o.status.success()).unwrap_or(true) {
+    if web_test_process::node()
+        .arg("--version")
+        .output()
+        .map(|o| !o.status.success())
+        .unwrap_or(true)
+    {
         eprintln!("SKIP single_file_boots: node not on PATH");
         return;
     }
+    if !web_test_process::chrome_available(&repo_root()) {
+        eprintln!("SKIP single_file_boots: no chrome on PATH");
+        return;
+    }
     let dir = tempfile::tempdir().expect("tempdir");
-    let status = Command::new(rock_bin())
+    let status = web_test_process::command(rock_bin())
         .current_dir(repo_root())
         .args(["web", "games/chesslings", "--single-file", "--out",
                dir.path().join("index.html").to_str().unwrap()])
@@ -564,7 +539,7 @@ fn web_chrome_single_file_boots_from_a_file_url() {
     assert!(page.is_file(), "single-file page not emitted");
 
     let shot = dir.path().join("shot.png");
-    let out = Command::new("node")
+    let out = web_test_process::node()
         .arg(repo_root().join("tools/web/chrome_cdp_smoke.js"))
         .arg(format!("file://{}", page.display()))
         .arg(&shot)
