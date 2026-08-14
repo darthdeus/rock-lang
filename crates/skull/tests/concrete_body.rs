@@ -1197,6 +1197,53 @@ fn concrete_result_order_gate_exercises_the_reversed_merge_population() {
 }
 
 #[test]
+fn concrete_reverse_completion_gate_exercises_parallel_publication() {
+    let ws = check(RICH);
+    let roots = skull::mir_emit::emission_roots(&ws, None);
+    let graph = instance_graph::build(&ws, roots, false);
+    let (scheduled, merge_order, trace) = concrete_body::build_with_reverse_completion(&ws, &graph);
+
+    assert!(merge_order.len() > 1, "fixture exposed only one concrete result");
+    assert!(trace.worker_count > 1, "dedicated test pool used only one worker");
+    let canonical_ready = merge_order
+        .iter()
+        .filter(|instance| scheduled.bodies.contains_key(*instance))
+        .cloned()
+        .collect::<Vec<_>>();
+    assert!(canonical_ready.len() > 1, "fixture exposed only one ready result");
+    assert!(trace.completion_order.len() > 1, "scheduler recorded fewer than two results");
+    let first = canonical_ready
+        .iter()
+        .position(|instance| instance == &trace.completion_order[0])
+        .expect("first completion was not a ready result");
+    let second = canonical_ready
+        .iter()
+        .position(|instance| instance == &trace.completion_order[1])
+        .expect("second completion was not a ready result");
+    assert!(
+        first > second,
+        "scheduler did not force an opposite completion order: {first} then {second}"
+    );
+
+    let census = scheduled.census();
+    assert!(scheduled.generic_bodies > 0, "fixture published no generic body");
+    assert!(scheduled.build_stats.type_nodes_examined > 0, "fixture published no type nodes");
+    assert!(scheduled.signature_derivations > 0, "fixture derived no signatures");
+    assert!(
+        scheduled.signature_requests > scheduled.signature_derivations,
+        "fixture did not exercise signature reuse: {}/{}",
+        scheduled.signature_requests,
+        scheduled.signature_derivations
+    );
+    assert!(scheduled.build_stats.plan_successes > 0, "fixture published no ordinary plans");
+    assert!(census.direct_calls > 0, "fixture published no direct-call rows");
+    assert!(census.fn_values > 0, "fixture published no function-value rows");
+    assert!(census.iterator_ops.values().sum::<usize>() > 0, "fixture published no iterator rows");
+    assert!(census.synthesized_calls > 0, "fixture published no synthesized-call rows");
+    assert!(!scheduled.always_plans.is_empty(), "fixture published no always-emitted plans");
+}
+
+#[test]
 fn concrete_result_order_merge_keeps_plan_and_failure_identity_canonical() {
     let src = r#"
 fn keep<T>(x: T) -> T {
@@ -1258,7 +1305,17 @@ fn main() {
         })
         .collect::<Vec<_>>();
     assert_eq!(canonical.render_free_types(&ws, &canonical_graph), expected_free);
-    assert_eq!(canonical.build_stats, reverse.build_stats);
+    let mut canonical_stats = canonical.build_stats;
+    let mut reverse_stats = reverse.build_stats;
+    canonical_stats.signature_ns = 0;
+    reverse_stats.signature_ns = 0;
+    canonical_stats.type_nodes_ns = 0;
+    reverse_stats.type_nodes_ns = 0;
+    canonical_stats.struct_fields_ns = 0;
+    reverse_stats.struct_fields_ns = 0;
+    canonical_stats.foreign_domains_ns = 0;
+    reverse_stats.foreign_domains_ns = 0;
+    assert_eq!(canonical_stats, reverse_stats);
     assert_eq!(*canonical.plans, *reverse.plans);
     assert_eq!(canonical.always_plans, reverse.always_plans);
     assert_eq!(canonical.free_types.len(), reverse.free_types.len());

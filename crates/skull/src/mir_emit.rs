@@ -1585,6 +1585,8 @@ enum BodyMutation {
     ClearIteratorWitnessInstance { body: FuncRef },
     #[cfg(test)]
     SkipAbiPlanPublish,
+    #[cfg(test)]
+    ConcreteResultOrder(skull_graph::concrete_body::BuildResultOrder),
     #[cfg(all(test, not(feature = "sequential")))]
     SetupLaneSchedule(SetupLaneSchedule),
 }
@@ -2129,6 +2131,7 @@ fn emit_body_chunk_with_mutation(
                 BodyMutation::ClearIteratorWitnessInstance { .. } | BodyMutation::SkipAbiPlanPublish => {
                     unreachable!()
                 }
+                BodyMutation::ConcreteResultOrder(_) => unreachable!(),
                 #[cfg(all(test, not(feature = "sequential")))]
                 BodyMutation::SetupLaneSchedule(_) => unreachable!(),
             }
@@ -4198,7 +4201,18 @@ fn emit_full_in_with_mutation(
 
     let t_setup = Instant::now();
     #[allow(unused_mut)]
-    let mut concrete = crate::concrete_body::build(ws, &mut graph);
+    let mut concrete = {
+        #[cfg(test)]
+        if let BodyMutation::ConcreteResultOrder(order) = mutation {
+            crate::concrete_body::build_with_result_order(ws, &graph, order).0
+        } else {
+            crate::concrete_body::build(ws, &mut graph)
+        }
+        #[cfg(not(test))]
+        {
+            crate::concrete_body::build(ws, &mut graph)
+        }
+    };
     #[cfg(test)]
     if let BodyMutation::ClearBoundPlan { body } = mutation {
         let mut matched = 0;
@@ -5821,6 +5835,36 @@ fn main() { let result = first() }
             emit.abi_plan_stats, stats,
             "the reported stats must be the context's own counters"
         );
+    }
+
+    #[test]
+    fn concrete_result_order_preserves_emitted_lua_bytes() {
+        let ws = workspace();
+        let mid = ws
+            .modules
+            .iter()
+            .find(|module| module.id != ModuleId::builtin())
+            .expect("test module")
+            .id;
+        let (canonical, _) = emit_full_in_with_test_mutation(
+            &ws,
+            mid,
+            BodyMutation::ConcreteResultOrder(
+                skull_graph::concrete_body::BuildResultOrder::Canonical,
+            ),
+        )
+        .expect("canonical emission");
+        let (reverse, _) = emit_full_in_with_test_mutation(
+            &ws,
+            mid,
+            BodyMutation::ConcreteResultOrder(
+                skull_graph::concrete_body::BuildResultOrder::Reverse,
+            ),
+        )
+        .expect("reverse emission");
+        assert!(!canonical.lua.is_empty(), "fixture emitted no Lua artifact");
+        assert_eq!(canonical.lua, reverse.lua);
+        assert_eq!(canonical.skipped, reverse.skipped);
     }
 
     #[test]
