@@ -1118,11 +1118,12 @@ fn concrete_plan(
     let mut callees = BTreeMap::new();
     let mut callee_signatures = BTreeMap::new();
     let signature_started = timing_enabled.then(std::time::Instant::now);
-    for (site, callee) in counted_callees(body, stats) {
+    let callee_rows = counted_callees(body, stats);
+    for (site, callee) in &callee_rows {
         let instance = callee.instance().clone();
         callee_signatures
             .insert(site.clone(), cached_concrete_signature(ws, g, &instance, sig_cache)?);
-        callees.insert(site, instance);
+        callees.insert(site.clone(), instance);
     }
     let signature = cached_concrete_signature(ws, g, inst, sig_cache)?;
     if let Some(started) = signature_started {
@@ -1167,7 +1168,7 @@ fn concrete_plan(
         .get(&Owner::Instance(inst.clone()))
         .into_iter()
         .flat_map(|c| c.struct_default_domains.iter().cloned());
-    let site_domains = counted_callees(body, stats).into_iter().map(|(site, _)| site.domain);
+    let site_domains = callee_rows.into_iter().map(|(site, _)| site.domain);
     let foreign_domains = foreign_domain_tables(
         ws,
         g,

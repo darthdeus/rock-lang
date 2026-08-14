@@ -1282,6 +1282,11 @@ fn concrete_plan_attribution_uses_one_authoritative_type_table() {
         stats.callee_vec_materializations > 0 && stats.callee_vec_rows > 0,
         "the fixture did not expose ConcreteBody::callees allocations: {stats:?}"
     );
+    assert_eq!(
+        stats.callee_vec_materializations,
+        stats.plan_attempts * 2,
+        "the ordinary plan still materialized callee rows more than once: {stats:?}"
+    );
     assert!(
         stats.plan_callee_map_inserts > 0 && stats.plan_callee_signature_inserts > 0,
         "the fixture did not expose plan callee consumers: {stats:?}"
