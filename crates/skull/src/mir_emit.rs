@@ -5378,8 +5378,9 @@ mod wgpu_projection_tests {
     }
 }
 
-#[cfg(all(test, not(feature = "sequential")))]
+#[cfg(test)]
 mod setup_parallel_tests {
+    #[cfg(not(feature = "sequential"))]
     use super::*;
 
     #[cfg(not(feature = "sequential"))]
