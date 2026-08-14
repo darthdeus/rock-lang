@@ -489,6 +489,9 @@ impl Walk<'_> {
     }
 
     fn with_interner_mut<R>(&mut self, f: impl FnOnce(&mut MonoArena) -> R) -> R {
+        if !self.timing_enabled {
+            return self.interner.with_mut(f);
+        }
         let started = Instant::now();
         let result = self.interner.with_mut(f);
         self.out.timing.interner_ns += started.elapsed().as_nanos() as u64;
@@ -1730,6 +1733,17 @@ impl InstanceGraph {
             }
         }
         pending = unique_pending;
+        let mut frontier_sizes = if pending.is_empty() {
+            Vec::new()
+        } else {
+            vec![pending.len()]
+        };
+        let mut frontier_depths: BTreeMap<Owner, usize> = pending
+            .iter()
+            .cloned()
+            .map(|owner| (owner, 0))
+            .collect();
+        let mut same_frontier_marks = BTreeSet::new();
         let initially_forced: BTreeSet<Owner> = pending
             .iter()
             .filter(|owner| self.contributions.contains_key(*owner))
@@ -1741,41 +1755,10 @@ impl InstanceGraph {
         // here and re-checked below rather than assumed away by walk order.
         let mut walked_with: BTreeMap<Instance, InstanceBoundTree> = BTreeMap::new();
         let mut rounds = 0usize;
-        let mut frontier_sizes = Vec::new();
         let mut expansion_times = Vec::new();
         loop {
-            if pending.is_empty() {
-                let stale: Vec<Owner> = walked_with
-                    .iter()
-                    .filter(|(i, used)| {
-                        self.contributions.contains_key(&Owner::Instance((*i).clone()))
-                            && self.bound_tree(i).unwrap_or(&InstanceBoundTree::default()) != *used
-                    })
-                    .map(|(i, _)| Owner::Instance(i.clone()))
-                    .collect();
-                if stale.is_empty() {
-                    break;
-                }
-                rounds += 1;
-                stats.settle_rounds = rounds;
-                assert!(
-                    rounds < 64,
-                    "conformance witnesses did not settle after {rounds} rounds; \
-                     {} owners still disagree with what they were walked with",
-                    stale.len()
-                );
-                pending = stale;
-                queued = pending.iter().cloned().collect();
-                continue;
-            }
-            let frontier = std::mem::take(&mut pending);
-            frontier_sizes.push(frontier.len());
-            let frontier_owners: BTreeSet<Owner> = frontier.iter().cloned().collect();
-            let mut same_frontier_dependencies = BTreeSet::new();
-            let mut expanded_in_frontier = BTreeSet::new();
-            let mut next_pending = Vec::new();
-            let mut frontier = frontier;
-            while let Some(owner) = frontier.pop() {
+            while let Some(owner) = pending.pop() {
+                let current_frontier = frontier_depths.get(&owner).copied().unwrap_or(0);
                 queued.remove(&owner);
                 stats.owner_visits += 1;
                 match owner {
@@ -1802,6 +1785,7 @@ impl InstanceGraph {
                 // the edited file and never reaches this loop.
                 if let Owner::Instance(i) = &owner {
                     if self.substitution(i).is_none() {
+                        same_frontier_marks.remove(&owner);
                         stats.skipped_stranded_owners += 1;
                         continue;
                     }
@@ -1821,7 +1805,11 @@ impl InstanceGraph {
                 let visit_ns = visit_start.elapsed().as_nanos() as u64;
                 expansion_times.push(visit_ns);
                 stats.expanded += 1;
-                expanded_in_frontier.insert(owner.clone());
+                if same_frontier_marks.remove(&owner) {
+                    stats.frontier_same_frontier_dependency_owners += 1;
+                } else {
+                    stats.frontier_ready_owners += 1;
+                }
                 match visit_kind {
                     VisitKind::FirstOwner => {
                         stats.first_owner_visits += 1;
@@ -1886,23 +1874,53 @@ impl InstanceGraph {
                 stats.index_preds_updates += install_timing.index.preds_updates;
                 stats.index_decls_updates += install_timing.index.decls_updates;
                 for owner in demanded {
-                    if frontier_owners.contains(&owner) {
-                        same_frontier_dependencies.insert(owner.clone());
+                    if queued.contains(&owner)
+                        && frontier_depths.get(&owner) == Some(&current_frontier)
+                    {
+                        same_frontier_marks.insert(owner.clone());
                     }
                     if queued.insert(owner.clone()) {
-                        next_pending.push(owner);
+                        let next_frontier = current_frontier.saturating_add(1);
+                        frontier_depths.insert(owner.clone(), next_frontier);
+                        if frontier_sizes.len() <= next_frontier {
+                            frontier_sizes.resize(next_frontier + 1, 0);
+                        }
+                        frontier_sizes[next_frontier] += 1;
+                        pending.push(owner);
                     } else {
                         stats.duplicate_pending_suppressed += 1;
                     }
                 }
             }
-            let same_frontier_dependencies = same_frontier_dependencies
-                .intersection(&expanded_in_frontier)
-                .count();
-            stats.frontier_same_frontier_dependency_owners += same_frontier_dependencies;
-            stats.frontier_ready_owners +=
-                expanded_in_frontier.len().saturating_sub(same_frontier_dependencies);
-            pending = next_pending;
+            // The fixpoint: an owner whose witnesses moved while it was already
+            // walked must be walked again, or its callees are the ones the old
+            // witnesses selected.
+            let stale: Vec<Owner> = walked_with
+                .iter()
+                .filter(|(i, used)| {
+                    self.contributions.contains_key(&Owner::Instance((*i).clone()))
+                        && self.bound_tree(i).unwrap_or(&InstanceBoundTree::default()) != *used
+                })
+                .map(|(i, _)| Owner::Instance(i.clone()))
+                .collect();
+            if stale.is_empty() {
+                break;
+            }
+            rounds += 1;
+            stats.settle_rounds = rounds;
+            assert!(
+                rounds < 64,
+                "conformance witnesses did not settle after {rounds} rounds; \
+                 {} owners still disagree with what they were walked with",
+                stale.len()
+            );
+            let settlement_frontier = frontier_sizes.len();
+            frontier_sizes.push(stale.len());
+            for owner in &stale {
+                frontier_depths.insert(owner.clone(), settlement_frontier);
+            }
+            pending = stale;
+            queued = pending.iter().cloned().collect();
         }
         assert_eq!(
             stats.owner_visits,
@@ -1937,6 +1955,7 @@ impl InstanceGraph {
         stats.expansion_ns_p50 = percentile_u64(&mut expansion_times, 50);
         stats.expansion_ns_p95 = percentile_u64(&mut expansion_times, 95);
         stats.expansion_ns_max = expansion_times.iter().copied().max().unwrap_or(0);
+        stats.mono_elapsed_ns = stats.mono_elapsed_ns.max(stats.expansion_ns_total);
         stats.index_subst_unique = self.index.subst.len();
         stats.index_trees_unique = self.index.trees.len();
         stats.index_erased_unique = self.index.erased.len();
