@@ -1958,7 +1958,7 @@ function stone_draw_fullscreen_quad() {
 
 // --- text: canvas2d glyph atlas (MC, docs/stone-web-plan.md § text) ---
 // The boot preload registered each shipped TTF as a FontFace; the bake here
-// is synchronous canvas2d against that family. All of ASCII 32..126 bakes as
+// is synchronous canvas2d against that family. ASCII 32..126 plus Á bakes as
 // one 16-glyph-wide atlas; density changes explicitly rebake into the same
 // texture handle. Atlas pixels are
 // coverage-RGBA (r=g=b=a=coverage, built from the canvas ALPHA channel --
@@ -2015,7 +2015,11 @@ function __sw_bake_font(path, pixelSize, existingAtlas, faceMask) {
   var shear = Math.tan((__SW_OBLIQUE_DEG * Math.PI) / 180);
   var embolden = pixelSize * __SW_BOLD_PER_PX;
 
-  // Pass 1: metrics for all 95 glyphs of every declared face -> cell size.
+  var slots = [];
+  for (var ascii = 32; ascii <= 126; ascii++) slots.push({ slot: ascii, cp: ascii, ch: String.fromCharCode(ascii) });
+  slots.push({ slot: 127, cp: 0x00C1, ch: "Á" });
+
+  // Pass 1: metrics for every text slot of every declared face -> cell size.
   // The cell holds the WIDEST face: an oblique pushes ink past its own
   // advance, so sizing from regular alone would bleed bold-italic into the
   // next cell. Canvas gives no sheared metrics, so the extra extent is
@@ -2028,8 +2032,10 @@ function __sw_bake_font(path, pixelSize, existingAtlas, faceMask) {
     var isBold = face === 1 || face === 3;
     var isItalic = face === 2 || face === 3;
     var faceInfos = [];
-    for (var cp = 32; cp <= 126; cp++) {
-      var ch = String.fromCharCode(cp);
+    for (var si = 0; si < slots.length; si++) {
+      var spec = slots[si];
+      var cp = spec.cp;
+      var ch = spec.ch;
       var m = mctx.measureText(ch);
       var left = m.actualBoundingBoxLeft || 0;
       var right = m.actualBoundingBoxRight || 0;
@@ -2040,7 +2046,7 @@ function __sw_bake_font(path, pixelSize, existingAtlas, faceMask) {
       var gw = Math.ceil(left + right + grow + lean);
       var gh = Math.ceil(ascent + descent + grow);
       faceInfos.push({
-        cp: cp, ch: ch, face: face, bold: isBold, italic: isItalic,
+        slot: spec.slot, cp: cp, ch: ch, face: face, bold: isBold, italic: isItalic,
         left: left + grow / 2, ascent: ascent + grow / 2,
         w: gw, h: gh, advance: m.width + grow,
       });
@@ -2053,7 +2059,7 @@ function __sw_bake_font(path, pixelSize, existingAtlas, faceMask) {
   cellW += PAD * 2;
   cellH += PAD * 2;
   var COLS = 16; // mirror native text.rs grid
-  var rowsPerFace = Math.ceil(95 / COLS);
+  var rowsPerFace = Math.ceil(slots.length / COLS);
   var aw = COLS * cellW, ah = rowsPerFace * baked.length * cellH;
 
   var canvas = document.createElement("canvas");
@@ -2096,7 +2102,7 @@ function __sw_bake_font(path, pixelSize, existingAtlas, faceMask) {
       ctx.restore();
       // 9-float glyph info: [u0 v0 u1 v1 width height bearing_x bearing_y advance];
       // bearing_y is TOP-based (ink top above baseline = actualBoundingBoxAscent).
-      glyphs[g.face][g.cp] = new Float32Array([
+      glyphs[g.face][g.slot] = new Float32Array([
         cx / aw, cy / ah, (cx + g.w) / aw, (cy + g.h) / ah,
         g.w, g.h, -g.left, g.ascent, g.advance,
       ]);
@@ -2175,6 +2181,11 @@ function stone_get_glyph_info_for(fontId, face, ch, out) {
   for (var i = 0; i < 9; i++) out[i] = g[i];
   return true;
 }
+function __sw_glyph_slot(cp) {
+  if (cp >= 32 && cp <= 126) return cp;
+  if (cp === 0x00C1) return 127;
+  return -1;
+}
 // Shim-side measure, from the shim's OWN advances (native-formula drift is
 // the bug class this avoids): width = max line sum(advance)*scale; height
 // single-line = max glyph height*scale, multi-line adds (lines-1)*em*1.2.
@@ -2188,7 +2199,7 @@ function stone_measure_text_js(fontId, text, scale) {
   var lines = 1, w = 0, lineW = 0, maxH = 0;
   for (var i = 0; i < s.length; i++) {
     if (s[i] === "\n") { lines++; if (lineW > w) w = lineW; lineW = 0; continue; }
-    var g = f.glyphs[0][s.charCodeAt(i)];
+    var g = f.glyphs[0][__sw_glyph_slot(s.charCodeAt(i))];
     if (g) { lineW += g[8]; if (g[5] > maxH) maxH = g[5]; }
   }
   if (lineW > w) w = lineW;
@@ -2203,7 +2214,7 @@ function stone_get_text_baseline_for(fontId, text, scale) {
   var s = String(text);
   var b = 0;
   for (var i = 0; i < s.length; i++) {
-    var g = f.glyphs[0][s.charCodeAt(i)];
+    var g = f.glyphs[0][__sw_glyph_slot(s.charCodeAt(i))];
     if (g && g[7] > b) b = g[7];
   }
   return b * Math.abs(scale);
