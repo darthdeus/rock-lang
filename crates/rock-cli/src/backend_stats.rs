@@ -212,10 +212,12 @@ fn print_attribution(attribution: &skull::mir_emit::EmitAttribution) {
         attribution.lower.mir_block_capacity,
     );
     println!(
-        "    inline results: {} accepted splices, {} copied instructions, {} arena allocations",
+        "    inline results: {} accepted splices, {} copied instructions, {} arena allocations; {} borrowed block scans over {} instructions",
         attribution.inline.accepted_splices,
         attribution.inline.copied_instructions,
         attribution.inline.arena_allocations,
+        attribution.inline.borrowed_block_scans,
+        attribution.inline.instructions_scanned,
     );
     if !attribution.inline.top_owners.is_empty() {
         println!("    top inline owners:");

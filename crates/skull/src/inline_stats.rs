@@ -83,7 +83,7 @@ pub fn report(ws: &Workspace) -> InlineStatsReport {
         ) else {
             continue;
         };
-        let Ok((_deps, splices)) = skull_transform::inline_functions_with_plans(
+        let Ok((_deps, splices, _scan_stats)) = skull_transform::inline_functions_with_plans(
             ws,
             &scx,
             self_ref,

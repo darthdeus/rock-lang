@@ -553,6 +553,8 @@ pub struct InlineAttribution {
     pub accepted_splices: usize,
     pub copied_instructions: usize,
     pub arena_allocations: usize,
+    pub borrowed_block_scans: usize,
+    pub instructions_scanned: usize,
     pub top_owners: Vec<InlineOwnerAttribution>,
 }
 
@@ -639,6 +641,8 @@ struct InlineWork {
     accepted_splices: usize,
     copied_instructions: usize,
     arena_allocations: usize,
+    borrowed_block_scans: usize,
+    instructions_scanned: usize,
     owners: BTreeMap<String, (usize, usize)>,
 }
 
@@ -660,10 +664,17 @@ impl InlineWork {
         self.arena_allocations += after.2.saturating_sub(before.2);
     }
 
+    fn add_scan(&mut self, stats: skull_transform::InlineScanStats) {
+        self.borrowed_block_scans += stats.borrowed_block_scans;
+        self.instructions_scanned += stats.instructions_scanned;
+    }
+
     fn add(&mut self, other: InlineWork) {
         self.accepted_splices += other.accepted_splices;
         self.copied_instructions += other.copied_instructions;
         self.arena_allocations += other.arena_allocations;
+        self.borrowed_block_scans += other.borrowed_block_scans;
+        self.instructions_scanned += other.instructions_scanned;
         for (owner, (splices, copied)) in other.owners {
             let entry = self.owners.entry(owner).or_default();
             entry.0 += splices;
@@ -855,6 +866,8 @@ impl AttributionAccumulator {
         self.result.inline.accepted_splices += unit.inline.accepted_splices;
         self.result.inline.copied_instructions += unit.inline.copied_instructions;
         self.result.inline.arena_allocations += unit.inline.arena_allocations;
+        self.result.inline.borrowed_block_scans += unit.inline.borrowed_block_scans;
+        self.result.inline.instructions_scanned += unit.inline.instructions_scanned;
         for (owner, (splices, copied)) in &unit.inline.owners {
             let entry = self
                 .result
@@ -2019,7 +2032,7 @@ fn emit_body_chunk_with_mutation(
     // per-call frame (`docs/skull-inlining-plan.md`).
     let before_inline = (mf.insts.len(), mf.blocks.len(), mf.cells.len());
     let ti = Instant::now();
-    let (spliced, splices) = skull_transform::inline_functions_with_plans(
+    let (spliced, splices, scan_stats) = skull_transform::inline_functions_with_plans(
         ws,
         scx,
         self_ref,
@@ -2029,6 +2042,7 @@ fn emit_body_chunk_with_mutation(
     )?;
     times.inline = ti.elapsed();
     attribution.inline.add_records(&splices);
+    attribution.inline.add_scan(scan_stats);
     times.inline_work = !splices.is_empty();
     attribution.inline.add_allocations(before_inline, (mf.insts.len(), mf.blocks.len(), mf.cells.len()));
     let mut deps: FxHashSet<FuncRef> = spliced.into_iter().collect();
@@ -2520,12 +2534,13 @@ fn prepare_instance_body_with_attribution(
     let mut work = InlineWork::default();
     let before = (mf.insts.len(), mf.blocks.len(), mf.cells.len());
     let ti = Instant::now();
-    let (spliced, records) = skull_transform::inline_functions_with_plans(
+    let (spliced, records, scan_stats) = skull_transform::inline_functions_with_plans(
         ws, scx, fref, mf, cache, concrete_plans,
     )?;
     times.inline = ti.elapsed();
     times.inline_work = !records.is_empty();
     work.add_records(&records);
+    work.add_scan(scan_stats);
     work.add_allocations(before, (mf.insts.len(), mf.blocks.len(), mf.cells.len()));
     let cleanup_before = mir_live_instructions(mf);
     let tc = Instant::now();
@@ -2600,7 +2615,7 @@ fn inline_hoisted_bodies(
     for nf in nested.iter_mut() {
         let before = (nf.insts.len(), nf.blocks.len(), nf.cells.len());
         let ti = Instant::now();
-        let (spliced, records) = skull_transform::inline_functions_with_plans(
+        let (spliced, records, scan_stats) = skull_transform::inline_functions_with_plans(
             ws,
             scx,
             self_ref,
@@ -2611,6 +2626,7 @@ fn inline_hoisted_bodies(
         .map_err(|e| e.message)?;
         times.hoisted_inline += ti.elapsed();
         work.add_records(&records);
+        work.add_scan(scan_stats);
         times.hoisted_inline_work |= !records.is_empty();
         work.add_allocations(before, (nf.insts.len(), nf.blocks.len(), nf.cells.len()));
         deps.extend(spliced);
@@ -5679,6 +5695,8 @@ fn main() { let result = first() }
         assert!(
             attribution.inline.accepted_splices > 0
                 && attribution.inline.copied_instructions > 0
+                && attribution.inline.borrowed_block_scans > 0
+                && attribution.inline.instructions_scanned > 0
                 && !attribution.inline.top_owners.is_empty(),
             "inline attribution has no accepted splice population: {attribution:?}"
         );

@@ -134,6 +134,12 @@ pub struct SpliceRecord {
     pub callee_insts: usize,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct InlineScanStats {
+    pub borrowed_block_scans: usize,
+    pub instructions_scanned: usize,
+}
+
 /// Lazy callee-eligibility cache, keyed by [`FuncRef`]. `None` = looked up and
 /// not inlinable. Lives across a whole-workspace emit so each callee lowers +
 /// classifies once -- and, in the incremental emit, ACROSS body edits: a callee
@@ -486,6 +492,7 @@ fn find_site(
     top: &HashSet<Idx<Block>>,
     resume: Option<(Idx<Block>, usize)>,
     concrete_plans: &ConcretePlans,
+    scan_stats: &mut InlineScanStats,
 ) -> Result<Option<Site>, CompilerError> {
     let mut started = resume.is_none();
     for (bid, _) in func.blocks.iter() {
@@ -503,8 +510,10 @@ fn find_site(
             }
             _ => 0,
         };
-        let insts = func.blocks[bid].insts.clone();
-        for (idx, iid) in insts.into_iter().enumerate().skip(start) {
+        let insts = &func.blocks[bid].insts;
+        scan_stats.borrowed_block_scans += 1;
+        scan_stats.instructions_scanned += insts.len().saturating_sub(start);
+        for (idx, &iid) in insts.iter().enumerate().skip(start) {
             let site = match &func.insts[iid] {
                 Inst::Call { func: fref, args } if *fref != self_ref => {
                     let Some((inst, abi)) = call_target(func, iid, *fref, ws)? else {
@@ -1263,7 +1272,8 @@ fn splice_general(
 /// budget. `self_ref` is the caller's own [`FuncRef`] (so a self-call is never
 /// inlined). Run BEFORE `cleanup`.
 ///
-/// Returns the set of callee [`FuncRef`]s spliced in — the transitive closure of
+/// Returns the set of callee [`FuncRef`]s spliced in, splice records, and the
+/// instruction-scan census. The dependency set is the transitive closure of
 /// bodies whose source now lives in `func`'s emitted chunk (the driver visits
 /// each, including ones the inlined bodies themselves introduced). These are the
 /// caller chunk's INLINE codegen dependencies: incremental emit must re-emit
@@ -1275,7 +1285,7 @@ pub fn inline_functions_with_plans(
     func: &mut MirFunc,
     cache: &mut InlineCache,
     concrete_plans: &ConcretePlans,
-) -> Result<(HashSet<FuncRef>, Vec<SpliceRecord>), CompilerError> {
+) -> Result<(HashSet<FuncRef>, Vec<SpliceRecord>, InlineScanStats), CompilerError> {
     inline_functions_inner(ws, scx, self_ref, func, cache, concrete_plans)
 }
 
@@ -1286,12 +1296,13 @@ fn inline_functions_inner(
     func: &mut MirFunc,
     cache: &mut InlineCache,
     concrete_plans: &ConcretePlans,
-) -> Result<(HashSet<FuncRef>, Vec<SpliceRecord>), CompilerError> {
+) -> Result<(HashSet<FuncRef>, Vec<SpliceRecord>, InlineScanStats), CompilerError> {
     let mut spliced = HashSet::default();
     let mut records: Vec<SpliceRecord> = Vec::new();
+    let mut scan_stats = InlineScanStats::default();
     // Kill-switch for perf attribution / bisecting a suspected inline bug.
     if inline_disabled() {
-        return Ok((spliced, records));
+        return Ok((spliced, records, scan_stats));
     }
     // The caller's top-level blocks (excludes closure sub-CFGs), maintained
     // incrementally so neither find_site nor the loop recomputes reachability.
@@ -1311,6 +1322,7 @@ fn inline_functions_inner(
             &top,
             resume,
             concrete_plans,
+            &mut scan_stats,
         )? else {
             break;
         };
@@ -1349,7 +1361,7 @@ fn inline_functions_inner(
         let mut seen: HashSet<ustr::Ustr> = HashSet::default();
         func.statics.retain(|sc| seen.insert(sc.cell));
     }
-    Ok((spliced, records))
+    Ok((spliced, records, scan_stats))
 }
 
 /// Whether the fn declares any `Iterator` bound on its generics -- such a fn has
