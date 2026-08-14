@@ -496,6 +496,12 @@ pub struct SetupLaneAttribution {
     pub mono_write_acqs_during_join: u64,
     pub mono_intern_attempts_during_join: u64,
     pub mono_intern_new_during_join: u64,
+    #[cfg(test)]
+    pub setup_handshake_entered: usize,
+    #[cfg(test)]
+    pub setup_handshake_released: usize,
+    #[cfg(test)]
+    pub setup_handshake_released_after_both: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1579,58 +1585,91 @@ enum BodyMutation {
     ClearIteratorWitnessInstance { body: FuncRef },
     #[cfg(test)]
     SkipAbiPlanPublish,
-    #[cfg(test)]
+    #[cfg(all(test, not(feature = "sequential")))]
     SetupLaneSchedule(SetupLaneSchedule),
 }
 
-#[cfg(test)]
-#[derive(Clone, Copy, Debug)]
+#[cfg(all(test, not(feature = "sequential")))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SetupLaneSchedule {
     CpuFirst,
     AbiFirst,
+    Handshake,
+}
+
+#[cfg(all(test, not(feature = "sequential")))]
+#[derive(Clone, Copy, Debug, Default)]
+struct SetupHandshakeState {
+    entered: usize,
+    released: usize,
+    released_after_both: bool,
 }
 
 #[cfg(all(test, not(feature = "sequential")))]
 struct SetupLaneScheduler {
-    first: SetupLaneKind,
+    schedule: SetupLaneSchedule,
     finished: std::sync::Mutex<bool>,
+    handshake: std::sync::Mutex<SetupHandshakeState>,
     wake: std::sync::Condvar,
 }
 
 #[cfg(all(test, not(feature = "sequential")))]
 impl SetupLaneScheduler {
-    fn new(first: SetupLaneKind) -> Self {
+    fn new(schedule: SetupLaneSchedule) -> Self {
         Self {
-            first,
+            schedule,
             finished: std::sync::Mutex::new(false),
+            handshake: std::sync::Mutex::new(SetupHandshakeState::default()),
             wake: std::sync::Condvar::new(),
         }
     }
 
     fn wait(&self, lane: SetupLaneKind) {
-        if lane == self.first {
+        if self.schedule == SetupLaneSchedule::Handshake {
+            if !matches!(lane, SetupLaneKind::CpuArtifact | SetupLaneKind::Shader) {
+                return;
+            }
+            let mut handshake = self.handshake.lock().expect("setup handshake lock");
+            handshake.entered += 1;
+            if handshake.entered == 2 {
+                handshake.released_after_both = true;
+                self.wake.notify_all();
+            }
+            while handshake.entered < 2 {
+                handshake = self.wake.wait(handshake).expect("setup handshake wait");
+            }
+            handshake.released += 1;
             return;
         }
-        let mut finished = self.finished.lock().expect("setup scheduler lock");
-        while !*finished {
-            finished = self.wake.wait(finished).expect("setup scheduler wait");
+        let first = match self.schedule {
+            SetupLaneSchedule::CpuFirst => SetupLaneKind::CpuArtifact,
+            SetupLaneSchedule::AbiFirst => SetupLaneKind::AbiWarm,
+            SetupLaneSchedule::Handshake => unreachable!(),
+        };
+        if lane != first {
+            let mut finished = self.finished.lock().expect("setup scheduler lock");
+            while !*finished {
+                finished = self.wake.wait(finished).expect("setup scheduler wait");
+            }
         }
     }
 
     fn finish(&self, lane: SetupLaneKind) {
-        if lane != self.first {
+        let first = match self.schedule {
+            SetupLaneSchedule::CpuFirst => SetupLaneKind::CpuArtifact,
+            SetupLaneSchedule::AbiFirst => SetupLaneKind::AbiWarm,
+            SetupLaneSchedule::Handshake => return,
+        };
+        if lane != first {
             return;
         }
         *self.finished.lock().expect("setup scheduler lock") = true;
         self.wake.notify_all();
     }
-}
 
-#[cfg(all(test, not(feature = "sequential")))]
-fn setup_lane_first(schedule: SetupLaneSchedule) -> SetupLaneKind {
-    match schedule {
-        SetupLaneSchedule::CpuFirst => SetupLaneKind::CpuArtifact,
-        SetupLaneSchedule::AbiFirst => SetupLaneKind::AbiWarm,
+    fn handshake(&self) -> (usize, usize, bool) {
+        let handshake = *self.handshake.lock().expect("setup handshake lock");
+        (handshake.entered, handshake.released, handshake.released_after_both)
     }
 }
 
@@ -2087,9 +2126,11 @@ fn emit_body_chunk_with_mutation(
                 BodyMutation::None => unreachable!(),
                 BodyMutation::ClearBoundPlan { .. } => unreachable!(),
                 BodyMutation::ClearCoroutineResultPlan { .. } => unreachable!(),
-                BodyMutation::ClearIteratorWitnessInstance { .. }
-                | BodyMutation::SkipAbiPlanPublish
-                | BodyMutation::SetupLaneSchedule(_) => unreachable!(),
+                BodyMutation::ClearIteratorWitnessInstance { .. } | BodyMutation::SkipAbiPlanPublish => {
+                    unreachable!()
+                }
+                #[cfg(all(test, not(feature = "sequential")))]
+                BodyMutation::SetupLaneSchedule(_) => unreachable!(),
             }
         }
         #[cfg(test)]
@@ -4256,7 +4297,7 @@ fn emit_full_in_with_mutation(
     #[cfg(all(test, not(feature = "sequential")))]
     let setup_scheduler = match mutation {
         BodyMutation::SetupLaneSchedule(schedule) => Some(std::sync::Arc::new(
-            SetupLaneScheduler::new(setup_lane_first(schedule)),
+            SetupLaneScheduler::new(schedule),
         )),
         _ => None,
     };
@@ -4269,7 +4310,8 @@ fn emit_full_in_with_mutation(
     let abi_plans = std::sync::Arc::clone(&concrete.plans);
     let abi_always_plans = &concrete.always_plans;
     let mono_before_lanes = graph.interner().stats();
-    let ((cpu_result, shader_result), (abi_scx, abi_lane)) = parallel_join(
+    let run_setup_lanes = || {
+        parallel_join(
         || {
             parallel_join(
                 || {
@@ -4367,8 +4409,36 @@ fn emit_full_in_with_mutation(
                 SetupLaneWindow { started, finished, population },
             )
         },
-    );
+        )
+    };
+    #[cfg(all(test, not(feature = "sequential")))]
+    let ((cpu_result, shader_result), (abi_scx, abi_lane)) =
+        if matches!(mutation, BodyMutation::SetupLaneSchedule(SetupLaneSchedule::Handshake)) {
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(3)
+                .build()
+                .expect("setup handshake test pool")
+                .install(run_setup_lanes)
+        } else {
+            run_setup_lanes()
+        };
+    #[cfg(any(not(test), feature = "sequential"))]
+    let ((cpu_result, shader_result), (abi_scx, abi_lane)) = run_setup_lanes();
     let mono_after_lanes = graph.interner().stats();
+    #[cfg(test)]
+    let setup_handshake = {
+        #[cfg(not(feature = "sequential"))]
+        {
+            setup_scheduler
+                .as_deref()
+                .map(|scheduler| scheduler.handshake())
+                .unwrap_or((0, 0, false))
+        }
+        #[cfg(feature = "sequential")]
+        {
+            (0, 0, false)
+        }
+    };
     let (lua_view, mut scx, cpu_lane) = cpu_result;
     let (shader_result, shader_lane) = shader_result;
     let (shader_view, shader_registrations) = shader_result?;
@@ -4390,6 +4460,12 @@ fn emit_full_in_with_mutation(
         mono_intern_new_during_join: mono_after_lanes
             .intern_new
             .saturating_sub(mono_before_lanes.intern_new),
+        #[cfg(test)]
+        setup_handshake_entered: setup_handshake.0,
+        #[cfg(test)]
+        setup_handshake_released: setup_handshake.1,
+        #[cfg(test)]
+        setup_handshake_released_after_both: setup_handshake.2,
     };
     setup_phases.push(("setup: artifact+shader+ABI lanes", t_setup.elapsed()));
     setup_phases.push(("join: cpu artifact branch", cpu_lane.finished - cpu_lane.started));
@@ -5302,7 +5378,7 @@ mod wgpu_projection_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "sequential")))]
 mod setup_parallel_tests {
     use super::*;
 
@@ -5916,8 +5992,49 @@ fn main() { let result = outer(1) }
         );
     }
 
+    #[cfg(not(feature = "sequential"))]
     #[test]
-    fn setup_lanes_report_population_and_actual_overlap() {
+    fn setup_lanes_use_deterministic_overlap_handshake() {
+        let _inline = InlineOn::on();
+        let ws = setup_workspace();
+        let mid = *ws
+            .module_ids
+            .get(&Ustr::from("<setup-lane-test>"))
+            .expect("setup test module");
+        let (emit, cache) = emit_full_in_with_test_mutation(
+            &ws,
+            mid,
+            BodyMutation::SetupLaneSchedule(SetupLaneSchedule::Handshake),
+        )
+        .expect("setup lane emission");
+        let lanes = emit.setup_lanes;
+        assert!(
+            lanes.cpu_population > 0 && lanes.shader_population > 0 && lanes.abi_population > 0,
+            "each setup lane must have a real population: {lanes:?}"
+        );
+        assert_eq!(
+            lanes.setup_handshake_entered, 2,
+            "CPU and shader lanes must both reach the handshake: {lanes:?}"
+        );
+        assert_eq!(
+            lanes.setup_handshake_released, 2,
+            "both handshake lanes must be released: {lanes:?}"
+        );
+        assert!(
+            lanes.setup_handshake_released_after_both,
+            "handshake must release only after both lanes enter: {lanes:?}"
+        );
+        assert!(
+            lanes.mono_intern_new_during_join > 0,
+            "the overlap fixture must allocate new shared identity: {lanes:?}"
+        );
+        assert!(!cache.lua_view().publisher_lanes.is_empty());
+        assert!(!cache.shader_view().roots.is_empty());
+    }
+
+    #[cfg(feature = "sequential")]
+    #[test]
+    fn setup_lanes_keep_the_sequential_control() {
         let _inline = InlineOn::on();
         let ws = setup_workspace();
         let mid = *ws
@@ -5926,29 +6043,14 @@ fn main() { let result = outer(1) }
             .expect("setup test module");
         let (emit, _) = emit_full_in_with_test_mutation(&ws, mid, BodyMutation::None)
             .expect("setup lane emission");
-        let lanes = &emit.setup_lanes;
+        let lanes = emit.setup_lanes;
         assert!(
-            lanes.cpu_population > 0
-                && lanes.shader_population > 0
-                && lanes.abi_population > 0,
+            lanes.cpu_population > 0 && lanes.shader_population > 0 && lanes.abi_population > 0,
             "each setup lane must have a real population: {lanes:?}"
         );
-        #[cfg(not(feature = "sequential"))]
-        {
-            assert!(
-                lanes.cpu_shader_overlap,
-                "artifact and shader lanes did not overlap: {lanes:?}"
-            );
-            assert!(
-                lanes.abi_cpu_overlap || lanes.abi_shader_overlap,
-                "ABI warm did not overlap either setup lane: {lanes:?}"
-            );
-        }
-        #[cfg(feature = "sequential")]
-        assert!(
-            !lanes.cpu_shader_overlap && !lanes.abi_cpu_overlap && !lanes.abi_shader_overlap,
-            "sequential setup must not report overlap: {lanes:?}"
-        );
+        assert_eq!(lanes.setup_handshake_entered, 0, "sequential setup used the parallel handshake");
+        assert_eq!(lanes.setup_handshake_released, 0, "sequential setup released a handshake");
+        assert!(!lanes.setup_handshake_released_after_both);
     }
 
     #[cfg(not(feature = "sequential"))]
@@ -5995,7 +6097,8 @@ fn main() { let result = outer(1) }
             );
             assert!(
                 emit.setup_lanes.mono_write_acqs_during_join > 0
-                    && emit.setup_lanes.mono_intern_attempts_during_join > 0,
+                    && emit.setup_lanes.mono_intern_attempts_during_join > 0
+                    && emit.setup_lanes.mono_intern_new_during_join > 0,
                 "{name} fixture must expose the shared interner write population: {:?}",
                 emit.setup_lanes
             );
