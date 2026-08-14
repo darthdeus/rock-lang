@@ -72,6 +72,10 @@ struct SkullStats {
     /// Shared-arena traffic split from the LAST timed run (counts are stable
     /// run to run modulo worker scheduling, so one run is representative).
     arena_traffic: skull::mir_emit::ArenaTraffic,
+    /// Body attribution from the LAST timed run. Durations are intentionally
+    /// not summed across runs: the distribution and top-owner rows are one
+    /// concrete corpus run, while phase wall shares above are run means.
+    attribution: skull::mir_emit::EmitAttribution,
 }
 
 pub fn do_backend_stats(input: &str, iters: usize, warmup: usize) -> Result<()> {
@@ -144,9 +148,66 @@ fn run_skull(sources: &SourceFiles, iters: usize, warmup: usize) -> SkullStats {
         merge_phases(&mut stats.emit_phases, &times.emit_phases);
         stats.abi_plan_stats.merge(&times.abi_plan_stats);
         stats.arena_traffic = times.arena_traffic;
+        stats.attribution = times.attribution;
     }
     stats.files = sources.files.len();
     stats
+}
+
+fn print_attribution(attribution: &skull::mir_emit::EmitAttribution) {
+    let ms = |d: Duration| d.as_secs_f64() * 1000.0;
+    let phase = |name: &str, p: &skull::mir_emit::AttributionPhase| {
+        println!(
+            "    {:24} {:>7.3} ms; bodies {}/{}; work {}; instr {}; p50/p95/max {}/{}/{} us",
+            name,
+            ms(p.elapsed),
+            p.bodies_with_work,
+            p.bodies_examined,
+            p.work_volume,
+            p.instructions_visited,
+            p.p50_us,
+            p.p95_us,
+            p.max_us,
+        );
+    };
+
+    println!(
+        "  body attribution (one timed run): {} examined, {} with MIR work",
+        attribution.bodies_examined, attribution.bodies_with_work
+    );
+    phase("lower hir->mir", &attribution.lower);
+    phase("inline plan+splice", &attribution.inline_phase);
+    phase("cleanup mir", &attribution.cleanup);
+    phase("closure conversion", &attribution.closure);
+    phase("counted-loop recovery", &attribution.counted_loop);
+    phase("hoisted-body inline", &attribution.hoisted_inline);
+    phase("post-transform validation", &attribution.validation);
+    phase("regalloc", &attribution.regalloc);
+    phase("stringify", &attribution.stringify);
+    println!(
+        "    inline results: {} accepted splices, {} copied instructions, {} arena allocations",
+        attribution.inline.accepted_splices,
+        attribution.inline.copied_instructions,
+        attribution.inline.arena_allocations,
+    );
+    if !attribution.inline.top_owners.is_empty() {
+        println!("    top inline owners:");
+        for owner in &attribution.inline.top_owners {
+            println!(
+                "      {:28} {} splices, {} copied instructions",
+                owner.owner, owner.splices, owner.copied_instructions
+            );
+        }
+    }
+    if !attribution.top_bodies.is_empty() {
+        println!("    top lower bodies:");
+        for body in &attribution.top_bodies {
+            println!(
+                "      {:28} {:>7} us, {} MIR instructions",
+                body.owner, body.lower_us, body.mir_instructions
+            );
+        }
+    }
 }
 
 fn print_report(input: &str, iters: usize, warmup: usize, bone: &BoneStats, skull: &SkullStats) {
@@ -263,6 +324,7 @@ fn print_report(input: &str, iters: usize, warmup: usize, bone: &BoneStats, skul
             println!("    {:28} {:>9.3} ms  (timer overhead / unbracketed)", "overhead", ms(overhead));
         }
     }
+    print_attribution(&skull.attribution);
     let memo = &skull.abi_plan_stats;
     if memo.requests() > 0 {
         let per_run = |v: u64| v / iters as u64;

@@ -98,6 +98,8 @@ pub struct SkullPhaseTimes {
     /// Shared-arena traffic split at the setup/fanout boundary, from
     /// `MirEmit::arena_traffic`.
     pub arena_traffic: skull::mir_emit::ArenaTraffic,
+    /// Body-oriented lowering and transform attribution from `MirEmit`.
+    pub attribution: skull::mir_emit::EmitAttribution,
 }
 
 /// Whole-project skull timing: parse all user files, type-check them together
@@ -141,6 +143,7 @@ pub fn skull_workspace_timed(sources: &SourceFiles) -> (bool, SkullPhaseTimes) {
             times.emit_phases = e.phases;
             times.abi_plan_stats = e.abi_plan_stats;
             times.arena_traffic = e.arena_traffic;
+            times.attribution = e.attribution;
             true
         }
         Err(_) => false,

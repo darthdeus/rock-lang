@@ -465,10 +465,65 @@ pub struct MirEmit {
     /// paths). Counts, so load-immune: `hits() > 0` on any real corpus is the
     /// memo's non-vacuity witness. Surfaced by `backend-stats`.
     pub abi_plan_stats: skull_mir::lower::AbiPlanMemoStats,
+    /// Body-oriented attribution for the current emission. Counters are reduced
+    /// from per-body results after the parallel fanout, so the hot passes do not
+    /// use shared atomics.
+    pub attribution: EmitAttribution,
     /// Shared-arena traffic split at the setup/fanout boundary (full builds;
     /// zeroed on paths without a fresh setup phase). The `*_final - *_setup`
     /// deltas are the post-setup traffic a frozen read view would serve.
     pub arena_traffic: ArenaTraffic,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct EmitAttribution {
+    pub bodies_examined: usize,
+    pub bodies_with_work: usize,
+    pub lower: AttributionPhase,
+    pub inline_phase: AttributionPhase,
+    pub inline: InlineAttribution,
+    pub cleanup: AttributionPhase,
+    pub closure: AttributionPhase,
+    pub counted_loop: AttributionPhase,
+    pub hoisted_inline: AttributionPhase,
+    pub validation: AttributionPhase,
+    pub regalloc: AttributionPhase,
+    pub stringify: AttributionPhase,
+    pub top_bodies: Vec<BodyAttributionOwner>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct AttributionPhase {
+    pub bodies_examined: usize,
+    pub bodies_with_work: usize,
+    pub elapsed: Duration,
+    pub instructions_visited: usize,
+    pub work_volume: usize,
+    pub p50_us: u64,
+    pub p95_us: u64,
+    pub max_us: u64,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct InlineAttribution {
+    pub accepted_splices: usize,
+    pub copied_instructions: usize,
+    pub arena_allocations: usize,
+    pub top_owners: Vec<InlineOwnerAttribution>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct InlineOwnerAttribution {
+    pub owner: String,
+    pub splices: usize,
+    pub copied_instructions: usize,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct BodyAttributionOwner {
+    pub owner: String,
+    pub lower_us: u64,
+    pub mir_instructions: usize,
 }
 
 /// Counter totals of the build's shared `RepArena` and `MonoInterner`, taken
@@ -490,20 +545,306 @@ pub struct ArenaTraffic {
 #[derive(Default, Clone, Copy)]
 struct PhaseTimes {
     lower: Duration,
+    lower_work: bool,
+    inline: Duration,
+    inline_work: bool,
     cleanup: Duration,
+    cleanup_work: bool,
+    closure: Duration,
+    closure_work: bool,
+    counted_loop: Duration,
+    counted_loop_work: bool,
+    hoisted_inline: Duration,
+    hoisted_inline_work: bool,
+    validation: Duration,
+    validation_work: bool,
     emit: Duration,
+    emit_work: bool,
     /// Regalloc subset of `emit` (read from the per-thread `REGALLOC_TIME`
     /// accumulator, reset just before this unit's emit so it is exact per-unit
     /// even when units run concurrently on a rayon worker pool).
     regalloc: Duration,
+    regalloc_work: bool,
 }
 
 impl PhaseTimes {
     fn add(&mut self, o: &PhaseTimes) {
         self.lower += o.lower;
+        self.lower_work |= o.lower_work;
+        self.inline += o.inline;
+        self.inline_work |= o.inline_work;
         self.cleanup += o.cleanup;
+        self.cleanup_work |= o.cleanup_work;
+        self.closure += o.closure;
+        self.closure_work |= o.closure_work;
+        self.counted_loop += o.counted_loop;
+        self.counted_loop_work |= o.counted_loop_work;
+        self.hoisted_inline += o.hoisted_inline;
+        self.hoisted_inline_work |= o.hoisted_inline_work;
+        self.validation += o.validation;
+        self.validation_work |= o.validation_work;
         self.emit += o.emit;
+        self.emit_work |= o.emit_work;
         self.regalloc += o.regalloc;
+        self.regalloc_work |= o.regalloc_work;
+    }
+}
+
+#[derive(Default, Clone)]
+struct InlineWork {
+    accepted_splices: usize,
+    copied_instructions: usize,
+    arena_allocations: usize,
+    owners: BTreeMap<String, (usize, usize)>,
+}
+
+impl InlineWork {
+    fn add_records(&mut self, records: &[skull_transform::SpliceRecord]) {
+        self.accepted_splices += records.len();
+        for record in records {
+            self.copied_instructions += record.callee_insts;
+            let owner = inline_owner_key(record.callee);
+            let entry = self.owners.entry(owner).or_default();
+            entry.0 += 1;
+            entry.1 += record.callee_insts;
+        }
+    }
+
+    fn add_allocations(&mut self, before: (usize, usize, usize), after: (usize, usize, usize)) {
+        self.arena_allocations += after.0.saturating_sub(before.0);
+        self.arena_allocations += after.1.saturating_sub(before.1);
+        self.arena_allocations += after.2.saturating_sub(before.2);
+    }
+
+    fn add(&mut self, other: InlineWork) {
+        self.accepted_splices += other.accepted_splices;
+        self.copied_instructions += other.copied_instructions;
+        self.arena_allocations += other.arena_allocations;
+        for (owner, (splices, copied)) in other.owners {
+            let entry = self.owners.entry(owner).or_default();
+            entry.0 += splices;
+            entry.1 += copied;
+        }
+    }
+}
+
+#[derive(Default, Clone)]
+struct UnitAttribution {
+    owner: String,
+    examined: bool,
+    times: PhaseTimes,
+    hir_nodes: usize,
+    mir_instructions: usize,
+    inline: InlineWork,
+}
+
+#[derive(Default)]
+struct AttributionAccumulator {
+    result: EmitAttribution,
+    lower_samples: Vec<u64>,
+    inline_samples: Vec<u64>,
+    cleanup_samples: Vec<u64>,
+    closure_samples: Vec<u64>,
+    counted_loop_samples: Vec<u64>,
+    hoisted_inline_samples: Vec<u64>,
+    validation_samples: Vec<u64>,
+    regalloc_samples: Vec<u64>,
+    stringify_samples: Vec<u64>,
+    top_bodies: Vec<BodyAttributionOwner>,
+}
+
+fn inline_owner_key(fref: FuncRef) -> String {
+    format!("m{}:f{}", fref.module.index(), u32::from(fref.func.into_raw()))
+}
+
+fn hir_nodes_for_owner(ws: &Workspace, mid: ModuleId, owner: BodyOwner) -> usize {
+    ws.module(mid)
+        .bodies
+        .get(&owner)
+        .map(|body| {
+            body.expr_arena.len()
+                + body.binding_arena.len()
+                + body.statement_arena.len()
+                + body.pattern_arena.len()
+                + body.match_arm_arena.len()
+        })
+        .unwrap_or(0)
+}
+
+fn mir_live_instructions(mf: &MirFunc) -> usize {
+    mf.blocks.iter().map(|(_, block)| block.insts.len()).sum()
+}
+
+fn duration_us(duration: Duration) -> u64 {
+    duration.as_micros().max(1) as u64
+}
+
+fn record_phase(
+    phase: &mut AttributionPhase,
+    samples: &mut Vec<u64>,
+    duration: Duration,
+    did_work: bool,
+    work_volume: usize,
+    instructions: usize,
+) {
+    phase.bodies_examined += 1;
+    phase.elapsed += duration;
+    phase.work_volume += work_volume;
+    phase.instructions_visited += instructions;
+    if duration > Duration::ZERO {
+        samples.push(duration_us(duration));
+    }
+    if did_work {
+        phase.bodies_with_work += 1;
+    }
+}
+
+fn finish_distribution(phase: &mut AttributionPhase, samples: &mut Vec<u64>) {
+    samples.sort_unstable();
+    if samples.is_empty() {
+        return;
+    }
+    let at = |percentile: usize| samples[(samples.len() - 1) * percentile / 100];
+    phase.p50_us = at(50);
+    phase.p95_us = at(95);
+    phase.max_us = *samples.last().expect("nonempty duration sample");
+}
+
+impl AttributionAccumulator {
+    fn add_unit(&mut self, unit: &UnitAttribution) {
+        if !unit.examined {
+            return;
+        }
+        self.result.bodies_examined += 1;
+        if unit.mir_instructions > 0 {
+            self.result.bodies_with_work += 1;
+        }
+        let times = &unit.times;
+        record_phase(
+            &mut self.result.lower,
+            &mut self.lower_samples,
+            times.lower,
+            times.lower_work,
+            unit.hir_nodes,
+            unit.mir_instructions,
+        );
+        record_phase(
+            &mut self.result.inline_phase,
+            &mut self.inline_samples,
+            times.inline,
+            times.inline_work,
+            unit.inline.accepted_splices,
+            unit.inline.copied_instructions,
+        );
+        record_phase(
+            &mut self.result.cleanup,
+            &mut self.cleanup_samples,
+            times.cleanup,
+            times.cleanup_work,
+            unit.mir_instructions,
+            0,
+        );
+        record_phase(
+            &mut self.result.closure,
+            &mut self.closure_samples,
+            times.closure,
+            times.closure_work,
+            0,
+            0,
+        );
+        record_phase(
+            &mut self.result.counted_loop,
+            &mut self.counted_loop_samples,
+            times.counted_loop,
+            times.counted_loop_work,
+            0,
+            0,
+        );
+        record_phase(
+            &mut self.result.hoisted_inline,
+            &mut self.hoisted_inline_samples,
+            times.hoisted_inline,
+            times.hoisted_inline_work,
+            0,
+            0,
+        );
+        record_phase(
+            &mut self.result.validation,
+            &mut self.validation_samples,
+            times.validation,
+            times.validation_work,
+            0,
+            0,
+        );
+        record_phase(
+            &mut self.result.regalloc,
+            &mut self.regalloc_samples,
+            times.regalloc,
+            times.regalloc_work,
+            0,
+            0,
+        );
+        let stringify = times.emit.saturating_sub(times.regalloc);
+        record_phase(
+            &mut self.result.stringify,
+            &mut self.stringify_samples,
+            stringify,
+            times.emit_work,
+            unit.mir_instructions,
+            0,
+        );
+        self.result.inline.accepted_splices += unit.inline.accepted_splices;
+        self.result.inline.copied_instructions += unit.inline.copied_instructions;
+        self.result.inline.arena_allocations += unit.inline.arena_allocations;
+        for (owner, (splices, copied)) in &unit.inline.owners {
+            let entry = self
+                .result
+                .inline
+                .top_owners
+                .iter_mut()
+                .find(|item| item.owner == *owner);
+            if let Some(entry) = entry {
+                entry.splices += *splices;
+                entry.copied_instructions += *copied;
+            } else {
+                self.result.inline.top_owners.push(InlineOwnerAttribution {
+                    owner: owner.clone(),
+                    splices: *splices,
+                    copied_instructions: *copied,
+                });
+            }
+        }
+        self.top_bodies.push(BodyAttributionOwner {
+            owner: unit.owner.clone(),
+            lower_us: duration_us(times.lower),
+            mir_instructions: unit.mir_instructions,
+        });
+    }
+
+    fn finish(mut self) -> EmitAttribution {
+        finish_distribution(&mut self.result.lower, &mut self.lower_samples);
+        finish_distribution(&mut self.result.inline_phase, &mut self.inline_samples);
+        finish_distribution(&mut self.result.cleanup, &mut self.cleanup_samples);
+        finish_distribution(&mut self.result.closure, &mut self.closure_samples);
+        finish_distribution(&mut self.result.counted_loop, &mut self.counted_loop_samples);
+        finish_distribution(&mut self.result.hoisted_inline, &mut self.hoisted_inline_samples);
+        finish_distribution(&mut self.result.validation, &mut self.validation_samples);
+        finish_distribution(&mut self.result.regalloc, &mut self.regalloc_samples);
+        finish_distribution(&mut self.result.stringify, &mut self.stringify_samples);
+        self.result.inline.top_owners.sort_by(|a, b| {
+            b.copied_instructions
+                .cmp(&a.copied_instructions)
+                .then_with(|| a.owner.cmp(&b.owner))
+        });
+        self.result.inline.top_owners.truncate(8);
+        self.top_bodies.sort_by(|a, b| {
+            b.lower_us
+                .cmp(&a.lower_us)
+                .then_with(|| a.owner.cmp(&b.owner))
+        });
+        self.top_bodies.truncate(8);
+        self.result.top_bodies = self.top_bodies;
+        self.result
     }
 }
 
@@ -535,6 +876,7 @@ struct UnitOut {
     /// Module-global names read/written (fn-as-value edges; see `Chunk`).
     global_names: Vec<Ustr>,
     times: PhaseTimes,
+    attribution: UnitAttribution,
 }
 
 /// Record one emitted definition's Lua, emit time, and (for the non-coroutine
@@ -549,6 +891,7 @@ fn emit_lowered(
     collect_refs: Option<Ustr>,
     t_emit: Duration,
 ) {
+    let tv = Instant::now();
     if let Some(key) = collect_refs {
         let (gs, cs) = direct_refs(ws, mf);
         out.refs = Some((key, gs, cs));
@@ -556,8 +899,13 @@ fn emit_lowered(
     out.calls = skull_mir::reach::call_targets(mf);
     out.global_names = skull_mir::reach::global_ref_names(mf);
     out.lua = lua;
-    out.times.emit = t_emit;
-    out.times.regalloc = skull_codegen_lua::regalloc_time_elapsed().min(t_emit);
+    out.times.validation += tv.elapsed();
+    out.times.validation_work = true;
+    out.times.emit += t_emit;
+    out.times.emit_work |= t_emit > Duration::ZERO;
+    let regalloc = skull_codegen_lua::regalloc_time_elapsed().min(t_emit);
+    out.times.regalloc += regalloc;
+    out.times.regalloc_work |= regalloc > Duration::ZERO;
 }
 
 /// Lower + emit one decorator definition (`deco <name>` -> `__deco_<name>`).
@@ -572,6 +920,7 @@ fn emit_decorator_unit(
     let mut out = UnitOut::default();
     let d = &ws.module(mid).decorators[did];
     let deco_name = crate::decorator_fn_name(d.name.as_str());
+    out.attribution.owner = format!("m{}:deco{}", mid.index(), u32::from(did.into_raw()));
     let tl = Instant::now();
     let owner = skull_mir::concrete::ConcreteOwner::Decorator {
         module: mid,
@@ -592,15 +941,24 @@ fn emit_decorator_unit(
     out.times.lower = tl.elapsed();
     match lowered {
         Ok(mut mf) => {
+            out.attribution.examined = true;
+            out.attribution.hir_nodes = hir_nodes_for_owner(ws, mid, BodyOwner::Decorator(did));
+            out.attribution.mir_instructions = mf.insts.len();
+            out.times.lower_work = out.attribution.mir_instructions > 0;
+            let cleanup_before = mir_live_instructions(&mf);
             let tc = Instant::now();
             skull_transform::cleanup_with_nobox(ws, &mut mf);
+            out.times.cleanup = tc.elapsed();
+            out.times.cleanup_work = mir_live_instructions(&mf) != cleanup_before;
             // Decorator bodies can carry lambdas too -- convert like an ordinary fn.
             let pre_nested = mf.nested_fns.len();
+            let tclosure = Instant::now();
             skull_transform::convert_closures(&mut mf, &deco_name);
+            out.times.closure = tclosure.elapsed();
+            out.times.closure_work = mf.nested_fns.len() > pre_nested;
             for nf in &mf.nested_fns[pre_nested..] {
                 cg.mint_synthetic(nf.name.to_string());
             }
-            out.times.cleanup = tc.elapsed();
             let owner = bone_semantic::hir::BodyOwner::Decorator(did);
             let plan = concrete_plan.expect("a lowered decorator has a concrete plan");
             let ctx = skull_mir::bound::concrete_body_ctx(
@@ -610,17 +968,26 @@ fn emit_decorator_unit(
                 &plan.bound_tree,
                 scx.interner(),
             );
-            if let Err(e) =
-                check_unit_spec_bindings(ws, &ctx, mid, &deco_name, &mf, d.span, &mut out.specs)
-            {
+            let tv = Instant::now();
+            let check = check_unit_spec_bindings(ws, &ctx, mid, &deco_name, &mf, d.span, &mut out.specs);
+            out.times.validation += tv.elapsed();
+            out.times.validation_work = true;
+            if let Err(e) = check {
                 out.hard_error = Some(e);
                 return out;
             }
             skull_codegen_lua::regalloc_time_reset();
             let te = Instant::now();
             let mut lua = emit_named(ws, cg, scx.interner(), &deco_name, &mf);
-            emit_pass_nested_fns(ws, cg, scx, &mut mf.nested_fns, &mut lua);
-            emit_lowered(ws, &mut out, &mf, lua, Some(Ustr::from(&deco_name)), te.elapsed());
+            let root_emit = te.elapsed();
+            out.times.emit += root_emit;
+            out.times.emit_work |= root_emit > Duration::ZERO;
+            let regalloc = skull_codegen_lua::regalloc_time_elapsed().min(root_emit);
+            out.times.regalloc += regalloc;
+            out.times.regalloc_work |= regalloc > Duration::ZERO;
+            emit_pass_nested_fns(ws, cg, scx, &mut mf.nested_fns, &mut lua, &mut out.times);
+            emit_lowered(ws, &mut out, &mf, lua, Some(Ustr::from(&deco_name)), Duration::ZERO);
+            out.attribution.times = out.times;
         }
         Err(e) => out.skipped = Some((deco_name, e.message)),
     }
@@ -662,6 +1029,7 @@ fn emit_global_unit(
     let mut out = UnitOut::default();
     let g = &ws.module(mid).globals[gid];
     let init_name = crate::global_init_fn_name(g.name.as_str());
+    out.attribution.owner = format!("m{}:global{}", mid.index(), u32::from(gid.into_raw()));
     let tl = Instant::now();
     let owner = skull_mir::concrete::ConcreteOwner::Global {
         module: mid,
@@ -690,8 +1058,15 @@ fn emit_global_unit(
     out.times.lower = tl.elapsed();
     match lowered {
         Ok(Some(mut mf)) => {
+            out.attribution.examined = true;
+            out.attribution.hir_nodes = hir_nodes_for_owner(ws, mid, BodyOwner::Global(gid));
+            out.attribution.mir_instructions = mf.insts.len();
+            out.times.lower_work = out.attribution.mir_instructions > 0;
+            let cleanup_before = mir_live_instructions(&mf);
             let tc = Instant::now();
             skull_transform::cleanup_with_nobox(ws, &mut mf);
+            out.times.cleanup = tc.elapsed();
+            out.times.cleanup_work = mir_live_instructions(&mf) != cleanup_before;
             // A global-initializer body can carry lambdas (e.g. a `[TileDef]`
             // literal with fn fields) -- route them through the shared pass, same
             // as an ordinary fn. Their global reads are NOT init-ordering
@@ -699,11 +1074,13 @@ fn emit_global_unit(
             // is computed on the post-pass `mf` where those reads live in the
             // hoisted siblings, not the main body.
             let pre_nested = mf.nested_fns.len();
+            let tclosure = Instant::now();
             skull_transform::convert_closures(&mut mf, &init_name);
+            out.times.closure = tclosure.elapsed();
+            out.times.closure_work = mf.nested_fns.len() > pre_nested;
             for nf in &mf.nested_fns[pre_nested..] {
                 cg.mint_synthetic(nf.name.to_string());
             }
-            out.times.cleanup = tc.elapsed();
             let owner = bone_semantic::hir::BodyOwner::Global(gid);
             let plan = concrete_plan.expect("a lowered global has a concrete plan");
             let ctx = skull_mir::bound::concrete_body_ctx(
@@ -713,9 +1090,11 @@ fn emit_global_unit(
                 &plan.bound_tree,
                 scx.interner(),
             );
-            if let Err(e) =
-                check_unit_spec_bindings(ws, &ctx, mid, g.name.as_str(), &mf, g.name_span, &mut out.specs)
-            {
+            let tv = Instant::now();
+            let check = check_unit_spec_bindings(ws, &ctx, mid, g.name.as_str(), &mf, g.name_span, &mut out.specs);
+            out.times.validation += tv.elapsed();
+            out.times.validation_work = true;
+            if let Err(e) = check {
                 out.hard_error = Some(e);
                 return out;
             }
@@ -723,8 +1102,15 @@ fn emit_global_unit(
             skull_codegen_lua::regalloc_time_reset();
             let te = Instant::now();
             let mut lua = emit_named(ws, cg, scx.interner(), &init_name, &mf);
-            emit_pass_nested_fns(ws, cg, scx, &mut mf.nested_fns, &mut lua);
-            emit_lowered(ws, &mut out, &mf, lua, Some(key), te.elapsed());
+            let root_emit = te.elapsed();
+            out.times.emit += root_emit;
+            out.times.emit_work |= root_emit > Duration::ZERO;
+            let regalloc = skull_codegen_lua::regalloc_time_elapsed().min(root_emit);
+            out.times.regalloc += regalloc;
+            out.times.regalloc_work |= regalloc > Duration::ZERO;
+            emit_pass_nested_fns(ws, cg, scx, &mut mf.nested_fns, &mut lua, &mut out.times);
+            emit_lowered(ws, &mut out, &mf, lua, Some(key), Duration::ZERO);
+            out.attribution.times = out.times;
             // Hot-reload init line. A `const` is a compile-time constant: tweaking
             // the source literal should show the new value next reload, so its init
             // runs UNCONDITIONALLY (no preserve guard), mirroring rock-codegen's
@@ -777,6 +1163,7 @@ fn merge_units(
     pending_inits: &mut Vec<(Ustr, Ustr, String)>,
     calls: &mut Vec<FuncRef>,
     global_names: &mut Vec<Ustr>,
+    attribution: &mut AttributionAccumulator,
     times: &mut PhaseTimes,
 ) {
     for u in results {
@@ -793,6 +1180,7 @@ fn merge_units(
         }
         calls.extend(u.calls);
         global_names.extend(u.global_names);
+        attribution.add_unit(&u.attribution);
         times.add(&u.times);
     }
 }
@@ -1059,6 +1447,7 @@ struct Chunk {
     /// Per-stage emit time captured when this chunk was built, summed back into
     /// the `backend-stats` breakdown by [`assemble`] when the chunk is pulled.
     times: PhaseTimes,
+    attribution: UnitAttribution,
     /// `static` cells this body declares -- aggregated at chunk-pull for the
     /// hot-reload preservation preamble + `__rock_known_globals` registration.
     statics: Vec<skull_mir::mir::StaticCell>,
@@ -1407,15 +1796,20 @@ fn emit_coroutine_chunk(
     mf: &mut MirFunc,
     mut times: PhaseTimes,
 ) -> Result<Chunk, CompilerError> {
+    let cleanup_before = mir_live_instructions(mf);
     let tc = Instant::now();
     skull_transform::cleanup_with_nobox(ws, mf);
     times.cleanup = tc.elapsed();
+    times.cleanup_work = mir_live_instructions(mf) != cleanup_before;
     // Coroutines never inline, so a combinator chain here leaves a residual call
     // -- fine when the lowerer specialized it (a standalone body serves it), a
     // rejection when it did not.
+    let tv = Instant::now();
     skull_transform::validate_no_residual_bound_calls(ws, f, mf)?;
     let mut specs = Vec::new();
     validate_emitted_body(ws, ctx, mf, &mut specs).map_err(|r| r.into_error(f.name_span, ""))?;
+    times.validation += tv.elapsed();
+    times.validation_work = true;
     skull_codegen_lua::regalloc_time_reset();
     let te = Instant::now();
     let inst = concrete_plan
@@ -1435,7 +1829,9 @@ fn emit_coroutine_chunk(
     })?;
     let lua = crate::coroutine_emit::emit_coroutine(ws, cg, scx.interner(), &plan, mf);
     times.emit = te.elapsed();
+    times.emit_work = times.emit > Duration::ZERO;
     times.regalloc = skull_codegen_lua::regalloc_time_elapsed().min(times.emit);
+    times.regalloc_work = times.regalloc > Duration::ZERO;
     // No declaration edge here: "this instance instantiates that declaration" is
     // the GRAPH's fact, and `update_chunk_cache` reads it through
     // `instances_of`. `deps` carries only what codegen alone knows -- which
@@ -1447,6 +1843,7 @@ fn emit_coroutine_chunk(
         direct_globals: Vec::new(),
         direct_calls: Vec::new(),
         times,
+        attribution: UnitAttribution::default(),
         statics: mf.statics.clone(),
         calls: skull_mir::reach::call_targets(mf),
         specs,
@@ -1481,12 +1878,20 @@ fn emit_body_chunk_with_mutation(
     mutation: BodyMutation,
 ) -> Result<Chunk, CompilerError> {
     let mut times = PhaseTimes::default();
+    let mut attribution = UnitAttribution {
+        owner: inline_owner_key(self_ref),
+        ..UnitAttribution::default()
+    };
     let tl = Instant::now();
     let plan = concrete
         .plan_for(&shared(self_ref))
         .ok_or_else(|| CompilerError::new_with_label(f.name_span, format!("no concrete plan for `{}`", f.name)))?;
     let mut mf = skull_mir::lower::lower_function_with_plans(ws, scx, plan, &concrete.plans)?;
     times.lower = tl.elapsed();
+    times.lower_work = mf.insts.len() > 0;
+    attribution.examined = true;
+    attribution.hir_nodes = hir_nodes_for_owner(ws, self_ref.module, BodyOwner::Function(self_ref.func));
+    attribution.mir_instructions = mf.insts.len();
     match mutation {
         BodyMutation::None => {}
         #[cfg(test)]
@@ -1542,11 +1947,17 @@ fn emit_body_chunk_with_mutation(
             &plan.bound_tree,
             scx.interner(),
         );
-        return emit_coroutine_chunk(ws, cg, scx, &ctx, plan, f, &mut mf, times);
+        let mut chunk = emit_coroutine_chunk(ws, cg, scx, &ctx, plan, f, &mut mf, times)?;
+        attribution.mir_instructions = mf.insts.len();
+        attribution.times = chunk.times;
+        chunk.attribution = attribution;
+        return Ok(chunk);
     }
     // Inline eligible direct calls before cleanup so a hot loop traces with no
     // per-call frame (`docs/skull-inlining-plan.md`).
-    let (spliced, _splices) = skull_transform::inline_functions_with_plans(
+    let before_inline = (mf.insts.len(), mf.blocks.len(), mf.cells.len());
+    let ti = Instant::now();
+    let (spliced, splices) = skull_transform::inline_functions_with_plans(
         ws,
         scx,
         self_ref,
@@ -1554,9 +1965,16 @@ fn emit_body_chunk_with_mutation(
         inline_cache,
         &concrete.plans,
     )?;
+    times.inline = ti.elapsed();
+    attribution.inline.add_records(&splices);
+    times.inline_work = !splices.is_empty();
+    attribution.inline.add_allocations(before_inline, (mf.insts.len(), mf.blocks.len(), mf.cells.len()));
     let mut deps: FxHashSet<FuncRef> = spliced.into_iter().collect();
+    let cleanup_before = mir_live_instructions(&mf);
     let tc = Instant::now();
     skull_transform::cleanup_with_nobox(ws, &mut mf); // drop dead values + dead-cell stores
+    times.cleanup = tc.elapsed();
+    times.cleanup_work = mir_live_instructions(&mf) != cleanup_before;
     // Shared closure conversion (S2 cutover, docs/closure-conversion-mir-plan.md):
     // every `Inst::Lambda` in this ORDINARY fn becomes a `MakeEnv` record / bare
     // `Global` + a hoisted sibling in `nested_fns`. Runs AFTER inline+cleanup,
@@ -1565,7 +1983,10 @@ fn emit_body_chunk_with_mutation(
     // `Inst::Lambda`s convert at codegen via `FrameCtx`/`HoistPlan` -- S3).
     let name = mangle_fn(ws, f);
     let pre_nested = mf.nested_fns.len();
+    let tclosure = Instant::now();
     skull_transform::convert_closures(&mut mf, &name);
+    times.closure = tclosure.elapsed();
+    times.closure_work = mf.nested_fns.len() > pre_nested;
     // Route each pass-hoisted `<name>__lambda<k>` through the synthetic-name
     // collision guard now that they enter the Lua global namespace (a user fn
     // named `foo__lambda0` must reject, not silently clobber). The pass appends
@@ -1573,7 +1994,11 @@ fn emit_body_chunk_with_mutation(
     for nf in &mf.nested_fns[pre_nested..] {
         cg.mint_synthetic(nf.name.to_string());
     }
+    let counted_before = mf.blocks.len();
+    let tcounted = Instant::now();
     skull_transform::recover_counted_loops(ws, &mut mf); // desugared iter loops -> FORL shape
+    times.counted_loop = tcounted.elapsed();
+    times.counted_loop_work = mf.blocks.len() > counted_before;
     // Hoisted bodies inline in their own right, and only HERE. The inliner scans a
     // caller's top-level blocks and never a closure sub-CFG, because a cell used in
     // a lambda body is an upvalue and splicing there piles onto LuaJIT's 60-upvalue
@@ -1584,6 +2009,7 @@ fn emit_body_chunk_with_mutation(
     // Correctness, not just an optimization: a call the lowerer gave the
     // specialized scalar ABI has no serviceable shared body, and for a
     // column-stored element the shared `next` reads a `_data` that does not exist.
+    let mut hoisted_work = InlineWork::default();
     inline_hoisted_bodies(
         ws,
         scx,
@@ -1592,9 +2018,13 @@ fn emit_body_chunk_with_mutation(
         inline_cache,
         &concrete.plans,
         &mut deps,
+        &mut times,
+        &mut hoisted_work,
     )
         .map_err(|msg| CompilerError::new_with_label(f.name_span, msg))?;
-    times.cleanup = tc.elapsed();
+    times.hoisted_inline_work = hoisted_work.accepted_splices > 0;
+    attribution.inline.add(hoisted_work);
+    let tv = Instant::now();
     skull_transform::validate_no_residual_bound_calls(ws, f, &mf)?;
     let mut specs = Vec::new();
     let owner = BodyOwner::Function(self_ref.func);
@@ -1608,19 +2038,25 @@ fn emit_body_chunk_with_mutation(
     validate_emitted_body(ws, &ctx, &mf, &mut specs).map_err(|r| r.into_error(f.name_span, ""))?;
     collect_callee_frefs(&mf, &mut deps);
     let (direct_globals, direct_calls) = direct_refs(ws, &mf);
+    times.validation = tv.elapsed();
+    times.validation_work = true;
     skull_codegen_lua::regalloc_time_reset();
     let te = Instant::now();
     let mut lua = emit_function(ws, cg, scx.interner(), self_ref, &mf);
+    times.emit = te.elapsed();
+    times.emit_work = times.emit > Duration::ZERO;
+    times.regalloc = skull_codegen_lua::regalloc_time_elapsed().min(times.emit);
+    times.regalloc_work = times.regalloc > Duration::ZERO;
     // Nested `fn`s are hoisted to sibling top-level Lua fns in the same chunk
     // (their `__local_*` names are already final -- emit_named, no mangling). Their
     // `static` cells fold into THIS chunk's `statics` so the hot-reload preamble +
     // overlay reset see them -- a nested-fn static is otherwise invisible to both.
     let mut statics = mf.statics.clone();
-    emit_nested_fns(ws, cg, scx, &mut mf.nested_fns, &mut deps, &mut statics, &mut lua);
-    times.emit = te.elapsed();
-    times.regalloc = skull_codegen_lua::regalloc_time_elapsed().min(times.emit);
+    emit_nested_fns(ws, cg, scx, &mut mf.nested_fns, &mut deps, &mut statics, &mut lua, &mut times);
+    attribution.mir_instructions = mf.insts.len();
+    attribution.times = times;
     let calls = skull_mir::reach::call_targets(&mf);
-    Ok(Chunk { lua, deps, direct_globals, direct_calls, times, statics, calls, specs })
+    Ok(Chunk { lua, deps, direct_globals, direct_calls, times, attribution, statics, calls, specs })
 }
 
 /// Emit each hoisted nested `fn` (and its own nested fns, depth-first) as a
@@ -1636,15 +2072,32 @@ fn emit_nested_fns(
     deps: &mut FxHashSet<FuncRef>,
     statics: &mut Vec<skull_mir::mir::StaticCell>,
     out: &mut String,
+    times: &mut PhaseTimes,
 ) {
     for nf in nested.iter_mut() {
+        let cleanup_before = mir_live_instructions(nf);
+        let tc = Instant::now();
         skull_transform::cleanup_with_nobox(ws, nf);
+        times.cleanup += tc.elapsed();
+        times.cleanup_work |= mir_live_instructions(nf) != cleanup_before;
+        let counted_before = nf.blocks.len();
+        let tl = Instant::now();
         skull_transform::recover_counted_loops(ws, nf);
+        times.counted_loop += tl.elapsed();
+        times.counted_loop_work |= nf.blocks.len() > counted_before;
         collect_callee_frefs(nf, deps);
         statics.extend(nf.statics.iter().cloned());
+        skull_codegen_lua::regalloc_time_reset();
+        let te = Instant::now();
         out.push_str(&emit_named(ws, cg, scx.interner(), nf.name.as_str(), nf));
+        let emit = te.elapsed();
+        times.emit += emit;
+        times.emit_work |= emit > Duration::ZERO;
+        let regalloc = skull_codegen_lua::regalloc_time_elapsed().min(emit);
+        times.regalloc += regalloc;
+        times.regalloc_work |= regalloc > Duration::ZERO;
         let mut children = std::mem::take(&mut nf.nested_fns);
-        emit_nested_fns(ws, cg, scx, &mut children, deps, statics, out);
+        emit_nested_fns(ws, cg, scx, &mut children, deps, statics, out, times);
     }
 }
 
@@ -1669,10 +2122,23 @@ fn emit_pass_nested_fns(
     scx: &skull_mir::lower::ScalarCtx,
     nested: &mut [MirFunc],
     out: &mut String,
+    times: &mut PhaseTimes,
 ) {
     for nf in nested.iter_mut() {
+        let cleanup_before = mir_live_instructions(nf);
+        let tc = Instant::now();
         skull_transform::cleanup_with_nobox(ws, nf);
+        times.cleanup += tc.elapsed();
+        times.cleanup_work |= mir_live_instructions(nf) != cleanup_before;
+        skull_codegen_lua::regalloc_time_reset();
+        let te = Instant::now();
         out.push_str(&emit_named(ws, cg, scx.interner(), nf.name.as_str(), nf));
+        let emit = te.elapsed();
+        times.emit += emit;
+        times.emit_work |= emit > Duration::ZERO;
+        let regalloc = skull_codegen_lua::regalloc_time_elapsed().min(emit);
+        times.regalloc += regalloc;
+        times.regalloc_work |= regalloc > Duration::ZERO;
     }
 }
 
@@ -1797,12 +2263,24 @@ fn emit_spec_chunk(
             format!("concrete plan has no resolved bound tree for specialized `{name}`"),
         ));
     }
+    let tl = Instant::now();
     let mut mf = skull_mir::lower::lower_instance_with_plans(ws, scx, plan, &concrete.plans)
         .map_err(|e| CompilerError::new_with_label(f.name_span, e.message))?;
+    let mut times = PhaseTimes::default();
+    times.lower = tl.elapsed();
+    times.lower_work = mf.insts.len() > 0;
+    let mut attribution = UnitAttribution {
+        owner: name.to_string(),
+        examined: true,
+        hir_nodes: hir_nodes_for_owner(ws, fref.module, BodyOwner::Function(fref.func)),
+        mir_instructions: mf.insts.len(),
+        ..UnitAttribution::default()
+    };
     // BEFORE every transform: an `Iterator`-bounded body's placeholders are what
     // make it unemittable on its own, and the demand that reached here is what
     // resolves them. The splice path does the same substitution at the moment it
     // clones the body into a caller.
+    let tresolve = Instant::now();
     skull_transform::bound::resolve_standalone_bound_calls(
         ws,
         scx,
@@ -1812,6 +2290,8 @@ fn emit_spec_chunk(
         &concrete.plans,
     )
         .map_err(|e| CompilerError::new_with_label(f.name_span, e.message))?;
+    times.validation += tresolve.elapsed();
+    times.validation_work = true;
     let owner = BodyOwner::Function(fref.func);
     let ctx = skull_mir::bound::concrete_body_ctx(
         ws,
@@ -1821,9 +2301,13 @@ fn emit_spec_chunk(
         scx.interner(),
     );
     if f.is_coroutine {
-        return emit_coroutine_chunk(ws, cg, scx, &ctx, plan, f, &mut mf, PhaseTimes::default());
+        let mut chunk = emit_coroutine_chunk(ws, cg, scx, &ctx, plan, f, &mut mf, times)?;
+        attribution.mir_instructions = mf.insts.len();
+        attribution.times = chunk.times;
+        chunk.attribution = attribution;
+        return Ok(chunk);
     }
-    let mut deps = prepare_instance_body_with_plans(
+    let (mut deps, prepared_times, prepared_inline) = prepare_instance_body_with_attribution(
         ws,
         scx,
         fref,
@@ -1833,25 +2317,41 @@ fn emit_spec_chunk(
         &concrete.plans,
     )
         .map_err(|e| CompilerError::new_with_label(f.name_span, e.message))?;
+    times.add(&prepared_times);
+    attribution.inline.add(prepared_inline);
     let before = specs.len();
     // Discovered BEFORE the verdict, and handed back through `specs` even when
     // the verdict rejects: the inline worklist pushed them into the live queue
     // first, so a failing build reports over that same closure.
+    let tv = Instant::now();
     validate_emitted_body(ws, &ctx, &mf, specs)
         .map_err(|r| r.into_error(f.name_span, &format!("cannot emit specialized `{name}`: ")))?;
+    times.validation += tv.elapsed();
+    times.validation_work = true;
     let specs = specs[before..].to_vec();
+    skull_codegen_lua::regalloc_time_reset();
+    let te = Instant::now();
     let mut lua = emit_named(ws, cg, scx.interner(), name, &mf);
+    let root_emit = te.elapsed();
+    times.emit += root_emit;
+    times.emit_work |= root_emit > Duration::ZERO;
+    let regalloc = skull_codegen_lua::regalloc_time_elapsed().min(root_emit);
+    times.regalloc += regalloc;
+    times.regalloc_work |= regalloc > Duration::ZERO;
     let mut statics = mf.statics.clone();
     let mut nested = std::mem::take(&mut mf.nested_fns);
     collect_nested_statics(&nested, &mut statics);
-    emit_pass_nested_fns(ws, cg, scx, &mut nested, &mut lua);
+    emit_pass_nested_fns(ws, cg, scx, &mut nested, &mut lua, &mut times);
     collect_callee_frefs(&mf, &mut deps);
+    attribution.mir_instructions = mf.insts.len();
+    attribution.times = times;
     Ok(Chunk {
         lua,
         deps,
         direct_globals: Vec::new(),
         direct_calls: Vec::new(),
-        times: PhaseTimes::default(),
+        times,
+        attribution,
         statics,
         calls: skull_mir::reach::call_targets(&mf),
         specs,
@@ -1940,13 +2440,46 @@ pub fn prepare_instance_body_with_plans(
     cache: &mut skull_transform::InlineCache,
     concrete_plans: &skull_mir::concrete::ConcretePlans,
 ) -> Result<FxHashSet<FuncRef>, CompilerError> {
-    let (spliced, _records) = skull_transform::inline_functions_with_plans(
+    prepare_instance_body_with_attribution(ws, scx, fref, name, mf, cache, concrete_plans)
+        .map(|(spliced, _, _)| spliced)
+}
+
+fn prepare_instance_body_with_attribution(
+    ws: &Workspace,
+    scx: &skull_mir::lower::ScalarCtx,
+    fref: FuncRef,
+    name: &str,
+    mf: &mut skull_mir::mir::MirFunc,
+    cache: &mut skull_transform::InlineCache,
+    concrete_plans: &skull_mir::concrete::ConcretePlans,
+) -> Result<(FxHashSet<FuncRef>, PhaseTimes, InlineWork), CompilerError> {
+    let mut times = PhaseTimes::default();
+    let mut work = InlineWork::default();
+    let before = (mf.insts.len(), mf.blocks.len(), mf.cells.len());
+    let ti = Instant::now();
+    let (spliced, records) = skull_transform::inline_functions_with_plans(
         ws, scx, fref, mf, cache, concrete_plans,
     )?;
+    times.inline = ti.elapsed();
+    times.inline_work = !records.is_empty();
+    work.add_records(&records);
+    work.add_allocations(before, (mf.insts.len(), mf.blocks.len(), mf.cells.len()));
+    let cleanup_before = mir_live_instructions(mf);
+    let tc = Instant::now();
     skull_transform::cleanup_with_nobox(ws, mf);
+    times.cleanup = tc.elapsed();
+    times.cleanup_work = mir_live_instructions(mf) != cleanup_before;
+    let tclosure = Instant::now();
+    let nested_before = mf.nested_fns.len();
     skull_transform::convert_closures(mf, name);
+    times.closure = tclosure.elapsed();
+    times.closure_work = mf.nested_fns.len() > nested_before;
+    let counted_before = mf.blocks.len();
+    let tcounted = Instant::now();
     skull_transform::recover_counted_loops(ws, mf);
-    Ok(spliced.into_iter().collect())
+    times.counted_loop = tcounted.elapsed();
+    times.counted_loop_work = mf.blocks.len() > counted_before;
+    Ok((spliced.into_iter().collect(), times, work))
 }
 
 /// Every rejection one assembly found, across all four kinds of emitted
@@ -1998,9 +2531,13 @@ fn inline_hoisted_bodies(
     inline_cache: &mut skull_transform::InlineCache,
     concrete_plans: &skull_mir::concrete::ConcretePlans,
     deps: &mut FxHashSet<FuncRef>,
+    times: &mut PhaseTimes,
+    work: &mut InlineWork,
 ) -> Result<(), String> {
     for nf in nested.iter_mut() {
-        let (spliced, _) = skull_transform::inline_functions_with_plans(
+        let before = (nf.insts.len(), nf.blocks.len(), nf.cells.len());
+        let ti = Instant::now();
+        let (spliced, records) = skull_transform::inline_functions_with_plans(
             ws,
             scx,
             self_ref,
@@ -2009,10 +2546,28 @@ fn inline_hoisted_bodies(
             concrete_plans,
         )
         .map_err(|e| e.message)?;
+        times.hoisted_inline += ti.elapsed();
+        work.add_records(&records);
+        times.hoisted_inline_work |= !records.is_empty();
+        work.add_allocations(before, (nf.insts.len(), nf.blocks.len(), nf.cells.len()));
         deps.extend(spliced);
+        let cleanup_before = mir_live_instructions(nf);
+        let tc = Instant::now();
         skull_transform::cleanup_with_nobox(ws, nf);
+        times.cleanup += tc.elapsed();
+        times.cleanup_work |= mir_live_instructions(nf) != cleanup_before;
         let mut children = std::mem::take(&mut nf.nested_fns);
-        inline_hoisted_bodies(ws, scx, self_ref, &mut children, inline_cache, concrete_plans, deps)?;
+        inline_hoisted_bodies(
+            ws,
+            scx,
+            self_ref,
+            &mut children,
+            inline_cache,
+            concrete_plans,
+            deps,
+            times,
+            work,
+        )?;
         nf.nested_fns = children;
     }
     Ok(())
@@ -2786,6 +3341,7 @@ fn assemble(
     // SEQUENTIAL remainder (prelude/value-structs/type-tables + global-init
     // ordering + deco application).
     let mut times = PhaseTimes::default();
+    let mut attribution = AttributionAccumulator::default();
     let mut t_scaffold = Duration::ZERO;
     let mut needed_specs: Vec<skull_mir::bound::SpecDemand> = Vec::new();
     let mut rejections = Rejections::default();
@@ -2820,7 +3376,7 @@ fn assemble(
     needed_specs.extend(deco_results.iter().flat_map(|u| u.specs.iter().cloned()));
     let mut always_emitted_calls: Vec<FuncRef> = Vec::new();
     let mut always_emitted_names: Vec<Ustr> = Vec::new();
-    merge_units(deco_results, &mut out, &mut skipped, &mut direct_globals, &mut direct_calls, &mut Vec::new(), &mut always_emitted_calls, &mut always_emitted_names, &mut times);
+    merge_units(deco_results, &mut out, &mut skipped, &mut direct_globals, &mut direct_calls, &mut Vec::new(), &mut always_emitted_calls, &mut always_emitted_names, &mut attribution, &mut times);
 
     // Global initializers are emitted below, in their original slot, but they are
     // LOWERED here: their call edges are reachability roots (a global init is
@@ -2851,7 +3407,7 @@ fn assemble(
     // Held back and appended after the fn-def skips so the reported order is
     // unchanged by the hoist.
     let mut global_skipped: Vec<(String, String)> = Vec::new();
-    merge_units(global_results, &mut globals_lua, &mut global_skipped, &mut direct_globals, &mut direct_calls, &mut pending_inits, &mut always_emitted_calls, &mut always_emitted_names, &mut times);
+    merge_units(global_results, &mut globals_lua, &mut global_skipped, &mut direct_globals, &mut direct_calls, &mut pending_inits, &mut always_emitted_calls, &mut always_emitted_names, &mut attribution, &mut times);
 
     // **Whole-program population, driven by `cache.lua_view` -- Phase 2.**
     // `should_emit_via_view` decides every ordinary/coroutine/inline
@@ -3032,6 +3588,7 @@ fn assemble(
                     direct_globals.insert(key, chunk.direct_globals.clone());
                     direct_calls.insert(key, chunk.direct_calls.clone());
                     times.add(&chunk.times);
+                    attribution.add_unit(&chunk.attribution);
                     if emit_def {
                         out.push_str(&chunk.lua);
                         // A dropped definition's `static` cells do not exist, so
@@ -3195,7 +3752,12 @@ fn assemble(
     let t_stringify = times.emit - times.regalloc;
     let phases = vec![
         ("lower hir->mir", times.lower),
+        ("inline plan+splice", times.inline),
         ("cleanup mir", times.cleanup),
+        ("closure conversion", times.closure),
+        ("counted-loop recovery", times.counted_loop),
+        ("hoisted-body inline", times.hoisted_inline),
+        ("post-transform validation", times.validation),
         ("emit: regalloc", times.regalloc),
         ("emit: stringify", t_stringify),
         ("scaffold+callgraph+order", t_scaffold),
@@ -3239,6 +3801,7 @@ fn assemble(
             skipped,
             phases,
             abi_plan_stats: scx.abi_plan_stats(),
+            attribution: attribution.finish(),
             arena_traffic: ArenaTraffic::default(),
         },
         emitted_bodies,
@@ -4357,6 +4920,7 @@ fn assemble_overlay(
         skipped,
         phases: Vec::new(),
         abi_plan_stats: cache.scx.abi_plan_stats(),
+        attribution: EmitAttribution::default(),
         arena_traffic: ArenaTraffic::default(),
     }
 }
@@ -4573,6 +5137,16 @@ fn main() {
 }
 "#;
 
+    const CLOSURE_SRC: &str = r#"
+fn top() -> int {
+    let counter = 100
+    let add = (n: int) => n + counter
+    return add(5)
+}
+
+fn main() { let result = top() }
+"#;
+
     static STDLIB: std::sync::LazyLock<Vec<skull_parser::Ast>> = std::sync::LazyLock::new(|| {
         rock_host::stdlib_loader::stdlib_files()
             .iter()
@@ -4610,6 +5184,30 @@ fn main() {
         }
     }
 
+    #[allow(dead_code)]
+    struct InlineOn(std::sync::MutexGuard<'static, ()>, Option<String>);
+
+    impl InlineOn {
+        fn on() -> Self {
+            let guard = INLINE_OFF.lock().unwrap_or_else(|e| e.into_inner());
+            let previous = std::env::var("SKULL_INLINE_OFF").ok();
+            unsafe { std::env::remove_var("SKULL_INLINE_OFF") };
+            skull_mir::ablation::clear();
+            skull_mir::ablation::set_enabled(false);
+            Self(guard, previous)
+        }
+    }
+
+    impl Drop for InlineOn {
+        fn drop(&mut self) {
+            skull_mir::ablation::clear();
+            match &self.1 {
+                Some(value) => unsafe { std::env::set_var("SKULL_INLINE_OFF", value) },
+                None => unsafe { std::env::remove_var("SKULL_INLINE_OFF") },
+            }
+        }
+    }
+
     fn workspace() -> Workspace {
         let mut modules = vec![
             skull_parser::parse_module_clean(SRC, Ustr::from("<missing-owner-test>"))
@@ -4631,6 +5229,15 @@ fn main() {
         let mut modules = STDLIB.clone();
         modules.push(
             skull_parser::parse_module_clean(COROUTINE_PLAN_SRC, Ustr::from("<coroutine-plan-test>"))
+                .expect("parse"),
+        );
+        bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic")
+    }
+
+    fn closure_workspace() -> Workspace {
+        let mut modules = STDLIB.clone();
+        modules.push(
+            skull_parser::parse_module_clean(CLOSURE_SRC, Ustr::from("<closure-test>"))
                 .expect("parse"),
         );
         bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic")
@@ -4926,5 +5533,62 @@ fn main() { let result = first() }
             ["join: cpu artifact branch", "join: shader view branch"]
         );
         assert!(join.iter().all(|(_, duration)| *duration > Duration::ZERO));
+    }
+
+    #[test]
+    fn body_attribution_reports_nonzero_work_and_distribution() {
+        let _inline = InlineOn::on();
+        let (_, _, emit) = emit_with_mutation(BodyMutation::None).expect("intact emission");
+        let attribution = &emit.attribution;
+        assert!(attribution.bodies_examined > 0, "no emitted bodies were examined: {attribution:?}");
+        assert!(
+            attribution.lower.bodies_with_work > 0
+                && attribution.lower.instructions_visited > 0,
+            "lowering attribution has no production population: {attribution:?}"
+        );
+        assert!(
+            attribution.inline.accepted_splices > 0
+                && attribution.inline.copied_instructions > 0
+                && !attribution.inline.top_owners.is_empty(),
+            "inline attribution has no accepted splice population: {attribution:?}"
+        );
+        assert!(
+            attribution.lower.p50_us > 0
+                && attribution.lower.p50_us <= attribution.lower.p95_us
+                && attribution.lower.p95_us <= attribution.lower.max_us,
+            "lowering duration distribution is empty or unordered: {attribution:?}"
+        );
+    }
+
+    #[test]
+    fn body_attribution_reports_transform_populations() {
+        let _inline = InlineOn::on();
+        let bounded = bounded_workspace();
+        let bounded_mid = *bounded
+            .module_ids
+            .get(&Ustr::from("<bound-plan-test>"))
+            .expect("bounded test module");
+        let (bounded_emit, _) =
+            emit_full_in_with_test_mutation(&bounded, bounded_mid, BodyMutation::None)
+                .expect("bounded emission");
+        assert!(
+            bounded_emit.attribution.counted_loop.bodies_with_work > 0,
+            "counted-loop recovery did not report a rewritten body: {:?}",
+            bounded_emit.attribution
+        );
+
+        let closure = closure_workspace();
+        let closure_mid = *closure
+            .module_ids
+            .get(&Ustr::from("<closure-test>"))
+            .expect("closure test module");
+        let (closure_emit, _) =
+            emit_full_in_with_test_mutation(&closure, closure_mid, BodyMutation::None)
+                .expect("closure emission");
+        assert!(
+            closure_emit.attribution.closure.bodies_with_work > 0,
+            "closure conversion did not report a hoisted body: {:?}",
+            closure_emit.attribution
+        );
     }
 }
