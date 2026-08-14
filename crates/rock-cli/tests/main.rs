@@ -1,6 +1,7 @@
 // Inner-loop integration tests: one linked binary instead of one per file.
 
 mod stone_harness;
+mod web_test_process;
 
 #[path = "ablation_census_survives_failure.rs"]
 mod ablation_census_survives_failure;
@@ -76,6 +77,8 @@ mod imgui_web_stubs;
 mod mono_js_backend_realization;
 #[path = "web_build_gate.rs"]
 mod web_build_gate;
+#[path = "web_driver_tests.rs"]
+mod web_driver_tests;
 #[path = "web_fake_gl_tests.rs"]
 mod web_fake_gl_tests;
 #[path = "web_package_tests.rs"]
