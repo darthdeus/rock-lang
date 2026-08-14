@@ -1174,6 +1174,112 @@ fn main() {
 }
 "#;
 
+#[test]
+fn concrete_result_order_gate_exercises_the_reversed_merge_population() {
+    let ws = check(RICH);
+    let roots = skull::mir_emit::emission_roots(&ws, None);
+    let canonical_graph = instance_graph::build(&ws, roots.clone(), false);
+    let (_, canonical_order) = concrete_body::build_with_result_order(
+        &ws,
+        &canonical_graph,
+        concrete_body::BuildResultOrder::Canonical,
+    );
+    let reverse_graph = instance_graph::build(&ws, roots, false);
+    let (_, reverse_order) = concrete_body::build_with_result_order(
+        &ws,
+        &reverse_graph,
+        concrete_body::BuildResultOrder::Reverse,
+    );
+    assert!(canonical_order.len() > 1, "fixture exposed only one concrete result");
+    let mut expected = canonical_order.clone();
+    expected.reverse();
+    assert_eq!(reverse_order, expected, "the test did not force opposite result order");
+}
+
+#[test]
+fn concrete_result_order_merge_keeps_plan_and_failure_identity_canonical() {
+    let src = r#"
+fn keep<T>(x: T) -> T {
+    return x
+}
+fn first() -> int {
+    let unresolved = null
+    return 1
+}
+fn second() -> int {
+    let unresolved = null
+    return 2
+}
+fn main() {
+    let a = keep(1)
+    let b = keep("s")
+    let c = first()
+    let d = second()
+    print("{a}{b}")
+}
+"#;
+    let ws = check(src);
+    let roots = skull::mir_emit::emission_roots(&ws, None);
+    let canonical_graph = instance_graph::build(&ws, roots.clone(), false);
+    let (canonical, canonical_order) = concrete_body::build_with_result_order(
+        &ws,
+        &canonical_graph,
+        concrete_body::BuildResultOrder::Canonical,
+    );
+    let reverse_graph = instance_graph::build(&ws, roots, false);
+    let (reverse, reverse_order) = concrete_body::build_with_result_order(
+        &ws,
+        &reverse_graph,
+        concrete_body::BuildResultOrder::Reverse,
+    );
+    assert!(canonical_order.len() > 1, "fixture exposed only one result");
+    assert!(
+        canonical.free_types.len() > 1,
+        "fixture exposed no cross-result failure population: {:?}",
+        canonical.render_free_types(&ws, &canonical_graph)
+    );
+    let expected_free = canonical_order
+        .iter()
+        .flat_map(|instance| {
+            canonical
+                .free_types
+                .iter()
+                .filter(move |(owner, _)| owner == instance)
+                .map(|(owner, failure)| {
+                    format!(
+                        "{} {} {} at {}:{}",
+                        canonical_graph.identity(&ws, owner),
+                        failure.slot.kind(),
+                        failure.reason.bucket(),
+                        failure.span.file,
+                        failure.span.line_range.0 + 1
+                    )
+                })
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(canonical.render_free_types(&ws, &canonical_graph), expected_free);
+    assert_eq!(canonical.build_stats, reverse.build_stats);
+    assert_eq!(*canonical.plans, *reverse.plans);
+    assert_eq!(canonical.always_plans, reverse.always_plans);
+    assert_eq!(canonical.free_types.len(), reverse.free_types.len());
+    assert_eq!(canonical.callee_holes.len(), reverse.callee_holes.len());
+    assert_eq!(canonical.plan_failures, reverse.plan_failures);
+    assert_eq!(
+        canonical.render_free_types(&ws, &canonical_graph),
+        reverse.render_free_types(&ws, &reverse_graph)
+    );
+    assert_eq!(reverse.render_free_types(&ws, &reverse_graph), expected_free);
+    assert_eq!(
+        canonical.render_callee_holes(&ws, &canonical_graph),
+        reverse.render_callee_holes(&ws, &reverse_graph)
+    );
+    assert_eq!(
+        canonical_order,
+        reverse_order.into_iter().rev().collect::<Vec<_>>(),
+        "the reverse arm did not expose the opposite incoming order"
+    );
+}
+
 /// Every recorded site is accounted for EXACTLY once, and the accounting is
 /// stated as an identity rather than as four independent non-zero counts: a
 /// site that silently reached no table would leave the totals short while every

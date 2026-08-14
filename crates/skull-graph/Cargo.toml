@@ -3,6 +3,9 @@ name = "skull-graph"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+test-hooks = []
+
 # The TARGET-NEUTRAL instance graph and the per-artifact views over it
 # (`docs/monomorphization-plan.md` S 9, S 11). It sits BELOW every backend so
 # each one realizes the same graph: `skull` (luajit driver),

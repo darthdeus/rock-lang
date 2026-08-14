@@ -308,7 +308,7 @@ pub struct ConcreteBodies {
     pub build_stats: ConcreteBuildStats,
 }
 
-#[derive(Default, Debug, Clone, Copy)]
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ConcreteBuildStats {
     pub plan_attempts: usize,
     pub plan_successes: usize,
@@ -338,6 +338,39 @@ pub struct ConcreteBuildStats {
     pub type_nodes_ns: u64,
     pub struct_fields_ns: u64,
     pub foreign_domains_ns: u64,
+}
+
+impl ConcreteBuildStats {
+    fn add(&mut self, other: Self) {
+        self.plan_attempts += other.plan_attempts;
+        self.plan_successes += other.plan_successes;
+        self.plan_failures += other.plan_failures;
+        self.always_plan_attempts += other.always_plan_attempts;
+        self.always_plan_successes += other.always_plan_successes;
+        self.always_plan_failures += other.always_plan_failures;
+        self.source_expr_slots += other.source_expr_slots;
+        self.source_binding_slots += other.source_binding_slots;
+        self.callee_vec_materializations += other.callee_vec_materializations;
+        self.callee_vec_rows += other.callee_vec_rows;
+        self.plan_callee_map_inserts += other.plan_callee_map_inserts;
+        self.plan_callee_signature_inserts += other.plan_callee_signature_inserts;
+        self.plan_type_expr_clones += other.plan_type_expr_clones;
+        self.plan_type_binding_clones += other.plan_type_binding_clones;
+        self.plan_untyped_expr_clones += other.plan_untyped_expr_clones;
+        self.plan_untyped_binding_clones += other.plan_untyped_binding_clones;
+        self.type_nodes_examined += other.type_nodes_examined;
+        self.type_node_memo_hits += other.type_node_memo_hits;
+        self.type_node_conversion_attempts += other.type_node_conversion_attempts;
+        self.type_node_unresolved += other.type_node_unresolved;
+        self.struct_literals_examined += other.struct_literals_examined;
+        self.struct_field_conversion_attempts += other.struct_field_conversion_attempts;
+        self.foreign_domain_requests += other.foreign_domain_requests;
+        self.foreign_domain_unique += other.foreign_domain_unique;
+        self.signature_ns += other.signature_ns;
+        self.type_nodes_ns += other.type_nodes_ns;
+        self.struct_fields_ns += other.struct_fields_ns;
+        self.foreign_domains_ns += other.foreign_domains_ns;
+    }
 }
 
 impl ConcreteBodies {
@@ -1309,6 +1342,214 @@ fn concrete_always_plan(
     }))
 }
 
+struct BuiltInstance {
+    instance: Instance,
+    concrete: ConcreteBody,
+    plan: Result<ConcreteBodyPlan, MonoTyReason>,
+    facts: ConcreteBodies,
+    convert_time: std::time::Duration,
+    callee_time: std::time::Duration,
+    plan_time: std::time::Duration,
+    elapsed: std::time::Duration,
+    slot_tyids: usize,
+    unique_slot_tyids: usize,
+}
+
+enum InstanceResult {
+    Gap(MissingBody),
+    Built(BuiltInstance),
+}
+
+impl InstanceResult {
+    fn instance(&self) -> &Instance {
+        match self {
+            Self::Gap(gap) => &gap.instance,
+            Self::Built(built) => &built.instance,
+        }
+    }
+}
+
+fn build_instance(
+    ws: &Workspace,
+    g: &InstanceGraph,
+    inst: Instance,
+    sig_cache: &mut SignatureCache,
+    timing_enabled: bool,
+) -> InstanceResult {
+    let t_inst = std::time::Instant::now();
+    if g.has_bound_tree_disagreement(&inst) {
+        return InstanceResult::Gap(MissingBody {
+            instance: inst,
+            gap: BodyGap::InconsistentBounds,
+        });
+    }
+    let Some(subst) = g.substitution(&inst).cloned() else {
+        return InstanceResult::Gap(MissingBody {
+            instance: inst,
+            gap: BodyGap::NoSubstitution,
+        });
+    };
+    let (inf, body) = match function_body(ws, inst.func) {
+        FunctionBody::Ready { inf, body } => (inf, body),
+        FunctionBody::NoInference => {
+            return InstanceResult::Gap(MissingBody {
+                instance: inst,
+                gap: BodyGap::NoInference,
+            });
+        }
+        FunctionBody::NoBody => {
+            return InstanceResult::Gap(MissingBody {
+                instance: inst,
+                gap: BodyGap::NoBody,
+            });
+        }
+        FunctionBody::StaleInference => {
+            return InstanceResult::Gap(MissingBody {
+                instance: inst,
+                gap: BodyGap::StaleInference,
+            });
+        }
+    };
+
+    let mut facts = ConcreteBodies::default();
+    let mut slot_tyids = 0usize;
+    let mut unique_slot_tyids = 0usize;
+    if timing_enabled {
+        let tyids: FxHashSet<TyId> = inf
+            .expr_types
+            .iter()
+            .map(|(_, ty)| *ty)
+            .chain(inf.binding_types.iter().map(|(_, ty)| *ty))
+            .collect();
+        slot_tyids = inf.expr_types.iter().count() + inf.binding_types.iter().count();
+        unique_slot_tyids = tyids.len();
+    }
+
+    let started = std::time::Instant::now();
+    let c = g.interner().with_mut(|a| convert_body(a, ws, inf, body, &subst));
+    let convert_time = started.elapsed();
+    facts.expr_examined = c.expr_examined;
+    facts.binding_examined = c.binding_examined;
+    facts.build_stats.source_expr_slots = c.expr_examined;
+    facts.build_stats.source_binding_slots = c.binding_examined;
+    facts.generics_bound = c.generics_bound;
+    facts.slot_conversions = c.conversions;
+    facts.generic_bodies = usize::from(!subst.is_empty());
+    let untyped = c.untyped_exprs;
+    facts.untyped_bindings = c.untyped_bindings.len();
+    facts.expr_slots = body.expr_arena.len();
+    facts.binding_slots = body.binding_arena.len();
+    let failures = c.failures;
+    facts.free_types = failures
+        .iter()
+        .cloned()
+        .map(|failure| (inst.clone(), failure))
+        .collect();
+    let mut type_memo = c.type_memo;
+    let mut types = ConcreteTypeTables {
+        expr_types: c.expr_types,
+        binding_types: c.binding_types,
+        untyped_exprs: untyped.iter().map(|u| u.expr).collect(),
+        untyped_bindings: c.untyped_bindings.iter().copied().collect(),
+        ..Default::default()
+    };
+    let mut concrete = ConcreteBody {
+        instance: inst.clone(),
+        direct_calls: BTreeMap::new(),
+        fn_values: BTreeMap::new(),
+        iterator_ops: BTreeMap::new(),
+        synthesized_calls: BTreeMap::new(),
+    };
+    for failure in failures {
+        match (failure.slot, failure.reason) {
+            (Slot::Expr(expr), MonoTyReason::UnresolvedInfer(_)) => {
+                types.untyped_exprs.insert(expr);
+            }
+            (Slot::Binding(binding), MonoTyReason::UnresolvedInfer(_)) => {
+                types.untyped_bindings.insert(binding);
+            }
+            _ => {}
+        }
+    }
+
+    let started = std::time::Instant::now();
+    callee_tables(ws, g, &inst, &mut concrete, &mut facts);
+    let callee_time = started.elapsed();
+    let keys: BTreeSet<Idx<Expr>> = counted_callees(&concrete, &mut facts.build_stats)
+        .into_iter()
+        .map(|(s, _)| s.expr)
+        .collect();
+    for u in &untyped {
+        if keys.contains(&u.expr) {
+            *facts.untyped_as_callee_key.entry(u.kind).or_insert(0) += 1;
+        }
+    }
+    facts
+        .untyped
+        .extend(untyped.into_iter().map(|u| (inst.clone(), u)));
+
+    let started = std::time::Instant::now();
+    facts.build_stats.plan_attempts += 1;
+    let plan = concrete_plan(
+        ws,
+        g,
+        &inst,
+        &subst,
+        inf,
+        body,
+        &concrete,
+        types,
+        sig_cache,
+        &mut type_memo,
+        &mut facts.build_stats,
+        timing_enabled,
+    );
+    let plan_time = started.elapsed();
+    if let Err(reason) = &plan {
+        facts.build_stats.plan_failures += 1;
+        facts.plan_failures.push((inst.clone(), reason.clone()));
+    } else {
+        facts.build_stats.plan_successes += 1;
+    }
+    InstanceResult::Built(BuiltInstance {
+        instance: inst,
+        concrete,
+        plan,
+        facts,
+        convert_time,
+        callee_time,
+        plan_time,
+        elapsed: t_inst.elapsed(),
+        slot_tyids,
+        unique_slot_tyids,
+    })
+}
+
+fn merge_instance_facts(out: &mut ConcreteBodies, mut facts: ConcreteBodies) {
+    out.expr_examined += facts.expr_examined;
+    out.binding_examined += facts.binding_examined;
+    out.generics_bound += facts.generics_bound;
+    out.untyped_bindings += facts.untyped_bindings;
+    out.expr_slots += facts.expr_slots;
+    out.binding_slots += facts.binding_slots;
+    out.generic_bodies += facts.generic_bodies;
+    out.sites_examined += facts.sites_examined;
+    out.signature_requests += facts.signature_requests;
+    out.signature_derivations += facts.signature_derivations;
+    out.signature_slots_cloned += facts.signature_slots_cloned;
+    out.slot_conversions += facts.slot_conversions;
+    out.free_types.append(&mut facts.free_types);
+    out.untyped.append(&mut facts.untyped);
+    out.gaps.append(&mut facts.gaps);
+    out.plan_failures.append(&mut facts.plan_failures);
+    out.callee_holes.append(&mut facts.callee_holes);
+    out.unknown_rock_callees.append(&mut facts.unknown_rock_callees);
+    for (kind, count) in facts.untyped_as_callee_key {
+        *out.untyped_as_callee_key.entry(kind).or_insert(0) += count;
+    }
+    out.build_stats.add(facts.build_stats);
+}
+
 /// Build a [`ConcreteBody`] for every instance the walk expanded.
 ///
 /// The tables intern into the graph's arena: a second arena would hand out ids
@@ -1324,6 +1565,37 @@ pub fn build_invocations() -> u64 {
 static BUILD_INVOCATIONS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 pub fn build(ws: &Workspace, g: &InstanceGraph) -> ConcreteBodies {
+    build_impl(ws, g, BuildResultOrder::Canonical).0
+}
+
+#[cfg(feature = "test-hooks")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BuildResultOrder {
+    Canonical,
+    Reverse,
+}
+
+#[cfg(not(feature = "test-hooks"))]
+#[derive(Clone, Copy)]
+enum BuildResultOrder {
+    Canonical,
+}
+
+#[cfg(feature = "test-hooks")]
+pub fn build_with_result_order(
+    ws: &Workspace,
+    g: &InstanceGraph,
+    order: BuildResultOrder,
+) -> (ConcreteBodies, Vec<Instance>) {
+    build_impl(ws, g, order)
+}
+
+fn build_impl(
+    ws: &Workspace,
+    g: &InstanceGraph,
+    order: BuildResultOrder,
+) -> (ConcreteBodies, Vec<Instance>) {
+    let _ = order;
     BUILD_INVOCATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let t_build = std::time::Instant::now();
     let intern_before = g.interner().stats();
@@ -1334,161 +1606,59 @@ pub fn build(ws: &Workspace, g: &InstanceGraph) -> ConcreteBodies {
     let mut unique_decls: FxHashSet<FuncRef> = FxHashSet::default();
     let mut out = ConcreteBodies::default();
     let timing_enabled = log::log_enabled!(log::Level::Debug);
-    let mut build_stats = ConcreteBuildStats::default();
     let mut plans = skull_mir::concrete::ConcretePlans::new();
     let mut sig_cache = SignatureCache::default();
     let expanded: Vec<Instance> = g.expanded().cloned().collect();
+    let mut results = Vec::with_capacity(expanded.len());
     let mut slot_tyids = 0usize;
     let mut unique_slot_tyids = 0usize;
     for inst in expanded {
-        let t_inst = std::time::Instant::now();
         unique_decls.insert(inst.func);
-        if g.has_bound_tree_disagreement(&inst) {
-            out.gaps.push(MissingBody { instance: inst, gap: BodyGap::InconsistentBounds });
-            continue;
-        }
-        let Some(subst) = g.substitution(&inst).cloned() else {
-            out.gaps.push(MissingBody { instance: inst, gap: BodyGap::NoSubstitution });
-            continue;
-        };
-        let (inf, body) = match function_body(ws, inst.func) {
-            FunctionBody::Ready { inf, body } => (inf, body),
-            FunctionBody::NoInference => {
-                out.gaps.push(MissingBody { instance: inst, gap: BodyGap::NoInference });
-                continue;
-            }
-            FunctionBody::NoBody => {
-                out.gaps.push(MissingBody { instance: inst, gap: BodyGap::NoBody });
-                continue;
-            }
-            FunctionBody::StaleInference => {
-                out.gaps.push(MissingBody { instance: inst, gap: BodyGap::StaleInference });
-                continue;
-            }
-        };
-        if log::log_enabled!(log::Level::Debug) {
-            let tyids: FxHashSet<TyId> = inf
-                .expr_types
-                .iter()
-                .map(|(_, ty)| *ty)
-                .chain(inf.binding_types.iter().map(|(_, ty)| *ty))
-                .collect();
-            slot_tyids += inf.expr_types.iter().count() + inf.binding_types.iter().count();
-            unique_slot_tyids += tyids.len();
-        }
-        let t = std::time::Instant::now();
-        let c = g.interner().with_mut(|a| convert_body(a, ws, inf, body, &subst));
-        t_convert += t.elapsed();
-        out.expr_examined += c.expr_examined;
-        out.binding_examined += c.binding_examined;
-        build_stats.source_expr_slots += c.expr_examined;
-        build_stats.source_binding_slots += c.binding_examined;
-        out.generics_bound += c.generics_bound;
-        out.slot_conversions += c.conversions;
-        out.generic_bodies += usize::from(!subst.is_empty());
-        let untyped = c.untyped_exprs;
-        out.untyped_bindings += c.untyped_bindings.len();
-        out.expr_slots += body.expr_arena.len();
-        out.binding_slots += body.binding_arena.len();
-        let failures = c.failures;
-        for f in &failures {
-            out.free_types.push((inst.clone(), f.clone()));
-        }
-        let mut type_memo = c.type_memo;
-        let mut types = ConcreteTypeTables {
-            expr_types: c.expr_types,
-            binding_types: c.binding_types,
-            untyped_exprs: untyped.iter().map(|u| u.expr).collect(),
-            untyped_bindings: c.untyped_bindings.iter().copied().collect(),
-            ..Default::default()
-        };
-        let mut concrete = ConcreteBody {
-            instance: inst.clone(),
-            direct_calls: BTreeMap::new(),
-            fn_values: BTreeMap::new(),
-            iterator_ops: BTreeMap::new(),
-            synthesized_calls: BTreeMap::new(),
-        };
-        for failure in failures {
-            match (failure.slot, failure.reason) {
-                (Slot::Expr(expr), MonoTyReason::UnresolvedInfer(_)) => {
-                    types.untyped_exprs.insert(expr);
+        results.push(build_instance(ws, g, inst, &mut sig_cache, timing_enabled));
+    }
+    if matches!(order, BuildResultOrder::Reverse) {
+        results.reverse();
+    }
+    let merge_order = results.iter().map(|result| result.instance().clone()).collect();
+    results.sort_by(|left, right| left.instance().cmp(right.instance()));
+    for result in results {
+        match result {
+            InstanceResult::Gap(gap) => out.gaps.push(gap),
+            InstanceResult::Built(built) => {
+                let instance = built.instance.clone();
+                t_convert += built.convert_time;
+                t_callee += built.callee_time;
+                t_plan += built.plan_time;
+                per_inst.push((instance.clone(), built.elapsed));
+                slot_tyids += built.slot_tyids;
+                unique_slot_tyids += built.unique_slot_tyids;
+                merge_instance_facts(&mut out, built.facts);
+                if let Ok(plan) = built.plan {
+                    plans.insert(instance.clone(), plan);
                 }
-                (Slot::Binding(binding), MonoTyReason::UnresolvedInfer(_)) => {
-                    types.untyped_bindings.insert(binding);
-                }
-                _ => {}
+                out.bodies.insert(instance, built.concrete);
             }
         }
-        let t = std::time::Instant::now();
-        callee_tables(ws, g, &inst, &mut concrete, &mut out);
-        t_callee += t.elapsed();
-
-        // The question the type-table slice deferred: does a callee entry need
-        // an expression type for a slot inference recorded none for? Answered by
-        // intersecting the two populations rather than by reasoning about the
-        // kinds -- a kind absent here needs no type because no table asks about
-        // it, and a kind present here is answered by the site's own oracle.
-        let keys: BTreeSet<Idx<Expr>> = counted_callees(&concrete, &mut build_stats)
-            .into_iter()
-            .map(|(s, _)| s.expr)
-            .collect();
-        for u in &untyped {
-            if keys.contains(&u.expr) {
-                *out.untyped_as_callee_key.entry(u.kind).or_insert(0) += 1;
-            }
-        }
-        for u in untyped {
-            out.untyped.push((inst.clone(), u));
-        }
-        let t = std::time::Instant::now();
-        build_stats.plan_attempts += 1;
-        match concrete_plan(
-            ws,
-            g,
-            &inst,
-            &subst,
-            inf,
-            body,
-            &concrete,
-            types,
-            &mut sig_cache,
-            &mut type_memo,
-            &mut build_stats,
-            timing_enabled,
-        ) {
-            Ok(plan) => {
-                build_stats.plan_successes += 1;
-                plans.insert(inst.clone(), plan);
-            }
-            Err(reason) => {
-                build_stats.plan_failures += 1;
-                out.plan_failures.push((inst.clone(), reason));
-            }
-        }
-        t_plan += t.elapsed();
-        per_inst.push((inst.clone(), t_inst.elapsed()));
-        out.bodies.insert(inst, concrete);
     }
     for owner in g.contributions.keys() {
         let Owner::AlwaysEmitted(module, body_owner) = owner else { continue };
-        build_stats.always_plan_attempts += 1;
+        out.build_stats.always_plan_attempts += 1;
         match concrete_always_plan(
             ws,
             g,
             *module,
             *body_owner,
             &mut sig_cache,
-            &mut build_stats,
+            &mut out.build_stats,
             timing_enabled,
         ) {
             Ok(Some(plan)) => {
-                build_stats.always_plan_successes += 1;
+                out.build_stats.always_plan_successes += 1;
                 out.always_plans.insert(plan.owner.clone(), plan);
             }
             Ok(None) => {}
             Err(reason) => {
-                build_stats.always_plan_failures += 1;
+                out.build_stats.always_plan_failures += 1;
                 let owner = match body_owner {
                     BodyOwner::Global(index) => ConcreteOwner::Global {
                         module: *module,
@@ -1505,11 +1675,11 @@ pub fn build(ws: &Workspace, g: &InstanceGraph) -> ConcreteBodies {
         }
     }
     out.plans = std::sync::Arc::new(plans);
-    out.build_stats = build_stats;
     out.signature_requests = sig_cache.requests;
     out.signature_derivations = sig_cache.derivations;
     out.signature_slots_cloned = sig_cache.slots_cloned;
     if log::log_enabled!(log::Level::Debug) {
+        let build_stats = out.build_stats;
         let intern_after = g.interner().stats();
         per_inst.sort_by_key(|(_, d)| *d);
         let pct = |p: usize| {
@@ -1572,5 +1742,5 @@ pub fn build(ws: &Workspace, g: &InstanceGraph) -> ConcreteBodies {
             std::time::Duration::from_nanos(build_stats.signature_ns),
         );
     }
-    out
+    (out, merge_order)
 }
