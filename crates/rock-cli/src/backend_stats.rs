@@ -76,6 +76,9 @@ struct SkullStats {
     /// not summed across runs: the distribution and top-owner rows are one
     /// concrete corpus run, while phase wall shares above are run means.
     attribution: skull::mir_emit::EmitAttribution,
+    /// Setup-lane census from the LAST timed run; overlap is an interval fact,
+    /// not a ratio inferred from noisy wall-clock totals.
+    setup_lanes: skull::mir_emit::SetupLaneAttribution,
 }
 
 pub fn do_backend_stats(input: &str, iters: usize, warmup: usize) -> Result<()> {
@@ -149,6 +152,7 @@ fn run_skull(sources: &SourceFiles, iters: usize, warmup: usize) -> SkullStats {
         stats.abi_plan_stats.merge(&times.abi_plan_stats);
         stats.arena_traffic = times.arena_traffic;
         stats.attribution = times.attribution;
+        stats.setup_lanes = times.setup_lanes;
     }
     stats.files = sources.files.len();
     stats
@@ -325,6 +329,18 @@ fn print_report(input: &str, iters: usize, warmup: usize, bone: &BoneStats, skul
         }
     }
     print_attribution(&skull.attribution);
+    let lanes = &skull.setup_lanes;
+    if lanes.cpu_population > 0 || lanes.shader_population > 0 || lanes.abi_population > 0 {
+        println!(
+            "  setup lanes (one timed run): cpu {}, shader {}, ABI {}; overlap cpu/shader={}, ABI/cpu={}, ABI/shader={}",
+            lanes.cpu_population,
+            lanes.shader_population,
+            lanes.abi_population,
+            lanes.cpu_shader_overlap,
+            lanes.abi_cpu_overlap,
+            lanes.abi_shader_overlap,
+        );
+    }
     let memo = &skull.abi_plan_stats;
     if memo.requests() > 0 {
         let per_run = |v: u64| v / iters as u64;

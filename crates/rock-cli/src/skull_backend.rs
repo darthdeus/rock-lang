@@ -100,6 +100,8 @@ pub struct SkullPhaseTimes {
     pub arena_traffic: skull::mir_emit::ArenaTraffic,
     /// Body-oriented lowering and transform attribution from `MirEmit`.
     pub attribution: skull::mir_emit::EmitAttribution,
+    /// Setup-lane populations and observed execution overlap from `MirEmit`.
+    pub setup_lanes: skull::mir_emit::SetupLaneAttribution,
 }
 
 /// Whole-project skull timing: parse all user files, type-check them together
@@ -144,6 +146,7 @@ pub fn skull_workspace_timed(sources: &SourceFiles) -> (bool, SkullPhaseTimes) {
             times.abi_plan_stats = e.abi_plan_stats;
             times.arena_traffic = e.arena_traffic;
             times.attribution = e.attribution;
+            times.setup_lanes = e.setup_lanes;
             true
         }
         Err(_) => false,

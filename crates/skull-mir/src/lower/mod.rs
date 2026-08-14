@@ -390,6 +390,20 @@ impl ScalarCtx {
         self.abi_plans.publish(warm_keys, warm_failures);
     }
 
+    /// Move a completed ABI warm into the context that will lower and emit.
+    /// The representation arena travels with the plans because their `RepId`s
+    /// are scoped to that arena; both contexts must share the graph interner.
+    pub fn adopt_warmed_abi(&mut self, warmed: Self) {
+        assert!(
+            self.values_first_class == warmed.values_first_class
+                && self.target == warmed.target
+                && std::sync::Arc::ptr_eq(&self.interner, &warmed.interner),
+            "ABI warm context does not match the emission context"
+        );
+        self.rep_arena = warmed.rep_arena;
+        self.abi_plans = warmed.abi_plans;
+    }
+
     /// Traffic counters of this context's representation arena.
     pub fn rep_arena_stats(&self) -> abi::RepArenaStats {
         self.rep_arena.stats()

@@ -473,6 +473,31 @@ pub struct MirEmit {
     /// zeroed on paths without a fresh setup phase). The `*_final - *_setup`
     /// deltas are the post-setup traffic a frozen read view would serve.
     pub arena_traffic: ArenaTraffic,
+    /// The three independent setup lanes and their production populations.
+    /// The overlap bits come from the lanes' actual execution intervals, not
+    /// from a wall-clock estimate.
+    pub setup_lanes: SetupLaneAttribution,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SetupLaneAttribution {
+    pub cpu_population: usize,
+    pub shader_population: usize,
+    pub abi_population: usize,
+    pub cpu_shader_overlap: bool,
+    pub abi_cpu_overlap: bool,
+    pub abi_shader_overlap: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct SetupLaneWindow {
+    started: Instant,
+    finished: Instant,
+    population: usize,
+}
+
+fn setup_lanes_overlap(left: SetupLaneWindow, right: SetupLaneWindow) -> bool {
+    left.started < right.finished && right.started < left.finished
 }
 
 #[derive(Clone, Debug, Default)]
@@ -3803,6 +3828,7 @@ fn assemble(
             abi_plan_stats: scx.abi_plan_stats(),
             attribution: attribution.finish(),
             arena_traffic: ArenaTraffic::default(),
+            setup_lanes: SetupLaneAttribution::default(),
         },
         emitted_bodies,
     ))
@@ -4084,72 +4110,108 @@ fn emit_full_in_with_mutation(
     }
     setup_phases.push(("setup: concrete plans", t_setup.elapsed()));
 
-    let t_setup = Instant::now();
-    // Pruned dependency bodies have no concrete plan and must not enter the fanout.
-    // The two branches share no mutable view state, so they can be realized
-    // independently -- but they are not read-only: CPU artifact realization can
-    // intern new types through the graph's shared `MonoInterner` (same
-    // lock-safe monotonic arena the body fanout later races).
-    let shader_plans = std::sync::Arc::clone(&concrete.plans);
-    let ((lua_view, mut scx, cpu_elapsed), (shader_result, shader_elapsed)) = parallel_join(
-        || {
-            let t_branch = Instant::now();
-            let lua_view = crate::artifact::realize(
-                ws,
-                &graph,
-                &crate::artifact::ArtifactRequest::new(
-                    crate::target_projection::LUAJIT_DESKTOP,
-                    &emission_roots,
-                ),
-            );
-            let scx =
-                skull_mir::lower::ScalarCtx::new(ws).sharing(std::sync::Arc::clone(graph.interner()));
-            (lua_view, scx, t_branch.elapsed())
-        },
-        || {
-            let t_branch = Instant::now();
-            // The overload set lives in `cg` (computed once there); borrow it
-            // rather than rescanning the workspace.
-            let shader_scx = skull_mir::lower::ScalarCtx::new_values_first_class(ws)
-                .sharing(std::sync::Arc::clone(graph.interner()));
-            let result = (|| {
-                let shader_view = realize_shader_view(
-                    ws,
-                    &graph,
-                    &shader_programs,
-                    &compute_programs,
-                    &shader_scx,
-                    shader_plans,
-                )?;
-                let shader_registrations = shader_registration_lines(
-                    ws,
-                    &shader_scx,
-                    &shader_collection,
-                    &compute_collection,
-                    &shader_view,
-                    renderer_target,
-                )?;
-                Ok::<_, CompilerError>((shader_view, shader_registrations))
-            })();
-            (result, t_branch.elapsed())
-        },
-    );
-    let (shader_view, shader_registrations) = shader_result?;
-    setup_phases.push(("setup: artifact+shader views", t_setup.elapsed()));
-    // Child branch times of the joined group above: they OVERLAP, so they are
-    // reported under a distinct prefix and never added into the setup total.
-    setup_phases.push(("join: cpu artifact branch", cpu_elapsed));
-    setup_phases.push(("join: shader view branch", shader_elapsed));
-
-    let t_setup = Instant::now();
     #[cfg(test)]
     let skip_abi_plan_publish = matches!(mutation, BodyMutation::SkipAbiPlanPublish);
     #[cfg(not(test))]
     let skip_abi_plan_publish = false;
-    if !skip_abi_plan_publish {
-        scx.warm_abi_plans(ws, &concrete.plans, &concrete.always_plans);
-    }
-    setup_phases.push(("setup: ABI plan warm", t_setup.elapsed()));
+
+    let t_setup = Instant::now();
+    // These lanes only read the graph after construction. ABI plans carry their
+    // own representation arena, so the warmed context is adopted after join.
+    let shader_plans = std::sync::Arc::clone(&concrete.plans);
+    let abi_plans = std::sync::Arc::clone(&concrete.plans);
+    let abi_always_plans = &concrete.always_plans;
+    let ((cpu_result, shader_result), (abi_scx, abi_lane)) = parallel_join(
+        || {
+            parallel_join(
+                || {
+                    let started = Instant::now();
+                    let lua_view = crate::artifact::realize(
+                        ws,
+                        &graph,
+                        &crate::artifact::ArtifactRequest::new(
+                            crate::target_projection::LUAJIT_DESKTOP,
+                            &emission_roots,
+                        ),
+                    );
+                    let population = lua_view.instances.len() + lua_view.boundaries.len();
+                    let scx = skull_mir::lower::ScalarCtx::new(ws)
+                        .sharing(std::sync::Arc::clone(graph.interner()));
+                    let finished = Instant::now();
+                    (
+                        lua_view,
+                        scx,
+                        SetupLaneWindow { started, finished, population },
+                    )
+                },
+                || {
+                    let started = Instant::now();
+                    // The overload set lives in `cg` (computed once there);
+                    // borrow it rather than rescanning the workspace.
+                    let shader_scx = skull_mir::lower::ScalarCtx::new_values_first_class(ws)
+                        .sharing(std::sync::Arc::clone(graph.interner()));
+                    let result = (|| {
+                        let shader_view = realize_shader_view(
+                            ws,
+                            &graph,
+                            &shader_programs,
+                            &compute_programs,
+                            &shader_scx,
+                            shader_plans,
+                        )?;
+                        let population = shader_view.roots.len()
+                            + shader_view.helpers.len()
+                            + shader_view.builtins.len();
+                        let shader_registrations = shader_registration_lines(
+                            ws,
+                            &shader_scx,
+                            &shader_collection,
+                            &compute_collection,
+                            &shader_view,
+                            renderer_target,
+                        )?;
+                        Ok::<_, CompilerError>((shader_view, shader_registrations, population))
+                    })();
+                    let population = result.as_ref().map(|(_, _, population)| *population).unwrap_or(0);
+                    let finished = Instant::now();
+                    (
+                        result.map(|(view, registrations, _)| (view, registrations)),
+                        SetupLaneWindow { started, finished, population },
+                    )
+                },
+            )
+        },
+        || {
+            let started = Instant::now();
+            let mut abi_scx = skull_mir::lower::ScalarCtx::new(ws)
+                .sharing(std::sync::Arc::clone(graph.interner()));
+            if !skip_abi_plan_publish {
+                abi_scx.warm_abi_plans(ws, &abi_plans, abi_always_plans);
+            }
+            let population = abi_scx.abi_plan_stats().warm_keys as usize;
+            let finished = Instant::now();
+            (
+                abi_scx,
+                SetupLaneWindow { started, finished, population },
+            )
+        },
+    );
+    let (lua_view, mut scx, cpu_lane) = cpu_result;
+    let (shader_result, shader_lane) = shader_result;
+    let (shader_view, shader_registrations) = shader_result?;
+    scx.adopt_warmed_abi(abi_scx);
+    let setup_lanes = SetupLaneAttribution {
+        cpu_population: cpu_lane.population,
+        shader_population: shader_lane.population,
+        abi_population: abi_lane.population,
+        cpu_shader_overlap: setup_lanes_overlap(cpu_lane, shader_lane),
+        abi_cpu_overlap: setup_lanes_overlap(abi_lane, cpu_lane),
+        abi_shader_overlap: setup_lanes_overlap(abi_lane, shader_lane),
+    };
+    setup_phases.push(("setup: artifact+shader+ABI lanes", t_setup.elapsed()));
+    setup_phases.push(("join: cpu artifact branch", cpu_lane.finished - cpu_lane.started));
+    setup_phases.push(("join: shader view branch", shader_lane.finished - shader_lane.started));
+    setup_phases.push(("join: ABI plan warm branch", abi_lane.finished - abi_lane.started));
 
     // The emitted param list must be injective. Checked per SIGNATURE, over every
     // function rather than just the emitted set: a duplicate Lua param is illegal
@@ -4230,6 +4292,7 @@ fn emit_full_in_with_mutation(
     };
     let mut built_specs: Vec<(Instance, Chunk)> = Vec::new();
     let (mut emit, emitted) = assemble(ws, &cache.cg, &cache.scx, &cache, &mut built_specs)?;
+    emit.setup_lanes = setup_lanes;
     let mut phases = setup_phases;
     phases.extend(emit.phases);
     emit.phases = phases;
@@ -4922,6 +4985,7 @@ fn assemble_overlay(
         abi_plan_stats: cache.scx.abi_plan_stats(),
         attribution: EmitAttribution::default(),
         arena_traffic: ArenaTraffic::default(),
+        setup_lanes: SetupLaneAttribution::default(),
     }
 }
 
@@ -5147,6 +5211,13 @@ fn top() -> int {
 fn main() { let result = top() }
 "#;
 
+    const SETUP_SRC: &str = r#"
+@shader(fragment)
+fn frag(tc: Vec2) -> Vec4 { return v(tc.x, 0.0, 0.0, 1.0) }
+
+fn main() { let shader = rock_shader(frag) }
+"#;
+
     static STDLIB: std::sync::LazyLock<Vec<skull_parser::Ast>> = std::sync::LazyLock::new(|| {
         rock_host::stdlib_loader::stdlib_files()
             .iter()
@@ -5238,6 +5309,15 @@ fn main() { let result = top() }
         let mut modules = STDLIB.clone();
         modules.push(
             skull_parser::parse_module_clean(CLOSURE_SRC, Ustr::from("<closure-test>"))
+                .expect("parse"),
+        );
+        bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic")
+    }
+
+    fn setup_workspace() -> Workspace {
+        let mut modules = STDLIB.clone();
+        modules.push(
+            skull_parser::parse_module_clean(SETUP_SRC, Ustr::from("<setup-lane-test>"))
                 .expect("parse"),
         );
         bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic")
@@ -5515,8 +5595,7 @@ fn main() { let result = first() }
                 "setup: root collection",
                 "setup: graph",
                 "setup: concrete plans",
-                "setup: artifact+shader views",
-                "setup: ABI plan warm",
+                "setup: artifact+shader+ABI lanes",
                 "setup: ABI validation",
             ]
         );
@@ -5530,7 +5609,11 @@ fn main() { let result = first() }
             .collect::<Vec<_>>();
         assert_eq!(
             join.iter().map(|(name, _)| *name).collect::<Vec<_>>(),
-            ["join: cpu artifact branch", "join: shader view branch"]
+            [
+                "join: cpu artifact branch",
+                "join: shader view branch",
+                "join: ABI plan warm branch"
+            ]
         );
         assert!(join.iter().all(|(_, duration)| *duration > Duration::ZERO));
     }
@@ -5589,6 +5672,41 @@ fn main() { let result = first() }
             closure_emit.attribution.closure.bodies_with_work > 0,
             "closure conversion did not report a hoisted body: {:?}",
             closure_emit.attribution
+        );
+    }
+
+    #[test]
+    fn setup_lanes_report_population_and_actual_overlap() {
+        let _inline = InlineOn::on();
+        let ws = setup_workspace();
+        let mid = *ws
+            .module_ids
+            .get(&Ustr::from("<setup-lane-test>"))
+            .expect("setup test module");
+        let (emit, _) = emit_full_in_with_test_mutation(&ws, mid, BodyMutation::None)
+            .expect("setup lane emission");
+        let lanes = &emit.setup_lanes;
+        assert!(
+            lanes.cpu_population > 0
+                && lanes.shader_population > 0
+                && lanes.abi_population > 0,
+            "each setup lane must have a real population: {lanes:?}"
+        );
+        #[cfg(not(feature = "sequential"))]
+        {
+            assert!(
+                lanes.cpu_shader_overlap,
+                "artifact and shader lanes did not overlap: {lanes:?}"
+            );
+            assert!(
+                lanes.abi_cpu_overlap || lanes.abi_shader_overlap,
+                "ABI warm did not overlap either setup lane: {lanes:?}"
+            );
+        }
+        #[cfg(feature = "sequential")]
+        assert!(
+            !lanes.cpu_shader_overlap && !lanes.abi_cpu_overlap && !lanes.abi_shader_overlap,
+            "sequential setup must not report overlap: {lanes:?}"
         );
     }
 }
