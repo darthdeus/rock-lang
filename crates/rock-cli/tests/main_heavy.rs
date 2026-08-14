@@ -32,6 +32,8 @@ mod frame_error_gate;
 mod wgpu_refusal_gate;
 #[path = "wgpu_capture_gate.rs"]
 mod wgpu_capture_gate;
+#[path = "wgpu_capture_contract_gate.rs"]
+mod wgpu_capture_contract_gate;
 #[path = "rich_text_reject_gate.rs"]
 mod rich_text_reject_gate;
 #[path = "shader_failure_gate.rs"]
