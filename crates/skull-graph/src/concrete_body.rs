@@ -146,7 +146,10 @@ pub struct ConcreteIteratorOp {
     pub callee: Callee,
 }
 
-/// One instance's concrete type and callee tables.
+/// One instance's concrete callee tables.
+///
+/// Type tables live only on `ConcreteBodyPlan`: lowerers and artifact views
+/// consume that plan, while this record remains the graph-side call-fact join.
 ///
 /// EVERY callee table is keyed by [`Site`] rather than by `Idx<Expr>`. One
 /// expression can carry more than one callee obligation -- a `for` head has an
@@ -157,10 +160,6 @@ pub struct ConcreteIteratorOp {
 /// owner's body.
 pub struct ConcreteBody {
     pub instance: Instance,
-    pub expr_types: ArenaMap<Idx<Expr>, MonoTyId>,
-    pub binding_types: ArenaMap<Idx<BindingInfo>, MonoTyId>,
-    pub untyped_exprs: FxHashSet<Idx<Expr>>,
-    pub untyped_bindings: FxHashSet<Idx<BindingInfo>>,
     pub direct_calls: BTreeMap<Site, Callee>,
     pub fn_values: BTreeMap<Site, Callee>,
     pub iterator_ops: BTreeMap<Site, ConcreteIteratorOp>,
@@ -1110,6 +1109,7 @@ fn concrete_plan(
     inf: &BodyInference,
     hir_body: &Body,
     body: &ConcreteBody,
+    mut types: ConcreteTypeTables,
     sig_cache: &mut SignatureCache,
     memo: &mut TypeConversionMemo,
     stats: &mut ConcreteBuildStats,
@@ -1158,7 +1158,7 @@ fn concrete_plan(
         ws,
         g,
         hir_body,
-        &body.expr_types,
+        &types.expr_types,
         stats,
         timing_enabled,
     )?;
@@ -1175,22 +1175,13 @@ fn concrete_plan(
         stats,
         timing_enabled,
     )?;
+    types.ty_types = ty_types;
+    types.struct_field_types = struct_field_types;
     stats.plan_callee_map_inserts += callees.len();
     stats.plan_callee_signature_inserts += callee_signatures.len();
-    stats.plan_type_expr_clones += body.expr_types.iter().count();
-    stats.plan_type_binding_clones += body.binding_types.iter().count();
-    stats.plan_untyped_expr_clones += body.untyped_exprs.len();
-    stats.plan_untyped_binding_clones += body.untyped_bindings.len();
     Ok(ConcreteBodyPlan {
         owner: ConcreteOwner::Function(inst.clone()),
-        types: ConcreteTypeTables {
-            expr_types: body.expr_types.clone(),
-            binding_types: body.binding_types.clone(),
-            untyped_exprs: body.untyped_exprs.clone(),
-            untyped_bindings: body.untyped_bindings.clone(),
-            ty_types,
-            struct_field_types,
-        },
+        types,
         foreign_domains,
         signature,
         callees,
@@ -1403,12 +1394,15 @@ pub fn build(ws: &Workspace, g: &InstanceGraph) -> ConcreteBodies {
             out.free_types.push((inst.clone(), f.clone()));
         }
         let mut type_memo = c.type_memo;
-        let mut concrete = ConcreteBody {
-            instance: inst.clone(),
+        let mut types = ConcreteTypeTables {
             expr_types: c.expr_types,
             binding_types: c.binding_types,
             untyped_exprs: untyped.iter().map(|u| u.expr).collect(),
             untyped_bindings: c.untyped_bindings.iter().copied().collect(),
+            ..Default::default()
+        };
+        let mut concrete = ConcreteBody {
+            instance: inst.clone(),
             direct_calls: BTreeMap::new(),
             fn_values: BTreeMap::new(),
             iterator_ops: BTreeMap::new(),
@@ -1417,10 +1411,10 @@ pub fn build(ws: &Workspace, g: &InstanceGraph) -> ConcreteBodies {
         for failure in failures {
             match (failure.slot, failure.reason) {
                 (Slot::Expr(expr), MonoTyReason::UnresolvedInfer(_)) => {
-                    concrete.untyped_exprs.insert(expr);
+                    types.untyped_exprs.insert(expr);
                 }
                 (Slot::Binding(binding), MonoTyReason::UnresolvedInfer(_)) => {
-                    concrete.untyped_bindings.insert(binding);
+                    types.untyped_bindings.insert(binding);
                 }
                 _ => {}
             }
@@ -1456,6 +1450,7 @@ pub fn build(ws: &Workspace, g: &InstanceGraph) -> ConcreteBodies {
             inf,
             body,
             &concrete,
+            types,
             &mut sig_cache,
             &mut type_memo,
             &mut build_stats,

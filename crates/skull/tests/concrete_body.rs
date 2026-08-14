@@ -11,8 +11,9 @@ use std::sync::LazyLock;
 use bone_semantic::hir::{BindingInfo, BodyOwner, Expr, TypeExpr};
 use bone_semantic::inference::Workspace;
 use comfy_la_arena::{ArenaMap, Idx};
-use skull::concrete_body::{self, Callee, ConcreteBodies, ConcreteBody, IteratorOpKind, Slot};
+use skull::concrete_body::{self, Callee, ConcreteBodies, IteratorOpKind, Slot};
 use skull::instance_graph::{self, InstanceGraph, Site, SiteOp, SiteOutcome};
+use skull_mir::concrete::ConcreteTypeTables;
 use skull_mir::monoty::{MonoTy, MonoTyId, MonoTyReason};
 use skull_mir::mir::{Inst, MirFunc, Term};
 use ustr::Ustr;
@@ -41,9 +42,9 @@ fn bodies_of(src: &str) -> (Workspace, InstanceGraph, ConcreteBodies) {
     (ws, g, bodies)
 }
 
-fn assert_arena_tables(body: &ConcreteBody) {
-    let _: &ArenaMap<Idx<Expr>, MonoTyId> = &body.expr_types;
-    let _: &ArenaMap<Idx<BindingInfo>, MonoTyId> = &body.binding_types;
+fn assert_arena_tables(tables: &ConcreteTypeTables) {
+    let _: &ArenaMap<Idx<Expr>, MonoTyId> = &tables.expr_types;
+    let _: &ArenaMap<Idx<BindingInfo>, MonoTyId> = &tables.binding_types;
 }
 
 fn collect_nested_type_nodes(
@@ -886,7 +887,7 @@ fn main() {
         .filter(|i| g.identity(&ws, i).starts_with("ident"))
         .collect();
     assert_eq!(insts.len(), 2, "expected two ident instances, got {insts:?}");
-    let (a, b) = (&bodies.bodies[insts[0]], &bodies.bodies[insts[1]]);
+    let (a, b) = (&bodies.plans[insts[0]].types, &bodies.plans[insts[1]].types);
     let shared: Vec<_> = a
         .expr_types
         .iter()
@@ -924,10 +925,10 @@ fn main() { let a = plain(1) }
 "#,
     );
     let found = bodies
-        .bodies
-        .keys()
-        .find(|i| g.identity(&ws, i).starts_with("plain"))
-        .map(|i| &bodies.bodies[i])
+        .plans
+        .iter()
+        .find(|(i, _)| g.identity(&ws, i).starts_with("plain"))
+        .map(|(_, plan)| &plan.types)
         .expect("`plain` has no ConcreteBody");
     assert_arena_tables(found);
     assert!(found.expr_types.values().next().is_some(), "`plain`'s table is empty");
@@ -1120,20 +1121,21 @@ fn main() { let a = body([1, 2]) }
     }
     assert_eq!(annotated_targets.len(), 2, "fixture has the wrong annotated targets");
     assert_eq!(inferred_targets.len(), 2, "fixture has the wrong inferred targets");
+    let body_types = &bodies.plans[body_inst].types;
     assert!(
         annotated_targets
             .iter()
-            .all(|target| !bodies.bodies[body_inst].expr_types.contains_idx(*target)),
+            .all(|target| !body_types.expr_types.contains_idx(*target)),
         "annotated assignment targets are no longer untyped; flip this sentinel"
     );
     assert!(
         inferred_targets
             .iter()
-            .all(|target| bodies.bodies[body_inst].expr_types.contains_idx(*target)),
+            .all(|target| body_types.expr_types.contains_idx(*target)),
         "the inferred assignment control became untyped"
     );
     assert!(
-        bodies.bodies[body_inst].expr_types.values().count() > 20,
+        body_types.expr_types.values().count() > 20,
         "almost nothing in `body` was typed, so the pinned kinds are not what is special"
     );
     assert_eq!(bodies.free_types.len(), 0);
@@ -1258,7 +1260,7 @@ fn every_recorded_operation_becomes_one_entry_a_hole_or_a_rejection() {
 }
 
 #[test]
-fn concrete_plan_attribution_exposes_duplicate_ownership_work() {
+fn concrete_plan_attribution_uses_one_authoritative_type_table() {
     let (_ws, _g, bodies) = bodies_of(RICH);
     let stats = bodies.build_stats;
     assert!(stats.plan_attempts > 0, "no ordinary concrete plans were attempted: {stats:?}");
@@ -1270,9 +1272,11 @@ fn concrete_plan_attribution_exposes_duplicate_ownership_work() {
     assert!(
         stats.source_expr_slots > 0
             && stats.source_binding_slots > 0
-            && stats.plan_type_expr_clones > 0
-            && stats.plan_type_binding_clones > 0,
-        "the fixture did not expose duplicated type-table ownership: {stats:?}"
+            && stats.plan_type_expr_clones == 0
+            && stats.plan_type_binding_clones == 0
+            && stats.plan_untyped_expr_clones == 0
+            && stats.plan_untyped_binding_clones == 0,
+        "the optimized route retained duplicate type-table ownership: {stats:?}"
     );
     assert!(
         stats.callee_vec_materializations > 0 && stats.callee_vec_rows > 0,
