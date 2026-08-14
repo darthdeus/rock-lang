@@ -2291,13 +2291,23 @@ fn emit_value_struct(
     Ok(())
 }
 
-fn attr_wgsl_type(kind: AttrKind) -> &'static str {
+fn attr_input_wgsl_type(kind: AttrKind) -> &'static str {
     match kind {
-        AttrKind::F32 => "f32",
-        AttrKind::F32x2 => "vec2<f32>",
-        AttrKind::F32x3 => "vec3<f32>",
-        AttrKind::F32x4 => "vec4<f32>",
+        AttrKind::F32 => "u32",
+        AttrKind::F32x2 => "vec2<u32>",
+        AttrKind::F32x3 => "vec3<u32>",
+        AttrKind::F32x4 => "vec4<u32>",
         AttrKind::I32 => "i32",
+    }
+}
+
+fn attr_input_expression(location: u32, kind: AttrKind) -> String {
+    match kind {
+        AttrKind::F32 => format!("bitcast<f32>(input_{location})"),
+        AttrKind::F32x2 => format!("bitcast<vec2<f32>>(input_{location})"),
+        AttrKind::F32x3 => format!("bitcast<vec3<f32>>(input_{location})"),
+        AttrKind::F32x4 => format!("bitcast<vec4<f32>>(input_{location})"),
+        AttrKind::I32 => format!("input_{location}"),
     }
 }
 
@@ -2444,7 +2454,7 @@ fn emit_explicit_entries(
                 "  @location({}) input_{}: {},",
                 attr.location,
                 attr.location,
-                attr_wgsl_type(attr.kind)
+                attr_input_wgsl_type(attr.kind)
             )
             .unwrap();
         }
@@ -2456,7 +2466,7 @@ fn emit_explicit_entries(
         let input_args = input
             .attrs
             .iter()
-            .map(|attr| format!("input_{}", attr.location))
+            .map(|attr| attr_input_expression(attr.location, attr.kind))
             .collect::<Vec<_>>()
             .join(", ");
         let name = format!("{}_attrs", input.struct_name);

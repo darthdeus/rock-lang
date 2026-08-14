@@ -641,6 +641,46 @@ fn selected_sprite_batch_pipeline_is_admitted_by_wgsl() {
     naga_validate(&artifact.source);
 }
 
+#[test]
+fn explicit_float_vertex_inputs_preserve_their_raw_bits() {
+    let (_, artifact) = sprite_batch_artifact();
+    assert!(
+        artifact.source.contains("@location(2) input_2: vec4<u32>,"),
+        "float vertex payloads must enter WGSL through an integer bit-preserving format:\n{}",
+        artifact.source
+    );
+    assert!(
+        artifact.source.contains(
+            "let Vertex_attrs = Vertex(bitcast<vec2<f32>>(input_0), bitcast<vec2<f32>>(input_1), bitcast<vec4<f32>>(input_2), bitcast<f32>(input_3), bitcast<f32>(input_4));"
+        ),
+        "the logical Vertex value must be reconstructed before the shader body:\n{}",
+        artifact.source
+    );
+    naga_validate(&artifact.source);
+}
+
+#[test]
+fn sprite_batch_color_is_flat_for_each_primitive() {
+    let (_, artifact) = sprite_batch_artifact();
+    assert!(
+        artifact
+            .abi
+            .varyings
+            .iter()
+            .any(|varying| varying.name == "Color" && varying.flat),
+        "sprite colors are per-primitive values and must not be interpolated on WGPU:\n{}",
+        artifact.source
+    );
+    assert!(
+        artifact
+            .source
+            .contains("@location(1) @interpolate(flat) Color: vec4<f32>,"),
+        "the emitted WGPU color varying must be flat:\n{}",
+        artifact.source
+    );
+    naga_validate(&artifact.source);
+}
+
 /// Naga proves well-formedness, not that the right target got the right
 /// location. `FragId` is the entity-id attachment: emitting it at location 0
 /// would validate and paint ids into the colour buffer.
@@ -676,11 +716,11 @@ fn the_mrt_outputs_keep_their_declaration_order_and_locations() {
     );
 }
 
-/// `EntityId` is an integer id carried as a float: interpolating it across the
-/// triangle produces ids no entity has, and every other varying must NOT be
-/// flat or the sprite loses its gradients.
+/// `Color` is repeated on every vertex of a primitive, while `EntityId` is an
+/// integer id carried as a float. Both must stay flat; UV and world position
+/// remain interpolated.
 #[test]
-fn only_the_flat_varying_carries_the_flat_interpolation_attribute() {
+fn per_primitive_varyings_carry_the_flat_interpolation_attribute() {
     let (_, artifact) = sprite_batch_artifact();
     let flat: Vec<&str> = artifact
         .abi
@@ -689,8 +729,15 @@ fn only_the_flat_varying_carries_the_flat_interpolation_attribute() {
         .filter(|varying| varying.flat)
         .map(|varying| varying.name.as_str())
         .collect();
-    assert_eq!(flat, ["EntityId"], "exactly one flat varying is declared");
-    assert_eq!(artifact.abi.varyings.len(), 4, "and three that are not");
+    assert_eq!(flat, ["Color", "EntityId"], "the per-primitive varyings are flat");
+    assert_eq!(artifact.abi.varyings.len(), 4, "and two interpolated varyings remain");
+    assert!(
+        artifact
+            .source
+            .contains("@location(1) @interpolate(flat) Color: vec4<f32>,"),
+        "{}",
+        artifact.source
+    );
     assert!(
         artifact
             .source
@@ -700,8 +747,8 @@ fn only_the_flat_varying_carries_the_flat_interpolation_attribute() {
     );
     assert_eq!(
         artifact.source.matches("@interpolate(flat)").count(),
-        1,
-        "no other varying may be flat: {}",
+        2,
+        "only per-primitive varyings may be flat: {}",
         artifact.source
     );
 }
