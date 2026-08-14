@@ -77,6 +77,31 @@ fn definition_plan_publishes_and_aborts_with_the_code_slot_transaction() {
 }
 
 #[test]
+fn failed_definition_materialization_keeps_the_old_plan_and_clears_pending() {
+    let source = format!("{}\n", skull_codegen_js::JS_CALL_HELPER) + r#"
+var __G = {};
+__rock_code_slot_begin();
+__rock_code_slot_stage_one("probe", function() { return 1; }, "abi");
+__rock_definition_plan_stage({widgets: {len: 1, _data: [{key: "old", factory: function() { return {key: "old"}; }}]}});
+__rock_code_slot_publish();
+var oldPlan = __G.__ROCK_DEFINITION_PLAN;
+var ok = false;
+try {
+  __rock_code_slot_begin();
+  __rock_definition_plan_stage({widgets: {len: 1, _data: [{key: "new", factory: function() { throw new Error("materialization failed"); }}]}});
+  __rock_code_slot_publish();
+} catch (e) { ok = true; }
+__rock_code_slot_abort();
+console.log(ok && __rock_definition_plan_pending === null
+  && __G.__ROCK_DEFINITION_PLAN === oldPlan
+  && oldPlan.widgets._data[0].definition.key === "old"
+  && __rock_code_slot_ref("probe").current_body() === 1);
+"#;
+    let output = node(&source);
+    assert_eq!(output.trim(), "true");
+}
+
+#[test]
 fn programs_without_definition_roles_do_not_stage_an_empty_plan() {
     let ws = ws_with("fn main() {}\n");
     let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");

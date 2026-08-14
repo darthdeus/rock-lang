@@ -3402,7 +3402,7 @@ fn definition_plan_stage_lua(
             let key = entry.identity.logical_key(ws, scx.interner());
             let _ = writeln!(
                 out,
-                "[{}] = {{ catalog = {}, key = {}, name = {}, ordinal = {}, factory = __rock_code_slot_ref({}) }},",
+                "[{}] = {{ catalog = {}, key = {}, name = {}, ordinal = {}, factory = __rock_code_slot_pending_ref({}) }},",
                 index + 1,
                 skull_codegen_lua::lua_string(entry.catalog.as_str()),
                 skull_codegen_lua::lua_string(entry.key.as_str()),

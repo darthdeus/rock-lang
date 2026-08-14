@@ -4662,7 +4662,7 @@ fn definition_plan_stage_js(
             let key = entry.identity.logical_key(ws, interner);
             writeln!(
                 out,
-                "{{catalog: {}, key: {}, name: {}, ordinal: {}, factory: __rock_code_slot_ref({})}},",
+                "{{catalog: {}, key: {}, name: {}, ordinal: {}, factory: __rock_code_slot_pending_ref({})}},",
                 js_string_lit(entry.catalog.as_str())?,
                 js_string_lit(entry.key.as_str())?,
                 js_string_lit(entry.diagnostic_name.as_str())?,

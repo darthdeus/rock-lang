@@ -120,8 +120,8 @@ fn main() {}
     let alpha = js.find("key: \"alpha\"").expect("alpha plan entry");
     let beta = js.find("key: \"beta\"").expect("beta plan entry");
     assert!(alpha < beta);
-    assert!(js.contains("factory: __rock_code_slot_ref(\"named:<test>::make_alpha<>\")"));
-    assert!(js.contains("factory: __rock_code_slot_ref(\"named:<test>::make_beta<>\")"));
+    assert!(js.contains("factory: __rock_code_slot_pending_ref(\"named:<test>::make_alpha<>\")"));
+    assert!(js.contains("factory: __rock_code_slot_pending_ref(\"named:<test>::make_beta<>\")"));
     let source = format!(
         "var __G = {{}};\n{}\n{}\nconsole.log(__G.__ROCK_DEFINITION_PLAN.widgets.len + ':' + __G.__ROCK_DEFINITION_PLAN.widgets._data[0].key + ':' + __rock_call(__G.__ROCK_DEFINITION_PLAN.widgets._data[0].factory));",
         skull_codegen_js::JS_CALL_HELPER,

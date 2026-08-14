@@ -46,7 +46,7 @@ end
 if not _G.__rock_code_slots then _G.__rock_code_slots = {} end
 function __rock_code_slot_ref(key)
   local slot = _G.__rock_code_slots[key]
-  if not slot and _G.__rock_code_slot_pending then
+  if (not slot or _G.__rock_definition_plan_materializing) and _G.__rock_code_slot_pending then
     local staged = _G.__rock_code_slot_pending[key]
     if staged then
       local pending = _G.__rock_code_slot_pending_slots
@@ -64,15 +64,33 @@ function __rock_code_slot_ref(key)
   if not slot then error("missing Rock code slot " .. key, 0) end
   return slot
 end
+function __rock_code_slot_pending_ref(key)
+  local staged = _G.__rock_code_slot_pending and _G.__rock_code_slot_pending[key]
+  if staged then
+    local pending = _G.__rock_code_slot_pending_slots
+    local temporary = pending[key]
+    if not temporary then
+      temporary = setmetatable({
+        __rock_code_slot = true,
+        key = key, current_body = staged.body, abi = staged.abi
+      }, _G.__rock_code_slot_mt)
+      pending[key] = temporary
+    end
+    return temporary
+  end
+  return __rock_code_slot_ref(key)
+end
 function __rock_code_slot_begin()
   _G.__rock_code_slot_pending = {}
   _G.__rock_code_slot_pending_slots = {}
+  _G.__rock_definition_plan_materializing = false
   _G.__rock_lifecycle_plan_pending = nil
   _G.__rock_definition_plan_pending = nil
 end
 function __rock_code_slot_abort()
   _G.__rock_code_slot_pending = nil
   _G.__rock_code_slot_pending_slots = nil
+  _G.__rock_definition_plan_materializing = false
   _G.__rock_lifecycle_plan_pending = nil
   _G.__rock_definition_plan_pending = nil
   local pending_wgpu = rawget(_G, "PENDING_WGPU_SHADER_SRCS")
@@ -94,7 +112,26 @@ function __rock_definition_plan_stage(plan)
   if not _G.__rock_code_slot_pending then error("Rock code slot stage not open", 0) end
   _G.__rock_definition_plan_pending = plan
 end
+function __rock_definition_plan_materialize(plan)
+  _G.__rock_definition_plan_materializing = true
+  for _, catalog in pairs(plan) do
+    if type(catalog) == "table" and catalog._data and catalog.len then
+      for i = 1, catalog.len do
+        local entry = catalog._data[i]
+        if entry and entry.factory ~= nil then
+          entry.definition = entry.factory()
+        end
+      end
+    end
+  end
+  _G.__rock_definition_plan_materializing = false
+  return plan
+end
 function __rock_code_slot_publish()
+  local definition_plan = _G.__rock_definition_plan_pending
+  if definition_plan ~= nil then
+    definition_plan = __rock_definition_plan_materialize(definition_plan)
+  end
   local pending_wgpu = rawget(_G, "PENDING_WGPU_SHADER_SRCS")
   if pending_wgpu and next(pending_wgpu) ~= nil then
     local register_wgpu = rawget(_G, "stone_wgpu_renderer_register_pending")
@@ -121,6 +158,12 @@ function __rock_code_slot_publish()
     if slot then
       slot.current_body = staged.body
       slot.abi = staged.abi
+      local temporary = _G.__rock_code_slot_pending_slots[key]
+      if temporary then
+        temporary.current_body = staged.body
+        temporary.abi = staged.abi
+        _G.__rock_code_slots[key] = temporary
+      end
     else
       local pending = _G.__rock_code_slot_pending_slots
       _G.__rock_code_slots[key] = pending[key] or setmetatable({
@@ -132,8 +175,8 @@ function __rock_code_slot_publish()
   if _G.__rock_lifecycle_plan_pending ~= nil then
     _G.__ROCK_LIFECYCLE_PLAN = _G.__rock_lifecycle_plan_pending
   end
-  if _G.__rock_definition_plan_pending ~= nil then
-    _G.__ROCK_DEFINITION_PLAN = _G.__rock_definition_plan_pending
+  if definition_plan ~= nil then
+    _G.__ROCK_DEFINITION_PLAN = definition_plan
   end
   _G.__rock_code_slot_pending = nil
   _G.__rock_code_slot_pending_slots = nil

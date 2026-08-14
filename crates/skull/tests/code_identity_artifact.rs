@@ -109,8 +109,8 @@ fn main() {}
     let alpha = emit.lua.find("key = \"alpha\"").expect("alpha plan entry");
     let beta = emit.lua.find("key = \"beta\"").expect("beta plan entry");
     assert!(alpha < beta, "definition order is declaration order");
-    assert!(emit.lua.contains("factory = __rock_code_slot_ref(\"named:<test>::make_alpha<>\")"));
-    assert!(emit.lua.contains("factory = __rock_code_slot_ref(\"named:<test>::make_beta<>\")"));
+    assert!(emit.lua.contains("factory = __rock_code_slot_pending_ref(\"named:<test>::make_alpha<>\")"));
+    assert!(emit.lua.contains("factory = __rock_code_slot_pending_ref(\"named:<test>::make_beta<>\")"));
     let out = run_luajit(
         &format!(
             "{}\nlocal p = _G.__ROCK_DEFINITION_PLAN.widgets; print(p.len .. ':' .. p._data[1].key .. ':' .. p._data[1].factory())",

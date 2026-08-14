@@ -225,7 +225,7 @@ var __rock_code_slots = Object.create(null);
 var __rock_code_slot_stage = null;
 function __rock_code_slot_ref(key) {
   var slot = __rock_code_slots[key];
-  if (!slot && __rock_code_slot_stage !== null) {
+  if ((!slot || __rock_definition_plan_materializing) && __rock_code_slot_stage !== null) {
     var staged = __rock_code_slot_stage[key];
     if (staged) {
       var temporary = __rock_code_slot_pending_slots[key];
@@ -242,18 +242,36 @@ function __rock_code_slot_ref(key) {
   if (!slot) throw new Error("missing Rock code slot " + key);
   return slot;
 }
+function __rock_code_slot_pending_ref(key) {
+  var staged = __rock_code_slot_stage === null ? null : __rock_code_slot_stage[key];
+  if (staged) {
+    var temporary = __rock_code_slot_pending_slots[key];
+    if (!temporary) {
+      temporary = {
+        __rock_code_slot: true, key: key,
+        current_body: staged.body, abi: staged.abi
+      };
+      __rock_code_slot_pending_slots[key] = temporary;
+    }
+    return temporary;
+  }
+  return __rock_code_slot_ref(key);
+}
 var __rock_code_slot_pending_slots = Object.create(null);
 var __rock_lifecycle_plan_pending = null;
 var __rock_definition_plan_pending = null;
+var __rock_definition_plan_materializing = false;
 function __rock_code_slot_begin() {
   __rock_code_slot_stage = Object.create(null);
   __rock_code_slot_pending_slots = Object.create(null);
+  __rock_definition_plan_materializing = false;
   __rock_lifecycle_plan_pending = null;
   __rock_definition_plan_pending = null;
 }
 function __rock_code_slot_abort() {
   __rock_code_slot_stage = null;
   __rock_code_slot_pending_slots = Object.create(null);
+  __rock_definition_plan_materializing = false;
   __rock_lifecycle_plan_pending = null;
   __rock_definition_plan_pending = null;
 }
@@ -265,6 +283,19 @@ function __rock_definition_plan_stage(plan) {
   if (__rock_code_slot_stage === null) throw new Error("Rock code slot stage not open");
   __rock_definition_plan_pending = plan;
 }
+function __rock_definition_plan_materialize(plan) {
+  __rock_definition_plan_materializing = true;
+  Object.keys(plan).forEach(function(catalogKey) {
+    var catalog = plan[catalogKey];
+    if (!catalog || !catalog._data || catalog.len === undefined) return;
+    for (var i = 0; i < catalog.len; i++) {
+      var entry = catalog._data[i];
+      if (entry && entry.factory !== undefined) entry.definition = __rock_call(entry.factory);
+    }
+  });
+  __rock_definition_plan_materializing = false;
+  return plan;
+}
 function __rock_code_slot_stage_one(key, body, abi) {
   var old = __rock_code_slots[key];
   if (old && old.abi !== abi) throw new Error("incompatible Rock code slot " + key);
@@ -273,12 +304,20 @@ function __rock_code_slot_stage_one(key, body, abi) {
 }
 function __rock_code_slot_publish() {
   if (__rock_code_slot_stage === null) throw new Error("Rock code slot stage not open");
+  var definition_plan = __rock_definition_plan_pending;
+  if (definition_plan !== null) definition_plan = __rock_definition_plan_materialize(definition_plan);
   var stage = __rock_code_slot_stage;
   Object.keys(stage).forEach(function(key) {
     var staged = stage[key], slot = __rock_code_slots[key];
     if (slot) {
       slot.current_body = staged.body;
       slot.abi = staged.abi;
+      var temporary = __rock_code_slot_pending_slots[key];
+      if (temporary) {
+        temporary.current_body = staged.body;
+        temporary.abi = staged.abi;
+        __rock_code_slots[key] = temporary;
+      }
     } else {
       __rock_code_slots[key] = __rock_code_slot_pending_slots[key] || {
         __rock_code_slot: true, key: key,
@@ -287,7 +326,7 @@ function __rock_code_slot_publish() {
     }
   });
   if (__rock_lifecycle_plan_pending !== null) __G.__ROCK_LIFECYCLE_PLAN = __rock_lifecycle_plan_pending;
-  if (__rock_definition_plan_pending !== null) __G.__ROCK_DEFINITION_PLAN = __rock_definition_plan_pending;
+  if (definition_plan !== null) __G.__ROCK_DEFINITION_PLAN = definition_plan;
   __rock_code_slot_stage = null;
   __rock_code_slot_pending_slots = Object.create(null);
   __rock_lifecycle_plan_pending = null;

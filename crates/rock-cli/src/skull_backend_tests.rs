@@ -2991,6 +2991,24 @@ fn main() {}
     }
 
     #[test]
+    fn failed_definition_materialization_keeps_old_definitions_and_state() {
+        let mut harness = StateTransitionHarness::boot(STATE_V0);
+        let failing_source = STATE_V1.replace(
+            "@widget(key=\"gamma\") fn make_gamma() -> WidgetDef { return WidgetDef { key: \"gamma\", callback: () => 3 } }",
+            "fn materialization_should_fail() -> bool { return true }\n@widget(key=\"gamma\") fn make_gamma() -> WidgetDef { if materialization_should_fail() { error(\"definition materialization failed\") } return WidgetDef { key: \"gamma\", callback: () => 3 } }",
+        );
+        harness
+            .replace_source(&failing_source)
+            .expect("the failing materializer must compile and publish its new plan");
+        let output = harness.run_materialization_failure_script(harness.current_artifact());
+        assert_eq!(
+            output,
+            vec!["old:2:alpha:beta:9:1:41:1"],
+            "a failed materialization must not leak a new definition or PanelState"
+        );
+    }
+
+    #[test]
     fn definition_reconciliation_preserves_prunes_and_recreates_state() {
         let mut harness = StateTransitionHarness::boot(STATE_V0);
         harness.replace_source(STATE_V1).expect("remove alpha and add gamma");
@@ -3046,24 +3064,19 @@ struct WidgetPlanEntry {
     key: string,
     name: string,
     ordinal: int,
-    factory: fn() -> WidgetDef,
+    definition: WidgetDef,
 }
 @artifact_definition(catalog="widgets", key_param="key")
 deco init widget(key: string) {}
 @lifecycle(phase="wire", owner="session")
 deco init wire {}
 inline(lua) fn widget_definition_plan() -> [WidgetPlanEntry] = "return (_G.__ROCK_DEFINITION_PLAN or {}).widgets or {len=0,_data={}}"
-global WIDGET_DEFS: [WidgetDef] = []
 global WIDGET_STATES: Map<string, WidgetState> = map_new()
-@widget(key="alpha") fn make_alpha() -> WidgetDef { return WidgetDef { key: "", callback: () => 1 } }
-@widget(key="beta") fn make_beta() -> WidgetDef { return WidgetDef { key: "", callback: () => 2 } }
-@wire fn reconcile_widgets() {
-    let next: [WidgetDef] = []
+@widget(key="alpha") fn make_alpha() -> WidgetDef { return WidgetDef { key: "alpha", callback: () => 1 } }
+@widget(key="beta") fn make_beta() -> WidgetDef { return WidgetDef { key: "beta", callback: () => 2 } }
+@wire fn reconcile_widget_state() {
     let present: Map<string, bool> = map_new()
     for entry in widget_definition_plan() {
-        let def = entry.factory()
-        def.key = entry.key
-        next.push(def)
         present[entry.key] = true
         if WIDGET_STATES.get(entry.key) == null { WIDGET_STATES[entry.key] = WidgetState {} }
     }
@@ -3072,7 +3085,6 @@ global WIDGET_STATES: Map<string, WidgetState> = map_new()
         if present.get(key) == null { removed.push(key) }
     }
     for key in removed { WIDGET_STATES.remove(key) }
-    WIDGET_DEFS = next
 }
 fn main() {}
 "#;
@@ -3080,23 +3092,18 @@ fn main() {}
     const STATE_V1: &str = r#"
 struct WidgetDef { key: string, callback: fn() -> int }
 struct WidgetState { seq: int = 0, presence: int = 0 }
-struct WidgetPlanEntry { catalog: string, key: string, name: string, ordinal: int, factory: fn() -> WidgetDef }
+struct WidgetPlanEntry { catalog: string, key: string, name: string, ordinal: int, definition: WidgetDef }
 @artifact_definition(catalog="widgets", key_param="key")
 deco init widget(key: string) {}
 @lifecycle(phase="wire", owner="session")
 deco init wire {}
 inline(lua) fn widget_definition_plan() -> [WidgetPlanEntry] = "return (_G.__ROCK_DEFINITION_PLAN or {}).widgets or {len=0,_data={}}"
-global WIDGET_DEFS: [WidgetDef] = []
 global WIDGET_STATES: Map<string, WidgetState> = map_new()
-@widget(key="beta") fn make_beta() -> WidgetDef { return WidgetDef { key: "", callback: () => 20 } }
-@widget(key="gamma") fn make_gamma() -> WidgetDef { return WidgetDef { key: "", callback: () => 3 } }
-@wire fn reconcile_widgets() {
-    let next: [WidgetDef] = []
+@widget(key="beta") fn make_beta() -> WidgetDef { return WidgetDef { key: "beta", callback: () => 20 } }
+@widget(key="gamma") fn make_gamma() -> WidgetDef { return WidgetDef { key: "gamma", callback: () => 3 } }
+@wire fn reconcile_widget_state() {
     let present: Map<string, bool> = map_new()
     for entry in widget_definition_plan() {
-        let def = entry.factory()
-        def.key = entry.key
-        next.push(def)
         present[entry.key] = true
         if WIDGET_STATES.get(entry.key) == null { WIDGET_STATES[entry.key] = WidgetState {} }
     }
@@ -3105,7 +3112,6 @@ global WIDGET_STATES: Map<string, WidgetState> = map_new()
         if present.get(key) == null { removed.push(key) }
     }
     for key in removed { WIDGET_STATES.remove(key) }
-    WIDGET_DEFS = next
 }
 fn main() {}
 "#;
@@ -3113,23 +3119,18 @@ fn main() {}
     const STATE_V2: &str = r#"
 struct WidgetDef { key: string, callback: fn() -> int }
 struct WidgetState { seq: int = 0, presence: int = 0 }
-struct WidgetPlanEntry { catalog: string, key: string, name: string, ordinal: int, factory: fn() -> WidgetDef }
+struct WidgetPlanEntry { catalog: string, key: string, name: string, ordinal: int, definition: WidgetDef }
 @artifact_definition(catalog="widgets", key_param="key")
 deco init widget(key: string) {}
 @lifecycle(phase="wire", owner="session")
 deco init wire {}
 inline(lua) fn widget_definition_plan() -> [WidgetPlanEntry] = "return (_G.__ROCK_DEFINITION_PLAN or {}).widgets or {len=0,_data={}}"
-global WIDGET_DEFS: [WidgetDef] = []
 global WIDGET_STATES: Map<string, WidgetState> = map_new()
-@widget(key="alpha") fn make_alpha() -> WidgetDef { return WidgetDef { key: "", callback: () => 10 } }
-@widget(key="beta") fn make_beta() -> WidgetDef { return WidgetDef { key: "", callback: () => 30 } }
-@wire fn reconcile_widgets() {
-    let next: [WidgetDef] = []
+@widget(key="alpha") fn make_alpha() -> WidgetDef { return WidgetDef { key: "alpha", callback: () => 10 } }
+@widget(key="beta") fn make_beta() -> WidgetDef { return WidgetDef { key: "beta", callback: () => 30 } }
+@wire fn reconcile_widget_state() {
     let present: Map<string, bool> = map_new()
     for entry in widget_definition_plan() {
-        let def = entry.factory()
-        def.key = entry.key
-        next.push(def)
         present[entry.key] = true
         if WIDGET_STATES.get(entry.key) == null { WIDGET_STATES[entry.key] = WidgetState {} }
     }
@@ -3138,7 +3139,6 @@ global WIDGET_STATES: Map<string, WidgetState> = map_new()
         if present.get(key) == null { removed.push(key) }
     }
     for key in removed { WIDGET_STATES.remove(key) }
-    WIDGET_DEFS = next
 }
 fn main() {}
 "#;
@@ -3231,10 +3231,14 @@ local function wire()
   assert(plan ~= nil and plan.len == 1, "state fixture wire population")
   plan._data[1].func()
 end
+local function published_plan()
+  return (_G.__ROCK_DEFINITION_PLAN or {}).widgets
+end
 local function find(key)
-  for i = 1, WIDGET_DEFS.len do
-    local def = WIDGET_DEFS._data[i]
-    if def.key == key then return def end
+  local plan = published_plan()
+  for i = 1, plan.len do
+    local entry = plan._data[i]
+    if entry.key == key then return entry.definition end
   end
   return nil
 end
@@ -3242,7 +3246,8 @@ local function line(s) io.write("__STATE__" .. s .. "\n") end
 
 REPLACE_INITIAL
 wire()
-line("v0:" .. WIDGET_DEFS.len .. ":" .. WIDGET_DEFS._data[1].key .. ":" .. WIDGET_DEFS._data[2].key)
+local plan = published_plan()
+line("v0:" .. plan.len .. ":" .. plan._data[1].key .. ":" .. plan._data[2].key)
 WIDGET_STATES["beta"].seq = 41
 WIDGET_STATES["beta"].presence = 1
 WIDGET_STATES["alpha"].seq = 9
@@ -3253,14 +3258,16 @@ wire()
 local beta = find("beta")
 local gamma = find("gamma")
 assert(find("alpha") == nil, "removed key still has a definition")
-line("v1:" .. WIDGET_DEFS.len .. ":" .. WIDGET_DEFS._data[1].key .. ":" .. WIDGET_DEFS._data[2].key .. ":" .. WIDGET_STATES["beta"].seq .. ":" .. WIDGET_STATES["beta"].presence .. ":" .. beta.callback() .. ":" .. WIDGET_STATES["gamma"].seq .. ":" .. WIDGET_STATES["gamma"].presence .. ":" .. gamma.callback())
+plan = published_plan()
+line("v1:" .. plan.len .. ":" .. plan._data[1].key .. ":" .. plan._data[2].key .. ":" .. WIDGET_STATES["beta"].seq .. ":" .. WIDGET_STATES["beta"].presence .. ":" .. beta.callback() .. ":" .. WIDGET_STATES["gamma"].seq .. ":" .. WIDGET_STATES["gamma"].presence .. ":" .. gamma.callback())
 
 REPLACE_V2
 wire()
 local alpha = find("alpha")
 beta = find("beta")
 assert(find("gamma") == nil, "removed key still has state or definition")
-line("v2:" .. WIDGET_DEFS.len .. ":" .. WIDGET_DEFS._data[1].key .. ":" .. WIDGET_DEFS._data[2].key .. ":" .. WIDGET_STATES["alpha"].seq .. ":" .. WIDGET_STATES["alpha"].presence .. ":" .. alpha.callback() .. ":" .. WIDGET_STATES["beta"].seq .. ":" .. WIDGET_STATES["beta"].presence .. ":" .. beta.callback())
+plan = published_plan()
+line("v2:" .. plan.len .. ":" .. plan._data[1].key .. ":" .. plan._data[2].key .. ":" .. WIDGET_STATES["alpha"].seq .. ":" .. WIDGET_STATES["alpha"].presence .. ":" .. alpha.callback() .. ":" .. WIDGET_STATES["beta"].seq .. ":" .. WIDGET_STATES["beta"].presence .. ":" .. beta.callback())
 "#;
             let script = driver
                 .replace("REPLACE_INITIAL", &self.initial_artifact)
@@ -3280,6 +3287,9 @@ line("v2:" .. WIDGET_DEFS.len .. ":" .. WIDGET_DEFS._data[1].key .. ":" .. WIDGE
         fn run_body_script(&self, overlay: String) -> Vec<String> {
             let driver = r#"
 _G.HOT_RELOAD = true
+local function published_plan()
+  return (_G.__ROCK_DEFINITION_PLAN or {}).widgets
+end
 REPLACE_INITIAL
 local plan = _G.__ROCK_LIFECYCLE_PLAN.wire
 assert(plan ~= nil and plan.len == 1, "body fixture wire population")
@@ -3289,8 +3299,9 @@ WIDGET_STATES["beta"].presence = 1
 REPLACE_OVERLAY
 plan._data[1].func()
 local beta
-for i = 1, WIDGET_DEFS.len do
-  if WIDGET_DEFS._data[i].key == "beta" then beta = WIDGET_DEFS._data[i] end
+plan = published_plan()
+for i = 1, plan.len do
+  if plan._data[i].key == "beta" then beta = plan._data[i].definition end
 end
 assert(beta ~= nil, "body overlay retained beta definition")
 io.write("__STATE__body:" .. WIDGET_STATES["beta"].seq .. ":" .. WIDGET_STATES["beta"].presence .. ":" .. beta.callback() .. "\n")
@@ -3301,6 +3312,50 @@ io.write("__STATE__body:" .. WIDGET_STATES["beta"].seq .. ":" .. WIDGET_STATES["
             let output = match super::exec_lua(&script) {
                 super::ExecOutcome::Output(output) => output,
                 super::ExecOutcome::Errored(error) => panic!("body transition artifact failed: {error}"),
+            };
+            output
+                .lines()
+                .filter_map(|line| line.strip_prefix("__STATE__"))
+                .map(str::to_string)
+                .collect()
+        }
+
+        fn run_materialization_failure_script(&self, failed_artifact: String) -> Vec<String> {
+            let driver = r#"
+_G.HOT_RELOAD = true
+local function published_plan()
+  return (_G.__ROCK_DEFINITION_PLAN or {}).widgets
+end
+REPLACE_INITIAL
+local plan = _G.__ROCK_LIFECYCLE_PLAN.wire
+assert(plan ~= nil and plan.len == 1, "materialization fixture wire population")
+plan._data[1].func()
+WIDGET_STATES["alpha"].seq = 9
+WIDGET_STATES["alpha"].presence = 1
+WIDGET_STATES["beta"].seq = 41
+WIDGET_STATES["beta"].presence = 1
+
+local ok = pcall(function()
+REPLACE_FAILED
+end)
+assert(not ok, "the materialization failure must be observed")
+assert(_G.__rock_definition_plan_pending ~= nil, "failed materialization must leave a pending plan for abort")
+__rock_code_slot_abort()
+plan = published_plan()
+assert(plan.len == 2, "failed materialization replaced old definitions")
+assert(plan._data[1].key == "alpha" and plan._data[2].key == "beta", "old definitions were not retained")
+assert(plan._data[1].definition.key == "alpha" and plan._data[2].definition.key == "beta", "old published definitions were not retained")
+assert(WIDGET_STATES["alpha"].seq == 9 and WIDGET_STATES["alpha"].presence == 1, "alpha state changed")
+assert(WIDGET_STATES["beta"].seq == 41 and WIDGET_STATES["beta"].presence == 1, "beta state changed")
+assert(WIDGET_STATES["gamma"] == nil, "failed materialization leaked gamma state")
+io.write("__STATE__old:" .. plan.len .. ":" .. plan._data[1].key .. ":" .. plan._data[2].key .. ":" .. WIDGET_STATES["alpha"].seq .. ":" .. WIDGET_STATES["alpha"].presence .. ":" .. WIDGET_STATES["beta"].seq .. ":" .. WIDGET_STATES["beta"].presence .. "\n")
+"#;
+            let script = driver
+                .replace("REPLACE_INITIAL", &self.initial_artifact)
+                .replace("REPLACE_FAILED", &failed_artifact);
+            let output = match super::exec_lua(&script) {
+                super::ExecOutcome::Output(output) => output,
+                super::ExecOutcome::Errored(error) => panic!("materialization failure artifact failed: {error}"),
             };
             output
                 .lines()
