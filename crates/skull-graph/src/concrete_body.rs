@@ -1162,8 +1162,8 @@ fn collect_foreign_domains(g: &InstanceGraph, expanded: &[Instance]) -> BTreeSet
             }
         }
     }
-    for contribution in g.contributions.values() {
-        if contribution.always_call_sites.is_empty() {
+    for (owner, contribution) in &g.contributions {
+        if !matches!(owner, Owner::AlwaysEmitted(..)) {
             continue;
         }
         domains.extend(contribution.struct_default_domains.iter().cloned());

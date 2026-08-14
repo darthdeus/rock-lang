@@ -709,6 +709,46 @@ fn main() { print("{startup}") }
     let _ = owner;
 }
 
+#[test]
+fn always_emitted_global_publishes_struct_default_domains_without_callees() {
+    let (ws, g, bodies) = bodies_of(
+        r#"
+struct Box<T> { value: T? = null }
+global startup: Box<int> = Box {}
+fn main() { let value = startup.value }
+"#,
+    );
+    let default_domain_population = g
+        .contributions
+        .iter()
+        .filter(|(owner, contribution)| {
+            matches!(owner, skull::instance_graph::Owner::AlwaysEmitted(..))
+                && !contribution.struct_default_domains.is_empty()
+        })
+        .count();
+    assert!(
+        default_domain_population > 0,
+        "fixture did not put a struct-default domain on an always-emitted contribution"
+    );
+    let user_mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("test module");
+    let global = bodies
+        .always_plans
+        .iter()
+        .find(|(owner, _)| {
+            matches!(
+                owner,
+                skull_mir::concrete::ConcreteOwner::Global { module, .. } if *module == user_mid
+            )
+        })
+        .map(|(_, plan)| plan)
+        .expect("the global has no always-emitted plan");
+    assert_eq!(
+        global.foreign_domains.len(),
+        1,
+        "the always-emitted global lost its struct-default domain"
+    );
+}
+
 fn return_arity(mir: &MirFunc) -> usize {
     mir.blocks
         .values()
