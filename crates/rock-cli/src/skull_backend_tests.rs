@@ -2925,6 +2925,161 @@ fn main() { }
 }
 
 #[cfg(test)]
+mod definition_transition_tests {
+    use super::super::{SkullReload, SkullStone};
+    use std::path::PathBuf;
+
+    const V0: &str = r#"
+@artifact_definition(catalog="widgets", key_param="key")
+deco init widget(key: string) {}
+
+@widget(key="alpha") fn make_alpha() -> int { return 1 }
+@widget(key="beta") fn make_beta() -> int { return 2 }
+fn main() {}
+"#;
+
+    const V1: &str = r#"
+@artifact_definition(catalog="widgets", key_param="key")
+deco init widget(key: string) {}
+
+@widget(key="beta") fn make_beta() -> int { return 20 }
+@widget(key="gamma") fn make_gamma() -> int { return 3 }
+fn main() {}
+"#;
+
+    #[test]
+    fn full_rebuild_transition_replaces_definition_membership_and_rejects_failed_build() {
+        let mut harness = DefinitionTransitionHarness::boot(V0);
+        let old_artifact = harness.current_artifact();
+        let old = harness.published_catalog_from(old_artifact.clone());
+        assert_eq!(old, vec!["2", "alpha", "beta"]);
+        assert!(old.first().is_some_and(|count| count != "0"), "catalog population must be nonzero");
+
+        let reload = harness.replace_source(V1).expect("full definition rebuild");
+        assert!(matches!(reload, SkullReload::Full { .. }), "structural definition edit must use full path: {reload:?}");
+        assert_eq!(harness.published_catalog(), vec!["2", "beta", "gamma"]);
+
+        let failed = harness.replace_source(
+            r#"
+@artifact_definition(catalog="widgets", key_param="key")
+deco init widget(key: string) {}
+@widget(key="beta") fn make_beta() -> int { return 20 }
+            @widget(key="beta") fn make_other() -> int { return 4 }
+fn main() {}
+"#,
+        );
+        assert!(failed.is_err(), "duplicate keys must fail the full rebuild");
+        assert_eq!(harness.last_good_catalog(), vec!["2", "beta", "gamma"]);
+        assert_eq!(harness.published_catalog_from(old_artifact), vec!["2", "alpha", "beta"]);
+    }
+
+    #[test]
+    fn late_full_publication_failure_keeps_the_last_good_artifact() {
+        let mut harness = DefinitionTransitionHarness::boot(V0);
+        let old_main = std::fs::read_to_string(&harness.main).expect("last-good main");
+        let blocked_main = harness._dir.path().join("blocked-main");
+        std::fs::create_dir(&blocked_main).expect("blocked publication path");
+
+        let failed = harness.replace_source_at(V1, &blocked_main);
+        assert!(failed.is_err(), "a publication failure must surface");
+        assert_eq!(
+            std::fs::read_to_string(&harness.main).expect("main after failed publication"),
+            old_main,
+            "failed full publication must not replace the last-good artifact"
+        );
+        assert_eq!(harness.last_good_catalog(), vec!["2", "alpha", "beta"]);
+    }
+
+    struct DefinitionTransitionHarness {
+        _dir: tempfile::TempDir,
+        stone: SkullStone,
+        main: PathBuf,
+        incremental: PathBuf,
+        source: PathBuf,
+        last_good_artifact: String,
+    }
+
+    impl DefinitionTransitionHarness {
+        fn boot(source: &str) -> Self {
+            let dir = tempfile::tempdir().expect("transition tempdir");
+            let root = dir.path().to_str().expect("transition root").to_string();
+            let main = dir.path().join("main.lua");
+            let incremental = dir.path().join("incremental.lua");
+            let source_path = dir.path().join("main.rock");
+            std::fs::write(&source_path, source).expect("initial source");
+            let stone = SkullStone::init(&root, &main, &incremental).expect("initial build");
+            let mut harness = Self {
+                _dir: dir,
+                stone,
+                main,
+                incremental,
+                source: source_path,
+                last_good_artifact: String::new(),
+            };
+            harness.last_good_artifact = harness.current_artifact();
+            harness
+        }
+
+        fn replace_source(&mut self, source: &str) -> anyhow::Result<SkullReload> {
+            let reload = self.replace_source_at(source, &self.main.clone())?;
+            self.last_good_artifact = self.current_artifact();
+            Ok(reload)
+        }
+
+        fn replace_source_at(
+            &mut self,
+            source: &str,
+            main: &std::path::Path,
+        ) -> anyhow::Result<SkullReload> {
+            std::fs::write(&self.source, source).expect("replacement source");
+            let reload = self.stone.recompile(
+                std::slice::from_ref(&self.source),
+                main,
+                &self.incremental,
+            )?;
+            Ok(reload)
+        }
+
+        fn current_artifact(&self) -> String {
+            let full = std::fs::read_to_string(&self.main).expect("written main artifact");
+            full.strip_suffix("\n__rock_main_wrapper(main)\n")
+                .unwrap_or(&full)
+                .to_string()
+        }
+
+        fn published_catalog(&self) -> Vec<String> {
+            self.published_catalog_from(self.current_artifact())
+        }
+
+        fn last_good_catalog(&self) -> Vec<String> {
+            self.published_catalog_from(self.last_good_artifact.clone())
+        }
+
+        fn published_catalog_from(&self, artifact: String) -> Vec<String> {
+            let probe = r#"
+local catalog = (_G.__ROCK_DEFINITION_PLAN or {}).widgets
+assert(catalog ~= nil, "widgets catalog was not published")
+io.write("__DEFINITION__", tostring(catalog.len), "\n")
+for i = 1, catalog.len do
+  io.write("__DEFINITION__", catalog._data[i].key, "\n")
+end
+"#;
+            let output = match super::exec_lua(&format!("{artifact}\n{probe}")) {
+                super::ExecOutcome::Output(output) => output,
+                super::ExecOutcome::Errored(error) => {
+                    panic!("definition transition artifact failed: {error}")
+                }
+            };
+            output
+                .lines()
+                .filter_map(|line| line.strip_prefix("__DEFINITION__"))
+                .map(str::to_string)
+                .collect()
+        }
+    }
+}
+
+#[cfg(test)]
 mod force_full_tests {
     //! `force_full` is the stone restart-path canonicalizer: after body edits
     //! have accumulated into `incremental.lua` (overlaying a stale `main.lua`),
