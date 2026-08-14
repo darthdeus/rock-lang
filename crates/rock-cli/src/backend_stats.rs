@@ -412,11 +412,14 @@ fn print_report(input: &str, iters: usize, warmup: usize, bone: &BoneStats, skul
             graph.mono_elapsed_ns as f64 / 1_000_000.0,
         );
         println!(
-            "  graph contributions: reached {}, bound trees {}, edges {}, sites {}, failures {}, always targets {}; index updates subst/trees/erased/always/preds/decls {}/{}/{}/{}/{}/{}; live unique {}/{}/{}/{}/{}/{}",
+            "  graph contributions: reached {}, bound trees {}, edges {}, sites {}, struct-default domains {}, rejections {}, synthesized examined {}, failures {}, always targets {}; index updates subst/trees/erased/always/preds/decls {}/{}/{}/{}/{}/{}; live unique {}/{}/{}/{}/{}/{}",
             graph.contribution_reached,
             graph.contribution_bound_trees,
             graph.contribution_edges,
             graph.contribution_sites,
+            graph.contribution_struct_default_domains,
+            graph.contribution_rejections,
+            graph.contribution_synthesized_examined,
             graph.contribution_failures,
             graph.contribution_always_emitted_targets,
             graph.index_subst_updates,

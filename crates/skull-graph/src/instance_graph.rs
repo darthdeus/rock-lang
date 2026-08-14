@@ -1561,12 +1561,16 @@ pub fn build_in(
         );
         log::debug!(
             "graph contribution/index census: reached {}, bound trees {}, edges {}, sites {}, \
-             failures {}, always targets {}; unique index keys subst/trees/erased/always/preds/decls \
+             struct-default domains {}, rejections {}, synthesized examined {}, failures {}, \
+             always targets {}; unique index keys subst/trees/erased/always/preds/decls \
              {}/{}/{}/{}/{}/{}; phases uninstall/index/derive/post-pass {:.3}/{:.3}/{:.3}/{:.3}ms",
             stats.contribution_reached,
             stats.contribution_bound_trees,
             stats.contribution_edges,
             stats.contribution_sites,
+            stats.contribution_struct_default_domains,
+            stats.contribution_rejections,
+            stats.contribution_synthesized_examined,
             stats.contribution_failures,
             stats.contribution_always_emitted_targets,
             stats.index_subst_unique,
@@ -1857,6 +1861,9 @@ impl InstanceGraph {
                 stats.contribution_bound_trees += c.bound_trees.len();
                 stats.contribution_edges += c.edges.len();
                 stats.contribution_sites += c.call_sites.len() + c.always_call_sites.len();
+                stats.contribution_struct_default_domains += c.struct_default_domains.len();
+                stats.contribution_rejections += c.rejections.len();
+                stats.contribution_synthesized_examined += c.synthesized_examined;
                 stats.contribution_failures += c.rejections.len()
                     + c.unresolved.len()
                     + c.storage_failures.len()
@@ -2904,6 +2911,9 @@ pub struct RunStats {
     pub contribution_bound_trees: usize,
     pub contribution_edges: usize,
     pub contribution_sites: usize,
+    pub contribution_struct_default_domains: usize,
+    pub contribution_rejections: usize,
+    pub contribution_synthesized_examined: usize,
     pub contribution_failures: usize,
     pub contribution_always_emitted_targets: usize,
     pub admissibility_ns: u64,
