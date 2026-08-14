@@ -81,6 +81,8 @@ struct SkullStats {
     setup_lanes: skull::mir_emit::SetupLaneAttribution,
     /// Graph operation census from the LAST timed run.
     graph_census: skull::instance_graph::RunStats,
+    /// Concrete-plan ownership census from the LAST timed run.
+    concrete_stats: skull::concrete_body::ConcreteBuildStats,
 }
 
 pub fn do_backend_stats(input: &str, iters: usize, warmup: usize) -> Result<()> {
@@ -156,6 +158,7 @@ fn run_skull(sources: &SourceFiles, iters: usize, warmup: usize) -> SkullStats {
         stats.attribution = times.attribution;
         stats.setup_lanes = times.setup_lanes;
         stats.graph_census = times.graph_census;
+        stats.concrete_stats = times.concrete_stats;
     }
     stats.files = sources.files.len();
     stats
@@ -376,6 +379,28 @@ fn print_report(input: &str, iters: usize, warmup: usize, bone: &BoneStats, skul
             graph.bound_tree_rows,
             graph.bound_call_rows,
             graph.iterator_rows,
+        );
+    }
+    let concrete = &skull.concrete_stats;
+    if concrete.plan_attempts > 0 || concrete.always_plan_attempts > 0 {
+        println!(
+            "  concrete plan facts (one timed run): ordinary plans {}/{} success/fail over {}; always {}/{} over {}; source slots expr/binding {}/{}; callee vecs {} over {} rows; plan maps callees/signatures {}/{}; cloned type tables expr/binding/untyped {}/{}/{}/{}",
+            concrete.plan_successes,
+            concrete.plan_failures,
+            concrete.plan_attempts,
+            concrete.always_plan_successes,
+            concrete.always_plan_failures,
+            concrete.always_plan_attempts,
+            concrete.source_expr_slots,
+            concrete.source_binding_slots,
+            concrete.callee_vec_materializations,
+            concrete.callee_vec_rows,
+            concrete.plan_callee_map_inserts,
+            concrete.plan_callee_signature_inserts,
+            concrete.plan_type_expr_clones,
+            concrete.plan_type_binding_clones,
+            concrete.plan_untyped_expr_clones,
+            concrete.plan_untyped_binding_clones,
         );
     }
     let memo = &skull.abi_plan_stats;

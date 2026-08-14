@@ -1257,6 +1257,33 @@ fn every_recorded_operation_becomes_one_entry_a_hole_or_a_rejection() {
     }
 }
 
+#[test]
+fn concrete_plan_attribution_exposes_duplicate_ownership_work() {
+    let (_ws, _g, bodies) = bodies_of(RICH);
+    let stats = bodies.build_stats;
+    assert!(stats.plan_attempts > 0, "no ordinary concrete plans were attempted: {stats:?}");
+    assert_eq!(
+        stats.plan_attempts,
+        stats.plan_successes + stats.plan_failures,
+        "ordinary plan outcomes lost a population: {stats:?}"
+    );
+    assert!(
+        stats.source_expr_slots > 0
+            && stats.source_binding_slots > 0
+            && stats.plan_type_expr_clones > 0
+            && stats.plan_type_binding_clones > 0,
+        "the fixture did not expose duplicated type-table ownership: {stats:?}"
+    );
+    assert!(
+        stats.callee_vec_materializations > 0 && stats.callee_vec_rows > 0,
+        "the fixture did not expose ConcreteBody::callees allocations: {stats:?}"
+    );
+    assert!(
+        stats.plan_callee_map_inserts > 0 && stats.plan_callee_signature_inserts > 0,
+        "the fixture did not expose plan callee consumers: {stats:?}"
+    );
+}
+
 /// The callee table is a function of the INSTANCE. `wrap<int>` and
 /// `wrap<string>` share one HIR body, so the same `Idx<Expr>` must name two
 /// DIFFERENT callee instances -- which is what makes a substitution unnecessary

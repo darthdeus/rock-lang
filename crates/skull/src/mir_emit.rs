@@ -480,6 +480,8 @@ pub struct MirEmit {
     /// Operational graph work and repeated source-fact populations from the
     /// graph used by this emission.
     pub graph_census: crate::instance_graph::RunStats,
+    /// Concrete-plan ownership and assembly populations from this emission.
+    pub concrete_stats: crate::concrete_body::ConcreteBuildStats,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -3866,6 +3868,7 @@ fn assemble(
             arena_traffic: ArenaTraffic::default(),
             setup_lanes: SetupLaneAttribution::default(),
             graph_census: crate::instance_graph::RunStats::default(),
+            concrete_stats: crate::concrete_body::ConcreteBuildStats::default(),
         },
         emitted_bodies,
     ))
@@ -4309,6 +4312,7 @@ fn emit_full_in_with_mutation(
             static_key_baseline.insert(sc.cell, static_cell_key(sc));
         }
     }
+    let concrete_stats = concrete.build_stats;
     let cache = SkullEmitCache {
         chunks,
         concrete,
@@ -4329,6 +4333,7 @@ fn emit_full_in_with_mutation(
     };
     let mut built_specs: Vec<(Instance, Chunk)> = Vec::new();
     let (mut emit, emitted) = assemble(ws, &cache.cg, &cache.scx, &cache, &mut built_specs)?;
+    emit.concrete_stats = concrete_stats;
     emit.setup_lanes = setup_lanes;
     let mut phases = setup_phases;
     phases.extend(emit.phases);
@@ -4817,6 +4822,7 @@ pub fn emit_incremental(
     let t_asm = Instant::now();
     let mut built_specs: Vec<(Instance, Chunk)> = Vec::new();
     let (mut emit, emitted) = assemble(ws, &cache.cg, &cache.scx, cache, &mut built_specs)?;
+    emit.concrete_stats = cache.concrete.build_stats;
     cache.emitted = emitted;
     cache.absorb_spec_chunks(built_specs);
     let reassemble = t_asm.elapsed();
@@ -5025,6 +5031,7 @@ fn assemble_overlay(
         arena_traffic: ArenaTraffic::default(),
         setup_lanes: SetupLaneAttribution::default(),
         graph_census: crate::instance_graph::RunStats::default(),
+        concrete_stats: crate::concrete_body::ConcreteBuildStats::default(),
     }
 }
 
@@ -5095,6 +5102,7 @@ pub fn emit_overlay(
     let t_relower = t2.elapsed();
     let t3 = Instant::now();
     let mut emit = assemble_overlay(ws, cache, shader_changed);
+    emit.concrete_stats = cache.concrete.build_stats;
     // Advance the static baseline to the keys now in effect. A reset line fires on
     // the reload that dofiles the overlay carrying it, so once THIS overlay resets a
     // cell (or leaves it unchanged), a LATER overlay must not reset it again -- else

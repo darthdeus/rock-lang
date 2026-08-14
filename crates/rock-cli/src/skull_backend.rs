@@ -104,6 +104,8 @@ pub struct SkullPhaseTimes {
     pub setup_lanes: skull::mir_emit::SetupLaneAttribution,
     /// Graph operation census from `MirEmit`.
     pub graph_census: skull::instance_graph::RunStats,
+    /// Concrete-plan ownership census from `MirEmit`.
+    pub concrete_stats: skull::concrete_body::ConcreteBuildStats,
 }
 
 /// Whole-project skull timing: parse all user files, type-check them together
@@ -150,6 +152,7 @@ pub fn skull_workspace_timed(sources: &SourceFiles) -> (bool, SkullPhaseTimes) {
             times.attribution = e.attribution;
             times.setup_lanes = e.setup_lanes;
             times.graph_census = e.graph_census;
+            times.concrete_stats = e.concrete_stats;
             true
         }
         Err(_) => false,

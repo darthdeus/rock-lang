@@ -311,6 +311,22 @@ pub struct ConcreteBodies {
 
 #[derive(Default, Debug, Clone, Copy)]
 pub struct ConcreteBuildStats {
+    pub plan_attempts: usize,
+    pub plan_successes: usize,
+    pub plan_failures: usize,
+    pub always_plan_attempts: usize,
+    pub always_plan_successes: usize,
+    pub always_plan_failures: usize,
+    pub source_expr_slots: usize,
+    pub source_binding_slots: usize,
+    pub callee_vec_materializations: usize,
+    pub callee_vec_rows: usize,
+    pub plan_callee_map_inserts: usize,
+    pub plan_callee_signature_inserts: usize,
+    pub plan_type_expr_clones: usize,
+    pub plan_type_binding_clones: usize,
+    pub plan_untyped_expr_clones: usize,
+    pub plan_untyped_binding_clones: usize,
     pub type_nodes_examined: usize,
     pub type_node_memo_hits: usize,
     pub type_node_conversion_attempts: usize,
@@ -1076,6 +1092,16 @@ fn cached_concrete_signature(
     Ok(sig)
 }
 
+fn counted_callees<'a>(
+    body: &'a ConcreteBody,
+    stats: &mut ConcreteBuildStats,
+) -> Vec<(Site, &'a Callee)> {
+    let rows = body.callees();
+    stats.callee_vec_materializations += 1;
+    stats.callee_vec_rows += rows.len();
+    rows
+}
+
 fn concrete_plan(
     ws: &Workspace,
     g: &InstanceGraph,
@@ -1092,7 +1118,7 @@ fn concrete_plan(
     let mut callees = BTreeMap::new();
     let mut callee_signatures = BTreeMap::new();
     let signature_started = timing_enabled.then(std::time::Instant::now);
-    for (site, callee) in body.callees() {
+    for (site, callee) in counted_callees(body, stats) {
         let instance = callee.instance().clone();
         callee_signatures
             .insert(site.clone(), cached_concrete_signature(ws, g, &instance, sig_cache)?);
@@ -1141,7 +1167,7 @@ fn concrete_plan(
         .get(&Owner::Instance(inst.clone()))
         .into_iter()
         .flat_map(|c| c.struct_default_domains.iter().cloned());
-    let site_domains = body.callees().into_iter().map(|(site, _)| site.domain);
+    let site_domains = counted_callees(body, stats).into_iter().map(|(site, _)| site.domain);
     let foreign_domains = foreign_domain_tables(
         ws,
         g,
@@ -1149,6 +1175,12 @@ fn concrete_plan(
         stats,
         timing_enabled,
     )?;
+    stats.plan_callee_map_inserts += callees.len();
+    stats.plan_callee_signature_inserts += callee_signatures.len();
+    stats.plan_type_expr_clones += body.expr_types.iter().count();
+    stats.plan_type_binding_clones += body.binding_types.iter().count();
+    stats.plan_untyped_expr_clones += body.untyped_exprs.len();
+    stats.plan_untyped_binding_clones += body.untyped_bindings.len();
     Ok(ConcreteBodyPlan {
         owner: ConcreteOwner::Function(inst.clone()),
         types: ConcreteTypeTables {
@@ -1357,6 +1389,8 @@ pub fn build(ws: &Workspace, g: &InstanceGraph) -> ConcreteBodies {
         t_convert += t.elapsed();
         out.expr_examined += c.expr_examined;
         out.binding_examined += c.binding_examined;
+        build_stats.source_expr_slots += c.expr_examined;
+        build_stats.source_binding_slots += c.binding_examined;
         out.generics_bound += c.generics_bound;
         out.slot_conversions += c.conversions;
         out.generic_bodies += usize::from(!subst.is_empty());
@@ -1400,8 +1434,10 @@ pub fn build(ws: &Workspace, g: &InstanceGraph) -> ConcreteBodies {
         // intersecting the two populations rather than by reasoning about the
         // kinds -- a kind absent here needs no type because no table asks about
         // it, and a kind present here is answered by the site's own oracle.
-        let keys: BTreeSet<Idx<Expr>> =
-            concrete.callees().into_iter().map(|(s, _)| s.expr).collect();
+        let keys: BTreeSet<Idx<Expr>> = counted_callees(&concrete, &mut build_stats)
+            .into_iter()
+            .map(|(s, _)| s.expr)
+            .collect();
         for u in &untyped {
             if keys.contains(&u.expr) {
                 *out.untyped_as_callee_key.entry(u.kind).or_insert(0) += 1;
@@ -1411,6 +1447,7 @@ pub fn build(ws: &Workspace, g: &InstanceGraph) -> ConcreteBodies {
             out.untyped.push((inst.clone(), u));
         }
         let t = std::time::Instant::now();
+        build_stats.plan_attempts += 1;
         match concrete_plan(
             ws,
             g,
@@ -1425,9 +1462,13 @@ pub fn build(ws: &Workspace, g: &InstanceGraph) -> ConcreteBodies {
             timing_enabled,
         ) {
             Ok(plan) => {
+                build_stats.plan_successes += 1;
                 plans.insert(inst.clone(), plan);
             }
-            Err(reason) => out.plan_failures.push((inst.clone(), reason)),
+            Err(reason) => {
+                build_stats.plan_failures += 1;
+                out.plan_failures.push((inst.clone(), reason));
+            }
         }
         t_plan += t.elapsed();
         per_inst.push((inst.clone(), t_inst.elapsed()));
@@ -1435,6 +1476,7 @@ pub fn build(ws: &Workspace, g: &InstanceGraph) -> ConcreteBodies {
     }
     for owner in g.contributions.keys() {
         let Owner::AlwaysEmitted(module, body_owner) = owner else { continue };
+        build_stats.always_plan_attempts += 1;
         match concrete_always_plan(
             ws,
             g,
@@ -1445,10 +1487,12 @@ pub fn build(ws: &Workspace, g: &InstanceGraph) -> ConcreteBodies {
             timing_enabled,
         ) {
             Ok(Some(plan)) => {
+                build_stats.always_plan_successes += 1;
                 out.always_plans.insert(plan.owner.clone(), plan);
             }
             Ok(None) => {}
             Err(reason) => {
+                build_stats.always_plan_failures += 1;
                 let owner = match body_owner {
                     BodyOwner::Global(index) => ConcreteOwner::Global {
                         module: *module,
