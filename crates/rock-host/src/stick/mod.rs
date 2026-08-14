@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
+pub mod build_vars;
 pub mod resolver;
 
 #[derive(Debug, Clone)]
@@ -22,8 +23,45 @@ pub struct StickConfig {
     /// build-time property of the bundle, not something the running game can
     /// choose, so it cannot live in `GameConfig`. Default: landscape.
     pub ios: Option<IosConfig>,
+    /// Declared compile-time inputs (`build_var(..)`) and release channels.
+    /// Commands are run by the CLI once per session build, before compilation;
+    /// the compiler only ever sees resolved values (docs/comptime-plan.md).
+    pub build: Option<BuildConfig>,
+    /// Release asset selection consumed by both `rock package` and `rock web`.
+    pub release: Option<ReleaseConfig>,
     pub dependencies: HashMap<String, Dependency>,
 }
+
+#[derive(Debug, Clone, Default)]
+pub struct BuildConfig {
+    pub channels: Vec<String>,
+    pub default_channel: Option<String>,
+    pub vars: HashMap<String, BuildVar>,
+}
+
+/// One declared build variable. Exactly one of `cmd`/`builtin`/`value` is its
+/// source (`validate_build` enforces arity; the shorthand `NAME = "literal"`
+/// parses as `value`). `channels` restricts where the source runs; outside the
+/// list the var resolves to `default`, and a restricted var with no default is
+/// a resolution error there.
+#[derive(Debug, Clone, Default)]
+pub struct BuildVar {
+    pub cmd: Option<String>,
+    pub builtin: Option<String>,
+    pub value: Option<String>,
+    pub channels: Option<Vec<String>>,
+    pub default: Option<String>,
+    /// Hash the value into cache keys but never store it in plaintext in any
+    /// on-disk artifact or manifest.
+    pub secret: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ReleaseConfig {
+    pub assets: Option<Vec<String>>,
+}
+
+pub const KNOWN_BUILD_BUILTINS: [&str; 2] = ["channel", "platform"];
 
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
@@ -136,11 +174,11 @@ pub enum PackageType {
     Lib,
 }
 
-// `[build]` and `Target` removed: Lua was the only codegen target Rock
-// ever shipped, so the field was tautological. Game-vs-lib detection
-// now reads `[package] type` (or the `stone` dependency) -- never the
-// build target. If/when a real second target lands (web, native, ...)
-// reintroduce the section with a meaningful enum.
+// `[build] target` and `Target` stay removed: Lua was the only codegen
+// target Rock ever shipped, so that field was tautological. Game-vs-lib
+// detection reads `[package] type` (or the `stone` dependency) -- never a
+// build target. `[build]` now carries channels and declared compile-time
+// vars instead (BuildConfig above).
 
 /// `Path(String)` because PathBuf isn't a built-in serde scalar; the
 /// consumer sites (`resolver.rs`, `compilation_units.rs`) convert via
@@ -259,6 +297,103 @@ impl<'de> serde::Deserialize<'de> for EngineConfig {
     }
 }
 
+impl<'de> serde::Deserialize<'de> for BuildVar {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct Vis;
+        impl<'de> serde::de::Visitor<'de> for Vis {
+            type Value = BuildVar;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                write!(f, "a literal string or a table with cmd/builtin/value/channels/default/secret")
+            }
+            fn visit_str<E: serde::de::Error>(self, s: &str) -> Result<BuildVar, E> {
+                Ok(BuildVar { value: Some(s.to_string()), ..BuildVar::default() })
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<BuildVar, A::Error> {
+                let mut var = BuildVar::default();
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "cmd" => { var.cmd = Some(map.next_value()?); }
+                        "builtin" => { var.builtin = Some(map.next_value()?); }
+                        "value" => { var.value = Some(map.next_value()?); }
+                        "channels" => { var.channels = Some(map.next_value()?); }
+                        "default" => { var.default = Some(map.next_value()?); }
+                        "secret" => { var.secret = map.next_value()?; }
+                        other => {
+                            // Fail closed: a misspelled source key would leave the
+                            // var sourceless and every build_var() reading it stale.
+                            return Err(serde::de::Error::custom(format!(
+                                "unknown key `{other}` in [build.vars] entry; known keys: \
+                                 cmd, builtin, value, channels, default, secret"
+                            )));
+                        }
+                    }
+                }
+                Ok(var)
+            }
+        }
+        d.deserialize_any(Vis)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for BuildConfig {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct Vis;
+        impl<'de> serde::de::Visitor<'de> for Vis {
+            type Value = BuildConfig;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                write!(f, "BuildConfig struct")
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<BuildConfig, A::Error> {
+                let mut build = BuildConfig::default();
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "channels" => { build.channels = map.next_value()?; }
+                        "default_channel" => { build.default_channel = Some(map.next_value()?); }
+                        "vars" => { build.vars = map.next_value()?; }
+                        other => {
+                            // Fail closed: a misspelled key here would silently drop
+                            // every declared var and channel.
+                            return Err(serde::de::Error::custom(format!(
+                                "unknown key `{other}` in [build]; known keys: \
+                                 channels, default_channel, vars"
+                            )));
+                        }
+                    }
+                }
+                Ok(build)
+            }
+        }
+        d.deserialize_map(Vis)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for ReleaseConfig {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct Vis;
+        impl<'de> serde::de::Visitor<'de> for Vis {
+            type Value = ReleaseConfig;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                write!(f, "ReleaseConfig struct")
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<ReleaseConfig, A::Error> {
+                let mut release = ReleaseConfig::default();
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "assets" => { release.assets = Some(map.next_value()?); }
+                        other => {
+                            return Err(serde::de::Error::custom(format!(
+                                "unknown key `{other}` in [release]; known keys: assets"
+                            )));
+                        }
+                    }
+                }
+                Ok(release)
+            }
+        }
+        d.deserialize_map(Vis)
+    }
+}
+
 impl<'de> serde::Deserialize<'de> for RendererConfig {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         struct Vis;
@@ -327,21 +462,14 @@ impl<'de> serde::Deserialize<'de> for StickConfig {
                 let mut engine: Option<EngineConfig> = None;
                 let mut renderer: Option<RendererConfig> = None;
                 let mut ios: Option<IosConfig> = None;
+                let mut build: Option<BuildConfig> = None;
+                let mut release: Option<ReleaseConfig> = None;
                 let mut dependencies: HashMap<String, Dependency> = HashMap::new();
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
                         "package" => { package = Some(map.next_value()?); }
-                        "build" => {
-                            // Hard reject -- the field used to carry `target = "lua"`
-                            // (the only option), so every real file just repeated the
-                            // default. Silently ignoring would let stale tomls drift;
-                            // this prompts the author to delete the section.
-                            return Err(serde::de::Error::custom(
-                                "[build] section is no longer accepted. Rock compiles to Lua; \
-                                 delete the section. If/when a real second codegen target lands, \
-                                 the section will come back with meaningful options."
-                            ));
-                        }
+                        "build" => { build = Some(map.next_value()?); }
+                        "release" => { release = Some(map.next_value()?); }
                         "engine" => { engine = map.next_value()?; }
                         "renderer" => { renderer = map.next_value()?; }
                         "ios" => { ios = map.next_value()?; }
@@ -350,7 +478,7 @@ impl<'de> serde::Deserialize<'de> for StickConfig {
                     }
                 }
                 let package = package.ok_or_else(|| serde::de::Error::missing_field("package"))?;
-                Ok(StickConfig { package, engine, renderer, ios, dependencies })
+                Ok(StickConfig { package, engine, renderer, ios, build, release, dependencies })
             }
         }
         d.deserialize_map(Vis)
@@ -528,6 +656,89 @@ impl StickConfig {
             }
         }
         Ok(())
+    }
+
+    /// Reject a malformed `[build]` section at load time: a var with zero or
+    /// two sources, an unknown builtin, or a channel name nothing declares
+    /// would otherwise surface as a confusing resolution failure (or silently
+    /// wrong value) at the first `build_var()` call.
+    pub fn validate_build(&self) -> Result<()> {
+        let Some(build) = self.build.as_ref() else {
+            return Ok(());
+        };
+        if let Some(default) = build.default_channel.as_deref() {
+            if !build.channels.iter().any(|c| c == default) {
+                anyhow::bail!(
+                    "stick.toml: [build] default_channel {:?} is not in channels {:?}",
+                    default, build.channels
+                );
+            }
+        }
+        for (name, var) in &build.vars {
+            let sources = [var.cmd.is_some(), var.builtin.is_some(), var.value.is_some()];
+            match sources.iter().filter(|s| **s).count() {
+                1 => {}
+                0 => anyhow::bail!(
+                    "stick.toml: [build.vars] {name} has no source; set one of cmd, builtin, value"
+                ),
+                _ => anyhow::bail!(
+                    "stick.toml: [build.vars] {name} has more than one source; \
+                     set exactly one of cmd, builtin, value"
+                ),
+            }
+            if let Some(builtin) = var.builtin.as_deref() {
+                if !KNOWN_BUILD_BUILTINS.contains(&builtin) {
+                    anyhow::bail!(
+                        "stick.toml: [build.vars] {name} names unknown builtin {:?}. Known: {:?}",
+                        builtin, KNOWN_BUILD_BUILTINS
+                    );
+                }
+            }
+            if let Some(var_channels) = var.channels.as_deref() {
+                for chan in var_channels {
+                    if !build.channels.iter().any(|c| c == chan) {
+                        anyhow::bail!(
+                            "stick.toml: [build.vars] {name} restricts to channel {:?}, \
+                             which is not in [build] channels {:?}",
+                            chan, build.channels
+                        );
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Resolve the release asset list once from the already-parsed StickConfig.
+    /// The default mirrors the historical release collector: game `assets/`,
+    /// plus a root-level `level.txt` when present.
+    pub fn release_assets(&self, project_dir: &Path) -> Result<Vec<String>> {
+        let assets = self
+            .release
+            .as_ref()
+            .and_then(|release| release.assets.clone())
+            .unwrap_or_else(|| {
+                let mut defaults = vec!["assets".to_string()];
+                if project_dir.join("level.txt").exists() {
+                    defaults.push("level.txt".to_string());
+                }
+                defaults
+            });
+        for rel in &assets {
+            let path = Path::new(rel);
+            if rel.is_empty()
+                || path.is_absolute()
+                || path
+                    .components()
+                    .any(|c| matches!(c, std::path::Component::ParentDir))
+            {
+                anyhow::bail!(
+                    "stick.toml: [release].assets entry {:?} must be a non-empty relative path inside the project",
+                    rel
+                );
+            }
+        }
+        Ok(assets)
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -908,6 +1119,129 @@ mod tests {
             .expect("valid manifest must parse")
             .expect("must be Some when file exists and parses");
         assert_eq!(result.package.name, "x");
+    }
+
+    #[test]
+    fn build_section_parses_channels_and_vars() {
+        let cfg = StickConfig::new_from_str(concat!(
+            "[package]\nname = \"x\"\n",
+            "[build]\n",
+            "channels = [\"dev\", \"steam\"]\n",
+            "default_channel = \"dev\"\n",
+            "[build.vars]\n",
+            "GIT_SHA = { cmd = \"git rev-parse --short HEAD\" }\n",
+            "CHANNEL = { builtin = \"channel\" }\n",
+            "ENDPOINT = \"https://example.test/v1\"\n",
+            "TOKEN = { cmd = \"./load.sh\", channels = [\"steam\"], default = \"\", secret = true }\n",
+        )).expect("build section must parse");
+        let build = cfg.build.as_ref().expect("build config present");
+        assert_eq!(build.channels, vec!["dev", "steam"]);
+        assert_eq!(build.default_channel.as_deref(), Some("dev"));
+        let sha = &build.vars["GIT_SHA"];
+        assert_eq!(sha.cmd.as_deref(), Some("git rev-parse --short HEAD"));
+        assert!(!sha.secret);
+        let chan = &build.vars["CHANNEL"];
+        assert_eq!(chan.builtin.as_deref(), Some("channel"));
+        let endpoint = &build.vars["ENDPOINT"];
+        assert_eq!(endpoint.value.as_deref(), Some("https://example.test/v1"));
+        let token = &build.vars["TOKEN"];
+        assert_eq!(token.channels.as_deref(), Some(&["steam".to_string()][..]));
+        assert_eq!(token.default.as_deref(), Some(""));
+        assert!(token.secret);
+        cfg.validate_build().expect("well-formed build section validates");
+    }
+
+    #[test]
+    fn build_section_rejects_unknown_key() {
+        let err = StickConfig::new_from_str(
+            "[package]\nname = \"x\"\n[build]\nchanels = [\"dev\"]\n",
+        ).expect_err("unknown [build] key must be rejected");
+        assert!(format!("{err}").contains("chanels"), "error names the bad key: {err}");
+    }
+
+    #[test]
+    fn release_section_parses_assets_through_stick_config() {
+        let cfg = StickConfig::new_from_str(concat!(
+            "[package]\nname = \"x\"\n",
+            "[release]\nassets = [\"assets\", \"saves/level.json\"]\n",
+        ))
+        .expect("release section must parse");
+        assert_eq!(
+            cfg.release.as_ref().unwrap().assets.as_deref(),
+            Some(&["assets".to_string(), "saves/level.json".to_string()][..])
+        );
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(cfg.release_assets(dir.path()).unwrap(), vec!["assets", "saves/level.json"]);
+    }
+
+    #[test]
+    fn release_section_rejects_unknown_keys_and_escape_paths() {
+        let err = StickConfig::new_from_str(
+            "[package]\nname = \"x\"\n[release]\nasset = [\"assets\"]\n",
+        )
+        .expect_err("unknown release key must reject");
+        assert!(format!("{err}").contains("asset"), "error names the bad release key: {err}");
+
+        let cfg = StickConfig::new_from_str(
+            "[package]\nname = \"x\"\n[release]\nassets = [\"../outside\"]\n",
+        )
+        .expect("path validation happens when selecting assets");
+        let dir = tempfile::tempdir().unwrap();
+        let err = cfg.release_assets(dir.path()).expect_err("asset escape must reject");
+        assert!(format!("{err}").contains("outside"), "error names the escape: {err}");
+    }
+
+    #[test]
+    fn build_var_rejects_unknown_key() {
+        let err = StickConfig::new_from_str(
+            "[package]\nname = \"x\"\n[build.vars]\nX = { comand = \"echo hi\" }\n",
+        ).expect_err("unknown var key must be rejected");
+        assert!(format!("{err}").contains("comand"), "error names the bad key: {err}");
+    }
+
+    #[test]
+    fn validate_build_rejects_multiple_sources() {
+        let cfg = StickConfig::new_from_str(
+            "[package]\nname = \"x\"\n[build.vars]\nX = { cmd = \"echo hi\", builtin = \"channel\" }\n",
+        ).expect("parses; source arity is a validate error");
+        let err = cfg.validate_build().expect_err("two sources must reject");
+        assert!(format!("{err}").contains("X"), "error names the var: {err}");
+    }
+
+    #[test]
+    fn validate_build_rejects_sourceless_var() {
+        let cfg = StickConfig::new_from_str(
+            "[package]\nname = \"x\"\n[build.vars]\nX = { secret = true }\n",
+        ).unwrap();
+        cfg.validate_build().expect_err("a var with no source must reject");
+    }
+
+    #[test]
+    fn validate_build_rejects_unknown_builtin() {
+        let cfg = StickConfig::new_from_str(
+            "[package]\nname = \"x\"\n[build.vars]\nX = { builtin = \"hostname\" }\n",
+        ).unwrap();
+        let err = cfg.validate_build().expect_err("unknown builtin must reject");
+        assert!(format!("{err}").contains("hostname"), "error names the builtin: {err}");
+    }
+
+    #[test]
+    fn validate_build_rejects_undeclared_var_channel() {
+        let cfg = StickConfig::new_from_str(concat!(
+            "[package]\nname = \"x\"\n",
+            "[build]\nchannels = [\"dev\"]\n",
+            "[build.vars]\nX = { cmd = \"echo hi\", channels = [\"steam\"] }\n",
+        )).unwrap();
+        let err = cfg.validate_build().expect_err("var channel outside [build] channels must reject");
+        assert!(format!("{err}").contains("steam"), "error names the channel: {err}");
+    }
+
+    #[test]
+    fn validate_build_rejects_default_channel_outside_channels() {
+        let cfg = StickConfig::new_from_str(
+            "[package]\nname = \"x\"\n[build]\nchannels = [\"dev\"]\ndefault_channel = \"steam\"\n",
+        ).unwrap();
+        cfg.validate_build().expect_err("default_channel must be a declared channel");
     }
 
     #[test]

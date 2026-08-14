@@ -16,8 +16,8 @@ pub fn discover_sources(source_spec: &SourceSpec) -> Result<SourceFiles> {
         SourceSpec::Directory(project_dir) => {
             // Check for stick.toml to pick up project settings
             if let Some((config_path, stick_config)) = StickConfig::find_from_dir(project_dir)? {
-                // Load project files first
-                let mut sources = SourceFiles::from_dir_preprocessed(project_dir)?;
+                let project_sources = SourceFiles::from_dir_preprocessed(project_dir)?;
+                let mut dependency_files = Vec::new();
 
                 // Resolve and load dependencies
                 if !stick_config.dependencies.is_empty() {
@@ -28,18 +28,21 @@ pub fn discover_sources(source_spec: &SourceSpec) -> Result<SourceFiles> {
                     // Load files from each dependency
                     for dep in resolved_deps {
                         let dep_sources = SourceFiles::from_dir_preprocessed(&dep.path)?;
-                        // Merge dependency sources into main sources, excluding script files
+                        // Dependencies load before the project. Global initializers are
+                        // module-load effects, so a library must be ready before a
+                        // consuming game's global initializer on both emitters.
                         for file in dep_sources.files {
                             // Skip files with #script directive (test/example files in library dependencies)
                             if !file.borrow().is_script {
-                                sources.files.push(file);
+                                dependency_files.push(file);
                             }
                         }
 
                     }
                 }
 
-                Ok(sources)
+                dependency_files.extend(project_sources.files);
+                Ok(SourceFiles { files: dependency_files })
             } else {
                 // No stick.toml - check if there's exactly one .rock file
                 let rock_files = rock_host::project::find_rock_files_at_path(project_dir)?;

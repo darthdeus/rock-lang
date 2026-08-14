@@ -594,6 +594,10 @@ impl Builder<'_> {
                     Some(ExpandKind::UniformValues) => {
                         self.expand_uniform_values(e, func, &arg_idxs)
                     }
+                    Some(ExpandKind::BuildVar | ExpandKind::EmbedString) => {
+                        let kind = self.fn_expand_kind(func).unwrap();
+                        self.expand_comptime_input(e, &arg_idxs, kind)
+                    }
                     None => self.lower_direct_call_repr(e, func, &arg_idxs, any_named),
                 },
                 Err(gap_err) => {

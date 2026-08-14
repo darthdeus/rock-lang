@@ -25,6 +25,18 @@ mod js_backend_ratchet;
 mod js_coroutines;
 #[path = "js_test_harness_globals_sentinel.rs"]
 mod js_test_harness_globals_sentinel;
+#[path = "comptime_build_vars.rs"]
+mod comptime_build_vars;
+#[path = "cimgui_prelude.rs"]
+mod cimgui_prelude;
+#[path = "release_mode_deleted.rs"]
+mod release_mode_deleted;
+#[path = "mag_build_vars.rs"]
+mod mag_build_vars;
+#[path = "package.rs"]
+mod package;
+#[path = "fire_manifest.rs"]
+mod fire_manifest;
 #[path = "js_run_gate.rs"]
 mod js_run_gate;
 #[path = "js_value_tests.rs"]
@@ -59,6 +71,8 @@ mod shader_register_arity_gate;
 mod shader_validate_gate;
 #[path = "shape_oracle.rs"]
 mod shape_oracle;
+#[path = "stone_test_comptime.rs"]
+mod stone_test_comptime;
 #[path = "stone_test_debounce.rs"]
 mod stone_test_debounce;
 #[path = "stone_test_decorator_cleanup.rs"]

@@ -57,7 +57,16 @@ fn skull_emit_full(
     let user = skull_parser::parse_module(src, ustr::Ustr::from(file))
         .map_err(|e| EmitFullErr::Compile(vec![e]))?;
     let user_file = user.file;
-    let ws = crate::bone_backend::check_with_stdlib([user]).map_err(EmitFullErr::Compile)?;
+    let mut ws = crate::bone_backend::check_with_stdlib([user]).map_err(EmitFullErr::Compile)?;
+    // Single-file emission resolves from the file's enclosing project
+    // (walk-up), matching the JS single-file path -- the same source must
+    // agree across backends (crates/rock-cli/tests/js_run_gate.rs).
+    crate::comptime::stamp_workspace(&mut ws, std::path::Path::new(file)).map_err(|e| {
+        EmitFullErr::Compile(vec![CompilerError::new_no_location(format!(
+            "build var resolution failed: {e:#}"
+        ))])
+    })?;
+    let ws = ws;
     // The build lint pass (`docs/lint-future-plan.md`): soft findings report,
     // `Error` findings refuse the program through the same path a type error
     // takes.
@@ -164,13 +173,17 @@ pub fn skull_iter_codegen(path: &str, iters: usize) -> Result<()> {
             crate::ablation_report::exit_with_census(1);
         }
     };
-    let ws = match crate::bone_backend::check_modules(&mut modules) {
+    let mut ws = match crate::bone_backend::check_modules(&mut modules) {
         Ok(ws) => ws,
         Err(errs) => {
             eprintln!("{}", render_project_errs(&sources, &errs));
             crate::ablation_report::exit_with_census(1);
         }
     };
+    if let Err(e) = crate::comptime::stamp_workspace(&mut ws, std::path::Path::new(path)) {
+        eprintln!("Error: build var resolution failed for {path}: {e:#}");
+        crate::ablation_report::exit_with_census(1);
+    }
     let entry_mid = crate::bone_backend::entry_module_id(&ws, entry_file);
 
     // Warm-up emit outside the timed loop (catch any gap, prime the allocator).
@@ -220,13 +233,17 @@ pub fn skull_inline_stats(path: &str) -> Result<()> {
             crate::ablation_report::exit_with_census(1);
         }
     };
-    let ws = match crate::bone_backend::check_modules(&mut modules) {
+    let mut ws = match crate::bone_backend::check_modules(&mut modules) {
         Ok(ws) => ws,
         Err(errs) => {
             eprintln!("{}", render_project_errs(&sources, &errs));
             crate::ablation_report::exit_with_census(1);
         }
     };
+    if let Err(e) = crate::comptime::stamp_workspace(&mut ws, std::path::Path::new(path)) {
+        eprintln!("Error: build var resolution failed for {path}: {e:#}");
+        crate::ablation_report::exit_with_census(1);
+    }
 
     let r = skull::inline_stats::report(&ws);
     let out = "skull-inline-stats.txt";
@@ -659,9 +676,15 @@ fn skull_build_package(dir: &str) -> std::result::Result<SkullOutcome, SkullFail
         reason: categorize(&errs[0].message),
         rendered: render_project_errs(&sources, &errs),
     })?;
-    let ws = crate::bone_backend::check_modules(&mut modules).map_err(|errs| SkullFailure {
+    let mut ws = crate::bone_backend::check_modules(&mut modules).map_err(|errs| SkullFailure {
         reason: categorize(&errs[0].message),
         rendered: render_project_errs(&sources, &errs),
+    })?;
+    crate::comptime::stamp_workspace(&mut ws, std::path::Path::new(dir)).map_err(|e| {
+        SkullFailure {
+            reason: "build var resolution failed".to_string(),
+            rendered: format!("build var resolution failed for {dir}: {e:#}"),
+        }
     })?;
     let entry_mid = crate::bone_backend::entry_module_id(&ws, entry_file);
     let lua = match skull::mir_emit::emit_workspace_mir(&ws, entry_mid) {
@@ -1050,7 +1073,10 @@ pub fn skull_watch(path: &str, output: Option<String>) -> Result<()> {
         let mut update_failed = false;
 
         match session {
-            None => match crate::bone_backend::bone_session(files.clone()) {
+            None => match crate::bone_backend::bone_session_for_emission(
+                files.clone(),
+                std::path::Path::new(path),
+            ) {
                 Ok(s) => {
                     *session = Some(s);
                     full = true; // first build: populate the cache
@@ -1253,8 +1279,9 @@ pub(crate) fn render_project_errs(sources: &SourceFiles, errs: &[CompilerError])
 /// bone, emit Lua via skull, and execute it.
 ///
 /// A game project also needs the stone engine runtime (libstone FFI + the frame
-/// loop): the `is_game` branch below stages libstone and the cimgui prelude and
-/// execs luajit on `tmp/main.lua`, reusing the rock backend's run recipe
+/// loop): the `is_game` branch below stages libstone and execs luajit on
+/// `tmp/main.lua`, where stone's global initializer sets up cimgui, reusing the
+/// rock backend's run recipe
 /// (`build_engine_libs`, `exec_luajit_file`). All games run this way (match3,
 /// mag, bitgun, ...). Non-game projects keep the captured-output pipe. See
 /// `docs/skull-plan.md` — whole-game milestone (reached).
@@ -1265,6 +1292,20 @@ pub(crate) fn render_project_errs(sources: &SourceFiles, errs: &[CompilerError])
 /// Renders against the project sources and exits 1 on any discovery / type /
 /// emit failure.
 fn skull_emit_project(dir: &str) -> String {
+    let inputs = match crate::comptime::inputs_for_project_dir(std::path::Path::new(dir)) {
+        Ok(inputs) => inputs,
+        Err(e) => {
+            log::error!(target: "SKULL", "build var resolution failed for project {}: {:#}", dir, e);
+            crate::ablation_report::exit_with_census(1);
+        }
+    };
+    skull_emit_project_with_inputs(dir, inputs)
+}
+
+fn skull_emit_project_with_inputs(
+    dir: &str,
+    inputs: bone_semantic::inference::ComptimeInputs,
+) -> String {
     use std::path::PathBuf;
     let renderer_target = match skull_renderer_target(dir) {
         Ok(target) => target,
@@ -1298,7 +1339,7 @@ fn skull_emit_project(dir: &str) -> String {
         }
     };
 
-    let ws = match crate::bone_backend::check_modules(&mut modules) {
+    let mut ws = match crate::bone_backend::check_modules(&mut modules) {
         Ok(ws) => ws,
         Err(errs) => {
             eprintln!("{}", render_project_errs(&sources, &errs));
@@ -1306,6 +1347,7 @@ fn skull_emit_project(dir: &str) -> String {
             crate::ablation_report::exit_with_census(1);
         }
     };
+    ws.comptime_inputs = inputs;
     let user_mid = crate::bone_backend::entry_module_id(&ws, entry_file);
 
     // Lints are a compiler pass, not an editor accessory: they run on the same
@@ -1647,12 +1689,21 @@ pub fn skull_compile_game_and_collect_sims(
 /// analogue of the single-file [`skull_compile_single`] path; shares
 /// [`skull_emit_project`] with `run`.
 fn skull_compile_project(dir: &str, output: Option<String>) -> Result<()> {
+    let inputs = crate::comptime::inputs_for_project_dir(std::path::Path::new(dir))?;
+    skull_compile_project_with_inputs(dir, output, inputs)
+}
+
+pub fn skull_compile_project_with_inputs(
+    dir: &str,
+    output: Option<String>,
+    inputs: bone_semantic::inference::ComptimeInputs,
+) -> Result<()> {
     use std::path::PathBuf;
-    let emit = skull_emit_project(dir);
+    let emit = skull_emit_project_with_inputs(dir, inputs);
     // A game's runnable main.lua is the same shape run/stone produce via
-    // write_full_main: preamble (cimgui bindings + game source dir) + emit +
-    // __rock_main_wrapper(main). Without the preamble the fire build is missing
-    // the imgui bindings (GetStyle etc.); without the wrapper it never starts.
+    // write_full_main: preamble (game source dir) + emit +
+    // __rock_main_wrapper(main). Without the preamble game asset paths are
+    // wrong; without the wrapper it never starts.
     let lua = if rock_host::project::is_game_project(&PathBuf::from(dir)).unwrap_or(false) {
         skull_game_main(&skull_game_preamble(dir), &emit)
     } else if emit.contains("function main(") {
@@ -2064,8 +2115,9 @@ pub fn skull_incremental_profile(path: &str) -> Result<()> {
     eprintln!("=== Skull Incremental Profile: {path} ===\n");
 
     let t_warm = Instant::now();
-    let mut session = crate::bone_backend::bone_session(files.clone())
-        .map_err(|e| anyhow::anyhow!("session warm failed: {}", e.message))?;
+    let mut session =
+        crate::bone_backend::bone_session_for_emission(files.clone(), std::path::Path::new(path))
+            .map_err(|e| anyhow::anyhow!("session warm failed: {}", e.message))?;
     let warm_ms = ms(t_warm);
 
     let (baseline_lua, mut cache, full_ms) = {
@@ -2241,8 +2293,9 @@ pub fn skull_iter_incremental(path: &str, iters: usize, warmup: usize) -> Result
         })
         .collect();
 
-    let mut session = crate::bone_backend::bone_session(files.clone())
-        .map_err(|e| anyhow::anyhow!("session warm failed: {}", e.message))?;
+    let mut session =
+        crate::bone_backend::bone_session_for_emission(files.clone(), std::path::Path::new(path))
+            .map_err(|e| anyhow::anyhow!("session warm failed: {}", e.message))?;
 
     let mut cache = {
         let ws = session.workspace();
@@ -2414,9 +2467,9 @@ pub fn skull_iter_incremental(path: &str, iters: usize, warmup: usize) -> Result
 // stone --backend skull: two-file incremental output (main.lua + incremental.lua)
 // ---------------------------------------------------------------------------
 
-/// The game preamble injected at the top of `main.lua`: `GAME_SOURCE_DIR` (asset
-/// resolution) + the embedded cimgui bindings. Factored so `skull_run_project`
-/// and the stone two-file path build it identically.
+/// The game preamble injected at the top of `main.lua`: `GAME_SOURCE_DIR` for
+/// asset resolution. cimgui is initialized by stone's global initializer.
+/// Factored so `skull_run_project` and the stone two-file path build it identically.
 fn skull_game_preamble(dir: &str) -> String {
     use std::path::PathBuf;
     let abs = PathBuf::from(dir).canonicalize().unwrap_or_else(|_| PathBuf::from(dir));
@@ -2430,7 +2483,6 @@ fn skull_game_preamble(dir: &str) -> String {
     if renderer == "wgpu" {
         full.push_str("__ROCK_RENDERER_BACKEND = \"wgpu\"\n");
     }
-    full.push_str(&rock_host::cimgui_embed::build_prelude());
     if !full.ends_with('\n') {
         full.push('\n');
     }
@@ -2609,6 +2661,19 @@ impl SkullStone {
     /// which never touch disk). None if the path isn't a discovered source.
     pub fn source_text(&self, path: &std::path::Path) -> Option<String> {
         self.project.source_text(path)
+    }
+
+    /// Absolute paths of every `embed_string` input baked into the current
+    /// program -- files the stone watcher must treat as sources: an edit to
+    /// one routes as a changed non-source path, which forces the full rebuild
+    /// that re-reads it (docs/comptime-plan.md).
+    pub fn comptime_watch_files(&self) -> Vec<std::path::PathBuf> {
+        // File ids are already the absolute canonical path the resolver read.
+        self.cache
+            .comptime_files()
+            .into_iter()
+            .map(|abs| std::path::PathBuf::from(abs.as_str()))
+            .collect()
     }
 
     /// Feed source edits into the Session, route by the worst tier, and write
