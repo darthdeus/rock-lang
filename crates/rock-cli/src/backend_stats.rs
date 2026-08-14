@@ -402,21 +402,20 @@ fn print_report(input: &str, iters: usize, warmup: usize, bone: &BoneStats, skul
             concrete.plan_untyped_expr_clones,
             concrete.plan_untyped_binding_clones,
         );
-        let per_run = |count: usize| count / iters;
-        let per_run_ns = |ns: u64| ns / iters as u64;
         println!(
-            "    concrete tables (per run): type nodes {}/{} attempts/memo hits, unresolved {}; struct literals {} fields {}; foreign domains {}/{} requests/unique; elapsed ns type/struct/foreign/signature {}/{}/{}/{}",
-            per_run(concrete.type_node_conversion_attempts),
-            per_run(concrete.type_node_memo_hits),
-            per_run(concrete.type_node_unresolved),
-            per_run(concrete.struct_literals_examined),
-            per_run(concrete.struct_field_conversion_attempts),
-            per_run(concrete.foreign_domain_requests),
-            per_run(concrete.foreign_domain_unique),
-            per_run_ns(concrete.type_nodes_ns),
-            per_run_ns(concrete.struct_fields_ns),
-            per_run_ns(concrete.foreign_domains_ns),
-            per_run_ns(concrete.signature_ns),
+            "    concrete tables (one timed run): type nodes {} examined, {} conversions, {} memo hits, unresolved {}; struct literals {} with {} field conversions; foreign domains {}/{} requests/unique; elapsed ns type/struct/foreign/signature {}/{}/{}/{}",
+            concrete.type_nodes_examined,
+            concrete.type_node_conversion_attempts,
+            concrete.type_node_memo_hits,
+            concrete.type_node_unresolved,
+            concrete.struct_literals_examined,
+            concrete.struct_field_conversion_attempts,
+            concrete.foreign_domain_requests,
+            concrete.foreign_domain_unique,
+            concrete.type_nodes_ns,
+            concrete.struct_fields_ns,
+            concrete.foreign_domains_ns,
+            concrete.signature_ns,
         );
     }
     let memo = &skull.abi_plan_stats;
