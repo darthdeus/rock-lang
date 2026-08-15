@@ -154,6 +154,7 @@ pub struct ConcreteIteratorOp {
 /// initializer's is not. Plan S 9 writes `Map<ExprId, ..>`; an expression key
 /// there silently keeps one of each pair and reads a foreign index against the
 /// owner's body.
+#[derive(Clone)]
 pub struct ConcreteBody {
     pub instance: Instance,
     pub expr_types: ArenaMap<Idx<Expr>, MonoTyId>,
@@ -247,7 +248,7 @@ pub struct MissingBody {
 }
 
 /// The tables for one graph, plus everything that did not convert.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct ConcreteBodies {
     pub bodies: BTreeMap<Instance, ConcreteBody>,
     /// The plan production lowering consumes. It is stored beside the census

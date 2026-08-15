@@ -253,7 +253,7 @@ fn an_inlined_static_resets_at_the_entry_boundary() {
 
 /// Logger suppression state restores at the boundary -- and this is the reason
 /// the `entry_diagnostics` arm exists. `log_once` dedups per call site in a Lua
-/// global outside `__ROCK_GLOBALS`, so the census never reaches it and a
+/// host/diagnostic global outside the compiler StateSchema, so the census never reaches it and a
 /// predecessor that logged through the same helper used to SUPPRESS the probe's
 /// warning entirely. No other arm can see that: the sim passes, writes nothing,
 /// and exits cleanly either way.
@@ -755,7 +755,7 @@ fn an_out_interpolating_env_is_refused_with_its_own_reason() {
 /// `Iterator`-bounded owner has no standalone emission, so the cell exists only
 /// inlined at call sites; the B1 registration fix carries a spliced callee's
 /// statics into the body they splice into, so the cell reaches
-/// `__ROCK_STATICS` and the checkpoint restores it like any other. Pinned at
+/// StateSchema and the checkpoint restores it like any other. Pinned at
 /// the emitted-Lua level too, by
 /// `crates/skull/tests/static_registration_coverage.rs`.
 #[test]

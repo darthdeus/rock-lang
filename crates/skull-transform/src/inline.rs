@@ -95,6 +95,7 @@ enum Kind {
 /// A pristine lowered snapshot of an eligible callee — every splice clones from
 /// this clean body (transitive inlining re-scans the caller, never mutates a
 /// candidate).
+#[derive(Clone)]
 struct CalleeBody {
     func: MirFunc,
     /// The concrete body this snapshot was lowered from. A declaration-level
@@ -149,7 +150,7 @@ pub struct SpliceRecord {
 /// own snapshot, so compile cost scales with element types used, not call sites.
 type CacheKey = Instance;
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct InlineCache {
     cands: HashMap<CacheKey, Option<CalleeBody>>,
 }

@@ -1,8 +1,8 @@
-//! `static` locals across a hot reload. The private cell + done-flag are plain
-//! Lua globals, so they survive a re-`dofile`; the done-flag guard then skips
+//! `static` locals across a hot reload. The private value cell + done-flag are
+//! Session slots, so they survive a re-`dofile`; the done-flag guard then skips
 //! re-init and the value is PRESERVED. Editing the initializer changes the
-//! `__rock_known_globals` key (type + init-hash), so the reset preamble nils the
-//! cell + clears the done-flag and the next reach RE-INITS with the new value.
+//! compiler's initializer identity, so the overlay clears both slots and the
+//! next reach RE-INITS with the new value.
 //! Design: docs/static-locals-plan.md, docs/static-locals-implementation.md.
 //!
 //! No arithmetic here on purpose: the no-stdlib emit harness can't resolve `+`

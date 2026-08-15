@@ -81,6 +81,7 @@ function __rock_code_slot_pending_ref(key)
   return __rock_code_slot_ref(key)
 end
 function __rock_code_slot_begin()
+  if _G.__rock_state_transaction_begin then __rock_state_transaction_begin() end
   _G.__rock_code_slot_pending = {}
   _G.__rock_code_slot_pending_slots = {}
   _G.__rock_definition_plan_materializing = false
@@ -88,6 +89,7 @@ function __rock_code_slot_begin()
   _G.__rock_definition_plan_pending = nil
 end
 function __rock_code_slot_abort()
+  if _G.__rock_state_transaction_abort then __rock_state_transaction_abort() end
   _G.__rock_code_slot_pending = nil
   _G.__rock_code_slot_pending_slots = nil
   _G.__rock_definition_plan_materializing = false
@@ -182,6 +184,7 @@ function __rock_code_slot_publish()
   _G.__rock_code_slot_pending_slots = nil
   _G.__rock_lifecycle_plan_pending = nil
   _G.__rock_definition_plan_pending = nil
+  if _G.__rock_state_transaction_commit then __rock_state_transaction_commit() end
 end
 if not _G.__rock_fn_mt then
   _G.__rock_fn_mt = {
@@ -300,6 +303,16 @@ pub struct CodegenCtx {
     rejections: Mutex<Vec<(String, CompilerError)>>,
     /// Compiler-assigned Session slots for mutable globals.
     state_slots: HashMap<ustr::Ustr, String>,
+}
+
+impl Clone for CodegenCtx {
+    fn clone(&self) -> Self {
+        Self {
+            reserved: self.reserved.clone(),
+            rejections: Mutex::new(self.rejections.lock().expect("rejection sink").clone()),
+            state_slots: self.state_slots.clone(),
+        }
+    }
 }
 
 /// True if `name` is an identifier skull emits as a bare LOCAL inside function

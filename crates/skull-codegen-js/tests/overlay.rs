@@ -50,6 +50,10 @@ fn node(source: &str) -> String {
     String::from_utf8(output.stdout).unwrap()
 }
 
+fn js_runtime() -> String {
+    format!("{}\n{}", skull_codegen_js::JS_SESSION_RUNTIME, skull_codegen_js::JS_CALL_HELPER)
+}
+
 #[test]
 fn definition_plan_publishes_and_aborts_with_the_code_slot_transaction() {
     let output = node(&format!(
@@ -71,14 +75,14 @@ fn definition_plan_publishes_and_aborts_with_the_code_slot_transaction() {
            && __G.__ROCK_DEFINITION_PLAN === oldPlan\n\
            && oldPlan.panels.len === 1\n\
            && __rock_code_slot_ref(\"probe\").current_body() === 1);",
-        skull_codegen_js::JS_CALL_HELPER
+        js_runtime()
     ));
     assert_eq!(output.trim(), "true");
 }
 
 #[test]
 fn failed_definition_materialization_keeps_the_old_plan_and_clears_pending() {
-    let source = format!("{}\n", skull_codegen_js::JS_CALL_HELPER) + r#"
+    let source = format!("{}\n", js_runtime()) + r#"
 var __G = {};
 __rock_code_slot_begin();
 __rock_code_slot_stage_one("probe", function() { return 1; }, "abi");
@@ -107,7 +111,7 @@ fn programs_without_definition_roles_do_not_stage_an_empty_plan() {
     let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
     let program = skull_codegen_js::emit::emit_program(&ws, mid).expect("emit program").program;
     assert!(!program.contains("__rock_definition_plan_stage("));
-    let output = node(&format!("var __G = {{}};\n{}\nconsole.log('PASS');", program));
+    let output = node(&format!("{}\nvar __G = {{}};\n{}\nconsole.log('PASS');", js_runtime(), program));
     assert_eq!(output.trim(), "PASS");
 }
 
@@ -139,8 +143,8 @@ fn const_value_overlay_redefines_users_without_reinitializing_state() {
     .expect_overlay();
 
     let output = node(&format!(
-        "var __G = {{}};\n{}\n__G.STATE = 99;\n{}\nconsole.log(__G.STATE + ':' + hot());",
-        program.program, overlay
+        "{}\nvar __G = {{}};\n{}\n__rock_state_set(\"global:<test>::STATE::value\", 99);\n{}\nconsole.log(__rock_state_get(\"global:<test>::STATE::value\") + ':' + hot());",
+        js_runtime(), program.program, overlay
     ));
     assert_eq!(output.trim(), "99:10");
 }
@@ -173,8 +177,8 @@ fn const_value_overlay_reinitializes_dependent_constants() {
     .expect_overlay();
 
     let output = node(&format!(
-        "var __G = {{}};\n{}\n{}\nconsole.log(hot());",
-        program.program, overlay
+        "{}\nvar __G = {{}};\n{}\n{}\nconsole.log(hot());",
+        js_runtime(), program.program, overlay
     ));
     assert_eq!(output.trim(), "11");
 }
@@ -204,10 +208,10 @@ fn overlay_redefines_a_function_without_reinitializing_global_state() {
     .unwrap()
     .expect_overlay();
 
-    assert!(!overlay.contains("__G.STATE ="));
+    assert!(!overlay.contains("__rock_state_set(\"global:<test>::STATE::value\""));
     let output = node(&format!(
-        "var __G = {{}};\n{}\n__G.STATE = 99;\n{}\nconsole.log(__G.STATE + ':' + hot());",
-        program.program, overlay
+        "{}\n{}\n__rock_state_set(\"global:<test>::STATE::value\", 99);\n{}\nconsole.log(__rock_state_get(\"global:<test>::STATE::value\") + ':' + hot());",
+        js_runtime(), program.program, overlay
     ));
     assert_eq!(output.trim(), "99:2");
 }
@@ -252,7 +256,7 @@ fn retained_named_and_capture_free_values_refresh_through_slots() {
     .expect_overlay();
     let output = node(&format!(
         "{}\nvar __G = {{}};\n{}\nstart();\nconsole.log(invoke());\n(0, eval)({:?});\nconsole.log(invoke());",
-        skull_codegen_js::JS_CALL_HELPER, program.program, overlay
+        js_runtime(), program.program, overlay
     ));
     assert_eq!(output.trim(), "14\n25");
     assert!(overlay.contains("__rock_code_slot_stage_one"));
@@ -291,7 +295,7 @@ fn retained_capturing_value_refreshes_while_keeping_mutable_capture() {
     .expect_overlay();
     let output = node(&format!(
         "{}\nvar __G = {{}};\n{}\nstart();\nconsole.log(invoke());\n(0, eval)({:?});\nconsole.log(invoke());",
-        skull_codegen_js::JS_CALL_HELPER, program.program, overlay
+        js_runtime(), program.program, overlay
     ));
     assert_eq!(output.trim(), "1\n12");
     assert!(overlay.contains("__rock_code_slot_stage_one"));
@@ -299,7 +303,7 @@ fn retained_capturing_value_refreshes_while_keeping_mutable_capture() {
     let (fresh, _) = skull_codegen_js::emit::emit_program_cached(&after, mid).unwrap();
     let fresh_output = node(&format!(
         "{}\nvar __G = {{}};\n{}\nstart();\nconsole.log(invoke());",
-        skull_codegen_js::JS_CALL_HELPER, fresh.program
+        js_runtime(), fresh.program
     ));
     assert_eq!(fresh_output.trim(), "11");
 }
@@ -333,8 +337,8 @@ fn failed_overlay_after_late_top_level_work_keeps_retained_code_ref_old() {
     assert!(overlay.contains("run_wire_systems();"), "overlay must contain the later top-level hook:\n{overlay}");
 
     let output = node(&format!(
-        "{}\nvar __G = {{}};\n{}\nstart();\ntry {{ (0, eval)({:?}); }} catch (e) {{ console.log(false); }}\nconsole.log(__rock_code_slot_stage === null);\nconsole.log(__rock_call(__G.CALLBACK));",
-        skull_codegen_js::JS_CALL_HELPER,
+        "{}\nvar __G = {{}};\n{}\nstart();\ntry {{ (0, eval)({:?}); }} catch (e) {{ console.log(false); }}\nconsole.log(__rock_code_slot_stage === null);\nconsole.log(__rock_call(__rock_state_get(\"global:<test>::CALLBACK::value\")));",
+        js_runtime(),
         program.program,
         overlay
     ));
@@ -380,8 +384,8 @@ fn successive_overlays_accumulate_changed_function_definitions() {
     .expect_overlay();
 
     let output = node(&format!(
-        "var __G = {{}};\n{}\nconsole.log(first() + ':' + second());",
-        overlay
+        "{}\n{}\nconsole.log(first() + ':' + second());",
+        js_runtime(), overlay
     ));
     assert_eq!(output.trim(), "2:20");
 }
@@ -418,8 +422,8 @@ fn changed_static_initializer_resets_only_its_live_cell() {
     .expect_overlay();
 
     let output = node(&format!(
-        "var __G = {{}};\n{}\nhot(); hot();\n{}\nconsole.log(hot());",
-        program.program, overlay
+        "{}\n{}\nhot(); hot();\n{}\nconsole.log(hot());",
+        js_runtime(), program.program, overlay
     ));
     assert_eq!(output.trim(), "11");
 }
@@ -461,12 +465,12 @@ fn decorated_function_overlay_refreshes_the_registered_code_ref() {
          {}\n\
          var __G = {{}};\n\
          {}\n\
-         __rock_call(__G.SYSTEMS._data[0].func);\n\
+         __rock_call(__rock_state_get(\"global:<test>::SYSTEMS::value\")._data[0].func);\n\
          (0, eval)({:?});\n\
-         __rock_call(__G.SYSTEMS._data[0].func);\n\
+         __rock_call(__rock_state_get(\"global:<test>::SYSTEMS::value\")._data[0].func);\n\
          console.log(output.join(','));",
         skull_codegen_js::JS_TABLE_PRIM,
-        skull_codegen_js::JS_CALL_HELPER,
+        js_runtime(),
         program.program,
         overlay
     ));

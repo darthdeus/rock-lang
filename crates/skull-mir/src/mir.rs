@@ -706,16 +706,20 @@ impl Default for Block {
 
 /// A `static` local's synthesized storage: a private global cell + a done-flag,
 /// discovered during lowering and surfaced to `skull::mir_emit` for the
-/// hot-reload preservation preamble + `__rock_known_globals` registration. The
+/// compiler-owned StateSchema and per-Session initializer reset. The
 /// in-body first-reach guard is emitted inline (see `Builder::lower_static`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct StaticCell {
     pub cell: Ustr,
     pub done_flag: Ustr,
-    /// Rendered type -- half the `__rock_known_globals` key (reset on mismatch).
+    /// Source binding name and declaration ordinal are the logical identity
+    /// within the owning callable; synthesized cell names are realization only.
+    pub logical_name: Ustr,
+    pub ordinal: u32,
+    /// Rendered type, included in the logical static layout fingerprint.
     pub type_str: String,
-    /// Content hash of the initializer expression -- the other half of the key,
-    /// so editing the initializer resets + re-inits the cell on the next reload.
+    /// Content hash of the initializer expression, so editing the initializer
+    /// resets + re-inits the cell on the next reload.
     /// Stable across edits ELSEWHERE in the body (hashes names / literals, not
     /// arena indices).
     pub init_hash: u64,

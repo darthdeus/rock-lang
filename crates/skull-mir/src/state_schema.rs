@@ -12,7 +12,7 @@ use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::ModuleId;
 use ustr::Ustr;
 
-use crate::code_identity::{CodeArtifact, CodeIdentity, FrameSchema, LambdaSiteId};
+use crate::code_identity::{CodeArtifact, CodeIdentity, FrameSchema};
 use crate::lower::{GlobalPlan, NB_PRIM_ELEMS, ScalarCtx, ValueStorage};
 use crate::mir::{MirFunc, StaticCell};
 
@@ -71,6 +71,8 @@ pub enum StateSchemaError {
     DuplicateLayout { identity: String },
     MissingPhysical { identity: String },
     UnownedPhysical { identity: String, physical: String },
+    MissingEntry { kind: StateKind, identity: String },
+    UnexpectedEntry { kind: StateKind, identity: String },
 }
 
 impl fmt::Display for StateSchemaError {
@@ -95,6 +97,12 @@ impl fmt::Display for StateSchemaError {
                 f,
                 "StateSchema entry `{identity}` has an unowned physical leaf `{physical}`"
             ),
+            Self::MissingEntry { kind, identity } => {
+                write!(f, "StateSchema is missing {kind:?} entry `{identity}`")
+            }
+            Self::UnexpectedEntry { kind, identity } => {
+                write!(f, "StateSchema has unexpected {kind:?} entry `{identity}`")
+            }
         }
     }
 }
@@ -187,6 +195,7 @@ impl StateSchema {
         statics: &[StaticCell],
     ) -> Result<Self, StateSchemaError> {
         let mut entries = Vec::new();
+        let mut expected: BTreeMap<StateKind, BTreeSet<String>> = BTreeMap::new();
 
         for module in ws.modules.iter().filter(|m| m.id != ModuleId::builtin()) {
             for (_, global) in module.globals.iter().filter(|(_, g)| !g.is_const) {
@@ -200,6 +209,10 @@ impl StateSchema {
                     .leaf_names(global.name)
                     .unwrap_or_else(|| vec![global.name]);
                 let logical = global_identity(module.file, global.name);
+                expected
+                    .entry(StateKind::Global)
+                    .or_default()
+                    .insert(logical.clone());
                 let fingerprint = format!(
                     "type={};representation={}",
                     ws.render(None, global.ty),
@@ -229,6 +242,8 @@ impl StateSchema {
                     || old.init_hash != cell.init_hash
                     || old.owner != cell.owner
                     || old.site != cell.site
+                    || old.logical_name != cell.logical_name
+                    || old.ordinal != cell.ordinal
                 {
                     return Err(StateSchemaError::DuplicateLayout {
                         identity: cell.cell.to_string(),
@@ -244,12 +259,16 @@ impl StateSchema {
                     kind: StateKind::Static,
                     identity: cell.cell.to_string(),
                 })?;
-            let site = cell.site.ok_or_else(|| StateSchemaError::Incomplete {
+            let _site = cell.site.ok_or_else(|| StateSchemaError::Incomplete {
                 kind: StateKind::Static,
                 identity: cell.cell.to_string(),
             })?;
             let owner_key = owner.logical_key(ws, scx.interner());
-            let logical = static_identity(&owner_key, site);
+            let logical = static_identity(&owner_key, cell.logical_name, cell.ordinal);
+            expected
+                .entry(StateKind::Static)
+                .or_default()
+                .insert(logical.clone());
             let entry = StateEntry {
                 kind: StateKind::Static,
                 identity: logical,
@@ -273,6 +292,10 @@ impl StateSchema {
             if !frame_ids.insert(logical.clone()) {
                 continue;
             }
+            expected
+                .entry(StateKind::CoroutineFrame)
+                .or_default()
+                .insert(logical.clone());
             let entry = StateEntry {
                 kind: StateKind::CoroutineFrame,
                 identity: logical.clone(),
@@ -285,9 +308,14 @@ impl StateSchema {
         }
 
         for (ctype, size) in NB_PRIM_ELEMS {
+            let identity = format!("primitive:{ctype}");
+            expected
+                .entry(StateKind::Storage)
+                .or_default()
+                .insert(identity.clone());
             let entry = StateEntry {
                 kind: StateKind::Storage,
-                identity: format!("primitive:{ctype}"),
+                identity,
                 fingerprint: format!("ctype={ctype};size={size}"),
                 physical: vec![format!("storage:{ctype}")],
                 owner: None,
@@ -318,9 +346,14 @@ impl StateSchema {
                 .map(|leaf| format!("{}:{}:{}", leaf.path, leaf.cty, leaf.byte_off))
                 .collect::<Vec<_>>()
                 .join(",");
+            let identity = format!("value:{name}");
+            expected
+                .entry(StateKind::Storage)
+                .or_default()
+                .insert(identity.clone());
             let entry = StateEntry {
                 kind: StateKind::Storage,
-                identity: format!("value:{name}"),
+                identity,
                 fingerprint: format!("ctype={name};size={size};align={align};leaves=[{layout}]"),
                 physical: vec![format!("storage:{name}")],
                 owner: Some(name.to_string()),
@@ -329,7 +362,34 @@ impl StateSchema {
             entries.push(entry);
         }
 
-        Self::from_entries(entries)
+        let schema = Self::from_entries(entries)?;
+        for kind in [
+            StateKind::Global,
+            StateKind::Static,
+            StateKind::CoroutineFrame,
+            StateKind::Storage,
+        ] {
+            let actual: BTreeSet<String> = schema
+                .entries
+                .iter()
+                .filter(|entry| entry.kind == kind)
+                .map(|entry| entry.identity.clone())
+                .collect();
+            let expected = expected.get(&kind).cloned().unwrap_or_default();
+            if let Some(identity) = expected.difference(&actual).next() {
+                return Err(StateSchemaError::MissingEntry {
+                    kind,
+                    identity: identity.clone(),
+                });
+            }
+            if let Some(identity) = actual.difference(&expected).next() {
+                return Err(StateSchemaError::UnexpectedEntry {
+                    kind,
+                    identity: identity.clone(),
+                });
+            }
+        }
+        Ok(schema)
     }
 }
 
@@ -337,8 +397,8 @@ pub fn global_identity(file: Ustr, name: Ustr) -> String {
     format!("global:{}::{}", file, name)
 }
 
-pub fn static_identity(owner: &str, site: LambdaSiteId) -> String {
-    format!("static:{owner}@{}:{}", site.file, site.offset)
+pub fn static_identity(owner: &str, name: Ustr, ordinal: u32) -> String {
+    format!("static:{owner}::{name}#{ordinal}")
 }
 
 pub fn state_key(identity: &str, leaf: &str) -> String {
@@ -419,11 +479,11 @@ pub fn static_cell_state_keys(
             kind: StateKind::Static,
             identity: cell.cell.to_string(),
         })?;
-    let site = cell.site.ok_or_else(|| StateSchemaError::Incomplete {
+    let _site = cell.site.ok_or_else(|| StateSchemaError::Incomplete {
         kind: StateKind::Static,
         identity: cell.cell.to_string(),
     })?;
-    let identity = static_identity(&owner.logical_key(ws, interner), site);
+    let identity = static_identity(&owner.logical_key(ws, interner), cell.logical_name, cell.ordinal);
     Ok((state_key(&identity, "value"), state_key(&identity, "done")))
 }
 

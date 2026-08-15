@@ -447,6 +447,7 @@ pub struct ArtifactCensus {
 }
 
 /// One target's realization of a graph it did not build.
+#[derive(Clone)]
 pub struct ArtifactView {
     pub spec: TargetSpec,
     /// The artifact's root instances -- realizable emission roots, plus the

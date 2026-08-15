@@ -262,6 +262,7 @@ var __rock_lifecycle_plan_pending = null;
 var __rock_definition_plan_pending = null;
 var __rock_definition_plan_materializing = false;
 function __rock_code_slot_begin() {
+  if (typeof __rock_state_transaction_begin !== "undefined") __rock_state_transaction_begin();
   __rock_code_slot_stage = Object.create(null);
   __rock_code_slot_pending_slots = Object.create(null);
   __rock_definition_plan_materializing = false;
@@ -269,11 +270,13 @@ function __rock_code_slot_begin() {
   __rock_definition_plan_pending = null;
 }
 function __rock_code_slot_abort() {
+  if (typeof __rock_state_transaction_abort !== "undefined") __rock_state_transaction_abort();
   __rock_code_slot_stage = null;
   __rock_code_slot_pending_slots = Object.create(null);
   __rock_definition_plan_materializing = false;
   __rock_lifecycle_plan_pending = null;
   __rock_definition_plan_pending = null;
+  if (typeof __rock_state_transaction_commit !== "undefined") __rock_state_transaction_commit();
 }
 function __rock_lifecycle_plan_stage(plan) {
   if (__rock_code_slot_stage === null) throw new Error("Rock code slot stage not open");
@@ -331,6 +334,7 @@ function __rock_code_slot_publish() {
   __rock_code_slot_pending_slots = Object.create(null);
   __rock_lifecycle_plan_pending = null;
   __rock_definition_plan_pending = null;
+  if (typeof __rock_state_transaction_commit !== "undefined") __rock_state_transaction_commit();
 }
 function __rock_code_ref_kind(v) {
   if (v === null || typeof v !== "object") return null;
@@ -2843,6 +2847,44 @@ function __rock_state_set(key, value) {
   session.__rock_initialized[key] = true;
   return value;
 }
+function __rock_state_transaction_begin() {
+  if (__rock_state_transaction !== null) return;
+  var session = __rock_session_current();
+  var state = Object.create(null);
+  var initialized = Object.create(null);
+  var initializer_keys = Object.create(null);
+  Object.keys(session.__rock_state).forEach(function (key) { state[key] = session.__rock_state[key]; });
+  Object.keys(session.__rock_initialized).forEach(function (key) { initialized[key] = session.__rock_initialized[key]; });
+  Object.keys(session.__rock_initializer_keys).forEach(function (key) { initializer_keys[key] = session.__rock_initializer_keys[key]; });
+  __rock_state_transaction = {
+    session: session,
+    schema_id: session.__rock_schema_id,
+    has_schema: typeof __ROCK_STATE_SCHEMA !== "undefined",
+    schema: (typeof __ROCK_STATE_SCHEMA === "undefined") ? null : __ROCK_STATE_SCHEMA,
+    state: state,
+    initialized: initialized,
+    initializer_keys: initializer_keys,
+    published_schema_id: __rock_state_schema_id
+  };
+}
+function __rock_state_transaction_abort() {
+  var transaction = __rock_state_transaction;
+  if (transaction === null) return;
+  var session = transaction.session;
+  __rock_active_session = session;
+  session.__rock_schema_id = transaction.schema_id;
+  Object.keys(session.__rock_state).forEach(function (key) { delete session.__rock_state[key]; });
+  Object.keys(transaction.state).forEach(function (key) { session.__rock_state[key] = transaction.state[key]; });
+  Object.keys(session.__rock_initialized).forEach(function (key) { delete session.__rock_initialized[key]; });
+  Object.keys(transaction.initialized).forEach(function (key) { session.__rock_initialized[key] = transaction.initialized[key]; });
+  Object.keys(session.__rock_initializer_keys).forEach(function (key) { delete session.__rock_initializer_keys[key]; });
+  Object.keys(transaction.initializer_keys).forEach(function (key) { session.__rock_initializer_keys[key] = transaction.initializer_keys[key]; });
+  if (transaction.has_schema) __ROCK_STATE_SCHEMA = transaction.schema;
+  else if (typeof __ROCK_STATE_SCHEMA !== "undefined") __ROCK_STATE_SCHEMA = undefined;
+  __rock_state_schema_id = transaction.published_schema_id;
+  __rock_state_transaction = null;
+}
+function __rock_state_transaction_commit() { __rock_state_transaction = null; }
 function __rock_state_prepare_static(value_key, done_key, initializer_key) {
   var session = __rock_session_current();
   var old = session.__rock_initializer_keys[value_key];
@@ -2861,8 +2903,97 @@ function __rock_state_publish_schema(schema_id) {
   session.__rock_schema_id = schema_id;
   __rock_state_schema_id = schema_id;
 }
+function __rock_state_entry_for_name(name) {
+  if (typeof __ROCK_STATE_SCHEMA === "undefined") return null;
+  for (var i = 0; i < __ROCK_STATE_SCHEMA.length; i++) {
+    var entry = __ROCK_STATE_SCHEMA[i];
+    if (entry.kind !== "global") continue;
+    if (entry.name === name || entry.identity === name) return entry;
+    for (var j = 0; j < (entry.physical || []).length; j++) {
+      if (entry.physical[j] === name) return entry;
+    }
+  }
+  return null;
+}
+function __rock_state_entry_get(entry) {
+  var keys = entry.session_keys || [];
+  if (keys.length === 1) return __rock_state_get(keys[0]);
+  throw new Error("StateSchema entry has no single JS logical realization " + entry.identity);
+}
+function __rock_state_entry_set(entry, value) {
+  var keys = entry.session_keys || [];
+  if (keys.length === 1) return __rock_state_set(keys[0], value);
+  throw new Error("StateSchema entry has no single JS logical realization " + entry.identity);
+}
+function __rock_state_entry_clear(entry) {
+  var keys = entry.session_keys || [];
+  for (var i = 0; i < keys.length; i++) {
+    delete __rock_session_current().__rock_state[keys[i]];
+    delete __rock_session_current().__rock_initialized[keys[i]];
+  }
+}
+function __rock_state_bridge_key(entry, name) {
+  var keys = entry.session_keys || [];
+  if (keys.length === 1) return keys[0];
+  for (var i = 0; i < (entry.physical || []).length; i++) {
+    if (entry.physical[i] === name) return keys[i];
+  }
+  return null;
+}
+function __rock_state_bridge_get(entry, name) {
+  var key = __rock_state_bridge_key(entry, name);
+  if (key === null) throw new Error("StateSchema entry has no JS logical leaf for " + name);
+  return __rock_state_get(key);
+}
+function __rock_state_bridge_set(entry, name, value) {
+  var key = __rock_state_bridge_key(entry, name);
+  if (key === null) throw new Error("StateSchema entry has no JS logical leaf for " + name);
+  return __rock_state_set(key, value);
+}
+function __rock_state_bridge_clear(entry, name) {
+  var key = __rock_state_bridge_key(entry, name);
+  if (key === null) throw new Error("StateSchema entry has no JS logical leaf for " + name);
+  delete __rock_session_current().__rock_state[key];
+  delete __rock_session_current().__rock_initialized[key];
+}
+function __rock_state_install_global_bridge() {
+  if (typeof __G === "undefined" || __G === null) return;
+  if (__G.__rock_state_bridge_target === true) return;
+  var target = __G;
+  Object.defineProperty(target, "__rock_state_bridge_target", {
+    value: true, writable: false, configurable: false, enumerable: false
+  });
+  __G = new Proxy(target, {
+    get: function (object, key, receiver) {
+      var entry = (typeof key === "string") ? __rock_state_entry_for_name(key) : null;
+      if (entry !== null) return __rock_state_bridge_get(entry, key);
+      return Reflect.get(object, key, receiver);
+    },
+    set: function (object, key, value, receiver) {
+      var entry = (typeof key === "string") ? __rock_state_entry_for_name(key) : null;
+      if (entry !== null) {
+        __rock_state_bridge_set(entry, key, value);
+        return true;
+      }
+      return Reflect.set(object, key, value, receiver);
+    },
+    deleteProperty: function (object, key) {
+      var entry = (typeof key === "string") ? __rock_state_entry_for_name(key) : null;
+      if (entry !== null) {
+        __rock_state_bridge_clear(entry, key);
+        return true;
+      }
+      return Reflect.deleteProperty(object, key);
+    },
+    has: function (object, key) {
+      var entry = (typeof key === "string") ? __rock_state_entry_for_name(key) : null;
+      return entry !== null || Reflect.has(object, key);
+    }
+  });
+}
 var __rock_active_session = null;
 var __rock_state_schema_id = null;
+var __rock_state_transaction = null;
 __rock_session_activate(__rock_session_new(null));
 "#;
 

@@ -91,6 +91,7 @@ pub struct ShaderRejection {
 }
 
 /// One target's SHADER artifact.
+#[derive(Clone)]
 pub struct ShaderArtifactView {
     pub profile: GlslProfile,
     /// The entries this artifact registers, as instances of the shared graph.

@@ -80,7 +80,7 @@ fn hook_fn_shared_across_constructions_and_still_fires() {
         table.sort(fresh)\n\
         print(#fresh == 0 and \"shared\" or table.concat(fresh, \",\"))\n\
         __rock_coroutine_kill(h1)\n\
-        print(LOG)\n");
+        print(__rock_state_get(\"global:<test>::LOG::value\"))\n");
     let out = run_luajit(&format!("{lua}{driver}"), "shared");
     assert_eq!(
         out, "shared\n105",

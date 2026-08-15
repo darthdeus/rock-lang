@@ -44,6 +44,8 @@ impl Builder<'_> {
         self.f.statics.push(StaticCell {
             cell,
             done_flag,
+            logical_name: sname,
+            ordinal: ctr,
             type_str,
             init_hash,
             owner: self.f.code_identity.clone(),

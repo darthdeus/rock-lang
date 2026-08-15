@@ -69,8 +69,8 @@ fn compiler_owned_state_schema_is_total_for_a_nondegenerate_fixture() {
         "generic static identity is absent"
     );
     assert!(
-        emit.lua.contains("_G.__ROCK_STATICS"),
-        "the shadow schema must compare against the old static registry"
+        emit.lua.contains("_G.__ROCK_STATE_SCHEMA = {"),
+        "the compiler-owned schema must be published to the Lua backend"
     );
     for entry in emit
         .state_schema
@@ -80,12 +80,28 @@ fn compiler_owned_state_schema_is_total_for_a_nondegenerate_fixture() {
     {
         assert!(
             emit.lua.contains(&format!(
-                "[{:?}] = {:?}",
-                entry.physical[0], entry.physical[1]
+                "identity={:?}",
+                entry.identity
             )),
-            "old static registry omitted {}",
+            "StateSchema omitted static {}",
             entry.identity
         );
+        assert!(
+            emit.lua.contains(&format!("owner={:?}", entry.owner.as_deref().unwrap())),
+            "StateSchema omitted static owner for {}",
+            entry.identity
+        );
+        assert!(
+            emit.lua.contains(&format!(
+                "initializer_identity={}",
+                entry.initializer_identity.unwrap()
+            )),
+            "StateSchema omitted static initializer identity for {}",
+            entry.identity
+        );
+        for key in skull_mir::state_schema::entry_state_keys(entry) {
+            assert!(emit.lua.contains(&format!("{key:?}")), "static slot {key} is not published");
+        }
     }
 }
 
@@ -96,6 +112,15 @@ fn state_schema_identity_ignores_body_and_source_order_but_tracks_membership_and
     assert_eq!(
         baseline.schema_id,
         emit_mir(&body_edit).state_schema.schema_id
+    );
+    let static_body_edit = FIXTURE.replace(
+        "fn with_static() -> int {\n    static initialized",
+        "fn with_static() -> int {\n    let unrelated = 0\n    static initialized",
+    );
+    assert_eq!(
+        baseline.schema_id,
+        emit_mir(&static_body_edit).state_schema.schema_id,
+        "an unrelated statement before a static must not rename its logical slot"
     );
 
     let reordered = FIXTURE.replace(

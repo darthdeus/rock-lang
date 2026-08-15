@@ -1426,18 +1426,16 @@ mod overlay_runtime_tests {
         }
     }
 
-    /// Layout drift, cell shift: a live coroutine suspended across a BodyOnly
-    /// overlay that INSERTS a frame-resident local before an existing one,
-    /// shifting its dense slot. The new step would read the shifted local at a
-    /// slot the old frame never wrote -- the frame layout stamp kills the
-    /// coroutine cleanly instead. The inserted `z` is a GENUINE frame cell
+    /// Layout drift, cell shift: inserting a frame-resident local changes the
+    /// StateSchema frame layout, so an overlay must request a safe restart
+    /// before any new CodeRef can reach a live process. The inserted `z` is a GENUINE frame cell
     /// (read after the first yield, so it must survive suspension); a dead local
     /// -- `let z = 999` never read -- is now a ghost dropped from the frame and
     /// does NOT shift the layout (the P2-finding fix; that path has its own
     /// structural test in skull/tests/frame_slot_naming.rs).
     /// docs/coroutine-allocation-plan.md "Layout drift across reloads".
     #[test]
-    fn live_coroutine_cell_layout_shift_overlay_stamp_kills() {
+    fn live_coroutine_cell_layout_shift_requests_safe_restart() {
         // `Act(() -> ())` forces Ev flat (frame-slot channel); `mk()` keeps the
         // locals as real calls so copy-prop/DCE can't erase the frame cells.
         // v1 inserts `z` AND reads it after yield 1 (`a = a + z`), so `z` is a
@@ -1463,7 +1461,7 @@ mod overlay_runtime_tests {
 
         let mut session = bone_session(files(v0)).expect("session v0");
         let mid = skull::user_module_id(session.workspace()).unwrap();
-        let (full0, mut cache) = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
+        let (_full0, mut cache) = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
 
         let result = session.update_file("main.rock", v1).expect("update v1");
         assert!(
@@ -1471,24 +1469,15 @@ mod overlay_runtime_tests {
             "inserting a let is a body edit -- must be BodyOnly (the premise), got {:?}",
             result.tier
         );
-        let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
-
-        // start() + pump() under v0 (Tick(7)=7, suspended at state 1), overlay,
-        // then pump() again on the SAME live coroutine. The frame layout stamp
-        // rejects the v0 frame in the v1 step (the genuine `z` frame cell shifted
-        // `b`'s slot): the check errors INSIDE the pcall, the coroutine dies
-        // cleanly (state -2, on_killed, last_error explains) and pump reads null
-        // -> -1. Pre-stamp this CRASHED the consumer (arithmetic on the nil read
-        // from the shifted slot).
-        let composed = run_parts(&[&full0.lua, stub_for(&full0.lua), "start()", "pump()", &overlay.lua, "pump()", "pump()", "pump()"]);
-        match composed {
-            ExecOutcome::Output(o) => assert_eq!(
-                normalize_stdout(&o).trim(),
-                "7\n-1\n-1\n-1",
-                "a cell-shifting overlay must stamp-kill the live coroutine, not corrupt it"
-            ),
-            ExecOutcome::Errored(_) => panic!("cell-shift + live resume crashed -- the layout stamp regressed"),
-        }
+        let err = match skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &result.reinferred) {
+            Ok(_) => panic!("a changed coroutine frame schema must not overlay"),
+            Err(err) => err,
+        };
+        assert!(
+            err.message.contains("safe restart"),
+            "a cell-shifting frame edit must request the safe restart path, got: {}",
+            err.message
+        );
     }
 
     /// Layout drift, state renumber: yields are numbered by order, so a BodyOnly
@@ -1644,14 +1633,12 @@ mod overlay_runtime_tests {
         }
     }
 
-    /// The mob-soft-lock scenario in miniature: a coroutine holding a game
-    /// invariant cleans up via `defer`, then a layout-shifting overlay
-    /// stamp-kills it mid-flight. The defer must run -- and it must be the
-    /// creation-time (v0) defer against the v0 frame: `__defers` stores the
-    /// per-site fns BY VALUE precisely so stale frames never run current-layout
-    /// cleanup code against old-layout cells.
+    /// A layout-changing coroutine edit must be refused before publication;
+    /// preserving the old Session is what keeps the creation-time defer and its
+    /// live frame coherent. The defer behavior itself remains covered by the
+    /// ordinary coroutine lifecycle tests.
     #[test]
-    fn stamp_kill_runs_creation_time_defers() {
+    fn coroutine_frame_layout_change_refuses_before_publication() {
         // v1 inserts `z` and reads it after the first yield (`a = a + z`), so `z`
         // is a genuine frame cell shifting `b`'s slot -- a real layout change.
         // (A dead `let z = 999` is now a ghost that does NOT shift the frame.)
@@ -1675,22 +1662,18 @@ mod overlay_runtime_tests {
 
         let mut session = bone_session(files(&v0)).expect("session v0");
         let mid = skull::user_module_id(session.workspace()).unwrap();
-        let (full0, mut cache) = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
+        let (_full0, mut cache) = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
         let result = session.update_file("main.rock", &v1).expect("update v1");
         assert!(matches!(result.tier, bone_incremental::session::UpdateTier::BodyOnly));
-        let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
-
-        // pump #1: Tick(7), BUSY=1, suspended. Overlay (cell shift). pump #2:
-        // stamp-kill -> -1, and the v0 defer must have cleared BUSY.
-        let composed = run_parts(&[&full0.lua, stub_for(&full0.lua), "start()", "pump()", &overlay.lua, "pump()", "report()"]);
-        match composed {
-            ExecOutcome::Output(o) => assert_eq!(
-                normalize_stdout(&o).trim(),
-                "7\n-1\nbusy:0",
-                "a stamp-killed coroutine must run its creation-time defers (invariant released, no soft-lock)"
-            ),
-            ExecOutcome::Errored(_) => panic!("stamp-kill defer fixture failed to run"),
-        }
+        let err = match skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &result.reinferred) {
+            Ok(_) => panic!("a changed coroutine frame schema must not overlay"),
+            Err(err) => err,
+        };
+        assert!(
+            err.message.contains("safe restart"),
+            "a frame-layout edit must request the safe restart path, got: {}",
+            err.message
+        );
     }
 
     /// A coroutine hook (`on_killed`/`on_resume`/`on_hot_reload`) argument must
@@ -2618,6 +2601,67 @@ mod shape_drift_tests {
     }
 
     #[test]
+    fn mutable_global_membership_edit_requests_restart_and_keeps_old_session_schema() {
+        let v0 = "global A: int = 1\nfn main() { }\n";
+        let v1 = "global A: int = 1\nglobal B: int = 2\nfn main() { }\n";
+        let (_dir, mut stone, main_lua, inc_lua, rock) = boot(v0);
+        let baseline = std::fs::read_to_string(&main_lua).expect("baseline");
+        let old_schema = stone
+            .cache
+            .state_schema()
+            .expect("baseline StateSchema")
+            .schema_id
+            .clone();
+
+        std::fs::write(&rock, v1).expect("edited source");
+        let reload = stone
+            .recompile(std::slice::from_ref(&rock), &main_lua, &inc_lua)
+            .expect("membership edit");
+        match reload {
+            SkullReload::FullRequired { reasons } => assert!(
+                reasons.iter().any(|reason| reason.contains("StateSchema")),
+                "membership drift must identify StateSchema restart: {reasons:?}"
+            ),
+            other => panic!("adding a mutable global must require restart, got {other:?}"),
+        }
+        assert_eq!(
+            std::fs::read_to_string(&main_lua).expect("main after refusal"),
+            baseline,
+            "an incompatible schema must not replace the old process artifact"
+        );
+        assert_eq!(
+            stone
+                .cache
+                .state_schema()
+                .expect("retained StateSchema")
+                .schema_id
+                .as_str(),
+            old_schema.as_str(),
+            "a refused publication must retain the old compiler schema"
+        );
+
+        stone
+            .force_full(&main_lua, &inc_lua)
+            .expect("restart canonicalization");
+        let current = std::fs::read_to_string(&main_lua).expect("new main");
+        assert_ne!(current, baseline, "force_full must materialize the new schema");
+        assert!(
+            current.contains("identity=\"global:") && current.contains("::B\""),
+            "the new logical global identity must be present in the published schema: {current}"
+        );
+        assert_ne!(
+            stone
+                .cache
+                .state_schema()
+                .expect("new StateSchema")
+                .schema_id
+                .as_str(),
+            old_schema.as_str(),
+            "restart canonicalization must publish the changed schema"
+        );
+    }
+
+    #[test]
     fn body_and_signature_edits_stay_on_the_hot_paths() {
         let v0 = "struct Mob { hp: int }\n\
                   fn heal(m: Mob) -> int { m.hp }\n\
@@ -2986,6 +3030,14 @@ fn main() {}
             std::fs::read_to_string(&harness.main).expect("main after failed publication"),
             old_main,
             "failed full publication must not replace the last-good artifact"
+        );
+        assert_eq!(
+            harness
+                .stone
+                .source_text(&harness.source)
+                .expect("retained source"),
+            V0,
+            "failed full publication must roll the compiler Session back with the artifact"
         );
         assert_eq!(harness.last_good_catalog(), vec!["2", "alpha", "beta"]);
     }
@@ -3551,12 +3603,12 @@ mod force_full_tests {
         );
     }
 
-    /// A recompile that hits a type error bails but leaves the session mutated
-    /// into the broken state. The stone restart path then calls `force_full` to
-    /// fold the overlay -- it must re-gate on diagnostics and refuse to write a
-    /// partial `main.lua`, else the respawned luajit loads broken code.
+    /// A recompile that hits a type error must retain the last-good compiler
+    /// Session as well as the last-good written artifact. The restart fold can
+    /// therefore proceed against the retained program instead of discovering a
+    /// broken intermediate state.
     #[test]
-    fn force_full_rejects_broken_session_after_failed_recompile() {
+    fn failed_recompile_retains_session_and_last_good_artifact() {
         let dir = tempfile::tempdir().expect("tempdir");
         let dir_str = dir.path().to_str().unwrap().to_string();
         let src = |p: &str| dir.path().join(p);
@@ -3571,20 +3623,21 @@ mod force_full_tests {
         let mut skull = SkullStone::init(&dir_str, &main_lua, &inc_lua).expect("init v1");
         let main_v1 = std::fs::read_to_string(&main_lua).expect("main.lua after init");
 
-        // Edit to a broken v2 (calls a non-existent function). recompile bails,
-        // but the session is now mutated into the broken state.
+        // Edit to a broken v2 (calls a non-existent function). recompile bails
+        // and must restore the v1 compiler Session before returning.
         let v2 = "fn helper() -> int { 3 }\nfn use_it() -> int { nope() }\n";
         std::fs::write(&rock, v2).unwrap();
         let reload = skull.recompile(&[rock.clone()], &main_lua, &inc_lua);
         assert!(reload.is_err(), "recompile must bail on the broken edit");
 
-        // The restart fold must refuse rather than emit a partial program.
+        // A fold after the failed update now sees the retained v1 Session and
+        // succeeds without changing the last-good artifact.
         let res = skull.force_full(&main_lua, &inc_lua);
-        assert!(res.is_err(), "force_full must reject a broken session");
+        assert!(res.is_ok(), "force_full must retain the previous good Session");
         assert_eq!(
             std::fs::read_to_string(&main_lua).unwrap(),
             main_v1,
-            "force_full must leave the last-good main.lua untouched, not overwrite with a partial build"
+            "a failed recompile must leave the last-good main.lua untouched"
         );
     }
 }

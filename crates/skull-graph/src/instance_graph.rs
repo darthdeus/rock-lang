@@ -537,7 +537,7 @@ static EMPTY_SUBST: std::sync::LazyLock<MonoSubst> =
 /// The agreed answer is the FIRST owner's in [`Owner`] order, which makes it a
 /// function of the contribution SET rather than of the order the walk
 /// discovered it in -- so a fresh build and an update cannot pick differently.
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Clone)]
 pub struct Indices {
     /// Instance -> who reached it and what they said.
     pub subst: BTreeMap<Instance, Agreed<MonoSubst>>,
@@ -634,6 +634,7 @@ impl<T: Clone + PartialEq> Agreed<T> {
     }
 }
 
+#[derive(Clone)]
 pub struct InstanceGraph {
     /// **The build's one arena, SHARED rather than owned.**
     ///

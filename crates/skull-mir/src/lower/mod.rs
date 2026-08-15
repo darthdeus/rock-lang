@@ -205,6 +205,7 @@ enum Scrut {
 /// Workspace-wide scalar-ABI context. Address-taken functions use the
 /// type-derived fn-value ABI at their definitions and direct calls, so all three
 /// call forms agree without callee-identity analysis.
+#[derive(Clone)]
 pub struct ScalarCtx {
     taken_by_ref: HashSet<Ustr>,
     /// Per-body contribution: each body's set of fn-names it references by value.

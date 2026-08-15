@@ -48,10 +48,18 @@ fn assembly_order() {
     let js = emit_program(&ws);
     ordered(&js, "function __deco_system(", "function main(");
     ordered(&js, "function main(", "function __ginit_DERIVED(");
-    ordered(&js, "function __ginit_DERIVED(", "__G.DERIVED = __ginit_DERIVED();");
+    ordered(
+        &js,
+        "function __ginit_DERIVED(",
+        "__rock_state_set(\"global:<test>::DERIVED::value\"",
+    );
     // `__deco_system({` is the APPLICATION (descriptor obj); the bare
     // `__deco_system(c0` definition sorts earlier and is matched above.
-    ordered(&js, "__G.DERIVED = __ginit_DERIVED();", "__deco_system({");
+    ordered(
+        &js,
+        "__rock_state_set(\"global:<test>::DERIVED::value\"",
+        "__deco_system({",
+    );
 }
 
 // Init lines are dependency-ordered: BASE before DERIVED (DERIVED reads BASE).
@@ -59,7 +67,11 @@ fn assembly_order() {
 fn init_dependency_order() {
     let ws = ws_with(PROG);
     let js = emit_program(&ws);
-    ordered(&js, "__G.BASE = __ginit_BASE();", "__G.DERIVED = __ginit_DERIVED();");
+    ordered(
+        &js,
+        "__rock_state_set(\"global:<test>::BASE::value\"",
+        "__rock_state_set(\"global:<test>::DERIVED::value\"",
+    );
 }
 
 // Application lines: the descriptor `{name, params, func}` mirror + arg
@@ -124,7 +136,7 @@ fn main() {}
     assert!(js.contains("factory: __rock_code_slot_pending_ref(\"named:<test>::make_beta<>\")"));
     let source = format!(
         "var __G = {{}};\n{}\n{}\nconsole.log(__G.__ROCK_DEFINITION_PLAN.widgets.len + ':' + __G.__ROCK_DEFINITION_PLAN.widgets._data[0].key + ':' + __rock_call(__G.__ROCK_DEFINITION_PLAN.widgets._data[0].factory));",
-        skull_codegen_js::JS_CALL_HELPER,
+        format!("{}\n{}", skull_codegen_js::JS_SESSION_RUNTIME, skull_codegen_js::JS_CALL_HELPER),
         js
     );
     let output = node()

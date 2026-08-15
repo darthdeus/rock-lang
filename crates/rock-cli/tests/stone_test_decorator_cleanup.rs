@@ -102,11 +102,9 @@ fn shutdown_systems_clear_contract_via_real_engine() {
     // Simulate two loads with `clear_all_systems()` between them, the
     // shape `do_hot_reload()` uses. HOT_RELOAD=true on the first load
     // so __rock_main_wrapper (which would call stone_run_game and need
-    // libstone.dylib) short-circuits; globals still init because
-    // `__rock_old_globals` is nil and the per-global guard's
-    // ` or not _G.__rock_old_globals` clause fires. Decorator init code
-    // runs unconditionally (no HOT_RELOAD guard), so SHUTDOWN_SYSTEMS
-    // gets pushed to.
+    // libstone.dylib) short-circuits; Session-backed globals still initialize
+    // on the cold Session. Decorator init code runs unconditionally (no
+    // HOT_RELOAD guard), so SHUTDOWN_SYSTEMS gets pushed to.
     //
     // We `dofile` the harness's on-disk main.lua rather than embedding
     // its text — embedding via `[==[...]==]` collides with the engine's

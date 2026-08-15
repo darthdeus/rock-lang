@@ -549,25 +549,151 @@ if not _G.__rock_session_new then
       error("Rock StateSchema changed; restart is required", 0)
     end
     session.__rock_schema_id = schema_id
-    _G.__rock_state_schema_id = schema_id
+    rawset(_G, "__rock_state_schema_id", schema_id)
+    rawset(_G, "__rock_state_name_index", nil)
   end
 end
 if not _G.__rock_active_session then
   _G.__rock_session_activate(_G.__rock_session_new(nil))
 end
--- THE way to read/write a global found by name in `__ROCK_GLOBALS`. A `nobox`
--- global has no slot under its own name -- its storage is its leaf globals -- so
--- a bare `_G[name]` would read nil and write a slot nothing else reads. The
--- rebuild/take-apart pair lives in `__ROCK_NOBOX_GLOBALS` (emitted per nobox
--- global); every other global falls through to `_G` unchanged.
-_G.__rock_global_get = function(name)
-  local a = _G.__ROCK_NOBOX_GLOBALS and _G.__ROCK_NOBOX_GLOBALS[name]
-  if a then return a.get() end
-  return _G[name]
+_G.__rock_state_clear = function(key)
+  local session = _G.__rock_session_current()
+  session.__rock_state[key] = nil
+  session.__rock_initialized[key] = nil
 end
-_G.__rock_global_set = function(name, v)
-  local a = _G.__ROCK_NOBOX_GLOBALS and _G.__ROCK_NOBOX_GLOBALS[name]
-  if a then a.set(v) else _G[name] = v end
+_G.__rock_state_transaction_begin = function()
+  if rawget(_G, "__rock_state_transaction") ~= nil then return end
+  local session = _G.__rock_session_current()
+  local state, initialized, initializer_keys = {}, {}, {}
+  for key, value in pairs(session.__rock_state) do state[key] = value end
+  for key, value in pairs(session.__rock_initialized) do initialized[key] = value end
+  for key, value in pairs(session.__rock_initializer_keys) do initializer_keys[key] = value end
+  rawset(_G, "__rock_state_transaction", {
+    session = session,
+    schema_id = session.__rock_schema_id,
+    schema = rawget(_G, "__ROCK_STATE_SCHEMA"),
+    metadata = rawget(_G, "__ROCK_STATE_METADATA"),
+    nobox = rawget(_G, "__ROCK_STATE_NOBOX"),
+    name_index = rawget(_G, "__rock_state_name_index"),
+    bridge_physical = rawget(_G, "__rock_state_bridge_physical"),
+    state = state,
+    initialized = initialized,
+    initializer_keys = initializer_keys,
+    published_schema_id = rawget(_G, "__rock_state_schema_id")
+  })
+end
+_G.__rock_state_transaction_abort = function()
+  local transaction = rawget(_G, "__rock_state_transaction")
+  if not transaction then return end
+  local session = transaction.session
+  rawset(_G, "__rock_active_session", session)
+  session.__rock_schema_id = transaction.schema_id
+  for key in pairs(session.__rock_state) do session.__rock_state[key] = nil end
+  for key, value in pairs(transaction.state) do session.__rock_state[key] = value end
+  for key in pairs(session.__rock_initialized) do session.__rock_initialized[key] = nil end
+  for key, value in pairs(transaction.initialized) do session.__rock_initialized[key] = value end
+  for key in pairs(session.__rock_initializer_keys) do session.__rock_initializer_keys[key] = nil end
+  for key, value in pairs(transaction.initializer_keys) do session.__rock_initializer_keys[key] = value end
+  rawset(_G, "__ROCK_STATE_SCHEMA", transaction.schema)
+  rawset(_G, "__ROCK_STATE_METADATA", transaction.metadata)
+  rawset(_G, "__ROCK_STATE_NOBOX", transaction.nobox)
+  rawset(_G, "__rock_state_name_index", transaction.name_index)
+  rawset(_G, "__rock_state_bridge_physical", transaction.bridge_physical)
+  rawset(_G, "__rock_state_schema_id", transaction.published_schema_id)
+  rawset(_G, "__rock_state_transaction", nil)
+end
+_G.__rock_state_transaction_commit = function()
+  rawset(_G, "__rock_state_transaction", nil)
+end
+_G.__rock_state_entry_for_name = function(name)
+  local index = rawget(_G, "__rock_state_name_index")
+  if not index then
+    index = {}
+    local function add(key, entry)
+      if not key then return end
+      local old = index[key]
+      if old == nil or old == entry then index[key] = entry else index[key] = false end
+    end
+    for _, entry in ipairs(rawget(_G, "__ROCK_STATE_SCHEMA") or {}) do
+      add(entry.name, entry)
+      add(entry.identity, entry)
+      if entry.kind == "global" then
+        for _, physical in ipairs(entry.physical or {}) do add(physical, entry) end
+      end
+    end
+    rawset(_G, "__rock_state_name_index", index)
+  end
+  local entry = index[name]
+  return entry ~= false and entry or nil
+end
+_G.__rock_state_entry_for_identity = function(identity)
+  for _, entry in ipairs(rawget(_G, "__ROCK_STATE_SCHEMA") or {}) do
+    if entry.identity == identity then return entry end
+  end
+  return nil
+end
+_G.__rock_state_entry_get = function(entry)
+  local adapters = rawget(_G, "__ROCK_STATE_NOBOX")
+  local adapter = adapters and adapters[entry.identity]
+  if adapter then return adapter.get() end
+  local keys = entry.session_keys or {}
+  if #keys == 1 then return _G.__rock_state_get(keys[1]) end
+  error("StateSchema entry has no logical realization " .. tostring(entry.identity), 0)
+end
+_G.__rock_state_entry_set = function(entry, value)
+  local adapters = rawget(_G, "__ROCK_STATE_NOBOX")
+  local adapter = adapters and adapters[entry.identity]
+  if adapter then return adapter.set(value) end
+  local keys = entry.session_keys or {}
+  if #keys == 1 then return _G.__rock_state_set(keys[1], value) end
+  error("StateSchema entry has no logical realization " .. tostring(entry.identity), 0)
+end
+_G.__rock_state_entry_clear = function(entry)
+  for _, key in ipairs(entry.session_keys or {}) do _G.__rock_state_clear(key) end
+end
+_G.__rock_state_install_global_bridge = function()
+  local schema = rawget(_G, "__ROCK_STATE_SCHEMA") or {}
+  local mt = getmetatable(_G) or {}
+  local old_index, old_newindex = mt.__rock_state_original_index, mt.__rock_state_original_newindex
+  if not mt.__rock_state_bridge then
+    old_index, old_newindex = mt.__index, mt.__newindex
+    mt.__rock_state_original_index = old_index
+    mt.__rock_state_original_newindex = old_newindex
+  end
+  local function old_read(t, key)
+    if type(old_index) == "function" then return old_index(t, key) end
+    if type(old_index) == "table" then return old_index[key] end
+    return nil
+  end
+  local function old_write(t, key, value)
+    if type(old_newindex) == "function" then return old_newindex(t, key, value) end
+    if type(old_newindex) == "table" then old_newindex[key] = value; return end
+    rawset(t, key, value)
+  end
+  local previous_physical = rawget(_G, "__rock_state_bridge_physical") or {}
+  for _, physical in ipairs(previous_physical) do rawset(_G, physical, nil) end
+  local current_physical = {}
+  for _, entry in ipairs(schema) do
+    if entry.kind == "global" then
+      for _, physical in ipairs(entry.physical or {}) do
+        rawset(_G, physical, nil)
+        current_physical[#current_physical + 1] = physical
+      end
+    end
+  end
+  rawset(_G, "__rock_state_bridge_physical", current_physical)
+  mt.__index = function(t, key)
+    local entry = _G.__rock_state_entry_for_name(key)
+    if entry and entry.kind == "global" then return _G.__rock_state_entry_get(entry) end
+    return old_read(t, key)
+  end
+  mt.__newindex = function(t, key, value)
+    local entry = _G.__rock_state_entry_for_name(key)
+    if entry and entry.kind == "global" then return _G.__rock_state_entry_set(entry, value) end
+    return old_write(t, key, value)
+  end
+  mt.__rock_state_bridge = true
+  setmetatable(_G, mt)
 end
 -- Shared metatable of capturing-lambda env records (docs/closure-env-records-plan.md):
 -- a record { __slot = <CodeRef>, <captures> } is callable as f(...) via __call.

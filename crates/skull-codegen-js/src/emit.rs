@@ -12,6 +12,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::Write as _;
 
+use bone_semantic::hir::BodyOwner;
 use bone_semantic::inference::Workspace;
 use comfy_la_arena::Idx;
 use skull_mir::code_identity::{
@@ -2694,11 +2695,13 @@ pub fn emit_with_closure(
         }
     }
     let init_lines = order_global_inits(&st.ginits, &st.lowered, &st.names, &st.gctx.state)?;
-    out.push_str("function __rock_state_initialize() {\n");
+    let has_state_transaction = !init_lines.is_empty();
+    if has_state_transaction {
+        out.push_str("if (typeof __rock_state_transaction_begin !== \"undefined\") __rock_state_transaction_begin();\n");
+    }
     for init in &init_lines {
         out.push_str(&init.js);
     }
-    out.push_str("}\n__rock_state_initialize();\n");
     for (fr, mf) in &st.lowered {
         let name = st.names.name_for_decl(ws, *fr).expect("emitted body has a name");
         let plan = st
@@ -2727,6 +2730,9 @@ pub fn emit_with_closure(
         )?);
     }
     out.push_str(code_slot_publish_js(&code_artifact, false));
+    if has_state_transaction && !code_artifact.entries.values().any(|entry| entry.escaping) {
+        out.push_str("if (typeof __rock_state_transaction_commit !== \"undefined\") __rock_state_transaction_commit();\n");
+    }
     Ok(out)
 }
 
@@ -3325,6 +3331,11 @@ fn assemble_program_core(
     out.push_str(&applications);
     stable.push_str(&applications);
     out.push_str(code_slot_publish_js(&code_artifact, has_definition_plan));
+    let has_state_publication = code_artifact.entries.values().any(|entry| entry.escaping)
+        || has_definition_plan;
+    if !has_state_publication {
+        out.push_str("if (typeof __rock_state_transaction_commit !== \"undefined\") __rock_state_transaction_commit();\n");
+    }
 
     // Every definition has been visited, so this is the earliest point where the
     // whole rejection list exists. A non-empty list fails the build and the
@@ -3339,8 +3350,10 @@ fn assemble_program_core(
     )
     .map_err(|error| err(error.to_string()))?;
     let program = format!(
-        "__rock_state_publish_schema({:?});\n{}",
-        state_schema.schema_id, out
+        "if (typeof __rock_state_transaction_begin !== \"undefined\") __rock_state_transaction_begin();\n__rock_state_publish_schema({:?});\n{}{}",
+        state_schema.schema_id,
+        state_schema_js(&state_schema)?,
+        out
     );
 
     Ok(ProgramBuild {
@@ -3353,6 +3366,56 @@ fn assemble_program_core(
         const_chunks,
         const_order,
     })
+}
+
+fn state_schema_js(
+    schema: &skull_mir::state_schema::StateSchema,
+) -> Result<String, CompilerError> {
+    let mut out = String::from("var __ROCK_STATE_SCHEMA = [");
+    for entry in &schema.entries {
+        let kind = match entry.kind {
+            skull_mir::state_schema::StateKind::Global => "global",
+            skull_mir::state_schema::StateKind::Static => "static",
+            skull_mir::state_schema::StateKind::CoroutineFrame => "coroutine_frame",
+            skull_mir::state_schema::StateKind::Storage => "storage",
+        };
+        let name = entry
+            .identity
+            .rsplit("::")
+            .next()
+            .unwrap_or(&entry.identity);
+        let physical = entry
+            .physical
+            .iter()
+            .map(|value| js_string_lit(value))
+            .collect::<Result<Vec<_>, _>>()?
+            .join(",");
+        let session_keys = skull_mir::state_schema::entry_state_keys(entry)
+            .iter()
+            .map(|value| js_string_lit(value))
+            .collect::<Result<Vec<_>, _>>()?
+            .join(",");
+        let owner = match entry.owner.as_deref() {
+            Some(owner) => js_string_lit(owner)?,
+            None => "null".to_string(),
+        };
+        let initializer_identity = entry
+            .initializer_identity
+            .map_or_else(|| "null".to_string(), |identity| identity.to_string());
+        out.push_str(&format!(
+            "{{kind:{},name:{},identity:{},fingerprint:{},physical:[{}],session_keys:[{}],owner:{},initializer_identity:{}}},",
+            js_string_lit(kind)?,
+            js_string_lit(name)?,
+            js_string_lit(&entry.identity)?,
+            js_string_lit(&entry.fingerprint)?,
+            physical,
+            session_keys,
+            owner,
+            initializer_identity,
+        ));
+    }
+    out.push_str("];\n__rock_state_install_global_bridge();\n");
+    Ok(out)
 }
 
 /// Select the JS-served registration declaration for shader driver lines.
@@ -3562,6 +3625,9 @@ pub fn emit_overlay(
     }
     update_js_session(ws, &mut cache.session, &root_plan.refs, reinferred);
     let current = assemble_program_core(ws, &cache.scx, &root_plan.named, &cache.session)?;
+    if current.state_schema.schema_id != cache.build.state_schema.schema_id {
+        return Ok(JsReload::FullRequired);
+    }
     if !cache.build.code_artifact.compatible_overlay(&current.code_artifact) {
         return Ok(JsReload::FullRequired);
     }
@@ -3659,12 +3725,17 @@ pub fn emit_overlay(
 
     let has_code_slots = current.code_artifact.entries.values().any(|entry| entry.escaping);
     let mut out = String::from("// skull JS incremental overlay\n");
-    if has_code_slots {
-        out.push_str("try {\n");
-    }
+    out.push_str("if (typeof __rock_state_transaction_begin !== \"undefined\") __rock_state_transaction_begin();\n");
+    out.push_str("try {\n");
+    let affected_consts = affected_const_names(ws, &changed_consts, &current.const_order);
     for name in &current.const_order {
+        if !affected_consts.contains(name) {
+            continue;
+        }
         if changed_consts.contains(name) {
             out.push_str(&current.const_chunks[name]);
+        } else {
+            out.push_str(&format!("__G.{name} = __ginit_{name}();\n"));
         }
     }
     let mut reset_cells = HashSet::new();
@@ -3720,12 +3791,13 @@ pub fn emit_overlay(
         }
     }
     out.push_str(code_slot_publish_js(&current.code_artifact, false));
-    if has_code_slots {
-        out.push_str("} catch (e) {\n");
-        out.push_str("  __rock_code_slot_abort();\n");
-        out.push_str("  throw e;\n");
-        out.push_str("}\n");
+    if !has_code_slots {
+        out.push_str("if (typeof __rock_state_transaction_commit !== \"undefined\") __rock_state_transaction_commit();\n");
     }
+    out.push_str("} catch (e) {\n");
+    out.push_str("  __rock_code_slot_abort();\n");
+    out.push_str("  throw e;\n");
+    out.push_str("}\n");
 
     cache.build = current;
     Ok(JsReload::Overlay(out))
@@ -3811,6 +3883,28 @@ fn add_inline_js_body(bodies: &mut Vec<JsInlineBody>, instance: Instance, decl: 
     if bodies.iter().all(|body| body.instance != instance) {
         bodies.push(JsInlineBody { instance, decl });
     }
+}
+
+fn opaque_js_global_names(ws: &Workspace, body: &JsInlineBody) -> Vec<ustr::Ustr> {
+    let Some((bone_semantic::hir::FnBackend::Js, source)) =
+        ws.module(body.decl.module).functions[body.decl.func].inline_body
+    else {
+        return Vec::new();
+    };
+    let mut names = Vec::new();
+    let mut rest = source.as_str();
+    while let Some(offset) = rest.find("__G.") {
+        let after = &rest[offset + "__G.".len()..];
+        let end = after
+            .char_indices()
+            .find(|(_, ch)| !ch.is_ascii_alphanumeric() && *ch != '_')
+            .map_or(after.len(), |(index, _)| index);
+        if end > 0 {
+            names.push(ustr::Ustr::from(&after[..end]));
+        }
+        rest = &after[end..];
+    }
+    names
 }
 
 impl WorklistState {
@@ -3916,6 +4010,31 @@ impl WorklistState {
     /// accumulated set -- so the program is never returned with a hole in it.
     fn reject(&mut self, name: &str, e: CompilerError) {
         self.rejections.push((name.to_string(), e));
+    }
+
+    /// An opaque `inline(js)` body has no MIR global-read facts. Recover its
+    /// explicit `__G.name` reads and feed the corresponding initializer through
+    /// the same ginit worklist as lowered bodies. Dynamic `__G[...]` remains
+    /// outside the compiler-known surface and has no silent fallback.
+    fn queue_opaque_js_global_initializers(&mut self, ws: &Workspace) {
+        let names: Vec<ustr::Ustr> = self
+            .inline_js
+            .iter()
+            .flat_map(|body| opaque_js_global_names(ws, body))
+            .collect();
+        for name in names {
+            let base = self
+                .nobox_leaf_globals
+                .get(&name)
+                .copied()
+                .unwrap_or(name);
+            let Some(&site) = self.state_index.get(&base) else {
+                continue;
+            };
+            if self.ginit_seen.insert(base) {
+                self.ginit_queue.push((base, site));
+            }
+        }
     }
 
     /// Every emitted top-level body (fn defs + ginit init fns) for the cross-
@@ -4384,6 +4503,7 @@ fn drain_worklists(
         while let Some(fr) = delivery.st.queue.pop() {
             delivery.visit_fn(fr)?;
         }
+        delivery.st.queue_opaque_js_global_initializers(ws);
         while let Some((gname, _)) = delivery.st.ginit_queue.pop() {
             delivery.visit_ginit(gname)?;
         }
@@ -5500,6 +5620,57 @@ fn direct_callees(mf: &MirFunc, names: &CalleeNames) -> Vec<ustr::Ustr> {
     let mut out = Vec::new();
     walk(mf, names, &mut out);
     out
+}
+
+fn forward_reach(deps: &HashMap<ustr::Ustr, HashSet<ustr::Ustr>>, start: ustr::Ustr) -> HashSet<ustr::Ustr> {
+    let mut seen = HashSet::default();
+    let mut stack = vec![start];
+    while let Some(name) = stack.pop() {
+        if let Some(references) = deps.get(&name) {
+            for &reference in references {
+                if seen.insert(reference) {
+                    stack.push(reference);
+                }
+            }
+        }
+    }
+    seen
+}
+
+fn affected_const_names(
+    ws: &Workspace,
+    changed: &HashSet<ustr::Ustr>,
+    const_order: &[ustr::Ustr],
+) -> HashSet<ustr::Ustr> {
+    if changed.is_empty() {
+        return HashSet::default();
+    }
+    let mut deps: HashMap<ustr::Ustr, HashSet<ustr::Ustr>> = HashMap::default();
+    for module in ws
+        .modules
+        .iter()
+        .filter(|module| module.id != bone_semantic::prelude::ModuleId::builtin())
+    {
+        let Some(inference) = ws.inference(module.id) else { continue };
+        for (fid, function) in module.functions.iter() {
+            if let Some(body) = inference.per_fn.get(&BodyOwner::Function(fid)) {
+                deps.entry(function.name).or_default().extend(body.deps.iter().copied());
+            }
+        }
+        for (gid, global) in module.globals.iter() {
+            if let Some(body) = inference.per_fn.get(&BodyOwner::Global(gid)) {
+                deps.entry(global.name).or_default().extend(body.deps.iter().copied());
+            }
+        }
+    }
+    const_order
+        .iter()
+        .copied()
+        .filter(|name| {
+            changed.contains(name)
+                || forward_reach(&deps, *name).iter().any(|dependency| changed.contains(dependency))
+        })
+        .collect()
 }
 
 /// Order the global-init assignment lines so each global inits AFTER every global

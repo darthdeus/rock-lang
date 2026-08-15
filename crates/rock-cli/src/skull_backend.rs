@@ -1348,14 +1348,8 @@ fn skull_emit_project(dir: &str) -> String {
         }
     }
 
-    // `_G.__ROCK_GLOBALS` registry (consumed by `--dump-state` /
-    // `dump_globals_json`). bone/skull are package-agnostic, so the
-    // package grouping is computed here at the host layer (where stick.toml
-    // lives), mirroring rock-codegen's `format_globals_registry`. Appended
-    // after the emit; the block only lists global *names* (read from `_G`
-    // at runtime), so position past the global defs is irrelevant.
-    let registry = build_rock_globals_registry(&ws, &spec);
-    let lua = format!("{lua}{registry}");
+    let mut lua = lua;
+    install_rock_state_metadata(&mut lua, &ws, &spec);
     // The bone Workspace + HIR modules are dead once `lua` is built -- this is a
     // terminal compile path (`compile`/`run` of a project; never looped in tests
     // or backend-stats), so the only thing after this is the output write / a
@@ -1371,13 +1365,11 @@ fn skull_emit_project(dir: &str) -> String {
     lua
 }
 
-/// Build the `_G.__ROCK_GLOBALS = {["pkg"]={"name",...},...}` registry that
-/// `--dump-state` / `dump_globals_json` reads. bone is package-agnostic, so the
-/// grouping is done here: every global is attributed to its package by
-/// longest-prefix match of its module file against the stick.toml package map
-/// (same rule as rock-codegen's assembler). Returns "" when there's no project
-/// package map (single-file / no stick.toml), matching rock (no registry then).
-fn build_rock_globals_registry(
+/// Attach host-only package grouping and reflection descriptions to the
+/// compiler-emitted StateSchema. This is metadata, not a second state-membership
+/// oracle: consumers enumerate `_G.__ROCK_STATE_SCHEMA` and read the active
+/// Session through its session keys.
+fn build_rock_state_metadata(
     ws: &bone_semantic::inference::Workspace,
     spec: &crate::unified_compile::SourceSpec,
 ) -> String {
@@ -1385,19 +1377,7 @@ fn build_rock_globals_registry(
     use std::collections::BTreeMap;
 
     let package_map = crate::unified_compile::build_package_map(spec);
-    if package_map.is_empty() {
-        return String::new();
-    }
-    let scx = skull_mir::lower::ScalarCtx::new(ws);
-
-    let mut by_package: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    // The RECURSIVE declared shape per global. A global has no reflection
-    // envelope to hang a type on -- `dump_globals_json` serializes its value
-    // with nothing in hand -- so a global holding `Image`, `[Image]` or
-    // `Map<string, Image>` serialized its raw process-local ids into
-    // dump-state, replay and keyframes. Emitted only for the globals whose
-    // declared type contains a nominal, so the rest keep the walk they have.
-    let mut global_descs: BTreeMap<String, String> = BTreeMap::new();
+    let mut metadata: BTreeMap<String, String> = BTreeMap::new();
     for m in ws.modules.iter().filter(|m| m.id != ModuleId::builtin()) {
         let module_path = m.file.as_str();
         // Longest-prefix match so nested packages resolve to the deepest one.
@@ -1410,62 +1390,55 @@ fn build_rock_globals_registry(
                 matched = Some(pkg_name);
             }
         }
-        let Some(pkg) = matched else { continue };
-        let entry = by_package.entry(pkg.to_string()).or_default();
         for (_gid, g) in m.globals.iter() {
-            // Every global is published under its LOGICAL name, `nobox` or not.
-            // A `nobox` global has no slot under that name -- its storage IS its
-            // leaves -- so the name alone would dump nil and restore nothing;
-            // `__ROCK_NOBOX_GLOBALS` carries the rebuild/take-apart pair, and the
-            // consumers go through `__rock_global_get`/`_set` rather than `_G[name]`.
-            // Publishing leaves here instead (which is what this did) put physical
-            // names in the dump, in save files and in replay keyframes.
-            entry.push(g.name.as_str().to_string());
-            if let Some(d) = skull::type_desc_lua(ws, g.ty) {
-                global_descs.insert(g.name.as_str().to_string(), d);
+            let identity = skull_mir::state_schema::global_identity(m.file, g.name);
+            let package = matched.map(str::to_string);
+            let description = skull::type_desc_lua(ws, g.ty);
+            let fields = [
+                package.map(|p| format!("package={p:?}")),
+                description.map(|d| format!("description={d}")),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+            if !fields.is_empty() {
+                metadata.insert(identity, format!("{{{}}}", fields.join(",")));
             }
         }
     }
-    by_package.retain(|_, names| !names.is_empty());
-    if by_package.is_empty() {
-        return String::new();
-    }
-
-    // Bracket-string keys so hyphenated package names (`ui-proto`) stay valid
-    // Lua (bare-identifier keys would be a syntax error).
-    let mut out = String::from("\n_G.__ROCK_GLOBALS = {");
-    for (pkg, names) in &by_package {
-        out.push_str(&format!("[{pkg:?}]={{"));
-        for (i, name) in names.iter().enumerate() {
-            if i > 0 {
-                out.push(',');
-            }
-            out.push_str(&format!("{name:?}"));
-        }
-        out.push_str("},");
+    let mut out = String::from("\n_G.__ROCK_STATE_METADATA = {");
+    for (identity, fields) in metadata {
+        out.push_str(&format!("[{identity:?}]={fields},"));
     }
     out.push_str("}\n");
-    // Rides with the registry for the same reason the accessors do: a consumer
-    // that had the names but not the shapes would serialize every handle-typed
-    // global as a raw id, which is the state this replaced.
-    if !global_descs.is_empty() {
-        out.push_str("_G.__ROCK_GLOBAL_DESC = {");
-        for (name, desc) in &global_descs {
-            out.push_str(&format!("[{name:?}]={desc},"));
-        }
-        out.push_str("}\n");
-    }
-    // The accessor table rides WITH the registry, never appended separately: four
-    // emit paths append this block, and a registry whose consumers had no
-    // accessors would read nil for every `nobox` global.
-    out.push_str(&build_nobox_global_accessors(ws, &scx));
+    out.push_str("for _, entry in ipairs(_G.__ROCK_STATE_SCHEMA or {}) do\n");
+    out.push_str("  local metadata = _G.__ROCK_STATE_METADATA[entry.identity]\n");
+    out.push_str("  if metadata then\n");
+    out.push_str("    entry.package = metadata.package\n");
+    out.push_str("    entry.description = metadata.description\n");
+    out.push_str("  end\nend\n");
     out
 }
 
-/// Build `_G.__ROCK_NOBOX_GLOBALS`, the rebuild/take-apart pair per `nobox`
+fn install_rock_state_metadata(
+    lua: &mut String,
+    ws: &bone_semantic::inference::Workspace,
+    spec: &crate::unified_compile::SourceSpec,
+) {
+    let marker = "__rock_state_install_global_bridge()\n";
+    let at = lua
+        .find(marker)
+        .expect("compiler-owned StateSchema must install its global bridge");
+    let mut metadata = build_rock_state_metadata(ws, spec);
+    let scx = skull_mir::lower::ScalarCtx::new(ws);
+    metadata.push_str(&build_state_nobox_accessors(ws, &scx));
+    lua.insert_str(at + marker.len(), &metadata);
+}
+
+/// Build `_G.__ROCK_STATE_NOBOX`, the rebuild/take-apart pair per `nobox`
 /// global. A `nobox` global's storage is its leaf globals, so reflection cannot
-/// reach it by name; these two closures are what `__rock_global_get`/`_set` call
-/// so every consumer addresses the LOGICAL value under the LOGICAL name.
+/// reach it as one Session value; these closures are the physical adapter for
+/// the logical StateSchema entry.
 ///
 /// Both directions consume one canonical accessor plan
 /// (`nobox_global_accessor_shape`), so they cannot drift from each other or from the
@@ -1475,9 +1448,7 @@ fn build_rock_globals_registry(
 /// `_lct` / `_vt` / `_ct` choice) -- dotted paths mean the flattened leaf ctor,
 /// otherwise the GC tier's table ctor or the cdata one.
 ///
-/// Position past the global defs is irrelevant -- the closures only read the leaf
-/// globals when called (same argument as the registry block it rides with).
-fn build_nobox_global_accessors(
+fn build_state_nobox_accessors(
     ws: &bone_semantic::inference::Workspace,
     scx: &skull_mir::lower::ScalarCtx,
 ) -> String {
@@ -1490,7 +1461,7 @@ fn build_nobox_global_accessors(
                 continue;
             };
             let skull_mir::lower::NoboxGlobalAccessorShape {
-                ty_name, paths, nullable, ctor_suffix: suffix, presence_path, unbuildable,
+                ty_name, paths, nullable, ctor_suffix: suffix, presence_path: _, unbuildable,
             } = acc;
             let leaves = skull_mir::lower::GlobalPlan::for_declared_type(ws, scx, g.ty)
                 .ok()
@@ -1529,8 +1500,37 @@ fn build_nobox_global_accessors(
                 );
                 crate::ablation_report::exit_with_census(1);
             }
-            let _ = presence_path;
-            let args = leaves.iter().map(|l| l.to_string()).collect::<Vec<_>>().join(", ");
+            let identity = skull_mir::state_schema::global_identity(m.file, g.name);
+            let all_leaf_names = if let Some(present) = present {
+                std::iter::once(present).chain(leaves.iter().copied()).collect::<Vec<_>>()
+            } else {
+                leaves.clone()
+            };
+            let state_keys = all_leaf_names
+                .iter()
+                .enumerate()
+                .map(|(index, _)| {
+                    let leaf = if all_leaf_names.len() == 1 {
+                        "value".to_string()
+                    } else {
+                        format!("leaf{index}")
+                    };
+                    skull_mir::state_schema::state_key(&identity, &leaf)
+                })
+                .collect::<Vec<_>>();
+            let (present_key, value_keys) = if nullable {
+                let (present, values) = state_keys
+                    .split_first()
+                    .expect("a nullable shape has a presence Session slot");
+                (Some(present.clone()), values.to_vec())
+            } else {
+                (None, state_keys)
+            };
+            let args = value_keys
+                .iter()
+                .map(|key| format!("__rock_state_get({key:?})"))
+                .collect::<Vec<_>>()
+                .join(", ");
             let writes = leaves
                 .iter()
                 .zip(&paths)
@@ -1539,20 +1539,26 @@ fn build_nobox_global_accessors(
                 // -- a field of nil. The prefix guard above never caught it,
                 // because a NON-nullable nested child contributes `m.x`/`m.y`
                 // with no `m`, so no path is a prefix of another.
-                .map(|(l, p)| format!("{l} = v[{:?}]", p.as_str()))
+                .zip(&value_keys)
+                .map(|((_, p), key)| format!("__rock_state_set({key:?}, v[{:?}])", p.as_str()))
                 .collect::<Vec<_>>()
                 .join("; ");
             let (get, set) = match present {
                 // Presence gates BOTH directions: rebuilding an absent value would
                 // hand reflection a struct of nils, and a write that left the leaves
                 // behind would let a later read resurrect the old value.
-                Some(p) => (
-                    format!("if not {p} then return nil end return {ty_name}{suffix}({args})"),
+                Some(_) => (
                     format!(
-                        "{p} = v ~= nil; if v ~= nil then {writes} else {} end",
+                        "if not __rock_state_get({:?}) then return nil end return {ty_name}{suffix}({args})",
+                        present_key.as_ref().expect("nullable accessor has a presence key")
+                    ),
+                    format!(
+                        "__rock_state_set({:?}, v ~= nil); if v ~= nil then {writes} else {} end",
+                        present_key.as_ref().expect("nullable accessor has a presence key"),
                         leaves
                             .iter()
-                            .map(|l| format!("{l} = nil"))
+                            .zip(&value_keys)
+                            .map(|(_, key)| format!("__rock_state_clear({key:?})"))
                             .collect::<Vec<_>>()
                             .join("; ")
                     ),
@@ -1561,7 +1567,7 @@ fn build_nobox_global_accessors(
             };
             rows.push(format!(
                 "[{:?}]={{get=function() {get} end,set=function(v) {set} end}},",
-                g.name.as_str()
+                identity
             ));
         }
     }
@@ -1570,7 +1576,7 @@ fn build_nobox_global_accessors(
     // would leave the previous build's accessors installed, and changing the last
     // `nobox` global to an ordinary one would keep reflection reading leaf globals
     // that no longer back it.
-    format!("\n_G.__ROCK_NOBOX_GLOBALS = {{{}}}\n", rows.concat())
+    format!("\n_G.__ROCK_STATE_NOBOX = {{{}}}\n", rows.concat())
 }
 
 /// Collect `@sim` info from the bone workspace -- the skull analog of rock's
@@ -2569,12 +2575,13 @@ impl SkullStone {
                 renderer_target,
             )
                 .map_err(|e| anyhow::anyhow!("{}", render_project_err(project.sources(), &e)))?;
-            // `_G.__ROCK_GLOBALS` for `--dump-state` (see `skull_emit_project`).
+            // Host package/description metadata is appended to StateSchema.
             let spec = crate::unified_compile::SourceSpec::Directory(
                 std::path::PathBuf::from(dir),
             );
-            let registry = build_rock_globals_registry(ws, &spec);
-            (format!("{}{}", emit.lua, registry), c)
+            let mut lua = emit.lua;
+            install_rock_state_metadata(&mut lua, ws, &spec);
+            (lua, c)
         };
         let preamble = skull_game_preamble(dir);
         write_full_main(&preamble, &lua, main_path, incremental_path)?;
@@ -2590,8 +2597,19 @@ impl SkullStone {
     /// overlay. `changed` is the watcher's changed-path set; pass empty to force a
     /// full re-discover.
     pub fn recompile(&mut self, changed: &[std::path::PathBuf], main_path: &std::path::Path, incremental_path: &std::path::Path) -> Result<SkullReload> {
+        let snapshot = self.project.snapshot(changed);
         let update = self.project.recompile(changed)?;
-        self.route_and_emit(update, main_path, incremental_path)
+        match self.route_and_emit(update, main_path, incremental_path) {
+            Ok(reload) => Ok(reload),
+            Err(error) => {
+                if let Err(restore) = self.project.restore(snapshot) {
+                    return Err(anyhow::anyhow!(
+                        "skull publication rollback failed after disk edit: {restore}; original error: {error}"
+                    ));
+                }
+                Err(error)
+            }
+        }
     }
 
     /// In-memory edit: replace one source's contents WITHOUT touching disk and
@@ -2601,8 +2619,19 @@ impl SkullStone {
     /// a path the build didn't discover -- an edit to an unknown file would
     /// otherwise silently do nothing.
     pub fn apply_edit(&mut self, path: &std::path::Path, new_text: &str, main_path: &std::path::Path, incremental_path: &std::path::Path) -> Result<SkullReload> {
+        let snapshot = self.project.snapshot(&[path.to_path_buf()]);
         let update = self.project.apply_edit(path, new_text)?;
-        self.route_and_emit(update, main_path, incremental_path)
+        match self.route_and_emit(update, main_path, incremental_path) {
+            Ok(reload) => Ok(reload),
+            Err(error) => {
+                if let Err(restore) = self.project.restore(snapshot) {
+                    return Err(anyhow::anyhow!(
+                        "skull publication rollback failed after in-memory edit: {restore}; original error: {error}"
+                    ));
+                }
+                Err(error)
+            }
+        }
     }
 
     /// The current in-session text of a source (reflects prior `apply_edit`s,
@@ -2671,26 +2700,39 @@ impl SkullStone {
                         reasons: vec!["shader registration ABI changed".to_string()],
                     });
                 }
-                self.cache = c; // resets changed_since_full
-                // `_G.__ROCK_GLOBALS` for `--dump-state` (see `skull_emit_project`):
-                // a structural edit can add/remove globals, so recompute on full.
+                if self
+                    .cache
+                    .state_schema()
+                    .is_some_and(|old| {
+                        c.state_schema()
+                            .is_some_and(|new| old.schema_id != new.schema_id)
+                    })
+                {
+                    return Ok(SkullReload::FullRequired {
+                        reasons: vec!["StateSchema changed; process restart is required".to_string()],
+                    });
+                }
+                // StateSchema metadata is regenerated on a structural edit.
                 let spec =
                     crate::unified_compile::SourceSpec::Directory(PathBuf::from(self.project.dir()));
-                let registry = build_rock_globals_registry(ws, &spec);
-                format!("{}{}", emit.lua, registry)
+                let mut lua = emit.lua;
+                install_rock_state_metadata(&mut lua, ws, &spec);
+                (lua, c)
             };
             let emit_ms = t_emit.elapsed().as_secs_f64() * 1000.0;
             let t_write = Instant::now();
+            let (lua, staged_cache) = lua;
             let bytes = write_full_main(&self.preamble, &lua, main_path, incremental_path)?;
+            self.cache = staged_cache;
             let write_ms = t_write.elapsed().as_secs_f64() * 1000.0;
             Ok(SkullReload::Full { bytes, cook_ms, emit_ms, write_ms })
         } else {
-            let overlay = {
+            let (overlay, staged_cache) = {
                 let ws = self.project.workspace();
-                skull::mir_emit::emit_overlay(ws, &mut self.cache, &reinferred)
+                skull::mir_emit::emit_overlay_staged(ws, &self.cache, &reinferred)
                     .map_err(|e| anyhow::anyhow!("{}", render_project_err(self.project.sources(), &e)))?
             };
-            if old_shader_contracts != self.cache.shader_registration_contracts() {
+            if old_shader_contracts != staged_cache.shader_registration_contracts() {
                 return Ok(SkullReload::FullRequired {
                     reasons: vec!["shader registration ABI changed".to_string()],
                 });
@@ -2699,6 +2741,7 @@ impl SkullStone {
             let emit_ms = t_emit.elapsed().as_secs_f64() * 1000.0;
             let t_write = Instant::now();
             rock_host::project::write_atomic(incremental_path, &overlay.lua)?;
+            self.cache = staged_cache;
             let write_ms = t_write.elapsed().as_secs_f64() * 1000.0;
             Ok(SkullReload::Incremental { bytes, reinferred: reinferred.len(), cook_ms, emit_ms, write_ms })
         }
@@ -2733,15 +2776,17 @@ impl SkullStone {
                 self.renderer_target,
             )
                 .map_err(|e| anyhow::anyhow!("skull force_full emit: {}", e.message))?;
-            self.cache = c; // resets changed_since_full -- the overlay is now folded in
-            // `_G.__ROCK_GLOBALS` for `--dump-state` (see `skull_emit_project`).
+            // Host package/description metadata is rebuilt with the StateSchema.
             let spec = crate::unified_compile::SourceSpec::Directory(
                 std::path::PathBuf::from(self.project.dir()),
             );
-            let registry = build_rock_globals_registry(ws, &spec);
-            format!("{}{}", emit.lua, registry)
+            let mut lua = emit.lua;
+            install_rock_state_metadata(&mut lua, ws, &spec);
+            (lua, c)
         };
+        let (lua, staged_cache) = lua;
         write_full_main(&self.preamble, &lua, main_path, incremental_path)?;
+        self.cache = staged_cache; // resets changed_since_full -- the overlay is now folded in
         // This program is what the (re)spawned process loads -- re-baseline the
         // shape hashes to it, including drift that arrived via a recompile that
         // bailed on a type error after mutating the session.

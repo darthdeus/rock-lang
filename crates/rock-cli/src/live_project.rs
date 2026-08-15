@@ -17,6 +17,12 @@ pub enum LiveUpdate {
     },
 }
 
+pub(crate) struct LiveProjectSnapshot {
+    sources: SourceFiles,
+    entry_path: String,
+    previous_contents: Vec<(String, String)>,
+}
+
 pub struct LiveProject {
     session: bone_incremental::session::Session,
     dir: String,
@@ -50,7 +56,69 @@ impl LiveProject {
         Ok(project)
     }
 
+    pub(crate) fn snapshot(&self, changed: &[PathBuf]) -> LiveProjectSnapshot {
+        let mut previous_contents = Vec::new();
+        for path in changed {
+            let Ok(canonical) = std::fs::canonicalize(path) else { continue };
+            let id = canonical.to_string_lossy().into_owned();
+            let Some(source) = self
+                .sources
+                .files
+                .iter()
+                .find(|source| source.borrow().file.to_id_path() == id)
+            else {
+                continue;
+            };
+            if previous_contents.iter().any(|(old_id, _)| old_id == &id) {
+                continue;
+            }
+            previous_contents.push((id, source.borrow().contents.clone()));
+        }
+        LiveProjectSnapshot {
+            sources: self.sources.clone(),
+            entry_path: self.entry_path.clone(),
+            previous_contents,
+        }
+    }
+
+    pub(crate) fn restore(&mut self, snapshot: LiveProjectSnapshot) -> Result<()> {
+        self.sources = snapshot.sources;
+        self.entry_path = snapshot.entry_path;
+        for (id, contents) in snapshot.previous_contents {
+            if let Some(source) = self
+                .sources
+                .files
+                .iter()
+                .find(|source| source.borrow().file.to_id_path() == id)
+            {
+                source.borrow_mut().contents = contents;
+            }
+        }
+        self.session = crate::bone_backend::bone_session(source_pairs(&self.sources)).map_err(|e| {
+            anyhow::anyhow!(
+                "{}",
+                crate::skull_backend::render_project_err(&self.sources, &e)
+            )
+        })?;
+        self.verdict("after failed publication rollback")
+    }
+
     pub fn recompile(&mut self, changed: &[PathBuf]) -> Result<LiveUpdate> {
+        let snapshot = self.snapshot(changed);
+        match self.recompile_inner(changed) {
+            Ok(update) => Ok(update),
+            Err(error) => {
+                if let Err(restore) = self.restore(snapshot) {
+                    return Err(anyhow::anyhow!(
+                        "live project rollback failed after compile error: {restore}; original error: {error}"
+                    ));
+                }
+                Err(error)
+            }
+        }
+    }
+
+    fn recompile_inner(&mut self, changed: &[PathBuf]) -> Result<LiveUpdate> {
         let started = Instant::now();
         let mut need_full = changed.is_empty();
         let mut feed = Vec::new();
@@ -89,6 +157,21 @@ impl LiveProject {
     }
 
     pub fn apply_edit(&mut self, path: &Path, new_text: &str) -> Result<LiveUpdate> {
+        let snapshot = self.snapshot(&[path.to_path_buf()]);
+        match self.apply_edit_inner(path, new_text) {
+            Ok(update) => Ok(update),
+            Err(error) => {
+                if let Err(restore) = self.restore(snapshot) {
+                    return Err(anyhow::anyhow!(
+                        "live project rollback failed after in-memory edit error: {restore}; original error: {error}"
+                    ));
+                }
+                Err(error)
+            }
+        }
+    }
+
+    fn apply_edit_inner(&mut self, path: &Path, new_text: &str) -> Result<LiveUpdate> {
         let started = Instant::now();
         let canonical = std::fs::canonicalize(path).map_err(|e| {
             anyhow::anyhow!("apply_edit: cannot canonicalize `{}`: {e}", path.display())
