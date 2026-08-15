@@ -238,6 +238,7 @@ pub struct InlineScanStats {
     pub candidate_cleanup_ns: u64,
     pub candidate_eligibility_ns: u64,
     pub candidate_keys: Vec<Instance>,
+    pub spliced_keys: Vec<Instance>,
     pub ordinary_keys: Vec<Instance>,
     pub candidate_worker_derivations: BTreeMap<String, usize>,
     pub rejection_reasons: BTreeMap<String, usize>,
@@ -349,6 +350,7 @@ impl InlineScanStats {
         self.candidate_cleanup_ns += other.candidate_cleanup_ns;
         self.candidate_eligibility_ns += other.candidate_eligibility_ns;
         self.candidate_keys.extend(other.candidate_keys);
+        self.spliced_keys.extend(other.spliced_keys);
         self.ordinary_keys.extend(other.ordinary_keys);
         for (worker, count) in other.candidate_worker_derivations {
             *self.candidate_worker_derivations.entry(worker).or_default() += count;
@@ -388,6 +390,21 @@ pub struct InlineCandidateTable {
     stats: InlineCandidateTableStats,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct InlineCandidateProfile {
+    pub lower_ns: u64,
+    pub compact_ns: u64,
+    pub lower_attempted: bool,
+    pub lowered: bool,
+    pub rejected_before_lower: bool,
+    pub raw_instructions: usize,
+    pub raw_cells: usize,
+    pub raw_blocks: usize,
+    pub cleaned_instructions: usize,
+    pub cleaned_cells: usize,
+    pub cleaned_blocks: usize,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct InlineCandidateTableStats {
     pub keys: usize,
@@ -395,9 +412,21 @@ pub struct InlineCandidateTableStats {
     pub reused: usize,
     pub eligible: usize,
     pub rejected: usize,
+    pub lower_attempted: usize,
+    pub lowered: usize,
+    pub rejected_before_lower: usize,
     pub lower_ns: u64,
     pub cleanup_ns: u64,
+    pub compact_ns: u64,
     pub eligibility_ns: u64,
+    pub raw_instructions: usize,
+    pub raw_cells: usize,
+    pub raw_blocks: usize,
+    pub cleaned_instructions: usize,
+    pub cleaned_cells: usize,
+    pub cleaned_blocks: usize,
+    pub profiles: BTreeMap<Instance, InlineCandidateProfile>,
+    pub lower_ns_by_key: BTreeMap<Instance, u64>,
     pub worker_derivations: BTreeMap<String, usize>,
     pub rejection_reasons: BTreeMap<String, usize>,
 }
@@ -407,6 +436,15 @@ pub struct InlineCandidateWarm {
     candidate: Option<Arc<CalleeBody>>,
     pub lower_ns: u64,
     pub cleanup_ns: u64,
+    pub compact_ns: u64,
+    pub lower_attempted: bool,
+    pub lowered: bool,
+    pub raw_instructions: usize,
+    pub raw_cells: usize,
+    pub raw_blocks: usize,
+    pub cleaned_instructions: usize,
+    pub cleaned_cells: usize,
+    pub cleaned_blocks: usize,
     pub eligibility_ns: u64,
     pub rejection: Option<&'static str>,
     worker: String,
@@ -433,21 +471,70 @@ impl InlineCandidateTable {
             warmed: warms.len(),
             ..InlineCandidateTableStats::default()
         };
+        let census_enabled = warms.iter().any(|warm| !warm.worker.is_empty())
+            || base.is_some_and(|table| !table.stats.profiles.is_empty());
+        if census_enabled {
+            if let Some(base) = base {
+                stats.profiles = base.stats.profiles.clone();
+            }
+        }
         for warm in warms {
             stats.lower_ns += warm.lower_ns;
             stats.cleanup_ns += warm.cleanup_ns;
+            stats.compact_ns += warm.compact_ns;
+            stats.raw_instructions += warm.raw_instructions;
+            stats.raw_cells += warm.raw_cells;
+            stats.raw_blocks += warm.raw_blocks;
+            stats.cleaned_instructions += warm.cleaned_instructions;
+            stats.cleaned_cells += warm.cleaned_cells;
+            stats.cleaned_blocks += warm.cleaned_blocks;
+            if warm.lower_attempted {
+                stats.lower_attempted += 1;
+            }
+            if warm.lowered {
+                stats.lowered += 1;
+                stats.lower_ns_by_key.insert(warm.key.clone(), warm.lower_ns);
+            }
             stats.eligibility_ns += warm.eligibility_ns;
             if !warm.worker.is_empty() {
                 *stats.worker_derivations.entry(warm.worker.clone()).or_default() += 1;
             }
             if let Some(reason) = warm.rejection {
                 stats.rejected += 1;
+                if !warm.lower_attempted {
+                    stats.rejected_before_lower += 1;
+                }
                 *stats.rejection_reasons.entry(reason.to_string()).or_default() += 1;
             } else {
                 stats.eligible += 1;
             }
+            if census_enabled {
+                stats.profiles.insert(
+                    warm.key.clone(),
+                    InlineCandidateProfile {
+                        lower_ns: warm.lower_ns,
+                        compact_ns: warm.compact_ns,
+                        lower_attempted: warm.lower_attempted,
+                        lowered: warm.lowered,
+                        rejected_before_lower: warm.rejection.is_some() && !warm.lower_attempted,
+                        raw_instructions: warm.raw_instructions,
+                        raw_cells: warm.raw_cells,
+                        raw_blocks: warm.raw_blocks,
+                        cleaned_instructions: warm.cleaned_instructions,
+                        cleaned_cells: warm.cleaned_cells,
+                        cleaned_blocks: warm.cleaned_blocks,
+                    },
+                );
+            }
             let previous = warmed.insert(warm.key, warm.candidate);
             assert!(previous.is_none(), "inline candidate table received a duplicate key");
+        }
+        if census_enabled {
+            stats.lower_ns_by_key = stats
+                .profiles
+                .iter()
+                .filter_map(|(key, profile)| profile.lowered.then_some((key.clone(), profile.lower_ns)))
+                .collect();
         }
         stats.reused = keys.len().saturating_sub(stats.warmed);
 
@@ -474,6 +561,12 @@ impl InlineCandidateTable {
 
     pub fn contains(&self, key: &CacheKey) -> bool {
         self.entries.contains_key(key)
+    }
+
+    pub fn keys(&self) -> Vec<Instance> {
+        let mut keys: Vec<_> = self.entries.keys().cloned().collect();
+        keys.sort();
+        keys
     }
 }
 
@@ -645,6 +738,10 @@ impl InlineCache {
         self.shared.clone()
     }
 
+    pub fn census_enabled(&self) -> bool {
+        self.census_enabled
+    }
+
     pub fn replace_candidate_table(&mut self, table: Arc<InlineCandidateTable>) {
         self.cands.clear();
         self.shared = Some(table);
@@ -682,6 +779,15 @@ impl InlineCache {
             candidate,
             lower_ns: timing.lower_ns,
             cleanup_ns: timing.cleanup_ns,
+            compact_ns: timing.compact_ns,
+            lower_attempted: timing.lower_attempted,
+            lowered: timing.lowered,
+            raw_instructions: timing.raw_instructions,
+            raw_cells: timing.raw_cells,
+            raw_blocks: timing.raw_blocks,
+            cleaned_instructions: timing.cleaned_instructions,
+            cleaned_cells: timing.cleaned_cells,
+            cleaned_blocks: timing.cleaned_blocks,
             eligibility_ns,
             rejection,
             worker: self.worker.clone(),
@@ -1211,6 +1317,15 @@ fn full_clone_stats(
 struct CandidateTiming {
     lower_ns: u64,
     cleanup_ns: u64,
+    compact_ns: u64,
+    lower_attempted: bool,
+    lowered: bool,
+    raw_instructions: usize,
+    raw_cells: usize,
+    raw_blocks: usize,
+    cleaned_instructions: usize,
+    cleaned_cells: usize,
+    cleaned_blocks: usize,
 }
 
 /// Lower `fref` and classify it as an inline candidate. Hard exclusions: extern,
@@ -1253,11 +1368,18 @@ fn classify(
     let abi = skull_mir::lower::owner_abi_plan(ws, scx, concrete_plans, inst)
         .map_err(|_| "abi_plan")?;
     let lower_started = timing.as_ref().map(|_| Instant::now());
+    if let Some(timing) = timing.as_deref_mut() {
+        timing.lower_attempted = true;
+    }
     let mut mf = skull_mir::lower::lower_instance_with_plans(ws, scx, plan, concrete_plans)
         .map_err(|_| "lower")?;
     if let Some(start) = lower_started {
         if let Some(timing) = timing.as_deref_mut() {
             timing.lower_ns = start.elapsed().as_nanos() as u64;
+            timing.lowered = true;
+            timing.raw_instructions = mf.insts.len();
+            timing.raw_cells = mf.cells.len();
+            timing.raw_blocks = mf.blocks.len();
         }
     }
     // Cleanup first so the size gate reflects emitted size and the splice clones
@@ -1267,6 +1389,9 @@ fn classify(
     if let Some(start) = cleanup_started {
         if let Some(timing) = timing.as_deref_mut() {
             timing.cleanup_ns = start.elapsed().as_nanos() as u64;
+            timing.cleaned_instructions = mf.insts.len();
+            timing.cleaned_cells = mf.cells.len();
+            timing.cleaned_blocks = mf.blocks.len();
         }
     }
 
@@ -1333,7 +1458,13 @@ fn classify(
         mf.params.iter().map(|p| !rebound.contains(p)).collect();
     let live = live_closure(&mf);
     let template = template_counts(&mf, &live);
+    let compact_started = timing.as_ref().map(|_| Instant::now());
     let (mf, block_map) = compact_live_template(mf, &live);
+    if let Some(start) = compact_started {
+        if let Some(timing) = timing.as_deref_mut() {
+            timing.compact_ns = start.elapsed().as_nanos() as u64;
+        }
+    }
 
     // A lambda-bearing body must take the General splice even when its entry
     // ends in Return: the straight path clones no blocks, so the lambda's
@@ -2609,6 +2740,9 @@ fn inline_functions_inner(
         };
         let pos = site.pos();
         let fref = site.fref();
+        if cache.census_enabled {
+            scan_stats.spliced_keys.push(site.inst().clone());
+        }
         let transitive = !original_calls.contains(&site.call_id());
         let argument_elements = match &site {
             Site::Single { args, .. } | Site::Multi { args, .. } => args.len(),

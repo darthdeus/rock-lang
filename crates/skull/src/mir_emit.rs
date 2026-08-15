@@ -598,6 +598,39 @@ pub struct AttributionPhase {
 }
 
 #[derive(Clone, Debug, Default)]
+pub struct InlinePopulationAttribution {
+    pub candidate_published_keys: usize,
+    pub candidate_lower_attempted: usize,
+    pub candidate_lowered_keys: usize,
+    pub candidate_rejected_before_lower: usize,
+    pub candidate_compact_ns: u64,
+    pub candidate_raw_instructions: usize,
+    pub candidate_raw_cells: usize,
+    pub candidate_raw_blocks: usize,
+    pub candidate_cleaned_instructions: usize,
+    pub candidate_cleaned_cells: usize,
+    pub candidate_cleaned_blocks: usize,
+    pub ordinary_lowered_keys: usize,
+    pub specialized_lowered_keys: usize,
+    pub ordinary_lowering_derivations: usize,
+    pub specialized_lowering_derivations: usize,
+    pub always_lowered_units: usize,
+    pub always_callee_keys: usize,
+    pub candidate_ordinary_overlap: usize,
+    pub candidate_specialized_overlap: usize,
+    pub candidate_always_callee_overlap: usize,
+    pub ordinary_specialized_overlap: usize,
+    pub candidate_requested_unique_keys: usize,
+    pub candidate_spliced_unique_keys: usize,
+    pub candidate_published_never_requested: usize,
+    pub candidate_requested_never_spliced: usize,
+    pub candidate_requested_not_published: usize,
+    pub keys_lowered_more_than_once: usize,
+    pub first_lower_ns: u64,
+    pub duplicate_lower_ns: u64,
+}
+
+#[derive(Clone, Debug, Default)]
 pub struct InlineAttribution {
     pub accepted_splices: usize,
     pub copied_instructions: usize,
@@ -611,6 +644,7 @@ pub struct InlineAttribution {
     pub borrowed_block_scans: usize,
     pub instructions_scanned: usize,
     pub census: skull_transform::InlineScanStats,
+    pub population: InlinePopulationAttribution,
     pub candidate_unique_keys: usize,
     pub candidate_snapshot_duplicates: usize,
     pub candidate_setup_keys: usize,
@@ -792,6 +826,15 @@ struct UnitAttribution {
     mir_instructions: usize,
     lower_facts: skull_mir::lower::LowerAttribution,
     inline: InlineWork,
+    lowered_instance: Option<(Instance, LoweredInstanceKind)>,
+    always_lowered: bool,
+    always_callee_keys: Vec<Instance>,
+}
+
+#[derive(Clone, Copy)]
+enum LoweredInstanceKind {
+    Ordinary,
+    Specialized,
 }
 
 #[derive(Default)]
@@ -807,6 +850,15 @@ struct AttributionAccumulator {
     regalloc_samples: Vec<u64>,
     stringify_samples: Vec<u64>,
     top_bodies: Vec<BodyAttributionOwner>,
+    census_enabled: bool,
+    candidate_published_keys: FxHashSet<Instance>,
+    ordinary_lowered_keys: FxHashSet<Instance>,
+    specialized_lowered_keys: FxHashSet<Instance>,
+    candidate_lower_ns_by_key: BTreeMap<Instance, Vec<u64>>,
+    ordinary_lower_ns_by_key: BTreeMap<Instance, Vec<u64>>,
+    specialized_lower_ns_by_key: BTreeMap<Instance, Vec<u64>>,
+    always_callee_keys: FxHashSet<Instance>,
+    always_lowered_units: usize,
 }
 
 fn inline_owner_key(fref: FuncRef) -> String {
@@ -833,6 +885,10 @@ fn mir_live_instructions(mf: &MirFunc) -> usize {
 
 fn duration_us(duration: Duration) -> u64 {
     duration.as_micros().max(1) as u64
+}
+
+fn duration_ns(duration: Duration) -> u64 {
+    duration.as_nanos().min(u64::MAX as u128) as u64
 }
 
 fn record_phase(
@@ -874,6 +930,30 @@ impl AttributionAccumulator {
         self.result.bodies_examined += 1;
         if unit.mir_instructions > 0 {
             self.result.bodies_with_work += 1;
+        }
+        if self.census_enabled {
+            if let Some((instance, kind)) = &unit.lowered_instance {
+                match kind {
+                    LoweredInstanceKind::Ordinary => {
+                        self.ordinary_lowered_keys.insert(instance.clone());
+                        self.ordinary_lower_ns_by_key
+                            .entry(instance.clone())
+                            .or_default()
+                            .push(duration_ns(unit.times.lower));
+                    }
+                    LoweredInstanceKind::Specialized => {
+                        self.specialized_lowered_keys.insert(instance.clone());
+                        self.specialized_lower_ns_by_key
+                            .entry(instance.clone())
+                            .or_default()
+                            .push(duration_ns(unit.times.lower));
+                    }
+                }
+            }
+            if unit.always_lowered {
+                self.always_lowered_units += 1;
+            }
+            self.always_callee_keys.extend(unit.always_callee_keys.iter().cloned());
         }
         let times = &unit.times;
         record_phase(
@@ -1082,6 +1162,91 @@ impl AttributionAccumulator {
             .iter()
             .filter(|key| ordinary_keys.contains(key))
             .count();
+        if self.census_enabled {
+            let published = &self.candidate_published_keys;
+            let requested: FxHashSet<_> = self
+                .result
+                .inline
+                .census
+                .candidate_requested_keys
+                .iter()
+                .cloned()
+                .collect();
+            let spliced: FxHashSet<_> = self
+                .result
+                .inline
+                .census
+                .spliced_keys
+                .iter()
+                .cloned()
+                .collect();
+            let mut lowerings_by_key: BTreeMap<Instance, Vec<u64>> = BTreeMap::new();
+            for (key, times) in &self.candidate_lower_ns_by_key {
+                lowerings_by_key
+                    .entry(key.clone())
+                    .or_default()
+                    .extend(times.iter().copied());
+            }
+            for (key, times) in &self.ordinary_lower_ns_by_key {
+                lowerings_by_key
+                    .entry(key.clone())
+                    .or_default()
+                    .extend(times.iter().copied());
+            }
+            for (key, times) in &self.specialized_lower_ns_by_key {
+                lowerings_by_key
+                    .entry(key.clone())
+                    .or_default()
+                    .extend(times.iter().copied());
+            }
+            let mut keys_lowered_more_than_once = 0;
+            let mut first_lower_ns = 0;
+            let mut duplicate_lower_ns = 0;
+            for times in lowerings_by_key.values() {
+                if times.len() > 1 {
+                    keys_lowered_more_than_once += 1;
+                }
+                if let Some((first, rest)) = times.split_first() {
+                    first_lower_ns += *first;
+                    duplicate_lower_ns += rest.iter().sum::<u64>();
+                }
+            }
+            let ordinary_lowering_derivations = self
+                .ordinary_lower_ns_by_key
+                .values()
+                .map(Vec::len)
+                .sum();
+            let specialized_lowering_derivations = self
+                .specialized_lower_ns_by_key
+                .values()
+                .map(Vec::len)
+                .sum();
+            let population = &mut self.result.inline.population;
+            population.candidate_published_keys = published.len();
+            population.ordinary_lowered_keys = self.ordinary_lowered_keys.len();
+            population.specialized_lowered_keys = self.specialized_lowered_keys.len();
+            population.ordinary_lowering_derivations = ordinary_lowering_derivations;
+            population.specialized_lowering_derivations = specialized_lowering_derivations;
+            population.always_lowered_units = self.always_lowered_units;
+            population.always_callee_keys = self.always_callee_keys.len();
+            population.candidate_ordinary_overlap =
+                published.intersection(&self.ordinary_lowered_keys).count();
+            population.candidate_specialized_overlap =
+                published.intersection(&self.specialized_lowered_keys).count();
+            population.candidate_always_callee_overlap =
+                published.intersection(&self.always_callee_keys).count();
+            population.ordinary_specialized_overlap =
+                self.ordinary_lowered_keys.intersection(&self.specialized_lowered_keys).count();
+            population.candidate_requested_unique_keys = requested.len();
+            population.candidate_spliced_unique_keys = spliced.len();
+            population.candidate_published_never_requested =
+                published.difference(&requested).count();
+            population.candidate_requested_never_spliced = requested.difference(&spliced).count();
+            population.candidate_requested_not_published = requested.difference(published).count();
+            population.keys_lowered_more_than_once = keys_lowered_more_than_once;
+            population.first_lower_ns = first_lower_ns;
+            population.duplicate_lower_ns = duplicate_lower_ns;
+        }
         self.top_bodies.sort_by(|a, b| {
             b.lower_us
                 .cmp(&a.lower_us)
@@ -1207,6 +1372,8 @@ fn emit_decorator_unit(
             }
             let owner = bone_semantic::hir::BodyOwner::Decorator(did);
             let plan = concrete_plan.expect("a lowered decorator has a concrete plan");
+            out.attribution.always_lowered = true;
+            out.attribution.always_callee_keys.extend(plan.callees.values().cloned());
             let ctx = skull_mir::bound::concrete_body_ctx(
                 ws,
                 mid,
@@ -1330,6 +1497,8 @@ fn emit_global_unit(
             }
             let owner = bone_semantic::hir::BodyOwner::Global(gid);
             let plan = concrete_plan.expect("a lowered global has a concrete plan");
+            out.attribution.always_lowered = true;
+            out.attribution.always_callee_keys.extend(plan.callees.values().cloned());
             let ctx = skull_mir::bound::concrete_body_ctx(
                 ws,
                 mid,
@@ -2273,6 +2442,9 @@ fn emit_body_chunk_with_mutation(
     attribution.hir_nodes = hir_nodes_for_owner(ws, self_ref.module, BodyOwner::Function(self_ref.func));
     attribution.mir_instructions = mf.insts.len();
     attribution.lower_facts = mf.lower_attribution.clone();
+    attribution.lowered_instance = ordinary_instance
+        .clone()
+        .map(|instance| (instance, LoweredInstanceKind::Ordinary));
     match mutation {
         BodyMutation::None => {}
         #[cfg(test)]
@@ -2669,6 +2841,7 @@ fn emit_spec_chunk(
         hir_nodes: hir_nodes_for_owner(ws, fref.module, BodyOwner::Function(fref.func)),
         mir_instructions: mf.insts.len(),
         lower_facts: mf.lower_attribution.clone(),
+        lowered_instance: Some((body.clone(), LoweredInstanceKind::Specialized)),
         ..UnitAttribution::default()
     };
     // BEFORE every transform: an `Iterator`-bounded body's placeholders are what
@@ -3755,7 +3928,10 @@ fn assemble(
     // SEQUENTIAL remainder (prelude/value-structs/type-tables + global-init
     // ordering + deco application).
     let mut times = PhaseTimes::default();
-    let mut attribution = AttributionAccumulator::default();
+    let mut attribution = AttributionAccumulator {
+        census_enabled: cache.inline_cache.census_enabled(),
+        ..AttributionAccumulator::default()
+    };
     if let Some(table) = cache.inline_cache.candidate_table() {
         let stats = table.stats();
         let inline = &mut attribution.result.inline;
@@ -3769,6 +3945,30 @@ fn assemble(
         inline.candidate_setup_eligibility_ns = stats.eligibility_ns;
         inline.candidate_setup_worker_derivations = stats.worker_derivations.clone();
         inline.candidate_setup_rejection_reasons = stats.rejection_reasons.clone();
+        if attribution.census_enabled {
+            attribution.candidate_published_keys.extend(table.keys());
+            let population = &mut inline.population;
+            for profile in stats.profiles.values() {
+                population.candidate_lower_attempted += usize::from(profile.lower_attempted);
+                population.candidate_lowered_keys += usize::from(profile.lowered);
+                population.candidate_rejected_before_lower +=
+                    usize::from(profile.rejected_before_lower);
+                population.candidate_compact_ns += profile.compact_ns;
+                population.candidate_raw_instructions += profile.raw_instructions;
+                population.candidate_raw_cells += profile.raw_cells;
+                population.candidate_raw_blocks += profile.raw_blocks;
+                population.candidate_cleaned_instructions += profile.cleaned_instructions;
+                population.candidate_cleaned_cells += profile.cleaned_cells;
+                population.candidate_cleaned_blocks += profile.cleaned_blocks;
+            }
+            for (key, lower_ns) in &stats.lower_ns_by_key {
+                attribution
+                    .candidate_lower_ns_by_key
+                    .entry(key.clone())
+                    .or_default()
+                    .push(*lower_ns);
+            }
+        }
     }
     let mut t_scaffold = Duration::ZERO;
     let mut needed_specs: Vec<skull_mir::bound::SpecDemand> = Vec::new();
@@ -6520,6 +6720,88 @@ fn main() { let result = first() }
         side_bounds!(call_sites);
         side_bounds!(call_site_owners);
         side_bounds!(iterator_headers);
+    }
+
+    #[test]
+    fn inline_population_census_proves_each_lowering_route_and_conserves_keys() {
+        let _inline = InlineOn::on();
+        let _census = InlineCensusOn::on();
+        let ws = census_workspace();
+        let mid = *ws
+            .module_ids
+            .get(&Ustr::from("<inline-census-test>"))
+            .expect("census test module");
+        let (emit, _) = emit_full_in_with_test_mutation(&ws, mid, BodyMutation::None)
+            .expect("intact emission");
+        let population = &emit.attribution.inline.population;
+        assert!(
+            population.candidate_published_keys > 0
+                && population.candidate_lower_attempted > 0
+                && population.candidate_lowered_keys > 0
+                && population.candidate_rejected_before_lower > 0
+                && population.ordinary_lowered_keys > 0
+                && population.always_lowered_units > 0
+                && population.candidate_ordinary_overlap > 0
+                && population.candidate_requested_unique_keys > 0
+                && population.candidate_spliced_unique_keys > 0
+                && population.candidate_requested_never_spliced > 0,
+            "the production route fixture has no required population: {population:?}"
+        );
+        assert_eq!(
+            emit.attribution.inline.candidate_setup_warmed,
+            population.candidate_lower_attempted + population.candidate_rejected_before_lower,
+            "candidate warm keys must partition into lower attempts and early rejections: {population:?}"
+        );
+        assert!(
+            population.candidate_lower_attempted >= population.candidate_lowered_keys
+                && population.candidate_raw_instructions > 0
+                && population.candidate_raw_cells > 0
+                && population.candidate_raw_blocks > 0
+                && population.candidate_cleaned_instructions > 0
+                && population.candidate_cleaned_cells > 0
+                && population.candidate_cleaned_blocks > 0
+                && population.candidate_compact_ns > 0
+                && population.ordinary_lowering_derivations
+                    >= population.ordinary_lowered_keys
+                && population.specialized_lowering_derivations
+                    >= population.specialized_lowered_keys
+                && population.keys_lowered_more_than_once > 0
+                && population.first_lower_ns > 0
+                && population.duplicate_lower_ns > 0,
+            "lowering overlap census has no measured duplicate population: {population:?}"
+        );
+        assert_eq!(
+            population.candidate_published_keys,
+            population.candidate_requested_unique_keys
+                + population.candidate_published_never_requested,
+            "published keys must partition into requested and never-requested keys: {population:?}"
+        );
+        assert_eq!(
+            population.candidate_requested_unique_keys,
+            population.candidate_spliced_unique_keys
+                + population.candidate_requested_never_spliced,
+            "requested keys must partition into spliced and unspliced keys: {population:?}"
+        );
+        assert_eq!(
+            population.candidate_requested_not_published,
+            0,
+            "a production inline lookup must use the published candidate table: {population:?}"
+        );
+
+        let specialized = specialized_workspace();
+        let specialized_mid = *specialized
+            .module_ids
+            .get(&Ustr::from("<specialized-test>"))
+            .expect("specialized test module");
+        let (specialized_emit, _) =
+            emit_full_in_with_test_mutation(&specialized, specialized_mid, BodyMutation::None)
+                .expect("specialized emission");
+        let specialized_population = &specialized_emit.attribution.inline.population;
+        assert!(
+            specialized_population.specialized_lowered_keys > 0
+                && specialized_population.candidate_specialized_overlap > 0,
+            "the specialized production route was not censused: {specialized_population:?}"
+        );
     }
 
     #[test]

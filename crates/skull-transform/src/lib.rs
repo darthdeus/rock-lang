@@ -42,7 +42,7 @@ pub use forl::recover_counted_loops;
 pub use inline::{
     fn_has_bounds, inline_functions_with_plans, inline_off_guard, InlineOffGuard,
     validate_no_residual_bound_calls, InlineCache, InlineCandidateTable,
-    InlineCandidateTableStats, InlineScanStats, SpliceRecord,
+    InlineCandidateProfile, InlineCandidateTableStats, InlineScanStats, SpliceRecord,
 };
 
 pub const STATE: &str = "__state";

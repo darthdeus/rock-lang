@@ -283,8 +283,9 @@ fn print_attribution(attribution: &skull::mir_emit::EmitAttribution) {
             ms(census.candidate_cleanup_ns),
             ms(census.candidate_eligibility_ns),
         );
+        let population = &attribution.inline.population;
         println!(
-            "      candidate table: keys {}, warmed {}, reused {}, eligible {}, rejected {}; lower/cleanup/eligibility {:.3}/{:.3}/{:.3} ms",
+            "      candidate table: keys {}, warmed {}, reused {}, eligible {}, rejected {}; lower/cleanup/compact/eligibility {:.3}/{:.3}/{:.3}/{:.3} ms",
             attribution.inline.candidate_setup_keys,
             attribution.inline.candidate_setup_warmed,
             attribution.inline.candidate_setup_reused,
@@ -292,7 +293,49 @@ fn print_attribution(attribution: &skull::mir_emit::EmitAttribution) {
             attribution.inline.candidate_setup_rejected,
             ms(attribution.inline.candidate_setup_lower_ns),
             ms(attribution.inline.candidate_setup_cleanup_ns),
+            ms(population.candidate_compact_ns),
             ms(attribution.inline.candidate_setup_eligibility_ns),
+        );
+        println!(
+            "      population: published {}, lower-attempted {}, lowered {}, rejected-before-lower {}, ordinary {}, specialized {}, always units {}, always callees {}",
+            population.candidate_published_keys,
+            population.candidate_lower_attempted,
+            population.candidate_lowered_keys,
+            population.candidate_rejected_before_lower,
+            population.ordinary_lowered_keys,
+            population.specialized_lowered_keys,
+            population.always_lowered_units,
+            population.always_callee_keys,
+        );
+        println!(
+            "      population overlap: candidate/ordinary {}, candidate/specialized {}, candidate/always {}, ordinary/specialized {}; lowered-more-than-once {}",
+            population.candidate_ordinary_overlap,
+            population.candidate_specialized_overlap,
+            population.candidate_always_callee_overlap,
+            population.ordinary_specialized_overlap,
+            population.keys_lowered_more_than_once,
+        );
+        println!(
+            "      MIR population: raw i/c/b {}/{}/{} clean {}/{}/{}; derivations candidate/ordinary/specialized {}/{}/{}; first/duplicate lowering {:.3}/{:.3} ms",
+            population.candidate_raw_instructions,
+            population.candidate_raw_cells,
+            population.candidate_raw_blocks,
+            population.candidate_cleaned_instructions,
+            population.candidate_cleaned_cells,
+            population.candidate_cleaned_blocks,
+            population.candidate_lowered_keys,
+            population.ordinary_lowering_derivations,
+            population.specialized_lowering_derivations,
+            ms(population.first_lower_ns),
+            ms(population.duplicate_lower_ns),
+        );
+        println!(
+            "      population keys: requested {}, spliced {}, published-never-requested {}, requested-never-spliced {}, requested-not-published {}",
+            population.candidate_requested_unique_keys,
+            population.candidate_spliced_unique_keys,
+            population.candidate_published_never_requested,
+            population.candidate_requested_never_spliced,
+            population.candidate_requested_not_published,
         );
         if !attribution.inline.candidate_setup_worker_derivations.is_empty() {
             println!(
