@@ -46,6 +46,29 @@ fn run_menu(renderer: &str, output: &Path) -> String {
     text
 }
 
+fn run_output_resolution_menu(renderer: &str, output: &Path) -> String {
+    let mut command = rock_command();
+    command
+        .current_dir(repo_root())
+        .args([
+            "sim",
+            "mag",
+            "menu_capture_output_resolution",
+            "--renderer",
+            renderer,
+        ])
+        .env("ROCK_FRAME_TIMEOUT_SECS", "120")
+        .env("MAG_MENU_CAPTURE_DIR", output);
+    let result = command.output().expect("spawn MAG output-resolution capture");
+    let mut text = String::from_utf8_lossy(&result.stdout).into_owned();
+    text.push_str(&String::from_utf8_lossy(&result.stderr));
+    assert!(
+        result.status.success(),
+        "{renderer} output-resolution menu capture failed:\n{text}"
+    );
+    text
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Bounds {
     min_x: u32,
@@ -129,6 +152,32 @@ fn region_population(image: &RgbaImage, region: Region) -> u32 {
         }
     }
     population
+}
+
+fn region_bounds(image: &RgbaImage, region: Region) -> Option<Bounds> {
+    let mut bounds: Option<Bounds> = None;
+    for y in region.y0..region.y1 {
+        for x in region.x0..region.x1 {
+            if image.get_pixel(x, y).0[..3] == [0, 0, 0] {
+                continue;
+            }
+            bounds = Some(match bounds {
+                Some(current) => Bounds {
+                    min_x: current.min_x.min(x),
+                    min_y: current.min_y.min(y),
+                    max_x: current.max_x.max(x),
+                    max_y: current.max_y.max(y),
+                },
+                None => Bounds {
+                    min_x: x,
+                    min_y: y,
+                    max_x: x,
+                    max_y: y,
+                },
+            });
+        }
+    }
+    bounds
 }
 
 fn diff_stats(left: &RgbaImage, right: &RgbaImage) -> DiffStats {
@@ -236,6 +285,111 @@ fn assert_cross_renderer_parity(name: &str, gl: &RgbaImage, wgpu: &RgbaImage) {
         stats.max_delta[3] <= 100 && stats.mean_delta[3] <= 0.25,
         "{name} alpha delta exceeds the measured opaque-surface tolerance: {stats:?}"
     );
+}
+
+fn output_resolution_regions() -> [Region; 6] {
+    [
+        Region {
+            name: "title",
+            x0: 700,
+            y0: 240,
+            x1: 1220,
+            y1: 380,
+        },
+        Region {
+            name: "play",
+            x0: 780,
+            y0: 390,
+            x1: 1140,
+            y1: 470,
+        },
+        Region {
+            name: "settings",
+            x0: 780,
+            y0: 465,
+            x1: 1140,
+            y1: 545,
+        },
+        Region {
+            name: "credits",
+            x0: 780,
+            y0: 535,
+            x1: 1140,
+            y1: 615,
+        },
+        Region {
+            name: "quit",
+            x0: 780,
+            y0: 610,
+            x1: 1140,
+            y1: 690,
+        },
+        Region {
+            name: "version",
+            x0: 1660,
+            y0: 1010,
+            x1: 1920,
+            y1: 1080,
+        },
+    ]
+}
+
+fn assert_output_resolution_image(path: &Path) -> (RgbaImage, ImageStats, Vec<(String, u32, Option<Bounds>)>) {
+    let image = decode(path);
+    let stats = image_stats(&image);
+    assert_eq!(
+        (stats.width, stats.height),
+        (1920, 1080),
+        "{} must use the non-degenerate drawable extent; stats={stats:?}",
+        path.display()
+    );
+    assert!(
+        stats.nonzero_pixels > 0 && stats.content_bounds.is_some(),
+        "{} must contain presented pixels; stats={stats:?}",
+        path.display()
+    );
+    let regions = output_resolution_regions();
+    let observations: Vec<_> = regions
+        .iter()
+        .map(|region| {
+            (
+                region.name.to_owned(),
+                region_population(&image, *region),
+                region_bounds(&image, *region),
+            )
+        })
+        .collect();
+    for (name, population, bounds) in &observations {
+        assert!(
+            *population > 0 && bounds.is_some(),
+            "{} semantic region {name} is empty; stats={stats:?} observations={observations:?}",
+            path.display(),
+        );
+    }
+    println!(
+        "{} output-resolution image stats: {stats:?} regions={observations:?}",
+        path.display()
+    );
+    (image, stats, observations)
+}
+
+fn assert_output_resolution_pixel_witnesses(name: &str, image: &RgbaImage) {
+    for (label, x, y) in [
+        ("title", 960, 320),
+        ("play", 960, 430),
+        ("settings background", 900, 500),
+        ("credits background", 900, 575),
+        ("quit background", 900, 647),
+        ("version", 1860, 1068),
+    ] {
+        let pixel = image.get_pixel(x, y).0;
+        assert_eq!(pixel[3], 255, "{name} {label} pixel must be opaque");
+        assert_ne!(
+            pixel[..3], [0, 0, 0],
+            "{name} {label} pixel must come from the presented menu"
+        );
+        println!("{name} {label} pixel=({}, {}, {}, {})", pixel[0], pixel[1], pixel[2], pixel[3]);
+    }
 }
 
 #[test]
@@ -347,4 +501,62 @@ fn mag_splash_and_menu_have_numerical_gl_wgpu_parity() {
     );
     assert_cross_renderer_parity("splash", &gl_splash, &wgpu_splash);
     assert_cross_renderer_parity("menu", &gl_menu, &wgpu_menu);
+}
+
+#[test]
+fn mag_output_resolution_ui_has_cross_renderer_parity() {
+    let gl_first_dir = tempfile::tempdir().expect("first GL output-resolution capture directory");
+    let gl_second_dir = tempfile::tempdir().expect("second GL output-resolution capture directory");
+    let wgpu_first_dir = tempfile::tempdir().expect("first WGPU output-resolution capture directory");
+    let wgpu_second_dir = tempfile::tempdir().expect("second WGPU output-resolution capture directory");
+    let gl_first_text = run_output_resolution_menu("gl", gl_first_dir.path());
+    let gl_second_text = run_output_resolution_menu("gl", gl_second_dir.path());
+    let wgpu_first_text = run_output_resolution_menu("wgpu", wgpu_first_dir.path());
+    let wgpu_second_text = run_output_resolution_menu("wgpu", wgpu_second_dir.path());
+    assert!(
+        gl_first_text.contains("menu_capture_output_resolution: PASS (12/12 expects passed)")
+            && gl_second_text.contains("menu_capture_output_resolution: PASS (12/12 expects passed)"),
+        "GL fixture denominator changed:\nfirst:\n{gl_first_text}\nsecond:\n{gl_second_text}"
+    );
+    assert!(
+        wgpu_first_text.contains("menu_capture_output_resolution: PASS (14/14 expects passed)")
+            && wgpu_second_text.contains("menu_capture_output_resolution: PASS (14/14 expects passed)"),
+        "WGPU fixture denominator changed:\nfirst:\n{wgpu_first_text}\nsecond:\n{wgpu_second_text}"
+    );
+    let (gl, gl_stats, gl_regions) =
+        assert_output_resolution_image(&gl_first_dir.path().join("menu.png"));
+    let (gl_control, gl_control_stats, _gl_control_regions) =
+        assert_output_resolution_image(&gl_second_dir.path().join("menu.png"));
+    let (wgpu, wgpu_stats, wgpu_regions) =
+        assert_output_resolution_image(&wgpu_first_dir.path().join("menu.png"));
+    let (wgpu_control, wgpu_control_stats, _wgpu_control_regions) =
+        assert_output_resolution_image(&wgpu_second_dir.path().join("menu.png"));
+    assert_same_renderer_controls(
+        "output-resolution GL",
+        &gl,
+        gl_stats,
+        &gl_control,
+        gl_control_stats,
+    );
+    assert_same_renderer_controls(
+        "output-resolution WGPU",
+        &wgpu,
+        wgpu_stats,
+        &wgpu_control,
+        wgpu_control_stats,
+    );
+    assert_output_resolution_pixel_witnesses("GL", &gl);
+    assert_output_resolution_pixel_witnesses("WGPU", &wgpu);
+    let gl_geometry: Vec<_> = gl_regions
+        .iter()
+        .map(|(name, _, bounds)| (name, bounds))
+        .collect();
+    let wgpu_geometry: Vec<_> = wgpu_regions
+        .iter()
+        .map(|(name, _, bounds)| (name, bounds))
+        .collect();
+    assert_eq!(
+        gl_geometry, wgpu_geometry,
+        "output-resolution menu geometry changed between GL and WGPU"
+    );
 }
