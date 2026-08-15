@@ -603,6 +603,7 @@ pub struct InlineAttribution {
     pub copied_instructions: usize,
     pub ordinary_splices: usize,
     pub specialized_splices: usize,
+    pub bounded_splices: usize,
     pub hoisted_splices: usize,
     pub arena_allocations: usize,
     pub cleanup_live_before: usize,
@@ -714,6 +715,7 @@ struct InlineWork {
     copied_instructions: usize,
     ordinary_splices: usize,
     specialized_splices: usize,
+    bounded_splices: usize,
     hoisted_splices: usize,
     arena_allocations: usize,
     cleanup_live_before: usize,
@@ -729,6 +731,7 @@ impl InlineWork {
         self.accepted_splices += records.len();
         for record in records {
             self.copied_instructions += record.callee_insts;
+            self.bounded_splices += usize::from(record.bounded);
             self.census.clone.add(record.clone);
             let owner = inline_owner_key(record.callee);
             let entry = self.owners.entry(owner).or_default();
@@ -761,6 +764,7 @@ impl InlineWork {
         self.copied_instructions += other.copied_instructions;
         self.ordinary_splices += other.ordinary_splices;
         self.specialized_splices += other.specialized_splices;
+        self.bounded_splices += other.bounded_splices;
         self.hoisted_splices += other.hoisted_splices;
         self.arena_allocations += other.arena_allocations;
         self.cleanup_live_before += other.cleanup_live_before;
@@ -998,6 +1002,7 @@ impl AttributionAccumulator {
         self.result.inline.copied_instructions += unit.inline.copied_instructions;
         self.result.inline.ordinary_splices += unit.inline.ordinary_splices;
         self.result.inline.specialized_splices += unit.inline.specialized_splices;
+        self.result.inline.bounded_splices += unit.inline.bounded_splices;
         self.result.inline.hoisted_splices += unit.inline.hoisted_splices;
         self.result.inline.arena_allocations += unit.inline.arena_allocations;
         self.result.inline.cleanup_live_before += unit.inline.cleanup_live_before;
@@ -6560,6 +6565,11 @@ fn main() { let result = first() }
             bounded_emit.attribution.lower.abi_param_shared_views > 0,
             "lowerer did not exercise the shared ABI parameter view: {:?}",
             bounded_emit.attribution
+        );
+        assert!(
+            bounded_emit.attribution.inline.bounded_splices > 0,
+            "bounded fixture did not reach the bounded inline route: {:?}",
+            bounded_emit.attribution.inline
         );
 
         let closure = closure_workspace();

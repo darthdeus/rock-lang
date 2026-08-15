@@ -307,13 +307,14 @@ fn print_attribution(attribution: &skull::mir_emit::EmitAttribution) {
             );
         }
         println!(
-            "      accepted: straight {}, general {}, direct {}, transitive {}, ordinary {}, specialized {}, hoisted {}; clone source i/c/b {}/{}/{} live {}/{}/{} cloned {}/{}/{} dead-source {}/{}/{} dead-cloned {}/{}/{} cleanup-roots {}",
+            "      accepted: straight {}, general {}, direct {}, transitive {}, ordinary {}, specialized {}, bounded {}, hoisted {}; clone source i/c/b {}/{}/{} live {}/{}/{} cloned {}/{}/{} dead-source {}/{}/{} dead-cloned {}/{}/{} cleanup-roots {}",
             census.straight_accepted,
             census.general_accepted,
             census.direct_splices,
             census.transitive_splices,
             attribution.inline.ordinary_splices,
             attribution.inline.specialized_splices,
+            attribution.inline.bounded_splices,
             attribution.inline.hoisted_splices,
             census.clone.source_instructions,
             census.clone.source_cells,

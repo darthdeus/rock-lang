@@ -114,6 +114,8 @@ struct CalleeBody {
     insts: usize,
     /// `@inline`-forced (bypassed the size caps). Diagnostic only.
     forced: bool,
+    /// Iterator-bounded body, which has no standalone placeholder-bearing emit.
+    bounded: bool,
     /// Source/live arena and side-table populations. The first census uses the
     /// live closure to expose dead cloning; the template cut later reuses this
     /// same closure as its canonical clone source.
@@ -137,6 +139,7 @@ pub struct SpliceRecord {
     pub callee: FuncRef,
     pub straight: bool,
     pub forced: bool,
+    pub bounded: bool,
     pub transitive: bool,
     /// Reachable inst count of the callee body copied at this site.
     pub callee_insts: usize,
@@ -1353,6 +1356,7 @@ fn classify(
             reachable: Vec::new(),
             insts: reachable_insts,
             forced: force,
+            bounded: has_bounds,
             template,
             coalescable_params,
         })
@@ -1382,6 +1386,7 @@ fn classify(
             reachable,
             insts: reachable_insts,
             forced: force,
+            bounded: has_bounds,
             template,
             coalescable_params,
         })
@@ -2662,6 +2667,7 @@ fn inline_functions_inner(
             callee: fref,
             straight: cand.kind == Kind::Straight,
             forced: cand.forced,
+            bounded: cand.bounded,
             transitive,
             callee_insts: cand.insts,
             clone: full_clone_stats(
