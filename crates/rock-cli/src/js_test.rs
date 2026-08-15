@@ -604,6 +604,7 @@ fn build_run_program(emitted: &skull_codegen_js::emit::JsProgram) -> String {
     p.push_str(skull_codegen_js::JS_STRUCTURAL_EQ);
     p.push_str(skull_codegen_js::JS_ENUM_RUNTIME);
     append_call_runtime(&mut p, &emitted.program, &emitted.code_artifact);
+    p.push_str(skull_codegen_js::JS_SESSION_RUNTIME);
     p.push_str(skull_codegen_js::JS_CORO_RUNTIME);
     p.push_str(skull_codegen_js::JS_STRING_RUNTIME);
     p.push_str(skull_codegen_js::JS_INSPECT_RUNTIME);
@@ -679,6 +680,7 @@ fn build_node_program(
     p.push_str(skull_codegen_js::JS_STRUCTURAL_EQ);
     p.push_str(skull_codegen_js::JS_ENUM_RUNTIME);
     append_call_runtime_with_flag(&mut p, shared_defs, has_code_refs);
+    p.push_str(skull_codegen_js::JS_SESSION_RUNTIME);
     p.push_str(skull_codegen_js::JS_CORO_RUNTIME);
     p.push_str(skull_codegen_js::JS_STRING_RUNTIME);
     p.push_str(skull_codegen_js::JS_INSPECT_RUNTIME);

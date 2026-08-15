@@ -633,7 +633,7 @@ fn emit_decorator_unit(
             skull_codegen_lua::regalloc_time_reset();
             let te = Instant::now();
             let mut lua = emit_named(ws, cg, scx.interner(), &deco_name, &mf);
-            emit_pass_nested_fns(ws, cg, scx, &mut mf.nested_fns, &mut lua);
+            emit_pass_nested_fns(ws, cg, scx, &mut mf.nested_fns, &mf.statics, &mut lua);
             emit_lowered(
                 ws,
                 &mut out,
@@ -670,6 +670,88 @@ fn global_init_target(
             .join(", "),
         None => g.name.to_string(),
     }
+}
+
+fn global_init_session_line(
+    ws: &Workspace,
+    scx: &skull_mir::lower::ScalarCtx,
+    cg: &CodegenCtx,
+    g: &bone_semantic::hir::GlobalDef,
+    init_name: &str,
+) -> Result<String, CompilerError> {
+    let plan = skull_mir::lower::GlobalPlan::for_declared_type(ws, scx, g.ty)
+        .map_err(|_| CompilerError::new_no_location(format!("no state plan for global `{}`", g.name)))?;
+    match plan.leaf_names(g.name) {
+        Some(leaves) => {
+            let keys: Vec<String> = leaves
+                .iter()
+                .map(|leaf| {
+                    cg.state_slot(*leaf)
+                        .map(str::to_string)
+                        .ok_or_else(|| {
+                            CompilerError::new_no_location(format!(
+                                "global `{}` has no compiler-owned Session slot for `{leaf}`",
+                                g.name
+                            ))
+                        })
+                })
+                .collect::<Result<_, _>>()?;
+            let first = keys.first().expect("a leaf plan has a first Session slot");
+            let mut line = format!("if not __rock_state_has({first:?}) then\n");
+            line.push_str(&format!("  local __rock_init_values = {{ {init_name}() }}\n"));
+            for (index, key) in keys.iter().enumerate() {
+                line.push_str(&format!(
+                    "  __rock_state_set({key:?}, __rock_init_values[{}])\n",
+                    index + 1
+                ));
+            }
+            line.push_str("end\n");
+            Ok(line)
+        }
+        None => {
+            let key = cg
+                .state_slot(g.name)
+                .ok_or_else(|| {
+                    CompilerError::new_no_location(format!(
+                        "global `{}` has no compiler-owned Session slot",
+                        g.name
+                    ))
+                })?
+                .to_string();
+            Ok(format!(
+                "if not __rock_state_has({key:?}) then __rock_state_set({key:?}, {init_name}()) end\n"
+            ))
+        }
+    }
+}
+
+fn state_schema_lua(schema: &skull_mir::state_schema::StateSchema) -> String {
+    let mut out = String::from("_G.__ROCK_STATE_SCHEMA = {");
+    for entry in &schema.entries {
+        let kind = match entry.kind {
+            skull_mir::state_schema::StateKind::Global => "global",
+            skull_mir::state_schema::StateKind::Static => "static",
+            skull_mir::state_schema::StateKind::CoroutineFrame => "coroutine_frame",
+            skull_mir::state_schema::StateKind::Storage => "storage",
+        };
+        let physical = entry
+            .physical
+            .iter()
+            .map(|name| format!("{name:?}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let keys = skull_mir::state_schema::entry_state_keys(entry)
+            .iter()
+            .map(|key| format!("{key:?}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        out.push_str(&format!(
+            "{{kind={kind:?},identity={:?},fingerprint={:?},physical={{{physical}}},session_keys={{{keys}}}}},",
+            entry.identity, entry.fingerprint
+        ));
+    }
+    out.push_str("}\n");
+    out
 }
 
 /// Lower + emit one global's initializer fn, recording its `pending_init` line.
@@ -745,7 +827,7 @@ fn emit_global_unit(
             skull_codegen_lua::regalloc_time_reset();
             let te = Instant::now();
             let mut lua = emit_named(ws, cg, scx.interner(), &init_name, &mf);
-            emit_pass_nested_fns(ws, cg, scx, &mut mf.nested_fns, &mut lua);
+            emit_pass_nested_fns(ws, cg, scx, &mut mf.nested_fns, &mf.statics, &mut lua);
             emit_lowered(ws, &mut out, &mf, lua, &init_name, Some(key), te.elapsed());
             // Hot-reload init line. A `const` is a compile-time constant: tweaking
             // the source literal should show the new value next reload, so its init
@@ -768,11 +850,13 @@ fn emit_global_unit(
             let line = if g.is_const {
                 format!("{target} = {init_name}()\n")
             } else {
-                let ty_str = ws.render(None, g.ty);
-                format!(
-                    "if not _G.HOT_RELOAD or not _G.__rock_old_globals or _G.__rock_old_globals[{:?}] ~= {:?} then {target} = {init_name}() end\n",
-                    g.name.as_str(), ty_str
-                )
+                match global_init_session_line(ws, scx, cg, g, &init_name) {
+                    Ok(line) => line,
+                    Err(error) => {
+                        out.hard_error = Some(error);
+                        return out;
+                    }
+                }
             };
             out.pending_init = Some((g.name, key, line));
         }
@@ -1654,7 +1738,16 @@ fn emit_body_chunk_with_mutation(
     // `static` cells fold into THIS chunk's `statics` so the hot-reload preamble +
     // overlay reset see them -- a nested-fn static is otherwise invisible to both.
     let mut statics = mf.statics.clone();
-    emit_nested_fns(ws, cg, scx, &mut mf.nested_fns, &mut deps, &mut statics, &mut lua);
+    emit_nested_fns(
+        ws,
+        cg,
+        scx,
+        &mut mf.nested_fns,
+        &mf.statics,
+        &mut deps,
+        &mut statics,
+        &mut lua,
+    );
     times.emit = te.elapsed();
     times.regalloc = skull_codegen_lua::regalloc_time_elapsed().min(times.emit);
     let calls = skull_mir::reach::call_targets(&mf);
@@ -1681,6 +1774,7 @@ fn emit_nested_fns(
     cg: &CodegenCtx,
     scx: &skull_mir::lower::ScalarCtx,
     nested: &mut [MirFunc],
+    inherited_statics: &[skull_mir::mir::StaticCell],
     deps: &mut FxHashSet<FuncRef>,
     statics: &mut Vec<skull_mir::mir::StaticCell>,
     out: &mut String,
@@ -1690,9 +1784,27 @@ fn emit_nested_fns(
         skull_transform::recover_counted_loops(ws, nf);
         collect_callee_frefs(nf, deps);
         statics.extend(nf.statics.iter().cloned());
-        out.push_str(&emit_named(ws, cg, scx.interner(), nf.name.as_str(), nf));
+        out.push_str(&skull_codegen_lua::emit_named_with_statics(
+            ws,
+            cg,
+            scx.interner(),
+            nf.name.as_str(),
+            nf,
+            inherited_statics,
+        ));
         let mut children = std::mem::take(&mut nf.nested_fns);
-        emit_nested_fns(ws, cg, scx, &mut children, deps, statics, out);
+        let mut next_inherited = inherited_statics.to_vec();
+        next_inherited.extend(nf.statics.iter().cloned());
+        emit_nested_fns(
+            ws,
+            cg,
+            scx,
+            &mut children,
+            &next_inherited,
+            deps,
+            statics,
+            out,
+        );
     }
 }
 
@@ -1716,11 +1828,19 @@ fn emit_pass_nested_fns(
     cg: &CodegenCtx,
     scx: &skull_mir::lower::ScalarCtx,
     nested: &mut [MirFunc],
+    inherited_statics: &[skull_mir::mir::StaticCell],
     out: &mut String,
 ) {
     for nf in nested.iter_mut() {
         skull_transform::cleanup_with_nobox(ws, nf);
-        out.push_str(&emit_named(ws, cg, scx.interner(), nf.name.as_str(), nf));
+        out.push_str(&skull_codegen_lua::emit_named_with_statics(
+            ws,
+            cg,
+            scx.interner(),
+            nf.name.as_str(),
+            nf,
+            inherited_statics,
+        ));
     }
 }
 
@@ -1894,7 +2014,7 @@ fn emit_spec_chunk(
     let mut statics = mf.statics.clone();
     let mut nested = std::mem::take(&mut mf.nested_fns);
     collect_nested_statics(&nested, &mut statics);
-    emit_pass_nested_fns(ws, cg, scx, &mut nested, &mut lua);
+    emit_pass_nested_fns(ws, cg, scx, &mut nested, &statics, &mut lua);
     collect_callee_frefs(&mf, &mut deps);
     Ok(Chunk {
         lua,
@@ -3208,6 +3328,11 @@ fn assemble(
     }
     let state_schema = skull_mir::state_schema::StateSchema::collect(ws, scx, &code_artifact, &all_statics)
         .map_err(|error| CompilerError::new_no_location(error.to_string()))?;
+    out.push_str(&format!(
+        "__rock_state_publish_schema({:?})\n",
+        state_schema.schema_id
+    ));
+    out.push_str(&state_schema_lua(&state_schema));
 
     // Globals: an init fn + a dependency-ordered `<NAME> = __skull_ginit_<NAME>()`.
     // (Lowered above, so the walk could see their call edges; appended here, in
@@ -3283,10 +3408,15 @@ fn assemble(
             sc.done_flag.as_str()
         );
         let key = static_cell_key(sc);
+        let (value_slot, done_slot) = skull_mir::state_schema::static_cell_state_keys(
+            ws,
+            scx.interner(),
+            sc,
+        )
+        .map_err(|error| CompilerError::new_no_location(error.to_string()))?;
         let _ = write!(
             static_resets,
-            "if _G.HOT_RELOAD and _G.__rock_old_globals and _G.__rock_old_globals[{:?}] ~= {:?} then {} = nil; {} = false end\n",
-            sc.cell.as_str(), key, sc.cell, sc.done_flag
+            "__rock_state_prepare_static({value_slot:?}, {done_slot:?}, {key:?})\n"
         );
         let _ = write!(
             static_regs,
@@ -3299,9 +3429,12 @@ fn assemble(
     // guards can preserve live values whose type is unchanged.
     out.push_str("if _G.HOT_RELOAD then _G.__rock_old_globals = _G.__rock_known_globals end\n");
     out.push_str(&static_resets);
-    for line in sort_global_init_lines(inits)? {
+    let init_lines = sort_global_init_lines(inits)?;
+    out.push_str("function __rock_state_initialize()\n");
+    for line in init_lines {
         out.push_str(&line);
     }
+    out.push_str("end\n__rock_state_initialize()\n");
     // Record this run's globals for the next reload's snapshot.
     out.push_str("_G.__rock_known_globals = {");
     out.push_str(&known_globals);
@@ -3642,7 +3775,6 @@ fn emit_full_in_with_mutation(
     if let Some((msg, span)) = skull_mir::lower::gc_value_c_boundary(ws, user_mid) {
         return Err(CompilerError::new_with_label(span, msg));
     }
-    let cg = CodegenCtx::new(ws);
     // **The graph is built FIRST, into a fresh arena, and `scx` shares that
     // arena rather than minting its own.** An `Instance` the graph mints has to
     // mean something to lowering, and a second arena would be a second identity
@@ -3758,6 +3890,11 @@ fn emit_full_in_with_mutation(
     // rescanning the workspace.
     let scx =
         skull_mir::lower::ScalarCtx::new(ws).sharing(std::sync::Arc::clone(graph.interner()));
+    let state_slots = skull_mir::state_schema::global_state_slots(ws, &scx)
+        .map_err(|error| CompilerError::new_no_location(error.to_string()))?
+        .into_iter()
+        .collect();
+    let cg = CodegenCtx::new_with_state(ws, state_slots);
     let shader_scx = skull_mir::lower::ScalarCtx::new_values_first_class(ws)
         .sharing(std::sync::Arc::clone(graph.interner()));
     let shader_view = realize_shader_view(ws, &graph, &shader_programs, &compute_programs, &shader_scx)?;

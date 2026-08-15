@@ -55,8 +55,10 @@ fn collect_nested_code_identities(
 /// [`emit_with_closure`]; empty for the standalone [`emit_fn`] entry.
 #[derive(Clone, Default)]
 pub struct GlobalCtx {
-    /// Names that are module-level STATE (-> `__G.<name>`).
-    state: HashSet<ustr::Ustr>,
+    /// Compiler-assigned Session slots for mutable globals and statics.
+    state: HashMap<ustr::Ustr, String>,
+    /// Compile-time globals remain artifact constants in the backend runtime.
+    const_globals: HashSet<ustr::Ustr>,
     /// A top-level fn used as a value -> its co-emitted JS name for direct calls.
     fns: HashMap<ustr::Ustr, String>,
     /// `__rock_enum_<E>_<V>` singletons / `__rock_enum_<E>_names` tables the body
@@ -1622,14 +1624,14 @@ impl Emitter<'_> {
                 // (scoped so no body local can collide). The name must be in the
                 // program's state set (`emit_with_closure` registers it before
                 // emit); an unregistered write is a backend bug, not a skip.
-                Inst::StoreGlobal { name, value } => {
-                    if !self.globals.state.contains(name) {
+            Inst::StoreGlobal { name, value } => {
+                    let Some(slot) = self.globals.state.get(name) else {
                         return Err(err(format!(
                             "JS subset: write to unregistered global `{name}`"
                         )));
-                    }
+                    };
                     let v = self.render_val(*value)?;
-                    self.push(&format!("__G.{name} = {v};"));
+                    self.push(&format!("__rock_state_set({}, {v});", js_string_lit(slot)?));
                 }
                 // A checked Vec/NativeBuffer index whose value is UNUSED: its
                 // bounds check throws on OOB, so it must be emitted as a statement
@@ -1926,17 +1928,16 @@ impl Emitter<'_> {
             Inst::Global(name) if self.globals.fns.contains_key(name) => {
                 self.globals.fns[name].clone()
             }
-            // Module-level `let`/`global` state: scoped so no body local can
-            // collide with or shadow it.
-            Inst::Global(name) if self.globals.state.contains(name) => {
+            Inst::Global(name) if self.globals.const_globals.contains(name) => {
                 format!("__G.{name}")
             }
-            // A boxed-enum singleton / names table: a bare top-level name whose def
-            // (`var __rock_enum_...`) `emit_with_closure` prepends to the program.
-            Inst::Global(name) if self.globals.enum_globals.contains(name) => name.to_string(),
-            Inst::Global(name) => {
-                return Err(err(format!("JS subset: global read `{name}` not supported")))
-            }
+            // Module-level `let`/`global` state: scoped so no body local can
+            // collide with or shadow it.
+            Inst::Global(name) => match self.globals.state.get(name) {
+                Some(slot) => format!("__rock_state_get({})", js_string_lit(slot)?),
+                None if self.globals.enum_globals.contains(name) => name.to_string(),
+                None => return Err(err(format!("JS subset: global read `{name}` not supported"))),
+            },
             // A CodeRef env record `{ __slot, c<A>.. }` (capturing lambda) or a
             // box `{ v }` (a shared mutable capture) -- built by `convert_closures`.
             Inst::MakeEnv { fn_ref, fields } => {
@@ -2692,9 +2693,12 @@ pub fn emit_with_closure(
             Err(e) => rejections.push((g.init_name.clone(), e)),
         }
     }
-    for init in order_global_inits(&st.ginits, &st.lowered, &st.names)? {
+    let init_lines = order_global_inits(&st.ginits, &st.lowered, &st.names, &st.gctx.state)?;
+    out.push_str("function __rock_state_initialize() {\n");
+    for init in &init_lines {
         out.push_str(&init.js);
     }
+    out.push_str("}\n__rock_state_initialize();\n");
     for (fr, mf) in &st.lowered {
         let name = st.names.name_for_decl(ws, *fr).expect("emitted body has a name");
         let plan = st
@@ -3281,13 +3285,21 @@ fn assemble_program_core(
     }
     // 4. load-time init lines (dependency-ordered).
     let mut const_order = Vec::new();
-    for init in order_global_inits(&st.ginits, &st.lowered, &st.names)? {
+    let init_lines = order_global_inits(&st.ginits, &st.lowered, &st.names, &st.gctx.state)?;
+    out.push_str("function __rock_state_initialize() {\n");
+    stable.push_str("function __rock_state_initialize() {\n");
+    for init in &init_lines {
         out.push_str(&init.js);
+        if !const_chunks.contains_key(&init.name) {
+            stable.push_str(&init.js);
+        }
+    }
+    out.push_str("}\n__rock_state_initialize();\n");
+    stable.push_str("}\n");
+    for init in init_lines {
         if let Some(chunk) = const_chunks.get_mut(&init.name) {
             chunk.push_str(&init.js);
             const_order.push(init.name);
-        } else {
-            stable.push_str(&init.js);
         }
     }
     mark_generated_code_values(ws, &mut code_artifact);
@@ -3326,9 +3338,13 @@ fn assemble_program_core(
         &all_statics,
     )
     .map_err(|error| err(error.to_string()))?;
+    let program = format!(
+        "__rock_state_publish_schema({:?});\n{}",
+        state_schema.schema_id, out
+    );
 
     Ok(ProgramBuild {
-        program: out,
+        program,
         stable,
         chunks,
         spec_chunks,
@@ -3662,9 +3678,14 @@ pub fn emit_overlay(
                 .is_none_or(|previous| *previous != key)
                 && reset_cells.insert(cell.cell)
             {
+                let (value_slot, done_slot) = skull_mir::state_schema::static_cell_state_keys(
+                    ws,
+                    cache.scx.interner(),
+                    cell,
+                )
+                .map_err(|error| err(error.to_string()))?;
                 out.push_str(&format!(
-                    "__G.{} = undefined; __G.{} = false;\n",
-                    cell.cell, cell.done_flag
+                    "__rock_state_set({value_slot:?}, undefined); __rock_state_set({done_slot:?}, false);\n"
                 ));
             }
             cache.static_keys.insert(cell.cell, key);
@@ -3856,6 +3877,12 @@ impl WorklistState {
             .iter()
             .map(|(inst, realized)| (inst.clone(), realized.decl))
             .collect();
+        let mut gctx = GlobalCtx::default();
+        gctx.state = skull_mir::state_schema::global_state_slots(ws, scx)
+            .map_err(|error| err(error.to_string()))?
+            .into_iter()
+            .collect();
+        gctx.const_globals = build_const_global_names(ws, scx);
         Ok(WorklistState {
             concrete,
             always,
@@ -3874,7 +3901,7 @@ impl WorklistState {
             nobox_leaf_globals: build_nobox_leaf_globals(ws, scx),
             deco_globals: if program_mode { HashSet::new() } else { decorator_populated_globals(ws) },
             enum_defs: build_enum_global_defs(ws),
-            gctx: GlobalCtx::default(),
+            gctx,
             ginit_queue: Vec::new(),
             ginit_seen: HashSet::new(),
             ginits: Vec::new(),
@@ -3975,14 +4002,19 @@ fn emit_inline_js_fn(
 /// `__static_*` cell + done-flag global (`lower_static`). No initializer line
 /// is needed -- an undefined done-flag is falsy, so the first-reach guard runs
 /// the init exactly as Lua's nil does.
-fn register_statics(mf: &MirFunc, gctx: &mut GlobalCtx) {
-    for sc in &mf.statics {
-        gctx.state.insert(sc.cell);
-        gctx.state.insert(sc.done_flag);
-    }
+fn register_statics(
+    ws: &Workspace,
+    interner: &skull_mir::monoty::MonoInterner,
+    mf: &MirFunc,
+    gctx: &mut GlobalCtx,
+) -> Result<(), CompilerError> {
+    let slots = skull_mir::state_schema::static_state_slots(ws, interner, mf)
+        .map_err(|error| err(error.to_string()))?;
+    gctx.state.extend(slots);
     for nf in &mf.nested_fns {
-        register_statics(nf, gctx);
+        register_statics(ws, interner, nf, gctx)?;
     }
+    Ok(())
 }
 
 /// The `(callee, instantiation)` pairs `mf` and its hoisted bodies still ask for
@@ -4309,7 +4341,7 @@ impl JsDelivery<'_> {
     ) -> Result<Vec<CompilerError>, CompilerError> {
         let ws = self.ws;
         let st = &mut *self.st;
-        register_statics(mf, &mut st.gctx);
+        register_statics(ws, self.scx.interner(), mf, &mut st.gctx)?;
         let mut findings = Vec::new();
         let mut demands = Vec::new();
         collect(&mut findings, collect_spec_bound_calls(ws, mf, &mut demands));
@@ -5148,6 +5180,24 @@ fn build_state_index(ws: &Workspace) -> HashMap<ustr::Ustr, GlobalSite> {
     m
 }
 
+fn build_const_global_names(
+    ws: &Workspace,
+    scx: &skull_mir::lower::ScalarCtx,
+) -> HashSet<ustr::Ustr> {
+    let mut names = HashSet::new();
+    for module in ws.modules.iter().filter(|m| m.id != bone_semantic::prelude::ModuleId::builtin()) {
+        for (_, global) in module.globals.iter().filter(|(_, g)| g.is_const) {
+            names.insert(global.name);
+            if let Ok(plan) = skull_mir::lower::GlobalPlan::for_declared_type(ws, scx, global.ty) {
+                if let Some(leaves) = plan.leaf_names(global.name) {
+                    names.extend(leaves);
+                }
+            }
+        }
+    }
+    names
+}
+
 /// `__nbg_<base>_<i>` -> `<base>`, for every global whose STORAGE is leaves.
 /// A `nobox` global is not one name holding a box; lowering reads and writes the
 /// leaves directly, and those names are synthesized, so they never appear in
@@ -5392,7 +5442,11 @@ fn schedule_global_reads(ws: &Workspace, mf: &MirFunc, st: &mut WorklistState) -
         } else if st.enum_defs.contains_key(&name) {
             st.gctx.enum_globals.insert(name);
         } else if let Some(&base) = st.nobox_leaf_globals.get(&name) {
-            st.gctx.state.insert(name);
+            if !st.gctx.state.contains_key(&name) && !st.gctx.const_globals.contains(&name) {
+                return Err(err(format!(
+                    "JS: nobox leaf `{name}` has no compiler-owned Session slot"
+                )));
+            }
             if let Some(&site) = st.state_index.get(&base) {
                 if st.ginit_seen.insert(base) {
                     st.ginit_queue.push((base, site));
@@ -5405,7 +5459,11 @@ fn schedule_global_reads(ws: &Workspace, mf: &MirFunc, st: &mut WorklistState) -
                      (module-load side effect not emitted)"
                 )));
             }
-            st.gctx.state.insert(name);
+            if !st.gctx.state.contains_key(&name) && !st.gctx.const_globals.contains(&name) {
+                return Err(err(format!(
+                    "JS: global `{name}` has no compiler-owned Session slot"
+                )));
+            }
             if st.ginit_seen.insert(name) {
                 st.ginit_queue.push((name, site));
             }
@@ -5454,6 +5512,7 @@ fn order_global_inits(
     ginits: &[GlobalInit],
     lowered: &[(FuncRef, MirFunc)],
     names: &CalleeNames,
+    state_slots: &HashMap<ustr::Ustr, String>,
 ) -> Result<Vec<GlobalInitLine>, CompilerError> {
     // Per-fn direct facts, keyed by emit name (ginit = init_name, lowered = js name).
     let mut direct_globals: HashMap<ustr::Ustr, Vec<ustr::Ustr>> = HashMap::new();
@@ -5568,15 +5627,13 @@ fn order_global_inits(
     let mut remaining: Vec<&GlobalInit> = ginits.iter().collect();
     while !remaining.is_empty() {
         let before = remaining.len();
-        remaining.retain(|g| {
+        let mut next = Vec::with_capacity(before);
+        for g in remaining.drain(..) {
             if init_deps[&g.name].iter().all(|d| emitted.contains(d)) {
                 lines.push(GlobalInitLine {
                     name: g.name,
-                    js: match &g.leaves {
-                        // Leaf storage: the ginit splats, so the extra leaves come
-                        // back through the scratch bank and must be read off it
-                        // before anything else can call and clobber it.
-                        Some(leaves) => {
+                    js: match (g.is_const, &g.leaves) {
+                        (true, Some(leaves)) => {
                             let mut js = format!("__G.{} = {}();", leaves[0], g.init_name);
                             for (i, leaf) in leaves.iter().enumerate().skip(1) {
                                 js.push_str(&format!(" __G.{leaf} = __rock_ret{i};"));
@@ -5584,15 +5641,53 @@ fn order_global_inits(
                             js.push('\n');
                             js
                         }
-                        None => format!("__G.{} = {}();\n", g.name, g.init_name),
+                        (true, None) => format!("__G.{} = {}();\n", g.name, g.init_name),
+                        // Leaf storage: the ginit splats, so the extra leaves come
+                        // back through the scratch bank and must be read off it
+                        // before anything else can call and clobber it.
+                        (false, Some(leaves)) => {
+                            let keys: Vec<&str> = leaves
+                                .iter()
+                                .map(|leaf| {
+                                    state_slots.get(leaf).map(String::as_str).ok_or_else(|| {
+                                        err(format!(
+                                            "JS: global `{}` has no compiler-owned Session slot for `{leaf}`",
+                                            g.name
+                                        ))
+                                    })
+                                })
+                                .collect::<Result<_, _>>()?;
+                            let mut js = format!(
+                                "if (!__rock_state_has({:?})) {{ let __rock_init_values = {}(); __rock_state_set({:?}, __rock_init_values);",
+                                keys[0], g.init_name, keys[0]
+                            );
+                            for (i, _) in leaves.iter().enumerate().skip(1) {
+                                let key = keys[i];
+                                js.push_str(&format!(" __rock_state_set({key:?}, __rock_ret{i});"));
+                            }
+                            js.push_str(" }\n");
+                            js
+                        }
+                        (false, None) => {
+                            let key = state_slots.get(&g.name).ok_or_else(|| {
+                                err(format!(
+                                    "JS: global `{}` has no compiler-owned Session slot",
+                                    g.name
+                                ))
+                            })?;
+                            format!(
+                                "if (!__rock_state_has({key:?})) __rock_state_set({key:?}, {}());\n",
+                                g.init_name
+                            )
+                        }
                     },
                 });
                 emitted.insert(g.name);
-                false
             } else {
-                true
+                next.push(g);
             }
-        });
+        }
+        remaining = next;
         if remaining.len() == before {
             let names: Vec<&str> = remaining.iter().map(|g| g.name.as_str()).collect();
             return Err(err(format!(

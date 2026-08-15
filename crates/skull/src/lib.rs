@@ -494,6 +494,67 @@ end
 _G.__rock_nb_storage = __rock_nb_storage
 {NB_PRIM_STORAGE}
 if not _G.__rock_on_hot_reload then _G.__rock_on_hot_reload = {} end
+if not _G.__rock_session_new then
+  _G.__rock_session_new = function(schema_id)
+    return {
+      __rock_schema_id = schema_id,
+      __rock_state = {},
+      __rock_initialized = {},
+      __rock_initializer_keys = {}
+    }
+  end
+  _G.__rock_session_activate = function(session)
+    if type(session) ~= "table" or type(session.__rock_state) ~= "table"
+        or type(session.__rock_initialized) ~= "table" then
+      error("invalid Rock Session", 0)
+    end
+    local published = _G.__rock_state_schema_id
+    if published ~= nil and session.__rock_schema_id ~= published then
+      error("Rock StateSchema does not match the active Session", 0)
+    end
+    _G.__rock_active_session = session
+    return session
+  end
+  _G.__rock_session_current = function()
+    local session = _G.__rock_active_session
+    if not session then error("no active Rock Session", 0) end
+    return session
+  end
+  _G.__rock_state_has = function(key)
+    return _G.__rock_session_current().__rock_initialized[key] == true
+  end
+  _G.__rock_state_get = function(key)
+    return _G.__rock_session_current().__rock_state[key]
+  end
+  _G.__rock_state_set = function(key, value)
+    local session = _G.__rock_session_current()
+    session.__rock_state[key] = value
+    session.__rock_initialized[key] = true
+    return value
+  end
+  _G.__rock_state_prepare_static = function(value_key, done_key, initializer_key)
+    local session = _G.__rock_session_current()
+    local old = session.__rock_initializer_keys[value_key]
+    if old ~= nil and old ~= initializer_key then
+      session.__rock_state[value_key] = nil
+      session.__rock_initialized[value_key] = nil
+      session.__rock_state[done_key] = false
+      session.__rock_initialized[done_key] = true
+    end
+    session.__rock_initializer_keys[value_key] = initializer_key
+  end
+  _G.__rock_state_publish_schema = function(schema_id)
+    local session = _G.__rock_session_current()
+    if session.__rock_schema_id ~= nil and session.__rock_schema_id ~= schema_id then
+      error("Rock StateSchema changed; restart is required", 0)
+    end
+    session.__rock_schema_id = schema_id
+    _G.__rock_state_schema_id = schema_id
+  end
+end
+if not _G.__rock_active_session then
+  _G.__rock_session_activate(_G.__rock_session_new(nil))
+end
 -- THE way to read/write a global found by name in `__ROCK_GLOBALS`. A `nobox`
 -- global has no slot under its own name -- its storage is its leaf globals -- so
 -- a bare `_G[name]` would read nil and write a slot nothing else reads. The

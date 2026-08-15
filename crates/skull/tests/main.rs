@@ -186,6 +186,8 @@ mod static_hot_reload;
 mod static_registration_coverage;
 #[path = "state_schema.rs"]
 mod state_schema;
+#[path = "session_state.rs"]
+mod session_state;
 #[path = "struct_expand.rs"]
 mod struct_expand;
 #[path = "synthetic_name_collision.rs"]

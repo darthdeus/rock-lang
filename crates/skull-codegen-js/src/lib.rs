@@ -2819,6 +2819,53 @@ function __rock_web_arm_raf(frameFn) {
 /// failures go to STDERR, never stdout -- the harness output-compare must not
 /// see them. Nil checks are truthiness (`!c.__defers`, `if (c.__inner)`) so
 /// `undefined` and `null` both count as nil, matching the subset's loose rule.
+pub const JS_SESSION_RUNTIME: &str = r#"
+function __rock_session_new(schema_id) {
+  return { __rock_schema_id: schema_id, __rock_state: Object.create(null), __rock_initialized: Object.create(null), __rock_initializer_keys: Object.create(null) };
+}
+function __rock_session_activate(session) {
+  if (!session || !session.__rock_state || !session.__rock_initialized) throw new Error("invalid Rock Session");
+  if (__rock_state_schema_id !== null && session.__rock_schema_id !== __rock_state_schema_id) {
+    throw new Error("Rock StateSchema does not match the active Session");
+  }
+  __rock_active_session = session;
+  return session;
+}
+function __rock_session_current() {
+  if (__rock_active_session === null) throw new Error("no active Rock Session");
+  return __rock_active_session;
+}
+function __rock_state_has(key) { return __rock_session_current().__rock_initialized[key] === true; }
+function __rock_state_get(key) { return __rock_session_current().__rock_state[key]; }
+function __rock_state_set(key, value) {
+  var session = __rock_session_current();
+  session.__rock_state[key] = value;
+  session.__rock_initialized[key] = true;
+  return value;
+}
+function __rock_state_prepare_static(value_key, done_key, initializer_key) {
+  var session = __rock_session_current();
+  var old = session.__rock_initializer_keys[value_key];
+  if (old !== undefined && old !== initializer_key) {
+    delete session.__rock_state[value_key];
+    delete session.__rock_initialized[value_key];
+    __rock_state_set(done_key, false);
+  }
+  session.__rock_initializer_keys[value_key] = initializer_key;
+}
+function __rock_state_publish_schema(schema_id) {
+  var session = __rock_session_current();
+  if (session.__rock_schema_id !== null && session.__rock_schema_id !== schema_id) {
+    throw new Error("Rock StateSchema changed; restart is required");
+  }
+  session.__rock_schema_id = schema_id;
+  __rock_state_schema_id = schema_id;
+}
+var __rock_active_session = null;
+var __rock_state_schema_id = null;
+__rock_session_activate(__rock_session_new(null));
+"#;
+
 pub const JS_CORO_RUNTIME: &str = r#"
 function error(m) { throw new Error(m); }
 function __rock_coroutine_run_defers(c) {

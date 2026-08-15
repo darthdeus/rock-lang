@@ -298,6 +298,8 @@ pub struct CodegenCtx {
     /// emit boundary. `Mutex` because `&CodegenCtx` is shared across rayon
     /// workers; contention is nil (a few per fn).
     rejections: Mutex<Vec<(String, CompilerError)>>,
+    /// Compiler-assigned Session slots for mutable globals.
+    state_slots: HashMap<ustr::Ustr, String>,
 }
 
 /// True if `name` is an identifier skull emits as a bare LOCAL inside function
@@ -343,6 +345,10 @@ fn reserved_namespace_collision(name: &str, span: Span, sink: &mut Vec<(String, 
 
 impl CodegenCtx {
     pub fn new(ws: &Workspace) -> Self {
+        Self::new_with_state(ws, HashMap::default())
+    }
+
+    pub fn new_with_state(ws: &Workspace, state_slots: HashMap<ustr::Ustr, String>) -> Self {
         let mut reserved: HashMap<String, Span> = HashMap::default();
         let mut collisions: Vec<(String, CompilerError)> = Vec::new();
         for m in ws.modules.iter() {
@@ -360,7 +366,11 @@ impl CodegenCtx {
         // signatures mangling alike, or a mangled name equal to an exempt bare
         // name. Drained through the same sink as the synthetic-name collisions.
         collisions.extend(skull_mir::mangle::collision_errors(ws));
-        CodegenCtx { reserved, rejections: Mutex::new(collisions) }
+        CodegenCtx {
+            reserved,
+            rejections: Mutex::new(collisions),
+            state_slots,
+        }
     }
 
     /// Mint a compiler-reserved synthetic top-level Lua name: a hoisted lambda
@@ -400,6 +410,10 @@ impl CodegenCtx {
         let mut sink = self.rejections.lock().expect("rejection sink");
         sink.sort_by(|a, b| a.0.cmp(&b.0));
         sink.drain(..).next().map(|(_, e)| e)
+    }
+
+    pub fn state_slot(&self, name: ustr::Ustr) -> Option<&str> {
+        self.state_slots.get(&name).map(String::as_str)
     }
 }
 
@@ -459,7 +473,21 @@ pub fn emit_named(
     name: &str,
     func: &MirFunc,
 ) -> String {
-    emit_named_framed(ws, ctx, interner, name, func, None)
+    emit_named_with_statics(ws, ctx, interner, name, func, &[])
+}
+
+/// Emit a function whose static cells may be owned by an enclosing lowered
+/// function. Closure conversion moves the lambda body into a sibling function,
+/// while its static cell remains owned by the enclosing callable.
+pub fn emit_named_with_statics(
+    ws: &Workspace,
+    ctx: &CodegenCtx,
+    interner: &MonoInterner,
+    name: &str,
+    func: &MirFunc,
+    inherited_statics: &[StaticCell],
+) -> String {
+    emit_named_framed_with_statics(ws, ctx, interner, name, func, None, inherited_statics)
 }
 
 /// The coroutine state-table context: a `co fn`'s `__step` reads/writes its
@@ -494,6 +522,18 @@ pub fn emit_named_framed(
     func: &MirFunc,
     frame: Option<&FrameCtx>,
 ) -> String {
+    emit_named_framed_with_statics(ws, ctx, interner, name, func, frame, &[])
+}
+
+fn emit_named_framed_with_statics(
+    ws: &Workspace,
+    ctx: &CodegenCtx,
+    interner: &MonoInterner,
+    name: &str,
+    func: &MirFunc,
+    frame: Option<&FrameCtx>,
+    inherited_statics: &[StaticCell],
+) -> String {
     let entry = func.entry();
     let params = func.params.as_slice();
     // Ordinary functions color cells (collapse them onto luajit's 200-local cap);
@@ -511,14 +551,64 @@ pub fn emit_named_framed(
     // re-running the def on reload is a harmless no-op (no preservation guard).
     record_leaf_form_violations(ws, ctx, func);
     let (hoist, hoist_names, hoist_defs) = collect_const_hoists(ws, func, name);
+    let static_slots = static_slots_for(
+        ws,
+        interner,
+        func,
+        inherited_statics,
+        name,
+        ctx,
+    );
     let estimated_body_bytes = func.insts.len() * 24;
     let mut out =
         String::with_capacity(hoist_defs.len() + name.len() + 64 + estimated_body_bytes);
     out.push_str(&hoist_defs);
     let _ = write!(out, "function {}", name);
-    render_scope(ws, interner, func, entry, params, true, frame, &cell_colors, &hoist, &hoist_names, &mut out);
+    render_scope(
+        ws,
+        interner,
+        func,
+        entry,
+        params,
+        true,
+        frame,
+        &cell_colors,
+        &ctx.state_slots,
+        &static_slots,
+        &hoist,
+        &hoist_names,
+        &mut out,
+    );
     out.push('\n');
     out
+}
+
+fn static_slots_for(
+    ws: &Workspace,
+    interner: &MonoInterner,
+    func: &MirFunc,
+    inherited_statics: &[StaticCell],
+    name: &str,
+    ctx: &CodegenCtx,
+) -> HashMap<ustr::Ustr, String> {
+    let mut slots = HashMap::default();
+    for cell in inherited_statics.iter().chain(&func.statics) {
+        let (value, done) = match skull_mir::state_schema::static_cell_state_keys(ws, interner, cell) {
+            Ok(keys) => keys,
+            Err(error) => {
+                ctx.reject(name.to_string(), CompilerError::new_no_location(error.to_string()));
+                return HashMap::default();
+            }
+        };
+        if slots.insert(cell.cell, value).is_some() || slots.insert(cell.done_flag, done).is_some() {
+            ctx.reject(
+                name.to_string(),
+                CompilerError::new_no_location(format!("duplicate static state slot for `{}`", cell.cell)),
+            );
+            return HashMap::default();
+        }
+    }
+    slots
 }
 
 /// Whether every use of `cand` is a provably READ-ONLY consumer, so sharing one
@@ -1233,6 +1323,8 @@ fn render_scope(
     is_top: bool,
     frame: Option<&FrameCtx>,
     cell_colors: &[u32],
+    state_slots: &HashMap<ustr::Ustr, String>,
+    static_slots: &HashMap<ustr::Ustr, String>,
     hoist: &HashMap<Idx<Inst>, u32>,
     hoist_names: &[String],
     out: &mut String,
@@ -1372,6 +1464,8 @@ fn render_scope(
         emitted: vec![false; func.blocks.len()],
         hoist,
         hoist_names,
+        state_slots,
+        static_slots,
     };
     for &bb in &rpo {
         em.emit_block(out, bb); // self-skips an already-emitted block (loop body)
@@ -1439,9 +1533,18 @@ struct Emitter<'a> {
     hoist: &'a HashMap<Idx<Inst>, u32>,
     /// `group -> global name` for [`Self::hoist`].
     hoist_names: &'a [String],
+    state_slots: &'a HashMap<ustr::Ustr, String>,
+    static_slots: &'a HashMap<ustr::Ustr, String>,
 }
 
 impl Emitter<'_> {
+    fn state_slot(&self, name: ustr::Ustr) -> Option<&str> {
+        self.state_slots
+            .get(&name)
+            .or_else(|| self.static_slots.get(&name))
+            .map(String::as_str)
+    }
+
     fn emit_block(&mut self, out: &mut String, bb: Idx<Block>) {
         if self.emitted[raw(bb) as usize] {
             return; // already emitted (e.g. as a loop body block)
@@ -1694,6 +1797,10 @@ impl Emitter<'_> {
                 if let Some(identity) = self.func.code_value_identities.get(&id) {
                     out.push_str("__rock_code_slot_ref(");
                     out.push_str(&lua_string(&identity.logical_key(self.ws, self.interner)));
+                    out.push(')');
+                } else if let Some(slot) = self.state_slot(*g) {
+                    out.push_str("__rock_state_get(");
+                    out.push_str(&lua_string(slot));
                     out.push(')');
                 } else {
                     out.push_str(g.as_str());
@@ -2299,9 +2406,17 @@ impl Emitter<'_> {
                 }
             }
             Inst::StoreGlobal { name, value } => {
-                let _ = write!(out, "  {name} = ");
-                self.write_opnd(out, *value);
-                out.push('\n');
+                if let Some(slot) = self.state_slot(*name) {
+                    out.push_str("  __rock_state_set(");
+                    out.push_str(&lua_string(slot));
+                    out.push_str(", ");
+                    self.write_opnd(out, *value);
+                    out.push_str(")\n");
+                } else {
+                    let _ = write!(out, "  {name} = ");
+                    self.write_opnd(out, *value);
+                    out.push('\n');
+                }
             }
             Inst::ArrayPush { arr, value, kind } => {
                 // `arr` is referenced up to 4x; render it once.

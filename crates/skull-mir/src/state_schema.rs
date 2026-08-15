@@ -14,7 +14,7 @@ use ustr::Ustr;
 
 use crate::code_identity::{CodeArtifact, CodeIdentity, FrameSchema, LambdaSiteId};
 use crate::lower::{GlobalPlan, NB_PRIM_ELEMS, ScalarCtx, ValueStorage};
-use crate::mir::StaticCell;
+use crate::mir::{MirFunc, StaticCell};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum StateKind {
@@ -193,7 +193,7 @@ impl StateSchema {
                 let plan = GlobalPlan::for_declared_type(ws, scx, global.ty).map_err(|_| {
                     StateSchemaError::Incomplete {
                         kind: StateKind::Global,
-                        identity: global_identity(module.file, global.name),
+                    identity: global_identity(module.file, global.name),
                     }
                 })?;
                 let names = plan
@@ -333,12 +333,116 @@ impl StateSchema {
     }
 }
 
-fn global_identity(file: Ustr, name: Ustr) -> String {
+pub fn global_identity(file: Ustr, name: Ustr) -> String {
     format!("global:{}::{}", file, name)
 }
 
-fn static_identity(owner: &str, site: LambdaSiteId) -> String {
+pub fn static_identity(owner: &str, site: LambdaSiteId) -> String {
     format!("static:{owner}@{}:{}", site.file, site.offset)
+}
+
+pub fn state_key(identity: &str, leaf: &str) -> String {
+    format!("{identity}::{leaf}")
+}
+
+/// The Session-owned slots for compiler-generated mutable globals. This is the
+/// one shared mapping consumed by both backend printers; a missing entry is an
+/// error rather than a bare backend-global fallback.
+pub fn global_state_slots(
+    ws: &Workspace,
+    scx: &ScalarCtx,
+) -> Result<BTreeMap<Ustr, String>, StateSchemaError> {
+    let mut slots = BTreeMap::new();
+    for module in ws.modules.iter().filter(|m| m.id != ModuleId::builtin()) {
+        for (_, global) in module.globals.iter().filter(|(_, g)| !g.is_const) {
+            let plan = GlobalPlan::for_declared_type(ws, scx, global.ty).map_err(|_| {
+                StateSchemaError::Incomplete {
+                    kind: StateKind::Global,
+                    identity: global_identity(module.file, global.name),
+                }
+            })?;
+            let names = plan
+                .leaf_names(global.name)
+                .unwrap_or_else(|| vec![global.name]);
+            let multi_leaf = names.len() != 1;
+            let identity = global_identity(module.file, global.name);
+            for (index, name) in names.into_iter().enumerate() {
+                let leaf = if !multi_leaf {
+                    "value".to_string()
+                } else {
+                    format!("leaf{index}")
+                };
+                let key = state_key(&identity, &leaf);
+                if let Some(old) = slots.insert(name, key.clone()) {
+                    return Err(StateSchemaError::UnownedPhysical {
+                        identity,
+                        physical: format!("{} (already owned by {old})", name),
+                    });
+                }
+            }
+        }
+    }
+    Ok(slots)
+}
+
+/// The Session-owned value and initialized/done slots for one lowered static.
+/// Static identity is based on its owning logical callable and source site,
+/// never on its emitted cell name or initializer hash.
+pub fn static_state_slots(
+    ws: &Workspace,
+    interner: &crate::monoty::MonoInterner,
+    function: &MirFunc,
+) -> Result<BTreeMap<Ustr, String>, StateSchemaError> {
+    let mut slots = BTreeMap::new();
+    for cell in &function.statics {
+        let (value, done) = static_cell_state_keys(ws, interner, cell)?;
+        let identity = value
+            .strip_suffix("::value")
+            .expect("static value slot has its role suffix")
+            .to_string();
+        if slots.insert(cell.cell, value).is_some() || slots.insert(cell.done_flag, done).is_some() {
+            return Err(StateSchemaError::DuplicateLayout { identity });
+        }
+    }
+    Ok(slots)
+}
+
+pub fn static_cell_state_keys(
+    ws: &Workspace,
+    interner: &crate::monoty::MonoInterner,
+    cell: &StaticCell,
+) -> Result<(String, String), StateSchemaError> {
+    let owner = cell
+        .owner
+        .as_ref()
+        .ok_or_else(|| StateSchemaError::Incomplete {
+            kind: StateKind::Static,
+            identity: cell.cell.to_string(),
+        })?;
+    let site = cell.site.ok_or_else(|| StateSchemaError::Incomplete {
+        kind: StateKind::Static,
+        identity: cell.cell.to_string(),
+    })?;
+    let identity = static_identity(&owner.logical_key(ws, interner), site);
+    Ok((state_key(&identity, "value"), state_key(&identity, "done")))
+}
+
+pub fn entry_state_keys(entry: &StateEntry) -> Vec<String> {
+    entry
+        .physical
+        .iter()
+        .enumerate()
+        .map(|(index, _)| {
+            let leaf = match entry.kind {
+                StateKind::Global if entry.physical.len() == 1 => "value".to_string(),
+                StateKind::Global => format!("leaf{index}"),
+                StateKind::Static if index == 0 => "value".to_string(),
+                StateKind::Static if index == 1 => "done".to_string(),
+                _ => format!("physical{index}"),
+            };
+            state_key(&entry.identity, &leaf)
+        })
+        .collect()
 }
 
 fn frame_fingerprint(frame: &FrameSchema) -> String {
