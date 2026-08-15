@@ -115,6 +115,10 @@ fn arena_globals_are_hashed_by_their_rows() {
         hashed.iter().any(|name| name.ends_with("::MOBS")),
         "MOBS must be hashed by its logical StateSchema identity; hashed names: {hashed:?}"
     );
+    assert!(
+        !hashed.iter().any(|name| name.contains("<bone-stdlib:arena.rock>::__ARENA_STORES")),
+        "the physical Arena registry is not replay state; hashed names: {hashed:?}"
+    );
 
     let scratch2 = tempfile::tempdir().unwrap();
     let rep = Command::new(env!("CARGO_BIN_EXE_rock"))

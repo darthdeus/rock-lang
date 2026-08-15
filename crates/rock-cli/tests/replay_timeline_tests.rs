@@ -60,8 +60,9 @@ fn current_tick(state: &serde_json::Value) -> i64 {
 }
 
 /// The engine-owned simulation-state predicate's OUTPUT: record `game` with a
-/// per-tick checkpoint so every `c <tick> <name> <hash>` line names exactly the
-/// globals the engine hashes as simulation state, and collect that name set.
+/// per-tick checkpoint so every `c <tick> <identity> <hash>` line names exactly
+/// the StateSchema entries the engine hashes as simulation state, and collect
+/// their logical dump-state names.
 /// Consuming this (rather than duplicating the exclusion list in Rust) is the
 /// P3.5 unification -- the Lua `__replay_is_sim_state` predicate is the single
 /// source of truth.
@@ -87,7 +88,7 @@ fn sim_state_names(game: &str, frames: u32) -> std::collections::HashSet<String>
         .lines()
         .filter_map(|l| l.strip_prefix("c "))
         .filter_map(|rest| rest.split(' ').nth(1))
-        .map(|s| s.to_string())
+        .map(|identity| identity.rsplit_once("::").map_or(identity, |(_, name)| name).to_string())
         .collect();
     assert!(!names.is_empty(), "record must emit checkpoint lines naming sim-state globals");
     names
