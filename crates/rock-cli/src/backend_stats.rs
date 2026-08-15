@@ -436,9 +436,10 @@ fn print_report(input: &str, iters: usize, warmup: usize, bone: &BoneStats, skul
             graph.index_decls_unique,
         );
         println!(
-            "  graph phases: uninstall {:.3} ms, index {:.3} ms, derive {:.3} ms, post-pass {:.3} ms",
+            "  graph phases: uninstall {:.3} ms, index {:.3} ms, commit {:.3} ms, derive {:.3} ms, post-pass {:.3} ms",
             graph.uninstall_ns as f64 / 1_000_000.0,
             graph.index_maintenance_ns as f64 / 1_000_000.0,
+            graph.index_commit_ns as f64 / 1_000_000.0,
             graph.derive_ns as f64 / 1_000_000.0,
             graph.post_pass_ns as f64 / 1_000_000.0,
         );
