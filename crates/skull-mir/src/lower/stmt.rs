@@ -135,6 +135,7 @@ impl Builder<'_> {
                 abi_param_copy_volume: param_reps.len(),
                 ..LowerAttribution::default()
             }),
+            lower_timing_enabled: self.lower_timing_enabled,
             generic_bounds: self.generic_bounds,
             body: self.body,
             inf: self.inf,

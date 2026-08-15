@@ -4434,6 +4434,7 @@ fn dispatched_sites(
         concrete_types: None,
         concrete_type_cache: None,
         lower_attribution: None,
+        lower_timing_enabled: false,
         interner: None,
         rep_arena: &rep_arena,
         target: bone_semantic::hir::FnBackend::Any,

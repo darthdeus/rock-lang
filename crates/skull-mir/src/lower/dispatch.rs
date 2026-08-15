@@ -45,6 +45,7 @@ pub struct DispatchCtx<'a> {
     pub concrete_types: Option<&'a ConcreteTypeTables>,
     pub concrete_type_cache: Option<&'a super::ConcreteTypeCache>,
     pub lower_attribution: Option<&'a std::cell::RefCell<super::LowerAttribution>>,
+    pub lower_timing_enabled: bool,
     pub interner: Option<&'a crate::monoty::MonoInterner>,
     pub rep_arena: &'a RepArena,
     pub target: bone_semantic::hir::FnBackend,
@@ -298,32 +299,76 @@ impl<'a> DispatchCtx<'a> {
     }
 
     pub(crate) fn concrete_mono(&self, id: crate::monoty::MonoTyId) -> Option<crate::monoty::MonoTy> {
+        let timing = self.lower_attribution.is_some() && self.lower_timing_enabled;
         if let Some(stats) = self.lower_attribution {
-            stats.borrow_mut().concrete_mono_requests += 1;
+            stats
+                .borrow_mut()
+                .record_concrete_mono_request(super::ConcreteMonoConsumer::Dispatch);
         }
         if let Some(cache) = self.concrete_type_cache {
-            if let Some(ty) = cache.borrow().get(&id).cloned() {
+            let hit = {
+                let cache = cache.borrow();
+                cache
+                    .get(&id)
+                    .map(|ty| super::clone_mono_ty_timed(ty, timing))
+            };
+            if let Some((ty, clone_self_ns)) = hit {
                 if let Some(stats) = self.lower_attribution {
                     let mut stats = stats.borrow_mut();
-                    stats.concrete_mono_cache_hits += 1;
-                    stats.concrete_mono_cloned_nodes += super::mono_ty_node_count(&ty);
+                    if timing {
+                        stats.concrete_mono_timed_requests += 1;
+                    }
+                    stats.record_concrete_mono_cache_hit(
+                        super::ConcreteMonoConsumer::Dispatch,
+                        super::mono_ty_node_count(&ty),
+                        clone_self_ns,
+                    );
                 }
                 return Some(ty);
             }
-            let ty = self.interner?.get(id);
-            if let Some(stats) = self.lower_attribution {
-                let mut stats = stats.borrow_mut();
-                stats.concrete_mono_derivations += 1;
-                stats.concrete_mono_cloned_nodes += 2 * super::mono_ty_node_count(&ty);
+            if timing {
+                if let Some(stats) = self.lower_attribution {
+                    stats.borrow_mut().concrete_mono_timed_requests += 1;
+                }
             }
-            cache.borrow_mut().insert(id, ty.clone());
+            let lookup_start = timing.then(std::time::Instant::now);
+            let ty = self.interner?.get(id);
+            let lookup_ns = lookup_start
+                .map(|start| start.elapsed().as_nanos() as u64)
+                .unwrap_or_default();
+            let (cached_ty, clone_self_ns) = super::clone_mono_ty_timed(&ty, timing);
+            cache.borrow_mut().insert(id, cached_ty);
+            if let Some(stats) = self.lower_attribution {
+                let nodes = super::mono_ty_node_count(&ty);
+                stats.borrow_mut().record_concrete_mono_derivation(
+                    super::ConcreteMonoConsumer::Dispatch,
+                    nodes,
+                    nodes,
+                    lookup_ns,
+                    clone_self_ns,
+                );
+            }
             return Some(ty);
         }
+        if timing {
+            if let Some(stats) = self.lower_attribution {
+                stats.borrow_mut().concrete_mono_timed_requests += 1;
+            }
+        }
+        let lookup_start = timing.then(std::time::Instant::now);
         let ty = self.interner?.get(id);
+        let lookup_ns = lookup_start
+            .map(|start| start.elapsed().as_nanos() as u64)
+            .unwrap_or_default();
         if let Some(stats) = self.lower_attribution {
-            let mut stats = stats.borrow_mut();
-            stats.concrete_mono_derivations += 1;
-            stats.concrete_mono_cloned_nodes += super::mono_ty_node_count(&ty);
+            let nodes = super::mono_ty_node_count(&ty);
+            stats.borrow_mut().record_concrete_mono_derivation(
+                super::ConcreteMonoConsumer::Dispatch,
+                nodes,
+                0,
+                lookup_ns,
+                0,
+            );
         }
         Some(ty)
     }

@@ -567,7 +567,17 @@ pub struct AttributionPhase {
     pub concrete_mono_requests: usize,
     pub concrete_mono_cache_hits: usize,
     pub concrete_mono_derivations: usize,
+    pub concrete_mono_unique_ids: usize,
     pub concrete_mono_cloned_nodes: usize,
+    pub concrete_mono_interner_miss_cloned_nodes: usize,
+    pub concrete_mono_cache_insertion_cloned_nodes: usize,
+    pub concrete_mono_cache_hit_cloned_nodes: usize,
+    pub concrete_mono_explicit_owned_escapes: usize,
+    pub concrete_mono_lookup_ns: u64,
+    pub concrete_mono_clone_self_ns: u64,
+    pub concrete_mono_timed_requests: usize,
+    pub concrete_mono_by_consumer:
+        [skull_mir::lower::ConcreteMonoConsumerStats; skull_mir::lower::ConcreteMonoConsumer::COUNT],
     pub abi_param_copy_volume: usize,
     pub abi_param_shared_views: usize,
     pub mir_instruction_allocations: usize,
@@ -603,6 +613,8 @@ pub struct BodyAttributionOwner {
     pub owner: String,
     pub lower_us: u64,
     pub mir_instructions: usize,
+    pub concrete_mono_requests: usize,
+    pub concrete_mono_cloned_nodes: usize,
 }
 
 /// Counter totals of the build's shared `RepArena` and `MonoInterner`, taken
@@ -820,7 +832,31 @@ impl AttributionAccumulator {
         self.result.lower.concrete_mono_requests += unit.lower_facts.concrete_mono_requests;
         self.result.lower.concrete_mono_cache_hits += unit.lower_facts.concrete_mono_cache_hits;
         self.result.lower.concrete_mono_derivations += unit.lower_facts.concrete_mono_derivations;
+        self.result.lower.concrete_mono_unique_ids += unit.lower_facts.concrete_mono_unique_ids;
         self.result.lower.concrete_mono_cloned_nodes += unit.lower_facts.concrete_mono_cloned_nodes;
+        self.result.lower.concrete_mono_interner_miss_cloned_nodes +=
+            unit.lower_facts.concrete_mono_interner_miss_cloned_nodes;
+        self.result.lower.concrete_mono_cache_insertion_cloned_nodes +=
+            unit.lower_facts.concrete_mono_cache_insertion_cloned_nodes;
+        self.result.lower.concrete_mono_cache_hit_cloned_nodes +=
+            unit.lower_facts.concrete_mono_cache_hit_cloned_nodes;
+        self.result.lower.concrete_mono_explicit_owned_escapes +=
+            unit.lower_facts.concrete_mono_explicit_owned_escapes;
+        self.result.lower.concrete_mono_lookup_ns += unit.lower_facts.concrete_mono_lookup_ns;
+        self.result.lower.concrete_mono_clone_self_ns += unit.lower_facts.concrete_mono_clone_self_ns;
+        self.result.lower.concrete_mono_timed_requests +=
+            unit.lower_facts.concrete_mono_timed_requests;
+        for (total, child) in self
+            .result
+            .lower
+            .concrete_mono_by_consumer
+            .iter_mut()
+            .zip(unit.lower_facts.concrete_mono_by_consumer.iter())
+        {
+            total.requests += child.requests;
+            total.cloned_nodes += child.cloned_nodes;
+            total.explicit_owned_escapes += child.explicit_owned_escapes;
+        }
         self.result.lower.abi_param_copy_volume += unit.lower_facts.abi_param_copy_volume;
         self.result.lower.abi_param_shared_views += unit.lower_facts.abi_param_shared_views;
         self.result.lower.mir_instruction_allocations += unit.lower_facts.mir_instruction_allocations;
@@ -924,6 +960,8 @@ impl AttributionAccumulator {
             owner: unit.owner.clone(),
             lower_us: duration_us(times.lower),
             mir_instructions: unit.mir_instructions,
+            concrete_mono_requests: unit.lower_facts.concrete_mono_requests,
+            concrete_mono_cloned_nodes: unit.lower_facts.concrete_mono_cloned_nodes,
         });
     }
 
@@ -5964,10 +6002,52 @@ fn main() { let result = first() }
                 && attribution.lower.concrete_mono_requests
                     == attribution.lower.concrete_mono_cache_hits
                         + attribution.lower.concrete_mono_derivations
+                && attribution.lower.concrete_mono_unique_ids
+                    == attribution.lower.concrete_mono_derivations
+                && attribution.lower.concrete_mono_interner_miss_cloned_nodes > 0
+                && attribution.lower.concrete_mono_cache_insertion_cloned_nodes > 0
+                && attribution.lower.concrete_mono_cache_hit_cloned_nodes > 0
+                && attribution.lower.concrete_mono_cloned_nodes
+                    == attribution.lower.concrete_mono_interner_miss_cloned_nodes
+                        + attribution.lower.concrete_mono_cache_insertion_cloned_nodes
+                        + attribution.lower.concrete_mono_cache_hit_cloned_nodes
+                && attribution.lower.concrete_mono_explicit_owned_escapes > 0
+                && attribution
+                    .lower
+                    .concrete_mono_by_consumer
+                    .iter()
+                    .map(|stats| stats.requests)
+                    .sum::<usize>()
+                    == attribution.lower.concrete_mono_requests
+                && attribution
+                    .lower
+                    .concrete_mono_by_consumer
+                    .iter()
+                    .map(|stats| stats.cloned_nodes)
+                    .sum::<usize>()
+                    == attribution.lower.concrete_mono_cloned_nodes
                 && attribution.lower.mir_instruction_allocations > 0
                 && attribution.lower.mir_instruction_capacity >= attribution.lower.instructions_visited,
             "lowerer ownership census has no production population: {attribution:?}"
         );
+        let consumers = &attribution.lower.concrete_mono_by_consumer;
+        assert!(
+            consumers[skull_mir::lower::ConcreteMonoConsumer::CallParameter as usize].requests > 0
+                && consumers[skull_mir::lower::ConcreteMonoConsumer::CallParameter as usize]
+                    .explicit_owned_escapes
+                    > 0
+                && consumers[skull_mir::lower::ConcreteMonoConsumer::Dispatch as usize].requests
+                    > 0,
+            "named lowerer consumer routes have no production population: {attribution:?}"
+        );
+        if std::env::var("ROCK_LOWER_CENSUS").is_ok_and(|value| value == "1") {
+            assert!(
+                attribution.lower.concrete_mono_timed_requests > 0
+                    && attribution.lower.concrete_mono_lookup_ns > 0
+                    && attribution.lower.concrete_mono_clone_self_ns > 0,
+                "opt-in lowerer timing has no measured population: {attribution:?}"
+            );
+        }
     }
 
     #[test]

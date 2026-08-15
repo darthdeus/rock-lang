@@ -18,6 +18,8 @@
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::sync::OnceLock;
+use std::time::Instant;
 
 use bone_semantic::hir::{
     BinOp, BindingInfo, BindingPattern, Body, BodyOwner, BuiltinTy, Callee, Expr, Function,
@@ -36,6 +38,54 @@ use crate::monoty::{MonoTy, MonoTyId};
 
 type ConcreteTypeCache = RefCell<rustc_hash::FxHashMap<MonoTyId, MonoTy>>;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(usize)]
+pub enum ConcreteMonoConsumer {
+    GlobalPlan = 0,
+    CallParameter = 1,
+    CoroutineChannel = 2,
+    ReturnValidation = 3,
+    ReturnLowering = 4,
+    NoboxBoundary = 5,
+    Dispatch = 6,
+}
+
+impl ConcreteMonoConsumer {
+    pub const COUNT: usize = 7;
+    pub const ALL: [Self; Self::COUNT] = [
+        Self::GlobalPlan,
+        Self::CallParameter,
+        Self::CoroutineChannel,
+        Self::ReturnValidation,
+        Self::ReturnLowering,
+        Self::NoboxBoundary,
+        Self::Dispatch,
+    ];
+
+    fn is_owned_escape(self) -> bool {
+        matches!(self, Self::GlobalPlan | Self::CallParameter)
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::GlobalPlan => "global-plan",
+            Self::CallParameter => "call-parameter",
+            Self::CoroutineChannel => "coroutine-channel",
+            Self::ReturnValidation => "return-validation",
+            Self::ReturnLowering => "return-lowering",
+            Self::NoboxBoundary => "nobox-boundary",
+            Self::Dispatch => "dispatch",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ConcreteMonoConsumerStats {
+    pub requests: usize,
+    pub cloned_nodes: usize,
+    pub explicit_owned_escapes: usize,
+}
+
 fn gap(msg: impl std::fmt::Display) -> CompilerError {
     CompilerError::new_no_location(format!("skull-mir: lowering gap: {msg}"))
 }
@@ -45,7 +95,16 @@ pub struct LowerAttribution {
     pub concrete_mono_requests: usize,
     pub concrete_mono_cache_hits: usize,
     pub concrete_mono_derivations: usize,
+    pub concrete_mono_unique_ids: usize,
     pub concrete_mono_cloned_nodes: usize,
+    pub concrete_mono_interner_miss_cloned_nodes: usize,
+    pub concrete_mono_cache_insertion_cloned_nodes: usize,
+    pub concrete_mono_cache_hit_cloned_nodes: usize,
+    pub concrete_mono_explicit_owned_escapes: usize,
+    pub concrete_mono_lookup_ns: u64,
+    pub concrete_mono_clone_self_ns: u64,
+    pub concrete_mono_timed_requests: usize,
+    pub concrete_mono_by_consumer: [ConcreteMonoConsumerStats; ConcreteMonoConsumer::COUNT],
     pub abi_param_copy_volume: usize,
     pub abi_param_shared_views: usize,
     pub mir_instruction_allocations: usize,
@@ -64,7 +123,26 @@ impl LowerAttribution {
         self.concrete_mono_requests += other.concrete_mono_requests;
         self.concrete_mono_cache_hits += other.concrete_mono_cache_hits;
         self.concrete_mono_derivations += other.concrete_mono_derivations;
+        self.concrete_mono_unique_ids += other.concrete_mono_unique_ids;
         self.concrete_mono_cloned_nodes += other.concrete_mono_cloned_nodes;
+        self.concrete_mono_interner_miss_cloned_nodes +=
+            other.concrete_mono_interner_miss_cloned_nodes;
+        self.concrete_mono_cache_insertion_cloned_nodes +=
+            other.concrete_mono_cache_insertion_cloned_nodes;
+        self.concrete_mono_cache_hit_cloned_nodes += other.concrete_mono_cache_hit_cloned_nodes;
+        self.concrete_mono_explicit_owned_escapes += other.concrete_mono_explicit_owned_escapes;
+        self.concrete_mono_lookup_ns += other.concrete_mono_lookup_ns;
+        self.concrete_mono_clone_self_ns += other.concrete_mono_clone_self_ns;
+        self.concrete_mono_timed_requests += other.concrete_mono_timed_requests;
+        for (total, child) in self
+            .concrete_mono_by_consumer
+            .iter_mut()
+            .zip(other.concrete_mono_by_consumer.iter())
+        {
+            total.requests += child.requests;
+            total.cloned_nodes += child.cloned_nodes;
+            total.explicit_owned_escapes += child.explicit_owned_escapes;
+        }
         self.abi_param_copy_volume += other.abi_param_copy_volume;
         self.abi_param_shared_views += other.abi_param_shared_views;
         self.mir_instruction_allocations += other.mir_instruction_allocations;
@@ -77,6 +155,57 @@ impl LowerAttribution {
         self.mir_block_reallocations += other.mir_block_reallocations;
         self.mir_block_capacity += other.mir_block_capacity;
     }
+
+    fn record_concrete_mono_request(&mut self, consumer: ConcreteMonoConsumer) {
+        self.concrete_mono_requests += 1;
+        let stats = &mut self.concrete_mono_by_consumer[consumer as usize];
+        stats.requests += 1;
+        if consumer.is_owned_escape() {
+            stats.explicit_owned_escapes += 1;
+            self.concrete_mono_explicit_owned_escapes += 1;
+        }
+    }
+
+    fn record_concrete_mono_cache_hit(
+        &mut self,
+        consumer: ConcreteMonoConsumer,
+        cloned_nodes: usize,
+        clone_self_ns: u64,
+    ) {
+        self.concrete_mono_cache_hits += 1;
+        self.concrete_mono_cloned_nodes += cloned_nodes;
+        self.concrete_mono_cache_hit_cloned_nodes += cloned_nodes;
+        self.concrete_mono_clone_self_ns += clone_self_ns;
+        let stats = &mut self.concrete_mono_by_consumer[consumer as usize];
+        stats.cloned_nodes += cloned_nodes;
+    }
+
+    fn record_concrete_mono_derivation(
+        &mut self,
+        consumer: ConcreteMonoConsumer,
+        interner_miss_nodes: usize,
+        insertion_nodes: usize,
+        lookup_ns: u64,
+        clone_self_ns: u64,
+    ) {
+        self.concrete_mono_derivations += 1;
+        self.concrete_mono_unique_ids += 1;
+        self.concrete_mono_cloned_nodes += interner_miss_nodes + insertion_nodes;
+        self.concrete_mono_interner_miss_cloned_nodes += interner_miss_nodes;
+        self.concrete_mono_cache_insertion_cloned_nodes += insertion_nodes;
+        self.concrete_mono_lookup_ns += lookup_ns;
+        self.concrete_mono_clone_self_ns += clone_self_ns;
+        let stats = &mut self.concrete_mono_by_consumer[consumer as usize];
+        stats.cloned_nodes += interner_miss_nodes + insertion_nodes;
+    }
+}
+
+pub(crate) fn lower_attribution_timing_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("ROCK_LOWER_CENSUS").is_ok_and(|value| value == "1")
+            || std::env::var("STONE_LOG").is_ok_and(|value| value == "debug")
+    })
 }
 
 fn mono_ty_node_count(ty: &MonoTy) -> usize {
@@ -97,6 +226,15 @@ fn mono_ty_node_count(ty: &MonoTy) -> usize {
             1 + params.iter().map(mono_ty_node_count).sum::<usize>() + mono_ty_node_count(ret)
         }
     }
+}
+
+fn clone_mono_ty_timed(ty: &MonoTy, timing: bool) -> (MonoTy, u64) {
+    let start = timing.then(Instant::now);
+    let cloned = ty.clone();
+    let elapsed = start
+        .map(|start| start.elapsed().as_nanos() as u64)
+        .unwrap_or_default();
+    (cloned, elapsed)
 }
 
 fn finish_lower_attribution(mut f: MirFunc, mut stats: LowerAttribution) -> MirFunc {
@@ -1318,6 +1456,7 @@ fn lower_body(
             abi_param_shared_views: usize::from(param_rep_count > 0),
             ..LowerAttribution::default()
         }),
+        lower_timing_enabled: lower_attribution_timing_enabled(),
         generic_bounds: &func.generic_bounds,
         body,
         inf,
@@ -1416,6 +1555,7 @@ fn lower_global_inner(
         concrete_plans,
         concrete_type_cache: RefCell::new(rustc_hash::FxHashMap::default()),
         lower_attribution: RefCell::new(LowerAttribution::default()),
+        lower_timing_enabled: lower_attribution_timing_enabled(),
         generic_bounds: &[],
         body,
         inf,
@@ -1449,7 +1589,10 @@ fn lower_global_inner(
     let global_plan = GlobalPlan::for_concrete_result(
         ws,
         scx,
-        concrete_plan.signature.result.map(|id| b.concrete_mono(id)),
+        concrete_plan
+            .signature
+            .result
+            .map(|id| b.concrete_mono(id, ConcreteMonoConsumer::GlobalPlan)),
     )
     .map_err(|error| match error.span.or(b.cur_span) {
         Some(span) => CompilerError::new_with_label(span, error.message),
@@ -1726,6 +1869,7 @@ fn lower_decorator_inner(
         concrete_plans,
         concrete_type_cache: RefCell::new(rustc_hash::FxHashMap::default()),
         lower_attribution: RefCell::new(LowerAttribution::default()),
+        lower_timing_enabled: lower_attribution_timing_enabled(),
         generic_bounds: &[],
         body,
         inf,
@@ -1774,6 +1918,7 @@ struct Builder<'a> {
     concrete_plans: &'a ConcretePlans,
     concrete_type_cache: ConcreteTypeCache,
     lower_attribution: RefCell<LowerAttribution>,
+    lower_timing_enabled: bool,
     /// The enclosing fn's `generic_bounds`, parallel to its `generics`:
     /// `Some(elem)` where a generic is declared `I: Iterator<elem>`. THE declared
     /// source for a placeholder `next`'s element shape -- the call's inferred
@@ -1988,22 +2133,41 @@ impl Builder<'_> {
     /// predicate below is a delegate: `DispatchCtx` is the one implementation,
     /// so the instance walk asking the same question cannot get a second answer
     /// (`skull_mir::lower::dispatch`).
-    pub(crate) fn concrete_mono(&self, id: MonoTyId) -> MonoTy {
-        self.lower_attribution.borrow_mut().concrete_mono_requests += 1;
+    pub(crate) fn concrete_mono(&self, id: MonoTyId, consumer: ConcreteMonoConsumer) -> MonoTy {
+        let timing = self.lower_timing_enabled;
+        self.lower_attribution
+            .borrow_mut()
+            .record_concrete_mono_request(consumer);
         let cache = &self.concrete_type_cache;
-        if let Some(ty) = cache.borrow().get(&id).cloned() {
+        let hit = {
+            let cache = cache.borrow();
+            cache
+                .get(&id)
+                .map(|ty| clone_mono_ty_timed(ty, timing))
+        };
+        if let Some((ty, clone_self_ns)) = hit {
             let mut stats = self.lower_attribution.borrow_mut();
-            stats.concrete_mono_cache_hits += 1;
-            stats.concrete_mono_cloned_nodes += mono_ty_node_count(&ty);
+            if timing {
+                stats.concrete_mono_timed_requests += 1;
+            }
+            stats.record_concrete_mono_cache_hit(consumer, mono_ty_node_count(&ty), clone_self_ns);
             return ty;
         }
-        let ty = self.scx.interner().get(id);
-        {
-            let mut stats = self.lower_attribution.borrow_mut();
-            stats.concrete_mono_derivations += 1;
-            stats.concrete_mono_cloned_nodes += 2 * mono_ty_node_count(&ty);
+        if timing {
+            self.lower_attribution
+                .borrow_mut()
+                .concrete_mono_timed_requests += 1;
         }
-        cache.borrow_mut().insert(id, ty.clone());
+        let lookup_start = timing.then(Instant::now);
+        let ty = self.scx.interner().get(id);
+        let lookup_ns = lookup_start
+            .map(|start| start.elapsed().as_nanos() as u64)
+            .unwrap_or_default();
+        let (cached_ty, clone_self_ns) = clone_mono_ty_timed(&ty, timing);
+        cache.borrow_mut().insert(id, cached_ty);
+        let nodes = mono_ty_node_count(&ty);
+        let mut stats = self.lower_attribution.borrow_mut();
+        stats.record_concrete_mono_derivation(consumer, nodes, nodes, lookup_ns, clone_self_ns);
         ty
     }
 
@@ -2016,6 +2180,7 @@ impl Builder<'_> {
             concrete_types: self.concrete_plan.domain_types(&self.cur_domain),
             concrete_type_cache: Some(&self.concrete_type_cache),
             lower_attribution: Some(&self.lower_attribution),
+            lower_timing_enabled: self.lower_timing_enabled,
             interner: Some(self.scx.interner()),
             rep_arena: self.scx.rep_arena.as_ref(),
             target: self.scx.target,
@@ -2223,7 +2388,7 @@ impl Builder<'_> {
     fn reject_nonunit_coroutine_falloff(&self) -> Result<(), CompilerError> {
         let plan = self.concrete_plan;
         let Some(result_id) = plan.signature.result else { return Ok(()) };
-        let result = self.concrete_mono(result_id);
+        let result = self.concrete_mono(result_id, ConcreteMonoConsumer::ReturnValidation);
         let crate::monoty::MonoTy::App {
             ctor: crate::monoty::MonoCtor::Nominal(name),
             params,
@@ -2264,7 +2429,12 @@ impl Builder<'_> {
             .concrete_plan
             .signature
             .result
-            .is_some_and(|id| matches!(self.concrete_mono(id), crate::monoty::MonoTy::Unit))
+            .is_some_and(|id| {
+                matches!(
+                    self.concrete_mono(id, ConcreteMonoConsumer::ReturnLowering),
+                    crate::monoty::MonoTy::Unit
+                )
+            })
         {
             self.lower_expr(e)?;
             return Ok(vec![]);
@@ -2289,7 +2459,7 @@ impl Builder<'_> {
         let v = self.lower_expr(e)?;
         let v = match self.concrete_plan.signature.result {
             Some(result) => {
-                let result = self.concrete_mono(result);
+                let result = self.concrete_mono(result, ConcreteMonoConsumer::ReturnLowering);
                 self.coerced_mono(v, e, &result)
             }
             None => v,
