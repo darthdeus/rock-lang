@@ -1226,55 +1226,6 @@ fn remap_term_clone(
     }
 }
 
-/// Substitute `from` -> `to` in every value operand across the whole function
-/// (all insts + terminators). The straight path needs this because a call's
-/// result value can be live across blocks (skull's regalloc colors cross-block
-/// values via liveness — e.g. the LHS of `?? ` is tested in one block and reused
-/// in another). `to` is defined where the call was, which dominates every use of
-/// `from`, so the replacement is sound. (Whole-arena walk; the incremental
-/// dest-binding perf refinement is deferred — `docs/skull-inlining-plan.md`.)
-fn subst_all(
-    func: &mut MirFunc,
-    from: Idx<Inst>,
-    to: Idx<Inst>,
-    census: &mut InlineScanStats,
-) {
-    let started = census_enabled(census).then(Instant::now);
-    let replacements = ThreadCell::new(0usize);
-    let m = |x: Idx<Inst>| {
-        if x == from {
-            replacements.set(replacements.get() + 1);
-            to
-        } else {
-            x
-        }
-    };
-    let ids: Vec<Idx<Inst>> = func.insts.iter().map(|(i, _)| i).collect();
-    for id in ids {
-        census.substitution_instructions_inspected += 1;
-        crate::remap_inst(&mut func.insts[id], &m);
-    }
-    census.substitution_replacements += replacements.get();
-    let bids: Vec<Idx<Block>> = func.blocks.iter().map(|(b, _)| b).collect();
-    for b in bids {
-        census.substitution_terminators_inspected += 1;
-        let mut term = func.blocks[b].term.clone();
-        crate::remap_term(&mut term, &m);
-        func.blocks[b].term = term;
-    }
-    if census_enabled(census) {
-        census.substitution_invocations += 1;
-        census.substitution_ns += started
-            .expect("census timer started when enabled")
-            .elapsed()
-            .as_nanos() as u64;
-    }
-}
-
-fn census_enabled(census: &InlineScanStats) -> bool {
-    census.enabled
-}
-
 /// For each coalescable param whose arg is a plain `Load(c)`, map the callee
 /// param cell -> the caller cell `c` (so the clone binds the param directly to
 /// it) and flag the param so the splice skips its `Store(param, arg)` copy.
@@ -1621,7 +1572,7 @@ fn splice_straight(
     ws: &Workspace,
     scx: &ScalarCtx,
     concrete_plans: &ConcretePlans,
-    census: &mut InlineScanStats,
+    _census: &mut InlineScanStats,
 ) -> Result<(), CompilerError> {
     let callee = &cand.func;
     let (bid, idx, args) = match &site {
@@ -1681,20 +1632,24 @@ fn splice_straight(
             func.blocks[bid].insts = new_insts;
         }
         Site::Single { call_id, .. } => {
-            // Rewrite uses of the call value to the returned value (or an emitted
-            // nil for a void callee). For a void callee the nil const must live
-            // in a block, so append it to the spliced body before the tail.
-            let to = match ret_vals.first() {
-                Some(v) => *v,
-                None => {
-                    let nil = func.insts.alloc(Inst::Const(Lit::Nil));
-                    new_insts.push(nil);
-                    nil
-                }
-            };
+            // Keep the original value id as a load in the caller block. A result
+            // cell makes the binding dominate uses in successor blocks without
+            // rewriting the caller's existing operands.
+            if let Some(value) = ret_vals.first() {
+                let result_cell = func.new_cell(None);
+                let store = func.insts.alloc(Inst::Store {
+                    cell: result_cell,
+                    value: *value,
+                });
+                func.insts[*call_id] = Inst::Load(result_cell);
+                new_insts.push(store);
+                new_insts.push(*call_id);
+            } else {
+                func.insts[*call_id] = Inst::Const(Lit::Nil);
+                new_insts.push(*call_id);
+            }
             new_insts.extend_from_slice(&old[idx + 1..]);
             func.blocks[bid].insts = new_insts;
-            subst_all(func, *call_id, to, census);
         }
     }
     Ok(())

@@ -2435,6 +2435,38 @@ mod tests {
         exec_eq(src, "print(run(true)); print(run(false))", "10\n20");
     }
 
+    #[test]
+    fn inlines_straight_result_across_branch() {
+        let src = "@inline\n\
+                   fn identity(flag: bool) -> bool { return flag }\n\
+                   fn run(select: bool) -> bool {\n\
+                       let value = identity(true)\n\
+                       if select { return value }\n\
+                       return value\n\
+                   }";
+        exec_eq(src, "print(run(true)); print(run(false))", "true\ntrue");
+    }
+
+    #[test]
+    fn inlines_straight_nullable_result_across_coalesce_branches() {
+        let src = "@inline\n\
+                   fn identity(value: int?) -> int? { return value }\n\
+                   fn run(select: bool) -> int {\n\
+                       let value = identity(null)\n\
+                       if select { return value ?? 1 }\n\
+                       return value ?? 2\n\
+                   }";
+        exec_eq(src, "print(run(true)); print(run(false))", "1\n2");
+    }
+
+    #[test]
+    fn inlines_void_straight_result() {
+        let src = "@inline\n\
+                   fn touch() { return }\n\
+                   fn run() -> int { touch(); return 7 }";
+        exec_eq(src, "print(run())", "7");
+    }
+
     /// Transitive inlining: `a` calls `b` calls `c`; re-scanning the caller after
     /// each splice inlines the calls the spliced body introduces, so neither
     /// `= b(` nor `= c(` survives in `a`. (Arithmetic ops aren't used — the

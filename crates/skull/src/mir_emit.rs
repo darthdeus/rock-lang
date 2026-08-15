@@ -5602,6 +5602,19 @@ fn main() { let result = top() }
 global RESULT: int = top()
 "#;
 
+    const CROSS_BLOCK_SRC: &str = r#"
+@inline
+fn identity(flag: bool) -> bool { return flag }
+
+fn run(select: bool) -> bool {
+    let value = identity(true)
+    if select { return value }
+    return value
+}
+
+fn main() { let result = run(true) }
+"#;
+
     const BOUNDED_SRC: &str = r#"
 fn total<I: Iterator<int>>(it: I) -> int {
     let sum = 0
@@ -5746,6 +5759,14 @@ fn main() {
     fn census_workspace() -> Workspace {
         let mut modules = vec![
             skull_parser::parse_module_clean(CENSUS_SRC, Ustr::from("<inline-census-test>"))
+                .expect("parse"),
+        ];
+        bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic")
+    }
+
+    fn cross_block_workspace() -> Workspace {
+        let mut modules = vec![
+            skull_parser::parse_module_clean(CROSS_BLOCK_SRC, Ustr::from("<inline-cross-block-test>"))
                 .expect("parse"),
         ];
         bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic")
@@ -6249,10 +6270,11 @@ fn main() { let result = first() }
             "both splice shapes must reach production: {census:?}"
         );
         assert!(
-            census.substitution_invocations > 0
-                && census.substitution_instructions_inspected > 0
-                && census.substitution_replacements > 0,
-            "the baseline straight-result substitution route must be measured: {census:?}"
+            census.substitution_invocations == 0
+                && census.substitution_instructions_inspected == 0
+                && census.substitution_terminators_inspected == 0
+                && census.substitution_replacements == 0,
+            "straight-result binding must remove the whole-caller substitution route: {census:?}"
         );
         assert_eq!(
             census.clone.source_instructions,
@@ -6300,6 +6322,29 @@ fn main() { let result = first() }
         side_bounds!(call_sites);
         side_bounds!(call_site_owners);
         side_bounds!(iterator_headers);
+    }
+
+    #[test]
+    fn straight_cross_block_results_use_a_targeted_binding() {
+        let _inline = InlineOn::on();
+        let _census = InlineCensusOn::on();
+        let ws = cross_block_workspace();
+        let mid = *ws
+            .module_ids
+            .get(&Ustr::from("<inline-cross-block-test>"))
+            .expect("cross-block test module");
+        let (emit, _) = emit_full_in_with_test_mutation(&ws, mid, BodyMutation::None)
+            .expect("cross-block emission");
+        assert!(
+            !emit.lua.contains("identity("),
+            "the straight callee must still inline in the cross-block fixture"
+        );
+        assert_eq!(
+            emit.attribution.inline.census.substitution_invocations,
+            0,
+            "straight result binding must not scan the caller arena: {:?}",
+            emit.attribution.inline.census
+        );
     }
 
     #[test]
