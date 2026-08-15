@@ -388,7 +388,12 @@ fn print_report(input: &str, iters: usize, warmup: usize, bone: &BoneStats, skul
             graph.iterator_rows,
         );
         println!(
-            "  graph wavefront (one timed run): {} frontiers; owners p50/p95/max {}/{}/{}; singleton {}; ordinary/always {}/{}; ready/same-frontier-dependency {}/{}",
+            "  graph wavefront (one timed run; census {}): {} frontiers; owners p50/p95/max {}/{}/{}; singleton {}; ordinary/always {}/{}; ready/same-frontier-dependency {}/{}",
+            if graph.census_enabled {
+                "enabled"
+            } else {
+                "disabled; set ROCK_GRAPH_CENSUS=1"
+            },
             graph.frontier_count,
             graph.frontier_owner_p50,
             graph.frontier_owner_p95,

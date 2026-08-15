@@ -426,8 +426,9 @@ pub struct Contribution {
     pub(crate) timing: ExpandTiming,
 }
 
-/// Conditional timings for one owner walk. The fields are zero unless debug
-/// logging is enabled; the counters and their denominators remain durable.
+/// Conditional timings for one owner walk. The fields are zero unless the
+/// debug/census path is enabled; the counters and their denominators remain
+/// durable.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ExpandTiming {
     pub admissibility_ns: u64,
@@ -441,7 +442,9 @@ pub struct ExpandTiming {
 }
 
 fn graph_timing_enabled() -> bool {
-    log::log_enabled!(log::Level::Debug)
+    cfg!(debug_assertions)
+        || log::log_enabled!(log::Level::Debug)
+        || std::env::var_os("ROCK_GRAPH_CENSUS").is_some()
 }
 
 fn elapsed_ns(start: Option<Instant>) -> u64 {
@@ -1723,6 +1726,7 @@ impl InstanceGraph {
             }
         }
         let timing_enabled = graph_timing_enabled();
+        stats.census_enabled = timing_enabled;
         let mut queued = BTreeSet::new();
         let mut unique_pending = Vec::with_capacity(pending.len());
         for owner in pending {
@@ -1733,16 +1737,20 @@ impl InstanceGraph {
             }
         }
         pending = unique_pending;
-        let mut frontier_sizes = if pending.is_empty() {
-            Vec::new()
-        } else {
+        let mut frontier_sizes = if timing_enabled && !pending.is_empty() {
             vec![pending.len()]
+        } else {
+            Vec::new()
         };
-        let mut frontier_depths: BTreeMap<Owner, usize> = pending
-            .iter()
-            .cloned()
-            .map(|owner| (owner, 0))
-            .collect();
+        let mut frontier_depths: BTreeMap<Owner, usize> = if timing_enabled {
+            pending
+                .iter()
+                .cloned()
+                .map(|owner| (owner, 0))
+                .collect()
+        } else {
+            BTreeMap::new()
+        };
         let mut same_frontier_marks = BTreeSet::new();
         let initially_forced: BTreeSet<Owner> = pending
             .iter()
@@ -1758,12 +1766,16 @@ impl InstanceGraph {
         let mut expansion_times = Vec::new();
         loop {
             while let Some(owner) = pending.pop() {
-                let current_frontier = frontier_depths.get(&owner).copied().unwrap_or(0);
+                let current_frontier = timing_enabled
+                    .then(|| frontier_depths.get(&owner).copied().unwrap_or(0))
+                    .unwrap_or(0);
                 queued.remove(&owner);
                 stats.owner_visits += 1;
-                match owner {
-                    Owner::Instance(_) => stats.ordinary_owner_visits += 1,
-                    Owner::AlwaysEmitted(..) => stats.always_emitted_owner_visits += 1,
+                if timing_enabled {
+                    match owner {
+                        Owner::Instance(_) => stats.ordinary_owner_visits += 1,
+                        Owner::AlwaysEmitted(..) => stats.always_emitted_owner_visits += 1,
+                    }
                 }
                 // **An instance that lost its last namer DURING this run is not
                 // walkable, and is not an invariant break.**
@@ -1785,7 +1797,9 @@ impl InstanceGraph {
                 // the edited file and never reaches this loop.
                 if let Owner::Instance(i) = &owner {
                     if self.substitution(i).is_none() {
-                        same_frontier_marks.remove(&owner);
+                        if timing_enabled {
+                            same_frontier_marks.remove(&owner);
+                        }
                         stats.skipped_stranded_owners += 1;
                         continue;
                     }
@@ -1800,15 +1814,19 @@ impl InstanceGraph {
                 } else {
                     VisitKind::FirstOwner
                 };
-                let visit_start = Instant::now();
+                let visit_start = timing_enabled.then(Instant::now);
                 let c = self.expand(ws, &owner, timing_enabled);
-                let visit_ns = visit_start.elapsed().as_nanos() as u64;
-                expansion_times.push(visit_ns);
+                let visit_ns = elapsed_ns(visit_start);
+                if timing_enabled {
+                    expansion_times.push(visit_ns);
+                }
                 stats.expanded += 1;
-                if same_frontier_marks.remove(&owner) {
-                    stats.frontier_same_frontier_dependency_owners += 1;
-                } else {
-                    stats.frontier_ready_owners += 1;
+                if timing_enabled {
+                    if same_frontier_marks.remove(&owner) {
+                        stats.frontier_same_frontier_dependency_owners += 1;
+                    } else {
+                        stats.frontier_ready_owners += 1;
+                    }
                 }
                 match visit_kind {
                     VisitKind::FirstOwner => {
@@ -1845,18 +1863,20 @@ impl InstanceGraph {
                 stats.bound_tree_rows += c.bound_tree_rows;
                 stats.bound_call_rows += c.bound_call_rows;
                 stats.iterator_rows += c.iterator_rows;
-                stats.contribution_reached += c.reached.len();
-                stats.contribution_bound_trees += c.bound_trees.len();
-                stats.contribution_edges += c.edges.len();
-                stats.contribution_sites += c.call_sites.len() + c.always_call_sites.len();
-                stats.contribution_struct_default_domains += c.struct_default_domains.len();
-                stats.contribution_rejections += c.rejections.len();
-                stats.contribution_synthesized_examined += c.synthesized_examined;
-                stats.contribution_failures += c.rejections.len()
-                    + c.unresolved.len()
-                    + c.storage_failures.len()
-                    + c.always_emitted_holes.len();
-                stats.contribution_always_emitted_targets += c.always_emitted_targets.len();
+                if timing_enabled {
+                    stats.contribution_reached += c.reached.len();
+                    stats.contribution_bound_trees += c.bound_trees.len();
+                    stats.contribution_edges += c.edges.len();
+                    stats.contribution_sites += c.call_sites.len() + c.always_call_sites.len();
+                    stats.contribution_struct_default_domains += c.struct_default_domains.len();
+                    stats.contribution_rejections += c.rejections.len();
+                    stats.contribution_synthesized_examined += c.synthesized_examined;
+                    stats.contribution_failures += c.rejections.len()
+                        + c.unresolved.len()
+                        + c.storage_failures.len()
+                        + c.always_emitted_holes.len();
+                    stats.contribution_always_emitted_targets += c.always_emitted_targets.len();
+                }
                 let (demanded, install_timing) = self.install(owner, c, timing_enabled);
                 stats.uninstall_ns += install_timing.uninstall_ns;
                 stats.index_maintenance_ns += install_timing.index.total_ns();
@@ -1874,18 +1894,21 @@ impl InstanceGraph {
                 stats.index_preds_updates += install_timing.index.preds_updates;
                 stats.index_decls_updates += install_timing.index.decls_updates;
                 for owner in demanded {
-                    if queued.contains(&owner)
+                    if timing_enabled
+                        && queued.contains(&owner)
                         && frontier_depths.get(&owner) == Some(&current_frontier)
                     {
                         same_frontier_marks.insert(owner.clone());
                     }
                     if queued.insert(owner.clone()) {
-                        let next_frontier = current_frontier.saturating_add(1);
-                        frontier_depths.insert(owner.clone(), next_frontier);
-                        if frontier_sizes.len() <= next_frontier {
-                            frontier_sizes.resize(next_frontier + 1, 0);
+                        if timing_enabled {
+                            let next_frontier = current_frontier.saturating_add(1);
+                            frontier_depths.insert(owner.clone(), next_frontier);
+                            if frontier_sizes.len() <= next_frontier {
+                                frontier_sizes.resize(next_frontier + 1, 0);
+                            }
+                            frontier_sizes[next_frontier] += 1;
                         }
-                        frontier_sizes[next_frontier] += 1;
                         pending.push(owner);
                     } else {
                         stats.duplicate_pending_suppressed += 1;
@@ -1914,10 +1937,12 @@ impl InstanceGraph {
                  {} owners still disagree with what they were walked with",
                 stale.len()
             );
-            let settlement_frontier = frontier_sizes.len();
-            frontier_sizes.push(stale.len());
-            for owner in &stale {
-                frontier_depths.insert(owner.clone(), settlement_frontier);
+            if timing_enabled {
+                let settlement_frontier = frontier_sizes.len();
+                frontier_sizes.push(stale.len());
+                for owner in &stale {
+                    frontier_depths.insert(owner.clone(), settlement_frontier);
+                }
             }
             pending = stale;
             queued = pending.iter().cloned().collect();
@@ -1946,22 +1971,24 @@ impl InstanceGraph {
         stats.mono_new_types = mono_after.intern_new.saturating_sub(mono_before.intern_new);
         stats.mono_read_acqs = mono_after.read_acqs.saturating_sub(mono_before.read_acqs);
         stats.mono_write_acqs = mono_after.write_acqs.saturating_sub(mono_before.write_acqs);
-        stats.frontier_count = frontier_sizes.len();
-        stats.frontier_owner_p50 = percentile_usize(&mut frontier_sizes, 50);
-        stats.frontier_owner_p95 = percentile_usize(&mut frontier_sizes, 95);
-        stats.frontier_owner_max = frontier_sizes.iter().copied().max().unwrap_or(0);
-        stats.singleton_frontiers = frontier_sizes.iter().filter(|n| **n == 1).count();
-        stats.expansion_ns_total = expansion_times.iter().sum();
-        stats.expansion_ns_p50 = percentile_u64(&mut expansion_times, 50);
-        stats.expansion_ns_p95 = percentile_u64(&mut expansion_times, 95);
-        stats.expansion_ns_max = expansion_times.iter().copied().max().unwrap_or(0);
-        stats.mono_elapsed_ns = stats.mono_elapsed_ns.max(stats.expansion_ns_total);
-        stats.index_subst_unique = self.index.subst.len();
-        stats.index_trees_unique = self.index.trees.len();
-        stats.index_erased_unique = self.index.erased.len();
-        stats.index_always_emitted_unique = self.index.always_emitted.len();
-        stats.index_preds_unique = self.index.preds.len();
-        stats.index_decls_unique = self.index.decls.len();
+        if timing_enabled {
+            stats.frontier_count = frontier_sizes.len();
+            stats.frontier_owner_p50 = percentile_usize(&mut frontier_sizes, 50);
+            stats.frontier_owner_p95 = percentile_usize(&mut frontier_sizes, 95);
+            stats.frontier_owner_max = frontier_sizes.iter().copied().max().unwrap_or(0);
+            stats.singleton_frontiers = frontier_sizes.iter().filter(|n| **n == 1).count();
+            stats.expansion_ns_total = expansion_times.iter().sum();
+            stats.expansion_ns_p50 = percentile_u64(&mut expansion_times, 50);
+            stats.expansion_ns_p95 = percentile_u64(&mut expansion_times, 95);
+            stats.expansion_ns_max = expansion_times.iter().copied().max().unwrap_or(0);
+            stats.mono_elapsed_ns = stats.mono_elapsed_ns.max(stats.expansion_ns_total);
+            stats.index_subst_unique = self.index.subst.len();
+            stats.index_trees_unique = self.index.trees.len();
+            stats.index_erased_unique = self.index.erased.len();
+            stats.index_always_emitted_unique = self.index.always_emitted.len();
+            stats.index_preds_unique = self.index.preds.len();
+            stats.index_decls_unique = self.index.decls.len();
+        }
         stats
     }
 
@@ -2895,6 +2922,7 @@ struct InstallTiming {
 /// that an update touched the affected region rather than the program.
 #[derive(Default, Debug, Clone, Copy)]
 pub struct RunStats {
+    pub census_enabled: bool,
     /// Every owner popped from the pending worklist, including stranded skips.
     pub owner_visits: usize,
     pub expanded: usize,

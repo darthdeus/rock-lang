@@ -198,6 +198,7 @@ fn the_operational_censuses_are_sums_of_the_primary_records() {
         sum(|c| c.call_sites.len())
     );
     assert!(census.owner_visits > 0 && census.first_owner_visits > 0);
+    assert!(census.census_enabled, "the graph fixture did not enable its census");
     assert!(
         census.body_exprs_scanned > 0
             && census.resolved_overload_rows > 0
@@ -299,7 +300,8 @@ fn the_operational_censuses_are_sums_of_the_primary_records() {
             + census.index_erased_ns
             + census.index_always_emitted_ns
             + census.index_preds_ns
-            + census.index_decls_ns,
+            + census.index_decls_ns
+            + census.index_commit_ns,
         "graph index timing attribution lost or double-counted a lane: {census:?}"
     );
 }
