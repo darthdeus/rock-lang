@@ -1,36 +1,21 @@
-//! SENTINEL -- pins a live codegen bug.
-//!
 //! `a ?? b` yielding a SCALARIZED `value` struct, used directly as a struct
-//! literal's field initializer, emits a field that is nil at runtime. The
-//! literal's other fields are written correctly, so nothing fails at the
-//! construction site; the nil surfaces later, wherever that field is first
-//! read. Found from a `Vec2?` parameter defaulted through `??` in mag's
-//! `spawn_ground_item`, where it died three call frames away inside the
-//! renderer with `attempt to perform arithmetic on local 'r1'`.
+//! literal's field initializer, must thread the selected value as leaves. The
+//! parent stores a `nobox` child in dotted physical slots, so lowering the join
+//! through one boxed cell and then reading leaves from it used to leave those
+//! slots nil.
 //!
-//! CORRECT behavior: `Thing { at: fallback ?? v(7, 8) }` sets `at` to (7, 8),
-//! exactly as the hoisted `let launch = fallback ?? v(7, 8)` form does.
-//!
-//! DISCRIMINANT, measured -- three controls below narrow it to one cell:
+//! Three controls keep the discriminant narrow:
 //!   * hoisting the same `??` into a `let` first is CORRECT, so the coalesce
 //!     lowering is fine on its own and the literal field position is the
 //!     trigger;
 //!   * a BOXED struct through the same inline `??` in the same position is
 //!     CORRECT, so it is the value-struct scalarization -- the field is
 //!     stored as separate `at.x` / `at.y` slots, and the coalesce writes
-//!     neither;
+//!     neither before the fix;
 //!   * `??` on a scalar (int) field is CORRECT, which rules out the literal
 //!     field position on its own.
-//!
-//! This is a SILENT WRONG VALUE, not a rejection: the emit is valid Lua and
-//! the crash lands somewhere unrelated to the mistake, which is why it is
-//! pinned rather than left to be rediscovered.
-//!
-//! WHEN THIS GOES RED, the bug is fixed. Flip `BUGGY_NIL` to the correct
-//! `"7 8"` in `coalesce_into_value_struct_literal_field_emits_nil`, rename it
-//! to say it works, and update this header.
 
-/// The bug: `??` into a `value`-struct field of a struct literal.
+/// `??` into a `value`-struct field of a struct literal.
 const VALUE_FIELD_INLINE: &str = r#"
 struct Thing { at: Vec2 = v(0, 0) }
 
@@ -51,6 +36,20 @@ fn main() {
     let launch = fallback ?? v(7, 8)
     let t = Thing { at: launch }
     print("{t.at.x as int} {t.at.y as int}")
+}
+"#;
+
+const VALUE_FIELD_DIVERGING_RHS: &str = r#"
+struct Thing { at: Vec2 = v(0, 0) }
+
+fn make(fallback: Vec2?) -> Thing? {
+    return Thing { at: fallback ?? return null }
+}
+
+fn main() {
+    let t = make(v(13, 17)).unwrap()
+    print("{t.at.x as int} {t.at.y as int}")
+    print("{make(null) == null}")
 }
 "#;
 
@@ -84,20 +83,19 @@ fn run(src: &str, tag: &str) -> String {
     crate::common::run_luajit(&format!("{lua}\nmain()\n"), tag)
 }
 
-/// PINNED BEHAVIOR (BUG). The scalarized field is never written, so reading it
-/// dies on nil. Asserting on the failure TEXT rather than on a value, because
-/// there is no value to read -- that is the bug.
 #[test]
-fn coalesce_into_value_struct_literal_field_emits_nil() {
-    let out = std::panic::catch_unwind(|| run(VALUE_FIELD_INLINE, "coalesce_value_field"));
+fn coalesce_into_value_struct_literal_field_is_correct() {
+    assert_eq!(
+        run(VALUE_FIELD_INLINE, "coalesce_value_field").trim(),
+        "7 8"
+    );
+}
 
-    assert!(
-        out.is_err(),
-        "PINNED BEHAVIOR (BUG): `Thing {{ at: fallback ?? v(7, 8) }}` leaves the \
-         scalarized `at` nil, so reading it dies at runtime. If this now \
-         SUCCEEDS, the fix landed -- flip this to \
-         `assert_eq!(run(VALUE_FIELD_INLINE, ..), \"7 8\")` and update the \
-         header."
+#[test]
+fn a_diverging_coalesce_arm_does_not_build_the_parent_from_nil_leaves() {
+    assert_eq!(
+        run(VALUE_FIELD_DIVERGING_RHS, "coalesce_value_diverging_rhs").trim(),
+        "13 17\ntrue"
     );
 }
 
