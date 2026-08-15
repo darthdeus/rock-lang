@@ -251,10 +251,12 @@ fn print_attribution(attribution: &skull::mir_emit::EmitAttribution) {
         );
     }
     println!(
-        "    inline results: {} accepted splices, {} copied instructions, {} arena allocations; {} borrowed block scans over {} instructions",
+        "    inline results: {} accepted splices, {} copied instructions, {} arena allocations; cleanup live before/after {}/{}; {} borrowed block scans over {} instructions",
         attribution.inline.accepted_splices,
         attribution.inline.copied_instructions,
         attribution.inline.arena_allocations,
+        attribution.inline.cleanup_live_before,
+        attribution.inline.cleanup_live_after,
         attribution.inline.borrowed_block_scans,
         attribution.inline.instructions_scanned,
     );
@@ -331,7 +333,7 @@ fn print_attribution(attribution: &skull::mir_emit::EmitAttribution) {
             census.clone.cleanup_load_roots,
         );
         println!(
-            "      remaps entries/capacity/growth i/c/b {}/{}/{} / {}/{}/{} / {}/{}/{}; reserve i/c/b {}/{}/{}; args {}/{} dests {}/{}; prefix/tail {}/{}; nested/static {}/{}",
+            "      remaps entries/capacity/growth i/c/b {}/{}/{} / {}/{}/{} / {}/{}/{}; arena realloc i/c/b {}/{}/{}; reserve i/c/b {}/{}/{}; args {}/{} dests {}/{}; prefix/tail {}/{}; nested/static {}/{}",
             census.clone.inst_remap_entries,
             census.clone.cell_remap_entries,
             census.clone.block_remap_entries,
@@ -341,6 +343,9 @@ fn print_attribution(attribution: &skull::mir_emit::EmitAttribution) {
             census.clone.inst_remap_growth,
             census.clone.cell_remap_growth,
             census.clone.block_remap_growth,
+            census.clone.inst_arena_reallocations,
+            census.clone.cell_arena_reallocations,
+            census.clone.block_arena_reallocations,
             census.clone.caller_reserved_instructions,
             census.clone.caller_reserved_cells,
             census.clone.caller_reserved_blocks,

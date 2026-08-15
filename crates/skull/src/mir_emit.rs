@@ -605,6 +605,8 @@ pub struct InlineAttribution {
     pub specialized_splices: usize,
     pub hoisted_splices: usize,
     pub arena_allocations: usize,
+    pub cleanup_live_before: usize,
+    pub cleanup_live_after: usize,
     pub borrowed_block_scans: usize,
     pub instructions_scanned: usize,
     pub census: skull_transform::InlineScanStats,
@@ -714,6 +716,8 @@ struct InlineWork {
     specialized_splices: usize,
     hoisted_splices: usize,
     arena_allocations: usize,
+    cleanup_live_before: usize,
+    cleanup_live_after: usize,
     borrowed_block_scans: usize,
     instructions_scanned: usize,
     census: skull_transform::InlineScanStats,
@@ -759,6 +763,8 @@ impl InlineWork {
         self.specialized_splices += other.specialized_splices;
         self.hoisted_splices += other.hoisted_splices;
         self.arena_allocations += other.arena_allocations;
+        self.cleanup_live_before += other.cleanup_live_before;
+        self.cleanup_live_after += other.cleanup_live_after;
         self.borrowed_block_scans += other.borrowed_block_scans;
         self.instructions_scanned += other.instructions_scanned;
         self.census.add(other.census);
@@ -994,6 +1000,8 @@ impl AttributionAccumulator {
         self.result.inline.specialized_splices += unit.inline.specialized_splices;
         self.result.inline.hoisted_splices += unit.inline.hoisted_splices;
         self.result.inline.arena_allocations += unit.inline.arena_allocations;
+        self.result.inline.cleanup_live_before += unit.inline.cleanup_live_before;
+        self.result.inline.cleanup_live_after += unit.inline.cleanup_live_after;
         self.result.inline.borrowed_block_scans += unit.inline.borrowed_block_scans;
         self.result.inline.instructions_scanned += unit.inline.instructions_scanned;
         self.result.inline.census.add(unit.inline.census.clone());
@@ -2352,7 +2360,10 @@ fn emit_body_chunk_with_mutation(
     let tc = Instant::now();
     skull_transform::cleanup_with_nobox(ws, &mut mf); // drop dead values + dead-cell stores
     times.cleanup = tc.elapsed();
-    times.cleanup_work = mir_live_instructions(&mf) != cleanup_before;
+    let cleanup_after = mir_live_instructions(&mf);
+    attribution.inline.cleanup_live_before += cleanup_before;
+    attribution.inline.cleanup_live_after += cleanup_after;
+    times.cleanup_work = cleanup_after != cleanup_before;
     // Shared closure conversion (S2 cutover, docs/closure-conversion-mir-plan.md):
     // every `Inst::Lambda` in this ORDINARY fn becomes a `MakeEnv` record / bare
     // `Global` + a hoisted sibling in `nested_fns`. Runs AFTER inline+cleanup,
@@ -2858,7 +2869,10 @@ fn prepare_instance_body_with_attribution(
     let tc = Instant::now();
     skull_transform::cleanup_with_nobox(ws, mf);
     times.cleanup = tc.elapsed();
-    times.cleanup_work = mir_live_instructions(mf) != cleanup_before;
+    let cleanup_after = mir_live_instructions(mf);
+    work.cleanup_live_before += cleanup_before;
+    work.cleanup_live_after += cleanup_after;
+    times.cleanup_work = cleanup_after != cleanup_before;
     let tclosure = Instant::now();
     let nested_before = mf.nested_fns.len();
     skull_transform::convert_closures(mf, name);
@@ -2947,7 +2961,10 @@ fn inline_hoisted_bodies(
         let tc = Instant::now();
         skull_transform::cleanup_with_nobox(ws, nf);
         times.cleanup += tc.elapsed();
-        times.cleanup_work |= mir_live_instructions(nf) != cleanup_before;
+        let cleanup_after = mir_live_instructions(nf);
+        work.cleanup_live_before += cleanup_before;
+        work.cleanup_live_after += cleanup_after;
+        times.cleanup_work |= cleanup_after != cleanup_before;
         let mut children = std::mem::take(&mut nf.nested_fns);
         inline_hoisted_bodies(
             ws,
@@ -6420,6 +6437,14 @@ fn main() { let result = first() }
             census.clone.source_blocks,
             census.clone.live_blocks + census.clone.dead_blocks,
             "block clone census must conserve source entries: {census:?}"
+        );
+        assert!(
+            emit.attribution.inline.cleanup_live_before > 0
+                && emit.attribution.inline.cleanup_live_after > 0
+                && emit.attribution.inline.cleanup_live_after
+                    <= emit.attribution.inline.cleanup_live_before,
+            "cleanup census must expose a nonzero live population and cannot grow it: {:?}",
+            emit.attribution.inline
         );
         assert!(
             census.clone.cloned_instructions <= census.clone.source_instructions

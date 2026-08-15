@@ -195,6 +195,9 @@ pub struct InlineCloneStats {
     pub inst_remap_growth: usize,
     pub cell_remap_growth: usize,
     pub block_remap_growth: usize,
+    pub inst_arena_reallocations: usize,
+    pub cell_arena_reallocations: usize,
+    pub block_arena_reallocations: usize,
     pub caller_reserved_instructions: usize,
     pub caller_reserved_cells: usize,
     pub caller_reserved_blocks: usize,
@@ -278,6 +281,9 @@ impl InlineCloneStats {
         self.inst_remap_growth += other.inst_remap_growth;
         self.cell_remap_growth += other.cell_remap_growth;
         self.block_remap_growth += other.block_remap_growth;
+        self.inst_arena_reallocations += other.inst_arena_reallocations;
+        self.cell_arena_reallocations += other.cell_arena_reallocations;
+        self.block_arena_reallocations += other.block_arena_reallocations;
         self.caller_reserved_instructions += other.caller_reserved_instructions;
         self.caller_reserved_cells += other.caller_reserved_cells;
         self.caller_reserved_blocks += other.caller_reserved_blocks;
@@ -1153,6 +1159,7 @@ fn full_clone_stats(
     tail: usize,
     maps: CloneMapStats,
     coalesced_cells: usize,
+    arena_reallocations: (usize, usize, usize),
 ) -> InlineCloneStats {
     let mut stats = cand.template;
     stats.cloned_instructions = stats.live_instructions;
@@ -1179,6 +1186,9 @@ fn full_clone_stats(
     stats.inst_remap_growth = maps.inst_growth;
     stats.cell_remap_growth = maps.cell_growth;
     stats.block_remap_growth = maps.block_growth;
+    stats.inst_arena_reallocations = arena_reallocations.0;
+    stats.cell_arena_reallocations = arena_reallocations.1;
+    stats.block_arena_reallocations = arena_reallocations.2;
     stats.caller_reserved_instructions = cand.func.insts.len();
     stats.caller_reserved_cells = cand.func.cells.len().saturating_sub(coalesced_cells);
     stats.caller_reserved_blocks = if straight { 0 } else { cand.func.blocks.len() };
@@ -2614,6 +2624,13 @@ fn inline_functions_inner(
         // the `&mut cache` in `find_site`, so split the lookup out here where
         // only `&cache` is held.
         let splice_start = cache.census_enabled.then(Instant::now);
+        let arena_capacities = cache.census_enabled.then(|| {
+            (
+                func.insts.capacity(),
+                func.cells.capacity(),
+                func.blocks.capacity(),
+            )
+        });
         let result_cell = usize::from(
             cand.kind == Kind::General && matches!(&site, Site::Single { .. }),
         );
@@ -2628,6 +2645,15 @@ fn inline_functions_inner(
             &mut uses,
             census,
         )?;
+        let arena_reallocations = arena_capacities
+            .map(|(inst_capacity, cell_capacity, block_capacity)| {
+                (
+                    usize::from(func.insts.capacity() > inst_capacity),
+                    usize::from(func.cells.capacity() > cell_capacity),
+                    usize::from(func.blocks.capacity() > block_capacity),
+                )
+            })
+            .unwrap_or_default();
         top.extend(scratch.added_blocks.drain(..));
         let splice_ns = splice_start
             .map(|start| start.elapsed().as_nanos() as u64)
@@ -2647,6 +2673,7 @@ fn inline_functions_inner(
                 tail,
                 maps,
                 coalesced_cells,
+                arena_reallocations,
             ),
             splice_ns,
         });
