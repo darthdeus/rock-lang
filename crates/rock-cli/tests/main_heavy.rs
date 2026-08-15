@@ -42,6 +42,8 @@ mod wgpu_refusal_gate;
 mod wgpu_capture_gate;
 #[path = "wgpu_capture_contract_gate.rs"]
 mod wgpu_capture_contract_gate;
+#[path = "wgpu_gameplay_origin_gate.rs"]
+mod wgpu_gameplay_origin_gate;
 #[path = "wgpu_menu_parity_gate.rs"]
 mod wgpu_menu_parity_gate;
 #[path = "rich_text_reject_gate.rs"]
