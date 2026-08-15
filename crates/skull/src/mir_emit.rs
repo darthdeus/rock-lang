@@ -610,6 +610,16 @@ pub struct InlineAttribution {
     pub census: skull_transform::InlineScanStats,
     pub candidate_unique_keys: usize,
     pub candidate_snapshot_duplicates: usize,
+    pub candidate_setup_keys: usize,
+    pub candidate_setup_warmed: usize,
+    pub candidate_setup_reused: usize,
+    pub candidate_setup_eligible: usize,
+    pub candidate_setup_rejected: usize,
+    pub candidate_setup_lower_ns: u64,
+    pub candidate_setup_cleanup_ns: u64,
+    pub candidate_setup_eligibility_ns: u64,
+    pub candidate_setup_worker_derivations: BTreeMap<String, usize>,
+    pub candidate_setup_rejection_reasons: BTreeMap<String, usize>,
     pub top_owners: Vec<InlineOwnerAttribution>,
 }
 
@@ -1040,7 +1050,7 @@ impl AttributionAccumulator {
             .result
             .inline
             .census
-            .candidate_keys
+            .candidate_requested_keys
             .iter()
             .collect::<FxHashSet<_>>()
             .len();
@@ -1530,6 +1540,47 @@ fn too_deep_to_instantiate(
     )))
 }
 
+fn inline_candidate_keys(concrete: &crate::concrete_body::ConcreteBodies) -> Vec<Instance> {
+    let mut keys = BTreeSet::new();
+    for plan in concrete.plans.values() {
+        keys.extend(plan.callees.values().cloned());
+    }
+    keys.into_iter().collect()
+}
+
+fn build_inline_candidate_table(
+    ws: &Workspace,
+    scx: &skull_mir::lower::ScalarCtx,
+    concrete: &crate::concrete_body::ConcreteBodies,
+    base: Option<&std::sync::Arc<skull_transform::InlineCandidateTable>>,
+    invalidated: Option<&FxHashSet<FuncRef>>,
+) -> std::sync::Arc<skull_transform::InlineCandidateTable> {
+    let keys = inline_candidate_keys(concrete);
+    let warm_keys: Vec<Instance> = keys
+        .iter()
+        .filter(|key| match base {
+            None => true,
+            Some(base) => {
+                invalidated.is_some_and(|frefs| frefs.contains(&key.func))
+                    || !base.contains(key)
+            }
+        })
+        .cloned()
+        .collect();
+    let warms = par_map_with(
+        warm_keys,
+        skull_transform::InlineCache::default,
+        |inline_cache, inst| {
+            inline_cache.warm_candidate(ws, scx, inst, concrete.plans.as_ref())
+        },
+    );
+    std::sync::Arc::new(skull_transform::InlineCandidateTable::from_warms_with_base(
+        base.map(std::sync::Arc::as_ref),
+        keys,
+        warms,
+    ))
+}
+
 /// **Phase 2's specialized-body population, driven by SpecDemand closure over
 /// `cache.lua_view`'s retained ordinary population -- not by `lua_view.
 /// instances` directly, and not by a reachability walk.**
@@ -1569,7 +1620,10 @@ fn view_driven_specialized_chunks(
 ) -> (FxHashMap<Instance, Chunk>, Vec<(String, CompilerError)>) {
     let mut built: FxHashMap<Instance, Chunk> = FxHashMap::default();
     let mut errs: Vec<(String, CompilerError)> = Vec::new();
-    let mut inline_cache = skull_transform::InlineCache::default();
+    let mut inline_cache = match cache.inline_cache.candidate_table() {
+        Some(table) => skull_transform::InlineCache::with_candidate_table(table),
+        None => skull_transform::InlineCache::default(),
+    };
     let mut pending: Vec<Instance> = initial.iter().map(|d| d.inst.clone()).collect();
     for module in ws.modules.iter() {
         if module.id == ModuleId::builtin() {
@@ -2708,6 +2762,8 @@ fn emit_specialized_callees(
     built: &mut Vec<(Instance, Chunk)>,
     statics: &mut Vec<skull_mir::mir::StaticCell>,
     out: &mut String,
+    attribution: &mut AttributionAccumulator,
+    times: &mut PhaseTimes,
 ) -> Vec<CompilerError> {
     let mut done: FxHashSet<Instance> = FxHashSet::default();
     let mut errs: Vec<(String, CompilerError)> = rejected.to_vec();
@@ -2737,6 +2793,8 @@ fn emit_specialized_callees(
             continue;
         };
         out.push_str(&chunk.lua);
+        attribution.add_unit(&chunk.attribution);
+        times.add(&chunk.times);
         // A specialized definition's `static` cells are cells the program uses,
         // so they register for hot-reload preservation on the same terms as a
         // declaration's. Folded HERE because this is where a specialized body
@@ -3676,6 +3734,20 @@ fn assemble(
     // ordering + deco application).
     let mut times = PhaseTimes::default();
     let mut attribution = AttributionAccumulator::default();
+    if let Some(table) = cache.inline_cache.candidate_table() {
+        let stats = table.stats();
+        let inline = &mut attribution.result.inline;
+        inline.candidate_setup_keys = stats.keys;
+        inline.candidate_setup_warmed = stats.warmed;
+        inline.candidate_setup_reused = stats.reused;
+        inline.candidate_setup_eligible = stats.eligible;
+        inline.candidate_setup_rejected = stats.rejected;
+        inline.candidate_setup_lower_ns = stats.lower_ns;
+        inline.candidate_setup_cleanup_ns = stats.cleanup_ns;
+        inline.candidate_setup_eligibility_ns = stats.eligibility_ns;
+        inline.candidate_setup_worker_derivations = stats.worker_derivations.clone();
+        inline.candidate_setup_rejection_reasons = stats.rejection_reasons.clone();
+    }
     let mut t_scaffold = Duration::ZERO;
     let mut needed_specs: Vec<skull_mir::bound::SpecDemand> = Vec::new();
     let mut rejections = Rejections::default();
@@ -3969,6 +4041,8 @@ fn assemble(
         built_specs,
         &mut all_statics,
         &mut out,
+        &mut attribution,
+        &mut times,
     ));
 
     // Every emitted definition has now been visited, so this is the earliest
@@ -4646,9 +4720,12 @@ fn emit_full_in_with_mutation(
                 })
         })
         .collect();
+    let t_setup = Instant::now();
+    let inline_candidate_table = build_inline_candidate_table(ws, &scx, &concrete, None, None);
+    setup_phases.push(("setup: inline candidate table", t_setup.elapsed()));
     let chunks = par_map_with(
         fn_items,
-        skull_transform::InlineCache::default,
+        || skull_transform::InlineCache::with_candidate_table(std::sync::Arc::clone(&inline_candidate_table)),
         |inline_cache, (self_ref, f)| {
             (
                 shared(self_ref),
@@ -4683,7 +4760,7 @@ fn emit_full_in_with_mutation(
         changed_since_full: FxHashSet::default(),
         cg,
         scx,
-        inline_cache: skull_transform::InlineCache::default(),
+        inline_cache: skull_transform::InlineCache::with_candidate_table(inline_candidate_table),
         dependents,
         changed_consts_since_full: FxHashSet::default(),
         static_key_baseline,
@@ -5072,6 +5149,19 @@ fn update_chunk_cache(
     // Fns whose scalar ABI flipped (a body now takes them by ref, or stopped) must
     // re-emit even if their own body didn't change.
     changed.extend(flipped_frefs.iter().copied());
+
+    let mut invalidated_candidate_frefs = changed.clone();
+    invalidated_candidate_frefs.extend(update.added.iter().map(|instance| instance.func));
+    invalidated_candidate_frefs.extend(update.removed.iter().map(|instance| instance.func));
+    let previous_candidate_table = cache.inline_cache.candidate_table();
+    let candidate_table = build_inline_candidate_table(
+        ws,
+        scx,
+        &cache.concrete,
+        previous_candidate_table.as_ref(),
+        Some(&invalidated_candidate_frefs),
+    );
+    cache.inline_cache.replace_candidate_table(candidate_table);
 
     // **A changed declaration maps to its LIVE INSTANCES through the graph**,
     // not to one declaration-shaped key. Editing a generic `co fn` with two
@@ -5647,12 +5737,24 @@ fn main() {
 "#;
 
     const CLOSURE_SRC: &str = r#"
+@inline
+fn bump(x: int) -> int { return x }
+
 fn top() -> int {
     let counter = 100
-    let add = (n: int) => n + counter
+    let add = (n: int) => bump(n) + counter
     return add(5)
 }
 
+fn main() { let result = top() }
+"#;
+
+    const SPECIALIZED_SRC: &str = r#"
+@inline
+fn bump(x: int) -> int { return x }
+
+fn generic<T>(x: T) -> int { return bump(1) }
+fn top() -> int { return generic(7) }
 fn main() { let result = top() }
 "#;
 
@@ -5797,6 +5899,15 @@ fn main() {
         let mut modules = STDLIB.clone();
         modules.push(
             skull_parser::parse_module_clean(CLOSURE_SRC, Ustr::from("<closure-test>"))
+                .expect("parse"),
+        );
+        bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic")
+    }
+
+    fn specialized_workspace() -> Workspace {
+        let mut modules = STDLIB.clone();
+        modules.push(
+            skull_parser::parse_module_clean(SPECIALIZED_SRC, Ustr::from("<specialized-test>"))
                 .expect("parse"),
         );
         bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic")
@@ -6042,6 +6153,7 @@ fn main() { let result = first() }
 
     #[test]
     fn concrete_result_order_preserves_emitted_lua_bytes() {
+        let _inline = InlineOn::on();
         let ws = workspace();
         let mid = ws
             .modules
@@ -6112,9 +6224,10 @@ fn main() { let result = first() }
                 "setup: validation+context",
                 "setup: root collection",
                 "setup: graph",
-                "setup: concrete plans",
-                "setup: artifact+shader+ABI lanes",
-                "setup: ABI validation",
+            "setup: concrete plans",
+            "setup: artifact+shader+ABI lanes",
+            "setup: ABI validation",
+            "setup: inline candidate table",
             ]
         );
         assert!(setup.iter().all(|(_, duration)| *duration > Duration::ZERO));
@@ -6264,9 +6377,23 @@ fn main() { let result = first() }
             "worker derivations must cover the global derivation population: {census:?}"
         );
         assert!(
-            census.candidate_derivations >= emit.attribution.inline.candidate_unique_keys
-                && emit.attribution.inline.candidate_unique_keys > 0,
-            "unique candidate keys need a nonzero denominator: {census:?}"
+            emit.attribution.inline.candidate_unique_keys > 0
+                && census.candidate_requested_keys.len() >= emit.attribution.inline.candidate_unique_keys
+                && census.candidate_derivations == 0
+                && emit.attribution.inline.candidate_setup_keys > 0
+                && emit.attribution.inline.candidate_setup_warmed > 0,
+            "the published candidate table must serve a nonzero requested population: {census:?}"
+        );
+        assert_eq!(
+            emit.attribution.inline.candidate_setup_warmed,
+            emit.attribution.inline.candidate_setup_eligible
+                + emit.attribution.inline.candidate_setup_rejected,
+            "candidate table warm results must partition into eligible and rejected keys"
+        );
+        assert!(
+            emit.attribution.inline.candidate_setup_keys
+                >= emit.attribution.inline.candidate_unique_keys,
+            "the candidate table cannot be smaller than its requested-key population"
         );
         assert!(
             census.straight_accepted > 0 && census.general_accepted > 0,
@@ -6423,6 +6550,26 @@ fn main() { let result = first() }
             "closure conversion did not report a hoisted body: {:?}",
             closure_emit.attribution
         );
+        assert!(
+            closure_emit.attribution.inline.hoisted_splices > 0,
+            "the closure fixture did not reach the hoisted inline route: {:?}",
+            closure_emit.attribution
+        );
+
+        let specialized = specialized_workspace();
+        let specialized_mid = *specialized
+            .module_ids
+            .get(&Ustr::from("<specialized-test>"))
+            .expect("specialized test module");
+        let (specialized_emit, _) =
+            emit_full_in_with_test_mutation(&specialized, specialized_mid, BodyMutation::None)
+                .expect("specialized emission");
+        assert!(
+            specialized_emit.attribution.inline.specialized_splices > 0,
+            "the specialized fixture did not reach specialized inline splicing: {:?}",
+            specialized_emit.attribution
+        );
+
     }
 
     #[test]

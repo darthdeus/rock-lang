@@ -282,6 +282,29 @@ fn print_attribution(attribution: &skull::mir_emit::EmitAttribution) {
             ms(census.candidate_eligibility_ns),
         );
         println!(
+            "      candidate table: keys {}, warmed {}, reused {}, eligible {}, rejected {}; lower/cleanup/eligibility {:.3}/{:.3}/{:.3} ms",
+            attribution.inline.candidate_setup_keys,
+            attribution.inline.candidate_setup_warmed,
+            attribution.inline.candidate_setup_reused,
+            attribution.inline.candidate_setup_eligible,
+            attribution.inline.candidate_setup_rejected,
+            ms(attribution.inline.candidate_setup_lower_ns),
+            ms(attribution.inline.candidate_setup_cleanup_ns),
+            ms(attribution.inline.candidate_setup_eligibility_ns),
+        );
+        if !attribution.inline.candidate_setup_worker_derivations.is_empty() {
+            println!(
+                "        candidate table derivations by worker: {:?}",
+                attribution.inline.candidate_setup_worker_derivations
+            );
+        }
+        if !attribution.inline.candidate_setup_rejection_reasons.is_empty() {
+            println!(
+                "        candidate table rejection reasons: {:?}",
+                attribution.inline.candidate_setup_rejection_reasons
+            );
+        }
+        println!(
             "      accepted: straight {}, general {}, direct {}, transitive {}, ordinary {}, specialized {}, hoisted {}; clone source i/c/b {}/{}/{} live {}/{}/{} cloned {}/{}/{} dead-source {}/{}/{} dead-cloned {}/{}/{}",
             census.straight_accepted,
             census.general_accepted,

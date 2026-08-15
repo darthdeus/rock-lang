@@ -25,6 +25,7 @@
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::cell::Cell as ThreadCell;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::Instant;
 
 use bone_semantic::inference::Workspace;
@@ -225,6 +226,7 @@ pub struct InlineScanStats {
     pub candidate_requests: usize,
     pub candidate_cache_hits: usize,
     pub candidate_derivations: usize,
+    pub candidate_requested_keys: Vec<Instance>,
     pub candidate_lower_ns: u64,
     pub candidate_cleanup_ns: u64,
     pub candidate_eligibility_ns: u64,
@@ -324,6 +326,7 @@ impl InlineScanStats {
         self.candidate_requests += other.candidate_requests;
         self.candidate_cache_hits += other.candidate_cache_hits;
         self.candidate_derivations += other.candidate_derivations;
+        self.candidate_requested_keys.extend(other.candidate_requested_keys);
         self.candidate_lower_ns += other.candidate_lower_ns;
         self.candidate_cleanup_ns += other.candidate_cleanup_ns;
         self.candidate_eligibility_ns += other.candidate_eligibility_ns;
@@ -355,11 +358,118 @@ impl InlineScanStats {
 /// own snapshot, so compile cost scales with element types used, not call sites.
 type CacheKey = Instance;
 
+pub struct InlineCandidateTable {
+    entries: HashMap<CacheKey, Option<Arc<CalleeBody>>>,
+    stats: InlineCandidateTableStats,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct InlineCandidateTableStats {
+    pub keys: usize,
+    pub warmed: usize,
+    pub reused: usize,
+    pub eligible: usize,
+    pub rejected: usize,
+    pub lower_ns: u64,
+    pub cleanup_ns: u64,
+    pub eligibility_ns: u64,
+    pub worker_derivations: BTreeMap<String, usize>,
+    pub rejection_reasons: BTreeMap<String, usize>,
+}
+
+pub struct InlineCandidateWarm {
+    key: CacheKey,
+    candidate: Option<Arc<CalleeBody>>,
+    pub lower_ns: u64,
+    pub cleanup_ns: u64,
+    pub eligibility_ns: u64,
+    pub rejection: Option<&'static str>,
+    worker: String,
+}
+
+impl InlineCandidateTable {
+    pub fn from_warms(warms: Vec<InlineCandidateWarm>) -> Self {
+        let keys = warms.iter().map(|warm| warm.key.clone()).collect();
+        Self::from_warms_with_base(None, keys, warms)
+    }
+
+    pub fn from_warms_with_base(
+        base: Option<&Self>,
+        mut keys: Vec<CacheKey>,
+        mut warms: Vec<InlineCandidateWarm>,
+    ) -> Self {
+        keys.sort();
+        keys.dedup();
+        warms.sort_by(|a, b| a.key.cmp(&b.key));
+        let mut warmed = HashMap::default();
+        warmed.reserve(warms.len());
+        let mut stats = InlineCandidateTableStats {
+            keys: keys.len(),
+            warmed: warms.len(),
+            ..InlineCandidateTableStats::default()
+        };
+        for warm in warms {
+            stats.lower_ns += warm.lower_ns;
+            stats.cleanup_ns += warm.cleanup_ns;
+            stats.eligibility_ns += warm.eligibility_ns;
+            if !warm.worker.is_empty() {
+                *stats.worker_derivations.entry(warm.worker.clone()).or_default() += 1;
+            }
+            if let Some(reason) = warm.rejection {
+                stats.rejected += 1;
+                *stats.rejection_reasons.entry(reason.to_string()).or_default() += 1;
+            } else {
+                stats.eligible += 1;
+            }
+            let previous = warmed.insert(warm.key, warm.candidate);
+            assert!(previous.is_none(), "inline candidate table received a duplicate key");
+        }
+        stats.reused = keys.len().saturating_sub(stats.warmed);
+
+        let mut entries = HashMap::default();
+        entries.reserve(keys.len());
+        for key in keys {
+            if let Some(candidate) = warmed.remove(&key) {
+                entries.insert(key, candidate);
+                continue;
+            }
+            let candidate = base
+                .and_then(|table| table.entries.get(&key))
+                .cloned()
+                .expect("inline candidate table omitted an unwarmed key");
+            entries.insert(key, candidate);
+        }
+        assert!(warmed.is_empty(), "inline candidate table warmed an unused key");
+        Self { entries, stats }
+    }
+
+    pub fn stats(&self) -> &InlineCandidateTableStats {
+        &self.stats
+    }
+
+    pub fn contains(&self, key: &CacheKey) -> bool {
+        self.entries.contains_key(key)
+    }
+}
+
 pub struct InlineCache {
-    cands: HashMap<CacheKey, Option<CalleeBody>>,
+    cands: HashMap<CacheKey, Option<Arc<CalleeBody>>>,
+    shared: Option<Arc<InlineCandidateTable>>,
+    scratch: InlineScratch,
     census_enabled: bool,
     census: InlineScanStats,
     worker: String,
+}
+
+#[derive(Default)]
+struct InlineScratch {
+    inst_map: HashMap<Idx<Inst>, Idx<Inst>>,
+    cell_map: HashMap<Idx<Cell>, Idx<Cell>>,
+    block_map: HashMap<Idx<Block>, Idx<Block>>,
+    overrides: HashMap<Idx<Cell>, Idx<Cell>>,
+    coalesced: Vec<bool>,
+    inst_ids: Vec<Idx<Inst>>,
+    added_blocks: Vec<Idx<Block>>,
 }
 
 impl Default for InlineCache {
@@ -371,6 +481,8 @@ impl Default for InlineCache {
             .unwrap_or_default();
         Self {
             cands: HashMap::default(),
+            shared: None,
+            scratch: InlineScratch::default(),
             census_enabled,
             census: InlineScanStats { enabled: census_enabled, ..InlineScanStats::default() },
             worker,
@@ -379,8 +491,59 @@ impl Default for InlineCache {
 }
 
 impl InlineCache {
-    /// Drop ALL cached candidates for `fref` (the shared snapshot AND every
-    /// specialized one) so the next lookup re-lowers and re-classifies. A fref's
+    pub fn with_candidate_table(table: Arc<InlineCandidateTable>) -> Self {
+        Self { shared: Some(table), ..Self::default() }
+    }
+
+    pub fn candidate_table(&self) -> Option<Arc<InlineCandidateTable>> {
+        self.shared.clone()
+    }
+
+    pub fn replace_candidate_table(&mut self, table: Arc<InlineCandidateTable>) {
+        self.cands.clear();
+        self.shared = Some(table);
+    }
+
+    pub fn warm_candidate(
+        &mut self,
+        ws: &Workspace,
+        scx: &ScalarCtx,
+        inst: Instance,
+        concrete_plans: &ConcretePlans,
+    ) -> InlineCandidateWarm {
+        let started = self.census_enabled.then(Instant::now);
+        let mut timing = CandidateTiming::default();
+        let result = classify(
+            ws,
+            scx,
+            &inst,
+            concrete_plans,
+            self.census_enabled.then_some(&mut timing),
+        );
+        let eligibility_ns = started
+            .map(|started| {
+                (started.elapsed().as_nanos().min(u64::MAX as u128) as u64)
+                    .saturating_sub(timing.lower_ns)
+                    .saturating_sub(timing.cleanup_ns)
+            })
+            .unwrap_or(0);
+        let (candidate, rejection) = match result {
+            Ok(candidate) => (Some(Arc::new(candidate)), None),
+            Err(reason) => (None, Some(reason)),
+        };
+        InlineCandidateWarm {
+            key: inst,
+            candidate,
+            lower_ns: timing.lower_ns,
+            cleanup_ns: timing.cleanup_ns,
+            eligibility_ns,
+            rejection,
+            worker: self.worker.clone(),
+        }
+    }
+
+    /// Drop every local cached candidate for `fref` so the next lookup consumes
+    /// the replacement shared snapshot. A fref's
     /// cached body goes stale iff its own body changed OR a fn it calls flipped
     /// scalar ABI -- both are within the emit's `affected` set, which the
     /// incremental driver invalidates wholesale. A body edit must also drop the
@@ -976,8 +1139,18 @@ fn get<'a>(
 ) -> Option<&'a CalleeBody> {
     if cache.census_enabled {
         cache.census.candidate_requests += 1;
+        cache.census.candidate_requested_keys.push(inst.clone());
     }
     if !cache.cands.contains_key(inst) {
+        if let Some(table) = cache.shared.as_ref() {
+            if let Some(candidate) = table.entries.get(inst).cloned() {
+                if cache.census_enabled {
+                    cache.census.candidate_cache_hits += 1;
+                }
+                cache.cands.insert(inst.clone(), candidate);
+                return cache.cands[inst].as_deref();
+            }
+        }
         if cache.census_enabled {
             cache.census.candidate_derivations += 1;
             cache.census.candidate_keys.push(inst.clone());
@@ -1005,7 +1178,7 @@ fn get<'a>(
                 .saturating_sub(timing.cleanup_ns);
         }
         let v = match result {
-            Ok(candidate) => Some(candidate),
+            Ok(candidate) => Some(Arc::new(candidate)),
             Err(reason) => {
                 cache.rejection(reason);
                 None
@@ -1015,7 +1188,7 @@ fn get<'a>(
     } else if cache.census_enabled {
         cache.census.candidate_cache_hits += 1;
     }
-    cache.cands[inst].as_ref()
+    cache.cands[inst].as_deref()
 }
 
 /// One resolved, eligible call site in the caller, extracted before the splice.
@@ -1155,6 +1328,7 @@ fn find_site(
     self_ref: FuncRef,
     top: &HashSet<Idx<Block>>,
     resume: Option<(Idx<Block>, usize)>,
+    cell_budget: usize,
     concrete_plans: &ConcretePlans,
     scan_stats: &mut InlineScanStats,
 ) -> Result<Option<Site>, CompilerError> {
@@ -1210,7 +1384,6 @@ fn find_site(
                 }
                 _ => continue,
             };
-            let cell_count = func.cells.len();
             let candidate = get(cache, ws, scx, site.inst(), concrete_plans);
             let Some(cand) = candidate else {
                 continue;
@@ -1224,7 +1397,7 @@ fn find_site(
             } else if !arity_ok(cand, &site) {
                 Some("candidate_arity_mismatch")
             } else if site.inst().args.is_empty()
-                && cell_count + cand.func.cells.len() > CELL_BUDGET
+                && cell_budget + cand.template.source_cells > CELL_BUDGET
             {
                 Some("cell_budget")
             } else {
@@ -1247,45 +1420,48 @@ fn find_site(
 fn clone_cells_insts(
     caller: &mut MirFunc,
     callee: &MirFunc,
-    overrides: &HashMap<Idx<Cell>, Idx<Cell>>,
-) -> (HashMap<Idx<Inst>, Idx<Inst>>, HashMap<Idx<Cell>, Idx<Cell>>, CloneMapStats) {
+    scratch: &mut InlineScratch,
+) -> CloneMapStats {
     caller.insts.reserve(callee.insts.len());
-    caller.cells.reserve(callee.cells.len().saturating_sub(overrides.len()));
-    let mut cell_map = HashMap::default();
-    let cell_capacity = cell_map.capacity();
-    cell_map.reserve(callee.cells.len());
-    let cell_reserved_capacity = cell_map.capacity();
+    caller
+        .cells
+        .reserve(callee.cells.len().saturating_sub(scratch.overrides.len()));
+    scratch.cell_map.clear();
+    let cell_capacity = scratch.cell_map.capacity();
+    scratch.cell_map.reserve(callee.cells.len());
     for (cid, cell) in callee.cells.iter() {
         // A coalesced param maps to the caller cell its arg loads (no fresh copy).
-        let mapped = overrides.get(&cid).copied().unwrap_or_else(|| caller.cells.alloc(cell.clone()));
-        cell_map.insert(cid, mapped);
+        let mapped = scratch
+            .overrides
+            .get(&cid)
+            .copied()
+            .unwrap_or_else(|| caller.cells.alloc(cell.clone()));
+        scratch.cell_map.insert(cid, mapped);
     }
-    let mut inst_map = HashMap::default();
-    let inst_capacity = inst_map.capacity();
-    inst_map.reserve(callee.insts.len());
-    let inst_reserved_capacity = inst_map.capacity();
-    let new_ids: Vec<(Idx<Inst>, Idx<Inst>)> = callee
-        .insts
-        .iter()
-        .map(|(iid, inst)| {
-            let nid = caller.insts.alloc(inst.clone());
-            inst_map.insert(iid, nid);
-            (iid, nid)
-        })
-        .collect();
-    for (_, nid) in new_ids {
-        remap_clone(&mut caller.insts[nid], &inst_map, &cell_map, &HashMap::default());
+    scratch.inst_map.clear();
+    let inst_capacity = scratch.inst_map.capacity();
+    scratch.inst_map.reserve(callee.insts.len());
+    scratch.inst_ids.clear();
+    scratch.inst_ids.reserve(callee.insts.len());
+    scratch.block_map.clear();
+    for (iid, inst) in callee.insts.iter() {
+        let nid = caller.insts.alloc(inst.clone());
+        scratch.inst_map.insert(iid, nid);
+        scratch.inst_ids.push(nid);
+    }
+    for &nid in &scratch.inst_ids {
+        remap_clone(&mut caller.insts[nid], &scratch.inst_map, &scratch.cell_map, &scratch.block_map);
     }
     let maps = CloneMapStats {
-        inst_entries: inst_map.len(),
-        cell_entries: cell_map.len(),
-        inst_capacity: inst_map.capacity(),
-        cell_capacity: cell_map.capacity(),
-        inst_growth: usize::from(inst_reserved_capacity != inst_capacity),
-        cell_growth: usize::from(cell_reserved_capacity != cell_capacity),
+        inst_entries: scratch.inst_map.len(),
+        cell_entries: scratch.cell_map.len(),
+        inst_capacity: scratch.inst_map.capacity(),
+        cell_capacity: scratch.cell_map.capacity(),
+        inst_growth: usize::from(scratch.inst_map.capacity() != inst_capacity),
+        cell_growth: usize::from(scratch.cell_map.capacity() != cell_capacity),
         ..CloneMapStats::default()
     };
-    (inst_map, cell_map, maps)
+    maps
 }
 
 /// Clone the callee's cells, blocks, AND insts into `caller`. Returns
@@ -1294,71 +1470,67 @@ fn clone_cells_insts(
 fn clone_all(
     caller: &mut MirFunc,
     callee: &MirFunc,
-    overrides: &HashMap<Idx<Cell>, Idx<Cell>>,
-) -> (
-    HashMap<Idx<Inst>, Idx<Inst>>,
-    HashMap<Idx<Cell>, Idx<Cell>>,
-    HashMap<Idx<Block>, Idx<Block>>,
-    CloneMapStats,
-) {
+    scratch: &mut InlineScratch,
+) -> CloneMapStats {
     caller.insts.reserve(callee.insts.len());
-    caller.cells.reserve(callee.cells.len().saturating_sub(overrides.len()));
+    caller
+        .cells
+        .reserve(callee.cells.len().saturating_sub(scratch.overrides.len()));
     caller.blocks.reserve(callee.blocks.len());
-    let mut cell_map = HashMap::default();
-    let cell_capacity = cell_map.capacity();
-    cell_map.reserve(callee.cells.len());
-    let cell_reserved_capacity = cell_map.capacity();
+    scratch.cell_map.clear();
+    let cell_capacity = scratch.cell_map.capacity();
+    scratch.cell_map.reserve(callee.cells.len());
     for (cid, cell) in callee.cells.iter() {
         // A coalesced param maps to the caller cell its arg loads (no fresh copy).
-        let mapped = overrides.get(&cid).copied().unwrap_or_else(|| caller.cells.alloc(cell.clone()));
-        cell_map.insert(cid, mapped);
+        let mapped = scratch
+            .overrides
+            .get(&cid)
+            .copied()
+            .unwrap_or_else(|| caller.cells.alloc(cell.clone()));
+        scratch.cell_map.insert(cid, mapped);
     }
-    let mut block_map = HashMap::default();
-    let block_capacity = block_map.capacity();
-    block_map.reserve(callee.blocks.len());
-    let block_reserved_capacity = block_map.capacity();
+    let block_capacity = scratch.block_map.capacity();
+    scratch.block_map.clear();
+    scratch.block_map.reserve(callee.blocks.len());
     for (bid, _) in callee.blocks.iter() {
-        block_map.insert(bid, caller.blocks.alloc(Block::new()));
+        scratch.block_map.insert(bid, caller.blocks.alloc(Block::new()));
     }
-    let mut inst_map = HashMap::default();
-    let inst_capacity = inst_map.capacity();
-    inst_map.reserve(callee.insts.len());
-    let inst_reserved_capacity = inst_map.capacity();
-    let new_ids: Vec<Idx<Inst>> = callee
-        .insts
-        .iter()
-        .map(|(iid, inst)| {
-            let nid = caller.insts.alloc(inst.clone());
-            inst_map.insert(iid, nid);
-            nid
-        })
-        .collect();
-    for nid in new_ids {
-        remap_clone(&mut caller.insts[nid], &inst_map, &cell_map, &block_map);
+    scratch.inst_map.clear();
+    let inst_capacity = scratch.inst_map.capacity();
+    scratch.inst_map.reserve(callee.insts.len());
+    scratch.inst_ids.clear();
+    scratch.inst_ids.reserve(callee.insts.len());
+    for (iid, inst) in callee.insts.iter() {
+        let nid = caller.insts.alloc(inst.clone());
+        scratch.inst_map.insert(iid, nid);
+        scratch.inst_ids.push(nid);
+    }
+    for &nid in &scratch.inst_ids {
+        remap_clone(&mut caller.insts[nid], &scratch.inst_map, &scratch.cell_map, &scratch.block_map);
     }
     // Fill cloned block inst-lists + terminators.
     for (bid, block) in callee.blocks.iter() {
-        let nbid = block_map[&bid];
-        caller.blocks[nbid].insts = block.insts.iter().map(|i| inst_map[i]).collect();
+        let nbid = scratch.block_map[&bid];
+        caller.blocks[nbid].insts = block.insts.iter().map(|i| scratch.inst_map[i]).collect();
         let mut term = block.term.clone();
-        remap_term_clone(&mut term, &inst_map, &block_map);
+        remap_term_clone(&mut term, &scratch.inst_map, &scratch.block_map);
         caller.blocks[nbid].term = term;
     }
     caller
         .for_iter_headers
-        .extend(callee.for_iter_headers.iter().map(|header| block_map[header]));
+        .extend(callee.for_iter_headers.iter().map(|header| scratch.block_map[header]));
     let maps = CloneMapStats {
-        inst_entries: inst_map.len(),
-        cell_entries: cell_map.len(),
-        block_entries: block_map.len(),
-        inst_capacity: inst_map.capacity(),
-        cell_capacity: cell_map.capacity(),
-        block_capacity: block_map.capacity(),
-        inst_growth: usize::from(inst_reserved_capacity != inst_capacity),
-        cell_growth: usize::from(cell_reserved_capacity != cell_capacity),
-        block_growth: usize::from(block_reserved_capacity != block_capacity),
+        inst_entries: scratch.inst_map.len(),
+        cell_entries: scratch.cell_map.len(),
+        block_entries: scratch.block_map.len(),
+        inst_capacity: scratch.inst_map.capacity(),
+        cell_capacity: scratch.cell_map.capacity(),
+        block_capacity: scratch.block_map.capacity(),
+        inst_growth: usize::from(scratch.inst_map.capacity() != inst_capacity),
+        cell_growth: usize::from(scratch.cell_map.capacity() != cell_capacity),
+        block_growth: usize::from(scratch.block_map.capacity() != block_capacity),
     };
-    (inst_map, cell_map, block_map, maps)
+    maps
 }
 
 /// Remap a freshly-cloned inst's value (via [`remap_inst`]), cell, and block
@@ -1433,10 +1605,12 @@ fn coalesce_overrides(
     caller: &MirFunc,
     cand: &CalleeBody,
     args: &[Idx<Inst>],
-) -> (HashMap<Idx<Cell>, Idx<Cell>>, Vec<bool>) {
+    scratch: &mut InlineScratch,
+) -> usize {
     let callee = &cand.func;
-    let mut overrides = HashMap::default();
-    let mut coalesced = vec![false; callee.params.len()];
+    scratch.overrides.clear();
+    scratch.coalesced.clear();
+    scratch.coalesced.resize(callee.params.len(), false);
     for (i, (param, arg)) in callee.params.iter().zip(args.iter()).enumerate() {
         if !cand.coalescable_params.get(i).copied().unwrap_or(false) {
             continue;
@@ -1454,11 +1628,11 @@ fn coalesce_overrides(
             _ => None,
         };
         if let Some(c) = arg_load {
-            overrides.insert(*param, c);
-            coalesced[i] = true;
+            scratch.overrides.insert(*param, c);
+            scratch.coalesced[i] = true;
         }
     }
-    (overrides, coalesced)
+    scratch.overrides.len()
 }
 
 fn graft_resolved_bound_tree(
@@ -1748,15 +1922,17 @@ fn splice(
     ws: &Workspace,
     scx: &ScalarCtx,
     concrete_plans: &ConcretePlans,
+    scratch: &mut InlineScratch,
     census: &mut InlineScanStats,
-) -> Result<(Vec<Idx<Block>>, CloneMapStats, usize), CompilerError> {
+) -> Result<(CloneMapStats, usize), CompilerError> {
+    scratch.added_blocks.clear();
     match cand.kind {
         Kind::Straight => {
             let (maps, coalesced) =
-                splice_straight(func, site, cand, ws, scx, concrete_plans, census)?;
-            Ok((Vec::new(), maps, coalesced))
+                splice_straight(func, site, cand, ws, scx, concrete_plans, scratch, census)?;
+            Ok((maps, coalesced))
         }
-        Kind::General => splice_general(func, site, cand, ws, scx, concrete_plans, census),
+        Kind::General => splice_general(func, site, cand, ws, scx, concrete_plans, scratch, census),
     }
 }
 
@@ -1771,6 +1947,7 @@ fn splice_straight(
     ws: &Workspace,
     scx: &ScalarCtx,
     concrete_plans: &ConcretePlans,
+    scratch: &mut InlineScratch,
     _census: &mut InlineScanStats,
 ) -> Result<(CloneMapStats, usize), CompilerError> {
     let callee = &cand.func;
@@ -1779,52 +1956,48 @@ fn splice_straight(
     };
     let site_tree = func.bound_trees.remove(&site.call_id());
     let site_resolved_tree = func.resolved_bound_trees.remove(&site.call_id());
-    let (overrides, coalesced) = coalesce_overrides(func, cand, &args);
-    let (inst_map, cell_map, maps) = clone_cells_insts(func, callee, &overrides);
+    let coalesced_cells = coalesce_overrides(func, cand, &args, scratch);
+    let maps = clone_cells_insts(func, callee, scratch);
     resolve_cloned_bound_calls(
         func,
         callee,
-        &inst_map,
+        &scratch.inst_map,
         site_tree.as_ref(),
         site_resolved_tree.as_ref(),
         ws,
         scx,
         concrete_plans,
     )?;
-    let nested_names = import_nested_fns(func, callee, &inst_map);
-    import_spec_bindings(func, callee, &inst_map, &nested_names);
-
-    // Arg -> param-cell stores (coalesced params are aliased to the caller cell,
-    // so they need no copy).
-    let mut arg_stores = Vec::new();
-    for (i, (param, arg)) in callee.params.iter().zip(args.iter()).enumerate() {
-        if coalesced[i] {
-            continue;
-        }
-        let pc = cell_map[param];
-        arg_stores.push(func.insts.alloc(Inst::Store { cell: pc, value: *arg }));
-    }
-
-    // Cloned body insts (the entry block's inst list, mapped).
-    let body_insts: Vec<Idx<Inst>> =
-        callee.blocks[callee.entry].insts.iter().map(|i| inst_map[i]).collect();
-
-    // Returned values (mapped).
-    let ret_vals: Vec<Idx<Inst>> = match &callee.blocks[callee.entry].term {
-        Term::Return(vs) => vs.iter().map(|v| inst_map[v]).collect(),
-        _ => unreachable!("straight candidate entry must end in Return"),
-    };
+    let nested_names = import_nested_fns(func, callee, &scratch.inst_map);
+    import_spec_bindings(func, callee, &scratch.inst_map, &nested_names);
 
     // Rebuild the caller block: before | arg-stores | body | dest-stores | after.
     let old = std::mem::take(&mut func.blocks[bid].insts);
     let mut new_insts: Vec<Idx<Inst>> = old[..idx].to_vec();
-    new_insts.extend(arg_stores);
-    new_insts.extend(body_insts);
+    for (i, (param, arg)) in callee.params.iter().zip(args.iter()).enumerate() {
+        if !scratch.coalesced[i] {
+            let pc = scratch.cell_map[param];
+            new_insts.push(func.insts.alloc(Inst::Store { cell: pc, value: *arg }));
+        }
+    }
+    new_insts.extend(
+        callee.blocks[callee.entry]
+            .insts
+            .iter()
+            .map(|inst| scratch.inst_map[inst]),
+    );
 
     match &site {
         Site::Multi { dests, .. } => {
-            for (dest, rv) in dests.iter().zip(ret_vals.iter()) {
-                let st = func.insts.alloc(Inst::Store { cell: *dest, value: *rv });
+            let values = match &callee.blocks[callee.entry].term {
+                Term::Return(values) => values,
+                _ => unreachable!("straight candidate entry must end in Return"),
+            };
+            for (dest, rv) in dests.iter().zip(values.iter()) {
+                let st = func.insts.alloc(Inst::Store {
+                    cell: *dest,
+                    value: scratch.inst_map[rv],
+                });
                 new_insts.push(st);
             }
             new_insts.extend_from_slice(&old[idx + 1..]);
@@ -1834,11 +2007,15 @@ fn splice_straight(
             // Keep the original value id as a load in the caller block. A result
             // cell makes the binding dominate uses in successor blocks without
             // rewriting the caller's existing operands.
-            if let Some(value) = ret_vals.first() {
+            let value = match &callee.blocks[callee.entry].term {
+                Term::Return(values) => values.first().map(|value| scratch.inst_map[value]),
+                _ => unreachable!("straight candidate entry must end in Return"),
+            };
+            if let Some(value) = value {
                 let result_cell = func.new_cell(None);
                 let store = func.insts.alloc(Inst::Store {
                     cell: result_cell,
-                    value: *value,
+                    value,
                 });
                 func.insts[*call_id] = Inst::Load(result_cell);
                 new_insts.push(store);
@@ -1851,7 +2028,7 @@ fn splice_straight(
             func.blocks[bid].insts = new_insts;
         }
     }
-    Ok((maps, overrides.len()))
+    Ok((maps, coalesced_cells))
 }
 
 /// General splice: the callee has internal control flow. Split the caller block
@@ -1865,29 +2042,30 @@ fn splice_general(
     ws: &Workspace,
     scx: &ScalarCtx,
     concrete_plans: &ConcretePlans,
+    scratch: &mut InlineScratch,
     _census: &mut InlineScanStats,
-) -> Result<(Vec<Idx<Block>>, CloneMapStats, usize), CompilerError> {
+) -> Result<(CloneMapStats, usize), CompilerError> {
     let callee = &cand.func;
     let (bid, idx, args) = match &site {
         Site::Single { bid, idx, args, .. } | Site::Multi { bid, idx, args, .. } => (*bid, *idx, args.clone()),
     };
     let site_tree = func.bound_trees.remove(&site.call_id());
     let site_resolved_tree = func.resolved_bound_trees.remove(&site.call_id());
-    let (overrides, coalesced) = coalesce_overrides(func, cand, &args);
-    let (inst_map, cell_map, block_map, maps) = clone_all(func, callee, &overrides);
+    let coalesced_cells = coalesce_overrides(func, cand, &args, scratch);
+    let maps = clone_all(func, callee, scratch);
     resolve_cloned_bound_calls(
         func,
         callee,
-        &inst_map,
+        &scratch.inst_map,
         site_tree.as_ref(),
         site_resolved_tree.as_ref(),
         ws,
         scx,
         concrete_plans,
     )?;
-    let nested_names = import_nested_fns(func, callee, &inst_map);
-    import_spec_bindings(func, callee, &inst_map, &nested_names);
-    let entry_clone = block_map[&callee.entry];
+    let nested_names = import_nested_fns(func, callee, &scratch.inst_map);
+    import_spec_bindings(func, callee, &scratch.inst_map, &nested_names);
+    let entry_clone = scratch.block_map[&callee.entry];
 
     // Split the caller block at the call.
     let old = std::mem::take(&mut func.blocks[bid].insts);
@@ -1917,10 +2095,10 @@ fn splice_general(
     // aliased to the caller cell (via `overrides`), so they need no copy.
     let mut prefix = before;
     for (i, (param, arg)) in callee.params.iter().zip(args.iter()).enumerate() {
-        if coalesced[i] {
+        if scratch.coalesced[i] {
             continue;
         }
-        let pc = cell_map[param];
+        let pc = scratch.cell_map[param];
         prefix.push(func.insts.alloc(Inst::Store { cell: pc, value: *arg }));
     }
     func.blocks[bid].insts = prefix;
@@ -1929,8 +2107,8 @@ fn splice_general(
     // Route each cloned TOP-LEVEL Return to the continuation, binding return
     // values. Only the callee's reachable blocks: a lambda sub-CFG's Return is
     // the LAMBDA's return, not the callee's, and must stay put.
-    let cloned_blocks: Vec<Idx<Block>> = cand.reachable.iter().map(|b| block_map[b]).collect();
-    for nb in cloned_blocks {
+    for &source_block in &cand.reachable {
+        let nb = scratch.block_map[&source_block];
         let vs = match &func.blocks[nb].term {
             Term::Return(vs) => vs.clone(),
             _ => continue,
@@ -1958,14 +2136,14 @@ fn splice_general(
         }
         func.blocks[nb].term = Term::Goto(cont);
     }
-    let _ = inst_map;
-
     // New top-level blocks: the REACHABLE clones (cand.reachable mapped through
     // the clone) + the continuation. Dead cloned blocks are unreachable and must
     // NOT enter the top-level set (the old full re-scan never visited them).
-    let mut added: Vec<Idx<Block>> = cand.reachable.iter().map(|b| block_map[b]).collect();
-    added.push(cont);
-    Ok((added, maps, overrides.len()))
+    scratch
+        .added_blocks
+        .extend(cand.reachable.iter().map(|b| scratch.block_map[b]));
+    scratch.added_blocks.push(cont);
+    Ok((maps, coalesced_cells))
 }
 
 /// Inline eligible direct calls in `func` (an ordinary, non-coroutine caller).
@@ -2027,6 +2205,7 @@ fn inline_functions_inner(
     // before it, so the next scan starts there (turns the per-splice full re-scan
     // from O(splices x size) into a single forward sweep).
     let mut resume: Option<(Idx<Block>, usize)> = None;
+    let mut cell_budget = func.cells.len();
     let mut budget = MAX_INLINES_PER_FN;
     while budget > 0 {
         let Some(site) = find_site(
@@ -2037,6 +2216,7 @@ fn inline_functions_inner(
             self_ref,
             &top,
             resume,
+            cell_budget,
             concrete_plans,
             &mut scan_stats,
         )? else {
@@ -2055,7 +2235,7 @@ fn inline_functions_inner(
         let prefix = pos.1;
         let tail = func.blocks[pos.0].insts.len().saturating_sub(pos.1 + 1);
         // Re-borrow the candidate immutably for the splice (distinct from `func`).
-        let (cands, census) = (&cache.cands, &mut cache.census);
+        let (cands, census, scratch) = (&cache.cands, &mut cache.census, &mut cache.scratch);
         let cand = cands[site.inst()]
             .as_ref()
             .expect("site implies a cached candidate");
@@ -2064,8 +2244,17 @@ fn inline_functions_inner(
         // the `&mut cache` in `find_site`, so split the lookup out here where
         // only `&cache` is held.
         let splice_start = cache.census_enabled.then(Instant::now);
-        let (added, maps, coalesced_cells) =
-            splice(func, site, cand, ws, scx, concrete_plans, census)?;
+        let (maps, coalesced_cells) = splice(
+            func,
+            site,
+            cand,
+            ws,
+            scx,
+            concrete_plans,
+            scratch,
+            census,
+        )?;
+        top.extend(scratch.added_blocks.drain(..));
         let splice_ns = splice_start
             .map(|start| start.elapsed().as_nanos() as u64)
             .unwrap_or_default();
@@ -2094,7 +2283,7 @@ fn inline_functions_inner(
         // `Iterator`-bounded fn -- reaches the emitted program's registry.
         // Deduped below; one callee can be spliced at many sites.
         func.statics.extend(cand.func.statics.iter().cloned());
-        top.extend(added);
+        cell_budget += cand.template.source_cells.saturating_sub(coalesced_cells);
         spliced.insert(fref);
         resume = Some(pos);
         budget -= 1;
@@ -2217,16 +2406,22 @@ mod tests {
         let counter = callee.new_cell(Some(Ustr::from("i")));
         callee.mark_loop_binding(counter);
         let plain = callee.new_cell(Some(Ustr::from("x")));
+        callee.insts.alloc(Inst::Const(Lit::Nil));
 
         let mut caller = MirFunc::new(Ustr::from("caller"));
-        let (_, cell_map, _) = clone_cells_insts(&mut caller, &callee, &HashMap::default());
+        let mut scratch = InlineScratch::default();
+        let first = clone_cells_insts(&mut caller, &callee, &mut scratch);
+        let second = clone_cells_insts(&mut caller, &callee, &mut scratch);
+
+        assert!(first.inst_growth > 0 && second.inst_growth == 0);
+        assert!(first.cell_growth > 0 && second.cell_growth == 0);
 
         assert!(
-            caller.cells[cell_map[&counter]].loop_binding,
+            caller.cells[scratch.cell_map[&counter]].loop_binding,
             "cloned loop-binding cell must keep its tag"
         );
         assert!(
-            !caller.cells[cell_map[&plain]].loop_binding,
+            !caller.cells[scratch.cell_map[&plain]].loop_binding,
             "an ordinary cloned cell must not gain the tag"
         );
     }
