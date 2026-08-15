@@ -184,6 +184,7 @@ pub struct InlineCloneStats {
     pub dead_cloned_instructions: usize,
     pub dead_cloned_cells: usize,
     pub dead_cloned_blocks: usize,
+    pub cleanup_load_roots: usize,
     pub coalesced_cells: usize,
     pub inst_remap_entries: usize,
     pub cell_remap_entries: usize,
@@ -266,6 +267,7 @@ impl InlineCloneStats {
         self.dead_cloned_instructions += other.dead_cloned_instructions;
         self.dead_cloned_cells += other.dead_cloned_cells;
         self.dead_cloned_blocks += other.dead_cloned_blocks;
+        self.cleanup_load_roots += other.cleanup_load_roots;
         self.coalesced_cells += other.coalesced_cells;
         self.inst_remap_entries += other.inst_remap_entries;
         self.cell_remap_entries += other.cell_remap_entries;
@@ -923,6 +925,17 @@ fn compact_live_template(
     let source_cell_span = source.emit_cell_span();
     let source_block_span = source.emit_block_span();
     let source_forced_cells = forced_cells(&source);
+    let mut cleanup_load_cells = HashSet::default();
+    for (bid, block) in source.blocks.iter() {
+        if live.blocks.contains(&bid) {
+            continue;
+        }
+        for &iid in &block.insts {
+            if let Inst::Load(cell) = source.insts[iid] {
+                cleanup_load_cells.insert(cell);
+            }
+        }
+    }
     let mut cell_map = HashMap::default();
     let mut cells = comfy_la_arena::Arena::with_capacity(live.cells.len());
     for (id, cell) in source.cells.iter() {
@@ -983,6 +996,12 @@ fn compact_live_template(
     template.insts = insts;
     template.cells = cells;
     template.blocks = blocks;
+    let mut cleanup_load_cells: Vec<_> = cleanup_load_cells
+        .into_iter()
+        .filter_map(|cell| cell_map.get(&cell).copied())
+        .collect();
+    cleanup_load_cells.sort_unstable_by_key(|cell| u32::from(cell.into_raw()));
+    template.inline_cleanup_load_cells = cleanup_load_cells;
     template.emit_ids = Some(skull_mir::mir::EmitIds {
         insts: emit_insts,
         cells: emit_cells,
@@ -1145,6 +1164,11 @@ fn full_clone_stats(
     stats.dead_cloned_instructions = 0;
     stats.dead_cloned_cells = 0;
     stats.dead_cloned_blocks = 0;
+    stats.cleanup_load_roots = if straight {
+        0
+    } else {
+        cand.func.inline_cleanup_load_cells.len()
+    };
     stats.coalesced_cells = coalesced_cells;
     stats.inst_remap_entries = maps.inst_entries;
     stats.cell_remap_entries = maps.cell_entries;
@@ -1745,6 +1769,7 @@ fn clone_all(
         };
         scratch.cell_map.insert(cid, mapped);
     }
+    import_cleanup_load_cells(caller, callee, &scratch.cell_map);
     if track_emit_ids {
         let forced = map_forced_cells(caller, callee, &scratch.overrides, cell_base, block_base);
         let ids = caller.emit_ids.as_mut().unwrap();
@@ -1811,6 +1836,25 @@ fn clone_all(
         block_growth: usize::from(scratch.block_map.capacity() != block_capacity),
     };
     maps
+}
+
+fn import_cleanup_load_cells(
+    caller: &mut MirFunc,
+    callee: &MirFunc,
+    cell_map: &HashMap<Idx<Cell>, Idx<Cell>>,
+) {
+    if callee.inline_cleanup_load_cells.is_empty() {
+        return;
+    }
+    let mut existing: HashSet<Idx<Cell>> =
+        caller.inline_cleanup_load_cells.iter().copied().collect();
+    for &cell in &callee.inline_cleanup_load_cells {
+        if let Some(&mapped) = cell_map.get(&cell) {
+            if existing.insert(mapped) {
+                caller.inline_cleanup_load_cells.push(mapped);
+            }
+        }
+    }
 }
 
 /// Remap a freshly-cloned inst's value (via [`remap_inst`]), cell, and block
@@ -2796,6 +2840,24 @@ mod tests {
         assert_eq!(template.emit_cell_span(), 2);
         assert_eq!(template.blocks.len(), 1);
         assert_eq!(template.emit_block_span(), 2);
+    }
+
+    #[test]
+    fn compact_template_records_dead_block_cleanup_loads() {
+        let mut source = MirFunc::new(Ustr::from("template_cleanup_roots"));
+        let cell = source.new_cell(Some(Ustr::from("value")));
+        let value = source.emit(source.entry, Inst::Const(Lit::Int(1)));
+        source.emit(source.entry, Inst::Store { cell, value });
+        source.set_term(source.entry, Term::Return(Vec::new()));
+        let dead = source.new_block();
+        let loaded = source.emit(dead, Inst::Load(cell));
+        source.set_term(dead, Term::Return(vec![loaded]));
+
+        let live = live_closure(&source);
+        let (template, _) = compact_live_template(source, &live);
+
+        let expected = template.cells.iter().next().unwrap().0;
+        assert_eq!(template.inline_cleanup_load_cells, vec![expected]);
     }
 
     #[test]

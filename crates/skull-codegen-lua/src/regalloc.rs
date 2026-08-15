@@ -882,7 +882,6 @@ pub fn color_cells(func: &MirFunc) -> Vec<u32> {
     // bool scratch reused across cells (no per-cell HashSet alloc).
     let mut used: Vec<bool> = Vec::new();
     for (i, c) in ordered.iter().enumerate() {
-        let Some(c) = c else { continue };
         if force_idx[i] {
             continue;
         }
@@ -901,7 +900,9 @@ pub fn color_cells(func: &MirFunc) -> Vec<u32> {
         while col < used.len() && used[col] {
             col += 1;
         }
-        colors[raw(*c)] = col as u32;
+        if let Some(c) = c {
+            colors[raw(*c)] = col as u32;
+        }
         color_of[i] = col as u32;
     }
     colors

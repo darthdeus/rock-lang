@@ -305,7 +305,7 @@ fn print_attribution(attribution: &skull::mir_emit::EmitAttribution) {
             );
         }
         println!(
-            "      accepted: straight {}, general {}, direct {}, transitive {}, ordinary {}, specialized {}, hoisted {}; clone source i/c/b {}/{}/{} live {}/{}/{} cloned {}/{}/{} dead-source {}/{}/{} dead-cloned {}/{}/{}",
+            "      accepted: straight {}, general {}, direct {}, transitive {}, ordinary {}, specialized {}, hoisted {}; clone source i/c/b {}/{}/{} live {}/{}/{} cloned {}/{}/{} dead-source {}/{}/{} dead-cloned {}/{}/{} cleanup-roots {}",
             census.straight_accepted,
             census.general_accepted,
             census.direct_splices,
@@ -328,6 +328,7 @@ fn print_attribution(attribution: &skull::mir_emit::EmitAttribution) {
             census.clone.dead_cloned_instructions,
             census.clone.dead_cloned_cells,
             census.clone.dead_cloned_blocks,
+            census.clone.cleanup_load_roots,
         );
         println!(
             "      remaps entries/capacity/growth i/c/b {}/{}/{} / {}/{}/{} / {}/{}/{}; reserve i/c/b {}/{}/{}; args {}/{} dests {}/{}; prefix/tail {}/{}; nested/static {}/{}",

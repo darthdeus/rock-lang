@@ -397,6 +397,7 @@ pub fn convert_closures_framed(
             cells: mf.cells.clone(),
             blocks: mf.blocks.clone(),
             emit_ids: mf.emit_ids.clone(),
+            inline_cleanup_load_cells: mf.inline_cleanup_load_cells.clone(),
             entry: tree.scopes[sid].entry,
             is_coroutine: false,
             resume_arg: None,

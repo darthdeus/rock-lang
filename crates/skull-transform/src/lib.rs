@@ -155,7 +155,10 @@ fn dce_core(func: &mut MirFunc, subst: Option<&[Option<Idx<Inst>>]>) {
             term_uses_each(&b.term, &mut |v| use_count[raw(v) as usize] += 1);
         }
     }
-
+    // Compact templates summarize these loads instead of cloning their dead blocks.
+    for &cell in &func.inline_cleanup_load_cells {
+        load_count[raw(cell) as usize] = load_count[raw(cell) as usize].saturating_add(1);
+    }
     // CSR: stores grouped by cell, so a cell whose last `Load` is removed cascades
     // its now-dead stores in O(stores-of-that-cell).
     let mut store_off = vec![0u32; nc + 1];
@@ -1723,6 +1726,26 @@ mod tests {
             .expect("test fixture concrete plan");
         skull_mir::lower::lower_instance_with_plans(&ws, &scx, plan, &concrete.plans)
             .expect("lower")
+    }
+
+    #[test]
+    fn cleanup_load_root_keeps_the_written_cell() {
+        let mut unrooted = MirFunc::new(ustr::Ustr::from("cleanup_root"));
+        let cell = unrooted.new_cell(None);
+        let value = unrooted.emit(unrooted.entry, Inst::Const(Lit::Int(1)));
+        let store = unrooted.emit(unrooted.entry, Inst::Store { cell, value });
+        unrooted.set_term(unrooted.entry, Term::Return(Vec::new()));
+        cleanup(&mut unrooted);
+        assert!(!unrooted.blocks[unrooted.entry].insts.contains(&store));
+
+        let mut rooted = MirFunc::new(ustr::Ustr::from("cleanup_root"));
+        let cell = rooted.new_cell(None);
+        let value = rooted.emit(rooted.entry, Inst::Const(Lit::Int(1)));
+        let store = rooted.emit(rooted.entry, Inst::Store { cell, value });
+        rooted.inline_cleanup_load_cells.push(cell);
+        rooted.set_term(rooted.entry, Term::Return(Vec::new()));
+        cleanup(&mut rooted);
+        assert!(rooted.blocks[rooted.entry].insts.contains(&store));
     }
 
     #[test]

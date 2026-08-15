@@ -763,6 +763,9 @@ pub struct MirFunc {
     pub cells: Arena<Cell>,
     pub blocks: Arena<Block>,
     pub emit_ids: Option<EmitIds>,
+    /// Cell liveness observed by cleanup in source-only, unreachable blocks of
+    /// an inline template. These roots replace copying those dead block loads.
+    pub inline_cleanup_load_cells: Vec<Idx<Cell>>,
     pub entry: Idx<Block>,
     /// `Some` for a `co fn`: the cell `yield e` evaluates to (the next
     /// `resume(arg)` value). The coroutine transform makes it the `__step`'s
@@ -918,6 +921,7 @@ impl MirFunc {
             cells: Arena::default(),
             blocks,
             emit_ids: None,
+            inline_cleanup_load_cells: Vec::new(),
             entry,
             is_coroutine: false,
             resume_arg: None,
