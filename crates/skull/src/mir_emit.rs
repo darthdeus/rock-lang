@@ -602,7 +602,10 @@ pub struct InlinePopulationAttribution {
     pub candidate_published_keys: usize,
     pub candidate_lower_attempted: usize,
     pub candidate_lowered_keys: usize,
+    pub candidate_lower_failed: usize,
+    pub candidate_eligible_keys: usize,
     pub candidate_rejected_before_lower: usize,
+    pub candidate_rejected_after_lower: usize,
     pub candidate_full_clone_ns: u64,
     pub candidate_compact_ns: u64,
     pub candidate_raw_instructions: usize,
@@ -625,6 +628,8 @@ pub struct InlinePopulationAttribution {
     pub specialized_canonical_reuse_keys: usize,
     pub ordinary_canonical_miss_keys: usize,
     pub specialized_canonical_miss_keys: usize,
+    pub ordinary_canonical_miss_instances: Vec<Instance>,
+    pub specialized_canonical_miss_instances: Vec<Instance>,
     pub canonical_clone_derivations: usize,
     pub always_lowered_units: usize,
     pub always_callee_keys: usize,
@@ -866,6 +871,7 @@ struct AttributionAccumulator {
     top_bodies: Vec<BodyAttributionOwner>,
     census_enabled: bool,
     candidate_published_keys: FxHashSet<Instance>,
+    candidate_eligible_keys: FxHashSet<Instance>,
     ordinary_lowered_keys: FxHashSet<Instance>,
     specialized_lowered_keys: FxHashSet<Instance>,
     ordinary_consumer_keys: FxHashSet<Instance>,
@@ -1259,20 +1265,29 @@ impl AttributionAccumulator {
                 .values()
                 .map(Vec::len)
                 .sum();
-            let candidate_lowered_keys: FxHashSet<_> =
-                self.candidate_lower_ns_by_key.keys().cloned().collect();
-            let candidate_ordinary_consumer_overlap = candidate_lowered_keys
+            let candidate_ordinary_consumer_overlap = self
+                .candidate_eligible_keys
                 .intersection(&self.ordinary_consumer_keys)
                 .count();
-            let candidate_specialized_consumer_overlap = candidate_lowered_keys
+            let candidate_specialized_consumer_overlap = self
+                .candidate_eligible_keys
                 .intersection(&self.specialized_consumer_keys)
                 .count();
-            let ordinary_canonical_miss_keys = candidate_ordinary_consumer_overlap
-                .saturating_sub(self.ordinary_canonical_reuse_keys.len());
-            let specialized_canonical_miss_keys = candidate_specialized_consumer_overlap
-                .saturating_sub(self.specialized_canonical_reuse_keys.len());
+            let ordinary_canonical_miss_instances: Vec<_> = self
+                .candidate_eligible_keys
+                .intersection(&self.ordinary_consumer_keys)
+                .filter(|key| !self.ordinary_canonical_reuse_keys.contains(*key))
+                .cloned()
+                .collect();
+            let specialized_canonical_miss_instances: Vec<_> = self
+                .candidate_eligible_keys
+                .intersection(&self.specialized_consumer_keys)
+                .filter(|key| !self.specialized_canonical_reuse_keys.contains(*key))
+                .cloned()
+                .collect();
             let population = &mut self.result.inline.population;
             population.candidate_published_keys = published.len();
+            population.candidate_eligible_keys = self.candidate_eligible_keys.len();
             population.ordinary_lowered_keys = self.ordinary_lowered_keys.len();
             population.specialized_lowered_keys = self.specialized_lowered_keys.len();
             population.ordinary_lowering_derivations = ordinary_lowering_derivations;
@@ -1285,8 +1300,10 @@ impl AttributionAccumulator {
             population.ordinary_canonical_reuse_keys = self.ordinary_canonical_reuse_keys.len();
             population.specialized_canonical_reuse_keys =
                 self.specialized_canonical_reuse_keys.len();
-            population.ordinary_canonical_miss_keys = ordinary_canonical_miss_keys;
-            population.specialized_canonical_miss_keys = specialized_canonical_miss_keys;
+            population.ordinary_canonical_miss_keys = ordinary_canonical_miss_instances.len();
+            population.specialized_canonical_miss_keys = specialized_canonical_miss_instances.len();
+            population.ordinary_canonical_miss_instances = ordinary_canonical_miss_instances;
+            population.specialized_canonical_miss_instances = specialized_canonical_miss_instances;
             population.canonical_clone_derivations = self.canonical_clone_derivations;
             population.always_lowered_units = self.always_lowered_units;
             population.always_callee_keys = self.always_callee_keys.len();
@@ -1304,6 +1321,12 @@ impl AttributionAccumulator {
                 published.difference(&requested).count();
             population.candidate_requested_never_spliced = requested.difference(&spliced).count();
             population.candidate_requested_not_published = requested.difference(published).count();
+            population.candidate_lower_failed = population
+                .candidate_lower_attempted
+                .saturating_sub(population.candidate_lowered_keys);
+            population.candidate_rejected_after_lower = population
+                .candidate_lowered_keys
+                .saturating_sub(population.candidate_eligible_keys);
             population.keys_lowered_more_than_once = keys_lowered_more_than_once;
             population.first_lower_ns = first_lower_ns;
             population.duplicate_lower_ns = duplicate_lower_ns;
@@ -4030,9 +4053,12 @@ fn assemble(
         if attribution.census_enabled {
             attribution.candidate_published_keys.extend(table.keys());
             let population = &mut inline.population;
-            for profile in stats.profiles.values() {
+            for (key, profile) in &stats.profiles {
                 population.candidate_lower_attempted += usize::from(profile.lower_attempted);
                 population.candidate_lowered_keys += usize::from(profile.lowered);
+                if profile.eligible {
+                    attribution.candidate_eligible_keys.insert(key.clone());
+                }
                 population.candidate_rejected_before_lower +=
                     usize::from(profile.rejected_before_lower);
                 population.candidate_full_clone_ns += profile.full_clone_ns;
@@ -6827,6 +6853,7 @@ fn main() { let result = first() }
             population.candidate_published_keys > 0
                 && population.candidate_lower_attempted > 0
                 && population.candidate_lowered_keys > 0
+                && population.candidate_eligible_keys > 0
                 && population.candidate_rejected_before_lower > 0
                 && population.ordinary_consumer_keys > 0
                 && population.always_lowered_units > 0
@@ -6843,6 +6870,16 @@ fn main() { let result = first() }
             emit.attribution.inline.candidate_setup_warmed,
             population.candidate_lower_attempted + population.candidate_rejected_before_lower,
             "candidate warm keys must partition into lower attempts and early rejections: {population:?}"
+        );
+        assert_eq!(
+            population.candidate_lower_attempted,
+            population.candidate_lowered_keys + population.candidate_lower_failed,
+            "lower attempts must partition into successful lowers and lower failures: {population:?}"
+        );
+        assert_eq!(
+            population.candidate_lowered_keys,
+            population.candidate_eligible_keys + population.candidate_rejected_after_lower,
+            "successful lowers must partition into eligible and post-lowering rejections: {population:?}"
         );
         assert!(
             population.candidate_lower_attempted >= population.candidate_lowered_keys

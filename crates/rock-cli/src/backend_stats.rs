@@ -297,11 +297,14 @@ fn print_attribution(attribution: &skull::mir_emit::EmitAttribution) {
             ms(attribution.inline.candidate_setup_eligibility_ns),
         );
         println!(
-            "      population: published {}, lower-attempted {}, lowered {}, rejected-before-lower {}, ordinary {}, specialized {}, always units {}, always callees {}",
+            "      population: published {}, eligible {}, lower-attempted {}, lowered {}, lower-failed {}, rejected-before-lower {}, rejected-after-lower {}, ordinary {}, specialized {}, always units {}, always callees {}",
             population.candidate_published_keys,
+            population.candidate_eligible_keys,
             population.candidate_lower_attempted,
             population.candidate_lowered_keys,
+            population.candidate_lower_failed,
             population.candidate_rejected_before_lower,
+            population.candidate_rejected_after_lower,
             population.ordinary_lowered_keys,
             population.specialized_lowered_keys,
             population.always_lowered_units,
@@ -327,6 +330,15 @@ fn print_attribution(attribution: &skull::mir_emit::EmitAttribution) {
             population.specialized_canonical_miss_keys,
             population.canonical_clone_derivations,
         );
+        if !population.ordinary_canonical_miss_instances.is_empty()
+            || !population.specialized_canonical_miss_instances.is_empty()
+        {
+            println!(
+                "        canonical miss instances: ordinary {:?}; specialized {:?}",
+                population.ordinary_canonical_miss_instances,
+                population.specialized_canonical_miss_instances,
+            );
+        }
         println!(
             "      MIR population: raw i/c/b {}/{}/{} clean {}/{}/{}; derivations candidate/ordinary/specialized {}/{}/{}; first/duplicate lowering {:.3}/{:.3} ms",
             population.candidate_raw_instructions,
