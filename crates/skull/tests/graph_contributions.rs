@@ -237,7 +237,9 @@ fn the_operational_censuses_are_sums_of_the_primary_records() {
             && census.mono_new_types > 0
             && census.mono_write_acqs > 0
             && census.mono_read_acqs > 0
-            && census.mono_elapsed_ns > 0,
+            && census.mono_interner_self_ns > 0
+            && census.mono_timed_mutation_calls > 0
+            && census.mono_timed_mutation_calls as u64 == census.mono_write_acqs,
         "graph interner census is empty: {census:?}"
     );
     assert!(

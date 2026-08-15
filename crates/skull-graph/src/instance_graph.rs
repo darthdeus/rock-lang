@@ -434,7 +434,8 @@ pub struct ExpandTiming {
     pub admissibility_ns: u64,
     pub body_prep_ns: u64,
     pub signature_type_conversion_ns: u64,
-    pub interner_ns: u64,
+    pub mono_interner_self_ns: u64,
+    pub mono_timed_mutation_calls: u64,
     pub call_site_resolution_ns: u64,
     pub witness_bound_tree_ns: u64,
     pub walk_body_edges_ns: u64,
@@ -496,8 +497,9 @@ impl Walk<'_> {
             return self.interner.with_mut(f);
         }
         let started = Instant::now();
+        self.out.timing.mono_timed_mutation_calls += 1;
         let result = self.interner.with_mut(f);
-        self.out.timing.interner_ns += started.elapsed().as_nanos() as u64;
+        self.out.timing.mono_interner_self_ns += started.elapsed().as_nanos() as u64;
         result
     }
 
@@ -1546,7 +1548,7 @@ pub fn build_in(
         log::debug!(
             "graph wavefront census: {} frontiers, owners p50/p95/max {}/{}/{}, singleton {}; \
              ordinary {}, always {}, ready {}, same-frontier dependency {}; expansion us total/p50/p95/max \
-             {}/{}/{}/{}; mono attempts/new/read/write {}/{}/{}/{}",
+             {}/{}/{}/{}; mono attempts/new/read/write/timed-mutations {}/{}/{}/{}/{}, self-time {}us",
             stats.frontier_count,
             stats.frontier_owner_p50,
             stats.frontier_owner_p95,
@@ -1564,6 +1566,8 @@ pub fn build_in(
             stats.mono_new_types,
             stats.mono_read_acqs,
             stats.mono_write_acqs,
+            stats.mono_timed_mutation_calls,
+            stats.mono_interner_self_ns / 1_000,
         );
         log::debug!(
             "graph contribution/index census: reached {}, bound trees {}, edges {}, sites {}, \
@@ -1849,7 +1853,8 @@ impl InstanceGraph {
                 stats.admissibility_ns += c.timing.admissibility_ns;
                 stats.body_prep_ns += c.timing.body_prep_ns;
                 stats.signature_type_conversion_ns += c.timing.signature_type_conversion_ns;
-                stats.mono_elapsed_ns += c.timing.interner_ns;
+                stats.mono_interner_self_ns += c.timing.mono_interner_self_ns;
+                stats.mono_timed_mutation_calls += c.timing.mono_timed_mutation_calls;
                 stats.call_site_resolution_ns += c.timing.call_site_resolution_ns;
                 stats.witness_bound_tree_ns += c.timing.witness_bound_tree_ns;
                 stats.walk_body_edges_ns += c.timing.walk_body_edges_ns;
@@ -1981,7 +1986,6 @@ impl InstanceGraph {
             stats.expansion_ns_p50 = percentile_u64(&mut expansion_times, 50);
             stats.expansion_ns_p95 = percentile_u64(&mut expansion_times, 95);
             stats.expansion_ns_max = expansion_times.iter().copied().max().unwrap_or(0);
-            stats.mono_elapsed_ns = stats.mono_elapsed_ns.max(stats.expansion_ns_total);
             stats.index_subst_unique = self.index.subst.len();
             stats.index_trees_unique = self.index.trees.len();
             stats.index_erased_unique = self.index.erased.len();
@@ -2953,7 +2957,8 @@ pub struct RunStats {
     pub mono_new_types: u64,
     pub mono_read_acqs: u64,
     pub mono_write_acqs: u64,
-    pub mono_elapsed_ns: u64,
+    pub mono_interner_self_ns: u64,
+    pub mono_timed_mutation_calls: u64,
     pub contribution_reached: usize,
     pub contribution_bound_trees: usize,
     pub contribution_edges: usize,

@@ -405,7 +405,7 @@ fn print_report(input: &str, iters: usize, warmup: usize, bone: &BoneStats, skul
             graph.frontier_same_frontier_dependency_owners,
         );
         println!(
-            "  graph expansion: total/p50/p95/max {} / {} / {} / {} us; mono attempts/new/read/write {}/{}/{}/{}; expansion elapsed {:.3} ms",
+            "  graph expansion: owner total/p50/p95/max {} / {} / {} / {} us; mono attempts/new/read/write/timed-mutations {}/{}/{}/{}/{}; interner self-time {:.3} ms",
             graph.expansion_ns_total / 1_000,
             graph.expansion_ns_p50 / 1_000,
             graph.expansion_ns_p95 / 1_000,
@@ -414,7 +414,8 @@ fn print_report(input: &str, iters: usize, warmup: usize, bone: &BoneStats, skul
             graph.mono_new_types,
             graph.mono_read_acqs,
             graph.mono_write_acqs,
-            graph.mono_elapsed_ns as f64 / 1_000_000.0,
+            graph.mono_timed_mutation_calls,
+            graph.mono_interner_self_ns as f64 / 1_000_000.0,
         );
         println!(
             "  graph contributions: reached {}, bound trees {}, edges {}, sites {}, struct-default domains {}, rejections {}, synthesized examined {}, failures {}, always targets {}; index updates subst/trees/erased/always/preds/decls {}/{}/{}/{}/{}/{}; live unique {}/{}/{}/{}/{}/{}",
