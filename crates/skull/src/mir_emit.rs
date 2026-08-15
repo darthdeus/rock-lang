@@ -617,6 +617,15 @@ pub struct InlinePopulationAttribution {
     pub specialized_lowered_keys: usize,
     pub ordinary_lowering_derivations: usize,
     pub specialized_lowering_derivations: usize,
+    pub ordinary_consumer_keys: usize,
+    pub specialized_consumer_keys: usize,
+    pub candidate_ordinary_consumer_overlap: usize,
+    pub candidate_specialized_consumer_overlap: usize,
+    pub ordinary_canonical_reuse_keys: usize,
+    pub specialized_canonical_reuse_keys: usize,
+    pub ordinary_canonical_miss_keys: usize,
+    pub specialized_canonical_miss_keys: usize,
+    pub canonical_clone_derivations: usize,
     pub always_lowered_units: usize,
     pub always_callee_keys: usize,
     pub candidate_ordinary_overlap: usize,
@@ -830,6 +839,8 @@ struct UnitAttribution {
     lower_facts: skull_mir::lower::LowerAttribution,
     inline: InlineWork,
     lowered_instance: Option<(Instance, LoweredInstanceKind)>,
+    consumer_instance: Option<(Instance, LoweredInstanceKind)>,
+    canonical_reused: bool,
     always_lowered: bool,
     always_callee_keys: Vec<Instance>,
 }
@@ -857,6 +868,11 @@ struct AttributionAccumulator {
     candidate_published_keys: FxHashSet<Instance>,
     ordinary_lowered_keys: FxHashSet<Instance>,
     specialized_lowered_keys: FxHashSet<Instance>,
+    ordinary_consumer_keys: FxHashSet<Instance>,
+    specialized_consumer_keys: FxHashSet<Instance>,
+    ordinary_canonical_reuse_keys: FxHashSet<Instance>,
+    specialized_canonical_reuse_keys: FxHashSet<Instance>,
+    canonical_clone_derivations: usize,
     candidate_lower_ns_by_key: BTreeMap<Instance, Vec<u64>>,
     ordinary_lower_ns_by_key: BTreeMap<Instance, Vec<u64>>,
     specialized_lower_ns_by_key: BTreeMap<Instance, Vec<u64>>,
@@ -935,6 +951,25 @@ impl AttributionAccumulator {
             self.result.bodies_with_work += 1;
         }
         if self.census_enabled {
+            if let Some((instance, kind)) = &unit.consumer_instance {
+                match kind {
+                    LoweredInstanceKind::Ordinary => {
+                        self.ordinary_consumer_keys.insert(instance.clone());
+                        if unit.canonical_reused {
+                            self.ordinary_canonical_reuse_keys.insert(instance.clone());
+                        }
+                    }
+                    LoweredInstanceKind::Specialized => {
+                        self.specialized_consumer_keys.insert(instance.clone());
+                        if unit.canonical_reused {
+                            self.specialized_canonical_reuse_keys.insert(instance.clone());
+                        }
+                    }
+                }
+                if unit.canonical_reused {
+                    self.canonical_clone_derivations += 1;
+                }
+            }
             if let Some((instance, kind)) = &unit.lowered_instance {
                 match kind {
                     LoweredInstanceKind::Ordinary => {
@@ -1224,12 +1259,35 @@ impl AttributionAccumulator {
                 .values()
                 .map(Vec::len)
                 .sum();
+            let candidate_lowered_keys: FxHashSet<_> =
+                self.candidate_lower_ns_by_key.keys().cloned().collect();
+            let candidate_ordinary_consumer_overlap = candidate_lowered_keys
+                .intersection(&self.ordinary_consumer_keys)
+                .count();
+            let candidate_specialized_consumer_overlap = candidate_lowered_keys
+                .intersection(&self.specialized_consumer_keys)
+                .count();
+            let ordinary_canonical_miss_keys = candidate_ordinary_consumer_overlap
+                .saturating_sub(self.ordinary_canonical_reuse_keys.len());
+            let specialized_canonical_miss_keys = candidate_specialized_consumer_overlap
+                .saturating_sub(self.specialized_canonical_reuse_keys.len());
             let population = &mut self.result.inline.population;
             population.candidate_published_keys = published.len();
             population.ordinary_lowered_keys = self.ordinary_lowered_keys.len();
             population.specialized_lowered_keys = self.specialized_lowered_keys.len();
             population.ordinary_lowering_derivations = ordinary_lowering_derivations;
             population.specialized_lowering_derivations = specialized_lowering_derivations;
+            population.ordinary_consumer_keys = self.ordinary_consumer_keys.len();
+            population.specialized_consumer_keys = self.specialized_consumer_keys.len();
+            population.candidate_ordinary_consumer_overlap = candidate_ordinary_consumer_overlap;
+            population.candidate_specialized_consumer_overlap =
+                candidate_specialized_consumer_overlap;
+            population.ordinary_canonical_reuse_keys = self.ordinary_canonical_reuse_keys.len();
+            population.specialized_canonical_reuse_keys =
+                self.specialized_canonical_reuse_keys.len();
+            population.ordinary_canonical_miss_keys = ordinary_canonical_miss_keys;
+            population.specialized_canonical_miss_keys = specialized_canonical_miss_keys;
+            population.canonical_clone_derivations = self.canonical_clone_derivations;
             population.always_lowered_units = self.always_lowered_units;
             population.always_callee_keys = self.always_callee_keys.len();
             population.candidate_ordinary_overlap =
@@ -2438,16 +2496,29 @@ fn emit_body_chunk_with_mutation(
         .plan_for(&shared(self_ref))
         .ok_or_else(|| CompilerError::new_with_label(f.name_span, format!("no concrete plan for `{}`", f.name)))?;
     let ordinary_instance = plan.function_instance().cloned();
-    let mut mf = skull_mir::lower::lower_function_with_plans(ws, scx, plan, &concrete.plans)?;
+    let canonical_body = ordinary_instance
+        .as_ref()
+        .and_then(|instance| inline_cache.canonical_body(instance));
+    let canonical_reused = canonical_body.is_some();
+    let mut mf = match canonical_body {
+        Some(body) => (*body).clone(),
+        None => skull_mir::lower::lower_function_with_plans(ws, scx, plan, &concrete.plans)?,
+    };
     times.lower = tl.elapsed();
     times.lower_work = mf.insts.len() > 0;
     attribution.examined = true;
     attribution.hir_nodes = hir_nodes_for_owner(ws, self_ref.module, BodyOwner::Function(self_ref.func));
     attribution.mir_instructions = mf.insts.len();
     attribution.lower_facts = mf.lower_attribution.clone();
-    attribution.lowered_instance = ordinary_instance
+    attribution.consumer_instance = ordinary_instance
         .clone()
         .map(|instance| (instance, LoweredInstanceKind::Ordinary));
+    attribution.canonical_reused = canonical_reused;
+    if !canonical_reused {
+        attribution.lowered_instance = ordinary_instance
+            .clone()
+            .map(|instance| (instance, LoweredInstanceKind::Ordinary));
+    }
     match mutation {
         BodyMutation::None => {}
         #[cfg(test)]
@@ -2833,8 +2904,13 @@ fn emit_spec_chunk(
         ));
     }
     let tl = Instant::now();
-    let mut mf = skull_mir::lower::lower_instance_with_plans(ws, scx, plan, &concrete.plans)
-        .map_err(|e| CompilerError::new_with_label(f.name_span, e.message))?;
+    let canonical_body = inline_cache.canonical_body(body);
+    let canonical_reused = canonical_body.is_some();
+    let mut mf = match canonical_body {
+        Some(body) => (*body).clone(),
+        None => skull_mir::lower::lower_instance_with_plans(ws, scx, plan, &concrete.plans)
+            .map_err(|e| CompilerError::new_with_label(f.name_span, e.message))?,
+    };
     let mut times = PhaseTimes::default();
     times.lower = tl.elapsed();
     times.lower_work = mf.insts.len() > 0;
@@ -2844,7 +2920,10 @@ fn emit_spec_chunk(
         hir_nodes: hir_nodes_for_owner(ws, fref.module, BodyOwner::Function(fref.func)),
         mir_instructions: mf.insts.len(),
         lower_facts: mf.lower_attribution.clone(),
-        lowered_instance: Some((body.clone(), LoweredInstanceKind::Specialized)),
+        consumer_instance: Some((body.clone(), LoweredInstanceKind::Specialized)),
+        lowered_instance: (!canonical_reused)
+            .then(|| (body.clone(), LoweredInstanceKind::Specialized)),
+        canonical_reused,
         ..UnitAttribution::default()
     };
     // BEFORE every transform: an `Iterator`-bounded body's placeholders are what
@@ -6749,9 +6828,12 @@ fn main() { let result = first() }
                 && population.candidate_lower_attempted > 0
                 && population.candidate_lowered_keys > 0
                 && population.candidate_rejected_before_lower > 0
-                && population.ordinary_lowered_keys > 0
+                && population.ordinary_consumer_keys > 0
                 && population.always_lowered_units > 0
-                && population.candidate_ordinary_overlap > 0
+                && population.candidate_ordinary_consumer_overlap > 0
+                && population.ordinary_canonical_reuse_keys
+                    == population.candidate_ordinary_consumer_overlap
+                && population.ordinary_canonical_miss_keys == 0
                 && population.candidate_requested_unique_keys > 0
                 && population.candidate_spliced_unique_keys > 0
                 && population.candidate_requested_never_spliced > 0,
@@ -6782,9 +6864,10 @@ fn main() { let result = first() }
                     >= population.ordinary_lowered_keys
                 && population.specialized_lowering_derivations
                     >= population.specialized_lowered_keys
-                && population.keys_lowered_more_than_once > 0
+                && population.keys_lowered_more_than_once == 0
                 && population.first_lower_ns > 0
-                && population.duplicate_lower_ns > 0
+                && population.duplicate_lower_ns == 0
+                && population.canonical_clone_derivations > 0
                 && emit.attribution.inline.census.splice_ns > 0,
             "lowering overlap census has no measured duplicate population: {population:?}"
         );
@@ -6816,9 +6899,109 @@ fn main() { let result = first() }
                 .expect("specialized emission");
         let specialized_population = &specialized_emit.attribution.inline.population;
         assert!(
-            specialized_population.specialized_lowered_keys > 0
-                && specialized_population.candidate_specialized_overlap > 0,
+            specialized_population.specialized_consumer_keys > 0
+                && specialized_population.specialized_canonical_reuse_keys
+                    == specialized_population.candidate_specialized_consumer_overlap
+                && specialized_population.specialized_canonical_miss_keys == 0,
             "the specialized production route was not censused: {specialized_population:?}"
+        );
+    }
+
+    #[test]
+    fn canonical_profiles_survive_fresh_incremental_overlay_and_sequential_reuse() {
+        let _inline = InlineOn::on();
+        let _census = InlineCensusOn::on();
+        let parse = |source: &str| {
+            skull_parser::parse_module_clean(
+                source,
+                Ustr::from("<inline-census-incremental-test>"),
+            )
+            .expect("parse")
+        };
+        let v1 = CENSUS_SRC;
+        let v2 = CENSUS_SRC.replace("return flag", "return false");
+        let mut modules = vec![parse(v1)];
+        let ws1 = bone_semantic::semantic_passes::semantic_pass(&mut modules)
+            .expect("semantic v1");
+        let mid1 = *ws1
+            .module_ids
+            .get(&Ustr::from("<inline-census-incremental-test>"))
+            .expect("module v1");
+        let (full1, mut cache) = emit_full(&ws1, mid1).expect("full v1");
+        assert!(
+            full1.attribution.inline.population.canonical_clone_derivations > 0,
+            "fresh build did not use canonical consumers: {:?}",
+            full1.attribution.inline.population
+        );
+
+        let mut modules = vec![parse(&v2)];
+        let ws2 = bone_semantic::semantic_passes::semantic_pass(&mut modules)
+            .expect("semantic v2");
+        let mid2 = *ws2
+            .module_ids
+            .get(&Ustr::from("<inline-census-incremental-test>"))
+            .expect("module v2");
+        let straight = ref_for(&ws2, "straight");
+        let reinferred = vec![(straight.module, BodyOwner::Function(straight.func))];
+        let incremental = emit_incremental(&ws2, &mut cache, &reinferred)
+            .expect("incremental canonical reuse");
+        let fresh = emit_full(&ws2, mid2).expect("fresh v2").0;
+        assert_eq!(incremental.lua, fresh.lua, "incremental output drifted from fresh output");
+        assert!(
+            incremental.attribution.inline.candidate_setup_reused > 0
+                && incremental.attribution.inline.population.ordinary_canonical_miss_keys == 0
+                && incremental.attribution.inline.population.specialized_canonical_miss_keys == 0,
+            "incremental build did not preserve the canonical contract: {:?}",
+            incremental.attribution.inline.population
+        );
+
+        let v3 = v2.replace("return 2", "return 3");
+        let mut modules = vec![parse(&v3)];
+        let ws3 = bone_semantic::semantic_passes::semantic_pass(&mut modules)
+            .expect("semantic v3");
+        let mid3 = *ws3
+            .module_ids
+            .get(&Ustr::from("<inline-census-incremental-test>"))
+            .expect("module v3");
+        let general = ref_for(&ws3, "general");
+        let sequential = emit_incremental(
+            &ws3,
+            &mut cache,
+            &[(general.module, BodyOwner::Function(general.func))],
+        )
+        .expect("sequential canonical reuse");
+        let fresh3 = emit_full(&ws3, mid3).expect("fresh v3").0;
+        assert_eq!(sequential.lua, fresh3.lua, "sequential incremental output drifted");
+        assert_eq!(
+            sequential.attribution.inline.population.ordinary_canonical_miss_keys,
+            0,
+            "sequential incremental path lost the canonical contract"
+        );
+
+        let mut modules = vec![parse(v1)];
+        let ws_overlay_base = bone_semantic::semantic_passes::semantic_pass(&mut modules)
+            .expect("semantic overlay base");
+        let mid_overlay = *ws_overlay_base
+            .module_ids
+            .get(&Ustr::from("<inline-census-incremental-test>"))
+            .expect("module overlay base");
+        let (_full_overlay, mut overlay_cache) =
+            emit_full(&ws_overlay_base, mid_overlay).expect("full overlay base");
+        let overlay = emit_overlay(&ws2, &mut overlay_cache, &reinferred)
+            .expect("overlay canonical reuse");
+        assert!(!overlay.lua.is_empty(), "overlay must emit the changed route");
+        let table = overlay_cache
+            .inline_cache
+            .candidate_table()
+            .expect("overlay candidate table");
+        assert_eq!(
+            table.stats().profiles.len(),
+            table.stats().keys,
+            "overlay publication must profile every published key"
+        );
+        assert!(
+            table.stats().reused > 0,
+            "overlay must reuse unaffected canonical profiles"
         );
     }
 

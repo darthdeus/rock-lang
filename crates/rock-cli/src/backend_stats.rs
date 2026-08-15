@@ -316,6 +316,18 @@ fn print_attribution(attribution: &skull::mir_emit::EmitAttribution) {
             population.keys_lowered_more_than_once,
         );
         println!(
+            "      canonical consumers: ordinary/specialized {}/{}; candidate overlap {}/{}; reused {}/{}; misses {}/{}; consumer clones {}",
+            population.ordinary_consumer_keys,
+            population.specialized_consumer_keys,
+            population.candidate_ordinary_consumer_overlap,
+            population.candidate_specialized_consumer_overlap,
+            population.ordinary_canonical_reuse_keys,
+            population.specialized_canonical_reuse_keys,
+            population.ordinary_canonical_miss_keys,
+            population.specialized_canonical_miss_keys,
+            population.canonical_clone_derivations,
+        );
+        println!(
             "      MIR population: raw i/c/b {}/{}/{} clean {}/{}/{}; derivations candidate/ordinary/specialized {}/{}/{}; first/duplicate lowering {:.3}/{:.3} ms",
             population.candidate_raw_instructions,
             population.candidate_raw_cells,

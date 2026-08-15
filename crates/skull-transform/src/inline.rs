@@ -96,6 +96,9 @@ enum Kind {
 /// candidate).
 struct CalleeBody {
     func: MirFunc,
+    /// The raw lowered body shared with emission consumers. Every mutating
+    /// consumer clones it; only this table owns the canonical source.
+    canonical: Arc<MirFunc>,
     /// The concrete body this snapshot was lowered from. A declaration-level
     /// snapshot is not a valid source for a concrete splice.
     subject: Instance,
@@ -605,6 +608,13 @@ impl InlineCandidateTable {
         keys.sort();
         keys
     }
+
+    pub fn canonical_body(&self, key: &Instance) -> Option<Arc<MirFunc>> {
+        self.entries
+            .get(key)
+            .and_then(|candidate| candidate.as_ref())
+            .map(|candidate| Arc::clone(&candidate.canonical))
+    }
 }
 
 pub struct InlineCache {
@@ -777,6 +787,10 @@ impl InlineCache {
 
     pub fn census_enabled(&self) -> bool {
         self.census_enabled
+    }
+
+    pub fn canonical_body(&self, key: &Instance) -> Option<Arc<MirFunc>> {
+        self.shared.as_ref().and_then(|table| table.canonical_body(key))
     }
 
     pub fn replace_candidate_table(&mut self, table: Arc<InlineCandidateTable>) {
@@ -1424,7 +1438,7 @@ fn classify(
     if let Some(timing) = timing.as_deref_mut() {
         timing.lower_attempted = true;
     }
-    let mut mf = skull_mir::lower::lower_instance_with_plans(ws, scx, plan, concrete_plans)
+    let mf = skull_mir::lower::lower_instance_with_plans(ws, scx, plan, concrete_plans)
         .map_err(|_| "lower")?;
     if let Some(start) = lower_started {
         if let Some(timing) = timing.as_deref_mut() {
@@ -1433,6 +1447,18 @@ fn classify(
             timing.raw_instructions = mf.insts.len();
             timing.raw_cells = mf.cells.len();
             timing.raw_blocks = mf.blocks.len();
+        }
+    }
+    let canonical = Arc::new(mf);
+    let clone_started = timing.as_ref().map(|_| Instant::now());
+    let mut mf = (*canonical).clone();
+    if let Some(start) = clone_started {
+        std::hint::black_box(&mf);
+        if let Some(timing) = timing.as_deref_mut() {
+            timing.full_clone_ns = start.elapsed().as_nanos() as u64;
+            timing.full_clone_inst_capacity = mf.insts.capacity();
+            timing.full_clone_cell_capacity = mf.cells.capacity();
+            timing.full_clone_block_capacity = mf.blocks.capacity();
         }
     }
     // Cleanup first so the size gate reflects emitted size and the splice clones
@@ -1447,17 +1473,6 @@ fn classify(
             timing.cleaned_blocks = mf.blocks.len();
         }
     }
-    if let Some(start) = timing.as_ref().map(|_| Instant::now()) {
-        let cloned = mf.clone();
-        std::hint::black_box(&cloned);
-        if let Some(timing) = timing.as_deref_mut() {
-            timing.full_clone_ns = start.elapsed().as_nanos() as u64;
-            timing.full_clone_inst_capacity = cloned.insts.capacity();
-            timing.full_clone_cell_capacity = cloned.cells.capacity();
-            timing.full_clone_block_capacity = cloned.blocks.capacity();
-        }
-    }
-
     // Structural exclusions over the whole arena.
     let mut has_lambda = false;
     for (_, inst) in mf.insts.iter() {
@@ -1546,6 +1561,7 @@ fn classify(
         };
         Ok(CalleeBody {
             func: mf,
+            canonical,
             subject: inst.clone(),
             abi,
             kind: Kind::Straight,
@@ -1576,6 +1592,7 @@ fn classify(
         }
         Ok(CalleeBody {
             func: mf,
+            canonical,
             subject: inst.clone(),
             abi,
             kind: Kind::General,
