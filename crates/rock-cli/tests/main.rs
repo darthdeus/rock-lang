@@ -1,6 +1,7 @@
 // Inner-loop integration tests: one linked binary instead of one per file.
 
 mod stone_harness;
+#[path = "web_test_process.rs"]
 mod web_test_process;
 
 #[path = "ablation_census_survives_failure.rs"]

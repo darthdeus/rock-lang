@@ -279,6 +279,32 @@ impl Builder<'_> {
         ValueRepr::Group { name: shape.name, parts, present: None }
     }
 
+    /// Read one physically embedded child without rediscovering its representation.
+    pub(crate) fn load_embed_repr(
+        &mut self,
+        parent: Idx<Inst>,
+        prefix: Ustr,
+        cname: Ustr,
+        nullable: bool,
+    ) -> ValueRepr {
+        let Some(shape) = self.nobox_embed_group_shape(cname) else {
+            let value = if nullable {
+                self.materialize_embed_nullable(parent, prefix, cname)
+            } else {
+                self.materialize_embed(parent, prefix, cname)
+            };
+            return ValueRepr::Scalar(value);
+        };
+        let mut repr = self.embed_group(parent, prefix, &shape);
+        if nullable {
+            let present = self.emit_cur(Inst::Field { base: parent, field: prefix });
+            if let ValueRepr::Group { present: slot, .. } = &mut repr {
+                *slot = Some(present);
+            }
+        }
+        repr
+    }
+
     /// The `(physical key, value)` pairs for an embedded field's leaves, the one
     /// source for both a parent literal's splice and a whole-field write.
     ///
@@ -369,6 +395,12 @@ impl Builder<'_> {
                 return Ok(out);
             }
         }
+        if let Some(shape) = self.nobox_embed_group_shape(cname) {
+            let paths = value_leaf_paths(&shape);
+            let repr = self.lower_expr_repr(value)?;
+            let leaves = self.repr_to_leaves(&repr, &shape);
+            return Self::pair_embed_leaves(paths, leaves);
+        }
         let v = self.lower_expr(value)?;
         Ok(self.embed_leaf_reads(cname, v))
     }
@@ -422,12 +454,15 @@ impl Builder<'_> {
         // because the repr carries its own presence and its leaves are nil on
         // the absent path by construction.
         if let Some(mut shape) = self.nobox_embed_group_shape(cname) {
+            let paths = value_leaf_paths(&shape);
             shape.nullable = true;
             let r = self.lower_expr_repr(value)?;
             let leaves = self.repr_to_leaves(&r, &shape);
-            let (present, rest) = leaves.split_first().expect("a nullable shape leads with presence");
-            debug_assert_eq!(paths.len(), rest.len(), "leaf path/value counts must agree");
-            return Ok((*present, paths.into_iter().zip(rest.iter().copied()).collect()));
+            let mut leaves = leaves.into_iter();
+            let present = leaves
+                .next()
+                .ok_or_else(|| gap("nullable embed shape produced no presence leaf"))?;
+            return Ok((present, Self::pair_embed_leaves(paths, leaves.collect())?));
         }
         // Dynamic `Child?`: one presence test, leaves read only on the present
         // arm and joined through cells.
@@ -576,5 +611,19 @@ impl Builder<'_> {
 
         self.cur = join;
         self.emit_cur(Inst::Load(result))
+    }
+
+    fn pair_embed_leaves(
+        paths: Vec<Ustr>,
+        leaves: Vec<Idx<Inst>>,
+    ) -> Result<Vec<(Ustr, Idx<Inst>)>, CompilerError> {
+        if paths.len() != leaves.len() {
+            return Err(gap(format!(
+                "embed shape has {} physical paths but lowering produced {} leaves",
+                paths.len(),
+                leaves.len()
+            )));
+        }
+        Ok(paths.into_iter().zip(leaves).collect())
     }
 }

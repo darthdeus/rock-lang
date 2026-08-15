@@ -128,6 +128,9 @@ pub const KNOWN_LINTS: &[&str] = &[
     BACKEND_SIBLING_MISMATCH,
     METHOD_SYNTAX,
     ROW_ESCAPE,
+    RAW_INPUT_MIGRATION,
+    RAW_INPUT_CLASSIFICATION,
+    ACTION_CALLERS,
 ];
 
 /// Lints that are OFF unless the invocation names them. A MIGRATION lint has a
@@ -137,7 +140,13 @@ pub const KNOWN_LINTS: &[&str] = &[
 /// (`rock lint <path> --lints=method_syntax`) is what a file-at-a-time
 /// conversion needs: the sweep is readable, and the build/LSP surfaces stay
 /// quiet the whole time.
-pub const OPT_IN_LINTS: &[&str] = &[METHOD_SYNTAX, ROW_ESCAPE];
+pub const OPT_IN_LINTS: &[&str] = &[
+    METHOD_SYNTAX,
+    ROW_ESCAPE,
+    RAW_INPUT_MIGRATION,
+    RAW_INPUT_CLASSIFICATION,
+    ACTION_CALLERS,
+];
 
 /// What an invocation asks of the lint engine: which lints run, and the knobs
 /// the lints themselves take. The default tier is the catalog minus
@@ -287,6 +296,14 @@ fn flat_findings_with(
         let found = method_syntax_in_module(ws, module, types, src);
         out.extend(filter_suppressed(found, src).iter().map(Finding::of));
     }
+    if sel.enabled(RAW_INPUT_MIGRATION) {
+        let found = raw_input_sites_in_module(module);
+        out.extend(filter_suppressed(found, src).iter().map(Finding::of));
+    }
+    if sel.enabled(RAW_INPUT_CLASSIFICATION) {
+        let found = unclassified_raw_input_sites_in_module(module, src);
+        out.extend(filter_suppressed(found, src).iter().map(Finding::of));
+    }
     out
 }
 
@@ -373,6 +390,11 @@ fn workspace_findings_by_file_with(
         }
     }
     if !sel.enabled(BACKEND_SIBLING_MISMATCH) {
+        if sel.enabled(ACTION_CALLERS) {
+            for finding in action_caller_gaps(ws, warm) {
+                out.entry(finding.file).or_default().push(Finding::of(&finding));
+            }
+        }
         return out;
     }
     // Warm modules are SCANNED (half of every stone sibling set is stdlib) but
@@ -383,6 +405,11 @@ fn workspace_findings_by_file_with(
             continue;
         }
         out.entry(file).or_default().extend(findings.iter().map(Finding::of));
+    }
+    if sel.enabled(ACTION_CALLERS) {
+        for finding in action_caller_gaps(ws, warm) {
+            out.entry(finding.file).or_default().push(Finding::of(&finding));
+        }
     }
     out
 }
@@ -1264,6 +1291,274 @@ impl LintFinding for MethodSyntax {
         )
         .with_level(CompilerErrorLevel::Advice)
     }
+}
+
+/// One direct call to an input observation primitive in a cold module. This
+/// is an opt-in migration census: the checked HIR has already resolved scopes
+/// and rejected malformed calls, while the source span identifies the caller
+/// that still needs an action/editor/tool/text classification.
+#[derive(Clone, Debug)]
+pub struct RawInputSite {
+    pub name: Ustr,
+    pub span: Span,
+}
+
+/// Canonical lint name for the Phase 6 raw-input migration census.
+pub const RAW_INPUT_MIGRATION: &str = "action_layer_raw_input";
+
+/// The live census remains unsuppressed; this second opt-in lint makes every
+/// remaining site carry one of the accepted non-action classes in source.
+pub const RAW_INPUT_CLASSIFICATION: &str = "action_layer_raw_input_classification";
+
+pub const RAW_INPUT_CLASSES: &[&str] = &[
+    "editor_tool_debug",
+    "deliberate_pointer",
+    "splash_skip",
+    "test_only",
+];
+
+const RAW_INPUT_NAMES: &[&str] = &[
+    "is_key_down",
+    "is_key_pressed",
+    "is_key_released",
+    "is_scancode_down",
+    "is_scancode_pressed",
+    "is_scancode_released",
+    "is_mouse_down",
+    "is_mouse_pressed",
+    "is_mouse_released",
+    "mouse_screen",
+    "stone_get_mouse_position",
+    "stone_get_global_mouse_position",
+    "is_pad_down",
+    "is_pad_pressed",
+    "is_pad_released",
+    "pad_axis_value",
+];
+
+/// Direct input observations are the census population. Action calls, input
+/// event injection, and tool-input helpers are intentionally separate APIs and
+/// therefore do not appear here.
+pub fn raw_input_sites_in_module(module: &Module) -> Vec<RawInputSite> {
+    let mut out = Vec::new();
+    for body in module.bodies.values() {
+        for (idx, expr) in body.expr_arena.iter() {
+            let Expr::Call { callee: Callee::Unresolved { name, .. }, .. } = expr else {
+                continue;
+            };
+            if RAW_INPUT_NAMES.contains(&name.as_str()) {
+                out.push(RawInputSite { name: *name, span: body.expr_spans[idx] });
+            }
+        }
+    }
+    out
+}
+
+impl LintFinding for RawInputSite {
+    const LINT: &'static str = RAW_INPUT_MIGRATION;
+    fn line(&self) -> usize {
+        self.span.line_range.0
+    }
+    fn to_diagnostic(&self) -> CompilerError {
+        CompilerError::new_with_label(
+            self.span,
+            format!(
+                "raw input query `{}` needs an action, editor/tool, text-input, or deliberate-remainder classification",
+                self.name
+            ),
+        )
+        .with_level(CompilerErrorLevel::Advice)
+    }
+}
+
+fn raw_input_class_marker(source: &str, line: usize) -> Option<&str> {
+    let marker_line = source.lines().nth(line.saturating_sub(1))?.trim();
+    let class = marker_line.strip_prefix("// action-layer:")?.trim();
+    if class.is_empty() || class.split_whitespace().count() != 1 {
+        return None;
+    }
+    RAW_INPUT_CLASSES.iter().copied().find(|&known| known == class)
+}
+
+#[derive(Clone, Debug)]
+pub struct RawInputClassificationGap {
+    pub name: Ustr,
+    pub span: Span,
+    pub line_population: usize,
+}
+
+pub fn unclassified_raw_input_sites_in_module(
+    module: &Module,
+    source: &str,
+) -> Vec<RawInputClassificationGap> {
+    let sites = raw_input_sites_in_module(module);
+    let mut sites_per_line: FxHashMap<usize, usize> = FxHashMap::default();
+    for site in &sites {
+        *sites_per_line.entry(site.span.line_range.0).or_default() += 1;
+    }
+    sites
+        .into_iter()
+        .filter_map(|site| {
+            let line_population = sites_per_line[&site.span.line_range.0];
+            (line_population != 1
+                || raw_input_class_marker(source, site.span.line_range.0).is_none())
+            .then_some(RawInputClassificationGap {
+                name: site.name,
+                span: site.span,
+                line_population,
+            })
+        })
+        .collect()
+}
+
+impl LintFinding for RawInputClassificationGap {
+    const LINT: &'static str = RAW_INPUT_CLASSIFICATION;
+    fn line(&self) -> usize {
+        self.span.line_range.0
+    }
+    fn to_diagnostic(&self) -> CompilerError {
+        if self.line_population != 1 {
+            return CompilerError::new_with_label(
+                self.span,
+                format!(
+                    "raw input classification requires exactly one query per source line (found {})",
+                    self.line_population
+                ),
+            )
+            .with_level(CompilerErrorLevel::Advice);
+        }
+        CompilerError::new_with_label(
+            self.span,
+            format!(
+                "raw input query `{}` needs an adjacent `// action-layer:` marker: {}",
+                self.name,
+                RAW_INPUT_CLASSES.join(", ")
+            ),
+        )
+        .with_level(CompilerErrorLevel::Advice)
+    }
+}
+
+/// A production Mag action declaration with no production caller. The source
+/// span is the declaration itself so a missing consumer is named exactly.
+#[derive(Clone, Debug)]
+pub struct ActionCallerGap {
+    pub action: Ustr,
+    pub file: Ustr,
+    pub span: Span,
+    pub population_empty: bool,
+}
+
+pub const ACTION_CALLERS: &str = "action_layer_action_callers";
+
+fn path_uses_component(file: Ustr, component: &str) -> bool {
+    let path = file.as_str().replace('\\', "/");
+    path == component
+        || path.starts_with(&format!("{component}/"))
+        || path.contains(&format!("/{component}/"))
+}
+
+fn is_test_module(file: Ustr) -> bool {
+    let path = file.as_str().replace('\\', "/");
+    path.starts_with('<')
+        || path_uses_component(file, "tests")
+        || path_uses_component(file, "test")
+}
+
+fn is_production_mag_module(file: Ustr) -> bool {
+    path_uses_component(file, "mag") && !is_test_module(file)
+}
+
+fn is_action_name(name: Ustr) -> bool {
+    name.as_str().starts_with("ACT_")
+}
+
+fn has_annotation(f: &Function, name: &str) -> bool {
+    f.annotations.iter().any(|annotation| annotation.name.name.as_str() == name)
+}
+
+impl LintFinding for ActionCallerGap {
+    const LINT: &'static str = ACTION_CALLERS;
+    fn line(&self) -> usize {
+        self.span.line_range.0
+    }
+    fn to_diagnostic(&self) -> CompilerError {
+        let message = if self.population_empty {
+            "no production Mag ACT_* declarations found".to_owned()
+        } else {
+            format!("production Mag action `{}` has no production caller", self.action)
+        };
+        CompilerError::new_with_label(self.span, message).with_level(CompilerErrorLevel::Advice)
+    }
+}
+
+/// HIR-backed caller census for production Mag actions. Global declaration
+/// initializers and `@wire` refresh bodies are registration, not callers.
+pub fn action_caller_gaps(ws: &Workspace, warm: &FxHashSet<ModuleId>) -> Vec<ActionCallerGap> {
+    let declarations: Vec<(Ustr, Ustr, Span)> = user_modules(ws, warm)
+        .filter(|module| is_production_mag_module(module.file))
+        .flat_map(|module| {
+            module
+                .globals
+                .iter()
+                .filter(|(_, global)| is_action_name(global.name))
+                .map(move |(_, global)| (global.name, module.file, global.name_span))
+        })
+        .collect();
+
+    if declarations.is_empty() {
+        let Some(module) = user_modules(ws, warm).find(|module| is_production_mag_module(module.file))
+        else {
+            return Vec::new();
+        };
+        let Some((_, function)) = module.functions.iter().next() else {
+            return Vec::new();
+        };
+        return vec![ActionCallerGap {
+            action: Ustr::from("<none>"),
+            file: module.file,
+            span: function.span,
+            population_empty: true,
+        }];
+    }
+
+    let declared: FxHashSet<Ustr> = declarations.iter().map(|(name, _, _)| *name).collect();
+    let mut callers: FxHashSet<Ustr> = FxHashSet::default();
+    for module in user_modules(ws, warm).filter(|module| !is_test_module(module.file)) {
+        for (owner, body) in &module.bodies {
+            let production_read = match owner {
+                BodyOwner::Function(fid) => {
+                    let function = &module.functions[*fid];
+                    !has_annotation(function, "wire")
+                        && function.name != "refresh_action_defaults"
+                        && function.name != "action_new"
+                }
+                BodyOwner::Global(gid) => !is_action_name(module.globals[*gid].name),
+                _ => false,
+            };
+            if !production_read {
+                continue;
+            }
+            for expr in body.expr_arena.values() {
+                if let Expr::Global(name) = expr {
+                    if declared.contains(name) {
+                        callers.insert(*name);
+                    }
+                }
+            }
+        }
+    }
+
+    declarations
+        .into_iter()
+        .filter(|(name, _, _)| !callers.contains(name))
+        .map(|(action, file, span)| ActionCallerGap {
+            action,
+            file,
+            span,
+            population_empty: false,
+        })
+        .collect()
 }
 
 /// Prefix-form declarations in one module that the receiver form

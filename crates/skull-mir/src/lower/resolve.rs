@@ -290,35 +290,8 @@ impl Builder<'_> {
                         }
                     }
                     let boxed = self.pack(br);
-                    // A `nobox` child stays in LEAF form instead. The transient
-                    // box is legal for an unmarked value -- it sinks -- but for
-                    // a marked one it is the guarantee's violation itself, so
-                    // the sink decides the representation. This is what lets a
-                    // field load widen to `T?`: a Group carries no presence, so
-                    // `repr_to_leaves` supplies it, exactly as it already does
-                    // for a literal ctor or a call result at the same param.
-                    if let Some(shape) = self.nobox_embed_group_shape(cname) {
-                        let parent = boxed;
-                        let mut g = self.embed_group(parent, field, &shape);
-                        // A NULLABLE child carries presence in the field's own
-                        // (undotted) key, so the Group takes it as its presence
-                        // rather than gating the read: an absent child's leaves
-                        // are nil, and every consumer branches on presence
-                        // before touching them.
-                        if self.embed_read_is_nullable(base, field) {
-                            let present = self.emit_cur(Inst::Field { base: parent, field });
-                            if let ValueRepr::Group { present: p, .. } = &mut g {
-                                *p = Some(present);
-                            }
-                        }
-                        return Ok(g);
-                    }
-                    let v = if self.embed_read_is_nullable(base, field) {
-                        self.materialize_embed_nullable(boxed, field, cname)
-                    } else {
-                        self.materialize_embed(boxed, field, cname)
-                    };
-                    return Ok(ValueRepr::Scalar(v));
+                    let nullable = self.embed_read_is_nullable(base, field);
+                    return Ok(self.load_embed_repr(boxed, field, cname, nullable));
                 }
                 // An embed LEAF read composes to one dotted key on the parent
                 // that holds it; no intermediate projection exists.

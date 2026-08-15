@@ -107,66 +107,13 @@ impl Builder<'_> {
         self.dispatch().is_nullable_ty(ty)
     }
 
-    /// The declared field names of a call-site spread operand `..op`, in struct
-    /// order. bone-inference has already verified the operand is a nominal
-    /// struct whose fields all match callee params.
-    pub(crate) fn spread_operand_fields(&self, op: Idx<Expr>) -> Result<Vec<Ustr>, CompilerError> {
-        match self.expr_ty(op) {
-            Some(TypeExpr::App { ctor: TypeCtor::Nominal(name), .. }) => self
-                .struct_field_names(name)
-                .ok_or_else(|| gap(format!("spread operand `{name}` has no known fields"))),
-            _ => Err(gap("spread operand is not a nominal struct")),
-        }
-    }
-
-    /// A spread operand `..op` decomposed to (field name, boxed value) pairs. A
-    /// struct-LITERAL operand is ELIDED: its field exprs lower directly (base
-    /// first, then explicit fields in source order for side effects; unwritten
-    /// fields from a functional-update base or the struct default), so no
-    /// intermediate table is built. Any other operand -- and a literal with a
-    /// flattened-enum field, which needs slot expansion -- is lowered once and
-    /// its fields read off it.
+    /// The boxed-ABI view of [`Self::spread_field_reprs`]. Field extraction has
+    /// one representation-aware implementation; only the final packing differs.
     pub(crate) fn spread_field_insts(&mut self, op: Idx<Expr>) -> Result<Vec<(Ustr, Idx<Inst>)>, CompilerError> {
-        if let Expr::StructLiteral { name, fields, bases } = self.body.expr_arena[op].clone() {
-            let decl = self.struct_field_names(name).unwrap_or_default();
-            if !decl.iter().any(|f| self.flat_field_of_struct(name, *f).is_some()) {
-                let base_inst = match bases.into_iter().next() {
-                    Some(b) => Some(self.lower_expr(b)?),
-                    None => None,
-                };
-                let mut explicit: Vec<(Ustr, Idx<Inst>)> = Vec::new();
-                let mut by_value: HashMap<u32, Idx<Inst>> = HashMap::new();
-                for fidx in fields {
-                    let lf = self.body.struct_lit_field_arena[fidx];
-                    let key: u32 = lf.value.into_raw().into();
-                    let v = match by_value.get(&key) {
-                        Some(&v) => v,
-                        None => {
-                            let v = self.lower_expr(lf.value)?;
-                            by_value.insert(key, v);
-                            v
-                        }
-                    };
-                    explicit.push((lf.name, v));
-                }
-                let mut out = Vec::new();
-                for fname in decl {
-                    let v = if let Some((_, v)) = explicit.iter().find(|(n, _)| *n == fname) {
-                        *v
-                    } else if let Some(bi) = base_inst {
-                        self.emit_cur(Inst::Field { base: bi, field: fname })
-                    } else {
-                        self.lower_struct_default(name, fname)?
-                    };
-                    out.push((fname, v));
-                }
-                return Ok(out);
-            }
-        }
-        let base = self.lower_expr(op)?;
-        let mut out = Vec::new();
-        for f in self.spread_operand_fields(op)? {
-            out.push((f, self.emit_cur(Inst::Field { base, field: f })));
+        let reprs = self.spread_field_reprs(op)?;
+        let mut out = Vec::with_capacity(reprs.len());
+        for (field, repr) in reprs {
+            out.push((field, self.pack(repr)));
         }
         Ok(out)
     }
@@ -176,7 +123,9 @@ impl Builder<'_> {
     /// reads fields off the packed cdata.
     pub(crate) fn spread_field_reprs(&mut self, op: Idx<Expr>) -> Result<Vec<(Ustr, ValueRepr)>, CompilerError> {
         if let Expr::StructLiteral { name, fields, bases } = self.body.expr_arena[op].clone() {
-            let decl = self.struct_field_names(name).unwrap_or_default();
+            let decl = self
+                .struct_field_names(name)
+                .ok_or_else(|| gap(format!("spread operand `{name}` has no known fields")))?;
             if !decl.iter().any(|f| self.flat_field_of_struct(name, *f).is_some()) {
                 let base_repr = match bases.into_iter().next() {
                     Some(b) => Some(self.lower_expr_repr(b)?),
@@ -222,8 +171,11 @@ impl Builder<'_> {
             Some(TypeExpr::App { ctor: TypeCtor::Nominal(name), .. }) => name,
             _ => return Err(gap("spread operand is not a nominal struct")),
         };
+        let fields = self
+            .struct_field_names(name)
+            .ok_or_else(|| gap(format!("spread operand `{name}` has no known fields")))?;
         let mut out = Vec::new();
-        for fname in self.struct_field_names(name).unwrap_or_default() {
+        for fname in fields {
             let r = self.spread_base_field_repr(&Some(base_repr.clone()), base_boxed, name, fname)?;
             out.push((fname, r));
         }
@@ -240,15 +192,31 @@ impl Builder<'_> {
         name: Ustr,
         fname: Ustr,
     ) -> Result<ValueRepr, CompilerError> {
+        if let Some(ValueRepr::Group { name: bn, parts, .. }) = base_repr {
+            let i = self.field_index(*bn, fname).ok_or_else(|| gap("spread field"))?;
+            return Ok(parts[i].clone());
+        }
+        if let Some(shape) = self.flat_field_of_struct(name, fname) {
+            let cells = match (base_repr, base_boxed) {
+                (Some(_), Some(parent)) => self.load_flat_cells(parent, fname, &shape),
+                (None, None) => {
+                    let value = self.lower_struct_default(name, fname)?;
+                    self.spread_box_to_cells(value, &shape)
+                }
+                _ => return Err(gap("flat spread field has no physical parent")),
+            };
+            return Ok(self.flat_cells_to_repr(&shape, cells));
+        }
+        if let (Some(cname), Some(parent)) = (self.embed_field_of_struct(name, fname), base_boxed) {
+            let nullable = self.embed_field_is_nullable(name, fname);
+            return Ok(self.load_embed_repr(parent, fname, cname, nullable));
+        }
         Ok(match (base_repr, base_boxed) {
-            (Some(ValueRepr::Group { name: bn, parts, .. }), _) => {
-                let i = self.field_index(*bn, fname).ok_or_else(|| gap("spread field"))?;
-                parts[i].clone()
-            }
             (Some(_), Some(bi)) => {
                 ValueRepr::Scalar(self.emit_cur(Inst::Field { base: bi, field: fname }))
             }
-            _ => ValueRepr::Scalar(self.lower_struct_default(name, fname)?),
+            (None, None) => ValueRepr::Scalar(self.lower_struct_default(name, fname)?),
+            _ => return Err(gap("spread field has no physical base representation")),
         })
     }
 
