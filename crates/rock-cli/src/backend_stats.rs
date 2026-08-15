@@ -195,7 +195,7 @@ fn print_attribution(attribution: &skull::mir_emit::EmitAttribution) {
     phase("regalloc", &attribution.regalloc);
     phase("stringify", &attribution.stringify);
     println!(
-        "    lower facts: concrete_mono {} requests, {} cache hits, {} derivations, {} unique ids; clones total/miss/insertion/hit {}/{}/{}/{}; explicit owned escapes {}; interner get/clone self {:.3}/{:.3} ms (timed requests {}); ABI param copied slots {}, shared views {}; MIR inst/cell/block alloc {}/{}/{} realloc {}/{}/{} capacity {}/{}/{}",
+        "    lower facts: concrete_mono {} requests, {} cache hits, {} derivations, {} unique ids; clones total/miss/insertion/hit/owned {}/{}/{}/{}/{}; explicit owned escapes {}; interner/cache/handle/owned-clone self {:.3}/{:.3}/{:.3}/{:.3} ms (timed requests {}); ABI param copied slots {}, shared views {}; MIR inst/cell/block alloc {}/{}/{} realloc {}/{}/{} capacity {}/{}/{}",
         attribution.lower.concrete_mono_requests,
         attribution.lower.concrete_mono_cache_hits,
         attribution.lower.concrete_mono_derivations,
@@ -204,8 +204,11 @@ fn print_attribution(attribution: &skull::mir_emit::EmitAttribution) {
         attribution.lower.concrete_mono_interner_miss_cloned_nodes,
         attribution.lower.concrete_mono_cache_insertion_cloned_nodes,
         attribution.lower.concrete_mono_cache_hit_cloned_nodes,
+        attribution.lower.concrete_mono_explicit_owned_escape_cloned_nodes,
         attribution.lower.concrete_mono_explicit_owned_escapes,
         attribution.lower.concrete_mono_lookup_ns as f64 / 1_000_000.0,
+        attribution.lower.concrete_mono_cache_lookup_ns as f64 / 1_000_000.0,
+        attribution.lower.concrete_mono_handle_clone_ns as f64 / 1_000_000.0,
         attribution.lower.concrete_mono_clone_self_ns as f64 / 1_000_000.0,
         attribution.lower.concrete_mono_timed_requests,
         attribution.lower.abi_param_copy_volume,

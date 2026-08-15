@@ -3,6 +3,7 @@
 //! specialization substitutes through.
 use super::*;
 use crate::monoty::MonoTy;
+use std::rc::Rc;
 
 impl Builder<'_> {
     pub(crate) fn is_null_lit(&self, e: Idx<Expr>) -> bool {
@@ -15,11 +16,11 @@ impl Builder<'_> {
         self.dispatch().expr_is_nullable(e)
     }
 
-    pub(crate) fn concrete_expr_ty(&self, e: Idx<Expr>) -> Option<MonoTy> {
+    pub(crate) fn concrete_expr_ty(&self, e: Idx<Expr>) -> Option<Rc<MonoTy>> {
         self.dispatch().concrete_expr_ty(e)
     }
 
-    pub(crate) fn concrete_ty_id(&self, ty: TyId) -> Option<MonoTy> {
+    pub(crate) fn concrete_ty_id(&self, ty: TyId) -> Option<Rc<MonoTy>> {
         self.dispatch().concrete_ty(ty)
     }
 
@@ -275,9 +276,10 @@ impl Builder<'_> {
         if let Some(&gidx) = self.inf.and_then(|inf| inf.bound_calls.get(&e)) {
             return self.bound_next_tuple_shape(gidx).map(Some);
         }
-        if let Some(MonoTy::Tuple(parts)) = self.concrete_expr_ty(e) {
-            let ty = MonoTy::Tuple(parts);
-            return self.concrete_rep_tuple(&ty, RepUse::Return, true, false);
+        if let Some(ty) = self.concrete_expr_ty(e) {
+            if matches!(&*ty, MonoTy::Tuple(_)) {
+                return self.concrete_rep_tuple(&ty, RepUse::Return, true, false);
+            }
         }
         Ok(None)
     }

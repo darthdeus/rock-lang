@@ -143,7 +143,7 @@ impl Builder<'_> {
         let id = slot.ok_or_else(|| {
             self.gap_here("concrete callee signature has no parameter for this argument")
         })?;
-        Ok(Some(self.concrete_mono(*id, ConcreteMonoConsumer::CallParameter)))
+        Ok(Some(self.concrete_mono_owned(*id, ConcreteMonoConsumer::CallParameter)))
     }
 
     pub(crate) fn concrete_coroutine_channel(
@@ -171,7 +171,7 @@ impl Builder<'_> {
             };
             signature
                 .result
-                .map(|id| self.concrete_mono(id, ConcreteMonoConsumer::CoroutineChannel))
+                .map(|id| self.concrete_mono_view(id, ConcreteMonoConsumer::CoroutineChannel))
         } else {
             Some(self.concrete_expr_ty(receiver).ok_or_else(|| {
                 self.gap_here("concrete coroutine receiver has no type")

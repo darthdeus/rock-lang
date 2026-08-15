@@ -572,8 +572,11 @@ pub struct AttributionPhase {
     pub concrete_mono_interner_miss_cloned_nodes: usize,
     pub concrete_mono_cache_insertion_cloned_nodes: usize,
     pub concrete_mono_cache_hit_cloned_nodes: usize,
+    pub concrete_mono_explicit_owned_escape_cloned_nodes: usize,
     pub concrete_mono_explicit_owned_escapes: usize,
     pub concrete_mono_lookup_ns: u64,
+    pub concrete_mono_cache_lookup_ns: u64,
+    pub concrete_mono_handle_clone_ns: u64,
     pub concrete_mono_clone_self_ns: u64,
     pub concrete_mono_timed_requests: usize,
     pub concrete_mono_by_consumer:
@@ -840,9 +843,15 @@ impl AttributionAccumulator {
             unit.lower_facts.concrete_mono_cache_insertion_cloned_nodes;
         self.result.lower.concrete_mono_cache_hit_cloned_nodes +=
             unit.lower_facts.concrete_mono_cache_hit_cloned_nodes;
+        self.result.lower.concrete_mono_explicit_owned_escape_cloned_nodes +=
+            unit.lower_facts.concrete_mono_explicit_owned_escape_cloned_nodes;
         self.result.lower.concrete_mono_explicit_owned_escapes +=
             unit.lower_facts.concrete_mono_explicit_owned_escapes;
         self.result.lower.concrete_mono_lookup_ns += unit.lower_facts.concrete_mono_lookup_ns;
+        self.result.lower.concrete_mono_cache_lookup_ns +=
+            unit.lower_facts.concrete_mono_cache_lookup_ns;
+        self.result.lower.concrete_mono_handle_clone_ns +=
+            unit.lower_facts.concrete_mono_handle_clone_ns;
         self.result.lower.concrete_mono_clone_self_ns += unit.lower_facts.concrete_mono_clone_self_ns;
         self.result.lower.concrete_mono_timed_requests +=
             unit.lower_facts.concrete_mono_timed_requests;
@@ -6005,13 +6014,19 @@ fn main() { let result = first() }
                 && attribution.lower.concrete_mono_unique_ids
                     == attribution.lower.concrete_mono_derivations
                 && attribution.lower.concrete_mono_interner_miss_cloned_nodes > 0
-                && attribution.lower.concrete_mono_cache_insertion_cloned_nodes > 0
-                && attribution.lower.concrete_mono_cache_hit_cloned_nodes > 0
+                && attribution.lower.concrete_mono_cache_insertion_cloned_nodes == 0
+                && attribution.lower.concrete_mono_cache_hit_cloned_nodes == 0
                 && attribution.lower.concrete_mono_cloned_nodes
                     == attribution.lower.concrete_mono_interner_miss_cloned_nodes
                         + attribution.lower.concrete_mono_cache_insertion_cloned_nodes
                         + attribution.lower.concrete_mono_cache_hit_cloned_nodes
+                        + attribution
+                            .lower
+                            .concrete_mono_explicit_owned_escape_cloned_nodes
                 && attribution.lower.concrete_mono_explicit_owned_escapes > 0
+                && attribution.lower.concrete_mono_cache_hit_cloned_nodes == 0
+                && attribution.lower.concrete_mono_cache_insertion_cloned_nodes == 0
+                && attribution.lower.concrete_mono_explicit_owned_escape_cloned_nodes > 0
                 && attribution
                     .lower
                     .concrete_mono_by_consumer

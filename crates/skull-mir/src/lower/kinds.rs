@@ -3,6 +3,7 @@
 //! numeric coercions (`int`->`float`, binding and param types).
 use super::*;
 use crate::monoty::MonoTy;
+use std::rc::Rc;
 
 impl Builder<'_> {
     pub(crate) fn container_plan_for(
@@ -160,7 +161,7 @@ impl Builder<'_> {
     ///   nothing, and a depth limit means a cyclic substitution chain. None of
     ///   the three occurs over the corpus or the Rock suite, so this arm has
     ///   teeth without a population.
-    pub(crate) fn concrete_ty(&self, e: Idx<Expr>) -> Result<Option<MonoTy>, CompilerError> {
+    pub(crate) fn concrete_ty(&self, e: Idx<Expr>) -> Result<Option<Rc<MonoTy>>, CompilerError> {
         if self.concrete_expr_is_untyped(e) {
             return Ok(None);
         }
