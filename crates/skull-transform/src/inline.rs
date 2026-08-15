@@ -240,6 +240,13 @@ pub struct InlineScanStats {
     pub substitution_terminators_inspected: usize,
     pub substitution_replacements: usize,
     pub substitution_ns: u64,
+    pub use_index_build_ns: u64,
+    pub use_index_values: usize,
+    pub targeted_bindings: usize,
+    pub targeted_binding_users: usize,
+    pub targeted_binding_terminators: usize,
+    pub targeted_binding_replacements: usize,
+    pub targeted_binding_ns: u64,
 }
 
 impl InlineCloneStats {
@@ -344,6 +351,13 @@ impl InlineScanStats {
         self.substitution_terminators_inspected += other.substitution_terminators_inspected;
         self.substitution_replacements += other.substitution_replacements;
         self.substitution_ns += other.substitution_ns;
+        self.use_index_build_ns += other.use_index_build_ns;
+        self.use_index_values += other.use_index_values;
+        self.targeted_bindings += other.targeted_bindings;
+        self.targeted_binding_users += other.targeted_binding_users;
+        self.targeted_binding_terminators += other.targeted_binding_terminators;
+        self.targeted_binding_replacements += other.targeted_binding_replacements;
+        self.targeted_binding_ns += other.targeted_binding_ns;
     }
 }
 
@@ -470,6 +484,127 @@ struct InlineScratch {
     coalesced: Vec<bool>,
     inst_ids: Vec<Idx<Inst>>,
     added_blocks: Vec<Idx<Block>>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum UseSite {
+    Inst(Idx<Inst>),
+    Term(Idx<Block>),
+}
+
+/// Exact value-use ownership for one caller. The inliner changes a small set of
+/// instructions per splice, so keeping the users lets straight-result binding
+/// rewrite cross-block uses without rescanning the caller arena.
+#[derive(Default)]
+struct UseIndex {
+    users: HashMap<Idx<Inst>, Vec<UseSite>>,
+    affected: HashSet<UseSite>,
+}
+
+impl UseIndex {
+    fn build(func: &MirFunc) -> Self {
+        let mut index = Self::default();
+        for (bid, block) in func.blocks.iter() {
+            for &iid in &block.insts {
+                index.add_inst(func, iid);
+            }
+            index.add_term(func, bid);
+        }
+        index
+    }
+
+    fn add_use(&mut self, value: Idx<Inst>, site: UseSite) {
+        let users = self.users.entry(value).or_default();
+        if !users.contains(&site) {
+            users.push(site);
+        }
+    }
+
+    fn remove_use(&mut self, value: Idx<Inst>, site: UseSite) {
+        if let Some(users) = self.users.get_mut(&value) {
+            users.retain(|user| *user != site);
+            if users.is_empty() {
+                self.users.remove(&value);
+            }
+        }
+    }
+
+    fn add_inst(&mut self, func: &MirFunc, iid: Idx<Inst>) {
+        crate::value_operands(&func.insts[iid], &mut |value| {
+            self.add_use(value, UseSite::Inst(iid));
+        });
+    }
+
+    fn remove_inst(&mut self, func: &MirFunc, iid: Idx<Inst>) {
+        crate::value_operands(&func.insts[iid], &mut |value| {
+            self.remove_use(value, UseSite::Inst(iid));
+        });
+    }
+
+    fn add_term(&mut self, func: &MirFunc, bid: Idx<Block>) {
+        term_values(&func.blocks[bid].term, &mut |value| {
+            self.add_use(value, UseSite::Term(bid));
+        });
+    }
+
+    fn remove_term(&mut self, func: &MirFunc, bid: Idx<Block>) {
+        term_values(&func.blocks[bid].term, &mut |value| {
+            self.remove_use(value, UseSite::Term(bid));
+        });
+    }
+
+    /// Replace one value in its exact users. The returned counts are attribution
+    /// only: unlike the removed `subst_all`, they cover users that actually had
+    /// to be touched.
+    fn replace(
+        &mut self,
+        func: &mut MirFunc,
+        from: Idx<Inst>,
+        to: Idx<Inst>,
+    ) -> (usize, usize, usize) {
+        if from == to {
+            return (0, 0, 0);
+        }
+        let sites = self.users.remove(&from).unwrap_or_default();
+        self.affected.clear();
+        let mut instructions = 0;
+        let mut terminators = 0;
+        let replacements = ThreadCell::new(0usize);
+        for site in sites {
+            if !self.affected.insert(site) {
+                continue;
+            }
+            match site {
+                UseSite::Inst(iid) => {
+                    self.remove_inst(func, iid);
+                    crate::remap_inst(&mut func.insts[iid], &|value| {
+                        if value == from {
+                            replacements.set(replacements.get() + 1);
+                            to
+                        } else {
+                            value
+                        }
+                    });
+                    self.add_inst(func, iid);
+                    instructions += 1;
+                }
+                UseSite::Term(bid) => {
+                    self.remove_term(func, bid);
+                    crate::remap_term(&mut func.blocks[bid].term, &|value| {
+                        if value == from {
+                            replacements.set(replacements.get() + 1);
+                            to
+                        } else {
+                            value
+                        }
+                    });
+                    self.add_term(func, bid);
+                    terminators += 1;
+                }
+            }
+        }
+        (instructions, terminators, replacements.get())
+    }
 }
 
 impl Default for InlineCache {
@@ -752,7 +887,10 @@ fn template_counts(func: &MirFunc, live: &LiveClosure) -> InlineCloneStats {
 /// Cut one canonical pristine candidate down to the closure consumed by a
 /// splice. Arena IDs are compacted once here; every later splice remaps from
 /// this template and never pays for source entries outside the live closure.
-fn compact_live_template(mut source: MirFunc, live: &LiveClosure) -> MirFunc {
+fn compact_live_template(
+    mut source: MirFunc,
+    live: &LiveClosure,
+) -> (MirFunc, HashMap<Idx<Block>, Idx<Block>>) {
     let mut cell_map = HashMap::default();
     let mut cells = comfy_la_arena::Arena::with_capacity(live.cells.len());
     for (id, cell) in source.cells.iter() {
@@ -882,10 +1020,10 @@ fn compact_live_template(mut source: MirFunc, live: &LiveClosure) -> MirFunc {
         .into_iter()
         .map(|nested| {
             let nested_live = live_closure(&nested);
-            compact_live_template(nested, &nested_live)
+            compact_live_template(nested, &nested_live).0
         })
         .collect();
-    template
+    (template, block_map)
 }
 
 #[derive(Clone, Copy, Default)]
@@ -1072,7 +1210,7 @@ fn classify(
         mf.params.iter().map(|p| !rebound.contains(p)).collect();
     let live = live_closure(&mf);
     let template = template_counts(&mf, &live);
-    let mf = compact_live_template(mf, &live);
+    let (mf, block_map) = compact_live_template(mf, &live);
 
     // A lambda-bearing body must take the General splice even when its entry
     // ends in Return: the straight path clones no blocks, so the lambda's
@@ -1100,7 +1238,8 @@ fn classify(
         })
     } else {
         // General: uniform return arity across every reachable Return.
-        let reachable = top_level_blocks(&mf);
+        let reachable: Vec<Idx<Block>> =
+            source_reachable.iter().map(|block| block_map[block]).collect();
         let mut arities = reachable
             .iter()
             .filter_map(|&b| match &mf.blocks[b].term {
@@ -1923,16 +2062,19 @@ fn splice(
     scx: &ScalarCtx,
     concrete_plans: &ConcretePlans,
     scratch: &mut InlineScratch,
+    uses: &mut UseIndex,
     census: &mut InlineScanStats,
 ) -> Result<(CloneMapStats, usize), CompilerError> {
     scratch.added_blocks.clear();
     match cand.kind {
         Kind::Straight => {
             let (maps, coalesced) =
-                splice_straight(func, site, cand, ws, scx, concrete_plans, scratch, census)?;
+                splice_straight(func, site, cand, ws, scx, concrete_plans, scratch, uses, census)?;
             Ok((maps, coalesced))
         }
-        Kind::General => splice_general(func, site, cand, ws, scx, concrete_plans, scratch, census),
+        Kind::General => {
+            splice_general(func, site, cand, ws, scx, concrete_plans, scratch, uses, census)
+        }
     }
 }
 
@@ -1948,7 +2090,8 @@ fn splice_straight(
     scx: &ScalarCtx,
     concrete_plans: &ConcretePlans,
     scratch: &mut InlineScratch,
-    _census: &mut InlineScanStats,
+    uses: &mut UseIndex,
+    census: &mut InlineScanStats,
 ) -> Result<(CloneMapStats, usize), CompilerError> {
     let callee = &cand.func;
     let (bid, idx, args) = match &site {
@@ -1970,6 +2113,13 @@ fn splice_straight(
     )?;
     let nested_names = import_nested_fns(func, callee, &scratch.inst_map);
     import_spec_bindings(func, callee, &scratch.inst_map, &nested_names);
+    for &iid in &scratch.inst_ids {
+        uses.add_inst(func, iid);
+    }
+
+    // The call leaves the block, so its argument uses disappear. Its result
+    // users remain indexed until the exact binding below replaces them.
+    uses.remove_inst(func, site.call_id());
 
     // Rebuild the caller block: before | arg-stores | body | dest-stores | after.
     let old = std::mem::take(&mut func.blocks[bid].insts);
@@ -1977,7 +2127,9 @@ fn splice_straight(
     for (i, (param, arg)) in callee.params.iter().zip(args.iter()).enumerate() {
         if !scratch.coalesced[i] {
             let pc = scratch.cell_map[param];
-            new_insts.push(func.insts.alloc(Inst::Store { cell: pc, value: *arg }));
+            let store = func.insts.alloc(Inst::Store { cell: pc, value: *arg });
+            uses.add_inst(func, store);
+            new_insts.push(store);
         }
     }
     new_insts.extend(
@@ -1998,34 +2150,41 @@ fn splice_straight(
                     cell: *dest,
                     value: scratch.inst_map[rv],
                 });
+                uses.add_inst(func, st);
                 new_insts.push(st);
             }
             new_insts.extend_from_slice(&old[idx + 1..]);
             func.blocks[bid].insts = new_insts;
         }
         Site::Single { call_id, .. } => {
-            // Keep the original value id as a load in the caller block. A result
-            // cell makes the binding dominate uses in successor blocks without
-            // rewriting the caller's existing operands.
-            let value = match &callee.blocks[callee.entry].term {
-                Term::Return(values) => values.first().map(|value| scratch.inst_map[value]),
+            // Preserve the old straight-line MIR shape: the returned value
+            // replaces the call at its exact indexed users, including uses in
+            // successor blocks. No bridge cell or whole-caller scan is needed.
+            let to = match &callee.blocks[callee.entry].term {
+                Term::Return(values) => match values.first().map(|value| scratch.inst_map[value]) {
+                    Some(value) => value,
+                    None => {
+                        func.insts[*call_id] = Inst::Const(Lit::Nil);
+                        new_insts.push(*call_id);
+                        *call_id
+                    }
+                },
                 _ => unreachable!("straight candidate entry must end in Return"),
             };
-            if let Some(value) = value {
-                let result_cell = func.new_cell(None);
-                let store = func.insts.alloc(Inst::Store {
-                    cell: result_cell,
-                    value,
-                });
-                func.insts[*call_id] = Inst::Load(result_cell);
-                new_insts.push(store);
-                new_insts.push(*call_id);
-            } else {
-                func.insts[*call_id] = Inst::Const(Lit::Nil);
-                new_insts.push(*call_id);
-            }
             new_insts.extend_from_slice(&old[idx + 1..]);
             func.blocks[bid].insts = new_insts;
+            let binding_started = census.enabled.then(Instant::now);
+            if to != *call_id {
+                let (instructions, terminators, replacements) =
+                    uses.replace(func, *call_id, to);
+                census.targeted_binding_users += instructions;
+                census.targeted_binding_terminators += terminators;
+                census.targeted_binding_replacements += replacements;
+            }
+            census.targeted_bindings += 1;
+            if let Some(start) = binding_started {
+                census.targeted_binding_ns += start.elapsed().as_nanos() as u64;
+            }
         }
     }
     Ok((maps, coalesced_cells))
@@ -2043,6 +2202,7 @@ fn splice_general(
     scx: &ScalarCtx,
     concrete_plans: &ConcretePlans,
     scratch: &mut InlineScratch,
+    uses: &mut UseIndex,
     _census: &mut InlineScanStats,
 ) -> Result<(CloneMapStats, usize), CompilerError> {
     let callee = &cand.func;
@@ -2065,6 +2225,16 @@ fn splice_general(
     )?;
     let nested_names = import_nested_fns(func, callee, &scratch.inst_map);
     import_spec_bindings(func, callee, &scratch.inst_map, &nested_names);
+    for &iid in &scratch.inst_ids {
+        uses.add_inst(func, iid);
+    }
+    for &bid in scratch.block_map.values() {
+        uses.add_term(func, bid);
+    }
+
+    // The call leaves the original block. Its argument uses disappear; the
+    // original call value remains as the stable result-load identity below.
+    uses.remove_inst(func, site.call_id());
     let entry_clone = scratch.block_map[&callee.entry];
 
     // Split the caller block at the call.
@@ -2072,11 +2242,13 @@ fn splice_general(
     let before: Vec<Idx<Inst>> = old[..idx].to_vec();
     let after: Vec<Idx<Inst>> = old[idx + 1..].to_vec();
     let orig_term = func.blocks[bid].term.clone();
+    uses.remove_term(func, bid);
 
     // Continuation block: post-call tail + the caller's original terminator.
     let cont = func.new_block();
     func.blocks[cont].insts = after;
     func.blocks[cont].term = orig_term;
+    uses.add_term(func, cont);
 
     // Single-result: a result cell read back in the continuation. Repurpose the
     // call inst id in place as `Load(rc)` at the front of `cont` so downstream
@@ -2099,7 +2271,9 @@ fn splice_general(
             continue;
         }
         let pc = scratch.cell_map[param];
-        prefix.push(func.insts.alloc(Inst::Store { cell: pc, value: *arg }));
+        let store = func.insts.alloc(Inst::Store { cell: pc, value: *arg });
+        uses.add_inst(func, store);
+        prefix.push(store);
     }
     func.blocks[bid].insts = prefix;
     func.blocks[bid].term = Term::Goto(entry_clone);
@@ -2113,6 +2287,7 @@ fn splice_general(
             Term::Return(vs) => vs.clone(),
             _ => continue,
         };
+        uses.remove_term(func, nb);
         match &site {
             Site::Single { .. } => {
                 let rc = result_cell.unwrap();
@@ -2121,20 +2296,24 @@ fn splice_general(
                     None => {
                         let nil = func.insts.alloc(Inst::Const(Lit::Nil));
                         func.blocks[nb].insts.push(nil);
+                        uses.add_inst(func, nil);
                         nil
                     }
                 };
                 let st = func.insts.alloc(Inst::Store { cell: rc, value: v });
                 func.blocks[nb].insts.push(st);
+                uses.add_inst(func, st);
             }
             Site::Multi { dests, .. } => {
                 for (dest, rv) in dests.iter().zip(vs.iter()) {
                     let st = func.insts.alloc(Inst::Store { cell: *dest, value: *rv });
                     func.blocks[nb].insts.push(st);
+                    uses.add_inst(func, st);
                 }
             }
         }
         func.blocks[nb].term = Term::Goto(cont);
+        uses.add_term(func, nb);
     }
     // New top-level blocks: the REACHABLE clones (cand.reachable mapped through
     // the clone) + the continuation. Dead cloned blocks are unreachable and must
@@ -2196,6 +2375,12 @@ fn inline_functions_inner(
         cache.census.top_level_blocks_population = top_blocks.len();
     }
     let mut top: HashSet<Idx<Block>> = top_blocks.into_iter().collect();
+    let use_index_started = cache.census_enabled.then(Instant::now);
+    let mut uses = UseIndex::build(func);
+    if let Some(start) = use_index_started {
+        cache.census.use_index_build_ns = start.elapsed().as_nanos() as u64;
+        cache.census.use_index_values = uses.users.len();
+    }
     let original_calls: HashSet<Idx<Inst>> = top
         .iter()
         .flat_map(|bid| func.blocks[*bid].insts.iter().copied())
@@ -2252,6 +2437,7 @@ fn inline_functions_inner(
             scx,
             concrete_plans,
             scratch,
+            &mut uses,
             census,
         )?;
         top.extend(scratch.added_blocks.drain(..));
@@ -2437,7 +2623,7 @@ mod tests {
 
         let live = live_closure(&source);
         let counts = template_counts(&source, &live);
-        let template = compact_live_template(source, &live);
+        let (template, _) = compact_live_template(source, &live);
 
         assert_eq!((counts.source_instructions, counts.live_instructions), (2, 1));
         assert_eq!((counts.source_cells, counts.live_cells), (1, 0));
@@ -2445,6 +2631,30 @@ mod tests {
         assert_eq!(template.insts.len(), counts.live_instructions);
         assert_eq!(template.cells.len(), counts.live_cells);
         assert_eq!(template.blocks.len(), counts.live_blocks);
+    }
+
+    #[test]
+    fn use_index_replaces_cross_block_users_once() {
+        let mut func = MirFunc::new(Ustr::from("uses"));
+        let from = func.emit(func.entry, Inst::Const(Lit::Int(1)));
+        let user = func.emit(func.entry, Inst::IntAdd(from, from));
+        let then_bb = func.new_block();
+        let else_bb = func.new_block();
+        func.set_term(
+            func.entry,
+            Term::Branch { cond: from, then_bb, else_bb },
+        );
+        func.set_term(then_bb, Term::Return(vec![user]));
+        func.set_term(else_bb, Term::Return(vec![from]));
+        let to = func.emit(func.entry, Inst::Const(Lit::Int(2)));
+
+        let mut uses = UseIndex::build(&func);
+        let counts = uses.replace(&mut func, from, to);
+
+        assert_eq!(counts, (1, 2, 4));
+        assert_eq!(func.insts[user], Inst::IntAdd(to, to));
+        assert_eq!(func.blocks[func.entry].term, Term::Branch { cond: to, then_bb, else_bb });
+        assert_eq!(func.blocks[else_bb].term, Term::Return(vec![to]));
     }
 
     #[test]

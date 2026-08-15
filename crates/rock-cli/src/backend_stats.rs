@@ -360,6 +360,16 @@ fn print_attribution(attribution: &skull::mir_emit::EmitAttribution) {
             census.substitution_replacements,
             ms(census.substitution_ns),
         );
+        println!(
+            "      targeted result binding: index {} values/{:.3} ms, bindings {}, users {}, terminators {}, replacements {}, {:.3} ms",
+            census.use_index_values,
+            ms(census.use_index_build_ns),
+            census.targeted_bindings,
+            census.targeted_binding_users,
+            census.targeted_binding_terminators,
+            census.targeted_binding_replacements,
+            ms(census.targeted_binding_ns),
+        );
         macro_rules! side {
             ($name:literal, $field:ident) => {
                 println!(
