@@ -239,10 +239,10 @@ pub fn convert_closures_framed(
                         // A boxed cell reads `.v` on its box table; a by-value
                         // capture is the env field directly.
                         let env = env_plans[&s].env_cell().expect("capture has an env plan");
-                        let il = mf.insts.alloc(Inst::Load(env));
+                        let il = mf.alloc_inst(Inst::Load(env));
                         new.push(il);
                         if boxed_c {
-                            let f = mf.insts.alloc(Inst::Field { base: il, field: field_of(c) });
+                            let f = mf.alloc_inst(Inst::Field { base: il, field: field_of(c) });
                             new.push(f);
                             mf.insts[id] = Inst::Field { base: f, field: Ustr::from("v") };
                         } else {
@@ -250,7 +250,7 @@ pub fn convert_closures_framed(
                         }
                     } else {
                         // Local boxed: `.v` on a load of the box table.
-                        let l = mf.insts.alloc(Inst::Load(c));
+                        let l = mf.alloc_inst(Inst::Load(c));
                         new.push(l);
                         mf.insts[id] = Inst::Field { base: l, field: Ustr::from("v") };
                     }
@@ -276,13 +276,13 @@ pub fn convert_closures_framed(
                         (sbase, frame_field(f.slots[&c]))
                     } else if captured {
                         let env = env_plans[&s].env_cell().expect("capture has an env plan");
-                        let il = mf.insts.alloc(Inst::Load(env));
+                        let il = mf.alloc_inst(Inst::Load(env));
                         new.push(il);
-                        let f = mf.insts.alloc(Inst::Field { base: il, field: field_of(c) });
+                        let f = mf.alloc_inst(Inst::Field { base: il, field: field_of(c) });
                         new.push(f);
                         (f, Ustr::from("v"))
                     } else {
-                        let l = mf.insts.alloc(Inst::Load(c));
+                        let l = mf.alloc_inst(Inst::Load(c));
                         new.push(l);
                         (l, Ustr::from("v"))
                     };
@@ -334,13 +334,13 @@ pub fn convert_closures_framed(
         let is_param = tree.scopes[owner].params.contains(&c);
         let dest = entry_prepend.entry(entry).or_default();
         if is_param {
-            let seed = mf.insts.alloc(Inst::Load(c));
-            let boxv = mf.insts.alloc(Inst::MakeEnv { fn_ref: None, fields: vec![(Ustr::from("v"), seed)] });
-            let st = mf.insts.alloc(Inst::Store { cell: c, value: boxv });
+            let seed = mf.alloc_inst(Inst::Load(c));
+            let boxv = mf.alloc_inst(Inst::MakeEnv { fn_ref: None, fields: vec![(Ustr::from("v"), seed)] });
+            let st = mf.alloc_inst(Inst::Store { cell: c, value: boxv });
             dest.extend([seed, boxv, st]);
         } else {
-            let boxv = mf.insts.alloc(Inst::MakeEnv { fn_ref: None, fields: Vec::new() });
-            let st = mf.insts.alloc(Inst::Store { cell: c, value: boxv });
+            let boxv = mf.alloc_inst(Inst::MakeEnv { fn_ref: None, fields: Vec::new() });
+            let st = mf.alloc_inst(Inst::Store { cell: c, value: boxv });
             dest.extend([boxv, st]);
         }
     }
@@ -396,6 +396,7 @@ pub fn convert_closures_framed(
             insts: mf.insts.clone(),
             cells: mf.cells.clone(),
             blocks: mf.blocks.clone(),
+            emit_ids: mf.emit_ids.clone(),
             entry: tree.scopes[sid].entry,
             is_coroutine: false,
             resume_arg: None,
@@ -446,9 +447,9 @@ pub fn convert_closures_framed(
 /// -- the base a frame-cell access composes `.c<slot>` onto inside a hoisted body
 /// (D3). Helper insts are appended to `new`; returns the `Field` inst.
 fn env_frame_base(mf: &mut MirFunc, env: Idx<Cell>, s_cell: Idx<Cell>, new: &mut Vec<Idx<Inst>>) -> Idx<Inst> {
-    let il = mf.insts.alloc(Inst::Load(env));
+    let il = mf.alloc_inst(Inst::Load(env));
     new.push(il);
-    let f = mf.insts.alloc(Inst::Field { base: il, field: field_of(s_cell) });
+    let f = mf.alloc_inst(Inst::Field { base: il, field: field_of(s_cell) });
     new.push(f);
     f
 }
@@ -475,15 +476,15 @@ fn slot_in_scope(
     // that collapsed to `s`, so it has an env).
     let owner = own.owner.get(&cc).copied().unwrap_or(crate::scope::ROOT);
     if owner == s {
-        let l = mf.insts.alloc(Inst::Load(cc));
+        let l = mf.alloc_inst(Inst::Load(cc));
         new.push(l);
         l
     } else {
         // Transitive capture: threads through THIS scope's env.
         let env = env_plans[&s].env_cell().expect("transitive capture has an env plan");
-        let il = mf.insts.alloc(Inst::Load(env));
+        let il = mf.alloc_inst(Inst::Load(env));
         new.push(il);
-        let f = mf.insts.alloc(Inst::Field { base: il, field: field_of(cc) });
+        let f = mf.alloc_inst(Inst::Field { base: il, field: field_of(cc) });
         new.push(f);
         f
     }

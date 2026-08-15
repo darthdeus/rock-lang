@@ -722,6 +722,21 @@ pub struct StaticCell {
     pub init_hash: u64,
 }
 
+/// Emission identities for a dense arena whose source had unreachable entries
+/// removed. Physical indices remain dense for MIR and backend side tables; these
+/// identities preserve the old arena order at the output boundary.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EmitIds {
+    pub insts: Vec<u32>,
+    pub cells: Vec<u32>,
+    pub blocks: Vec<u32>,
+    pub forced_cells: Vec<u32>,
+    pub forced_cell_blocks: Vec<u32>,
+    pub next_insts: u32,
+    pub next_cells: u32,
+    pub next_blocks: u32,
+}
+
 /// A function — a CFG over cells and values. `params` are the entry block's
 /// parameter *cells* in order (params are variables, hence cells); they
 /// materialize as the Lua function parameters.
@@ -747,6 +762,7 @@ pub struct MirFunc {
     pub insts: Arena<Inst>,
     pub cells: Arena<Cell>,
     pub blocks: Arena<Block>,
+    pub emit_ids: Option<EmitIds>,
     pub entry: Idx<Block>,
     /// `Some` for a `co fn`: the cell `yield e` evaluates to (the next
     /// `resume(arg)` value). The coroutine transform makes it the `__step`'s
@@ -901,6 +917,7 @@ impl MirFunc {
             insts: Arena::default(),
             cells: Arena::default(),
             blocks,
+            emit_ids: None,
             entry,
             is_coroutine: false,
             resume_arg: None,
@@ -934,6 +951,7 @@ impl MirFunc {
         let capacity = self.cells.capacity();
         let start = self.lower_timing_enabled.then(Instant::now);
         let id = self.cells.alloc(Cell { name, loop_binding: false, ty: None, nonnull_value_struct: false });
+        self.record_new_cell();
         if self.cells.capacity() != capacity {
             self.lower_attribution.mir_cell_reallocations += 1;
             self.lower_attribution.mir_cell_reallocation_ns +=
@@ -947,6 +965,7 @@ impl MirFunc {
         let capacity = self.cells.capacity();
         let start = self.lower_timing_enabled.then(Instant::now);
         let id = self.cells.alloc(Cell { name, loop_binding: false, ty, nonnull_value_struct: false });
+        self.record_new_cell();
         if self.cells.capacity() != capacity {
             self.lower_attribution.mir_cell_reallocations += 1;
             self.lower_attribution.mir_cell_reallocation_ns +=
@@ -972,6 +991,7 @@ impl MirFunc {
         let capacity = self.blocks.capacity();
         let start = self.lower_timing_enabled.then(Instant::now);
         let id = self.blocks.alloc(Block::new());
+        self.record_new_block();
         if self.blocks.capacity() != capacity {
             self.lower_attribution.mir_block_reallocations += 1;
             self.lower_attribution.mir_block_reallocation_ns +=
@@ -985,6 +1005,7 @@ impl MirFunc {
         let capacity = self.insts.capacity();
         let start = self.lower_timing_enabled.then(Instant::now);
         let id = self.insts.alloc(inst);
+        self.record_new_inst();
         if self.insts.capacity() != capacity {
             self.lower_attribution.mir_instruction_reallocations += 1;
             self.lower_attribution.mir_instruction_reallocation_ns +=
@@ -994,7 +1015,120 @@ impl MirFunc {
         id
     }
 
+    pub fn alloc_inst(&mut self, inst: Inst) -> Idx<Inst> {
+        let id = self.insts.alloc(inst);
+        self.record_new_inst();
+        id
+    }
+
     pub fn set_term(&mut self, block: Idx<Block>, term: Term) {
         self.blocks[block].term = term;
+    }
+
+    pub fn ensure_emit_ids(&mut self) {
+        if self.emit_ids.is_none() {
+            self.emit_ids = Some(EmitIds {
+                insts: (0..self.insts.len()).map(|id| id as u32).collect(),
+                cells: (0..self.cells.len()).map(|id| id as u32).collect(),
+                blocks: (0..self.blocks.len()).map(|id| id as u32).collect(),
+                forced_cells: Vec::new(),
+                forced_cell_blocks: Vec::new(),
+                next_insts: self.insts.len() as u32,
+                next_cells: self.cells.len() as u32,
+                next_blocks: self.blocks.len() as u32,
+            });
+        }
+    }
+
+    pub fn emit_inst_id(&self, id: Idx<Inst>) -> u32 {
+        self.emit_ids
+            .as_ref()
+            .map_or(u32::from(id.into_raw()), |ids| ids.insts[u32::from(id.into_raw()) as usize])
+    }
+
+    pub fn emit_cell_id(&self, id: Idx<Cell>) -> u32 {
+        self.emit_ids
+            .as_ref()
+            .map_or(u32::from(id.into_raw()), |ids| ids.cells[u32::from(id.into_raw()) as usize])
+    }
+
+    pub fn emit_block_id(&self, id: Idx<Block>) -> u32 {
+        self.emit_ids
+            .as_ref()
+            .map_or(u32::from(id.into_raw()), |ids| ids.blocks[u32::from(id.into_raw()) as usize])
+    }
+
+    pub fn emit_inst_span(&self) -> u32 {
+        self.emit_ids.as_ref().map_or(self.insts.len() as u32, |ids| ids.next_insts)
+    }
+
+    pub fn emit_cell_span(&self) -> u32 {
+        self.emit_ids.as_ref().map_or(self.cells.len() as u32, |ids| ids.next_cells)
+    }
+
+    pub fn emit_block_span(&self) -> u32 {
+        self.emit_ids.as_ref().map_or(self.blocks.len() as u32, |ids| ids.next_blocks)
+    }
+
+    pub fn emit_nexts(&self) -> Option<(u32, u32, u32)> {
+        self.emit_ids.as_ref().map(|ids| (ids.next_insts, ids.next_cells, ids.next_blocks))
+    }
+
+    pub fn set_emit_nexts(&mut self, nexts: (u32, u32, u32)) {
+        let ids = self.emit_ids.as_mut().expect("emit identities must be enabled");
+        ids.next_insts = nexts.0;
+        ids.next_cells = nexts.1;
+        ids.next_blocks = nexts.2;
+    }
+
+    pub fn alloc_cell_with_emit_id(&mut self, cell: Cell, emit_id: u32) -> Idx<Cell> {
+        let id = self.cells.alloc(cell);
+        self.emit_ids
+            .as_mut()
+            .expect("emit identities must be enabled")
+            .cells
+            .push(emit_id);
+        id
+    }
+
+    pub fn alloc_inst_with_emit_id(&mut self, inst: Inst, emit_id: u32) -> Idx<Inst> {
+        let id = self.insts.alloc(inst);
+        self.emit_ids
+            .as_mut()
+            .expect("emit identities must be enabled")
+            .insts
+            .push(emit_id);
+        id
+    }
+
+    pub fn alloc_block_with_emit_id(&mut self, emit_id: u32) -> Idx<Block> {
+        let id = self.blocks.alloc(Block::new());
+        self.emit_ids
+            .as_mut()
+            .expect("emit identities must be enabled")
+            .blocks
+            .push(emit_id);
+        id
+    }
+
+    fn record_new_inst(&mut self) {
+        if let Some(ids) = &mut self.emit_ids {
+            ids.insts.push(ids.next_insts);
+            ids.next_insts += 1;
+        }
+    }
+
+    fn record_new_cell(&mut self) {
+        if let Some(ids) = &mut self.emit_ids {
+            ids.cells.push(ids.next_cells);
+            ids.next_cells += 1;
+        }
+    }
+
+    fn record_new_block(&mut self) {
+        if let Some(ids) = &mut self.emit_ids {
+            ids.blocks.push(ids.next_blocks);
+            ids.next_blocks += 1;
+        }
     }
 }

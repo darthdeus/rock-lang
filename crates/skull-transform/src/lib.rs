@@ -403,6 +403,23 @@ pub fn fold_const_branches(func: &mut MirFunc) -> bool {
             }
         });
     }
+    let reachable_emit_blocks: rustc_hash::FxHashSet<u32> = reach
+        .iter()
+        .map(|block| func.emit_block_id(*block))
+        .collect();
+    if let Some(ids) = &mut func.emit_ids {
+        debug_assert_eq!(ids.forced_cells.len(), ids.forced_cell_blocks.len());
+        let mut forced_cells = Vec::with_capacity(ids.forced_cells.len());
+        let mut forced_cell_blocks = Vec::with_capacity(ids.forced_cell_blocks.len());
+        for (&cell, &block) in ids.forced_cells.iter().zip(&ids.forced_cell_blocks) {
+            if reachable_emit_blocks.contains(&block) {
+                forced_cells.push(cell);
+                forced_cell_blocks.push(block);
+            }
+        }
+        ids.forced_cells = forced_cells;
+        ids.forced_cell_blocks = forced_cell_blocks;
+    }
     for b in bids {
         if !reach.contains(&b) {
             func.blocks[b].insts.clear();
@@ -471,7 +488,7 @@ pub fn scalarize_native_buffer_stores(func: &mut MirFunc) {
     }
     let mut replacement: HashMap<Idx<Inst>, Vec<Idx<Inst>>> = HashMap::default();
     for (store_i, base, index, value, kind) in targets {
-        let slot = func.insts.alloc(Inst::Index { base, index, kind });
+        let slot = func.alloc_inst(Inst::Index { base, index, kind });
         let mut new = vec![slot];
         gen_leaf_stores(func, slot, value, &mut new);
         replacement.insert(store_i, new);
@@ -549,7 +566,7 @@ fn leaf_operand(
             }
             // Opaque: read the field off the existing value.
             _ => {
-                let f = func.insts.alloc(Inst::Field { base: cur, field: comp });
+                let f = func.alloc_inst(Inst::Field { base: cur, field: comp });
                 out.push(f);
                 Some(f)
             }
@@ -647,7 +664,7 @@ pub fn flatten_nobox_nested_ctors(ws: &Workspace, func: &mut MirFunc) -> bool {
         let span = func.inst_spans.get(t).copied();
         // Preserve the variant: an explicit box stays explicit, it just stops
         // building a nested one on the way.
-        let flat = func.insts.alloc(if explicit {
+        let flat = func.alloc_inst(if explicit {
             Inst::MaterializeValueStruct { name, fields: leaves }
         } else {
             Inst::MakeValueStruct { name, fields: leaves }
@@ -735,7 +752,7 @@ fn gen_leaf_stores(func: &mut MirFunc, slot: Idx<Inst>, mvs: Idx<Inst>, out: &mu
     };
     let fields = fields.clone();
     for (fname, op) in fields {
-        out.push(func.insts.alloc(Inst::StoreField { base: slot, field: fname, value: op }));
+        out.push(func.alloc_inst(Inst::StoreField { base: slot, field: fname, value: op }));
     }
 }
 
@@ -1367,13 +1384,13 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> bool {
                 // spliced into the block (in `news`) BEFORE the store that reads it,
                 // or it floats free of any block and regalloc/codegen never emit it.
                 FieldSrc::ConstStr(s) => {
-                    let cv = func.insts.alloc(Inst::Const(Lit::Str(s)));
+                    let cv = func.alloc_inst(Inst::Const(Lit::Str(s)));
                     news.push(cv);
                     cv
                 }
                 FieldSrc::CellLoad(root) => {
                     let rc = get_field_cell(func, root, fname);
-                    let lv = func.insts.alloc(Inst::Load(rc));
+                    let lv = func.alloc_inst(Inst::Load(rc));
                     news.push(lv);
                     lv
                 }
@@ -1382,7 +1399,7 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> bool {
             if nn_field.get(&(c, fname)).copied().unwrap_or(false) {
                 func.mark_nonnull_value_struct(fc);
             }
-            news.push(func.insts.alloc(Inst::Store { cell: fc, value: fval }));
+            news.push(func.alloc_inst(Inst::Store { cell: fc, value: fval }));
         }
         replacement.insert(store_i, news);
     }
@@ -1406,7 +1423,7 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> bool {
         let mut mvs_fields = Vec::with_capacity(order.len());
         for fname in order {
             let fc = get_field_cell(func, root, fname);
-            let fl = func.insts.alloc(Inst::Load(fc));
+            let fl = func.alloc_inst(Inst::Load(fc));
             news.push(fl);
             mvs_fields.push((fname, fl));
         }
@@ -1774,7 +1791,7 @@ fn fnv1a32(s: &str) -> u32 {
 
 /// Append `inst` to block `bid` of `f`, returning its id.
 fn emit(f: &mut MirFunc, bid: Idx<Block>, inst: Inst) -> Idx<Inst> {
-    let id = f.insts.alloc(inst);
+    let id = f.alloc_inst(inst);
     f.blocks[bid].insts.push(id);
     id
 }
@@ -2033,8 +2050,8 @@ fn spill_cross_block_values(step: &mut MirFunc, s_cell: Idx<Cell>, block_ids: &[
         let mut reload: HashMap<Idx<Inst>, Idx<Inst>> = HashMap::default();
         let mut new_list: Vec<Idx<Inst>> = Vec::new();
         for v in used_here {
-            let sv = step.insts.alloc(Inst::Load(s_cell));
-            let rv = step.insts.alloc(Inst::Field { base: sv, field: vfield(v) });
+            let sv = step.alloc_inst(Inst::Load(s_cell));
+            let rv = step.alloc_inst(Inst::Field { base: sv, field: vfield(v) });
             new_list.push(sv);
             new_list.push(rv);
             reload.insert(v, rv);
@@ -2045,8 +2062,8 @@ fn spill_cross_block_values(step: &mut MirFunc, s_cell: Idx<Cell>, block_ids: &[
             new_list.push(id);
             // Spill right after a frame value's def.
             if frame_values.contains(&id) && def_block.get(&id) == Some(&bid) {
-                let sv = step.insts.alloc(Inst::Load(s_cell));
-                let st = step.insts.alloc(Inst::StoreField { base: sv, field: vfield(id), value: id });
+                let sv = step.alloc_inst(Inst::Load(s_cell));
+                let st = step.alloc_inst(Inst::StoreField { base: sv, field: vfield(id), value: id });
                 new_list.push(sv);
                 new_list.push(st);
             }
@@ -2152,9 +2169,9 @@ pub fn transform_coroutine(func: &MirFunc, channel: Option<&skull_mir::lower::Yi
         let old: Vec<Idx<Inst>> = std::mem::take(&mut step.blocks[bid].insts);
         for id in old {
             if let Inst::CoroSetInner(x) = step.insts[id] {
-                let sv = step.insts.alloc(Inst::Load(s_cell));
+                let sv = step.alloc_inst(Inst::Load(s_cell));
                 step.blocks[bid].insts.push(sv);
-                let store = step.insts.alloc(Inst::StoreField {
+                let store = step.alloc_inst(Inst::StoreField {
                     base: sv,
                     field: ustr::Ustr::from("__inner"),
                     value: x,
@@ -2471,13 +2488,13 @@ pub fn materialize_frame(
         for id in old {
             match mf.insts[id].clone() {
                 Inst::Load(c) if slots.contains_key(&c) => {
-                    let sv = mf.insts.alloc(Inst::Load(s_cell));
+                    let sv = mf.alloc_inst(Inst::Load(s_cell));
                     new.push(sv);
                     mf.insts[id] = Inst::Field { base: sv, field: field_of(slots[&c]) };
                     new.push(id);
                 }
                 Inst::Store { cell, value } if slots.contains_key(&cell) => {
-                    let sv = mf.insts.alloc(Inst::Load(s_cell));
+                    let sv = mf.alloc_inst(Inst::Load(s_cell));
                     new.push(sv);
                     mf.insts[id] = Inst::StoreField { base: sv, field: field_of(slots[&cell]), value };
                     new.push(id);
@@ -2507,9 +2524,9 @@ pub fn materialize_frame(
                     }
                     new.push(id);
                     for &(_, frame_cell, temp) in &redirects {
-                        let lt = mf.insts.alloc(Inst::Load(temp));
-                        let sv = mf.insts.alloc(Inst::Load(s_cell));
-                        let sf = mf.insts.alloc(Inst::StoreField {
+                        let lt = mf.alloc_inst(Inst::Load(temp));
+                        let sv = mf.alloc_inst(Inst::Load(s_cell));
+                        let sf = mf.alloc_inst(Inst::StoreField {
                             base: sv,
                             field: field_of(slots[&frame_cell]),
                             value: lt,
@@ -2529,9 +2546,9 @@ pub fn materialize_frame(
                     let k_use = if slots.contains_key(&key_cell) {
                         let t = mf.new_cell(None);
                         minted.insert(t);
-                        let sv = mf.insts.alloc(Inst::Load(s_cell));
-                        let fld = mf.insts.alloc(Inst::Field { base: sv, field: field_of(slots[&key_cell]) });
-                        let st = mf.insts.alloc(Inst::Store { cell: t, value: fld });
+                        let sv = mf.alloc_inst(Inst::Load(s_cell));
+                        let fld = mf.alloc_inst(Inst::Field { base: sv, field: field_of(slots[&key_cell]) });
+                        let st = mf.alloc_inst(Inst::Store { cell: t, value: fld });
                         new.extend([sv, fld, st]);
                         t
                     } else {
@@ -2549,9 +2566,9 @@ pub fn materialize_frame(
                     for (frame_cell, temp) in
                         [(key_cell, k_use), (val_cell, v_use)].into_iter().filter(|(c, _)| slots.contains_key(c))
                     {
-                        let lt = mf.insts.alloc(Inst::Load(temp));
-                        let sv = mf.insts.alloc(Inst::Load(s_cell));
-                        let sf = mf.insts.alloc(Inst::StoreField {
+                        let lt = mf.alloc_inst(Inst::Load(temp));
+                        let sv = mf.alloc_inst(Inst::Load(s_cell));
+                        let sf = mf.alloc_inst(Inst::StoreField {
                             base: sv,
                             field: field_of(slots[&frame_cell]),
                             value: lt,

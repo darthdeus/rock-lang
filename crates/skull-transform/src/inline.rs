@@ -772,6 +772,34 @@ fn cell_operands(inst: &Inst, push: &mut impl FnMut(Idx<Cell>)) {
     }
 }
 
+fn forced_cells(func: &MirFunc) -> Vec<(u32, u32)> {
+    let top: HashSet<Idx<Block>> = top_level_blocks(func).into_iter().collect();
+    let mut cells = HashSet::default();
+    for (_, inst) in func.insts.iter() {
+        if let Inst::Lambda { params, entry } = inst {
+            for &cell in params {
+                cells.insert((cell, *entry));
+            }
+        }
+    }
+    for (bid, block) in func.blocks.iter() {
+        if top.contains(&bid) {
+            continue;
+        }
+        for &iid in &block.insts {
+            cell_operands(&func.insts[iid], &mut |cell| {
+                cells.insert((cell, bid));
+            });
+        }
+    }
+    let mut cells: Vec<(u32, u32)> = cells
+        .into_iter()
+        .map(|(cell, block)| (func.emit_cell_id(cell), func.emit_block_id(block)))
+        .collect();
+    cells.sort_unstable();
+    cells
+}
+
 fn live_closure(func: &MirFunc) -> LiveClosure {
     let mut live = LiveClosure::default();
     let mut blocks = vec![func.entry];
@@ -891,6 +919,10 @@ fn compact_live_template(
     mut source: MirFunc,
     live: &LiveClosure,
 ) -> (MirFunc, HashMap<Idx<Block>, Idx<Block>>) {
+    let source_inst_span = source.emit_inst_span();
+    let source_cell_span = source.emit_cell_span();
+    let source_block_span = source.emit_block_span();
+    let source_forced_cells = forced_cells(&source);
     let mut cell_map = HashMap::default();
     let mut cells = comfy_la_arena::Arena::with_capacity(live.cells.len());
     for (id, cell) in source.cells.iter() {
@@ -927,6 +959,19 @@ fn compact_live_template(
         blocks[new_id].term = term;
     }
 
+    let mut emit_insts = vec![0; insts.len()];
+    for (old, new) in &inst_map {
+        emit_insts[u32::from(new.into_raw()) as usize] = source.emit_inst_id(*old);
+    }
+    let mut emit_cells = vec![0; cells.len()];
+    for (old, new) in &cell_map {
+        emit_cells[u32::from(new.into_raw()) as usize] = source.emit_cell_id(*old);
+    }
+    let mut emit_blocks = vec![0; blocks.len()];
+    for (old, new) in &block_map {
+        emit_blocks[u32::from(new.into_raw()) as usize] = source.emit_block_id(*old);
+    }
+
     let mut template = MirFunc::new(source.name);
     template.params = source.params.iter().map(|param| cell_map[param]).collect();
     template.lower_timing_enabled = source.lower_timing_enabled;
@@ -938,6 +983,16 @@ fn compact_live_template(
     template.insts = insts;
     template.cells = cells;
     template.blocks = blocks;
+    template.emit_ids = Some(skull_mir::mir::EmitIds {
+        insts: emit_insts,
+        cells: emit_cells,
+        blocks: emit_blocks,
+        forced_cells: source_forced_cells.iter().map(|(cell, _)| *cell).collect(),
+        forced_cell_blocks: source_forced_cells.iter().map(|(_, block)| *block).collect(),
+        next_insts: source_inst_span,
+        next_cells: source_cell_span,
+        next_blocks: source_block_span,
+    });
     template.entry = block_map[&source.entry];
     template.is_coroutine = source.is_coroutine;
     template.resume_arg = source.resume_arg.map(|cell| cell_map[&cell]);
@@ -1037,6 +1092,37 @@ struct CloneMapStats {
     inst_growth: usize,
     cell_growth: usize,
     block_growth: usize,
+}
+
+fn map_forced_cells(
+    caller: &MirFunc,
+    callee: &MirFunc,
+    overrides: &HashMap<Idx<Cell>, Idx<Cell>>,
+    cell_base: u32,
+    block_base: u32,
+) -> Vec<(u32, u32)> {
+    let Some(source) = callee.emit_ids.as_ref() else { return Vec::new() };
+    source
+        .forced_cells
+        .iter()
+        .zip(source.forced_cell_blocks.iter().copied())
+        .map(|(&source_id, source_block)| {
+            let target_cell = if let Some(target) = callee.cells.iter().find_map(|(cell, _)| {
+                (callee.emit_cell_id(cell) == source_id)
+                    .then(|| overrides.get(&cell).copied())
+                    .flatten()
+            }) {
+                caller.emit_cell_id(target)
+            } else {
+                let skipped = overrides
+                    .keys()
+                    .filter(|cell| callee.emit_cell_id(**cell) < source_id)
+                    .count() as u32;
+                cell_base + source_id - skipped
+            };
+            (target_cell, block_base + source_block)
+        })
+        .collect()
 }
 
 fn full_clone_stats(
@@ -1561,6 +1647,11 @@ fn clone_cells_insts(
     callee: &MirFunc,
     scratch: &mut InlineScratch,
 ) -> CloneMapStats {
+    let track_emit_ids = caller.emit_ids.is_some() || callee.emit_ids.is_some();
+    if track_emit_ids {
+        caller.ensure_emit_ids();
+    }
+    let (inst_base, cell_base, block_base) = caller.emit_nexts().unwrap_or_default();
     caller.insts.reserve(callee.insts.len());
     caller
         .cells
@@ -1568,13 +1659,18 @@ fn clone_cells_insts(
     scratch.cell_map.clear();
     let cell_capacity = scratch.cell_map.capacity();
     scratch.cell_map.reserve(callee.cells.len());
+    let mut skipped_cells = 0u32;
     for (cid, cell) in callee.cells.iter() {
         // A coalesced param maps to the caller cell its arg loads (no fresh copy).
-        let mapped = scratch
-            .overrides
-            .get(&cid)
-            .copied()
-            .unwrap_or_else(|| caller.cells.alloc(cell.clone()));
+        let mapped = if let Some(&mapped) = scratch.overrides.get(&cid) {
+            skipped_cells += 1;
+            mapped
+        } else if track_emit_ids {
+            let emit_id = cell_base + callee.emit_cell_id(cid) - skipped_cells;
+            caller.alloc_cell_with_emit_id(cell.clone(), emit_id)
+        } else {
+            caller.cells.alloc(cell.clone())
+        };
         scratch.cell_map.insert(cid, mapped);
     }
     scratch.inst_map.clear();
@@ -1584,12 +1680,23 @@ fn clone_cells_insts(
     scratch.inst_ids.reserve(callee.insts.len());
     scratch.block_map.clear();
     for (iid, inst) in callee.insts.iter() {
-        let nid = caller.insts.alloc(inst.clone());
+        let nid = if track_emit_ids {
+            caller.alloc_inst_with_emit_id(inst.clone(), inst_base + callee.emit_inst_id(iid))
+        } else {
+            caller.insts.alloc(inst.clone())
+        };
         scratch.inst_map.insert(iid, nid);
         scratch.inst_ids.push(nid);
     }
     for &nid in &scratch.inst_ids {
         remap_clone(&mut caller.insts[nid], &scratch.inst_map, &scratch.cell_map, &scratch.block_map);
+    }
+    if track_emit_ids {
+        caller.set_emit_nexts((
+            inst_base + callee.emit_inst_span(),
+            cell_base + callee.emit_cell_span() - skipped_cells,
+            block_base,
+        ));
     }
     let maps = CloneMapStats {
         inst_entries: scratch.inst_map.len(),
@@ -1611,6 +1718,11 @@ fn clone_all(
     callee: &MirFunc,
     scratch: &mut InlineScratch,
 ) -> CloneMapStats {
+    let track_emit_ids = caller.emit_ids.is_some() || callee.emit_ids.is_some();
+    if track_emit_ids {
+        caller.ensure_emit_ids();
+    }
+    let (inst_base, cell_base, block_base) = caller.emit_nexts().unwrap_or_default();
     caller.insts.reserve(callee.insts.len());
     caller
         .cells
@@ -1619,20 +1731,38 @@ fn clone_all(
     scratch.cell_map.clear();
     let cell_capacity = scratch.cell_map.capacity();
     scratch.cell_map.reserve(callee.cells.len());
+    let mut skipped_cells = 0u32;
     for (cid, cell) in callee.cells.iter() {
         // A coalesced param maps to the caller cell its arg loads (no fresh copy).
-        let mapped = scratch
-            .overrides
-            .get(&cid)
-            .copied()
-            .unwrap_or_else(|| caller.cells.alloc(cell.clone()));
+        let mapped = if let Some(&mapped) = scratch.overrides.get(&cid) {
+            skipped_cells += 1;
+            mapped
+        } else if track_emit_ids {
+            let emit_id = cell_base + callee.emit_cell_id(cid) - skipped_cells;
+            caller.alloc_cell_with_emit_id(cell.clone(), emit_id)
+        } else {
+            caller.cells.alloc(cell.clone())
+        };
         scratch.cell_map.insert(cid, mapped);
+    }
+    if track_emit_ids {
+        let forced = map_forced_cells(caller, callee, &scratch.overrides, cell_base, block_base);
+        let ids = caller.emit_ids.as_mut().unwrap();
+        for (cell, block) in forced {
+            ids.forced_cells.push(cell);
+            ids.forced_cell_blocks.push(block);
+        }
     }
     let block_capacity = scratch.block_map.capacity();
     scratch.block_map.clear();
     scratch.block_map.reserve(callee.blocks.len());
     for (bid, _) in callee.blocks.iter() {
-        scratch.block_map.insert(bid, caller.blocks.alloc(Block::new()));
+        let nbid = if track_emit_ids {
+            caller.alloc_block_with_emit_id(block_base + callee.emit_block_id(bid))
+        } else {
+            caller.blocks.alloc(Block::new())
+        };
+        scratch.block_map.insert(bid, nbid);
     }
     scratch.inst_map.clear();
     let inst_capacity = scratch.inst_map.capacity();
@@ -1640,7 +1770,11 @@ fn clone_all(
     scratch.inst_ids.clear();
     scratch.inst_ids.reserve(callee.insts.len());
     for (iid, inst) in callee.insts.iter() {
-        let nid = caller.insts.alloc(inst.clone());
+        let nid = if track_emit_ids {
+            caller.alloc_inst_with_emit_id(inst.clone(), inst_base + callee.emit_inst_id(iid))
+        } else {
+            caller.insts.alloc(inst.clone())
+        };
         scratch.inst_map.insert(iid, nid);
         scratch.inst_ids.push(nid);
     }
@@ -1658,6 +1792,13 @@ fn clone_all(
     caller
         .for_iter_headers
         .extend(callee.for_iter_headers.iter().map(|header| scratch.block_map[header]));
+    if track_emit_ids {
+        caller.set_emit_nexts((
+            inst_base + callee.emit_inst_span(),
+            cell_base + callee.emit_cell_span() - skipped_cells,
+            block_base + callee.emit_block_span(),
+        ));
+    }
     let maps = CloneMapStats {
         inst_entries: scratch.inst_map.len(),
         cell_entries: scratch.cell_map.len(),
@@ -2127,7 +2268,7 @@ fn splice_straight(
     for (i, (param, arg)) in callee.params.iter().zip(args.iter()).enumerate() {
         if !scratch.coalesced[i] {
             let pc = scratch.cell_map[param];
-            let store = func.insts.alloc(Inst::Store { cell: pc, value: *arg });
+            let store = func.alloc_inst(Inst::Store { cell: pc, value: *arg });
             uses.add_inst(func, store);
             new_insts.push(store);
         }
@@ -2146,7 +2287,7 @@ fn splice_straight(
                 _ => unreachable!("straight candidate entry must end in Return"),
             };
             for (dest, rv) in dests.iter().zip(values.iter()) {
-                let st = func.insts.alloc(Inst::Store {
+                let st = func.alloc_inst(Inst::Store {
                     cell: *dest,
                     value: scratch.inst_map[rv],
                 });
@@ -2271,7 +2412,7 @@ fn splice_general(
             continue;
         }
         let pc = scratch.cell_map[param];
-        let store = func.insts.alloc(Inst::Store { cell: pc, value: *arg });
+        let store = func.alloc_inst(Inst::Store { cell: pc, value: *arg });
         uses.add_inst(func, store);
         prefix.push(store);
     }
@@ -2294,19 +2435,19 @@ fn splice_general(
                 let v = match vs.first() {
                     Some(v) => *v,
                     None => {
-                        let nil = func.insts.alloc(Inst::Const(Lit::Nil));
+                        let nil = func.alloc_inst(Inst::Const(Lit::Nil));
                         func.blocks[nb].insts.push(nil);
                         uses.add_inst(func, nil);
                         nil
                     }
                 };
-                let st = func.insts.alloc(Inst::Store { cell: rc, value: v });
+                let st = func.alloc_inst(Inst::Store { cell: rc, value: v });
                 func.blocks[nb].insts.push(st);
                 uses.add_inst(func, st);
             }
             Site::Multi { dests, .. } => {
                 for (dest, rv) in dests.iter().zip(vs.iter()) {
-                    let st = func.insts.alloc(Inst::Store { cell: *dest, value: *rv });
+                let st = func.alloc_inst(Inst::Store { cell: *dest, value: *rv });
                     func.blocks[nb].insts.push(st);
                     uses.add_inst(func, st);
                 }
@@ -2634,6 +2775,53 @@ mod tests {
         assert_eq!(template.insts.len(), counts.live_instructions);
         assert_eq!(template.cells.len(), counts.live_cells);
         assert_eq!(template.blocks.len(), counts.live_blocks);
+    }
+
+    #[test]
+    fn compact_template_preserves_source_emission_ids() {
+        let mut source = MirFunc::new(Ustr::from("template_ids"));
+        let dead = source.new_cell(Some(Ustr::from("dead")));
+        let live = source.new_cell(Some(Ustr::from("live")));
+        let value = source.emit(source.entry, Inst::Load(live));
+        source.set_term(source.entry, Term::Return(vec![value]));
+        let dead_block = source.new_block();
+        let dead_value = source.emit(dead_block, Inst::Load(dead));
+        source.set_term(dead_block, Term::Return(vec![dead_value]));
+
+        let live = live_closure(&source);
+        let (template, _) = compact_live_template(source, &live);
+
+        assert_eq!(template.cells.len(), 1);
+        assert_eq!(template.emit_cell_id(template.cells.iter().next().unwrap().0), 1);
+        assert_eq!(template.emit_cell_span(), 2);
+        assert_eq!(template.blocks.len(), 1);
+        assert_eq!(template.emit_block_span(), 2);
+    }
+
+    #[test]
+    fn folded_dead_blocks_drop_virtual_forced_cell_provenance() {
+        let mut func = MirFunc::new(Ustr::from("forced_provenance"));
+        let cond = func.emit(func.entry, Inst::Const(Lit::Bool(true)));
+        let live = func.new_block();
+        let dead = func.new_block();
+        let cell = func.new_cell(None);
+        let value = func.emit(dead, Inst::Load(cell));
+        func.set_term(func.entry, Term::Branch { cond, then_bb: live, else_bb: dead });
+        func.set_term(live, Term::Return(Vec::new()));
+        func.set_term(dead, Term::Return(vec![value]));
+        func.ensure_emit_ids();
+        let dead_cell_id = func.emit_cell_id(cell);
+        let dead_block_id = func.emit_block_id(dead);
+        func.emit_ids.as_mut().unwrap().forced_cells.push(dead_cell_id);
+        func.emit_ids
+            .as_mut()
+            .unwrap()
+            .forced_cell_blocks
+            .push(dead_block_id);
+
+        assert!(crate::fold_const_branches(&mut func));
+        assert!(func.emit_ids.as_ref().unwrap().forced_cells.is_empty());
+        assert!(func.emit_ids.as_ref().unwrap().forced_cell_blocks.is_empty());
     }
 
     #[test]

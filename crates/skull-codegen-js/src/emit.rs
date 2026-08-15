@@ -12,7 +12,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use bone_semantic::inference::Workspace;
-use comfy_la_arena::Idx;
+use comfy_la_arena::{Idx, RawIdx};
 use skull_mir::intrinsics::{Emission, IntrinsicTable};
 use skull_mir::instance::Instance;
 use skull_mir::mir::{Block, Cell, ContainerKind, FuncRef, Inst, Lit, MirFunc, Term};
@@ -112,8 +112,8 @@ fn combine_rejections(mut rejections: Vec<(String, CompilerError)>) -> Result<()
 
 /// A cell's JS identifier (`c<raw>`). Params and locals share the scheme; params
 /// materialize in the fn arg list, other stored cells as hoisted `let`s.
-fn cell_name<T>(cell: Idx<T>) -> String {
-    format!("c{}", raw(cell))
+fn cell_name(mf: &MirFunc, cell: Idx<Cell>) -> String {
+    format!("c{}", mf.emit_cell_id(cell))
 }
 
 fn cell_is_uint(ws: &Workspace, ty: Option<bone_semantic::prelude::TyId>) -> bool {
@@ -563,18 +563,18 @@ pub fn emit_fn_with_callees(
         indent: 1,
     };
 
-    let params: Vec<String> = mf.params.iter().map(|&c| cell_name(c)).collect();
+    let params: Vec<String> = mf.params.iter().map(|&c| cell_name(mf, c)).collect();
     let mut header = format!("function {js_name}({}) {{\n", params.join(", "));
     for &c in &mf.params {
         if cell_is_uint(ws, mf.cells[c].ty) {
-            header.push_str(&format!("  {} = {} >>> 0;\n", cell_name(c), cell_name(c)));
+            header.push_str(&format!("  {} = {} >>> 0;\n", cell_name(mf, c), cell_name(mf, c)));
         }
     }
 
     // Hoist declarations for every stored cell that is not a param (JS block
     // scope would otherwise not carry a cell written in one arm and read in the
     // merge -- the `sign` shape).
-    let param_set: HashSet<u32> = mf.params.iter().map(|&c| raw(c)).collect();
+    let param_set: HashSet<Idx<Cell>> = mf.params.iter().copied().collect();
     let mut declared: Vec<u32> = Vec::new();
     let mut seen = HashSet::new();
     // Only cells stored in REACHABLE blocks -- a dead block's `store` never
@@ -582,8 +582,8 @@ pub fn emit_fn_with_callees(
     for &b in &reachable_blocks(mf) {
         for &iid in &mf.blocks[b].insts {
             for cell in inst_writes(&mf.insts[iid]) {
-                if !param_set.contains(&raw(cell)) && seen.insert(raw(cell)) {
-                    declared.push(raw(cell));
+                if !param_set.contains(&cell) && seen.insert(cell) {
+                    declared.push(mf.emit_cell_id(cell));
                 }
             }
         }
@@ -598,7 +598,7 @@ pub fn emit_fn_with_callees(
     match em.emit_seq(mf.entry, None, LoopCtx::default()) {
         Ok(()) => {
             let body = format!("{header}{}}}\n", em.out);
-            Ok(finalize_labels(body, &em.loop_markers, &em.labels_used))
+            Ok(finalize_labels(body, mf, &em.loop_markers, &em.labels_used))
         }
         // The structured relooper cannot express this CFG (a shared branch tail
         // holding a nested loop, or one over the tail-dup cap). Re-emit the SAME
@@ -657,21 +657,25 @@ pub fn emit_fn_trampoline(
         out: String::new(),
         indent: 1,
     };
-    let pnames: Vec<String> = params.iter().map(|&c| cell_name(c)).collect();
+    let pnames: Vec<String> = params.iter().map(|&c| cell_name(mf, c)).collect();
     let mut header = format!("function {js_name}({}) {{\n", pnames.join(", "));
-    let param_set: HashSet<u32> = params.iter().map(|&c| raw(c)).collect();
+    let param_set: HashSet<Idx<Cell>> = params.iter().copied().collect();
     let mut declared: Vec<u32> = Vec::new();
     let mut seen = HashSet::new();
     for &b in &region {
         for &iid in &mf.blocks[b].insts {
             for cell in inst_writes(&mf.insts[iid]) {
-                if !param_set.contains(&raw(cell)) && seen.insert(raw(cell)) {
-                    declared.push(raw(cell));
+                if !param_set.contains(&cell) && seen.insert(cell) {
+                    declared.push(mf.emit_cell_id(cell));
                 }
             }
         }
     }
-    let mut hoisted_names: Vec<u32> = em.hoisted_temps.iter().copied().collect();
+    let mut hoisted_names: Vec<u32> = em
+        .hoisted_temps
+        .iter()
+        .map(|&id| mf.emit_inst_id(Idx::from_raw(RawIdx::from_u32(id))))
+        .collect();
     hoisted_names.sort_unstable();
     if !declared.is_empty() || !hoisted_names.is_empty() {
         declared.sort_unstable();
@@ -682,15 +686,15 @@ pub fn emit_fn_trampoline(
             .collect();
         header.push_str(&format!("  let {};\n", names.join(", ")));
     }
-    em.push(&format!("var __bb = {};", raw(entry)));
+    em.push(&format!("var __bb = {};", mf.emit_block_id(entry)));
     em.push("for (;;) {");
     em.indent += 1;
     em.push("switch (__bb) {");
     em.indent += 1;
     let mut cases = region.clone();
-    cases.sort_by_key(|b| raw(*b));
+    cases.sort_by_key(|b| mf.emit_block_id(*b));
     for b in cases {
-        em.push(&format!("case {}: {{", raw(b)));
+        em.push(&format!("case {}: {{", mf.emit_block_id(b)));
         em.indent += 1;
         em.emit_block_effects(b)?;
         em.emit_trampoline_term(b)?;
@@ -707,16 +711,25 @@ pub fn emit_fn_trampoline(
 /// A unique, JS-invalid sentinel a loop emits in place of its label; resolved by
 /// [`finalize_labels`] to `L<h>: ` if a multi-level jump targeted it, else stripped.
 /// `\x01` cannot appear in emitted JS source, so the replace is unambiguous.
-fn loop_marker(h: Idx<Block>) -> String {
-    format!("\u{1}L{}\u{1}", raw(h))
+fn loop_marker(mf: &MirFunc, h: Idx<Block>) -> String {
+    format!("\u{1}L{}\u{1}", mf.emit_block_id(h))
 }
 
 /// Resolve loop-label sentinels: a targeted loop's marker becomes `L<h>: `; the
 /// rest are stripped, keeping single-level loops byte-identical.
-fn finalize_labels(mut s: String, markers: &[Idx<Block>], used: &HashSet<Idx<Block>>) -> String {
+fn finalize_labels(
+    mut s: String,
+    mf: &MirFunc,
+    markers: &[Idx<Block>],
+    used: &HashSet<Idx<Block>>,
+) -> String {
     for &h in markers {
-        let m = loop_marker(h);
-        let repl = if used.contains(&h) { format!("L{}: ", raw(h)) } else { String::new() };
+        let m = loop_marker(mf, h);
+        let repl = if used.contains(&h) {
+            format!("L{}: ", mf.emit_block_id(h))
+        } else {
+            String::new()
+        };
         s = s.replace(&m, &repl);
     }
     s
@@ -1353,13 +1366,13 @@ impl Emitter<'_> {
     /// init clause is empty. `continue` targets the latch (the `for` increment
     /// runs it); `break` targets the exit.
     fn emit_counted(&mut self, header: Idx<Block>, li: LoopInfo) -> Result<(), CompilerError> {
-        let slot = cell_name(li.slot);
+        let slot = cell_name(self.mf, li.slot);
         // The bound is a `Load` of a hoisted preheader cell (or a const),
         // rendered inline so it never depends on a header-block temp we skip.
         let bound = self.render_inst_expr(li.bound)?;
         let cmp = if li.inclusive { "<=" } else { "<" };
         self.loop_markers.push(header);
-        let mark = loop_marker(header);
+        let mark = loop_marker(self.mf, header);
         self.push(&format!("{mark}for (; {slot} {cmp} {bound}; {slot} = {slot} + 1) {{"));
         self.indent += 1;
         let ctx = LoopCtx { cont: Some(li.latch), brk: Some(li.exit) };
@@ -1391,9 +1404,9 @@ impl Emitter<'_> {
         }
         self.labels_used.insert(header);
         Some(if is_cont {
-            format!("continue L{};", raw(header))
+            format!("continue L{};", self.mf.emit_block_id(header))
         } else {
-            format!("break L{};", raw(header))
+            format!("break L{};", self.mf.emit_block_id(header))
         })
     }
 
@@ -1414,7 +1427,7 @@ impl Emitter<'_> {
 
         self.active.insert(h);
         self.loop_markers.push(h);
-        let mark = loop_marker(h);
+        let mark = loop_marker(self.mf, h);
         self.push(&format!("{mark}while (true) {{"));
         self.indent += 1;
         self.loop_stack.push(LoopFrame { cont: h, brk: exit, header: h });
@@ -1489,11 +1502,11 @@ impl Emitter<'_> {
     /// `CallMulti`/`CallValueMulti` have dests and always emit as statements).
     fn multi_assign(&self, dests: &[Idx<Cell>], call: &str) -> String {
         match dests {
-            [d] => format!("{} = {call};", cell_name(*d)),
+            [d] => format!("{} = {call};", cell_name(self.mf, *d)),
             _ => {
-                let mut s = format!("{} = {call};", cell_name(dests[0]));
+                let mut s = format!("{} = {call};", cell_name(self.mf, dests[0]));
                 for (i, d) in dests.iter().enumerate().skip(1) {
-                    s.push_str(&format!(" {} = {};", cell_name(*d), ret_slot(i)));
+                    s.push_str(&format!(" {} = {};", cell_name(self.mf, *d), ret_slot(i)));
                 }
                 s
             }
@@ -1505,7 +1518,7 @@ impl Emitter<'_> {
             match &self.mf.insts[iid] {
                 Inst::Store { cell, value } => {
                     let rhs = self.render_val(*value)?;
-                    let line = format!("{} = {};", cell_name(*cell), rhs);
+                    let line = format!("{} = {};", cell_name(self.mf, *cell), rhs);
                     self.push(&line);
                 }
                 Inst::StoreIndex { base, index, value, kind } => {
@@ -1555,8 +1568,8 @@ impl Emitter<'_> {
                 // materialized `v<N>` temp, so re-rendering it is safe.
                 Inst::MapNext { key_cell, val_cell, table } => {
                     let t = self.render_val(*table)?;
-                    let k = cell_name(*key_cell);
-                    let v = cell_name(*val_cell);
+                    let k = cell_name(self.mf, *key_cell);
+                    let v = cell_name(self.mf, *val_cell);
                     self.push(&format!("{k} = __map_next({t}, {k});"));
                     self.push(&format!("{v} = ({k} === null ? null : {t}.get({k}));"));
                 }
@@ -1637,9 +1650,9 @@ impl Emitter<'_> {
                     // `hoisted_temps`); assign, don't re-`let`, so it stays live
                     // across the flat switch cases. Block-local temps `let` here.
                     if self.hoisted_temps.contains(&raw(iid)) {
-                        self.push(&format!("v{} = {};", raw(iid), expr));
+                        self.push(&format!("v{} = {};", self.mf.emit_inst_id(iid), expr));
                     } else {
-                        self.push(&format!("let v{} = {};", raw(iid), expr));
+                        self.push(&format!("let v{} = {};", self.mf.emit_inst_id(iid), expr));
                     }
                 }
                 // An inlinable value inst renders at its use; an unused pure inst
@@ -1693,13 +1706,13 @@ impl Emitter<'_> {
     /// discriminant is a temp or a pure inlinable, so re-rendering is safe).
     fn emit_trampoline_term(&mut self, b: Idx<Block>) -> Result<(), CompilerError> {
         match self.mf.blocks[b].term.clone() {
-            Term::Goto(t) => self.push(&format!("__bb = {}; continue;", raw(t))),
+            Term::Goto(t) => self.push(&format!("__bb = {}; continue;", self.mf.emit_block_id(t))),
             Term::Branch { cond, then_bb, else_bb } => {
                 let c = self.render_val(cond)?;
                 self.push(&format!(
                     "if ({c}) {{ __bb = {}; }} else {{ __bb = {}; }} continue;",
-                    raw(then_bb),
-                    raw(else_bb)
+                    self.mf.emit_block_id(then_bb),
+                    self.mf.emit_block_id(else_bb)
                 ));
             }
             Term::Switch { discr, cases, default } => {
@@ -1714,9 +1727,12 @@ impl Emitter<'_> {
                         Lit::Float(f) => format!("{d} === {}", js_number(*f)?),
                         Lit::Str(v) => format!("{d} === {}", js_string_lit(v.as_str())?),
                     };
-                    s.push_str(&format!("if ({cmp}) {{ __bb = {}; }} else ", raw(*bb)));
+                    s.push_str(&format!(
+                        "if ({cmp}) {{ __bb = {}; }} else ",
+                        self.mf.emit_block_id(*bb)
+                    ));
                 }
-                s.push_str(&format!("{{ __bb = {}; }} continue;", raw(default)));
+                s.push_str(&format!("{{ __bb = {}; }} continue;", self.mf.emit_block_id(default)));
                 self.push(&s);
             }
             Term::Return(vs) => match vs.as_slice() {
@@ -1773,7 +1789,7 @@ impl Emitter<'_> {
         if self.inlinable[raw(iid) as usize] {
             self.render_inst_expr(iid)
         } else {
-            Ok(format!("v{}", raw(iid)))
+            Ok(format!("v{}", self.mf.emit_inst_id(iid)))
         }
     }
 
@@ -1792,7 +1808,7 @@ impl Emitter<'_> {
             Inst::Const(Lit::Bool(b)) => b.to_string(),
             Inst::Const(Lit::Nil) => "null".to_string(),
             Inst::Const(Lit::Str(s)) => js_string_lit(s.as_str())?,
-            Inst::Load(c) => cell_name(*c),
+            Inst::Load(c) => cell_name(self.mf, *c),
             Inst::IntAdd(a, b) | Inst::FloatAdd(a, b) => bin(a, "+", b, self)?,
             Inst::IntSub(a, b) | Inst::FloatSub(a, b) => bin(a, "-", b, self)?,
             Inst::IntMul(a, b) | Inst::FloatMul(a, b) => bin(a, "*", b, self)?,

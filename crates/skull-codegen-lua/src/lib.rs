@@ -626,9 +626,9 @@ fn collect_const_hoists(
 /// state-table field `<s>.c<raw>`; everything else is its colored local
 /// (`c<color>`) or — when uncolored (a coroutine `__step`, passed an empty
 /// color map) — the raw `c<raw>`.
-fn cellname(frame: Option<&FrameCtx>, colors: &[u32], c: Idx<Cell>) -> String {
+fn cellname(func: &MirFunc, frame: Option<&FrameCtx>, colors: &[u32], c: Idx<Cell>) -> String {
     let mut s = String::new();
-    write_cellname(&mut s, frame, colors, c);
+    write_cellname(&mut s, func, frame, colors, c);
     s
 }
 
@@ -639,23 +639,29 @@ fn cellname(frame: Option<&FrameCtx>, colors: &[u32], c: Idx<Cell>) -> String {
 /// there); env-record captures and box `.v` access are now materialized as MIR
 /// `Field`/`StoreField` by `convert_closures`, so this fn no longer special-cases
 /// them.
-fn write_cellname(out: &mut String, frame: Option<&FrameCtx>, colors: &[u32], c: Idx<Cell>) {
+fn write_cellname(
+    out: &mut String,
+    func: &MirFunc,
+    frame: Option<&FrameCtx>,
+    colors: &[u32],
+    c: Idx<Cell>,
+) {
     if let Some(f) = frame {
         if f.fields.contains(&c) {
-            write_cellname(out, None, colors, f.s_cell);
+            write_cellname(out, func, None, colors, f.s_cell);
             out.push_str(".c");
             let slot = *f.slots.get(&c).expect("frame field cell must carry a dense slot");
             push_uint(out, slot);
             return;
         }
     }
-    write_cell_local(out, colors, c);
+    write_cell_local(out, func, colors, c);
 }
 
-fn write_cell_local(out: &mut String, colors: &[u32], c: Idx<Cell>) {
+fn write_cell_local(out: &mut String, func: &MirFunc, colors: &[u32], c: Idx<Cell>) {
     out.push('c');
     match colors[raw(c) as usize] {
-        u32::MAX => push_uint(out, raw(c)),
+        u32::MAX => push_uint(out, func.emit_cell_id(c)),
         col => push_uint(out, col),
     }
 }
@@ -1139,7 +1145,7 @@ fn render_scope(
         .iter()
         .map(|(&h, cl)| regalloc::LoopScope { header: h, region: cl.region.iter().copied().collect() })
         .collect();
-    loop_scopes.sort_by_key(|ls| raw(ls.header));
+    loop_scopes.sort_by_key(|ls| func.emit_block_id(ls.header));
     let mut va = regalloc::color_values(func, &rpo, &inlinable, &loop_scopes);
     if va.color_scope.len() > 150 && !loop_scopes.is_empty() {
         va = regalloc::color_values(func, &rpo, &inlinable, &[]);
@@ -1157,16 +1163,16 @@ fn render_scope(
             out.push_str(", ");
         }
         wrote_param = true;
-        write_cell_local(out, cell_colors, c);
+        write_cell_local(out, func, cell_colors, c);
     }
     out.push_str(")\n");
 
     for &c in params {
         if cell_is_uint(ws, func.cells[c].ty) {
             out.push_str("  ");
-            write_cell_local(out, cell_colors, c);
+            write_cell_local(out, func, cell_colors, c);
             out.push_str(" = ((");
-            write_cell_local(out, cell_colors, c);
+            write_cell_local(out, func, cell_colors, c);
             out.push_str(" % 4294967296) + 4294967296) % 4294967296\n");
         }
     }
@@ -1231,7 +1237,7 @@ fn render_scope(
             out.push('c');
             match col {
                 Some(col) => push_uint(out, col),
-                None => push_uint(out, raw(cid)),
+                None => push_uint(out, func.emit_cell_id(cid)),
             }
         }
     }
@@ -1280,11 +1286,11 @@ pub fn mangled(ws: &Workspace, r: FuncRef) -> String {
 /// The Lua local name for a value: its register `r<color>` (colored values) or
 /// the raw `v<raw>` fallback (an uncolored value — should not occur once every
 /// value is colored, but keeps the printer total).
-fn write_vname(out: &mut String, colors: &[u32], id: Idx<Inst>) {
+fn write_vname(out: &mut String, func: &MirFunc, colors: &[u32], id: Idx<Inst>) {
     match colors[raw(id) as usize] {
         u32::MAX => {
             out.push('v');
-            push_uint(out, raw(id));
+            push_uint(out, func.emit_inst_id(id));
         }
         c => {
             out.push('r');
@@ -1339,7 +1345,7 @@ impl Emitter<'_> {
         }
         self.emitted[raw(bb) as usize] = true;
         out.push_str("  ::bb");
-        push_uint(out, raw(bb));
+        push_uint(out, self.func.emit_block_id(bb));
         out.push_str("::\n");
         let insts: &[Idx<Inst>] = &self.func.blocks[bb].insts;
         for &id in insts {
@@ -1369,10 +1375,10 @@ impl Emitter<'_> {
         let (slot, inclusive, body_entry, latch, exit) =
             (cl.slot, cl.inclusive, cl.body_entry, cl.latch, cl.exit);
         let region: HashSet<Idx<Block>> = cl.region.iter().copied().collect();
-        let slot_name = cellname(self.frame, self.cell_colors, slot);
+        let slot_name = cellname(self.func, self.frame, self.cell_colors, slot);
         let hi = match &cl.hi {
             HiLimit::Value(v) => self.opnd_str(*v),
-            HiLimit::Cell(c) => cellname(self.frame, self.cell_colors, *c),
+            HiLimit::Cell(c) => cellname(self.func, self.frame, self.cell_colors, *c),
         };
         let limit = if inclusive { hi } else { format!("{hi} - 1") };
 
@@ -1412,11 +1418,11 @@ impl Emitter<'_> {
         // loop-done edge (header's false branch).
         self.emitted[raw(latch) as usize] = true;
         out.push_str("  ::bb");
-        push_uint(out, raw(latch));
+        push_uint(out, self.func.emit_block_id(latch));
         out.push_str("::\n");
         out.push_str("  end\n");
         out.push_str("  goto bb");
-        push_uint(out, raw(exit));
+        push_uint(out, self.func.emit_block_id(exit));
         out.push('\n');
     }
 
@@ -1442,7 +1448,7 @@ impl Emitter<'_> {
         let inst = &self.func.insts[id];
         if inst.produces_value() {
             out.push_str("  ");
-            write_vname(out, &self.colors, id);
+            write_vname(out, self.func, &self.colors, id);
             out.push_str(" = ");
             self.write_value(out, id, inst);
             out.push('\n');
@@ -1507,7 +1513,7 @@ impl Emitter<'_> {
         // A `Call`/`Index` value is never tree-folded here (`always_inlinable`
         // excludes them), so `result` has a register.
         let mut lv = String::new();
-        write_vname(&mut lv, &self.colors, result);
+        write_vname(&mut lv, self.func, &self.colors, result);
 
         out.push_str("  do\n");
         for (p, a) in callee.param_decls.iter().zip(args.iter()) {
@@ -1550,7 +1556,7 @@ impl Emitter<'_> {
             self.write_value(out, id, &self.func.insts[id]);
             out.push(')');
         } else {
-            write_vname(out, &self.colors, id);
+            write_vname(out, self.func, &self.colors, id);
         }
     }
 
@@ -1582,7 +1588,7 @@ impl Emitter<'_> {
         match inst {
             Inst::Const(l) => write_lit(out, l),
             Inst::Global(g) => out.push_str(g.as_str()),
-            Inst::Load(c) => write_cellname(out, self.frame, self.cell_colors, *c),
+            Inst::Load(c) => write_cellname(out, self.func, self.frame, self.cell_colors, *c),
 
             Inst::IntAdd(a, b) | Inst::FloatAdd(a, b) => self.write_bin(out, "+", a, b),
             Inst::IntSub(a, b) | Inst::FloatSub(a, b) => self.write_bin(out, "-", a, b),
@@ -2127,7 +2133,7 @@ impl Emitter<'_> {
         match inst {
             Inst::Store { cell, value } => {
                 out.push_str("  ");
-                write_cellname(out, self.frame, self.cell_colors, *cell);
+                write_cellname(out, self.func, self.frame, self.cell_colors, *cell);
                 out.push_str(" = ");
                 self.write_opnd(out, *value);
                 out.push('\n');
@@ -2220,9 +2226,9 @@ impl Emitter<'_> {
                 table,
             } => {
                 // `key_cell` is referenced twice; render it once.
-                let k = cellname(self.frame, self.cell_colors, *key_cell);
+                let k = cellname(self.func, self.frame, self.cell_colors, *key_cell);
                 let _ = write!(out, "  {k}, ");
-                write_cellname(out, self.frame, self.cell_colors, *val_cell);
+                write_cellname(out, self.func, self.frame, self.cell_colors, *val_cell);
                 let _ = write!(out, " = next(");
                 self.write_opnd(out, *table);
                 let _ = writeln!(out, ", {k})");
@@ -2235,7 +2241,7 @@ impl Emitter<'_> {
                     if i > 0 {
                         out.push_str(", ");
                     }
-                    write_cellname(out, self.frame, self.cell_colors, *c);
+                    write_cellname(out, self.func, self.frame, self.cell_colors, *c);
                 }
                 let callee = self.callee_name(id, *func);
                 let _ = write!(out, " = {callee}(");
@@ -2250,7 +2256,7 @@ impl Emitter<'_> {
                     if i > 0 {
                         out.push_str(", ");
                     }
-                    write_cellname(out, self.frame, self.cell_colors, *c);
+                    write_cellname(out, self.func, self.frame, self.cell_colors, *c);
                 }
                 out.push_str(" = ");
                 self.write_opnd(out, *callee);
@@ -2281,7 +2287,7 @@ impl Emitter<'_> {
             }
             Term::Goto(b) => {
                 out.push_str("  goto bb");
-                push_uint(out, raw(*b));
+                push_uint(out, self.func.emit_block_id(*b));
                 out.push('\n');
             }
             Term::Branch {
@@ -2292,9 +2298,9 @@ impl Emitter<'_> {
                 out.push_str("  if ");
                 self.write_opnd(out, *cond);
                 out.push_str(" then goto bb");
-                push_uint(out, raw(*then_bb));
+                push_uint(out, self.func.emit_block_id(*then_bb));
                 out.push_str(" else goto bb");
-                push_uint(out, raw(*else_bb));
+                push_uint(out, self.func.emit_block_id(*else_bb));
                 out.push_str(" end\n");
             }
             Term::Switch {
@@ -2311,16 +2317,16 @@ impl Emitter<'_> {
                     let _ = write!(out, "  {kw} {d} == ");
                     write_lit(out, l);
                     out.push_str(" then goto bb");
-                    push_uint(out, raw(*b));
+                    push_uint(out, self.func.emit_block_id(*b));
                     out.push('\n');
                 }
                 if first {
                     out.push_str("  goto bb");
-                    push_uint(out, raw(*default));
+                    push_uint(out, self.func.emit_block_id(*default));
                     out.push('\n');
                 } else {
                     out.push_str("  else goto bb");
-                    push_uint(out, raw(*default));
+                    push_uint(out, self.func.emit_block_id(*default));
                     out.push_str(" end\n");
                 }
             }

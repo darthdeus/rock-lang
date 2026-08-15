@@ -305,7 +305,7 @@ fn repack_bound_next_element(
     let mut tail: Vec<Idx<Inst>> = Vec::new();
     let mut taken = 0usize;
     let packed = emit_elem_rebuild(func, plan, &leaf_cells, &mut taken, &mut tail);
-    let store = func.insts.alloc(Inst::Store { cell: elem_cell, value: packed });
+    let store = func.alloc_inst(Inst::Store { cell: elem_cell, value: packed });
 
     // Inserted immediately after the call, in its own block: the element cell must
     // hold the rebuilt value before the `ok` branch reads it.
@@ -339,7 +339,7 @@ fn emit_elem_rebuild(
 ) -> Idx<Inst> {
     match plan {
         ElemRebuild::Passthrough => {
-            let l = func.insts.alloc(Inst::Load(cells[*taken]));
+            let l = func.alloc_inst(Inst::Load(cells[*taken]));
             *taken += 1;
             tail.push(l);
             l
@@ -347,12 +347,12 @@ fn emit_elem_rebuild(
         ElemRebuild::Value(name, fields) => {
             let mut fs = Vec::with_capacity(fields.len());
             for f in fields {
-                let l = func.insts.alloc(Inst::Load(cells[*taken]));
+                let l = func.alloc_inst(Inst::Load(cells[*taken]));
                 *taken += 1;
                 tail.push(l);
                 fs.push((*f, l));
             }
-            let packed = func.insts.alloc(Inst::MakeValueStruct { name: *name, fields: fs });
+            let packed = func.alloc_inst(Inst::MakeValueStruct { name: *name, fields: fs });
             tail.push(packed);
             packed
         }
@@ -361,7 +361,7 @@ fn emit_elem_rebuild(
             for p in parts {
                 vs.push(emit_elem_rebuild(func, p, cells, taken, tail));
             }
-            let packed = func.insts.alloc(Inst::MakeTuple(vs));
+            let packed = func.alloc_inst(Inst::MakeTuple(vs));
             tail.push(packed);
             packed
         }
