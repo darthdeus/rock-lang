@@ -603,6 +603,7 @@ pub struct InlinePopulationAttribution {
     pub candidate_lower_attempted: usize,
     pub candidate_lowered_keys: usize,
     pub candidate_rejected_before_lower: usize,
+    pub candidate_full_clone_ns: u64,
     pub candidate_compact_ns: u64,
     pub candidate_raw_instructions: usize,
     pub candidate_raw_cells: usize,
@@ -610,6 +611,8 @@ pub struct InlinePopulationAttribution {
     pub candidate_cleaned_instructions: usize,
     pub candidate_cleaned_cells: usize,
     pub candidate_cleaned_blocks: usize,
+    pub candidate_full_clone_capacity: (usize, usize, usize),
+    pub candidate_compact_capacity: (usize, usize, usize),
     pub ordinary_lowered_keys: usize,
     pub specialized_lowered_keys: usize,
     pub ordinary_lowering_derivations: usize,
@@ -3953,6 +3956,7 @@ fn assemble(
                 population.candidate_lowered_keys += usize::from(profile.lowered);
                 population.candidate_rejected_before_lower +=
                     usize::from(profile.rejected_before_lower);
+                population.candidate_full_clone_ns += profile.full_clone_ns;
                 population.candidate_compact_ns += profile.compact_ns;
                 population.candidate_raw_instructions += profile.raw_instructions;
                 population.candidate_raw_cells += profile.raw_cells;
@@ -3960,6 +3964,12 @@ fn assemble(
                 population.candidate_cleaned_instructions += profile.cleaned_instructions;
                 population.candidate_cleaned_cells += profile.cleaned_cells;
                 population.candidate_cleaned_blocks += profile.cleaned_blocks;
+                population.candidate_full_clone_capacity.0 += profile.full_clone_inst_capacity;
+                population.candidate_full_clone_capacity.1 += profile.full_clone_cell_capacity;
+                population.candidate_full_clone_capacity.2 += profile.full_clone_block_capacity;
+                population.candidate_compact_capacity.0 += profile.compact_inst_capacity;
+                population.candidate_compact_capacity.1 += profile.compact_cell_capacity;
+                population.candidate_compact_capacity.2 += profile.compact_block_capacity;
             }
             for (key, lower_ns) in &stats.lower_ns_by_key {
                 attribution
@@ -6760,14 +6770,22 @@ fn main() { let result = first() }
                 && population.candidate_cleaned_instructions > 0
                 && population.candidate_cleaned_cells > 0
                 && population.candidate_cleaned_blocks > 0
+                && population.candidate_full_clone_ns > 0
                 && population.candidate_compact_ns > 0
+                && population.candidate_full_clone_capacity.0 > 0
+                && population.candidate_full_clone_capacity.1 > 0
+                && population.candidate_full_clone_capacity.2 > 0
+                && population.candidate_compact_capacity.0 > 0
+                && population.candidate_compact_capacity.1 > 0
+                && population.candidate_compact_capacity.2 > 0
                 && population.ordinary_lowering_derivations
                     >= population.ordinary_lowered_keys
                 && population.specialized_lowering_derivations
                     >= population.specialized_lowered_keys
                 && population.keys_lowered_more_than_once > 0
                 && population.first_lower_ns > 0
-                && population.duplicate_lower_ns > 0,
+                && population.duplicate_lower_ns > 0
+                && emit.attribution.inline.census.splice_ns > 0,
             "lowering overlap census has no measured duplicate population: {population:?}"
         );
         assert_eq!(

@@ -239,6 +239,7 @@ pub struct InlineScanStats {
     pub candidate_eligibility_ns: u64,
     pub candidate_keys: Vec<Instance>,
     pub spliced_keys: Vec<Instance>,
+    pub splice_ns: u64,
     pub ordinary_keys: Vec<Instance>,
     pub candidate_worker_derivations: BTreeMap<String, usize>,
     pub rejection_reasons: BTreeMap<String, usize>,
@@ -351,6 +352,7 @@ impl InlineScanStats {
         self.candidate_eligibility_ns += other.candidate_eligibility_ns;
         self.candidate_keys.extend(other.candidate_keys);
         self.spliced_keys.extend(other.spliced_keys);
+        self.splice_ns += other.splice_ns;
         self.ordinary_keys.extend(other.ordinary_keys);
         for (worker, count) in other.candidate_worker_derivations {
             *self.candidate_worker_derivations.entry(worker).or_default() += count;
@@ -393,6 +395,7 @@ pub struct InlineCandidateTable {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct InlineCandidateProfile {
     pub lower_ns: u64,
+    pub full_clone_ns: u64,
     pub compact_ns: u64,
     pub lower_attempted: bool,
     pub lowered: bool,
@@ -403,6 +406,12 @@ pub struct InlineCandidateProfile {
     pub cleaned_instructions: usize,
     pub cleaned_cells: usize,
     pub cleaned_blocks: usize,
+    pub full_clone_inst_capacity: usize,
+    pub full_clone_cell_capacity: usize,
+    pub full_clone_block_capacity: usize,
+    pub compact_inst_capacity: usize,
+    pub compact_cell_capacity: usize,
+    pub compact_block_capacity: usize,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -416,8 +425,15 @@ pub struct InlineCandidateTableStats {
     pub lowered: usize,
     pub rejected_before_lower: usize,
     pub lower_ns: u64,
+    pub full_clone_ns: u64,
     pub cleanup_ns: u64,
     pub compact_ns: u64,
+    pub full_clone_inst_capacity: usize,
+    pub full_clone_cell_capacity: usize,
+    pub full_clone_block_capacity: usize,
+    pub compact_inst_capacity: usize,
+    pub compact_cell_capacity: usize,
+    pub compact_block_capacity: usize,
     pub eligibility_ns: u64,
     pub raw_instructions: usize,
     pub raw_cells: usize,
@@ -435,6 +451,7 @@ pub struct InlineCandidateWarm {
     key: CacheKey,
     candidate: Option<Arc<CalleeBody>>,
     pub lower_ns: u64,
+    pub full_clone_ns: u64,
     pub cleanup_ns: u64,
     pub compact_ns: u64,
     pub lower_attempted: bool,
@@ -445,6 +462,12 @@ pub struct InlineCandidateWarm {
     pub cleaned_instructions: usize,
     pub cleaned_cells: usize,
     pub cleaned_blocks: usize,
+    pub full_clone_inst_capacity: usize,
+    pub full_clone_cell_capacity: usize,
+    pub full_clone_block_capacity: usize,
+    pub compact_inst_capacity: usize,
+    pub compact_cell_capacity: usize,
+    pub compact_block_capacity: usize,
     pub eligibility_ns: u64,
     pub rejection: Option<&'static str>,
     worker: String,
@@ -480,8 +503,15 @@ impl InlineCandidateTable {
         }
         for warm in warms {
             stats.lower_ns += warm.lower_ns;
+            stats.full_clone_ns += warm.full_clone_ns;
             stats.cleanup_ns += warm.cleanup_ns;
             stats.compact_ns += warm.compact_ns;
+            stats.full_clone_inst_capacity += warm.full_clone_inst_capacity;
+            stats.full_clone_cell_capacity += warm.full_clone_cell_capacity;
+            stats.full_clone_block_capacity += warm.full_clone_block_capacity;
+            stats.compact_inst_capacity += warm.compact_inst_capacity;
+            stats.compact_cell_capacity += warm.compact_cell_capacity;
+            stats.compact_block_capacity += warm.compact_block_capacity;
             stats.raw_instructions += warm.raw_instructions;
             stats.raw_cells += warm.raw_cells;
             stats.raw_blocks += warm.raw_blocks;
@@ -513,6 +543,7 @@ impl InlineCandidateTable {
                     warm.key.clone(),
                     InlineCandidateProfile {
                         lower_ns: warm.lower_ns,
+                        full_clone_ns: warm.full_clone_ns,
                         compact_ns: warm.compact_ns,
                         lower_attempted: warm.lower_attempted,
                         lowered: warm.lowered,
@@ -523,6 +554,12 @@ impl InlineCandidateTable {
                         cleaned_instructions: warm.cleaned_instructions,
                         cleaned_cells: warm.cleaned_cells,
                         cleaned_blocks: warm.cleaned_blocks,
+                        full_clone_inst_capacity: warm.full_clone_inst_capacity,
+                        full_clone_cell_capacity: warm.full_clone_cell_capacity,
+                        full_clone_block_capacity: warm.full_clone_block_capacity,
+                        compact_inst_capacity: warm.compact_inst_capacity,
+                        compact_cell_capacity: warm.compact_cell_capacity,
+                        compact_block_capacity: warm.compact_block_capacity,
                     },
                 );
             }
@@ -768,6 +805,8 @@ impl InlineCache {
                 (started.elapsed().as_nanos().min(u64::MAX as u128) as u64)
                     .saturating_sub(timing.lower_ns)
                     .saturating_sub(timing.cleanup_ns)
+                    .saturating_sub(timing.full_clone_ns)
+                    .saturating_sub(timing.compact_ns)
             })
             .unwrap_or(0);
         let (candidate, rejection) = match result {
@@ -778,6 +817,7 @@ impl InlineCache {
             key: inst,
             candidate,
             lower_ns: timing.lower_ns,
+            full_clone_ns: timing.full_clone_ns,
             cleanup_ns: timing.cleanup_ns,
             compact_ns: timing.compact_ns,
             lower_attempted: timing.lower_attempted,
@@ -788,6 +828,12 @@ impl InlineCache {
             cleaned_instructions: timing.cleaned_instructions,
             cleaned_cells: timing.cleaned_cells,
             cleaned_blocks: timing.cleaned_blocks,
+            full_clone_inst_capacity: timing.full_clone_inst_capacity,
+            full_clone_cell_capacity: timing.full_clone_cell_capacity,
+            full_clone_block_capacity: timing.full_clone_block_capacity,
+            compact_inst_capacity: timing.compact_inst_capacity,
+            compact_cell_capacity: timing.compact_cell_capacity,
+            compact_block_capacity: timing.compact_block_capacity,
             eligibility_ns,
             rejection,
             worker: self.worker.clone(),
@@ -1316,6 +1362,7 @@ fn full_clone_stats(
 #[derive(Default)]
 struct CandidateTiming {
     lower_ns: u64,
+    full_clone_ns: u64,
     cleanup_ns: u64,
     compact_ns: u64,
     lower_attempted: bool,
@@ -1326,6 +1373,12 @@ struct CandidateTiming {
     cleaned_instructions: usize,
     cleaned_cells: usize,
     cleaned_blocks: usize,
+    full_clone_inst_capacity: usize,
+    full_clone_cell_capacity: usize,
+    full_clone_block_capacity: usize,
+    compact_inst_capacity: usize,
+    compact_cell_capacity: usize,
+    compact_block_capacity: usize,
 }
 
 /// Lower `fref` and classify it as an inline candidate. Hard exclusions: extern,
@@ -1392,6 +1445,16 @@ fn classify(
             timing.cleaned_instructions = mf.insts.len();
             timing.cleaned_cells = mf.cells.len();
             timing.cleaned_blocks = mf.blocks.len();
+        }
+    }
+    if let Some(start) = timing.as_ref().map(|_| Instant::now()) {
+        let cloned = mf.clone();
+        std::hint::black_box(&cloned);
+        if let Some(timing) = timing.as_deref_mut() {
+            timing.full_clone_ns = start.elapsed().as_nanos() as u64;
+            timing.full_clone_inst_capacity = cloned.insts.capacity();
+            timing.full_clone_cell_capacity = cloned.cells.capacity();
+            timing.full_clone_block_capacity = cloned.blocks.capacity();
         }
     }
 
@@ -1463,6 +1526,9 @@ fn classify(
     if let Some(start) = compact_started {
         if let Some(timing) = timing.as_deref_mut() {
             timing.compact_ns = start.elapsed().as_nanos() as u64;
+            timing.compact_inst_capacity = mf.insts.capacity();
+            timing.compact_cell_capacity = mf.cells.capacity();
+            timing.compact_block_capacity = mf.blocks.capacity();
         }
     }
 
@@ -1570,7 +1636,9 @@ fn get<'a>(
             cache.census.candidate_cleanup_ns += timing.cleanup_ns;
             cache.census.candidate_eligibility_ns += elapsed
                 .saturating_sub(timing.lower_ns)
-                .saturating_sub(timing.cleanup_ns);
+                .saturating_sub(timing.cleanup_ns)
+                .saturating_sub(timing.full_clone_ns)
+                .saturating_sub(timing.compact_ns);
         }
         let v = match result {
             Ok(candidate) => Some(Arc::new(candidate)),
@@ -2797,6 +2865,7 @@ fn inline_functions_inner(
         let splice_ns = splice_start
             .map(|start| start.elapsed().as_nanos() as u64)
             .unwrap_or_default();
+        scan_stats.splice_ns += splice_ns;
         records.push(SpliceRecord {
             callee: fref,
             straight: cand.kind == Kind::Straight,

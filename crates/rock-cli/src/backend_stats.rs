@@ -330,6 +330,18 @@ fn print_attribution(attribution: &skull::mir_emit::EmitAttribution) {
             ms(population.duplicate_lower_ns),
         );
         println!(
+            "      ownership cost: clone/compact {:.3}/{:.3} ms; clone capacity i/c/b {}/{}/{}; compact capacity i/c/b {}/{}/{}; splice {:.3} ms",
+            ms(population.candidate_full_clone_ns),
+            ms(population.candidate_compact_ns),
+            population.candidate_full_clone_capacity.0,
+            population.candidate_full_clone_capacity.1,
+            population.candidate_full_clone_capacity.2,
+            population.candidate_compact_capacity.0,
+            population.candidate_compact_capacity.1,
+            population.candidate_compact_capacity.2,
+            ms(census.splice_ns),
+        );
+        println!(
             "      population keys: requested {}, spliced {}, published-never-requested {}, requested-never-spliced {}, requested-not-published {}",
             population.candidate_requested_unique_keys,
             population.candidate_spliced_unique_keys,
