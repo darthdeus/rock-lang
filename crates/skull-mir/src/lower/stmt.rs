@@ -41,7 +41,14 @@ impl Builder<'_> {
             hash_init_expr(self.body, value, &mut hsh);
             hsh.finish()
         };
-        self.f.statics.push(StaticCell { cell, done_flag, type_str, init_hash });
+        self.f.statics.push(StaticCell {
+            cell,
+            done_flag,
+            type_str,
+            init_hash,
+            owner: self.f.code_identity.clone(),
+            site: crate::code_identity::LambdaSiteId::from_span(self.body.binding_arena[name].span),
+        });
 
         let done_v = self.emit_cur(Inst::Global(done_flag));
         let init_bb = self.f.new_block();

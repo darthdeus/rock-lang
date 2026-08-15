@@ -184,6 +184,8 @@ mod compute_surface;
 mod static_hot_reload;
 #[path = "static_registration_coverage.rs"]
 mod static_registration_coverage;
+#[path = "state_schema.rs"]
+mod state_schema;
 #[path = "struct_expand.rs"]
 mod struct_expand;
 #[path = "synthetic_name_collision.rs"]

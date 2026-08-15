@@ -331,6 +331,13 @@ impl GlobalPlan {
     pub fn lanes(&self) -> usize {
         self.arena.get(self.representation).lanes(&self.arena)
     }
+
+    /// A build-independent description of the stored global representation.
+    /// `RepId` and the arena allocation order are deliberately absent: this is
+    /// the logical StateSchema fingerprint, not a backend publication name.
+    pub fn logical_fingerprint(&self) -> String {
+        rep_logical_fingerprint(&self.arena, self.representation)
+    }
 }
 
 impl FunctionRepPlan {

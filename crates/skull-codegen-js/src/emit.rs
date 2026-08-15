@@ -14,7 +14,9 @@ use std::fmt::Write as _;
 
 use bone_semantic::inference::Workspace;
 use comfy_la_arena::Idx;
-use skull_mir::code_identity::{CaptureSchema, CodeArtifact, CodeCompatibility, CodeIdentity};
+use skull_mir::code_identity::{
+    CaptureSchema, CodeArtifact, CodeCompatibility, CodeIdentity, FrameSchema,
+};
 use skull_mir::intrinsics::{Emission, IntrinsicTable};
 use skull_mir::instance::Instance;
 use skull_mir::lower::BackendFnAbiPlan;
@@ -2946,6 +2948,7 @@ pub fn emit_program(
         program: build.program,
         main_js_name,
         code_artifact: build.code_artifact,
+        state_schema: build.state_schema,
     })
 }
 
@@ -2971,6 +2974,7 @@ pub fn emit_program_cached(
         program: build.program.clone(),
         main_js_name,
         code_artifact: build.code_artifact.clone(),
+        state_schema: build.state_schema.clone(),
     };
     let cache = JsEmitCache {
         build,
@@ -3177,10 +3181,12 @@ fn assemble_program_core(
     let mut out = String::new();
     let mut stable = String::new();
     let mut code_artifact = CodeArtifact::default();
+    let mut all_statics = Vec::new();
     for (name, mf) in &deco_bodies {
         let mut artifact = CodeArtifact::from_mir_tree(mf);
         artifact.set_body_names(mf, name);
         code_artifact.merge(artifact);
+        all_statics.extend(collect_statics(mf));
     }
     let enum_singletons = emit_enum_singletons(&st.gctx, &st.enum_defs);
     out.push_str(&enum_singletons);
@@ -3221,6 +3227,7 @@ fn assemble_program_core(
             Ok((js, artifact)) => {
                 out.push_str(&js);
                 code_artifact.merge(artifact.clone());
+                all_statics.extend(collect_statics(mf));
                 chunks.insert(
                     *fr,
                     JsChunk { js, statics: collect_statics(mf) },
@@ -3236,6 +3243,9 @@ fn assemble_program_core(
     for chunk in ordered_spec_chunks(&spec_chunks, &st.spec_lowered) {
         out.push_str(&chunk.js);
         code_artifact.merge(chunk.code_artifact.clone());
+    }
+    for (_, mf) in &st.spec_lowered {
+        all_statics.extend(collect_statics(mf));
     }
     // 2b. inline(js) fns, emitted verbatim.
     for body in &st.inline_js {
@@ -3262,6 +3272,7 @@ fn assemble_program_core(
         let mut artifact = CodeArtifact::from_mir_tree(&g.mf);
         artifact.set_body_names(&g.mf, &g.init_name);
         code_artifact.merge(artifact);
+        all_statics.extend(collect_statics(&g.mf));
         if g.is_const {
             const_chunks.entry(g.name).or_insert_with(String::new).push_str(&definition);
         } else {
@@ -3308,12 +3319,21 @@ fn assemble_program_core(
     // assembled program is discarded with it.
     combine_rejections(rejections)?;
 
+    let state_schema = skull_mir::state_schema::StateSchema::collect(
+        ws,
+        scx,
+        &code_artifact,
+        &all_statics,
+    )
+    .map_err(|error| err(error.to_string()))?;
+
     Ok(ProgramBuild {
         program: out,
         stable,
         chunks,
         spec_chunks,
         code_artifact,
+        state_schema,
         const_chunks,
         const_order,
     })
@@ -3388,6 +3408,8 @@ pub struct JsProgram {
     pub main_js_name: Option<String>,
     /// Compiler-owned logical callable identities for the emitted JS artifact.
     pub code_artifact: CodeArtifact,
+    /// Compiler-owned logical mutable-state inventory for the emitted artifact.
+    pub state_schema: skull_mir::state_schema::StateSchema,
 }
 
 struct JsChunk {
@@ -3407,6 +3429,7 @@ struct ProgramBuild {
     chunks: HashMap<FuncRef, JsChunk>,
     spec_chunks: HashMap<Instance, JsSpecChunk>,
     code_artifact: CodeArtifact,
+    state_schema: skull_mir::state_schema::StateSchema,
     const_chunks: HashMap<ustr::Ustr, String>,
     const_order: Vec<ustr::Ustr>,
 }
@@ -3446,6 +3469,10 @@ impl JsEmitCache {
 
     pub fn code_artifact(&self) -> &CodeArtifact {
         &self.build.code_artifact
+    }
+
+    pub fn state_schema(&self) -> &skull_mir::state_schema::StateSchema {
+        &self.build.state_schema
     }
 }
 
@@ -6051,6 +6078,10 @@ fn emit_coroutine_js(
     if let Some(identity) = &lowered.step.code_identity {
         if let Some(entry) = code_artifact.entries.get_mut(identity) {
             entry.body_name = Some(Ustr::from(plan.base()));
+            let mut slots: Vec<u32> = lowered.frame_plan.slots().values().copied().collect();
+            slots.sort_unstable();
+            slots.dedup();
+            entry.compatibility.frame = Some(FrameSchema { slots });
         }
     }
     for aux in &defer_funcs {

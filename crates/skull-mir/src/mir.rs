@@ -719,6 +719,12 @@ pub struct StaticCell {
     /// Stable across edits ELSEWHERE in the body (hashes names / literals, not
     /// arena indices).
     pub init_hash: u64,
+    /// The compiler-owned callable identity that owns this static. This is
+    /// metadata for StateSchema; the emitted cell name is only a realization.
+    pub owner: Option<crate::code_identity::CodeIdentity>,
+    /// Source site of the static declaration. It is stable under body edits and
+    /// independent of lowering traversal order.
+    pub site: Option<crate::code_identity::LambdaSiteId>,
 }
 
 /// A function — a CFG over cells and values. `params` are the entry block's

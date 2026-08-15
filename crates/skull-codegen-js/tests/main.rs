@@ -75,6 +75,8 @@ mod nomangle_roots;
 mod number_format;
 #[path = "session_arena.rs"]
 mod session_arena;
+#[path = "state_schema.rs"]
+mod state_schema;
 
 #[path = "overlay.rs"]
 mod overlay;

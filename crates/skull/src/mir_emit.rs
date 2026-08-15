@@ -481,6 +481,8 @@ pub struct MirEmit {
     pub lua: String,
     /// Artifact-owned callable identities and their self-validating census.
     pub code_artifact: skull_mir::code_identity::CodeArtifact,
+    /// The one compiler-owned logical inventory consumed by every backend.
+    pub state_schema: skull_mir::state_schema::StateSchema,
     /// `(lua_name, reason)` for every definition the new path skipped.
     pub skipped: Vec<(String, String)>,
     /// Coarse per-stage time for the emit, in run order: HIR->MIR lowering, MIR
@@ -1318,6 +1320,9 @@ pub struct SkullEmitCache {
     /// Logical callable table from the last complete assembly. Body overlays
     /// preserve this identity table; a full/incremental assembly refreshes it.
     code_artifact: skull_mir::code_identity::CodeArtifact,
+    /// Logical state table from the last complete assembly. Body overlays keep
+    /// it unchanged; a full/incremental assembly replaces it atomically.
+    state_schema: Option<skull_mir::state_schema::StateSchema>,
     /// The compilation target's root directory; see [`is_library_module`].
     project_root: Option<String>,
     renderer_target: RendererTarget,
@@ -3201,6 +3206,8 @@ fn assemble(
             "incomplete LifecyclePlan census: {:?}", lifecycle_plan.census
         )));
     }
+    let state_schema = skull_mir::state_schema::StateSchema::collect(ws, scx, &code_artifact, &all_statics)
+        .map_err(|error| CompilerError::new_no_location(error.to_string()))?;
 
     // Globals: an init fn + a dependency-ordered `<NAME> = __skull_ginit_<NAME>()`.
     // (Lowered above, so the walk could see their call edges; appended here, in
@@ -3363,7 +3370,7 @@ fn assemble(
         }
     }
     emitted_bodies.extend(spec_chunks.keys().cloned());
-    Ok((MirEmit { lua: out, code_artifact, skipped, phases }, emitted_bodies))
+    Ok((MirEmit { lua: out, code_artifact, state_schema, skipped, phases }, emitted_bodies))
 }
 
 fn code_slot_registration_lua(
@@ -3834,6 +3841,7 @@ fn emit_full_in_with_mutation(
         shader_view,
         emitted: FxHashSet::default(),
         code_artifact: skull_mir::code_identity::CodeArtifact::default(),
+        state_schema: None,
         project_root: project_root.map(str::to_string),
         renderer_target,
     };
@@ -3842,6 +3850,7 @@ fn emit_full_in_with_mutation(
     let mut cache = cache;
     cache.emitted = emitted;
     cache.code_artifact = emit.code_artifact.clone();
+    cache.state_schema = Some(emit.state_schema.clone());
     cache.absorb_spec_chunks(built_specs);
     Ok((emit, cache))
 }
@@ -4312,6 +4321,7 @@ pub fn emit_incremental(
     let (mut emit, emitted) = assemble(ws, &cache.cg, &cache.scx, cache, &mut built_specs)?;
     cache.emitted = emitted;
     cache.code_artifact = emit.code_artifact.clone();
+    cache.state_schema = Some(emit.state_schema.clone());
     cache.absorb_spec_chunks(built_specs);
     let reassemble = t_asm.elapsed();
     emit.phases.push(("incr: re-emit affected bodies", reemit));
@@ -4500,6 +4510,10 @@ fn assemble_overlay(
     Ok(MirEmit {
         lua: out,
         code_artifact: cache.code_artifact.clone(),
+        state_schema: cache
+            .state_schema
+            .clone()
+            .expect("overlay requires a completed StateSchema"),
         skipped,
         phases: Vec::new(),
     })

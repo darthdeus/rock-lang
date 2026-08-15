@@ -9,7 +9,9 @@ use std::collections::HashSet;
 use bone_semantic::inference::Workspace;
 use comfy_la_arena::Idx;
 use skull_codegen_lua::{emit_named_framed, CodegenCtx, FrameCtx};
-use skull_mir::code_identity::{CaptureSchema, CodeArtifact, CodeCompatibility, CodeIdentity};
+use skull_mir::code_identity::{
+    CaptureSchema, CodeArtifact, CodeCompatibility, CodeIdentity, FrameSchema,
+};
 use skull_mir::lower::CoroutinePlan;
 use skull_mir::mir::*;
 use skull_transform::{CoroLowered, STATE};
@@ -202,6 +204,10 @@ pub fn emit_coroutine_with_artifact(
     if let Some(identity) = &lowered.step.code_identity {
         if let Some(entry) = code_artifact.entries.get_mut(identity) {
             entry.body_name = Some(Ustr::from(plan.base()));
+            let mut slots: Vec<u32> = lowered.frame_plan.slots().values().copied().collect();
+            slots.sort_unstable();
+            slots.dedup();
+            entry.compatibility.frame = Some(FrameSchema { slots });
         }
     }
     for aux in &defer_funcs {
