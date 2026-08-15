@@ -258,12 +258,120 @@ fn print_attribution(attribution: &skull::mir_emit::EmitAttribution) {
         attribution.inline.borrowed_block_scans,
         attribution.inline.instructions_scanned,
     );
+    let census = &attribution.inline.census;
+    if census.enabled {
+        let ms = |ns: u64| ns as f64 / 1_000_000.0;
+        println!(
+            "    inline census: blocks {:.3} ms/{}; calls {}/{}; resume {}, rescanned {}",
+            ms(census.top_level_blocks_ns),
+            census.top_level_blocks_population,
+            census.call_instructions_examined,
+            census.call_target_resolutions,
+            census.resume_cursor_progress,
+            census.rescanned_instructions,
+        );
+        println!(
+            "      candidates: requests {}, hits {}, derivations {}, unique {}, ordinary duplicates {}; lower/cleanup/eligibility {:.3}/{:.3}/{:.3} ms",
+            census.candidate_requests,
+            census.candidate_cache_hits,
+            census.candidate_derivations,
+            attribution.inline.candidate_unique_keys,
+            attribution.inline.candidate_snapshot_duplicates,
+            ms(census.candidate_lower_ns),
+            ms(census.candidate_cleanup_ns),
+            ms(census.candidate_eligibility_ns),
+        );
+        println!(
+            "      accepted: straight {}, general {}, direct {}, transitive {}, ordinary {}, specialized {}, hoisted {}; clone source i/c/b {}/{}/{} live {}/{}/{} cloned {}/{}/{} dead {}/{}/{}",
+            census.straight_accepted,
+            census.general_accepted,
+            census.direct_splices,
+            census.transitive_splices,
+            attribution.inline.ordinary_splices,
+            attribution.inline.specialized_splices,
+            attribution.inline.hoisted_splices,
+            census.clone.source_instructions,
+            census.clone.source_cells,
+            census.clone.source_blocks,
+            census.clone.live_instructions,
+            census.clone.live_cells,
+            census.clone.live_blocks,
+            census.clone.cloned_instructions,
+            census.clone.cloned_cells,
+            census.clone.cloned_blocks,
+            census.clone.dead_instructions,
+            census.clone.dead_cells,
+            census.clone.dead_blocks,
+        );
+        println!(
+            "      remaps entries/capacity/growth i/c/b {}/{}/{} / {}/{}/{} / {}/{}/{}; args {}/{} dests {}/{}; prefix/tail {}/{}; nested/static {}/{}",
+            census.clone.inst_remap_entries,
+            census.clone.cell_remap_entries,
+            census.clone.block_remap_entries,
+            census.clone.inst_remap_capacity,
+            census.clone.cell_remap_capacity,
+            census.clone.block_remap_capacity,
+            census.clone.inst_remap_growth,
+            census.clone.cell_remap_growth,
+            census.clone.block_remap_growth,
+            census.clone.argument_elements,
+            census.clone.argument_stores,
+            census.clone.destination_elements,
+            census.clone.destination_stores,
+            census.clone.block_prefix_copies,
+            census.clone.block_tail_copies,
+            census.clone.nested_function_imports,
+            census.clone.static_imports,
+        );
+        println!(
+            "      substitution: calls {}, instructions {}, terminators {}, replacements {}, {:.3} ms",
+            census.substitution_invocations,
+            census.substitution_instructions_inspected,
+            census.substitution_terminators_inspected,
+            census.substitution_replacements,
+            ms(census.substitution_ns),
+        );
+        macro_rules! side {
+            ($name:literal, $field:ident) => {
+                println!(
+                    "      side {}: source/examined/copied {}/{}/{}",
+                    $name,
+                    census.clone.side_tables.$field.source_rows,
+                    census.clone.side_tables.$field.examined,
+                    census.clone.side_tables.$field.copied,
+                );
+            };
+        }
+        side!("spec_bindings", spec_bindings);
+        side!("callee_instances", callee_instances);
+        side!("abi_plans", abi_plans);
+        side!("representation_plans", representation_plans);
+        side!("closure_environment_plans", closure_environment_plans);
+        side!("raw_bound_trees", raw_bound_trees);
+        side!("resolved_bound_trees", resolved_bound_trees);
+        side!("function_value_symbols", function_value_symbols);
+        side!("instruction_spans", instruction_spans);
+        side!("call_sites", call_sites);
+        side!("call_site_owners", call_site_owners);
+        side!("iterator_headers", iterator_headers);
+        if !census.candidate_worker_derivations.is_empty() {
+            println!("      candidate derivations by worker: {:?}", census.candidate_worker_derivations);
+        }
+        if !census.rejection_reasons.is_empty() {
+            println!("      candidate rejection reasons: {:?}", census.rejection_reasons);
+        }
+    }
     if !attribution.inline.top_owners.is_empty() {
         println!("    top inline owners:");
         for owner in &attribution.inline.top_owners {
             println!(
-                "      {:28} {} splices, {} copied instructions",
-                owner.owner, owner.splices, owner.copied_instructions
+                "      {:28} {} splices, {} copied instructions, {:.3} ms, live {}, dead {}",
+                owner.owner,
+                owner.splices,
+                owner.copied_instructions,
+                owner.splice_ns as f64 / 1_000_000.0,
+                owner.live_cloned_entries,
+                owner.dead_cloned_entries,
             );
         }
     }

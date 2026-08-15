@@ -601,9 +601,15 @@ pub struct AttributionPhase {
 pub struct InlineAttribution {
     pub accepted_splices: usize,
     pub copied_instructions: usize,
+    pub ordinary_splices: usize,
+    pub specialized_splices: usize,
+    pub hoisted_splices: usize,
     pub arena_allocations: usize,
     pub borrowed_block_scans: usize,
     pub instructions_scanned: usize,
+    pub census: skull_transform::InlineScanStats,
+    pub candidate_unique_keys: usize,
+    pub candidate_snapshot_duplicates: usize,
     pub top_owners: Vec<InlineOwnerAttribution>,
 }
 
@@ -612,6 +618,9 @@ pub struct InlineOwnerAttribution {
     pub owner: String,
     pub splices: usize,
     pub copied_instructions: usize,
+    pub splice_ns: u64,
+    pub live_cloned_entries: usize,
+    pub dead_cloned_entries: usize,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -691,10 +700,14 @@ impl PhaseTimes {
 struct InlineWork {
     accepted_splices: usize,
     copied_instructions: usize,
+    ordinary_splices: usize,
+    specialized_splices: usize,
+    hoisted_splices: usize,
     arena_allocations: usize,
     borrowed_block_scans: usize,
     instructions_scanned: usize,
-    owners: BTreeMap<String, (usize, usize)>,
+    census: skull_transform::InlineScanStats,
+    owners: BTreeMap<String, (usize, usize, u64, usize, usize)>,
 }
 
 impl InlineWork {
@@ -702,10 +715,18 @@ impl InlineWork {
         self.accepted_splices += records.len();
         for record in records {
             self.copied_instructions += record.callee_insts;
+            self.census.clone.add(record.clone);
             let owner = inline_owner_key(record.callee);
             let entry = self.owners.entry(owner).or_default();
             entry.0 += 1;
             entry.1 += record.callee_insts;
+            entry.2 += record.splice_ns;
+            entry.3 += record.clone.live_instructions
+                + record.clone.live_cells
+                + record.clone.live_blocks;
+            entry.4 += record.clone.dead_instructions
+                + record.clone.dead_cells
+                + record.clone.dead_blocks;
         }
     }
 
@@ -718,18 +739,26 @@ impl InlineWork {
     fn add_scan(&mut self, stats: skull_transform::InlineScanStats) {
         self.borrowed_block_scans += stats.borrowed_block_scans;
         self.instructions_scanned += stats.instructions_scanned;
+        self.census.add(stats);
     }
 
     fn add(&mut self, other: InlineWork) {
         self.accepted_splices += other.accepted_splices;
         self.copied_instructions += other.copied_instructions;
+        self.ordinary_splices += other.ordinary_splices;
+        self.specialized_splices += other.specialized_splices;
+        self.hoisted_splices += other.hoisted_splices;
         self.arena_allocations += other.arena_allocations;
         self.borrowed_block_scans += other.borrowed_block_scans;
         self.instructions_scanned += other.instructions_scanned;
-        for (owner, (splices, copied)) in other.owners {
+        self.census.add(other.census);
+        for (owner, (splices, copied, splice_ns, live, dead)) in other.owners {
             let entry = self.owners.entry(owner).or_default();
             entry.0 += splices;
             entry.1 += copied;
+            entry.2 += splice_ns;
+            entry.3 += live;
+            entry.4 += dead;
         }
     }
 }
@@ -951,10 +980,14 @@ impl AttributionAccumulator {
         );
         self.result.inline.accepted_splices += unit.inline.accepted_splices;
         self.result.inline.copied_instructions += unit.inline.copied_instructions;
+        self.result.inline.ordinary_splices += unit.inline.ordinary_splices;
+        self.result.inline.specialized_splices += unit.inline.specialized_splices;
+        self.result.inline.hoisted_splices += unit.inline.hoisted_splices;
         self.result.inline.arena_allocations += unit.inline.arena_allocations;
         self.result.inline.borrowed_block_scans += unit.inline.borrowed_block_scans;
         self.result.inline.instructions_scanned += unit.inline.instructions_scanned;
-        for (owner, (splices, copied)) in &unit.inline.owners {
+        self.result.inline.census.add(unit.inline.census.clone());
+        for (owner, (splices, copied, splice_ns, live, dead)) in &unit.inline.owners {
             let entry = self
                 .result
                 .inline
@@ -964,11 +997,17 @@ impl AttributionAccumulator {
             if let Some(entry) = entry {
                 entry.splices += *splices;
                 entry.copied_instructions += *copied;
+                entry.splice_ns += *splice_ns;
+                entry.live_cloned_entries += *live;
+                entry.dead_cloned_entries += *dead;
             } else {
                 self.result.inline.top_owners.push(InlineOwnerAttribution {
                     owner: owner.clone(),
                     splices: *splices,
                     copied_instructions: *copied,
+                    splice_ns: *splice_ns,
+                    live_cloned_entries: *live,
+                    dead_cloned_entries: *dead,
                 });
             }
         }
@@ -997,6 +1036,29 @@ impl AttributionAccumulator {
                 .then_with(|| a.owner.cmp(&b.owner))
         });
         self.result.inline.top_owners.truncate(8);
+        self.result.inline.candidate_unique_keys = self
+            .result
+            .inline
+            .census
+            .candidate_keys
+            .iter()
+            .collect::<FxHashSet<_>>()
+            .len();
+        let ordinary_keys: FxHashSet<_> = self
+            .result
+            .inline
+            .census
+            .ordinary_keys
+            .iter()
+            .collect();
+        self.result.inline.candidate_snapshot_duplicates = self
+            .result
+            .inline
+            .census
+            .candidate_keys
+            .iter()
+            .filter(|key| ordinary_keys.contains(key))
+            .count();
         self.top_bodies.sort_by(|a, b| {
             b.lower_us
                 .cmp(&a.lower_us)
@@ -2136,6 +2198,7 @@ fn emit_body_chunk_with_mutation(
     let plan = concrete
         .plan_for(&shared(self_ref))
         .ok_or_else(|| CompilerError::new_with_label(f.name_span, format!("no concrete plan for `{}`", f.name)))?;
+    let ordinary_instance = plan.function_instance().cloned();
     let mut mf = skull_mir::lower::lower_function_with_plans(ws, scx, plan, &concrete.plans)?;
     times.lower = tl.elapsed();
     times.lower_work = mf.insts.len() > 0;
@@ -2220,8 +2283,13 @@ fn emit_body_chunk_with_mutation(
         inline_cache,
         &concrete.plans,
     )?;
+    let mut scan_stats = scan_stats;
+    if let Some(instance) = ordinary_instance {
+        scan_stats.ordinary_keys.push(instance);
+    }
     times.inline = ti.elapsed();
     attribution.inline.add_records(&splices);
+    attribution.inline.ordinary_splices += splices.len();
     attribution.inline.add_scan(scan_stats);
     times.inline_work = !splices.is_empty();
     attribution.inline.add_allocations(before_inline, (mf.insts.len(), mf.blocks.len(), mf.cells.len()));
@@ -2575,6 +2643,12 @@ fn emit_spec_chunk(
     )
         .map_err(|e| CompilerError::new_with_label(f.name_span, e.message))?;
     times.add(&prepared_times);
+    let mut prepared_inline = prepared_inline;
+    prepared_inline.specialized_splices = prepared_inline.accepted_splices;
+    prepared_inline
+        .census
+        .ordinary_keys
+        .push(body.clone());
     attribution.inline.add(prepared_inline);
     let before = specs.len();
     // Discovered BEFORE the verdict, and handed back through `specs` even when
@@ -2806,6 +2880,7 @@ fn inline_hoisted_bodies(
         .map_err(|e| e.message)?;
         times.hoisted_inline += ti.elapsed();
         work.add_records(&records);
+        work.hoisted_splices += records.len();
         work.add_scan(scan_stats);
         times.hoisted_inline_work |= !records.is_empty();
         work.add_allocations(before, (nf.insts.len(), nf.blocks.len(), nf.cells.len()));
@@ -5508,6 +5583,25 @@ fn main() { let result = top() }
 global RESULT: int = top()
 "#;
 
+    const CENSUS_SRC: &str = r#"
+@inline
+fn straight(flag: bool) -> bool { return flag }
+
+@inline
+fn general(flag: bool) -> int {
+    if flag { return 1 }
+    return 2
+}
+
+fn top() -> int {
+    let flag = straight(true)
+    return general(flag)
+}
+
+fn main() { let result = top() }
+global RESULT: int = top()
+"#;
+
     const BOUNDED_SRC: &str = r#"
 fn total<I: Iterator<int>>(it: I) -> int {
     let sum = 0
@@ -5569,6 +5663,7 @@ fn main() {
     });
 
     static INLINE_OFF: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    static INLINE_CENSUS: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[allow(dead_code)]
     struct InlineOff(std::sync::MutexGuard<'static, ()>, Option<String>);
@@ -5619,9 +5714,38 @@ fn main() {
         }
     }
 
+    #[allow(dead_code)]
+    struct InlineCensusOn(std::sync::MutexGuard<'static, ()>, Option<String>);
+
+    impl InlineCensusOn {
+        fn on() -> Self {
+            let guard = INLINE_CENSUS.lock().unwrap_or_else(|e| e.into_inner());
+            let previous = std::env::var("ROCK_INLINE_CENSUS").ok();
+            unsafe { std::env::set_var("ROCK_INLINE_CENSUS", "1") };
+            Self(guard, previous)
+        }
+    }
+
+    impl Drop for InlineCensusOn {
+        fn drop(&mut self) {
+            match &self.1 {
+                Some(value) => unsafe { std::env::set_var("ROCK_INLINE_CENSUS", value) },
+                None => unsafe { std::env::remove_var("ROCK_INLINE_CENSUS") },
+            }
+        }
+    }
+
     fn workspace() -> Workspace {
         let mut modules = vec![
             skull_parser::parse_module_clean(SRC, Ustr::from("<missing-owner-test>"))
+                .expect("parse"),
+        ];
+        bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic")
+    }
+
+    fn census_workspace() -> Workspace {
+        let mut modules = vec![
+            skull_parser::parse_module_clean(CENSUS_SRC, Ustr::from("<inline-census-test>"))
                 .expect("parse"),
         ];
         bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic")
@@ -6085,6 +6209,97 @@ fn main() { let result = first() }
                 "opt-in MIR growth timing has no measured population: {attribution:?}"
             );
         }
+    }
+
+    #[test]
+    fn inline_census_has_a_nonzero_production_population() {
+        let _inline = InlineOn::on();
+        let _census = InlineCensusOn::on();
+        let ws = census_workspace();
+        let mid = *ws
+            .module_ids
+            .get(&Ustr::from("<inline-census-test>"))
+            .expect("census test module");
+        let (emit, _) = emit_full_in_with_test_mutation(&ws, mid, BodyMutation::None)
+            .expect("intact emission");
+        let census = &emit.attribution.inline.census;
+        assert!(
+            census.candidate_requests > 0
+                && census.candidate_requests
+                    == census.candidate_cache_hits + census.candidate_derivations,
+            "candidate requests must partition into hits and derivations: {census:?}"
+        );
+        assert_eq!(
+            census.candidate_derivations,
+            census.candidate_keys.len(),
+            "each derivation must publish one measured instance key: {census:?}"
+        );
+        assert_eq!(
+            census.candidate_derivations,
+            census.candidate_worker_derivations.values().sum(),
+            "worker derivations must cover the global derivation population: {census:?}"
+        );
+        assert!(
+            census.candidate_derivations >= emit.attribution.inline.candidate_unique_keys
+                && emit.attribution.inline.candidate_unique_keys > 0,
+            "unique candidate keys need a nonzero denominator: {census:?}"
+        );
+        assert!(
+            census.straight_accepted > 0 && census.general_accepted > 0,
+            "both splice shapes must reach production: {census:?}"
+        );
+        assert!(
+            census.substitution_invocations > 0
+                && census.substitution_instructions_inspected > 0
+                && census.substitution_replacements > 0,
+            "the baseline straight-result substitution route must be measured: {census:?}"
+        );
+        assert_eq!(
+            census.clone.source_instructions,
+            census.clone.live_instructions + census.clone.dead_instructions,
+            "instruction clone census must conserve source entries: {census:?}"
+        );
+        assert_eq!(
+            census.clone.source_cells,
+            census.clone.live_cells + census.clone.dead_cells,
+            "cell clone census must conserve source entries: {census:?}"
+        );
+        assert_eq!(
+            census.clone.source_blocks,
+            census.clone.live_blocks + census.clone.dead_blocks,
+            "block clone census must conserve source entries: {census:?}"
+        );
+        assert!(
+            census.clone.cloned_instructions <= census.clone.source_instructions
+                && census.clone.cloned_cells <= census.clone.source_cells
+                && census.clone.cloned_blocks <= census.clone.source_blocks,
+            "cloning may not exceed the measured source population: {census:?}"
+        );
+        macro_rules! side_bounds {
+            ($field:ident) => {
+                assert!(
+                    census.clone.side_tables.$field.examined
+                        <= census.clone.side_tables.$field.source_rows
+                        && census.clone.side_tables.$field.copied
+                            <= census.clone.side_tables.$field.examined,
+                    "side-table census is not bounded for {}: {:?}",
+                    stringify!($field),
+                    census
+                );
+            };
+        }
+        side_bounds!(spec_bindings);
+        side_bounds!(callee_instances);
+        side_bounds!(abi_plans);
+        side_bounds!(representation_plans);
+        side_bounds!(closure_environment_plans);
+        side_bounds!(raw_bound_trees);
+        side_bounds!(resolved_bound_trees);
+        side_bounds!(function_value_symbols);
+        side_bounds!(instruction_spans);
+        side_bounds!(call_sites);
+        side_bounds!(call_site_owners);
+        side_bounds!(iterator_headers);
     }
 
     #[test]

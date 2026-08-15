@@ -24,6 +24,8 @@
 
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::cell::Cell as ThreadCell;
+use std::collections::BTreeMap;
+use std::time::Instant;
 
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::{BoundTree, CompilerError};
@@ -111,6 +113,10 @@ struct CalleeBody {
     insts: usize,
     /// `@inline`-forced (bypassed the size caps). Diagnostic only.
     forced: bool,
+    /// Source/live arena and side-table populations. The first census uses the
+    /// live closure to expose dead cloning; the template cut later reuses this
+    /// same closure as its canonical clone source.
+    template: InlineCloneStats,
     /// Param cells this callee NEVER whole-`Store`s (only reads / `Field` /
     /// `StoreField`). Their arg can be COALESCED — an arg that is a plain
     /// `Load(c)` binds the cloned param directly to the caller cell `c` instead
@@ -130,14 +136,200 @@ pub struct SpliceRecord {
     pub callee: FuncRef,
     pub straight: bool,
     pub forced: bool,
+    pub transitive: bool,
     /// Reachable inst count of the callee body copied at this site.
     pub callee_insts: usize,
+    pub clone: InlineCloneStats,
+    pub splice_ns: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct InlineSideTableFamily {
+    pub source_rows: usize,
+    pub examined: usize,
+    pub copied: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct InlineSideTableStats {
+    pub spec_bindings: InlineSideTableFamily,
+    pub callee_instances: InlineSideTableFamily,
+    pub abi_plans: InlineSideTableFamily,
+    pub representation_plans: InlineSideTableFamily,
+    pub closure_environment_plans: InlineSideTableFamily,
+    pub raw_bound_trees: InlineSideTableFamily,
+    pub resolved_bound_trees: InlineSideTableFamily,
+    pub function_value_symbols: InlineSideTableFamily,
+    pub instruction_spans: InlineSideTableFamily,
+    pub call_sites: InlineSideTableFamily,
+    pub call_site_owners: InlineSideTableFamily,
+    pub iterator_headers: InlineSideTableFamily,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct InlineCloneStats {
+    pub source_instructions: usize,
+    pub source_cells: usize,
+    pub source_blocks: usize,
+    pub live_instructions: usize,
+    pub live_cells: usize,
+    pub live_blocks: usize,
+    pub cloned_instructions: usize,
+    pub cloned_cells: usize,
+    pub cloned_blocks: usize,
+    pub dead_instructions: usize,
+    pub dead_cells: usize,
+    pub dead_blocks: usize,
+    pub coalesced_cells: usize,
+    pub inst_remap_entries: usize,
+    pub cell_remap_entries: usize,
+    pub block_remap_entries: usize,
+    pub inst_remap_capacity: usize,
+    pub cell_remap_capacity: usize,
+    pub block_remap_capacity: usize,
+    pub inst_remap_growth: usize,
+    pub cell_remap_growth: usize,
+    pub block_remap_growth: usize,
+    pub argument_elements: usize,
+    pub argument_stores: usize,
+    pub destination_elements: usize,
+    pub destination_stores: usize,
+    pub block_prefix_copies: usize,
+    pub block_tail_copies: usize,
+    pub nested_function_imports: usize,
+    pub static_imports: usize,
+    pub side_tables: InlineSideTableStats,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct InlineScanStats {
+    pub enabled: bool,
     pub borrowed_block_scans: usize,
     pub instructions_scanned: usize,
+    pub top_level_blocks_ns: u64,
+    pub top_level_blocks_population: usize,
+    pub call_instructions_examined: usize,
+    pub call_target_resolutions: usize,
+    pub straight_accepted: usize,
+    pub general_accepted: usize,
+    pub direct_splices: usize,
+    pub transitive_splices: usize,
+    pub resume_cursor_progress: usize,
+    pub rescanned_instructions: usize,
+    pub candidate_requests: usize,
+    pub candidate_cache_hits: usize,
+    pub candidate_derivations: usize,
+    pub candidate_lower_ns: u64,
+    pub candidate_cleanup_ns: u64,
+    pub candidate_eligibility_ns: u64,
+    pub candidate_keys: Vec<Instance>,
+    pub ordinary_keys: Vec<Instance>,
+    pub candidate_worker_derivations: BTreeMap<String, usize>,
+    pub rejection_reasons: BTreeMap<String, usize>,
+    pub clone: InlineCloneStats,
+    pub substitution_invocations: usize,
+    pub substitution_instructions_inspected: usize,
+    pub substitution_terminators_inspected: usize,
+    pub substitution_replacements: usize,
+    pub substitution_ns: u64,
+}
+
+impl InlineCloneStats {
+    pub fn add(&mut self, other: Self) {
+        self.source_instructions += other.source_instructions;
+        self.source_cells += other.source_cells;
+        self.source_blocks += other.source_blocks;
+        self.live_instructions += other.live_instructions;
+        self.live_cells += other.live_cells;
+        self.live_blocks += other.live_blocks;
+        self.cloned_instructions += other.cloned_instructions;
+        self.cloned_cells += other.cloned_cells;
+        self.cloned_blocks += other.cloned_blocks;
+        self.dead_instructions += other.dead_instructions;
+        self.dead_cells += other.dead_cells;
+        self.dead_blocks += other.dead_blocks;
+        self.coalesced_cells += other.coalesced_cells;
+        self.inst_remap_entries += other.inst_remap_entries;
+        self.cell_remap_entries += other.cell_remap_entries;
+        self.block_remap_entries += other.block_remap_entries;
+        self.inst_remap_capacity += other.inst_remap_capacity;
+        self.cell_remap_capacity += other.cell_remap_capacity;
+        self.block_remap_capacity += other.block_remap_capacity;
+        self.inst_remap_growth += other.inst_remap_growth;
+        self.cell_remap_growth += other.cell_remap_growth;
+        self.block_remap_growth += other.block_remap_growth;
+        self.argument_elements += other.argument_elements;
+        self.argument_stores += other.argument_stores;
+        self.destination_elements += other.destination_elements;
+        self.destination_stores += other.destination_stores;
+        self.block_prefix_copies += other.block_prefix_copies;
+        self.block_tail_copies += other.block_tail_copies;
+        self.nested_function_imports += other.nested_function_imports;
+        self.static_imports += other.static_imports;
+        self.side_tables.add(other.side_tables);
+    }
+}
+
+impl InlineSideTableStats {
+    pub fn add(&mut self, other: Self) {
+        macro_rules! add_family {
+            ($field:ident) => {
+                self.$field.source_rows += other.$field.source_rows;
+                self.$field.examined += other.$field.examined;
+                self.$field.copied += other.$field.copied;
+            };
+        }
+        add_family!(spec_bindings);
+        add_family!(callee_instances);
+        add_family!(abi_plans);
+        add_family!(representation_plans);
+        add_family!(closure_environment_plans);
+        add_family!(raw_bound_trees);
+        add_family!(resolved_bound_trees);
+        add_family!(function_value_symbols);
+        add_family!(instruction_spans);
+        add_family!(call_sites);
+        add_family!(call_site_owners);
+        add_family!(iterator_headers);
+    }
+}
+
+impl InlineScanStats {
+    pub fn add(&mut self, other: Self) {
+        self.enabled |= other.enabled;
+        self.borrowed_block_scans += other.borrowed_block_scans;
+        self.instructions_scanned += other.instructions_scanned;
+        self.top_level_blocks_ns += other.top_level_blocks_ns;
+        self.top_level_blocks_population += other.top_level_blocks_population;
+        self.call_instructions_examined += other.call_instructions_examined;
+        self.call_target_resolutions += other.call_target_resolutions;
+        self.straight_accepted += other.straight_accepted;
+        self.general_accepted += other.general_accepted;
+        self.direct_splices += other.direct_splices;
+        self.transitive_splices += other.transitive_splices;
+        self.resume_cursor_progress += other.resume_cursor_progress;
+        self.rescanned_instructions += other.rescanned_instructions;
+        self.candidate_requests += other.candidate_requests;
+        self.candidate_cache_hits += other.candidate_cache_hits;
+        self.candidate_derivations += other.candidate_derivations;
+        self.candidate_lower_ns += other.candidate_lower_ns;
+        self.candidate_cleanup_ns += other.candidate_cleanup_ns;
+        self.candidate_eligibility_ns += other.candidate_eligibility_ns;
+        self.candidate_keys.extend(other.candidate_keys);
+        self.ordinary_keys.extend(other.ordinary_keys);
+        for (worker, count) in other.candidate_worker_derivations {
+            *self.candidate_worker_derivations.entry(worker).or_default() += count;
+        }
+        for (reason, count) in other.rejection_reasons {
+            *self.rejection_reasons.entry(reason).or_default() += count;
+        }
+        self.clone.add(other.clone);
+        self.substitution_invocations += other.substitution_invocations;
+        self.substitution_instructions_inspected += other.substitution_instructions_inspected;
+        self.substitution_terminators_inspected += other.substitution_terminators_inspected;
+        self.substitution_replacements += other.substitution_replacements;
+        self.substitution_ns += other.substitution_ns;
+    }
 }
 
 /// Lazy callee-eligibility cache, keyed by [`FuncRef`]. `None` = looked up and
@@ -151,9 +343,27 @@ pub struct InlineScanStats {
 /// own snapshot, so compile cost scales with element types used, not call sites.
 type CacheKey = Instance;
 
-#[derive(Default)]
 pub struct InlineCache {
     cands: HashMap<CacheKey, Option<CalleeBody>>,
+    census_enabled: bool,
+    census: InlineScanStats,
+    worker: String,
+}
+
+impl Default for InlineCache {
+    fn default() -> Self {
+        let census_enabled = std::env::var_os("ROCK_INLINE_CENSUS")
+            .is_some_and(|v| v.to_str() == Some("1"));
+        let worker = census_enabled
+            .then(|| format!("{:?}", std::thread::current().id()))
+            .unwrap_or_default();
+        Self {
+            cands: HashMap::default(),
+            census_enabled,
+            census: InlineScanStats { enabled: census_enabled, ..InlineScanStats::default() },
+            worker,
+        }
+    }
 }
 
 impl InlineCache {
@@ -165,6 +375,19 @@ impl InlineCache {
     /// specialized snapshots keyed off it, so this matches on the `fref` component.
     pub fn invalidate(&mut self, fref: FuncRef) {
         self.cands.retain(|inst, _| inst.func != fref);
+    }
+
+    fn reset_census(&mut self) {
+        self.census = InlineScanStats {
+            enabled: self.census_enabled,
+            ..InlineScanStats::default()
+        };
+    }
+
+    fn rejection(&mut self, reason: &'static str) {
+        if self.census_enabled {
+            *self.census.rejection_reasons.entry(reason.to_string()).or_default() += 1;
+        }
     }
 }
 
@@ -191,20 +414,243 @@ fn annotation_gate(has_inline: bool, has_pure: bool, size_heuristic: bool) -> Op
     }
 }
 
-/// Lower `fref` and classify it as an inline candidate, or `None` if it is not
-/// eligible. Hard exclusions: extern, `inline(lua)`, `co fn`, lambda-bearing,
-/// self-recursive, or any reachable non-`Return`/`Goto`/`Branch`/`Switch`
-/// terminator (a reachable `Unreachable`/`Yield` would mis-lower to a bare
+#[derive(Default)]
+struct LiveClosure {
+    blocks: HashSet<Idx<Block>>,
+    insts: HashSet<Idx<Inst>>,
+    cells: HashSet<Idx<Cell>>,
+}
+
+fn term_values(term: &Term, push: &mut impl FnMut(Idx<Inst>)) {
+    match term {
+        Term::Return(values) | Term::Yield { values, .. } => {
+            values.iter().copied().for_each(push);
+        }
+        Term::Branch { cond, .. } | Term::Switch { discr: cond, .. } => push(*cond),
+        Term::Goto(_) | Term::Unreachable => {}
+    }
+}
+
+fn term_targets(term: &Term, push: &mut impl FnMut(Idx<Block>)) {
+    match term {
+        Term::Goto(target) => push(*target),
+        Term::Branch { then_bb, else_bb, .. } => {
+            push(*then_bb);
+            push(*else_bb);
+        }
+        Term::Switch { cases, default, .. } => {
+            cases.iter().map(|(_, target)| *target).for_each(&mut *push);
+            push(*default);
+        }
+        Term::Yield { resume, .. } => push(*resume),
+        Term::Return(_) | Term::Unreachable => {}
+    }
+}
+
+fn cell_operands(inst: &Inst, push: &mut impl FnMut(Idx<Cell>)) {
+    match inst {
+        Inst::Load(cell) | Inst::Store { cell, .. } => push(*cell),
+        Inst::CallMulti { dests, .. }
+        | Inst::CallValueMulti { dests, .. }
+        | Inst::CallBoundMulti { dests, .. } => dests.iter().copied().for_each(push),
+        Inst::Lambda { params, .. } => params.iter().copied().for_each(push),
+        Inst::MapNext { key_cell, val_cell, .. } => {
+            push(*key_cell);
+            push(*val_cell);
+        }
+        _ => {}
+    }
+}
+
+fn live_closure(func: &MirFunc) -> LiveClosure {
+    let mut live = LiveClosure::default();
+    let mut blocks = vec![func.entry];
+    let mut insts = Vec::new();
+    while let Some(bid) = blocks.pop() {
+        if !live.blocks.insert(bid) {
+            continue;
+        }
+        let block = &func.blocks[bid];
+        insts.extend(block.insts.iter().copied());
+        term_values(&block.term, &mut |iid| insts.push(iid));
+        term_targets(&block.term, &mut |target| blocks.push(target));
+    }
+    for param in &func.params {
+        live.cells.insert(*param);
+    }
+    while let Some(iid) = insts.pop() {
+        if !live.insts.insert(iid) {
+            continue;
+        }
+        let inst = &func.insts[iid];
+        crate::value_operands(inst, &mut |operand| insts.push(operand));
+        cell_operands(inst, &mut |cell| {
+            live.cells.insert(cell);
+        });
+        if let Inst::Lambda { entry, .. } = inst {
+            blocks.push(*entry);
+        }
+        while let Some(bid) = blocks.pop() {
+            if !live.blocks.insert(bid) {
+                continue;
+            }
+            let block = &func.blocks[bid];
+            insts.extend(block.insts.iter().copied());
+            term_values(&block.term, &mut |value| insts.push(value));
+            term_targets(&block.term, &mut |target| blocks.push(target));
+        }
+    }
+    live
+}
+
+fn side_family(source_rows: usize, retained: usize) -> InlineSideTableFamily {
+    InlineSideTableFamily {
+        source_rows,
+        examined: retained,
+        copied: retained,
+    }
+}
+
+fn template_counts(func: &MirFunc, measure_live: bool) -> InlineCloneStats {
+    let live = if measure_live {
+        Some(live_closure(func))
+    } else {
+        None
+    };
+    let live_instructions = live.as_ref().map_or(func.insts.len(), |live| live.insts.len());
+    let live_cells = live.as_ref().map_or(func.cells.len(), |live| live.cells.len());
+    let live_blocks = live.as_ref().map_or(func.blocks.len(), |live| live.blocks.len());
+    let live_inst = |id: &Idx<Inst>| live.as_ref().is_none_or(|live| live.insts.contains(id));
+    let live_block = |id: &Idx<Block>| live.as_ref().is_none_or(|live| live.blocks.contains(id));
+    let mut side = InlineSideTableStats::default();
+    side.spec_bindings = side_family(func.spec_bindings.len(), func.spec_bindings.keys().filter(|id| live_inst(*id)).count());
+    side.callee_instances = side_family(func.callee_instances.len(), func.callee_instances.keys().filter(|id| live_inst(*id)).count());
+    side.abi_plans = side_family(func.call_abi_plans.len(), func.call_abi_plans.keys().filter(|id| live_inst(*id)).count());
+    side.representation_plans = side_family(func.call_rep_plans.len(), func.call_rep_plans.keys().filter(|id| live_inst(*id)).count());
+    side.closure_environment_plans = side_family(func.closure_env_plans.len(), func.closure_env_plans.keys().filter(|id| live_inst(*id)).count());
+    side.raw_bound_trees = side_family(func.bound_trees.len(), func.bound_trees.keys().filter(|id| live_inst(*id)).count());
+    side.resolved_bound_trees = side_family(func.resolved_bound_trees.len(), func.resolved_bound_trees.keys().filter(|id| live_inst(*id)).count());
+    side.function_value_symbols = side_family(func.fn_value_symbols.len(), func.fn_value_symbols.keys().filter(|id| live_inst(*id)).count());
+    side.instruction_spans = side_family(
+        func.inst_spans.iter().count(),
+        func.inst_spans.iter().filter(|(id, _)| live_inst(id)).count(),
+    );
+    let retained_call_sites = func.call_sites.keys().filter(|id| live_inst(*id)).count();
+    side.call_sites = side_family(func.call_sites.len(), retained_call_sites);
+    let retained_owners: HashSet<u32> = func
+        .call_sites
+        .iter()
+        .filter(|(id, _)| live_inst(id))
+        .map(|(_, site)| site.owner.0)
+        .collect();
+    side.call_site_owners = side_family(func.site_owners.len(), retained_owners.len());
+    side.iterator_headers = side_family(
+        func.for_iter_headers.len(),
+        func.for_iter_headers.iter().filter(|id| live_block(id)).count(),
+    );
+    InlineCloneStats {
+        source_instructions: func.insts.len(),
+        source_cells: func.cells.len(),
+        source_blocks: func.blocks.len(),
+        live_instructions,
+        live_cells,
+        live_blocks,
+        dead_instructions: func.insts.len().saturating_sub(live_instructions),
+        dead_cells: func.cells.len().saturating_sub(live_cells),
+        dead_blocks: func.blocks.len().saturating_sub(live_blocks),
+        side_tables: side,
+        ..InlineCloneStats::default()
+    }
+}
+
+fn source_side_tables(side: InlineSideTableStats) -> InlineSideTableStats {
+    let mut out = side;
+    macro_rules! source_family {
+        ($field:ident) => {
+            out.$field.examined = out.$field.source_rows;
+            out.$field.copied = out.$field.source_rows;
+        };
+    }
+    source_family!(spec_bindings);
+    source_family!(callee_instances);
+    source_family!(abi_plans);
+    source_family!(representation_plans);
+    source_family!(closure_environment_plans);
+    source_family!(raw_bound_trees);
+    source_family!(resolved_bound_trees);
+    source_family!(function_value_symbols);
+    source_family!(instruction_spans);
+    source_family!(call_sites);
+    source_family!(call_site_owners);
+    source_family!(iterator_headers);
+    out
+}
+
+fn full_clone_stats(
+    cand: &CalleeBody,
+    straight: bool,
+    argument_elements: usize,
+    destination_elements: usize,
+    prefix: usize,
+    tail: usize,
+) -> InlineCloneStats {
+    let mut stats = cand.template;
+    stats.cloned_instructions = stats.source_instructions;
+    stats.cloned_cells = stats.source_cells;
+    stats.cloned_blocks = if straight { 0 } else { stats.source_blocks };
+    stats.dead_instructions = stats.source_instructions.saturating_sub(stats.live_instructions);
+    stats.dead_cells = stats.source_cells.saturating_sub(stats.live_cells);
+    stats.dead_blocks = if straight {
+        0
+    } else {
+        stats.source_blocks.saturating_sub(stats.live_blocks)
+    };
+    stats.inst_remap_entries = stats.source_instructions;
+    stats.cell_remap_entries = stats.source_cells;
+    stats.block_remap_entries = stats.cloned_blocks;
+    stats.inst_remap_capacity = stats.source_instructions;
+    stats.cell_remap_capacity = stats.source_cells;
+    stats.block_remap_capacity = stats.cloned_blocks;
+    stats.argument_elements = argument_elements;
+    stats.argument_stores = cand.func.params.len().min(argument_elements);
+    stats.destination_elements = destination_elements;
+    stats.destination_stores = destination_elements;
+    stats.block_prefix_copies = prefix;
+    stats.block_tail_copies = tail;
+    stats.nested_function_imports = cand.func.nested_fns.len();
+    stats.static_imports = cand.func.statics.len();
+    stats.side_tables = source_side_tables(stats.side_tables);
+    stats
+}
+
+#[derive(Default)]
+struct CandidateTiming {
+    lower_ns: u64,
+    cleanup_ns: u64,
+}
+
+/// Lower `fref` and classify it as an inline candidate. Hard exclusions: extern,
+/// `inline(lua)`, `co fn`, lambda-bearing, self-recursive, or any reachable
+/// non-`Return`/`Goto`/`Branch`/`Switch` terminator (a reachable
+/// `Unreachable`/`Yield` would mis-lower to a bare
 fn classify(
     ws: &Workspace,
     scx: &ScalarCtx,
     inst: &Instance,
     concrete_plans: &ConcretePlans,
-) -> Option<CalleeBody> {
+    measure_live: bool,
+    mut timing: Option<&mut CandidateTiming>,
+) -> Result<CalleeBody, &'static str> {
     let fref = inst.func;
     let f = &ws.module(fref.module).functions[fref.func];
-    if f.is_extern || f.inline_body.is_some() || f.is_coroutine {
-        return None;
+    if f.is_extern {
+        return Err("extern");
+    }
+    if f.inline_body.is_some() {
+        return Err("inline_lua");
+    }
+    if f.is_coroutine {
+        return Err("coroutine");
     }
     let has_inline = f.annotations.iter().any(|a| a.name.name.as_str() == "inline");
     let has_pure = f.annotations.iter().any(|a| a.name.name.as_str() == "pure");
@@ -215,17 +661,31 @@ fn classify(
     let force = match annotation_gate(has_inline, has_pure, size_heuristic()) {
         Some(force) => force || has_bounds,
         None if has_bounds => true,
-        None => return None,
+        None => return Err("missing_inline_annotation"),
     };
     // A snapshot lowers the body as if hand-written for the concrete
     // instantiation (`docs/flatvec-plan.md`); a non-generic instance's is the
     // declaration's own body.
-    let plan = concrete_plans.get(inst)?;
-    let abi = skull_mir::lower::owner_abi_plan(ws, scx, concrete_plans, inst).ok()?;
-    let mut mf = skull_mir::lower::lower_instance_with_plans(ws, scx, plan, concrete_plans).ok()?;
+    let plan = concrete_plans.get(inst).ok_or("missing_concrete_plan")?;
+    let abi = skull_mir::lower::owner_abi_plan(ws, scx, concrete_plans, inst)
+        .map_err(|_| "abi_plan")?;
+    let lower_started = timing.as_ref().map(|_| Instant::now());
+    let mut mf = skull_mir::lower::lower_instance_with_plans(ws, scx, plan, concrete_plans)
+        .map_err(|_| "lower")?;
+    if let Some(start) = lower_started {
+        if let Some(timing) = timing.as_deref_mut() {
+            timing.lower_ns = start.elapsed().as_nanos() as u64;
+        }
+    }
     // Cleanup first so the size gate reflects emitted size and the splice clones
     // a tight body (the caller re-runs cleanup over the whole result anyway).
+    let cleanup_started = timing.as_ref().map(|_| Instant::now());
     crate::cleanup(&mut mf);
+    if let Some(start) = cleanup_started {
+        if let Some(timing) = timing.as_deref_mut() {
+            timing.cleanup_ns = start.elapsed().as_nanos() as u64;
+        }
+    }
 
     // Structural exclusions over the whole arena.
     let mut has_lambda = false;
@@ -239,12 +699,12 @@ fn classify(
                 // Non-bounded fns keep the v0 refusal (they have a real
                 // emission to fall back on).
                 if !has_bounds {
-                    return None;
+                    return Err("lambda");
                 }
                 has_lambda = true;
             }
             Inst::Call { func, .. } | Inst::CallMulti { func, .. } if *func == fref => {
-                return None; // self-recursive
+                return Err("self_recursive");
             }
             _ => {}
         }
@@ -256,7 +716,8 @@ fn classify(
     // here would corrupt caller control flow.
     for &b in &reachable {
         match &mf.blocks[b].term {
-            Term::Unreachable | Term::Yield { .. } => return None,
+            Term::Unreachable => return Err("unreachable_terminator"),
+            Term::Yield { .. } => return Err("yield_terminator"),
             _ => {}
         }
     }
@@ -286,6 +747,7 @@ fn classify(
     }
     let coalescable_params: Vec<bool> =
         mf.params.iter().map(|p| !rebound.contains(p)).collect();
+    let template = template_counts(&mf, measure_live);
 
     // A lambda-bearing body must take the General splice even when its entry
     // ends in Return: the straight path clones no blocks, so the lambda's
@@ -293,13 +755,13 @@ fn classify(
     if !has_lambda && matches!(mf.blocks[mf.entry].term, Term::Return(_)) {
         // Straight: entry ends in Return, so it is the only reachable block.
         if !force && reachable_insts > STRAIGHT_INSTS {
-            return None;
+            return Err("straight_size_cap");
         }
         let ret_arity = match &mf.blocks[mf.entry].term {
             Term::Return(vs) => vs.len(),
             _ => unreachable!(),
         };
-        Some(CalleeBody {
+        Ok(CalleeBody {
             func: mf,
             subject: inst.clone(),
             abi,
@@ -308,6 +770,7 @@ fn classify(
             reachable: Vec::new(),
             insts: reachable_insts,
             forced: force,
+            template,
             coalescable_params,
         })
     } else {
@@ -318,14 +781,14 @@ fn classify(
                 Term::Return(vs) => Some(vs.len()),
                 _ => None,
             });
-        let ret_arity = arities.next()?; // no Return -> can't bind a result
+        let ret_arity = arities.next().ok_or("no_return")?;
         if !arities.all(|a| a == ret_arity) {
-            return None;
+            return Err("nonuniform_return_arity");
         }
         if !force && reachable_insts > GENERAL_INSTS {
-            return None;
+            return Err("general_size_cap");
         }
-        Some(CalleeBody {
+        Ok(CalleeBody {
             func: mf,
             subject: inst.clone(),
             abi,
@@ -334,6 +797,7 @@ fn classify(
             reachable,
             insts: reachable_insts,
             forced: force,
+            template,
             coalescable_params,
         })
     }
@@ -347,9 +811,47 @@ fn get<'a>(
     inst: &Instance,
     concrete_plans: &ConcretePlans,
 ) -> Option<&'a CalleeBody> {
+    if cache.census_enabled {
+        cache.census.candidate_requests += 1;
+    }
     if !cache.cands.contains_key(inst) {
-        let v = classify(ws, scx, inst, concrete_plans);
+        if cache.census_enabled {
+            cache.census.candidate_derivations += 1;
+            cache.census.candidate_keys.push(inst.clone());
+            *cache
+                .census
+                .candidate_worker_derivations
+                .entry(cache.worker.clone())
+                .or_default() += 1;
+        }
+        let started = cache.census_enabled.then(Instant::now);
+        let mut timing = CandidateTiming::default();
+        let result = classify(
+            ws,
+            scx,
+            inst,
+            concrete_plans,
+            cache.census_enabled,
+            cache.census_enabled.then_some(&mut timing),
+        );
+        if let Some(start) = started {
+            let elapsed = start.elapsed().as_nanos() as u64;
+            cache.census.candidate_lower_ns += timing.lower_ns;
+            cache.census.candidate_cleanup_ns += timing.cleanup_ns;
+            cache.census.candidate_eligibility_ns += elapsed
+                .saturating_sub(timing.lower_ns)
+                .saturating_sub(timing.cleanup_ns);
+        }
+        let v = match result {
+            Ok(candidate) => Some(candidate),
+            Err(reason) => {
+                cache.rejection(reason);
+                None
+            }
+        };
         cache.cands.insert(inst.clone(), v);
+    } else if cache.census_enabled {
+        cache.census.candidate_cache_hits += 1;
     }
     cache.cands[inst].as_ref()
 }
@@ -495,6 +997,9 @@ fn find_site(
     scan_stats: &mut InlineScanStats,
 ) -> Result<Option<Site>, CompilerError> {
     let mut started = resume.is_none();
+    if resume.is_some() {
+        scan_stats.resume_cursor_progress += 1;
+    }
     for (bid, _) in func.blocks.iter() {
         if !top.contains(&bid) {
             continue;
@@ -516,15 +1021,21 @@ fn find_site(
         for (idx, &iid) in insts.iter().enumerate().skip(start) {
             let site = match &func.insts[iid] {
                 Inst::Call { func: fref, args } if *fref != self_ref => {
+                    scan_stats.call_instructions_examined += 1;
                     let Some((inst, abi)) = call_target(func, iid, *fref, ws)? else {
+                        cache.rejection("missing_or_incomplete_concrete_owner");
                         continue;
                     };
+                    scan_stats.call_target_resolutions += 1;
                     Site::Single { bid, idx, call_id: iid, args: args.clone(), inst, abi }
                 }
                 Inst::CallMulti { dests, func: fref, args } if *fref != self_ref => {
+                    scan_stats.call_instructions_examined += 1;
                     let Some((inst, abi)) = call_target(func, iid, *fref, ws)? else {
+                        cache.rejection("missing_or_incomplete_concrete_owner");
                         continue;
                     };
+                    scan_stats.call_target_resolutions += 1;
                     Site::Multi {
                         bid,
                         idx,
@@ -538,25 +1049,30 @@ fn find_site(
                 _ => continue,
             };
             let cell_count = func.cells.len();
-            match get(cache, ws, scx, site.inst(), concrete_plans) {
-                // Decline a splice that would breach the per-caller cell budget
-                // (keep scanning — a smaller candidate may still fit). A concrete
-                // call with a scalarized ABI is exempt: its args are splatted to
-                // leaves, so a residual opaque delivery would be invalid -- it
-                // must splice, and eligibility is a subset of `classify` so a
-                // candidate always exists. Declining it would leave a residual
-                // miscompile.
-                Some(cand)
-                    if cand.subject == *site.inst()
-                        && cand.abi.as_ref() == site.abi()
-                        && cand.abi.result_lanes() == site.abi().result_lanes()
-                        && arity_ok(cand, &site)
-                        && (!site.inst().args.is_empty()
-                            || cell_count + cand.func.cells.len() <= CELL_BUDGET) =>
-                {
-                    return Ok(Some(site))
+            let candidate = get(cache, ws, scx, site.inst(), concrete_plans);
+            let Some(cand) = candidate else {
+                continue;
+            };
+            let reason = if cand.subject != *site.inst() {
+                Some("candidate_subject_mismatch")
+            } else if cand.abi.as_ref() != site.abi() {
+                Some("candidate_abi_mismatch")
+            } else if cand.abi.result_lanes() != site.abi().result_lanes() {
+                Some("candidate_result_lanes_mismatch")
+            } else if !arity_ok(cand, &site) {
+                Some("candidate_arity_mismatch")
+            } else if site.inst().args.is_empty()
+                && cell_count + cand.func.cells.len() > CELL_BUDGET
+            {
+                Some("cell_budget")
+            } else {
+                None
+            };
+            match reason {
+                None => {
+                    return Ok(Some(site));
                 }
-                _ => {}
+                Some(reason) => cache.rejection(reason),
             }
         }
     }
@@ -717,18 +1233,46 @@ fn remap_term_clone(
 /// in another). `to` is defined where the call was, which dominates every use of
 /// `from`, so the replacement is sound. (Whole-arena walk; the incremental
 /// dest-binding perf refinement is deferred — `docs/skull-inlining-plan.md`.)
-fn subst_all(func: &mut MirFunc, from: Idx<Inst>, to: Idx<Inst>) {
-    let m = |x: Idx<Inst>| if x == from { to } else { x };
+fn subst_all(
+    func: &mut MirFunc,
+    from: Idx<Inst>,
+    to: Idx<Inst>,
+    census: &mut InlineScanStats,
+) {
+    let started = census_enabled(census).then(Instant::now);
+    let replacements = ThreadCell::new(0usize);
+    let m = |x: Idx<Inst>| {
+        if x == from {
+            replacements.set(replacements.get() + 1);
+            to
+        } else {
+            x
+        }
+    };
     let ids: Vec<Idx<Inst>> = func.insts.iter().map(|(i, _)| i).collect();
     for id in ids {
+        census.substitution_instructions_inspected += 1;
         crate::remap_inst(&mut func.insts[id], &m);
     }
+    census.substitution_replacements += replacements.get();
     let bids: Vec<Idx<Block>> = func.blocks.iter().map(|(b, _)| b).collect();
     for b in bids {
+        census.substitution_terminators_inspected += 1;
         let mut term = func.blocks[b].term.clone();
         crate::remap_term(&mut term, &m);
         func.blocks[b].term = term;
     }
+    if census_enabled(census) {
+        census.substitution_invocations += 1;
+        census.substitution_ns += started
+            .expect("census timer started when enabled")
+            .elapsed()
+            .as_nanos() as u64;
+    }
+}
+
+fn census_enabled(census: &InlineScanStats) -> bool {
+    census.enabled
 }
 
 /// For each coalescable param whose arg is a plain `Load(c)`, map the callee
@@ -1055,13 +1599,14 @@ fn splice(
     ws: &Workspace,
     scx: &ScalarCtx,
     concrete_plans: &ConcretePlans,
+    census: &mut InlineScanStats,
 ) -> Result<Vec<Idx<Block>>, CompilerError> {
     match cand.kind {
         Kind::Straight => {
-            splice_straight(func, site, cand, ws, scx, concrete_plans)?;
+            splice_straight(func, site, cand, ws, scx, concrete_plans, census)?;
             Ok(Vec::new())
         }
-        Kind::General => splice_general(func, site, cand, ws, scx, concrete_plans),
+        Kind::General => splice_general(func, site, cand, ws, scx, concrete_plans, census),
     }
 }
 
@@ -1076,6 +1621,7 @@ fn splice_straight(
     ws: &Workspace,
     scx: &ScalarCtx,
     concrete_plans: &ConcretePlans,
+    census: &mut InlineScanStats,
 ) -> Result<(), CompilerError> {
     let callee = &cand.func;
     let (bid, idx, args) = match &site {
@@ -1148,7 +1694,7 @@ fn splice_straight(
             };
             new_insts.extend_from_slice(&old[idx + 1..]);
             func.blocks[bid].insts = new_insts;
-            subst_all(func, *call_id, to);
+            subst_all(func, *call_id, to, census);
         }
     }
     Ok(())
@@ -1165,6 +1711,7 @@ fn splice_general(
     ws: &Workspace,
     scx: &ScalarCtx,
     concrete_plans: &ConcretePlans,
+    _census: &mut InlineScanStats,
 ) -> Result<Vec<Idx<Block>>, CompilerError> {
     let callee = &cand.func;
     let (bid, idx, args) = match &site {
@@ -1299,14 +1846,29 @@ fn inline_functions_inner(
 ) -> Result<(HashSet<FuncRef>, Vec<SpliceRecord>, InlineScanStats), CompilerError> {
     let mut spliced = HashSet::default();
     let mut records: Vec<SpliceRecord> = Vec::new();
-    let mut scan_stats = InlineScanStats::default();
+    let mut scan_stats = InlineScanStats {
+        enabled: cache.census_enabled,
+        ..InlineScanStats::default()
+    };
+    cache.reset_census();
     // Kill-switch for perf attribution / bisecting a suspected inline bug.
     if inline_disabled() {
         return Ok((spliced, records, scan_stats));
     }
     // The caller's top-level blocks (excludes closure sub-CFGs), maintained
     // incrementally so neither find_site nor the loop recomputes reachability.
-    let mut top: HashSet<Idx<Block>> = top_level_blocks(func).into_iter().collect();
+    let top_start = cache.census_enabled.then(Instant::now);
+    let top_blocks = top_level_blocks(func);
+    if let Some(start) = top_start {
+        cache.census.top_level_blocks_ns = start.elapsed().as_nanos() as u64;
+        cache.census.top_level_blocks_population = top_blocks.len();
+    }
+    let mut top: HashSet<Idx<Block>> = top_blocks.into_iter().collect();
+    let original_calls: HashSet<Idx<Inst>> = top
+        .iter()
+        .flat_map(|bid| func.blocks[*bid].insts.iter().copied())
+        .filter(|iid| matches!(&func.insts[*iid], Inst::Call { .. } | Inst::CallMulti { .. }))
+        .collect();
     // Resume cursor: the position of the last splice. No eligible call can appear
     // before it, so the next scan starts there (turns the per-splice full re-scan
     // from O(splices x size) into a single forward sweep).
@@ -1328,21 +1890,46 @@ fn inline_functions_inner(
         };
         let pos = site.pos();
         let fref = site.fref();
+        let transitive = !original_calls.contains(&site.call_id());
+        let argument_elements = match &site {
+            Site::Single { args, .. } | Site::Multi { args, .. } => args.len(),
+        };
+        let destination_elements = match &site {
+            Site::Single { .. } => 0,
+            Site::Multi { dests, .. } => dests.len(),
+        };
+        let prefix = pos.1;
+        let tail = func.blocks[pos.0].insts.len().saturating_sub(pos.1 + 1);
         // Re-borrow the candidate immutably for the splice (distinct from `func`).
-        let cand = cache.cands[site.inst()]
+        let (cands, census) = (&cache.cands, &mut cache.census);
+        let cand = cands[site.inst()]
             .as_ref()
             .expect("site implies a cached candidate");
         // SAFETY-of-borrows: `splice` mutates `func`, reads `cand` (in `cache`);
         // they are different objects. The borrow checker can't see that through
         // the `&mut cache` in `find_site`, so split the lookup out here where
         // only `&cache` is held.
+        let splice_start = cache.census_enabled.then(Instant::now);
+        let added = splice(func, site, cand, ws, scx, concrete_plans, census)?;
+        let splice_ns = splice_start
+            .map(|start| start.elapsed().as_nanos() as u64)
+            .unwrap_or_default();
         records.push(SpliceRecord {
             callee: fref,
             straight: cand.kind == Kind::Straight,
             forced: cand.forced,
+            transitive,
             callee_insts: cand.insts,
+            clone: full_clone_stats(
+                cand,
+                cand.kind == Kind::Straight,
+                argument_elements,
+                destination_elements,
+                prefix,
+                tail,
+            ),
+            splice_ns,
         });
-        let added = splice(func, site, cand, ws, scx, concrete_plans)?;
         // The callee's `static` cells now live in THIS body: the spliced code
         // reads and writes them, and a `static` is one cell per owning fn, so
         // the cell is the same one every call site shares. Carrying them here is
@@ -1360,6 +1947,19 @@ fn inline_functions_inner(
     if func.statics.len() > 1 {
         let mut seen: HashSet<ustr::Ustr> = HashSet::default();
         func.statics.retain(|sc| seen.insert(sc.cell));
+    }
+    scan_stats.add(std::mem::take(&mut cache.census));
+    for record in &records {
+        if record.straight {
+            scan_stats.straight_accepted += 1;
+        } else {
+            scan_stats.general_accepted += 1;
+        }
+        if record.transitive {
+            scan_stats.transitive_splices += 1;
+        } else {
+            scan_stats.direct_splices += 1;
+        }
     }
     Ok((spliced, records, scan_stats))
 }
