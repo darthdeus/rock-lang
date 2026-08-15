@@ -30,8 +30,8 @@ fn workspace_root() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR")).parent().expect("workspace root")
 }
 
-/// Sim-state global names = the engine predicate's output (its `c`-line names),
-/// consumed rather than re-listed in Rust.
+/// Sim-state global names = the engine predicate's output, resolved to the
+/// logical names used by dump-state rather than re-listed in Rust.
 fn sim_state_names(game: &str, frames: u32) -> std::collections::HashSet<String> {
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("names.replay");
@@ -51,7 +51,7 @@ fn sim_state_names(game: &str, frames: u32) -> std::collections::HashSet<String>
     text.lines()
         .filter_map(|l| l.strip_prefix("c "))
         .filter_map(|rest| rest.split(' ').nth(1))
-        .map(|s| s.to_string())
+        .map(|identity| identity.rsplit_once("::").map_or(identity, |(_, name)| name).to_string())
         .collect()
 }
 
