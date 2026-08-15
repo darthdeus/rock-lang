@@ -2429,6 +2429,9 @@ fn inline_functions_inner(
         // the `&mut cache` in `find_site`, so split the lookup out here where
         // only `&cache` is held.
         let splice_start = cache.census_enabled.then(Instant::now);
+        let result_cell = usize::from(
+            cand.kind == Kind::General && matches!(&site, Site::Single { .. }),
+        );
         let (maps, coalesced_cells) = splice(
             func,
             site,
@@ -2469,7 +2472,7 @@ fn inline_functions_inner(
         // `Iterator`-bounded fn -- reaches the emitted program's registry.
         // Deduped below; one callee can be spliced at many sites.
         func.statics.extend(cand.func.statics.iter().cloned());
-        cell_budget += cand.template.source_cells.saturating_sub(coalesced_cells);
+        cell_budget += cand.template.source_cells.saturating_sub(coalesced_cells) + result_cell;
         spliced.insert(fref);
         resume = Some(pos);
         budget -= 1;
