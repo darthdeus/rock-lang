@@ -387,6 +387,7 @@ pub fn convert_closures_framed(
         nested.push(MirFunc {
             name: hoisted_name[&sid],
             params,
+            lower_timing_enabled: mf.lower_timing_enabled,
             lower_attribution: mf.lower_attribution.clone(),
             abi_plan: None,
             abi_representation: mf.abi_representation.clone(),

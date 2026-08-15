@@ -223,6 +223,12 @@ fn print_attribution(attribution: &skull::mir_emit::EmitAttribution) {
         attribution.lower.mir_cell_capacity,
         attribution.lower.mir_block_capacity,
     );
+    println!(
+        "    MIR reallocation self: inst/cell/block {:.3}/{:.3}/{:.3} ms (opt-in timing)",
+        attribution.lower.mir_instruction_reallocation_ns as f64 / 1_000_000.0,
+        attribution.lower.mir_cell_reallocation_ns as f64 / 1_000_000.0,
+        attribution.lower.mir_block_reallocation_ns as f64 / 1_000_000.0,
+    );
     let accounted_ownership_ns = attribution
         .lower
         .concrete_mono_lookup_ns

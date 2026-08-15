@@ -25,6 +25,7 @@
 
 use bone_semantic::hir::TyId;
 use comfy_la_arena::{Arena, Idx};
+use std::time::Instant;
 use ustr::Ustr;
 
 pub const VEC_COLUMN_HEADER_FIELD: &str = "@vec";
@@ -728,6 +729,8 @@ pub struct StaticCell {
 pub struct MirFunc {
     pub name: Ustr,
     pub params: Vec<Idx<Cell>>,
+    /// Opt-in timing for arena growth attribution.
+    pub lower_timing_enabled: bool,
     pub lower_attribution: crate::lower::LowerAttribution,
     /// The concrete function representation consumed by entry binding and
     /// return lowering. Calls retain the same plan in `call_abi_plans`.
@@ -889,6 +892,7 @@ impl MirFunc {
         Self {
             name,
             params: Vec::new(),
+            lower_timing_enabled: crate::lower::lower_attribution_timing_enabled(),
             lower_attribution: Default::default(),
             abi_plan: None,
             abi_representation: None,
@@ -928,9 +932,12 @@ impl MirFunc {
     /// declared/inferred type.
     pub fn new_cell(&mut self, name: Option<Ustr>) -> Idx<Cell> {
         let capacity = self.cells.capacity();
+        let start = self.lower_timing_enabled.then(Instant::now);
         let id = self.cells.alloc(Cell { name, loop_binding: false, ty: None, nonnull_value_struct: false });
         if self.cells.capacity() != capacity {
             self.lower_attribution.mir_cell_reallocations += 1;
+            self.lower_attribution.mir_cell_reallocation_ns +=
+                start.map(|start| start.elapsed().as_nanos() as u64).unwrap_or_default();
         }
         id
     }
@@ -938,9 +945,12 @@ impl MirFunc {
     /// Allocate a fresh variable cell carrying bone's type for the binding.
     pub fn new_cell_typed(&mut self, name: Option<Ustr>, ty: Option<TyId>) -> Idx<Cell> {
         let capacity = self.cells.capacity();
+        let start = self.lower_timing_enabled.then(Instant::now);
         let id = self.cells.alloc(Cell { name, loop_binding: false, ty, nonnull_value_struct: false });
         if self.cells.capacity() != capacity {
             self.lower_attribution.mir_cell_reallocations += 1;
+            self.lower_attribution.mir_cell_reallocation_ns +=
+                start.map(|start| start.elapsed().as_nanos() as u64).unwrap_or_default();
         }
         id
     }
@@ -960,9 +970,12 @@ impl MirFunc {
     /// Allocate a fresh (empty, `Unreachable`-terminated) block.
     pub fn new_block(&mut self) -> Idx<Block> {
         let capacity = self.blocks.capacity();
+        let start = self.lower_timing_enabled.then(Instant::now);
         let id = self.blocks.alloc(Block::new());
         if self.blocks.capacity() != capacity {
             self.lower_attribution.mir_block_reallocations += 1;
+            self.lower_attribution.mir_block_reallocation_ns +=
+                start.map(|start| start.elapsed().as_nanos() as u64).unwrap_or_default();
         }
         id
     }
@@ -970,9 +983,12 @@ impl MirFunc {
     /// Allocate an instruction and append it to `block`; return its id (=value).
     pub fn emit(&mut self, block: Idx<Block>, inst: Inst) -> Idx<Inst> {
         let capacity = self.insts.capacity();
+        let start = self.lower_timing_enabled.then(Instant::now);
         let id = self.insts.alloc(inst);
         if self.insts.capacity() != capacity {
             self.lower_attribution.mir_instruction_reallocations += 1;
+            self.lower_attribution.mir_instruction_reallocation_ns +=
+                start.map(|start| start.elapsed().as_nanos() as u64).unwrap_or_default();
         }
         self.blocks[block].insts.push(id);
         id

@@ -585,12 +585,15 @@ pub struct AttributionPhase {
     pub abi_param_shared_views: usize,
     pub mir_instruction_allocations: usize,
     pub mir_instruction_reallocations: usize,
+    pub mir_instruction_reallocation_ns: u64,
     pub mir_instruction_capacity: usize,
     pub mir_cell_allocations: usize,
     pub mir_cell_reallocations: usize,
+    pub mir_cell_reallocation_ns: u64,
     pub mir_cell_capacity: usize,
     pub mir_block_allocations: usize,
     pub mir_block_reallocations: usize,
+    pub mir_block_reallocation_ns: u64,
     pub mir_block_capacity: usize,
 }
 
@@ -870,12 +873,16 @@ impl AttributionAccumulator {
         self.result.lower.abi_param_shared_views += unit.lower_facts.abi_param_shared_views;
         self.result.lower.mir_instruction_allocations += unit.lower_facts.mir_instruction_allocations;
         self.result.lower.mir_instruction_reallocations += unit.lower_facts.mir_instruction_reallocations;
+        self.result.lower.mir_instruction_reallocation_ns +=
+            unit.lower_facts.mir_instruction_reallocation_ns;
         self.result.lower.mir_instruction_capacity += unit.lower_facts.mir_instruction_capacity;
         self.result.lower.mir_cell_allocations += unit.lower_facts.mir_cell_allocations;
         self.result.lower.mir_cell_reallocations += unit.lower_facts.mir_cell_reallocations;
+        self.result.lower.mir_cell_reallocation_ns += unit.lower_facts.mir_cell_reallocation_ns;
         self.result.lower.mir_cell_capacity += unit.lower_facts.mir_cell_capacity;
         self.result.lower.mir_block_allocations += unit.lower_facts.mir_block_allocations;
         self.result.lower.mir_block_reallocations += unit.lower_facts.mir_block_reallocations;
+        self.result.lower.mir_block_reallocation_ns += unit.lower_facts.mir_block_reallocation_ns;
         self.result.lower.mir_block_capacity += unit.lower_facts.mir_block_capacity;
         record_phase(
             &mut self.result.inline_phase,
@@ -6062,6 +6069,16 @@ fn main() { let result = first() }
                     && attribution.lower.concrete_mono_lookup_ns > 0
                     && attribution.lower.concrete_mono_clone_self_ns > 0,
                 "opt-in lowerer timing has no measured population: {attribution:?}"
+            );
+            let reallocations = attribution.lower.mir_instruction_reallocations
+                + attribution.lower.mir_cell_reallocations
+                + attribution.lower.mir_block_reallocations;
+            let reallocation_ns = attribution.lower.mir_instruction_reallocation_ns
+                + attribution.lower.mir_cell_reallocation_ns
+                + attribution.lower.mir_block_reallocation_ns;
+            assert!(
+                reallocations > 0 && reallocation_ns > 0,
+                "opt-in MIR growth timing has no measured population: {attribution:?}"
             );
         }
     }

@@ -113,12 +113,15 @@ pub struct LowerAttribution {
     pub abi_param_shared_views: usize,
     pub mir_instruction_allocations: usize,
     pub mir_instruction_reallocations: usize,
+    pub mir_instruction_reallocation_ns: u64,
     pub mir_instruction_capacity: usize,
     pub mir_cell_allocations: usize,
     pub mir_cell_reallocations: usize,
+    pub mir_cell_reallocation_ns: u64,
     pub mir_cell_capacity: usize,
     pub mir_block_allocations: usize,
     pub mir_block_reallocations: usize,
+    pub mir_block_reallocation_ns: u64,
     pub mir_block_capacity: usize,
 }
 
@@ -155,12 +158,15 @@ impl LowerAttribution {
         self.abi_param_shared_views += other.abi_param_shared_views;
         self.mir_instruction_allocations += other.mir_instruction_allocations;
         self.mir_instruction_reallocations += other.mir_instruction_reallocations;
+        self.mir_instruction_reallocation_ns += other.mir_instruction_reallocation_ns;
         self.mir_instruction_capacity += other.mir_instruction_capacity;
         self.mir_cell_allocations += other.mir_cell_allocations;
         self.mir_cell_reallocations += other.mir_cell_reallocations;
+        self.mir_cell_reallocation_ns += other.mir_cell_reallocation_ns;
         self.mir_cell_capacity += other.mir_cell_capacity;
         self.mir_block_allocations += other.mir_block_allocations;
         self.mir_block_reallocations += other.mir_block_reallocations;
+        self.mir_block_reallocation_ns += other.mir_block_reallocation_ns;
         self.mir_block_capacity += other.mir_block_capacity;
     }
 
@@ -271,8 +277,11 @@ fn finish_lower_attribution(mut f: MirFunc, mut stats: LowerAttribution) -> MirF
     stats.mir_block_allocations += f.blocks.len();
     stats.mir_block_capacity += f.blocks.capacity();
     stats.mir_instruction_reallocations += f.lower_attribution.mir_instruction_reallocations;
+    stats.mir_instruction_reallocation_ns += f.lower_attribution.mir_instruction_reallocation_ns;
     stats.mir_cell_reallocations += f.lower_attribution.mir_cell_reallocations;
+    stats.mir_cell_reallocation_ns += f.lower_attribution.mir_cell_reallocation_ns;
     stats.mir_block_reallocations += f.lower_attribution.mir_block_reallocations;
+    stats.mir_block_reallocation_ns += f.lower_attribution.mir_block_reallocation_ns;
     f.lower_attribution = stats;
     f
 }
