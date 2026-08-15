@@ -105,7 +105,7 @@ pub struct LowerAttribution {
     pub concrete_mono_explicit_owned_escapes: usize,
     pub concrete_mono_lookup_ns: u64,
     pub concrete_mono_cache_lookup_ns: u64,
-    pub concrete_mono_handle_clone_ns: u64,
+    pub concrete_mono_shared_handle_requests: usize,
     pub concrete_mono_clone_self_ns: u64,
     pub concrete_mono_timed_requests: usize,
     pub concrete_mono_by_consumer: [ConcreteMonoConsumerStats; ConcreteMonoConsumer::COUNT],
@@ -139,7 +139,7 @@ impl LowerAttribution {
         self.concrete_mono_explicit_owned_escapes += other.concrete_mono_explicit_owned_escapes;
         self.concrete_mono_lookup_ns += other.concrete_mono_lookup_ns;
         self.concrete_mono_cache_lookup_ns += other.concrete_mono_cache_lookup_ns;
-        self.concrete_mono_handle_clone_ns += other.concrete_mono_handle_clone_ns;
+        self.concrete_mono_shared_handle_requests += other.concrete_mono_shared_handle_requests;
         self.concrete_mono_clone_self_ns += other.concrete_mono_clone_self_ns;
         self.concrete_mono_timed_requests += other.concrete_mono_timed_requests;
         for (total, child) in self
@@ -180,13 +180,13 @@ impl LowerAttribution {
         cloned_nodes: usize,
         clone_self_ns: u64,
         cache_lookup_ns: u64,
-        handle_clone_ns: u64,
+        lookup_ns: u64,
     ) {
         self.concrete_mono_cache_hits += 1;
         self.concrete_mono_cloned_nodes += cloned_nodes;
         self.concrete_mono_cache_hit_cloned_nodes += cloned_nodes;
         self.concrete_mono_cache_lookup_ns += cache_lookup_ns;
-        self.concrete_mono_handle_clone_ns += handle_clone_ns;
+        self.concrete_mono_lookup_ns += lookup_ns;
         self.concrete_mono_clone_self_ns += clone_self_ns;
         let stats = &mut self.concrete_mono_by_consumer[consumer as usize];
         stats.cloned_nodes += cloned_nodes;
@@ -257,15 +257,6 @@ fn mono_ty_node_count(ty: &MonoTy) -> usize {
 fn clone_mono_ty_timed(ty: &MonoTy, timing: bool) -> (MonoTy, u64) {
     let start = timing.then(Instant::now);
     let cloned = ty.clone();
-    let elapsed = start
-        .map(|start| start.elapsed().as_nanos() as u64)
-        .unwrap_or_default();
-    (cloned, elapsed)
-}
-
-fn clone_mono_handle_timed(ty: &Rc<MonoTy>, timing: bool) -> (Rc<MonoTy>, u64) {
-    let start = timing.then(Instant::now);
-    let cloned = Rc::clone(ty);
     let elapsed = start
         .map(|start| start.elapsed().as_nanos() as u64)
         .unwrap_or_default();
@@ -2177,47 +2168,32 @@ impl Builder<'_> {
         self.lower_attribution
             .borrow_mut()
             .record_concrete_mono_request(consumer);
+        if self.lower_timing_enabled {
+            self.lower_attribution
+                .borrow_mut()
+                .concrete_mono_timed_requests += 1;
+        }
         let cache = &self.concrete_type_cache;
         let cache_lookup_start = timing.then(Instant::now);
-        let (hit, handle_clone_ns) = {
-            let cache = cache.borrow();
-            let hit = cache
-                .get(&id)
-                .map(|ty| clone_mono_handle_timed(ty, timing));
-            let handle_clone_ns = hit.as_ref().map(|(_, ns)| *ns).unwrap_or_default();
-            (hit.map(|(ty, _)| ty), handle_clone_ns)
-        };
+        let hit = cache.borrow().get(&id).map(Rc::clone);
         let cache_lookup_ns = cache_lookup_start
             .map(|start| start.elapsed().as_nanos() as u64)
             .unwrap_or_default();
         if let Some(ty) = hit {
             let mut stats = self.lower_attribution.borrow_mut();
-            if timing {
-                stats.concrete_mono_timed_requests += 1;
-            }
-            stats.record_concrete_mono_cache_hit(
-                consumer,
-                0,
-                0,
-                cache_lookup_ns,
-                handle_clone_ns,
-            );
+            stats.concrete_mono_shared_handle_requests += 1;
+            stats.record_concrete_mono_cache_hit(consumer, 0, 0, cache_lookup_ns, 0);
             return ty;
         }
-        if timing {
-            self.lower_attribution
-                .borrow_mut()
-                .concrete_mono_timed_requests += 1;
-        }
         let lookup_start = timing.then(Instant::now);
-        let ty = self.scx.interner().get(id);
+        let (ty, interner_cold) = self.scx.interner().get_shared_with_status(id);
         let lookup_ns = lookup_start
             .map(|start| start.elapsed().as_nanos() as u64)
             .unwrap_or_default();
-        let nodes = mono_ty_node_count(&ty);
-        let ty = Rc::new(ty);
-        cache.borrow_mut().insert(id, Rc::clone(&ty));
         let mut stats = self.lower_attribution.borrow_mut();
+        stats.concrete_mono_shared_handle_requests += 1;
+        let nodes = interner_cold.then(|| mono_ty_node_count(&ty)).unwrap_or_default();
+        cache.borrow_mut().insert(id, Rc::clone(&ty));
         stats.record_concrete_mono_derivation(consumer, nodes, 0, lookup_ns, cache_lookup_ns, 0);
         ty
     }

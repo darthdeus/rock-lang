@@ -576,7 +576,7 @@ pub struct AttributionPhase {
     pub concrete_mono_explicit_owned_escapes: usize,
     pub concrete_mono_lookup_ns: u64,
     pub concrete_mono_cache_lookup_ns: u64,
-    pub concrete_mono_handle_clone_ns: u64,
+    pub concrete_mono_shared_handle_requests: usize,
     pub concrete_mono_clone_self_ns: u64,
     pub concrete_mono_timed_requests: usize,
     pub concrete_mono_by_consumer:
@@ -850,8 +850,8 @@ impl AttributionAccumulator {
         self.result.lower.concrete_mono_lookup_ns += unit.lower_facts.concrete_mono_lookup_ns;
         self.result.lower.concrete_mono_cache_lookup_ns +=
             unit.lower_facts.concrete_mono_cache_lookup_ns;
-        self.result.lower.concrete_mono_handle_clone_ns +=
-            unit.lower_facts.concrete_mono_handle_clone_ns;
+        self.result.lower.concrete_mono_shared_handle_requests +=
+            unit.lower_facts.concrete_mono_shared_handle_requests;
         self.result.lower.concrete_mono_clone_self_ns += unit.lower_facts.concrete_mono_clone_self_ns;
         self.result.lower.concrete_mono_timed_requests +=
             unit.lower_facts.concrete_mono_timed_requests;
@@ -6013,7 +6013,6 @@ fn main() { let result = first() }
                         + attribution.lower.concrete_mono_derivations
                 && attribution.lower.concrete_mono_unique_ids
                     == attribution.lower.concrete_mono_derivations
-                && attribution.lower.concrete_mono_interner_miss_cloned_nodes > 0
                 && attribution.lower.concrete_mono_cache_insertion_cloned_nodes == 0
                 && attribution.lower.concrete_mono_cache_hit_cloned_nodes == 0
                 && attribution.lower.concrete_mono_cloned_nodes
@@ -6027,6 +6026,8 @@ fn main() { let result = first() }
                 && attribution.lower.concrete_mono_cache_hit_cloned_nodes == 0
                 && attribution.lower.concrete_mono_cache_insertion_cloned_nodes == 0
                 && attribution.lower.concrete_mono_explicit_owned_escape_cloned_nodes > 0
+                && attribution.lower.concrete_mono_shared_handle_requests
+                    == attribution.lower.concrete_mono_requests
                 && attribution
                     .lower
                     .concrete_mono_by_consumer

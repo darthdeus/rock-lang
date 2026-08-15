@@ -309,22 +309,17 @@ impl<'a> DispatchCtx<'a> {
                 .borrow_mut()
                 .record_concrete_mono_request(super::ConcreteMonoConsumer::Dispatch);
         }
+        let interner = self.interner?;
         if let Some(cache) = self.concrete_type_cache {
             let cache_lookup_start = timing.then(std::time::Instant::now);
-            let (hit, handle_clone_ns) = {
-                let cache = cache.borrow();
-                let hit = cache
-                    .get(&id)
-                    .map(|ty| super::clone_mono_handle_timed(ty, timing));
-                let handle_clone_ns = hit.as_ref().map(|(_, ns)| *ns).unwrap_or_default();
-                (hit.map(|(ty, _)| ty), handle_clone_ns)
-            };
+            let hit = cache.borrow().get(&id).map(Rc::clone);
             let cache_lookup_ns = cache_lookup_start
                 .map(|start| start.elapsed().as_nanos() as u64)
                 .unwrap_or_default();
             if let Some(ty) = hit {
                 if let Some(stats) = self.lower_attribution {
                     let mut stats = stats.borrow_mut();
+                    stats.concrete_mono_shared_handle_requests += 1;
                     if timing {
                         stats.concrete_mono_timed_requests += 1;
                     }
@@ -333,26 +328,25 @@ impl<'a> DispatchCtx<'a> {
                         0,
                         0,
                         cache_lookup_ns,
-                        handle_clone_ns,
+                        0,
                     );
                 }
                 return Some(ty);
             }
-            if timing {
-                if let Some(stats) = self.lower_attribution {
-                    stats.borrow_mut().concrete_mono_timed_requests += 1;
-                }
-            }
             let lookup_start = timing.then(std::time::Instant::now);
-            let ty = self.interner?.get(id);
+            let (ty, interner_cold) = interner.get_shared_with_status(id);
             let lookup_ns = lookup_start
                 .map(|start| start.elapsed().as_nanos() as u64)
                 .unwrap_or_default();
-            let nodes = super::mono_ty_node_count(&ty);
-            let ty = Rc::new(ty);
+            let nodes = interner_cold.then(|| super::mono_ty_node_count(&ty)).unwrap_or_default();
             cache.borrow_mut().insert(id, Rc::clone(&ty));
             if let Some(stats) = self.lower_attribution {
-                stats.borrow_mut().record_concrete_mono_derivation(
+                let mut stats = stats.borrow_mut();
+                stats.concrete_mono_shared_handle_requests += 1;
+                if timing {
+                    stats.concrete_mono_timed_requests += 1;
+                }
+                stats.record_concrete_mono_derivation(
                     super::ConcreteMonoConsumer::Dispatch,
                     nodes,
                     0,
@@ -369,13 +363,15 @@ impl<'a> DispatchCtx<'a> {
             }
         }
         let lookup_start = timing.then(std::time::Instant::now);
-        let ty = self.interner?.get(id);
+        let (ty, interner_cold) = interner.get_shared_with_status(id);
         let lookup_ns = lookup_start
             .map(|start| start.elapsed().as_nanos() as u64)
             .unwrap_or_default();
         if let Some(stats) = self.lower_attribution {
-            let nodes = super::mono_ty_node_count(&ty);
-            stats.borrow_mut().record_concrete_mono_derivation(
+            let mut stats = stats.borrow_mut();
+            stats.concrete_mono_shared_handle_requests += 1;
+            let nodes = interner_cold.then(|| super::mono_ty_node_count(&ty)).unwrap_or_default();
+            stats.record_concrete_mono_derivation(
                 super::ConcreteMonoConsumer::Dispatch,
                 nodes,
                 0,
@@ -384,7 +380,7 @@ impl<'a> DispatchCtx<'a> {
                 0,
             );
         }
-        Some(Rc::new(ty))
+        Some(ty)
     }
 
     /// The stored HIR node. Concrete plan consumers use `concrete_ty` or

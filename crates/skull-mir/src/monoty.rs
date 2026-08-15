@@ -38,6 +38,7 @@ use bone_semantic::hir::{BuiltinTy, TypeExpr, TypeCtor, VarId};
 use bone_semantic::inference::{BodyInference, Workspace};
 use bone_semantic::prelude::TyId;
 use rustc_hash::FxHashMap;
+use std::rc::Rc;
 use ustr::Ustr;
 
 /// Index into a [`MonoArena`]. Equality is type-equality WITHIN one arena; it
@@ -640,7 +641,7 @@ pub struct MonoInterner {
 #[derive(Default)]
 struct MonoReadCache {
     arena_gen: u64,
-    tys: Vec<Option<MonoTy>>,
+    tys: Vec<Option<Rc<MonoTy>>>,
 }
 
 impl MonoReadCache {
@@ -651,12 +652,12 @@ impl MonoReadCache {
         }
     }
 
-    fn record(&mut self, id: MonoTyId, ty: &MonoTy) {
+    fn record(&mut self, id: MonoTyId, ty: Rc<MonoTy>) {
         let idx = id.index();
         if self.tys.len() <= idx {
             self.tys.resize(idx + 1, None);
         }
-        self.tys[idx] = Some(ty.clone());
+        self.tys[idx] = Some(ty);
     }
 }
 
@@ -737,16 +738,30 @@ impl MonoInterner {
     /// Served from the worker-local cache when this thread has read `id`
     /// before; a cold id reads through to the lock.
     pub fn get(&self, id: MonoTyId) -> MonoTy {
+        (*self.get_shared(id)).clone()
+    }
+
+    /// Read an immutable worker-local handle to an interned type. The handle
+    /// borrows no arena lock and is valid only within the current worker's
+    /// synchronous lowering work; the interner generation resets the cache
+    /// before another arena can be observed.
+    pub fn get_shared(&self, id: MonoTyId) -> Rc<MonoTy> {
+        self.get_shared_with_status(id).0
+    }
+
+    /// As [`Self::get_shared`], also reporting whether this worker had to
+    /// materialize the type from the authoritative arena.
+    pub fn get_shared_with_status(&self, id: MonoTyId) -> (Rc<MonoTy>, bool) {
         MONO_READ_CACHE.with(|cache| {
             let mut cache = cache.borrow_mut();
             cache.reset_for(self.arena_gen);
             if let Some(Some(ty)) = cache.tys.get(id.index()) {
                 self.local_read_hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                return ty.clone();
+                return (Rc::clone(ty), false);
             }
-            let ty = self.with(|a| a.get(id).clone());
-            cache.record(id, &ty);
-            ty
+            let ty = Rc::new(self.with(|a| a.get(id).clone()));
+            cache.record(id, Rc::clone(&ty));
+            (ty, true)
         })
     }
 
@@ -1002,5 +1017,23 @@ mod mono_read_cache_tests {
         assert_ne!(first, second);
         assert_eq!(a.get(second), MonoTy::Float);
         assert_eq!(a.get_all(&[first, second]), vec![MonoTy::Int, MonoTy::Float]);
+    }
+
+    #[test]
+    fn shared_reads_reuse_only_the_current_interner_handle() {
+        let a = MonoInterner::new();
+        let b = MonoInterner::new();
+        let ia = a.intern(MonoTy::Int);
+        let ib = b.intern(MonoTy::Bool);
+
+        let (a_first, a_cold) = a.get_shared_with_status(ia);
+        let (a_second, a_warm) = a.get_shared_with_status(ia);
+        let (b_first, b_cold) = b.get_shared_with_status(ib);
+
+        assert!(a_cold && !a_warm && b_cold);
+        assert!(Rc::ptr_eq(&a_first, &a_second));
+        assert!(!Rc::ptr_eq(&a_first, &b_first));
+        assert_eq!(*a_first, MonoTy::Int);
+        assert_eq!(*b_first, MonoTy::Bool);
     }
 }
