@@ -363,6 +363,11 @@ impl<T> Arena<T> {
         self.data.capacity()
     }
 
+    /// Reserves capacity for at least `additional` more values.
+    pub fn reserve(&mut self, additional: usize) {
+        self.data.reserve(additional);
+    }
+
     /// Returns whether the arena contains no elements.
     ///
     /// ```

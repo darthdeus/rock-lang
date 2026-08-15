@@ -724,9 +724,9 @@ impl InlineWork {
             entry.3 += record.clone.live_instructions
                 + record.clone.live_cells
                 + record.clone.live_blocks;
-            entry.4 += record.clone.dead_instructions
-                + record.clone.dead_cells
-                + record.clone.dead_blocks;
+            entry.4 += record.clone.dead_cloned_instructions
+                + record.clone.dead_cloned_cells
+                + record.clone.dead_cloned_blocks;
         }
     }
 
@@ -5585,7 +5585,10 @@ global RESULT: int = top()
 
     const CENSUS_SRC: &str = r#"
 @inline
-fn straight(flag: bool) -> bool { return flag }
+fn straight(flag: bool) -> bool {
+    let unused = 99
+    return flag
+}
 
 @inline
 fn general(flag: bool) -> int {
@@ -6296,6 +6299,44 @@ fn main() { let result = first() }
                 && census.clone.cloned_cells <= census.clone.source_cells
                 && census.clone.cloned_blocks <= census.clone.source_blocks,
             "cloning may not exceed the measured source population: {census:?}"
+        );
+        assert_eq!(
+            census.clone.inst_remap_entries,
+            census.clone.live_instructions,
+            "every live instruction and no dead instruction must enter the remap: {census:?}"
+        );
+        assert_eq!(
+            census.clone.cell_remap_entries,
+            census.clone.live_cells,
+            "every live cell and no dead cell must enter the remap: {census:?}"
+        );
+        assert_eq!(
+            census.clone.block_remap_entries,
+            census.clone.cloned_blocks,
+            "only cloned live blocks may enter the remap: {census:?}"
+        );
+        assert!(
+            census.clone.dead_instructions > 0,
+            "the census fixture must expose a dead template instruction: {census:?}"
+        );
+        assert_eq!(
+            census.clone.dead_cloned_instructions
+                + census.clone.dead_cloned_cells
+                + census.clone.dead_cloned_blocks,
+            0,
+            "the live template must not clone dead arena entries: {census:?}"
+        );
+        assert!(
+            census.clone.inst_remap_capacity > 0
+                && census.clone.cell_remap_capacity > 0
+                && census.clone.block_remap_capacity > 0,
+            "exact template populations must reach clone-map reservation: {census:?}"
+        );
+        assert!(
+            census.clone.caller_reserved_instructions > 0
+                && census.clone.caller_reserved_cells > 0
+                && census.clone.caller_reserved_blocks > 0,
+            "exact template populations must reach caller arena reservation: {census:?}"
         );
         macro_rules! side_bounds {
             ($field:ident) => {

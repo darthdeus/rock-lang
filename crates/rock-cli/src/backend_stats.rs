@@ -282,7 +282,7 @@ fn print_attribution(attribution: &skull::mir_emit::EmitAttribution) {
             ms(census.candidate_eligibility_ns),
         );
         println!(
-            "      accepted: straight {}, general {}, direct {}, transitive {}, ordinary {}, specialized {}, hoisted {}; clone source i/c/b {}/{}/{} live {}/{}/{} cloned {}/{}/{} dead {}/{}/{}",
+            "      accepted: straight {}, general {}, direct {}, transitive {}, ordinary {}, specialized {}, hoisted {}; clone source i/c/b {}/{}/{} live {}/{}/{} cloned {}/{}/{} dead-source {}/{}/{} dead-cloned {}/{}/{}",
             census.straight_accepted,
             census.general_accepted,
             census.direct_splices,
@@ -302,9 +302,12 @@ fn print_attribution(attribution: &skull::mir_emit::EmitAttribution) {
             census.clone.dead_instructions,
             census.clone.dead_cells,
             census.clone.dead_blocks,
+            census.clone.dead_cloned_instructions,
+            census.clone.dead_cloned_cells,
+            census.clone.dead_cloned_blocks,
         );
         println!(
-            "      remaps entries/capacity/growth i/c/b {}/{}/{} / {}/{}/{} / {}/{}/{}; args {}/{} dests {}/{}; prefix/tail {}/{}; nested/static {}/{}",
+            "      remaps entries/capacity/growth i/c/b {}/{}/{} / {}/{}/{} / {}/{}/{}; reserve i/c/b {}/{}/{}; args {}/{} dests {}/{}; prefix/tail {}/{}; nested/static {}/{}",
             census.clone.inst_remap_entries,
             census.clone.cell_remap_entries,
             census.clone.block_remap_entries,
@@ -314,6 +317,9 @@ fn print_attribution(attribution: &skull::mir_emit::EmitAttribution) {
             census.clone.inst_remap_growth,
             census.clone.cell_remap_growth,
             census.clone.block_remap_growth,
+            census.clone.caller_reserved_instructions,
+            census.clone.caller_reserved_cells,
+            census.clone.caller_reserved_blocks,
             census.clone.argument_elements,
             census.clone.argument_stores,
             census.clone.destination_elements,

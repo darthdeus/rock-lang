@@ -180,6 +180,9 @@ pub struct InlineCloneStats {
     pub dead_instructions: usize,
     pub dead_cells: usize,
     pub dead_blocks: usize,
+    pub dead_cloned_instructions: usize,
+    pub dead_cloned_cells: usize,
+    pub dead_cloned_blocks: usize,
     pub coalesced_cells: usize,
     pub inst_remap_entries: usize,
     pub cell_remap_entries: usize,
@@ -190,6 +193,9 @@ pub struct InlineCloneStats {
     pub inst_remap_growth: usize,
     pub cell_remap_growth: usize,
     pub block_remap_growth: usize,
+    pub caller_reserved_instructions: usize,
+    pub caller_reserved_cells: usize,
+    pub caller_reserved_blocks: usize,
     pub argument_elements: usize,
     pub argument_stores: usize,
     pub destination_elements: usize,
@@ -248,6 +254,9 @@ impl InlineCloneStats {
         self.dead_instructions += other.dead_instructions;
         self.dead_cells += other.dead_cells;
         self.dead_blocks += other.dead_blocks;
+        self.dead_cloned_instructions += other.dead_cloned_instructions;
+        self.dead_cloned_cells += other.dead_cloned_cells;
+        self.dead_cloned_blocks += other.dead_cloned_blocks;
         self.coalesced_cells += other.coalesced_cells;
         self.inst_remap_entries += other.inst_remap_entries;
         self.cell_remap_entries += other.cell_remap_entries;
@@ -258,6 +267,9 @@ impl InlineCloneStats {
         self.inst_remap_growth += other.inst_remap_growth;
         self.cell_remap_growth += other.cell_remap_growth;
         self.block_remap_growth += other.block_remap_growth;
+        self.caller_reserved_instructions += other.caller_reserved_instructions;
+        self.caller_reserved_cells += other.caller_reserved_cells;
+        self.caller_reserved_blocks += other.caller_reserved_blocks;
         self.argument_elements += other.argument_elements;
         self.argument_stores += other.argument_stores;
         self.destination_elements += other.destination_elements;
@@ -500,6 +512,22 @@ fn live_closure(func: &MirFunc) -> LiveClosure {
             term_targets(&block.term, &mut |target| blocks.push(target));
         }
     }
+    if let Some(cell) = func.resume_arg {
+        live.cells.insert(cell);
+    }
+    for (flag, block) in &func.coro_defers {
+        if live.blocks.contains(block) {
+            live.cells.insert(*flag);
+        }
+    }
+    for iid in live.insts.iter().copied() {
+        if let Some(plan) = func.closure_env_plans.get(&iid) {
+            live.cells.extend(plan.captures().iter().copied());
+            if let Some(cell) = plan.env_cell() {
+                live.cells.insert(cell);
+            }
+        }
+    }
     live
 }
 
@@ -511,17 +539,12 @@ fn side_family(source_rows: usize, retained: usize) -> InlineSideTableFamily {
     }
 }
 
-fn template_counts(func: &MirFunc, measure_live: bool) -> InlineCloneStats {
-    let live = if measure_live {
-        Some(live_closure(func))
-    } else {
-        None
-    };
-    let live_instructions = live.as_ref().map_or(func.insts.len(), |live| live.insts.len());
-    let live_cells = live.as_ref().map_or(func.cells.len(), |live| live.cells.len());
-    let live_blocks = live.as_ref().map_or(func.blocks.len(), |live| live.blocks.len());
-    let live_inst = |id: &Idx<Inst>| live.as_ref().is_none_or(|live| live.insts.contains(id));
-    let live_block = |id: &Idx<Block>| live.as_ref().is_none_or(|live| live.blocks.contains(id));
+fn template_counts(func: &MirFunc, live: &LiveClosure) -> InlineCloneStats {
+    let live_instructions = live.insts.len();
+    let live_cells = live.cells.len();
+    let live_blocks = live.blocks.len();
+    let live_inst = |id: &Idx<Inst>| live.insts.contains(id);
+    let live_block = |id: &Idx<Block>| live.blocks.contains(id);
     let mut side = InlineSideTableStats::default();
     side.spec_bindings = side_family(func.spec_bindings.len(), func.spec_bindings.keys().filter(|id| live_inst(*id)).count());
     side.callee_instances = side_family(func.callee_instances.len(), func.callee_instances.keys().filter(|id| live_inst(*id)).count());
@@ -563,27 +586,156 @@ fn template_counts(func: &MirFunc, measure_live: bool) -> InlineCloneStats {
     }
 }
 
-fn source_side_tables(side: InlineSideTableStats) -> InlineSideTableStats {
-    let mut out = side;
-    macro_rules! source_family {
+/// Cut one canonical pristine candidate down to the closure consumed by a
+/// splice. Arena IDs are compacted once here; every later splice remaps from
+/// this template and never pays for source entries outside the live closure.
+fn compact_live_template(mut source: MirFunc, live: &LiveClosure) -> MirFunc {
+    let mut cell_map = HashMap::default();
+    let mut cells = comfy_la_arena::Arena::with_capacity(live.cells.len());
+    for (id, cell) in source.cells.iter() {
+        if live.cells.contains(&id) {
+            cell_map.insert(id, cells.alloc(cell.clone()));
+        }
+    }
+
+    let mut block_map = HashMap::default();
+    let mut blocks = comfy_la_arena::Arena::with_capacity(live.blocks.len());
+    for (id, _) in source.blocks.iter() {
+        if live.blocks.contains(&id) {
+            block_map.insert(id, blocks.alloc(Block::new()));
+        }
+    }
+
+    let mut inst_map = HashMap::default();
+    let mut insts = comfy_la_arena::Arena::with_capacity(live.insts.len());
+    for (id, inst) in source.insts.iter() {
+        if live.insts.contains(&id) {
+            inst_map.insert(id, insts.alloc(inst.clone()));
+        }
+    }
+    for id in live.insts.iter().copied() {
+        let new_id = inst_map[&id];
+        remap_clone(&mut insts[new_id], &inst_map, &cell_map, &block_map);
+    }
+    for id in live.blocks.iter().copied() {
+        let new_id = block_map[&id];
+        let old = &source.blocks[id];
+        blocks[new_id].insts = old.insts.iter().map(|inst| inst_map[inst]).collect();
+        let mut term = old.term.clone();
+        remap_term_clone(&mut term, &inst_map, &block_map);
+        blocks[new_id].term = term;
+    }
+
+    let mut template = MirFunc::new(source.name);
+    template.params = source.params.iter().map(|param| cell_map[param]).collect();
+    template.lower_timing_enabled = source.lower_timing_enabled;
+    template.lower_attribution = source.lower_attribution.clone();
+    template.abi_plan = source.abi_plan.clone();
+    template.abi_representation = source.abi_representation.clone();
+    template.global_plan = source.global_plan.clone();
+    template.statics = source.statics.clone();
+    template.insts = insts;
+    template.cells = cells;
+    template.blocks = blocks;
+    template.entry = block_map[&source.entry];
+    template.is_coroutine = source.is_coroutine;
+    template.resume_arg = source.resume_arg.map(|cell| cell_map[&cell]);
+    template.coro_defers = source
+        .coro_defers
+        .iter()
+        .filter_map(|(flag, block)| {
+            live.blocks
+                .contains(block)
+                .then(|| (cell_map[flag], block_map[block]))
+        })
+        .collect();
+    template.for_iter_headers = source
+        .for_iter_headers
+        .iter()
+        .filter(|header| live.blocks.contains(header))
+        .map(|header| block_map[header])
+        .collect();
+    template.hoisted_fn_globals = source.hoisted_fn_globals.clone();
+
+    macro_rules! remap_inst_table {
         ($field:ident) => {
-            out.$field.examined = out.$field.source_rows;
-            out.$field.copied = out.$field.source_rows;
+            for (old_id, value) in &source.$field {
+                if let Some(&new_id) = inst_map.get(old_id) {
+                    template.$field.insert(new_id, value.clone());
+                }
+            }
         };
     }
-    source_family!(spec_bindings);
-    source_family!(callee_instances);
-    source_family!(abi_plans);
-    source_family!(representation_plans);
-    source_family!(closure_environment_plans);
-    source_family!(raw_bound_trees);
-    source_family!(resolved_bound_trees);
-    source_family!(function_value_symbols);
-    source_family!(instruction_spans);
-    source_family!(call_sites);
-    source_family!(call_site_owners);
-    source_family!(iterator_headers);
-    out
+    remap_inst_table!(bound_trees);
+    remap_inst_table!(resolved_bound_trees);
+    remap_inst_table!(spec_bindings);
+    remap_inst_table!(callee_instances);
+    remap_inst_table!(call_abi_plans);
+    remap_inst_table!(call_rep_plans);
+    remap_inst_table!(fn_value_symbols);
+    for (old_id, plan) in &source.closure_env_plans {
+        let Some(&new_id) = inst_map.get(old_id) else { continue };
+        let captures = plan.captures().iter().map(|cell| cell_map[cell]).collect();
+        let env_cell = plan.env_cell().map(|cell| cell_map[&cell]);
+        template
+            .closure_env_plans
+            .insert(new_id, skull_mir::mir::ClosureEnvPlan::new(captures, env_cell));
+    }
+    for old_id in &source.bound_next_split {
+        if let Some(&new_id) = inst_map.get(old_id) {
+            template.bound_next_split.insert(new_id);
+        }
+    }
+    for (old_id, span) in source.inst_spans.iter() {
+        if let Some(&new_id) = inst_map.get(&old_id) {
+            template.inst_spans.insert(new_id, *span);
+        }
+    }
+
+    let mut owner_map: HashMap<u32, skull_mir::site::OwnerRef> = HashMap::default();
+    for (old_id, site) in &source.call_sites {
+        let Some(&new_id) = inst_map.get(old_id) else { continue };
+        let owner = match owner_map.get(&site.owner.0) {
+            Some(&owner) => owner,
+            None => {
+                let owner = source
+                    .site_owners
+                    .get(site.owner.0 as usize)
+                    .expect("call-site owner must exist in the candidate template")
+                    .clone();
+                let owner = skull_mir::site::intern_owner(&mut template.site_owners, owner);
+                owner_map.insert(site.owner.0, owner);
+                owner
+            }
+        };
+        template.call_sites.insert(
+            new_id,
+            skull_mir::site::CallSite { owner, site: site.site.clone() },
+        );
+    }
+
+    let nested = std::mem::take(&mut source.nested_fns);
+    template.nested_fns = nested
+        .into_iter()
+        .map(|nested| {
+            let nested_live = live_closure(&nested);
+            compact_live_template(nested, &nested_live)
+        })
+        .collect();
+    template
+}
+
+#[derive(Clone, Copy, Default)]
+struct CloneMapStats {
+    inst_entries: usize,
+    cell_entries: usize,
+    block_entries: usize,
+    inst_capacity: usize,
+    cell_capacity: usize,
+    block_capacity: usize,
+    inst_growth: usize,
+    cell_growth: usize,
+    block_growth: usize,
 }
 
 fn full_clone_stats(
@@ -593,33 +745,41 @@ fn full_clone_stats(
     destination_elements: usize,
     prefix: usize,
     tail: usize,
+    maps: CloneMapStats,
+    coalesced_cells: usize,
 ) -> InlineCloneStats {
     let mut stats = cand.template;
-    stats.cloned_instructions = stats.source_instructions;
-    stats.cloned_cells = stats.source_cells;
-    stats.cloned_blocks = if straight { 0 } else { stats.source_blocks };
+    stats.cloned_instructions = stats.live_instructions;
+    stats.cloned_cells = stats.live_cells;
+    stats.cloned_blocks = if straight { 0 } else { stats.live_blocks };
     stats.dead_instructions = stats.source_instructions.saturating_sub(stats.live_instructions);
     stats.dead_cells = stats.source_cells.saturating_sub(stats.live_cells);
-    stats.dead_blocks = if straight {
-        0
-    } else {
-        stats.source_blocks.saturating_sub(stats.live_blocks)
-    };
-    stats.inst_remap_entries = stats.source_instructions;
-    stats.cell_remap_entries = stats.source_cells;
-    stats.block_remap_entries = stats.cloned_blocks;
-    stats.inst_remap_capacity = stats.source_instructions;
-    stats.cell_remap_capacity = stats.source_cells;
-    stats.block_remap_capacity = stats.cloned_blocks;
+    stats.dead_blocks = stats.source_blocks.saturating_sub(stats.live_blocks);
+    stats.dead_cloned_instructions = 0;
+    stats.dead_cloned_cells = 0;
+    stats.dead_cloned_blocks = 0;
+    stats.coalesced_cells = coalesced_cells;
+    stats.inst_remap_entries = maps.inst_entries;
+    stats.cell_remap_entries = maps.cell_entries;
+    stats.block_remap_entries = maps.block_entries;
+    stats.inst_remap_capacity = maps.inst_capacity;
+    stats.cell_remap_capacity = maps.cell_capacity;
+    stats.block_remap_capacity = maps.block_capacity;
+    stats.inst_remap_growth = maps.inst_growth;
+    stats.cell_remap_growth = maps.cell_growth;
+    stats.block_remap_growth = maps.block_growth;
+    stats.caller_reserved_instructions = cand.func.insts.len();
+    stats.caller_reserved_cells = cand.func.cells.len().saturating_sub(coalesced_cells);
+    stats.caller_reserved_blocks = if straight { 0 } else { cand.func.blocks.len() };
     stats.argument_elements = argument_elements;
-    stats.argument_stores = cand.func.params.len().min(argument_elements);
+    stats.cloned_cells = stats.live_cells.saturating_sub(coalesced_cells);
+    stats.argument_stores = cand.func.params.len().min(argument_elements).saturating_sub(coalesced_cells);
     stats.destination_elements = destination_elements;
     stats.destination_stores = destination_elements;
     stats.block_prefix_copies = prefix;
     stats.block_tail_copies = tail;
     stats.nested_function_imports = cand.func.nested_fns.len();
     stats.static_imports = cand.func.statics.len();
-    stats.side_tables = source_side_tables(stats.side_tables);
     stats
 }
 
@@ -638,7 +798,6 @@ fn classify(
     scx: &ScalarCtx,
     inst: &Instance,
     concrete_plans: &ConcretePlans,
-    measure_live: bool,
     mut timing: Option<&mut CandidateTiming>,
 ) -> Result<CalleeBody, &'static str> {
     let fref = inst.func;
@@ -710,18 +869,19 @@ fn classify(
         }
     }
 
-    let reachable = top_level_blocks(&mf);
+    let source_reachable = top_level_blocks(&mf);
     // A reachable terminator must be one the splice can route. `Unreachable`
     // lowers to a bare `return` and `Yield` is coroutine-only; either reachable
     // here would corrupt caller control flow.
-    for &b in &reachable {
+    for &b in &source_reachable {
         match &mf.blocks[b].term {
             Term::Unreachable => return Err("unreachable_terminator"),
             Term::Yield { .. } => return Err("yield_terminator"),
             _ => {}
         }
     }
-    let reachable_insts: usize = reachable.iter().map(|&b| mf.blocks[b].insts.len()).sum();
+    let reachable_insts: usize =
+        source_reachable.iter().map(|&b| mf.blocks[b].insts.len()).sum();
 
     // A param is coalescable iff nothing in the body rebinds its cell WHOLE (a
     // `Store` to it, or defining it as a multi-return dest / map cursor). Reads
@@ -747,7 +907,9 @@ fn classify(
     }
     let coalescable_params: Vec<bool> =
         mf.params.iter().map(|p| !rebound.contains(p)).collect();
-    let template = template_counts(&mf, measure_live);
+    let live = live_closure(&mf);
+    let template = template_counts(&mf, &live);
+    let mf = compact_live_template(mf, &live);
 
     // A lambda-bearing body must take the General splice even when its entry
     // ends in Return: the straight path clones no blocks, so the lambda's
@@ -775,6 +937,7 @@ fn classify(
         })
     } else {
         // General: uniform return arity across every reachable Return.
+        let reachable = top_level_blocks(&mf);
         let mut arities = reachable
             .iter()
             .filter_map(|&b| match &mf.blocks[b].term {
@@ -831,7 +994,6 @@ fn get<'a>(
             scx,
             inst,
             concrete_plans,
-            cache.census_enabled,
             cache.census_enabled.then_some(&mut timing),
         );
         if let Some(start) = started {
@@ -1086,16 +1248,22 @@ fn clone_cells_insts(
     caller: &mut MirFunc,
     callee: &MirFunc,
     overrides: &HashMap<Idx<Cell>, Idx<Cell>>,
-) -> (HashMap<Idx<Inst>, Idx<Inst>>, HashMap<Idx<Cell>, Idx<Cell>>) {
+) -> (HashMap<Idx<Inst>, Idx<Inst>>, HashMap<Idx<Cell>, Idx<Cell>>, CloneMapStats) {
+    caller.insts.reserve(callee.insts.len());
+    caller.cells.reserve(callee.cells.len().saturating_sub(overrides.len()));
     let mut cell_map = HashMap::default();
+    let cell_capacity = cell_map.capacity();
     cell_map.reserve(callee.cells.len());
+    let cell_reserved_capacity = cell_map.capacity();
     for (cid, cell) in callee.cells.iter() {
         // A coalesced param maps to the caller cell its arg loads (no fresh copy).
         let mapped = overrides.get(&cid).copied().unwrap_or_else(|| caller.cells.alloc(cell.clone()));
         cell_map.insert(cid, mapped);
     }
     let mut inst_map = HashMap::default();
+    let inst_capacity = inst_map.capacity();
     inst_map.reserve(callee.insts.len());
+    let inst_reserved_capacity = inst_map.capacity();
     let new_ids: Vec<(Idx<Inst>, Idx<Inst>)> = callee
         .insts
         .iter()
@@ -1108,7 +1276,16 @@ fn clone_cells_insts(
     for (_, nid) in new_ids {
         remap_clone(&mut caller.insts[nid], &inst_map, &cell_map, &HashMap::default());
     }
-    (inst_map, cell_map)
+    let maps = CloneMapStats {
+        inst_entries: inst_map.len(),
+        cell_entries: cell_map.len(),
+        inst_capacity: inst_map.capacity(),
+        cell_capacity: cell_map.capacity(),
+        inst_growth: usize::from(inst_reserved_capacity != inst_capacity),
+        cell_growth: usize::from(cell_reserved_capacity != cell_capacity),
+        ..CloneMapStats::default()
+    };
+    (inst_map, cell_map, maps)
 }
 
 /// Clone the callee's cells, blocks, AND insts into `caller`. Returns
@@ -1122,21 +1299,31 @@ fn clone_all(
     HashMap<Idx<Inst>, Idx<Inst>>,
     HashMap<Idx<Cell>, Idx<Cell>>,
     HashMap<Idx<Block>, Idx<Block>>,
+    CloneMapStats,
 ) {
+    caller.insts.reserve(callee.insts.len());
+    caller.cells.reserve(callee.cells.len().saturating_sub(overrides.len()));
+    caller.blocks.reserve(callee.blocks.len());
     let mut cell_map = HashMap::default();
+    let cell_capacity = cell_map.capacity();
     cell_map.reserve(callee.cells.len());
+    let cell_reserved_capacity = cell_map.capacity();
     for (cid, cell) in callee.cells.iter() {
         // A coalesced param maps to the caller cell its arg loads (no fresh copy).
         let mapped = overrides.get(&cid).copied().unwrap_or_else(|| caller.cells.alloc(cell.clone()));
         cell_map.insert(cid, mapped);
     }
     let mut block_map = HashMap::default();
+    let block_capacity = block_map.capacity();
     block_map.reserve(callee.blocks.len());
+    let block_reserved_capacity = block_map.capacity();
     for (bid, _) in callee.blocks.iter() {
         block_map.insert(bid, caller.blocks.alloc(Block::new()));
     }
     let mut inst_map = HashMap::default();
+    let inst_capacity = inst_map.capacity();
     inst_map.reserve(callee.insts.len());
+    let inst_reserved_capacity = inst_map.capacity();
     let new_ids: Vec<Idx<Inst>> = callee
         .insts
         .iter()
@@ -1160,7 +1347,18 @@ fn clone_all(
     caller
         .for_iter_headers
         .extend(callee.for_iter_headers.iter().map(|header| block_map[header]));
-    (inst_map, cell_map, block_map)
+    let maps = CloneMapStats {
+        inst_entries: inst_map.len(),
+        cell_entries: cell_map.len(),
+        block_entries: block_map.len(),
+        inst_capacity: inst_map.capacity(),
+        cell_capacity: cell_map.capacity(),
+        block_capacity: block_map.capacity(),
+        inst_growth: usize::from(inst_reserved_capacity != inst_capacity),
+        cell_growth: usize::from(cell_reserved_capacity != cell_capacity),
+        block_growth: usize::from(block_reserved_capacity != block_capacity),
+    };
+    (inst_map, cell_map, block_map, maps)
 }
 
 /// Remap a freshly-cloned inst's value (via [`remap_inst`]), cell, and block
@@ -1551,11 +1749,12 @@ fn splice(
     scx: &ScalarCtx,
     concrete_plans: &ConcretePlans,
     census: &mut InlineScanStats,
-) -> Result<Vec<Idx<Block>>, CompilerError> {
+) -> Result<(Vec<Idx<Block>>, CloneMapStats, usize), CompilerError> {
     match cand.kind {
         Kind::Straight => {
-            splice_straight(func, site, cand, ws, scx, concrete_plans, census)?;
-            Ok(Vec::new())
+            let (maps, coalesced) =
+                splice_straight(func, site, cand, ws, scx, concrete_plans, census)?;
+            Ok((Vec::new(), maps, coalesced))
         }
         Kind::General => splice_general(func, site, cand, ws, scx, concrete_plans, census),
     }
@@ -1573,7 +1772,7 @@ fn splice_straight(
     scx: &ScalarCtx,
     concrete_plans: &ConcretePlans,
     _census: &mut InlineScanStats,
-) -> Result<(), CompilerError> {
+) -> Result<(CloneMapStats, usize), CompilerError> {
     let callee = &cand.func;
     let (bid, idx, args) = match &site {
         Site::Single { bid, idx, args, .. } | Site::Multi { bid, idx, args, .. } => (*bid, *idx, args.clone()),
@@ -1581,7 +1780,7 @@ fn splice_straight(
     let site_tree = func.bound_trees.remove(&site.call_id());
     let site_resolved_tree = func.resolved_bound_trees.remove(&site.call_id());
     let (overrides, coalesced) = coalesce_overrides(func, cand, &args);
-    let (inst_map, cell_map) = clone_cells_insts(func, callee, &overrides);
+    let (inst_map, cell_map, maps) = clone_cells_insts(func, callee, &overrides);
     resolve_cloned_bound_calls(
         func,
         callee,
@@ -1652,7 +1851,7 @@ fn splice_straight(
             func.blocks[bid].insts = new_insts;
         }
     }
-    Ok(())
+    Ok((maps, overrides.len()))
 }
 
 /// General splice: the callee has internal control flow. Split the caller block
@@ -1667,7 +1866,7 @@ fn splice_general(
     scx: &ScalarCtx,
     concrete_plans: &ConcretePlans,
     _census: &mut InlineScanStats,
-) -> Result<Vec<Idx<Block>>, CompilerError> {
+) -> Result<(Vec<Idx<Block>>, CloneMapStats, usize), CompilerError> {
     let callee = &cand.func;
     let (bid, idx, args) = match &site {
         Site::Single { bid, idx, args, .. } | Site::Multi { bid, idx, args, .. } => (*bid, *idx, args.clone()),
@@ -1675,7 +1874,7 @@ fn splice_general(
     let site_tree = func.bound_trees.remove(&site.call_id());
     let site_resolved_tree = func.resolved_bound_trees.remove(&site.call_id());
     let (overrides, coalesced) = coalesce_overrides(func, cand, &args);
-    let (inst_map, cell_map, block_map) = clone_all(func, callee, &overrides);
+    let (inst_map, cell_map, block_map, maps) = clone_all(func, callee, &overrides);
     resolve_cloned_bound_calls(
         func,
         callee,
@@ -1766,7 +1965,7 @@ fn splice_general(
     // NOT enter the top-level set (the old full re-scan never visited them).
     let mut added: Vec<Idx<Block>> = cand.reachable.iter().map(|b| block_map[b]).collect();
     added.push(cont);
-    Ok(added)
+    Ok((added, maps, overrides.len()))
 }
 
 /// Inline eligible direct calls in `func` (an ordinary, non-coroutine caller).
@@ -1865,7 +2064,8 @@ fn inline_functions_inner(
         // the `&mut cache` in `find_site`, so split the lookup out here where
         // only `&cache` is held.
         let splice_start = cache.census_enabled.then(Instant::now);
-        let added = splice(func, site, cand, ws, scx, concrete_plans, census)?;
+        let (added, maps, coalesced_cells) =
+            splice(func, site, cand, ws, scx, concrete_plans, census)?;
         let splice_ns = splice_start
             .map(|start| start.elapsed().as_nanos() as u64)
             .unwrap_or_default();
@@ -1882,6 +2082,8 @@ fn inline_functions_inner(
                 destination_elements,
                 prefix,
                 tail,
+                maps,
+                coalesced_cells,
             ),
             splice_ns,
         });
@@ -2017,7 +2219,7 @@ mod tests {
         let plain = callee.new_cell(Some(Ustr::from("x")));
 
         let mut caller = MirFunc::new(Ustr::from("caller"));
-        let (_, cell_map) = clone_cells_insts(&mut caller, &callee, &HashMap::default());
+        let (_, cell_map, _) = clone_cells_insts(&mut caller, &callee, &HashMap::default());
 
         assert!(
             caller.cells[cell_map[&counter]].loop_binding,
@@ -2027,6 +2229,27 @@ mod tests {
             !caller.cells[cell_map[&plain]].loop_binding,
             "an ordinary cloned cell must not gain the tag"
         );
+    }
+
+    #[test]
+    fn compact_template_excludes_dead_arena_entries() {
+        let mut source = MirFunc::new(Ustr::from("template"));
+        let live = source.emit(source.entry, Inst::Const(Lit::Nil));
+        source.set_term(source.entry, Term::Return(vec![live]));
+        source.insts.alloc(Inst::Const(Lit::Bool(true)));
+        source.new_cell(Some(Ustr::from("dead")));
+        source.new_block();
+
+        let live = live_closure(&source);
+        let counts = template_counts(&source, &live);
+        let template = compact_live_template(source, &live);
+
+        assert_eq!((counts.source_instructions, counts.live_instructions), (2, 1));
+        assert_eq!((counts.source_cells, counts.live_cells), (1, 0));
+        assert_eq!((counts.source_blocks, counts.live_blocks), (2, 1));
+        assert_eq!(template.insts.len(), counts.live_instructions);
+        assert_eq!(template.cells.len(), counts.live_cells);
+        assert_eq!(template.blocks.len(), counts.live_blocks);
     }
 
     #[test]
