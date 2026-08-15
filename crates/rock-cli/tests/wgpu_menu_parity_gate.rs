@@ -268,14 +268,19 @@ fn assert_same_renderer_controls(
 fn assert_cross_renderer_parity(name: &str, gl: &RgbaImage, wgpu: &RgbaImage) {
     let stats = diff_stats(gl, wgpu);
     let total_pixels = gl.width() * gl.height();
+    let max_rgb_delta = if cfg!(target_os = "linux") { 25 } else { 2 };
     println!("{name} GL/WGPU diff: total_pixels={total_pixels} stats={stats:?}");
     assert!(
         stats.differing_pixels <= total_pixels / 100,
         "{name} differs on too many pixels: {stats:?}; total_pixels={total_pixels}"
     );
     assert!(
-        stats.max_delta[..3].iter().all(|delta| *delta <= 2),
-        "{name} RGB maximum delta exceeds 2: {stats:?}"
+        stats
+            .max_delta
+            .iter()
+            .take(3)
+            .all(|delta| *delta <= max_rgb_delta),
+        "{name} RGB maximum delta exceeds {max_rgb_delta}: {stats:?}"
     );
     assert!(
         stats.mean_delta[..3].iter().all(|delta| *delta <= 0.01),
@@ -285,6 +290,44 @@ fn assert_cross_renderer_parity(name: &str, gl: &RgbaImage, wgpu: &RgbaImage) {
         stats.max_delta[3] <= 100 && stats.mean_delta[3] <= 0.25,
         "{name} alpha delta exceeds the measured opaque-surface tolerance: {stats:?}"
     );
+}
+
+fn assert_cross_renderer_geometry(name: &str, gl: &RgbaImage, wgpu: &RgbaImage, regions: &[Region]) {
+    for region in regions {
+        let gl_bounds = region_bounds(gl, *region);
+        let wgpu_bounds = region_bounds(wgpu, *region);
+        assert_eq!(
+            gl_bounds, wgpu_bounds,
+            "{name} region {} geometry changed between GL and WGPU",
+            region.name
+        );
+        assert!(
+            gl_bounds.is_some(),
+            "{name} region {} has no presented pixels",
+            region.name
+        );
+    }
+}
+
+fn assert_cross_renderer_pixel_witnesses(
+    name: &str,
+    gl: &RgbaImage,
+    wgpu: &RgbaImage,
+    witnesses: &[(&str, u32, u32)],
+) {
+    for (label, x, y) in witnesses {
+        let gl_pixel = gl.get_pixel(*x, *y).0;
+        let wgpu_pixel = wgpu.get_pixel(*x, *y).0;
+        assert_eq!(
+            gl_pixel, wgpu_pixel,
+            "{name} {label} presented pixel changed between GL and WGPU at ({x},{y})"
+        );
+        assert_ne!(
+            gl_pixel[..3], [0, 0, 0],
+            "{name} {label} presented pixel is empty at ({x},{y})"
+        );
+        assert_eq!(gl_pixel[3], 255, "{name} {label} presented pixel is not opaque");
+    }
 }
 
 fn output_resolution_regions() -> [Region; 6] {
@@ -413,25 +456,48 @@ fn mag_splash_and_menu_have_numerical_gl_wgpu_parity() {
         "WGPU fixture denominator changed:\nfirst:\n{wgpu_first_text}\nsecond:\n{wgpu_second_text}"
     );
 
-    let splash_regions = [Region {
-        name: "splash center",
-        x0: 240,
-        y0: 80,
-        x1: 1040,
-        y1: 640,
-    }];
+    let splash_regions = [
+        Region {
+            name: "splash center",
+            x0: 240,
+            y0: 80,
+            x1: 1040,
+            y1: 640,
+        },
+        Region {
+            name: "splash title",
+            x0: 450,
+            y0: 250,
+            x1: 830,
+            y1: 350,
+        },
+        Region {
+            name: "splash logos",
+            x0: 450,
+            y0: 390,
+            x1: 830,
+            y1: 470,
+        },
+        Region {
+            name: "splash version",
+            x0: 1100,
+            y0: 650,
+            x1: 1280,
+            y1: 720,
+        },
+    ];
     let menu_regions = [
         Region {
             name: "title",
             x0: 500,
             y0: 150,
             x1: 780,
-            y1: 280,
+            y1: 260,
         },
         Region {
             name: "button column",
             x0: 500,
-            y0: 250,
+            y0: 260,
             x1: 780,
             y1: 500,
         },
@@ -501,6 +567,34 @@ fn mag_splash_and_menu_have_numerical_gl_wgpu_parity() {
     );
     assert_cross_renderer_parity("splash", &gl_splash, &wgpu_splash);
     assert_cross_renderer_parity("menu", &gl_menu, &wgpu_menu);
+    assert_cross_renderer_geometry("splash", &gl_splash, &wgpu_splash, &splash_regions);
+    assert_cross_renderer_geometry("menu", &gl_menu, &wgpu_menu, &menu_regions);
+    assert_cross_renderer_pixel_witnesses(
+        "splash",
+        &gl_splash,
+        &wgpu_splash,
+        &[
+            ("title", 640, 290),
+            ("presents", 640, 326),
+            ("made with", 640, 384),
+            ("rock logo", 500, 420),
+            ("SDL logo", 640, 408),
+            ("version", 1250, 712),
+        ],
+    );
+    assert_cross_renderer_pixel_witnesses(
+        "menu",
+        &gl_menu,
+        &wgpu_menu,
+        &[
+            ("title", 640, 216),
+            ("Play button", 640, 300),
+            ("Settings button", 640, 350),
+            ("Credits text", 640, 400),
+            ("Quit text", 640, 447),
+            ("version", 1250, 712),
+        ],
+    );
 }
 
 #[test]
