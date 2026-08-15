@@ -63,10 +63,6 @@ impl ConcreteMonoConsumer {
         Self::Dispatch,
     ];
 
-    fn is_owned_escape(self) -> bool {
-        matches!(self, Self::GlobalPlan | Self::CallParameter)
-    }
-
     pub fn label(self) -> &'static str {
         match self {
             Self::GlobalPlan => "global-plan",
@@ -174,10 +170,6 @@ impl LowerAttribution {
         self.concrete_mono_requests += 1;
         let stats = &mut self.concrete_mono_by_consumer[consumer as usize];
         stats.requests += 1;
-        if consumer.is_owned_escape() {
-            stats.explicit_owned_escapes += 1;
-            self.concrete_mono_explicit_owned_escapes += 1;
-        }
     }
 
     fn record_concrete_mono_cache_hit(
@@ -227,8 +219,11 @@ impl LowerAttribution {
     ) {
         self.concrete_mono_cloned_nodes += cloned_nodes;
         self.concrete_mono_explicit_owned_escape_cloned_nodes += cloned_nodes;
+        self.concrete_mono_explicit_owned_escapes += 1;
         self.concrete_mono_clone_self_ns += clone_self_ns;
-        self.concrete_mono_by_consumer[consumer as usize].cloned_nodes += cloned_nodes;
+        let stats = &mut self.concrete_mono_by_consumer[consumer as usize];
+        stats.cloned_nodes += cloned_nodes;
+        stats.explicit_owned_escapes += 1;
     }
 }
 

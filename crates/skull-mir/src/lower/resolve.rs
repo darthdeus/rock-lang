@@ -733,7 +733,7 @@ impl Builder<'_> {
                 .transpose()?
                 .flatten()
             {
-                Some(t) => self.coerced_mono(v, a, &t),
+                Some(t) => self.coerced_mono(v, a, t.as_ref()),
                 None => {
                     return Err(self.gap_here("concrete call has no callee parameter type"));
                 }

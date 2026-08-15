@@ -110,7 +110,7 @@ impl Builder<'_> {
         e: Idx<Expr>,
         inst: &crate::instance::Instance,
         pidx: usize,
-    ) -> Result<Option<crate::monoty::MonoTy>, CompilerError> {
+    ) -> Result<Option<std::rc::Rc<crate::monoty::MonoTy>>, CompilerError> {
         let callee = &self.ws.module(inst.func.module).functions[inst.func.func];
         let plan = self.concrete_plan;
         let site = crate::site::Site {
@@ -143,7 +143,7 @@ impl Builder<'_> {
         let id = slot.ok_or_else(|| {
             self.gap_here("concrete callee signature has no parameter for this argument")
         })?;
-        Ok(Some(self.concrete_mono_owned(*id, ConcreteMonoConsumer::CallParameter)))
+        Ok(Some(self.concrete_mono_view(*id, ConcreteMonoConsumer::CallParameter)))
     }
 
     pub(crate) fn concrete_coroutine_channel(
@@ -803,7 +803,7 @@ impl Builder<'_> {
                         let t = self
                             .concrete_callee_param_ty(e, &dc.callee_inst, i)?
                             .ok_or_else(|| self.gap_here("concrete call has no callee parameter type"))?;
-                        Ok(self.coerced_mono(v, a, &t))
+                        Ok(self.coerced_mono(v, a, t.as_ref()))
                     })
                     .collect::<Result<_, CompilerError>>()?
             };

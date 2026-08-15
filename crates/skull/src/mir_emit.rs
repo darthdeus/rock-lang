@@ -5505,6 +5505,7 @@ fn wrap<T>(x: T) -> T { return x }
 
 fn top() -> int { return wrap(7) }
 fn main() { let result = top() }
+global RESULT: int = top()
 "#;
 
     const BOUNDED_SRC: &str = r#"
@@ -6020,6 +6021,7 @@ fn main() { let result = first() }
                         + attribution.lower.concrete_mono_derivations
                 && attribution.lower.concrete_mono_unique_ids
                     == attribution.lower.concrete_mono_derivations
+                && attribution.lower.concrete_mono_cache_hits > 0
                 && attribution.lower.concrete_mono_cache_insertion_cloned_nodes == 0
                 && attribution.lower.concrete_mono_cache_hit_cloned_nodes == 0
                 && attribution.lower.concrete_mono_cloned_nodes
@@ -6032,7 +6034,6 @@ fn main() { let result = first() }
                 && attribution.lower.concrete_mono_explicit_owned_escapes > 0
                 && attribution.lower.concrete_mono_cache_hit_cloned_nodes == 0
                 && attribution.lower.concrete_mono_cache_insertion_cloned_nodes == 0
-                && attribution.lower.concrete_mono_explicit_owned_escape_cloned_nodes > 0
                 && attribution.lower.concrete_mono_shared_handle_requests
                     == attribution.lower.concrete_mono_requests
                 && attribution
@@ -6058,10 +6059,13 @@ fn main() { let result = first() }
             consumers[skull_mir::lower::ConcreteMonoConsumer::CallParameter as usize].requests > 0
                 && consumers[skull_mir::lower::ConcreteMonoConsumer::CallParameter as usize]
                     .explicit_owned_escapes
+                    == 0
+                && consumers[skull_mir::lower::ConcreteMonoConsumer::GlobalPlan as usize]
+                    .explicit_owned_escapes
                     > 0
                 && consumers[skull_mir::lower::ConcreteMonoConsumer::Dispatch as usize].requests
                     > 0,
-            "named lowerer consumer routes have no production population: {attribution:?}"
+            "named lowerer consumer ownership routes are misclassified: {attribution:?}"
         );
         if std::env::var("ROCK_LOWER_CENSUS").is_ok_and(|value| value == "1") {
             assert!(
