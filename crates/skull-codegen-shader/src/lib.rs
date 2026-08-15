@@ -27,7 +27,7 @@ use skull_mir::shader_ir::{
     LogicalUniformGroup, ShaderIR, ShaderInstance, ShaderInterfacePlan, ShaderStage,
     ShaderStageIr, UniformRole,
 };
-use skull_parser::CompilerError;
+use skull_parser::{CompilerError, CompilerErrorKind};
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use ustr::Ustr;
@@ -38,6 +38,12 @@ use ustr::Ustr;
 pub trait ShaderPlannerPolicy {
     fn inline_call(&self, function: &Function) -> bool;
     fn backend_name(&self) -> &'static str;
+
+    /// Return a capability the target deliberately does not project. This is
+    /// the only planner rejection the selected-artifact driver may omit.
+    fn unsupported_capability(&self, _function: &Function) -> Option<String> {
+        None
+    }
 
     fn validate_concrete_signature(
         &self,
@@ -98,6 +104,18 @@ pub struct ShaderArtifactPlan {
 
 fn err(span: Span, message: impl Into<String>) -> CompilerError {
     CompilerError::new_with_label(span, message.into())
+}
+
+fn profile_err(
+    policy: &dyn ShaderPlannerPolicy,
+    function: &Function,
+    message: impl Into<String>,
+) -> CompilerError {
+    let error = err(function.name_span, message);
+    match policy.unsupported_capability(function) {
+        Some(capability) => error.with_kind(CompilerErrorKind::UnsupportedWgslProjection { capability }),
+        None => error,
+    }
 }
 
 /// Resolve a root name to one function, preferring the caller's module.
@@ -318,6 +336,7 @@ fn profile_body(
     policy: &dyn ShaderPlannerPolicy,
     concrete: bool,
     interner: &skull_mir::monoty::MonoInterner,
+    const_globals: &mut HashMap<Ustr, Lit>,
 ) -> Result<(), CompilerError> {
     for (instruction_id, instruction) in body.insts.iter() {
         match instruction {
@@ -334,7 +353,9 @@ fn profile_body(
                 )?);
             }
             Inst::Global(name) => {
-                if const_lit(ws, *name).is_none() {
+                if let Some(lit) = const_lit(ws, *name) {
+                    const_globals.insert(*name, lit);
+                } else {
                     if ws.const_globals.contains(name) {
                         return Err(err(
                             function.name_span,
@@ -591,15 +612,17 @@ fn visit_standalone_shader_instance(
     for record in sites.values() {
         let SiteOutcome::Resolved(callee) = &record.outcome else { continue };
         let function = &ws.module(callee.func.module).functions[callee.func.func];
-        if policy.inline_instance(ws, function, callee, interner)
-            || policy.lowered_native_operator(ws, function, callee, interner)
-        {
+        if policy.inline_instance(ws, function, callee, interner) {
             builtins.insert(callee.clone());
             continue;
         }
+        if policy.lowered_native_operator(ws, function, callee, interner) {
+            continue;
+        }
         if function.is_extern || function.inline_body.is_some() {
-            return Err(err(
-                function.name_span,
+            return Err(profile_err(
+                policy,
+                function,
                 format!(
                     "shader profile: `{}` has no emittable body and no {} intrinsic mapping",
                     function.name,
@@ -662,8 +685,9 @@ fn checked_concrete_callees(
             continue;
         }
         if f.is_extern || f.inline_body.is_some() {
-            return Err(err(
-                f.name_span,
+            return Err(profile_err(
+                policy,
+                f,
                 format!(
                     "shader profile: `{}` has no emittable body and no {} intrinsic mapping",
                     f.name,
@@ -783,6 +807,7 @@ pub fn plan_stage_from_concrete(
             ),
         )
     })?;
+    let mut const_globals = HashMap::default();
     let mut entry_callees = Vec::new();
     profile_body(
         ws,
@@ -792,6 +817,7 @@ pub fn plan_stage_from_concrete(
         policy,
         true,
         scx.interner(),
+        &mut const_globals,
     )?;
 
     let mut allowed: HashSet<ShaderInstance> = HashSet::default();
@@ -846,6 +872,7 @@ pub fn plan_stage_from_concrete(
             policy,
             true,
             scx.interner(),
+            &mut const_globals,
         )?;
         let checked = checked_concrete_callees(
             ws,
@@ -881,6 +908,7 @@ pub fn plan_stage_from_concrete(
         body: entry_body,
         order,
         bodies,
+        const_globals,
     };
     if ir.declarations() != input.dependencies {
         return Err(CompilerError::new_no_location(

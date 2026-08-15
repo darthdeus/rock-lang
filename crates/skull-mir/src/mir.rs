@@ -721,6 +721,34 @@ pub struct StaticCell {
     pub init_hash: u64,
 }
 
+/// One comptime input a lowered body baked in (docs/comptime-plan.md tier 1):
+/// which input, and the hash of the value that went into the emitted code.
+/// bone hashes only source text, so incremental invalidation must compare
+/// these against the CURRENT inputs itself -- a body with a stale read is a
+/// body edit.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ComptimeRead {
+    pub input: ComptimeInputId,
+    pub value_hash: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum ComptimeInputId {
+    /// `build_var("NAME")` -- the declared var's name.
+    Var(Ustr),
+    /// `embed_string("path")` -- the path literal, project-root-relative.
+    File(Ustr),
+}
+
+/// The one hash both the recorder and the staleness check use, so they cannot
+/// drift (std `DefaultHasher`, the `StaticCell.init_hash` precedent).
+pub fn comptime_value_hash(value: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    value.hash(&mut h);
+    h.finish()
+}
+
 /// A function — a CFG over cells and values. `params` are the entry block's
 /// parameter *cells* in order (params are variables, hence cells); they
 /// materialize as the Lua function parameters.
@@ -740,6 +768,9 @@ pub struct MirFunc {
     pub global_plan: Option<crate::lower::GlobalPlan>,
     /// `static` cells declared in this fn's body (in source order).
     pub statics: Vec<StaticCell>,
+    /// Comptime inputs this body's emitted code baked in (build_var /
+    /// embed_string expansions), for incremental staleness detection.
+    pub comptime_reads: Vec<ComptimeRead>,
     pub insts: Arena<Inst>,
     pub cells: Arena<Cell>,
     pub blocks: Arena<Block>,
@@ -892,6 +923,7 @@ impl MirFunc {
             abi_representation: None,
             global_plan: None,
             statics: Vec::new(),
+            comptime_reads: Vec::new(),
             insts: Arena::default(),
             cells: Arena::default(),
             blocks,

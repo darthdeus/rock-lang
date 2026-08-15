@@ -1,8 +1,10 @@
 use bone_semantic::prelude::Span;
+use skull_parser::CompilerErrorKind;
 use skull_codegen_wgsl::{
     WgslAbiPlan, WgslPrimitiveTopology, emit_fullscreen_shader, plan_fullscreen_artifact,
 };
 use skull_mir::mir::{Inst, Term};
+use skull_mir::gpu_layout::SamplerKind;
 use std::sync::LazyLock;
 use ustr::Ustr;
 
@@ -38,6 +40,18 @@ const ROOTS: &[(&str, &str, &str)] = &[
     ),
 ];
 
+const ENTITY_ID_DEBUG: &str = include_str!("../../../stone/engine/shaders/rendering/entity_id_debug_shader.rock");
+const NONFINITE: &str = include_str!("../../../stone/engine/shaders/debug/nonfinite_shader.rock");
+
+fn outline_target_source() -> String {
+    format!(
+        "{}\nvalue Vertex {{ pos: Vec2, uv: Vec2, color: Vec4, pivot_y: float, entity_id: float }}\n{}\n{}",
+        include_str!("../../../stone/engine/rendering/engine_uniforms.rock"),
+        include_str!("../../../stone/engine/shaders/common/pass_textures.rock"),
+        include_str!("../../../stone/engine/shaders/rendering/outline_target_shader.rock"),
+    )
+}
+
 fn workspace(
     src: &str,
 ) -> (
@@ -51,21 +65,26 @@ fn workspace(
     (ws, mid)
 }
 
-fn artifact(root: &str, source: &str) -> skull_codegen_wgsl::WgslShaderEmission {
+fn try_artifact(
+    root: &str,
+    source: &str,
+) -> Result<skull_codegen_wgsl::WgslShaderEmission, skull_parser::CompilerError> {
     let source = format!(
         "{}\n{}",
         include_str!("../../../stone/engine/shaders/common/pass_textures.rock"),
         source
     );
     let (ws, mid) = workspace(&source);
-    let fref = skull_codegen_shader::resolve_root(&ws, mid, root).expect("root");
-    let neutral = plan_fullscreen_artifact(&ws, fref).expect("neutral ShaderIR/interface");
-    let abi = WgslAbiPlan::wgsl(&neutral.interface, Span::default()).expect("WGSL ABI");
-    let emission =
-        emit_fullscreen_shader(&ws, &neutral.ir, &neutral.interface, &abi, Span::default())
-            .expect("WGSL emission");
+    let fref = skull_codegen_shader::resolve_root(&ws, mid, root)?;
+    let neutral = plan_fullscreen_artifact(&ws, fref)?;
+    let abi = WgslAbiPlan::wgsl(&neutral.interface, Span::default())?;
+    let emission = emit_fullscreen_shader(&ws, &neutral.ir, &neutral.interface, &abi, Span::default())?;
     assert_eq!(emission.dependencies, neutral.dependencies);
-    emission
+    Ok(emission)
+}
+
+fn artifact(root: &str, source: &str) -> skull_codegen_wgsl::WgslShaderEmission {
+    try_artifact(root, source).expect("WGSL artifact")
 }
 
 #[test]
@@ -112,6 +131,332 @@ fn selected_sprite_basic_pipeline_is_admitted_by_wgsl() {
     )
     .validate(&module)
     .expect("WGSL validates");
+}
+
+const CONST_GLOBAL_SHADER: &str = r#"
+const WATER_SCALE_BASE: float = -0.37
+const WATER_SCALE: float = WATER_SCALE_BASE
+
+value ConstAttrs { pos: Vec2 }
+value ConstVary { position: Vec4, marker: float }
+
+@shader(vertex)
+fn const_global_vert(@attr a: ConstAttrs) -> ConstVary {
+    let scaled = a.pos.x * WATER_SCALE
+    return ConstVary {
+        position: v(scaled, a.pos.y, 0.0, 1.0),
+        marker: scaled,
+    }
+}
+
+@shader(fragment)
+fn const_global_frag(vary: ConstVary) -> Vec4 {
+    return v(vary.marker, -0.61, 0.0, 1.0)
+}
+"#;
+
+fn try_explicit_artifact_source(
+    source: &str,
+    vertex_root: &str,
+    fragment_root: &str,
+) -> Result<skull_codegen_wgsl::WgslShaderEmission, skull_parser::CompilerError> {
+    let (ws, mid) = workspace(source);
+    let glsl = skull_codegen_glsl::emit_shader_pipeline_with_dependencies(
+        &ws,
+        mid,
+        vertex_root,
+        fragment_root,
+        skull_codegen_glsl::GlslProfile::Core330,
+    )?;
+    let abi = WgslAbiPlan::explicit(
+        &glsl.interface,
+        "vertex_main",
+        "fragment_main",
+        Span::default(),
+    )?;
+    skull_codegen_wgsl::emit_explicit_shader(
+        &ws,
+        &glsl.ir,
+        &glsl.interface,
+        &abi,
+        Span::default(),
+    )
+}
+
+#[test]
+fn const_globals_emit_planner_proven_literals_and_validate() {
+    let artifact = try_explicit_artifact_source(
+        CONST_GLOBAL_SHADER,
+        "const_global_vert",
+        "const_global_frag",
+    )
+    .expect("planner-proven const globals must emit in WGSL");
+    assert!(artifact.source.contains("* -0.37"), "negative const spelling changed");
+    assert!(artifact.source.contains("-0.61"), "negative float spelling changed");
+    let module = naga::front::wgsl::parse_str(&artifact.source).expect("WGSL parses");
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    )
+    .validate(&module)
+    .expect("const-global WGSL validates");
+}
+
+#[test]
+fn mutable_and_nonconstant_globals_remain_rejected_controls() {
+    let mutable = CONST_GLOBAL_SHADER.replace(
+        "const WATER_SCALE: float = WATER_SCALE_BASE",
+        "global WATER_SCALE: float = -0.37",
+    );
+    let mutable_error = match try_explicit_artifact_source(
+        &mutable,
+        "const_global_vert",
+        "const_global_frag",
+    ) {
+        Ok(_) => panic!("mutable shader globals must remain rejected"),
+        Err(error) => error,
+    };
+    assert!(
+        mutable_error.message.contains("global read")
+            || mutable_error.message.contains("non-tier-0"),
+        "mutable global was not rejected by the planner: {}",
+        mutable_error.message
+    );
+
+    let nonconstant = CONST_GLOBAL_SHADER.replace(
+        "const WATER_SCALE_BASE: float = -0.37",
+        "const WATER_SCALE_BASE: float = nonconstant_scale()",
+    ) + "\nfn nonconstant_scale() -> float { return 0.25 }\n";
+    let nonconstant_error = match try_explicit_artifact_source(
+        &nonconstant,
+        "const_global_vert",
+        "const_global_frag",
+    ) {
+        Ok(_) => panic!("nonconstant shader initializers must remain rejected"),
+        Err(error) => error,
+    };
+    assert!(
+        nonconstant_error.message.contains("constant expression")
+            || nonconstant_error.message.contains("global"),
+        "nonconstant initializer was not rejected: {}",
+        nonconstant_error.message
+    );
+}
+
+#[test]
+fn integer_texture_id_emits_sampler_free_load_and_validates() {
+    let artifact = artifact("entity_id_debug_frag", ENTITY_ID_DEBUG);
+    let module = naga::front::wgsl::parse_str(&artifact.source).expect("WGSL parses");
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    )
+    .validate(&module)
+    .expect("integer texture WGSL validates");
+    assert_eq!(artifact.abi.textures.len(), 1);
+    assert_eq!(artifact.abi.textures[0].kind, SamplerKind::Int);
+    assert_eq!(artifact.abi.textures[0].sampler_binding, None);
+    assert!(artifact.source.contains("var tex_id_buffer: texture_2d<i32>"));
+    assert!(artifact.source.contains("textureLoad(tex_id_buffer"));
+    assert!(!artifact.source.contains("samp_id_buffer"));
+}
+
+#[test]
+fn integer_texture_id_rejects_a_float_sampler() {
+    let source = r#"
+struct BadEntityIdTex {
+    id_buffer: Sampler2D,
+}
+
+@shader(fragment)
+fn bad_entity_id_frag(@textures t: BadEntityIdTex, tc: Vec2) -> Vec4 {
+    let id = texture_id(t.id_buffer, tc)
+    return v(int_to_float(id), 0.0, 0.0, 1.0)
+}
+"#;
+    let result = try_artifact("bad_entity_id_frag", source);
+    assert!(result.is_err(), "texture_id must reject a filterable float sampler");
+}
+
+#[test]
+fn nonfinite_intrinsics_emit_typed_ieee_predicates_and_bool_vectors() {
+    let artifact = artifact("nonfinite_frag", NONFINITE);
+    let module = naga::front::wgsl::parse_str(&artifact.source).expect("WGSL parses");
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    )
+    .validate(&module)
+    .expect("nonfinite WGSL validates");
+    assert!(artifact.source.contains("bitcast<u32>"));
+    assert!(artifact.source.contains("vec3<bool>"));
+    assert!(artifact.source.contains("any("));
+    assert!(artifact.source.contains("select(vec3<f32>(0.0), vec3<f32>(1.0)"));
+    assert!(artifact.source.contains(" > "));
+}
+
+#[test]
+fn outline_target_emits_an_integer_fragment_output_for_r32i() {
+    let source = outline_target_source();
+    let (ws, mid) = workspace(&source);
+    let glsl = skull_codegen_glsl::emit_shader_pipeline_with_dependencies(
+        &ws,
+        mid,
+        "outline_target_vert",
+        "outline_target_frag",
+        skull_codegen_glsl::GlslProfile::Core330,
+    )
+    .expect("the current outline target compiler plan");
+    assert!(matches!(
+        glsl.interface.fragment_output,
+        skull_mir::shader_ir::FragmentOutput::Single(skull_mir::gpu_layout::WireKind::I32)
+    ));
+    let abi = WgslAbiPlan::explicit(
+        &glsl.interface,
+        "vertex_main",
+        "fragment_main",
+        Span::default(),
+    )
+    .expect("R32I outline target is a supported explicit WGSL output");
+    let artifact = skull_codegen_wgsl::emit_explicit_shader(
+        &ws,
+        &glsl.ir,
+        &glsl.interface,
+        &abi,
+        Span::default(),
+    )
+    .expect("the outline target WGSL artifact");
+    naga_validate(&artifact.source);
+    assert_eq!(artifact.abi.fragment_outputs[0].kind, skull_mir::gpu_layout::WireKind::I32);
+    assert!(artifact.source.contains("@location(0) i32"), "{}", artifact.source);
+}
+
+#[test]
+fn explicit_pipeline_without_texture_group_is_admitted_by_wgsl() {
+    let source = r#"
+value BareVert { aPos: Vec2 }
+value BareVary { position: Vec4, TexCoord: Vec2 }
+@shader(vertex)
+fn bare_vert(@attr a: BareVert) -> BareVary {
+    return BareVary { position: v(a.aPos, 0.0, 1.0), TexCoord: a.aPos }
+}
+@shader(fragment)
+fn bare_frag(_vary: BareVary) -> Vec4 {
+    return Vec4 { x: 1.0, y: 0.0, z: 1.0, w: 1.0 }
+}
+"#;
+    let (ws, mid) = workspace(source);
+    let glsl = skull_codegen_glsl::emit_shader_pipeline_with_dependencies(
+        &ws,
+        mid,
+        "bare_vert",
+        "bare_frag",
+        skull_codegen_glsl::GlslProfile::Core330,
+    )
+    .expect("the texture-free paired compiler plan");
+    let abi = WgslAbiPlan::explicit(
+        &glsl.interface,
+        "vertex_main",
+        "fragment_main",
+        Span::default(),
+    )
+    .expect("a texture-free explicit interface is admitted");
+    assert!(abi.textures.is_empty());
+    let artifact = skull_codegen_wgsl::emit_explicit_shader(
+        &ws,
+        &glsl.ir,
+        &glsl.interface,
+        &abi,
+        Span::default(),
+    )
+    .expect("a texture-free explicit shader emits WGSL");
+    naga_validate(&artifact.source);
+}
+
+#[test]
+fn explicit_multiple_vertex_streams_preserve_instance_inputs_and_vertex_index() {
+    let source = r#"
+value Quad { pos: Vec2 }
+value Instance { offset: Vec2 }
+value Vary { position: Vec4, uv: Vec2 }
+@shader(vertex)
+fn multi_vert(@attr a: Quad, @instance i: Instance) -> Vary {
+    let vid = vertex_id() % 2
+    return Vary { position: v(a.pos.x + i.offset.x + int_to_float(vid) * 0.01, a.pos.y + i.offset.y, 0.0, 1.0), uv: a.pos }
+}
+
+@shader(fragment)
+fn multi_frag(vary: Vary) -> Vec4 {
+    return v(vary.uv, 0.0, 1.0)
+}
+"#;
+    let (ws, mid) = workspace(source);
+    let glsl = skull_codegen_glsl::emit_shader_pipeline_with_dependencies(
+        &ws,
+        mid,
+        "multi_vert",
+        "multi_frag",
+        skull_codegen_glsl::GlslProfile::Core330,
+    )
+    .expect("the multi-stream compiler plan");
+    assert_eq!(glsl.interface.vertex_inputs.len(), 2);
+    let abi = WgslAbiPlan::explicit(
+        &glsl.interface,
+        "vertex_main",
+        "fragment_main",
+        Span::default(),
+    )
+    .expect("the measured per-vertex plus per-instance contract");
+    let artifact = skull_codegen_wgsl::emit_explicit_shader(
+        &ws,
+        &glsl.ir,
+        &glsl.interface,
+        &abi,
+        Span::default(),
+    )
+    .expect("the indexed instanced shader emits WGSL");
+    assert!(artifact.source.contains("@builtin(vertex_index)"), "{}", artifact.source);
+    assert!(artifact.source.contains("@location(1) input_1"), "{}", artifact.source);
+    naga_validate(&artifact.source);
+}
+
+#[test]
+fn explicit_no_fragment_varyings_are_a_typed_wgsl_omission() {
+    let source = r#"
+value Quad { pos: Vec2 }
+value Vary { position: Vec4 }
+@shader(vertex)
+fn solid_vert(@attr a: Quad) -> Vary {
+    return Vary { position: v(a.pos.x, a.pos.y, 0.0, 1.0) }
+}
+@shader(fragment)
+fn solid_frag(vary: Vary) -> Vec4 {
+    return v(1.0, 0.0, 1.0, 1.0)
+}
+"#;
+    let (ws, mid) = workspace(source);
+    let glsl = skull_codegen_glsl::emit_shader_pipeline_with_dependencies(
+        &ws,
+        mid,
+        "solid_vert",
+        "solid_frag",
+        skull_codegen_glsl::GlslProfile::Core330,
+    )
+    .expect("the no-varying compiler plan");
+    assert!(glsl.interface.varyings.is_empty());
+    let error = WgslAbiPlan::explicit(
+        &glsl.interface,
+        "vertex_main",
+        "fragment_main",
+        Span::default(),
+    )
+    .expect_err("no fragment varyings are not yet physically representable");
+    assert_eq!(
+        error.kind,
+        CompilerErrorKind::UnsupportedWgslProjection {
+            capability: "fragment varyings".into(),
+        }
+    );
 }
 
 // Mirrors rect_batch.rock's `Vertex`; rect_batch itself drags in `DepthMode`,
@@ -653,7 +998,7 @@ fn source_goldens_and_physical_structure_are_deterministic() {
                 texture.texture_binding,
                 artifact.abi.uniform_blocks.len() as u32 + 1 + slot as u32 * 2
             );
-            assert_eq!(texture.sampler_binding, texture.texture_binding + 1);
+            assert_eq!(texture.sampler_binding, Some(texture.texture_binding + 1));
         }
     }
 }

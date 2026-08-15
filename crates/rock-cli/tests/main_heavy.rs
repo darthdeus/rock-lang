@@ -1,6 +1,8 @@
 // Game-spawning tests, excluded from the default nextest profile (see .config/nextest.toml).
 
 mod stone_harness;
+#[path = "web_test_process.rs"]
+mod web_test_process;
 
 #[path = "arena_serialization_tests.rs"]
 mod arena_serialization_tests;

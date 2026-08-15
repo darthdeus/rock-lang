@@ -21,7 +21,7 @@ pub use rock_host::process_management::*;
 pub use rock_host::source_files::{
     source_file_from_code, source_file_new_preprocessed, SourceFilesExt,
 };
-pub use rock_host::stick::StickConfig;
+pub use rock_host::stick::{RendererBackend, StickConfig};
 pub use std::collections::{HashMap, HashSet};
 pub use std::sync::mpsc::channel;
 pub use std::time::Duration;
@@ -33,6 +33,7 @@ pub mod bone_backend;
 pub mod skull_backend;
 pub mod common;
 mod compile_cmd;
+pub mod comptime;
 mod dispatcher;
 mod error_test;
 mod file_watcher;
@@ -48,10 +49,11 @@ pub mod glsl_test;
 pub mod js_test;
 pub mod live_project;
 pub mod web;
+pub mod package;
 pub mod zip_writer;
 mod test_protocol;
 mod lint_cmd;
-pub(crate) mod lint_union;
+pub mod lint_union;
 pub mod lint_pass;
 pub mod ablation_report;
 mod mono_manifest;
@@ -273,6 +275,9 @@ pub enum CliCommand {
     /// preludes + `JS_WEB_RUNTIME` + emitted program + a boot line). Serve the
     /// out dir with any static file server. See `docs/stone-web-plan.md` Arc 2.
     Web,
+    /// `rock package <game>` -- stage native release inputs, bake bytecode,
+    /// and write the manifest consumed by Fire and release verification.
+    Package,
 }
 
 impl clap::ValueEnum for CliCommand {
@@ -307,6 +312,7 @@ impl clap::ValueEnum for CliCommand {
             Self::Shader,
             Self::ShaderValidate,
             Self::Web,
+            Self::Package,
         ]
     }
     fn to_possible_value(&self) -> Option<clap::builder::PossibleValue> {
@@ -357,6 +363,7 @@ impl CliCommand {
             Self::Shader => "shader",
             Self::ShaderValidate => "shader-validate",
             Self::Web => "web",
+            Self::Package => "package",
         }
     }
 }
@@ -505,10 +512,21 @@ pub struct Args {
     pub perf_format: String,
     pub type_validation: bool,
     pub headless: bool,
+    /// Build and run game commands against this renderer without changing the
+    /// manifest default. The resolved choice feeds compiler, engine build, and
+    /// runtime preamble through rock-host's renderer authority.
+    pub renderer: Option<RendererBackend>,
     pub test_threads: Option<usize>,
     pub lib: Option<String>,
     pub clean: bool,
-    pub release: bool,
+    /// `--channel`: release channel for `[build.vars]` resolution
+    /// (docs/comptime-plan.md). None = the project's default_channel.
+    pub channel: Option<String>,
+    /// `--target-os`: artifact target for the `platform` builtin. Cross-builds
+    /// package on one OS for another; None = infer from channel, then host.
+    pub target_os: Option<String>,
+    /// `--var NAME=VALUE` overrides, raw; parsed/validated at resolution.
+    pub build_var_overrides: Vec<String>,
     pub trace: bool,
     pub timeout: u64,
     pub no_timeout: bool,
@@ -679,6 +697,8 @@ impl Args {
                 .help("Enable type validation warnings for unresolved types after inference"))
             .arg(Arg::new("headless").long("headless").action(ArgAction::SetTrue)
                 .help("Run frame command in headless mode (no display required)"))
+            .arg(Arg::new("renderer").long("renderer").value_parser(["gl", "wgpu"])
+                .help("Select the game renderer for this invocation (`gl` or `wgpu`); manifest default remains unchanged"))
             .arg(Arg::new("test-threads").long("test-threads").value_name("NUM")
                 .value_parser(clap::value_parser!(usize))
                 .help("Number of threads to use for running tests (default: number of CPU cores, use 1 for sequential)"))
@@ -686,8 +706,13 @@ impl Args {
                 .help("Load a project as a library context when running a Rock file. Usage: rock run --lib game/ test.rock"))
             .arg(Arg::new("clean").long("clean").action(ArgAction::SetTrue)
                 .help("Force a clean build by clearing the cache before compilation"))
-            .arg(Arg::new("release").long("release").action(ArgAction::SetTrue)
-                .help("Compile in release mode — strips debug-time runtime checks. Can also be set via ROCK_RELEASE=1."))
+            .arg(Arg::new("channel").long("channel").value_name("CHANNEL")
+                .help("Release channel for [build.vars] resolution (must be declared in the project's [build] channels)"))
+            .arg(Arg::new("var").long("var").value_name("NAME=VALUE")
+                .action(ArgAction::Append)
+                .help("Override a declared [build.vars] entry for this invocation (repeatable)"))
+            .arg(Arg::new("target-os").long("target-os").value_name("OS")
+                .help("Artifact target for the `platform` builtin (linux, osx, windows, ios, web). Cross-builds package on one OS for another; default infers from channel, then the host."))
             .arg(Arg::new("trace").long("trace").action(ArgAction::SetTrue)
                 .help("Enable trace file generation (trace.folded and trace.perfetto) for profiling"))
             .arg(Arg::new("timeout").long("timeout").default_value("60")
@@ -786,10 +811,20 @@ impl Args {
             perf_format: m.get_one::<String>("perf-format").cloned().unwrap_or_else(|| "pretty".to_string()),
             type_validation: m.get_flag("type-validation"),
             headless: m.get_flag("headless"),
+            renderer: m.get_one::<String>("renderer").map(|value| match value.as_str() {
+                "gl" => RendererBackend::Gl,
+                "wgpu" => RendererBackend::Wgpu,
+                _ => unreachable!("renderer value parser admitted an unknown value"),
+            }),
             test_threads: m.get_one::<usize>("test-threads").copied(),
             lib: m.get_one::<String>("lib").cloned(),
             clean: m.get_flag("clean"),
-            release: m.get_flag("release"),
+            channel: m.get_one::<String>("channel").cloned(),
+            target_os: m.get_one::<String>("target-os").cloned(),
+            build_var_overrides: m
+                .get_many::<String>("var")
+                .map(|vals| vals.cloned().collect())
+                .unwrap_or_default(),
             trace: m.get_flag("trace"),
             timeout: *m.get_one::<u64>("timeout").unwrap(),
             no_timeout: m.get_flag("no-timeout"),
@@ -855,6 +890,17 @@ mod arg_tests {
         };
         assert!(parse(&["rock", "stone", "bitgun", "--no-record"]).no_record);
         assert!(!parse(&["rock", "stone", "bitgun"]).no_record);
+    }
+
+    #[test]
+    fn renderer_override_parses_after_project_name() {
+        let args = Args::from_matches(
+            Args::command()
+                .try_get_matches_from(["rock", "frame", "mag", "--renderer", "wgpu", "-n", "30"])
+                .expect("parse"),
+        );
+        assert_eq!(args.renderer, Some(super::RendererBackend::Wgpu));
+        assert_eq!(args.frames, 30);
     }
 }
 

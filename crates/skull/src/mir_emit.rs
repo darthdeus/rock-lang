@@ -26,7 +26,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use skull_codegen_lua::{emit_function, emit_named, mangle_fn, CodegenCtx};
 use skull_mir::instance::Instance;
 use skull_mir::mir::{FuncRef, Inst, MirFunc, Term};
-use skull_parser::CompilerError;
+use skull_parser::{CompilerError, CompilerErrorKind};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::time::{Duration, Instant};
@@ -502,6 +502,11 @@ struct UnitOut {
     specs: Vec<skull_mir::bound::SpecDemand>,
     /// Module-global names read/written (fn-as-value edges; see `Chunk`).
     global_names: Vec<Ustr>,
+    /// Comptime inputs this unit's body baked in (`build_var`/`embed_string`).
+    /// Always-emitted units have no Chunk to carry these, and ALL in-tree
+    /// production comptime reads are global initializers -- dropping them here
+    /// is how the cimgui embeds went missing from the watch set.
+    comptime_reads: Vec<skull_mir::mir::ComptimeRead>,
     times: PhaseTimes,
 }
 
@@ -523,6 +528,7 @@ fn emit_lowered(
     }
     out.calls = skull_mir::reach::call_targets(mf);
     out.global_names = skull_mir::reach::global_ref_names(mf);
+    out.comptime_reads = mf.comptime_reads.clone();
     out.lua = lua;
     out.times.emit = t_emit;
     out.times.regalloc = skull_codegen_lua::regalloc_time_elapsed().min(t_emit);
@@ -1030,6 +1036,10 @@ struct Chunk {
     /// `static` cells this body declares -- aggregated at chunk-pull for the
     /// hot-reload preservation preamble + `__rock_known_globals` registration.
     statics: Vec<skull_mir::mir::StaticCell>,
+    /// Comptime inputs baked into this chunk's Lua (build_var/embed_string).
+    /// `update_chunk_cache` compares them against the current inputs and treats
+    /// a stale read as a body edit -- bone's reinferred set cannot see these.
+    comptime_reads: Vec<skull_mir::mir::ComptimeRead>,
     /// The callees this body still CALLS after inlining -- the reachability edge
     /// set. Distinct from `deps`, which is an invalidation superset (it also holds
     /// everything inlined AWAY, and would keep spliced-out callees alive).
@@ -1258,6 +1268,11 @@ pub struct SkullEmitCache {
     /// By emitted body rather than by declaration, because a specialization is
     /// its own definition with its own symbol.
     emitted: FxHashSet<Instance>,
+    /// Comptime reads of the always-emitted units (global initializers,
+    /// decorator defs), which have no Chunk. Feeds the watch set
+    /// (`comptime_files`) and the overlay's stale-const re-init; refreshed by
+    /// every `assemble` (full and incremental reassembly re-lower all units).
+    unit_comptime_reads: UnitComptimeReads,
     /// The compilation target's root directory; see [`is_library_module`].
     project_root: Option<String>,
     renderer_target: RendererTarget,
@@ -1269,6 +1284,54 @@ pub enum RendererTarget {
     Wgpu,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct WgpuProjectionCensus {
+    pub examined: usize,
+    pub admitted: usize,
+    pub omitted: usize,
+    pub omissions: BTreeMap<String, String>,
+}
+
+enum WgpuProjection<T> {
+    Admitted(T),
+    Unsupported { capability: String },
+}
+
+fn classify_wgpu_projection<T>(result: Result<T, CompilerError>) -> Result<WgpuProjection<T>, CompilerError> {
+    match result {
+        Ok(value) => Ok(WgpuProjection::Admitted(value)),
+        Err(error) => match error.kind {
+            CompilerErrorKind::UnsupportedWgslProjection { capability } => {
+                Ok(WgpuProjection::Unsupported { capability })
+            }
+            _ => Err(error),
+        },
+    }
+}
+
+fn collect_wgpu_projections<T, K>(
+    items: impl IntoIterator<Item = (String, K)>,
+    mut project: impl FnMut(&str, K) -> Result<T, CompilerError>,
+) -> Result<(Vec<(String, T)>, WgpuProjectionCensus), CompilerError> {
+    let mut census = WgpuProjectionCensus::default();
+    let mut admitted = Vec::new();
+    for (key, input) in items {
+        census.examined += 1;
+        match classify_wgpu_projection(project(&key, input))? {
+            WgpuProjection::Admitted(value) => {
+                census.admitted += 1;
+                admitted.push((key, value));
+            }
+            WgpuProjection::Unsupported { capability } => {
+                census.omitted += 1;
+                census.omissions.insert(key, capability);
+            }
+        }
+    }
+    debug_assert_eq!(census.examined, census.admitted + census.omitted);
+    Ok((admitted, census))
+}
+
 #[derive(Default)]
 struct ShaderRegistrations {
     lua: String,
@@ -1277,6 +1340,7 @@ struct ShaderRegistrations {
     roots: Vec<FuncRef>,
     keys: BTreeSet<String>,
     abi_wires: BTreeMap<String, String>,
+    wgpu_projection_census: Option<WgpuProjectionCensus>,
 }
 
 /// A `static` cell's reload key: rendered type + initializer content hash. Equal
@@ -1365,6 +1429,7 @@ fn emit_coroutine_chunk(
         direct_calls: Vec::new(),
         times,
         statics: mf.statics.clone(),
+        comptime_reads: mf.comptime_reads.clone(),
         calls: skull_mir::reach::call_targets(mf),
         specs,
     })
@@ -1535,7 +1600,7 @@ fn emit_body_chunk_with_mutation(
     times.emit = te.elapsed();
     times.regalloc = skull_codegen_lua::regalloc_time_elapsed().min(times.emit);
     let calls = skull_mir::reach::call_targets(&mf);
-    Ok(Chunk { lua, deps, direct_globals, direct_calls, times, statics, calls, specs })
+    Ok(Chunk { lua, deps, direct_globals, direct_calls, times, statics, comptime_reads: mf.comptime_reads.clone(), calls, specs })
 }
 
 /// Emit each hoisted nested `fn` (and its own nested fns, depth-first) as a
@@ -1768,6 +1833,7 @@ fn emit_spec_chunk(
         direct_calls: Vec::new(),
         times: PhaseTimes::default(),
         statics,
+        comptime_reads: mf.comptime_reads.clone(),
         calls: skull_mir::reach::call_targets(&mf),
         specs,
     })
@@ -2434,17 +2500,11 @@ fn graph_rejection_error(
 /// with the new source (the hot-reload-parity invariant). Deterministic
 /// sorted-by-key order (from `collect_shader_pairs`) keeps re-emission
 /// byte-identical. The driver realizes the graph-owned shader view and passes
-/// it to GLSL; skull-mir still surfaces only the resolved `FuncRef`s. An emit
-/// error (tier violation, stage/collision) is a spanned `CompilerError` failing
-/// the compile, never skip-and-continue.
-const WGSL_SELECTED_ARTIFACTS: [(&str, bool); 5] = [
-    ("blit_frag", true),
-    ("present_frag", true),
-    ("tonemap_frag", true),
-    ("sprite_basic_vert+sprite_basic_frag", false),
-    ("sprite_batch_vert+sprite_batch_frag", false),
-];
-
+/// it to GLSL; skull-mir still surfaces only the resolved `FuncRef`s. Selected
+/// WGPU projects every graph pair independently: GL registration remains
+/// unconditional, while a pair whose WGSL projection cannot represent its
+/// graph-owned interface is omitted from the WGPU artifact view and rejected
+/// by the runtime before effects.
 fn concrete_stage_input(
     view: &skull_graph::shader::ShaderStageView,
     concrete_plans: &std::sync::Arc<skull_mir::concrete::ConcretePlans>,
@@ -2534,116 +2594,94 @@ fn shader_registration_lines(
         .map(|pair| pair.key.clone())
         .chain(compute_collection.entries.iter().map(|entry| entry.key.clone()))
         .collect();
-    if renderer_target == RendererTarget::Wgpu && !collection.pairs.is_empty() {
-        let mut admitted = 0usize;
-        for (key, fullscreen) in WGSL_SELECTED_ARTIFACTS {
-            let Some(pair) = collection.pairs.iter().find(|pair| pair.key == key) else {
-                return Err(CompilerError::new_no_location(format!(
-                    "selected wgpu artifact {key} was not admitted by rock_shader"
-                )));
-            };
-            let program_view = view
-                .program_views
-                .iter()
-                .find(|candidate| {
-                    candidate.program.vert == pair.vert && candidate.program.frag == pair.frag
-                })
-                .ok_or_else(|| {
-                    CompilerError::new_no_location(format!(
-                        "selected wgpu artifact {key} has no graph-owned shader view"
+    let mut wgpu_projection_census = None;
+    if renderer_target == RendererTarget::Wgpu {
+        let items = collection
+            .pairs
+            .iter()
+            .zip(&view.program_views)
+            .map(|(pair, program_view)| {
+                (pair.key.clone(), (pair.vert.is_none(), program_view))
+            });
+        let (artifacts, census) = collect_wgpu_projections(items, |key, (fullscreen, program_view)| {
+            let emitted = (|| -> Result<(String, String, String, Vec<FuncRef>), CompilerError> {
+                if fullscreen {
+                    let stage_view = program_view
+                        .stages
+                        .iter()
+                        .find(|stage| stage.stage == skull_mir::shader_ir::ShaderStage::Fragment)
+                        .ok_or_else(|| {
+                            CompilerError::new_no_location(format!(
+                                "wgsl artifact {key} has no fragment stage view"
+                            ))
+                        })?;
+                    let input = concrete_stage_input(stage_view, &program_view.concrete_plans);
+                    let neutral = skull_codegen_shader::plan_fullscreen_fragment_from_concrete(
+                        ws,
+                        scx,
+                        &input,
+                        &skull_codegen_wgsl::WgslShaderPolicy,
+                    )?;
+                    let abi = skull_codegen_wgsl::WgslAbiPlan::wgsl(
+                        &neutral.interface,
+                        bone_semantic::prelude::Span::default(),
+                    )?;
+                    let emission = skull_codegen_wgsl::emit_fullscreen_shader(
+                        ws,
+                        &neutral.ir,
+                        &neutral.interface,
+                        &abi,
+                        bone_semantic::prelude::Span::default(),
+                    )?;
+                    Ok((
+                        emission.source,
+                        emission.abi.wire(),
+                        neutral.interface.semantic_wire(true),
+                        emission.dependencies,
                     ))
-                })?;
-            let (shader_key, source, wire, semantic_wire, emission_dependencies) = if fullscreen {
-                if pair.vert.is_some() {
-                    return Err(CompilerError::new_no_location(format!(
-                        "selected wgpu artifact {key} is marked fullscreen but has an explicit vertex stage"
-                    )));
+                } else {
+                    let glsl = skull_codegen_glsl::emit_shader_pipeline_with_view(
+                        ws,
+                        scx,
+                        program_view,
+                        profile,
+                    )?;
+                    let abi = skull_codegen_wgsl::WgslAbiPlan::explicit(
+                        &glsl.interface,
+                        "vertex_main",
+                        "fragment_main",
+                        bone_semantic::prelude::Span::default(),
+                    )?;
+                    let emission = skull_codegen_wgsl::emit_explicit_shader(
+                        ws,
+                        &glsl.ir,
+                        &glsl.interface,
+                        &abi,
+                        bone_semantic::prelude::Span::default(),
+                    )?;
+                    Ok((
+                        emission.source,
+                        emission.abi.wire(),
+                        glsl.interface.semantic_wire(false),
+                        emission.dependencies,
+                    ))
                 }
-                let stage_view = program_view
-                    .stages
-                    .iter()
-                    .find(|stage| stage.stage == skull_mir::shader_ir::ShaderStage::Fragment)
-                    .ok_or_else(|| {
-                        CompilerError::new_no_location(format!(
-                            "selected wgpu artifact {key} has no fragment stage view"
-                        ))
-                    })?;
-                let input = concrete_stage_input(stage_view, &program_view.concrete_plans);
-                let neutral = skull_codegen_shader::plan_fullscreen_fragment_from_concrete(
-                    ws,
-                    scx,
-                    &input,
-                    &skull_codegen_wgsl::WgslShaderPolicy,
-                )?;
-                let abi = skull_codegen_wgsl::WgslAbiPlan::wgsl(
-                    &neutral.interface,
-                    bone_semantic::prelude::Span::default(),
-                )?;
-                let emission = skull_codegen_wgsl::emit_fullscreen_shader(
-                    ws,
-                    &neutral.ir,
-                    &neutral.interface,
-                    &abi,
-                    bone_semantic::prelude::Span::default(),
-                )?;
-                (
-                    key,
-                    emission.source,
-                    emission.abi.wire(),
-                    neutral.interface.semantic_wire(true),
-                    emission.dependencies,
-                )
-            } else {
-                if pair.vert.is_none() {
-                    return Err(CompilerError::new_no_location(format!(
-                        "selected wgpu artifact {key} has no explicit vertex stage"
-                    )));
-                }
-                let glsl = skull_codegen_glsl::emit_shader_pipeline_with_view(
-                    ws,
-                    scx,
-                    program_view,
-                    profile,
-                )?;
-                let abi = skull_codegen_wgsl::WgslAbiPlan::explicit(
-                    &glsl.interface,
-                    "vertex_main",
-                    "fragment_main",
-                    bone_semantic::prelude::Span::default(),
-                )?;
-                let emission = skull_codegen_wgsl::emit_explicit_shader(
-                    ws,
-                    &glsl.ir,
-                    &glsl.interface,
-                    &abi,
-                    bone_semantic::prelude::Span::default(),
-                )?;
-                (
-                    key,
-                    emission.source,
-                    emission.abi.wire(),
-                    glsl.interface.semantic_wire(false),
-                    emission.dependencies,
-                )
-            };
+            })();
+            emitted
+        })?;
+        for (shader_key, (source, wire, semantic_wire, emission_dependencies)) in artifacts {
             dependencies.extend(emission_dependencies);
-            abi_wires.insert(shader_key.to_string(), wire.clone());
+            abi_wires.insert(shader_key.clone(), wire.clone());
             let _ = writeln!(
                 out,
                 "__rock_wgpu_shader_register({}, {}, {}, {})",
-                skull_codegen_lua::lua_string(shader_key),
+                skull_codegen_lua::lua_string(&shader_key),
                 skull_codegen_lua::lua_string(&source),
                 skull_codegen_lua::lua_string(&wire),
                 skull_codegen_lua::lua_string(&semantic_wire),
             );
-            admitted += 1;
         }
-        if admitted != WGSL_SELECTED_ARTIFACTS.len() {
-            return Err(CompilerError::new_no_location(format!(
-                "selected wgpu artifact registration admitted {admitted} artifacts, expected {}",
-                WGSL_SELECTED_ARTIFACTS.len()
-            )));
-        }
+        wgpu_projection_census = Some(census);
     }
     if view.compute_views.len() != compute_collection.entries.len() {
         return Err(CompilerError::new_no_location(format!(
@@ -2708,7 +2746,21 @@ fn shader_registration_lines(
             .collect(),
         keys,
         abi_wires,
+        wgpu_projection_census,
     })
+}
+
+/// Comptime reads made by ALWAYS-EMITTED units, which have no Chunk to carry
+/// them: per-global (keyed so the overlay can re-init exactly the stale one)
+/// plus decorator definitions (files only -- decorators re-apply on full
+/// rebuild, so the watch set is all they need).
+#[derive(Default)]
+pub struct UnitComptimeReads {
+    globals: FxHashMap<
+        (ModuleId, Idx<bone_semantic::hir::GlobalDef>),
+        Vec<skull_mir::mir::ComptimeRead>,
+    >,
+    decorators: Vec<skull_mir::mir::ComptimeRead>,
 }
 
 fn assemble(
@@ -2717,7 +2769,7 @@ fn assemble(
     scx: &skull_mir::lower::ScalarCtx,
     cache: &SkullEmitCache,
     built_specs: &mut Vec<(Instance, Chunk)>,
-) -> Result<(MirEmit, FxHashSet<Instance>), CompilerError> {
+) -> Result<(MirEmit, FxHashSet<Instance>, UnitComptimeReads), CompilerError> {
     // Per-stage lower/cleanup/emit/regalloc times: chunk times (captured during the
     // parallel `emit_full`/`emit_incremental` chunk build) summed in as chunks are
     // pulled, plus the decorator/global units re-emitted here. Under parallel emit
@@ -2758,6 +2810,10 @@ fn assemble(
     });
     rejections.extend(unit_errors(&deco_results));
     needed_specs.extend(deco_results.iter().flat_map(|u| u.specs.iter().cloned()));
+    let mut unit_reads = UnitComptimeReads::default();
+    for u in &deco_results {
+        unit_reads.decorators.extend(u.comptime_reads.iter().cloned());
+    }
     let mut always_emitted_calls: Vec<FuncRef> = Vec::new();
     let mut always_emitted_names: Vec<Ustr> = Vec::new();
     merge_units(deco_results, &mut out, &mut skipped, &mut direct_globals, &mut direct_calls, &mut Vec::new(), &mut always_emitted_calls, &mut always_emitted_names, &mut times);
@@ -2782,9 +2838,17 @@ fn assemble(
             format!("[{:?}] = {:?},", g.name.as_str(), ws.render(None, g.ty))
         })
         .collect();
+    let global_keys = global_items.clone();
     let global_results = par_map(global_items, |(mid, gid)| {
         emit_global_unit(ws, scx, cg, &cache.concrete, mid, gid)
     });
+    // par_map preserves input order, so keys and results zip positionally --
+    // the same pairing merge_units relies on for output order.
+    for (key, u) in global_keys.iter().zip(global_results.iter()) {
+        if !u.comptime_reads.is_empty() {
+            unit_reads.globals.insert(*key, u.comptime_reads.clone());
+        }
+    }
     rejections.extend(unit_errors(&global_results));
     needed_specs.extend(global_results.iter().flat_map(|u| u.specs.iter().cloned()));
     let mut globals_lua = String::new();
@@ -3173,7 +3237,7 @@ fn assemble(
         }
     }
     emitted_bodies.extend(spec_chunks.keys().cloned());
-    Ok((MirEmit { lua: out, skipped, phases }, emitted_bodies))
+    Ok((MirEmit { lua: out, skipped, phases }, emitted_bodies, unit_reads))
 }
 
 /// Full emit: populate the chunk cache for every retained ordinary/coroutine
@@ -3304,6 +3368,9 @@ fn emit_full_in_with_mutation(
         ));
     }
     if let Some(err) = skull_mir::lower::expansion_rejection(ws, user_mid) {
+        return Err(err);
+    }
+    if let Some(err) = skull_mir::lower::comptime_input_rejection(ws, user_mid) {
         return Err(err);
     }
     if let Some(err) = skull_mir::intrinsics::intrinsic_rejection(ws, user_mid) {
@@ -3525,13 +3592,15 @@ fn emit_full_in_with_mutation(
         shader_registrations,
         shader_view,
         emitted: FxHashSet::default(),
+        unit_comptime_reads: UnitComptimeReads::default(),
         project_root: project_root.map(str::to_string),
         renderer_target,
     };
     let mut built_specs: Vec<(Instance, Chunk)> = Vec::new();
-    let (emit, emitted) = assemble(ws, &cache.cg, &cache.scx, &cache, &mut built_specs)?;
+    let (emit, emitted, unit_reads) = assemble(ws, &cache.cg, &cache.scx, &cache, &mut built_specs)?;
     let mut cache = cache;
     cache.emitted = emitted;
+    cache.unit_comptime_reads = unit_reads;
     cache.absorb_spec_chunks(built_specs);
     Ok((emit, cache))
 }
@@ -3553,7 +3622,59 @@ fn emit_full_in_with_mutation(
 /// every shifted fn is in `reinferred` and re-emitted here). Shared by
 /// `emit_incremental` (full reassembly) and `emit_overlay` (the incremental.lua
 /// split).
+/// Whether any of `reads` no longer matches the CURRENT inputs. File ids are
+/// the ABSOLUTE path the resolver landed on; an unreadable input hashes as
+/// None != recorded, forcing a re-lower whose spanned rejection reports the
+/// real cause. `file_hashes` memoizes reads within one staleness sweep.
+fn comptime_reads_stale(
+    ws: &Workspace,
+    reads: &[skull_mir::mir::ComptimeRead],
+    file_hashes: &mut FxHashMap<Ustr, Option<u64>>,
+) -> bool {
+    use skull_mir::mir::{comptime_value_hash, ComptimeInputId};
+    reads.iter().any(|read| {
+        let current = match &read.input {
+            ComptimeInputId::Var(name) => ws
+                .comptime_inputs
+                .vars
+                .get(name)
+                .map(|v| comptime_value_hash(&v.value)),
+            ComptimeInputId::File(path) => *file_hashes.entry(*path).or_insert_with(|| {
+                let text = std::fs::read_to_string(path.as_str()).ok()?;
+                Some(comptime_value_hash(&text))
+            }),
+        };
+        current != Some(read.value_hash)
+    })
+}
+
 impl SkullEmitCache {
+    /// The ABSOLUTE path of every `embed_string` input baked into the program
+    /// -- function chunks AND the always-emitted units (global initializers,
+    /// decorator defs) -- the files a watcher must treat as sources
+    /// (docs/comptime-plan.md). The unit half is load-bearing: all in-tree
+    /// production embeds are global initializers (the cimgui prelude).
+    pub fn comptime_files(&self) -> Vec<Ustr> {
+        let mut out: FxHashSet<Ustr> = FxHashSet::default();
+        let chunk_reads = self
+            .chunks
+            .values()
+            .filter_map(|chunk| chunk.as_ref().ok())
+            .flat_map(|chunk| chunk.comptime_reads.iter());
+        let unit_reads = self
+            .unit_comptime_reads
+            .globals
+            .values()
+            .flatten()
+            .chain(self.unit_comptime_reads.decorators.iter());
+        for read in chunk_reads.chain(unit_reads) {
+            if let skull_mir::mir::ComptimeInputId::File(path) = read.input {
+                out.insert(path);
+            }
+        }
+        out.into_iter().collect()
+    }
+
     /// The authoritative instance graph this cache emits against. Always
     /// present -- there is no build in which production has no graph.
     pub fn graph(&self) -> &crate::instance_graph::InstanceGraph {
@@ -3595,6 +3716,10 @@ impl SkullEmitCache {
     /// changed wire cannot be applied to a live registry/pipeline safely.
     pub fn shader_registration_contracts(&self) -> BTreeMap<String, String> {
         self.shader_registrations.abi_wires.clone()
+    }
+
+    pub fn wgpu_projection_census(&self) -> Option<&WgpuProjectionCensus> {
+        self.shader_registrations.wgpu_projection_census.as_ref()
     }
 
 
@@ -3885,6 +4010,21 @@ fn update_chunk_cache(
     // re-emit even if their own body didn't change.
     changed.extend(flipped_frefs.iter().copied());
 
+    // A chunk whose baked comptime input (build_var value / embedded file
+    // content) no longer matches the CURRENT inputs is a body edit bone cannot
+    // see -- reinferred hashes only source text (docs/comptime-plan.md). Seed
+    // the decl so the chunk and every dependent (a caller that inlined the
+    // value) re-emits fresh.
+    {
+        let mut file_hashes: FxHashMap<Ustr, Option<u64>> = FxHashMap::default();
+        for (body, chunk) in cache.chunks.iter() {
+            let Ok(chunk) = chunk else { continue };
+            if comptime_reads_stale(ws, &chunk.comptime_reads, &mut file_hashes) {
+                changed.insert(body.func);
+            }
+        }
+    }
+
     // **A changed declaration maps to its LIVE INSTANCES through the graph**,
     // not to one declaration-shaped key. Editing a generic `co fn` with two
     // instantiations must re-emit both bodies, and editing one specialization's
@@ -3995,8 +4135,9 @@ pub fn emit_incremental(
     // The two-file split (`emit_overlay`) avoids it entirely on a body edit.
     let t_asm = Instant::now();
     let mut built_specs: Vec<(Instance, Chunk)> = Vec::new();
-    let (mut emit, emitted) = assemble(ws, &cache.cg, &cache.scx, cache, &mut built_specs)?;
+    let (mut emit, emitted, unit_reads) = assemble(ws, &cache.cg, &cache.scx, cache, &mut built_specs)?;
     cache.emitted = emitted;
+    cache.unit_comptime_reads = unit_reads;
     cache.absorb_spec_chunks(built_specs);
     let reassemble = t_asm.elapsed();
     emit.phases.push(("incr: re-emit affected bodies", reemit));
@@ -4262,6 +4403,26 @@ pub fn emit_overlay(
             }
         }
     }
+    // A comptime input read by a GLOBAL initializer can go stale with no
+    // reinferred body at all (bone hashes only source text). Route a stale
+    // const through the same changed-consts machinery -- its ginit re-lowers
+    // fresh, re-reading the file / new var value. A stale MUTABLE global is
+    // deliberately left alone: its guarded init preserves the live value on
+    // reload, exactly as a source edit to its initializer does.
+    {
+        let mut file_hashes: FxHashMap<Ustr, Option<u64>> = FxHashMap::default();
+        let stale_consts: Vec<(ModuleId, Idx<bone_semantic::hir::GlobalDef>)> = cache
+            .unit_comptime_reads
+            .globals
+            .iter()
+            .filter(|((mid, gid), reads)| {
+                ws.module(*mid).globals[*gid].is_const
+                    && comptime_reads_stale(ws, reads, &mut file_hashes)
+            })
+            .map(|(key, _)| *key)
+            .collect();
+        cache.changed_consts_since_full.extend(stale_consts);
+    }
     let t_relower = t2.elapsed();
     let t3 = Instant::now();
     let mut emit = assemble_overlay(ws, cache, shader_changed);
@@ -4293,6 +4454,32 @@ pub fn emit_overlay(
         ("assemble_overlay (+build_deco_map)", t_asm),
     ];
     Ok(emit)
+}
+
+#[cfg(test)]
+mod wgpu_projection_tests {
+    use super::*;
+
+    #[test]
+    fn unexpected_emitter_failure_aborts_after_admission() {
+        let unexpected = CompilerError::new_no_location("unexpected WGSL emitter failure");
+        let mut visited = Vec::new();
+        let result = collect_wgpu_projections(
+            vec![("admitted".to_string(), true), ("unexpected".to_string(), false)],
+            |key, _| {
+                visited.push(key.to_string());
+                if key == "admitted" {
+                    Ok("artifact")
+                } else {
+                    Err(unexpected.clone())
+                }
+            },
+        );
+        let error = result.expect_err("an unexpected emitter error must fail the collection");
+        assert_eq!(error.message, "unexpected WGSL emitter failure");
+        assert_eq!(error.kind, CompilerErrorKind::Generic);
+        assert_eq!(visited, ["admitted", "unexpected"]);
+    }
 }
 
 #[cfg(test)]

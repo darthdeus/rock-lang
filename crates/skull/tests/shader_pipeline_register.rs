@@ -20,6 +20,83 @@ use skull_codegen_shader::ConcreteStageInput;
 use skull_mir::shader_ir::ShaderStage;
 use std::sync::Arc;
 
+const TYPED_PROJECTION_REFUSAL_SRC: &str = r#"
+struct EntityIdTex { id_buffer: ISampler2D }
+
+@shader(fragment)
+fn entity_id_debug_frag(@textures t: EntityIdTex, tc: Vec2) -> Vec4 {
+    let id = texture_id(t.id_buffer, tc)
+    if id <= 0 { discard() }
+    let x = int_to_float(id)
+    return v(x, x, x, 1.0)
+}
+
+value Quad { aPos: Vec2, aTexCoord: Vec2 }
+value Vary { position: Vec4, TexCoord: Vec2 }
+struct OutlineTex { target_mask: ISampler2D, visible_id: ISampler2D }
+
+@shader(vertex)
+fn outline_detect_vert(@attr a: Quad) -> Vary {
+    return Vary {
+        position: v(a.aPos, 0.0, 1.0),
+        TexCoord: a.aTexCoord,
+    }
+}
+
+@shader(fragment)
+fn outline_detect_frag(vary: Vary, @textures t: OutlineTex) -> Vec4 {
+    let target = texture_id(t.target_mask, vary.TexCoord)
+    let visible = texture_id(t.visible_id, vary.TexCoord)
+    if target == visible { return v(0.0, 1.0, 0.0, 1.0) }
+    return v(1.0, 0.0, 0.0, 1.0)
+}
+
+fn use_all() -> string {
+    let entity = rock_shader(entity_id_debug_frag)
+    let outline = rock_shader(outline_detect_vert, outline_detect_frag)
+    return entity + outline
+}
+"#;
+
+const NONFINITE_PROJECTION_SRC: &str = r#"
+struct SrcTex { src_tex: Sampler2D }
+
+@shader(fragment)
+fn nonfinite_frag(@textures t: SrcTex, tc: Vec2) -> Vec4 {
+    let c = texture(t.src_tex, tc)
+    let bad = bvec3(
+        isinf(c.r) || isnan(c.r),
+        isinf(c.g) || isnan(c.g),
+        isinf(c.b) || isnan(c.b),
+    )
+    if any(bad) { return v(to_vec3(bad), 1.0) }
+    if any(greater_than(c.rgb.abs(), v(60000.0, 60000.0, 60000.0))) {
+        return v(1.0, 1.0, 0.0, 1.0)
+    }
+    return v(0.0, 0.0, 0.0, 1.0)
+}
+
+fn use_all() -> string { return rock_shader(nonfinite_frag) }
+"#;
+
+const OUTLINE_PROJECTION_SRC: &str = concat!(
+    r#"
+struct MainTex { uTexture: Sampler2D }
+value Vertex { pos: Vec2, uv: Vec2, color: Vec4, pivot_y: float, entity_id: float }
+    value EngineU { uProjection: Mat4, uView: Mat4 }
+    "#,
+    include_str!("../../../stone/engine/shaders/common/utils_math.rock"),
+    include_str!("../../../stone/engine/shaders/rendering/outline_target_shader.rock"),
+    include_str!("../../../stone/engine/shaders/rendering/outline_detect_shader.rock"),
+    r#"
+fn use_all() -> string {
+    let target = rock_shader(outline_target_vert, outline_target_frag)
+    let detect = rock_shader(outline_detect_vert, outline_detect_frag)
+    return target + detect
+}
+"#,
+);
+
 fn emit_overlay(
     ws: &Workspace,
     cache: &mut SkullEmitCache,
@@ -410,6 +487,20 @@ fn sprite_batch_frag(vary: SpriteBatchVary, @textures t: SpriteBatchTex) -> Vec4
     return texture(t.uTexture, vary.TexCoord)
 }
 @shader(fragment)
+fn sampler_value_frag(src: Sampler2D, tc: Vec2) -> Vec4 {
+    return texture(src, tc)
+}
+value CustomVert { aPos: Vec2 }
+value CustomVary { position: Vec4, TexCoord: Vec2 }
+@shader(vertex)
+fn custom_vert(@attr a: CustomVert) -> CustomVary {
+    return CustomVary { position: v(a.aPos, 0.0, 1.0), TexCoord: a.aPos }
+}
+@shader(fragment)
+fn custom_frag(_vary: CustomVary) -> Vec4 {
+    return Vec4 { x: 1.0, y: 0.0, z: 1.0, w: 1.0 }
+}
+@shader(fragment)
 fn blit_frag(tc: Vec2) -> Vec4 { return Vec4 { x: shader_channel(tc.x), y: 0.0, z: 1.0, w: 1.0 } }
 @shader(fragment)
 fn present_frag(tc: Vec2) -> Vec4 { return Vec4 { x: 0.0, y: tc.y, z: 1.0, w: 1.0 } }
@@ -421,27 +512,38 @@ fn use_all() -> string {
     let b = rock_shader(present_frag)
     let c = rock_shader(tonemap_frag)
     let d = rock_shader(sprite_basic_vert, sprite_basic_frag)
-    return rock_shader(sprite_batch_vert, sprite_batch_frag)
+    let e = rock_shader(sprite_batch_vert, sprite_batch_frag)
+    let f = rock_shader(sampler_value_frag)
+    return rock_shader(custom_vert, custom_frag)
 }
 "#;
 
 #[test]
-fn selected_wgpu_registration_is_exactly_the_five_selected_artifacts() {
+fn wgpu_registration_follows_graph_owned_shader_pairs() {
     let ws = ws_with_stdlib(WGPU_FULLSCREEN_SRC);
     let mid = test_mid(&ws);
-    let (emit, _) = emit_full_in_for_renderer(&ws, mid, None, RendererTarget::Wgpu)
+    let (emit, cache) = emit_full_in_for_renderer(&ws, mid, None, RendererTarget::Wgpu)
         .expect("selected artifacts emit");
     assert_eq!(
         emit.lua.matches("__rock_wgpu_shader_register(").count(),
-        5,
-        "the selected renderer admits a non-zero, exact WGSL artifact population"
+        6,
+        "the selected renderer admits six of the seven graph pairs"
     );
+    assert!(emit.lua.contains("__rock_shader_register(\"sampler_value_frag\""),
+        "GL keeps the raw compatibility registration for the omitted WGSL projection");
+    let census = cache.wgpu_projection_census().expect("WGPU projection census");
+    assert_eq!(census.examined, 7);
+    assert_eq!(census.admitted, 6);
+    assert_eq!(census.omitted, 1);
+    assert_eq!(census.admitted + census.omitted, census.examined);
+    assert_eq!(census.omissions.keys().map(String::as_str).collect::<Vec<_>>(), ["sampler_value_frag"]);
     for root in [
         "blit_frag",
         "present_frag",
         "tonemap_frag",
         "sprite_basic_vert+sprite_basic_frag",
         "sprite_batch_vert+sprite_batch_frag",
+        "custom_vert+custom_frag",
     ] {
         assert!(
             emit.lua.contains(&format!("__rock_wgpu_shader_register(\"{root}\"")),
@@ -450,13 +552,56 @@ fn selected_wgpu_registration_is_exactly_the_five_selected_artifacts() {
     }
 }
 
+const BLOOM_PROJECTION_SRC: &str = r#"
+struct InputTex { input_tex: Sampler2D }
+struct SrcTex { src_tex: Sampler2D }
+value BloomDownU { gain: float }
+
+@shader(fragment)
+fn bloom_down_13(src: Sampler2D, tc: Vec2) -> Vec4 {
+    return texture(src, tc)
+}
+
+@shader(fragment)
+fn blit_frag(@textures t: InputTex, tc: Vec2) -> Vec4 {
+    return texture(t.input_tex, tc)
+}
+
+@shader(fragment)
+fn bloom_down_frag(@textures t: SrcTex, @uniform u: BloomDownU, tc: Vec2) -> Vec4 {
+    return bloom_down_13(t.src_tex, tc) * u.gain
+}
+
+fn use_all() -> string {
+    let a = rock_shader(blit_frag)
+    let b = rock_shader(bloom_down_frag)
+    return b
+}
+"#;
+
+#[test]
+fn bloom_sampler_helper_projection_is_admitted_from_the_graph() {
+    let ws = ws_with_stdlib(BLOOM_PROJECTION_SRC);
+    let mid = test_mid(&ws);
+    let (emit, cache) = emit_full_in_for_renderer(&ws, mid, None, RendererTarget::Wgpu)
+        .expect("selected artifacts emit");
+    let census = cache.wgpu_projection_census().expect("WGPU projection census");
+    assert_eq!(census.examined, 2, "the fixture must exercise both graph roots: {census:?}");
+    assert_eq!(census.admitted, 2, "bloom sampler/helper projection was omitted: {census:?}");
+    assert_eq!(census.omitted, 0, "a valid graph pair entered the omitted population: {census:?}");
+    assert!(
+        emit.lua.contains("__rock_wgpu_shader_register(\"bloom_down_frag\""),
+        "the admitted bloom artifact never reached the registration output"
+    );
+}
+
 #[test]
 fn selected_wgpu_planning_reads_the_exact_graph_instance_and_concrete_plan() {
     let ws = ws_with_stdlib(WGPU_FULLSCREEN_SRC);
     let mid = test_mid(&ws);
     let (emit, cache) = emit_full_in_for_renderer(&ws, mid, None, RendererTarget::Wgpu)
         .expect("selected artifacts emit");
-    assert_eq!(emit.lua.matches("__rock_wgpu_shader_register(").count(), 5);
+    assert_eq!(emit.lua.matches("__rock_wgpu_shader_register(").count(), 6);
 
     let blit = cache
         .shader_view()
@@ -537,4 +682,63 @@ fn selected_wgpu_planning_reads_the_exact_graph_instance_and_concrete_plan() {
         Err(error) => error,
     };
     assert!(rejected.message.contains("no concrete plan"), "{rejected}");
+}
+
+#[test]
+fn typed_projection_census_admits_the_current_entity_and_outline_projections() {
+    let ws = ws_with_stdlib(TYPED_PROJECTION_REFUSAL_SRC);
+    let mid = test_mid(&ws);
+    let (emit, cache) = emit_full_in_for_renderer(&ws, mid, None, RendererTarget::Wgpu)
+        .expect("the typed refusal census must compile its GL controls");
+    let census = cache.wgpu_projection_census().expect("WGPU projection census");
+    println!("typed projection census: {census:?}");
+    assert_eq!(census.examined, 2);
+    assert_eq!(census.admitted, 2, "entity-id and outline projections must be admitted: {census:?}");
+    assert_eq!(census.omitted, 0, "typed projection omissions remain: {census:?}");
+    assert!(census.omissions.is_empty());
+    assert!(emit.lua.contains("__rock_shader_register(\"entity_id_debug_frag\""));
+    assert!(emit.lua.contains("__rock_shader_register(\"outline_detect_vert+outline_detect_frag\""));
+    assert!(emit.lua.contains("__rock_wgpu_shader_register(\"entity_id_debug_frag\""));
+    assert!(emit.lua.contains("__rock_wgpu_shader_register(\"outline_detect_vert+outline_detect_frag\""));
+}
+
+#[test]
+fn selected_wgpu_entity_id_projection_is_admitted() {
+    let ws = ws_with_stdlib(TYPED_PROJECTION_REFUSAL_SRC);
+    let mid = test_mid(&ws);
+    let (emit, cache) = emit_full_in_for_renderer(&ws, mid, None, RendererTarget::Wgpu)
+        .expect("the entity-id fixture must reach projection census");
+    let census = cache.wgpu_projection_census().expect("WGPU projection census");
+    assert_eq!(census.examined, 2);
+    assert_eq!(census.admitted, 2, "entity-id and its real outline consumer must be admitted: {census:?}");
+    assert_eq!(census.omitted, 0, "typed projection omissions remain: {census:?}");
+    assert!(emit.lua.contains("__rock_wgpu_shader_register(\"entity_id_debug_frag\""));
+}
+
+#[test]
+fn nonfinite_projection_reaches_selected_wgpu() {
+    let ws = ws_with_stdlib(NONFINITE_PROJECTION_SRC);
+    let mid = test_mid(&ws);
+    let (emit, cache) = emit_full_in_for_renderer(&ws, mid, None, RendererTarget::Wgpu)
+        .expect("the nonfinite shader must have a GL control");
+    let census = cache.wgpu_projection_census().expect("WGPU projection census");
+    assert_eq!(census.examined, 1);
+    assert_eq!(census.admitted, 1, "nonfinite shader remains omitted: {census:?}");
+    assert_eq!(census.omitted, 0, "nonfinite shader projection failed: {census:?}");
+    assert!(emit.lua.contains("__rock_wgpu_shader_register(\"nonfinite_frag\""));
+}
+
+#[test]
+fn current_outline_sources_report_their_exact_wgpu_projection_census() {
+    let ws = ws_with_stdlib(OUTLINE_PROJECTION_SRC);
+    let mid = test_mid(&ws);
+    let (emit, cache) = emit_full_in_for_renderer(&ws, mid, None, RendererTarget::Wgpu)
+        .expect("the current outline sources must reach projection census");
+    let census = cache.wgpu_projection_census().expect("WGPU projection census");
+    println!("current outline projection census: {census:?}");
+    assert_eq!(census.examined, 2);
+    assert_eq!(census.admitted, 2, "current outline sources remain omitted: {census:?}");
+    assert_eq!(census.omitted, 0, "current outline projection omissions: {census:?}");
+    assert!(emit.lua.contains("__rock_wgpu_shader_register(\"outline_target_vert+outline_target_frag\""));
+    assert!(emit.lua.contains("__rock_wgpu_shader_register(\"outline_detect_vert+outline_detect_frag\""));
 }

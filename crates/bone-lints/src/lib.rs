@@ -889,6 +889,8 @@ fn is_implementation_anno(name: &str) -> bool {
             | "scalar_abi"
             | "struct_expand"
             | "shader_expand"
+            | "build_var_expand"
+            | "embed_expand"
             | "consume"
     )
 }

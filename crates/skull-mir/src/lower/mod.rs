@@ -2781,6 +2781,194 @@ fn uniform_values_rejection_for_call(
     None
 }
 
+/// Resolve a `build_var("NAME")` / `embed_string("path")` call to its value
+/// (docs/comptime-plan.md tier 1). THE shared resolver: the lowering expander
+/// and the fatal gate both call it, so they cannot diverge on what they
+/// accept. The argument must be a plain string literal -- interpolation or any
+/// computed expression rejects, because the input has to be knowable without
+/// running the body.
+pub fn resolve_comptime_value(
+    ws: &Workspace,
+    body: &Body,
+    call_expr: Idx<Expr>,
+    args: &[Idx<Expr>],
+    kind: ExpandKind,
+) -> Result<ResolvedComptime, CompilerError> {
+    let fname = match kind {
+        ExpandKind::BuildVar => "build_var",
+        ExpandKind::EmbedString => "embed_string",
+        _ => unreachable!("resolve_comptime_value only serves the comptime-input kinds"),
+    };
+    let reject = |span: Idx<Expr>, msg: String| {
+        CompilerError::new_with_label(body.expr_spans[span], msg)
+    };
+    let [arg] = args else {
+        return Err(reject(call_expr, format!("`{fname}` takes exactly one argument")));
+    };
+    let Expr::String(key) = body.expr_arena[*arg] else {
+        return Err(reject(
+            *arg,
+            format!("`{fname}` argument must be a plain string literal (no interpolation)"),
+        ));
+    };
+    match kind {
+        ExpandKind::BuildVar => match ws.comptime_inputs.vars.get(&key) {
+            Some(var) => Ok(ResolvedComptime { value: var.value.clone(), file_abs: None }),
+            // A fully-default inputs struct means resolution never RAN for
+            // this compile (no stick.toml found, or an entry point that did
+            // not stamp declared inputs) -- blaming the project's [build.vars]
+            // there sent people at the wrong file. A stamped project always
+            // carries at least its embed_root.
+            None if ws.comptime_inputs.embed_root.is_none()
+                && ws.comptime_inputs.vars.is_empty()
+                && ws.comptime_inputs.channel.is_empty() =>
+            {
+                Err(reject(
+                    call_expr,
+                    format!(
+                        "`build_var(\"{key}\")`: no [build.vars] were resolved for this \
+                         compile (no stick.toml found at or above the entry point, or \
+                         this rock entry point did not resolve declared inputs)"
+                    ),
+                ))
+            }
+            None => Err(reject(
+                call_expr,
+                format!("`build_var(\"{key}\")`: {key} is not declared in this project's [build.vars]"),
+            )),
+        },
+        ExpandKind::EmbedString => {
+            // Resolution root: the nearest stick.toml at/above the CALLING
+            // file's dir (a library embeds its own files, whatever project is
+            // consuming it -- docs/comptime-plan.md tier 1.5); fall back to
+            // the invocation's embed_root for synthetic/test module files.
+            let call_file = body.expr_spans[call_expr].file;
+            let package_root = std::path::Path::new(call_file.as_str())
+                .exists()
+                .then(|| {
+                    let mut dir = std::path::Path::new(call_file.as_str()).parent();
+                    while let Some(d) = dir {
+                        if d.join("stick.toml").exists() {
+                            return Some(d.to_path_buf());
+                        }
+                        dir = d.parent();
+                    }
+                    None
+                })
+                .flatten();
+            let Some(root) = package_root.or_else(|| ws.comptime_inputs.embed_root.clone()) else {
+                return Err(reject(
+                    call_expr,
+                    "`embed_string` needs a package root (a stick.toml at or above the \
+                     calling file, or a project root); none is available in this compilation"
+                        .to_string(),
+                ));
+            };
+            let rel = std::path::Path::new(key.as_str());
+            if rel.is_absolute() {
+                return Err(reject(
+                    *arg,
+                    format!("`embed_string` path must be relative to the package root, got {key:?}"),
+                ));
+            }
+            let joined = root.join(rel);
+            let file = joined.canonicalize().map_err(|e| {
+                reject(*arg, format!("`embed_string(\"{key}\")`: cannot read {key:?}: {e}"))
+            })?;
+            let canon_root = root.canonicalize().map_err(|e| {
+                reject(call_expr, format!("`embed_string`: package root is unreadable: {e}"))
+            })?;
+            if !file.starts_with(&canon_root) {
+                return Err(reject(
+                    *arg,
+                    format!("`embed_string(\"{key}\")`: path escapes the package root"),
+                ));
+            }
+            let value = std::fs::read_to_string(&file).map_err(|e| {
+                reject(*arg, format!("`embed_string(\"{key}\")`: cannot read {key:?}: {e}"))
+            })?;
+            Ok(ResolvedComptime {
+                value,
+                file_abs: Some(Ustr::from(&file.to_string_lossy())),
+            })
+        }
+        _ => unreachable!(),
+    }
+}
+
+/// A resolved comptime input: the value, plus (for embeds) the absolute path
+/// the read landed on -- what invalidation re-reads and the watcher watches.
+pub struct ResolvedComptime {
+    pub value: String,
+    pub file_abs: Option<Ustr>,
+}
+
+/// FATAL gate for `build_var` / `embed_string` misuse (non-literal argument,
+/// undeclared var, unreadable or escaping path): a per-fn lowering error is
+/// only a lenient skip, so validation lives here. Shares
+/// [`resolve_comptime_value`] with the expander.
+pub fn comptime_input_rejection(ws: &Workspace, mid: ModuleId) -> Option<CompilerError> {
+    let module = ws.module(mid);
+    let ir = ws.inference(mid)?;
+    for (owner, body) in module.bodies.iter() {
+        let Some(inf) = ir.per_fn.get(owner) else { continue };
+        for (e, expr) in body.expr_arena.iter() {
+            let Expr::Call { callee: Callee::Unresolved { name, .. }, args, .. } = expr else {
+                continue;
+            };
+            let Some((fmod, fid)) = resolve_call_fn(ws, inf, e, *name) else { continue };
+            let kind = crate::intrinsics::expand_kind(&ws.module(fmod).functions[fid]);
+            let Some(kind @ (ExpandKind::BuildVar | ExpandKind::EmbedString)) = kind else {
+                continue;
+            };
+            let arg_idxs: Vec<Idx<Expr>> = args.into_iter().collect();
+            if let Err(err) = resolve_comptime_value(ws, body, e, &arg_idxs, kind) {
+                return Some(err);
+            }
+        }
+    }
+    None
+}
+
+/// The ABSOLUTE path of every `embed_string` input the program reads, found
+/// by the SAME resolution emission uses (`resolve_comptime_value` -- one
+/// oracle, so this cannot drift from what actually gets baked). For watchers
+/// over emitters that keep no chunk cache (the JS web watch); the Lua side
+/// reads its `SkullEmitCache::comptime_files` instead.
+pub fn comptime_embed_files(ws: &Workspace) -> Vec<Ustr> {
+    let mut out: Vec<Ustr> = Vec::new();
+    for module in ws.modules.iter() {
+        if module.id == ModuleId::builtin() {
+            continue;
+        }
+        let Some(ir) = ws.inference(module.id) else { continue };
+        for (owner, body) in module.bodies.iter() {
+            let Some(inf) = ir.per_fn.get(owner) else { continue };
+            for (e, expr) in body.expr_arena.iter() {
+                let Expr::Call { callee: Callee::Unresolved { name, .. }, args, .. } = expr else {
+                    continue;
+                };
+                let Some((fmod, fid)) = resolve_call_fn(ws, inf, e, *name) else { continue };
+                let kind = crate::intrinsics::expand_kind(&ws.module(fmod).functions[fid]);
+                if !matches!(kind, Some(ExpandKind::EmbedString)) {
+                    continue;
+                }
+                let arg_idxs: Vec<Idx<Expr>> = args.into_iter().collect();
+                if let Ok(resolved) =
+                    resolve_comptime_value(ws, body, e, &arg_idxs, ExpandKind::EmbedString)
+                {
+                    if let Some(path) = resolved.file_abs {
+                        out.push(path);
+                    }
+                }
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
 /// Emit-time validation for `@vertex_expand` calls: misuse is a spanned
 /// compile error, never a call that reaches the fn's error body.
 fn vertex_expand_rejection_for_call(
@@ -2826,6 +3014,7 @@ impl ExpansionRejections {
             ExpandKind::VertexLayout => &mut self.vertex_layout,
             ExpandKind::UniformBlock => &mut self.uniform_block,
             ExpandKind::UniformValues => &mut self.uniform_values,
+            ExpandKind::BuildVar | ExpandKind::EmbedString => return,
             ExpandKind::Materialize => return,
         };
         if slot.is_none() {
@@ -2886,6 +3075,7 @@ pub fn expansion_rejection(ws: &Workspace, mid: ModuleId) -> Option<CompilerErro
                 ExpandKind::UniformValues => {
                     uniform_values_rejection_for_call(ws, inf, body, e, f, &arg_idxs)
                 }
+                ExpandKind::BuildVar | ExpandKind::EmbedString => None,
                 ExpandKind::Materialize => None,
             };
             rejections.record(kind, rejection);
