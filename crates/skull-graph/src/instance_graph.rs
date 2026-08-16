@@ -2672,15 +2672,6 @@ impl InstanceGraph {
     /// signature moves the root set, the mangling and every caller's
     /// instantiation; `bone_incremental::UpdateTier` names that case and the
     /// caller must rebuild instead.
-    pub fn update_bodies(
-        &mut self,
-        ws: &Workspace,
-        roots: Vec<FuncRef>,
-        changed: &[(ModuleId, BodyOwner)],
-    ) -> UpdateStats {
-        self.update_bodies_with_edits(ws, roots, changed, &[])
-    }
-
     pub fn update_bodies_with_edits(
         &mut self,
         ws: &Workspace,

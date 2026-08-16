@@ -437,7 +437,7 @@ impl Perturbed {
     fn update(&self) -> (InstanceGraph, UpdateStats) {
         let mut g = graph_of(&self.v1);
         let roots = skull::mir_emit::emission_roots(&self.v2, Some(PROJ));
-        let stats = g.update_bodies(&self.v2, roots, &self.changed);
+        let stats = g.update_bodies_with_edits(&self.v2, roots, &self.changed, &[]);
         (g, stats)
     }
 
@@ -788,7 +788,7 @@ fn a_moved_root_set_is_refused_rather_than_absorbed() {
     let mut roots = skull::mir_emit::emission_roots(ws, Some(PROJ));
     roots.pop().expect("the fixture has roots");
     let mut graph = graph_of(ws);
-    graph.update_bodies(ws, roots, &[]);
+    graph.update_bodies_with_edits(ws, roots, &[], &[]);
 }
 
 // ---------------------------------------------------------------------------
