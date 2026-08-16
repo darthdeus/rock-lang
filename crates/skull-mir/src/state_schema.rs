@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-use bone_semantic::hir::FnBackend;
+use bone_semantic::hir::{FnBackend, StateMetadata};
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::ModuleId;
 use ustr::Ustr;
@@ -37,6 +37,7 @@ pub struct StateEntry {
     pub physical: Vec<String>,
     pub owner: Option<String>,
     pub initializer_identity: Option<u64>,
+    pub metadata: Option<StateMetadata>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -225,6 +226,7 @@ impl StateSchema {
                     physical: names.iter().map(|n| n.to_string()).collect(),
                     owner: Some(module.file.to_string()),
                     initializer_identity: None,
+                    metadata: Some(global.state_metadata),
                 };
                 entries.push(entry);
             }
@@ -276,6 +278,7 @@ impl StateSchema {
                 physical: vec![cell.cell.to_string(), cell.done_flag.to_string()],
                 owner: Some(owner_key),
                 initializer_identity: Some(cell.init_hash),
+                metadata: Some(StateMetadata::default()),
             };
             entries.push(entry);
         }
@@ -303,6 +306,7 @@ impl StateSchema {
                 physical: vec![format!("frame:{logical}")],
                 owner: Some(logical),
                 initializer_identity: None,
+                metadata: Some(StateMetadata::default()),
             };
             entries.push(entry);
         }
@@ -320,6 +324,7 @@ impl StateSchema {
                 physical: vec![format!("storage:{ctype}")],
                 owner: None,
                 initializer_identity: None,
+                metadata: Some(StateMetadata::default()),
             };
             entries.push(entry);
         }
@@ -358,6 +363,7 @@ impl StateSchema {
                 physical: vec![format!("storage:{name}")],
                 owner: Some(name.to_string()),
                 initializer_identity: None,
+                metadata: Some(StateMetadata::default()),
             };
             entries.push(entry);
         }
@@ -524,6 +530,7 @@ fn fingerprint(entries: &[StateEntry]) -> String {
             format!("{:?}", entry.kind),
             entry.identity.clone(),
             entry.fingerprint.clone(),
+            format!("{:?}", entry.metadata),
         ] {
             for byte in text.bytes() {
                 hash ^= u64::from(byte);

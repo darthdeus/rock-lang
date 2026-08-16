@@ -5,7 +5,7 @@
 //! Contract: snapshotting the registry at tick T and restoring it later must
 //! return the game EXACTLY to tick-T sim state -- same `current_tick`, and every
 //! simulation-state global byte-identical to a plain run-to-T. The equality
-//! oracle is the engine's own `__replay_is_sim_state` predicate output (the
+//! oracle is the engine's own StateImagePlan world-membership output (the
 //! `c <tick> <name> <hash>` checkpoint names via `sim_state_names`); we compare
 //! those globals, not a duplicated Rust exclusion list.
 //!

@@ -383,8 +383,15 @@ fn main() {}
          __rock_state_set({box_key:?}, payload);\n\
          var image = __rock_state_image_capture('boot', -1);\n\
          var source = __rock_active_session;\n\
+         var source_id = __rock_state_image_current_session();\n\
          var a = __rock_state_image_materialize(image, 'boot');\n\
          var b = __rock_state_image_materialize(image, 'boot');\n\
+         var session_before = Object.keys(__rock_state_image_sessions).length;\n\
+         for (var i = 0; i < 8; i++) {{\n\
+           var disposable = __rock_state_image_materialize(image, 'boot');\n\
+           __rock_state_image_release_session(disposable);\n\
+         }}\n\
+         var sessions_released = Object.keys(__rock_state_image_sessions).length === session_before;\n\
          __rock_state_image_session_activate(a);\n\
          var ap = __rock_state_get({box_key:?});\n\
          ap.node.value = 21;\n\
@@ -398,6 +405,15 @@ fn main() {}
          __rock_session_activate(source);\n\
          var source_ok = __rock_state_get({counter_key:?}) === 9\n\
              && __rock_state_get({box_key:?}).node.value === 17;\n\
+         __rock_state_image_session_commit(a);\n\
+         var after_a = Object.keys(__rock_state_image_sessions).length;\n\
+         __rock_state_image_session_commit(b);\n\
+         var after_b = Object.keys(__rock_state_image_sessions).length;\n\
+         var old_retired = !Object.prototype.hasOwnProperty.call(__rock_state_image_sessions, source_id);\n\
+         __rock_session_activate(source);\n\
+         __rock_state_image_release_session(b);\n\
+         var sessions_committed = after_a === 2 && after_b === 1\n\
+             && old_retired && Object.keys(__rock_state_image_sessions).length === 0;\n\
          var old = __rock_active_session;\n\
          var image_data = __rock_state_image_images[image];\n\
          var original_layout = image_data.layouts[{box_identity:?}];\n\
@@ -410,7 +426,9 @@ fn main() {}
          var scene_rejected = false;\n\
          try {{ __rock_state_image_capture('world', 1); }}\n\
          catch (e) {{ scene_rejected = e.message.indexOf('SceneImage') >= 0; }}\n\
-         console.log([a !== b, a_ok, b_ok, source_ok, failure_ok, scene_rejected].every(Boolean));\n",
+         __rock_state_image_release_image(image);\n\
+         var images_released = Object.keys(__rock_state_image_images).length === 0;\n\
+         console.log([a !== b, sessions_released, sessions_committed, a_ok, b_ok, source_ok, failure_ok, scene_rejected, images_released].every(Boolean));\n",
         skull_codegen_js::JS_CALL_HELPER,
         skull_codegen_js::JS_SESSION_RUNTIME,
         emitted.program,

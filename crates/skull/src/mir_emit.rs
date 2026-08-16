@@ -771,12 +771,13 @@ fn state_schema_lua(schema: &skull_mir::state_schema::StateSchema) -> String {
     ));
     for entry in image_plan.entries() {
         out.push_str(&format!(
-            "{{identity={:?},kind={:?},layout={:?},capture_policy={:?},realization_policy={:?}}},",
+            "{{identity={:?},kind={:?},layout={:?},capture_policy={:?},realization_policy={:?},world_policy={:?}}},",
             entry.identity,
             entry.kind.as_str(),
             entry.layout,
             entry.capture_policy,
             entry.realization_policy,
+            entry.world_policy,
         ));
     }
     let census = image_plan.census();

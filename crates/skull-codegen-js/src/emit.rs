@@ -3430,6 +3430,8 @@ fn state_schema_js(
         out.push_str(&js_string_lit(&entry.capture_policy)?);
         out.push_str(",realization_policy:");
         out.push_str(&js_string_lit(&entry.realization_policy)?);
+        out.push_str(",world_policy:");
+        out.push_str(&js_string_lit(&entry.world_policy)?);
         out.push_str("},");
     }
     let census = image_plan.census();

@@ -806,7 +806,7 @@ pub fn pass_lower_functions(a: &Ast, ctx: &mut LowerCtx) -> Result<(), CompilerE
             | ItemKind::Newtype(_) => {}
 
             ItemKind::Global(g) => {
-                lower_global(ctx, a, g)?;
+                lower_global(ctx, a, g, &item.annotations)?;
             }
 
             ItemKind::CompilerDirective(_) => {

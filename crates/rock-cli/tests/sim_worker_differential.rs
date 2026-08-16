@@ -167,6 +167,22 @@ fn a_predecessors_global_does_not_reach_the_next_entry() {
     assert_eq!(isolated.artifacts["count.txt"], worker.artifacts["count.txt"]);
 }
 
+#[test]
+fn state_image_worker_registries_stay_bounded_across_repeated_entries() {
+    let entries = vec!["t1a_worker_registries_stay_bounded".to_string(); 12];
+    let records = run_worker_suite(Backend::Skull, "testbed", &entries)
+        .expect("the repeated StateImage worker queue must run");
+    assert_eq!(records.len(), entries.len(), "the worker returned one record per entry");
+    let crossed = records.iter().filter(|(_, crossed)| *crossed).count();
+    assert_eq!(crossed, 11, "every entry after the first must cross one worker boundary");
+    assert!(crossed > 0, "the bounded-registry assertion needs a nonzero boundary population");
+    for (record, _) in records {
+        assert_eq!(record.verdict(), "PASS", "worker registry fixture failed: {record:?}");
+        assert!(record.errors.is_empty(), "worker registry fixture emitted errors: {record:?}");
+        assert_eq!(record.expects_pass.len(), 2, "both registry populations were asserted");
+    }
+}
+
 /// A global that was NULL at boot is null again at the next entry.
 ///
 /// Its own class, not a variant of `b0_leak_probe`: the image is keyed by

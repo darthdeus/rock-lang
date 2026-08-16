@@ -162,6 +162,7 @@ fn state_schema_rejects_omissions_duplicates_and_incomplete_entries() {
         physical: physical.iter().map(|name| (*name).to_string()).collect(),
         owner: None,
         initializer_identity: None,
+        metadata: Some(bone_semantic::hir::StateMetadata::default()),
     };
     assert!(matches!(
         StateSchema::from_entries(vec![entry("", "shape", &["g"])]),
@@ -208,4 +209,24 @@ fn lua_emits_the_complete_state_image_plan_next_to_the_schema() {
     }
     assert!(emitted.lua.contains(&format!("examined={}", census.examined)));
     assert!(emitted.lua.contains(&format!("assigned={}", census.assigned)));
+}
+
+#[test]
+fn explicit_global_state_ownership_reaches_both_image_backends() {
+    let source = r#"
+@state(ownership=host_projection, world=exclude, realization=font)
+global FONT_REGISTRY: int = 0
+global VALUE: int = 1
+"#;
+    let emitted = emit_mir(source);
+    let plan = StateImagePlan::from_schema(&emitted.state_schema).expect("image plan");
+    let font = plan
+        .entries()
+        .iter()
+        .find(|entry| entry.identity.ends_with("::FONT_REGISTRY"))
+        .expect("font entry");
+    assert_eq!(font.kind, skull_mir::state_image::ImageEntryKind::HostProjection);
+    assert_eq!(font.world_policy, "exclude");
+    assert_eq!(font.realization_policy, "font");
+    assert!(emitted.lua.contains("realization_policy=\"font\""));
 }

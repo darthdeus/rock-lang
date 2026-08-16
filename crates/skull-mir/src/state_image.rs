@@ -2,6 +2,8 @@
 
 use std::collections::BTreeSet;
 
+use bone_semantic::hir::{StateOwnership, StateRealization, StateWorldPolicy};
+
 use crate::state_schema::{StateKind, StateSchema};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -32,6 +34,7 @@ pub struct StateImageEntry {
     pub layout: String,
     pub capture_policy: String,
     pub realization_policy: String,
+    pub world_policy: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -64,6 +67,8 @@ pub struct StateImagePlan {
 pub enum StateImagePlanError {
     EmptySchema,
     DuplicateIdentity(String),
+    Unclassified(String),
+    InvalidMetadata(String),
 }
 
 impl std::fmt::Display for StateImagePlanError {
@@ -72,6 +77,12 @@ impl std::fmt::Display for StateImagePlanError {
             Self::EmptySchema => write!(f, "StateImagePlan requires a non-empty StateSchema"),
             Self::DuplicateIdentity(identity) => {
                 write!(f, "StateImagePlan owns `{identity}` more than once")
+            }
+            Self::Unclassified(identity) => {
+                write!(f, "StateImagePlan has no compiler ownership metadata for `{identity}`")
+            }
+            Self::InvalidMetadata(identity) => {
+                write!(f, "StateImagePlan has incompatible ownership metadata for `{identity}`")
             }
         }
     }
@@ -88,25 +99,16 @@ impl StateImagePlan {
         }
         let mut entries = Vec::new();
         for entry in &schema.entries {
-            let (kind, capture_policy, realization_policy) = if entry.kind == StateKind::Global
-                && runner_global(entry)
-            {
-                (
-                    ImageEntryKind::RunnerDiagnostic,
-                    "exclude",
-                    runner_realization(entry),
-                )
-            } else if entry.kind == StateKind::Global && host_global(entry) {
-                (
-                    ImageEntryKind::HostProjection,
-                    "host-owned",
-                    "rebuild-host-projection",
-                )
-            } else {
-                match entry.kind {
-                    StateKind::Global => {
-                        (ImageEntryKind::SemanticSession, "graph", "fresh-session")
-                    }
+            let metadata = entry
+                .metadata
+                .ok_or_else(|| StateImagePlanError::Unclassified(entry.identity.clone()))?;
+            let (kind, capture_policy, realization_policy) = match metadata.ownership {
+                StateOwnership::Session => match entry.kind {
+                    StateKind::Global => (
+                        ImageEntryKind::SemanticSession,
+                        "graph",
+                        StateRealization::FreshSession.as_str(),
+                    ),
                     StateKind::Static => (
                         ImageEntryKind::SemanticSession,
                         "boot-graph;world-live",
@@ -115,14 +117,41 @@ impl StateImagePlan {
                     StateKind::CoroutineFrame => (
                         ImageEntryKind::SemanticSession,
                         "frame-descriptor",
-                        "fresh-session",
+                        StateRealization::FreshSession.as_str(),
                     ),
                     StateKind::Storage => (
                         ImageEntryKind::SemanticSession,
                         "storage-descriptor",
                         "fresh-allocation",
                     ),
+                },
+                StateOwnership::HostProjection => {
+                    if entry.kind != StateKind::Global || metadata.world != StateWorldPolicy::Exclude {
+                        return Err(StateImagePlanError::InvalidMetadata(entry.identity.clone()));
+                    }
+                    (ImageEntryKind::HostProjection, "host-owned", metadata.realization.as_str())
                 }
+                StateOwnership::RunnerDiagnostic => {
+                    if entry.kind != StateKind::Global || metadata.world != StateWorldPolicy::Exclude {
+                        return Err(StateImagePlanError::InvalidMetadata(entry.identity.clone()));
+                    }
+                    (ImageEntryKind::RunnerDiagnostic, "exclude", metadata.realization.as_str())
+                }
+                StateOwnership::Unsupported => {
+                    if entry.kind != StateKind::Global
+                        || metadata.world != StateWorldPolicy::Exclude
+                        || metadata.realization != StateRealization::Reject
+                    {
+                        return Err(StateImagePlanError::InvalidMetadata(entry.identity.clone()));
+                    }
+                    (ImageEntryKind::Unsupported, "reject", StateRealization::Reject.as_str())
+                }
+            };
+            let world_policy = match (entry.kind, metadata.ownership) {
+                (StateKind::Global, StateOwnership::Session) => metadata.world.as_str(),
+                (StateKind::Static, StateOwnership::Session) => StateWorldPolicy::BootOnly.as_str(),
+                (_, StateOwnership::Session) => StateWorldPolicy::Exclude.as_str(),
+                (_, _) => StateWorldPolicy::Exclude.as_str(),
             };
             entries.push(StateImageEntry {
                 identity: entry.identity.clone(),
@@ -130,6 +159,7 @@ impl StateImagePlan {
                 layout: entry.fingerprint.clone(),
                 capture_policy: capture_policy.to_string(),
                 realization_policy: realization_policy.to_string(),
+                world_policy: world_policy.to_string(),
             });
         }
 
@@ -268,126 +298,19 @@ fn push_structural(
         layout: layout.into(),
         capture_policy: capture_policy.into(),
         realization_policy: realization_policy.into(),
+        world_policy: match kind {
+            ImageEntryKind::SemanticSession => "include",
+            _ => "exclude",
+        }
+        .into(),
     });
-}
-
-fn schema_tail(entry: &crate::state_schema::StateEntry) -> &str {
-    entry.identity.rsplit("::").next().unwrap_or(&entry.identity)
-}
-
-/// State roots owned by the sim runner or its diagnostics are deliberately
-/// excluded from a semantic image. This is the compiler-side spelling of the
-/// existing runner boundary; logger tables are structural because they are
-/// inline-host roots and appear as `runner::logger-state` above.
-fn runner_global(entry: &crate::state_schema::StateEntry) -> bool {
-    const ROOTS: &[&str] = &[
-        "SIMS",
-        "SIM_HANDLE",
-        "SIM_ENTRIES",
-        "SIM_ENTRY_INDEX",
-        "SIM_ENTRY_FRAME_START",
-        "SIM_FIXED_DT",
-        "SIM_FIXED_EPOCH",
-        "SIM_INPUT_SYNTHETIC_ONLY",
-        "PERF_FIXED_DT_ENABLED",
-        "PERF_FIXED_DT",
-        "SIM_SKIP_RENDER",
-        "SIM_STOP_SITE",
-        "SIM_STOP_PENDING",
-        "SIM_NATIVE_BOOT",
-        "SIM_NATIVE_BOOT_UNRESTORABLE",
-        "SIM_DIAG_BOOT_GL",
-        "SIM_DIAG_BOOT_SHADER",
-        "SIM_DIAG_BASE_GL",
-        "SIM_DIAG_BASE_SHADER",
-        "FRAME_FORCE_ERROR_AT",
-        "FRAME_ERROR_COUNT",
-        "FONT_BROWSER",
-        "FONT_CHOICE_SINK",
-        "JIT_TRACE_LOG_ENABLED",
-        "JIT_TRACE_INSTALLED",
-        "JIT_TRACE_STARTS",
-        "JIT_TRACE_ABORTS",
-        "JIT_TRACE_LAST_STARTS",
-        "JIT_TRACE_LAST_ABORTS",
-        "JIT_RUNTIME_ENABLED",
-    ];
-    ROOTS.contains(&schema_tail(entry))
-}
-
-fn runner_realization(entry: &crate::state_schema::StateEntry) -> &'static str {
-    const RESET: &[&str] = &[
-        "SIM_HANDLE",
-        "SIM_ENTRY_FRAME_START",
-        "SIM_STOP_SITE",
-        "SIM_STOP_PENDING",
-        "SIM_DIAG_BASE_GL",
-        "SIM_DIAG_BASE_SHADER",
-        "FRAME_ERROR_COUNT",
-        "JIT_TRACE_LOG_ENABLED",
-        "JIT_TRACE_INSTALLED",
-        "JIT_TRACE_STARTS",
-        "JIT_TRACE_ABORTS",
-        "JIT_TRACE_LAST_STARTS",
-        "JIT_TRACE_LAST_ABORTS",
-        "JIT_RUNTIME_ENABLED",
-    ];
-    if RESET.contains(&schema_tail(entry)) {
-        "runner-reset"
-    } else {
-        "runner-rebind"
-    }
-}
-
-fn host_global(entry: &crate::state_schema::StateEntry) -> bool {
-    if schema_tail(entry) == "stone_window" || schema_tail(entry) == "SHADER_UNIFORM_BLOCKS" {
-        return true;
-    }
-    entry.owner.as_deref().is_some_and(|owner| {
-        owner.contains("/stone/engine/") && !engine_semantic_global(schema_tail(entry))
-    })
-}
-
-fn engine_semantic_global(name: &str) -> bool {
-    matches!(
-        name,
-        "current_tick"
-            | "time"
-            | "dt"
-            | "TIME_SCALE"
-            | "camera"
-            | "editor_camera"
-            | "RENDER_CONFIG"
-            | "keys_down"
-            | "mouse_down"
-            | "keys_down_last"
-            | "mouse_down_last"
-            | "physical_mouse_down"
-            | "physical_mouse_suppressed"
-            | "physical_keys_down"
-            | "physical_keys_pressed_this_frame"
-            | "physical_mouse_pressed_this_frame"
-            | "synthetic_mouse_down"
-            | "synthetic_keys_down"
-            | "replay_mouse_down"
-            | "replay_keys_down"
-            | "keys_pressed_this_frame"
-            | "mouse_pressed_this_frame"
-            | "UI_MOUSE"
-            | "UI_FOCUS"
-            | "UI_FEEL"
-            | "WORLD_MODE"
-            | "MOTES"
-            | "POLLER"
-            | "SKIN_GALLERY_SEED"
-            | "CURRENT_BLEND"
-    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::{ImageEntryKind, StateImagePlan};
     use crate::state_schema::{StateEntry, StateKind, StateSchema};
+    use bone_semantic::hir::StateMetadata;
 
     fn schema() -> StateSchema {
         StateSchema::from_entries(vec![
@@ -398,6 +321,7 @@ mod tests {
                 physical: vec!["value".into()],
                 owner: Some("test".into()),
                 initializer_identity: None,
+                metadata: Some(StateMetadata::default()),
             },
             StateEntry {
                 kind: StateKind::Static,
@@ -406,6 +330,7 @@ mod tests {
                 physical: vec!["cell".into(), "done".into()],
                 owner: Some("test".into()),
                 initializer_identity: Some(7),
+                metadata: Some(StateMetadata::default()),
             },
             StateEntry {
                 kind: StateKind::CoroutineFrame,
@@ -414,6 +339,7 @@ mod tests {
                 physical: vec!["frame:fn:test::frame".into()],
                 owner: Some("fn:test::frame".into()),
                 initializer_identity: None,
+                metadata: Some(StateMetadata::default()),
             },
             StateEntry {
                 kind: StateKind::Storage,
@@ -422,6 +348,7 @@ mod tests {
                 physical: vec!["storage:int".into()],
                 owner: None,
                 initializer_identity: None,
+                metadata: Some(StateMetadata::default()),
             },
         ])
         .expect("fixture schema")
@@ -502,6 +429,21 @@ mod tests {
     }
 
     #[test]
+    fn an_unclassified_global_root_is_rejected() {
+        let schema = StateSchema::from_entries(vec![StateEntry {
+            kind: StateKind::Global,
+            identity: "global:fixture::new_root".into(),
+            fingerprint: "type=UnknownRoot".into(),
+            physical: vec!["new_root".into()],
+            owner: None,
+            initializer_identity: None,
+            metadata: None,
+        }])
+        .expect("unclassified root schema");
+        assert!(StateImagePlan::from_schema(&schema).is_err());
+    }
+
+    #[test]
     fn blend_shadow_is_session_state_not_a_host_handle() {
         let schema = StateSchema::from_entries(vec![StateEntry {
             kind: StateKind::Global,
@@ -510,6 +452,7 @@ mod tests {
             physical: vec!["CURRENT_BLEND".into()],
             owner: Some("/workspace/stone/engine/compat/bindings.rock".into()),
             initializer_identity: None,
+            metadata: Some(StateMetadata::default()),
         }])
         .expect("blend shadow schema");
         let plan = StateImagePlan::from_schema(&schema).expect("image plan");

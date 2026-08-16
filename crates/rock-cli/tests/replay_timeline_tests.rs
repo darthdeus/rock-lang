@@ -64,7 +64,7 @@ fn current_tick(state: &serde_json::Value) -> i64 {
 /// the StateSchema entries the engine hashes as simulation state, and collect
 /// their logical dump-state names.
 /// Consuming this (rather than duplicating the exclusion list in Rust) is the
-/// P3.5 unification -- the Lua `__replay_is_sim_state` predicate is the single
+/// P3.5 unification -- the StateImagePlan is the single
 /// source of truth.
 fn sim_state_names(game: &str, frames: u32) -> std::collections::HashSet<String> {
     let rock_bin = env!("CARGO_BIN_EXE_rock");

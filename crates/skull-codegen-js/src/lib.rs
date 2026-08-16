@@ -3034,7 +3034,8 @@ function __rock_state_image_plan_validate() {
   plan.entries.forEach(function (entry) {
     if (!entry.identity || seen[entry.identity]) throw new Error("StateImagePlan owns " + entry.identity + " more than once");
     seen[entry.identity] = true;
-    if (!entry.kind || !entry.layout || !entry.capture_policy || !entry.realization_policy) {
+    if (!entry.kind || !entry.layout || !entry.capture_policy || !entry.realization_policy
+        || !entry.world_policy) {
       throw new Error("incomplete StateImagePlan entry " + entry.identity);
     }
     if (counts[entry.kind] === undefined) throw new Error("unknown StateImagePlan kind " + entry.kind);
@@ -3112,12 +3113,12 @@ var __rock_state_image_next_session_id = 0;
 var __rock_state_image_images = Object.create(null);
 var __rock_state_image_sessions = Object.create(null);
 function __rock_state_image_world_included(entry) {
-  if (entry.kind === "static") return false;
-  if (entry.kind !== "global") return true;
-  if (typeof __replay_is_sim_state === "function") {
-    return __replay_is_sim_state(entry.name || entry.identity);
-  }
-  return true;
+  var imageEntry = __ROCK_STATE_IMAGE_PLAN.entries.find(function (candidate) {
+    return candidate.identity === entry.identity;
+  });
+  return entry.kind === "global" && imageEntry
+    && imageEntry.kind === "semantic_session"
+    && imageEntry.world_policy === "include";
 }
 function __rock_state_image_capture(kind, tick) {
   if (kind !== "boot" && kind !== "world") throw new Error("unsupported StateImage capture kind " + kind);
@@ -3223,6 +3224,47 @@ function __rock_state_image_materialize(image_id, kind) {
 function __rock_state_image_try_materialize(image_id, kind) {
   try { __rock_state_image_materialize(image_id, kind); return ""; }
   catch (e) { return String(e && e.message !== undefined ? e.message : e); }
+}
+function __rock_state_image_release_image(image_id) {
+  if (!Object.prototype.hasOwnProperty.call(__rock_state_image_images, image_id)) return false;
+  delete __rock_state_image_images[image_id];
+  return true;
+}
+function __rock_state_image_session_id(session) {
+  var ids = Object.keys(__rock_state_image_sessions);
+  for (var i = 0; i < ids.length; i++) {
+    if (__rock_state_image_sessions[ids[i]] === session) return Number(ids[i]);
+  }
+  return -1;
+}
+function __rock_state_image_release_session(session_id) {
+  var session = __rock_state_image_sessions[session_id];
+  if (!session || session.__rock_image_materialized !== true) return false;
+  if (session === __rock_active_session) {
+    throw new Error("cannot release the active StateImage Session");
+  }
+  delete __rock_state_image_sessions[session_id];
+  return true;
+}
+function __rock_state_image_session_commit(session_id) {
+  var candidate = __rock_state_image_sessions[session_id];
+  if (!candidate || candidate.__rock_image_materialized !== true) {
+    throw new Error("unknown or incomplete materialized StateImage Session " + session_id);
+  }
+  var old = __rock_active_session;
+  if (candidate === old) return true;
+  var old_id = __rock_state_image_session_id(old);
+  try {
+    __rock_session_activate(candidate);
+    if (candidate.__rock_rng_state !== null && candidate.__rock_rng_state !== undefined
+        && typeof __rock_rng_state_set === "function") __rock_rng_state_set(candidate.__rock_rng_state);
+    if (old_id >= 0 && old_id !== session_id) delete __rock_state_image_sessions[old_id];
+    return true;
+  } catch (e) {
+    try { __rock_session_activate(old); } catch (rollback) {}
+    if (candidate !== old) delete __rock_state_image_sessions[session_id];
+    throw e;
+  }
 }
 function __rock_state_image_session_activate(session_id) {
   var session = __rock_state_image_sessions[session_id];
