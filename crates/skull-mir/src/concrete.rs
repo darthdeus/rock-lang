@@ -111,7 +111,9 @@ pub struct ConcreteBodyPlan {
     pub bound_tree: ResolvedBoundTree,
 }
 
-pub type ConcretePlans = BTreeMap<Instance, ConcreteBodyPlan>;
+/// Stable per-instance plan handles. The table is still ordered for
+/// deterministic iteration, while replacing one body only swaps its handle.
+pub type ConcretePlans = BTreeMap<Instance, Arc<ConcreteBodyPlan>>;
 pub type ConcreteAlwaysPlans = FxHashMap<ConcreteOwner, ConcreteBodyPlan>;
 
 impl ConcreteBodyPlan {

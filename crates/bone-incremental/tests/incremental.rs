@@ -1175,6 +1175,49 @@ fn b() -> int {
 }
 
 #[test]
+fn session_body_update_metadata_separates_semantics_from_span_relocation() {
+    let mut h = Harness::new(&[(
+        "meta.rock",
+        "fn first() -> int {\n    1\n}\n\nfn second() -> int {\n    2\n}\n",
+    )]);
+
+    let semantic = h.update(
+        "meta.rock",
+        "fn first() -> int {\n    1\n}\n\nfn second() -> int {\n    222\n}\n",
+    );
+    assert_eq!(semantic.tier, UpdateTier::BodyOnly);
+    assert!(!semantic.body_update.span_only);
+    assert_eq!(semantic.body_update.semantic_bodies, semantic.reinferred);
+    let edit = semantic.body_update.edit.expect("body edit metadata");
+    assert_eq!(edit.file, Ustr::from("meta.rock"));
+    assert!(edit.byte_delta > 0, "the fixture must move later spans");
+    assert!(edit.line_delta == 0);
+
+    let span_only = h.update(
+        "meta.rock",
+        "fn first() -> int {\n    1\n}\n\n// moved without a body change\n\nfn second() -> int {\n    222\n}\n",
+    );
+    assert_eq!(span_only.tier, UpdateTier::BodyOnly);
+    assert!(span_only.body_update.span_only);
+    assert!(span_only.body_update.semantic_bodies.is_empty());
+    assert!(span_only.reinferred.is_empty());
+    let edit = span_only.body_update.edit.expect("layout edit metadata");
+    assert!(edit.byte_delta > 0);
+    assert!(edit.line_delta > 0);
+}
+
+#[test]
+fn session_interface_update_does_not_publish_body_metadata() {
+    let mut h = Harness::new(&[("meta-interface.rock", "fn value() -> int {\n    1\n}\n")]);
+    let result = h.update(
+        "meta-interface.rock",
+        "fn value(x: int) -> int {\n    x\n}\n",
+    );
+    assert_ne!(result.tier, UpdateTier::BodyOnly);
+    assert_eq!(result.body_update, Default::default());
+}
+
+#[test]
 fn classify_interface_shaped_edits() {
     use bone_incremental::session::FileDiff;
     let base = "

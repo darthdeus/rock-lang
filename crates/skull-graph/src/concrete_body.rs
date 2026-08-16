@@ -28,6 +28,7 @@
 //! [`MonoTy`]: skull_mir::monoty::MonoTy
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use bone_semantic::hir::{BindingInfo, Body, BodyOwner, Expr, TypeExpr};
 use bone_semantic::inference::{BodyInference, Workspace};
@@ -158,6 +159,7 @@ pub struct ConcreteIteratorOp {
 /// initializer's is not. Plan S 9 writes `Map<ExprId, ..>`; an expression key
 /// there silently keeps one of each pair and reads a foreign index against the
 /// owner's body.
+#[derive(Clone)]
 pub struct ConcreteBody {
     pub instance: Instance,
     pub direct_calls: BTreeMap<Site, Callee>,
@@ -306,6 +308,11 @@ pub struct ConcreteBodies {
     /// deliberately separate from the semantic body census: the same body
     /// can be re-read by type-node, field, domain, and signature consumers.
     pub build_stats: ConcreteBuildStats,
+    instance_facts: BTreeMap<Instance, OwnerFacts>,
+    always_facts: FxHashMap<ConcreteOwner, OwnerFacts>,
+    candidate_keys: BTreeSet<Instance>,
+    owner_candidates: BTreeMap<Instance, BTreeSet<Instance>>,
+    candidate_users: BTreeMap<Instance, BTreeSet<Instance>>,
 }
 
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
@@ -340,6 +347,17 @@ pub struct ConcreteBuildStats {
     pub foreign_domains_ns: u64,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ConcreteUpdateStats {
+    pub before: usize,
+    pub derived: usize,
+    pub reused: usize,
+    pub retracted: usize,
+    pub broad_scans: usize,
+    pub candidate_keys_added: BTreeSet<Instance>,
+    pub candidate_keys_removed: BTreeSet<Instance>,
+}
+
 impl ConcreteBuildStats {
     fn add(&mut self, other: Self) {
         self.plan_attempts += other.plan_attempts;
@@ -371,15 +389,235 @@ impl ConcreteBuildStats {
         self.struct_fields_ns += other.struct_fields_ns;
         self.foreign_domains_ns += other.foreign_domains_ns;
     }
+
+    fn sub(&mut self, other: Self) {
+        self.plan_attempts -= other.plan_attempts;
+        self.plan_successes -= other.plan_successes;
+        self.plan_failures -= other.plan_failures;
+        self.always_plan_attempts -= other.always_plan_attempts;
+        self.always_plan_successes -= other.always_plan_successes;
+        self.always_plan_failures -= other.always_plan_failures;
+        self.source_expr_slots -= other.source_expr_slots;
+        self.source_binding_slots -= other.source_binding_slots;
+        self.callee_vec_materializations -= other.callee_vec_materializations;
+        self.callee_vec_rows -= other.callee_vec_rows;
+        self.plan_callee_map_inserts -= other.plan_callee_map_inserts;
+        self.plan_callee_signature_inserts -= other.plan_callee_signature_inserts;
+        self.plan_type_expr_clones -= other.plan_type_expr_clones;
+        self.plan_type_binding_clones -= other.plan_type_binding_clones;
+        self.plan_untyped_expr_clones -= other.plan_untyped_expr_clones;
+        self.plan_untyped_binding_clones -= other.plan_untyped_binding_clones;
+        self.type_nodes_examined -= other.type_nodes_examined;
+        self.type_node_memo_hits -= other.type_node_memo_hits;
+        self.type_node_conversion_attempts -= other.type_node_conversion_attempts;
+        self.type_node_unresolved -= other.type_node_unresolved;
+        self.struct_literals_examined -= other.struct_literals_examined;
+        self.struct_field_conversion_attempts -= other.struct_field_conversion_attempts;
+        self.foreign_domain_requests -= other.foreign_domain_requests;
+        self.foreign_domain_unique -= other.foreign_domain_unique;
+        self.signature_ns -= other.signature_ns;
+        self.type_nodes_ns -= other.type_nodes_ns;
+        self.struct_fields_ns -= other.struct_fields_ns;
+        self.foreign_domains_ns -= other.foreign_domains_ns;
+    }
 }
 
 impl ConcreteBodies {
     pub fn plan_for(&self, instance: &Instance) -> Option<&ConcreteBodyPlan> {
-        self.plans.get(instance)
+        self.plans.get(instance).map(|plan| &**plan)
     }
 
     pub fn plan_for_owner(&self, owner: &ConcreteOwner) -> Option<&ConcreteBodyPlan> {
         self.always_plans.get(owner)
+    }
+
+    pub fn candidate_keys(&self) -> &BTreeSet<Instance> {
+        &self.candidate_keys
+    }
+
+    pub fn update_local(
+        &mut self,
+        ws: &Workspace,
+        g: &InstanceGraph,
+        revisited: &BTreeSet<Instance>,
+        removed: &BTreeSet<Instance>,
+        revisited_owners: &BTreeSet<Owner>,
+    ) -> ConcreteUpdateStats {
+        let before = self.instance_facts.len() + self.always_facts.len();
+        let mut instance_subjects = revisited.clone();
+        instance_subjects.extend(removed.iter().cloned());
+        let mut retracted = 0;
+        let mut broad_scans = 0;
+        let mut candidate_keys_added = BTreeSet::new();
+        let mut candidate_keys_removed = BTreeSet::new();
+        for instance in &instance_subjects {
+            if self.instance_facts.contains_key(instance)
+                || self.bodies.contains_key(instance)
+                || self.plans.get(instance).is_some()
+            {
+                retracted += 1;
+            }
+            let (removed_candidates, scans) = self.remove_instance(instance);
+            candidate_keys_removed.extend(removed_candidates);
+            broad_scans += scans;
+        }
+        let mut targets = revisited.clone();
+        targets.extend(removed.iter().cloned());
+        targets.retain(|instance| g.instances.contains(instance));
+        let results = build_instance_delta(ws, g, &targets);
+        let mut derived = results.len();
+        for result in results {
+            match result {
+                InstanceResult::Gap(gap) => {
+                    insert_instance_row(&mut self.gaps, gap.clone(), &gap.instance, |row| &row.instance);
+                    self.instance_facts.insert(gap.instance, OwnerFacts::default());
+                }
+                InstanceResult::Built(built) => {
+                    let instance = built.instance.clone();
+                    let facts = merge_instance_facts(self, built.facts);
+                    if let Ok(plan) = built.plan {
+                        candidate_keys_added.extend(self.install_candidate_refs(&instance, &plan));
+                        Arc::get_mut(&mut self.plans)
+                            .expect("local concrete update lost its unique plan store")
+                            .insert(instance.clone(), Arc::new(plan));
+                    }
+                    self.bodies.insert(instance.clone(), built.concrete);
+                    self.instance_facts.insert(instance, facts);
+                }
+            }
+        }
+        let mut always_subjects = Vec::new();
+        for owner in revisited_owners {
+            let Owner::AlwaysEmitted(module, body_owner) = owner else { continue };
+            let Some(owner) = concrete_owner_for(*module, *body_owner) else { continue };
+            always_subjects.push((*module, *body_owner, owner));
+        }
+        for (_, _, owner) in &always_subjects {
+            if let Some(facts) = self.always_facts.remove(owner) {
+                broad_scans += facts.remove_from(self, None, Some(owner));
+                retracted += 1;
+            }
+            self.always_plans.remove(owner);
+        }
+        let always_inputs: Vec<_> = always_subjects
+            .iter()
+            .enumerate()
+            .map(|(order, (module, body_owner, _))| {
+                prepare_always(ws, g, order, *module, *body_owner, log::log_enabled!(log::Level::Debug))
+            })
+            .collect();
+        if !always_inputs.is_empty() {
+            let always_owners: BTreeSet<Owner> = always_inputs
+                .iter()
+                .map(|prepared| Owner::AlwaysEmitted(prepared.module, prepared.body_owner))
+                .collect();
+            let signatures = publish_signatures_local(ws, g, &targets, &always_owners);
+            let mut publication_stats = ConcreteBuildStats::default();
+            let domains = collect_foreign_domains_local(g, &targets, &always_owners);
+            let published_domains = publish_foreign_domains(
+                ws,
+                g,
+                domains,
+                &mut publication_stats,
+                log::log_enabled!(log::Level::Debug),
+            );
+            let mut results: Vec<_> = always_inputs
+                .into_iter()
+                .map(|prepared| {
+                    produce_always(
+                        ws,
+                        g,
+                        prepared,
+                        &signatures,
+                        &published_domains,
+                        log::log_enabled!(log::Level::Debug),
+                    )
+                })
+                .collect();
+            results.sort_by_key(|result| result.order);
+            for result in results {
+                let owner = result.owner.clone();
+                let mut raw_facts = result.facts;
+                if let (Some(owner), Err(reason)) = (&owner, &result.plan) {
+                    raw_facts.always_plan_failures.push((owner.clone(), reason.clone()));
+                }
+                let facts = merge_instance_facts(self, raw_facts);
+                match result.plan {
+                    Ok(Some(plan)) => {
+                        self.always_plans.insert(plan.owner.clone(), plan);
+                    }
+                    Ok(None) => {}
+                    Err(_) => {}
+                }
+                if let Some(owner) = owner {
+                    self.always_facts.insert(owner, facts);
+                }
+            }
+            derived += always_subjects.len();
+        }
+        ConcreteUpdateStats {
+            derived,
+            retracted,
+            reused: before.saturating_sub(retracted),
+            before,
+            candidate_keys_added,
+            candidate_keys_removed,
+            broad_scans,
+        }
+    }
+
+    fn remove_instance(&mut self, instance: &Instance) -> (BTreeSet<Instance>, usize) {
+        let mut removed = BTreeSet::new();
+        if let Some(candidates) = self.owner_candidates.remove(instance) {
+            for candidate in candidates {
+                let Some(users) = self.candidate_users.get_mut(&candidate) else { continue };
+                users.remove(instance);
+                if users.is_empty() {
+                    self.candidate_users.remove(&candidate);
+                    self.candidate_keys.remove(&candidate);
+                    removed.insert(candidate);
+                }
+            }
+        }
+        let Some(facts) = self.instance_facts.remove(instance) else {
+            self.bodies.remove(instance);
+            Arc::get_mut(&mut self.plans)
+                .expect("local concrete update lost its unique plan store")
+                .remove(instance);
+            remove_instance_rows(&mut self.gaps, instance, |row| &row.instance);
+            return (removed, 0);
+        };
+        let scans = facts.remove_from(self, Some(instance), None);
+        self.bodies.remove(instance);
+        Arc::get_mut(&mut self.plans)
+            .expect("local concrete update lost its unique plan store")
+            .remove(instance);
+        (removed, scans)
+    }
+
+    fn install_candidate_refs(
+        &mut self,
+        owner: &Instance,
+        plan: &ConcreteBodyPlan,
+    ) -> BTreeSet<Instance> {
+        let refs: BTreeSet<Instance> = plan.callees.values().cloned().collect();
+        let mut added = BTreeSet::new();
+        for candidate in &refs {
+            let was_empty = self
+                .candidate_users
+                .get(candidate)
+                .is_none_or(BTreeSet::is_empty);
+            if was_empty {
+                self.candidate_keys.insert(candidate.clone());
+                added.insert(candidate.clone());
+            }
+            self.candidate_users
+                .entry(candidate.clone())
+                .or_default()
+                .insert(owner.clone());
+        }
+        self.owner_candidates.insert(owner.clone(), refs);
+        added
     }
 
     pub fn census(&self) -> BodyCensus {
@@ -1081,29 +1319,199 @@ impl InstanceResult {
     }
 }
 
-fn merge_instance_facts(out: &mut ConcreteBodies, mut facts: ConcreteBodies) {
-    out.expr_examined += facts.expr_examined;
-    out.binding_examined += facts.binding_examined;
-    out.generics_bound += facts.generics_bound;
-    out.untyped_bindings += facts.untyped_bindings;
-    out.expr_slots += facts.expr_slots;
-    out.binding_slots += facts.binding_slots;
-    out.generic_bodies += facts.generic_bodies;
-    out.sites_examined += facts.sites_examined;
-    out.signature_requests += facts.signature_requests;
-    out.signature_derivations += facts.signature_derivations;
-    out.signature_slots_cloned += facts.signature_slots_cloned;
-    out.slot_conversions += facts.slot_conversions;
-    out.free_types.append(&mut facts.free_types);
-    out.untyped.append(&mut facts.untyped);
-    out.gaps.append(&mut facts.gaps);
-    out.plan_failures.append(&mut facts.plan_failures);
-    out.callee_holes.append(&mut facts.callee_holes);
-    out.unknown_rock_callees.append(&mut facts.unknown_rock_callees);
-    for (kind, count) in facts.untyped_as_callee_key {
-        *out.untyped_as_callee_key.entry(kind).or_insert(0) += count;
+#[derive(Clone, Default)]
+struct OwnerFacts {
+    plan_failures: Vec<(Instance, MonoTyReason)>,
+    always_plan_failures: Vec<(ConcreteOwner, MonoTyReason)>,
+    free_types: Vec<(Instance, FreeType)>,
+    gaps: Vec<MissingBody>,
+    expr_examined: usize,
+    binding_examined: usize,
+    generics_bound: usize,
+    untyped: Vec<(Instance, UntypedExpr)>,
+    untyped_bindings: usize,
+    expr_slots: usize,
+    binding_slots: usize,
+    generic_bodies: usize,
+    sites_examined: usize,
+    callee_holes: Vec<CalleeHole>,
+    unknown_rock_callees: Vec<(Instance, Site)>,
+    untyped_as_callee_key: BTreeMap<&'static str, usize>,
+    signature_requests: usize,
+    signature_derivations: usize,
+    signature_slots_cloned: usize,
+    slot_conversions: usize,
+    build_stats: ConcreteBuildStats,
+}
+
+fn insert_instance_row<T, F>(rows: &mut Vec<T>, row: T, instance: &Instance, key: F)
+where
+    F: Fn(&T) -> &Instance,
+{
+    let position = rows
+        .binary_search_by(|current| key(current).cmp(instance))
+        .unwrap_or_else(|position| position);
+    rows.insert(position, row);
+}
+
+fn remove_instance_rows<T, F>(rows: &mut Vec<T>, instance: &Instance, key: F)
+where
+    F: Fn(&T) -> &Instance,
+{
+    while let Ok(position) = rows.binary_search_by(|current| key(current).cmp(instance)) {
+        rows.remove(position);
     }
-    out.build_stats.add(facts.build_stats);
+}
+
+fn concrete_owner_order(
+    left: &ConcreteOwner,
+    right: &ConcreteOwner,
+) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let tag = |owner: &ConcreteOwner| match owner {
+        ConcreteOwner::Function(_) => 0,
+        ConcreteOwner::Global { .. } => 1,
+        ConcreteOwner::Decorator { .. } => 2,
+    };
+    tag(left).cmp(&tag(right)).then_with(|| match (left, right) {
+        (ConcreteOwner::Function(left), ConcreteOwner::Function(right)) => left.cmp(right),
+        (
+            ConcreteOwner::Global { module: left_module, index: left_index },
+            ConcreteOwner::Global { module: right_module, index: right_index },
+        )
+        | (
+            ConcreteOwner::Decorator { module: left_module, index: left_index },
+            ConcreteOwner::Decorator { module: right_module, index: right_index },
+        ) => left_module
+            .index()
+            .cmp(&right_module.index())
+            .then(left_index.cmp(right_index)),
+        _ => Ordering::Equal,
+    })
+}
+
+impl OwnerFacts {
+    fn from_body(mut facts: ConcreteBodies) -> Self {
+        debug_assert!(facts.bodies.is_empty() && facts.always_plans.is_empty());
+        Self {
+            plan_failures: std::mem::take(&mut facts.plan_failures),
+            always_plan_failures: std::mem::take(&mut facts.always_plan_failures),
+            free_types: std::mem::take(&mut facts.free_types),
+            gaps: std::mem::take(&mut facts.gaps),
+            expr_examined: facts.expr_examined,
+            binding_examined: facts.binding_examined,
+            generics_bound: facts.generics_bound,
+            untyped: std::mem::take(&mut facts.untyped),
+            untyped_bindings: facts.untyped_bindings,
+            expr_slots: facts.expr_slots,
+            binding_slots: facts.binding_slots,
+            generic_bodies: facts.generic_bodies,
+            sites_examined: facts.sites_examined,
+            callee_holes: std::mem::take(&mut facts.callee_holes),
+            unknown_rock_callees: std::mem::take(&mut facts.unknown_rock_callees),
+            untyped_as_callee_key: std::mem::take(&mut facts.untyped_as_callee_key),
+            signature_requests: facts.signature_requests,
+            signature_derivations: facts.signature_derivations,
+            signature_slots_cloned: facts.signature_slots_cloned,
+            slot_conversions: facts.slot_conversions,
+            build_stats: facts.build_stats,
+        }
+    }
+
+    fn add_to(&self, out: &mut ConcreteBodies) {
+        out.expr_examined += self.expr_examined;
+        out.binding_examined += self.binding_examined;
+        out.generics_bound += self.generics_bound;
+        out.untyped_bindings += self.untyped_bindings;
+        out.expr_slots += self.expr_slots;
+        out.binding_slots += self.binding_slots;
+        out.generic_bodies += self.generic_bodies;
+        out.sites_examined += self.sites_examined;
+        out.signature_requests += self.signature_requests;
+        out.signature_derivations += self.signature_derivations;
+        out.signature_slots_cloned += self.signature_slots_cloned;
+        out.slot_conversions += self.slot_conversions;
+        for row in &self.free_types {
+            insert_instance_row(&mut out.free_types, row.clone(), &row.0, |row| &row.0);
+        }
+        for row in &self.gaps {
+            insert_instance_row(&mut out.gaps, row.clone(), &row.instance, |row| &row.instance);
+        }
+        for row in &self.plan_failures {
+            insert_instance_row(&mut out.plan_failures, row.clone(), &row.0, |row| &row.0);
+        }
+        for row in &self.always_plan_failures {
+            let position = out
+                .always_plan_failures
+                .binary_search_by(|current| concrete_owner_order(&current.0, &row.0))
+                .unwrap_or_else(|position| position);
+            out.always_plan_failures.insert(position, row.clone());
+        }
+        for row in &self.untyped {
+            insert_instance_row(&mut out.untyped, row.clone(), &row.0, |row| &row.0);
+        }
+        for row in &self.callee_holes {
+            insert_instance_row(&mut out.callee_holes, row.clone(), &row.instance, |row| &row.instance);
+        }
+        for row in &self.unknown_rock_callees {
+            insert_instance_row(&mut out.unknown_rock_callees, row.clone(), &row.0, |row| &row.0);
+        }
+        for (kind, count) in &self.untyped_as_callee_key {
+            *out.untyped_as_callee_key.entry(kind).or_insert(0) += count;
+        }
+        out.build_stats.add(self.build_stats);
+    }
+
+    fn remove_from(
+        &self,
+        out: &mut ConcreteBodies,
+        instance: Option<&Instance>,
+        owner: Option<&ConcreteOwner>,
+    ) -> usize {
+        out.expr_examined -= self.expr_examined;
+        out.binding_examined -= self.binding_examined;
+        out.generics_bound -= self.generics_bound;
+        out.untyped_bindings -= self.untyped_bindings;
+        out.expr_slots -= self.expr_slots;
+        out.binding_slots -= self.binding_slots;
+        out.generic_bodies -= self.generic_bodies;
+        out.sites_examined -= self.sites_examined;
+        out.signature_requests -= self.signature_requests;
+        out.signature_derivations -= self.signature_derivations;
+        out.signature_slots_cloned -= self.signature_slots_cloned;
+        out.slot_conversions -= self.slot_conversions;
+        if let Some(instance) = instance {
+            remove_instance_rows(&mut out.free_types, instance, |row| &row.0);
+            remove_instance_rows(&mut out.gaps, instance, |row| &row.instance);
+            remove_instance_rows(&mut out.plan_failures, instance, |row| &row.0);
+            remove_instance_rows(&mut out.untyped, instance, |row| &row.0);
+            remove_instance_rows(&mut out.callee_holes, instance, |row| &row.instance);
+            remove_instance_rows(&mut out.unknown_rock_callees, instance, |row| &row.0);
+        }
+        if let Some(owner) = owner {
+            while let Ok(position) = out
+                .always_plan_failures
+                .binary_search_by(|current| concrete_owner_order(&current.0, owner))
+            {
+                out.always_plan_failures.remove(position);
+            }
+        }
+        for (kind, count) in &self.untyped_as_callee_key {
+            let entry = out.untyped_as_callee_key.get_mut(kind).expect("owner fact count missing");
+            *entry -= count;
+            if *entry == 0 {
+                out.untyped_as_callee_key.remove(kind);
+            }
+        }
+        out.build_stats.sub(self.build_stats);
+        0
+    }
+}
+
+fn merge_instance_facts(out: &mut ConcreteBodies, facts: ConcreteBodies) -> OwnerFacts {
+    let facts = OwnerFacts::from_body(facts);
+    facts.add_to(out);
+    facts
 }
 
 type PublishedSignatures = FxHashMap<Instance, Result<ConcreteSignatureHandle, MonoTyReason>>;
@@ -1148,6 +1556,44 @@ fn publish_signatures(
     (published, derivations, elapsed)
 }
 
+fn publish_signatures_local(
+    ws: &Workspace,
+    g: &InstanceGraph,
+    seeds: &BTreeSet<Instance>,
+    always_owners: &BTreeSet<Owner>,
+) -> PublishedSignatures {
+    let mut instances = seeds.clone();
+    for inst in seeds {
+        if let Some(sites) = g.sites_of(inst) {
+            for record in sites.values() {
+                if let SiteOutcome::Resolved(target) = &record.outcome {
+                    instances.insert(target.clone());
+                }
+            }
+        }
+    }
+    for owner in always_owners {
+        let Some(contribution) = g.contributions.get(owner) else { continue };
+        for record in contribution.always_call_sites.values() {
+            if let SiteOutcome::Resolved(target) = &record.outcome {
+                instances.insert(target.clone());
+            }
+        }
+    }
+    instances
+        .into_iter()
+        .map(|instance| {
+            let result = g
+                .substitution(&instance)
+                .cloned()
+                .ok_or(MonoTyReason::NoNode)
+                .and_then(|subst| concrete_signature(ws, g, &instance, &subst))
+                .map(Arc::new);
+            (instance, result)
+        })
+        .collect()
+}
+
 fn collect_foreign_domains(g: &InstanceGraph, expanded: &[Instance]) -> BTreeSet<SiteDomain> {
     let mut domains = BTreeSet::new();
     for inst in expanded {
@@ -1170,6 +1616,64 @@ fn collect_foreign_domains(g: &InstanceGraph, expanded: &[Instance]) -> BTreeSet
         domains.extend(contribution.always_call_sites.keys().map(|site| site.domain.clone()));
     }
     domains
+}
+
+fn collect_foreign_domains_local(
+    g: &InstanceGraph,
+    instances: &BTreeSet<Instance>,
+    always_owners: &BTreeSet<Owner>,
+) -> BTreeSet<SiteDomain> {
+    let mut domains = BTreeSet::new();
+    for inst in instances {
+        if let Some(contribution) = g.contributions.get(&Owner::Instance(inst.clone())) {
+            domains.extend(contribution.struct_default_domains.iter().cloned());
+        }
+        if let Some(sites) = g.sites_of(inst) {
+            domains.extend(sites.keys().map(|site| site.domain.clone()));
+        }
+    }
+    for owner in always_owners {
+        let Some(contribution) = g.contributions.get(owner) else { continue };
+        domains.extend(contribution.struct_default_domains.iter().cloned());
+        domains.extend(contribution.always_call_sites.keys().map(|site| site.domain.clone()));
+    }
+    domains
+}
+
+fn build_instance_delta(
+    ws: &Workspace,
+    g: &InstanceGraph,
+    targets: &BTreeSet<Instance>,
+) -> Vec<InstanceResult> {
+    if targets.is_empty() {
+        return Vec::new();
+    }
+    let timing_enabled = log::log_enabled!(log::Level::Debug);
+    let signatures = publish_signatures_local(ws, g, targets, &BTreeSet::new());
+    let mut publication_stats = ConcreteBuildStats::default();
+    let domains = collect_foreign_domains_local(g, targets, &BTreeSet::new());
+    let published_domains = publish_foreign_domains(
+        ws,
+        g,
+        domains,
+        &mut publication_stats,
+        timing_enabled,
+    );
+    targets
+        .iter()
+        .cloned()
+        .map(|instance| match prepare_instance(ws, g, instance, timing_enabled) {
+            PreparedInstanceResult::Gap(gap) => InstanceResult::Gap(gap),
+            PreparedInstanceResult::Ready(prepared) => InstanceResult::Built(produce_instance(
+                ws,
+                g,
+                prepared,
+                &signatures,
+                &published_domains,
+                timing_enabled,
+            )),
+        })
+        .collect()
 }
 
 fn publish_foreign_domains(
@@ -1399,15 +1903,8 @@ struct PreparedAlways {
     facts: ConcreteBodies,
 }
 
-fn prepare_always(
-    ws: &Workspace,
-    g: &InstanceGraph,
-    order: usize,
-    module: bone_semantic::prelude::ModuleId,
-    body_owner: BodyOwner,
-    timing_enabled: bool,
-) -> PreparedAlways {
-    let owner = match body_owner {
+fn concrete_owner_for(module: bone_semantic::prelude::ModuleId, body_owner: BodyOwner) -> Option<ConcreteOwner> {
+    match body_owner {
         BodyOwner::Global(index) => Some(ConcreteOwner::Global {
             module,
             index: index.into_raw().into_u32(),
@@ -1416,9 +1913,22 @@ fn prepare_always(
             module,
             index: index.into_raw().into_u32(),
         }),
-        BodyOwner::Function(_) | BodyOwner::StructDefaults(_) => None,
-        BodyOwner::Enum(_) | BodyOwner::Newtype(_) => None,
-    };
+        BodyOwner::Function(_)
+        | BodyOwner::StructDefaults(_)
+        | BodyOwner::Enum(_)
+        | BodyOwner::Newtype(_) => None,
+    }
+}
+
+fn prepare_always(
+    ws: &Workspace,
+    g: &InstanceGraph,
+    order: usize,
+    module: bone_semantic::prelude::ModuleId,
+    body_owner: BodyOwner,
+    timing_enabled: bool,
+) -> PreparedAlways {
+    let owner = concrete_owner_for(module, body_owner);
     let Some(body) = ws.module(module).bodies.get(&body_owner) else {
         return PreparedAlways {
             order,
@@ -2131,10 +2641,12 @@ fn produce_instances(
 /// session consume `ConcreteBodies::plans` by handle); a second build inside
 /// one emission is the duplicate-work regression this counter exists to gate.
 pub fn build_invocations() -> u64 {
-    BUILD_INVOCATIONS.load(std::sync::atomic::Ordering::Relaxed)
+    BUILD_INVOCATIONS.with(std::cell::Cell::get)
 }
 
-static BUILD_INVOCATIONS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+thread_local! {
+    static BUILD_INVOCATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
 
 pub fn build(ws: &Workspace, g: &InstanceGraph) -> ConcreteBodies {
     build_impl(ws, g, BuildResultOrder::Canonical, BuildSchedule::Default).bodies
@@ -2241,7 +2753,7 @@ fn build_published_impl(
 ) -> BuildRun {
     #[cfg(not(feature = "test-hooks"))]
     let _ = order;
-    BUILD_INVOCATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    BUILD_INVOCATIONS.with(|count| count.set(count.get() + 1));
     let t_build = std::time::Instant::now();
     let intern_before = g.interner().stats();
     let timing_enabled = log::log_enabled!(log::Level::Debug);
@@ -2361,7 +2873,10 @@ fn build_published_impl(
     let mut unique_slot_tyids = 0usize;
     for result in results {
         match result {
-            InstanceResult::Gap(gap) => out.gaps.push(gap),
+            InstanceResult::Gap(gap) => {
+                out.gaps.push(gap.clone());
+                out.instance_facts.insert(gap.instance, OwnerFacts::default());
+            }
             InstanceResult::Built(built) => {
                 let instance = built.instance.clone();
                 t_convert += built.convert_time;
@@ -2370,11 +2885,13 @@ fn build_published_impl(
                 per_inst.push((instance.clone(), built.elapsed));
                 slot_tyids += built.slot_tyids;
                 unique_slot_tyids += built.unique_slot_tyids;
-                merge_instance_facts(&mut out, built.facts);
+                let facts = merge_instance_facts(&mut out, built.facts);
                 if let Ok(plan) = built.plan {
-                    plans.insert(instance.clone(), plan);
+                    out.install_candidate_refs(&instance, &plan);
+                    plans.insert(instance.clone(), std::sync::Arc::new(plan));
                 }
-                out.bodies.insert(instance, built.concrete);
+                out.bodies.insert(instance.clone(), built.concrete);
+                out.instance_facts.insert(instance, facts);
             }
         }
     }
@@ -2397,17 +2914,20 @@ fn build_published_impl(
     always_results.sort_by_key(|result| result.order);
     for result in always_results {
         let owner = result.owner.clone();
-        merge_instance_facts(&mut out, result.facts);
+        let mut raw_facts = result.facts;
+        if let (Some(owner), Err(reason)) = (&owner, &result.plan) {
+            raw_facts.always_plan_failures.push((owner.clone(), reason.clone()));
+        }
+        let facts = merge_instance_facts(&mut out, raw_facts);
         match result.plan {
             Ok(Some(plan)) => {
                 out.always_plans.insert(plan.owner.clone(), plan);
             }
             Ok(None) => {}
-            Err(reason) => {
-                if let Some(owner) = owner {
-                    out.always_plan_failures.push((owner, reason));
-                }
-            }
+            Err(_) => {}
+        }
+        if let Some(owner) = owner {
+            out.always_facts.insert(owner, facts);
         }
     }
     let always_merge_time = t_always_merge.elapsed();

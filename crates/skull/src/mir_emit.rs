@@ -1807,32 +1807,40 @@ fn too_deep_to_instantiate(
 }
 
 fn inline_candidate_keys(concrete: &crate::concrete_body::ConcreteBodies) -> Vec<Instance> {
-    let mut keys = BTreeSet::new();
-    for plan in concrete.plans.values() {
-        keys.extend(plan.callees.values().cloned());
+    concrete.candidate_keys().iter().cloned().collect()
+}
+
+fn candidate_key_index(keys: &BTreeSet<Instance>) -> FxHashMap<FuncRef, BTreeSet<Instance>> {
+    let mut by_func = FxHashMap::default();
+    for key in keys {
+        by_func.entry(key.func).or_insert_with(BTreeSet::new).insert(key.clone());
     }
-    keys.into_iter().collect()
+    by_func
 }
 
 fn build_inline_candidate_table(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,
     concrete: &crate::concrete_body::ConcreteBodies,
+    keys: Vec<Instance>,
     base: Option<&std::sync::Arc<skull_transform::InlineCandidateTable>>,
     invalidated: Option<&FxHashSet<FuncRef>>,
+    warm_keys_override: Option<Vec<Instance>>,
+    added: Option<&BTreeSet<Instance>>,
+    removed: Option<&BTreeSet<Instance>>,
 ) -> std::sync::Arc<skull_transform::InlineCandidateTable> {
-    let keys = inline_candidate_keys(concrete);
-    let warm_keys: Vec<Instance> = keys
-        .iter()
-        .filter(|key| match base {
-            None => true,
-            Some(base) => {
-                invalidated.is_some_and(|frefs| frefs.contains(&key.func))
-                    || !base.contains(key)
-            }
-        })
-        .cloned()
-        .collect();
+    let warm_keys: Vec<Instance> = warm_keys_override.unwrap_or_else(|| {
+        keys.iter()
+            .filter(|key| match base {
+                None => true,
+                Some(base) => {
+                    invalidated.is_some_and(|frefs| frefs.contains(&key.func))
+                        || !base.contains(key)
+                }
+            })
+            .cloned()
+            .collect()
+    });
     let warms = par_map_with(
         warm_keys,
         skull_transform::InlineCache::default,
@@ -1840,6 +1848,16 @@ fn build_inline_candidate_table(
             inline_cache.warm_candidate(ws, scx, inst, concrete.plans.as_ref())
         },
     );
+    if let Some(base) = base {
+        if let (Some(added), Some(removed)) = (added, removed) {
+            return std::sync::Arc::new(skull_transform::InlineCandidateTable::from_warms_incremental(
+                std::sync::Arc::clone(base),
+                warms,
+                &added.iter().cloned().collect::<Vec<_>>(),
+                &removed.iter().cloned().collect::<Vec<_>>(),
+            ));
+        }
+    }
     std::sync::Arc::new(skull_transform::InlineCandidateTable::from_warms_with_base(
         base.map(std::sync::Arc::as_ref),
         keys,
@@ -2281,6 +2299,11 @@ pub struct SkullEmitCache {
     /// warms lazily as edits touch callees.
     /// `docs/skull-incremental-emit-cache-plan.md` step 3.
     inline_cache: skull_transform::InlineCache,
+    /// Candidate identities currently demanded by concrete owner plans. The
+    /// concrete publisher updates this set by owner delta; it is not rebuilt
+    /// by scanning every plan on a body edit.
+    candidate_keys: BTreeSet<Instance>,
+    candidate_keys_by_func: FxHashMap<FuncRef, BTreeSet<Instance>>,
     /// Reverse dependency index: `dependents[C]` = the chunks that have `C` in
     /// their codegen deps (a body inlined `C` in, or calls `C`). Lets
     /// `update_chunk_cache` compute the affected set with one reverse hop per
@@ -2316,6 +2339,39 @@ pub struct SkullEmitCache {
     /// The compilation target's root directory; see [`is_library_module`].
     project_root: Option<String>,
     renderer_target: RendererTarget,
+    repair_stats: IncrementalRepairStats,
+}
+
+/// Structural work performed by the last body-only cache update.
+///
+/// This is populated only on the opt-in inspection path used by incremental
+/// tests and profiling. It is ordinary per-cache state, not a hot-path atomic.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct IncrementalRepairStats {
+    pub body_only_edits: usize,
+    pub owners_revisited: usize,
+    pub instances_revisited: usize,
+    pub graph_contributions_retracted: usize,
+    pub graph_contributions_installed: usize,
+    pub full_graph_rebuilds: usize,
+    pub concrete_entries_derived: usize,
+    pub concrete_entries_reused: usize,
+    pub concrete_entries_retracted: usize,
+    pub full_concrete_rebuilds: usize,
+    pub artifact_chunks_revisited: usize,
+    pub artifact_chunks_added: usize,
+    pub artifact_chunks_removed: usize,
+    pub full_artifact_view_realizations: usize,
+    pub broad_owner_scans: usize,
+    pub broad_concrete_scans: usize,
+    pub broad_artifact_scans: usize,
+    pub broad_candidate_scans: usize,
+    pub graph_update_ns: u64,
+    pub concrete_update_ns: u64,
+    pub artifact_update_ns: u64,
+    pub candidate_update_ns: u64,
+    pub affected_selection_ns: u64,
+    pub relowering_ns: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -4860,7 +4916,13 @@ fn emit_full_in_with_mutation(
     // The graph is complete before these lanes start; shared interning remains
     // synchronized. ABI plans carry their own representation arena, so the
     // warmed context is adopted after join.
-    let shader_plans = std::sync::Arc::clone(&concrete.plans);
+    let shader_plans = std::sync::Arc::new(
+        concrete
+            .plans
+            .iter()
+            .map(|(instance, plan)| (instance.clone(), std::sync::Arc::clone(plan)))
+            .collect(),
+    );
     let abi_plans = std::sync::Arc::clone(&concrete.plans);
     let abi_always_plans = &concrete.always_plans;
     let mono_before_lanes = graph.interner().stats();
@@ -5058,7 +5120,17 @@ fn emit_full_in_with_mutation(
         })
         .collect();
     let t_setup = Instant::now();
-    let inline_candidate_table = build_inline_candidate_table(ws, &scx, &concrete, None, None);
+    let inline_candidate_table = build_inline_candidate_table(
+        ws,
+        &scx,
+        &concrete,
+        inline_candidate_keys(&concrete),
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
     setup_phases.push(("setup: inline candidate table", t_setup.elapsed()));
     let chunks = par_map_with(
         fn_items,
@@ -5089,6 +5161,8 @@ fn emit_full_in_with_mutation(
         }
     }
     let concrete_stats = concrete.build_stats;
+    let candidate_keys = concrete.candidate_keys().clone();
+    let candidate_keys_by_func = candidate_key_index(&candidate_keys);
     let cache = SkullEmitCache {
         chunks,
         concrete,
@@ -5098,6 +5172,8 @@ fn emit_full_in_with_mutation(
         cg,
         scx,
         inline_cache: skull_transform::InlineCache::with_candidate_table(inline_candidate_table),
+        candidate_keys,
+        candidate_keys_by_func,
         dependents,
         changed_consts_since_full: FxHashSet::default(),
         static_key_baseline,
@@ -5106,6 +5182,7 @@ fn emit_full_in_with_mutation(
         emitted: FxHashSet::default(),
         project_root: project_root.map(str::to_string),
         renderer_target,
+        repair_stats: IncrementalRepairStats::default(),
     };
     let mut built_specs: Vec<(Instance, Chunk)> = Vec::new();
     let (mut emit, emitted) = assemble(ws, &cache.cg, &cache.scx, &cache, &mut built_specs)?;
@@ -5145,6 +5222,10 @@ fn emit_full_in_with_mutation(
 /// `emit_incremental` (full reassembly) and `emit_overlay` (the incremental.lua
 /// split).
 impl SkullEmitCache {
+    pub fn repair_stats(&self) -> IncrementalRepairStats {
+        self.repair_stats
+    }
+
     /// The authoritative instance graph this cache emits against. Always
     /// present -- there is no build in which production has no graph.
     pub fn graph(&self) -> &crate::instance_graph::InstanceGraph {
@@ -5416,12 +5497,17 @@ fn update_chunk_cache(
     &mut self,
     ws: &Workspace,
     reinferred: &[(ModuleId, BodyOwner)],
+    edits: &[crate::instance_graph::SpanEdit],
 ) -> (
     FxHashSet<Instance>,
     crate::instance_graph::UpdateStats,
     Vec<CompilerError>,
 ) {
     let cache = self;
+    cache.repair_stats = IncrementalRepairStats {
+        body_only_edits: 1,
+        ..IncrementalRepairStats::default()
+    };
     // Fold each re-inferred body's value-reference contribution into the cached
     // ScalarCtx. A name whose taken-by-ref membership flips changes scalar-ABI
     // eligibility, so the named fn(s) -- and, via the deps scan below, every
@@ -5447,7 +5533,8 @@ fn update_chunk_cache(
     //
     // Rebuilding the graph instead of updating it is what the arc measured and
     // rejected: 15-33 ms release against a sub-millisecond edit.
-    let _t_graph = Instant::now();
+    let t_graph = Instant::now();
+    let graph_builds_before = crate::instance_graph::build_invocations();
     // `update_shader_registrations` runs BEFORE this (in `emit_incremental`), so
     // the glue roots below are this edit's, not the previous build's.
     let roots = all_roots(
@@ -5455,22 +5542,79 @@ fn update_chunk_cache(
         cache.project_root.as_deref(),
         &cache.shader_registrations.roots,
     );
-    let update = cache.graph.update_bodies(ws, roots.clone(), reinferred);
-    cache.concrete = crate::concrete_body::build(ws, &mut cache.graph);
-    let _graph_ms = _t_graph.elapsed();
+    let update = cache
+        .graph
+        .update_bodies_with_edits(ws, roots.clone(), reinferred, edits);
+    cache.repair_stats.graph_update_ns = t_graph.elapsed().as_nanos() as u64;
+    cache.repair_stats.full_graph_rebuilds = crate::instance_graph::build_invocations()
+        .saturating_sub(graph_builds_before) as usize;
+    cache.repair_stats.owners_revisited = update.revisited_owners.len();
+    cache.repair_stats.instances_revisited = update.revisited.len();
+    cache.repair_stats.graph_contributions_retracted = update.retracted_owners.len();
+    cache.repair_stats.graph_contributions_installed = update.revisited_owners.len();
+    cache.repair_stats.broad_owner_scans = update.broad_scans;
+    let concrete_builds_before = crate::concrete_body::build_invocations();
+    let t_concrete = Instant::now();
+    let concrete_update = cache.concrete.update_local(
+        ws,
+        &cache.graph,
+        &update.revisited,
+        &update.removed,
+        &update.revisited_owners,
+    );
+    cache.repair_stats.concrete_entries_derived = concrete_update.derived;
+    cache.repair_stats.concrete_entries_reused = concrete_update.reused;
+    cache.repair_stats.concrete_entries_retracted = concrete_update.retracted;
+    cache.repair_stats.full_concrete_rebuilds = crate::concrete_body::build_invocations()
+        .saturating_sub(concrete_builds_before) as usize;
+    cache.repair_stats.broad_concrete_scans = concrete_update.broad_scans;
+    cache.repair_stats.concrete_update_ns = t_concrete.elapsed().as_nanos() as u64;
+    for key in &concrete_update.candidate_keys_removed {
+        cache.candidate_keys.remove(key);
+        if let Some(keys) = cache.candidate_keys_by_func.get_mut(&key.func) {
+            keys.remove(key);
+            if keys.is_empty() {
+                cache.candidate_keys_by_func.remove(&key.func);
+            }
+        }
+    }
+    for key in &concrete_update.candidate_keys_added {
+        cache.candidate_keys.insert(key.clone());
+        cache
+            .candidate_keys_by_func
+            .entry(key.func)
+            .or_default()
+            .insert(key.clone());
+    }
+    let _graph_ms = Duration::from_nanos(
+        cache.repair_stats.graph_update_ns
+            + cache.repair_stats.concrete_update_ns
+            + cache.repair_stats.artifact_update_ns,
+    );
 
     // Before any borrow of the cache's own fields, because it mutates several.
     for gone in &update.removed {
         cache.forget_instance(gone);
     }
 
-    // The graph moved; the Lua view is this edit's realization of it, from the
-    // same roots. Kept in step with `graph` rather than a first-edit snapshot.
-    cache.lua_view = crate::artifact::realize(
+    // The graph moved; retract and install only the affected target subjects.
+    // The retained view owns the predecessor/successor indexes needed to
+    // update reachability without realizing the full graph again.
+    let t_artifact = Instant::now();
+    let artifact_update = cache.lua_view.update_local(
         ws,
         &cache.graph,
         &crate::artifact::ArtifactRequest::new(crate::target_projection::LUAJIT_DESKTOP, &roots),
+        &update.revisited,
+        &update.added,
+        &update.removed,
     );
+    cache.repair_stats.artifact_chunks_revisited = artifact_update.revisited;
+    cache.repair_stats.artifact_chunks_added = artifact_update.added;
+    cache.repair_stats.artifact_chunks_removed = artifact_update.removed;
+    cache.repair_stats.full_artifact_view_realizations = 0;
+    cache.repair_stats.broad_artifact_scans = artifact_update.broad_scans;
+    cache.repair_stats.artifact_update_ns = t_artifact.elapsed().as_nanos() as u64;
 
     let scx = &cache.scx;
     let cg = &cache.cg;
@@ -5490,15 +5634,27 @@ fn update_chunk_cache(
     let mut invalidated_candidate_frefs = changed.clone();
     invalidated_candidate_frefs.extend(update.added.iter().map(|instance| instance.func));
     invalidated_candidate_frefs.extend(update.removed.iter().map(|instance| instance.func));
+    let mut warm_keys = concrete_update.candidate_keys_added.clone();
+    for fref in &invalidated_candidate_frefs {
+        if let Some(keys) = cache.candidate_keys_by_func.get(fref) {
+            warm_keys.extend(keys.iter().cloned());
+        }
+    }
+    let t_candidate = Instant::now();
     let previous_candidate_table = cache.inline_cache.candidate_table();
     let candidate_table = build_inline_candidate_table(
         ws,
         scx,
         &cache.concrete,
+        Vec::new(),
         previous_candidate_table.as_ref(),
         Some(&invalidated_candidate_frefs),
+        Some(warm_keys.into_iter().collect()),
+        Some(&concrete_update.candidate_keys_added),
+        Some(&concrete_update.candidate_keys_removed),
     );
     cache.inline_cache.replace_candidate_table(candidate_table);
+    cache.repair_stats.candidate_update_ns = t_candidate.elapsed().as_nanos() as u64;
 
     // **A changed declaration maps to its LIVE INSTANCES through the graph**,
     // not to one declaration-shaped key. Editing a generic `co fn` with two
@@ -5529,7 +5685,8 @@ fn update_chunk_cache(
     //
     // Construction of graph additions happens after invalidation below, so a
     // newly reached body cannot reuse an inline decision made for the old body.
-    let _aff_ms = _t_aff.elapsed();
+    cache.repair_stats.affected_selection_ns = _t_aff.elapsed().as_nanos() as u64;
+    let _aff_ms = Duration::from_nanos(cache.repair_stats.affected_selection_ns);
 
     // The persistent InlineCache keeps unchanged callee bodies across edits; the
     // affected entries are exactly those whose lowered body could have changed
@@ -5570,6 +5727,7 @@ fn update_chunk_cache(
         }
     }
     let added_errors = Self::build_graph_added_chunks(cache, ws, &update.added);
+    cache.repair_stats.relowering_ns = _t_relow.elapsed().as_nanos() as u64;
     if std::env::var("SKULL_EMIT_PROFILE").is_ok() {
         eprintln!(
             "    update_chunk_cache: graph {:.3}ms (+{} -{} instances) | affected-scan {:.3}ms (O(edit), {} chunks) | re-lower {:.3}ms ({} affected)",
@@ -5596,7 +5754,7 @@ pub fn emit_incremental(
     // `update_chunk_cache`'s re-walk must see this edit's set, not the last
     // build's.
     let shader_changed = cache.update_shader_registrations(ws, reinferred)?;
-    let (_affected, update, added_errors) = cache.update_chunk_cache(ws, reinferred);
+    let (_affected, update, added_errors) = cache.update_chunk_cache(ws, reinferred, &[]);
     if let Some(err) = SkullEmitCache::combine_errors(added_errors) {
         return Err(err);
     }
@@ -5858,6 +6016,15 @@ pub fn emit_overlay(
     cache: &mut SkullEmitCache,
     reinferred: &[(ModuleId, BodyOwner)],
 ) -> Result<MirEmit, CompilerError> {
+    emit_overlay_with_span_edits(ws, cache, reinferred, &[])
+}
+
+pub fn emit_overlay_with_span_edits(
+    ws: &Workspace,
+    cache: &mut SkullEmitCache,
+    reinferred: &[(ModuleId, BodyOwner)],
+    edits: &[crate::instance_graph::SpanEdit],
+) -> Result<MirEmit, CompilerError> {
     let t0 = Instant::now();
     // `cg` is cached (interface-derived, identical on body edits) -- no rebuild.
     let t_cg = t0.elapsed();
@@ -5869,7 +6036,7 @@ pub fn emit_overlay(
     // Shader registrations FIRST -- their dependencies are graph/view roots, so
     // `update_chunk_cache`'s re-walk must see this edit's set.
     let shader_changed = cache.update_shader_registrations(ws, reinferred)?;
-    let (affected, update, added_errors) = cache.update_chunk_cache(ws, reinferred);
+    let (affected, update, added_errors) = cache.update_chunk_cache(ws, reinferred, edits);
     if let Some(err) = SkullEmitCache::combine_errors(added_errors) {
         return Err(err);
     }
@@ -5917,6 +6084,12 @@ pub fn emit_overlay(
         ("CodegenCtx::new", t_cg),
         ("ScalarCtx::new", t_scx),
         ("update_chunk_cache (re-lower changed)", t_relower),
+        ("  graph update", Duration::from_nanos(cache.repair_stats.graph_update_ns)),
+        ("  concrete update", Duration::from_nanos(cache.repair_stats.concrete_update_ns)),
+        ("  ArtifactView update", Duration::from_nanos(cache.repair_stats.artifact_update_ns)),
+        ("  candidate update", Duration::from_nanos(cache.repair_stats.candidate_update_ns)),
+        ("  affected selection", Duration::from_nanos(cache.repair_stats.affected_selection_ns)),
+        ("  relowering", Duration::from_nanos(cache.repair_stats.relowering_ns)),
         ("assemble_overlay (+build_deco_map)", t_asm),
     ];
     Ok(emit)

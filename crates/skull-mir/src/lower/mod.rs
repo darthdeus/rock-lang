@@ -609,7 +609,7 @@ impl ScalarCtx {
     ) {
         let mut keys = Vec::new();
         keys.extend(plans.keys().cloned().map(AbiPlanKey::Owner));
-        for body in plans.values().chain(always.values()) {
+        for body in plans.values().map(|plan| &**plan).chain(always.values()) {
             keys.extend(body.callees.values().cloned().map(AbiPlanKey::Callee));
         }
         keys.sort();

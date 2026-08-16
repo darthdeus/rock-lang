@@ -641,6 +641,20 @@ pub struct Indices {
     /// the only question asked of it is whether ANY predecessor lies outside a
     /// region.
     pub preds: FxHashMap<Instance, FxHashSet<Instance>>,
+    /// Declaration -> its live concrete instances. Body edits use this index
+    /// to revisit every specialization without scanning the whole graph.
+    pub decl_instances: BTreeMap<DeclKey, BTreeSet<Instance>>,
+    /// File -> owners carrying spans in that file. Coordinate relocation uses
+    /// this set; membership does not make an owner semantically stale.
+    pub span_owners: BTreeMap<ustr::Ustr, BTreeSet<Owner>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SpanEdit {
+    pub file: ustr::Ustr,
+    pub at: usize,
+    pub byte_delta: isize,
+    pub line_delta: isize,
 }
 
 /// **One fact several owners assert, with the agreement kept rather than
@@ -727,6 +741,10 @@ pub struct InstanceGraph {
     /// identity; keeping it here makes the denominator available to tests and
     /// callers without a second graph walk.
     pub run_stats: RunStats,
+    last_run_owners: BTreeSet<Owner>,
+    last_run_retracted: BTreeSet<Owner>,
+    delta_added: BTreeSet<Instance>,
+    delta_removed: BTreeSet<Instance>,
     /// Constructions the model refuses that no single body produced:
     /// [`detect_changing_instance_recursion`] is a WHOLE-GRAPH search over the
     /// edge set, so its findings belong to the graph rather than to an owner.
@@ -737,6 +755,7 @@ pub struct InstanceGraph {
     /// here, BY CAUSE. See [`RootHole`]: one set carrying several different
     /// facts could only ever be read as the weakest of them.
     pub uninstantiated_roots: BTreeMap<String, RootHole>,
+    root_hole_sites: BTreeMap<String, BTreeMap<Owner, Vec<AlwaysEmittedFailure>>>,
     /// Generic emission roots the narrowing in [`generic_root_obligation`] ruled
     /// out, keyed by the reason. Recorded, not dropped: the population a check
     /// EXCLUDED is the only way to tell a narrowed gate from a dead one, and a
@@ -870,6 +889,22 @@ pub const INDEX_TRIGGERED: &[(&str, StorageCond, &[&str])] = &[
     ("Map", StorageCond::MapColumn, &["__map_col_slot", "__map_col_slot_checked", "__map_col_free"]),
     ("NativeBuffer", StorageCond::Always, &["__nb_checked_index"]),
 ];
+
+#[cfg(feature = "test-hooks")]
+thread_local! {
+    static BUILD_INVOCATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+pub fn build_invocations() -> u64 {
+    #[cfg(feature = "test-hooks")]
+    {
+        return BUILD_INVOCATIONS.with(std::cell::Cell::get);
+    }
+    #[cfg(not(feature = "test-hooks"))]
+    {
+        0
+    }
+}
 
 /// Every runtime entry a synthesized call or an opaque body can name
 /// (`docs/boundary-contracts.md` S 1.4). Kept as ONE list so the inline-body
@@ -1424,6 +1459,20 @@ pub fn is_spanless(span: &Span) -> bool {
     span.file.as_str() == "<unknown>"
 }
 
+fn shift_graph_span(span: &mut Span, edit: &SpanEdit) {
+    if span.file != edit.file || span.offset_range.0 < edit.at {
+        return;
+    }
+    span.offset_range = (
+        (span.offset_range.0 as isize + edit.byte_delta) as usize,
+        (span.offset_range.1 as isize + edit.byte_delta) as usize,
+    );
+    span.line_range = (
+        (span.line_range.0 as isize + edit.line_delta) as usize,
+        (span.line_range.1 as isize + edit.line_delta) as usize,
+    );
+}
+
 #[derive(Debug, Default)]
 pub struct RecursionCensus {
     pub direct_same_instance: BTreeSet<String>,
@@ -1461,6 +1510,8 @@ pub fn build_in(
     perturb: bool,
     interner: std::sync::Arc<MonoInterner>,
 ) -> InstanceGraph {
+    #[cfg(feature = "test-hooks")]
+    BUILD_INVOCATIONS.with(|count| count.set(count.get() + 1));
     let t_build = std::time::Instant::now();
     let intern_before = interner.stats();
     let mut g = InstanceGraph::empty_in(interner);
@@ -1615,12 +1666,15 @@ fn canonical_roots(ws: &Workspace, roots: Vec<FuncRef>, perturb: bool) -> Vec<Fu
 impl InstanceGraph {
     /// Every LIVE instance of one declaration.
     ///
-    /// A scan of the instance set rather than an index, deliberately: the only
-    /// caller asks it once per CHANGED declaration on a body edit (a handful),
-    /// and a maintained `DeclKey -> {Instance}` map would be a third reverse
-    /// index to keep in step with `preds` and `decls` for no measured gain.
+    /// The retained declaration index is updated with each owner contribution,
+    /// so a generic declaration maps to every live specialization without a
+    /// workspace-sized scan on a body edit.
     pub fn instances_of(&self, fref: FuncRef) -> impl Iterator<Item = &Instance> {
-        self.instances.iter().filter(move |i| i.func == fref)
+        self.index
+            .decl_instances
+            .get(&DeclKey(fref))
+            .into_iter()
+            .flat_map(|instances| instances.iter())
     }
 
     /// **The arena this graph's `MonoTyId`s index**, as the shared handle.
@@ -1640,9 +1694,14 @@ impl InstanceGraph {
         root_instances: BTreeSet::new(),
             instances: BTreeSet::new(),
             run_stats: RunStats::default(),
+            last_run_owners: BTreeSet::new(),
+            last_run_retracted: BTreeSet::new(),
+            delta_added: BTreeSet::new(),
+            delta_removed: BTreeSet::new(),
         index: Indices::default(),
         graph_rejections: Vec::new(),
         uninstantiated_roots: BTreeMap::new(),
+        root_hole_sites: BTreeMap::new(),
         excused_generic_roots: BTreeMap::new(),
         boundaries: BTreeMap::new(),
         coroutine_helpers: BTreeSet::new(),
@@ -1723,6 +1782,8 @@ impl InstanceGraph {
     /// changed. One driver, so the two cannot walk differently.
     fn run(&mut self, ws: &Workspace, mut pending: Vec<Owner>) -> RunStats {
         let mut stats = RunStats::default();
+        self.last_run_owners.clear();
+        self.last_run_retracted.clear();
         let mono_before = self.interner.stats();
         for i in self.root_instances.clone() {
             if !self.contributions.contains_key(&Owner::Instance(i.clone())) {
@@ -1818,6 +1879,7 @@ impl InstanceGraph {
                 } else {
                     VisitKind::FirstOwner
                 };
+                self.last_run_owners.insert(owner.clone());
                 let visit_start = timing_enabled.then(Instant::now);
                 let c = self.expand(ws, &owner, timing_enabled);
                 let visit_ns = elapsed_ns(visit_start);
@@ -2125,7 +2187,11 @@ impl InstanceGraph {
         timing_enabled: bool,
     ) -> (Vec<Owner>, InstallTiming) {
         let uninstall_start = timing_enabled.then(Instant::now);
+        let replaced = self.contributions.contains_key(&owner);
         self.uninstall(&owner);
+        if replaced {
+            self.last_run_retracted.insert(owner.clone());
+        }
         let uninstall_ns = elapsed_ns(uninstall_start);
         let mut index = IndexMaintenanceTiming::default();
         // Every callee is in `reached`, an always-emitted body's included --
@@ -2178,6 +2244,14 @@ impl InstanceGraph {
         if let Some(from) = owner.instance() {
             index.decls_updates += 1;
             *self.index.decls.entry(DeclKey(from.func)).or_insert(0) += 1;
+            self.index
+                .decl_instances
+                .entry(DeclKey(from.func))
+                .or_default()
+                .insert(from.clone());
+        }
+        for file in &c.span_files {
+            self.index.span_owners.entry(*file).or_default().insert(owner.clone());
         }
         index.decls_ns = elapsed_ns(lane_start);
         let lane_start = timing_enabled.then(Instant::now);
@@ -2189,7 +2263,23 @@ impl InstanceGraph {
         // otherwise find itself absent at the moment it asked and re-walk
         // forever.
         let reached: Vec<Instance> = c.reached.iter().map(|(to, _)| to.clone()).collect();
-        self.contributions.insert(owner, c);
+        for (name, failure) in &c.always_emitted_holes {
+            self.root_hole_sites
+                .entry(name.clone())
+                .or_default()
+                .entry(owner.clone())
+                .or_default()
+                .push(failure.clone());
+        }
+        self.add_contribution_counters(&c);
+        self.contributions.insert(owner.clone(), c);
+        if let Some(instance) = owner.instance() {
+            if self.instances.insert(instance.clone()) {
+                if !self.delta_removed.remove(instance) {
+                    self.delta_added.insert(instance.clone());
+                }
+            }
+        }
         let mut demanded: Vec<Owner> = reached
             .into_iter()
             .map(Owner::Instance)
@@ -2211,6 +2301,22 @@ impl InstanceGraph {
     /// survive as a positive number nobody can check.
     fn uninstall(&mut self, owner: &Owner) {
         let Some(old) = self.contributions.remove(owner) else { return };
+        self.subtract_contribution_counters(&old);
+        for (name, _) in &old.always_emitted_holes {
+            if let Some(owners) = self.root_hole_sites.get_mut(name) {
+                owners.remove(owner);
+                if owners.is_empty() {
+                    self.root_hole_sites.remove(name);
+                }
+            }
+        }
+        if let Some(instance) = owner.instance() {
+            if self.instances.remove(instance) {
+                if !self.delta_added.remove(instance) {
+                    self.delta_removed.insert(instance.clone());
+                }
+            }
+        }
         // One owner can assert one fact several times, so the retraction is by
         // COUNT: dropping it once would leave a total that outlives its owner.
         let mut reach_times: BTreeMap<&Instance, usize> = BTreeMap::new();
@@ -2276,7 +2382,54 @@ impl InstanceGraph {
                     e.remove();
                 }
             }
+            if let Some(instances) = self.index.decl_instances.get_mut(&DeclKey(from.func)) {
+                instances.remove(from);
+                if instances.is_empty() {
+                    self.index.decl_instances.remove(&DeclKey(from.func));
+                }
+            }
         }
+        for file in &old.span_files {
+            if let Some(owners) = self.index.span_owners.get_mut(file) {
+                owners.remove(owner);
+                if owners.is_empty() {
+                    self.index.span_owners.remove(file);
+                }
+            }
+        }
+    }
+
+    fn add_contribution_counters(&mut self, c: &Contribution) {
+        self.sites_attempted += c.sites_attempted;
+        self.always_emitted_seeds += c.always_emitted_seeds;
+        self.synthesized_examined += c.synthesized_examined;
+        self.synthesized_approximated += c.synthesized_approximated;
+    }
+
+    fn subtract_contribution_counters(&mut self, c: &Contribution) {
+        self.sites_attempted = self.sites_attempted.saturating_sub(c.sites_attempted);
+        self.always_emitted_seeds = self.always_emitted_seeds.saturating_sub(c.always_emitted_seeds);
+        self.synthesized_examined = self.synthesized_examined.saturating_sub(c.synthesized_examined);
+        self.synthesized_approximated = self
+            .synthesized_approximated
+            .saturating_sub(c.synthesized_approximated);
+    }
+
+    fn refresh_root_hole_sites(&mut self) {
+        let mut names: BTreeSet<String> = self.uninstantiated_roots.keys().cloned().collect();
+        names.extend(self.root_hole_sites.keys().cloned());
+        for name in names {
+            let failures = self
+                .root_hole_sites
+                .get(&name)
+                .into_iter()
+                .flat_map(|owners| owners.values())
+                .flat_map(|rows| rows.iter().cloned())
+                .collect();
+            self.uninstantiated_roots.entry(name).or_default().always_emitted_sites = failures;
+        }
+        self.uninstantiated_roots
+            .retain(|_, hole| hole.generic_root || !hole.always_emitted_sites.is_empty());
     }
 
     /// **Rebuild every flat field from the contribution set**, prune what no
@@ -2311,7 +2464,7 @@ impl InstanceGraph {
         // owners a root or an always-emitted seed demanded, so every owner it
         // installed is root-reachable. An update is where the question has an
         // answer, and the answer is searched over the affected region.
-        let Prune { pruned, region } =
+        let Prune { pruned, region, .. } =
             if incremental { self.stranded(&lost) } else { Prune::default() };
         if std::env::var("ROCK_GRAPH_VERIFY").is_ok() {
             // Both claims against one whole-graph reachability walk, on demand:
@@ -2338,8 +2491,17 @@ impl InstanceGraph {
         // over everything -- the same code path, not a second one.
         let after: BTreeSet<Instance> =
             self.contributions.keys().filter_map(|o| o.instance()).cloned().collect();
-        let entered: Vec<Instance> = after.difference(&self.instances).cloned().collect();
-        let left: Vec<Instance> = self.instances.difference(&after).cloned().collect();
+        let previous_instances = self.instances.clone();
+        let entered: Vec<Instance> = if incremental {
+            after.difference(&previous_instances).cloned().collect()
+        } else {
+            after.iter().cloned().collect()
+        };
+        let left: Vec<Instance> = if incremental {
+            previous_instances.difference(&after).cloned().collect()
+        } else {
+            Vec::new()
+        };
         self.instances = after;
         let decls_entered: Vec<DeclKey> = {
             let mut v: Vec<DeclKey> = entered.iter().map(|i| DeclKey(i.func)).collect();
@@ -2364,35 +2526,7 @@ impl InstanceGraph {
             self.boundaries.remove(&mangle_fn(ws, f));
         }
         self.graph_rejections.clear();
-        self.sites_attempted = 0;
-        self.always_emitted_seeds = 0;
-        self.synthesized_examined = 0;
-        self.synthesized_approximated = 0;
-        for name in self.uninstantiated_roots.values_mut() {
-            name.always_emitted_sites.clear();
-        }
-        // Summed over the primary records rather than accumulated beside them.
-        // O(owners) with no allocation, and `graph_contributions` asserts the
-        // equality, so a maintained total that drifted would be caught rather
-        // than believed.
-        for c in self.contributions.values() {
-            self.sites_attempted += c.sites_attempted;
-            self.always_emitted_seeds += c.always_emitted_seeds;
-            self.synthesized_examined += c.synthesized_examined;
-            self.synthesized_approximated += c.synthesized_approximated;
-        }
-        let holes: Vec<(String, AlwaysEmittedFailure)> = self
-            .contributions
-            .values()
-            .flat_map(|c| c.always_emitted_holes.iter().cloned())
-            .collect();
-        for (name, failure) in holes {
-            self.uninstantiated_roots
-                .entry(name)
-                .or_default()
-                .always_emitted_sites
-                .push(failure);
-        }
+        self.refresh_root_hole_sites();
 
         // Which holes nevertheless have concrete instances from other call
         // sites. A post-pass because a root is recorded before any body is
@@ -2420,7 +2554,102 @@ impl InstanceGraph {
         record_coroutine_helpers(self, ws, &entered, &left);
         self.run_stats.post_pass_ns = post_pass_start.elapsed().as_nanos() as u64;
         self.run_stats.derive_ns += self.run_stats.post_pass_ns;
-        Prune { pruned, region }
+        Prune { pruned, region, broad_scans: 0 }
+    }
+
+    fn derive_incremental(
+        &mut self,
+        ws: &Workspace,
+        affected: &[Owner],
+        changed_decls: &[DeclKey],
+    ) -> Prune {
+        let started = Instant::now();
+        let lost: Vec<Instance> = std::mem::take(&mut self.lost).into_iter().collect();
+        let prune = self.stranded(&lost);
+        for instance in &prune.pruned {
+            self.uninstall(&Owner::Instance(instance.clone()));
+        }
+
+        let entered: Vec<Instance> = self.delta_added.iter().cloned().collect();
+        let left: Vec<Instance> = self.delta_removed.iter().cloned().collect();
+        let mut touched_instances: BTreeSet<Instance> = affected
+            .iter()
+            .filter_map(Owner::instance)
+            .cloned()
+            .collect();
+        touched_instances.extend(entered.iter().cloned());
+        touched_instances.extend(left.iter().cloned());
+
+        let mut touched_decls: BTreeSet<DeclKey> = changed_decls.iter().cloned().collect();
+        touched_decls.extend(entered.iter().map(|i| DeclKey(i.func)));
+        touched_decls.extend(left.iter().map(|i| DeclKey(i.func)));
+        let mut active_decls: BTreeSet<DeclKey> = changed_decls
+            .iter()
+            .cloned()
+            .chain(entered.iter().map(|i| DeclKey(i.func)))
+            .collect();
+        active_decls.extend(
+            touched_decls
+                .iter()
+                .filter(|decl| self.index.decls.contains_key(decl))
+                .cloned(),
+        );
+
+        for decl in &touched_decls {
+            for member in skull_mir::lower::backend_variant_group(ws, decl.0) {
+                let member = DeclKey(member);
+                self.inline_body_deps.remove(&member);
+                self.inline_body_nomangle_roots.remove(&member);
+                let f = &ws.module(member.0.module).functions[member.0.func];
+                self.boundaries.remove(&mangle_fn(ws, f));
+            }
+        }
+        let active_decl_vec: Vec<DeclKey> = active_decls.iter().cloned().collect();
+        record_inline_body_deps(self, ws, &active_decl_vec);
+        record_inline_body_nomangle_roots(
+            self,
+            ws,
+            active_decl_vec.iter().map(|decl| decl.0),
+        );
+        self.refresh_erased_entries();
+        classify_boundaries(self, ws, &active_decl_vec);
+        record_coroutine_helpers(self, ws, &entered, &left);
+        self.refresh_root_hole_sites();
+        self.refresh_root_hole_instances(ws);
+
+        let broad_scans = usize::from(!self.graph_rejections.is_empty());
+        self.graph_rejections.retain(|rejection| {
+            !touched_instances.contains(&rejection.at)
+                && !touched_decls.contains(&DeclKey(rejection.at.func))
+        });
+        let (starts, findings) = detect_changing_instance_recursion_local(self, ws, &touched_instances);
+        self.recursion_starts = starts;
+        self.graph_rejections.extend(findings);
+        self.run_stats.derive_ns = started.elapsed().as_nanos() as u64;
+        self.run_stats.post_pass_ns = self.run_stats.derive_ns;
+        Prune { pruned: prune.pruned, region: prune.region, broad_scans }
+    }
+
+    fn refresh_root_hole_instances(&mut self, ws: &Workspace) {
+        let names: Vec<String> = self.uninstantiated_roots.keys().cloned().collect();
+        for name in names {
+            let mut count = 0;
+            if let Some(functions) = ws.functions_by_name.get(&ustr::Ustr::from(name.as_str())) {
+                let mut decls = BTreeSet::new();
+                for (module, func) in functions {
+                    let fref = FuncRef { module: *module, func: *func };
+                    decls.insert(DeclKey(skull_mir::lower::canonical_variant(ws, fref)));
+                }
+                count = decls
+                    .iter()
+                    .filter_map(|decl| self.index.decl_instances.get(decl))
+                    .map(BTreeSet::len)
+                    .sum();
+            }
+            if let Some(hole) = self.uninstantiated_roots.get_mut(&name) {
+                hole.instances = count;
+            }
+        }
     }
 
     /// **Update the graph for a BODY-ONLY change**, in place, against the same
@@ -2449,7 +2678,24 @@ impl InstanceGraph {
         roots: Vec<FuncRef>,
         changed: &[(ModuleId, BodyOwner)],
     ) -> UpdateStats {
-        let before: BTreeSet<Instance> = self.instances.clone();
+        self.update_bodies_with_edits(ws, roots, changed, &[])
+    }
+
+    pub fn update_bodies_with_edits(
+        &mut self,
+        ws: &Workspace,
+        roots: Vec<FuncRef>,
+        changed: &[(ModuleId, BodyOwner)],
+        edits: &[SpanEdit],
+    ) -> UpdateStats {
+        self.delta_added.clear();
+        self.delta_removed.clear();
+        let previous_generic_roots: BTreeMap<String, bool> = self
+            .uninstantiated_roots
+            .iter()
+            .map(|(name, hole)| (name.clone(), hole.generic_root))
+            .collect();
+        let previous_excused_roots = self.excused_generic_roots.clone();
         // Re-derived and CHECKED, not assumed: the root set is a function of
         // the declarations, so a body-only edit cannot move it, and an edit
         // that did move it is an interface change the caller must rebuild for
@@ -2463,6 +2709,12 @@ impl InstanceGraph {
             previous_roots.len(),
             self.root_instances.len()
         );
+        for (name, generic_root) in previous_generic_roots {
+            self.uninstantiated_roots.entry(name).or_default().generic_root = generic_root;
+        }
+        self.excused_generic_roots = previous_excused_roots;
+
+        self.shift_contribution_spans(edits);
 
         // No removal step: `run` expands every pending owner unconditionally
         // and `commit` inserts over whatever was there, so an affected owner's
@@ -2471,7 +2723,7 @@ impl InstanceGraph {
         let affected = self.affected_owners(ws, changed);
         let run = self.run(ws, affected.clone());
         self.run_stats = run;
-        let prune = self.derive(ws, true);
+        let revisited_owners = self.last_run_owners.clone();
         let changed_decls = changed.iter().filter_map(|(module, owner)| match owner {
             BodyOwner::Function(func) => Some(skull_mir::lower::canonical_variant(
                 ws,
@@ -2479,19 +2731,67 @@ impl InstanceGraph {
             )),
             _ => None,
         });
-        record_inline_body_nomangle_roots(self, ws, changed_decls);
+        let changed_decls: Vec<DeclKey> = changed_decls.map(DeclKey).collect();
+        let prune = self.derive_incremental(ws, &affected, &changed_decls);
+        let added = self.delta_added.clone();
+        let removed = self.delta_removed.clone();
+        let mut revisited: BTreeSet<Instance> = affected
+            .iter()
+            .filter_map(Owner::instance)
+            .filter(|instance| self.instances.contains(*instance))
+            .cloned()
+            .collect();
+        revisited.extend(added.iter().cloned());
         UpdateStats {
             affected: affected.len(),
             expanded: run.expanded,
             pruned: prune.pruned.len(),
             suspect_region: prune.region,
-            newly_reached: self.instances.difference(&before).count(),
-            added: self.instances.difference(&before).cloned().collect(),
-            removed: before.difference(&self.instances).cloned().collect(),
+            newly_reached: added.len(),
+            added,
+            removed,
             owners: self.contributions.len(),
             instances: self.instances.len(),
             settle_rounds: run.settle_rounds,
+            revisited,
+            revisited_owners: revisited_owners.clone(),
+            retracted_owners: self.last_run_retracted.clone(),
+            broad_scans: prune.broad_scans,
             census: run,
+        }
+    }
+
+    fn shift_contribution_spans(&mut self, edits: &[SpanEdit]) {
+        for edit in edits {
+            let owners: Vec<Owner> = self
+                .index
+                .span_owners
+                .get(&edit.file)
+                .into_iter()
+                .flat_map(|owners| owners.iter().cloned())
+                .collect();
+            for owner in owners {
+                let Some(contribution) = self.contributions.get_mut(&owner) else { continue };
+                for edge in &mut contribution.edges {
+                    shift_graph_span(&mut edge.span, edit);
+                }
+                for record in contribution
+                    .call_sites
+                    .values_mut()
+                    .chain(contribution.always_call_sites.values_mut())
+                {
+                    shift_graph_span(&mut record.span, edit);
+                }
+                for unresolved in &mut contribution.unresolved {
+                    shift_graph_span(&mut unresolved.span, edit);
+                }
+                for rejection in &mut contribution.rejections {
+                    shift_graph_span(&mut rejection.span, edit);
+                }
+                for (_, failure) in &mut contribution.always_emitted_holes {
+                    shift_graph_span(&mut failure.span, edit);
+                }
+            }
         }
     }
 
@@ -2500,37 +2800,29 @@ impl InstanceGraph {
     /// Two causes, and the second is the one a "re-walk the edited body" rule
     /// misses. An owner's contribution is stale if
     ///
-    /// - the edited body IS its body, or
-    /// - it QUOTES the edited file. Every recorded fact carries a span, and an
-    ///   edit anywhere in a file shifts the offsets of everything after it, so
-    ///   an untouched body in the same file holds spans that no longer match
-    ///   the workspace. It is not even confined to one file: a struct literal
-    ///   that omits a field injects that field's initializer from the DECLARING
-    ///   struct's module, so an instance records sites spanned in a file it does
-    ///   not live in.
     ///
-    /// The second cause was found by the always-emitted-hole fixture, whose
-    /// edit made one identifier a character longer: every span in `main` moved
-    /// by one byte and the updated graph kept the old ones.
+    /// Coordinate relocation is handled separately by
+    /// [`Self::shift_contribution_spans`]. An owner quoting the edited file is
+    /// not semantically stale merely because its source coordinates moved.
     ///
     /// Total over [`BodyOwner`] on purpose: an arm that silently did nothing
     /// would leave a stale contribution behind and the graph would still look
     /// consistent with itself.
     fn affected_owners(&self, ws: &Workspace, changed: &[(ModuleId, BodyOwner)]) -> Vec<Owner> {
-        let mut changed_files: BTreeSet<ustr::Ustr> = BTreeSet::new();
-        let mut changed_decls: BTreeSet<DeclKey> = BTreeSet::new();
         let mut changed_seeds: Vec<Owner> = Vec::new();
         for (module, body_owner) in changed {
-            changed_files.insert(ws.module(*module).file);
             match body_owner {
                 // The graph keys instances on bone's collapsed representative,
                 // so a backend sibling's body reaches its instances through the
                 // same canonicalization `build` seeds roots with.
                 BodyOwner::Function(f) => {
-                    changed_decls.insert(DeclKey(skull_mir::lower::canonical_variant(
+                    let fref = skull_mir::lower::canonical_variant(
                         ws,
                         FuncRef { module: *module, func: *f },
-                    )));
+                    );
+                    if let Some(instances) = self.index.decl_instances.get(&DeclKey(fref)) {
+                        changed_seeds.extend(instances.iter().cloned().map(Owner::Instance));
+                    }
                 }
                 // An owner in its own right. Reachable through a `const`
                 // initializer, whose VALUE is a body
@@ -2561,13 +2853,6 @@ impl InstanceGraph {
             }
         }
         let mut out: Vec<Owner> = changed_seeds;
-        for (owner, c) in &self.contributions {
-            let quotes_edit = c.span_files.iter().any(|f| changed_files.contains(f));
-            let is_edited_body = owner.instance().is_some_and(|i| changed_decls.contains(&DeclKey(i.func)));
-            if quotes_edit || is_edited_body {
-                out.push(owner.clone());
-            }
-        }
         out.sort();
         out.dedup();
         out
@@ -2837,7 +3122,11 @@ impl InstanceGraph {
                 }
             }
         }
-        Prune { pruned: region.difference(&survives).cloned().collect(), region: region.len() }
+        Prune {
+            pruned: region.difference(&survives).cloned().collect(),
+            region: region.len(),
+            broad_scans: 0,
+        }
     }
 
     /// Instances the graph holds that no root reaches. The whole-graph
@@ -3027,6 +3316,7 @@ struct Prune {
     /// How many instances the suspect walk VISITED to produce `pruned` -- the
     /// forward closure of what lost an in-edge.
     region: usize,
+    broad_scans: usize,
 }
 
 /// What one [`InstanceGraph::update_bodies`] did, as a structural census.
@@ -3069,6 +3359,15 @@ pub struct UpdateStats {
     pub instances: usize,
     /// See [`RunStats::settle_rounds`].
     pub settle_rounds: usize,
+    /// Live instances whose owner records were revisited or newly installed.
+    pub revisited: BTreeSet<Instance>,
+    /// Owner contributions replaced by this update, including globals and
+    /// decorators that have no instance key.
+    pub revisited_owners: BTreeSet<Owner>,
+    /// Revisited owners that had a prior contribution to retract.
+    pub retracted_owners: BTreeSet<Owner>,
+    /// Whole-graph diagnostic vectors touched by a local post-pass.
+    pub broad_scans: usize,
     /// The same denominator and phase census retained on the graph after the
     /// update, so callers do not need to infer a full rebuild from `expanded`.
     pub census: RunStats,
@@ -3518,6 +3817,58 @@ fn detect_changing_instance_recursion(g: &mut InstanceGraph, ws: &Workspace) {
             message,
         });
     }
+}
+
+fn detect_changing_instance_recursion_local(
+    g: &InstanceGraph,
+    ws: &Workspace,
+    seeds: &BTreeSet<Instance>,
+) -> (usize, Vec<Rejection>) {
+    let mut starts: Vec<Instance> = seeds
+        .iter()
+        .filter(|i| {
+            g.contributions.contains_key(&Owner::Instance((*i).clone()))
+                && g.index.decls.get(&DeclKey(i.func)).is_some_and(|n| *n > 1)
+        })
+        .cloned()
+        .collect();
+    starts.sort();
+    let mut found = Vec::new();
+    let mut already = BTreeSet::new();
+    for start in starts.iter() {
+        let key = DeclKey(start.func);
+        if !already.insert(key) {
+            continue;
+        }
+        let mut seen = BTreeSet::new();
+        let mut queue = Vec::new();
+        if let Some(c) = g.contributions.get(&Owner::Instance(start.clone())) {
+            queue.extend(c.edges.iter().map(|e| (e.to.clone(), e.span)));
+        }
+        while let Some((node, via)) = queue.pop() {
+            if !seen.insert(node.clone()) {
+                continue;
+            }
+            if node.func == start.func && node.args != start.args {
+                found.push(Rejection {
+                    kind: RejectionKind::ChangingInstanceRecursion,
+                    at: start.clone(),
+                    span: via,
+                    message: format!(
+                        "polymorphic recursion: `{}` recurs as `{}`; instantiation does not \
+                         terminate on a recursive call whose type arguments change",
+                        g.symbol(ws, start),
+                        g.symbol(ws, &node)
+                    ),
+                });
+                break;
+            }
+            if let Some(c) = g.contributions.get(&Owner::Instance(node)) {
+                queue.extend(c.edges.iter().map(|e| (e.to.clone(), e.span)));
+            }
+        }
+    }
+    (starts.len(), found)
 }
 
 /// A synthesized `iter` witness: the `for` head's or a coerced argument's.

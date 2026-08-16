@@ -10,6 +10,7 @@ pub enum LiveUpdate {
     NoChange,
     BodyOnly {
         reinferred: Vec<(ModuleId, BodyOwner)>,
+        span_edits: Vec<skull::instance_graph::SpanEdit>,
         cook_ms: f64,
     },
     Full {
@@ -197,6 +198,7 @@ impl LiveProject {
     fn update(&mut self, feed: &[(String, String)], started: Instant) -> Result<LiveUpdate> {
         let sources = self.sources.clone();
         let mut reinferred = Vec::new();
+        let mut span_edits = Vec::new();
         let mut full = false;
         let mut changed = false;
         for (path, text) in feed {
@@ -208,6 +210,14 @@ impl LiveProject {
                 bone_incremental::session::UpdateTier::BodyOnly => {
                     changed = true;
                     reinferred.extend(update.reinferred);
+                    if let Some(edit) = update.body_update.edit {
+                        span_edits.push(skull::instance_graph::SpanEdit {
+                            file: edit.file,
+                            at: edit.at,
+                            byte_delta: edit.byte_delta,
+                            line_delta: edit.line_delta,
+                        });
+                    }
                 }
                 bone_incremental::session::UpdateTier::Interface
                 | bone_incremental::session::UpdateTier::FullUser => {
@@ -226,6 +236,7 @@ impl LiveProject {
         } else {
             Ok(LiveUpdate::BodyOnly {
                 reinferred,
+                span_edits,
                 cook_ms,
             })
         }

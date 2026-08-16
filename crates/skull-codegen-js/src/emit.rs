@@ -9,7 +9,7 @@
 //! `CompilerError` (reject, don't emit-and-hope); the subset grows with the
 //! backend.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use bone_semantic::inference::Workspace;
 use comfy_la_arena::{Idx, RawIdx};
@@ -2620,8 +2620,8 @@ pub fn emit_with_closure(
         false,
         &session.graph,
         &session.view,
-        std::sync::Arc::clone(&session.concrete),
-        std::sync::Arc::clone(&session.always),
+        session.concrete.plans.as_ref(),
+        &session.concrete.always_plans,
         scx.interner_handle(),
     )?;
     drain_worklists(ws, &scx, &mut st)?;
@@ -2748,8 +2748,7 @@ struct JsSession {
     roots: Vec<FuncRef>,
     graph: InstanceGraph,
     view: ArtifactView,
-    concrete: std::sync::Arc<BTreeMap<Instance, skull_mir::concrete::ConcreteBodyPlan>>,
-    always: std::sync::Arc<skull_mir::concrete::ConcreteAlwaysPlans>,
+    concrete: skull_graph::concrete_body::ConcreteBodies,
     last_update: Option<JsGraphUpdate>,
 }
 
@@ -2851,8 +2850,7 @@ fn new_js_session(
         roots: roots.to_vec(),
         graph,
         view,
-        concrete: concrete.plans,
-        always: std::sync::Arc::new(concrete.always_plans),
+        concrete,
         last_update: None,
     }
 }
@@ -2862,21 +2860,32 @@ fn update_js_session(
     session: &mut JsSession,
     roots: &[FuncRef],
     changed: &[(bone_semantic::prelude::ModuleId, bone_semantic::hir::BodyOwner)],
+    edits: &[skull_graph::instance_graph::SpanEdit],
 ) {
     let before = session.graph.instances.len();
-    let update = session.graph.update_bodies(ws, roots.to_vec(), changed);
-    let concrete = skull_graph::concrete_body::build(ws, &mut session.graph);
-    let mappings = artifact::ArtifactMappings::for_backend(bone_semantic::hir::FnBackend::Js)
-        .with_supply(&crate::JsBackendRealization);
-    session.view = artifact::realize(
+    let update = session
+        .graph
+        .update_bodies_with_edits(ws, roots.to_vec(), changed, edits);
+    session.concrete.update_local(
         ws,
         &session.graph,
-        &artifact::ArtifactRequest::new(target_projection::JAVASCRIPT_WEB, roots)
-            .with_mappings(mappings)
-            .with_symbols(&artifact::REALIZED_SYMBOLS),
+        &update.revisited,
+        &update.removed,
+        &update.revisited_owners,
     );
-    session.concrete = concrete.plans;
-    session.always = std::sync::Arc::new(concrete.always_plans);
+    let mappings = artifact::ArtifactMappings::for_backend(bone_semantic::hir::FnBackend::Js)
+        .with_supply(&crate::JsBackendRealization);
+    let request = artifact::ArtifactRequest::new(target_projection::JAVASCRIPT_WEB, roots)
+        .with_mappings(mappings)
+        .with_symbols(&artifact::REALIZED_SYMBOLS);
+    session.view.update_local(
+        ws,
+        &session.graph,
+        &request,
+        &update.revisited,
+        &update.added,
+        &update.removed,
+    );
     session.roots = roots.to_vec();
     session.last_update = Some(JsGraphUpdate {
         before,
@@ -3006,8 +3015,8 @@ fn assemble_program_core(
         true,
         &session.graph,
         &session.view,
-        std::sync::Arc::clone(&session.concrete),
-        std::sync::Arc::clone(&session.always),
+        session.concrete.plans.as_ref(),
+        &session.concrete.always_plans,
         scx.interner_handle(),
     )?;
 
@@ -3138,6 +3147,7 @@ fn assemble_program_core(
         let name = st.names.name_for_decl(ws, *fr).expect("emitted body has a name");
         let plan = session
             .concrete
+            .plans
             .get(&Instance::base(*fr))
             .ok_or_else(|| err(format!("JS: no concrete plan for `{name}`")))?;
         match emit_lowered_fn(ws, scx.interner(), mf, name, plan, &st.names, &hoisted, &st.gctx) {
@@ -3365,6 +3375,16 @@ pub fn emit_overlay(
     cache: &mut JsEmitCache,
     reinferred: &[(bone_semantic::prelude::ModuleId, bone_semantic::hir::BodyOwner)],
 ) -> Result<JsReload, CompilerError> {
+    emit_overlay_with_span_edits(ws, user_mid, cache, reinferred, &[])
+}
+
+pub fn emit_overlay_with_span_edits(
+    ws: &Workspace,
+    user_mid: bone_semantic::prelude::ModuleId,
+    cache: &mut JsEmitCache,
+    reinferred: &[(bone_semantic::prelude::ModuleId, bone_semantic::hir::BodyOwner)],
+    edits: &[skull_graph::instance_graph::SpanEdit],
+) -> Result<JsReload, CompilerError> {
     if reinferred
         .iter()
         .any(|(_, owner)| {
@@ -3411,7 +3431,7 @@ pub fn emit_overlay(
     if current_roots != session_roots {
         return Ok(JsReload::FullRequired);
     }
-    update_js_session(ws, &mut cache.session, &root_plan.refs, reinferred);
+    update_js_session(ws, &mut cache.session, &root_plan.refs, reinferred, edits);
     let current = assemble_program_core(ws, &cache.scx, &root_plan.named, &cache.session)?;
     let update = cache
         .session
@@ -3565,7 +3585,7 @@ pub fn emit_overlay(
         out.push_str(&emit_inline_js_fn(
             ws,
             &cache.scx,
-            &cache.session.concrete,
+            cache.session.concrete.plans.as_ref(),
             &rebind_instance,
             rebind,
             "__rock_rebind_system",
@@ -3643,9 +3663,9 @@ struct JsInlineBody {
     decl: FuncRef,
 }
 
-struct WorklistState {
-    concrete: std::sync::Arc<BTreeMap<Instance, skull_mir::concrete::ConcreteBodyPlan>>,
-    always: std::sync::Arc<skull_mir::concrete::ConcreteAlwaysPlans>,
+struct WorklistState<'a> {
+    concrete: &'a skull_mir::concrete::ConcretePlans,
+    always: &'a skull_mir::concrete::ConcreteAlwaysPlans,
     cache: skull_transform::InlineCache,
     names: CalleeNames,
     queue: Vec<FuncRef>,
@@ -3686,7 +3706,7 @@ fn add_inline_js_body(bodies: &mut Vec<JsInlineBody>, instance: Instance, decl: 
     }
 }
 
-impl WorklistState {
+impl<'a> WorklistState<'a> {
     fn new(
         ws: &Workspace,
         scx: &skull_mir::lower::ScalarCtx,
@@ -3694,8 +3714,8 @@ impl WorklistState {
         program_mode: bool,
         graph: &InstanceGraph,
         view: &ArtifactView,
-        concrete: std::sync::Arc<BTreeMap<Instance, skull_mir::concrete::ConcreteBodyPlan>>,
-        always: std::sync::Arc<skull_mir::concrete::ConcreteAlwaysPlans>,
+        concrete: &'a skull_mir::concrete::ConcretePlans,
+        always: &'a skull_mir::concrete::ConcreteAlwaysPlans,
         _interner: std::sync::Arc<skull_mir::monoty::MonoInterner>,
     ) -> Result<Self, CompilerError> {
         let mut names = CalleeNames::from_graph(graph);
@@ -3899,13 +3919,13 @@ fn collect_spec_bound_calls(
 /// declarations and symbols come from `ArtifactView`; this type only lowers
 /// retained declarations, follows post-inline residual calls, and emits the
 /// global/opaque bodies those definitions still require.
-struct JsDelivery<'a> {
+struct JsDelivery<'a, 'b> {
     ws: &'a Workspace,
     scx: &'a skull_mir::lower::ScalarCtx,
-    st: &'a mut WorklistState,
+    st: &'a mut WorklistState<'b>,
 }
 
-impl JsDelivery<'_> {
+impl<'a, 'b> JsDelivery<'a, 'b> {
     /// Lower + transform one fn through the same per-body pipeline the luajit
     /// path runs (lower -> inline -> cleanup -> closures -> FORL -> residual-
     /// bound-call validation; coroutines skip inline/FORL), then record it.
@@ -3930,7 +3950,7 @@ impl JsDelivery<'_> {
             self.ws,
             self.scx,
             plan,
-            &self.st.concrete,
+            self.st.concrete,
         ) {
             Ok(mf) => mf,
             Err(e) => {
@@ -4370,7 +4390,7 @@ fn check_scalar_abi(
     lowered: &[(FuncRef, MirFunc)],
     spec_lowered: &[(Instance, MirFunc)],
     bodies: &[&MirFunc],
-    concrete: &BTreeMap<Instance, skull_mir::concrete::ConcreteBodyPlan>,
+    concrete: &skull_mir::concrete::ConcretePlans,
     artifact_decls: &HashMap<Instance, FuncRef>,
 ) -> Vec<(String, CompilerError)> {
     let arities: HashMap<FuncRef, usize> =
@@ -6599,6 +6619,8 @@ mod tests {
                 .with_symbols(&artifact::REALIZED_SYMBOLS),
         );
 
+        let concrete = skull_mir::concrete::ConcretePlans::new();
+        let always = skull_mir::concrete::ConcreteAlwaysPlans::default();
         let result = WorklistState::new(
             &ws,
             &scx,
@@ -6606,8 +6628,8 @@ mod tests {
             false,
             &graph,
             &view,
-            std::sync::Arc::new(BTreeMap::new()),
-            std::sync::Arc::new(skull_mir::concrete::ConcreteAlwaysPlans::default()),
+            &concrete,
+            &always,
             interner,
         );
         let error = match result {

@@ -74,6 +74,63 @@ fn body_edit_to_inlined_callee_reemits_callers() {
 }
 
 #[test]
+fn exact_body_edit_has_no_full_concrete_or_artifact_rebuild() {
+    let v1 = "fn helper() -> int { 3 }\nfn main() { let x = helper() }";
+    let v2 = "fn helper() -> int { 5 }\nfn main() { let x = helper() }";
+    let ws1 = ws_of(v1);
+    let mid = skull::user_module_id(&ws1).unwrap();
+    let (_full, mut cache) = emit_full(&ws1, mid).expect("emit_full v1");
+    let ws2 = ws_of(v2);
+
+    let _overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "helper")]);
+    let stats = cache.repair_stats();
+    assert_eq!(stats.body_only_edits, 1, "the production route did not record a body edit");
+    assert!(stats.owners_revisited > 0, "no graph owner was revisited: {stats:?}");
+    assert!(stats.instances_revisited > 0, "no graph delta subject was visited: {stats:?}");
+    assert!(stats.graph_contributions_retracted > 0, "no graph contribution was retracted: {stats:?}");
+    assert!(stats.graph_contributions_installed > 0, "no graph contribution was installed: {stats:?}");
+    assert!(stats.concrete_entries_derived > 0, "no concrete entry was derived: {stats:?}");
+    assert!(stats.concrete_entries_reused > 0, "no unchanged concrete entry was reused: {stats:?}");
+    assert!(stats.concrete_entries_retracted > 0, "no concrete entry was retracted: {stats:?}");
+    assert!(stats.artifact_chunks_revisited > 0, "no artifact subject was revisited: {stats:?}");
+    assert_eq!(stats.full_graph_rebuilds, 0, "body-only route rebuilt the graph: {stats:?}");
+    assert_eq!(
+        stats.full_concrete_rebuilds, 0,
+        "a body-only edit rebuilt all concrete plans: {stats:?}"
+    );
+    assert_eq!(
+        stats.full_artifact_view_realizations, 0,
+        "a body-only edit rebuilt the full ArtifactView: {stats:?}"
+    );
+    assert_eq!(stats.broad_owner_scans, 0, "body-only route scanned all owners: {stats:?}");
+    assert_eq!(stats.broad_concrete_scans, 0, "body-only route scanned all concrete entries: {stats:?}");
+    assert_eq!(stats.broad_artifact_scans, 0, "body-only route scanned all artifact chunks: {stats:?}");
+    assert_eq!(stats.broad_candidate_scans, 0, "body-only route scanned all candidate keys: {stats:?}");
+}
+
+#[test]
+fn removing_the_last_edge_retracts_concrete_and_artifact_entries_locally() {
+    let v1 = "fn leaf<T>(x: T) -> T { x }\nfn main() { let x = leaf(3) }";
+    let v2 = "fn leaf<T>(x: T) -> T { x }\nfn main() { let x = 0 }";
+    let ws1 = ws_of(v1);
+    let mid = skull::user_module_id(&ws1).unwrap();
+    let (full, mut cache) = emit_full(&ws1, mid).expect("emit_full v1");
+    assert!(full.lua.contains("leaf"), "the removal fixture must emit the callee");
+
+    let ws2 = ws_of(v2);
+    let incremental = emit_incremental(&ws2, &mut cache, &[body_id(&ws2, "main")])
+        .expect("emit_incremental v2");
+    let stats = cache.repair_stats();
+    assert!(stats.instances_revisited > 0, "the changed owner was not revisited: {stats:?}");
+    assert!(stats.concrete_entries_retracted > 0, "the removed callee was not retracted: {stats:?}");
+    assert!(stats.artifact_chunks_removed > 0, "the removed callee chunk was not retracted: {stats:?}");
+    assert_eq!(stats.full_concrete_rebuilds, 0, "local removal rebuilt concrete state: {stats:?}");
+    assert_eq!(stats.full_artifact_view_realizations, 0, "local removal realized a full view: {stats:?}");
+    let fresh = emit_full(&ws2, skull::user_module_id(&ws2).unwrap()).expect("emit_full v2").0;
+    assert_eq!(incremental.lua, fresh.lua, "local removal diverged from fresh emission");
+}
+
+#[test]
 fn body_edit_to_leaf_only_reemits_itself() {
     let v1 = "@inline\nfn helper() -> int { 3 }\n\
               fn use_it() -> float { helper() }\n\

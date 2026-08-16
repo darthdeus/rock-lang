@@ -97,7 +97,19 @@ impl Case {
         assert!(!res.reinferred.is_empty(), "a body-only edit reinferred nothing");
         let ws = self.session.workspace();
         let roots = skull::mir_emit::emission_roots(ws, Some(PROJ));
-        self.graph.update_bodies(ws, roots, &res.reinferred)
+        let edits = res
+            .body_update
+            .edit
+            .into_iter()
+            .map(|edit| instance_graph::SpanEdit {
+                file: edit.file,
+                at: edit.at,
+                byte_delta: edit.byte_delta,
+                line_delta: edit.line_delta,
+            })
+            .collect::<Vec<_>>();
+        self.graph
+            .update_bodies_with_edits(ws, roots, &res.reinferred, &edits)
     }
 
     /// The updated graph must MEAN the same thing as a build from scratch.
@@ -715,6 +727,39 @@ fn a_body_with_no_facts_that_gains_a_call_is_still_re_walked() {
     assert!(case.has_instance_named("added"), "the call added to an empty body was not seen");
     assert_eq!(stats.newly_reached, 1);
     case.assert_matches_fresh("empty body gains a call");
+}
+
+#[test]
+fn a_semantic_edit_shifts_unedited_owner_spans_without_rewalking_that_owner() {
+    let mut case = Case::new(
+        "fn main() { print(other()) }\n",
+        "fn leaf() -> int { return 1 }\nfn other() -> int { return leaf() }\n",
+    );
+    let span_before = case
+        .graph
+        .contributions
+        .iter()
+        .find(|(owner, _)| owner.instance().is_some_and(|i| case.identity(i).starts_with("other")))
+        .and_then(|(_, contribution)| contribution.call_sites.values().next())
+        .map(|site| site.span.offset_range)
+        .expect("the unedited owner must have a call span");
+
+    let stats = case.edit(
+        LIB,
+        "fn leaf() -> int {\n  return 2\n}\nfn other() -> int { return leaf() }\n",
+    );
+    assert_eq!(stats.affected, 1, "the edit should rewalk only `leaf`: {stats:?}");
+    let span_after = case
+        .graph
+        .contributions
+        .iter()
+        .find(|(owner, _)| owner.instance().is_some_and(|i| case.identity(i).starts_with("other")))
+        .and_then(|(_, contribution)| contribution.call_sites.values().next())
+        .map(|site| site.span.offset_range)
+        .expect("the unedited owner must retain its call span");
+    assert!(span_after.0 > span_before.0, "the unedited call span did not relocate");
+    assert_eq!(stats.revisited_owners.len(), 1, "span relocation widened the semantic delta");
+    case.assert_matches_fresh("semantic edit with span relocation");
 }
 
 /// The same, for an ALWAYS-EMITTED body: a `const` whose initializer had no

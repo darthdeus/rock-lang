@@ -392,6 +392,8 @@ type CacheKey = Instance;
 
 pub struct InlineCandidateTable {
     entries: HashMap<CacheKey, Option<Arc<CalleeBody>>>,
+    removed: HashSet<CacheKey>,
+    parent: Option<Arc<InlineCandidateTable>>,
     stats: InlineCandidateTableStats,
 }
 
@@ -588,13 +590,45 @@ impl InlineCandidateTable {
                 continue;
             }
             let candidate = base
-                .and_then(|table| table.entries.get(&key))
-                .cloned()
+                .and_then(|table| table.lookup(&key))
                 .expect("inline candidate table omitted an unwarmed key");
             entries.insert(key, candidate);
         }
         assert!(warmed.is_empty(), "inline candidate table warmed an unused key");
-        Self { entries, stats }
+        Self { entries, removed: HashSet::default(), parent: None, stats }
+    }
+
+    /// Publish an edit-local candidate delta over the prior immutable table.
+    /// Unchanged entries stay in the parent; only invalidated, added, and
+    /// removed identities occupy this layer.
+    pub fn from_warms_incremental(
+        base: Arc<Self>,
+        warms: Vec<InlineCandidateWarm>,
+        added: &[Instance],
+        removed: &[Instance],
+    ) -> Self {
+        let mut entries = HashMap::default();
+        for warm in warms {
+            let previous = entries.insert(warm.key, warm.candidate);
+            assert!(previous.is_none(), "inline candidate delta received a duplicate key");
+        }
+        let mut removed_keys = removed.iter().cloned().collect::<HashSet<_>>();
+        for key in entries.keys() {
+            removed_keys.remove(key);
+        }
+        let mut stats = base.stats.clone();
+        stats.keys = stats
+            .keys
+            .saturating_add(added.len())
+            .saturating_sub(removed.len());
+        stats.warmed = entries.len();
+        stats.reused = stats.keys.saturating_sub(stats.warmed);
+        Self {
+            entries,
+            removed: removed_keys,
+            parent: Some(base),
+            stats,
+        }
     }
 
     pub fn stats(&self) -> &InlineCandidateTableStats {
@@ -602,20 +636,36 @@ impl InlineCandidateTable {
     }
 
     pub fn contains(&self, key: &CacheKey) -> bool {
-        self.entries.contains_key(key)
+        self.lookup(key).is_some()
     }
 
     pub fn keys(&self) -> Vec<Instance> {
-        let mut keys: Vec<_> = self.entries.keys().cloned().collect();
+        let mut keys = self
+            .parent
+            .as_ref()
+            .map(|parent| parent.keys())
+            .unwrap_or_default();
+        keys.retain(|key| !self.removed.contains(key));
+        keys.extend(self.entries.keys().cloned());
         keys.sort();
+        keys.dedup();
         keys
     }
 
     pub fn canonical_body(&self, key: &Instance) -> Option<Arc<MirFunc>> {
-        self.entries
-            .get(key)
-            .and_then(|candidate| candidate.as_ref())
+        self.lookup(key)
+            .and_then(|candidate| candidate)
             .map(|candidate| Arc::clone(&candidate.canonical))
+    }
+
+    fn lookup(&self, key: &CacheKey) -> Option<Option<Arc<CalleeBody>>> {
+        if let Some(candidate) = self.entries.get(key) {
+            return Some(candidate.clone());
+        }
+        if self.removed.contains(key) {
+            return None;
+        }
+        self.parent.as_ref().and_then(|parent| parent.lookup(key))
     }
 }
 
@@ -1623,7 +1673,7 @@ fn get<'a>(
     }
     if !cache.cands.contains_key(inst) {
         if let Some(table) = cache.shared.as_ref() {
-            if let Some(candidate) = table.entries.get(inst).cloned() {
+            if let Some(candidate) = table.lookup(inst) {
                 if cache.census_enabled {
                     cache.census.candidate_cache_hits += 1;
                 }

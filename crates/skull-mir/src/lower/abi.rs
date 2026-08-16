@@ -1696,7 +1696,7 @@ fn owner_abi_plan_impl(
     let derived = if !requires_concrete_body_plan(ws, owner) {
         BackendFnAbiPlan::for_boundary_instance(ws, scx, owner)
     } else {
-        let plan = in_hand.or_else(|| plans.get(owner)).ok_or_else(|| {
+        let plan = in_hand.or_else(|| plans.get(owner).map(|plan| &**plan)).ok_or_else(|| {
             skull_parser::CompilerError::new_no_location(format!(
                 "internal: concrete ABI plan is missing for owner `{}` ({})",
                 ws.module(owner.func.module).functions[owner.func.func].name,

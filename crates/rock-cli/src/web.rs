@@ -393,12 +393,13 @@ impl WebCompiler {
                 self.emit_full(project, out_dir)?;
                 Ok(WebCompile::Reload)
             }
-            crate::live_project::LiveUpdate::BodyOnly { reinferred, .. } => {
-                match skull_codegen_js::emit::emit_overlay(
+            crate::live_project::LiveUpdate::BodyOnly { reinferred, span_edits, .. } => {
+                match skull_codegen_js::emit::emit_overlay_with_span_edits(
                     self.project.workspace(),
                     self.project.entry_module(),
                     &mut self.cache,
                     &reinferred,
+                    &span_edits,
                 )
                 .map_err(|error| anyhow::anyhow!(
                     "{}",

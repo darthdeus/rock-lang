@@ -143,7 +143,7 @@ fn main() {
         .next()
         .copied()
         .expect("concrete plan has no type nodes");
-    let mut poisoned = plan.clone();
+    let mut poisoned = (**plan).clone();
     poisoned.types.ty_types.remove(&missing);
     let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(g.interner().clone());
     assert!(
@@ -284,7 +284,7 @@ fn main() {
     assert!(plan.types.is_untyped_expr(null), "unresolved null slot was not recorded");
 
     let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(g.interner().clone());
-    let mut poisoned = plan.clone();
+    let mut poisoned = (**plan).clone();
     poisoned.types.untyped_exprs.clear();
     let err = skull_mir::lower::lower_instance_with_plans(&ws, &scx, &poisoned, &bodies.plans)
         .expect_err("lowering accepted an untyped slot after its plan marker was removed");
@@ -369,7 +369,7 @@ fn main() {
         .map(|(_, plan)| plan)
         .expect("main has no concrete plan");
     assert!(!main_plan.callees.is_empty(), "fixture has no concrete site population");
-    let mut poisoned = main_plan.clone();
+    let mut poisoned = (**main_plan).clone();
     poisoned.callees.clear();
     let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(g.interner().clone());
     assert!(
@@ -421,7 +421,7 @@ fn main() {
         .iter()
         .find_map(|(site, inst)| (inst == &callee).then_some(site))
         .expect("id call site disappeared");
-    let mut caller = main_plan.clone();
+    let mut caller = (**main_plan).clone();
     std::sync::Arc::make_mut(
         caller
             .callee_signatures
@@ -430,13 +430,12 @@ fn main() {
     )
     .params[0] = float;
     let mut plans = (*bodies.plans).clone();
-    std::sync::Arc::make_mut(
-        &mut plans
+    let callee_plan = std::sync::Arc::make_mut(
+        plans
             .get_mut(&callee)
-            .expect("selected callee plan disappeared")
-            .signature,
-    )
-    .params[0] = float;
+            .expect("selected callee plan disappeared"),
+    );
+    std::sync::Arc::make_mut(&mut callee_plan.signature).params[0] = float;
     let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(g.interner().clone());
     let mir = skull_mir::lower::lower_instance_with_plans(&ws, &scx, &caller, &plans)
         .expect("plan-driven call lowering failed");
@@ -470,13 +469,12 @@ fn main() {
         .cloned()
         .expect("main has no concrete id call");
     let mut plans = (*bodies.plans).clone();
-    std::sync::Arc::make_mut(
-        &mut plans
+    let callee_plan = std::sync::Arc::make_mut(
+        plans
             .get_mut(&callee)
-            .expect("selected callee plan disappeared")
-            .signature,
-    )
-    .params[0] = g.interner().intern(MonoTy::Float);
+            .expect("selected callee plan disappeared"),
+    );
+    std::sync::Arc::make_mut(&mut callee_plan.signature).params[0] = g.interner().intern(MonoTy::Float);
     let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(g.interner().clone());
     let err = skull_mir::lower::lower_instance_with_plans(&ws, &scx, main_plan, &plans)
         .expect_err("lowering accepted a mismatched callee body plan");
@@ -503,7 +501,7 @@ fn main() {
         .find(|inst| ws.module(inst.func.module).functions[inst.func.func].name.as_str() == "id")
         .cloned()
         .expect("id has no concrete plan");
-    let mut plan = bodies.plans.get(&callee).expect("id plan disappeared").clone();
+    let mut plan = (**bodies.plans.get(&callee).expect("id plan disappeared")).clone();
     assert!(plan.signature.result.is_some(), "body signature has no result population");
     std::sync::Arc::make_mut(&mut plan.signature).result = Some(g.interner().intern(MonoTy::Float));
     let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(g.interner().clone());
@@ -568,7 +566,7 @@ fn main() {
     assert!(rendered.iter().any(|ty| ty == "int?"), "missing int default table: {rendered:?}");
     assert!(rendered.iter().any(|ty| ty == "string?"), "missing string default table: {rendered:?}");
 
-    let mut poisoned = main.clone();
+    let mut poisoned = (**main).clone();
     let domain = poisoned.foreign_domains.keys().next().cloned().expect("domain");
     poisoned.foreign_domains.remove(&domain);
     let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(g.interner().clone());
@@ -614,7 +612,7 @@ fn main() {
         "missing string default table: {rendered:?}"
     );
     let domain = main.foreign_domains.keys().next().cloned().expect("default domain");
-    let mut poisoned = main.clone();
+    let mut poisoned = (**main).clone();
     poisoned.foreign_domains.remove(&domain);
     let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(g.interner().clone());
     assert!(
@@ -687,13 +685,12 @@ fn main() { print("{startup}") }
     let call_site = plan.callees.keys().next().expect("global call site");
     let callee = plan.callees[call_site].clone();
     let mut mismatched_plans = (*bodies.plans).clone();
-    std::sync::Arc::make_mut(
-        &mut mismatched_plans
+    let callee_plan = std::sync::Arc::make_mut(
+        mismatched_plans
             .get_mut(&callee)
-            .expect("global callee plan disappeared")
-            .signature,
-    )
-    .result = Some(g.interner().intern(MonoTy::Float));
+            .expect("global callee plan disappeared"),
+    );
+    std::sync::Arc::make_mut(&mut callee_plan.signature).result = Some(g.interner().intern(MonoTy::Float));
     let err = skull_mir::lower::lower_global_with_plans(
         &ws,
         &scx,

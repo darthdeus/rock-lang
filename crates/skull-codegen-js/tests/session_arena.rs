@@ -217,6 +217,10 @@ fn every_js_production_route_enters_the_shared_session() {
         "one JS session updater"
     );
     assert!(
+        source.contains("update_bodies_with_edits"),
+        "the JS session must forward body edit metadata into graph repair"
+    );
+    assert!(
         source.contains("update.added") && source.contains("update.removed"),
         "the session must publish the graph's exact delta populations"
     );

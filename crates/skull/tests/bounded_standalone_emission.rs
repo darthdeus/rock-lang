@@ -257,14 +257,13 @@ fn main() {
         params: Vec::new(),
     };
     let wrong_result = graph.interner().intern(MonoTy::Tuple(vec![MonoTy::Bool, pair]));
-    std::sync::Arc::make_mut(
-        &mut poisoned_plans
+    let witness_plan = std::sync::Arc::make_mut(
+        poisoned_plans
             .get_mut(&witness)
-            .expect("witness plan disappeared")
-            .signature,
-    )
-    .result = Some(wrong_result);
-    let mut poisoned_owner = plan.clone();
+            .expect("witness plan disappeared"),
+    );
+    std::sync::Arc::make_mut(&mut witness_plan.signature).result = Some(wrong_result);
+    let mut poisoned_owner = (**plan).clone();
     for (site, callee) in &poisoned_owner.callees {
         if callee == &witness {
             std::sync::Arc::make_mut(

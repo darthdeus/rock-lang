@@ -2363,6 +2363,19 @@ pub fn skull_iter_incremental(path: &str, iters: usize, warmup: usize) -> Result
         // bone's per-edit phase breakdown (clone/cook/lower/infer), set by
         // rebuild_body_incremental inside the SAME update_file the stone loop calls.
         let update_phases = session.workspace().phase_timings.clone();
+        let span_edits = upd
+            .body_update
+            .edit
+            .as_ref()
+            .map(|edit| {
+                vec![skull::instance_graph::SpanEdit {
+                    file: edit.file,
+                    at: edit.at,
+                    byte_delta: edit.byte_delta,
+                    line_delta: edit.line_delta,
+                }]
+            })
+            .unwrap_or_default();
 
         // `SkullStone::recompile` calls `diagnostics()` inside its `cook` timing --
         // an O(workspace) error scan + sort over every module. Measure it here too
@@ -2377,7 +2390,12 @@ pub fn skull_iter_incremental(path: &str, iters: usize, warmup: usize) -> Result
         let (emit_ms, overlay_bytes, phases) = {
             let ws = session.workspace();
             let t_e = Instant::now();
-            let e = skull::mir_emit::emit_overlay(ws, &mut cache, &upd.reinferred)
+            let e = skull::mir_emit::emit_overlay_with_span_edits(
+                ws,
+                &mut cache,
+                &upd.reinferred,
+                &span_edits,
+            )
                 .map_err(|e| anyhow::anyhow!("emit_overlay: {}", e.message))?;
             (ms(t_e), e.lua.len(), e.phases)
         };
@@ -2638,13 +2656,13 @@ impl SkullStone {
     /// `t_cook` is the caller's front-end timer (includes its feed construction).
     fn route_and_emit(&mut self, update: crate::live_project::LiveUpdate, main_path: &std::path::Path, incremental_path: &std::path::Path) -> Result<SkullReload> {
         use std::path::PathBuf;
-        let (full, reinferred, cook_ms) = match update {
+        let (full, reinferred, span_edits, cook_ms) = match update {
             crate::live_project::LiveUpdate::NoChange => return Ok(SkullReload::NoChange),
-            crate::live_project::LiveUpdate::BodyOnly { reinferred, cook_ms } => {
-                (false, reinferred, cook_ms)
+            crate::live_project::LiveUpdate::BodyOnly { reinferred, span_edits, cook_ms } => {
+                (false, reinferred, span_edits, cook_ms)
             }
             crate::live_project::LiveUpdate::Full { cook_ms } => {
-                (true, Vec::new(), cook_ms)
+                (true, Vec::new(), Vec::new(), cook_ms)
             }
         };
 
@@ -2706,7 +2724,12 @@ impl SkullStone {
         } else {
             let overlay = {
                 let ws = self.project.workspace();
-                skull::mir_emit::emit_overlay(ws, &mut self.cache, &reinferred)
+                skull::mir_emit::emit_overlay_with_span_edits(
+                    ws,
+                    &mut self.cache,
+                    &reinferred,
+                    &span_edits,
+                )
                     .map_err(|e| anyhow::anyhow!("{}", render_project_err(self.project.sources(), &e)))?
             };
             if old_shader_contracts != self.cache.shader_registration_contracts() {

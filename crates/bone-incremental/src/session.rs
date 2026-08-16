@@ -10,8 +10,26 @@ use bone_semantic::{
 
 use crate::span_shift;
 
-/// Unique identifier of a Body across all modules
-type BodyId = (ModuleId, BodyOwner);
+/// Unique identifier of a Body across all modules.
+pub type BodyId = (ModuleId, BodyOwner);
+
+/// The source-coordinate change carried with one incremental body update.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TextEditDelta {
+    pub file: Ustr,
+    pub at: usize,
+    pub byte_delta: isize,
+    pub line_delta: isize,
+}
+
+/// The semantic part of a body-only update, kept separate from coordinate
+/// relocation so graph owners are not re-walked merely because spans moved.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BodyUpdate {
+    pub edit: Option<TextEditDelta>,
+    pub semantic_bodies: Vec<BodyId>,
+    pub span_only: bool,
+}
 
 /// Represents a kind of update necessary after change detection
 ///
@@ -37,6 +55,18 @@ pub struct UpdateResult {
     pub tier: UpdateTier,
     pub reinferred: Vec<BodyId>,
     pub relowered: Vec<BodyId>,
+    pub body_update: BodyUpdate,
+}
+
+impl Default for UpdateResult {
+    fn default() -> Self {
+        Self {
+            tier: UpdateTier::NoChange,
+            reinferred: Vec::new(),
+            relowered: Vec::new(),
+            body_update: BodyUpdate::default(),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -484,6 +514,7 @@ impl Session {
             .reinferred_body_count
             .store(0, std::sync::atomic::Ordering::Relaxed);
         let hash = text_hash(text);
+        let previous_text = self.files.get(path).map(|file| file.text.clone());
 
         if let Some(existing) = self.files.get(path) {
             if existing.text_hash == hash {
@@ -491,6 +522,7 @@ impl Session {
                     tier: UpdateTier::NoChange,
                     reinferred: Vec::new(),
                     relowered: Vec::new(),
+                    ..UpdateResult::default()
                 });
             }
         }
@@ -516,6 +548,7 @@ impl Session {
                 tier: UpdateTier::NoChange,
                 reinferred: Vec::new(),
                 relowered: Vec::new(),
+                ..UpdateResult::default()
             });
         }
 
@@ -576,7 +609,8 @@ impl Session {
         // The freshly parsed `module` is threaded into the chosen rebuild path
         // rather than stored: the AST is transient, so the rebuilder cooks+lowers
         // this owned copy directly (no clone-from-storage, no persisted AST).
-        match (diff, interfaces_changed) {
+        let span_only = matches!(&diff, Some(FileDiff::LayoutOnly));
+        let mut result = match (diff, interfaces_changed) {
             (Some(FileDiff::BodiesOnly(changed)), _) => {
                 if changed.len() == 1 {
                     let idx = changed[0];
@@ -599,7 +633,17 @@ impl Session {
             ),
 
             _ => self.rebuild_or_revert("update", path, |s| s.rebuild_users(), restore),
+        }?;
+        if result.tier == UpdateTier::BodyOnly && result.body_update.edit.is_none() {
+            result.body_update = BodyUpdate {
+                edit: previous_text
+                    .as_deref()
+                    .map(|old| text_edit_delta(path, old, text)),
+                semantic_bodies: (!span_only).then(|| result.reinferred.clone()).unwrap_or_default(),
+                span_only,
+            };
         }
+        Ok(result)
     }
 
     fn rebuild_interface(
@@ -843,6 +887,7 @@ impl Session {
             tier: UpdateTier::Interface,
             reinferred,
             relowered,
+            ..UpdateResult::default()
         })
     }
 
@@ -852,6 +897,7 @@ impl Session {
                 tier: UpdateTier::NoChange,
                 reinferred: Vec::new(),
                 relowered: Vec::new(),
+                ..UpdateResult::default()
             });
         };
 
@@ -963,6 +1009,7 @@ impl Session {
             tier: UpdateTier::FullUser,
             reinferred,
             relowered,
+            ..UpdateResult::default()
         })
     }
 
@@ -1119,6 +1166,7 @@ impl Session {
             tier: UpdateTier::BodyOnly,
             reinferred,
             relowered,
+            ..UpdateResult::default()
         })
     }
 
@@ -1143,7 +1191,7 @@ impl Session {
             return Ok(None);
         }
         // --- locate (non-mutating; releases the files borrow before any change) ---
-        let (es, oe, delta, idx, so, eo, line, col, old_iface, old_name, old_prints, old_macros, old_syntax_errors) = {
+        let (es, oe, delta, idx, so, eo, line, col, old_iface, old_name, old_text, old_prints, old_macros, old_syntax_errors) = {
             let Some(old) = self.files.get(path) else { return Ok(None) };
             let (es, oe, delta) = byte_diff(&old.text, new_text);
             let Some(idx) = locate_body_edit(&old.item_prints, es, oe) else { return Ok(None) };
@@ -1153,7 +1201,7 @@ impl Session {
                 p.item_span.offset_range.0, p.item_span.offset_range.1,
                 p.item_span.line_range.0, p.item_span.col_range.0,
                 p.iface_hash, p.name,
-                old.item_prints.clone(), old.macros.clone(), old.syntax_errors.clone(),
+                old.text.clone(), old.item_prints.clone(), old.macros.clone(), old.syntax_errors.clone(),
             )
         };
         let _ = (es, oe);
@@ -1230,12 +1278,17 @@ impl Session {
                 s.files.insert(path.to_string(), prev);
             }
         };
-        let result = self.rebuild_or_revert(
+        let mut result = self.rebuild_or_revert(
             "update",
             path,
             move |s| s.commit_body_relower(mid, owner, fid, mini, at, byte_delta, line_delta),
             restore,
         )?;
+        result.body_update = BodyUpdate {
+            edit: Some(text_edit_delta(path, &old_text, new_text)),
+            semantic_bodies: result.reinferred.clone(),
+            span_only: false,
+        };
         Ok(Some(result))
     }
 
@@ -1291,7 +1344,12 @@ impl Session {
         self.ws.log_time("rebuild dependents", deps_timer);
 
         let body = vec![(mid, owner)];
-        Ok(UpdateResult { tier: UpdateTier::BodyOnly, reinferred: body.clone(), relowered: body })
+        Ok(UpdateResult {
+            tier: UpdateTier::BodyOnly,
+            reinferred: body.clone(),
+            relowered: body,
+            ..UpdateResult::default()
+        })
     }
 
     fn rebuild_body_incremental(&mut self, path: &str, ast: Ast, changed_idx: usize) -> Result<UpdateResult, CompilerError> {
@@ -1402,7 +1460,8 @@ impl Session {
         Ok(UpdateResult {
             tier: UpdateTier::BodyOnly,
             reinferred: body.clone(),
-            relowered: body
+            relowered: body,
+            ..UpdateResult::default()
         })
     }
 
@@ -1517,6 +1576,19 @@ fn byte_diff(old: &str, new: &str) -> (usize, usize, isize) {
         s += 1;
     }
     (p, o.len() - s, new.len() as isize - old.len() as isize)
+}
+
+fn text_edit_delta(path: &str, old: &str, new: &str) -> TextEditDelta {
+    let (at, old_end, byte_delta) = byte_diff(old, new);
+    let new_end = (old_end as isize + byte_delta) as usize;
+    let old_lines = old.as_bytes()[at..old_end].iter().filter(|b| **b == b'\n').count();
+    let new_lines = new.as_bytes()[at..new_end].iter().filter(|b| **b == b'\n').count();
+    TextEditDelta {
+        file: Ustr::from(path),
+        at,
+        byte_delta,
+        line_delta: new_lines as isize - old_lines as isize,
+    }
 }
 
 /// The index of the single item whose function BODY block strictly contains the
