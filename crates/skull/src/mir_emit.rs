@@ -4823,6 +4823,7 @@ fn emit_full_in_with_mutation(
                 !plan.bound_tree.is_empty(),
                 "bound-plan mutation found a specialized body with no witness tree"
             );
+            let plan = std::sync::Arc::make_mut(plan);
             plan.bound_tree = Default::default();
             matched += 1;
         }
@@ -4848,6 +4849,7 @@ fn emit_full_in_with_mutation(
                     plan.signature.result.is_some(),
                     "coroutine-plan mutation found a body with no concrete result witness"
                 );
+                let plan = std::sync::Arc::make_mut(plan);
                 std::sync::Arc::make_mut(&mut plan.signature).result = None;
                 matched += 1;
             }
@@ -4867,7 +4869,7 @@ fn emit_full_in_with_mutation(
             if instance.func != body {
                 continue;
             }
-            let witness = plan
+            let witness = std::sync::Arc::make_mut(plan)
                 .bound_tree
                 .next
                 .values_mut()

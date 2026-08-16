@@ -5869,7 +5869,7 @@ mod assertion_flip_tests {
         let plan = Arc::make_mut(&mut view.concrete_plans)
             .get_mut(&passthrough)
             .expect("generic helper has a concrete plan");
-        std::sync::Arc::make_mut(&mut plan.signature).result =
+        std::sync::Arc::make_mut(&mut Arc::make_mut(plan).signature).result =
             Some(session.scx.interner().intern(MonoTy::String));
 
         let err = emit_shader_library_with_view(&ws, &session.scx, &view)
@@ -5923,7 +5923,7 @@ mod assertion_flip_tests {
         let caller_plan = Arc::make_mut(&mut view.concrete_plans)
             .get_mut(&caller_inst)
             .expect("caller plan");
-        let signature = caller_plan
+        let signature = Arc::make_mut(caller_plan)
             .callee_signatures
             .values_mut()
             .next()

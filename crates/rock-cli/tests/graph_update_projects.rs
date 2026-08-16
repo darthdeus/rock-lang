@@ -97,8 +97,19 @@ fn edit_and_compare(
     assert!(!res.reinferred.is_empty(), "{label}: a body-only edit reinferred nothing");
     let ws = session.workspace();
     let roots = skull::mir_emit::emission_roots(ws, Some(root));
+    let edits = res
+        .body_update
+        .edit
+        .into_iter()
+        .map(|edit| skull::instance_graph::SpanEdit {
+            file: edit.file,
+            at: edit.at,
+            byte_delta: edit.byte_delta,
+            line_delta: edit.line_delta,
+        })
+        .collect::<Vec<_>>();
     let t = Instant::now();
-    let stats = graph.update_bodies(ws, roots, &res.reinferred);
+    let stats = graph.update_bodies_with_edits(ws, roots, &res.reinferred, &edits);
     let update_ms = t.elapsed().as_secs_f64() * 1000.0;
 
     let fresh = graph_of(ws, root);
@@ -147,12 +158,15 @@ fn project_case(rel: &str) {
                 continue;
             }
             examined += 1;
-            let edited: String = text
+            let mut edited: String = text
                 .lines()
                 .enumerate()
                 .map(|(j, l)| if j == i { format!("// {l}") } else { l.to_string() })
                 .collect::<Vec<_>>()
                 .join("\n");
+            if text.ends_with('\n') {
+                edited.push('\n');
+            }
             let Ok(res) = session.update_file(path, &edited) else { continue };
             let ok = res.tier == UpdateTier::BodyOnly && session.diagnostics().is_empty();
             let prunes = if ok {
