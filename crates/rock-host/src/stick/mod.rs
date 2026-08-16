@@ -29,6 +29,8 @@ pub struct StickConfig {
     pub build: Option<BuildConfig>,
     /// Release asset selection consumed by both `rock package` and `rock web`.
     pub release: Option<ReleaseConfig>,
+    /// External asset roots used when ROCK_ASSET_OVERLAYS is unset.
+    pub assets: Option<AssetsConfig>,
     pub dependencies: HashMap<String, Dependency>,
 }
 
@@ -59,6 +61,11 @@ pub struct BuildVar {
 #[derive(Debug, Clone, Default)]
 pub struct ReleaseConfig {
     pub assets: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AssetsConfig {
+    pub overlays: Vec<String>,
 }
 
 pub const KNOWN_BUILD_BUILTINS: [&str; 2] = ["channel", "platform"];
@@ -394,6 +401,33 @@ impl<'de> serde::Deserialize<'de> for ReleaseConfig {
     }
 }
 
+impl<'de> serde::Deserialize<'de> for AssetsConfig {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct Vis;
+        impl<'de> serde::de::Visitor<'de> for Vis {
+            type Value = AssetsConfig;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                write!(f, "AssetsConfig struct")
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<AssetsConfig, A::Error> {
+                let mut assets = AssetsConfig::default();
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "overlays" => { assets.overlays = map.next_value()?; }
+                        other => {
+                            return Err(serde::de::Error::custom(format!(
+                                "unknown key `{other}` in [assets]; known keys: overlays"
+                            )));
+                        }
+                    }
+                }
+                Ok(assets)
+            }
+        }
+        d.deserialize_map(Vis)
+    }
+}
+
 impl<'de> serde::Deserialize<'de> for RendererConfig {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         struct Vis;
@@ -464,12 +498,14 @@ impl<'de> serde::Deserialize<'de> for StickConfig {
                 let mut ios: Option<IosConfig> = None;
                 let mut build: Option<BuildConfig> = None;
                 let mut release: Option<ReleaseConfig> = None;
+                let mut assets: Option<AssetsConfig> = None;
                 let mut dependencies: HashMap<String, Dependency> = HashMap::new();
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
                         "package" => { package = Some(map.next_value()?); }
                         "build" => { build = Some(map.next_value()?); }
                         "release" => { release = Some(map.next_value()?); }
+                        "assets" => { assets = Some(map.next_value()?); }
                         "engine" => { engine = map.next_value()?; }
                         "renderer" => { renderer = map.next_value()?; }
                         "ios" => { ios = map.next_value()?; }
@@ -478,7 +514,7 @@ impl<'de> serde::Deserialize<'de> for StickConfig {
                     }
                 }
                 let package = package.ok_or_else(|| serde::de::Error::missing_field("package"))?;
-                Ok(StickConfig { package, engine, renderer, ios, build, release, dependencies })
+                Ok(StickConfig { package, engine, renderer, ios, build, release, assets, dependencies })
             }
         }
         d.deserialize_map(Vis)
@@ -739,6 +775,44 @@ impl StickConfig {
             }
         }
         Ok(assets)
+    }
+
+    pub fn asset_overlay_defaults(&self, project_dir: &Path) -> Result<Vec<PathBuf>> {
+        let Some(assets) = &self.assets else {
+            return Ok(Vec::new());
+        };
+        let base = project_dir.canonicalize().unwrap_or_else(|_| {
+            if project_dir.is_absolute() {
+                project_dir.to_path_buf()
+            } else {
+                std::env::current_dir().unwrap_or_default().join(project_dir)
+            }
+        });
+        assets
+            .overlays
+            .iter()
+            .map(|raw| {
+                if raw.is_empty() {
+                    anyhow::bail!("stick.toml: [assets].overlays entries must not be empty");
+                }
+                let expanded = if raw == "~" || raw.starts_with("~/") || raw.starts_with("~\\") {
+                    let home = std::env::var_os("HOME")
+                        .or_else(|| std::env::var_os("USERPROFILE"))
+                        .ok_or_else(|| anyhow::anyhow!(
+                            "stick.toml: cannot expand [assets].overlays entry {raw:?}: no home directory environment"
+                        ))?;
+                    let tail = raw.trim_start_matches('~').trim_start_matches(['/', '\\']);
+                    PathBuf::from(home).join(tail)
+                } else if raw.starts_with('~') {
+                    anyhow::bail!(
+                        "stick.toml: [assets].overlays entry {raw:?} uses unsupported user-home syntax; use ~/path"
+                    );
+                } else {
+                    PathBuf::from(raw)
+                };
+                Ok(if expanded.is_absolute() { expanded } else { base.join(expanded) })
+            })
+            .collect()
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -1189,6 +1263,28 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let err = cfg.release_assets(dir.path()).expect_err("asset escape must reject");
         assert!(format!("{err}").contains("outside"), "error names the escape: {err}");
+    }
+
+    #[test]
+    fn asset_overlay_defaults_resolve_relative_and_home_paths() {
+        let project = tempfile::tempdir().unwrap();
+        let cfg = StickConfig::new_from_str(
+            "[package]\nname = \"x\"\n[assets]\noverlays = [\"../shared\", \"~/rock-assets\"]\n",
+        )
+        .unwrap();
+        let resolved = cfg.asset_overlay_defaults(project.path()).unwrap();
+        assert_eq!(resolved[0], project.path().join("../shared"));
+        let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).unwrap();
+        assert_eq!(resolved[1], PathBuf::from(home).join("rock-assets"));
+    }
+
+    #[test]
+    fn assets_section_rejects_unknown_keys() {
+        let err = StickConfig::new_from_str(
+            "[package]\nname = \"x\"\n[assets]\noverlay = [\"somewhere\"]\n",
+        )
+        .expect_err("misspelled overlay key must reject");
+        assert!(format!("{err}").contains("known keys: overlays"));
     }
 
     #[test]

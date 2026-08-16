@@ -1705,7 +1705,7 @@ pub fn skull_compile_project_with_inputs(
     // __rock_main_wrapper(main). Without the preamble game asset paths are
     // wrong; without the wrapper it never starts.
     let lua = if rock_host::project::is_game_project(&PathBuf::from(dir)).unwrap_or(false) {
-        skull_game_main(&skull_game_preamble(dir), &emit)
+        skull_game_main(&skull_game_preamble(dir)?, &emit)
     } else if emit.contains("function main(") {
         format!("{emit}\n__rock_main_wrapper(main)\n")
     } else {
@@ -1746,7 +1746,7 @@ fn skull_run_project(dir: &str) -> Result<()> {
         // fresh baseline.
         let lua_file = rock_host::project::default_main_lua_path();
         if let Err(e) = write_full_main(
-            &skull_game_preamble(dir),
+            &skull_game_preamble(dir)?,
             &lua,
             &lua_file,
             &lua_file.with_file_name("incremental.lua"),
@@ -2470,23 +2470,38 @@ pub fn skull_iter_incremental(path: &str, iters: usize, warmup: usize) -> Result
 /// The game preamble injected at the top of `main.lua`: `GAME_SOURCE_DIR` for
 /// asset resolution. cimgui is initialized by stone's global initializer.
 /// Factored so `skull_run_project` and the stone two-file path build it identically.
-fn skull_game_preamble(dir: &str) -> String {
+fn skull_game_preamble(dir: &str) -> Result<String> {
     use std::path::PathBuf;
     let abs = PathBuf::from(dir).canonicalize().unwrap_or_else(|_| PathBuf::from(dir));
     let escaped = abs.display().to_string().replace('\\', "\\\\").replace('"', "\\\"");
+    let overlay_defaults = match rock_host::stick::StickConfig::find_from_dir(&abs)? {
+        Some((_, config)) => config.asset_overlay_defaults(&abs)?,
+        None => Vec::new(),
+    };
     let renderer = match skull_renderer_target(dir) {
         Ok(skull::mir_emit::RendererTarget::Gl) => "gl",
         Ok(skull::mir_emit::RendererTarget::Wgpu) => "wgpu",
         Err(e) => panic!("cannot read renderer selection for {dir}: {e}"),
     };
     let mut full = format!("__ROCK_GAME_SOURCE_DIR = \"{escaped}\"\n");
+    full.push_str("__ROCK_ASSET_OVERLAY_DEFAULTS = {");
+    for (index, path) in overlay_defaults.iter().enumerate() {
+        if index > 0 {
+            full.push_str(", ");
+        }
+        let path = path.display().to_string().replace('\\', "\\\\").replace('"', "\\\"");
+        full.push('"');
+        full.push_str(&path);
+        full.push('"');
+    }
+    full.push_str("}\n");
     if renderer == "wgpu" {
         full.push_str("__ROCK_RENDERER_BACKEND = \"wgpu\"\n");
     }
     if !full.ends_with('\n') {
         full.push('\n');
     }
-    full
+    Ok(full)
 }
 
 fn skull_renderer_target(dir: &str) -> Result<skull::mir_emit::RendererTarget> {
@@ -2628,7 +2643,7 @@ impl SkullStone {
             let registry = build_rock_globals_registry(ws, &spec);
             (format!("{}{}", emit.lua, registry), c)
         };
-        let preamble = skull_game_preamble(dir);
+        let preamble = skull_game_preamble(dir)?;
         write_full_main(&preamble, &lua, main_path, incremental_path)?;
         let shape_hashes = skull::type_shape_hashes(project.workspace());
         Ok(SkullStone { project, cache, preamble, renderer_target, shape_hashes })
@@ -2744,6 +2759,7 @@ impl SkullStone {
                 let registry = build_rock_globals_registry(ws, &spec);
                 format!("{}{}", emit.lua, registry)
             };
+            self.preamble = skull_game_preamble(self.project.dir())?;
             let emit_ms = t_emit.elapsed().as_secs_f64() * 1000.0;
             let t_write = Instant::now();
             let bytes = write_full_main(&self.preamble, &lua, main_path, incremental_path)?;
@@ -2806,6 +2822,7 @@ impl SkullStone {
             let registry = build_rock_globals_registry(ws, &spec);
             format!("{}{}", emit.lua, registry)
         };
+        self.preamble = skull_game_preamble(self.project.dir())?;
         write_full_main(&self.preamble, &lua, main_path, incremental_path)?;
         // This program is what the (re)spawned process loads -- re-baseline the
         // shape hashes to it, including drift that arrived via a recompile that

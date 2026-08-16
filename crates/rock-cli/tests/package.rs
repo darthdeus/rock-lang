@@ -13,6 +13,7 @@ fn rock_bin() -> PathBuf {
 
 #[test]
 fn package_manifest_is_the_secret_safe_metadata_boundary() {
+    let out_dir = tempfile::tempdir().expect("package output");
     let secret = "package-known-secret-9f8d";
     let out = Command::new(rock_bin())
         .current_dir(repo_root())
@@ -23,6 +24,8 @@ fn package_manifest_is_the_secret_safe_metadata_boundary() {
             "steam",
             "--var",
             &format!("TELEMETRY_TOKEN={secret}"),
+            "--output",
+            out_dir.path().to_str().unwrap(),
         ])
         .output()
         .expect("spawn rock package");
@@ -32,8 +35,7 @@ fn package_manifest_is_the_secret_safe_metadata_boundary() {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
-    let root = repo_root();
-    let build = root.join("crates/fire/build");
+    let build = out_dir.path();
     let manifest_path = build.join("package-manifest.json");
     let manifest_text = std::fs::read_to_string(&manifest_path).expect("package manifest");
     let manifest: Value = serde_json::from_str(&manifest_text).expect("valid package manifest");

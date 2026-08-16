@@ -34,7 +34,7 @@ pub fn select_assets(
     workspace_root: &Path,
     include_web_font: bool,
 ) -> Result<AssetSelection> {
-    let overlays = configured_asset_overlays()?;
+    let overlays = configured_asset_overlays(project_dir, config)?;
     select_assets_with_overlays(
         project_dir,
         game_key,
@@ -45,35 +45,57 @@ pub fn select_assets(
     )
 }
 
-fn configured_asset_overlays() -> Result<Vec<PathBuf>> {
-    let Some(value) = std::env::var_os(ASSET_OVERLAYS_ENV) else {
-        return Ok(Vec::new());
-    };
-    if value.is_empty() {
-        return Ok(Vec::new());
+fn configured_asset_overlays(
+    project_dir: &Path,
+    config: Option<&StickConfig>,
+) -> Result<Vec<PathBuf>> {
+    let env = std::env::var_os(ASSET_OVERLAYS_ENV);
+    configured_asset_overlays_from(project_dir, config, env.as_deref())
+}
+
+fn configured_asset_overlays_from(
+    project_dir: &Path,
+    config: Option<&StickConfig>,
+    env: Option<&OsStr>,
+) -> Result<Vec<PathBuf>> {
+    if let Some(value) = env {
+        return parse_asset_overlay_paths(value);
     }
-    parse_asset_overlay_paths(&value)
+    let defaults = match config {
+        Some(config) => config.asset_overlay_defaults(project_dir)?,
+        None => Vec::new(),
+    };
+    validate_asset_overlay_paths(defaults, "stick.toml [assets].overlays")
 }
 
 fn parse_asset_overlay_paths(value: &OsStr) -> Result<Vec<PathBuf>> {
-    std::env::split_paths(value)
-        .filter(|path| !path.as_os_str().is_empty())
+    validate_asset_overlay_paths(
+        std::env::split_paths(value)
+            .filter(|path| !path.as_os_str().is_empty())
+            .collect(),
+        ASSET_OVERLAYS_ENV,
+    )
+}
+
+fn validate_asset_overlay_paths(paths: Vec<PathBuf>, source: &str) -> Result<Vec<PathBuf>> {
+    paths
+        .into_iter()
         .map(|path| {
             if !path.is_absolute() {
                 anyhow::bail!(
-                    "{ASSET_OVERLAYS_ENV} entries must be absolute directories: {}",
+                    "{source} entries must resolve to absolute directories: {}",
                     path.display()
                 );
             }
             let canonical = fs_err::canonicalize(&path).map_err(|e| {
                 anyhow::anyhow!(
-                    "{ASSET_OVERLAYS_ENV} directory {} cannot be resolved: {e}",
+                    "{source} directory {} cannot be resolved: {e}",
                     path.display()
                 )
             })?;
             if !canonical.is_dir() {
                 anyhow::bail!(
-                    "{ASSET_OVERLAYS_ENV} entry is not a directory: {}",
+                    "{source} entry is not a directory: {}",
                     canonical.display()
                 );
             }
@@ -488,5 +510,37 @@ mod tests {
             high.join("assets/fx/overlay-only.png")
         );
         assert_eq!(by_key["mag/saves/level.json"], project.join("saves/level.json"));
+    }
+
+    #[test]
+    fn explicit_overlay_environment_replaces_stick_defaults_including_with_empty() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("game");
+        let configured = root.path().join("configured");
+        let explicit = root.path().join("explicit");
+        for path in [&project, &configured, &explicit] {
+            std::fs::create_dir_all(path).unwrap();
+        }
+        let cfg = StickConfig::new_from_str(&format!(
+            "[package]\nname = \"game\"\n[assets]\noverlays = [\"{}\"]\n",
+            configured.display()
+        ))
+        .unwrap();
+
+        assert_eq!(
+            configured_asset_overlays_from(&project, Some(&cfg), None).unwrap(),
+            vec![configured.canonicalize().unwrap()]
+        );
+        let explicit_list = std::env::join_paths([explicit.as_path()]).unwrap();
+        assert_eq!(
+            configured_asset_overlays_from(&project, Some(&cfg), Some(&explicit_list)).unwrap(),
+            vec![explicit.canonicalize().unwrap()]
+        );
+        assert!(
+            configured_asset_overlays_from(&project, Some(&cfg), Some(OsStr::new("")))
+                .unwrap()
+                .is_empty(),
+            "an explicitly empty environment disables configured defaults"
+        );
     }
 }

@@ -2938,6 +2938,43 @@ mod force_full_tests {
         );
     }
 
+    #[test]
+    fn full_rebuilds_rewrite_stick_asset_overlay_defaults() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let dir_str = dir.path().to_str().unwrap().to_string();
+        let main_lua = dir.path().join("main.lua");
+        let incremental = dir.path().join("incremental.lua");
+        let source = dir.path().join("main.rock");
+        let stick = dir.path().join("stick.toml");
+        std::fs::write(&source, "fn main() {}\n").unwrap();
+        let write_stick = |overlay: &str| {
+            std::fs::write(
+                &stick,
+                format!(
+                    "[package]\nname = \"preamble-refresh\"\n[assets]\noverlays = [{overlay:?}]\n"
+                ),
+            )
+            .unwrap();
+        };
+
+        write_stick("/tmp/overlay-v1");
+        let mut skull = SkullStone::init(&dir_str, &main_lua, &incremental).expect("init");
+        assert!(std::fs::read_to_string(&main_lua).unwrap().contains("/tmp/overlay-v1"));
+
+        write_stick("/tmp/overlay-v2");
+        let reload = skull.recompile(std::slice::from_ref(&stick), &main_lua, &incremental).unwrap();
+        assert!(matches!(reload, SkullReload::Full { .. }));
+        let rebuilt = std::fs::read_to_string(&main_lua).unwrap();
+        assert!(rebuilt.contains("/tmp/overlay-v2"));
+        assert!(!rebuilt.contains("/tmp/overlay-v1"));
+
+        write_stick("/tmp/overlay-v3");
+        skull.force_full(&main_lua, &incremental).unwrap();
+        let forced = std::fs::read_to_string(&main_lua).unwrap();
+        assert!(forced.contains("/tmp/overlay-v3"));
+        assert!(!forced.contains("/tmp/overlay-v2"));
+    }
+
     /// init at v1 -> body-edit to v2 (writes the overlay) -> force_full. The
     /// canonical `main.lua` must equal a fresh full build of v2, must DIFFER from
     /// the v1 baseline (proving the edit was actually folded in, not served
