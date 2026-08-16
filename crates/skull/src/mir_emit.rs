@@ -726,6 +726,8 @@ fn global_init_session_line(
 }
 
 fn state_schema_lua(schema: &skull_mir::state_schema::StateSchema) -> String {
+    let image_plan = skull_mir::state_image::StateImagePlan::from_schema(schema)
+        .expect("compiler-owned StateSchema must produce one StateImagePlan");
     let mut out = String::from("_G.__ROCK_STATE_SCHEMA = {");
     for entry in &schema.entries {
         let kind = match entry.kind {
@@ -763,6 +765,33 @@ fn state_schema_lua(schema: &skull_mir::state_schema::StateSchema) -> String {
         ));
     }
     out.push_str("}\n");
+    out.push_str(&format!(
+        "_G.__ROCK_STATE_IMAGE_PLAN = {{schema_id={:?},entries={{",
+        image_plan.schema_id()
+    ));
+    for entry in image_plan.entries() {
+        out.push_str(&format!(
+            "{{identity={:?},kind={:?},layout={:?},capture_policy={:?},realization_policy={:?}}},",
+            entry.identity,
+            entry.kind.as_str(),
+            entry.layout,
+            entry.capture_policy,
+            entry.realization_policy,
+        ));
+    }
+    let census = image_plan.census();
+    out.push_str(&format!(
+        "}},census={{examined={},assigned={},duplicates={},unknown={},semantic_session={},program_artifact={},host_projection={},runner_diagnostic={},unsupported={}}}}}\n",
+        census.examined,
+        census.assigned,
+        census.duplicates,
+        census.unknown,
+        census.semantic_session,
+        census.program_artifact,
+        census.host_projection,
+        census.runner_diagnostic,
+        census.unsupported,
+    ));
     out.push_str("__rock_state_install_global_bridge()\n");
     out
 }

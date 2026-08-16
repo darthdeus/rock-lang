@@ -1,6 +1,7 @@
 //! RED checkpoint for the compiler-owned logical state inventory.
 
 use crate::common::emit_mir;
+use skull_mir::state_image::StateImagePlan;
 
 const FIXTURE: &str = r#"
 value Boxed { x: int, y: int }
@@ -184,4 +185,27 @@ fn state_schema_rejects_omissions_duplicates_and_incomplete_entries() {
         ]),
         Err(StateSchemaError::UnownedPhysical { .. })
     ));
+}
+
+#[test]
+fn lua_emits_the_complete_state_image_plan_next_to_the_schema() {
+    let emitted = emit_mir(FIXTURE);
+    let plan = StateImagePlan::from_schema(&emitted.state_schema).expect("image plan");
+    let census = plan.census();
+    assert!(census.is_total() && census.examined > 0);
+    assert!(emitted.lua.contains("__ROCK_STATE_IMAGE_PLAN = {"));
+    for entry in plan.entries() {
+        assert!(
+            emitted.lua.contains(&format!("identity={:?}", entry.identity)),
+            "Lua image plan omitted {}",
+            entry.identity
+        );
+        assert!(
+            emitted.lua.contains(&format!("kind={:?}", entry.kind.as_str())),
+            "Lua image plan omitted kind for {}",
+            entry.identity
+        );
+    }
+    assert!(emitted.lua.contains(&format!("examined={}", census.examined)));
+    assert!(emitted.lua.contains(&format!("assigned={}", census.assigned)));
 }

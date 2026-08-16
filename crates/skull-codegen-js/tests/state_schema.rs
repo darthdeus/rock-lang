@@ -1,4 +1,5 @@
 use crate::common::ws_with;
+use skull_mir::state_image::StateImagePlan;
 
 const FIXTURE: &str = r#"
 value Boxed { x: int, y: int }
@@ -50,4 +51,22 @@ fn lua_and_js_emit_the_same_logical_state_schema() {
         "schema census is not total: {census:?}"
     );
     assert!(census.globals > 0 && census.statics > 0 && census.frames > 0 && census.storage > 0);
+}
+
+#[test]
+fn lua_and_js_derive_the_same_state_image_plan() {
+    let ws = ws_with(FIXTURE);
+    let mid = *ws
+        .module_ids
+        .get(&ustr::Ustr::from("<test>"))
+        .expect("test module");
+    let lua = skull::mir_emit::emit_workspace_mir(&ws, mid).expect("lua emit");
+    let js = skull_codegen_js::emit::emit_program(&ws, mid).expect("js emit");
+    let lua_plan = StateImagePlan::from_schema(&lua.state_schema).expect("Lua plan");
+    let js_plan = StateImagePlan::from_schema(&js.state_schema).expect("JS plan");
+    assert_eq!(lua_plan, js_plan);
+    assert!(lua.lua.contains("__ROCK_STATE_IMAGE_PLAN = {"));
+    assert!(js.program.contains("var __ROCK_STATE_IMAGE_PLAN = {"));
+    assert_eq!(lua_plan.census().examined, lua_plan.census().assigned);
+    assert!(lua_plan.census().examined > 0);
 }
