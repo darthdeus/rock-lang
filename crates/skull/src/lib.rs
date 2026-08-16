@@ -513,6 +513,8 @@ if not _G.__rock_session_new then
       error("Rock StateSchema does not match the active Session", 0)
     end
     _G.__rock_active_session = session
+    _G.__rock_active_state = session.__rock_state
+    _G.__rock_active_initialized = session.__rock_initialized
     return session
   end
   _G.__rock_session_current = function()
@@ -521,15 +523,20 @@ if not _G.__rock_session_new then
     return session
   end
   _G.__rock_state_has = function(key)
-    return _G.__rock_session_current().__rock_initialized[key] == true
+    local initialized = _G.__rock_active_initialized
+    if not initialized then error("no active Rock Session", 0) end
+    return initialized[key] == true
   end
   _G.__rock_state_get = function(key)
-    return _G.__rock_session_current().__rock_state[key]
+    local state = _G.__rock_active_state
+    if not state then error("no active Rock Session", 0) end
+    return state[key]
   end
   _G.__rock_state_set = function(key, value)
-    local session = _G.__rock_session_current()
-    session.__rock_state[key] = value
-    session.__rock_initialized[key] = true
+    local state, initialized = _G.__rock_active_state, _G.__rock_active_initialized
+    if not state or not initialized then error("no active Rock Session", 0) end
+    state[key] = value
+    initialized[key] = true
     return value
   end
   _G.__rock_state_prepare_static = function(value_key, done_key, initializer_key)
@@ -587,6 +594,8 @@ _G.__rock_state_transaction_abort = function()
   if not transaction then return end
   local session = transaction.session
   rawset(_G, "__rock_active_session", session)
+  rawset(_G, "__rock_active_state", session.__rock_state)
+  rawset(_G, "__rock_active_initialized", session.__rock_initialized)
   session.__rock_schema_id = transaction.schema_id
   for key in pairs(session.__rock_state) do session.__rock_state[key] = nil end
   for key, value in pairs(transaction.state) do session.__rock_state[key] = value end

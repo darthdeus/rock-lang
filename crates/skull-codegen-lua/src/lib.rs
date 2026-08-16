@@ -1365,6 +1365,14 @@ fn render_scope(
     let regalloc::ValueAlloc { colors, color_scope } = va;
     REGALLOC_TIME.with(|c| c.set(c.get() + t_ra.elapsed()));
 
+    let has_state_access = func.insts.iter().any(|(_, inst)| match inst {
+        Inst::Global(name) => state_slots.contains_key(name) || static_slots.contains_key(name),
+        Inst::StoreGlobal { name, .. } => {
+            state_slots.contains_key(name) || static_slots.contains_key(name)
+        }
+        _ => false,
+    });
+
     // Param list `(a, b, c)` — written straight into the buffer (no Vec<String>).
     // A hoisted capturing lambda's env-record param is a materialized cell in
     // `params` (the pass), so it renders through the normal loop.
@@ -1378,6 +1386,11 @@ fn render_scope(
         write_cell_local(out, cell_colors, c);
     }
     out.push_str(")\n");
+
+    if has_state_access {
+        out.push_str("  local __rock_active_state = __rock_active_session.__rock_state\n");
+        out.push_str("  local __rock_active_initialized = __rock_active_session.__rock_initialized\n");
+    }
 
     for &c in params {
         if cell_is_uint(ws, func.cells[c].ty) {
@@ -1812,9 +1825,9 @@ impl Emitter<'_> {
                     out.push_str(&lua_string(&identity.logical_key(self.ws, self.interner)));
                     out.push(')');
                 } else if let Some(slot) = self.state_slot(*g) {
-                    out.push_str("__rock_state_get(");
+                    out.push_str("__rock_active_state[");
                     out.push_str(&lua_string(slot));
-                    out.push(')');
+                    out.push(']');
                 } else {
                     out.push_str(g.as_str());
                 }
@@ -2420,11 +2433,13 @@ impl Emitter<'_> {
             }
             Inst::StoreGlobal { name, value } => {
                 if let Some(slot) = self.state_slot(*name) {
-                    out.push_str("  __rock_state_set(");
+                    out.push_str("  __rock_active_state[");
                     out.push_str(&lua_string(slot));
-                    out.push_str(", ");
+                    out.push_str("] = ");
                     self.write_opnd(out, *value);
-                    out.push_str(")\n");
+                    out.push_str("\n  __rock_active_initialized[");
+                    out.push_str(&lua_string(slot));
+                    out.push_str("] = true\n");
                 } else {
                     let _ = write!(out, "  {name} = ");
                     self.write_opnd(out, *value);

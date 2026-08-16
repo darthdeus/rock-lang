@@ -27,6 +27,29 @@ fn compiler_generated_mutable_global_accesses_require_the_active_session() {
 }
 
 #[test]
+fn generated_state_accesses_use_function_local_active_session_views() {
+    let emitted = emit_mir(FIXTURE);
+    assert!(
+        emitted
+            .lua
+            .contains("local __rock_active_state = __rock_active_session.__rock_state"),
+        "state-using functions must bind the active Session state table locally"
+    );
+    assert!(
+        emitted
+            .lua
+            .contains("__rock_active_state[\"global:<test>::COUNTER::value\"]"),
+        "mutable global reads and writes must use the local Session view"
+    );
+    assert!(
+        emitted.lua.contains(
+            "__rock_active_initialized[\"global:<test>::COUNTER::value\"] = true"
+        ),
+        "mutable global writes must mark the local Session view initialized"
+    );
+}
+
+#[test]
 fn two_lua_sessions_initialize_and_isolate_mutable_globals() {
     let emitted = emit_mir(FIXTURE);
     let bump = mangled_name(&emitted.lua, "bump");
