@@ -1028,7 +1028,7 @@ impl ArtifactView {
                 revisited: revisited.len(),
                 added: added.len(),
                 removed: removed.len(),
-                iterations: subjects.len(),
+                iterations: subjects.len() + local_index_rows_examined,
                 root_entries_examined,
                 local_index_rows_examined,
                 broad_scans,
