@@ -426,6 +426,15 @@ pub struct Contribution {
     pub(crate) timing: ExpandTiming,
 }
 
+#[derive(Clone)]
+struct RecursionFinding {
+    rejection: Rejection,
+    /// Instances whose outgoing contributions the witness search inspected.
+    /// Retraction is indexed by these subjects, so changing an intermediate
+    /// body cannot leave a finding owned by an untouched start behind.
+    subjects: BTreeSet<Instance>,
+}
+
 /// Conditional timings for one owner walk. The fields are zero unless the
 /// debug/census path is enabled; the counters and their denominators remain
 /// durable.
@@ -751,11 +760,18 @@ pub struct InstanceGraph {
     /// Every other rejection lives in the contribution whose walk raised it;
     /// [`InstanceGraph::rejections`] is the two of them together.
     pub graph_rejections: Vec<Rejection>,
+    recursion_findings: BTreeMap<Instance, RecursionFinding>,
+    recursion_by_subject: BTreeMap<Instance, BTreeSet<Instance>>,
+    recursion_by_decl: BTreeMap<DeclKey, BTreeSet<Instance>>,
+    recursion_positions: BTreeMap<Instance, usize>,
+    coroutine_rejections: BTreeMap<Instance, Rejection>,
+    coroutine_positions: BTreeMap<Instance, usize>,
     /// Names with no concrete instance covering the obligation that put them
     /// here, BY CAUSE. See [`RootHole`]: one set carrying several different
     /// facts could only ever be read as the weakest of them.
     pub uninstantiated_roots: BTreeMap<String, RootHole>,
     root_hole_sites: BTreeMap<String, BTreeMap<Owner, Vec<AlwaysEmittedFailure>>>,
+    root_hole_dirty_names: BTreeSet<String>,
     /// Generic emission roots the narrowing in [`generic_root_obligation`] ruled
     /// out, keyed by the reason. Recorded, not dropped: the population a check
     /// EXCLUDED is the only way to tell a narrowed gate from a dead one, and a
@@ -765,6 +781,7 @@ pub struct InstanceGraph {
     pub boundaries: BTreeMap<String, Boundary>,
     /// Helper symbols owned by coroutine instances.
     pub coroutine_helpers: BTreeSet<CoroutineHelper>,
+    coroutine_helpers_by_owner: BTreeMap<String, BTreeSet<CoroutineHelper>>,
     /// Which of the 15 literal-name `stdlib_funcref` entries the walk actually
     /// reached (`docs/boundary-contracts.md` S 1.4). A name absent here is one
     /// the corpus never triggers, not one that does not exist.
@@ -780,6 +797,7 @@ pub struct InstanceGraph {
     /// is a per-artifact decision (`crate::artifact`), because the serving
     /// declaration differs by target.
     pub inline_body_deps: BTreeMap<DeclKey, BTreeSet<&'static str>>,
+    inline_erased_users: BTreeMap<String, BTreeSet<DeclKey>>,
     /// Bare `@nomangle` declarations named by retained `inline(js)` bodies.
     /// The graph records the opaque-boundary root obligation; a target view
     /// filters it to the declarations it actually realizes.
@@ -1459,7 +1477,7 @@ pub fn is_spanless(span: &Span) -> bool {
     span.file.as_str() == "<unknown>"
 }
 
-fn shift_graph_span(span: &mut Span, edit: &SpanEdit) {
+pub(crate) fn shift_span(span: &mut Span, edit: &SpanEdit) {
     if span.file != edit.file || span.offset_range.0 < edit.at {
         return;
     }
@@ -1520,7 +1538,7 @@ pub fn build_in(
     let pending = g.always_emitted_owners(ws);
     let t_seed = t.elapsed();
     let t = std::time::Instant::now();
-    let stats = g.run(ws, pending);
+    let stats = g.run(ws, pending, true);
     g.run_stats = stats;
     let t_run = t.elapsed();
     let t = std::time::Instant::now();
@@ -1700,13 +1718,22 @@ impl InstanceGraph {
             delta_removed: BTreeSet::new(),
         index: Indices::default(),
         graph_rejections: Vec::new(),
+        recursion_findings: BTreeMap::new(),
+        recursion_by_subject: BTreeMap::new(),
+        recursion_by_decl: BTreeMap::new(),
+        recursion_positions: BTreeMap::new(),
+        coroutine_rejections: BTreeMap::new(),
+        coroutine_positions: BTreeMap::new(),
         uninstantiated_roots: BTreeMap::new(),
         root_hole_sites: BTreeMap::new(),
+        root_hole_dirty_names: BTreeSet::new(),
         excused_generic_roots: BTreeMap::new(),
         boundaries: BTreeMap::new(),
         coroutine_helpers: BTreeSet::new(),
+        coroutine_helpers_by_owner: BTreeMap::new(),
         erased_entries: BTreeSet::new(),
         inline_body_deps: BTreeMap::new(),
+        inline_erased_users: BTreeMap::new(),
         inline_body_nomangle_roots: BTreeMap::new(),
         synthesized_examined: 0,
         synthesized_approximated: 0,
@@ -1725,6 +1752,7 @@ impl InstanceGraph {
     fn seed_roots(&mut self, ws: &Workspace, roots: Vec<FuncRef>) {
         self.root_instances.clear();
         self.uninstantiated_roots.clear();
+        self.root_hole_dirty_names.clear();
         self.excused_generic_roots.clear();
         // A root that is generic has no instantiation of its own; it is a
         // shared body until a call supplies one. Recorded rather than invented.
@@ -1739,10 +1767,9 @@ impl InstanceGraph {
                             .insert(mangle_fn(ws, f));
                     }
                     None => {
-                        self.uninstantiated_roots
-                            .entry(mangle_fn(ws, f))
-                            .or_default()
-                            .generic_root = true;
+                        let name = mangle_fn(ws, f);
+                        self.root_hole_dirty_names.insert(name.clone());
+                        self.uninstantiated_roots.entry(name).or_default().generic_root = true;
                     }
                 }
                 continue;
@@ -1780,14 +1807,22 @@ impl InstanceGraph {
     /// always-emitted bodies and lets the roots come through
     /// [`Self::merge_reached`]; an update hands it the owners whose bodies
     /// changed. One driver, so the two cannot walk differently.
-    fn run(&mut self, ws: &Workspace, mut pending: Vec<Owner>) -> RunStats {
+    fn run(
+        &mut self,
+        ws: &Workspace,
+        mut pending: Vec<Owner>,
+        include_missing_roots: bool,
+    ) -> RunStats {
         let mut stats = RunStats::default();
         self.last_run_owners.clear();
         self.last_run_retracted.clear();
         let mono_before = self.interner.stats();
-        for i in self.root_instances.clone() {
-            if !self.contributions.contains_key(&Owner::Instance(i.clone())) {
-                pending.push(Owner::Instance(i));
+        if include_missing_roots {
+            for i in self.root_instances.clone() {
+                stats.root_instances_checked += 1;
+                if !self.contributions.contains_key(&Owner::Instance(i.clone())) {
+                    pending.push(Owner::Instance(i));
+                }
             }
         }
         let timing_enabled = graph_timing_enabled();
@@ -1946,6 +1981,7 @@ impl InstanceGraph {
                 }
                 let (demanded, install_timing) = self.install(owner, c, timing_enabled);
                 stats.uninstall_ns += install_timing.uninstall_ns;
+                stats.root_hole_rows_examined += install_timing.root_hole_rows_retracted;
                 stats.index_maintenance_ns += install_timing.index.total_ns();
                 stats.index_subst_ns += install_timing.index.subst_ns;
                 stats.index_trees_ns += install_timing.index.trees_ns;
@@ -2188,6 +2224,11 @@ impl InstanceGraph {
     ) -> (Vec<Owner>, InstallTiming) {
         let uninstall_start = timing_enabled.then(Instant::now);
         let replaced = self.contributions.contains_key(&owner);
+        let root_hole_rows_retracted = self
+            .contributions
+            .get(&owner)
+            .map(|c| c.always_emitted_holes.len())
+            .unwrap_or(0);
         self.uninstall(&owner);
         if replaced {
             self.last_run_retracted.insert(owner.clone());
@@ -2264,6 +2305,7 @@ impl InstanceGraph {
         // forever.
         let reached: Vec<Instance> = c.reached.iter().map(|(to, _)| to.clone()).collect();
         for (name, failure) in &c.always_emitted_holes {
+            self.root_hole_dirty_names.insert(name.clone());
             self.root_hole_sites
                 .entry(name.clone())
                 .or_default()
@@ -2290,7 +2332,11 @@ impl InstanceGraph {
         index.commit_ns = elapsed_ns(lane_start);
         (
             demanded,
-            InstallTiming { uninstall_ns, index },
+            InstallTiming {
+                uninstall_ns,
+                root_hole_rows_retracted,
+                index,
+            },
         )
     }
 
@@ -2303,6 +2349,7 @@ impl InstanceGraph {
         let Some(old) = self.contributions.remove(owner) else { return };
         self.subtract_contribution_counters(&old);
         for (name, _) in &old.always_emitted_holes {
+            self.root_hole_dirty_names.insert(name.clone());
             if let Some(owners) = self.root_hole_sites.get_mut(name) {
                 owners.remove(owner);
                 if owners.is_empty() {
@@ -2415,21 +2462,240 @@ impl InstanceGraph {
             .saturating_sub(c.synthesized_approximated);
     }
 
-    fn refresh_root_hole_sites(&mut self) {
+    fn remove_graph_rejection_position(&mut self, position: usize) {
+        if position >= self.graph_rejections.len() {
+            return;
+        }
+        self.graph_rejections.swap_remove(position);
+        if position == self.graph_rejections.len() {
+            return;
+        }
+        let moved = &self.graph_rejections[position];
+        match moved.kind {
+            RejectionKind::ChangingInstanceRecursion => {
+                self.recursion_positions.insert(moved.at.clone(), position);
+            }
+            RejectionKind::ConcreteTypeUnavailable => {
+                self.coroutine_positions.insert(moved.at.clone(), position);
+            }
+            _ => {}
+        }
+    }
+
+    fn remove_recursion_finding(&mut self, at: &Instance) {
+        let Some(finding) = self.recursion_findings.remove(at) else { return };
+        for subject in finding.subjects {
+            if let Some(starts) = self.recursion_by_subject.get_mut(&subject) {
+                starts.remove(at);
+                if starts.is_empty() {
+                    self.recursion_by_subject.remove(&subject);
+                }
+            }
+        }
+        let decl = DeclKey(at.func);
+        if let Some(starts) = self.recursion_by_decl.get_mut(&decl) {
+            starts.remove(at);
+            if starts.is_empty() {
+                self.recursion_by_decl.remove(&decl);
+            }
+        }
+        if let Some(position) = self.recursion_positions.remove(at) {
+            self.remove_graph_rejection_position(position);
+        }
+    }
+
+    fn install_recursion_finding(&mut self, finding: RecursionFinding) {
+        let at = finding.rejection.at.clone();
+        self.remove_recursion_finding(&at);
+        let position = self.graph_rejections.len();
+        self.graph_rejections.push(finding.rejection.clone());
+        self.recursion_positions.insert(at.clone(), position);
+        self.recursion_by_decl.entry(DeclKey(at.func)).or_default().insert(at.clone());
+        for subject in &finding.subjects {
+            self.recursion_by_subject.entry(subject.clone()).or_default().insert(at.clone());
+        }
+        self.recursion_findings.insert(at, finding);
+    }
+
+    fn remove_coroutine_rejection(&mut self, at: &Instance) {
+        self.coroutine_rejections.remove(at);
+        if let Some(position) = self.coroutine_positions.remove(at) {
+            self.remove_graph_rejection_position(position);
+        }
+    }
+
+    fn install_coroutine_rejection(&mut self, rejection: Rejection) {
+        let at = rejection.at.clone();
+        self.remove_coroutine_rejection(&at);
+        let position = self.graph_rejections.len();
+        self.graph_rejections.push(rejection.clone());
+        self.coroutine_positions.insert(at.clone(), position);
+        self.coroutine_rejections.insert(at, rejection);
+    }
+
+    fn clear_graph_postpass_rejections(&mut self) {
+        self.graph_rejections.clear();
+        self.recursion_findings.clear();
+        self.recursion_by_subject.clear();
+        self.recursion_by_decl.clear();
+        self.recursion_positions.clear();
+        self.coroutine_rejections.clear();
+        self.coroutine_positions.clear();
+    }
+
+    fn retract_recursion_findings(
+        &mut self,
+        touched_instances: &BTreeSet<Instance>,
+        touched_decls: &BTreeSet<DeclKey>,
+    ) -> BTreeSet<Instance> {
+        let mut starts = BTreeSet::new();
+        for instance in touched_instances {
+            if let Some(found) = self.recursion_by_subject.get(instance) {
+                starts.extend(found.iter().cloned());
+            }
+        }
+        for decl in touched_decls {
+            if let Some(found) = self.recursion_by_decl.get(decl) {
+                starts.extend(found.iter().cloned());
+            }
+        }
+        for at in starts.iter() {
+            self.remove_recursion_finding(at);
+        }
+        starts
+    }
+
+    fn refresh_coroutine_rejections(
+        &mut self,
+        ws: &Workspace,
+        touched: impl IntoIterator<Item = Instance>,
+    ) {
+        let touched: BTreeSet<Instance> = touched.into_iter().collect();
+        let mut active = Vec::new();
+        let mut removed = Vec::new();
+        for instance in &touched {
+            let identity = self.identity(ws, instance);
+            self.remove_coroutine_helpers(&identity);
+            self.remove_coroutine_rejection(instance);
+            if self.contributions.contains_key(&Owner::Instance(instance.clone())) {
+                active.push(instance.clone());
+            } else {
+                removed.push(instance.clone());
+            }
+        }
+        record_coroutine_helpers(self, ws, &active, &removed);
+    }
+
+    fn remove_coroutine_helpers(&mut self, owner_identity: &str) {
+        let Some(helpers) = self.coroutine_helpers_by_owner.remove(owner_identity) else {
+            return;
+        };
+        for helper in helpers {
+            self.coroutine_helpers.remove(&helper);
+        }
+    }
+
+    fn insert_coroutine_helper(&mut self, helper: CoroutineHelper) {
+        self.coroutine_helpers.insert(helper.clone());
+        self.coroutine_helpers_by_owner
+            .entry(helper.owner_identity.clone())
+            .or_default()
+            .insert(helper);
+    }
+
+    fn apply_root_delta(
+        &mut self,
+        ws: &Workspace,
+        root_added: &[FuncRef],
+        root_removed: &[FuncRef],
+    ) -> usize {
+        let added = canonical_roots(ws, root_added.to_vec(), false);
+        let removed = canonical_roots(ws, root_removed.to_vec(), false);
+        let mut reason_buckets_examined = 0;
+        for root in removed {
+            if added.contains(&root) {
+                continue;
+            }
+            let f = &ws.module(root.module).functions[root.func];
+            if f.generics.is_empty() {
+                let instance = Instance { func: root, args: Vec::new() };
+                self.root_instances.remove(&instance);
+                if self.contributions.contains_key(&Owner::Instance(instance.clone())) {
+                    self.lost.insert(instance);
+                }
+            } else {
+                let name = mangle_fn(ws, f);
+                self.root_hole_dirty_names.insert(name.clone());
+                if let Some(hole) = self.uninstantiated_roots.get_mut(&name) {
+                    hole.generic_root = false;
+                }
+                for roots in self.excused_generic_roots.values_mut() {
+                    reason_buckets_examined += 1;
+                    roots.remove(&name);
+                }
+                reason_buckets_examined += self.excused_generic_roots.len();
+                self.excused_generic_roots.retain(|_, roots| !roots.is_empty());
+            }
+        }
+        for root in added {
+            let f = &ws.module(root.module).functions[root.func];
+            if f.generics.is_empty() {
+                self.root_instances.insert(Instance { func: root, args: Vec::new() });
+            } else if let Some(reason) = generic_root_obligation(ws, root, f) {
+                self.excused_generic_roots.entry(reason).or_default().insert(mangle_fn(ws, f));
+            } else {
+                let name = mangle_fn(ws, f);
+                self.root_hole_dirty_names.insert(name.clone());
+                self.uninstantiated_roots.entry(name).or_default().generic_root = true;
+            }
+        }
+        reason_buckets_examined
+    }
+
+    fn reseed_roots_for_update(&mut self, ws: &Workspace, roots: Vec<FuncRef>) {
+        let previous_generic_roots: BTreeMap<String, bool> = self
+            .uninstantiated_roots
+            .iter()
+            .map(|(name, hole)| (name.clone(), hole.generic_root))
+            .collect();
+        let previous_excused_roots = self.excused_generic_roots.clone();
+        let previous_roots = std::mem::take(&mut self.root_instances);
+        self.seed_roots(ws, canonical_roots(ws, roots, false));
+        assert!(
+            self.root_instances == previous_roots,
+            "the root set moved during a body-only update ({} before, {} after) -- that is \
+             an interface change",
+            previous_roots.len(),
+            self.root_instances.len()
+        );
+        for (name, generic_root) in previous_generic_roots {
+            self.root_hole_dirty_names.insert(name.clone());
+            self.uninstantiated_roots.entry(name).or_default().generic_root = generic_root;
+        }
+        self.excused_generic_roots = previous_excused_roots;
+    }
+
+    fn refresh_root_hole_sites(&mut self) -> RootHoleCensus {
+        let mut census = RootHoleCensus::default();
         let mut names: BTreeSet<String> = self.uninstantiated_roots.keys().cloned().collect();
         names.extend(self.root_hole_sites.keys().cloned());
         for name in names {
-            let failures = self
+            census.names_examined += 1;
+            let failures: Vec<AlwaysEmittedFailure> = self
                 .root_hole_sites
                 .get(&name)
                 .into_iter()
                 .flat_map(|owners| owners.values())
-                .flat_map(|rows| rows.iter().cloned())
+                .flat_map(|rows| {
+                    census.rows_examined += rows.len();
+                    rows.iter().cloned()
+                })
                 .collect();
             self.uninstantiated_roots.entry(name).or_default().always_emitted_sites = failures;
         }
         self.uninstantiated_roots
             .retain(|_, hole| hole.generic_root || !hole.always_emitted_sites.is_empty());
+        census
     }
 
     /// **Rebuild every flat field from the contribution set**, prune what no
@@ -2519,36 +2785,26 @@ impl InstanceGraph {
         };
         for decl in &decls_left {
             for member in skull_mir::lower::backend_variant_group(ws, decl.0) {
-                self.inline_body_deps.remove(&DeclKey(member));
+                self.remove_inline_body_deps(&DeclKey(member));
                 self.inline_body_nomangle_roots.remove(&DeclKey(member));
             }
             let f = &ws.module(decl.0.module).functions[decl.0.func];
             self.boundaries.remove(&mangle_fn(ws, f));
         }
-        self.graph_rejections.clear();
-        self.refresh_root_hole_sites();
-
-        // Which holes nevertheless have concrete instances from other call
-        // sites. A post-pass because a root is recorded before any body is
-        // walked, so at insertion time no instance of it exists yet -- which is
-        // how a name a later call fully instantiated went on reading as having
-        // no concrete body at all.
-        if !self.uninstantiated_roots.is_empty() {
-            let mut counts: BTreeMap<String, usize> = BTreeMap::new();
-            for i in &self.instances {
-                let f = &ws.module(i.func.module).functions[i.func.func];
-                *counts.entry(mangle_fn(ws, f)).or_default() += 1;
-            }
-            for (name, hole) in self.uninstantiated_roots.iter_mut() {
-                hole.instances = counts.get(name).copied().unwrap_or(0);
-            }
-        }
+        self.clear_graph_postpass_rejections();
+        let root_holes = self.refresh_root_hole_sites();
+        self.run_stats.root_hole_names_examined += root_holes.names_examined;
+        self.run_stats.root_hole_rows_examined += root_holes.rows_examined;
+        let root_holes = self.refresh_root_hole_instances(ws);
+        self.run_stats.root_hole_names_examined += root_holes.names_examined;
+        self.run_stats.root_hole_decls_examined += root_holes.decls_examined;
+        self.root_hole_dirty_names.clear();
 
         self.run_stats.derive_ns = derive_start.elapsed().as_nanos() as u64;
         let post_pass_start = Instant::now();
         record_inline_body_deps(self, ws, &decls_entered);
         record_inline_body_nomangle_roots(self, ws, decls_entered.iter().map(|decl| decl.0));
-        self.refresh_erased_entries();
+        self.run_stats.erased_catalogue_entries_examined += self.refresh_erased_entries();
         detect_changing_instance_recursion(self, ws);
         classify_boundaries(self, ws, &decls_entered);
         record_coroutine_helpers(self, ws, &entered, &left);
@@ -2598,7 +2854,7 @@ impl InstanceGraph {
         for decl in &touched_decls {
             for member in skull_mir::lower::backend_variant_group(ws, decl.0) {
                 let member = DeclKey(member);
-                self.inline_body_deps.remove(&member);
+                self.remove_inline_body_deps(&member);
                 self.inline_body_nomangle_roots.remove(&member);
                 let f = &ws.module(member.0.module).functions[member.0.func];
                 self.boundaries.remove(&mangle_fn(ws, f));
@@ -2611,32 +2867,110 @@ impl InstanceGraph {
             ws,
             active_decl_vec.iter().map(|decl| decl.0),
         );
-        self.refresh_erased_entries();
+        self.run_stats.erased_catalogue_entries_examined += self.refresh_erased_entries();
         classify_boundaries(self, ws, &active_decl_vec);
-        record_coroutine_helpers(self, ws, &entered, &left);
-        self.refresh_root_hole_sites();
-        self.refresh_root_hole_instances(ws);
+        self.refresh_coroutine_rejections(
+            ws,
+            touched_instances.iter().cloned(),
+        );
+        let dirty_root_hole_names = std::mem::take(&mut self.root_hole_dirty_names);
+        let root_holes = self.refresh_root_hole_sites_local(&dirty_root_hole_names);
+        self.run_stats.root_hole_names_examined += root_holes.names_examined;
+        self.run_stats.root_hole_rows_examined += root_holes.rows_examined;
+        let root_holes = self.refresh_root_hole_instances_local(ws, &dirty_root_hole_names);
+        self.run_stats.root_hole_names_examined += root_holes.names_examined;
+        self.run_stats.root_hole_decls_examined += root_holes.decls_examined;
 
-        let broad_scans = usize::from(!self.graph_rejections.is_empty());
-        self.graph_rejections.retain(|rejection| {
-            !touched_instances.contains(&rejection.at)
-                && !touched_decls.contains(&DeclKey(rejection.at.func))
-        });
-        let (starts, findings) = detect_changing_instance_recursion_local(self, ws, &touched_instances);
+        let previous_recursion_starts = self.retract_recursion_findings(&touched_instances, &touched_decls);
+        self.run_stats.recursion_findings_retracted += previous_recursion_starts.len();
+        let mut recursion_seeds = touched_instances.clone();
+        recursion_seeds.extend(previous_recursion_starts);
+        recursion_seeds.extend(
+            touched_decls
+                .iter()
+                .flat_map(|decl| self.index.decl_instances.get(decl).into_iter().flatten().cloned()),
+        );
+        recursion_seeds = self.recursion_seed_closure(recursion_seeds);
+        self.run_stats.recursion_seed_subjects = recursion_seeds.len();
+        let (starts, findings) = detect_changing_instance_recursion_local(self, ws, &recursion_seeds);
         self.recursion_starts = starts;
-        self.graph_rejections.extend(findings);
+        self.run_stats.recursion_findings_derived += findings.len();
+        for finding in findings {
+            self.install_recursion_finding(finding);
+        }
         self.run_stats.derive_ns = started.elapsed().as_nanos() as u64;
         self.run_stats.post_pass_ns = self.run_stats.derive_ns;
-        Prune { pruned: prune.pruned, region: prune.region, broad_scans }
+        Prune { pruned: prune.pruned, region: prune.region, broad_scans: 0 }
     }
 
-    fn refresh_root_hole_instances(&mut self, ws: &Workspace) {
-        let names: Vec<String> = self.uninstantiated_roots.keys().cloned().collect();
+    fn refresh_root_hole_sites_local(&mut self, names: &BTreeSet<String>) -> RootHoleCensus {
+        let mut census = RootHoleCensus::default();
         for name in names {
+            census.names_examined += 1;
+            let failures: Vec<AlwaysEmittedFailure> = self
+                .root_hole_sites
+                .get(name)
+                .into_iter()
+                .flat_map(|owners| owners.values())
+                .flat_map(|rows| {
+                    census.rows_examined += rows.len();
+                    rows.iter().cloned()
+                })
+                .collect();
+            let generic_root = self
+                .uninstantiated_roots
+                .get(name)
+                .is_some_and(|hole| hole.generic_root);
+            if !generic_root && failures.is_empty() {
+                self.uninstantiated_roots.remove(name);
+            } else {
+                self.uninstantiated_roots
+                    .entry(name.clone())
+                    .or_default()
+                    .always_emitted_sites = failures;
+            }
+        }
+        census
+    }
+
+    fn refresh_root_hole_instances_local(
+        &mut self,
+        ws: &Workspace,
+        names: &BTreeSet<String>,
+    ) -> RootHoleCensus {
+        let mut census = RootHoleCensus::default();
+        for name in names {
+            let Some(hole) = self.uninstantiated_roots.get_mut(name) else { continue };
+            census.names_examined += 1;
             let mut count = 0;
             if let Some(functions) = ws.functions_by_name.get(&ustr::Ustr::from(name.as_str())) {
                 let mut decls = BTreeSet::new();
                 for (module, func) in functions {
+                    census.decls_examined += 1;
+                    let fref = FuncRef { module: *module, func: *func };
+                    decls.insert(DeclKey(skull_mir::lower::canonical_variant(ws, fref)));
+                }
+                count = decls
+                    .iter()
+                    .filter_map(|decl| self.index.decl_instances.get(decl))
+                    .map(BTreeSet::len)
+                    .sum();
+            }
+            hole.instances = count;
+        }
+        census
+    }
+
+    fn refresh_root_hole_instances(&mut self, ws: &Workspace) -> RootHoleCensus {
+        let mut census = RootHoleCensus::default();
+        let names: Vec<String> = self.uninstantiated_roots.keys().cloned().collect();
+        for name in names {
+            census.names_examined += 1;
+            let mut count = 0;
+            if let Some(functions) = ws.functions_by_name.get(&ustr::Ustr::from(name.as_str())) {
+                let mut decls = BTreeSet::new();
+                for (module, func) in functions {
+                    census.decls_examined += 1;
                     let fref = FuncRef { module: *module, func: *func };
                     decls.insert(DeclKey(skull_mir::lower::canonical_variant(ws, fref)));
                 }
@@ -2650,6 +2984,21 @@ impl InstanceGraph {
                 hole.instances = count;
             }
         }
+        census
+    }
+
+    fn recursion_seed_closure(&self, seeds: BTreeSet<Instance>) -> BTreeSet<Instance> {
+        let mut out = BTreeSet::new();
+        let mut pending: Vec<Instance> = seeds.into_iter().collect();
+        while let Some(instance) = pending.pop() {
+            if !out.insert(instance.clone()) {
+                continue;
+            }
+            if let Some(preds) = self.index.preds.get(&instance) {
+                pending.extend(preds.iter().cloned());
+            }
+        }
+        out
     }
 
     /// **Update the graph for a BODY-ONLY change**, in place, against the same
@@ -2679,40 +3028,54 @@ impl InstanceGraph {
         changed: &[(ModuleId, BodyOwner)],
         edits: &[SpanEdit],
     ) -> UpdateStats {
+        self.reseed_roots_for_update(ws, roots);
+        self.update_bodies_after_roots(ws, changed, edits, Vec::new())
+    }
+
+    /// Update a body while applying only the explicit root declarations that
+    /// changed with it. Interface-derived roots remain in the retained graph;
+    /// callers use this path after preserving their root cache.
+    pub fn update_bodies_with_root_delta(
+        &mut self,
+        ws: &Workspace,
+        root_added: &[FuncRef],
+        root_removed: &[FuncRef],
+        changed: &[(ModuleId, BodyOwner)],
+        edits: &[SpanEdit],
+    ) -> UpdateStats {
+        let pending_roots = canonical_roots(ws, root_added.to_vec(), false)
+            .into_iter()
+            .filter(|root| ws.module(root.module).functions[root.func].generics.is_empty())
+            .map(|root| Owner::Instance(Instance { func: root, args: Vec::new() }))
+            .collect();
+        let reason_buckets_examined = self.apply_root_delta(ws, root_added, root_removed);
+        let mut update = self.update_bodies_after_roots(ws, changed, edits, pending_roots);
+        self.run_stats.root_hole_reason_buckets_examined += reason_buckets_examined;
+        update.census.root_hole_reason_buckets_examined =
+            self.run_stats.root_hole_reason_buckets_examined;
+        update
+    }
+
+    fn update_bodies_after_roots(
+        &mut self,
+        ws: &Workspace,
+        changed: &[(ModuleId, BodyOwner)],
+        edits: &[SpanEdit],
+        pending_roots: Vec<Owner>,
+    ) -> UpdateStats {
         self.delta_added.clear();
         self.delta_removed.clear();
-        let previous_generic_roots: BTreeMap<String, bool> = self
-            .uninstantiated_roots
-            .iter()
-            .map(|(name, hole)| (name.clone(), hole.generic_root))
-            .collect();
-        let previous_excused_roots = self.excused_generic_roots.clone();
-        // Re-derived and CHECKED, not assumed: the root set is a function of
-        // the declarations, so a body-only edit cannot move it, and an edit
-        // that did move it is an interface change the caller must rebuild for
-        // rather than one this function can absorb.
-        let previous_roots = std::mem::take(&mut self.root_instances);
-        self.seed_roots(ws, canonical_roots(ws, roots, false));
-        assert!(
-            self.root_instances == previous_roots,
-            "the root set moved during a body-only update ({} before, {} after) -- that is \
-             an interface change",
-            previous_roots.len(),
-            self.root_instances.len()
-        );
-        for (name, generic_root) in previous_generic_roots {
-            self.uninstantiated_roots.entry(name).or_default().generic_root = generic_root;
-        }
-        self.excused_generic_roots = previous_excused_roots;
-
         self.shift_contribution_spans(edits);
 
         // No removal step: `run` expands every pending owner unconditionally
         // and `commit` inserts over whatever was there, so an affected owner's
         // old contribution is REPLACED rather than merged with. A remove-first
         // loop stood here and was inert -- mutation-verified.
-        let affected = self.affected_owners(ws, changed);
-        let run = self.run(ws, affected.clone());
+        let mut affected = self.affected_owners(ws, changed);
+        affected.extend(pending_roots);
+        affected.sort();
+        affected.dedup();
+        let run = self.run(ws, affected.clone(), false);
         self.run_stats = run;
         let revisited_owners = self.last_run_owners.clone();
         let changed_decls = changed.iter().filter_map(|(module, owner)| match owner {
@@ -2748,7 +3111,10 @@ impl InstanceGraph {
             revisited_owners: revisited_owners.clone(),
             retracted_owners: self.last_run_retracted.clone(),
             broad_scans: prune.broad_scans,
-            census: run,
+            recursion_findings_retracted: self.run_stats.recursion_findings_retracted,
+            recursion_findings_derived: self.run_stats.recursion_findings_derived,
+            recursion_seed_subjects: self.run_stats.recursion_seed_subjects,
+            census: self.run_stats,
         }
     }
 
@@ -2764,23 +3130,23 @@ impl InstanceGraph {
             for owner in owners {
                 let Some(contribution) = self.contributions.get_mut(&owner) else { continue };
                 for edge in &mut contribution.edges {
-                    shift_graph_span(&mut edge.span, edit);
+                    shift_span(&mut edge.span, edit);
                 }
                 for record in contribution
                     .call_sites
                     .values_mut()
                     .chain(contribution.always_call_sites.values_mut())
                 {
-                    shift_graph_span(&mut record.span, edit);
+                    shift_span(&mut record.span, edit);
                 }
                 for unresolved in &mut contribution.unresolved {
-                    shift_graph_span(&mut unresolved.span, edit);
+                    shift_span(&mut unresolved.span, edit);
                 }
                 for rejection in &mut contribution.rejections {
-                    shift_graph_span(&mut rejection.span, edit);
+                    shift_span(&mut rejection.span, edit);
                 }
                 for (_, failure) in &mut contribution.always_emitted_holes {
-                    shift_graph_span(&mut failure.span, edit);
+                    shift_span(&mut failure.span, edit);
                 }
             }
         }
@@ -3038,14 +3404,26 @@ impl InstanceGraph {
     /// inline bodies name. Bounded by `ERASED_RUNTIME_ENTRIES` (15 names), so
     /// it is rebuilt from its two indices rather than maintained -- one writer
     /// for a set this small beats two that have to agree.
-    fn refresh_erased_entries(&mut self) {
+    fn refresh_erased_entries(&mut self) -> usize {
         self.erased_entries = self
             .index
             .erased
             .keys()
             .cloned()
-            .chain(self.inline_body_deps.values().flatten().map(|n| (*n).to_string()))
+            .chain(self.inline_erased_users.keys().cloned())
             .collect();
+        self.erased_entries.len()
+    }
+
+    fn remove_inline_body_deps(&mut self, decl: &DeclKey) {
+        let Some(entries) = self.inline_body_deps.remove(decl) else { return };
+        for entry in entries {
+            let Some(users) = self.inline_erased_users.get_mut(entry) else { continue };
+            users.remove(decl);
+            if users.is_empty() {
+                self.inline_erased_users.remove(entry);
+            }
+        }
     }
 
     /// **What an edit stranded**, searched over the affected region only.
@@ -3199,7 +3577,15 @@ impl IndexMaintenanceTiming {
 #[derive(Default)]
 struct InstallTiming {
     uninstall_ns: u64,
+    root_hole_rows_retracted: usize,
     index: IndexMaintenanceTiming,
+}
+
+#[derive(Default)]
+struct RootHoleCensus {
+    names_examined: usize,
+    rows_examined: usize,
+    decls_examined: usize,
 }
 
 /// What one [`InstanceGraph::run`] actually walked. Operational, and the check
@@ -3287,6 +3673,22 @@ pub struct RunStats {
     pub bound_tree_rows: usize,
     pub bound_call_rows: usize,
     pub iterator_rows: usize,
+    /// The retained root-hole catalogue is bounded by the names that actually
+    /// produced a root obligation; these fields make that post-pass visible.
+    pub root_hole_names_examined: usize,
+    pub root_hole_rows_examined: usize,
+    pub root_hole_decls_examined: usize,
+    /// The fixed reason-bucket catalogue scanned while retracting a generic
+    /// root obligation. This is bounded by the classifier's static reasons,
+    /// not by the number of workspace roots.
+    pub root_hole_reason_buckets_examined: usize,
+    /// Root instances checked while admitting missing root contributions.
+    /// Body-only updates pass explicit additions and keep this at zero.
+    pub root_instances_checked: usize,
+    pub erased_catalogue_entries_examined: usize,
+    pub recursion_seed_subjects: usize,
+    pub recursion_findings_retracted: usize,
+    pub recursion_findings_derived: usize,
     /// How many times the conformance fixpoint had to walk owners again.
     ///
     /// Published because a guard with no population reads as load-bearing when
@@ -3359,6 +3761,9 @@ pub struct UpdateStats {
     pub retracted_owners: BTreeSet<Owner>,
     /// Whole-graph diagnostic vectors touched by a local post-pass.
     pub broad_scans: usize,
+    pub recursion_findings_retracted: usize,
+    pub recursion_findings_derived: usize,
+    pub recursion_seed_subjects: usize,
     /// The same denominator and phase census retained on the graph after the
     /// update, so callers do not need to infer a full rebuild from `expanded`.
     pub census: RunStats,
@@ -3766,7 +4171,7 @@ fn detect_changing_instance_recursion(g: &mut InstanceGraph, ws: &Workspace) {
         .filter(|i| g.index.decls.get(&DeclKey(i.func)).is_some_and(|n| *n > 1))
         .collect();
     order.sort();
-    let mut found: Vec<(Instance, Span, String)> = Vec::new();
+    let mut found: Vec<(Instance, Span, String, BTreeSet<Instance>)> = Vec::new();
     let mut already: BTreeSet<(u32, u32)> = BTreeSet::new();
     let mut starts = 0usize;
     for start in order {
@@ -3776,8 +4181,10 @@ fn detect_changing_instance_recursion(g: &mut InstanceGraph, ws: &Workspace) {
         }
         starts += 1;
         let mut seen: BTreeSet<&Instance> = BTreeSet::new();
+        let mut subjects = BTreeSet::from([start.clone()]);
         let mut queue: Vec<(&Instance, Span)> = vec![(start, Span::unknown())];
         while let Some((node, via)) = queue.pop() {
+            subjects.insert(node.clone());
             if node.func == start.func && node.args != start.args {
                 already.insert(key);
                 found.push((
@@ -3789,6 +4196,7 @@ fn detect_changing_instance_recursion(g: &mut InstanceGraph, ws: &Workspace) {
                         g.symbol(ws, start),
                         g.symbol(ws, node)
                     ),
+                    subjects,
                 ));
                 break;
             }
@@ -3800,12 +4208,16 @@ fn detect_changing_instance_recursion(g: &mut InstanceGraph, ws: &Workspace) {
         }
     }
     g.recursion_starts = starts;
-    for (at, span, message) in found {
-        g.graph_rejections.push(Rejection {
-            kind: RejectionKind::ChangingInstanceRecursion,
-            at,
-            span,
-            message,
+    g.run_stats.recursion_findings_derived += found.len();
+    for (at, span, message, subjects) in found {
+        g.install_recursion_finding(RecursionFinding {
+            rejection: Rejection {
+                kind: RejectionKind::ChangingInstanceRecursion,
+                at,
+                span,
+                message,
+            },
+            subjects,
         });
     }
 }
@@ -3814,7 +4226,7 @@ fn detect_changing_instance_recursion_local(
     g: &InstanceGraph,
     ws: &Workspace,
     seeds: &BTreeSet<Instance>,
-) -> (usize, Vec<Rejection>) {
+) -> (usize, Vec<RecursionFinding>) {
     let mut starts: Vec<Instance> = seeds
         .iter()
         .filter(|i| {
@@ -3832,6 +4244,7 @@ fn detect_changing_instance_recursion_local(
             continue;
         }
         let mut seen = BTreeSet::new();
+        let mut subjects = BTreeSet::from([start.clone()]);
         let mut queue = Vec::new();
         if let Some(c) = g.contributions.get(&Owner::Instance(start.clone())) {
             queue.extend(c.edges.iter().map(|e| (e.to.clone(), e.span)));
@@ -3840,17 +4253,21 @@ fn detect_changing_instance_recursion_local(
             if !seen.insert(node.clone()) {
                 continue;
             }
+            subjects.insert(node.clone());
             if node.func == start.func && node.args != start.args {
-                found.push(Rejection {
-                    kind: RejectionKind::ChangingInstanceRecursion,
-                    at: start.clone(),
-                    span: via,
-                    message: format!(
-                        "polymorphic recursion: `{}` recurs as `{}`; instantiation does not \
-                         terminate on a recursive call whose type arguments change",
-                        g.symbol(ws, start),
-                        g.symbol(ws, &node)
-                    ),
+                found.push(RecursionFinding {
+                    rejection: Rejection {
+                        kind: RejectionKind::ChangingInstanceRecursion,
+                        at: start.clone(),
+                        span: via,
+                        message: format!(
+                            "polymorphic recursion: `{}` recurs as `{}`; instantiation does not \
+                             terminate on a recursive call whose type arguments change",
+                            g.symbol(ws, start),
+                            g.symbol(ws, &node)
+                        ),
+                    },
+                    subjects,
                 });
                 break;
             }
@@ -4927,7 +5344,13 @@ fn record_inline_body_deps(g: &mut InstanceGraph, ws: &Workspace, decls: &[DeclK
             let text = body.1.as_str();
             for name in ERASED_RUNTIME_ENTRIES {
                 if text.contains(name) {
-                    g.inline_body_deps.entry(member).or_default().insert(name);
+                    let inserted = g.inline_body_deps.entry(member.clone()).or_default().insert(name);
+                    if inserted {
+                        g.inline_erased_users
+                            .entry(name.to_string())
+                            .or_default()
+                            .insert(member.clone());
+                    }
                 }
             }
         }
@@ -5026,7 +5449,8 @@ fn record_coroutine_helpers(
 ) {
     for i in removed {
         let identity = g.identity(ws, i);
-        g.coroutine_helpers.retain(|h| h.owner_identity != identity);
+        g.remove_coroutine_helpers(&identity);
+        g.remove_coroutine_rejection(i);
     }
     for i in added {
         let f = &ws.module(i.func.module).functions[i.func.func];
@@ -5045,7 +5469,7 @@ fn record_coroutine_helpers(
         ) {
             Ok(plan) => plan,
             Err(reason) => {
-                g.graph_rejections.push(Rejection {
+                g.install_coroutine_rejection(Rejection {
                     kind: RejectionKind::ConcreteTypeUnavailable,
                     at: i.clone(),
                     span: f.name_span,
@@ -5060,7 +5484,7 @@ fn record_coroutine_helpers(
         };
         let owner_identity = g.identity(ws, i);
         for suffix in plan.declared_suffixes() {
-            g.coroutine_helpers.insert(CoroutineHelper {
+            g.insert_coroutine_helper(CoroutineHelper {
                 owner_identity: owner_identity.clone(),
                 suffix,
                 symbol_today: format!("{}{suffix}", plan.base()),

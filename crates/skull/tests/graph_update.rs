@@ -696,6 +696,14 @@ fn fixing_an_always_emitted_call_clears_its_root_hole() {
             .map(|(n, h)| (n.clone(), h.always_emitted_sites.len()))
             .collect::<Vec<_>>()
     );
+    assert!(
+        stats.census.root_hole_names_examined > 0,
+        "root-hole refresh had no name denominator: {stats:?}"
+    );
+    assert!(
+        stats.census.root_hole_rows_examined > 0,
+        "root-hole refresh had no failure-row denominator: {stats:?}"
+    );
     assert!(stats.newly_reached > 0, "`mono_id` was not reached as a new root");
     case.assert_matches_fresh("always-emitted hole cleared");
 }

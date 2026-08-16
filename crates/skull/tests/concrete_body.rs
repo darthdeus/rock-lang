@@ -1509,6 +1509,276 @@ fn concrete_plan_attribution_uses_one_authoritative_type_table() {
     );
 }
 
+#[test]
+fn local_owner_diagnostic_records_retract_and_reinstall_exactly() {
+    let source_v1 = r#"
+fn changing() -> int {
+    let unresolved = null
+    return 1
+}
+fn main() {
+    let a = changing()
+    let b = stable()
+    let c = vanishing()
+    print("{a}{b}{c}")
+}
+fn stable() -> int {
+    let unresolved = null
+    return 2
+}
+fn vanishing() -> int {
+    let unresolved = null
+    return 3
+}
+"#;
+    let source_v2 = r#"
+fn changing() -> int {
+    let unresolved = null
+    return 1
+}
+fn main() {
+    let b = stable()
+    print("{b}")
+}
+fn stable() -> int {
+    let unresolved = null
+    return 2
+}
+fn vanishing() -> int {
+    let unresolved = null
+    return 3
+}
+"#;
+    let ws1 = check(source_v1);
+    let roots = skull::mir_emit::emission_roots(&ws1, Some("/project"));
+    let mut graph = instance_graph::build(&ws1, roots.clone(), false);
+    let mut local = concrete_body::build(&ws1, &mut graph);
+    let before = local.diagnostic_snapshot(&ws1, &graph);
+    assert!(!before.is_empty(), "fixture exposed no diagnostic rows");
+    assert!(
+        before.iter().any(|row| row.starts_with("free-type:") || row.starts_with("untyped:")),
+        "fixture exposed neither free-type nor untyped rows: {before:?}"
+    );
+    let stable_identity = graph
+        .expanded()
+        .find(|instance| {
+            ws1.module(instance.func.module).functions[instance.func.func].name.as_str() == "stable"
+        })
+        .map(|instance| graph.identity(&ws1, instance))
+        .expect("stable instance was not expanded");
+
+    let ws2 = check(source_v2);
+    let module = *ws2.module_ids.get(&Ustr::from("<test>")).expect("test module");
+    let old_module = *ws1.module_ids.get(&Ustr::from("<test>")).expect("test module");
+    let old_main_span = ws1
+        .module(old_module)
+        .functions
+        .iter()
+        .find(|(_, function)| function.name.as_str() == "main")
+        .map(|(_, function)| function.span)
+        .expect("old main span");
+    let main = ws2
+        .module(module)
+        .functions
+        .iter()
+        .find(|(_, function)| function.name.as_str() == "main")
+        .map(|(function, _)| (module, BodyOwner::Function(function)))
+        .expect("main body");
+    let BodyOwner::Function(main_fid) = main.1 else { panic!("main is not a function") };
+    let new_main_span = ws2.module(module).functions[main_fid].span;
+    let span_edit = instance_graph::SpanEdit {
+        file: Ustr::from("<test>"),
+        at: old_main_span.offset_range.1,
+        byte_delta: new_main_span.offset_range.1 as isize - old_main_span.offset_range.1 as isize,
+        line_delta: new_main_span.line_range.1 as isize - old_main_span.line_range.1 as isize,
+    };
+    let update = graph.update_bodies_with_root_delta(&ws2, &[], &[], &[main], &[span_edit]);
+    assert!(!update.removed.is_empty(), "the changed main body did not remove a live edge: {update:?}");
+    let _stats = local.update_local_with_span_edits(
+        &ws2,
+        &graph,
+        &update.revisited,
+        &update.removed,
+        &update.revisited_owners,
+        &[span_edit],
+    );
+    let fresh_roots = skull::mir_emit::emission_roots(&ws2, Some("/project"));
+    let mut fresh_graph = instance_graph::build(&ws2, fresh_roots, false);
+    let fresh = concrete_body::build(&ws2, &mut fresh_graph);
+    assert_eq!(
+        local.diagnostic_snapshot(&ws2, &graph),
+        fresh.diagnostic_snapshot(&ws2, &fresh_graph),
+        "local owner records diverged from fresh diagnostics"
+    );
+    let local_stats = local.authoritative_build_stats();
+    let fresh_stats = fresh.authoritative_build_stats();
+    assert_eq!(local_stats.plan_attempts, fresh_stats.plan_attempts);
+    assert_eq!(local_stats.plan_successes, fresh_stats.plan_successes);
+    assert_eq!(local_stats.plan_failures, fresh_stats.plan_failures);
+    assert_eq!(local_stats.always_plan_attempts, fresh_stats.always_plan_attempts);
+    assert_eq!(local_stats.type_nodes_examined, fresh_stats.type_nodes_examined);
+    assert_eq!(local_stats.foreign_domain_unique, fresh_stats.foreign_domain_unique);
+    assert!(
+        local
+            .diagnostic_snapshot(&ws2, &graph)
+            .iter()
+            .any(|row| row.contains(&stable_identity)),
+        "the unrelated populated owner was lost during local replacement"
+    );
+    assert!(
+        !local
+            .diagnostic_snapshot(&ws2, &graph)
+            .iter()
+            .any(|row| row.contains("changing") || row.contains("vanishing")),
+        "removed owner findings were retained"
+    );
+}
+
+#[test]
+fn owner_records_expose_plan_and_always_failure_populations() {
+    let ws = check(
+        r#"
+fn bad() -> int {
+    return 1
+}
+fn hole<T>() -> int {
+    let unresolved: T = null
+    return 1
+}
+fn ordinary(v: [int]) -> int {
+    let unresolved = null
+    let total = 0
+    for i in 0..3 { total = total + i }
+    for x in v { total = total + x }
+    return total
+}
+global failed_call: int = bad()
+fn main() {
+    let a = ordinary([1, 2])
+    let b = bad()
+    let c = hole()
+    print("{a}{b}{c}{failed_call}")
+}
+"#,
+    );
+    let roots = skull::mir_emit::emission_roots(&ws, Some("<project>"));
+    let mut graph = instance_graph::build(&ws, roots, false);
+    let bad = graph
+        .expanded()
+        .find(|instance| {
+            ws.module(instance.func.module).functions[instance.func.func].name.as_str() == "bad"
+        })
+        .cloned()
+        .expect("bad instance");
+    assert!(!graph.root_instances.contains(&bad), "fixture made bad a root");
+    assert!(graph.index.subst.remove(&bad).is_some(), "fixture did not expose bad's substitution");
+    let bodies = concrete_body::build(&ws, &mut graph);
+    let snapshot = bodies.diagnostic_snapshot(&ws, &graph);
+    assert!(!snapshot.is_empty(), "fixture exposed no owner findings");
+    assert!(
+        bodies.build_stats.plan_attempts > 0,
+        "fixture exposed no ordinary plan population: {:?}",
+        bodies.build_stats
+    );
+    assert!(
+        bodies.build_stats.always_plan_attempts > 0,
+        "fixture exposed no always-emitted plan population: {:?}",
+        bodies.build_stats
+    );
+    assert!(
+        !bodies.plan_failures.is_empty(),
+        "fixture exposed no ordinary plan failure: {snapshot:?}"
+    );
+    assert!(
+        !bodies.always_plan_failures.is_empty(),
+        "fixture exposed no always-emitted plan failure: {snapshot:?}"
+    );
+    assert!(!bodies.free_types.is_empty(), "fixture exposed no free type: {snapshot:?}");
+    assert!(!bodies.untyped.is_empty(), "fixture exposed no untyped slot: {snapshot:?}");
+    assert!(!bodies.callee_holes.is_empty(), "fixture exposed no callee hole: {snapshot:?}");
+}
+
+#[test]
+fn local_owner_plan_failures_retract_with_the_last_live_edge() {
+    let source_v1 = r#"
+fn bad() -> int { return 1 }
+fn stable() -> int {
+    let unresolved = null
+    return 2
+}
+global failed_call: int = bad()
+fn main() {
+    let a = bad()
+    let b = stable()
+    print("{a}{b}{failed_call}")
+}
+"#;
+    let source_v2 = r#"
+fn bad() -> int { return 1 }
+fn stable() -> int {
+    let unresolved = null
+    return 2
+}
+global failed_call: int = 1
+fn main() {
+    let b = stable()
+    print("{b}{failed_call}")
+}
+"#;
+    let ws1 = check(source_v1);
+    let roots = skull::mir_emit::emission_roots(&ws1, Some("<project>"));
+    let mut graph = instance_graph::build(&ws1, roots, false);
+    let bad = graph
+        .expanded()
+        .find(|instance| {
+            ws1.module(instance.func.module).functions[instance.func.func].name.as_str() == "bad"
+        })
+        .cloned()
+        .expect("bad instance");
+    assert!(graph.index.subst.remove(&bad).is_some(), "fixture did not expose bad's substitution");
+    let mut local = concrete_body::build(&ws1, &mut graph);
+    let before = local.diagnostic_snapshot(&ws1, &graph);
+    assert!(before.iter().any(|row| row.starts_with("plan-failure:")));
+    assert!(before.iter().any(|row| row.starts_with("always-plan-failure:")));
+
+    let ws2 = check(source_v2);
+    let module = *ws2.module_ids.get(&Ustr::from("<test>")).expect("test module");
+    let owners = ws2
+        .module(module)
+        .functions
+        .iter()
+        .filter_map(|(function, f)| {
+            matches!(f.name.as_str(), "main").then_some((module, BodyOwner::Function(function)))
+        })
+        .chain(std::iter::once((module, BodyOwner::Global(Idx::from_raw(0u32.into())))))
+        .collect::<Vec<_>>();
+    let update = graph.update_bodies_with_root_delta(&ws2, &[], &[], &owners, &[]);
+    assert!(!update.removed.is_empty(), "the last bad edge was not removed: {update:?}");
+    local.update_local(
+        &ws2,
+        &graph,
+        &update.revisited,
+        &update.removed,
+        &update.revisited_owners,
+    );
+    let fresh_roots = skull::mir_emit::emission_roots(&ws2, Some("<project>"));
+    let mut fresh_graph = instance_graph::build(&ws2, fresh_roots, false);
+    let fresh = concrete_body::build(&ws2, &mut fresh_graph);
+    assert_eq!(
+        local.diagnostic_snapshot(&ws2, &graph),
+        fresh.diagnostic_snapshot(&ws2, &fresh_graph),
+        "local failure records diverged after the last edge disappeared"
+    );
+    assert!(
+        local
+            .diagnostic_snapshot(&ws2, &graph)
+            .iter()
+            .all(|row| !row.starts_with("plan-failure:") && !row.starts_with("always-plan-failure:")),
+        "stale plan failure survived owner retraction: {:?}",
+        local.diagnostic_snapshot(&ws2, &graph)
+    );
+}
+
 /// The callee table is a function of the INSTANCE. `wrap<int>` and
 /// `wrap<string>` share one HIR body, so the same `Idx<Expr>` must name two
 /// DIFFERENT callee instances -- which is what makes a substitution unnecessary

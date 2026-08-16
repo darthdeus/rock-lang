@@ -17,7 +17,7 @@
 //! corpus, not this comment; see `docs/skull-bone-mir-faithful-plan.md`.
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::OnceLock;
 use std::time::Instant;
@@ -2938,7 +2938,7 @@ fn struct_expand_rejection_for_call(
 ///   bare name, never containing '+', so it can never collide with a pair key);
 ///   the driver runs `emit_shader_entry`.
 /// `key` is the pipeline name const `pipeline()` looks up.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ShaderPair {
     pub key: String,
     pub vert: Option<FuncRef>,
@@ -2948,9 +2948,10 @@ pub struct ShaderPair {
 pub struct ShaderCollection {
     pub pairs: Vec<ShaderPair>,
     pub callsites: Vec<(ModuleId, BodyOwner)>,
+    pub contributions: HashMap<(ModuleId, BodyOwner), Vec<ShaderPair>>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ComputeEntry {
     pub key: String,
     pub entry: FuncRef,
@@ -2959,6 +2960,7 @@ pub struct ComputeEntry {
 pub struct ComputeCollection {
     pub entries: Vec<ComputeEntry>,
     pub callsites: Vec<(ModuleId, BodyOwner)>,
+    pub contributions: HashMap<(ModuleId, BodyOwner), Vec<ComputeEntry>>,
 }
 
 /// The `@shader(<stage>)` stage of `f`, else `None`.
@@ -3364,79 +3366,132 @@ pub fn body_has_compute_artifact_call(
     })
 }
 
+/// Collect the shader roots contributed by one body. Full construction calls
+/// this for every body; incremental repair calls it only for re-inferred
+/// bodies, so a body edit does not rediscover unrelated shader registrations.
+pub fn collect_shader_body(
+    ws: &Workspace,
+    mid: ModuleId,
+    owner: BodyOwner,
+) -> Result<(Vec<ShaderPair>, bool), CompilerError> {
+    let module = ws.module(mid);
+    let Some(body) = module.bodies.get(&owner) else { return Ok((Vec::new(), false)) };
+    let inf = ws.inference(mid).and_then(|ir| ir.per_fn.get(&owner));
+    let mut by_key = BTreeMap::new();
+    let mut callsite = false;
+    for (e, expr) in body.expr_arena.iter() {
+        let Expr::Call { callee: Callee::Unresolved { name, .. }, args, .. } = expr else {
+            continue;
+        };
+        let resolved = match inf {
+            Some(inf) => resolve_call_fn(ws, inf, e, *name),
+            None => match ws.functions_by_name.get(name).map(|list| list.as_slice()) {
+                Some([single]) => Some(*single),
+                _ => None,
+            },
+        };
+        let Some((fmod, fid)) = resolved else { continue };
+        if !matches!(
+            crate::intrinsics::expand_kind(&ws.module(fmod).functions[fid]),
+            Some(ExpandKind::ShaderPipeline)
+        ) {
+            continue;
+        }
+        callsite = true;
+        let arg_idxs: Vec<Idx<Expr>> = args.into_iter().collect();
+        let pair = resolve_shader_pair(ws, body, e, &arg_idxs)?;
+        by_key.entry(pair.key.clone()).or_insert(pair);
+    }
+    Ok((by_key.into_values().collect(), callsite))
+}
+
+/// Collect the compute roots contributed by one body. See
+/// [`collect_shader_body`] for the locality contract.
+pub fn collect_compute_body(
+    ws: &Workspace,
+    mid: ModuleId,
+    owner: BodyOwner,
+) -> Result<(Vec<ComputeEntry>, bool), CompilerError> {
+    let module = ws.module(mid);
+    let Some(body) = module.bodies.get(&owner) else { return Ok((Vec::new(), false)) };
+    let inf = ws.inference(mid).and_then(|ir| ir.per_fn.get(&owner));
+    let mut by_key = BTreeMap::new();
+    let mut callsite = false;
+    for (e, expr) in body.expr_arena.iter() {
+        let Expr::Call { callee: Callee::Unresolved { name, .. }, args, .. } = expr else {
+            continue;
+        };
+        let resolved = match inf {
+            Some(inf) => resolve_call_fn(ws, inf, e, *name),
+            None => match ws.functions_by_name.get(name).map(|list| list.as_slice()) {
+                Some([single]) => Some(*single),
+                _ => None,
+            },
+        };
+        let Some((fmod, fid)) = resolved else { continue };
+        if !matches!(
+            crate::intrinsics::expand_kind(&ws.module(fmod).functions[fid]),
+            Some(ExpandKind::ComputeArtifact)
+        ) {
+            continue;
+        }
+        callsite = true;
+        let arg_idxs: Vec<Idx<Expr>> = args.into_iter().collect();
+        let entry = resolve_compute_entry(ws, body, e, &arg_idxs)?;
+        let key = ws.module(entry.module).functions[entry.func].name.to_string();
+        by_key.entry(key.clone()).or_insert(ComputeEntry { key, entry });
+    }
+    Ok((by_key.into_values().collect(), callsite))
+}
+
 pub fn collect_shader_collection(ws: &Workspace) -> Result<ShaderCollection, CompilerError> {
-    let mut by_key: std::collections::BTreeMap<String, ShaderPair> =
-        std::collections::BTreeMap::new();
+    let mut by_key: BTreeMap<String, ShaderPair> = BTreeMap::new();
     let mut callsites: HashSet<(ModuleId, BodyOwner)> = HashSet::new();
+    let mut contributions = HashMap::new();
     for (_, &mid) in ws.module_ids.iter() {
         let module = ws.module(mid);
-        let ir = ws.inference(mid);
-        for (owner, body) in module.bodies.iter() {
-            let inf = ir.and_then(|ir| ir.per_fn.get(owner));
-            for (e, expr) in body.expr_arena.iter() {
-                let Expr::Call { callee: Callee::Unresolved { name, .. }, args, .. } = expr else {
-                    continue;
-                };
-                let resolved = match inf {
-                    Some(inf) => resolve_call_fn(ws, inf, e, *name),
-                    None => match ws.functions_by_name.get(name).map(|l| l.as_slice()) {
-                        Some([single]) => Some(*single),
-                        _ => None,
-                    },
-                };
-                let Some((fmod, fid)) = resolved else { continue };
-                if !matches!(
-                    crate::intrinsics::expand_kind(&ws.module(fmod).functions[fid]),
-                    Some(ExpandKind::ShaderPipeline)
-                ) {
-                    continue;
-                }
-                callsites.insert((mid, *owner));
-                let arg_idxs: Vec<Idx<Expr>> = args.into_iter().collect();
-                let pair = resolve_shader_pair(ws, body, e, &arg_idxs)?;
-                by_key.entry(pair.key.clone()).or_insert(pair);
+        for (owner, _) in module.bodies.iter() {
+            let key = (mid, *owner);
+            let (pairs, callsite) = collect_shader_body(ws, mid, *owner)?;
+            if callsite {
+                callsites.insert(key);
             }
+            for pair in &pairs {
+                by_key.entry(pair.key.clone()).or_insert_with(|| pair.clone());
+            }
+            contributions.insert(key, pairs);
         }
     }
     Ok(ShaderCollection {
         pairs: by_key.into_values().collect(),
         callsites: callsites.into_iter().collect(),
+        contributions,
     })
 }
 
 pub fn collect_compute_collection(ws: &Workspace) -> Result<ComputeCollection, CompilerError> {
-    let mut by_key = std::collections::BTreeMap::<String, ComputeEntry>::new();
+    let mut by_key = BTreeMap::<String, ComputeEntry>::new();
     let mut callsites = HashSet::new();
+    let mut contributions = HashMap::new();
     for (_, &mid) in ws.module_ids.iter() {
         let module = ws.module(mid);
-        let ir = ws.inference(mid);
-        for (owner, body) in module.bodies.iter() {
-            let inf = ir.and_then(|ir| ir.per_fn.get(owner));
-            for (e, expr) in body.expr_arena.iter() {
-                let Expr::Call { callee: Callee::Unresolved { name, .. }, args, .. } = expr else {
-                    continue;
-                };
-                let resolved = match inf {
-                    Some(inf) => resolve_call_fn(ws, inf, e, *name),
-                    None => match ws.functions_by_name.get(name).map(|list| list.as_slice()) {
-                        Some([single]) => Some(*single),
-                        _ => None,
-                    },
-                };
-                let Some((fmod, fid)) = resolved else { continue };
-                let function = &ws.module(fmod).functions[fid];
-                if !matches!(crate::intrinsics::expand_kind(function), Some(ExpandKind::ComputeArtifact)) {
-                    continue;
-                }
-                callsites.insert((mid, *owner));
-                let arg_idxs: Vec<Idx<Expr>> = args.into_iter().collect();
-                let entry = resolve_compute_entry(ws, body, e, &arg_idxs)?;
-                let key = ws.module(entry.module).functions[entry.func].name.to_string();
-                by_key.entry(key.clone()).or_insert(ComputeEntry { key, entry });
+        for (owner, _) in module.bodies.iter() {
+            let key = (mid, *owner);
+            let (entries, callsite) = collect_compute_body(ws, mid, *owner)?;
+            if callsite {
+                callsites.insert(key);
             }
+            for entry in &entries {
+                by_key.entry(entry.key.clone()).or_insert_with(|| entry.clone());
+            }
+            contributions.insert(key, entries);
         }
     }
-    Ok(ComputeCollection { entries: by_key.into_values().collect(), callsites: callsites.into_iter().collect() })
+    Ok(ComputeCollection {
+        entries: by_key.into_values().collect(),
+        callsites: callsites.into_iter().collect(),
+        contributions,
+    })
 }
 
 /// Reject CPU-side calls to `@gpu_only` intrinsics and references to GPU-side

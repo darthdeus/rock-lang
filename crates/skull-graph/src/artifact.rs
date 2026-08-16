@@ -601,13 +601,25 @@ struct ArtifactIndex {
     realization_by_decl: BTreeMap<DeclKey, BTreeSet<Instance>>,
     inline_by_owner: BTreeMap<DeclKey, (Vec<InlineDep>, Vec<UnresolvedInlineDep>)>,
     inline_consumers: BTreeMap<DeclKey, BTreeSet<DeclKey>>,
+    inline_dependencies_by_owner: BTreeMap<DeclKey, BTreeSet<DeclKey>>,
+    publication_candidates: BTreeMap<Instance, String>,
+    publication_decls: BTreeMap<DeclKey, BTreeSet<Instance>>,
+    publication_users: BTreeMap<String, BTreeSet<Instance>>,
     root_decls: BTreeSet<DeclKey>,
 }
 
+#[derive(Debug)]
 pub struct ArtifactUpdateStats {
     pub revisited: usize,
     pub added: usize,
     pub removed: usize,
+    /// Local queue subjects and neighbours actually processed by the delta.
+    pub iterations: usize,
+    /// Root entries examined while applying an explicit root delta.
+    pub root_entries_examined: usize,
+    /// Rows traversed in the connected reverse indexes while retracting and
+    /// reinstalling local publications, inline dependencies, and findings.
+    pub local_index_rows_examined: usize,
     /// Whole-output scans performed by a local update. The ordinary delta path
     /// keeps this at zero; a nonzero value is a structural finding, not a
     /// timing claim.
@@ -640,6 +652,25 @@ fn unresolved_inline_dep_order(
     func_ref_order(&left.owner, &right.owner).then_with(|| left.entry.cmp(right.entry))
 }
 
+fn publication_candidates(
+    ws: &Workspace,
+    req: &ArtifactRequest<'_>,
+) -> BTreeMap<Instance, String> {
+    let target = req.spec.cpu();
+    req.roots
+        .iter()
+        .filter_map(|r| {
+            let f = &ws.module(r.module).functions[r.func];
+            (f.annotations.iter().any(|a| a.name.name.as_str() == "nomangle")
+                && instance_graph::serves(
+                    f.backend,
+                    target.execution.backend.unwrap_or(FnBackend::Any),
+                ))
+                .then(|| (Instance::base(*r), f.name.to_string()))
+        })
+        .collect()
+}
+
 impl ArtifactIndex {
     fn fresh(
         ws: &Workspace,
@@ -650,6 +681,7 @@ impl ArtifactIndex {
         symbols: &BTreeMap<Instance, String>,
         inline_deps: &[InlineDep],
         unresolved_inline_deps: &[UnresolvedInlineDep],
+        publication_candidates: BTreeMap<Instance, String>,
         root_decls: BTreeSet<DeclKey>,
     ) -> Self {
         let mut index = Self {
@@ -705,6 +737,7 @@ impl ArtifactIndex {
                 .push(dep.clone());
         }
         for (owner, entries) in &g.inline_body_deps {
+            let owner = owner.clone();
             for entry in entries {
                 if let Some(rep) = instance_graph::stdlib_entry_representative(ws, entry) {
                     index
@@ -712,14 +745,51 @@ impl ArtifactIndex {
                         .entry(DeclKey(rep))
                         .or_default()
                         .insert(owner.clone());
+                    index
+                        .inline_dependencies_by_owner
+                        .entry(owner.clone())
+                        .or_default()
+                        .insert(DeclKey(rep));
                 }
             }
+        }
+        for (instance, symbol) in publication_candidates {
+            index
+                .publication_users
+                .entry(symbol.clone())
+                .or_default()
+                .insert(instance.clone());
+            index
+                .publication_decls
+                .entry(DeclKey(instance.func))
+                .or_default()
+                .insert(instance.clone());
+            index.publication_candidates.insert(instance, symbol);
         }
         index
     }
 }
 
 impl ArtifactView {
+    #[cfg(feature = "test-hooks")]
+    fn forced_broad_scan_count(&self) -> usize {
+        if std::env::var_os("SKULL_FORCE_ARTIFACT_BROAD_SCAN").is_none() {
+            return 0;
+        }
+        self.realization.keys().count()
+            + self
+                .index
+                .publication_users
+                .values()
+                .map(BTreeSet::len)
+                .sum::<usize>()
+    }
+
+    #[cfg(not(feature = "test-hooks"))]
+    fn forced_broad_scan_count(&self) -> usize {
+        0
+    }
+
     /// Apply graph deltas to this target without re-realizing the workspace.
     /// The retained view owns the indexes needed to retract an old owner and
     /// install its replacement; unchanged owners keep their immutable output.
@@ -732,15 +802,114 @@ impl ArtifactView {
         added: &BTreeSet<Instance>,
         removed: &BTreeSet<Instance>,
     ) -> ArtifactUpdateStats {
+        let old_roots = self.index.root_decls.clone();
+        let new_roots: BTreeSet<DeclKey> = req
+            .roots
+            .iter()
+            .map(|r| DeclKey(skull_mir::lower::canonical_variant(ws, *r)))
+            .collect();
+        let root_added: BTreeSet<DeclKey> = new_roots.difference(&old_roots).cloned().collect();
+        let root_removed: BTreeSet<DeclKey> = old_roots.difference(&new_roots).cloned().collect();
+        let stats = self.update_local_with_decl_delta(
+            ws,
+            g,
+            req,
+            revisited,
+            added,
+            removed,
+            &root_added,
+            &root_removed,
+        );
+        stats
+    }
+
+    /// Apply a graph delta and an explicit root delta. Production callers keep
+    /// the requested root set in their own cache and pass only changed roots;
+    /// [`Self::update_local`] remains the full-request oracle for callers that
+    /// do not retain that state.
+    pub fn update_local_with_root_delta(
+        &mut self,
+        ws: &Workspace,
+        g: &InstanceGraph,
+        req: &ArtifactRequest<'_>,
+        revisited: &BTreeSet<Instance>,
+        added: &BTreeSet<Instance>,
+        removed: &BTreeSet<Instance>,
+        root_added: &[FuncRef],
+        root_removed: &[FuncRef],
+    ) -> ArtifactUpdateStats {
+        let root_added: BTreeSet<DeclKey> = root_added
+            .iter()
+            .map(|r| DeclKey(skull_mir::lower::canonical_variant(ws, *r)))
+            .collect();
+        let root_removed: BTreeSet<DeclKey> = root_removed
+            .iter()
+            .map(|r| DeclKey(skull_mir::lower::canonical_variant(ws, *r)))
+            .collect();
+        self.update_local_with_decl_delta(
+            ws,
+            g,
+            req,
+            revisited,
+            added,
+            removed,
+            &root_added,
+            &root_removed,
+        )
+    }
+
+    fn update_local_with_decl_delta(
+        &mut self,
+        ws: &Workspace,
+        g: &InstanceGraph,
+        req: &ArtifactRequest<'_>,
+        revisited: &BTreeSet<Instance>,
+        added: &BTreeSet<Instance>,
+        removed: &BTreeSet<Instance>,
+        root_added: &BTreeSet<DeclKey>,
+        root_removed: &BTreeSet<DeclKey>,
+    ) -> ArtifactUpdateStats {
+        let broad_scans = self.forced_broad_scan_count();
+        let mut local_index_rows_examined = 0;
+        let mut root_subjects = BTreeSet::new();
+        for decl in root_added.iter().chain(root_removed) {
+            local_index_rows_examined += 1;
+            root_subjects.extend(
+                self.index
+                    .realization_by_decl
+                    .get(decl)
+                    .into_iter()
+                    .flat_map(|instances| {
+                        local_index_rows_examined += instances.len();
+                        instances.iter().cloned()
+                    }),
+            );
+            let instances: Vec<_> = g.instances_of(decl.0).cloned().collect();
+            local_index_rows_examined += instances.len();
+            root_subjects.extend(instances);
+        }
         let mut subjects = revisited.clone();
         subjects.extend(added.iter().cloned());
         subjects.extend(removed.iter().cloned());
-        if subjects.is_empty() {
+        subjects.extend(root_subjects.iter().cloned());
+        if subjects.is_empty() && root_added.is_empty() && root_removed.is_empty() {
             self.shared_instances = g.instances.len();
-            return ArtifactUpdateStats { revisited: 0, added: 0, removed: 0, broad_scans: 0 };
+            return ArtifactUpdateStats {
+                revisited: 0,
+                added: 0,
+                removed: 0,
+                iterations: 0,
+                root_entries_examined: 0,
+                local_index_rows_examined,
+                broad_scans,
+            };
         }
 
-        let old_roots = self.roots.clone();
+        let old_root_subjects: BTreeSet<Instance> = subjects
+            .iter()
+            .filter(|instance| self.roots.contains(*instance))
+            .cloned()
+            .collect();
         let old_realizable: BTreeMap<Instance, Result<Realized, Unrealizable>> = subjects
             .iter()
             .filter_map(|i| self.index.realizable.get(i).map(|r| (i.clone(), *r)))
@@ -761,7 +930,9 @@ impl ArtifactView {
         // Remove only the outgoing rows owned by the changed subjects. The
         // old rows remain in `old_outgoing` for the local dirty-region walk.
         for i in &subjects {
+            local_index_rows_examined += 1;
             if let Some(edges) = self.index.outgoing.remove(i) {
+                local_index_rows_examined += edges.len();
                 for callee in edges.values() {
                     if let Some(preds) = self.index.incoming.get_mut(callee) {
                         preds.remove(i);
@@ -773,6 +944,7 @@ impl ArtifactView {
             }
             self.index.sites.remove(i);
             if let Some(values) = self.index.fn_values_by_caller.remove(i) {
+                local_index_rows_examined += values.len();
                 for callee in values {
                     if let Some(users) = self.index.fn_value_users.get_mut(&callee) {
                         users.remove(i);
@@ -788,6 +960,7 @@ impl ArtifactView {
 
         let target = req.spec.cpu();
         for i in &subjects {
+            local_index_rows_examined += 1;
             if !g.instances.contains(i) {
                 self.index.realizable.remove(i);
                 continue;
@@ -799,6 +972,7 @@ impl ArtifactView {
             let sites = g.sites_of(i).cloned().unwrap_or_default();
             self.index.site_counts.insert(i.clone(), sites.len());
             for (site, record) in &sites {
+                local_index_rows_examined += 1;
                 let SiteOutcome::Resolved(callee) = &record.outcome else { continue };
                 self.index.outgoing.entry(i.clone()).or_default().insert(site.clone(), callee.clone());
                 self.index.incoming.entry(callee.clone()).or_default().insert(i.clone());
@@ -810,16 +984,22 @@ impl ArtifactView {
             self.index.sites.insert(i.clone(), sites);
         }
 
-        self.index.root_decls = req
-            .roots
-            .iter()
-            .map(|r| DeclKey(skull_mir::lower::canonical_variant(ws, *r)))
-            .collect();
+        let mut root_entries_examined = 0;
+        for decl in root_removed {
+            local_index_rows_examined += 1;
+            root_entries_examined += usize::from(self.index.root_decls.remove(decl));
+        }
+        for decl in root_added {
+            local_index_rows_examined += 1;
+            root_entries_examined += usize::from(self.index.root_decls.insert(decl.clone()));
+        }
         for i in &subjects {
+            local_index_rows_examined += 1;
             self.roots.remove(i);
             self.declared_roots.remove(i);
         }
         for i in subjects.iter().filter(|i| g.instances.contains(*i)) {
+            local_index_rows_examined += 1;
             let declared = self.index.root_decls.contains(&DeclKey(i.func));
             let structural = g.is_always_emitted_target(i);
             if (declared || structural) && self.index.realizable[i].is_ok() {
@@ -829,17 +1009,29 @@ impl ArtifactView {
                 }
             }
         }
+        let root_delta_changed = !root_added.is_empty() || !root_removed.is_empty();
 
         let edge_changed = subjects.iter().any(|i| old_outgoing.get(i) != self.index.outgoing.get(i));
         let realization_changed = subjects.iter().any(|i| old_realizable.get(i) != self.index.realizable.get(i));
-        let roots_changed = subjects.iter().any(|i| old_roots.contains(i) != self.roots.contains(i));
-        if !edge_changed && !realization_changed && !roots_changed && added.is_empty() && removed.is_empty() {
+        let roots_changed = subjects
+            .iter()
+            .any(|i| old_root_subjects.contains(i) != self.roots.contains(i));
+        if !edge_changed
+            && !realization_changed
+            && !roots_changed
+            && !root_delta_changed
+            && added.is_empty()
+            && removed.is_empty()
+        {
             self.shared_instances = g.instances.len();
             return ArtifactUpdateStats {
                 revisited: revisited.len(),
                 added: added.len(),
                 removed: removed.len(),
-                broad_scans: 0,
+                iterations: subjects.len(),
+                root_entries_examined,
+                local_index_rows_examined,
+                broad_scans,
             };
         }
 
@@ -849,17 +1041,22 @@ impl ArtifactView {
         let mut dirty = subjects.clone();
         let mut queue: VecDeque<Instance> = subjects.iter().cloned().collect();
         while let Some(i) = queue.pop_front() {
+            local_index_rows_examined += 1;
             let mut neighbours = Vec::new();
             if let Some(edges) = old_outgoing.get(&i) {
+                local_index_rows_examined += edges.len();
                 neighbours.extend(edges.values().cloned());
             }
             if let Some(edges) = self.index.outgoing.get(&i) {
+                local_index_rows_examined += edges.len();
                 neighbours.extend(edges.values().cloned());
             }
             if let Some(preds) = self.index.incoming.get(&i) {
+                local_index_rows_examined += preds.len();
                 neighbours.extend(preds.iter().cloned());
             }
             if let Some(preds) = old_predecessors.get(&i) {
+                local_index_rows_examined += preds.len();
                 neighbours.extend(preds.iter().cloned());
             }
             for neighbour in neighbours {
@@ -877,6 +1074,7 @@ impl ArtifactView {
             .cloned()
             .collect();
         while let Some(i) = reach_queue.pop_front() {
+            local_index_rows_examined += 1;
             if !dirty.contains(&i) || reachable_dirty.contains(&i) {
                 continue;
             }
@@ -886,6 +1084,7 @@ impl ArtifactView {
                 continue;
             }
             if let Some(edges) = self.index.outgoing.get(&i) {
+                local_index_rows_examined += edges.len();
                 for callee in edges.values() {
                     if dirty.contains(callee) {
                         reach_queue.push_back(callee.clone());
@@ -894,14 +1093,17 @@ impl ArtifactView {
             }
         }
         for i in &dirty {
+            local_index_rows_examined += 1;
             self.index.severed_by_caller.remove(i);
             self.remove_instance_output(i, self.index.site_counts.get(i).copied().unwrap_or(0));
             self.index.exclusions.remove(i);
         }
         for i in removed {
+            local_index_rows_examined += 1;
             self.index.site_counts.remove(i);
         }
         for i in dirty.iter().filter(|i| g.instances.contains(*i)) {
+            local_index_rows_examined += 1;
             let Some(result) = self.index.realizable.get(i).copied() else { continue };
             if reachable_dirty.contains(i) {
                 let realized = result.expect("retained artifact instance must be realizable");
@@ -941,6 +1143,7 @@ impl ArtifactView {
 
         let mut changed_decls = BTreeSet::new();
         for i in &dirty {
+            local_index_rows_examined += 1;
             changed_decls.insert(DeclKey(i.func));
             if let Some(Ok(realized)) = old_realizable.get(i) {
                 changed_decls.insert(DeclKey(realized.decl));
@@ -949,20 +1152,35 @@ impl ArtifactView {
                 changed_decls.insert(DeclKey(realized.decl));
             }
         }
-        self.refresh_inline_local(ws, g, &changed_decls);
-        self.refresh_opaque_roots(g, &changed_decls);
-        self.refresh_publications(ws, g, req);
-        self.refresh_excluded_local(&dirty);
-        self.refresh_severed_local(&dirty);
+        local_index_rows_examined += self.refresh_inline_local(ws, g, &changed_decls);
+        local_index_rows_examined += self.refresh_opaque_roots(g, &changed_decls);
+        let mut changed_publication_symbols: BTreeSet<String> = dirty
+            .iter()
+            .filter_map(|instance| self.index.publication_candidates.get(instance).cloned())
+            .collect();
+        let (publication_symbols, publication_rows) = self.refresh_publication_candidates(
+            ws,
+            req,
+            root_added,
+            root_removed,
+        );
+        changed_publication_symbols.extend(publication_symbols);
+        local_index_rows_examined += publication_rows;
+        local_index_rows_examined += self.refresh_publications_local(g, &changed_publication_symbols);
+        local_index_rows_examined += self.refresh_excluded_local(&dirty);
+        local_index_rows_examined += self.refresh_severed_local(&dirty);
         let mut changed_symbols: BTreeSet<String> = old_symbols.into_values().collect();
         changed_symbols.extend(dirty.iter().filter_map(|i| self.symbols.get(i).cloned()));
-        self.refresh_symbol_collisions_local(&changed_symbols);
+        local_index_rows_examined += self.refresh_symbol_collisions_local(&changed_symbols);
         self.shared_instances = g.instances.len();
         ArtifactUpdateStats {
             revisited: revisited.len(),
             added: added.len(),
             removed: removed.len(),
-            broad_scans: 0,
+            iterations: dirty.len() + reachable_dirty.len() + local_index_rows_examined,
+            root_entries_examined,
+            local_index_rows_examined,
+            broad_scans,
         }
     }
 
@@ -1072,32 +1290,33 @@ impl ArtifactView {
         ws: &Workspace,
         g: &InstanceGraph,
         changed_decls: &BTreeSet<DeclKey>,
-    ) {
+    ) -> usize {
+        let mut rows_examined = 0;
         let mut owners = BTreeSet::new();
         for decl in changed_decls {
             if let Some(consumers) = self.index.inline_consumers.get(decl) {
+                rows_examined += consumers.len();
                 owners.extend(consumers.iter().cloned());
             }
             if g.inline_body_deps.contains_key(decl) {
+                rows_examined += 1;
                 owners.insert(decl.clone());
             }
         }
         if owners.is_empty() {
-            return;
+            return rows_examined;
         }
         for owner in &owners {
+            rows_examined += 1;
             self.remove_inline_rows(owner.0);
-            for consumers in self.index.inline_consumers.values_mut() {
-                consumers.remove(owner);
-            }
-            if let Some(entries) = g.inline_body_deps.get(owner) {
-                for entry in entries {
-                    if let Some(rep) = instance_graph::stdlib_entry_representative(ws, entry) {
-                        self.index
-                            .inline_consumers
-                            .entry(DeclKey(rep))
-                            .or_default()
-                            .insert(owner.clone());
+            if let Some(dependencies) = self.index.inline_dependencies_by_owner.remove(owner) {
+                rows_examined += dependencies.len();
+                for dependency in dependencies {
+                    if let Some(consumers) = self.index.inline_consumers.get_mut(&dependency) {
+                        consumers.remove(owner);
+                        if consumers.is_empty() {
+                            self.index.inline_consumers.remove(&dependency);
+                        }
                     }
                 }
             }
@@ -1109,9 +1328,26 @@ impl ArtifactView {
                 self.index.inline_by_owner.remove(owner);
                 continue;
             }
+            for entry in entries {
+                rows_examined += 1;
+                if let Some(rep) = instance_graph::stdlib_entry_representative(ws, entry) {
+                    let dependency = DeclKey(rep);
+                    self.index
+                        .inline_consumers
+                        .entry(dependency.clone())
+                        .or_default()
+                        .insert(owner.clone());
+                    self.index
+                        .inline_dependencies_by_owner
+                        .entry(owner.clone())
+                        .or_default()
+                        .insert(dependency);
+                }
+            }
             let mut inline = Vec::new();
             let mut unresolved = Vec::new();
             for entry in entries {
+                rows_examined += 1;
                 let Some(rep) = instance_graph::stdlib_entry_representative(ws, entry) else {
                     unresolved.push(UnresolvedInlineDep {
                         owner: owner.0,
@@ -1128,6 +1364,7 @@ impl ArtifactView {
                     });
                     continue;
                 };
+                rows_examined += instances.len();
                 let mut matching = instances.iter();
                 let Some(inst) = matching.next() else {
                     unresolved.push(UnresolvedInlineDep {
@@ -1153,6 +1390,7 @@ impl ArtifactView {
             }
             self.index.inline_by_owner.insert(owner.clone(), (inline, unresolved));
             if let Some((deps, unresolved)) = self.index.inline_by_owner.get(owner) {
+                rows_examined += deps.len() + unresolved.len();
                 for dep in deps {
                     let position = self
                         .inline_deps
@@ -1169,6 +1407,7 @@ impl ArtifactView {
                 }
             }
         }
+        rows_examined
     }
 
     fn remove_inline_rows(&mut self, owner: FuncRef) {
@@ -1186,7 +1425,7 @@ impl ArtifactView {
         }
     }
 
-    fn refresh_opaque_roots(&mut self, g: &InstanceGraph, changed_decls: &BTreeSet<DeclKey>) {
+    fn refresh_opaque_roots(&mut self, g: &InstanceGraph, changed_decls: &BTreeSet<DeclKey>) -> usize {
         for owner in changed_decls {
             self.opaque_boundary_roots.remove(owner);
             if self.index.realization_by_decl.contains_key(owner) {
@@ -1195,44 +1434,143 @@ impl ArtifactView {
                 }
             }
         }
+        changed_decls.len()
     }
 
-    fn refresh_publications(&mut self, ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) {
+    fn refresh_publication_candidates(
+        &mut self,
+        ws: &Workspace,
+        req: &ArtifactRequest<'_>,
+        root_added: &BTreeSet<DeclKey>,
+        root_removed: &BTreeSet<DeclKey>,
+    ) -> (BTreeSet<String>, usize) {
+        let mut changed = BTreeSet::new();
+        let mut rows_examined = root_added.len() + root_removed.len();
+        for decl in root_removed {
+            let Some(instances) = self.index.publication_decls.remove(decl) else { continue };
+            rows_examined += instances.len();
+            for instance in instances {
+                let Some(symbol) = self.index.publication_candidates.remove(&instance) else {
+                    continue;
+                };
+                changed.insert(symbol.clone());
+                if let Some(users) = self.index.publication_users.get_mut(&symbol) {
+                    rows_examined += users.len();
+                    users.remove(&instance);
+                    if users.is_empty() {
+                        self.index.publication_users.remove(&symbol);
+                    }
+                }
+                self.publications.remove(&instance);
+                if let Ok(position) = self
+                    .unrepresented_publications
+                    .binary_search_by(|current| func_ref_order(current, &instance.func))
+                {
+                    self.unrepresented_publications.remove(position);
+                }
+            }
+        }
         let target = req.spec.cpu();
-        let mut by_symbol: BTreeMap<String, Vec<Instance>> = BTreeMap::new();
-        let mut unrepresented = Vec::new();
-        for r in req.roots {
-            let f = &ws.module(r.module).functions[r.func];
-            if !f.annotations.iter().any(|a| a.name.name.as_str() == "nomangle") {
+        for decl in root_added {
+            let f = &ws.module(decl.0.module).functions[decl.0.func];
+            if !f.annotations.iter().any(|a| a.name.name.as_str() == "nomangle")
+                || !instance_graph::serves(
+                    f.backend,
+                    target.execution.backend.unwrap_or(FnBackend::Any),
+                )
+            {
                 continue;
             }
-            if !instance_graph::serves(f.backend, target.execution.backend.unwrap_or(FnBackend::Any)) {
+            let instance = Instance::base(decl.0);
+            let symbol = f.name.to_string();
+            if self
+                .index
+                .publication_candidates
+                .insert(instance.clone(), symbol.clone())
+                .is_some()
+            {
                 continue;
             }
-            let inst = Instance::base(*r);
-            if !g.instances.contains(&inst) {
-                unrepresented.push(*r);
-            } else {
-                by_symbol.entry(f.name.to_string()).or_default().push(inst);
-            }
+            self.index
+                .publication_decls
+                .entry(decl.clone())
+                .or_default()
+                .insert(instance.clone());
+            self.index
+                .publication_users
+                .entry(symbol.clone())
+                .or_default()
+                .insert(instance);
+            changed.insert(symbol);
         }
-        let mut publications = BTreeMap::new();
-        let mut collisions = Vec::new();
-        for (symbol, mut instances) in by_symbol {
-            instances.sort();
-            instances.dedup();
-            if instances.len() > 1 {
-                collisions.push(PublicationCollision { symbol, instances });
-            } else if let Some(instance) = instances.into_iter().next() {
-                publications.insert(instance, symbol);
-            }
-        }
-        self.publications = publications;
-        self.publication_collisions = collisions;
-        self.unrepresented_publications = unrepresented;
+        (changed, rows_examined)
     }
 
-    fn refresh_excluded_local(&mut self, changed: &BTreeSet<Instance>) {
+    fn refresh_publications_local(
+        &mut self,
+        g: &InstanceGraph,
+        changed_symbols: &BTreeSet<String>,
+    ) -> usize {
+        let mut rows_examined = changed_symbols.len();
+        for symbol in changed_symbols {
+            let users = self
+                .index
+                .publication_users
+                .get(symbol)
+                .cloned()
+                .unwrap_or_default();
+            rows_examined += users.len();
+            for instance in &users {
+                self.publications.remove(instance);
+                let fref = instance.func;
+                if let Ok(position) = self
+                    .unrepresented_publications
+                    .binary_search_by(|current| func_ref_order(current, &fref))
+                {
+                    self.unrepresented_publications.remove(position);
+                }
+            }
+            if let Ok(position) = self
+                .publication_collisions
+                .binary_search_by(|row| row.symbol.as_str().cmp(symbol.as_str()))
+            {
+                self.publication_collisions.remove(position);
+            }
+            for instance in &users {
+                if !g.instances.contains(instance) {
+                    let fref = instance.func;
+                    let position = self
+                        .unrepresented_publications
+                        .binary_search_by(|current| func_ref_order(current, &fref))
+                        .unwrap_or_else(|position| position);
+                    self.unrepresented_publications.insert(position, fref);
+                }
+            }
+            let represented: Vec<Instance> = users
+                .iter()
+                .filter(|instance| g.instances.contains(*instance))
+                .cloned()
+                .collect();
+            rows_examined += represented.len();
+            if represented.len() > 1 {
+                let row = PublicationCollision {
+                    symbol: symbol.clone(),
+                    instances: represented,
+                };
+                let position = self
+                    .publication_collisions
+                    .binary_search_by(|current| current.symbol.cmp(symbol))
+                    .unwrap_or_else(|position| position);
+                self.publication_collisions.insert(position, row);
+            } else if let Some(instance) = represented.into_iter().next() {
+                self.publications.insert(instance, symbol.clone());
+            }
+        }
+        rows_examined
+    }
+
+    fn refresh_excluded_local(&mut self, changed: &BTreeSet<Instance>) -> usize {
+        let rows_examined = changed.len();
         for instance in changed {
             if let Ok(position) = self
                 .excluded
@@ -1249,9 +1587,11 @@ impl ArtifactView {
                 self.excluded.insert(position, row);
             }
         }
+        rows_examined
     }
 
-    fn refresh_severed_local(&mut self, changed_callers: &BTreeSet<Instance>) {
+    fn refresh_severed_local(&mut self, changed_callers: &BTreeSet<Instance>) -> usize {
+        let mut rows_examined = changed_callers.len();
         for caller in changed_callers {
             while let Ok(position) = self
                 .severed
@@ -1260,6 +1600,7 @@ impl ArtifactView {
                 self.severed.remove(position);
             }
             if let Some(rows) = self.index.severed_by_caller.get(caller) {
+                rows_examined += rows.len();
                 for row in rows {
                     let position = self
                         .severed
@@ -1269,9 +1610,11 @@ impl ArtifactView {
                 }
             }
         }
+        rows_examined
     }
 
-    fn refresh_symbol_collisions_local(&mut self, changed_symbols: &BTreeSet<String>) {
+    fn refresh_symbol_collisions_local(&mut self, changed_symbols: &BTreeSet<String>) -> usize {
+        let mut rows_examined = changed_symbols.len();
         for symbol in changed_symbols {
             if let Ok(position) = self
                 .symbol_collisions
@@ -1280,6 +1623,7 @@ impl ArtifactView {
                 self.symbol_collisions.remove(position);
             }
             let Some(users) = self.index.symbol_users.get(symbol) else { continue };
+            rows_examined += users.len();
             if users.len() < 2 {
                 continue;
             }
@@ -1293,6 +1637,7 @@ impl ArtifactView {
                 .unwrap_or_else(|position| position);
             self.symbol_collisions.insert(position, row);
         }
+        rows_examined
     }
 
     /// Compare every realized output except the target description itself.
@@ -1924,22 +2269,15 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
     // all -- this is a second, independent obligation over the SAME graph, not
     // a second discovery walk: the exact instance's own contribution, if the
     // graph has one, is what `g.instances`/`g.sites_of` already recorded.
+    let publication_candidates = publication_candidates(ws, req);
     let mut by_pub_symbol: BTreeMap<String, Vec<Instance>> = BTreeMap::new();
     let mut unrepresented_publications: Vec<FuncRef> = Vec::new();
-    for r in req.roots {
-        let f = &ws.module(r.module).functions[r.func];
-        if !f.annotations.iter().any(|a| a.name.name.as_str() == "nomangle") {
-            continue;
-        }
-        if !instance_graph::serves(f.backend, target.execution.backend.unwrap_or(FnBackend::Any)) {
-            continue;
-        }
-        let inst = Instance::base(*r);
+    for (inst, symbol) in &publication_candidates {
         if !g.instances.contains(&inst) {
-            unrepresented_publications.push(*r);
+            unrepresented_publications.push(inst.func);
             continue;
         }
-        by_pub_symbol.entry(f.name.to_string()).or_default().push(inst);
+        by_pub_symbol.entry(symbol.clone()).or_default().push(inst.clone());
     }
     let mut publications: BTreeMap<Instance, String> = BTreeMap::new();
     let mut publication_collisions: Vec<PublicationCollision> = Vec::new();
@@ -1952,6 +2290,7 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
             publications.insert(instances.into_iter().next().expect("non-empty group"), symbol);
         }
     }
+    unrepresented_publications.sort_by(func_ref_order);
 
     let opaque_boundary_roots = g
         .inline_body_nomangle_roots
@@ -1969,6 +2308,7 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
         &symbols,
         &inline_deps,
         &unresolved_inline_deps,
+        publication_candidates,
         root_decls,
     );
 

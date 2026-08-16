@@ -13,7 +13,7 @@
 
 use std::sync::LazyLock;
 
-use bone_semantic::hir::FnBackend;
+use bone_semantic::hir::{BodyOwner, FnBackend};
 use bone_semantic::inference::Workspace;
 use skull::artifact::{self, ArtifactMappings, ArtifactRequest, Exclusion, Unrealizable};
 use skull::artifact::RealizedCallee;
@@ -67,6 +67,31 @@ impl artifact::SymbolPlanner for Prefixed {
         "prefixed"
     }
 }
+
+struct MainRightCollision;
+
+impl artifact::SymbolPlanner for MainRightCollision {
+    fn symbol(
+        &self,
+        ws: &Workspace,
+        g: &InstanceGraph,
+        i: &Instance,
+        _realized: artifact::Realized,
+    ) -> String {
+        let name = ws.module(i.func.module).functions[i.func.func].name.as_str();
+        if matches!(name, "main" | "right") {
+            "shared".to_string()
+        } else {
+            g.logical_symbol(ws, i)
+        }
+    }
+
+    fn describe(&self) -> &'static str {
+        "main-right-collision"
+    }
+}
+
+static MAIN_RIGHT_COLLISION: MainRightCollision = MainRightCollision;
 
 /// A backend realization oracle that supplies exactly the named declarations --
 /// the stand-in for a real backend's own (`skull_codegen_js::js_supply`). One
@@ -1941,4 +1966,171 @@ fn two_nomangle_roots_sharing_a_bare_name_collide_rather_than_overwrite() {
             "a colliding publication was admitted anyway: {i:?}"
         );
     }
+}
+
+#[test]
+fn local_publication_and_collision_retraction_matches_fresh_view() {
+    let ws = check(PUBLICATION_COLLISION_FIXTURE);
+    let (g, roots) = graph_for(&ws);
+    let mut local = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT_DESKTOP, &roots));
+    assert_eq!(local.publication_collisions.len(), 1, "fixture did not populate a collision");
+    let removed_root = roots
+        .iter()
+        .copied()
+        .find(|root| {
+            let f = &ws.module(root.module).functions[root.func];
+            f.name.as_str() == "dup"
+                && f.annotations.iter().any(|a| a.name.name.as_str() == "nomangle")
+                && f.generics.is_empty()
+        })
+        .expect("fixture's @nomangle root");
+    let narrowed: Vec<_> = roots.iter().copied().filter(|root| *root != removed_root).collect();
+    let fresh = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT_DESKTOP, &narrowed));
+    let stats = local.update_local(
+        &ws,
+        &g,
+        &ArtifactRequest::new(LUAJIT_DESKTOP, &narrowed),
+        &Default::default(),
+        &Default::default(),
+        &Default::default(),
+    );
+    assert!(stats.root_entries_examined > 0, "root-delta fixture did no indexed root work: {stats:?}");
+    assert_eq!(local.publications, fresh.publications, "publication rows were not retracted locally");
+    assert_eq!(local.publication_collisions, fresh.publication_collisions, "collision rows went stale");
+    assert_eq!(local.unrepresented_publications, fresh.unrepresented_publications);
+    assert_eq!(local.symbol_collisions, fresh.symbol_collisions, "symbol rows changed under a publication delta");
+    let restored = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT_DESKTOP, &roots));
+    let install_stats = local.update_local(
+        &ws,
+        &g,
+        &ArtifactRequest::new(LUAJIT_DESKTOP, &roots),
+        &Default::default(),
+        &Default::default(),
+        &Default::default(),
+    );
+    assert!(install_stats.root_entries_examined > 0, "root-addition fixture did no indexed root work: {install_stats:?}");
+    assert_eq!(local.publications, restored.publications, "publication installation was lost");
+    assert_eq!(local.publication_collisions, restored.publication_collisions, "collision installation was lost");
+}
+
+#[test]
+fn local_symbol_collision_retraction_matches_fresh_view() {
+    let source_v1 = "fn left() -> int { return 1 }\nfn right() -> int { return 2 }\n\
+fn main() { let a = left()\n let b = right()\n print(\"{a}{b}\") }";
+    let source_v2 = "fn left() -> int { return 1 }\nfn right() -> int { return 2 }\n\
+fn main() { let a = left()\n print(\"{a}\") }";
+    let ws1 = check(source_v1);
+    let roots = skull::mir_emit::emission_roots(&ws1, Some("/project"));
+    let mut graph = instance_graph::build(&ws1, roots.clone(), false);
+    let request = ArtifactRequest::new(LUAJIT_DESKTOP, &roots).with_symbols(&MAIN_RIGHT_COLLISION);
+    let mut local = artifact::realize(&ws1, &graph, &request);
+    assert_eq!(local.symbol_collisions.len(), 1, "fixture did not populate a symbol collision");
+
+    let ws2 = check(source_v2);
+    let module = *ws2.module_ids.get(&Ustr::from("<test>")).expect("test module");
+    let main = ws2
+        .module(module)
+        .functions
+        .iter()
+        .find(|(_, function)| function.name.as_str() == "main")
+        .map(|(function, _)| (module, BodyOwner::Function(function)))
+        .expect("main body");
+    let update = graph.update_bodies_with_root_delta(&ws2, &[], &[], &[main], &[]);
+    let fresh_roots = skull::mir_emit::emission_roots(&ws2, Some("/project"));
+    let fresh_graph = instance_graph::build(&ws2, fresh_roots, false);
+    let fresh_request = ArtifactRequest::new(LUAJIT_DESKTOP, &roots).with_symbols(&MAIN_RIGHT_COLLISION);
+    let fresh = artifact::realize(&ws2, &fresh_graph, &fresh_request);
+    let stats = local.update_local(
+        &ws2,
+        &graph,
+        &fresh_request,
+        &update.revisited,
+        &update.added,
+        &update.removed,
+    );
+    assert!(stats.iterations > 0, "symbol-delta fixture did no local artifact work: {stats:?}");
+    assert_eq!(local.symbol_collisions, fresh.symbol_collisions, "symbol collision rows went stale");
+    assert!(local.symbol_collisions.is_empty(), "the removed owner kept a collision row");
+}
+
+#[test]
+fn local_inline_foreign_dependency_retraction_matches_fresh_view() {
+    let source_v1 = r#"
+inline(lua) fn foreign_dep(x: int) -> int = """
+    return __rock_vec_column_elements({ len = 1 }, x)
+"""
+fn caller() -> int {
+    return foreign_dep(1)
+}
+fn main() { let x = caller() }
+"#;
+    let source_v2 = r#"
+inline(lua) fn foreign_dep(x: int) -> int = """
+    return __rock_vec_column_elements({ len = 1 }, x)
+"""
+fn caller() -> string { return "unchanged" }
+fn main() { let x = caller() }
+"#;
+    let ws1 = check(source_v1);
+    let all_roots1 = skull::mir_emit::emission_roots(&ws1, None);
+    let mut graph = instance_graph::build(&ws1, all_roots1, false);
+    let main = ws1
+        .modules
+        .iter()
+        .find_map(|module| {
+            module
+                .functions
+                .iter()
+                .find(|(_, f)| f.name.as_str() == "main")
+                .map(|(fid, _)| skull_mir::mir::FuncRef { module: module.id, func: fid })
+        })
+        .expect("main root");
+    let request_roots = vec![main];
+    let mut local = artifact::realize(
+        &ws1,
+        &graph,
+        &ArtifactRequest::new(LUAJIT_DESKTOP, &request_roots),
+    );
+    assert!(
+        !local.inline_deps.is_empty() || !local.unresolved_inline_deps.is_empty(),
+        "inline foreign-dependency fixture had no retained dependency: graph={:?}, view={:?}",
+        graph.inline_body_deps,
+        local.inline_deps
+    );
+
+    let ws2 = check(source_v2);
+    let caller = ws2
+        .modules
+        .iter()
+        .find_map(|module| {
+            module
+                .functions
+                .iter()
+                .find(|(_, f)| f.name.as_str() == "caller")
+                .map(|(fid, _)| (module.id, BodyOwner::Function(fid)))
+        })
+        .expect("caller body");
+    let update = graph.update_bodies_with_root_delta(&ws2, &[], &[], &[caller], &[]);
+    let all_roots2 = skull::mir_emit::emission_roots(&ws2, None);
+    let fresh_graph = instance_graph::build(&ws2, all_roots2, false);
+    let fresh = artifact::realize(
+        &ws2,
+        &fresh_graph,
+        &ArtifactRequest::new(LUAJIT_DESKTOP, &request_roots),
+    );
+    let stats = local.update_local(
+        &ws2,
+        &graph,
+        &ArtifactRequest::new(LUAJIT_DESKTOP, &request_roots),
+        &update.revisited,
+        &update.added,
+        &update.removed,
+    );
+    assert!(stats.iterations > 0, "inline-delta fixture did no local artifact work: {stats:?}");
+    assert_eq!(local.inline_deps, fresh.inline_deps, "inline dependency rows went stale");
+    assert_eq!(
+        local.unresolved_inline_deps,
+        fresh.unresolved_inline_deps,
+        "inline unresolved rows went stale"
+    );
 }

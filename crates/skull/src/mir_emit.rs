@@ -27,7 +27,7 @@ use skull_codegen_lua::{emit_function, emit_named, mangle_fn, CodegenCtx};
 use skull_mir::instance::Instance;
 use skull_mir::mir::{FuncRef, Inst, MirFunc, Term};
 use skull_parser::{CompilerError, CompilerErrorKind};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write as _;
 use std::time::{Duration, Instant};
 use ustr::Ustr;
@@ -1829,6 +1829,43 @@ fn build_inline_candidate_table(
     added: Option<&BTreeSet<Instance>>,
     removed: Option<&BTreeSet<Instance>>,
 ) -> std::sync::Arc<skull_transform::InlineCandidateTable> {
+    let mut census = CandidateBuildStats::default();
+    build_inline_candidate_table_with_census(
+        ws,
+        scx,
+        concrete,
+        keys,
+        base,
+        invalidated,
+        warm_keys_override,
+        added,
+        removed,
+        &mut census,
+    )
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct CandidateBuildStats {
+    keys_examined: usize,
+    warmed: usize,
+}
+
+fn build_inline_candidate_table_with_census(
+    ws: &Workspace,
+    scx: &skull_mir::lower::ScalarCtx,
+    concrete: &crate::concrete_body::ConcreteBodies,
+    keys: Vec<Instance>,
+    base: Option<&std::sync::Arc<skull_transform::InlineCandidateTable>>,
+    invalidated: Option<&FxHashSet<FuncRef>>,
+    warm_keys_override: Option<Vec<Instance>>,
+    added: Option<&BTreeSet<Instance>>,
+    removed: Option<&BTreeSet<Instance>>,
+    census: &mut CandidateBuildStats,
+) -> std::sync::Arc<skull_transform::InlineCandidateTable> {
+    // The old incremental route left this unset and filtered every key here.
+    // Count the exact iterator population so a mutation that restores that
+    // route is visible rather than looking like a timing-only regression.
+    census.keys_examined = usize::from(warm_keys_override.is_none()) * keys.len();
     let warm_keys: Vec<Instance> = warm_keys_override.unwrap_or_else(|| {
         keys.iter()
             .filter(|key| match base {
@@ -1848,6 +1885,7 @@ fn build_inline_candidate_table(
             inline_cache.warm_candidate(ws, scx, inst, concrete.plans.as_ref())
         },
     );
+    census.warmed = warms.len();
     if let Some(base) = base {
         if let (Some(added), Some(removed)) = (added, removed) {
             return std::sync::Arc::new(skull_transform::InlineCandidateTable::from_warms_incremental(
@@ -2326,6 +2364,7 @@ pub struct SkullEmitCache {
     /// preserves the live value). Rebuilt by `emit_full`.
     /// `docs/static-hot-reload-overlay-bug.md`.
     static_key_baseline: FxHashMap<Ustr, String>,
+    roots: RootCache,
     shader_registrations: ShaderRegistrations,
     shader_view: crate::shader_artifact::ShaderArtifactView,
     /// The definitions the last assembly actually EMITTED (global DCE prunes
@@ -2336,16 +2375,13 @@ pub struct SkullEmitCache {
     /// By emitted body rather than by declaration, because a specialization is
     /// its own definition with its own symbol.
     emitted: FxHashSet<Instance>,
-    /// The compilation target's root directory; see [`is_library_module`].
-    project_root: Option<String>,
     renderer_target: RendererTarget,
     repair_stats: IncrementalRepairStats,
 }
 
-/// Structural work performed by the last body-only cache update.
-///
-/// This is populated only on the opt-in inspection path used by incremental
-/// tests and profiling. It is ordinary per-cache state, not a hot-path atomic.
+/// Structural work performed by the last body-only cache update. The counters
+/// are ordinary per-cache state; they do not use synchronization or process-
+/// global atomics. The route records only work it already performs.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct IncrementalRepairStats {
     pub body_only_edits: usize,
@@ -2366,6 +2402,34 @@ pub struct IncrementalRepairStats {
     pub broad_concrete_scans: usize,
     pub broad_artifact_scans: usize,
     pub broad_candidate_scans: usize,
+    pub root_requests: usize,
+    pub root_modules_examined: usize,
+    pub root_functions_examined: usize,
+    pub root_reseeds: usize,
+    pub root_instances_checked: usize,
+    pub shader_delta_requests: usize,
+    pub shader_roots_examined: usize,
+    pub shader_roots_derived: usize,
+    pub declaration_instance_lookups: usize,
+    pub declaration_lookup_requests: usize,
+    pub candidate_entries_invalidated: usize,
+    pub candidate_entries_derived: usize,
+    pub candidate_entries_reused: usize,
+    pub candidate_entries_requested: usize,
+    pub dependents_visited: usize,
+    pub dependent_requests: usize,
+    pub chunks_rebuilt: usize,
+    pub chunk_rebuild_requests: usize,
+    pub artifact_iterations: usize,
+    pub artifact_iteration_requests: usize,
+    pub artifact_root_entries_examined: usize,
+    pub artifact_index_rows_examined: usize,
+    pub artifact_realize_invocations: usize,
+    pub root_hole_names_examined: usize,
+    pub root_hole_rows_examined: usize,
+    pub root_hole_decls_examined: usize,
+    pub root_hole_reason_buckets_examined: usize,
+    pub erased_catalogue_entries_examined: usize,
     pub graph_update_ns: u64,
     pub concrete_update_ns: u64,
     pub artifact_update_ns: u64,
@@ -2433,10 +2497,26 @@ struct ShaderRegistrations {
     lua: String,
     dependencies: FxHashSet<FuncRef>,
     callsites: FxHashSet<(ModuleId, BodyOwner)>,
+    shader_contributions: HashMap<(ModuleId, BodyOwner), Vec<skull_mir::lower::ShaderPair>>,
+    compute_contributions: HashMap<(ModuleId, BodyOwner), Vec<skull_mir::lower::ComputeEntry>>,
+    shader_pair_users: BTreeMap<String, usize>,
+    shader_pairs: BTreeMap<String, skull_mir::lower::ShaderPair>,
+    compute_entry_users: BTreeMap<String, usize>,
+    compute_entries: BTreeMap<String, skull_mir::lower::ComputeEntry>,
+    shader_root_set: FxHashSet<FuncRef>,
     roots: Vec<FuncRef>,
     keys: BTreeSet<String>,
     abi_wires: BTreeMap<String, String>,
     wgpu_projection_census: Option<WgpuProjectionCensus>,
+}
+
+#[derive(Clone, Default)]
+struct RootCache {
+    project_root: Option<String>,
+    interface_roots: Vec<FuncRef>,
+    sim_root: Option<FuncRef>,
+    shader_roots: Vec<FuncRef>,
+    roots: Vec<FuncRef>,
 }
 
 /// A `static` cell's reload key: rendered type + initializer content hash. Equal
@@ -3634,11 +3714,23 @@ fn register_sim_fn(ws: &Workspace) -> Option<FuncRef> {
 /// that decision itself. See [`all_roots`], which adds the generated-glue
 /// obligations on top.
 pub fn emission_roots(ws: &Workspace, project_root: Option<&str>) -> Vec<FuncRef> {
+    emission_roots_with_census(ws, project_root, None)
+}
+
+fn emission_roots_with_census(
+    ws: &Workspace,
+    project_root: Option<&str>,
+    mut census: Option<&mut RootEnumerationCensus>,
+) -> Vec<FuncRef> {
     let (deco_map, _) = build_deco_map(ws);
     let mut roots = Vec::new();
     for module in ws.modules.iter() {
         if module.id == ModuleId::builtin() {
             continue;
+        }
+        if let Some(census) = census.as_deref_mut() {
+            census.modules_examined += 1;
+            census.functions_examined += module.functions.len();
         }
         for (fid, f) in module.functions.iter() {
             if is_emission_root(module.file.as_str(), project_root, f, &deco_map)
@@ -3663,12 +3755,22 @@ pub fn emission_roots(ws: &Workspace, project_root: Option<&str>) -> Vec<FuncRef
 ///
 /// The shader collection is therefore built BEFORE the graph, not beside the
 /// assembly that renders it.
+#[cfg(test)]
 fn all_roots(
     ws: &Workspace,
     project_root: Option<&str>,
     shader_roots: &[FuncRef],
 ) -> Vec<FuncRef> {
-    let mut roots = emission_roots(ws, project_root);
+    all_roots_with_census(ws, project_root, shader_roots, None)
+}
+
+fn all_roots_with_census(
+    ws: &Workspace,
+    project_root: Option<&str>,
+    shader_roots: &[FuncRef],
+    mut census: Option<&mut RootEnumerationCensus>,
+) -> Vec<FuncRef> {
+    let mut roots = emission_roots_with_census(ws, project_root, census.as_deref_mut());
     let mut seen: FxHashSet<FuncRef> = roots.iter().copied().collect();
     let mut glue: Vec<FuncRef> = Vec::new();
     if !collect_sim_fns(ws).is_empty() {
@@ -3678,7 +3780,37 @@ fn all_roots(
     // Deterministic: `dependencies` is a hash set, so its iteration order is not.
     glue.sort_by_key(|f| (f.module.index(), f.func.into_raw()));
     roots.extend(glue.into_iter().filter(|f| seen.insert(*f)));
+    if let Some(census) = census.as_deref_mut() {
+        census.roots_reseeded += roots.len();
+    }
     roots
+}
+
+/// Compose the retained root set from facts cached by full construction and
+/// explicit body-local shader deltas. Unlike [`all_roots`], this never asks the
+/// workspace for its declarations or sim functions.
+fn cached_roots(
+    interface_roots: &[FuncRef],
+    sim_root: Option<FuncRef>,
+    shader_roots: &[FuncRef],
+) -> Vec<FuncRef> {
+    let mut roots = interface_roots.to_vec();
+    let mut seen: FxHashSet<FuncRef> = roots.iter().copied().collect();
+    let mut glue = Vec::new();
+    if let Some(register_sim) = sim_root {
+        glue.push(register_sim);
+    }
+    glue.extend(shader_roots.iter().copied());
+    glue.sort_by_key(|f| (f.module.index(), f.func.into_raw()));
+    roots.extend(glue.into_iter().filter(|f| seen.insert(*f)));
+    roots
+}
+
+#[derive(Default)]
+struct RootEnumerationCensus {
+    modules_examined: usize,
+    functions_examined: usize,
+    roots_reseeded: usize,
 }
 
 fn sim_registration_lines(
@@ -4055,6 +4187,29 @@ fn shader_registration_lines(
     if has_compute {
         out.push_str("if not __rock_wgpu_compute_snapshot_end() then error(\"compiler compute snapshot failed\") end\n");
     }
+    let mut shader_pair_users = BTreeMap::new();
+    for pairs in collection.contributions.values() {
+        for pair in pairs {
+            *shader_pair_users.entry(pair.key.clone()).or_insert(0) += 1;
+        }
+    }
+    let shader_pairs = collection
+        .pairs
+        .iter()
+        .map(|pair| (pair.key.clone(), pair.clone()))
+        .collect();
+    let mut compute_entry_users = BTreeMap::new();
+    for entries in compute_collection.contributions.values() {
+        for entry in entries {
+            *compute_entry_users.entry(entry.key.clone()).or_insert(0) += 1;
+        }
+    }
+    let compute_entries = compute_collection
+        .entries
+        .iter()
+        .map(|entry| (entry.key.clone(), entry.clone()))
+        .collect();
+    let shader_root_set = roots.iter().chain(compute_collection.entries.iter().map(|entry| &entry.entry)).copied().collect();
     Ok(ShaderRegistrations {
         lua: out,
         dependencies,
@@ -4064,6 +4219,13 @@ fn shader_registration_lines(
             .copied()
             .chain(compute_collection.callsites.iter().copied())
             .collect(),
+        shader_contributions: collection.contributions.clone(),
+        compute_contributions: compute_collection.contributions.clone(),
+        shader_pair_users,
+        shader_pairs,
+        compute_entry_users,
+        compute_entries,
+        shader_root_set,
         roots: roots
             .into_iter()
             .chain(compute_collection.entries.iter().map(|entry| entry.entry))
@@ -4785,7 +4947,15 @@ fn emit_full_in_with_mutation(
         .flat_map(|program| program.vert.into_iter().chain(std::iter::once(program.frag)))
         .chain(compute_programs.iter().map(|program| program.entry))
         .collect();
-    let emission_roots = all_roots(ws, project_root, &shader_roots);
+    let interface_roots = emission_roots(ws, project_root);
+    let sim_root = (!collect_sim_fns(ws).is_empty()).then(|| register_sim_fn(ws)).flatten();
+    let emission_roots = cached_roots(&interface_roots, sim_root, &shader_roots);
+    #[cfg(test)]
+    assert_eq!(
+        emission_roots,
+        all_roots(ws, project_root, &shader_roots),
+        "cached full-build roots diverged from the wholesale root oracle"
+    );
     setup_phases.push(("setup: root collection", t_setup.elapsed()));
 
     let t_setup = Instant::now();
@@ -5179,10 +5349,16 @@ fn emit_full_in_with_mutation(
         dependents,
         changed_consts_since_full: FxHashSet::default(),
         static_key_baseline,
+        roots: RootCache {
+            project_root: project_root.map(str::to_string),
+            interface_roots,
+            sim_root,
+            shader_roots,
+            roots: emission_roots.clone(),
+        },
         shader_registrations,
         shader_view,
         emitted: FxHashSet::default(),
-        project_root: project_root.map(str::to_string),
         renderer_target,
         repair_stats: IncrementalRepairStats::default(),
     };
@@ -5239,8 +5415,9 @@ impl SkullEmitCache {
         &self.shader_view
     }
 
-    /// The Lua artifact's realization of [`Self::graph`], from the same roots
-    /// the graph was built/updated from. Recomputed every edit; see the field.
+    /// The Lua artifact's retained realization of [`Self::graph`], from the
+    /// same roots the graph was built/updated from. Body edits apply a local
+    /// delta; full construction remains the independent oracle.
     pub fn lua_view(&self) -> &crate::artifact::ArtifactView {
         &self.lua_view
     }
@@ -5264,6 +5441,52 @@ impl SkullEmitCache {
         Ok(current != self.shader_registrations.keys)
     }
 
+    /// Compare the registration key set after replacing only the contributions
+    /// of the re-inferred bodies. The full-workspace method above remains the
+    /// full-build/reload oracle; BodyOnly must not use it.
+    pub fn shader_registration_keys_changed_for_bodies(
+        &self,
+        ws: &Workspace,
+        reinferred: &[(ModuleId, BodyOwner)],
+    ) -> Result<bool, CompilerError> {
+        let mut users = self.shader_registrations.shader_pair_users.clone();
+        let mut compute_users = self.shader_registrations.compute_entry_users.clone();
+        for &(mid, owner) in reinferred {
+            if let Some(previous) = self.shader_registrations.shader_contributions.get(&(mid, owner)) {
+                for pair in previous {
+                    let count = users
+                        .get_mut(&pair.key)
+                        .expect("shader key index lost a body contribution");
+                    *count -= 1;
+                    if *count == 0 {
+                        users.remove(&pair.key);
+                    }
+                }
+            }
+            if let Some(previous) = self.shader_registrations.compute_contributions.get(&(mid, owner)) {
+                for entry in previous {
+                    let count = compute_users
+                        .get_mut(&entry.key)
+                        .expect("compute key index lost a body contribution");
+                    *count -= 1;
+                    if *count == 0 {
+                        compute_users.remove(&entry.key);
+                    }
+                }
+            }
+            let (shader, _) = skull_mir::lower::collect_shader_body(ws, mid, owner)?;
+            for pair in shader {
+                *users.entry(pair.key).or_insert(0) += 1;
+            }
+            let (compute, _) = skull_mir::lower::collect_compute_body(ws, mid, owner)?;
+            for entry in compute {
+                *compute_users.entry(entry.key).or_insert(0) += 1;
+            }
+        }
+        let current: BTreeSet<String> = users.keys().cloned().chain(compute_users.keys().cloned()).collect();
+        Ok(current != self.shader_registrations.keys)
+    }
+
     /// The compiler-owned ABI contract for every WGPU artifact registered by
     /// this cache. Body edits may replace source under the same contract; a
     /// changed wire cannot be applied to a live registry/pipeline safely.
@@ -5281,6 +5504,7 @@ fn update_shader_registrations(
     ws: &Workspace,
     reinferred: &[(ModuleId, BodyOwner)],
 ) -> Result<bool, CompilerError> {
+    self.repair_stats.shader_delta_requests = reinferred.len();
     let affected = reinferred.iter().any(|&(mid, owner)| {
         self.shader_registrations.callsites.contains(&(mid, owner))
             || matches!(
@@ -5297,20 +5521,123 @@ fn update_shader_registrations(
     if !affected {
         return Ok(false);
     }
-    let collection = skull_mir::lower::collect_shader_collection(ws)?;
-    let compute_collection = skull_mir::lower::collect_compute_collection(ws)?;
-    self.shader_registrations.roots = collection
-        .pairs
-        .iter()
-        .flat_map(|pair| pair.vert.into_iter().chain(std::iter::once(pair.frag)))
-        .chain(compute_collection.entries.iter().map(|entry| entry.entry))
-        .collect();
-    self.shader_registrations.callsites = collection
-        .callsites
+    let mut roots_examined = 0;
+    let mut roots_derived = 0;
+    for &(mid, owner) in reinferred {
+        let key = (mid, owner);
+        let old_shader = self
+            .shader_registrations
+            .shader_contributions
+            .remove(&key)
+            .unwrap_or_default();
+        let old_compute = self
+            .shader_registrations
+            .compute_contributions
+            .remove(&key)
+            .unwrap_or_default();
+        roots_examined += old_shader
+            .iter()
+            .map(|pair| usize::from(pair.vert.is_some()) + 1)
+            .sum::<usize>();
+        roots_examined += old_compute.len();
+        for pair in old_shader {
+            let users = self
+                .shader_registrations
+                .shader_pair_users
+                .get_mut(&pair.key)
+                .expect("shader contribution index lost an existing key");
+            *users -= 1;
+            if *users == 0 {
+                self.shader_registrations.shader_pair_users.remove(&pair.key);
+                self.shader_registrations.shader_pairs.remove(&pair.key);
+                if let Some(vert) = pair.vert {
+                    self.shader_registrations.shader_root_set.remove(&vert);
+                }
+                self.shader_registrations.shader_root_set.remove(&pair.frag);
+            }
+        }
+        for entry in old_compute {
+            let users = self
+                .shader_registrations
+                .compute_entry_users
+                .get_mut(&entry.key)
+                .expect("compute contribution index lost an existing key");
+            *users -= 1;
+            if *users == 0 {
+                self.shader_registrations.compute_entry_users.remove(&entry.key);
+                self.shader_registrations.compute_entries.remove(&entry.key);
+                self.shader_registrations.shader_root_set.remove(&entry.entry);
+            }
+        }
+
+        let (shader, shader_callsite) = skull_mir::lower::collect_shader_body(ws, mid, owner)?;
+        let (compute, compute_callsite) = skull_mir::lower::collect_compute_body(ws, mid, owner)?;
+        roots_derived += shader
+            .iter()
+            .map(|pair| usize::from(pair.vert.is_some()) + 1)
+            .sum::<usize>();
+        roots_derived += compute.len();
+        for pair in &shader {
+            let users = self
+                .shader_registrations
+                .shader_pair_users
+                .entry(pair.key.clone())
+                .or_insert(0);
+            *users += 1;
+            if *users == 1 {
+                self.shader_registrations
+                    .shader_pairs
+                    .insert(pair.key.clone(), pair.clone());
+                if let Some(vert) = pair.vert {
+                    self.shader_registrations.shader_root_set.insert(vert);
+                }
+                self.shader_registrations.shader_root_set.insert(pair.frag);
+            }
+        }
+        for entry in &compute {
+            let users = self
+                .shader_registrations
+                .compute_entry_users
+                .entry(entry.key.clone())
+                .or_insert(0);
+            *users += 1;
+            if *users == 1 {
+                self.shader_registrations
+                    .compute_entries
+                    .insert(entry.key.clone(), entry.clone());
+                self.shader_registrations.shader_root_set.insert(entry.entry);
+            }
+        }
+        self.shader_registrations
+            .shader_contributions
+            .insert(key, shader);
+        self.shader_registrations
+            .compute_contributions
+            .insert(key, compute);
+        let callsite = shader_callsite || compute_callsite;
+        if callsite {
+            self.shader_registrations.callsites.insert(key);
+        } else {
+            self.shader_registrations.callsites.remove(&key);
+        }
+    }
+    let mut shader_roots: Vec<FuncRef> = self
+        .shader_registrations
+        .shader_root_set
         .iter()
         .copied()
-        .chain(compute_collection.callsites.iter().copied())
         .collect();
+    shader_roots.sort_by_key(|f| (f.module.index(), f.func.into_raw()));
+    self.shader_registrations.roots = shader_roots;
+    self.shader_registrations.keys = self
+        .shader_registrations
+        .shader_pairs
+        .keys()
+        .cloned()
+        .chain(self.shader_registrations.compute_entries.keys().cloned())
+        .collect();
+    self.repair_stats.shader_roots_examined = roots_examined;
+    self.repair_stats.shader_roots_derived = roots_derived;
     Ok(true)
 }
 
@@ -5318,9 +5645,27 @@ fn update_shader_registrations(
         &mut self,
         ws: &Workspace,
     ) -> Result<(), CompilerError> {
-    let collection = skull_mir::lower::collect_shader_collection(ws)?;
+    let collection = skull_mir::lower::ShaderCollection {
+        pairs: self
+            .shader_registrations
+            .shader_pairs
+            .values()
+            .cloned()
+            .collect(),
+        callsites: self.shader_registrations.callsites.iter().copied().collect(),
+        contributions: self.shader_registrations.shader_contributions.clone(),
+    };
     let programs = shader_programs(&collection);
-    let compute_collection = skull_mir::lower::collect_compute_collection(ws)?;
+    let compute_collection = skull_mir::lower::ComputeCollection {
+        entries: self
+            .shader_registrations
+            .compute_entries
+            .values()
+            .cloned()
+            .collect(),
+        callsites: Vec::new(),
+        contributions: self.shader_registrations.compute_contributions.clone(),
+    };
     let compute = compute_programs(&compute_collection);
     let shader_scx = skull_mir::lower::ScalarCtx::new_values_first_class(ws)
         .sharing(std::sync::Arc::clone(self.graph.interner()));
@@ -5506,8 +5851,14 @@ fn update_chunk_cache(
     Vec<CompilerError>,
 ) {
     let cache = self;
+    let shader_delta_requests = cache.repair_stats.shader_delta_requests;
+    let shader_roots_examined = cache.repair_stats.shader_roots_examined;
+    let shader_roots_derived = cache.repair_stats.shader_roots_derived;
     cache.repair_stats = IncrementalRepairStats {
         body_only_edits: 1,
+        shader_delta_requests,
+        shader_roots_examined,
+        shader_roots_derived,
         ..IncrementalRepairStats::default()
     };
     // Fold each re-inferred body's value-reference contribution into the cached
@@ -5537,16 +5888,72 @@ fn update_chunk_cache(
     // rejected: 15-33 ms release against a sub-millisecond edit.
     let t_graph = Instant::now();
     let graph_builds_before = crate::instance_graph::build_invocations();
-    // `update_shader_registrations` runs BEFORE this (in `emit_incremental`), so
-    // the glue roots below are this edit's, not the previous build's.
-    let roots = all_roots(
-        ws,
-        cache.project_root.as_deref(),
-        &cache.shader_registrations.roots,
-    );
+    cache.repair_stats.root_requests = 1;
+    let previous_shader_roots = cache.roots.shader_roots.clone();
+    let current_shader_roots = cache.shader_registrations.roots.clone();
+    let shader_roots_changed = previous_shader_roots != current_shader_roots;
+    let mut root_added = Vec::new();
+    let mut root_removed = Vec::new();
+    if shader_roots_changed {
+        let mut current_roots = cache.roots.roots.clone();
+        for root in previous_shader_roots
+            .iter()
+            .filter(|root| !current_shader_roots.contains(root))
+        {
+            if cache.roots.interface_roots.contains(root)
+                || cache.roots.sim_root == Some(*root)
+            {
+                continue;
+            }
+            if let Some(position) = current_roots.iter().position(|current| current == root) {
+                current_roots.remove(position);
+                root_removed.push(*root);
+            }
+        }
+        for root in current_shader_roots
+            .iter()
+            .filter(|root| !previous_shader_roots.contains(root))
+        {
+            if !current_roots.contains(root) {
+                current_roots.push(*root);
+                root_added.push(*root);
+            }
+        }
+        current_roots.sort_by_key(|root| (root.module.index(), root.func.into_raw()));
+        cache.roots.roots = current_roots;
+    }
+    cache.roots.shader_roots = current_shader_roots;
+    // The full root enumerator remains an oracle for tests and verification;
+    // the body route consumes the retained root cache above.
+    let forced_roots = if std::env::var_os("SKULL_FORCE_ROOT_SCAN").is_some() {
+        let mut census = RootEnumerationCensus::default();
+        let roots = all_roots_with_census(
+            ws,
+            cache.roots.project_root.as_deref(),
+            &cache.roots.shader_roots,
+            Some(&mut census),
+        );
+        cache.repair_stats.root_functions_examined = census.functions_examined;
+        cache.repair_stats.root_modules_examined = census.modules_examined;
+        cache.repair_stats.root_reseeds = census.roots_reseeded;
+        let previous_roots = cache.roots.roots.clone();
+        root_added = roots
+            .iter()
+            .filter(|root| !previous_roots.contains(root))
+            .copied()
+            .collect();
+        root_removed = previous_roots
+            .iter()
+            .filter(|root| !roots.contains(root))
+            .copied()
+            .collect();
+        Some(roots)
+    } else {
+        None
+    };
     let update = cache
         .graph
-        .update_bodies_with_edits(ws, roots.clone(), reinferred, edits);
+        .update_bodies_with_root_delta(ws, &root_added, &root_removed, reinferred, edits);
     cache.repair_stats.graph_update_ns = t_graph.elapsed().as_nanos() as u64;
     cache.repair_stats.full_graph_rebuilds = crate::instance_graph::build_invocations()
         .saturating_sub(graph_builds_before) as usize;
@@ -5555,14 +5962,23 @@ fn update_chunk_cache(
     cache.repair_stats.graph_contributions_retracted = update.retracted_owners.len();
     cache.repair_stats.graph_contributions_installed = update.revisited_owners.len();
     cache.repair_stats.broad_owner_scans = update.broad_scans;
+    cache.repair_stats.root_hole_names_examined = update.census.root_hole_names_examined;
+    cache.repair_stats.root_hole_rows_examined = update.census.root_hole_rows_examined;
+    cache.repair_stats.root_hole_decls_examined = update.census.root_hole_decls_examined;
+    cache.repair_stats.root_hole_reason_buckets_examined =
+        update.census.root_hole_reason_buckets_examined;
+    cache.repair_stats.root_instances_checked = update.census.root_instances_checked;
+    cache.repair_stats.erased_catalogue_entries_examined =
+        update.census.erased_catalogue_entries_examined;
     let concrete_builds_before = crate::concrete_body::build_invocations();
     let t_concrete = Instant::now();
-    let concrete_update = cache.concrete.update_local(
+    let concrete_update = cache.concrete.update_local_with_span_edits(
         ws,
         &cache.graph,
         &update.revisited,
         &update.removed,
         &update.revisited_owners,
+        edits,
     );
     cache.repair_stats.concrete_entries_derived = concrete_update.derived;
     cache.repair_stats.concrete_entries_reused = concrete_update.reused;
@@ -5603,18 +6019,44 @@ fn update_chunk_cache(
     // The retained view owns the predecessor/successor indexes needed to
     // update reachability without realizing the full graph again.
     let t_artifact = Instant::now();
-    let artifact_update = cache.lua_view.update_local(
+    cache.repair_stats.artifact_iteration_requests = update
+        .revisited
+        .len()
+        .saturating_add(update.added.len())
+        .saturating_add(update.removed.len());
+    let artifact_realize_before = crate::artifact::realize_invocations();
+    if std::env::var_os("SKULL_FORCE_ARTIFACT_REALIZE").is_some() {
+        let _ = crate::artifact::realize(
+                ws,
+                &cache.graph,
+                &crate::artifact::ArtifactRequest::new(
+                    crate::target_projection::LUAJIT_DESKTOP,
+                forced_roots.as_deref().unwrap_or(cache.roots.roots.as_slice()),
+            ),
+        );
+    }
+    let artifact_update = cache.lua_view.update_local_with_root_delta(
         ws,
         &cache.graph,
-        &crate::artifact::ArtifactRequest::new(crate::target_projection::LUAJIT_DESKTOP, &roots),
+        &crate::artifact::ArtifactRequest::new(
+            crate::target_projection::LUAJIT_DESKTOP,
+            forced_roots.as_deref().unwrap_or(cache.roots.roots.as_slice()),
+        ),
         &update.revisited,
         &update.added,
         &update.removed,
+        &root_added,
+        &root_removed,
     );
     cache.repair_stats.artifact_chunks_revisited = artifact_update.revisited;
     cache.repair_stats.artifact_chunks_added = artifact_update.added;
     cache.repair_stats.artifact_chunks_removed = artifact_update.removed;
-    cache.repair_stats.full_artifact_view_realizations = 0;
+    cache.repair_stats.artifact_iterations = artifact_update.iterations;
+    cache.repair_stats.artifact_root_entries_examined = artifact_update.root_entries_examined;
+    cache.repair_stats.artifact_index_rows_examined = artifact_update.local_index_rows_examined;
+    cache.repair_stats.artifact_realize_invocations = crate::artifact::realize_invocations()
+        .saturating_sub(artifact_realize_before) as usize;
+    cache.repair_stats.full_artifact_view_realizations = cache.repair_stats.artifact_realize_invocations;
     cache.repair_stats.broad_artifact_scans = artifact_update.broad_scans;
     cache.repair_stats.artifact_update_ns = t_artifact.elapsed().as_nanos() as u64;
 
@@ -5642,20 +6084,43 @@ fn update_chunk_cache(
             warm_keys.extend(keys.iter().cloned());
         }
     }
+    let candidate_entries_requested = warm_keys.len();
+    let candidate_entries_invalidated = concrete_update.candidate_keys_removed.len()
+        + warm_keys
+            .iter()
+            .filter(|key| {
+                !concrete_update.candidate_keys_added.contains(*key)
+                    && cache.candidate_keys.contains(*key)
+            })
+            .count();
+    let warm_keys: Vec<Instance> = warm_keys.into_iter().collect();
     let t_candidate = Instant::now();
     let previous_candidate_table = cache.inline_cache.candidate_table();
-    let candidate_table = build_inline_candidate_table(
+    let force_candidate_scan = std::env::var_os("SKULL_FORCE_CANDIDATE_SCAN").is_some();
+    let mut candidate_census = CandidateBuildStats::default();
+    let candidate_table = build_inline_candidate_table_with_census(
         ws,
         scx,
         &cache.concrete,
-        Vec::new(),
+        if force_candidate_scan {
+            cache.candidate_keys.iter().cloned().collect()
+        } else {
+            Vec::new()
+        },
         previous_candidate_table.as_ref(),
         Some(&invalidated_candidate_frefs),
-        Some(warm_keys.into_iter().collect()),
+        (!force_candidate_scan).then_some(warm_keys),
         Some(&concrete_update.candidate_keys_added),
         Some(&concrete_update.candidate_keys_removed),
+        &mut candidate_census,
     );
     cache.inline_cache.replace_candidate_table(candidate_table);
+    cache.repair_stats.candidate_entries_requested = candidate_entries_requested;
+    cache.repair_stats.candidate_entries_invalidated = candidate_entries_invalidated;
+    cache.repair_stats.candidate_entries_derived = candidate_census.warmed;
+    cache.repair_stats.candidate_entries_reused = candidate_entries_requested
+        .saturating_sub(candidate_census.warmed);
+    cache.repair_stats.broad_candidate_scans = candidate_census.keys_examined;
     cache.repair_stats.candidate_update_ns = t_candidate.elapsed().as_nanos() as u64;
 
     // **A changed declaration maps to its LIVE INSTANCES through the graph**,
@@ -5666,8 +6131,11 @@ fn update_chunk_cache(
     // IS its base instance, and a declaration the graph never reached still has
     // a chunk here that an edit can invalidate.
     let mut affected: FxHashSet<Instance> = changed.iter().copied().map(shared).collect();
+    cache.repair_stats.declaration_lookup_requests = changed.len();
     for c in &changed {
-        affected.extend(cache.graph.instances_of(*c).cloned());
+        let instances: Vec<Instance> = cache.graph.instances_of(*c).cloned().collect();
+        cache.repair_stats.declaration_instance_lookups += instances.len();
+        affected.extend(instances);
     }
     // ...plus every chunk that DEPENDS on a changed fn. This is the CODEGEN
     // reverse graph, which the instance graph does not hold and must not be
@@ -5677,6 +6145,8 @@ fn update_chunk_cache(
     // other, so both survive.
     for c in &changed {
         if let Some(deps) = cache.dependents.get(c) {
+            cache.repair_stats.dependent_requests += 1;
+            cache.repair_stats.dependents_visited += deps.len();
             affected.extend(deps.iter().cloned());
         }
     }
@@ -5688,6 +6158,7 @@ fn update_chunk_cache(
     // Construction of graph additions happens after invalidation below, so a
     // newly reached body cannot reuse an inline decision made for the old body.
     cache.repair_stats.affected_selection_ns = _t_aff.elapsed().as_nanos() as u64;
+    cache.repair_stats.chunk_rebuild_requests = affected.len();
     let _aff_ms = Duration::from_nanos(cache.repair_stats.affected_selection_ns);
 
     // The persistent InlineCache keeps unchanged callee bodies across edits; the
@@ -5696,6 +6167,7 @@ fn update_chunk_cache(
     // `affected`), so invalidate them before re-lowering. Everything else is
     // provably unchanged and reused.
     let _t_relow = Instant::now();
+    let mut chunks_rebuilt = 0;
     for body in &affected {
         cache.inline_cache.invalidate(body.func);
     }
@@ -5716,6 +6188,7 @@ fn update_chunk_cache(
         // An edit can flip a body between cached (ordinary/coroutine) and
         // regenerated (extern / inline(lua)); only the former has a chunk.
         if is_cached_emitted_body(f, body) {
+            chunks_rebuilt += 1;
             let chunk = rebuild_chunk(ws, cg, scx, &cache.concrete, body, f, &mut cache.inline_cache);
             if let Ok(c) = &chunk {
                 let new_deps: Vec<FuncRef> = c.deps.iter().copied().collect();
@@ -5728,6 +6201,7 @@ fn update_chunk_cache(
             cache.chunks.remove(body);
         }
     }
+    cache.repair_stats.chunks_rebuilt = chunks_rebuilt;
     let added_errors = Self::build_graph_added_chunks(cache, ws, &update.added);
     cache.repair_stats.relowering_ns = _t_relow.elapsed().as_nanos() as u64;
     if std::env::var("SKULL_EMIT_PROFILE").is_ok() {
@@ -5771,7 +6245,7 @@ pub fn emit_incremental(
     let t_asm = Instant::now();
     let mut built_specs: Vec<(Instance, Chunk)> = Vec::new();
     let (mut emit, emitted) = assemble(ws, &cache.cg, &cache.scx, cache, &mut built_specs)?;
-    emit.concrete_stats = cache.concrete.build_stats;
+    emit.concrete_stats = cache.concrete.authoritative_build_stats();
     cache.emitted = emitted;
     cache.absorb_spec_chunks(built_specs);
     let reassemble = t_asm.elapsed();
@@ -6060,7 +6534,7 @@ pub fn emit_overlay_with_span_edits(
     let t_relower = t2.elapsed();
     let t3 = Instant::now();
     let mut emit = assemble_overlay(ws, cache, shader_changed);
-    emit.concrete_stats = cache.concrete.build_stats;
+    emit.concrete_stats = cache.concrete.authoritative_build_stats();
     // Advance the static baseline to the keys now in effect. A reset line fires on
     // the reload that dofiles the overlay carrying it, so once THIS overlay resets a
     // cell (or leaves it unchanged), a LATER overlay must not reset it again -- else

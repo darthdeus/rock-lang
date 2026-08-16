@@ -2234,7 +2234,7 @@ pub fn skull_incremental_profile(path: &str) -> Result<()> {
 /// states so every pass is a genuine change (not a content-hash no-op). Reports
 /// the timing distribution (mean/p50/p99/min/max/stddev) + overlay size + the
 /// per-phase breakdown of BOTH halves: `update_file` (clone/cook/lower/infer, from
-/// bone's `phase_timings`) and `emit_overlay`. It calls the EXACT same
+/// bone's `phase_timings`) and `emit_overlay`, plus verdict lints. It calls the EXACT same
 /// `session.update_file` + `skull::mir_emit::emit_overlay` that
 /// `SkullStone::recompile` runs on a body edit (no reassembly -- the two-file
 /// split's whole point), so the numbers are the live recompile path, just sampled
@@ -2245,6 +2245,8 @@ pub fn skull_incremental_profile(path: &str) -> Result<()> {
 /// its first fn); `SKULL_ITER_FN=<name>` profiles a REAL constant edit -- flips
 /// the first digit in that fn's body, alternating with the original (e.g.
 /// `SKULL_ITER_FN=update_mobs` flips mag's `tick_anim(.., 3, ..)` 3<->2).
+/// `SKULL_ITER_WRITE=1` additionally measures the production atomic overlay
+/// write into a temporary output path.
 pub fn skull_iter_incremental(path: &str, iters: usize, warmup: usize) -> Result<()> {
     use std::path::PathBuf;
 
@@ -2291,7 +2293,7 @@ pub fn skull_iter_incremental(path: &str, iters: usize, warmup: usize) -> Result
     // fn's body, alternating modified <-> original -- e.g.
     // `SKULL_ITER_FN=update_mobs rock iter-incremental mag` flips `tick_anim(..,
     // 3, ..)` 3<->2. Else: auto-pick a file and inject whitespace (body_touch).
-    let (target, state_a, state_b) = if let Ok(fname) = std::env::var("SKULL_ITER_FN") {
+    let (target, mut state_a, mut state_b) = if let Ok(fname) = std::env::var("SKULL_ITER_FN") {
         let (p, t) = files
             .iter()
             .find(|(p, t)| p.contains(&proj_dir) && t.contains(&format!("fn {fname}")))
@@ -2336,6 +2338,9 @@ pub fn skull_iter_incremental(path: &str, iters: usize, warmup: usize) -> Result
         let b = body_touch(&a).unwrap();
         (target, a, b)
     };
+    if std::env::var_os("SKULL_ITER_REVERSE").is_some() {
+        std::mem::swap(&mut state_a, &mut state_b);
+    }
 
     let iters = iters.max(1);
     let target_name = std::path::Path::new(&target)
@@ -2343,10 +2348,16 @@ pub fn skull_iter_incremental(path: &str, iters: usize, warmup: usize) -> Result
         .map(|f| f.to_string_lossy().into_owned())
         .unwrap_or_else(|| target.clone());
 
+    let write_disk = std::env::var_os("SKULL_ITER_WRITE").is_some();
+    let write_dir = tempfile::tempdir().map_err(|e| anyhow::anyhow!("create iter output: {e}"))?;
+    let write_path = write_dir.path().join("incremental.lua");
     let mut samples: Vec<f64> = Vec::with_capacity(iters);
+    let mut disk_samples: Vec<f64> = Vec::with_capacity(iters);
     let mut last_update = 0.0;
     let mut last_diag = 0.0;
+    let mut last_lint = 0.0;
     let mut last_emit = 0.0;
+    let mut last_write = 0.0;
     let mut last_bytes = 0usize;
     let mut last_reinferred = 0usize;
     let mut last_body_meta = (0usize, false, 0usize, 0isize);
@@ -2386,9 +2397,24 @@ pub fn skull_iter_incremental(path: &str, iters: usize, warmup: usize) -> Result
         let _ = session.diagnostics();
         let diag_ms = ms(t_d);
 
+        let t_l = Instant::now();
+        let lint_errs = crate::lint_pass::run_build_lints(
+            session.workspace(),
+            &sources,
+            std::path::Path::new(path),
+            crate::lint_pass::Scope::WholeProject,
+        );
+        if !lint_errs.is_empty() {
+            return Err(anyhow::anyhow!(
+                "iter-incremental fixture produced {} lint error(s)",
+                lint_errs.len()
+            ));
+        }
+        let lint_ms = ms(t_l);
+
         // Profile the REAL stone path: `emit_overlay` (no reassembly), matching
         // what `SkullStone::recompile` writes on a body edit.
-        let (emit_ms, overlay_bytes, phases) = {
+        let (emit_ms, overlay, phases) = {
             let ws = session.workspace();
             let t_e = Instant::now();
             let e = skull::mir_emit::emit_overlay_with_span_edits(
@@ -2398,15 +2424,30 @@ pub fn skull_iter_incremental(path: &str, iters: usize, warmup: usize) -> Result
                 &span_edits,
             )
                 .map_err(|e| anyhow::anyhow!("emit_overlay: {}", e.message))?;
-            (ms(t_e), e.lua.len(), e.phases)
+            (ms(t_e), e.lua, e.phases)
+        };
+        let overlay_bytes = overlay.len();
+        let write_ms = if write_disk {
+            let t_w = Instant::now();
+            rock_host::project::write_atomic(&write_path, &overlay)
+                .map_err(|e| anyhow::anyhow!("iter-incremental write: {e}"))?;
+            ms(t_w)
+        } else {
+            0.0
         };
 
         if i >= warmup {
-            samples.push(update_ms + diag_ms + emit_ms);
+            let backend_ms = update_ms + diag_ms + lint_ms + emit_ms;
+            samples.push(backend_ms);
+            if write_disk {
+                disk_samples.push(backend_ms + write_ms);
+            }
             last_update = update_ms;
             last_diag = diag_ms;
+            last_lint = lint_ms;
             last_emit = emit_ms;
             last_bytes = overlay_bytes;
+            last_write = write_ms;
             last_reinferred = upd.reinferred.len();
             last_body_meta = (
                 upd.body_update.semantic_bodies.len(),
@@ -2434,9 +2475,28 @@ pub fn skull_iter_incremental(path: &str, iters: usize, warmup: usize) -> Result
         last_reinferred
     );
     eprintln!(
-        "  update+emit per pass [ms]:  mean {:.3}  p50 {:.3}  p99 {:.3}  min {:.3}  max {:.3}  stddev {:.3} (cv {:.1}%)",
+        "  backend route per pass [ms] (update + diagnostics + lints + overlay):  mean {:.3}  p50 {:.3}  p99 {:.3}  min {:.3}  max {:.3}  stddev {:.3} (cv {:.1}%)",
         mean, pct(50.0), pct(99.0), sorted[0], sorted[sorted.len() - 1], stddev, cv
     );
+    if write_disk {
+        let mut disk_sorted = disk_samples.clone();
+        disk_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let disk_mean = disk_samples.iter().sum::<f64>() / n;
+        let disk_var = disk_samples.iter().map(|s| (s - disk_mean).powi(2)).sum::<f64>() / n;
+        let disk_pct = |p: f64| {
+            disk_sorted[((p / 100.0) * (disk_sorted.len() as f64 - 1.0)).round() as usize]
+        };
+        eprintln!(
+            "  disk-inclusive per pass [ms] (backend + atomic overlay write):  mean {:.3}  p50 {:.3}  p99 {:.3}  min {:.3}  max {:.3}  stddev {:.3} (cv {:.1}%)",
+            disk_mean,
+            disk_pct(50.0),
+            disk_pct(99.0),
+            disk_sorted[0],
+            disk_sorted[disk_sorted.len() - 1],
+            disk_var.sqrt(),
+            if disk_mean > 0.0 { disk_var.sqrt() / disk_mean * 100.0 } else { 0.0 },
+        );
+    }
     eprintln!("\n  last-pass breakdown (the two-file split path):");
     eprintln!(
         "    Session update_file:            {last_update:.3} ms  (re-lower+re-infer ONLY the {last_reinferred} changed body/bodies)"
@@ -2446,8 +2506,12 @@ pub fn skull_iter_incremental(path: &str, iters: usize, warmup: usize) -> Result
     }
     let update_known: f64 = last_update_phases.iter().map(|(_, d)| d.as_secs_f64() * 1000.0).sum();
     eprintln!("       (parse + classify, untimed: {:.3} ms)", (last_update - update_known).max(0.0));
-    eprintln!("    diagnostics (O(workspace) scan): {last_diag:.3} ms  (live cook ALSO has disk read, not here)");
+    eprintln!("    diagnostics (O(workspace) scan): {last_diag:.3} ms");
+    eprintln!("    lints (whole-project verdict):  {last_lint:.3} ms");
     eprintln!("    emit_overlay:                   {last_emit:.3} ms  ({last_bytes} B overlay)");
+    if write_disk {
+        eprintln!("    incremental file write:         {last_write:.3} ms");
+    }
     for (lbl, d) in &last_phases {
         eprintln!("       {lbl}: {:.3} ms", d.as_secs_f64() * 1000.0);
     }
@@ -2480,6 +2544,41 @@ broad_owner={} broad_concrete={} broad_artifact={} broad_candidate={}",
             stats.broad_concrete_scans,
             stats.broad_artifact_scans,
             stats.broad_candidate_scans,
+        );
+        eprintln!(
+            "    locality census: roots requested={} modules_examined={} functions_examined={} reseeded={} root-instances-checked={} \
+shader requests={} roots examined={} derived={} declarations requested={} instances looked up={} \
+candidates requested={} invalidated={} derived={} reused={} dependents requested={} visited={} \
+chunks requested={} rebuilt={} artifact requests={} iterations={} index-rows={} root entries={} realizes={} \
+root-hole names={} rows={} decls={} reason-buckets={} erased-catalogue={}",
+            stats.root_requests,
+            stats.root_modules_examined,
+            stats.root_functions_examined,
+            stats.root_reseeds,
+            stats.root_instances_checked,
+            stats.shader_delta_requests,
+            stats.shader_roots_examined,
+            stats.shader_roots_derived,
+            stats.declaration_lookup_requests,
+            stats.declaration_instance_lookups,
+            stats.candidate_entries_requested,
+            stats.candidate_entries_invalidated,
+            stats.candidate_entries_derived,
+            stats.candidate_entries_reused,
+            stats.dependent_requests,
+            stats.dependents_visited,
+            stats.chunk_rebuild_requests,
+            stats.chunks_rebuilt,
+            stats.artifact_iteration_requests,
+            stats.artifact_iterations,
+            stats.artifact_index_rows_examined,
+            stats.artifact_root_entries_examined,
+            stats.artifact_realize_invocations,
+            stats.root_hole_names_examined,
+            stats.root_hole_rows_examined,
+            stats.root_hole_decls_examined,
+            stats.root_hole_reason_buckets_examined,
+            stats.erased_catalogue_entries_examined,
         );
     }
     Ok(())
@@ -2706,11 +2805,19 @@ impl SkullStone {
 
         let t_emit = Instant::now();
         let old_shader_contracts = self.cache.shader_registration_contracts();
-        if self
-            .cache
-            .shader_registration_keys_changed(self.project.workspace())
-            .map_err(|e| anyhow::anyhow!("{}", render_project_err(self.project.sources(), &e)))?
-        {
+        let shader_keys_changed = if full {
+            self.cache
+                .shader_registration_keys_changed(self.project.workspace())
+                .map_err(|e| anyhow::anyhow!("{}", render_project_err(self.project.sources(), &e)))?
+        } else {
+            self.cache
+                .shader_registration_keys_changed_for_bodies(
+                    self.project.workspace(),
+                    &reinferred,
+                )
+                .map_err(|e| anyhow::anyhow!("{}", render_project_err(self.project.sources(), &e)))?
+        };
+        if shader_keys_changed {
             return Ok(SkullReload::FullRequired {
                 reasons: vec!["shader registration key set changed".to_string()],
             });

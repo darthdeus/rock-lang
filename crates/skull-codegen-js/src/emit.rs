@@ -9,7 +9,7 @@
 //! `CompilerError` (reject, don't emit-and-hope); the subset grows with the
 //! backend.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use bone_semantic::inference::Workspace;
 use comfy_la_arena::{Idx, RawIdx};
@@ -2739,6 +2739,7 @@ fn js_scx(ws: &Workspace) -> skull_mir::lower::ScalarCtx {
     skull_mir::lower::ScalarCtx::new(ws).with_target(bone_semantic::hir::FnBackend::Js)
 }
 
+#[derive(Clone)]
 struct JsRootPlan {
     named: Vec<(FuncRef, String)>,
     refs: Vec<FuncRef>,
@@ -2863,28 +2864,42 @@ fn update_js_session(
     edits: &[skull_graph::instance_graph::SpanEdit],
 ) {
     let before = session.graph.instances.len();
+    let previous_roots = session.roots.clone();
+    let root_added: Vec<FuncRef> = roots
+        .iter()
+        .filter(|root| !previous_roots.contains(root))
+        .copied()
+        .collect();
+    let root_removed: Vec<FuncRef> = previous_roots
+        .iter()
+        .filter(|root| !roots.contains(root))
+        .copied()
+        .collect();
     let update = session
         .graph
-        .update_bodies_with_edits(ws, roots.to_vec(), changed, edits);
-    session.concrete.update_local(
+        .update_bodies_with_root_delta(ws, &root_added, &root_removed, changed, edits);
+    session.concrete.update_local_with_span_edits(
         ws,
         &session.graph,
         &update.revisited,
         &update.removed,
         &update.revisited_owners,
+        edits,
     );
     let mappings = artifact::ArtifactMappings::for_backend(bone_semantic::hir::FnBackend::Js)
         .with_supply(&crate::JsBackendRealization);
     let request = artifact::ArtifactRequest::new(target_projection::JAVASCRIPT_WEB, roots)
         .with_mappings(mappings)
         .with_symbols(&artifact::REALIZED_SYMBOLS);
-    session.view.update_local(
+    session.view.update_local_with_root_delta(
         ws,
         &session.graph,
         &request,
         &update.revisited,
         &update.added,
         &update.removed,
+        &root_added,
+        &root_removed,
     );
     session.roots = roots.to_vec();
     session.last_update = Some(JsGraphUpdate {
@@ -2911,7 +2926,7 @@ pub fn emit_program(
         extra.push((fr, nm.clone()));
         nm
     });
-    let (build, _) = build_program_session(ws, &scx, &extra)?;
+    let (build, _, _) = build_program_session(ws, &scx, &extra)?;
     Ok(JsProgram { program: build.program, main_js_name })
 }
 
@@ -2926,7 +2941,8 @@ pub fn emit_program_cached(
         extra.push((fr, name.clone()));
         name
     });
-    let (build, session) = build_program_session(ws, &scx, &extra)?;
+    let (build, session, root_plan) = build_program_session(ws, &scx, &extra)?;
+    let shader_collection = skull_mir::lower::collect_shader_collection(ws)?;
     let static_keys = build
         .chunks
         .values()
@@ -2941,7 +2957,12 @@ pub fn emit_program_cached(
         build,
         changed_since_full: HashSet::new(),
         static_keys,
-        shader_registration_keys: shader_registration_keys(ws)?,
+        shader_contributions: shader_collection.contributions,
+        root_plan,
+        opaque_root_contributions: session
+            .view
+            .opaque_boundary_roots
+            .clone(),
         scx,
         session,
     };
@@ -2978,7 +2999,7 @@ fn build_program_session(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,
     extra_roots: &[(FuncRef, String)],
-) -> Result<(ProgramBuild, JsSession), CompilerError> {
+) -> Result<(ProgramBuild, JsSession, JsRootPlan), CompilerError> {
     for module in ws.modules.iter() {
         if module.id == bone_semantic::prelude::ModuleId::builtin() {
             continue;
@@ -2997,7 +3018,7 @@ fn build_program_session(
             continue;
         }
         let build = assemble_program_core(ws, scx, &root_plan.named, &session)?;
-        return Ok((build, session));
+        return Ok((build, session, root_plan));
     }
 }
 
@@ -3317,7 +3338,11 @@ pub struct JsEmitCache {
     build: ProgramBuild,
     changed_since_full: HashSet<FuncRef>,
     static_keys: HashMap<ustr::Ustr, String>,
-    shader_registration_keys: BTreeSet<String>,
+    shader_contributions:
+        HashMap<(bone_semantic::prelude::ModuleId, bone_semantic::hir::BodyOwner), Vec<skull_mir::lower::ShaderPair>>,
+    root_plan: JsRootPlan,
+    opaque_root_contributions:
+        BTreeMap<skull_graph::instance_graph::DeclKey, rustc_hash::FxHashSet<FuncRef>>,
     /// The session's lowering context, graph, and artifact view, kept across edits.
     scx: skull_mir::lower::ScalarCtx,
     session: JsSession,
@@ -3398,11 +3423,6 @@ pub fn emit_overlay_with_span_edits(
         return Ok(JsReload::FullRequired);
     }
 
-    let current_shader_keys = shader_registration_keys(ws)?;
-    if current_shader_keys != cache.shader_registration_keys {
-        return Ok(JsReload::FullRequired);
-    }
-
     // **The session's own arena, not a fresh one** -- see `JsEmitCache::scx`.
     // MAINTAINED first: the value-reference scan behind scalar-ABI eligibility
     // is per body, so a reused context that skipped this would plan the ABI the
@@ -3412,20 +3432,49 @@ pub fn emit_overlay_with_span_edits(
         cache.scx.update_body(ws, mid, owner);
     }
 
-    let mut extra_roots = Vec::new();
-    if let Some(main) = nullary_main(ws, user_mid) {
-        extra_roots.push((main, callee_js_name(ws, main)));
+    for &(mid, owner) in reinferred {
+        let key = (mid, owner);
+        let previous = cache.shader_contributions.get(&key).cloned().unwrap_or_default();
+        let (current, _) = skull_mir::lower::collect_shader_body(ws, mid, owner)?;
+        if current != previous {
+            return Ok(JsReload::FullRequired);
+        }
     }
-    let mut root_plan = js_root_plan(ws, &extra_roots)?;
+
+    let changed_funcs: Vec<FuncRef> = reinferred
+        .iter()
+        .filter_map(|(mid, owner)| match owner {
+            bone_semantic::hir::BodyOwner::Function(func) => Some(FuncRef { module: *mid, func: *func }),
+            bone_semantic::hir::BodyOwner::Global(_) => None,
+            _ => None,
+        })
+        .collect();
     let current_opaque = skull_graph::instance_graph::opaque_boundary_roots_for_decls(
         ws,
-        cache.session.view.realization.values().map(|realized| realized.decl),
+        changed_funcs.iter().copied(),
     );
-    extend_root_plan_from_opaque_targets(
-        ws,
-        &mut root_plan,
-        current_opaque.values().flatten().copied(),
-    );
+    for function in changed_funcs {
+        for member in skull_mir::lower::backend_variant_group(ws, function) {
+            let decl = skull_graph::instance_graph::DeclKey(member);
+            let previous = cache
+                .opaque_root_contributions
+                .get(&decl)
+                .cloned()
+                .unwrap_or_default();
+            let current = current_opaque.get(&decl).cloned().unwrap_or_default();
+            if current != previous {
+                return Ok(JsReload::FullRequired);
+            }
+        }
+    }
+
+    if let Some(main) = nullary_main(ws, user_mid) {
+        if !cache.root_plan.refs.contains(&main) {
+            return Ok(JsReload::FullRequired);
+        }
+    }
+
+    let root_plan = cache.root_plan.clone();
     let current_roots: HashSet<FuncRef> = root_plan.refs.iter().copied().collect();
     let session_roots: HashSet<FuncRef> = cache.session.roots.iter().copied().collect();
     if current_roots != session_roots {
@@ -3609,13 +3658,6 @@ pub fn emit_overlay_with_span_edits(
 
     cache.build = current;
     Ok(JsReload::Overlay(out))
-}
-
-fn shader_registration_keys(ws: &Workspace) -> Result<BTreeSet<String>, CompilerError> {
-    Ok(skull_mir::lower::collect_shader_pairs(ws)?
-        .into_iter()
-        .map(|pair| pair.key)
-        .collect())
 }
 
 fn static_cell_key(cell: &skull_mir::mir::StaticCell) -> String {
