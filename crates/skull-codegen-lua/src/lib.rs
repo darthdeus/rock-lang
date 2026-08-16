@@ -1590,8 +1590,8 @@ impl Emitter<'_> {
             Inst::UintAdd(a, b) => self.write_u32_bin(out, "+", a, b),
             Inst::UintSub(a, b) => self.write_u32_bin(out, "-", a, b),
             Inst::UintMul(a, b) => self.write_u32_mul(out, a, b),
-            // int `/` is floor-division (rock semantics); float `/` is real.
-            Inst::IntDiv(a, b) => {
+            // Integer `/` is floor-division (rock semantics); float `/` is real.
+            Inst::IntDiv(a, b) | Inst::UintDiv(a, b) => {
                 out.push_str("math.floor(");
                 self.write_opnd(out, *a);
                 out.push_str(" / ");
@@ -1600,13 +1600,6 @@ impl Emitter<'_> {
             }
             Inst::FloatDiv(a, b) => self.write_bin(out, "/", a, b),
             Inst::IntMod(a, b) | Inst::FloatMod(a, b) => self.write_bin(out, "%", a, b),
-            Inst::UintDiv(a, b) => {
-                out.push_str("math.floor(");
-                self.write_opnd(out, *a);
-                out.push_str(" / ");
-                self.write_opnd(out, *b);
-                out.push(')');
-            }
             Inst::UintMod(a, b) => self.write_u32_bin(out, "%", a, b),
             Inst::StringConcat(a, b) => {
                 // Emit the whole inlinable concat tree as ONE flat `..` run
@@ -1653,11 +1646,12 @@ impl Emitter<'_> {
             // the inner value's expression verbatim (identity). Reached only if a
             // pass ever materializes one; the operand path (`write_opnd`) folds it
             // away. `write_value` (not `write_opnd`) to avoid a double wrap.
-            Inst::IntToFloat(x) => self.write_value(out, *x, &self.func.insts[*x]),
-            Inst::UintToFloat(x) => self.write_value(out, *x, &self.func.insts[*x]),
-            Inst::IntToUint(x) => self.write_checked_u32(out, *x, "uint conversion out of range"),
-            Inst::FloatToUint(x) => self.write_checked_u32(out, *x, "uint conversion out of range"),
-            Inst::UintToInt(x) => self.write_value(out, *x, &self.func.insts[*x]),
+            Inst::IntToFloat(x) | Inst::UintToFloat(x) | Inst::UintToInt(x) => {
+                self.write_value(out, *x, &self.func.insts[*x])
+            }
+            Inst::IntToUint(x) | Inst::FloatToUint(x) => {
+                self.write_checked_u32(out, *x, "uint conversion out of range")
+            }
             Inst::UintBitcastInt(x) => {
                 out.push_str("(((");
                 self.write_opnd(out, *x);
@@ -1669,14 +1663,18 @@ impl Emitter<'_> {
                 out.push_str(") % 4294967296)");
             }
 
-            Inst::IntLt(a, b) | Inst::FloatLt(a, b) => self.write_bin(out, "<", a, b),
-            Inst::IntLeq(a, b) | Inst::FloatLeq(a, b) => self.write_bin(out, "<=", a, b),
-            Inst::IntGt(a, b) | Inst::FloatGt(a, b) => self.write_bin(out, ">", a, b),
-            Inst::IntGeq(a, b) | Inst::FloatGeq(a, b) => self.write_bin(out, ">=", a, b),
-            Inst::UintLt(a, b) => self.write_bin(out, "<", a, b),
-            Inst::UintLeq(a, b) => self.write_bin(out, "<=", a, b),
-            Inst::UintGt(a, b) => self.write_bin(out, ">", a, b),
-            Inst::UintGeq(a, b) => self.write_bin(out, ">=", a, b),
+            Inst::IntLt(a, b) | Inst::UintLt(a, b) | Inst::FloatLt(a, b) => {
+                self.write_bin(out, "<", a, b)
+            }
+            Inst::IntLeq(a, b) | Inst::UintLeq(a, b) | Inst::FloatLeq(a, b) => {
+                self.write_bin(out, "<=", a, b)
+            }
+            Inst::IntGt(a, b) | Inst::UintGt(a, b) | Inst::FloatGt(a, b) => {
+                self.write_bin(out, ">", a, b)
+            }
+            Inst::IntGeq(a, b) | Inst::UintGeq(a, b) | Inst::FloatGeq(a, b) => {
+                self.write_bin(out, ">=", a, b)
+            }
             Inst::Eq(a, b) => self.write_bin(out, "==", a, b),
             Inst::NotEq(a, b) => self.write_bin(out, "~=", a, b),
 
