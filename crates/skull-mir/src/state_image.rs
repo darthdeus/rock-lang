@@ -104,9 +104,14 @@ impl StateImagePlan {
                 )
             } else {
                 match entry.kind {
-                    StateKind::Global | StateKind::Static => {
+                    StateKind::Global => {
                         (ImageEntryKind::SemanticSession, "graph", "fresh-session")
                     }
+                    StateKind::Static => (
+                        ImageEntryKind::SemanticSession,
+                        "boot-graph;world-live",
+                        "boot-fresh;world-live-fresh-copy",
+                    ),
                     StateKind::CoroutineFrame => (
                         ImageEntryKind::SemanticSession,
                         "frame-descriptor",

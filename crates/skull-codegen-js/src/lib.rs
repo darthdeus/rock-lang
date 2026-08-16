@@ -3111,6 +3111,14 @@ var __rock_state_image_next_id = 0;
 var __rock_state_image_next_session_id = 0;
 var __rock_state_image_images = Object.create(null);
 var __rock_state_image_sessions = Object.create(null);
+function __rock_state_image_world_included(entry) {
+  if (entry.kind === "static") return false;
+  if (entry.kind !== "global") return true;
+  if (typeof __replay_is_sim_state === "function") {
+    return __replay_is_sim_state(entry.name || entry.identity);
+  }
+  return true;
+}
 function __rock_state_image_capture(kind, tick) {
   if (kind !== "boot" && kind !== "world") throw new Error("unsupported StateImage capture kind " + kind);
   __rock_state_image_plan_validate();
@@ -3129,13 +3137,18 @@ function __rock_state_image_capture(kind, tick) {
     });
     if (!planEntry) throw new Error("StateImage has unknown schema entry " + entry.identity);
     if (planEntry.kind !== "semantic_session") return;
+    if (kind === "world" && !__rock_state_image_world_included(entry)) return;
     var keys = entry.session_keys || [];
     var values = [], initialized = [];
     for (var i = 0; i < keys.length; i++) {
       initialized[i] = __rock_state_has(keys[i]);
       values[i] = initialized[i] ? __rock_state_image_clone(__rock_state_get(keys[i]), seen, "capture") : undefined;
     }
-    image.entries[entry.identity] = { keys: keys.slice(), values: values, initialized: initialized };
+    image.entries[entry.identity] = {
+      keys: keys.slice(), values: values, initialized: initialized,
+      initializer_key: entry.kind === "static"
+        ? __rock_active_session.__rock_initializer_keys[keys[0]] : undefined
+    };
     image.members[entry.identity] = true;
   });
   __rock_state_image_images[id] = image;
@@ -3161,12 +3174,31 @@ function __rock_state_image_materialize(image_id, kind) {
   var candidate = __rock_session_new(image.schema_id);
   candidate.__rock_rng_state = image.rng_state;
   var seen = new Map();
+  var source = __rock_active_session;
   __ROCK_STATE_SCHEMA.forEach(function (entry) {
     var planEntry = __ROCK_STATE_IMAGE_PLAN.entries.find(function (candidateEntry) {
       return candidateEntry.identity === entry.identity;
     });
     if (!planEntry) throw new Error("StateImage has unknown schema entry " + entry.identity);
     if (planEntry.kind !== "semantic_session") return;
+    if (kind === "world" && !__rock_state_image_world_included(entry)) {
+      if (entry.kind !== "static") return;
+      var liveKeys = entry.session_keys || [];
+      if (liveKeys.length !== 2) throw new Error("StateImage static entry has no value/done realization " + entry.identity);
+      var liveValueKey = liveKeys[0], liveDoneKey = liveKeys[1];
+      if (source.__rock_initialized[liveValueKey] === true) {
+        candidate.__rock_state[liveValueKey] = __rock_state_image_clone(
+          source.__rock_state[liveValueKey], seen, "materialize");
+        candidate.__rock_initialized[liveValueKey] = true;
+      }
+      if (source.__rock_initialized[liveDoneKey] === true) {
+        candidate.__rock_state[liveDoneKey] = source.__rock_state[liveDoneKey];
+        candidate.__rock_initialized[liveDoneKey] = true;
+      }
+      var liveInitializer = source.__rock_initializer_keys[liveValueKey];
+      if (liveInitializer !== undefined) candidate.__rock_initializer_keys[liveValueKey] = liveInitializer;
+      return;
+    }
     var snapshot = image.entries[entry.identity];
     if (!snapshot || snapshot.keys.length !== (entry.session_keys || []).length) {
       throw new Error("StateImage omitted semantic entry " + entry.identity);
@@ -3178,6 +3210,9 @@ function __rock_state_image_materialize(image_id, kind) {
         candidate.__rock_state[key] = __rock_state_image_clone(snapshot.values[i], seen, "materialize");
         candidate.__rock_initialized[key] = true;
       }
+    }
+    if (entry.kind === "static" && snapshot.initializer_key !== undefined) {
+      candidate.__rock_initializer_keys[entry.session_keys[0]] = snapshot.initializer_key;
     }
   });
   var session_id = ++__rock_state_image_next_session_id;
