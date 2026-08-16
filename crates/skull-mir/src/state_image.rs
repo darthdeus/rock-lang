@@ -351,6 +351,8 @@ fn engine_semantic_global(name: &str) -> bool {
             | "dt"
             | "TIME_SCALE"
             | "camera"
+            | "editor_camera"
+            | "RENDER_CONFIG"
             | "keys_down"
             | "mouse_down"
             | "keys_down_last"
@@ -368,9 +370,11 @@ fn engine_semantic_global(name: &str) -> bool {
             | "mouse_pressed_this_frame"
             | "UI_MOUSE"
             | "UI_FOCUS"
+            | "UI_FEEL"
             | "WORLD_MODE"
             | "MOTES"
             | "POLLER"
+            | "SKIN_GALLERY_SEED"
             | "CURRENT_BLEND"
     )
 }
