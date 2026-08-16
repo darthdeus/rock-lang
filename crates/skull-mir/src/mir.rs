@@ -828,6 +828,9 @@ pub struct MirFunc {
     /// Comptime inputs this body's emitted code baked in (build_var /
     /// embed_string expansions), for incremental staleness detection.
     pub comptime_reads: Vec<ComptimeRead>,
+    /// Nominal structs whose declared logical shape is observed by runtime
+    /// reflection even when no Rock constructor realizes the value.
+    pub struct_registry_roots: std::collections::BTreeSet<Ustr>,
     pub insts: Arena<Inst>,
     pub cells: Arena<Cell>,
     pub blocks: Arena<Block>,
@@ -982,6 +985,7 @@ impl MirFunc {
             global_plan: None,
             statics: Vec::new(),
             comptime_reads: Vec::new(),
+            struct_registry_roots: Default::default(),
             insts: Arena::default(),
             cells: Arena::default(),
             blocks,

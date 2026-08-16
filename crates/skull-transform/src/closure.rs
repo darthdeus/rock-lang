@@ -396,6 +396,7 @@ pub fn convert_closures_framed(
             // parent's set covers every lambda region; carrying it is at worst
             // an over-invalidation within this fn's own hoists.
             comptime_reads: mf.comptime_reads.clone(),
+            struct_registry_roots: mf.struct_registry_roots.clone(),
             insts: mf.insts.clone(),
             cells: mf.cells.clone(),
             blocks: mf.blocks.clone(),

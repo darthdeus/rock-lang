@@ -332,7 +332,7 @@ function __rock_make_enum(variant, ty, kv) {
 /// reproduce the Lua renderer for the cross-backend `inspect(x) == "..."` pins.
 ///
 /// A struct renders through `__rock_inspect_ty[<__ty>]`, a per-type function
-/// `build_inspect_ty_defs` emits for every constructed or inline struct: it
+/// `build_inspect_ty_defs` emits for every realized struct and declared child: it
 /// supplies the DECLARED fields, because a null field is an absent key and a key walk alone
 /// therefore under-reports the shape, and an `embed` field is stored as flat
 /// `<name>.<leaf>` slots that carry no declared name at all. That is luajit's

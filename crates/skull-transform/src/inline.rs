@@ -1342,6 +1342,8 @@ fn inline_functions_inner(
         // build_var/embed_string values now live in THIS chunk's Lua, and a
         // callee inlined everywhere may have no standalone chunk to carry them.
         func.comptime_reads.extend(cand.func.comptime_reads.iter().cloned());
+        func.struct_registry_roots
+            .extend(cand.func.struct_registry_roots.iter().copied());
         top.extend(added);
         spliced.insert(fref);
         resume = Some(pos);

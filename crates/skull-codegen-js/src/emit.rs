@@ -2641,12 +2641,18 @@ pub fn emit_with_closure(
         &st.artifact_decls,
     ));
     let hoisted = collect_hoisted(&bodies);
+    let struct_registry = skull_mir::lower::StructRegistryPlan::for_bodies(
+        ws,
+        bone_semantic::hir::FnBackend::Js,
+        &bodies,
+    )
+    .map_err(|error| err(error.message))?;
 
     let mut out = String::new();
     out.push_str(&emit_enum_singletons(&st.gctx, &st.enum_defs));
-    out.push_str(&emit_vt_eq(ws, &bodies)?);
-    out.push_str(&emit_inspect_ty(ws, &bodies)?);
-    out.push_str(&emit_col_mat(ws, &bodies)?);
+    out.push_str(&emit_vt_eq(ws, struct_registry.as_ref())?);
+    out.push_str(&emit_inspect_ty(ws, struct_registry.as_ref())?);
+    out.push_str(&emit_col_mat(ws, struct_registry.as_ref())?);
     out.push_str(&ret_slot_decls(
         max_multi_wire(&bodies)?.max(max_published_lanes(&session.view, &st.inline_js)?),
     ));
@@ -3107,19 +3113,25 @@ fn assemble_program_core(
         &st.artifact_decls,
     ));
     let hoisted = collect_hoisted(&bodies);
+    let struct_registry = skull_mir::lower::StructRegistryPlan::for_bodies(
+        ws,
+        bone_semantic::hir::FnBackend::Js,
+        &bodies,
+    )
+    .map_err(|error| err(error.message))?;
 
     let mut out = String::new();
     let mut stable = String::new();
     let enum_singletons = emit_enum_singletons(&st.gctx, &st.enum_defs);
     out.push_str(&enum_singletons);
     stable.push_str(&enum_singletons);
-    let vt_eq = emit_vt_eq(ws, &bodies)?;
+    let vt_eq = emit_vt_eq(ws, struct_registry.as_ref())?;
     out.push_str(&vt_eq);
     stable.push_str(&vt_eq);
-    let inspect_ty = emit_inspect_ty(ws, &bodies)?;
+    let inspect_ty = emit_inspect_ty(ws, struct_registry.as_ref())?;
     out.push_str(&inspect_ty);
     stable.push_str(&inspect_ty);
-    let col_mat = emit_col_mat(ws, &bodies)?;
+    let col_mat = emit_col_mat(ws, struct_registry.as_ref())?;
     out.push_str(&col_mat);
     stable.push_str(&col_mat);
     let ret_slots = ret_slot_decls(
@@ -4520,52 +4532,38 @@ fn emit_enum_singletons(gctx: &GlobalCtx, enum_defs: &HashMap<ustr::Ustr, String
 
 /// Per-type `__rock_vt_eq` registry for every GC-carrying value struct the
 /// program constructs (closed transitively over GC-carrying value-struct fields).
-fn emit_vt_eq(ws: &Workspace, bodies: &[&MirFunc]) -> Result<String, CompilerError> {
-    if bodies.is_empty() {
+fn emit_vt_eq(
+    ws: &Workspace,
+    registry: Option<&skull_mir::lower::StructRegistryPlan>,
+) -> Result<String, CompilerError> {
+    let Some(registry) = registry else {
         return Ok(String::new());
-    }
-    let arena = bodies
-        .iter()
-        .find_map(|mf| mf.rep_arena.as_ref())
-        .ok_or_else(|| err("JS subset: value equality registry has no representation arena"))?;
-    let plans = arena
-        .value_plan_catalog()
-        .into_iter()
-        .collect::<std::collections::BTreeMap<_, _>>();
+    };
+    let arena = registry.arena();
     let mut vt_names: BTreeSet<ustr::Ustr> = BTreeSet::new();
-    for mf in bodies {
-        collect_gc_value_structs(mf, arena, &mut vt_names)?;
+    for (&name, &representation) in registry.value_plans() {
+        let plan = arena.try_get(representation).ok_or_else(|| {
+            err(format!(
+                "JS subset: value equality registry `{name}` carries a foreign representation plan"
+            ))
+        })?;
+        if plan.value_storage() != Some(skull_mir::lower::ValueStorage::CData) {
+            vt_names.insert(name);
+        }
     }
-    close_gc_value_struct_fields(ws, arena, &plans, &mut vt_names)?;
     build_vt_eq_defs(ws, &vt_names)
 }
 
-/// Per-type `__rock_inspect_ty` registry for every constructed struct, closed
-/// over inline fields (an `embed` child has no constructor of its own, yet its
-/// logical view still has to render under its own name).
-fn emit_inspect_ty(ws: &Workspace, bodies: &[&MirFunc]) -> Result<String, CompilerError> {
-    if bodies.is_empty() {
+/// Per-type `__rock_inspect_ty` registry for every realized struct, closed over
+/// all declared struct fields.
+fn emit_inspect_ty(
+    ws: &Workspace,
+    registry: Option<&skull_mir::lower::StructRegistryPlan>,
+) -> Result<String, CompilerError> {
+    let Some(registry) = registry else {
         return Ok(String::new());
-    }
-    let arena = bodies
-        .iter()
-        .find_map(|mf| mf.rep_arena.as_ref())
-        .ok_or_else(|| err("JS subset: inspect registry has no representation arena"))?;
-    let plans = arena
-        .value_plan_catalog()
-        .into_iter()
-        .collect::<std::collections::BTreeMap<_, _>>();
-    let mut names: BTreeSet<ustr::Ustr> = BTreeSet::new();
-    for mf in bodies {
-        collect_struct_types(ws, mf, &mut names);
-        // A column element is DECOMPOSED at every construction site, so it never
-        // appears as a ctor inst -- yet a materialized one still has to render in
-        // its own (colon) tier rather than fall through to the generic walk.
-        skull_mir::mir::column_elem_types(mf, &mut names);
-    }
-    names.retain(|n| ws.struct_by_name.contains_key(n));
-    close_struct_field_types(ws, &mut names)?;
-    build_inspect_ty_defs(ws, arena, &plans, &names)
+    };
+    build_inspect_ty_defs(ws, registry.arena(), registry.value_plans(), registry.names())
 }
 
 /// Per-type `__rock_col_mat` registry for every element type the program stores
@@ -4574,19 +4572,14 @@ fn emit_inspect_ty(ws: &Workspace, bodies: &[&MirFunc]) -> Result<String, Compil
 /// not getting one (`docs/runtime-globals-audit.md` S4.2b wants luajit's DELETED),
 /// and the element type is a compile-time fact at every column site anyway --
 /// that is exactly why `spec_key_has_target_storage` forces specialization for one.
-fn emit_col_mat(ws: &Workspace, bodies: &[&MirFunc]) -> Result<String, CompilerError> {
-    if bodies.is_empty() {
+fn emit_col_mat(
+    ws: &Workspace,
+    registry: Option<&skull_mir::lower::StructRegistryPlan>,
+) -> Result<String, CompilerError> {
+    let Some(registry) = registry else {
         return Ok(String::new());
-    }
-    let arena = bodies
-        .iter()
-        .find_map(|mf| mf.rep_arena.as_ref())
-        .ok_or_else(|| err("JS subset: column materializers have no representation arena"))?;
-    let mut plans = std::collections::BTreeMap::new();
-    for mf in bodies {
-        skull_mir::mir::column_elem_rep_plans(mf, &mut plans);
-    }
-    build_col_mat_defs(ws, &plans, arena)
+    };
+    build_col_mat_defs(ws, registry.column_plans(), registry.arena())
 }
 
 /// Emit `__rock_col_mat["<E>"] = function(v, i) { return {...}; };` -- one
@@ -5431,152 +5424,6 @@ fn build_enum_global_defs(ws: &Workspace) -> HashMap<ustr::Ustr, String> {
     out
 }
 
-/// Collect every GC-carrying value-struct name a body CONSTRUCTS (an
-/// `Inst::MakeValueStruct` whose type is a non-`CData` `ValueStorage`), scanning the
-/// full inst arena so a value struct built as a nested value operand is caught.
-fn collect_gc_value_structs(
-    mf: &MirFunc,
-    arena: &skull_mir::lower::RepArena,
-    out: &mut BTreeSet<ustr::Ustr>,
-) -> Result<(), CompilerError> {
-    let local = mf
-        .rep_arena
-        .as_ref()
-        .ok_or_else(|| err(format!("JS subset: `{}` has no representation arena", mf.name)))?;
-    if !std::ptr::eq(local.as_ref(), arena) {
-        return Err(err(format!(
-            "JS subset: `{}` carries a representation plan from another arena",
-            mf.name
-        )));
-    }
-    for inst in mf.insts.values() {
-        let (name, representation) = match inst {
-            Inst::MakeValueStruct { name, representation, .. }
-            | Inst::MaterializeValueStruct { name, representation, .. } => (*name, *representation),
-            _ => continue,
-        };
-        let plan = arena.try_get(representation).ok_or_else(|| {
-            err(format!(
-                "JS subset: `{name}` constructor carries a foreign representation plan"
-            ))
-        })?;
-        if plan.value_storage() != Some(skull_mir::lower::ValueStorage::CData) {
-            out.insert(name);
-        }
-    }
-    for nf in &mf.nested_fns {
-        collect_gc_value_structs(nf, arena, out)?;
-    }
-    Ok(())
-}
-
-/// Close the referenced set over GC-carrying value-struct FIELDS: a `Wrap`
-/// registry entry recurses through `__op_eq` into its `VecBox` field, so that
-/// field's entry must exist even if `VecBox` is never independently constructed.
-fn close_gc_value_struct_fields(
-    ws: &Workspace,
-    arena: &skull_mir::lower::RepArena,
-    plans: &std::collections::BTreeMap<ustr::Ustr, skull_mir::lower::RepId>,
-    names: &mut BTreeSet<ustr::Ustr>,
-) -> Result<(), CompilerError> {
-    let mut queue: Vec<ustr::Ustr> = names.iter().copied().collect();
-    while let Some(name) = queue.pop() {
-        let Some(sid) = ws.struct_by_name.get(&name) else { continue };
-        let s = &ws.module(sid.module).structs[sid.def];
-        for f in &s.fields {
-            if let Some(field_struct) = value_struct_field_name(ws, f.ty) {
-                let representation = plans.get(&field_struct).ok_or_else(|| {
-                    err(format!(
-                        "JS subset: GC value field `{field_struct}` has no owned representation plan"
-                    ))
-                })?;
-                let plan = arena.try_get(*representation).ok_or_else(|| {
-                    err(format!(
-                        "JS subset: GC value field `{field_struct}` carries a foreign representation plan"
-                    ))
-                })?;
-                if plan.value_storage() != Some(skull_mir::lower::ValueStorage::CData)
-                    && names.insert(field_struct)
-                {
-                    queue.push(field_struct);
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-/// The nominal name of `ty` when it resolves to a `value` struct, else `None`
-/// (used to walk value-struct field types for the registry closure).
-fn value_struct_field_name(ws: &Workspace, ty: bone_semantic::prelude::TyId) -> Option<ustr::Ustr> {
-    use bone_semantic::hir::{TypeCtor, TypeExpr};
-    let te = match ty {
-        bone_semantic::prelude::TyId::Static(mid, idx) => ws.modules.get(mid.index())?.ty_arena[idx],
-        bone_semantic::prelude::TyId::Local(_) => return None,
-    };
-    match te {
-        TypeExpr::App { ctor: TypeCtor::Nominal(name), .. }
-            if ws
-                .struct_by_name
-                .get(&name)
-                .map(|sid| ws.module(sid.module).structs[sid.def].is_value)
-                .unwrap_or(false) =>
-        {
-            Some(name)
-        }
-        _ => None,
-    }
-}
-
-/// Every nominal struct a body CONSTRUCTS, in either repr.
-fn collect_struct_types(ws: &Workspace, mf: &MirFunc, out: &mut BTreeSet<ustr::Ustr>) {
-    for inst in mf.insts.values() {
-        let name = match inst {
-            Inst::MakeStruct { ty: Some(name), .. } => *name,
-            Inst::MakeValueStruct { name, .. } | Inst::MaterializeValueStruct { name, .. } => *name,
-            _ => continue,
-        };
-        if ws.struct_by_name.contains_key(&name) {
-            out.insert(name);
-        }
-    }
-    for nf in &mf.nested_fns {
-        collect_struct_types(ws, nf, out);
-    }
-}
-
-/// Close over physically inline struct fields. Direct children enter through
-/// their own constructors; following them here would demand representation
-/// plans for declaration-only values that this artifact never realizes.
-fn close_struct_field_types(
-    ws: &Workspace,
-    names: &mut BTreeSet<ustr::Ustr>,
-) -> Result<(), CompilerError> {
-    let mut queue: Vec<ustr::Ustr> = names.iter().copied().collect();
-    while let Some(name) = queue.pop() {
-        let Some(sid) = ws.struct_by_name.get(&name) else { continue };
-        let s = &ws.module(sid.module).structs[sid.def];
-        for f in &s.fields {
-            let plan = skull_mir::lower::struct_field_plan(
-                ws,
-                bone_semantic::hir::FnBackend::Js,
-                name,
-                f.name,
-                false,
-            )
-            .map_err(|e| err(e.message))?;
-            if let Some(child) =
-                plan.inline_child().filter(|child| ws.struct_by_name.contains_key(child))
-            {
-                if names.insert(child) {
-                    queue.push(child);
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
 /// A JS expression rebuilding an `embed` field's LOGICAL value from the
 /// parent's physical leaves (the port of `__rock_embed_view`): the child has no
 /// box of its own, its leaves live at `<prefix>.<subfield>` recursively, and a
@@ -5637,7 +5484,9 @@ fn build_inspect_ty_defs(
     // the prelude did supply one -- it always precedes the emitted program.
     let mut out = String::new();
     for name in names {
-        let Some(sid) = ws.struct_by_name.get(name) else { continue };
+        let sid = ws.struct_by_name.get(name).ok_or_else(|| {
+            err(format!("JS subset: inspected registry type `{name}` is not declared"))
+        })?;
         let s = &ws.module(sid.module).structs[sid.def];
         if out.is_empty() {
             out.push_str("var __rock_inspect_ty = __rock_inspect_ty || {};\n");
@@ -5732,7 +5581,9 @@ fn build_inspect_ty_defs(
 fn build_vt_eq_defs(ws: &Workspace, names: &BTreeSet<ustr::Ustr>) -> Result<String, CompilerError> {
     let mut out = String::new();
     for name in names {
-        let Some(sid) = ws.struct_by_name.get(name) else { continue };
+        let sid = ws.struct_by_name.get(name).ok_or_else(|| {
+            err(format!("JS subset: value equality registry type `{name}` is not declared"))
+        })?;
         let s = &ws.module(sid.module).structs[sid.def];
         let cmps: Vec<String> = s
             .fields

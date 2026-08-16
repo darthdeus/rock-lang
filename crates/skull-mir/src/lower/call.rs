@@ -303,6 +303,13 @@ impl Builder<'_> {
         if let Callee::Unresolved { name, .. } = callee {
             if matches!(name.as_str(), "inspect" | "inspect_formatted") {
                 if let Some(&arg) = arg_idxs.first() {
+                    if let Some(name) = self
+                        .concrete_expr_ty(arg)
+                        .and_then(|ty| ty.peel_nullable().0.nominal())
+                        .filter(|name| self.ws.struct_by_name.contains_key(name))
+                    {
+                        self.f.struct_registry_roots.insert(name);
+                    }
                     if let Some(elem) = self.vec_column_elem_of(arg)? {
                         if elem.is_nobox() {
                             return Err(CompilerError::new_with_label(

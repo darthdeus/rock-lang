@@ -1,12 +1,16 @@
 //! The shared physical answer for one logical struct field.
 
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
+
 use bone_semantic::hir::{FnBackend, TypeCtor, TypeExpr};
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::TyId;
 use ustr::Ustr;
 
 use super::shape::{declared_value_storage, static_ty};
-use super::{EnumFlatShape, EnumPlan, RepError, ValueStorage};
+use super::{EnumFlatShape, EnumPlan, RepArena, RepError, RepId, ValueStorage};
+use crate::mir::{Inst, MirFunc};
 
 /// One physical answer for one logical field. Inline/nobox fields and flat
 /// enum payloads share one inline layout; consumers only project the part
@@ -60,6 +64,113 @@ impl StructFieldPlan {
             Self::Direct { nullable, .. } | Self::Inline { nullable, .. } => *nullable,
         }
     }
+}
+
+/// The build-owned struct registry input shared by late representation
+/// consumers. Its roots are the structs this MIR can realize; closing over
+/// declared child fields also owns any value representation needed to observe
+/// a child that enters through a host boundary rather than a Rock constructor.
+pub struct StructRegistryPlan {
+    arena: Arc<RepArena>,
+    names: BTreeSet<Ustr>,
+    value_plans: BTreeMap<Ustr, RepId>,
+    column_plans: BTreeMap<Ustr, (bool, RepId)>,
+}
+
+impl StructRegistryPlan {
+    pub fn for_bodies(
+        ws: &Workspace,
+        target: FnBackend,
+        bodies: &[&MirFunc],
+    ) -> Result<Option<Self>, RepError> {
+        if bodies.is_empty() {
+            return Ok(None);
+        }
+        let arena = bodies
+            .iter()
+            .find_map(|body| body.rep_arena.as_ref().cloned())
+            .ok_or_else(|| plan_error("struct registry has no representation arena"))?;
+        let mut names = BTreeSet::new();
+        let mut column_plans = BTreeMap::new();
+        for body in bodies {
+            collect_struct_roots(ws, body, &arena, &mut names)?;
+            crate::mir::column_elem_rep_plans(body, &mut column_plans);
+        }
+        names.extend(column_plans.keys().copied());
+
+        let mut value_plans: BTreeMap<Ustr, RepId> = arena.value_plan_catalog().into_iter().collect();
+        let mut queue: Vec<Ustr> = names.iter().copied().collect();
+        while let Some(name) = queue.pop() {
+            let sid = ws
+                .struct_by_name
+                .get(&name)
+                .ok_or_else(|| plan_error(format!("struct registry type `{name}` is not declared")))?;
+            let s = &ws.modules[sid.module.index()].structs[sid.def];
+            if s.is_value && !value_plans.contains_key(&name) {
+                value_plans.insert(name, arena.plan_nominal_value(ws, target, name)?);
+            }
+            for field in &s.fields {
+                let plan = struct_field_plan(ws, target, name, field.name, false)?;
+                if let Some(child) = plan.child().filter(|child| ws.struct_by_name.contains_key(child)) {
+                    if names.insert(child) {
+                        queue.push(child);
+                    }
+                }
+            }
+        }
+        value_plans.retain(|name, _| names.contains(name));
+        Ok(Some(Self { arena, names, value_plans, column_plans }))
+    }
+
+    pub fn arena(&self) -> &RepArena {
+        &self.arena
+    }
+
+    pub fn names(&self) -> &BTreeSet<Ustr> {
+        &self.names
+    }
+
+    pub fn value_plans(&self) -> &BTreeMap<Ustr, RepId> {
+        &self.value_plans
+    }
+
+    pub fn column_plans(&self) -> &BTreeMap<Ustr, (bool, RepId)> {
+        &self.column_plans
+    }
+}
+
+fn collect_struct_roots(
+    ws: &Workspace,
+    body: &MirFunc,
+    arena: &Arc<RepArena>,
+    names: &mut BTreeSet<Ustr>,
+) -> Result<(), RepError> {
+    let local = body
+        .rep_arena
+        .as_ref()
+        .ok_or_else(|| plan_error(format!("`{}` has no representation arena", body.name)))?;
+    if !Arc::ptr_eq(local, arena) {
+        return Err(plan_error(format!(
+            "`{}` carries a representation plan from another arena",
+            body.name
+        )));
+    }
+    names.extend(body.struct_registry_roots.iter().copied());
+    for inst in body.insts.values() {
+        let name = match inst {
+            Inst::MakeStruct { ty: Some(name), .. }
+            | Inst::MakeValueStruct { name, .. }
+            | Inst::MaterializeValueStruct { name, .. } => *name,
+            _ => continue,
+        };
+        if ws.struct_by_name.contains_key(&name) {
+            names.insert(name);
+        }
+    }
+    for nested in &body.nested_fns {
+        collect_struct_roots(ws, nested, arena, names)?;
+    }
+    Ok(())
 }
 
 fn plan_error(message: impl Into<String>) -> RepError {

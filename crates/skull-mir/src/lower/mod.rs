@@ -79,7 +79,7 @@ pub use abi::{
 };
 
 mod struct_plan;
-pub use struct_plan::{struct_field_plan, StructFieldPlan};
+pub use struct_plan::{struct_field_plan, StructFieldPlan, StructRegistryPlan};
 
 mod coroutine;
 pub use coroutine::CoroutinePlan;
