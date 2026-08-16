@@ -87,6 +87,40 @@ fn sync_read_flips_against_the_active_height_not_the_backing_texture() {
 }
 
 #[test]
+fn web_remove_file_reports_missing_paths() {
+    if !node_available() {
+        eprintln!("SKIP: node not found");
+        return;
+    }
+    let json = run(
+        "__ROCK_WEB_FILES.present = 'ok';\n\
+         out.missing = stone_remove_file('missing');\n\
+         out.present = stone_remove_file('present');\n\
+         out.present_after = stone_file_exists('present');",
+    );
+    assert!(json.contains("\"missing\":false"), "missing web files must report failure: {json}");
+    assert!(json.contains("\"present\":true"), "present web files must report success: {json}");
+    assert!(json.contains("\"present_after\":false"), "successful removal must delete the file: {json}");
+}
+
+#[test]
+fn web_audio_init_reports_unavailable_context() {
+    if !node_available() {
+        eprintln!("SKIP: node not found");
+        return;
+    }
+    let json = run(
+        "out.audio = stone_audio_init();\n\
+         out.unload_missing = stone_unload_sound(999);\n\
+         __SW.audio.sounds[7] = {};\n\
+         out.unload_present = stone_unload_sound(7);",
+    );
+    assert!(json.contains("\"audio\":false"), "missing AudioContext must be reported: {json}");
+    assert!(json.contains("\"unload_missing\":false"), "missing sounds must report failure: {json}");
+    assert!(json.contains("\"unload_present\":true"), "present sounds must unload successfully: {json}");
+}
+
+#[test]
 fn sync_read_bounds_checks_against_the_active_extent() {
     if !node_available() {
         eprintln!("SKIP: node not found");
