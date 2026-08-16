@@ -3,97 +3,15 @@
 //! plumbing that materializes one.
 use super::*;
 
-/// One physical answer for one logical field. Inline/nobox fields and flat
-/// enum payloads share one inline layout; consumers only project the part
-/// they need from the selected plan.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum StructFieldPlan {
-    Direct,
-    Inline {
-        child: Ustr,
-        nullable: bool,
-        flat: Option<EnumFlatShape>,
-    },
-}
-
-impl StructFieldPlan {
-    pub(crate) fn embed(&self) -> Option<(Ustr, bool)> {
-        match self {
-            Self::Inline { child, nullable, flat: None } => Some((*child, *nullable)),
-            _ => None,
-        }
-    }
-
-    pub(crate) fn inline_child(&self) -> Option<Ustr> {
-        self.embed().map(|(child, _)| child)
-    }
-
-    pub(crate) fn flat_shape(&self) -> Option<EnumFlatShape> {
-        match self {
-            Self::Inline { flat: Some(shape), .. } => Some(shape.clone()),
-            _ => None,
-        }
-    }
-
-    pub(crate) fn nullable(&self) -> bool {
-        matches!(self, Self::Inline { nullable: true, .. })
-    }
-}
-
 impl Builder<'_> {
     pub(crate) fn struct_field_plan(
         &self,
         sname: Ustr,
         field: Ustr,
         spliced: bool,
-    ) -> Result<Option<StructFieldPlan>, CompilerError> {
-        let Some(&sid) = self.ws.struct_by_name.get(&sname) else {
-            return Ok(None);
-        };
-        let sd = &self.ws.modules[sid.module.index()].structs[sid.def];
-        let Some(fdef) = sd.fields.iter().find(|f| f.name == field) else {
-            return Ok(None);
-        };
-        let Some(resolved) = self.resolve_ty(fdef.ty) else {
-            return Ok(None);
-        };
-        let child_name = match resolved {
-            TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } => name,
-            _ => return Ok(Some(StructFieldPlan::Direct)),
-        };
-        let child = self
-            .ws
-            .struct_by_name
-            .get(&child_name)
-            .map(|sid| &self.ws.modules[sid.module.index()].structs[sid.def]);
-        if (fdef.is_embed || child.is_some_and(|s| s.is_nobox))
-            && (spliced
-                || !self.is_value_struct(sname)
-                || self
-                    .scx
-                    .rep_arena()
-                    .nominal_value_storage_required(self.ws, self.scx.target, sname)
-                    .map_err(|e| self.gap_here(e.message))?
-                    == ValueStorage::LeafTable)
-        {
-            return Ok(Some(StructFieldPlan::Inline {
-                child: child_name,
-                nullable: matches!(self.ty_node(fdef.ty), Some(TypeExpr::Nullable(_))),
-                flat: None,
-            }));
-        }
-        if !self.is_value_struct(sname) {
-            if let Some(TypeExpr::App { ctor: TypeCtor::Nominal(enum_name), .. }) = static_ty(self.ws, fdef.ty) {
-                if let Some(shape) = EnumPlan::for_name(self.ws, enum_name).and_then(|plan| plan.flat().cloned()) {
-                    return Ok(Some(StructFieldPlan::Inline {
-                        child: enum_name,
-                        nullable: false,
-                        flat: Some(shape),
-                    }));
-                }
-            }
-        }
-        Ok(Some(StructFieldPlan::Direct))
+    ) -> Result<StructFieldPlan, CompilerError> {
+        crate::lower::struct_field_plan(self.ws, self.scx.target, sname, field, spliced)
+            .map_err(|e| self.gap_here(e.message))
     }
 
     // --- `embed` storage: a child's leaves ARE the parent's physical keys ---
@@ -128,12 +46,15 @@ impl Builder<'_> {
         let mut cur = base;
         let mut innermost = None;
         while let Expr::FieldAccess { base: b2, field: f2 } = self.body.expr_arena[cur] {
+            if self.swizzle_of(b2, f2).is_some() {
+                break;
+            }
             let Some(TypeExpr::App { ctor: TypeCtor::Nominal(sname), .. }) = self.expr_ty(b2) else {
                 break;
             };
             if self
                 .struct_field_plan(sname, f2, true)?
-                .and_then(|p| p.inline_child())
+                .inline_child()
                 .is_none()
             {
                 break;
@@ -145,7 +66,7 @@ impl Builder<'_> {
         if let Some((s, f)) = innermost
             && self
                 .struct_field_plan(s, f, false)?
-                .and_then(|p| p.inline_child())
+                .inline_child()
                 .is_none()
         {
             return Ok((base, field));
@@ -218,13 +139,13 @@ impl Builder<'_> {
             let key = Ustr::from(&format!("{prefix}.{f}"));
             let relkey = format!("{rel}{f}");
             let field_plan = self.struct_field_plan(cname, f, false)?;
-            if let Some((inner, nullable)) = field_plan.as_ref().and_then(|p| p.embed()) {
+            if let Some((inner, nullable)) = field_plan.embed() {
                 if nullable {
                         let v = self.emit_cur(Inst::Field { base: parent, field: key });
                         out.push((Ustr::from(relkey.as_str()), v));
                 }
                 self.collect_embed_slots(parent, key, &format!("{relkey}."), inner, out)?;
-            } else if let Some(shape) = field_plan.and_then(|p| p.flat_shape()) {
+            } else if let Some(shape) = field_plan.flat_shape() {
                     for slot in flat_slot_names(f, &shape) {
                         let src = Ustr::from(&format!("{prefix}.{slot}"));
                         let v = self.emit_cur(Inst::Field { base: parent, field: src });
@@ -264,13 +185,14 @@ impl Builder<'_> {
         for f in self.struct_field_names_required(cname)? {
             if self
                 .struct_field_plan(cname, f, false)?
-                .is_some_and(|p| p.flat_shape().is_some())
+                .flat_shape()
+                .is_some()
             {
                 return Ok(true);
             }
             if let Some(inner) = self
                 .struct_field_plan(cname, f, true)?
-                .and_then(|p| p.inline_child())
+                .inline_child()
                 && inner != cname
                 && self.struct_has_flat_field(inner)?
             {
@@ -359,14 +281,14 @@ impl Builder<'_> {
                 for f in self.struct_field_names_required(cname)? {
                     let inner = self
                         .struct_field_plan(cname, f, true)?
-                        .and_then(|p| p.inline_child());
+                        .inline_child();
                     // A flat-enum field contributes its sub-slots, never one
                     // boxed leaf -- same expansion the non-embed struct literal
                     // does via `flat_literal_slots`.
                     let flat = if inner.is_none() {
                         self
                             .struct_field_plan(cname, f, false)?
-                            .and_then(|p| p.flat_shape())
+                            .flat_shape()
                     } else {
                         None
                     };
@@ -378,7 +300,7 @@ impl Builder<'_> {
                             (Some(ic), _) => {
                                 let n = self
                                     .struct_field_plan(cname, f, true)?
-                                    .is_some_and(|p| p.nullable());
+                                    .nullable();
                                 let leaves = self.embed_value_leaves(n, ic, ve)?;
                                 out.extend(Self::embed_field_slots(f, leaves));
                             }
@@ -440,7 +362,7 @@ impl Builder<'_> {
         for f in self.struct_field_names_required(cname)? {
             match self
                 .struct_field_plan(cname, f, true)?
-                .and_then(|p| p.inline_child())
+                .inline_child()
             {
                 Some(inner) => out.extend(
                     self.embed_leaf_paths(inner)?
@@ -449,7 +371,7 @@ impl Builder<'_> {
                 ),
                 None => match self
                     .struct_field_plan(cname, f, false)?
-                    .and_then(|p| p.flat_shape())
+                    .flat_shape()
                 {
                     Some(shape) => out.extend(flat_slot_names(f, &shape)),
                     None => out.push(f),
@@ -549,12 +471,12 @@ impl Builder<'_> {
             // field read first would be a dead load of a key nothing writes.
             if self
                 .struct_field_plan(cname, f, true)?
-                .and_then(|p| p.inline_child())
+                .inline_child()
                 .is_none()
             {
                 if let Some(shape) = self
                     .struct_field_plan(cname, f, false)?
-                    .and_then(|p| p.flat_shape())
+                    .flat_shape()
                 {
                     for slot in flat_slot_names(f, &shape) {
                         let v = self.emit_cur(Inst::Field { base: value, field: slot });
@@ -566,7 +488,7 @@ impl Builder<'_> {
             let part = self.emit_cur(Inst::Field { base: value, field: f });
             match self
                 .struct_field_plan(cname, f, true)?
-                .and_then(|p| p.inline_child())
+                .inline_child()
             {
                 Some(inner) => out.extend(prefixed(f, self.embed_leaf_reads(inner, part)?)),
                 None => out.push((f, part)),
@@ -585,7 +507,7 @@ impl Builder<'_> {
             Some(TypeExpr::App { ctor: TypeCtor::Nominal(sname), .. }) => {
                 Ok(self
                     .struct_field_plan(sname, field, false)?
-                    .is_some_and(|p| p.nullable()))
+                    .nullable())
             }
             _ => Ok(false),
         }

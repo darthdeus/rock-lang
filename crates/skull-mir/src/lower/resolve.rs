@@ -285,7 +285,7 @@ impl Builder<'_> {
                 if let Some(TypeExpr::App { ctor: TypeCtor::Nominal(sname), .. }) = self.expr_ty(base)
                     && let Some(shape) = self
                         .struct_field_plan(sname, field, false)?
-                        .and_then(|p| p.flat_shape())
+                        .flat_shape()
                 {
                     let parent = self.lower_expr(base)?;
                     return Ok(ValueRepr::Scalar(self.materialize_flat(parent, field, &shape)));
@@ -297,7 +297,7 @@ impl Builder<'_> {
                 if let Some(TypeExpr::App { ctor: TypeCtor::Nominal(sname), .. }) = self.expr_ty(base)
                     && let Some((cname, _)) = self
                         .struct_field_plan(sname, field, false)?
-                        .and_then(|p| p.embed())
+                        .embed()
                 {
                     // A leaf-table VALUE parent can still be UNBOXED here (a
                     // local, a param, a call result): project the part off the

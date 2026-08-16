@@ -289,7 +289,7 @@ impl Builder<'_> {
         let shape = container
             .element_shape(&self.scx.rep_arena())
             .ok_or_else(|| gap(format!("NativeBuffer<{elem}> has no value leaf plan")))?;
-        let leaves = self.repr_to_leaves_bundle_for_shape(&bundle, &shape)?;
+        let leaves = self.repr_to_storage_leaves(&bundle, &shape, "native buffer store")?;
         if leaves.len() != plan.len() {
             return Err(gap(format!(
                 "leaf store arity mismatch for NativeBuffer<{elem}>: {} leaves vs {} slots",
@@ -793,7 +793,7 @@ impl Builder<'_> {
         elem: ColumnElem,
     ) -> Result<(), CompilerError> {
         let shape = self.column_shape(elem)?;
-        let leaves = self.repr_to_leaves_bundle_for_shape(bundle, &shape)?;
+        let leaves = self.repr_to_storage_leaves(bundle, &shape, "column append")?;
         self.column_append_leaves(vec, leaves, elem, &shape)
     }
 
@@ -804,7 +804,7 @@ impl Builder<'_> {
         elem: ColumnElem,
         shape: &ValueShape,
     ) -> Result<(), CompilerError> {
-        let leaves = self.repr_to_leaves_bundle_for_shape(bundle, shape)?;
+        let leaves = self.repr_to_storage_leaves(bundle, shape, "column append")?;
         self.column_append_leaves(vec, leaves, elem, shape)
     }
 
@@ -1147,7 +1147,7 @@ impl Builder<'_> {
         elem: ColumnElem,
     ) -> Result<(), CompilerError> {
         let shape = self.column_shape(elem)?;
-        let leaves = self.repr_to_leaves_bundle_for_shape(bundle, &shape)?;
+        let leaves = self.repr_to_storage_leaves(bundle, &shape, "column store")?;
         let paths = column_leaf_paths(&shape);
         if leaves.len() != paths.len() {
             return Err(gap(format!(

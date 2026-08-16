@@ -71,14 +71,14 @@ pub type ShapeHashes = rustc_hash::FxHashMap<ustr::Ustr, u64>;
 /// see [`struct_shape_hash`]. Known over-trigger (accepted,
 /// uniform-predictable): reordering a boxed enum's variants restarts even
 /// though its live tags are name strings.
-pub fn type_shape_hashes(ws: &Workspace) -> ShapeHashes {
+pub fn type_shape_hashes(ws: &Workspace) -> Result<ShapeHashes, CompilerError> {
     use bone_semantic::hir::VariantPayload;
     use std::hash::{Hash, Hasher};
 
     let mut out = ShapeHashes::default();
     for module in ws.modules.iter() {
         for (_, s) in module.structs.iter() {
-            out.insert(s.name, struct_shape_hash(ws, s, &mut Vec::new()));
+            out.insert(s.name, struct_shape_hash(ws, s, &mut Vec::new())?);
         }
         for (_, e) in module.enums.iter() {
             let mut h = rustc_hash::FxHasher::default();
@@ -111,7 +111,7 @@ pub fn type_shape_hashes(ws: &Workspace) -> ShapeHashes {
             out.insert(nt.name, h.finish());
         }
     }
-    out
+    Ok(out)
 }
 
 /// One struct's layout hash. An `embed` field contributes the embedded type's
@@ -123,9 +123,9 @@ pub fn type_shape_hashes(ws: &Workspace) -> ShapeHashes {
 /// hashes strictly more than a boxed one: flipping `f: Task?` to
 /// `embed f: Task?` leaves every rendered field type identical and touches no
 /// other type, so before this the whole workspace hashed clean and NO restart
-/// fired. `is_embed` is hashed explicitly anyway -- the flag is part of the
-/// layout in its own right, and that should not depend on how the child
-/// happens to contribute.
+/// fired. The planned inline/direct decision is hashed explicitly, so the
+/// layout bit remains load-bearing on its own and does not depend on how the
+/// child happens to contribute.
 ///
 /// `visiting` breaks a cycle with a stable sentinel. bone rejects a cyclic
 /// embed graph (`check_embed_site_legality`), so this is unreachable by
@@ -135,7 +135,7 @@ fn struct_shape_hash(
     ws: &Workspace,
     s: &bone_semantic::hir::StructDef,
     visiting: &mut Vec<ustr::Ustr>,
-) -> u64 {
+) -> Result<u64, CompilerError> {
     use std::hash::{Hash, Hasher};
 
     let mut h = rustc_hash::FxHasher::default();
@@ -144,26 +144,32 @@ fn struct_shape_hash(
     s.is_nobox.hash(&mut h);
     for f in s.fields.iter() {
         f.name.as_str().hash(&mut h);
-        f.is_embed.hash(&mut h);
         ws.render(None, f.ty).hash(&mut h);
-        let child = nominal_field_type(ws, f.ty)
-            .and_then(|n| ws.struct_by_name.get(&ustr::Ustr::from(&n)).copied());
-        let flattened = f.is_embed
-            || child.is_some_and(|sid| ws.modules[sid.module.index()].structs[sid.def].is_nobox);
-        if !flattened {
-            continue;
-        }
-        match child {
-            Some(sid) if !visiting.contains(&s.name) => {
+        let plan = skull_mir::lower::struct_field_plan(
+            ws,
+            bone_semantic::hir::FnBackend::Lua,
+            s.name,
+            f.name,
+            false,
+        )
+        .map_err(|e| CompilerError::new_no_location(e.message))?;
+        plan.embed().is_some().hash(&mut h);
+        if let Some(child_name) = plan.inline_child() {
+            let sid = ws.struct_by_name.get(&child_name).ok_or_else(|| {
+                CompilerError::new_no_location(format!(
+                    "struct `{}` field `{}` has no planned child `{child_name}`",
+                    s.name, f.name
+                ))
+            })?;
+            if !visiting.contains(&s.name) {
                 let child = &ws.modules[sid.module.index()].structs[sid.def];
                 visiting.push(s.name);
-                struct_shape_hash(ws, child, visiting).hash(&mut h);
+                struct_shape_hash(ws, child, visiting)?.hash(&mut h);
                 visiting.pop();
             }
-            _ => "<embed-unresolved>".hash(&mut h),
         }
     }
-    h.finish()
+    Ok(h.finish())
 }
 
 /// The type names whose shape hash differs between two compiles: changed,
@@ -1432,39 +1438,15 @@ fn reflect_field_type(ws: &Workspace, ty: bone_semantic::prelude::TyId) -> (Stri
     }
 }
 
-/// The nominal name a field's type denotes, peeling `Nullable`. An `embed`
-/// field needs this even when nullable: reflection rebuilds its logical value
-/// from that type's field list, and [`reflect_field_type`] renders any nullable
-/// as `any`, which would lose the name.
-fn nominal_field_type(ws: &Workspace, ty: bone_semantic::prelude::TyId) -> Option<String> {
-    use bone_semantic::hir::{TypeCtor, TypeExpr};
-    let resolve = |t: bone_semantic::prelude::TyId| -> Option<(TypeExpr, bone_semantic::prelude::TyId)> {
-        match t {
-            bone_semantic::prelude::TyId::Static(mid, idx) => {
-                ws.modules.get(mid.index()).map(|m| (m.ty_arena[idx], t))
-            }
-            bone_semantic::prelude::TyId::Local(_) => None,
-        }
-    };
-    let (mut te, mut cur) = resolve(ty)?;
-    if let TypeExpr::Nullable(inner) = te {
-        let (t2, c2) = resolve(cur.with_idx(inner))?;
-        te = t2;
-        cur = c2;
-    }
-    let _ = cur;
-    match te {
-        TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } => Some(name.as_str().to_string()),
-        _ => None,
-    }
-}
-
 /// Register every struct + newtype into `_G.__ROCK_TYPE_TABLE`, so the stdlib
 /// reflection fns (`get_type_info`, `type_info_of`, `type_name`) can recover a
 /// value's metadata from its `__ty` tag. Mirrors
 /// rock-codegen/src/codegen_pass.rs. The prelude already seeds the table empty,
 /// so this only adds entries. No metatables: type tagging is the direct `__ty`.
-fn type_table_defs(ws: &Workspace, gc: &rustc_hash::FxHashSet<ustr::Ustr>) -> String {
+fn type_table_defs(
+    ws: &Workspace,
+    gc: &rustc_hash::FxHashSet<ustr::Ustr>,
+) -> Result<String, CompilerError> {
     let mut out = String::new();
     let mut type_id = 100i64;
     for module in ws.modules.iter() {
@@ -1479,40 +1461,31 @@ fn type_table_defs(ws: &Workspace, gc: &rustc_hash::FxHashSet<ustr::Ustr>) -> St
             } else {
                 "c_struct"
             };
-            let fields: Vec<String> = s
-                .fields
-                .iter()
-                .map(|f| {
-                    let (tystr, nullable) = reflect_field_type(ws, f.ty);
-                    let child = nominal_field_type(ws, f.ty)
-                        .and_then(|n| ws.struct_by_name.get(&ustr::Ustr::from(&n)).copied());
-                    let flattened = f.is_embed
-                        || child.is_some_and(|sid| {
-                            ws.modules[sid.module.index()].structs[sid.def].is_nobox
-                        });
-                    // `embed` marks a field whose leaves are THIS struct's
-                    // physical keys (`f.x`), so reflection has to rebuild the
-                    // logical child from them -- the declared name indexes
-                    // nothing (a presence slot when nullable). The child's name
-                    // must survive nullability for that rebuild to be possible.
-                    let tystr = match flattened.then(|| nominal_field_type(ws, f.ty)).flatten() {
-                        Some(n) => n,
-                        None => tystr,
-                    };
-                    let embed = if flattened { ", embed = true" } else { "" };
-                    // The recursive shape, present only where the flat `type`
-                    // above cannot express it (a container, a tuple, a nullable
-                    // -- anything with a nominal inside it).
-                    let desc = match field_desc_lua(ws, f.ty) {
-                        Some(d) => format!(", desc = {d}"),
-                        None => String::new(),
-                    };
-                    format!(
-                        "{{ name = \"{}\", type = \"{}\", nullable = {}{}{} }}",
-                        f.name, tystr, nullable, embed, desc
-                    )
-                })
-                .collect();
+            let mut fields = Vec::with_capacity(s.fields.len());
+            for f in &s.fields {
+                let (tystr, _) = reflect_field_type(ws, f.ty);
+                let plan = skull_mir::lower::struct_field_plan(
+                    ws,
+                    bone_semantic::hir::FnBackend::Lua,
+                    s.name,
+                    f.name,
+                    false,
+                )
+                .map_err(|e| CompilerError::new_no_location(e.message))?;
+                let nullable = plan.nullable();
+                let (tystr, embed) = match plan.inline_child() {
+                    Some(child) => (child.as_str().to_string(), ", embed = true"),
+                    None => (tystr, ""),
+                };
+                let desc = match field_desc_lua(ws, f.ty) {
+                    Some(d) => format!(", desc = {d}"),
+                    None => String::new(),
+                };
+                fields.push(format!(
+                    "{{ name = \"{}\", type = \"{}\", nullable = {}{}{} }}",
+                    f.name, tystr, nullable, embed, desc
+                ));
+            }
             out.push_str(&format!(
                 "_G.__ROCK_TYPE_TABLE[\"{n}\"] = {{ name = \"{n}\", kind = \"{k}\", type_id = {id}, fields = {{ {f} }} }}\n",
                 n = s.name,
@@ -1611,7 +1584,7 @@ fn type_table_defs(ws: &Workspace, gc: &rustc_hash::FxHashSet<ustr::Ustr>) -> St
             type_id += 1;
         }
     }
-    out
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -1666,7 +1639,7 @@ mod tests {
                 .unwrap_or_else(|e| panic!("parse failed: {}", e.message));
             let ws = bone_semantic::semantic_passes::semantic_pass(&mut [module])
                 .unwrap_or_else(|e| panic!("semantic_pass failed: {}", e.message));
-            super::type_shape_hashes(&ws)
+            super::type_shape_hashes(&ws).expect("shape planning must succeed")
         };
         let base = "struct Mob { hp: int }\n\
                     enum Ev { Tick(int), Done }\n\
@@ -1712,7 +1685,7 @@ mod tests {
                 .unwrap_or_else(|e| panic!("parse failed: {}", e.message));
             let ws = bone_semantic::semantic_passes::semantic_pass(&mut [module])
                 .unwrap_or_else(|e| panic!("semantic_pass failed: {}", e.message));
-            super::type_shape_hashes(&ws)
+            super::type_shape_hashes(&ws).expect("shape planning must succeed")
         };
 
         // (a) The flag alone relayouts the parent, while every rendered field

@@ -610,18 +610,17 @@ fn global_init_target(
     scx: &skull_mir::lower::ScalarCtx,
     cg: &CodegenCtx,
     g: &bone_semantic::hir::GlobalDef,
-) -> String {
-    match skull_mir::lower::GlobalPlan::for_declared_type(ws, scx, g.ty)
-        .ok()
-        .and_then(|plan| plan.leaf_names(g.name))
-    {
-        Some(leaves) => leaves
-            .iter()
-            .map(|l| cg.mint_synthetic(l.to_string()))
-            .collect::<Vec<_>>()
-            .join(", "),
-        None => g.name.to_string(),
-    }
+) -> Result<String, CompilerError> {
+    let plan = skull_mir::lower::GlobalPlan::for_declared_type(ws, scx, g.ty)
+        .map_err(|e| CompilerError::new_no_location(e.message))?;
+    let Some(leaves) = plan.leaf_names(g.name) else {
+        return Ok(g.name.to_string());
+    };
+    Ok(leaves
+        .iter()
+        .map(|l| cg.mint_synthetic(l.to_string()))
+        .collect::<Vec<_>>()
+        .join(", "))
 }
 
 /// Lower + emit one global's initializer fn, recording its `pending_init` line.
@@ -722,7 +721,13 @@ fn emit_global_unit(
             // detect the difference: a layout drift restarts the process upstream
             // (`shape_drift_tests::marking_a_type_nobox_requests_restart`), and a
             // respawn is a cold start that never reaches this branch.
-            let target = global_init_target(ws, scx, cg, g);
+            let target = match global_init_target(ws, scx, cg, g) {
+                Ok(target) => target,
+                Err(e) => {
+                    out.hard_error = Some(e);
+                    return out;
+                }
+            };
             let line = if g.is_const {
                 format!("{target} = {init_name}()\n")
             } else {
@@ -2781,7 +2786,7 @@ fn assemble(
     out.push_str(&crate::value_struct_metatypes(ws, &value_emitted));
     out.push_str(&crate::enum_cdata_metatypes(ws));
     out.push_str(&crate::c_struct_inspect_defs(ws, &value_emitted));
-    out.push_str(&crate::type_table_defs(ws, &value_gc));
+    out.push_str(&crate::type_table_defs(ws, &value_gc)?);
     out.push_str(&crate::enum_runtime_defs(ws));
     t_scaffold += ts.elapsed();
 
@@ -3077,19 +3082,18 @@ fn assemble(
     // through its leaves, so a leaf dep has to resolve back to the group that
     // owns it or the dependent initializer sorts before it. Built from the
     // globals that actually mint leaves -- never a name-shape guess.
-    let leaf_owner: FxHashMap<Ustr, Ustr> = ws
-        .modules
-        .iter()
-        .flat_map(|m| m.globals.iter())
-        .flat_map(|(_, g)| {
-            skull_mir::lower::GlobalPlan::for_declared_type(ws, &cache.scx, g.ty)
-                .ok()
-                .and_then(|plan| plan.leaf_names(g.name))
-                .into_iter()
-                .flatten()
-                .map(move |l| (l, g.name))
-        })
-        .collect();
+    let mut leaf_owner: FxHashMap<Ustr, Ustr> = FxHashMap::default();
+    for module in ws.modules.iter() {
+        for (_, g) in module.globals.iter() {
+            let plan = skull_mir::lower::GlobalPlan::for_declared_type(ws, &cache.scx, g.ty)
+                .map_err(|e| CompilerError::new_no_location(e.message))?;
+            if let Some(leaves) = plan.leaf_names(g.name) {
+                for leaf in leaves {
+                    leaf_owner.insert(leaf, g.name);
+                }
+            }
+        }
+    }
     let inits: Vec<GlobalInit> = pending_inits
         .into_iter()
         .map(|(name, init_name, line)| GlobalInit {
@@ -4056,7 +4060,7 @@ fn assemble_overlay(
     ws: &Workspace,
     cache: &SkullEmitCache,
     shader_changed: bool,
-) -> MirEmit {
+) -> Result<MirEmit, CompilerError> {
     let mut out = String::from("-- skull incremental overlay (loaded after main.lua)\n");
     let mut skipped: Vec<(String, String)> = Vec::new();
 
@@ -4187,18 +4191,29 @@ fn assemble_overlay(
                     a.mid,
                     a.gid,
                 );
+                if let Some(err) = unit.hard_error {
+                    return Err(err);
+                }
                 out.push_str(&unit.lua); // the (new) ginit fn def
                 if let Some(s) = unit.skipped {
                     skipped.push(s);
                 }
-                unit.pending_init.map(|(_, _, l)| l).unwrap_or_default()
+                unit.pending_init
+                    .map(|(_, _, line)| line)
+                    .ok_or_else(|| {
+                        CompilerError::new_no_location(format!(
+                            "changed global `{}` produced no initializer plan",
+                            a.name
+                        ))
+                    })?
             } else {
                 // Unchanged dependent: its ginit is already in main.lua; re-run only
                 // the line so it recomputes from the upstream's new value.
                 let g = &ws.module(a.mid).globals[a.gid];
+                let target = global_init_target(ws, &cache.scx, &cache.cg, g)?;
                 format!(
                     "{} = {}()\n",
-                    global_init_target(ws, &cache.scx, &cache.cg, g),
+                    target,
                     crate::global_init_fn_name(a.name.as_str())
                 )
             };
@@ -4236,7 +4251,7 @@ fn assemble_overlay(
         out.push_str(&cache.shader_registrations.lua);
     }
 
-    MirEmit { lua: out, skipped, phases: Vec::new() }
+    Ok(MirEmit { lua: out, skipped, phases: Vec::new() })
 }
 
 /// `__rock_rebind_system("<name>", <func>)` for each CHANGED decorated function
@@ -4305,7 +4320,7 @@ pub fn emit_overlay(
     }
     let t_relower = t2.elapsed();
     let t3 = Instant::now();
-    let mut emit = assemble_overlay(ws, cache, shader_changed);
+    let mut emit = assemble_overlay(ws, cache, shader_changed)?;
     // Advance the static baseline to the keys now in effect. A reset line fires on
     // the reload that dofiles the overlay carrying it, so once THIS overlay resets a
     // cell (or leaves it unchanged), a LATER overlay must not reset it again -- else
@@ -4450,6 +4465,42 @@ fn main() {
                 .expect("parse"),
         ];
         bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic")
+    }
+
+    #[test]
+    fn global_init_target_rejects_an_unresolved_storage_plan() {
+        let mut modules = vec![
+            skull_parser::parse_module_clean(
+                "global G: int = 0\nfn main() {}",
+                Ustr::from("<global-plan-test>"),
+            )
+            .expect("parse"),
+        ];
+        let mut ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic");
+        let mid = ws
+            .modules
+            .iter()
+            .find(|module| module.id != ModuleId::builtin())
+            .expect("test module")
+            .id;
+        let gid = ws
+            .module(mid)
+            .globals
+            .iter()
+            .find(|(_, global)| global.name == Ustr::from("G"))
+            .map(|(gid, _)| gid)
+            .expect("global");
+        let ty = ws.module(mid).globals[gid].ty;
+        let bone_semantic::prelude::TyId::Static(_, idx) = ty else {
+            panic!("fixture global must have a static type id")
+        };
+        ws.module_mut(mid).globals[gid].ty = bone_semantic::prelude::TyId::Local(idx);
+        let scx = skull_mir::lower::ScalarCtx::new(&ws);
+        let cg = CodegenCtx::new(&ws);
+        let global = &ws.module(mid).globals[gid];
+        let err = global_init_target(&ws, &scx, &cg, global)
+            .expect_err("a missing global representation plan must reject");
+        assert!(err.message.contains("global type cannot be planned"), "{err}");
     }
 
     fn bounded_workspace() -> Workspace {

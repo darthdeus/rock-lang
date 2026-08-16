@@ -228,11 +228,11 @@ impl Builder<'_> {
                     // a plain struct (an enum variant name is not in
                     // `struct_by_name`), so a variant record falls through.
                     let embedded = match (name, scrut) {
-                        (Some(sname), Scrut::Val(_)) => {
-                            match self.struct_field_plan(sname, rpf.name, false)? {
-                                Some(plan) => plan.embed().map(|(child, _)| (sname, child)),
-                                _ => None,
-                            }
+                        (Some(sname), Scrut::Val(_)) if self.ws.struct_by_name.contains_key(&sname) => {
+                            self
+                                .struct_field_plan(sname, rpf.name, false)?
+                                .embed()
+                                .map(|(child, _)| (sname, child))
                         }
                         _ => None,
                     };
@@ -241,7 +241,7 @@ impl Builder<'_> {
                             let parent = *v;
                             if self
                                 .struct_field_plan(sname, rpf.name, false)?
-                                .is_some_and(|p| p.nullable())
+                                .nullable()
                             {
                                 self.materialize_embed_nullable(parent, rpf.name, cname)?
                             } else {
@@ -360,14 +360,11 @@ impl Builder<'_> {
     /// else lowers to an ordinary value.
     pub(crate) fn lower_scrut(&mut self, e: Idx<Expr>) -> Result<Scrut, CompilerError> {
         if let Expr::FieldAccess { base, field } = self.body.expr_arena[e].clone() {
-            let flat_plan = match self.expr_ty(base) {
-                Some(TypeExpr::App { ctor: TypeCtor::Nominal(sname), .. }) =>
-                    self.struct_field_plan(sname, field, false)?,
-                _ => None,
-            };
-            if let Some(shape) = flat_plan.and_then(|p| p.flat_shape()) {
-                let parent = self.lower_expr(base)?;
-                return Ok(Scrut::Flat { parent, prefix: field, shape });
+            if let Some(TypeExpr::App { ctor: TypeCtor::Nominal(sname), .. }) = self.expr_ty(base) {
+                if let Some(shape) = self.struct_field_plan(sname, field, false)?.flat_shape() {
+                    let parent = self.lower_expr(base)?;
+                    return Ok(Scrut::Flat { parent, prefix: field, shape });
+                }
             }
         }
         // A flat enum that threads as a Group (scalarized param/return, or a freshly

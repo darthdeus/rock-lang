@@ -668,7 +668,7 @@ impl Builder<'_> {
         let vals = match shape {
             Some(shape) => {
                 let r = self.lower_expr_repr(value)?;
-                self.repr_to_leaves_bundle_for_shape(&r, &shape)?
+                self.repr_to_storage_leaves(&r, &shape, "nobox global store")?
             }
             None => vec![self.lower_expr(value)?],
         };

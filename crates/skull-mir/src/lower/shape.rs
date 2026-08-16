@@ -1573,6 +1573,45 @@ impl RetSlot {
     }
 }
 
+pub(crate) fn value_shape_can_fill(actual: &ValueShape, expected: &ValueShape) -> bool {
+    actual.name == expected.name
+        && (!actual.nullable || expected.nullable)
+        && actual.fields.len() == expected.fields.len()
+        && actual
+            .fields
+            .iter()
+            .zip(&expected.fields)
+            .all(|((actual_name, actual_field), (expected_name, expected_field))| {
+                actual_name == expected_name
+                    && match (actual_field, expected_field) {
+                        (FieldShape::Prim, FieldShape::Prim) => true,
+                        (FieldShape::Nested(actual), FieldShape::Nested(expected)) => {
+                            value_shape_can_fill(actual, expected)
+                        }
+                        _ => false,
+                    }
+            })
+}
+
+pub(crate) fn ret_slot_can_fill(actual: &RetSlot, expected: &RetSlot) -> bool {
+    match (actual, expected) {
+        (RetSlot::Opaque, RetSlot::Opaque) => true,
+        (RetSlot::Leaves(actual), RetSlot::Leaves(expected)) => {
+            value_shape_can_fill(actual, expected)
+        }
+        (RetSlot::Nested(actual), RetSlot::Nested(expected)) => {
+            (!actual.nullable || expected.nullable)
+                && actual.slots.len() == expected.slots.len()
+                && actual
+                    .slots
+                    .iter()
+                    .zip(&expected.slots)
+                    .all(|(actual, expected)| ret_slot_can_fill(actual, expected))
+        }
+        _ => false,
+    }
+}
+
 /// Per-element wire shape of a tuple RETURN under the multi-return ABI.
 ///
 /// Only a `nobox` element splats. An unmarked value struct keeps its single

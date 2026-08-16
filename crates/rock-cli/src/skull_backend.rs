@@ -2589,7 +2589,8 @@ impl SkullStone {
         };
         let preamble = skull_game_preamble(dir);
         write_full_main(&preamble, &lua, main_path, incremental_path)?;
-        let shape_hashes = skull::type_shape_hashes(project.workspace());
+        let shape_hashes = skull::type_shape_hashes(project.workspace())
+            .map_err(|e| anyhow::anyhow!(e.message))?;
         Ok(SkullStone { project, cache, preamble, renderer_target, shape_hashes })
     }
 
@@ -2660,7 +2661,8 @@ impl SkullStone {
             // `force_full` (canonicalize) writes this session's program for the
             // respawn. Re-baseline the stored hashes now: the delta is consumed
             // by this one restart.
-            let new_shapes = skull::type_shape_hashes(self.project.workspace());
+            let new_shapes = skull::type_shape_hashes(self.project.workspace())
+                .map_err(|e| anyhow::anyhow!(e.message))?;
             let drifted = skull::shape_diff(&self.shape_hashes, &new_shapes);
             if !drifted.is_empty() {
                 self.shape_hashes = new_shapes;
@@ -2758,7 +2760,8 @@ impl SkullStone {
         // This program is what the (re)spawned process loads -- re-baseline the
         // shape hashes to it, including drift that arrived via a recompile that
         // bailed on a type error after mutating the session.
-        self.shape_hashes = skull::type_shape_hashes(self.project.workspace());
+        self.shape_hashes = skull::type_shape_hashes(self.project.workspace())
+            .map_err(|e| anyhow::anyhow!(e.message))?;
         Ok(())
     }
 }

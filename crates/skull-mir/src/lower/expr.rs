@@ -644,9 +644,9 @@ impl Builder<'_> {
     pub(crate) fn lower_place_base(&mut self, e: Idx<Expr>) -> Result<Idx<Inst>, CompilerError> {
         let nobox_global_place = self.nobox_global_place(e)?;
         let flat_field = match self.body.expr_arena[e].clone() {
-            Expr::FieldAccess { base, field } => match self.expr_ty(base) {
+            Expr::FieldAccess { base, field } if self.swizzle_of(base, field).is_none() => match self.expr_ty(base) {
                 Some(TypeExpr::App { ctor: TypeCtor::Nominal(sname), .. }) =>
-                    self.struct_field_plan(sname, field, false)?,
+                    Some(self.struct_field_plan(sname, field, false)?),
                 _ => None,
             },
             _ => None,
@@ -772,8 +772,9 @@ impl Builder<'_> {
                 // slot of its own, so write its leaves. Composition happens
                 // BEFORE this, so `p.f` here is the child, not a physical key.
                 let embed_plan = match self.expr_ty(base) {
-                    Some(TypeExpr::App { ctor: TypeCtor::Nominal(sname), .. }) =>
-                        self.struct_field_plan(sname, field, false)?,
+                    Some(TypeExpr::App { ctor: TypeCtor::Nominal(sname), .. })
+                        if self.swizzle_of(base, field).is_none() =>
+                        Some(self.struct_field_plan(sname, field, false)?),
                     _ => None,
                 };
                 if let Some((cname, _)) = embed_plan.as_ref().and_then(|p| p.embed()) {
@@ -788,8 +789,9 @@ impl Builder<'_> {
                 // A flattened enum field: write the discriminant + payload slots
                 // directly on the parent table (no nested box).
                 let flat_plan = match self.expr_ty(base) {
-                    Some(TypeExpr::App { ctor: TypeCtor::Nominal(sname), .. }) =>
-                        self.struct_field_plan(sname, field, false)?,
+                    Some(TypeExpr::App { ctor: TypeCtor::Nominal(sname), .. })
+                        if self.swizzle_of(base, field).is_none() =>
+                        Some(self.struct_field_plan(sname, field, false)?),
                     _ => None,
                 };
                 if let Some(shape) = flat_plan.and_then(|p| p.flat_shape()) {
@@ -1296,10 +1298,15 @@ impl Builder<'_> {
         bv: Idx<Inst>,
         field: Ustr,
     ) -> Result<Idx<Inst>, CompilerError> {
-        let embed_plan = match self.expr_ty(base) {
-            Some(TypeExpr::App { ctor: TypeCtor::Nominal(sname), .. }) =>
-                self.struct_field_plan(sname, field, false)?,
-            _ => None,
+        let embed_plan = if field.parse::<usize>().is_ok() || self.expr_is_newtype(base) {
+            None
+        } else {
+            match self.expr_ty(base) {
+                Some(TypeExpr::App { ctor: TypeCtor::Nominal(sname), .. })
+                    if self.swizzle_of(base, field).is_none() =>
+                    Some(self.struct_field_plan(sname, field, false)?),
+                _ => None,
+            }
         };
         let embed = embed_plan.as_ref().and_then(|p| p.embed());
         let fv = match field.as_str().parse::<usize>() {
@@ -1380,10 +1387,15 @@ impl Builder<'_> {
         field: Ustr,
         shape: RetSlot,
     ) -> Result<ValueRepr, CompilerError> {
-        let plan = match self.expr_ty(base) {
-            Some(TypeExpr::App { ctor: TypeCtor::Nominal(sname), .. }) =>
-                self.struct_field_plan(sname, field, false)?,
-            _ => None,
+        let plan = if field.parse::<usize>().is_ok() || self.expr_is_newtype(base) {
+            None
+        } else {
+            match self.expr_ty(base) {
+                Some(TypeExpr::App { ctor: TypeCtor::Nominal(sname), .. })
+                    if self.swizzle_of(base, field).is_none() =>
+                    Some(self.struct_field_plan(sname, field, false)?),
+                _ => None,
+            }
         };
         let embed = plan.and_then(|p| p.inline_child());
         let group_shape = match embed {
@@ -1462,7 +1474,7 @@ impl Builder<'_> {
             paths.iter().map(|p| (*p, Vec::with_capacity(elems.len()))).collect();
         for &e in elems {
             let repr = self.lower_expr_repr(e)?;
-            let leaves = self.repr_to_leaves_bundle_for_shape(&repr, &shape)?;
+            let leaves = self.repr_to_storage_leaves(&repr, &shape, "column literal")?;
             if leaves.len() != paths.len() {
                 return Err(gap(format!(
                     "column literal arity mismatch for [{}]: {} leaves vs {} columns",

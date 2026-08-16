@@ -1609,14 +1609,44 @@ impl Builder<'_> {
             || (actual.nullable && !expected.nullable)
         {
             return Err(self.gap_here(format!(
-                "representation {:?} does not match destination value shape",
-                bundle.representation()
+                "representation {:?} shape {:?} does not match destination value shape {:?}",
+                bundle.representation(),
+                actual,
+                expected
             )));
         }
         if actual == *expected {
             self.repr_to_leaves_bundle(bundle)
         } else {
             self.repr_to_leaves_shape(bundle.value(), expected)
+        }
+    }
+
+    pub(crate) fn repr_to_storage_leaves(
+        &mut self,
+        bundle: &ValueBundle,
+        expected: &ValueShape,
+        reason: &str,
+    ) -> Result<Vec<Idx<Inst>>, CompilerError> {
+        let plan = self
+            .scx
+            .rep_arena()
+            .try_get(bundle.representation())
+            .ok_or_else(|| {
+                self.gap_here(format!(
+                    "representation {:?} does not belong to this build arena at {reason}",
+                    bundle.representation()
+                ))
+            })?;
+        match plan.layout() {
+            RepLayout::Opaque | RepLayout::Foreign { .. } => {
+                self.opaque_boundary_leaves(bundle, expected, reason)
+            }
+            RepLayout::Leaves(_) => self.repr_to_leaves_bundle_for_shape(bundle, expected),
+            RepLayout::Tuple { .. } => Err(self.gap_here(format!(
+                "tuple representation {:?} cannot fill a value storage shape at {reason}",
+                bundle.representation()
+            ))),
         }
     }
 
@@ -1730,10 +1760,13 @@ impl Builder<'_> {
                             bundle.representation()
                         ))
                     })?;
-                if actual != *expected {
+                if !ret_slot_can_fill(
+                    &RetSlot::Nested(actual.clone()),
+                    &RetSlot::Nested(expected.clone()),
+                ) {
                     return Err(self.gap_here(format!(
-                        "representation {:?} does not match its nested tuple slot",
-                        bundle.representation()
+                        "representation {:?} tuple shape {:?} does not match its nested tuple slot {:?}",
+                        bundle.representation(), actual, expected
                     )));
                 }
                 self.tuple_repr_to_slots(bundle.value().clone(), expected)

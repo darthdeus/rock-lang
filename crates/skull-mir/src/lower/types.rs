@@ -87,9 +87,44 @@ impl Builder<'_> {
         e: Idx<Expr>,
         value: ValueRepr,
     ) -> Result<ValueBundle, CompilerError> {
-        let ty = self
-            .concrete_expr_ty(e)
-            .ok_or_else(|| self.gap_here("expression has no concrete type for representation planning"))?;
+        let ty = match self.concrete_expr_ty(e) {
+            Some(ty) => ty,
+            None => {
+                let enum_name = match self.body.expr_arena[e] {
+                    Expr::EnumVariant { enum_name, .. } => Some(enum_name),
+                    _ => match self.expr_ty(e) {
+                        Some(TypeExpr::App { ctor: TypeCtor::Nominal(name), .. })
+                            if EnumPlan::for_name(self.ws, name).is_some() =>
+                            Some(name),
+                        _ => None,
+                    },
+                };
+                if let Some(enum_name) = enum_name {
+                    crate::monoty::MonoTy::App {
+                        ctor: crate::monoty::MonoCtor::Nominal(enum_name),
+                        params: Vec::new(),
+                    }
+                } else {
+                    let inf = self.inf.ok_or_else(|| {
+                        self.gap_here("expression has no inference context for representation planning")
+                    })?;
+                    let ty_id = inf.expr_types.get(e).copied().ok_or_else(|| {
+                        self.gap_here("expression has no type for representation planning")
+                    })?;
+                    crate::monoty::convert(
+                        self.ws,
+                        inf,
+                        ty_id,
+                        &crate::monoty::MonoSubst::default(),
+                    )
+                    .map_err(|reason| {
+                        self.gap_here(format!(
+                            "expression has no concrete type for representation planning: {reason:?}"
+                        ))
+                    })?
+                }
+            }
+        };
         let representation = self.lowered_expr_representation(e, &ty, &value)?;
         Ok(ValueBundle::new(representation, value))
     }
@@ -284,7 +319,8 @@ impl Builder<'_> {
             for f in &decl {
                 if self
                     .struct_field_plan(name, *f, false)?
-                    .is_some_and(|p| p.flat_shape().is_some())
+                    .flat_shape()
+                    .is_some()
                 {
                     has_flat = true;
                     break;
@@ -341,7 +377,7 @@ impl Builder<'_> {
         let fields = self
             .struct_field_names(name)
             .ok_or_else(|| gap(format!("spread operand `{name}` has no known fields")))?;
-        let origin = matches!(self.body.expr_arena[op], Expr::StructLiteral { .. }).then_some(op);
+        let origin = Some(op);
         let mut out = Vec::new();
         for fname in fields {
             let r = self.spread_base_field_repr(&Some(base_repr.clone()), base_boxed, name, fname)?;
@@ -383,8 +419,45 @@ impl Builder<'_> {
                     .concrete_types
                     .and_then(|tables| tables.struct_field_type(literal, field))
                     .map(|id| self.concrete_mono(id))
-            })
-            .or_else(|| self.concrete_ty_id(fdef.ty));
+            });
+        let ty = match ty {
+            Some(ty) => Some(ty),
+            None => match origin.and_then(|subject| self.concrete_expr_ty(subject)) {
+                Some(MonoTy::App { ctor: crate::monoty::MonoCtor::Nominal(base), params })
+                    if base == sname => {
+                        let def = &self.ws.modules[sid.module.index()].structs[sid.def];
+                        if def.generics.len() != params.len() {
+                            return Err(gap(format!(
+                                "spread struct `{sname}` has {} generic arguments for {} parameters",
+                                params.len(),
+                                def.generics.len()
+                            )));
+                        }
+                        let mut subst = crate::monoty::MonoSubst::default();
+                        for (generic, param) in def.generics.iter().zip(params) {
+                            let TypeExpr::Generic(var, _) = self.dispatch().raw_ty_node(*generic)
+                                .ok_or_else(|| gap("spread struct generic parameter has no type node"))?
+                            else {
+                                return Err(gap(format!(
+                                    "spread struct `{sname}` has a non-generic parameter slot"
+                                )));
+                            };
+                            subst.insert(var, param);
+                        }
+                        Some(crate::monoty::convert_decl(self.ws, fdef.ty, &subst).map_err(|reason| {
+                            gap(format!(
+                                "spread field `{sname}.{field}` has no concrete type plan: {reason:?}"
+                            ))
+                        })?)
+                    }
+                Some(other) => {
+                    return Err(gap(format!(
+                        "spread operand for `{sname}.{field}` has type `{other:?}`"
+                    )));
+                }
+                None => self.concrete_ty_id(fdef.ty),
+            },
+        };
         let ty = match ty {
             Some(ty) => ty,
             None => crate::monoty::convert_decl(
@@ -422,7 +495,7 @@ impl Builder<'_> {
             return Ok(parts[i].clone());
         }
         let field_plan = self.struct_field_plan(name, fname, false)?;
-        if let Some(shape) = field_plan.as_ref().and_then(|p| p.flat_shape()) {
+        if let Some(shape) = field_plan.flat_shape() {
             let cells = match (base_repr, base_boxed) {
                 (Some(_), Some(parent)) => self.load_flat_cells(parent, fname, &shape),
                 (None, None) => {
@@ -434,7 +507,7 @@ impl Builder<'_> {
             return Ok(self.flat_cells_to_repr(&shape, cells));
         }
         if let (Some((cname, nullable)), Some(parent)) =
-            (field_plan.and_then(|p| p.embed()), base_boxed)
+            (field_plan.embed(), base_boxed)
         {
             return self.load_embed_repr(parent, fname, cname, nullable);
         }

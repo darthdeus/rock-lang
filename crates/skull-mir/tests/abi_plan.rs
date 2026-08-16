@@ -21,7 +21,8 @@ use skull_mir::lower::{
     BackendFnAbiPlan, ContainerFamily, ContainerPlan, ContainerStorage, GlobalPlan, RepArena,
     RepGuarantees,
     bound_next_shape_from_concrete, declared_boundary_class, boundary_requires_boxed_representation,
-    BoundaryClass, EnumLayout, EnumPlan, RepLayout, RepUse, RepUseFacts, ScalarCtx, ValueStorage,
+    BoundaryClass, EnumLayout, EnumPlan, RepLayout, RepUse, RepUseFacts, ScalarCtx,
+    ValueStorage, struct_field_plan,
 };
 use skull_mir::mir::FuncRef;
 use skull_mir::monoty::{MonoCtor, MonoTy};
@@ -1002,4 +1003,81 @@ fn nominal_c_layout_aligns_nested_fields_before_recurse() {
     );
     assert_eq!(size, 36);
     assert_eq!(align, 4);
+}
+
+#[test]
+fn shared_struct_field_plan_is_required_and_fail_closed() {
+    let mut ws = ws_of(
+        "struct Child { x: int }\n\
+         value Inner { x: int }\n\
+         value Outer { inner: Inner }\n\
+         nobox value N { x: int }\n\
+         struct Holder { embed child: Child?, n: N, direct: int, coroutine: Coroutine<int, int, int> }",
+    );
+    let holder = Ustr::from("Holder");
+    let child = Ustr::from("child");
+    let direct = Ustr::from("direct");
+    let plan = struct_field_plan(&ws, bone_semantic::hir::FnBackend::Lua, holder, child, false)
+        .expect("known struct field must have a plan");
+    assert_eq!(plan.inline_child(), Some(Ustr::from("Child")));
+    assert!(plan.nullable(), "the shared plan must retain field presence");
+    assert_eq!(
+        struct_field_plan(&ws, bone_semantic::hir::FnBackend::Lua, holder, Ustr::from("n"), false)
+            .expect("known nobox field must have a plan")
+            .inline_child(),
+        Some(Ustr::from("N"))
+    );
+    let direct_plan = struct_field_plan(&ws, bone_semantic::hir::FnBackend::Lua, holder, direct, false)
+        .expect("known primitive field must have a plan");
+    assert!(direct_plan.is_direct());
+    assert_eq!(direct_plan.direct_child(), None);
+    let nested_plan = struct_field_plan(
+        &ws,
+        bone_semantic::hir::FnBackend::Lua,
+        Ustr::from("Outer"),
+        Ustr::from("inner"),
+        false,
+    )
+    .expect("known direct child must have a plan");
+    assert!(nested_plan.is_direct());
+    assert_eq!(nested_plan.direct_child(), Some(Ustr::from("Inner")));
+    assert_eq!(
+        struct_field_plan(
+            &ws,
+            bone_semantic::hir::FnBackend::Lua,
+            holder,
+            Ustr::from("coroutine"),
+            false,
+        )
+        .expect("compiler-owned opaque nominal must have a direct plan")
+        .direct_child(),
+        Some(Ustr::from("Coroutine"))
+    );
+
+    let missing_struct = struct_field_plan(
+        &ws,
+        bone_semantic::hir::FnBackend::Lua,
+        Ustr::from("Missing"),
+        child,
+        false,
+    )
+    .expect_err("a missing parent struct must reject");
+    assert!(missing_struct.message.contains("struct `Missing`"), "{missing_struct}");
+
+    let missing_field = struct_field_plan(
+        &ws,
+        bone_semantic::hir::FnBackend::Lua,
+        holder,
+        Ustr::from("missing"),
+        false,
+    )
+    .expect_err("a missing field must reject");
+    assert!(missing_field.message.contains("field `missing`"), "{missing_field}");
+
+    let sid = *ws.struct_by_name.get(&holder).expect("holder declaration");
+    ws.modules[sid.module.index()].structs[sid.def].fields[0].ty =
+        bone_semantic::prelude::TyId::Local(comfy_la_arena::Idx::from_raw(comfy_la_arena::RawIdx::from(0)));
+    let unresolved = struct_field_plan(&ws, bone_semantic::hir::FnBackend::Lua, holder, child, false)
+        .expect_err("an unresolved field type must reject");
+    assert!(unresolved.message.contains("resolved type"), "{unresolved}");
 }

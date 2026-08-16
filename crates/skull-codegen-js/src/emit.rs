@@ -2239,13 +2239,27 @@ impl Emitter<'_> {
     /// value struct -- so a rebuilt sub-object carries the `__ty` the non-leaf
     /// path would give it, and the inspect renderer can recurse into a
     /// flattened group. Fails closed: a non-struct field yields `None`.
-    fn nested_field_struct_name(&self, name: ustr::Ustr, head: &str) -> Option<ustr::Ustr> {
-        let sid = self.ws.struct_by_name.get(&name)?;
+    fn nested_field_struct_name(
+        &self,
+        name: ustr::Ustr,
+        head: &str,
+    ) -> Result<Option<ustr::Ustr>, CompilerError> {
+        let sid = self.ws.struct_by_name.get(&name).ok_or_else(|| {
+            err(format!("leaf-form value `{name}` has no declared struct"))
+        })?;
         let sd = &self.ws.modules[sid.module.index()].structs[sid.def];
-        let f = sd.fields.iter().find(|f| f.name.as_str() == head)?;
-        let rendered = self.ws.render(None, f.ty);
-        let n = ustr::Ustr::from(rendered.trim_end_matches('?'));
-        self.ws.struct_by_name.contains_key(&n).then_some(n)
+        let Some(f) = sd.fields.iter().find(|f| f.name.as_str() == head) else {
+            return Err(err(format!("struct `{name}` has no field `{head}`")));
+        };
+        let plan = skull_mir::lower::struct_field_plan(
+            self.ws,
+            bone_semantic::hir::FnBackend::Js,
+            name,
+            f.name,
+            false,
+        )
+        .map_err(|e| err(e.message))?;
+        Ok(plan.child().filter(|child| self.ws.struct_by_name.contains_key(child)))
     }
 
     /// Split a possibly-FLATTENED field list into exact fields and per-head
@@ -2297,13 +2311,12 @@ impl Emitter<'_> {
                 }
             }
         }
-        let field_ty = |head: &str| self.nested_field_struct_name(name, head);
         let mut parts = vec![format!("__ty: {}", js_string_lit(&name.to_string())?)];
         for (f, rendered) in &top {
             parts.push(format!("{}: {rendered}", js_key(f)?));
         }
         for (head, sub) in &groups {
-            let sub_name = field_ty(head).ok_or_else(|| {
+            let sub_name = self.nested_field_struct_name(name, head)?.ok_or_else(|| {
                 CompilerError::new_no_location(format!(
                     "leaf-form ctor for `{name}`: field `{head}` is not a value struct"
                 ))
@@ -2395,11 +2408,13 @@ impl Emitter<'_> {
             let rendered = if let Some(vid) = exact.get(fname) {
                 self.render_value_struct_inspect(*vid, cyc, prec)?
             } else if let Some((_, sub)) = groups.iter().find(|(h, _)| h == fname.as_str()) {
-                let sub_name = self.nested_field_struct_name(name, fname).ok_or_else(|| {
-                    err(format!(
-                        "value struct `{name}` field `{fname}` arrives as leaves but is not a value struct"
-                    ))
-                })?;
+                let sub_name = self
+                    .nested_field_struct_name(name, fname)?
+                    .ok_or_else(|| {
+                        err(format!(
+                            "value struct `{name}` field `{fname}` arrives as leaves but is not a value struct"
+                        ))
+                    })?;
                 self.render_value_struct_inspect_fields(sub_name, sub, cyc, prec)?
             } else {
                 return Err(err(format!(
@@ -4550,7 +4565,7 @@ fn emit_inspect_ty(ws: &Workspace, bodies: &[&MirFunc]) -> Result<String, Compil
         skull_mir::mir::column_elem_types(mf, &mut names);
     }
     names.retain(|n| ws.struct_by_name.contains_key(n));
-    close_struct_field_types(ws, &mut names);
+    close_struct_field_types(ws, &mut names)?;
     build_inspect_ty_defs(ws, arena, &plans, &names)
 }
 
@@ -4656,7 +4671,7 @@ fn col_mat_object(
         parts.push(format!("{}: {read}", js_key(f)?));
     }
     for (head, sub) in &groups {
-        let child = nested_value_field_struct_name(ws, name, head.as_str()).ok_or_else(|| {
+        let child = nested_value_field_struct_name(ws, name, head.as_str())?.ok_or_else(|| {
             err(format!(
                 "JS subset: column element `{name}` field `{head}` is not a value struct"
             ))
@@ -4672,11 +4687,27 @@ fn nested_value_field_struct_name(
     ws: &Workspace,
     parent: ustr::Ustr,
     field: &str,
-) -> Option<ustr::Ustr> {
-    let sid = ws.struct_by_name.get(&parent)?;
+) -> Result<Option<ustr::Ustr>, CompilerError> {
+    let sid = ws.struct_by_name.get(&parent).ok_or_else(|| {
+        err(format!("column element `{parent}` has no declared struct"))
+    })?;
     let s = &ws.module(sid.module).structs[sid.def];
-    let f = s.fields.iter().find(|f| f.name.as_str() == field)?;
-    nominal_struct_name(ws, f.ty)
+    let Some(f) = s.fields.iter().find(|f| f.name.as_str() == field) else {
+        return Err(err(format!("struct `{parent}` has no field `{field}")));
+    };
+    let plan = skull_mir::lower::struct_field_plan(
+        ws,
+        bone_semantic::hir::FnBackend::Js,
+        parent,
+        f.name,
+        false,
+    )
+    .map_err(|e| err(e.message))?;
+    Ok(plan.child().filter(|child| {
+        ws.struct_by_name
+            .get(child)
+            .is_some_and(|sid| ws.module(sid.module).structs[sid.def].is_value)
+    }))
 }
 
 /// The `__deco_<name>` JS identity for a decorator (matches skull's Lua
@@ -5517,53 +5548,31 @@ fn collect_struct_types(ws: &Workspace, mf: &MirFunc, out: &mut BTreeSet<ustr::U
 
 /// Close the set over struct-typed fields, so a type only ever reached as a
 /// field (an `embed` child, a nested `value` struct) still gets an entry.
-fn close_struct_field_types(ws: &Workspace, names: &mut BTreeSet<ustr::Ustr>) {
+fn close_struct_field_types(
+    ws: &Workspace,
+    names: &mut BTreeSet<ustr::Ustr>,
+) -> Result<(), CompilerError> {
     let mut queue: Vec<ustr::Ustr> = names.iter().copied().collect();
     while let Some(name) = queue.pop() {
         let Some(sid) = ws.struct_by_name.get(&name) else { continue };
         let s = &ws.module(sid.module).structs[sid.def];
         for f in &s.fields {
-            if let Some(child) = nominal_struct_name(ws, f.ty) {
+            let plan = skull_mir::lower::struct_field_plan(
+                ws,
+                bone_semantic::hir::FnBackend::Js,
+                name,
+                f.name,
+                false,
+            )
+            .map_err(|e| err(e.message))?;
+            if let Some(child) = plan.child().filter(|child| ws.struct_by_name.contains_key(child)) {
                 if names.insert(child) {
                     queue.push(child);
                 }
             }
         }
     }
-}
-
-/// The nominal name `ty` denotes when it resolves to a struct, peeling
-/// `Nullable` (an `embed f: Foo?` still rebuilds from `Foo`'s fields).
-fn nominal_struct_name(ws: &Workspace, ty: bone_semantic::prelude::TyId) -> Option<ustr::Ustr> {
-    use bone_semantic::hir::{TypeCtor, TypeExpr};
-    let resolve = |t: bone_semantic::prelude::TyId| -> Option<TypeExpr> {
-        match t {
-            bone_semantic::prelude::TyId::Static(mid, idx) => Some(ws.modules.get(mid.index())?.ty_arena[idx]),
-            bone_semantic::prelude::TyId::Local(_) => None,
-        }
-    };
-    let mut te = resolve(ty)?;
-    if let TypeExpr::Nullable(inner) = te {
-        te = resolve(ty.with_idx(inner))?;
-    }
-    match te {
-        TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } if ws.struct_by_name.contains_key(&name) => {
-            Some(name)
-        }
-        _ => None,
-    }
-}
-
-/// True when `ty` is a nullable type (an `embed f: Foo?` keeps its presence
-/// flag at the declared name, and reads as null when absent).
-fn ty_is_nullable(ws: &Workspace, ty: bone_semantic::prelude::TyId) -> bool {
-    use bone_semantic::hir::TypeExpr;
-    match ty {
-        bone_semantic::prelude::TyId::Static(mid, idx) => {
-            matches!(ws.modules.get(mid.index()).map(|m| m.ty_arena[idx]), Some(TypeExpr::Nullable(_)))
-        }
-        bone_semantic::prelude::TyId::Local(_) => false,
-    }
+    Ok(())
 }
 
 /// A JS expression rebuilding an `embed` field's LOGICAL value from the
@@ -5576,13 +5585,23 @@ fn embed_view_expr(
     ty_name: ustr::Ustr,
     nullable: bool,
 ) -> Result<String, CompilerError> {
-    let Some(sid) = ws.struct_by_name.get(&ty_name) else { return Ok("null".to_string()) };
+    let sid = ws.struct_by_name.get(&ty_name).ok_or_else(|| {
+        err(format!("embed view `{ty_name}` has no declared struct"))
+    })?;
     let s = &ws.module(sid.module).structs[sid.def];
     let mut parts = vec![format!("__ty: {}", js_string_lit(ty_name.as_str())?)];
     for f in &s.fields {
         let key = format!("{prefix}.{}", f.name);
-        let val = match (f.is_embed, nominal_struct_name(ws, f.ty)) {
-            (true, Some(child)) => embed_view_expr(ws, &key, child, ty_is_nullable(ws, f.ty))?,
+        let plan = skull_mir::lower::struct_field_plan(
+            ws,
+            bone_semantic::hir::FnBackend::Js,
+            ty_name,
+            f.name,
+            true,
+        )
+        .map_err(|e| err(e.message))?;
+        let val = match plan.embed() {
+            Some((child, child_nullable)) => embed_view_expr(ws, &key, child, child_nullable)?,
             _ => format!("t[{}]", js_string_lit(&key)?),
         };
         parts.push(format!("{}: {val}", js_string_lit(f.name.as_str())?));
@@ -5644,6 +5663,20 @@ fn build_inspect_ty_defs(
                 .fields
                 .iter()
                 .map(|f| {
+                    let plan = skull_mir::lower::struct_field_plan(
+                        ws,
+                        bone_semantic::hir::FnBackend::Js,
+                        *name,
+                        f.name,
+                        false,
+                    )
+                    .map_err(|e| err(e.message))?;
+                    if !plan.is_direct() {
+                        return Err(err(format!(
+                            "JS subset: cdata value `{name}` field `{}` has non-direct field plan",
+                            f.name
+                        )));
+                    }
                     let n = js_string_lit(f.name.as_str())?;
                     Ok(format!("[{n}, t[{n}]]"))
                 })
@@ -5661,16 +5694,20 @@ fn build_inspect_ty_defs(
             .iter()
             .map(|f| {
                 let n = js_string_lit(f.name.as_str())?;
-                let val = match (f.is_embed, nominal_struct_name(ws, f.ty)) {
-                    // A TABLE at the declared name means `t` is already a rebuilt
-                    // logical view (the parent's nested-embed reconstruction), whose
-                    // child sits under the name directly -- there are no leaves to
-                    // read. Same discriminant luajit's walker uses.
-                    (true, Some(child)) => format!(
+                let plan = skull_mir::lower::struct_field_plan(
+                    ws,
+                    bone_semantic::hir::FnBackend::Js,
+                    *name,
+                    f.name,
+                    false,
+                )
+                .map_err(|e| err(e.message))?;
+                let val = match plan.embed() {
+                    Some((child, nullable)) => format!(
                         "((t[{n}] !== null && typeof t[{n}] === \"object\") ? t[{n}] : {})",
-                        embed_view_expr(ws, f.name.as_str(), child, ty_is_nullable(ws, f.ty))?
+                        embed_view_expr(ws, f.name.as_str(), child, nullable)?
                     ),
-                    _ => format!("t[{n}]"),
+                    None => format!("t[{n}]"),
                 };
                 Ok(format!("[{n}, {val}]"))
             })

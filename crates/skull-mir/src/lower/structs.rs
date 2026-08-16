@@ -46,7 +46,7 @@ impl Builder<'_> {
             let lf = self.body.struct_lit_field_arena[fidx];
             let key: u32 = lf.value.into_raw().into();
             let field_plan = self.struct_field_plan(name, lf.name, false)?;
-            if let Some(shape) = field_plan.as_ref().and_then(|p| p.flat_shape()) {
+            if let Some(shape) = field_plan.flat_shape() {
                 let cells = match flat_by_value.get(&key) {
                     Some(c) => c.clone(),
                     None => {
@@ -56,7 +56,7 @@ impl Builder<'_> {
                     }
                 };
                 lit_flat.push((lf.name, cells));
-            } else if let Some((cname, nullable)) = field_plan.and_then(|p| p.embed()) {
+            } else if let Some((cname, nullable)) = field_plan.embed() {
                 // An embedded field's leaves ARE this parent's keys, so its
                 // value is spliced rather than lowered to a child box. Keyed by
                 // the value expr so a field GROUP still evaluates once.
@@ -93,7 +93,7 @@ impl Builder<'_> {
                         fs.push((fname, v));
                     } else if let Some((cname, nullable)) = self
                         .struct_field_plan(name, fname, false)?
-                        .and_then(|p| p.embed())
+                        .embed()
                     {
                         // Unwritten embed field: copy the base's leaves through
                         // (including its presence slot), else the struct default.
@@ -118,7 +118,7 @@ impl Builder<'_> {
                         }
                     } else if let Some(shape) = self
                         .struct_field_plan(name, fname, false)?
-                        .and_then(|p| p.flat_shape())
+                        .flat_shape()
                     {
                         // Unwritten flat field: from the base if present, else the
                         // struct default. A base stores the field in physical

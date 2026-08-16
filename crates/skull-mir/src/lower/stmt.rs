@@ -215,8 +215,15 @@ impl Builder<'_> {
                     let mut opaque_repr = None;
                     if let Some(shape) = threaded_shape {
                         let r = self.lower_expr_repr(value)?;
-                        if self.scx.rep_arena().value_shape(r.representation()).is_some() {
-                            let leaves = self.repr_to_leaves_bundle_for_shape(&r, &shape)?;
+                        if let Some(actual) = self.scx.rep_arena().value_shape(r.representation()) {
+                            if actual.name != shape.name || actual.fields != shape.fields {
+                                return Err(self.gap_here(format!(
+                                    "representation {:?} shape {:?} does not match binding shape {:?}",
+                                    r.representation(), actual, shape
+                                )));
+                            }
+                            let shape = actual;
+                            let leaves = self.repr_to_leaves_bundle(&r)?;
                             let bname = self.body.binding_arena[name].name;
                             let cells: Vec<Idx<Cell>> = leaves
                                 .into_iter()
