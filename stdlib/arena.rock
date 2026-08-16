@@ -125,6 +125,16 @@ fn __arena_new_owned<T>(scene_id: int) -> Arena<T> {
     return Arena { _scene_id: scene_id, _arena_id: id }
 }
 
+fn __arena_reinitialize<T>(arena: Arena<T>) {
+    assert(!is_null(__arena_store_any(arena._scene_id, arena._arena_id)),
+        "Arena {arena._arena_id} is not live")
+    let store: ArenaStore<T> = ArenaStore {
+        generations: [], occupied: [], data: [], free_indices: [],
+        occupied_count: 0, next_generation: 0,
+    }
+    __ARENA_STORES[arena._arena_id] = store
+}
+
 // Retires one Arena incarnation, releasing its rows. True on the first call,
 // false for a handle that was already dead -- so a caller can tell which
 // destruction was theirs. The ID stays consumed.
