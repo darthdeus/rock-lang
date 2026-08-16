@@ -37,10 +37,14 @@ struct ArenaStore<T> {
 //
 // Everything created by `arena_new()` belongs to owner (scene) 0, the Session
 // root, until P2 introduces typed Scenes.
+@state(ownership=session, world=boot_only, realization=fresh_session)
 global __ARENA_STORES: [any?] = []
+@state(ownership=session, world=boot_only, realization=fresh_session)
 global __ARENA_SCENE_IDS: [int] = []
+@state(ownership=session, world=boot_only, realization=fresh_session)
 global __ARENA_NEXT_ID: int = 0
 
+@state(ownership=session, world=boot_only, realization=fresh_session)
 global __ARENA_SESSION_ROOT: int = 0
 
 // THE resolution oracle: every Arena operation, the `enumerate(arena)` loop
@@ -84,6 +88,7 @@ fn __arena_store_mut<T>(arena: Arena<T>) -> ArenaStore<T> {
 //
 // `__arena_store_or_empty` is the same store for the `enumerate(arena)`
 // lowering, which needs a non-generic callee for its synthesized `Inst::Call`.
+@state(ownership=session, world=boot_only, realization=fresh_session)
 global __ARENA_DEAD_STORE: ArenaStore<int> = ArenaStore {
     generations: [], occupied: [], data: [], free_indices: [],
     occupied_count: 0, next_generation: 0,
