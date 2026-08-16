@@ -2365,11 +2365,12 @@ function stone_unload_sound(h) { delete __SW.audio.sounds[h]; return true; }
 // The web mixer has only sfx and music nodes, so music routes to musicGain and
 // every other bus shares sfxGain -- the topology is coarser than native, not
 // ignored.
-function stone_play_sound(h, bus, volume, speed, decay) {
+function stone_play_sound(h, bus, volume, speed, decay, looped) {
   var A = __SW.audio, s = A.sounds[h];
   if (!A.ctx || !s || !s.buffer) return;
   var src = A.ctx.createBufferSource();
   src.buffer = s.buffer;
+  src.loop = looped;
   src.playbackRate.value = Math.min(Math.max(speed, 0.05), 8);
   var g = A.ctx.createGain();
   var vol = Math.max(volume, 0);
