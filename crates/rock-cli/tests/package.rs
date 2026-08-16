@@ -79,3 +79,38 @@ fn package_manifest_is_the_secret_safe_metadata_boundary() {
         }
     }
 }
+
+#[test]
+fn package_stages_external_asset_overlays() {
+    let overlay = tempfile::tempdir().expect("overlay tempdir");
+    let source = overlay.path().join("assets/overlay-package-sentinel.txt");
+    std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+    std::fs::write(&source, "from-overlay").unwrap();
+    let out_dir = tempfile::tempdir().expect("package output");
+    let overlays = std::env::join_paths([overlay.path()]).unwrap();
+
+    let out = Command::new(rock_bin())
+        .current_dir(repo_root())
+        .env("ROCK_ASSET_OVERLAYS", overlays)
+        .args([
+            "package",
+            "mag",
+            "--output",
+            out_dir.path().to_str().unwrap(),
+        ])
+        .output()
+        .expect("spawn rock package");
+    assert!(
+        out.status.success(),
+        "rock package failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(
+            out_dir.path().join("assets/mag/assets/overlay-package-sentinel.txt")
+        )
+        .unwrap(),
+        "from-overlay"
+    );
+}

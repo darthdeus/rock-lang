@@ -1,8 +1,11 @@
 use anyhow::Result;
 use std::collections::BTreeMap;
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 use crate::stick::StickConfig;
+
+pub const ASSET_OVERLAYS_ENV: &str = "ROCK_ASSET_OVERLAYS";
 
 #[derive(Debug, Clone)]
 pub struct ReleaseAsset {
@@ -31,6 +34,62 @@ pub fn select_assets(
     workspace_root: &Path,
     include_web_font: bool,
 ) -> Result<AssetSelection> {
+    let overlays = configured_asset_overlays()?;
+    select_assets_with_overlays(
+        project_dir,
+        game_key,
+        config,
+        workspace_root,
+        include_web_font,
+        &overlays,
+    )
+}
+
+fn configured_asset_overlays() -> Result<Vec<PathBuf>> {
+    let Some(value) = std::env::var_os(ASSET_OVERLAYS_ENV) else {
+        return Ok(Vec::new());
+    };
+    if value.is_empty() {
+        return Ok(Vec::new());
+    }
+    parse_asset_overlay_paths(&value)
+}
+
+fn parse_asset_overlay_paths(value: &OsStr) -> Result<Vec<PathBuf>> {
+    std::env::split_paths(value)
+        .filter(|path| !path.as_os_str().is_empty())
+        .map(|path| {
+            if !path.is_absolute() {
+                anyhow::bail!(
+                    "{ASSET_OVERLAYS_ENV} entries must be absolute directories: {}",
+                    path.display()
+                );
+            }
+            let canonical = fs_err::canonicalize(&path).map_err(|e| {
+                anyhow::anyhow!(
+                    "{ASSET_OVERLAYS_ENV} directory {} cannot be resolved: {e}",
+                    path.display()
+                )
+            })?;
+            if !canonical.is_dir() {
+                anyhow::bail!(
+                    "{ASSET_OVERLAYS_ENV} entry is not a directory: {}",
+                    canonical.display()
+                );
+            }
+            Ok(canonical)
+        })
+        .collect()
+}
+
+fn select_assets_with_overlays(
+    project_dir: &Path,
+    game_key: &str,
+    config: Option<&StickConfig>,
+    workspace_root: &Path,
+    include_web_font: bool,
+    overlays: &[PathBuf],
+) -> Result<AssetSelection> {
     validate_relative_key(game_key, "game key")?;
     let names = match config {
         Some(config) => config.release_assets(project_dir)?,
@@ -39,7 +98,7 @@ pub fn select_assets(
 
     let mut by_key = BTreeMap::<String, PathBuf>::new();
     let mut missing = Vec::new();
-    for name in names {
+    for name in &names {
         let source = project_dir.join(&name);
         if !source.exists() {
             missing.push(source);
@@ -51,6 +110,22 @@ pub fn select_assets(
             &source,
             project_dir,
             &source,
+            false,
+        )?;
+    }
+
+    for overlay in overlays.iter().rev() {
+        let source = overlay.join("assets");
+        if !source.exists() {
+            continue;
+        }
+        add_path(
+            &mut by_key,
+            game_key,
+            &source,
+            overlay,
+            &source,
+            true,
         )?;
     }
 
@@ -66,6 +141,7 @@ pub fn select_assets(
             &source,
             workspace_root,
             &source,
+            false,
         )?;
     }
 
@@ -95,6 +171,7 @@ fn add_path(
     source: &Path,
     root: &Path,
     display_source: &Path,
+    overwrite: bool,
 ) -> Result<()> {
     if source.is_dir() {
         for entry in walkdir::WalkDir::new(source).sort_by_file_name() {
@@ -108,7 +185,7 @@ fn add_path(
                     )
                 })?;
                 let key = key_for(prefix, &rel.to_string_lossy().replace('\\', "/"));
-                by_key.entry(key).or_insert_with(|| entry.path().to_path_buf());
+                insert_asset(by_key, key, entry.path().to_path_buf(), overwrite);
             }
         }
     } else if source.is_file() {
@@ -120,9 +197,30 @@ fn add_path(
             )
         })?;
         let key = key_for(prefix, &rel.to_string_lossy().replace('\\', "/"));
-        by_key.entry(key).or_insert_with(|| source.to_path_buf());
+        insert_asset(by_key, key, source.to_path_buf(), overwrite);
     }
     Ok(())
+}
+
+fn insert_asset(
+    by_key: &mut BTreeMap<String, PathBuf>,
+    key: String,
+    source: PathBuf,
+    overwrite: bool,
+) {
+    if overwrite {
+        if let Some(previous) = by_key.insert(key.clone(), source.clone()) {
+            log::info!(
+                target: "ASSETS",
+                "overlay {} replaces {} for {}",
+                source.display(),
+                previous.display(),
+                key
+            );
+        }
+    } else {
+        by_key.entry(key).or_insert(source);
+    }
 }
 
 /// Sibling marker proving `output_dir` is a tree this module generated and
@@ -314,5 +412,81 @@ mod tests {
         let err = select_assets(&project, "/tmp/demo", None, root.path(), false)
             .expect_err("absolute game key must reject");
         assert!(format!("{err}").contains("relative"), "error explains key restriction: {err}");
+    }
+
+    #[test]
+    fn overlay_path_lists_ignore_empty_segments() {
+        let root = tempfile::tempdir().unwrap();
+        let first = root.path().join("first");
+        let second = root.path().join("second");
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        let value = std::env::join_paths([
+            Path::new(""),
+            first.as_path(),
+            Path::new(""),
+            second.as_path(),
+            Path::new(""),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            parse_asset_overlay_paths(&value).unwrap(),
+            vec![first.canonicalize().unwrap(), second.canonicalize().unwrap()]
+        );
+    }
+
+    #[test]
+    fn overlays_merge_assets_in_declared_priority_without_shadowing_other_release_files() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("mag");
+        let high = root.path().join("high");
+        let low = root.path().join("low");
+        for dir in [&project, &high, &low] {
+            std::fs::create_dir_all(dir.join("assets/sfx")).unwrap();
+            std::fs::create_dir_all(dir.join("saves")).unwrap();
+        }
+        std::fs::create_dir_all(root.path().join("stone/engine/shaders")).unwrap();
+        std::fs::create_dir_all(root.path().join("stone/assets")).unwrap();
+
+        std::fs::write(project.join("assets/sfx/shared.ogg"), "base").unwrap();
+        std::fs::write(project.join("assets/sfx/base.ogg"), "base-only").unwrap();
+        std::fs::write(project.join("saves/level.json"), "base-level").unwrap();
+        std::fs::write(low.join("assets/sfx/shared.ogg"), "low").unwrap();
+        std::fs::write(low.join("assets/sfx/low.ogg"), "low-only").unwrap();
+        std::fs::write(high.join("assets/sfx/shared.ogg"), "high").unwrap();
+        std::fs::write(high.join("assets/sfx/high.ogg"), "high-only").unwrap();
+        std::fs::create_dir_all(high.join("assets/fx")).unwrap();
+        std::fs::write(high.join("assets/fx/overlay-only.png"), "fx-only").unwrap();
+        std::fs::write(high.join("saves/level.json"), "overlay-level").unwrap();
+
+        let cfg = StickConfig::new_from_str(
+            "[package]\nname = \"mag\"\n[release]\nassets = [\"assets/sfx\", \"saves/level.json\"]\n",
+        )
+        .unwrap();
+        let selected = select_assets_with_overlays(
+            &project,
+            "mag",
+            Some(&cfg),
+            root.path(),
+            false,
+            &[high.clone(), low.clone()],
+        )
+        .unwrap();
+        let by_key: BTreeMap<_, _> = selected
+            .assets
+            .iter()
+            .map(|asset| (asset.key.as_str(), asset.source.as_path()))
+            .collect();
+
+        assert_eq!(by_key["mag/assets/sfx/shared.ogg"], high.join("assets/sfx/shared.ogg"));
+        assert_eq!(by_key["mag/assets/sfx/base.ogg"], project.join("assets/sfx/base.ogg"));
+        assert_eq!(by_key["mag/assets/sfx/low.ogg"], low.join("assets/sfx/low.ogg"));
+        assert_eq!(by_key["mag/assets/sfx/high.ogg"], high.join("assets/sfx/high.ogg"));
+        assert_eq!(
+            by_key["mag/assets/fx/overlay-only.png"],
+            high.join("assets/fx/overlay-only.png")
+        );
+        assert_eq!(by_key["mag/saves/level.json"], project.join("saves/level.json"));
     }
 }
