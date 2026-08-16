@@ -297,6 +297,8 @@ fn runner_global(entry: &crate::state_schema::StateEntry) -> bool {
         "SIM_DIAG_BASE_SHADER",
         "FRAME_FORCE_ERROR_AT",
         "FRAME_ERROR_COUNT",
+        "FONT_BROWSER",
+        "FONT_CHOICE_SINK",
         "JIT_TRACE_LOG_ENABLED",
         "JIT_TRACE_INSTALLED",
         "JIT_TRACE_STARTS",
