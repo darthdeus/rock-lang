@@ -2349,6 +2349,7 @@ pub fn skull_iter_incremental(path: &str, iters: usize, warmup: usize) -> Result
     let mut last_emit = 0.0;
     let mut last_bytes = 0usize;
     let mut last_reinferred = 0usize;
+    let mut last_body_meta = (0usize, false, 0usize, 0isize);
     let mut last_phases: Vec<(&'static str, std::time::Duration)> = Vec::new();
     let mut last_update_phases: Vec<(&'static str, std::time::Duration)> = Vec::new();
 
@@ -2407,6 +2408,12 @@ pub fn skull_iter_incremental(path: &str, iters: usize, warmup: usize) -> Result
             last_emit = emit_ms;
             last_bytes = overlay_bytes;
             last_reinferred = upd.reinferred.len();
+            last_body_meta = (
+                upd.body_update.semantic_bodies.len(),
+                upd.body_update.span_only,
+                upd.body_update.edit.as_ref().map_or(0, |edit| edit.at),
+                upd.body_update.edit.as_ref().map_or(0, |edit| edit.byte_delta),
+            );
             last_phases = phases;
             last_update_phases = update_phases;
         }
@@ -2443,6 +2450,37 @@ pub fn skull_iter_incremental(path: &str, iters: usize, warmup: usize) -> Result
     eprintln!("    emit_overlay:                   {last_emit:.3} ms  ({last_bytes} B overlay)");
     for (lbl, d) in &last_phases {
         eprintln!("       {lbl}: {:.3} ms", d.as_secs_f64() * 1000.0);
+    }
+    if std::env::var_os("SKULL_REPAIR_STATS").is_some() {
+        let stats = cache.repair_stats();
+        eprintln!(
+            "    body metadata: semantic={} span_only={} edit_at={} byte_delta={}",
+            last_body_meta.0, last_body_meta.1, last_body_meta.2, last_body_meta.3
+        );
+        eprintln!(
+            "    repair counters: body={} owners={} instances={} graph_retract={} graph_install={} full_graph={} \
+concrete_derived={} concrete_reused={} concrete_retracted={} full_concrete={} \
+artifact_revisited={} artifact_added={} artifact_removed={} full_artifact={} \
+broad_owner={} broad_concrete={} broad_artifact={} broad_candidate={}",
+            stats.body_only_edits,
+            stats.owners_revisited,
+            stats.instances_revisited,
+            stats.graph_contributions_retracted,
+            stats.graph_contributions_installed,
+            stats.full_graph_rebuilds,
+            stats.concrete_entries_derived,
+            stats.concrete_entries_reused,
+            stats.concrete_entries_retracted,
+            stats.full_concrete_rebuilds,
+            stats.artifact_chunks_revisited,
+            stats.artifact_chunks_added,
+            stats.artifact_chunks_removed,
+            stats.full_artifact_view_realizations,
+            stats.broad_owner_scans,
+            stats.broad_concrete_scans,
+            stats.broad_artifact_scans,
+            stats.broad_candidate_scans,
+        );
     }
     Ok(())
 }
