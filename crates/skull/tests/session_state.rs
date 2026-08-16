@@ -27,25 +27,25 @@ fn compiler_generated_mutable_global_accesses_require_the_active_session() {
 }
 
 #[test]
-fn generated_state_accesses_use_function_local_active_session_views() {
+fn generated_state_accesses_follow_mid_call_session_swaps() {
     let emitted = emit_mir(FIXTURE);
     assert!(
-        emitted
+        !emitted
             .lua
             .contains("local __rock_active_state = __rock_active_session.__rock_state"),
-        "state-using functions must bind the active Session state table locally"
+        "state-using functions must not cache a Session table across activation"
     );
     assert!(
         emitted
             .lua
-            .contains("__rock_active_state[\"global:<test>::COUNTER::value\"]"),
-        "mutable global reads and writes must use the local Session view"
+            .contains("__rock_active_session.__rock_state[\"global:<test>::COUNTER::value\"]"),
+        "mutable global reads and writes must follow the active Session"
     );
     assert!(
         emitted.lua.contains(
-            "__rock_active_initialized[\"global:<test>::COUNTER::value\"] = true"
+            "__rock_active_session.__rock_initialized[\"global:<test>::COUNTER::value\"] = true"
         ),
-        "mutable global writes must mark the local Session view initialized"
+        "mutable global writes must mark the active Session initialized"
     );
 }
 
