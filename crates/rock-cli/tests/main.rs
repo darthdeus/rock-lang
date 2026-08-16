@@ -92,6 +92,8 @@ mod test_harness_truncation;
 mod watcher_tmp_project_path;
 #[path = "imgui_web_stubs.rs"]
 mod imgui_web_stubs;
+#[path = "iter_parse_cli.rs"]
+mod iter_parse_cli;
 #[path = "mono_js_backend_realization.rs"]
 mod mono_js_backend_realization;
 #[path = "web_build_gate.rs"]

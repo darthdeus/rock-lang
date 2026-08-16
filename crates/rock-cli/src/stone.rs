@@ -174,9 +174,7 @@ pub fn do_stone_watch(
     let initial_compilation_success = match compiler.compile(&changed_paths, false) {
         Ok(_) => {
             clear_error_file();
-            if let Ok(mut set) = comptime_watch.lock() {
-                *set = compiler.comptime_watch_files().into_iter().collect();
-            }
+            *comptime_watch.lock() = compiler.comptime_watch_files().into_iter().collect();
             true
         }
         Err(e) => {
@@ -291,7 +289,7 @@ pub fn do_stone_watch(
             } else if path_str.ends_with(".rock") {
                 changed_paths.insert(path.clone());
                 changed_game.push(filename);
-            } else if comptime_watch.lock().map(|s| s.contains(path.as_path())).unwrap_or(false) {
+            } else if comptime_watch.lock().contains(path.as_path()) {
                 // An embedded input is a source: routing it as a changed
                 // non-source path makes LiveProject take the full-rebuild arm,
                 // which re-reads the file (docs/comptime-plan.md).
@@ -395,9 +393,7 @@ pub fn do_stone_watch(
                     changed_paths.clear();
                     compilation_succeeded = true;
                     clear_error_file();
-                    if let Ok(mut set) = comptime_watch.lock() {
-                        *set = compiler.comptime_watch_files().into_iter().collect();
-                    }
+                    *comptime_watch.lock() = compiler.comptime_watch_files().into_iter().collect();
                     if !outcome.restart_reasons.is_empty() {
                         info!(
                             "live reload requires a process restart ({})",
