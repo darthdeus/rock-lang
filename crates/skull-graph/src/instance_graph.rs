@@ -636,7 +636,7 @@ pub struct Indices {
     /// The three per-declaration post-passes read the declaration set, not the
     /// instance set, so this is what tells them which declarations ENTERED or
     /// LEFT the graph -- the only ones whose answer can have moved.
-    pub decls: BTreeMap<DeclKey, usize>,
+    pub decls: FxHashMap<FuncRef, usize>,
     /// Instance -> the instances with an edge INTO it.
     ///
     /// Forward adjacency needs no index -- an owner's successors are its own
@@ -652,10 +652,10 @@ pub struct Indices {
     pub preds: FxHashMap<Instance, FxHashSet<Instance>>,
     /// Declaration -> its live concrete instances. Body edits use this index
     /// to revisit every specialization without scanning the whole graph.
-    pub decl_instances: BTreeMap<DeclKey, BTreeSet<Instance>>,
+    pub decl_instances: FxHashMap<FuncRef, FxHashSet<Instance>>,
     /// File -> owners carrying spans in that file. Coordinate relocation uses
     /// this set; membership does not make an owner semantically stale.
-    pub span_owners: BTreeMap<ustr::Ustr, BTreeSet<Owner>>,
+    pub span_owners: FxHashMap<ustr::Ustr, BTreeSet<Owner>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -921,6 +921,17 @@ pub fn build_invocations() -> u64 {
     #[cfg(not(feature = "test-hooks"))]
     {
         0
+    }
+}
+
+#[cfg(feature = "test-hooks")]
+impl InstanceGraph {
+    pub fn incremental_state_population(&self) -> (usize, usize, usize) {
+        (
+            self.delta_added.len(),
+            self.delta_removed.len(),
+            self.last_run_owners.len(),
+        )
     }
 }
 
@@ -1538,7 +1549,7 @@ pub fn build_in(
     let pending = g.always_emitted_owners(ws);
     let t_seed = t.elapsed();
     let t = std::time::Instant::now();
-    let stats = g.run(ws, pending, true);
+    let stats = g.run(ws, pending, true, false);
     g.run_stats = stats;
     let t_run = t.elapsed();
     let t = std::time::Instant::now();
@@ -1690,7 +1701,7 @@ impl InstanceGraph {
     pub fn instances_of(&self, fref: FuncRef) -> impl Iterator<Item = &Instance> {
         self.index
             .decl_instances
-            .get(&DeclKey(fref))
+            .get(&fref)
             .into_iter()
             .flat_map(|instances| instances.iter())
     }
@@ -1812,10 +1823,13 @@ impl InstanceGraph {
         ws: &Workspace,
         mut pending: Vec<Owner>,
         include_missing_roots: bool,
+        track_incremental_state: bool,
     ) -> RunStats {
         let mut stats = RunStats::default();
-        self.last_run_owners.clear();
-        self.last_run_retracted.clear();
+        if track_incremental_state {
+            self.last_run_owners.clear();
+            self.last_run_retracted.clear();
+        }
         let mono_before = self.interner.stats();
         if include_missing_roots {
             for i in self.root_instances.clone() {
@@ -1914,7 +1928,9 @@ impl InstanceGraph {
                 } else {
                     VisitKind::FirstOwner
                 };
-                self.last_run_owners.insert(owner.clone());
+                if track_incremental_state {
+                    self.last_run_owners.insert(owner.clone());
+                }
                 let visit_start = timing_enabled.then(Instant::now);
                 let c = self.expand(ws, &owner, timing_enabled);
                 let visit_ns = elapsed_ns(visit_start);
@@ -1979,7 +1995,8 @@ impl InstanceGraph {
                         + c.always_emitted_holes.len();
                     stats.contribution_always_emitted_targets += c.always_emitted_targets.len();
                 }
-                let (demanded, install_timing) = self.install(owner, c, timing_enabled);
+                let (demanded, install_timing) =
+                    self.install(owner, c, timing_enabled, track_incremental_state);
                 stats.uninstall_ns += install_timing.uninstall_ns;
                 stats.root_hole_rows_examined += install_timing.root_hole_rows_retracted;
                 stats.index_maintenance_ns += install_timing.index.total_ns();
@@ -2221,6 +2238,7 @@ impl InstanceGraph {
         owner: Owner,
         c: Contribution,
         timing_enabled: bool,
+        track_incremental_state: bool,
     ) -> (Vec<Owner>, InstallTiming) {
         let uninstall_start = timing_enabled.then(Instant::now);
         let replaced = self.contributions.contains_key(&owner);
@@ -2230,7 +2248,7 @@ impl InstanceGraph {
             .map(|c| c.always_emitted_holes.len())
             .unwrap_or(0);
         self.uninstall(&owner);
-        if replaced {
+        if track_incremental_state && replaced {
             self.last_run_retracted.insert(owner.clone());
         }
         let uninstall_ns = elapsed_ns(uninstall_start);
@@ -2284,10 +2302,10 @@ impl InstanceGraph {
         let lane_start = timing_enabled.then(Instant::now);
         if let Some(from) = owner.instance() {
             index.decls_updates += 1;
-            *self.index.decls.entry(DeclKey(from.func)).or_insert(0) += 1;
+            *self.index.decls.entry(from.func).or_insert(0) += 1;
             self.index
                 .decl_instances
-                .entry(DeclKey(from.func))
+                .entry(from.func)
                 .or_default()
                 .insert(from.clone());
         }
@@ -2315,10 +2333,12 @@ impl InstanceGraph {
         }
         self.add_contribution_counters(&c);
         self.contributions.insert(owner.clone(), c);
-        if let Some(instance) = owner.instance() {
-            if self.instances.insert(instance.clone()) {
-                if !self.delta_removed.remove(instance) {
-                    self.delta_added.insert(instance.clone());
+        if track_incremental_state {
+            if let Some(instance) = owner.instance() {
+                if self.instances.insert(instance.clone()) {
+                    if !self.delta_removed.remove(instance) {
+                        self.delta_added.insert(instance.clone());
+                    }
                 }
             }
         }
@@ -2421,18 +2441,16 @@ impl InstanceGraph {
             // Its own edges are gone, so its successors may have lost their
             // last way in. Recorded for the caller to prune from.
             self.lost.extend(old.edges.iter().map(|e| e.to.clone()));
-            if let std::collections::btree_map::Entry::Occupied(mut e) =
-                self.index.decls.entry(DeclKey(from.func))
-            {
-                *e.get_mut() -= 1;
-                if *e.get() == 0 {
-                    e.remove();
+            if let Some(count) = self.index.decls.get_mut(&from.func) {
+                *count -= 1;
+                if *count == 0 {
+                    self.index.decls.remove(&from.func);
                 }
             }
-            if let Some(instances) = self.index.decl_instances.get_mut(&DeclKey(from.func)) {
+            if let Some(instances) = self.index.decl_instances.get_mut(&from.func) {
                 instances.remove(from);
                 if instances.is_empty() {
-                    self.index.decl_instances.remove(&DeclKey(from.func));
+                    self.index.decl_instances.remove(&from.func);
                 }
             }
         }
@@ -2773,14 +2791,14 @@ impl InstanceGraph {
             let mut v: Vec<DeclKey> = entered.iter().map(|i| DeclKey(i.func)).collect();
             v.sort();
             v.dedup();
-            v.retain(|d| self.index.decls.contains_key(d));
+            v.retain(|d| self.index.decls.contains_key(&d.0));
             v
         };
         let decls_left: Vec<DeclKey> = {
             let mut v: Vec<DeclKey> = left.iter().map(|i| DeclKey(i.func)).collect();
             v.sort();
             v.dedup();
-            v.retain(|d| !self.index.decls.contains_key(d));
+            v.retain(|d| !self.index.decls.contains_key(&d.0));
             v
         };
         for decl in &decls_left {
@@ -2847,7 +2865,7 @@ impl InstanceGraph {
         active_decls.extend(
             touched_decls
                 .iter()
-                .filter(|decl| self.index.decls.contains_key(decl))
+                .filter(|decl| self.index.decls.contains_key(&decl.0))
                 .cloned(),
         );
 
@@ -2888,7 +2906,7 @@ impl InstanceGraph {
         recursion_seeds.extend(
             touched_decls
                 .iter()
-                .flat_map(|decl| self.index.decl_instances.get(decl).into_iter().flatten().cloned()),
+                .flat_map(|decl| self.index.decl_instances.get(&decl.0).into_iter().flatten().cloned()),
         );
         recursion_seeds = self.recursion_seed_closure(recursion_seeds);
         self.run_stats.recursion_seed_subjects = recursion_seeds.len();
@@ -2952,8 +2970,8 @@ impl InstanceGraph {
                 }
                 count = decls
                     .iter()
-                    .filter_map(|decl| self.index.decl_instances.get(decl))
-                    .map(BTreeSet::len)
+                    .filter_map(|decl| self.index.decl_instances.get(&decl.0))
+                    .map(FxHashSet::len)
                     .sum();
             }
             hole.instances = count;
@@ -2976,8 +2994,8 @@ impl InstanceGraph {
                 }
                 count = decls
                     .iter()
-                    .filter_map(|decl| self.index.decl_instances.get(decl))
-                    .map(BTreeSet::len)
+                    .filter_map(|decl| self.index.decl_instances.get(&decl.0))
+                    .map(FxHashSet::len)
                     .sum();
             }
             if let Some(hole) = self.uninstantiated_roots.get_mut(&name) {
@@ -3075,7 +3093,7 @@ impl InstanceGraph {
         affected.extend(pending_roots);
         affected.sort();
         affected.dedup();
-        let run = self.run(ws, affected.clone(), false);
+        let run = self.run(ws, affected.clone(), false, true);
         self.run_stats = run;
         let revisited_owners = self.last_run_owners.clone();
         let changed_decls = changed.iter().filter_map(|(module, owner)| match owner {
@@ -3177,7 +3195,7 @@ impl InstanceGraph {
                         ws,
                         FuncRef { module: *module, func: *f },
                     );
-                    if let Some(instances) = self.index.decl_instances.get(&DeclKey(fref)) {
+                    if let Some(instances) = self.index.decl_instances.get(&fref) {
                         changed_seeds.extend(instances.iter().cloned().map(Owner::Instance));
                     }
                 }
@@ -4168,7 +4186,7 @@ fn detect_changing_instance_recursion(g: &mut InstanceGraph, ws: &Workspace) {
     let mut order: Vec<&Instance> = succ
         .keys()
         .copied()
-        .filter(|i| g.index.decls.get(&DeclKey(i.func)).is_some_and(|n| *n > 1))
+        .filter(|i| g.index.decls.get(&i.func).is_some_and(|n| *n > 1))
         .collect();
     order.sort();
     let mut found: Vec<(Instance, Span, String, BTreeSet<Instance>)> = Vec::new();
@@ -4231,7 +4249,7 @@ fn detect_changing_instance_recursion_local(
         .iter()
         .filter(|i| {
             g.contributions.contains_key(&Owner::Instance((*i).clone()))
-                && g.index.decls.get(&DeclKey(i.func)).is_some_and(|n| *n > 1)
+                && g.index.decls.get(&i.func).is_some_and(|n| *n > 1)
         })
         .cloned()
         .collect();

@@ -251,7 +251,7 @@ pub struct MissingBody {
 }
 
 /// The tables for one graph, plus everything that did not convert.
-#[derive(Default)]
+#[derive(Clone)]
 pub struct ConcreteBodies {
     pub bodies: BTreeMap<Instance, ConcreteBody>,
     /// Compatibility projections below are refreshed only for a full-build
@@ -306,22 +306,65 @@ pub struct ConcreteBodies {
     /// instances (always-emitted bodies excluded); `expr_examined +
     /// binding_examined` is the per-slot denominator it deduplicates.
     pub slot_conversions: usize,
-    /// Compatibility snapshot from the last full build. Local consumers use
-    /// [`Self::authoritative_build_stats`], which folds the owner records.
+    /// Last explicitly requested compatibility snapshot of the owner records.
+    /// Ordinary construction and owner-local repair leave this field untouched.
     pub build_stats: ConcreteBuildStats,
-    instance_facts: BTreeMap<Instance, OwnerFacts>,
+    eager_owner_fact_scans: usize,
+    instance_facts: FxHashMap<Instance, OwnerFacts>,
     always_facts: FxHashMap<ConcreteOwner, OwnerFacts>,
     /// Foreign-domain publication is a shared full-build contribution. It is
     /// kept separately because it has no single owner; local body facts never
     /// mutate it or fold a second copy into the aggregate.
     global_build_stats: ConcreteBuildStats,
-    /// Scalar totals for the current owner records. Unlike the diagnostic
-    /// rows, these are maintained by owner replacement so emission does not
-    /// scan every retained record just to publish a census snapshot.
-    authoritative_stats: ConcreteBuildStats,
+    plan_failure_index: BTreeMap<Instance, MonoTyReason>,
+    always_plan_failure_index: FxHashMap<ConcreteOwner, MonoTyReason>,
     candidate_keys: BTreeSet<Instance>,
-    owner_candidates: BTreeMap<Instance, BTreeSet<Instance>>,
-    candidate_users: BTreeMap<Instance, BTreeSet<Instance>>,
+    candidate_keys_by_func: FxHashMap<FuncRef, FxHashSet<Instance>>,
+    owner_candidates: FxHashMap<Instance, FxHashSet<Instance>>,
+    candidate_users: FxHashMap<Instance, FxHashSet<Instance>>,
+}
+
+impl Default for ConcreteBodies {
+    fn default() -> Self {
+        #[cfg(feature = "test-hooks")]
+        CONCRETE_DEFAULT_INVOCATIONS.with(|count| count.set(count.get() + 1));
+        Self {
+            bodies: BTreeMap::new(),
+            plans: std::sync::Arc::new(ConcretePlans::new()),
+            always_plans: ConcreteAlwaysPlans::default(),
+            plan_failures: Vec::new(),
+            always_plan_failures: Vec::new(),
+            free_types: Vec::new(),
+            gaps: Vec::new(),
+            expr_examined: 0,
+            binding_examined: 0,
+            generics_bound: 0,
+            untyped: Vec::new(),
+            untyped_bindings: 0,
+            expr_slots: 0,
+            binding_slots: 0,
+            generic_bodies: 0,
+            sites_examined: 0,
+            callee_holes: Vec::new(),
+            unknown_rock_callees: Vec::new(),
+            untyped_as_callee_key: BTreeMap::new(),
+            signature_requests: 0,
+            signature_derivations: 0,
+            signature_slots_cloned: 0,
+            slot_conversions: 0,
+            build_stats: ConcreteBuildStats::default(),
+            eager_owner_fact_scans: 0,
+            instance_facts: FxHashMap::default(),
+            always_facts: FxHashMap::default(),
+            global_build_stats: ConcreteBuildStats::default(),
+            plan_failure_index: BTreeMap::new(),
+            always_plan_failure_index: FxHashMap::default(),
+            candidate_keys: BTreeSet::new(),
+            candidate_keys_by_func: FxHashMap::default(),
+            owner_candidates: FxHashMap::default(),
+            candidate_users: FxHashMap::default(),
+        }
+    }
 }
 
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
@@ -399,77 +442,6 @@ impl ConcreteBuildStats {
         self.foreign_domains_ns += other.foreign_domains_ns;
     }
 
-    fn sub(&mut self, other: Self) {
-        self.plan_attempts = self.plan_attempts.saturating_sub(other.plan_attempts);
-        self.plan_successes = self.plan_successes.saturating_sub(other.plan_successes);
-        self.plan_failures = self.plan_failures.saturating_sub(other.plan_failures);
-        self.always_plan_attempts = self
-            .always_plan_attempts
-            .saturating_sub(other.always_plan_attempts);
-        self.always_plan_successes = self
-            .always_plan_successes
-            .saturating_sub(other.always_plan_successes);
-        self.always_plan_failures = self
-            .always_plan_failures
-            .saturating_sub(other.always_plan_failures);
-        self.source_expr_slots = self.source_expr_slots.saturating_sub(other.source_expr_slots);
-        self.source_binding_slots = self
-            .source_binding_slots
-            .saturating_sub(other.source_binding_slots);
-        self.callee_vec_materializations = self
-            .callee_vec_materializations
-            .saturating_sub(other.callee_vec_materializations);
-        self.callee_vec_rows = self.callee_vec_rows.saturating_sub(other.callee_vec_rows);
-        self.plan_callee_map_inserts = self
-            .plan_callee_map_inserts
-            .saturating_sub(other.plan_callee_map_inserts);
-        self.plan_callee_signature_inserts = self
-            .plan_callee_signature_inserts
-            .saturating_sub(other.plan_callee_signature_inserts);
-        self.plan_type_expr_clones = self
-            .plan_type_expr_clones
-            .saturating_sub(other.plan_type_expr_clones);
-        self.plan_type_binding_clones = self
-            .plan_type_binding_clones
-            .saturating_sub(other.plan_type_binding_clones);
-        self.plan_untyped_expr_clones = self
-            .plan_untyped_expr_clones
-            .saturating_sub(other.plan_untyped_expr_clones);
-        self.plan_untyped_binding_clones = self
-            .plan_untyped_binding_clones
-            .saturating_sub(other.plan_untyped_binding_clones);
-        self.type_nodes_examined = self
-            .type_nodes_examined
-            .saturating_sub(other.type_nodes_examined);
-        self.type_node_memo_hits = self
-            .type_node_memo_hits
-            .saturating_sub(other.type_node_memo_hits);
-        self.type_node_conversion_attempts = self
-            .type_node_conversion_attempts
-            .saturating_sub(other.type_node_conversion_attempts);
-        self.type_node_unresolved = self
-            .type_node_unresolved
-            .saturating_sub(other.type_node_unresolved);
-        self.struct_literals_examined = self
-            .struct_literals_examined
-            .saturating_sub(other.struct_literals_examined);
-        self.struct_field_conversion_attempts = self
-            .struct_field_conversion_attempts
-            .saturating_sub(other.struct_field_conversion_attempts);
-        self.foreign_domain_requests = self
-            .foreign_domain_requests
-            .saturating_sub(other.foreign_domain_requests);
-        self.foreign_domain_unique = self
-            .foreign_domain_unique
-            .saturating_sub(other.foreign_domain_unique);
-        self.signature_ns = self.signature_ns.saturating_sub(other.signature_ns);
-        self.type_nodes_ns = self.type_nodes_ns.saturating_sub(other.type_nodes_ns);
-        self.struct_fields_ns = self.struct_fields_ns.saturating_sub(other.struct_fields_ns);
-        self.foreign_domains_ns = self
-            .foreign_domains_ns
-            .saturating_sub(other.foreign_domains_ns);
-    }
-
 }
 
 impl ConcreteBodies {
@@ -485,9 +457,11 @@ impl ConcreteBodies {
         facts
     }
 
-    fn refresh_flat_views(&mut self) {
+    /// Materialize compatibility vectors for an explicit diagnostic/census
+    /// request. Ordinary fresh construction keeps owner facts authoritative.
+    pub fn refresh_flat_views(&mut self) {
+        self.eager_owner_fact_scans += self.instance_facts.len() + self.always_facts.len();
         let facts = self.aggregate_facts();
-        self.authoritative_stats = facts.build_stats;
         self.plan_failures = facts.plan_failures;
         self.always_plan_failures = facts.always_plan_failures;
         self.free_types = facts.free_types;
@@ -505,7 +479,6 @@ impl ConcreteBodies {
         self.unknown_rock_callees = facts.unknown_rock_callees;
         self.untyped_as_callee_key = facts.untyped_as_callee_key;
         self.signature_requests = facts.signature_requests;
-        self.signature_derivations = facts.signature_derivations;
         self.signature_slots_cloned = facts.signature_slots_cloned;
         self.slot_conversions = facts.slot_conversions;
         self.build_stats = facts.build_stats;
@@ -538,8 +511,34 @@ impl ConcreteBodies {
         &self.candidate_keys
     }
 
+    pub fn candidate_keys_by_func(&self) -> &FxHashMap<FuncRef, FxHashSet<Instance>> {
+        &self.candidate_keys_by_func
+    }
+
     pub fn authoritative_build_stats(&self) -> ConcreteBuildStats {
-        self.authoritative_stats
+        self.build_stats
+    }
+
+    /// Fold the authoritative owner records for an explicit census request.
+    /// The repair path does not call this method.
+    pub fn snapshot_build_stats(&mut self) -> ConcreteBuildStats {
+        let stats = self.aggregate_facts().build_stats;
+        self.build_stats = stats;
+        stats
+    }
+
+    pub fn eager_owner_fact_scans(&self) -> usize {
+        self.eager_owner_fact_scans
+    }
+
+    pub fn first_plan_failure(&self) -> Option<(&Instance, &MonoTyReason)> {
+        self.plan_failure_index.first_key_value()
+    }
+
+    pub fn first_always_plan_failure(&self) -> Option<(&ConcreteOwner, &MonoTyReason)> {
+        self.always_plan_failure_index
+            .iter()
+            .min_by(|(left, _), (right, _)| concrete_owner_order(left, right))
     }
 
     fn forced_broad_scan_count(&self) -> usize {
@@ -602,15 +601,17 @@ impl ConcreteBodies {
                 }
                 InstanceResult::Built(built) => {
                     let instance = built.instance.clone();
-                    let facts = merge_instance_facts(self, built.facts);
-                    self.authoritative_stats.add(facts.build_stats);
+                    let facts = built.facts;
+                    let candidate_refs = built.candidate_refs;
                     if let Ok(plan) = built.plan {
-                        candidate_keys_added.extend(self.install_candidate_refs(&instance, &plan));
+                        candidate_keys_added
+                            .extend(self.install_candidate_refs_owned(&instance, candidate_refs));
                         Arc::get_mut(&mut self.plans)
                             .expect("local concrete update lost its unique plan store")
                             .insert(instance.clone(), Arc::new(plan));
                     }
                     self.bodies.insert(instance.clone(), built.concrete);
+                    self.install_failure_index(&facts);
                     self.instance_facts.insert(instance, facts);
                 }
             }
@@ -622,10 +623,10 @@ impl ConcreteBodies {
             always_subjects.push((*module, *body_owner, owner));
         }
         for (_, _, owner) in &always_subjects {
-            if let Some(facts) = self.always_facts.remove(owner) {
-                self.authoritative_stats.sub(facts.build_stats);
+            if self.always_facts.remove(owner).is_some() {
                 retracted += 1;
             }
+            self.always_plan_failure_index.remove(owner);
             self.always_plans.remove(owner);
         }
         let always_inputs: Vec<_> = always_subjects
@@ -671,8 +672,7 @@ impl ConcreteBodies {
                 if let (Some(owner), Err(reason)) = (&owner, &result.plan) {
                     raw_facts.always_plan_failures.push((owner.clone(), reason.clone()));
                 }
-                let facts = merge_instance_facts(self, raw_facts);
-                self.authoritative_stats.add(facts.build_stats);
+                let facts = raw_facts;
                 match result.plan {
                     Ok(Some(plan)) => {
                         self.always_plans.insert(plan.owner.clone(), plan);
@@ -681,6 +681,7 @@ impl ConcreteBodies {
                     Err(_) => {}
                 }
                 if let Some(owner) = owner {
+                    self.install_failure_index(&facts);
                     self.always_facts.insert(owner, facts);
                 }
             }
@@ -717,12 +718,18 @@ impl ConcreteBodies {
                 if users.is_empty() {
                     self.candidate_users.remove(&candidate);
                     self.candidate_keys.remove(&candidate);
+                    if let Some(keys) = self.candidate_keys_by_func.get_mut(&candidate.func) {
+                        keys.remove(&candidate);
+                        if keys.is_empty() {
+                            self.candidate_keys_by_func.remove(&candidate.func);
+                        }
+                    }
                     removed.insert(candidate);
                 }
             }
         }
-        if let Some(facts) = self.instance_facts.remove(instance) {
-            self.authoritative_stats.sub(facts.build_stats);
+        if self.instance_facts.remove(instance).is_some() {
+            self.plan_failure_index.remove(instance);
         } else {
             self.bodies.remove(instance);
             Arc::get_mut(&mut self.plans)
@@ -737,26 +744,38 @@ impl ConcreteBodies {
         (removed, 0)
     }
 
-    fn install_candidate_refs(
+    fn install_failure_index(&mut self, facts: &OwnerFacts) {
+        for (instance, reason) in &facts.plan_failures {
+            self.plan_failure_index.insert(instance.clone(), reason.clone());
+        }
+        for (owner, reason) in &facts.always_plan_failures {
+            self.always_plan_failure_index.insert(owner.clone(), reason.clone());
+        }
+    }
+
+    fn install_candidate_refs_owned(
         &mut self,
         owner: &Instance,
-        plan: &ConcreteBodyPlan,
+        refs: FxHashSet<Instance>,
     ) -> BTreeSet<Instance> {
-        let refs: BTreeSet<Instance> = plan.callees.values().cloned().collect();
         let mut added = BTreeSet::new();
         for candidate in &refs {
-            let was_empty = self
-                .candidate_users
-                .get(candidate)
-                .is_none_or(BTreeSet::is_empty);
-            if was_empty {
-                self.candidate_keys.insert(candidate.clone());
-                added.insert(candidate.clone());
+            match self.candidate_users.entry(candidate.clone()) {
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    self.candidate_keys.insert(candidate.clone());
+                    self.candidate_keys_by_func
+                        .entry(candidate.func)
+                        .or_default()
+                        .insert(candidate.clone());
+                    added.insert(candidate.clone());
+                    let mut users = FxHashSet::default();
+                    users.insert(owner.clone());
+                    entry.insert(users);
+                }
+                std::collections::hash_map::Entry::Occupied(mut entry) => {
+                    entry.get_mut().insert(owner.clone());
+                }
             }
-            self.candidate_users
-                .entry(candidate.clone())
-                .or_default()
-                .insert(owner.clone());
         }
         self.owner_candidates.insert(owner.clone(), refs);
         added
@@ -1151,7 +1170,7 @@ fn callee_tables(
     g: &InstanceGraph,
     inst: &Instance,
     body: &mut ConcreteBody,
-    out: &mut ConcreteBodies,
+    out: &mut OwnerFacts,
 ) {
     let Some(sites) = g.sites_of(inst) else { return };
     for (site, rec) in sites {
@@ -1498,7 +1517,8 @@ struct BuiltInstance {
     instance: Instance,
     concrete: ConcreteBody,
     plan: Result<ConcreteBodyPlan, MonoTyReason>,
-    facts: ConcreteBodies,
+    candidate_refs: FxHashSet<Instance>,
+    facts: OwnerFacts,
     convert_time: std::time::Duration,
     callee_time: std::time::Duration,
     plan_time: std::time::Duration,
@@ -1586,33 +1606,6 @@ impl OwnerFacts {
         }
     }
 
-    fn from_body(mut facts: ConcreteBodies) -> Self {
-        debug_assert!(facts.bodies.is_empty() && facts.always_plans.is_empty());
-        Self {
-            plan_failures: std::mem::take(&mut facts.plan_failures),
-            always_plan_failures: std::mem::take(&mut facts.always_plan_failures),
-            free_types: std::mem::take(&mut facts.free_types),
-            gaps: std::mem::take(&mut facts.gaps),
-            expr_examined: facts.expr_examined,
-            binding_examined: facts.binding_examined,
-            generics_bound: facts.generics_bound,
-            untyped: std::mem::take(&mut facts.untyped),
-            untyped_bindings: facts.untyped_bindings,
-            expr_slots: facts.expr_slots,
-            binding_slots: facts.binding_slots,
-            generic_bodies: facts.generic_bodies,
-            sites_examined: facts.sites_examined,
-            callee_holes: std::mem::take(&mut facts.callee_holes),
-            unknown_rock_callees: std::mem::take(&mut facts.unknown_rock_callees),
-            untyped_as_callee_key: std::mem::take(&mut facts.untyped_as_callee_key),
-            signature_requests: facts.signature_requests,
-            signature_derivations: facts.signature_derivations,
-            signature_slots_cloned: facts.signature_slots_cloned,
-            slot_conversions: facts.slot_conversions,
-            build_stats: facts.build_stats,
-        }
-    }
-
     fn accumulate_into(&self, out: &mut OwnerFacts) {
         out.plan_failures.extend(self.plan_failures.iter().cloned());
         out.always_plan_failures
@@ -1641,10 +1634,6 @@ impl OwnerFacts {
         out.build_stats.add(self.build_stats);
     }
 
-}
-
-fn merge_instance_facts(_out: &mut ConcreteBodies, facts: ConcreteBodies) -> OwnerFacts {
-    OwnerFacts::from_body(facts)
 }
 
 type PublishedSignatures = FxHashMap<Instance, Result<ConcreteSignatureHandle, MonoTyReason>>;
@@ -1863,7 +1852,7 @@ struct PreparedInstance {
     types: ConcreteTypeTables,
     untyped: Vec<UntypedExpr>,
     type_error: Option<MonoTyReason>,
-    facts: ConcreteBodies,
+    facts: OwnerFacts,
     convert_time: std::time::Duration,
     elapsed: std::time::Duration,
     slot_tyids: usize,
@@ -1925,7 +1914,7 @@ fn prepare_instance(
         }
     };
 
-    let mut facts = ConcreteBodies::default();
+    let mut facts = OwnerFacts::default();
     let (slot_tyids, unique_slot_tyids) = if timing_enabled {
         let tyids: FxHashSet<TyId> = inf
             .expr_types
@@ -2034,7 +2023,7 @@ struct PreparedAlways {
     types: Option<ConcreteTypeTables>,
     type_error: Option<MonoTyReason>,
     skip: bool,
-    facts: ConcreteBodies,
+    facts: OwnerFacts,
 }
 
 fn concrete_owner_for(module: bone_semantic::prelude::ModuleId, body_owner: BodyOwner) -> Option<ConcreteOwner> {
@@ -2072,7 +2061,7 @@ fn prepare_always(
             types: None,
             type_error: Some(MonoTyReason::NoNode),
             skip: false,
-            facts: ConcreteBodies::default(),
+            facts: OwnerFacts::default(),
         };
     };
     if matches!(body_owner, BodyOwner::Global(_)) && body.root.is_none() {
@@ -2084,7 +2073,7 @@ fn prepare_always(
             types: None,
             type_error: None,
             skip: true,
-            facts: ConcreteBodies::default(),
+            facts: OwnerFacts::default(),
         };
     }
     let Some(inf) = ws
@@ -2099,10 +2088,10 @@ fn prepare_always(
             types: None,
             type_error: Some(MonoTyReason::NoNode),
             skip: false,
-            facts: ConcreteBodies::default(),
+            facts: OwnerFacts::default(),
         };
     };
-    let mut facts = ConcreteBodies::default();
+    let mut facts = OwnerFacts::default();
     let declared_types = match body_owner {
         BodyOwner::Global(index) => std::iter::once(ws.module(module).globals[index].ty)
             .collect::<Vec<_>>()
@@ -2181,13 +2170,15 @@ fn concrete_plan_from_publication(
     domains: &PublishedDomains,
     stats: &mut ConcreteBuildStats,
     timing_enabled: bool,
-) -> Result<ConcreteBodyPlan, MonoTyReason> {
+) -> Result<(ConcreteBodyPlan, FxHashSet<Instance>), MonoTyReason> {
     let mut callees = BTreeMap::new();
     let mut callee_signatures = BTreeMap::new();
+    let mut candidate_refs = FxHashSet::default();
     let signature_started = timing_enabled.then(std::time::Instant::now);
     let callee_rows = counted_callees(body, stats);
     for (site, callee) in &callee_rows {
         let instance = callee.instance().clone();
+        candidate_refs.insert(instance.clone());
         let signature = signatures
             .get(&instance)
             .ok_or(MonoTyReason::NoNode)?
@@ -2228,16 +2219,21 @@ fn concrete_plan_from_publication(
     )?;
     stats.plan_callee_map_inserts += callees.len();
     stats.plan_callee_signature_inserts += callee_signatures.len();
-    Ok(ConcreteBodyPlan {
-        owner: ConcreteOwner::Function(inst.clone()),
-        types,
-        foreign_domains,
-        signature,
-        callees,
-        callee_signatures,
-        failed_sites,
-        bound_tree: g.bound_tree(inst).map_or_else(Default::default, |tree| tree.to_resolved()),
-    })
+    Ok((
+        ConcreteBodyPlan {
+            owner: ConcreteOwner::Function(inst.clone()),
+            types,
+            foreign_domains,
+            signature,
+            callees,
+            callee_signatures,
+            failed_sites,
+            bound_tree: g
+                .bound_tree(inst)
+                .map_or_else(Default::default, |tree| tree.to_resolved()),
+        },
+        candidate_refs,
+    ))
 }
 
 fn produce_instance(
@@ -2292,7 +2288,7 @@ fn produce_instance(
         + 1;
     let started = std::time::Instant::now();
     facts.build_stats.plan_attempts += 1;
-    let plan = concrete_plan_from_publication(
+    let (plan, candidate_refs) = match concrete_plan_from_publication(
         g,
         &inst,
         &concrete,
@@ -2302,7 +2298,10 @@ fn produce_instance(
         domains,
         &mut facts.build_stats,
         timing_enabled,
-    );
+    ) {
+        Ok((plan, candidate_refs)) => (Ok(plan), candidate_refs),
+        Err(reason) => (Err(reason), FxHashSet::default()),
+    };
     let plan_time = started.elapsed();
     if let Err(reason) = &plan {
         facts.build_stats.plan_failures += 1;
@@ -2314,6 +2313,7 @@ fn produce_instance(
         instance: inst,
         concrete,
         plan,
+        candidate_refs,
         facts,
         convert_time,
         callee_time,
@@ -2328,7 +2328,7 @@ struct BuiltAlways {
     order: usize,
     owner: Option<ConcreteOwner>,
     plan: Result<Option<ConcreteBodyPlan>, MonoTyReason>,
-    facts: ConcreteBodies,
+    facts: OwnerFacts,
 }
 
 fn produce_always(
@@ -2780,10 +2780,23 @@ pub fn build_invocations() -> u64 {
 
 thread_local! {
     static BUILD_INVOCATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    #[cfg(feature = "test-hooks")]
+    static CONCRETE_DEFAULT_INVOCATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 pub fn build(ws: &Workspace, g: &InstanceGraph) -> ConcreteBodies {
     build_impl(ws, g, BuildResultOrder::Canonical, BuildSchedule::Default).bodies
+}
+
+pub fn concrete_default_invocations() -> u64 {
+    #[cfg(feature = "test-hooks")]
+    {
+        return CONCRETE_DEFAULT_INVOCATIONS.with(std::cell::Cell::get);
+    }
+    #[cfg(not(feature = "test-hooks"))]
+    {
+        0
+    }
 }
 
 #[cfg(feature = "test-hooks")]
@@ -3003,6 +3016,12 @@ fn build_published_impl(
     let mut t_convert = std::time::Duration::ZERO;
     let mut t_callee = std::time::Duration::ZERO;
     let mut t_plan = std::time::Duration::ZERO;
+    let mut candidate_install_time = std::time::Duration::ZERO;
+    let mut plan_insert_time = std::time::Duration::ZERO;
+    let mut body_insert_time = std::time::Duration::ZERO;
+    let mut failure_index_time = std::time::Duration::ZERO;
+    let mut owner_fact_insert_time = std::time::Duration::ZERO;
+    let mut candidate_ref_rows = 0usize;
     let mut slot_tyids = 0usize;
     let mut unique_slot_tyids = 0usize;
     for result in results {
@@ -3020,13 +3039,36 @@ fn build_published_impl(
                 per_inst.push((instance.clone(), built.elapsed));
                 slot_tyids += built.slot_tyids;
                 unique_slot_tyids += built.unique_slot_tyids;
-                let facts = merge_instance_facts(&mut out, built.facts);
+                let facts = built.facts;
+                let candidate_refs = built.candidate_refs;
+                candidate_ref_rows += candidate_refs.len();
                 if let Ok(plan) = built.plan {
-                    out.install_candidate_refs(&instance, &plan);
+                    let started = timing_enabled.then(std::time::Instant::now);
+                    out.install_candidate_refs_owned(&instance, candidate_refs);
+                    if let Some(started) = started {
+                        candidate_install_time += started.elapsed();
+                    }
+                    let started = timing_enabled.then(std::time::Instant::now);
                     plans.insert(instance.clone(), std::sync::Arc::new(plan));
+                    if let Some(started) = started {
+                        plan_insert_time += started.elapsed();
+                    }
                 }
+                let started = timing_enabled.then(std::time::Instant::now);
                 out.bodies.insert(instance.clone(), built.concrete);
+                if let Some(started) = started {
+                    body_insert_time += started.elapsed();
+                }
+                let started = timing_enabled.then(std::time::Instant::now);
+                out.install_failure_index(&facts);
+                if let Some(started) = started {
+                    failure_index_time += started.elapsed();
+                }
+                let started = timing_enabled.then(std::time::Instant::now);
                 out.instance_facts.insert(instance, facts);
+                if let Some(started) = started {
+                    owner_fact_insert_time += started.elapsed();
+                }
             }
         }
     }
@@ -3053,7 +3095,7 @@ fn build_published_impl(
         if let (Some(owner), Err(reason)) = (&owner, &result.plan) {
             raw_facts.always_plan_failures.push((owner.clone(), reason.clone()));
         }
-        let facts = merge_instance_facts(&mut out, raw_facts);
+        let facts = raw_facts;
         match result.plan {
             Ok(Some(plan)) => {
                 out.always_plans.insert(plan.owner.clone(), plan);
@@ -3062,11 +3104,11 @@ fn build_published_impl(
             Err(_) => {}
         }
         if let Some(owner) = owner {
+            out.install_failure_index(&facts);
             out.always_facts.insert(owner, facts);
         }
     }
     let always_merge_time = t_always_merge.elapsed();
-    out.refresh_flat_views();
     #[cfg(feature = "test-hooks")]
     let completion_trace = completion_trace.map(|mut trace| {
         trace.always_worker_count = always_census.worker_count();
@@ -3160,6 +3202,16 @@ fn build_published_impl(
             out.signature_derivations,
             out.signature_slots_cloned,
             std::time::Duration::from_nanos(out.build_stats.signature_ns),
+        );
+        log::debug!(
+            "concrete merge detail: candidate refs {} rows {:?}, plans {:?}, bodies {:?}, \
+             failures {:?}, owner facts {:?}",
+            candidate_ref_rows,
+            candidate_install_time,
+            plan_insert_time,
+            body_insert_time,
+            failure_index_time,
+            owner_fact_insert_time,
         );
     }
     BuildRun {

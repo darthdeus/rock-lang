@@ -34,11 +34,17 @@ fn check(src: &str) -> Workspace {
     bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass")
 }
 
-fn bodies_of(src: &str) -> (Workspace, InstanceGraph, ConcreteBodies) {
+fn bodies_of_raw(src: &str) -> (Workspace, InstanceGraph, ConcreteBodies) {
     let ws = check(src);
     let roots = skull::mir_emit::emission_roots(&ws, None);
     let mut g = instance_graph::build(&ws, roots, false);
     let bodies = concrete_body::build(&ws, &mut g);
+    (ws, g, bodies)
+}
+
+fn bodies_of(src: &str) -> (Workspace, InstanceGraph, ConcreteBodies) {
+    let (ws, g, mut bodies) = bodies_of_raw(src);
+    bodies.refresh_flat_views();
     (ws, g, bodies)
 }
 
@@ -828,7 +834,8 @@ fn main() { let x = G }
     let user_mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("test module");
     let roots = skull::mir_emit::emission_roots(&ws, Some("<project>"));
     let mut g = instance_graph::build(&ws, roots, false);
-    let bodies = concrete_body::build(&ws, &mut g);
+    let mut bodies = concrete_body::build(&ws, &mut g);
+    bodies.refresh_flat_views();
     let (owner, plan) = bodies
         .always_plans
         .iter()
@@ -1001,7 +1008,8 @@ fn main() { let a = plain(1) }
         "the instance graph expanded a body from stale inference"
     );
 
-    let bodies = concrete_body::build(&ws, &mut g);
+    let mut bodies = concrete_body::build(&ws, &mut g);
+    bodies.refresh_flat_views();
 
     assert!(
         !bodies.bodies.contains_key(&inst),
@@ -1239,7 +1247,8 @@ fn concrete_reverse_completion_gate_exercises_parallel_publication() {
     let ws = check(RICH);
     let roots = skull::mir_emit::emission_roots(&ws, None);
     let graph = instance_graph::build(&ws, roots, false);
-    let (scheduled, merge_order, trace) = concrete_body::build_with_reverse_completion(&ws, &graph);
+    let (mut scheduled, merge_order, trace) = concrete_body::build_with_reverse_completion(&ws, &graph);
+    scheduled.refresh_flat_views();
 
     assert!(merge_order.len() > 1, "fixture exposed only one concrete result");
     assert!(trace.worker_count > 1, "dedicated test pool used only one worker");
@@ -1287,7 +1296,8 @@ fn concrete_sequential_route_uses_one_worker_without_parallel_handshake() {
     let ws = check(RICH);
     let roots = skull::mir_emit::emission_roots(&ws, None);
     let graph = instance_graph::build(&ws, roots, false);
-    let (scheduled, trace) = concrete_body::build_with_default_trace(&ws, &graph);
+    let (mut scheduled, trace) = concrete_body::build_with_default_trace(&ws, &graph);
+    scheduled.refresh_flat_views();
 
     assert!(scheduled.plans.len() > 1, "fixture exposed too few ordinary plans");
     assert!(!scheduled.always_plans.is_empty(), "fixture exposed no always-emitted plans");
@@ -1321,17 +1331,19 @@ fn main() {
     let ws = check(src);
     let roots = skull::mir_emit::emission_roots(&ws, None);
     let canonical_graph = instance_graph::build(&ws, roots.clone(), false);
-    let (canonical, canonical_order) = concrete_body::build_with_result_order(
+    let (mut canonical, canonical_order) = concrete_body::build_with_result_order(
         &ws,
         &canonical_graph,
         concrete_body::BuildResultOrder::Canonical,
     );
     let reverse_graph = instance_graph::build(&ws, roots, false);
-    let (reverse, reverse_order) = concrete_body::build_with_result_order(
+    let (mut reverse, reverse_order) = concrete_body::build_with_result_order(
         &ws,
         &reverse_graph,
         concrete_body::BuildResultOrder::Reverse,
     );
+    canonical.refresh_flat_views();
+    reverse.refresh_flat_views();
     assert!(canonical_order.len() > 1, "fixture exposed only one result");
     assert!(
         canonical.free_types.len() > 1,
@@ -1510,6 +1522,52 @@ fn concrete_plan_attribution_uses_one_authoritative_type_table() {
 }
 
 #[test]
+fn fresh_publication_does_not_eagerly_fold_owner_records() {
+    let (_ws, _g, bodies) = bodies_of_raw(RICH);
+    assert!(!bodies.plans.is_empty(), "fixture exposed no concrete plans");
+    assert_eq!(
+        bodies.eager_owner_fact_scans(),
+        0,
+        "fresh publication folded every owner record into a compatibility snapshot"
+    );
+    assert_eq!(
+        bodies.build_stats.plan_successes,
+        0,
+        "fresh publication eagerly folded owner counters into the compatibility snapshot"
+    );
+}
+
+#[test]
+fn fresh_workers_do_not_construct_global_concrete_indexes() {
+    let before = concrete_body::concrete_default_invocations();
+    let (_ws, _g, bodies) = bodies_of_raw(RICH);
+    let default_invocations = concrete_body::concrete_default_invocations().saturating_sub(before);
+    assert!(!bodies.plans.is_empty(), "fixture exposed no concrete plans");
+    assert_eq!(
+        default_invocations, 1,
+        "fresh workers constructed ConcreteBodies' global indexes instead of owner facts"
+    );
+}
+
+#[test]
+fn fresh_publication_publishes_the_authoritative_candidate_index() {
+    let (_ws, _g, bodies) = bodies_of_raw(RICH);
+    let mut rebuilt = rustc_hash::FxHashMap::default();
+    for key in bodies.candidate_keys() {
+        rebuilt
+            .entry(key.func)
+            .or_insert_with(rustc_hash::FxHashSet::default)
+            .insert(key.clone());
+    }
+    assert!(!rebuilt.is_empty(), "fixture exposed no candidate population");
+    assert_eq!(
+        bodies.candidate_keys_by_func(),
+        &rebuilt,
+        "fresh construction did not publish the candidate index from its producer"
+    );
+}
+
+#[test]
 fn local_owner_diagnostic_records_retract_and_reinstall_exactly() {
     let source_v1 = r#"
 fn changing() -> int {
@@ -1604,14 +1662,14 @@ fn vanishing() -> int {
     );
     let fresh_roots = skull::mir_emit::emission_roots(&ws2, Some("/project"));
     let mut fresh_graph = instance_graph::build(&ws2, fresh_roots, false);
-    let fresh = concrete_body::build(&ws2, &mut fresh_graph);
+    let mut fresh = concrete_body::build(&ws2, &mut fresh_graph);
     assert_eq!(
         local.diagnostic_snapshot(&ws2, &graph),
         fresh.diagnostic_snapshot(&ws2, &fresh_graph),
         "local owner records diverged from fresh diagnostics"
     );
-    let local_stats = local.authoritative_build_stats();
-    let fresh_stats = fresh.authoritative_build_stats();
+    let local_stats = local.snapshot_build_stats();
+    let fresh_stats = fresh.snapshot_build_stats();
     assert_eq!(local_stats.plan_attempts, fresh_stats.plan_attempts);
     assert_eq!(local_stats.plan_successes, fresh_stats.plan_successes);
     assert_eq!(local_stats.plan_failures, fresh_stats.plan_failures);
@@ -1672,7 +1730,8 @@ fn main() {
         .expect("bad instance");
     assert!(!graph.root_instances.contains(&bad), "fixture made bad a root");
     assert!(graph.index.subst.remove(&bad).is_some(), "fixture did not expose bad's substitution");
-    let bodies = concrete_body::build(&ws, &mut graph);
+    let mut bodies = concrete_body::build(&ws, &mut graph);
+    bodies.refresh_flat_views();
     let snapshot = bodies.diagnostic_snapshot(&ws, &graph);
     assert!(!snapshot.is_empty(), "fixture exposed no owner findings");
     assert!(
@@ -1922,7 +1981,8 @@ fn main() { let n = sum_it([1, 2].iter()) }
             instance_graph::InstanceBoundTree::default(),
         );
 
-    let bodies = concrete_body::build(&ws, &mut g);
+    let mut bodies = concrete_body::build(&ws, &mut g);
+    bodies.refresh_flat_views();
     assert!(!bodies.bodies.contains_key(&inst), "an ambiguous body was still built");
     assert!(
         bodies
@@ -2210,7 +2270,8 @@ fn the_tyid_memo_deduplicates_conversions_and_replays_the_census() {
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
     let roots = skull::mir_emit::emission_roots(&ws, None);
     let mut g = instance_graph::build(&ws, roots, false);
-    let bodies = concrete_body::build(&ws, &mut g);
+    let mut bodies = concrete_body::build(&ws, &mut g);
+    bodies.refresh_flat_views();
     let slots = bodies.expr_examined + bodies.binding_examined;
     assert!(slots > 0, "the fixture lost its slots");
     assert!(

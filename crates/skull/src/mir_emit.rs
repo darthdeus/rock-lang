@@ -1810,12 +1810,8 @@ fn inline_candidate_keys(concrete: &crate::concrete_body::ConcreteBodies) -> Vec
     concrete.candidate_keys().iter().cloned().collect()
 }
 
-fn candidate_key_index(keys: &BTreeSet<Instance>) -> FxHashMap<FuncRef, BTreeSet<Instance>> {
-    let mut by_func = FxHashMap::default();
-    for key in keys {
-        by_func.entry(key.func).or_insert_with(BTreeSet::new).insert(key.clone());
-    }
-    by_func
+fn concrete_stats_requested() -> bool {
+    std::env::var_os("SKULL_CONCRETE_STATS").is_some()
 }
 
 fn build_inline_candidate_table(
@@ -2340,8 +2336,6 @@ pub struct SkullEmitCache {
     /// Candidate identities currently demanded by concrete owner plans. The
     /// concrete publisher updates this set by owner delta; it is not rebuilt
     /// by scanning every plan on a body edit.
-    candidate_keys: BTreeSet<Instance>,
-    candidate_keys_by_func: FxHashMap<FuncRef, BTreeSet<Instance>>,
     /// Reverse dependency index: `dependents[C]` = the chunks that have `C` in
     /// their codegen deps (a body inlined `C` in, or calls `C`). Lets
     /// `update_chunk_cache` compute the affected set with one reverse hop per
@@ -5057,14 +5051,14 @@ fn emit_full_in_with_mutation(
             "iterator-plan mutation found no concrete instance for {body:?}"
         );
     }
-    if let Some((instance, reason)) = concrete.plan_failures.first() {
+    if let Some((instance, reason)) = concrete.first_plan_failure() {
         let f = &ws.module(instance.func.module).functions[instance.func.func];
         return Err(CompilerError::new_with_label(
             f.name_span,
             format!("cannot build concrete lowering plan for `{}`: {:?}", f.name, reason),
         ));
     }
-    if let Some((owner, reason)) = concrete.always_plan_failures.first() {
+    if let Some((owner, reason)) = concrete.first_always_plan_failure() {
         return Err(CompilerError::new_no_location(format!(
             "cannot build concrete always-emitted lowering plan for {owner:?}: {reason:?}"
         )));
@@ -5332,9 +5326,11 @@ fn emit_full_in_with_mutation(
             static_key_baseline.insert(sc.cell, static_cell_key(sc));
         }
     }
-    let concrete_stats = concrete.build_stats;
-    let candidate_keys = concrete.candidate_keys().clone();
-    let candidate_keys_by_func = candidate_key_index(&candidate_keys);
+    let concrete_stats = if concrete_stats_requested() {
+        concrete.snapshot_build_stats()
+    } else {
+        crate::concrete_body::ConcreteBuildStats::default()
+    };
     let cache = SkullEmitCache {
         chunks,
         concrete,
@@ -5344,8 +5340,6 @@ fn emit_full_in_with_mutation(
         cg,
         scx,
         inline_cache: skull_transform::InlineCache::with_candidate_table(inline_candidate_table),
-        candidate_keys,
-        candidate_keys_by_func,
         dependents,
         changed_consts_since_full: FxHashSet::default(),
         static_key_baseline,
@@ -5402,6 +5396,10 @@ fn emit_full_in_with_mutation(
 impl SkullEmitCache {
     pub fn repair_stats(&self) -> IncrementalRepairStats {
         self.repair_stats
+    }
+
+    fn candidate_index_by_func(&self) -> &FxHashMap<FuncRef, FxHashSet<Instance>> {
+        self.concrete.candidate_keys_by_func()
     }
 
     /// The authoritative instance graph this cache emits against. Always
@@ -5987,23 +5985,6 @@ fn update_chunk_cache(
         .saturating_sub(concrete_builds_before) as usize;
     cache.repair_stats.broad_concrete_scans = concrete_update.broad_scans;
     cache.repair_stats.concrete_update_ns = t_concrete.elapsed().as_nanos() as u64;
-    for key in &concrete_update.candidate_keys_removed {
-        cache.candidate_keys.remove(key);
-        if let Some(keys) = cache.candidate_keys_by_func.get_mut(&key.func) {
-            keys.remove(key);
-            if keys.is_empty() {
-                cache.candidate_keys_by_func.remove(&key.func);
-            }
-        }
-    }
-    for key in &concrete_update.candidate_keys_added {
-        cache.candidate_keys.insert(key.clone());
-        cache
-            .candidate_keys_by_func
-            .entry(key.func)
-            .or_default()
-            .insert(key.clone());
-    }
     let _graph_ms = Duration::from_nanos(
         cache.repair_stats.graph_update_ns
             + cache.repair_stats.concrete_update_ns
@@ -6080,7 +6061,7 @@ fn update_chunk_cache(
     invalidated_candidate_frefs.extend(update.removed.iter().map(|instance| instance.func));
     let mut warm_keys = concrete_update.candidate_keys_added.clone();
     for fref in &invalidated_candidate_frefs {
-        if let Some(keys) = cache.candidate_keys_by_func.get(fref) {
+        if let Some(keys) = cache.candidate_index_by_func().get(fref) {
             warm_keys.extend(keys.iter().cloned());
         }
     }
@@ -6090,7 +6071,7 @@ fn update_chunk_cache(
             .iter()
             .filter(|key| {
                 !concrete_update.candidate_keys_added.contains(*key)
-                    && cache.candidate_keys.contains(*key)
+                    && cache.concrete.candidate_keys().contains(*key)
             })
             .count();
     let warm_keys: Vec<Instance> = warm_keys.into_iter().collect();
@@ -6103,7 +6084,7 @@ fn update_chunk_cache(
         scx,
         &cache.concrete,
         if force_candidate_scan {
-            cache.candidate_keys.iter().cloned().collect()
+            cache.concrete.candidate_keys().iter().cloned().collect()
         } else {
             Vec::new()
         },
@@ -6245,7 +6226,9 @@ pub fn emit_incremental(
     let t_asm = Instant::now();
     let mut built_specs: Vec<(Instance, Chunk)> = Vec::new();
     let (mut emit, emitted) = assemble(ws, &cache.cg, &cache.scx, cache, &mut built_specs)?;
-    emit.concrete_stats = cache.concrete.authoritative_build_stats();
+    if concrete_stats_requested() {
+        emit.concrete_stats = cache.concrete.snapshot_build_stats();
+    }
     cache.emitted = emitted;
     cache.absorb_spec_chunks(built_specs);
     let reassemble = t_asm.elapsed();
@@ -6534,7 +6517,9 @@ pub fn emit_overlay_with_span_edits(
     let t_relower = t2.elapsed();
     let t3 = Instant::now();
     let mut emit = assemble_overlay(ws, cache, shader_changed);
-    emit.concrete_stats = cache.concrete.authoritative_build_stats();
+    if concrete_stats_requested() {
+        emit.concrete_stats = cache.concrete.snapshot_build_stats();
+    }
     // Advance the static baseline to the keys now in effect. A reset line fires on
     // the reload that dofiles the overlay carrying it, so once THIS overlay resets a
     // cell (or leaves it unchanged), a LATER overlay must not reset it again -- else
@@ -6906,6 +6891,19 @@ fn main() {
                 .expect("parse"),
         );
         bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic")
+    }
+
+    #[test]
+    fn candidate_repair_reads_the_concrete_publisher_index() {
+        let (_, cache, _) = emit_with_mutation(BodyMutation::None).expect("intact emission");
+        let canonical = cache.concrete.candidate_keys_by_func();
+        let population: usize = canonical.values().map(|entries| entries.len()).sum();
+        assert!(population > 0, "candidate-index fixture has no published entries");
+        assert_eq!(
+            cache.candidate_index_by_func() as *const _,
+            canonical as *const _,
+            "repair must borrow the concrete publisher's index rather than a copied map"
+        );
     }
 
     fn ref_for(ws: &Workspace, name: &str) -> FuncRef {

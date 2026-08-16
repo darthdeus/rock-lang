@@ -30,6 +30,22 @@ fn graph_of(src: &str) -> (Workspace, instance_graph::InstanceGraph) {
     (ws, g)
 }
 
+#[test]
+fn fresh_graph_does_not_seed_incremental_delta_state() {
+    let (_ws, graph) = graph_of(
+        r#"
+fn main() {
+    print("ok")
+}
+"#,
+    );
+    assert_eq!(
+        graph.incremental_state_population(),
+        (0, 0, 0),
+        "fresh construction retained update-only owner or instance deltas"
+    );
+}
+
 /// One generic function called at two element types is TWO instances, even
 /// when neither argument requires a representation-specific lowering.
 #[test]

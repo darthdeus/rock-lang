@@ -2134,3 +2134,16 @@ fn main() { let x = caller() }
         "inline unresolved rows went stale"
     );
 }
+
+#[test]
+fn fresh_artifact_indexes_each_graph_site_once() {
+    let ws = check("fn leaf(x: int) -> int { x + 1 }\nfn main() { let x = leaf(1) }");
+    let (g, roots) = graph_for(&ws);
+    let expected: usize = g.call_sites().map(|(_, sites)| sites.len()).sum();
+    assert!(expected > 0, "artifact-index fixture has no graph-site population");
+    let before = artifact::fresh_index_site_rows();
+    let view = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT_DESKTOP, &roots));
+    let indexed = artifact::fresh_index_site_rows().saturating_sub(before) as usize;
+    assert_eq!(indexed, expected, "fresh ArtifactIndex installed graph sites more than once");
+    assert!(view.census().sites_walked > 0, "the fixture did not retain a site-bearing body");
+}

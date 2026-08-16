@@ -46,17 +46,29 @@ use crate::instance_graph::{
     self, BoundaryClass, Concreteness, DeclKey, Instance, InstanceGraph, Site, SiteOutcome,
 };
 use crate::target_projection::{supports, CpuTargetSpec, TargetSpec};
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 #[cfg(feature = "test-hooks")]
 thread_local! {
     static REALIZE_INVOCATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static FRESH_INDEX_SITE_ROWS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 pub fn realize_invocations() -> u64 {
     #[cfg(feature = "test-hooks")]
     {
         return REALIZE_INVOCATIONS.with(std::cell::Cell::get);
+    }
+    #[cfg(not(feature = "test-hooks"))]
+    {
+        0
+    }
+}
+
+pub fn fresh_index_site_rows() -> u64 {
+    #[cfg(feature = "test-hooks")]
+    {
+        return FRESH_INDEX_SITE_ROWS.with(std::cell::Cell::get);
     }
     #[cfg(not(feature = "test-hooks"))]
     {
@@ -588,17 +600,17 @@ pub struct ArtifactView {
 
 #[derive(Default)]
 struct ArtifactIndex {
-    realizable: BTreeMap<Instance, Result<Realized, Unrealizable>>,
-    sites: BTreeMap<Instance, BTreeMap<Site, instance_graph::SiteRecord>>,
-    outgoing: BTreeMap<Instance, BTreeMap<Site, Instance>>,
-    incoming: BTreeMap<Instance, BTreeSet<Instance>>,
-    site_counts: BTreeMap<Instance, usize>,
-    fn_values_by_caller: BTreeMap<Instance, BTreeSet<Instance>>,
-    fn_value_users: BTreeMap<Instance, BTreeSet<Instance>>,
-    severed_by_caller: BTreeMap<Instance, Vec<Severed>>,
-    exclusions: BTreeMap<Instance, Exclusion>,
-    symbol_users: BTreeMap<String, BTreeSet<Instance>>,
-    realization_by_decl: BTreeMap<DeclKey, BTreeSet<Instance>>,
+    realizable: FxHashMap<Instance, Result<Realized, Unrealizable>>,
+    outgoing: FxHashMap<Instance, FxHashMap<Site, Instance>>,
+    incoming: FxHashMap<Instance, FxHashSet<Instance>>,
+    site_counts: FxHashMap<Instance, usize>,
+    fn_values_by_caller: FxHashMap<Instance, FxHashSet<Instance>>,
+    fn_value_users: FxHashMap<Instance, FxHashSet<Instance>>,
+    severed_by_caller: FxHashMap<Instance, Vec<Severed>>,
+    exclusions: FxHashMap<Instance, Exclusion>,
+    symbol_users: FxHashMap<String, FxHashSet<Instance>>,
+    realization_by_decl: FxHashMap<FuncRef, FxHashSet<Instance>>,
+    instances_by_decl: FxHashMap<FuncRef, FxHashSet<Instance>>,
     inline_by_owner: BTreeMap<DeclKey, (Vec<InlineDep>, Vec<UnresolvedInlineDep>)>,
     inline_consumers: BTreeMap<DeclKey, BTreeSet<DeclKey>>,
     inline_dependencies_by_owner: BTreeMap<DeclKey, BTreeSet<DeclKey>>,
@@ -669,105 +681,6 @@ fn publication_candidates(
                 .then(|| (Instance::base(*r), f.name.to_string()))
         })
         .collect()
-}
-
-impl ArtifactIndex {
-    fn fresh(
-        ws: &Workspace,
-        realizable: BTreeMap<Instance, Result<Realized, Unrealizable>>,
-        g: &InstanceGraph,
-        excluded: &[Excluded],
-        severed: &[Severed],
-        symbols: &BTreeMap<Instance, String>,
-        inline_deps: &[InlineDep],
-        unresolved_inline_deps: &[UnresolvedInlineDep],
-        publication_candidates: BTreeMap<Instance, String>,
-        root_decls: BTreeSet<DeclKey>,
-    ) -> Self {
-        let mut index = Self {
-            realizable,
-            root_decls,
-            ..Default::default()
-        };
-        for (i, sites) in g.call_sites() {
-            index.sites.insert(i.clone(), sites.clone());
-            index.site_counts.insert(i.clone(), sites.len());
-            for (site, record) in sites {
-                let SiteOutcome::Resolved(callee) = &record.outcome else { continue };
-                index.outgoing.entry(i.clone()).or_default().insert(site.clone(), callee.clone());
-                index.incoming.entry(callee.clone()).or_default().insert(i.clone());
-                if site.op == skull_mir::site::SiteOp::FnValue {
-                    index.fn_values_by_caller.entry(i.clone()).or_default().insert(callee.clone());
-                    index.fn_value_users.entry(callee.clone()).or_default().insert(i.clone());
-                }
-            }
-        }
-        for e in excluded {
-            index.exclusions.insert(e.instance.clone(), e.cause);
-        }
-        for s in severed {
-            index.severed_by_caller.entry(s.caller.clone()).or_default().push(s.clone());
-        }
-        for (i, symbol) in symbols {
-            index.symbol_users.entry(symbol.clone()).or_default().insert(i.clone());
-        }
-        for i in symbols.keys() {
-            if let Some(Ok(realized)) = index.realizable.get(i) {
-                index
-                    .realization_by_decl
-                    .entry(DeclKey(realized.decl))
-                    .or_default()
-                    .insert(i.clone());
-            }
-        }
-        for dep in inline_deps {
-            index
-                .inline_by_owner
-                .entry(DeclKey(dep.owner))
-                .or_default()
-                .0
-                .push(dep.clone());
-        }
-        for dep in unresolved_inline_deps {
-            index
-                .inline_by_owner
-                .entry(DeclKey(dep.owner))
-                .or_default()
-                .1
-                .push(dep.clone());
-        }
-        for (owner, entries) in &g.inline_body_deps {
-            let owner = owner.clone();
-            for entry in entries {
-                if let Some(rep) = instance_graph::stdlib_entry_representative(ws, entry) {
-                    index
-                        .inline_consumers
-                        .entry(DeclKey(rep))
-                        .or_default()
-                        .insert(owner.clone());
-                    index
-                        .inline_dependencies_by_owner
-                        .entry(owner.clone())
-                        .or_default()
-                        .insert(DeclKey(rep));
-                }
-            }
-        }
-        for (instance, symbol) in publication_candidates {
-            index
-                .publication_users
-                .entry(symbol.clone())
-                .or_default()
-                .insert(instance.clone());
-            index
-                .publication_decls
-                .entry(DeclKey(instance.func))
-                .or_default()
-                .insert(instance.clone());
-            index.publication_candidates.insert(instance, symbol);
-        }
-        index
-    }
 }
 
 impl ArtifactView {
@@ -876,8 +789,8 @@ impl ArtifactView {
             local_index_rows_examined += 1;
             root_subjects.extend(
                 self.index
-                    .realization_by_decl
-                    .get(decl)
+                    .instances_by_decl
+                    .get(&decl.0)
                     .into_iter()
                     .flat_map(|instances| {
                         local_index_rows_examined += instances.len();
@@ -910,15 +823,15 @@ impl ArtifactView {
             .filter(|instance| self.roots.contains(*instance))
             .cloned()
             .collect();
-        let old_realizable: BTreeMap<Instance, Result<Realized, Unrealizable>> = subjects
+        let old_realizable: FxHashMap<Instance, Result<Realized, Unrealizable>> = subjects
             .iter()
             .filter_map(|i| self.index.realizable.get(i).map(|r| (i.clone(), *r)))
             .collect();
-        let old_outgoing: BTreeMap<Instance, BTreeMap<Site, Instance>> = subjects
+        let old_outgoing: FxHashMap<Instance, FxHashMap<Site, Instance>> = subjects
             .iter()
             .filter_map(|i| self.index.outgoing.get(i).map(|edges| (i.clone(), edges.clone())))
             .collect();
-        let old_predecessors: BTreeMap<Instance, BTreeSet<Instance>> = subjects
+        let old_predecessors: FxHashMap<Instance, FxHashSet<Instance>> = subjects
             .iter()
             .filter_map(|i| self.index.incoming.get(i).map(|preds| (i.clone(), preds.clone())))
             .collect();
@@ -942,7 +855,6 @@ impl ArtifactView {
                     }
                 }
             }
-            self.index.sites.remove(i);
             if let Some(values) = self.index.fn_values_by_caller.remove(i) {
                 local_index_rows_examined += values.len();
                 for callee in values {
@@ -981,7 +893,6 @@ impl ArtifactView {
                     self.index.fn_value_users.entry(callee.clone()).or_default().insert(i.clone());
                 }
             }
-            self.index.sites.insert(i.clone(), sites);
         }
 
         let mut root_entries_examined = 0;
@@ -1117,9 +1028,8 @@ impl ArtifactView {
                 }
                 if realized.kind.boundary_class().is_none() {
                     let mut severed = Vec::new();
-                    if let Some(sites) = self.index.sites.get(i) {
-                        for (site, record) in sites {
-                            let SiteOutcome::Resolved(callee) = &record.outcome else { continue };
+                    if let Some(sites) = self.index.outgoing.get(i) {
+                        for (site, callee) in sites {
                             if let Some(Err(cause)) = self.index.realizable.get(callee) {
                                 severed.push(Severed {
                                     caller: i.clone(),
@@ -1196,13 +1106,25 @@ impl ArtifactView {
             }
         }
         if let Some(realized) = self.realization.remove(i) {
-            let decl = DeclKey(realized.decl);
+            let decl = realized.decl;
             let remove_decl = self.index.realization_by_decl.get_mut(&decl).is_some_and(|users| {
                 users.remove(i);
                 users.is_empty()
             });
             if remove_decl {
                 self.index.realization_by_decl.remove(&decl);
+            }
+            let instance_decl = i.func;
+            let remove_instance_decl = self
+                .index
+                .instances_by_decl
+                .get_mut(&instance_decl)
+                .is_some_and(|users| {
+                    users.remove(i);
+                    users.is_empty()
+                });
+            if remove_instance_decl {
+                self.index.instances_by_decl.remove(&instance_decl);
             }
             self.boundaries.remove(i);
             if realized.kind.boundary_class().is_none() {
@@ -1239,7 +1161,12 @@ impl ArtifactView {
         self.realization.insert(i.clone(), realized);
         self.index
             .realization_by_decl
-            .entry(DeclKey(realized.decl))
+            .entry(realized.decl)
+            .or_default()
+            .insert(i.clone());
+        self.index
+            .instances_by_decl
+            .entry(i.func)
             .or_default()
             .insert(i.clone());
         if realized.kind.boundary_class().is_none() {
@@ -1324,7 +1251,9 @@ impl ArtifactView {
                 self.index.inline_by_owner.remove(owner);
                 continue;
             };
-            if !self.index.realization_by_decl.contains_key(owner) {
+            if !self.index.realization_by_decl.contains_key(&owner.0)
+                && !self.index.instances_by_decl.contains_key(&owner.0)
+            {
                 self.index.inline_by_owner.remove(owner);
                 continue;
             }
@@ -1356,7 +1285,7 @@ impl ArtifactView {
                     });
                     continue;
                 };
-                let Some(instances) = self.index.realization_by_decl.get(&DeclKey(rep)) else {
+                let Some(instances) = self.index.instances_by_decl.get(&rep) else {
                     unresolved.push(UnresolvedInlineDep {
                         owner: owner.0,
                         entry,
@@ -1428,7 +1357,9 @@ impl ArtifactView {
     fn refresh_opaque_roots(&mut self, g: &InstanceGraph, changed_decls: &BTreeSet<DeclKey>) -> usize {
         for owner in changed_decls {
             self.opaque_boundary_roots.remove(owner);
-            if self.index.realization_by_decl.contains_key(owner) {
+            if self.index.realization_by_decl.contains_key(&owner.0)
+                || self.index.instances_by_decl.contains_key(&owner.0)
+            {
                 if let Some(targets) = g.inline_body_nomangle_roots.get(owner) {
                     self.opaque_boundary_roots.insert(owner.clone(), targets.clone());
                 }
@@ -1627,9 +1558,11 @@ impl ArtifactView {
             if users.len() < 2 {
                 continue;
             }
+            let mut instances: Vec<Instance> = users.iter().cloned().collect();
+            instances.sort();
             let row = SymbolCollision {
                 symbol: symbol.clone(),
-                instances: users.iter().cloned().collect(),
+                instances,
             };
             let position = self
                 .symbol_collisions
@@ -1993,7 +1926,7 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
     let target = req.spec.cpu();
     // Realizability of every instance the graph holds, computed once. It is a
     // property of the DECLARATION and the artifact, independent of reachability.
-    let mut realizable: BTreeMap<Instance, Result<Realized, Unrealizable>> = BTreeMap::new();
+    let mut realizable: FxHashMap<Instance, Result<Realized, Unrealizable>> = FxHashMap::default();
     for i in &g.instances {
         realizable
             .insert(i.clone(), realize_decl(ws, i.func, &g.erased_entries, &target, &req.mappings));
@@ -2011,12 +1944,43 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
         .iter()
         .map(|r| DeclKey(skull_mir::lower::canonical_variant(ws, *r)))
         .collect();
+    let mut index = ArtifactIndex {
+        realizable,
+        root_decls: root_decls.clone(),
+        ..Default::default()
+    };
+    for (owner, sites) in g.call_sites() {
+        #[cfg(feature = "test-hooks")]
+        FRESH_INDEX_SITE_ROWS.with(|count| count.set(count.get() + sites.len() as u64));
+        index.site_counts.insert(owner.clone(), sites.len());
+        for (site, record) in sites {
+            let SiteOutcome::Resolved(callee) = &record.outcome else { continue };
+            index
+                .outgoing
+                .entry(owner.clone())
+                .or_default()
+                .insert(site.clone(), callee.clone());
+            index.incoming.entry(callee.clone()).or_default().insert(owner.clone());
+            if site.op == skull_mir::site::SiteOp::FnValue {
+                index
+                    .fn_values_by_caller
+                    .entry(owner.clone())
+                    .or_default()
+                    .insert(callee.clone());
+                index
+                    .fn_value_users
+                    .entry(callee.clone())
+                    .or_default()
+                    .insert(owner.clone());
+            }
+        }
+    }
     let mut roots: BTreeSet<Instance> = BTreeSet::new();
     let mut declared_roots: BTreeSet<Instance> = BTreeSet::new();
     for i in &g.instances {
         let declared = root_decls.contains(&DeclKey(i.func));
         let is_root = declared || g.is_always_emitted_target(i);
-        if is_root && realizable[i].is_ok() {
+        if is_root && index.realizable[i].is_ok() {
             roots.insert(i.clone());
             if declared {
                 declared_roots.insert(i.clone());
@@ -2042,14 +2006,24 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
     // The boundary's IDENTITY is not minted here. It needs this artifact's
     // spelling, which is the planner's answer over the full retained set, so it
     // is built once below -- see `boundaries`.
-    let admit = |i: &Instance,
+    let mut admit = |i: &Instance,
                  instances: &mut BTreeSet<Instance>,
                  realization: &mut BTreeMap<Instance, Realized>,
                  queue: &mut VecDeque<Instance>| {
-        let r = *realizable[i].as_ref().expect("admitted means realizable");
+        let r = *index.realizable[i].as_ref().expect("admitted means realizable");
         if realization.insert(i.clone(), r).is_some() {
             return;
         }
+        index
+            .realization_by_decl
+            .entry(r.decl)
+            .or_default()
+            .insert(i.clone());
+        index
+            .instances_by_decl
+            .entry(i.func)
+            .or_default()
+            .insert(i.clone());
         if r.kind.boundary_class().is_none() {
             instances.insert(i.clone());
             queue.push_back(i.clone());
@@ -2061,29 +2035,40 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
     }
     let mut fn_value_targets: BTreeSet<Instance> = BTreeSet::new();
     while let Some(caller) = queue.pop_front() {
-        let Some(sites) = g.sites_of(&caller) else { continue };
-        for (site, rec) in sites {
-            sites_walked += 1;
-            let SiteOutcome::Resolved(callee) = &rec.outcome else { continue };
-            match realizable.get(callee) {
+        sites_walked += index.site_counts.get(&caller).copied().unwrap_or(0);
+        let Some(sites) = index.outgoing.get(&caller) else { continue };
+        for (site, callee) in sites {
+            match index.realizable.get(callee) {
                 Some(Ok(_)) => {
                     if site.op == skull_mir::site::SiteOp::FnValue {
                         fn_value_targets.insert(callee.clone());
                     }
                     admit(callee, &mut instances, &mut realization, &mut queue)
                 }
-                Some(Err(cause)) => severed.push(Severed {
-                    caller: caller.clone(),
-                    site: site.clone(),
-                    callee: callee.clone(),
-                    cause: *cause,
-                }),
+                Some(Err(cause)) => {
+                    let row = Severed {
+                        caller: caller.clone(),
+                        site: site.clone(),
+                        callee: callee.clone(),
+                        cause: *cause,
+                    };
+                    index
+                        .severed_by_caller
+                        .entry(caller.clone())
+                        .or_default()
+                        .push(row.clone());
+                    severed.push(row);
+                }
                 // The walk resolved a callee the graph does not hold. Already a
                 // `ConcreteBody` finding (`unknown_rock_callees`); nothing to
                 // realize here.
                 None => {}
             }
         }
+    }
+    severed.sort_by(severed_order);
+    for rows in index.severed_by_caller.values_mut() {
+        rows.sort_by(severed_order);
     }
 
     // The partition: every shared instance is a retained Rock instance, a
@@ -2095,12 +2080,15 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
         .filter(|i| !realization.contains_key(*i))
         .map(|i| Excluded {
             instance: i.clone(),
-            cause: match realizable[i] {
+            cause: match index.realizable[i] {
                 Ok(_) => Exclusion::Unreachable,
                 Err(u) => Exclusion::Unrealizable(u),
             },
         })
         .collect();
+    for e in &excluded {
+        index.exclusions.insert(e.instance.clone(), e.cause);
+    }
 
     // One symbol per retained instance, from THIS artifact's planner.
     let mut by_symbol: BTreeMap<String, Vec<Instance>> = BTreeMap::new();
@@ -2108,6 +2096,7 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
     for i in realization.keys() {
         let s = req.symbols.symbol(ws, g, i, realization[i]);
         by_symbol.entry(s.clone()).or_default().push(i.clone());
+        index.symbol_users.entry(s.clone()).or_default().insert(i.clone());
         symbols.insert(i.clone(), s);
     }
     let symbol_collisions: Vec<SymbolCollision> = by_symbol
@@ -2141,12 +2130,33 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
     // Opaque dependencies, terminating in a concrete callee of THIS artifact.
     let mut inline_deps = Vec::new();
     let mut unresolved_inline_deps = Vec::new();
-    let retained_decls: BTreeSet<DeclKey> =
-        realization.values().map(|r| DeclKey(r.decl)).collect();
+    let retained_decls: BTreeSet<DeclKey> = index
+        .realization_by_decl
+        .keys()
+        .copied()
+        .map(DeclKey)
+        .collect();
     for (owner, entries) in &g.inline_body_deps {
+        let owner_retained = retained_decls.contains(owner);
+        for entry in entries {
+            let Some(rep) = instance_graph::stdlib_entry_representative(ws, entry) else {
+                continue;
+            };
+            let dependency = DeclKey(rep);
+            index
+                .inline_consumers
+                .entry(dependency.clone())
+                .or_default()
+                .insert(owner.clone());
+            index
+                .inline_dependencies_by_owner
+                .entry(owner.clone())
+                .or_default()
+                .insert(dependency);
+        }
         // An owner this artifact dropped carries no obligation: its text is
         // never emitted here.
-        if !retained_decls.contains(owner) {
+        if !owner_retained {
             continue;
         }
         for entry in entries {
@@ -2165,21 +2175,32 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
             // WHICH instance, not merely which declaration. A runtime entry is
             // non-generic so one instance is expected, but picking the first of
             // several would silently choose.
-            let matching: Vec<&Instance> =
-                realization.keys().filter(|i| i.func == rep).collect();
-            let [inst] = matching.as_slice() else {
+            let Some(instances) = index.instances_by_decl.get(&rep) else {
                 unresolved_inline_deps.push(UnresolvedInlineDep {
                     owner: owner.0,
                     entry,
-                    reason: if matching.is_empty() {
-                        "the serving declaration is not retained by the artifact"
-                    } else {
-                        "the serving declaration has more than one retained instance"
-                    },
+                    reason: "the serving declaration is not retained by the artifact",
                 });
                 continue;
             };
-            let inst = (*inst).clone();
+            let mut matching = instances.iter();
+            let Some(inst) = matching.next() else {
+                unresolved_inline_deps.push(UnresolvedInlineDep {
+                    owner: owner.0,
+                    entry,
+                    reason: "the serving declaration is not retained by the artifact",
+                });
+                continue;
+            };
+            if matching.next().is_some() {
+                unresolved_inline_deps.push(UnresolvedInlineDep {
+                    owner: owner.0,
+                    entry,
+                    reason: "the serving declaration has more than one retained instance",
+                });
+                continue;
+            }
+            let inst = inst.clone();
             let callee = match boundaries.get(&inst) {
                 Some(id) => RealizedCallee::Boundary(id.clone()),
                 None => RealizedCallee::Rock(inst),
@@ -2189,6 +2210,22 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
     }
     inline_deps.sort_by(inline_dep_order);
     unresolved_inline_deps.sort_by(unresolved_inline_dep_order);
+    for dep in &inline_deps {
+        index
+            .inline_by_owner
+            .entry(DeclKey(dep.owner))
+            .or_default()
+            .0
+            .push(dep.clone());
+    }
+    for dep in &unresolved_inline_deps {
+        index
+            .inline_by_owner
+            .entry(DeclKey(dep.owner))
+            .or_default()
+            .1
+            .push(dep.clone());
+    }
 
     // The result-lane width of every foreign body this artifact emits. Asked of
     // the SELECTED declaration -- the one whose body is emitted -- under this
@@ -2270,6 +2307,21 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
     // a second discovery walk: the exact instance's own contribution, if the
     // graph has one, is what `g.instances`/`g.sites_of` already recorded.
     let publication_candidates = publication_candidates(ws, req);
+    for (instance, symbol) in &publication_candidates {
+        index
+            .publication_users
+            .entry(symbol.clone())
+            .or_default()
+            .insert(instance.clone());
+        index
+            .publication_decls
+            .entry(DeclKey(instance.func))
+            .or_default()
+            .insert(instance.clone());
+        index
+            .publication_candidates
+            .insert(instance.clone(), symbol.clone());
+    }
     let mut by_pub_symbol: BTreeMap<String, Vec<Instance>> = BTreeMap::new();
     let mut unrepresented_publications: Vec<FuncRef> = Vec::new();
     for (inst, symbol) in &publication_candidates {
@@ -2298,19 +2350,6 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
         .filter(|(owner, _)| retained_decls.contains(owner))
         .map(|(owner, targets)| (owner.clone(), targets.clone()))
         .collect();
-
-    let index = ArtifactIndex::fresh(
-        ws,
-        realizable,
-        g,
-        &excluded,
-        &severed,
-        &symbols,
-        &inline_deps,
-        &unresolved_inline_deps,
-        publication_candidates,
-        root_decls,
-    );
 
     ArtifactView {
         shared_instances: g.instances.len(),
