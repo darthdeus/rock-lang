@@ -215,9 +215,8 @@ impl Builder<'_> {
         FlatCells { tag, positional, named }
     }
 
-    /// Re-materialize a flattened enum field `parent.{prefix}` to a boxed enum
-    /// (`MakeEnumDyn`) at a whole-value-read boundary.
-    pub(crate) fn materialize_flat(&mut self, parent: Idx<Inst>, prefix: Ustr, shape: &EnumFlatShape) -> Idx<Inst> {
+    /// Read a flat enum field from the physical slots of its parent struct.
+    pub(crate) fn load_flat_cells(&mut self, parent: Idx<Inst>, prefix: Ustr, shape: &EnumFlatShape) -> FlatCells {
         let tag = self.emit_cur(Inst::Field { base: parent, field: flat_tag_slot(prefix) });
         let positional = (0..shape.tuple_width())
             .map(|i| self.emit_cur(Inst::Field { base: parent, field: flat_payload_slot(prefix, i) }))
@@ -228,7 +227,19 @@ impl Builder<'_> {
             .into_iter()
             .map(|rf| (rf, self.emit_cur(Inst::Field { base: parent, field: flat_named_slot(prefix, rf) })))
             .collect();
-        self.emit_cur(Inst::MakeEnumDyn { tag, ty: shape.name, positional, named })
+        FlatCells { tag, positional, named }
+    }
+
+    /// Re-materialize a flattened enum field `parent.{prefix}` to a boxed enum
+    /// (`MakeEnumDyn`) at a whole-value-read boundary.
+    pub(crate) fn materialize_flat(&mut self, parent: Idx<Inst>, prefix: Ustr, shape: &EnumFlatShape) -> Idx<Inst> {
+        let cells = self.load_flat_cells(parent, prefix, shape);
+        self.emit_cur(Inst::MakeEnumDyn {
+            tag: cells.tag,
+            ty: shape.name,
+            positional: cells.positional,
+            named: cells.named,
+        })
     }
 
     /// Emit the per-slot stores for a flattened enum field assignment

@@ -80,6 +80,41 @@ fn run(backend: Option<&str>, path: &std::path::Path) -> (String, bool) {
     (String::from_utf8_lossy(&out.stdout).into_owned(), out.status.success())
 }
 
+const COALESCE_VALUE_FIELD: &str = r#"
+struct Thing { at: Vec2 = v(0, 0) }
+
+fn main() {
+    let fallback: Vec2? = null
+    let t = Thing { at: fallback ?? v(7, 8) }
+    print("{t.at.x as int} {t.at.y as int}")
+}
+"#;
+
+#[test]
+fn scalarized_coalesce_field_runs_on_both_backends() {
+    if !node_available() {
+        eprintln!("SKIP: node not found");
+        return;
+    }
+    let dir = std::env::temp_dir().join("rock_js_run_gate_coalesce_value_field");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("coalesce_value_field.rock");
+    std::fs::write(&path, COALESCE_VALUE_FIELD).unwrap();
+
+    let (lua_out, lua_ok) = run(None, &path);
+    let (js_out, js_ok) = run(Some("js"), &path);
+    assert!(
+        lua_ok && js_ok,
+        "scalarized coalesce failed: luajit_ok={lua_ok}, js_ok={js_ok}, \
+         luajit_stdout={lua_out:?}, js_stdout={js_out:?}"
+    );
+    assert_eq!(
+        (lua_out.as_str(), js_out.as_str()),
+        ("7 8\n", "7 8\n"),
+        "both backends must preserve the selected scalarized field value"
+    );
+}
+
 #[test]
 fn js_run_matches_luajit_end_to_end() {
     if !node_available() {
