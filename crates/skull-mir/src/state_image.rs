@@ -369,6 +369,7 @@ fn engine_semantic_global(name: &str) -> bool {
             | "WORLD_MODE"
             | "MOTES"
             | "POLLER"
+            | "CURRENT_BLEND"
     )
 }
 
@@ -487,5 +488,22 @@ mod tests {
             StateImagePlan::from_schema(&schema),
             Err(super::StateImagePlanError::EmptySchema)
         );
+    }
+
+    #[test]
+    fn blend_shadow_is_session_state_not_a_host_handle() {
+        let schema = StateSchema::from_entries(vec![StateEntry {
+            kind: StateKind::Global,
+            identity: "global:/workspace/stone/engine/compat/bindings.rock::CURRENT_BLEND".into(),
+            fingerprint: "type=BlendMode".into(),
+            physical: vec!["CURRENT_BLEND".into()],
+            owner: Some("/workspace/stone/engine/compat/bindings.rock".into()),
+            initializer_identity: None,
+        }])
+        .expect("blend shadow schema");
+        let plan = StateImagePlan::from_schema(&schema).expect("image plan");
+        assert_eq!(plan.entries()[0].kind, ImageEntryKind::SemanticSession);
+        assert_eq!(plan.entries()[0].capture_policy, "graph");
+        assert_eq!(plan.entries()[0].realization_policy, "fresh-session");
     }
 }
