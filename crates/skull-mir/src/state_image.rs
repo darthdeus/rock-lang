@@ -91,7 +91,11 @@ impl StateImagePlan {
             let (kind, capture_policy, realization_policy) = if entry.kind == StateKind::Global
                 && runner_global(entry)
             {
-                (ImageEntryKind::RunnerDiagnostic, "exclude", "runner-owned")
+                (
+                    ImageEntryKind::RunnerDiagnostic,
+                    "exclude",
+                    runner_realization(entry),
+                )
             } else if entry.kind == StateKind::Global && host_global(entry) {
                 (
                     ImageEntryKind::HostProjection,
@@ -149,6 +153,14 @@ impl StateImagePlan {
             "session::initializer-keys",
             "initializer-key-map",
             "graph",
+            "fresh-session",
+        );
+        push_structural(
+            &mut entries,
+            ImageEntryKind::SemanticSession,
+            "session::rng-state",
+            "uint64-rng-state",
+            "scalar",
             "fresh-session",
         );
 
@@ -296,8 +308,68 @@ fn runner_global(entry: &crate::state_schema::StateEntry) -> bool {
     ROOTS.contains(&schema_tail(entry))
 }
 
+fn runner_realization(entry: &crate::state_schema::StateEntry) -> &'static str {
+    const RESET: &[&str] = &[
+        "SIM_HANDLE",
+        "SIM_ENTRY_FRAME_START",
+        "SIM_STOP_SITE",
+        "SIM_STOP_PENDING",
+        "SIM_DIAG_BASE_GL",
+        "SIM_DIAG_BASE_SHADER",
+        "FRAME_ERROR_COUNT",
+        "JIT_TRACE_LOG_ENABLED",
+        "JIT_TRACE_INSTALLED",
+        "JIT_TRACE_STARTS",
+        "JIT_TRACE_ABORTS",
+        "JIT_TRACE_LAST_STARTS",
+        "JIT_TRACE_LAST_ABORTS",
+        "JIT_RUNTIME_ENABLED",
+    ];
+    if RESET.contains(&schema_tail(entry)) {
+        "runner-reset"
+    } else {
+        "runner-rebind"
+    }
+}
+
 fn host_global(entry: &crate::state_schema::StateEntry) -> bool {
-    schema_tail(entry) == "stone_window"
+    if schema_tail(entry) == "stone_window" || schema_tail(entry) == "SHADER_UNIFORM_BLOCKS" {
+        return true;
+    }
+    entry.owner.as_deref().is_some_and(|owner| {
+        owner.contains("/stone/engine/") && !engine_semantic_global(schema_tail(entry))
+    })
+}
+
+fn engine_semantic_global(name: &str) -> bool {
+    matches!(
+        name,
+        "current_tick"
+            | "time"
+            | "dt"
+            | "TIME_SCALE"
+            | "camera"
+            | "keys_down"
+            | "mouse_down"
+            | "keys_down_last"
+            | "mouse_down_last"
+            | "physical_mouse_down"
+            | "physical_mouse_suppressed"
+            | "physical_keys_down"
+            | "physical_keys_pressed_this_frame"
+            | "physical_mouse_pressed_this_frame"
+            | "synthetic_mouse_down"
+            | "synthetic_keys_down"
+            | "replay_mouse_down"
+            | "replay_keys_down"
+            | "keys_pressed_this_frame"
+            | "mouse_pressed_this_frame"
+            | "UI_MOUSE"
+            | "UI_FOCUS"
+            | "WORLD_MODE"
+            | "MOTES"
+            | "POLLER"
+    )
 }
 
 #[cfg(test)]
@@ -384,6 +456,28 @@ mod tests {
             assert!(!entry.capture_policy.is_empty());
             assert!(!entry.realization_policy.is_empty());
         }
+        let structural: Vec<_> = plan
+            .entries()
+            .iter()
+            .skip(schema.entries.len())
+            .map(|entry| entry.identity.as_str())
+            .collect();
+        assert_eq!(
+            structural,
+            vec![
+                "session::schema-id",
+                "session::initialized",
+                "session::initializer-keys",
+                "session::rng-state",
+                "program-artifact::code-slots",
+                "program-artifact::lifecycle-plan",
+                "program-artifact::definition-plan",
+                "host-projection::arena-registry",
+                "host-projection::native-ledger",
+                "runner::logger-state",
+                "unsupported::live-scene-state",
+            ]
+        );
     }
 
     #[test]

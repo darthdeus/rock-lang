@@ -188,7 +188,7 @@ fn a_global_that_was_null_at_boot_is_null_again_at_the_next_entry() {
     assert_eq!(worker.verdict(), "PASS", "and after a predecessor that set the global");
     // Agreement over an unmade assertion would be agreement over nothing.
     // (Membership is not asserted in the sim: a one-entry queue takes no
-    // checkpoint at all, so `sim_checkpoint_has` is false in the isolated arm
+    // checkpoint at all, so checkpoint membership is empty in the isolated arm
     // by design and would diverge for a reason unrelated to the class.)
     for (label, record) in [("isolated", &isolated), ("worker", &worker)] {
         assert!(

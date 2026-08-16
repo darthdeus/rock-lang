@@ -797,12 +797,22 @@ function log_dedup_count() { return Object.keys(__stone_log_dedup).length; }
 /// a semantic, not a nicety).
 pub const JS_RNG_RUNTIME: &str = r#"
 var __rock_rng_state = 0;
-function __rock_rng_seed(s) { __rock_rng_state = s >>> 0; }
-function __rock_rng_state_get() { return __rock_rng_state; }
-function __rock_rng_state_set(s) { __rock_rng_state = s >>> 0; }
+function __rock_rng_current() {
+  if (typeof __rock_active_session !== "undefined" && __rock_active_session
+      && __rock_active_session.__rock_rng_state !== null) return __rock_active_session.__rock_rng_state;
+  return __rock_rng_state;
+}
+function __rock_rng_store(s) {
+  if (typeof __rock_active_session !== "undefined" && __rock_active_session) __rock_active_session.__rock_rng_state = s >>> 0;
+  else __rock_rng_state = s >>> 0;
+}
+function __rock_rng_seed(s) { __rock_rng_store(s); }
+function __rock_rng_state_get() { return __rock_rng_current(); }
+function __rock_rng_state_set(s) { __rock_rng_store(s); }
 function __rock_rng_next32() {
-  __rock_rng_state = (__rock_rng_state + 0x6D2B79F5) >>> 0;
-  var t = __rock_rng_state;
+  var state = (__rock_rng_current() + 0x6D2B79F5) >>> 0;
+  __rock_rng_store(state);
+  var t = state;
   t = Math.imul(t ^ (t >>> 15), t | 1);
   t = (t + Math.imul(t ^ (t >>> 7), t | 61)) ^ t;
   return (t ^ (t >>> 14)) >>> 0;
@@ -2825,7 +2835,7 @@ function __rock_web_arm_raf(frameFn) {
 /// `undefined` and `null` both count as nil, matching the subset's loose rule.
 pub const JS_SESSION_RUNTIME: &str = r#"
 function __rock_session_new(schema_id) {
-  return { __rock_schema_id: schema_id, __rock_state: Object.create(null), __rock_initialized: Object.create(null), __rock_initializer_keys: Object.create(null) };
+  return { __rock_schema_id: schema_id, __rock_state: Object.create(null), __rock_initialized: Object.create(null), __rock_initializer_keys: Object.create(null), __rock_rng_state: null };
 }
 function __rock_session_activate(session) {
   if (!session || !session.__rock_state || !session.__rock_initialized) throw new Error("invalid Rock Session");
@@ -2990,6 +3000,208 @@ function __rock_state_install_global_bridge() {
       return entry !== null || Reflect.has(object, key);
     }
   });
+}
+var __rock_state_image_structural_ids = [
+  "session::schema-id", "session::initialized", "session::initializer-keys",
+  "session::rng-state", "program-artifact::code-slots",
+  "program-artifact::lifecycle-plan", "program-artifact::definition-plan",
+  "host-projection::arena-registry", "host-projection::native-ledger",
+  "runner::logger-state", "unsupported::live-scene-state"
+];
+function __rock_state_image_plan_validate() {
+  var schema = (typeof __ROCK_STATE_SCHEMA === "undefined") ? [] : __ROCK_STATE_SCHEMA;
+  var plan = (typeof __ROCK_STATE_IMAGE_PLAN === "undefined") ? null : __ROCK_STATE_IMAGE_PLAN;
+  if (!plan) throw new Error("StateImagePlan is not published");
+  if (plan.schema_id !== __rock_state_schema_id) throw new Error("StateImagePlan StateSchema mismatch");
+  if (!plan.entries || plan.entries.length !== schema.length + __rock_state_image_structural_ids.length) {
+    throw new Error("StateImagePlan has an incomplete structural tail");
+  }
+  var seen = Object.create(null);
+  var counts = { semantic_session: 0, program_artifact: 0, host_projection: 0,
+    runner_diagnostic: 0, unsupported: 0 };
+  for (var i = 0; i < schema.length; i++) {
+    var imageEntry = plan.entries[i], entry = schema[i];
+    if (!imageEntry || imageEntry.identity !== entry.identity || imageEntry.layout !== entry.fingerprint) {
+      throw new Error("StateImagePlan changed StateSchema ordering at entry " + i);
+    }
+  }
+  for (var j = 0; j < __rock_state_image_structural_ids.length; j++) {
+    var structural = plan.entries[schema.length + j];
+    if (!structural || structural.identity !== __rock_state_image_structural_ids[j]) {
+      throw new Error("StateImagePlan changed structural ownership at entry " + j);
+    }
+  }
+  plan.entries.forEach(function (entry) {
+    if (!entry.identity || seen[entry.identity]) throw new Error("StateImagePlan owns " + entry.identity + " more than once");
+    seen[entry.identity] = true;
+    if (!entry.kind || !entry.layout || !entry.capture_policy || !entry.realization_policy) {
+      throw new Error("incomplete StateImagePlan entry " + entry.identity);
+    }
+    if (counts[entry.kind] === undefined) throw new Error("unknown StateImagePlan kind " + entry.kind);
+    counts[entry.kind]++;
+  });
+  var census = plan.census || {};
+  if (census.examined !== plan.entries.length || census.assigned !== plan.entries.length
+      || census.duplicates !== 0 || census.unknown !== 0) {
+    throw new Error("incomplete StateImagePlan census");
+  }
+  Object.keys(counts).forEach(function (kind) {
+    if (census[kind] !== counts[kind]) throw new Error("StateImagePlan census disagrees for " + kind);
+    if (counts[kind] === 0) throw new Error("StateImagePlan has a zero ownership category: " + kind);
+  });
+  return true;
+}
+function __rock_state_image_clone(value, seen, mode) {
+  if (value === null || value === undefined) return value;
+  var type = typeof value;
+  if (type !== "object" && type !== "function") return value;
+  if (type === "function") {
+    if (mode === "capture" && typeof __rock_code_ref_kind === "function"
+        && __rock_code_ref_kind(value) === "slot") {
+      return { __rock_state_image_code_ref: value.key };
+    }
+    throw new Error("StateImage rejects foreign function value");
+  }
+  if (mode === "capture" && typeof __rock_code_ref_kind === "function"
+      && __rock_code_ref_kind(value) === "slot") {
+    return { __rock_state_image_code_ref: value.key };
+  }
+  if (mode === "materialize" && Object.prototype.hasOwnProperty.call(value, "__rock_state_image_code_ref")) {
+    if (typeof value.__rock_state_image_code_ref !== "string") throw new Error("StateImage has an invalid logical CodeIdentity");
+    if (typeof __rock_code_slot_ref !== "function") throw new Error("StateImage cannot resolve logical CodeIdentity");
+    return __rock_code_slot_ref(value.__rock_state_image_code_ref);
+  }
+  if (seen.has(value)) return seen.get(value);
+  if (ArrayBuffer.isView(value)) {
+    var typed = new value.constructor(value);
+    seen.set(value, typed);
+    return typed;
+  }
+  if (value instanceof Map) {
+    var map = new Map();
+    seen.set(value, map);
+    value.forEach(function (v, k) {
+      map.set(__rock_state_image_clone(k, seen, mode), __rock_state_image_clone(v, seen, mode));
+    });
+    return map;
+  }
+  if (value instanceof ArrayBuffer) {
+    var buffer = value.slice(0);
+    seen.set(value, buffer);
+    return buffer;
+  }
+  var copy = Array.isArray(value) ? [] : {};
+  seen.set(value, copy);
+  Object.keys(value).forEach(function (key) {
+    copy[key] = __rock_state_image_clone(value[key], seen, mode);
+  });
+  return copy;
+}
+function __rock_state_image_scene_is_live() {
+  if (typeof __G === "undefined" || __G === null) return false;
+  var roots = __G.__SCENE_ROOTS;
+  if (roots === null || roots === undefined) return false;
+  if (Array.isArray(roots)) return roots.some(function (v) { return v !== null && v !== undefined; });
+  if (roots._data && roots.len !== undefined) {
+    for (var i = 0; i < roots.len; i++) if (roots._data[i] !== null && roots._data[i] !== undefined) return true;
+  }
+  return Object.keys(roots).some(function (key) { return roots[key] !== null && roots[key] !== undefined; });
+}
+var __rock_state_image_next_id = 0;
+var __rock_state_image_next_session_id = 0;
+var __rock_state_image_images = Object.create(null);
+var __rock_state_image_sessions = Object.create(null);
+function __rock_state_image_capture(kind, tick) {
+  if (kind !== "boot" && kind !== "world") throw new Error("unsupported StateImage capture kind " + kind);
+  __rock_state_image_plan_validate();
+  if (kind === "world" && __rock_state_image_scene_is_live()) {
+    throw new Error("StateImage capture rejected live Scene state; SceneImage is not implemented");
+  }
+  var id = ++__rock_state_image_next_id;
+  var image = { id: id, kind: kind, tick: tick, schema_id: __rock_state_schema_id,
+    layouts: Object.create(null), entries: Object.create(null), members: Object.create(null),
+    rng_state: __rock_active_session.__rock_rng_state };
+  __ROCK_STATE_IMAGE_PLAN.entries.forEach(function (entry) { image.layouts[entry.identity] = entry.layout; });
+  var seen = new Map();
+  __ROCK_STATE_SCHEMA.forEach(function (entry) {
+    var planEntry = __ROCK_STATE_IMAGE_PLAN.entries.find(function (candidate) {
+      return candidate.identity === entry.identity;
+    });
+    if (!planEntry) throw new Error("StateImage has unknown schema entry " + entry.identity);
+    if (planEntry.kind !== "semantic_session") return;
+    var keys = entry.session_keys || [];
+    var values = [], initialized = [];
+    for (var i = 0; i < keys.length; i++) {
+      initialized[i] = __rock_state_has(keys[i]);
+      values[i] = initialized[i] ? __rock_state_image_clone(__rock_state_get(keys[i]), seen, "capture") : undefined;
+    }
+    image.entries[entry.identity] = { keys: keys.slice(), values: values, initialized: initialized };
+    image.members[entry.identity] = true;
+  });
+  __rock_state_image_images[id] = image;
+  return id;
+}
+function __rock_state_image_validate_layouts(image) {
+  var plan = __ROCK_STATE_IMAGE_PLAN, count = 0;
+  Object.keys(image.layouts || {}).forEach(function (identity) {
+    count++;
+    var found = plan.entries.find(function (entry) { return entry.identity === identity; });
+    if (!found) throw new Error("StateImage has an unknown layout " + identity);
+    if (found.layout !== image.layouts[identity]) throw new Error("StateImage layout mismatch for " + identity);
+  });
+  if (count !== plan.entries.length) throw new Error("StateImage layout plan is incomplete");
+}
+function __rock_state_image_materialize(image_id, kind) {
+  var image = __rock_state_image_images[image_id];
+  if (!image) throw new Error("unknown StateImage " + image_id);
+  if (image.kind !== kind) throw new Error("StateImage kind mismatch: expected " + kind + ", got " + image.kind);
+  if (image.schema_id !== __rock_state_schema_id) throw new Error("StateImage StateSchema mismatch; restart is required");
+  __rock_state_image_plan_validate();
+  __rock_state_image_validate_layouts(image);
+  var candidate = __rock_session_new(image.schema_id);
+  candidate.__rock_rng_state = image.rng_state;
+  var seen = new Map();
+  __ROCK_STATE_SCHEMA.forEach(function (entry) {
+    var planEntry = __ROCK_STATE_IMAGE_PLAN.entries.find(function (candidateEntry) {
+      return candidateEntry.identity === entry.identity;
+    });
+    if (!planEntry) throw new Error("StateImage has unknown schema entry " + entry.identity);
+    if (planEntry.kind !== "semantic_session") return;
+    var snapshot = image.entries[entry.identity];
+    if (!snapshot || snapshot.keys.length !== (entry.session_keys || []).length) {
+      throw new Error("StateImage omitted semantic entry " + entry.identity);
+    }
+    for (var i = 0; i < entry.session_keys.length; i++) {
+      var key = entry.session_keys[i];
+      if (snapshot.keys[i] !== key) throw new Error("StateImage layout mismatch for " + entry.identity);
+      if (snapshot.initialized[i]) {
+        candidate.__rock_state[key] = __rock_state_image_clone(snapshot.values[i], seen, "materialize");
+        candidate.__rock_initialized[key] = true;
+      }
+    }
+  });
+  var session_id = ++__rock_state_image_next_session_id;
+  candidate.__rock_image_materialized = true;
+  __rock_state_image_sessions[session_id] = candidate;
+  return session_id;
+}
+function __rock_state_image_try_materialize(image_id, kind) {
+  try { __rock_state_image_materialize(image_id, kind); return ""; }
+  catch (e) { return String(e && e.message !== undefined ? e.message : e); }
+}
+function __rock_state_image_session_activate(session_id) {
+  var session = __rock_state_image_sessions[session_id];
+  if (!session || session.__rock_image_materialized !== true) throw new Error("unknown or incomplete materialized StateImage Session " + session_id);
+  __rock_session_activate(session);
+  if (session.__rock_rng_state !== null && session.__rock_rng_state !== undefined
+      && typeof __rock_rng_state_set === "function") __rock_rng_state_set(session.__rock_rng_state);
+  return true;
+}
+function __rock_state_image_current_session() {
+  var id = ++__rock_state_image_next_session_id;
+  __rock_active_session.__rock_image_materialized = true;
+  __rock_state_image_sessions[id] = __rock_active_session;
+  return id;
 }
 var __rock_active_session = null;
 var __rock_state_schema_id = null;

@@ -500,7 +500,8 @@ if not _G.__rock_session_new then
       __rock_schema_id = schema_id,
       __rock_state = {},
       __rock_initialized = {},
-      __rock_initializer_keys = {}
+      __rock_initializer_keys = {},
+      __rock_rng_state = nil
     }
   end
   _G.__rock_session_activate = function(session)
@@ -712,14 +713,28 @@ if _G.__ROCK_RELEASE == nil then _G.__ROCK_RELEASE = false end
 if not _G.__rock_rng_next then
   local __rock_bit = require("bit")
   local __rock_rng_state = _G.ffi.new("uint64_t", 0)
-  _G.__rock_rng_seed = function(s) __rock_rng_state = _G.ffi.new("uint64_t", s) end
+  local function active_rng_state()
+    local session = _G.__rock_active_session
+    if session and session.__rock_rng_state ~= nil then return session.__rock_rng_state end
+    return __rock_rng_state
+  end
+  local function store_rng_state(state)
+    local session = _G.__rock_active_session
+    if session then session.__rock_rng_state = state else __rock_rng_state = state end
+  end
+  _G.__rock_rng_seed = function(s)
+    store_rng_state(_G.ffi.new("uint64_t", s))
+  end
   -- Whole RNG state is this one counter; get/set serialize it for replay
   -- keyframe restore (docs/replay-scrub-plan.md). Returns the uint64 cdata.
-  _G.__rock_rng_state_get = function() return __rock_rng_state end
-  _G.__rock_rng_state_set = function(s) __rock_rng_state = _G.ffi.new("uint64_t", s) end
+  _G.__rock_rng_state_get = function() return active_rng_state() end
+  _G.__rock_rng_state_set = function(s)
+    store_rng_state(_G.ffi.new("uint64_t", s))
+  end
   _G.__rock_rng_next = function()
-    __rock_rng_state = __rock_rng_state + 0x9E3779B97F4A7C15ULL
-    local z = __rock_rng_state
+    local state = active_rng_state() + 0x9E3779B97F4A7C15ULL
+    store_rng_state(state)
+    local z = state
     z = __rock_bit.bxor(z, __rock_bit.rshift(z, 30)) * 0xBF58476D1CE4E5B9ULL
     z = __rock_bit.bxor(z, __rock_bit.rshift(z, 27)) * 0x94D049BB133111EBULL
     z = __rock_bit.bxor(z, __rock_bit.rshift(z, 31))
