@@ -359,7 +359,7 @@ pub(crate) fn c_prim_size_align(cty: &str) -> Option<(usize, usize)> {
 /// silent memory corruption rather than a failure.
 ///
 /// PRIVATE on purpose: the raw walker is the bypass this module exists to
-/// prevent. Its traversal mirrors [`value_shape_rec`] arm for arm so the leaf
+/// prevent. Its traversal mirrors the planned field tree arm for arm so the leaf
 /// ORDER matches [`value_leaf_paths`], but that is two separate walkers staying
 /// in step, NOT something this function enforces. Leaves are matched to offsets
 /// POSITIONALLY, so if they drift, every runtime `ffi.offsetof` assertion still
@@ -370,106 +370,65 @@ pub(crate) fn c_prim_size_align(cty: &str) -> Option<(usize, usize)> {
 /// and it rejects on drift. Keep the raw walker private so a future lowering
 /// cannot reach around the representation plan.
 pub(crate) fn value_leaf_layout(ws: &Workspace, name: Ustr) -> Option<(Vec<LeafSlot>, usize, usize)> {
+    let plan = planned_value(ws, name)?;
+    if plan.storage != ValueStorage::CData {
+        return None;
+    }
     let mut out = Vec::new();
-    let (size, align) = layout_rec(ws, name, "", 0, "", &mut out, &mut Vec::new())?;
+    let (size, align) = planned_layout_rec(&plan, "", 0, "", &mut out)?;
     Some((out, size, align))
 }
 
-/// Append `name`'s leaves at `base` (a byte offset), returning its `(size, align)`.
-/// `ofs` is the `ffi.offsetof` composition accumulated down to `name`'s start.
-pub(crate) fn layout_rec(
-    ws: &Workspace,
-    name: Ustr,
+fn planned_layout_rec(
+    plan: &PlannedValue,
     prefix: &str,
     base: usize,
     ofs: &str,
     out: &mut Vec<LeafSlot>,
-    visiting: &mut Vec<Ustr>,
 ) -> Option<(usize, usize)> {
-    // A cdata-eligible enum is a struct in its own right (`{ int __tag; <prim>
-    // _0; .. }`), not a value struct -- `value_shape_rec` nests it, so this
-    // must nest it identically.
-    if let Some(es) = EnumPlan::for_name(ws, name).and_then(|plan| plan.cdata().cloned()) {
-        let mut off = base;
-        let mut align = 4; // the `int __tag`
-        let mut push = |nm: &str, cty: &'static str, off: &mut usize, align: &mut usize| {
-            let (sz, al) = c_prim_size_align(cty)?;
-            *off = round_up(*off, al);
-            out.push(LeafSlot {
-                path: leaf_path(prefix, nm),
-                cty,
-                byte_off: *off,
-                offsetof_expr: join_offsetof(ofs, name, nm),
-            });
-            *off += sz;
-            *align = (*align).max(al);
-            Some(())
-        };
-        push("__tag", "int", &mut off, &mut align)?;
-        for (nm, cty) in &es.slots {
-            push(nm.as_str(), cty, &mut off, &mut align)?;
-        }
-        return Some((round_up(off - base, align), align));
-    }
-
-    let sid = *ws.struct_by_name.get(&name)?;
-    let sd = &ws.modules[sid.module.index()].structs[sid.def];
-    if !sd.is_value || visiting.contains(&name) {
-        return None;
-    }
-    visiting.push(name);
     let mut off = base;
     let mut align = 1usize;
-    for f in &sd.fields {
-        let cty = value_field_c_type(ws, f.ty)?;
-        match c_prim_size_align(&cty) {
-            Some((sz, al)) => {
-                // Leak-free: the only strings reaching here are the three
-                // literals `value_field_c_type` returns for primitives.
-                let cty: &'static str = match cty.as_str() {
-                    "int" => "int",
-                    "uint32_t" => "uint32_t",
-                    "float" => "float",
-                    "bool" => "bool",
-                    _ => return None,
-                };
-                off = round_up(off, al);
+    for (field, planned) in &plan.fields {
+        match planned {
+            PlannedField::Primitive(cty) => {
+                let (size, field_align) = c_prim_size_align(cty)?;
+                off = round_up(off, field_align);
                 out.push(LeafSlot {
-                    path: leaf_path(prefix, f.name.as_str()),
+                    path: leaf_path(prefix, field.as_str()),
                     cty,
                     byte_off: off,
-                    offsetof_expr: join_offsetof(ofs, name, f.name.as_str()),
+                    offsetof_expr: join_offsetof(ofs, plan.name, field.as_str()),
                 });
-                off += sz;
-                align = align.max(al);
+                off += size;
+                align = align.max(field_align);
             }
-            // A nested value struct or a cdata enum: recurse under the dotted
-            // prefix, aligning to the nested aggregate's own alignment.
-            None => {
-                let nested = Ustr::from(cty.as_str());
-                let probe_at = round_up(off, nested_align(ws, nested, visiting)?);
-                let (sz, al) = layout_rec(
-                    ws,
-                    nested,
-                    &format!("{prefix}{}.", f.name),
-                    probe_at,
-                    &join_offsetof(ofs, name, f.name.as_str()),
+            PlannedField::Nested(child) => {
+                let child_base = round_up(off, planned_alignment(child)?);
+                let (size, child_align) = planned_layout_rec(
+                    child,
+                    &format!("{}{field}.", prefix),
+                    child_base,
+                    &join_offsetof(ofs, plan.name, field.as_str()),
                     out,
-                    visiting,
                 )?;
-                off = probe_at + sz;
-                align = align.max(al);
+                off = child_base + size;
+                align = align.max(child_align);
             }
+            PlannedField::Nullable(_) | PlannedField::Opaque => return None,
         }
     }
-    visiting.pop();
     Some((round_up(off - base, align), align))
 }
 
-/// The alignment of a nested aggregate, computed without emitting its leaves.
-pub(crate) fn nested_align(ws: &Workspace, name: Ustr, visiting: &mut Vec<Ustr>) -> Option<usize> {
-    let mut scratch = Vec::new();
-    Some(layout_rec(ws, name, "", 0, "", &mut scratch, visiting)?.1)
+fn planned_alignment(plan: &PlannedValue) -> Option<usize> {
+    plan.fields.iter().try_fold(1usize, |align, (_, field)| {
+        let field_align = match field {
+            PlannedField::Primitive(cty) => c_prim_size_align(cty)?.1,
+            PlannedField::Nested(child) => planned_alignment(child)?,
+            PlannedField::Nullable(_) | PlannedField::Opaque => return None,
+        };
+        Some(align.max(field_align))
+    })
 }
 
 /// Extend an `ffi.offsetof` composition by one field hop.
@@ -531,6 +490,180 @@ impl ValueShape {
             .sum::<usize>()
             + usize::from(self.nullable)
     }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum PlannedField {
+    Primitive(&'static str),
+    Nested(Box<PlannedValue>),
+    Nullable(Box<PlannedValue>),
+    Opaque,
+}
+
+/// One recursive nominal plan. The storage tier and both scalar/GC projections
+/// are computed in this walk; later consumers only project this tree.
+#[derive(Clone, Debug)]
+pub(crate) struct PlannedValue {
+    pub(crate) name: Ustr,
+    pub(crate) storage: ValueStorage,
+    pub(crate) fields: Vec<(Ustr, PlannedField)>,
+    pub(crate) shape: Option<ValueShape>,
+    pub(crate) gc_shape: Option<ValueShape>,
+}
+
+fn planned_shape(
+    name: Ustr,
+    fields: &[(Ustr, PlannedField)],
+    gc: bool,
+) -> Option<ValueShape> {
+    let mut out = Vec::with_capacity(fields.len());
+    for (field, planned) in fields {
+        let shape = match planned {
+            PlannedField::Primitive(_) => FieldShape::Prim,
+            PlannedField::Opaque if gc => FieldShape::Prim,
+            PlannedField::Opaque => return None,
+            PlannedField::Nested(child) => {
+                let child = if gc {
+                    child.shape.clone().or_else(|| child.gc_shape.clone())
+                } else {
+                    child.shape.clone()
+                }?;
+                FieldShape::Nested(child)
+            }
+            PlannedField::Nullable(child) => {
+                let mut child = if gc {
+                    child.shape.clone().or_else(|| child.gc_shape.clone())
+                } else {
+                    child.shape.clone()
+                }?;
+                child.nullable = true;
+                FieldShape::Nested(child)
+            }
+        };
+        out.push((*field, shape));
+    }
+    Some(ValueShape { name, fields: out, nullable: false })
+}
+
+fn nominal_name_from_ty(ws: &Workspace, ty: TyId) -> Option<(Ustr, bool)> {
+    let mut node = static_ty(ws, ty)?;
+    let mut nullable = false;
+    if let TypeExpr::Nullable(inner) = node {
+        nullable = true;
+        node = static_ty(ws, ty.with_idx(inner))?;
+    }
+    match node {
+        TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } => Some((name, nullable)),
+        _ => None,
+    }
+}
+
+fn planned_value_rec(
+    ws: &Workspace,
+    name: Ustr,
+    visiting: &mut Vec<Ustr>,
+) -> Option<PlannedValue> {
+    if let Some(enum_plan) = EnumPlan::for_name(ws, name).and_then(|plan| plan.cdata().cloned()) {
+        let mut fields = vec![(Ustr::from("__tag"), PlannedField::Primitive("int"))];
+        fields.extend(
+            enum_plan
+                .slots
+                .iter()
+                .map(|(field, cty)| (*field, PlannedField::Primitive(*cty))),
+        );
+        return Some(PlannedValue {
+            name,
+            storage: ValueStorage::CData,
+            shape: Some(enum_plan.value_shape()),
+            gc_shape: None,
+            fields,
+        });
+    }
+    let sid = *ws.struct_by_name.get(&name)?;
+    let sd = &ws.modules[sid.module.index()].structs[sid.def];
+    if !sd.is_value || visiting.contains(&name) {
+        return None;
+    }
+    visiting.push(name);
+    let mut fields = Vec::with_capacity(sd.fields.len());
+    let mut cdata = sd.generics.is_empty();
+    let mut scalarizable = sd.generics.is_empty();
+    for field in &sd.fields {
+        let planned = match static_ty(ws, field.ty) {
+            Some(TypeExpr::Builtin(BuiltinTy::Int)) => PlannedField::Primitive("int"),
+            Some(TypeExpr::Builtin(BuiltinTy::Uint)) => PlannedField::Primitive("uint32_t"),
+            Some(TypeExpr::Builtin(BuiltinTy::Float)) => PlannedField::Primitive("float"),
+            Some(TypeExpr::Builtin(BuiltinTy::Bool)) => PlannedField::Primitive("bool"),
+            Some(TypeExpr::App { ctor: TypeCtor::Nominal(child), .. })
+                if payload_free_enum_variants(ws, child).is_some() =>
+            {
+                PlannedField::Primitive("int")
+            }
+            Some(TypeExpr::App { ctor: TypeCtor::Nominal(child), .. }) => {
+                let Some(child_plan) = planned_value_rec(ws, child, visiting) else {
+                    cdata = false;
+                    scalarizable = false;
+                    fields.push((field.name, PlannedField::Opaque));
+                    continue;
+                };
+                cdata &= child_plan.storage == ValueStorage::CData;
+                scalarizable &= child_plan.shape.is_some();
+                PlannedField::Nested(Box::new(child_plan))
+            }
+            Some(TypeExpr::Nullable(_)) => {
+                let Some((child, true)) = nominal_name_from_ty(ws, field.ty) else {
+                    cdata = false;
+                    scalarizable = false;
+                    fields.push((field.name, PlannedField::Opaque));
+                    continue;
+                };
+                let Some(child_plan) = planned_value_rec(ws, child, visiting) else {
+                    cdata = false;
+                    scalarizable = false;
+                    fields.push((field.name, PlannedField::Opaque));
+                    continue;
+                };
+                let nobox = ws.struct_by_name.get(&child).is_some_and(|sid| {
+                    ws.modules[sid.module.index()].structs[sid.def].is_nobox
+                });
+                if !nobox {
+                    cdata = false;
+                    scalarizable = false;
+                    PlannedField::Opaque
+                } else {
+                    cdata = false;
+                    scalarizable &= child_plan.shape.is_some();
+                    PlannedField::Nullable(Box::new(child_plan))
+                }
+            }
+            _ => {
+                cdata = false;
+                scalarizable = false;
+                PlannedField::Opaque
+            }
+        };
+        if matches!(planned, PlannedField::Opaque) {
+            cdata = false;
+        }
+        fields.push((field.name, planned));
+    }
+    let shape = scalarizable.then(|| planned_shape(name, &fields, false)).flatten();
+    let storage = if cdata {
+        ValueStorage::CData
+    } else if scalarizable {
+        ValueStorage::LeafTable
+    } else {
+        ValueStorage::GcTable
+    };
+    let gc_shape = (storage != ValueStorage::CData)
+        .then(|| planned_shape(name, &fields, true))
+        .flatten();
+    visiting.pop();
+    Some(PlannedValue { name, storage, fields, shape, gc_shape })
+}
+
+pub(crate) fn planned_value(ws: &Workspace, name: Ustr) -> Option<PlannedValue> {
+    planned_value_rec(ws, name, &mut Vec::new())
 }
 
 /// `Some(ordered variant names)` iff `name` is a PAYLOAD-FREE enum (every variant
@@ -605,6 +738,10 @@ impl ValueBundle {
         &self.value
     }
 
+    pub(crate) fn into_value(self) -> ValueRepr {
+        self.value
+    }
+
 }
 
 /// A safe-nav receiver after lowering: either an ordinary boxed value, or an
@@ -660,10 +797,7 @@ pub(crate) fn static_ty(ws: &Workspace, ty: TyId) -> Option<TypeExpr> {
 /// so a real cdata always exists as the escape representation). Cyclic field
 /// types disqualify.
 pub(crate) fn value_shape(ws: &Workspace, name: Ustr) -> Option<ValueShape> {
-    value_shape_rec(ws, name, &mut Vec::new())
-        .or_else(|| {
-            EnumPlan::for_name(ws, name).and_then(|plan| plan.cdata().map(|e| e.value_shape()))
-        })
+    planned_value(ws, name)?.shape
 }
 
 /// The target/context-specific physical storage of a nominal value. This is
@@ -674,95 +808,13 @@ pub(crate) fn declared_value_storage(
     _target: bone_semantic::hir::FnBackend,
     name: Ustr,
 ) -> Option<ValueStorage> {
-    if let Some(plan) = EnumPlan::for_name(ws, name) {
-        return match plan.layout() {
-            EnumLayout::Cdata(_) => Some(ValueStorage::CData),
-            EnumLayout::Flat(_) => Some(ValueStorage::GcTable),
-            EnumLayout::PayloadFree | EnumLayout::Boxed => None,
-        };
-    }
-    let sid = *ws.struct_by_name.get(&name)?;
-    let s = &ws.modules[sid.module.index()].structs[sid.def];
-    if !s.is_value {
-        return None;
-    }
-    if !value_storage_is_gc_guarded(ws, name, &mut Vec::new()) {
-        return Some(ValueStorage::CData);
-    }
-    if s.generics.is_empty() && value_shape_rec(ws, name, &mut Vec::new()).is_some() {
-        Some(ValueStorage::LeafTable)
-    } else {
-        Some(ValueStorage::GcTable)
-    }
+    planned_value(ws, name).map(|plan| plan.storage)
 }
 
-/// Declaration field order of `name` iff it is a GC-free value STRUCT proper --
-/// NOT an enum value-shape (which `declared_value_storage` also classifies via
-/// the enum layout). `value_shape_rec` is struct-only (it requires a
-/// `struct_by_name` entry), so this cleanly separates the two: a genuine value
-/// struct renders `Name { f: v }` colon-format on JS, an enum box still rejects.
+/// Declaration field order of `name` iff it is a GC-free value STRUCT proper.
 pub fn gc_free_value_struct_field_order(ws: &Workspace, name: Ustr) -> Option<Vec<Ustr>> {
-    value_shape_rec(ws, name, &mut Vec::new()).map(|_| struct_field_names(ws, name))
-}
-
-pub(crate) fn value_shape_rec(ws: &Workspace, name: Ustr, visiting: &mut Vec<Ustr>) -> Option<ValueShape> {
-    let sid = *ws.struct_by_name.get(&name)?;
-    let sd = &ws.modules[sid.module.index()].structs[sid.def];
-    if !sd.is_value || visiting.contains(&name) {
-        return None;
-    }
-    visiting.push(name);
-    let mut fields = Vec::with_capacity(sd.fields.len());
-    for f in &sd.fields {
-        let fs = match static_ty(ws, f.ty)? {
-            TypeExpr::Builtin(BuiltinTy::Int | BuiltinTy::Uint | BuiltinTy::Float | BuiltinTy::Bool) => FieldShape::Prim,
-            TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => {
-                // A payload-free enum is an `int` value GLOBALLY (the variant's
-                // declaration-order tag), so as a field it is just a `Prim` int --
-                // no conversion. A cdata payload enum nests its `[__tag, _0]` leaves
-                // (flattened into the host cdef). Else a nested value struct; else
-                // disqualified.
-                if payload_free_enum_variants(ws, n).is_some() {
-                    FieldShape::Prim
-                } else if let Some(es) = EnumPlan::for_name(ws, n).and_then(|plan| plan.cdata().cloned()) {
-                    FieldShape::Nested(es.value_shape())
-                } else {
-                    FieldShape::Nested(value_shape_rec(ws, n, visiting)?)
-                }
-            }
-            // A NULLABLE `nobox` child threads its own presence tag as leaf 0 of
-            // its nested shape -- the same rule the signature/local/global
-            // contexts already apply at the outermost slot, reached through the
-            // one resolver rather than re-spelled here. Without this arm the
-            // field type fell to the catch-all and disqualified the WHOLE struct,
-            // which is mechanism A: the parent then had no shape, fell back to a
-            // box, and the materialization verifier refused it.
-            //
-            // Gated on `nobox` by the resolver: an UNMARKED nullable value field
-            // keeps its box + nil sentinel, which is legal today (a box is not a
-            // guarantee violation for an unmarked type), so this changes no
-            // existing emission.
-            TypeExpr::Nullable(_) => match nullable_nominal_shape(ws, f.ty, &|t| static_ty(ws, t))
-            {
-                Some(sub) => FieldShape::Nested(sub),
-                None => {
-                    visiting.pop();
-                    return None;
-                }
-            },
-            _ => {
-                visiting.pop();
-                return None;
-            }
-        };
-        fields.push((f.name, fs));
-    }
-    visiting.pop();
-    Some(ValueShape {
-        name,
-        fields,
-        nullable: false,
-    })
+    ws.struct_by_name.get(&name)?;
+    planned_value(ws, name)?.shape.map(|_| struct_field_names(ws, name))
 }
 
 /// The scalar-ABI shape of a GC-CARRYING value struct:
@@ -777,65 +829,7 @@ pub(crate) fn value_shape_rec(ws: &Workspace, name: Ustr, visiting: &mut Vec<Ust
 /// tier), never `<Name>_ct`; the leaf threading is repr-agnostic (`pack` builds
 /// an `Inst::MakeValueStruct` that codegen renders per tier).
 pub(crate) fn value_shape_gc(ws: &Workspace, name: Ustr) -> Option<ValueShape> {
-    value_shape_gc_rec(ws, name, &mut Vec::new())
-}
-
-pub(crate) fn value_shape_gc_rec(ws: &Workspace, name: Ustr, visiting: &mut Vec<Ustr>) -> Option<ValueShape> {
-    if !value_storage_is_gc_guarded(ws, name, &mut Vec::new()) {
-        return None;
-    }
-    let sid = *ws.struct_by_name.get(&name)?;
-    let sd = &ws.modules[sid.module.index()].structs[sid.def];
-    if visiting.contains(&name) {
-        return None;
-    }
-    visiting.push(name);
-    let mut fields = Vec::with_capacity(sd.fields.len());
-    for f in &sd.fields {
-        let fs = match static_ty(ws, f.ty) {
-            Some(TypeExpr::App { ctor: TypeCtor::Nominal(n), .. }) => {
-                if payload_free_enum_variants(ws, n).is_some() {
-                    FieldShape::Prim
-                } else if let Some(es) = EnumPlan::for_name(ws, n).and_then(|plan| plan.cdata().cloned()) {
-                    FieldShape::Nested(es.value_shape())
-                } else if map_is_value_struct(ws, n) {
-                    // Nested value struct (either tier): thread its own leaves; a
-                    // cyclic/odd shape falls back to one boxed slot.
-                    match value_shape(ws, n).or_else(|| value_shape_gc_rec(ws, n, visiting)) {
-                        Some(sub) => FieldShape::Nested(sub),
-                        None => FieldShape::Prim,
-                    }
-                } else {
-                    // Array / Arena / Map / other nominal collection -> one slot.
-                    FieldShape::Prim
-                }
-            }
-            // A NULLABLE `nobox` child threads leaves + presence, exactly as in
-            // `value_shape_rec`. The two constructors are alternates for the SAME
-            // struct, so they must agree on leaf COUNT: giving the arm to one and
-            // not the other makes a producer and a consumer disagree, and
-            // `rebuild_from_leaves` indexes past the end. That is not theoretical
-            // -- it is what `a_nullable_nobox_field_round_trips_both_ways` (a
-            // GC-tier outer) caught when only `value_shape_rec` had it.
-            Some(TypeExpr::Nullable(_))
-                if nullable_nominal_shape(ws, f.ty, &|t| static_ty(ws, t)).is_some() =>
-            {
-                FieldShape::Nested(
-                    nullable_nominal_shape(ws, f.ty, &|t| static_ty(ws, t))
-                        .expect("guard matched"),
-                )
-            }
-            // Builtin scalar, generic `T`, non-nobox nullable, tuple -> one slot.
-            _ => FieldShape::Prim,
-        };
-        fields.push((f.name, fs));
-    }
-    visiting.pop();
-    Some(ValueShape {
-        name,
-        fields,
-        nullable: false,
-    })
+    planned_value(ws, name)?.gc_shape
 }
 
 /// Declared field names of struct `name`, in declaration order (the positional
@@ -1186,32 +1180,6 @@ pub fn is_nobox_nominal(ws: &Workspace, name: Ustr) -> bool {
         .is_some_and(|sid| ws.modules[sid.module.index()].structs[sid.def].is_nobox)
 }
 
-/// Resolve a nullable nominal through the type-node lookup supplied by the
-/// caller. Body fields and declaration fields use different arenas, but share
-/// this representation rule.
-pub(crate) fn nullable_nominal_shape(
-    ws: &Workspace,
-    ty: TyId,
-    resolve: &dyn Fn(TyId) -> Option<TypeExpr>,
-) -> Option<ValueShape> {
-    let nobox_shape = |name: Ustr| {
-        is_nobox_nominal(ws, name).then(|| value_shape_of_nominal(ws, name)).flatten()
-    };
-    match resolve(ty)? {
-        TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } => nobox_shape(name),
-        TypeExpr::Nullable(inner) => {
-            let TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } = resolve(ty.with_idx(inner))?
-            else {
-                return None;
-            };
-            let mut shape = nobox_shape(name)?;
-            shape.nullable = true;
-            Some(shape)
-        }
-        _ => None,
-    }
-}
-
 /// Everything the reflection accessor for a `nobox` global decides, answered
 /// from the SAME oracles the emitter uses rather than from the leaf paths'
 /// punctuation.
@@ -1249,41 +1217,63 @@ pub fn nobox_global_accessor_shape(
     ws: &Workspace,
     scx: &ScalarCtx,
     ty: TyId,
-) -> Option<NoboxGlobalAccessorShape> {
-    let plan = GlobalPlan::for_declared_type(ws, scx, ty).ok()?;
-    let shape = plan.value_shape()?;
-    let paths = plan.leaf_paths()?;
-    // The global's OWN presence leaf leads the leaves and has no path, so the
-    // flags line up with `paths` from that offset on -- the same offset the
-    // caller splits the leaves at.
-    let flags = plan.presence_flags()?;
-    let flags = if shape.nullable { &flags[1..] } else { &flags[..] };
+) -> Result<Option<NoboxGlobalAccessorShape>, RepError> {
+    let plan = GlobalPlan::for_declared_type(ws, scx, ty)?;
+    let Some(shape) = plan.value_shape() else { return Ok(None) };
+    let paths = plan.leaf_paths().ok_or_else(|| RepError {
+        span: None,
+        message: format!("`{}` has no physical leaf-path plan for global accessors", shape.name),
+    })?;
+    // `value_leaf_paths` omits the global's own presence leaf, and
+    // `value_leaf_presence_flags` omits it too; both sequences therefore line
+    // up directly. Nested nullable fields remain represented in both.
+    let flags = plan.presence_flags().ok_or_else(|| RepError {
+        span: None,
+        message: format!("`{}` has no physical presence plan for global accessors", shape.name),
+    })?;
+    if flags.len() != paths.len() {
+        return Err(RepError {
+            span: None,
+            message: format!(
+                "`{}` has {} presence entries for {} leaf paths",
+                shape.name,
+                flags.len(),
+                paths.len()
+            ),
+        });
+    }
     let presence_path =
         flags.iter().zip(paths.iter()).find(|(is_tag, _)| **is_tag).map(|(_, p)| *p);
-    let storage = plan.value_storage()?;
+    let storage = plan.value_storage().ok_or_else(|| RepError {
+        span: None,
+        message: format!("`{}` has no physical storage plan for global accessors", shape.name),
+    })?;
     let ctor_suffix = match storage {
         ValueStorage::LeafTable => "_lct",
         ValueStorage::GcTable => "_vt",
         ValueStorage::CData => "_ct",
     };
-    let unbuildable = (ctor_suffix != "_lct" && paths.iter().any(|p| p.contains('.'))).then(|| {
-        format!(
-            "`{}{ctor_suffix}` is positional over DECLARED FIELDS, but this type's \
-             storage is {} leaves including a nested one (`{}`), so the accessor \
-             would pass a leaf where the ctor wants a nested value",
-            shape.name,
-            paths.len(),
-            paths.iter().find(|p| p.contains('.')).expect("just found one"),
-        )
-    });
-    Some(NoboxGlobalAccessorShape {
+    let unbuildable = if ctor_suffix != "_lct" {
+        paths.iter().find(|p| p.contains('.')).map(|nested| {
+            format!(
+                "`{}{ctor_suffix}` is positional over DECLARED FIELDS, but this type's \
+                 storage is {} leaves including a nested one (`{nested}`), so the accessor \
+                 would pass a leaf where the ctor wants a nested value",
+                shape.name,
+                paths.len(),
+            )
+        })
+    } else {
+        None
+    };
+    Ok(Some(NoboxGlobalAccessorShape {
         ty_name: shape.name,
         paths,
         nullable: shape.nullable,
         ctor_suffix,
         presence_path,
         unbuildable,
-    })
+    }))
 }
 
 /// Structural depth of an instantiation type, counting a leaf as 1. Polymorphic
@@ -1583,6 +1573,45 @@ impl RetSlot {
     }
 }
 
+pub(crate) fn value_shape_can_fill(actual: &ValueShape, expected: &ValueShape) -> bool {
+    actual.name == expected.name
+        && (!actual.nullable || expected.nullable)
+        && actual.fields.len() == expected.fields.len()
+        && actual
+            .fields
+            .iter()
+            .zip(&expected.fields)
+            .all(|((actual_name, actual_field), (expected_name, expected_field))| {
+                actual_name == expected_name
+                    && match (actual_field, expected_field) {
+                        (FieldShape::Prim, FieldShape::Prim) => true,
+                        (FieldShape::Nested(actual), FieldShape::Nested(expected)) => {
+                            value_shape_can_fill(actual, expected)
+                        }
+                        _ => false,
+                    }
+            })
+}
+
+pub(crate) fn ret_slot_can_fill(actual: &RetSlot, expected: &RetSlot) -> bool {
+    match (actual, expected) {
+        (RetSlot::Opaque, RetSlot::Opaque) => true,
+        (RetSlot::Leaves(actual), RetSlot::Leaves(expected)) => {
+            value_shape_can_fill(actual, expected)
+        }
+        (RetSlot::Nested(actual), RetSlot::Nested(expected)) => {
+            (!actual.nullable || expected.nullable)
+                && actual.slots.len() == expected.slots.len()
+                && actual
+                    .slots
+                    .iter()
+                    .zip(&expected.slots)
+                    .all(|(actual, expected)| ret_slot_can_fill(actual, expected))
+        }
+        _ => false,
+    }
+}
+
 /// Per-element wire shape of a tuple RETURN under the multi-return ABI.
 ///
 /// Only a `nobox` element splats. An unmarked value struct keeps its single
@@ -1661,8 +1690,9 @@ pub enum BoundNextElem {
 pub enum ElemRebuild {
     /// One wire value, used as-is (an unmarked element inside a splatting tuple).
     Passthrough,
-    /// A `nobox` value: its struct name and leaf fields in ctor order.
-    Value(Ustr, Vec<Ustr>),
+    /// A `nobox` value: its struct name, owned representation, and leaf fields
+    /// in ctor order.
+    Value(Ustr, RepId, Vec<Ustr>),
     /// A tuple element (`zip`'s pair, `enumerate`'s `(int, T)`): rebuild each part,
     /// then pack them.
     Tuple(Vec<ElemRebuild>),
@@ -1673,27 +1703,30 @@ impl ElemRebuild {
     pub fn leaf_count(&self) -> usize {
         match self {
             ElemRebuild::Passthrough => 1,
-            ElemRebuild::Value(_, fields) => fields.len(),
+            ElemRebuild::Value(_, _, fields) => fields.len(),
             ElemRebuild::Tuple(parts) => parts.iter().map(Self::leaf_count).sum(),
         }
     }
 }
 
-pub(crate) fn elem_rebuild(slot: &RetSlot) -> Option<ElemRebuild> {
-    match slot {
-        RetSlot::Opaque => Some(ElemRebuild::Passthrough),
-        RetSlot::Leaves(vs) if !vs.nullable => {
-            let fields: Option<Vec<Ustr>> = vs
+fn elem_rebuild_from_rep(arena: &RepArena, id: RepId) -> Option<ElemRebuild> {
+    let plan = arena.try_get(id)?;
+    match plan.layout() {
+        RepLayout::Opaque | RepLayout::Foreign { .. } => Some(ElemRebuild::Passthrough),
+        RepLayout::Leaves(shape) if !shape.nullable => {
+            let fields: Option<Vec<Ustr>> = shape
                 .fields
                 .iter()
                 .map(|(n, fs)| matches!(fs, FieldShape::Prim).then_some(*n))
                 .collect();
-            fields.map(|f| ElemRebuild::Value(vs.name, f))
+            fields.map(|f| ElemRebuild::Value(shape.name, id, f))
         }
-        RetSlot::Nested(inner) if !inner.nullable => {
-            inner.slots.iter().map(elem_rebuild).collect::<Option<Vec<_>>>().map(ElemRebuild::Tuple)
-        }
-        RetSlot::Leaves(_) | RetSlot::Nested(_) => None,
+        RepLayout::Tuple { slots, nullable: false } => slots
+            .iter()
+            .map(|slot| elem_rebuild_from_rep(arena, *slot))
+            .collect::<Option<Vec<_>>>()
+            .map(ElemRebuild::Tuple),
+        RepLayout::Leaves(_) | RepLayout::Tuple { nullable: true, .. } => None,
     }
 }
 
@@ -1730,14 +1763,20 @@ pub fn bound_next_shape_from_concrete(
         span: None,
         message: format!("bound witness result `{}` has no tuple return plan", result.render()),
     })?;
-    bound_next_shape_from_tuple(shape)
-}
-
-fn bound_next_shape_from_tuple(shape: TupleRetShape) -> Result<BoundNextShape, RepError> {
+    let plan = scx.rep_arena().try_get(id).ok_or_else(|| RepError {
+        span: None,
+        message: "bound witness return plan does not belong to the build arena".into(),
+    })?;
+    let RepLayout::Tuple { slots, .. } = plan.layout() else {
+        return Err(RepError {
+            span: None,
+            message: "bound witness return plan is not a tuple layout".into(),
+        });
+    };
     // The element is slot 1 alone, or slots 1.. as a tuple -- the same pairing
     // `lower_for_user_iter` makes when it binds the pattern, so the two paths
     // cannot disagree about what the element IS.
-    let elem_slot = match shape.slots.get(1..).ok_or_else(|| RepError {
+    let elem_slots = match slots.get(1..).ok_or_else(|| RepError {
         span: None,
         message: "bound witness return plan has no success flag and element slots".into(),
     })? {
@@ -1747,11 +1786,21 @@ fn bound_next_shape_from_tuple(shape: TupleRetShape) -> Result<BoundNextShape, R
                 message: "bound witness return plan has no element slot".into(),
             })
         }
-        [one] => one.clone(),
-        rest => RetSlot::Nested(TupleRetShape { slots: rest.to_vec(), nullable: false }),
+        ids => ids,
     };
-    let elem = if elem_slot.splats() {
-        match elem_rebuild(&elem_slot) {
+    let arena = scx.rep_arena();
+    let elem_splats = elem_slots.iter().any(|slot| arena.get(*slot).splats(&arena));
+    let elem = if elem_splats {
+        let rebuild = if elem_slots.len() == 1 {
+            elem_rebuild_from_rep(&arena, elem_slots[0])
+        } else {
+            elem_slots
+                .iter()
+                .map(|slot| elem_rebuild_from_rep(&arena, *slot))
+                .collect::<Option<Vec<_>>>()
+                .map(ElemRebuild::Tuple)
+        };
+        match rebuild {
             Some(plan) => BoundNextElem::Rebuild(plan),
             None => BoundNextElem::Unsupported,
         }
@@ -1877,10 +1926,10 @@ fn build_enum_cdata_shape(ws: &Workspace, name: Ustr) -> Option<EnumCdataShape> 
 /// `rock_type_to_c_type`. A nested payload-free enum stores as its int tag; a
 /// cdata-eligible payload enum nests its own `{__tag, _0}` ctype.
 pub fn value_field_c_type(ws: &Workspace, ty: TyId) -> Option<String> {
-    value_field_c_type_guarded(ws, ty, &mut Vec::new())
+    value_field_c_type_guarded(ws, ty)
 }
 
-pub(crate) fn value_field_c_type_guarded(ws: &Workspace, ty: TyId, stack: &mut Vec<Ustr>) -> Option<String> {
+pub(crate) fn value_field_c_type_guarded(ws: &Workspace, ty: TyId) -> Option<String> {
     match static_ty(ws, ty)? {
         TypeExpr::Builtin(BuiltinTy::Int) => Some("int".into()),
         TypeExpr::Builtin(BuiltinTy::Uint) => Some("uint32_t".into()),
@@ -1890,7 +1939,7 @@ pub(crate) fn value_field_c_type_guarded(ws: &Workspace, ty: TyId, stack: &mut V
         // GC-carrying nested value struct makes this field (and its parent)
         // GC-carrying too.
         TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } if map_is_value_struct(ws, name) => {
-            if value_storage_is_gc_guarded(ws, name, stack) {
+            if value_storage_is_gc_guarded(ws, name) {
                 None
             } else {
                 Some(name.as_str().to_string())
@@ -1930,29 +1979,8 @@ pub fn gc_eq_is_structural(ws: &Workspace, ty: TyId) -> bool {
     )
 }
 
-pub(crate) fn value_storage_is_gc_guarded(ws: &Workspace, name: Ustr, stack: &mut Vec<Ustr>) -> bool {
-    let Some(sid) = ws.struct_by_name.get(&name) else {
-        return false;
-    };
-    let s = &ws.modules[sid.module.index()].structs[sid.def];
-    if !s.is_value {
-        return false;
-    }
-    if !s.generics.is_empty() {
-        return true;
-    }
-    // A definition cycle among value-struct fields is not C-mappable (an
-    // infinite C layout); value_struct_defs rejects genuine cycles separately.
-    if stack.contains(&name) {
-        return true;
-    }
-    stack.push(name);
-    let field_tys: Vec<TyId> = s.fields.iter().map(|f| f.ty).collect();
-    let gc = field_tys
-        .iter()
-        .any(|ty| value_field_c_type_guarded(ws, *ty, stack).is_none());
-    stack.pop();
-    gc
+pub(crate) fn value_storage_is_gc_guarded(ws: &Workspace, name: Ustr) -> bool {
+    planned_value(ws, name).is_some_and(|plan| plan.storage != ValueStorage::CData)
 }
 
 /// The flatten shape of an enum that boxes today and is eligible to be inlined

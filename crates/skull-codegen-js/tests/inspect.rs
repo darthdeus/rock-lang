@@ -101,6 +101,27 @@ fn value_struct_nested_colon_render() {
     assert_eq!(eval_str(src, "root"), "Nested { a: IV { x: 1, y: 2 }, b: 9 }");
 }
 
+// An embedded child is physically inline. Inspect must use the shared field
+// plan to rebuild the logical child before the generic object renderer walks it.
+#[test]
+fn inspect_rebuilds_an_embed_field_from_inline_leaves() {
+    let src = "struct Pt { x: int, y: int }\n\
+               struct Holder { embed p: Pt, tag: int }\n\
+               fn root() -> string { inspect(Holder { p: Pt { x: 1, y: 2 }, tag: 3 }) }";
+    assert_eq!(eval_str(src, "root"), "Holder { p = Pt { x = 1, y = 2 }, tag = 3 }");
+}
+
+#[test]
+fn inspect_registry_does_not_demand_plans_for_unconstructed_direct_fields() {
+    let src = "value Mask { r: bool, g: bool }\n\
+               struct Draw { mask: Mask }\n\
+               struct Traced { draw: Draw }\n\
+               fn root(draw: Draw) -> Traced { Traced { draw: draw } }";
+    let js = emit_closure(&ws_with(src), "root").expect("direct field types need no registry plan");
+    assert!(!js.contains("__rock_inspect_ty[\"Draw\"]"));
+    assert!(!js.contains("__rock_inspect_ty[\"Mask\"]"));
+}
+
 // An ENUM argument rejects. A payload-bearing enum scalarizes to the
 // value-struct-like shape (`MakeValueStruct`), so it is caught by the same box
 // gate -- either message is a correct honest reject (the numeric tag / colon

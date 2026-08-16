@@ -28,9 +28,10 @@
 //! it. `tests/errors/embed_projection_only.rock.err` pins the spelled form and
 //! is unaffected by this.
 //!
-//! WHEN THIS GOES RED the rejection grew a return-position sibling: flip these
-//! two tests to expect a compile error naming the boundary, keep the three
-//! controls exactly as they are, and note that
+//! The return-position sibling now rejects both forms with the concrete
+//! substituted return type, while the three controls remain unchanged. This
+//! keeps the return boundary fail-closed even when the declaration spells a
+//! generic return.
 //! `docs/scene-system-plan.md` P4's FieldRef pull model is unblocked -- a
 //! position descriptor is `ReadFieldRef<T, Vec2>`, which is precisely this
 //! shape.
@@ -145,25 +146,22 @@ fn run(src: &str, tag: &str) -> String {
 }
 
 #[test]
-fn pinned_bug_field_get_of_a_nobox_field_is_admitted() {
-    assert_eq!(
-        emit_err(FIELD_GET_NOBOX),
-        "",
-        "PINNED BEHAVIOR (BUG): `field_get` returning a flattened `nobox` field \
-         is accepted. The field emits as `pos.x`/`pos.y`, so the body's \
-         `o[\"pos\"]` is nil. If this now errors, the return-position rejection \
-         landed -- assert the error names the boundary instead."
+fn a_field_get_of_a_nobox_field_is_rejected_at_the_return_boundary() {
+    let err = emit_err(FIELD_GET_NOBOX);
+    assert!(
+        err.contains("cannot cross the boxed return of `field_get`")
+            && err.contains("Vec2"),
+        "a flattened field must not cross an opaque generic return: {err}"
     );
 }
 
 #[test]
-fn pinned_bug_a_generic_nobox_return_crosses_an_opaque_boundary() {
-    assert_eq!(
-        emit_err(GENERIC_RETURN_NOBOX),
-        "",
-        "PINNED BEHAVIOR (BUG): a generic `-> V` instantiated at a `nobox` \
-         value crosses an `inline(lua)` boundary unchecked, with no `FieldRef` \
-         involved. If this now errors, flip it."
+fn a_generic_nobox_return_is_rejected_at_an_opaque_boundary() {
+    let err = emit_err(GENERIC_RETURN_NOBOX);
+    assert!(
+        err.contains("cannot cross the boxed return of `unwrap_generic`")
+            && err.contains("Vec2"),
+        "a concrete generic nobox return must not cross an opaque boundary: {err}"
     );
 }
 

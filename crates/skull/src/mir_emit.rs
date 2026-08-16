@@ -567,7 +567,10 @@ fn emit_decorator_unit(
     match lowered {
         Ok(mut mf) => {
             let tc = Instant::now();
-            skull_transform::cleanup_with_nobox(ws, &mut mf);
+            if let Err(e) = skull_transform::cleanup_with_nobox(ws, &mut mf) {
+                out.hard_error = Some(e);
+                return out;
+            }
             // Decorator bodies can carry lambdas too -- convert like an ordinary fn.
             let pre_nested = mf.nested_fns.len();
             skull_transform::convert_closures(&mut mf, &deco_name);
@@ -593,7 +596,10 @@ fn emit_decorator_unit(
             skull_codegen_lua::regalloc_time_reset();
             let te = Instant::now();
             let mut lua = emit_named(ws, cg, scx.interner(), &deco_name, &mf);
-            emit_pass_nested_fns(ws, cg, scx, &mut mf.nested_fns, &mut lua);
+            if let Err(e) = emit_pass_nested_fns(ws, cg, scx, &mut mf.nested_fns, &mut lua) {
+                out.hard_error = Some(e);
+                return out;
+            }
             emit_lowered(ws, &mut out, &mf, lua, Some(Ustr::from(&deco_name)), te.elapsed());
         }
         Err(e) => out.skipped = Some((deco_name, e.message)),
@@ -610,18 +616,17 @@ fn global_init_target(
     scx: &skull_mir::lower::ScalarCtx,
     cg: &CodegenCtx,
     g: &bone_semantic::hir::GlobalDef,
-) -> String {
-    match skull_mir::lower::GlobalPlan::for_declared_type(ws, scx, g.ty)
-        .ok()
-        .and_then(|plan| plan.leaf_names(g.name))
-    {
-        Some(leaves) => leaves
-            .iter()
-            .map(|l| cg.mint_synthetic(l.to_string()))
-            .collect::<Vec<_>>()
-            .join(", "),
-        None => g.name.to_string(),
-    }
+) -> Result<String, CompilerError> {
+    let plan = skull_mir::lower::GlobalPlan::for_declared_type(ws, scx, g.ty)
+        .map_err(|e| CompilerError::new_no_location(e.message))?;
+    let Some(leaves) = plan.leaf_names(g.name) else {
+        return Ok(g.name.to_string());
+    };
+    Ok(leaves
+        .iter()
+        .map(|l| cg.mint_synthetic(l.to_string()))
+        .collect::<Vec<_>>()
+        .join(", "))
 }
 
 /// Lower + emit one global's initializer fn, recording its `pending_init` line.
@@ -665,7 +670,10 @@ fn emit_global_unit(
     match lowered {
         Ok(Some(mut mf)) => {
             let tc = Instant::now();
-            skull_transform::cleanup_with_nobox(ws, &mut mf);
+            if let Err(e) = skull_transform::cleanup_with_nobox(ws, &mut mf) {
+                out.hard_error = Some(e);
+                return out;
+            }
             // A global-initializer body can carry lambdas (e.g. a `[TileDef]`
             // literal with fn fields) -- route them through the shared pass, same
             // as an ordinary fn. Their global reads are NOT init-ordering
@@ -697,7 +705,10 @@ fn emit_global_unit(
             skull_codegen_lua::regalloc_time_reset();
             let te = Instant::now();
             let mut lua = emit_named(ws, cg, scx.interner(), &init_name, &mf);
-            emit_pass_nested_fns(ws, cg, scx, &mut mf.nested_fns, &mut lua);
+            if let Err(e) = emit_pass_nested_fns(ws, cg, scx, &mut mf.nested_fns, &mut lua) {
+                out.hard_error = Some(e);
+                return out;
+            }
             emit_lowered(ws, &mut out, &mf, lua, Some(key), te.elapsed());
             // Hot-reload init line. A `const` is a compile-time constant: tweaking
             // the source literal should show the new value next reload, so its init
@@ -716,7 +727,13 @@ fn emit_global_unit(
             // detect the difference: a layout drift restarts the process upstream
             // (`shape_drift_tests::marking_a_type_nobox_requests_restart`), and a
             // respawn is a cold start that never reaches this branch.
-            let target = global_init_target(ws, scx, cg, g);
+            let target = match global_init_target(ws, scx, cg, g) {
+                Ok(target) => target,
+                Err(e) => {
+                    out.hard_error = Some(e);
+                    return out;
+                }
+            };
             let line = if g.is_const {
                 format!("{target} = {init_name}()\n")
             } else {
@@ -1389,7 +1406,7 @@ fn emit_coroutine_chunk(
     mut times: PhaseTimes,
 ) -> Result<Chunk, CompilerError> {
     let tc = Instant::now();
-    skull_transform::cleanup_with_nobox(ws, mf);
+    skull_transform::cleanup_with_nobox(ws, mf)?;
     times.cleanup = tc.elapsed();
     // Coroutines never inline, so a combinator chain here leaves a residual call
     // -- fine when the lowerer specialized it (a standalone body serves it), a
@@ -1414,7 +1431,7 @@ fn emit_coroutine_chunk(
             format!("cannot build concrete coroutine plan for `{}`: {}", f.name, reason.bucket()),
         )
     })?;
-    let lua = crate::coroutine_emit::emit_coroutine(ws, cg, scx.interner(), &plan, mf);
+    let lua = crate::coroutine_emit::emit_coroutine(ws, cg, scx.interner(), &plan, mf)?;
     times.emit = te.elapsed();
     times.regalloc = skull_codegen_lua::regalloc_time_elapsed().min(times.emit);
     // No declaration edge here: "this instance instantiates that declaration" is
@@ -1536,7 +1553,7 @@ fn emit_body_chunk_with_mutation(
     )?;
     let mut deps: FxHashSet<FuncRef> = spliced.into_iter().collect();
     let tc = Instant::now();
-    skull_transform::cleanup_with_nobox(ws, &mut mf); // drop dead values + dead-cell stores
+    skull_transform::cleanup_with_nobox(ws, &mut mf)?; // drop dead values + dead-cell stores
     // Shared closure conversion (S2 cutover, docs/closure-conversion-mir-plan.md):
     // every `Inst::Lambda` in this ORDINARY fn becomes a `MakeEnv` record / bare
     // `Global` + a hoisted sibling in `nested_fns`. Runs AFTER inline+cleanup,
@@ -1596,7 +1613,7 @@ fn emit_body_chunk_with_mutation(
     // `static` cells fold into THIS chunk's `statics` so the hot-reload preamble +
     // overlay reset see them -- a nested-fn static is otherwise invisible to both.
     let mut statics = mf.statics.clone();
-    emit_nested_fns(ws, cg, scx, &mut mf.nested_fns, &mut deps, &mut statics, &mut lua);
+    emit_nested_fns(ws, cg, scx, &mut mf.nested_fns, &mut deps, &mut statics, &mut lua)?;
     times.emit = te.elapsed();
     times.regalloc = skull_codegen_lua::regalloc_time_elapsed().min(times.emit);
     let calls = skull_mir::reach::call_targets(&mf);
@@ -1616,16 +1633,17 @@ fn emit_nested_fns(
     deps: &mut FxHashSet<FuncRef>,
     statics: &mut Vec<skull_mir::mir::StaticCell>,
     out: &mut String,
-) {
+) -> Result<(), CompilerError> {
     for nf in nested.iter_mut() {
-        skull_transform::cleanup_with_nobox(ws, nf);
+        skull_transform::cleanup_with_nobox(ws, nf)?;
         skull_transform::recover_counted_loops(ws, nf);
         collect_callee_frefs(nf, deps);
         statics.extend(nf.statics.iter().cloned());
         out.push_str(&emit_named(ws, cg, scx.interner(), nf.name.as_str(), nf));
         let mut children = std::mem::take(&mut nf.nested_fns);
-        emit_nested_fns(ws, cg, scx, &mut children, deps, statics, out);
+        emit_nested_fns(ws, cg, scx, &mut children, deps, statics, out)?;
     }
+    Ok(())
 }
 
 /// Emit the flat list of pass-produced hoisted lambda bodies (`convert_closures`
@@ -1649,11 +1667,12 @@ fn emit_pass_nested_fns(
     scx: &skull_mir::lower::ScalarCtx,
     nested: &mut [MirFunc],
     out: &mut String,
-) {
+) -> Result<(), CompilerError> {
     for nf in nested.iter_mut() {
-        skull_transform::cleanup_with_nobox(ws, nf);
+        skull_transform::cleanup_with_nobox(ws, nf)?;
         out.push_str(&emit_named(ws, cg, scx.interner(), nf.name.as_str(), nf));
     }
+    Ok(())
 }
 
 /// Whether a function body is cached as a [`Chunk`] (ordinary or coroutine) vs
@@ -1824,7 +1843,7 @@ fn emit_spec_chunk(
     let mut statics = mf.statics.clone();
     let mut nested = std::mem::take(&mut mf.nested_fns);
     collect_nested_statics(&nested, &mut statics);
-    emit_pass_nested_fns(ws, cg, scx, &mut nested, &mut lua);
+    emit_pass_nested_fns(ws, cg, scx, &mut nested, &mut lua)?;
     collect_callee_frefs(&mf, &mut deps);
     Ok(Chunk {
         lua,
@@ -1924,7 +1943,7 @@ pub fn prepare_instance_body_with_plans(
     let (spliced, _records) = skull_transform::inline_functions_with_plans(
         ws, scx, fref, mf, cache, concrete_plans,
     )?;
-    skull_transform::cleanup_with_nobox(ws, mf);
+    skull_transform::cleanup_with_nobox(ws, mf)?;
     skull_transform::convert_closures(mf, name);
     skull_transform::recover_counted_loops(ws, mf);
     Ok(spliced.into_iter().collect())
@@ -1991,7 +2010,7 @@ fn inline_hoisted_bodies(
         )
         .map_err(|e| e.message)?;
         deps.extend(spliced);
-        skull_transform::cleanup_with_nobox(ws, nf);
+        skull_transform::cleanup_with_nobox(ws, nf).map_err(|e| e.message)?;
         let mut children = std::mem::take(&mut nf.nested_fns);
         inline_hoisted_bodies(ws, scx, self_ref, &mut children, inline_cache, concrete_plans, deps)?;
         nf.nested_fns = children;
@@ -2790,13 +2809,14 @@ fn assemble(
     let ts = Instant::now();
     let mut out = String::from(crate::runtime_prelude());
     out.push_str(&crate::enum_cdata_defs(ws));
-    let (vdefs, value_emitted, value_gc) = crate::value_struct_defs(ws)?;
+    let rep_arena = scx.rep_arena();
+    let (vdefs, value_emitted, value_gc) = crate::value_struct_defs(ws, &rep_arena)?;
     out.push_str(&vdefs);
-    out.push_str(&crate::value_struct_gc_defs(ws, &value_gc));
+    out.push_str(&crate::value_struct_gc_defs(ws, &value_gc, &rep_arena)?);
     out.push_str(&crate::value_struct_metatypes(ws, &value_emitted));
     out.push_str(&crate::enum_cdata_metatypes(ws));
     out.push_str(&crate::c_struct_inspect_defs(ws, &value_emitted));
-    out.push_str(&crate::type_table_defs(ws, &value_gc));
+    out.push_str(&crate::type_table_defs(ws, &value_gc)?);
     out.push_str(&crate::enum_runtime_defs(ws));
     t_scaffold += ts.elapsed();
 
@@ -3104,19 +3124,18 @@ fn assemble(
     // through its leaves, so a leaf dep has to resolve back to the group that
     // owns it or the dependent initializer sorts before it. Built from the
     // globals that actually mint leaves -- never a name-shape guess.
-    let leaf_owner: FxHashMap<Ustr, Ustr> = ws
-        .modules
-        .iter()
-        .flat_map(|m| m.globals.iter())
-        .flat_map(|(_, g)| {
-            skull_mir::lower::GlobalPlan::for_declared_type(ws, &cache.scx, g.ty)
-                .ok()
-                .and_then(|plan| plan.leaf_names(g.name))
-                .into_iter()
-                .flatten()
-                .map(move |l| (l, g.name))
-        })
-        .collect();
+    let mut leaf_owner: FxHashMap<Ustr, Ustr> = FxHashMap::default();
+    for module in ws.modules.iter() {
+        for (_, g) in module.globals.iter() {
+            let plan = skull_mir::lower::GlobalPlan::for_declared_type(ws, &cache.scx, g.ty)
+                .map_err(|e| CompilerError::new_no_location(e.message))?;
+            if let Some(leaves) = plan.leaf_names(g.name) {
+                for leaf in leaves {
+                    leaf_owner.insert(leaf, g.name);
+                }
+            }
+        }
+    }
     let inits: Vec<GlobalInit> = pending_inits
         .into_iter()
         .map(|(name, init_name, line)| GlobalInit {
@@ -4156,7 +4175,7 @@ fn assemble_overlay(
     ws: &Workspace,
     cache: &SkullEmitCache,
     shader_changed: bool,
-) -> MirEmit {
+) -> Result<MirEmit, CompilerError> {
     let mut out = String::from("-- skull incremental overlay (loaded after main.lua)\n");
     let mut skipped: Vec<(String, String)> = Vec::new();
 
@@ -4287,18 +4306,29 @@ fn assemble_overlay(
                     a.mid,
                     a.gid,
                 );
+                if let Some(err) = unit.hard_error {
+                    return Err(err);
+                }
                 out.push_str(&unit.lua); // the (new) ginit fn def
                 if let Some(s) = unit.skipped {
                     skipped.push(s);
                 }
-                unit.pending_init.map(|(_, _, l)| l).unwrap_or_default()
+                unit.pending_init
+                    .map(|(_, _, line)| line)
+                    .ok_or_else(|| {
+                        CompilerError::new_no_location(format!(
+                            "changed global `{}` produced no initializer plan",
+                            a.name
+                        ))
+                    })?
             } else {
                 // Unchanged dependent: its ginit is already in main.lua; re-run only
                 // the line so it recomputes from the upstream's new value.
                 let g = &ws.module(a.mid).globals[a.gid];
+                let target = global_init_target(ws, &cache.scx, &cache.cg, g)?;
                 format!(
                     "{} = {}()\n",
-                    global_init_target(ws, &cache.scx, &cache.cg, g),
+                    target,
                     crate::global_init_fn_name(a.name.as_str())
                 )
             };
@@ -4336,7 +4366,7 @@ fn assemble_overlay(
         out.push_str(&cache.shader_registrations.lua);
     }
 
-    MirEmit { lua: out, skipped, phases: Vec::new() }
+    Ok(MirEmit { lua: out, skipped, phases: Vec::new() })
 }
 
 /// `__rock_rebind_system("<name>", <func>)` for each CHANGED decorated function
@@ -4425,7 +4455,7 @@ pub fn emit_overlay(
     }
     let t_relower = t2.elapsed();
     let t3 = Instant::now();
-    let mut emit = assemble_overlay(ws, cache, shader_changed);
+    let mut emit = assemble_overlay(ws, cache, shader_changed)?;
     // Advance the static baseline to the keys now in effect. A reset line fires on
     // the reload that dofiles the overlay carrying it, so once THIS overlay resets a
     // cell (or leaves it unchanged), a LATER overlay must not reset it again -- else
@@ -4570,6 +4600,42 @@ fn main() {
                 .expect("parse"),
         ];
         bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic")
+    }
+
+    #[test]
+    fn global_init_target_rejects_an_unresolved_storage_plan() {
+        let mut modules = vec![
+            skull_parser::parse_module_clean(
+                "global G: int = 0\nfn main() {}",
+                Ustr::from("<global-plan-test>"),
+            )
+            .expect("parse"),
+        ];
+        let mut ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic");
+        let mid = ws
+            .modules
+            .iter()
+            .find(|module| module.id != ModuleId::builtin())
+            .expect("test module")
+            .id;
+        let gid = ws
+            .module(mid)
+            .globals
+            .iter()
+            .find(|(_, global)| global.name == Ustr::from("G"))
+            .map(|(gid, _)| gid)
+            .expect("global");
+        let ty = ws.module(mid).globals[gid].ty;
+        let bone_semantic::prelude::TyId::Static(_, idx) = ty else {
+            panic!("fixture global must have a static type id")
+        };
+        ws.module_mut(mid).globals[gid].ty = bone_semantic::prelude::TyId::Local(idx);
+        let scx = skull_mir::lower::ScalarCtx::new(&ws);
+        let cg = CodegenCtx::new(&ws);
+        let global = &ws.module(mid).globals[gid];
+        let err = global_init_target(&ws, &scx, &cg, global)
+            .expect_err("a missing global representation plan must reject");
+        assert!(err.message.contains("global type cannot be planned"), "{err}");
     }
 
     fn bounded_workspace() -> Workspace {

@@ -32,10 +32,9 @@ impl Builder<'_> {
                             // value of another shape, addresses its own leading
                             // slots and the rest of the position nil-pads.
                             match shape.position_shape(pos, self.nobox_value_name(a)) {
-                                Some(vs) => {
-                                    let vs = vs.clone();
+                                Some(_vs) => {
                                     let r = self.lower_expr_repr(a)?;
-                                    for (k, lv) in self.repr_to_leaves(&r, &vs).into_iter().enumerate()
+                                    for (k, lv) in self.repr_to_leaves_bundle(&r)?.into_iter().enumerate()
                                     {
                                         slots[off + k] = Some(lv);
                                     }
@@ -82,15 +81,15 @@ impl Builder<'_> {
         // param/return/local, or a fresh ctor) yields its cells directly -- no box;
         // a Scalar (a genuinely boxed source: global singleton, `any`, if-join) is
         // spread back out.
-        let r = self.lower_expr_repr(value)?;
+        let r = self.lower_expr_repr(value)?.into_value();
         match r {
             ValueRepr::Group { name, parts, .. }
                 if EnumPlan::for_name(self.ws, name).is_some_and(|plan| plan.flat().is_some()) =>
             {
-                Ok(self.repr_group_to_cells(shape, parts))
+                Ok(self.repr_group_to_cells(shape, parts)?)
             }
             other => {
-                let bv = self.pack(other);
+                let bv = self.pack(other)?;
                 Ok(self.spread_box_to_cells(bv, shape))
             }
         }
@@ -115,14 +114,17 @@ impl Builder<'_> {
 
     /// The flat-enum `ValueShape` of `e`'s (non-nullable) inferred type, else `None`
     /// -- the gate for threading a `let`/reassign target as leaf cells.
-    pub(crate) fn flat_enum_value_shape_of(&self, e: Idx<Expr>) -> Option<ValueShape> {
-        let id = self.expr_rep_id(e, RepUse::Value, false)?;
-        let mut shape = self.scx.rep_arena().value_shape(id)?;
+    pub(crate) fn flat_enum_value_shape_of(
+        &self,
+        e: Idx<Expr>,
+    ) -> Result<Option<ValueShape>, CompilerError> {
+        let Some(id) = self.expr_rep_id(e, RepUse::Value, false)? else { return Ok(None) };
+        let Some(mut shape) = self.scx.rep_arena().value_shape(id) else { return Ok(None) };
         if !EnumPlan::for_name(self.ws, shape.name).is_some_and(|plan| plan.flat().is_some()) {
-            return None;
+            return Ok(None);
         }
         shape.nullable = false;
-        Some(shape)
+        Ok(Some(shape))
     }
 
     pub(crate) fn resume_frame_read_channel(
@@ -172,8 +174,15 @@ impl Builder<'_> {
     /// Split a flat-enum `ValueRepr::Group` into its cells (the inverse of
     /// `flat_cells_to_repr`) -- no box. Parts are leaf Scalars in `value_shape`
     /// order: `[tag, _0.., <rec>..]`.
-    pub(crate) fn repr_group_to_cells(&mut self, shape: &EnumFlatShape, parts: Vec<ValueRepr>) -> FlatCells {
-        let packed: Vec<Idx<Inst>> = parts.into_iter().map(|p| self.pack(p)).collect();
+    pub(crate) fn repr_group_to_cells(
+        &mut self,
+        shape: &EnumFlatShape,
+        parts: Vec<ValueRepr>,
+    ) -> Result<FlatCells, CompilerError> {
+        let packed: Vec<Idx<Inst>> = parts
+            .into_iter()
+            .map(|p| self.pack(p))
+            .collect::<Result<Vec<_>, _>>()?;
         let tag = packed[0];
         let positional = packed[1..1 + shape.tuple_width()].to_vec();
         let named = shape
@@ -182,7 +191,7 @@ impl Builder<'_> {
             .enumerate()
             .map(|(i, rf)| (*rf, packed[1 + shape.tuple_width() + i]))
             .collect();
-        FlatCells { tag, positional, named }
+        Ok(FlatCells { tag, positional, named })
     }
 
     /// A flat enum's runtime cells as a `ValueRepr::Group` in `value_shape` leaf

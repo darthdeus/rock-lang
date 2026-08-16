@@ -389,6 +389,7 @@ pub fn convert_closures_framed(
             params,
             abi_plan: None,
             abi_representation: mf.abi_representation.clone(),
+            rep_arena: mf.rep_arena.clone(),
             global_plan: mf.global_plan.clone(),
             statics: Vec::new(),
             // Reads were recorded while lowering the whole pre-split fn, so the

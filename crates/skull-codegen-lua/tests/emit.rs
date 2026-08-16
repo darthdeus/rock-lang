@@ -62,7 +62,7 @@ fn emit_clean(src: &str, fn_name: &str) -> String {
         .expect("function by name");
     let (mut func, interner) = common::lower_test_ref(&ws, mid, fid)
         .unwrap_or_else(|e| panic!("lower failed: {}", e.message));
-    skull_transform::cleanup(&mut func);
+    skull_transform::cleanup(&mut func).unwrap();
     let ctx = CodegenCtx::new(&ws);
     emit_function(&ws, &ctx, &interner, FuncRef { module: mid, func: fid }, &func)
 }
@@ -123,7 +123,7 @@ fn run(src: &str, driver: &str) -> String {
             plan,
             &concrete.plans,
         ) {
-            skull_transform::cleanup(&mut func);
+            skull_transform::cleanup(&mut func).unwrap();
             skull_transform::recover_counted_loops(&ws, &mut func);
             lua.push_str(&skull_codegen_lua::emit_named(
                 &ws,
@@ -718,7 +718,7 @@ fn emit_inlined(src: &str, fn_name: &str) -> String {
         &bodies.plans,
     )
     .expect("inline failed");
-    skull_transform::cleanup(&mut func);
+    skull_transform::cleanup(&mut func).unwrap();
     skull_transform::recover_counted_loops(&ws, &mut func);
     let ctx = CodegenCtx::new(&ws);
     emit_function(&ws, &ctx, scx.interner(), self_ref, &func)

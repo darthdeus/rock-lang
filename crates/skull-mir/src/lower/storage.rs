@@ -35,7 +35,7 @@ impl Builder<'_> {
                     cur = b;
                 }
                 Expr::Index { base: ib, index } => {
-                    let ContainerKind::NativeBufferValue(elem) = self.nb_kind(ib) else {
+                    let ContainerKind::NativeBufferValue(elem) = self.nb_kind(ib)? else {
                         return Ok(None);
                     };
                     if !self.is_leaf_addressed(elem)? {
@@ -89,16 +89,17 @@ impl Builder<'_> {
         let leaves = if hit.len() == 1 && hit[0].address().path.as_str() == path {
             vec![self.lower_expr(value)?]
         } else {
-            let sub = self
-                .value_aggregate_of(value)
-                .and_then(|n| self.nominal_rep_shape(n, false))
-                .ok_or_else(|| {
-                    gap(format!(
-                        "whole write to `{path}` needs a value-struct or cdata-enum RHS"
-                    ))
-                })?;
+            let _sub = match self.value_aggregate_of(value) {
+                Some(n) => self.nominal_rep_shape(n, false)?,
+                None => None,
+            }
+            .ok_or_else(|| {
+                gap(format!(
+                    "whole write to `{path}` needs a value-struct or cdata-enum RHS"
+                ))
+            })?;
             let repr = self.lower_expr_repr(value)?;
-            self.repr_to_leaves(&repr, &sub)
+            self.repr_to_leaves_bundle(&repr)?
         };
         if leaves.len() != hit.len() {
             return Err(gap(format!(
@@ -277,9 +278,6 @@ impl Builder<'_> {
         elem: Ustr,
     ) -> Result<(), CompilerError> {
         let container = self.native_buffer_plan(elem)?;
-        let shape = container
-            .element_shape(&self.scx.rep_arena())
-            .ok_or_else(|| gap("leaf-addressed element is not a value struct"))?;
         let plan: Vec<PlaceBundle> = container
             .leaf_addresses()
             .ok_or_else(|| gap("leaf-addressed element has no owned leaf address plan"))?
@@ -287,9 +285,11 @@ impl Builder<'_> {
             .cloned()
             .map(|address| container.place(address).map_err(|e| gap(e.message)))
             .collect::<Result<_, _>>()?;
-        let repr = self.lower_expr_repr(value)?;
-        let bundle = ValueBundle::new(container.element_rep(), repr);
-        let leaves = self.repr_to_leaves_bundle(&bundle, &shape);
+        let bundle = self.lower_expr_repr(value)?;
+        let shape = container
+            .element_shape(&self.scx.rep_arena())
+            .ok_or_else(|| gap(format!("NativeBuffer<{elem}> has no value leaf plan")))?;
+        let leaves = self.repr_to_storage_leaves(&bundle, &shape, "native buffer store")?;
         if leaves.len() != plan.len() {
             return Err(gap(format!(
                 "leaf store arity mismatch for NativeBuffer<{elem}>: {} leaves vs {} slots",
@@ -364,7 +364,7 @@ impl Builder<'_> {
         vec: Idx<Inst>,
         index: Idx<Inst>,
         elem: ColumnElem,
-    ) -> Result<ValueRepr, CompilerError> {
+    ) -> Result<ValueBundle, CompilerError> {
         let shape = self.column_shape(elem)?;
         let slot = self.checked_column_index(vec, index);
         // Presence leads the reads for a nullable element, which is exactly what
@@ -382,7 +382,10 @@ impl Builder<'_> {
             })
             .collect();
         let mut idx = 0;
-        Ok(self.rebuild_from_leaves(&shape, &leaves, &mut idx))
+        Ok(ValueBundle::new(
+            elem.representation(),
+            self.rebuild_from_leaves(&shape, &leaves, &mut idx),
+        ))
     }
 
     /// The unique stdlib function `name`, for a lowering that SYNTHESIZES a call
@@ -460,7 +463,7 @@ impl Builder<'_> {
                 let Some(elem) = self.vec_column_elem_of(*recv)? else { return Ok(None) };
                 let vec = self.lower_expr(*recv)?;
                 let i = self.lower_expr(*index)?;
-                Ok(Some(self.column_element_repr(vec, i, elem)?))
+                Ok(Some(self.column_element_repr(vec, i, elem)?.into_value()))
             }
             ("__vec_data_set", [recv, index, value]) => {
                 let Some(elem) = self.vec_column_elem_of(*recv)? else { return Ok(None) };
@@ -511,7 +514,7 @@ impl Builder<'_> {
                 let vec = self.lower_expr(*recv)?;
                 let i = self.lower_expr(*index)?;
                 let repr = self.lower_expr_repr(*value)?;
-                let leaves = self.repr_to_leaves(&repr, &shape);
+                let leaves = self.repr_to_leaves_bundle(&repr)?;
                 if leaves.len() != paths.len() {
                     return Err(gap(format!(
                         "column insert arity mismatch for [{}]",
@@ -616,6 +619,7 @@ impl Builder<'_> {
     pub(crate) fn make_column_header(&mut self, elem: ColumnElem, capacity: Idx<Inst>) -> Idx<Inst> {
         self.emit_cur(Inst::MakeVecColumnHeader {
             elem: elem.name,
+            representation: elem.representation(),
             nobox: elem.is_nobox(),
             capacity,
         })
@@ -637,6 +641,7 @@ impl Builder<'_> {
         let columns = column_leaf_paths(&shape).into_iter().map(|p| (p, Vec::new())).collect();
         Ok(self.emit_cur(Inst::MakeVecColumns {
             elem: elem.name,
+            representation: elem.representation(),
             nobox: elem.is_nobox(),
             columns,
             len: 0,
@@ -752,7 +757,8 @@ impl Builder<'_> {
             index: one_based,
             kind: ContainerKind::VecColumn,
         });
-        self.column_append_repr(vec, &ValueRepr::Scalar(value), elem)?;
+        let bundle = ValueBundle::new(elem.representation(), ValueRepr::Scalar(value));
+        self.column_append_bundle(vec, &bundle, elem)?;
         let next = self.emit_cur(Inst::IntAdd(i_now, one));
         self.emit_cur(Inst::Store {
             cell: i_cell,
@@ -776,28 +782,39 @@ impl Builder<'_> {
         let shape = self.column_shape(elem)?;
         let vec = self.lower_expr(recv)?;
         let repr = self.lower_expr_repr(item)?;
-        self.column_append_repr_with_shape(vec, &repr, elem, &shape)?;
+        self.column_append_bundle_with_shape(vec, &repr, elem, &shape)?;
         Ok(ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil))))
     }
 
-    pub(crate) fn column_append_repr(
+    pub(crate) fn column_append_bundle(
         &mut self,
         vec: Idx<Inst>,
-        repr: &ValueRepr,
+        bundle: &ValueBundle,
         elem: ColumnElem,
     ) -> Result<(), CompilerError> {
         let shape = self.column_shape(elem)?;
-        self.column_append_repr_with_shape(vec, repr, elem, &shape)
+        let leaves = self.repr_to_storage_leaves(bundle, &shape, "column append")?;
+        self.column_append_leaves(vec, leaves, elem, &shape)
     }
 
-    pub(crate) fn column_append_repr_with_shape(
+    pub(crate) fn column_append_bundle_with_shape(
         &mut self,
         vec: Idx<Inst>,
-        repr: &ValueRepr,
+        bundle: &ValueBundle,
         elem: ColumnElem,
         shape: &ValueShape,
     ) -> Result<(), CompilerError> {
-        let leaves = self.repr_to_leaves(repr, shape);
+        let leaves = self.repr_to_storage_leaves(bundle, shape, "column append")?;
+        self.column_append_leaves(vec, leaves, elem, shape)
+    }
+
+    fn column_append_leaves(
+        &mut self,
+        vec: Idx<Inst>,
+        leaves: Vec<Idx<Inst>>,
+        elem: ColumnElem,
+        shape: &ValueShape,
+    ) -> Result<(), CompilerError> {
         let paths = column_leaf_paths(shape);
         if leaves.len() != paths.len() {
             return Err(gap(format!(
@@ -927,7 +944,7 @@ impl Builder<'_> {
         elem: ColumnElem,
     ) -> Result<(), CompilerError> {
         let repr = self.lower_expr_repr(value)?;
-        self.column_element_store_repr(vec, index, &repr, elem)
+        self.column_element_store_bundle(vec, index, &repr, elem)
     }
 
 
@@ -987,7 +1004,8 @@ impl Builder<'_> {
         value: Idx<Expr>,
         elem: ColumnElem,
     ) -> Result<(), CompilerError> {
-        let repr = self.lower_expr_repr(value)?;
+        let bundle = self.lower_expr_repr(value)?;
+        let repr = bundle.value();
         // A SCALAR here is a nullable value that never became a Group -- a literal
         // `null`, or a boxed source. Its presence is a runtime nil test, and the
         // leaves come from field reads off the box, which is why `boxed` defers
@@ -1005,7 +1023,7 @@ impl Builder<'_> {
         let Some(present) = present else {
             let slot = self.call_spine("__map_col_slot", vec![m, key])?;
             let data = self.map_col_data(m);
-            return self.column_element_store_repr(data, slot, &repr, elem);
+            return self.column_element_store_bundle(data, slot, &bundle, elem);
         };
         let set_bb = self.f.new_block();
         let del_bb = self.f.new_block();
@@ -1016,12 +1034,15 @@ impl Builder<'_> {
         );
         self.cur = set_bb;
         let stored = match boxed {
-            Some(s) => self.boxed_value_copy_repr(s, elem.name),
-            None => repr,
+            Some(s) => ValueBundle::new(
+                elem.representation(),
+                self.boxed_value_copy_repr(s, elem.name)?,
+            ),
+            None => bundle.clone(),
         };
         let slot = self.call_spine("__map_col_slot", vec![m, key])?;
         let data = self.map_col_data(m);
-        self.column_element_store_repr(data, slot, &stored, elem)?;
+        self.column_element_store_bundle(data, slot, &stored, elem)?;
         self.f.set_term(self.cur, Term::Goto(join));
         self.cur = del_bb;
         self.call_spine("__map_col_free", vec![m, key])?;
@@ -1040,7 +1061,7 @@ impl Builder<'_> {
     ) -> Result<ValueRepr, CompilerError> {
         let slot = self.call_spine("__map_col_slot_checked", vec![m, key])?;
         let data = self.map_col_data(m);
-        self.column_element_repr(data, slot, elem)
+        Ok(self.column_element_repr(data, slot, elem)?.into_value())
     }
 
     /// `m.get(k)` on a column-stored Map: a `V?` whose presence is the SPINE.
@@ -1083,9 +1104,9 @@ impl Builder<'_> {
         let data = self.map_col_data(m);
         let found = self.column_element_repr(data, slot, elem)?;
         let stored: Vec<Idx<Inst>> = if unboxed {
-            self.repr_to_leaves(&found, &shape)
+            self.repr_to_leaves_bundle(&found)?
         } else {
-            vec![self.pack(found)]
+            vec![self.pack(found.into_value())?]
         };
         for (cell, value) in cells.iter().zip(stored) {
             self.emit_cur(Inst::Store { cell: *cell, value });
@@ -1118,15 +1139,15 @@ impl Builder<'_> {
     /// [`Self::column_element_store`] from an already-lowered repr, for a caller
     /// that had to inspect the value's presence before choosing a block to store
     /// in (the column Map's nullable arm).
-    pub(crate) fn column_element_store_repr(
+    pub(crate) fn column_element_store_bundle(
         &mut self,
         vec: Idx<Inst>,
         index: Idx<Inst>,
-        repr: &ValueRepr,
+        bundle: &ValueBundle,
         elem: ColumnElem,
     ) -> Result<(), CompilerError> {
         let shape = self.column_shape(elem)?;
-        let leaves = self.repr_to_leaves(repr, &shape);
+        let leaves = self.repr_to_storage_leaves(bundle, &shape, "column store")?;
         let paths = column_leaf_paths(&shape);
         if leaves.len() != paths.len() {
             return Err(gap(format!(
