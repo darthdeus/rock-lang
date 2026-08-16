@@ -407,13 +407,12 @@ impl Builder<'_> {
                     .into_iter()
                     .enumerate()
                     .map(|(i, _)| {
-                        lam_plan
-                            .params()
-                            .get(i)
-                            .map(|id| self.scx.rep_arena().ret_slot(*id))
-                            .unwrap_or(RetSlot::Opaque)
+                        let id = lam_plan.params().get(i).ok_or_else(|| {
+                            self.gap_here(format!("lambda ABI has no parameter slot {i}"))
+                        })?;
+                        Ok(self.scx.rep_arena().ret_slot(*id))
                     })
-                    .collect();
+                    .collect::<Result<_, CompilerError>>()?;
                 // A lambda's params land in the SAME cell namespace as the
                 // enclosing body's, so it collects its own list off `f.params`
                 // rather than owning it -- but the binding rule itself is
@@ -421,7 +420,9 @@ impl Builder<'_> {
                 let before = self.f.params.len();
                 for (i, pb) in params.into_iter().enumerate() {
                     let pname = self.body.binding_arena[pb].name;
-                    let slot = param_slots.get(i).cloned().unwrap_or(RetSlot::Opaque);
+                    let slot = param_slots.get(i).cloned().ok_or_else(|| {
+                        self.gap_here(format!("lambda ABI has no collected parameter slot {i}"))
+                    })?;
                     self.bind_param_slot(pb, pname, &slot);
                 }
                 let param_cells: Vec<Idx<Cell>> = self.f.params.split_off(before);

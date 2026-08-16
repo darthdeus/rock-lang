@@ -961,13 +961,16 @@ impl Builder<'_> {
         arg_idxs: &[Idx<Expr>],
     ) -> Result<ValueRepr, CompilerError> {
         let arena = self.scx.rep_arena();
+        let plan_slots: Vec<RetSlot> =
+            plan.params().iter().map(|id| arena.ret_slot(*id)).collect();
         let mut argv = Vec::new();
         for (i, &a) in arg_idxs.iter().enumerate() {
-            let slot = plan
-                .params()
-                .get(i)
-                .map(|id| arena.ret_slot(*id))
-                .unwrap_or(RetSlot::Opaque);
+            let slot = required_wire_slot(
+                &plan_slots,
+                i,
+                false,
+                "indirect function-value call",
+            )?;
             argv.extend(self.arg_values_for_slot(&slot, a)?);
         }
         let Some(result) = plan.result() else {
@@ -1083,15 +1086,21 @@ impl Builder<'_> {
         // The RECEIVER arrives already lowered, so it cannot go through
         // `arg_values_for_slot`; a tuple receiver has no UFCS spelling, so
         // `Leaves` is the only splatting slot reachable here.
-        match param_shapes.first() {
-            Some(RetSlot::Leaves(shape)) => {
+        let receiver_slot = required_wire_slot(&param_shapes, 0, false, "UFCS receiver")?;
+        match receiver_slot {
+            RetSlot::Leaves(shape) => {
                 let leaves = self.cdata_leaves(recv, &shape.clone());
                 argv.extend(leaves);
             }
             _ => argv.push(recv),
         }
         for (i, &a) in arg_idxs.iter().enumerate() {
-            let slot = param_shapes.get(i + 1).cloned().unwrap_or(RetSlot::Opaque);
+            let slot = required_wire_slot(
+                &param_shapes,
+                i + 1,
+                self.ws.module(func.module).functions[func.func].is_variadic,
+                "UFCS call",
+            )?;
             argv.extend(self.arg_values_for_slot(&slot, a)?);
         }
         match dc.plan.ret_shape() {
@@ -1128,7 +1137,12 @@ impl Builder<'_> {
         if !any_named {
             let mut out = Vec::new();
             for (i, &a) in arg_idxs.iter().enumerate() {
-                let slot = param_shapes.get(i).cloned().unwrap_or(RetSlot::Opaque);
+                let slot = required_wire_slot(
+                    param_shapes,
+                    i,
+                    self.ws.module(func.module).functions[func.func].is_variadic,
+                    "direct scalar-ABI call",
+                )?;
                 out.extend(self.arg_values_for_slot(&slot, a)?);
             }
             return Ok(out);
@@ -1191,7 +1205,7 @@ impl Builder<'_> {
         let hi = slots.iter().rposition(|s| s.is_some()).map_or(0, |i| i + 1);
         let mut out = Vec::new();
         for i in 0..hi {
-            let slot = param_shapes.get(i).cloned().unwrap_or(RetSlot::Opaque);
+            let slot = required_wire_slot(param_shapes, i, false, "slotted call")?;
             match slots[i].clone() {
                 Some(r) => out.extend(self.repr_to_slot_values(r, &slot)),
                 // An omitted param arrives as one nil PER WIRE VALUE, so the

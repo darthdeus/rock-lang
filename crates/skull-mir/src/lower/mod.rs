@@ -40,6 +40,19 @@ fn gap(msg: impl std::fmt::Display) -> CompilerError {
     CompilerError::new_no_location(format!("skull-mir: lowering gap: {msg}"))
 }
 
+pub(crate) fn required_wire_slot(
+    slots: &[RetSlot],
+    index: usize,
+    variadic: bool,
+    context: impl std::fmt::Display,
+) -> Result<RetSlot, CompilerError> {
+    slots
+        .get(index)
+        .cloned()
+        .or_else(|| variadic.then(|| slots.last().cloned()).flatten())
+        .ok_or_else(|| gap(format!("{context} has no ABI slot {index}")))
+}
+
 // --- scalarized value ABI (rock parity) -------------------------------------
 //
 // A `value` struct is passed/returned as its flattened primitive LEAF scalars
@@ -1194,7 +1207,7 @@ fn lower_body(
         nested_fn_counters: HashMap::new(),
         presence_only: None,
     };
-    b.lower_params();
+    b.lower_params()?;
     b.fill_param_defaults()?;
     b.lower_root()?;
     Ok(b.f)
@@ -1547,6 +1560,11 @@ fn lower_decorator_inner(
     let target = body
         .deco_target
         .ok_or_else(|| gap("decorator body has no target binding"))?;
+    let param_reps = scx
+        .rep_arena()
+        .boxed_function(scx.target, body.param_bindings.clone().count())
+        .params()
+        .to_vec();
     let f = MirFunc::new(name);
     let cur = f.entry();
     let mut b = Builder {
@@ -1567,7 +1585,7 @@ fn lower_decorator_inner(
         in_defer_body: false,
         resume_arg: None,
         // Decorator bodies never run `inline_functions` -- box value args.
-        param_reps: Vec::new(),
+        param_reps,
         ret_rep: None,
         fn_name_span: None,
         cur_span: None,
@@ -1588,7 +1606,7 @@ fn lower_decorator_inner(
     let tcell = b.f.new_cell(Some(b.body.binding_arena[target].name));
     b.f.params.push(tcell);
     b.binds.insert(raw(target), tcell);
-    b.lower_params();
+    b.lower_params()?;
     b.fill_param_defaults()?;
     b.lower_root()?;
     Ok(b.f)
@@ -1726,12 +1744,13 @@ impl Builder<'_> {
         self.scx.rep_arena().ret_slot(id)
     }
 
-    fn param_slot(&self, index: usize) -> RetSlot {
-        self.param_reps
+    fn param_slot(&self, index: usize) -> Result<RetSlot, CompilerError> {
+        let id = self
+            .param_reps
             .get(index)
             .copied()
-            .map(|id| self.rep_slot(id))
-            .unwrap_or(RetSlot::Opaque)
+            .ok_or_else(|| self.gap_here(format!("function ABI has no parameter slot {index}")))?;
+        Ok(self.rep_slot(id))
     }
 
     fn result_shape(&self) -> Option<ValueShape> {
@@ -1892,13 +1911,14 @@ impl Builder<'_> {
         matches!(self.f.blocks[self.cur].term, Term::Unreachable)
     }
 
-    fn lower_params(&mut self) {
+    fn lower_params(&mut self) -> Result<(), CompilerError> {
         let pbs: Vec<Idx<BindingInfo>> = self.body.param_bindings.into_iter().collect();
         for (i, pb) in pbs.iter().enumerate() {
             let name = self.body.binding_arena[*pb].name;
-            let slot = self.param_slot(i);
+            let slot = self.param_slot(i)?;
             self.bind_param_slot(*pb, name, &slot);
         }
+        Ok(())
     }
 
     /// Bind one declared param to the cells its wire slot occupies, in the Lua

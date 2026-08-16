@@ -171,7 +171,7 @@ impl Builder<'_> {
 
         for (i, pb) in params.into_iter().enumerate() {
             let pname = child.body.binding_arena[pb].name;
-            let slot = child.param_slot(i);
+            let slot = child.param_slot(i)?;
             child.bind_param_slot(pb, pname, &slot);
         }
 
