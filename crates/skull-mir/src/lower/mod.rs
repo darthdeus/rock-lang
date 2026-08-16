@@ -324,7 +324,7 @@ impl ScalarCtx {
         std::sync::Arc::clone(&self.interner)
     }
 
-    pub(crate) fn rep_arena(&self) -> std::sync::Arc<abi::RepArena> {
+    pub fn rep_arena(&self) -> std::sync::Arc<abi::RepArena> {
         std::sync::Arc::clone(&self.rep_arena)
     }
 
@@ -1131,6 +1131,7 @@ fn lower_body(
         .and_then(|ir| ir.per_fn.get(&BodyOwner::Function(fid)));
 
     let mut f = MirFunc::new(func.name);
+    f.rep_arena = Some(scx.rep_arena());
     // A `co fn` lowers to an ordinary CFG with `Term::Yield`s + a resume-arg cell
     // (the value `yield e` evaluates to). `skull-transform`'s coroutine pass then
     // rewrites it into the stackless state machine.
@@ -1194,7 +1195,7 @@ fn lower_body(
         nested_fn_counters: HashMap::new(),
         presence_only: None,
     };
-    b.lower_params();
+    b.lower_params()?;
     b.fill_param_defaults()?;
     b.lower_root()?;
     Ok(b.f)
@@ -1240,7 +1241,8 @@ fn lower_global_inner(
     let inf = ws
         .inference(mid)
         .and_then(|ir| ir.per_fn.get(&BodyOwner::Global(gid)));
-    let f = MirFunc::new(name);
+    let mut f = MirFunc::new(name);
+    f.rep_arena = Some(scx.rep_arena());
     let cur = f.entry();
     let mut b = Builder {
         ws,
@@ -1547,8 +1549,18 @@ fn lower_decorator_inner(
     let target = body
         .deco_target
         .ok_or_else(|| gap("decorator body has no target binding"))?;
-    let f = MirFunc::new(name);
+    let mut f = MirFunc::new(name);
+    f.rep_arena = Some(scx.rep_arena());
     let cur = f.entry();
+    let representation = scx
+        .rep_arena()
+        .boxed_function(scx.target(), concrete_plan.signature.params.len());
+    f.abi_representation = Some(representation.clone());
+    let param_reps = representation.params().to_vec();
+    let ret_rep = concrete_plan
+        .signature
+        .result
+        .map(|_| representation.result().expect("boxed decorator result plan"));
     let mut b = Builder {
         ws,
         scx,
@@ -1566,9 +1578,10 @@ fn lower_decorator_inner(
         defers: Vec::new(),
         in_defer_body: false,
         resume_arg: None,
-        // Decorator bodies never run `inline_functions` -- box value args.
-        param_reps: Vec::new(),
-        ret_rep: None,
+        // Decorator bodies never run `inline_functions` -- box value args, but
+        // their declared parameters still need the owned ABI slots.
+        param_reps,
+        ret_rep,
         fn_name_span: None,
         cur_span: None,
         cur_expr: None,
@@ -1588,7 +1601,7 @@ fn lower_decorator_inner(
     let tcell = b.f.new_cell(Some(b.body.binding_arena[target].name));
     b.f.params.push(tcell);
     b.binds.insert(raw(target), tcell);
-    b.lower_params();
+    b.lower_params()?;
     b.fill_param_defaults()?;
     b.lower_root()?;
     Ok(b.f)
@@ -1726,12 +1739,12 @@ impl Builder<'_> {
         self.scx.rep_arena().ret_slot(id)
     }
 
-    fn param_slot(&self, index: usize) -> RetSlot {
+    fn param_slot(&self, index: usize) -> Result<RetSlot, CompilerError> {
         self.param_reps
             .get(index)
             .copied()
             .map(|id| self.rep_slot(id))
-            .unwrap_or(RetSlot::Opaque)
+            .ok_or_else(|| self.gap_here(format!("parameter {index} has no representation plan")))
     }
 
     fn result_shape(&self) -> Option<ValueShape> {
@@ -1892,13 +1905,14 @@ impl Builder<'_> {
         matches!(self.f.blocks[self.cur].term, Term::Unreachable)
     }
 
-    fn lower_params(&mut self) {
+    fn lower_params(&mut self) -> Result<(), CompilerError> {
         let pbs: Vec<Idx<BindingInfo>> = self.body.param_bindings.into_iter().collect();
         for (i, pb) in pbs.iter().enumerate() {
             let name = self.body.binding_arena[*pb].name;
-            let slot = self.param_slot(i);
+            let slot = self.param_slot(i)?;
             self.bind_param_slot(*pb, name, &slot);
         }
+        Ok(())
     }
 
     /// Bind one declared param to the cells its wire slot occupies, in the Lua
@@ -1964,7 +1978,7 @@ impl Builder<'_> {
                 self.f.set_term(self.cur, Term::Branch { cond: is_nil, then_bb, else_bb: join });
                 self.cur = then_bb;
                 let r = self.lower_expr_repr(*def)?;
-                let leaves = self.repr_to_leaves(&r, &shape);
+                let leaves = self.repr_to_leaves_bundle_for_shape(&r, &shape)?;
                 for (c, v) in cells.iter().zip(leaves) {
                     self.emit_cur(Inst::Store { cell: *c, value: v });
                 }
@@ -2082,18 +2096,31 @@ impl Builder<'_> {
             return Ok(vec![]);
         }
         if let Some(shape) = self.result_shape() {
+            let is_phantom = match &self.body.expr_arena[e] {
+                Expr::Call { callee: Callee::Unresolved { name, .. }, args, .. } => {
+                    name.as_str() == "phantom" && args.clone().into_iter().next().is_none()
+                }
+                _ => false,
+            };
+            if is_phantom {
+                self.lower_expr(e)?;
+                return Ok((0..shape.leaf_count())
+                    .map(|_| self.emit_cur(Inst::Const(Lit::Nil)))
+                    .collect());
+            }
             let r = self.lower_expr_repr(e)?;
-            let rep = self.ret_rep.expect("result_shape requires an owned result RepId");
-            let bundle = ValueBundle::new(rep, r);
-            return Ok(self.repr_to_leaves_bundle(&bundle, &shape));
+            if self.scx.rep_arena().value_shape(r.representation()).is_none() {
+                return self.opaque_boundary_leaves(&r, &shape, "return boundary");
+            }
+            return self.repr_to_leaves_bundle_after_presence(&r, &shape);
         }
         if let Some(shape) = self.result_tuple() {
             if shape.nullable {
                 return self.nullable_tuple_return_slots(e, &shape);
             }
             if shape.splats() {
-                let r = self.lower_expr_repr(e)?;
-                return Ok(self.tuple_repr_to_slots(r, &shape));
+                let r = self.lower_expr_repr(e)?.into_value();
+                return self.tuple_repr_to_slots(r, &shape);
             }
             let v = self.lower_expr(e)?;
             return Ok(self.tuple_return_operands(v, shape.slots.len()));
@@ -2133,7 +2160,7 @@ impl Builder<'_> {
         e: Idx<Expr>,
         shape: &TupleRetShape,
     ) -> Result<Vec<Idx<Inst>>, CompilerError> {
-        let r = self.lower_expr_repr(e)?;
+        let r = self.lower_expr_repr(e)?.into_value();
         if let ValueRepr::Scalar(v) = &r {
             if !matches!(self.f.insts[*v], Inst::Const(Lit::Nil)) {
                 return Err(gap(
@@ -2143,7 +2170,7 @@ impl Builder<'_> {
             }
             return Ok(self.absent_tuple_slots(shape));
         }
-        Ok(self.tuple_repr_to_slots(r, shape))
+        self.tuple_repr_to_slots(r, shape)
     }
 
     /// The N return operands for a tuple-return `return <v>`. A fresh `MakeTuple`
@@ -2173,11 +2200,15 @@ impl Builder<'_> {
     /// presence sits on the wire. A repr that carries its OWN tag forwards that
     /// tag: `return maybe(b)` hands on the callee's presence, and synthesizing
     /// `true` here instead reported every absent forward as present.
-    fn tuple_repr_to_slots(&mut self, r: ValueRepr, shape: &TupleRetShape) -> Vec<Idx<Inst>> {
+    fn tuple_repr_to_slots(
+        &mut self,
+        r: ValueRepr,
+        shape: &TupleRetShape,
+    ) -> Result<Vec<Idx<Inst>>, CompilerError> {
         // A phantom tuple has no aggregate to project; every wire slot is absent.
         if let ValueRepr::Scalar(v) = &r {
             if matches!(self.f.insts[*v], Inst::Const(Lit::Nil)) {
-                return self.absent_tuple_slots(shape);
+                return Ok(self.absent_tuple_slots(shape));
             }
         }
         let present = match (shape.nullable, &r) {
@@ -2188,7 +2219,7 @@ impl Builder<'_> {
         let parts: Vec<ValueRepr> = match r {
             ValueRepr::Tuple { parts, .. } if parts.len() == shape.slots.len() => parts,
             other => {
-                let base = self.pack(other);
+                let base = self.pack(other)?;
                 (0..shape.slots.len())
                     .map(|index| ValueRepr::Scalar(self.emit_cur(Inst::TupleIndex { base, index })))
                     .collect()
@@ -2198,7 +2229,7 @@ impl Builder<'_> {
         out.extend(present);
         for (slot, part) in shape.slots.iter().zip(parts) {
             match slot {
-                RetSlot::Opaque => out.push(self.pack(part)),
+                RetSlot::Opaque => out.push(self.pack(part)?),
                 // A BOXED source at a non-nullable splatting slot is the iterator
                 // protocol's "no element" placeholder (`return (false,
                 // phantom())`), which is nil -- field-reading it would fault, and
@@ -2210,14 +2241,14 @@ impl Builder<'_> {
                 {
                     let mut nullable = vs.clone();
                     nullable.nullable = true;
-                    let leaves = self.repr_to_leaves(&part, &nullable);
+                    let leaves = self.repr_to_leaves_shape(&part, &nullable)?;
                     out.extend(leaves.into_iter().skip(1));
                 }
-                RetSlot::Leaves(vs) => out.extend(self.repr_to_leaves(&part, vs)),
-                RetSlot::Nested(inner) => out.extend(self.tuple_repr_to_slots(part, inner)),
+                RetSlot::Leaves(vs) => out.extend(self.repr_to_leaves_shape(&part, vs)?),
+                RetSlot::Nested(inner) => out.extend(self.tuple_repr_to_slots(part, inner)?),
             }
         }
-        out
+        Ok(out)
     }
 
     /// Rebuild the tuple repr `shape` describes from a flat slot list -- the
@@ -2271,15 +2302,7 @@ impl Builder<'_> {
             return Ok(vec![self.lower_expr(a)?]);
         }
         let r = self.lower_expr_repr(a)?;
-        Ok(self.repr_to_slot_values(r, slot))
-    }
-
-    pub(crate) fn repr_to_slot_values(&mut self, repr: ValueRepr, slot: &RetSlot) -> Vec<Idx<Inst>> {
-        match slot {
-            RetSlot::Opaque => vec![self.pack(repr)],
-            RetSlot::Leaves(shape) => self.repr_to_leaves(&repr, shape),
-            RetSlot::Nested(shape) => self.tuple_repr_to_slots(repr, shape),
-        }
+        self.repr_to_slot_values_bundle(&r, slot)
     }
 
 }
@@ -2436,10 +2459,9 @@ pub fn map_key_rejection(ws: &Workspace, mid: ModuleId) -> Option<(String, Span)
 /// position. Not a legal C boundary type: no `ffi.cdef` typedef exists, so
 /// `ffi.new`/`sizeof`/`ffi.istype`/the extern ABI cannot name it.
 fn nominal_is_gc_value(ws: &Workspace, name: Ustr) -> bool {
-    let rep_arena = RepArena::default();
     map_is_value_struct(ws, name)
         && !matches!(
-            rep_arena.nominal_value_storage(ws, bone_semantic::hir::FnBackend::Lua, name),
+            crate::lower::declared_value_storage(ws, bone_semantic::hir::FnBackend::Lua, name),
             Some(ValueStorage::CData)
         )
 }

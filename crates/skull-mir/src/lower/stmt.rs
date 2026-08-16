@@ -122,7 +122,8 @@ impl Builder<'_> {
         let abi = self.nested_fn_abi(name, params, hoisted)?;
         self.nested_fn_globals.insert(raw(name), abi.clone());
 
-        let mf = MirFunc::new(hoisted);
+        let mut mf = MirFunc::new(hoisted);
+        mf.rep_arena = Some(self.scx.rep_arena());
         let entry = mf.entry();
         let mut child = Builder {
             ws: self.ws,
@@ -171,7 +172,7 @@ impl Builder<'_> {
 
         for (i, pb) in params.into_iter().enumerate() {
             let pname = child.body.binding_arena[pb].name;
-            let slot = child.param_slot(i);
+            let slot = child.param_slot(i)?;
             child.bind_param_slot(pb, pname, &slot);
         }
 
@@ -203,25 +204,36 @@ impl Builder<'_> {
                 Statement::Let { name, value } => {
                     // Flat enums and guaranteed no-box values live in leaf cells,
                     // matching the scalar ABI instead of relying on later SROA.
-                    let threaded_shape = self
-                        .flat_enum_value_shape_of(value)
-                        .or_else(|| self.nobox_binding_shape(name))
-                        .or_else(|| self.nobox_value_shape_of(value));
+                    let threaded_shape = if let Some(shape) = self.flat_enum_value_shape_of(value)? {
+                        Some(shape)
+                    } else if let Some(shape) = self.nobox_binding_shape(name)? {
+                        Some(shape)
+                    } else {
+                        self.nobox_value_shape_of(value)?
+                    };
+                    let mut threaded = false;
+                    let mut opaque_repr = None;
                     if let Some(shape) = threaded_shape {
                         let r = self.lower_expr_repr(value)?;
-                        let leaves = self.repr_to_leaves(&r, &shape);
-                        let bname = self.body.binding_arena[name].name;
-                        let cells: Vec<Idx<Cell>> = leaves
-                            .into_iter()
-                            .enumerate()
-                            .map(|(li, lv)| {
-                                let c = self.f.new_cell(Some(Ustr::from(format!("{bname}__{li}").as_str())));
-                                self.emit_cur(Inst::Store { cell: c, value: lv });
-                                c
-                            })
-                            .collect();
-                        self.group_binds.insert(raw(name), (cells, shape));
-                    } else {
+                        if self.scx.rep_arena().value_shape(r.representation()).is_some() {
+                            let leaves = self.repr_to_leaves_bundle_for_shape(&r, &shape)?;
+                            let bname = self.body.binding_arena[name].name;
+                            let cells: Vec<Idx<Cell>> = leaves
+                                .into_iter()
+                                .enumerate()
+                                .map(|(li, lv)| {
+                                    let c = self.f.new_cell(Some(Ustr::from(format!("{bname}__{li}").as_str())));
+                                    self.emit_cur(Inst::Store { cell: c, value: lv });
+                                    c
+                                })
+                                .collect();
+                            self.group_binds.insert(raw(name), (cells, shape));
+                            threaded = true;
+                        } else {
+                            opaque_repr = Some(r);
+                        }
+                    }
+                    if !threaded {
                         let shape = self
                             .nullable_tuple_wire_shape(value)?
                             .or(self.expr_tuple_shape(value)?.filter(TupleRetShape::splats));
@@ -231,11 +243,14 @@ impl Builder<'_> {
                         // boxes the `nobox` element the splat exists to keep
                         // unboxed; a packed tuple is also structurally never nil, so
                         // a nullable one answered `t == null` as false when absent.
-                        let r = self.lower_expr_repr(value)?;
-                        let slots = self.tuple_repr_to_slots(r, &shape);
+                        let r = self.lower_expr_repr(value)?.into_value();
+                        let slots = self.tuple_repr_to_slots(r, &shape)?;
                             self.bind_tuple_slots(name, &slots, shape);
                         } else {
-                        let v = self.lower_expr(value)?;
+                        let v = match opaque_repr {
+                            Some(r) => self.pack(r.into_value())?,
+                            None => self.lower_expr(value)?,
+                        };
                         let v = self.coerced_to_binding(v, value, name);
                         let cty = self.binding_ty(name);
                         let cell = self.f.new_cell_typed(Some(self.body.binding_arena[name].name), cty);
@@ -281,8 +296,8 @@ impl Builder<'_> {
                 Statement::LetTuple { vars, value } => {
                     match self.expr_tuple_shape(value)?.filter(TupleRetShape::splats) {
                         Some(shape) => {
-                            let r = self.lower_expr_repr(value)?;
-                            self.bind_tuple_repr(&vars, &shape, r);
+                            let r = self.lower_expr_repr(value)?.into_value();
+                            self.bind_tuple_repr(&vars, &shape, r)?;
                         }
                         None => {
                             let v = self.lower_expr(value)?;
@@ -441,7 +456,7 @@ impl Builder<'_> {
             return Ok(ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil))));
         }
         let repr = match tail {
-            Some(tail) => self.lower_expr_repr(tail)?,
+            Some(tail) => self.lower_expr_repr(tail)?.into_value(),
             None => ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil))),
         };
         self.run_top_frame()?;

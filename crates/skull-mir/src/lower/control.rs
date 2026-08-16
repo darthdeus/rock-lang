@@ -86,7 +86,7 @@ impl Builder<'_> {
                     // test (`mouse_screen`'s `sim_mouse_override`, every frame).
                     if self.nobox_value_name(v).is_none()
                         && !self.expr_is_flat_enum(v)
-                        && self.nullable_place_value_of(v).is_some()
+                        && self.nullable_place_value_of(v)?.is_some()
                     {
                         let outer = self.presence_only.replace(v);
                         let value = self.lower_expr(v);
@@ -100,7 +100,7 @@ impl Builder<'_> {
                         }));
                     }
                     if self.nobox_value_name(v).is_some() {
-                        let repr = self.lower_expr_repr(v)?;
+                        let repr = self.lower_expr_repr(v)?.into_value();
                         let present = match repr {
                             ValueRepr::Group {
                                 present: Some(value),
@@ -110,7 +110,7 @@ impl Builder<'_> {
                                 self.emit_cur(Inst::Const(Lit::Bool(true)))
                             }
                             other => {
-                                let value = self.pack(other);
+                                let value = self.pack(other)?;
                                 let nil = self.emit_cur(Inst::Const(Lit::Nil));
                                 self.emit_cur(Inst::NotEq(value, nil))
                             }
@@ -127,14 +127,14 @@ impl Builder<'_> {
                     // `MakeTuple` -- a table, never nil -- so `== null` would be
                     // false even on the absent arm.
                     if self.nullable_tuple_wire_shape(v)?.is_some() {
-                        let repr = self.lower_expr_repr(v)?;
+                        let repr = self.lower_expr_repr(v)?.into_value();
                         let present = match repr {
                             ValueRepr::Tuple {
                                 present: Some(value),
                                 ..
                             } => value,
                             other => {
-                                let value = self.pack(other);
+                                let value = self.pack(other)?;
                                 let nil = self.emit_cur(Inst::Const(Lit::Nil));
                                 self.emit_cur(Inst::NotEq(value, nil))
                             }
@@ -146,12 +146,12 @@ impl Builder<'_> {
                         });
                     }
                     if self.expr_is_flat_enum(v) {
-                        let tag = match self.lower_expr_repr(v)? {
+                        let tag = match self.lower_expr_repr(v)?.into_value() {
                             ValueRepr::Group { parts, .. } => {
-                                self.pack(parts.into_iter().next().expect("flat enum group has a tag leaf"))
+                                self.pack(parts.into_iter().next().expect("flat enum group has a tag leaf"))?
                             }
                             // a boxed flat enum: nil-or-table, compare directly.
-                            other => self.pack(other),
+                            other => self.pack(other)?,
                         };
                         let nil = self.emit_cur(Inst::Const(Lit::Nil));
                         return Ok(self.emit_cur(if matches!(op, BinOp::Eq) {
@@ -165,15 +165,13 @@ impl Builder<'_> {
                     (self.nobox_value_name(lhs), self.nobox_value_name(rhs))
                 {
                     if ln == rn {
-                        let mut shape = self
-                            .nobox_value_shape_of(lhs)
+                        let _shape = self
+                            .nobox_value_shape_of(lhs)?
                             .ok_or_else(|| gap(format!("nobox value `{ln}` has no scalar shape")))?;
-                        shape.nullable =
-                            self.expr_is_nullable(lhs) || self.expr_is_nullable(rhs);
                         let lhs_repr = self.lower_expr_repr(lhs)?;
-                        let lhs_leaves = self.repr_to_leaves(&lhs_repr, &shape);
+                        let lhs_leaves = self.repr_to_leaves_bundle(&lhs_repr)?;
                         let rhs_repr = self.lower_expr_repr(rhs)?;
-                        let rhs_leaves = self.repr_to_leaves(&rhs_repr, &shape);
+                        let rhs_leaves = self.repr_to_leaves_bundle(&rhs_repr)?;
                         let equal = self.emit_all_equal(&lhs_leaves, &rhs_leaves);
                         return Ok(if matches!(op, BinOp::Eq) {
                             equal
@@ -247,7 +245,7 @@ impl Builder<'_> {
     ) -> Result<Idx<Inst>, CompilerError> {
         let repr =
             self.lower_if_repr(cond, then_branch, else_branch, RetSlot::Opaque)?;
-        Ok(self.pack(repr))
+        Ok(self.pack(repr)?)
     }
 
     pub(crate) fn lower_if_repr(
@@ -274,14 +272,17 @@ impl Builder<'_> {
 
         self.cur = then_bb;
         let tv = self.lower_expr_repr(then_branch)?;
-        self.store_repr_and_join(&results, &shape, tv, join)?;
+        self.store_bundle_and_join(&results, &shape, &tv, join)?;
 
         self.cur = else_bb;
         let ev = match else_branch {
             Some(eb) => self.lower_expr_repr(eb)?,
-            None => ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil))),
+            None => ValueBundle::new(
+                tv.representation(),
+                ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil))),
+            ),
         };
-        self.store_repr_and_join(&results, &shape, ev, join)?;
+        self.store_bundle_and_join(&results, &shape, &ev, join)?;
 
         self.cur = join;
         let slots: Vec<Idx<Inst>> =
@@ -329,7 +330,7 @@ impl Builder<'_> {
     /// and each joined its arms through ONE result cell. A `nobox` value is leaves
     /// plus a presence tag and does not fit one cell, so it packed to a box --
     /// the materialization the mark forbids. This is the same multi-cell join
-    /// `if`/`match` as values already use ([`Self::store_repr_and_join`]); safe-nav
+    /// `if`/`match` as values already use ([`Self::store_bundle_and_join`]); safe-nav
     /// was simply never dispatched through it.
     ///
     /// The nil arm needs no special case: `repr_to_leaves` already folds a
@@ -342,7 +343,7 @@ impl Builder<'_> {
         &mut self,
         receiver: Idx<Expr>,
         shape: RetSlot,
-        value_arm: impl FnOnce(&mut Self, Idx<Inst>) -> Result<ValueRepr, CompilerError>,
+        value_arm: impl FnOnce(&mut Self, Idx<Inst>) -> Result<ValueBundle, CompilerError>,
     ) -> Result<ValueRepr, CompilerError> {
         let recv = self.lower_safe_nav_receiver(receiver)?;
         let is_nil = self.safe_nav_absent_cond(&recv);
@@ -353,14 +354,15 @@ impl Builder<'_> {
         let join = self.f.new_block();
         self.f.set_term(self.cur, Term::Branch { cond: is_nil, then_bb: nil_bb, else_bb: val_bb });
 
+        self.cur = val_bb;
+        let recv_v = self.safe_nav_present_value(recv)?;
+        let v = value_arm(self, recv_v)?;
+        self.store_bundle_and_join(&results, &shape, &v, join)?;
+
         self.cur = nil_bb;
         let n = self.emit_cur(Inst::Const(Lit::Nil));
-        self.store_repr_and_join(&results, &shape, ValueRepr::Scalar(n), join)?;
-
-        self.cur = val_bb;
-        let recv_v = self.safe_nav_present_value(recv);
-        let v = value_arm(self, recv_v)?;
-        self.store_repr_and_join(&results, &shape, v, join)?;
+        let nil = ValueBundle::new(v.representation(), ValueRepr::Scalar(n));
+        self.store_bundle_and_join(&results, &shape, &nil, join)?;
 
         self.cur = join;
         let slots: Vec<Idx<Inst>> =
@@ -381,21 +383,21 @@ impl Builder<'_> {
         }
     }
 
-    pub(crate) fn store_repr_and_join(
+    pub(crate) fn store_bundle_and_join(
         &mut self,
         results: &[Idx<Cell>],
         shape: &RetSlot,
-        value: ValueRepr,
+        value: &ValueBundle,
         join: Idx<Block>,
     ) -> Result<(), CompilerError> {
         if !self.is_open() {
             return Ok(());
         }
-        let slots = self.repr_to_slot_values(value, shape);
+        let slots = self.repr_to_slot_values_bundle(value, shape)?;
         self.store_slots_and_join(results, &slots, join)
     }
 
-    /// [`Self::store_repr_and_join`] for an arm whose slots are already in hand
+    /// [`Self::store_bundle_and_join`] for an arm whose slots are already in hand
     /// rather than still a repr -- a `??` lhs, whose slots were read before the
     /// branch.
     ///

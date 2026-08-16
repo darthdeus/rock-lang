@@ -5,6 +5,7 @@
 //! printer-free).
 
 use bone_semantic::inference::Workspace;
+use bone_semantic::prelude::CompilerError;
 use comfy_la_arena::Idx;
 use rustc_hash::FxHashSet as HashSet;
 use skull_codegen_lua::{emit_named_framed, CodegenCtx, FrameCtx};
@@ -29,7 +30,7 @@ pub fn emit_coroutine(
     interner: &skull_mir::monoty::MonoInterner,
     plan: &CoroutinePlan,
     func: &MirFunc,
-) -> String {
+) -> Result<String, CompilerError> {
     let name = plan.base().to_string();
     // A co fn yielding a flat enum threads through the frame-slot channel (0 alloc
     // per yield); the channel's shape drives both the slot writes (transform) and
@@ -112,7 +113,7 @@ pub fn emit_coroutine(
     let mut nested_luas = String::new();
     let mut hoisted = std::mem::take(&mut lowered.step.nested_fns);
     for nf in hoisted[pre_nested..].iter_mut() {
-        skull_transform::cleanup_with_nobox(ws, nf);
+        skull_transform::cleanup_with_nobox(ws, nf)?;
         nested_luas
             .push_str(&skull_codegen_lua::emit_named(ws, ctx, interner, nf.name.as_str(), nf));
     }
@@ -160,7 +161,7 @@ pub fn emit_coroutine(
     }
     let ctor = emit_constructor(plan, &step_name, &lowered);
     let _ = lowered.num_states;
-    format!("{step_lua}{nested_luas}{defer_luas}{hook_luas}{ctor}")
+    Ok(format!("{step_lua}{nested_luas}{defer_luas}{hook_luas}{ctor}"))
 }
 
 /// The constructor: build the state table (seed param fields + relocated

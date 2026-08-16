@@ -194,11 +194,11 @@ fn classify(
     scx: &ScalarCtx,
     inst: &Instance,
     concrete_plans: &ConcretePlans,
-) -> Option<CalleeBody> {
+) -> Result<Option<CalleeBody>, CompilerError> {
     let fref = inst.func;
     let f = &ws.module(fref.module).functions[fref.func];
     if f.is_extern || f.inline_body.is_some() || f.is_coroutine {
-        return None;
+        return Ok(None);
     }
     let has_inline = f.annotations.iter().any(|a| a.name.name.as_str() == "inline");
     let has_pure = f.annotations.iter().any(|a| a.name.name.as_str() == "pure");
@@ -209,17 +209,17 @@ fn classify(
     let force = match annotation_gate(has_inline, has_pure, size_heuristic()) {
         Some(force) => force || has_bounds,
         None if has_bounds => true,
-        None => return None,
+        None => return Ok(None),
     };
     // A snapshot lowers the body as if hand-written for the concrete
     // instantiation (`docs/flatvec-plan.md`); a non-generic instance's is the
     // declaration's own body.
-    let plan = concrete_plans.get(inst)?;
+    let Some(plan) = concrete_plans.get(inst) else { return Ok(None) };
     let abi = BackendFnAbiPlan::for_concrete_plan(ws, scx, plan);
-    let mut mf = skull_mir::lower::lower_instance_with_plans(ws, scx, plan, concrete_plans).ok()?;
+    let mut mf = skull_mir::lower::lower_instance_with_plans(ws, scx, plan, concrete_plans)?;
     // Cleanup first so the size gate reflects emitted size and the splice clones
     // a tight body (the caller re-runs cleanup over the whole result anyway).
-    crate::cleanup(&mut mf);
+    crate::cleanup(&mut mf)?;
 
     // Structural exclusions over the whole arena.
     let mut has_lambda = false;
@@ -233,12 +233,12 @@ fn classify(
                 // Non-bounded fns keep the v0 refusal (they have a real
                 // emission to fall back on).
                 if !has_bounds {
-                    return None;
+                    return Ok(None);
                 }
                 has_lambda = true;
             }
             Inst::Call { func, .. } | Inst::CallMulti { func, .. } if *func == fref => {
-                return None; // self-recursive
+                return Ok(None); // self-recursive
             }
             _ => {}
         }
@@ -250,7 +250,7 @@ fn classify(
     // here would corrupt caller control flow.
     for &b in &reachable {
         match &mf.blocks[b].term {
-            Term::Unreachable | Term::Yield { .. } => return None,
+            Term::Unreachable | Term::Yield { .. } => return Ok(None),
             _ => {}
         }
     }
@@ -287,13 +287,13 @@ fn classify(
     if !has_lambda && matches!(mf.blocks[mf.entry].term, Term::Return(_)) {
         // Straight: entry ends in Return, so it is the only reachable block.
         if !force && reachable_insts > STRAIGHT_INSTS {
-            return None;
+            return Ok(None);
         }
         let ret_arity = match &mf.blocks[mf.entry].term {
             Term::Return(vs) => vs.len(),
             _ => unreachable!(),
         };
-        Some(CalleeBody {
+        Ok(Some(CalleeBody {
             func: mf,
             subject: inst.clone(),
             abi,
@@ -303,7 +303,7 @@ fn classify(
             insts: reachable_insts,
             forced: force,
             coalescable_params,
-        })
+        }))
     } else {
         // General: uniform return arity across every reachable Return.
         let mut arities = reachable
@@ -312,14 +312,14 @@ fn classify(
                 Term::Return(vs) => Some(vs.len()),
                 _ => None,
             });
-        let ret_arity = arities.next()?; // no Return -> can't bind a result
+        let Some(ret_arity) = arities.next() else { return Ok(None) }; // no Return -> can't bind a result
         if !arities.all(|a| a == ret_arity) {
-            return None;
+            return Ok(None);
         }
         if !force && reachable_insts > GENERAL_INSTS {
-            return None;
+            return Ok(None);
         }
-        Some(CalleeBody {
+        Ok(Some(CalleeBody {
             func: mf,
             subject: inst.clone(),
             abi,
@@ -329,7 +329,7 @@ fn classify(
             insts: reachable_insts,
             forced: force,
             coalescable_params,
-        })
+        }))
     }
 }
 
@@ -340,12 +340,12 @@ fn get<'a>(
     scx: &ScalarCtx,
     inst: &Instance,
     concrete_plans: &ConcretePlans,
-) -> Option<&'a CalleeBody> {
+) -> Result<Option<&'a CalleeBody>, CompilerError> {
     if !cache.cands.contains_key(inst) {
-        let v = classify(ws, scx, inst, concrete_plans);
+        let v = classify(ws, scx, inst, concrete_plans)?;
         cache.cands.insert(inst.clone(), v);
     }
-    cache.cands[inst].as_ref()
+    Ok(cache.cands[inst].as_ref())
 }
 
 /// One resolved, eligible call site in the caller, extracted before the splice.
@@ -529,7 +529,7 @@ fn find_site(
                 _ => continue,
             };
             let cell_count = func.cells.len();
-            match get(cache, ws, scx, site.inst(), concrete_plans) {
+            match get(cache, ws, scx, site.inst(), concrete_plans)? {
                 // Decline a splice that would breach the per-caller cell budget
                 // (keep scanning — a smaller candidate may still fit). A concrete
                 // call with a scalarized ABI is exempt: its args are splatted to

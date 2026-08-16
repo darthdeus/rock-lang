@@ -62,12 +62,14 @@ fn main() { print("{H.a}") }
 fn accessor_of(src: &str, global: &str) -> (Workspace, NoboxGlobalAccessorShape) {
     let ws = crate::common::ws_with_stdlib(src);
     let scx = ScalarCtx::new(&ws);
-    let shape = ws
+    let (_, gdecl) = ws
         .modules
         .iter()
         .flat_map(|m| m.globals.iter())
         .find(|(_, g)| g.name.as_str() == global)
-        .and_then(|(_, g)| nobox_global_accessor_shape(&ws, &scx, g.ty))
+        .unwrap_or_else(|| panic!("global `{global}` is missing"));
+    let shape = nobox_global_accessor_shape(&ws, &scx, gdecl.ty)
+        .expect("global accessor planning must not fail")
         .unwrap_or_else(|| panic!("global `{global}` has no nobox accessor shape"));
     (ws, shape)
 }
@@ -156,6 +158,14 @@ global F: Flat = Flat { x: 3.0, y: 4.0 }
 fn main() { print("{F.x}") }
 "#;
 
+const NULLABLE_TOP_LEVEL: &str = r#"
+nobox value NV2 { x: float, y: float }
+
+global MAYBE: NV2? = NV2 { x: 3.0, y: 4.0 }
+
+fn main() { print("{MAYBE}") }
+"#;
+
 #[test]
 fn an_ffi_clean_nested_field_is_unbuildable_and_says_why() {
     let (_ws, acc) = accessor_of(FFI_CLEAN_NESTED, "H");
@@ -176,4 +186,13 @@ fn a_flat_ffi_clean_global_stays_buildable() {
     assert_eq!(acc.ctor_suffix, "_ct");
     assert_eq!(acc.presence_path, None);
     assert!(acc.unbuildable.is_none(), "a flat cdata ctor IS its leaf sequence");
+}
+
+#[test]
+fn a_top_level_nullable_global_keeps_data_flags_aligned() {
+    let (_ws, acc) = accessor_of(NULLABLE_TOP_LEVEL, "MAYBE");
+    assert_eq!(acc.paths.iter().map(|p| p.to_string()).collect::<Vec<_>>(), ["x", "y"]);
+    assert_eq!(acc.presence_path, None, "the top-level presence has no field path");
+    assert_eq!(acc.ctor_suffix, "_ct");
+    assert!(acc.unbuildable.is_none());
 }

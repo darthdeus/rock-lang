@@ -165,6 +165,37 @@ impl Builder<'_> {
         Ok(Some(self.concrete_mono(*id)))
     }
 
+    pub(crate) fn concrete_callee_return_ty(
+        &self,
+        e: Idx<Expr>,
+        inst: &crate::instance::Instance,
+    ) -> Result<Option<crate::monoty::MonoTy>, CompilerError> {
+        let plan = self.concrete_plan;
+        let site = crate::site::Site {
+            domain: self.cur_domain.clone(),
+            expr: e,
+            op: self.cur_op.clone(),
+        };
+        if plan.callees.get(&site) != Some(inst) {
+            return Err(self.gap_here("concrete callee identity disagrees with its site plan"));
+        }
+        let signature = if crate::lower::requires_concrete_body_plan(self.ws, inst)
+            && crate::monoty::too_deep_to_instantiate(inst.arg_types(self.scx.interner()).iter()).is_none()
+        {
+            &self
+                .concrete_plans
+                .get(inst)
+                .ok_or_else(|| self.gap_here("concrete callee body plan is missing for its return"))?
+                .signature
+        } else {
+            self.concrete_plan
+                .callee_signatures
+                .get(&site)
+                .ok_or_else(|| self.gap_here("concrete callee signature is missing for its return"))?
+        };
+        Ok(signature.result.map(|id| self.concrete_mono(id)))
+    }
+
     pub(crate) fn concrete_coroutine_channel(
         &self,
         receiver: Idx<Expr>,
@@ -256,7 +287,7 @@ impl Builder<'_> {
         args: IdxRange<Expr>,
     ) -> Result<Idx<Inst>, CompilerError> {
         let r = self.lower_call_repr(e, callee, args)?;
-        Ok(self.pack(r))
+        Ok(self.pack(r)?)
     }
 
     /// Lower a call to a [`ValueRepr`]. A scalar-ABI value-returning direct call
@@ -333,7 +364,7 @@ impl Builder<'_> {
             if name.as_str() == "cast" && self.nobox_value_name(e).is_some() {
                 if let [inner] = arg_idxs[..] {
                     if self.resolves_to_inline_builtin(e, name) {
-                        return self.lower_expr_repr(inner);
+                        return self.lower_expr_repr(inner).map(ValueBundle::into_value);
                     }
                 }
             }
@@ -365,9 +396,9 @@ impl Builder<'_> {
                     return Err(gap("`native_buffer_alloc` takes exactly one argument (count)"));
                 };
                 let span = self.body.expr_spans[e];
-                let ctype = self.native_buffer_alloc_ctype(e, span)?;
+                let (ctype, representation) = self.native_buffer_alloc_ctype(e, span)?;
                 let count = self.lower_expr(n_arg)?;
-                let ptr = self.emit_cur(Inst::FfiNewArray { ctype, count });
+                let ptr = self.emit_cur(Inst::FfiNewArray { ctype, count, representation });
                 let mut fields =
                     vec![(Ustr::from("ptr"), ptr), (Ustr::from("len"), count)];
                 fields.extend(self.leaf_view_fields(ctype, ptr));
@@ -834,7 +865,7 @@ impl Builder<'_> {
         if let Some(shape) = &declared_ret_tuple {
             self.reject_nobox_opaque_tuple_return(e, func, shape)?;
         } else {
-            self.reject_nobox_opaque_value_return(e, func)?;
+            self.reject_nobox_opaque_value_return(e, func, &dc.callee_inst)?;
         }
         let lua_opaque = self.scx.target() == bone_semantic::hir::FnBackend::Lua
             && callee.inline_body.is_some()
@@ -959,11 +990,10 @@ impl Builder<'_> {
         let arena = self.scx.rep_arena();
         let mut argv = Vec::new();
         for (i, &a) in arg_idxs.iter().enumerate() {
-            let slot = plan
-                .params()
-                .get(i)
-                .map(|id| arena.ret_slot(*id))
-                .unwrap_or(RetSlot::Opaque);
+            let id = plan.params().get(i).copied().ok_or_else(|| {
+                gap(format!("indirect-call argument {i} has no representation plan"))
+            })?;
+            let slot = arena.ret_slot(id);
             argv.extend(self.arg_values_for_slot(&slot, a)?);
         }
         let Some(result) = plan.result() else {
@@ -1009,7 +1039,7 @@ impl Builder<'_> {
         callee: Idx<Inst>,
         args: Vec<Idx<Inst>>,
     ) -> Result<Idx<Inst>, CompilerError> {
-        Ok(self.emit_call_value_n(self.expr_tuple_shape(e)?, callee, args))
+        self.emit_call_value_n(self.expr_tuple_shape(e)?, callee, args)
     }
 
     /// [`Self::emit_call_value`] with an explicit tuple shape (the safe-nav call
@@ -1019,7 +1049,7 @@ impl Builder<'_> {
         shape: Option<TupleRetShape>,
         callee: Idx<Inst>,
         args: Vec<Idx<Inst>>,
-    ) -> Idx<Inst> {
+    ) -> Result<Idx<Inst>, CompilerError> {
         match shape {
             Some(shape) => {
                 let dests: Vec<Idx<Cell>> =
@@ -1028,9 +1058,9 @@ impl Builder<'_> {
                 let loads: Vec<Idx<Inst>> =
                     dests.iter().map(|c| self.emit_cur(Inst::Load(*c))).collect();
                 let r = self.tuple_result(&shape, &loads);
-                self.pack(r)
+                Ok(self.pack(r)?)
             }
-            None => self.emit_cur(Inst::CallValue { callee, args }),
+            None => Ok(self.emit_cur(Inst::CallValue { callee, args })),
         }
     }
 
@@ -1081,13 +1111,15 @@ impl Builder<'_> {
         // `Leaves` is the only splatting slot reachable here.
         match param_shapes.first() {
             Some(RetSlot::Leaves(shape)) => {
-                let leaves = self.cdata_leaves(recv, &shape.clone());
+                let leaves = self.cdata_leaves(recv, &shape.clone())?;
                 argv.extend(leaves);
             }
             _ => argv.push(recv),
         }
         for (i, &a) in arg_idxs.iter().enumerate() {
-            let slot = param_shapes.get(i + 1).cloned().unwrap_or(RetSlot::Opaque);
+            let slot = param_shapes.get(i + 1).cloned().ok_or_else(|| {
+                gap(format!("method argument {i} has no parameter representation plan"))
+            })?;
             argv.extend(self.arg_values_for_slot(&slot, a)?);
         }
         match dc.plan.ret_shape() {
@@ -1124,7 +1156,10 @@ impl Builder<'_> {
         if !any_named {
             let mut out = Vec::new();
             for (i, &a) in arg_idxs.iter().enumerate() {
-                let slot = param_shapes.get(i).cloned().unwrap_or(RetSlot::Opaque);
+                let slot = param_shapes
+                    .get(i)
+                    .cloned()
+                    .ok_or_else(|| gap(format!("argument {i} has no parameter representation plan")))?;
                 out.extend(self.arg_values_for_slot(&slot, a)?);
             }
             return Ok(out);
@@ -1150,13 +1185,13 @@ impl Builder<'_> {
         param_shapes: &[RetSlot],
         arg_idxs: &[Idx<Expr>],
     ) -> Result<Vec<Idx<Inst>>, CompilerError> {
-        let mut slots: Vec<Option<ValueRepr>> = vec![None; param_names.len()];
+        let mut slots: Vec<Option<ValueBundle>> = vec![None; param_names.len()];
         let mut next_pos = 0usize;
         for &a in arg_idxs {
             // Struct spread `..op`: decompose into per-field reprs (a struct-
             // literal operand is elided) and place each into its param slot.
             if self.body.spread_args.contains(&a) {
-                for (fname, r) in self.spread_field_reprs(a)? {
+                for (fname, r) in self.spread_field_bundles(a)? {
                     let pidx = param_names.iter().position(|p| *p == fname).ok_or_else(|| {
                         gap(format!("spread field `{fname}` matches no parameter"))
                     })?;
@@ -1187,9 +1222,12 @@ impl Builder<'_> {
         let hi = slots.iter().rposition(|s| s.is_some()).map_or(0, |i| i + 1);
         let mut out = Vec::new();
         for i in 0..hi {
-            let slot = param_shapes.get(i).cloned().unwrap_or(RetSlot::Opaque);
+            let slot = param_shapes
+                .get(i)
+                .cloned()
+                .ok_or_else(|| gap(format!("argument {i} has no parameter representation plan")))?;
             match slots[i].clone() {
-                Some(r) => out.extend(self.repr_to_slot_values(r, &slot)),
+                Some(r) => out.extend(self.repr_to_slot_values_bundle(&r, &slot)?),
                 // An omitted param arrives as one nil PER WIRE VALUE, so the
                 // callee's default-fill sees a nil in every leaf it binds.
                 None => {
@@ -1206,14 +1244,14 @@ impl Builder<'_> {
 
     /// Materialize a `ValueRepr` as a single value — the one place a `Group`
     /// becomes a real `<name>_ct(...)` cdata (an escape: stored/compared/boxed).
-    pub(crate) fn pack(&mut self, r: ValueRepr) -> Idx<Inst> {
+    pub(crate) fn pack(&mut self, r: ValueRepr) -> Result<Idx<Inst>, CompilerError> {
         match r {
-            ValueRepr::Scalar(v) => v,
+            ValueRepr::Scalar(v) => Ok(v),
             // A splatting tuple's box. Its `nobox` elements pack too, which is
             // exactly how a whole-tuple use reaches the guarantee's rejection.
             ValueRepr::Tuple { parts, .. } => {
-                let vs = parts.into_iter().map(|p| self.pack(p)).collect();
-                self.emit_cur(Inst::MakeTuple(vs))
+                let vs = parts.into_iter().map(|p| self.pack(p)).collect::<Result<Vec<_>, _>>()?;
+                Ok(self.emit_cur(Inst::MakeTuple(vs)))
             }
             // A flat-enum Group `[tag, _0.., <rec>..]` packs to the `{__variant}`
             // box (`MakeEnumDyn`), the enum escape -- not a `<name>_ct` cdata.
@@ -1222,8 +1260,20 @@ impl Builder<'_> {
             {
                 let shape = EnumPlan::for_name(self.ws, name)
                     .and_then(|plan| plan.flat().cloned())
-                    .expect("flat enum plan disappeared");
-                let packed: Vec<Idx<Inst>> = parts.into_iter().map(|p| self.pack(p)).collect();
+                    .ok_or_else(|| {
+                        self.gap_here(format!("flat enum `{name}` lost its representation plan"))
+                    })?;
+                let expected_len = 1 + shape.tuple_width() + shape.record_fields.len();
+                if parts.len() != expected_len {
+                    return Err(self.gap_here(format!(
+                        "flat enum `{name}` produced {} fields for a plan requiring {expected_len}",
+                        parts.len()
+                    )));
+                }
+                let packed: Vec<Idx<Inst>> = parts
+                    .into_iter()
+                    .map(|p| self.pack(p))
+                    .collect::<Result<Vec<_>, _>>()?;
                 let tag = packed[0];
                 let positional = packed[1..1 + shape.tuple_width()].to_vec();
                 let named: Vec<(Ustr, Idx<Inst>)> = shape
@@ -1237,9 +1287,9 @@ impl Builder<'_> {
                 if let Inst::Const(Lit::Str(variant)) = self.f.insts[tag] {
                     if self.variant_is_unit(name, variant) {
                         let g = Ustr::from(format!("__rock_enum_{name}_{variant}").as_str());
-                        return self.emit_cur(Inst::Global(g));
+                        return Ok(self.emit_cur(Inst::Global(g)));
                     }
-                    return self.emit_cur(Inst::MakeEnumDyn { tag, ty: name, positional, named });
+                    return Ok(self.emit_cur(Inst::MakeEnumDyn { tag, ty: name, positional, named }));
                 }
                 // A DYNAMIC tag may be `nil` (a null nullable enum): materialize to
                 // `nil` in that case, else the box -- else a null threads to a
@@ -1260,25 +1310,7 @@ impl Builder<'_> {
                 self.emit_cur(Inst::Store { cell: result, value: boxed });
                 self.f.set_term(self.cur, Term::Goto(join));
                 self.cur = join;
-                self.emit_cur(Inst::Load(result))
-            }
-            // A leaf-table struct's physical keys ARE its leaves, so it packs
-            // through the flat `<Name>_lct` ctor. Packing it field-wise would
-            // box the nullable `nobox` child under its declared name -- the
-            // guarantee's violation, and the only reason this struct is
-            // GC-tier at all.
-            ValueRepr::Group { name, .. }
-                if matches!(
-                    self.scx.rep_arena().nominal_value_storage(self.ws, self.scx.target, name),
-                    Some(ValueStorage::LeafTable)
-                ) =>
-            {
-                let shape = self
-                    .nominal_rep_shape(name, false)
-                    .expect("a leaf-table struct has a shape");
-                let leaves = self.repr_to_leaves(&r, &shape);
-                let fields = value_leaf_paths(&shape).into_iter().zip(leaves).collect();
-                self.emit_cur(Inst::MakeValueStruct { name, fields })
+                Ok(self.emit_cur(Inst::Load(result)))
             }
             // `present` is deliberately NOT consulted here. Packing an absent
             // Group to `nil` is what a `== nil` consumer needs, but `pack` cannot
@@ -1290,8 +1322,52 @@ impl Builder<'_> {
             // exactly the win `docs/parked/inline-lua.md` recorded this costing.
             // Narrowing to a static presence does not help: at a `??` the
             // presence is dynamic and the coalesce consumes it anyway.
-            ValueRepr::Group { name, parts, present: _ } => {
-                self.pack_group_fields(name, parts)
+            ValueRepr::Group { name, parts, present } => {
+                // A leaf-table struct's physical keys ARE its leaves, so it
+                // packs through the flat `<Name>_lct` ctor. Packing it
+                // field-wise would box a flattened child under its declared
+                // name and violate the selected plan. Non-value Groups are
+                // enum/ordinary aggregate carriers and keep their own packer.
+                let storage = if self.is_value_struct(name) {
+                    Some(
+                        self.scx
+                            .rep_arena()
+                            .nominal_value_storage_required(self.ws, self.scx.target, name)
+                            .map_err(|e| self.gap_here(e.message))?,
+                    )
+                } else {
+                    None
+                };
+                if storage == Some(ValueStorage::LeafTable) {
+                    let representation = self.nominal_value_representation(name)?;
+                    let shape = self
+                        .scx
+                        .rep_arena()
+                        .value_shape(representation)
+                        .ok_or_else(|| self.gap_here(format!("`{name}` has no planned value shape")))?;
+                    let bundle = ValueBundle::new(
+                        representation,
+                        ValueRepr::Group { name, parts, present },
+                    );
+                    let leaves = self.repr_to_leaves_bundle(&bundle)?;
+                    let paths = value_leaf_paths(&shape);
+                    if paths.len() != leaves.len() {
+                        return Err(self.gap_here(format!(
+                            "`{name}` leaf plan has {} paths but the value produced {} leaves",
+                            paths.len(),
+                            leaves.len()
+                        )));
+                    }
+                    let fields = paths.into_iter().zip(leaves).collect();
+                    Ok(self.emit_cur(Inst::MakeValueStruct {
+                        name,
+                        representation,
+                        form: ValueCtorForm::Leaves,
+                        fields,
+                    }))
+                } else {
+                    self.pack_group_fields(name, parts)
+                }
             }
         }
     }
@@ -1306,7 +1382,7 @@ impl Builder<'_> {
     /// `nobox_coalesce_at_ctor_field`. The branch is legal HERE because the slot
     /// is already an escape -- the ctor survives either way, so honouring
     /// presence buys the correct `nil` for free. Same split safe-nav uses.
-    pub(crate) fn pack_maybe_absent(&mut self, r: ValueRepr) -> Idx<Inst> {
+    pub(crate) fn pack_maybe_absent(&mut self, r: ValueRepr) -> Result<Idx<Inst>, CompilerError> {
         let ValueRepr::Group { name, parts, present: Some(present) } = r else {
             return self.pack(r);
         };
@@ -1325,12 +1401,12 @@ impl Builder<'_> {
         self.f.set_term(self.cur, Term::Goto(join));
 
         self.cur = present_bb;
-        let boxed = self.pack_group_fields(name, parts);
+        let boxed = self.pack_group_fields(name, parts)?;
         self.emit_cur(Inst::Store { cell: result, value: boxed });
         self.f.set_term(self.cur, Term::Goto(join));
 
         self.cur = join;
-        self.emit_cur(Inst::Load(result))
+        Ok(self.emit_cur(Inst::Load(result)))
     }
 
     /// The `<name>_ct(..)` cdata for a Group's parts, with no presence test.
@@ -1340,21 +1416,29 @@ impl Builder<'_> {
     /// forward a `Field` read to its ctor operand (SROA), eliminating the cdata
     /// when it never escapes. A payload-free enum field is just an `int` value
     /// (Prim), packed like any primitive.
-    fn pack_group_fields(&mut self, name: Ustr, parts: Vec<ValueRepr>) -> Idx<Inst> {
+    fn pack_group_fields(&mut self, name: Ustr, parts: Vec<ValueRepr>) -> Result<Idx<Inst>, CompilerError> {
+        let representation = self.nominal_value_representation(name)?;
         let names = struct_field_names(self.ws, name);
         let fields = parts
             .into_iter()
             .enumerate()
-            .map(|(i, p)| {
+            .map(|(i, p)| -> Result<(Ustr, Idx<Inst>), CompilerError> {
                 // A Group's parts are the nominal's declared fields, so the two
                 // always line up. Naming a part after its STRUCT instead would
                 // emit a ctor field the type does not have, and duplicate it for
                 // every part -- fabricated identity, not a usable fallback.
-                let fname = *names.get(i).expect("a Group's parts are its nominal's declared fields");
-                (fname, self.pack(p))
+                let fname = *names
+                    .get(i)
+                    .ok_or_else(|| self.gap_here("a planned value group has too many fields"))?;
+                Ok((fname, self.pack(p)?))
             })
-            .collect();
-        self.emit_cur(Inst::MakeValueStruct { name, fields })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(self.emit_cur(Inst::MakeValueStruct {
+            name,
+            representation,
+            form: ValueCtorForm::Declared,
+            fields,
+        }))
     }
 
     /// Flatten a `ValueRepr` to its primitive leaf values per `shape` (the wire
@@ -1380,7 +1464,7 @@ impl Builder<'_> {
     pub(crate) fn iter_witness_args(
         &mut self,
         inst: &crate::instance::Instance,
-        repr: ValueRepr,
+        bundle: ValueBundle,
     ) -> Result<Vec<Idx<Inst>>, CompilerError> {
         let iter_ref = inst.func;
         let plan = self.callee_abi_plan_for_instance(inst)?;
@@ -1395,16 +1479,20 @@ impl Builder<'_> {
                 ))
             })?
         };
-        Ok(self.repr_to_slot_values(repr, &slot))
+        self.repr_to_slot_values_bundle(&bundle, &slot)
     }
 
-    pub(crate) fn repr_to_leaves(&mut self, r: &ValueRepr, shape: &ValueShape) -> Vec<Idx<Inst>> {
+    pub(crate) fn repr_to_leaves_shape(
+        &mut self,
+        r: &ValueRepr,
+        shape: &ValueShape,
+    ) -> Result<Vec<Idx<Inst>>, CompilerError> {
         match r {
             // A tuple at a value-shaped sink is a boxed source: pack and
             // field-read, the `Scalar` treatment.
             ValueRepr::Tuple { .. } => {
-                let v = self.pack(r.clone());
-                self.repr_to_leaves(&ValueRepr::Scalar(v), shape)
+                let v = self.pack(r.clone())?;
+                self.repr_to_leaves_shape(&ValueRepr::Scalar(v), shape)
             }
             ValueRepr::Group {
                 parts, present, ..
@@ -1418,11 +1506,11 @@ impl Builder<'_> {
                 }
                 for ((_, fs), part) in shape.fields.iter().zip(parts) {
                     match fs {
-                        FieldShape::Prim => out.push(self.pack(part.clone())),
-                        FieldShape::Nested(sub) => out.extend(self.repr_to_leaves(part, sub)),
+                        FieldShape::Prim => out.push(self.pack(part.clone())?),
+                        FieldShape::Nested(sub) => out.extend(self.repr_to_leaves_shape(part, sub)?),
                     }
                 }
-                out
+                Ok(out)
             }
             ValueRepr::Scalar(v) if shape.nullable => {
                 let field_count = shape.leaf_count() - 1;
@@ -1432,7 +1520,7 @@ impl Builder<'_> {
                     for _ in 0..field_count {
                         out.push(self.emit_cur(Inst::Const(Lit::Nil)));
                     }
-                    return out;
+                    return Ok(out);
                 }
 
                 let nil = self.emit_cur(Inst::Const(Lit::Nil));
@@ -1464,7 +1552,7 @@ impl Builder<'_> {
                 self.cur = value_bb;
                 let mut inner = shape.clone();
                 inner.nullable = false;
-                let leaves = self.cdata_leaves(*v, &inner);
+                let leaves = self.cdata_leaves(*v, &inner)?;
                 for (cell, value) in cells.iter().zip(leaves) {
                     self.emit_cur(Inst::Store {
                         cell: *cell,
@@ -1477,7 +1565,7 @@ impl Builder<'_> {
                 let mut out = Vec::with_capacity(1 + field_count);
                 out.push(present);
                 out.extend(cells.iter().map(|cell| self.emit_cur(Inst::Load(*cell))));
-                out
+                Ok(out)
             }
             ValueRepr::Scalar(v) => self.cdata_leaves(*v, shape),
         }
@@ -1486,21 +1574,182 @@ impl Builder<'_> {
     pub(crate) fn repr_to_leaves_bundle(
         &mut self,
         bundle: &ValueBundle,
-        shape: &ValueShape,
-    ) -> Vec<Idx<Inst>> {
-        debug_assert_eq!(
-            self.scx.rep_arena().value_shape(bundle.representation()).as_ref(),
-            Some(shape),
-            "operational value does not conform to its RepId"
-        );
-        self.repr_to_leaves(bundle.value(), shape)
+    ) -> Result<Vec<Idx<Inst>>, CompilerError> {
+        let shape = self
+            .scx
+            .rep_arena()
+            .value_shape(bundle.representation())
+            .ok_or_else(|| {
+                CompilerError::new_no_location(format!(
+                    "representation {:?} has no value leaf shape",
+                    bundle.representation()
+                ))
+            })?;
+        self.repr_to_leaves_shape(bundle.value(), &shape)
+    }
+
+    pub(crate) fn repr_to_leaves_bundle_for_shape(
+        &mut self,
+        bundle: &ValueBundle,
+        expected: &ValueShape,
+    ) -> Result<Vec<Idx<Inst>>, CompilerError> {
+        let actual = self
+            .scx
+            .rep_arena()
+            .value_shape(bundle.representation())
+            .ok_or_else(|| {
+                self.gap_here(format!(
+                    "representation {:?} has no value leaf plan while lowering `{}`",
+                    bundle.representation(),
+                    self.f.name
+                ))
+            })?;
+        if actual.name != expected.name
+            || actual.fields != expected.fields
+            || (actual.nullable && !expected.nullable)
+        {
+            return Err(self.gap_here(format!(
+                "representation {:?} does not match destination value shape",
+                bundle.representation()
+            )));
+        }
+        if actual == *expected {
+            self.repr_to_leaves_bundle(bundle)
+        } else {
+            self.repr_to_leaves_shape(bundle.value(), expected)
+        }
+    }
+
+    pub(crate) fn repr_to_leaves_bundle_after_presence(
+        &mut self,
+        bundle: &ValueBundle,
+        expected: &ValueShape,
+    ) -> Result<Vec<Idx<Inst>>, CompilerError> {
+        let actual = self
+            .scx
+            .rep_arena()
+            .value_shape(bundle.representation())
+            .ok_or_else(|| {
+                self.gap_here(format!(
+                    "representation {:?} has no value leaf plan while lowering `{}`",
+                    bundle.representation(),
+                    self.f.name
+                ))
+            })?;
+        if actual.name != expected.name || actual.fields != expected.fields {
+            return Err(self.gap_here(format!(
+                "representation {:?} does not match narrowed return shape",
+                bundle.representation()
+            )));
+        }
+        if !actual.nullable || expected.nullable {
+            return self.repr_to_leaves_bundle_for_shape(bundle, expected);
+        }
+        if !matches!(bundle.value(), ValueRepr::Group { present: Some(_), .. }) {
+            return Err(self.gap_here(format!(
+                "representation {:?} lost its presence witness before narrowing",
+                bundle.representation()
+            )));
+        }
+        self.repr_to_leaves_shape(bundle.value(), expected)
+    }
+
+    pub(crate) fn opaque_boundary_leaves(
+        &mut self,
+        bundle: &ValueBundle,
+        expected: &ValueShape,
+        reason: &str,
+    ) -> Result<Vec<Idx<Inst>>, CompilerError> {
+        let plan = self
+            .scx
+            .rep_arena()
+            .try_get(bundle.representation())
+            .ok_or_else(|| {
+                self.gap_here(format!(
+                    "representation {:?} does not belong to this build arena at {reason}",
+                    bundle.representation()
+                ))
+            })?;
+        if !matches!(plan.layout(), RepLayout::Opaque | RepLayout::Foreign { .. }) {
+            return Err(self.gap_here(format!(
+                "representation {:?} is not an opaque boundary at {reason}",
+                bundle.representation()
+            )));
+        }
+        self.repr_to_leaves_shape(bundle.value(), expected)
+    }
+
+    pub(crate) fn repr_to_slot_values_bundle(
+        &mut self,
+        bundle: &ValueBundle,
+        slot: &RetSlot,
+    ) -> Result<Vec<Idx<Inst>>, CompilerError> {
+        match slot {
+            RetSlot::Opaque => self.pack(bundle.value().clone()).map(|value| vec![value]),
+            RetSlot::Leaves(expected) => {
+                let plan = self
+                    .scx
+                    .rep_arena()
+                    .try_get(bundle.representation())
+                    .ok_or_else(|| {
+                        self.gap_here(format!(
+                            "representation {:?} is missing at a leaves slot while lowering `{}`",
+                            bundle.representation(),
+                            self.f.name
+                        ))
+                    })?;
+                match plan.layout() {
+                    RepLayout::Leaves(actual) => {
+                        if actual.name != expected.name || actual.fields != expected.fields {
+                            return Err(self.gap_here(format!(
+                                "representation {:?} shape does not match its leaves slot shape",
+                                bundle.representation()
+                            )));
+                        }
+                        if actual.nullable && !expected.nullable {
+                            return self.repr_to_leaves_bundle_after_presence(bundle, expected);
+                        }
+                        self.repr_to_leaves_bundle_for_shape(bundle, expected)
+                    }
+                    RepLayout::Opaque | RepLayout::Foreign { .. } => self
+                        .opaque_boundary_leaves(bundle, expected, "scalar ABI argument"),
+                    RepLayout::Tuple { .. } => Err(self.gap_here(format!(
+                        "tuple representation {:?} cannot fill a leaves slot",
+                        bundle.representation()
+                    ))),
+                }
+            }
+            RetSlot::Nested(expected) => {
+                let actual = self
+                    .scx
+                    .rep_arena()
+                    .tuple_shape(bundle.representation())
+                    .ok_or_else(|| {
+                        self.gap_here(format!(
+                            "representation {:?} has no tuple plan for a nested slot",
+                            bundle.representation()
+                        ))
+                    })?;
+                if actual != *expected {
+                    return Err(self.gap_here(format!(
+                        "representation {:?} does not match its nested tuple slot",
+                        bundle.representation()
+                    )));
+                }
+                self.tuple_repr_to_slots(bundle.value().clone(), expected)
+            }
+        }
     }
 
     /// Flatten a boxed value to its primitive leaves via chained reads (the inverse
     /// of `pack`, used when a value arrives boxed). A flat ENUM box reads its box
     /// keys (`__variant`, positional `[i+1]`, `.recfield`) in shape order; a cdata
     /// value reads its `<name>_ct` fields.
-    pub(crate) fn cdata_leaves(&mut self, v: Idx<Inst>, shape: &ValueShape) -> Vec<Idx<Inst>> {
+    pub(crate) fn cdata_leaves(
+        &mut self,
+        v: Idx<Inst>,
+        shape: &ValueShape,
+    ) -> Result<Vec<Idx<Inst>>, CompilerError> {
         if let Some(es) = EnumPlan::for_name(self.ws, shape.name).and_then(|plan| plan.flat().cloned()) {
             // NIL-SAFE spread: the box may be `nil` (a null nullable enum), and
             // `nil.__variant`/`nil[1]` would fault. Branch on nil -> all-nil leaves
@@ -1530,20 +1779,22 @@ impl Builder<'_> {
             }
             self.f.set_term(self.cur, Term::Goto(join));
             self.cur = join;
-            return cells.iter().map(|c| self.emit_cur(Inst::Load(*c))).collect();
+            return Ok(cells.iter().map(|c| self.emit_cur(Inst::Load(*c))).collect());
         }
         // A leaf-table box stores one key per leaf, so the split IS the key
         // reads -- the exact inverse of the `<Name>_lct` ctor, including the
         // presence key at a nullable child's own name.
-        if matches!(
-            self.scx.rep_arena().nominal_value_storage(self.ws, self.scx.target, shape.name),
-            Some(ValueStorage::LeafTable)
-        ) && !shape.nullable
+        let storage = self
+            .scx
+            .rep_arena()
+            .nominal_value_storage_required(self.ws, self.scx.target, shape.name)
+            .map_err(|e| self.gap_here(e.message))?;
+        if storage == ValueStorage::LeafTable && !shape.nullable
         {
-            return value_leaf_paths(shape)
+            return Ok(value_leaf_paths(shape)
                 .into_iter()
                 .map(|path| self.emit_cur(Inst::Field { base: v, field: path }))
-                .collect();
+                .collect());
         }
         let mut out = Vec::new();
         for (fname, fs) in &shape.fields {
@@ -1581,7 +1832,7 @@ impl Builder<'_> {
                     self.cur = value_bb;
                     let mut inner = sub.clone();
                     inner.nullable = false;
-                    let leaves = self.cdata_leaves(fv, &inner);
+                    let leaves = self.cdata_leaves(fv, &inner)?;
                     for (c, lv) in cells.iter().zip(leaves) {
                         self.emit_cur(Inst::Store { cell: *c, value: lv });
                     }
@@ -1592,10 +1843,10 @@ impl Builder<'_> {
                         cells.iter().map(|c| self.emit_cur(Inst::Load(*c))).collect::<Vec<_>>(),
                     );
                 }
-                FieldShape::Nested(sub) => out.extend(self.cdata_leaves(fv, sub)),
+                FieldShape::Nested(sub) => out.extend(self.cdata_leaves(fv, sub)?),
             }
         }
-        out
+        Ok(out)
     }
 
     /// A whole-value read of value struct `name` out of a BOXED place (struct
@@ -1609,13 +1860,15 @@ impl Builder<'_> {
     /// POINTER. A GC leaf is one slot, so its pointee stays shared by design. A
     /// leaf projection off the `Group` still reads its own slot at its own read
     /// point, and the unread leaves die in DCE.
-    pub(crate) fn boxed_value_copy_repr(&mut self, boxed: Idx<Inst>, name: Ustr) -> ValueRepr {
-        let Some(shape) = self.nominal_rep_shape(name, false) else {
-            return ValueRepr::Scalar(boxed);
-        };
-        let leaves = self.cdata_leaves(boxed, &shape);
+    pub(crate) fn boxed_value_copy_repr(
+        &mut self,
+        boxed: Idx<Inst>,
+        name: Ustr,
+    ) -> Result<ValueRepr, CompilerError> {
+        let shape = self.nominal_rep_shape_required(name, false)?;
+        let leaves = self.cdata_leaves(boxed, &shape)?;
         let mut idx = 0;
-        self.rebuild_from_leaves(&shape, &leaves, &mut idx)
+        Ok(self.rebuild_from_leaves(&shape, &leaves, &mut idx))
     }
 
     /// The `V?` twin of [`Self::boxed_value_copy_repr`]: an absent value has no
@@ -1623,7 +1876,11 @@ impl Builder<'_> {
     /// through untouched. The result is a single value (a fresh box or `nil`), not
     /// a `Group` -- a Group carries no presence for `pack`, which would materialize
     /// a box for an absent value and break `== null`.
-    pub(crate) fn nullable_boxed_value_copy(&mut self, boxed: Idx<Inst>, name: Ustr) -> Idx<Inst> {
+    pub(crate) fn nullable_boxed_value_copy(
+        &mut self,
+        boxed: Idx<Inst>,
+        name: Ustr,
+    ) -> Result<Idx<Inst>, CompilerError> {
         let nil = self.emit_cur(Inst::Const(Lit::Nil));
         let is_nil = self.emit_cur(Inst::Eq(boxed, nil));
         let result = self.f.new_cell(None);
@@ -1637,12 +1894,12 @@ impl Builder<'_> {
         self.store_and_join(result, n, join);
 
         self.cur = val_bb;
-        let copy = self.boxed_value_copy_repr(boxed, name);
-        let packed = self.pack(copy);
+        let copy = self.boxed_value_copy_repr(boxed, name)?;
+        let packed = self.pack(copy)?;
         self.store_and_join(result, packed, join);
 
         self.cur = join;
-        self.emit_cur(Inst::Load(result))
+        Ok(self.emit_cur(Inst::Load(result)))
     }
 
     /// One element of an indexable collection, for the loop lowerings that bind a
@@ -1660,7 +1917,9 @@ impl Builder<'_> {
         kind: ContainerKind,
     ) -> Result<ValueRepr, CompilerError> {
         match kind {
-            ContainerKind::VecValueColumns(elem) => self.column_element_repr(arr, index, elem),
+            ContainerKind::VecValueColumns(elem) => {
+                self.column_element_repr(arr, index, elem).map(ValueBundle::into_value)
+            }
             ContainerKind::NativeBufferValue(elem) if self.is_leaf_addressed(elem)? => {
                 self.nb_leaf_element_repr(arr, index, elem)
             }
@@ -1679,7 +1938,7 @@ impl Builder<'_> {
         kind: ContainerKind,
     ) -> Result<Idx<Inst>, CompilerError> {
         let repr = self.loop_element_repr_at(arr, index, kind)?;
-        Ok(self.pack(repr))
+        Ok(self.pack(repr)?)
     }
 
     /// Reconstruct a nested `Group` from a flat leaf list per `shape` (the inverse
@@ -1720,6 +1979,7 @@ impl Builder<'_> {
 
     /// Index of `field` in value struct `name`'s declared field order.
     pub(crate) fn field_index(&self, name: Ustr, field: Ustr) -> Option<usize> {
-        self.struct_field_names(name)?.iter().position(|f| *f == field)
+        let fields = self.struct_field_names(name);
+        fields?.iter().position(|f| *f == field)
     }
 }

@@ -475,6 +475,38 @@ fn nested_opaque_tuple_elements_keep_one_physical_slot() {
 }
 
 #[test]
+fn a_representation_id_cannot_cross_build_arenas() {
+    let ws = ws_of("fn main() { print(\"ok\") }\n");
+    let left = RepArena::default();
+    let right = RepArena::default();
+    let left_id = left
+        .plan(
+            &ws,
+            bone_semantic::hir::FnBackend::Lua,
+            &MonoTy::Float,
+            RepUse::Value,
+            &RepUseFacts::default(),
+            RepGuarantees::default(),
+        )
+        .expect("the left arena must plan the primitive");
+    right
+        .plan(
+            &ws,
+            bone_semantic::hir::FnBackend::Lua,
+            &MonoTy::Float,
+            RepUse::Value,
+            &RepUseFacts::default(),
+            RepGuarantees::default(),
+        )
+        .expect("the right arena must have the same local shape");
+
+    assert!(
+        right.try_get(left_id).is_none(),
+        "a plan ID from another build must not be accepted by a catalog with the same local index"
+    );
+}
+
+#[test]
 fn container_storage_uses_the_element_representation_plan() {
     let ws = ws_of("nobox value V2 { x: float, y: float }");
     let arena = RepArena::default();
@@ -854,8 +886,10 @@ fn nominal_value_storage_is_owned_by_the_rep_plan() {
     assert_eq!(plan.value_storage(), Some(ValueStorage::GcTable));
     assert!(matches!(plan.layout(), RepLayout::Leaves(_)));
     assert_eq!(
-        arena.nominal_value_storage(&ws, bone_semantic::hir::FnBackend::Lua, Ustr::from("Boxed")),
-        Some(ValueStorage::GcTable)
+        arena
+            .nominal_value_storage_required(&ws, bone_semantic::hir::FnBackend::Lua, Ustr::from("Boxed"))
+            .expect("the required storage plan must exist"),
+        ValueStorage::GcTable
     );
 }
 
@@ -866,12 +900,14 @@ fn nominal_value_leaf_paths_are_owned_by_the_rep_plan() {
     );
     let arena = RepArena::default();
     assert_eq!(
-        arena.nominal_value_leaf_paths(
+        arena
+            .nominal_value_leaf_paths_required(
             &ws,
             bone_semantic::hir::FnBackend::Lua,
             Ustr::from("Boxed"),
-        ),
-        Some(vec![Ustr::from("child.x"), Ustr::from("child.y"), Ustr::from("tag")])
+        )
+        .expect("the required leaf-path plan must exist"),
+        vec![Ustr::from("child.x"), Ustr::from("child.y"), Ustr::from("tag")]
     );
 }
 
@@ -882,12 +918,14 @@ fn nominal_value_presence_flags_are_owned_by_the_rep_plan() {
     );
     let arena = RepArena::default();
     assert_eq!(
-        arena.nominal_value_leaf_presence_flags(
+        arena
+            .nominal_value_leaf_presence_flags_required(
             &ws,
             bone_semantic::hir::FnBackend::Lua,
             Ustr::from("Boxed"),
-        ),
-        Some(vec![true, false, false, false])
+        )
+        .expect("the required presence plan must exist"),
+        vec![true, false, false, false]
     );
 }
 
@@ -925,5 +963,43 @@ fn nominal_c_layout_is_owned_by_the_rep_plan() {
         vec![Ustr::from("on"), Ustr::from("count"), Ustr::from("scale")]
     );
     assert_eq!(size, 12);
+    assert_eq!(align, 4);
+}
+
+#[test]
+fn nominal_c_layout_aligns_nested_fields_before_recurse() {
+    let ws = ws_of(
+        "value V2 { x: float, y: float }\n\
+         value V4 { x: float, y: float, z: float, w: float }\n\
+         value SpriteFragU {\
+             lights: bool, unlit: bool, count: int, ambient: V4,\
+             glow: bool, normal: bool, params: V2\
+         }",
+    );
+    let arena = RepArena::default();
+    let (leaves, size, align) = arena
+        .nominal_leaf_layout(
+            &ws,
+            bone_semantic::hir::FnBackend::Lua,
+            Ustr::from("SpriteFragU"),
+        )
+        .expect("the nested C layout must be representable");
+    assert_eq!(
+        leaves.iter().map(|leaf| (leaf.path, leaf.byte_off)).collect::<Vec<_>>(),
+        vec![
+            (Ustr::from("lights"), 0),
+            (Ustr::from("unlit"), 1),
+            (Ustr::from("count"), 4),
+            (Ustr::from("ambient.x"), 8),
+            (Ustr::from("ambient.y"), 12),
+            (Ustr::from("ambient.z"), 16),
+            (Ustr::from("ambient.w"), 20),
+            (Ustr::from("glow"), 24),
+            (Ustr::from("normal"), 25),
+            (Ustr::from("params.x"), 28),
+            (Ustr::from("params.y"), 32),
+        ]
+    );
+    assert_eq!(size, 36);
     assert_eq!(align, 4);
 }

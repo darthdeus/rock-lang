@@ -45,6 +45,73 @@ fn lower_dump(mut modules: Vec<skull_parser::Ast>, fn_name: &str) -> String {
         .join("\n")
 }
 
+#[test]
+fn value_constructors_carry_the_owned_representation() {
+    let ast = skull_parser::parse_module(
+        "value V2 { x: float, y: float }\n\
+         struct Holder { value: V2 }\n\
+         fn make() -> Holder { Holder { value: V2 { x: 1.0, y: 2.0 } } }",
+        ustr::Ustr::from("<test>"),
+    )
+    .expect("parse");
+    let mut modules = vec![ast];
+    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
+    let mid = *ws
+        .module_ids
+        .get(&ustr::Ustr::from("<test>"))
+        .expect("user module id");
+    let fid = ws
+        .module(mid)
+        .functions
+        .iter()
+        .find(|(_, f)| f.name.as_str() == "make")
+        .map(|(fid, _)| fid)
+        .expect("make function");
+    let mir = lower_test_root(&ws, mid, fid).expect("lower");
+
+    let arena = mir
+        .rep_arena
+        .as_ref()
+        .expect("lowered MIR must retain its representation arena");
+    let mut constructors = 0;
+    for (_, inst) in mir.insts.iter() {
+        if let skull_mir::mir::Inst::MakeValueStruct {
+            name,
+            representation,
+            form,
+            fields,
+        }
+        | skull_mir::mir::Inst::MaterializeValueStruct {
+            name,
+            representation,
+            form,
+            fields,
+        } = inst
+        {
+            constructors += 1;
+            let plan = arena
+                .try_get(*representation)
+                .expect("value constructor RepId must belong to its function arena");
+            assert_eq!(
+                plan.use_context(),
+                skull_mir::lower::RepUse::Value,
+                "value construction must retain the value-use plan"
+            );
+            let shape = match plan.layout() {
+                skull_mir::lower::RepLayout::Leaves(shape) => shape.clone(),
+                other => panic!("value constructor must carry a leaf plan, got {other:?}"),
+            };
+            let expected = match form {
+                skull_mir::mir::ValueCtorForm::Declared => skull_mir::lower::struct_field_names(&ws, *name),
+                skull_mir::mir::ValueCtorForm::Leaves => skull_mir::lower::value_leaf_paths(&shape),
+            };
+            let actual = fields.iter().map(|(field, _)| *field).collect::<Vec<_>>();
+            assert_eq!(actual, expected, "constructor `{name}` fields must match its selected form");
+        }
+    }
+    assert!(constructors > 0, "fixture must exercise a value constructor");
+}
+
 /// Stdlib-free: enough for literals, vars, `let`, and builtin operators.
 fn mir(src: &str, fn_name: &str) -> String {
     let ast = skull_parser::parse_module(src, ustr::Ustr::from("<test>")).expect("parse");

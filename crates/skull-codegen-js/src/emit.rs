@@ -1955,38 +1955,28 @@ impl Emitter<'_> {
             // registry (`build_vt_eq_defs`) supplies that split and `__op_eq`
             // consults it before the generic walk -- mirroring luajit's `_vt.__eq`
             // metatable-authority rule. Construction is identical for both tiers.
-            Inst::MakeValueStruct { name, fields }
-            | Inst::MaterializeValueStruct { name, fields } => {
-                // Dotted keys are the post-normalization LEAF form (a nested
-                // nobox field flattened into its parent so it never boxes). JS
-                // has no cdata layout to write leaves into -- a value struct is
-                // a plain object -- so rebuild the nested objects the declared
-                // shape expects. luajit instead calls the generated `_lct`.
-                //
-                // The dot test is a PROXY for leaf form and it does not always
-                // hold: a nullable child with no data leaves contributes a single
-                // undotted leaf keyed on the field's own name, so a leaf-table
-                // struct can reach here with no dot in sight. That is harmless
-                // HERE and nowhere else -- with no data leaves the flat object
-                // and the declared object are the same object, so both arms
-                // agree. luajit had to be re-keyed on the shared leaf-table plan
-                // for exactly this shape, because its two arms are different
-                // FUNCTIONS and one of them is never emitted.
-                if fields.iter().any(|(f, _)| f.contains('.')) {
-                    // Same strictness as the Lua emitter: a PARTIAL flattening
-                    // must reject, not silently emit a half-shaped object.
-                    let canonical = skull_mir::lower::RepArena::default()
-                        .nominal_value_leaf_paths(
-                            self.ws,
-                            bone_semantic::hir::FnBackend::Js,
-                            *name,
-                        )
-                        .unwrap_or_default();
+            Inst::MakeValueStruct { name, representation, form, fields }
+            | Inst::MaterializeValueStruct { name, representation, form, fields } => {
+                let arena = self.mf.rep_arena.as_ref().ok_or_else(|| {
+                    err(format!(
+                        "JS subset: `{name}` value constructor has no representation arena"
+                    ))
+                })?;
+                let plan = arena.try_get(*representation).ok_or_else(|| {
+                    err(format!(
+                        "JS subset: `{name}` value constructor has a foreign representation plan"
+                    ))
+                })?;
+                if matches!(form, skull_mir::mir::ValueCtorForm::Leaves) {
+                    let canonical = plan.leaf_paths().ok_or_else(|| {
+                        err(format!(
+                            "JS subset: `{name}` leaf-form constructor has no leaf paths"
+                        ))
+                    })?;
                     let got: Vec<ustr::Ustr> = fields.iter().map(|(f, _)| *f).collect();
                     if got != canonical {
-                        return Err(CompilerError::new_no_location(format!(
-                            "`{name}` ctor carries dotted field names that are not its canonical \
-                             leaf sequence: {got:?} vs {canonical:?}"
+                        return Err(err(format!(
+                            "`{name}` leaf-form constructor does not match its supplied plan: {got:?} vs {canonical:?}"
                         )));
                     }
                     return self.render_leaf_form_value_struct(*name, fields);
@@ -2092,7 +2082,7 @@ impl Emitter<'_> {
             // (skull-mir intercepts the call and resolves the element ctype).
             // `Ptr<T>` IS a TypedArray on JS, matching the luajit `ffi.new` cdata;
             // value-struct elements use the shared flat C layout below.
-            Inst::FfiNewArray { ctype, count } => match ctype.as_str() {
+            Inst::FfiNewArray { ctype, count, representation } => match ctype.as_str() {
                 "float" => format!("new Float32Array({})", self.render_val(*count)?),
                 "int" => format!("new Int32Array({})", self.render_val(*count)?),
                 "uint32_t" => format!("new Uint32Array({})", self.render_val(*count)?),
@@ -2104,19 +2094,33 @@ impl Emitter<'_> {
                 // leaf count, so the vertex pool's storage and its `.ptr` going to
                 // WebGL are unchanged -- pinned by `nb_leaf_layout_premise`.
                 other => {
-                    let size = skull_mir::lower::RepArena::default()
-                        .nominal_leaf_size(
-                            self.ws,
-                            bone_semantic::hir::FnBackend::Js,
-                            *ctype,
-                        )
-                        .map_err(|e| {
+                    let representation = representation.ok_or_else(|| {
+                        err(format!(
+                            "JS subset: native_buffer_alloc element ctype `{other}` has no supplied representation plan"
+                        ))
+                    })?;
+                    let arena = self.mf.rep_arena.as_ref().ok_or_else(|| {
+                        err(format!(
+                            "JS subset: native_buffer_alloc element ctype `{other}` has no representation arena"
+                        ))
+                    })?;
+                    let plan = arena.try_get(representation).ok_or_else(|| {
+                        err(format!(
+                            "JS subset: native_buffer_alloc element ctype `{other}` has a foreign representation plan"
+                        ))
+                    })?;
+                    let size = arena.leaf_size(self.ws, representation).map_err(|e| {
                         err(format!(
                             "JS subset: native_buffer_alloc element ctype `{other}` has no C \
                              leaf layout to back a TypedArray with ({})",
                             e.message
                         ))
                     })?;
+                    if plan.value_storage() != Some(skull_mir::lower::ValueStorage::CData) {
+                        return Err(err(format!(
+                            "JS subset: native_buffer_alloc element ctype `{other}` is not a CData representation"
+                        )));
+                    }
                     // A 4-byte-backed array needs a 4-byte multiple. C gives that
                     // whenever any leaf is 4-wide; an all-`bool` element would not,
                     // and rejects rather than silently reinterpreting its bytes.
@@ -2357,8 +2361,8 @@ impl Emitter<'_> {
     ) -> Result<String, CompilerError> {
         // `MaterializeValueStruct` is the same box, explicitly authorized -- it
         // inspects identically.
-        if let Inst::MakeValueStruct { name, fields }
-        | Inst::MaterializeValueStruct { name, fields } = &self.mf.insts[id]
+        if let Inst::MakeValueStruct { name, fields, .. }
+        | Inst::MaterializeValueStruct { name, fields, .. } = &self.mf.insts[id]
         {
             if skull_mir::lower::gc_free_value_struct_field_order(self.ws, *name).is_some() {
                 return self.render_value_struct_inspect_fields(*name, fields, cyc, prec);
@@ -2445,7 +2449,7 @@ impl Emitter<'_> {
         // `inspect` (lua_tostring / precision parity), nested value structs recurse.
         if matches!(cf.name.as_str(), "inspect" | "inspect_formatted") {
             if let Some(&arg0) = args.first() {
-                if let Inst::MakeValueStruct { name, .. } = &self.mf.insts[arg0] {
+                if let Inst::MakeValueStruct { name, representation, .. } = &self.mf.insts[arg0] {
                     if skull_mir::lower::gc_free_value_struct_field_order(self.ws, *name).is_some() {
                         let (cyc, prec) = if cf.name.as_str() == "inspect_formatted" {
                             ("true".to_string(), self.render_val(args[1])?)
@@ -2460,14 +2464,13 @@ impl Emitter<'_> {
                     // A scalarized ENUM box reaches here (name is an enum value-shape,
                     // not a struct): its numeric tag / named variant cannot be rebuilt
                     // from the `{__tag, _n}` object -- reject honestly.
-                    if matches!(
-                        skull_mir::lower::RepArena::default().nominal_value_storage(
-                            self.ws,
-                            bone_semantic::hir::FnBackend::Js,
-                            *name,
-                        ),
-                        Some(skull_mir::lower::ValueStorage::CData)
-                    ) {
+                    let storage = self
+                        .mf
+                        .rep_arena
+                        .as_ref()
+                        .and_then(|arena| arena.try_get(*representation))
+                        .and_then(|plan| plan.value_storage());
+                    if storage == Some(skull_mir::lower::ValueStorage::CData) {
                         return Err(err(format!(
                             "JS subset: `inspect` of scalarized enum `{name}` \
                              (numeric-tag box cannot reproduce the named variant)"
@@ -3049,7 +3052,10 @@ fn assemble_program_core(
                 st.reject(&deco_name, e);
                 continue;
             }
-            skull_transform::cleanup_with_nobox(ws, &mut mf);
+            if let Err(e) = skull_transform::cleanup_with_nobox(ws, &mut mf) {
+                st.reject(&deco_name, e);
+                continue;
+            }
             skull_transform::convert_closures(&mut mf, &deco_name);
             skull_transform::recover_counted_loops(ws, &mut mf);
             for nf in &mut mf.nested_fns {
@@ -3742,7 +3748,7 @@ impl WorklistState {
             spec_lowered: Vec::new(),
             inline_js,
             state_index: build_state_index(ws),
-            nobox_leaf_globals: build_nobox_leaf_globals(ws, scx),
+            nobox_leaf_globals: build_nobox_leaf_globals(ws, scx)?,
             deco_globals: if program_mode { HashSet::new() } else { decorator_populated_globals(ws) },
             enum_defs: build_enum_global_defs(ws),
             gctx: GlobalCtx::default(),
@@ -3915,7 +3921,10 @@ impl JsDelivery<'_> {
             }
         };
         if mf.is_coroutine {
-            skull_transform::cleanup_with_nobox(self.ws, &mut mf);
+            if let Err(e) = skull_transform::cleanup_with_nobox(self.ws, &mut mf) {
+                self.st.reject(&name, e);
+                return Ok(());
+            }
         } else {
             if let Err(e) = skull_transform::inline_functions_with_plans(
                 self.ws,
@@ -3928,7 +3937,10 @@ impl JsDelivery<'_> {
                 self.st.reject(&name, e);
                 return Ok(());
             }
-            skull_transform::cleanup_with_nobox(self.ws, &mut mf);
+            if let Err(e) = skull_transform::cleanup_with_nobox(self.ws, &mut mf) {
+                self.st.reject(&name, e);
+                return Ok(());
+            }
             skull_transform::convert_closures(&mut mf, &name);
             skull_transform::recover_counted_loops(self.ws, &mut mf);
             for nf in &mut mf.nested_fns {
@@ -4076,7 +4088,10 @@ impl JsDelivery<'_> {
             self.st.reject(&name, e);
             return Ok(());
         }
-        skull_transform::cleanup_with_nobox(self.ws, &mut mf);
+        if let Err(e) = skull_transform::cleanup_with_nobox(self.ws, &mut mf) {
+            self.st.reject(&name, e);
+            return Ok(());
+        }
         skull_transform::convert_closures(&mut mf, &name);
         skull_transform::recover_counted_loops(self.ws, &mut mf);
         for nf in &mut mf.nested_fns {
@@ -4133,7 +4148,10 @@ impl JsDelivery<'_> {
             }
         };
         let Some(mut mf) = lowered else { return Ok(()) };
-        skull_transform::cleanup_with_nobox(self.ws, &mut mf);
+        if let Err(e) = skull_transform::cleanup_with_nobox(self.ws, &mut mf) {
+            self.st.reject(&init_name, e);
+            return Ok(());
+        }
         skull_transform::convert_closures(&mut mf, &init_name);
         skull_transform::recover_counted_loops(self.ws, &mut mf);
         for nf in &mut mf.nested_fns {
@@ -4151,9 +4169,19 @@ impl JsDelivery<'_> {
         }
         let gdecl = &self.ws.module(site.module).globals[site.gid];
         let is_const = gdecl.is_const;
-        let leaves = skull_mir::lower::GlobalPlan::for_declared_type(self.ws, self.scx, gdecl.ty)
-            .ok()
-            .and_then(|plan| plan.leaf_names(gdecl.name));
+        let leaves = match skull_mir::lower::GlobalPlan::for_declared_type(self.ws, self.scx, gdecl.ty) {
+            Ok(plan) => plan.leaf_names(gdecl.name),
+            Err(error) => {
+                self.st.reject(
+                    &init_name,
+                    CompilerError::new_no_location(format!(
+                        "JS: global `{}` representation planning failed: {}",
+                        gdecl.name, error.message
+                    )),
+                );
+                return Ok(());
+            }
+        };
         self.st.ginits.push(GlobalInit {
             name: gname,
             init_name,
@@ -4478,11 +4506,22 @@ fn emit_enum_singletons(gctx: &GlobalCtx, enum_defs: &HashMap<ustr::Ustr, String
 /// Per-type `__rock_vt_eq` registry for every GC-carrying value struct the
 /// program constructs (closed transitively over GC-carrying value-struct fields).
 fn emit_vt_eq(ws: &Workspace, bodies: &[&MirFunc]) -> Result<String, CompilerError> {
+    if bodies.is_empty() {
+        return Ok(String::new());
+    }
+    let arena = bodies
+        .iter()
+        .find_map(|mf| mf.rep_arena.as_ref())
+        .ok_or_else(|| err("JS subset: value equality registry has no representation arena"))?;
+    let plans = arena
+        .value_plan_catalog()
+        .into_iter()
+        .collect::<std::collections::BTreeMap<_, _>>();
     let mut vt_names: BTreeSet<ustr::Ustr> = BTreeSet::new();
     for mf in bodies {
-        collect_gc_value_structs(ws, mf, &mut vt_names);
+        collect_gc_value_structs(mf, arena, &mut vt_names)?;
     }
-    close_gc_value_struct_fields(ws, &mut vt_names);
+    close_gc_value_struct_fields(ws, arena, &plans, &mut vt_names)?;
     build_vt_eq_defs(ws, &vt_names)
 }
 
@@ -4491,6 +4530,17 @@ fn emit_vt_eq(ws: &Workspace, bodies: &[&MirFunc]) -> Result<String, CompilerErr
 /// never constructed on its own -- its leaves are written straight into the
 /// parent -- yet its logical view still has to render under its own name).
 fn emit_inspect_ty(ws: &Workspace, bodies: &[&MirFunc]) -> Result<String, CompilerError> {
+    if bodies.is_empty() {
+        return Ok(String::new());
+    }
+    let arena = bodies
+        .iter()
+        .find_map(|mf| mf.rep_arena.as_ref())
+        .ok_or_else(|| err("JS subset: inspect registry has no representation arena"))?;
+    let plans = arena
+        .value_plan_catalog()
+        .into_iter()
+        .collect::<std::collections::BTreeMap<_, _>>();
     let mut names: BTreeSet<ustr::Ustr> = BTreeSet::new();
     for mf in bodies {
         collect_struct_types(ws, mf, &mut names);
@@ -4501,7 +4551,7 @@ fn emit_inspect_ty(ws: &Workspace, bodies: &[&MirFunc]) -> Result<String, Compil
     }
     names.retain(|n| ws.struct_by_name.contains_key(n));
     close_struct_field_types(ws, &mut names);
-    build_inspect_ty_defs(ws, &names)
+    build_inspect_ty_defs(ws, arena, &plans, &names)
 }
 
 /// Per-type `__rock_col_mat` registry for every element type the program stores
@@ -4511,11 +4561,18 @@ fn emit_inspect_ty(ws: &Workspace, bodies: &[&MirFunc]) -> Result<String, Compil
 /// and the element type is a compile-time fact at every column site anyway --
 /// that is exactly why `spec_key_has_target_storage` forces specialization for one.
 fn emit_col_mat(ws: &Workspace, bodies: &[&MirFunc]) -> Result<String, CompilerError> {
+    if bodies.is_empty() {
+        return Ok(String::new());
+    }
+    let arena = bodies
+        .iter()
+        .find_map(|mf| mf.rep_arena.as_ref())
+        .ok_or_else(|| err("JS subset: column materializers have no representation arena"))?;
     let mut plans = std::collections::BTreeMap::new();
     for mf in bodies {
-        skull_mir::mir::column_elem_plans(mf, &mut plans);
+        skull_mir::mir::column_elem_rep_plans(mf, &mut plans);
     }
-    build_col_mat_defs(ws, &plans)
+    build_col_mat_defs(ws, &plans, arena)
 }
 
 /// Emit `__rock_col_mat["<E>"] = function(v, i) { return {...}; };` -- one
@@ -4529,11 +4586,11 @@ fn emit_col_mat(ws: &Workspace, bodies: &[&MirFunc]) -> Result<String, CompilerE
 /// `E { x: 1, y: 2 }` with no further help.
 fn build_col_mat_defs(
     ws: &Workspace,
-    plans: &std::collections::BTreeMap<ustr::Ustr, bool>,
+    plans: &std::collections::BTreeMap<ustr::Ustr, (bool, skull_mir::lower::RepId)>,
+    arena: &skull_mir::lower::RepArena,
 ) -> Result<String, CompilerError> {
     let mut out = String::new();
-    let rep_arena = skull_mir::lower::RepArena::default();
-    for (name, nobox) in plans {
+    for (name, (nobox, representation)) in plans {
         // A `nobox` element has no materializer BY CONSTRUCTION: every op that
         // would need one (inspect, sort, the Lua-array bridge) is a spanned
         // rejection in the lowering, so emitting one would be unreachable code
@@ -4541,11 +4598,12 @@ fn build_col_mat_defs(
         if *nobox {
             continue;
         }
-        let Some(paths) = rep_arena.nominal_value_leaf_paths(
-            ws,
-            bone_semantic::hir::FnBackend::Js,
-            *name,
-        ) else {
+        let plan = arena.try_get(*representation).ok_or_else(|| {
+            err(format!(
+                "JS subset: column element `{name}` carries a foreign representation plan"
+            ))
+        })?;
+        let Some(paths) = plan.leaf_paths() else {
             // An enum value-shape has leaf paths but no struct declaration to
             // rebuild against: its `{__tag, _n}` leaves cannot reproduce the
             // named variant a JS enum box carries. Same honest rejection the
@@ -4851,21 +4909,20 @@ fn build_state_index(ws: &Workspace) -> HashMap<ustr::Ustr, GlobalSite> {
 fn build_nobox_leaf_globals(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,
-) -> HashMap<ustr::Ustr, ustr::Ustr> {
+) -> Result<HashMap<ustr::Ustr, ustr::Ustr>, CompilerError> {
     let mut m = HashMap::new();
     for module in &ws.modules {
         for (_gid, g) in module.globals.iter() {
-            if let Some(leaves) = skull_mir::lower::GlobalPlan::for_declared_type(ws, scx, g.ty)
-                .ok()
-                .and_then(|plan| plan.leaf_names(g.name))
-            {
+            let plan = skull_mir::lower::GlobalPlan::for_declared_type(ws, scx, g.ty)
+                .map_err(|e| CompilerError::new_no_location(e.message))?;
+            if let Some(leaves) = plan.leaf_names(g.name) {
                 for leaf in leaves {
                     m.insert(leaf, g.name);
                 }
             }
         }
     }
-    m
+    Ok(m)
 }
 
 fn queue_standalone(
@@ -5347,50 +5404,76 @@ fn build_enum_global_defs(ws: &Workspace) -> HashMap<ustr::Ustr, String> {
 /// Collect every GC-carrying value-struct name a body CONSTRUCTS (an
 /// `Inst::MakeValueStruct` whose type is a non-`CData` `ValueStorage`), scanning the
 /// full inst arena so a value struct built as a nested value operand is caught.
-fn collect_gc_value_structs(ws: &Workspace, mf: &MirFunc, out: &mut BTreeSet<ustr::Ustr>) {
+fn collect_gc_value_structs(
+    mf: &MirFunc,
+    arena: &skull_mir::lower::RepArena,
+    out: &mut BTreeSet<ustr::Ustr>,
+) -> Result<(), CompilerError> {
+    let local = mf
+        .rep_arena
+        .as_ref()
+        .ok_or_else(|| err(format!("JS subset: `{}` has no representation arena", mf.name)))?;
+    if !std::ptr::eq(local.as_ref(), arena) {
+        return Err(err(format!(
+            "JS subset: `{}` carries a representation plan from another arena",
+            mf.name
+        )));
+    }
     for inst in mf.insts.values() {
-        if let Inst::MakeValueStruct { name, .. } = inst {
-            if !matches!(
-                skull_mir::lower::RepArena::default().nominal_value_storage(
-                    ws,
-                    bone_semantic::hir::FnBackend::Js,
-                    *name,
-                ),
-                Some(skull_mir::lower::ValueStorage::CData)
-            ) {
-                out.insert(*name);
-            }
+        let (name, representation) = match inst {
+            Inst::MakeValueStruct { name, representation, .. }
+            | Inst::MaterializeValueStruct { name, representation, .. } => (*name, *representation),
+            _ => continue,
+        };
+        let plan = arena.try_get(representation).ok_or_else(|| {
+            err(format!(
+                "JS subset: `{name}` constructor carries a foreign representation plan"
+            ))
+        })?;
+        if plan.value_storage() != Some(skull_mir::lower::ValueStorage::CData) {
+            out.insert(name);
         }
     }
     for nf in &mf.nested_fns {
-        collect_gc_value_structs(ws, nf, out);
+        collect_gc_value_structs(nf, arena, out)?;
     }
+    Ok(())
 }
 
 /// Close the referenced set over GC-carrying value-struct FIELDS: a `Wrap`
 /// registry entry recurses through `__op_eq` into its `VecBox` field, so that
 /// field's entry must exist even if `VecBox` is never independently constructed.
-fn close_gc_value_struct_fields(ws: &Workspace, names: &mut BTreeSet<ustr::Ustr>) {
+fn close_gc_value_struct_fields(
+    ws: &Workspace,
+    arena: &skull_mir::lower::RepArena,
+    plans: &std::collections::BTreeMap<ustr::Ustr, skull_mir::lower::RepId>,
+    names: &mut BTreeSet<ustr::Ustr>,
+) -> Result<(), CompilerError> {
     let mut queue: Vec<ustr::Ustr> = names.iter().copied().collect();
     while let Some(name) = queue.pop() {
         let Some(sid) = ws.struct_by_name.get(&name) else { continue };
         let s = &ws.module(sid.module).structs[sid.def];
         for f in &s.fields {
             if let Some(field_struct) = value_struct_field_name(ws, f.ty) {
-                if !matches!(
-                    skull_mir::lower::RepArena::default().nominal_value_storage(
-                        ws,
-                        bone_semantic::hir::FnBackend::Js,
-                        field_struct,
-                    ),
-                    Some(skull_mir::lower::ValueStorage::CData)
-                ) && names.insert(field_struct)
+                let representation = plans.get(&field_struct).ok_or_else(|| {
+                    err(format!(
+                        "JS subset: GC value field `{field_struct}` has no owned representation plan"
+                    ))
+                })?;
+                let plan = arena.try_get(*representation).ok_or_else(|| {
+                    err(format!(
+                        "JS subset: GC value field `{field_struct}` carries a foreign representation plan"
+                    ))
+                })?;
+                if plan.value_storage() != Some(skull_mir::lower::ValueStorage::CData)
+                    && names.insert(field_struct)
                 {
                     queue.push(field_struct);
                 }
             }
         }
     }
+    Ok(())
 }
 
 /// The nominal name of `ty` when it resolves to a `value` struct, else `None`
@@ -5522,6 +5605,8 @@ fn embed_view_expr(
 /// the compact/multiline threshold.
 fn build_inspect_ty_defs(
     ws: &Workspace,
+    arena: &skull_mir::lower::RepArena,
+    plans: &std::collections::BTreeMap<ustr::Ustr, skull_mir::lower::RepId>,
     names: &BTreeSet<ustr::Ustr>,
 ) -> Result<String, CompilerError> {
     // Self-declaring: `JS_INSPECT_RUNTIME` also declares the table, but a caller
@@ -5537,15 +5622,23 @@ fn build_inspect_ty_defs(
             out.push_str("var __rock_inspect_ty = __rock_inspect_ty || {};\n");
         }
         let header = js_string_lit(name.as_str())?;
-        if s.is_value
-            && matches!(
-                skull_mir::lower::RepArena::default().nominal_value_storage(
-                    ws,
-                    bone_semantic::hir::FnBackend::Js,
-                    *name,
-                ),
-                Some(skull_mir::lower::ValueStorage::CData)
-            )
+        let value_plan = if s.is_value {
+            let representation = plans.get(name).ok_or_else(|| {
+                err(format!(
+                    "JS subset: inspected value `{name}` has no owned representation plan"
+                ))
+            })?;
+            Some(arena.try_get(*representation).ok_or_else(|| {
+                err(format!(
+                    "JS subset: inspected value `{name}` carries a foreign representation plan"
+                ))
+            })?)
+        } else {
+            None
+        };
+        if value_plan
+            .as_ref()
+            .is_some_and(|plan| plan.value_storage() == Some(skull_mir::lower::ValueStorage::CData))
         {
             let pairs: Vec<String> = s
                 .fields
@@ -5700,7 +5793,7 @@ fn emit_coroutine_js(
     // are already `e.c<S>.c<slot>` MIR) -- the normal structured path.
     let mut nested = std::mem::take(&mut lowered.step.nested_fns);
     for nf in nested.iter_mut() {
-        skull_transform::cleanup_with_nobox(ws, nf);
+        skull_transform::cleanup_with_nobox(ws, nf)?;
         skull_transform::recover_counted_loops(ws, nf);
         out.push_str(&emit_fn_with_callees(ws, nf, nf.name.as_str(), callees, &hoisted, globals)?);
     }

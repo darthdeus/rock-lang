@@ -37,13 +37,21 @@ impl Builder<'_> {
     /// rewrite. A no-op on anything that is not an implicit box of a `nobox`
     /// struct.
     pub(crate) fn authorize_nobox_box(&mut self, inst: Idx<Inst>) {
-        let Inst::MakeValueStruct { name, fields } = &self.f.insts[inst] else { return };
+        let Inst::MakeValueStruct { name, representation, form, fields } = &self.f.insts[inst]
+        else {
+            return;
+        };
         let Some(sid) = self.ws.struct_by_name.get(name) else { return };
         if !self.ws.modules[sid.module.index()].structs[sid.def].is_nobox {
             return;
         }
-        let (name, fields) = (*name, fields.clone());
-        self.f.insts[inst] = Inst::MaterializeValueStruct { name, fields };
+        let (name, representation, form, fields) = (*name, *representation, *form, fields.clone());
+        self.f.insts[inst] = Inst::MaterializeValueStruct {
+            name,
+            representation,
+            form,
+            fields,
+        };
     }
 
     /// ARGUMENTS ONLY -- there is no return-position sibling, and that is an
@@ -389,6 +397,7 @@ impl Builder<'_> {
         &self,
         e: Idx<Expr>,
         func: FuncRef,
+        inst: &crate::instance::Instance,
     ) -> Result<(), CompilerError> {
         if self.scx.values_first_class {
             return Ok(());
@@ -404,13 +413,13 @@ impl Builder<'_> {
         if !opaque {
             return Ok(());
         }
-        let Some(ret) = callee.return_ty else {
+        let Some(ret) = self.concrete_callee_return_ty(e, inst)? else {
             return Ok(());
         };
-        let Some(TypeExpr::App {
-            ctor: TypeCtor::Nominal(name),
+        let crate::monoty::MonoTy::App {
+            ctor: crate::monoty::MonoCtor::Nominal(name),
             ..
-        }) = static_ty(self.ws, ret)
+        } = ret
         else {
             return Ok(());
         };
@@ -438,9 +447,10 @@ impl Builder<'_> {
         else {
             return false;
         };
-        self.resolve_funcref(expr, name)
-            .ok()
-            .is_some_and(|func| matches!(self.fn_expand_kind(func), Some(ExpandKind::Materialize)))
+        matches!(
+            self.resolve_funcref(expr, name),
+            Ok(func) if matches!(self.fn_expand_kind(func), Some(ExpandKind::Materialize))
+        )
     }
 
     /// A (value) struct field's declared type, for the value-struct-literal
@@ -535,16 +545,23 @@ impl Builder<'_> {
         self.dispatch().is_nobox_struct(name)
     }
 
-    pub(crate) fn nobox_value_shape_of(&self, e: Idx<Expr>) -> Option<ValueShape> {
+    pub(crate) fn nobox_value_shape_of(
+        &self,
+        e: Idx<Expr>,
+    ) -> Result<Option<ValueShape>, CompilerError> {
         if self.scx.values_first_class {
-            return None;
+            return Ok(None);
         }
-        self.expr_rep_id(e, RepUse::Value, true)
-            .and_then(|id| self.scx.rep_arena().value_shape(id))
+        let Some(id) = self.expr_rep_id(e, RepUse::Value, true)? else { return Ok(None) };
+        Ok(self.scx.rep_arena().value_shape(id))
     }
 
-    pub(crate) fn nobox_binding_shape(&self, binding: Idx<BindingInfo>) -> Option<ValueShape> {
-        self.nobox_shape_of_ty(self.binding_ty(binding)?)
+    pub(crate) fn nobox_binding_shape(
+        &self,
+        binding: Idx<BindingInfo>,
+    ) -> Result<Option<ValueShape>, CompilerError> {
+        let Some(ty) = self.binding_ty(binding) else { return Ok(None) };
+        self.nobox_shape_of_ty(ty)
     }
 
     pub(crate) fn fn_value_rep_plan(
@@ -562,9 +579,12 @@ impl Builder<'_> {
         Ok(None)
     }
 
-    pub(crate) fn nobox_shape_of_ty(&self, ty: TyId) -> Option<ValueShape> {
+    pub(crate) fn nobox_shape_of_ty(
+        &self,
+        ty: TyId,
+    ) -> Result<Option<ValueShape>, CompilerError> {
         if self.scx.values_first_class {
-            return None;
+            return Ok(None);
         }
         self.rep_shape_for_ty(ty, RepUse::Value, true)
     }
@@ -573,10 +593,14 @@ impl Builder<'_> {
     /// shape of the projected part (`None` = one primitive leaf). `SPOT` is the
     /// whole group, `SPOT.x` / `SPOT.a.b` a contiguous sub-range of it -- the
     /// leaf order is `repr_to_leaves`', so a projection is a slice, never a
-    /// scatter. `None` when the place is not rooted at a `nobox` global.
-    pub(crate) fn nobox_global_place(&self, e: Idx<Expr>) -> Option<(Vec<Ustr>, Option<ValueShape>)> {
+    /// scatter. `Ok(None)` when the place is not rooted at a `nobox` global.
+    /// A planning failure is an error rather than an ordinary-slot fallback.
+    pub(crate) fn nobox_global_place(
+        &self,
+        e: Idx<Expr>,
+    ) -> Result<Option<(Vec<Ustr>, Option<ValueShape>)>, CompilerError> {
         if self.scx.values_first_class {
-            return None;
+            return Ok(None);
         }
         match self.body.expr_arena[e].clone() {
             // The DECLARED type, never `e`'s: a refined read of a `global X: NV2?`
@@ -584,16 +608,21 @@ impl Builder<'_> {
             // leaf as `x`. Storage layout is a property of the global, not of the
             // read site.
             Expr::Global(name) => {
-                let ty = *self.ws.globals_by_name.get(&name)?;
-                let plan = GlobalPlan::for_declared_type(self.ws, self.scx, ty).ok()?;
-                let shape = plan.value_shape()?;
+                let Some(&ty) = self.ws.globals_by_name.get(&name) else {
+                    return Ok(None);
+                };
+                let plan = GlobalPlan::for_declared_type(self.ws, self.scx, ty)
+                    .map_err(|e| self.gap_here(e.message))?;
+                let Some(shape) = plan.value_shape() else {
+                    return Ok(None);
+                };
                 let leaves =
                     (0..shape.leaf_count()).map(|i| nobox_global_leaf_name(name, i)).collect();
-                Some((leaves, Some(shape)))
+                Ok(Some((leaves, Some(shape))))
             }
             Expr::FieldAccess { base, field } => {
-                let (leaves, Some(shape)) = self.nobox_global_place(base)? else {
-                    return None;
+                let Some((leaves, Some(shape))) = self.nobox_global_place(base)? else {
+                    return Ok(None);
                 };
                 let mut off = usize::from(shape.nullable);
                 for (fname, fs) in &shape.fields {
@@ -602,13 +631,13 @@ impl Builder<'_> {
                         FieldShape::Nested(s) => (s.leaf_count(), Some(s.clone())),
                     };
                     if *fname == field {
-                        return Some((leaves[off..off + n].to_vec(), sub));
+                        return Ok(Some((leaves[off..off + n].to_vec(), sub)));
                     }
                     off += n;
                 }
-                None
+                Ok(None)
             }
-            _ => None,
+            _ => Ok(None),
         }
     }
 
@@ -639,7 +668,7 @@ impl Builder<'_> {
         let vals = match shape {
             Some(shape) => {
                 let r = self.lower_expr_repr(value)?;
-                self.repr_to_leaves(&r, &shape)
+                self.repr_to_leaves_bundle_for_shape(&r, &shape)?
             }
             None => vec![self.lower_expr(value)?],
         };

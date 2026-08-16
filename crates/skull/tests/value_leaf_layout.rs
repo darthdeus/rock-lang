@@ -41,7 +41,7 @@ fn leaf_walkers_agree_on_path_order() {
         // refactor that weakens the check does not silently pass this test.
         let got: Vec<Ustr> = layout(&ws, name).iter().map(|l| l.path).collect();
         let want = RepArena::default()
-            .nominal_value_leaf_paths(
+            .nominal_value_leaf_paths_required(
                 &ws,
                 bone_semantic::hir::FnBackend::Any,
                 Ustr::from(name),

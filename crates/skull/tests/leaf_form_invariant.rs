@@ -24,17 +24,20 @@ fn main() {
 fn a_non_canonical_leaf_sequence_rejects() {
     let ws = ws_with_stdlib(NESTED_NOBOX);
     let name = Ustr::from("E5");
-    let canonical = skull_mir::lower::RepArena::default()
-        .nominal_value_leaf_paths(&ws, bone_semantic::hir::FnBackend::Lua, name)
-        .expect("E5 has a leaf layout");
+    let arena = skull_mir::lower::RepArena::default();
+    let plan_id = arena
+        .plan_nominal_value(&ws, bone_semantic::hir::FnBackend::Lua, name)
+        .expect("E5 has a representation plan");
+    let plan = arena.get(plan_id);
+    let canonical = plan.leaf_paths().expect("E5 has a leaf layout");
     assert!(canonical.len() > 2, "need a multi-leaf type to reorder: {canonical:?}");
 
     assert!(
-        skull_codegen_lua::leaf_form_violation(&ws, name, &canonical).is_none(),
+        skull_codegen_lua::leaf_form_violation(&plan, &canonical).is_none(),
         "the canonical sequence itself must pass"
     );
 
-    let err = skull_codegen_lua::leaf_form_violation(&ws, name, &canonical[..canonical.len() - 1])
+    let err = skull_codegen_lua::leaf_form_violation(&plan, &canonical[..canonical.len() - 1])
         .expect("a truncated flattening must reject");
     assert!(
         err.message.contains("canonical leaf"),
@@ -45,7 +48,7 @@ fn a_non_canonical_leaf_sequence_rejects() {
     let mut swapped = canonical.clone();
     swapped.swap(0, 1);
     assert!(
-        skull_codegen_lua::leaf_form_violation(&ws, name, &swapped).is_some(),
+        skull_codegen_lua::leaf_form_violation(&plan, &swapped).is_some(),
         "a reordered flattening must reject -- `_lct` is positional"
     );
 }

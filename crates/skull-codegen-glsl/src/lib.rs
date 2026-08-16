@@ -1590,7 +1590,7 @@ impl FnEmit<'_> {
             // `MaterializeValueStruct` renders identically: on the GPU an
             // authorized box is just a `vec2(..)` ctor -- the authorization is a
             // Lua-side concept (`authorize_gpu_boundary_boxes`).
-            Inst::MakeValueStruct { name, fields } | Inst::MaterializeValueStruct { name, fields } => {
+            Inst::MakeValueStruct { name, fields, .. } | Inst::MaterializeValueStruct { name, fields, .. } => {
                 // GLSL must never see the post-normalization LEAF form (dotted
                 // field names, `flatten_nobox_nested_ctors`). It cannot today --
                 // this crate never calls `skull_transform`, so it never runs

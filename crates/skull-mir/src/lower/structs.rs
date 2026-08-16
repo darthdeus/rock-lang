@@ -45,7 +45,8 @@ impl Builder<'_> {
         for fidx in fields {
             let lf = self.body.struct_lit_field_arena[fidx];
             let key: u32 = lf.value.into_raw().into();
-            if let Some(shape) = self.flat_field_of_struct(name, lf.name) {
+            let field_plan = self.struct_field_plan(name, lf.name, false)?;
+            if let Some(shape) = field_plan.as_ref().and_then(|p| p.flat_shape()) {
                 let cells = match flat_by_value.get(&key) {
                     Some(c) => c.clone(),
                     None => {
@@ -55,11 +56,10 @@ impl Builder<'_> {
                     }
                 };
                 lit_flat.push((lf.name, cells));
-            } else if let Some(cname) = self.embed_field_of_struct(name, lf.name) {
+            } else if let Some((cname, nullable)) = field_plan.and_then(|p| p.embed()) {
                 // An embedded field's leaves ARE this parent's keys, so its
                 // value is spliced rather than lowered to a child box. Keyed by
                 // the value expr so a field GROUP still evaluates once.
-                let nullable = self.embed_field_is_nullable(name, lf.name);
                 let leaves = match embed_by_value.get(&key) {
                     Some(l) => l.clone(),
                     None => {
@@ -91,13 +91,15 @@ impl Builder<'_> {
                         fs.extend(slots.clone());
                     } else if let Some(&(_, v)) = lit_box.iter().find(|(n, _)| *n == fname) {
                         fs.push((fname, v));
-                    } else if let Some(cname) = self.embed_field_of_struct(name, fname) {
+                    } else if let Some((cname, nullable)) = self
+                        .struct_field_plan(name, fname, false)?
+                        .and_then(|p| p.embed())
+                    {
                         // Unwritten embed field: copy the base's leaves through
                         // (including its presence slot), else the struct default.
-                        let nullable = self.embed_field_is_nullable(name, fname);
                         match base_inst {
                             Some(bi) => {
-                                for k in self.embed_leaf_paths(cname) {
+                                for k in self.embed_leaf_paths(cname)? {
                                     let key = Ustr::from(&format!("{fname}.{k}"));
                                     let v = self.emit_cur(Inst::Field { base: bi, field: key });
                                     fs.push((key, v));
@@ -114,7 +116,10 @@ impl Builder<'_> {
                                 fs.extend(Self::embed_field_slots(fname, slots));
                             }
                         }
-                    } else if let Some(shape) = self.flat_field_of_struct(name, fname) {
+                    } else if let Some(shape) = self
+                        .struct_field_plan(name, fname, false)?
+                        .and_then(|p| p.flat_shape())
+                    {
                         // Unwritten flat field: from the base if present, else the
                         // struct default. A base stores the field in physical
                         // dotted slots, while the default is still a boxed enum.
@@ -144,7 +149,7 @@ impl Builder<'_> {
         // would otherwise index a nil view. (Loud, not silent: leaf addressing
         // never changes storage, so the only failure available is a missing
         // view, and that errors on first access.)
-        let out = self.with_leaf_views(e, name, out);
+        let out = self.with_leaf_views(e, name, out)?;
         // Non-value structs only — a `value` literal is built via the repr layer
         // (`value_literal_repr` -> `pack`, the single value-cdata source), so it
         // never reaches here.
@@ -162,27 +167,35 @@ impl Builder<'_> {
         e: Idx<Expr>,
         name: Ustr,
         mut fields: Vec<(Ustr, Idx<Inst>)>,
-    ) -> Vec<(Ustr, Idx<Inst>)> {
+    ) -> Result<Vec<(Ustr, Idx<Inst>)>, CompilerError> {
         if name.as_str() != "NativeBuffer" {
-            return fields;
+            return Ok(fields);
         }
         // The element comes from the literal's own inferred type, the same
         // oracle element ACCESS consults -- so construction and access can never
         // disagree about whether a buffer is leaf-addressed.
-        let Some(elem) = self.nb_value_elem(e) else {
-            return fields;
+        let Some(elem) = self.nb_value_elem(e)? else {
+            return Ok(fields);
         };
         let Some(&(_, ptr)) = fields.iter().find(|(f, _)| f.as_str() == "ptr") else {
-            return fields;
+            return Ok(fields);
         };
         fields.extend(self.leaf_view_fields(elem, ptr));
-        fields
+        Ok(fields)
     }
 
     pub(crate) fn struct_field_names(&self, name: Ustr) -> Option<Vec<Ustr>> {
         let sid = *self.ws.struct_by_name.get(&name)?;
         let sd = &self.ws.modules[sid.module.index()].structs[sid.def];
         Some(sd.fields.iter().map(|f| f.name).collect())
+    }
+
+    pub(crate) fn struct_field_names_required(
+        &self,
+        name: Ustr,
+    ) -> Result<Vec<Ustr>, CompilerError> {
+        self.struct_field_names(name)
+            .ok_or_else(|| self.gap_here(format!("nominal `{name}` has no declared field plan")))
     }
 
     /// Whether nominal `name` is a `value` struct (C-layout cdata).
@@ -219,16 +232,16 @@ impl Builder<'_> {
     /// so it stops at the first container/global (`vlocal.buf[i]` is shared
     /// storage even though the chain starts at a value binding) where bone walks
     /// to the root. They must AGREE that a temporary is neither.
-    pub(crate) fn is_mutable_place(&self, e: Idx<Expr>) -> bool {
+    pub(crate) fn is_mutable_place(&self, e: Idx<Expr>) -> Result<bool, CompilerError> {
         match &self.body.expr_arena[e] {
-            Expr::Global(_) | Expr::Index { .. } => true,
+            Expr::Global(_) | Expr::Index { .. } => Ok(true),
             Expr::FieldAccess { base, .. } | Expr::SafeNav { base, .. } => {
                 self.is_mutable_place(*base)
             }
             // A reference-struct binding aliases shared storage; a value binding
             // is a copy of its own.
-            Expr::Var(b) => !self.binding_is_nonnull_value_struct(*b),
-            _ => false,
+            Expr::Var(b) => Ok(!self.binding_is_nonnull_value_struct(*b)),
+            _ => Ok(false),
         }
     }
 
@@ -263,23 +276,26 @@ impl Builder<'_> {
     /// A `nobox` global is excluded: its leaves ARE the storage, so the read is
     /// already a snapshot and there is no box to copy out of. So is a read whose
     /// only consumer is a nil test ([`Builder::presence_only`]).
-    pub(crate) fn nullable_place_value_of(&self, e: Idx<Expr>) -> Option<Ustr> {
+    pub(crate) fn nullable_place_value_of(
+        &self,
+        e: Idx<Expr>,
+    ) -> Result<Option<Ustr>, CompilerError> {
         if self.presence_only == Some(e) {
-            return None;
+            return Ok(None);
         }
         if !self.expr_is_nullable(e) {
-            return None;
+            return Ok(None);
         }
         let is_place = match &self.body.expr_arena[e] {
-            Expr::Global(_) => self.nobox_global_place(e).is_none(),
+            Expr::Global(_) => self.nobox_global_place(e)?.is_none(),
             Expr::Index { .. } => true,
-            Expr::FieldAccess { base, .. } => self.is_mutable_place(*base),
+            Expr::FieldAccess { base, .. } => self.is_mutable_place(*base)?,
             _ => false,
         };
         if !is_place {
-            return None;
+            return Ok(None);
         }
-        self.value_struct_name_of(e)
+        Ok(self.value_struct_name_of(e))
     }
 
     /// The nominal type name of a non-nullable AGGREGATE expression -- a value
@@ -553,16 +569,19 @@ impl Builder<'_> {
         let [arg] = arg_idxs else {
             return Err(gap("materialize expects one argument"));
         };
-        let repr = self.lower_expr_repr(*arg)?;
-        Ok(ValueRepr::Scalar(self.materialize_repr(repr)))
+        let repr = self.lower_expr_repr(*arg)?.into_value();
+        Ok(ValueRepr::Scalar(self.materialize_repr(repr)?))
     }
 
-    pub(crate) fn materialize_repr(&mut self, repr: ValueRepr) -> Idx<Inst> {
+    pub(crate) fn materialize_repr(&mut self, repr: ValueRepr) -> Result<Idx<Inst>, CompilerError> {
         match repr {
-            ValueRepr::Scalar(value) => value,
+            ValueRepr::Scalar(value) => Ok(value),
             ValueRepr::Tuple { parts, .. } => {
-                let vs = parts.into_iter().map(|p| self.materialize_repr(p)).collect();
-                self.emit_cur(Inst::MakeTuple(vs))
+                let vs = parts
+                    .into_iter()
+                    .map(|p| self.materialize_repr(p))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(self.emit_cur(Inst::MakeTuple(vs)))
             }
             // An ABSENT value has no leaves to build from -- the ctor would get
             // nil per field and fail the cdata conversion -- so a presence-carrying
@@ -588,28 +607,40 @@ impl Builder<'_> {
                 self.f.set_term(self.cur, Term::Goto(join));
 
                 self.cur = present_bb;
-                let boxed = self.materialize_group(name, parts);
+                let boxed = self.materialize_group(name, parts)?;
                 self.emit_cur(Inst::Store { cell: result, value: boxed });
                 self.f.set_term(self.cur, Term::Goto(join));
 
                 self.cur = join;
-                self.emit_cur(Inst::Load(result))
+                Ok(self.emit_cur(Inst::Load(result)))
             }
             ValueRepr::Group { name, parts, .. } => self.materialize_group(name, parts),
         }
     }
 
-    fn materialize_group(&mut self, name: Ustr, parts: Vec<ValueRepr>) -> Idx<Inst> {
+    fn materialize_group(
+        &mut self,
+        name: Ustr,
+        parts: Vec<ValueRepr>,
+    ) -> Result<Idx<Inst>, CompilerError> {
+        let representation = self.nominal_value_representation(name)?;
         let names = struct_field_names(self.ws, name);
         let fields = parts
             .into_iter()
             .enumerate()
-            .map(|(i, part)| {
-                let field = *names.get(i).expect("a Group's parts are its nominal's declared fields");
-                (field, self.materialize_repr(part))
+            .map(|(i, part)| -> Result<(Ustr, Idx<Inst>), CompilerError> {
+                let field = *names
+                    .get(i)
+                    .ok_or_else(|| self.gap_here("a planned value group has too many fields"))?;
+                Ok((field, self.materialize_repr(part)?))
             })
-            .collect();
-        self.emit_cur(Inst::MaterializeValueStruct { name, fields })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(self.emit_cur(Inst::MaterializeValueStruct {
+            name,
+            representation,
+            form: ValueCtorForm::Declared,
+            fields,
+        }))
     }
 
     /// Expand a `@struct_expand fn f<T>(u: T) -> [(string, E)]` call into its
@@ -651,7 +682,7 @@ impl Builder<'_> {
 
         // The argument must be a value struct: its Group's parts are the field
         // values in declaration order, each lowered exactly once.
-        let repr = self.lower_expr_repr(arg)?;
+        let repr = self.lower_expr_repr(arg)?.into_value();
         let ValueRepr::Group {
             name: struct_name,
             parts,
@@ -676,7 +707,7 @@ impl Builder<'_> {
 
         let mut tuples = Vec::with_capacity(fields.len());
         for (i, ((field, _), variant)) in fields.iter().zip(variants).enumerate() {
-            let payload = self.pack(parts[i].clone());
+            let payload = self.pack(parts[i].clone())?;
             // The pairs enum is table-backed when any payload is non-scalar, so a
             // `nobox` payload has nowhere to live but a box -- the same boundary
             // `uniform(x: Vec2)` marks with an explicit `materialize`. Here the
@@ -779,10 +810,7 @@ impl Builder<'_> {
         let plan = uniform_block_checked(self.ws, struct_name)
             .map_err(|m| reject(u_span, format!("`@uniform_expand`: {m}")))?;
 
-        let shape = self
-            .nominal_rep_shape(struct_name, false)
-            .ok_or_else(|| reject(u_span, uniform_expand_arg_msg(fname)))?;
-        let leaves = self.repr_to_leaves(&repr, &shape);
+        let leaves = self.repr_to_leaves_bundle(&repr)?;
         let stores = plan.leaf_stores();
         // `uniform_block_checked` already proved the two walkers agree on the
         // leaf PATH sequence, so this can only differ if the repr handed back a
@@ -858,10 +886,7 @@ impl Builder<'_> {
         let packet = uniform_values_return_shape(self.ws, block_name)
             .map_err(|m| reject(call_span, format!("`@uniform_values`: {m}")))?;
         let repr = self.lower_expr_repr(*u_e)?;
-        let shape = self
-            .nominal_rep_shape(struct_name, false)
-            .ok_or_else(|| reject(u_span, format!("`@uniform_values`: `{struct_name}` has no value shape")))?;
-        let leaves = self.repr_to_leaves(&repr, &shape);
+        let leaves = self.repr_to_leaves_bundle(&repr)?;
         let expected: Vec<crate::gpu_layout::WireKind> = members
             .iter()
             .flat_map(|(_, kind)| std::iter::repeat(*kind).take(kind.leaf_suffixes().len()))
@@ -926,11 +951,12 @@ impl Builder<'_> {
         let Some(kind) = ret.and_then(|r| vertex_expand_return(self.ws, r)) else {
             return Err(reject(call_span, vertex_expand_ret_msg(self.ws, fname, ret)));
         };
-        let Some(elem) = self.nb_value_elem(arg) else {
+        let Some(elem) = self.nb_value_elem(arg)? else {
             return Err(reject(arg_span, vertex_expand_arg_msg(fname)));
         };
 
-        let plan = crate::vertex_plan::vertex_plan(self.ws, elem)
+        let rep_arena = self.scx.rep_arena();
+        let plan = crate::vertex_plan::vertex_plan(self.ws, &rep_arena, elem)
             .map_err(|e| reject(arg_span, format!("`@vertex_expand`: {}", e.message)))?;
         // `float_unit_*` carry the integer-attribute and cumulative-offset
         // rejections, so the float-unit view is never emitted for a layout it
@@ -986,7 +1012,7 @@ impl Builder<'_> {
                 name: enum_name,
                 parts,
                 present: None,
-            }));
+            })?);
         }
         Ok(self.emit_cur(Inst::MakeEnum {
             tag: variant,
@@ -1004,7 +1030,7 @@ impl Builder<'_> {
     ) -> Result<Idx<Inst>, CompilerError> {
         if let Some(shape) = EnumPlan::for_name(self.ws, enum_name).and_then(|plan| plan.cdata().cloned()) {
             let r = self.enum_cdata_repr(&shape, variant, args)?;
-            return Ok(self.pack(r));
+            return Ok(self.pack(r)?);
         }
         if let VariantArgs::Unit = args {
             // A payload-free enum is an `int` value GLOBALLY (the variant's

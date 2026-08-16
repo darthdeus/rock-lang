@@ -28,6 +28,7 @@
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use bone_semantic::inference::Workspace;
+use bone_semantic::prelude::CompilerError;
 use comfy_la_arena::{Idx, RawIdx};
 use skull_mir::mir::*;
 use ustr::Ustr;
@@ -269,7 +270,7 @@ fn is_dead_value(inst: &Inst) -> bool {
 /// scan walks each inst, so the value-operand remap (`remap_inst` over every
 /// inst) and the use-counting share one traversal instead of two back-to-back.
 /// The standalone `copy_propagate` / `dce` keep their independent behavior.
-pub fn cleanup(func: &mut MirFunc) {
+pub fn cleanup(func: &mut MirFunc) -> Result<(), CompilerError> {
     scalarize_native_buffer_stores(func);
     // SROA and copy-prop/DCE INTERLEAVE to a fixpoint: peeling a cursor struct
     // leaves its (now-dead) ctor behind, and that ctor's operand uses pin the
@@ -284,7 +285,11 @@ pub fn cleanup(func: &mut MirFunc) {
             eprintln!("--- SROA round {round} input ({}) ---\n{func}", func.name);
             round += 1;
         }
-        let changed = has_scalarizable_store(func) && scalarize_struct_cells_once(func);
+        let changed = if has_scalarizable_store(func) {
+            scalarize_struct_cells_once(func)?
+        } else {
+            false
+        };
         // Inside the loop, because SROA is what CREATES the shape: forwarding a
         // nullable value field's read to the literal that filled it leaves a
         // presence test whose operand is now a fresh ctor.
@@ -301,6 +306,7 @@ pub fn cleanup(func: &mut MirFunc) {
     if fold_const_branches(func) {
         dce(func);
     }
+    Ok(())
 }
 
 fn has_scalarizable_store(func: &MirFunc) -> bool {
@@ -500,11 +506,11 @@ pub fn scalarize_native_buffer_stores(func: &mut MirFunc) {
 /// operand is the SANCTIONED escape and is never a violation.
 fn ctor_tree_has_implicit_nobox(ws: &Workspace, func: &MirFunc, mvs: Idx<Inst>) -> bool {
     let (name, fields) = match &func.insts[mvs] {
-        Inst::MakeValueStruct { name, fields } => (name, fields),
+        Inst::MakeValueStruct { name, fields, .. } => (name, fields),
         // An EXPLICIT box is a sanctioned root, but its nested fields are still
         // implicit: `materialize(E5 { pos: NV2 { .. } })` authorizes the E5 box,
         // never a separate NV2 one.
-        Inst::MaterializeValueStruct { name, fields } => (name, fields),
+        Inst::MaterializeValueStruct { name, fields, .. } => (name, fields),
         _ => return false,
     };
     if let Some(sid) = ws.struct_by_name.get(name) {
@@ -574,8 +580,10 @@ fn leaf_operand(
 /// every pass that runs in between (`convert_closures`, `recover_counted_loops`,
 /// `inline_hoisted_bodies`, the verifier) remaps operands or matches the struct
 /// NAME only -- none interpret field names.
-pub fn flatten_nobox_nested_ctors(ws: &Workspace, func: &mut MirFunc) -> bool {
-    let rep_arena = skull_mir::lower::RepArena::default();
+pub fn flatten_nobox_nested_ctors(
+    ws: &Workspace,
+    func: &mut MirFunc,
+) -> Result<bool, CompilerError> {
     let all: Vec<Idx<Inst>> =
         func.blocks.iter().flat_map(|(_, b)| b.insts.iter().copied()).collect();
     // A ctor used as a field operand of another ctor is not the outermost one.
@@ -593,44 +601,45 @@ pub fn flatten_nobox_nested_ctors(ws: &Workspace, func: &mut MirFunc) -> bool {
         .filter(|i| !inner.contains(i) && ctor_tree_has_implicit_nobox(ws, func, *i))
         .collect();
     if targets.is_empty() {
-        return false;
+        return Ok(false);
     }
+    let rep_arena = func.rep_arena.clone().ok_or_else(|| {
+        CompilerError::new_no_location(format!(
+            "nobox constructor in `{}` has no build-owned representation arena",
+            func.name
+        ))
+    })?;
     let mut replacement: HashMap<Idx<Inst>, Vec<Idx<Inst>>> = HashMap::default();
     for t in targets {
-        let (name, explicit) = match &func.insts[t] {
-            Inst::MakeValueStruct { name, .. } => (*name, false),
-            Inst::MaterializeValueStruct { name, .. } => (*name, true),
+        let (name, representation, explicit) = match &func.insts[t] {
+            Inst::MakeValueStruct { name, representation, .. } => (*name, *representation, false),
+            Inst::MaterializeValueStruct { name, representation, .. } => (*name, *representation, true),
             _ => continue,
         };
-        // A GC-tier outer stores fields as table entries, so there is no cdata
-        // to write leaves into; leave it for the verifier to reject.
-        if !matches!(
-            rep_arena.nominal_value_storage(ws, bone_semantic::hir::FnBackend::Lua, name),
-            Some(skull_mir::lower::ValueStorage::CData)
-        ) {
-            continue;
+        let plan = rep_arena.try_get(representation).ok_or_else(|| {
+            CompilerError::new_no_location(format!(
+                "nobox constructor `{name}` carries representation {representation:?} that does not belong to its build arena"
+            ))
+        })?;
+        if plan.value_storage() != Some(skull_mir::lower::ValueStorage::CData) {
+            return Err(CompilerError::new_no_location(format!(
+                "nobox constructor `{name}` carries representation {representation:?} without CData storage"
+            )));
         }
-        let Some(paths) = rep_arena.nominal_value_leaf_paths(
-            ws,
-            bone_semantic::hir::FnBackend::Lua,
-            name,
-        ) else {
-            continue;
-        };
+        let paths = plan.leaf_paths().ok_or_else(|| {
+            CompilerError::new_no_location(format!(
+                "nobox constructor `{name}` carries representation {representation:?} without a leaf-path plan"
+            ))
+        })?;
         let mut pre: Vec<Idx<Inst>> = Vec::new();
         let mut leaves: Vec<(Ustr, Idx<Inst>)> = Vec::with_capacity(paths.len());
-        let mut ok = true;
         for path in &paths {
-            match leaf_operand(func, t, path.as_str(), &mut pre) {
-                Some(op) => leaves.push((*path, op)),
-                None => {
-                    ok = false;
-                    break;
-                }
-            }
-        }
-        if !ok {
-            continue;
+            let op = leaf_operand(func, t, path.as_str(), &mut pre).ok_or_else(|| {
+                CompilerError::new_no_location(format!(
+                    "nobox constructor `{name}` representation {representation:?} leaf `{path}` does not resolve through its physical fields"
+                ))
+            })?;
+            leaves.push((*path, op));
         }
         // An already-flat ctor rewrites to ITSELF -- a `nobox` name is its own
         // trigger, so `materialize(Color { .. })` is a target on every pass. The
@@ -648,9 +657,19 @@ pub fn flatten_nobox_nested_ctors(ws: &Workspace, func: &mut MirFunc) -> bool {
         // Preserve the variant: an explicit box stays explicit, it just stops
         // building a nested one on the way.
         let flat = func.insts.alloc(if explicit {
-            Inst::MaterializeValueStruct { name, fields: leaves }
+            Inst::MaterializeValueStruct {
+                name,
+                representation,
+                form: ValueCtorForm::Leaves,
+                fields: leaves,
+            }
         } else {
-            Inst::MakeValueStruct { name, fields: leaves }
+            Inst::MakeValueStruct {
+                name,
+                representation,
+                form: ValueCtorForm::Leaves,
+                fields: leaves,
+            }
         });
         // Minted insts inherit the outer ctor's span: a rejection downstream must
         // still name the user's line.
@@ -663,7 +682,7 @@ pub fn flatten_nobox_nested_ctors(ws: &Workspace, func: &mut MirFunc) -> bool {
         replacement.insert(t, pre);
     }
     if replacement.is_empty() {
-        return false;
+        return Ok(false);
     }
     // The flattened ctor takes the original's slot, so every existing user of
     // `t` now reads the flat form.
@@ -694,7 +713,7 @@ pub fn flatten_nobox_nested_ctors(ws: &Workspace, func: &mut MirFunc) -> bool {
         }
         func.blocks[bid].insts = new;
     }
-    true
+    Ok(true)
 }
 
 /// [`cleanup`] plus nobox nested-ctor normalization and the DCE that clears the
@@ -708,18 +727,19 @@ pub fn flatten_nobox_nested_ctors(ws: &Workspace, func: &mut MirFunc) -> bool {
 /// Every emit-path caller uses this; plain `cleanup` survives only as this
 /// function's own first step. Were a site to miss it, the failure would be
 /// CLOSED -- a spurious rejection from the verifier, never a silent miscompile.
-pub fn cleanup_with_nobox(ws: &Workspace, func: &mut MirFunc) {
-    cleanup(func);
+pub fn cleanup_with_nobox(ws: &Workspace, func: &mut MirFunc) -> Result<(), CompilerError> {
+    cleanup(func)?;
     // INTERLEAVED, not once each. Flattening replaces a nested nobox ctor's
     // users with leaf reads, and that is exactly the shape SROA needs to split
     // the field cell the ctor is stored to: while the outer ctor still reads the
     // nested one whole, the nested ctor has more than one user and SROA leaves
     // the field cell alone, so the box survives. Terminates because the pass is
     // idempotent -- a flattened ctor no longer matches the trigger.
-    while flatten_nobox_nested_ctors(ws, func) {
-        cleanup(func);
+    while flatten_nobox_nested_ctors(ws, func)? {
+        cleanup(func)?;
     }
     dce(func);
+    Ok(())
 }
 
 /// Emit one `StoreField(slot, field, value)` per IMMEDIATE field of `mvs` (a
@@ -790,7 +810,7 @@ fn ctor_fields(
         fs.iter().map(|(n, v)| (*n, FieldSrc::Operand(*v))).collect::<Vec<_>>()
     };
     match inst {
-        Inst::MakeValueStruct { name, fields } => Some((StructId::Value(*name), op(fields))),
+        Inst::MakeValueStruct { name, fields, .. } => Some((StructId::Value(*name), op(fields))),
         Inst::MakeStruct { ty, fields } => Some((StructId::Plain(*ty), op(fields))),
         Inst::MakeTuple(vs) => Some((
             StructId::Tuple(vs.len()),
@@ -828,6 +848,16 @@ fn ctor_fields(
     }
 }
 
+fn value_ctor_plan(inst: &Inst) -> Option<(skull_mir::lower::RepId, ValueCtorForm)> {
+    match inst {
+        Inst::MakeValueStruct { representation, form, .. }
+        | Inst::MaterializeValueStruct { representation, form, .. } => {
+            Some((*representation, *form))
+        }
+        _ => None,
+    }
+}
+
 /// Scalar replacement of struct cells (SROA) -- both `value` cdata and plain
 /// `struct` tables. A cell whose every `Store` is a struct ctor of one
 /// consistent type and whose every `Load` feeds ONLY `Field` reads / `StoreField`
@@ -855,23 +885,26 @@ fn ctor_fields(
 /// -- a struct that never escapes has no observable identity, so dropping it is
 /// sound (rock proves it). Runs to a fixpoint so nested value structs (a field
 /// cell that itself holds a ctor) peel too.
-pub fn scalarize_struct_cells(func: &mut MirFunc) {
+pub fn scalarize_struct_cells(func: &mut MirFunc) -> Result<(), CompilerError> {
     let dbg = std::env::var("SROA_DEBUG").is_ok();
     let mut round = 0;
-    while {
+    loop {
         if dbg {
             eprintln!("--- SROA round {round} input ---\n{func}");
             round += 1;
         }
-        has_scalarizable_store(func) && scalarize_struct_cells_once(func)
-    } {}
+        if !has_scalarizable_store(func) || !scalarize_struct_cells_once(func)? {
+            break;
+        }
+    }
     if dbg {
         eprintln!("--- SROA final ---\n{func}");
     }
+    Ok(())
 }
 
 /// One SROA round; returns whether it rewrote anything (drives the fixpoint).
-fn scalarize_struct_cells_once(func: &mut MirFunc) -> bool {
+fn scalarize_struct_cells_once(func: &mut MirFunc) -> Result<bool, CompilerError> {
     let nc = func.cells.len();
     // Escape-site rematerialization (item 8): a whole-value load of a
     // `nonnull_value_struct` binding that would otherwise ESCAPE (disqualifying
@@ -880,7 +913,7 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> bool {
     // rebuilt `MakeValueStruct` is positional); `escape_loads` are the loads to
     // rewrite. The flag -- set at lowering only for non-null value bindings --
     // is the ONLY license: no store/CFG heuristic (both proven unsound/too weak).
-    let mut value_order: HashMap<usize, Vec<ustr::Ustr>> = HashMap::default();
+    let mut value_order: HashMap<usize, (Vec<ustr::Ustr>, skull_mir::lower::RepId, ValueCtorForm)> = HashMap::default();
     let mut escape_loads: Vec<(Idx<Inst>, Idx<Cell>)> = Vec::new();
     // A cell is a candidate iff every store to it is a struct ctor of one
     // consistent type. `cand[c]`: None = not yet seen / disqualified, Some(id) =
@@ -994,9 +1027,13 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> bool {
                         } else {
                             cand[ck] = Some(id);
                             if matches!(id, StructId::Value(_)) {
-                                value_order
-                                    .entry(ck)
-                                    .or_insert_with(|| fields.iter().map(|(n, _)| *n).collect());
+                                let Some((representation, form)) = value_ctor_plan(&func.insts[*value]) else {
+                                    disq[ck] = true;
+                                    continue;
+                                };
+                                value_order.entry(ck).or_insert_with(|| {
+                                    (fields.iter().map(|(n, _)| *n).collect(), representation, form)
+                                });
                             }
                             cand_fields[ck]
                                 .get_or_insert_with(HashSet::default)
@@ -1175,7 +1212,7 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> bool {
         k < nc && cand[k].is_some() && !disq[k] && has_store[k]
     };
     if (0..nc).all(|k| !(cand[k].is_some() && !disq[k] && has_store[k])) {
-        return false;
+        return Ok(false);
     }
 
     // Allocate per-field cells on demand: (cell, field name) -> field cell.
@@ -1269,48 +1306,61 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> bool {
         func.insts[i] = Inst::Store { cell: fc, value };
     }
 
+    let candidate_fields = |c: Idx<Cell>| -> Result<Vec<ustr::Ustr>, CompilerError> {
+        let k = raw(c) as usize;
+        let root = *rep.get(k).ok_or_else(|| {
+            CompilerError::new_no_location("SROA candidate cell is outside its analysis tables")
+        })?;
+        let fields = cand_fields.get(root).and_then(Option::as_ref).ok_or_else(|| {
+            CompilerError::new_no_location(format!(
+                "SROA candidate cell {} has no planned physical field set",
+                k
+            ))
+        })?;
+        Ok(fields.iter().copied().collect())
+    };
+
     // Expand each `Store { cand, ctor }` into per-field stores. Collect first
     // (immutable read of the ctor fields), then rebuild the affected blocks.
     let store_expansions: Vec<(Idx<Inst>, Idx<Cell>, Vec<(ustr::Ustr, FieldSrc)>)> = func
         .blocks
         .iter()
         .flat_map(|(_, b)| b.insts.iter().copied())
-        .filter_map(|i| match &func.insts[i] {
+        .map(|i| -> Result<Option<(Idx<Inst>, Idx<Cell>, Vec<(ustr::Ustr, FieldSrc)>)>, CompilerError> {
+            match &func.insts[i] {
             Inst::Store { cell, value } if is_cand(*cell) => {
                 // A nil store writes nil to EVERY field cell (sorted for
                 // deterministic emission), reusing the nil value inst.
                 if matches!(&func.insts[*value], Inst::Const(Lit::Nil)) {
-                    let mut fs: Vec<ustr::Ustr> = cand_fields[rep[raw(*cell) as usize]]
-                        .as_ref()
-                        .map(|s| s.iter().copied().collect())
-                        .unwrap_or_default();
+                    let mut fs = candidate_fields(*cell)?;
                     fs.sort_unstable();
-                    return Some((
+                    return Ok(Some((
                         i,
                         *cell,
                         fs.into_iter().map(|f| (f, FieldSrc::Operand(*value))).collect(),
-                    ));
+                    )));
                 }
                 // A value-struct alias member copies the root's leaves.
                 if let (Inst::Load(_), Some(root)) =
                     (&func.insts[*value], copy_alias[raw(*cell) as usize])
                 {
-                    let mut fs: Vec<ustr::Ustr> = cand_fields[raw(*cell) as usize]
-                        .as_ref()
-                        .map(|s| s.iter().copied().collect())
-                        .unwrap_or_default();
+                    let mut fs = candidate_fields(*cell)?;
                     fs.sort_unstable();
-                    return Some((
+                    return Ok(Some((
                         i,
                         *cell,
                         fs.into_iter().map(|f| (f, FieldSrc::CellLoad(root))).collect(),
-                    ));
+                    )));
                 }
-                ctor_fields(&func.insts[*value], cell_enum[raw(*cell) as usize])
-                    .map(|(_, fields)| (i, *cell, fields))
+                Ok(ctor_fields(&func.insts[*value], cell_enum[raw(*cell) as usize])
+                    .map(|(_, fields)| (i, *cell, fields)))
             }
-            _ => None,
+            _ => Ok(None),
+            }
         })
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .flatten()
         .collect();
     // Accepted alias stores (`Store(member, Load(..))`) DELETE: the member's
     // accesses were rewritten onto the root's field cells above, so the
@@ -1401,7 +1451,7 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> bool {
         }
         let root = to_rep(c);
         let Some(StructId::Value(name)) = cand[raw(root) as usize] else { continue };
-        let Some(order) = value_order.get(&(raw(root) as usize)).cloned() else { continue };
+        let Some((order, representation, form)) = value_order.get(&(raw(root) as usize)).cloned() else { continue };
         let mut news = Vec::with_capacity(order.len() + 1);
         let mut mvs_fields = Vec::with_capacity(order.len());
         for fname in order {
@@ -1410,7 +1460,12 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> bool {
             news.push(fl);
             mvs_fields.push((fname, fl));
         }
-        func.insts[l] = Inst::MakeValueStruct { name, fields: mvs_fields };
+        func.insts[l] = Inst::MakeValueStruct {
+            name,
+            representation,
+            form,
+            fields: mvs_fields,
+        };
         news.push(l);
         replacement.insert(l, news);
     }
@@ -1431,7 +1486,7 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> bool {
             func.blocks[bid].insts = new;
         }
     }
-    true
+    Ok(true)
 }
 
 /// Intra-block copy propagation: the cell model emits a `Load(c)` for every use

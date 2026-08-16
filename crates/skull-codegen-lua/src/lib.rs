@@ -386,8 +386,8 @@ pub fn emit_named_framed(
     // def is emitted in THIS function's chunk (not shared scaffolding), so an
     // incremental body-edit overlay carries it; value structs are immutable, so
     // re-running the def on reload is a harmless no-op (no preservation guard).
-    record_leaf_form_violations(ws, ctx, func);
-    let (hoist, hoist_names, hoist_defs) = collect_const_hoists(ws, func, name);
+    record_representation_violations(ctx, func);
+    let (hoist, hoist_names, hoist_defs) = collect_const_hoists(ws, ctx, func, name);
     let estimated_body_bytes = func.insts.len() * 24;
     let mut out =
         String::with_capacity(hoist_defs.len() + name.len() + 64 + estimated_body_bytes);
@@ -405,7 +405,7 @@ pub fn emit_named_framed(
 /// including a new `Inst` variant -- disqualifies. The inverse (list the
 /// escaping consumers) would silently start sharing a mutable value the day the
 /// enum grows.
-fn const_hoist_uses_are_read_only(ws: &Workspace, func: &MirFunc, cand: Idx<Inst>) -> bool {
+fn const_hoist_uses_are_read_only(_ws: &Workspace, func: &MirFunc, cand: Idx<Inst>) -> bool {
     for (_, inst) in func.insts.iter() {
         let allowed = match inst {
             // A field/tuple projection and an equality test observe the value
@@ -417,15 +417,14 @@ fn const_hoist_uses_are_read_only(ws: &Workspace, func: &MirFunc, cand: Idx<Inst
             // field, and a `slot.f = v` into a NativeBuffer element writes bytes.
             // A TABLE destination (plain struct, GC-tier `<Name>_vt`, Vec element,
             // global, cell) stores the REFERENCE and is what aliases.
-            Inst::MakeValueStruct { name, fields }
-            | Inst::MaterializeValueStruct { name, fields } => {
+            Inst::MakeValueStruct { representation, fields, .. }
+            | Inst::MaterializeValueStruct { representation, fields, .. } => {
                 !fields.iter().any(|(_, v)| *v == cand)
                     || !matches!(
-                        skull_mir::lower::RepArena::default().nominal_value_storage(
-                            ws,
-                            bone_semantic::hir::FnBackend::Lua,
-                            *name,
-                        ),
+                        func.rep_arena
+                            .as_ref()
+                            .and_then(|arena| arena.try_get(*representation))
+                            .and_then(|plan| plan.value_storage()),
                         Some(
                             skull_mir::lower::ValueStorage::GcTable
                                 | skull_mir::lower::ValueStorage::LeafTable
@@ -461,60 +460,87 @@ fn const_hoist_uses_are_read_only(ws: &Workspace, func: &MirFunc, cand: Idx<Inst
 }
 
 
-/// Whether these ctor operands are the flattened LEAF form (dotted field names
-/// naming primitive leaves) rather than the declared-field form.
-///
-/// Deliberately NOT "some name contains a dot": the sequence must equal
-/// the owned representation plan EXACTLY. The ctor is positional, so a partially or
-/// wrongly flattened field list would emit silently against the wrong
-/// signature; requiring the canonical sequence turns that into a loud panic at
-/// emit instead -- the same fail-closed move the owned RepPlan C-layout check makes.
-fn is_leaf_form(fields: &[(ustr::Ustr, Idx<Inst>)]) -> bool {
-    fields.iter().any(|(n, _)| n.contains('.'))
+fn ctor_suffix(func: &MirFunc, representation: skull_mir::lower::RepId, form: ValueCtorForm) -> Option<&'static str> {
+    let arena = func.rep_arena.as_ref()?;
+    let plan = arena.try_get(representation)?;
+    Some(match form {
+        ValueCtorForm::Leaves => "_lct",
+        ValueCtorForm::Declared => match plan.value_storage() {
+            Some(skull_mir::lower::ValueStorage::GcTable) => "_vt",
+            Some(skull_mir::lower::ValueStorage::LeafTable) => "_lct",
+            Some(skull_mir::lower::ValueStorage::CData) | None => "_ct",
+        },
+    })
 }
 
-/// `Some(err)` if a flattened (dotted-field) ctor for `name` does not carry
-/// EXACTLY its canonical leaf sequence. The `_lct` ctor is positional, so a
-/// partial or reordered flattening would write one leaf's value into another
-/// with no diagnostic.
-///
-/// A violation is a compiler-invariant break rather than illegal user code, but
-/// it still REJECTS instead of panicking: this runs on every emit, and a panic
-/// takes `rock lsp serve` and `rock stone`'s watch loop down with a backtrace
-/// and no diagnostic. Twin of the JS emitter's check.
+/// Check a leaf-form constructor against the representation it carries.
+/// Callers supply the plan; this routine never reconstructs one from a name or
+/// from the punctuation of the operand keys.
 pub fn leaf_form_violation(
-    ws: &Workspace,
-    name: ustr::Ustr,
+    plan: &skull_mir::lower::RepPlan,
     got: &[ustr::Ustr],
 ) -> Option<CompilerError> {
-    let canonical = skull_mir::lower::RepArena::default()
-        .nominal_value_leaf_paths(ws, bone_semantic::hir::FnBackend::Lua, name)
-        .unwrap_or_default();
+    let Some(canonical) = plan.leaf_paths() else {
+        return Some(CompilerError::new_no_location(
+            "leaf-form constructor carries a non-leaf representation plan",
+        ));
+    };
     if got == canonical {
         return None;
     }
     Some(CompilerError::new_no_location(format!(
-        "`{name}` ctor carries dotted field names that are not its canonical leaf \
-         sequence: {got:?} vs {canonical:?}"
+            "leaf-form constructor does not match its canonical leaf plan: {got:?} vs {canonical:?}"
     )))
 }
 
-/// Every flattened value-struct ctor in `func`, checked against its canonical
-/// leaf sequence. Run once per emitted function, before rendering: the render
-/// path picks `_lct` off the dotted names alone and cannot itself reject.
-fn record_leaf_form_violations(ws: &Workspace, ctx: &CodegenCtx, func: &MirFunc) {
+/// Validate every plan-tagged constructor before rendering. A missing plan is
+/// an internal compiler error; it must reach the ordinary rejection sink rather
+/// than making emission recover a tier from a name or operand spelling.
+fn record_representation_violations(ctx: &CodegenCtx, func: &MirFunc) {
     for (_, inst) in func.insts.iter() {
-        let (Inst::MakeValueStruct { name, fields } | Inst::MaterializeValueStruct { name, fields }) =
-            inst
-        else {
+        let (name, representation, form, fields) = match inst {
+            Inst::MakeValueStruct { name, representation, form, fields }
+            | Inst::MaterializeValueStruct { name, representation, form, fields } => {
+                (*name, *representation, *form, fields)
+            }
+            _ => continue,
+        };
+        let Some(suffix) = ctor_suffix(func, representation, form) else {
+            ctx.reject(
+                name.to_string(),
+                CompilerError::new_no_location(format!(
+                    "`{name}` value constructor carries a representation plan that does not belong to this function's arena"
+                )),
+            );
             continue;
         };
-        if !is_leaf_form(fields) {
-            continue;
+        if matches!(form, ValueCtorForm::Leaves) {
+            let Some(plan) = func
+                .rep_arena
+                .as_ref()
+                .and_then(|arena| arena.try_get(representation))
+            else {
+                ctx.reject(
+                    name.to_string(),
+                    CompilerError::new_no_location(format!(
+                        "`{name}` leaf-form constructor has no leaf paths in its supplied plan"
+                    )),
+                );
+                continue;
+            };
+            let got: Vec<ustr::Ustr> = fields.iter().map(|(n, _)| *n).collect();
+            if let Some(mut error) = leaf_form_violation(&plan, &got) {
+                error.message = format!("`{name}` {}", error.message);
+                ctx.reject(name.to_string(), error);
+            }
         }
-        let got: Vec<ustr::Ustr> = fields.iter().map(|(n, _)| *n).collect();
-        if let Some(err) = leaf_form_violation(ws, *name, &got) {
-            ctx.reject(name.to_string(), err);
+        if suffix == "_lct" && matches!(form, ValueCtorForm::Declared) {
+            ctx.reject(
+                name.to_string(),
+                CompilerError::new_no_location(format!(
+                    "`{name}` declared-form constructor selects a leaf-table plan"
+                )),
+            );
         }
     }
 }
@@ -537,12 +563,11 @@ fn record_leaf_form_violations(ws: &Workspace, ctx: &CodegenCtx, func: &MirFunc)
 /// hoist existed.
 fn collect_const_hoists(
     ws: &Workspace,
+    ctx: &CodegenCtx,
     func: &MirFunc,
     base: &str,
 ) -> (HashMap<Idx<Inst>, u32>, Vec<String>, String) {
-    // The leaf-form flag rides with the group: a flattened all-const ctor must
-    // hoist against `_lct`, whose arity and signature differ from `_ct`.
-    let mut groups: Vec<(ustr::Ustr, Vec<Lit>, bool)> = Vec::new();
+    let mut groups: Vec<(ustr::Ustr, skull_mir::lower::RepId, ValueCtorForm, Vec<Lit>)> = Vec::new();
     let mut hoist: HashMap<Idx<Inst>, u32> = HashMap::default();
     // Only insts still REACHED BY A BLOCK. The arena keeps orphans (DCE unlinks
     // from blocks, it does not free), and hoisting one emits a module-scope ctor
@@ -554,7 +579,7 @@ fn collect_const_hoists(
         if !live.contains(&id) {
             continue;
         }
-        let Inst::MakeValueStruct { name, fields } = inst else {
+        let Inst::MakeValueStruct { name, representation, form, fields } = inst else {
             continue;
         };
         // An int->float-subsumed constant field (`IntToFloat(Const)`) is still a
@@ -575,11 +600,13 @@ fn collect_const_hoists(
         if !const_hoist_uses_are_read_only(ws, func, id) {
             continue;
         }
-        let leaf_form = is_leaf_form(fields);
-        let g = match groups.iter().position(|(n, l, lf)| *n == *name && *l == lits && *lf == leaf_form) {
+        let g = match groups
+            .iter()
+            .position(|(n, rep, ctor_form, l)| *n == *name && *rep == *representation && *ctor_form == *form && *l == lits)
+        {
             Some(p) => p as u32,
             None => {
-                groups.push((*name, lits, leaf_form));
+                groups.push((*name, *representation, *form, lits));
                 (groups.len() - 1) as u32
             }
         };
@@ -590,24 +617,16 @@ fn collect_const_hoists(
     }
     let mut names = Vec::with_capacity(groups.len());
     let mut defs = String::new();
-    for (g, (name, lits, leaf_form)) in groups.iter().enumerate() {
+    for (g, (name, representation, form, lits)) in groups.iter().enumerate() {
         let gname = format!("__skull_kc_{base}_{g}");
-        let suffix = if *leaf_form {
-            "_lct"
-        } else if matches!(
-            skull_mir::lower::RepArena::default().nominal_value_storage(
-                ws,
-                bone_semantic::hir::FnBackend::Lua,
-                *name,
-            ),
-            Some(
-                skull_mir::lower::ValueStorage::GcTable
-                    | skull_mir::lower::ValueStorage::LeafTable
-            )
-        ) {
-            "_vt"
-        } else {
-            "_ct"
+        let Some(suffix) = ctor_suffix(func, *representation, *form) else {
+            ctx.reject(
+                name.to_string(),
+                CompilerError::new_no_location(format!(
+                    "`{name}` constant constructor has no valid supplied representation plan"
+                )),
+            );
+            continue;
         };
         let _ = write!(defs, "{gname} = {name}{suffix}(");
         for (i, l) in lits.iter().enumerate() {
@@ -1809,46 +1828,16 @@ impl Emitter<'_> {
                 }
                 out.push('}');
             }
-            Inst::MakeValueStruct { name, fields }
-            | Inst::MaterializeValueStruct { name, fields } => {
-                // Positional ctor in declared field order; field names are for MIR
-                // passes only (SROA), not the wire shape. The ctor NAME is chosen
-                // by tier from the ONE classification: `_vt` (table) for a
-                // GC-carrying value struct, `_ct` (cdata) for an FFI-clean one.
-                //
-                // A leaf-table struct is decided by TYPE, ahead of any operand
-                // check: it has no declared-field ctor at all (the prelude emits
-                // only `_lct` for it), and its pack site is unconditionally leaf
-                // form. Asking the operands instead reads the same oracle through
-                // a proxy that does not hold -- a nullable child with no data
-                // leaves contributes one leaf keyed on the field's own name, so
-                // the leaf sequence is textually identical to the declared field
-                // list and no operand-shape test can tell them apart.
-                let suffix = if matches!(
-                    skull_mir::lower::RepArena::default().nominal_value_storage(
-                        self.ws,
-                        bone_semantic::hir::FnBackend::Lua,
-                        *name,
-                    ),
-                    Some(skull_mir::lower::ValueStorage::LeafTable)
-                ) {
-                    "_lct"
-                } else if is_leaf_form(fields) {
-                    "_lct"
-                } else if matches!(
-                    skull_mir::lower::RepArena::default().nominal_value_storage(
-                        self.ws,
-                        bone_semantic::hir::FnBackend::Lua,
-                        *name,
-                    ),
-                    Some(
-                        skull_mir::lower::ValueStorage::GcTable
-                            | skull_mir::lower::ValueStorage::LeafTable
-                    )
-                ) {
-                    "_vt"
-                } else {
-                    "_ct"
+            Inst::MakeValueStruct { name, representation, form, fields }
+            | Inst::MaterializeValueStruct { name, representation, form, fields } => {
+                let Some(suffix) = ctor_suffix(self.func, *representation, *form) else {
+                    self.ctx.reject(
+                        name.to_string(),
+                        CompilerError::new_no_location(format!(
+                            "`{name}` value constructor has no valid supplied representation plan"
+                        )),
+                    );
+                    return;
                 };
                 let _ = write!(out, "{name}{suffix}(");
                 for (i, (_, id)) in fields.iter().enumerate() {
@@ -1895,7 +1884,7 @@ impl Emitter<'_> {
                 out.push('}');
             }
 
-            Inst::FfiNewArray { ctype, count } => {
+            Inst::FfiNewArray { ctype, count, .. } => {
                 let _ = write!(out, "ffi.new(\"{ctype}[?]\", ");
                 self.write_opnd(out, *count);
                 out.push(')');

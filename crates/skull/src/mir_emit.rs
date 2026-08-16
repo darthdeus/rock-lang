@@ -561,7 +561,10 @@ fn emit_decorator_unit(
     match lowered {
         Ok(mut mf) => {
             let tc = Instant::now();
-            skull_transform::cleanup_with_nobox(ws, &mut mf);
+            if let Err(e) = skull_transform::cleanup_with_nobox(ws, &mut mf) {
+                out.hard_error = Some(e);
+                return out;
+            }
             // Decorator bodies can carry lambdas too -- convert like an ordinary fn.
             let pre_nested = mf.nested_fns.len();
             skull_transform::convert_closures(&mut mf, &deco_name);
@@ -587,7 +590,10 @@ fn emit_decorator_unit(
             skull_codegen_lua::regalloc_time_reset();
             let te = Instant::now();
             let mut lua = emit_named(ws, cg, scx.interner(), &deco_name, &mf);
-            emit_pass_nested_fns(ws, cg, scx, &mut mf.nested_fns, &mut lua);
+            if let Err(e) = emit_pass_nested_fns(ws, cg, scx, &mut mf.nested_fns, &mut lua) {
+                out.hard_error = Some(e);
+                return out;
+            }
             emit_lowered(ws, &mut out, &mf, lua, Some(Ustr::from(&deco_name)), te.elapsed());
         }
         Err(e) => out.skipped = Some((deco_name, e.message)),
@@ -659,7 +665,10 @@ fn emit_global_unit(
     match lowered {
         Ok(Some(mut mf)) => {
             let tc = Instant::now();
-            skull_transform::cleanup_with_nobox(ws, &mut mf);
+            if let Err(e) = skull_transform::cleanup_with_nobox(ws, &mut mf) {
+                out.hard_error = Some(e);
+                return out;
+            }
             // A global-initializer body can carry lambdas (e.g. a `[TileDef]`
             // literal with fn fields) -- route them through the shared pass, same
             // as an ordinary fn. Their global reads are NOT init-ordering
@@ -691,7 +700,10 @@ fn emit_global_unit(
             skull_codegen_lua::regalloc_time_reset();
             let te = Instant::now();
             let mut lua = emit_named(ws, cg, scx.interner(), &init_name, &mf);
-            emit_pass_nested_fns(ws, cg, scx, &mut mf.nested_fns, &mut lua);
+            if let Err(e) = emit_pass_nested_fns(ws, cg, scx, &mut mf.nested_fns, &mut lua) {
+                out.hard_error = Some(e);
+                return out;
+            }
             emit_lowered(ws, &mut out, &mf, lua, Some(key), te.elapsed());
             // Hot-reload init line. A `const` is a compile-time constant: tweaking
             // the source literal should show the new value next reload, so its init
@@ -1374,7 +1386,7 @@ fn emit_coroutine_chunk(
     mut times: PhaseTimes,
 ) -> Result<Chunk, CompilerError> {
     let tc = Instant::now();
-    skull_transform::cleanup_with_nobox(ws, mf);
+    skull_transform::cleanup_with_nobox(ws, mf)?;
     times.cleanup = tc.elapsed();
     // Coroutines never inline, so a combinator chain here leaves a residual call
     // -- fine when the lowerer specialized it (a standalone body serves it), a
@@ -1399,7 +1411,7 @@ fn emit_coroutine_chunk(
             format!("cannot build concrete coroutine plan for `{}`: {}", f.name, reason.bucket()),
         )
     })?;
-    let lua = crate::coroutine_emit::emit_coroutine(ws, cg, scx.interner(), &plan, mf);
+    let lua = crate::coroutine_emit::emit_coroutine(ws, cg, scx.interner(), &plan, mf)?;
     times.emit = te.elapsed();
     times.regalloc = skull_codegen_lua::regalloc_time_elapsed().min(times.emit);
     // No declaration edge here: "this instance instantiates that declaration" is
@@ -1520,7 +1532,7 @@ fn emit_body_chunk_with_mutation(
     )?;
     let mut deps: FxHashSet<FuncRef> = spliced.into_iter().collect();
     let tc = Instant::now();
-    skull_transform::cleanup_with_nobox(ws, &mut mf); // drop dead values + dead-cell stores
+    skull_transform::cleanup_with_nobox(ws, &mut mf)?; // drop dead values + dead-cell stores
     // Shared closure conversion (S2 cutover, docs/closure-conversion-mir-plan.md):
     // every `Inst::Lambda` in this ORDINARY fn becomes a `MakeEnv` record / bare
     // `Global` + a hoisted sibling in `nested_fns`. Runs AFTER inline+cleanup,
@@ -1580,7 +1592,7 @@ fn emit_body_chunk_with_mutation(
     // `static` cells fold into THIS chunk's `statics` so the hot-reload preamble +
     // overlay reset see them -- a nested-fn static is otherwise invisible to both.
     let mut statics = mf.statics.clone();
-    emit_nested_fns(ws, cg, scx, &mut mf.nested_fns, &mut deps, &mut statics, &mut lua);
+    emit_nested_fns(ws, cg, scx, &mut mf.nested_fns, &mut deps, &mut statics, &mut lua)?;
     times.emit = te.elapsed();
     times.regalloc = skull_codegen_lua::regalloc_time_elapsed().min(times.emit);
     let calls = skull_mir::reach::call_targets(&mf);
@@ -1600,16 +1612,17 @@ fn emit_nested_fns(
     deps: &mut FxHashSet<FuncRef>,
     statics: &mut Vec<skull_mir::mir::StaticCell>,
     out: &mut String,
-) {
+) -> Result<(), CompilerError> {
     for nf in nested.iter_mut() {
-        skull_transform::cleanup_with_nobox(ws, nf);
+        skull_transform::cleanup_with_nobox(ws, nf)?;
         skull_transform::recover_counted_loops(ws, nf);
         collect_callee_frefs(nf, deps);
         statics.extend(nf.statics.iter().cloned());
         out.push_str(&emit_named(ws, cg, scx.interner(), nf.name.as_str(), nf));
         let mut children = std::mem::take(&mut nf.nested_fns);
-        emit_nested_fns(ws, cg, scx, &mut children, deps, statics, out);
+        emit_nested_fns(ws, cg, scx, &mut children, deps, statics, out)?;
     }
+    Ok(())
 }
 
 /// Emit the flat list of pass-produced hoisted lambda bodies (`convert_closures`
@@ -1633,11 +1646,12 @@ fn emit_pass_nested_fns(
     scx: &skull_mir::lower::ScalarCtx,
     nested: &mut [MirFunc],
     out: &mut String,
-) {
+) -> Result<(), CompilerError> {
     for nf in nested.iter_mut() {
-        skull_transform::cleanup_with_nobox(ws, nf);
+        skull_transform::cleanup_with_nobox(ws, nf)?;
         out.push_str(&emit_named(ws, cg, scx.interner(), nf.name.as_str(), nf));
     }
+    Ok(())
 }
 
 /// Whether a function body is cached as a [`Chunk`] (ordinary or coroutine) vs
@@ -1808,7 +1822,7 @@ fn emit_spec_chunk(
     let mut statics = mf.statics.clone();
     let mut nested = std::mem::take(&mut mf.nested_fns);
     collect_nested_statics(&nested, &mut statics);
-    emit_pass_nested_fns(ws, cg, scx, &mut nested, &mut lua);
+    emit_pass_nested_fns(ws, cg, scx, &mut nested, &mut lua)?;
     collect_callee_frefs(&mf, &mut deps);
     Ok(Chunk {
         lua,
@@ -1907,7 +1921,7 @@ pub fn prepare_instance_body_with_plans(
     let (spliced, _records) = skull_transform::inline_functions_with_plans(
         ws, scx, fref, mf, cache, concrete_plans,
     )?;
-    skull_transform::cleanup_with_nobox(ws, mf);
+    skull_transform::cleanup_with_nobox(ws, mf)?;
     skull_transform::convert_closures(mf, name);
     skull_transform::recover_counted_loops(ws, mf);
     Ok(spliced.into_iter().collect())
@@ -1974,7 +1988,7 @@ fn inline_hoisted_bodies(
         )
         .map_err(|e| e.message)?;
         deps.extend(spliced);
-        skull_transform::cleanup_with_nobox(ws, nf);
+        skull_transform::cleanup_with_nobox(ws, nf).map_err(|e| e.message)?;
         let mut children = std::mem::take(&mut nf.nested_fns);
         inline_hoisted_bodies(ws, scx, self_ref, &mut children, inline_cache, concrete_plans, deps)?;
         nf.nested_fns = children;
@@ -2760,9 +2774,10 @@ fn assemble(
     let ts = Instant::now();
     let mut out = String::from(crate::runtime_prelude());
     out.push_str(&crate::enum_cdata_defs(ws));
-    let (vdefs, value_emitted, value_gc) = crate::value_struct_defs(ws)?;
+    let rep_arena = scx.rep_arena();
+    let (vdefs, value_emitted, value_gc) = crate::value_struct_defs(ws, &rep_arena)?;
     out.push_str(&vdefs);
-    out.push_str(&crate::value_struct_gc_defs(ws, &value_gc));
+    out.push_str(&crate::value_struct_gc_defs(ws, &value_gc, &rep_arena)?);
     out.push_str(&crate::value_struct_metatypes(ws, &value_emitted));
     out.push_str(&crate::enum_cdata_metatypes(ws));
     out.push_str(&crate::c_struct_inspect_defs(ws, &value_emitted));

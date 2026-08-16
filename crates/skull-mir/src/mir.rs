@@ -25,9 +25,18 @@
 
 use bone_semantic::hir::TyId;
 use comfy_la_arena::{Arena, Idx};
+use std::sync::Arc;
 use ustr::Ustr;
 
 pub const VEC_COLUMN_HEADER_FIELD: &str = "@vec";
+
+/// Physical constructor spelling selected by lowering.  This is part of the
+/// plan identity; backends must not infer it from field names or operands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ValueCtorForm {
+    Declared,
+    Leaves,
+}
 pub const VEC_COLUMN_REPR: &str = "columns";
 /// The PRESENCE column of a `[E?]` whose `E` is `nobox`: one bool per slot,
 /// leading the leaf columns exactly as the presence leaf leads a nullable
@@ -50,6 +59,26 @@ pub fn column_elem_plans(mf: &MirFunc, out: &mut std::collections::BTreeMap<Ustr
     }
     for nf in &mf.nested_fns {
         column_elem_plans(nf, out);
+    }
+}
+
+/// The same census with the build-owned representation identity retained for
+/// consumers that emit or inspect the physical columns.
+pub fn column_elem_rep_plans(
+    mf: &MirFunc,
+    out: &mut std::collections::BTreeMap<Ustr, (bool, crate::lower::RepId)>,
+) {
+    for inst in mf.insts.values() {
+        match inst {
+            Inst::MakeVecColumns { elem, nobox, representation, .. }
+            | Inst::MakeVecColumnHeader { elem, nobox, representation, .. } => {
+                out.insert(*elem, (*nobox, *representation));
+            }
+            _ => {}
+        }
+    }
+    for nf in &mf.nested_fns {
+        column_elem_rep_plans(nf, out);
     }
 }
 
@@ -131,13 +160,21 @@ pub enum ContainerKind {
 /// because it decides the column SET (a nullable element leads with
 /// [`VEC_COLUMN_PRESENCE_FIELD`]) — reading it back off an expression's type at
 /// a use site would be the phantom-presence bug.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug)]
 pub struct ColumnElem {
     pub name: Ustr,
     pub nullable: bool,
     representation: crate::lower::RepId,
     nobox: bool,
 }
+
+impl PartialEq for ColumnElem {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name && self.nullable == other.nullable && self.nobox == other.nobox
+    }
+}
+
+impl Eq for ColumnElem {}
 
 impl ColumnElem {
     pub(crate) fn planned(
@@ -402,6 +439,7 @@ pub enum Inst {
     /// length `len`, in the element's declaration order.
     MakeVecColumns {
         elem: Ustr,
+        representation: crate::lower::RepId,
         nobox: bool,
         columns: Vec<(Ustr, Vec<Idx<Inst>>)>,
         len: usize,
@@ -412,6 +450,7 @@ pub enum Inst {
     /// header shape.
     MakeVecColumnHeader {
         elem: Ustr,
+        representation: crate::lower::RepId,
         nobox: bool,
         capacity: Idx<Inst>,
     },
@@ -429,6 +468,11 @@ pub enum Inst {
     /// type lookup.
     MakeValueStruct {
         name: Ustr,
+        /// The build-owned representation that selected this constructor's
+        /// physical form. Backends must realize this plan, never replan from
+        /// `name` or the operand spelling.
+        representation: crate::lower::RepId,
+        form: ValueCtorForm,
         /// `(declared field name, value)` in declared field order (the `<name>_ct`
         /// ctor is positional, so order is load-bearing; the names let MIR passes
         /// forward a `Field` read to its operand -- SROA). Nested value-struct
@@ -454,6 +498,10 @@ pub enum Inst {
     /// the `nobox` verifier ignores this variant.
     MaterializeValueStruct {
         name: Ustr,
+        /// The same physical plan as the implicit constructor, retained even
+        /// though this node records an authorized materialization boundary.
+        representation: crate::lower::RepId,
+        form: ValueCtorForm,
         fields: Vec<(Ustr, Idx<Inst>)>,
     },
     /// An enum-variant value as a tagged table `{ __variant, __ty, <payload> }`.
@@ -502,7 +550,13 @@ pub enum Inst {
     /// elements of C type `ctype` (an FFI-clean value struct's cdef name, or
     /// `int`/`float`). Emitted only by the `native_buffer_alloc<T>` intrinsic,
     /// which resolves `ctype` from the concrete element type at the call site.
-    FfiNewArray { ctype: Ustr, count: Idx<Inst> },
+    FfiNewArray {
+        ctype: Ustr,
+        count: Idx<Inst>,
+        /// Aggregate element allocations carry the plan used to validate
+        /// their C layout. Primitive arrays have no nominal plan.
+        representation: Option<crate::lower::RepId>,
+    },
 
     /// `ffi.cast("<cty>*", <ptr>)` -- a typed LEAF VIEW over a NativeBuffer's
     /// storage, one per distinct primitive C type among the element's leaves.
@@ -727,6 +781,9 @@ pub struct StaticCell {
 #[derive(Clone, Debug, PartialEq)]
 pub struct MirFunc {
     pub name: Ustr,
+    /// The build-owned representation catalog used by every plan-tagged value
+    /// constructor in this function and its nested functions.
+    pub rep_arena: Option<Arc<crate::lower::RepArena>>,
     pub params: Vec<Idx<Cell>>,
     /// The concrete function representation consumed by entry binding and
     /// return lowering. Calls retain the same plan in `call_abi_plans`.
@@ -887,6 +944,7 @@ impl MirFunc {
         let entry = blocks.alloc(Block::new());
         Self {
             name,
+            rep_arena: None,
             params: Vec::new(),
             abi_plan: None,
             abi_representation: None,

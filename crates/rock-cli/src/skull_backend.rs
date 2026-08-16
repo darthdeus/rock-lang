@@ -1354,7 +1354,14 @@ fn skull_emit_project(dir: &str) -> String {
     // lives), mirroring rock-codegen's `format_globals_registry`. Appended
     // after the emit; the block only lists global *names* (read from `_G`
     // at runtime), so position past the global defs is irrelevant.
-    let registry = build_rock_globals_registry(&ws, &spec);
+    let registry = match build_rock_globals_registry(&ws, &spec) {
+        Ok(registry) => registry,
+        Err(error) => {
+            eprintln!("{}", render_project_err(&sources, &error));
+            log::error!(target: "SKULL", "global registry planning failed for {}", dir);
+            crate::ablation_report::exit_with_census(1);
+        }
+    };
     let lua = format!("{lua}{registry}");
     // The bone Workspace + HIR modules are dead once `lua` is built -- this is a
     // terminal compile path (`compile`/`run` of a project; never looped in tests
@@ -1380,13 +1387,13 @@ fn skull_emit_project(dir: &str) -> String {
 fn build_rock_globals_registry(
     ws: &bone_semantic::inference::Workspace,
     spec: &crate::unified_compile::SourceSpec,
-) -> String {
+) -> std::result::Result<String, CompilerError> {
     use bone_semantic::prelude::ModuleId;
     use std::collections::BTreeMap;
 
     let package_map = crate::unified_compile::build_package_map(spec);
     if package_map.is_empty() {
-        return String::new();
+        return Ok(String::new());
     }
     let scx = skull_mir::lower::ScalarCtx::new(ws);
 
@@ -1428,7 +1435,7 @@ fn build_rock_globals_registry(
     }
     by_package.retain(|_, names| !names.is_empty());
     if by_package.is_empty() {
-        return String::new();
+        return Ok(String::new());
     }
 
     // Bracket-string keys so hyphenated package names (`ui-proto`) stay valid
@@ -1458,8 +1465,8 @@ fn build_rock_globals_registry(
     // The accessor table rides WITH the registry, never appended separately: four
     // emit paths append this block, and a registry whose consumers had no
     // accessors would read nil for every `nobox` global.
-    out.push_str(&build_nobox_global_accessors(ws, &scx));
-    out
+    out.push_str(&build_nobox_global_accessors(ws, &scx)?);
+    Ok(out)
 }
 
 /// Build `_G.__ROCK_NOBOX_GLOBALS`, the rebuild/take-apart pair per `nobox`
@@ -1480,54 +1487,57 @@ fn build_rock_globals_registry(
 fn build_nobox_global_accessors(
     ws: &bone_semantic::inference::Workspace,
     scx: &skull_mir::lower::ScalarCtx,
-) -> String {
+) -> std::result::Result<String, CompilerError> {
     use bone_semantic::prelude::ModuleId;
 
     let mut rows: Vec<String> = Vec::new();
     for m in ws.modules.iter().filter(|m| m.id != ModuleId::builtin()) {
         for (_gid, g) in m.globals.iter() {
-            let Some(acc) = skull_mir::lower::nobox_global_accessor_shape(ws, scx, g.ty) else {
-                continue;
-            };
+            let Some(acc) = skull_mir::lower::nobox_global_accessor_shape(ws, scx, g.ty)
+                .map_err(|e| CompilerError::new_no_location(e.message))?
+            else { continue };
             let skull_mir::lower::NoboxGlobalAccessorShape {
                 ty_name, paths, nullable, ctor_suffix: suffix, presence_path, unbuildable,
             } = acc;
-            let leaves = skull_mir::lower::GlobalPlan::for_declared_type(ws, scx, g.ty)
-                .ok()
-                .and_then(|plan| plan.leaf_names(g.name))
-                .expect("a global plan with leaf paths must own its leaf names");
+            let plan = skull_mir::lower::GlobalPlan::for_declared_type(ws, scx, g.ty)
+                .map_err(|e| CompilerError::new_no_location(e.message))?;
+            let all_leaves = plan.leaf_names(g.name).ok_or_else(|| {
+                CompilerError::new_no_location(format!(
+                    "nobox global `{}` has an accessor shape but no leaf-name plan",
+                    g.name
+                ))
+            })?;
             // A nullable global leads with a presence leaf that has no path: it is
             // not a field, so it is branched on rather than read. Everything below
             // pairs the REMAINING leaves with the paths.
             let (present, leaves) = if nullable {
-                let (p, rest) = leaves.split_first().expect("a nullable shape has a presence leaf");
+                let Some((p, rest)) = all_leaves.split_first() else {
+                    return Err(CompilerError::new_no_location(format!(
+                        "nullable nobox global `{}` has no presence leaf",
+                        g.name
+                    )));
+                };
                 (Some(*p), rest.to_vec())
             } else {
-                (None, leaves)
+                (None, all_leaves)
             };
             if leaves.len() != paths.len() {
-                log::error!(
-                    target: "SKULL",
-                    "nobox global `{}`: {} leaves but {} leaf paths -- the ctor is \
-                     positional over the paths, so an accessor built from a \
-                     mismatched pair would write one leaf's value into another",
-                    g.name, leaves.len(), paths.len()
-                );
-                crate::ablation_report::exit_with_census(1);
+                return Err(CompilerError::new_no_location(format!(
+                    "nobox global `{}` has {} leaves but {} leaf paths",
+                    g.name,
+                    leaves.len(),
+                    paths.len()
+                )));
             }
             // Both accessor directions are POSITIONAL over the leaf sequence, so
             // they are sound only where the ctor is too. `nobox_global_accessor_shape`
             // makes that call; guessing is how a leak becomes a miscompile, so an
             // unbuildable shape rejects rather than emit a wrong accessor.
             if let Some(why) = &unbuildable {
-                log::error!(
-                    target: "SKULL",
-                    "nobox global `{}` of type `{ty_name}`: reflection cannot rebuild \
-                     it -- {why}. Mechanism J of docs/nobox-case-matrix.md covers the \
-                     rebuildable shapes only.",
+                return Err(CompilerError::new_no_location(format!(
+                    "nobox global `{}` of type `{ty_name}` cannot be rebuilt: {why}",
                     g.name
-                );
-                crate::ablation_report::exit_with_census(1);
+                )));
             }
             let _ = presence_path;
             let args = leaves.iter().map(|l| l.to_string()).collect::<Vec<_>>().join(", ");
@@ -1570,7 +1580,7 @@ fn build_nobox_global_accessors(
     // would leave the previous build's accessors installed, and changing the last
     // `nobox` global to an ordinary one would keep reflection reading leaf globals
     // that no longer back it.
-    format!("\n_G.__ROCK_NOBOX_GLOBALS = {{{}}}\n", rows.concat())
+    Ok(format!("\n_G.__ROCK_NOBOX_GLOBALS = {{{}}}\n", rows.concat()))
 }
 
 /// Collect `@sim` info from the bone workspace -- the skull analog of rock's
@@ -2573,7 +2583,8 @@ impl SkullStone {
             let spec = crate::unified_compile::SourceSpec::Directory(
                 std::path::PathBuf::from(dir),
             );
-            let registry = build_rock_globals_registry(ws, &spec);
+            let registry = build_rock_globals_registry(ws, &spec)
+                .map_err(|e| anyhow::anyhow!(e.message))?;
             (format!("{}{}", emit.lua, registry), c)
         };
         let preamble = skull_game_preamble(dir);
@@ -2676,7 +2687,8 @@ impl SkullStone {
                 // a structural edit can add/remove globals, so recompute on full.
                 let spec =
                     crate::unified_compile::SourceSpec::Directory(PathBuf::from(self.project.dir()));
-                let registry = build_rock_globals_registry(ws, &spec);
+                let registry = build_rock_globals_registry(ws, &spec)
+                    .map_err(|e| anyhow::anyhow!(e.message))?;
                 format!("{}{}", emit.lua, registry)
             };
             let emit_ms = t_emit.elapsed().as_secs_f64() * 1000.0;
@@ -2738,7 +2750,8 @@ impl SkullStone {
             let spec = crate::unified_compile::SourceSpec::Directory(
                 std::path::PathBuf::from(self.project.dir()),
             );
-            let registry = build_rock_globals_registry(ws, &spec);
+            let registry = build_rock_globals_registry(ws, &spec)
+                .map_err(|e| anyhow::anyhow!(e.message))?;
             format!("{}{}", emit.lua, registry)
         };
         write_full_main(&self.preamble, &lua, main_path, incremental_path)?;
