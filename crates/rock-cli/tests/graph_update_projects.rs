@@ -226,6 +226,8 @@ fn project_case(rel: &str) {
             m.stats.prune_search_population,
             m.stats.suspect_region
                 + m.stats.boundary_predecessor_edges_examined
+                + m.stats.support_component_nodes_examined
+                + m.stats.support_component_edges_examined
                 + m.stats.reverse_instances_examined
                 + m.stats.reverse_predecessor_edges_examined,
             "{rel} {what}: prune denominator omitted pruning work"
@@ -234,11 +236,13 @@ fn project_case(rel: &str) {
         assert!(
             m.stats.prune_search_population < m.stats.instances,
             "{rel} {what}: prune search examined the whole instance population: {} of {} \
-             ({} forward, {} boundary edges, {} reverse nodes, {} reverse edges)",
+             ({} forward, {} boundary edges, {} support nodes, {} support edges, {} reverse nodes, {} reverse edges)",
             m.stats.prune_search_population,
             m.stats.instances,
             m.stats.suspect_region,
             m.stats.boundary_predecessor_edges_examined,
+            m.stats.support_component_nodes_examined,
+            m.stats.support_component_edges_examined,
             m.stats.reverse_instances_examined,
             m.stats.reverse_predecessor_edges_examined
         );
@@ -246,8 +250,8 @@ fn project_case(rel: &str) {
 
     println!(
         "{rel}: fresh build {fresh_ms:.1} ms over {owners_total} owners / {instances_total} instances\n  \
-         delete: {:.2} ms, {} affected, {} walked, {} pruned of {} forward + {} boundary edges + {} reverse nodes + {} reverse edges = {} search -> {} owners / {} instances\n  \
-         add:    {:.2} ms, {} affected, {} walked, {} new, {} forward + {} boundary edges + {} reverse nodes + {} reverse edges = {} search -> {} owners / {} instances\n  \
+         delete: {:.2} ms, {} affected, {} walked, {} pruned of {} forward + {} boundary edges + {} support nodes + {} support edges + {} reverse nodes + {} reverse edges = {} search -> {} owners / {} instances\n  \
+         add:    {:.2} ms, {} affected, {} walked, {} new, {} forward + {} boundary edges + {} support nodes + {} support edges + {} reverse nodes + {} reverse edges = {} search -> {} owners / {} instances\n  \
          candidates examined: {examined}, edited file: {path}",
         del.update_ms,
         del.stats.affected,
@@ -255,6 +259,8 @@ fn project_case(rel: &str) {
         del.stats.pruned,
         del.stats.suspect_region,
         del.stats.boundary_predecessor_edges_examined,
+        del.stats.support_component_nodes_examined,
+        del.stats.support_component_edges_examined,
         del.stats.reverse_instances_examined,
         del.stats.reverse_predecessor_edges_examined,
         del.stats.prune_search_population,
@@ -266,6 +272,8 @@ fn project_case(rel: &str) {
         add.stats.newly_reached,
         add.stats.suspect_region,
         add.stats.boundary_predecessor_edges_examined,
+        add.stats.support_component_nodes_examined,
+        add.stats.support_component_edges_examined,
         add.stats.reverse_instances_examined,
         add.stats.reverse_predecessor_edges_examined,
         add.stats.prune_search_population,
