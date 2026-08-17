@@ -11,7 +11,7 @@
 //! `nobox_column_threshold.rs`. Design + work list:
 //! `docs/nobox-nested-ctor-plan.md`.
 
-use crate::common::{function_body, run_luajit, try_emit_module};
+use crate::common::{function_body, mangled_name, run_luajit, try_emit_module};
 
 /// A global forces the outer struct to materialize with no `Vec` in the program,
 /// which is what separates this class from the `MAX_COLUMN_LEAVES` trigger.
@@ -126,6 +126,26 @@ fn main() {
     let e = E3 { pos: NV2 { x: 1.0, y: 2.0 }, a: 4.0 }
     if FLAG { print("boundary") }
     print("{sink(Part::One(E3 { ..e, a: 8.0 }))}")
+}
+"#;
+
+const NESTED_NOBOX_ACROSS_COROUTINE_FRAME: &str = r#"
+nobox value NV2 { x: float, y: float }
+value E3 { pos: NV2, a: float }
+enum Part { One(E3) }
+global FLAG: bool = true
+fn sink(p: Part) -> float {
+    match p { Part::One(e) => return e.a + e.pos.x + e.pos.y }
+}
+co fn build() -> Coroutine<float> {
+    let e = E3 { pos: NV2 { x: 1.0, y: 2.0 }, a: 4.0 }
+    yield 0.0
+    if FLAG { print("boundary") }
+    yield sink(Part::One(E3 { ..e, a: 8.0 }))
+}
+fn main() {
+    let c = build()
+    for n in c { print("{n as int}") }
 }
 "#;
 
@@ -251,6 +271,23 @@ fn an_sroa_split_local_reassembled_into_an_escape_does_not_box_its_nested_field(
     assert_eq!(
         run_luajit(&format!("{lua}\nmain()\n"), "sroa_reassembly").trim(),
         "boundary\n11"
+    );
+}
+
+#[test]
+fn a_coroutine_frame_carries_a_value_with_a_nested_nobox_field() {
+    let lua = emit_ok(
+        NESTED_NOBOX_ACROSS_COROUTINE_FRAME,
+        "a nested nobox field carried across a coroutine frame",
+    );
+    let build = mangled_name(&lua, "build");
+    assert!(
+        !function_body(&lua, &format!("{build}__step")).contains("NV2_ct("),
+        "the coroutine frame materialized its nested nobox field:\n{lua}"
+    );
+    assert_eq!(
+        run_luajit(&format!("{lua}\nmain()\n"), "nested_nobox_coroutine").trim(),
+        "0\nboundary\n11"
     );
 }
 

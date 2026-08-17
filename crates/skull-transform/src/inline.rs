@@ -856,7 +856,7 @@ impl InlineCache {
         scx: &ScalarCtx,
         inst: Instance,
         concrete_plans: &ConcretePlans,
-    ) -> InlineCandidateWarm {
+    ) -> Result<InlineCandidateWarm, CompilerError> {
         let started = self.census_enabled.then(Instant::now);
         let mut timing = CandidateTiming::default();
         let result = classify(
@@ -875,11 +875,9 @@ impl InlineCache {
                     .saturating_sub(timing.compact_ns)
             })
             .unwrap_or(0);
-        let (candidate, rejection) = match result {
-            Ok(candidate) => (Some(Arc::new(candidate)), None),
-            Err(reason) => (None, Some(reason)),
-        };
-        InlineCandidateWarm {
+        let candidate = result?.map(Arc::new);
+        let rejection = timing.rejection;
+        Ok(InlineCandidateWarm {
             key: inst,
             candidate,
             lower_ns: timing.lower_ns,
@@ -903,7 +901,7 @@ impl InlineCache {
             eligibility_ns,
             rejection,
             worker: self.worker.clone(),
-        }
+        })
     }
 
     /// Drop every local cached candidate for `fref` so the next lookup consumes
@@ -1445,6 +1443,17 @@ struct CandidateTiming {
     compact_inst_capacity: usize,
     compact_cell_capacity: usize,
     compact_block_capacity: usize,
+    rejection: Option<&'static str>,
+}
+
+fn reject_candidate(
+    timing: &mut Option<&mut CandidateTiming>,
+    reason: &'static str,
+) -> Result<Option<CalleeBody>, CompilerError> {
+    if let Some(timing) = timing.as_deref_mut() {
+        timing.rejection = Some(reason);
+    }
+    Ok(None)
 }
 
 /// Lower `fref` and classify it as an inline candidate. Hard exclusions: extern,
@@ -1457,17 +1466,17 @@ fn classify(
     inst: &Instance,
     concrete_plans: &ConcretePlans,
     mut timing: Option<&mut CandidateTiming>,
-) -> Result<CalleeBody, &'static str> {
+) -> Result<Option<CalleeBody>, CompilerError> {
     let fref = inst.func;
     let f = &ws.module(fref.module).functions[fref.func];
     if f.is_extern {
-        return Err("extern");
+        return reject_candidate(&mut timing, "extern");
     }
     if f.inline_body.is_some() {
-        return Err("inline_lua");
+        return reject_candidate(&mut timing, "inline_lua");
     }
     if f.is_coroutine {
-        return Err("coroutine");
+        return reject_candidate(&mut timing, "coroutine");
     }
     let has_inline = f.annotations.iter().any(|a| a.name.name.as_str() == "inline");
     let has_pure = f.annotations.iter().any(|a| a.name.name.as_str() == "pure");
@@ -1478,20 +1487,20 @@ fn classify(
     let force = match annotation_gate(has_inline, has_pure, size_heuristic()) {
         Some(force) => force || has_bounds,
         None if has_bounds => true,
-        None => return Err("missing_inline_annotation"),
+        None => return reject_candidate(&mut timing, "missing_inline_annotation"),
     };
     // A snapshot lowers the body as if hand-written for the concrete
     // instantiation (`docs/flatvec-plan.md`); a non-generic instance's is the
     // declaration's own body.
-    let plan = concrete_plans.get(inst).ok_or("missing_concrete_plan")?;
-    let abi = skull_mir::lower::owner_abi_plan(ws, scx, concrete_plans, inst)
-        .map_err(|_| "abi_plan")?;
+    let Some(plan) = concrete_plans.get(inst) else {
+        return reject_candidate(&mut timing, "missing_concrete_plan");
+    };
+    let abi = skull_mir::lower::owner_abi_plan(ws, scx, concrete_plans, inst)?;
     let lower_started = timing.as_ref().map(|_| Instant::now());
     if let Some(timing) = timing.as_deref_mut() {
         timing.lower_attempted = true;
     }
-    let mf = skull_mir::lower::lower_instance_with_plans(ws, scx, plan, concrete_plans)
-        .map_err(|_| "lower")?;
+    let mf = skull_mir::lower::lower_instance_with_plans(ws, scx, plan, concrete_plans)?;
     if let Some(start) = lower_started {
         if let Some(timing) = timing.as_deref_mut() {
             timing.lower_ns = start.elapsed().as_nanos() as u64;
@@ -1516,7 +1525,7 @@ fn classify(
     // Cleanup first so the size gate reflects emitted size and the splice clones
     // a tight body (the caller re-runs cleanup over the whole result anyway).
     let cleanup_started = timing.as_ref().map(|_| Instant::now());
-    crate::cleanup(&mut mf);
+    crate::cleanup(&mut mf)?;
     if let Some(start) = cleanup_started {
         if let Some(timing) = timing.as_deref_mut() {
             timing.cleanup_ns = start.elapsed().as_nanos() as u64;
@@ -1537,12 +1546,12 @@ fn classify(
                 // Non-bounded fns keep the v0 refusal (they have a real
                 // emission to fall back on).
                 if !has_bounds {
-                    return Err("lambda");
+                    return reject_candidate(&mut timing, "lambda");
                 }
                 has_lambda = true;
             }
             Inst::Call { func, .. } | Inst::CallMulti { func, .. } if *func == fref => {
-                return Err("self_recursive");
+                return reject_candidate(&mut timing, "self_recursive");
             }
             _ => {}
         }
@@ -1554,8 +1563,8 @@ fn classify(
     // here would corrupt caller control flow.
     for &b in &source_reachable {
         match &mf.blocks[b].term {
-            Term::Unreachable => return Err("unreachable_terminator"),
-            Term::Yield { .. } => return Err("yield_terminator"),
+            Term::Unreachable => return reject_candidate(&mut timing, "unreachable_terminator"),
+            Term::Yield { .. } => return reject_candidate(&mut timing, "yield_terminator"),
             _ => {}
         }
     }
@@ -1605,13 +1614,13 @@ fn classify(
     if !has_lambda && matches!(mf.blocks[mf.entry].term, Term::Return(_)) {
         // Straight: entry ends in Return, so it is the only reachable block.
         if !force && reachable_insts > STRAIGHT_INSTS {
-            return Err("straight_size_cap");
+            return reject_candidate(&mut timing, "straight_size_cap");
         }
         let ret_arity = match &mf.blocks[mf.entry].term {
             Term::Return(vs) => vs.len(),
             _ => unreachable!(),
         };
-        Ok(CalleeBody {
+        Ok(Some(CalleeBody {
             func: mf,
             canonical,
             subject: inst.clone(),
@@ -1624,7 +1633,7 @@ fn classify(
             bounded: has_bounds,
             template,
             coalescable_params,
-        })
+        }))
     } else {
         // General: uniform return arity across every reachable Return.
         let reachable: Vec<Idx<Block>> =
@@ -1635,14 +1644,16 @@ fn classify(
                 Term::Return(vs) => Some(vs.len()),
                 _ => None,
             });
-        let ret_arity = arities.next().ok_or("no_return")?;
+        let Some(ret_arity) = arities.next() else {
+            return reject_candidate(&mut timing, "no_return");
+        };
         if !arities.all(|a| a == ret_arity) {
-            return Err("nonuniform_return_arity");
+            return reject_candidate(&mut timing, "nonuniform_return_arity");
         }
         if !force && reachable_insts > GENERAL_INSTS {
-            return Err("general_size_cap");
+            return reject_candidate(&mut timing, "general_size_cap");
         }
-        Ok(CalleeBody {
+        Ok(Some(CalleeBody {
             func: mf,
             canonical,
             subject: inst.clone(),
@@ -1655,7 +1666,7 @@ fn classify(
             bounded: has_bounds,
             template,
             coalescable_params,
-        })
+        }))
     }
 }
 
@@ -1666,7 +1677,7 @@ fn get<'a>(
     scx: &ScalarCtx,
     inst: &Instance,
     concrete_plans: &ConcretePlans,
-) -> Option<&'a CalleeBody> {
+) -> Result<Option<&'a CalleeBody>, CompilerError> {
     if cache.census_enabled {
         cache.census.candidate_requests += 1;
         cache.census.candidate_requested_keys.push(inst.clone());
@@ -1678,7 +1689,7 @@ fn get<'a>(
                     cache.census.candidate_cache_hits += 1;
                 }
                 cache.cands.insert(inst.clone(), candidate);
-                return cache.cands[inst].as_deref();
+                return Ok(cache.cands[inst].as_ref().map(|candidate| &**candidate));
             }
         }
         if cache.census_enabled {
@@ -1709,10 +1720,12 @@ fn get<'a>(
                 .saturating_sub(timing.full_clone_ns)
                 .saturating_sub(timing.compact_ns);
         }
-        let v = match result {
-            Ok(candidate) => Some(Arc::new(candidate)),
-            Err(reason) => {
-                cache.rejection(reason);
+        let v = match result? {
+            Some(candidate) => Some(Arc::new(candidate)),
+            None => {
+                if let Some(reason) = timing.rejection {
+                    cache.rejection(reason);
+                }
                 None
             }
         };
@@ -1720,7 +1733,7 @@ fn get<'a>(
     } else if cache.census_enabled {
         cache.census.candidate_cache_hits += 1;
     }
-    cache.cands[inst].as_deref()
+    Ok(cache.cands[inst].as_ref().map(|candidate| &**candidate))
 }
 
 /// One resolved, eligible call site in the caller, extracted before the splice.
@@ -1916,7 +1929,7 @@ fn find_site(
                 }
                 _ => continue,
             };
-            let candidate = get(cache, ws, scx, site.inst(), concrete_plans);
+            let candidate = get(cache, ws, scx, site.inst(), concrete_plans)?;
             let Some(cand) = candidate else {
                 continue;
             };
@@ -2962,6 +2975,9 @@ fn inline_functions_inner(
         // `Iterator`-bounded fn -- reaches the emitted program's registry.
         // Deduped below; one callee can be spliced at many sites.
         func.statics.extend(cand.func.statics.iter().cloned());
+        func.comptime_reads.extend(cand.func.comptime_reads.iter().cloned());
+        func.struct_registry_roots
+            .extend(cand.func.struct_registry_roots.iter().copied());
         cell_budget += cand.template.source_cells.saturating_sub(coalesced_cells) + result_cell;
         spliced.insert(fref);
         resume = Some(pos);

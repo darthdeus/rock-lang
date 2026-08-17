@@ -71,14 +71,14 @@ pub type ShapeHashes = rustc_hash::FxHashMap<ustr::Ustr, u64>;
 /// see [`struct_shape_hash`]. Known over-trigger (accepted,
 /// uniform-predictable): reordering a boxed enum's variants restarts even
 /// though its live tags are name strings.
-pub fn type_shape_hashes(ws: &Workspace) -> ShapeHashes {
+pub fn type_shape_hashes(ws: &Workspace) -> Result<ShapeHashes, CompilerError> {
     use bone_semantic::hir::VariantPayload;
     use std::hash::{Hash, Hasher};
 
     let mut out = ShapeHashes::default();
     for module in ws.modules.iter() {
         for (_, s) in module.structs.iter() {
-            out.insert(s.name, struct_shape_hash(ws, s, &mut Vec::new()));
+            out.insert(s.name, struct_shape_hash(ws, s, &mut Vec::new())?);
         }
         for (_, e) in module.enums.iter() {
             let mut h = rustc_hash::FxHasher::default();
@@ -111,7 +111,7 @@ pub fn type_shape_hashes(ws: &Workspace) -> ShapeHashes {
             out.insert(nt.name, h.finish());
         }
     }
-    out
+    Ok(out)
 }
 
 /// One struct's layout hash. An `embed` field contributes the embedded type's
@@ -123,9 +123,9 @@ pub fn type_shape_hashes(ws: &Workspace) -> ShapeHashes {
 /// hashes strictly more than a boxed one: flipping `f: Task?` to
 /// `embed f: Task?` leaves every rendered field type identical and touches no
 /// other type, so before this the whole workspace hashed clean and NO restart
-/// fired. `is_embed` is hashed explicitly anyway -- the flag is part of the
-/// layout in its own right, and that should not depend on how the child
-/// happens to contribute.
+/// fired. The planned inline/direct decision is hashed explicitly, so the
+/// layout bit remains load-bearing on its own and does not depend on how the
+/// child happens to contribute.
 ///
 /// `visiting` breaks a cycle with a stable sentinel. bone rejects a cyclic
 /// embed graph (`check_embed_site_legality`), so this is unreachable by
@@ -135,7 +135,7 @@ fn struct_shape_hash(
     ws: &Workspace,
     s: &bone_semantic::hir::StructDef,
     visiting: &mut Vec<ustr::Ustr>,
-) -> u64 {
+) -> Result<u64, CompilerError> {
     use std::hash::{Hash, Hasher};
 
     let mut h = rustc_hash::FxHasher::default();
@@ -144,26 +144,32 @@ fn struct_shape_hash(
     s.is_nobox.hash(&mut h);
     for f in s.fields.iter() {
         f.name.as_str().hash(&mut h);
-        f.is_embed.hash(&mut h);
         ws.render(None, f.ty).hash(&mut h);
-        let child = nominal_field_type(ws, f.ty)
-            .and_then(|n| ws.struct_by_name.get(&ustr::Ustr::from(&n)).copied());
-        let flattened = f.is_embed
-            || child.is_some_and(|sid| ws.modules[sid.module.index()].structs[sid.def].is_nobox);
-        if !flattened {
-            continue;
-        }
-        match child {
-            Some(sid) if !visiting.contains(&s.name) => {
+        let plan = skull_mir::lower::struct_field_plan(
+            ws,
+            bone_semantic::hir::FnBackend::Lua,
+            s.name,
+            f.name,
+            false,
+        )
+        .map_err(|e| CompilerError::new_no_location(e.message))?;
+        plan.embed().is_some().hash(&mut h);
+        if let Some(child_name) = plan.inline_child() {
+            let sid = ws.struct_by_name.get(&child_name).ok_or_else(|| {
+                CompilerError::new_no_location(format!(
+                    "struct `{}` field `{}` has no planned child `{child_name}`",
+                    s.name, f.name
+                ))
+            })?;
+            if !visiting.contains(&s.name) {
                 let child = &ws.modules[sid.module.index()].structs[sid.def];
                 visiting.push(s.name);
-                struct_shape_hash(ws, child, visiting).hash(&mut h);
+                struct_shape_hash(ws, child, visiting)?.hash(&mut h);
                 visiting.pop();
             }
-            _ => "<embed-unresolved>".hash(&mut h),
         }
     }
-    h.finish()
+    Ok(h.finish())
 }
 
 /// The type names whose shape hash differs between two compiles: changed,
@@ -513,7 +519,6 @@ end
 -- a record { __fn = <top-level fn>, <captures> } is callable as f(...) via __call.
 -- Preserved across reload so pre- and post-reload records share metatable identity.
 {FN_MT}
-if _G.__ROCK_RELEASE == nil then _G.__ROCK_RELEASE = false end
 if not _G.__rock_rng_next then
   local __rock_bit = require("bit")
   local __rock_rng_state = _G.ffi.new("uint64_t", 0)
@@ -641,10 +646,10 @@ fn leaf_ctor_def(name: ustr::Ustr, paths: &[ustr::Ustr]) -> String {
 /// has no C layout to sequence).
 fn value_struct_defs(
     ws: &Workspace,
+    rep_arena: &skull_mir::lower::RepArena,
 ) -> Result<(String, rustc_hash::FxHashSet<ustr::Ustr>, rustc_hash::FxHashSet<ustr::Ustr>), CompilerError>
 {
     let vstructs = canonical_value_structs(ws);
-    let rep_arena = skull_mir::lower::RepArena::default();
     let mut emitted: rustc_hash::FxHashSet<ustr::Ustr> = Default::default();
     let mut gc: rustc_hash::FxHashSet<ustr::Ustr> = Default::default();
     if vstructs.is_empty() {
@@ -655,10 +660,10 @@ fn value_struct_defs(
     // (`_vt`), never as cdef, so only FFI-clean structs enter the ordering.
     let mut ffi_structs = Vec::new();
     for s in vstructs {
-        if !matches!(
-            rep_arena.nominal_value_storage(ws, bone_semantic::hir::FnBackend::Lua, s.name),
-            Some(skull_mir::lower::ValueStorage::CData)
-        ) {
+        let storage = rep_arena
+            .nominal_value_storage_required(ws, bone_semantic::hir::FnBackend::Lua, s.name)
+            .map_err(|e| CompilerError::new_no_location(e.message))?;
+        if storage != skull_mir::lower::ValueStorage::CData {
             gc.insert(s.name);
         } else {
             ffi_structs.push(s);
@@ -698,14 +703,15 @@ fn value_struct_defs(
                 // write leaves instead, hoisting each nested reference once.
                 // Used by the normalization that keeps a `nobox` field from
                 // materializing when its parent boxes.
-                if let Some(paths) = rep_arena.nominal_value_leaf_paths(
-                    ws,
-                    bone_semantic::hir::FnBackend::Lua,
-                    s.name,
-                ) {
-                    if paths.iter().any(|p| p.contains('.')) {
-                        ctors.push_str(&leaf_ctor_def(s.name, &paths));
-                    }
+                let paths = rep_arena
+                    .nominal_value_leaf_paths_required(
+                        ws,
+                        bone_semantic::hir::FnBackend::Lua,
+                        s.name,
+                    )
+                    .map_err(|e| CompilerError::new_no_location(e.message))?;
+                if paths.iter().any(|p| p.contains('.')) {
+                    ctors.push_str(&leaf_ctor_def(s.name, &paths));
                 }
                 emitted.insert(s.name);
                 progress = true;
@@ -728,7 +734,7 @@ fn value_struct_defs(
     // Direct ffi.cdef: a skull chunk loads once per process, so a failure here
     // is a genuine emit bug and must abort with LuaJIT's own message — the old
     // pcall swallowed it and every `<Name>_ct` use downstream failed cryptically.
-    let (checks, storage) = value_leaf_layout_checks(ws, &emitted)?;
+    let (checks, storage) = value_leaf_layout_checks(ws, &emitted, rep_arena)?;
     Ok((format!("ffi.cdef[[\n{}]]\n{}{}{}", typedefs, ctors, checks, storage), emitted, gc))
 }
 
@@ -758,9 +764,9 @@ fn value_struct_defs(
 fn value_leaf_layout_checks(
     ws: &Workspace,
     emitted: &rustc_hash::FxHashSet<ustr::Ustr>,
+    rep_arena: &skull_mir::lower::RepArena,
 ) -> Result<(String, String), CompilerError> {
     use std::fmt::Write as _;
-    let rep_arena = skull_mir::lower::RepArena::default();
     let mut names: Vec<ustr::Ustr> = emitted.iter().copied().collect();
     names.sort_by(|a, b| a.as_str().cmp(b.as_str()));
     let mut out = String::new();
@@ -806,9 +812,12 @@ fn value_leaf_layout_checks(
 /// identity -- LuaJIT only fires `__eq` when both operands share the metamethod.
 /// Rendering is handled by the generic table `inspect` path (a `__ty`-tagged
 /// table), so no `__ROCK_C_STRUCT` (ffi.istype) entry is needed.
-fn value_struct_gc_defs(ws: &Workspace, gc: &rustc_hash::FxHashSet<ustr::Ustr>) -> String {
+fn value_struct_gc_defs(
+    ws: &Workspace,
+    gc: &rustc_hash::FxHashSet<ustr::Ustr>,
+    rep_arena: &skull_mir::lower::RepArena,
+) -> Result<String, CompilerError> {
     let mut out = String::new();
-    let rep_arena = skull_mir::lower::RepArena::default();
     for s in canonical_value_structs(ws) {
         if !gc.contains(&s.name) {
             continue;
@@ -818,13 +827,13 @@ fn value_struct_gc_defs(ws: &Workspace, gc: &rustc_hash::FxHashSet<ustr::Ustr>) 
         out.push_str(&format!("{mt} = {mt} or {{}}\n"));
         // A leaf-table struct has no declared-field keys to compare or print, so
         // both metamethods and its ctor run off the leaf paths instead.
-        if matches!(
-            rep_arena.nominal_value_storage(ws, bone_semantic::hir::FnBackend::Lua, n),
-            Some(skull_mir::lower::ValueStorage::LeafTable)
-        ) {
+        let storage = rep_arena
+            .nominal_value_storage_required(ws, bone_semantic::hir::FnBackend::Lua, n)
+            .map_err(|e| CompilerError::new_no_location(e.message))?;
+        if storage == skull_mir::lower::ValueStorage::LeafTable {
             let paths = rep_arena
-                .nominal_value_leaf_paths(ws, bone_semantic::hir::FnBackend::Lua, n)
-                .unwrap_or_default();
+                .nominal_value_leaf_paths_required(ws, bone_semantic::hir::FnBackend::Lua, n)
+                .map_err(|e| CompilerError::new_no_location(e.message))?;
             out.push_str(&format!("{mt}.__eq = function(a, b)\n"));
             out.push_str(
                 "  if type(a) ~= \"table\" or type(b) ~= \"table\" then return false end\n",
@@ -849,8 +858,8 @@ fn value_struct_gc_defs(ws: &Workspace, gc: &rustc_hash::FxHashSet<ustr::Ustr>) 
             // `false` on the wire, and two logically-equal absent values then
             // compared unequal (`__eq` is a per-key compare, and `false ~= nil`).
             let presence = rep_arena
-                .nominal_value_leaf_presence_flags(ws, bone_semantic::hir::FnBackend::Lua, n)
-                .unwrap_or_default();
+                .nominal_value_leaf_presence_flags_required(ws, bone_semantic::hir::FnBackend::Lua, n)
+                .map_err(|e| CompilerError::new_no_location(e.message))?;
             let assigns: Vec<String> = paths
                 .iter()
                 .enumerate()
@@ -917,7 +926,7 @@ fn value_struct_gc_defs(ws: &Workspace, gc: &rustc_hash::FxHashSet<ustr::Ustr>) 
             b = body,
         ));
     }
-    out
+    Ok(out)
 }
 
 /// Emit the `ffi.cdef` typedef + `<Enum>_ct` ctor for every cdata-eligible enum
@@ -1428,39 +1437,15 @@ fn reflect_field_type(ws: &Workspace, ty: bone_semantic::prelude::TyId) -> (Stri
     }
 }
 
-/// The nominal name a field's type denotes, peeling `Nullable`. An `embed`
-/// field needs this even when nullable: reflection rebuilds its logical value
-/// from that type's field list, and [`reflect_field_type`] renders any nullable
-/// as `any`, which would lose the name.
-fn nominal_field_type(ws: &Workspace, ty: bone_semantic::prelude::TyId) -> Option<String> {
-    use bone_semantic::hir::{TypeCtor, TypeExpr};
-    let resolve = |t: bone_semantic::prelude::TyId| -> Option<(TypeExpr, bone_semantic::prelude::TyId)> {
-        match t {
-            bone_semantic::prelude::TyId::Static(mid, idx) => {
-                ws.modules.get(mid.index()).map(|m| (m.ty_arena[idx], t))
-            }
-            bone_semantic::prelude::TyId::Local(_) => None,
-        }
-    };
-    let (mut te, mut cur) = resolve(ty)?;
-    if let TypeExpr::Nullable(inner) = te {
-        let (t2, c2) = resolve(cur.with_idx(inner))?;
-        te = t2;
-        cur = c2;
-    }
-    let _ = cur;
-    match te {
-        TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } => Some(name.as_str().to_string()),
-        _ => None,
-    }
-}
-
 /// Register every struct + newtype into `_G.__ROCK_TYPE_TABLE`, so the stdlib
 /// reflection fns (`get_type_info`, `type_info_of`, `type_name`) can recover a
 /// value's metadata from its `__ty` tag. Mirrors
 /// rock-codegen/src/codegen_pass.rs. The prelude already seeds the table empty,
 /// so this only adds entries. No metatables: type tagging is the direct `__ty`.
-fn type_table_defs(ws: &Workspace, gc: &rustc_hash::FxHashSet<ustr::Ustr>) -> String {
+fn type_table_defs(
+    ws: &Workspace,
+    gc: &rustc_hash::FxHashSet<ustr::Ustr>,
+) -> Result<String, CompilerError> {
     let mut out = String::new();
     let mut type_id = 100i64;
     for module in ws.modules.iter() {
@@ -1475,40 +1460,31 @@ fn type_table_defs(ws: &Workspace, gc: &rustc_hash::FxHashSet<ustr::Ustr>) -> St
             } else {
                 "c_struct"
             };
-            let fields: Vec<String> = s
-                .fields
-                .iter()
-                .map(|f| {
-                    let (tystr, nullable) = reflect_field_type(ws, f.ty);
-                    let child = nominal_field_type(ws, f.ty)
-                        .and_then(|n| ws.struct_by_name.get(&ustr::Ustr::from(&n)).copied());
-                    let flattened = f.is_embed
-                        || child.is_some_and(|sid| {
-                            ws.modules[sid.module.index()].structs[sid.def].is_nobox
-                        });
-                    // `embed` marks a field whose leaves are THIS struct's
-                    // physical keys (`f.x`), so reflection has to rebuild the
-                    // logical child from them -- the declared name indexes
-                    // nothing (a presence slot when nullable). The child's name
-                    // must survive nullability for that rebuild to be possible.
-                    let tystr = match flattened.then(|| nominal_field_type(ws, f.ty)).flatten() {
-                        Some(n) => n,
-                        None => tystr,
-                    };
-                    let embed = if flattened { ", embed = true" } else { "" };
-                    // The recursive shape, present only where the flat `type`
-                    // above cannot express it (a container, a tuple, a nullable
-                    // -- anything with a nominal inside it).
-                    let desc = match field_desc_lua(ws, f.ty) {
-                        Some(d) => format!(", desc = {d}"),
-                        None => String::new(),
-                    };
-                    format!(
-                        "{{ name = \"{}\", type = \"{}\", nullable = {}{}{} }}",
-                        f.name, tystr, nullable, embed, desc
-                    )
-                })
-                .collect();
+            let mut fields = Vec::with_capacity(s.fields.len());
+            for f in &s.fields {
+                let (tystr, _) = reflect_field_type(ws, f.ty);
+                let plan = skull_mir::lower::struct_field_plan(
+                    ws,
+                    bone_semantic::hir::FnBackend::Lua,
+                    s.name,
+                    f.name,
+                    false,
+                )
+                .map_err(|e| CompilerError::new_no_location(e.message))?;
+                let nullable = plan.nullable();
+                let (tystr, embed) = match plan.inline_child() {
+                    Some(child) => (child.as_str().to_string(), ", embed = true"),
+                    None => (tystr, ""),
+                };
+                let desc = match field_desc_lua(ws, f.ty) {
+                    Some(d) => format!(", desc = {d}"),
+                    None => String::new(),
+                };
+                fields.push(format!(
+                    "{{ name = \"{}\", type = \"{}\", nullable = {}{}{} }}",
+                    f.name, tystr, nullable, embed, desc
+                ));
+            }
             out.push_str(&format!(
                 "_G.__ROCK_TYPE_TABLE[\"{n}\"] = {{ name = \"{n}\", kind = \"{k}\", type_id = {id}, fields = {{ {f} }} }}\n",
                 n = s.name,
@@ -1607,7 +1583,7 @@ fn type_table_defs(ws: &Workspace, gc: &rustc_hash::FxHashSet<ustr::Ustr>) -> St
             type_id += 1;
         }
     }
-    out
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -1662,7 +1638,7 @@ mod tests {
                 .unwrap_or_else(|e| panic!("parse failed: {}", e.message));
             let ws = bone_semantic::semantic_passes::semantic_pass(&mut [module])
                 .unwrap_or_else(|e| panic!("semantic_pass failed: {}", e.message));
-            super::type_shape_hashes(&ws)
+            super::type_shape_hashes(&ws).expect("shape planning must succeed")
         };
         let base = "struct Mob { hp: int }\n\
                     enum Ev { Tick(int), Done }\n\
@@ -1708,7 +1684,7 @@ mod tests {
                 .unwrap_or_else(|e| panic!("parse failed: {}", e.message));
             let ws = bone_semantic::semantic_passes::semantic_pass(&mut [module])
                 .unwrap_or_else(|e| panic!("semantic_pass failed: {}", e.message));
-            super::type_shape_hashes(&ws)
+            super::type_shape_hashes(&ws).expect("shape planning must succeed")
         };
 
         // (a) The flag alone relayouts the parent, while every rendered field

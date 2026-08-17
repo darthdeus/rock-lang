@@ -322,6 +322,9 @@ pub use abi::{
     RepGuarantees, RepPlan, RepUse, RepUseFacts,
 };
 
+mod struct_plan;
+pub use struct_plan::{struct_field_plan, StructFieldPlan, StructRegistryPlan};
+
 mod coroutine;
 pub use coroutine::CoroutinePlan;
 
@@ -574,7 +577,7 @@ impl ScalarCtx {
         std::sync::Arc::clone(&self.interner)
     }
 
-    pub(crate) fn rep_arena(&self) -> std::sync::Arc<abi::RepArena> {
+    pub fn rep_arena(&self) -> std::sync::Arc<abi::RepArena> {
         std::sync::Arc::clone(&self.rep_arena)
     }
 
@@ -1457,6 +1460,7 @@ fn lower_body(
         .and_then(|ir| ir.per_fn.get(&BodyOwner::Function(fid)));
 
     let mut f = MirFunc::new(func.name);
+    f.rep_arena = Some(scx.rep_arena());
     // A `co fn` lowers to an ordinary CFG with `Term::Yield`s + a resume-arg cell
     // (the value `yield e` evaluates to). `skull-transform`'s coroutine pass then
     // rewrites it into the stackless state machine.
@@ -1529,7 +1533,7 @@ fn lower_body(
         nested_fn_counters: HashMap::new(),
         presence_only: None,
     };
-    b.lower_params();
+    b.lower_params()?;
     b.fill_param_defaults()?;
     b.lower_root()?;
     let stats = b.lower_attribution.into_inner();
@@ -1576,7 +1580,8 @@ fn lower_global_inner(
     let inf = ws
         .inference(mid)
         .and_then(|ir| ir.per_fn.get(&BodyOwner::Global(gid)));
-    let f = MirFunc::new(name);
+    let mut f = MirFunc::new(name);
+    f.rep_arena = Some(scx.rep_arena());
     let cur = f.entry();
     let mut b = Builder {
         ws,
@@ -1890,8 +1895,18 @@ fn lower_decorator_inner(
     let target = body
         .deco_target
         .ok_or_else(|| gap("decorator body has no target binding"))?;
-    let f = MirFunc::new(name);
+    let mut f = MirFunc::new(name);
+    f.rep_arena = Some(scx.rep_arena());
     let cur = f.entry();
+    let representation = scx
+        .rep_arena()
+        .boxed_function(scx.target(), concrete_plan.signature.params.len());
+    f.abi_representation = Some(representation.clone());
+    let param_reps = representation.params().to_vec();
+    let ret_rep = concrete_plan
+        .signature
+        .result
+        .map(|_| representation.result().expect("boxed decorator result plan"));
     let mut b = Builder {
         ws,
         scx,
@@ -1911,10 +1926,11 @@ fn lower_decorator_inner(
         defers: Vec::new(),
         in_defer_body: false,
         resume_arg: None,
-        // Decorator bodies never run `inline_functions` -- box value args.
-        param_reps: Vec::new(),
+        // Decorator bodies never run `inline_functions` -- box value args, but
+        // their declared parameters still need the owned ABI slots.
+        param_reps,
         param_plan: None,
-        ret_rep: None,
+        ret_rep,
         fn_name_span: None,
         cur_span: None,
         cur_expr: None,
@@ -1934,7 +1950,7 @@ fn lower_decorator_inner(
     let tcell = b.f.new_cell(Some(b.body.binding_arena[target].name));
     b.f.params.push(tcell);
     b.binds.insert(raw(target), tcell);
-    b.lower_params();
+    b.lower_params()?;
     b.fill_param_defaults()?;
     b.lower_root()?;
     let stats = b.lower_attribution.into_inner();
@@ -2077,14 +2093,14 @@ impl Builder<'_> {
         self.scx.rep_arena().ret_slot(id)
     }
 
-    fn param_slot(&self, index: usize) -> RetSlot {
+    fn param_slot(&self, index: usize) -> Result<RetSlot, CompilerError> {
         self.param_plan
             .as_ref()
             .and_then(|plan| plan.representation().params().get(index))
             .copied()
             .or_else(|| self.param_reps.get(index).copied())
             .map(|id| self.rep_slot(id))
-            .unwrap_or(RetSlot::Opaque)
+            .ok_or_else(|| self.gap_here(format!("parameter {index} has no representation plan")))
     }
 
     fn result_shape(&self) -> Option<ValueShape> {
@@ -2292,13 +2308,14 @@ impl Builder<'_> {
         matches!(self.f.blocks[self.cur].term, Term::Unreachable)
     }
 
-    fn lower_params(&mut self) {
+    fn lower_params(&mut self) -> Result<(), CompilerError> {
         let pbs: Vec<Idx<BindingInfo>> = self.body.param_bindings.into_iter().collect();
         for (i, pb) in pbs.iter().enumerate() {
             let name = self.body.binding_arena[*pb].name;
-            let slot = self.param_slot(i);
+            let slot = self.param_slot(i)?;
             self.bind_param_slot(*pb, name, &slot);
         }
+        Ok(())
     }
 
     /// Bind one declared param to the cells its wire slot occupies, in the Lua
@@ -2364,7 +2381,7 @@ impl Builder<'_> {
                 self.f.set_term(self.cur, Term::Branch { cond: is_nil, then_bb, else_bb: join });
                 self.cur = then_bb;
                 let r = self.lower_expr_repr(*def)?;
-                let leaves = self.repr_to_leaves(&r, &shape);
+                let leaves = self.repr_to_storage_leaves(&r, &shape, "struct default")?;
                 for (c, v) in cells.iter().zip(leaves) {
                     self.emit_cur(Inst::Store { cell: *c, value: v });
                 }
@@ -2487,18 +2504,31 @@ impl Builder<'_> {
             return Ok(vec![]);
         }
         if let Some(shape) = self.result_shape() {
+            let is_phantom = match &self.body.expr_arena[e] {
+                Expr::Call { callee: Callee::Unresolved { name, .. }, args, .. } => {
+                    name.as_str() == "phantom" && args.clone().into_iter().next().is_none()
+                }
+                _ => false,
+            };
+            if is_phantom {
+                self.lower_expr(e)?;
+                return Ok((0..shape.leaf_count())
+                    .map(|_| self.emit_cur(Inst::Const(Lit::Nil)))
+                    .collect());
+            }
             let r = self.lower_expr_repr(e)?;
-            let rep = self.ret_rep.expect("result_shape requires an owned result RepId");
-            let bundle = ValueBundle::new(rep, r);
-            return Ok(self.repr_to_leaves_bundle(&bundle, &shape));
+            if self.scx.rep_arena().value_shape(r.representation()).is_none() {
+                return self.opaque_boundary_leaves(&r, &shape, "return boundary");
+            }
+            return self.repr_to_leaves_bundle_after_presence(&r, &shape);
         }
         if let Some(shape) = self.result_tuple() {
             if shape.nullable {
                 return self.nullable_tuple_return_slots(e, &shape);
             }
             if shape.splats() {
-                let r = self.lower_expr_repr(e)?;
-                return Ok(self.tuple_repr_to_slots(r, &shape));
+                let r = self.lower_expr_repr(e)?.into_value();
+                return self.tuple_repr_to_slots(r, &shape);
             }
             let v = self.lower_expr(e)?;
             return Ok(self.tuple_return_operands(v, shape.slots.len()));
@@ -2538,7 +2568,7 @@ impl Builder<'_> {
         e: Idx<Expr>,
         shape: &TupleRetShape,
     ) -> Result<Vec<Idx<Inst>>, CompilerError> {
-        let r = self.lower_expr_repr(e)?;
+        let r = self.lower_expr_repr(e)?.into_value();
         if let ValueRepr::Scalar(v) = &r {
             if !matches!(self.f.insts[*v], Inst::Const(Lit::Nil)) {
                 return Err(gap(
@@ -2548,7 +2578,7 @@ impl Builder<'_> {
             }
             return Ok(self.absent_tuple_slots(shape));
         }
-        Ok(self.tuple_repr_to_slots(r, shape))
+        self.tuple_repr_to_slots(r, shape)
     }
 
     /// The N return operands for a tuple-return `return <v>`. A fresh `MakeTuple`
@@ -2578,11 +2608,15 @@ impl Builder<'_> {
     /// presence sits on the wire. A repr that carries its OWN tag forwards that
     /// tag: `return maybe(b)` hands on the callee's presence, and synthesizing
     /// `true` here instead reported every absent forward as present.
-    fn tuple_repr_to_slots(&mut self, r: ValueRepr, shape: &TupleRetShape) -> Vec<Idx<Inst>> {
+    fn tuple_repr_to_slots(
+        &mut self,
+        r: ValueRepr,
+        shape: &TupleRetShape,
+    ) -> Result<Vec<Idx<Inst>>, CompilerError> {
         // A phantom tuple has no aggregate to project; every wire slot is absent.
         if let ValueRepr::Scalar(v) = &r {
             if matches!(self.f.insts[*v], Inst::Const(Lit::Nil)) {
-                return self.absent_tuple_slots(shape);
+                return Ok(self.absent_tuple_slots(shape));
             }
         }
         let present = match (shape.nullable, &r) {
@@ -2593,7 +2627,7 @@ impl Builder<'_> {
         let parts: Vec<ValueRepr> = match r {
             ValueRepr::Tuple { parts, .. } if parts.len() == shape.slots.len() => parts,
             other => {
-                let base = self.pack(other);
+                let base = self.pack(other)?;
                 (0..shape.slots.len())
                     .map(|index| ValueRepr::Scalar(self.emit_cur(Inst::TupleIndex { base, index })))
                     .collect()
@@ -2603,7 +2637,7 @@ impl Builder<'_> {
         out.extend(present);
         for (slot, part) in shape.slots.iter().zip(parts) {
             match slot {
-                RetSlot::Opaque => out.push(self.pack(part)),
+                RetSlot::Opaque => out.push(self.pack(part)?),
                 // A BOXED source at a non-nullable splatting slot is the iterator
                 // protocol's "no element" placeholder (`return (false,
                 // phantom())`), which is nil -- field-reading it would fault, and
@@ -2615,14 +2649,14 @@ impl Builder<'_> {
                 {
                     let mut nullable = vs.clone();
                     nullable.nullable = true;
-                    let leaves = self.repr_to_leaves(&part, &nullable);
+                    let leaves = self.repr_to_leaves_shape(&part, &nullable)?;
                     out.extend(leaves.into_iter().skip(1));
                 }
-                RetSlot::Leaves(vs) => out.extend(self.repr_to_leaves(&part, vs)),
-                RetSlot::Nested(inner) => out.extend(self.tuple_repr_to_slots(part, inner)),
+                RetSlot::Leaves(vs) => out.extend(self.repr_to_leaves_shape(&part, vs)?),
+                RetSlot::Nested(inner) => out.extend(self.tuple_repr_to_slots(part, inner)?),
             }
         }
-        out
+        Ok(out)
     }
 
     /// Rebuild the tuple repr `shape` describes from a flat slot list -- the
@@ -2676,15 +2710,7 @@ impl Builder<'_> {
             return Ok(vec![self.lower_expr(a)?]);
         }
         let r = self.lower_expr_repr(a)?;
-        Ok(self.repr_to_slot_values(r, slot))
-    }
-
-    pub(crate) fn repr_to_slot_values(&mut self, repr: ValueRepr, slot: &RetSlot) -> Vec<Idx<Inst>> {
-        match slot {
-            RetSlot::Opaque => vec![self.pack(repr)],
-            RetSlot::Leaves(shape) => self.repr_to_leaves(&repr, shape),
-            RetSlot::Nested(shape) => self.tuple_repr_to_slots(repr, shape),
-        }
+        self.repr_to_slot_values_bundle(&r, slot)
     }
 
 }
@@ -2841,10 +2867,9 @@ pub fn map_key_rejection(ws: &Workspace, mid: ModuleId) -> Option<(String, Span)
 /// position. Not a legal C boundary type: no `ffi.cdef` typedef exists, so
 /// `ffi.new`/`sizeof`/`ffi.istype`/the extern ABI cannot name it.
 fn nominal_is_gc_value(ws: &Workspace, name: Ustr) -> bool {
-    let rep_arena = RepArena::default();
     map_is_value_struct(ws, name)
         && !matches!(
-            rep_arena.nominal_value_storage(ws, bone_semantic::hir::FnBackend::Lua, name),
+            crate::lower::declared_value_storage(ws, bone_semantic::hir::FnBackend::Lua, name),
             Some(ValueStorage::CData)
         )
 }
@@ -3188,6 +3213,194 @@ fn uniform_values_rejection_for_call(
     None
 }
 
+/// Resolve a `build_var("NAME")` / `embed_string("path")` call to its value
+/// (docs/comptime-plan.md tier 1). THE shared resolver: the lowering expander
+/// and the fatal gate both call it, so they cannot diverge on what they
+/// accept. The argument must be a plain string literal -- interpolation or any
+/// computed expression rejects, because the input has to be knowable without
+/// running the body.
+pub fn resolve_comptime_value(
+    ws: &Workspace,
+    body: &Body,
+    call_expr: Idx<Expr>,
+    args: &[Idx<Expr>],
+    kind: ExpandKind,
+) -> Result<ResolvedComptime, CompilerError> {
+    let fname = match kind {
+        ExpandKind::BuildVar => "build_var",
+        ExpandKind::EmbedString => "embed_string",
+        _ => unreachable!("resolve_comptime_value only serves the comptime-input kinds"),
+    };
+    let reject = |span: Idx<Expr>, msg: String| {
+        CompilerError::new_with_label(body.expr_spans[span], msg)
+    };
+    let [arg] = args else {
+        return Err(reject(call_expr, format!("`{fname}` takes exactly one argument")));
+    };
+    let Expr::String(key) = body.expr_arena[*arg] else {
+        return Err(reject(
+            *arg,
+            format!("`{fname}` argument must be a plain string literal (no interpolation)"),
+        ));
+    };
+    match kind {
+        ExpandKind::BuildVar => match ws.comptime_inputs.vars.get(&key) {
+            Some(var) => Ok(ResolvedComptime { value: var.value.clone(), file_abs: None }),
+            // A fully-default inputs struct means resolution never RAN for
+            // this compile (no stick.toml found, or an entry point that did
+            // not stamp declared inputs) -- blaming the project's [build.vars]
+            // there sent people at the wrong file. A stamped project always
+            // carries at least its embed_root.
+            None if ws.comptime_inputs.embed_root.is_none()
+                && ws.comptime_inputs.vars.is_empty()
+                && ws.comptime_inputs.channel.is_empty() =>
+            {
+                Err(reject(
+                    call_expr,
+                    format!(
+                        "`build_var(\"{key}\")`: no [build.vars] were resolved for this \
+                         compile (no stick.toml found at or above the entry point, or \
+                         this rock entry point did not resolve declared inputs)"
+                    ),
+                ))
+            }
+            None => Err(reject(
+                call_expr,
+                format!("`build_var(\"{key}\")`: {key} is not declared in this project's [build.vars]"),
+            )),
+        },
+        ExpandKind::EmbedString => {
+            // Resolution root: the nearest stick.toml at/above the CALLING
+            // file's dir (a library embeds its own files, whatever project is
+            // consuming it -- docs/comptime-plan.md tier 1.5); fall back to
+            // the invocation's embed_root for synthetic/test module files.
+            let call_file = body.expr_spans[call_expr].file;
+            let package_root = std::path::Path::new(call_file.as_str())
+                .exists()
+                .then(|| {
+                    let mut dir = std::path::Path::new(call_file.as_str()).parent();
+                    while let Some(d) = dir {
+                        if d.join("stick.toml").exists() {
+                            return Some(d.to_path_buf());
+                        }
+                        dir = d.parent();
+                    }
+                    None
+                })
+                .flatten();
+            let Some(root) = package_root.or_else(|| ws.comptime_inputs.embed_root.clone()) else {
+                return Err(reject(
+                    call_expr,
+                    "`embed_string` needs a package root (a stick.toml at or above the \
+                     calling file, or a project root); none is available in this compilation"
+                        .to_string(),
+                ));
+            };
+            let rel = std::path::Path::new(key.as_str());
+            if rel.is_absolute() {
+                return Err(reject(
+                    *arg,
+                    format!("`embed_string` path must be relative to the package root, got {key:?}"),
+                ));
+            }
+            let joined = root.join(rel);
+            let file = joined.canonicalize().map_err(|e| {
+                reject(*arg, format!("`embed_string(\"{key}\")`: cannot read {key:?}: {e}"))
+            })?;
+            let canon_root = root.canonicalize().map_err(|e| {
+                reject(call_expr, format!("`embed_string`: package root is unreadable: {e}"))
+            })?;
+            if !file.starts_with(&canon_root) {
+                return Err(reject(
+                    *arg,
+                    format!("`embed_string(\"{key}\")`: path escapes the package root"),
+                ));
+            }
+            let value = std::fs::read_to_string(&file).map_err(|e| {
+                reject(*arg, format!("`embed_string(\"{key}\")`: cannot read {key:?}: {e}"))
+            })?;
+            Ok(ResolvedComptime {
+                value,
+                file_abs: Some(Ustr::from(&file.to_string_lossy())),
+            })
+        }
+        _ => unreachable!(),
+    }
+}
+
+/// A resolved comptime input: the value, plus (for embeds) the absolute path
+/// the read landed on -- what invalidation re-reads and the watcher watches.
+pub struct ResolvedComptime {
+    pub value: String,
+    pub file_abs: Option<Ustr>,
+}
+
+/// FATAL gate for `build_var` / `embed_string` misuse (non-literal argument,
+/// undeclared var, unreadable or escaping path): a per-fn lowering error is
+/// only a lenient skip, so validation lives here. Shares
+/// [`resolve_comptime_value`] with the expander.
+pub fn comptime_input_rejection(ws: &Workspace, mid: ModuleId) -> Option<CompilerError> {
+    let module = ws.module(mid);
+    let ir = ws.inference(mid)?;
+    for (owner, body) in module.bodies.iter() {
+        let Some(inf) = ir.per_fn.get(owner) else { continue };
+        for (e, expr) in body.expr_arena.iter() {
+            let Expr::Call { callee: Callee::Unresolved { name, .. }, args, .. } = expr else {
+                continue;
+            };
+            let Some((fmod, fid)) = resolve_call_fn(ws, inf, e, *name) else { continue };
+            let kind = crate::intrinsics::expand_kind(&ws.module(fmod).functions[fid]);
+            let Some(kind @ (ExpandKind::BuildVar | ExpandKind::EmbedString)) = kind else {
+                continue;
+            };
+            let arg_idxs: Vec<Idx<Expr>> = args.into_iter().collect();
+            if let Err(err) = resolve_comptime_value(ws, body, e, &arg_idxs, kind) {
+                return Some(err);
+            }
+        }
+    }
+    None
+}
+
+/// The ABSOLUTE path of every `embed_string` input the program reads, found
+/// by the SAME resolution emission uses (`resolve_comptime_value` -- one
+/// oracle, so this cannot drift from what actually gets baked). For watchers
+/// over emitters that keep no chunk cache (the JS web watch); the Lua side
+/// reads its `SkullEmitCache::comptime_files` instead.
+pub fn comptime_embed_files(ws: &Workspace) -> Vec<Ustr> {
+    let mut out: Vec<Ustr> = Vec::new();
+    for module in ws.modules.iter() {
+        if module.id == ModuleId::builtin() {
+            continue;
+        }
+        let Some(ir) = ws.inference(module.id) else { continue };
+        for (owner, body) in module.bodies.iter() {
+            let Some(inf) = ir.per_fn.get(owner) else { continue };
+            for (e, expr) in body.expr_arena.iter() {
+                let Expr::Call { callee: Callee::Unresolved { name, .. }, args, .. } = expr else {
+                    continue;
+                };
+                let Some((fmod, fid)) = resolve_call_fn(ws, inf, e, *name) else { continue };
+                let kind = crate::intrinsics::expand_kind(&ws.module(fmod).functions[fid]);
+                if !matches!(kind, Some(ExpandKind::EmbedString)) {
+                    continue;
+                }
+                let arg_idxs: Vec<Idx<Expr>> = args.into_iter().collect();
+                if let Ok(resolved) =
+                    resolve_comptime_value(ws, body, e, &arg_idxs, ExpandKind::EmbedString)
+                {
+                    if let Some(path) = resolved.file_abs {
+                        out.push(path);
+                    }
+                }
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
 /// Emit-time validation for `@vertex_expand` calls: misuse is a spanned
 /// compile error, never a call that reaches the fn's error body.
 fn vertex_expand_rejection_for_call(
@@ -3233,6 +3446,7 @@ impl ExpansionRejections {
             ExpandKind::VertexLayout => &mut self.vertex_layout,
             ExpandKind::UniformBlock => &mut self.uniform_block,
             ExpandKind::UniformValues => &mut self.uniform_values,
+            ExpandKind::BuildVar | ExpandKind::EmbedString => return,
             ExpandKind::Materialize => return,
         };
         if slot.is_none() {
@@ -3293,6 +3507,7 @@ pub fn expansion_rejection(ws: &Workspace, mid: ModuleId) -> Option<CompilerErro
                 ExpandKind::UniformValues => {
                     uniform_values_rejection_for_call(ws, inf, body, e, f, &arg_idxs)
                 }
+                ExpandKind::BuildVar | ExpandKind::EmbedString => None,
                 ExpandKind::Materialize => None,
             };
             rejections.record(kind, rejection);

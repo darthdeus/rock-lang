@@ -42,6 +42,7 @@ fn stage_ir(entry: ShaderInstance, order: Vec<ShaderInstance>) -> ShaderStageIr 
         body: skull_mir::mir::MirFunc::new(Ustr::from("entry")),
         order,
         bodies: Default::default(),
+        const_globals: Default::default(),
     }
 }
 

@@ -37,9 +37,14 @@ impl LiveProject {
         };
         let entry_path = entry_path(&sources)?;
         let files = source_pairs(&sources);
-        let session = crate::bone_backend::bone_session(files).map_err(|e| {
-            anyhow::anyhow!("{}", crate::skull_backend::render_project_err(&sources, &e))
-        })?;
+        // bone_session_for_emission resolves [build.vars] at construction, so
+        // var commands run once per session build -- init and every
+        // `rebuild_session` -- never per incremental update (the Session
+        // mutates its ws in place, so the stamp survives `update_file`).
+        let session = crate::bone_backend::bone_session_for_emission(files, Path::new(dir))
+            .map_err(|e| {
+                anyhow::anyhow!("{}", crate::skull_backend::render_project_err(&sources, &e))
+            })?;
         let project = Self {
             session,
             dir: dir.to_string(),
@@ -185,13 +190,16 @@ impl LiveProject {
     }
 
     fn rebuild_session(&mut self) -> Result<()> {
-        self.session =
-            crate::bone_backend::bone_session(source_pairs(&self.sources)).map_err(|error| {
-                anyhow::anyhow!(
-                    "{}",
-                    crate::skull_backend::render_project_err(&self.sources, &error)
-                )
-            })?;
+        self.session = crate::bone_backend::bone_session_for_emission(
+            source_pairs(&self.sources),
+            Path::new(&self.dir),
+        )
+        .map_err(|error| {
+            anyhow::anyhow!(
+                "{}",
+                crate::skull_backend::render_project_err(&self.sources, &error)
+            )
+        })?;
         self.verdict("- serving last good output")
     }
 
@@ -302,5 +310,39 @@ mod tests {
             project.recompile(std::slice::from_ref(&source)).unwrap(),
             LiveUpdate::Full { .. }
         ));
+    }
+
+    #[test]
+    fn build_var_commands_run_once_for_incremental_updates() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("main.rock");
+        let count = dir.path().join("count");
+        std::fs::write(
+            dir.path().join("stick.toml"),
+            format!(
+                "[package]\nname = \"cadence\"\n[build]\n[build.vars]\nCOUNT = {{ cmd = \"n=$(cat {} 2>/dev/null || echo 0); echo $((n + 1)) > {}; echo counted\" }}\n",
+                count.display(), count.display()
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            &source,
+            "fn value() -> int { 1 }\nfn main() { print(build_var(\"COUNT\")) }\n",
+        )
+        .unwrap();
+
+        let mut project = LiveProject::init(dir.path().to_str().unwrap(), false).unwrap();
+        assert_eq!(std::fs::read_to_string(&count).unwrap().trim(), "1");
+
+        std::fs::write(
+            &source,
+            "fn value() -> int { 2 }\nfn main() { print(build_var(\"COUNT\")) }\n",
+        )
+        .unwrap();
+        project.recompile(std::slice::from_ref(&source)).unwrap();
+        assert_eq!(std::fs::read_to_string(&count).unwrap().trim(), "1");
+
+        project.recompile(&[]).unwrap();
+        assert_eq!(std::fs::read_to_string(&count).unwrap().trim(), "2");
     }
 }

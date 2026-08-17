@@ -16,6 +16,7 @@
 
 use crate::common::ws_of;
 use skull_mir::gpu_layout::AttrKind;
+use skull_mir::lower::RepArena;
 use skull_mir::vertex_plan::{vertex_plan, AttrSlot, VertexPlan};
 use ustr::Ustr;
 
@@ -35,7 +36,7 @@ fn main() { }
 "#;
 
 fn plan(ws: &bone_semantic::inference::Workspace, name: &str) -> Vec<(String, u32, usize)> {
-    vertex_plan(ws, Ustr::from(name))
+    vertex_plan(ws, &RepArena::default(), Ustr::from(name))
         .unwrap_or_else(|e| panic!("{name}: {e:?}"))
         .slots
         .iter()
@@ -44,7 +45,9 @@ fn plan(ws: &bone_semantic::inference::Workspace, name: &str) -> Vec<(String, u3
 }
 
 fn stride(ws: &bone_semantic::inference::Workspace, name: &str) -> usize {
-    vertex_plan(ws, Ustr::from(name)).unwrap_or_else(|e| panic!("{name}: {e:?}")).byte_stride
+    vertex_plan(ws, &RepArena::default(), Ustr::from(name))
+        .unwrap_or_else(|e| panic!("{name}: {e:?}"))
+        .byte_stride
 }
 
 /// The numbers bitgun's `gpu_mesh_set_instances` call site passes by hand
@@ -121,7 +124,8 @@ fn wide_vectors_pack_by_c_rules() {
 #[test]
 fn an_integer_attribute_rejects_the_float_unit_form() {
     let ws = ws_of(SHAPES);
-    let p = vertex_plan(&ws, Ustr::from("WithInt")).expect("int is a valid attribute kind");
+    let p = vertex_plan(&ws, &RepArena::default(), Ustr::from("WithInt"))
+        .expect("int is a valid attribute kind");
     assert_eq!(p.slots[1].kind, AttrKind::I32);
 
     let err = p.float_unit_sizes().expect_err("the float path must not accept an int attribute");
@@ -129,7 +133,7 @@ fn an_integer_attribute_rejects_the_float_unit_form() {
 
     // The all-float sibling still passes, so the rejection is about the int and
     // not about the form itself.
-    let g = vertex_plan(&ws, Ustr::from("Grass")).expect("Grass");
+    let g = vertex_plan(&ws, &RepArena::default(), Ustr::from("Grass")).expect("Grass");
     assert_eq!(g.float_unit_sizes().expect("all-float"), vec![2, 1, 1, 1]);
     assert_eq!(g.float_unit_stride().expect("all-float"), 5);
 }
@@ -182,7 +186,7 @@ fn a_slot_off_its_cumulative_position_rejects_the_float_unit_view() {
     // Positive control: the real derivation satisfies the invariant, so the
     // check is not simply rejecting everything.
     let ws = ws_of(SHAPES);
-    let real = vertex_plan(&ws, Ustr::from("Grass")).expect("Grass");
+    let real = vertex_plan(&ws, &RepArena::default(), Ustr::from("Grass")).expect("Grass");
     assert!(real.float_unit_sizes().is_ok());
     assert!(real.float_unit_stride().is_ok());
 }
@@ -221,5 +225,8 @@ fn trailing_padding_rejects_the_float_unit_view() {
 
     // Positive control: a plan whose attributes exactly span its stride.
     let ws = ws_of(SHAPES);
-    assert!(vertex_plan(&ws, Ustr::from("Grass")).expect("Grass").float_unit_sizes().is_ok());
+    assert!(vertex_plan(&ws, &RepArena::default(), Ustr::from("Grass"))
+        .expect("Grass")
+        .float_unit_sizes()
+        .is_ok());
 }

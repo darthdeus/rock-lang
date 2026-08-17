@@ -1,6 +1,8 @@
 // Game-spawning tests, excluded from the default nextest profile (see .config/nextest.toml).
 
 mod stone_harness;
+#[path = "web_test_process.rs"]
+mod web_test_process;
 
 #[path = "arena_serialization_tests.rs"]
 mod arena_serialization_tests;
@@ -15,6 +17,10 @@ mod quit_teardown_test;
 mod replay_desync_tests;
 #[path = "replay_flight_tests.rs"]
 mod replay_flight_tests;
+#[path = "replay_bindings_tests.rs"]
+mod replay_bindings_tests;
+#[path = "action_layer_v2_landing_gaps.rs"]
+mod action_layer_v2_landing_gaps;
 #[path = "replay_restore_tests.rs"]
 mod replay_restore_tests;
 #[path = "replay_roundtrip_tests.rs"]

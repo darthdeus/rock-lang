@@ -2722,6 +2722,16 @@ enum ValueKind {
     Sampler(SamplerKind),
 }
 
+fn lit_value_kind(lit: &Lit) -> Option<ValueKind> {
+    match lit {
+        Lit::Float(_) => Some(ValueKind::F32),
+        Lit::Int(_) => Some(ValueKind::I32),
+        Lit::Uint(_) => Some(ValueKind::U32),
+        Lit::Bool(_) => Some(ValueKind::Bool),
+        Lit::Nil | Lit::Str(_) => None,
+    }
+}
+
 impl ValueKind {
     fn wire(self) -> Option<WireKind> {
         match self {
@@ -3826,6 +3836,7 @@ impl<'a> FunctionEmitter<'a> {
                     }
                 }
                 Inst::Const(_)
+                | Inst::Global(_)
                 | Inst::Load(_)
                 | Inst::Field { .. }
                 | Inst::MakeValueStruct { .. }
@@ -4022,6 +4033,19 @@ impl<'a> FunctionEmitter<'a> {
                 self.span,
                 "WGSL emission does not support null or string literals",
             )),
+            Inst::Global(name) => self
+                .stage
+                .const_globals
+                .get(name)
+                .and_then(lit_value_kind)
+                .ok_or_else(|| {
+                    err(
+                        self.span,
+                        format!(
+                            "WGSL global `{name}` has no planner-proven scalar constant"
+                        ),
+                    )
+                }),
             Inst::Load(cell) => self.cell_kinds.get(cell).copied().ok_or_else(|| {
                 err(
                     self.span,
@@ -4469,14 +4493,20 @@ impl<'a> FunctionEmitter<'a> {
 
     fn render_val(&self, iid: Idx<Inst>) -> Result<String, CompilerError> {
         match &self.body.insts[iid] {
-            Inst::Const(Lit::Float(value)) => Ok(format_float(*value)),
-            Inst::Const(Lit::Int(value)) => Ok(value.to_string()),
-            Inst::Const(Lit::Uint(value)) => Ok(format!("{value}u")),
-            Inst::Const(Lit::Bool(value)) => Ok(value.to_string()),
-            Inst::Const(Lit::Nil) | Inst::Const(Lit::Str(_)) => Err(err(
-                self.span,
-                "WGSL emission does not support null or string literals",
-            )),
+            Inst::Const(lit) => self.render_lit(lit),
+            Inst::Global(name) => self
+                .stage
+                .const_globals
+                .get(name)
+                .ok_or_else(|| {
+                    err(
+                        self.span,
+                        format!(
+                            "WGSL global `{name}` has no planner-proven scalar constant"
+                        ),
+                    )
+                })
+                .and_then(|lit| self.render_lit(lit)),
             Inst::Load(cell) => {
                 if let Some((name, _)) = self.workgroup_cells.get(cell) {
                     return Ok(name.clone());
@@ -4570,8 +4600,8 @@ impl<'a> FunctionEmitter<'a> {
                 }
                 Ok(format!("{}.{}", self.render_val(*base)?, field))
             }
-            Inst::MakeValueStruct { name, fields }
-            | Inst::MaterializeValueStruct { name, fields } => {
+            Inst::MakeValueStruct { name, fields, .. }
+            | Inst::MaterializeValueStruct { name, fields, .. } => {
                 let kind = value_struct_kind(*name).ok_or_else(|| {
                     err(self.span, format!("WGSL does not support value struct `{name}`"))
                 })?;
@@ -4644,6 +4674,19 @@ impl<'a> FunctionEmitter<'a> {
                     "WGSL reaches unsupported value operation `{}`",
                     mir_kind(other)
                 ),
+            )),
+        }
+    }
+
+    fn render_lit(&self, lit: &Lit) -> Result<String, CompilerError> {
+        match lit {
+            Lit::Float(value) => Ok(format_float(*value)),
+            Lit::Int(value) => Ok(value.to_string()),
+            Lit::Uint(value) => Ok(format!("{value}u")),
+            Lit::Bool(value) => Ok(value.to_string()),
+            Lit::Nil | Lit::Str(_) => Err(err(
+                self.span,
+                "WGSL emission does not support null or string literals",
             )),
         }
     }

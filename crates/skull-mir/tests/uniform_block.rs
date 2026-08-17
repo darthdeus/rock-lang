@@ -273,7 +273,7 @@ fn the_wire_and_value_walkers_agree_on_every_shape() {
         assert_eq!(
             plan.leaf_paths(),
             RepArena::default()
-                .nominal_value_leaf_paths(
+                .nominal_value_leaf_paths_required(
                     &ws,
                     bone_semantic::hir::FnBackend::Any,
                     n,

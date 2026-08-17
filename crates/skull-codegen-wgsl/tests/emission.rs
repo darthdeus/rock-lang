@@ -133,6 +133,116 @@ fn selected_sprite_basic_pipeline_is_admitted_by_wgsl() {
     .expect("WGSL validates");
 }
 
+const CONST_GLOBAL_SHADER: &str = r#"
+const WATER_SCALE_BASE: float = -0.37
+const WATER_SCALE: float = WATER_SCALE_BASE
+
+value ConstAttrs { pos: Vec2 }
+value ConstVary { position: Vec4, marker: float }
+
+@shader(vertex)
+fn const_global_vert(@attr a: ConstAttrs) -> ConstVary {
+    let scaled = a.pos.x * WATER_SCALE
+    return ConstVary {
+        position: v(scaled, a.pos.y, 0.0, 1.0),
+        marker: scaled,
+    }
+}
+
+@shader(fragment)
+fn const_global_frag(vary: ConstVary) -> Vec4 {
+    return v(vary.marker, -0.61, 0.0, 1.0)
+}
+"#;
+
+fn try_explicit_artifact_source(
+    source: &str,
+    vertex_root: &str,
+    fragment_root: &str,
+) -> Result<skull_codegen_wgsl::WgslShaderEmission, skull_parser::CompilerError> {
+    let (ws, mid) = workspace(source);
+    let glsl = skull_codegen_glsl::emit_shader_pipeline_with_dependencies(
+        &ws,
+        mid,
+        vertex_root,
+        fragment_root,
+        skull_codegen_glsl::GlslProfile::Core330,
+    )?;
+    let abi = WgslAbiPlan::explicit(
+        &glsl.interface,
+        "vertex_main",
+        "fragment_main",
+        Span::default(),
+    )?;
+    skull_codegen_wgsl::emit_explicit_shader(
+        &ws,
+        &glsl.ir,
+        &glsl.interface,
+        &abi,
+        Span::default(),
+    )
+}
+
+#[test]
+fn const_globals_emit_planner_proven_literals_and_validate() {
+    let artifact = try_explicit_artifact_source(
+        CONST_GLOBAL_SHADER,
+        "const_global_vert",
+        "const_global_frag",
+    )
+    .expect("planner-proven const globals must emit in WGSL");
+    assert!(artifact.source.contains("* -0.37"), "negative const spelling changed");
+    assert!(artifact.source.contains("-0.61"), "negative float spelling changed");
+    let module = naga::front::wgsl::parse_str(&artifact.source).expect("WGSL parses");
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    )
+    .validate(&module)
+    .expect("const-global WGSL validates");
+}
+
+#[test]
+fn mutable_and_nonconstant_globals_remain_rejected_controls() {
+    let mutable = CONST_GLOBAL_SHADER.replace(
+        "const WATER_SCALE: float = WATER_SCALE_BASE",
+        "global WATER_SCALE: float = -0.37",
+    );
+    let mutable_error = match try_explicit_artifact_source(
+        &mutable,
+        "const_global_vert",
+        "const_global_frag",
+    ) {
+        Ok(_) => panic!("mutable shader globals must remain rejected"),
+        Err(error) => error,
+    };
+    assert!(
+        mutable_error.message.contains("global read")
+            || mutable_error.message.contains("non-tier-0"),
+        "mutable global was not rejected by the planner: {}",
+        mutable_error.message
+    );
+
+    let nonconstant = CONST_GLOBAL_SHADER.replace(
+        "const WATER_SCALE_BASE: float = -0.37",
+        "const WATER_SCALE_BASE: float = nonconstant_scale()",
+    ) + "\nfn nonconstant_scale() -> float { return 0.25 }\n";
+    let nonconstant_error = match try_explicit_artifact_source(
+        &nonconstant,
+        "const_global_vert",
+        "const_global_frag",
+    ) {
+        Ok(_) => panic!("nonconstant shader initializers must remain rejected"),
+        Err(error) => error,
+    };
+    assert!(
+        nonconstant_error.message.contains("constant expression")
+            || nonconstant_error.message.contains("global"),
+        "nonconstant initializer was not rejected: {}",
+        nonconstant_error.message
+    );
+}
+
 #[test]
 fn integer_texture_id_emits_sampler_free_load_and_validates() {
     let artifact = artifact("entity_id_debug_frag", ENTITY_ID_DEBUG);
@@ -674,7 +784,16 @@ fn bool_uniforms_cross_as_u32_and_are_compared_at_every_read() {
         .filter(|member| member.kind == skull_mir::gpu_layout::WireKind::Bool32)
         .map(|member| member.name.as_str())
         .collect();
-    assert_eq!(bools, ["uLightsEnabled", "uUnlit", "uGlowEnabled", "uHasNormalTex"]);
+    assert_eq!(
+        bools,
+        [
+            "uLightsEnabled",
+            "uShadowsEnabled",
+            "uUnlit",
+            "uGlowEnabled",
+            "uHasNormalTex",
+        ]
+    );
     for name in &bools {
         assert!(
             artifact.source.contains(&format!("  {name}: u32,")),

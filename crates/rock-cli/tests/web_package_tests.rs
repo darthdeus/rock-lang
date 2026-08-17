@@ -105,6 +105,41 @@ fn single_file_embeds_every_staged_asset() {
 }
 
 #[test]
+fn directory_build_stages_external_asset_overlays() {
+    let overlay = tempfile::tempdir().expect("overlay tempdir");
+    let source = overlay.path().join("assets/overlay-web-sentinel.txt");
+    std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+    std::fs::write(&source, "from-overlay").unwrap();
+    let out_dir = tempfile::tempdir().expect("web output");
+    let overlays = std::env::join_paths([overlay.path()]).unwrap();
+
+    let out = Command::new(rock_bin())
+        .current_dir(repo_root())
+        .env("ROCK_ASSET_OVERLAYS", overlays)
+        .args([
+            "web",
+            "games/match3",
+            "--out",
+            out_dir.path().to_str().unwrap(),
+        ])
+        .output()
+        .expect("spawn rock web");
+    assert!(
+        out.status.success(),
+        "rock web failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(
+            out_dir.path().join("games/match3/assets/overlay-web-sentinel.txt")
+        )
+        .unwrap(),
+        "from-overlay"
+    );
+}
+
+#[test]
 fn the_page_opens_exactly_the_two_scripts_it_means_to() {
     // NOT an escaping test: no game in the tree emits `</script`, so this
     // fixture cannot distinguish working escaping from none at all. Escaping is

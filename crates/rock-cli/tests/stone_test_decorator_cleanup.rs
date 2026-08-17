@@ -63,6 +63,15 @@ fn make_seed(main_rock: &str) -> Vec<(String, String)> {
          stone = {{ path = \"{}\" }}\n",
         stone_path(),
     );
+    let stick = format!(
+        "{stick}\n\n[build]\nchannels = [\"dev\"]\ndefault_channel = \"dev\"\n\n\
+         [build.vars]\n\
+         GIT_SHA = {{ value = \"stone-test\" }}\n\
+         BUILD_UNIX = {{ value = \"0\" }}\n\
+         BUILD_DATE = {{ value = \"stone-test\" }}\n\
+         CHANNEL = {{ builtin = \"channel\" }}\n\
+         PLATFORM = {{ builtin = \"platform\" }}\n"
+    );
     vec![
         ("stick.toml".to_string(), stick),
         ("main.rock".to_string(), main_rock.to_string()),

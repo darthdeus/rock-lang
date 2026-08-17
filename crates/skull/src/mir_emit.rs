@@ -1369,6 +1369,11 @@ struct UnitOut {
     specs: Vec<skull_mir::bound::SpecDemand>,
     /// Module-global names read/written (fn-as-value edges; see `Chunk`).
     global_names: Vec<Ustr>,
+    /// Comptime inputs this unit's body baked in (`build_var`/`embed_string`).
+    /// Always-emitted units have no Chunk to carry these, and ALL in-tree
+    /// production comptime reads are global initializers -- dropping them here
+    /// is how the cimgui embeds went missing from the watch set.
+    comptime_reads: Vec<skull_mir::mir::ComptimeRead>,
     times: PhaseTimes,
     attribution: UnitAttribution,
 }
@@ -1392,6 +1397,7 @@ fn emit_lowered(
     }
     out.calls = skull_mir::reach::call_targets(mf);
     out.global_names = skull_mir::reach::global_ref_names(mf);
+    out.comptime_reads = mf.comptime_reads.clone();
     out.lua = lua;
     out.times.validation += tv.elapsed();
     out.times.validation_work = true;
@@ -1442,7 +1448,10 @@ fn emit_decorator_unit(
             out.times.lower_work = out.attribution.mir_instructions > 0;
             let cleanup_before = mir_live_instructions(&mf);
             let tc = Instant::now();
-            skull_transform::cleanup_with_nobox(ws, &mut mf);
+            if let Err(e) = skull_transform::cleanup_with_nobox(ws, &mut mf) {
+                out.hard_error = Some(e);
+                return out;
+            }
             out.times.cleanup = tc.elapsed();
             out.times.cleanup_work = mir_live_instructions(&mf) != cleanup_before;
             // Decorator bodies can carry lambdas too -- convert like an ordinary fn.
@@ -1482,7 +1491,17 @@ fn emit_decorator_unit(
             let regalloc = skull_codegen_lua::regalloc_time_elapsed().min(root_emit);
             out.times.regalloc += regalloc;
             out.times.regalloc_work |= regalloc > Duration::ZERO;
-            emit_pass_nested_fns(ws, cg, scx, &mut mf.nested_fns, &mut lua, &mut out.times);
+            if let Err(e) = emit_pass_nested_fns(
+                ws,
+                cg,
+                scx,
+                &mut mf.nested_fns,
+                &mut lua,
+                &mut out.times,
+            ) {
+                out.hard_error = Some(e);
+                return out;
+            }
             emit_lowered(ws, &mut out, &mf, lua, Some(Ustr::from(&deco_name)), Duration::ZERO);
             out.attribution.times = out.times;
         }
@@ -1500,18 +1519,17 @@ fn global_init_target(
     scx: &skull_mir::lower::ScalarCtx,
     cg: &CodegenCtx,
     g: &bone_semantic::hir::GlobalDef,
-) -> String {
-    match skull_mir::lower::GlobalPlan::for_declared_type(ws, scx, g.ty)
-        .ok()
-        .and_then(|plan| plan.leaf_names(g.name))
-    {
-        Some(leaves) => leaves
-            .iter()
-            .map(|l| cg.mint_synthetic(l.to_string()))
-            .collect::<Vec<_>>()
-            .join(", "),
-        None => g.name.to_string(),
-    }
+) -> Result<String, CompilerError> {
+    let plan = skull_mir::lower::GlobalPlan::for_declared_type(ws, scx, g.ty)
+        .map_err(|e| CompilerError::new_no_location(e.message))?;
+    let Some(leaves) = plan.leaf_names(g.name) else {
+        return Ok(g.name.to_string());
+    };
+    Ok(leaves
+        .iter()
+        .map(|l| cg.mint_synthetic(l.to_string()))
+        .collect::<Vec<_>>()
+        .join(", "))
 }
 
 /// Lower + emit one global's initializer fn, recording its `pending_init` line.
@@ -1562,7 +1580,10 @@ fn emit_global_unit(
             out.times.lower_work = out.attribution.mir_instructions > 0;
             let cleanup_before = mir_live_instructions(&mf);
             let tc = Instant::now();
-            skull_transform::cleanup_with_nobox(ws, &mut mf);
+            if let Err(e) = skull_transform::cleanup_with_nobox(ws, &mut mf) {
+                out.hard_error = Some(e);
+                return out;
+            }
             out.times.cleanup = tc.elapsed();
             out.times.cleanup_work = mir_live_instructions(&mf) != cleanup_before;
             // A global-initializer body can carry lambdas (e.g. a `[TileDef]`
@@ -1608,7 +1629,17 @@ fn emit_global_unit(
             let regalloc = skull_codegen_lua::regalloc_time_elapsed().min(root_emit);
             out.times.regalloc += regalloc;
             out.times.regalloc_work |= regalloc > Duration::ZERO;
-            emit_pass_nested_fns(ws, cg, scx, &mut mf.nested_fns, &mut lua, &mut out.times);
+            if let Err(e) = emit_pass_nested_fns(
+                ws,
+                cg,
+                scx,
+                &mut mf.nested_fns,
+                &mut lua,
+                &mut out.times,
+            ) {
+                out.hard_error = Some(e);
+                return out;
+            }
             emit_lowered(ws, &mut out, &mf, lua, Some(key), Duration::ZERO);
             out.attribution.times = out.times;
             // Hot-reload init line. A `const` is a compile-time constant: tweaking
@@ -1628,7 +1659,13 @@ fn emit_global_unit(
             // detect the difference: a layout drift restarts the process upstream
             // (`shape_drift_tests::marking_a_type_nobox_requests_restart`), and a
             // respawn is a cold start that never reaches this branch.
-            let target = global_init_target(ws, scx, cg, g);
+            let target = match global_init_target(ws, scx, cg, g) {
+                Ok(target) => target,
+                Err(e) => {
+                    out.hard_error = Some(e);
+                    return out;
+                }
+            };
             let line = if g.is_const {
                 format!("{target} = {init_name}()\n")
             } else {
@@ -1824,7 +1861,7 @@ fn build_inline_candidate_table(
     warm_keys_override: Option<Vec<Instance>>,
     added: Option<&BTreeSet<Instance>>,
     removed: Option<&BTreeSet<Instance>>,
-) -> std::sync::Arc<skull_transform::InlineCandidateTable> {
+) -> Result<std::sync::Arc<skull_transform::InlineCandidateTable>, CompilerError> {
     let mut census = CandidateBuildStats::default();
     build_inline_candidate_table_with_census(
         ws,
@@ -1857,7 +1894,7 @@ fn build_inline_candidate_table_with_census(
     added: Option<&BTreeSet<Instance>>,
     removed: Option<&BTreeSet<Instance>>,
     census: &mut CandidateBuildStats,
-) -> std::sync::Arc<skull_transform::InlineCandidateTable> {
+) -> Result<std::sync::Arc<skull_transform::InlineCandidateTable>, CompilerError> {
     // The old incremental route left this unset and filtered every key here.
     // Count the exact iterator population so a mutation that restores that
     // route is visible rather than looking like a timing-only regression.
@@ -1874,29 +1911,31 @@ fn build_inline_candidate_table_with_census(
             .cloned()
             .collect()
     });
-    let warms = par_map_with(
+    let warms: Vec<skull_transform::InlineCandidateWarm> = par_map_with(
         warm_keys,
         skull_transform::InlineCache::default,
         |inline_cache, inst| {
             inline_cache.warm_candidate(ws, scx, inst, concrete.plans.as_ref())
         },
-    );
+    )
+    .into_iter()
+    .collect::<Result<_, _>>()?;
     census.warmed = warms.len();
     if let Some(base) = base {
         if let (Some(added), Some(removed)) = (added, removed) {
-            return std::sync::Arc::new(skull_transform::InlineCandidateTable::from_warms_incremental(
+            return Ok(std::sync::Arc::new(skull_transform::InlineCandidateTable::from_warms_incremental(
                 std::sync::Arc::clone(base),
                 warms,
                 &added.iter().cloned().collect::<Vec<_>>(),
                 &removed.iter().cloned().collect::<Vec<_>>(),
-            ));
+            )));
         }
     }
-    std::sync::Arc::new(skull_transform::InlineCandidateTable::from_warms_with_base(
+    Ok(std::sync::Arc::new(skull_transform::InlineCandidateTable::from_warms_with_base(
         base.map(std::sync::Arc::as_ref),
         keys,
         warms,
-    ))
+    )))
 }
 
 /// **Phase 2's specialized-body population, driven by SpecDemand closure over
@@ -2047,6 +2086,10 @@ struct Chunk {
     /// `static` cells this body declares -- aggregated at chunk-pull for the
     /// hot-reload preservation preamble + `__rock_known_globals` registration.
     statics: Vec<skull_mir::mir::StaticCell>,
+    /// Comptime inputs baked into this chunk's Lua (build_var/embed_string).
+    /// `update_chunk_cache` compares them against the current inputs and treats
+    /// a stale read as a body edit -- bone's reinferred set cannot see these.
+    comptime_reads: Vec<skull_mir::mir::ComptimeRead>,
     /// The callees this body still CALLS after inlining -- the reachability edge
     /// set. Distinct from `deps`, which is an invalidation superset (it also holds
     /// everything inlined AWAY, and would keep spliced-out callees alive).
@@ -2369,6 +2412,11 @@ pub struct SkullEmitCache {
     /// By emitted body rather than by declaration, because a specialization is
     /// its own definition with its own symbol.
     emitted: FxHashSet<Instance>,
+    /// Comptime reads of the always-emitted units (global initializers,
+    /// decorator defs), which have no Chunk. Feeds the watch set
+    /// (`comptime_files`) and the overlay's stale-const re-init; refreshed by
+    /// every `assemble` (full and incremental reassembly re-lower all units).
+    unit_comptime_reads: UnitComptimeReads,
     renderer_target: RendererTarget,
     repair_stats: IncrementalRepairStats,
 }
@@ -2560,7 +2608,7 @@ fn emit_coroutine_chunk(
 ) -> Result<Chunk, CompilerError> {
     let cleanup_before = mir_live_instructions(mf);
     let tc = Instant::now();
-    skull_transform::cleanup_with_nobox(ws, mf);
+    skull_transform::cleanup_with_nobox(ws, mf)?;
     times.cleanup = tc.elapsed();
     times.cleanup_work = mir_live_instructions(mf) != cleanup_before;
     // Coroutines never inline, so a combinator chain here leaves a residual call
@@ -2589,7 +2637,7 @@ fn emit_coroutine_chunk(
             format!("cannot build concrete coroutine plan for `{}`: {}", f.name, reason.bucket()),
         )
     })?;
-    let lua = crate::coroutine_emit::emit_coroutine(ws, cg, scx.interner(), &plan, mf);
+    let lua = crate::coroutine_emit::emit_coroutine(ws, cg, scx.interner(), &plan, mf)?;
     times.emit = te.elapsed();
     times.emit_work = times.emit > Duration::ZERO;
     times.regalloc = skull_codegen_lua::regalloc_time_elapsed().min(times.emit);
@@ -2607,6 +2655,7 @@ fn emit_coroutine_chunk(
         times,
         attribution: UnitAttribution::default(),
         statics: mf.statics.clone(),
+        comptime_reads: mf.comptime_reads.clone(),
         calls: skull_mir::reach::call_targets(mf),
         specs,
     })
@@ -2762,7 +2811,7 @@ fn emit_body_chunk_with_mutation(
     let mut deps: FxHashSet<FuncRef> = spliced.into_iter().collect();
     let cleanup_before = mir_live_instructions(&mf);
     let tc = Instant::now();
-    skull_transform::cleanup_with_nobox(ws, &mut mf); // drop dead values + dead-cell stores
+    skull_transform::cleanup_with_nobox(ws, &mut mf)?; // drop dead values + dead-cell stores
     times.cleanup = tc.elapsed();
     let cleanup_after = mir_live_instructions(&mf);
     attribution.inline.cleanup_live_before += cleanup_before;
@@ -2845,11 +2894,22 @@ fn emit_body_chunk_with_mutation(
     // `static` cells fold into THIS chunk's `statics` so the hot-reload preamble +
     // overlay reset see them -- a nested-fn static is otherwise invisible to both.
     let mut statics = mf.statics.clone();
-    emit_nested_fns(ws, cg, scx, &mut mf.nested_fns, &mut deps, &mut statics, &mut lua, &mut times);
+    emit_nested_fns(ws, cg, scx, &mut mf.nested_fns, &mut deps, &mut statics, &mut lua, &mut times)?;
     attribution.mir_instructions = mf.insts.len();
     attribution.times = times;
     let calls = skull_mir::reach::call_targets(&mf);
-    Ok(Chunk { lua, deps, direct_globals, direct_calls, times, attribution, statics, calls, specs })
+    Ok(Chunk {
+        lua,
+        deps,
+        direct_globals,
+        direct_calls,
+        times,
+        attribution,
+        statics,
+        comptime_reads: mf.comptime_reads.clone(),
+        calls,
+        specs,
+    })
 }
 
 /// Emit each hoisted nested `fn` (and its own nested fns, depth-first) as a
@@ -2866,11 +2926,11 @@ fn emit_nested_fns(
     statics: &mut Vec<skull_mir::mir::StaticCell>,
     out: &mut String,
     times: &mut PhaseTimes,
-) {
+) -> Result<(), CompilerError> {
     for nf in nested.iter_mut() {
         let cleanup_before = mir_live_instructions(nf);
         let tc = Instant::now();
-        skull_transform::cleanup_with_nobox(ws, nf);
+        skull_transform::cleanup_with_nobox(ws, nf)?;
         times.cleanup += tc.elapsed();
         times.cleanup_work |= mir_live_instructions(nf) != cleanup_before;
         let counted_before = nf.blocks.len();
@@ -2890,8 +2950,9 @@ fn emit_nested_fns(
         times.regalloc += regalloc;
         times.regalloc_work |= regalloc > Duration::ZERO;
         let mut children = std::mem::take(&mut nf.nested_fns);
-        emit_nested_fns(ws, cg, scx, &mut children, deps, statics, out, times);
+        emit_nested_fns(ws, cg, scx, &mut children, deps, statics, out, times)?;
     }
+    Ok(())
 }
 
 /// Emit the flat list of pass-produced hoisted lambda bodies (`convert_closures`
@@ -2916,11 +2977,11 @@ fn emit_pass_nested_fns(
     nested: &mut [MirFunc],
     out: &mut String,
     times: &mut PhaseTimes,
-) {
+) -> Result<(), CompilerError> {
     for nf in nested.iter_mut() {
         let cleanup_before = mir_live_instructions(nf);
         let tc = Instant::now();
-        skull_transform::cleanup_with_nobox(ws, nf);
+        skull_transform::cleanup_with_nobox(ws, nf)?;
         times.cleanup += tc.elapsed();
         times.cleanup_work |= mir_live_instructions(nf) != cleanup_before;
         skull_codegen_lua::regalloc_time_reset();
@@ -2933,6 +2994,7 @@ fn emit_pass_nested_fns(
         times.regalloc += regalloc;
         times.regalloc_work |= regalloc > Duration::ZERO;
     }
+    Ok(())
 }
 
 /// Whether a function body is cached as a [`Chunk`] (ordinary or coroutine) vs
@@ -3150,7 +3212,7 @@ fn emit_spec_chunk(
     let mut statics = mf.statics.clone();
     let mut nested = std::mem::take(&mut mf.nested_fns);
     collect_nested_statics(&nested, &mut statics);
-    emit_pass_nested_fns(ws, cg, scx, &mut nested, &mut lua, &mut times);
+        emit_pass_nested_fns(ws, cg, scx, &mut nested, &mut lua, &mut times)?;
     collect_callee_frefs(&mf, &mut deps);
     attribution.mir_instructions = mf.insts.len();
     attribution.times = times;
@@ -3162,6 +3224,7 @@ fn emit_spec_chunk(
         times,
         attribution,
         statics,
+        comptime_reads: mf.comptime_reads.clone(),
         calls: skull_mir::reach::call_targets(&mf),
         specs,
     })
@@ -3280,7 +3343,7 @@ fn prepare_instance_body_with_attribution(
     work.add_allocations(before, (mf.insts.len(), mf.blocks.len(), mf.cells.len()));
     let cleanup_before = mir_live_instructions(mf);
     let tc = Instant::now();
-    skull_transform::cleanup_with_nobox(ws, mf);
+    skull_transform::cleanup_with_nobox(ws, mf)?;
     times.cleanup = tc.elapsed();
     let cleanup_after = mir_live_instructions(mf);
     work.cleanup_live_before += cleanup_before;
@@ -3372,7 +3435,7 @@ fn inline_hoisted_bodies(
         deps.extend(spliced);
         let cleanup_before = mir_live_instructions(nf);
         let tc = Instant::now();
-        skull_transform::cleanup_with_nobox(ws, nf);
+        skull_transform::cleanup_with_nobox(ws, nf).map_err(|e| e.message)?;
         times.cleanup += tc.elapsed();
         let cleanup_after = mir_live_instructions(nf);
         work.cleanup_live_before += cleanup_before;
@@ -4230,13 +4293,26 @@ fn shader_registration_lines(
     })
 }
 
+/// Comptime reads made by ALWAYS-EMITTED units, which have no Chunk to carry
+/// them: per-global (keyed so the overlay can re-init exactly the stale one)
+/// plus decorator definitions (files only -- decorators re-apply on full
+/// rebuild, so the watch set is all they need).
+#[derive(Default)]
+pub struct UnitComptimeReads {
+    globals: FxHashMap<
+        (ModuleId, Idx<bone_semantic::hir::GlobalDef>),
+        Vec<skull_mir::mir::ComptimeRead>,
+    >,
+    decorators: Vec<skull_mir::mir::ComptimeRead>,
+}
+
 fn assemble(
     ws: &Workspace,
     cg: &CodegenCtx,
     scx: &skull_mir::lower::ScalarCtx,
     cache: &SkullEmitCache,
     built_specs: &mut Vec<(Instance, Chunk)>,
-) -> Result<(MirEmit, FxHashSet<Instance>), CompilerError> {
+) -> Result<(MirEmit, FxHashSet<Instance>, UnitComptimeReads), CompilerError> {
     // Per-stage lower/cleanup/emit/regalloc times: chunk times (captured during the
     // parallel `emit_full`/`emit_incremental` chunk build) summed in as chunks are
     // pulled, plus the decorator/global units re-emitted here. Under parallel emit
@@ -4309,13 +4385,14 @@ fn assemble(
     let ts = Instant::now();
     let mut out = String::from(crate::runtime_prelude());
     out.push_str(&crate::enum_cdata_defs(ws));
-    let (vdefs, value_emitted, value_gc) = crate::value_struct_defs(ws)?;
+    let rep_arena = scx.rep_arena();
+    let (vdefs, value_emitted, value_gc) = crate::value_struct_defs(ws, &rep_arena)?;
     out.push_str(&vdefs);
-    out.push_str(&crate::value_struct_gc_defs(ws, &value_gc));
+    out.push_str(&crate::value_struct_gc_defs(ws, &value_gc, &rep_arena)?);
     out.push_str(&crate::value_struct_metatypes(ws, &value_emitted));
     out.push_str(&crate::enum_cdata_metatypes(ws));
     out.push_str(&crate::c_struct_inspect_defs(ws, &value_emitted));
-    out.push_str(&crate::type_table_defs(ws, &value_gc));
+    out.push_str(&crate::type_table_defs(ws, &value_gc)?);
     out.push_str(&crate::enum_runtime_defs(ws));
     t_scaffold += ts.elapsed();
 
@@ -4329,6 +4406,10 @@ fn assemble(
     });
     rejections.extend(unit_errors(&deco_results));
     needed_specs.extend(deco_results.iter().flat_map(|u| u.specs.iter().cloned()));
+    let mut unit_reads = UnitComptimeReads::default();
+    for u in &deco_results {
+        unit_reads.decorators.extend(u.comptime_reads.iter().cloned());
+    }
     let mut always_emitted_calls: Vec<FuncRef> = Vec::new();
     let mut always_emitted_names: Vec<Ustr> = Vec::new();
     merge_units(deco_results, &mut out, &mut skipped, &mut direct_globals, &mut direct_calls, &mut Vec::new(), &mut always_emitted_calls, &mut always_emitted_names, &mut attribution, &mut times);
@@ -4353,9 +4434,17 @@ fn assemble(
             format!("[{:?}] = {:?},", g.name.as_str(), ws.render(None, g.ty))
         })
         .collect();
+    let global_keys = global_items.clone();
     let global_results = par_map(global_items, |(mid, gid)| {
         emit_global_unit(ws, scx, cg, &cache.concrete, mid, gid)
     });
+    // par_map preserves input order, so keys and results zip positionally --
+    // the same pairing merge_units relies on for output order.
+    for (key, u) in global_keys.iter().zip(global_results.iter()) {
+        if !u.comptime_reads.is_empty() {
+            unit_reads.globals.insert(*key, u.comptime_reads.clone());
+        }
+    }
     rejections.extend(unit_errors(&global_results));
     needed_specs.extend(global_results.iter().flat_map(|u| u.specs.iter().cloned()));
     let mut globals_lua = String::new();
@@ -4614,19 +4703,18 @@ fn assemble(
     // through its leaves, so a leaf dep has to resolve back to the group that
     // owns it or the dependent initializer sorts before it. Built from the
     // globals that actually mint leaves -- never a name-shape guess.
-    let leaf_owner: FxHashMap<Ustr, Ustr> = ws
-        .modules
-        .iter()
-        .flat_map(|m| m.globals.iter())
-        .flat_map(|(_, g)| {
-            skull_mir::lower::GlobalPlan::for_declared_type(ws, &cache.scx, g.ty)
-                .ok()
-                .and_then(|plan| plan.leaf_names(g.name))
-                .into_iter()
-                .flatten()
-                .map(move |l| (l, g.name))
-        })
-        .collect();
+    let mut leaf_owner: FxHashMap<Ustr, Ustr> = FxHashMap::default();
+    for module in ws.modules.iter() {
+        for (_, g) in module.globals.iter() {
+            let plan = skull_mir::lower::GlobalPlan::for_declared_type(ws, &cache.scx, g.ty)
+                .map_err(|e| CompilerError::new_no_location(e.message))?;
+            if let Some(leaves) = plan.leaf_names(g.name) {
+                for leaf in leaves {
+                    leaf_owner.insert(leaf, g.name);
+                }
+            }
+        }
+    }
     let inits: Vec<GlobalInit> = pending_inits
         .into_iter()
         .map(|(name, init_name, line)| GlobalInit {
@@ -4765,6 +4853,7 @@ fn assemble(
             concrete_stats: crate::concrete_body::ConcreteBuildStats::default(),
         },
         emitted_bodies,
+        unit_reads,
     ))
 }
 
@@ -4898,6 +4987,9 @@ fn emit_full_in_with_mutation(
         ));
     }
     if let Some(err) = skull_mir::lower::expansion_rejection(ws, user_mid) {
+        return Err(err);
+    }
+    if let Some(err) = skull_mir::lower::comptime_input_rejection(ws, user_mid) {
         return Err(err);
     }
     if let Some(err) = skull_mir::intrinsics::intrinsic_rejection(ws, user_mid) {
@@ -5296,7 +5388,7 @@ fn emit_full_in_with_mutation(
         None,
         None,
         None,
-    );
+    )?;
     setup_phases.push(("setup: inline candidate table", t_setup.elapsed()));
     let chunks = par_map_with(
         fn_items,
@@ -5353,11 +5445,12 @@ fn emit_full_in_with_mutation(
         shader_registrations,
         shader_view,
         emitted: FxHashSet::default(),
+        unit_comptime_reads: UnitComptimeReads::default(),
         renderer_target,
         repair_stats: IncrementalRepairStats::default(),
     };
     let mut built_specs: Vec<(Instance, Chunk)> = Vec::new();
-    let (mut emit, emitted) = assemble(ws, &cache.cg, &cache.scx, &cache, &mut built_specs)?;
+    let (mut emit, emitted, unit_reads) = assemble(ws, &cache.cg, &cache.scx, &cache, &mut built_specs)?;
     emit.concrete_stats = concrete_stats;
     emit.setup_lanes = setup_lanes;
     let mut phases = setup_phases;
@@ -5371,6 +5464,7 @@ fn emit_full_in_with_mutation(
     };
     let mut cache = cache;
     cache.emitted = emitted;
+    cache.unit_comptime_reads = unit_reads;
     cache.absorb_spec_chunks(built_specs);
     emit.graph_census = cache.graph.run_stats;
     Ok((emit, cache))
@@ -5393,6 +5487,32 @@ fn emit_full_in_with_mutation(
 /// every shifted fn is in `reinferred` and re-emitted here). Shared by
 /// `emit_incremental` (full reassembly) and `emit_overlay` (the incremental.lua
 /// split).
+/// Whether any of `reads` no longer matches the CURRENT inputs. File ids are
+/// the ABSOLUTE path the resolver landed on; an unreadable input hashes as
+/// None != recorded, forcing a re-lower whose spanned rejection reports the
+/// real cause. `file_hashes` memoizes reads within one staleness sweep.
+fn comptime_reads_stale(
+    ws: &Workspace,
+    reads: &[skull_mir::mir::ComptimeRead],
+    file_hashes: &mut FxHashMap<Ustr, Option<u64>>,
+) -> bool {
+    use skull_mir::mir::{comptime_value_hash, ComptimeInputId};
+    reads.iter().any(|read| {
+        let current = match &read.input {
+            ComptimeInputId::Var(name) => ws
+                .comptime_inputs
+                .vars
+                .get(name)
+                .map(|v| comptime_value_hash(&v.value)),
+            ComptimeInputId::File(path) => *file_hashes.entry(*path).or_insert_with(|| {
+                let text = std::fs::read_to_string(path.as_str()).ok()?;
+                Some(comptime_value_hash(&text))
+            }),
+        };
+        current != Some(read.value_hash)
+    })
+}
+
 impl SkullEmitCache {
     pub fn repair_stats(&self) -> IncrementalRepairStats {
         self.repair_stats
@@ -5400,6 +5520,32 @@ impl SkullEmitCache {
 
     fn candidate_index_by_func(&self) -> &FxHashMap<FuncRef, FxHashSet<Instance>> {
         self.concrete.candidate_keys_by_func()
+    }
+
+    /// The ABSOLUTE path of every `embed_string` input baked into the program
+    /// -- function chunks AND the always-emitted units (global initializers,
+    /// decorator defs) -- the files a watcher must treat as sources
+    /// (docs/comptime-plan.md). The unit half is load-bearing: all in-tree
+    /// production embeds are global initializers (the cimgui prelude).
+    pub fn comptime_files(&self) -> Vec<Ustr> {
+        let mut out: FxHashSet<Ustr> = FxHashSet::default();
+        let chunk_reads = self
+            .chunks
+            .values()
+            .filter_map(|chunk| chunk.as_ref().ok())
+            .flat_map(|chunk| chunk.comptime_reads.iter());
+        let unit_reads = self
+            .unit_comptime_reads
+            .globals
+            .values()
+            .flatten()
+            .chain(self.unit_comptime_reads.decorators.iter());
+        for read in chunk_reads.chain(unit_reads) {
+            if let skull_mir::mir::ComptimeInputId::File(path) = read.input {
+                out.insert(path);
+            }
+        }
+        out.into_iter().collect()
     }
 
     /// The authoritative instance graph this cache emits against. Always
@@ -5843,11 +5989,11 @@ fn update_chunk_cache(
     ws: &Workspace,
     reinferred: &[(ModuleId, BodyOwner)],
     edits: &[crate::instance_graph::SpanEdit],
-) -> (
+) -> Result<(
     FxHashSet<Instance>,
     crate::instance_graph::UpdateStats,
     Vec<CompilerError>,
-) {
+), CompilerError> {
     let cache = self;
     let shader_delta_requests = cache.repair_stats.shader_delta_requests;
     let shader_roots_examined = cache.repair_stats.shader_roots_examined;
@@ -6056,6 +6202,21 @@ fn update_chunk_cache(
     // re-emit even if their own body didn't change.
     changed.extend(flipped_frefs.iter().copied());
 
+    // A chunk whose baked comptime input (build_var value / embedded file
+    // content) no longer matches the CURRENT inputs is a body edit bone cannot
+    // see -- reinferred hashes only source text (docs/comptime-plan.md). Seed
+    // the decl so the chunk and every dependent (a caller that inlined the
+    // value) re-emits fresh.
+    {
+        let mut file_hashes: FxHashMap<Ustr, Option<u64>> = FxHashMap::default();
+        for (body, chunk) in cache.chunks.iter() {
+            let Ok(chunk) = chunk else { continue };
+            if comptime_reads_stale(ws, &chunk.comptime_reads, &mut file_hashes) {
+                changed.insert(body.func);
+            }
+        }
+    }
+
     let mut invalidated_candidate_frefs = changed.clone();
     invalidated_candidate_frefs.extend(update.added.iter().map(|instance| instance.func));
     invalidated_candidate_frefs.extend(update.removed.iter().map(|instance| instance.func));
@@ -6094,7 +6255,7 @@ fn update_chunk_cache(
         Some(&concrete_update.candidate_keys_added),
         Some(&concrete_update.candidate_keys_removed),
         &mut candidate_census,
-    );
+    )?;
     cache.inline_cache.replace_candidate_table(candidate_table);
     cache.repair_stats.candidate_entries_requested = candidate_entries_requested;
     cache.repair_stats.candidate_entries_invalidated = candidate_entries_invalidated;
@@ -6103,7 +6264,6 @@ fn update_chunk_cache(
         .saturating_sub(candidate_census.warmed);
     cache.repair_stats.broad_candidate_scans = candidate_census.keys_examined;
     cache.repair_stats.candidate_update_ns = t_candidate.elapsed().as_nanos() as u64;
-
     // **A changed declaration maps to its LIVE INSTANCES through the graph**,
     // not to one declaration-shaped key. Editing a generic `co fn` with two
     // instantiations must re-emit both bodies, and editing one specialization's
@@ -6197,7 +6357,7 @@ fn update_chunk_cache(
             affected.len(),
         );
     }
-    (affected, update, added_errors)
+    Ok((affected, update, added_errors))
 }
 }
 
@@ -6211,7 +6371,7 @@ pub fn emit_incremental(
     // `update_chunk_cache`'s re-walk must see this edit's set, not the last
     // build's.
     let shader_changed = cache.update_shader_registrations(ws, reinferred)?;
-    let (_affected, update, added_errors) = cache.update_chunk_cache(ws, reinferred, &[]);
+    let (_affected, update, added_errors) = cache.update_chunk_cache(ws, reinferred, &[])?;
     if let Some(err) = SkullEmitCache::combine_errors(added_errors) {
         return Err(err);
     }
@@ -6225,11 +6385,12 @@ pub fn emit_incremental(
     // The two-file split (`emit_overlay`) avoids it entirely on a body edit.
     let t_asm = Instant::now();
     let mut built_specs: Vec<(Instance, Chunk)> = Vec::new();
-    let (mut emit, emitted) = assemble(ws, &cache.cg, &cache.scx, cache, &mut built_specs)?;
+    let (mut emit, emitted, unit_reads) = assemble(ws, &cache.cg, &cache.scx, cache, &mut built_specs)?;
     if concrete_stats_requested() {
         emit.concrete_stats = cache.concrete.snapshot_build_stats();
     }
     cache.emitted = emitted;
+    cache.unit_comptime_reads = unit_reads;
     cache.absorb_spec_chunks(built_specs);
     let reassemble = t_asm.elapsed();
     emit.phases.push(("incr: re-emit affected bodies", reemit));
@@ -6248,7 +6409,7 @@ fn assemble_overlay(
     ws: &Workspace,
     cache: &SkullEmitCache,
     shader_changed: bool,
-) -> MirEmit {
+) -> Result<MirEmit, CompilerError> {
     let mut out = String::from("-- skull incremental overlay (loaded after main.lua)\n");
     let mut skipped: Vec<(String, String)> = Vec::new();
 
@@ -6379,18 +6540,29 @@ fn assemble_overlay(
                     a.mid,
                     a.gid,
                 );
+                if let Some(err) = unit.hard_error {
+                    return Err(err);
+                }
                 out.push_str(&unit.lua); // the (new) ginit fn def
                 if let Some(s) = unit.skipped {
                     skipped.push(s);
                 }
-                unit.pending_init.map(|(_, _, l)| l).unwrap_or_default()
+                unit.pending_init
+                    .map(|(_, _, line)| line)
+                    .ok_or_else(|| {
+                        CompilerError::new_no_location(format!(
+                            "changed global `{}` produced no initializer plan",
+                            a.name
+                        ))
+                    })?
             } else {
                 // Unchanged dependent: its ginit is already in main.lua; re-run only
                 // the line so it recomputes from the upstream's new value.
                 let g = &ws.module(a.mid).globals[a.gid];
+                let target = global_init_target(ws, &cache.scx, &cache.cg, g)?;
                 format!(
                     "{} = {}()\n",
-                    global_init_target(ws, &cache.scx, &cache.cg, g),
+                    target,
                     crate::global_init_fn_name(a.name.as_str())
                 )
             };
@@ -6428,7 +6600,7 @@ fn assemble_overlay(
         out.push_str(&cache.shader_registrations.lua);
     }
 
-    MirEmit {
+    Ok(MirEmit {
         lua: out,
         skipped,
         phases: Vec::new(),
@@ -6438,7 +6610,7 @@ fn assemble_overlay(
         setup_lanes: SetupLaneAttribution::default(),
         graph_census: crate::instance_graph::RunStats::default(),
         concrete_stats: crate::concrete_body::ConcreteBuildStats::default(),
-    }
+    })
 }
 
 /// `__rock_rebind_system("<name>", <func>)` for each CHANGED decorated function
@@ -6495,7 +6667,7 @@ pub fn emit_overlay_with_span_edits(
     // Shader registrations FIRST -- their dependencies are graph/view roots, so
     // `update_chunk_cache`'s re-walk must see this edit's set.
     let shader_changed = cache.update_shader_registrations(ws, reinferred)?;
-    let (affected, update, added_errors) = cache.update_chunk_cache(ws, reinferred, edits);
+    let (affected, update, added_errors) = cache.update_chunk_cache(ws, reinferred, edits)?;
     if let Some(err) = SkullEmitCache::combine_errors(added_errors) {
         return Err(err);
     }
@@ -6514,9 +6686,29 @@ pub fn emit_overlay_with_span_edits(
             }
         }
     }
+    // A comptime input read by a GLOBAL initializer can go stale with no
+    // reinferred body at all (bone hashes only source text). Route a stale
+    // const through the same changed-consts machinery -- its ginit re-lowers
+    // fresh, re-reading the file / new var value. A stale MUTABLE global is
+    // deliberately left alone: its guarded init preserves the live value on
+    // reload, exactly as a source edit to its initializer does.
+    {
+        let mut file_hashes: FxHashMap<Ustr, Option<u64>> = FxHashMap::default();
+        let stale_consts: Vec<(ModuleId, Idx<bone_semantic::hir::GlobalDef>)> = cache
+            .unit_comptime_reads
+            .globals
+            .iter()
+            .filter(|((mid, gid), reads)| {
+                ws.module(*mid).globals[*gid].is_const
+                    && comptime_reads_stale(ws, reads, &mut file_hashes)
+            })
+            .map(|(key, _)| *key)
+            .collect();
+        cache.changed_consts_since_full.extend(stale_consts);
+    }
     let t_relower = t2.elapsed();
     let t3 = Instant::now();
-    let mut emit = assemble_overlay(ws, cache, shader_changed);
+    let mut emit = assemble_overlay(ws, cache, shader_changed)?;
     if concrete_stats_requested() {
         emit.concrete_stats = cache.concrete.snapshot_build_stats();
     }
@@ -6846,6 +7038,42 @@ fn main() {
                 .expect("parse"),
         ];
         bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic")
+    }
+
+    #[test]
+    fn global_init_target_rejects_an_unresolved_storage_plan() {
+        let mut modules = vec![
+            skull_parser::parse_module_clean(
+                "global G: int = 0\nfn main() {}",
+                Ustr::from("<global-plan-test>"),
+            )
+            .expect("parse"),
+        ];
+        let mut ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic");
+        let mid = ws
+            .modules
+            .iter()
+            .find(|module| module.id != ModuleId::builtin())
+            .expect("test module")
+            .id;
+        let gid = ws
+            .module(mid)
+            .globals
+            .iter()
+            .find(|(_, global)| global.name == Ustr::from("G"))
+            .map(|(gid, _)| gid)
+            .expect("global");
+        let ty = ws.module(mid).globals[gid].ty;
+        let bone_semantic::prelude::TyId::Static(_, idx) = ty else {
+            panic!("fixture global must have a static type id")
+        };
+        ws.module_mut(mid).globals[gid].ty = bone_semantic::prelude::TyId::Local(idx);
+        let scx = skull_mir::lower::ScalarCtx::new(&ws);
+        let cg = CodegenCtx::new(&ws);
+        let global = &ws.module(mid).globals[gid];
+        let err = global_init_target(&ws, &scx, &cg, global)
+            .expect_err("a missing global representation plan must reject");
+        assert!(err.message.contains("global type cannot be planned"), "{err}");
     }
 
     fn bounded_workspace() -> Workspace {

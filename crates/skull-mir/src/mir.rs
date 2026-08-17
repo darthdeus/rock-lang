@@ -25,10 +25,19 @@
 
 use bone_semantic::hir::TyId;
 use comfy_la_arena::{Arena, Idx};
+use std::sync::Arc;
 use std::time::Instant;
 use ustr::Ustr;
 
 pub const VEC_COLUMN_HEADER_FIELD: &str = "@vec";
+
+/// Physical constructor spelling selected by lowering.  This is part of the
+/// plan identity; backends must not infer it from field names or operands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ValueCtorForm {
+    Declared,
+    Leaves,
+}
 pub const VEC_COLUMN_REPR: &str = "columns";
 /// The PRESENCE column of a `[E?]` whose `E` is `nobox`: one bool per slot,
 /// leading the leaf columns exactly as the presence leaf leads a nullable
@@ -51,6 +60,26 @@ pub fn column_elem_plans(mf: &MirFunc, out: &mut std::collections::BTreeMap<Ustr
     }
     for nf in &mf.nested_fns {
         column_elem_plans(nf, out);
+    }
+}
+
+/// The same census with the build-owned representation identity retained for
+/// consumers that emit or inspect the physical columns.
+pub fn column_elem_rep_plans(
+    mf: &MirFunc,
+    out: &mut std::collections::BTreeMap<Ustr, (bool, crate::lower::RepId)>,
+) {
+    for inst in mf.insts.values() {
+        match inst {
+            Inst::MakeVecColumns { elem, nobox, representation, .. }
+            | Inst::MakeVecColumnHeader { elem, nobox, representation, .. } => {
+                out.insert(*elem, (*nobox, *representation));
+            }
+            _ => {}
+        }
+    }
+    for nf in &mf.nested_fns {
+        column_elem_rep_plans(nf, out);
     }
 }
 
@@ -132,13 +161,21 @@ pub enum ContainerKind {
 /// because it decides the column SET (a nullable element leads with
 /// [`VEC_COLUMN_PRESENCE_FIELD`]) — reading it back off an expression's type at
 /// a use site would be the phantom-presence bug.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug)]
 pub struct ColumnElem {
     pub name: Ustr,
     pub nullable: bool,
     representation: crate::lower::RepId,
     nobox: bool,
 }
+
+impl PartialEq for ColumnElem {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name && self.nullable == other.nullable && self.nobox == other.nobox
+    }
+}
+
+impl Eq for ColumnElem {}
 
 impl ColumnElem {
     pub(crate) fn planned(
@@ -403,6 +440,7 @@ pub enum Inst {
     /// length `len`, in the element's declaration order.
     MakeVecColumns {
         elem: Ustr,
+        representation: crate::lower::RepId,
         nobox: bool,
         columns: Vec<(Ustr, Vec<Idx<Inst>>)>,
         len: usize,
@@ -413,6 +451,7 @@ pub enum Inst {
     /// header shape.
     MakeVecColumnHeader {
         elem: Ustr,
+        representation: crate::lower::RepId,
         nobox: bool,
         capacity: Idx<Inst>,
     },
@@ -430,6 +469,11 @@ pub enum Inst {
     /// type lookup.
     MakeValueStruct {
         name: Ustr,
+        /// The build-owned representation that selected this constructor's
+        /// physical form. Backends must realize this plan, never replan from
+        /// `name` or the operand spelling.
+        representation: crate::lower::RepId,
+        form: ValueCtorForm,
         /// `(declared field name, value)` in declared field order (the `<name>_ct`
         /// ctor is positional, so order is load-bearing; the names let MIR passes
         /// forward a `Field` read to its operand -- SROA). Nested value-struct
@@ -455,6 +499,10 @@ pub enum Inst {
     /// the `nobox` verifier ignores this variant.
     MaterializeValueStruct {
         name: Ustr,
+        /// The same physical plan as the implicit constructor, retained even
+        /// though this node records an authorized materialization boundary.
+        representation: crate::lower::RepId,
+        form: ValueCtorForm,
         fields: Vec<(Ustr, Idx<Inst>)>,
     },
     /// An enum-variant value as a tagged table `{ __variant, __ty, <payload> }`.
@@ -503,7 +551,13 @@ pub enum Inst {
     /// elements of C type `ctype` (an FFI-clean value struct's cdef name, or
     /// `int`/`float`). Emitted only by the `native_buffer_alloc<T>` intrinsic,
     /// which resolves `ctype` from the concrete element type at the call site.
-    FfiNewArray { ctype: Ustr, count: Idx<Inst> },
+    FfiNewArray {
+        ctype: Ustr,
+        count: Idx<Inst>,
+        /// Aggregate element allocations carry the plan used to validate
+        /// their C layout. Primitive arrays have no nominal plan.
+        representation: Option<crate::lower::RepId>,
+    },
 
     /// `ffi.cast("<cty>*", <ptr>)` -- a typed LEAF VIEW over a NativeBuffer's
     /// storage, one per distinct primitive C type among the element's leaves.
@@ -737,12 +791,42 @@ pub struct EmitIds {
     pub next_blocks: u32,
 }
 
+/// One comptime input a lowered body baked in (docs/comptime-plan.md tier 1):
+/// which input, and the hash of the value that went into the emitted code.
+/// bone hashes only source text, so incremental invalidation must compare
+/// these against the CURRENT inputs itself -- a body with a stale read is a
+/// body edit.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ComptimeRead {
+    pub input: ComptimeInputId,
+    pub value_hash: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum ComptimeInputId {
+    /// `build_var("NAME")` -- the declared var's name.
+    Var(Ustr),
+    /// `embed_string("path")` -- the path literal, project-root-relative.
+    File(Ustr),
+}
+
+/// The one hash both the recorder and the staleness check use, so they cannot
+/// drift (std `DefaultHasher`, the `StaticCell.init_hash` precedent).
+pub fn comptime_value_hash(value: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    value.hash(&mut h);
+    h.finish()
+}
 /// A function — a CFG over cells and values. `params` are the entry block's
 /// parameter *cells* in order (params are variables, hence cells); they
 /// materialize as the Lua function parameters.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MirFunc {
     pub name: Ustr,
+    /// The build-owned representation catalog used by every plan-tagged value
+    /// constructor in this function and its nested functions.
+    pub rep_arena: Option<Arc<crate::lower::RepArena>>,
     pub params: Vec<Idx<Cell>>,
     /// Opt-in timing for arena growth attribution.
     pub lower_timing_enabled: bool,
@@ -759,6 +843,12 @@ pub struct MirFunc {
     pub global_plan: Option<crate::lower::GlobalPlan>,
     /// `static` cells declared in this fn's body (in source order).
     pub statics: Vec<StaticCell>,
+    /// Comptime inputs this body's emitted code baked in (build_var /
+    /// embed_string expansions), for incremental staleness detection.
+    pub comptime_reads: Vec<ComptimeRead>,
+    /// Nominal structs whose declared logical shape is observed by runtime
+    /// reflection even when no Rock constructor realizes the value.
+    pub struct_registry_roots: std::collections::BTreeSet<Ustr>,
     pub insts: Arena<Inst>,
     pub cells: Arena<Cell>,
     pub blocks: Arena<Block>,
@@ -910,6 +1000,7 @@ impl MirFunc {
         let entry = blocks.alloc(Block::new());
         Self {
             name,
+            rep_arena: None,
             params: Vec::new(),
             lower_timing_enabled: crate::lower::lower_attribution_timing_enabled(),
             lower_attribution: Default::default(),
@@ -917,6 +1008,8 @@ impl MirFunc {
             abi_representation: None,
             global_plan: None,
             statics: Vec::new(),
+            comptime_reads: Vec::new(),
+            struct_registry_roots: Default::default(),
             insts: Arena::default(),
             cells: Arena::default(),
             blocks,

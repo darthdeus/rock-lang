@@ -391,8 +391,14 @@ pub fn convert_closures_framed(
             lower_attribution: mf.lower_attribution.clone(),
             abi_plan: None,
             abi_representation: mf.abi_representation.clone(),
+            rep_arena: mf.rep_arena.clone(),
             global_plan: mf.global_plan.clone(),
             statics: Vec::new(),
+            // Reads were recorded while lowering the whole pre-split fn, so the
+            // parent's set covers every lambda region; carrying it is at worst
+            // an over-invalidation within this fn's own hoists.
+            comptime_reads: mf.comptime_reads.clone(),
+            struct_registry_roots: mf.struct_registry_roots.clone(),
             insts: mf.insts.clone(),
             cells: mf.cells.clone(),
             blocks: mf.blocks.clone(),

@@ -27,7 +27,7 @@ fn emit_closure(ws: &bone_semantic::inference::Workspace, root: &str) -> Result<
         .map_err(|e| e.message)
 }
 
-// Emit `root`, run it under node with the string + inspect runtimes, return the
+// Emit `root`, run it under node with the string + equality + inspect runtimes, return the
 // single string `root()` produces (via JSON so newlines survive).
 fn eval_str(src: &str, root: &str) -> String {
     let ws = ws_with(src);
@@ -37,9 +37,10 @@ fn eval_str(src: &str, root: &str) -> String {
         return String::new();
     }
     let program = format!(
-        "{}{}{}\n{js}\nprocess.stdout.write(\"<<<\" + {root}() + \">>>\");",
+        "{}{}{}{}\n{js}\nprocess.stdout.write(\"<<<\" + {root}() + \">>>\");",
         skull_codegen_js::JS_VEC_CHECK_SHIMS,
         skull_codegen_js::JS_STRING_RUNTIME,
+        skull_codegen_js::JS_STRUCTURAL_EQ,
         skull_codegen_js::JS_INSPECT_RUNTIME,
     );
     let out = crate::common::node().arg("-e").arg(&program).output().expect("spawn node");
@@ -99,6 +100,45 @@ fn value_struct_nested_colon_render() {
                value Nested { a: IV, b: int }\n\
                fn root() -> string { inspect(Nested { a: IV { x: 1, y: 2 }, b: 9 }) }";
     assert_eq!(eval_str(src, "root"), "Nested { a: IV { x: 1, y: 2 }, b: 9 }");
+}
+
+// An embedded child is physically inline. Inspect must use the shared field
+// plan to rebuild the logical child before the generic object renderer walks it.
+#[test]
+fn inspect_rebuilds_an_embed_field_from_inline_leaves() {
+    let src = "struct Pt { x: int, y: int }\n\
+               struct Holder { embed p: Pt, tag: int }\n\
+               fn root() -> string { inspect(Holder { p: Pt { x: 1, y: 2 }, tag: 3 }) }";
+    assert_eq!(eval_str(src, "root"), "Holder { p = Pt { x = 1, y = 2 }, tag = 3 }");
+}
+
+#[test]
+fn direct_child_inspect_is_independent_of_an_unrelated_constructor() {
+    const PREFIX: &str = r#"
+value Mask { r: bool, g: bool? }
+struct Draw { mask: Mask }
+struct Traced { draw: Draw }
+
+inline(js) fn foreign_draw() -> Draw = """
+return { __ty: "Draw", mask: { __ty: "Mask", r: true } };
+"""
+"#;
+    let without_constructor = format!(
+        "{PREFIX}\nfn root() -> string {{ inspect(Traced {{ draw: foreign_draw() }}) }}"
+    );
+    let with_constructor = format!(
+        "{PREFIX}\n\
+         fn local_draw() -> Draw {{ Draw {{ mask: Mask {{ r: false, g: null }} }} }}\n\
+         fn root() -> string {{ let _ = local_draw(); inspect(Traced {{ draw: foreign_draw() }}) }}"
+    );
+    let direct_root = format!("{PREFIX}\nfn root() -> string {{ inspect(foreign_draw()) }}");
+    let expected = "Traced { draw = Draw { mask = Mask { g = nil, r = true } } }";
+    assert_eq!(eval_str(&without_constructor, "root"), expected);
+    assert_eq!(eval_str(&with_constructor, "root"), expected);
+    assert_eq!(
+        eval_str(&direct_root, "root"),
+        "Draw { mask = Mask { g = nil, r = true } }"
+    );
 }
 
 // An ENUM argument rejects. A payload-bearing enum scalarizes to the

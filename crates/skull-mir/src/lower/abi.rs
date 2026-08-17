@@ -28,7 +28,10 @@ use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::Span;
 use ustr::Ustr;
 
-use super::{slot_param_names, RetSlot, ScalarCtx, SpecSubst, TupleRetShape, ValueShape, ValueStorage};
+use super::{
+    slot_param_names, FieldShape, RetSlot, ScalarCtx, SpecSubst, TupleRetShape, ValueShape,
+    ValueStorage,
+};
 use super::shape::declared_value_storage;
 use crate::concrete::{ConcreteBodyPlan, ConcreteSignature};
 use crate::mir::FuncRef;
@@ -91,11 +94,14 @@ pub fn boundary_requires_boxed_representation(f: &Function) -> bool {
 /// An interned physical representation.  Its numeric identity is meaningful
 /// only through the build-scoped arena carried by [`ScalarCtx`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct RepId(u32);
+pub struct RepId {
+    arena: u64,
+    index: u32,
+}
 
 impl RepId {
     pub fn raw(self) -> u32 {
-        self.0
+        self.index
     }
 }
 
@@ -220,7 +226,7 @@ impl RepPlan {
         }
     }
 
-    fn splats(&self, arena: &RepArena) -> bool {
+    pub(crate) fn splats(&self, arena: &RepArena) -> bool {
         match &self.layout {
             RepLayout::Leaves(_) => true,
             RepLayout::Tuple { slots, .. } => slots.iter().any(|slot| arena.get(*slot).splats(arena)),
@@ -790,7 +796,7 @@ struct RepArenaInner {
 #[derive(Debug)]
 pub struct RepArena {
     inner: Mutex<RepArenaInner>,
-    arena_gen: u64,
+    arena_id: u64,
     get_calls: std::sync::atomic::AtomicU64,
     local_get_hits: std::sync::atomic::AtomicU64,
     intern_attempts: std::sync::atomic::AtomicU64,
@@ -803,7 +809,7 @@ impl Default for RepArena {
         static ARENA_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         Self {
             inner: Mutex::default(),
-            arena_gen: ARENA_GEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            arena_id: ARENA_GEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             get_calls: Default::default(),
             local_get_hits: Default::default(),
             intern_attempts: Default::default(),
@@ -832,7 +838,7 @@ impl RepReadCache {
     }
 
     fn record_plan(&mut self, id: RepId, plan: &RepPlan) {
-        let idx = id.0 as usize;
+        let idx = id.index as usize;
         if self.plans.len() <= idx {
             self.plans.resize(idx + 1, None);
         }
@@ -858,6 +864,14 @@ pub struct RepArenaStats {
     pub intern_new: u64,
     pub plans: u64,
 }
+
+impl PartialEq for RepArena {
+    fn eq(&self, other: &Self) -> bool {
+        self.equivalent(other)
+    }
+}
+
+impl Eq for RepArena {}
 
 fn mono_value_storage(
     ws: &Workspace,
@@ -890,9 +904,15 @@ fn column_eligible_for_shape(
     ty: &crate::monoty::MonoTy,
     shape: &ValueShape,
 ) -> bool {
-    matches!(ty.peel_nullable().0, crate::monoty::MonoTy::App {
-        ctor: crate::monoty::MonoCtor::Nominal(_), ..
-    }) && super::shape::value_shape_rec(ws, shape.name, &mut Vec::new()).is_some()
+    let crate::monoty::MonoTy::App {
+        ctor: crate::monoty::MonoCtor::Nominal(name), ..
+    } = ty.peel_nullable().0
+    else {
+        return false;
+    };
+    let Some(sid) = ws.struct_by_name.get(&name) else { return false };
+    ws.modules[sid.module.index()].structs[sid.def].is_value
+        && super::shape::planned_value(ws, shape.name).is_some_and(|plan| plan.shape.is_some())
 }
 
 impl RepArena {
@@ -932,7 +952,7 @@ impl RepArena {
         let key = (target, use_context, layout, storage, column_eligible, nobox);
         REP_READ_CACHE.with(|cache| {
             let mut cache = cache.borrow_mut();
-            cache.reset_for(self.arena_gen);
+            cache.reset_for(self.arena_id);
             if let Some(id) = cache.by_key.get(&key) {
                 self.local_intern_hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 return *id;
@@ -943,7 +963,10 @@ impl RepArena {
                     Some(id) => *id,
                     None => {
                         self.intern_new.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        let id = RepId(inner.plans.len() as u32);
+                        let id = RepId {
+                            arena: self.arena_id,
+                            index: inner.plans.len() as u32,
+                        };
                         let (target, use_context, layout, storage, column_eligible, nobox) =
                             key.clone();
                         inner.plans.push(RepPlan {
@@ -963,6 +986,40 @@ impl RepArena {
             cache.by_key.insert(key, id);
             id
         })
+    }
+
+    fn intern_value_shape_plan(
+        &self,
+        ws: &Workspace,
+        target: FnBackend,
+        use_context: RepUse,
+        ty: &crate::monoty::MonoTy,
+        shape: ValueShape,
+    ) -> RepId {
+        let storage = mono_value_storage(ws, target, ty);
+        let column_eligible = column_eligible_for_shape(ws, ty, &shape);
+        let nobox = declared_nobox(ws, ty);
+        let id = self.intern_with_facts(
+            target,
+            use_context,
+            RepLayout::Leaves(shape.clone()),
+            storage,
+            column_eligible,
+            nobox,
+        );
+        self.intern_nested_value_plans(ws, target, &shape);
+        id
+    }
+
+    fn intern_nested_value_plans(&self, ws: &Workspace, target: FnBackend, shape: &ValueShape) {
+        for (_, field) in &shape.fields {
+            let FieldShape::Nested(child) = field else { continue };
+            let child_ty = crate::monoty::MonoTy::App {
+                ctor: crate::monoty::MonoCtor::Nominal(child.name),
+                params: Vec::new(),
+            };
+            self.intern_value_shape_plan(ws, target, RepUse::Value, &child_ty, child.clone());
+        }
     }
 
     pub(crate) fn column_eligible(&self, id: RepId) -> bool {
@@ -987,10 +1044,11 @@ impl RepArena {
 
     pub fn get(&self, id: RepId) -> RepPlan {
         self.get_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(id.arena, self.arena_id, "RepId must belong to its build arena");
         REP_READ_CACHE.with(|cache| {
             let mut cache = cache.borrow_mut();
-            cache.reset_for(self.arena_gen);
-            if let Some(Some(plan)) = cache.plans.get(id.0 as usize) {
+            cache.reset_for(self.arena_id);
+            if let Some(Some(plan)) = cache.plans.get(id.index as usize) {
                 self.local_get_hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 return plan.clone();
             }
@@ -999,7 +1057,7 @@ impl RepArena {
                 .lock()
                 .expect("RepArena lock poisoned")
                 .plans
-                .get(id.0 as usize)
+                .get(id.index as usize)
                 .cloned()
                 .expect("RepId must belong to its build arena");
             cache.record_plan(id, &plan);
@@ -1017,6 +1075,33 @@ impl RepArena {
             intern_new: self.intern_new.load(Ordering::Relaxed),
             plans: self.inner.lock().expect("RepArena lock poisoned").plans.len() as u64,
         }
+    }
+
+    pub fn try_get(&self, id: RepId) -> Option<RepPlan> {
+        if id.arena != self.arena_id {
+            return None;
+        }
+        self.inner
+            .lock()
+            .expect("RepArena lock poisoned")
+            .plans
+            .get(id.index as usize)
+            .cloned()
+    }
+
+    /// The value plans selected during this build. Late consumers receive this
+    /// catalog and retain the plan ID they use; they do not reconstruct one
+    /// from a nominal declaration.
+    pub fn value_plan_catalog(&self) -> Vec<(Ustr, RepId)> {
+        let inner = self.inner.lock().expect("RepArena lock poisoned");
+        inner
+            .plans
+            .iter()
+            .filter_map(|plan| match &plan.layout {
+                RepLayout::Leaves(shape) => Some((shape.name, plan.id)),
+                RepLayout::Opaque | RepLayout::Tuple { .. } | RepLayout::Foreign { .. } => None,
+            })
+            .collect()
     }
 
     /// Plan the physical value representation of a nominal without letting a
@@ -1041,14 +1126,17 @@ impl RepArena {
         )
     }
 
-    pub fn nominal_value_storage(
+    pub fn nominal_value_storage_required(
         &self,
         ws: &Workspace,
         target: FnBackend,
         name: Ustr,
-    ) -> Option<ValueStorage> {
-        let id = self.plan_nominal_value(ws, target, name).ok()?;
-        self.get(id).value_storage()
+    ) -> Result<ValueStorage, RepError> {
+        let id = self.plan_nominal_value(ws, target, name)?;
+        self.get(id).value_storage().ok_or_else(|| RepError {
+            span: None,
+            message: format!("`{name}` has no physical value storage plan"),
+        })
     }
 
     pub fn native_buffer_element_ctype(
@@ -1056,7 +1144,7 @@ impl RepArena {
         ws: &Workspace,
         target: FnBackend,
         element: &crate::monoty::MonoTy,
-    ) -> Result<Ustr, RepError> {
+    ) -> Result<(Ustr, Option<RepId>), RepError> {
         let element_name = element.render();
         let (element, nullable) = element.peel_nullable();
         let reject = |reason: String| RepError {
@@ -1069,10 +1157,10 @@ impl RepArena {
             return Err(reject("nullable elements have no native C-array ctype".into()));
         }
         match element {
-            crate::monoty::MonoTy::Int => Ok(Ustr::from("int")),
-            crate::monoty::MonoTy::Uint => Ok(Ustr::from("uint32_t")),
-            crate::monoty::MonoTy::Float => Ok(Ustr::from("float")),
-            crate::monoty::MonoTy::Bool => Ok(Ustr::from("bool")),
+            crate::monoty::MonoTy::Int => Ok((Ustr::from("int"), None)),
+            crate::monoty::MonoTy::Uint => Ok((Ustr::from("uint32_t"), None)),
+            crate::monoty::MonoTy::Float => Ok((Ustr::from("float"), None)),
+            crate::monoty::MonoTy::Bool => Ok((Ustr::from("bool"), None)),
             crate::monoty::MonoTy::App {
                 ctor: crate::monoty::MonoCtor::Nominal(name), ..
             } => {
@@ -1096,30 +1184,36 @@ impl RepArena {
                 }
                 self.leaf_layout(ws, id)
                     .map_err(|error| reject(error.message))?;
-                Ok(*name)
+                Ok((*name, Some(id)))
             }
             _ => Err(reject(format!("`{element_name}` is not C-mappable"))),
         }
     }
 
-    pub fn nominal_value_leaf_paths(
+    pub fn nominal_value_leaf_paths_required(
         &self,
         ws: &Workspace,
         target: FnBackend,
         name: Ustr,
-    ) -> Option<Vec<Ustr>> {
-        let id = self.plan_nominal_value(ws, target, name).ok()?;
-        self.get(id).leaf_paths()
+    ) -> Result<Vec<Ustr>, RepError> {
+        let id = self.plan_nominal_value(ws, target, name)?;
+        self.get(id).leaf_paths().ok_or_else(|| RepError {
+            span: None,
+            message: format!("`{name}` has no physical leaf-path plan"),
+        })
     }
 
-    pub fn nominal_value_leaf_presence_flags(
+    pub fn nominal_value_leaf_presence_flags_required(
         &self,
         ws: &Workspace,
         target: FnBackend,
         name: Ustr,
-    ) -> Option<Vec<bool>> {
-        let id = self.plan_nominal_value(ws, target, name).ok()?;
-        self.get(id).presence_flags()
+    ) -> Result<Vec<bool>, RepError> {
+        let id = self.plan_nominal_value(ws, target, name)?;
+        self.get(id).presence_flags().ok_or_else(|| RepError {
+            span: None,
+            message: format!("`{name}` has no physical presence-flag plan"),
+        })
     }
 
     pub fn nominal_leaf_addresses(
@@ -1129,7 +1223,7 @@ impl RepArena {
         name: Ustr,
     ) -> Result<Vec<crate::lower::LeafAddr>, RepError> {
         let id = self.plan_nominal_value(ws, target, name)?;
-        self.leaf_addresses(ws, id).ok_or_else(|| RepError {
+        self.leaf_addresses(ws, id)?.ok_or_else(|| RepError {
             span: None,
             message: format!("{name} has no concrete leaf-addressed representation"),
         })
@@ -1238,30 +1332,44 @@ impl RepArena {
         Ok((leaves, size, align))
     }
 
+    pub fn leaf_size(&self, ws: &Workspace, id: RepId) -> Result<usize, RepError> {
+        self.leaf_layout(ws, id).map(|(_, size, _)| size)
+    }
+
     pub(crate) fn leaf_addresses(
         &self,
         ws: &Workspace,
         id: RepId,
-    ) -> Option<Vec<crate::lower::LeafAddr>> {
+    ) -> Result<Option<Vec<crate::lower::LeafAddr>>, RepError> {
         if !self.column_eligible(id) {
-            return None;
+            return Ok(None);
         }
-        let (leaves, size, _) = self.leaf_layout(ws, id).ok()?;
-        leaves
-            .into_iter()
-            .map(|leaf| {
-                let (leaf_size, _) = crate::lower::c_prim_size_align(leaf.cty)?;
-                if size % leaf_size != 0 || leaf.byte_off % leaf_size != 0 {
-                    return None;
-                }
-                Some(crate::lower::LeafAddr {
-                    path: leaf.path,
-                    view_field: crate::lower::leaf_view_field(leaf.cty),
-                    stride: (size / leaf_size) as i64,
-                    offset: (leaf.byte_off / leaf_size) as i64,
-                })
-            })
-            .collect()
+        let (leaves, size, _) = self.leaf_layout(ws, id)?;
+        let mut out = Vec::with_capacity(leaves.len());
+        for leaf in leaves {
+            let Some((leaf_size, _)) = crate::lower::c_prim_size_align(leaf.cty) else {
+                return Err(RepError {
+                    span: None,
+                    message: format!("leaf `{}` has no primitive C layout", leaf.path),
+                });
+            };
+            if size % leaf_size != 0 || leaf.byte_off % leaf_size != 0 {
+                return Err(RepError {
+                    span: None,
+                    message: format!(
+                        "leaf `{}` is not aligned to its column stride (size {}, offset {}, leaf {})",
+                        leaf.path, size, leaf.byte_off, leaf_size
+                    ),
+                });
+            }
+            out.push(crate::lower::LeafAddr {
+                path: leaf.path,
+                view_field: crate::lower::leaf_view_field(leaf.cty),
+                stride: (size / leaf_size) as i64,
+                offset: (leaf.byte_off / leaf_size) as i64,
+            });
+        }
+        Ok(Some(out))
     }
 
     /// Total physical planning for one concrete logical type. `Opaque` is an
@@ -1319,16 +1427,7 @@ impl RepArena {
                         crate::lower::mono_value_shape(ws, ty)
                     };
                     if let Some(shape) = shape {
-                        let storage = mono_value_storage(ws, target, ty);
-                        let column_eligible = column_eligible_for_shape(ws, ty, &shape);
-                        return Ok(self.intern_with_facts(
-                            target,
-                            use_context,
-                            RepLayout::Leaves(shape),
-                            storage,
-                            column_eligible,
-                            declared_nobox(ws, ty),
-                        ));
+                        return Ok(self.intern_value_shape_plan(ws, target, use_context, ty, shape));
                     }
                     if guarantees.nobox && !guarantees.allow_opaque {
                         return Err(reject(format!(
@@ -1376,16 +1475,7 @@ impl RepArena {
                     crate::lower::mono_value_shape(ws, ty)
                 };
                 if let Some(shape) = shape {
-                    let storage = mono_value_storage(ws, target, ty);
-                    let column_eligible = column_eligible_for_shape(ws, ty, &shape);
-                    return Ok(self.intern_with_facts(
-                        target,
-                        use_context,
-                        RepLayout::Leaves(shape),
-                        storage,
-                        column_eligible,
-                        declared_nobox(ws, ty),
-                    ));
+                    return Ok(self.intern_value_shape_plan(ws, target, use_context, ty, shape));
                 }
                 if guarantees.nobox && !guarantees.allow_opaque {
                     return Err(reject(format!(
@@ -1441,18 +1531,19 @@ impl RepArena {
         let params = params
             .iter()
             .map(|param| {
-                let tuple_spelled = matches!(param.peel_nullable().0, crate::monoty::MonoTy::Tuple(_))
-                    && self
-                        .plan(
-                            ws,
-                            target,
-                            param,
-                            RepUse::Return,
-                            &RepUseFacts::default(),
-                            RepGuarantees { nobox: true, allow_opaque: true },
-                        )
-                        .map(|id| self.get(id).splats(self))
-                        .unwrap_or(false);
+                let tuple_spelled = if matches!(param.peel_nullable().0, crate::monoty::MonoTy::Tuple(_)) {
+                    let id = self.plan(
+                        ws,
+                        target,
+                        param,
+                        RepUse::Return,
+                        &RepUseFacts::default(),
+                        RepGuarantees { nobox: true, allow_opaque: true },
+                    )?;
+                    self.get(id).splats(self)
+                } else {
+                    false
+                };
                 self.plan(
                     ws,
                     target,

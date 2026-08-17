@@ -332,8 +332,8 @@ function __rock_make_enum(variant, ty, kv) {
 /// reproduce the Lua renderer for the cross-backend `inspect(x) == "..."` pins.
 ///
 /// A struct renders through `__rock_inspect_ty[<__ty>]`, a per-type function
-/// `build_inspect_ty_defs` emits for every reachable struct: it supplies the
-/// DECLARED fields, because a null field is an absent key and a key walk alone
+/// `build_inspect_ty_defs` emits for every realized struct and declared child: it
+/// supplies the DECLARED fields, because a null field is an absent key and a key walk alone
 /// therefore under-reports the shape, and an `embed` field is stored as flat
 /// `<name>.<leaf>` slots that carry no declared name at all. That is luajit's
 /// `_G.__ROCK_TYPE_TABLE` lookup replaced by compile-time-emitted dispatch
@@ -775,8 +775,17 @@ function __sw_sdl_keycode(e) {
   return 0;
 }
 
-function __sw_push_event(type, key, btn, x, y) {
-  __SW.events.push({ type: type, key: key, mouse_button: btn, mouse_x: x, mouse_y: y });
+function __sw_push_event(type, key, btn, x, y, scancode, modifiers, repeat) {
+  __SW.events.push({
+    type: type, key: key, scancode: scancode || 0, modifiers: modifiers || 0,
+    repeat: !!repeat, mouse_button: btn, mouse_x: x, mouse_y: y,
+    pad_instance_id: -1, pad_button: "", pad_axis: "", pad_value: 0, pad_sync: false
+  });
+}
+
+function __sw_key_modifiers(e) {
+  return (e.ctrlKey ? 1 : 0) | (e.shiftKey ? 2 : 0) |
+    (e.altKey ? 4 : 0) | (e.metaKey ? 8 : 0);
 }
 
 // Mirror of lib.rock sdl_keycode_to_string: the polled key-state map is keyed by
@@ -873,11 +882,18 @@ function stone_create_window_ex(title, x, y, width, height, display, resizable, 
 
   window.addEventListener("keydown", function (e) {
     var kc = __sw_sdl_keycode(e);
-    if (kc !== 0) { __SW.keysDown[__sw_keycode_to_string(kc)] = true; __sw_push_event(2, kc, 0, 0, 0); e.preventDefault(); }
+    if (kc !== 0) {
+      __SW.keysDown[__sw_keycode_to_string(kc)] = true;
+      __sw_push_event(2, kc, 0, 0, 0, 0, __sw_key_modifiers(e), e.repeat);
+      e.preventDefault();
+    }
   });
   window.addEventListener("keyup", function (e) {
     var kc = __sw_sdl_keycode(e);
-    if (kc !== 0) { __SW.keysDown[__sw_keycode_to_string(kc)] = false; __sw_push_event(3, kc, 0, 0, 0); }
+    if (kc !== 0) {
+      __SW.keysDown[__sw_keycode_to_string(kc)] = false;
+      __sw_push_event(3, kc, 0, 0, 0, 0, __sw_key_modifiers(e), e.repeat);
+    }
   });
   canvas.addEventListener("mousemove", function (e) {
     var r = canvas.getBoundingClientRect();
@@ -940,7 +956,11 @@ function stone_poll_event(ev) {
   if (q.length === 0) return false;
   var e = q.shift();
   ev.type = e.type; ev.key = e.key; ev.mouse_button = e.mouse_button;
-  ev.mouse_x = e.mouse_x; ev.mouse_y = e.mouse_y;
+  ev.scancode = e.scancode || 0; ev.modifiers = e.modifiers || 0;
+  ev.repeat = !!e.repeat; ev.mouse_x = e.mouse_x; ev.mouse_y = e.mouse_y;
+  ev.pad_instance_id = e.pad_instance_id == null ? -1 : e.pad_instance_id;
+  ev.pad_button = e.pad_button || ""; ev.pad_axis = e.pad_axis || "";
+  ev.pad_value = e.pad_value || 0; ev.pad_sync = !!e.pad_sync;
   return true;
 }
 function stone_get_mouse_position(px, py) { px[0] = Math.round(__SW.mouseX); py[0] = Math.round(__SW.mouseY); }
@@ -1958,7 +1978,7 @@ function stone_draw_fullscreen_quad() {
 
 // --- text: canvas2d glyph atlas (MC, docs/stone-web-plan.md § text) ---
 // The boot preload registered each shipped TTF as a FontFace; the bake here
-// is synchronous canvas2d against that family. All of ASCII 32..126 bakes as
+// is synchronous canvas2d against that family. ASCII 32..126 plus Á bakes as
 // one 16-glyph-wide atlas; density changes explicitly rebake into the same
 // texture handle. Atlas pixels are
 // coverage-RGBA (r=g=b=a=coverage, built from the canvas ALPHA channel --
@@ -2015,7 +2035,11 @@ function __sw_bake_font(path, pixelSize, existingAtlas, faceMask) {
   var shear = Math.tan((__SW_OBLIQUE_DEG * Math.PI) / 180);
   var embolden = pixelSize * __SW_BOLD_PER_PX;
 
-  // Pass 1: metrics for all 95 glyphs of every declared face -> cell size.
+  var slots = [];
+  for (var ascii = 32; ascii <= 126; ascii++) slots.push({ slot: ascii, cp: ascii, ch: String.fromCharCode(ascii) });
+  slots.push({ slot: 127, cp: 0x00C1, ch: "Á" });
+
+  // Pass 1: metrics for every text slot of every declared face -> cell size.
   // The cell holds the WIDEST face: an oblique pushes ink past its own
   // advance, so sizing from regular alone would bleed bold-italic into the
   // next cell. Canvas gives no sheared metrics, so the extra extent is
@@ -2028,8 +2052,10 @@ function __sw_bake_font(path, pixelSize, existingAtlas, faceMask) {
     var isBold = face === 1 || face === 3;
     var isItalic = face === 2 || face === 3;
     var faceInfos = [];
-    for (var cp = 32; cp <= 126; cp++) {
-      var ch = String.fromCharCode(cp);
+    for (var si = 0; si < slots.length; si++) {
+      var spec = slots[si];
+      var cp = spec.cp;
+      var ch = spec.ch;
       var m = mctx.measureText(ch);
       var left = m.actualBoundingBoxLeft || 0;
       var right = m.actualBoundingBoxRight || 0;
@@ -2040,7 +2066,7 @@ function __sw_bake_font(path, pixelSize, existingAtlas, faceMask) {
       var gw = Math.ceil(left + right + grow + lean);
       var gh = Math.ceil(ascent + descent + grow);
       faceInfos.push({
-        cp: cp, ch: ch, face: face, bold: isBold, italic: isItalic,
+        slot: spec.slot, cp: cp, ch: ch, face: face, bold: isBold, italic: isItalic,
         left: left + grow / 2, ascent: ascent + grow / 2,
         w: gw, h: gh, advance: m.width + grow,
       });
@@ -2053,7 +2079,7 @@ function __sw_bake_font(path, pixelSize, existingAtlas, faceMask) {
   cellW += PAD * 2;
   cellH += PAD * 2;
   var COLS = 16; // mirror native text.rs grid
-  var rowsPerFace = Math.ceil(95 / COLS);
+  var rowsPerFace = Math.ceil(slots.length / COLS);
   var aw = COLS * cellW, ah = rowsPerFace * baked.length * cellH;
 
   var canvas = document.createElement("canvas");
@@ -2096,7 +2122,7 @@ function __sw_bake_font(path, pixelSize, existingAtlas, faceMask) {
       ctx.restore();
       // 9-float glyph info: [u0 v0 u1 v1 width height bearing_x bearing_y advance];
       // bearing_y is TOP-based (ink top above baseline = actualBoundingBoxAscent).
-      glyphs[g.face][g.cp] = new Float32Array([
+      glyphs[g.face][g.slot] = new Float32Array([
         cx / aw, cy / ah, (cx + g.w) / aw, (cy + g.h) / ah,
         g.w, g.h, -g.left, g.ascent, g.advance,
       ]);
@@ -2175,6 +2201,11 @@ function stone_get_glyph_info_for(fontId, face, ch, out) {
   for (var i = 0; i < 9; i++) out[i] = g[i];
   return true;
 }
+function __sw_glyph_slot(cp) {
+  if (cp >= 32 && cp <= 126) return cp;
+  if (cp === 0x00C1) return 127;
+  return -1;
+}
 // Shim-side measure, from the shim's OWN advances (native-formula drift is
 // the bug class this avoids): width = max line sum(advance)*scale; height
 // single-line = max glyph height*scale, multi-line adds (lines-1)*em*1.2.
@@ -2188,7 +2219,7 @@ function stone_measure_text_js(fontId, text, scale) {
   var lines = 1, w = 0, lineW = 0, maxH = 0;
   for (var i = 0; i < s.length; i++) {
     if (s[i] === "\n") { lines++; if (lineW > w) w = lineW; lineW = 0; continue; }
-    var g = f.glyphs[0][s.charCodeAt(i)];
+    var g = f.glyphs[0][__sw_glyph_slot(s.charCodeAt(i))];
     if (g) { lineW += g[8]; if (g[5] > maxH) maxH = g[5]; }
   }
   if (lineW > w) w = lineW;
@@ -2203,7 +2234,7 @@ function stone_get_text_baseline_for(fontId, text, scale) {
   var s = String(text);
   var b = 0;
   for (var i = 0; i < s.length; i++) {
-    var g = f.glyphs[0][s.charCodeAt(i)];
+    var g = f.glyphs[0][__sw_glyph_slot(s.charCodeAt(i))];
     if (g && g[7] > b) b = g[7];
   }
   return b * Math.abs(scale);
