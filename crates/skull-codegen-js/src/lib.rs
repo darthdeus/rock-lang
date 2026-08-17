@@ -2369,15 +2369,16 @@ function stone_unload_sound(h) {
   delete __SW.audio.sounds[h];
   return true;
 }
-// `bus` is STONE_BUS_* (lib.rock): 0 master, 1 sfx, 2 music, 3 ambience, 4 ui.
+// `bus` is STONE_BUS_* (lib.rock): 0 master, 1 sfx, 2 music, 3 ambience, 4 ui, 5 foley.
 // The web mixer has only sfx and music nodes, so music routes to musicGain and
 // every other bus shares sfxGain -- the topology is coarser than native, not
 // ignored.
-function stone_play_sound(h, bus, volume, speed, decay) {
+function stone_play_sound(h, bus, volume, speed, decay, looped) {
   var A = __SW.audio, s = A.sounds[h];
   if (!A.ctx || !s || !s.buffer) return;
   var src = A.ctx.createBufferSource();
   src.buffer = s.buffer;
+  src.loop = looped;
   src.playbackRate.value = Math.min(Math.max(speed, 0.05), 8);
   var g = A.ctx.createGain();
   var vol = Math.max(volume, 0);
@@ -2412,7 +2413,7 @@ function stone_stop_music() {
   var A = __SW.audio;
   if (A.musicSrc) { try { A.musicSrc.stop(); } catch (e) {} A.musicSrc = null; }
 }
-// No bus graph on web v1 (mixer.rock's five strips have no WebAudio
+// No bus graph on web v1 (mixer.rock's strips have no WebAudio
 // counterpart yet); every bus/voice op below is a silent stub, same tier as
 // the convolver reverb has always been.
 function stone_bus_set_gain(bus, gain) { return false; }
@@ -2421,6 +2422,7 @@ function stone_bus_duck_count(bus) { return 0; }
 function stone_bus_gain(bus) { return 1; }
 function stone_bus_peak(bus) { return 0; }
 function stone_bus_set_lowpass(bus, cutoff_hz, q) { return false; }
+function stone_bus_lowpass_cutoff(bus) { return 0; }
 function stone_bus_set_distortion(bus, drive, mix) { return false; }
 function stone_bus_set_reverb(bus, enabled, room_size, damping, wet, dry, width) { return false; }
 function stone_bus_duck(bus, depth, attack_secs, release_secs) { return false; }
