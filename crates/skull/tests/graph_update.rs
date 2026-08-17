@@ -157,13 +157,13 @@ fn assert_scoped(stats: &UpdateStats, label: &str) {
         stats.census.incremental_forced_rewalks > 0,
         "{label}: the update fixture did not expose an incremental forced re-walk"
     );
-    // **The prune's own cost is NOT asserted here, deliberately.** These
-    // fixtures hold ~95 instances, so a whole-graph strand search visits 6 and
-    // a correct one visits 7 (one owner can strand a whole iterator chain):
-    // the two are not separable at this scale, and a bound that cannot
-    // distinguish them would be a vacuous arm rather than a cheap one. It lives
-    // in `rock-cli/tests/graph_update_projects.rs`, where the same mutation
-    // moves the region from 2/1/2 to 988/379/94.
+    assert!(
+        stats.prune_search_population <= stats.suspect_region * 4,
+        "{label}: prune search examined {} entries for a {}-instance region -- \
+         hidden broad pruning escaped the denominator: {stats:?}",
+        stats.prune_search_population,
+        stats.suspect_region
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -903,11 +903,173 @@ fn an_external_anchor_stops_a_branched_strand_search() {
     assert!(stats.suspect_region > 0, "the prune search had no population: {stats:?}");
     assert!(stats.census.index_preds_updates > 0, "the predecessor index had no population");
     assert!(
-        stats.suspect_region <= stats.expanded * 4,
+        stats.prune_search_population <= stats.expanded * 4,
         "the anchor boundary was not local: {stats:?}"
     );
     case.assert_matches_fresh("external anchor with stranded branch");
     assert_scoped(&stats, "external anchor with stranded branch");
+}
+
+const LONG_ANCHOR_LIB: &str = r#"
+fn entry() -> int { return shared_root() + dead_root() }
+fn anchor() -> int { return anchor_0() }
+fn anchor_0() -> int { return anchor_1() }
+fn anchor_1() -> int { return anchor_2() }
+fn anchor_2() -> int { return anchor_3() }
+fn anchor_3() -> int { return anchor_4() }
+fn anchor_4() -> int { return anchor_5() }
+fn anchor_5() -> int { return anchor_6() }
+fn anchor_6() -> int { return anchor_7() }
+fn anchor_7() -> int { return anchor_8() }
+fn anchor_8() -> int { return anchor_9() }
+fn anchor_9() -> int { return anchor_10() }
+fn anchor_10() -> int { return anchor_11() }
+fn anchor_11() -> int { return anchor_12() }
+fn anchor_12() -> int { return anchor_13() }
+fn anchor_13() -> int { return anchor_14() }
+fn anchor_14() -> int { return anchor_15() }
+fn anchor_15() -> int { return anchor_16() }
+fn anchor_16() -> int { return anchor_17() }
+fn anchor_17() -> int { return anchor_18() }
+fn anchor_18() -> int { return anchor_19() }
+fn anchor_19() -> int { return anchor_20() }
+fn anchor_20() -> int { return anchor_21() }
+fn anchor_21() -> int { return anchor_22() }
+fn anchor_22() -> int { return anchor_23() }
+fn anchor_23() -> int { return anchor_24() }
+fn anchor_24() -> int { return anchor_25() }
+fn anchor_25() -> int { return anchor_26() }
+fn anchor_26() -> int { return anchor_27() }
+fn anchor_27() -> int { return anchor_28() }
+fn anchor_28() -> int { return anchor_29() }
+fn anchor_29() -> int { return anchor_30() }
+fn anchor_30() -> int { return anchor_31() }
+fn anchor_31() -> int { return shared_root() }
+fn shared_root() -> int { return shared_left() + shared_right() }
+fn shared_left() -> int { return 1 }
+fn shared_right() -> int { return 2 }
+fn dead_root() -> int { return dead_leaf() }
+fn dead_leaf() -> int { return 3 }
+"#;
+
+#[test]
+fn a_long_anchor_path_is_included_in_prune_locality() {
+    let mut case = Case::new(
+        "fn main() { print(\"{entry()} {anchor()}\") }\n",
+        LONG_ANCHOR_LIB,
+    );
+    for name in ["shared_root", "dead_root", "dead_leaf", "anchor_31"] {
+        assert!(case.has_instance_named(name), "v1 never reached `{name}`");
+    }
+    let shared = case
+        .graph
+        .instances
+        .iter()
+        .find(|instance| case.identity(instance).starts_with("shared_root"))
+        .cloned()
+        .expect("the shared branch instance");
+    let incoming = case.graph.index.preds.get(&shared).expect("shared predecessor index row");
+    assert!(incoming.len() >= 2, "the fixture has no shared external anchor: {incoming:?}");
+
+    let stats = case.edit(MAIN, "fn main() { print(\"{anchor()}\") }\n");
+
+    assert!(case.has_instance_named("shared_root"), "the external anchor was pruned");
+    assert!(!case.has_instance_named("dead_root"), "the stranded branch survived");
+    assert!(!case.has_instance_named("dead_leaf"), "the stranded leaf survived");
+    assert_eq!(stats.pruned, 3, "only entry and the dead branch should be pruned: {stats:?}");
+    assert_eq!(stats.affected, 1, "one caller body should be affected: {stats:?}");
+    assert!(stats.expanded > 0, "the update expanded no owner: {stats:?}");
+    assert!(stats.suspect_region > 0, "the forward prune population is empty: {stats:?}");
+    assert_eq!(
+        stats.reverse_instances_examined, 0,
+        "the affected-region search still performed a reverse reachability walk: {stats:?}"
+    );
+    assert!(
+        stats.reverse_predecessor_edges_examined == 0,
+        "the affected-region search still examined reverse predecessor edges: {stats:?}"
+    );
+    assert!(
+        stats.prune_search_population >= stats.suspect_region,
+        "the prune denominator dropped forward work: {stats:?}"
+    );
+    assert_eq!(
+        stats.prune_search_population,
+        stats.suspect_region
+            + stats.reverse_instances_examined
+            + stats.reverse_predecessor_edges_examined,
+        "the prune denominator does not include every reported search population: {stats:?}"
+    );
+    assert!(
+        stats.prune_search_population <= stats.expanded * 4,
+        "forward plus reverse prune work escaped the locality bound: {stats:?}"
+    );
+    case.assert_matches_fresh("long external anchor path");
+    assert_scoped(&stats, "long external anchor path");
+}
+
+const DEFERRED_BOUNDARY_LIB: &str = r#"
+fn entry() -> int { return branch() }
+fn branch() -> int { return shared() + apparent() }
+fn apparent() -> int { return shared() }
+fn shared() -> int { return dead() }
+fn dead() -> int { return 1 }
+fn other() -> int { return 7 }
+"#;
+
+#[test]
+fn a_later_lost_predecessor_releases_a_tentative_boundary() {
+    let mut case = Case::new(
+        "fn main() { print(\"{entry()}\") }\n",
+        DEFERRED_BOUNDARY_LIB,
+    );
+    for name in ["entry", "branch", "apparent", "shared", "dead"] {
+        assert!(case.has_instance_named(name), "v1 never reached `{name}`");
+    }
+
+    let stats = case.edit(MAIN, "fn main() { print(\"{other()}\") }\n");
+
+    for name in ["entry", "branch", "apparent", "shared", "dead"] {
+        assert!(!case.has_instance_named(name), "`{name}` survived the lost-seed closure");
+    }
+    assert!(stats.pruned >= 5, "the deferred boundary had no population: {stats:?}");
+    assert!(stats.suspect_region >= stats.pruned);
+    assert!(stats.prune_search_population > 0);
+    case.assert_matches_fresh("deferred boundary release");
+    assert_scoped(&stats, "deferred boundary release");
+}
+
+const ROOTED_CYCLE_LIB: &str = r#"
+fn entry() -> int { return rooted_a() + dead() }
+fn rooted_a() -> int { return rooted_b() }
+fn rooted_b() -> int { return rooted_a() }
+fn dead() -> int { return dead_leaf() }
+fn dead_leaf() -> int { return 1 }
+"#;
+
+#[test]
+fn a_rooted_cycle_survives_while_the_lost_branch_is_pruned() {
+    let mut case = Case::new(
+        "fn main() { print(\"{entry()}\") }\nfn root_anchor() -> int { return rooted_a() }\n",
+        ROOTED_CYCLE_LIB,
+    );
+    for name in ["entry", "rooted_a", "rooted_b", "dead", "dead_leaf"] {
+        assert!(case.has_instance_named(name), "v1 never reached `{name}`");
+    }
+
+    let stats = case.edit(
+        MAIN,
+        "fn main() { print(\"0\") }\nfn root_anchor() -> int { return rooted_a() }\n",
+    );
+
+    for name in ["rooted_a", "rooted_b"] {
+        assert!(case.has_instance_named(name), "rooted cycle member `{name}` was pruned");
+    }
+    for name in ["entry", "dead", "dead_leaf"] {
+        assert!(!case.has_instance_named(name), "lost branch `{name}` survived");
+    }
+    assert!(stats.pruned >= 3, "the rooted-cycle fixture had no stranded branch: {stats:?}");
+    case.assert_matches_fresh("rooted cycle");
+    assert_scoped(&stats, "rooted cycle");
 }
 
 const BOUNDED_LIB: &str = r#"

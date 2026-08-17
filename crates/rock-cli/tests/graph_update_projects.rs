@@ -203,17 +203,8 @@ fn project_case(rel: &str) {
             m.stats.owners
         );
         assert_eq!(m.stats.settle_rounds, 0, "{rel} {what}: the conformance fixpoint engaged");
-        // **The PRUNE's own cost, which its result cannot report.** A
-        // whole-graph strand search returns the same pruned set and passes
-        // canonical equality, so this is the only arm that can see the
-        // affected-region property at all. It goes red when a re-installed
-        // owner stops taking its own unchanged targets back out of `lost`,
-        // which makes the suspect region the whole reachable graph.
-        // Against the WALK, not against the program: both are per-edit
-        // quantities, and an instance can only lose an in-edge because an owner
-        // was re-walked. A fraction-of-`instances` bound is the wrong yardstick
-        // -- it is satisfied by a region two orders of magnitude too large on
-        // every project whose affected set is small.
+        // Against the walk, not against the program: the forward region and
+        // every reported reverse-query entry are per-edit quantities.
         assert!(
             m.stats.suspect_region <= m.stats.expanded * 4,
             "{rel} {what}: the strand search visited {} instances after walking {} owners \
@@ -223,18 +214,31 @@ fn project_case(rel: &str) {
             m.stats.instances,
             m.stats.pruned
         );
+        assert!(
+            m.stats.prune_search_population <= m.stats.expanded * 4,
+            "{rel} {what}: prune search examined {} entries after walking {} owners \
+             ({} forward, {} reverse nodes, {} reverse edges) -- that is a broad prune",
+            m.stats.prune_search_population,
+            m.stats.expanded,
+            m.stats.suspect_region,
+            m.stats.reverse_instances_examined,
+            m.stats.reverse_predecessor_edges_examined
+        );
     }
 
     println!(
         "{rel}: fresh build {fresh_ms:.1} ms over {owners_total} owners / {instances_total} instances\n  \
-         delete: {:.2} ms, {} affected, {} walked, {} pruned of {} suspect -> {} owners / {} instances\n  \
-         add:    {:.2} ms, {} affected, {} walked, {} new, {} suspect -> {} owners / {} instances\n  \
+         delete: {:.2} ms, {} affected, {} walked, {} pruned of {} forward + {} reverse nodes + {} reverse edges = {} search -> {} owners / {} instances\n  \
+         add:    {:.2} ms, {} affected, {} walked, {} new, {} forward + {} reverse nodes + {} reverse edges = {} search -> {} owners / {} instances\n  \
          candidates examined: {examined}, edited file: {path}",
         del.update_ms,
         del.stats.affected,
         del.stats.expanded,
         del.stats.pruned,
         del.stats.suspect_region,
+        del.stats.reverse_instances_examined,
+        del.stats.reverse_predecessor_edges_examined,
+        del.stats.prune_search_population,
         del.stats.owners,
         del.stats.instances,
         add.update_ms,
@@ -242,6 +246,9 @@ fn project_case(rel: &str) {
         add.stats.expanded,
         add.stats.newly_reached,
         add.stats.suspect_region,
+        add.stats.reverse_instances_examined,
+        add.stats.reverse_predecessor_edges_examined,
+        add.stats.prune_search_population,
         add.stats.owners,
         add.stats.instances,
     );
