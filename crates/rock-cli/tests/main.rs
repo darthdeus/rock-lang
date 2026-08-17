@@ -28,6 +28,8 @@ mod js_coroutines;
 mod js_test_harness_globals_sentinel;
 #[path = "comptime_build_vars.rs"]
 mod comptime_build_vars;
+#[path = "sample_game_c_build_vars.rs"]
+mod sample_game_c_build_vars;
 #[path = "cimgui_prelude.rs"]
 mod cimgui_prelude;
 #[path = "release_mode_deleted.rs"]
