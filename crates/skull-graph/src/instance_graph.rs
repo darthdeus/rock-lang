@@ -2751,6 +2751,8 @@ impl InstanceGraph {
         let Prune {
             pruned,
             region,
+            seeds,
+            boundary_predecessor_edges_examined,
             reverse_instances_examined,
             reverse_predecessor_edges_examined,
             prune_search_population,
@@ -2838,6 +2840,8 @@ impl InstanceGraph {
         Prune {
             pruned,
             region,
+            seeds,
+            boundary_predecessor_edges_examined,
             reverse_instances_examined,
             reverse_predecessor_edges_examined,
             prune_search_population,
@@ -2935,6 +2939,8 @@ impl InstanceGraph {
         Prune {
             pruned: prune.pruned,
             region: prune.region,
+            seeds: prune.seeds,
+            boundary_predecessor_edges_examined: prune.boundary_predecessor_edges_examined,
             reverse_instances_examined: prune.reverse_instances_examined,
             reverse_predecessor_edges_examined: prune.reverse_predecessor_edges_examined,
             prune_search_population: prune.prune_search_population,
@@ -3140,6 +3146,8 @@ impl InstanceGraph {
             expanded: run.expanded,
             pruned: prune.pruned.len(),
             suspect_region: prune.region,
+            prune_seeds: prune.seeds,
+            boundary_predecessor_edges_examined: prune.boundary_predecessor_edges_examined,
             newly_reached: added.len(),
             added,
             removed,
@@ -3486,7 +3494,7 @@ impl InstanceGraph {
                 .get(&Owner::Instance(i.clone()))
                 .map_or(&[][..], |c| c.edges.as_slice())
         };
-        let seeds: FxHashSet<Instance> = lost.iter().cloned().collect();
+        let seeds: BTreeSet<Instance> = lost.iter().cloned().collect();
         let mut region: BTreeSet<Instance> = lost
             .iter()
             .filter(|i| self.contributions.contains_key(&Owner::Instance((*i).clone())))
@@ -3499,6 +3507,20 @@ impl InstanceGraph {
         let mut boundary_waiters: BTreeMap<Instance, BTreeSet<Instance>> = BTreeMap::new();
         let mut anchors: BTreeSet<Instance> = BTreeSet::new();
         let mut released: Vec<Instance> = Vec::new();
+        let mut boundary_predecessor_edges_examined = 0;
+        let predecessor_blockers =
+            |target: &Instance,
+             region: &BTreeSet<Instance>,
+             examined: &mut usize|
+             -> BTreeSet<Instance> {
+                let Some(preds) = self.index.preds.get(target) else { return BTreeSet::new() };
+                *examined += preds.len();
+                preds
+                    .iter()
+                    .filter(|pred| *pred != target && !region.contains(*pred))
+                    .cloned()
+                    .collect()
+            };
         while !queue.is_empty() || !released.is_empty() {
             while let Some(promoted) = released.pop() {
                 let waiters = boundary_waiters.remove(&promoted).unwrap_or_default();
@@ -3527,19 +3549,15 @@ impl InstanceGraph {
             }
             let is_root = self.root_instances.contains(&i);
             let is_always = self.index.always_emitted.contains_key(&i);
-            let blockers: BTreeSet<Instance> = self
-                .index
-                .preds
-                .get(&i)
-                .into_iter()
-                .flat_map(|preds| preds.iter())
-                .filter(|pred| *pred != &i && !region.contains(*pred))
-                .cloned()
-                .collect();
             if is_root || is_always {
                 anchors.insert(i);
                 continue;
             }
+            let blockers = predecessor_blockers(
+                &i,
+                &region,
+                &mut boundary_predecessor_edges_examined,
+            );
             if !blockers.is_empty() {
                 anchors.insert(i.clone());
                 boundary_preds.insert(i.clone(), blockers.clone());
@@ -3550,26 +3568,29 @@ impl InstanceGraph {
                 anchors.remove(&i);
                 boundary_preds.remove(&i);
             }
-            // A lost seed is tentative even with an outside predecessor: its
-            // forward walk is what exposes an unanchored cycle. Other nodes
-            // only enter the queue after every current outside predecessor
-            // has been promoted into the region.
-            if !seeds.contains(&i) && !blockers.is_empty() {
+            // A lost seed with a root/always-emitted boundary is tentative;
+            // otherwise it must probe forward so an unanchored cycle is found.
+            let has_root_boundary = blockers.iter().any(|pred| {
+                self.root_instances.contains(pred) || self.index.always_emitted.contains_key(pred)
+            });
+            if !blockers.is_empty() && (!seeds.contains(&i) || has_root_boundary) {
                 continue;
             }
             for target in succ(&i).iter().map(|e| e.to.clone()) {
                 if region.contains(&target) || boundary_preds.contains_key(&target) {
                     continue;
                 }
-                let blockers: BTreeSet<Instance> = self
-                    .index
-                    .preds
-                    .get(&target)
-                    .into_iter()
-                    .flat_map(|preds| preds.iter())
-                    .filter(|pred| *pred != &target && !region.contains(*pred))
-                    .cloned()
-                    .collect();
+                if self.root_instances.contains(&target)
+                    || self.index.always_emitted.contains_key(&target)
+                {
+                    anchors.insert(target);
+                    continue;
+                }
+                let blockers = predecessor_blockers(
+                    &target,
+                    &region,
+                    &mut boundary_predecessor_edges_examined,
+                );
                 if blockers.is_empty() {
                     if region.insert(target.clone()) {
                         released.push(target.clone());
@@ -3587,7 +3608,11 @@ impl InstanceGraph {
             }
         }
         if region.is_empty() {
-            return Prune::default();
+            return Prune {
+                seeds,
+                boundary_predecessor_edges_examined,
+                ..Prune::default()
+            };
         }
         let mut alive: Vec<Instance> = anchors.iter().cloned().collect();
         let mut survives: BTreeSet<Instance> = BTreeSet::new();
@@ -3604,9 +3629,11 @@ impl InstanceGraph {
         Prune {
             pruned: region.difference(&survives).cloned().collect(),
             region: region.len(),
+            seeds,
+            boundary_predecessor_edges_examined,
             reverse_instances_examined: 0,
             reverse_predecessor_edges_examined: 0,
-            prune_search_population: region.len(),
+            prune_search_population: region.len() + boundary_predecessor_edges_examined,
             broad_scans: 0,
         }
     }
@@ -3825,12 +3852,15 @@ struct Prune {
     /// How many instances the suspect walk VISITED to produce `pruned` -- the
     /// forward closure of what lost an in-edge.
     region: usize,
-    /// Instances examined by the reverse reachability queries used to classify
-    /// forward boundaries.
+    /// The initial instances whose incoming edges changed.
+    seeds: BTreeSet<Instance>,
+    /// Predecessor edges examined while classifying local boundary blockers.
+    boundary_predecessor_edges_examined: usize,
+    /// Instances examined by removed reverse reachability queries.
     reverse_instances_examined: usize,
-    /// Predecessor edges examined by those reverse queries.
+    /// Predecessor edges examined by removed reverse reachability queries.
     reverse_predecessor_edges_examined: usize,
-    /// Forward instance work plus all reported reverse-query work.
+    /// Forward instances plus local boundary edges and any reverse-query work.
     prune_search_population: usize,
     broad_scans: usize,
 }
@@ -3855,13 +3885,18 @@ pub struct UpdateStats {
     /// region -- the forward closure of everything that lost an in-edge.
     ///
     /// The forward instance population only. `prune_search_population` adds
-    /// any reverse-query population before the locality gates consume it.
+    /// local boundary-edge and reverse-query populations before the locality
+    /// gates consume it.
     pub suspect_region: usize,
-    /// Instances examined by reverse boundary queries.
+    /// The initial instances whose incoming edges changed.
+    pub prune_seeds: BTreeSet<Instance>,
+    /// Predecessor edges examined while classifying local boundary blockers.
+    pub boundary_predecessor_edges_examined: usize,
+    /// Instances examined by removed reverse reachability queries.
     pub reverse_instances_examined: usize,
-    /// Predecessor edges examined by reverse boundary queries.
+    /// Predecessor edges examined by removed reverse reachability queries.
     pub reverse_predecessor_edges_examined: usize,
-    /// Forward instance work plus every reported reverse instance and edge.
+    /// Forward instances plus local boundary edges and any reverse-query work.
     pub prune_search_population: usize,
     /// Instances the graph did not have before.
     pub newly_reached: usize,

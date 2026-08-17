@@ -157,12 +157,18 @@ fn assert_scoped(stats: &UpdateStats, label: &str) {
         stats.census.incremental_forced_rewalks > 0,
         "{label}: the update fixture did not expose an incremental forced re-walk"
     );
-    assert!(
-        stats.prune_search_population <= stats.suspect_region * 4,
-        "{label}: prune search examined {} entries for a {}-instance region -- \
-         hidden broad pruning escaped the denominator: {stats:?}",
+    assert_eq!(
         stats.prune_search_population,
         stats.suspect_region
+            + stats.boundary_predecessor_edges_examined
+            + stats.reverse_instances_examined
+            + stats.reverse_predecessor_edges_examined,
+        "{label}: prune denominator omitted pruning work: {stats:?}"
+    );
+    assert_eq!(stats.broad_scans, 0, "{label}: a broad prune scan ran: {stats:?}");
+    assert!(
+        stats.prune_search_population < stats.instances,
+        "{label}: prune search examined the whole instance population: {stats:?}"
     );
 }
 
@@ -903,8 +909,8 @@ fn an_external_anchor_stops_a_branched_strand_search() {
     assert!(stats.suspect_region > 0, "the prune search had no population: {stats:?}");
     assert!(stats.census.index_preds_updates > 0, "the predecessor index had no population");
     assert!(
-        stats.prune_search_population <= stats.expanded * 4,
-        "the anchor boundary was not local: {stats:?}"
+        stats.suspect_region <= stats.expanded * 4,
+        "the forward anchor boundary was not local: {stats:?}"
     );
     case.assert_matches_fresh("external anchor with stranded branch");
     assert_scoped(&stats, "external anchor with stranded branch");
@@ -986,7 +992,11 @@ fn a_long_anchor_path_is_included_in_prune_locality() {
     );
     assert!(
         stats.reverse_predecessor_edges_examined == 0,
-        "the affected-region search still examined reverse predecessor edges: {stats:?}"
+        "the affected-region search still examined rootward predecessor edges: {stats:?}"
+    );
+    assert!(
+        stats.boundary_predecessor_edges_examined > 0,
+        "the local boundary classification examined no predecessor edges: {stats:?}"
     );
     assert!(
         stats.prune_search_population >= stats.suspect_region,
@@ -995,16 +1005,136 @@ fn a_long_anchor_path_is_included_in_prune_locality() {
     assert_eq!(
         stats.prune_search_population,
         stats.suspect_region
+            + stats.boundary_predecessor_edges_examined
             + stats.reverse_instances_examined
             + stats.reverse_predecessor_edges_examined,
-        "the prune denominator does not include every reported search population: {stats:?}"
+        "the prune denominator does not include every reported pruning population: {stats:?}"
     );
     assert!(
-        stats.prune_search_population <= stats.expanded * 4,
-        "forward plus reverse prune work escaped the locality bound: {stats:?}"
+        stats.suspect_region <= stats.expanded * 4,
+        "the forward prune region escaped the locality bound: {stats:?}"
+    );
+    assert!(
+        stats.prune_search_population <= stats.suspect_region * 4,
+        "forward plus boundary prune work escaped the locality bound: {stats:?}"
     );
     case.assert_matches_fresh("long external anchor path");
     assert_scoped(&stats, "long external anchor path");
+}
+
+const DIRECT_SEED_MAIN_V1: &str =
+    "fn main() { print(\"{shared_root()}\") }\nfn independent_root() -> int { return shared_root() }\n";
+const DIRECT_SEED_MAIN_V2: &str =
+    "fn main() { print(\"0\") }\nfn independent_root() -> int { return shared_root() }\n";
+const DIRECT_SEED_LIB: &str = r#"
+fn shared_root() -> int { return shared_left() + shared_right() }
+fn shared_left() -> int { return shared_left_a() + shared_left_b() }
+fn shared_right() -> int { return shared_right_a() + shared_right_b() }
+fn shared_left_a() -> int { return shared_left_a_0() + shared_left_a_1() }
+fn shared_left_b() -> int { return shared_left_b_0() + shared_left_b_1() }
+fn shared_right_a() -> int { return shared_right_a_0() + shared_right_a_1() }
+fn shared_right_b() -> int { return shared_right_b_0() + shared_right_b_1() }
+fn shared_left_a_0() -> int { return 1 }
+fn shared_left_a_1() -> int { return 2 }
+fn shared_left_b_0() -> int { return 3 }
+fn shared_left_b_1() -> int { return 4 }
+fn shared_right_a_0() -> int { return 5 }
+fn shared_right_a_1() -> int { return 6 }
+fn shared_right_b_0() -> int { return 7 }
+fn shared_right_b_1() -> int { return 8 }
+"#;
+const DIRECT_SEED_SUBTREE: &[&str] = &[
+    "shared_root",
+    "shared_left",
+    "shared_right",
+    "shared_left_a",
+    "shared_left_b",
+    "shared_right_a",
+    "shared_right_b",
+    "shared_left_a_0",
+    "shared_left_a_1",
+    "shared_left_b_0",
+    "shared_left_b_1",
+    "shared_right_a_0",
+    "shared_right_a_1",
+    "shared_right_b_0",
+    "shared_right_b_1",
+];
+
+#[test]
+fn an_externally_supported_lost_seed_stops_before_its_subtree() {
+    let mut case = Case::new(DIRECT_SEED_MAIN_V1, DIRECT_SEED_LIB);
+    for name in DIRECT_SEED_SUBTREE {
+        assert!(case.has_instance_named(name), "v1 never reached `{name}`");
+    }
+    assert!(
+        case.graph
+            .root_instances
+            .iter()
+            .any(|instance| case.identity(instance).starts_with("independent_root")),
+        "the independent external root is not rooted"
+    );
+    let shared = case
+        .graph
+        .instances
+        .iter()
+        .find(|instance| case.identity(instance).starts_with("shared_root"))
+        .cloned()
+        .expect("the direct shared seed");
+    let incoming = case.graph.index.preds.get(&shared).expect("shared predecessor row");
+    assert!(
+        incoming.iter().any(|pred| case.identity(pred).starts_with("independent_root")),
+        "the direct seed has no independent external predecessor: {incoming:?}"
+    );
+
+    let stats = case.edit(MAIN, DIRECT_SEED_MAIN_V2);
+
+    assert!(
+        stats
+            .prune_seeds
+            .iter()
+            .any(|seed| case.identity(seed).starts_with("shared_root")),
+        "shared_root was not an initial lost seed: {stats:?}"
+    );
+    for name in DIRECT_SEED_SUBTREE {
+        assert!(case.has_instance_named(name), "shared subtree `{name}` was pruned");
+    }
+    assert_eq!(stats.pruned, 0, "the externally supported subtree was pruned: {stats:?}");
+    case.assert_matches_fresh("direct externally supported seed");
+    assert!(stats.suspect_region > 0, "the direct seed had no forward population: {stats:?}");
+    assert!(
+        stats.boundary_predecessor_edges_examined > 0,
+        "the direct seed classified no external predecessor edge: {stats:?}"
+    );
+    assert_eq!(
+        stats.reverse_instances_examined, 0,
+        "the direct seed used a rootward reverse query: {stats:?}"
+    );
+    assert_eq!(
+        stats.reverse_predecessor_edges_examined, 0,
+        "the direct seed examined rootward predecessor edges: {stats:?}"
+    );
+    assert_eq!(
+        stats.prune_search_population,
+        stats.suspect_region
+            + stats.boundary_predecessor_edges_examined
+            + stats.reverse_instances_examined
+            + stats.reverse_predecessor_edges_examined,
+        "the direct-seed denominator omits pruning work: {stats:?}"
+    );
+    assert!(
+        stats.suspect_region < DIRECT_SEED_SUBTREE.len(),
+        "the prune search expanded the shared subtree: {stats:?}"
+    );
+    assert!(
+        stats.suspect_region <= stats.expanded * 4,
+        "the direct external seed's forward region escaped the locality bound: {stats:?}"
+    );
+    assert!(
+        stats.prune_search_population <= stats.suspect_region * 4,
+        "the direct external seed's boundary work escaped the locality bound: {stats:?}"
+    );
+    assert_scoped(&stats, "direct externally supported seed");
 }
 
 const DEFERRED_BOUNDARY_LIB: &str = r#"
@@ -1049,7 +1179,7 @@ fn dead_leaf() -> int { return 1 }
 #[test]
 fn a_rooted_cycle_survives_while_the_lost_branch_is_pruned() {
     let mut case = Case::new(
-        "fn main() { print(\"{entry()}\") }\nfn root_anchor() -> int { return rooted_a() }\n",
+        "fn main() { print(\"{entry()} {rooted_a()}\") }\nfn root_anchor() -> int { return rooted_a() }\n",
         ROOTED_CYCLE_LIB,
     );
     for name in ["entry", "rooted_a", "rooted_b", "dead", "dead_leaf"] {
@@ -1061,6 +1191,13 @@ fn a_rooted_cycle_survives_while_the_lost_branch_is_pruned() {
         "fn main() { print(\"0\") }\nfn root_anchor() -> int { return rooted_a() }\n",
     );
 
+    assert!(
+        stats
+            .prune_seeds
+            .iter()
+            .any(|seed| case.identity(seed).starts_with("rooted_a")),
+        "the rooted cycle member was not an initial lost seed: {stats:?}"
+    );
     for name in ["rooted_a", "rooted_b"] {
         assert!(case.has_instance_named(name), "rooted cycle member `{name}` was pruned");
     }
