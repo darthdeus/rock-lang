@@ -6409,9 +6409,10 @@ fn assemble_overlay(
     ws: &Workspace,
     cache: &SkullEmitCache,
     shader_changed: bool,
-) -> Result<MirEmit, CompilerError> {
+) -> Result<(MirEmit, UnitComptimeReads), CompilerError> {
     let mut out = String::from("-- skull incremental overlay (loaded after main.lua)\n");
     let mut skipped: Vec<(String, String)> = Vec::new();
+    let mut unit_reads = UnitComptimeReads::default();
 
     // Redefine the changed functions, deterministic order for a stable diff.
     let mut order: Vec<Instance> = cache.changed_since_full.iter().cloned().collect();
@@ -6543,6 +6544,9 @@ fn assemble_overlay(
                 if let Some(err) = unit.hard_error {
                     return Err(err);
                 }
+                unit_reads
+                    .globals
+                    .insert((a.mid, a.gid), unit.comptime_reads.clone());
                 out.push_str(&unit.lua); // the (new) ginit fn def
                 if let Some(s) = unit.skipped {
                     skipped.push(s);
@@ -6600,17 +6604,20 @@ fn assemble_overlay(
         out.push_str(&cache.shader_registrations.lua);
     }
 
-    Ok(MirEmit {
-        lua: out,
-        skipped,
-        phases: Vec::new(),
-        abi_plan_stats: cache.scx.abi_plan_stats(),
-        attribution: EmitAttribution::default(),
-        arena_traffic: ArenaTraffic::default(),
-        setup_lanes: SetupLaneAttribution::default(),
-        graph_census: crate::instance_graph::RunStats::default(),
-        concrete_stats: crate::concrete_body::ConcreteBuildStats::default(),
-    })
+    Ok((
+        MirEmit {
+            lua: out,
+            skipped,
+            phases: Vec::new(),
+            abi_plan_stats: cache.scx.abi_plan_stats(),
+            attribution: EmitAttribution::default(),
+            arena_traffic: ArenaTraffic::default(),
+            setup_lanes: SetupLaneAttribution::default(),
+            graph_census: crate::instance_graph::RunStats::default(),
+            concrete_stats: crate::concrete_body::ConcreteBuildStats::default(),
+        },
+        unit_reads,
+    ))
 }
 
 /// `__rock_rebind_system("<name>", <func>)` for each CHANGED decorated function
@@ -6708,7 +6715,14 @@ pub fn emit_overlay_with_span_edits(
     }
     let t_relower = t2.elapsed();
     let t3 = Instant::now();
-    let mut emit = assemble_overlay(ws, cache, shader_changed)?;
+    let (mut emit, overlay_unit_reads) = assemble_overlay(ws, cache, shader_changed)?;
+    for (key, reads) in overlay_unit_reads.globals {
+        if reads.is_empty() {
+            cache.unit_comptime_reads.globals.remove(&key);
+        } else {
+            cache.unit_comptime_reads.globals.insert(key, reads);
+        }
+    }
     if concrete_stats_requested() {
         emit.concrete_stats = cache.concrete.snapshot_build_stats();
     }

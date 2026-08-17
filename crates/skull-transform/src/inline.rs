@@ -397,11 +397,13 @@ pub struct InlineCandidateTable {
     stats: InlineCandidateTableStats,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct InlineCandidateProfile {
     pub lower_ns: u64,
     pub full_clone_ns: u64,
+    pub cleanup_ns: u64,
     pub compact_ns: u64,
+    pub eligibility_ns: u64,
     pub lower_attempted: bool,
     pub lowered: bool,
     pub eligible: bool,
@@ -418,6 +420,8 @@ pub struct InlineCandidateProfile {
     pub compact_inst_capacity: usize,
     pub compact_cell_capacity: usize,
     pub compact_block_capacity: usize,
+    pub worker: String,
+    pub rejection_reason: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -477,6 +481,113 @@ pub struct InlineCandidateWarm {
     pub eligibility_ns: u64,
     pub rejection: Option<&'static str>,
     worker: String,
+}
+
+impl InlineCandidateProfile {
+    fn from_warm(warm: &InlineCandidateWarm) -> Self {
+        Self {
+            lower_ns: warm.lower_ns,
+            full_clone_ns: warm.full_clone_ns,
+            cleanup_ns: warm.cleanup_ns,
+            compact_ns: warm.compact_ns,
+            eligibility_ns: warm.eligibility_ns,
+            lower_attempted: warm.lower_attempted,
+            lowered: warm.lowered,
+            eligible: warm.rejection.is_none(),
+            rejected_before_lower: warm.rejection.is_some() && !warm.lower_attempted,
+            raw_instructions: warm.raw_instructions,
+            raw_cells: warm.raw_cells,
+            raw_blocks: warm.raw_blocks,
+            cleaned_instructions: warm.cleaned_instructions,
+            cleaned_cells: warm.cleaned_cells,
+            cleaned_blocks: warm.cleaned_blocks,
+            full_clone_inst_capacity: warm.full_clone_inst_capacity,
+            full_clone_cell_capacity: warm.full_clone_cell_capacity,
+            full_clone_block_capacity: warm.full_clone_block_capacity,
+            compact_inst_capacity: warm.compact_inst_capacity,
+            compact_cell_capacity: warm.compact_cell_capacity,
+            compact_block_capacity: warm.compact_block_capacity,
+            worker: warm.worker.clone(),
+            rejection_reason: warm.rejection.map(str::to_string),
+        }
+    }
+}
+
+fn adjust_count(map: &mut BTreeMap<String, usize>, key: &str, add: bool) {
+    if add {
+        *map.entry(key.to_string()).or_default() += 1;
+    } else if let Some(count) = map.get_mut(key) {
+        *count = count.saturating_sub(1);
+        if *count == 0 {
+            map.remove(key);
+        }
+    }
+}
+
+fn adjust_candidate_profile(
+    stats: &mut InlineCandidateTableStats,
+    key: &Instance,
+    profile: &InlineCandidateProfile,
+    add: bool,
+) {
+    macro_rules! adjust {
+        ($field:ident) => {
+            if add {
+                stats.$field += profile.$field;
+            } else {
+                stats.$field = stats.$field.saturating_sub(profile.$field);
+            }
+        };
+    }
+    macro_rules! adjust_bool {
+        ($field:ident) => {
+            if add {
+                stats.$field += usize::from(profile.$field);
+            } else {
+                stats.$field = stats.$field.saturating_sub(usize::from(profile.$field));
+            }
+        };
+    }
+    adjust!(lower_ns);
+    adjust!(full_clone_ns);
+    adjust!(cleanup_ns);
+    adjust!(compact_ns);
+    adjust!(eligibility_ns);
+    adjust_bool!(lower_attempted);
+    adjust_bool!(lowered);
+    adjust_bool!(rejected_before_lower);
+    adjust!(raw_instructions);
+    adjust!(raw_cells);
+    adjust!(raw_blocks);
+    adjust!(cleaned_instructions);
+    adjust!(cleaned_cells);
+    adjust!(cleaned_blocks);
+    adjust!(full_clone_inst_capacity);
+    adjust!(full_clone_cell_capacity);
+    adjust!(full_clone_block_capacity);
+    adjust!(compact_inst_capacity);
+    adjust!(compact_cell_capacity);
+    adjust!(compact_block_capacity);
+    if add {
+        stats.eligible += usize::from(profile.eligible);
+        stats.rejected += usize::from(!profile.eligible);
+    } else {
+        stats.eligible = stats.eligible.saturating_sub(usize::from(profile.eligible));
+        stats.rejected = stats.rejected.saturating_sub(usize::from(!profile.eligible));
+    }
+    if !profile.worker.is_empty() {
+        adjust_count(&mut stats.worker_derivations, &profile.worker, add);
+    }
+    if let Some(reason) = &profile.rejection_reason {
+        adjust_count(&mut stats.rejection_reasons, reason, add);
+    }
+    if profile.lowered {
+        if add {
+            stats.lower_ns_by_key.insert(key.clone(), profile.lower_ns);
+        } else {
+            stats.lower_ns_by_key.remove(key);
+        }
+    }
 }
 
 impl InlineCandidateTable {
@@ -545,30 +656,9 @@ impl InlineCandidateTable {
                 stats.eligible += 1;
             }
             if census_enabled {
-                stats.profiles.insert(
-                    warm.key.clone(),
-                    InlineCandidateProfile {
-                        lower_ns: warm.lower_ns,
-                        full_clone_ns: warm.full_clone_ns,
-                        compact_ns: warm.compact_ns,
-                        lower_attempted: warm.lower_attempted,
-                        lowered: warm.lowered,
-                        eligible: warm.rejection.is_none(),
-                        rejected_before_lower: warm.rejection.is_some() && !warm.lower_attempted,
-                        raw_instructions: warm.raw_instructions,
-                        raw_cells: warm.raw_cells,
-                        raw_blocks: warm.raw_blocks,
-                        cleaned_instructions: warm.cleaned_instructions,
-                        cleaned_cells: warm.cleaned_cells,
-                        cleaned_blocks: warm.cleaned_blocks,
-                        full_clone_inst_capacity: warm.full_clone_inst_capacity,
-                        full_clone_cell_capacity: warm.full_clone_cell_capacity,
-                        full_clone_block_capacity: warm.full_clone_block_capacity,
-                        compact_inst_capacity: warm.compact_inst_capacity,
-                        compact_cell_capacity: warm.compact_cell_capacity,
-                        compact_block_capacity: warm.compact_block_capacity,
-                    },
-                );
+                stats
+                    .profiles
+                    .insert(warm.key.clone(), InlineCandidateProfile::from_warm(&warm));
             }
             let previous = warmed.insert(warm.key, warm.candidate);
             assert!(previous.is_none(), "inline candidate table received a duplicate key");
@@ -608,6 +698,26 @@ impl InlineCandidateTable {
         removed: &[Instance],
     ) -> Self {
         let mut entries = HashMap::default();
+        let mut stats = base.stats.clone();
+        let census_enabled = !stats.profiles.is_empty()
+            || warms.iter().any(|warm| !warm.worker.is_empty());
+        if census_enabled {
+            for key in removed {
+                if let Some(profile) = stats.profiles.remove(key) {
+                    adjust_candidate_profile(&mut stats, key, &profile, false);
+                }
+            }
+        }
+        for warm in &warms {
+            if census_enabled {
+                if let Some(profile) = stats.profiles.remove(&warm.key) {
+                    adjust_candidate_profile(&mut stats, &warm.key, &profile, false);
+                }
+                let profile = InlineCandidateProfile::from_warm(warm);
+                adjust_candidate_profile(&mut stats, &warm.key, &profile, true);
+                stats.profiles.insert(warm.key.clone(), profile);
+            }
+        }
         for warm in warms {
             let previous = entries.insert(warm.key, warm.candidate);
             assert!(previous.is_none(), "inline candidate delta received a duplicate key");
@@ -616,7 +726,6 @@ impl InlineCandidateTable {
         for key in entries.keys() {
             removed_keys.remove(key);
         }
-        let mut stats = base.stats.clone();
         stats.keys = stats
             .keys
             .saturating_add(added.len())
@@ -3247,6 +3356,71 @@ mod tests {
         assert_eq!(annotation_gate(true, false, true), Some(true));   // @inline -> forced
         assert_eq!(annotation_gate(false, true, true), Some(false));  // @pure inert in this mode
         assert_eq!(annotation_gate(true, true, true), Some(true));
+    }
+
+    fn candidate_test_key() -> Instance {
+        let mut modules = vec![
+            skull_parser::parse_module_clean(
+                "fn candidate() -> int { return 1 }",
+                Ustr::from("<candidate-table-test>"),
+            )
+            .expect("parse"),
+        ];
+        let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic");
+        let mid = *ws
+            .module_ids
+            .get(&Ustr::from("<candidate-table-test>"))
+            .expect("module");
+        let (func, _) = ws.module(mid).functions.iter().next().expect("candidate");
+        Instance::base(FuncRef { module: mid, func })
+    }
+
+    fn candidate_warm(key: Instance, rejection: Option<&'static str>) -> InlineCandidateWarm {
+        InlineCandidateWarm {
+            key,
+            candidate: None,
+            lower_ns: 0,
+            full_clone_ns: 0,
+            cleanup_ns: 0,
+            compact_ns: 0,
+            lower_attempted: false,
+            lowered: false,
+            raw_instructions: 0,
+            raw_cells: 0,
+            raw_blocks: 0,
+            cleaned_instructions: 0,
+            cleaned_cells: 0,
+            cleaned_blocks: 0,
+            full_clone_inst_capacity: 0,
+            full_clone_cell_capacity: 0,
+            full_clone_block_capacity: 0,
+            compact_inst_capacity: 0,
+            compact_cell_capacity: 0,
+            compact_block_capacity: 0,
+            eligibility_ns: 0,
+            rejection,
+            worker: "candidate-table-test".to_string(),
+        }
+    }
+
+    #[test]
+    fn incremental_candidate_replacement_updates_rejection_profile() {
+        let key = candidate_test_key();
+        let base = Arc::new(InlineCandidateTable::from_warms(vec![candidate_warm(key.clone(), None)]));
+        assert_eq!(base.stats().eligible, 1);
+        assert_eq!(base.stats().rejected, 0);
+
+        let delta = InlineCandidateTable::from_warms_incremental(
+            Arc::clone(&base),
+            vec![candidate_warm(key.clone(), Some("body_changed"))],
+            &[],
+            &[],
+        );
+        let stats = delta.stats();
+        assert_eq!(stats.eligible, 0, "the replaced candidate stayed eligible");
+        assert_eq!(stats.rejected, 1, "the replaced rejection was not published");
+        assert_eq!(stats.rejection_reasons.get("body_changed"), Some(&1));
+        assert!(!stats.profiles[&key].eligible, "the replacement profile is stale");
     }
 
     fn resolved_tree_count(mf: &MirFunc) -> (usize, usize) {

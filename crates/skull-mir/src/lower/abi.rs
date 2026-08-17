@@ -2234,7 +2234,8 @@ mod rep_read_cache_tests {
             RepUse::Return,
             RepLayout::Foreign { reason: Ustr::from("test") },
         );
-        assert_eq!(ia, ib, "both arenas must mint id 0 for the fixture to discriminate");
+        assert_eq!(ia.raw(), ib.raw(), "both arenas must mint local id 0 for the fixture to discriminate");
+        assert_ne!(ia, ib, "arena ownership must distinguish equal local ids");
         for _ in 0..2 {
             assert!(matches!(a.get(ia).layout(), RepLayout::Opaque));
             assert!(matches!(b.get(ib).layout(), RepLayout::Foreign { .. }));

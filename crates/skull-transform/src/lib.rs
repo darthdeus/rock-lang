@@ -1791,7 +1791,7 @@ mod tests {
         let value = unrooted.emit(unrooted.entry, Inst::Const(Lit::Int(1)));
         let store = unrooted.emit(unrooted.entry, Inst::Store { cell, value });
         unrooted.set_term(unrooted.entry, Term::Return(Vec::new()));
-        cleanup(&mut unrooted);
+        let _ = cleanup(&mut unrooted);
         assert!(!unrooted.blocks[unrooted.entry].insts.contains(&store));
 
         let mut rooted = MirFunc::new(ustr::Ustr::from("cleanup_root"));
@@ -1800,7 +1800,7 @@ mod tests {
         let store = rooted.emit(rooted.entry, Inst::Store { cell, value });
         rooted.inline_cleanup_load_cells.push(cell);
         rooted.set_term(rooted.entry, Term::Return(Vec::new()));
-        cleanup(&mut rooted);
+        let _ = cleanup(&mut rooted);
         assert!(rooted.blocks[rooted.entry].insts.contains(&store));
     }
 

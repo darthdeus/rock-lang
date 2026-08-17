@@ -184,6 +184,20 @@ fn reinferred_of(
     panic!("no fn named {name}");
 }
 
+fn global_reinferred_of(
+    ws: &bone_semantic::inference::Workspace,
+    name: &str,
+) -> (bone_semantic::prelude::ModuleId, bone_semantic::hir::BodyOwner) {
+    for module in ws.modules.iter() {
+        for (gid, global) in module.globals.iter() {
+            if global.name.as_str() == name {
+                return (module.id, bone_semantic::hir::BodyOwner::Global(gid));
+            }
+        }
+    }
+    panic!("no global named {name}");
+}
+
 const INCR_SRC: &str = r#"
 fn tag() -> string {
     return build_var("SHA")
@@ -225,6 +239,41 @@ fn build_var_change_reaches_incremental_and_overlay() {
         "the overlay must redefine the body reading the changed var:\n{}",
         overlay.lua
     );
+}
+
+#[test]
+fn a_comptime_input_change_reaches_every_recorded_consumer() {
+    use skull::mir_emit::{emit_full, emit_incremental};
+
+    let src = r#"
+fn first() -> string {
+    return build_var("SHA")
+}
+fn second() -> string {
+    return build_var("SHA")
+}
+const TAG: string = build_var("SHA")
+fn other() -> int {
+    return 1
+}
+fn main() {
+    print(first())
+    print(second())
+    print(TAG)
+}
+"#;
+    let ws1 = ws_with_inputs(src, inputs_with_var("SHA", "all-first"));
+    let mid = skull::user_module_id(&ws1).unwrap();
+    let (full1, mut cache) = emit_full(&ws1, mid).expect("emit_full v1");
+    assert_eq!(full1.lua.matches("all-first").count(), 3);
+
+    let ws2 = ws_with_inputs(src, inputs_with_var("SHA", "all-second"));
+    let incremental = emit_incremental(&ws2, &mut cache, &[reinferred_of(&ws2, "other")])
+        .expect("emit_incremental");
+    assert_eq!(incremental.lua.matches("all-second").count(), 3);
+    assert!(!incremental.lua.contains("all-first"));
+    let fresh = emit_full(&ws2, skull::user_module_id(&ws2).unwrap()).expect("fresh").0;
+    assert_eq!(incremental.lua, fresh.lua, "incremental != fresh for all consumers");
 }
 
 #[test]
@@ -377,6 +426,59 @@ fn global_const_build_var_change_reaches_the_overlay() {
         overlay.lua.contains("TAG = "),
         "the overlay must re-run the const's init line:\n{}",
         overlay.lua
+    );
+}
+
+#[test]
+fn global_body_edit_replaces_the_recorded_comptime_read_set() {
+    use skull::mir_emit::{emit_full, emit_overlay};
+
+    let dir = tempfile::tempdir().unwrap();
+    let first_path = dir.path().join("first.txt");
+    let second_path = dir.path().join("second.txt");
+    std::fs::write(&first_path, "first-v1").unwrap();
+    std::fs::write(&second_path, "second-v1").unwrap();
+    let v1 = r#"
+const TAG: string = embed_string("first.txt")
+fn other() -> int {
+    return 1
+}
+fn main() {
+    print(TAG)
+}
+"#;
+    let v2 = v1.replace("first.txt", "second.txt");
+    let mut inputs = bone_semantic::inference::ComptimeInputs::default();
+    inputs.embed_root = Some(dir.path().to_path_buf());
+    let ws1 = ws_with_inputs(v1, inputs.clone());
+    let mid = skull::user_module_id(&ws1).unwrap();
+    let (_, mut cache) = emit_full(&ws1, mid).expect("emit_full v1");
+
+    let ws2 = ws_with_inputs(&v2, inputs.clone());
+    let first = emit_overlay(&ws2, &mut cache, &[global_reinferred_of(&ws2, "TAG")])
+        .expect("global body edit overlay");
+    assert!(
+        first.lua.contains("second-v1"),
+        "the first overlay must carry the new input: {}",
+        first.lua
+    );
+    let first_canonical = first_path.canonicalize().unwrap();
+    let second_canonical = second_path.canonicalize().unwrap();
+    let files = cache.comptime_files();
+    assert!(
+        files.iter().any(|file| std::path::Path::new(file.as_str()) == second_canonical)
+            && !files.iter().any(|file| std::path::Path::new(file.as_str()) == first_canonical),
+        "the overlay must publish the replacement global read set: {files:?}"
+    );
+
+    std::fs::write(&second_path, "second-v2").unwrap();
+    let ws3 = ws_with_inputs(&v2, inputs);
+    let second = emit_overlay(&ws3, &mut cache, &[reinferred_of(&ws3, "other")])
+        .expect("new input overlay");
+    assert!(
+        second.lua.contains("second-v2"),
+        "a later change to the newly recorded input must reach the global initializer: {}",
+        second.lua
     );
 }
 

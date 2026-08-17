@@ -454,6 +454,7 @@ impl ConcreteBodies {
             owner.accumulate_into(&mut facts);
         }
         facts.build_stats.add(self.global_build_stats);
+        facts.sort_for_output();
         facts
     }
 
@@ -482,21 +483,6 @@ impl ConcreteBodies {
         self.signature_slots_cloned = facts.signature_slots_cloned;
         self.slot_conversions = facts.slot_conversions;
         self.build_stats = facts.build_stats;
-        self.free_types.sort_by(|left, right| left.0.cmp(&right.0));
-        self.gaps.sort_by(|left, right| left.instance.cmp(&right.instance));
-        self.plan_failures.sort_by(|left, right| left.0.cmp(&right.0));
-        self.always_plan_failures
-            .sort_by(|left, right| concrete_owner_order(&left.0, &right.0));
-        self.untyped.sort_by(|left, right| left.0.cmp(&right.0));
-        self.callee_holes.sort_by(|left, right| {
-            left.instance
-                .cmp(&right.instance)
-                .then_with(|| left.site.cmp(&right.site))
-                .then_with(|| left.reason.cmp(right.reason))
-        });
-        self.unknown_rock_callees.sort_by(|left, right| {
-            left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1))
-        });
     }
 
     pub fn plan_for(&self, instance: &Instance) -> Option<&ConcreteBodyPlan> {
@@ -1632,6 +1618,24 @@ impl OwnerFacts {
         out.signature_slots_cloned += self.signature_slots_cloned;
         out.slot_conversions += self.slot_conversions;
         out.build_stats.add(self.build_stats);
+    }
+
+    fn sort_for_output(&mut self) {
+        self.free_types.sort_by(|left, right| left.0.cmp(&right.0));
+        self.gaps.sort_by(|left, right| left.instance.cmp(&right.instance));
+        self.plan_failures.sort_by(|left, right| left.0.cmp(&right.0));
+        self.always_plan_failures
+            .sort_by(|left, right| concrete_owner_order(&left.0, &right.0));
+        self.untyped.sort_by(|left, right| left.0.cmp(&right.0));
+        self.callee_holes.sort_by(|left, right| {
+            left.instance
+                .cmp(&right.instance)
+                .then_with(|| left.site.cmp(&right.site))
+                .then_with(|| left.reason.cmp(right.reason))
+        });
+        self.unknown_rock_callees.sort_by(|left, right| {
+            left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1))
+        });
     }
 
 }
