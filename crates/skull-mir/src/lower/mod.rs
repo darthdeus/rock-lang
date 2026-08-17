@@ -1373,6 +1373,21 @@ pub fn lower_instance_with_plans(
     lower_instance_with_plan_inner(ws, scx, plan, concrete_plans)
 }
 
+/// Reject a specialized bounded body whose witness tree was lost before any
+/// lowering consumer can interpret its placeholder calls.
+pub fn validate_concrete_bound_plan(
+    func: &bone_semantic::hir::Function,
+    plan: &ConcreteBodyPlan,
+) -> Result<(), CompilerError> {
+    if func.generic_bounds.iter().any(Option::is_some) && plan.bound_tree.is_empty() {
+        return Err(CompilerError::new_with_label(
+            func.name_span,
+            "concrete callee bound plan is empty for its site".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 fn lower_instance_with_plan_inner(
     ws: &Workspace,
     scx: &ScalarCtx,
@@ -1384,6 +1399,8 @@ fn lower_instance_with_plan_inner(
         .ok_or_else(|| gap("concrete plan does not own a function instance"))?;
     let (mid, fid) = (inst.func.module, inst.func.func);
     let module = ws.module(mid);
+    let func = &module.functions[fid];
+    validate_concrete_bound_plan(func, plan)?;
     let body = module
         .bodies
         .get(&BodyOwner::Function(fid))
@@ -1392,7 +1409,6 @@ fn lower_instance_with_plan_inner(
         .inference(mid)
         .and_then(|ir| ir.per_fn.get(&BodyOwner::Function(fid)));
     if let Some(inf) = inf {
-        let func = &module.functions[fid];
         validate_concrete_type_tables(
             ws,
             inf,

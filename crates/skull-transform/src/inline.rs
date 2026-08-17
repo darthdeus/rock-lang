@@ -1604,6 +1604,7 @@ fn classify(
     let Some(plan) = concrete_plans.get(inst) else {
         return reject_candidate(&mut timing, "missing_concrete_plan");
     };
+    skull_mir::lower::validate_concrete_bound_plan(f, plan)?;
     let abi = skull_mir::lower::owner_abi_plan(ws, scx, concrete_plans, inst)?;
     let lower_started = timing.as_ref().map(|_| Instant::now());
     if let Some(timing) = timing.as_deref_mut() {

@@ -3112,12 +3112,7 @@ fn emit_spec_chunk(
         .plan_for(body)
         .ok_or_else(|| CompilerError::new_with_label(f.name_span, format!("no concrete plan for `{name}`")))?;
     let tree = &plan.bound_tree;
-    if fn_has_bounds(f) && tree.is_empty() {
-        return Err(CompilerError::new_with_label(
-            f.name_span,
-            format!("concrete plan has no resolved bound tree for specialized `{name}`"),
-        ));
-    }
+    skull_mir::lower::validate_concrete_bound_plan(f, plan)?;
     let tl = Instant::now();
     let canonical_body = inline_cache.canonical_body(body);
     let canonical_reused = canonical_body.is_some();
