@@ -3521,6 +3521,12 @@ impl InstanceGraph {
                     .cloned()
                     .collect()
             };
+        let predecessor_has_external_support =
+            |target: &Instance, region: &BTreeSet<Instance>, examined: &mut usize| {
+                let Some(preds) = self.index.preds.get(target) else { return false };
+                *examined += preds.len();
+                preds.iter().any(|pred| *pred != *target && !region.contains(pred))
+            };
         while !queue.is_empty() || !released.is_empty() {
             while let Some(promoted) = released.pop() {
                 let waiters = boundary_waiters.remove(&promoted).unwrap_or_default();
@@ -3568,12 +3574,18 @@ impl InstanceGraph {
                 anchors.remove(&i);
                 boundary_preds.remove(&i);
             }
-            // A lost seed with a root/always-emitted boundary is tentative;
+            // A lost seed with a locally supported boundary is tentative;
             // otherwise it must probe forward so an unanchored cycle is found.
-            let has_root_boundary = blockers.iter().any(|pred| {
-                self.root_instances.contains(pred) || self.index.always_emitted.contains_key(pred)
+            let has_live_boundary = blockers.iter().any(|pred| {
+                self.root_instances.contains(pred)
+                    || self.index.always_emitted.contains_key(pred)
+                    || predecessor_has_external_support(
+                        pred,
+                        &region,
+                        &mut boundary_predecessor_edges_examined,
+                    )
             });
-            if !blockers.is_empty() && (!seeds.contains(&i) || has_root_boundary) {
+            if !blockers.is_empty() && (!seeds.contains(&i) || has_live_boundary) {
                 continue;
             }
             for target in succ(&i).iter().map(|e| e.to.clone()) {

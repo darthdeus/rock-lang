@@ -1137,6 +1137,137 @@ fn an_externally_supported_lost_seed_stops_before_its_subtree() {
     assert_scoped(&stats, "direct externally supported seed");
 }
 
+const NESTED_SEED_MAIN_V1: &str =
+    "fn main() { print(\"{shared(1)}\") }\nfn independent_root() { print(\"{outer(1)}\") }\n";
+const NESTED_SEED_MAIN_V2: &str =
+    "fn main() { print(\"0\") }\nfn independent_root() { print(\"{outer(1)}\") }\n";
+const NESTED_SEED_LIB: &str = r#"
+fn shared<T>(x: T) -> int { return shared_left() + shared_right() }
+fn outer<T>(x: T) -> int { return shared(x) }
+fn shared_left() -> int { return shared_left_a() + shared_left_b() }
+fn shared_right() -> int { return shared_right_a() + shared_right_b() }
+fn shared_left_a() -> int { return shared_left_a_0() + shared_left_a_1() }
+fn shared_left_b() -> int { return shared_left_b_0() + shared_left_b_1() }
+fn shared_right_a() -> int { return shared_right_a_0() + shared_right_a_1() }
+fn shared_right_b() -> int { return shared_right_b_0() + shared_right_b_1() }
+fn shared_left_a_0() -> int { return 1 }
+fn shared_left_a_1() -> int { return 2 }
+fn shared_left_b_0() -> int { return 3 }
+fn shared_left_b_1() -> int { return 4 }
+fn shared_right_a_0() -> int { return 5 }
+fn shared_right_a_1() -> int { return 6 }
+fn shared_right_b_0() -> int { return 7 }
+fn shared_right_b_1() -> int { return 8 }
+"#;
+const NESTED_SEED_SUBTREE: &[&str] = &[
+    "shared",
+    "shared_left",
+    "shared_right",
+    "shared_left_a",
+    "shared_left_b",
+    "shared_right_a",
+    "shared_right_b",
+    "shared_left_a_0",
+    "shared_left_a_1",
+    "shared_left_b_0",
+    "shared_left_b_1",
+    "shared_right_a_0",
+    "shared_right_a_1",
+    "shared_right_b_0",
+    "shared_right_b_1",
+];
+
+#[test]
+fn a_root_reachable_non_root_seed_predecessor_stops_before_its_subtree() {
+    let mut case = Case::new(NESTED_SEED_MAIN_V1, NESTED_SEED_LIB);
+    for name in NESTED_SEED_SUBTREE {
+        assert!(case.has_instance_named(name), "v1 never reached `{name}`");
+    }
+    let outer = case
+        .graph
+        .instances
+        .iter()
+        .find(|instance| case.identity(instance).starts_with("outer"))
+        .cloned()
+        .expect("the nested outer instance");
+    assert!(
+        !case.graph.root_instances.contains(&outer),
+        "the nested predecessor unexpectedly became a root: {}",
+        case.identity(&outer)
+    );
+    assert!(
+        !case.graph.index.always_emitted.contains_key(&outer),
+        "the nested predecessor unexpectedly became always-emitted: {}",
+        case.identity(&outer)
+    );
+    assert!(
+        case.graph.reachable_instances().contains(&outer),
+        "the nested predecessor is not independently root-reachable: {}",
+        case.identity(&outer)
+    );
+
+    let stats = case.edit(MAIN, NESTED_SEED_MAIN_V2);
+
+    assert!(
+        stats
+            .prune_seeds
+            .iter()
+            .any(|seed| case.identity(seed).starts_with("shared")),
+        "shared<T> was not an initial lost seed: {stats:?}"
+    );
+    let shared = case
+        .graph
+        .instances
+        .iter()
+        .find(|instance| case.identity(instance).starts_with("shared"))
+        .cloned()
+        .expect("the shared generic seed after the edit");
+    let incoming = case.graph.index.preds.get(&shared).expect("shared predecessor row");
+    assert!(
+        incoming.iter().any(|pred| case.identity(pred).starts_with("outer")),
+        "the shared seed lost its nested predecessor: {incoming:?}"
+    );
+    assert!(
+        incoming.iter().any(|pred| !case.graph.root_instances.contains(pred)),
+        "the shared seed's predecessor row has no non-root instance: {incoming:?}"
+    );
+    for name in NESTED_SEED_SUBTREE {
+        assert!(case.has_instance_named(name), "shared subtree `{name}` was pruned");
+    }
+    assert_eq!(stats.pruned, 0, "the rooted nested subtree was pruned: {stats:?}");
+    case.assert_matches_fresh("root-reachable nested seed");
+    assert!(stats.suspect_region > 0, "the nested seed had no forward population: {stats:?}");
+    assert!(
+        stats.boundary_predecessor_edges_examined > 0,
+        "the nested seed classified no boundary predecessor edge: {stats:?}"
+    );
+    assert_eq!(
+        stats.reverse_instances_examined, 0,
+        "the nested seed used a rootward reverse query: {stats:?}"
+    );
+    assert_eq!(
+        stats.reverse_predecessor_edges_examined, 0,
+        "the nested seed examined rootward predecessor edges: {stats:?}"
+    );
+    assert_eq!(
+        stats.prune_search_population,
+        stats.suspect_region
+            + stats.boundary_predecessor_edges_examined
+            + stats.reverse_instances_examined
+            + stats.reverse_predecessor_edges_examined,
+        "the nested-seed denominator omits pruning work: {stats:?}"
+    );
+    assert!(
+        stats.suspect_region < NESTED_SEED_SUBTREE.len(),
+        "the prune search expanded the nested shared subtree: {stats:?}"
+    );
+    assert!(
+        stats.prune_search_population <= stats.suspect_region * 4,
+        "the nested-seed boundary work escaped the locality bound: {stats:?}"
+    );
+    assert_scoped(&stats, "root-reachable nested seed");
+}
+
 const DEFERRED_BOUNDARY_LIB: &str = r#"
 fn entry() -> int { return branch() }
 fn branch() -> int { return shared() + apparent() }
