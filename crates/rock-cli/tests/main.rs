@@ -66,6 +66,8 @@ mod production_sources_test;
 mod asset_overlay_defaults;
 #[path = "directory_listing_api.rs"]
 mod directory_listing_api;
+#[path = "editor_inspector_position.rs"]
+mod editor_inspector_position;
 #[path = "run_exit_status.rs"]
 mod run_exit_status;
 #[path = "shader_pipeline_cli.rs"]
