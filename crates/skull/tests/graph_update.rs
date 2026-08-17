@@ -660,6 +660,120 @@ fn intersecting_tentative_support_components_release_together() {
     assert_scoped(&stats, "intersecting support components");
 }
 
+fn branching_support_sources(dead_first: bool) -> (String, String, String) {
+    let v1 = "fn main() { print(\"{lost_b()} {dead_c()}\") }\n\
+fn independent_root() -> int { return root_branch() }\n"
+        .to_string();
+    let v2 = "fn main() { print(\"0\") }\n\
+fn independent_root() -> int { return root_branch() }\n"
+        .to_string();
+    let mut lib = String::from(
+        "fn target() -> int { return lost_b() }\n\
+         fn dead_c() -> int { return dead_a() }\n\
+         fn lost_b() -> int { return 7 }\n",
+    );
+    if dead_first {
+        lib.push_str(
+            "fn root_branch() -> int { return target() }\n\
+             fn dead_branch() -> int { return dead_c() + target() }\n",
+        );
+    } else {
+        lib.push_str(
+            "fn dead_branch() -> int { return dead_c() + target() }\n\
+             fn root_branch() -> int { return target() }\n",
+        );
+    }
+    lib.push_str("fn dead_a() -> int { return dead_branch() }\n");
+    (v1, v2, lib)
+}
+
+fn assert_branching_support_fixture(dead_first: bool) {
+    let (v1, v2, lib) = branching_support_sources(dead_first);
+    let mut case = Case::new(&v1, &lib);
+    for name in ["target", "lost_b", "dead_c", "dead_a", "dead_branch", "root_branch"] {
+        assert!(case.has_instance_named(name), "v1 never reached {name}");
+    }
+    let find = |name: &str, case: &Case| {
+        case.graph
+            .instances
+            .iter()
+            .find(|instance| case.identity(instance).starts_with(name))
+            .cloned()
+            .expect("branching-support instance")
+    };
+    let target = find("target", &case);
+    let root_branch = find("root_branch", &case);
+    let dead_branch = find("dead_branch", &case);
+    let target_preds = case.graph.index.preds.get(&target).expect("target row");
+    assert_eq!(
+        target_preds.len(),
+        2,
+        "target has an unexpected predecessor population: {target_preds:?}"
+    );
+    assert!(target_preds.contains(&root_branch), "rooted target branch is absent");
+    assert!(target_preds.contains(&dead_branch), "dead target branch is absent");
+    let dead_c = find("dead_c", &case);
+    let lost_b = find("lost_b", &case);
+    assert_eq!(
+        case.graph.index.preds.get(&dead_c).expect("dead_c row").len(),
+        2,
+        "dead cycle seed has an unexpected predecessor population"
+    );
+    assert_eq!(
+        case.graph.index.preds.get(&lost_b).expect("lost_b row").len(),
+        2,
+        "second lost seed has an unexpected predecessor population"
+    );
+
+    let stats = case.edit(MAIN, &v2);
+    assert_eq!(
+        stats.prune_seeds.len(),
+        2,
+        "branching support changed an unexpected seed population: {stats:?}"
+    );
+    assert!(
+        stats
+            .prune_seeds
+            .iter()
+            .any(|instance| case.identity(instance).starts_with("dead_c")),
+        "dead_c was not an initial lost seed: {stats:?}"
+    );
+    assert!(
+        stats
+            .prune_seeds
+            .iter()
+            .any(|instance| case.identity(instance).starts_with("lost_b")),
+        "lost_b was not an initial lost seed: {stats:?}"
+    );
+    assert_eq!(stats.suspect_region, 4, "unexpected branching forward population: {stats:?}");
+    assert_eq!(stats.boundary_predecessor_edges_examined, 8, "unexpected branching boundary population: {stats:?}");
+    assert_eq!(stats.support_component_nodes_examined, 4, "unexpected branching support-node population: {stats:?}");
+    assert_eq!(stats.support_component_edges_examined, 5, "unexpected branching support-edge population: {stats:?}");
+    assert_eq!(stats.prune_search_population, 21, "unexpected branching prune denominator: {stats:?}");
+    assert_eq!(stats.pruned, 3, "unexpected branching pruned population: {stats:?}");
+    assert!(case.has_instance_named("target"), "the rooted target was pruned: {stats:?}");
+    for name in ["dead_c", "dead_a", "dead_branch"] {
+        assert!(!case.has_instance_named(name), "dead branch member {name} survived: {stats:?}");
+    }
+    assert!(
+        stats.support_component_nodes_examined > 0
+            && stats.support_component_edges_examined > 0,
+        "the branching support search had no measured population: {stats:?}"
+    );
+    case.assert_matches_fresh("branching support component");
+    assert_scoped(&stats, "branching support component");
+}
+
+#[test]
+fn branching_support_cache_does_not_launder_dead_branch_liveness() {
+    assert_branching_support_fixture(true);
+}
+
+#[test]
+fn branching_support_cache_is_independent_of_branch_order() {
+    assert_branching_support_fixture(false);
+}
+
 // ---------------------------------------------------------------------------
 // 7. Addition reaches a new specialization
 // ---------------------------------------------------------------------------

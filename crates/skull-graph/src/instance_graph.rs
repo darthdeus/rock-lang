@@ -3547,28 +3547,21 @@ impl InstanceGraph {
                     return (*supported, *component);
                 }
                 let mut pending = vec![target.clone()];
-                let mut component = BTreeSet::new();
-                let mut supported = false;
+                let mut discovered = BTreeSet::new();
+                let mut support_edges = Vec::new();
+                let mut direct_anchors = BTreeSet::new();
                 while let Some(i) = pending.pop() {
                     if region.contains(&i) {
                         continue;
                     }
-                    if let Some((cached, _)) = cache.get(&i) {
-                        if *cached {
-                            supported = true;
-                            break;
-                        }
-                        continue;
-                    }
-                    if !component.insert(i.clone()) {
+                    if !discovered.insert(i.clone()) {
                         continue;
                     }
                     *nodes_examined += 1;
                     if self.root_instances.contains(&i)
                         || self.index.always_emitted.contains_key(&i)
                     {
-                        supported = true;
-                        break;
+                        direct_anchors.insert(i.clone());
                     }
                     let Some(preds) = self.index.preds.get(&i) else { continue };
                     *edges_examined += preds.len();
@@ -3579,21 +3572,86 @@ impl InstanceGraph {
                         if self.root_instances.contains(pred)
                             || self.index.always_emitted.contains_key(pred)
                         {
-                            supported = true;
-                            break;
+                            direct_anchors.insert(i.clone());
+                        } else {
+                            support_edges.push((i.clone(), pred.clone()));
+                            pending.push(pred.clone());
                         }
-                        pending.push(pred.clone());
-                    }
-                    if supported {
-                        break;
                     }
                 }
-                let component_id = components.len();
-                components.push(component.clone());
-                for i in component {
-                    cache.insert(i, (supported, component_id));
+
+                let mut dependents: BTreeMap<Instance, BTreeSet<Instance>> = BTreeMap::new();
+                for (source, predecessor) in &support_edges {
+                    dependents
+                        .entry(predecessor.clone())
+                        .or_default()
+                        .insert(source.clone());
                 }
-                (supported, component_id)
+                let mut supported_nodes = direct_anchors;
+                let mut support_queue: Vec<Instance> = supported_nodes.iter().cloned().collect();
+                while let Some(supported) = support_queue.pop() {
+                    let Some(dependents) = dependents.get(&supported) else { continue };
+                    for dependent in dependents {
+                        if supported_nodes.insert(dependent.clone()) {
+                            support_queue.push(dependent.clone());
+                        }
+                    }
+                }
+
+                let unsupported_nodes: BTreeSet<Instance> = discovered
+                    .difference(&supported_nodes)
+                    .cloned()
+                    .collect();
+                let mut unsupported_neighbors: BTreeMap<Instance, BTreeSet<Instance>> =
+                    BTreeMap::new();
+                for node in &unsupported_nodes {
+                    unsupported_neighbors.entry(node.clone()).or_default();
+                }
+                for (source, predecessor) in &support_edges {
+                    if unsupported_nodes.contains(source) && unsupported_nodes.contains(predecessor) {
+                        unsupported_neighbors
+                            .entry(source.clone())
+                            .or_default()
+                            .insert(predecessor.clone());
+                        unsupported_neighbors
+                            .entry(predecessor.clone())
+                            .or_default()
+                            .insert(source.clone());
+                    }
+                }
+                let mut remaining = unsupported_nodes;
+                while let Some(start) = remaining.pop_first() {
+                    let component_id = components.len();
+                    let mut component = BTreeSet::new();
+                    let mut component_queue = vec![start];
+                    while let Some(i) = component_queue.pop() {
+                        if !component.insert(i.clone()) {
+                            continue;
+                        }
+                        remaining.remove(&i);
+                        if let Some(neighbors) = unsupported_neighbors.get(&i) {
+                            component_queue.extend(neighbors.iter().filter(|n| {
+                                remaining.contains(*n)
+                            }).cloned());
+                        }
+                    }
+                    for i in &component {
+                        cache.insert(i.clone(), (false, component_id));
+                    }
+                    components.push(component);
+                }
+                for i in &supported_nodes {
+                    cache.insert(i.clone(), (true, usize::MAX));
+                }
+                if supported_nodes.contains(target) {
+                    (true, usize::MAX)
+                } else {
+                    let component_id = components
+                        .iter()
+                        .position(|component| component.contains(target))
+                        .expect("unsupported support target has no component");
+                    (false, component_id)
+                }
             };
         loop {
             while let Some(promoted) = released.pop() {
