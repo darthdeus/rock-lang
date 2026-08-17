@@ -21,7 +21,7 @@ use std::time::Instant;
 
 use bone_incremental::session::{Session, UpdateTier};
 use bone_semantic::inference::Workspace;
-use skull::graph_snapshot::canonical;
+use skull::graph_snapshot::{canonical, instance_key};
 use skull::instance_graph::{self, InstanceGraph, UpdateStats};
 
 fn warm_stdlib() -> Vec<skull_parser::Ast> {
@@ -127,7 +127,8 @@ fn project_case(rel: &str) {
         .unwrap_or_else(|e| panic!("{rel} session warm failed: {}", e.message));
     assert!(
         session.diagnostics().is_empty(),
-        "{rel} does not typecheck clean, so nothing below would be evidence"
+        "{rel} does not typecheck clean, so nothing below would be evidence: {:?}",
+        session.diagnostics()
     );
 
     // MIN of several, not one sample: this box is noisy enough that a single
@@ -172,8 +173,11 @@ fn project_case(rel: &str) {
             let prunes = if ok {
                 let ws = session.workspace();
                 let after = graph_of(ws, &dir);
-                let before: BTreeSet<_> = graph.instances.iter().cloned().collect();
-                before.difference(&after.instances).count() > 0
+                let before: BTreeSet<_> =
+                    graph.instances.iter().map(|i| instance_key(ws, &graph, i)).collect();
+                let after: BTreeSet<_> =
+                    after.instances.iter().map(|i| instance_key(ws, &after, i)).collect();
+                before.difference(&after).next().is_some()
             } else {
                 false
             };
@@ -191,7 +195,11 @@ fn project_case(rel: &str) {
     // The same for the update: the first call pays for whatever the machine
     // was doing a moment ago.
     let del = edit_and_compare(&mut session, &mut graph, &dir, &path, &edited, "deletion");
-    assert!(del.stats.pruned > 0, "{rel}: the chosen deletion pruned nothing");
+    assert!(
+        del.stats.pruned > 0,
+        "{rel}: the chosen deletion pruned nothing (path={path}, stats={:?})",
+        del.stats
+    );
     let add = edit_and_compare(&mut session, &mut graph, &dir, &path, &original, "addition");
     assert!(add.stats.newly_reached > 0, "{rel}: restoring the call reached nothing new");
 

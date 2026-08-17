@@ -3474,8 +3474,8 @@ impl InstanceGraph {
     /// of instances that keep each other alive, and a cycle has no member whose
     /// count would ever drop to zero. But it does not need the whole graph
     /// either -- only an instance whose IN-EDGES changed can have become
-    /// unreachable, so the search starts at those and stops at the boundary of
-    /// what they can reach.
+    /// unreachable, so the search starts at those and stops at tentative
+    /// external boundaries.
     ///
     /// The search keeps external boundaries tentative. If another lost seed
     /// later reaches a boundary's predecessor, that predecessor enters the
