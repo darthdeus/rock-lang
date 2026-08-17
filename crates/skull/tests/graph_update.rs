@@ -853,6 +853,63 @@ fn an_always_emitted_target_anchors_what_the_edit_stranded() {
     assert_scoped(&stats, "always-emitted anchor");
 }
 
+const BRANCHED_ANCHOR_LIB: &str = r#"
+fn entry() -> int { return shared_root() + dead_root() }
+fn anchor() -> int { return shared_root() }
+fn shared_root() -> int { return shared_left() + shared_right() }
+fn shared_left() -> int { return shared_left_a() + shared_left_b() }
+fn shared_right() -> int { return shared_right_a() + shared_right_b() }
+fn shared_left_a() -> int { return 1 }
+fn shared_left_b() -> int { return 2 }
+fn shared_right_a() -> int { return 3 }
+fn shared_right_b() -> int { return 4 }
+fn dead_root() -> int { return dead_leaf() }
+fn dead_leaf() -> int { return 5 }
+"#;
+
+#[test]
+fn an_external_anchor_stops_a_branched_strand_search() {
+    let mut case = Case::new(
+        "fn main() { print(\"{entry()} {anchor()}\") }\n",
+        BRANCHED_ANCHOR_LIB,
+    );
+    for name in [
+        "shared_root",
+        "shared_left",
+        "shared_right",
+        "dead_root",
+        "dead_leaf",
+    ] {
+        assert!(case.has_instance_named(name), "v1 never reached `{name}`");
+    }
+    let shared = case
+        .graph
+        .instances
+        .iter()
+        .find(|instance| case.identity(instance).starts_with("shared_root"))
+        .cloned()
+        .expect("the shared branch instance");
+    let incoming = case.graph.index.preds.get(&shared).expect("shared predecessor index row");
+    assert!(incoming.len() >= 2, "the fixture has no external anchor: {incoming:?}");
+
+    let stats = case.edit(MAIN, "fn main() { print(\"{anchor()}\") }\n");
+
+    assert!(case.has_instance_named("shared_root"), "the external anchor was pruned");
+    assert!(!case.has_instance_named("dead_root"), "the stranded branch survived");
+    assert!(!case.has_instance_named("dead_leaf"), "the stranded leaf survived");
+    assert_eq!(stats.pruned, 3, "the fixture must remove the caller, root, and leaf: {stats:?}");
+    assert_eq!(stats.affected, 1, "one caller body should be affected: {stats:?}");
+    assert!(stats.expanded > 0, "the update expanded no owner: {stats:?}");
+    assert!(stats.suspect_region > 0, "the prune search had no population: {stats:?}");
+    assert!(stats.census.index_preds_updates > 0, "the predecessor index had no population");
+    assert!(
+        stats.suspect_region <= stats.expanded * 4,
+        "the anchor boundary was not local: {stats:?}"
+    );
+    case.assert_matches_fresh("external anchor with stranded branch");
+    assert_scoped(&stats, "external anchor with stranded branch");
+}
+
 const BOUNDED_LIB: &str = r#"
 fn total(v: Vec<int>) -> int {
     let t = 0

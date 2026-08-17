@@ -3455,12 +3455,9 @@ impl InstanceGraph {
     ///
     /// Three steps, and the third is what makes cycles come out right:
     ///
-    /// 1. the SUSPECT region is everything forward-reachable from the instances
-    ///    that lost an in-edge -- if one is dead, everything only it reached is
-    ///    dead too;
-    /// 2. an ANCHOR is a member of that region a root still reaches without
-    ///    going through it: a root instance, an always-emitted target, or the
-    ///    target of an edge from a live instance OUTSIDE the region;
+    /// 1. start at the instances that lost an in-edge and walk forward, stopping
+    ///    at a node already proven reachable from a root or always-emitted body;
+    /// 2. an ANCHOR is a root, an always-emitted target, or such a live boundary;
     /// 3. whatever the anchors reach INSIDE the region survives. A cycle with no
     ///    anchor keeps only itself alive, so nothing marks it and it goes.
     fn stranded(&self, lost: &[Instance]) -> Prune {
@@ -3474,30 +3471,50 @@ impl InstanceGraph {
         };
         let mut region: BTreeSet<Instance> = BTreeSet::new();
         let mut queue: Vec<Instance> = lost.to_vec();
+        let mut pending: FxHashSet<Instance> = lost.iter().cloned().collect();
+        let mut root_reachable_cache: FxHashMap<Instance, bool> = FxHashMap::default();
+        let mut anchors: BTreeSet<Instance> = BTreeSet::new();
         while let Some(i) = queue.pop() {
-            if !self.contributions.contains_key(&Owner::Instance(i.clone()))
-                || !region.insert(i.clone())
-            {
+            pending.remove(&i);
+            if anchors.contains(&i) || region.contains(&i) {
                 continue;
             }
-            queue.extend(succ(&i).iter().map(|e| e.to.clone()));
+            if !self.contributions.contains_key(&Owner::Instance(i.clone())) {
+                continue;
+            }
+            let is_root = self.root_instances.contains(&i);
+            let is_always = self.index.always_emitted.contains_key(&i);
+            let has_external_predecessor = self
+                .index
+                .preds
+                .get(&i)
+                .is_some_and(|preds| {
+                    preds
+                        .iter()
+                        .any(|pred| pred != &i && !region.contains(pred))
+                });
+            let root_reachable = has_external_predecessor
+                && self.root_reachable_for_prune(&i, &mut root_reachable_cache);
+            if is_root || is_always {
+                region.insert(i.clone());
+                anchors.insert(i);
+                continue;
+            }
+            if root_reachable {
+                anchors.insert(i);
+                continue;
+            }
+            region.insert(i.clone());
+            for target in succ(&i).iter().map(|e| e.to.clone()) {
+                if !region.contains(&target) && pending.insert(target.clone()) {
+                    queue.push(target);
+                }
+            }
         }
         if region.is_empty() {
             return Prune::default();
         }
-        let mut alive: Vec<Instance> = region
-            .iter()
-            .filter(|i| {
-                self.root_instances.contains(*i)
-                    || self.index.always_emitted.contains_key(*i)
-                    || self
-                        .index
-                        .preds
-                        .get(*i)
-                        .is_some_and(|p| p.iter().any(|from| !region.contains(from)))
-            })
-            .cloned()
-            .collect();
+        let mut alive: Vec<Instance> = anchors.iter().cloned().collect();
         let mut survives: BTreeSet<Instance> = BTreeSet::new();
         while let Some(i) = alive.pop() {
             if !survives.insert(i.clone()) {
@@ -3514,6 +3531,53 @@ impl InstanceGraph {
             region: region.len(),
             broad_scans: 0,
         }
+    }
+
+    fn root_reachable_for_prune(
+        &self,
+        start: &Instance,
+        cache: &mut FxHashMap<Instance, bool>,
+    ) -> bool {
+        if let Some(reachable) = cache.get(start) {
+            return *reachable;
+        }
+        let mut pending = vec![start.clone()];
+        let mut seen = FxHashSet::default();
+        while let Some(instance) = pending.pop() {
+            if let Some(reachable) = cache.get(&instance) {
+                if *reachable {
+                    for seen_instance in seen {
+                        cache.insert(seen_instance, true);
+                    }
+                    cache.insert(instance, true);
+                    return true;
+                }
+                continue;
+            }
+            if self.root_instances.contains(&instance)
+                || self.index.always_emitted.contains_key(&instance)
+            {
+                for seen_instance in seen {
+                    cache.insert(seen_instance, true);
+                }
+                cache.insert(instance, true);
+                return true;
+            }
+            if !seen.insert(instance.clone()) {
+                continue;
+            }
+            pending.extend(
+                self.index
+                    .preds
+                    .get(&instance)
+                    .into_iter()
+                    .flat_map(|preds| preds.iter().cloned()),
+            );
+        }
+        for instance in seen {
+            cache.insert(instance, false);
+        }
+        false
     }
 
     /// Instances the graph holds that no root reaches. The whole-graph
