@@ -3,6 +3,7 @@
 //! numeric coercions (`int`->`float`, binding and param types).
 use super::*;
 use crate::monoty::MonoTy;
+use std::rc::Rc;
 
 impl Builder<'_> {
     pub(crate) fn container_plan_for(
@@ -40,22 +41,25 @@ impl Builder<'_> {
     /// Drives [`ContainerKind::NativeBufferValue`]; an opaque generic `E` stays
     /// plain `NativeBuffer` (matching the alloc intrinsic, which also requires a
     /// concrete element).
-    pub(crate) fn nb_value_elem(&self, e: Idx<Expr>) -> Option<Ustr> {
-        let concrete = self.concrete_expr_ty(e)?;
+    pub(crate) fn nb_value_elem(&self, e: Idx<Expr>) -> Result<Option<Ustr>, CompilerError> {
+        let Some(concrete) = self.concrete_expr_ty(e) else { return Ok(None) };
         let family = match concrete.peel_nullable().0 {
             MonoTy::App {
                 ctor: crate::monoty::MonoCtor::Nominal(name), ..
             } => match name.as_str() {
                 "NativeBuffer" => ContainerFamily::NativeBuffer,
                 "FlatVec" => ContainerFamily::FlatVec,
-                _ => return None,
+                _ => return Ok(None),
             },
-            _ => return None,
+            _ => return Ok(None),
         };
         let arena = self.scx.rep_arena();
-        ContainerPlan::for_type(self.ws, self.scx.target, &arena, family, &concrete)
-            .ok()
-            .and_then(|plan| plan.ffi_element_name(&arena))
+        let plan = ContainerPlan::for_type(self.ws, self.scx.target, &arena, family, &concrete)
+            .map_err(|error| match error.span.or(self.cur_span) {
+                Some(span) => CompilerError::new_with_label(span, error.message),
+                None => CompilerError::new_no_location(error.message),
+            })?;
+        Ok(plan.ffi_element_name(&arena))
     }
 
     /// The column-eligible element of `e`'s `Arena<E>` type, if any. The twin of
@@ -160,7 +164,7 @@ impl Builder<'_> {
     ///   nothing, and a depth limit means a cyclic substitution chain. None of
     ///   the three occurs over the corpus or the Rock suite, so this arm has
     ///   teeth without a population.
-    pub(crate) fn concrete_ty(&self, e: Idx<Expr>) -> Result<Option<MonoTy>, CompilerError> {
+    pub(crate) fn concrete_ty(&self, e: Idx<Expr>) -> Result<Option<Rc<MonoTy>>, CompilerError> {
         if self.concrete_expr_is_untyped(e) {
             return Ok(None);
         }
@@ -177,10 +181,10 @@ impl Builder<'_> {
 
     /// The NativeBuffer container kind for base expr `e`: value-struct elements
     /// carry their name so the JS emitter can lower flat slots (Lua identical).
-    pub(crate) fn nb_kind(&self, e: Idx<Expr>) -> ContainerKind {
-        match self.nb_value_elem(e) {
-            Some(elem) => ContainerKind::NativeBufferValue(elem),
-            None => ContainerKind::NativeBuffer,
+    pub(crate) fn nb_kind(&self, e: Idx<Expr>) -> Result<ContainerKind, CompilerError> {
+        match self.nb_value_elem(e)? {
+            Some(elem) => Ok(ContainerKind::NativeBufferValue(elem)),
+            None => Ok(ContainerKind::NativeBuffer),
         }
     }
 
@@ -195,7 +199,7 @@ impl Builder<'_> {
         base: Idx<Expr>,
     ) -> Result<(Idx<Inst>, ContainerKind), CompilerError> {
         if self.expr_is_flat_vec(base) {
-            let kind = self.nb_kind(base);
+            let kind = self.nb_kind(base)?;
             let b = self.lower_expr(base)?;
             let buf = self.emit_cur(Inst::Field { base: b, field: Ustr::from("buf") });
             return Ok((buf, kind));
@@ -218,7 +222,7 @@ impl Builder<'_> {
                 MonoTy::App {
                     ctor: crate::monoty::MonoCtor::Nominal(name),
                     ..
-                } if is_native_buffer(name.as_str()) => Ok(self.nb_kind(base)),
+                } if is_native_buffer(name.as_str()) => Ok(self.nb_kind(base)?),
                 _ => Err(self.gap_here("concrete type is not an indexable container")),
             };
         }

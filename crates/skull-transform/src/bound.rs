@@ -157,17 +157,7 @@ fn substitute_bound_call_inner(
     let (dests, args) = (dests.clone(), args.clone());
     func.insts[call] = Inst::CallMulti { dests, func: owner.func, args };
     skull_mir::site::record_call_owner(func, call, &owner);
-    let abi = if !skull_mir::lower::requires_concrete_body_plan(ws, &owner) {
-        skull_mir::lower::BackendFnAbiPlan::for_boundary_instance(ws, scx, &owner)
-    } else {
-        let plan = concrete_plans.get(&owner).ok_or_else(|| {
-            CompilerError::new_no_location(format!(
-                "internal: concrete ABI plan is missing for bound callee `{}`",
-                owner.func.func.into_raw().into_u32()
-            ))
-        })?;
-        skull_mir::lower::BackendFnAbiPlan::for_concrete_plan(ws, scx, plan)
-    };
+    let abi = skull_mir::lower::owner_abi_plan(ws, scx, concrete_plans, &owner)?;
     func.call_abi_plans.insert(call, abi);
     if !owner.args.is_empty() {
         func.spec_bindings.insert(call, owner.clone());
@@ -314,8 +304,8 @@ fn repack_bound_next_element(
 
     let mut tail: Vec<Idx<Inst>> = Vec::new();
     let mut taken = 0usize;
-    let packed = emit_elem_rebuild(func, plan, &leaf_cells, &mut taken, &mut tail);
-    let store = func.insts.alloc(Inst::Store { cell: elem_cell, value: packed });
+    let packed = emit_elem_rebuild(func, plan, &leaf_cells, &mut taken, &mut tail)?;
+    let store = func.alloc_inst(Inst::Store { cell: elem_cell, value: packed });
 
     // Inserted immediately after the call, in its own block: the element cell must
     // hold the rebuilt value before the `ok` branch reads it.
@@ -346,34 +336,49 @@ fn emit_elem_rebuild(
     cells: &[Idx<Cell>],
     taken: &mut usize,
     tail: &mut Vec<Idx<Inst>>,
-) -> Idx<Inst> {
+) -> Result<Idx<Inst>, CompilerError> {
     match plan {
         ElemRebuild::Passthrough => {
-            let l = func.insts.alloc(Inst::Load(cells[*taken]));
+            let l = func.alloc_inst(Inst::Load(cells[*taken]));
             *taken += 1;
             tail.push(l);
-            l
+            Ok(l)
         }
-        ElemRebuild::Value(name, fields) => {
+        ElemRebuild::Value(name, representation, fields) => {
             let mut fs = Vec::with_capacity(fields.len());
             for f in fields {
-                let l = func.insts.alloc(Inst::Load(cells[*taken]));
+                let l = func.alloc_inst(Inst::Load(cells[*taken]));
                 *taken += 1;
                 tail.push(l);
                 fs.push((*f, l));
             }
-            let packed = func.insts.alloc(Inst::MakeValueStruct { name: *name, fields: fs });
+            let arena = func.rep_arena.as_ref().ok_or_else(|| {
+                CompilerError::new_no_location(format!(
+                    "bound element `{name}` has no owned representation arena"
+                ))
+            })?;
+            if arena.try_get(*representation).is_none() {
+                return Err(CompilerError::new_no_location(format!(
+                    "bound element `{name}` carries a foreign value representation plan"
+                )));
+            }
+            let packed = func.alloc_inst(Inst::MakeValueStruct {
+                name: *name,
+                representation: *representation,
+                form: ValueCtorForm::Leaves,
+                fields: fs,
+            });
             tail.push(packed);
-            packed
+            Ok(packed)
         }
         ElemRebuild::Tuple(parts) => {
             let mut vs = Vec::with_capacity(parts.len());
             for p in parts {
-                vs.push(emit_elem_rebuild(func, p, cells, taken, tail));
+                vs.push(emit_elem_rebuild(func, p, cells, taken, tail)?);
             }
-            let packed = func.insts.alloc(Inst::MakeTuple(vs));
+            let packed = func.alloc_inst(Inst::MakeTuple(vs));
             tail.push(packed);
-            packed
+            Ok(packed)
         }
     }
 }

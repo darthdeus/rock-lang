@@ -125,6 +125,30 @@ fn nobox_equality_compares_leaves_without_materializing() {
     assert!(!body.contains("NV2_ct("), "nobox equality materialized its operands:\n{body}");
 }
 
+const NOBOX_MIXED_NULLABLE_EQUALITY: &str = r#"
+nobox value NV2 { x: float, y: float }
+
+fn matches(value: NV2?, expected: NV2) -> bool {
+    return value == expected && expected == value
+}
+
+fn main() {
+    let expected = NV2 { x: 1.0, y: 2.0 }
+    print(matches(expected, expected))
+    print(!matches(null, expected))
+    print(!matches(NV2 { x: 1.0, y: 3.0 }, expected))
+}
+"#;
+
+#[test]
+fn nullable_nobox_equality_with_a_non_nullable_operand_compares_presence_and_leaves() {
+    let lua = emit_module(NOBOX_MIXED_NULLABLE_EQUALITY);
+    assert_eq!(
+        run_luajit(&format!("{lua}\nmain()\n"), "nobox_mixed_nullable_equality"),
+        "true\ntrue\ntrue"
+    );
+}
+
 #[test]
 fn nobox_null_check_does_not_materialize() {
     let lua = emit_module(NOBOX_WHOLE_VALUE_OPERATORS);

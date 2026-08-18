@@ -40,8 +40,9 @@ fn phase_rank(phase: Ustr) -> Option<u8> {
         "late_update" => 5,
         "draw" => 6,
         "late_draw" => 7,
-        "reset" => 8,
-        "shutdown" => 9,
+        "post_imgui_draw" => 8,
+        "reset" => 9,
+        "shutdown" => 10,
         _ => return None,
     })
 }
@@ -287,5 +288,32 @@ mod tests {
         )]);
         let err = collect(&ws).expect_err("parameterized lifecycle target must reject");
         assert!(err.message.contains("zero-argument"), "{err:?}");
+    }
+
+    #[test]
+    fn post_imgui_draw_is_a_compiler_owned_role() {
+        let ws = workspace(&[(
+            "post-imgui.rock",
+            r#"
+            @lifecycle(phase="post_imgui_draw", owner="session", stage_param="stage")
+            deco init post_imgui_draw(stage: int = 100) {}
+            @post_imgui_draw(stage=20) fn later() {}
+            @post_imgui_draw(stage=10) fn first() {}
+        "#,
+        )]);
+        let plan = collect(&ws).expect("post_imgui_draw must be collected");
+        assert_eq!(plan.census.declarations, 1);
+        assert_eq!(plan.census.applications, 2);
+        assert_eq!(plan.census.admitted, 2);
+        assert_eq!(
+            plan.entries
+                .iter()
+                .map(|entry| (entry.phase.as_str(), entry.diagnostic_name.as_str(), entry.stage))
+                .collect::<Vec<_>>(),
+            vec![
+                ("post_imgui_draw", "first", 10),
+                ("post_imgui_draw", "later", 20),
+            ]
+        );
     }
 }

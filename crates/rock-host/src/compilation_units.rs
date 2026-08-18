@@ -200,7 +200,7 @@ pub fn load_sources_for_compilation_unit(unit: &CompilationUnit) -> Result<Sourc
     match unit {
         CompilationUnit::Project(files) => {
             // Load stick.toml dependencies for project compilation
-            let mut all_files = files.clone();
+            let mut all_files = Vec::new();
 
             // Try to find stick.toml in the project directory
             if let Some(first_file) = files.first() {
@@ -239,6 +239,10 @@ pub fn load_sources_for_compilation_unit(unit: &CompilationUnit) -> Result<Sourc
                     }
                 }
             }
+
+            // Module-load effects, including stone's cimgui prelude, must be
+            // ready before a consuming project's global initializers.
+            all_files.extend(files.clone());
 
             load_sources_from_paths(&all_files)
         }

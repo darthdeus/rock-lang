@@ -934,8 +934,8 @@ fn rewrite(func: &mut MirFunc, h: Idx<Block>, m: LoopMatch) {
     func.blocks[m.p].insts.extend(m.chain.iter().copied());
 
     // T becomes the detector header: `load slot; cmp` -> Branch(yield, exit).
-    let sl = func.insts.alloc(Inst::Load(m.slot));
-    let ncond = func.insts.alloc(if m.inclusive {
+    let sl = func.alloc_inst(Inst::Load(m.slot));
+    let ncond = func.alloc_inst(if m.inclusive {
         Inst::IntLeq(sl, m.bound)
     } else {
         Inst::IntLt(sl, m.bound)
@@ -963,10 +963,10 @@ fn rewrite(func: &mut MirFunc, h: Idx<Block>, m: LoopMatch) {
     // so the slot advances); a take_while's stop edge becomes a `break`
     // (straight to EXIT -- its done-propagation path is cleared).
     let l = func.new_block();
-    let ll = func.insts.alloc(Inst::Load(m.slot));
-    let lc = func.insts.alloc(Inst::Const(Lit::Int(1)));
-    let la = func.insts.alloc(Inst::IntAdd(ll, lc));
-    let ls = func.insts.alloc(Inst::Store { cell: m.slot, value: la });
+    let ll = func.alloc_inst(Inst::Load(m.slot));
+    let lc = func.alloc_inst(Inst::Const(Lit::Int(1)));
+    let la = func.alloc_inst(Inst::IntAdd(ll, lc));
+    let ls = func.alloc_inst(Inst::Store { cell: m.slot, value: la });
     func.blocks[l].insts = vec![ll, lc, la, ls];
     func.blocks[l].term = Term::Goto(m.t);
     for &bp in &m.back {

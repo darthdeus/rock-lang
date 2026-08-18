@@ -176,7 +176,7 @@ impl ContainerPlan {
         let leaf_addresses = if !nullable
             && matches!(family, ContainerFamily::NativeBuffer | ContainerFamily::FlatVec)
         {
-            arena.leaf_addresses(ws, element_rep)
+            arena.leaf_addresses(ws, element_rep)?
         } else {
             None
         };

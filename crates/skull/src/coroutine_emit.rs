@@ -7,6 +7,7 @@
 use std::collections::HashSet;
 
 use bone_semantic::inference::Workspace;
+use bone_semantic::prelude::CompilerError;
 use comfy_la_arena::Idx;
 use skull_codegen_lua::{emit_named_framed, CodegenCtx, FrameCtx};
 use skull_mir::code_identity::{
@@ -96,8 +97,8 @@ pub fn emit_coroutine(
     interner: &skull_mir::monoty::MonoInterner,
     plan: &CoroutinePlan,
     func: &MirFunc,
-) -> String {
-    emit_coroutine_with_artifact(ws, ctx, interner, plan, func).0
+) -> Result<String, CompilerError> {
+    emit_coroutine_with_artifact(ws, ctx, interner, plan, func).map(|(lua, _)| lua)
 }
 
 pub fn emit_coroutine_with_artifact(
@@ -106,7 +107,7 @@ pub fn emit_coroutine_with_artifact(
     interner: &skull_mir::monoty::MonoInterner,
     plan: &CoroutinePlan,
     func: &MirFunc,
-) -> (String, CodeArtifact) {
+) -> Result<(String, CodeArtifact), CompilerError> {
     // A co fn yielding a flat enum threads through the frame-slot channel (0 alloc
     // per yield); the channel's shape drives both the slot writes (transform) and
     // the generic/boxed `resume()` rebuild (constructor).
@@ -192,7 +193,7 @@ pub fn emit_coroutine_with_artifact(
     let mut nested_luas = String::new();
     let mut hoisted = std::mem::take(&mut lowered.step.nested_fns);
     for nf in hoisted[pre_nested..].iter_mut() {
-        skull_transform::cleanup_with_nobox(ws, nf);
+        skull_transform::cleanup_with_nobox(ws, nf)?;
         nested_luas
             .push_str(&skull_codegen_lua::emit_named(ws, ctx, interner, nf.name.as_str(), nf));
     }
@@ -231,13 +232,13 @@ pub fn emit_coroutine_with_artifact(
     );
     let mut defer_luas = String::new();
     for mut aux in defer_funcs {
-        skull_transform::cleanup_with_nobox(ws, &mut aux);
+        skull_transform::cleanup_with_nobox(ws, &mut aux)?;
         defer_luas.push_str(&skull_codegen_lua::emit_named(
             ws, ctx, interner, aux.name.as_str(), &aux,
         ));
         let mut nested = std::mem::take(&mut aux.nested_fns);
         for nf in nested.iter_mut() {
-            skull_transform::cleanup_with_nobox(ws, nf);
+            skull_transform::cleanup_with_nobox(ws, nf)?;
             defer_luas.push_str(&skull_codegen_lua::emit_named(
                 ws, ctx, interner, nf.name.as_str(), nf,
             ));
@@ -245,13 +246,13 @@ pub fn emit_coroutine_with_artifact(
     }
     let mut hook_luas = String::new();
     for (_, mut aux) in hook_funcs {
-        skull_transform::cleanup_with_nobox(ws, &mut aux);
+        skull_transform::cleanup_with_nobox(ws, &mut aux)?;
         hook_luas.push_str(&skull_codegen_lua::emit_named(
             ws, ctx, interner, aux.name.as_str(), &aux,
         ));
         let mut nested = std::mem::take(&mut aux.nested_fns);
         for nf in nested.iter_mut() {
-            skull_transform::cleanup_with_nobox(ws, nf);
+            skull_transform::cleanup_with_nobox(ws, nf)?;
             hook_luas.push_str(&skull_codegen_lua::emit_named(
                 ws, ctx, interner, nf.name.as_str(), nf,
             ));
@@ -267,10 +268,10 @@ pub fn emit_coroutine_with_artifact(
         &hook_keys,
     );
     let _ = lowered.num_states;
-    (
+    Ok((
         format!("{step_lua}{nested_luas}{defer_luas}{hook_luas}{ctor}"),
         code_artifact,
-    )
+    ))
 }
 
 /// The constructor: build the state table (seed param fields + relocated

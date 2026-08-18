@@ -27,7 +27,7 @@ use skull_codegen_lua::{emit_function, emit_named, mangle_fn, CodegenCtx};
 use skull_mir::instance::Instance;
 use skull_mir::mir::{FuncRef, Inst, MirFunc, Term};
 use skull_parser::{CompilerError, CompilerErrorKind};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write as _;
 use std::time::{Duration, Instant};
 use ustr::Ustr;
@@ -105,6 +105,16 @@ fn par_map_with<T: Send, R: Send, S>(
 fn par_map_with<T, R, S>(items: Vec<T>, init: impl Fn() -> S, f: impl Fn(&mut S, T) -> R) -> Vec<R> {
     let mut state = init();
     items.into_iter().map(|t| f(&mut state, t)).collect()
+}
+
+#[cfg(not(feature = "sequential"))]
+fn parallel_join<A: Send, B: Send>(left: impl FnOnce() -> A + Send, right: impl FnOnce() -> B + Send) -> (A, B) {
+    rayon::join(left, right)
+}
+
+#[cfg(feature = "sequential")]
+fn parallel_join<A, B>(left: impl FnOnce() -> A, right: impl FnOnce() -> B) -> (A, B) {
+    (left(), right())
 }
 
 /// The globals a function reads DIRECTLY plus the (statically-resolved) functions
@@ -485,12 +495,259 @@ pub struct MirEmit {
     pub state_schema: skull_mir::state_schema::StateSchema,
     /// `(lua_name, reason)` for every definition the new path skipped.
     pub skipped: Vec<(String, String)>,
-    /// Coarse per-stage time for the emit, in run order: HIR->MIR lowering, MIR
-    /// cleanup, and Lua emission (regalloc + stringify) — each summed across every
-    /// fn/decorator/global (CPU-time under parallel emit, wall-clock under
-    /// `--features sequential`) — plus the directly-timed sequential scaffolding /
-    /// global-init ordering / deco application. Surfaced by `rock backend-stats`.
+    /// Coarse per-stage time for the emit, in run order. `setup:` entries are
+    /// direct wall-clock measurements; the remaining entries cover HIR->MIR
+    /// lowering, MIR cleanup, Lua emission, and sequential assembly. The latter
+    /// are per-unit elapsed timers that overlap under parallel emit and become
+    /// wall-clock measurements under `sequential`.
     pub phases: Vec<(&'static str, std::time::Duration)>,
+    /// ABI-plan memo counters over the emitting context's lifetime (== this
+    /// emission for a full build, cumulative across edits on the incremental
+    /// paths). Counts, so load-immune: `hits() > 0` on any real corpus is the
+    /// memo's non-vacuity witness. Surfaced by `backend-stats`.
+    pub abi_plan_stats: skull_mir::lower::AbiPlanMemoStats,
+    /// Body-oriented attribution for the current emission. Counters are reduced
+    /// from per-body results after the parallel fanout, so the hot passes do not
+    /// use shared atomics.
+    pub attribution: EmitAttribution,
+    /// Shared-arena traffic split at the setup/fanout boundary (full builds;
+    /// zeroed on paths without a fresh setup phase). The `*_final - *_setup`
+    /// deltas are the post-setup traffic a frozen read view would serve.
+    pub arena_traffic: ArenaTraffic,
+    /// The three independent setup lanes and their production populations.
+    /// The overlap bits come from the lanes' actual execution intervals, not
+    /// from a wall-clock estimate.
+    pub setup_lanes: SetupLaneAttribution,
+    /// Operational graph work and repeated source-fact populations from the
+    /// graph used by this emission.
+    pub graph_census: crate::instance_graph::RunStats,
+    /// Concrete-plan ownership and assembly populations from this emission.
+    pub concrete_stats: crate::concrete_body::ConcreteBuildStats,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SetupLaneAttribution {
+    pub cpu_population: usize,
+    pub shader_population: usize,
+    pub abi_population: usize,
+    pub cpu_shader_overlap: bool,
+    pub abi_cpu_overlap: bool,
+    pub abi_shader_overlap: bool,
+    pub first_started_lane: Option<SetupLaneKind>,
+    pub mono_write_acqs_during_join: u64,
+    pub mono_intern_attempts_during_join: u64,
+    pub mono_intern_new_during_join: u64,
+    #[cfg(test)]
+    pub setup_handshake_entered: usize,
+    #[cfg(test)]
+    pub setup_handshake_released: usize,
+    #[cfg(test)]
+    pub setup_handshake_released_after_both: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SetupLaneKind {
+    CpuArtifact,
+    Shader,
+    AbiWarm,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct SetupLaneWindow {
+    started: Instant,
+    finished: Instant,
+    population: usize,
+}
+
+fn setup_lanes_overlap(left: SetupLaneWindow, right: SetupLaneWindow) -> bool {
+    left.started < right.finished && right.started < left.finished
+}
+
+fn first_setup_lane(
+    cpu: SetupLaneWindow,
+    shader: SetupLaneWindow,
+    abi: SetupLaneWindow,
+) -> SetupLaneKind {
+    let mut first = (cpu.started, SetupLaneKind::CpuArtifact);
+    if shader.started < first.0 {
+        first = (shader.started, SetupLaneKind::Shader);
+    }
+    if abi.started < first.0 {
+        first = (abi.started, SetupLaneKind::AbiWarm);
+    }
+    first.1
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct EmitAttribution {
+    pub bodies_examined: usize,
+    pub bodies_with_work: usize,
+    pub lower: AttributionPhase,
+    pub inline_phase: AttributionPhase,
+    pub inline: InlineAttribution,
+    pub cleanup: AttributionPhase,
+    pub closure: AttributionPhase,
+    pub counted_loop: AttributionPhase,
+    pub hoisted_inline: AttributionPhase,
+    pub validation: AttributionPhase,
+    pub regalloc: AttributionPhase,
+    pub stringify: AttributionPhase,
+    pub top_bodies: Vec<BodyAttributionOwner>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct AttributionPhase {
+    pub bodies_examined: usize,
+    pub bodies_with_work: usize,
+    pub elapsed: Duration,
+    pub instructions_visited: usize,
+    pub work_volume: usize,
+    pub p50_us: u64,
+    pub p95_us: u64,
+    pub max_us: u64,
+    pub concrete_mono_requests: usize,
+    pub concrete_mono_cache_hits: usize,
+    pub concrete_mono_derivations: usize,
+    pub concrete_mono_unique_ids: usize,
+    pub concrete_mono_cloned_nodes: usize,
+    pub concrete_mono_interner_miss_cloned_nodes: usize,
+    pub concrete_mono_cache_insertion_cloned_nodes: usize,
+    pub concrete_mono_cache_hit_cloned_nodes: usize,
+    pub concrete_mono_explicit_owned_escape_cloned_nodes: usize,
+    pub concrete_mono_explicit_owned_escapes: usize,
+    pub concrete_mono_lookup_ns: u64,
+    pub concrete_mono_cache_lookup_ns: u64,
+    pub concrete_mono_shared_handle_requests: usize,
+    pub concrete_mono_clone_self_ns: u64,
+    pub concrete_mono_timed_requests: usize,
+    pub concrete_mono_by_consumer:
+        [skull_mir::lower::ConcreteMonoConsumerStats; skull_mir::lower::ConcreteMonoConsumer::COUNT],
+    pub abi_param_copy_volume: usize,
+    pub abi_param_shared_views: usize,
+    pub mir_instruction_allocations: usize,
+    pub mir_instruction_reallocations: usize,
+    pub mir_instruction_reallocation_ns: u64,
+    pub mir_instruction_capacity: usize,
+    pub mir_cell_allocations: usize,
+    pub mir_cell_reallocations: usize,
+    pub mir_cell_reallocation_ns: u64,
+    pub mir_cell_capacity: usize,
+    pub mir_block_allocations: usize,
+    pub mir_block_reallocations: usize,
+    pub mir_block_reallocation_ns: u64,
+    pub mir_block_capacity: usize,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct InlinePopulationAttribution {
+    pub candidate_published_keys: usize,
+    pub candidate_lower_attempted: usize,
+    pub candidate_lowered_keys: usize,
+    pub candidate_lower_failed: usize,
+    pub candidate_eligible_keys: usize,
+    pub candidate_rejected_before_lower: usize,
+    pub candidate_rejected_after_lower: usize,
+    pub candidate_full_clone_ns: u64,
+    pub candidate_compact_ns: u64,
+    pub candidate_raw_instructions: usize,
+    pub candidate_raw_cells: usize,
+    pub candidate_raw_blocks: usize,
+    pub candidate_cleaned_instructions: usize,
+    pub candidate_cleaned_cells: usize,
+    pub candidate_cleaned_blocks: usize,
+    pub candidate_full_clone_capacity: (usize, usize, usize),
+    pub candidate_compact_capacity: (usize, usize, usize),
+    pub ordinary_lowered_keys: usize,
+    pub specialized_lowered_keys: usize,
+    pub ordinary_lowering_derivations: usize,
+    pub specialized_lowering_derivations: usize,
+    pub ordinary_consumer_keys: usize,
+    pub specialized_consumer_keys: usize,
+    pub candidate_ordinary_consumer_overlap: usize,
+    pub candidate_specialized_consumer_overlap: usize,
+    pub ordinary_canonical_reuse_keys: usize,
+    pub specialized_canonical_reuse_keys: usize,
+    pub ordinary_canonical_miss_keys: usize,
+    pub specialized_canonical_miss_keys: usize,
+    pub ordinary_canonical_miss_instances: Vec<Instance>,
+    pub specialized_canonical_miss_instances: Vec<Instance>,
+    pub canonical_clone_derivations: usize,
+    pub always_lowered_units: usize,
+    pub always_callee_keys: usize,
+    pub candidate_ordinary_overlap: usize,
+    pub candidate_specialized_overlap: usize,
+    pub candidate_always_callee_overlap: usize,
+    pub ordinary_specialized_overlap: usize,
+    pub candidate_requested_unique_keys: usize,
+    pub candidate_spliced_unique_keys: usize,
+    pub candidate_published_never_requested: usize,
+    pub candidate_requested_never_spliced: usize,
+    pub candidate_requested_not_published: usize,
+    pub keys_lowered_more_than_once: usize,
+    pub first_lower_ns: u64,
+    pub duplicate_lower_ns: u64,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct InlineAttribution {
+    pub accepted_splices: usize,
+    pub copied_instructions: usize,
+    pub ordinary_splices: usize,
+    pub specialized_splices: usize,
+    pub bounded_splices: usize,
+    pub hoisted_splices: usize,
+    pub arena_allocations: usize,
+    pub cleanup_live_before: usize,
+    pub cleanup_live_after: usize,
+    pub borrowed_block_scans: usize,
+    pub instructions_scanned: usize,
+    pub census: skull_transform::InlineScanStats,
+    pub population: InlinePopulationAttribution,
+    pub candidate_unique_keys: usize,
+    pub candidate_snapshot_duplicates: usize,
+    pub candidate_setup_keys: usize,
+    pub candidate_setup_warmed: usize,
+    pub candidate_setup_reused: usize,
+    pub candidate_setup_eligible: usize,
+    pub candidate_setup_rejected: usize,
+    pub candidate_setup_lower_ns: u64,
+    pub candidate_setup_cleanup_ns: u64,
+    pub candidate_setup_eligibility_ns: u64,
+    pub candidate_setup_worker_derivations: BTreeMap<String, usize>,
+    pub candidate_setup_rejection_reasons: BTreeMap<String, usize>,
+    pub top_owners: Vec<InlineOwnerAttribution>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct InlineOwnerAttribution {
+    pub owner: String,
+    pub splices: usize,
+    pub copied_instructions: usize,
+    pub splice_ns: u64,
+    pub live_cloned_entries: usize,
+    pub dead_cloned_entries: usize,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct BodyAttributionOwner {
+    pub owner: String,
+    pub lower_us: u64,
+    pub mir_instructions: usize,
+    pub concrete_mono_requests: usize,
+    pub concrete_mono_cloned_nodes: usize,
+}
+
+/// Counter totals of the build's shared `RepArena` and `MonoInterner`, taken
+/// when the body-lowering fanout began (`setup`) and again at emission end
+/// (`final`). Surfaced by `backend-stats`; the freeze-premise gate for
+/// publishing lock-free read views is `intern_new`/`write_acqs` deltas near
+/// zero after setup.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ArenaTraffic {
+    pub rep_setup: skull_mir::lower::RepArenaStats,
+    pub rep_final: skull_mir::lower::RepArenaStats,
+    pub mono_setup: skull_mir::monoty::MonoInternerStats,
+    pub mono_final: skull_mir::monoty::MonoInternerStats,
 }
 
 /// Coarse per-stage wall-clock for one emitted definition. Summed across every
@@ -499,20 +756,630 @@ pub struct MirEmit {
 #[derive(Default, Clone, Copy)]
 struct PhaseTimes {
     lower: Duration,
+    lower_work: bool,
+    inline: Duration,
+    inline_work: bool,
     cleanup: Duration,
+    cleanup_work: bool,
+    closure: Duration,
+    closure_work: bool,
+    counted_loop: Duration,
+    counted_loop_work: bool,
+    hoisted_inline: Duration,
+    hoisted_inline_work: bool,
+    validation: Duration,
+    validation_work: bool,
     emit: Duration,
+    emit_work: bool,
     /// Regalloc subset of `emit` (read from the per-thread `REGALLOC_TIME`
     /// accumulator, reset just before this unit's emit so it is exact per-unit
     /// even when units run concurrently on a rayon worker pool).
     regalloc: Duration,
+    regalloc_work: bool,
 }
 
 impl PhaseTimes {
     fn add(&mut self, o: &PhaseTimes) {
         self.lower += o.lower;
+        self.lower_work |= o.lower_work;
+        self.inline += o.inline;
+        self.inline_work |= o.inline_work;
         self.cleanup += o.cleanup;
+        self.cleanup_work |= o.cleanup_work;
+        self.closure += o.closure;
+        self.closure_work |= o.closure_work;
+        self.counted_loop += o.counted_loop;
+        self.counted_loop_work |= o.counted_loop_work;
+        self.hoisted_inline += o.hoisted_inline;
+        self.hoisted_inline_work |= o.hoisted_inline_work;
+        self.validation += o.validation;
+        self.validation_work |= o.validation_work;
         self.emit += o.emit;
+        self.emit_work |= o.emit_work;
         self.regalloc += o.regalloc;
+        self.regalloc_work |= o.regalloc_work;
+    }
+}
+
+#[derive(Default, Clone)]
+struct InlineWork {
+    accepted_splices: usize,
+    copied_instructions: usize,
+    ordinary_splices: usize,
+    specialized_splices: usize,
+    bounded_splices: usize,
+    hoisted_splices: usize,
+    arena_allocations: usize,
+    cleanup_live_before: usize,
+    cleanup_live_after: usize,
+    borrowed_block_scans: usize,
+    instructions_scanned: usize,
+    census: skull_transform::InlineScanStats,
+    owners: BTreeMap<String, (usize, usize, u64, usize, usize)>,
+}
+
+impl InlineWork {
+    fn add_records(&mut self, records: &[skull_transform::SpliceRecord]) {
+        self.accepted_splices += records.len();
+        for record in records {
+            self.copied_instructions += record.callee_insts;
+            self.bounded_splices += usize::from(record.bounded);
+            self.census.clone.add(record.clone);
+            let owner = inline_owner_key(record.callee);
+            let entry = self.owners.entry(owner).or_default();
+            entry.0 += 1;
+            entry.1 += record.callee_insts;
+            entry.2 += record.splice_ns;
+            entry.3 += record.clone.live_instructions
+                + record.clone.live_cells
+                + record.clone.live_blocks;
+            entry.4 += record.clone.dead_cloned_instructions
+                + record.clone.dead_cloned_cells
+                + record.clone.dead_cloned_blocks;
+        }
+    }
+
+    fn add_allocations(&mut self, before: (usize, usize, usize), after: (usize, usize, usize)) {
+        self.arena_allocations += after.0.saturating_sub(before.0);
+        self.arena_allocations += after.1.saturating_sub(before.1);
+        self.arena_allocations += after.2.saturating_sub(before.2);
+    }
+
+    fn add_scan(&mut self, stats: skull_transform::InlineScanStats) {
+        self.borrowed_block_scans += stats.borrowed_block_scans;
+        self.instructions_scanned += stats.instructions_scanned;
+        self.census.add(stats);
+    }
+
+    fn add(&mut self, other: InlineWork) {
+        self.accepted_splices += other.accepted_splices;
+        self.copied_instructions += other.copied_instructions;
+        self.ordinary_splices += other.ordinary_splices;
+        self.specialized_splices += other.specialized_splices;
+        self.bounded_splices += other.bounded_splices;
+        self.hoisted_splices += other.hoisted_splices;
+        self.arena_allocations += other.arena_allocations;
+        self.cleanup_live_before += other.cleanup_live_before;
+        self.cleanup_live_after += other.cleanup_live_after;
+        self.borrowed_block_scans += other.borrowed_block_scans;
+        self.instructions_scanned += other.instructions_scanned;
+        self.census.add(other.census);
+        for (owner, (splices, copied, splice_ns, live, dead)) in other.owners {
+            let entry = self.owners.entry(owner).or_default();
+            entry.0 += splices;
+            entry.1 += copied;
+            entry.2 += splice_ns;
+            entry.3 += live;
+            entry.4 += dead;
+        }
+    }
+}
+
+#[derive(Default, Clone)]
+struct UnitAttribution {
+    owner: String,
+    examined: bool,
+    times: PhaseTimes,
+    hir_nodes: usize,
+    mir_instructions: usize,
+    lower_facts: skull_mir::lower::LowerAttribution,
+    inline: InlineWork,
+    lowered_instance: Option<(Instance, LoweredInstanceKind)>,
+    consumer_instance: Option<(Instance, LoweredInstanceKind)>,
+    canonical_reused: bool,
+    always_lowered: bool,
+    always_callee_keys: Vec<Instance>,
+}
+
+#[derive(Clone, Copy)]
+enum LoweredInstanceKind {
+    Ordinary,
+    Specialized,
+}
+
+#[derive(Default)]
+struct AttributionAccumulator {
+    result: EmitAttribution,
+    lower_samples: Vec<u64>,
+    inline_samples: Vec<u64>,
+    cleanup_samples: Vec<u64>,
+    closure_samples: Vec<u64>,
+    counted_loop_samples: Vec<u64>,
+    hoisted_inline_samples: Vec<u64>,
+    validation_samples: Vec<u64>,
+    regalloc_samples: Vec<u64>,
+    stringify_samples: Vec<u64>,
+    top_bodies: Vec<BodyAttributionOwner>,
+    census_enabled: bool,
+    candidate_published_keys: FxHashSet<Instance>,
+    candidate_eligible_keys: FxHashSet<Instance>,
+    ordinary_lowered_keys: FxHashSet<Instance>,
+    specialized_lowered_keys: FxHashSet<Instance>,
+    ordinary_consumer_keys: FxHashSet<Instance>,
+    specialized_consumer_keys: FxHashSet<Instance>,
+    ordinary_canonical_reuse_keys: FxHashSet<Instance>,
+    specialized_canonical_reuse_keys: FxHashSet<Instance>,
+    canonical_clone_derivations: usize,
+    candidate_lower_ns_by_key: BTreeMap<Instance, Vec<u64>>,
+    ordinary_lower_ns_by_key: BTreeMap<Instance, Vec<u64>>,
+    specialized_lower_ns_by_key: BTreeMap<Instance, Vec<u64>>,
+    always_callee_keys: FxHashSet<Instance>,
+    always_lowered_units: usize,
+}
+
+fn inline_owner_key(fref: FuncRef) -> String {
+    format!("m{}:f{}", fref.module.index(), u32::from(fref.func.into_raw()))
+}
+
+fn hir_nodes_for_owner(ws: &Workspace, mid: ModuleId, owner: BodyOwner) -> usize {
+    ws.module(mid)
+        .bodies
+        .get(&owner)
+        .map(|body| {
+            body.expr_arena.len()
+                + body.binding_arena.len()
+                + body.statement_arena.len()
+                + body.pattern_arena.len()
+                + body.match_arm_arena.len()
+        })
+        .unwrap_or(0)
+}
+
+fn mir_live_instructions(mf: &MirFunc) -> usize {
+    mf.blocks.iter().map(|(_, block)| block.insts.len()).sum()
+}
+
+fn duration_us(duration: Duration) -> u64 {
+    duration.as_micros().max(1) as u64
+}
+
+fn duration_ns(duration: Duration) -> u64 {
+    duration.as_nanos().min(u64::MAX as u128) as u64
+}
+
+fn record_phase(
+    phase: &mut AttributionPhase,
+    samples: &mut Vec<u64>,
+    duration: Duration,
+    did_work: bool,
+    work_volume: usize,
+    instructions: usize,
+) {
+    phase.bodies_examined += 1;
+    phase.elapsed += duration;
+    phase.work_volume += work_volume;
+    phase.instructions_visited += instructions;
+    if duration > Duration::ZERO {
+        samples.push(duration_us(duration));
+    }
+    if did_work {
+        phase.bodies_with_work += 1;
+    }
+}
+
+fn finish_distribution(phase: &mut AttributionPhase, samples: &mut Vec<u64>) {
+    samples.sort_unstable();
+    if samples.is_empty() {
+        return;
+    }
+    let at = |percentile: usize| samples[(samples.len() - 1) * percentile / 100];
+    phase.p50_us = at(50);
+    phase.p95_us = at(95);
+    phase.max_us = *samples.last().expect("nonempty duration sample");
+}
+
+impl AttributionAccumulator {
+    fn add_unit(&mut self, unit: &UnitAttribution) {
+        if !unit.examined {
+            return;
+        }
+        self.result.bodies_examined += 1;
+        if unit.mir_instructions > 0 {
+            self.result.bodies_with_work += 1;
+        }
+        if self.census_enabled {
+            if let Some((instance, kind)) = &unit.consumer_instance {
+                match kind {
+                    LoweredInstanceKind::Ordinary => {
+                        self.ordinary_consumer_keys.insert(instance.clone());
+                        if unit.canonical_reused {
+                            self.ordinary_canonical_reuse_keys.insert(instance.clone());
+                        }
+                    }
+                    LoweredInstanceKind::Specialized => {
+                        self.specialized_consumer_keys.insert(instance.clone());
+                        if unit.canonical_reused {
+                            self.specialized_canonical_reuse_keys.insert(instance.clone());
+                        }
+                    }
+                }
+                if unit.canonical_reused {
+                    self.canonical_clone_derivations += 1;
+                }
+            }
+            if let Some((instance, kind)) = &unit.lowered_instance {
+                match kind {
+                    LoweredInstanceKind::Ordinary => {
+                        self.ordinary_lowered_keys.insert(instance.clone());
+                        self.ordinary_lower_ns_by_key
+                            .entry(instance.clone())
+                            .or_default()
+                            .push(duration_ns(unit.times.lower));
+                    }
+                    LoweredInstanceKind::Specialized => {
+                        self.specialized_lowered_keys.insert(instance.clone());
+                        self.specialized_lower_ns_by_key
+                            .entry(instance.clone())
+                            .or_default()
+                            .push(duration_ns(unit.times.lower));
+                    }
+                }
+            }
+            if unit.always_lowered {
+                self.always_lowered_units += 1;
+            }
+            self.always_callee_keys.extend(unit.always_callee_keys.iter().cloned());
+        }
+        let times = &unit.times;
+        record_phase(
+            &mut self.result.lower,
+            &mut self.lower_samples,
+            times.lower,
+            times.lower_work,
+            unit.hir_nodes,
+            unit.mir_instructions,
+        );
+        self.result.lower.concrete_mono_requests += unit.lower_facts.concrete_mono_requests;
+        self.result.lower.concrete_mono_cache_hits += unit.lower_facts.concrete_mono_cache_hits;
+        self.result.lower.concrete_mono_derivations += unit.lower_facts.concrete_mono_derivations;
+        self.result.lower.concrete_mono_unique_ids += unit.lower_facts.concrete_mono_unique_ids;
+        self.result.lower.concrete_mono_cloned_nodes += unit.lower_facts.concrete_mono_cloned_nodes;
+        self.result.lower.concrete_mono_interner_miss_cloned_nodes +=
+            unit.lower_facts.concrete_mono_interner_miss_cloned_nodes;
+        self.result.lower.concrete_mono_cache_insertion_cloned_nodes +=
+            unit.lower_facts.concrete_mono_cache_insertion_cloned_nodes;
+        self.result.lower.concrete_mono_cache_hit_cloned_nodes +=
+            unit.lower_facts.concrete_mono_cache_hit_cloned_nodes;
+        self.result.lower.concrete_mono_explicit_owned_escape_cloned_nodes +=
+            unit.lower_facts.concrete_mono_explicit_owned_escape_cloned_nodes;
+        self.result.lower.concrete_mono_explicit_owned_escapes +=
+            unit.lower_facts.concrete_mono_explicit_owned_escapes;
+        self.result.lower.concrete_mono_lookup_ns += unit.lower_facts.concrete_mono_lookup_ns;
+        self.result.lower.concrete_mono_cache_lookup_ns +=
+            unit.lower_facts.concrete_mono_cache_lookup_ns;
+        self.result.lower.concrete_mono_shared_handle_requests +=
+            unit.lower_facts.concrete_mono_shared_handle_requests;
+        self.result.lower.concrete_mono_clone_self_ns += unit.lower_facts.concrete_mono_clone_self_ns;
+        self.result.lower.concrete_mono_timed_requests +=
+            unit.lower_facts.concrete_mono_timed_requests;
+        for (total, child) in self
+            .result
+            .lower
+            .concrete_mono_by_consumer
+            .iter_mut()
+            .zip(unit.lower_facts.concrete_mono_by_consumer.iter())
+        {
+            total.requests += child.requests;
+            total.cloned_nodes += child.cloned_nodes;
+            total.explicit_owned_escapes += child.explicit_owned_escapes;
+        }
+        self.result.lower.abi_param_copy_volume += unit.lower_facts.abi_param_copy_volume;
+        self.result.lower.abi_param_shared_views += unit.lower_facts.abi_param_shared_views;
+        self.result.lower.mir_instruction_allocations += unit.lower_facts.mir_instruction_allocations;
+        self.result.lower.mir_instruction_reallocations += unit.lower_facts.mir_instruction_reallocations;
+        self.result.lower.mir_instruction_reallocation_ns +=
+            unit.lower_facts.mir_instruction_reallocation_ns;
+        self.result.lower.mir_instruction_capacity += unit.lower_facts.mir_instruction_capacity;
+        self.result.lower.mir_cell_allocations += unit.lower_facts.mir_cell_allocations;
+        self.result.lower.mir_cell_reallocations += unit.lower_facts.mir_cell_reallocations;
+        self.result.lower.mir_cell_reallocation_ns += unit.lower_facts.mir_cell_reallocation_ns;
+        self.result.lower.mir_cell_capacity += unit.lower_facts.mir_cell_capacity;
+        self.result.lower.mir_block_allocations += unit.lower_facts.mir_block_allocations;
+        self.result.lower.mir_block_reallocations += unit.lower_facts.mir_block_reallocations;
+        self.result.lower.mir_block_reallocation_ns += unit.lower_facts.mir_block_reallocation_ns;
+        self.result.lower.mir_block_capacity += unit.lower_facts.mir_block_capacity;
+        record_phase(
+            &mut self.result.inline_phase,
+            &mut self.inline_samples,
+            times.inline,
+            times.inline_work,
+            unit.inline.accepted_splices,
+            unit.inline.copied_instructions,
+        );
+        record_phase(
+            &mut self.result.cleanup,
+            &mut self.cleanup_samples,
+            times.cleanup,
+            times.cleanup_work,
+            unit.mir_instructions,
+            0,
+        );
+        record_phase(
+            &mut self.result.closure,
+            &mut self.closure_samples,
+            times.closure,
+            times.closure_work,
+            0,
+            0,
+        );
+        record_phase(
+            &mut self.result.counted_loop,
+            &mut self.counted_loop_samples,
+            times.counted_loop,
+            times.counted_loop_work,
+            0,
+            0,
+        );
+        record_phase(
+            &mut self.result.hoisted_inline,
+            &mut self.hoisted_inline_samples,
+            times.hoisted_inline,
+            times.hoisted_inline_work,
+            0,
+            0,
+        );
+        record_phase(
+            &mut self.result.validation,
+            &mut self.validation_samples,
+            times.validation,
+            times.validation_work,
+            0,
+            0,
+        );
+        record_phase(
+            &mut self.result.regalloc,
+            &mut self.regalloc_samples,
+            times.regalloc,
+            times.regalloc_work,
+            0,
+            0,
+        );
+        let stringify = times.emit.saturating_sub(times.regalloc);
+        record_phase(
+            &mut self.result.stringify,
+            &mut self.stringify_samples,
+            stringify,
+            times.emit_work,
+            unit.mir_instructions,
+            0,
+        );
+        self.result.inline.accepted_splices += unit.inline.accepted_splices;
+        self.result.inline.copied_instructions += unit.inline.copied_instructions;
+        self.result.inline.ordinary_splices += unit.inline.ordinary_splices;
+        self.result.inline.specialized_splices += unit.inline.specialized_splices;
+        self.result.inline.bounded_splices += unit.inline.bounded_splices;
+        self.result.inline.hoisted_splices += unit.inline.hoisted_splices;
+        self.result.inline.arena_allocations += unit.inline.arena_allocations;
+        self.result.inline.cleanup_live_before += unit.inline.cleanup_live_before;
+        self.result.inline.cleanup_live_after += unit.inline.cleanup_live_after;
+        self.result.inline.borrowed_block_scans += unit.inline.borrowed_block_scans;
+        self.result.inline.instructions_scanned += unit.inline.instructions_scanned;
+        self.result.inline.census.add(unit.inline.census.clone());
+        for (owner, (splices, copied, splice_ns, live, dead)) in &unit.inline.owners {
+            let entry = self
+                .result
+                .inline
+                .top_owners
+                .iter_mut()
+                .find(|item| item.owner == *owner);
+            if let Some(entry) = entry {
+                entry.splices += *splices;
+                entry.copied_instructions += *copied;
+                entry.splice_ns += *splice_ns;
+                entry.live_cloned_entries += *live;
+                entry.dead_cloned_entries += *dead;
+            } else {
+                self.result.inline.top_owners.push(InlineOwnerAttribution {
+                    owner: owner.clone(),
+                    splices: *splices,
+                    copied_instructions: *copied,
+                    splice_ns: *splice_ns,
+                    live_cloned_entries: *live,
+                    dead_cloned_entries: *dead,
+                });
+            }
+        }
+        self.top_bodies.push(BodyAttributionOwner {
+            owner: unit.owner.clone(),
+            lower_us: duration_us(times.lower),
+            mir_instructions: unit.mir_instructions,
+            concrete_mono_requests: unit.lower_facts.concrete_mono_requests,
+            concrete_mono_cloned_nodes: unit.lower_facts.concrete_mono_cloned_nodes,
+        });
+    }
+
+    fn finish(mut self) -> EmitAttribution {
+        finish_distribution(&mut self.result.lower, &mut self.lower_samples);
+        finish_distribution(&mut self.result.inline_phase, &mut self.inline_samples);
+        finish_distribution(&mut self.result.cleanup, &mut self.cleanup_samples);
+        finish_distribution(&mut self.result.closure, &mut self.closure_samples);
+        finish_distribution(&mut self.result.counted_loop, &mut self.counted_loop_samples);
+        finish_distribution(&mut self.result.hoisted_inline, &mut self.hoisted_inline_samples);
+        finish_distribution(&mut self.result.validation, &mut self.validation_samples);
+        finish_distribution(&mut self.result.regalloc, &mut self.regalloc_samples);
+        finish_distribution(&mut self.result.stringify, &mut self.stringify_samples);
+        self.result.inline.top_owners.sort_by(|a, b| {
+            b.copied_instructions
+                .cmp(&a.copied_instructions)
+                .then_with(|| a.owner.cmp(&b.owner))
+        });
+        self.result.inline.top_owners.truncate(8);
+        self.result.inline.candidate_unique_keys = self
+            .result
+            .inline
+            .census
+            .candidate_requested_keys
+            .iter()
+            .collect::<FxHashSet<_>>()
+            .len();
+        let ordinary_keys: FxHashSet<_> = self
+            .result
+            .inline
+            .census
+            .ordinary_keys
+            .iter()
+            .collect();
+        self.result.inline.candidate_snapshot_duplicates = self
+            .result
+            .inline
+            .census
+            .candidate_keys
+            .iter()
+            .filter(|key| ordinary_keys.contains(key))
+            .count();
+        if self.census_enabled {
+            let published = &self.candidate_published_keys;
+            let requested: FxHashSet<_> = self
+                .result
+                .inline
+                .census
+                .candidate_requested_keys
+                .iter()
+                .cloned()
+                .collect();
+            let spliced: FxHashSet<_> = self
+                .result
+                .inline
+                .census
+                .spliced_keys
+                .iter()
+                .cloned()
+                .collect();
+            let mut lowerings_by_key: BTreeMap<Instance, Vec<u64>> = BTreeMap::new();
+            for (key, times) in &self.candidate_lower_ns_by_key {
+                lowerings_by_key
+                    .entry(key.clone())
+                    .or_default()
+                    .extend(times.iter().copied());
+            }
+            for (key, times) in &self.ordinary_lower_ns_by_key {
+                lowerings_by_key
+                    .entry(key.clone())
+                    .or_default()
+                    .extend(times.iter().copied());
+            }
+            for (key, times) in &self.specialized_lower_ns_by_key {
+                lowerings_by_key
+                    .entry(key.clone())
+                    .or_default()
+                    .extend(times.iter().copied());
+            }
+            let mut keys_lowered_more_than_once = 0;
+            let mut first_lower_ns = 0;
+            let mut duplicate_lower_ns = 0;
+            for times in lowerings_by_key.values() {
+                if times.len() > 1 {
+                    keys_lowered_more_than_once += 1;
+                }
+                if let Some((first, rest)) = times.split_first() {
+                    first_lower_ns += *first;
+                    duplicate_lower_ns += rest.iter().sum::<u64>();
+                }
+            }
+            let ordinary_lowering_derivations = self
+                .ordinary_lower_ns_by_key
+                .values()
+                .map(Vec::len)
+                .sum();
+            let specialized_lowering_derivations = self
+                .specialized_lower_ns_by_key
+                .values()
+                .map(Vec::len)
+                .sum();
+            let candidate_ordinary_consumer_overlap = self
+                .candidate_eligible_keys
+                .intersection(&self.ordinary_consumer_keys)
+                .count();
+            let candidate_specialized_consumer_overlap = self
+                .candidate_eligible_keys
+                .intersection(&self.specialized_consumer_keys)
+                .count();
+            let ordinary_canonical_miss_instances: Vec<_> = self
+                .candidate_eligible_keys
+                .intersection(&self.ordinary_consumer_keys)
+                .filter(|key| !self.ordinary_canonical_reuse_keys.contains(*key))
+                .cloned()
+                .collect();
+            let specialized_canonical_miss_instances: Vec<_> = self
+                .candidate_eligible_keys
+                .intersection(&self.specialized_consumer_keys)
+                .filter(|key| !self.specialized_canonical_reuse_keys.contains(*key))
+                .cloned()
+                .collect();
+            let population = &mut self.result.inline.population;
+            population.candidate_published_keys = published.len();
+            population.candidate_eligible_keys = self.candidate_eligible_keys.len();
+            population.ordinary_lowered_keys = self.ordinary_lowered_keys.len();
+            population.specialized_lowered_keys = self.specialized_lowered_keys.len();
+            population.ordinary_lowering_derivations = ordinary_lowering_derivations;
+            population.specialized_lowering_derivations = specialized_lowering_derivations;
+            population.ordinary_consumer_keys = self.ordinary_consumer_keys.len();
+            population.specialized_consumer_keys = self.specialized_consumer_keys.len();
+            population.candidate_ordinary_consumer_overlap = candidate_ordinary_consumer_overlap;
+            population.candidate_specialized_consumer_overlap =
+                candidate_specialized_consumer_overlap;
+            population.ordinary_canonical_reuse_keys = self.ordinary_canonical_reuse_keys.len();
+            population.specialized_canonical_reuse_keys =
+                self.specialized_canonical_reuse_keys.len();
+            population.ordinary_canonical_miss_keys = ordinary_canonical_miss_instances.len();
+            population.specialized_canonical_miss_keys = specialized_canonical_miss_instances.len();
+            population.ordinary_canonical_miss_instances = ordinary_canonical_miss_instances;
+            population.specialized_canonical_miss_instances = specialized_canonical_miss_instances;
+            population.canonical_clone_derivations = self.canonical_clone_derivations;
+            population.always_lowered_units = self.always_lowered_units;
+            population.always_callee_keys = self.always_callee_keys.len();
+            population.candidate_ordinary_overlap =
+                published.intersection(&self.ordinary_lowered_keys).count();
+            population.candidate_specialized_overlap =
+                published.intersection(&self.specialized_lowered_keys).count();
+            population.candidate_always_callee_overlap =
+                published.intersection(&self.always_callee_keys).count();
+            population.ordinary_specialized_overlap =
+                self.ordinary_lowered_keys.intersection(&self.specialized_lowered_keys).count();
+            population.candidate_requested_unique_keys = requested.len();
+            population.candidate_spliced_unique_keys = spliced.len();
+            population.candidate_published_never_requested =
+                published.difference(&requested).count();
+            population.candidate_requested_never_spliced = requested.difference(&spliced).count();
+            population.candidate_requested_not_published = requested.difference(published).count();
+            population.candidate_lower_failed = population
+                .candidate_lower_attempted
+                .saturating_sub(population.candidate_lowered_keys);
+            population.candidate_rejected_after_lower = population
+                .candidate_lowered_keys
+                .saturating_sub(population.candidate_eligible_keys);
+            population.keys_lowered_more_than_once = keys_lowered_more_than_once;
+            population.first_lower_ns = first_lower_ns;
+            population.duplicate_lower_ns = duplicate_lower_ns;
+        }
+        self.top_bodies.sort_by(|a, b| {
+            b.lower_us
+                .cmp(&a.lower_us)
+                .then_with(|| a.owner.cmp(&b.owner))
+        });
+        self.top_bodies.truncate(8);
+        self.result.top_bodies = self.top_bodies;
+        self.result
     }
 }
 
@@ -545,7 +1412,13 @@ struct UnitOut {
     code_artifact: skull_mir::code_identity::CodeArtifact,
     /// Module-global names read/written (fn-as-value edges; see `Chunk`).
     global_names: Vec<Ustr>,
+    /// Comptime inputs this unit's body baked in (`build_var`/`embed_string`).
+    /// Always-emitted units have no Chunk to carry these, and ALL in-tree
+    /// production comptime reads are global initializers -- dropping them here
+    /// is how the cimgui embeds went missing from the watch set.
+    comptime_reads: Vec<skull_mir::mir::ComptimeRead>,
     times: PhaseTimes,
+    attribution: UnitAttribution,
 }
 
 /// Record one emitted definition's Lua, emit time, and (for the non-coroutine
@@ -561,17 +1434,24 @@ fn emit_lowered(
     collect_refs: Option<Ustr>,
     t_emit: Duration,
 ) {
+    let tv = Instant::now();
     if let Some(key) = collect_refs {
         let (gs, cs) = direct_refs(ws, mf);
         out.refs = Some((key, gs, cs));
     }
     out.calls = skull_mir::reach::call_targets(mf);
     out.global_names = skull_mir::reach::global_ref_names(mf);
+    out.comptime_reads = mf.comptime_reads.clone();
     out.lua = lua;
     out.code_artifact = skull_mir::code_identity::CodeArtifact::from_mir_tree(mf);
     out.code_artifact.set_body_names(mf, body_name);
-    out.times.emit = t_emit;
-    out.times.regalloc = skull_codegen_lua::regalloc_time_elapsed().min(t_emit);
+    out.times.validation += tv.elapsed();
+    out.times.validation_work = true;
+    out.times.emit += t_emit;
+    out.times.emit_work |= t_emit > Duration::ZERO;
+    let regalloc = skull_codegen_lua::regalloc_time_elapsed().min(t_emit);
+    out.times.regalloc += regalloc;
+    out.times.regalloc_work |= regalloc > Duration::ZERO;
 }
 
 /// Lower + emit one decorator definition (`deco <name>` -> `__deco_<name>`).
@@ -586,6 +1466,7 @@ fn emit_decorator_unit(
     let mut out = UnitOut::default();
     let d = &ws.module(mid).decorators[did];
     let deco_name = crate::decorator_fn_name(d.name.as_str());
+    out.attribution.owner = format!("m{}:deco{}", mid.index(), u32::from(did.into_raw()));
     let tl = Instant::now();
     let owner = skull_mir::concrete::ConcreteOwner::Decorator {
         module: mid,
@@ -606,17 +1487,32 @@ fn emit_decorator_unit(
     out.times.lower = tl.elapsed();
     match lowered {
         Ok(mut mf) => {
+            out.attribution.examined = true;
+            out.attribution.hir_nodes = hir_nodes_for_owner(ws, mid, BodyOwner::Decorator(did));
+            out.attribution.mir_instructions = mf.insts.len();
+            out.attribution.lower_facts = mf.lower_attribution.clone();
+            out.times.lower_work = out.attribution.mir_instructions > 0;
+            let cleanup_before = mir_live_instructions(&mf);
             let tc = Instant::now();
-            skull_transform::cleanup_with_nobox(ws, &mut mf);
+            if let Err(e) = skull_transform::cleanup_with_nobox(ws, &mut mf) {
+                out.hard_error = Some(e);
+                return out;
+            }
+            out.times.cleanup = tc.elapsed();
+            out.times.cleanup_work = mir_live_instructions(&mf) != cleanup_before;
             // Decorator bodies can carry lambdas too -- convert like an ordinary fn.
             let pre_nested = mf.nested_fns.len();
+            let tclosure = Instant::now();
             skull_transform::convert_closures(&mut mf, &deco_name);
+            out.times.closure = tclosure.elapsed();
+            out.times.closure_work = mf.nested_fns.len() > pre_nested;
             for nf in &mf.nested_fns[pre_nested..] {
                 cg.mint_synthetic(nf.name.to_string());
             }
-            out.times.cleanup = tc.elapsed();
             let owner = bone_semantic::hir::BodyOwner::Decorator(did);
             let plan = concrete_plan.expect("a lowered decorator has a concrete plan");
+            out.attribution.always_lowered = true;
+            out.attribution.always_callee_keys.extend(plan.callees.values().cloned());
             let ctx = skull_mir::bound::concrete_body_ctx(
                 ws,
                 mid,
@@ -624,16 +1520,35 @@ fn emit_decorator_unit(
                 &plan.bound_tree,
                 scx.interner(),
             );
-            if let Err(e) =
-                check_unit_spec_bindings(ws, &ctx, mid, &deco_name, &mf, d.span, &mut out.specs)
-            {
+            let tv = Instant::now();
+            let check = check_unit_spec_bindings(ws, &ctx, mid, &deco_name, &mf, d.span, &mut out.specs);
+            out.times.validation += tv.elapsed();
+            out.times.validation_work = true;
+            if let Err(e) = check {
                 out.hard_error = Some(e);
                 return out;
             }
             skull_codegen_lua::regalloc_time_reset();
             let te = Instant::now();
             let mut lua = emit_named(ws, cg, scx.interner(), &deco_name, &mf);
-            emit_pass_nested_fns(ws, cg, scx, &mut mf.nested_fns, &mf.statics, &mut lua);
+            let root_emit = te.elapsed();
+            out.times.emit += root_emit;
+            out.times.emit_work |= root_emit > Duration::ZERO;
+            let regalloc = skull_codegen_lua::regalloc_time_elapsed().min(root_emit);
+            out.times.regalloc += regalloc;
+            out.times.regalloc_work |= regalloc > Duration::ZERO;
+            if let Err(e) = emit_pass_nested_fns(
+                ws,
+                cg,
+                scx,
+                &mut mf.nested_fns,
+                &mf.statics,
+                &mut lua,
+                &mut out.times,
+            ) {
+                out.hard_error = Some(e);
+                return out;
+            }
             emit_lowered(
                 ws,
                 &mut out,
@@ -641,8 +1556,9 @@ fn emit_decorator_unit(
                 lua,
                 &deco_name,
                 Some(Ustr::from(&deco_name)),
-                te.elapsed(),
+                Duration::ZERO,
             );
+            out.attribution.times = out.times;
         }
         Err(e) => out.skipped = Some((deco_name, e.message)),
     }
@@ -658,18 +1574,17 @@ fn global_init_target(
     scx: &skull_mir::lower::ScalarCtx,
     cg: &CodegenCtx,
     g: &bone_semantic::hir::GlobalDef,
-) -> String {
-    match skull_mir::lower::GlobalPlan::for_declared_type(ws, scx, g.ty)
-        .ok()
-        .and_then(|plan| plan.leaf_names(g.name))
-    {
-        Some(leaves) => leaves
-            .iter()
-            .map(|l| cg.mint_synthetic(l.to_string()))
-            .collect::<Vec<_>>()
-            .join(", "),
-        None => g.name.to_string(),
-    }
+) -> Result<String, CompilerError> {
+    let plan = skull_mir::lower::GlobalPlan::for_declared_type(ws, scx, g.ty)
+        .map_err(|e| CompilerError::new_no_location(e.message))?;
+    let Some(leaves) = plan.leaf_names(g.name) else {
+        return Ok(g.name.to_string());
+    };
+    Ok(leaves
+        .iter()
+        .map(|l| cg.mint_synthetic(l.to_string()))
+        .collect::<Vec<_>>()
+        .join(", "))
 }
 
 fn global_init_session_line(
@@ -809,6 +1724,7 @@ fn emit_global_unit(
     let mut out = UnitOut::default();
     let g = &ws.module(mid).globals[gid];
     let init_name = crate::global_init_fn_name(g.name.as_str());
+    out.attribution.owner = format!("m{}:global{}", mid.index(), u32::from(gid.into_raw()));
     let tl = Instant::now();
     let owner = skull_mir::concrete::ConcreteOwner::Global {
         module: mid,
@@ -837,8 +1753,19 @@ fn emit_global_unit(
     out.times.lower = tl.elapsed();
     match lowered {
         Ok(Some(mut mf)) => {
+            out.attribution.examined = true;
+            out.attribution.hir_nodes = hir_nodes_for_owner(ws, mid, BodyOwner::Global(gid));
+            out.attribution.mir_instructions = mf.insts.len();
+            out.attribution.lower_facts = mf.lower_attribution.clone();
+            out.times.lower_work = out.attribution.mir_instructions > 0;
+            let cleanup_before = mir_live_instructions(&mf);
             let tc = Instant::now();
-            skull_transform::cleanup_with_nobox(ws, &mut mf);
+            if let Err(e) = skull_transform::cleanup_with_nobox(ws, &mut mf) {
+                out.hard_error = Some(e);
+                return out;
+            }
+            out.times.cleanup = tc.elapsed();
+            out.times.cleanup_work = mir_live_instructions(&mf) != cleanup_before;
             // A global-initializer body can carry lambdas (e.g. a `[TileDef]`
             // literal with fn fields) -- route them through the shared pass, same
             // as an ordinary fn. Their global reads are NOT init-ordering
@@ -846,13 +1773,17 @@ fn emit_global_unit(
             // is computed on the post-pass `mf` where those reads live in the
             // hoisted siblings, not the main body.
             let pre_nested = mf.nested_fns.len();
+            let tclosure = Instant::now();
             skull_transform::convert_closures(&mut mf, &init_name);
+            out.times.closure = tclosure.elapsed();
+            out.times.closure_work = mf.nested_fns.len() > pre_nested;
             for nf in &mf.nested_fns[pre_nested..] {
                 cg.mint_synthetic(nf.name.to_string());
             }
-            out.times.cleanup = tc.elapsed();
             let owner = bone_semantic::hir::BodyOwner::Global(gid);
             let plan = concrete_plan.expect("a lowered global has a concrete plan");
+            out.attribution.always_lowered = true;
+            out.attribution.always_callee_keys.extend(plan.callees.values().cloned());
             let ctx = skull_mir::bound::concrete_body_ctx(
                 ws,
                 mid,
@@ -860,9 +1791,11 @@ fn emit_global_unit(
                 &plan.bound_tree,
                 scx.interner(),
             );
-            if let Err(e) =
-                check_unit_spec_bindings(ws, &ctx, mid, g.name.as_str(), &mf, g.name_span, &mut out.specs)
-            {
+            let tv = Instant::now();
+            let check = check_unit_spec_bindings(ws, &ctx, mid, g.name.as_str(), &mf, g.name_span, &mut out.specs);
+            out.times.validation += tv.elapsed();
+            out.times.validation_work = true;
+            if let Err(e) = check {
                 out.hard_error = Some(e);
                 return out;
             }
@@ -870,12 +1803,50 @@ fn emit_global_unit(
             skull_codegen_lua::regalloc_time_reset();
             let te = Instant::now();
             let mut lua = emit_named(ws, cg, scx.interner(), &init_name, &mf);
-            emit_pass_nested_fns(ws, cg, scx, &mut mf.nested_fns, &mf.statics, &mut lua);
-            emit_lowered(ws, &mut out, &mf, lua, &init_name, Some(key), te.elapsed());
-            // Consts remain artifact data and are re-evaluated on every complete
-            // publication. Mutable globals are Session slots, so their initializer
-            // is guarded by slot initialization rather than by process-global names.
-            let target = global_init_target(ws, scx, cg, g);
+            let root_emit = te.elapsed();
+            out.times.emit += root_emit;
+            out.times.emit_work |= root_emit > Duration::ZERO;
+            let regalloc = skull_codegen_lua::regalloc_time_elapsed().min(root_emit);
+            out.times.regalloc += regalloc;
+            out.times.regalloc_work |= regalloc > Duration::ZERO;
+            if let Err(e) = emit_pass_nested_fns(
+                ws,
+                cg,
+                scx,
+                &mut mf.nested_fns,
+                &mf.statics,
+                &mut lua,
+                &mut out.times,
+            ) {
+                out.hard_error = Some(e);
+                return out;
+            }
+            emit_lowered(ws, &mut out, &mf, lua, &init_name, Some(key), Duration::ZERO);
+            out.attribution.times = out.times;
+            // Hot-reload init line. A `const` is a compile-time constant: tweaking
+            // the source literal should show the new value next reload, so its init
+            // runs UNCONDITIONALLY (no preserve guard), mirroring rock-codegen's
+            // `if is_const` branch (`incremental.rs::generate_global_code`).
+            //
+            // A mutable `global` holds live runtime state we WANT to survive the
+            // re-dofile, so it keeps the preservation guard: on a reload
+            // (`_G.HOT_RELOAD`), skip the assignment when this global existed with
+            // the SAME type in the previous run. Cold start (HOT_RELOAD nil) always
+            // runs the init. The type string is bone's render of `g.ty`, also
+            // written into `__rock_known_globals` below (which lists const + mutable
+            // alike); both come from the same render so "type unchanged" compares
+            // equal.
+            // Same TYPE is not same LAYOUT, and this guard deliberately does not
+            // detect the difference: a layout drift restarts the process upstream
+            // (`shape_drift_tests::marking_a_type_nobox_requests_restart`), and a
+            // respawn is a cold start that never reaches this branch.
+            let target = match global_init_target(ws, scx, cg, g) {
+                Ok(target) => target,
+                Err(e) => {
+                    out.hard_error = Some(e);
+                    return out;
+                }
+            };
             let line = if g.is_const {
                 format!("{target} = {init_name}()\n")
             } else {
@@ -913,6 +1884,7 @@ fn merge_units(
     calls: &mut Vec<FuncRef>,
     global_names: &mut Vec<Ustr>,
     code_artifact: &mut skull_mir::code_identity::CodeArtifact,
+    attribution: &mut AttributionAccumulator,
     times: &mut PhaseTimes,
 ) {
     for u in results {
@@ -930,6 +1902,7 @@ fn merge_units(
         calls.extend(u.calls);
         global_names.extend(u.global_names);
         code_artifact.merge(u.code_artifact);
+        attribution.add_unit(&u.attribution);
         times.add(&u.times);
     }
 }
@@ -1056,6 +2029,101 @@ fn too_deep_to_instantiate(
     )))
 }
 
+fn inline_candidate_keys(concrete: &crate::concrete_body::ConcreteBodies) -> Vec<Instance> {
+    concrete.candidate_keys().iter().cloned().collect()
+}
+
+fn concrete_stats_requested() -> bool {
+    std::env::var_os("SKULL_CONCRETE_STATS").is_some()
+}
+
+fn build_inline_candidate_table(
+    ws: &Workspace,
+    scx: &skull_mir::lower::ScalarCtx,
+    concrete: &crate::concrete_body::ConcreteBodies,
+    keys: Vec<Instance>,
+    base: Option<&std::sync::Arc<skull_transform::InlineCandidateTable>>,
+    invalidated: Option<&FxHashSet<FuncRef>>,
+    warm_keys_override: Option<Vec<Instance>>,
+    added: Option<&BTreeSet<Instance>>,
+    removed: Option<&BTreeSet<Instance>>,
+) -> Result<std::sync::Arc<skull_transform::InlineCandidateTable>, CompilerError> {
+    let mut census = CandidateBuildStats::default();
+    build_inline_candidate_table_with_census(
+        ws,
+        scx,
+        concrete,
+        keys,
+        base,
+        invalidated,
+        warm_keys_override,
+        added,
+        removed,
+        &mut census,
+    )
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct CandidateBuildStats {
+    keys_examined: usize,
+    warmed: usize,
+}
+
+fn build_inline_candidate_table_with_census(
+    ws: &Workspace,
+    scx: &skull_mir::lower::ScalarCtx,
+    concrete: &crate::concrete_body::ConcreteBodies,
+    keys: Vec<Instance>,
+    base: Option<&std::sync::Arc<skull_transform::InlineCandidateTable>>,
+    invalidated: Option<&FxHashSet<FuncRef>>,
+    warm_keys_override: Option<Vec<Instance>>,
+    added: Option<&BTreeSet<Instance>>,
+    removed: Option<&BTreeSet<Instance>>,
+    census: &mut CandidateBuildStats,
+) -> Result<std::sync::Arc<skull_transform::InlineCandidateTable>, CompilerError> {
+    // The old incremental route left this unset and filtered every key here.
+    // Count the exact iterator population so a mutation that restores that
+    // route is visible rather than looking like a timing-only regression.
+    census.keys_examined = usize::from(warm_keys_override.is_none()) * keys.len();
+    let warm_keys: Vec<Instance> = warm_keys_override.unwrap_or_else(|| {
+        keys.iter()
+            .filter(|key| match base {
+                None => true,
+                Some(base) => {
+                    invalidated.is_some_and(|frefs| frefs.contains(&key.func))
+                        || !base.contains(key)
+                }
+            })
+            .cloned()
+            .collect()
+    });
+    let warms: Vec<skull_transform::InlineCandidateWarm> = par_map_with(
+        warm_keys,
+        skull_transform::InlineCache::default,
+        |inline_cache, inst| {
+            inline_cache.warm_candidate(ws, scx, inst, concrete.plans.as_ref())
+        },
+    )
+    .into_iter()
+    .collect::<Result<_, _>>()?;
+    census.warmed = warms.len();
+    if let Some(base) = base {
+        if let (Some(added), Some(removed)) = (added, removed) {
+            return Ok(std::sync::Arc::new(skull_transform::InlineCandidateTable::from_warms_incremental(
+                std::sync::Arc::clone(base),
+                warms,
+                &added.iter().cloned().collect::<Vec<_>>(),
+                &removed.iter().cloned().collect::<Vec<_>>(),
+            )));
+        }
+    }
+    Ok(std::sync::Arc::new(skull_transform::InlineCandidateTable::from_warms_with_base(
+        base.map(std::sync::Arc::as_ref),
+        keys,
+        warms,
+    )))
+}
+
 /// **Phase 2's specialized-body population, driven by SpecDemand closure over
 /// `cache.lua_view`'s retained ordinary population -- not by `lua_view.
 /// instances` directly, and not by a reachability walk.**
@@ -1095,7 +2163,10 @@ fn view_driven_specialized_chunks(
 ) -> (FxHashMap<Instance, Chunk>, Vec<(String, CompilerError)>) {
     let mut built: FxHashMap<Instance, Chunk> = FxHashMap::default();
     let mut errs: Vec<(String, CompilerError)> = Vec::new();
-    let mut inline_cache = skull_transform::InlineCache::default();
+    let mut inline_cache = match cache.inline_cache.candidate_table() {
+        Some(table) => skull_transform::InlineCache::with_candidate_table(table),
+        None => skull_transform::InlineCache::default(),
+    };
     let mut pending: Vec<Instance> = initial.iter().map(|d| d.inst.clone()).collect();
     for module in ws.modules.iter() {
         if module.id == ModuleId::builtin() {
@@ -1197,9 +2268,14 @@ struct Chunk {
     /// Per-stage emit time captured when this chunk was built, summed back into
     /// the `backend-stats` breakdown by [`assemble`] when the chunk is pulled.
     times: PhaseTimes,
-    /// `static` cells this body declares -- aggregated at assembly for the
-    /// compiler-owned StateSchema and initializer-key reset lines.
+    attribution: UnitAttribution,
+    /// `static` cells this body declares -- aggregated at chunk-pull for the
+    /// hot-reload preservation preamble + `__rock_known_globals` registration.
     statics: Vec<skull_mir::mir::StaticCell>,
+    /// Comptime inputs baked into this chunk's Lua (build_var/embed_string).
+    /// `update_chunk_cache` compares them against the current inputs and treats
+    /// a stale read as a body edit -- bone's reinferred set cannot see these.
+    comptime_reads: Vec<skull_mir::mir::ComptimeRead>,
     /// The callees this body still CALLS after inlining -- the reachability edge
     /// set. Distinct from `deps`, which is an invalidation superset (it also holds
     /// everything inlined AWAY, and would keep spliced-out callees alive).
@@ -1226,6 +2302,96 @@ enum BodyMutation {
     ClearCoroutineResultPlan { body: FuncRef },
     #[cfg(test)]
     ClearIteratorWitnessInstance { body: FuncRef },
+    #[cfg(test)]
+    SkipAbiPlanPublish,
+    #[cfg(test)]
+    ConcreteResultOrder(skull_graph::concrete_body::BuildResultOrder),
+    #[cfg(all(test, not(feature = "sequential")))]
+    SetupLaneSchedule(SetupLaneSchedule),
+}
+
+#[cfg(all(test, not(feature = "sequential")))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SetupLaneSchedule {
+    CpuFirst,
+    AbiFirst,
+    Handshake,
+}
+
+#[cfg(all(test, not(feature = "sequential")))]
+#[derive(Clone, Copy, Debug, Default)]
+struct SetupHandshakeState {
+    entered: usize,
+    released: usize,
+    released_after_both: bool,
+}
+
+#[cfg(all(test, not(feature = "sequential")))]
+struct SetupLaneScheduler {
+    schedule: SetupLaneSchedule,
+    finished: std::sync::Mutex<bool>,
+    handshake: std::sync::Mutex<SetupHandshakeState>,
+    wake: std::sync::Condvar,
+}
+
+#[cfg(all(test, not(feature = "sequential")))]
+impl SetupLaneScheduler {
+    fn new(schedule: SetupLaneSchedule) -> Self {
+        Self {
+            schedule,
+            finished: std::sync::Mutex::new(false),
+            handshake: std::sync::Mutex::new(SetupHandshakeState::default()),
+            wake: std::sync::Condvar::new(),
+        }
+    }
+
+    fn wait(&self, lane: SetupLaneKind) {
+        if self.schedule == SetupLaneSchedule::Handshake {
+            if !matches!(lane, SetupLaneKind::CpuArtifact | SetupLaneKind::Shader) {
+                return;
+            }
+            let mut handshake = self.handshake.lock().expect("setup handshake lock");
+            handshake.entered += 1;
+            if handshake.entered == 2 {
+                handshake.released_after_both = true;
+                self.wake.notify_all();
+            }
+            while handshake.entered < 2 {
+                handshake = self.wake.wait(handshake).expect("setup handshake wait");
+            }
+            handshake.released += 1;
+            return;
+        }
+        let first = match self.schedule {
+            SetupLaneSchedule::CpuFirst => SetupLaneKind::CpuArtifact,
+            SetupLaneSchedule::AbiFirst => SetupLaneKind::AbiWarm,
+            SetupLaneSchedule::Handshake => unreachable!(),
+        };
+        if lane != first {
+            let mut finished = self.finished.lock().expect("setup scheduler lock");
+            while !*finished {
+                finished = self.wake.wait(finished).expect("setup scheduler wait");
+            }
+        }
+    }
+
+    fn finish(&self, lane: SetupLaneKind) {
+        let first = match self.schedule {
+            SetupLaneSchedule::CpuFirst => SetupLaneKind::CpuArtifact,
+            SetupLaneSchedule::AbiFirst => SetupLaneKind::AbiWarm,
+            SetupLaneSchedule::Handshake => return,
+        };
+        if lane != first {
+            return;
+        }
+        *self.finished.lock().expect("setup scheduler lock") = true;
+        self.wake.notify_all();
+    }
+
+    fn handshake(&self) -> (usize, usize, bool) {
+        let handshake = *self.handshake.lock().expect("setup handshake lock");
+        (handshake.entered, handshake.released, handshake.released_after_both)
+    }
 }
 
 /// The shared body of `fref` -- the id under which a declaration's own
@@ -1399,6 +2565,9 @@ pub struct SkullEmitCache {
     /// warms lazily as edits touch callees.
     /// `docs/skull-incremental-emit-cache-plan.md` step 3.
     inline_cache: skull_transform::InlineCache,
+    /// Candidate identities currently demanded by concrete owner plans. The
+    /// concrete publisher updates this set by owner delta; it is not rebuilt
+    /// by scanning every plan on a body edit.
     /// Reverse dependency index: `dependents[C]` = the chunks that have `C` in
     /// their codegen deps (a body inlined `C` in, or calls `C`). Lets
     /// `update_chunk_cache` compute the affected set with one reverse hop per
@@ -1421,6 +2590,7 @@ pub struct SkullEmitCache {
     /// preserves the live value). Rebuilt by `emit_full`.
     /// `docs/static-hot-reload-overlay-bug.md`.
     static_key_baseline: FxHashMap<Ustr, String>,
+    roots: RootCache,
     shader_registrations: ShaderRegistrations,
     shader_view: crate::shader_artifact::ShaderArtifactView,
     /// The definitions the last assembly actually EMITTED (global DCE prunes
@@ -1437,9 +2607,72 @@ pub struct SkullEmitCache {
     /// Logical state table from the last complete assembly. Body overlays keep
     /// it unchanged; a full/incremental assembly replaces it atomically.
     state_schema: Option<skull_mir::state_schema::StateSchema>,
-    /// The compilation target's root directory; see [`is_library_module`].
-    project_root: Option<String>,
+    /// Comptime reads of the always-emitted units (global initializers,
+    /// decorator defs), which have no Chunk. Feeds the watch set
+    /// (`comptime_files`) and the overlay's stale-const re-init; refreshed by
+    /// every `assemble` (full and incremental reassembly re-lower all units).
+    unit_comptime_reads: UnitComptimeReads,
     renderer_target: RendererTarget,
+    repair_stats: IncrementalRepairStats,
+}
+
+/// Structural work performed by the last body-only cache update. The counters
+/// are ordinary per-cache state; they do not use synchronization or process-
+/// global atomics. The route records only work it already performs.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct IncrementalRepairStats {
+    pub body_only_edits: usize,
+    pub owners_revisited: usize,
+    pub instances_revisited: usize,
+    pub graph_contributions_retracted: usize,
+    pub graph_contributions_installed: usize,
+    pub full_graph_rebuilds: usize,
+    pub concrete_entries_derived: usize,
+    pub concrete_entries_reused: usize,
+    pub concrete_entries_retracted: usize,
+    pub full_concrete_rebuilds: usize,
+    pub artifact_chunks_revisited: usize,
+    pub artifact_chunks_added: usize,
+    pub artifact_chunks_removed: usize,
+    pub full_artifact_view_realizations: usize,
+    pub broad_owner_scans: usize,
+    pub broad_concrete_scans: usize,
+    pub broad_artifact_scans: usize,
+    pub broad_candidate_scans: usize,
+    pub root_requests: usize,
+    pub root_modules_examined: usize,
+    pub root_functions_examined: usize,
+    pub root_reseeds: usize,
+    pub root_instances_checked: usize,
+    pub shader_delta_requests: usize,
+    pub shader_roots_examined: usize,
+    pub shader_roots_derived: usize,
+    pub declaration_instance_lookups: usize,
+    pub declaration_lookup_requests: usize,
+    pub candidate_entries_invalidated: usize,
+    pub candidate_entries_derived: usize,
+    pub candidate_entries_reused: usize,
+    pub candidate_entries_requested: usize,
+    pub dependents_visited: usize,
+    pub dependent_requests: usize,
+    pub chunks_rebuilt: usize,
+    pub chunk_rebuild_requests: usize,
+    pub artifact_iterations: usize,
+    pub artifact_iteration_requests: usize,
+    pub artifact_root_entries_examined: usize,
+    pub artifact_index_rows_examined: usize,
+    pub artifact_realize_invocations: usize,
+    pub root_hole_names_examined: usize,
+    pub root_hole_rows_examined: usize,
+    pub root_hole_decls_examined: usize,
+    pub root_hole_reason_buckets_examined: usize,
+    pub erased_catalogue_entries_examined: usize,
+    pub graph_update_ns: u64,
+    pub concrete_update_ns: u64,
+    pub artifact_update_ns: u64,
+    pub candidate_update_ns: u64,
+    pub affected_selection_ns: u64,
+    pub relowering_ns: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1501,10 +2734,26 @@ struct ShaderRegistrations {
     lua: String,
     dependencies: FxHashSet<FuncRef>,
     callsites: FxHashSet<(ModuleId, BodyOwner)>,
+    shader_contributions: HashMap<(ModuleId, BodyOwner), Vec<skull_mir::lower::ShaderPair>>,
+    compute_contributions: HashMap<(ModuleId, BodyOwner), Vec<skull_mir::lower::ComputeEntry>>,
+    shader_pair_users: BTreeMap<String, usize>,
+    shader_pairs: BTreeMap<String, skull_mir::lower::ShaderPair>,
+    compute_entry_users: BTreeMap<String, usize>,
+    compute_entries: BTreeMap<String, skull_mir::lower::ComputeEntry>,
+    shader_root_set: FxHashSet<FuncRef>,
     roots: Vec<FuncRef>,
     keys: BTreeSet<String>,
     abi_wires: BTreeMap<String, String>,
     wgpu_projection_census: Option<WgpuProjectionCensus>,
+}
+
+#[derive(Clone, Default)]
+struct RootCache {
+    project_root: Option<String>,
+    interface_roots: Vec<FuncRef>,
+    sim_root: Option<FuncRef>,
+    shader_roots: Vec<FuncRef>,
+    roots: Vec<FuncRef>,
 }
 
 /// A `static` cell's reload key: rendered type + initializer content hash. Equal
@@ -1552,15 +2801,20 @@ fn emit_coroutine_chunk(
     mf: &mut MirFunc,
     mut times: PhaseTimes,
 ) -> Result<Chunk, CompilerError> {
+    let cleanup_before = mir_live_instructions(mf);
     let tc = Instant::now();
-    skull_transform::cleanup_with_nobox(ws, mf);
+    skull_transform::cleanup_with_nobox(ws, mf)?;
     times.cleanup = tc.elapsed();
+    times.cleanup_work = mir_live_instructions(mf) != cleanup_before;
     // Coroutines never inline, so a combinator chain here leaves a residual call
     // -- fine when the lowerer specialized it (a standalone body serves it), a
     // rejection when it did not.
+    let tv = Instant::now();
     skull_transform::validate_no_residual_bound_calls(ws, f, mf)?;
     let mut specs = Vec::new();
     validate_emitted_body(ws, ctx, mf, &mut specs).map_err(|r| r.into_error(f.name_span, ""))?;
+    times.validation += tv.elapsed();
+    times.validation_work = true;
     skull_codegen_lua::regalloc_time_reset();
     let te = Instant::now();
     let inst = concrete_plan
@@ -1584,9 +2838,11 @@ fn emit_coroutine_chunk(
         scx.interner(),
         &plan,
         mf,
-    );
+    )?;
     times.emit = te.elapsed();
+    times.emit_work = times.emit > Duration::ZERO;
     times.regalloc = skull_codegen_lua::regalloc_time_elapsed().min(times.emit);
+    times.regalloc_work = times.regalloc > Duration::ZERO;
     // No declaration edge here: "this instance instantiates that declaration" is
     // the GRAPH's fact, and `update_chunk_cache` reads it through
     // `instances_of`. `deps` carries only what codegen alone knows -- which
@@ -1598,7 +2854,9 @@ fn emit_coroutine_chunk(
         direct_globals: Vec::new(),
         direct_calls: Vec::new(),
         times,
+        attribution: UnitAttribution::default(),
         statics: mf.statics.clone(),
+        comptime_reads: mf.comptime_reads.clone(),
         calls: skull_mir::reach::call_targets(mf),
         specs,
         code_artifact,
@@ -1608,7 +2866,8 @@ fn emit_coroutine_chunk(
 /// Emit one ordinary or coroutine function body to a cacheable [`Chunk`]. Extern
 /// and `inline(lua)` functions are NOT handled here — they are cheap and
 /// regenerated in [`assemble`]. Captures per-stage emit time into the chunk so the
-/// parallel chunk fan-out's CPU time still rolls up into `backend-stats`.
+/// parallel chunk fan-out's per-unit elapsed time still rolls up into
+/// `backend-stats`.
 fn emit_body_chunk(
     ws: &Workspace,
     cg: &CodegenCtx,
@@ -1632,12 +2891,38 @@ fn emit_body_chunk_with_mutation(
     mutation: BodyMutation,
 ) -> Result<Chunk, CompilerError> {
     let mut times = PhaseTimes::default();
+    let mut attribution = UnitAttribution {
+        owner: inline_owner_key(self_ref),
+        ..UnitAttribution::default()
+    };
     let tl = Instant::now();
     let plan = concrete
         .plan_for(&shared(self_ref))
         .ok_or_else(|| CompilerError::new_with_label(f.name_span, format!("no concrete plan for `{}`", f.name)))?;
-    let mut mf = skull_mir::lower::lower_function_with_plans(ws, scx, plan, &concrete.plans)?;
+    let ordinary_instance = plan.function_instance().cloned();
+    let canonical_body = ordinary_instance
+        .as_ref()
+        .and_then(|instance| inline_cache.canonical_body(instance));
+    let canonical_reused = canonical_body.is_some();
+    let mut mf = match canonical_body {
+        Some(body) => (*body).clone(),
+        None => skull_mir::lower::lower_function_with_plans(ws, scx, plan, &concrete.plans)?,
+    };
     times.lower = tl.elapsed();
+    times.lower_work = mf.insts.len() > 0;
+    attribution.examined = true;
+    attribution.hir_nodes = hir_nodes_for_owner(ws, self_ref.module, BodyOwner::Function(self_ref.func));
+    attribution.mir_instructions = mf.insts.len();
+    attribution.lower_facts = mf.lower_attribution.clone();
+    attribution.consumer_instance = ordinary_instance
+        .clone()
+        .map(|instance| (instance, LoweredInstanceKind::Ordinary));
+    attribution.canonical_reused = canonical_reused;
+    if !canonical_reused {
+        attribution.lowered_instance = ordinary_instance
+            .clone()
+            .map(|instance| (instance, LoweredInstanceKind::Ordinary));
+    }
     match mutation {
         BodyMutation::None => {}
         #[cfg(test)]
@@ -1677,7 +2962,12 @@ fn emit_body_chunk_with_mutation(
                 BodyMutation::None => unreachable!(),
                 BodyMutation::ClearBoundPlan { .. } => unreachable!(),
                 BodyMutation::ClearCoroutineResultPlan { .. } => unreachable!(),
-                BodyMutation::ClearIteratorWitnessInstance { .. } => unreachable!(),
+                BodyMutation::ClearIteratorWitnessInstance { .. } | BodyMutation::SkipAbiPlanPublish => {
+                    unreachable!()
+                }
+                BodyMutation::ConcreteResultOrder(_) => unreachable!(),
+                #[cfg(all(test, not(feature = "sequential")))]
+                BodyMutation::SetupLaneSchedule(_) => unreachable!(),
             }
         }
         #[cfg(test)]
@@ -1692,11 +2982,17 @@ fn emit_body_chunk_with_mutation(
             &plan.bound_tree,
             scx.interner(),
         );
-        return emit_coroutine_chunk(ws, cg, scx, &ctx, plan, f, &mut mf, times);
+        let mut chunk = emit_coroutine_chunk(ws, cg, scx, &ctx, plan, f, &mut mf, times)?;
+        attribution.mir_instructions = mf.insts.len();
+        attribution.times = chunk.times;
+        chunk.attribution = attribution;
+        return Ok(chunk);
     }
     // Inline eligible direct calls before cleanup so a hot loop traces with no
     // per-call frame (`docs/skull-inlining-plan.md`).
-    let (spliced, _splices) = skull_transform::inline_functions_with_plans(
+    let before_inline = (mf.insts.len(), mf.blocks.len(), mf.cells.len());
+    let ti = Instant::now();
+    let (spliced, splices, scan_stats) = skull_transform::inline_functions_with_plans(
         ws,
         scx,
         self_ref,
@@ -1704,9 +3000,25 @@ fn emit_body_chunk_with_mutation(
         inline_cache,
         &concrete.plans,
     )?;
+    let mut scan_stats = scan_stats;
+    if let Some(instance) = ordinary_instance {
+        scan_stats.ordinary_keys.push(instance);
+    }
+    times.inline = ti.elapsed();
+    attribution.inline.add_records(&splices);
+    attribution.inline.ordinary_splices += splices.len();
+    attribution.inline.add_scan(scan_stats);
+    times.inline_work = !splices.is_empty();
+    attribution.inline.add_allocations(before_inline, (mf.insts.len(), mf.blocks.len(), mf.cells.len()));
     let mut deps: FxHashSet<FuncRef> = spliced.into_iter().collect();
+    let cleanup_before = mir_live_instructions(&mf);
     let tc = Instant::now();
-    skull_transform::cleanup_with_nobox(ws, &mut mf); // drop dead values + dead-cell stores
+    skull_transform::cleanup_with_nobox(ws, &mut mf)?; // drop dead values + dead-cell stores
+    times.cleanup = tc.elapsed();
+    let cleanup_after = mir_live_instructions(&mf);
+    attribution.inline.cleanup_live_before += cleanup_before;
+    attribution.inline.cleanup_live_after += cleanup_after;
+    times.cleanup_work = cleanup_after != cleanup_before;
     // Shared closure conversion (S2 cutover, docs/closure-conversion-mir-plan.md):
     // every `Inst::Lambda` in this ORDINARY fn becomes a `MakeEnv` record / bare
     // `Global` + a hoisted sibling in `nested_fns`. Runs AFTER inline+cleanup,
@@ -1715,7 +3027,10 @@ fn emit_body_chunk_with_mutation(
     // `Inst::Lambda`s convert at codegen via `FrameCtx`/`HoistPlan` -- S3).
     let name = mangle_fn(ws, f);
     let pre_nested = mf.nested_fns.len();
+    let tclosure = Instant::now();
     skull_transform::convert_closures(&mut mf, &name);
+    times.closure = tclosure.elapsed();
+    times.closure_work = mf.nested_fns.len() > pre_nested;
     // Route each pass-hoisted `<name>__lambda<k>` through the synthetic-name
     // collision guard now that they enter the Lua global namespace (a user fn
     // named `foo__lambda0` must reject, not silently clobber). The pass appends
@@ -1723,7 +3038,11 @@ fn emit_body_chunk_with_mutation(
     for nf in &mf.nested_fns[pre_nested..] {
         cg.mint_synthetic(nf.name.to_string());
     }
+    let counted_before = mf.blocks.len();
+    let tcounted = Instant::now();
     skull_transform::recover_counted_loops(ws, &mut mf); // desugared iter loops -> FORL shape
+    times.counted_loop = tcounted.elapsed();
+    times.counted_loop_work = mf.blocks.len() > counted_before;
     // Hoisted bodies inline in their own right, and only HERE. The inliner scans a
     // caller's top-level blocks and never a closure sub-CFG, because a cell used in
     // a lambda body is an upvalue and splicing there piles onto LuaJIT's 60-upvalue
@@ -1734,6 +3053,7 @@ fn emit_body_chunk_with_mutation(
     // Correctness, not just an optimization: a call the lowerer gave the
     // specialized scalar ABI has no serviceable shared body, and for a
     // column-stored element the shared `next` reads a `_data` that does not exist.
+    let mut hoisted_work = InlineWork::default();
     inline_hoisted_bodies(
         ws,
         scx,
@@ -1742,9 +3062,13 @@ fn emit_body_chunk_with_mutation(
         inline_cache,
         &concrete.plans,
         &mut deps,
+        &mut times,
+        &mut hoisted_work,
     )
         .map_err(|msg| CompilerError::new_with_label(f.name_span, msg))?;
-    times.cleanup = tc.elapsed();
+    times.hoisted_inline_work = hoisted_work.accepted_splices > 0;
+    attribution.inline.add(hoisted_work);
+    let tv = Instant::now();
     skull_transform::validate_no_residual_bound_calls(ws, f, &mf)?;
     let mut specs = Vec::new();
     let owner = BodyOwner::Function(self_ref.func);
@@ -1760,9 +3084,15 @@ fn emit_body_chunk_with_mutation(
     let mut code_artifact = skull_mir::code_identity::CodeArtifact::from_mir_tree(&mf);
     code_artifact.set_body_names(&mf, &mangle_fn(ws, f));
     let (direct_globals, direct_calls) = direct_refs(ws, &mf);
+    times.validation = tv.elapsed();
+    times.validation_work = true;
     skull_codegen_lua::regalloc_time_reset();
     let te = Instant::now();
     let mut lua = emit_function(ws, cg, scx.interner(), self_ref, &mf);
+    times.emit = te.elapsed();
+    times.emit_work = times.emit > Duration::ZERO;
+    times.regalloc = skull_codegen_lua::regalloc_time_elapsed().min(times.emit);
+    times.regalloc_work = times.regalloc > Duration::ZERO;
     // Nested `fn`s are hoisted to sibling top-level Lua fns in the same chunk
     // (their `__local_*` names are already final -- emit_named, no mangling). Their
     // `static` cells fold into THIS chunk's `statics` so the hot-reload preamble +
@@ -1777,9 +3107,10 @@ fn emit_body_chunk_with_mutation(
         &mut deps,
         &mut statics,
         &mut lua,
-    );
-    times.emit = te.elapsed();
-    times.regalloc = skull_codegen_lua::regalloc_time_elapsed().min(times.emit);
+        &mut times,
+    )?;
+    attribution.mir_instructions = mf.insts.len();
+    attribution.times = times;
     let calls = skull_mir::reach::call_targets(&mf);
     Ok(Chunk {
         lua,
@@ -1791,6 +3122,8 @@ fn emit_body_chunk_with_mutation(
         calls,
         specs,
         code_artifact,
+        attribution,
+        comptime_reads: mf.comptime_reads.clone(),
     })
 }
 
@@ -1808,12 +3141,23 @@ fn emit_nested_fns(
     deps: &mut FxHashSet<FuncRef>,
     statics: &mut Vec<skull_mir::mir::StaticCell>,
     out: &mut String,
-) {
+    times: &mut PhaseTimes,
+) -> Result<(), CompilerError> {
     for nf in nested.iter_mut() {
-        skull_transform::cleanup_with_nobox(ws, nf);
+        let cleanup_before = mir_live_instructions(nf);
+        let tc = Instant::now();
+        skull_transform::cleanup_with_nobox(ws, nf)?;
+        times.cleanup += tc.elapsed();
+        times.cleanup_work |= mir_live_instructions(nf) != cleanup_before;
+        let counted_before = nf.blocks.len();
+        let tl = Instant::now();
         skull_transform::recover_counted_loops(ws, nf);
+        times.counted_loop += tl.elapsed();
+        times.counted_loop_work |= nf.blocks.len() > counted_before;
         collect_callee_frefs(nf, deps);
         statics.extend(nf.statics.iter().cloned());
+        skull_codegen_lua::regalloc_time_reset();
+        let te = Instant::now();
         out.push_str(&skull_codegen_lua::emit_named_with_statics(
             ws,
             cg,
@@ -1822,6 +3166,12 @@ fn emit_nested_fns(
             nf,
             inherited_statics,
         ));
+        let emit = te.elapsed();
+        times.emit += emit;
+        times.emit_work |= emit > Duration::ZERO;
+        let regalloc = skull_codegen_lua::regalloc_time_elapsed().min(emit);
+        times.regalloc += regalloc;
+        times.regalloc_work |= regalloc > Duration::ZERO;
         let mut children = std::mem::take(&mut nf.nested_fns);
         let mut next_inherited = inherited_statics.to_vec();
         next_inherited.extend(nf.statics.iter().cloned());
@@ -1834,8 +3184,10 @@ fn emit_nested_fns(
             deps,
             statics,
             out,
-        );
+            times,
+        )?;
     }
+    Ok(())
 }
 
 /// Emit the flat list of pass-produced hoisted lambda bodies (`convert_closures`
@@ -1860,9 +3212,16 @@ fn emit_pass_nested_fns(
     nested: &mut [MirFunc],
     inherited_statics: &[skull_mir::mir::StaticCell],
     out: &mut String,
-) {
+    times: &mut PhaseTimes,
+) -> Result<(), CompilerError> {
     for nf in nested.iter_mut() {
-        skull_transform::cleanup_with_nobox(ws, nf);
+        let cleanup_before = mir_live_instructions(nf);
+        let tc = Instant::now();
+        skull_transform::cleanup_with_nobox(ws, nf)?;
+        times.cleanup += tc.elapsed();
+        times.cleanup_work |= mir_live_instructions(nf) != cleanup_before;
+        skull_codegen_lua::regalloc_time_reset();
+        let te = Instant::now();
         out.push_str(&skull_codegen_lua::emit_named_with_statics(
             ws,
             cg,
@@ -1871,7 +3230,14 @@ fn emit_pass_nested_fns(
             nf,
             inherited_statics,
         ));
+        let emit = te.elapsed();
+        times.emit += emit;
+        times.emit_work |= emit > Duration::ZERO;
+        let regalloc = skull_codegen_lua::regalloc_time_elapsed().min(emit);
+        times.regalloc += regalloc;
+        times.regalloc_work |= regalloc > Duration::ZERO;
     }
+    Ok(())
 }
 
 /// Whether a function body is cached as a [`Chunk`] (ordinary or coroutine) vs
@@ -1987,18 +3353,35 @@ fn emit_spec_chunk(
         .plan_for(body)
         .ok_or_else(|| CompilerError::new_with_label(f.name_span, format!("no concrete plan for `{name}`")))?;
     let tree = &plan.bound_tree;
-    if fn_has_bounds(f) && tree.is_empty() {
-        return Err(CompilerError::new_with_label(
-            f.name_span,
-            format!("concrete plan has no resolved bound tree for specialized `{name}`"),
-        ));
-    }
-    let mut mf = skull_mir::lower::lower_instance_with_plans(ws, scx, plan, &concrete.plans)
-        .map_err(|e| CompilerError::new_with_label(f.name_span, e.message))?;
+    skull_mir::lower::validate_concrete_bound_plan(f, plan)?;
+    let tl = Instant::now();
+    let canonical_body = inline_cache.canonical_body(body);
+    let canonical_reused = canonical_body.is_some();
+    let mut mf = match canonical_body {
+        Some(body) => (*body).clone(),
+        None => skull_mir::lower::lower_instance_with_plans(ws, scx, plan, &concrete.plans)
+            .map_err(|e| CompilerError::new_with_label(f.name_span, e.message))?,
+    };
+    let mut times = PhaseTimes::default();
+    times.lower = tl.elapsed();
+    times.lower_work = mf.insts.len() > 0;
+    let mut attribution = UnitAttribution {
+        owner: name.to_string(),
+        examined: true,
+        hir_nodes: hir_nodes_for_owner(ws, fref.module, BodyOwner::Function(fref.func)),
+        mir_instructions: mf.insts.len(),
+        lower_facts: mf.lower_attribution.clone(),
+        consumer_instance: Some((body.clone(), LoweredInstanceKind::Specialized)),
+        lowered_instance: (!canonical_reused)
+            .then(|| (body.clone(), LoweredInstanceKind::Specialized)),
+        canonical_reused,
+        ..UnitAttribution::default()
+    };
     // BEFORE every transform: an `Iterator`-bounded body's placeholders are what
     // make it unemittable on its own, and the demand that reached here is what
     // resolves them. The splice path does the same substitution at the moment it
     // clones the body into a caller.
+    let tresolve = Instant::now();
     skull_transform::bound::resolve_standalone_bound_calls(
         ws,
         scx,
@@ -2008,6 +3391,8 @@ fn emit_spec_chunk(
         &concrete.plans,
     )
         .map_err(|e| CompilerError::new_with_label(f.name_span, e.message))?;
+    times.validation += tresolve.elapsed();
+    times.validation_work = true;
     let owner = BodyOwner::Function(fref.func);
     let ctx = skull_mir::bound::concrete_body_ctx(
         ws,
@@ -2017,9 +3402,13 @@ fn emit_spec_chunk(
         scx.interner(),
     );
     if f.is_coroutine {
-        return emit_coroutine_chunk(ws, cg, scx, &ctx, plan, f, &mut mf, PhaseTimes::default());
+        let mut chunk = emit_coroutine_chunk(ws, cg, scx, &ctx, plan, f, &mut mf, times)?;
+        attribution.mir_instructions = mf.insts.len();
+        attribution.times = chunk.times;
+        chunk.attribution = attribution;
+        return Ok(chunk);
     }
-    let mut deps = prepare_instance_body_with_plans(
+    let (mut deps, prepared_times, prepared_inline) = prepare_instance_body_with_attribution(
         ws,
         scx,
         fref,
@@ -2029,28 +3418,51 @@ fn emit_spec_chunk(
         &concrete.plans,
     )
         .map_err(|e| CompilerError::new_with_label(f.name_span, e.message))?;
+    times.add(&prepared_times);
+    let mut prepared_inline = prepared_inline;
+    prepared_inline.specialized_splices = prepared_inline.accepted_splices;
+    prepared_inline
+        .census
+        .ordinary_keys
+        .push(body.clone());
+    attribution.inline.add(prepared_inline);
     let before = specs.len();
     // Discovered BEFORE the verdict, and handed back through `specs` even when
     // the verdict rejects: the inline worklist pushed them into the live queue
     // first, so a failing build reports over that same closure.
+    let tv = Instant::now();
     validate_emitted_body(ws, &ctx, &mf, specs)
         .map_err(|r| r.into_error(f.name_span, &format!("cannot emit specialized `{name}`: ")))?;
+    times.validation += tv.elapsed();
+    times.validation_work = true;
     let specs = specs[before..].to_vec();
     let mut code_artifact = skull_mir::code_identity::CodeArtifact::from_mir_tree(&mf);
     code_artifact.set_body_names(&mf, name);
+    skull_codegen_lua::regalloc_time_reset();
+    let te = Instant::now();
     let mut lua = emit_named(ws, cg, scx.interner(), name, &mf);
+    let root_emit = te.elapsed();
+    times.emit += root_emit;
+    times.emit_work |= root_emit > Duration::ZERO;
+    let regalloc = skull_codegen_lua::regalloc_time_elapsed().min(root_emit);
+    times.regalloc += regalloc;
+    times.regalloc_work |= regalloc > Duration::ZERO;
     let mut statics = mf.statics.clone();
     let mut nested = std::mem::take(&mut mf.nested_fns);
     collect_nested_statics(&nested, &mut statics);
-    emit_pass_nested_fns(ws, cg, scx, &mut nested, &statics, &mut lua);
+    emit_pass_nested_fns(ws, cg, scx, &mut nested, &statics, &mut lua, &mut times)?;
     collect_callee_frefs(&mf, &mut deps);
+    attribution.mir_instructions = mf.insts.len();
+    attribution.times = times;
     Ok(Chunk {
         lua,
         deps,
         direct_globals: Vec::new(),
         direct_calls: Vec::new(),
-        times: PhaseTimes::default(),
+        times,
+        attribution,
         statics,
+        comptime_reads: mf.comptime_reads.clone(),
         calls: skull_mir::reach::call_targets(&mf),
         specs,
         code_artifact,
@@ -2076,6 +3488,8 @@ fn emit_specialized_callees(
     built: &mut Vec<(Instance, Chunk)>,
     statics: &mut Vec<skull_mir::mir::StaticCell>,
     out: &mut String,
+    attribution: &mut AttributionAccumulator,
+    times: &mut PhaseTimes,
 ) -> Vec<CompilerError> {
     let mut done: FxHashSet<Instance> = FxHashSet::default();
     let mut errs: Vec<(String, CompilerError)> = rejected.to_vec();
@@ -2105,6 +3519,8 @@ fn emit_specialized_callees(
             continue;
         };
         out.push_str(&chunk.lua);
+        attribution.add_unit(&chunk.attribution);
+        times.add(&chunk.times);
         // A specialized definition's `static` cells are cells the program uses,
         // so they register for hot-reload preservation on the same terms as a
         // declaration's. Folded HERE because this is where a specialized body
@@ -2139,13 +3555,50 @@ pub fn prepare_instance_body_with_plans(
     cache: &mut skull_transform::InlineCache,
     concrete_plans: &skull_mir::concrete::ConcretePlans,
 ) -> Result<FxHashSet<FuncRef>, CompilerError> {
-    let (spliced, _records) = skull_transform::inline_functions_with_plans(
+    prepare_instance_body_with_attribution(ws, scx, fref, name, mf, cache, concrete_plans)
+        .map(|(spliced, _, _)| spliced)
+}
+
+fn prepare_instance_body_with_attribution(
+    ws: &Workspace,
+    scx: &skull_mir::lower::ScalarCtx,
+    fref: FuncRef,
+    name: &str,
+    mf: &mut skull_mir::mir::MirFunc,
+    cache: &mut skull_transform::InlineCache,
+    concrete_plans: &skull_mir::concrete::ConcretePlans,
+) -> Result<(FxHashSet<FuncRef>, PhaseTimes, InlineWork), CompilerError> {
+    let mut times = PhaseTimes::default();
+    let mut work = InlineWork::default();
+    let before = (mf.insts.len(), mf.blocks.len(), mf.cells.len());
+    let ti = Instant::now();
+    let (spliced, records, scan_stats) = skull_transform::inline_functions_with_plans(
         ws, scx, fref, mf, cache, concrete_plans,
     )?;
-    skull_transform::cleanup_with_nobox(ws, mf);
+    times.inline = ti.elapsed();
+    times.inline_work = !records.is_empty();
+    work.add_records(&records);
+    work.add_scan(scan_stats);
+    work.add_allocations(before, (mf.insts.len(), mf.blocks.len(), mf.cells.len()));
+    let cleanup_before = mir_live_instructions(mf);
+    let tc = Instant::now();
+    skull_transform::cleanup_with_nobox(ws, mf)?;
+    times.cleanup = tc.elapsed();
+    let cleanup_after = mir_live_instructions(mf);
+    work.cleanup_live_before += cleanup_before;
+    work.cleanup_live_after += cleanup_after;
+    times.cleanup_work = cleanup_after != cleanup_before;
+    let tclosure = Instant::now();
+    let nested_before = mf.nested_fns.len();
     skull_transform::convert_closures(mf, name);
+    times.closure = tclosure.elapsed();
+    times.closure_work = mf.nested_fns.len() > nested_before;
+    let counted_before = mf.blocks.len();
+    let tcounted = Instant::now();
     skull_transform::recover_counted_loops(ws, mf);
-    Ok(spliced.into_iter().collect())
+    times.counted_loop = tcounted.elapsed();
+    times.counted_loop_work = mf.blocks.len() > counted_before;
+    Ok((spliced.into_iter().collect(), times, work))
 }
 
 /// Every rejection one assembly found, across all four kinds of emitted
@@ -2197,9 +3650,13 @@ fn inline_hoisted_bodies(
     inline_cache: &mut skull_transform::InlineCache,
     concrete_plans: &skull_mir::concrete::ConcretePlans,
     deps: &mut FxHashSet<FuncRef>,
+    times: &mut PhaseTimes,
+    work: &mut InlineWork,
 ) -> Result<(), String> {
     for nf in nested.iter_mut() {
-        let (spliced, _) = skull_transform::inline_functions_with_plans(
+        let before = (nf.insts.len(), nf.blocks.len(), nf.cells.len());
+        let ti = Instant::now();
+        let (spliced, records, scan_stats) = skull_transform::inline_functions_with_plans(
             ws,
             scx,
             self_ref,
@@ -2208,10 +3665,33 @@ fn inline_hoisted_bodies(
             concrete_plans,
         )
         .map_err(|e| e.message)?;
+        times.hoisted_inline += ti.elapsed();
+        work.add_records(&records);
+        work.hoisted_splices += records.len();
+        work.add_scan(scan_stats);
+        times.hoisted_inline_work |= !records.is_empty();
+        work.add_allocations(before, (nf.insts.len(), nf.blocks.len(), nf.cells.len()));
         deps.extend(spliced);
-        skull_transform::cleanup_with_nobox(ws, nf);
+        let cleanup_before = mir_live_instructions(nf);
+        let tc = Instant::now();
+        skull_transform::cleanup_with_nobox(ws, nf).map_err(|e| e.message)?;
+        times.cleanup += tc.elapsed();
+        let cleanup_after = mir_live_instructions(nf);
+        work.cleanup_live_before += cleanup_before;
+        work.cleanup_live_after += cleanup_after;
+        times.cleanup_work |= cleanup_after != cleanup_before;
         let mut children = std::mem::take(&mut nf.nested_fns);
-        inline_hoisted_bodies(ws, scx, self_ref, &mut children, inline_cache, concrete_plans, deps)?;
+        inline_hoisted_bodies(
+            ws,
+            scx,
+            self_ref,
+            &mut children,
+            inline_cache,
+            concrete_plans,
+            deps,
+            times,
+            work,
+        )?;
         nf.nested_fns = children;
     }
     Ok(())
@@ -2546,11 +4026,23 @@ fn register_sim_fn(ws: &Workspace) -> Option<FuncRef> {
 /// that decision itself. See [`all_roots`], which adds the generated-glue
 /// obligations on top.
 pub fn emission_roots(ws: &Workspace, project_root: Option<&str>) -> Vec<FuncRef> {
+    emission_roots_with_census(ws, project_root, None)
+}
+
+fn emission_roots_with_census(
+    ws: &Workspace,
+    project_root: Option<&str>,
+    mut census: Option<&mut RootEnumerationCensus>,
+) -> Vec<FuncRef> {
     let (deco_map, _) = build_deco_map(ws);
     let mut roots = Vec::new();
     for module in ws.modules.iter() {
         if module.id == ModuleId::builtin() {
             continue;
+        }
+        if let Some(census) = census.as_deref_mut() {
+            census.modules_examined += 1;
+            census.functions_examined += module.functions.len();
         }
         for (fid, f) in module.functions.iter() {
             if is_emission_root(module.file.as_str(), project_root, f, &deco_map)
@@ -2575,12 +4067,22 @@ pub fn emission_roots(ws: &Workspace, project_root: Option<&str>) -> Vec<FuncRef
 ///
 /// The shader collection is therefore built BEFORE the graph, not beside the
 /// assembly that renders it.
+#[cfg(test)]
 fn all_roots(
     ws: &Workspace,
     project_root: Option<&str>,
     shader_roots: &[FuncRef],
 ) -> Vec<FuncRef> {
-    let mut roots = emission_roots(ws, project_root);
+    all_roots_with_census(ws, project_root, shader_roots, None)
+}
+
+fn all_roots_with_census(
+    ws: &Workspace,
+    project_root: Option<&str>,
+    shader_roots: &[FuncRef],
+    mut census: Option<&mut RootEnumerationCensus>,
+) -> Vec<FuncRef> {
+    let mut roots = emission_roots_with_census(ws, project_root, census.as_deref_mut());
     let mut seen: FxHashSet<FuncRef> = roots.iter().copied().collect();
     let mut glue: Vec<FuncRef> = Vec::new();
     if !collect_sim_fns(ws).is_empty() {
@@ -2590,7 +4092,37 @@ fn all_roots(
     // Deterministic: `dependencies` is a hash set, so its iteration order is not.
     glue.sort_by_key(|f| (f.module.index(), f.func.into_raw()));
     roots.extend(glue.into_iter().filter(|f| seen.insert(*f)));
+    if let Some(census) = census.as_deref_mut() {
+        census.roots_reseeded += roots.len();
+    }
     roots
+}
+
+/// Compose the retained root set from facts cached by full construction and
+/// explicit body-local shader deltas. Unlike [`all_roots`], this never asks the
+/// workspace for its declarations or sim functions.
+fn cached_roots(
+    interface_roots: &[FuncRef],
+    sim_root: Option<FuncRef>,
+    shader_roots: &[FuncRef],
+) -> Vec<FuncRef> {
+    let mut roots = interface_roots.to_vec();
+    let mut seen: FxHashSet<FuncRef> = roots.iter().copied().collect();
+    let mut glue = Vec::new();
+    if let Some(register_sim) = sim_root {
+        glue.push(register_sim);
+    }
+    glue.extend(shader_roots.iter().copied());
+    glue.sort_by_key(|f| (f.module.index(), f.func.into_raw()));
+    roots.extend(glue.into_iter().filter(|f| seen.insert(*f)));
+    roots
+}
+
+#[derive(Default)]
+struct RootEnumerationCensus {
+    modules_examined: usize,
+    functions_examined: usize,
+    roots_reseeded: usize,
 }
 
 fn sim_registration_lines(
@@ -2672,6 +4204,7 @@ fn realize_shader_view(
     programs: &[crate::shader_artifact::ShaderProgram],
     compute: &[crate::shader_artifact::ComputeProgram],
     scx: &skull_mir::lower::ScalarCtx,
+    plans: std::sync::Arc<skull_mir::concrete::ConcretePlans>,
 ) -> Result<crate::shader_artifact::ShaderArtifactView, CompilerError> {
     crate::shader_artifact::realize_shader_with_context_and_compute(
         ws,
@@ -2687,6 +4220,7 @@ fn realize_shader_view(
         },
         scx,
         compute,
+        Some(plans),
     )
     .ok_or_else(|| CompilerError::new_no_location("GLSL shader view is unavailable".to_string()))
 }
@@ -2977,6 +4511,29 @@ fn shader_registration_lines(
     if has_compute {
         out.push_str("if not __rock_wgpu_compute_snapshot_end() then error(\"compiler compute snapshot failed\") end\n");
     }
+    let mut shader_pair_users = BTreeMap::new();
+    for pairs in collection.contributions.values() {
+        for pair in pairs {
+            *shader_pair_users.entry(pair.key.clone()).or_insert(0) += 1;
+        }
+    }
+    let shader_pairs = collection
+        .pairs
+        .iter()
+        .map(|pair| (pair.key.clone(), pair.clone()))
+        .collect();
+    let mut compute_entry_users = BTreeMap::new();
+    for entries in compute_collection.contributions.values() {
+        for entry in entries {
+            *compute_entry_users.entry(entry.key.clone()).or_insert(0) += 1;
+        }
+    }
+    let compute_entries = compute_collection
+        .entries
+        .iter()
+        .map(|entry| (entry.key.clone(), entry.clone()))
+        .collect();
+    let shader_root_set = roots.iter().chain(compute_collection.entries.iter().map(|entry| &entry.entry)).copied().collect();
     Ok(ShaderRegistrations {
         lua: out,
         dependencies,
@@ -2986,6 +4543,13 @@ fn shader_registration_lines(
             .copied()
             .chain(compute_collection.callsites.iter().copied())
             .collect(),
+        shader_contributions: collection.contributions.clone(),
+        compute_contributions: compute_collection.contributions.clone(),
+        shader_pair_users,
+        shader_pairs,
+        compute_entry_users,
+        compute_entries,
+        shader_root_set,
         roots: roots
             .into_iter()
             .chain(compute_collection.entries.iter().map(|entry| entry.entry))
@@ -2996,21 +4560,86 @@ fn shader_registration_lines(
     })
 }
 
+/// Comptime reads made by ALWAYS-EMITTED units, which have no Chunk to carry
+/// them: per-global (keyed so the overlay can re-init exactly the stale one)
+/// plus decorator definitions (files only -- decorators re-apply on full
+/// rebuild, so the watch set is all they need).
+#[derive(Clone, Default)]
+pub struct UnitComptimeReads {
+    globals: FxHashMap<
+        (ModuleId, Idx<bone_semantic::hir::GlobalDef>),
+        Vec<skull_mir::mir::ComptimeRead>,
+    >,
+    decorators: Vec<skull_mir::mir::ComptimeRead>,
+}
+
 fn assemble(
     ws: &Workspace,
     cg: &CodegenCtx,
     scx: &skull_mir::lower::ScalarCtx,
     cache: &SkullEmitCache,
     built_specs: &mut Vec<(Instance, Chunk)>,
-) -> Result<(MirEmit, FxHashSet<Instance>), CompilerError> {
+) -> Result<(MirEmit, FxHashSet<Instance>, UnitComptimeReads), CompilerError> {
     // Per-stage lower/cleanup/emit/regalloc times: chunk times (captured during the
     // parallel `emit_full`/`emit_incremental` chunk build) summed in as chunks are
     // pulled, plus the decorator/global units re-emitted here. Under parallel emit
-    // these are summed CPU time across workers (so they exceed the wall-clock emit
+    // these are summed per-unit elapsed time across workers (so they exceed the wall-clock emit
     // total `backend-stats` measures). `t_scaffold` is the directly-timed
     // SEQUENTIAL remainder (prelude/value-structs/type-tables + global-init
     // ordering + deco application).
     let mut times = PhaseTimes::default();
+    let mut attribution = AttributionAccumulator {
+        census_enabled: cache.inline_cache.census_enabled(),
+        ..AttributionAccumulator::default()
+    };
+    if let Some(table) = cache.inline_cache.candidate_table() {
+        let stats = table.stats();
+        let inline = &mut attribution.result.inline;
+        inline.candidate_setup_keys = stats.keys;
+        inline.candidate_setup_warmed = stats.warmed;
+        inline.candidate_setup_reused = stats.reused;
+        inline.candidate_setup_eligible = stats.eligible;
+        inline.candidate_setup_rejected = stats.rejected;
+        inline.candidate_setup_lower_ns = stats.lower_ns;
+        inline.candidate_setup_cleanup_ns = stats.cleanup_ns;
+        inline.candidate_setup_eligibility_ns = stats.eligibility_ns;
+        inline.candidate_setup_worker_derivations = stats.worker_derivations.clone();
+        inline.candidate_setup_rejection_reasons = stats.rejection_reasons.clone();
+        if attribution.census_enabled {
+            attribution.candidate_published_keys.extend(table.keys());
+            let population = &mut inline.population;
+            for (key, profile) in &stats.profiles {
+                population.candidate_lower_attempted += usize::from(profile.lower_attempted);
+                population.candidate_lowered_keys += usize::from(profile.lowered);
+                if profile.eligible {
+                    attribution.candidate_eligible_keys.insert(key.clone());
+                }
+                population.candidate_rejected_before_lower +=
+                    usize::from(profile.rejected_before_lower);
+                population.candidate_full_clone_ns += profile.full_clone_ns;
+                population.candidate_compact_ns += profile.compact_ns;
+                population.candidate_raw_instructions += profile.raw_instructions;
+                population.candidate_raw_cells += profile.raw_cells;
+                population.candidate_raw_blocks += profile.raw_blocks;
+                population.candidate_cleaned_instructions += profile.cleaned_instructions;
+                population.candidate_cleaned_cells += profile.cleaned_cells;
+                population.candidate_cleaned_blocks += profile.cleaned_blocks;
+                population.candidate_full_clone_capacity.0 += profile.full_clone_inst_capacity;
+                population.candidate_full_clone_capacity.1 += profile.full_clone_cell_capacity;
+                population.candidate_full_clone_capacity.2 += profile.full_clone_block_capacity;
+                population.candidate_compact_capacity.0 += profile.compact_inst_capacity;
+                population.candidate_compact_capacity.1 += profile.compact_cell_capacity;
+                population.candidate_compact_capacity.2 += profile.compact_block_capacity;
+            }
+            for (key, lower_ns) in &stats.lower_ns_by_key {
+                attribution
+                    .candidate_lower_ns_by_key
+                    .entry(key.clone())
+                    .or_default()
+                    .push(*lower_ns);
+            }
+        }
+    }
     let mut t_scaffold = Duration::ZERO;
     let mut needed_specs: Vec<skull_mir::bound::SpecDemand> = Vec::new();
     let mut rejections = Rejections::default();
@@ -3024,13 +4653,14 @@ fn assemble(
     let ts = Instant::now();
     let mut out = String::from(crate::runtime_prelude());
     out.push_str(&crate::enum_cdata_defs(ws));
-    let (vdefs, value_emitted, value_gc) = crate::value_struct_defs(ws)?;
+    let rep_arena = scx.rep_arena();
+    let (vdefs, value_emitted, value_gc) = crate::value_struct_defs(ws, &rep_arena)?;
     out.push_str(&vdefs);
-    out.push_str(&crate::value_struct_gc_defs(ws, &value_gc));
+    out.push_str(&crate::value_struct_gc_defs(ws, &value_gc, &rep_arena)?);
     out.push_str(&crate::value_struct_metatypes(ws, &value_emitted));
     out.push_str(&crate::enum_cdata_metatypes(ws));
     out.push_str(&crate::c_struct_inspect_defs(ws, &value_emitted));
-    out.push_str(&crate::type_table_defs(ws, &value_gc));
+    out.push_str(&crate::type_table_defs(ws, &value_gc)?);
     out.push_str(&crate::enum_runtime_defs(ws));
     t_scaffold += ts.elapsed();
 
@@ -3044,6 +4674,10 @@ fn assemble(
     });
     rejections.extend(unit_errors(&deco_results));
     needed_specs.extend(deco_results.iter().flat_map(|u| u.specs.iter().cloned()));
+    let mut unit_reads = UnitComptimeReads::default();
+    for u in &deco_results {
+        unit_reads.decorators.extend(u.comptime_reads.iter().cloned());
+    }
     let mut always_emitted_calls: Vec<FuncRef> = Vec::new();
     let mut always_emitted_names: Vec<Ustr> = Vec::new();
     merge_units(
@@ -3056,6 +4690,7 @@ fn assemble(
         &mut always_emitted_calls,
         &mut always_emitted_names,
         &mut code_artifact,
+        &mut attribution,
         &mut times,
     );
 
@@ -3069,9 +4704,17 @@ fn assemble(
         .filter(|m| m.id != ModuleId::builtin())
         .flat_map(|m| m.globals.iter().map(move |(gid, _)| (m.id, gid)))
         .collect();
+    let global_keys = global_items.clone();
     let global_results = par_map(global_items, |(mid, gid)| {
         emit_global_unit(ws, scx, cg, &cache.concrete, mid, gid)
     });
+    // par_map preserves input order, so keys and results zip positionally --
+    // the same pairing merge_units relies on for output order.
+    for (key, u) in global_keys.iter().zip(global_results.iter()) {
+        if !u.comptime_reads.is_empty() {
+            unit_reads.globals.insert(*key, u.comptime_reads.clone());
+        }
+    }
     rejections.extend(unit_errors(&global_results));
     needed_specs.extend(global_results.iter().flat_map(|u| u.specs.iter().cloned()));
     let mut globals_lua = String::new();
@@ -3088,6 +4731,7 @@ fn assemble(
         &mut always_emitted_calls,
         &mut always_emitted_names,
         &mut code_artifact,
+        &mut attribution,
         &mut times,
     );
 
@@ -3270,6 +4914,7 @@ fn assemble(
                     direct_globals.insert(key, chunk.direct_globals.clone());
                     direct_calls.insert(key, chunk.direct_calls.clone());
                     times.add(&chunk.times);
+                    attribution.add_unit(&chunk.attribution);
                     if emit_def {
                         out.push_str(&chunk.lua);
                         code_artifact.merge_ref(&chunk.code_artifact);
@@ -3317,6 +4962,8 @@ fn assemble(
         built_specs,
         &mut all_statics,
         &mut out,
+        &mut attribution,
+        &mut times,
     ));
     for chunk in spec_chunks.values() {
         code_artifact.merge_ref(&chunk.code_artifact);
@@ -3382,19 +5029,18 @@ fn assemble(
     // through its leaves, so a leaf dep has to resolve back to the group that
     // owns it or the dependent initializer sorts before it. Built from the
     // globals that actually mint leaves -- never a name-shape guess.
-    let leaf_owner: FxHashMap<Ustr, Ustr> = ws
-        .modules
-        .iter()
-        .flat_map(|m| m.globals.iter())
-        .flat_map(|(_, g)| {
-            skull_mir::lower::GlobalPlan::for_declared_type(ws, &cache.scx, g.ty)
-                .ok()
-                .and_then(|plan| plan.leaf_names(g.name))
-                .into_iter()
-                .flatten()
-                .map(move |l| (l, g.name))
-        })
-        .collect();
+    let mut leaf_owner: FxHashMap<Ustr, Ustr> = FxHashMap::default();
+    for module in ws.modules.iter() {
+        for (_, g) in module.globals.iter() {
+            let plan = skull_mir::lower::GlobalPlan::for_declared_type(ws, &cache.scx, g.ty)
+                .map_err(|e| CompilerError::new_no_location(e.message))?;
+            if let Some(leaves) = plan.leaf_names(g.name) {
+                for leaf in leaves {
+                    leaf_owner.insert(leaf, g.name);
+                }
+            }
+        }
+    }
     let inits: Vec<GlobalInit> = pending_inits
         .into_iter()
         .map(|(name, init_name, line)| GlobalInit {
@@ -3458,7 +5104,12 @@ fn assemble(
     let t_stringify = times.emit - times.regalloc;
     let phases = vec![
         ("lower hir->mir", times.lower),
+        ("inline plan+splice", times.inline),
         ("cleanup mir", times.cleanup),
+        ("closure conversion", times.closure),
+        ("counted-loop recovery", times.counted_loop),
+        ("hoisted-body inline", times.hoisted_inline),
+        ("post-transform validation", times.validation),
         ("emit: regalloc", times.regalloc),
         ("emit: stringify", t_stringify),
         ("scaffold+callgraph+order", t_scaffold),
@@ -3496,7 +5147,23 @@ fn assemble(
         }
     }
     emitted_bodies.extend(spec_chunks.keys().cloned());
-    Ok((MirEmit { lua: out, code_artifact, state_schema, skipped, phases }, emitted_bodies))
+    Ok((
+        MirEmit {
+            lua: out,
+            code_artifact,
+            state_schema,
+            skipped,
+            phases,
+            abi_plan_stats: scx.abi_plan_stats(),
+            attribution: attribution.finish(),
+            arena_traffic: ArenaTraffic::default(),
+            setup_lanes: SetupLaneAttribution::default(),
+            graph_census: crate::instance_graph::RunStats::default(),
+            concrete_stats: crate::concrete_body::ConcreteBuildStats::default(),
+        },
+        emitted_bodies,
+        unit_reads,
+    ))
 }
 
 fn code_slot_registration_lua(
@@ -3735,6 +5402,8 @@ fn emit_full_in_with_mutation(
     mutation: BodyMutation,
     renderer_target: RendererTarget,
 ) -> Result<(MirEmit, SkullEmitCache), CompilerError> {
+    let mut setup_phases = Vec::new();
+    let t_setup = Instant::now();
     let project_root = canonical_project_root(ws, project_root)?;
     let project_root = project_root.as_deref();
     if let Some(span) = skull_mir::lower::string_char_literal_out_of_range(ws, user_mid) {
@@ -3745,6 +5414,9 @@ fn emit_full_in_with_mutation(
         ));
     }
     if let Some(err) = skull_mir::lower::expansion_rejection(ws, user_mid) {
+        return Err(err);
+    }
+    if let Some(err) = skull_mir::lower::comptime_input_rejection(ws, user_mid) {
         return Err(err);
     }
     if let Some(err) = skull_mir::intrinsics::intrinsic_rejection(ws, user_mid) {
@@ -3768,6 +5440,9 @@ fn emit_full_in_with_mutation(
     if let Some((msg, span)) = skull_mir::lower::gc_value_c_boundary(ws, user_mid) {
         return Err(CompilerError::new_with_label(span, msg));
     }
+    setup_phases.push(("setup: validation+context", t_setup.elapsed()));
+
+    let t_setup = Instant::now();
     // **The graph is built FIRST, into a fresh arena, and `scx` shares that
     // arena rather than minting its own.** An `Instance` the graph mints has to
     // mean something to lowering, and a second arena would be a second identity
@@ -3784,17 +5459,45 @@ fn emit_full_in_with_mutation(
         .flat_map(|program| program.vert.into_iter().chain(std::iter::once(program.frag)))
         .chain(compute_programs.iter().map(|program| program.entry))
         .collect();
-    let emission_roots = all_roots(ws, project_root, &shader_roots);
+    let interface_roots = emission_roots(ws, project_root);
+    let sim_root = (!collect_sim_fns(ws).is_empty()).then(|| register_sim_fn(ws)).flatten();
+    let emission_roots = cached_roots(&interface_roots, sim_root, &shader_roots);
+    #[cfg(test)]
+    assert_eq!(
+        emission_roots,
+        all_roots(ws, project_root, &shader_roots),
+        "cached full-build roots diverged from the wholesale root oracle"
+    );
+    setup_phases.push(("setup: root collection", t_setup.elapsed()));
+
+    let t_setup = Instant::now();
     let mut graph = crate::instance_graph::build(ws, emission_roots.clone(), false);
     if let Some(err) = graph_rejection_error(ws, &graph) {
         return Err(err);
     }
+    setup_phases.push(("setup: graph", t_setup.elapsed()));
+
+    let t_setup = Instant::now();
     #[allow(unused_mut)]
-    let mut concrete = crate::concrete_body::build(ws, &mut graph);
+    let mut concrete = {
+        #[cfg(test)]
+        if let BodyMutation::ConcreteResultOrder(order) = mutation {
+            crate::concrete_body::build_with_result_order(ws, &graph, order).0
+        } else {
+            crate::concrete_body::build(ws, &mut graph)
+        }
+        #[cfg(not(test))]
+        {
+            crate::concrete_body::build(ws, &mut graph)
+        }
+    };
     #[cfg(test)]
     if let BodyMutation::ClearBoundPlan { body } = mutation {
         let mut matched = 0;
-        for (instance, plan) in &mut concrete.plans {
+        for (instance, plan) in std::sync::Arc::get_mut(&mut concrete.plans)
+            .expect("concrete plans are unshared before the setup join")
+            .iter_mut()
+        {
             if instance.func != body || instance.args.is_empty() {
                 continue;
             }
@@ -3802,6 +5505,7 @@ fn emit_full_in_with_mutation(
                 !plan.bound_tree.is_empty(),
                 "bound-plan mutation found a specialized body with no witness tree"
             );
+            let plan = std::sync::Arc::make_mut(plan);
             plan.bound_tree = Default::default();
             matched += 1;
         }
@@ -3818,13 +5522,17 @@ fn emit_full_in_with_mutation(
     #[cfg(test)]
     if let BodyMutation::ClearCoroutineResultPlan { body } = mutation {
         let mut matched = 0;
-        for (instance, plan) in &mut concrete.plans {
+        for (instance, plan) in std::sync::Arc::get_mut(&mut concrete.plans)
+            .expect("concrete plans are unshared before the setup join")
+            .iter_mut()
+        {
             if instance.func == body {
                 assert!(
                     plan.signature.result.is_some(),
                     "coroutine-plan mutation found a body with no concrete result witness"
                 );
-                plan.signature.result = None;
+                let plan = std::sync::Arc::make_mut(plan);
+                std::sync::Arc::make_mut(&mut plan.signature).result = None;
                 matched += 1;
             }
         }
@@ -3836,11 +5544,14 @@ fn emit_full_in_with_mutation(
     #[cfg(test)]
     if let BodyMutation::ClearIteratorWitnessInstance { body } = mutation {
         let mut matched = 0;
-        for (instance, plan) in &mut concrete.plans {
+        for (instance, plan) in std::sync::Arc::get_mut(&mut concrete.plans)
+            .expect("concrete plans are unshared before the setup join")
+            .iter_mut()
+        {
             if instance.func != body {
                 continue;
             }
-            let witness = plan
+            let witness = std::sync::Arc::make_mut(plan)
                 .bound_tree
                 .next
                 .values_mut()
@@ -3858,51 +5569,218 @@ fn emit_full_in_with_mutation(
             "iterator-plan mutation found no concrete instance for {body:?}"
         );
     }
-    if let Some((instance, reason)) = concrete.plan_failures.first() {
+    if let Some((instance, reason)) = concrete.first_plan_failure() {
         let f = &ws.module(instance.func.module).functions[instance.func.func];
         return Err(CompilerError::new_with_label(
             f.name_span,
             format!("cannot build concrete lowering plan for `{}`: {:?}", f.name, reason),
         ));
     }
-    if let Some((owner, reason)) = concrete.always_plan_failures.first() {
+    if let Some((owner, reason)) = concrete.first_always_plan_failure() {
         return Err(CompilerError::new_no_location(format!(
             "cannot build concrete always-emitted lowering plan for {owner:?}: {reason:?}"
         )));
     }
-    // Pruned dependency bodies have no concrete plan and must not enter the fanout.
-    let lua_view = crate::artifact::realize(
-        ws,
-        &graph,
-        &crate::artifact::ArtifactRequest::new(
-            crate::target_projection::LUAJIT_DESKTOP,
-            &emission_roots,
-        ),
+    setup_phases.push(("setup: concrete plans", t_setup.elapsed()));
+
+    #[cfg(test)]
+    let skip_abi_plan_publish = matches!(mutation, BodyMutation::SkipAbiPlanPublish);
+    #[cfg(not(test))]
+    let skip_abi_plan_publish = false;
+
+    #[cfg(all(test, not(feature = "sequential")))]
+    let setup_scheduler = match mutation {
+        BodyMutation::SetupLaneSchedule(schedule) => Some(std::sync::Arc::new(
+            SetupLaneScheduler::new(schedule),
+        )),
+        _ => None,
+    };
+
+    let t_setup = Instant::now();
+    // The graph is complete before these lanes start; shared interning remains
+    // synchronized. ABI plans carry their own representation arena, so the
+    // warmed context is adopted after join.
+    let shader_plans = std::sync::Arc::new(
+        concrete
+            .plans
+            .iter()
+            .map(|(instance, plan)| (instance.clone(), std::sync::Arc::clone(plan)))
+            .collect(),
     );
-    // The overload set lives in `cg` (computed once there); borrow it rather than
-    // rescanning the workspace.
-    let scx =
-        skull_mir::lower::ScalarCtx::new(ws).sharing(std::sync::Arc::clone(graph.interner()));
+    let abi_plans = std::sync::Arc::clone(&concrete.plans);
+    let abi_always_plans = &concrete.always_plans;
+    let mono_before_lanes = graph.interner().stats();
+    let run_setup_lanes = || {
+        parallel_join(
+        || {
+            parallel_join(
+                || {
+                    #[cfg(all(test, not(feature = "sequential")))]
+                    setup_scheduler
+                        .as_deref()
+                        .map(|scheduler| scheduler.wait(SetupLaneKind::CpuArtifact));
+                    let started = Instant::now();
+                    let lua_view = crate::artifact::realize(
+                        ws,
+                        &graph,
+                        &crate::artifact::ArtifactRequest::new(
+                            crate::target_projection::LUAJIT_DESKTOP,
+                            &emission_roots,
+                        ),
+                    );
+                    let population = lua_view.instances.len() + lua_view.boundaries.len();
+                    let scx = skull_mir::lower::ScalarCtx::new(ws)
+                        .sharing(std::sync::Arc::clone(graph.interner()));
+                    let finished = Instant::now();
+                    #[cfg(all(test, not(feature = "sequential")))]
+                    setup_scheduler
+                        .as_deref()
+                        .map(|scheduler| scheduler.finish(SetupLaneKind::CpuArtifact));
+                    (
+                        lua_view,
+                        scx,
+                        SetupLaneWindow { started, finished, population },
+                    )
+                },
+                || {
+                    #[cfg(all(test, not(feature = "sequential")))]
+                    setup_scheduler
+                        .as_deref()
+                        .map(|scheduler| scheduler.wait(SetupLaneKind::Shader));
+                    let started = Instant::now();
+                    // The overload set lives in `cg` (computed once there);
+                    // borrow it rather than rescanning the workspace.
+                    let shader_scx = skull_mir::lower::ScalarCtx::new_values_first_class(ws)
+                        .sharing(std::sync::Arc::clone(graph.interner()));
+                    let result = (|| {
+                        let shader_view = realize_shader_view(
+                            ws,
+                            &graph,
+                            &shader_programs,
+                            &compute_programs,
+                            &shader_scx,
+                            shader_plans,
+                        )?;
+                        let population = shader_view.roots.len()
+                            + shader_view.helpers.len()
+                            + shader_view.builtins.len();
+                        let shader_registrations = shader_registration_lines(
+                            ws,
+                            &shader_scx,
+                            &shader_collection,
+                            &compute_collection,
+                            &shader_view,
+                            renderer_target,
+                        )?;
+                        Ok::<_, CompilerError>((shader_view, shader_registrations, population))
+                    })();
+                    let population = result.as_ref().map(|(_, _, population)| *population).unwrap_or(0);
+                    let finished = Instant::now();
+                    #[cfg(all(test, not(feature = "sequential")))]
+                    setup_scheduler
+                        .as_deref()
+                        .map(|scheduler| scheduler.finish(SetupLaneKind::Shader));
+                    (
+                        result.map(|(view, registrations, _)| (view, registrations)),
+                        SetupLaneWindow { started, finished, population },
+                    )
+                },
+            )
+        },
+        || {
+            #[cfg(all(test, not(feature = "sequential")))]
+            setup_scheduler
+                .as_deref()
+                .map(|scheduler| scheduler.wait(SetupLaneKind::AbiWarm));
+            let started = Instant::now();
+            let mut abi_scx = skull_mir::lower::ScalarCtx::new(ws)
+                .sharing(std::sync::Arc::clone(graph.interner()));
+            if !skip_abi_plan_publish {
+                abi_scx.warm_abi_plans(ws, &abi_plans, abi_always_plans);
+            }
+            let population = abi_scx.abi_plan_stats().warm_keys as usize;
+            let finished = Instant::now();
+            #[cfg(all(test, not(feature = "sequential")))]
+            setup_scheduler
+                .as_deref()
+                .map(|scheduler| scheduler.finish(SetupLaneKind::AbiWarm));
+            (
+                abi_scx,
+                SetupLaneWindow { started, finished, population },
+            )
+        },
+        )
+    };
+    #[cfg(all(test, not(feature = "sequential")))]
+    let ((cpu_result, shader_result), (abi_scx, abi_lane)) =
+        if matches!(mutation, BodyMutation::SetupLaneSchedule(SetupLaneSchedule::Handshake)) {
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(3)
+                .build()
+                .expect("setup handshake test pool")
+                .install(run_setup_lanes)
+        } else {
+            run_setup_lanes()
+        };
+    #[cfg(any(not(test), feature = "sequential"))]
+    let ((cpu_result, shader_result), (abi_scx, abi_lane)) = run_setup_lanes();
+    let mono_after_lanes = graph.interner().stats();
+    #[cfg(test)]
+    let setup_handshake = {
+        #[cfg(not(feature = "sequential"))]
+        {
+            setup_scheduler
+                .as_deref()
+                .map(|scheduler| scheduler.handshake())
+                .unwrap_or((0, 0, false))
+        }
+        #[cfg(feature = "sequential")]
+        {
+            (0, 0, false)
+        }
+    };
+    let (lua_view, mut scx, cpu_lane) = cpu_result;
+    let (shader_result, shader_lane) = shader_result;
+    let (shader_view, shader_registrations) = shader_result?;
+    scx.adopt_warmed_abi(abi_scx);
     let state_slots = skull_mir::state_schema::global_state_slots(ws, &scx)
         .map_err(|error| CompilerError::new_no_location(error.to_string()))?
         .into_iter()
         .collect();
     let cg = CodegenCtx::new_with_state(ws, state_slots);
-    let shader_scx = skull_mir::lower::ScalarCtx::new_values_first_class(ws)
-        .sharing(std::sync::Arc::clone(graph.interner()));
-    let shader_view = realize_shader_view(ws, &graph, &shader_programs, &compute_programs, &shader_scx)?;
-    let shader_registrations = shader_registration_lines(
-        ws,
-        &shader_scx,
-        &shader_collection,
-        &compute_collection,
-        &shader_view,
-        renderer_target,
-    )?;
+    let setup_lanes = SetupLaneAttribution {
+        cpu_population: cpu_lane.population,
+        shader_population: shader_lane.population,
+        abi_population: abi_lane.population,
+        cpu_shader_overlap: setup_lanes_overlap(cpu_lane, shader_lane),
+        abi_cpu_overlap: setup_lanes_overlap(abi_lane, cpu_lane),
+        abi_shader_overlap: setup_lanes_overlap(abi_lane, shader_lane),
+        first_started_lane: Some(first_setup_lane(cpu_lane, shader_lane, abi_lane)),
+        mono_write_acqs_during_join: mono_after_lanes
+            .write_acqs
+            .saturating_sub(mono_before_lanes.write_acqs),
+        mono_intern_attempts_during_join: mono_after_lanes
+            .intern_attempts
+            .saturating_sub(mono_before_lanes.intern_attempts),
+        mono_intern_new_during_join: mono_after_lanes
+            .intern_new
+            .saturating_sub(mono_before_lanes.intern_new),
+        #[cfg(test)]
+        setup_handshake_entered: setup_handshake.0,
+        #[cfg(test)]
+        setup_handshake_released: setup_handshake.1,
+        #[cfg(test)]
+        setup_handshake_released_after_both: setup_handshake.2,
+    };
+    setup_phases.push(("setup: artifact+shader+ABI lanes", t_setup.elapsed()));
+    setup_phases.push(("join: cpu artifact branch", cpu_lane.finished - cpu_lane.started));
+    setup_phases.push(("join: shader view branch", shader_lane.finished - shader_lane.started));
+    setup_phases.push(("join: ABI plan warm branch", abi_lane.finished - abi_lane.started));
 
     // The emitted param list must be injective. Checked per SIGNATURE, over every
     // function rather than just the emitted set: a duplicate Lua param is illegal
     // regardless of which filter would have reached the body.
+    let t_setup = Instant::now();
     for m in ws.modules.iter().filter(|m| m.id != ModuleId::builtin()) {
         for (fid, _) in m.functions.iter() {
             let fref = FuncRef { module: m.id, func: fid };
@@ -3911,6 +5789,9 @@ fn emit_full_in_with_mutation(
             }
         }
     }
+    setup_phases.push(("setup: ABI validation", t_setup.elapsed()));
+
+    let setup_traffic = (scx.rep_arena_stats(), scx.interner().stats());
 
     let fn_items: Vec<(FuncRef, &bone_semantic::hir::Function)> = ws
         .modules
@@ -3927,9 +5808,22 @@ fn emit_full_in_with_mutation(
                 })
         })
         .collect();
+    let t_setup = Instant::now();
+    let inline_candidate_table = build_inline_candidate_table(
+        ws,
+        &scx,
+        &concrete,
+        inline_candidate_keys(&concrete),
+        None,
+        None,
+        None,
+        None,
+        None,
+    )?;
+    setup_phases.push(("setup: inline candidate table", t_setup.elapsed()));
     let chunks = par_map_with(
         fn_items,
-        skull_transform::InlineCache::default,
+        || skull_transform::InlineCache::with_candidate_table(std::sync::Arc::clone(&inline_candidate_table)),
         |inline_cache, (self_ref, f)| {
             (
                 shared(self_ref),
@@ -3955,6 +5849,11 @@ fn emit_full_in_with_mutation(
             static_key_baseline.insert(sc.cell, static_cell_key(sc));
         }
     }
+    let concrete_stats = if concrete_stats_requested() {
+        concrete.snapshot_build_stats()
+    } else {
+        crate::concrete_body::ConcreteBuildStats::default()
+    };
     let cache = SkullEmitCache {
         chunks,
         concrete,
@@ -3963,25 +5862,46 @@ fn emit_full_in_with_mutation(
         changed_since_full: FxHashSet::default(),
         cg,
         scx,
-        inline_cache: skull_transform::InlineCache::default(),
+        inline_cache: skull_transform::InlineCache::with_candidate_table(inline_candidate_table),
         dependents,
         changed_consts_since_full: FxHashSet::default(),
         static_key_baseline,
+        roots: RootCache {
+            project_root: project_root.map(str::to_string),
+            interface_roots,
+            sim_root,
+            shader_roots,
+            roots: emission_roots.clone(),
+        },
         shader_registrations,
         shader_view,
         emitted: FxHashSet::default(),
         code_artifact: skull_mir::code_identity::CodeArtifact::default(),
         state_schema: None,
-        project_root: project_root.map(str::to_string),
+        unit_comptime_reads: UnitComptimeReads::default(),
         renderer_target,
+        repair_stats: IncrementalRepairStats::default(),
     };
     let mut built_specs: Vec<(Instance, Chunk)> = Vec::new();
-    let (emit, emitted) = assemble(ws, &cache.cg, &cache.scx, &cache, &mut built_specs)?;
+    let (mut emit, emitted, unit_reads) = assemble(ws, &cache.cg, &cache.scx, &cache, &mut built_specs)?;
+    emit.concrete_stats = concrete_stats;
+    emit.setup_lanes = setup_lanes;
+    let mut phases = setup_phases;
+    phases.extend(emit.phases);
+    emit.phases = phases;
+    emit.arena_traffic = ArenaTraffic {
+        rep_setup: setup_traffic.0,
+        rep_final: cache.scx.rep_arena_stats(),
+        mono_setup: setup_traffic.1,
+        mono_final: cache.scx.interner().stats(),
+    };
     let mut cache = cache;
     cache.emitted = emitted;
     cache.code_artifact = emit.code_artifact.clone();
     cache.state_schema = Some(emit.state_schema.clone());
+    cache.unit_comptime_reads = unit_reads;
     cache.absorb_spec_chunks(built_specs);
+    emit.graph_census = cache.graph.run_stats;
     Ok((emit, cache))
 }
 
@@ -4002,7 +5922,67 @@ fn emit_full_in_with_mutation(
 /// every shifted fn is in `reinferred` and re-emitted here). Shared by
 /// `emit_incremental` (full reassembly) and `emit_overlay` (the incremental.lua
 /// split).
+/// Whether any of `reads` no longer matches the CURRENT inputs. File ids are
+/// the ABSOLUTE path the resolver landed on; an unreadable input hashes as
+/// None != recorded, forcing a re-lower whose spanned rejection reports the
+/// real cause. `file_hashes` memoizes reads within one staleness sweep.
+fn comptime_reads_stale(
+    ws: &Workspace,
+    reads: &[skull_mir::mir::ComptimeRead],
+    file_hashes: &mut FxHashMap<Ustr, Option<u64>>,
+) -> bool {
+    use skull_mir::mir::{comptime_value_hash, ComptimeInputId};
+    reads.iter().any(|read| {
+        let current = match &read.input {
+            ComptimeInputId::Var(name) => ws
+                .comptime_inputs
+                .vars
+                .get(name)
+                .map(|v| comptime_value_hash(&v.value)),
+            ComptimeInputId::File(path) => *file_hashes.entry(*path).or_insert_with(|| {
+                let text = std::fs::read_to_string(path.as_str()).ok()?;
+                Some(comptime_value_hash(&text))
+            }),
+        };
+        current != Some(read.value_hash)
+    })
+}
+
 impl SkullEmitCache {
+    pub fn repair_stats(&self) -> IncrementalRepairStats {
+        self.repair_stats
+    }
+
+    fn candidate_index_by_func(&self) -> &FxHashMap<FuncRef, FxHashSet<Instance>> {
+        self.concrete.candidate_keys_by_func()
+    }
+
+    /// The ABSOLUTE path of every `embed_string` input baked into the program
+    /// -- function chunks AND the always-emitted units (global initializers,
+    /// decorator defs) -- the files a watcher must treat as sources
+    /// (docs/comptime-plan.md). The unit half is load-bearing: all in-tree
+    /// production embeds are global initializers (the cimgui prelude).
+    pub fn comptime_files(&self) -> Vec<Ustr> {
+        let mut out: FxHashSet<Ustr> = FxHashSet::default();
+        let chunk_reads = self
+            .chunks
+            .values()
+            .filter_map(|chunk| chunk.as_ref().ok())
+            .flat_map(|chunk| chunk.comptime_reads.iter());
+        let unit_reads = self
+            .unit_comptime_reads
+            .globals
+            .values()
+            .flatten()
+            .chain(self.unit_comptime_reads.decorators.iter());
+        for read in chunk_reads.chain(unit_reads) {
+            if let skull_mir::mir::ComptimeInputId::File(path) = read.input {
+                out.insert(path);
+            }
+        }
+        out.into_iter().collect()
+    }
+
     /// The authoritative instance graph this cache emits against. Always
     /// present -- there is no build in which production has no graph.
     pub fn graph(&self) -> &crate::instance_graph::InstanceGraph {
@@ -4014,8 +5994,9 @@ impl SkullEmitCache {
         &self.shader_view
     }
 
-    /// The Lua artifact's realization of [`Self::graph`], from the same roots
-    /// the graph was built/updated from. Recomputed every edit; see the field.
+    /// The Lua artifact's retained realization of [`Self::graph`], from the
+    /// same roots the graph was built/updated from. Body edits apply a local
+    /// delta; full construction remains the independent oracle.
     pub fn lua_view(&self) -> &crate::artifact::ArtifactView {
         &self.lua_view
     }
@@ -4043,6 +6024,52 @@ impl SkullEmitCache {
         Ok(current != self.shader_registrations.keys)
     }
 
+    /// Compare the registration key set after replacing only the contributions
+    /// of the re-inferred bodies. The full-workspace method above remains the
+    /// full-build/reload oracle; BodyOnly must not use it.
+    pub fn shader_registration_keys_changed_for_bodies(
+        &self,
+        ws: &Workspace,
+        reinferred: &[(ModuleId, BodyOwner)],
+    ) -> Result<bool, CompilerError> {
+        let mut users = self.shader_registrations.shader_pair_users.clone();
+        let mut compute_users = self.shader_registrations.compute_entry_users.clone();
+        for &(mid, owner) in reinferred {
+            if let Some(previous) = self.shader_registrations.shader_contributions.get(&(mid, owner)) {
+                for pair in previous {
+                    let count = users
+                        .get_mut(&pair.key)
+                        .expect("shader key index lost a body contribution");
+                    *count -= 1;
+                    if *count == 0 {
+                        users.remove(&pair.key);
+                    }
+                }
+            }
+            if let Some(previous) = self.shader_registrations.compute_contributions.get(&(mid, owner)) {
+                for entry in previous {
+                    let count = compute_users
+                        .get_mut(&entry.key)
+                        .expect("compute key index lost a body contribution");
+                    *count -= 1;
+                    if *count == 0 {
+                        compute_users.remove(&entry.key);
+                    }
+                }
+            }
+            let (shader, _) = skull_mir::lower::collect_shader_body(ws, mid, owner)?;
+            for pair in shader {
+                *users.entry(pair.key).or_insert(0) += 1;
+            }
+            let (compute, _) = skull_mir::lower::collect_compute_body(ws, mid, owner)?;
+            for entry in compute {
+                *compute_users.entry(entry.key).or_insert(0) += 1;
+            }
+        }
+        let current: BTreeSet<String> = users.keys().cloned().chain(compute_users.keys().cloned()).collect();
+        Ok(current != self.shader_registrations.keys)
+    }
+
     /// The compiler-owned ABI contract for every WGPU artifact registered by
     /// this cache. Body edits may replace source under the same contract; a
     /// changed wire cannot be applied to a live registry/pipeline safely.
@@ -4060,6 +6087,7 @@ fn update_shader_registrations(
     ws: &Workspace,
     reinferred: &[(ModuleId, BodyOwner)],
 ) -> Result<bool, CompilerError> {
+    self.repair_stats.shader_delta_requests = reinferred.len();
     let affected = reinferred.iter().any(|&(mid, owner)| {
         self.shader_registrations.callsites.contains(&(mid, owner))
             || matches!(
@@ -4076,20 +6104,123 @@ fn update_shader_registrations(
     if !affected {
         return Ok(false);
     }
-    let collection = skull_mir::lower::collect_shader_collection(ws)?;
-    let compute_collection = skull_mir::lower::collect_compute_collection(ws)?;
-    self.shader_registrations.roots = collection
-        .pairs
-        .iter()
-        .flat_map(|pair| pair.vert.into_iter().chain(std::iter::once(pair.frag)))
-        .chain(compute_collection.entries.iter().map(|entry| entry.entry))
-        .collect();
-    self.shader_registrations.callsites = collection
-        .callsites
+    let mut roots_examined = 0;
+    let mut roots_derived = 0;
+    for &(mid, owner) in reinferred {
+        let key = (mid, owner);
+        let old_shader = self
+            .shader_registrations
+            .shader_contributions
+            .remove(&key)
+            .unwrap_or_default();
+        let old_compute = self
+            .shader_registrations
+            .compute_contributions
+            .remove(&key)
+            .unwrap_or_default();
+        roots_examined += old_shader
+            .iter()
+            .map(|pair| usize::from(pair.vert.is_some()) + 1)
+            .sum::<usize>();
+        roots_examined += old_compute.len();
+        for pair in old_shader {
+            let users = self
+                .shader_registrations
+                .shader_pair_users
+                .get_mut(&pair.key)
+                .expect("shader contribution index lost an existing key");
+            *users -= 1;
+            if *users == 0 {
+                self.shader_registrations.shader_pair_users.remove(&pair.key);
+                self.shader_registrations.shader_pairs.remove(&pair.key);
+                if let Some(vert) = pair.vert {
+                    self.shader_registrations.shader_root_set.remove(&vert);
+                }
+                self.shader_registrations.shader_root_set.remove(&pair.frag);
+            }
+        }
+        for entry in old_compute {
+            let users = self
+                .shader_registrations
+                .compute_entry_users
+                .get_mut(&entry.key)
+                .expect("compute contribution index lost an existing key");
+            *users -= 1;
+            if *users == 0 {
+                self.shader_registrations.compute_entry_users.remove(&entry.key);
+                self.shader_registrations.compute_entries.remove(&entry.key);
+                self.shader_registrations.shader_root_set.remove(&entry.entry);
+            }
+        }
+
+        let (shader, shader_callsite) = skull_mir::lower::collect_shader_body(ws, mid, owner)?;
+        let (compute, compute_callsite) = skull_mir::lower::collect_compute_body(ws, mid, owner)?;
+        roots_derived += shader
+            .iter()
+            .map(|pair| usize::from(pair.vert.is_some()) + 1)
+            .sum::<usize>();
+        roots_derived += compute.len();
+        for pair in &shader {
+            let users = self
+                .shader_registrations
+                .shader_pair_users
+                .entry(pair.key.clone())
+                .or_insert(0);
+            *users += 1;
+            if *users == 1 {
+                self.shader_registrations
+                    .shader_pairs
+                    .insert(pair.key.clone(), pair.clone());
+                if let Some(vert) = pair.vert {
+                    self.shader_registrations.shader_root_set.insert(vert);
+                }
+                self.shader_registrations.shader_root_set.insert(pair.frag);
+            }
+        }
+        for entry in &compute {
+            let users = self
+                .shader_registrations
+                .compute_entry_users
+                .entry(entry.key.clone())
+                .or_insert(0);
+            *users += 1;
+            if *users == 1 {
+                self.shader_registrations
+                    .compute_entries
+                    .insert(entry.key.clone(), entry.clone());
+                self.shader_registrations.shader_root_set.insert(entry.entry);
+            }
+        }
+        self.shader_registrations
+            .shader_contributions
+            .insert(key, shader);
+        self.shader_registrations
+            .compute_contributions
+            .insert(key, compute);
+        let callsite = shader_callsite || compute_callsite;
+        if callsite {
+            self.shader_registrations.callsites.insert(key);
+        } else {
+            self.shader_registrations.callsites.remove(&key);
+        }
+    }
+    let mut shader_roots: Vec<FuncRef> = self
+        .shader_registrations
+        .shader_root_set
         .iter()
         .copied()
-        .chain(compute_collection.callsites.iter().copied())
         .collect();
+    shader_roots.sort_by_key(|f| (f.module.index(), f.func.into_raw()));
+    self.shader_registrations.roots = shader_roots;
+    self.shader_registrations.keys = self
+        .shader_registrations
+        .shader_pairs
+        .keys()
+        .cloned()
+        .chain(self.shader_registrations.compute_entries.keys().cloned())
+        .collect();
+    self.repair_stats.shader_roots_examined = roots_examined;
+    self.repair_stats.shader_roots_derived = roots_derived;
     Ok(true)
 }
 
@@ -4097,13 +6228,38 @@ fn update_shader_registrations(
         &mut self,
         ws: &Workspace,
     ) -> Result<(), CompilerError> {
-    let collection = skull_mir::lower::collect_shader_collection(ws)?;
+    let collection = skull_mir::lower::ShaderCollection {
+        pairs: self
+            .shader_registrations
+            .shader_pairs
+            .values()
+            .cloned()
+            .collect(),
+        callsites: self.shader_registrations.callsites.iter().copied().collect(),
+        contributions: self.shader_registrations.shader_contributions.clone(),
+    };
     let programs = shader_programs(&collection);
-    let compute_collection = skull_mir::lower::collect_compute_collection(ws)?;
+    let compute_collection = skull_mir::lower::ComputeCollection {
+        entries: self
+            .shader_registrations
+            .compute_entries
+            .values()
+            .cloned()
+            .collect(),
+        callsites: Vec::new(),
+        contributions: self.shader_registrations.compute_contributions.clone(),
+    };
     let compute = compute_programs(&compute_collection);
     let shader_scx = skull_mir::lower::ScalarCtx::new_values_first_class(ws)
         .sharing(std::sync::Arc::clone(self.graph.interner()));
-    let view = realize_shader_view(ws, &self.graph, &programs, &compute, &shader_scx)?;
+    let view = realize_shader_view(
+        ws,
+        &self.graph,
+        &programs,
+        &compute,
+        &shader_scx,
+        std::sync::Arc::clone(&self.concrete.plans),
+    )?;
     let registrations = shader_registration_lines(
         ws,
         &shader_scx,
@@ -4271,12 +6427,23 @@ fn update_chunk_cache(
     &mut self,
     ws: &Workspace,
     reinferred: &[(ModuleId, BodyOwner)],
-) -> (
+    edits: &[crate::instance_graph::SpanEdit],
+) -> Result<(
     FxHashSet<Instance>,
     crate::instance_graph::UpdateStats,
     Vec<CompilerError>,
-) {
+), CompilerError> {
     let cache = self;
+    let shader_delta_requests = cache.repair_stats.shader_delta_requests;
+    let shader_roots_examined = cache.repair_stats.shader_roots_examined;
+    let shader_roots_derived = cache.repair_stats.shader_roots_derived;
+    cache.repair_stats = IncrementalRepairStats {
+        body_only_edits: 1,
+        shader_delta_requests,
+        shader_roots_examined,
+        shader_roots_derived,
+        ..IncrementalRepairStats::default()
+    };
     // Fold each re-inferred body's value-reference contribution into the cached
     // ScalarCtx. A name whose taken-by-ref membership flips changes scalar-ABI
     // eligibility, so the named fn(s) -- and, via the deps scan below, every
@@ -4302,30 +6469,162 @@ fn update_chunk_cache(
     //
     // Rebuilding the graph instead of updating it is what the arc measured and
     // rejected: 15-33 ms release against a sub-millisecond edit.
-    let _t_graph = Instant::now();
-    // `update_shader_registrations` runs BEFORE this (in `emit_incremental`), so
-    // the glue roots below are this edit's, not the previous build's.
-    let roots = all_roots(
+    let t_graph = Instant::now();
+    let graph_builds_before = crate::instance_graph::build_invocations();
+    cache.repair_stats.root_requests = 1;
+    let previous_shader_roots = cache.roots.shader_roots.clone();
+    let current_shader_roots = cache.shader_registrations.roots.clone();
+    let shader_roots_changed = previous_shader_roots != current_shader_roots;
+    let mut root_added = Vec::new();
+    let mut root_removed = Vec::new();
+    if shader_roots_changed {
+        let mut current_roots = cache.roots.roots.clone();
+        for root in previous_shader_roots
+            .iter()
+            .filter(|root| !current_shader_roots.contains(root))
+        {
+            if cache.roots.interface_roots.contains(root)
+                || cache.roots.sim_root == Some(*root)
+            {
+                continue;
+            }
+            if let Some(position) = current_roots.iter().position(|current| current == root) {
+                current_roots.remove(position);
+                root_removed.push(*root);
+            }
+        }
+        for root in current_shader_roots
+            .iter()
+            .filter(|root| !previous_shader_roots.contains(root))
+        {
+            if !current_roots.contains(root) {
+                current_roots.push(*root);
+                root_added.push(*root);
+            }
+        }
+        current_roots.sort_by_key(|root| (root.module.index(), root.func.into_raw()));
+        cache.roots.roots = current_roots;
+    }
+    cache.roots.shader_roots = current_shader_roots;
+    // The full root enumerator remains an oracle for tests and verification;
+    // the body route consumes the retained root cache above.
+    let forced_roots = if std::env::var_os("SKULL_FORCE_ROOT_SCAN").is_some() {
+        let mut census = RootEnumerationCensus::default();
+        let roots = all_roots_with_census(
+            ws,
+            cache.roots.project_root.as_deref(),
+            &cache.roots.shader_roots,
+            Some(&mut census),
+        );
+        cache.repair_stats.root_functions_examined = census.functions_examined;
+        cache.repair_stats.root_modules_examined = census.modules_examined;
+        cache.repair_stats.root_reseeds = census.roots_reseeded;
+        let previous_roots = cache.roots.roots.clone();
+        root_added = roots
+            .iter()
+            .filter(|root| !previous_roots.contains(root))
+            .copied()
+            .collect();
+        root_removed = previous_roots
+            .iter()
+            .filter(|root| !roots.contains(root))
+            .copied()
+            .collect();
+        Some(roots)
+    } else {
+        None
+    };
+    let update = cache
+        .graph
+        .update_bodies_with_root_delta(ws, &root_added, &root_removed, reinferred, edits);
+    cache.repair_stats.graph_update_ns = t_graph.elapsed().as_nanos() as u64;
+    cache.repair_stats.full_graph_rebuilds = crate::instance_graph::build_invocations()
+        .saturating_sub(graph_builds_before) as usize;
+    cache.repair_stats.owners_revisited = update.revisited_owners.len();
+    cache.repair_stats.instances_revisited = update.revisited.len();
+    cache.repair_stats.graph_contributions_retracted = update.retracted_owners.len();
+    cache.repair_stats.graph_contributions_installed = update.revisited_owners.len();
+    cache.repair_stats.broad_owner_scans = update.broad_scans;
+    cache.repair_stats.root_hole_names_examined = update.census.root_hole_names_examined;
+    cache.repair_stats.root_hole_rows_examined = update.census.root_hole_rows_examined;
+    cache.repair_stats.root_hole_decls_examined = update.census.root_hole_decls_examined;
+    cache.repair_stats.root_hole_reason_buckets_examined =
+        update.census.root_hole_reason_buckets_examined;
+    cache.repair_stats.root_instances_checked = update.census.root_instances_checked;
+    cache.repair_stats.erased_catalogue_entries_examined =
+        update.census.erased_catalogue_entries_examined;
+    let concrete_builds_before = crate::concrete_body::build_invocations();
+    let t_concrete = Instant::now();
+    let concrete_update = cache.concrete.update_local_with_span_edits(
         ws,
-        cache.project_root.as_deref(),
-        &cache.shader_registrations.roots,
+        &cache.graph,
+        &update.revisited,
+        &update.removed,
+        &update.revisited_owners,
+        edits,
     );
-    let update = cache.graph.update_bodies(ws, roots.clone(), reinferred);
-    cache.concrete = crate::concrete_body::build(ws, &mut cache.graph);
-    let _graph_ms = _t_graph.elapsed();
+    cache.repair_stats.concrete_entries_derived = concrete_update.derived;
+    cache.repair_stats.concrete_entries_reused = concrete_update.reused;
+    cache.repair_stats.concrete_entries_retracted = concrete_update.retracted;
+    cache.repair_stats.full_concrete_rebuilds = crate::concrete_body::build_invocations()
+        .saturating_sub(concrete_builds_before) as usize;
+    cache.repair_stats.broad_concrete_scans = concrete_update.broad_scans;
+    cache.repair_stats.concrete_update_ns = t_concrete.elapsed().as_nanos() as u64;
+    let _graph_ms = Duration::from_nanos(
+        cache.repair_stats.graph_update_ns
+            + cache.repair_stats.concrete_update_ns
+            + cache.repair_stats.artifact_update_ns,
+    );
 
     // Before any borrow of the cache's own fields, because it mutates several.
     for gone in &update.removed {
         cache.forget_instance(gone);
     }
 
-    // The graph moved; the Lua view is this edit's realization of it, from the
-    // same roots. Kept in step with `graph` rather than a first-edit snapshot.
-    cache.lua_view = crate::artifact::realize(
+    // The graph moved; retract and install only the affected target subjects.
+    // The retained view owns the predecessor/successor indexes needed to
+    // update reachability without realizing the full graph again.
+    let t_artifact = Instant::now();
+    cache.repair_stats.artifact_iteration_requests = update
+        .revisited
+        .len()
+        .saturating_add(update.added.len())
+        .saturating_add(update.removed.len());
+    let artifact_realize_before = crate::artifact::realize_invocations();
+    if std::env::var_os("SKULL_FORCE_ARTIFACT_REALIZE").is_some() {
+        let _ = crate::artifact::realize(
+                ws,
+                &cache.graph,
+                &crate::artifact::ArtifactRequest::new(
+                    crate::target_projection::LUAJIT_DESKTOP,
+                forced_roots.as_deref().unwrap_or(cache.roots.roots.as_slice()),
+            ),
+        );
+    }
+    let artifact_update = cache.lua_view.update_local_with_root_delta(
         ws,
         &cache.graph,
-        &crate::artifact::ArtifactRequest::new(crate::target_projection::LUAJIT_DESKTOP, &roots),
+        &crate::artifact::ArtifactRequest::new(
+            crate::target_projection::LUAJIT_DESKTOP,
+            forced_roots.as_deref().unwrap_or(cache.roots.roots.as_slice()),
+        ),
+        &update.revisited,
+        &update.added,
+        &update.removed,
+        &root_added,
+        &root_removed,
     );
+    cache.repair_stats.artifact_chunks_revisited = artifact_update.revisited;
+    cache.repair_stats.artifact_chunks_added = artifact_update.added;
+    cache.repair_stats.artifact_chunks_removed = artifact_update.removed;
+    cache.repair_stats.artifact_iterations = artifact_update.iterations;
+    cache.repair_stats.artifact_root_entries_examined = artifact_update.root_entries_examined;
+    cache.repair_stats.artifact_index_rows_examined = artifact_update.local_index_rows_examined;
+    cache.repair_stats.artifact_realize_invocations = crate::artifact::realize_invocations()
+        .saturating_sub(artifact_realize_before) as usize;
+    cache.repair_stats.full_artifact_view_realizations = cache.repair_stats.artifact_realize_invocations;
+    cache.repair_stats.broad_artifact_scans = artifact_update.broad_scans;
+    cache.repair_stats.artifact_update_ns = t_artifact.elapsed().as_nanos() as u64;
 
     let scx = &cache.scx;
     let cg = &cache.cg;
@@ -4342,6 +6641,68 @@ fn update_chunk_cache(
     // re-emit even if their own body didn't change.
     changed.extend(flipped_frefs.iter().copied());
 
+    // A chunk whose baked comptime input (build_var value / embedded file
+    // content) no longer matches the CURRENT inputs is a body edit bone cannot
+    // see -- reinferred hashes only source text (docs/comptime-plan.md). Seed
+    // the decl so the chunk and every dependent (a caller that inlined the
+    // value) re-emits fresh.
+    {
+        let mut file_hashes: FxHashMap<Ustr, Option<u64>> = FxHashMap::default();
+        for (body, chunk) in cache.chunks.iter() {
+            let Ok(chunk) = chunk else { continue };
+            if comptime_reads_stale(ws, &chunk.comptime_reads, &mut file_hashes) {
+                changed.insert(body.func);
+            }
+        }
+    }
+
+    let mut invalidated_candidate_frefs = changed.clone();
+    invalidated_candidate_frefs.extend(update.added.iter().map(|instance| instance.func));
+    invalidated_candidate_frefs.extend(update.removed.iter().map(|instance| instance.func));
+    let mut warm_keys = concrete_update.candidate_keys_added.clone();
+    for fref in &invalidated_candidate_frefs {
+        if let Some(keys) = cache.candidate_index_by_func().get(fref) {
+            warm_keys.extend(keys.iter().cloned());
+        }
+    }
+    let candidate_entries_requested = warm_keys.len();
+    let candidate_entries_invalidated = concrete_update.candidate_keys_removed.len()
+        + warm_keys
+            .iter()
+            .filter(|key| {
+                !concrete_update.candidate_keys_added.contains(*key)
+                    && cache.concrete.candidate_keys().contains(*key)
+            })
+            .count();
+    let warm_keys: Vec<Instance> = warm_keys.into_iter().collect();
+    let t_candidate = Instant::now();
+    let previous_candidate_table = cache.inline_cache.candidate_table();
+    let force_candidate_scan = std::env::var_os("SKULL_FORCE_CANDIDATE_SCAN").is_some();
+    let mut candidate_census = CandidateBuildStats::default();
+    let candidate_table = build_inline_candidate_table_with_census(
+        ws,
+        scx,
+        &cache.concrete,
+        if force_candidate_scan {
+            cache.concrete.candidate_keys().iter().cloned().collect()
+        } else {
+            Vec::new()
+        },
+        previous_candidate_table.as_ref(),
+        Some(&invalidated_candidate_frefs),
+        (!force_candidate_scan).then_some(warm_keys),
+        Some(&concrete_update.candidate_keys_added),
+        Some(&concrete_update.candidate_keys_removed),
+        &mut candidate_census,
+    )?;
+    cache.inline_cache.replace_candidate_table(candidate_table);
+    cache.repair_stats.candidate_entries_requested = candidate_entries_requested;
+    cache.repair_stats.candidate_entries_invalidated = candidate_entries_invalidated;
+    cache.repair_stats.candidate_entries_derived = candidate_census.warmed;
+    cache.repair_stats.candidate_entries_reused = candidate_entries_requested
+        .saturating_sub(candidate_census.warmed);
+    cache.repair_stats.broad_candidate_scans = candidate_census.keys_examined;
+    cache.repair_stats.candidate_update_ns = t_candidate.elapsed().as_nanos() as u64;
     // **A changed declaration maps to its LIVE INSTANCES through the graph**,
     // not to one declaration-shaped key. Editing a generic `co fn` with two
     // instantiations must re-emit both bodies, and editing one specialization's
@@ -4350,8 +6711,11 @@ fn update_chunk_cache(
     // IS its base instance, and a declaration the graph never reached still has
     // a chunk here that an edit can invalidate.
     let mut affected: FxHashSet<Instance> = changed.iter().copied().map(shared).collect();
+    cache.repair_stats.declaration_lookup_requests = changed.len();
     for c in &changed {
-        affected.extend(cache.graph.instances_of(*c).cloned());
+        let instances: Vec<Instance> = cache.graph.instances_of(*c).cloned().collect();
+        cache.repair_stats.declaration_instance_lookups += instances.len();
+        affected.extend(instances);
     }
     // ...plus every chunk that DEPENDS on a changed fn. This is the CODEGEN
     // reverse graph, which the instance graph does not hold and must not be
@@ -4361,6 +6725,8 @@ fn update_chunk_cache(
     // other, so both survive.
     for c in &changed {
         if let Some(deps) = cache.dependents.get(c) {
+            cache.repair_stats.dependent_requests += 1;
+            cache.repair_stats.dependents_visited += deps.len();
             affected.extend(deps.iter().cloned());
         }
     }
@@ -4371,7 +6737,9 @@ fn update_chunk_cache(
     //
     // Construction of graph additions happens after invalidation below, so a
     // newly reached body cannot reuse an inline decision made for the old body.
-    let _aff_ms = _t_aff.elapsed();
+    cache.repair_stats.affected_selection_ns = _t_aff.elapsed().as_nanos() as u64;
+    cache.repair_stats.chunk_rebuild_requests = affected.len();
+    let _aff_ms = Duration::from_nanos(cache.repair_stats.affected_selection_ns);
 
     // The persistent InlineCache keeps unchanged callee bodies across edits; the
     // affected entries are exactly those whose lowered body could have changed
@@ -4379,6 +6747,7 @@ fn update_chunk_cache(
     // `affected`), so invalidate them before re-lowering. Everything else is
     // provably unchanged and reused.
     let _t_relow = Instant::now();
+    let mut chunks_rebuilt = 0;
     for body in &affected {
         cache.inline_cache.invalidate(body.func);
     }
@@ -4399,6 +6768,7 @@ fn update_chunk_cache(
         // An edit can flip a body between cached (ordinary/coroutine) and
         // regenerated (extern / inline(lua)); only the former has a chunk.
         if is_cached_emitted_body(f, body) {
+            chunks_rebuilt += 1;
             let chunk = rebuild_chunk(ws, cg, scx, &cache.concrete, body, f, &mut cache.inline_cache);
             if let Ok(c) = &chunk {
                 let new_deps: Vec<FuncRef> = c.deps.iter().copied().collect();
@@ -4411,7 +6781,9 @@ fn update_chunk_cache(
             cache.chunks.remove(body);
         }
     }
+    cache.repair_stats.chunks_rebuilt = chunks_rebuilt;
     let added_errors = Self::build_graph_added_chunks(cache, ws, &update.added);
+    cache.repair_stats.relowering_ns = _t_relow.elapsed().as_nanos() as u64;
     if std::env::var("SKULL_EMIT_PROFILE").is_ok() {
         eprintln!(
             "    update_chunk_cache: graph {:.3}ms (+{} -{} instances) | affected-scan {:.3}ms (O(edit), {} chunks) | re-lower {:.3}ms ({} affected)",
@@ -4424,7 +6796,7 @@ fn update_chunk_cache(
             affected.len(),
         );
     }
-    (affected, update, added_errors)
+    Ok((affected, update, added_errors))
 }
 }
 
@@ -4438,7 +6810,7 @@ pub fn emit_incremental(
     // `update_chunk_cache`'s re-walk must see this edit's set, not the last
     // build's.
     let shader_changed = cache.update_shader_registrations(ws, reinferred)?;
-    let (_affected, update, added_errors) = cache.update_chunk_cache(ws, reinferred);
+    let (_affected, update, added_errors) = cache.update_chunk_cache(ws, reinferred, &[])?;
     if let Some(err) = SkullEmitCache::combine_errors(added_errors) {
         return Err(err);
     }
@@ -4452,10 +6824,14 @@ pub fn emit_incremental(
     // The two-file split (`emit_overlay`) avoids it entirely on a body edit.
     let t_asm = Instant::now();
     let mut built_specs: Vec<(Instance, Chunk)> = Vec::new();
-    let (mut emit, emitted) = assemble(ws, &cache.cg, &cache.scx, cache, &mut built_specs)?;
+    let (mut emit, emitted, unit_reads) = assemble(ws, &cache.cg, &cache.scx, cache, &mut built_specs)?;
+    if concrete_stats_requested() {
+        emit.concrete_stats = cache.concrete.snapshot_build_stats();
+    }
     cache.emitted = emitted;
     cache.code_artifact = emit.code_artifact.clone();
     cache.state_schema = Some(emit.state_schema.clone());
+    cache.unit_comptime_reads = unit_reads;
     cache.absorb_spec_chunks(built_specs);
     let reassemble = t_asm.elapsed();
     emit.phases.push(("incr: re-emit affected bodies", reemit));
@@ -4473,10 +6849,11 @@ fn assemble_overlay(
     ws: &Workspace,
     cache: &SkullEmitCache,
     shader_changed: bool,
-) -> Result<MirEmit, CompilerError> {
+) -> Result<(MirEmit, UnitComptimeReads), CompilerError> {
     let mut out = String::from("-- skull incremental overlay (loaded after main.lua)\n");
     let mut skipped: Vec<(String, String)> = Vec::new();
     out.push_str("__rock_state_transaction_begin()\n");
+    let mut unit_reads = UnitComptimeReads::default();
 
     // Redefine the changed functions, deterministic order for a stable diff.
     let mut order: Vec<Instance> = cache.changed_since_full.iter().cloned().collect();
@@ -4617,18 +6994,32 @@ fn assemble_overlay(
                     a.mid,
                     a.gid,
                 );
+                if let Some(err) = unit.hard_error {
+                    return Err(err);
+                }
+                unit_reads
+                    .globals
+                    .insert((a.mid, a.gid), unit.comptime_reads.clone());
                 out.push_str(&unit.lua); // the (new) ginit fn def
                 if let Some(s) = unit.skipped {
                     skipped.push(s);
                 }
-                unit.pending_init.map(|(_, _, l)| l).unwrap_or_default()
+                unit.pending_init
+                    .map(|(_, _, line)| line)
+                    .ok_or_else(|| {
+                        CompilerError::new_no_location(format!(
+                            "changed global `{}` produced no initializer plan",
+                            a.name
+                        ))
+                    })?
             } else {
                 // Unchanged dependent: its ginit is already in main.lua; re-run only
                 // the line so it recomputes from the upstream's new value.
                 let g = &ws.module(a.mid).globals[a.gid];
+                let target = global_init_target(ws, &cache.scx, &cache.cg, g)?;
                 format!(
                     "{} = {}()\n",
-                    global_init_target(ws, &cache.scx, &cache.cg, g),
+                    target,
                     crate::global_init_fn_name(a.name.as_str())
                 )
             };
@@ -4655,16 +7046,25 @@ fn assemble_overlay(
         out.push_str("__rock_state_transaction_commit()\n");
     }
 
-    Ok(MirEmit {
-        lua: out,
-        code_artifact: cache.code_artifact.clone(),
-        state_schema: cache
-            .state_schema
-            .clone()
-            .expect("overlay requires a completed StateSchema"),
-        skipped,
-        phases: Vec::new(),
-    })
+    Ok((
+        MirEmit {
+            lua: out,
+            code_artifact: cache.code_artifact.clone(),
+            state_schema: cache
+                .state_schema
+                .clone()
+                .expect("overlay requires a completed StateSchema"),
+            skipped,
+            phases: Vec::new(),
+            abi_plan_stats: cache.scx.abi_plan_stats(),
+            attribution: EmitAttribution::default(),
+            arena_traffic: ArenaTraffic::default(),
+            setup_lanes: SetupLaneAttribution::default(),
+            graph_census: crate::instance_graph::RunStats::default(),
+            concrete_stats: crate::concrete_body::ConcreteBuildStats::default(),
+        },
+        unit_reads,
+    ))
 }
 
 /// Incremental OVERLAY emit for a body edit: update the chunk cache for the
@@ -4679,9 +7079,7 @@ pub fn emit_overlay(
     cache: &mut SkullEmitCache,
     reinferred: &[(ModuleId, BodyOwner)],
 ) -> Result<MirEmit, CompilerError> {
-    let (emit, staged) = emit_overlay_staged(ws, cache, reinferred)?;
-    *cache = staged;
-    Ok(emit)
+    emit_overlay_with_span_edits(ws, cache, reinferred, &[])
 }
 
 /// Build an overlay against a staged cache. The caller may publish the returned
@@ -4692,15 +7090,25 @@ pub fn emit_overlay_staged(
     cache: &SkullEmitCache,
     reinferred: &[(ModuleId, BodyOwner)],
 ) -> Result<(MirEmit, SkullEmitCache), CompilerError> {
+    emit_overlay_with_span_edits_staged(ws, cache, reinferred, &[])
+}
+
+pub fn emit_overlay_with_span_edits_staged(
+    ws: &Workspace,
+    cache: &SkullEmitCache,
+    reinferred: &[(ModuleId, BodyOwner)],
+    edits: &[crate::instance_graph::SpanEdit],
+) -> Result<(MirEmit, SkullEmitCache), CompilerError> {
     let mut staged = cache.clone();
-    let emit = emit_overlay_in_place(ws, &mut staged, reinferred)?;
+    let emit = emit_overlay_with_span_edits(ws, &mut staged, reinferred, edits)?;
     Ok((emit, staged))
 }
 
-fn emit_overlay_in_place(
+pub fn emit_overlay_with_span_edits(
     ws: &Workspace,
     cache: &mut SkullEmitCache,
     reinferred: &[(ModuleId, BodyOwner)],
+    edits: &[crate::instance_graph::SpanEdit],
 ) -> Result<MirEmit, CompilerError> {
     let t0 = Instant::now();
     // `cg` is cached (interface-derived, identical on body edits) -- no rebuild.
@@ -4713,7 +7121,7 @@ fn emit_overlay_in_place(
     // Shader registrations FIRST -- their dependencies are graph/view roots, so
     // `update_chunk_cache`'s re-walk must see this edit's set.
     let shader_changed = cache.update_shader_registrations(ws, reinferred)?;
-    let (affected, update, added_errors) = cache.update_chunk_cache(ws, reinferred);
+    let (affected, update, added_errors) = cache.update_chunk_cache(ws, reinferred, edits)?;
     if let Some(err) = SkullEmitCache::combine_errors(added_errors) {
         return Err(err);
     }
@@ -4769,9 +7177,39 @@ fn emit_overlay_in_place(
     }
     cache.code_artifact = next_code_artifact;
     cache.state_schema = Some(next_state_schema);
+    // A comptime input read by a GLOBAL initializer can go stale with no
+    // reinferred body at all (bone hashes only source text). Route a stale
+    // const through the same changed-consts machinery -- its ginit re-lowers
+    // fresh, re-reading the file / new var value. A stale MUTABLE global is
+    // deliberately left alone: its guarded init preserves the live value on
+    // reload, exactly as a source edit to its initializer does.
+    {
+        let mut file_hashes: FxHashMap<Ustr, Option<u64>> = FxHashMap::default();
+        let stale_consts: Vec<(ModuleId, Idx<bone_semantic::hir::GlobalDef>)> = cache
+            .unit_comptime_reads
+            .globals
+            .iter()
+            .filter(|((mid, gid), reads)| {
+                ws.module(*mid).globals[*gid].is_const
+                    && comptime_reads_stale(ws, reads, &mut file_hashes)
+            })
+            .map(|(key, _)| *key)
+            .collect();
+        cache.changed_consts_since_full.extend(stale_consts);
+    }
     let t_relower = t2.elapsed();
     let t3 = Instant::now();
-    let mut emit = assemble_overlay(ws, cache, shader_changed)?;
+    let (mut emit, overlay_unit_reads) = assemble_overlay(ws, cache, shader_changed)?;
+    for (key, reads) in overlay_unit_reads.globals {
+        if reads.is_empty() {
+            cache.unit_comptime_reads.globals.remove(&key);
+        } else {
+            cache.unit_comptime_reads.globals.insert(key, reads);
+        }
+    }
+    if concrete_stats_requested() {
+        emit.concrete_stats = cache.concrete.snapshot_build_stats();
+    }
     // Advance the static baseline to the keys now in effect. A reset line fires on
     // the reload that dofiles the overlay carrying it, so once THIS overlay resets a
     // cell (or leaves it unchanged), a LATER overlay must not reset it again -- else
@@ -4797,6 +7235,12 @@ fn emit_overlay_in_place(
         ("CodegenCtx::new", t_cg),
         ("ScalarCtx::new", t_scx),
         ("update_chunk_cache (re-lower changed)", t_relower),
+        ("  graph update", Duration::from_nanos(cache.repair_stats.graph_update_ns)),
+        ("  concrete update", Duration::from_nanos(cache.repair_stats.concrete_update_ns)),
+        ("  ArtifactView update", Duration::from_nanos(cache.repair_stats.artifact_update_ns)),
+        ("  candidate update", Duration::from_nanos(cache.repair_stats.candidate_update_ns)),
+        ("  affected selection", Duration::from_nanos(cache.repair_stats.affected_selection_ns)),
+        ("  relowering", Duration::from_nanos(cache.repair_stats.relowering_ns)),
         ("assemble_overlay (+build_deco_map)", t_asm),
     ];
     Ok(emit)
@@ -4828,6 +7272,50 @@ mod wgpu_projection_tests {
     }
 }
 
+#[cfg(all(test, not(feature = "sequential")))]
+mod setup_parallel_tests {
+    use super::*;
+
+    #[cfg(not(feature = "sequential"))]
+    #[test]
+    fn independent_setup_branches_can_overlap() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(2)
+            .build()
+            .expect("two-thread test pool");
+        let active = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        pool.install(|| {
+            parallel_join(
+                {
+                    let active = Arc::clone(&active);
+                    let peak = Arc::clone(&peak);
+                    move || {
+                        let now = active.fetch_add(1, Ordering::SeqCst) + 1;
+                        peak.fetch_max(now, Ordering::SeqCst);
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                        active.fetch_sub(1, Ordering::SeqCst);
+                    }
+                },
+                {
+                    let active = Arc::clone(&active);
+                    let peak = Arc::clone(&peak);
+                    move || {
+                        let now = active.fetch_add(1, Ordering::SeqCst) + 1;
+                        peak.fetch_max(now, Ordering::SeqCst);
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                        active.fetch_sub(1, Ordering::SeqCst);
+                    }
+                },
+            );
+        });
+        assert_eq!(peak.load(Ordering::SeqCst), 2);
+    }
+}
+
 #[cfg(test)]
 mod missing_owner_tests {
     use super::*;
@@ -4843,6 +7331,42 @@ fn wrap<T>(x: T) -> T { return x }
 
 fn top() -> int { return wrap(7) }
 fn main() { let result = top() }
+global RESULT: int = top()
+"#;
+
+    const CENSUS_SRC: &str = r#"
+@inline
+fn straight(flag: bool) -> bool {
+    let unused = 99
+    return flag
+}
+
+@inline
+fn general(flag: bool) -> int {
+    if flag { return 1 }
+    return 2
+}
+
+fn top() -> int {
+    let flag = straight(true)
+    return general(flag)
+}
+
+fn main() { let result = top() }
+global RESULT: int = top()
+"#;
+
+    const CROSS_BLOCK_SRC: &str = r#"
+@inline
+fn identity(flag: bool) -> bool { return flag }
+
+fn run(select: bool) -> bool {
+    let value = identity(true)
+    if select { return value }
+    return value
+}
+
+fn main() { let result = run(true) }
 "#;
 
     const BOUNDED_SRC: &str = r#"
@@ -4873,6 +7397,40 @@ fn main() {
 }
 "#;
 
+    const CLOSURE_SRC: &str = r#"
+@inline
+fn bump(x: int) -> int { return x }
+
+fn top() -> int {
+    let counter = 100
+    let add = (n: int) => bump(n) + counter
+    return add(5)
+}
+
+fn main() { let result = top() }
+"#;
+
+    const SPECIALIZED_SRC: &str = r#"
+@inline
+fn bump(x: int) -> int { return x }
+
+fn generic<T>(x: T) -> int { return bump(1) }
+fn top() -> int { return generic(7) }
+fn main() { let result = top() }
+"#;
+
+    const SETUP_SRC: &str = r#"
+@nomangle inline(lua) fn publish(value: int) -> int = "return value"
+
+@shader(fragment)
+fn frag(tc: Vec2) -> Vec4 { return v(tc.x, 0.0, 0.0, 1.0) }
+
+fn main() {
+    let shader = rock_shader(frag)
+    let published = publish(7)
+}
+"#;
+
     static STDLIB: std::sync::LazyLock<Vec<skull_parser::Ast>> = std::sync::LazyLock::new(|| {
         rock_host::stdlib_loader::stdlib_files()
             .iter()
@@ -4883,6 +7441,8 @@ fn main() {
             .collect()
     });
 
+    static INLINE_OFF: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    static INLINE_CENSUS: std::sync::Mutex<()> = std::sync::Mutex::new(());
     #[allow(dead_code)]
     struct InlineOff(skull_transform::InlineOffGuard, skull_mir::ablation::Scope);
 
@@ -4892,12 +7452,109 @@ fn main() {
         }
     }
 
+    #[allow(dead_code)]
+    struct InlineOn(std::sync::MutexGuard<'static, ()>, Option<String>);
+
+    impl InlineOn {
+        fn on() -> Self {
+            let guard = INLINE_OFF.lock().unwrap_or_else(|e| e.into_inner());
+            let previous = std::env::var("SKULL_INLINE_OFF").ok();
+            unsafe { std::env::remove_var("SKULL_INLINE_OFF") };
+            skull_mir::ablation::clear();
+            skull_mir::ablation::set_enabled(false);
+            Self(guard, previous)
+        }
+    }
+
+    impl Drop for InlineOn {
+        fn drop(&mut self) {
+            skull_mir::ablation::clear();
+            match &self.1 {
+                Some(value) => unsafe { std::env::set_var("SKULL_INLINE_OFF", value) },
+                None => unsafe { std::env::remove_var("SKULL_INLINE_OFF") },
+            }
+        }
+    }
+
+    #[allow(dead_code)]
+    struct InlineCensusOn(std::sync::MutexGuard<'static, ()>, Option<String>);
+
+    impl InlineCensusOn {
+        fn on() -> Self {
+            let guard = INLINE_CENSUS.lock().unwrap_or_else(|e| e.into_inner());
+            let previous = std::env::var("ROCK_INLINE_CENSUS").ok();
+            unsafe { std::env::set_var("ROCK_INLINE_CENSUS", "1") };
+            Self(guard, previous)
+        }
+    }
+
+    impl Drop for InlineCensusOn {
+        fn drop(&mut self) {
+            match &self.1 {
+                Some(value) => unsafe { std::env::set_var("ROCK_INLINE_CENSUS", value) },
+                None => unsafe { std::env::remove_var("ROCK_INLINE_CENSUS") },
+            }
+        }
+    }
+
     fn workspace() -> Workspace {
         let mut modules = vec![
             skull_parser::parse_module_clean(SRC, Ustr::from("<missing-owner-test>"))
                 .expect("parse"),
         ];
         bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic")
+    }
+
+    fn census_workspace() -> Workspace {
+        let mut modules = vec![
+            skull_parser::parse_module_clean(CENSUS_SRC, Ustr::from("<inline-census-test>"))
+                .expect("parse"),
+        ];
+        bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic")
+    }
+
+    fn cross_block_workspace() -> Workspace {
+        let mut modules = vec![
+            skull_parser::parse_module_clean(CROSS_BLOCK_SRC, Ustr::from("<inline-cross-block-test>"))
+                .expect("parse"),
+        ];
+        bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic")
+    }
+
+    #[test]
+    fn global_init_target_rejects_an_unresolved_storage_plan() {
+        let mut modules = vec![
+            skull_parser::parse_module_clean(
+                "global G: int = 0\nfn main() {}",
+                Ustr::from("<global-plan-test>"),
+            )
+            .expect("parse"),
+        ];
+        let mut ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic");
+        let mid = ws
+            .modules
+            .iter()
+            .find(|module| module.id != ModuleId::builtin())
+            .expect("test module")
+            .id;
+        let gid = ws
+            .module(mid)
+            .globals
+            .iter()
+            .find(|(_, global)| global.name == Ustr::from("G"))
+            .map(|(gid, _)| gid)
+            .expect("global");
+        let ty = ws.module(mid).globals[gid].ty;
+        let bone_semantic::prelude::TyId::Static(_, idx) = ty else {
+            panic!("fixture global must have a static type id")
+        };
+        ws.module_mut(mid).globals[gid].ty = bone_semantic::prelude::TyId::Local(idx);
+        let scx = skull_mir::lower::ScalarCtx::new(&ws);
+        let cg = CodegenCtx::new(&ws);
+        let global = &ws.module(mid).globals[gid];
+        let err = global_init_target(&ws, &scx, &cg, global)
+            .expect_err("a missing global representation plan must reject");
+        assert!(err.message.contains("global type cannot be planned"), "{err}");
     }
 
     fn bounded_workspace() -> Workspace {
@@ -4916,6 +7573,46 @@ fn main() {
                 .expect("parse"),
         );
         bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic")
+    }
+
+    fn closure_workspace() -> Workspace {
+        let mut modules = STDLIB.clone();
+        modules.push(
+            skull_parser::parse_module_clean(CLOSURE_SRC, Ustr::from("<closure-test>"))
+                .expect("parse"),
+        );
+        bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic")
+    }
+
+    fn specialized_workspace() -> Workspace {
+        let mut modules = STDLIB.clone();
+        modules.push(
+            skull_parser::parse_module_clean(SPECIALIZED_SRC, Ustr::from("<specialized-test>"))
+                .expect("parse"),
+        );
+        bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic")
+    }
+
+    fn setup_workspace() -> Workspace {
+        let mut modules = STDLIB.clone();
+        modules.push(
+            skull_parser::parse_module_clean(SETUP_SRC, Ustr::from("<setup-lane-test>"))
+                .expect("parse"),
+        );
+        bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic")
+    }
+
+    #[test]
+    fn candidate_repair_reads_the_concrete_publisher_index() {
+        let (_, cache, _) = emit_with_mutation(BodyMutation::None).expect("intact emission");
+        let canonical = cache.concrete.candidate_keys_by_func();
+        let population: usize = canonical.values().map(|entries| entries.len()).sum();
+        assert!(population > 0, "candidate-index fixture has no published entries");
+        assert_eq!(
+            cache.candidate_index_by_func() as *const _,
+            canonical as *const _,
+            "repair must borrow the concrete publisher's index rather than a copied map"
+        );
     }
 
     fn ref_for(ws: &Workspace, name: &str) -> FuncRef {
@@ -5075,6 +7772,881 @@ fn main() {
         assert!(
             err.message.contains("concrete ABI plan is missing for callee `next`"),
             "the missing iterator bound plan must fail at its production consumer, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn full_emission_deduplicates_abi_plan_derivations() {
+        // Its own fixture: `helper` must be CALLED from more than one site, or
+        // the callee question is asked once and a zero hit count cannot
+        // distinguish "no duplicates" from "memo not consulted".
+        const DEDUP_SRC: &str = r#"
+fn helper(x: int) -> int { return x }
+fn first() -> int { return helper(1) }
+fn second() -> int { return helper(2) }
+fn main() { let result = first() }
+"#;
+        let mut modules = vec![
+            skull_parser::parse_module_clean(DEDUP_SRC, Ustr::from("<abi-dedup-test>"))
+                .expect("parse"),
+        ];
+        let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic");
+        let mid =
+            ws.modules.iter().find(|m| m.id != ModuleId::builtin()).expect("test module").id;
+        let (emit, cache) = emit_full_in_with_test_mutation(&ws, mid, BodyMutation::None)
+            .expect("intact emission");
+        let stats = cache.scx.abi_plan_stats();
+        let (hits, misses) = (stats.hits(), stats.requests() - stats.hits());
+        assert!(misses > 0, "no ABI-plan question consulted the memo (hits={hits})");
+        assert!(
+            hits > 0,
+            "three helper call sites repeat the callee question; zero hits means the \
+             production path is not consulting the memo (misses={misses})"
+        );
+        assert!(
+            stats.stores > 0 && stats.unique_keys > 0,
+            "derivations must commit to the table: {stats:?}"
+        );
+        assert!(
+            stats.shared_lookups > 0,
+            "the production population must reach the shared ABI table: {stats:?}"
+        );
+        assert_eq!(
+            stats.shared_lookups,
+            stats.shared_hits + stats.shared_misses,
+            "shared lookup accounting lost a route: {stats:?}"
+        );
+        assert!(
+            stats.published_hits > 0,
+            "the production consumers must reach the immutable published plan table: {stats:?}"
+        );
+        assert_eq!(
+            stats.published_misses, 0,
+            "a published-table miss would fall back to the old shared route: {stats:?}"
+        );
+        assert_eq!(
+            stats.plan_clones, 0,
+            "cached plan consumers must share immutable handles rather than clone plans: {stats:?}"
+        );
+        assert_eq!(
+            stats.cloned_param_slots, 0,
+            "cached plan consumers must not clone parameter-slot vectors: {stats:?}"
+        );
+        assert!(
+            stats.plan_size_samples() > 0
+                && stats.plan_size_p50() <= stats.plan_size_p95()
+                && stats.plan_size_p95() <= stats.plan_size_max,
+            "plan-size census must have a nonzero, ordered population: {stats:?}"
+        );
+        assert_eq!(
+            emit.abi_plan_stats, stats,
+            "the reported stats must be the context's own counters"
+        );
+    }
+
+    #[test]
+    fn concrete_result_order_preserves_emitted_lua_bytes() {
+        let _inline = InlineOn::on();
+        let ws = workspace();
+        let mid = ws
+            .modules
+            .iter()
+            .find(|module| module.id != ModuleId::builtin())
+            .expect("test module")
+            .id;
+        let (canonical, _) = emit_full_in_with_test_mutation(
+            &ws,
+            mid,
+            BodyMutation::ConcreteResultOrder(
+                skull_graph::concrete_body::BuildResultOrder::Canonical,
+            ),
+        )
+        .expect("canonical emission");
+        let (reverse, _) = emit_full_in_with_test_mutation(
+            &ws,
+            mid,
+            BodyMutation::ConcreteResultOrder(
+                skull_graph::concrete_body::BuildResultOrder::Reverse,
+            ),
+        )
+        .expect("reverse emission");
+        assert!(!canonical.lua.is_empty(), "fixture emitted no Lua artifact");
+        assert_eq!(canonical.lua, reverse.lua);
+        assert_eq!(canonical.skipped, reverse.skipped);
+    }
+
+    #[test]
+    fn abi_plan_publication_witness_catches_a_bypassed_publish() {
+        let mut modules = vec![
+            skull_parser::parse_module_clean(
+                "fn helper(x: int) -> int { return x }\nfn main() { let result = helper(1) }",
+                Ustr::from("<abi-publish-bypass-test>"),
+            )
+            .expect("parse"),
+        ];
+        let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic");
+        let mid = ws
+            .modules
+            .iter()
+            .find(|m| m.id != ModuleId::builtin())
+            .expect("test module")
+            .id;
+        let (_, cache) = emit_full_in_with_test_mutation(&ws, mid, BodyMutation::SkipAbiPlanPublish)
+            .expect("the bypass must still take the fallback path");
+        let stats = cache.scx.abi_plan_stats();
+        let witness = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            assert!(
+                stats.published_hits > 0,
+                "the publication witness must fail when the publish step is bypassed: {stats:?}"
+            );
+        }));
+        assert!(witness.is_err(), "the publication witness did not see its bypass: {stats:?}");
+    }
+
+    #[test]
+    fn full_emission_reports_pre_assembly_setup_work() {
+        let (_, _, emit) = emit_with_mutation(BodyMutation::None).expect("intact emission");
+        let setup = emit
+            .phases
+            .iter()
+            .filter(|(name, _)| name.starts_with("setup: "))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            setup.iter().map(|(name, _)| *name).collect::<Vec<_>>(),
+            [
+                "setup: validation+context",
+                "setup: root collection",
+                "setup: graph",
+            "setup: concrete plans",
+            "setup: artifact+shader+ABI lanes",
+            "setup: ABI validation",
+            "setup: inline candidate table",
+            ]
+        );
+        assert!(setup.iter().all(|(_, duration)| *duration > Duration::ZERO));
+        // The joined group's children report under their own prefix so no
+        // consumer can sum them into the sequential setup rows.
+        let join = emit
+            .phases
+            .iter()
+            .filter(|(name, _)| name.starts_with("join: "))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            join.iter().map(|(name, _)| *name).collect::<Vec<_>>(),
+            [
+                "join: cpu artifact branch",
+                "join: shader view branch",
+                "join: ABI plan warm branch"
+            ]
+        );
+        assert!(join.iter().all(|(_, duration)| *duration > Duration::ZERO));
+    }
+
+    #[test]
+    fn body_attribution_reports_nonzero_work_and_distribution() {
+        let _inline = InlineOn::on();
+        let (_, _, emit) = emit_with_mutation(BodyMutation::None).expect("intact emission");
+        let attribution = &emit.attribution;
+        assert!(attribution.bodies_examined > 0, "no emitted bodies were examined: {attribution:?}");
+        assert!(
+            attribution.lower.bodies_with_work > 0
+                && attribution.lower.instructions_visited > 0,
+            "lowering attribution has no production population: {attribution:?}"
+        );
+        assert!(
+            attribution.inline.accepted_splices > 0
+                && attribution.inline.copied_instructions > 0
+                && attribution.inline.borrowed_block_scans > 0
+                && attribution.inline.instructions_scanned > 0
+                && !attribution.inline.top_owners.is_empty(),
+            "inline attribution has no accepted splice population: {attribution:?}"
+        );
+        assert!(
+            attribution.lower.p50_us > 0
+                && attribution.lower.p50_us <= attribution.lower.p95_us
+                && attribution.lower.p95_us <= attribution.lower.max_us,
+            "lowering duration distribution is empty or unordered: {attribution:?}"
+        );
+        assert!(
+            attribution.lower.concrete_mono_requests > 0
+                && attribution.lower.concrete_mono_derivations > 0
+                && attribution.lower.concrete_mono_requests
+                    == attribution.lower.concrete_mono_cache_hits
+                        + attribution.lower.concrete_mono_derivations
+                && attribution.lower.concrete_mono_unique_ids
+                    == attribution.lower.concrete_mono_derivations
+                && attribution.lower.concrete_mono_cache_hits > 0
+                && attribution.lower.concrete_mono_cache_insertion_cloned_nodes == 0
+                && attribution.lower.concrete_mono_cache_hit_cloned_nodes == 0
+                && attribution.lower.concrete_mono_cloned_nodes
+                    == attribution.lower.concrete_mono_interner_miss_cloned_nodes
+                        + attribution.lower.concrete_mono_cache_insertion_cloned_nodes
+                        + attribution.lower.concrete_mono_cache_hit_cloned_nodes
+                        + attribution
+                            .lower
+                            .concrete_mono_explicit_owned_escape_cloned_nodes
+                && attribution.lower.concrete_mono_explicit_owned_escapes > 0
+                && attribution.lower.concrete_mono_cache_hit_cloned_nodes == 0
+                && attribution.lower.concrete_mono_cache_insertion_cloned_nodes == 0
+                && attribution.lower.concrete_mono_shared_handle_requests
+                    == attribution.lower.concrete_mono_requests
+                && attribution
+                    .lower
+                    .concrete_mono_by_consumer
+                    .iter()
+                    .map(|stats| stats.requests)
+                    .sum::<usize>()
+                    == attribution.lower.concrete_mono_requests
+                && attribution
+                    .lower
+                    .concrete_mono_by_consumer
+                    .iter()
+                    .map(|stats| stats.cloned_nodes)
+                    .sum::<usize>()
+                    == attribution.lower.concrete_mono_cloned_nodes
+                && attribution.lower.mir_instruction_allocations > 0
+                && attribution.lower.mir_instruction_capacity >= attribution.lower.instructions_visited,
+            "lowerer ownership census has no production population: {attribution:?}"
+        );
+        let consumers = &attribution.lower.concrete_mono_by_consumer;
+        assert!(
+            consumers[skull_mir::lower::ConcreteMonoConsumer::CallParameter as usize].requests > 0
+                && consumers[skull_mir::lower::ConcreteMonoConsumer::CallParameter as usize]
+                    .explicit_owned_escapes
+                    == 0
+                && consumers[skull_mir::lower::ConcreteMonoConsumer::GlobalPlan as usize]
+                    .explicit_owned_escapes
+                    > 0
+                && consumers[skull_mir::lower::ConcreteMonoConsumer::Dispatch as usize].requests
+                    > 0,
+            "named lowerer consumer ownership routes are misclassified: {attribution:?}"
+        );
+        if std::env::var("ROCK_LOWER_CENSUS").is_ok_and(|value| value == "1") {
+            assert!(
+                attribution.lower.concrete_mono_timed_requests > 0
+                    && attribution.lower.concrete_mono_lookup_ns > 0
+                    && attribution.lower.concrete_mono_clone_self_ns > 0,
+                "opt-in lowerer timing has no measured population: {attribution:?}"
+            );
+            let reallocations = attribution.lower.mir_instruction_reallocations
+                + attribution.lower.mir_cell_reallocations
+                + attribution.lower.mir_block_reallocations;
+            let reallocation_ns = attribution.lower.mir_instruction_reallocation_ns
+                + attribution.lower.mir_cell_reallocation_ns
+                + attribution.lower.mir_block_reallocation_ns;
+            assert!(
+                reallocations > 0 && reallocation_ns > 0,
+                "opt-in MIR growth timing has no measured population: {attribution:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn inline_census_has_a_nonzero_production_population() {
+        let _inline = InlineOn::on();
+        let _census = InlineCensusOn::on();
+        let ws = census_workspace();
+        let mid = *ws
+            .module_ids
+            .get(&Ustr::from("<inline-census-test>"))
+            .expect("census test module");
+        let (emit, _) = emit_full_in_with_test_mutation(&ws, mid, BodyMutation::None)
+            .expect("intact emission");
+        let census = &emit.attribution.inline.census;
+        assert!(
+            census.candidate_requests > 0
+                && census.candidate_requests
+                    == census.candidate_cache_hits + census.candidate_derivations,
+            "candidate requests must partition into hits and derivations: {census:?}"
+        );
+        assert_eq!(
+            census.candidate_derivations,
+            census.candidate_keys.len(),
+            "each derivation must publish one measured instance key: {census:?}"
+        );
+        assert_eq!(
+            census.candidate_derivations,
+            census.candidate_worker_derivations.values().sum(),
+            "worker derivations must cover the global derivation population: {census:?}"
+        );
+        assert!(
+            emit.attribution.inline.candidate_unique_keys > 0
+                && census.candidate_requested_keys.len() >= emit.attribution.inline.candidate_unique_keys
+                && census.candidate_derivations == 0
+                && emit.attribution.inline.candidate_setup_keys > 0
+                && emit.attribution.inline.candidate_setup_warmed > 0,
+            "the published candidate table must serve a nonzero requested population: {census:?}"
+        );
+        assert_eq!(
+            emit.attribution.inline.candidate_setup_warmed,
+            emit.attribution.inline.candidate_setup_eligible
+                + emit.attribution.inline.candidate_setup_rejected,
+            "candidate table warm results must partition into eligible and rejected keys"
+        );
+        assert!(
+            emit.attribution.inline.candidate_setup_keys
+                >= emit.attribution.inline.candidate_unique_keys,
+            "the candidate table cannot be smaller than its requested-key population"
+        );
+        assert!(
+            census.straight_accepted > 0 && census.general_accepted > 0,
+            "both splice shapes must reach production: {census:?}"
+        );
+        assert!(
+            census.substitution_invocations == 0
+                && census.substitution_instructions_inspected == 0
+                && census.substitution_terminators_inspected == 0
+                && census.substitution_replacements == 0,
+            "straight-result binding must remove the whole-caller substitution route: {census:?}"
+        );
+        assert_eq!(
+            census.clone.source_instructions,
+            census.clone.live_instructions + census.clone.dead_instructions,
+            "instruction clone census must conserve source entries: {census:?}"
+        );
+        assert_eq!(
+            census.clone.source_cells,
+            census.clone.live_cells + census.clone.dead_cells,
+            "cell clone census must conserve source entries: {census:?}"
+        );
+        assert_eq!(
+            census.clone.source_blocks,
+            census.clone.live_blocks + census.clone.dead_blocks,
+            "block clone census must conserve source entries: {census:?}"
+        );
+        assert!(
+            emit.attribution.inline.cleanup_live_before > 0
+                && emit.attribution.inline.cleanup_live_after > 0
+                && emit.attribution.inline.cleanup_live_after
+                    <= emit.attribution.inline.cleanup_live_before,
+            "cleanup census must expose a nonzero live population and cannot grow it: {:?}",
+            emit.attribution.inline
+        );
+        assert!(
+            census.clone.cloned_instructions <= census.clone.source_instructions
+                && census.clone.cloned_cells <= census.clone.source_cells
+                && census.clone.cloned_blocks <= census.clone.source_blocks,
+            "cloning may not exceed the measured source population: {census:?}"
+        );
+        assert_eq!(
+            census.clone.inst_remap_entries,
+            census.clone.live_instructions,
+            "every live instruction and no dead instruction must enter the remap: {census:?}"
+        );
+        assert_eq!(
+            census.clone.cell_remap_entries,
+            census.clone.live_cells,
+            "every live cell and no dead cell must enter the remap: {census:?}"
+        );
+        assert_eq!(
+            census.clone.block_remap_entries,
+            census.clone.cloned_blocks,
+            "only cloned live blocks may enter the remap: {census:?}"
+        );
+        assert!(
+            census.clone.dead_instructions > 0,
+            "the census fixture must expose a dead template instruction: {census:?}"
+        );
+        assert_eq!(
+            census.clone.dead_cloned_instructions
+                + census.clone.dead_cloned_cells
+                + census.clone.dead_cloned_blocks,
+            0,
+            "the live template must not clone dead arena entries: {census:?}"
+        );
+        assert!(
+            census.clone.inst_remap_capacity > 0
+                && census.clone.cell_remap_capacity > 0
+                && census.clone.block_remap_capacity > 0,
+            "exact template populations must reach clone-map reservation: {census:?}"
+        );
+        assert!(
+            census.clone.caller_reserved_instructions > 0
+                && census.clone.caller_reserved_cells > 0
+                && census.clone.caller_reserved_blocks > 0,
+            "exact template populations must reach caller arena reservation: {census:?}"
+        );
+        macro_rules! side_bounds {
+            ($field:ident) => {
+                assert!(
+                    census.clone.side_tables.$field.examined
+                        <= census.clone.side_tables.$field.source_rows
+                        && census.clone.side_tables.$field.copied
+                            <= census.clone.side_tables.$field.examined,
+                    "side-table census is not bounded for {}: {:?}",
+                    stringify!($field),
+                    census
+                );
+            };
+        }
+        side_bounds!(spec_bindings);
+        side_bounds!(callee_instances);
+        side_bounds!(abi_plans);
+        side_bounds!(representation_plans);
+        side_bounds!(closure_environment_plans);
+        side_bounds!(raw_bound_trees);
+        side_bounds!(resolved_bound_trees);
+        side_bounds!(function_value_symbols);
+        side_bounds!(instruction_spans);
+        side_bounds!(call_sites);
+        side_bounds!(call_site_owners);
+        side_bounds!(iterator_headers);
+    }
+
+    #[test]
+    fn inline_population_census_proves_each_lowering_route_and_conserves_keys() {
+        let _inline = InlineOn::on();
+        let _census = InlineCensusOn::on();
+        let ws = census_workspace();
+        let mid = *ws
+            .module_ids
+            .get(&Ustr::from("<inline-census-test>"))
+            .expect("census test module");
+        let (emit, _) = emit_full_in_with_test_mutation(&ws, mid, BodyMutation::None)
+            .expect("intact emission");
+        let population = &emit.attribution.inline.population;
+        assert!(
+            population.candidate_published_keys > 0
+                && population.candidate_lower_attempted > 0
+                && population.candidate_lowered_keys > 0
+                && population.candidate_eligible_keys > 0
+                && population.candidate_rejected_before_lower > 0
+                && population.ordinary_consumer_keys > 0
+                && population.always_lowered_units > 0
+                && population.candidate_ordinary_consumer_overlap > 0
+                && population.ordinary_canonical_reuse_keys
+                    == population.candidate_ordinary_consumer_overlap
+                && population.ordinary_canonical_miss_keys == 0
+                && population.candidate_requested_unique_keys > 0
+                && population.candidate_spliced_unique_keys > 0
+                && population.candidate_requested_never_spliced > 0,
+            "the production route fixture has no required population: {population:?}"
+        );
+        assert_eq!(
+            emit.attribution.inline.candidate_setup_warmed,
+            population.candidate_lower_attempted + population.candidate_rejected_before_lower,
+            "candidate warm keys must partition into lower attempts and early rejections: {population:?}"
+        );
+        assert_eq!(
+            population.candidate_lower_attempted,
+            population.candidate_lowered_keys + population.candidate_lower_failed,
+            "lower attempts must partition into successful lowers and lower failures: {population:?}"
+        );
+        assert_eq!(
+            population.candidate_lowered_keys,
+            population.candidate_eligible_keys + population.candidate_rejected_after_lower,
+            "successful lowers must partition into eligible and post-lowering rejections: {population:?}"
+        );
+        assert!(
+            population.candidate_lower_attempted >= population.candidate_lowered_keys
+                && population.candidate_raw_instructions > 0
+                && population.candidate_raw_cells > 0
+                && population.candidate_raw_blocks > 0
+                && population.candidate_cleaned_instructions > 0
+                && population.candidate_cleaned_cells > 0
+                && population.candidate_cleaned_blocks > 0
+                && population.candidate_full_clone_ns > 0
+                && population.candidate_compact_ns > 0
+                && population.candidate_full_clone_capacity.0 > 0
+                && population.candidate_full_clone_capacity.1 > 0
+                && population.candidate_full_clone_capacity.2 > 0
+                && population.candidate_compact_capacity.0 > 0
+                && population.candidate_compact_capacity.1 > 0
+                && population.candidate_compact_capacity.2 > 0
+                && population.ordinary_lowering_derivations
+                    >= population.ordinary_lowered_keys
+                && population.specialized_lowering_derivations
+                    >= population.specialized_lowered_keys
+                && population.keys_lowered_more_than_once == 0
+                && population.first_lower_ns > 0
+                && population.duplicate_lower_ns == 0
+                && population.canonical_clone_derivations > 0
+                && emit.attribution.inline.census.splice_ns > 0,
+            "lowering overlap census has no measured duplicate population: {population:?}"
+        );
+        assert_eq!(
+            population.candidate_published_keys,
+            population.candidate_requested_unique_keys
+                + population.candidate_published_never_requested,
+            "published keys must partition into requested and never-requested keys: {population:?}"
+        );
+        assert_eq!(
+            population.candidate_requested_unique_keys,
+            population.candidate_spliced_unique_keys
+                + population.candidate_requested_never_spliced,
+            "requested keys must partition into spliced and unspliced keys: {population:?}"
+        );
+        assert_eq!(
+            population.candidate_requested_not_published,
+            0,
+            "a production inline lookup must use the published candidate table: {population:?}"
+        );
+
+        let specialized = specialized_workspace();
+        let specialized_mid = *specialized
+            .module_ids
+            .get(&Ustr::from("<specialized-test>"))
+            .expect("specialized test module");
+        let (specialized_emit, _) =
+            emit_full_in_with_test_mutation(&specialized, specialized_mid, BodyMutation::None)
+                .expect("specialized emission");
+        let specialized_population = &specialized_emit.attribution.inline.population;
+        assert!(
+            specialized_population.specialized_consumer_keys > 0
+                && specialized_population.specialized_canonical_reuse_keys
+                    == specialized_population.candidate_specialized_consumer_overlap
+                && specialized_population.specialized_canonical_miss_keys == 0,
+            "the specialized production route was not censused: {specialized_population:?}"
+        );
+    }
+
+    #[test]
+    fn canonical_profiles_survive_fresh_incremental_overlay_and_sequential_reuse() {
+        let _inline = InlineOn::on();
+        let _census = InlineCensusOn::on();
+        let parse = |source: &str| {
+            skull_parser::parse_module_clean(
+                source,
+                Ustr::from("<inline-census-incremental-test>"),
+            )
+            .expect("parse")
+        };
+        let v1 = CENSUS_SRC;
+        let v2 = CENSUS_SRC.replace("return flag", "return false");
+        let mut modules = vec![parse(v1)];
+        let ws1 = bone_semantic::semantic_passes::semantic_pass(&mut modules)
+            .expect("semantic v1");
+        let mid1 = *ws1
+            .module_ids
+            .get(&Ustr::from("<inline-census-incremental-test>"))
+            .expect("module v1");
+        let (full1, mut cache) = emit_full(&ws1, mid1).expect("full v1");
+        assert!(
+            full1.attribution.inline.population.canonical_clone_derivations > 0,
+            "fresh build did not use canonical consumers: {:?}",
+            full1.attribution.inline.population
+        );
+
+        let mut modules = vec![parse(&v2)];
+        let ws2 = bone_semantic::semantic_passes::semantic_pass(&mut modules)
+            .expect("semantic v2");
+        let mid2 = *ws2
+            .module_ids
+            .get(&Ustr::from("<inline-census-incremental-test>"))
+            .expect("module v2");
+        let straight = ref_for(&ws2, "straight");
+        let reinferred = vec![(straight.module, BodyOwner::Function(straight.func))];
+        let incremental = emit_incremental(&ws2, &mut cache, &reinferred)
+            .expect("incremental canonical reuse");
+        let fresh = emit_full(&ws2, mid2).expect("fresh v2").0;
+        assert_eq!(incremental.lua, fresh.lua, "incremental output drifted from fresh output");
+        assert!(
+            incremental.attribution.inline.candidate_setup_reused > 0
+                && incremental.attribution.inline.population.ordinary_canonical_miss_keys == 0
+                && incremental.attribution.inline.population.specialized_canonical_miss_keys == 0,
+            "incremental build did not preserve the canonical contract: {:?}",
+            incremental.attribution.inline.population
+        );
+
+        let v3 = v2.replace("return 2", "return 3");
+        let mut modules = vec![parse(&v3)];
+        let ws3 = bone_semantic::semantic_passes::semantic_pass(&mut modules)
+            .expect("semantic v3");
+        let mid3 = *ws3
+            .module_ids
+            .get(&Ustr::from("<inline-census-incremental-test>"))
+            .expect("module v3");
+        let general = ref_for(&ws3, "general");
+        let sequential = emit_incremental(
+            &ws3,
+            &mut cache,
+            &[(general.module, BodyOwner::Function(general.func))],
+        )
+        .expect("sequential canonical reuse");
+        let fresh3 = emit_full(&ws3, mid3).expect("fresh v3").0;
+        assert_eq!(sequential.lua, fresh3.lua, "sequential incremental output drifted");
+        assert_eq!(
+            sequential.attribution.inline.population.ordinary_canonical_miss_keys,
+            0,
+            "sequential incremental path lost the canonical contract"
+        );
+
+        let mut modules = vec![parse(v1)];
+        let ws_overlay_base = bone_semantic::semantic_passes::semantic_pass(&mut modules)
+            .expect("semantic overlay base");
+        let mid_overlay = *ws_overlay_base
+            .module_ids
+            .get(&Ustr::from("<inline-census-incremental-test>"))
+            .expect("module overlay base");
+        let (_full_overlay, mut overlay_cache) =
+            emit_full(&ws_overlay_base, mid_overlay).expect("full overlay base");
+        let overlay = emit_overlay(&ws2, &mut overlay_cache, &reinferred)
+            .expect("overlay canonical reuse");
+        assert!(!overlay.lua.is_empty(), "overlay must emit the changed route");
+        let table = overlay_cache
+            .inline_cache
+            .candidate_table()
+            .expect("overlay candidate table");
+        assert_eq!(
+            table.stats().profiles.len(),
+            table.stats().keys,
+            "overlay publication must profile every published key"
+        );
+        assert!(
+            table.stats().reused > 0,
+            "overlay must reuse unaffected canonical profiles"
+        );
+    }
+
+    #[test]
+    fn straight_cross_block_results_use_a_targeted_binding() {
+        let _inline = InlineOn::on();
+        let _census = InlineCensusOn::on();
+        let ws = cross_block_workspace();
+        let mid = *ws
+            .module_ids
+            .get(&Ustr::from("<inline-cross-block-test>"))
+            .expect("cross-block test module");
+        let (emit, _) = emit_full_in_with_test_mutation(&ws, mid, BodyMutation::None)
+            .expect("cross-block emission");
+        assert!(
+            !emit.lua.contains("identity("),
+            "the straight callee must still inline in the cross-block fixture"
+        );
+        assert_eq!(
+            emit.attribution.inline.census.substitution_invocations,
+            0,
+            "straight result binding must not scan the caller arena: {:?}",
+            emit.attribution.inline.census
+        );
+    }
+
+    #[test]
+    fn body_attribution_reports_transform_populations() {
+        let _inline = InlineOn::on();
+        let bounded = bounded_workspace();
+        let bounded_mid = *bounded
+            .module_ids
+            .get(&Ustr::from("<bound-plan-test>"))
+            .expect("bounded test module");
+        let (bounded_emit, _) =
+            emit_full_in_with_test_mutation(&bounded, bounded_mid, BodyMutation::None)
+                .expect("bounded emission");
+        assert!(
+            bounded_emit.attribution.counted_loop.bodies_with_work > 0,
+            "counted-loop recovery did not report a rewritten body: {:?}",
+            bounded_emit.attribution
+        );
+        assert!(
+            bounded_emit.attribution.lower.abi_param_shared_views > 0,
+            "lowerer did not exercise the shared ABI parameter view: {:?}",
+            bounded_emit.attribution
+        );
+        assert!(
+            bounded_emit.attribution.inline.bounded_splices > 0,
+            "bounded fixture did not reach the bounded inline route: {:?}",
+            bounded_emit.attribution.inline
+        );
+
+        let closure = closure_workspace();
+        let closure_mid = *closure
+            .module_ids
+            .get(&Ustr::from("<closure-test>"))
+            .expect("closure test module");
+        let (closure_emit, _) =
+            emit_full_in_with_test_mutation(&closure, closure_mid, BodyMutation::None)
+                .expect("closure emission");
+        assert!(
+            closure_emit.attribution.closure.bodies_with_work > 0,
+            "closure conversion did not report a hoisted body: {:?}",
+            closure_emit.attribution
+        );
+        assert!(
+            closure_emit.attribution.inline.hoisted_splices > 0,
+            "the closure fixture did not reach the hoisted inline route: {:?}",
+            closure_emit.attribution
+        );
+
+        let specialized = specialized_workspace();
+        let specialized_mid = *specialized
+            .module_ids
+            .get(&Ustr::from("<specialized-test>"))
+            .expect("specialized test module");
+        let (specialized_emit, _) =
+            emit_full_in_with_test_mutation(&specialized, specialized_mid, BodyMutation::None)
+                .expect("specialized emission");
+        assert!(
+            specialized_emit.attribution.inline.specialized_splices > 0,
+            "the specialized fixture did not reach specialized inline splicing: {:?}",
+            specialized_emit.attribution
+        );
+
+    }
+
+    #[test]
+    fn body_attribution_includes_explicit_nested_lowering() {
+        const NESTED_SRC: &str = r#"
+fn outer(x: int) -> int {
+    fn inner(y: int) -> int { return y }
+    return inner(x)
+}
+fn main() { let result = outer(1) }
+"#;
+        let mut modules = vec![
+            skull_parser::parse_module_clean(NESTED_SRC, Ustr::from("<nested-lower-test>")).expect("parse"),
+        ];
+        let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic");
+        let mid = ws
+            .modules
+            .iter()
+            .find(|m| m.id != ModuleId::builtin())
+            .expect("test module")
+            .id;
+        let (emit, _) = emit_full_in_with_test_mutation(&ws, mid, BodyMutation::None)
+            .expect("nested emission");
+        assert!(
+            emit.attribution.lower.mir_instruction_allocations
+                > emit.attribution.lower.instructions_visited,
+            "nested lowering was omitted from the arena census: {:?}",
+            emit.attribution
+        );
+    }
+
+    #[cfg(not(feature = "sequential"))]
+    #[test]
+    fn setup_lanes_use_deterministic_overlap_handshake() {
+        let _inline = InlineOn::on();
+        let ws = setup_workspace();
+        let mid = *ws
+            .module_ids
+            .get(&Ustr::from("<setup-lane-test>"))
+            .expect("setup test module");
+        let (emit, cache) = emit_full_in_with_test_mutation(
+            &ws,
+            mid,
+            BodyMutation::SetupLaneSchedule(SetupLaneSchedule::Handshake),
+        )
+        .expect("setup lane emission");
+        let lanes = emit.setup_lanes;
+        assert!(
+            lanes.cpu_population > 0 && lanes.shader_population > 0 && lanes.abi_population > 0,
+            "each setup lane must have a real population: {lanes:?}"
+        );
+        assert_eq!(
+            lanes.setup_handshake_entered, 2,
+            "CPU and shader lanes must both reach the handshake: {lanes:?}"
+        );
+        assert_eq!(
+            lanes.setup_handshake_released, 2,
+            "both handshake lanes must be released: {lanes:?}"
+        );
+        assert!(
+            lanes.setup_handshake_released_after_both,
+            "handshake must release only after both lanes enter: {lanes:?}"
+        );
+        assert!(
+            lanes.mono_intern_new_during_join > 0,
+            "the overlap fixture must allocate new shared identity: {lanes:?}"
+        );
+        assert!(!cache.lua_view().publisher_lanes.is_empty());
+        assert!(!cache.shader_view().roots.is_empty());
+    }
+
+    #[cfg(feature = "sequential")]
+    #[test]
+    fn setup_lanes_keep_the_sequential_control() {
+        let _inline = InlineOn::on();
+        let ws = setup_workspace();
+        let mid = *ws
+            .module_ids
+            .get(&Ustr::from("<setup-lane-test>"))
+            .expect("setup test module");
+        let (emit, _) = emit_full_in_with_test_mutation(&ws, mid, BodyMutation::None)
+            .expect("setup lane emission");
+        let lanes = emit.setup_lanes;
+        assert!(
+            lanes.cpu_population > 0 && lanes.shader_population > 0 && lanes.abi_population > 0,
+            "each setup lane must have a real population: {lanes:?}"
+        );
+        assert_eq!(lanes.setup_handshake_entered, 0, "sequential setup used the parallel handshake");
+        assert_eq!(lanes.setup_handshake_released, 0, "sequential setup released a handshake");
+        assert!(!lanes.setup_handshake_released_after_both);
+    }
+
+    #[cfg(not(feature = "sequential"))]
+    #[test]
+    fn setup_lanes_preserve_identity_under_reversed_scheduling() {
+        let _inline = InlineOn::on();
+        let ws = setup_workspace();
+        let mid = *ws
+            .module_ids
+            .get(&Ustr::from("<setup-lane-test>"))
+            .expect("setup test module");
+        let emit = |schedule| {
+            emit_full_in_with_test_mutation(
+                &ws,
+                mid,
+                BodyMutation::SetupLaneSchedule(schedule),
+            )
+            .expect("setup lane emission")
+        };
+        let (cpu_first, cpu_cache) = emit(SetupLaneSchedule::CpuFirst);
+        let (abi_first, abi_cache) = emit(SetupLaneSchedule::AbiFirst);
+
+        for (name, emit, cache, expected_first) in [
+            (
+                "CPU-first",
+                &cpu_first,
+                &cpu_cache,
+                SetupLaneKind::CpuArtifact,
+            ),
+            ("ABI-first", &abi_first, &abi_cache, SetupLaneKind::AbiWarm),
+        ] {
+            assert!(
+                emit.setup_lanes.cpu_population > 0
+                    && emit.setup_lanes.shader_population > 0
+                    && emit.setup_lanes.abi_population > 0,
+                "{name} schedule must exercise every setup lane: {:?}",
+                emit.setup_lanes
+            );
+            assert_eq!(
+                emit.setup_lanes.first_started_lane,
+                Some(expected_first),
+                "{name} schedule did not force the requested first lane: {:?}",
+                emit.setup_lanes
+            );
+            assert!(
+                emit.setup_lanes.mono_write_acqs_during_join > 0
+                    && emit.setup_lanes.mono_intern_attempts_during_join > 0
+                    && emit.setup_lanes.mono_intern_new_during_join > 0,
+                "{name} fixture must expose the shared interner write population: {:?}",
+                emit.setup_lanes
+            );
+            assert!(
+                cache.lua_view().publisher_lanes.len() > 0,
+                "{name} fixture must publish a concrete foreign body: {:?}",
+                cache.lua_view().census()
+            );
+            assert!(
+                cache.shader_view().roots.len() > 0,
+                "{name} fixture must retain a shader root: {:?}",
+                cache.shader_view().roots.len()
+            );
+        }
+
+        assert_eq!(
+            cpu_first.lua, abi_first.lua,
+            "reversing setup scheduling changed the Lua artifact"
+        );
+        assert_eq!(
+            cpu_cache.lua_view().publisher_lanes,
+            abi_cache.lua_view().publisher_lanes,
+            "reversing setup scheduling changed publisher ABI identity"
+        );
+        assert_eq!(
+            cpu_cache.shader_registration_contracts(),
+            abi_cache.shader_registration_contracts(),
+            "reversing setup scheduling changed shader ABI identity"
         );
     }
 }

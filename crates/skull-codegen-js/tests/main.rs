@@ -4,6 +4,8 @@
 
 mod common;
 
+#[path = "abi_plan_memo.rs"]
+mod abi_plan_memo;
 #[path = "backend_externs.rs"]
 mod backend_externs;
 #[path = "bounded_standalone_emission.rs"]

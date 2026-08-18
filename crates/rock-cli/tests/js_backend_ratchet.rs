@@ -150,7 +150,7 @@ fn js_runnable_coverage_ratchet() {
     // tests/js_format_specs.rock -> 212 (full-suite 3075 -> 3190; the
     // __rock_fmt_* / Format / FormatDyn buckets collapsed). T8d misc intrinsics
     // (tuple_first/tuple_second -> 0-based array projection, __range -> a
-    // Vec-shaped runtime object, is_release_mode -> false) added
+    // Vec-shaped runtime object) added
     // tests/js_misc_intrinsics.rock -> 217 (full-suite 3190 -> 3209). T8d
     // try_call (`__try_call`: try/catch over __rock_call) + the checked-index
     // side-effect fix (an unused Vec/NativeBuffer OOB read is emitted, not
@@ -247,7 +247,10 @@ fn js_runnable_coverage_ratchet() {
     // dispatch (logical reflection over flat `embed` storage, plus the value-struct
     // `: ` tier) adds tests/embed_reflection.rock's 8, and lets one previously
     // physical-shaped render in the existing corpus pass -> 369.
-    const FLOOR: usize = 369;
+    // Deleting Rock's compile-mode `--release` retired the corpus's
+    // `is_release_mode` test -> 368. This is the one direction the floor may
+    // move down: a test removed with the feature it covered.
+    const FLOOR: usize = 368;
     assert!(
         summary.tests_passed >= FLOOR,
         "JS-runnable coverage regressed: {} passed < floor {}. Skip histogram:\n{}",

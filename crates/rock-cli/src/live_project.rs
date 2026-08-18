@@ -10,6 +10,7 @@ pub enum LiveUpdate {
     NoChange,
     BodyOnly {
         reinferred: Vec<(ModuleId, BodyOwner)>,
+        span_edits: Vec<skull::instance_graph::SpanEdit>,
         cook_ms: f64,
     },
     Full {
@@ -42,9 +43,14 @@ impl LiveProject {
         };
         let entry_path = entry_path(&sources)?;
         let files = source_pairs(&sources);
-        let session = crate::bone_backend::bone_session(files).map_err(|e| {
-            anyhow::anyhow!("{}", crate::skull_backend::render_project_err(&sources, &e))
-        })?;
+        // bone_session_for_emission resolves [build.vars] at construction, so
+        // var commands run once per session build -- init and every
+        // `rebuild_session` -- never per incremental update (the Session
+        // mutates its ws in place, so the stamp survives `update_file`).
+        let session = crate::bone_backend::bone_session_for_emission(files, Path::new(dir))
+            .map_err(|e| {
+                anyhow::anyhow!("{}", crate::skull_backend::render_project_err(&sources, &e))
+            })?;
         let project = Self {
             session,
             dir: dir.to_string(),
@@ -267,19 +273,23 @@ impl LiveProject {
     }
 
     fn rebuild_session(&mut self) -> Result<()> {
-        self.session =
-            crate::bone_backend::bone_session(source_pairs(&self.sources)).map_err(|error| {
-                anyhow::anyhow!(
-                    "{}",
-                    crate::skull_backend::render_project_err(&self.sources, &error)
-                )
-            })?;
+        self.session = crate::bone_backend::bone_session_for_emission(
+            source_pairs(&self.sources),
+            Path::new(&self.dir),
+        )
+        .map_err(|error| {
+            anyhow::anyhow!(
+                "{}",
+                crate::skull_backend::render_project_err(&self.sources, &error)
+            )
+        })?;
         self.verdict("- serving last good output")
     }
 
     fn update(&mut self, feed: &[(String, String)], started: Instant) -> Result<LiveUpdate> {
         let sources = self.sources.clone();
         let mut reinferred = Vec::new();
+        let mut span_edits = Vec::new();
         let mut full = false;
         let mut changed = false;
         for (path, text) in feed {
@@ -291,6 +301,14 @@ impl LiveProject {
                 bone_incremental::session::UpdateTier::BodyOnly => {
                     changed = true;
                     reinferred.extend(update.reinferred);
+                    if let Some(edit) = update.body_update.edit {
+                        span_edits.push(skull::instance_graph::SpanEdit {
+                            file: edit.file,
+                            at: edit.at,
+                            byte_delta: edit.byte_delta,
+                            line_delta: edit.line_delta,
+                        });
+                    }
                 }
                 bone_incremental::session::UpdateTier::Interface
                 | bone_incremental::session::UpdateTier::FullUser => {
@@ -309,6 +327,7 @@ impl LiveProject {
         } else {
             Ok(LiveUpdate::BodyOnly {
                 reinferred,
+                span_edits,
                 cook_ms,
             })
         }
@@ -374,5 +393,39 @@ mod tests {
             project.recompile(std::slice::from_ref(&source)).unwrap(),
             LiveUpdate::Full { .. }
         ));
+    }
+
+    #[test]
+    fn build_var_commands_run_once_for_incremental_updates() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("main.rock");
+        let count = dir.path().join("count");
+        std::fs::write(
+            dir.path().join("stick.toml"),
+            format!(
+                "[package]\nname = \"cadence\"\n[build]\n[build.vars]\nCOUNT = {{ cmd = \"n=$(cat {} 2>/dev/null || echo 0); echo $((n + 1)) > {}; echo counted\" }}\n",
+                count.display(), count.display()
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            &source,
+            "fn value() -> int { 1 }\nfn main() { print(build_var(\"COUNT\")) }\n",
+        )
+        .unwrap();
+
+        let mut project = LiveProject::init(dir.path().to_str().unwrap(), false).unwrap();
+        assert_eq!(std::fs::read_to_string(&count).unwrap().trim(), "1");
+
+        std::fs::write(
+            &source,
+            "fn value() -> int { 2 }\nfn main() { print(build_var(\"COUNT\")) }\n",
+        )
+        .unwrap();
+        project.recompile(std::slice::from_ref(&source)).unwrap();
+        assert_eq!(std::fs::read_to_string(&count).unwrap().trim(), "1");
+
+        project.recompile(&[]).unwrap();
+        assert_eq!(std::fs::read_to_string(&count).unwrap().trim(), "2");
     }
 }

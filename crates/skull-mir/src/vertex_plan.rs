@@ -144,9 +144,13 @@ impl VertexPlan {
 }
 
 /// The buffer plan for `struct_name`, or a spanned rejection.
-pub fn vertex_plan(ws: &Workspace, struct_name: Ustr) -> Result<VertexPlan, CompilerError> {
+pub fn vertex_plan(
+    ws: &Workspace,
+    rep_arena: &RepArena,
+    struct_name: Ustr,
+) -> Result<VertexPlan, CompilerError> {
     let attrs = vertex_attrs(ws, struct_name)?;
-    let (leaves, byte_stride, _align) = RepArena::default()
+    let (leaves, byte_stride, _align) = rep_arena
         .nominal_leaf_layout(ws, skull_parser::ast::FnBackend::Any, struct_name)
         .map_err(|e| {
             CompilerError::new_no_location(format!("vertex plan: `{struct_name}`: {}", e.message))

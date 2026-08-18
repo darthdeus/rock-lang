@@ -2,6 +2,41 @@ use super::*;
 
 use bone_semantic::hir::{TypeExpr, VarId};
 
+#[test]
+fn missing_wire_slot_rejects_instead_of_boxing() {
+    let slots = [RetSlot::Opaque];
+    assert!(super::required_wire_slot(
+        &slots,
+        0,
+        false,
+        "fixture",
+        Clone::clone,
+        |message| super::gap(message),
+    )
+    .is_ok());
+    let err = super::required_wire_slot(
+        &slots,
+        1,
+        false,
+        "fixture",
+        Clone::clone,
+        |message| super::gap(message),
+    )
+    .expect_err("a missing non-variadic slot must reject");
+    assert!(err.message.contains("fixture has no ABI slot 1"), "{}", err.message);
+
+    let variadic = super::required_wire_slot(
+        &slots,
+        3,
+        true,
+        "fixture",
+        Clone::clone,
+        |message| super::gap(message),
+    )
+    .expect("a variadic call reuses its declared tail slot");
+    assert!(matches!(variadic, RetSlot::Opaque));
+}
+
 // -- Stage 0b route-table invariants (docs/monomorphization-plan.md S 2b).
 //
 // No Rock program can reach these states, which is why they are rejections
@@ -10,7 +45,7 @@ use bone_semantic::hir::{TypeExpr, VarId};
 
 fn spec_ws(src: &str) -> (Workspace, ModuleId) {
     let mut modules =
-        vec![skull_parser::parse_module(src, ustr::Ustr::from("<test>")).expect("parse")];
+        vec![skull_parser::parse_module_clean(src, ustr::Ustr::from("<test>")).expect("parse")];
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
     let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("user module id");
     (ws, mid)
@@ -133,4 +168,25 @@ fn non_generic_declared_generic_rejects() {
     )
     .expect_err("a non-generic declared generic must reject");
     assert!(err.message.contains("is not a generic type variable"), "{}", err.message);
+}
+
+/// `update_body` is the one ABI-state mutation crossing emissions, and its
+/// clear must reach the WORKER-LOCAL memo mirrors too: this thread first takes
+/// a hit (populating its mirror), so a survivor here is the mirror serving a
+/// plan the context already invalidated.
+#[test]
+fn a_cleared_abi_memo_cannot_serve_a_worker_mirror() {
+    let (ws, mid) = spec_ws("fn f(x: int) -> int { x }\nfn main() { let y = f(1) }");
+    let mut scx = ScalarCtx::new(&ws);
+    let inst = crate::instance::Instance::base(spec_fn(&ws, mid, "f"));
+    let plan = std::sync::Arc::new(BackendFnAbiPlan::for_boundary_instance(&ws, &scx, &inst));
+    let key = AbiPlanKey::Owner(inst);
+    scx.abi_plan_store(key.clone(), &plan);
+    assert!(scx.abi_plan_cached(&key).is_some(), "the stored plan must hit before the clear");
+    let main_fn = spec_fn(&ws, mid, "main").func;
+    let _ = scx.update_body(&ws, mid, BodyOwner::Function(main_fn));
+    assert!(
+        scx.abi_plan_cached(&key).is_none(),
+        "update_body cleared the memo; a hit can only be a stale worker-local mirror"
+    );
 }

@@ -335,7 +335,9 @@ impl StateSchema {
             .keys()
             .copied()
             .filter(|name| {
-                arena.nominal_value_storage(ws, FnBackend::Lua, *name) == Some(ValueStorage::CData)
+                arena
+                    .nominal_value_storage_required(ws, FnBackend::Lua, *name)
+                    .map_or(false, |storage| storage == ValueStorage::CData)
             })
             .collect();
         names.sort_by(|a, b| a.as_str().cmp(b.as_str()));

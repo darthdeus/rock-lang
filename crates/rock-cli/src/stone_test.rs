@@ -102,11 +102,20 @@ pub fn run_stone_test(root: &Path) -> Result<()> {
 
     let (ctl_tx, ctl_rx) = channel::<Ctl>();
 
+    // embed_string inputs are sources the extension filter can't know; the
+    // set comes from the compiled program, refreshed after every build
+    // (mirrors `rock stone`, docs/comptime-plan.md).
+    let comptime_watch: crate::file_watcher::SharedWatchSet = Default::default();
+
     // Watcher thread: forwards FileChangeEvents into ctl_rx.
     let _debouncer = {
         let (fc_tx, fc_rx) = channel::<crate::file_watcher::FileChangeEvent>();
         let watcher = crate::file_watcher::FileWatcher::new()
-            .with_metadata_filter(true);
+            .with_metadata_filter(true)
+            // "toml" mirrors `rock stone`: a stick.toml edit is a session
+            // rebuild (declared inputs re-resolve), not a dropped event.
+            .with_extensions(vec!["rock".to_string(), "toml".to_string()])
+            .with_shared_extra_files(comptime_watch.clone());
         let debouncer = watcher.watch(vec![root.clone()], fc_tx)?;
         let ctl_tx = ctl_tx.clone();
         std::thread::spawn(move || {
@@ -180,6 +189,7 @@ pub fn run_stone_test(root: &Path) -> Result<()> {
         reload_n += 1;
         let record = match result {
             Ok(st) => {
+                *comptime_watch.lock() = st.comptime_watch_files().into_iter().collect();
                 stone = Some(st);
                 ReloadRecord {
                     n: reload_n,
@@ -250,6 +260,9 @@ pub fn run_stone_test(root: &Path) -> Result<()> {
                 };
                 let compile_ms = t0.elapsed().as_secs_f64() * 1000.0;
                 let files: Vec<PathBuf> = in_scope.into_iter().collect();
+                if let Some(st) = stone.as_ref() {
+                    *comptime_watch.lock() = st.comptime_watch_files().into_iter().collect();
+                }
 
                 match outcome {
                     Ok(None) => {} // no source-level change -> no reload event

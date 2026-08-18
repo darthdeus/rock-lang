@@ -562,7 +562,7 @@ fn standalone_stage_input(
             dependencies.push(instance.func);
         }
     }
-    let concrete_plans = Arc::new(skull_graph::concrete_body::build(ws, &graph).plans);
+    let concrete_plans = skull_graph::concrete_body::build(ws, &graph).plans;
     let helpers: BTreeSet<Instance> = retained.iter().filter(|instance| *instance != &entry).cloned().collect();
     let input = ConcreteStageInput {
         stage,

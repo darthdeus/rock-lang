@@ -64,6 +64,7 @@ log = { workspace = true }
 png = "0.18"
 parking_lot = { workspace = true }
 wait-timeout = { workspace = true }
+sha2 = "0.10"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

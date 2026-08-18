@@ -237,7 +237,7 @@ fn fmt_inst(
         Inst::VecCheckedIndex { vec, index } => {
             format!("vec_checked_index v{}, v{}", v(*vec), v(*index))
         }
-        Inst::FfiNewArray { ctype, count } => format!("ffi_new_array {ctype}[?], v{}", v(*count)),
+        Inst::FfiNewArray { ctype, count, .. } => format!("ffi_new_array {ctype}[?], v{}", v(*count)),
 
         Inst::Store { cell, value } => format!("store c{}, v{}", raw(*cell), v(*value)),
         Inst::StoreField { base, field, value } => {
@@ -259,12 +259,12 @@ fn fmt_inst(
             format!("array_push[{kind:?}] v{}, v{}", v(*arr), v(*value))
         }
         Inst::CoroSetInner(x) => format!("coro_set_inner v{}", v(*x)),
-        Inst::MakeValueStruct { name, fields } => {
+        Inst::MakeValueStruct { name, fields, .. } => {
             let parts: Vec<String> =
                 fields.iter().map(|(fname, f)| format!("{fname}: v{}", v(*f))).collect();
             format!("{name}_ct({})", parts.join(", "))
         }
-        Inst::MaterializeValueStruct { name, fields } => {
+        Inst::MaterializeValueStruct { name, fields, .. } => {
             let parts: Vec<String> =
                 fields.iter().map(|(fname, f)| format!("{fname}: v{}", v(*f))).collect();
             format!("materialize {name}_ct({})", parts.join(", "))

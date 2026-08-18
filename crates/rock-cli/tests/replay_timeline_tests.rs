@@ -651,8 +651,9 @@ fn save_repro_writes_a_replayable_from_boot_log() {
 // --- tool input vs game input ----------------------------------------------
 
 /// Record `game` and rewrite every tick's held-key field, so the log carries a
-/// keypress the recording session never made. The `t` line is
-/// `t <dt> <mx> <my> <wheel> <imgui-capture> <keys> <buttons>`; only field 6
+/// keypress the recording session never made. The v6 `t` line is
+/// `t <dt> <mx> <my> <wheel> <imgui-capture> <keys> <buttons> <pad-buttons> <pad-axes>`;
+/// only field 6
 /// moves, so the run is otherwise the one that was recorded.
 fn record_log_with_keys(game: &str, frames: u32, keys_at: &[(usize, &str)]) -> tempfile::TempDir {
     let rock_bin = env!("CARGO_BIN_EXE_rock");
@@ -681,7 +682,7 @@ fn record_log_with_keys(game: &str, frames: u32, keys_at: &[(usize, &str)]) -> t
                 return line.to_string();
             }
             let mut fields: Vec<&str> = line.split_whitespace().collect();
-            assert_eq!(fields.len(), 8, "recorded tick shape changed: {line}");
+            assert!(fields.len() == 8 || fields.len() == 10, "recorded tick shape changed: {line}");
             if let Some((_, key)) = keys_at.iter().find(|(at, _)| *at == tick) {
                 fields[6] = key;
                 planted += 1;

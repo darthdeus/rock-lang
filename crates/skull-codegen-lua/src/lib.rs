@@ -462,6 +462,18 @@ fn referenced_cells_in_region(func: &MirFunc, entry: Idx<Block>) -> HashSet<Idx<
     cells
 }
 
+/// Every closure parameter cell is owned by its nested Lua function rather
+/// than by the enclosing scope's local declaration.
+pub(crate) fn collect_lambda_params(func: &MirFunc) -> HashSet<Idx<Cell>> {
+    let mut out = HashSet::default();
+    for (_, inst) in func.insts.iter() {
+        if let Inst::Lambda { params, .. } = inst {
+            out.extend(params.iter().copied());
+        }
+    }
+    out
+}
+
 /// Emit one MIR function as a top-level Lua `function <name>(...) ... end`.
 /// `self_ref` identifies the function being emitted so its header name mangles
 /// identically to a call site that targets it.
@@ -562,8 +574,8 @@ fn emit_named_framed_with_statics(
     // def is emitted in THIS function's chunk (not shared scaffolding), so an
     // incremental body-edit overlay carries it; value structs are immutable, so
     // re-running the def on reload is a harmless no-op (no preservation guard).
-    record_leaf_form_violations(ws, ctx, func);
-    let (hoist, hoist_names, hoist_defs) = collect_const_hoists(ws, func, name);
+    record_representation_violations(ctx, func);
+    let (hoist, hoist_names, hoist_defs) = collect_const_hoists(ws, ctx, func, name);
     let static_slots = static_slots_for(
         ws,
         interner,
@@ -579,6 +591,7 @@ fn emit_named_framed_with_statics(
     let _ = write!(out, "function {}", name);
     render_scope(
         ws,
+        ctx,
         interner,
         func,
         entry,
@@ -631,7 +644,7 @@ fn static_slots_for(
 /// including a new `Inst` variant -- disqualifies. The inverse (list the
 /// escaping consumers) would silently start sharing a mutable value the day the
 /// enum grows.
-fn const_hoist_uses_are_read_only(ws: &Workspace, func: &MirFunc, cand: Idx<Inst>) -> bool {
+fn const_hoist_uses_are_read_only(_ws: &Workspace, func: &MirFunc, cand: Idx<Inst>) -> bool {
     for (_, inst) in func.insts.iter() {
         let allowed = match inst {
             // A field/tuple projection and an equality test observe the value
@@ -643,15 +656,14 @@ fn const_hoist_uses_are_read_only(ws: &Workspace, func: &MirFunc, cand: Idx<Inst
             // field, and a `slot.f = v` into a NativeBuffer element writes bytes.
             // A TABLE destination (plain struct, GC-tier `<Name>_vt`, Vec element,
             // global, cell) stores the REFERENCE and is what aliases.
-            Inst::MakeValueStruct { name, fields }
-            | Inst::MaterializeValueStruct { name, fields } => {
+            Inst::MakeValueStruct { representation, fields, .. }
+            | Inst::MaterializeValueStruct { representation, fields, .. } => {
                 !fields.iter().any(|(_, v)| *v == cand)
                     || !matches!(
-                        skull_mir::lower::RepArena::default().nominal_value_storage(
-                            ws,
-                            bone_semantic::hir::FnBackend::Lua,
-                            *name,
-                        ),
+                        func.rep_arena
+                            .as_ref()
+                            .and_then(|arena| arena.try_get(*representation))
+                            .and_then(|plan| plan.value_storage()),
                         Some(
                             skull_mir::lower::ValueStorage::GcTable
                                 | skull_mir::lower::ValueStorage::LeafTable
@@ -687,60 +699,87 @@ fn const_hoist_uses_are_read_only(ws: &Workspace, func: &MirFunc, cand: Idx<Inst
 }
 
 
-/// Whether these ctor operands are the flattened LEAF form (dotted field names
-/// naming primitive leaves) rather than the declared-field form.
-///
-/// Deliberately NOT "some name contains a dot": the sequence must equal
-/// the owned representation plan EXACTLY. The ctor is positional, so a partially or
-/// wrongly flattened field list would emit silently against the wrong
-/// signature; requiring the canonical sequence turns that into a loud panic at
-/// emit instead -- the same fail-closed move the owned RepPlan C-layout check makes.
-fn is_leaf_form(fields: &[(ustr::Ustr, Idx<Inst>)]) -> bool {
-    fields.iter().any(|(n, _)| n.contains('.'))
+fn ctor_suffix(func: &MirFunc, representation: skull_mir::lower::RepId, form: ValueCtorForm) -> Option<&'static str> {
+    let arena = func.rep_arena.as_ref()?;
+    let plan = arena.try_get(representation)?;
+    Some(match form {
+        ValueCtorForm::Leaves => "_lct",
+        ValueCtorForm::Declared => match plan.value_storage() {
+            Some(skull_mir::lower::ValueStorage::GcTable) => "_vt",
+            Some(skull_mir::lower::ValueStorage::LeafTable) => "_lct",
+            Some(skull_mir::lower::ValueStorage::CData) | None => "_ct",
+        },
+    })
 }
 
-/// `Some(err)` if a flattened (dotted-field) ctor for `name` does not carry
-/// EXACTLY its canonical leaf sequence. The `_lct` ctor is positional, so a
-/// partial or reordered flattening would write one leaf's value into another
-/// with no diagnostic.
-///
-/// A violation is a compiler-invariant break rather than illegal user code, but
-/// it still REJECTS instead of panicking: this runs on every emit, and a panic
-/// takes `rock lsp serve` and `rock stone`'s watch loop down with a backtrace
-/// and no diagnostic. Twin of the JS emitter's check.
+/// Check a leaf-form constructor against the representation it carries.
+/// Callers supply the plan; this routine never reconstructs one from a name or
+/// from the punctuation of the operand keys.
 pub fn leaf_form_violation(
-    ws: &Workspace,
-    name: ustr::Ustr,
+    plan: &skull_mir::lower::RepPlan,
     got: &[ustr::Ustr],
 ) -> Option<CompilerError> {
-    let canonical = skull_mir::lower::RepArena::default()
-        .nominal_value_leaf_paths(ws, bone_semantic::hir::FnBackend::Lua, name)
-        .unwrap_or_default();
+    let Some(canonical) = plan.leaf_paths() else {
+        return Some(CompilerError::new_no_location(
+            "leaf-form constructor carries a non-leaf representation plan",
+        ));
+    };
     if got == canonical {
         return None;
     }
     Some(CompilerError::new_no_location(format!(
-        "`{name}` ctor carries dotted field names that are not its canonical leaf \
-         sequence: {got:?} vs {canonical:?}"
+            "leaf-form constructor does not match its canonical leaf plan: {got:?} vs {canonical:?}"
     )))
 }
 
-/// Every flattened value-struct ctor in `func`, checked against its canonical
-/// leaf sequence. Run once per emitted function, before rendering: the render
-/// path picks `_lct` off the dotted names alone and cannot itself reject.
-fn record_leaf_form_violations(ws: &Workspace, ctx: &CodegenCtx, func: &MirFunc) {
+/// Validate every plan-tagged constructor before rendering. A missing plan is
+/// an internal compiler error; it must reach the ordinary rejection sink rather
+/// than making emission recover a tier from a name or operand spelling.
+fn record_representation_violations(ctx: &CodegenCtx, func: &MirFunc) {
     for (_, inst) in func.insts.iter() {
-        let (Inst::MakeValueStruct { name, fields } | Inst::MaterializeValueStruct { name, fields }) =
-            inst
-        else {
+        let (name, representation, form, fields) = match inst {
+            Inst::MakeValueStruct { name, representation, form, fields }
+            | Inst::MaterializeValueStruct { name, representation, form, fields } => {
+                (*name, *representation, *form, fields)
+            }
+            _ => continue,
+        };
+        let Some(suffix) = ctor_suffix(func, representation, form) else {
+            ctx.reject(
+                name.to_string(),
+                CompilerError::new_no_location(format!(
+                    "`{name}` value constructor carries a representation plan that does not belong to this function's arena"
+                )),
+            );
             continue;
         };
-        if !is_leaf_form(fields) {
-            continue;
+        if matches!(form, ValueCtorForm::Leaves) {
+            let Some(plan) = func
+                .rep_arena
+                .as_ref()
+                .and_then(|arena| arena.try_get(representation))
+            else {
+                ctx.reject(
+                    name.to_string(),
+                    CompilerError::new_no_location(format!(
+                        "`{name}` leaf-form constructor has no leaf paths in its supplied plan"
+                    )),
+                );
+                continue;
+            };
+            let got: Vec<ustr::Ustr> = fields.iter().map(|(n, _)| *n).collect();
+            if let Some(mut error) = leaf_form_violation(&plan, &got) {
+                error.message = format!("`{name}` {}", error.message);
+                ctx.reject(name.to_string(), error);
+            }
         }
-        let got: Vec<ustr::Ustr> = fields.iter().map(|(n, _)| *n).collect();
-        if let Some(err) = leaf_form_violation(ws, *name, &got) {
-            ctx.reject(name.to_string(), err);
+        if suffix == "_lct" && matches!(form, ValueCtorForm::Declared) {
+            ctx.reject(
+                name.to_string(),
+                CompilerError::new_no_location(format!(
+                    "`{name}` declared-form constructor selects a leaf-table plan"
+                )),
+            );
         }
     }
 }
@@ -763,12 +802,11 @@ fn record_leaf_form_violations(ws: &Workspace, ctx: &CodegenCtx, func: &MirFunc)
 /// hoist existed.
 fn collect_const_hoists(
     ws: &Workspace,
+    ctx: &CodegenCtx,
     func: &MirFunc,
     base: &str,
 ) -> (HashMap<Idx<Inst>, u32>, Vec<String>, String) {
-    // The leaf-form flag rides with the group: a flattened all-const ctor must
-    // hoist against `_lct`, whose arity and signature differ from `_ct`.
-    let mut groups: Vec<(ustr::Ustr, Vec<Lit>, bool)> = Vec::new();
+    let mut groups: Vec<(ustr::Ustr, skull_mir::lower::RepId, ValueCtorForm, Vec<Lit>)> = Vec::new();
     let mut hoist: HashMap<Idx<Inst>, u32> = HashMap::default();
     // Only insts still REACHED BY A BLOCK. The arena keeps orphans (DCE unlinks
     // from blocks, it does not free), and hoisting one emits a module-scope ctor
@@ -780,7 +818,7 @@ fn collect_const_hoists(
         if !live.contains(&id) {
             continue;
         }
-        let Inst::MakeValueStruct { name, fields } = inst else {
+        let Inst::MakeValueStruct { name, representation, form, fields } = inst else {
             continue;
         };
         // An int->float-subsumed constant field (`IntToFloat(Const)`) is still a
@@ -801,11 +839,13 @@ fn collect_const_hoists(
         if !const_hoist_uses_are_read_only(ws, func, id) {
             continue;
         }
-        let leaf_form = is_leaf_form(fields);
-        let g = match groups.iter().position(|(n, l, lf)| *n == *name && *l == lits && *lf == leaf_form) {
+        let g = match groups
+            .iter()
+            .position(|(n, rep, ctor_form, l)| *n == *name && *rep == *representation && *ctor_form == *form && *l == lits)
+        {
             Some(p) => p as u32,
             None => {
-                groups.push((*name, lits, leaf_form));
+                groups.push((*name, *representation, *form, lits));
                 (groups.len() - 1) as u32
             }
         };
@@ -816,24 +856,16 @@ fn collect_const_hoists(
     }
     let mut names = Vec::with_capacity(groups.len());
     let mut defs = String::new();
-    for (g, (name, lits, leaf_form)) in groups.iter().enumerate() {
+    for (g, (name, representation, form, lits)) in groups.iter().enumerate() {
         let gname = format!("__skull_kc_{base}_{g}");
-        let suffix = if *leaf_form {
-            "_lct"
-        } else if matches!(
-            skull_mir::lower::RepArena::default().nominal_value_storage(
-                ws,
-                bone_semantic::hir::FnBackend::Lua,
-                *name,
-            ),
-            Some(
-                skull_mir::lower::ValueStorage::GcTable
-                    | skull_mir::lower::ValueStorage::LeafTable
-            )
-        ) {
-            "_vt"
-        } else {
-            "_ct"
+        let Some(suffix) = ctor_suffix(func, *representation, *form) else {
+            ctx.reject(
+                name.to_string(),
+                CompilerError::new_no_location(format!(
+                    "`{name}` constant constructor has no valid supplied representation plan"
+                )),
+            );
+            continue;
         };
         let _ = write!(defs, "{gname} = {name}{suffix}(");
         for (i, l) in lits.iter().enumerate() {
@@ -852,9 +884,9 @@ fn collect_const_hoists(
 /// state-table field `<s>.c<raw>`; everything else is its colored local
 /// (`c<color>`) or — when uncolored (a coroutine `__step`, passed an empty
 /// color map) — the raw `c<raw>`.
-fn cellname(frame: Option<&FrameCtx>, colors: &[u32], c: Idx<Cell>) -> String {
+fn cellname(func: &MirFunc, frame: Option<&FrameCtx>, colors: &[u32], c: Idx<Cell>) -> String {
     let mut s = String::new();
-    write_cellname(&mut s, frame, colors, c);
+    write_cellname(&mut s, func, frame, colors, c);
     s
 }
 
@@ -865,23 +897,29 @@ fn cellname(frame: Option<&FrameCtx>, colors: &[u32], c: Idx<Cell>) -> String {
 /// there); env-record captures and box `.v` access are now materialized as MIR
 /// `Field`/`StoreField` by `convert_closures`, so this fn no longer special-cases
 /// them.
-fn write_cellname(out: &mut String, frame: Option<&FrameCtx>, colors: &[u32], c: Idx<Cell>) {
+fn write_cellname(
+    out: &mut String,
+    func: &MirFunc,
+    frame: Option<&FrameCtx>,
+    colors: &[u32],
+    c: Idx<Cell>,
+) {
     if let Some(f) = frame {
         if f.fields.contains(&c) {
-            write_cellname(out, None, colors, f.s_cell);
+            write_cellname(out, func, None, colors, f.s_cell);
             out.push_str(".c");
             let slot = *f.slots.get(&c).expect("frame field cell must carry a dense slot");
             push_uint(out, slot);
             return;
         }
     }
-    write_cell_local(out, colors, c);
+    write_cell_local(out, func, colors, c);
 }
 
-fn write_cell_local(out: &mut String, colors: &[u32], c: Idx<Cell>) {
+fn write_cell_local(out: &mut String, func: &MirFunc, colors: &[u32], c: Idx<Cell>) {
     out.push('c');
     match colors[raw(c) as usize] {
-        u32::MAX => push_uint(out, raw(c)),
+        u32::MAX => push_uint(out, func.emit_cell_id(c)),
         col => push_uint(out, col),
     }
 }
@@ -1329,6 +1367,7 @@ fn compute_inlinable(func: &MirFunc, scope: &[Idx<Block>]) -> Vec<bool> {
 #[allow(clippy::too_many_arguments)]
 fn render_scope(
     ws: &Workspace,
+    ctx: &CodegenCtx,
     interner: &MonoInterner,
     func: &MirFunc,
     entry: Idx<Block>,
@@ -1357,7 +1396,7 @@ fn render_scope(
         .iter()
         .map(|(&h, cl)| regalloc::LoopScope { header: h, region: cl.region.iter().copied().collect() })
         .collect();
-    loop_scopes.sort_by_key(|ls| raw(ls.header));
+    loop_scopes.sort_by_key(|ls| func.emit_block_id(ls.header));
     let mut va = regalloc::color_values(func, &rpo, &inlinable, &loop_scopes);
     if va.color_scope.len() > 150 && !loop_scopes.is_empty() {
         va = regalloc::color_values(func, &rpo, &inlinable, &[]);
@@ -1375,16 +1414,16 @@ fn render_scope(
             out.push_str(", ");
         }
         wrote_param = true;
-        write_cell_local(out, cell_colors, c);
+        write_cell_local(out, func, cell_colors, c);
     }
     out.push_str(")\n");
 
     for &c in params {
         if cell_is_uint(ws, func.cells[c].ty) {
             out.push_str("  ");
-            write_cell_local(out, cell_colors, c);
+            write_cell_local(out, func, cell_colors, c);
             out.push_str(" = ((");
-            write_cell_local(out, cell_colors, c);
+            write_cell_local(out, func, cell_colors, c);
             out.push_str(" % 4294967296) + 4294967296) % 4294967296\n");
         }
     }
@@ -1449,7 +1488,7 @@ fn render_scope(
             out.push('c');
             match col {
                 Some(col) => push_uint(out, col),
-                None => push_uint(out, raw(cid)),
+                None => push_uint(out, func.emit_cell_id(cid)),
             }
         }
     }
@@ -1465,6 +1504,7 @@ fn render_scope(
 
     let mut em = Emitter {
         ws,
+        ctx,
         interner,
         func,
         colors,
@@ -1498,11 +1538,11 @@ pub fn mangled(ws: &Workspace, r: FuncRef) -> String {
 /// The Lua local name for a value: its register `r<color>` (colored values) or
 /// the raw `v<raw>` fallback (an uncolored value — should not occur once every
 /// value is colored, but keeps the printer total).
-fn write_vname(out: &mut String, colors: &[u32], id: Idx<Inst>) {
+fn write_vname(out: &mut String, func: &MirFunc, colors: &[u32], id: Idx<Inst>) {
     match colors[raw(id) as usize] {
         u32::MAX => {
             out.push('v');
-            push_uint(out, raw(id));
+            push_uint(out, func.emit_inst_id(id));
         }
         c => {
             out.push('r');
@@ -1513,6 +1553,7 @@ fn write_vname(out: &mut String, colors: &[u32], id: Idx<Inst>) {
 
 struct Emitter<'a> {
     ws: &'a Workspace,
+    ctx: &'a CodegenCtx,
     /// The build's one arena, so the symbol a call spells comes from the same
     /// [`Instance`] object the definition was emitted under rather than from a
     /// second derivation of the same encoder.
@@ -1564,7 +1605,7 @@ impl Emitter<'_> {
         }
         self.emitted[raw(bb) as usize] = true;
         out.push_str("  ::bb");
-        push_uint(out, raw(bb));
+        push_uint(out, self.func.emit_block_id(bb));
         out.push_str("::\n");
         let insts: &[Idx<Inst>] = &self.func.blocks[bb].insts;
         for &id in insts {
@@ -1594,10 +1635,10 @@ impl Emitter<'_> {
         let (slot, inclusive, body_entry, latch, exit) =
             (cl.slot, cl.inclusive, cl.body_entry, cl.latch, cl.exit);
         let region: HashSet<Idx<Block>> = cl.region.iter().copied().collect();
-        let slot_name = cellname(self.frame, self.cell_colors, slot);
+        let slot_name = cellname(self.func, self.frame, self.cell_colors, slot);
         let hi = match &cl.hi {
             HiLimit::Value(v) => self.opnd_str(*v),
-            HiLimit::Cell(c) => cellname(self.frame, self.cell_colors, *c),
+            HiLimit::Cell(c) => cellname(self.func, self.frame, self.cell_colors, *c),
         };
         let limit = if inclusive { hi } else { format!("{hi} - 1") };
 
@@ -1637,11 +1678,11 @@ impl Emitter<'_> {
         // loop-done edge (header's false branch).
         self.emitted[raw(latch) as usize] = true;
         out.push_str("  ::bb");
-        push_uint(out, raw(latch));
+        push_uint(out, self.func.emit_block_id(latch));
         out.push_str("::\n");
         out.push_str("  end\n");
         out.push_str("  goto bb");
-        push_uint(out, raw(exit));
+        push_uint(out, self.func.emit_block_id(exit));
         out.push('\n');
     }
 
@@ -1667,7 +1708,7 @@ impl Emitter<'_> {
         let inst = &self.func.insts[id];
         if inst.produces_value() {
             out.push_str("  ");
-            write_vname(out, &self.colors, id);
+            write_vname(out, self.func, &self.colors, id);
             out.push_str(" = ");
             self.write_value(out, id, inst);
             out.push('\n');
@@ -1732,7 +1773,7 @@ impl Emitter<'_> {
         // A `Call`/`Index` value is never tree-folded here (`always_inlinable`
         // excludes them), so `result` has a register.
         let mut lv = String::new();
-        write_vname(&mut lv, &self.colors, result);
+        write_vname(&mut lv, self.func, &self.colors, result);
 
         out.push_str("  do\n");
         for (p, a) in callee.param_decls.iter().zip(args.iter()) {
@@ -1775,7 +1816,7 @@ impl Emitter<'_> {
             self.write_value(out, id, &self.func.insts[id]);
             out.push(')');
         } else {
-            write_vname(out, &self.colors, id);
+            write_vname(out, self.func, &self.colors, id);
         }
     }
 
@@ -1819,7 +1860,7 @@ impl Emitter<'_> {
                     out.push_str(g.as_str());
                 }
             }
-            Inst::Load(c) => write_cellname(out, self.frame, self.cell_colors, *c),
+            Inst::Load(c) => write_cellname(out, self.func, self.frame, self.cell_colors, *c),
 
             Inst::IntAdd(a, b) | Inst::FloatAdd(a, b) => self.write_bin(out, "+", a, b),
             Inst::IntSub(a, b) | Inst::FloatSub(a, b) => self.write_bin(out, "-", a, b),
@@ -1827,8 +1868,8 @@ impl Emitter<'_> {
             Inst::UintAdd(a, b) => self.write_u32_bin(out, "+", a, b),
             Inst::UintSub(a, b) => self.write_u32_bin(out, "-", a, b),
             Inst::UintMul(a, b) => self.write_u32_mul(out, a, b),
-            // int `/` is floor-division (rock semantics); float `/` is real.
-            Inst::IntDiv(a, b) => {
+            // Integer `/` is floor-division (rock semantics); float `/` is real.
+            Inst::IntDiv(a, b) | Inst::UintDiv(a, b) => {
                 out.push_str("math.floor(");
                 self.write_opnd(out, *a);
                 out.push_str(" / ");
@@ -1837,13 +1878,6 @@ impl Emitter<'_> {
             }
             Inst::FloatDiv(a, b) => self.write_bin(out, "/", a, b),
             Inst::IntMod(a, b) | Inst::FloatMod(a, b) => self.write_bin(out, "%", a, b),
-            Inst::UintDiv(a, b) => {
-                out.push_str("math.floor(");
-                self.write_opnd(out, *a);
-                out.push_str(" / ");
-                self.write_opnd(out, *b);
-                out.push(')');
-            }
             Inst::UintMod(a, b) => self.write_u32_bin(out, "%", a, b),
             Inst::StringConcat(a, b) => {
                 // Emit the whole inlinable concat tree as ONE flat `..` run
@@ -1890,11 +1924,12 @@ impl Emitter<'_> {
             // the inner value's expression verbatim (identity). Reached only if a
             // pass ever materializes one; the operand path (`write_opnd`) folds it
             // away. `write_value` (not `write_opnd`) to avoid a double wrap.
-            Inst::IntToFloat(x) => self.write_value(out, *x, &self.func.insts[*x]),
-            Inst::UintToFloat(x) => self.write_value(out, *x, &self.func.insts[*x]),
-            Inst::IntToUint(x) => self.write_checked_u32(out, *x, "uint conversion out of range"),
-            Inst::FloatToUint(x) => self.write_checked_u32(out, *x, "uint conversion out of range"),
-            Inst::UintToInt(x) => self.write_value(out, *x, &self.func.insts[*x]),
+            Inst::IntToFloat(x) | Inst::UintToFloat(x) | Inst::UintToInt(x) => {
+                self.write_value(out, *x, &self.func.insts[*x])
+            }
+            Inst::IntToUint(x) | Inst::FloatToUint(x) => {
+                self.write_checked_u32(out, *x, "uint conversion out of range")
+            }
             Inst::UintBitcastInt(x) => {
                 out.push_str("(((");
                 self.write_opnd(out, *x);
@@ -1906,14 +1941,18 @@ impl Emitter<'_> {
                 out.push_str(") % 4294967296)");
             }
 
-            Inst::IntLt(a, b) | Inst::FloatLt(a, b) => self.write_bin(out, "<", a, b),
-            Inst::IntLeq(a, b) | Inst::FloatLeq(a, b) => self.write_bin(out, "<=", a, b),
-            Inst::IntGt(a, b) | Inst::FloatGt(a, b) => self.write_bin(out, ">", a, b),
-            Inst::IntGeq(a, b) | Inst::FloatGeq(a, b) => self.write_bin(out, ">=", a, b),
-            Inst::UintLt(a, b) => self.write_bin(out, "<", a, b),
-            Inst::UintLeq(a, b) => self.write_bin(out, "<=", a, b),
-            Inst::UintGt(a, b) => self.write_bin(out, ">", a, b),
-            Inst::UintGeq(a, b) => self.write_bin(out, ">=", a, b),
+            Inst::IntLt(a, b) | Inst::UintLt(a, b) | Inst::FloatLt(a, b) => {
+                self.write_bin(out, "<", a, b)
+            }
+            Inst::IntLeq(a, b) | Inst::UintLeq(a, b) | Inst::FloatLeq(a, b) => {
+                self.write_bin(out, "<=", a, b)
+            }
+            Inst::IntGt(a, b) | Inst::UintGt(a, b) | Inst::FloatGt(a, b) => {
+                self.write_bin(out, ">", a, b)
+            }
+            Inst::IntGeq(a, b) | Inst::UintGeq(a, b) | Inst::FloatGeq(a, b) => {
+                self.write_bin(out, ">=", a, b)
+            }
             Inst::Eq(a, b) => self.write_bin(out, "==", a, b),
             Inst::NotEq(a, b) => self.write_bin(out, "~=", a, b),
 
@@ -2035,46 +2074,16 @@ impl Emitter<'_> {
                 }
                 out.push('}');
             }
-            Inst::MakeValueStruct { name, fields }
-            | Inst::MaterializeValueStruct { name, fields } => {
-                // Positional ctor in declared field order; field names are for MIR
-                // passes only (SROA), not the wire shape. The ctor NAME is chosen
-                // by tier from the ONE classification: `_vt` (table) for a
-                // GC-carrying value struct, `_ct` (cdata) for an FFI-clean one.
-                //
-                // A leaf-table struct is decided by TYPE, ahead of any operand
-                // check: it has no declared-field ctor at all (the prelude emits
-                // only `_lct` for it), and its pack site is unconditionally leaf
-                // form. Asking the operands instead reads the same oracle through
-                // a proxy that does not hold -- a nullable child with no data
-                // leaves contributes one leaf keyed on the field's own name, so
-                // the leaf sequence is textually identical to the declared field
-                // list and no operand-shape test can tell them apart.
-                let suffix = if matches!(
-                    skull_mir::lower::RepArena::default().nominal_value_storage(
-                        self.ws,
-                        bone_semantic::hir::FnBackend::Lua,
-                        *name,
-                    ),
-                    Some(skull_mir::lower::ValueStorage::LeafTable)
-                ) {
-                    "_lct"
-                } else if is_leaf_form(fields) {
-                    "_lct"
-                } else if matches!(
-                    skull_mir::lower::RepArena::default().nominal_value_storage(
-                        self.ws,
-                        bone_semantic::hir::FnBackend::Lua,
-                        *name,
-                    ),
-                    Some(
-                        skull_mir::lower::ValueStorage::GcTable
-                            | skull_mir::lower::ValueStorage::LeafTable
-                    )
-                ) {
-                    "_vt"
-                } else {
-                    "_ct"
+            Inst::MakeValueStruct { name, representation, form, fields }
+            | Inst::MaterializeValueStruct { name, representation, form, fields } => {
+                let Some(suffix) = ctor_suffix(self.func, *representation, *form) else {
+                    self.ctx.reject(
+                        name.to_string(),
+                        CompilerError::new_no_location(format!(
+                            "`{name}` value constructor has no valid supplied representation plan"
+                        )),
+                    );
+                    return;
                 };
                 let _ = write!(out, "{name}{suffix}(");
                 for (i, (_, id)) in fields.iter().enumerate() {
@@ -2121,7 +2130,7 @@ impl Emitter<'_> {
                 out.push('}');
             }
 
-            Inst::FfiNewArray { ctype, count } => {
+            Inst::FfiNewArray { ctype, count, .. } => {
                 let _ = write!(out, "ffi.new(\"{ctype}[?]\", ");
                 self.write_opnd(out, *count);
                 out.push(')');
@@ -2359,7 +2368,7 @@ impl Emitter<'_> {
         match inst {
             Inst::Store { cell, value } => {
                 out.push_str("  ");
-                write_cellname(out, self.frame, self.cell_colors, *cell);
+                write_cellname(out, self.func, self.frame, self.cell_colors, *cell);
                 out.push_str(" = ");
                 self.write_opnd(out, *value);
                 out.push('\n');
@@ -2462,9 +2471,9 @@ impl Emitter<'_> {
                 table,
             } => {
                 // `key_cell` is referenced twice; render it once.
-                let k = cellname(self.frame, self.cell_colors, *key_cell);
+                let k = cellname(self.func, self.frame, self.cell_colors, *key_cell);
                 let _ = write!(out, "  {k}, ");
-                write_cellname(out, self.frame, self.cell_colors, *val_cell);
+                write_cellname(out, self.func, self.frame, self.cell_colors, *val_cell);
                 let _ = write!(out, " = next(");
                 self.write_opnd(out, *table);
                 let _ = writeln!(out, ", {k})");
@@ -2477,7 +2486,7 @@ impl Emitter<'_> {
                     if i > 0 {
                         out.push_str(", ");
                     }
-                    write_cellname(out, self.frame, self.cell_colors, *c);
+                    write_cellname(out, self.func, self.frame, self.cell_colors, *c);
                 }
                 let callee = self.callee_name(id, *func);
                 let _ = write!(out, " = {callee}(");
@@ -2492,7 +2501,7 @@ impl Emitter<'_> {
                     if i > 0 {
                         out.push_str(", ");
                     }
-                    write_cellname(out, self.frame, self.cell_colors, *c);
+                    write_cellname(out, self.func, self.frame, self.cell_colors, *c);
                 }
                 out.push_str(" = ");
                 self.write_opnd(out, *callee);
@@ -2523,7 +2532,7 @@ impl Emitter<'_> {
             }
             Term::Goto(b) => {
                 out.push_str("  goto bb");
-                push_uint(out, raw(*b));
+                push_uint(out, self.func.emit_block_id(*b));
                 out.push('\n');
             }
             Term::Branch {
@@ -2534,9 +2543,9 @@ impl Emitter<'_> {
                 out.push_str("  if ");
                 self.write_opnd(out, *cond);
                 out.push_str(" then goto bb");
-                push_uint(out, raw(*then_bb));
+                push_uint(out, self.func.emit_block_id(*then_bb));
                 out.push_str(" else goto bb");
-                push_uint(out, raw(*else_bb));
+                push_uint(out, self.func.emit_block_id(*else_bb));
                 out.push_str(" end\n");
             }
             Term::Switch {
@@ -2553,16 +2562,16 @@ impl Emitter<'_> {
                     let _ = write!(out, "  {kw} {d} == ");
                     write_lit(out, l);
                     out.push_str(" then goto bb");
-                    push_uint(out, raw(*b));
+                    push_uint(out, self.func.emit_block_id(*b));
                     out.push('\n');
                 }
                 if first {
                     out.push_str("  goto bb");
-                    push_uint(out, raw(*default));
+                    push_uint(out, self.func.emit_block_id(*default));
                     out.push('\n');
                 } else {
                     out.push_str("  else goto bb");
-                    push_uint(out, raw(*default));
+                    push_uint(out, self.func.emit_block_id(*default));
                     out.push_str(" end\n");
                 }
             }

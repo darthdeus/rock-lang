@@ -55,6 +55,24 @@ fn sim_state_names(game: &str, frames: u32) -> std::collections::HashSet<String>
         .collect()
 }
 
+#[test]
+fn replay_snapshot_oracle_includes_effective_pad_state_only() {
+    let names = sim_state_names("bitgun", 3);
+    assert!(names.contains("pad_down"), "effective pad buttons must be replay state: {names:?}");
+    assert!(names.contains("pad_axes"), "effective pad axes must be replay state: {names:?}");
+    assert!(names.contains("ACTION_RUNTIME"), "action runtime must be replay state: {names:?}");
+    assert!(!names.contains("physical_pad_down"), "physical pad lane must not be snapshotted: {names:?}");
+    assert!(!names.contains("physical_pad_active_instance"), "controller handles must not be snapshotted: {names:?}");
+    assert!(!names.contains("replay_pad_down"), "replay scratch must not be snapshotted: {names:?}");
+    assert!(!names.contains("replay_scancodes_down"), "replay keyboard scratch must not be snapshotted: {names:?}");
+    assert!(!names.contains("pad_axis_motion_this_frame"), "capture scratch must not be snapshotted: {names:?}");
+    assert!(!names.contains("ACTIONS"), "binding configuration must not be snapshotted: {names:?}");
+    assert!(!names.contains("ACTION_NAMES"), "binding registry scratch must not be snapshotted: {names:?}");
+    assert!(!names.contains("BINDING_RAW_ACTIONS"), "unknown binding scratch must not be snapshotted: {names:?}");
+    assert!(!names.contains("LAST_INPUT_DEVICE"), "glyph modality must not be snapshotted: {names:?}");
+    assert!(!names.contains("UI_INPUT_CAPTURE"), "capture mode must not be snapshotted: {names:?}");
+}
+
 /// `rock frame <game> -n N --replay <log> --dump-state [env]` -> parsed JSON.
 fn run_replay_dump(game: &str, frames: u32, log: &str, env: &[(&str, &str)]) -> serde_json::Value {
     let scratch = tempfile::tempdir().unwrap();
@@ -735,7 +753,7 @@ fn mag_main_menu_transition_survives_seek_resimulation() {
                 return line.to_string();
             }
             let mut fields: Vec<&str> = line.split_whitespace().collect();
-            assert_eq!(fields.len(), 8, "recorded tick shape changed: {line}");
+            assert!(fields.len() == 8 || fields.len() == 10, "recorded tick shape changed: {line}");
             fields[1] = "0x1.999999999999ap-4";
             fields[2] = if tick == 30 { "1100" } else { "960" };
             fields[3] = if tick == 30 { "700" } else { "432" };
@@ -876,7 +894,7 @@ fn mag_main_menu_transition_survives_seek_resimulation() {
                 return line.to_string();
             }
             let mut fields: Vec<&str> = line.split_whitespace().collect();
-            assert_eq!(fields.len(), 8, "recorded tick shape changed: {line}");
+            assert!(fields.len() == 8 || fields.len() == 10, "recorded tick shape changed: {line}");
             fields[1] = "0x1.999999999999ap-4";
             fields[2] = if tick == 24 { "1100" } else { "0" };
             fields[3] = if tick == 24 { "700" } else { "0" };

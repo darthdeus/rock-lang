@@ -21,7 +21,7 @@ use std::time::Instant;
 
 use bone_incremental::session::{Session, UpdateTier};
 use bone_semantic::inference::Workspace;
-use skull::graph_snapshot::canonical;
+use skull::graph_snapshot::{canonical, instance_key};
 use skull::instance_graph::{self, InstanceGraph, UpdateStats};
 
 fn warm_stdlib() -> Vec<skull_parser::Ast> {
@@ -97,8 +97,19 @@ fn edit_and_compare(
     assert!(!res.reinferred.is_empty(), "{label}: a body-only edit reinferred nothing");
     let ws = session.workspace();
     let roots = skull::mir_emit::emission_roots(ws, Some(root));
+    let edits = res
+        .body_update
+        .edit
+        .into_iter()
+        .map(|edit| skull::instance_graph::SpanEdit {
+            file: edit.file,
+            at: edit.at,
+            byte_delta: edit.byte_delta,
+            line_delta: edit.line_delta,
+        })
+        .collect::<Vec<_>>();
     let t = Instant::now();
-    let stats = graph.update_bodies(ws, roots, &res.reinferred);
+    let stats = graph.update_bodies_with_edits(ws, roots, &res.reinferred, &edits);
     let update_ms = t.elapsed().as_secs_f64() * 1000.0;
 
     let fresh = graph_of(ws, root);
@@ -116,7 +127,8 @@ fn project_case(rel: &str) {
         .unwrap_or_else(|e| panic!("{rel} session warm failed: {}", e.message));
     assert!(
         session.diagnostics().is_empty(),
-        "{rel} does not typecheck clean, so nothing below would be evidence"
+        "{rel} does not typecheck clean, so nothing below would be evidence: {:?}",
+        session.diagnostics()
     );
 
     // MIN of several, not one sample: this box is noisy enough that a single
@@ -147,19 +159,25 @@ fn project_case(rel: &str) {
                 continue;
             }
             examined += 1;
-            let edited: String = text
+            let mut edited: String = text
                 .lines()
                 .enumerate()
                 .map(|(j, l)| if j == i { format!("// {l}") } else { l.to_string() })
                 .collect::<Vec<_>>()
                 .join("\n");
+            if text.ends_with('\n') {
+                edited.push('\n');
+            }
             let Ok(res) = session.update_file(path, &edited) else { continue };
             let ok = res.tier == UpdateTier::BodyOnly && session.diagnostics().is_empty();
             let prunes = if ok {
                 let ws = session.workspace();
                 let after = graph_of(ws, &dir);
-                let before: BTreeSet<_> = graph.instances.iter().cloned().collect();
-                before.difference(&after.instances).count() > 0
+                let before: BTreeSet<_> =
+                    graph.instances.iter().map(|i| instance_key(ws, &graph, i)).collect();
+                let after: BTreeSet<_> =
+                    after.instances.iter().map(|i| instance_key(ws, &after, i)).collect();
+                before.difference(&after).next().is_some()
             } else {
                 false
             };
@@ -177,7 +195,11 @@ fn project_case(rel: &str) {
     // The same for the update: the first call pays for whatever the machine
     // was doing a moment ago.
     let del = edit_and_compare(&mut session, &mut graph, &dir, &path, &edited, "deletion");
-    assert!(del.stats.pruned > 0, "{rel}: the chosen deletion pruned nothing");
+    assert!(
+        del.stats.pruned > 0,
+        "{rel}: the chosen deletion pruned nothing (path={path}, stats={:?})",
+        del.stats
+    );
     let add = edit_and_compare(&mut session, &mut graph, &dir, &path, &original, "addition");
     assert!(add.stats.newly_reached > 0, "{rel}: restoring the call reached nothing new");
 
@@ -189,17 +211,8 @@ fn project_case(rel: &str) {
             m.stats.owners
         );
         assert_eq!(m.stats.settle_rounds, 0, "{rel} {what}: the conformance fixpoint engaged");
-        // **The PRUNE's own cost, which its result cannot report.** A
-        // whole-graph strand search returns the same pruned set and passes
-        // canonical equality, so this is the only arm that can see the
-        // affected-region property at all. It goes red when a re-installed
-        // owner stops taking its own unchanged targets back out of `lost`,
-        // which makes the suspect region the whole reachable graph.
-        // Against the WALK, not against the program: both are per-edit
-        // quantities, and an instance can only lose an in-edge because an owner
-        // was re-walked. A fraction-of-`instances` bound is the wrong yardstick
-        // -- it is satisfied by a region two orders of magnitude too large on
-        // every project whose affected set is small.
+        // Against the walk, not against the program: all four pruning
+        // populations are per-edit quantities.
         assert!(
             m.stats.suspect_region <= m.stats.expanded * 4,
             "{rel} {what}: the strand search visited {} instances after walking {} owners \
@@ -209,18 +222,48 @@ fn project_case(rel: &str) {
             m.stats.instances,
             m.stats.pruned
         );
+        assert_eq!(
+            m.stats.prune_search_population,
+            m.stats.suspect_region
+                + m.stats.boundary_predecessor_edges_examined
+                + m.stats.support_component_nodes_examined
+                + m.stats.support_component_edges_examined
+                + m.stats.reverse_instances_examined
+                + m.stats.reverse_predecessor_edges_examined,
+            "{rel} {what}: prune denominator omitted pruning work"
+        );
+        assert_eq!(m.stats.broad_scans, 0, "{rel} {what}: a broad prune scan ran");
+        assert!(
+            m.stats.prune_search_population < m.stats.instances,
+            "{rel} {what}: prune search examined the whole instance population: {} of {} \
+             ({} forward, {} boundary edges, {} support nodes, {} support edges, {} reverse nodes, {} reverse edges)",
+            m.stats.prune_search_population,
+            m.stats.instances,
+            m.stats.suspect_region,
+            m.stats.boundary_predecessor_edges_examined,
+            m.stats.support_component_nodes_examined,
+            m.stats.support_component_edges_examined,
+            m.stats.reverse_instances_examined,
+            m.stats.reverse_predecessor_edges_examined
+        );
     }
 
     println!(
         "{rel}: fresh build {fresh_ms:.1} ms over {owners_total} owners / {instances_total} instances\n  \
-         delete: {:.2} ms, {} affected, {} walked, {} pruned of {} suspect -> {} owners / {} instances\n  \
-         add:    {:.2} ms, {} affected, {} walked, {} new, {} suspect -> {} owners / {} instances\n  \
+         delete: {:.2} ms, {} affected, {} walked, {} pruned of {} forward + {} boundary edges + {} support nodes + {} support edges + {} reverse nodes + {} reverse edges = {} search -> {} owners / {} instances\n  \
+         add:    {:.2} ms, {} affected, {} walked, {} new, {} forward + {} boundary edges + {} support nodes + {} support edges + {} reverse nodes + {} reverse edges = {} search -> {} owners / {} instances\n  \
          candidates examined: {examined}, edited file: {path}",
         del.update_ms,
         del.stats.affected,
         del.stats.expanded,
         del.stats.pruned,
         del.stats.suspect_region,
+        del.stats.boundary_predecessor_edges_examined,
+        del.stats.support_component_nodes_examined,
+        del.stats.support_component_edges_examined,
+        del.stats.reverse_instances_examined,
+        del.stats.reverse_predecessor_edges_examined,
+        del.stats.prune_search_population,
         del.stats.owners,
         del.stats.instances,
         add.update_ms,
@@ -228,6 +271,12 @@ fn project_case(rel: &str) {
         add.stats.expanded,
         add.stats.newly_reached,
         add.stats.suspect_region,
+        add.stats.boundary_predecessor_edges_examined,
+        add.stats.support_component_nodes_examined,
+        add.stats.support_component_edges_examined,
+        add.stats.reverse_instances_examined,
+        add.stats.reverse_predecessor_edges_examined,
+        add.stats.prune_search_population,
         add.stats.owners,
         add.stats.instances,
     );

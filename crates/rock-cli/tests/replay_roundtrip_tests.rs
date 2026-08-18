@@ -280,6 +280,60 @@ fn replay_applies_recorded_keys_and_buttons() {
     );
 }
 
+#[test]
+fn replay_applies_explicit_v6_pad_buttons_and_axes() {
+    let dir = tempfile::tempdir().expect("replay-log dir");
+    let log = dir.path().join("pad-v6.replay");
+    let text = "STONE_REPLAY 6\nseed 42\nwindow 0x1p9 0x1p9\ngame bitgun\n"
+        .to_string()
+        + "t 0x0p+0 0x0p+0 0x0p+0 0 0 - - a leftx=0x1p-1\n";
+    std::fs::write(&log, text).expect("write v6 pad log");
+
+    let state = run_frame("bitgun", 1, &["--replay", &log.to_string_lossy()]);
+    assert_eq!(
+        state["stone"]["pad_down"]["a"],
+        serde_json::json!(true),
+        "v6 replay must project a recorded pad button into effective state"
+    );
+    assert_eq!(
+        state["stone"]["pad_axes"]["leftx"],
+        serde_json::json!(0.5),
+        "v6 replay must project a recorded pad axis into effective state"
+    );
+}
+
+#[test]
+fn recording_and_branch_rewrite_use_the_v6_pad_record_renderer() {
+    let dir = tempfile::tempdir().expect("replay-log dir");
+    let log = dir.path().join("v6-renderer.replay");
+    let log_s = log.to_string_lossy().into_owned();
+
+    let _ = run_frame("bitgun", 2, &["--record", &log_s]);
+    let text = std::fs::read_to_string(&log).expect("read v6 record");
+    assert!(text.starts_with("STONE_REPLAY 6\n"), "recording must use the v6 header: {text}");
+    let tick = text.lines().find(|line| line.starts_with("t ")).expect("tick");
+    assert_eq!(tick.split(' ').count(), 10, "v6 tick has nine payload fields");
+    assert!(tick.ends_with(" - -"), "empty live pad state has explicit empty fields: {tick}");
+}
+
+#[test]
+fn replay_rejects_malformed_v6_pad_axis_records() {
+    let dir = tempfile::tempdir().expect("replay-log dir");
+    let log = dir.path().join("malformed-pad-v6.replay");
+    let text = "STONE_REPLAY 6\nseed 42\nwindow 0x1p9 0x1p9\ngame bitgun\n"
+        .to_string()
+        + "t 0x0p+0 0x0p+0 0x0p+0 0 0 - - a leftx=not-a-number\n";
+    std::fs::write(&log, text).expect("write malformed v6 log");
+
+    let out = run_frame_raw("bitgun", 1, &["--replay", &log.to_string_lossy()]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "malformed v6 axis must refuse the log\nstderr:\n{stderr}");
+    assert!(
+        stderr.contains("malformed replay records"),
+        "malformed v6 axis must use the replay load failure path\nstderr:\n{stderr}"
+    );
+}
+
 /// `--replay` with an unopenable log must abort the run, not silently fall
 /// back to a live (non-replayed) run whose output looks plausible.
 #[test]
@@ -362,13 +416,19 @@ fn replay_rejects_malformed_v5_environment_records() {
 }
 
 #[test]
-fn replay_preserves_v1_to_v4_load_compatibility() {
-    for version in 1..=4 {
+fn replay_preserves_v1_to_v5_load_compatibility() {
+    for version in 1..=5 {
         let dir = tempfile::tempdir().expect("dir");
         let log = dir.path().join(format!("v{version}.replay"));
-        let text = format!(
-            "STONE_REPLAY {version}\nseed 42\nwindow 0x1p9 0x1p9\ngame bitgun\nt 0x0p+0 0x0p+0 0x0p+0 0 0 - -\n"
-        );
+        let text = if version == 5 {
+            format!(
+                "STONE_REPLAY {version}\nseed 42\nwindow 0x1p9 0x1p9\ngame bitgun\nbuild dev\ncheckpoint 60\nenv STONE_QUIET 1 31\nt 0x0p+0 0x0p+0 0x0p+0 0 0 - -\n"
+            )
+        } else {
+            format!(
+                "STONE_REPLAY {version}\nseed 42\nwindow 0x1p9 0x1p9\ngame bitgun\nt 0x0p+0 0x0p+0 0x0p+0 0 0 - -\n"
+            )
+        };
         std::fs::write(&log, text).expect("write legacy log");
 
         let out = run_frame_raw("bitgun", 1, &["--replay", &log.to_string_lossy()]);

@@ -164,11 +164,17 @@ pub fn do_stone_watch(
         crate::game_runtime::game_compiler_for(backend, path, &output_path);
     let mut changed_paths: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
 
+    // embed_string inputs are sources the extension filter can't know
+    // (docs/comptime-plan.md): the set comes from the compiled program, seeded
+    // after every successful build, and shared with the watcher's filter.
+    let comptime_watch: crate::file_watcher::SharedWatchSet = Default::default();
+
     // Do initial compilation.
     // If it fails, we'll continue watching and start the game when compilation succeeds
     let initial_compilation_success = match compiler.compile(&changed_paths, false) {
         Ok(_) => {
             clear_error_file();
+            *comptime_watch.lock() = compiler.comptime_watch_files().into_iter().collect();
             true
         }
         Err(e) => {
@@ -229,6 +235,7 @@ pub fn do_stone_watch(
     let _watcher = FileWatcher::default_for_rock_sources()
         .with_restart_trigger(true)
         .with_extensions(vec!["rock".to_string(), "rs".to_string(), "c".to_string(), "h".to_string(), "toml".to_string()])
+        .with_shared_extra_files(comptime_watch.clone())
         .watch(watch_paths, change_tx)?;
 
     info!("Watching for changes...");
@@ -280,6 +287,20 @@ pub fn do_stone_watch(
                 needs_compiler_rebuild = true;
                 changed_compiler.push(filename);
             } else if path_str.ends_with(".rock") {
+                changed_paths.insert(path.clone());
+                changed_game.push(filename);
+            } else if comptime_watch.lock().contains(path.as_path()) {
+                // An embedded input is a source: routing it as a changed
+                // non-source path makes LiveProject take the full-rebuild arm,
+                // which re-reads the file (docs/comptime-plan.md).
+                changed_paths.insert(path.clone());
+                changed_game.push(filename);
+            } else if filename == "stick.toml" {
+                // A [build.vars]/[engine]/[assets]/[release] edit mid-session: route as
+                // a changed non-source path so LiveProject takes the
+                // full-rebuild arm, whose session rebuild re-resolves declared
+                // inputs. Dropping it here left stale vars until the next
+                // structural edit.
                 changed_paths.insert(path.clone());
                 changed_game.push(filename);
             }
@@ -372,6 +393,7 @@ pub fn do_stone_watch(
                     changed_paths.clear();
                     compilation_succeeded = true;
                     clear_error_file();
+                    *comptime_watch.lock() = compiler.comptime_watch_files().into_iter().collect();
                     if !outcome.restart_reasons.is_empty() {
                         info!(
                             "live reload requires a process restart ({})",

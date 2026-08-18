@@ -17,7 +17,7 @@ use rustc_hash::FxHashSet as HashSet;
 
 use comfy_la_arena::Idx;
 
-use crate::{reachable_blocks_from, successors};
+use crate::{collect_lambda_params, reachable_blocks_from, successors};
 use skull_mir::mir::{Block, Cell, Inst, MirFunc, Term};
 
 /// A dense fixed-size bit set over `0..n` — used for cell liveness/interference,
@@ -348,7 +348,7 @@ pub fn color_values(
             }
         }
     }
-    values.sort_by_key(|v| u32::from(v.into_raw()));
+    values.sort_by_key(|v| func.emit_inst_id(*v));
     values.dedup();
     let v_count = values.len();
     // Dense value -> dense index (raw-id keyed). `vi[raw(v)]` replaces the FxHash
@@ -437,7 +437,8 @@ pub fn color_values(
             let cur = block_part[raw(b)];
             let tighter = cur == 0 || {
                 let c = &loops[cur as usize - 1];
-                (c.region.len(), raw(c.header)) > (ls.region.len(), raw(ls.header))
+                (c.region.len(), func.emit_block_id(c.header))
+                    > (ls.region.len(), func.emit_block_id(ls.header))
             };
             if tighter {
                 block_part[raw(b)] = k as u32 + 1;
@@ -653,7 +654,12 @@ pub fn color_cells(func: &MirFunc) -> Vec<u32> {
 
     // Cells any closure sub-CFG touches must stay unique (the closure captures /
     // mutates the local by reference). Closure blocks are those not in `top`.
-    let mut force_unique: HashSet<Idx<Cell>> = HashSet::default();
+    let mut force_unique: HashSet<Idx<Cell>> = collect_lambda_params(func);
+    let forced_emit_ids: HashSet<u32> = func
+        .emit_ids
+        .as_ref()
+        .map(|ids| ids.forced_cells.iter().copied().collect())
+        .unwrap_or_default();
     for (bid, b) in func.blocks.iter() {
         if top_set.contains(&bid) {
             continue;
@@ -669,21 +675,21 @@ pub fn color_cells(func: &MirFunc) -> Vec<u32> {
     }
 
     // Color EVERY cell of the function (an ordinary fn has no frame cells) into a
-    // dense `0..C` index space so liveness/interference run on bitsets. A cell not
-    // referenced in a top block is still declared as an outer local, so it must
-    // get a `c<color>` — never a raw `c<raw>` that could collide with a colored
-    // cell sharing that raw integer.
-    let cells: Vec<Idx<Cell>> = {
-        let mut v: Vec<Idx<Cell>> = func.cells.iter().map(|(id, _)| id).collect();
-        v.sort_by_key(|c| u32::from(c.into_raw()));
-        v
-    };
-    let c_count = cells.len();
-    // Dense cell -> dense index (raw-id keyed); replaces the `ci[&c]` FxHash
-    // lookups in the liveness/interference inner loops.
+    // dense `0..C` index space so liveness/interference run on bitsets. A compact
+    // inline template leaves holes in the logical source arena; retain those as
+    // zero-edge virtual cells so removing them does not renumber later colors.
+    let c_count = func.emit_cell_span() as usize;
+    let mut ordered: Vec<Option<Idx<Cell>>> = vec![None; c_count];
+    for (id, _) in func.cells.iter() {
+        ordered[func.emit_cell_id(id) as usize] = Some(id);
+    }
+    // Dense physical cell -> logical index (raw-id keyed); replaces the `ci[&c]`
+    // FxHash lookups in the liveness/interference inner loops.
     let mut ci = vec![u32::MAX; func.cells.len()];
-    for (i, &c) in cells.iter().enumerate() {
-        ci[raw(c)] = i as u32;
+    for (i, c) in ordered.iter().enumerate() {
+        if let Some(c) = c {
+            ci[raw(*c)] = i as u32;
+        }
     }
 
     // Per-block upward-exposed uses and defs (bit sets) over top-level blocks.
@@ -784,6 +790,11 @@ pub fn color_cells(func: &MirFunc) -> Vec<u32> {
             force_idx[k as usize] = true;
         }
     }
+    for &emit_id in &forced_emit_ids {
+        if let Some(slot) = force_idx.get_mut(emit_id as usize) {
+            *slot = true;
+        }
+    }
     // Interference edges between NON-force-unique cells only: a force-unique cell
     // gets a dedicated color in `0..base` and every other cell's search starts at
     // `base`, so edges touching a force cell never change a coloring result. CSR
@@ -853,9 +864,11 @@ pub fn color_cells(func: &MirFunc) -> Vec<u32> {
     let mut colors: Vec<u32> = vec![u32::MAX; func.cells.len()];
     let mut color_of: Vec<u32> = vec![u32::MAX; c_count];
     let mut next_unique = 0u32;
-    for (i, &c) in cells.iter().enumerate() {
+    for (i, c) in ordered.iter().enumerate() {
         if force_idx[i] {
-            colors[raw(c)] = next_unique;
+            if let Some(c) = c {
+                colors[raw(*c)] = next_unique;
+            }
             color_of[i] = next_unique;
             next_unique += 1;
         }
@@ -867,7 +880,7 @@ pub fn color_cells(func: &MirFunc) -> Vec<u32> {
     // all below `base`. Arena order for deterministic output. `used` is a dense
     // bool scratch reused across cells (no per-cell HashSet alloc).
     let mut used: Vec<bool> = Vec::new();
-    for (i, &c) in cells.iter().enumerate() {
+    for (i, c) in ordered.iter().enumerate() {
         if force_idx[i] {
             continue;
         }
@@ -886,7 +899,9 @@ pub fn color_cells(func: &MirFunc) -> Vec<u32> {
         while col < used.len() && used[col] {
             col += 1;
         }
-        colors[raw(c)] = col as u32;
+        if let Some(c) = c {
+            colors[raw(*c)] = col as u32;
+        }
         color_of[i] = col as u32;
     }
     colors

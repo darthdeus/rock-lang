@@ -468,8 +468,8 @@ function __rock_make_enum(variant, ty, kv) {
 /// reproduce the Lua renderer for the cross-backend `inspect(x) == "..."` pins.
 ///
 /// A struct renders through `__rock_inspect_ty[<__ty>]`, a per-type function
-/// `build_inspect_ty_defs` emits for every reachable struct: it supplies the
-/// DECLARED fields, because a null field is an absent key and a key walk alone
+/// `build_inspect_ty_defs` emits for every realized struct and declared child: it
+/// supplies the DECLARED fields, because a null field is an absent key and a key walk alone
 /// therefore under-reports the shape, and an `embed` field is stored as flat
 /// `<name>.<leaf>` slots that carry no declared name at all. That is luajit's
 /// `_G.__ROCK_TYPE_TABLE` lookup replaced by compile-time-emitted dispatch
@@ -921,8 +921,17 @@ function __sw_sdl_keycode(e) {
   return 0;
 }
 
-function __sw_push_event(type, key, btn, x, y) {
-  __SW.events.push({ type: type, key: key, mouse_button: btn, mouse_x: x, mouse_y: y });
+function __sw_push_event(type, key, btn, x, y, scancode, modifiers, repeat) {
+  __SW.events.push({
+    type: type, key: key, scancode: scancode || 0, modifiers: modifiers || 0,
+    repeat: !!repeat, mouse_button: btn, mouse_x: x, mouse_y: y,
+    pad_instance_id: -1, pad_button: "", pad_axis: "", pad_value: 0, pad_sync: false
+  });
+}
+
+function __sw_key_modifiers(e) {
+  return (e.ctrlKey ? 1 : 0) | (e.shiftKey ? 2 : 0) |
+    (e.altKey ? 4 : 0) | (e.metaKey ? 8 : 0);
 }
 
 // Mirror of lib.rock sdl_keycode_to_string: the polled key-state map is keyed by
@@ -983,7 +992,7 @@ function __sw_audio_decode(id, path) {
     function (e) { __sw_log_once("stone_load_sound: decode failed for " + path + " (" + (e && e.message) + ")"); });
   return id;
 }
-function stone_audio_init() { __sw_audio_ctx(); return true; }
+function stone_audio_init() { return __sw_audio_ctx() !== null; }
 function stone_quit() { __SW.quitReq = true; }
 function stone_quit_requested() { return __SW.quitReq; }
 function stone_is_initialized() { return __SW.initialized; }
@@ -1019,11 +1028,18 @@ function stone_create_window_ex(title, x, y, width, height, display, resizable, 
 
   window.addEventListener("keydown", function (e) {
     var kc = __sw_sdl_keycode(e);
-    if (kc !== 0) { __SW.keysDown[__sw_keycode_to_string(kc)] = true; __sw_push_event(2, kc, 0, 0, 0); e.preventDefault(); }
+    if (kc !== 0) {
+      __SW.keysDown[__sw_keycode_to_string(kc)] = true;
+      __sw_push_event(2, kc, 0, 0, 0, 0, __sw_key_modifiers(e), e.repeat);
+      e.preventDefault();
+    }
   });
   window.addEventListener("keyup", function (e) {
     var kc = __sw_sdl_keycode(e);
-    if (kc !== 0) { __SW.keysDown[__sw_keycode_to_string(kc)] = false; __sw_push_event(3, kc, 0, 0, 0); }
+    if (kc !== 0) {
+      __SW.keysDown[__sw_keycode_to_string(kc)] = false;
+      __sw_push_event(3, kc, 0, 0, 0, 0, __sw_key_modifiers(e), e.repeat);
+    }
   });
   canvas.addEventListener("mousemove", function (e) {
     var r = canvas.getBoundingClientRect();
@@ -1086,7 +1102,11 @@ function stone_poll_event(ev) {
   if (q.length === 0) return false;
   var e = q.shift();
   ev.type = e.type; ev.key = e.key; ev.mouse_button = e.mouse_button;
-  ev.mouse_x = e.mouse_x; ev.mouse_y = e.mouse_y;
+  ev.scancode = e.scancode || 0; ev.modifiers = e.modifiers || 0;
+  ev.repeat = !!e.repeat; ev.mouse_x = e.mouse_x; ev.mouse_y = e.mouse_y;
+  ev.pad_instance_id = e.pad_instance_id == null ? -1 : e.pad_instance_id;
+  ev.pad_button = e.pad_button || ""; ev.pad_axis = e.pad_axis || "";
+  ev.pad_value = e.pad_value || 0; ev.pad_sync = !!e.pad_sync;
   return true;
 }
 function stone_get_mouse_position(px, py) { px[0] = Math.round(__SW.mouseX); py[0] = Math.round(__SW.mouseY); }
@@ -1124,7 +1144,7 @@ function stone_sprite_init() {
 // here states the sprite vertex; the Rock `Vertex` struct owns it and the
 // caller derives both numbers from it. Returns -1 for no draw, 0 for an
 // untextured draw, and 1 when the texture was bound.
-function stone_draw_mesh(data, count, stride, attr_sizes, attr_count, tex) {
+function stone_draw_mesh(data, count, stride, attr_sizes, attr_count, texKind, tex) {
   var gl = __SW.gl;
   if (!gl || count <= 0) return -1;
   var sh = __SW.shaders[__SW.curShader];
@@ -1133,7 +1153,8 @@ function stone_draw_mesh(data, count, stride, attr_sizes, attr_count, tex) {
     return -1;
   }
   gl.useProgram(sh.prog);
-  var t = __SW.textures[tex];
+  var c = texKind === 1 ? __SW.canvases[tex] : null;
+  var t = c ? c.tex : __SW.textures[tex];
   var textureBound = false;
   if (t) {
     gl.activeTexture(gl.TEXTURE0);
@@ -1324,6 +1345,10 @@ function stone_image_set_wrap(h, repeat) {
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, mode);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, mode);
   return true;
+}
+function stone_image_wrap_state(h) {
+  if (!__SW.textures || !__SW.textures[h]) return -1;
+  return __SW.imageRepeat[h] ? 1 : 0;
 }
 function stone_unload_image(h) {
   var t = __SW.textures[h];
@@ -1530,11 +1555,6 @@ function stone_bind_canvas_depth_to_unit(h, unit) {
 }
 function stone_canvas_exists(h) { return !!__SW.canvases[h]; }
 function stone_canvas_has_depth(h) { var c = __SW.canvases[h]; return !!(c && c.depthTex); }
-function stone_sprite_draw_canvas(shader, h, tw, th, x, y, w, hh, sx, sy, sw, sh) {
-  var c = __SW.canvases[h];
-  if (!c) return;
-  stone_sprite_draw_texture(shader, c.tex, tw, th, x, y, w, hh, sx, sy, sw, sh, 0, 1, 1, 1, 1, 1, 1);
-}
 // GL names, for the imgui path only.
 function stone_get_canvas_texture(h) { var c = __SW.canvases[h]; return c ? c.tex : 0; }
 function stone_get_canvas_depth_texture(h) { var c = __SW.canvases[h]; return c ? (c.depthTex || 0) : 0; }
@@ -1976,6 +1996,7 @@ function stone_shader_set_vec4_array(h, name, values, count) {
   __sw_with_shader_uniform(h, name, function (gl, l) { gl.uniform4fv(l, values.subarray ? values.subarray(0, count * 4) : values); });
 }
 function stone_bind_image_texture_to_unit(h, unit) { return stone_bind_texture_to_unit(h, unit) !== 0; }
+function stone_image_exists(h) { return !!(__SW.textures && __SW.textures[h]); }
 function stone_bind_texture_to_unit(tex, unit) {
   var gl = __SW.gl, t = __SW.textures[tex];
   if (!gl || !t || unit < 0) return 0;
@@ -2104,7 +2125,7 @@ function stone_draw_fullscreen_quad() {
 
 // --- text: canvas2d glyph atlas (MC, docs/stone-web-plan.md § text) ---
 // The boot preload registered each shipped TTF as a FontFace; the bake here
-// is synchronous canvas2d against that family. All of ASCII 32..126 bakes as
+// is synchronous canvas2d against that family. ASCII 32..126 plus Á bakes as
 // one 16-glyph-wide atlas; density changes explicitly rebake into the same
 // texture handle. Atlas pixels are
 // coverage-RGBA (r=g=b=a=coverage, built from the canvas ALPHA channel --
@@ -2161,7 +2182,11 @@ function __sw_bake_font(path, pixelSize, existingAtlas, faceMask) {
   var shear = Math.tan((__SW_OBLIQUE_DEG * Math.PI) / 180);
   var embolden = pixelSize * __SW_BOLD_PER_PX;
 
-  // Pass 1: metrics for all 95 glyphs of every declared face -> cell size.
+  var slots = [];
+  for (var ascii = 32; ascii <= 126; ascii++) slots.push({ slot: ascii, cp: ascii, ch: String.fromCharCode(ascii) });
+  slots.push({ slot: 127, cp: 0x00C1, ch: "Á" });
+
+  // Pass 1: metrics for every text slot of every declared face -> cell size.
   // The cell holds the WIDEST face: an oblique pushes ink past its own
   // advance, so sizing from regular alone would bleed bold-italic into the
   // next cell. Canvas gives no sheared metrics, so the extra extent is
@@ -2174,8 +2199,10 @@ function __sw_bake_font(path, pixelSize, existingAtlas, faceMask) {
     var isBold = face === 1 || face === 3;
     var isItalic = face === 2 || face === 3;
     var faceInfos = [];
-    for (var cp = 32; cp <= 126; cp++) {
-      var ch = String.fromCharCode(cp);
+    for (var si = 0; si < slots.length; si++) {
+      var spec = slots[si];
+      var cp = spec.cp;
+      var ch = spec.ch;
       var m = mctx.measureText(ch);
       var left = m.actualBoundingBoxLeft || 0;
       var right = m.actualBoundingBoxRight || 0;
@@ -2186,7 +2213,7 @@ function __sw_bake_font(path, pixelSize, existingAtlas, faceMask) {
       var gw = Math.ceil(left + right + grow + lean);
       var gh = Math.ceil(ascent + descent + grow);
       faceInfos.push({
-        cp: cp, ch: ch, face: face, bold: isBold, italic: isItalic,
+        slot: spec.slot, cp: cp, ch: ch, face: face, bold: isBold, italic: isItalic,
         left: left + grow / 2, ascent: ascent + grow / 2,
         w: gw, h: gh, advance: m.width + grow,
       });
@@ -2199,7 +2226,7 @@ function __sw_bake_font(path, pixelSize, existingAtlas, faceMask) {
   cellW += PAD * 2;
   cellH += PAD * 2;
   var COLS = 16; // mirror native text.rs grid
-  var rowsPerFace = Math.ceil(95 / COLS);
+  var rowsPerFace = Math.ceil(slots.length / COLS);
   var aw = COLS * cellW, ah = rowsPerFace * baked.length * cellH;
 
   var canvas = document.createElement("canvas");
@@ -2242,7 +2269,7 @@ function __sw_bake_font(path, pixelSize, existingAtlas, faceMask) {
       ctx.restore();
       // 9-float glyph info: [u0 v0 u1 v1 width height bearing_x bearing_y advance];
       // bearing_y is TOP-based (ink top above baseline = actualBoundingBoxAscent).
-      glyphs[g.face][g.cp] = new Float32Array([
+      glyphs[g.face][g.slot] = new Float32Array([
         cx / aw, cy / ah, (cx + g.w) / aw, (cy + g.h) / ah,
         g.w, g.h, -g.left, g.ascent, g.advance,
       ]);
@@ -2321,6 +2348,11 @@ function stone_get_glyph_info_for(fontId, face, ch, out) {
   for (var i = 0; i < 9; i++) out[i] = g[i];
   return true;
 }
+function __sw_glyph_slot(cp) {
+  if (cp >= 32 && cp <= 126) return cp;
+  if (cp === 0x00C1) return 127;
+  return -1;
+}
 // Shim-side measure, from the shim's OWN advances (native-formula drift is
 // the bug class this avoids): width = max line sum(advance)*scale; height
 // single-line = max glyph height*scale, multi-line adds (lines-1)*em*1.2.
@@ -2334,7 +2366,7 @@ function stone_measure_text_js(fontId, text, scale) {
   var lines = 1, w = 0, lineW = 0, maxH = 0;
   for (var i = 0; i < s.length; i++) {
     if (s[i] === "\n") { lines++; if (lineW > w) w = lineW; lineW = 0; continue; }
-    var g = f.glyphs[0][s.charCodeAt(i)];
+    var g = f.glyphs[0][__sw_glyph_slot(s.charCodeAt(i))];
     if (g) { lineW += g[8]; if (g[5] > maxH) maxH = g[5]; }
   }
   if (lineW > w) w = lineW;
@@ -2349,7 +2381,7 @@ function stone_get_text_baseline_for(fontId, text, scale) {
   var s = String(text);
   var b = 0;
   for (var i = 0; i < s.length; i++) {
-    var g = f.glyphs[0][s.charCodeAt(i)];
+    var g = f.glyphs[0][__sw_glyph_slot(s.charCodeAt(i))];
     if (g && g[7] > b) b = g[7];
   }
   return b * Math.abs(scale);
@@ -2400,7 +2432,11 @@ function stone_rename(src, dst) {
   delete __ROCK_WEB_FILES[src];
   return true;
 }
-function stone_remove_file(path) { delete __ROCK_WEB_FILES[path]; return true; }
+function stone_remove_file(path) {
+  if (!Object.prototype.hasOwnProperty.call(__ROCK_WEB_FILES, path)) return false;
+  delete __ROCK_WEB_FILES[path];
+  return true;
+}
 
 // --- subprocess (chess UCI): no child processes in a browser; the spawn is a
 // loud stub returning 0 so sf_start drops to the built-in engine. ---
@@ -2475,16 +2511,21 @@ function stone_reload_sound(h, path) {
   if (!__sw_audio_ctx()) return false;
   return __sw_audio_decode(h, path) !== 0;
 }
-function stone_unload_sound(h) { delete __SW.audio.sounds[h]; return true; }
-// `bus` is STONE_BUS_* (lib.rock): 0 master, 1 sfx, 2 music, 3 ambience, 4 ui.
+function stone_unload_sound(h) {
+  if (!Object.prototype.hasOwnProperty.call(__SW.audio.sounds, h)) return false;
+  delete __SW.audio.sounds[h];
+  return true;
+}
+// `bus` is STONE_BUS_* (lib.rock): 0 master, 1 sfx, 2 music, 3 ambience, 4 ui, 5 foley.
 // The web mixer has only sfx and music nodes, so music routes to musicGain and
 // every other bus shares sfxGain -- the topology is coarser than native, not
 // ignored.
-function stone_play_sound(h, bus, volume, speed, decay) {
+function stone_play_sound(h, bus, volume, speed, decay, looped) {
   var A = __SW.audio, s = A.sounds[h];
   if (!A.ctx || !s || !s.buffer) return;
   var src = A.ctx.createBufferSource();
   src.buffer = s.buffer;
+  src.loop = looped;
   src.playbackRate.value = Math.min(Math.max(speed, 0.05), 8);
   var g = A.ctx.createGain();
   var vol = Math.max(volume, 0);
@@ -2519,7 +2560,7 @@ function stone_stop_music() {
   var A = __SW.audio;
   if (A.musicSrc) { try { A.musicSrc.stop(); } catch (e) {} A.musicSrc = null; }
 }
-// No bus graph on web v1 (mixer.rock's five strips have no WebAudio
+// No bus graph on web v1 (mixer.rock's strips have no WebAudio
 // counterpart yet); every bus/voice op below is a silent stub, same tier as
 // the convolver reverb has always been.
 function stone_bus_set_gain(bus, gain) { return false; }
@@ -2528,6 +2569,7 @@ function stone_bus_duck_count(bus) { return 0; }
 function stone_bus_gain(bus) { return 1; }
 function stone_bus_peak(bus) { return 0; }
 function stone_bus_set_lowpass(bus, cutoff_hz, q) { return false; }
+function stone_bus_lowpass_cutoff(bus) { return 0; }
 function stone_bus_set_distortion(bus, drive, mix) { return false; }
 function stone_bus_set_reverb(bus, enabled, room_size, damping, wet, dry, width) { return false; }
 function stone_bus_duck(bus, depth, attack_secs, release_secs) { return false; }

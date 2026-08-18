@@ -14,7 +14,9 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use ustr::Ustr;
 
 use crate::instance::Instance;
-use crate::mir::{ColumnElem, ContainerKind, CoroHookKind, FuncRef, Inst, Lit, MirFunc, Term};
+use crate::mir::{
+    ColumnElem, ContainerKind, CoroHookKind, FuncRef, Inst, Lit, MirFunc, Term, ValueCtorForm,
+};
 use crate::monoty::MonoInterner;
 
 /// The source location used to identify a lambda within one concrete owner.
@@ -695,6 +697,23 @@ impl BodyHasher {
         self.hash.write_usize(canonical);
     }
 
+    fn option_rep_id(&mut self, id: Option<crate::lower::RepId>) {
+        match id {
+            Some(id) => {
+                self.boolean(true);
+                self.rep_id(id);
+            }
+            None => self.boolean(false),
+        }
+    }
+
+    fn value_ctor_form(&mut self, form: ValueCtorForm) {
+        self.tag(match form {
+            ValueCtorForm::Declared => 0,
+            ValueCtorForm::Leaves => 1,
+        });
+    }
+
     fn inst_list(&mut self, values: &[Idx<Inst>]) {
         self.hash.write_usize(values.len());
         for value in values {
@@ -922,9 +941,10 @@ impl BodyHasher {
                 self.tag(65);
                 self.inst_list(values);
             }
-            Inst::MakeVecColumns { elem, nobox, columns, len, capacity } => {
+            Inst::MakeVecColumns { elem, representation, nobox, columns, len, capacity } => {
                 self.tag(66);
                 self.string(elem.as_str());
+                self.rep_id(*representation);
                 self.boolean(*nobox);
                 self.hash.write_usize(columns.len());
                 for (name, values) in columns {
@@ -934,9 +954,10 @@ impl BodyHasher {
                 self.hash.write_usize(*len);
                 self.inst_idx(*capacity);
             }
-            Inst::MakeVecColumnHeader { elem, nobox, capacity } => {
+            Inst::MakeVecColumnHeader { elem, representation, nobox, capacity } => {
                 self.tag(67);
                 self.string(elem.as_str());
+                self.rep_id(*representation);
                 self.boolean(*nobox);
                 self.inst_idx(*capacity);
             }
@@ -949,18 +970,22 @@ impl BodyHasher {
                     self.inst_idx(*value);
                 }
             }
-            Inst::MakeValueStruct { name, fields } => {
+            Inst::MakeValueStruct { name, representation, form, fields } => {
                 self.tag(69);
                 self.string(name.as_str());
+                self.rep_id(*representation);
+                self.value_ctor_form(*form);
                 self.hash.write_usize(fields.len());
                 for (field, value) in fields {
                     self.string(field.as_str());
                     self.inst_idx(*value);
                 }
             }
-            Inst::MaterializeValueStruct { name, fields } => {
+            Inst::MaterializeValueStruct { name, representation, form, fields } => {
                 self.tag(70);
                 self.string(name.as_str());
+                self.rep_id(*representation);
+                self.value_ctor_form(*form);
                 self.hash.write_usize(fields.len());
                 for (field, value) in fields {
                     self.string(field.as_str());
@@ -1004,10 +1029,11 @@ impl BodyHasher {
                     self.inst_idx(*value);
                 }
             }
-            Inst::FfiNewArray { ctype, count } => {
+            Inst::FfiNewArray { ctype, count, representation } => {
                 self.tag(74);
                 self.string(ctype.as_str());
                 self.inst_idx(*count);
+                self.option_rep_id(*representation);
             }
             Inst::FfiViewCast { cty, ptr } => {
                 self.tag(75);

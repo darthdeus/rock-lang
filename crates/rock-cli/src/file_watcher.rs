@@ -47,7 +47,15 @@ pub struct FileWatcherConfig {
     pub watch_extensions: Vec<String>,
     pub watch_all_files: bool,
     pub ignored_roots: Vec<PathBuf>,
+    /// Exact files watched IN ADDITION to the extension filter, shared with
+    /// the owner so it can be updated after watcher creation. Used for
+    /// embed_string inputs (docs/comptime-plan.md): the set is only known
+    /// after a compile, and grows/shrinks as the game's embeds change.
+    pub extra_files: Option<SharedWatchSet>,
 }
+
+/// Canonicalized paths consulted by the debounce filter on every event.
+pub type SharedWatchSet = std::sync::Arc<parking_lot::Mutex<HashSet<PathBuf>>>;
 
 impl Default for FileWatcherConfig {
     fn default() -> Self {
@@ -58,6 +66,7 @@ impl Default for FileWatcherConfig {
             watch_extensions: vec!["rock".to_string()],
             watch_all_files: false,
             ignored_roots: Vec::new(),
+            extra_files: None,
         }
     }
 }
@@ -130,6 +139,13 @@ impl FileWatcher {
 
     pub fn with_all_files(mut self) -> Self {
         self.config.watch_all_files = true;
+        self
+    }
+
+    /// Watch these exact files as well as the extension set; the shared handle
+    /// stays with the caller, which refreshes it after each compile.
+    pub fn with_shared_extra_files(mut self, files: SharedWatchSet) -> Self {
+        self.config.extra_files = Some(files);
         self
     }
 
@@ -214,6 +230,12 @@ impl FileWatcher {
                             let affects_watched_files = event_paths.iter().any(|path| {
                                 if config.watch_all_files {
                                     return !path.to_string_lossy().ends_with('~');
+                                }
+                                if let Some(extra) = config.extra_files.as_ref() {
+                                    let member = extra.lock().contains(path.as_path());
+                                    if member {
+                                        return true;
+                                    }
                                 }
                                 if let Some(ext) = path.extension() {
                                     if let Some(ext_str) = ext.to_str() {
@@ -334,5 +356,21 @@ impl FileWatcher {
         }
 
         Ok(debouncer)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shared_watch_set_survives_a_writer_panic() {
+        let set: SharedWatchSet = Default::default();
+        let writer = set.clone();
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            writer.lock().insert(PathBuf::from("held"));
+            panic!("poison probe");
+        }));
+        assert!(set.lock().contains(&PathBuf::from("held")));
     }
 }

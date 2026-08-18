@@ -5,6 +5,7 @@
 //! substitution that produced them.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use bone_semantic::hir::{BindingInfo, Expr};
 use bone_semantic::prelude::ModuleId;
@@ -87,6 +88,8 @@ pub struct ConcreteSignature {
     pub result: Option<MonoTyId>,
 }
 
+pub type ConcreteSignatureHandle = Arc<ConcreteSignature>;
+
 /// All concrete facts MIR lowering needs for one body.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ConcreteBodyPlan {
@@ -99,19 +102,21 @@ pub struct ConcreteBodyPlan {
     /// Struct-default domains entered while lowering this owner. The key is
     /// part of the plan because each domain has a distinct HIR arena.
     pub foreign_domains: BTreeMap<SiteDomain, ConcreteTypeTables>,
-    pub signature: ConcreteSignature,
+    pub signature: ConcreteSignatureHandle,
     /// Every resolved site is owned by its concrete callee instance.
     pub callees: BTreeMap<Site, Instance>,
     /// Concrete signatures for the same resolved sites, including boundaries
     /// whose body is supplied by the target rather than lowered here.
-    pub callee_signatures: BTreeMap<Site, ConcreteSignature>,
+    pub callee_signatures: BTreeMap<Site, ConcreteSignatureHandle>,
     /// Sites the graph visited but could not resolve. Keeping these distinct
     /// from absent entries lets lowering report a planned failure at the site.
     pub failed_sites: BTreeMap<Site, &'static str>,
     pub bound_tree: ResolvedBoundTree,
 }
 
-pub type ConcretePlans = BTreeMap<Instance, ConcreteBodyPlan>;
+/// Stable per-instance plan handles. The table is still ordered for
+/// deterministic iteration, while replacing one body only swaps its handle.
+pub type ConcretePlans = BTreeMap<Instance, Arc<ConcreteBodyPlan>>;
 pub type ConcreteAlwaysPlans = FxHashMap<ConcreteOwner, ConcreteBodyPlan>;
 
 impl ConcreteBodyPlan {
