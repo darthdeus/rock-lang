@@ -31,19 +31,18 @@ fn ui_frag(vary: UiVary, @uniform u: UiFragU) -> Vec4 {
 }
 "#;
 
-/// A unique temp dir for a test (nextest runs each test in its own process;
-/// distinct names keep parallel tests from colliding).
-fn scratch(name: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("rock_shader_pipeline_{name}"));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+fn scratch(name: &str) -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix(&format!("rock_shader_pipeline_{name}_"))
+        .tempdir()
+        .unwrap()
 }
 
 #[test]
 fn two_root_form_emits_pipeline() {
     let dir = scratch("two_root");
-    let src = dir.join("ui.rock");
-    let out = dir.join("ui.glsl");
+    let src = dir.path().join("ui.rock");
+    let out = dir.path().join("ui.glsl");
     std::fs::write(&src, PIPELINE_SRC).unwrap();
 
     let status = Command::new(rock_bin())
@@ -76,8 +75,8 @@ fn two_root_form_emits_pipeline() {
 #[test]
 fn profile_300es_selected() {
     let dir = scratch("es300");
-    let src = dir.join("ui.rock");
-    let out = dir.join("ui.glsl");
+    let src = dir.path().join("ui.rock");
+    let out = dir.path().join("ui.glsl");
     std::fs::write(&src, PIPELINE_SRC).unwrap();
 
     let status = Command::new(rock_bin())
@@ -102,7 +101,7 @@ fn profile_300es_selected() {
 #[test]
 fn unknown_profile_rejects_listing_valid() {
     let dir = scratch("badprofile");
-    let src = dir.join("ui.rock");
+    let src = dir.path().join("ui.rock");
     std::fs::write(&src, PIPELINE_SRC).unwrap();
 
     let out = Command::new(rock_bin())
@@ -120,8 +119,8 @@ fn unknown_profile_rejects_listing_valid() {
 #[test]
 fn failed_emission_invalidates_the_previous_output() {
     let dir = scratch("failed_emission");
-    let src = dir.join("bad.rock");
-    let output = dir.join("bad.glsl");
+    let src = dir.path().join("bad.rock");
+    let output = dir.path().join("bad.glsl");
     std::fs::write(
         &src,
         "@shader(fragment)\nfn bad(tc: Vec2) -> float { return tc.x }\n",
@@ -147,7 +146,7 @@ fn failed_emission_invalidates_the_previous_output() {
 #[test]
 fn output_cannot_alias_the_source() {
     let dir = scratch("source_output_alias");
-    let src = dir.join("ui.rock");
+    let src = dir.path().join("ui.rock");
     std::fs::write(&src, PIPELINE_SRC).unwrap();
 
     let result = Command::new(rock_bin())
@@ -169,7 +168,7 @@ fn output_cannot_alias_the_source() {
     {
         use std::os::unix::fs::symlink;
 
-        let alias = dir.join("alias.glsl");
+        let alias = dir.path().join("alias.glsl");
         symlink(&src, &alias).unwrap();
         let result = Command::new(rock_bin())
             .args([
