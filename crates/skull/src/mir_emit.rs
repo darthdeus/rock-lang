@@ -5177,13 +5177,26 @@ fn code_slot_registration_lua(
             artifact.census
         )));
     }
-    let mut entries: Vec<_> = artifact.entries.values().filter(|entry| entry.escaping).collect();
-    entries.sort_by_key(|entry| entry.identity.logical_key(ws, scx.interner()));
+    code_slot_registration_lua_entries(ws, scx, artifact.entries.values(), false)
+}
+
+fn code_slot_registration_lua_entries<'a>(
+    ws: &Workspace,
+    scx: &skull_mir::lower::ScalarCtx,
+    source: impl IntoIterator<Item = &'a skull_mir::code_identity::CodeEntry>,
+    begin_when_empty: bool,
+) -> Result<String, CompilerError> {
+    let entries: Vec<_> = source.into_iter().filter(|entry| entry.escaping).collect();
     if entries.is_empty() {
-        return Ok(String::new());
+        return Ok(if begin_when_empty {
+            "__rock_code_slot_begin()\n".to_string()
+        } else {
+            String::new()
+        });
     }
-    let mut out = String::new();
-    out.push_str("__rock_code_slot_begin()\n");
+    let mut entries = entries;
+    entries.sort_by_key(|entry| entry.identity.logical_key(ws, scx.interner()));
+    let mut out = String::from("__rock_code_slot_begin()\n");
     for entry in entries {
         let Some(body) = entry.body_name else {
             return Err(CompilerError::new_no_location(format!(
@@ -5201,6 +5214,34 @@ fn code_slot_registration_lua(
         .expect("writing a String cannot fail");
     }
     Ok(out)
+}
+
+fn overlay_code_artifact(
+    ws: &Workspace,
+    cache: &SkullEmitCache,
+    bodies: &[Instance],
+) -> skull_mir::code_identity::CodeArtifact {
+    let mut artifact = skull_mir::code_identity::CodeArtifact::default();
+    for body in bodies {
+        if let Some(Ok(chunk)) = cache.chunks.get(body) {
+            for entry in chunk.code_artifact.entries.values().filter(|entry| entry.escaping) {
+                artifact.insert(entry.clone());
+            }
+        }
+        if !body.args.is_empty() {
+            continue;
+        }
+        let fref = body.func;
+        let identity = skull_mir::code_identity::CodeIdentity::Named(Instance::base(fref));
+        let Some(entry) = cache.code_artifact.entries.get(&identity) else {
+            continue;
+        };
+        let mut entry = entry.clone();
+        let body_name = mangle_fn(ws, &ws.module(fref.module).functions[fref.func]);
+        entry.body_name = Some(Ustr::from(&body_name));
+        artifact.insert(entry);
+    }
+    artifact
 }
 
 fn code_slot_publish_lua(
@@ -6849,6 +6890,7 @@ fn assemble_overlay(
     ws: &Workspace,
     cache: &SkullEmitCache,
     shader_changed: bool,
+    overlay_code_artifact: &skull_mir::code_identity::CodeArtifact,
 ) -> Result<(MirEmit, UnitComptimeReads), CompilerError> {
     let mut out = String::from("-- skull incremental overlay (loaded after main.lua)\n");
     let mut skipped: Vec<(String, String)> = Vec::new();
@@ -6871,9 +6913,14 @@ fn assemble_overlay(
             None => {}
         }
     }
-    let code_slot_stage = code_slot_registration_lua(ws, &cache.scx, &cache.code_artifact)?;
+    let has_code_slots = cache.code_artifact.entries.values().any(|entry| entry.escaping);
+    let code_slot_stage = code_slot_registration_lua_entries(
+        ws,
+        &cache.scx,
+        overlay_code_artifact.entries.values(),
+        has_code_slots,
+    )?;
     out.push_str(&code_slot_stage);
-
     // Reset `static` cells whose initializer MEANING changed since the last full
     // build (`type@init_hash` key differs from the baseline). A static is
     // name-keyed and lazy, so redefining its fn above leaves the warmed cell +
@@ -7121,8 +7168,12 @@ pub fn emit_overlay_with_span_edits(
     let t2 = Instant::now();
     // Shader registrations FIRST -- their dependencies are graph/view roots, so
     // `update_chunk_cache`'s re-walk must see this edit's set.
+    let t_shader = Instant::now();
     let shader_changed = cache.update_shader_registrations(ws, reinferred)?;
+    let d_shader = t_shader.elapsed();
+    let t_chunk = Instant::now();
     let (affected, update, added_errors) = cache.update_chunk_cache(ws, reinferred, edits)?;
+    let d_chunk = t_chunk.elapsed();
     if let Some(err) = SkullEmitCache::combine_errors(added_errors) {
         return Err(err);
     }
@@ -7141,6 +7192,7 @@ pub fn emit_overlay_with_span_edits(
             }
         }
     }
+    let t_replacements = Instant::now();
     let replacements: Vec<&skull_mir::code_identity::CodeArtifact> = cache
         .changed_since_full
         .iter()
@@ -7148,11 +7200,13 @@ pub fn emit_overlay_with_span_edits(
         .map(|chunk| &chunk.code_artifact)
         .collect();
     let next_code_artifact = cache.code_artifact.with_replacements(&replacements);
+    let d_replacements = t_replacements.elapsed();
     if !cache.code_artifact.compatible_overlay(&next_code_artifact) {
         return Err(CompilerError::new_no_location(
             "Rock CodeRef compatibility requires a safe restart".to_string(),
         ));
     }
+    let t_statics = Instant::now();
     let statics: Vec<skull_mir::mir::StaticCell> = cache
         .chunks
         .iter()
@@ -7160,13 +7214,50 @@ pub fn emit_overlay_with_span_edits(
         .filter_map(|(_, chunk)| chunk.as_ref().ok())
         .flat_map(|chunk| chunk.statics.iter().cloned())
         .collect();
-    let next_state_schema = skull_mir::state_schema::StateSchema::collect(
-        ws,
-        &cache.scx,
-        &next_code_artifact,
-        &statics,
-    )
-    .map_err(|error| CompilerError::new_no_location(error.to_string()))?;
+    let d_statics = t_statics.elapsed();
+    let t_schema = Instant::now();
+    let body_only_state_change = reinferred
+        .iter()
+        .all(|(_, owner)| matches!(owner, BodyOwner::Function(_)));
+    let mut full_schema_collection = false;
+    let next_state_schema = if body_only_state_change {
+        if let Some(old) = cache.state_schema.as_ref() {
+            let unchanged = old
+                .dynamic_entries_match(ws, &cache.scx, &next_code_artifact, &statics)
+                .map_err(|error| CompilerError::new_no_location(error.to_string()))?;
+            if unchanged {
+                old.clone()
+            } else {
+                full_schema_collection = true;
+                skull_mir::state_schema::StateSchema::collect(
+                    ws,
+                    &cache.scx,
+                    &next_code_artifact,
+                    &statics,
+                )
+                .map_err(|error| CompilerError::new_no_location(error.to_string()))?
+            }
+        } else {
+            full_schema_collection = true;
+            skull_mir::state_schema::StateSchema::collect(
+                ws,
+                &cache.scx,
+                &next_code_artifact,
+                &statics,
+            )
+            .map_err(|error| CompilerError::new_no_location(error.to_string()))?
+        }
+    } else {
+        full_schema_collection = true;
+        skull_mir::state_schema::StateSchema::collect(
+            ws,
+            &cache.scx,
+            &next_code_artifact,
+            &statics,
+        )
+        .map_err(|error| CompilerError::new_no_location(error.to_string()))?
+    };
+    let d_schema = t_schema.elapsed();
     if cache
         .state_schema
         .as_ref()
@@ -7184,6 +7275,7 @@ pub fn emit_overlay_with_span_edits(
     // fresh, re-reading the file / new var value. A stale MUTABLE global is
     // deliberately left alone: its guarded init preserves the live value on
     // reload, exactly as a source edit to its initializer does.
+    let t_stale = Instant::now();
     {
         let mut file_hashes: FxHashMap<Ustr, Option<u64>> = FxHashMap::default();
         let stale_consts: Vec<(ModuleId, Idx<bone_semantic::hir::GlobalDef>)> = cache
@@ -7198,9 +7290,13 @@ pub fn emit_overlay_with_span_edits(
             .collect();
         cache.changed_consts_since_full.extend(stale_consts);
     }
+    let d_stale = t_stale.elapsed();
     let t_relower = t2.elapsed();
     let t3 = Instant::now();
-    let (mut emit, overlay_unit_reads) = assemble_overlay(ws, cache, shader_changed)?;
+    let changed_bodies: Vec<Instance> = cache.changed_since_full.iter().cloned().collect();
+    let changed_code_artifact = overlay_code_artifact(ws, cache, &changed_bodies);
+    let (mut emit, overlay_unit_reads) =
+        assemble_overlay(ws, cache, shader_changed, &changed_code_artifact)?;
     for (key, reads) in overlay_unit_reads.globals {
         if reads.is_empty() {
             cache.unit_comptime_reads.globals.remove(&key);
@@ -7236,6 +7332,16 @@ pub fn emit_overlay_with_span_edits(
         ("CodegenCtx::new", t_cg),
         ("ScalarCtx::new", t_scx),
         ("update_chunk_cache (re-lower changed)", t_relower),
+        ("  shader registrations", d_shader),
+        ("  owner-local chunk cache", d_chunk),
+        ("  CodeArtifact replacement", d_replacements),
+        ("  static collection", d_statics),
+        ("  StateSchema dynamic validation", d_schema),
+        (
+            "  StateSchema full collection",
+            full_schema_collection.then_some(d_schema).unwrap_or_default(),
+        ),
+        ("  stale comptime scan", d_stale),
         ("  graph update", Duration::from_nanos(cache.repair_stats.graph_update_ns)),
         ("  concrete update", Duration::from_nanos(cache.repair_stats.concrete_update_ns)),
         ("  ArtifactView update", Duration::from_nanos(cache.repair_stats.artifact_update_ns)),

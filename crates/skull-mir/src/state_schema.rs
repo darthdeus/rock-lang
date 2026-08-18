@@ -232,82 +232,12 @@ impl StateSchema {
             }
         }
 
-        // Inline expansion can report the same physical static more than once.
-        // Collapse that one realization before validating logical membership;
-        // two different physical cells with one logical identity remain an
-        // error instead of being silently merged.
-        let mut static_by_cell: BTreeMap<Ustr, &StaticCell> = BTreeMap::new();
-        for cell in statics {
-            if let Some(old) = static_by_cell.insert(cell.cell, cell) {
-                if old.done_flag != cell.done_flag
-                    || old.type_str != cell.type_str
-                    || old.init_hash != cell.init_hash
-                    || old.owner != cell.owner
-                    || old.site != cell.site
-                    || old.logical_name != cell.logical_name
-                    || old.ordinal != cell.ordinal
-                {
-                    return Err(StateSchemaError::DuplicateLayout {
-                        identity: cell.cell.to_string(),
-                    });
-                }
-            }
-        }
-        for cell in static_by_cell.values() {
-            let owner = cell
-                .owner
-                .as_ref()
-                .ok_or_else(|| StateSchemaError::Incomplete {
-                    kind: StateKind::Static,
-                    identity: cell.cell.to_string(),
-                })?;
-            let _site = cell.site.ok_or_else(|| StateSchemaError::Incomplete {
-                kind: StateKind::Static,
-                identity: cell.cell.to_string(),
-            })?;
-            let owner_key = owner.logical_key(ws, scx.interner());
-            let logical = static_identity(&owner_key, cell.logical_name, cell.ordinal);
+        let dynamic_entries = collect_dynamic_entries(ws, scx, artifact, statics)?;
+        for entry in dynamic_entries {
             expected
-                .entry(StateKind::Static)
+                .entry(entry.kind)
                 .or_default()
-                .insert(logical.clone());
-            let entry = StateEntry {
-                kind: StateKind::Static,
-                identity: logical,
-                fingerprint: format!("value-cell;done-flag;type={}", cell.type_str),
-                physical: vec![cell.cell.to_string(), cell.done_flag.to_string()],
-                owner: Some(owner_key),
-                initializer_identity: Some(cell.init_hash),
-                metadata: Some(StateMetadata::default()),
-            };
-            entries.push(entry);
-        }
-
-        let mut frame_ids = BTreeSet::new();
-        for code in artifact.entries.values() {
-            if !matches!(&code.identity, CodeIdentity::Named(_)) {
-                continue;
-            }
-            let Some(frame) = &code.compatibility.frame else {
-                continue;
-            };
-            let logical = code.identity.logical_key(ws, scx.interner());
-            if !frame_ids.insert(logical.clone()) {
-                continue;
-            }
-            expected
-                .entry(StateKind::CoroutineFrame)
-                .or_default()
-                .insert(logical.clone());
-            let entry = StateEntry {
-                kind: StateKind::CoroutineFrame,
-                identity: logical.clone(),
-                fingerprint: frame_fingerprint(frame),
-                physical: vec![format!("frame:{logical}")],
-                owner: Some(logical),
-                initializer_identity: None,
-                metadata: Some(StateMetadata::default()),
-            };
+                .insert(entry.identity.clone());
             entries.push(entry);
         }
 
@@ -399,6 +329,109 @@ impl StateSchema {
         }
         Ok(schema)
     }
+
+    /// Validate the state classes that a body-only overlay can change without
+    /// walking declarations and nominal storage plans again.
+    pub fn dynamic_entries_match(
+        &self,
+        ws: &Workspace,
+        scx: &ScalarCtx,
+        artifact: &CodeArtifact,
+        statics: &[StaticCell],
+    ) -> Result<bool, StateSchemaError> {
+        let mut current = collect_dynamic_entries(ws, scx, artifact, statics)?;
+        let mut previous: Vec<StateEntry> = self
+            .entries
+            .iter()
+            .filter(|entry| {
+                matches!(entry.kind, StateKind::Static | StateKind::CoroutineFrame)
+            })
+            .cloned()
+            .collect();
+        current.sort_by(|a, b| (a.kind, &a.identity).cmp(&(b.kind, &b.identity)));
+        previous.sort_by(|a, b| (a.kind, &a.identity).cmp(&(b.kind, &b.identity)));
+        Ok(current == previous)
+    }
+}
+
+fn collect_dynamic_entries(
+    ws: &Workspace,
+    scx: &ScalarCtx,
+    artifact: &CodeArtifact,
+    statics: &[StaticCell],
+) -> Result<Vec<StateEntry>, StateSchemaError> {
+    let mut entries = Vec::new();
+
+    // Inline expansion can report the same physical static more than once.
+    // Collapse that one realization before validating logical membership;
+    // two different physical cells with one logical identity remain an
+    // error instead of being silently merged.
+    let mut static_by_cell: BTreeMap<Ustr, &StaticCell> = BTreeMap::new();
+    for cell in statics {
+        if let Some(old) = static_by_cell.insert(cell.cell, cell) {
+            if old.done_flag != cell.done_flag
+                || old.type_str != cell.type_str
+                || old.init_hash != cell.init_hash
+                || old.owner != cell.owner
+                || old.site != cell.site
+                || old.logical_name != cell.logical_name
+                || old.ordinal != cell.ordinal
+            {
+                return Err(StateSchemaError::DuplicateLayout {
+                    identity: cell.cell.to_string(),
+                });
+            }
+        }
+    }
+    for cell in static_by_cell.values() {
+        let owner = cell
+            .owner
+            .as_ref()
+            .ok_or_else(|| StateSchemaError::Incomplete {
+                kind: StateKind::Static,
+                identity: cell.cell.to_string(),
+            })?;
+        let _site = cell.site.ok_or_else(|| StateSchemaError::Incomplete {
+            kind: StateKind::Static,
+            identity: cell.cell.to_string(),
+        })?;
+        let owner_key = owner.logical_key(ws, scx.interner());
+        let logical = static_identity(&owner_key, cell.logical_name, cell.ordinal);
+        entries.push(StateEntry {
+            kind: StateKind::Static,
+            identity: logical,
+            fingerprint: format!("value-cell;done-flag;type={}", cell.type_str),
+            physical: vec![cell.cell.to_string(), cell.done_flag.to_string()],
+            owner: Some(owner_key),
+            initializer_identity: Some(cell.init_hash),
+            metadata: Some(StateMetadata::default()),
+        });
+    }
+
+    let mut frame_ids = BTreeSet::new();
+    for code in artifact.entries.values() {
+        if !matches!(&code.identity, CodeIdentity::Named(_)) {
+            continue;
+        }
+        let Some(frame) = &code.compatibility.frame else {
+            continue;
+        };
+        let logical = code.identity.logical_key(ws, scx.interner());
+        if !frame_ids.insert(logical.clone()) {
+            continue;
+        }
+        entries.push(StateEntry {
+            kind: StateKind::CoroutineFrame,
+            identity: logical.clone(),
+            fingerprint: frame_fingerprint(frame),
+            physical: vec![format!("frame:{logical}")],
+            owner: Some(logical),
+            initializer_identity: None,
+            metadata: Some(StateMetadata::default()),
+        });
+    }
+
+    Ok(entries)
 }
 
 pub fn global_identity(file: Ustr, name: Ustr) -> String {
