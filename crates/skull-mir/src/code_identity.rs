@@ -562,6 +562,9 @@ impl CodeArtifact {
         for entry in self.entries.values().chain(next.entries.values()) {
             let Some(owner) = entry.identity.owner() else { continue };
             let topology = entry.compatibility.lambda_topology;
+            if topology == LambdaTopologyFingerprint::default() {
+                continue;
+            }
             if let Some(previous) = owners.insert(owner, topology) {
                 if previous != topology {
                     return false;

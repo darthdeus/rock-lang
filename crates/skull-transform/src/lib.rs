@@ -1987,6 +1987,95 @@ mod tests {
     }
 
     #[test]
+    fn owner_topology_ignores_non_lambda_entries_without_topology() {
+        use skull_mir::code_identity::{
+            CaptureSchema, CodeArtifact, CodeCompatibility, CodeEntry, CodeIdentity, CodeOwner,
+            LambdaSiteId, LambdaTopologyFingerprint,
+        };
+        use skull_mir::instance::Instance;
+
+        let owner = Instance::base(skull_mir::mir::FuncRef {
+            module: bone_semantic::prelude::ModuleId::builtin(),
+            func: comfy_la_arena::Idx::from_raw(comfy_la_arena::RawIdx::from_u32(0)),
+        });
+        let owner = CodeOwner::Instance(owner);
+        let topology = LambdaTopologyFingerprint::from_sites(&[(
+            LambdaSiteId {
+                file: Ustr::from("f.rock"),
+                offset: 10,
+            },
+            0,
+        )]);
+        let compat = |lambda_topology| CodeCompatibility {
+            call_abi: "unit".to_string(),
+            capture: CaptureSchema::empty(),
+            frame: None,
+            lambda_topology,
+        };
+        let mut old = CodeArtifact::default();
+        old.insert(CodeEntry {
+            identity: CodeIdentity::Lambda {
+                enclosing: owner.clone(),
+                site: LambdaSiteId {
+                    file: Ustr::from("f.rock"),
+                    offset: 10,
+                },
+            },
+            compatibility: compat(topology),
+            body_fingerprint: 1,
+            body_name: Some(Ustr::from("lambda_old")),
+            escaping: true,
+            capture_free: true,
+        });
+        old.insert(CodeEntry {
+            identity: CodeIdentity::Nested {
+                enclosing: owner.clone(),
+                site: LambdaSiteId {
+                    file: Ustr::from("f.rock"),
+                    offset: 20,
+                },
+                name: Ustr::from("nested"),
+            },
+            compatibility: compat(LambdaTopologyFingerprint::default()),
+            body_fingerprint: 2,
+            body_name: Some(Ustr::from("nested_old")),
+            escaping: true,
+            capture_free: true,
+        });
+        let mut next = CodeArtifact::default();
+        next.insert(CodeEntry {
+            identity: CodeIdentity::Lambda {
+                enclosing: owner.clone(),
+                site: LambdaSiteId {
+                    file: Ustr::from("f.rock"),
+                    offset: 10,
+                },
+            },
+            compatibility: compat(topology),
+            body_fingerprint: 3,
+            body_name: Some(Ustr::from("lambda_new")),
+            escaping: true,
+            capture_free: true,
+        });
+        next.insert(CodeEntry {
+            identity: CodeIdentity::Nested {
+                enclosing: owner,
+                site: LambdaSiteId {
+                    file: Ustr::from("f.rock"),
+                    offset: 20,
+                },
+                name: Ustr::from("nested"),
+            },
+            compatibility: compat(LambdaTopologyFingerprint::default()),
+            body_fingerprint: 4,
+            body_name: Some(Ustr::from("nested_new")),
+            escaping: true,
+            capture_free: true,
+        });
+        assert!(old.compatible_overlay(&next));
+    }
+
+    #[test]
     fn named_values_are_counted_but_direct_calls_do_not_acquire_slots() {
         let mut direct = lower(
             "fn target(x: int) -> int { return x }\n\
