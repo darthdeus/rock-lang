@@ -55,7 +55,7 @@ pub struct FileWatcherConfig {
 }
 
 /// Canonicalized paths consulted by the debounce filter on every event.
-pub type SharedWatchSet = std::sync::Arc<std::sync::Mutex<HashSet<PathBuf>>>;
+pub type SharedWatchSet = std::sync::Arc<parking_lot::Mutex<HashSet<PathBuf>>>;
 
 impl Default for FileWatcherConfig {
     fn default() -> Self {
@@ -232,10 +232,7 @@ impl FileWatcher {
                                     return !path.to_string_lossy().ends_with('~');
                                 }
                                 if let Some(extra) = config.extra_files.as_ref() {
-                                    let member = extra
-                                        .lock()
-                                        .map(|set| set.contains(path.as_path()))
-                                        .unwrap_or(false);
+                                    let member = extra.lock().contains(path.as_path());
                                     if member {
                                         return true;
                                     }
@@ -359,5 +356,21 @@ impl FileWatcher {
         }
 
         Ok(debouncer)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shared_watch_set_survives_a_writer_panic() {
+        let set: SharedWatchSet = Default::default();
+        let writer = set.clone();
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            writer.lock().insert(PathBuf::from("held"));
+            panic!("poison probe");
+        }));
+        assert!(set.lock().contains(&PathBuf::from("held")));
     }
 }

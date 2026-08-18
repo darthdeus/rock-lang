@@ -28,6 +28,8 @@ mod js_coroutines;
 mod js_test_harness_globals_sentinel;
 #[path = "comptime_build_vars.rs"]
 mod comptime_build_vars;
+#[path = "sample_game_c_build_vars.rs"]
+mod sample_game_c_build_vars;
 #[path = "cimgui_prelude.rs"]
 mod cimgui_prelude;
 #[path = "release_mode_deleted.rs"]
@@ -66,6 +68,8 @@ mod production_sources_test;
 mod asset_overlay_defaults;
 #[path = "directory_listing_api.rs"]
 mod directory_listing_api;
+#[path = "editor_inspector_position.rs"]
+mod editor_inspector_position;
 #[path = "run_exit_status.rs"]
 mod run_exit_status;
 #[path = "shader_pipeline_cli.rs"]
@@ -92,6 +96,8 @@ mod test_harness_truncation;
 mod watcher_tmp_project_path;
 #[path = "imgui_web_stubs.rs"]
 mod imgui_web_stubs;
+#[path = "iter_parse_cli.rs"]
+mod iter_parse_cli;
 #[path = "mono_js_backend_realization.rs"]
 mod mono_js_backend_realization;
 #[path = "web_build_gate.rs"]

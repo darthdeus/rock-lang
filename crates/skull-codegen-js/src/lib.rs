@@ -846,7 +846,7 @@ function __sw_audio_decode(id, path) {
     function (e) { __sw_log_once("stone_load_sound: decode failed for " + path + " (" + (e && e.message) + ")"); });
   return id;
 }
-function stone_audio_init() { __sw_audio_ctx(); return true; }
+function stone_audio_init() { return __sw_audio_ctx() !== null; }
 function stone_quit() { __SW.quitReq = true; }
 function stone_quit_requested() { return __SW.quitReq; }
 function stone_is_initialized() { return __SW.initialized; }
@@ -2285,7 +2285,11 @@ function stone_rename(src, dst) {
   delete __ROCK_WEB_FILES[src];
   return true;
 }
-function stone_remove_file(path) { delete __ROCK_WEB_FILES[path]; return true; }
+function stone_remove_file(path) {
+  if (!Object.prototype.hasOwnProperty.call(__ROCK_WEB_FILES, path)) return false;
+  delete __ROCK_WEB_FILES[path];
+  return true;
+}
 
 // --- subprocess (chess UCI): no child processes in a browser; the spawn is a
 // loud stub returning 0 so sf_start drops to the built-in engine. ---
@@ -2360,16 +2364,21 @@ function stone_reload_sound(h, path) {
   if (!__sw_audio_ctx()) return false;
   return __sw_audio_decode(h, path) !== 0;
 }
-function stone_unload_sound(h) { delete __SW.audio.sounds[h]; return true; }
-// `bus` is STONE_BUS_* (lib.rock): 0 master, 1 sfx, 2 music, 3 ambience, 4 ui.
+function stone_unload_sound(h) {
+  if (!Object.prototype.hasOwnProperty.call(__SW.audio.sounds, h)) return false;
+  delete __SW.audio.sounds[h];
+  return true;
+}
+// `bus` is STONE_BUS_* (lib.rock): 0 master, 1 sfx, 2 music, 3 ambience, 4 ui, 5 foley.
 // The web mixer has only sfx and music nodes, so music routes to musicGain and
 // every other bus shares sfxGain -- the topology is coarser than native, not
 // ignored.
-function stone_play_sound(h, bus, volume, speed, decay) {
+function stone_play_sound(h, bus, volume, speed, decay, looped) {
   var A = __SW.audio, s = A.sounds[h];
   if (!A.ctx || !s || !s.buffer) return;
   var src = A.ctx.createBufferSource();
   src.buffer = s.buffer;
+  src.loop = looped;
   src.playbackRate.value = Math.min(Math.max(speed, 0.05), 8);
   var g = A.ctx.createGain();
   var vol = Math.max(volume, 0);
@@ -2404,7 +2413,7 @@ function stone_stop_music() {
   var A = __SW.audio;
   if (A.musicSrc) { try { A.musicSrc.stop(); } catch (e) {} A.musicSrc = null; }
 }
-// No bus graph on web v1 (mixer.rock's five strips have no WebAudio
+// No bus graph on web v1 (mixer.rock's strips have no WebAudio
 // counterpart yet); every bus/voice op below is a silent stub, same tier as
 // the convolver reverb has always been.
 function stone_bus_set_gain(bus, gain) { return false; }
@@ -2413,6 +2422,7 @@ function stone_bus_duck_count(bus) { return 0; }
 function stone_bus_gain(bus) { return 1; }
 function stone_bus_peak(bus) { return 0; }
 function stone_bus_set_lowpass(bus, cutoff_hz, q) { return false; }
+function stone_bus_lowpass_cutoff(bus) { return 0; }
 function stone_bus_set_distortion(bus, drive, mix) { return false; }
 function stone_bus_set_reverb(bus, enabled, room_size, damping, wet, dry, width) { return false; }
 function stone_bus_duck(bus, depth, attack_secs, release_secs) { return false; }

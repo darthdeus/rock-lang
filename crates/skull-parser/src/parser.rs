@@ -1183,7 +1183,9 @@ impl<'a> Parser<'a> {
                 break;
             }
         }
-        let _ = self.expect_generic_close();
+        if let Err(e) = self.expect_generic_close() {
+            self.ast.recovery_errors.push(e);
+        }
         out
     }
 

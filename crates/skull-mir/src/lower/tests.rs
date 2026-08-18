@@ -2,6 +2,41 @@ use super::*;
 
 use bone_semantic::hir::{TypeExpr, VarId};
 
+#[test]
+fn missing_wire_slot_rejects_instead_of_boxing() {
+    let slots = [RetSlot::Opaque];
+    assert!(super::required_wire_slot(
+        &slots,
+        0,
+        false,
+        "fixture",
+        Clone::clone,
+        |message| super::gap(message),
+    )
+    .is_ok());
+    let err = super::required_wire_slot(
+        &slots,
+        1,
+        false,
+        "fixture",
+        Clone::clone,
+        |message| super::gap(message),
+    )
+    .expect_err("a missing non-variadic slot must reject");
+    assert!(err.message.contains("fixture has no ABI slot 1"), "{}", err.message);
+
+    let variadic = super::required_wire_slot(
+        &slots,
+        3,
+        true,
+        "fixture",
+        Clone::clone,
+        |message| super::gap(message),
+    )
+    .expect("a variadic call reuses its declared tail slot");
+    assert!(matches!(variadic, RetSlot::Opaque));
+}
+
 // -- Stage 0b route-table invariants (docs/monomorphization-plan.md S 2b).
 //
 // No Rock program can reach these states, which is why they are rejections
@@ -10,7 +45,7 @@ use bone_semantic::hir::{TypeExpr, VarId};
 
 fn spec_ws(src: &str) -> (Workspace, ModuleId) {
     let mut modules =
-        vec![skull_parser::parse_module(src, ustr::Ustr::from("<test>")).expect("parse")];
+        vec![skull_parser::parse_module_clean(src, ustr::Ustr::from("<test>")).expect("parse")];
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
     let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("user module id");
     (ws, mid)

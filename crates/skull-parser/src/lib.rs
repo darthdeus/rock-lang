@@ -219,6 +219,16 @@ mod tests {
         assert!(parse_module_clean("fn f(x: int) -> int { return x }\n", file).is_ok());
     }
 
+    #[test]
+    fn missing_generic_close_is_recorded_as_recovery() {
+        let src = "struct Box<T { value: int }\n";
+        let ast = parse_module(src, Ustr::from("<generic-close>")).expect("tokenization");
+        assert!(
+            !ast.recovery_errors.is_empty(),
+            "a missing generic close must not become a clean struct"
+        );
+    }
+
     fn first_fn(ast: &Ast) -> &FunctionDef {
         match &ast.items[0].kind {
             ItemKind::Function(f) => f,

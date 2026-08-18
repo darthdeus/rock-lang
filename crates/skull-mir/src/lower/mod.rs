@@ -281,6 +281,20 @@ fn finish_lower_attribution(mut f: MirFunc, mut stats: LowerAttribution) -> MirF
     f
 }
 
+pub(crate) fn required_wire_slot<T>(
+    slots: &[T],
+    index: usize,
+    variadic: bool,
+    context: impl std::fmt::Display,
+    to_slot: impl Fn(&T) -> RetSlot,
+    missing: impl FnOnce(String) -> CompilerError,
+) -> Result<RetSlot, CompilerError> {
+    slots
+        .get(index)
+        .or_else(|| variadic.then(|| slots.last()).flatten())
+        .map(to_slot)
+        .ok_or_else(|| missing(format!("{context} has no ABI slot {index}")))
+}
 // --- scalarized value ABI (rock parity) -------------------------------------
 //
 // A `value` struct is passed/returned as its flattened primitive LEAF scalars

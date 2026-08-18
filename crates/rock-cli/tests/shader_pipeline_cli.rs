@@ -116,3 +116,74 @@ fn unknown_profile_rejects_listing_valid() {
         "reject should list valid profiles, got: {stderr}"
     );
 }
+
+#[test]
+fn failed_emission_invalidates_the_previous_output() {
+    let dir = scratch("failed_emission");
+    let src = dir.join("bad.rock");
+    let output = dir.join("bad.glsl");
+    std::fs::write(
+        &src,
+        "@shader(fragment)\nfn bad(tc: Vec2) -> float { return tc.x }\n",
+    )
+    .unwrap();
+    std::fs::write(&output, "stale output").unwrap();
+
+    let result = Command::new(rock_bin())
+        .args([
+            "shader",
+            src.to_str().unwrap(),
+            "bad",
+            "--output",
+            output.to_str().unwrap(),
+        ])
+        .output()
+        .expect("spawn rock");
+
+    assert!(!result.status.success(), "failed emission must return nonzero");
+    assert!(!output.exists(), "failed emission left stale output at {}", output.display());
+}
+
+#[test]
+fn output_cannot_alias_the_source() {
+    let dir = scratch("source_output_alias");
+    let src = dir.join("ui.rock");
+    std::fs::write(&src, PIPELINE_SRC).unwrap();
+
+    let result = Command::new(rock_bin())
+        .args([
+            "shader",
+            src.to_str().unwrap(),
+            "ui_vert",
+            "ui_frag",
+            "--output",
+            src.to_str().unwrap(),
+        ])
+        .output()
+        .expect("spawn rock");
+
+    assert!(!result.status.success(), "source/output alias must reject");
+    assert_eq!(std::fs::read_to_string(&src).unwrap(), PIPELINE_SRC);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+
+        let alias = dir.join("alias.glsl");
+        symlink(&src, &alias).unwrap();
+        let result = Command::new(rock_bin())
+            .args([
+                "shader",
+                src.to_str().unwrap(),
+                "ui_vert",
+                "ui_frag",
+                "--output",
+                alias.to_str().unwrap(),
+            ])
+            .output()
+            .expect("spawn rock");
+
+        assert!(!result.status.success(), "symlinked source/output alias must reject");
+        assert_eq!(std::fs::read_to_string(&src).unwrap(), PIPELINE_SRC);
+    }
+}

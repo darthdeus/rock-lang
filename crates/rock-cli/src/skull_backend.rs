@@ -849,6 +849,9 @@ pub fn skull_shader(files: &[String], output: Option<String>, profile: Option<St
     if roots.is_empty() {
         anyhow::bail!("rock shader: need at least one root fn name");
     }
+    if let Some(out) = output.as_deref() {
+        invalidate_shader_output(path, out)?;
+    }
     let src = match fs_err::read_to_string(path) {
         Ok(s) => s,
         Err(e) => {
@@ -996,6 +999,24 @@ pub fn skull_shader(files: &[String], output: Option<String>, profile: Option<St
         None => print!("{glsl}"),
     }
     Ok(())
+}
+
+fn invalidate_shader_output(input: &str, output: &str) -> Result<()> {
+    let input = std::path::Path::new(input);
+    let output = std::path::Path::new(output);
+    let aliases = input == output
+        || match (fs_err::canonicalize(input), fs_err::canonicalize(output)) {
+            (Ok(input), Ok(output)) => input == output,
+            _ => false,
+        };
+    if aliases {
+        anyhow::bail!("rock shader: --output must not refer to the input file");
+    }
+    match fs_err::remove_file(output) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.into()),
+    }
 }
 
 pub fn skull_compile_single(path: &str, output: Option<String>) -> Result<()> {

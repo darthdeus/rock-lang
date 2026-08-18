@@ -189,9 +189,7 @@ pub fn run_stone_test(root: &Path) -> Result<()> {
         reload_n += 1;
         let record = match result {
             Ok(st) => {
-                if let Ok(mut set) = comptime_watch.lock() {
-                    *set = st.comptime_watch_files().into_iter().collect();
-                }
+                *comptime_watch.lock() = st.comptime_watch_files().into_iter().collect();
                 stone = Some(st);
                 ReloadRecord {
                     n: reload_n,
@@ -262,8 +260,8 @@ pub fn run_stone_test(root: &Path) -> Result<()> {
                 };
                 let compile_ms = t0.elapsed().as_secs_f64() * 1000.0;
                 let files: Vec<PathBuf> = in_scope.into_iter().collect();
-                if let (Ok(mut set), Some(st)) = (comptime_watch.lock(), stone.as_ref()) {
-                    *set = st.comptime_watch_files().into_iter().collect();
+                if let Some(st) = stone.as_ref() {
+                    *comptime_watch.lock() = st.comptime_watch_files().into_iter().collect();
                 }
 
                 match outcome {

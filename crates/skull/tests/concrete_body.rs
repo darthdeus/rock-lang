@@ -10,7 +10,7 @@ use std::sync::LazyLock;
 
 use bone_semantic::hir::{BindingInfo, BodyOwner, Expr, TypeExpr};
 use bone_semantic::inference::Workspace;
-use comfy_la_arena::{ArenaMap, Idx};
+use comfy_la_arena::{ArenaMap, Idx, IdxRange};
 use skull::concrete_body::{self, Callee, ConcreteBodies, IteratorOpKind, Slot};
 use skull::instance_graph::{self, InstanceGraph, Site, SiteOp, SiteOutcome};
 use skull_mir::concrete::ConcreteTypeTables;
@@ -358,6 +358,131 @@ fn main() {
 }
 
 #[test]
+fn production_scalar_call_rejects_a_missing_selected_parameter_slot() {
+    let (ws, g, bodies) = bodies_of(
+        r#"
+nobox value V2 { x: float, y: float }
+@scalar_abi fn id(v: V2) -> V2 { return v }
+fn main() {
+    let v = id(V2 { x: 1.0, y: 2.0 })
+    print("{v.x}")
+}
+"#,
+    );
+    let main_plan = bodies
+        .plans
+        .iter()
+        .find(|(inst, _)| ws.module(inst.func.module).functions[inst.func.func].name.as_str() == "main")
+        .map(|(_, plan)| plan)
+        .expect("main has no concrete plan");
+    let callee = main_plan
+        .callees
+        .values()
+        .find(|inst| ws.module(inst.func.module).functions[inst.func.func].name.as_str() == "id")
+        .cloned()
+        .expect("main has no concrete id call");
+    let site = main_plan
+        .callees
+        .iter()
+        .find_map(|(site, inst)| (inst == &callee).then_some(site))
+        .expect("id call site disappeared");
+    let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(g.interner().clone());
+    skull_mir::lower::lower_instance_with_plans(&ws, &scx, main_plan, &bodies.plans)
+        .expect("the intact scalar call must lower");
+
+    let mut caller = (**main_plan).clone();
+    let signature = std::sync::Arc::make_mut(
+        caller
+            .callee_signatures
+            .get_mut(site)
+            .expect("id call signature disappeared"),
+    );
+    signature.params.clear();
+    signature.param_tuple_spelled.clear();
+
+    let mut plans = (*bodies.plans).clone();
+    let callee_plan = std::sync::Arc::make_mut(
+        plans
+            .get_mut(&callee)
+            .expect("selected callee plan disappeared"),
+    );
+    let signature = std::sync::Arc::make_mut(&mut callee_plan.signature);
+    signature.params.clear();
+    signature.param_tuple_spelled.clear();
+
+    let poisoned_scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(g.interner().clone());
+    let err = skull_mir::lower::lower_instance_with_plans(&ws, &poisoned_scx, &caller, &plans)
+        .expect_err("a missing scalar ABI slot must reject instead of boxing");
+    assert!(
+        err.message.contains("no ABI slot"),
+        "unexpected missing-slot diagnostic: {err:?}"
+    );
+}
+
+#[test]
+fn production_ufcs_call_rejects_a_missing_receiver_slot() {
+    let (ws, g, bodies) = bodies_of(
+        r#"
+nobox value V2 { x: float, y: float }
+@scalar_abi fn id(v: V2) -> V2 { return v }
+fn main() {
+    let v: V2? = V2 { x: 1.0, y: 2.0 }
+    let out = v?.id()
+    print("{out?.x ?? 0.0}")
+}
+"#,
+    );
+    let main_plan = bodies
+        .plans
+        .iter()
+        .find(|(inst, _)| ws.module(inst.func.module).functions[inst.func.func].name.as_str() == "main")
+        .map(|(_, plan)| plan)
+        .expect("main has no concrete plan");
+    let callee = main_plan
+        .callees
+        .values()
+        .find(|inst| ws.module(inst.func.module).functions[inst.func.func].name.as_str() == "id")
+        .cloned()
+        .expect("main has no concrete id call");
+    let site = main_plan
+        .callees
+        .iter()
+        .find_map(|(site, inst)| (inst == &callee).then_some(site))
+        .expect("id UFCS call site disappeared");
+    let intact_scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(g.interner().clone());
+    skull_mir::lower::lower_instance_with_plans(&ws, &intact_scx, main_plan, &bodies.plans)
+        .expect("the intact safe-nav UFCS call must lower");
+    let mut caller = (**main_plan).clone();
+    let signature = std::sync::Arc::make_mut(
+        caller
+            .callee_signatures
+            .get_mut(site)
+            .expect("id UFCS call signature disappeared"),
+    );
+    signature.params.clear();
+    signature.param_tuple_spelled.clear();
+
+    let mut plans = (*bodies.plans).clone();
+    let callee_plan = std::sync::Arc::make_mut(
+        plans
+            .get_mut(&callee)
+            .expect("selected UFCS callee plan disappeared"),
+    );
+    let signature = std::sync::Arc::make_mut(&mut callee_plan.signature);
+    signature.params.clear();
+    signature.param_tuple_spelled.clear();
+
+    let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(g.interner().clone());
+    let err = skull_mir::lower::lower_instance_with_plans(&ws, &scx, &caller, &plans)
+        .expect_err("a missing UFCS receiver slot must reject instead of becoming opaque");
+    assert!(
+        err.message.contains("UFCS receiver has no ABI slot 0"),
+        "unexpected missing-receiver diagnostic: {err:?}"
+    );
+    assert!(!err.labels.is_empty(), "missing receiver diagnostic lost its source span");
+}
+
+#[test]
 fn production_call_identity_consumes_the_plan_site_map() {
     let (ws, g, bodies) = bodies_of(
         r#"
@@ -382,6 +507,106 @@ fn main() {
         skull_mir::lower::lower_instance_with_plans(&ws, &scx, &poisoned, &bodies.plans).is_err(),
         "lowering reconstructed a callee identity after its plan site was removed"
     );
+}
+
+#[test]
+fn production_variadic_direct_and_ufcs_reuse_the_tail_slot() {
+    let (ws, g, bodies) = bodies_of(
+        r#"
+nobox value V2 { x: int, y: int }
+@scalar_abi fn variadic(receiver: V2, first: int, args: ...any) -> int { return receiver.x }
+fn main() {
+    let v = V2 { x: 11, y: 12 }
+    let direct = variadic(v, 1, 2, 3)
+    let ufcs = v.variadic(1, 2, 3)
+    print("{direct} {ufcs}")
+}
+"#,
+    );
+    let main_plan = bodies
+        .plans
+        .iter()
+        .find(|(inst, _)| ws.module(inst.func.module).functions[inst.func.func].name.as_str() == "main")
+        .map(|(_, plan)| plan)
+        .expect("main has no concrete plan");
+    let callee = main_plan
+        .callees
+        .values()
+        .find(|inst| ws.module(inst.func.module).functions[inst.func.func].name.as_str() == "variadic")
+        .expect("main has no variadic callee");
+    let variadic_sites: Vec<_> = main_plan
+        .callees
+        .iter()
+        .filter(|(_, inst)| *inst == callee)
+        .collect();
+    assert_eq!(variadic_sites.len(), 2, "fixture lost its direct or UFCS call");
+    for (site, _) in variadic_sites {
+        assert_eq!(
+            main_plan
+                .callee_signatures
+                .get(site)
+                .expect("variadic site signature")
+                .params
+                .len(),
+            3,
+            "fixture did not leave surplus arguments to the declared tail slot"
+        );
+    }
+    let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(g.interner().clone());
+    skull_mir::lower::lower_instance_with_plans(&ws, &scx, main_plan, &bodies.plans)
+        .expect("direct and UFCS variadic calls did not lower");
+}
+
+#[test]
+fn production_lambda_parameter_slot_loss_reports_a_spanned_gap() {
+    let (mut ws, g, bodies) = bodies_of(
+        r#"
+fn main() {
+    let f = (x: int) => x
+    print("{f(1)}")
+}
+"#,
+    );
+    let (main, plan) = bodies
+        .plans
+        .iter()
+        .find(|(inst, _)| ws.module(inst.func.module).functions[inst.func.func].name.as_str() == "main")
+        .map(|(inst, plan)| (inst.clone(), plan.clone()))
+        .expect("main has no concrete plan");
+    let mid = main.func.module;
+    let body = ws
+        .modules[mid.index()]
+        .bodies
+        .get_mut(&BodyOwner::Function(main.func.func))
+        .expect("main has no body");
+    let (lambda, params, lambda_body) = body
+        .expr_arena
+        .iter()
+        .find_map(|(expr, node)| match node {
+            Expr::Lambda { params, body } => Some((expr, *params, *body)),
+            _ => None,
+        })
+        .expect("fixture has no lambda");
+    assert_eq!(params.len(), 1, "fixture did not expose one lambda parameter");
+    let extra = body
+        .binding_arena
+        .iter()
+        .map(|(binding, _)| binding)
+        .find(|binding| *binding == params.end())
+        .expect("fixture has no adjacent binding to poison the lambda range");
+    body.expr_arena[lambda] = Expr::Lambda {
+        params: IdxRange::new_inclusive(params.start()..=extra),
+        body: lambda_body,
+    };
+
+    let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(g.interner().clone());
+    let err = skull_mir::lower::lower_instance_with_plans(&ws, &scx, &plan, &bodies.plans)
+        .expect_err("lambda lowering accepted a missing ABI parameter slot");
+    assert!(
+        err.message.contains("lambda ABI has no parameter slot 1"),
+        "unexpected lambda missing-slot diagnostic: {err:?}"
+    );
+    assert!(!err.labels.is_empty(), "lambda missing-slot diagnostic lost its source span");
 }
 
 fn count_int_to_float(mir: &MirFunc) -> usize {
@@ -750,6 +975,53 @@ fn main() { let value = startup.value }
         1,
         "the always-emitted global lost its struct-default domain"
     );
+}
+
+#[test]
+fn production_decorator_lowering_keeps_its_owned_abi_plan() {
+    let (ws, g, bodies) = bodies_of(
+        r#"
+deco init register(priority: int = 100) {
+    print("{target.name}:{priority}")
+}
+@register
+fn system() {}
+fn main() {}
+"#,
+    );
+    let user_mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("test module");
+    let plan = bodies
+        .always_plans
+        .iter()
+        .find(|(owner, _)| {
+            matches!(
+                owner,
+                skull_mir::concrete::ConcreteOwner::Decorator { module, .. } if *module == user_mid
+            )
+        })
+        .map(|(_, plan)| plan)
+        .expect("decorator has no concrete plan");
+    assert!(
+        plan.signature.params.len() >= 2,
+        "fixture did not publish target and decorator parameter slots"
+    );
+    let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(g.interner().clone());
+    let mir = skull_mir::lower::lower_decorator_with_plans(
+        &ws,
+        &scx,
+        plan,
+        &bodies.plans,
+        Ustr::from("__test_decorator"),
+    )
+    .expect("plan-driven decorator lowering failed");
+    let abi = mir
+        .abi_representation
+        .as_ref()
+        .expect("decorator lost its owned ABI representation");
+    assert!(mir.rep_arena.is_some(), "decorator lost its representation arena");
+    assert_eq!(abi.params().len(), plan.signature.params.len());
+    assert_eq!(mir.params.len(), plan.signature.params.len());
+    assert!(abi.result().is_some(), "decorator lost its ABI result slot");
 }
 
 fn return_arity(mir: &MirFunc) -> usize {

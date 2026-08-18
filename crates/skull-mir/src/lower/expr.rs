@@ -417,10 +417,10 @@ impl Builder<'_> {
                     .into_iter()
                     .enumerate()
                     .map(|(i, _)| {
-                        let id = lam_plan.params().get(i).copied().ok_or_else(|| {
-                            gap(format!("lambda parameter {i} has no representation plan"))
+                        let id = lam_plan.params().get(i).ok_or_else(|| {
+                            self.gap_here(format!("lambda ABI has no parameter slot {i}"))
                         })?;
-                        Ok(self.scx.rep_arena().ret_slot(id))
+                        Ok(self.scx.rep_arena().ret_slot(*id))
                     })
                     .collect::<Result<_, CompilerError>>()?;
                 // A lambda's params land in the SAME cell namespace as the
@@ -431,7 +431,7 @@ impl Builder<'_> {
                 for (i, pb) in params.into_iter().enumerate() {
                     let pname = self.body.binding_arena[pb].name;
                     let slot = param_slots.get(i).cloned().ok_or_else(|| {
-                        gap(format!("lambda parameter {i} has no representation plan"))
+                        self.gap_here(format!("lambda ABI has no collected parameter slot {i}"))
                     })?;
                     self.bind_param_slot(pb, pname, &slot);
                 }

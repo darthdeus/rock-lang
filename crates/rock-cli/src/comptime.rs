@@ -47,8 +47,22 @@ pub fn set_invocation_selection(
         };
         parsed.insert(name.to_string(), value.to_string());
     }
-    let _ = SELECTION.set(CliSelection { channel, implied_channel, target_os, overrides: parsed });
+    SELECTION
+        .set(CliSelection { channel, implied_channel, target_os, overrides: parsed })
+        .map_err(|_| anyhow::anyhow!("CLI invocation selection was already initialized"))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::set_invocation_selection;
+
+    #[test]
+    fn repeated_invocation_selection_is_rejected() {
+        assert!(set_invocation_selection(None, None, None, &[]).is_ok());
+        let err = set_invocation_selection(None, None, None, &[]).expect_err("second set must fail");
+        assert!(err.to_string().contains("already initialized"));
+    }
 }
 
 /// Stamp `ws` with the inputs resolved from `anchor`'s enclosing project.
