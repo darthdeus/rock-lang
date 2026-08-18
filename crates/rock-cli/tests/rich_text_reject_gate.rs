@@ -79,6 +79,21 @@ fn an_unsupported_byte_rejects() {
 }
 
 #[test]
+fn a_malformed_sequence_rejects() {
+    assert_rejects("malformed_sequence", "starts a malformed sequence");
+}
+
+#[test]
+fn a_codepoint_absent_from_every_font_rejects_by_codepoint_and_offset() {
+    assert_rejects("missing_codepoint", "codepoint 128512 at offset 1");
+}
+
+#[test]
+fn a_late_missing_codepoint_rejects_before_partial_measure_or_emission() {
+    assert_rejects("missing_codepoint_late", "codepoint 128512 at offset 0");
+}
+
+#[test]
 fn a_stale_font_handle_rejects() {
     assert_rejects("stale_font", "stale font handle");
 }
@@ -89,6 +104,16 @@ fn a_stale_font_handle_rejects() {
 #[test]
 fn a_stale_font_handle_rejects_for_an_empty_sequence() {
     assert_rejects("empty_stale_font", "stale font handle");
+}
+
+#[test]
+fn a_stale_fallback_handle_rejects_for_an_empty_sequence() {
+    assert_rejects("empty_stale_fallback", "stale font handle");
+}
+
+#[test]
+fn a_fallback_selected_glyph_without_the_requested_face_rejects() {
+    assert_rejects("fallback_missing_face", "declares no bold face");
 }
 
 /// Synthesis is DECLARED per face. Serving `Regular` for an undeclared bold
