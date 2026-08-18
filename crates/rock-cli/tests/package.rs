@@ -49,12 +49,13 @@ fn package_manifest_is_the_secret_safe_metadata_boundary() {
         expected
     );
     assert_eq!(manifest["package"]["channel"], "steam");
-    let level = build.join("assets/mag/saves/level.json");
+    let level = build.join("assets/mag/levels/crypt.json");
+    assert!(level.is_file(), "packaged crypt asset is missing: {}", level.display());
     let level_digest = format!("{:x}", Sha256::digest(std::fs::read(level).unwrap()));
     assert_eq!(
         manifest["build_vars"]["CONTENT_REV"]["value"],
         &level_digest[..12],
-        "CONTENT_REV must preserve the old staged-level fingerprint semantics"
+        "CONTENT_REV must hash the packaged crypt catalog source"
     );
     assert!(manifest["artifacts"]["lua"]["sha256"].as_str().is_some());
     assert!(manifest["artifacts"]["bytecode"]["sha256"].as_str().is_some());
