@@ -4,7 +4,7 @@
 //! values. Lowering may inspect the facts, but it does not receive the
 //! substitution that produced them.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use bone_semantic::hir::{BindingInfo, Expr};
@@ -118,6 +118,46 @@ pub struct ConcreteBodyPlan {
 /// deterministic iteration, while replacing one body only swaps its handle.
 pub type ConcretePlans = BTreeMap<Instance, Arc<ConcreteBodyPlan>>;
 pub type ConcreteAlwaysPlans = FxHashMap<ConcreteOwner, ConcreteBodyPlan>;
+
+/// Copy a view's outer table while preserving the stable handle for every
+/// selected body. The owner-local publisher can then replace its authoritative
+/// map entry without mutating a consumer's selection.
+pub fn select_concrete_plans<'a>(
+    plans: &ConcretePlans,
+    instances: impl IntoIterator<Item = &'a Instance>,
+) -> ConcretePlans {
+    instances
+        .into_iter()
+        .filter_map(|instance| {
+            plans
+                .get(instance)
+                .map(|plan| (instance.clone(), Arc::clone(plan)))
+        })
+        .collect()
+}
+
+/// Select the concrete plans a lowering view can consume, including resolved
+/// Rock callees that the target graph classifies as inline/native operators.
+pub fn select_concrete_plan_closure<'a>(
+    plans: &ConcretePlans,
+    roots: impl IntoIterator<Item = &'a Instance>,
+) -> ConcretePlans {
+    let mut selected = BTreeSet::new();
+    let mut queue: Vec<_> = roots
+        .into_iter()
+        .filter(|instance| selected.insert((*instance).clone()))
+        .cloned()
+        .collect();
+    while let Some(instance) = queue.pop() {
+        let Some(plan) = plans.get(&instance) else { continue };
+        for callee in plan.callees.values() {
+            if selected.insert(callee.clone()) {
+                queue.push(callee.clone());
+            }
+        }
+    }
+    select_concrete_plans(plans, selected.iter())
+}
 
 impl ConcreteBodyPlan {
     pub fn function_instance(&self) -> Option<&Instance> {

@@ -7100,6 +7100,7 @@ pub fn emit_overlay_with_span_edits_staged(
     edits: &[crate::instance_graph::SpanEdit],
 ) -> Result<(MirEmit, SkullEmitCache), CompilerError> {
     let mut staged = cache.clone();
+    staged.concrete.detach_plan_store();
     let emit = emit_overlay_with_span_edits(ws, &mut staged, reinferred, edits)?;
     Ok((emit, staged))
 }

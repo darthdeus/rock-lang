@@ -493,6 +493,15 @@ impl ConcreteBodies {
         self.always_plans.get(owner)
     }
 
+    /// A staged cache shares the outer table with its last-good owner until it
+    /// crosses this boundary. Clone only the ordered handle map; unchanged
+    /// concrete bodies remain shared by their per-entry `Arc`.
+    pub fn detach_plan_store(&mut self) {
+        if Arc::strong_count(&self.plans) > 1 {
+            self.plans = Arc::new((*self.plans).clone());
+        }
+    }
+
     pub fn candidate_keys(&self) -> &BTreeSet<Instance> {
         &self.candidate_keys
     }

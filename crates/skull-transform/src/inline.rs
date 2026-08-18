@@ -1326,6 +1326,20 @@ fn compact_live_template(
     }
 
     let mut template = MirFunc::new(source.name);
+    template.code_identity = source.code_identity.clone();
+    template.code_abi_fingerprint = source.code_abi_fingerprint.clone();
+    template.code_compatibility = source.code_compatibility.clone();
+    template.lambda_abi_fingerprints = source
+        .lambda_abi_fingerprints
+        .iter()
+        .filter_map(|(old_id, fingerprint)| {
+            inst_map
+                .get(old_id)
+                .map(|new_id| (*new_id, fingerprint.clone()))
+        })
+        .collect();
+    template.nested_fn_identities = source.nested_fn_identities.clone();
+    template.rep_arena = source.rep_arena.clone();
     template.params = source.params.iter().map(|param| cell_map[param]).collect();
     template.lower_timing_enabled = source.lower_timing_enabled;
     template.lower_attribution = source.lower_attribution.clone();
@@ -1333,6 +1347,8 @@ fn compact_live_template(
     template.abi_representation = source.abi_representation.clone();
     template.global_plan = source.global_plan.clone();
     template.statics = source.statics.clone();
+    template.comptime_reads = source.comptime_reads.clone();
+    template.struct_registry_roots = source.struct_registry_roots.clone();
     template.insts = insts;
     template.cells = cells;
     template.blocks = blocks;
@@ -1388,6 +1404,11 @@ fn compact_live_template(
     remap_inst_table!(call_abi_plans);
     remap_inst_table!(call_rep_plans);
     remap_inst_table!(fn_value_symbols);
+    for (old_id, identity) in &source.code_value_identities {
+        if let Some(&new_id) = inst_map.get(old_id) {
+            template.code_value_identities.insert(new_id, identity.clone());
+        }
+    }
     for (old_id, plan) in &source.closure_env_plans {
         let Some(&new_id) = inst_map.get(old_id) else { continue };
         let captures = plan.captures().iter().map(|cell| cell_map[cell]).collect();
