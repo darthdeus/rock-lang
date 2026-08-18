@@ -69,8 +69,46 @@ fn replay_snapshot_oracle_includes_effective_pad_state_only() {
     assert!(!names.contains("ACTIONS"), "binding configuration must not be snapshotted: {names:?}");
     assert!(!names.contains("ACTION_NAMES"), "binding registry scratch must not be snapshotted: {names:?}");
     assert!(!names.contains("BINDING_RAW_ACTIONS"), "unknown binding scratch must not be snapshotted: {names:?}");
+    for name in [
+        "BINDING_RAW_ACTION_BYTES",
+        "BINDING_RAW_ACTION_KEYS",
+        "REBIND_CAPTURE",
+        "REBIND_CAPTURE_CANCELLED",
+        "REBIND_SNAPSHOT_SCANCODES_DOWN",
+        "REBIND_SNAPSHOT_SCANCODES_PRESSED",
+        "REBIND_SNAPSHOT_MOUSE_DOWN",
+        "REBIND_SNAPSHOT_MOUSE_PRESSED",
+        "REBIND_SNAPSHOT_PAD_DOWN",
+        "REBIND_SNAPSHOT_PAD_PRESSED",
+        "REBIND_SNAPSHOT_AXES",
+        "REBIND_SNAPSHOT_AXIS_MOTION",
+    ] {
+        assert!(!names.contains(name), "input host projection {name} was snapshotted: {names:?}");
+    }
     assert!(!names.contains("LAST_INPUT_DEVICE"), "glyph modality must not be snapshotted: {names:?}");
     assert!(!names.contains("UI_INPUT_CAPTURE"), "capture mode must not be snapshotted: {names:?}");
+}
+
+#[test]
+fn mag_audio_and_vfx_projections_are_not_world_image_state() {
+    let names = sim_state_names("mag", 3);
+    assert!(!names.is_empty(), "the Mag checkpoint census must examine a nonzero population");
+    assert!(names.contains("pad_down"), "the Mag census must include effective input state: {names:?}");
+    for name in [
+        "SFX_SPELL_FLAMESTRIKE_HIT",
+        "SFX_CAST_LIGHTNING",
+        "AMBIENCE_VOICE",
+        "VFX_LIGHTNING_HIT",
+        "IMPACT_VFX_LIFETIME",
+        "SPLASHES",
+        "STONE_BUILD_SHA",
+        "ui_effect_composite_shader",
+        "UI_RASTER_CANVAS",
+        "UI_OUTPUT_CANVAS",
+        "UI_EFFECT_COMPOSITE_PIPELINE",
+    ] {
+        assert!(!names.contains(name), "host projection {name} leaked into WorldImage: {names:?}");
+    }
 }
 
 /// `rock frame <game> -n N --replay <log> --dump-state [env]` -> parsed JSON.
