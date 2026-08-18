@@ -998,7 +998,7 @@ function stone_sprite_init() {
 // here states the sprite vertex; the Rock `Vertex` struct owns it and the
 // caller derives both numbers from it. Returns -1 for no draw, 0 for an
 // untextured draw, and 1 when the texture was bound.
-function stone_draw_mesh(data, count, stride, attr_sizes, attr_count, tex) {
+function stone_draw_mesh(data, count, stride, attr_sizes, attr_count, texKind, tex) {
   var gl = __SW.gl;
   if (!gl || count <= 0) return -1;
   var sh = __SW.shaders[__SW.curShader];
@@ -1007,7 +1007,8 @@ function stone_draw_mesh(data, count, stride, attr_sizes, attr_count, tex) {
     return -1;
   }
   gl.useProgram(sh.prog);
-  var t = __SW.textures[tex];
+  var c = texKind === 1 ? __SW.canvases[tex] : null;
+  var t = c ? c.tex : __SW.textures[tex];
   var textureBound = false;
   if (t) {
     gl.activeTexture(gl.TEXTURE0);
@@ -1198,6 +1199,10 @@ function stone_image_set_wrap(h, repeat) {
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, mode);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, mode);
   return true;
+}
+function stone_image_wrap_state(h) {
+  if (!__SW.textures || !__SW.textures[h]) return -1;
+  return __SW.imageRepeat[h] ? 1 : 0;
 }
 function stone_unload_image(h) {
   var t = __SW.textures[h];
@@ -1404,11 +1409,6 @@ function stone_bind_canvas_depth_to_unit(h, unit) {
 }
 function stone_canvas_exists(h) { return !!__SW.canvases[h]; }
 function stone_canvas_has_depth(h) { var c = __SW.canvases[h]; return !!(c && c.depthTex); }
-function stone_sprite_draw_canvas(shader, h, tw, th, x, y, w, hh, sx, sy, sw, sh) {
-  var c = __SW.canvases[h];
-  if (!c) return;
-  stone_sprite_draw_texture(shader, c.tex, tw, th, x, y, w, hh, sx, sy, sw, sh, 0, 1, 1, 1, 1, 1, 1);
-}
 // GL names, for the imgui path only.
 function stone_get_canvas_texture(h) { var c = __SW.canvases[h]; return c ? c.tex : 0; }
 function stone_get_canvas_depth_texture(h) { var c = __SW.canvases[h]; return c ? (c.depthTex || 0) : 0; }
@@ -1850,6 +1850,7 @@ function stone_shader_set_vec4_array(h, name, values, count) {
   __sw_with_shader_uniform(h, name, function (gl, l) { gl.uniform4fv(l, values.subarray ? values.subarray(0, count * 4) : values); });
 }
 function stone_bind_image_texture_to_unit(h, unit) { return stone_bind_texture_to_unit(h, unit) !== 0; }
+function stone_image_exists(h) { return !!(__SW.textures && __SW.textures[h]); }
 function stone_bind_texture_to_unit(tex, unit) {
   var gl = __SW.gl, t = __SW.textures[tex];
   if (!gl || !t || unit < 0) return 0;
