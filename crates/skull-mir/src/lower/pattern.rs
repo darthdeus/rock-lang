@@ -391,12 +391,14 @@ impl Builder<'_> {
         match scrut {
             Scrut::Val(v) => *v,
             Scrut::Flat { parent, prefix, shape } => self.materialize_flat(*parent, *prefix, shape),
-            Scrut::Cells { tag, positional, named, shape } => self.emit_cur(Inst::MakeEnumDyn {
-                tag: *tag,
-                ty: shape.name,
-                positional: positional.clone(),
-                named: named.clone(),
-            }),
+            Scrut::Cells { tag, positional, named, shape } => self.materialize_flat_cells(
+                shape,
+                FlatCells {
+                    tag: *tag,
+                    positional: positional.clone(),
+                    named: named.clone(),
+                },
+            ),
         }
     }
 

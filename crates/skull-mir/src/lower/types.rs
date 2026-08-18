@@ -512,7 +512,7 @@ impl Builder<'_> {
                 (Some(_), Some(parent)) => self.load_flat_cells(parent, fname, &shape),
                 (None, None) => {
                     let value = self.lower_struct_default(name, fname)?;
-                    self.spread_box_to_cells(value, &shape)
+                    self.spread_maybe_null_box_to_cells(value, &shape)?
                 }
                 _ => return Err(gap("flat spread field has no physical parent")),
             };

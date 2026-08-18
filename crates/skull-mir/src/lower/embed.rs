@@ -335,7 +335,7 @@ impl Builder<'_> {
                             match (inner, flat) {
                                 (Some(ic), _) => out.extend(prefixed(f, self.embed_leaf_reads(ic, d)?)),
                                 (None, Some(shape)) => {
-                                    let cells = self.spread_box_to_cells(d, &shape);
+                                    let cells = self.spread_maybe_null_box_to_cells(d, &shape)?;
                                     out.extend(self.flat_literal_slots(f, cells));
                                 }
                                 (None, None) => out.push((f, d)),

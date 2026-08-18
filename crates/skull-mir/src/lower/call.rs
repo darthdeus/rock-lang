@@ -1257,43 +1257,17 @@ impl Builder<'_> {
                     .into_iter()
                     .map(|p| self.pack(p))
                     .collect::<Result<Vec<_>, _>>()?;
-                let tag = packed[0];
-                let positional = packed[1..1 + shape.tuple_width()].to_vec();
-                let named: Vec<(Ustr, Idx<Inst>)> = shape
+                let cells = FlatCells {
+                    tag: packed[0],
+                    positional: packed[1..1 + shape.tuple_width()].to_vec(),
+                    named: shape
                     .record_fields
                     .iter()
                     .enumerate()
                     .map(|(i, rf)| (*rf, packed[1 + shape.tuple_width() + i]))
-                    .collect();
-                // A STATIC tag names a present variant: box directly. A payload-free
-                // variant reuses its interned singleton (map-key / identity holds).
-                if let Inst::Const(Lit::Str(variant)) = self.f.insts[tag] {
-                    if self.variant_is_unit(name, variant) {
-                        let g = Ustr::from(format!("__rock_enum_{name}_{variant}").as_str());
-                        return Ok(self.emit_cur(Inst::Global(g)));
-                    }
-                    return Ok(self.emit_cur(Inst::MakeEnumDyn { tag, ty: name, positional, named }));
-                }
-                // A DYNAMIC tag may be `nil` (a null nullable enum): materialize to
-                // `nil` in that case, else the box -- else a null threads to a
-                // `{__variant = nil}` table that fails `== null`.
-                let result = self.f.new_cell(None);
-                let nil = self.emit_cur(Inst::Const(Lit::Nil));
-                let is_nil = self.emit_cur(Inst::Eq(tag, nil));
-                let nil_bb = self.f.new_block();
-                let box_bb = self.f.new_block();
-                let join = self.f.new_block();
-                self.f.set_term(self.cur, Term::Branch { cond: is_nil, then_bb: nil_bb, else_bb: box_bb });
-                self.cur = nil_bb;
-                let z = self.emit_cur(Inst::Const(Lit::Nil));
-                self.emit_cur(Inst::Store { cell: result, value: z });
-                self.f.set_term(self.cur, Term::Goto(join));
-                self.cur = box_bb;
-                let boxed = self.emit_cur(Inst::MakeEnumDyn { tag, ty: name, positional, named });
-                self.emit_cur(Inst::Store { cell: result, value: boxed });
-                self.f.set_term(self.cur, Term::Goto(join));
-                self.cur = join;
-                Ok(self.emit_cur(Inst::Load(result)))
+                    .collect(),
+                };
+                Ok(self.materialize_flat_cells(&shape, cells))
             }
             // `present` is deliberately NOT consulted here. Packing an absent
             // Group to `nil` is what a `== nil` consumer needs, but `pack` cannot

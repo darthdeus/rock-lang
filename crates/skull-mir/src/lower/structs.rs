@@ -127,7 +127,7 @@ impl Builder<'_> {
                             Some(bi) => self.load_flat_cells(bi, fname, &shape),
                             None => {
                                 let dv = self.lower_struct_default(name, fname)?;
-                                self.spread_box_to_cells(dv, &shape)
+                                self.spread_maybe_null_box_to_cells(dv, &shape)?
                             }
                         };
                         fs.extend(self.flat_literal_slots(fname, cells));

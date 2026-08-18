@@ -8,7 +8,7 @@ impl Builder<'_> {
     /// field), nil where the live variant doesn't fill them so stale slots from a
     /// prior wider/other-shaped variant are cleared. A direct `E::V(..)` ctor fuses
     /// to a string const + the lowered args (no box); any other enum expression is
-    /// lowered to a box once and spread (`__variant` + `[i+1]` + `.field`).
+    /// lowered to a box once and spread through the nil-safe leaf projection.
     pub(crate) fn lower_flat_value(
         &mut self,
         shape: &EnumFlatShape,
@@ -89,10 +89,22 @@ impl Builder<'_> {
                 Ok(self.repr_group_to_cells(shape, parts)?)
             }
             other => {
-                let bv = self.pack(other)?;
-                Ok(self.spread_box_to_cells(bv, shape))
+                let boxed = self.pack_maybe_absent(other)?;
+                self.spread_maybe_null_box_to_cells(boxed, shape)
             }
         }
+    }
+
+    pub(crate) fn spread_maybe_null_box_to_cells(
+        &mut self,
+        boxed: Idx<Inst>,
+        shape: &EnumFlatShape,
+    ) -> Result<FlatCells, CompilerError> {
+        let leaves = self.cdata_leaves(boxed, &shape.value_shape())?;
+        self.repr_group_to_cells(
+            shape,
+            leaves.into_iter().map(ValueRepr::Scalar).collect(),
+        )
     }
 
     /// Whether `variant` of `enum_name` is a Unit (payload-free) variant -- its
@@ -239,16 +251,57 @@ impl Builder<'_> {
         FlatCells { tag, positional, named }
     }
 
-    /// Re-materialize a flattened enum field `parent.{prefix}` to a boxed enum
-    /// (`MakeEnumDyn`) at a whole-value-read boundary.
-    pub(crate) fn materialize_flat(&mut self, parent: Idx<Inst>, prefix: Ustr, shape: &EnumFlatShape) -> Idx<Inst> {
-        let cells = self.load_flat_cells(parent, prefix, shape);
-        self.emit_cur(Inst::MakeEnumDyn {
-            tag: cells.tag,
+    pub(crate) fn materialize_flat_cells(
+        &mut self,
+        shape: &EnumFlatShape,
+        cells: FlatCells,
+    ) -> Idx<Inst> {
+        let tag = cells.tag;
+        if let Inst::Const(Lit::Str(variant)) = self.f.insts[tag] {
+            if self.variant_is_unit(shape.name, variant) {
+                let global = Ustr::from(format!("__rock_enum_{}_{}", shape.name, variant).as_str());
+                return self.emit_cur(Inst::Global(global));
+            }
+            return self.emit_cur(Inst::MakeEnumDyn {
+                tag,
+                ty: shape.name,
+                positional: cells.positional,
+                named: cells.named,
+            });
+        }
+
+        let result = self.f.new_cell(None);
+        let nil = self.emit_cur(Inst::Const(Lit::Nil));
+        let is_nil = self.emit_cur(Inst::Eq(tag, nil));
+        let nil_bb = self.f.new_block();
+        let box_bb = self.f.new_block();
+        let join = self.f.new_block();
+        self.f.set_term(
+            self.cur,
+            Term::Branch { cond: is_nil, then_bb: nil_bb, else_bb: box_bb },
+        );
+        self.cur = nil_bb;
+        let absent = self.emit_cur(Inst::Const(Lit::Nil));
+        self.emit_cur(Inst::Store { cell: result, value: absent });
+        self.f.set_term(self.cur, Term::Goto(join));
+        self.cur = box_bb;
+        let boxed = self.emit_cur(Inst::MakeEnumDyn {
+            tag,
             ty: shape.name,
             positional: cells.positional,
             named: cells.named,
-        })
+        });
+        self.emit_cur(Inst::Store { cell: result, value: boxed });
+        self.f.set_term(self.cur, Term::Goto(join));
+        self.cur = join;
+        self.emit_cur(Inst::Load(result))
+    }
+
+    /// Re-materialize a flattened enum field `parent.{prefix}` at a whole-value
+    /// read boundary. A nil tag materializes to nil, never `{__variant = nil}`.
+    pub(crate) fn materialize_flat(&mut self, parent: Idx<Inst>, prefix: Ustr, shape: &EnumFlatShape) -> Idx<Inst> {
+        let cells = self.load_flat_cells(parent, prefix, shape);
+        self.materialize_flat_cells(shape, cells)
     }
 
     /// Emit the per-slot stores for a flattened enum field assignment
