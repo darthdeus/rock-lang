@@ -57,7 +57,16 @@ fn skull_emit_full(
     let user = skull_parser::parse_module(src, ustr::Ustr::from(file))
         .map_err(|e| EmitFullErr::Compile(vec![e]))?;
     let user_file = user.file;
-    let ws = crate::bone_backend::check_with_stdlib([user]).map_err(EmitFullErr::Compile)?;
+    let mut ws = crate::bone_backend::check_with_stdlib([user]).map_err(EmitFullErr::Compile)?;
+    // Single-file emission resolves from the file's enclosing project
+    // (walk-up), matching the JS single-file path -- the same source must
+    // agree across backends (crates/rock-cli/tests/js_run_gate.rs).
+    crate::comptime::stamp_workspace(&mut ws, std::path::Path::new(file)).map_err(|e| {
+        EmitFullErr::Compile(vec![CompilerError::new_no_location(format!(
+            "build var resolution failed: {e:#}"
+        ))])
+    })?;
+    let ws = ws;
     // The build lint pass (`docs/lint-future-plan.md`): soft findings report,
     // `Error` findings refuse the program through the same path a type error
     // takes.
@@ -93,6 +102,19 @@ pub struct SkullPhaseTimes {
     /// scaffold+misc), from `MirEmit::phases`. Empty if bone rejected the
     /// workspace (emit never ran). Summed element-wise across timed runs.
     pub emit_phases: Vec<(&'static str, Duration)>,
+    /// skull's ABI-plan memo counters, from `MirEmit::abi_plan_stats`.
+    pub abi_plan_stats: skull_mir::lower::AbiPlanMemoStats,
+    /// Shared-arena traffic split at the setup/fanout boundary, from
+    /// `MirEmit::arena_traffic`.
+    pub arena_traffic: skull::mir_emit::ArenaTraffic,
+    /// Body-oriented lowering and transform attribution from `MirEmit`.
+    pub attribution: skull::mir_emit::EmitAttribution,
+    /// Setup-lane populations and observed execution overlap from `MirEmit`.
+    pub setup_lanes: skull::mir_emit::SetupLaneAttribution,
+    /// Graph operation census from `MirEmit`.
+    pub graph_census: skull::instance_graph::RunStats,
+    /// Concrete-plan ownership census from `MirEmit`.
+    pub concrete_stats: skull::concrete_body::ConcreteBuildStats,
 }
 
 /// Whole-project skull timing: parse all user files, type-check them together
@@ -134,6 +156,12 @@ pub fn skull_workspace_timed(sources: &SourceFiles) -> (bool, SkullPhaseTimes) {
     let emit_ok = match emit {
         Ok(e) => {
             times.emit_phases = e.phases;
+            times.abi_plan_stats = e.abi_plan_stats;
+            times.arena_traffic = e.arena_traffic;
+            times.attribution = e.attribution;
+            times.setup_lanes = e.setup_lanes;
+            times.graph_census = e.graph_census;
+            times.concrete_stats = e.concrete_stats;
             true
         }
         Err(_) => false,
@@ -164,13 +192,17 @@ pub fn skull_iter_codegen(path: &str, iters: usize) -> Result<()> {
             crate::ablation_report::exit_with_census(1);
         }
     };
-    let ws = match crate::bone_backend::check_modules(&mut modules) {
+    let mut ws = match crate::bone_backend::check_modules(&mut modules) {
         Ok(ws) => ws,
         Err(errs) => {
             eprintln!("{}", render_project_errs(&sources, &errs));
             crate::ablation_report::exit_with_census(1);
         }
     };
+    if let Err(e) = crate::comptime::stamp_workspace(&mut ws, std::path::Path::new(path)) {
+        eprintln!("Error: build var resolution failed for {path}: {e:#}");
+        crate::ablation_report::exit_with_census(1);
+    }
     let entry_mid = crate::bone_backend::entry_module_id(&ws, entry_file);
 
     // Warm-up emit outside the timed loop (catch any gap, prime the allocator).
@@ -220,13 +252,17 @@ pub fn skull_inline_stats(path: &str) -> Result<()> {
             crate::ablation_report::exit_with_census(1);
         }
     };
-    let ws = match crate::bone_backend::check_modules(&mut modules) {
+    let mut ws = match crate::bone_backend::check_modules(&mut modules) {
         Ok(ws) => ws,
         Err(errs) => {
             eprintln!("{}", render_project_errs(&sources, &errs));
             crate::ablation_report::exit_with_census(1);
         }
     };
+    if let Err(e) = crate::comptime::stamp_workspace(&mut ws, std::path::Path::new(path)) {
+        eprintln!("Error: build var resolution failed for {path}: {e:#}");
+        crate::ablation_report::exit_with_census(1);
+    }
 
     let r = skull::inline_stats::report(&ws);
     let out = "skull-inline-stats.txt";
@@ -659,9 +695,15 @@ fn skull_build_package(dir: &str) -> std::result::Result<SkullOutcome, SkullFail
         reason: categorize(&errs[0].message),
         rendered: render_project_errs(&sources, &errs),
     })?;
-    let ws = crate::bone_backend::check_modules(&mut modules).map_err(|errs| SkullFailure {
+    let mut ws = crate::bone_backend::check_modules(&mut modules).map_err(|errs| SkullFailure {
         reason: categorize(&errs[0].message),
         rendered: render_project_errs(&sources, &errs),
+    })?;
+    crate::comptime::stamp_workspace(&mut ws, std::path::Path::new(dir)).map_err(|e| {
+        SkullFailure {
+            reason: "build var resolution failed".to_string(),
+            rendered: format!("build var resolution failed for {dir}: {e:#}"),
+        }
     })?;
     let entry_mid = crate::bone_backend::entry_module_id(&ws, entry_file);
     let lua = match skull::mir_emit::emit_workspace_mir(&ws, entry_mid) {
@@ -806,6 +848,9 @@ pub fn skull_shader(files: &[String], output: Option<String>, profile: Option<St
     };
     if roots.is_empty() {
         anyhow::bail!("rock shader: need at least one root fn name");
+    }
+    if let Some(out) = output.as_deref() {
+        invalidate_shader_output(path, out)?;
     }
     let src = match fs_err::read_to_string(path) {
         Ok(s) => s,
@@ -956,6 +1001,24 @@ pub fn skull_shader(files: &[String], output: Option<String>, profile: Option<St
     Ok(())
 }
 
+fn invalidate_shader_output(input: &str, output: &str) -> Result<()> {
+    let input = std::path::Path::new(input);
+    let output = std::path::Path::new(output);
+    let aliases = input == output
+        || match (fs_err::canonicalize(input), fs_err::canonicalize(output)) {
+            (Ok(input), Ok(output)) => input == output,
+            _ => false,
+        };
+    if aliases {
+        anyhow::bail!("rock shader: --output must not refer to the input file");
+    }
+    match fs_err::remove_file(output) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.into()),
+    }
+}
+
 pub fn skull_compile_single(path: &str, output: Option<String>) -> Result<()> {
     if std::path::Path::new(path).is_dir() {
         return skull_compile_project(path, output);
@@ -1050,7 +1113,10 @@ pub fn skull_watch(path: &str, output: Option<String>) -> Result<()> {
         let mut update_failed = false;
 
         match session {
-            None => match crate::bone_backend::bone_session(files.clone()) {
+            None => match crate::bone_backend::bone_session_for_emission(
+                files.clone(),
+                std::path::Path::new(path),
+            ) {
                 Ok(s) => {
                     *session = Some(s);
                     full = true; // first build: populate the cache
@@ -1253,8 +1319,9 @@ pub(crate) fn render_project_errs(sources: &SourceFiles, errs: &[CompilerError])
 /// bone, emit Lua via skull, and execute it.
 ///
 /// A game project also needs the stone engine runtime (libstone FFI + the frame
-/// loop): the `is_game` branch below stages libstone and the cimgui prelude and
-/// execs luajit on `tmp/main.lua`, reusing the rock backend's run recipe
+/// loop): the `is_game` branch below stages libstone and execs luajit on
+/// `tmp/main.lua`, where stone's global initializer sets up cimgui, reusing the
+/// rock backend's run recipe
 /// (`build_engine_libs`, `exec_luajit_file`). All games run this way (match3,
 /// mag, bitgun, ...). Non-game projects keep the captured-output pipe. See
 /// `docs/skull-plan.md` — whole-game milestone (reached).
@@ -1265,6 +1332,20 @@ pub(crate) fn render_project_errs(sources: &SourceFiles, errs: &[CompilerError])
 /// Renders against the project sources and exits 1 on any discovery / type /
 /// emit failure.
 fn skull_emit_project(dir: &str) -> String {
+    let inputs = match crate::comptime::inputs_for_project_dir(std::path::Path::new(dir)) {
+        Ok(inputs) => inputs,
+        Err(e) => {
+            log::error!(target: "SKULL", "build var resolution failed for project {}: {:#}", dir, e);
+            crate::ablation_report::exit_with_census(1);
+        }
+    };
+    skull_emit_project_with_inputs(dir, inputs)
+}
+
+fn skull_emit_project_with_inputs(
+    dir: &str,
+    inputs: bone_semantic::inference::ComptimeInputs,
+) -> String {
     use std::path::PathBuf;
     let renderer_target = match skull_renderer_target(dir) {
         Ok(target) => target,
@@ -1298,7 +1379,7 @@ fn skull_emit_project(dir: &str) -> String {
         }
     };
 
-    let ws = match crate::bone_backend::check_modules(&mut modules) {
+    let mut ws = match crate::bone_backend::check_modules(&mut modules) {
         Ok(ws) => ws,
         Err(errs) => {
             eprintln!("{}", render_project_errs(&sources, &errs));
@@ -1306,6 +1387,7 @@ fn skull_emit_project(dir: &str) -> String {
             crate::ablation_report::exit_with_census(1);
         }
     };
+    ws.comptime_inputs = inputs;
     let user_mid = crate::bone_backend::entry_module_id(&ws, entry_file);
 
     // Lints are a compiler pass, not an editor accessory: they run on the same
@@ -1348,14 +1430,12 @@ fn skull_emit_project(dir: &str) -> String {
         }
     }
 
-    // `_G.__ROCK_GLOBALS` registry (consumed by `--dump-state` /
-    // `dump_globals_json`). bone/skull are package-agnostic, so the
-    // package grouping is computed here at the host layer (where stick.toml
-    // lives), mirroring rock-codegen's `format_globals_registry`. Appended
-    // after the emit; the block only lists global *names* (read from `_G`
-    // at runtime), so position past the global defs is irrelevant.
-    let registry = build_rock_globals_registry(&ws, &spec);
-    let lua = format!("{lua}{registry}");
+    let mut lua = lua;
+    if let Err(error) = install_rock_state_metadata(&mut lua, &ws, &spec) {
+        eprintln!("{}", render_project_err(&sources, &error));
+        log::error!(target: "SKULL", "state metadata planning failed for {}", dir);
+        crate::ablation_report::exit_with_census(1);
+    }
     // The bone Workspace + HIR modules are dead once `lua` is built -- this is a
     // terminal compile path (`compile`/`run` of a project; never looped in tests
     // or backend-stats), so the only thing after this is the output write / a
@@ -1371,33 +1451,19 @@ fn skull_emit_project(dir: &str) -> String {
     lua
 }
 
-/// Build the `_G.__ROCK_GLOBALS = {["pkg"]={"name",...},...}` registry that
-/// `--dump-state` / `dump_globals_json` reads. bone is package-agnostic, so the
-/// grouping is done here: every global is attributed to its package by
-/// longest-prefix match of its module file against the stick.toml package map
-/// (same rule as rock-codegen's assembler). Returns "" when there's no project
-/// package map (single-file / no stick.toml), matching rock (no registry then).
-fn build_rock_globals_registry(
+/// Attach host-only package grouping and reflection descriptions to the
+/// compiler-emitted StateSchema. This is metadata, not a second state-membership
+/// oracle: consumers enumerate `_G.__ROCK_STATE_SCHEMA` and read the active
+/// Session through its session keys.
+fn build_rock_state_metadata(
     ws: &bone_semantic::inference::Workspace,
     spec: &crate::unified_compile::SourceSpec,
-) -> String {
+) -> std::result::Result<String, CompilerError> {
     use bone_semantic::prelude::ModuleId;
     use std::collections::BTreeMap;
 
     let package_map = crate::unified_compile::build_package_map(spec);
-    if package_map.is_empty() {
-        return String::new();
-    }
-    let scx = skull_mir::lower::ScalarCtx::new(ws);
-
-    let mut by_package: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    // The RECURSIVE declared shape per global. A global has no reflection
-    // envelope to hang a type on -- `dump_globals_json` serializes its value
-    // with nothing in hand -- so a global holding `Image`, `[Image]` or
-    // `Map<string, Image>` serialized its raw process-local ids into
-    // dump-state, replay and keyframes. Emitted only for the globals whose
-    // declared type contains a nominal, so the rest keep the walk they have.
-    let mut global_descs: BTreeMap<String, String> = BTreeMap::new();
+    let mut metadata: BTreeMap<String, String> = BTreeMap::new();
     for m in ws.modules.iter().filter(|m| m.id != ModuleId::builtin()) {
         let module_path = m.file.as_str();
         // Longest-prefix match so nested packages resolve to the deepest one.
@@ -1410,62 +1476,58 @@ fn build_rock_globals_registry(
                 matched = Some(pkg_name);
             }
         }
-        let Some(pkg) = matched else { continue };
-        let entry = by_package.entry(pkg.to_string()).or_default();
         for (_gid, g) in m.globals.iter() {
-            // Every global is published under its LOGICAL name, `nobox` or not.
-            // A `nobox` global has no slot under that name -- its storage IS its
-            // leaves -- so the name alone would dump nil and restore nothing;
-            // `__ROCK_NOBOX_GLOBALS` carries the rebuild/take-apart pair, and the
-            // consumers go through `__rock_global_get`/`_set` rather than `_G[name]`.
-            // Publishing leaves here instead (which is what this did) put physical
-            // names in the dump, in save files and in replay keyframes.
-            entry.push(g.name.as_str().to_string());
-            if let Some(d) = skull::type_desc_lua(ws, g.ty) {
-                global_descs.insert(g.name.as_str().to_string(), d);
+            let identity = skull_mir::state_schema::global_identity(m.file, g.name);
+            let package = matched.map(str::to_string);
+            let description = skull::type_desc_lua(ws, g.ty);
+            let fields = [
+                package.map(|p| format!("package={p:?}")),
+                description.map(|d| format!("description={d}")),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+            if !fields.is_empty() {
+                metadata.insert(identity, format!("{{{}}}", fields.join(",")));
             }
         }
     }
-    by_package.retain(|_, names| !names.is_empty());
-    if by_package.is_empty() {
-        return String::new();
-    }
-
-    // Bracket-string keys so hyphenated package names (`ui-proto`) stay valid
-    // Lua (bare-identifier keys would be a syntax error).
-    let mut out = String::from("\n_G.__ROCK_GLOBALS = {");
-    for (pkg, names) in &by_package {
-        out.push_str(&format!("[{pkg:?}]={{"));
-        for (i, name) in names.iter().enumerate() {
-            if i > 0 {
-                out.push(',');
-            }
-            out.push_str(&format!("{name:?}"));
-        }
-        out.push_str("},");
+    let mut out = String::from("\n_G.__ROCK_STATE_METADATA = {");
+    for (identity, fields) in metadata {
+        out.push_str(&format!("[{identity:?}]={fields},"));
     }
     out.push_str("}\n");
-    // Rides with the registry for the same reason the accessors do: a consumer
-    // that had the names but not the shapes would serialize every handle-typed
-    // global as a raw id, which is the state this replaced.
-    if !global_descs.is_empty() {
-        out.push_str("_G.__ROCK_GLOBAL_DESC = {");
-        for (name, desc) in &global_descs {
-            out.push_str(&format!("[{name:?}]={desc},"));
-        }
-        out.push_str("}\n");
-    }
-    // The accessor table rides WITH the registry, never appended separately: four
-    // emit paths append this block, and a registry whose consumers had no
-    // accessors would read nil for every `nobox` global.
-    out.push_str(&build_nobox_global_accessors(ws, &scx));
-    out
+    out.push_str("for _, entry in ipairs(_G.__ROCK_STATE_SCHEMA or {}) do\n");
+    out.push_str("  local metadata = _G.__ROCK_STATE_METADATA[entry.identity]\n");
+    out.push_str("  if metadata then\n");
+    out.push_str("    entry.package = metadata.package\n");
+    out.push_str("    entry.description = metadata.description\n");
+    out.push_str("  end\nend\n");
+    Ok(out)
 }
 
-/// Build `_G.__ROCK_NOBOX_GLOBALS`, the rebuild/take-apart pair per `nobox`
+fn install_rock_state_metadata(
+    lua: &mut String,
+    ws: &bone_semantic::inference::Workspace,
+    spec: &crate::unified_compile::SourceSpec,
+) -> std::result::Result<(), CompilerError> {
+    let marker = "__rock_state_install_global_bridge()\n";
+    let at = lua
+        .find(marker)
+        .ok_or_else(|| CompilerError::new_no_location(
+            "compiler-owned StateSchema is missing its global bridge".to_string(),
+        ))?;
+    let mut metadata = build_rock_state_metadata(ws, spec)?;
+    let scx = skull_mir::lower::ScalarCtx::new(ws);
+    metadata.push_str(&build_state_nobox_accessors(ws, &scx)?);
+    lua.insert_str(at + marker.len(), &metadata);
+    Ok(())
+}
+
+/// Build `_G.__ROCK_STATE_NOBOX`, the rebuild/take-apart pair per `nobox`
 /// global. A `nobox` global's storage is its leaf globals, so reflection cannot
-/// reach it by name; these two closures are what `__rock_global_get`/`_set` call
-/// so every consumer addresses the LOGICAL value under the LOGICAL name.
+/// reach it as one Session value; these closures are the physical adapter for
+/// the logical StateSchema entry.
 ///
 /// Both directions consume one canonical accessor plan
 /// (`nobox_global_accessor_shape`), so they cannot drift from each other or from the
@@ -1475,62 +1537,92 @@ fn build_rock_globals_registry(
 /// `_lct` / `_vt` / `_ct` choice) -- dotted paths mean the flattened leaf ctor,
 /// otherwise the GC tier's table ctor or the cdata one.
 ///
-/// Position past the global defs is irrelevant -- the closures only read the leaf
-/// globals when called (same argument as the registry block it rides with).
-fn build_nobox_global_accessors(
+fn build_state_nobox_accessors(
     ws: &bone_semantic::inference::Workspace,
     scx: &skull_mir::lower::ScalarCtx,
-) -> String {
+) -> std::result::Result<String, CompilerError> {
     use bone_semantic::prelude::ModuleId;
 
     let mut rows: Vec<String> = Vec::new();
     for m in ws.modules.iter().filter(|m| m.id != ModuleId::builtin()) {
         for (_gid, g) in m.globals.iter() {
-            let Some(acc) = skull_mir::lower::nobox_global_accessor_shape(ws, scx, g.ty) else {
-                continue;
-            };
+            let Some(acc) = skull_mir::lower::nobox_global_accessor_shape(ws, scx, g.ty)
+                .map_err(|e| CompilerError::new_no_location(e.message))?
+            else { continue };
             let skull_mir::lower::NoboxGlobalAccessorShape {
-                ty_name, paths, nullable, ctor_suffix: suffix, presence_path, unbuildable,
+                ty_name, paths, nullable, ctor_suffix: suffix, presence_path: _, unbuildable,
             } = acc;
-            let leaves = skull_mir::lower::GlobalPlan::for_declared_type(ws, scx, g.ty)
-                .ok()
-                .and_then(|plan| plan.leaf_names(g.name))
-                .expect("a global plan with leaf paths must own its leaf names");
+            let plan = skull_mir::lower::GlobalPlan::for_declared_type(ws, scx, g.ty)
+                .map_err(|e| CompilerError::new_no_location(e.message))?;
+            let all_leaves = plan.leaf_names(g.name).ok_or_else(|| {
+                CompilerError::new_no_location(format!(
+                    "nobox global `{}` has an accessor shape but no leaf-name plan",
+                    g.name
+                ))
+            })?;
             // A nullable global leads with a presence leaf that has no path: it is
             // not a field, so it is branched on rather than read. Everything below
             // pairs the REMAINING leaves with the paths.
             let (present, leaves) = if nullable {
-                let (p, rest) = leaves.split_first().expect("a nullable shape has a presence leaf");
+                let Some((p, rest)) = all_leaves.split_first() else {
+                    return Err(CompilerError::new_no_location(format!(
+                        "nullable nobox global `{}` has no presence leaf",
+                        g.name
+                    )));
+                };
                 (Some(*p), rest.to_vec())
             } else {
-                (None, leaves)
+                (None, all_leaves)
             };
             if leaves.len() != paths.len() {
-                log::error!(
-                    target: "SKULL",
-                    "nobox global `{}`: {} leaves but {} leaf paths -- the ctor is \
-                     positional over the paths, so an accessor built from a \
-                     mismatched pair would write one leaf's value into another",
-                    g.name, leaves.len(), paths.len()
-                );
-                crate::ablation_report::exit_with_census(1);
+                return Err(CompilerError::new_no_location(format!(
+                    "nobox global `{}` has {} leaves but {} leaf paths",
+                    g.name,
+                    leaves.len(),
+                    paths.len()
+                )));
             }
             // Both accessor directions are POSITIONAL over the leaf sequence, so
             // they are sound only where the ctor is too. `nobox_global_accessor_shape`
             // makes that call; guessing is how a leak becomes a miscompile, so an
             // unbuildable shape rejects rather than emit a wrong accessor.
             if let Some(why) = &unbuildable {
-                log::error!(
-                    target: "SKULL",
-                    "nobox global `{}` of type `{ty_name}`: reflection cannot rebuild \
-                     it -- {why}. Mechanism J of docs/nobox-case-matrix.md covers the \
-                     rebuildable shapes only.",
+                return Err(CompilerError::new_no_location(format!(
+                    "nobox global `{}` of type `{ty_name}` cannot be rebuilt: {why}",
                     g.name
-                );
-                crate::ablation_report::exit_with_census(1);
+                )));
             }
-            let _ = presence_path;
-            let args = leaves.iter().map(|l| l.to_string()).collect::<Vec<_>>().join(", ");
+            let identity = skull_mir::state_schema::global_identity(m.file, g.name);
+            let all_leaf_names = if let Some(present) = present {
+                std::iter::once(present).chain(leaves.iter().copied()).collect::<Vec<_>>()
+            } else {
+                leaves.clone()
+            };
+            let state_keys = all_leaf_names
+                .iter()
+                .enumerate()
+                .map(|(index, _)| {
+                    let leaf = if all_leaf_names.len() == 1 {
+                        "value".to_string()
+                    } else {
+                        format!("leaf{index}")
+                    };
+                    skull_mir::state_schema::state_key(&identity, &leaf)
+                })
+                .collect::<Vec<_>>();
+            let (present_key, value_keys) = if nullable {
+                let (present, values) = state_keys
+                    .split_first()
+                    .expect("a nullable shape has a presence Session slot");
+                (Some(present.clone()), values.to_vec())
+            } else {
+                (None, state_keys)
+            };
+            let args = value_keys
+                .iter()
+                .map(|key| format!("__rock_state_get({key:?})"))
+                .collect::<Vec<_>>()
+                .join(", ");
             let writes = leaves
                 .iter()
                 .zip(&paths)
@@ -1539,20 +1631,26 @@ fn build_nobox_global_accessors(
                 // -- a field of nil. The prefix guard above never caught it,
                 // because a NON-nullable nested child contributes `m.x`/`m.y`
                 // with no `m`, so no path is a prefix of another.
-                .map(|(l, p)| format!("{l} = v[{:?}]", p.as_str()))
+                .zip(&value_keys)
+                .map(|((_, p), key)| format!("__rock_state_set({key:?}, v[{:?}])", p.as_str()))
                 .collect::<Vec<_>>()
                 .join("; ");
             let (get, set) = match present {
                 // Presence gates BOTH directions: rebuilding an absent value would
                 // hand reflection a struct of nils, and a write that left the leaves
                 // behind would let a later read resurrect the old value.
-                Some(p) => (
-                    format!("if not {p} then return nil end return {ty_name}{suffix}({args})"),
+                Some(_) => (
                     format!(
-                        "{p} = v ~= nil; if v ~= nil then {writes} else {} end",
+                        "if not __rock_state_get({:?}) then return nil end return {ty_name}{suffix}({args})",
+                        present_key.as_ref().expect("nullable accessor has a presence key")
+                    ),
+                    format!(
+                        "__rock_state_set({:?}, v ~= nil); if v ~= nil then {writes} else {} end",
+                        present_key.as_ref().expect("nullable accessor has a presence key"),
                         leaves
                             .iter()
-                            .map(|l| format!("{l} = nil"))
+                            .zip(&value_keys)
+                            .map(|(_, key)| format!("__rock_state_clear({key:?})"))
                             .collect::<Vec<_>>()
                             .join("; ")
                     ),
@@ -1561,7 +1659,7 @@ fn build_nobox_global_accessors(
             };
             rows.push(format!(
                 "[{:?}]={{get=function() {get} end,set=function(v) {set} end}},",
-                g.name.as_str()
+                identity
             ));
         }
     }
@@ -1570,7 +1668,7 @@ fn build_nobox_global_accessors(
     // would leave the previous build's accessors installed, and changing the last
     // `nobox` global to an ordinary one would keep reflection reading leaf globals
     // that no longer back it.
-    format!("\n_G.__ROCK_NOBOX_GLOBALS = {{{}}}\n", rows.concat())
+    Ok(format!("\n_G.__ROCK_STATE_NOBOX = {{{}}}\n", rows.concat()))
 }
 
 /// Collect `@sim` info from the bone workspace -- the skull analog of rock's
@@ -1647,14 +1745,23 @@ pub fn skull_compile_game_and_collect_sims(
 /// analogue of the single-file [`skull_compile_single`] path; shares
 /// [`skull_emit_project`] with `run`.
 fn skull_compile_project(dir: &str, output: Option<String>) -> Result<()> {
+    let inputs = crate::comptime::inputs_for_project_dir(std::path::Path::new(dir))?;
+    skull_compile_project_with_inputs(dir, output, inputs)
+}
+
+pub fn skull_compile_project_with_inputs(
+    dir: &str,
+    output: Option<String>,
+    inputs: bone_semantic::inference::ComptimeInputs,
+) -> Result<()> {
     use std::path::PathBuf;
-    let emit = skull_emit_project(dir);
+    let emit = skull_emit_project_with_inputs(dir, inputs);
     // A game's runnable main.lua is the same shape run/stone produce via
-    // write_full_main: preamble (cimgui bindings + game source dir) + emit +
-    // __rock_main_wrapper(main). Without the preamble the fire build is missing
-    // the imgui bindings (GetStyle etc.); without the wrapper it never starts.
+    // write_full_main: preamble (game source dir) + emit +
+    // __rock_main_wrapper(main). Without the preamble game asset paths are
+    // wrong; without the wrapper it never starts.
     let lua = if rock_host::project::is_game_project(&PathBuf::from(dir)).unwrap_or(false) {
-        skull_game_main(&skull_game_preamble(dir), &emit)
+        skull_game_main(&skull_game_preamble(dir)?, &emit)
     } else if emit.contains("function main(") {
         format!("{emit}\n__rock_main_wrapper(main)\n")
     } else {
@@ -1695,7 +1802,7 @@ fn skull_run_project(dir: &str) -> Result<()> {
         // fresh baseline.
         let lua_file = rock_host::project::default_main_lua_path();
         if let Err(e) = write_full_main(
-            &skull_game_preamble(dir),
+            &skull_game_preamble(dir)?,
             &lua,
             &lua_file,
             &lua_file.with_file_name("incremental.lua"),
@@ -2064,8 +2171,9 @@ pub fn skull_incremental_profile(path: &str) -> Result<()> {
     eprintln!("=== Skull Incremental Profile: {path} ===\n");
 
     let t_warm = Instant::now();
-    let mut session = crate::bone_backend::bone_session(files.clone())
-        .map_err(|e| anyhow::anyhow!("session warm failed: {}", e.message))?;
+    let mut session =
+        crate::bone_backend::bone_session_for_emission(files.clone(), std::path::Path::new(path))
+            .map_err(|e| anyhow::anyhow!("session warm failed: {}", e.message))?;
     let warm_ms = ms(t_warm);
 
     let (baseline_lua, mut cache, full_ms) = {
@@ -2215,7 +2323,7 @@ pub fn skull_incremental_profile(path: &str) -> Result<()> {
 /// states so every pass is a genuine change (not a content-hash no-op). Reports
 /// the timing distribution (mean/p50/p99/min/max/stddev) + overlay size + the
 /// per-phase breakdown of BOTH halves: `update_file` (clone/cook/lower/infer, from
-/// bone's `phase_timings`) and `emit_overlay`. It calls the EXACT same
+/// bone's `phase_timings`) and `emit_overlay`, plus verdict lints. It calls the EXACT same
 /// `session.update_file` + `skull::mir_emit::emit_overlay` that
 /// `SkullStone::recompile` runs on a body edit (no reassembly -- the two-file
 /// split's whole point), so the numbers are the live recompile path, just sampled
@@ -2226,6 +2334,8 @@ pub fn skull_incremental_profile(path: &str) -> Result<()> {
 /// its first fn); `SKULL_ITER_FN=<name>` profiles a REAL constant edit -- flips
 /// the first digit in that fn's body, alternating with the original (e.g.
 /// `SKULL_ITER_FN=update_mobs` flips mag's `tick_anim(.., 3, ..)` 3<->2).
+/// `SKULL_ITER_WRITE=1` additionally measures the production atomic overlay
+/// write into a temporary output path.
 pub fn skull_iter_incremental(path: &str, iters: usize, warmup: usize) -> Result<()> {
     use std::path::PathBuf;
 
@@ -2241,8 +2351,9 @@ pub fn skull_iter_incremental(path: &str, iters: usize, warmup: usize) -> Result
         })
         .collect();
 
-    let mut session = crate::bone_backend::bone_session(files.clone())
-        .map_err(|e| anyhow::anyhow!("session warm failed: {}", e.message))?;
+    let mut session =
+        crate::bone_backend::bone_session_for_emission(files.clone(), std::path::Path::new(path))
+            .map_err(|e| anyhow::anyhow!("session warm failed: {}", e.message))?;
 
     let mut cache = {
         let ws = session.workspace();
@@ -2272,7 +2383,7 @@ pub fn skull_iter_incremental(path: &str, iters: usize, warmup: usize) -> Result
     // fn's body, alternating modified <-> original -- e.g.
     // `SKULL_ITER_FN=update_mobs rock iter-incremental mag` flips `tick_anim(..,
     // 3, ..)` 3<->2. Else: auto-pick a file and inject whitespace (body_touch).
-    let (target, state_a, state_b) = if let Ok(fname) = std::env::var("SKULL_ITER_FN") {
+    let (target, mut state_a, mut state_b) = if let Ok(fname) = std::env::var("SKULL_ITER_FN") {
         let (p, t) = files
             .iter()
             .find(|(p, t)| p.contains(&proj_dir) && t.contains(&format!("fn {fname}")))
@@ -2317,6 +2428,9 @@ pub fn skull_iter_incremental(path: &str, iters: usize, warmup: usize) -> Result
         let b = body_touch(&a).unwrap();
         (target, a, b)
     };
+    if std::env::var_os("SKULL_ITER_REVERSE").is_some() {
+        std::mem::swap(&mut state_a, &mut state_b);
+    }
 
     let iters = iters.max(1);
     let target_name = std::path::Path::new(&target)
@@ -2324,12 +2438,19 @@ pub fn skull_iter_incremental(path: &str, iters: usize, warmup: usize) -> Result
         .map(|f| f.to_string_lossy().into_owned())
         .unwrap_or_else(|| target.clone());
 
+    let write_disk = std::env::var_os("SKULL_ITER_WRITE").is_some();
+    let write_dir = tempfile::tempdir().map_err(|e| anyhow::anyhow!("create iter output: {e}"))?;
+    let write_path = write_dir.path().join("incremental.lua");
     let mut samples: Vec<f64> = Vec::with_capacity(iters);
+    let mut disk_samples: Vec<f64> = Vec::with_capacity(iters);
     let mut last_update = 0.0;
     let mut last_diag = 0.0;
+    let mut last_lint = 0.0;
     let mut last_emit = 0.0;
+    let mut last_write = 0.0;
     let mut last_bytes = 0usize;
     let mut last_reinferred = 0usize;
+    let mut last_body_meta = (0usize, false, 0usize, 0isize);
     let mut last_phases: Vec<(&'static str, std::time::Duration)> = Vec::new();
     let mut last_update_phases: Vec<(&'static str, std::time::Duration)> = Vec::new();
 
@@ -2344,6 +2465,19 @@ pub fn skull_iter_incremental(path: &str, iters: usize, warmup: usize) -> Result
         // bone's per-edit phase breakdown (clone/cook/lower/infer), set by
         // rebuild_body_incremental inside the SAME update_file the stone loop calls.
         let update_phases = session.workspace().phase_timings.clone();
+        let span_edits = upd
+            .body_update
+            .edit
+            .as_ref()
+            .map(|edit| {
+                vec![skull::instance_graph::SpanEdit {
+                    file: edit.file,
+                    at: edit.at,
+                    byte_delta: edit.byte_delta,
+                    line_delta: edit.line_delta,
+                }]
+            })
+            .unwrap_or_default();
 
         // `SkullStone::recompile` calls `diagnostics()` inside its `cook` timing --
         // an O(workspace) error scan + sort over every module. Measure it here too
@@ -2353,23 +2487,64 @@ pub fn skull_iter_incremental(path: &str, iters: usize, warmup: usize) -> Result
         let _ = session.diagnostics();
         let diag_ms = ms(t_d);
 
+        let t_l = Instant::now();
+        let lint_errs = crate::lint_pass::run_build_lints(
+            session.workspace(),
+            &sources,
+            std::path::Path::new(path),
+            crate::lint_pass::Scope::WholeProject,
+        );
+        if !lint_errs.is_empty() {
+            return Err(anyhow::anyhow!(
+                "iter-incremental fixture produced {} lint error(s)",
+                lint_errs.len()
+            ));
+        }
+        let lint_ms = ms(t_l);
+
         // Profile the REAL stone path: `emit_overlay` (no reassembly), matching
         // what `SkullStone::recompile` writes on a body edit.
-        let (emit_ms, overlay_bytes, phases) = {
+        let (emit_ms, overlay, phases) = {
             let ws = session.workspace();
             let t_e = Instant::now();
-            let e = skull::mir_emit::emit_overlay(ws, &mut cache, &upd.reinferred)
+            let e = skull::mir_emit::emit_overlay_with_span_edits(
+                ws,
+                &mut cache,
+                &upd.reinferred,
+                &span_edits,
+            )
                 .map_err(|e| anyhow::anyhow!("emit_overlay: {}", e.message))?;
-            (ms(t_e), e.lua.len(), e.phases)
+            (ms(t_e), e.lua, e.phases)
+        };
+        let overlay_bytes = overlay.len();
+        let write_ms = if write_disk {
+            let t_w = Instant::now();
+            rock_host::project::write_atomic(&write_path, &overlay)
+                .map_err(|e| anyhow::anyhow!("iter-incremental write: {e}"))?;
+            ms(t_w)
+        } else {
+            0.0
         };
 
         if i >= warmup {
-            samples.push(update_ms + diag_ms + emit_ms);
+            let backend_ms = update_ms + diag_ms + lint_ms + emit_ms;
+            samples.push(backend_ms);
+            if write_disk {
+                disk_samples.push(backend_ms + write_ms);
+            }
             last_update = update_ms;
             last_diag = diag_ms;
+            last_lint = lint_ms;
             last_emit = emit_ms;
             last_bytes = overlay_bytes;
+            last_write = write_ms;
             last_reinferred = upd.reinferred.len();
+            last_body_meta = (
+                upd.body_update.semantic_bodies.len(),
+                upd.body_update.span_only,
+                upd.body_update.edit.as_ref().map_or(0, |edit| edit.at),
+                upd.body_update.edit.as_ref().map_or(0, |edit| edit.byte_delta),
+            );
             last_phases = phases;
             last_update_phases = update_phases;
         }
@@ -2390,9 +2565,28 @@ pub fn skull_iter_incremental(path: &str, iters: usize, warmup: usize) -> Result
         last_reinferred
     );
     eprintln!(
-        "  update+emit per pass [ms]:  mean {:.3}  p50 {:.3}  p99 {:.3}  min {:.3}  max {:.3}  stddev {:.3} (cv {:.1}%)",
+        "  backend route per pass [ms] (update + diagnostics + lints + overlay):  mean {:.3}  p50 {:.3}  p99 {:.3}  min {:.3}  max {:.3}  stddev {:.3} (cv {:.1}%)",
         mean, pct(50.0), pct(99.0), sorted[0], sorted[sorted.len() - 1], stddev, cv
     );
+    if write_disk {
+        let mut disk_sorted = disk_samples.clone();
+        disk_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let disk_mean = disk_samples.iter().sum::<f64>() / n;
+        let disk_var = disk_samples.iter().map(|s| (s - disk_mean).powi(2)).sum::<f64>() / n;
+        let disk_pct = |p: f64| {
+            disk_sorted[((p / 100.0) * (disk_sorted.len() as f64 - 1.0)).round() as usize]
+        };
+        eprintln!(
+            "  disk-inclusive per pass [ms] (backend + atomic overlay write):  mean {:.3}  p50 {:.3}  p99 {:.3}  min {:.3}  max {:.3}  stddev {:.3} (cv {:.1}%)",
+            disk_mean,
+            disk_pct(50.0),
+            disk_pct(99.0),
+            disk_sorted[0],
+            disk_sorted[disk_sorted.len() - 1],
+            disk_var.sqrt(),
+            if disk_mean > 0.0 { disk_var.sqrt() / disk_mean * 100.0 } else { 0.0 },
+        );
+    }
     eprintln!("\n  last-pass breakdown (the two-file split path):");
     eprintln!(
         "    Session update_file:            {last_update:.3} ms  (re-lower+re-infer ONLY the {last_reinferred} changed body/bodies)"
@@ -2402,10 +2596,80 @@ pub fn skull_iter_incremental(path: &str, iters: usize, warmup: usize) -> Result
     }
     let update_known: f64 = last_update_phases.iter().map(|(_, d)| d.as_secs_f64() * 1000.0).sum();
     eprintln!("       (parse + classify, untimed: {:.3} ms)", (last_update - update_known).max(0.0));
-    eprintln!("    diagnostics (O(workspace) scan): {last_diag:.3} ms  (live cook ALSO has disk read, not here)");
+    eprintln!("    diagnostics (O(workspace) scan): {last_diag:.3} ms");
+    eprintln!("    lints (whole-project verdict):  {last_lint:.3} ms");
     eprintln!("    emit_overlay:                   {last_emit:.3} ms  ({last_bytes} B overlay)");
+    if write_disk {
+        eprintln!("    incremental file write:         {last_write:.3} ms");
+    }
     for (lbl, d) in &last_phases {
         eprintln!("       {lbl}: {:.3} ms", d.as_secs_f64() * 1000.0);
+    }
+    if std::env::var_os("SKULL_REPAIR_STATS").is_some() {
+        let stats = cache.repair_stats();
+        eprintln!(
+            "    body metadata: semantic={} span_only={} edit_at={} byte_delta={}",
+            last_body_meta.0, last_body_meta.1, last_body_meta.2, last_body_meta.3
+        );
+        eprintln!(
+            "    repair counters: body={} owners={} instances={} graph_retract={} graph_install={} full_graph={} \
+concrete_derived={} concrete_reused={} concrete_retracted={} full_concrete={} \
+artifact_revisited={} artifact_added={} artifact_removed={} full_artifact={} \
+broad_owner={} broad_concrete={} broad_artifact={} broad_candidate={}",
+            stats.body_only_edits,
+            stats.owners_revisited,
+            stats.instances_revisited,
+            stats.graph_contributions_retracted,
+            stats.graph_contributions_installed,
+            stats.full_graph_rebuilds,
+            stats.concrete_entries_derived,
+            stats.concrete_entries_reused,
+            stats.concrete_entries_retracted,
+            stats.full_concrete_rebuilds,
+            stats.artifact_chunks_revisited,
+            stats.artifact_chunks_added,
+            stats.artifact_chunks_removed,
+            stats.full_artifact_view_realizations,
+            stats.broad_owner_scans,
+            stats.broad_concrete_scans,
+            stats.broad_artifact_scans,
+            stats.broad_candidate_scans,
+        );
+        eprintln!(
+            "    locality census: roots requested={} modules_examined={} functions_examined={} reseeded={} root-instances-checked={} \
+shader requests={} roots examined={} derived={} declarations requested={} instances looked up={} \
+candidates requested={} invalidated={} derived={} reused={} dependents requested={} visited={} \
+chunks requested={} rebuilt={} artifact requests={} iterations={} index-rows={} root entries={} realizes={} \
+root-hole names={} rows={} decls={} reason-buckets={} erased-catalogue={}",
+            stats.root_requests,
+            stats.root_modules_examined,
+            stats.root_functions_examined,
+            stats.root_reseeds,
+            stats.root_instances_checked,
+            stats.shader_delta_requests,
+            stats.shader_roots_examined,
+            stats.shader_roots_derived,
+            stats.declaration_lookup_requests,
+            stats.declaration_instance_lookups,
+            stats.candidate_entries_requested,
+            stats.candidate_entries_invalidated,
+            stats.candidate_entries_derived,
+            stats.candidate_entries_reused,
+            stats.dependent_requests,
+            stats.dependents_visited,
+            stats.chunk_rebuild_requests,
+            stats.chunks_rebuilt,
+            stats.artifact_iteration_requests,
+            stats.artifact_iterations,
+            stats.artifact_index_rows_examined,
+            stats.artifact_root_entries_examined,
+            stats.artifact_realize_invocations,
+            stats.root_hole_names_examined,
+            stats.root_hole_rows_examined,
+            stats.root_hole_decls_examined,
+            stats.root_hole_reason_buckets_examined,
+            stats.erased_catalogue_entries_examined,
+        );
     }
     Ok(())
 }
@@ -2414,27 +2678,41 @@ pub fn skull_iter_incremental(path: &str, iters: usize, warmup: usize) -> Result
 // stone --backend skull: two-file incremental output (main.lua + incremental.lua)
 // ---------------------------------------------------------------------------
 
-/// The game preamble injected at the top of `main.lua`: `GAME_SOURCE_DIR` (asset
-/// resolution) + the embedded cimgui bindings. Factored so `skull_run_project`
-/// and the stone two-file path build it identically.
-fn skull_game_preamble(dir: &str) -> String {
+/// The game preamble injected at the top of `main.lua`: `GAME_SOURCE_DIR` for
+/// asset resolution. cimgui is initialized by stone's global initializer.
+/// Factored so `skull_run_project` and the stone two-file path build it identically.
+fn skull_game_preamble(dir: &str) -> Result<String> {
     use std::path::PathBuf;
     let abs = PathBuf::from(dir).canonicalize().unwrap_or_else(|_| PathBuf::from(dir));
     let escaped = abs.display().to_string().replace('\\', "\\\\").replace('"', "\\\"");
+    let overlay_defaults = match rock_host::stick::StickConfig::find_from_dir(&abs)? {
+        Some((_, config)) => config.asset_overlay_defaults(&abs)?,
+        None => Vec::new(),
+    };
     let renderer = match skull_renderer_target(dir) {
         Ok(skull::mir_emit::RendererTarget::Gl) => "gl",
         Ok(skull::mir_emit::RendererTarget::Wgpu) => "wgpu",
         Err(e) => panic!("cannot read renderer selection for {dir}: {e}"),
     };
     let mut full = format!("__ROCK_GAME_SOURCE_DIR = \"{escaped}\"\n");
+    full.push_str("__ROCK_ASSET_OVERLAY_DEFAULTS = {");
+    for (index, path) in overlay_defaults.iter().enumerate() {
+        if index > 0 {
+            full.push_str(", ");
+        }
+        let path = path.display().to_string().replace('\\', "\\\\").replace('"', "\\\"");
+        full.push('"');
+        full.push_str(&path);
+        full.push('"');
+    }
+    full.push_str("}\n");
     if renderer == "wgpu" {
         full.push_str("__ROCK_RENDERER_BACKEND = \"wgpu\"\n");
     }
-    full.push_str(&rock_host::cimgui_embed::build_prelude());
     if !full.ends_with('\n') {
         full.push('\n');
     }
-    full
+    Ok(full)
 }
 
 fn skull_renderer_target(dir: &str) -> Result<skull::mir_emit::RendererTarget> {
@@ -2569,16 +2847,19 @@ impl SkullStone {
                 renderer_target,
             )
                 .map_err(|e| anyhow::anyhow!("{}", render_project_err(project.sources(), &e)))?;
-            // `_G.__ROCK_GLOBALS` for `--dump-state` (see `skull_emit_project`).
+            // Host package/description metadata is appended to StateSchema.
             let spec = crate::unified_compile::SourceSpec::Directory(
                 std::path::PathBuf::from(dir),
             );
-            let registry = build_rock_globals_registry(ws, &spec);
-            (format!("{}{}", emit.lua, registry), c)
+            let mut lua = emit.lua;
+            install_rock_state_metadata(&mut lua, ws, &spec)
+                .map_err(|e| anyhow::anyhow!(render_project_err(project.sources(), &e)))?;
+            (lua, c)
         };
-        let preamble = skull_game_preamble(dir);
+        let preamble = skull_game_preamble(dir)?;
         write_full_main(&preamble, &lua, main_path, incremental_path)?;
-        let shape_hashes = skull::type_shape_hashes(project.workspace());
+        let shape_hashes = skull::type_shape_hashes(project.workspace())
+            .map_err(|e| anyhow::anyhow!(e.message))?;
         Ok(SkullStone { project, cache, preamble, renderer_target, shape_hashes })
     }
 
@@ -2590,8 +2871,19 @@ impl SkullStone {
     /// overlay. `changed` is the watcher's changed-path set; pass empty to force a
     /// full re-discover.
     pub fn recompile(&mut self, changed: &[std::path::PathBuf], main_path: &std::path::Path, incremental_path: &std::path::Path) -> Result<SkullReload> {
+        let snapshot = self.project.snapshot(changed);
         let update = self.project.recompile(changed)?;
-        self.route_and_emit(update, main_path, incremental_path)
+        match self.route_and_emit(update, main_path, incremental_path) {
+            Ok(reload) => Ok(reload),
+            Err(error) => {
+                if let Err(restore) = self.project.restore(snapshot) {
+                    return Err(anyhow::anyhow!(
+                        "skull publication rollback failed after disk edit: {restore}; original error: {error}"
+                    ));
+                }
+                Err(error)
+            }
+        }
     }
 
     /// In-memory edit: replace one source's contents WITHOUT touching disk and
@@ -2601,14 +2893,38 @@ impl SkullStone {
     /// a path the build didn't discover -- an edit to an unknown file would
     /// otherwise silently do nothing.
     pub fn apply_edit(&mut self, path: &std::path::Path, new_text: &str, main_path: &std::path::Path, incremental_path: &std::path::Path) -> Result<SkullReload> {
+        let snapshot = self.project.snapshot(&[path.to_path_buf()]);
         let update = self.project.apply_edit(path, new_text)?;
-        self.route_and_emit(update, main_path, incremental_path)
+        match self.route_and_emit(update, main_path, incremental_path) {
+            Ok(reload) => Ok(reload),
+            Err(error) => {
+                if let Err(restore) = self.project.restore(snapshot) {
+                    return Err(anyhow::anyhow!(
+                        "skull publication rollback failed after in-memory edit: {restore}; original error: {error}"
+                    ));
+                }
+                Err(error)
+            }
+        }
     }
 
     /// The current in-session text of a source (reflects prior `apply_edit`s,
     /// which never touch disk). None if the path isn't a discovered source.
     pub fn source_text(&self, path: &std::path::Path) -> Option<String> {
         self.project.source_text(path)
+    }
+
+    /// Absolute paths of every `embed_string` input baked into the current
+    /// program -- files the stone watcher must treat as sources: an edit to
+    /// one routes as a changed non-source path, which forces the full rebuild
+    /// that re-reads it (docs/comptime-plan.md).
+    pub fn comptime_watch_files(&self) -> Vec<std::path::PathBuf> {
+        // File ids are already the absolute canonical path the resolver read.
+        self.cache
+            .comptime_files()
+            .into_iter()
+            .map(|abs| std::path::PathBuf::from(abs.as_str()))
+            .collect()
     }
 
     /// Feed source edits into the Session, route by the worst tier, and write
@@ -2619,23 +2935,31 @@ impl SkullStone {
     /// `t_cook` is the caller's front-end timer (includes its feed construction).
     fn route_and_emit(&mut self, update: crate::live_project::LiveUpdate, main_path: &std::path::Path, incremental_path: &std::path::Path) -> Result<SkullReload> {
         use std::path::PathBuf;
-        let (full, reinferred, cook_ms) = match update {
+        let (full, reinferred, span_edits, cook_ms) = match update {
             crate::live_project::LiveUpdate::NoChange => return Ok(SkullReload::NoChange),
-            crate::live_project::LiveUpdate::BodyOnly { reinferred, cook_ms } => {
-                (false, reinferred, cook_ms)
+            crate::live_project::LiveUpdate::BodyOnly { reinferred, span_edits, cook_ms } => {
+                (false, reinferred, span_edits, cook_ms)
             }
             crate::live_project::LiveUpdate::Full { cook_ms } => {
-                (true, Vec::new(), cook_ms)
+                (true, Vec::new(), Vec::new(), cook_ms)
             }
         };
 
         let t_emit = Instant::now();
         let old_shader_contracts = self.cache.shader_registration_contracts();
-        if self
-            .cache
-            .shader_registration_keys_changed(self.project.workspace())
-            .map_err(|e| anyhow::anyhow!("{}", render_project_err(self.project.sources(), &e)))?
-        {
+        let shader_keys_changed = if full {
+            self.cache
+                .shader_registration_keys_changed(self.project.workspace())
+                .map_err(|e| anyhow::anyhow!("{}", render_project_err(self.project.sources(), &e)))?
+        } else {
+            self.cache
+                .shader_registration_keys_changed_for_bodies(
+                    self.project.workspace(),
+                    &reinferred,
+                )
+                .map_err(|e| anyhow::anyhow!("{}", render_project_err(self.project.sources(), &e)))?
+        };
+        if shader_keys_changed {
             return Ok(SkullReload::FullRequired {
                 reasons: vec!["shader registration key set changed".to_string()],
             });
@@ -2649,7 +2973,8 @@ impl SkullStone {
             // `force_full` (canonicalize) writes this session's program for the
             // respawn. Re-baseline the stored hashes now: the delta is consumed
             // by this one restart.
-            let new_shapes = skull::type_shape_hashes(self.project.workspace());
+            let new_shapes = skull::type_shape_hashes(self.project.workspace())
+                .map_err(|e| anyhow::anyhow!(e.message))?;
             let drifted = skull::shape_diff(&self.shape_hashes, &new_shapes);
             if !drifted.is_empty() {
                 self.shape_hashes = new_shapes;
@@ -2671,26 +2996,46 @@ impl SkullStone {
                         reasons: vec!["shader registration ABI changed".to_string()],
                     });
                 }
-                self.cache = c; // resets changed_since_full
-                // `_G.__ROCK_GLOBALS` for `--dump-state` (see `skull_emit_project`):
-                // a structural edit can add/remove globals, so recompute on full.
+                if self
+                    .cache
+                    .state_schema()
+                    .is_some_and(|old| {
+                        c.state_schema()
+                            .is_some_and(|new| old.schema_id != new.schema_id)
+                    })
+                {
+                    return Ok(SkullReload::FullRequired {
+                        reasons: vec!["StateSchema changed; process restart is required".to_string()],
+                    });
+                }
+                // StateSchema metadata is regenerated on a structural edit.
                 let spec =
                     crate::unified_compile::SourceSpec::Directory(PathBuf::from(self.project.dir()));
-                let registry = build_rock_globals_registry(ws, &spec);
-                format!("{}{}", emit.lua, registry)
+                let mut lua = emit.lua;
+                install_rock_state_metadata(&mut lua, ws, &spec)
+                    .map_err(|e| anyhow::anyhow!(render_project_err(self.project.sources(), &e)))?;
+                (lua, c)
             };
+            self.preamble = skull_game_preamble(self.project.dir())?;
             let emit_ms = t_emit.elapsed().as_secs_f64() * 1000.0;
             let t_write = Instant::now();
+            let (lua, staged_cache) = lua;
             let bytes = write_full_main(&self.preamble, &lua, main_path, incremental_path)?;
+            self.cache = staged_cache;
             let write_ms = t_write.elapsed().as_secs_f64() * 1000.0;
             Ok(SkullReload::Full { bytes, cook_ms, emit_ms, write_ms })
         } else {
-            let overlay = {
+            let (overlay, staged_cache) = {
                 let ws = self.project.workspace();
-                skull::mir_emit::emit_overlay(ws, &mut self.cache, &reinferred)
+                skull::mir_emit::emit_overlay_with_span_edits_staged(
+                    ws,
+                    &self.cache,
+                    &reinferred,
+                    &span_edits,
+                )
                     .map_err(|e| anyhow::anyhow!("{}", render_project_err(self.project.sources(), &e)))?
             };
-            if old_shader_contracts != self.cache.shader_registration_contracts() {
+            if old_shader_contracts != staged_cache.shader_registration_contracts() {
                 return Ok(SkullReload::FullRequired {
                     reasons: vec!["shader registration ABI changed".to_string()],
                 });
@@ -2699,6 +3044,7 @@ impl SkullStone {
             let emit_ms = t_emit.elapsed().as_secs_f64() * 1000.0;
             let t_write = Instant::now();
             rock_host::project::write_atomic(incremental_path, &overlay.lua)?;
+            self.cache = staged_cache;
             let write_ms = t_write.elapsed().as_secs_f64() * 1000.0;
             Ok(SkullReload::Incremental { bytes, reinferred: reinferred.len(), cook_ms, emit_ms, write_ms })
         }
@@ -2733,19 +3079,24 @@ impl SkullStone {
                 self.renderer_target,
             )
                 .map_err(|e| anyhow::anyhow!("skull force_full emit: {}", e.message))?;
-            self.cache = c; // resets changed_since_full -- the overlay is now folded in
-            // `_G.__ROCK_GLOBALS` for `--dump-state` (see `skull_emit_project`).
+            // Host package/description metadata is rebuilt with the StateSchema.
             let spec = crate::unified_compile::SourceSpec::Directory(
                 std::path::PathBuf::from(self.project.dir()),
             );
-            let registry = build_rock_globals_registry(ws, &spec);
-            format!("{}{}", emit.lua, registry)
+            let mut lua = emit.lua;
+            install_rock_state_metadata(&mut lua, ws, &spec)
+                .map_err(|e| anyhow::anyhow!(e.message))?;
+            (lua, c)
         };
+        let (lua, staged_cache) = lua;
+        self.preamble = skull_game_preamble(self.project.dir())?;
         write_full_main(&self.preamble, &lua, main_path, incremental_path)?;
+        self.cache = staged_cache; // resets changed_since_full -- the overlay is now folded in
         // This program is what the (re)spawned process loads -- re-baseline the
         // shape hashes to it, including drift that arrived via a recompile that
         // bailed on a type error after mutating the session.
-        self.shape_hashes = skull::type_shape_hashes(self.project.workspace());
+        self.shape_hashes = skull::type_shape_hashes(self.project.workspace())
+            .map_err(|e| anyhow::anyhow!(e.message))?;
         Ok(())
     }
 }

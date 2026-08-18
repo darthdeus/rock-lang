@@ -53,8 +53,8 @@ impl Builder<'_> {
             // lowering-time error would lose. Pinned by `multi_rejection` and
             // `nobox_diagnostic_attribution`.
             None if self.tuple_box_shape(expr)?.is_some() => {
-                let r = self.lower_expr_repr(expr)?;
-                let v = self.pack(r);
+                let r = self.lower_expr_repr(expr)?.into_value();
+                let v = self.pack(r)?;
                 self.stringify(expr, v)
             }
             None => {
@@ -72,7 +72,7 @@ impl Builder<'_> {
         let name = self
             .nobox_value_name(expr)
             .ok_or_else(|| self.gap_here("nobox interpolation type"))?;
-        let repr = self.lower_expr_repr(expr)?;
+        let repr = self.lower_expr_repr(expr)?.into_value();
         self.stringify_nobox_repr(name, Vec::new(), repr)
     }
 
@@ -173,7 +173,7 @@ impl Builder<'_> {
                     self.stringify_struct_leaf(field.ty, child_path, value)?
                 }
                 part @ ValueRepr::Tuple { .. } => {
-                    let value = self.pack(part);
+                    let value = self.pack(part)?;
                     self.stringify_struct_leaf(field.ty, child_path, value)?
                 }
             };

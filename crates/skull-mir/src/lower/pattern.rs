@@ -15,7 +15,7 @@ impl Builder<'_> {
         arms: comfy_la_arena::IdxRange<MatchArm>,
     ) -> Result<Idx<Inst>, CompilerError> {
         let repr = self.lower_match_repr(scrut, arms, RetSlot::Opaque)?;
-        Ok(self.pack(repr))
+        Ok(self.pack(repr)?)
     }
 
     pub(crate) fn lower_match_repr(
@@ -51,7 +51,7 @@ impl Builder<'_> {
                 self.cur = kept;
             }
             let bv = self.lower_expr_repr(arm.body)?;
-            self.store_repr_and_join(&results, &shape, bv, join)?;
+            self.store_bundle_and_join(&results, &shape, &bv, join)?;
 
             self.cur = next;
         }
@@ -224,21 +224,28 @@ impl Builder<'_> {
                     // BINDING for it rebuilds from the parent's dotted leaves --
                     // the same rule the field-read paths follow. `scrut_named`
                     // would emit `Inst::Field` against a key that does not exist.
-                    // `embed_field_of_struct` fails closed on anything that is not
+                    // The shared field-storage plan fails closed on anything that is not
                     // a plain struct (an enum variant name is not in
                     // `struct_by_name`), so a variant record falls through.
-                    let embedded = name
-                        .and_then(|sname| {
-                            self.embed_field_of_struct(sname, rpf.name).map(|cn| (sname, cn))
-                        })
-                        .filter(|_| matches!(scrut, Scrut::Val(_)));
+                    let embedded = match (name, scrut) {
+                        (Some(sname), Scrut::Val(_)) if self.ws.struct_by_name.contains_key(&sname) => {
+                            self
+                                .struct_field_plan(sname, rpf.name, false)?
+                                .embed()
+                                .map(|(child, _)| (sname, child))
+                        }
+                        _ => None,
+                    };
                     let fv = match (embedded, scrut) {
                         (Some((sname, cname)), Scrut::Val(v)) => {
                             let parent = *v;
-                            if self.embed_field_is_nullable(sname, rpf.name) {
-                                self.materialize_embed_nullable(parent, rpf.name, cname)
+                            if self
+                                .struct_field_plan(sname, rpf.name, false)?
+                                .nullable()
+                            {
+                                self.materialize_embed_nullable(parent, rpf.name, cname)?
                             } else {
-                                self.materialize_embed(parent, rpf.name, cname)
+                                self.materialize_embed(parent, rpf.name, cname)?
                             }
                         }
                         _ => self.scrut_named(scrut, rpf.name, cdata),
@@ -353,18 +360,20 @@ impl Builder<'_> {
     /// else lowers to an ordinary value.
     pub(crate) fn lower_scrut(&mut self, e: Idx<Expr>) -> Result<Scrut, CompilerError> {
         if let Expr::FieldAccess { base, field } = self.body.expr_arena[e].clone() {
-            if let Some(shape) = self.flat_field_of(base, field) {
-                let parent = self.lower_expr(base)?;
-                return Ok(Scrut::Flat { parent, prefix: field, shape });
+            if let Some(TypeExpr::App { ctor: TypeCtor::Nominal(sname), .. }) = self.expr_ty(base) {
+                if let Some(shape) = self.struct_field_plan(sname, field, false)?.flat_shape() {
+                    let parent = self.lower_expr(base)?;
+                    return Ok(Scrut::Flat { parent, prefix: field, shape });
+                }
             }
         }
         // A flat enum that threads as a Group (scalarized param/return, or a freshly
         // constructed enum) matches from its cells -- no box.
-        let r = self.lower_expr_repr(e)?;
+        let r = self.lower_expr_repr(e)?.into_value();
         if let ValueRepr::Group { name, .. } = &r {
             if let Some(shape) = EnumPlan::for_name(self.ws, *name).and_then(|plan| plan.flat().cloned()) {
                 let ValueRepr::Group { parts, .. } = r else { unreachable!() };
-                let cells = self.repr_group_to_cells(&shape, parts);
+                let cells = self.repr_group_to_cells(&shape, parts)?;
                 return Ok(Scrut::Cells {
                     tag: cells.tag,
                     positional: cells.positional,
@@ -373,7 +382,7 @@ impl Builder<'_> {
                 });
             }
         }
-        Ok(Scrut::Val(self.pack(r)))
+        Ok(Scrut::Val(self.pack(r)?))
     }
 
     /// The scrutinee as a whole value -- materializing a flattened field / threaded
@@ -382,12 +391,14 @@ impl Builder<'_> {
         match scrut {
             Scrut::Val(v) => *v,
             Scrut::Flat { parent, prefix, shape } => self.materialize_flat(*parent, *prefix, shape),
-            Scrut::Cells { tag, positional, named, shape } => self.emit_cur(Inst::MakeEnumDyn {
-                tag: *tag,
-                ty: shape.name,
-                positional: positional.clone(),
-                named: named.clone(),
-            }),
+            Scrut::Cells { tag, positional, named, shape } => self.materialize_flat_cells(
+                shape,
+                FlatCells {
+                    tag: *tag,
+                    positional: positional.clone(),
+                    named: named.clone(),
+                },
+            ),
         }
     }
 
@@ -552,7 +563,7 @@ impl Builder<'_> {
         else_branch: Option<Idx<Expr>>,
     ) -> Result<Idx<Inst>, CompilerError> {
         if let Pattern::Bind(b) = self.body.pattern_arena[pattern] {
-            if self.expr_is_nullable(value) && self.nobox_binding_shape(b).is_some() {
+            if self.expr_is_nullable(value) && self.nobox_binding_shape(b)?.is_some() {
                 return self.lower_if_let_nobox(b, value, then_branch, else_branch);
             }
         }
@@ -618,13 +629,15 @@ impl Builder<'_> {
         then_branch: Idx<Expr>,
         else_branch: Option<Idx<Expr>>,
     ) -> Result<Idx<Inst>, CompilerError> {
-        let shape = self.nobox_binding_shape(b).expect("caller checked");
+        let shape = self
+            .nobox_binding_shape(b)?
+            .ok_or_else(|| gap("nullable nobox binding has no scalar shape"))?;
         let mut scrut_shape = shape.clone();
         scrut_shape.nullable = true;
 
         let result = self.f.new_cell(None);
-        let repr = self.lower_expr_repr(value)?;
-        let leaves = self.repr_to_leaves(&repr, &scrut_shape);
+        let bundle = self.lower_expr_repr(value)?;
+        let leaves = self.repr_to_slot_values_bundle(&bundle, &RetSlot::Leaves(scrut_shape))?;
         let (present, values) = leaves
             .split_first()
             .expect("a nullable shape carries its presence leaf first");
@@ -715,7 +728,7 @@ impl Builder<'_> {
             return Ok(shape.nullable.then(|| shape.clone()));
         }
         if self.is_safe_nav(e) {
-            let Some(inner) = self.peeled_tuple_shape(e).filter(TupleRetShape::splats) else {
+            let Some(inner) = self.peeled_tuple_shape(e)?.filter(TupleRetShape::splats) else {
                 return Ok(None);
             };
             return Ok(Some(TupleRetShape { nullable: true, ..inner }));
@@ -764,7 +777,7 @@ impl Builder<'_> {
         match self.body.pattern_arena[pat].clone() {
             Pattern::Wildcard => *idx += slot.slot_count(),
             Pattern::Bind(b) => {
-                self.bind_pattern_slot(&BindingPattern::Leaf(b), slot, values, idx)
+                self.bind_pattern_slot(&BindingPattern::Leaf(b), slot, values, idx)?;
             }
             Pattern::Tuple { elements } => {
                 let RetSlot::Nested(inner) = slot else {
@@ -795,7 +808,7 @@ impl Builder<'_> {
         else_branch: Option<Idx<Expr>>,
     ) -> Result<Idx<Inst>, CompilerError> {
         let result = self.f.new_cell(None);
-        let repr = self.lower_expr_repr(value)?;
+        let repr = self.lower_expr_repr(value)?.into_value();
         let ValueRepr::Tuple {
             parts,
             present: Some(present),
@@ -815,7 +828,7 @@ impl Builder<'_> {
         let slots = self.tuple_repr_to_slots(
             ValueRepr::Tuple { parts, present: None },
             &bound_shape,
-        );
+        )?;
         // ONE dispatcher for every pattern shape: a single name takes the whole
         // tuple's slot cells, a destructure takes each element's, and anything
         // that does not line up packs -- which is where a whole-tuple use of a

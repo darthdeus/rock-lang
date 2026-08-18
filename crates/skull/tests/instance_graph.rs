@@ -30,6 +30,22 @@ fn graph_of(src: &str) -> (Workspace, instance_graph::InstanceGraph) {
     (ws, g)
 }
 
+#[test]
+fn fresh_graph_does_not_seed_incremental_delta_state() {
+    let (_ws, graph) = graph_of(
+        r#"
+fn main() {
+    print("ok")
+}
+"#,
+    );
+    assert_eq!(
+        graph.incremental_state_population(),
+        (0, 0, 0),
+        "fresh construction retained update-only owner or instance deltas"
+    );
+}
+
 /// One generic function called at two element types is TWO instances, even
 /// when neither argument requires a representation-specific lowering.
 #[test]
@@ -478,7 +494,7 @@ fn main() { let c = ticker(); let _ = c.resume() }
     );
     let bodies = skull::concrete_body::build(&ws, &mut g);
     let mut compared = 0;
-    for (inst, concrete) in &bodies.plans {
+    for (inst, concrete) in bodies.plans.iter() {
         let f = &ws.module(inst.func.module).functions[inst.func.func];
         if !f.is_coroutine {
             continue;
@@ -510,10 +526,8 @@ fn main() { let c = ticker(); let _ = c.resume() }
 ///
 /// This holds BY CONSTRUCTION -- `instance_graph::build` walks bone's HIR and
 /// inference and never runs the inliner -- and "by construction" is a claim
-/// about code that can be edited, which is what this pins. The mode is toggled
-/// rather than mocked: `ROCK_MONO_ABLATION` is what disables inlining in a real
-/// build (`skull_transform::inline::classify`), so the test exercises the same
-/// switch the corpus run does.
+/// about code that can be edited, which is what this pins. The scoped ablation
+/// context is the same mode that a `ROCK_MONO_ABLATION` process run installs.
 ///
 /// Corpus result recorded alongside it: all 23 project digests are identical
 /// between a normal `rock mono-manifest .` and one under
@@ -533,16 +547,20 @@ fn main() {
     let ws = check(src);
     let roots = skull::mir_emit::emission_roots(&ws, None);
 
-    skull_mir::ablation::set_enabled(false);
-    let normal = instance_graph::build(&ws, roots.clone(), false);
-    let normal_text = instance_graph::render_manifest(&ws, &normal);
-
-    skull_mir::ablation::set_enabled(true);
-    let no_inline = instance_graph::build(&ws, roots.clone(), false);
-    let no_inline_text = instance_graph::render_manifest(&ws, &no_inline);
-    // Perturbed order AND inlining disabled, the two S 0g knobs together.
-    let no_inline_rev = instance_graph::build(&ws, roots, true);
-    skull_mir::ablation::set_enabled(false);
+    let (normal, normal_text) = {
+        let _mode = crate::common::AblationGuard::off();
+        let normal = instance_graph::build(&ws, roots.clone(), false);
+        let normal_text = instance_graph::render_manifest(&ws, &normal);
+        (normal, normal_text)
+    };
+    let (no_inline_text, no_inline_rev) = {
+        let _mode = crate::common::AblationGuard::on();
+        let no_inline = instance_graph::build(&ws, roots.clone(), false);
+        let no_inline_text = instance_graph::render_manifest(&ws, &no_inline);
+        // Perturbed order AND inlining disabled, the two S 0g knobs together.
+        let no_inline_rev = instance_graph::build(&ws, roots, true);
+        (no_inline_text, no_inline_rev)
+    };
 
     assert_eq!(
         normal_text, no_inline_text,

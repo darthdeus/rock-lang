@@ -4610,8 +4610,8 @@ impl<'a> FunctionEmitter<'a> {
                 }
                 Ok(format!("{}.{}", self.render_val(*base)?, field))
             }
-            Inst::MakeValueStruct { name, fields }
-            | Inst::MaterializeValueStruct { name, fields } => {
+            Inst::MakeValueStruct { name, fields, .. }
+            | Inst::MaterializeValueStruct { name, fields, .. } => {
                 let kind = value_struct_kind(*name).ok_or_else(|| {
                     err(self.span, format!("WGSL does not support value struct `{name}`"))
                 })?;

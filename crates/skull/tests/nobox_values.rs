@@ -125,6 +125,30 @@ fn nobox_equality_compares_leaves_without_materializing() {
     assert!(!body.contains("NV2_ct("), "nobox equality materialized its operands:\n{body}");
 }
 
+const NOBOX_MIXED_NULLABLE_EQUALITY: &str = r#"
+nobox value NV2 { x: float, y: float }
+
+fn matches(value: NV2?, expected: NV2) -> bool {
+    return value == expected && expected == value
+}
+
+fn main() {
+    let expected = NV2 { x: 1.0, y: 2.0 }
+    print(matches(expected, expected))
+    print(!matches(null, expected))
+    print(!matches(NV2 { x: 1.0, y: 3.0 }, expected))
+}
+"#;
+
+#[test]
+fn nullable_nobox_equality_with_a_non_nullable_operand_compares_presence_and_leaves() {
+    let lua = emit_module(NOBOX_MIXED_NULLABLE_EQUALITY);
+    assert_eq!(
+        run_luajit(&format!("{lua}\nmain()\n"), "nobox_mixed_nullable_equality"),
+        "true\ntrue\ntrue"
+    );
+}
+
 #[test]
 fn nobox_null_check_does_not_materialize() {
     let lua = emit_module(NOBOX_WHOLE_VALUE_OPERATORS);
@@ -736,8 +760,9 @@ fn global_of_a_nobox_value_stores_leaves() {
         "the initializer did not return leaves:\n{init}"
     );
     assert!(
-        lua.contains("__nbg_SPOT_0, __nbg_SPOT_1 = __skull_ginit_SPOT()"),
-        "the global was not bound leaf-wise:\n{lua}"
+        lua.contains("global:<test>::SPOT::leaf0")
+            && lua.contains("global:<test>::SPOT::leaf1"),
+        "the global leaves were not bound through the active Session:\n{lua}"
     );
     for f in ["read", "main"] {
         let body = function_body(&lua, f);
@@ -798,8 +823,12 @@ fn main() {
 #[test]
 fn a_nobox_global_read_orders_its_dependent_initializer() {
     let lua = emit_module(NOBOX_GLOBAL_INIT_ORDER);
-    let base = lua.find("__nbg_BASE_0, __nbg_BASE_1 =").expect("BASE init line");
-    let derived = lua.find("__nbg_DERIVED_0, __nbg_DERIVED_1 =").expect("DERIVED init line");
+    let base = lua
+        .find("if not __rock_state_has(\"global:<test>::BASE::leaf0\")")
+        .expect("BASE Session init line");
+    let derived = lua
+        .find("if not __rock_state_has(\"global:<test>::DERIVED::leaf0\")")
+        .expect("DERIVED Session init line");
     assert!(base < derived, "DERIVED initialized before the BASE it reads:\n{lua}");
     assert_eq!(
         run_luajit(&format!("{lua}\nmain()\n"), "nobox_global_order"),
@@ -834,8 +863,10 @@ fn a_refined_nullable_nobox_global_addresses_the_right_leaves() {
     // the presence leaf. Layout follows the DECLARED type, so it must not.
     let lua = emit_module(NOBOX_NULLABLE_GLOBAL);
     assert!(
-        lua.contains("__nbg_MAYBE_0, __nbg_MAYBE_1, __nbg_MAYBE_2 ="),
-        "a nullable nobox global did not reserve a presence leaf:\n{lua}"
+        lua.contains("global:<test>::MAYBE::leaf0")
+            && lua.contains("global:<test>::MAYBE::leaf1")
+            && lua.contains("global:<test>::MAYBE::leaf2"),
+        "a nullable nobox global did not reserve Session presence/data leaves:\n{lua}"
     );
     assert_eq!(
         run_luajit(&format!("{lua}\nmain()\n"), "nobox_global_nullable"),

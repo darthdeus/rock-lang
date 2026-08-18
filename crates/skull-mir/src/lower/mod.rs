@@ -17,7 +17,10 @@
 //! corpus, not this comment; see `docs/skull-bone-mir-faithful-plan.md`.
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::rc::Rc;
+use std::sync::OnceLock;
+use std::time::Instant;
 
 use bone_semantic::hir::{
     BinOp, BindingInfo, BindingPattern, Body, BodyOwner, BuiltinTy, Callee, Expr, Function,
@@ -34,12 +37,264 @@ use crate::mir::*;
 use crate::concrete::{ConcreteBodyPlan, ConcreteOwner, ConcretePlans, ConcreteTypeTables};
 use crate::monoty::{MonoTy, MonoTyId};
 
-type ConcreteTypeCache = RefCell<rustc_hash::FxHashMap<MonoTyId, MonoTy>>;
+type ConcreteTypeCache = RefCell<rustc_hash::FxHashMap<MonoTyId, Rc<MonoTy>>>;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(usize)]
+pub enum ConcreteMonoConsumer {
+    GlobalPlan = 0,
+    CallParameter = 1,
+    CoroutineChannel = 2,
+    ReturnValidation = 3,
+    ReturnLowering = 4,
+    NoboxBoundary = 5,
+    Dispatch = 6,
+}
+
+impl ConcreteMonoConsumer {
+    pub const COUNT: usize = 7;
+    pub const ALL: [Self; Self::COUNT] = [
+        Self::GlobalPlan,
+        Self::CallParameter,
+        Self::CoroutineChannel,
+        Self::ReturnValidation,
+        Self::ReturnLowering,
+        Self::NoboxBoundary,
+        Self::Dispatch,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::GlobalPlan => "global-plan",
+            Self::CallParameter => "call-parameter",
+            Self::CoroutineChannel => "coroutine-channel",
+            Self::ReturnValidation => "return-validation",
+            Self::ReturnLowering => "return-lowering",
+            Self::NoboxBoundary => "nobox-boundary",
+            Self::Dispatch => "dispatch",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ConcreteMonoConsumerStats {
+    pub requests: usize,
+    pub cloned_nodes: usize,
+    pub explicit_owned_escapes: usize,
+}
 
 fn gap(msg: impl std::fmt::Display) -> CompilerError {
     CompilerError::new_no_location(format!("skull-mir: lowering gap: {msg}"))
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LowerAttribution {
+    pub concrete_mono_requests: usize,
+    pub concrete_mono_cache_hits: usize,
+    pub concrete_mono_derivations: usize,
+    pub concrete_mono_unique_ids: usize,
+    pub concrete_mono_cloned_nodes: usize,
+    pub concrete_mono_interner_miss_cloned_nodes: usize,
+    pub concrete_mono_cache_insertion_cloned_nodes: usize,
+    pub concrete_mono_cache_hit_cloned_nodes: usize,
+    pub concrete_mono_explicit_owned_escape_cloned_nodes: usize,
+    pub concrete_mono_explicit_owned_escapes: usize,
+    pub concrete_mono_lookup_ns: u64,
+    pub concrete_mono_cache_lookup_ns: u64,
+    pub concrete_mono_shared_handle_requests: usize,
+    pub concrete_mono_clone_self_ns: u64,
+    pub concrete_mono_timed_requests: usize,
+    pub concrete_mono_by_consumer: [ConcreteMonoConsumerStats; ConcreteMonoConsumer::COUNT],
+    pub abi_param_copy_volume: usize,
+    pub abi_param_shared_views: usize,
+    pub mir_instruction_allocations: usize,
+    pub mir_instruction_reallocations: usize,
+    pub mir_instruction_reallocation_ns: u64,
+    pub mir_instruction_capacity: usize,
+    pub mir_cell_allocations: usize,
+    pub mir_cell_reallocations: usize,
+    pub mir_cell_reallocation_ns: u64,
+    pub mir_cell_capacity: usize,
+    pub mir_block_allocations: usize,
+    pub mir_block_reallocations: usize,
+    pub mir_block_reallocation_ns: u64,
+    pub mir_block_capacity: usize,
+}
+
+impl LowerAttribution {
+    pub(crate) fn add_assign(&mut self, other: &Self) {
+        self.concrete_mono_requests += other.concrete_mono_requests;
+        self.concrete_mono_cache_hits += other.concrete_mono_cache_hits;
+        self.concrete_mono_derivations += other.concrete_mono_derivations;
+        self.concrete_mono_unique_ids += other.concrete_mono_unique_ids;
+        self.concrete_mono_cloned_nodes += other.concrete_mono_cloned_nodes;
+        self.concrete_mono_interner_miss_cloned_nodes +=
+            other.concrete_mono_interner_miss_cloned_nodes;
+        self.concrete_mono_cache_insertion_cloned_nodes +=
+            other.concrete_mono_cache_insertion_cloned_nodes;
+        self.concrete_mono_cache_hit_cloned_nodes += other.concrete_mono_cache_hit_cloned_nodes;
+        self.concrete_mono_explicit_owned_escape_cloned_nodes +=
+            other.concrete_mono_explicit_owned_escape_cloned_nodes;
+        self.concrete_mono_explicit_owned_escapes += other.concrete_mono_explicit_owned_escapes;
+        self.concrete_mono_lookup_ns += other.concrete_mono_lookup_ns;
+        self.concrete_mono_cache_lookup_ns += other.concrete_mono_cache_lookup_ns;
+        self.concrete_mono_shared_handle_requests += other.concrete_mono_shared_handle_requests;
+        self.concrete_mono_clone_self_ns += other.concrete_mono_clone_self_ns;
+        self.concrete_mono_timed_requests += other.concrete_mono_timed_requests;
+        for (total, child) in self
+            .concrete_mono_by_consumer
+            .iter_mut()
+            .zip(other.concrete_mono_by_consumer.iter())
+        {
+            total.requests += child.requests;
+            total.cloned_nodes += child.cloned_nodes;
+            total.explicit_owned_escapes += child.explicit_owned_escapes;
+        }
+        self.abi_param_copy_volume += other.abi_param_copy_volume;
+        self.abi_param_shared_views += other.abi_param_shared_views;
+        self.mir_instruction_allocations += other.mir_instruction_allocations;
+        self.mir_instruction_reallocations += other.mir_instruction_reallocations;
+        self.mir_instruction_reallocation_ns += other.mir_instruction_reallocation_ns;
+        self.mir_instruction_capacity += other.mir_instruction_capacity;
+        self.mir_cell_allocations += other.mir_cell_allocations;
+        self.mir_cell_reallocations += other.mir_cell_reallocations;
+        self.mir_cell_reallocation_ns += other.mir_cell_reallocation_ns;
+        self.mir_cell_capacity += other.mir_cell_capacity;
+        self.mir_block_allocations += other.mir_block_allocations;
+        self.mir_block_reallocations += other.mir_block_reallocations;
+        self.mir_block_reallocation_ns += other.mir_block_reallocation_ns;
+        self.mir_block_capacity += other.mir_block_capacity;
+    }
+
+    fn record_concrete_mono_request(&mut self, consumer: ConcreteMonoConsumer) {
+        self.concrete_mono_requests += 1;
+        let stats = &mut self.concrete_mono_by_consumer[consumer as usize];
+        stats.requests += 1;
+    }
+
+    fn record_concrete_mono_cache_hit(
+        &mut self,
+        consumer: ConcreteMonoConsumer,
+        cloned_nodes: usize,
+        clone_self_ns: u64,
+        cache_lookup_ns: u64,
+        lookup_ns: u64,
+    ) {
+        self.concrete_mono_cache_hits += 1;
+        self.concrete_mono_cloned_nodes += cloned_nodes;
+        self.concrete_mono_cache_hit_cloned_nodes += cloned_nodes;
+        self.concrete_mono_cache_lookup_ns += cache_lookup_ns;
+        self.concrete_mono_lookup_ns += lookup_ns;
+        self.concrete_mono_clone_self_ns += clone_self_ns;
+        let stats = &mut self.concrete_mono_by_consumer[consumer as usize];
+        stats.cloned_nodes += cloned_nodes;
+    }
+
+    fn record_concrete_mono_derivation(
+        &mut self,
+        consumer: ConcreteMonoConsumer,
+        interner_miss_nodes: usize,
+        insertion_nodes: usize,
+        lookup_ns: u64,
+        cache_lookup_ns: u64,
+        clone_self_ns: u64,
+    ) {
+        self.concrete_mono_derivations += 1;
+        self.concrete_mono_unique_ids += 1;
+        self.concrete_mono_cloned_nodes += interner_miss_nodes + insertion_nodes;
+        self.concrete_mono_interner_miss_cloned_nodes += interner_miss_nodes;
+        self.concrete_mono_cache_insertion_cloned_nodes += insertion_nodes;
+        self.concrete_mono_lookup_ns += lookup_ns;
+        self.concrete_mono_cache_lookup_ns += cache_lookup_ns;
+        self.concrete_mono_clone_self_ns += clone_self_ns;
+        let stats = &mut self.concrete_mono_by_consumer[consumer as usize];
+        stats.cloned_nodes += interner_miss_nodes + insertion_nodes;
+    }
+
+    fn record_concrete_mono_owned_escape(
+        &mut self,
+        consumer: ConcreteMonoConsumer,
+        cloned_nodes: usize,
+        clone_self_ns: u64,
+    ) {
+        self.concrete_mono_cloned_nodes += cloned_nodes;
+        self.concrete_mono_explicit_owned_escape_cloned_nodes += cloned_nodes;
+        self.concrete_mono_explicit_owned_escapes += 1;
+        self.concrete_mono_clone_self_ns += clone_self_ns;
+        let stats = &mut self.concrete_mono_by_consumer[consumer as usize];
+        stats.cloned_nodes += cloned_nodes;
+        stats.explicit_owned_escapes += 1;
+    }
+}
+
+pub(crate) fn lower_attribution_timing_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("ROCK_LOWER_CENSUS").is_ok_and(|value| value == "1")
+            || std::env::var("STONE_LOG").is_ok_and(|value| value == "debug")
+    })
+}
+
+fn mono_ty_node_count(ty: &MonoTy) -> usize {
+    match ty {
+        MonoTy::Int
+        | MonoTy::Uint
+        | MonoTy::Float
+        | MonoTy::Bool
+        | MonoTy::String
+        | MonoTy::Any
+        | MonoTy::Unit
+        | MonoTy::Never => 1,
+        MonoTy::Nullable(inner) => 1 + mono_ty_node_count(inner),
+        MonoTy::Tuple(parts) | MonoTy::App { params: parts, .. } => {
+            1 + parts.iter().map(mono_ty_node_count).sum::<usize>()
+        }
+        MonoTy::Function { params, ret } => {
+            1 + params.iter().map(mono_ty_node_count).sum::<usize>() + mono_ty_node_count(ret)
+        }
+    }
+}
+
+fn clone_mono_ty_timed(ty: &MonoTy, timing: bool) -> (MonoTy, u64) {
+    let start = timing.then(Instant::now);
+    let cloned = ty.clone();
+    let elapsed = start
+        .map(|start| start.elapsed().as_nanos() as u64)
+        .unwrap_or_default();
+    (cloned, elapsed)
+}
+
+fn finish_lower_attribution(mut f: MirFunc, mut stats: LowerAttribution) -> MirFunc {
+    stats.mir_instruction_allocations += f.insts.len();
+    stats.mir_instruction_capacity += f.insts.capacity();
+    stats.mir_cell_allocations += f.cells.len();
+    stats.mir_cell_capacity += f.cells.capacity();
+    stats.mir_block_allocations += f.blocks.len();
+    stats.mir_block_capacity += f.blocks.capacity();
+    stats.mir_instruction_reallocations += f.lower_attribution.mir_instruction_reallocations;
+    stats.mir_instruction_reallocation_ns += f.lower_attribution.mir_instruction_reallocation_ns;
+    stats.mir_cell_reallocations += f.lower_attribution.mir_cell_reallocations;
+    stats.mir_cell_reallocation_ns += f.lower_attribution.mir_cell_reallocation_ns;
+    stats.mir_block_reallocations += f.lower_attribution.mir_block_reallocations;
+    stats.mir_block_reallocation_ns += f.lower_attribution.mir_block_reallocation_ns;
+    f.lower_attribution = stats;
+    f
+}
+
+pub(crate) fn required_wire_slot<T>(
+    slots: &[T],
+    index: usize,
+    variadic: bool,
+    context: impl std::fmt::Display,
+    to_slot: impl Fn(&T) -> RetSlot,
+    missing: impl FnOnce(String) -> CompilerError,
+) -> Result<RetSlot, CompilerError> {
+    slots
+        .get(index)
+        .or_else(|| variadic.then(|| slots.last()).flatten())
+        .map(to_slot)
+        .ok_or_else(|| missing(format!("{context} has no ABI slot {index}")))
+}
 // --- scalarized value ABI (rock parity) -------------------------------------
 //
 // A `value` struct is passed/returned as its flattened primitive LEAF scalars
@@ -72,11 +327,17 @@ pub use shape::*;
 /// it from two places.
 mod abi;
 pub use abi::{
-    boundary_requires_boxed_representation, declared_boundary_class, requires_concrete_body_plan,
-    BackendFnAbiPlan, BoundaryClass, FunctionRepPlan, GlobalPlan, RepArena, RepError, RepId,
-    RepLayout,
+    boundary_requires_boxed_representation, declared_boundary_class, owner_abi_plan,
+    owner_abi_plan_for_body, requires_concrete_body_plan, selected_sibling_abi_plan,
+    AbiPlanKey, AbiPlanMemoStats, BackendFnAbiPlan, BackendFnAbiPlanHandle, BoundaryClass,
+    FunctionRepPlan, GlobalPlan,
+    RepArena, RepArenaStats, RepError,
+    RepId, RepLayout,
     RepGuarantees, RepPlan, RepUse, RepUseFacts,
 };
+
+mod struct_plan;
+pub use struct_plan::{struct_field_plan, StructFieldPlan, StructRegistryPlan};
 
 mod coroutine;
 pub use coroutine::CoroutinePlan;
@@ -250,6 +511,26 @@ pub struct ScalarCtx {
     /// so target-specific ABI identities survive from body entry through calls
     /// and publishers.
     rep_arena: std::sync::Arc<abi::RepArena>,
+    /// Memoized [`BackendFnAbiPlan`] derivations. Lives here because a plan is
+    /// only valid under this context's target/value-mode/taken-by-ref state,
+    /// and [`ScalarCtx::update_body`] -- the one mutation crossing emissions --
+    /// clears it.
+    abi_plans: abi::AbiPlanCache,
+}
+
+impl Clone for ScalarCtx {
+    fn clone(&self) -> Self {
+        Self {
+            taken_by_ref: self.taken_by_ref.clone(),
+            per_body: self.per_body.clone(),
+            ref_counts: self.ref_counts.clone(),
+            values_first_class: self.values_first_class,
+            target: self.target,
+            interner: std::sync::Arc::clone(&self.interner),
+            rep_arena: std::sync::Arc::clone(&self.rep_arena),
+            abi_plans: self.abi_plans.clone(),
+        }
+    }
 }
 
 /// The fn-names a single body references by value (`Expr::Global(name)` whose
@@ -295,6 +576,7 @@ impl ScalarCtx {
             target: bone_semantic::hir::FnBackend::Lua,
             interner: std::sync::Arc::new(crate::monoty::MonoInterner::new()),
             rep_arena: std::sync::Arc::new(abi::RepArena::default()),
+            abi_plans: abi::AbiPlanCache::default(),
         }
     }
 
@@ -324,8 +606,80 @@ impl ScalarCtx {
         std::sync::Arc::clone(&self.interner)
     }
 
-    pub(crate) fn rep_arena(&self) -> std::sync::Arc<abi::RepArena> {
+    pub fn rep_arena(&self) -> std::sync::Arc<abi::RepArena> {
         std::sync::Arc::clone(&self.rep_arena)
+    }
+
+    pub(crate) fn abi_plan_cached(&self, key: &AbiPlanKey) -> Option<BackendFnAbiPlanHandle> {
+        self.abi_plans.lookup(key)
+    }
+
+    pub(crate) fn abi_plan_store(&self, key: AbiPlanKey, plan: &BackendFnAbiPlanHandle) {
+        self.abi_plans.store(key, plan);
+    }
+
+    pub(crate) fn abi_plan_record_derivation(&self, started: Option<std::time::Instant>) {
+        self.abi_plans.record_derivation(started);
+    }
+
+    /// ABI-plan memo counters. A full emission over a real workspace must show
+    /// hits: the duplicate-derivation population it exists to remove is the
+    /// normal case, not an optimization corner.
+    pub fn abi_plan_stats(&self) -> AbiPlanMemoStats {
+        self.abi_plans.stats()
+    }
+
+    /// Derive every ABI question the concrete plans can present to production
+    /// lowering, in deterministic key order, then publish the successful plans
+    /// as immutable handles for the parallel fanout. Errors are intentionally
+    /// not cached: the original consumer still re-derives them at its own span.
+    pub fn warm_abi_plans(
+        &mut self,
+        ws: &Workspace,
+        plans: &crate::concrete::ConcretePlans,
+        always: &crate::concrete::ConcreteAlwaysPlans,
+    ) {
+        let mut keys = Vec::new();
+        keys.extend(plans.keys().cloned().map(AbiPlanKey::Owner));
+        for body in plans.values().map(|plan| &**plan).chain(always.values()) {
+            keys.extend(body.callees.values().cloned().map(AbiPlanKey::Callee));
+        }
+        keys.sort();
+        keys.dedup();
+
+        let warm_keys = keys.len() as u64;
+        let mut warm_failures = 0;
+        for key in &keys {
+            let result = match key {
+                AbiPlanKey::Owner(owner) => owner_abi_plan(ws, self, plans, owner).map(|_| ()),
+                AbiPlanKey::Callee(callee) => {
+                    abi::callee_abi_plan_for_instance(ws, self, plans, callee).map(|_| ())
+                }
+            };
+            if result.is_err() {
+                warm_failures += 1;
+            }
+        }
+        self.abi_plans.publish(warm_keys, warm_failures);
+    }
+
+    /// Move a completed ABI warm into the context that will lower and emit.
+    /// The representation arena travels with the plans because their `RepId`s
+    /// are scoped to that arena; both contexts must share the graph interner.
+    pub fn adopt_warmed_abi(&mut self, warmed: Self) {
+        assert!(
+            self.values_first_class == warmed.values_first_class
+                && self.target == warmed.target
+                && std::sync::Arc::ptr_eq(&self.interner, &warmed.interner),
+            "ABI warm context does not match the emission context"
+        );
+        self.rep_arena = warmed.rep_arena;
+        self.abi_plans = warmed.abi_plans;
+    }
+
+    /// Traffic counters of this context's representation arena.
+    pub fn rep_arena_stats(&self) -> abi::RepArenaStats {
+        self.rep_arena.stats()
     }
 
     /// Set the codegen backend this lowering feeds (see [`target`]).
@@ -362,6 +716,10 @@ impl ScalarCtx {
     /// Body edits keep the body SET fixed (add/remove fn is interface-tier ->
     /// full rebuild), so diffing only the re-inferred bodies is complete.
     pub fn update_body(&mut self, ws: &Workspace, mid: ModuleId, owner: BodyOwner) -> Vec<Ustr> {
+        // An edit can flip taken-by-ref membership, and the memoized ABI plans
+        // read it -- drop them all rather than tracking which flips reach which
+        // plan. Cheaper than one stale plan is worth.
+        self.abi_plans.clear();
         let key = (mid, owner);
         let old = self.per_body.remove(&key).unwrap_or_default();
         let new = match ws.module(mid).bodies.get(&owner) {
@@ -1044,6 +1402,21 @@ pub fn lower_instance_with_plans(
     lower_instance_with_plan_inner(ws, scx, plan, concrete_plans)
 }
 
+/// Reject a specialized bounded body whose witness tree was lost before any
+/// lowering consumer can interpret its placeholder calls.
+pub fn validate_concrete_bound_plan(
+    func: &bone_semantic::hir::Function,
+    plan: &ConcreteBodyPlan,
+) -> Result<(), CompilerError> {
+    if func.generic_bounds.iter().any(Option::is_some) && plan.bound_tree.is_empty() {
+        return Err(CompilerError::new_with_label(
+            func.name_span,
+            "concrete callee bound plan is empty for its site".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 fn lower_instance_with_plan_inner(
     ws: &Workspace,
     scx: &ScalarCtx,
@@ -1055,6 +1428,8 @@ fn lower_instance_with_plan_inner(
         .ok_or_else(|| gap("concrete plan does not own a function instance"))?;
     let (mid, fid) = (inst.func.module, inst.func.func);
     let module = ws.module(mid);
+    let func = &module.functions[fid];
+    validate_concrete_bound_plan(func, plan)?;
     let body = module
         .bodies
         .get(&BodyOwner::Function(fid))
@@ -1063,7 +1438,6 @@ fn lower_instance_with_plan_inner(
         .inference(mid)
         .and_then(|ir| ir.per_fn.get(&BodyOwner::Function(fid)));
     if let Some(inf) = inf {
-        let func = &module.functions[fid];
         validate_concrete_type_tables(
             ws,
             inf,
@@ -1131,6 +1505,7 @@ fn lower_body(
         .and_then(|ir| ir.per_fn.get(&BodyOwner::Function(fid)));
 
     let mut f = MirFunc::new(func.name);
+    f.rep_arena = Some(scx.rep_arena());
     // A `co fn` lowers to an ordinary CFG with `Term::Yield`s + a resume-arg cell
     // (the value `yield e` evaluates to). `skull-transform`'s coroutine pass then
     // rewrites it into the stackless state machine.
@@ -1142,10 +1517,14 @@ fn lower_body(
     let cur = f.entry();
     // Scalar value ABI: when this fn participates, each value param expands to
     // leaf cells and a value return becomes a multi-value `Return`. This body's
-    // own ABI comes from the one plan the calls that target it read.
-    let abi = BackendFnAbiPlan::for_concrete_plan(ws, scx, concrete_plan);
+    // own ABI is the one Owner-keyed plan the calls that target it read; the
+    // plan in hand rides along because a standalone specialization's plan may
+    // not be in the shared map.
+    let abi = owner_abi_plan_for_body(ws, scx, concrete_plans, &subject, concrete_plan)?;
     f.abi_plan = Some(abi.clone());
-    let param_reps = abi.representation().params().to_vec();
+    f.code_identity = Some(crate::code_identity::CodeIdentity::Named(subject.clone()));
+    f.code_abi_fingerprint = Some(abi.logical_fingerprint());
+    let param_rep_count = abi.representation().params().len();
     let ret_rep = abi.representation().result();
     let mut b = Builder {
         ws,
@@ -1153,6 +1532,12 @@ fn lower_body(
         concrete_plan,
         concrete_plans,
         concrete_type_cache: RefCell::new(rustc_hash::FxHashMap::default()),
+        lower_attribution: RefCell::new(LowerAttribution {
+            abi_param_copy_volume: 0,
+            abi_param_shared_views: usize::from(param_rep_count > 0),
+            ..LowerAttribution::default()
+        }),
+        lower_timing_enabled: lower_attribution_timing_enabled(),
         generic_bounds: &func.generic_bounds,
         body,
         inf,
@@ -1166,7 +1551,8 @@ fn lower_body(
         resume_arg,
         // A coroutine body emits via `emit_coroutine` before `inline_functions`
         // runs, so it is never spliced -- box value args (see field docs).
-        param_reps,
+        param_reps: Vec::new(),
+        param_plan: Some(abi.clone()),
         ret_rep,
         fn_name_span: Some(func.name_span),
         cur_span: None,
@@ -1194,10 +1580,11 @@ fn lower_body(
         nested_fn_counters: HashMap::new(),
         presence_only: None,
     };
-    b.lower_params();
+    b.lower_params()?;
     b.fill_param_defaults()?;
     b.lower_root()?;
-    Ok(b.f)
+    let stats = b.lower_attribution.into_inner();
+    Ok(finish_lower_attribution(b.f, stats))
 }
 
 /// Lower an always-emitted global from its graph-owned concrete plan.
@@ -1240,7 +1627,15 @@ fn lower_global_inner(
     let inf = ws
         .inference(mid)
         .and_then(|ir| ir.per_fn.get(&BodyOwner::Global(gid)));
-    let f = MirFunc::new(name);
+    let mut f = MirFunc::new(name);
+    f.code_identity = Some(crate::code_identity::CodeIdentity::Artifact(
+        crate::code_identity::CodeOwner::Artifact {
+            kind: crate::code_identity::CodeOwnerKind::Global,
+            module: module.file,
+            name: module.globals[gid].name,
+        },
+    ));
+    f.rep_arena = Some(scx.rep_arena());
     let cur = f.entry();
     let mut b = Builder {
         ws,
@@ -1248,6 +1643,8 @@ fn lower_global_inner(
         concrete_plan,
         concrete_plans,
         concrete_type_cache: RefCell::new(rustc_hash::FxHashMap::default()),
+        lower_attribution: RefCell::new(LowerAttribution::default()),
+        lower_timing_enabled: lower_attribution_timing_enabled(),
         generic_bounds: &[],
         body,
         inf,
@@ -1261,6 +1658,7 @@ fn lower_global_inner(
         resume_arg: None,
         // Global-init bodies never run `inline_functions` -- box value args.
         param_reps: Vec::new(),
+        param_plan: None,
         ret_rep: None,
         fn_name_span: None,
         cur_span: None,
@@ -1280,7 +1678,10 @@ fn lower_global_inner(
     let global_plan = GlobalPlan::for_concrete_result(
         ws,
         scx,
-        concrete_plan.signature.result.map(|id| b.concrete_mono(id)),
+        concrete_plan
+            .signature
+            .result
+            .map(|id| b.concrete_mono_owned(id, ConcreteMonoConsumer::GlobalPlan)),
     )
     .map_err(|error| match error.span.or(b.cur_span) {
         Some(span) => CompilerError::new_with_label(span, error.message),
@@ -1293,7 +1694,8 @@ fn lower_global_inner(
     b.ret_rep = (!scx.values_first_class)
         .then(|| b.f.global_plan.as_ref().expect("global plan").representation());
     b.lower_root()?;
-    Ok(Some(b.f))
+    let stats = b.lower_attribution.into_inner();
+    Ok(Some(finish_lower_attribution(b.f, stats)))
 }
 
 /// Lower an always-emitted decorator from its graph-owned concrete plan.
@@ -1547,14 +1949,33 @@ fn lower_decorator_inner(
     let target = body
         .deco_target
         .ok_or_else(|| gap("decorator body has no target binding"))?;
-    let f = MirFunc::new(name);
+    let mut f = MirFunc::new(name);
+    f.code_identity = Some(crate::code_identity::CodeIdentity::Artifact(
+        crate::code_identity::CodeOwner::Artifact {
+            kind: crate::code_identity::CodeOwnerKind::Decorator,
+            module: module.file,
+            name: module.decorators[did].name,
+        },
+    ));
+    f.rep_arena = Some(scx.rep_arena());
     let cur = f.entry();
+    let representation = scx
+        .rep_arena()
+        .boxed_function(scx.target(), concrete_plan.signature.params.len());
+    f.abi_representation = Some(representation.clone());
+    let param_reps = representation.params().to_vec();
+    let ret_rep = concrete_plan
+        .signature
+        .result
+        .map(|_| representation.result().expect("boxed decorator result plan"));
     let mut b = Builder {
         ws,
         scx,
         concrete_plan,
         concrete_plans,
         concrete_type_cache: RefCell::new(rustc_hash::FxHashMap::default()),
+        lower_attribution: RefCell::new(LowerAttribution::default()),
+        lower_timing_enabled: lower_attribution_timing_enabled(),
         generic_bounds: &[],
         body,
         inf,
@@ -1566,9 +1987,11 @@ fn lower_decorator_inner(
         defers: Vec::new(),
         in_defer_body: false,
         resume_arg: None,
-        // Decorator bodies never run `inline_functions` -- box value args.
-        param_reps: Vec::new(),
-        ret_rep: None,
+        // Decorator bodies never run `inline_functions` -- box value args, but
+        // their declared parameters still need the owned ABI slots.
+        param_reps,
+        param_plan: None,
+        ret_rep,
         fn_name_span: None,
         cur_span: None,
         cur_expr: None,
@@ -1588,10 +2011,11 @@ fn lower_decorator_inner(
     let tcell = b.f.new_cell(Some(b.body.binding_arena[target].name));
     b.f.params.push(tcell);
     b.binds.insert(raw(target), tcell);
-    b.lower_params();
+    b.lower_params()?;
     b.fill_param_defaults()?;
     b.lower_root()?;
-    Ok(b.f)
+    let stats = b.lower_attribution.into_inner();
+    Ok(finish_lower_attribution(b.f, stats))
 }
 
 struct Builder<'a> {
@@ -1600,6 +2024,8 @@ struct Builder<'a> {
     concrete_plan: &'a ConcreteBodyPlan,
     concrete_plans: &'a ConcretePlans,
     concrete_type_cache: ConcreteTypeCache,
+    lower_attribution: RefCell<LowerAttribution>,
+    lower_timing_enabled: bool,
     /// The enclosing fn's `generic_bounds`, parallel to its `generics`:
     /// `Some(elem)` where a generic is declared `I: Iterator<elem>`. THE declared
     /// source for a placeholder `next`'s element shape -- the call's inferred
@@ -1642,6 +2068,8 @@ struct Builder<'a> {
     /// `body.param_bindings`. Shape structs are projected only at the
     /// flatten/rebuild seams; this is the body-owned ABI answer.
     param_reps: Vec<RepId>,
+    /// The ordinary body's ABI owns this immutable parameter slice.
+    param_plan: Option<BackendFnAbiPlanHandle>,
     /// The body's physical result representation identity, if it has one.
     ret_rep: Option<RepId>,
     /// The fn's name span, for spanned emit-time rejections that have no better
@@ -1726,12 +2154,14 @@ impl Builder<'_> {
         self.scx.rep_arena().ret_slot(id)
     }
 
-    fn param_slot(&self, index: usize) -> RetSlot {
-        self.param_reps
-            .get(index)
+    fn param_slot(&self, index: usize) -> Result<RetSlot, CompilerError> {
+        self.param_plan
+            .as_ref()
+            .and_then(|plan| plan.representation().params().get(index))
             .copied()
+            .or_else(|| self.param_reps.get(index).copied())
             .map(|id| self.rep_slot(id))
-            .unwrap_or(RetSlot::Opaque)
+            .ok_or_else(|| self.gap_here(format!("parameter {index} has no representation plan")))
     }
 
     fn result_shape(&self) -> Option<ValueShape> {
@@ -1810,14 +2240,59 @@ impl Builder<'_> {
     /// predicate below is a delegate: `DispatchCtx` is the one implementation,
     /// so the instance walk asking the same question cannot get a second answer
     /// (`skull_mir::lower::dispatch`).
-    pub(crate) fn concrete_mono(&self, id: MonoTyId) -> MonoTy {
+    pub(crate) fn concrete_mono_view(
+        &self,
+        id: MonoTyId,
+        consumer: ConcreteMonoConsumer,
+    ) -> Rc<MonoTy> {
+        let timing = self.lower_timing_enabled;
+        self.lower_attribution
+            .borrow_mut()
+            .record_concrete_mono_request(consumer);
+        if self.lower_timing_enabled {
+            self.lower_attribution
+                .borrow_mut()
+                .concrete_mono_timed_requests += 1;
+        }
         let cache = &self.concrete_type_cache;
-        if let Some(ty) = cache.borrow().get(&id).cloned() {
+        let cache_lookup_start = timing.then(Instant::now);
+        let hit = cache.borrow().get(&id).map(Rc::clone);
+        let cache_lookup_ns = cache_lookup_start
+            .map(|start| start.elapsed().as_nanos() as u64)
+            .unwrap_or_default();
+        if let Some(ty) = hit {
+            let mut stats = self.lower_attribution.borrow_mut();
+            stats.concrete_mono_shared_handle_requests += 1;
+            stats.record_concrete_mono_cache_hit(consumer, 0, 0, cache_lookup_ns, 0);
             return ty;
         }
-        let ty = self.scx.interner().get(id);
-        cache.borrow_mut().insert(id, ty.clone());
+        let lookup_start = timing.then(Instant::now);
+        let (ty, interner_cold) = self.scx.interner().get_shared_with_status(id);
+        let lookup_ns = lookup_start
+            .map(|start| start.elapsed().as_nanos() as u64)
+            .unwrap_or_default();
+        let mut stats = self.lower_attribution.borrow_mut();
+        stats.concrete_mono_shared_handle_requests += 1;
+        let nodes = interner_cold.then(|| mono_ty_node_count(&ty)).unwrap_or_default();
+        cache.borrow_mut().insert(id, Rc::clone(&ty));
+        stats.record_concrete_mono_derivation(consumer, nodes, 0, lookup_ns, cache_lookup_ns, 0);
         ty
+    }
+
+    pub(crate) fn concrete_mono_owned(
+        &self,
+        id: MonoTyId,
+        consumer: ConcreteMonoConsumer,
+    ) -> MonoTy {
+        let ty = self.concrete_mono_view(id, consumer);
+        let (owned, clone_self_ns) = clone_mono_ty_timed(&ty, self.lower_timing_enabled);
+        let mut stats = self.lower_attribution.borrow_mut();
+        stats.record_concrete_mono_owned_escape(
+            consumer,
+            mono_ty_node_count(&ty),
+            clone_self_ns,
+        );
+        owned
     }
 
     pub(crate) fn dispatch(&self) -> dispatch::DispatchCtx<'_> {
@@ -1828,6 +2303,8 @@ impl Builder<'_> {
             concrete_plan: Some(self.concrete_plan),
             concrete_types: self.concrete_plan.domain_types(&self.cur_domain),
             concrete_type_cache: Some(&self.concrete_type_cache),
+            lower_attribution: Some(&self.lower_attribution),
+            lower_timing_enabled: self.lower_timing_enabled,
             interner: Some(self.scx.interner()),
             rep_arena: self.scx.rep_arena.as_ref(),
             target: self.scx.target,
@@ -1892,13 +2369,14 @@ impl Builder<'_> {
         matches!(self.f.blocks[self.cur].term, Term::Unreachable)
     }
 
-    fn lower_params(&mut self) {
+    fn lower_params(&mut self) -> Result<(), CompilerError> {
         let pbs: Vec<Idx<BindingInfo>> = self.body.param_bindings.into_iter().collect();
         for (i, pb) in pbs.iter().enumerate() {
             let name = self.body.binding_arena[*pb].name;
-            let slot = self.param_slot(i);
+            let slot = self.param_slot(i)?;
             self.bind_param_slot(*pb, name, &slot);
         }
+        Ok(())
     }
 
     /// Bind one declared param to the cells its wire slot occupies, in the Lua
@@ -1964,7 +2442,7 @@ impl Builder<'_> {
                 self.f.set_term(self.cur, Term::Branch { cond: is_nil, then_bb, else_bb: join });
                 self.cur = then_bb;
                 let r = self.lower_expr_repr(*def)?;
-                let leaves = self.repr_to_leaves(&r, &shape);
+                let leaves = self.repr_to_storage_leaves(&r, &shape, "struct default")?;
                 for (c, v) in cells.iter().zip(leaves) {
                     self.emit_cur(Inst::Store { cell: *c, value: v });
                 }
@@ -2035,11 +2513,11 @@ impl Builder<'_> {
     fn reject_nonunit_coroutine_falloff(&self) -> Result<(), CompilerError> {
         let plan = self.concrete_plan;
         let Some(result_id) = plan.signature.result else { return Ok(()) };
-        let result = self.concrete_mono(result_id);
+        let result = self.concrete_mono_view(result_id, ConcreteMonoConsumer::ReturnValidation);
         let crate::monoty::MonoTy::App {
             ctor: crate::monoty::MonoCtor::Nominal(name),
             params,
-        } = result
+        } = &*result
         else {
             return Ok(())
         };
@@ -2076,24 +2554,42 @@ impl Builder<'_> {
             .concrete_plan
             .signature
             .result
-            .is_some_and(|id| matches!(self.concrete_mono(id), crate::monoty::MonoTy::Unit))
+            .is_some_and(|id| {
+                matches!(
+                    &*self.concrete_mono_view(id, ConcreteMonoConsumer::ReturnLowering),
+                    crate::monoty::MonoTy::Unit
+                )
+            })
         {
             self.lower_expr(e)?;
             return Ok(vec![]);
         }
         if let Some(shape) = self.result_shape() {
+            let is_phantom = match &self.body.expr_arena[e] {
+                Expr::Call { callee: Callee::Unresolved { name, .. }, args, .. } => {
+                    name.as_str() == "phantom" && args.clone().into_iter().next().is_none()
+                }
+                _ => false,
+            };
+            if is_phantom {
+                self.lower_expr(e)?;
+                return Ok((0..shape.leaf_count())
+                    .map(|_| self.emit_cur(Inst::Const(Lit::Nil)))
+                    .collect());
+            }
             let r = self.lower_expr_repr(e)?;
-            let rep = self.ret_rep.expect("result_shape requires an owned result RepId");
-            let bundle = ValueBundle::new(rep, r);
-            return Ok(self.repr_to_leaves_bundle(&bundle, &shape));
+            if self.scx.rep_arena().value_shape(r.representation()).is_none() {
+                return self.opaque_boundary_leaves(&r, &shape, "return boundary");
+            }
+            return self.repr_to_leaves_bundle_after_presence(&r, &shape);
         }
         if let Some(shape) = self.result_tuple() {
             if shape.nullable {
                 return self.nullable_tuple_return_slots(e, &shape);
             }
             if shape.splats() {
-                let r = self.lower_expr_repr(e)?;
-                return Ok(self.tuple_repr_to_slots(r, &shape));
+                let r = self.lower_expr_repr(e)?.into_value();
+                return self.tuple_repr_to_slots(r, &shape);
             }
             let v = self.lower_expr(e)?;
             return Ok(self.tuple_return_operands(v, shape.slots.len()));
@@ -2101,7 +2597,7 @@ impl Builder<'_> {
         let v = self.lower_expr(e)?;
         let v = match self.concrete_plan.signature.result {
             Some(result) => {
-                let result = self.concrete_mono(result);
+                let result = self.concrete_mono_view(result, ConcreteMonoConsumer::ReturnLowering);
                 self.coerced_mono(v, e, &result)
             }
             None => v,
@@ -2133,7 +2629,7 @@ impl Builder<'_> {
         e: Idx<Expr>,
         shape: &TupleRetShape,
     ) -> Result<Vec<Idx<Inst>>, CompilerError> {
-        let r = self.lower_expr_repr(e)?;
+        let r = self.lower_expr_repr(e)?.into_value();
         if let ValueRepr::Scalar(v) = &r {
             if !matches!(self.f.insts[*v], Inst::Const(Lit::Nil)) {
                 return Err(gap(
@@ -2143,7 +2639,7 @@ impl Builder<'_> {
             }
             return Ok(self.absent_tuple_slots(shape));
         }
-        Ok(self.tuple_repr_to_slots(r, shape))
+        self.tuple_repr_to_slots(r, shape)
     }
 
     /// The N return operands for a tuple-return `return <v>`. A fresh `MakeTuple`
@@ -2173,11 +2669,15 @@ impl Builder<'_> {
     /// presence sits on the wire. A repr that carries its OWN tag forwards that
     /// tag: `return maybe(b)` hands on the callee's presence, and synthesizing
     /// `true` here instead reported every absent forward as present.
-    fn tuple_repr_to_slots(&mut self, r: ValueRepr, shape: &TupleRetShape) -> Vec<Idx<Inst>> {
+    fn tuple_repr_to_slots(
+        &mut self,
+        r: ValueRepr,
+        shape: &TupleRetShape,
+    ) -> Result<Vec<Idx<Inst>>, CompilerError> {
         // A phantom tuple has no aggregate to project; every wire slot is absent.
         if let ValueRepr::Scalar(v) = &r {
             if matches!(self.f.insts[*v], Inst::Const(Lit::Nil)) {
-                return self.absent_tuple_slots(shape);
+                return Ok(self.absent_tuple_slots(shape));
             }
         }
         let present = match (shape.nullable, &r) {
@@ -2188,7 +2688,7 @@ impl Builder<'_> {
         let parts: Vec<ValueRepr> = match r {
             ValueRepr::Tuple { parts, .. } if parts.len() == shape.slots.len() => parts,
             other => {
-                let base = self.pack(other);
+                let base = self.pack(other)?;
                 (0..shape.slots.len())
                     .map(|index| ValueRepr::Scalar(self.emit_cur(Inst::TupleIndex { base, index })))
                     .collect()
@@ -2198,7 +2698,7 @@ impl Builder<'_> {
         out.extend(present);
         for (slot, part) in shape.slots.iter().zip(parts) {
             match slot {
-                RetSlot::Opaque => out.push(self.pack(part)),
+                RetSlot::Opaque => out.push(self.pack(part)?),
                 // A BOXED source at a non-nullable splatting slot is the iterator
                 // protocol's "no element" placeholder (`return (false,
                 // phantom())`), which is nil -- field-reading it would fault, and
@@ -2210,14 +2710,14 @@ impl Builder<'_> {
                 {
                     let mut nullable = vs.clone();
                     nullable.nullable = true;
-                    let leaves = self.repr_to_leaves(&part, &nullable);
+                    let leaves = self.repr_to_leaves_shape(&part, &nullable)?;
                     out.extend(leaves.into_iter().skip(1));
                 }
-                RetSlot::Leaves(vs) => out.extend(self.repr_to_leaves(&part, vs)),
-                RetSlot::Nested(inner) => out.extend(self.tuple_repr_to_slots(part, inner)),
+                RetSlot::Leaves(vs) => out.extend(self.repr_to_leaves_shape(&part, vs)?),
+                RetSlot::Nested(inner) => out.extend(self.tuple_repr_to_slots(part, inner)?),
             }
         }
-        out
+        Ok(out)
     }
 
     /// Rebuild the tuple repr `shape` describes from a flat slot list -- the
@@ -2271,15 +2771,7 @@ impl Builder<'_> {
             return Ok(vec![self.lower_expr(a)?]);
         }
         let r = self.lower_expr_repr(a)?;
-        Ok(self.repr_to_slot_values(r, slot))
-    }
-
-    pub(crate) fn repr_to_slot_values(&mut self, repr: ValueRepr, slot: &RetSlot) -> Vec<Idx<Inst>> {
-        match slot {
-            RetSlot::Opaque => vec![self.pack(repr)],
-            RetSlot::Leaves(shape) => self.repr_to_leaves(&repr, shape),
-            RetSlot::Nested(shape) => self.tuple_repr_to_slots(repr, shape),
-        }
+        self.repr_to_slot_values_bundle(&r, slot)
     }
 
 }
@@ -2436,10 +2928,9 @@ pub fn map_key_rejection(ws: &Workspace, mid: ModuleId) -> Option<(String, Span)
 /// position. Not a legal C boundary type: no `ffi.cdef` typedef exists, so
 /// `ffi.new`/`sizeof`/`ffi.istype`/the extern ABI cannot name it.
 fn nominal_is_gc_value(ws: &Workspace, name: Ustr) -> bool {
-    let rep_arena = RepArena::default();
     map_is_value_struct(ws, name)
         && !matches!(
-            rep_arena.nominal_value_storage(ws, bone_semantic::hir::FnBackend::Lua, name),
+            crate::lower::declared_value_storage(ws, bone_semantic::hir::FnBackend::Lua, name),
             Some(ValueStorage::CData)
         )
 }
@@ -2533,7 +3024,7 @@ fn struct_expand_rejection_for_call(
 ///   bare name, never containing '+', so it can never collide with a pair key);
 ///   the driver runs `emit_shader_entry`.
 /// `key` is the pipeline name const `pipeline()` looks up.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ShaderPair {
     pub key: String,
     pub vert: Option<FuncRef>,
@@ -2543,9 +3034,10 @@ pub struct ShaderPair {
 pub struct ShaderCollection {
     pub pairs: Vec<ShaderPair>,
     pub callsites: Vec<(ModuleId, BodyOwner)>,
+    pub contributions: HashMap<(ModuleId, BodyOwner), Vec<ShaderPair>>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ComputeEntry {
     pub key: String,
     pub entry: FuncRef,
@@ -2554,6 +3046,7 @@ pub struct ComputeEntry {
 pub struct ComputeCollection {
     pub entries: Vec<ComputeEntry>,
     pub callsites: Vec<(ModuleId, BodyOwner)>,
+    pub contributions: HashMap<(ModuleId, BodyOwner), Vec<ComputeEntry>>,
 }
 
 /// The `@shader(<stage>)` stage of `f`, else `None`.
@@ -2781,6 +3274,194 @@ fn uniform_values_rejection_for_call(
     None
 }
 
+/// Resolve a `build_var("NAME")` / `embed_string("path")` call to its value
+/// (docs/comptime-plan.md tier 1). THE shared resolver: the lowering expander
+/// and the fatal gate both call it, so they cannot diverge on what they
+/// accept. The argument must be a plain string literal -- interpolation or any
+/// computed expression rejects, because the input has to be knowable without
+/// running the body.
+pub fn resolve_comptime_value(
+    ws: &Workspace,
+    body: &Body,
+    call_expr: Idx<Expr>,
+    args: &[Idx<Expr>],
+    kind: ExpandKind,
+) -> Result<ResolvedComptime, CompilerError> {
+    let fname = match kind {
+        ExpandKind::BuildVar => "build_var",
+        ExpandKind::EmbedString => "embed_string",
+        _ => unreachable!("resolve_comptime_value only serves the comptime-input kinds"),
+    };
+    let reject = |span: Idx<Expr>, msg: String| {
+        CompilerError::new_with_label(body.expr_spans[span], msg)
+    };
+    let [arg] = args else {
+        return Err(reject(call_expr, format!("`{fname}` takes exactly one argument")));
+    };
+    let Expr::String(key) = body.expr_arena[*arg] else {
+        return Err(reject(
+            *arg,
+            format!("`{fname}` argument must be a plain string literal (no interpolation)"),
+        ));
+    };
+    match kind {
+        ExpandKind::BuildVar => match ws.comptime_inputs.vars.get(&key) {
+            Some(var) => Ok(ResolvedComptime { value: var.value.clone(), file_abs: None }),
+            // A fully-default inputs struct means resolution never RAN for
+            // this compile (no stick.toml found, or an entry point that did
+            // not stamp declared inputs) -- blaming the project's [build.vars]
+            // there sent people at the wrong file. A stamped project always
+            // carries at least its embed_root.
+            None if ws.comptime_inputs.embed_root.is_none()
+                && ws.comptime_inputs.vars.is_empty()
+                && ws.comptime_inputs.channel.is_empty() =>
+            {
+                Err(reject(
+                    call_expr,
+                    format!(
+                        "`build_var(\"{key}\")`: no [build.vars] were resolved for this \
+                         compile (no stick.toml found at or above the entry point, or \
+                         this rock entry point did not resolve declared inputs)"
+                    ),
+                ))
+            }
+            None => Err(reject(
+                call_expr,
+                format!("`build_var(\"{key}\")`: {key} is not declared in this project's [build.vars]"),
+            )),
+        },
+        ExpandKind::EmbedString => {
+            // Resolution root: the nearest stick.toml at/above the CALLING
+            // file's dir (a library embeds its own files, whatever project is
+            // consuming it -- docs/comptime-plan.md tier 1.5); fall back to
+            // the invocation's embed_root for synthetic/test module files.
+            let call_file = body.expr_spans[call_expr].file;
+            let package_root = std::path::Path::new(call_file.as_str())
+                .exists()
+                .then(|| {
+                    let mut dir = std::path::Path::new(call_file.as_str()).parent();
+                    while let Some(d) = dir {
+                        if d.join("stick.toml").exists() {
+                            return Some(d.to_path_buf());
+                        }
+                        dir = d.parent();
+                    }
+                    None
+                })
+                .flatten();
+            let Some(root) = package_root.or_else(|| ws.comptime_inputs.embed_root.clone()) else {
+                return Err(reject(
+                    call_expr,
+                    "`embed_string` needs a package root (a stick.toml at or above the \
+                     calling file, or a project root); none is available in this compilation"
+                        .to_string(),
+                ));
+            };
+            let rel = std::path::Path::new(key.as_str());
+            if rel.is_absolute() {
+                return Err(reject(
+                    *arg,
+                    format!("`embed_string` path must be relative to the package root, got {key:?}"),
+                ));
+            }
+            let joined = root.join(rel);
+            let file = joined.canonicalize().map_err(|e| {
+                reject(*arg, format!("`embed_string(\"{key}\")`: cannot read {key:?}: {e}"))
+            })?;
+            let canon_root = root.canonicalize().map_err(|e| {
+                reject(call_expr, format!("`embed_string`: package root is unreadable: {e}"))
+            })?;
+            if !file.starts_with(&canon_root) {
+                return Err(reject(
+                    *arg,
+                    format!("`embed_string(\"{key}\")`: path escapes the package root"),
+                ));
+            }
+            let value = std::fs::read_to_string(&file).map_err(|e| {
+                reject(*arg, format!("`embed_string(\"{key}\")`: cannot read {key:?}: {e}"))
+            })?;
+            Ok(ResolvedComptime {
+                value,
+                file_abs: Some(Ustr::from(&file.to_string_lossy())),
+            })
+        }
+        _ => unreachable!(),
+    }
+}
+
+/// A resolved comptime input: the value, plus (for embeds) the absolute path
+/// the read landed on -- what invalidation re-reads and the watcher watches.
+pub struct ResolvedComptime {
+    pub value: String,
+    pub file_abs: Option<Ustr>,
+}
+
+/// FATAL gate for `build_var` / `embed_string` misuse (non-literal argument,
+/// undeclared var, unreadable or escaping path): a per-fn lowering error is
+/// only a lenient skip, so validation lives here. Shares
+/// [`resolve_comptime_value`] with the expander.
+pub fn comptime_input_rejection(ws: &Workspace, mid: ModuleId) -> Option<CompilerError> {
+    let module = ws.module(mid);
+    let ir = ws.inference(mid)?;
+    for (owner, body) in module.bodies.iter() {
+        let Some(inf) = ir.per_fn.get(owner) else { continue };
+        for (e, expr) in body.expr_arena.iter() {
+            let Expr::Call { callee: Callee::Unresolved { name, .. }, args, .. } = expr else {
+                continue;
+            };
+            let Some((fmod, fid)) = resolve_call_fn(ws, inf, e, *name) else { continue };
+            let kind = crate::intrinsics::expand_kind(&ws.module(fmod).functions[fid]);
+            let Some(kind @ (ExpandKind::BuildVar | ExpandKind::EmbedString)) = kind else {
+                continue;
+            };
+            let arg_idxs: Vec<Idx<Expr>> = args.into_iter().collect();
+            if let Err(err) = resolve_comptime_value(ws, body, e, &arg_idxs, kind) {
+                return Some(err);
+            }
+        }
+    }
+    None
+}
+
+/// The ABSOLUTE path of every `embed_string` input the program reads, found
+/// by the SAME resolution emission uses (`resolve_comptime_value` -- one
+/// oracle, so this cannot drift from what actually gets baked). For watchers
+/// over emitters that keep no chunk cache (the JS web watch); the Lua side
+/// reads its `SkullEmitCache::comptime_files` instead.
+pub fn comptime_embed_files(ws: &Workspace) -> Vec<Ustr> {
+    let mut out: Vec<Ustr> = Vec::new();
+    for module in ws.modules.iter() {
+        if module.id == ModuleId::builtin() {
+            continue;
+        }
+        let Some(ir) = ws.inference(module.id) else { continue };
+        for (owner, body) in module.bodies.iter() {
+            let Some(inf) = ir.per_fn.get(owner) else { continue };
+            for (e, expr) in body.expr_arena.iter() {
+                let Expr::Call { callee: Callee::Unresolved { name, .. }, args, .. } = expr else {
+                    continue;
+                };
+                let Some((fmod, fid)) = resolve_call_fn(ws, inf, e, *name) else { continue };
+                let kind = crate::intrinsics::expand_kind(&ws.module(fmod).functions[fid]);
+                if !matches!(kind, Some(ExpandKind::EmbedString)) {
+                    continue;
+                }
+                let arg_idxs: Vec<Idx<Expr>> = args.into_iter().collect();
+                if let Ok(resolved) =
+                    resolve_comptime_value(ws, body, e, &arg_idxs, ExpandKind::EmbedString)
+                {
+                    if let Some(path) = resolved.file_abs {
+                        out.push(path);
+                    }
+                }
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
 /// Emit-time validation for `@vertex_expand` calls: misuse is a spanned
 /// compile error, never a call that reaches the fn's error body.
 fn vertex_expand_rejection_for_call(
@@ -2826,6 +3507,7 @@ impl ExpansionRejections {
             ExpandKind::VertexLayout => &mut self.vertex_layout,
             ExpandKind::UniformBlock => &mut self.uniform_block,
             ExpandKind::UniformValues => &mut self.uniform_values,
+            ExpandKind::BuildVar | ExpandKind::EmbedString => return,
             ExpandKind::Materialize => return,
         };
         if slot.is_none() {
@@ -2886,6 +3568,7 @@ pub fn expansion_rejection(ws: &Workspace, mid: ModuleId) -> Option<CompilerErro
                 ExpandKind::UniformValues => {
                     uniform_values_rejection_for_call(ws, inf, body, e, f, &arg_idxs)
                 }
+                ExpandKind::BuildVar | ExpandKind::EmbedString => None,
                 ExpandKind::Materialize => None,
             };
             rejections.record(kind, rejection);
@@ -2959,79 +3642,132 @@ pub fn body_has_compute_artifact_call(
     })
 }
 
+/// Collect the shader roots contributed by one body. Full construction calls
+/// this for every body; incremental repair calls it only for re-inferred
+/// bodies, so a body edit does not rediscover unrelated shader registrations.
+pub fn collect_shader_body(
+    ws: &Workspace,
+    mid: ModuleId,
+    owner: BodyOwner,
+) -> Result<(Vec<ShaderPair>, bool), CompilerError> {
+    let module = ws.module(mid);
+    let Some(body) = module.bodies.get(&owner) else { return Ok((Vec::new(), false)) };
+    let inf = ws.inference(mid).and_then(|ir| ir.per_fn.get(&owner));
+    let mut by_key = BTreeMap::new();
+    let mut callsite = false;
+    for (e, expr) in body.expr_arena.iter() {
+        let Expr::Call { callee: Callee::Unresolved { name, .. }, args, .. } = expr else {
+            continue;
+        };
+        let resolved = match inf {
+            Some(inf) => resolve_call_fn(ws, inf, e, *name),
+            None => match ws.functions_by_name.get(name).map(|list| list.as_slice()) {
+                Some([single]) => Some(*single),
+                _ => None,
+            },
+        };
+        let Some((fmod, fid)) = resolved else { continue };
+        if !matches!(
+            crate::intrinsics::expand_kind(&ws.module(fmod).functions[fid]),
+            Some(ExpandKind::ShaderPipeline)
+        ) {
+            continue;
+        }
+        callsite = true;
+        let arg_idxs: Vec<Idx<Expr>> = args.into_iter().collect();
+        let pair = resolve_shader_pair(ws, body, e, &arg_idxs)?;
+        by_key.entry(pair.key.clone()).or_insert(pair);
+    }
+    Ok((by_key.into_values().collect(), callsite))
+}
+
+/// Collect the compute roots contributed by one body. See
+/// [`collect_shader_body`] for the locality contract.
+pub fn collect_compute_body(
+    ws: &Workspace,
+    mid: ModuleId,
+    owner: BodyOwner,
+) -> Result<(Vec<ComputeEntry>, bool), CompilerError> {
+    let module = ws.module(mid);
+    let Some(body) = module.bodies.get(&owner) else { return Ok((Vec::new(), false)) };
+    let inf = ws.inference(mid).and_then(|ir| ir.per_fn.get(&owner));
+    let mut by_key = BTreeMap::new();
+    let mut callsite = false;
+    for (e, expr) in body.expr_arena.iter() {
+        let Expr::Call { callee: Callee::Unresolved { name, .. }, args, .. } = expr else {
+            continue;
+        };
+        let resolved = match inf {
+            Some(inf) => resolve_call_fn(ws, inf, e, *name),
+            None => match ws.functions_by_name.get(name).map(|list| list.as_slice()) {
+                Some([single]) => Some(*single),
+                _ => None,
+            },
+        };
+        let Some((fmod, fid)) = resolved else { continue };
+        if !matches!(
+            crate::intrinsics::expand_kind(&ws.module(fmod).functions[fid]),
+            Some(ExpandKind::ComputeArtifact)
+        ) {
+            continue;
+        }
+        callsite = true;
+        let arg_idxs: Vec<Idx<Expr>> = args.into_iter().collect();
+        let entry = resolve_compute_entry(ws, body, e, &arg_idxs)?;
+        let key = ws.module(entry.module).functions[entry.func].name.to_string();
+        by_key.entry(key.clone()).or_insert(ComputeEntry { key, entry });
+    }
+    Ok((by_key.into_values().collect(), callsite))
+}
+
 pub fn collect_shader_collection(ws: &Workspace) -> Result<ShaderCollection, CompilerError> {
-    let mut by_key: std::collections::BTreeMap<String, ShaderPair> =
-        std::collections::BTreeMap::new();
+    let mut by_key: BTreeMap<String, ShaderPair> = BTreeMap::new();
     let mut callsites: HashSet<(ModuleId, BodyOwner)> = HashSet::new();
+    let mut contributions = HashMap::new();
     for (_, &mid) in ws.module_ids.iter() {
         let module = ws.module(mid);
-        let ir = ws.inference(mid);
-        for (owner, body) in module.bodies.iter() {
-            let inf = ir.and_then(|ir| ir.per_fn.get(owner));
-            for (e, expr) in body.expr_arena.iter() {
-                let Expr::Call { callee: Callee::Unresolved { name, .. }, args, .. } = expr else {
-                    continue;
-                };
-                let resolved = match inf {
-                    Some(inf) => resolve_call_fn(ws, inf, e, *name),
-                    None => match ws.functions_by_name.get(name).map(|l| l.as_slice()) {
-                        Some([single]) => Some(*single),
-                        _ => None,
-                    },
-                };
-                let Some((fmod, fid)) = resolved else { continue };
-                if !matches!(
-                    crate::intrinsics::expand_kind(&ws.module(fmod).functions[fid]),
-                    Some(ExpandKind::ShaderPipeline)
-                ) {
-                    continue;
-                }
-                callsites.insert((mid, *owner));
-                let arg_idxs: Vec<Idx<Expr>> = args.into_iter().collect();
-                let pair = resolve_shader_pair(ws, body, e, &arg_idxs)?;
-                by_key.entry(pair.key.clone()).or_insert(pair);
+        for (owner, _) in module.bodies.iter() {
+            let key = (mid, *owner);
+            let (pairs, callsite) = collect_shader_body(ws, mid, *owner)?;
+            if callsite {
+                callsites.insert(key);
             }
+            for pair in &pairs {
+                by_key.entry(pair.key.clone()).or_insert_with(|| pair.clone());
+            }
+            contributions.insert(key, pairs);
         }
     }
     Ok(ShaderCollection {
         pairs: by_key.into_values().collect(),
         callsites: callsites.into_iter().collect(),
+        contributions,
     })
 }
 
 pub fn collect_compute_collection(ws: &Workspace) -> Result<ComputeCollection, CompilerError> {
-    let mut by_key = std::collections::BTreeMap::<String, ComputeEntry>::new();
+    let mut by_key = BTreeMap::<String, ComputeEntry>::new();
     let mut callsites = HashSet::new();
+    let mut contributions = HashMap::new();
     for (_, &mid) in ws.module_ids.iter() {
         let module = ws.module(mid);
-        let ir = ws.inference(mid);
-        for (owner, body) in module.bodies.iter() {
-            let inf = ir.and_then(|ir| ir.per_fn.get(owner));
-            for (e, expr) in body.expr_arena.iter() {
-                let Expr::Call { callee: Callee::Unresolved { name, .. }, args, .. } = expr else {
-                    continue;
-                };
-                let resolved = match inf {
-                    Some(inf) => resolve_call_fn(ws, inf, e, *name),
-                    None => match ws.functions_by_name.get(name).map(|list| list.as_slice()) {
-                        Some([single]) => Some(*single),
-                        _ => None,
-                    },
-                };
-                let Some((fmod, fid)) = resolved else { continue };
-                let function = &ws.module(fmod).functions[fid];
-                if !matches!(crate::intrinsics::expand_kind(function), Some(ExpandKind::ComputeArtifact)) {
-                    continue;
-                }
-                callsites.insert((mid, *owner));
-                let arg_idxs: Vec<Idx<Expr>> = args.into_iter().collect();
-                let entry = resolve_compute_entry(ws, body, e, &arg_idxs)?;
-                let key = ws.module(entry.module).functions[entry.func].name.to_string();
-                by_key.entry(key.clone()).or_insert(ComputeEntry { key, entry });
+        for (owner, _) in module.bodies.iter() {
+            let key = (mid, *owner);
+            let (entries, callsite) = collect_compute_body(ws, mid, *owner)?;
+            if callsite {
+                callsites.insert(key);
             }
+            for entry in &entries {
+                by_key.entry(entry.key.clone()).or_insert_with(|| entry.clone());
+            }
+            contributions.insert(key, entries);
         }
     }
-    Ok(ComputeCollection { entries: by_key.into_values().collect(), callsites: callsites.into_iter().collect() })
+    Ok(ComputeCollection {
+        entries: by_key.into_values().collect(),
+        callsites: callsites.into_iter().collect(),
+        contributions,
+    })
 }
 
 /// Reject CPU-side calls to `@gpu_only` intrinsics and references to GPU-side

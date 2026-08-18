@@ -41,31 +41,30 @@ fn discover(path: &str) -> Result<SourceFiles> {
 /// Without this, the A/B was confined to games (the only `stick.toml` projects),
 /// leaving `tests/` + stdlib unverified.
 fn discover_or_walk(path: &str) -> Result<SourceFiles> {
-    if let Ok(s) = discover(path) {
-        return Ok(s);
-    }
     use rock_core::source_file_from_path_and_contents;
     let p = std::path::Path::new(path);
-    let mut paths: Vec<std::path::PathBuf> = if p.is_file() {
-        vec![p.to_path_buf()]
-    } else if p.is_dir() {
-        crate::WalkDir::new(p)
-            .into_iter()
-            .filter_map(|e| e.ok())
-            // Exact `.rock` extension excludes `.rock.err` / `.rock.lsp` fixtures.
-            .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("rock"))
-            .map(|e| e.path().to_path_buf())
-            .collect()
-    } else {
+    if p.is_file() {
+        return discover(path);
+    }
+    if !p.is_dir() {
         anyhow::bail!("path does not exist: {path}");
-    };
+    }
+    if crate::StickConfig::find_from_dir(p)?.is_some() {
+        return discover(path);
+    }
+    let mut paths = Vec::new();
+    for entry in crate::WalkDir::new(p) {
+        let entry = entry?;
+        if entry.path().extension().and_then(|s| s.to_str()) == Some("rock") {
+            paths.push(entry.path().to_path_buf());
+        }
+    }
     paths.sort();
     let mut sources = SourceFiles { files: vec![] };
     for fp in &paths {
-        if let Ok(contents) = std::fs::read_to_string(fp) {
-            let id = fp.to_string_lossy().into_owned();
-            sources.add_or_update_file(source_file_from_path_and_contents(id.clone(), id, contents));
-        }
+        let contents = fs_err::read_to_string(fp)?;
+        let id = fp.to_string_lossy().into_owned();
+        sources.add_or_update_file(source_file_from_path_and_contents(id.clone(), id, contents));
     }
     if sources.files.is_empty() {
         anyhow::bail!("no .rock files at {path}");

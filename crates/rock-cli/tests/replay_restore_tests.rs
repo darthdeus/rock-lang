@@ -5,7 +5,7 @@
 //! Contract: snapshotting the registry at tick T and restoring it later must
 //! return the game EXACTLY to tick-T sim state -- same `current_tick`, and every
 //! simulation-state global byte-identical to a plain run-to-T. The equality
-//! oracle is the engine's own `__replay_is_sim_state` predicate output (the
+//! oracle is the engine's own StateImagePlan world-membership output (the
 //! `c <tick> <name> <hash>` checkpoint names via `sim_state_names`); we compare
 //! those globals, not a duplicated Rust exclusion list.
 //!
@@ -30,8 +30,8 @@ fn workspace_root() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR")).parent().expect("workspace root")
 }
 
-/// Sim-state global names = the engine predicate's output (its `c`-line names),
-/// consumed rather than re-listed in Rust.
+/// Sim-state global names = the engine predicate's output, resolved to the
+/// logical names used by dump-state rather than re-listed in Rust.
 fn sim_state_names(game: &str, frames: u32) -> std::collections::HashSet<String> {
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("names.replay");
@@ -51,8 +51,64 @@ fn sim_state_names(game: &str, frames: u32) -> std::collections::HashSet<String>
     text.lines()
         .filter_map(|l| l.strip_prefix("c "))
         .filter_map(|rest| rest.split(' ').nth(1))
-        .map(|s| s.to_string())
+        .map(|identity| identity.rsplit_once("::").map_or(identity, |(_, name)| name).to_string())
         .collect()
+}
+
+#[test]
+fn replay_snapshot_oracle_includes_effective_pad_state_only() {
+    let names = sim_state_names("bitgun", 3);
+    assert!(names.contains("pad_down"), "effective pad buttons must be replay state: {names:?}");
+    assert!(names.contains("pad_axes"), "effective pad axes must be replay state: {names:?}");
+    assert!(names.contains("ACTION_RUNTIME"), "action runtime must be replay state: {names:?}");
+    assert!(!names.contains("physical_pad_down"), "physical pad lane must not be snapshotted: {names:?}");
+    assert!(!names.contains("physical_pad_active_instance"), "controller handles must not be snapshotted: {names:?}");
+    assert!(!names.contains("replay_pad_down"), "replay scratch must not be snapshotted: {names:?}");
+    assert!(!names.contains("replay_scancodes_down"), "replay keyboard scratch must not be snapshotted: {names:?}");
+    assert!(!names.contains("pad_axis_motion_this_frame"), "capture scratch must not be snapshotted: {names:?}");
+    assert!(!names.contains("ACTIONS"), "binding configuration must not be snapshotted: {names:?}");
+    assert!(!names.contains("ACTION_NAMES"), "binding registry scratch must not be snapshotted: {names:?}");
+    assert!(!names.contains("BINDING_RAW_ACTIONS"), "unknown binding scratch must not be snapshotted: {names:?}");
+    for name in [
+        "BINDING_RAW_ACTION_BYTES",
+        "BINDING_RAW_ACTION_KEYS",
+        "REBIND_CAPTURE",
+        "REBIND_CAPTURE_CANCELLED",
+        "REBIND_SNAPSHOT_SCANCODES_DOWN",
+        "REBIND_SNAPSHOT_SCANCODES_PRESSED",
+        "REBIND_SNAPSHOT_MOUSE_DOWN",
+        "REBIND_SNAPSHOT_MOUSE_PRESSED",
+        "REBIND_SNAPSHOT_PAD_DOWN",
+        "REBIND_SNAPSHOT_PAD_PRESSED",
+        "REBIND_SNAPSHOT_AXES",
+        "REBIND_SNAPSHOT_AXIS_MOTION",
+    ] {
+        assert!(!names.contains(name), "input host projection {name} was snapshotted: {names:?}");
+    }
+    assert!(!names.contains("LAST_INPUT_DEVICE"), "glyph modality must not be snapshotted: {names:?}");
+    assert!(!names.contains("UI_INPUT_CAPTURE"), "capture mode must not be snapshotted: {names:?}");
+}
+
+#[test]
+fn mag_audio_and_vfx_projections_are_not_world_image_state() {
+    let names = sim_state_names("mag", 3);
+    assert!(!names.is_empty(), "the Mag checkpoint census must examine a nonzero population");
+    assert!(names.contains("pad_down"), "the Mag census must include effective input state: {names:?}");
+    for name in [
+        "SFX_SPELL_FLAMESTRIKE_HIT",
+        "SFX_CAST_LIGHTNING",
+        "AMBIENCE_VOICE",
+        "VFX_LIGHTNING_HIT",
+        "IMPACT_VFX_LIFETIME",
+        "SPLASHES",
+        "STONE_BUILD_SHA",
+        "ui_effect_composite_shader",
+        "UI_RASTER_CANVAS",
+        "UI_OUTPUT_CANVAS",
+        "UI_EFFECT_COMPOSITE_PIPELINE",
+    ] {
+        assert!(!names.contains(name), "host projection {name} leaked into WorldImage: {names:?}");
+    }
 }
 
 /// `rock frame <game> -n N --replay <log> --dump-state [env]` -> parsed JSON.
@@ -660,29 +716,38 @@ fn live_full_reload_refuses_after_invalidating_all_keyframes() {
 #[test]
 fn long_live_bitgun_rewind_resimulates_materially_fewer_frames() {
     let game = "bitgun";
-    let target: i64 = 900;
+    let seek_frame: u32 = 900;
+    let target: i64 = 605;
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("long-live.replay");
     let log_s = log.to_string_lossy().into_owned();
 
     let rewound = run_record_dump(
         game,
-        2800,
+        seek_frame + 100,
         &log_s,
         &[
+            ("PERF_MODE", "1"),
+            ("PERF_DT", "0.008333333333333333"),
             ("STONE_LIVE_REWIND", "1"),
             ("STONE_LIVE_REWIND_CADENCE_SECONDS", "0.5"),
             ("STONE_LIVE_REWIND_WINDOW_SECONDS", "5.0"),
-            ("STONE_TIMELINE_SEEK_AT_FRAME", "1800"),
-            ("STONE_TIMELINE_SEEK_TO_TICK", "900"),
+            ("STONE_TIMELINE_SEEK_AT_FRAME", "900"),
+            ("STONE_TIMELINE_SEEK_TO_TICK", "605"),
         ],
     );
-    assert_eq!(current_tick(&rewound), target);
     let diag = &rewound["__stone_diag"];
+    assert_eq!(current_tick(&rewound), target, "long live rewind must land at its requested target: {diag}");
+    assert_eq!(diag["STONE_LIVE_REWIND_REFUSED"].as_i64(), Some(0), "the in-window target must be admitted: {diag}");
+    assert!(
+        diag["STONE_LIVE_REWIND_FLOOR_AT_SEEK"].as_i64().is_some_and(|floor| floor > 0 && floor <= target),
+        "the fixed game-time window must evict old history while retaining the requested target: {diag}"
+    );
     let resim = diag["STONE_SEEK_RESIM_FRAMES"].as_i64().expect("resim frame count");
-    assert!(resim * 2 < target, "the bounded live cadence must materially reduce resimulation: {diag}");
+    assert!(resim > 0 && resim * 2 < target, "the bounded live cadence must exercise and materially reduce resimulation: {diag}");
     assert!(diag["STONE_KEYFRAME_CADENCE_CAPTURES"].as_i64().is_some_and(|n| n >= 4), "{diag}");
-    assert!(diag["STONE_KEYFRAME_COUNT"].as_i64().is_some_and(|n| n >= 2), "{diag}");
+    assert!(diag["STONE_KEYFRAME_EVICTIONS"].as_i64().is_some_and(|n| n > 0), "{diag}");
+    assert!(diag["STONE_KEYFRAME_COUNT"].as_i64().is_some_and(|n| (2..=14).contains(&n)), "{diag}");
     let cadence_ms = diag["STONE_KEYFRAME_CADENCE_MS"].as_f64().expect("cadence cost");
     let capture_max_ms = diag["STONE_KEYFRAME_CAPTURE_MAX_MS"].as_f64().expect("capture hitch");
     assert!(cadence_ms > 0.0, "{diag}");
@@ -691,7 +756,7 @@ fn long_live_bitgun_rewind_resimulates_materially_fewer_frames() {
         "[live-rewind-costs] target={target} resim={resim} keyframes={} cadence_ms={cadence_ms:.2} capture_max_ms={capture_max_ms:.2}",
         diag["STONE_KEYFRAME_COUNT"]
     );
-    assert_eq!(recorded_tick_lines(&log_s), 1800, "the retained future must remain the one recorded input stream");
+    assert_eq!(recorded_tick_lines(&log_s), seek_frame as usize, "the retained future must remain the one recorded input stream");
 }
 
 /// Seek resimulation must run the same game semantics as ordinary playback.
@@ -726,7 +791,7 @@ fn mag_main_menu_transition_survives_seek_resimulation() {
                 return line.to_string();
             }
             let mut fields: Vec<&str> = line.split_whitespace().collect();
-            assert_eq!(fields.len(), 8, "recorded tick shape changed: {line}");
+            assert!(fields.len() == 8 || fields.len() == 10, "recorded tick shape changed: {line}");
             fields[1] = "0x1.999999999999ap-4";
             fields[2] = if tick == 30 { "1100" } else { "960" };
             fields[3] = if tick == 30 { "700" } else { "432" };
@@ -867,7 +932,7 @@ fn mag_main_menu_transition_survives_seek_resimulation() {
                 return line.to_string();
             }
             let mut fields: Vec<&str> = line.split_whitespace().collect();
-            assert_eq!(fields.len(), 8, "recorded tick shape changed: {line}");
+            assert!(fields.len() == 8 || fields.len() == 10, "recorded tick shape changed: {line}");
             fields[1] = "0x1.999999999999ap-4";
             fields[2] = if tick == 24 { "1100" } else { "0" };
             fields[3] = if tick == 24 { "700" } else { "0" };
@@ -2075,15 +2140,42 @@ fn replay_reports_its_own_costs() {
         diag["STONE_REPLAY_SAVE_MS"].as_f64().unwrap()
     );
 
-    // Keyframe BYTES are only honest where real memory was imaged. bitgun holds
-    // no buffer storage in sim state, so its figure is a truthful zero; bopt
-    // holds a NativeBuffer, so its keyframe reports the bytes it copied.
+    // Keyframe BYTES are only honest where real memory was imaged. Bitgun and
+    // bopt both hold NativeBuffers; a minimal game with no buffer declarations
+    // is the zero control.
     let seek_diag = &seeked["__stone_diag"];
-    assert_eq!(
-        seek_diag.get("STONE_KEYFRAME_STORAGE_BYTES").and_then(serde_json::Value::as_i64),
-        Some(0),
-        "bitgun images no buffer storage, so its byte figure must be a real zero: {seek_diag}"
+    let bitgun_bytes = seek_diag["STONE_KEYFRAME_STORAGE_BYTES"].as_i64().expect("bitgun storage bytes");
+    assert!(
+        bitgun_bytes > 0,
+        "bitgun holds buffer storage in sim state, so its keyframe must report imaged bytes: {seek_diag}"
     );
+
+    let zero_game = tempfile::tempdir().unwrap();
+    std::fs::write(
+        zero_game.path().join("stick.toml"),
+        format!(
+            "[package]\nname = \"replay_storage_zero\"\nversion = \"0.1.0\"\ntype = \"bin\"\n\n\
+             [dependencies]\nstone = {{ path = \"{}\" }}\n",
+            workspace_root().parent().expect("repo root").join("stone").display()
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        zero_game.path().join("main.rock"),
+        "fn main() {\n    stone_run_game(GameConfig { title: \"replay storage zero\", width: 64, height: 64 })\n}\n",
+    )
+    .unwrap();
+    let zero_game_s = zero_game.path().to_string_lossy().into_owned();
+    let zero_log = dir.path().join("zero-storage.replay").to_string_lossy().into_owned();
+    run_record_dump(&zero_game_s, 25, &zero_log, &[]);
+    let zero = run_replay_dump(&zero_game_s, 30, &zero_log, &[("STONE_KEYFRAME_INTERVAL", "10")]);
+    let zero_diag = &zero["__stone_diag"];
+    assert_eq!(
+        zero_diag["STONE_KEYFRAME_STORAGE_BYTES"].as_i64(),
+        Some(0),
+        "a game with no buffer declarations must report a real zero: {zero_diag}"
+    );
+
     let bopt_log = dir.path().join("bopt.replay").to_string_lossy().into_owned();
     let bopt_rec = Command::new(env!("CARGO_BIN_EXE_rock"))
         .args([
@@ -2102,7 +2194,9 @@ fn replay_reports_its_own_costs() {
         "bopt holds buffer storage in sim state, so its keyframe must report imaged bytes: {}",
         bopt["__stone_diag"]
     );
-    println!("[replay-costs] bopt keyframe imaged {bytes} bytes of buffer storage");
+    println!(
+        "[replay-costs] keyframe buffer storage: zero-control 0B, bitgun {bitgun_bytes}B, bopt {bytes}B"
+    );
 }
 
 fn keyframe_count(s: &serde_json::Value) -> i64 {
@@ -2121,10 +2215,11 @@ fn lambda_counter(s: &serde_json::Value) -> i64 {
     panic!("lambda_state_counter not present in dump-state");
 }
 
-/// docs/lambda-in-state-snapshot-plan.md T1: the engine keyframe walk (`dc` in
-/// stone/engine/snapshot.rock) must deep-copy a CAPTURING lambda held in a
-/// registered global -- an env record, `setmetatable({__fn=.., c<N>=..},
-/// __rock_fn_mt)` -- and keep it callable AND capture-isolated across a restore.
+/// The engine keyframe walk (`dc` in stone/engine/snapshot.rock) must copy a
+/// CAPTURING CodeRef env record held in a registered global, keep its captures
+/// isolated across a restore, and leave its logical slot shared with the live
+/// program. The probe publishes a same-ABI body edit after the capture, so a
+/// restored record that copied a backend body fails this test.
 /// The bitgun probe (`lambda_snapshot_probe.rock`, gated by BITGUN_LAMBDA_STATE)
 /// plants such a lambda plus a plain int counter it drives each tick.
 ///
@@ -2134,15 +2229,7 @@ fn lambda_counter(s: &serde_json::Value) -> i64 {
 /// trajectory observes the lambda's behavior instead.
 ///
 /// Vehicle is SCRUB, not plain RESTORE_AT: a backward scrub restores the nearest
-/// keyframe AND resims forward, invoking the restored lambda each resim tick;
-/// RESTORE_AT pauses immediately, so an uncallable copy (T2(a) without the
-/// setmetatable re-attach) would never be called and the break-verify in the
-/// plan's verification section could not fail. RED progression:
-///   - today: snapshot_take errors on the metatable reject -> record/replay exit
-///     nonzero -> run_replay_dump's success assert fails.
-///   - after T2(a) alone: the resim calls an uncallable table -> @update aborts
-///     mid-frame -> the counter stalls != reference.
-///   - green: only once T2(b) re-attaches __rock_fn_mt on the copy.
+/// keyframe AND resims forward, invoking the restored lambda after the edit.
 #[test]
 fn lambda_in_state_survives_keyframe_scrub() {
     let game = "bitgun";
@@ -2162,42 +2249,41 @@ fn lambda_in_state_survives_keyframe_scrub() {
         .expect("spawn record");
     assert!(rec.status.success(), "record failed: {}", String::from_utf8_lossy(&rec.stderr));
 
-    // Reference: the true tick-25 state with the lambda driving the counter from
-    // boot. (Cadence keyframe at tick 0 walks the record here too -- so today
-    // this run ALSO errors on the reject, which is fine: RED is RED.)
+    // Reference: the true tick-35 state, including the compatible body edit at
+    // tick 30.
     let reference = run_replay_dump(
         game, 60, &log_s,
-        &[
-            ("BITGUN_LAMBDA_STATE", "1"),
-            ("STONE_START_PAUSED", "1"), ("STONE_STEP_FRAMES", "25"),
-        ],
+        &[("BITGUN_LAMBDA_STATE", "1"), ("BITGUN_LAMBDA_STATE_EDIT", "1"),
+          ("STONE_START_PAUSED", "1"), ("STONE_STEP_FRAMES", "35")],
     );
-    assert_eq!(current_tick(&reference), 25, "reference must sit at tick 25");
+    assert_eq!(current_tick(&reference), 35, "reference must sit at tick 35");
 
-    // Scrub run: play to 40, scrub back to 25 -> restore keyframe 20 and resim
-    // 20..25 THROUGH the restored lambda record.
+    // Scrub run: play to 50, scrub back to 35 -> restore keyframe 20 and resim
+    // through the post-capture body edit at tick 30.
     let scrubbed = run_replay_dump(
         game, 60, &log_s,
         &[
             ("BITGUN_LAMBDA_STATE", "1"),
+            ("BITGUN_LAMBDA_STATE_EDIT", "1"),
             ("STONE_KEYFRAME_INTERVAL", "10"),
-            ("STONE_SCRUB_AT_TICK", "40"),
-            ("STONE_SCRUB_TO_TICK", "25"),
+            ("STONE_SCRUB_AT_TICK", "50"),
+            ("STONE_SCRUB_TO_TICK", "35"),
         ],
     );
-    assert_eq!(current_tick(&scrubbed), 25, "after scrubbing back to 25, current_tick must be 25");
+    assert_eq!(current_tick(&scrubbed), 35, "after scrubbing back to 35, current_tick must be 35");
 
     // The oracle: the lambda-driven counter must be non-trivial (the lambda
-    // actually ran) and match the plain run-to-25 exactly -- the restored lambda
-    // was callable and its capture isolated. NOT a comparison of the serialized
-    // lambda global (dump-state renders it "<function>" either way).
+    // actually ran) and match the plain run-to-35 exactly -- the restored lambda
+    // was callable, its capture isolated, and its slot saw the edit. NOT a
+    // comparison of the serialized lambda global (dump-state renders it
+    // "<function>" either way).
     let ref_counter = lambda_counter(&reference);
     let scrub_counter = lambda_counter(&scrubbed);
     assert!(ref_counter > 0, "reference lambda must have driven the counter (got {ref_counter})");
     assert_eq!(
         scrub_counter, ref_counter,
-        "post-scrub counter must match the plain run-to-25 (got {scrub_counter} vs {ref_counter}); \
-         a stalled counter means the restored lambda was uncallable (lost __rock_fn_mt)"
+        "post-scrub counter must match the plain run-to-35 (got {scrub_counter} vs {ref_counter}); \
+         a stalled counter means the restored CodeRef was uncallable or stale"
     );
 }
 

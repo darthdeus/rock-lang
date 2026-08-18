@@ -21,7 +21,8 @@ use skull_mir::lower::{
     BackendFnAbiPlan, ContainerFamily, ContainerPlan, ContainerStorage, GlobalPlan, RepArena,
     RepGuarantees,
     bound_next_shape_from_concrete, declared_boundary_class, boundary_requires_boxed_representation,
-    BoundaryClass, EnumLayout, EnumPlan, RepLayout, RepUse, RepUseFacts, ScalarCtx, ValueStorage,
+    BoundaryClass, EnumLayout, EnumPlan, RepLayout, RepUse, RepUseFacts, ScalarCtx,
+    ValueStorage, struct_field_plan,
 };
 use skull_mir::mir::FuncRef;
 use skull_mir::monoty::{MonoCtor, MonoTy};
@@ -137,7 +138,7 @@ fn a_concrete_generic_body_states_its_owned_abi() {
         .values()
         .find(|plan| plan.subject == *concrete_instance)
         .expect("the direct call must retain ident<V2>'s ABI plan");
-    assert_eq!(call, &spec, "the generic call must consume ident<V2>'s owned plan");
+    assert_eq!(call.as_ref(), &spec, "the generic call must consume ident<V2>'s owned plan");
 }
 
 /// The control: a non-generic declaration has exactly one emitted body, and the
@@ -176,13 +177,14 @@ fn main() {
     let v2 = scx.interner().intern(nominal("V2"));
     let plan = ConcreteBodyPlan {
         owner: ConcreteOwner::Function(Instance::base(sink)),
+        code_identity: Some(skull_mir::code_identity::CodeIdentity::Named(Instance::base(sink))),
         types: ConcreteTypeTables::default(),
         foreign_domains: Default::default(),
-        signature: ConcreteSignature {
+        signature: std::sync::Arc::new(ConcreteSignature {
             params: vec![v2],
             param_tuple_spelled: vec![false],
             result: Some(v2),
-        },
+        }),
         callees: Default::default(),
         callee_signatures: Default::default(),
         failed_sites: Default::default(),
@@ -211,22 +213,24 @@ fn main() { print("{generic_tuple_take((V2 { x: 1.0, y: 2.0 }, 3.0)).0.x}") }
     let take = func_ref(&ws, "generic_tuple_take");
     let v2_ty = nominal("V2");
     let tuple = scx.interner().intern(MonoTy::Tuple(vec![v2_ty, MonoTy::Float]));
+    let take_instance = Instance::intern(
+        scx.interner(),
+        take,
+        vec![MonoTy::Tuple(vec![MonoTy::App {
+            ctor: MonoCtor::Nominal(Ustr::from("V2")),
+            params: Vec::new(),
+        }])],
+    );
     let plan = ConcreteBodyPlan {
-        owner: ConcreteOwner::Function(Instance::intern(
-            scx.interner(),
-            take,
-            vec![MonoTy::Tuple(vec![MonoTy::App {
-                ctor: MonoCtor::Nominal(Ustr::from("V2")),
-                params: Vec::new(),
-            }])],
-        )),
+        owner: ConcreteOwner::Function(take_instance.clone()),
+        code_identity: Some(skull_mir::code_identity::CodeIdentity::Named(take_instance)),
         types: ConcreteTypeTables::default(),
         foreign_domains: Default::default(),
-        signature: ConcreteSignature {
+        signature: std::sync::Arc::new(ConcreteSignature {
             params: vec![tuple],
             param_tuple_spelled: vec![false],
             result: Some(tuple),
-        },
+        }),
         callees: Default::default(),
         callee_signatures: Default::default(),
         failed_sites: Default::default(),
@@ -243,13 +247,14 @@ fn main() { print("{generic_tuple_take((V2 { x: 1.0, y: 2.0 }, 3.0)).0.x}") }
     let written = func_ref(&ws, "written_tuple");
     let written_plan = ConcreteBodyPlan {
         owner: ConcreteOwner::Function(Instance::base(written)),
+        code_identity: Some(skull_mir::code_identity::CodeIdentity::Named(Instance::base(written))),
         types: ConcreteTypeTables::default(),
         foreign_domains: Default::default(),
-        signature: ConcreteSignature {
+        signature: std::sync::Arc::new(ConcreteSignature {
             params: vec![tuple],
             param_tuple_spelled: vec![true],
             result: Some(tuple),
-        },
+        }),
         callees: Default::default(),
         callee_signatures: Default::default(),
         failed_sites: Default::default(),
@@ -312,12 +317,12 @@ fn main() {
 
         assert_eq!(
             &owned,
-            body,
+            body.as_ref(),
             "body entry must consume the owned representation for {name}"
         );
         assert_eq!(
             &owned,
-            call,
+            call.as_ref(),
             "call and callee entry must consume one owned representation for {name}"
         );
         assert_eq!(
@@ -472,6 +477,38 @@ fn nested_opaque_tuple_elements_keep_one_physical_slot() {
     };
     assert_eq!(slots.len(), 2, "the outer tuple population must be nonzero");
     assert!(matches!(arena.get(slots[0]).layout(), RepLayout::Opaque));
+}
+
+#[test]
+fn a_representation_id_cannot_cross_build_arenas() {
+    let ws = ws_of("fn main() { print(\"ok\") }\n");
+    let left = RepArena::default();
+    let right = RepArena::default();
+    let left_id = left
+        .plan(
+            &ws,
+            bone_semantic::hir::FnBackend::Lua,
+            &MonoTy::Float,
+            RepUse::Value,
+            &RepUseFacts::default(),
+            RepGuarantees::default(),
+        )
+        .expect("the left arena must plan the primitive");
+    right
+        .plan(
+            &ws,
+            bone_semantic::hir::FnBackend::Lua,
+            &MonoTy::Float,
+            RepUse::Value,
+            &RepUseFacts::default(),
+            RepGuarantees::default(),
+        )
+        .expect("the right arena must have the same local shape");
+
+    assert!(
+        right.try_get(left_id).is_none(),
+        "a plan ID from another build must not be accepted by a catalog with the same local index"
+    );
 }
 
 #[test]
@@ -854,8 +891,10 @@ fn nominal_value_storage_is_owned_by_the_rep_plan() {
     assert_eq!(plan.value_storage(), Some(ValueStorage::GcTable));
     assert!(matches!(plan.layout(), RepLayout::Leaves(_)));
     assert_eq!(
-        arena.nominal_value_storage(&ws, bone_semantic::hir::FnBackend::Lua, Ustr::from("Boxed")),
-        Some(ValueStorage::GcTable)
+        arena
+            .nominal_value_storage_required(&ws, bone_semantic::hir::FnBackend::Lua, Ustr::from("Boxed"))
+            .expect("the required storage plan must exist"),
+        ValueStorage::GcTable
     );
 }
 
@@ -866,12 +905,14 @@ fn nominal_value_leaf_paths_are_owned_by_the_rep_plan() {
     );
     let arena = RepArena::default();
     assert_eq!(
-        arena.nominal_value_leaf_paths(
+        arena
+            .nominal_value_leaf_paths_required(
             &ws,
             bone_semantic::hir::FnBackend::Lua,
             Ustr::from("Boxed"),
-        ),
-        Some(vec![Ustr::from("child.x"), Ustr::from("child.y"), Ustr::from("tag")])
+        )
+        .expect("the required leaf-path plan must exist"),
+        vec![Ustr::from("child.x"), Ustr::from("child.y"), Ustr::from("tag")]
     );
 }
 
@@ -882,12 +923,14 @@ fn nominal_value_presence_flags_are_owned_by_the_rep_plan() {
     );
     let arena = RepArena::default();
     assert_eq!(
-        arena.nominal_value_leaf_presence_flags(
+        arena
+            .nominal_value_leaf_presence_flags_required(
             &ws,
             bone_semantic::hir::FnBackend::Lua,
             Ustr::from("Boxed"),
-        ),
-        Some(vec![true, false, false, false])
+        )
+        .expect("the required presence plan must exist"),
+        vec![true, false, false, false]
     );
 }
 
@@ -926,4 +969,119 @@ fn nominal_c_layout_is_owned_by_the_rep_plan() {
     );
     assert_eq!(size, 12);
     assert_eq!(align, 4);
+}
+
+#[test]
+fn nominal_c_layout_aligns_nested_fields_before_recurse() {
+    let ws = ws_of(
+        "value V2 { x: float, y: float }\n\
+         value V4 { x: float, y: float, z: float, w: float }\n\
+         value SpriteFragU {\
+             lights: bool, unlit: bool, count: int, ambient: V4,\
+             glow: bool, normal: bool, params: V2\
+         }",
+    );
+    let arena = RepArena::default();
+    let (leaves, size, align) = arena
+        .nominal_leaf_layout(
+            &ws,
+            bone_semantic::hir::FnBackend::Lua,
+            Ustr::from("SpriteFragU"),
+        )
+        .expect("the nested C layout must be representable");
+    assert_eq!(
+        leaves.iter().map(|leaf| (leaf.path, leaf.byte_off)).collect::<Vec<_>>(),
+        vec![
+            (Ustr::from("lights"), 0),
+            (Ustr::from("unlit"), 1),
+            (Ustr::from("count"), 4),
+            (Ustr::from("ambient.x"), 8),
+            (Ustr::from("ambient.y"), 12),
+            (Ustr::from("ambient.z"), 16),
+            (Ustr::from("ambient.w"), 20),
+            (Ustr::from("glow"), 24),
+            (Ustr::from("normal"), 25),
+            (Ustr::from("params.x"), 28),
+            (Ustr::from("params.y"), 32),
+        ]
+    );
+    assert_eq!(size, 36);
+    assert_eq!(align, 4);
+}
+
+#[test]
+fn shared_struct_field_plan_is_required_and_fail_closed() {
+    let mut ws = ws_of(
+        "struct Child { x: int }\n\
+         value Inner { x: int }\n\
+         value Outer { inner: Inner }\n\
+         nobox value N { x: int }\n\
+         struct Holder { embed child: Child?, n: N, direct: int, coroutine: Coroutine<int, int, int> }",
+    );
+    let holder = Ustr::from("Holder");
+    let child = Ustr::from("child");
+    let direct = Ustr::from("direct");
+    let plan = struct_field_plan(&ws, bone_semantic::hir::FnBackend::Lua, holder, child, false)
+        .expect("known struct field must have a plan");
+    assert_eq!(plan.inline_child(), Some(Ustr::from("Child")));
+    assert!(plan.nullable(), "the shared plan must retain field presence");
+    assert_eq!(
+        struct_field_plan(&ws, bone_semantic::hir::FnBackend::Lua, holder, Ustr::from("n"), false)
+            .expect("known nobox field must have a plan")
+            .inline_child(),
+        Some(Ustr::from("N"))
+    );
+    let direct_plan = struct_field_plan(&ws, bone_semantic::hir::FnBackend::Lua, holder, direct, false)
+        .expect("known primitive field must have a plan");
+    assert!(direct_plan.is_direct());
+    assert_eq!(direct_plan.direct_child(), None);
+    let nested_plan = struct_field_plan(
+        &ws,
+        bone_semantic::hir::FnBackend::Lua,
+        Ustr::from("Outer"),
+        Ustr::from("inner"),
+        false,
+    )
+    .expect("known direct child must have a plan");
+    assert!(nested_plan.is_direct());
+    assert_eq!(nested_plan.direct_child(), Some(Ustr::from("Inner")));
+    assert_eq!(
+        struct_field_plan(
+            &ws,
+            bone_semantic::hir::FnBackend::Lua,
+            holder,
+            Ustr::from("coroutine"),
+            false,
+        )
+        .expect("compiler-owned opaque nominal must have a direct plan")
+        .direct_child(),
+        Some(Ustr::from("Coroutine"))
+    );
+
+    let missing_struct = struct_field_plan(
+        &ws,
+        bone_semantic::hir::FnBackend::Lua,
+        Ustr::from("Missing"),
+        child,
+        false,
+    )
+    .expect_err("a missing parent struct must reject");
+    assert!(missing_struct.message.contains("struct `Missing`"), "{missing_struct}");
+
+    let missing_field = struct_field_plan(
+        &ws,
+        bone_semantic::hir::FnBackend::Lua,
+        holder,
+        Ustr::from("missing"),
+        false,
+    )
+    .expect_err("a missing field must reject");
+    assert!(missing_field.message.contains("field `missing`"), "{missing_field}");
+
+    let sid = *ws.struct_by_name.get(&holder).expect("holder declaration");
+    ws.modules[sid.module.index()].structs[sid.def].fields[0].ty =
+        bone_semantic::prelude::TyId::Local(comfy_la_arena::Idx::from_raw(comfy_la_arena::RawIdx::from(0)));
+    let unresolved = struct_field_plan(&ws, bone_semantic::hir::FnBackend::Lua, holder, child, false)
+        .expect_err("an unresolved field type must reject");
+    assert!(unresolved.message.contains("resolved type"), "{unresolved}");
 }

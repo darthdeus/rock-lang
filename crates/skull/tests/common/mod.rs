@@ -89,6 +89,39 @@ pub fn emit_module(src: &str) -> String {
     emit_mir(src).lua
 }
 
+/// Like [`try_emit_module`] but with `Workspace.comptime_inputs` set before
+/// emission -- the seam the host CLI uses for `build_var`/`embed_string`
+/// (docs/comptime-plan.md tier 1).
+pub fn try_emit_module_with(
+    src: &str,
+    inputs: bone_semantic::inference::ComptimeInputs,
+) -> Result<String, skull_parser::CompilerError> {
+    let mut modules = STDLIB.clone();
+    modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
+    let mut ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
+    assert_no_bone_errors(&ws);
+    ws.comptime_inputs = inputs;
+    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
+    skull::mir_emit::emit_workspace_mir(&ws, mid).map(|e| e.lua)
+}
+
+/// [`try_emit_module_with`] with a caller-chosen module FILE path -- for
+/// fixtures where embed resolution must see a real on-disk file location
+/// (package-relative embeds).
+pub fn try_emit_module_with_file(
+    src: &str,
+    file: &str,
+    inputs: bone_semantic::inference::ComptimeInputs,
+) -> Result<String, skull_parser::CompilerError> {
+    let mut modules = STDLIB.clone();
+    modules.push(skull_parser::parse_module_clean(src, Ustr::from(file)).expect("parse"));
+    let mut ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
+    assert_no_bone_errors(&ws);
+    ws.comptime_inputs = inputs;
+    let mid = *ws.module_ids.get(&Ustr::from(file)).expect("module id");
+    skull::mir_emit::emit_workspace_mir(&ws, mid).map(|e| e.lua)
+}
+
 /// Like [`emit_mir`] but surfaces the codegen `Result` (a rejection such as a
 /// reserved synthetic-name collision) instead of `.expect`ing success. Semantic
 /// errors still panic (a malformed test, not what these cases probe).
@@ -241,22 +274,7 @@ pub fn run_luajit(prog: &str, tag: &str) -> String {
     stdout.trim().to_string()
 }
 
-/// THE lock for the Stage-0e ablation mode, which is a process-global flag
-/// (`skull_mir::ablation`).
-///
-/// One lock for the whole test binary. Every `tests/*.rs` here is a `#[path]`
-/// module of `main.rs`, so a `static MODE` declared per file locks a DIFFERENT
-/// mutex -- two such files serialize against themselves and not against each
-/// other, which under `cargo test`'s threads is exactly no serialization at
-/// all. The flag then flips under a running test and one fixture's fatals land
-/// in another's census.
-static ABLATION_MODE: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-static INLINE_MODE: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-/// Hold the ablation mode for one test. `Drop` restores it even on a panicking
-/// assert, so a failing test cannot leave the flag on for the next one.
-pub struct AblationGuard(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
+pub struct AblationGuard(#[allow(dead_code)] skull_mir::ablation::Scope);
 
 impl AblationGuard {
     pub fn on() -> Self {
@@ -268,42 +286,14 @@ impl AblationGuard {
     }
 
     fn set(on: bool) -> Self {
-        // `into_inner` on poison: a test that panicked while holding this left
-        // the flag restored by `Drop` regardless, so the lock is still usable
-        // and refusing here would cascade one failure into every sibling.
-        let g = ABLATION_MODE.lock().unwrap_or_else(|e| e.into_inner());
-        skull_mir::ablation::clear();
-        skull_mir::ablation::set_enabled(on);
-        AblationGuard(g)
+        AblationGuard(skull_mir::ablation::scope(on))
     }
 }
 
-impl Drop for AblationGuard {
-    fn drop(&mut self) {
-        skull_mir::ablation::set_enabled(false);
-        skull_mir::ablation::clear();
-    }
-}
-
-pub struct InlineOffGuard(
-    #[allow(dead_code)] std::sync::MutexGuard<'static, ()>,
-    Option<String>,
-);
+pub struct InlineOffGuard(#[allow(dead_code)] skull_transform::InlineOffGuard);
 
 impl InlineOffGuard {
     pub fn on() -> Self {
-        let guard = INLINE_MODE.lock().unwrap_or_else(|e| e.into_inner());
-        let previous = std::env::var("SKULL_INLINE_OFF").ok();
-        unsafe { std::env::set_var("SKULL_INLINE_OFF", "1") };
-        InlineOffGuard(guard, previous)
-    }
-}
-
-impl Drop for InlineOffGuard {
-    fn drop(&mut self) {
-        match &self.1 {
-            Some(value) => unsafe { std::env::set_var("SKULL_INLINE_OFF", value) },
-            None => unsafe { std::env::remove_var("SKULL_INLINE_OFF") },
-        }
+        InlineOffGuard(skull_transform::inline_off_guard())
     }
 }

@@ -91,6 +91,7 @@ pub struct ShaderRejection {
 }
 
 /// One target's SHADER artifact.
+#[derive(Clone)]
 pub struct ShaderArtifactView {
     pub profile: GlslProfile,
     /// The entries this artifact registers, as instances of the shared graph.
@@ -161,7 +162,7 @@ pub fn realize_shader(
 ) -> Option<ShaderArtifactView> {
     let scx = skull_mir::lower::ScalarCtx::new_values_first_class(ws)
         .sharing(std::sync::Arc::clone(g.interner()));
-    realize_shader_with_context_and_compute(ws, g, req, &scx, &[])
+    realize_shader_with_context_and_compute(ws, g, req, &scx, &[], None)
 }
 
 /// Realize a shader view with the lowering context that shares the graph's
@@ -173,15 +174,22 @@ pub fn realize_shader_with_context(
     req: &ShaderArtifactRequest<'_>,
     scx: &skull_mir::lower::ScalarCtx,
 ) -> Option<ShaderArtifactView> {
-    realize_shader_with_context_and_compute(ws, g, req, scx, &[])
+    realize_shader_with_context_and_compute(ws, g, req, scx, &[], None)
 }
 
+/// `plans`: the build's own concrete-plan table when the caller has one (the
+/// emit drivers, which built it from the same graph moments earlier) -- the
+/// plans are a pure function of `(ws, graph)`, so sharing is identity-safe.
+/// `None` derives a fresh table here and is for STANDALONE tools only
+/// (shader-validate, `rock web`'s offline view, manifests); an emit path
+/// passing `None` is re-doing setup work it already paid for.
 pub fn realize_shader_with_context_and_compute(
     ws: &Workspace,
     g: &InstanceGraph,
     req: &ShaderArtifactRequest<'_>,
     scx: &skull_mir::lower::ScalarCtx,
     compute_programs: &[ComputeProgram],
+    plans: Option<Arc<skull_mir::concrete::ConcretePlans>>,
 ) -> Option<ShaderArtifactView> {
     // The typed axis value. A non-GLSL shader target packages no GLSL artifact
     // -- and says so by being absent here rather than by defaulting to a
@@ -232,7 +240,8 @@ pub fn realize_shader_with_context_and_compute(
     }
 
     let mut program_views = Vec::with_capacity(req.programs.len());
-    let concrete_plans = Arc::new(skull_graph::concrete_body::build(ws, g).plans);
+    let all_concrete_plans =
+        plans.unwrap_or_else(|| skull_graph::concrete_body::build(ws, g).plans);
     for program in req.programs {
         let entry_of = |r: FuncRef| -> Option<&Instance> {
             let key = DeclKey(skull_mir::lower::canonical_variant(ws, r));
@@ -257,20 +266,29 @@ pub fn realize_shader_with_context_and_compute(
                 ShaderStage::Fragment,
             ));
         }
+        let concrete_plans = Arc::new(skull_mir::concrete::select_concrete_plan_closure(
+            &all_concrete_plans,
+            stages.iter().flat_map(|stage| stage.retained.iter()),
+        ));
         program_views.push(ShaderProgramView {
             program: *program,
             stages,
-            concrete_plans: Arc::clone(&concrete_plans),
+            concrete_plans,
         });
     }
     let mut compute_views = Vec::with_capacity(compute_programs.len());
     for program in compute_programs {
         let key = DeclKey(skull_mir::lower::canonical_variant(ws, program.entry));
         if let Some(entry) = roots.iter().find(|instance| DeclKey(instance.func) == key) {
+            let stage = stage_view(ws, g, &edges, entry, ShaderStage::Compute);
+            let concrete_plans = Arc::new(skull_mir::concrete::select_concrete_plan_closure(
+                &all_concrete_plans,
+                stage.retained.iter(),
+            ));
             compute_views.push(ComputeProgramView {
                 program: *program,
-                stage: stage_view(ws, g, &edges, entry, ShaderStage::Compute),
-                concrete_plans: Arc::clone(&concrete_plans),
+                stage,
+                concrete_plans,
             });
         }
     }

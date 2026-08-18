@@ -179,7 +179,7 @@ impl Builder<'_> {
         let it_val = match info.iter.as_ref().map(|w| w.func) {
             Some((m, f)) => {
                 let iter_ref = FuncRef { module: m, func: f };
-                let repr = self.lower_expr_repr(iter_expr)?;
+                let bundle = self.lower_expr_repr(iter_expr)?;
                 // Resolved BEFORE the arguments are shaped, for the same reason
                 // the implicit-coercion form does it: the splat must match the
                 // body the call targets.
@@ -191,7 +191,7 @@ impl Builder<'_> {
                 } else {
                     crate::instance::Instance::base(iter_ref)
                 };
-                let args = self.iter_witness_args(&witness, repr)?;
+                let args = self.iter_witness_args(&witness, bundle)?;
                 // The `for` head's `iter` witness, not the head expression's
                 // own call: both live at one expression and share one span, so
                 // the operation is what keeps them distinguishable.
@@ -338,7 +338,7 @@ impl Builder<'_> {
             rest => RetSlot::Nested(TupleRetShape { slots: rest.to_vec(), nullable: false }),
         };
         let mut idx = 0;
-        self.bind_pattern_slot(vars, &elem_slot, &loads, &mut idx);
+        self.bind_pattern_slot(vars, &elem_slot, &loads, &mut idx)?;
         self.loop_targets.push((header, exit));
         self.lower_stmt_expr(body)?;
         self.loop_targets.pop();
@@ -499,8 +499,11 @@ impl Builder<'_> {
         // pairs-scan entities).
         let e_gen =
             self.emit_cur(Inst::Index { base: generations, index: idx, kind: ContainerKind::Vec });
+        let entity_representation = self.nominal_value_representation(Ustr::from("Entity"))?;
         let entity = self.emit_cur(Inst::MakeValueStruct {
             name: Ustr::from("Entity"),
+            representation: entity_representation,
+            form: ValueCtorForm::Declared,
             fields: vec![
                 (Ustr::from("_scene_id"), scene_id),
                 (Ustr::from("_arena_id"), arena_id),
@@ -515,7 +518,7 @@ impl Builder<'_> {
         let data = match column_elem {
             Some(elem) => {
                 let repr = self.column_element_repr(data, idx, elem)?;
-                self.pack(repr)
+                self.pack(repr.into_value())?
             }
             None => self.emit_cur(Inst::Index { base: data, index: idx, kind: ContainerKind::Vec }),
         };
@@ -615,7 +618,7 @@ impl Builder<'_> {
                 let slot = self.emit_cur(Inst::Load(val_cell));
                 let data = self.map_col_data(m);
                 let repr = self.column_element_repr(data, slot, elem)?;
-                Some(self.pack(repr))
+                Some(self.pack(repr.into_value())?)
             }
             None => None,
         };
@@ -786,10 +789,10 @@ impl Builder<'_> {
         let repr = self.loop_element_repr_at(arr_v, i_now, kind)?;
         match &split {
             // split: index already bound to i_cell; bind the element pattern.
-            Some((_, xpat)) => self.bind_loop_element_repr(xpat, repr),
+            Some((_, xpat)) => self.bind_loop_element_repr(xpat, repr)?,
             // single: bind the whole `(index, element)` tuple.
             None => {
-                let elem = self.pack(repr);
+                let elem = self.pack(repr)?;
                 let pair = self.emit_cur(Inst::MakeTuple(vec![i_now, elem]));
                 self.bind_for_pattern(vars, pair);
             }
@@ -827,7 +830,7 @@ impl Builder<'_> {
         // `for v in fv` over FlatVec: numeric loop bounded by the `len` FIELD
         // (not the buffer capacity), elements via the `buf` NativeBuffer.
         let (kind, arr_v, len_v) = if self.expr_is_flat_vec(iter) {
-            let kind = self.nb_kind(iter);
+            let kind = self.nb_kind(iter)?;
             let fv = self.lower_expr(iter)?;
             let buf = self.emit_cur(Inst::Field { base: fv, field: Ustr::from("buf") });
             let len = self.emit_cur(Inst::Field { base: fv, field: Ustr::from("len") });
@@ -898,11 +901,31 @@ impl Builder<'_> {
     /// so the absent elements would come back as a struct of nils rather than as
     /// `null`. SROA peels a redundant pack for the non-nullable case, which is
     /// why that one worked through the boxed bind; presence has no such recovery.
-    pub(crate) fn bind_loop_element_repr(&mut self, vars: &BindingPattern, repr: ValueRepr) {
+    pub(crate) fn bind_loop_element_repr(
+        &mut self,
+        vars: &BindingPattern,
+        repr: ValueRepr,
+    ) -> Result<(), CompilerError> {
         if let BindingPattern::Leaf(b) = vars {
-            if let Some(shape) = self.binding_ty(*b).and_then(|t| self.nobox_shape_of_ty(t)) {
+            if let Some(shape) = self
+                .binding_ty(*b)
+                .map(|t| self.nobox_shape_of_ty(t))
+                .transpose()?
+                .flatten()
+            {
                 let name = self.body.binding_arena[*b].name;
-                let leaves = self.repr_to_leaves(&repr, &shape);
+                let mono = self
+                    .binding_ty(*b)
+                    .and_then(|ty| self.concrete_ty_id(ty))
+                    .ok_or_else(|| self.gap_here("loop binding has no concrete representation"))?;
+                let representation = self.concrete_rep_id(
+                    &mono,
+                    RepUse::Value,
+                    false,
+                    true,
+                )?;
+                let bundle = ValueBundle::new(representation, repr);
+                let leaves = self.repr_to_leaves_bundle_for_shape(&bundle, &shape)?;
                 let cells: Vec<Idx<Cell>> = leaves
                     .iter()
                     .enumerate()
@@ -915,11 +938,12 @@ impl Builder<'_> {
                     })
                     .collect();
                 self.group_binds.insert(raw(*b), (cells, shape));
-                return;
+                return Ok(());
             }
         }
-        let value = self.pack(repr);
+        let value = self.pack(repr)?;
         self.bind_for_pattern(vars, value);
+        Ok(())
     }
 
     /// Bind a for-loop pattern to an element value: `Leaf` -> one cell; `Tuple`
@@ -969,7 +993,7 @@ impl Builder<'_> {
         slot: &RetSlot,
         values: &[Idx<Inst>],
         idx: &mut usize,
-    ) {
+    ) -> Result<(), CompilerError> {
         match (vars, slot) {
             (BindingPattern::Leaf(b), RetSlot::Leaves(shape)) => {
                 let n = shape.leaf_count();
@@ -981,7 +1005,7 @@ impl Builder<'_> {
                 if subs.len() == inner.slots.len() =>
             {
                 for (sub, s) in subs.iter().zip(inner.slots.clone()) {
-                    self.bind_pattern_slot(sub, &s, values, idx);
+                    self.bind_pattern_slot(sub, &s, values, idx)?;
                 }
             }
             // ONE name bound to a splatting tuple (`let (ok, x) = next(it)` in a
@@ -997,10 +1021,11 @@ impl Builder<'_> {
             }
             (vars, slot) => {
                 let r = self.slot_repr(slot, values, idx);
-                let v = self.pack(r);
+                let v = self.pack(r)?;
                 self.bind_for_pattern(vars, v);
             }
         }
+        Ok(())
     }
 
     /// Bind `b` to a value's LEAVES: one cell per leaf, registered in
@@ -1045,20 +1070,26 @@ impl Builder<'_> {
 
     /// Destructure a splatting tuple into `vars`. The elements arrive as flat
     /// slots, so an element that is a `nobox` value binds its leaves directly.
-    pub(crate) fn bind_tuple_repr(&mut self, vars: &BindingPattern, shape: &TupleRetShape, r: ValueRepr) {
-        let values = self.tuple_repr_to_slots(r, shape);
+    pub(crate) fn bind_tuple_repr(
+        &mut self,
+        vars: &BindingPattern,
+        shape: &TupleRetShape,
+        r: ValueRepr,
+    ) -> Result<(), CompilerError> {
+        let values = self.tuple_repr_to_slots(r, shape)?;
         let mut idx = 0;
         match vars {
             BindingPattern::Tuple(subs) if subs.len() == shape.slots.len() => {
                 for (sub, slot) in subs.iter().zip(shape.slots.clone()) {
-                    self.bind_pattern_slot(sub, &slot, &values, &mut idx);
+                    self.bind_pattern_slot(sub, &slot, &values, &mut idx)?;
                 }
             }
             _ => {
                 let r = self.tuple_from_slots(shape, &values, &mut idx);
-                let v = self.pack(r);
+                let v = self.pack(r)?;
                 self.bind_for_pattern(vars, v);
             }
         }
+        Ok(())
     }
 }

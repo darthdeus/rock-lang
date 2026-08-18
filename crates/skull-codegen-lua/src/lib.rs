@@ -36,14 +36,177 @@ use skull_mir::monoty::MonoInterner;
 
 pub use skull_mir::mangle::mangle_fn;
 
-/// The shared metatable of capturing-lambda env records
-/// (`docs/closure-env-records-plan.md`): a record `{ __fn = <top-level fn>,
-/// <captures> }` is callable as `f(...)` via `__call`. Reload-guarded so pre- and
-/// post-reload records share metatable identity. THE canonical definition -- both
-/// `skull::runtime_prelude` (the load-time scaffolding) and the codegen test
-/// harness reference this one constant, not a copy.
-pub const FN_MT_PRELUDE: &str =
-    "if not _G.__rock_fn_mt then _G.__rock_fn_mt = { __call = function(e, ...) return e.__fn(e, ...) end } end";
+/// Runtime support for callable CodeRefs and capturing environment records.
+/// Slots are mutated in place only by the publish step, so existing values see
+/// a compatible body edit while a failed stage leaves the previous body live.
+pub const FN_MT_PRELUDE: &str = r#"
+if not _G.__rock_code_slot_mt then
+  _G.__rock_code_slot_mt = { __call = function(s, ...) return s.current_body(...) end }
+end
+if not _G.__rock_code_slots then _G.__rock_code_slots = {} end
+function __rock_code_slot_ref(key)
+  local slot = _G.__rock_code_slots[key]
+  if (not slot or _G.__rock_definition_plan_materializing) and _G.__rock_code_slot_pending then
+    local staged = _G.__rock_code_slot_pending[key]
+    if staged then
+      local pending = _G.__rock_code_slot_pending_slots
+      local temporary = pending[key]
+      if not temporary then
+        temporary = setmetatable({
+          __rock_code_slot = true,
+          key = key, current_body = staged.body, abi = staged.abi
+        }, _G.__rock_code_slot_mt)
+        pending[key] = temporary
+      end
+      return temporary
+    end
+  end
+  if not slot then error("missing Rock code slot " .. key, 0) end
+  return slot
+end
+function __rock_code_slot_pending_ref(key)
+  local staged = _G.__rock_code_slot_pending and _G.__rock_code_slot_pending[key]
+  if staged then
+    local pending = _G.__rock_code_slot_pending_slots
+    local temporary = pending[key]
+    if not temporary then
+      temporary = setmetatable({
+        __rock_code_slot = true,
+        key = key, current_body = staged.body, abi = staged.abi
+      }, _G.__rock_code_slot_mt)
+      pending[key] = temporary
+    end
+    return temporary
+  end
+  return __rock_code_slot_ref(key)
+end
+function __rock_code_slot_begin()
+  if _G.__rock_state_transaction_begin then __rock_state_transaction_begin() end
+  _G.__rock_code_slot_pending = {}
+  _G.__rock_code_slot_pending_slots = {}
+  _G.__rock_definition_plan_materializing = false
+  _G.__rock_lifecycle_plan_pending = nil
+  _G.__rock_definition_plan_pending = nil
+end
+function __rock_code_slot_abort()
+  if _G.__rock_state_transaction_abort then __rock_state_transaction_abort() end
+  _G.__rock_code_slot_pending = nil
+  _G.__rock_code_slot_pending_slots = nil
+  _G.__rock_definition_plan_materializing = false
+  _G.__rock_lifecycle_plan_pending = nil
+  _G.__rock_definition_plan_pending = nil
+  local pending_wgpu = rawget(_G, "PENDING_WGPU_SHADER_SRCS")
+  if pending_wgpu then
+    for key in pairs(pending_wgpu) do pending_wgpu[key] = nil end
+  end
+end
+function __rock_code_slot_stage(key, body, abi)
+  local old = _G.__rock_code_slots[key]
+  if old and old.abi ~= abi then error("incompatible Rock code slot " .. key, 0) end
+  if not _G.__rock_code_slot_pending then error("Rock code slot stage not open", 0) end
+  _G.__rock_code_slot_pending[key] = { body = body, abi = abi }
+end
+function __rock_lifecycle_plan_stage(plan)
+  if not _G.__rock_code_slot_pending then error("Rock code slot stage not open", 0) end
+  _G.__rock_lifecycle_plan_pending = plan
+end
+function __rock_definition_plan_stage(plan)
+  if not _G.__rock_code_slot_pending then error("Rock code slot stage not open", 0) end
+  _G.__rock_definition_plan_pending = plan
+end
+function __rock_definition_plan_materialize(plan)
+  _G.__rock_definition_plan_materializing = true
+  for _, catalog in pairs(plan) do
+    if type(catalog) == "table" and catalog._data and catalog.len then
+      for i = 1, catalog.len do
+        local entry = catalog._data[i]
+        if entry and entry.factory ~= nil then
+          entry.definition = entry.factory()
+        end
+      end
+    end
+  end
+  _G.__rock_definition_plan_materializing = false
+  return plan
+end
+function __rock_code_slot_publish()
+  local definition_plan = _G.__rock_definition_plan_pending
+  if definition_plan ~= nil then
+    definition_plan = __rock_definition_plan_materialize(definition_plan)
+  end
+  local pending_wgpu = rawget(_G, "PENDING_WGPU_SHADER_SRCS")
+  if pending_wgpu and next(pending_wgpu) ~= nil then
+    local register_wgpu = rawget(_G, "stone_wgpu_renderer_register_pending")
+    if not register_wgpu then
+      register_wgpu = rawget(_G, "stone_wgpu_renderer_register_pending_ret_bool")
+    end
+    if not register_wgpu or not register_wgpu() then
+      error("WGPU shader registration did not complete", 0)
+    end
+    local publish_wgpu = rawget(_G, "stone_wgpu_renderer_publish_pending")
+    if not publish_wgpu then
+      publish_wgpu = rawget(_G, "stone_wgpu_renderer_publish_pending_ret_bool")
+    end
+    if publish_wgpu then
+      if not publish_wgpu() then error("WGPU shader registration did not complete", 0) end
+    else
+      error("WGPU shader registration did not complete", 0)
+    end
+  end
+  local stage = _G.__rock_code_slot_pending
+  if not stage then error("Rock code slot stage not open", 0) end
+  for key, staged in pairs(stage) do
+    local slot = _G.__rock_code_slots[key]
+    if slot then
+      slot.current_body = staged.body
+      slot.abi = staged.abi
+      local temporary = _G.__rock_code_slot_pending_slots[key]
+      if temporary then
+        temporary.current_body = staged.body
+        temporary.abi = staged.abi
+        _G.__rock_code_slots[key] = temporary
+      end
+    else
+      local pending = _G.__rock_code_slot_pending_slots
+      _G.__rock_code_slots[key] = pending[key] or setmetatable({
+          __rock_code_slot = true,
+          key = key, current_body = staged.body, abi = staged.abi
+        }, _G.__rock_code_slot_mt)
+    end
+  end
+  if _G.__rock_lifecycle_plan_pending ~= nil then
+    _G.__ROCK_LIFECYCLE_PLAN = _G.__rock_lifecycle_plan_pending
+  end
+  if definition_plan ~= nil then
+    _G.__ROCK_DEFINITION_PLAN = definition_plan
+  end
+  _G.__rock_code_slot_pending = nil
+  _G.__rock_code_slot_pending_slots = nil
+  _G.__rock_lifecycle_plan_pending = nil
+  _G.__rock_definition_plan_pending = nil
+  if _G.__rock_state_transaction_commit then __rock_state_transaction_commit() end
+end
+if not _G.__rock_fn_mt then
+  _G.__rock_fn_mt = {
+    __call = function(e, ...)
+      if not e.__slot then error("invalid Rock CodeRef environment", 0) end
+      return e.__slot.current_body(e, ...)
+    end
+  }
+end
+function __rock_code_ref_kind(v)
+  if type(v) ~= "table" then return nil end
+  if rawget(v, "__rock_code_slot") == true
+      and getmetatable(v) == _G.__rock_code_slot_mt then
+    return "slot"
+  end
+  if getmetatable(v) == _G.__rock_fn_mt then
+    local slot = rawget(v, "__slot")
+    if slot ~= nil and __rock_code_ref_kind(slot) == "slot" then return "env" end
+  end
+  return nil
+end
+"#;
 
 /// Lua shims for the checked Vec indexing helpers codegen emits
 /// (`__vec_checked_get`/`__vec_checked_set`). In real builds the stdlib
@@ -138,6 +301,18 @@ pub struct CodegenCtx {
     /// emit boundary. `Mutex` because `&CodegenCtx` is shared across rayon
     /// workers; contention is nil (a few per fn).
     rejections: Mutex<Vec<(String, CompilerError)>>,
+    /// Compiler-assigned Session slots for mutable globals.
+    state_slots: HashMap<ustr::Ustr, String>,
+}
+
+impl Clone for CodegenCtx {
+    fn clone(&self) -> Self {
+        Self {
+            reserved: self.reserved.clone(),
+            rejections: Mutex::new(self.rejections.lock().expect("rejection sink").clone()),
+            state_slots: self.state_slots.clone(),
+        }
+    }
 }
 
 /// True if `name` is an identifier skull emits as a bare LOCAL inside function
@@ -183,6 +358,10 @@ fn reserved_namespace_collision(name: &str, span: Span, sink: &mut Vec<(String, 
 
 impl CodegenCtx {
     pub fn new(ws: &Workspace) -> Self {
+        Self::new_with_state(ws, HashMap::default())
+    }
+
+    pub fn new_with_state(ws: &Workspace, state_slots: HashMap<ustr::Ustr, String>) -> Self {
         let mut reserved: HashMap<String, Span> = HashMap::default();
         let mut collisions: Vec<(String, CompilerError)> = Vec::new();
         for m in ws.modules.iter() {
@@ -200,7 +379,11 @@ impl CodegenCtx {
         // signatures mangling alike, or a mangled name equal to an exempt bare
         // name. Drained through the same sink as the synthetic-name collisions.
         collisions.extend(skull_mir::mangle::collision_errors(ws));
-        CodegenCtx { reserved, rejections: Mutex::new(collisions) }
+        CodegenCtx {
+            reserved,
+            rejections: Mutex::new(collisions),
+            state_slots,
+        }
     }
 
     /// Mint a compiler-reserved synthetic top-level Lua name: a hoisted lambda
@@ -241,17 +424,15 @@ impl CodegenCtx {
         sink.sort_by(|a, b| a.0.cmp(&b.0));
         sink.drain(..).next().map(|(_, e)| e)
     }
+
+    pub fn state_slot(&self, name: ustr::Ustr) -> Option<&str> {
+        self.state_slots.get(&name).map(String::as_str)
+    }
 }
 
 /// Cells REFERENCED (Load/Store/`MapNext` or multi-return dest) anywhere the top
-/// scope rooted at `entry` emits: its terminator-reachable blocks PLUS every
-/// inline-lambda sub-region nested within them (reached via `Inst::Lambda`
-/// entries, which a hook/defer body still renders inline). The declaration walk
-/// declares only these -- a hoisted lambda body is a full-arena clone whose dead
-/// enclosing/sibling regions would otherwise declare the WHOLE arena as inert
-/// locals (fatal past LuaJIT's 200-local parse cap on a large co-fn step;
-/// docs/closure-conversion-mir-plan.md S3). Complete by construction: `render_scope`
-/// emits exactly this block set, so every cell it references is included.
+/// scope rooted at `entry` emits. Hoisted closure bodies are separate ordinary
+/// MirFuncs, so the declaration walk only follows this function's CFG.
 fn referenced_cells_in_region(func: &MirFunc, entry: Idx<Block>) -> HashSet<Idx<Cell>> {
     let mut seen: HashSet<Idx<Block>> = HashSet::default();
     let mut stack = vec![entry];
@@ -269,11 +450,6 @@ fn referenced_cells_in_region(func: &MirFunc, entry: Idx<Block>) -> HashSet<Idx<
                 Inst::CallMulti { dests, .. }
                 | Inst::CallValueMulti { dests, .. }
                 | Inst::CallBoundMulti { dests, .. } => cells.extend(dests.iter().copied()),
-                Inst::Lambda { entry: le, .. } => {
-                    if seen.insert(*le) {
-                        stack.push(*le);
-                    }
-                }
                 _ => {}
             }
         }
@@ -286,9 +462,8 @@ fn referenced_cells_in_region(func: &MirFunc, entry: Idx<Block>) -> HashSet<Idx<
     cells
 }
 
-/// Every closure parameter cell in `func` (across all `Lambda` insts). The
-/// enclosing function must NOT declare these as locals — they are each closure's
-/// Lua `function(...)` argument list.
+/// Every closure parameter cell is owned by its nested Lua function rather
+/// than by the enclosing scope's local declaration.
 pub(crate) fn collect_lambda_params(func: &MirFunc) -> HashSet<Idx<Cell>> {
     let mut out = HashSet::default();
     for (_, inst) in func.insts.iter() {
@@ -323,7 +498,21 @@ pub fn emit_named(
     name: &str,
     func: &MirFunc,
 ) -> String {
-    emit_named_framed(ws, ctx, interner, name, func, None, None)
+    emit_named_with_statics(ws, ctx, interner, name, func, &[])
+}
+
+/// Emit a function whose static cells may be owned by an enclosing lowered
+/// function. Closure conversion moves the lambda body into a sibling function,
+/// while its static cell remains owned by the enclosing callable.
+pub fn emit_named_with_statics(
+    ws: &Workspace,
+    ctx: &CodegenCtx,
+    interner: &MonoInterner,
+    name: &str,
+    func: &MirFunc,
+    inherited_statics: &[StaticCell],
+) -> String {
+    emit_named_framed_with_statics(ws, ctx, interner, name, func, None, inherited_statics)
 }
 
 /// The coroutine state-table context: a `co fn`'s `__step` reads/writes its
@@ -333,16 +522,14 @@ pub fn emit_named(
 /// lambda-cell allocation bumps raw ids but never reorders the frame cells, so
 /// a slot -- and the layout stamp keyed on it -- is invariant under
 /// lambda-internal cell-count edits (the P2 finding in
-/// docs/coroutine-frame-lambda-plan.md). `hoist_lambdas` is true only for the
-/// step emission: lambdas hoist like non-frame ones, with frame captures
-/// collapsing to `s` (P1); the hook/defer emissions keep it false
-/// (mechanism 3, an all-cells frame with no plan).
+/// docs/coroutine-frame-lambda-plan.md). Lambdas are converted before emission;
+/// detached hook/defer regions are ordinary `MirFunc`s by the time they reach
+/// this printer.
 pub struct FrameCtx {
     pub s_cell: Idx<Cell>,
     pub fields: HashSet<Idx<Cell>>,
     /// Frame cell -> dense slot (`c<slot>` field name). Total over `fields`.
     pub slots: HashMap<Idx<Cell>, u32>,
-    pub hoist_lambdas: bool,
 }
 
 /// [`emit_named`] with an optional coroutine frame context (the `__step` fn).
@@ -351,9 +538,7 @@ pub struct FrameCtx {
 /// shared MIR pass) has already rewritten every reachable `Inst::Lambda` into a
 /// `MakeEnv` record / bare `Global` + a hoisted sibling `MirFunc` before emission
 /// (S3, docs/closure-conversion-mir-plan.md). So this fn only renders the given
-/// region; the sole surviving inline `Inst::Lambda` is a lambda nested in a co-fn
-/// hook/defer body (`FrameCtx::hoist_lambdas == false`, a detached region the pass
-/// leaves untouched), rendered by the inline arm in `emit_inst`.
+/// region.
 pub fn emit_named_framed(
     ws: &Workspace,
     ctx: &CodegenCtx,
@@ -361,18 +546,21 @@ pub fn emit_named_framed(
     name: &str,
     func: &MirFunc,
     frame: Option<&FrameCtx>,
-    // A hook/defer body is a detached region of the co-fn step: it lives in the
-    // step's own inst/cell/block arena, entered at its own block with `params =
-    // [s]`. This override renders exactly that region of the SHARED `func` instead
-    // of cloning the whole `MirFunc` just to swap `entry`/`params` (the clone
-    // deep-copied the entire arena per hook/defer). `None` uses `func`'s own
-    // entry/params. Everything else reads the shared arena, so a frame-field cell
-    // renders byte-identically to the pre-elision clone.
-    entry_override: Option<(Idx<Block>, &[Idx<Cell>])>,
 ) -> String {
-    let entry = entry_override.map_or_else(|| func.entry(), |(e, _)| e);
-    let params = entry_override.map_or(func.params.as_slice(), |(_, p)| p);
-    let lambda_params = collect_lambda_params(func);
+    emit_named_framed_with_statics(ws, ctx, interner, name, func, frame, &[])
+}
+
+fn emit_named_framed_with_statics(
+    ws: &Workspace,
+    ctx: &CodegenCtx,
+    interner: &MonoInterner,
+    name: &str,
+    func: &MirFunc,
+    frame: Option<&FrameCtx>,
+    inherited_statics: &[StaticCell],
+) -> String {
+    let entry = func.entry();
+    let params = func.params.as_slice();
     // Ordinary functions color cells (collapse them onto luajit's 200-local cap);
     // a coroutine `__step` keeps raw `c<raw>` names (frame-field naming depends on
     // the raw id), so it gets an empty map.
@@ -386,16 +574,67 @@ pub fn emit_named_framed(
     // def is emitted in THIS function's chunk (not shared scaffolding), so an
     // incremental body-edit overlay carries it; value structs are immutable, so
     // re-running the def on reload is a harmless no-op (no preservation guard).
-    record_leaf_form_violations(ws, ctx, func);
-    let (hoist, hoist_names, hoist_defs) = collect_const_hoists(ws, func, name);
+    record_representation_violations(ctx, func);
+    let (hoist, hoist_names, hoist_defs) = collect_const_hoists(ws, ctx, func, name);
+    let static_slots = static_slots_for(
+        ws,
+        interner,
+        func,
+        inherited_statics,
+        name,
+        ctx,
+    );
     let estimated_body_bytes = func.insts.len() * 24;
     let mut out =
         String::with_capacity(hoist_defs.len() + name.len() + 64 + estimated_body_bytes);
     out.push_str(&hoist_defs);
     let _ = write!(out, "function {}", name);
-    render_scope(ws, ctx, interner, func, entry, params, &lambda_params, true, frame, &cell_colors, &hoist, &hoist_names, &mut out);
+    render_scope(
+        ws,
+        ctx,
+        interner,
+        func,
+        entry,
+        params,
+        true,
+        frame,
+        &cell_colors,
+        &ctx.state_slots,
+        &static_slots,
+        &hoist,
+        &hoist_names,
+        &mut out,
+    );
     out.push('\n');
     out
+}
+
+fn static_slots_for(
+    ws: &Workspace,
+    interner: &MonoInterner,
+    func: &MirFunc,
+    inherited_statics: &[StaticCell],
+    name: &str,
+    ctx: &CodegenCtx,
+) -> HashMap<ustr::Ustr, String> {
+    let mut slots = HashMap::default();
+    for cell in inherited_statics.iter().chain(&func.statics) {
+        let (value, done) = match skull_mir::state_schema::static_cell_state_keys(ws, interner, cell) {
+            Ok(keys) => keys,
+            Err(error) => {
+                ctx.reject(name.to_string(), CompilerError::new_no_location(error.to_string()));
+                return HashMap::default();
+            }
+        };
+        if slots.insert(cell.cell, value).is_some() || slots.insert(cell.done_flag, done).is_some() {
+            ctx.reject(
+                name.to_string(),
+                CompilerError::new_no_location(format!("duplicate static state slot for `{}`", cell.cell)),
+            );
+            return HashMap::default();
+        }
+    }
+    slots
 }
 
 /// Whether every use of `cand` is a provably READ-ONLY consumer, so sharing one
@@ -405,7 +644,7 @@ pub fn emit_named_framed(
 /// including a new `Inst` variant -- disqualifies. The inverse (list the
 /// escaping consumers) would silently start sharing a mutable value the day the
 /// enum grows.
-fn const_hoist_uses_are_read_only(ws: &Workspace, func: &MirFunc, cand: Idx<Inst>) -> bool {
+fn const_hoist_uses_are_read_only(_ws: &Workspace, func: &MirFunc, cand: Idx<Inst>) -> bool {
     for (_, inst) in func.insts.iter() {
         let allowed = match inst {
             // A field/tuple projection and an equality test observe the value
@@ -417,15 +656,14 @@ fn const_hoist_uses_are_read_only(ws: &Workspace, func: &MirFunc, cand: Idx<Inst
             // field, and a `slot.f = v` into a NativeBuffer element writes bytes.
             // A TABLE destination (plain struct, GC-tier `<Name>_vt`, Vec element,
             // global, cell) stores the REFERENCE and is what aliases.
-            Inst::MakeValueStruct { name, fields }
-            | Inst::MaterializeValueStruct { name, fields } => {
+            Inst::MakeValueStruct { representation, fields, .. }
+            | Inst::MaterializeValueStruct { representation, fields, .. } => {
                 !fields.iter().any(|(_, v)| *v == cand)
                     || !matches!(
-                        skull_mir::lower::RepArena::default().nominal_value_storage(
-                            ws,
-                            bone_semantic::hir::FnBackend::Lua,
-                            *name,
-                        ),
+                        func.rep_arena
+                            .as_ref()
+                            .and_then(|arena| arena.try_get(*representation))
+                            .and_then(|plan| plan.value_storage()),
                         Some(
                             skull_mir::lower::ValueStorage::GcTable
                                 | skull_mir::lower::ValueStorage::LeafTable
@@ -461,60 +699,87 @@ fn const_hoist_uses_are_read_only(ws: &Workspace, func: &MirFunc, cand: Idx<Inst
 }
 
 
-/// Whether these ctor operands are the flattened LEAF form (dotted field names
-/// naming primitive leaves) rather than the declared-field form.
-///
-/// Deliberately NOT "some name contains a dot": the sequence must equal
-/// the owned representation plan EXACTLY. The ctor is positional, so a partially or
-/// wrongly flattened field list would emit silently against the wrong
-/// signature; requiring the canonical sequence turns that into a loud panic at
-/// emit instead -- the same fail-closed move the owned RepPlan C-layout check makes.
-fn is_leaf_form(fields: &[(ustr::Ustr, Idx<Inst>)]) -> bool {
-    fields.iter().any(|(n, _)| n.contains('.'))
+fn ctor_suffix(func: &MirFunc, representation: skull_mir::lower::RepId, form: ValueCtorForm) -> Option<&'static str> {
+    let arena = func.rep_arena.as_ref()?;
+    let plan = arena.try_get(representation)?;
+    Some(match form {
+        ValueCtorForm::Leaves => "_lct",
+        ValueCtorForm::Declared => match plan.value_storage() {
+            Some(skull_mir::lower::ValueStorage::GcTable) => "_vt",
+            Some(skull_mir::lower::ValueStorage::LeafTable) => "_lct",
+            Some(skull_mir::lower::ValueStorage::CData) | None => "_ct",
+        },
+    })
 }
 
-/// `Some(err)` if a flattened (dotted-field) ctor for `name` does not carry
-/// EXACTLY its canonical leaf sequence. The `_lct` ctor is positional, so a
-/// partial or reordered flattening would write one leaf's value into another
-/// with no diagnostic.
-///
-/// A violation is a compiler-invariant break rather than illegal user code, but
-/// it still REJECTS instead of panicking: this runs on every emit, and a panic
-/// takes `rock lsp serve` and `rock stone`'s watch loop down with a backtrace
-/// and no diagnostic. Twin of the JS emitter's check.
+/// Check a leaf-form constructor against the representation it carries.
+/// Callers supply the plan; this routine never reconstructs one from a name or
+/// from the punctuation of the operand keys.
 pub fn leaf_form_violation(
-    ws: &Workspace,
-    name: ustr::Ustr,
+    plan: &skull_mir::lower::RepPlan,
     got: &[ustr::Ustr],
 ) -> Option<CompilerError> {
-    let canonical = skull_mir::lower::RepArena::default()
-        .nominal_value_leaf_paths(ws, bone_semantic::hir::FnBackend::Lua, name)
-        .unwrap_or_default();
+    let Some(canonical) = plan.leaf_paths() else {
+        return Some(CompilerError::new_no_location(
+            "leaf-form constructor carries a non-leaf representation plan",
+        ));
+    };
     if got == canonical {
         return None;
     }
     Some(CompilerError::new_no_location(format!(
-        "`{name}` ctor carries dotted field names that are not its canonical leaf \
-         sequence: {got:?} vs {canonical:?}"
+            "leaf-form constructor does not match its canonical leaf plan: {got:?} vs {canonical:?}"
     )))
 }
 
-/// Every flattened value-struct ctor in `func`, checked against its canonical
-/// leaf sequence. Run once per emitted function, before rendering: the render
-/// path picks `_lct` off the dotted names alone and cannot itself reject.
-fn record_leaf_form_violations(ws: &Workspace, ctx: &CodegenCtx, func: &MirFunc) {
+/// Validate every plan-tagged constructor before rendering. A missing plan is
+/// an internal compiler error; it must reach the ordinary rejection sink rather
+/// than making emission recover a tier from a name or operand spelling.
+fn record_representation_violations(ctx: &CodegenCtx, func: &MirFunc) {
     for (_, inst) in func.insts.iter() {
-        let (Inst::MakeValueStruct { name, fields } | Inst::MaterializeValueStruct { name, fields }) =
-            inst
-        else {
+        let (name, representation, form, fields) = match inst {
+            Inst::MakeValueStruct { name, representation, form, fields }
+            | Inst::MaterializeValueStruct { name, representation, form, fields } => {
+                (*name, *representation, *form, fields)
+            }
+            _ => continue,
+        };
+        let Some(suffix) = ctor_suffix(func, representation, form) else {
+            ctx.reject(
+                name.to_string(),
+                CompilerError::new_no_location(format!(
+                    "`{name}` value constructor carries a representation plan that does not belong to this function's arena"
+                )),
+            );
             continue;
         };
-        if !is_leaf_form(fields) {
-            continue;
+        if matches!(form, ValueCtorForm::Leaves) {
+            let Some(plan) = func
+                .rep_arena
+                .as_ref()
+                .and_then(|arena| arena.try_get(representation))
+            else {
+                ctx.reject(
+                    name.to_string(),
+                    CompilerError::new_no_location(format!(
+                        "`{name}` leaf-form constructor has no leaf paths in its supplied plan"
+                    )),
+                );
+                continue;
+            };
+            let got: Vec<ustr::Ustr> = fields.iter().map(|(n, _)| *n).collect();
+            if let Some(mut error) = leaf_form_violation(&plan, &got) {
+                error.message = format!("`{name}` {}", error.message);
+                ctx.reject(name.to_string(), error);
+            }
         }
-        let got: Vec<ustr::Ustr> = fields.iter().map(|(n, _)| *n).collect();
-        if let Some(err) = leaf_form_violation(ws, *name, &got) {
-            ctx.reject(name.to_string(), err);
+        if suffix == "_lct" && matches!(form, ValueCtorForm::Declared) {
+            ctx.reject(
+                name.to_string(),
+                CompilerError::new_no_location(format!(
+                    "`{name}` declared-form constructor selects a leaf-table plan"
+                )),
+            );
         }
     }
 }
@@ -537,12 +802,11 @@ fn record_leaf_form_violations(ws: &Workspace, ctx: &CodegenCtx, func: &MirFunc)
 /// hoist existed.
 fn collect_const_hoists(
     ws: &Workspace,
+    ctx: &CodegenCtx,
     func: &MirFunc,
     base: &str,
 ) -> (HashMap<Idx<Inst>, u32>, Vec<String>, String) {
-    // The leaf-form flag rides with the group: a flattened all-const ctor must
-    // hoist against `_lct`, whose arity and signature differ from `_ct`.
-    let mut groups: Vec<(ustr::Ustr, Vec<Lit>, bool)> = Vec::new();
+    let mut groups: Vec<(ustr::Ustr, skull_mir::lower::RepId, ValueCtorForm, Vec<Lit>)> = Vec::new();
     let mut hoist: HashMap<Idx<Inst>, u32> = HashMap::default();
     // Only insts still REACHED BY A BLOCK. The arena keeps orphans (DCE unlinks
     // from blocks, it does not free), and hoisting one emits a module-scope ctor
@@ -554,7 +818,7 @@ fn collect_const_hoists(
         if !live.contains(&id) {
             continue;
         }
-        let Inst::MakeValueStruct { name, fields } = inst else {
+        let Inst::MakeValueStruct { name, representation, form, fields } = inst else {
             continue;
         };
         // An int->float-subsumed constant field (`IntToFloat(Const)`) is still a
@@ -575,11 +839,13 @@ fn collect_const_hoists(
         if !const_hoist_uses_are_read_only(ws, func, id) {
             continue;
         }
-        let leaf_form = is_leaf_form(fields);
-        let g = match groups.iter().position(|(n, l, lf)| *n == *name && *l == lits && *lf == leaf_form) {
+        let g = match groups
+            .iter()
+            .position(|(n, rep, ctor_form, l)| *n == *name && *rep == *representation && *ctor_form == *form && *l == lits)
+        {
             Some(p) => p as u32,
             None => {
-                groups.push((*name, lits, leaf_form));
+                groups.push((*name, *representation, *form, lits));
                 (groups.len() - 1) as u32
             }
         };
@@ -590,24 +856,16 @@ fn collect_const_hoists(
     }
     let mut names = Vec::with_capacity(groups.len());
     let mut defs = String::new();
-    for (g, (name, lits, leaf_form)) in groups.iter().enumerate() {
+    for (g, (name, representation, form, lits)) in groups.iter().enumerate() {
         let gname = format!("__skull_kc_{base}_{g}");
-        let suffix = if *leaf_form {
-            "_lct"
-        } else if matches!(
-            skull_mir::lower::RepArena::default().nominal_value_storage(
-                ws,
-                bone_semantic::hir::FnBackend::Lua,
-                *name,
-            ),
-            Some(
-                skull_mir::lower::ValueStorage::GcTable
-                    | skull_mir::lower::ValueStorage::LeafTable
-            )
-        ) {
-            "_vt"
-        } else {
-            "_ct"
+        let Some(suffix) = ctor_suffix(func, *representation, *form) else {
+            ctx.reject(
+                name.to_string(),
+                CompilerError::new_no_location(format!(
+                    "`{name}` constant constructor has no valid supplied representation plan"
+                )),
+            );
+            continue;
         };
         let _ = write!(defs, "{gname} = {name}{suffix}(");
         for (i, l) in lits.iter().enumerate() {
@@ -626,9 +884,9 @@ fn collect_const_hoists(
 /// state-table field `<s>.c<raw>`; everything else is its colored local
 /// (`c<color>`) or — when uncolored (a coroutine `__step`, passed an empty
 /// color map) — the raw `c<raw>`.
-fn cellname(frame: Option<&FrameCtx>, colors: &[u32], c: Idx<Cell>) -> String {
+fn cellname(func: &MirFunc, frame: Option<&FrameCtx>, colors: &[u32], c: Idx<Cell>) -> String {
     let mut s = String::new();
-    write_cellname(&mut s, frame, colors, c);
+    write_cellname(&mut s, func, frame, colors, c);
     s
 }
 
@@ -639,23 +897,29 @@ fn cellname(frame: Option<&FrameCtx>, colors: &[u32], c: Idx<Cell>) -> String {
 /// there); env-record captures and box `.v` access are now materialized as MIR
 /// `Field`/`StoreField` by `convert_closures`, so this fn no longer special-cases
 /// them.
-fn write_cellname(out: &mut String, frame: Option<&FrameCtx>, colors: &[u32], c: Idx<Cell>) {
+fn write_cellname(
+    out: &mut String,
+    func: &MirFunc,
+    frame: Option<&FrameCtx>,
+    colors: &[u32],
+    c: Idx<Cell>,
+) {
     if let Some(f) = frame {
         if f.fields.contains(&c) {
-            write_cellname(out, None, colors, f.s_cell);
+            write_cellname(out, func, None, colors, f.s_cell);
             out.push_str(".c");
             let slot = *f.slots.get(&c).expect("frame field cell must carry a dense slot");
             push_uint(out, slot);
             return;
         }
     }
-    write_cell_local(out, colors, c);
+    write_cell_local(out, func, colors, c);
 }
 
-fn write_cell_local(out: &mut String, colors: &[u32], c: Idx<Cell>) {
+fn write_cell_local(out: &mut String, func: &MirFunc, colors: &[u32], c: Idx<Cell>) {
     out.push('c');
     match colors[raw(c) as usize] {
-        u32::MAX => push_uint(out, raw(c)),
+        u32::MAX => push_uint(out, func.emit_cell_id(c)),
         col => push_uint(out, col),
     }
 }
@@ -891,7 +1155,7 @@ fn slot_sound(
 /// value operands only (operands are SSA — immutable once computed) with no read
 /// of mutable state (cell/global/heap) and no side effect. Excludes `Load`/
 /// `Global`/`Field`/`Index`/`Len`/`Call` (order-sensitive memory reads / effects)
-/// and `Lambda` (rendered as its own scope) — those keep their register.
+/// and closure records — those keep their register.
 /// The splice-able shape of an `inline(lua)` body (for `@inline` splicing).
 #[derive(Clone, Copy)]
 enum InlineLuaShape {
@@ -1098,13 +1362,8 @@ fn compute_inlinable(func: &MirFunc, scope: &[Idx<Block>]) -> Vec<bool> {
     inl
 }
 
-/// Render `function(<params>) <locals> <blocks> end` for a scope rooted at
-/// `entry` (the top function or a closure body), appending to `out` AFTER its
-/// already-written name. Values are colored over ONLY this scope's reachable
-/// blocks (a closure's values are independent of the enclosing scope; `r<n>`
-/// names shadow safely since only cells cross the boundary). `is_top` declares
-/// the function's cells (a closure declares none — its params are the arg list,
-/// captures/locals are enclosing upvalues).
+/// Render `function(<params>) <locals> <blocks> end` for the ordinary MIR
+/// function rooted at `entry`, appending to `out` after its name.
 #[allow(clippy::too_many_arguments)]
 fn render_scope(
     ws: &Workspace,
@@ -1113,13 +1372,11 @@ fn render_scope(
     func: &MirFunc,
     entry: Idx<Block>,
     params: &[Idx<Cell>],
-    lambda_params: &HashSet<Idx<Cell>>,
-    // `true` for a top-level fn (declares its cells); `false` for an inline
-    // hook/defer lambda body (shares the enclosing fn's cell namespace, declares
-    // nothing).
     is_top: bool,
     frame: Option<&FrameCtx>,
     cell_colors: &[u32],
+    state_slots: &HashMap<ustr::Ustr, String>,
+    static_slots: &HashMap<ustr::Ustr, String>,
     hoist: &HashMap<Idx<Inst>, u32>,
     hoist_names: &[String],
     out: &mut String,
@@ -1139,7 +1396,7 @@ fn render_scope(
         .iter()
         .map(|(&h, cl)| regalloc::LoopScope { header: h, region: cl.region.iter().copied().collect() })
         .collect();
-    loop_scopes.sort_by_key(|ls| raw(ls.header));
+    loop_scopes.sort_by_key(|ls| func.emit_block_id(ls.header));
     let mut va = regalloc::color_values(func, &rpo, &inlinable, &loop_scopes);
     if va.color_scope.len() > 150 && !loop_scopes.is_empty() {
         va = regalloc::color_values(func, &rpo, &inlinable, &[]);
@@ -1157,16 +1414,16 @@ fn render_scope(
             out.push_str(", ");
         }
         wrote_param = true;
-        write_cell_local(out, cell_colors, c);
+        write_cell_local(out, func, cell_colors, c);
     }
     out.push_str(")\n");
 
     for &c in params {
         if cell_is_uint(ws, func.cells[c].ty) {
             out.push_str("  ");
-            write_cell_local(out, cell_colors, c);
+            write_cell_local(out, func, cell_colors, c);
             out.push_str(" = ((");
-            write_cell_local(out, cell_colors, c);
+            write_cell_local(out, func, cell_colors, c);
             out.push_str(" % 4294967296) + 4294967296) % 4294967296\n");
         }
     }
@@ -1213,7 +1470,7 @@ fn render_scope(
             .collect();
         let mut seen_color: HashSet<u32> = HashSet::default();
         for (cid, _) in func.cells.iter() {
-            if param_cells.contains(&cid) || lambda_params.contains(&cid) || is_frame(&cid) || !referenced.contains(&cid) {
+            if param_cells.contains(&cid) || is_frame(&cid) || !referenced.contains(&cid) {
                 continue;
             }
             let (decl, col) = match cell_colors[raw(cid) as usize] {
@@ -1231,7 +1488,7 @@ fn render_scope(
             out.push('c');
             match col {
                 Some(col) => push_uint(out, col),
-                None => push_uint(out, raw(cid)),
+                None => push_uint(out, func.emit_cell_id(cid)),
             }
         }
     }
@@ -1253,7 +1510,6 @@ fn render_scope(
         colors,
         color_scope,
         cell_colors,
-        lambda_params,
         frame,
         loops: &loops,
         rpo: &rpo,
@@ -1261,6 +1517,8 @@ fn render_scope(
         emitted: vec![false; func.blocks.len()],
         hoist,
         hoist_names,
+        state_slots,
+        static_slots,
     };
     for &bb in &rpo {
         em.emit_block(out, bb); // self-skips an already-emitted block (loop body)
@@ -1280,11 +1538,11 @@ pub fn mangled(ws: &Workspace, r: FuncRef) -> String {
 /// The Lua local name for a value: its register `r<color>` (colored values) or
 /// the raw `v<raw>` fallback (an uncolored value — should not occur once every
 /// value is colored, but keeps the printer total).
-fn write_vname(out: &mut String, colors: &[u32], id: Idx<Inst>) {
+fn write_vname(out: &mut String, func: &MirFunc, colors: &[u32], id: Idx<Inst>) {
     match colors[raw(id) as usize] {
         u32::MAX => {
             out.push('v');
-            push_uint(out, raw(id));
+            push_uint(out, func.emit_inst_id(id));
         }
         c => {
             out.push('r');
@@ -1310,7 +1568,6 @@ struct Emitter<'a> {
     /// get their `local` line inside the `for` block ([`Self::expand_for`]).
     color_scope: Vec<Option<Idx<Block>>>,
     cell_colors: &'a [u32],
-    lambda_params: &'a HashSet<Idx<Cell>>,
     frame: Option<&'a FrameCtx>,
     /// Recognized counted loops, keyed by header — a goto into an un-emitted
     /// header expands a structured `for`.
@@ -1330,16 +1587,25 @@ struct Emitter<'a> {
     hoist: &'a HashMap<Idx<Inst>, u32>,
     /// `group -> global name` for [`Self::hoist`].
     hoist_names: &'a [String],
+    state_slots: &'a HashMap<ustr::Ustr, String>,
+    static_slots: &'a HashMap<ustr::Ustr, String>,
 }
 
 impl Emitter<'_> {
+    fn state_slot(&self, name: ustr::Ustr) -> Option<&str> {
+        self.state_slots
+            .get(&name)
+            .or_else(|| self.static_slots.get(&name))
+            .map(String::as_str)
+    }
+
     fn emit_block(&mut self, out: &mut String, bb: Idx<Block>) {
         if self.emitted[raw(bb) as usize] {
             return; // already emitted (e.g. as a loop body block)
         }
         self.emitted[raw(bb) as usize] = true;
         out.push_str("  ::bb");
-        push_uint(out, raw(bb));
+        push_uint(out, self.func.emit_block_id(bb));
         out.push_str("::\n");
         let insts: &[Idx<Inst>] = &self.func.blocks[bb].insts;
         for &id in insts {
@@ -1369,10 +1635,10 @@ impl Emitter<'_> {
         let (slot, inclusive, body_entry, latch, exit) =
             (cl.slot, cl.inclusive, cl.body_entry, cl.latch, cl.exit);
         let region: HashSet<Idx<Block>> = cl.region.iter().copied().collect();
-        let slot_name = cellname(self.frame, self.cell_colors, slot);
+        let slot_name = cellname(self.func, self.frame, self.cell_colors, slot);
         let hi = match &cl.hi {
             HiLimit::Value(v) => self.opnd_str(*v),
-            HiLimit::Cell(c) => cellname(self.frame, self.cell_colors, *c),
+            HiLimit::Cell(c) => cellname(self.func, self.frame, self.cell_colors, *c),
         };
         let limit = if inclusive { hi } else { format!("{hi} - 1") };
 
@@ -1412,11 +1678,11 @@ impl Emitter<'_> {
         // loop-done edge (header's false branch).
         self.emitted[raw(latch) as usize] = true;
         out.push_str("  ::bb");
-        push_uint(out, raw(latch));
+        push_uint(out, self.func.emit_block_id(latch));
         out.push_str("::\n");
         out.push_str("  end\n");
         out.push_str("  goto bb");
-        push_uint(out, raw(exit));
+        push_uint(out, self.func.emit_block_id(exit));
         out.push('\n');
     }
 
@@ -1442,7 +1708,7 @@ impl Emitter<'_> {
         let inst = &self.func.insts[id];
         if inst.produces_value() {
             out.push_str("  ");
-            write_vname(out, &self.colors, id);
+            write_vname(out, self.func, &self.colors, id);
             out.push_str(" = ");
             self.write_value(out, id, inst);
             out.push('\n');
@@ -1507,7 +1773,7 @@ impl Emitter<'_> {
         // A `Call`/`Index` value is never tree-folded here (`always_inlinable`
         // excludes them), so `result` has a register.
         let mut lv = String::new();
-        write_vname(&mut lv, &self.colors, result);
+        write_vname(&mut lv, self.func, &self.colors, result);
 
         out.push_str("  do\n");
         for (p, a) in callee.param_decls.iter().zip(args.iter()) {
@@ -1550,7 +1816,7 @@ impl Emitter<'_> {
             self.write_value(out, id, &self.func.insts[id]);
             out.push(')');
         } else {
-            write_vname(out, &self.colors, id);
+            write_vname(out, self.func, &self.colors, id);
         }
     }
 
@@ -1581,8 +1847,20 @@ impl Emitter<'_> {
     fn write_value(&self, out: &mut String, id: Idx<Inst>, inst: &Inst) {
         match inst {
             Inst::Const(l) => write_lit(out, l),
-            Inst::Global(g) => out.push_str(g.as_str()),
-            Inst::Load(c) => write_cellname(out, self.frame, self.cell_colors, *c),
+            Inst::Global(g) => {
+                if let Some(identity) = self.func.code_value_identities.get(&id) {
+                    out.push_str("__rock_code_slot_ref(");
+                    out.push_str(&lua_string(&identity.logical_key(self.ws, self.interner)));
+                    out.push(')');
+                } else if let Some(slot) = self.state_slot(*g) {
+                    out.push_str("__rock_active_session.__rock_state[");
+                    out.push_str(&lua_string(slot));
+                    out.push(']');
+                } else {
+                    out.push_str(g.as_str());
+                }
+            }
+            Inst::Load(c) => write_cellname(out, self.func, self.frame, self.cell_colors, *c),
 
             Inst::IntAdd(a, b) | Inst::FloatAdd(a, b) => self.write_bin(out, "+", a, b),
             Inst::IntSub(a, b) | Inst::FloatSub(a, b) => self.write_bin(out, "-", a, b),
@@ -1590,8 +1868,8 @@ impl Emitter<'_> {
             Inst::UintAdd(a, b) => self.write_u32_bin(out, "+", a, b),
             Inst::UintSub(a, b) => self.write_u32_bin(out, "-", a, b),
             Inst::UintMul(a, b) => self.write_u32_mul(out, a, b),
-            // int `/` is floor-division (rock semantics); float `/` is real.
-            Inst::IntDiv(a, b) => {
+            // Integer `/` is floor-division (rock semantics); float `/` is real.
+            Inst::IntDiv(a, b) | Inst::UintDiv(a, b) => {
                 out.push_str("math.floor(");
                 self.write_opnd(out, *a);
                 out.push_str(" / ");
@@ -1600,13 +1878,6 @@ impl Emitter<'_> {
             }
             Inst::FloatDiv(a, b) => self.write_bin(out, "/", a, b),
             Inst::IntMod(a, b) | Inst::FloatMod(a, b) => self.write_bin(out, "%", a, b),
-            Inst::UintDiv(a, b) => {
-                out.push_str("math.floor(");
-                self.write_opnd(out, *a);
-                out.push_str(" / ");
-                self.write_opnd(out, *b);
-                out.push(')');
-            }
             Inst::UintMod(a, b) => self.write_u32_bin(out, "%", a, b),
             Inst::StringConcat(a, b) => {
                 // Emit the whole inlinable concat tree as ONE flat `..` run
@@ -1653,11 +1924,12 @@ impl Emitter<'_> {
             // the inner value's expression verbatim (identity). Reached only if a
             // pass ever materializes one; the operand path (`write_opnd`) folds it
             // away. `write_value` (not `write_opnd`) to avoid a double wrap.
-            Inst::IntToFloat(x) => self.write_value(out, *x, &self.func.insts[*x]),
-            Inst::UintToFloat(x) => self.write_value(out, *x, &self.func.insts[*x]),
-            Inst::IntToUint(x) => self.write_checked_u32(out, *x, "uint conversion out of range"),
-            Inst::FloatToUint(x) => self.write_checked_u32(out, *x, "uint conversion out of range"),
-            Inst::UintToInt(x) => self.write_value(out, *x, &self.func.insts[*x]),
+            Inst::IntToFloat(x) | Inst::UintToFloat(x) | Inst::UintToInt(x) => {
+                self.write_value(out, *x, &self.func.insts[*x])
+            }
+            Inst::IntToUint(x) | Inst::FloatToUint(x) => {
+                self.write_checked_u32(out, *x, "uint conversion out of range")
+            }
             Inst::UintBitcastInt(x) => {
                 out.push_str("(((");
                 self.write_opnd(out, *x);
@@ -1669,14 +1941,18 @@ impl Emitter<'_> {
                 out.push_str(") % 4294967296)");
             }
 
-            Inst::IntLt(a, b) | Inst::FloatLt(a, b) => self.write_bin(out, "<", a, b),
-            Inst::IntLeq(a, b) | Inst::FloatLeq(a, b) => self.write_bin(out, "<=", a, b),
-            Inst::IntGt(a, b) | Inst::FloatGt(a, b) => self.write_bin(out, ">", a, b),
-            Inst::IntGeq(a, b) | Inst::FloatGeq(a, b) => self.write_bin(out, ">=", a, b),
-            Inst::UintLt(a, b) => self.write_bin(out, "<", a, b),
-            Inst::UintLeq(a, b) => self.write_bin(out, "<=", a, b),
-            Inst::UintGt(a, b) => self.write_bin(out, ">", a, b),
-            Inst::UintGeq(a, b) => self.write_bin(out, ">=", a, b),
+            Inst::IntLt(a, b) | Inst::UintLt(a, b) | Inst::FloatLt(a, b) => {
+                self.write_bin(out, "<", a, b)
+            }
+            Inst::IntLeq(a, b) | Inst::UintLeq(a, b) | Inst::FloatLeq(a, b) => {
+                self.write_bin(out, "<=", a, b)
+            }
+            Inst::IntGt(a, b) | Inst::UintGt(a, b) | Inst::FloatGt(a, b) => {
+                self.write_bin(out, ">", a, b)
+            }
+            Inst::IntGeq(a, b) | Inst::UintGeq(a, b) | Inst::FloatGeq(a, b) => {
+                self.write_bin(out, ">=", a, b)
+            }
             Inst::Eq(a, b) => self.write_bin(out, "==", a, b),
             Inst::NotEq(a, b) => self.write_bin(out, "~=", a, b),
 
@@ -1729,19 +2005,8 @@ impl Emitter<'_> {
                 self.write_csv(out, args);
                 out.push(')');
             }
-            Inst::Lambda { params, entry } => {
-                // The ONLY `Inst::Lambda` that reaches codegen is one nested inside
-                // a co-fn hook/defer body (`FrameCtx::hoist_lambdas == false`): the
-                // shared pass leaves that detached region untouched, so the lambda
-                // renders inline `function(<params>) <body> end` (a sanctioned
-                // exception -- the mechanism-1 pocket, docs/coroutine-frame-lambda-plan.md
-                // D5, pinned by `cofn_lambda_in_defer_body`). Captured cells are
-                // frame fields (`c<s>.c<slot>`) handled by the all-cells aux
-                // FrameCtx; the body declares nothing (`is_top = false`). Every
-                // other lambda was already converted to a `MakeEnv` / `Global` +
-                // hoisted sibling by `convert_closures`.
-                out.push_str("function");
-                render_scope(self.ws, self.ctx, self.interner, self.func, *entry, params, self.lambda_params, false, self.frame, self.cell_colors, self.hoist, self.hoist_names, out);
+            Inst::Lambda { .. } => {
+                unreachable!("residual Inst::Lambda reached Lua emission")
             }
 
             Inst::MakeTuple(vs) => {
@@ -1809,46 +2074,16 @@ impl Emitter<'_> {
                 }
                 out.push('}');
             }
-            Inst::MakeValueStruct { name, fields }
-            | Inst::MaterializeValueStruct { name, fields } => {
-                // Positional ctor in declared field order; field names are for MIR
-                // passes only (SROA), not the wire shape. The ctor NAME is chosen
-                // by tier from the ONE classification: `_vt` (table) for a
-                // GC-carrying value struct, `_ct` (cdata) for an FFI-clean one.
-                //
-                // A leaf-table struct is decided by TYPE, ahead of any operand
-                // check: it has no declared-field ctor at all (the prelude emits
-                // only `_lct` for it), and its pack site is unconditionally leaf
-                // form. Asking the operands instead reads the same oracle through
-                // a proxy that does not hold -- a nullable child with no data
-                // leaves contributes one leaf keyed on the field's own name, so
-                // the leaf sequence is textually identical to the declared field
-                // list and no operand-shape test can tell them apart.
-                let suffix = if matches!(
-                    skull_mir::lower::RepArena::default().nominal_value_storage(
-                        self.ws,
-                        bone_semantic::hir::FnBackend::Lua,
-                        *name,
-                    ),
-                    Some(skull_mir::lower::ValueStorage::LeafTable)
-                ) {
-                    "_lct"
-                } else if is_leaf_form(fields) {
-                    "_lct"
-                } else if matches!(
-                    skull_mir::lower::RepArena::default().nominal_value_storage(
-                        self.ws,
-                        bone_semantic::hir::FnBackend::Lua,
-                        *name,
-                    ),
-                    Some(
-                        skull_mir::lower::ValueStorage::GcTable
-                            | skull_mir::lower::ValueStorage::LeafTable
-                    )
-                ) {
-                    "_vt"
-                } else {
-                    "_ct"
+            Inst::MakeValueStruct { name, representation, form, fields }
+            | Inst::MaterializeValueStruct { name, representation, form, fields } => {
+                let Some(suffix) = ctor_suffix(self.func, *representation, *form) else {
+                    self.ctx.reject(
+                        name.to_string(),
+                        CompilerError::new_no_location(format!(
+                            "`{name}` value constructor has no valid supplied representation plan"
+                        )),
+                    );
+                    return;
                 };
                 let _ = write!(out, "{name}{suffix}(");
                 for (i, (_, id)) in fields.iter().enumerate() {
@@ -1895,7 +2130,7 @@ impl Emitter<'_> {
                 out.push('}');
             }
 
-            Inst::FfiNewArray { ctype, count } => {
+            Inst::FfiNewArray { ctype, count, .. } => {
                 let _ = write!(out, "ffi.new(\"{ctype}[?]\", ");
                 self.write_opnd(out, *count);
                 out.push(')');
@@ -1970,17 +2205,23 @@ impl Emitter<'_> {
             // The shared closure-conversion pass (`skull_transform::convert_closures`)
             // materializes a capturing lambda as an env record and a shared mutable
             // capture as a box, both as `MakeEnv`. `fn_ref = Some(name)` is a
-            // callable record `setmetatable({ __fn = name, c<raw> = .., .. },
+            // callable record `setmetatable({ __slot = ..., c<raw> = .., .. },
             // __rock_fn_mt)` (invoked via `__call`); `fn_ref = None` is a box `{}`
             // / `{ v = <seed> }`. Field access (`e.c<raw>`, `.v`) already flows
             // through `Inst::Field`/`Inst::StoreField`. EVERY servable path (ordinary
             // fns AND the coroutine step, S2+S3) now routes through the pass, so
-            // `MakeEnv` is the only closure shape codegen sees -- the sole surviving
-            // `Inst::Lambda` is a lambda nested in a hook/defer body (rendered inline).
+            // `MakeEnv` is the only capturing closure shape codegen sees.
             Inst::MakeEnv { fn_ref, fields } => match fn_ref {
-                Some(name) => {
-                    out.push_str("setmetatable({ __fn = ");
-                    out.push_str(name.as_str());
+                Some(_name) => {
+                    out.push_str("setmetatable({ ");
+                    let identity = self
+                        .func
+                        .code_value_identities
+                        .get(&id)
+                        .expect("Rock closure MakeEnv missing compiler-owned CodeRef identity");
+                    out.push_str("__slot = __rock_code_slot_ref(");
+                    out.push_str(&lua_string(&identity.logical_key(self.ws, self.interner)));
+                    out.push(')');
                     for (f, v) in fields {
                         out.push_str(", ");
                         out.push_str(f.as_str());
@@ -2127,7 +2368,7 @@ impl Emitter<'_> {
         match inst {
             Inst::Store { cell, value } => {
                 out.push_str("  ");
-                write_cellname(out, self.frame, self.cell_colors, *cell);
+                write_cellname(out, self.func, self.frame, self.cell_colors, *cell);
                 out.push_str(" = ");
                 self.write_opnd(out, *value);
                 out.push('\n');
@@ -2187,9 +2428,19 @@ impl Emitter<'_> {
                 }
             }
             Inst::StoreGlobal { name, value } => {
-                let _ = write!(out, "  {name} = ");
-                self.write_opnd(out, *value);
-                out.push('\n');
+                if let Some(slot) = self.state_slot(*name) {
+                    out.push_str("  __rock_active_session.__rock_state[");
+                    out.push_str(&lua_string(slot));
+                    out.push_str("] = ");
+                    self.write_opnd(out, *value);
+                    out.push_str("\n  __rock_active_session.__rock_initialized[");
+                    out.push_str(&lua_string(slot));
+                    out.push_str("] = true\n");
+                } else {
+                    let _ = write!(out, "  {name} = ");
+                    self.write_opnd(out, *value);
+                    out.push('\n');
+                }
             }
             Inst::ArrayPush { arr, value, kind } => {
                 // `arr` is referenced up to 4x; render it once.
@@ -2220,9 +2471,9 @@ impl Emitter<'_> {
                 table,
             } => {
                 // `key_cell` is referenced twice; render it once.
-                let k = cellname(self.frame, self.cell_colors, *key_cell);
+                let k = cellname(self.func, self.frame, self.cell_colors, *key_cell);
                 let _ = write!(out, "  {k}, ");
-                write_cellname(out, self.frame, self.cell_colors, *val_cell);
+                write_cellname(out, self.func, self.frame, self.cell_colors, *val_cell);
                 let _ = write!(out, " = next(");
                 self.write_opnd(out, *table);
                 let _ = writeln!(out, ", {k})");
@@ -2235,7 +2486,7 @@ impl Emitter<'_> {
                     if i > 0 {
                         out.push_str(", ");
                     }
-                    write_cellname(out, self.frame, self.cell_colors, *c);
+                    write_cellname(out, self.func, self.frame, self.cell_colors, *c);
                 }
                 let callee = self.callee_name(id, *func);
                 let _ = write!(out, " = {callee}(");
@@ -2250,7 +2501,7 @@ impl Emitter<'_> {
                     if i > 0 {
                         out.push_str(", ");
                     }
-                    write_cellname(out, self.frame, self.cell_colors, *c);
+                    write_cellname(out, self.func, self.frame, self.cell_colors, *c);
                 }
                 out.push_str(" = ");
                 self.write_opnd(out, *callee);
@@ -2281,7 +2532,7 @@ impl Emitter<'_> {
             }
             Term::Goto(b) => {
                 out.push_str("  goto bb");
-                push_uint(out, raw(*b));
+                push_uint(out, self.func.emit_block_id(*b));
                 out.push('\n');
             }
             Term::Branch {
@@ -2292,9 +2543,9 @@ impl Emitter<'_> {
                 out.push_str("  if ");
                 self.write_opnd(out, *cond);
                 out.push_str(" then goto bb");
-                push_uint(out, raw(*then_bb));
+                push_uint(out, self.func.emit_block_id(*then_bb));
                 out.push_str(" else goto bb");
-                push_uint(out, raw(*else_bb));
+                push_uint(out, self.func.emit_block_id(*else_bb));
                 out.push_str(" end\n");
             }
             Term::Switch {
@@ -2311,16 +2562,16 @@ impl Emitter<'_> {
                     let _ = write!(out, "  {kw} {d} == ");
                     write_lit(out, l);
                     out.push_str(" then goto bb");
-                    push_uint(out, raw(*b));
+                    push_uint(out, self.func.emit_block_id(*b));
                     out.push('\n');
                 }
                 if first {
                     out.push_str("  goto bb");
-                    push_uint(out, raw(*default));
+                    push_uint(out, self.func.emit_block_id(*default));
                     out.push('\n');
                 } else {
                     out.push_str("  else goto bb");
-                    push_uint(out, raw(*default));
+                    push_uint(out, self.func.emit_block_id(*default));
                     out.push_str(" end\n");
                 }
             }

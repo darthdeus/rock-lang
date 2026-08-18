@@ -25,9 +25,19 @@
 
 use bone_semantic::hir::TyId;
 use comfy_la_arena::{Arena, Idx};
+use std::sync::Arc;
+use std::time::Instant;
 use ustr::Ustr;
 
 pub const VEC_COLUMN_HEADER_FIELD: &str = "@vec";
+
+/// Physical constructor spelling selected by lowering.  This is part of the
+/// plan identity; backends must not infer it from field names or operands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ValueCtorForm {
+    Declared,
+    Leaves,
+}
 pub const VEC_COLUMN_REPR: &str = "columns";
 /// The PRESENCE column of a `[E?]` whose `E` is `nobox`: one bool per slot,
 /// leading the leaf columns exactly as the presence leaf leads a nullable
@@ -50,6 +60,26 @@ pub fn column_elem_plans(mf: &MirFunc, out: &mut std::collections::BTreeMap<Ustr
     }
     for nf in &mf.nested_fns {
         column_elem_plans(nf, out);
+    }
+}
+
+/// The same census with the build-owned representation identity retained for
+/// consumers that emit or inspect the physical columns.
+pub fn column_elem_rep_plans(
+    mf: &MirFunc,
+    out: &mut std::collections::BTreeMap<Ustr, (bool, crate::lower::RepId)>,
+) {
+    for inst in mf.insts.values() {
+        match inst {
+            Inst::MakeVecColumns { elem, nobox, representation, .. }
+            | Inst::MakeVecColumnHeader { elem, nobox, representation, .. } => {
+                out.insert(*elem, (*nobox, *representation));
+            }
+            _ => {}
+        }
+    }
+    for nf in &mf.nested_fns {
+        column_elem_rep_plans(nf, out);
     }
 }
 
@@ -131,13 +161,21 @@ pub enum ContainerKind {
 /// because it decides the column SET (a nullable element leads with
 /// [`VEC_COLUMN_PRESENCE_FIELD`]) — reading it back off an expression's type at
 /// a use site would be the phantom-presence bug.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug)]
 pub struct ColumnElem {
     pub name: Ustr,
     pub nullable: bool,
     representation: crate::lower::RepId,
     nobox: bool,
 }
+
+impl PartialEq for ColumnElem {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name && self.nullable == other.nullable && self.nobox == other.nobox
+    }
+}
+
+impl Eq for ColumnElem {}
 
 impl ColumnElem {
     pub(crate) fn planned(
@@ -402,6 +440,7 @@ pub enum Inst {
     /// length `len`, in the element's declaration order.
     MakeVecColumns {
         elem: Ustr,
+        representation: crate::lower::RepId,
         nobox: bool,
         columns: Vec<(Ustr, Vec<Idx<Inst>>)>,
         len: usize,
@@ -412,6 +451,7 @@ pub enum Inst {
     /// header shape.
     MakeVecColumnHeader {
         elem: Ustr,
+        representation: crate::lower::RepId,
         nobox: bool,
         capacity: Idx<Inst>,
     },
@@ -429,6 +469,11 @@ pub enum Inst {
     /// type lookup.
     MakeValueStruct {
         name: Ustr,
+        /// The build-owned representation that selected this constructor's
+        /// physical form. Backends must realize this plan, never replan from
+        /// `name` or the operand spelling.
+        representation: crate::lower::RepId,
+        form: ValueCtorForm,
         /// `(declared field name, value)` in declared field order (the `<name>_ct`
         /// ctor is positional, so order is load-bearing; the names let MIR passes
         /// forward a `Field` read to its operand -- SROA). Nested value-struct
@@ -454,6 +499,10 @@ pub enum Inst {
     /// the `nobox` verifier ignores this variant.
     MaterializeValueStruct {
         name: Ustr,
+        /// The same physical plan as the implicit constructor, retained even
+        /// though this node records an authorized materialization boundary.
+        representation: crate::lower::RepId,
+        form: ValueCtorForm,
         fields: Vec<(Ustr, Idx<Inst>)>,
     },
     /// An enum-variant value as a tagged table `{ __variant, __ty, <payload> }`.
@@ -483,7 +532,7 @@ pub enum Inst {
     /// Produced by `skull_transform::convert_closures` (the shared
     /// closure-conversion pass), NEVER by lowering. Two shapes:
     ///   - `fn_ref = Some(name)` is a callable RECORD -- a capturing lambda's
-    ///     value: `{ __fn = <name>, c<A> = .. }`, invoked through the target's
+    ///     value: `{ __slot = <CodeRef>, c<A> = .. }`, invoked through the target's
     ///     `__call` convention (Lua `setmetatable({..}, __rock_fn_mt)`, JS the
     ///     `__rock_call` dispatch helper). A capture-FREE lambda is a bare
     ///     [`Inst::Global`] instead (no record, no alloc).
@@ -502,7 +551,13 @@ pub enum Inst {
     /// elements of C type `ctype` (an FFI-clean value struct's cdef name, or
     /// `int`/`float`). Emitted only by the `native_buffer_alloc<T>` intrinsic,
     /// which resolves `ctype` from the concrete element type at the call site.
-    FfiNewArray { ctype: Ustr, count: Idx<Inst> },
+    FfiNewArray {
+        ctype: Ustr,
+        count: Idx<Inst>,
+        /// Aggregate element allocations carry the plan used to validate
+        /// their C layout. Primitive arrays have no nominal plan.
+        representation: Option<crate::lower::RepId>,
+    },
 
     /// `ffi.cast("<cty>*", <ptr>)` -- a typed LEAF VIEW over a NativeBuffer's
     /// storage, one per distinct primitive C type among the element's leaves.
@@ -706,31 +761,107 @@ impl Default for Block {
 
 /// A `static` local's synthesized storage: a private global cell + a done-flag,
 /// discovered during lowering and surfaced to `skull::mir_emit` for the
-/// hot-reload preservation preamble + `__rock_known_globals` registration. The
+/// compiler-owned StateSchema and per-Session initializer reset. The
 /// in-body first-reach guard is emitted inline (see `Builder::lower_static`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct StaticCell {
     pub cell: Ustr,
     pub done_flag: Ustr,
-    /// Rendered type -- half the `__rock_known_globals` key (reset on mismatch).
+    /// Source binding name and declaration ordinal are the logical identity
+    /// within the owning callable; synthesized cell names are realization only.
+    pub logical_name: Ustr,
+    pub ordinal: u32,
+    /// Rendered type, included in the logical static layout fingerprint.
     pub type_str: String,
-    /// Content hash of the initializer expression -- the other half of the key,
-    /// so editing the initializer resets + re-inits the cell on the next reload.
+    /// Content hash of the initializer expression, so editing the initializer
+    /// resets + re-inits the cell on the next reload.
     /// Stable across edits ELSEWHERE in the body (hashes names / literals, not
     /// arena indices).
     pub init_hash: u64,
+    /// The compiler-owned callable identity that owns this static. This is
+    /// metadata for StateSchema; the emitted cell name is only a realization.
+    pub owner: Option<crate::code_identity::CodeIdentity>,
+    /// Source site of the static declaration. It is stable under body edits and
+    /// independent of lowering traversal order.
+    pub site: Option<crate::code_identity::LambdaSiteId>,
 }
 
+/// Emission identities for a dense arena whose source had unreachable entries
+/// removed. Physical indices remain dense for MIR and backend side tables; these
+/// identities preserve the old arena order at the output boundary.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EmitIds {
+    pub insts: Vec<u32>,
+    pub cells: Vec<u32>,
+    pub blocks: Vec<u32>,
+    pub forced_cells: Vec<u32>,
+    pub forced_cell_blocks: Vec<u32>,
+    pub next_insts: u32,
+    pub next_cells: u32,
+    pub next_blocks: u32,
+}
+
+/// One comptime input a lowered body baked in (docs/comptime-plan.md tier 1):
+/// which input, and the hash of the value that went into the emitted code.
+/// bone hashes only source text, so incremental invalidation must compare
+/// these against the CURRENT inputs itself -- a body with a stale read is a
+/// body edit.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ComptimeRead {
+    pub input: ComptimeInputId,
+    pub value_hash: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum ComptimeInputId {
+    /// `build_var("NAME")` -- the declared var's name.
+    Var(Ustr),
+    /// `embed_string("path")` -- the path literal, project-root-relative.
+    File(Ustr),
+}
+
+/// The one hash both the recorder and the staleness check use, so they cannot
+/// drift (std `DefaultHasher`, the `StaticCell.init_hash` precedent).
+pub fn comptime_value_hash(value: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    value.hash(&mut h);
+    h.finish()
+}
 /// A function — a CFG over cells and values. `params` are the entry block's
 /// parameter *cells* in order (params are variables, hence cells); they
 /// materialize as the Lua function parameters.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MirFunc {
     pub name: Ustr,
+    /// Compiler-owned identity of the callable body, when this MIR is a
+    /// concrete Rock function or a closure/nested-function sibling.
+    pub code_identity: Option<crate::code_identity::CodeIdentity>,
+    /// Canonical ABI witness used to build `code_compatibility` after closure
+    /// conversion. It contains no backend symbol or build-local RepId.
+    pub code_abi_fingerprint: Option<String>,
+    /// Function-value ABI witnesses keyed by the pre-conversion lambda inst.
+    pub lambda_abi_fingerprints:
+        bone_semantic::prelude::FxHashMap<Idx<Inst>, String>,
+    /// Concrete logical target for each named function-value mint.
+    pub code_value_identities:
+        bone_semantic::prelude::FxHashMap<Idx<Inst>, crate::code_identity::CodeIdentity>,
+    /// Identities of source-named nested functions keyed by their hoisted
+    /// backend spelling. The spelling is only the lookup key during lowering;
+    /// the stored value remains compiler-owned.
+    pub nested_fn_identities:
+        bone_semantic::prelude::FxHashMap<Ustr, crate::code_identity::CodeIdentity>,
+    pub code_compatibility: Option<crate::code_identity::CodeCompatibility>,
+    /// The build-owned representation catalog used by every plan-tagged value
+    /// constructor in this function and its nested functions.
+    pub rep_arena: Option<Arc<crate::lower::RepArena>>,
     pub params: Vec<Idx<Cell>>,
+    /// Opt-in timing for arena growth attribution.
+    pub lower_timing_enabled: bool,
+    pub lower_attribution: crate::lower::LowerAttribution,
     /// The concrete function representation consumed by entry binding and
     /// return lowering. Calls retain the same plan in `call_abi_plans`.
-    pub abi_plan: Option<crate::lower::BackendFnAbiPlan>,
+    pub abi_plan: Option<crate::lower::BackendFnAbiPlanHandle>,
     /// The owned function representation for bodies without an `Instance`,
     /// notably hoisted nested functions. Such a body still has a concrete ABI;
     /// it just has no graph-owned top-level instance to wrap in
@@ -740,9 +871,19 @@ pub struct MirFunc {
     pub global_plan: Option<crate::lower::GlobalPlan>,
     /// `static` cells declared in this fn's body (in source order).
     pub statics: Vec<StaticCell>,
+    /// Comptime inputs this body's emitted code baked in (build_var /
+    /// embed_string expansions), for incremental staleness detection.
+    pub comptime_reads: Vec<ComptimeRead>,
+    /// Nominal structs whose declared logical shape is observed by runtime
+    /// reflection even when no Rock constructor realizes the value.
+    pub struct_registry_roots: std::collections::BTreeSet<Ustr>,
     pub insts: Arena<Inst>,
     pub cells: Arena<Cell>,
     pub blocks: Arena<Block>,
+    pub emit_ids: Option<EmitIds>,
+    /// Cell liveness observed by cleanup in source-only, unreachable blocks of
+    /// an inline template. These roots replace copying those dead block loads.
+    pub inline_cleanup_load_cells: Vec<Idx<Cell>>,
     pub entry: Idx<Block>,
     /// `Some` for a `co fn`: the cell `yield e` evaluates to (the next
     /// `resume(arg)` value). The coroutine transform makes it the `__step`'s
@@ -811,7 +952,7 @@ pub struct MirFunc {
     /// beside identity because reconstructing it from a later, possibly mutated
     /// owner would make an ABI corruption look self-consistent.
     pub call_abi_plans:
-        bone_semantic::prelude::FxHashMap<Idx<Inst>, crate::lower::BackendFnAbiPlan>,
+        bone_semantic::prelude::FxHashMap<Idx<Inst>, crate::lower::BackendFnAbiPlanHandle>,
     /// The owned function-type representation used by an indirect call. A
     /// function value has no declaration `Instance`, so its physical signature
     /// is carried directly beside the `CallValue`/`CallValueMulti` instruction.
@@ -887,14 +1028,27 @@ impl MirFunc {
         let entry = blocks.alloc(Block::new());
         Self {
             name,
+            code_identity: None,
+            code_abi_fingerprint: None,
+            lambda_abi_fingerprints: Default::default(),
+            code_value_identities: Default::default(),
+            nested_fn_identities: Default::default(),
+            code_compatibility: None,
+            rep_arena: None,
             params: Vec::new(),
+            lower_timing_enabled: crate::lower::lower_attribution_timing_enabled(),
+            lower_attribution: Default::default(),
             abi_plan: None,
             abi_representation: None,
             global_plan: None,
             statics: Vec::new(),
+            comptime_reads: Vec::new(),
+            struct_registry_roots: Default::default(),
             insts: Arena::default(),
             cells: Arena::default(),
             blocks,
+            emit_ids: None,
+            inline_cleanup_load_cells: Vec::new(),
             entry,
             is_coroutine: false,
             resume_arg: None,
@@ -925,12 +1079,30 @@ impl MirFunc {
     /// first store). Use [`Self::new_cell_typed`] at a binding site with a
     /// declared/inferred type.
     pub fn new_cell(&mut self, name: Option<Ustr>) -> Idx<Cell> {
-        self.cells.alloc(Cell { name, loop_binding: false, ty: None, nonnull_value_struct: false })
+        let capacity = self.cells.capacity();
+        let start = self.lower_timing_enabled.then(Instant::now);
+        let id = self.cells.alloc(Cell { name, loop_binding: false, ty: None, nonnull_value_struct: false });
+        self.record_new_cell();
+        if self.cells.capacity() != capacity {
+            self.lower_attribution.mir_cell_reallocations += 1;
+            self.lower_attribution.mir_cell_reallocation_ns +=
+                start.map(|start| start.elapsed().as_nanos() as u64).unwrap_or_default();
+        }
+        id
     }
 
     /// Allocate a fresh variable cell carrying bone's type for the binding.
     pub fn new_cell_typed(&mut self, name: Option<Ustr>, ty: Option<TyId>) -> Idx<Cell> {
-        self.cells.alloc(Cell { name, loop_binding: false, ty, nonnull_value_struct: false })
+        let capacity = self.cells.capacity();
+        let start = self.lower_timing_enabled.then(Instant::now);
+        let id = self.cells.alloc(Cell { name, loop_binding: false, ty, nonnull_value_struct: false });
+        self.record_new_cell();
+        if self.cells.capacity() != capacity {
+            self.lower_attribution.mir_cell_reallocations += 1;
+            self.lower_attribution.mir_cell_reallocation_ns +=
+                start.map(|start| start.elapsed().as_nanos() as u64).unwrap_or_default();
+        }
+        id
     }
 
     /// Tag a cell as a `for`-desugaring loop binding (DESUGAR PROVENANCE; see
@@ -947,17 +1119,147 @@ impl MirFunc {
 
     /// Allocate a fresh (empty, `Unreachable`-terminated) block.
     pub fn new_block(&mut self) -> Idx<Block> {
-        self.blocks.alloc(Block::new())
+        let capacity = self.blocks.capacity();
+        let start = self.lower_timing_enabled.then(Instant::now);
+        let id = self.blocks.alloc(Block::new());
+        self.record_new_block();
+        if self.blocks.capacity() != capacity {
+            self.lower_attribution.mir_block_reallocations += 1;
+            self.lower_attribution.mir_block_reallocation_ns +=
+                start.map(|start| start.elapsed().as_nanos() as u64).unwrap_or_default();
+        }
+        id
     }
 
     /// Allocate an instruction and append it to `block`; return its id (=value).
     pub fn emit(&mut self, block: Idx<Block>, inst: Inst) -> Idx<Inst> {
+        let capacity = self.insts.capacity();
+        let start = self.lower_timing_enabled.then(Instant::now);
         let id = self.insts.alloc(inst);
+        self.record_new_inst();
+        if self.insts.capacity() != capacity {
+            self.lower_attribution.mir_instruction_reallocations += 1;
+            self.lower_attribution.mir_instruction_reallocation_ns +=
+                start.map(|start| start.elapsed().as_nanos() as u64).unwrap_or_default();
+        }
         self.blocks[block].insts.push(id);
+        id
+    }
+
+    pub fn alloc_inst(&mut self, inst: Inst) -> Idx<Inst> {
+        let id = self.insts.alloc(inst);
+        self.record_new_inst();
         id
     }
 
     pub fn set_term(&mut self, block: Idx<Block>, term: Term) {
         self.blocks[block].term = term;
+    }
+
+    pub fn ensure_emit_ids(&mut self) {
+        if self.emit_ids.is_none() {
+            self.emit_ids = Some(EmitIds {
+                insts: (0..self.insts.len()).map(|id| id as u32).collect(),
+                cells: (0..self.cells.len()).map(|id| id as u32).collect(),
+                blocks: (0..self.blocks.len()).map(|id| id as u32).collect(),
+                forced_cells: Vec::new(),
+                forced_cell_blocks: Vec::new(),
+                next_insts: self.insts.len() as u32,
+                next_cells: self.cells.len() as u32,
+                next_blocks: self.blocks.len() as u32,
+            });
+        }
+    }
+
+    pub fn emit_inst_id(&self, id: Idx<Inst>) -> u32 {
+        self.emit_ids
+            .as_ref()
+            .map_or(u32::from(id.into_raw()), |ids| ids.insts[u32::from(id.into_raw()) as usize])
+    }
+
+    pub fn emit_cell_id(&self, id: Idx<Cell>) -> u32 {
+        self.emit_ids
+            .as_ref()
+            .map_or(u32::from(id.into_raw()), |ids| ids.cells[u32::from(id.into_raw()) as usize])
+    }
+
+    pub fn emit_block_id(&self, id: Idx<Block>) -> u32 {
+        self.emit_ids
+            .as_ref()
+            .map_or(u32::from(id.into_raw()), |ids| ids.blocks[u32::from(id.into_raw()) as usize])
+    }
+
+    pub fn emit_inst_span(&self) -> u32 {
+        self.emit_ids.as_ref().map_or(self.insts.len() as u32, |ids| ids.next_insts)
+    }
+
+    pub fn emit_cell_span(&self) -> u32 {
+        self.emit_ids.as_ref().map_or(self.cells.len() as u32, |ids| ids.next_cells)
+    }
+
+    pub fn emit_block_span(&self) -> u32 {
+        self.emit_ids.as_ref().map_or(self.blocks.len() as u32, |ids| ids.next_blocks)
+    }
+
+    pub fn emit_nexts(&self) -> Option<(u32, u32, u32)> {
+        self.emit_ids.as_ref().map(|ids| (ids.next_insts, ids.next_cells, ids.next_blocks))
+    }
+
+    pub fn set_emit_nexts(&mut self, nexts: (u32, u32, u32)) {
+        let ids = self.emit_ids.as_mut().expect("emit identities must be enabled");
+        ids.next_insts = nexts.0;
+        ids.next_cells = nexts.1;
+        ids.next_blocks = nexts.2;
+    }
+
+    pub fn alloc_cell_with_emit_id(&mut self, cell: Cell, emit_id: u32) -> Idx<Cell> {
+        let id = self.cells.alloc(cell);
+        self.emit_ids
+            .as_mut()
+            .expect("emit identities must be enabled")
+            .cells
+            .push(emit_id);
+        id
+    }
+
+    pub fn alloc_inst_with_emit_id(&mut self, inst: Inst, emit_id: u32) -> Idx<Inst> {
+        let id = self.insts.alloc(inst);
+        self.emit_ids
+            .as_mut()
+            .expect("emit identities must be enabled")
+            .insts
+            .push(emit_id);
+        id
+    }
+
+    pub fn alloc_block_with_emit_id(&mut self, emit_id: u32) -> Idx<Block> {
+        let id = self.blocks.alloc(Block::new());
+        self.emit_ids
+            .as_mut()
+            .expect("emit identities must be enabled")
+            .blocks
+            .push(emit_id);
+        id
+    }
+
+    fn record_new_inst(&mut self) {
+        if let Some(ids) = &mut self.emit_ids {
+            ids.insts.push(ids.next_insts);
+            ids.next_insts += 1;
+        }
+    }
+
+    fn record_new_cell(&mut self) {
+        if let Some(ids) = &mut self.emit_ids {
+            ids.cells.push(ids.next_cells);
+            ids.next_cells += 1;
+        }
+    }
+
+    fn record_new_block(&mut self) {
+        if let Some(ids) = &mut self.emit_ids {
+            ids.blocks.push(ids.next_blocks);
+            ids.next_blocks += 1;
+        }
     }
 }

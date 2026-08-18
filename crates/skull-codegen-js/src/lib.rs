@@ -218,22 +218,157 @@ function __map_next(m, k) {
 "#;
 
 /// The uniform indirect-call dispatch helper (`docs/closure-conversion-mir-plan.md`):
-/// a fn value is either a raw JS function (a named fn / capture-free hoisted
-/// lambda, referenced by global name) or a closure ENV RECORD `{ __fn, .. }`
-/// (a capturing lambda, built by `convert_closures`). `__rock_call` invokes both
-/// -- a function directly, a record through its `__fn(record, ...)` -- so every
-/// `CallValue` emits `__rock_call(f, ...args)`. Prepend to any emitted program
-/// that calls a fn value. (The Lua path uses a `__call` metatable instead; JS
-/// objects carry no metatable, so the dispatch is explicit here.)
+/// Rock values are reusable slot objects, and capturing records carry a slot
+/// plus their captures. Raw JS functions remain an explicit foreign boundary.
 pub const JS_CALL_HELPER: &str = r#"
+var __rock_code_slots = Object.create(null);
+var __rock_code_slot_stage = null;
+function __rock_code_slot_ref(key) {
+  var slot = __rock_code_slots[key];
+  if ((!slot || __rock_definition_plan_materializing) && __rock_code_slot_stage !== null) {
+    var staged = __rock_code_slot_stage[key];
+    if (staged) {
+      var temporary = __rock_code_slot_pending_slots[key];
+      if (!temporary) {
+        temporary = {
+          __rock_code_slot: true, key: key,
+          current_body: staged.body, abi: staged.abi
+        };
+        __rock_code_slot_pending_slots[key] = temporary;
+      }
+      return temporary;
+    }
+  }
+  if (!slot) throw new Error("missing Rock code slot " + key);
+  return slot;
+}
+function __rock_code_slot_pending_ref(key) {
+  var staged = __rock_code_slot_stage === null ? null : __rock_code_slot_stage[key];
+  if (staged) {
+    var temporary = __rock_code_slot_pending_slots[key];
+    if (!temporary) {
+      temporary = {
+        __rock_code_slot: true, key: key,
+        current_body: staged.body, abi: staged.abi
+      };
+      __rock_code_slot_pending_slots[key] = temporary;
+    }
+    return temporary;
+  }
+  return __rock_code_slot_ref(key);
+}
+var __rock_code_slot_pending_slots = Object.create(null);
+var __rock_lifecycle_plan_pending = null;
+var __rock_definition_plan_pending = null;
+var __rock_definition_plan_materializing = false;
+function __rock_code_slot_begin() {
+  if (typeof __rock_state_transaction_begin !== "undefined") __rock_state_transaction_begin();
+  __rock_code_slot_stage = Object.create(null);
+  __rock_code_slot_pending_slots = Object.create(null);
+  __rock_definition_plan_materializing = false;
+  __rock_lifecycle_plan_pending = null;
+  __rock_definition_plan_pending = null;
+}
+function __rock_code_slot_abort() {
+  if (typeof __rock_state_transaction_abort !== "undefined") __rock_state_transaction_abort();
+  __rock_code_slot_stage = null;
+  __rock_code_slot_pending_slots = Object.create(null);
+  __rock_definition_plan_materializing = false;
+  __rock_lifecycle_plan_pending = null;
+  __rock_definition_plan_pending = null;
+  if (typeof __rock_state_transaction_commit !== "undefined") __rock_state_transaction_commit();
+}
+function __rock_lifecycle_plan_stage(plan) {
+  if (__rock_code_slot_stage === null) throw new Error("Rock code slot stage not open");
+  __rock_lifecycle_plan_pending = plan;
+}
+function __rock_definition_plan_stage(plan) {
+  if (__rock_code_slot_stage === null) throw new Error("Rock code slot stage not open");
+  __rock_definition_plan_pending = plan;
+}
+function __rock_definition_plan_materialize(plan) {
+  __rock_definition_plan_materializing = true;
+  Object.keys(plan).forEach(function(catalogKey) {
+    var catalog = plan[catalogKey];
+    if (!catalog || !catalog._data || catalog.len === undefined) return;
+    for (var i = 0; i < catalog.len; i++) {
+      var entry = catalog._data[i];
+      if (entry && entry.factory !== undefined) entry.definition = __rock_call(entry.factory);
+    }
+  });
+  __rock_definition_plan_materializing = false;
+  return plan;
+}
+function __rock_code_slot_stage_one(key, body, abi) {
+  var old = __rock_code_slots[key];
+  if (old && old.abi !== abi) throw new Error("incompatible Rock code slot " + key);
+  if (__rock_code_slot_stage === null) throw new Error("Rock code slot stage not open");
+  __rock_code_slot_stage[key] = { body: body, abi: abi };
+}
+function __rock_code_slot_publish() {
+  if (__rock_code_slot_stage === null) throw new Error("Rock code slot stage not open");
+  var definition_plan = __rock_definition_plan_pending;
+  if (definition_plan !== null) definition_plan = __rock_definition_plan_materialize(definition_plan);
+  var stage = __rock_code_slot_stage;
+  Object.keys(stage).forEach(function(key) {
+    var staged = stage[key], slot = __rock_code_slots[key];
+    if (slot) {
+      slot.current_body = staged.body;
+      slot.abi = staged.abi;
+      var temporary = __rock_code_slot_pending_slots[key];
+      if (temporary) {
+        temporary.current_body = staged.body;
+        temporary.abi = staged.abi;
+        __rock_code_slots[key] = temporary;
+      }
+    } else {
+      __rock_code_slots[key] = __rock_code_slot_pending_slots[key] || {
+        __rock_code_slot: true, key: key,
+        current_body: staged.body, abi: staged.abi
+      };
+    }
+  });
+  if (__rock_lifecycle_plan_pending !== null) __G.__ROCK_LIFECYCLE_PLAN = __rock_lifecycle_plan_pending;
+  if (definition_plan !== null) __G.__ROCK_DEFINITION_PLAN = definition_plan;
+  __rock_code_slot_stage = null;
+  __rock_code_slot_pending_slots = Object.create(null);
+  __rock_lifecycle_plan_pending = null;
+  __rock_definition_plan_pending = null;
+  if (typeof __rock_state_transaction_commit !== "undefined") __rock_state_transaction_commit();
+}
+function __rock_code_ref_kind(v) {
+  if (v === null || typeof v !== "object") return null;
+  if (v.__rock_code_slot === true
+      && Object.prototype.hasOwnProperty.call(v, "key")
+      && Object.prototype.hasOwnProperty.call(v, "current_body")) return "slot";
+  if (Object.prototype.hasOwnProperty.call(v, "__slot")
+      && __rock_code_ref_kind(v.__slot) === "slot") return "env";
+  return null;
+}
 function __rock_call(f) {
   var a = Array.prototype.slice.call(arguments, 1);
+  var kind = __rock_code_ref_kind(f);
+  if (kind === "slot") return f.current_body.apply(null, a);
   if (typeof f === "function") return f.apply(null, a);
-  return f.__fn.apply(null, [f].concat(a));
+  if (kind === "env") return f.__slot.current_body.apply(null, [f].concat(a));
+  throw new Error("cannot call a value that is not a Rock CodeRef or foreign function");
 }
 // `try_call(f)`: run `f` and report whether it errored (Lua `pcall`; returns
 // `not ok`). A JS throw is the pcall failure; the error itself is discarded by
 // design (the caller only wants the did-it-error bool, matching the stdlib body).
+function __try_call(f) {
+  try { __rock_call(f); return false; } catch (e) { return true; }
+}
+"#;
+
+/// The explicit foreign-function boundary used when an artifact has indirect
+/// calls but no escaping Rock CodeRefs.
+pub const JS_FOREIGN_CALL_HELPER: &str = r#"
+function __rock_call(f) {
+  var a = Array.prototype.slice.call(arguments, 1);
+  if (typeof f === "function") return f.apply(null, a);
+  throw new Error("cannot call a value that is not a foreign function");
+}
 function __try_call(f) {
   try { __rock_call(f); return false; } catch (e) { return true; }
 }
@@ -249,8 +384,8 @@ function __try_call(f) {
 /// Structs are `{__ty, ...}` plain objects (the
 /// `__rock_create_struct` shape: a `__ty` string tag, no metatable), so a
 /// key-walk that includes `__ty` covers the type check for free. A capturing
-/// lambda is a closure ENV RECORD `{ __fn, .. }` (`convert_closures`): a callable
-/// value, so -- like a raw fn -- it compares by IDENTITY, never by walking its
+/// lambda is a CodeRef env record `{ __slot, .. }` (`convert_closures`): a callable
+/// value, so -- like a raw foreign fn -- it compares by IDENTITY, never by walking its
 /// captures (matching luajit's `__rock_fn_mt` identity-leaf rule and pre-arc
 /// arrow `===`).
 pub const JS_STRUCTURAL_EQ: &str = r#"
@@ -264,7 +399,8 @@ function __op_eq(a, b) {
   if (an || bn) return an && bn;
   if (a === b) return true;
   if (typeof a !== "object" || typeof b !== "object") return a === b;
-  if (a.__fn !== undefined || b.__fn !== undefined) return a === b;
+  if (typeof __rock_code_ref_kind === "function" &&
+      (__rock_code_ref_kind(a) !== null || __rock_code_ref_kind(b) !== null)) return a === b;
   // A Vec compares by tracked `len` over `_data[0..len)` (len-bounded, like
   // luajit's pairs-walk), so a drained tail slot beyond `len` never breaks eq.
   if (a.__ty === "Vec" || b.__ty === "Vec") {
@@ -323,7 +459,7 @@ function __rock_make_enum(variant, ty, kv) {
 /// object (keys sorted by `lua_tostring`, `__ty`/`__variant` skipped), a Vec
 /// `{_data (0-based), len, __ty:"Vec"}`, a JS `Map` (raw-table
 /// analog), a JS array (Lua array-table analog), and scalars. A capturing-lambda
-/// env record (`__fn`) is an opaque callable LEAF (`String(fn)`), matching the
+/// CodeRef env record (`__slot`) is an opaque callable LEAF (`String(fn)`), matching the
 /// luajit `__rock_fn_mt` rule; a `visited` Map detects cycles. NOTE: most inspect
 /// tests are VACUOUS -- a `@test(output=..)` whose expected contains `{` is an
 /// interpolated string, so its expectation is dropped (`out=nil`) and the test
@@ -332,8 +468,8 @@ function __rock_make_enum(variant, ty, kv) {
 /// reproduce the Lua renderer for the cross-backend `inspect(x) == "..."` pins.
 ///
 /// A struct renders through `__rock_inspect_ty[<__ty>]`, a per-type function
-/// `build_inspect_ty_defs` emits for every reachable struct: it supplies the
-/// DECLARED fields, because a null field is an absent key and a key walk alone
+/// `build_inspect_ty_defs` emits for every realized struct and declared child: it
+/// supplies the DECLARED fields, because a null field is an absent key and a key walk alone
 /// therefore under-reports the shape, and an `embed` field is stored as flat
 /// `<name>.<leaf>` slots that carry no declared name at all. That is luajit's
 /// `_G.__ROCK_TYPE_TABLE` lookup replaced by compile-time-emitted dispatch
@@ -405,7 +541,7 @@ function __rock_inspect_value(v, indent, path, visited, precision) {
   var t = v;
   // A capturing-lambda env record is a callable LEAF (never walked) -- rendered
   // as its function, same `function: ` form as a raw fn.
-  if (t.__fn !== undefined) return "function: builtin";
+  if (typeof __rock_code_ref_kind === "function" && __rock_code_ref_kind(t) !== null) return "function: builtin";
   if (visited) {
     if (visited.has(t)) return "<CYCLE: " + visited.get(t) + ">";
     visited.set(t, path);
@@ -505,19 +641,19 @@ function inspect_formatted(obj, precision) { return inspect(obj, true, precision
 
 /// `deepcopy`: the recursive `__rock_deepcopy_value` clone (stdlib/unified.rock).
 /// A `seen` Map (object identity) preserves the graph -- a shared reference copies
-/// ONCE, a cycle terminates. Primitives and bare functions (a closure's `__fn`)
-/// pass through by identity; a TypedArray (NativeBuffer `.ptr`) is `.slice()`d; a
-/// `Map` and an array (a Vec's `_data`) copy element-wise; every other object (a
-/// struct `{__ty,...}`, an env record `{__fn,...}`, a box) copies own keys. A
-/// copied env record keeps its `__fn` and its copied box, so `__rock_call` still
-/// dispatches and shared-box aliasing survives (the closures read captures from
-/// the record arg, not lexically).
+/// ONCE, a cycle terminates. Primitives and bare functions pass through by identity;
+/// a TypedArray (NativeBuffer `.ptr`) is `.slice()`d; a `Map` and an array (a Vec's
+/// `_data`) copy element-wise; every other object (a struct `{__ty,...}`, a CodeRef
+/// env record `{__slot,...}`, a box) copies own keys. A copied env record keeps its
+/// logical slot and copies its captures, so calls remain fresh while mutable boxes
+/// do not alias the source.
 pub const JS_DEEPCOPY_RUNTIME: &str = r#"
 function __rock_deepcopy_value(obj, seen) {
   if (obj === null || obj === undefined) return obj;
   var t = typeof obj;
   if (t !== "object" && t !== "function") return obj;
   if (t === "function") return obj;
+  if (typeof __rock_code_ref_kind === "function" && __rock_code_ref_kind(obj) === "slot") return obj;
   if (seen.has(obj)) return seen.get(obj);
   if (ArrayBuffer.isView(obj)) { var tc = obj.slice(); seen.set(obj, tc); return tc; }
   if (obj instanceof Map) {
@@ -661,12 +797,22 @@ function log_dedup_count() { return Object.keys(__stone_log_dedup).length; }
 /// a semantic, not a nicety).
 pub const JS_RNG_RUNTIME: &str = r#"
 var __rock_rng_state = 0;
-function __rock_rng_seed(s) { __rock_rng_state = s >>> 0; }
-function __rock_rng_state_get() { return __rock_rng_state; }
-function __rock_rng_state_set(s) { __rock_rng_state = s >>> 0; }
+function __rock_rng_current() {
+  if (typeof __rock_active_session !== "undefined" && __rock_active_session
+      && __rock_active_session.__rock_rng_state !== null) return __rock_active_session.__rock_rng_state;
+  return __rock_rng_state;
+}
+function __rock_rng_store(s) {
+  if (typeof __rock_active_session !== "undefined" && __rock_active_session) __rock_active_session.__rock_rng_state = s >>> 0;
+  else __rock_rng_state = s >>> 0;
+}
+function __rock_rng_seed(s) { __rock_rng_store(s); }
+function __rock_rng_state_get() { return __rock_rng_current(); }
+function __rock_rng_state_set(s) { __rock_rng_store(s); }
 function __rock_rng_next32() {
-  __rock_rng_state = (__rock_rng_state + 0x6D2B79F5) >>> 0;
-  var t = __rock_rng_state;
+  var state = (__rock_rng_current() + 0x6D2B79F5) >>> 0;
+  __rock_rng_store(state);
+  var t = state;
   t = Math.imul(t ^ (t >>> 15), t | 1);
   t = (t + Math.imul(t ^ (t >>> 7), t | 61)) ^ t;
   return (t ^ (t >>> 14)) >>> 0;
@@ -775,8 +921,17 @@ function __sw_sdl_keycode(e) {
   return 0;
 }
 
-function __sw_push_event(type, key, btn, x, y) {
-  __SW.events.push({ type: type, key: key, mouse_button: btn, mouse_x: x, mouse_y: y });
+function __sw_push_event(type, key, btn, x, y, scancode, modifiers, repeat) {
+  __SW.events.push({
+    type: type, key: key, scancode: scancode || 0, modifiers: modifiers || 0,
+    repeat: !!repeat, mouse_button: btn, mouse_x: x, mouse_y: y,
+    pad_instance_id: -1, pad_button: "", pad_axis: "", pad_value: 0, pad_sync: false
+  });
+}
+
+function __sw_key_modifiers(e) {
+  return (e.ctrlKey ? 1 : 0) | (e.shiftKey ? 2 : 0) |
+    (e.altKey ? 4 : 0) | (e.metaKey ? 8 : 0);
 }
 
 // Mirror of lib.rock sdl_keycode_to_string: the polled key-state map is keyed by
@@ -837,7 +992,7 @@ function __sw_audio_decode(id, path) {
     function (e) { __sw_log_once("stone_load_sound: decode failed for " + path + " (" + (e && e.message) + ")"); });
   return id;
 }
-function stone_audio_init() { __sw_audio_ctx(); return true; }
+function stone_audio_init() { return __sw_audio_ctx() !== null; }
 function stone_quit() { __SW.quitReq = true; }
 function stone_quit_requested() { return __SW.quitReq; }
 function stone_is_initialized() { return __SW.initialized; }
@@ -873,11 +1028,18 @@ function stone_create_window_ex(title, x, y, width, height, display, resizable, 
 
   window.addEventListener("keydown", function (e) {
     var kc = __sw_sdl_keycode(e);
-    if (kc !== 0) { __SW.keysDown[__sw_keycode_to_string(kc)] = true; __sw_push_event(2, kc, 0, 0, 0); e.preventDefault(); }
+    if (kc !== 0) {
+      __SW.keysDown[__sw_keycode_to_string(kc)] = true;
+      __sw_push_event(2, kc, 0, 0, 0, 0, __sw_key_modifiers(e), e.repeat);
+      e.preventDefault();
+    }
   });
   window.addEventListener("keyup", function (e) {
     var kc = __sw_sdl_keycode(e);
-    if (kc !== 0) { __SW.keysDown[__sw_keycode_to_string(kc)] = false; __sw_push_event(3, kc, 0, 0, 0); }
+    if (kc !== 0) {
+      __SW.keysDown[__sw_keycode_to_string(kc)] = false;
+      __sw_push_event(3, kc, 0, 0, 0, 0, __sw_key_modifiers(e), e.repeat);
+    }
   });
   canvas.addEventListener("mousemove", function (e) {
     var r = canvas.getBoundingClientRect();
@@ -940,7 +1102,11 @@ function stone_poll_event(ev) {
   if (q.length === 0) return false;
   var e = q.shift();
   ev.type = e.type; ev.key = e.key; ev.mouse_button = e.mouse_button;
-  ev.mouse_x = e.mouse_x; ev.mouse_y = e.mouse_y;
+  ev.scancode = e.scancode || 0; ev.modifiers = e.modifiers || 0;
+  ev.repeat = !!e.repeat; ev.mouse_x = e.mouse_x; ev.mouse_y = e.mouse_y;
+  ev.pad_instance_id = e.pad_instance_id == null ? -1 : e.pad_instance_id;
+  ev.pad_button = e.pad_button || ""; ev.pad_axis = e.pad_axis || "";
+  ev.pad_value = e.pad_value || 0; ev.pad_sync = !!e.pad_sync;
   return true;
 }
 function stone_get_mouse_position(px, py) { px[0] = Math.round(__SW.mouseX); py[0] = Math.round(__SW.mouseY); }
@@ -978,7 +1144,7 @@ function stone_sprite_init() {
 // here states the sprite vertex; the Rock `Vertex` struct owns it and the
 // caller derives both numbers from it. Returns -1 for no draw, 0 for an
 // untextured draw, and 1 when the texture was bound.
-function stone_draw_mesh(data, count, stride, attr_sizes, attr_count, tex) {
+function stone_draw_mesh(data, count, stride, attr_sizes, attr_count, texKind, tex) {
   var gl = __SW.gl;
   if (!gl || count <= 0) return -1;
   var sh = __SW.shaders[__SW.curShader];
@@ -987,7 +1153,8 @@ function stone_draw_mesh(data, count, stride, attr_sizes, attr_count, tex) {
     return -1;
   }
   gl.useProgram(sh.prog);
-  var t = __SW.textures[tex];
+  var c = texKind === 1 ? __SW.canvases[tex] : null;
+  var t = c ? c.tex : __SW.textures[tex];
   var textureBound = false;
   if (t) {
     gl.activeTexture(gl.TEXTURE0);
@@ -1178,6 +1345,10 @@ function stone_image_set_wrap(h, repeat) {
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, mode);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, mode);
   return true;
+}
+function stone_image_wrap_state(h) {
+  if (!__SW.textures || !__SW.textures[h]) return -1;
+  return __SW.imageRepeat[h] ? 1 : 0;
 }
 function stone_unload_image(h) {
   var t = __SW.textures[h];
@@ -1384,11 +1555,6 @@ function stone_bind_canvas_depth_to_unit(h, unit) {
 }
 function stone_canvas_exists(h) { return !!__SW.canvases[h]; }
 function stone_canvas_has_depth(h) { var c = __SW.canvases[h]; return !!(c && c.depthTex); }
-function stone_sprite_draw_canvas(shader, h, tw, th, x, y, w, hh, sx, sy, sw, sh) {
-  var c = __SW.canvases[h];
-  if (!c) return;
-  stone_sprite_draw_texture(shader, c.tex, tw, th, x, y, w, hh, sx, sy, sw, sh, 0, 1, 1, 1, 1, 1, 1);
-}
 // GL names, for the imgui path only.
 function stone_get_canvas_texture(h) { var c = __SW.canvases[h]; return c ? c.tex : 0; }
 function stone_get_canvas_depth_texture(h) { var c = __SW.canvases[h]; return c ? (c.depthTex || 0) : 0; }
@@ -1830,6 +1996,7 @@ function stone_shader_set_vec4_array(h, name, values, count) {
   __sw_with_shader_uniform(h, name, function (gl, l) { gl.uniform4fv(l, values.subarray ? values.subarray(0, count * 4) : values); });
 }
 function stone_bind_image_texture_to_unit(h, unit) { return stone_bind_texture_to_unit(h, unit) !== 0; }
+function stone_image_exists(h) { return !!(__SW.textures && __SW.textures[h]); }
 function stone_bind_texture_to_unit(tex, unit) {
   var gl = __SW.gl, t = __SW.textures[tex];
   if (!gl || !t || unit < 0) return 0;
@@ -1958,7 +2125,7 @@ function stone_draw_fullscreen_quad() {
 
 // --- text: canvas2d glyph atlas (MC, docs/stone-web-plan.md § text) ---
 // The boot preload registered each shipped TTF as a FontFace; the bake here
-// is synchronous canvas2d against that family. All of ASCII 32..126 bakes as
+// is synchronous canvas2d against that family. ASCII 32..126 plus Á bakes as
 // one 16-glyph-wide atlas; density changes explicitly rebake into the same
 // texture handle. Atlas pixels are
 // coverage-RGBA (r=g=b=a=coverage, built from the canvas ALPHA channel --
@@ -2015,7 +2182,11 @@ function __sw_bake_font(path, pixelSize, existingAtlas, faceMask) {
   var shear = Math.tan((__SW_OBLIQUE_DEG * Math.PI) / 180);
   var embolden = pixelSize * __SW_BOLD_PER_PX;
 
-  // Pass 1: metrics for all 95 glyphs of every declared face -> cell size.
+  var slots = [];
+  for (var ascii = 32; ascii <= 126; ascii++) slots.push({ slot: ascii, cp: ascii, ch: String.fromCharCode(ascii) });
+  slots.push({ slot: 127, cp: 0x00C1, ch: "Á" });
+
+  // Pass 1: metrics for every text slot of every declared face -> cell size.
   // The cell holds the WIDEST face: an oblique pushes ink past its own
   // advance, so sizing from regular alone would bleed bold-italic into the
   // next cell. Canvas gives no sheared metrics, so the extra extent is
@@ -2028,8 +2199,10 @@ function __sw_bake_font(path, pixelSize, existingAtlas, faceMask) {
     var isBold = face === 1 || face === 3;
     var isItalic = face === 2 || face === 3;
     var faceInfos = [];
-    for (var cp = 32; cp <= 126; cp++) {
-      var ch = String.fromCharCode(cp);
+    for (var si = 0; si < slots.length; si++) {
+      var spec = slots[si];
+      var cp = spec.cp;
+      var ch = spec.ch;
       var m = mctx.measureText(ch);
       var left = m.actualBoundingBoxLeft || 0;
       var right = m.actualBoundingBoxRight || 0;
@@ -2040,7 +2213,7 @@ function __sw_bake_font(path, pixelSize, existingAtlas, faceMask) {
       var gw = Math.ceil(left + right + grow + lean);
       var gh = Math.ceil(ascent + descent + grow);
       faceInfos.push({
-        cp: cp, ch: ch, face: face, bold: isBold, italic: isItalic,
+        slot: spec.slot, cp: cp, ch: ch, face: face, bold: isBold, italic: isItalic,
         left: left + grow / 2, ascent: ascent + grow / 2,
         w: gw, h: gh, advance: m.width + grow,
       });
@@ -2053,7 +2226,7 @@ function __sw_bake_font(path, pixelSize, existingAtlas, faceMask) {
   cellW += PAD * 2;
   cellH += PAD * 2;
   var COLS = 16; // mirror native text.rs grid
-  var rowsPerFace = Math.ceil(95 / COLS);
+  var rowsPerFace = Math.ceil(slots.length / COLS);
   var aw = COLS * cellW, ah = rowsPerFace * baked.length * cellH;
 
   var canvas = document.createElement("canvas");
@@ -2096,7 +2269,7 @@ function __sw_bake_font(path, pixelSize, existingAtlas, faceMask) {
       ctx.restore();
       // 9-float glyph info: [u0 v0 u1 v1 width height bearing_x bearing_y advance];
       // bearing_y is TOP-based (ink top above baseline = actualBoundingBoxAscent).
-      glyphs[g.face][g.cp] = new Float32Array([
+      glyphs[g.face][g.slot] = new Float32Array([
         cx / aw, cy / ah, (cx + g.w) / aw, (cy + g.h) / ah,
         g.w, g.h, -g.left, g.ascent, g.advance,
       ]);
@@ -2175,6 +2348,11 @@ function stone_get_glyph_info_for(fontId, face, ch, out) {
   for (var i = 0; i < 9; i++) out[i] = g[i];
   return true;
 }
+function __sw_glyph_slot(cp) {
+  if (cp >= 32 && cp <= 126) return cp;
+  if (cp === 0x00C1) return 127;
+  return -1;
+}
 // Shim-side measure, from the shim's OWN advances (native-formula drift is
 // the bug class this avoids): width = max line sum(advance)*scale; height
 // single-line = max glyph height*scale, multi-line adds (lines-1)*em*1.2.
@@ -2188,7 +2366,7 @@ function stone_measure_text_js(fontId, text, scale) {
   var lines = 1, w = 0, lineW = 0, maxH = 0;
   for (var i = 0; i < s.length; i++) {
     if (s[i] === "\n") { lines++; if (lineW > w) w = lineW; lineW = 0; continue; }
-    var g = f.glyphs[0][s.charCodeAt(i)];
+    var g = f.glyphs[0][__sw_glyph_slot(s.charCodeAt(i))];
     if (g) { lineW += g[8]; if (g[5] > maxH) maxH = g[5]; }
   }
   if (lineW > w) w = lineW;
@@ -2203,7 +2381,7 @@ function stone_get_text_baseline_for(fontId, text, scale) {
   var s = String(text);
   var b = 0;
   for (var i = 0; i < s.length; i++) {
-    var g = f.glyphs[0][s.charCodeAt(i)];
+    var g = f.glyphs[0][__sw_glyph_slot(s.charCodeAt(i))];
     if (g && g[7] > b) b = g[7];
   }
   return b * Math.abs(scale);
@@ -2254,7 +2432,11 @@ function stone_rename(src, dst) {
   delete __ROCK_WEB_FILES[src];
   return true;
 }
-function stone_remove_file(path) { delete __ROCK_WEB_FILES[path]; return true; }
+function stone_remove_file(path) {
+  if (!Object.prototype.hasOwnProperty.call(__ROCK_WEB_FILES, path)) return false;
+  delete __ROCK_WEB_FILES[path];
+  return true;
+}
 
 // --- subprocess (chess UCI): no child processes in a browser; the spawn is a
 // loud stub returning 0 so sf_start drops to the built-in engine. ---
@@ -2329,16 +2511,21 @@ function stone_reload_sound(h, path) {
   if (!__sw_audio_ctx()) return false;
   return __sw_audio_decode(h, path) !== 0;
 }
-function stone_unload_sound(h) { delete __SW.audio.sounds[h]; return true; }
-// `bus` is STONE_BUS_* (lib.rock): 0 master, 1 sfx, 2 music, 3 ambience, 4 ui.
+function stone_unload_sound(h) {
+  if (!Object.prototype.hasOwnProperty.call(__SW.audio.sounds, h)) return false;
+  delete __SW.audio.sounds[h];
+  return true;
+}
+// `bus` is STONE_BUS_* (lib.rock): 0 master, 1 sfx, 2 music, 3 ambience, 4 ui, 5 foley.
 // The web mixer has only sfx and music nodes, so music routes to musicGain and
 // every other bus shares sfxGain -- the topology is coarser than native, not
 // ignored.
-function stone_play_sound(h, bus, volume, speed, decay) {
+function stone_play_sound(h, bus, volume, speed, decay, looped) {
   var A = __SW.audio, s = A.sounds[h];
   if (!A.ctx || !s || !s.buffer) return;
   var src = A.ctx.createBufferSource();
   src.buffer = s.buffer;
+  src.loop = looped;
   src.playbackRate.value = Math.min(Math.max(speed, 0.05), 8);
   var g = A.ctx.createGain();
   var vol = Math.max(volume, 0);
@@ -2373,7 +2560,7 @@ function stone_stop_music() {
   var A = __SW.audio;
   if (A.musicSrc) { try { A.musicSrc.stop(); } catch (e) {} A.musicSrc = null; }
 }
-// No bus graph on web v1 (mixer.rock's five strips have no WebAudio
+// No bus graph on web v1 (mixer.rock's strips have no WebAudio
 // counterpart yet); every bus/voice op below is a silent stub, same tier as
 // the convolver reverb has always been.
 function stone_bus_set_gain(bus, gain) { return false; }
@@ -2382,6 +2569,7 @@ function stone_bus_duck_count(bus) { return 0; }
 function stone_bus_gain(bus) { return 1; }
 function stone_bus_peak(bus) { return 0; }
 function stone_bus_set_lowpass(bus, cutoff_hz, q) { return false; }
+function stone_bus_lowpass_cutoff(bus) { return 0; }
 function stone_bus_set_distortion(bus, drive, mix) { return false; }
 function stone_bus_set_reverb(bus, enabled, room_size, damping, wet, dry, width) { return false; }
 function stone_bus_duck(bus, depth, attack_secs, release_secs) { return false; }
@@ -2687,12 +2875,465 @@ function __rock_web_arm_raf(frameFn) {
 /// failures go to STDERR, never stdout -- the harness output-compare must not
 /// see them. Nil checks are truthiness (`!c.__defers`, `if (c.__inner)`) so
 /// `undefined` and `null` both count as nil, matching the subset's loose rule.
+pub const JS_SESSION_RUNTIME: &str = r#"
+function __rock_session_new(schema_id) {
+  return { __rock_schema_id: schema_id, __rock_state: Object.create(null), __rock_initialized: Object.create(null), __rock_initializer_keys: Object.create(null), __rock_rng_state: null };
+}
+function __rock_session_activate(session) {
+  if (!session || !session.__rock_state || !session.__rock_initialized) throw new Error("invalid Rock Session");
+  if (__rock_state_schema_id !== null && session.__rock_schema_id !== __rock_state_schema_id) {
+    throw new Error("Rock StateSchema does not match the active Session");
+  }
+  __rock_active_session = session;
+  return session;
+}
+function __rock_session_current() {
+  if (__rock_active_session === null) throw new Error("no active Rock Session");
+  return __rock_active_session;
+}
+function __rock_state_has(key) { return __rock_session_current().__rock_initialized[key] === true; }
+function __rock_state_get(key) { return __rock_session_current().__rock_state[key]; }
+function __rock_state_set(key, value) {
+  var session = __rock_session_current();
+  session.__rock_state[key] = value;
+  session.__rock_initialized[key] = true;
+  return value;
+}
+function __rock_state_transaction_begin() {
+  if (__rock_state_transaction !== null) return;
+  var session = __rock_session_current();
+  var state = Object.create(null);
+  var initialized = Object.create(null);
+  var initializer_keys = Object.create(null);
+  Object.keys(session.__rock_state).forEach(function (key) { state[key] = session.__rock_state[key]; });
+  Object.keys(session.__rock_initialized).forEach(function (key) { initialized[key] = session.__rock_initialized[key]; });
+  Object.keys(session.__rock_initializer_keys).forEach(function (key) { initializer_keys[key] = session.__rock_initializer_keys[key]; });
+  __rock_state_transaction = {
+    session: session,
+    schema_id: session.__rock_schema_id,
+    has_schema: typeof __ROCK_STATE_SCHEMA !== "undefined",
+    schema: (typeof __ROCK_STATE_SCHEMA === "undefined") ? null : __ROCK_STATE_SCHEMA,
+    state: state,
+    initialized: initialized,
+    initializer_keys: initializer_keys,
+    published_schema_id: __rock_state_schema_id
+  };
+}
+function __rock_state_transaction_abort() {
+  var transaction = __rock_state_transaction;
+  if (transaction === null) return;
+  var session = transaction.session;
+  __rock_active_session = session;
+  session.__rock_schema_id = transaction.schema_id;
+  Object.keys(session.__rock_state).forEach(function (key) { delete session.__rock_state[key]; });
+  Object.keys(transaction.state).forEach(function (key) { session.__rock_state[key] = transaction.state[key]; });
+  Object.keys(session.__rock_initialized).forEach(function (key) { delete session.__rock_initialized[key]; });
+  Object.keys(transaction.initialized).forEach(function (key) { session.__rock_initialized[key] = transaction.initialized[key]; });
+  Object.keys(session.__rock_initializer_keys).forEach(function (key) { delete session.__rock_initializer_keys[key]; });
+  Object.keys(transaction.initializer_keys).forEach(function (key) { session.__rock_initializer_keys[key] = transaction.initializer_keys[key]; });
+  if (transaction.has_schema) __ROCK_STATE_SCHEMA = transaction.schema;
+  else if (typeof __ROCK_STATE_SCHEMA !== "undefined") __ROCK_STATE_SCHEMA = undefined;
+  __rock_state_schema_id = transaction.published_schema_id;
+  __rock_state_transaction = null;
+}
+function __rock_state_transaction_commit() { __rock_state_transaction = null; }
+function __rock_state_prepare_static(value_key, done_key, initializer_key) {
+  var session = __rock_session_current();
+  var old = session.__rock_initializer_keys[value_key];
+  if (old !== undefined && old !== initializer_key) {
+    delete session.__rock_state[value_key];
+    delete session.__rock_initialized[value_key];
+    __rock_state_set(done_key, false);
+  }
+  session.__rock_initializer_keys[value_key] = initializer_key;
+}
+function __rock_state_publish_schema(schema_id) {
+  var session = __rock_session_current();
+  if (session.__rock_schema_id !== null && session.__rock_schema_id !== schema_id) {
+    throw new Error("Rock StateSchema changed; restart is required");
+  }
+  session.__rock_schema_id = schema_id;
+  __rock_state_schema_id = schema_id;
+}
+function __rock_state_entry_for_name(name) {
+  if (typeof __ROCK_STATE_SCHEMA === "undefined") return null;
+  for (var i = 0; i < __ROCK_STATE_SCHEMA.length; i++) {
+    var entry = __ROCK_STATE_SCHEMA[i];
+    if (entry.kind !== "global") continue;
+    if (entry.name === name || entry.identity === name) return entry;
+    for (var j = 0; j < (entry.physical || []).length; j++) {
+      if (entry.physical[j] === name) return entry;
+    }
+  }
+  return null;
+}
+function __rock_state_entry_get(entry) {
+  var keys = entry.session_keys || [];
+  if (keys.length === 1) return __rock_state_get(keys[0]);
+  throw new Error("StateSchema entry has no single JS logical realization " + entry.identity);
+}
+function __rock_state_entry_set(entry, value) {
+  var keys = entry.session_keys || [];
+  if (keys.length === 1) return __rock_state_set(keys[0], value);
+  throw new Error("StateSchema entry has no single JS logical realization " + entry.identity);
+}
+function __rock_state_entry_clear(entry) {
+  var keys = entry.session_keys || [];
+  for (var i = 0; i < keys.length; i++) {
+    delete __rock_session_current().__rock_state[keys[i]];
+    delete __rock_session_current().__rock_initialized[keys[i]];
+  }
+}
+function __rock_state_bridge_key(entry, name) {
+  var keys = entry.session_keys || [];
+  if (keys.length === 1) return keys[0];
+  for (var i = 0; i < (entry.physical || []).length; i++) {
+    if (entry.physical[i] === name) return keys[i];
+  }
+  return null;
+}
+function __rock_state_bridge_get(entry, name) {
+  var key = __rock_state_bridge_key(entry, name);
+  if (key === null) throw new Error("StateSchema entry has no JS logical leaf for " + name);
+  return __rock_state_get(key);
+}
+function __rock_state_bridge_set(entry, name, value) {
+  var key = __rock_state_bridge_key(entry, name);
+  if (key === null) throw new Error("StateSchema entry has no JS logical leaf for " + name);
+  return __rock_state_set(key, value);
+}
+function __rock_state_bridge_clear(entry, name) {
+  var key = __rock_state_bridge_key(entry, name);
+  if (key === null) throw new Error("StateSchema entry has no JS logical leaf for " + name);
+  delete __rock_session_current().__rock_state[key];
+  delete __rock_session_current().__rock_initialized[key];
+}
+function __rock_state_install_global_bridge() {
+  if (typeof __G === "undefined" || __G === null) return;
+  if (__G.__rock_state_bridge_target === true) return;
+  var target = __G;
+  Object.defineProperty(target, "__rock_state_bridge_target", {
+    value: true, writable: false, configurable: false, enumerable: false
+  });
+  __G = new Proxy(target, {
+    get: function (object, key, receiver) {
+      var entry = (typeof key === "string") ? __rock_state_entry_for_name(key) : null;
+      if (entry !== null) return __rock_state_bridge_get(entry, key);
+      return Reflect.get(object, key, receiver);
+    },
+    set: function (object, key, value, receiver) {
+      var entry = (typeof key === "string") ? __rock_state_entry_for_name(key) : null;
+      if (entry !== null) {
+        __rock_state_bridge_set(entry, key, value);
+        return true;
+      }
+      return Reflect.set(object, key, value, receiver);
+    },
+    deleteProperty: function (object, key) {
+      var entry = (typeof key === "string") ? __rock_state_entry_for_name(key) : null;
+      if (entry !== null) {
+        __rock_state_bridge_clear(entry, key);
+        return true;
+      }
+      return Reflect.deleteProperty(object, key);
+    },
+    has: function (object, key) {
+      var entry = (typeof key === "string") ? __rock_state_entry_for_name(key) : null;
+      return entry !== null || Reflect.has(object, key);
+    }
+  });
+}
+var __rock_state_image_structural_ids = [
+  "session::schema-id", "session::initialized", "session::initializer-keys",
+  "session::rng-state", "program-artifact::code-slots",
+  "program-artifact::lifecycle-plan", "program-artifact::definition-plan",
+  "host-projection::arena-registry", "host-projection::native-ledger",
+  "runner::logger-state", "unsupported::live-scene-state"
+];
+function __rock_state_image_plan_validate() {
+  var schema = (typeof __ROCK_STATE_SCHEMA === "undefined") ? [] : __ROCK_STATE_SCHEMA;
+  var plan = (typeof __ROCK_STATE_IMAGE_PLAN === "undefined") ? null : __ROCK_STATE_IMAGE_PLAN;
+  if (!plan) throw new Error("StateImagePlan is not published");
+  if (plan.schema_id !== __rock_state_schema_id) throw new Error("StateImagePlan StateSchema mismatch");
+  if (!plan.entries || plan.entries.length !== schema.length + __rock_state_image_structural_ids.length) {
+    throw new Error("StateImagePlan has an incomplete structural tail");
+  }
+  var seen = Object.create(null);
+  var counts = { semantic_session: 0, program_artifact: 0, host_projection: 0,
+    runner_diagnostic: 0, unsupported: 0 };
+  for (var i = 0; i < schema.length; i++) {
+    var imageEntry = plan.entries[i], entry = schema[i];
+    if (!imageEntry || imageEntry.identity !== entry.identity || imageEntry.layout !== entry.fingerprint) {
+      throw new Error("StateImagePlan changed StateSchema ordering at entry " + i);
+    }
+  }
+  for (var j = 0; j < __rock_state_image_structural_ids.length; j++) {
+    var structural = plan.entries[schema.length + j];
+    if (!structural || structural.identity !== __rock_state_image_structural_ids[j]) {
+      throw new Error("StateImagePlan changed structural ownership at entry " + j);
+    }
+  }
+  plan.entries.forEach(function (entry) {
+    if (!entry.identity || seen[entry.identity]) throw new Error("StateImagePlan owns " + entry.identity + " more than once");
+    seen[entry.identity] = true;
+    if (!entry.kind || !entry.layout || !entry.capture_policy || !entry.realization_policy
+        || !entry.world_policy) {
+      throw new Error("incomplete StateImagePlan entry " + entry.identity);
+    }
+    if (counts[entry.kind] === undefined) throw new Error("unknown StateImagePlan kind " + entry.kind);
+    counts[entry.kind]++;
+  });
+  var census = plan.census || {};
+  if (census.examined !== plan.entries.length || census.assigned !== plan.entries.length
+      || census.duplicates !== 0 || census.unknown !== 0) {
+    throw new Error("incomplete StateImagePlan census");
+  }
+  Object.keys(counts).forEach(function (kind) {
+    if (census[kind] !== counts[kind]) throw new Error("StateImagePlan census disagrees for " + kind);
+    if (counts[kind] === 0) throw new Error("StateImagePlan has a zero ownership category: " + kind);
+  });
+  return true;
+}
+function __rock_state_image_clone(value, seen, mode) {
+  if (value === null || value === undefined) return value;
+  var type = typeof value;
+  if (type !== "object" && type !== "function") return value;
+  if (type === "function") {
+    if (mode === "capture" && typeof __rock_code_ref_kind === "function"
+        && __rock_code_ref_kind(value) === "slot") {
+      return { __rock_state_image_code_ref: value.key };
+    }
+    throw new Error("StateImage rejects foreign function value");
+  }
+  if (mode === "capture" && typeof __rock_code_ref_kind === "function"
+      && __rock_code_ref_kind(value) === "slot") {
+    return { __rock_state_image_code_ref: value.key };
+  }
+  if (mode === "materialize" && Object.prototype.hasOwnProperty.call(value, "__rock_state_image_code_ref")) {
+    if (typeof value.__rock_state_image_code_ref !== "string") throw new Error("StateImage has an invalid logical CodeIdentity");
+    if (typeof __rock_code_slot_ref !== "function") throw new Error("StateImage cannot resolve logical CodeIdentity");
+    return __rock_code_slot_ref(value.__rock_state_image_code_ref);
+  }
+  if (seen.has(value)) return seen.get(value);
+  if (ArrayBuffer.isView(value)) {
+    var typed = new value.constructor(value);
+    seen.set(value, typed);
+    return typed;
+  }
+  if (value instanceof Map) {
+    var map = new Map();
+    seen.set(value, map);
+    value.forEach(function (v, k) {
+      map.set(__rock_state_image_clone(k, seen, mode), __rock_state_image_clone(v, seen, mode));
+    });
+    return map;
+  }
+  if (value instanceof ArrayBuffer) {
+    var buffer = value.slice(0);
+    seen.set(value, buffer);
+    return buffer;
+  }
+  var copy = Array.isArray(value) ? [] : {};
+  seen.set(value, copy);
+  Object.keys(value).forEach(function (key) {
+    copy[key] = __rock_state_image_clone(value[key], seen, mode);
+  });
+  return copy;
+}
+function __rock_state_image_scene_is_live() {
+  if (typeof __G === "undefined" || __G === null) return false;
+  var roots = __G.__SCENE_ROOTS;
+  if (roots === null || roots === undefined) return false;
+  if (Array.isArray(roots)) return roots.some(function (v) { return v !== null && v !== undefined; });
+  if (roots._data && roots.len !== undefined) {
+    for (var i = 0; i < roots.len; i++) if (roots._data[i] !== null && roots._data[i] !== undefined) return true;
+  }
+  return Object.keys(roots).some(function (key) { return roots[key] !== null && roots[key] !== undefined; });
+}
+var __rock_state_image_next_id = 0;
+var __rock_state_image_next_session_id = 0;
+var __rock_state_image_images = Object.create(null);
+var __rock_state_image_sessions = Object.create(null);
+function __rock_state_image_world_included(entry) {
+  var imageEntry = __ROCK_STATE_IMAGE_PLAN.entries.find(function (candidate) {
+    return candidate.identity === entry.identity;
+  });
+  return entry.kind === "global" && imageEntry
+    && imageEntry.kind === "semantic_session"
+    && imageEntry.world_policy === "include";
+}
+function __rock_state_image_capture(kind, tick) {
+  if (kind !== "boot" && kind !== "world") throw new Error("unsupported StateImage capture kind " + kind);
+  __rock_state_image_plan_validate();
+  if (kind === "world" && __rock_state_image_scene_is_live()) {
+    throw new Error("StateImage capture rejected live Scene state; SceneImage is not implemented");
+  }
+  var id = ++__rock_state_image_next_id;
+  var image = { id: id, kind: kind, tick: tick, schema_id: __rock_state_schema_id,
+    layouts: Object.create(null), entries: Object.create(null), members: Object.create(null),
+    rng_state: __rock_active_session.__rock_rng_state };
+  __ROCK_STATE_IMAGE_PLAN.entries.forEach(function (entry) { image.layouts[entry.identity] = entry.layout; });
+  var seen = new Map();
+  __ROCK_STATE_SCHEMA.forEach(function (entry) {
+    var planEntry = __ROCK_STATE_IMAGE_PLAN.entries.find(function (candidate) {
+      return candidate.identity === entry.identity;
+    });
+    if (!planEntry) throw new Error("StateImage has unknown schema entry " + entry.identity);
+    if (planEntry.kind !== "semantic_session") return;
+    if (kind === "world" && !__rock_state_image_world_included(entry)) return;
+    var keys = entry.session_keys || [];
+    var values = [], initialized = [];
+    for (var i = 0; i < keys.length; i++) {
+      initialized[i] = __rock_state_has(keys[i]);
+      values[i] = initialized[i] ? __rock_state_image_clone(__rock_state_get(keys[i]), seen, "capture") : undefined;
+    }
+    image.entries[entry.identity] = {
+      keys: keys.slice(), values: values, initialized: initialized,
+      initializer_key: entry.kind === "static"
+        ? __rock_active_session.__rock_initializer_keys[keys[0]] : undefined
+    };
+    image.members[entry.identity] = true;
+  });
+  __rock_state_image_images[id] = image;
+  return id;
+}
+function __rock_state_image_validate_layouts(image) {
+  var plan = __ROCK_STATE_IMAGE_PLAN, count = 0;
+  Object.keys(image.layouts || {}).forEach(function (identity) {
+    count++;
+    var found = plan.entries.find(function (entry) { return entry.identity === identity; });
+    if (!found) throw new Error("StateImage has an unknown layout " + identity);
+    if (found.layout !== image.layouts[identity]) throw new Error("StateImage layout mismatch for " + identity);
+  });
+  if (count !== plan.entries.length) throw new Error("StateImage layout plan is incomplete");
+}
+function __rock_state_image_materialize(image_id, kind) {
+  var image = __rock_state_image_images[image_id];
+  if (!image) throw new Error("unknown StateImage " + image_id);
+  if (image.kind !== kind) throw new Error("StateImage kind mismatch: expected " + kind + ", got " + image.kind);
+  if (image.schema_id !== __rock_state_schema_id) throw new Error("StateImage StateSchema mismatch; restart is required");
+  __rock_state_image_plan_validate();
+  __rock_state_image_validate_layouts(image);
+  var candidate = __rock_session_new(image.schema_id);
+  candidate.__rock_rng_state = image.rng_state;
+  var seen = new Map();
+  var source = __rock_active_session;
+  __ROCK_STATE_SCHEMA.forEach(function (entry) {
+    var planEntry = __ROCK_STATE_IMAGE_PLAN.entries.find(function (candidateEntry) {
+      return candidateEntry.identity === entry.identity;
+    });
+    if (!planEntry) throw new Error("StateImage has unknown schema entry " + entry.identity);
+    if (planEntry.kind !== "semantic_session") return;
+    if (kind === "world" && !__rock_state_image_world_included(entry)) {
+      if (entry.kind !== "static") return;
+      var liveKeys = entry.session_keys || [];
+      if (liveKeys.length !== 2) throw new Error("StateImage static entry has no value/done realization " + entry.identity);
+      var liveValueKey = liveKeys[0], liveDoneKey = liveKeys[1];
+      if (source.__rock_initialized[liveValueKey] === true) {
+        candidate.__rock_state[liveValueKey] = __rock_state_image_clone(
+          source.__rock_state[liveValueKey], seen, "materialize");
+        candidate.__rock_initialized[liveValueKey] = true;
+      }
+      if (source.__rock_initialized[liveDoneKey] === true) {
+        candidate.__rock_state[liveDoneKey] = source.__rock_state[liveDoneKey];
+        candidate.__rock_initialized[liveDoneKey] = true;
+      }
+      var liveInitializer = source.__rock_initializer_keys[liveValueKey];
+      if (liveInitializer !== undefined) candidate.__rock_initializer_keys[liveValueKey] = liveInitializer;
+      return;
+    }
+    var snapshot = image.entries[entry.identity];
+    if (!snapshot || snapshot.keys.length !== (entry.session_keys || []).length) {
+      throw new Error("StateImage omitted semantic entry " + entry.identity);
+    }
+    for (var i = 0; i < entry.session_keys.length; i++) {
+      var key = entry.session_keys[i];
+      if (snapshot.keys[i] !== key) throw new Error("StateImage layout mismatch for " + entry.identity);
+      if (snapshot.initialized[i]) {
+        candidate.__rock_state[key] = __rock_state_image_clone(snapshot.values[i], seen, "materialize");
+        candidate.__rock_initialized[key] = true;
+      }
+    }
+    if (entry.kind === "static" && snapshot.initializer_key !== undefined) {
+      candidate.__rock_initializer_keys[entry.session_keys[0]] = snapshot.initializer_key;
+    }
+  });
+  var session_id = ++__rock_state_image_next_session_id;
+  candidate.__rock_image_materialized = true;
+  __rock_state_image_sessions[session_id] = candidate;
+  return session_id;
+}
+function __rock_state_image_try_materialize(image_id, kind) {
+  try { __rock_state_image_materialize(image_id, kind); return ""; }
+  catch (e) { return String(e && e.message !== undefined ? e.message : e); }
+}
+function __rock_state_image_release_image(image_id) {
+  if (!Object.prototype.hasOwnProperty.call(__rock_state_image_images, image_id)) return false;
+  delete __rock_state_image_images[image_id];
+  return true;
+}
+function __rock_state_image_session_id(session) {
+  var ids = Object.keys(__rock_state_image_sessions);
+  for (var i = 0; i < ids.length; i++) {
+    if (__rock_state_image_sessions[ids[i]] === session) return Number(ids[i]);
+  }
+  return -1;
+}
+function __rock_state_image_release_session(session_id) {
+  var session = __rock_state_image_sessions[session_id];
+  if (!session || session.__rock_image_materialized !== true) return false;
+  if (session === __rock_active_session) {
+    throw new Error("cannot release the active StateImage Session");
+  }
+  delete __rock_state_image_sessions[session_id];
+  return true;
+}
+function __rock_state_image_session_commit(session_id) {
+  var candidate = __rock_state_image_sessions[session_id];
+  if (!candidate || candidate.__rock_image_materialized !== true) {
+    throw new Error("unknown or incomplete materialized StateImage Session " + session_id);
+  }
+  var old = __rock_active_session;
+  if (candidate === old) return true;
+  var old_id = __rock_state_image_session_id(old);
+  try {
+    __rock_session_activate(candidate);
+    if (candidate.__rock_rng_state !== null && candidate.__rock_rng_state !== undefined
+        && typeof __rock_rng_state_set === "function") __rock_rng_state_set(candidate.__rock_rng_state);
+    if (old_id >= 0 && old_id !== session_id) delete __rock_state_image_sessions[old_id];
+    return true;
+  } catch (e) {
+    try { __rock_session_activate(old); } catch (rollback) {}
+    if (candidate !== old) delete __rock_state_image_sessions[session_id];
+    throw e;
+  }
+}
+function __rock_state_image_session_activate(session_id) {
+  var session = __rock_state_image_sessions[session_id];
+  if (!session || session.__rock_image_materialized !== true) throw new Error("unknown or incomplete materialized StateImage Session " + session_id);
+  __rock_session_activate(session);
+  if (session.__rock_rng_state !== null && session.__rock_rng_state !== undefined
+      && typeof __rock_rng_state_set === "function") __rock_rng_state_set(session.__rock_rng_state);
+  return true;
+}
+function __rock_state_image_current_session() {
+  var id = ++__rock_state_image_next_session_id;
+  __rock_active_session.__rock_image_materialized = true;
+  __rock_state_image_sessions[id] = __rock_active_session;
+  return id;
+}
+var __rock_active_session = null;
+var __rock_state_schema_id = null;
+var __rock_state_transaction = null;
+__rock_session_activate(__rock_session_new(null));
+"#;
+
 pub const JS_CORO_RUNTIME: &str = r#"
 function error(m) { throw new Error(m); }
 function __rock_coroutine_run_defers(c) {
   if (!c.__defers) return;
   for (var i = c.__defers.length - 1; i >= 0; i--) {
-    try { c.__defers[i](c); } catch (e) {
+    try { __rock_call(c.__defers[i], c); } catch (e) {
       var m = (e && e.message !== undefined) ? e.message : e;
       process.stderr.write("coroutine defer failed during cleanup: " + m + "\n");
     }
@@ -2703,7 +3344,7 @@ function __rock_coroutine_kill(c) {
   c.__state = -1;
   if (c.__inner) { __rock_coroutine_kill(c.__inner); }
   __rock_coroutine_run_defers(c);
-  if (c.__on_killed) { c.__on_killed(c); }
+  if (c.__on_killed) { __rock_call(c.__on_killed, c); }
 }
 "#;
 

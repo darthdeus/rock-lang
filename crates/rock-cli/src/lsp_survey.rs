@@ -31,6 +31,40 @@ use std::time::Instant;
 
 use crate::skull_backend::{body_digit_flip, ms};
 
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn missing_survey_source_is_an_error() {
+        let path = "/tmp/rock-lsp-survey-missing-source.rock";
+        let err = super::read_survey_source(path).expect_err("missing source must not be skipped");
+        assert!(err.to_string().contains(path));
+    }
+
+    #[test]
+    fn survey_restore_errors_are_propagated() {
+        let err = super::require_survey_restore("fixture.rock", Err::<(), _>("restore failed"))
+            .expect_err("restore failure must not be discarded");
+        assert!(err.to_string().contains("fixture.rock"));
+        assert!(err.to_string().contains("restore failed"));
+    }
+
+    #[test]
+    fn only_broken_candidates_may_be_classified_as_parse_errors() {
+        let err = super::require_expected_survey_update(
+            super::EditKind::Body,
+            Err::<(), _>("unexpected update failure"),
+        )
+        .expect_err("a normal candidate failure must abort the survey");
+        assert!(err.to_string().contains("unexpected update failure"));
+        assert!(super::require_expected_survey_update(
+            super::EditKind::Broken,
+            Err::<(), _>("expected parse failure"),
+        )
+        .expect("broken candidates classify expected parse failures")
+        .is_none());
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum EditKind {
     Body,
@@ -100,6 +134,31 @@ fn line_of(text: &str, off: usize) -> u32 {
     offset_to_position(text, off.min(text.len())).line + 1
 }
 
+fn read_survey_source(path: &str) -> Result<String> {
+    std::fs::read_to_string(path)
+        .map_err(|e| anyhow::anyhow!("lsp-survey failed to read source `{path}`: {e}"))
+}
+
+fn require_survey_restore<T, E: std::fmt::Display>(
+    path: &str,
+    result: std::result::Result<T, E>,
+) -> Result<()> {
+    result
+        .map(|_| ())
+        .map_err(|e| anyhow::anyhow!("lsp-survey failed to restore `{path}`: {e}"))
+}
+
+fn require_expected_survey_update<T, E: std::fmt::Display>(
+    kind: EditKind,
+    result: std::result::Result<T, E>,
+) -> Result<Option<T>> {
+    match result {
+        Ok(update) => Ok(Some(update)),
+        Err(_) if kind == EditKind::Broken => Ok(None),
+        Err(e) => anyhow::bail!("lsp-survey {} candidate update failed: {e}", kind.label()),
+    }
+}
+
 /// Short `dir/file.rock` form for the tables.
 fn short(file: &str) -> String {
     let p = Path::new(file);
@@ -115,7 +174,7 @@ fn short(file: &str) -> String {
 fn collect_stats(
     session: &bone_incremental::session::Session,
     proj_marker: &str,
-) -> (Vec<ModStat>, Vec<FnStat>) {
+) -> Result<(Vec<ModStat>, Vec<FnStat>)> {
     let ws = &session.ws;
 
     // One O(workspace) pass: tally call sites resolving to each (module, fn).
@@ -136,7 +195,7 @@ fn collect_stats(
         if file.starts_with("<bone-stdlib:") || !file.contains(proj_marker) {
             continue;
         }
-        let text = std::fs::read_to_string(&file).unwrap_or_default();
+        let text = read_survey_source(&file)?;
 
         // Module fan-in: distinct modules depending on any symbol defined here.
         let mut dependent_mods = std::collections::HashSet::new();
@@ -201,7 +260,7 @@ fn collect_stats(
             fan_in: dependent_mods.len(),
         });
     }
-    (mods, fns)
+    Ok((mods, fns))
 }
 
 /// BODY edit: flip a digit in the fn body, else insert a space just inside `{`.
@@ -278,7 +337,7 @@ pub fn lsp_survey(path: &str, iters: usize, warmup: usize, json_out: bool) -> Re
     let mut session = crate::bone_backend::bone_session(files)
         .map_err(|e| anyhow::anyhow!("bone session warm failed: {}", e.message))?;
 
-    let (mut mods, mut fns) = collect_stats(&session, &proj_marker);
+    let (mut mods, mut fns) = collect_stats(&session, &proj_marker)?;
     if fns.is_empty() {
         anyhow::bail!("no editable project functions found under `{path}`");
     }
@@ -330,18 +389,15 @@ pub fn lsp_survey(path: &str, iters: usize, warmup: usize, json_out: bool) -> Re
         let canon = fs_err::canonicalize(&f.file)
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_else(|_| f.file.clone());
-        let orig = match std::fs::read_to_string(&canon) {
-            Ok(t) => t,
-            Err(_) => continue,
-        };
+        let orig = read_survey_source(&canon)?;
         let Some(edited) = make_edit(&orig, f, *kind) else { continue };
 
         // Ground-truth tier + reinferred count from the Session (then revert).
-        let (tier, reinferred) = match session.update_file(&canon, &edited) {
-            Ok(u) => (format!("{:?}", u.tier), u.reinferred.len()),
-            Err(_) => ("ParseErr".to_string(), 0),
+        let (tier, reinferred) = match require_expected_survey_update(*kind, session.update_file(&canon, &edited))? {
+            Some(u) => (format!("{:?}", u.tier), u.reinferred.len()),
+            None => ("ParseErr".to_string(), 0),
         };
-        let _ = session.update_file(&canon, &orig);
+        require_survey_restore(&canon, session.update_file(&canon, &orig))?;
 
         // Time the live LSP path on the BoneWorkspace, alternating edited/orig.
         bone.update(&canon, orig.clone());

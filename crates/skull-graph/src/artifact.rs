@@ -46,7 +46,35 @@ use crate::instance_graph::{
     self, BoundaryClass, Concreteness, DeclKey, Instance, InstanceGraph, Site, SiteOutcome,
 };
 use crate::target_projection::{supports, CpuTargetSpec, TargetSpec};
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
+
+#[cfg(feature = "test-hooks")]
+thread_local! {
+    static REALIZE_INVOCATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static FRESH_INDEX_SITE_ROWS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+pub fn realize_invocations() -> u64 {
+    #[cfg(feature = "test-hooks")]
+    {
+        return REALIZE_INVOCATIONS.with(std::cell::Cell::get);
+    }
+    #[cfg(not(feature = "test-hooks"))]
+    {
+        0
+    }
+}
+
+pub fn fresh_index_site_rows() -> u64 {
+    #[cfg(feature = "test-hooks")]
+    {
+        return FRESH_INDEX_SITE_ROWS.with(std::cell::Cell::get);
+    }
+    #[cfg(not(feature = "test-hooks"))]
+    {
+        0
+    }
+}
 
 /// Where an artifact's realization of a callee comes from, when the
 /// declaration's own body is not it.
@@ -447,6 +475,7 @@ pub struct ArtifactCensus {
 }
 
 /// One target's realization of a graph it did not build.
+#[derive(Clone)]
 pub struct ArtifactView {
     pub spec: TargetSpec,
     /// The artifact's root instances -- realizable emission roots, plus the
@@ -567,9 +596,984 @@ pub struct ArtifactView {
     /// therefore always the representative already.
     pub unrepresented_publications: Vec<FuncRef>,
     pub publication_collisions: Vec<PublicationCollision>,
+    index: ArtifactIndex,
+}
+
+#[derive(Clone, Default)]
+struct ArtifactIndex {
+    realizable: FxHashMap<Instance, Result<Realized, Unrealizable>>,
+    outgoing: FxHashMap<Instance, FxHashMap<Site, Instance>>,
+    incoming: FxHashMap<Instance, FxHashSet<Instance>>,
+    site_counts: FxHashMap<Instance, usize>,
+    fn_values_by_caller: FxHashMap<Instance, FxHashSet<Instance>>,
+    fn_value_users: FxHashMap<Instance, FxHashSet<Instance>>,
+    severed_by_caller: FxHashMap<Instance, Vec<Severed>>,
+    exclusions: FxHashMap<Instance, Exclusion>,
+    symbol_users: FxHashMap<String, FxHashSet<Instance>>,
+    realization_by_decl: FxHashMap<FuncRef, FxHashSet<Instance>>,
+    instances_by_decl: FxHashMap<FuncRef, FxHashSet<Instance>>,
+    inline_by_owner: BTreeMap<DeclKey, (Vec<InlineDep>, Vec<UnresolvedInlineDep>)>,
+    inline_consumers: BTreeMap<DeclKey, BTreeSet<DeclKey>>,
+    inline_dependencies_by_owner: BTreeMap<DeclKey, BTreeSet<DeclKey>>,
+    publication_candidates: BTreeMap<Instance, String>,
+    publication_decls: BTreeMap<DeclKey, BTreeSet<Instance>>,
+    publication_users: BTreeMap<String, BTreeSet<Instance>>,
+    root_decls: BTreeSet<DeclKey>,
+}
+
+#[derive(Debug)]
+pub struct ArtifactUpdateStats {
+    pub revisited: usize,
+    pub added: usize,
+    pub removed: usize,
+    /// Local queue subjects and neighbours actually processed by the delta.
+    pub iterations: usize,
+    /// Root entries examined while applying an explicit root delta.
+    pub root_entries_examined: usize,
+    /// Rows traversed in the connected reverse indexes while retracting and
+    /// reinstalling local publications, inline dependencies, and findings.
+    pub local_index_rows_examined: usize,
+    /// Whole-output scans performed by a local update. The ordinary delta path
+    /// keeps this at zero; a nonzero value is a structural finding, not a
+    /// timing claim.
+    pub broad_scans: usize,
+}
+
+fn severed_order(left: &Severed, right: &Severed) -> std::cmp::Ordering {
+    left.caller
+        .cmp(&right.caller)
+        .then_with(|| left.site.cmp(&right.site))
+        .then_with(|| left.callee.cmp(&right.callee))
+        .then_with(|| left.cause.cmp(&right.cause))
+}
+
+fn func_ref_order(left: &FuncRef, right: &FuncRef) -> std::cmp::Ordering {
+    left.module
+        .index()
+        .cmp(&right.module.index())
+        .then_with(|| u32::from(left.func.into_raw()).cmp(&u32::from(right.func.into_raw())))
+}
+
+fn inline_dep_order(left: &InlineDep, right: &InlineDep) -> std::cmp::Ordering {
+    func_ref_order(&left.owner, &right.owner).then_with(|| left.entry.cmp(right.entry))
+}
+
+fn unresolved_inline_dep_order(
+    left: &UnresolvedInlineDep,
+    right: &UnresolvedInlineDep,
+) -> std::cmp::Ordering {
+    func_ref_order(&left.owner, &right.owner).then_with(|| left.entry.cmp(right.entry))
+}
+
+fn publication_candidates(
+    ws: &Workspace,
+    req: &ArtifactRequest<'_>,
+) -> BTreeMap<Instance, String> {
+    let target = req.spec.cpu();
+    req.roots
+        .iter()
+        .filter_map(|r| {
+            let f = &ws.module(r.module).functions[r.func];
+            (f.annotations.iter().any(|a| a.name.name.as_str() == "nomangle")
+                && instance_graph::serves(
+                    f.backend,
+                    target.execution.backend.unwrap_or(FnBackend::Any),
+                ))
+                .then(|| (Instance::base(*r), f.name.to_string()))
+        })
+        .collect()
 }
 
 impl ArtifactView {
+    #[cfg(feature = "test-hooks")]
+    fn forced_broad_scan_count(&self) -> usize {
+        if std::env::var_os("SKULL_FORCE_ARTIFACT_BROAD_SCAN").is_none() {
+            return 0;
+        }
+        self.realization.keys().count()
+            + self
+                .index
+                .publication_users
+                .values()
+                .map(BTreeSet::len)
+                .sum::<usize>()
+    }
+
+    #[cfg(not(feature = "test-hooks"))]
+    fn forced_broad_scan_count(&self) -> usize {
+        0
+    }
+
+    /// Apply graph deltas to this target without re-realizing the workspace.
+    /// The retained view owns the indexes needed to retract an old owner and
+    /// install its replacement; unchanged owners keep their immutable output.
+    pub fn update_local(
+        &mut self,
+        ws: &Workspace,
+        g: &InstanceGraph,
+        req: &ArtifactRequest<'_>,
+        revisited: &BTreeSet<Instance>,
+        added: &BTreeSet<Instance>,
+        removed: &BTreeSet<Instance>,
+    ) -> ArtifactUpdateStats {
+        let old_roots = self.index.root_decls.clone();
+        let new_roots: BTreeSet<DeclKey> = req
+            .roots
+            .iter()
+            .map(|r| DeclKey(skull_mir::lower::canonical_variant(ws, *r)))
+            .collect();
+        let root_added: BTreeSet<DeclKey> = new_roots.difference(&old_roots).cloned().collect();
+        let root_removed: BTreeSet<DeclKey> = old_roots.difference(&new_roots).cloned().collect();
+        let stats = self.update_local_with_decl_delta(
+            ws,
+            g,
+            req,
+            revisited,
+            added,
+            removed,
+            &root_added,
+            &root_removed,
+        );
+        stats
+    }
+
+    /// Apply a graph delta and an explicit root delta. Production callers keep
+    /// the requested root set in their own cache and pass only changed roots;
+    /// [`Self::update_local`] remains the full-request oracle for callers that
+    /// do not retain that state.
+    pub fn update_local_with_root_delta(
+        &mut self,
+        ws: &Workspace,
+        g: &InstanceGraph,
+        req: &ArtifactRequest<'_>,
+        revisited: &BTreeSet<Instance>,
+        added: &BTreeSet<Instance>,
+        removed: &BTreeSet<Instance>,
+        root_added: &[FuncRef],
+        root_removed: &[FuncRef],
+    ) -> ArtifactUpdateStats {
+        let root_added: BTreeSet<DeclKey> = root_added
+            .iter()
+            .map(|r| DeclKey(skull_mir::lower::canonical_variant(ws, *r)))
+            .collect();
+        let root_removed: BTreeSet<DeclKey> = root_removed
+            .iter()
+            .map(|r| DeclKey(skull_mir::lower::canonical_variant(ws, *r)))
+            .collect();
+        self.update_local_with_decl_delta(
+            ws,
+            g,
+            req,
+            revisited,
+            added,
+            removed,
+            &root_added,
+            &root_removed,
+        )
+    }
+
+    fn update_local_with_decl_delta(
+        &mut self,
+        ws: &Workspace,
+        g: &InstanceGraph,
+        req: &ArtifactRequest<'_>,
+        revisited: &BTreeSet<Instance>,
+        added: &BTreeSet<Instance>,
+        removed: &BTreeSet<Instance>,
+        root_added: &BTreeSet<DeclKey>,
+        root_removed: &BTreeSet<DeclKey>,
+    ) -> ArtifactUpdateStats {
+        let broad_scans = self.forced_broad_scan_count();
+        let mut local_index_rows_examined = 0;
+        let mut root_subjects = BTreeSet::new();
+        for decl in root_added.iter().chain(root_removed) {
+            local_index_rows_examined += 1;
+            root_subjects.extend(
+                self.index
+                    .instances_by_decl
+                    .get(&decl.0)
+                    .into_iter()
+                    .flat_map(|instances| {
+                        local_index_rows_examined += instances.len();
+                        instances.iter().cloned()
+                    }),
+            );
+            let instances: Vec<_> = g.instances_of(decl.0).cloned().collect();
+            local_index_rows_examined += instances.len();
+            root_subjects.extend(instances);
+        }
+        let mut subjects = revisited.clone();
+        subjects.extend(added.iter().cloned());
+        subjects.extend(removed.iter().cloned());
+        subjects.extend(root_subjects.iter().cloned());
+        if subjects.is_empty() && root_added.is_empty() && root_removed.is_empty() {
+            self.shared_instances = g.instances.len();
+            return ArtifactUpdateStats {
+                revisited: 0,
+                added: 0,
+                removed: 0,
+                iterations: 0,
+                root_entries_examined: 0,
+                local_index_rows_examined,
+                broad_scans,
+            };
+        }
+
+        let old_root_subjects: BTreeSet<Instance> = subjects
+            .iter()
+            .filter(|instance| self.roots.contains(*instance))
+            .cloned()
+            .collect();
+        let old_realizable: FxHashMap<Instance, Result<Realized, Unrealizable>> = subjects
+            .iter()
+            .filter_map(|i| self.index.realizable.get(i).map(|r| (i.clone(), *r)))
+            .collect();
+        let old_outgoing: FxHashMap<Instance, FxHashMap<Site, Instance>> = subjects
+            .iter()
+            .filter_map(|i| self.index.outgoing.get(i).map(|edges| (i.clone(), edges.clone())))
+            .collect();
+        let old_predecessors: FxHashMap<Instance, FxHashSet<Instance>> = subjects
+            .iter()
+            .filter_map(|i| self.index.incoming.get(i).map(|preds| (i.clone(), preds.clone())))
+            .collect();
+        let old_symbols: BTreeMap<Instance, String> = subjects
+            .iter()
+            .filter_map(|i| self.symbols.get(i).map(|symbol| (i.clone(), symbol.clone())))
+            .collect();
+
+        // Remove only the outgoing rows owned by the changed subjects. The
+        // old rows remain in `old_outgoing` for the local dirty-region walk.
+        for i in &subjects {
+            local_index_rows_examined += 1;
+            if let Some(edges) = self.index.outgoing.remove(i) {
+                local_index_rows_examined += edges.len();
+                for callee in edges.values() {
+                    if let Some(preds) = self.index.incoming.get_mut(callee) {
+                        preds.remove(i);
+                        if preds.is_empty() {
+                            self.index.incoming.remove(callee);
+                        }
+                    }
+                }
+            }
+            if let Some(values) = self.index.fn_values_by_caller.remove(i) {
+                local_index_rows_examined += values.len();
+                for callee in values {
+                    if let Some(users) = self.index.fn_value_users.get_mut(&callee) {
+                        users.remove(i);
+                        if users.is_empty() {
+                            self.index.fn_value_users.remove(&callee);
+                            self.fn_value_targets.remove(&callee);
+                        }
+                    }
+                }
+            }
+            self.index.severed_by_caller.remove(i);
+        }
+
+        let target = req.spec.cpu();
+        for i in &subjects {
+            local_index_rows_examined += 1;
+            if !g.instances.contains(i) {
+                self.index.realizable.remove(i);
+                continue;
+            }
+            self.index.realizable.insert(
+                i.clone(),
+                realize_decl(ws, i.func, &g.erased_entries, &target, &req.mappings),
+            );
+            let sites = g.sites_of(i).cloned().unwrap_or_default();
+            self.index.site_counts.insert(i.clone(), sites.len());
+            for (site, record) in &sites {
+                local_index_rows_examined += 1;
+                let SiteOutcome::Resolved(callee) = &record.outcome else { continue };
+                self.index.outgoing.entry(i.clone()).or_default().insert(site.clone(), callee.clone());
+                self.index.incoming.entry(callee.clone()).or_default().insert(i.clone());
+                if site.op == skull_mir::site::SiteOp::FnValue {
+                    self.index.fn_values_by_caller.entry(i.clone()).or_default().insert(callee.clone());
+                    self.index.fn_value_users.entry(callee.clone()).or_default().insert(i.clone());
+                }
+            }
+        }
+
+        let mut root_entries_examined = 0;
+        for decl in root_removed {
+            local_index_rows_examined += 1;
+            root_entries_examined += usize::from(self.index.root_decls.remove(decl));
+        }
+        for decl in root_added {
+            local_index_rows_examined += 1;
+            root_entries_examined += usize::from(self.index.root_decls.insert(decl.clone()));
+        }
+        for i in &subjects {
+            local_index_rows_examined += 1;
+            self.roots.remove(i);
+            self.declared_roots.remove(i);
+        }
+        for i in subjects.iter().filter(|i| g.instances.contains(*i)) {
+            local_index_rows_examined += 1;
+            let declared = self.index.root_decls.contains(&DeclKey(i.func));
+            let structural = g.is_always_emitted_target(i);
+            if (declared || structural) && self.index.realizable[i].is_ok() {
+                self.roots.insert(i.clone());
+                if declared {
+                    self.declared_roots.insert(i.clone());
+                }
+            }
+        }
+        let root_delta_changed = !root_added.is_empty() || !root_removed.is_empty();
+
+        let edge_changed = subjects.iter().any(|i| old_outgoing.get(i) != self.index.outgoing.get(i));
+        let realization_changed = subjects.iter().any(|i| old_realizable.get(i) != self.index.realizable.get(i));
+        let roots_changed = subjects
+            .iter()
+            .any(|i| old_root_subjects.contains(i) != self.roots.contains(i));
+        if !edge_changed
+            && !realization_changed
+            && !roots_changed
+            && !root_delta_changed
+            && added.is_empty()
+            && removed.is_empty()
+        {
+            self.shared_instances = g.instances.len();
+            return ArtifactUpdateStats {
+                revisited: revisited.len(),
+                added: added.len(),
+                removed: removed.len(),
+                iterations: subjects.len() + local_index_rows_examined,
+                root_entries_examined,
+                local_index_rows_examined,
+                broad_scans,
+            };
+        }
+
+        // Only the connected region around a changed owner can change
+        // reachability. This uses the retained view's predecessor/successor
+        // indexes; no graph-wide candidate scan is needed.
+        let mut dirty = subjects.clone();
+        let mut queue: VecDeque<Instance> = subjects.iter().cloned().collect();
+        while let Some(i) = queue.pop_front() {
+            local_index_rows_examined += 1;
+            let mut neighbours = Vec::new();
+            if let Some(edges) = old_outgoing.get(&i) {
+                local_index_rows_examined += edges.len();
+                neighbours.extend(edges.values().cloned());
+            }
+            if let Some(edges) = self.index.outgoing.get(&i) {
+                local_index_rows_examined += edges.len();
+                neighbours.extend(edges.values().cloned());
+            }
+            if let Some(preds) = self.index.incoming.get(&i) {
+                local_index_rows_examined += preds.len();
+                neighbours.extend(preds.iter().cloned());
+            }
+            if let Some(preds) = old_predecessors.get(&i) {
+                local_index_rows_examined += preds.len();
+                neighbours.extend(preds.iter().cloned());
+            }
+            for neighbour in neighbours {
+                if dirty.insert(neighbour.clone()) {
+                    queue.push_back(neighbour);
+                }
+            }
+        }
+
+        let mut reachable_dirty = BTreeSet::new();
+        let mut reach_queue: VecDeque<Instance> = self
+            .roots
+            .iter()
+            .filter(|i| dirty.contains(*i))
+            .cloned()
+            .collect();
+        while let Some(i) = reach_queue.pop_front() {
+            local_index_rows_examined += 1;
+            if !dirty.contains(&i) || reachable_dirty.contains(&i) {
+                continue;
+            }
+            let Some(Ok(realized)) = self.index.realizable.get(&i) else { continue };
+            reachable_dirty.insert(i.clone());
+            if realized.kind.boundary_class().is_some() {
+                continue;
+            }
+            if let Some(edges) = self.index.outgoing.get(&i) {
+                local_index_rows_examined += edges.len();
+                for callee in edges.values() {
+                    if dirty.contains(callee) {
+                        reach_queue.push_back(callee.clone());
+                    }
+                }
+            }
+        }
+        for i in &dirty {
+            local_index_rows_examined += 1;
+            self.index.severed_by_caller.remove(i);
+            self.remove_instance_output(i, self.index.site_counts.get(i).copied().unwrap_or(0));
+            self.index.exclusions.remove(i);
+        }
+        for i in removed {
+            local_index_rows_examined += 1;
+            self.index.site_counts.remove(i);
+        }
+        for i in dirty.iter().filter(|i| g.instances.contains(*i)) {
+            local_index_rows_examined += 1;
+            let Some(result) = self.index.realizable.get(i).copied() else { continue };
+            if reachable_dirty.contains(i) {
+                let realized = result.expect("retained artifact instance must be realizable");
+                self.install_instance_output(ws, g, req, i, realized);
+                let declared = self.index.root_decls.contains(&DeclKey(i.func));
+                if declared || g.is_always_emitted_target(i) {
+                    self.roots.insert(i.clone());
+                    if declared {
+                        self.declared_roots.insert(i.clone());
+                    }
+                }
+                if realized.kind.boundary_class().is_none() {
+                    let mut severed = Vec::new();
+                    if let Some(sites) = self.index.outgoing.get(i) {
+                        for (site, callee) in sites {
+                            if let Some(Err(cause)) = self.index.realizable.get(callee) {
+                                severed.push(Severed {
+                                    caller: i.clone(),
+                                    site: site.clone(),
+                                    callee: callee.clone(),
+                                    cause: *cause,
+                                });
+                            }
+                        }
+                    }
+                    self.index.severed_by_caller.insert(i.clone(), severed);
+                }
+            } else {
+                let cause = match result {
+                    Ok(_) => Exclusion::Unreachable,
+                    Err(reason) => Exclusion::Unrealizable(reason),
+                };
+                self.index.exclusions.insert(i.clone(), cause);
+            }
+        }
+
+        let mut changed_decls = BTreeSet::new();
+        for i in &dirty {
+            local_index_rows_examined += 1;
+            changed_decls.insert(DeclKey(i.func));
+            if let Some(Ok(realized)) = old_realizable.get(i) {
+                changed_decls.insert(DeclKey(realized.decl));
+            }
+            if let Some(Ok(realized)) = self.index.realizable.get(i) {
+                changed_decls.insert(DeclKey(realized.decl));
+            }
+        }
+        local_index_rows_examined += self.refresh_inline_local(ws, g, &changed_decls);
+        local_index_rows_examined += self.refresh_opaque_roots(g, &changed_decls);
+        let mut changed_publication_symbols: BTreeSet<String> = dirty
+            .iter()
+            .filter_map(|instance| self.index.publication_candidates.get(instance).cloned())
+            .collect();
+        let (publication_symbols, publication_rows) = self.refresh_publication_candidates(
+            ws,
+            req,
+            root_added,
+            root_removed,
+        );
+        changed_publication_symbols.extend(publication_symbols);
+        local_index_rows_examined += publication_rows;
+        local_index_rows_examined += self.refresh_publications_local(g, &changed_publication_symbols);
+        local_index_rows_examined += self.refresh_excluded_local(&dirty);
+        local_index_rows_examined += self.refresh_severed_local(&dirty);
+        let mut changed_symbols: BTreeSet<String> = old_symbols.into_values().collect();
+        changed_symbols.extend(dirty.iter().filter_map(|i| self.symbols.get(i).cloned()));
+        local_index_rows_examined += self.refresh_symbol_collisions_local(&changed_symbols);
+        self.shared_instances = g.instances.len();
+        ArtifactUpdateStats {
+            revisited: revisited.len(),
+            added: added.len(),
+            removed: removed.len(),
+            iterations: dirty.len() + reachable_dirty.len() + local_index_rows_examined,
+            root_entries_examined,
+            local_index_rows_examined,
+            broad_scans,
+        }
+    }
+
+    fn remove_instance_output(&mut self, i: &Instance, old_site_count: usize) {
+        self.roots.remove(i);
+        self.declared_roots.remove(i);
+        if let Some(symbol) = self.symbols.remove(i) {
+            if let Some(users) = self.index.symbol_users.get_mut(&symbol) {
+                users.remove(i);
+                if users.is_empty() {
+                    self.index.symbol_users.remove(&symbol);
+                }
+            }
+        }
+        if let Some(realized) = self.realization.remove(i) {
+            let decl = realized.decl;
+            let remove_decl = self.index.realization_by_decl.get_mut(&decl).is_some_and(|users| {
+                users.remove(i);
+                users.is_empty()
+            });
+            if remove_decl {
+                self.index.realization_by_decl.remove(&decl);
+            }
+            let instance_decl = i.func;
+            let remove_instance_decl = self
+                .index
+                .instances_by_decl
+                .get_mut(&instance_decl)
+                .is_some_and(|users| {
+                    users.remove(i);
+                    users.is_empty()
+                });
+            if remove_instance_decl {
+                self.index.instances_by_decl.remove(&instance_decl);
+            }
+            self.boundaries.remove(i);
+            if realized.kind.boundary_class().is_none() {
+                self.instances.remove(i);
+                self.sites_walked = self.sites_walked.saturating_sub(old_site_count);
+            }
+        }
+        self.publisher_lanes.remove(i);
+        self.missing_substitutions.remove(i);
+        if let Some(values) = self.index.fn_values_by_caller.get(i).cloned() {
+            for callee in values {
+                if let Some(users) = self.index.fn_value_users.get_mut(&callee) {
+                    users.remove(i);
+                    if users.is_empty() {
+                        self.index.fn_value_users.remove(&callee);
+                        self.fn_value_targets.remove(&callee);
+                    }
+                }
+            }
+        }
+    }
+
+    fn install_instance_output(
+        &mut self,
+        ws: &Workspace,
+        g: &InstanceGraph,
+        req: &ArtifactRequest<'_>,
+        i: &Instance,
+        realized: Realized,
+    ) {
+        let symbol = req.symbols.symbol(ws, g, i, realized);
+        self.symbols.insert(i.clone(), symbol.clone());
+        self.index.symbol_users.entry(symbol.clone()).or_default().insert(i.clone());
+        self.realization.insert(i.clone(), realized);
+        self.index
+            .realization_by_decl
+            .entry(realized.decl)
+            .or_default()
+            .insert(i.clone());
+        self.index
+            .instances_by_decl
+            .entry(i.func)
+            .or_default()
+            .insert(i.clone());
+        if realized.kind.boundary_class().is_none() {
+            self.instances.insert(i.clone());
+            self.sites_walked += self.index.site_counts.get(i).copied().unwrap_or(0);
+        }
+        if let Some(class) = realized.kind.boundary_class() {
+            self.boundaries.insert(
+                i.clone(),
+                BoundaryId {
+                    declaration: realized.decl,
+                    class,
+                    target: req.spec.cpu(),
+                    symbol,
+                },
+            );
+        }
+        if let Some(values) = self.index.fn_values_by_caller.get(i) {
+            for callee in values {
+                self.fn_value_targets.insert(callee.clone());
+            }
+        }
+        if g.concreteness(i) == Concreteness::Missing {
+            self.missing_substitutions.insert(i.clone());
+        }
+        if let Some(scx) = req.spec.execution.backend.map(|b| {
+            skull_mir::lower::ScalarCtx::new(ws)
+                .with_target(b)
+                .sharing(g.interner().clone())
+        }) {
+            if matches!(realized.kind, Realization::ForeignBody(BoundaryClass::InlineBody)) {
+                if let Ok(signature) = crate::concrete_body::concrete_signature_for_instance(ws, g, i) {
+                    let selected = Instance { func: realized.decl, args: i.args.clone() };
+                    self.publisher_lanes.insert(
+                        i.clone(),
+                        skull_mir::lower::BackendFnAbiPlan::for_concrete_signature(
+                            ws, &scx, &selected, &signature,
+                        )
+                        .result_lanes(),
+                    );
+                }
+            }
+        }
+    }
+
+    fn refresh_inline_local(
+        &mut self,
+        ws: &Workspace,
+        g: &InstanceGraph,
+        changed_decls: &BTreeSet<DeclKey>,
+    ) -> usize {
+        let mut rows_examined = 0;
+        let mut owners = BTreeSet::new();
+        for decl in changed_decls {
+            if let Some(consumers) = self.index.inline_consumers.get(decl) {
+                rows_examined += consumers.len();
+                owners.extend(consumers.iter().cloned());
+            }
+            if g.inline_body_deps.contains_key(decl) {
+                rows_examined += 1;
+                owners.insert(decl.clone());
+            }
+        }
+        if owners.is_empty() {
+            return rows_examined;
+        }
+        for owner in &owners {
+            rows_examined += 1;
+            self.remove_inline_rows(owner.0);
+            if let Some(dependencies) = self.index.inline_dependencies_by_owner.remove(owner) {
+                rows_examined += dependencies.len();
+                for dependency in dependencies {
+                    if let Some(consumers) = self.index.inline_consumers.get_mut(&dependency) {
+                        consumers.remove(owner);
+                        if consumers.is_empty() {
+                            self.index.inline_consumers.remove(&dependency);
+                        }
+                    }
+                }
+            }
+            let Some(entries) = g.inline_body_deps.get(owner) else {
+                self.index.inline_by_owner.remove(owner);
+                continue;
+            };
+            if !self.index.realization_by_decl.contains_key(&owner.0)
+                && !self.index.instances_by_decl.contains_key(&owner.0)
+            {
+                self.index.inline_by_owner.remove(owner);
+                continue;
+            }
+            for entry in entries {
+                rows_examined += 1;
+                if let Some(rep) = instance_graph::stdlib_entry_representative(ws, entry) {
+                    let dependency = DeclKey(rep);
+                    self.index
+                        .inline_consumers
+                        .entry(dependency.clone())
+                        .or_default()
+                        .insert(owner.clone());
+                    self.index
+                        .inline_dependencies_by_owner
+                        .entry(owner.clone())
+                        .or_default()
+                        .insert(dependency);
+                }
+            }
+            let mut inline = Vec::new();
+            let mut unresolved = Vec::new();
+            for entry in entries {
+                rows_examined += 1;
+                let Some(rep) = instance_graph::stdlib_entry_representative(ws, entry) else {
+                    unresolved.push(UnresolvedInlineDep {
+                        owner: owner.0,
+                        entry,
+                        reason: "no single declaration supplies this entry",
+                    });
+                    continue;
+                };
+                let Some(instances) = self.index.instances_by_decl.get(&rep) else {
+                    unresolved.push(UnresolvedInlineDep {
+                        owner: owner.0,
+                        entry,
+                        reason: "the serving declaration is not retained by the artifact",
+                    });
+                    continue;
+                };
+                rows_examined += instances.len();
+                let mut matching = instances.iter();
+                let Some(inst) = matching.next() else {
+                    unresolved.push(UnresolvedInlineDep {
+                        owner: owner.0,
+                        entry,
+                        reason: "the serving declaration is not retained by the artifact",
+                    });
+                    continue;
+                };
+                if matching.next().is_some() {
+                    unresolved.push(UnresolvedInlineDep {
+                        owner: owner.0,
+                        entry,
+                        reason: "the serving declaration has more than one retained instance",
+                    });
+                    continue;
+                }
+                let callee = match self.boundaries.get(inst) {
+                    Some(id) => RealizedCallee::Boundary(id.clone()),
+                    None => RealizedCallee::Rock(inst.clone()),
+                };
+                inline.push(InlineDep { owner: owner.0, entry, callee });
+            }
+            self.index.inline_by_owner.insert(owner.clone(), (inline, unresolved));
+            if let Some((deps, unresolved)) = self.index.inline_by_owner.get(owner) {
+                rows_examined += deps.len() + unresolved.len();
+                for dep in deps {
+                    let position = self
+                        .inline_deps
+                        .binary_search_by(|current| inline_dep_order(current, dep))
+                        .unwrap_or_else(|position| position);
+                    self.inline_deps.insert(position, dep.clone());
+                }
+                for dep in unresolved {
+                    let position = self
+                        .unresolved_inline_deps
+                        .binary_search_by(|current| unresolved_inline_dep_order(current, dep))
+                        .unwrap_or_else(|position| position);
+                    self.unresolved_inline_deps.insert(position, dep.clone());
+                }
+            }
+        }
+        rows_examined
+    }
+
+    fn remove_inline_rows(&mut self, owner: FuncRef) {
+        while let Ok(position) = self
+            .inline_deps
+            .binary_search_by(|current| func_ref_order(&current.owner, &owner))
+        {
+            self.inline_deps.remove(position);
+        }
+        while let Ok(position) = self
+            .unresolved_inline_deps
+            .binary_search_by(|current| func_ref_order(&current.owner, &owner))
+        {
+            self.unresolved_inline_deps.remove(position);
+        }
+    }
+
+    fn refresh_opaque_roots(&mut self, g: &InstanceGraph, changed_decls: &BTreeSet<DeclKey>) -> usize {
+        for owner in changed_decls {
+            self.opaque_boundary_roots.remove(owner);
+            if self.index.realization_by_decl.contains_key(&owner.0)
+                || self.index.instances_by_decl.contains_key(&owner.0)
+            {
+                if let Some(targets) = g.inline_body_nomangle_roots.get(owner) {
+                    self.opaque_boundary_roots.insert(owner.clone(), targets.clone());
+                }
+            }
+        }
+        changed_decls.len()
+    }
+
+    fn refresh_publication_candidates(
+        &mut self,
+        ws: &Workspace,
+        req: &ArtifactRequest<'_>,
+        root_added: &BTreeSet<DeclKey>,
+        root_removed: &BTreeSet<DeclKey>,
+    ) -> (BTreeSet<String>, usize) {
+        let mut changed = BTreeSet::new();
+        let mut rows_examined = root_added.len() + root_removed.len();
+        for decl in root_removed {
+            let Some(instances) = self.index.publication_decls.remove(decl) else { continue };
+            rows_examined += instances.len();
+            for instance in instances {
+                let Some(symbol) = self.index.publication_candidates.remove(&instance) else {
+                    continue;
+                };
+                changed.insert(symbol.clone());
+                if let Some(users) = self.index.publication_users.get_mut(&symbol) {
+                    rows_examined += users.len();
+                    users.remove(&instance);
+                    if users.is_empty() {
+                        self.index.publication_users.remove(&symbol);
+                    }
+                }
+                self.publications.remove(&instance);
+                if let Ok(position) = self
+                    .unrepresented_publications
+                    .binary_search_by(|current| func_ref_order(current, &instance.func))
+                {
+                    self.unrepresented_publications.remove(position);
+                }
+            }
+        }
+        let target = req.spec.cpu();
+        for decl in root_added {
+            let f = &ws.module(decl.0.module).functions[decl.0.func];
+            if !f.annotations.iter().any(|a| a.name.name.as_str() == "nomangle")
+                || !instance_graph::serves(
+                    f.backend,
+                    target.execution.backend.unwrap_or(FnBackend::Any),
+                )
+            {
+                continue;
+            }
+            let instance = Instance::base(decl.0);
+            let symbol = f.name.to_string();
+            if self
+                .index
+                .publication_candidates
+                .insert(instance.clone(), symbol.clone())
+                .is_some()
+            {
+                continue;
+            }
+            self.index
+                .publication_decls
+                .entry(decl.clone())
+                .or_default()
+                .insert(instance.clone());
+            self.index
+                .publication_users
+                .entry(symbol.clone())
+                .or_default()
+                .insert(instance);
+            changed.insert(symbol);
+        }
+        (changed, rows_examined)
+    }
+
+    fn refresh_publications_local(
+        &mut self,
+        g: &InstanceGraph,
+        changed_symbols: &BTreeSet<String>,
+    ) -> usize {
+        let mut rows_examined = changed_symbols.len();
+        for symbol in changed_symbols {
+            let users = self
+                .index
+                .publication_users
+                .get(symbol)
+                .cloned()
+                .unwrap_or_default();
+            rows_examined += users.len();
+            for instance in &users {
+                self.publications.remove(instance);
+                let fref = instance.func;
+                if let Ok(position) = self
+                    .unrepresented_publications
+                    .binary_search_by(|current| func_ref_order(current, &fref))
+                {
+                    self.unrepresented_publications.remove(position);
+                }
+            }
+            if let Ok(position) = self
+                .publication_collisions
+                .binary_search_by(|row| row.symbol.as_str().cmp(symbol.as_str()))
+            {
+                self.publication_collisions.remove(position);
+            }
+            for instance in &users {
+                if !g.instances.contains(instance) {
+                    let fref = instance.func;
+                    let position = self
+                        .unrepresented_publications
+                        .binary_search_by(|current| func_ref_order(current, &fref))
+                        .unwrap_or_else(|position| position);
+                    self.unrepresented_publications.insert(position, fref);
+                }
+            }
+            let represented: Vec<Instance> = users
+                .iter()
+                .filter(|instance| g.instances.contains(*instance))
+                .cloned()
+                .collect();
+            rows_examined += represented.len();
+            if represented.len() > 1 {
+                let row = PublicationCollision {
+                    symbol: symbol.clone(),
+                    instances: represented,
+                };
+                let position = self
+                    .publication_collisions
+                    .binary_search_by(|current| current.symbol.cmp(symbol))
+                    .unwrap_or_else(|position| position);
+                self.publication_collisions.insert(position, row);
+            } else if let Some(instance) = represented.into_iter().next() {
+                self.publications.insert(instance, symbol.clone());
+            }
+        }
+        rows_examined
+    }
+
+    fn refresh_excluded_local(&mut self, changed: &BTreeSet<Instance>) -> usize {
+        let rows_examined = changed.len();
+        for instance in changed {
+            if let Ok(position) = self
+                .excluded
+                .binary_search_by(|row| row.instance.cmp(instance))
+            {
+                self.excluded.remove(position);
+            }
+            if let Some(&cause) = self.index.exclusions.get(instance) {
+                let row = Excluded { instance: instance.clone(), cause };
+                let position = self
+                    .excluded
+                    .binary_search_by(|current| current.instance.cmp(instance))
+                    .unwrap_or_else(|position| position);
+                self.excluded.insert(position, row);
+            }
+        }
+        rows_examined
+    }
+
+    fn refresh_severed_local(&mut self, changed_callers: &BTreeSet<Instance>) -> usize {
+        let mut rows_examined = changed_callers.len();
+        for caller in changed_callers {
+            while let Ok(position) = self
+                .severed
+                .binary_search_by(|row| row.caller.cmp(caller))
+            {
+                self.severed.remove(position);
+            }
+            if let Some(rows) = self.index.severed_by_caller.get(caller) {
+                rows_examined += rows.len();
+                for row in rows {
+                    let position = self
+                        .severed
+                        .binary_search_by(|current| severed_order(current, row))
+                        .unwrap_or_else(|position| position);
+                    self.severed.insert(position, row.clone());
+                }
+            }
+        }
+        rows_examined
+    }
+
+    fn refresh_symbol_collisions_local(&mut self, changed_symbols: &BTreeSet<String>) -> usize {
+        let mut rows_examined = changed_symbols.len();
+        for symbol in changed_symbols {
+            if let Ok(position) = self
+                .symbol_collisions
+                .binary_search_by(|row| row.symbol.cmp(symbol))
+            {
+                self.symbol_collisions.remove(position);
+            }
+            let Some(users) = self.index.symbol_users.get(symbol) else { continue };
+            rows_examined += users.len();
+            if users.len() < 2 {
+                continue;
+            }
+            let mut instances: Vec<Instance> = users.iter().cloned().collect();
+            instances.sort();
+            let row = SymbolCollision {
+                symbol: symbol.clone(),
+                instances,
+            };
+            let position = self
+                .symbol_collisions
+                .binary_search_by(|current| current.symbol.cmp(symbol))
+                .unwrap_or_else(|position| position);
+            self.symbol_collisions.insert(position, row);
+        }
+        rows_examined
+    }
+
     /// Compare every realized output except the target description itself.
     pub fn same_cpu_decisions(&self, other: &Self) -> bool {
         self.roots == other.roots
@@ -916,12 +1920,14 @@ fn has_rock_body(ws: &Workspace, decl: FuncRef) -> bool {
 /// therefore no mismatch to detect -- backend-sibling selection lives in
 /// [`realize_decl`], which is reached from here and from nowhere else.
 pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> ArtifactView {
+    #[cfg(feature = "test-hooks")]
+    REALIZE_INVOCATIONS.with(|count| count.set(count.get() + 1));
     // Shader packaging is absent from this value by construction. Platform
     // capabilities remain available for host boundary admission.
     let target = req.spec.cpu();
     // Realizability of every instance the graph holds, computed once. It is a
     // property of the DECLARATION and the artifact, independent of reachability.
-    let mut realizable: BTreeMap<Instance, Result<Realized, Unrealizable>> = BTreeMap::new();
+    let mut realizable: FxHashMap<Instance, Result<Realized, Unrealizable>> = FxHashMap::default();
     for i in &g.instances {
         realizable
             .insert(i.clone(), realize_decl(ws, i.func, &g.erased_entries, &target, &req.mappings));
@@ -939,12 +1945,43 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
         .iter()
         .map(|r| DeclKey(skull_mir::lower::canonical_variant(ws, *r)))
         .collect();
+    let mut index = ArtifactIndex {
+        realizable,
+        root_decls: root_decls.clone(),
+        ..Default::default()
+    };
+    for (owner, sites) in g.call_sites() {
+        #[cfg(feature = "test-hooks")]
+        FRESH_INDEX_SITE_ROWS.with(|count| count.set(count.get() + sites.len() as u64));
+        index.site_counts.insert(owner.clone(), sites.len());
+        for (site, record) in sites {
+            let SiteOutcome::Resolved(callee) = &record.outcome else { continue };
+            index
+                .outgoing
+                .entry(owner.clone())
+                .or_default()
+                .insert(site.clone(), callee.clone());
+            index.incoming.entry(callee.clone()).or_default().insert(owner.clone());
+            if site.op == skull_mir::site::SiteOp::FnValue {
+                index
+                    .fn_values_by_caller
+                    .entry(owner.clone())
+                    .or_default()
+                    .insert(callee.clone());
+                index
+                    .fn_value_users
+                    .entry(callee.clone())
+                    .or_default()
+                    .insert(owner.clone());
+            }
+        }
+    }
     let mut roots: BTreeSet<Instance> = BTreeSet::new();
     let mut declared_roots: BTreeSet<Instance> = BTreeSet::new();
     for i in &g.instances {
         let declared = root_decls.contains(&DeclKey(i.func));
         let is_root = declared || g.is_always_emitted_target(i);
-        if is_root && realizable[i].is_ok() {
+        if is_root && index.realizable[i].is_ok() {
             roots.insert(i.clone());
             if declared {
                 declared_roots.insert(i.clone());
@@ -970,14 +2007,24 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
     // The boundary's IDENTITY is not minted here. It needs this artifact's
     // spelling, which is the planner's answer over the full retained set, so it
     // is built once below -- see `boundaries`.
-    let admit = |i: &Instance,
+    let mut admit = |i: &Instance,
                  instances: &mut BTreeSet<Instance>,
                  realization: &mut BTreeMap<Instance, Realized>,
                  queue: &mut VecDeque<Instance>| {
-        let r = *realizable[i].as_ref().expect("admitted means realizable");
+        let r = *index.realizable[i].as_ref().expect("admitted means realizable");
         if realization.insert(i.clone(), r).is_some() {
             return;
         }
+        index
+            .realization_by_decl
+            .entry(r.decl)
+            .or_default()
+            .insert(i.clone());
+        index
+            .instances_by_decl
+            .entry(i.func)
+            .or_default()
+            .insert(i.clone());
         if r.kind.boundary_class().is_none() {
             instances.insert(i.clone());
             queue.push_back(i.clone());
@@ -989,29 +2036,40 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
     }
     let mut fn_value_targets: BTreeSet<Instance> = BTreeSet::new();
     while let Some(caller) = queue.pop_front() {
-        let Some(sites) = g.sites_of(&caller) else { continue };
-        for (site, rec) in sites {
-            sites_walked += 1;
-            let SiteOutcome::Resolved(callee) = &rec.outcome else { continue };
-            match realizable.get(callee) {
+        sites_walked += index.site_counts.get(&caller).copied().unwrap_or(0);
+        let Some(sites) = index.outgoing.get(&caller) else { continue };
+        for (site, callee) in sites {
+            match index.realizable.get(callee) {
                 Some(Ok(_)) => {
                     if site.op == skull_mir::site::SiteOp::FnValue {
                         fn_value_targets.insert(callee.clone());
                     }
                     admit(callee, &mut instances, &mut realization, &mut queue)
                 }
-                Some(Err(cause)) => severed.push(Severed {
-                    caller: caller.clone(),
-                    site: site.clone(),
-                    callee: callee.clone(),
-                    cause: *cause,
-                }),
+                Some(Err(cause)) => {
+                    let row = Severed {
+                        caller: caller.clone(),
+                        site: site.clone(),
+                        callee: callee.clone(),
+                        cause: *cause,
+                    };
+                    index
+                        .severed_by_caller
+                        .entry(caller.clone())
+                        .or_default()
+                        .push(row.clone());
+                    severed.push(row);
+                }
                 // The walk resolved a callee the graph does not hold. Already a
                 // `ConcreteBody` finding (`unknown_rock_callees`); nothing to
                 // realize here.
                 None => {}
             }
         }
+    }
+    severed.sort_by(severed_order);
+    for rows in index.severed_by_caller.values_mut() {
+        rows.sort_by(severed_order);
     }
 
     // The partition: every shared instance is a retained Rock instance, a
@@ -1023,12 +2081,15 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
         .filter(|i| !realization.contains_key(*i))
         .map(|i| Excluded {
             instance: i.clone(),
-            cause: match realizable[i] {
+            cause: match index.realizable[i] {
                 Ok(_) => Exclusion::Unreachable,
                 Err(u) => Exclusion::Unrealizable(u),
             },
         })
         .collect();
+    for e in &excluded {
+        index.exclusions.insert(e.instance.clone(), e.cause);
+    }
 
     // One symbol per retained instance, from THIS artifact's planner.
     let mut by_symbol: BTreeMap<String, Vec<Instance>> = BTreeMap::new();
@@ -1036,6 +2097,7 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
     for i in realization.keys() {
         let s = req.symbols.symbol(ws, g, i, realization[i]);
         by_symbol.entry(s.clone()).or_default().push(i.clone());
+        index.symbol_users.entry(s.clone()).or_default().insert(i.clone());
         symbols.insert(i.clone(), s);
     }
     let symbol_collisions: Vec<SymbolCollision> = by_symbol
@@ -1069,12 +2131,33 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
     // Opaque dependencies, terminating in a concrete callee of THIS artifact.
     let mut inline_deps = Vec::new();
     let mut unresolved_inline_deps = Vec::new();
-    let retained_decls: BTreeSet<DeclKey> =
-        realization.values().map(|r| DeclKey(r.decl)).collect();
+    let retained_decls: BTreeSet<DeclKey> = index
+        .realization_by_decl
+        .keys()
+        .copied()
+        .map(DeclKey)
+        .collect();
     for (owner, entries) in &g.inline_body_deps {
+        let owner_retained = retained_decls.contains(owner);
+        for entry in entries {
+            let Some(rep) = instance_graph::stdlib_entry_representative(ws, entry) else {
+                continue;
+            };
+            let dependency = DeclKey(rep);
+            index
+                .inline_consumers
+                .entry(dependency.clone())
+                .or_default()
+                .insert(owner.clone());
+            index
+                .inline_dependencies_by_owner
+                .entry(owner.clone())
+                .or_default()
+                .insert(dependency);
+        }
         // An owner this artifact dropped carries no obligation: its text is
         // never emitted here.
-        if !retained_decls.contains(owner) {
+        if !owner_retained {
             continue;
         }
         for entry in entries {
@@ -1093,27 +2176,56 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
             // WHICH instance, not merely which declaration. A runtime entry is
             // non-generic so one instance is expected, but picking the first of
             // several would silently choose.
-            let matching: Vec<&Instance> =
-                realization.keys().filter(|i| i.func == rep).collect();
-            let [inst] = matching.as_slice() else {
+            let Some(instances) = index.instances_by_decl.get(&rep) else {
                 unresolved_inline_deps.push(UnresolvedInlineDep {
                     owner: owner.0,
                     entry,
-                    reason: if matching.is_empty() {
-                        "the serving declaration is not retained by the artifact"
-                    } else {
-                        "the serving declaration has more than one retained instance"
-                    },
+                    reason: "the serving declaration is not retained by the artifact",
                 });
                 continue;
             };
-            let inst = (*inst).clone();
+            let mut matching = instances.iter();
+            let Some(inst) = matching.next() else {
+                unresolved_inline_deps.push(UnresolvedInlineDep {
+                    owner: owner.0,
+                    entry,
+                    reason: "the serving declaration is not retained by the artifact",
+                });
+                continue;
+            };
+            if matching.next().is_some() {
+                unresolved_inline_deps.push(UnresolvedInlineDep {
+                    owner: owner.0,
+                    entry,
+                    reason: "the serving declaration has more than one retained instance",
+                });
+                continue;
+            }
+            let inst = inst.clone();
             let callee = match boundaries.get(&inst) {
                 Some(id) => RealizedCallee::Boundary(id.clone()),
                 None => RealizedCallee::Rock(inst),
             };
             inline_deps.push(InlineDep { owner: owner.0, entry, callee });
         }
+    }
+    inline_deps.sort_by(inline_dep_order);
+    unresolved_inline_deps.sort_by(unresolved_inline_dep_order);
+    for dep in &inline_deps {
+        index
+            .inline_by_owner
+            .entry(DeclKey(dep.owner))
+            .or_default()
+            .0
+            .push(dep.clone());
+    }
+    for dep in &unresolved_inline_deps {
+        index
+            .inline_by_owner
+            .entry(DeclKey(dep.owner))
+            .or_default()
+            .1
+            .push(dep.clone());
     }
 
     // The result-lane width of every foreign body this artifact emits. Asked of
@@ -1195,22 +2307,30 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
     // all -- this is a second, independent obligation over the SAME graph, not
     // a second discovery walk: the exact instance's own contribution, if the
     // graph has one, is what `g.instances`/`g.sites_of` already recorded.
+    let publication_candidates = publication_candidates(ws, req);
+    for (instance, symbol) in &publication_candidates {
+        index
+            .publication_users
+            .entry(symbol.clone())
+            .or_default()
+            .insert(instance.clone());
+        index
+            .publication_decls
+            .entry(DeclKey(instance.func))
+            .or_default()
+            .insert(instance.clone());
+        index
+            .publication_candidates
+            .insert(instance.clone(), symbol.clone());
+    }
     let mut by_pub_symbol: BTreeMap<String, Vec<Instance>> = BTreeMap::new();
     let mut unrepresented_publications: Vec<FuncRef> = Vec::new();
-    for r in req.roots {
-        let f = &ws.module(r.module).functions[r.func];
-        if !f.annotations.iter().any(|a| a.name.name.as_str() == "nomangle") {
-            continue;
-        }
-        if !instance_graph::serves(f.backend, target.execution.backend.unwrap_or(FnBackend::Any)) {
-            continue;
-        }
-        let inst = Instance::base(*r);
+    for (inst, symbol) in &publication_candidates {
         if !g.instances.contains(&inst) {
-            unrepresented_publications.push(*r);
+            unrepresented_publications.push(inst.func);
             continue;
         }
-        by_pub_symbol.entry(f.name.to_string()).or_default().push(inst);
+        by_pub_symbol.entry(symbol.clone()).or_default().push(inst.clone());
     }
     let mut publications: BTreeMap<Instance, String> = BTreeMap::new();
     let mut publication_collisions: Vec<PublicationCollision> = Vec::new();
@@ -1223,6 +2343,7 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
             publications.insert(instances.into_iter().next().expect("non-empty group"), symbol);
         }
     }
+    unrepresented_publications.sort_by(func_ref_order);
 
     let opaque_boundary_roots = g
         .inline_body_nomangle_roots
@@ -1257,5 +2378,6 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
         inline_deps,
         unresolved_inline_deps,
         opaque_boundary_roots,
+        index,
     }
 }

@@ -788,7 +788,7 @@ impl FnEmit<'_> {
             .ok_or_else(|| err(self.span(), "shader profile: concrete call has no site identity"))?;
         plan.callee_signatures.get(&site.site).ok_or_else(|| {
             err(self.span(), "shader profile: concrete call has no signature in the body plan")
-        })
+        }).map(std::sync::Arc::as_ref)
     }
 
     fn call_param_types(
@@ -1590,7 +1590,7 @@ impl FnEmit<'_> {
             // `MaterializeValueStruct` renders identically: on the GPU an
             // authorized box is just a `vec2(..)` ctor -- the authorization is a
             // Lua-side concept (`authorize_gpu_boundary_boxes`).
-            Inst::MakeValueStruct { name, fields } | Inst::MaterializeValueStruct { name, fields } => {
+            Inst::MakeValueStruct { name, fields, .. } | Inst::MaterializeValueStruct { name, fields, .. } => {
                 // GLSL must never see the post-normalization LEAF form (dotted
                 // field names, `flatten_nobox_nested_ctors`). It cannot today --
                 // this crate never calls `skull_transform`, so it never runs
@@ -2265,7 +2265,7 @@ pub fn realize_shader_library_view(
             dependencies.push(instance.func);
         }
     }
-    let concrete_plans = Arc::new(skull_graph::concrete_body::build(ws, graph).plans);
+    let concrete_plans = skull_graph::concrete_body::build(ws, graph).plans;
     Ok(ShaderLibraryView {
         roots: root_instances,
         retained,
@@ -2470,7 +2470,7 @@ fn realize_shader_program_view(
             ShaderStage::Fragment,
         )],
     };
-    let concrete_plans = Arc::new(skull_graph::concrete_body::build(ws, graph).plans);
+    let concrete_plans = skull_graph::concrete_body::build(ws, graph).plans;
     Ok(ShaderProgramView { program, stages, concrete_plans })
 }
 
@@ -5869,7 +5869,8 @@ mod assertion_flip_tests {
         let plan = Arc::make_mut(&mut view.concrete_plans)
             .get_mut(&passthrough)
             .expect("generic helper has a concrete plan");
-        plan.signature.result = Some(session.scx.interner().intern(MonoTy::String));
+        std::sync::Arc::make_mut(&mut Arc::make_mut(plan).signature).result =
+            Some(session.scx.interner().intern(MonoTy::String));
 
         let err = emit_shader_library_with_view(&ws, &session.scx, &view)
             .expect_err("a concrete result plan disagreement must reject GLSL emission");
@@ -5922,12 +5923,12 @@ mod assertion_flip_tests {
         let caller_plan = Arc::make_mut(&mut view.concrete_plans)
             .get_mut(&caller_inst)
             .expect("caller plan");
-        let signature = caller_plan
+        let signature = Arc::make_mut(caller_plan)
             .callee_signatures
             .values_mut()
             .next()
             .expect("call signature");
-        signature.result = Some(scx.interner().intern(MonoTy::String));
+        Arc::make_mut(signature).result = Some(scx.interner().intern(MonoTy::String));
         let bad_signature = emit_shader_library_with_view(&ws, scx, &view)
             .expect_err("a non-tier-0 concrete call result must reject GLSL emission");
         assert!(

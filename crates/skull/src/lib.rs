@@ -71,14 +71,14 @@ pub type ShapeHashes = rustc_hash::FxHashMap<ustr::Ustr, u64>;
 /// see [`struct_shape_hash`]. Known over-trigger (accepted,
 /// uniform-predictable): reordering a boxed enum's variants restarts even
 /// though its live tags are name strings.
-pub fn type_shape_hashes(ws: &Workspace) -> ShapeHashes {
+pub fn type_shape_hashes(ws: &Workspace) -> Result<ShapeHashes, CompilerError> {
     use bone_semantic::hir::VariantPayload;
     use std::hash::{Hash, Hasher};
 
     let mut out = ShapeHashes::default();
     for module in ws.modules.iter() {
         for (_, s) in module.structs.iter() {
-            out.insert(s.name, struct_shape_hash(ws, s, &mut Vec::new()));
+            out.insert(s.name, struct_shape_hash(ws, s, &mut Vec::new())?);
         }
         for (_, e) in module.enums.iter() {
             let mut h = rustc_hash::FxHasher::default();
@@ -111,7 +111,7 @@ pub fn type_shape_hashes(ws: &Workspace) -> ShapeHashes {
             out.insert(nt.name, h.finish());
         }
     }
-    out
+    Ok(out)
 }
 
 /// One struct's layout hash. An `embed` field contributes the embedded type's
@@ -123,9 +123,9 @@ pub fn type_shape_hashes(ws: &Workspace) -> ShapeHashes {
 /// hashes strictly more than a boxed one: flipping `f: Task?` to
 /// `embed f: Task?` leaves every rendered field type identical and touches no
 /// other type, so before this the whole workspace hashed clean and NO restart
-/// fired. `is_embed` is hashed explicitly anyway -- the flag is part of the
-/// layout in its own right, and that should not depend on how the child
-/// happens to contribute.
+/// fired. The planned inline/direct decision is hashed explicitly, so the
+/// layout bit remains load-bearing on its own and does not depend on how the
+/// child happens to contribute.
 ///
 /// `visiting` breaks a cycle with a stable sentinel. bone rejects a cyclic
 /// embed graph (`check_embed_site_legality`), so this is unreachable by
@@ -135,7 +135,7 @@ fn struct_shape_hash(
     ws: &Workspace,
     s: &bone_semantic::hir::StructDef,
     visiting: &mut Vec<ustr::Ustr>,
-) -> u64 {
+) -> Result<u64, CompilerError> {
     use std::hash::{Hash, Hasher};
 
     let mut h = rustc_hash::FxHasher::default();
@@ -144,26 +144,32 @@ fn struct_shape_hash(
     s.is_nobox.hash(&mut h);
     for f in s.fields.iter() {
         f.name.as_str().hash(&mut h);
-        f.is_embed.hash(&mut h);
         ws.render(None, f.ty).hash(&mut h);
-        let child = nominal_field_type(ws, f.ty)
-            .and_then(|n| ws.struct_by_name.get(&ustr::Ustr::from(&n)).copied());
-        let flattened = f.is_embed
-            || child.is_some_and(|sid| ws.modules[sid.module.index()].structs[sid.def].is_nobox);
-        if !flattened {
-            continue;
-        }
-        match child {
-            Some(sid) if !visiting.contains(&s.name) => {
+        let plan = skull_mir::lower::struct_field_plan(
+            ws,
+            bone_semantic::hir::FnBackend::Lua,
+            s.name,
+            f.name,
+            false,
+        )
+        .map_err(|e| CompilerError::new_no_location(e.message))?;
+        plan.embed().is_some().hash(&mut h);
+        if let Some(child_name) = plan.inline_child() {
+            let sid = ws.struct_by_name.get(&child_name).ok_or_else(|| {
+                CompilerError::new_no_location(format!(
+                    "struct `{}` field `{}` has no planned child `{child_name}`",
+                    s.name, f.name
+                ))
+            })?;
+            if !visiting.contains(&s.name) {
                 let child = &ws.modules[sid.module.index()].structs[sid.def];
                 visiting.push(s.name);
-                struct_shape_hash(ws, child, visiting).hash(&mut h);
+                struct_shape_hash(ws, child, visiting)?.hash(&mut h);
                 visiting.pop();
             }
-            _ => "<embed-unresolved>".hash(&mut h),
         }
     }
-    h.finish()
+    Ok(h.finish())
 }
 
 /// The type names whose shape hash differs between two compiles: changed,
@@ -429,13 +435,12 @@ fn runtime_prelude() -> &'static str {
     //   2. splitmix64 RNG (stdlib `random_*` inline(lua) bodies call
     //      `__rock_rng_next`/`__rock_rng_seed` by name); seeded from
     //      ROCK_TEST_SEED for deterministic test runs.
-    // The `{FN_MT}` placeholder is filled once from the canonical
-    // `skull_codegen_lua::FN_MT_PRELUDE` constant (one definition, shared with the
-    // codegen test harness) -- the record metatable is where the emitter's
-    // `setmetatable({..}, __rock_fn_mt)` output lands.
+    // The CodeRef runtime is appended by assembly only when this artifact has an
+    // escaping Rock function value. This keeps direct-call-only output free of
+    // slot machinery while retaining one canonical runtime definition.
     static PRELUDE: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
         let out = PRELUDE_TEMPLATE
-            .replace("{FN_MT}", skull_codegen_lua::FN_MT_PRELUDE)
+            .replace("{FN_MT}", "")
             .replace("{LEAF_VIEWS}", &skull_mir::lower::leaf_views_lua_table())
             .replace("{NB_PRIM_STORAGE}", &skull_mir::lower::nb_prim_storage_lua());
         // `str::replace` on a placeholder that drifted out of the template is a
@@ -495,36 +500,246 @@ end
 _G.__rock_nb_storage = __rock_nb_storage
 {NB_PRIM_STORAGE}
 if not _G.__rock_on_hot_reload then _G.__rock_on_hot_reload = {} end
--- THE way to read/write a global found by name in `__ROCK_GLOBALS`. A `nobox`
--- global has no slot under its own name -- its storage is its leaf globals -- so
--- a bare `_G[name]` would read nil and write a slot nothing else reads. The
--- rebuild/take-apart pair lives in `__ROCK_NOBOX_GLOBALS` (emitted per nobox
--- global); every other global falls through to `_G` unchanged.
-_G.__rock_global_get = function(name)
-  local a = _G.__ROCK_NOBOX_GLOBALS and _G.__ROCK_NOBOX_GLOBALS[name]
-  if a then return a.get() end
-  return _G[name]
+if not _G.__rock_session_new then
+  _G.__rock_session_new = function(schema_id)
+    return {
+      __rock_schema_id = schema_id,
+      __rock_state = {},
+      __rock_initialized = {},
+      __rock_initializer_keys = {},
+      __rock_rng_state = nil
+    }
+  end
+  _G.__rock_session_activate = function(session)
+    if type(session) ~= "table" or type(session.__rock_state) ~= "table"
+        or type(session.__rock_initialized) ~= "table" then
+      error("invalid Rock Session", 0)
+    end
+    local published = _G.__rock_state_schema_id
+    if published ~= nil and session.__rock_schema_id ~= published then
+      error("Rock StateSchema does not match the active Session", 0)
+    end
+    _G.__rock_active_session = session
+    _G.__rock_active_state = session.__rock_state
+    _G.__rock_active_initialized = session.__rock_initialized
+    return session
+  end
+  _G.__rock_session_current = function()
+    local session = _G.__rock_active_session
+    if not session then error("no active Rock Session", 0) end
+    return session
+  end
+  _G.__rock_state_has = function(key)
+    local initialized = _G.__rock_active_initialized
+    if not initialized then error("no active Rock Session", 0) end
+    return initialized[key] == true
+  end
+  _G.__rock_state_get = function(key)
+    local state = _G.__rock_active_state
+    if not state then error("no active Rock Session", 0) end
+    return state[key]
+  end
+  _G.__rock_state_set = function(key, value)
+    local state, initialized = _G.__rock_active_state, _G.__rock_active_initialized
+    if not state or not initialized then error("no active Rock Session", 0) end
+    state[key] = value
+    initialized[key] = true
+    return value
+  end
+  _G.__rock_state_prepare_static = function(value_key, done_key, initializer_key)
+    local session = _G.__rock_session_current()
+    local old = session.__rock_initializer_keys[value_key]
+    if old ~= nil and old ~= initializer_key then
+      session.__rock_state[value_key] = nil
+      session.__rock_initialized[value_key] = nil
+      session.__rock_state[done_key] = false
+      session.__rock_initialized[done_key] = true
+    end
+    session.__rock_initializer_keys[value_key] = initializer_key
+  end
+  _G.__rock_state_publish_schema = function(schema_id)
+    local session = _G.__rock_session_current()
+    if session.__rock_schema_id ~= nil and session.__rock_schema_id ~= schema_id then
+      error("Rock StateSchema changed; restart is required", 0)
+    end
+    session.__rock_schema_id = schema_id
+    rawset(_G, "__rock_state_schema_id", schema_id)
+    rawset(_G, "__rock_state_name_index", nil)
+  end
 end
-_G.__rock_global_set = function(name, v)
-  local a = _G.__ROCK_NOBOX_GLOBALS and _G.__ROCK_NOBOX_GLOBALS[name]
-  if a then a.set(v) else _G[name] = v end
+if not _G.__rock_active_session then
+  _G.__rock_session_activate(_G.__rock_session_new(nil))
+end
+_G.__rock_state_clear = function(key)
+  local session = _G.__rock_session_current()
+  session.__rock_state[key] = nil
+  session.__rock_initialized[key] = nil
+end
+_G.__rock_state_transaction_begin = function()
+  if rawget(_G, "__rock_state_transaction") ~= nil then return end
+  local session = _G.__rock_session_current()
+  local state, initialized, initializer_keys = {}, {}, {}
+  for key, value in pairs(session.__rock_state) do state[key] = value end
+  for key, value in pairs(session.__rock_initialized) do initialized[key] = value end
+  for key, value in pairs(session.__rock_initializer_keys) do initializer_keys[key] = value end
+  rawset(_G, "__rock_state_transaction", {
+    session = session,
+    schema_id = session.__rock_schema_id,
+    schema = rawget(_G, "__ROCK_STATE_SCHEMA"),
+    metadata = rawget(_G, "__ROCK_STATE_METADATA"),
+    nobox = rawget(_G, "__ROCK_STATE_NOBOX"),
+    name_index = rawget(_G, "__rock_state_name_index"),
+    bridge_physical = rawget(_G, "__rock_state_bridge_physical"),
+    state = state,
+    initialized = initialized,
+    initializer_keys = initializer_keys,
+    published_schema_id = rawget(_G, "__rock_state_schema_id")
+  })
+end
+_G.__rock_state_transaction_abort = function()
+  local transaction = rawget(_G, "__rock_state_transaction")
+  if not transaction then return end
+  local session = transaction.session
+  rawset(_G, "__rock_active_session", session)
+  rawset(_G, "__rock_active_state", session.__rock_state)
+  rawset(_G, "__rock_active_initialized", session.__rock_initialized)
+  session.__rock_schema_id = transaction.schema_id
+  for key in pairs(session.__rock_state) do session.__rock_state[key] = nil end
+  for key, value in pairs(transaction.state) do session.__rock_state[key] = value end
+  for key in pairs(session.__rock_initialized) do session.__rock_initialized[key] = nil end
+  for key, value in pairs(transaction.initialized) do session.__rock_initialized[key] = value end
+  for key in pairs(session.__rock_initializer_keys) do session.__rock_initializer_keys[key] = nil end
+  for key, value in pairs(transaction.initializer_keys) do session.__rock_initializer_keys[key] = value end
+  rawset(_G, "__ROCK_STATE_SCHEMA", transaction.schema)
+  rawset(_G, "__ROCK_STATE_METADATA", transaction.metadata)
+  rawset(_G, "__ROCK_STATE_NOBOX", transaction.nobox)
+  rawset(_G, "__rock_state_name_index", transaction.name_index)
+  rawset(_G, "__rock_state_bridge_physical", transaction.bridge_physical)
+  rawset(_G, "__rock_state_schema_id", transaction.published_schema_id)
+  rawset(_G, "__rock_state_transaction", nil)
+end
+_G.__rock_state_transaction_commit = function()
+  rawset(_G, "__rock_state_transaction", nil)
+end
+_G.__rock_state_entry_for_name = function(name)
+  local index = rawget(_G, "__rock_state_name_index")
+  if not index then
+    index = {}
+    local function add(key, entry)
+      if not key then return end
+      local old = index[key]
+      if old == nil or old == entry then index[key] = entry else index[key] = false end
+    end
+    for _, entry in ipairs(rawget(_G, "__ROCK_STATE_SCHEMA") or {}) do
+      add(entry.name, entry)
+      add(entry.identity, entry)
+      if entry.kind == "global" then
+        for _, physical in ipairs(entry.physical or {}) do add(physical, entry) end
+      end
+    end
+    rawset(_G, "__rock_state_name_index", index)
+  end
+  local entry = index[name]
+  return entry ~= false and entry or nil
+end
+_G.__rock_state_entry_for_identity = function(identity)
+  for _, entry in ipairs(rawget(_G, "__ROCK_STATE_SCHEMA") or {}) do
+    if entry.identity == identity then return entry end
+  end
+  return nil
+end
+_G.__rock_state_entry_get = function(entry)
+  local adapters = rawget(_G, "__ROCK_STATE_NOBOX")
+  local adapter = adapters and adapters[entry.identity]
+  if adapter then return adapter.get() end
+  local keys = entry.session_keys or {}
+  if #keys == 1 then return _G.__rock_state_get(keys[1]) end
+  error("StateSchema entry has no logical realization " .. tostring(entry.identity), 0)
+end
+_G.__rock_state_entry_set = function(entry, value)
+  local adapters = rawget(_G, "__ROCK_STATE_NOBOX")
+  local adapter = adapters and adapters[entry.identity]
+  if adapter then return adapter.set(value) end
+  local keys = entry.session_keys or {}
+  if #keys == 1 then return _G.__rock_state_set(keys[1], value) end
+  error("StateSchema entry has no logical realization " .. tostring(entry.identity), 0)
+end
+_G.__rock_state_entry_clear = function(entry)
+  for _, key in ipairs(entry.session_keys or {}) do _G.__rock_state_clear(key) end
+end
+_G.__rock_state_install_global_bridge = function()
+  local schema = rawget(_G, "__ROCK_STATE_SCHEMA") or {}
+  local mt = getmetatable(_G) or {}
+  local old_index, old_newindex = mt.__rock_state_original_index, mt.__rock_state_original_newindex
+  if not mt.__rock_state_bridge then
+    old_index, old_newindex = mt.__index, mt.__newindex
+    mt.__rock_state_original_index = old_index
+    mt.__rock_state_original_newindex = old_newindex
+  end
+  local function old_read(t, key)
+    if type(old_index) == "function" then return old_index(t, key) end
+    if type(old_index) == "table" then return old_index[key] end
+    return nil
+  end
+  local function old_write(t, key, value)
+    if type(old_newindex) == "function" then return old_newindex(t, key, value) end
+    if type(old_newindex) == "table" then old_newindex[key] = value; return end
+    rawset(t, key, value)
+  end
+  local previous_physical = rawget(_G, "__rock_state_bridge_physical") or {}
+  for _, physical in ipairs(previous_physical) do rawset(_G, physical, nil) end
+  local current_physical = {}
+  for _, entry in ipairs(schema) do
+    if entry.kind == "global" then
+      for _, physical in ipairs(entry.physical or {}) do
+        rawset(_G, physical, nil)
+        current_physical[#current_physical + 1] = physical
+      end
+    end
+  end
+  rawset(_G, "__rock_state_bridge_physical", current_physical)
+  mt.__index = function(t, key)
+    local entry = _G.__rock_state_entry_for_name(key)
+    if entry and entry.kind == "global" then return _G.__rock_state_entry_get(entry) end
+    return old_read(t, key)
+  end
+  mt.__newindex = function(t, key, value)
+    local entry = _G.__rock_state_entry_for_name(key)
+    if entry and entry.kind == "global" then return _G.__rock_state_entry_set(entry, value) end
+    return old_write(t, key, value)
+  end
+  mt.__rock_state_bridge = true
+  setmetatable(_G, mt)
 end
 -- Shared metatable of capturing-lambda env records (docs/closure-env-records-plan.md):
--- a record { __fn = <top-level fn>, <captures> } is callable as f(...) via __call.
+-- a record { __slot = <CodeRef>, <captures> } is callable as f(...) via __call.
 -- Preserved across reload so pre- and post-reload records share metatable identity.
 {FN_MT}
-if _G.__ROCK_RELEASE == nil then _G.__ROCK_RELEASE = false end
 if not _G.__rock_rng_next then
   local __rock_bit = require("bit")
   local __rock_rng_state = _G.ffi.new("uint64_t", 0)
-  _G.__rock_rng_seed = function(s) __rock_rng_state = _G.ffi.new("uint64_t", s) end
+  local function active_rng_state()
+    local session = _G.__rock_active_session
+    if session and session.__rock_rng_state ~= nil then return session.__rock_rng_state end
+    return __rock_rng_state
+  end
+  local function store_rng_state(state)
+    local session = _G.__rock_active_session
+    if session then session.__rock_rng_state = state else __rock_rng_state = state end
+  end
+  _G.__rock_rng_seed = function(s)
+    store_rng_state(_G.ffi.new("uint64_t", s))
+  end
   -- Whole RNG state is this one counter; get/set serialize it for replay
   -- keyframe restore (docs/replay-scrub-plan.md). Returns the uint64 cdata.
-  _G.__rock_rng_state_get = function() return __rock_rng_state end
-  _G.__rock_rng_state_set = function(s) __rock_rng_state = _G.ffi.new("uint64_t", s) end
+  _G.__rock_rng_state_get = function() return active_rng_state() end
+  _G.__rock_rng_state_set = function(s)
+    store_rng_state(_G.ffi.new("uint64_t", s))
+  end
   _G.__rock_rng_next = function()
-    __rock_rng_state = __rock_rng_state + 0x9E3779B97F4A7C15ULL
-    local z = __rock_rng_state
+    local state = active_rng_state() + 0x9E3779B97F4A7C15ULL
+    store_rng_state(state)
+    local z = state
     z = __rock_bit.bxor(z, __rock_bit.rshift(z, 30)) * 0xBF58476D1CE4E5B9ULL
     z = __rock_bit.bxor(z, __rock_bit.rshift(z, 27)) * 0x94D049BB133111EBULL
     z = __rock_bit.bxor(z, __rock_bit.rshift(z, 31))
@@ -641,10 +856,10 @@ fn leaf_ctor_def(name: ustr::Ustr, paths: &[ustr::Ustr]) -> String {
 /// has no C layout to sequence).
 fn value_struct_defs(
     ws: &Workspace,
+    rep_arena: &skull_mir::lower::RepArena,
 ) -> Result<(String, rustc_hash::FxHashSet<ustr::Ustr>, rustc_hash::FxHashSet<ustr::Ustr>), CompilerError>
 {
     let vstructs = canonical_value_structs(ws);
-    let rep_arena = skull_mir::lower::RepArena::default();
     let mut emitted: rustc_hash::FxHashSet<ustr::Ustr> = Default::default();
     let mut gc: rustc_hash::FxHashSet<ustr::Ustr> = Default::default();
     if vstructs.is_empty() {
@@ -655,10 +870,10 @@ fn value_struct_defs(
     // (`_vt`), never as cdef, so only FFI-clean structs enter the ordering.
     let mut ffi_structs = Vec::new();
     for s in vstructs {
-        if !matches!(
-            rep_arena.nominal_value_storage(ws, bone_semantic::hir::FnBackend::Lua, s.name),
-            Some(skull_mir::lower::ValueStorage::CData)
-        ) {
+        let storage = rep_arena
+            .nominal_value_storage_required(ws, bone_semantic::hir::FnBackend::Lua, s.name)
+            .map_err(|e| CompilerError::new_no_location(e.message))?;
+        if storage != skull_mir::lower::ValueStorage::CData {
             gc.insert(s.name);
         } else {
             ffi_structs.push(s);
@@ -698,14 +913,15 @@ fn value_struct_defs(
                 // write leaves instead, hoisting each nested reference once.
                 // Used by the normalization that keeps a `nobox` field from
                 // materializing when its parent boxes.
-                if let Some(paths) = rep_arena.nominal_value_leaf_paths(
-                    ws,
-                    bone_semantic::hir::FnBackend::Lua,
-                    s.name,
-                ) {
-                    if paths.iter().any(|p| p.contains('.')) {
-                        ctors.push_str(&leaf_ctor_def(s.name, &paths));
-                    }
+                let paths = rep_arena
+                    .nominal_value_leaf_paths_required(
+                        ws,
+                        bone_semantic::hir::FnBackend::Lua,
+                        s.name,
+                    )
+                    .map_err(|e| CompilerError::new_no_location(e.message))?;
+                if paths.iter().any(|p| p.contains('.')) {
+                    ctors.push_str(&leaf_ctor_def(s.name, &paths));
                 }
                 emitted.insert(s.name);
                 progress = true;
@@ -728,7 +944,7 @@ fn value_struct_defs(
     // Direct ffi.cdef: a skull chunk loads once per process, so a failure here
     // is a genuine emit bug and must abort with LuaJIT's own message — the old
     // pcall swallowed it and every `<Name>_ct` use downstream failed cryptically.
-    let (checks, storage) = value_leaf_layout_checks(ws, &emitted)?;
+    let (checks, storage) = value_leaf_layout_checks(ws, &emitted, rep_arena)?;
     Ok((format!("ffi.cdef[[\n{}]]\n{}{}{}", typedefs, ctors, checks, storage), emitted, gc))
 }
 
@@ -758,9 +974,9 @@ fn value_struct_defs(
 fn value_leaf_layout_checks(
     ws: &Workspace,
     emitted: &rustc_hash::FxHashSet<ustr::Ustr>,
+    rep_arena: &skull_mir::lower::RepArena,
 ) -> Result<(String, String), CompilerError> {
     use std::fmt::Write as _;
-    let rep_arena = skull_mir::lower::RepArena::default();
     let mut names: Vec<ustr::Ustr> = emitted.iter().copied().collect();
     names.sort_by(|a, b| a.as_str().cmp(b.as_str()));
     let mut out = String::new();
@@ -806,9 +1022,12 @@ fn value_leaf_layout_checks(
 /// identity -- LuaJIT only fires `__eq` when both operands share the metamethod.
 /// Rendering is handled by the generic table `inspect` path (a `__ty`-tagged
 /// table), so no `__ROCK_C_STRUCT` (ffi.istype) entry is needed.
-fn value_struct_gc_defs(ws: &Workspace, gc: &rustc_hash::FxHashSet<ustr::Ustr>) -> String {
+fn value_struct_gc_defs(
+    ws: &Workspace,
+    gc: &rustc_hash::FxHashSet<ustr::Ustr>,
+    rep_arena: &skull_mir::lower::RepArena,
+) -> Result<String, CompilerError> {
     let mut out = String::new();
-    let rep_arena = skull_mir::lower::RepArena::default();
     for s in canonical_value_structs(ws) {
         if !gc.contains(&s.name) {
             continue;
@@ -818,13 +1037,13 @@ fn value_struct_gc_defs(ws: &Workspace, gc: &rustc_hash::FxHashSet<ustr::Ustr>) 
         out.push_str(&format!("{mt} = {mt} or {{}}\n"));
         // A leaf-table struct has no declared-field keys to compare or print, so
         // both metamethods and its ctor run off the leaf paths instead.
-        if matches!(
-            rep_arena.nominal_value_storage(ws, bone_semantic::hir::FnBackend::Lua, n),
-            Some(skull_mir::lower::ValueStorage::LeafTable)
-        ) {
+        let storage = rep_arena
+            .nominal_value_storage_required(ws, bone_semantic::hir::FnBackend::Lua, n)
+            .map_err(|e| CompilerError::new_no_location(e.message))?;
+        if storage == skull_mir::lower::ValueStorage::LeafTable {
             let paths = rep_arena
-                .nominal_value_leaf_paths(ws, bone_semantic::hir::FnBackend::Lua, n)
-                .unwrap_or_default();
+                .nominal_value_leaf_paths_required(ws, bone_semantic::hir::FnBackend::Lua, n)
+                .map_err(|e| CompilerError::new_no_location(e.message))?;
             out.push_str(&format!("{mt}.__eq = function(a, b)\n"));
             out.push_str(
                 "  if type(a) ~= \"table\" or type(b) ~= \"table\" then return false end\n",
@@ -849,8 +1068,8 @@ fn value_struct_gc_defs(ws: &Workspace, gc: &rustc_hash::FxHashSet<ustr::Ustr>) 
             // `false` on the wire, and two logically-equal absent values then
             // compared unequal (`__eq` is a per-key compare, and `false ~= nil`).
             let presence = rep_arena
-                .nominal_value_leaf_presence_flags(ws, bone_semantic::hir::FnBackend::Lua, n)
-                .unwrap_or_default();
+                .nominal_value_leaf_presence_flags_required(ws, bone_semantic::hir::FnBackend::Lua, n)
+                .map_err(|e| CompilerError::new_no_location(e.message))?;
             let assigns: Vec<String> = paths
                 .iter()
                 .enumerate()
@@ -917,7 +1136,7 @@ fn value_struct_gc_defs(ws: &Workspace, gc: &rustc_hash::FxHashSet<ustr::Ustr>) 
             b = body,
         ));
     }
-    out
+    Ok(out)
 }
 
 /// Emit the `ffi.cdef` typedef + `<Enum>_ct` ctor for every cdata-eligible enum
@@ -1428,39 +1647,15 @@ fn reflect_field_type(ws: &Workspace, ty: bone_semantic::prelude::TyId) -> (Stri
     }
 }
 
-/// The nominal name a field's type denotes, peeling `Nullable`. An `embed`
-/// field needs this even when nullable: reflection rebuilds its logical value
-/// from that type's field list, and [`reflect_field_type`] renders any nullable
-/// as `any`, which would lose the name.
-fn nominal_field_type(ws: &Workspace, ty: bone_semantic::prelude::TyId) -> Option<String> {
-    use bone_semantic::hir::{TypeCtor, TypeExpr};
-    let resolve = |t: bone_semantic::prelude::TyId| -> Option<(TypeExpr, bone_semantic::prelude::TyId)> {
-        match t {
-            bone_semantic::prelude::TyId::Static(mid, idx) => {
-                ws.modules.get(mid.index()).map(|m| (m.ty_arena[idx], t))
-            }
-            bone_semantic::prelude::TyId::Local(_) => None,
-        }
-    };
-    let (mut te, mut cur) = resolve(ty)?;
-    if let TypeExpr::Nullable(inner) = te {
-        let (t2, c2) = resolve(cur.with_idx(inner))?;
-        te = t2;
-        cur = c2;
-    }
-    let _ = cur;
-    match te {
-        TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } => Some(name.as_str().to_string()),
-        _ => None,
-    }
-}
-
 /// Register every struct + newtype into `_G.__ROCK_TYPE_TABLE`, so the stdlib
 /// reflection fns (`get_type_info`, `type_info_of`, `type_name`) can recover a
 /// value's metadata from its `__ty` tag. Mirrors
 /// rock-codegen/src/codegen_pass.rs. The prelude already seeds the table empty,
 /// so this only adds entries. No metatables: type tagging is the direct `__ty`.
-fn type_table_defs(ws: &Workspace, gc: &rustc_hash::FxHashSet<ustr::Ustr>) -> String {
+fn type_table_defs(
+    ws: &Workspace,
+    gc: &rustc_hash::FxHashSet<ustr::Ustr>,
+) -> Result<String, CompilerError> {
     let mut out = String::new();
     let mut type_id = 100i64;
     for module in ws.modules.iter() {
@@ -1475,40 +1670,31 @@ fn type_table_defs(ws: &Workspace, gc: &rustc_hash::FxHashSet<ustr::Ustr>) -> St
             } else {
                 "c_struct"
             };
-            let fields: Vec<String> = s
-                .fields
-                .iter()
-                .map(|f| {
-                    let (tystr, nullable) = reflect_field_type(ws, f.ty);
-                    let child = nominal_field_type(ws, f.ty)
-                        .and_then(|n| ws.struct_by_name.get(&ustr::Ustr::from(&n)).copied());
-                    let flattened = f.is_embed
-                        || child.is_some_and(|sid| {
-                            ws.modules[sid.module.index()].structs[sid.def].is_nobox
-                        });
-                    // `embed` marks a field whose leaves are THIS struct's
-                    // physical keys (`f.x`), so reflection has to rebuild the
-                    // logical child from them -- the declared name indexes
-                    // nothing (a presence slot when nullable). The child's name
-                    // must survive nullability for that rebuild to be possible.
-                    let tystr = match flattened.then(|| nominal_field_type(ws, f.ty)).flatten() {
-                        Some(n) => n,
-                        None => tystr,
-                    };
-                    let embed = if flattened { ", embed = true" } else { "" };
-                    // The recursive shape, present only where the flat `type`
-                    // above cannot express it (a container, a tuple, a nullable
-                    // -- anything with a nominal inside it).
-                    let desc = match field_desc_lua(ws, f.ty) {
-                        Some(d) => format!(", desc = {d}"),
-                        None => String::new(),
-                    };
-                    format!(
-                        "{{ name = \"{}\", type = \"{}\", nullable = {}{}{} }}",
-                        f.name, tystr, nullable, embed, desc
-                    )
-                })
-                .collect();
+            let mut fields = Vec::with_capacity(s.fields.len());
+            for f in &s.fields {
+                let (tystr, _) = reflect_field_type(ws, f.ty);
+                let plan = skull_mir::lower::struct_field_plan(
+                    ws,
+                    bone_semantic::hir::FnBackend::Lua,
+                    s.name,
+                    f.name,
+                    false,
+                )
+                .map_err(|e| CompilerError::new_no_location(e.message))?;
+                let nullable = plan.nullable();
+                let (tystr, embed) = match plan.inline_child() {
+                    Some(child) => (child.as_str().to_string(), ", embed = true"),
+                    None => (tystr, ""),
+                };
+                let desc = match field_desc_lua(ws, f.ty) {
+                    Some(d) => format!(", desc = {d}"),
+                    None => String::new(),
+                };
+                fields.push(format!(
+                    "{{ name = \"{}\", type = \"{}\", nullable = {}{}{} }}",
+                    f.name, tystr, nullable, embed, desc
+                ));
+            }
             out.push_str(&format!(
                 "_G.__ROCK_TYPE_TABLE[\"{n}\"] = {{ name = \"{n}\", kind = \"{k}\", type_id = {id}, fields = {{ {f} }} }}\n",
                 n = s.name,
@@ -1607,7 +1793,7 @@ fn type_table_defs(ws: &Workspace, gc: &rustc_hash::FxHashSet<ustr::Ustr>) -> St
             type_id += 1;
         }
     }
-    out
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -1662,7 +1848,7 @@ mod tests {
                 .unwrap_or_else(|e| panic!("parse failed: {}", e.message));
             let ws = bone_semantic::semantic_passes::semantic_pass(&mut [module])
                 .unwrap_or_else(|e| panic!("semantic_pass failed: {}", e.message));
-            super::type_shape_hashes(&ws)
+            super::type_shape_hashes(&ws).expect("shape planning must succeed")
         };
         let base = "struct Mob { hp: int }\n\
                     enum Ev { Tick(int), Done }\n\
@@ -1708,7 +1894,7 @@ mod tests {
                 .unwrap_or_else(|e| panic!("parse failed: {}", e.message));
             let ws = bone_semantic::semantic_passes::semantic_pass(&mut [module])
                 .unwrap_or_else(|e| panic!("semantic_pass failed: {}", e.message));
-            super::type_shape_hashes(&ws)
+            super::type_shape_hashes(&ws).expect("shape planning must succeed")
         };
 
         // (a) The flag alone relayouts the parent, while every rendered field
@@ -2433,6 +2619,38 @@ mod tests {
             "expected pick() inlined (no `= pick(` call), got:\n{lua}"
         );
         exec_eq(src, "print(run(true)); print(run(false))", "10\n20");
+    }
+
+    #[test]
+    fn inlines_straight_result_across_branch() {
+        let src = "@inline\n\
+                   fn identity(flag: bool) -> bool { return flag }\n\
+                   fn run(select: bool) -> bool {\n\
+                       let value = identity(true)\n\
+                       if select { return value }\n\
+                       return value\n\
+                   }";
+        exec_eq(src, "print(run(true)); print(run(false))", "true\ntrue");
+    }
+
+    #[test]
+    fn inlines_straight_nullable_result_across_coalesce_branches() {
+        let src = "@inline\n\
+                   fn identity(value: int?) -> int? { return value }\n\
+                   fn run(select: bool) -> int {\n\
+                       let value = identity(null)\n\
+                       if select { return value ?? 1 }\n\
+                       return value ?? 2\n\
+                   }";
+        exec_eq(src, "print(run(true)); print(run(false))", "1\n2");
+    }
+
+    #[test]
+    fn inlines_void_straight_result() {
+        let src = "@inline\n\
+                   fn touch() { return }\n\
+                   fn run() -> int { touch(); return 7 }";
+        exec_eq(src, "print(run())", "7");
     }
 
     /// Transitive inlining: `a` calls `b` calls `c`; re-scanning the caller after

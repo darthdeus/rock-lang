@@ -16,8 +16,8 @@ pub fn discover_sources(source_spec: &SourceSpec) -> Result<SourceFiles> {
         SourceSpec::Directory(project_dir) => {
             // Check for stick.toml to pick up project settings
             if let Some((config_path, stick_config)) = StickConfig::find_from_dir(project_dir)? {
-                // Load project files first
-                let mut sources = SourceFiles::from_dir_preprocessed(project_dir)?;
+                let project_sources = SourceFiles::from_dir_preprocessed(project_dir)?;
+                let mut dependency_files = Vec::new();
 
                 // Resolve and load dependencies
                 if !stick_config.dependencies.is_empty() {
@@ -28,18 +28,21 @@ pub fn discover_sources(source_spec: &SourceSpec) -> Result<SourceFiles> {
                     // Load files from each dependency
                     for dep in resolved_deps {
                         let dep_sources = SourceFiles::from_dir_preprocessed(&dep.path)?;
-                        // Merge dependency sources into main sources, excluding script files
+                        // Dependencies load before the project. Global initializers are
+                        // module-load effects, so a library must be ready before a
+                        // consuming game's global initializer on both emitters.
                         for file in dep_sources.files {
                             // Skip files with #script directive (test/example files in library dependencies)
                             if !file.borrow().is_script {
-                                sources.files.push(file);
+                                dependency_files.push(file);
                             }
                         }
 
                     }
                 }
 
-                Ok(sources)
+                dependency_files.extend(project_sources.files);
+                Ok(SourceFiles { files: dependency_files })
             } else {
                 // No stick.toml - check if there's exactly one .rock file
                 let rock_files = rock_host::project::find_rock_files_at_path(project_dir)?;
@@ -93,7 +96,7 @@ pub fn build_package_map(source_spec: &SourceSpec) -> Vec<(String, PathBuf)> {
         Err(e) => {
             log::warn!(target: "COMPILE",
                 "build_package_map: stick.toml lookup failed: {}. \
-                 Package grouping in _G.__ROCK_GLOBALS will be incomplete.",
+                 StateSchema package metadata will be incomplete.",
                 e
             );
             return Vec::new();
@@ -112,7 +115,7 @@ pub fn build_package_map(source_spec: &SourceSpec) -> Vec<(String, PathBuf)> {
     // resolver earlier in the same compile and propagates errors, so
     // by the time we get here the resolve has already succeeded once.
     // If it fails now (transient FS race, stick.toml rewritten mid-
-    // build), surface it -- the package map feeds _G.__ROCK_GLOBALS
+    // build), surface it -- the package map feeds StateSchema metadata
     // grouping in codegen, and silently dropping deps would produce
     // a subtly-wrong runtime.
     if !stick_config.dependencies.is_empty() {
@@ -127,7 +130,7 @@ pub fn build_package_map(source_spec: &SourceSpec) -> Vec<(String, PathBuf)> {
             Err(e) => {
                 log::warn!(target: "COMPILE",
                     "build_package_map: dependency resolver failed: {}. \
-                     Package grouping in _G.__ROCK_GLOBALS will be incomplete.",
+                     StateSchema package metadata will be incomplete.",
                     e
                 );
             }

@@ -223,10 +223,16 @@ fn js_build_file(file: &str) -> JsUnitOutcome {
         Err(e) => return js_compile_failure(file, &src, &[e]),
     };
     let user_file = user.file;
-    let ws = match crate::bone_backend::check_with_stdlib([user]) {
+    let mut ws = match crate::bone_backend::check_with_stdlib([user]) {
         Ok(ws) => ws,
         Err(errs) => return js_compile_failure(file, &src, &errs),
     };
+    if let Err(e) = crate::comptime::stamp_workspace(&mut ws, std::path::Path::new(file)) {
+        return JsUnitOutcome::UnitFail {
+            reason: "build var resolution failed".to_string(),
+            rendered: format!("build var resolution failed for {file}: {e:#}"),
+        };
+    }
     let user_mid = crate::bone_backend::entry_module_id(&ws, user_file);
     // A discovery error (malformed `@test` annotation on a bone-accepted file)
     // is a rejection, never an expected compile failure -- so it does NOT route
@@ -269,7 +275,7 @@ fn js_build_package(dir: &str) -> JsUnitOutcome {
             }
         }
     };
-    let ws = match crate::bone_backend::check_modules(&mut modules) {
+    let mut ws = match crate::bone_backend::check_modules(&mut modules) {
         Ok(ws) => ws,
         Err(errs) => {
             return JsUnitOutcome::UnitFail {
@@ -278,6 +284,12 @@ fn js_build_package(dir: &str) -> JsUnitOutcome {
             }
         }
     };
+    if let Err(e) = crate::comptime::stamp_workspace(&mut ws, std::path::Path::new(dir)) {
+        return JsUnitOutcome::UnitFail {
+            reason: "build var resolution failed".to_string(),
+            rendered: format!("build var resolution failed for {dir}: {e:#}"),
+        };
+    }
     let tests = match crate::skull_backend::collect_package_test_fns(&ws, dir) {
         Ok(tests) => tests,
         Err(e) => {
@@ -357,13 +369,16 @@ fn js_run_tests(
     let mut run_idxs: Vec<usize> = supported.iter().map(|(i, _)| *i).collect();
     run_idxs.extend(deco_pending.iter().copied());
     run_idxs.sort_unstable();
-    let shared_defs = if run_idxs.is_empty() {
-        String::new()
+    let (shared_defs, shared_has_code_refs) = if run_idxs.is_empty() {
+        (String::new(), false)
     } else {
         let roots: Vec<(FuncRef, String)> =
             run_idxs.iter().map(|&i| (tests[i].0, format!("__t{i}"))).collect();
-        match skull_codegen_js::emit::emit_program_with_roots(ws, &roots) {
-            Ok(blob) => blob,
+        match skull_codegen_js::emit::emit_program_with_roots_artifact(ws, &roots) {
+            Ok((blob, artifact)) => {
+                let has_code_refs = artifact.entries.values().any(|entry| entry.escaping);
+                (blob, has_code_refs)
+            }
             Err(e) => {
                 // Whole-file emission rejected for something no single test hit
                 // on its own (a deco-dependent test that also reaches an
@@ -374,7 +389,9 @@ fn js_run_tests(
                     skips.push((tests[i].1.name.clone(), all_reasons(&e)));
                 }
                 run_idxs = supported.iter().map(|(i, _)| *i).collect();
-                supported.iter().map(|(_, d)| d.as_str()).collect::<String>()
+                let blob = supported.iter().map(|(_, d)| d.as_str()).collect::<String>();
+                let has_code_refs = blob.contains("__rock_code_slot_ref(");
+                (blob, has_code_refs)
             }
         }
     };
@@ -392,7 +409,7 @@ fn js_run_tests(
         })
         .collect();
 
-    let program = build_node_program(&shared_defs, &meta);
+    let program = build_node_program(&shared_defs, &meta, shared_has_code_refs);
     let timeout = Some(std::time::Duration::from_secs(15));
     let run = match rock_host::js_runner::run_node_code_with_timeout(&program, timeout) {
         Ok(r) => r,
@@ -489,13 +506,19 @@ fn emit_js_program_single(path: &str) -> skull_codegen_js::emit::JsProgram {
         }
     };
     let user_file = user.file;
-    let ws = match crate::bone_backend::check_with_stdlib([user]) {
+    let mut ws = match crate::bone_backend::check_with_stdlib([user]) {
         Ok(ws) => ws,
         Err(errs) => {
             eprintln!("{}", crate::skull_backend::render_file_errs(path, &src, &errs));
             crate::ablation_report::exit_with_census(1);
         }
     };
+    // Single-file runs resolve from the file's enclosing project (walk-up), so
+    // a file inside a [build.vars] project behaves the same on both backends.
+    if let Err(e) = crate::comptime::stamp_workspace(&mut ws, std::path::Path::new(path)) {
+        log::error!(target: "JS", "build var resolution failed for {}: {:#}", path, e);
+        crate::ablation_report::exit_with_census(1);
+    }
     let user_mid = crate::bone_backend::entry_module_id(&ws, user_file);
     match skull_codegen_js::emit::emit_program(&ws, user_mid) {
         Ok(p) => p,
@@ -555,13 +578,14 @@ pub(crate) fn try_emit_js_program_project_cached(
             crate::skull_backend::render_project_errs(&sources, &errs)
         )),
     };
-    let ws = match crate::bone_backend::check_modules(&mut modules) {
+    let mut ws = match crate::bone_backend::check_modules(&mut modules) {
         Ok(ws) => ws,
         Err(errs) => return Err(anyhow::anyhow!(
             "{}",
             crate::skull_backend::render_project_errs(&sources, &errs)
         )),
     };
+    crate::comptime::stamp_workspace(&mut ws, std::path::Path::new(dir))?;
     let user_mid = crate::bone_backend::entry_module_id(&ws, entry_file);
     let (prog, cache) = match skull_codegen_js::emit::emit_program_cached(&ws, user_mid) {
         Ok(p) => p,
@@ -598,7 +622,8 @@ fn build_run_program(emitted: &skull_codegen_js::emit::JsProgram) -> String {
     p.push_str(skull_codegen_js::JS_MAP_ITER_RUNTIME);
     p.push_str(skull_codegen_js::JS_STRUCTURAL_EQ);
     p.push_str(skull_codegen_js::JS_ENUM_RUNTIME);
-    p.push_str(skull_codegen_js::JS_CALL_HELPER);
+    append_call_runtime(&mut p, &emitted.program, &emitted.code_artifact);
+    p.push_str(skull_codegen_js::JS_SESSION_RUNTIME);
     p.push_str(skull_codegen_js::JS_CORO_RUNTIME);
     p.push_str(skull_codegen_js::JS_STRING_RUNTIME);
     p.push_str(skull_codegen_js::JS_INSPECT_RUNTIME);
@@ -665,6 +690,7 @@ fn is_decorator_populated_reject(msg: &str) -> bool {
 fn build_node_program(
     shared_defs: &str,
     tests: &[(String, String, Option<String>, bool)],
+    has_code_refs: bool,
 ) -> String {
     let mut p = String::from(skull_codegen_js::JS_NB_CHECK_SHIMS);
     p.push_str(skull_codegen_js::JS_VEC_CHECK_SHIMS);
@@ -672,7 +698,8 @@ fn build_node_program(
     p.push_str(skull_codegen_js::JS_MAP_ITER_RUNTIME);
     p.push_str(skull_codegen_js::JS_STRUCTURAL_EQ);
     p.push_str(skull_codegen_js::JS_ENUM_RUNTIME);
-    p.push_str(skull_codegen_js::JS_CALL_HELPER);
+    append_call_runtime_with_flag(&mut p, shared_defs, has_code_refs);
+    p.push_str(skull_codegen_js::JS_SESSION_RUNTIME);
     p.push_str(skull_codegen_js::JS_CORO_RUNTIME);
     p.push_str(skull_codegen_js::JS_STRING_RUNTIME);
     p.push_str(skull_codegen_js::JS_INSPECT_RUNTIME);
@@ -737,6 +764,26 @@ for (var i = 0; i < __tests.length; i++) {
 "#,
     );
     p
+}
+
+pub(crate) fn append_call_runtime(
+    program: &mut String,
+    emitted: &str,
+    artifact: &skull_mir::code_identity::CodeArtifact,
+) {
+    let has_code_refs = artifact.entries.values().any(|entry| entry.escaping);
+    append_call_runtime_with_flag(program, emitted, has_code_refs);
+}
+
+fn append_call_runtime_with_flag(program: &mut String, emitted: &str, has_code_refs: bool) {
+    let needs_call = has_code_refs
+        || emitted.contains("__rock_call(")
+        || emitted.contains("__try_call(");
+    if has_code_refs {
+        program.push_str(skull_codegen_js::JS_CALL_HELPER);
+    } else if needs_call {
+        program.push_str(skull_codegen_js::JS_FOREIGN_CALL_HELPER);
+    }
 }
 
 /// Keep emitted-JS dumps in error reports manageable.

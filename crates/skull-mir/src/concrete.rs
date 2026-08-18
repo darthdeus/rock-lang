@@ -4,7 +4,8 @@
 //! values. Lowering may inspect the facts, but it does not receive the
 //! substitution that produced them.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use bone_semantic::hir::{BindingInfo, Expr};
 use bone_semantic::prelude::ModuleId;
@@ -87,29 +88,76 @@ pub struct ConcreteSignature {
     pub result: Option<MonoTyId>,
 }
 
+pub type ConcreteSignatureHandle = Arc<ConcreteSignature>;
+
 /// All concrete facts MIR lowering needs for one body.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ConcreteBodyPlan {
     pub owner: ConcreteOwner,
+    /// The logical identity the concrete lowering belongs to. Function plans
+    /// carry their mono instance; global/decorator plans leave this empty.
+    pub code_identity: Option<crate::code_identity::CodeIdentity>,
     /// The owner's own expression and binding arena.
     pub types: ConcreteTypeTables,
     /// Struct-default domains entered while lowering this owner. The key is
     /// part of the plan because each domain has a distinct HIR arena.
     pub foreign_domains: BTreeMap<SiteDomain, ConcreteTypeTables>,
-    pub signature: ConcreteSignature,
+    pub signature: ConcreteSignatureHandle,
     /// Every resolved site is owned by its concrete callee instance.
     pub callees: BTreeMap<Site, Instance>,
     /// Concrete signatures for the same resolved sites, including boundaries
     /// whose body is supplied by the target rather than lowered here.
-    pub callee_signatures: BTreeMap<Site, ConcreteSignature>,
+    pub callee_signatures: BTreeMap<Site, ConcreteSignatureHandle>,
     /// Sites the graph visited but could not resolve. Keeping these distinct
     /// from absent entries lets lowering report a planned failure at the site.
     pub failed_sites: BTreeMap<Site, &'static str>,
     pub bound_tree: ResolvedBoundTree,
 }
 
-pub type ConcretePlans = BTreeMap<Instance, ConcreteBodyPlan>;
+/// Stable per-instance plan handles. The table is still ordered for
+/// deterministic iteration, while replacing one body only swaps its handle.
+pub type ConcretePlans = BTreeMap<Instance, Arc<ConcreteBodyPlan>>;
 pub type ConcreteAlwaysPlans = FxHashMap<ConcreteOwner, ConcreteBodyPlan>;
+
+/// Copy a view's outer table while preserving the stable handle for every
+/// selected body. The owner-local publisher can then replace its authoritative
+/// map entry without mutating a consumer's selection.
+pub fn select_concrete_plans<'a>(
+    plans: &ConcretePlans,
+    instances: impl IntoIterator<Item = &'a Instance>,
+) -> ConcretePlans {
+    instances
+        .into_iter()
+        .filter_map(|instance| {
+            plans
+                .get(instance)
+                .map(|plan| (instance.clone(), Arc::clone(plan)))
+        })
+        .collect()
+}
+
+/// Select the concrete plans a lowering view can consume, including resolved
+/// Rock callees that the target graph classifies as inline/native operators.
+pub fn select_concrete_plan_closure<'a>(
+    plans: &ConcretePlans,
+    roots: impl IntoIterator<Item = &'a Instance>,
+) -> ConcretePlans {
+    let mut selected = BTreeSet::new();
+    let mut queue: Vec<_> = roots
+        .into_iter()
+        .filter(|instance| selected.insert((*instance).clone()))
+        .cloned()
+        .collect();
+    while let Some(instance) = queue.pop() {
+        let Some(plan) = plans.get(&instance) else { continue };
+        for callee in plan.callees.values() {
+            if selected.insert(callee.clone()) {
+                queue.push(callee.clone());
+            }
+        }
+    }
+    select_concrete_plans(plans, selected.iter())
+}
 
 impl ConcreteBodyPlan {
     pub fn function_instance(&self) -> Option<&Instance> {

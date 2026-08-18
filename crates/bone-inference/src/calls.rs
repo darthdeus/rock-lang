@@ -1428,7 +1428,7 @@ pub(crate) fn commit_selected_call(
                 (
                     SlotFill::Direct(arg),
                     if i < nfixed {
-                        param_tys[offset + 1]
+                        param_tys[offset + i]
                     } else {
                         velem
                     },

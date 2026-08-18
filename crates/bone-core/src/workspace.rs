@@ -64,6 +64,38 @@ pub struct Workspace {
     /// keeps `Workspace: Clone` and lets the parallel dependent re-check (which
     /// holds `&Workspace`) share one counter across threads.
     pub reinferred_body_count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+
+    /// Resolved compile-time inputs (docs/comptime-plan.md tier 1), set by the
+    /// host once per session build before emission. bone itself never reads them
+    /// -- values don't affect types -- but they live here because every
+    /// consumer (skull's `build_var`/`embed_string` expansion at MIR lowering,
+    /// on all backends) already holds a `&Workspace` and nothing else with
+    /// that reach exists. Empty in LSP/typecheck-only contexts, where no
+    /// expansion runs.
+    pub comptime_inputs: ComptimeInputs,
+}
+
+/// See [`Workspace::comptime_inputs`].
+#[derive(Clone, Debug, Default)]
+pub struct ComptimeInputs {
+    pub vars: FxHashMap<Ustr, ComptimeVarValue>,
+    /// Effective declared build channel for package metadata. Empty means a
+    /// synthetic/type-only workspace did not come through CLI resolution.
+    pub channel: String,
+    /// FALLBACK root for `embed_string(path)`, used only when the calling
+    /// module has no file on disk to resolve from (a synthetic module).
+    /// Normally the path resolves against the nearest stick.toml at or above
+    /// the CALLING file. None and no calling file = every embed rejects.
+    pub embed_root: Option<std::path::PathBuf>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ComptimeVarValue {
+    pub value: String,
+    /// Metadata hygiene, not confidentiality (docs/comptime-plan.md): hashed
+    /// into cache keys, ALLOWED in the compiled program payload, and kept out
+    /// of logs, diagnostics, manifests and cache metadata.
+    pub secret: bool,
 }
 
 impl Default for Workspace {
@@ -117,6 +149,7 @@ impl Workspace {
             phase_timings: Default::default(),
 
             reinferred_body_count: Default::default(),
+            comptime_inputs: Default::default(),
         };
 
         ws.module_ids.insert(ustr("$builtin"), ModuleId::builtin());

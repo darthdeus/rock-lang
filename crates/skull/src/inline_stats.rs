@@ -68,7 +68,7 @@ pub fn report(ws: &Workspace) -> InlineStatsReport {
     let mut callers: Vec<(String, usize, usize)> = Vec::new(); // (name, splices, copies)
     let (mut total_splices, mut total_copies, mut funcs_scanned) = (0usize, 0usize, 0usize);
 
-    for (inst, plan) in &concrete.plans {
+    for (inst, plan) in concrete.plans.iter() {
         let f = &ws.module(inst.func.module).functions[inst.func.func];
         if f.is_extern || f.inline_body.is_some() || f.is_coroutine {
             continue;
@@ -83,7 +83,7 @@ pub fn report(ws: &Workspace) -> InlineStatsReport {
         ) else {
             continue;
         };
-        let Ok((_deps, splices)) = skull_transform::inline_functions_with_plans(
+        let Ok((_deps, splices, _scan_stats)) = skull_transform::inline_functions_with_plans(
             ws,
             &scx,
             self_ref,

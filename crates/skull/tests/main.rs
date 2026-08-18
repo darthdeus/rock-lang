@@ -18,8 +18,10 @@ mod bounded_standalone_emission;
 mod capture_free_hoist;
 #[path = "closure_snapshot.rs"]
 mod closure_snapshot;
-#[path = "coalesce_value_struct_literal_field_sentinel.rs"]
-mod coalesce_value_struct_literal_field_sentinel;
+#[path = "code_identity_artifact.rs"]
+mod code_identity_artifact;
+#[path = "coalesce_value_struct_literal_field.rs"]
+mod coalesce_value_struct_literal_field;
 #[path = "concrete_body.rs"]
 mod concrete_body;
 #[path = "concrete_coroutine_emission.rs"]
@@ -40,6 +42,8 @@ mod expansion_admission;
 mod concrete_expansion;
 #[path = "enum_cdata.rs"]
 mod enum_cdata;
+#[path = "enum_flat_field_spread.rs"]
+mod enum_flat_field_spread;
 #[path = "enum_payload_sroa.rs"]
 mod enum_payload_sroa;
 #[path = "enum_scalarize.rs"]
@@ -87,6 +91,8 @@ mod inline_lua_column_container_param_sentinel;
 mod inline_value_specialization;
 #[path = "inline_stats.rs"]
 mod inline_stats;
+#[path = "parallel_inline_mode.rs"]
+mod parallel_inline_mode;
 #[path = "graph_contributions.rs"]
 mod graph_contributions;
 
@@ -172,6 +178,8 @@ mod nullable_value_in_tuple_sentinel;
 mod plain_struct_scalarize;
 #[path = "reserved_namespace.rs"]
 mod reserved_namespace;
+#[path = "comptime_inputs.rs"]
+mod comptime_inputs;
 #[path = "shader_pipeline_register.rs"]
 mod shader_pipeline_register;
 #[path = "compute_surface.rs"]
@@ -180,6 +188,10 @@ mod compute_surface;
 mod static_hot_reload;
 #[path = "static_registration_coverage.rs"]
 mod static_registration_coverage;
+#[path = "state_schema.rs"]
+mod state_schema;
+#[path = "session_state.rs"]
+mod session_state;
 #[path = "struct_expand.rs"]
 mod struct_expand;
 #[path = "synthetic_name_collision.rs"]

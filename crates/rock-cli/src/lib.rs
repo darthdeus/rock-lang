@@ -33,6 +33,7 @@ pub mod bone_backend;
 pub mod skull_backend;
 pub mod common;
 mod compile_cmd;
+pub mod comptime;
 mod dispatcher;
 mod error_test;
 mod file_watcher;
@@ -48,6 +49,7 @@ pub mod glsl_test;
 pub mod js_test;
 pub mod live_project;
 pub mod web;
+pub mod package;
 pub mod zip_writer;
 mod test_protocol;
 mod lint_cmd;
@@ -273,6 +275,9 @@ pub enum CliCommand {
     /// preludes + `JS_WEB_RUNTIME` + emitted program + a boot line). Serve the
     /// out dir with any static file server. See `docs/stone-web-plan.md` Arc 2.
     Web,
+    /// `rock package <game>` -- stage native release inputs, bake bytecode,
+    /// and write the manifest consumed by Fire and release verification.
+    Package,
 }
 
 impl clap::ValueEnum for CliCommand {
@@ -307,6 +312,7 @@ impl clap::ValueEnum for CliCommand {
             Self::Shader,
             Self::ShaderValidate,
             Self::Web,
+            Self::Package,
         ]
     }
     fn to_possible_value(&self) -> Option<clap::builder::PossibleValue> {
@@ -357,6 +363,7 @@ impl CliCommand {
             Self::Shader => "shader",
             Self::ShaderValidate => "shader-validate",
             Self::Web => "web",
+            Self::Package => "package",
         }
     }
 }
@@ -512,7 +519,14 @@ pub struct Args {
     pub test_threads: Option<usize>,
     pub lib: Option<String>,
     pub clean: bool,
-    pub release: bool,
+    /// `--channel`: release channel for `[build.vars]` resolution
+    /// (docs/comptime-plan.md). None = the project's default_channel.
+    pub channel: Option<String>,
+    /// `--target-os`: artifact target for the `platform` builtin. Cross-builds
+    /// package on one OS for another; None = infer from channel, then host.
+    pub target_os: Option<String>,
+    /// `--var NAME=VALUE` overrides, raw; parsed/validated at resolution.
+    pub build_var_overrides: Vec<String>,
     pub trace: bool,
     pub timeout: u64,
     pub no_timeout: bool,
@@ -522,12 +536,13 @@ pub struct Args {
     /// conservative default in `run_sim::resolve_jobs`.
     pub jobs: Option<usize>,
     /// For `rock sim`: force one fresh process per entry. This is the permanent
-    /// reference-oracle surface (`docs/sim-speed-plan.md`), today also the
-    /// default; it stays meaningful when boot-checkpoint workers become one.
+    /// fresh-process reference oracle; the ordinary default uses eligible
+    /// boot-checkpoint workers, including rendered sims.
     pub isolated: bool,
-    /// For `rock sim`: opt into boot-checkpoint workers -- eligible entries
-    /// grouped by boot signature share one booted process with the B2 restore
-    /// boundary between them. Ineligible entries stay isolated with a reason.
+    /// For `rock sim`: explicitly force the boot-checkpoint worker path. The
+    /// default already uses it where eligible; this spelling makes fallback a
+    /// rejection for diagnostics. Ineligible entries stay isolated with a
+    /// reason.
     pub workers: bool,
     /// For `rock sim <project>`: the B4 corpus gate. Runs the whole project in
     /// three predecessor orders and compares every sim against its own
@@ -692,8 +707,13 @@ impl Args {
                 .help("Load a project as a library context when running a Rock file. Usage: rock run --lib game/ test.rock"))
             .arg(Arg::new("clean").long("clean").action(ArgAction::SetTrue)
                 .help("Force a clean build by clearing the cache before compilation"))
-            .arg(Arg::new("release").long("release").action(ArgAction::SetTrue)
-                .help("Compile in release mode — strips debug-time runtime checks. Can also be set via ROCK_RELEASE=1."))
+            .arg(Arg::new("channel").long("channel").value_name("CHANNEL")
+                .help("Release channel for [build.vars] resolution (must be declared in the project's [build] channels)"))
+            .arg(Arg::new("var").long("var").value_name("NAME=VALUE")
+                .action(ArgAction::Append)
+                .help("Override a declared [build.vars] entry for this invocation (repeatable)"))
+            .arg(Arg::new("target-os").long("target-os").value_name("OS")
+                .help("Artifact target for the `platform` builtin (linux, osx, windows, ios, web). Cross-builds package on one OS for another; default infers from channel, then the host."))
             .arg(Arg::new("trace").long("trace").action(ArgAction::SetTrue)
                 .help("Enable trace file generation (trace.folded and trace.perfetto) for profiling"))
             .arg(Arg::new("timeout").long("timeout").default_value("60")
@@ -710,9 +730,9 @@ impl Args {
                 .help("For `rock sim`: run up to N sim children concurrently (default 4, 1 = serial). Applies to the whole-suite and multi-name forms."))
             .arg(Arg::new("isolated").long("isolated").action(ArgAction::SetTrue)
                 .conflicts_with("workers")
-                .help("For `rock sim`: force one fresh process per entry -- the permanent reference oracle. The default is the hybrid: render-skipped entries share boot-checkpoint workers, rendered entries run isolated with a reported reason."))
+                .help("For `rock sim`: force one fresh process per entry -- the permanent fresh-process reference oracle. The default uses eligible boot-checkpoint workers, including rendered sims."))
             .arg(Arg::new("workers").long("workers").action(ArgAction::SetTrue)
-                .help("For `rock sim`: force RENDERED sims into shared boot-checkpoint workers too, which the hybrid default isolates -- the diagnostic spelling, and how the differential and multi-order gates measure that class. Hot-reload sims, $OUT-interpolating env and SIM_WORKER_ISOLATED still run isolated with a reported reason."))
+                .help("For `rock sim`: explicitly require boot-checkpoint workers. The default already uses the same worker policy, including eligible rendered sims; this diagnostic/force spelling rejects where the default may fall back. Hot-reload sims, $OUT-interpolating env and SIM_WORKER_ISOLATED still run isolated with a reported reason."))
             .arg(Arg::new("multi-order").long("multi-order").action(ArgAction::SetTrue)
                 .conflicts_with_all(["isolated", "workers"])
                 .help("For `rock sim <project> [name...]`: the B4 corpus gate -- run the corpus in registry, reverse and one fixed shuffled order and compare every sim against its own fresh-process reference. With no names it runs the whole project and is an arc checkpoint (slow); with names it runs the same four arms over just those sims, which confirms an already-isolated divergence in seconds but cannot discover a new one."))
@@ -800,7 +820,12 @@ impl Args {
             test_threads: m.get_one::<usize>("test-threads").copied(),
             lib: m.get_one::<String>("lib").cloned(),
             clean: m.get_flag("clean"),
-            release: m.get_flag("release"),
+            channel: m.get_one::<String>("channel").cloned(),
+            target_os: m.get_one::<String>("target-os").cloned(),
+            build_var_overrides: m
+                .get_many::<String>("var")
+                .map(|vals| vals.cloned().collect())
+                .unwrap_or_default(),
             trace: m.get_flag("trace"),
             timeout: *m.get_one::<u64>("timeout").unwrap(),
             no_timeout: m.get_flag("no-timeout"),
@@ -866,6 +891,23 @@ mod arg_tests {
         };
         assert!(parse(&["rock", "stone", "bitgun", "--no-record"]).no_record);
         assert!(!parse(&["rock", "stone", "bitgun"]).no_record);
+    }
+
+    #[test]
+    fn sim_worker_help_names_the_current_default_and_force_spelling() {
+        let help = Args::command().render_help().to_string();
+        assert!(
+            help.contains("default uses eligible boot-checkpoint workers, including rendered sims"),
+            "sim help lost the worker default wording:\n{help}"
+        );
+        assert!(
+            help.contains("diagnostic/force spelling rejects where the default may fall back"),
+            "sim help lost the explicit --workers distinction:\n{help}"
+        );
+        assert!(
+            !help.contains("rendered entries run isolated with a reported reason"),
+            "sim help still describes the superseded rendered-isolated default:\n{help}"
+        );
     }
 
     #[test]

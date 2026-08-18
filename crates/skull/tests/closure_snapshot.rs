@@ -5,7 +5,7 @@
 //! a mutable capture is BOXED and the field holds the shared box table, so a later
 //! write is observed by reference. Neither renders an inline `function(` closure
 //! at the creation site. Record mechanics in depth: `env_record_hoist.rs`.
-use crate::common::{emit_module, function_body, mangled_name, run_luajit};
+use crate::common::{emit_module, function_body, run_luajit};
 
 /// True if `body` declares a box cell -- a `local c<N> = {}` line (the box-init
 /// shape). Matched precisely rather than via the bare `= {}` substring, which an
@@ -46,11 +46,11 @@ fn main() { let f = submit(3) f() }
 fn nonloop_capture_hoists_to_by_value_record() {
     let lua = emit_module(NONLOOP_CAPTURE);
     let body = function_body(&lua, "submit");
-    let lam = format!("{}__lambda0", mangled_name(&lua, "submit"));
     assert!(
-        body.contains(&format!("setmetatable({{ __fn = {lam}")),
+        body.contains("setmetatable({ __slot = __rock_code_slot_ref("),
         "the capture hoists to an env record, not an inline closure:\n{body}"
     );
+    assert!(!body.contains("__fn"), "a Rock closure stores a CodeRef, not a frozen body:\n{body}");
     assert!(
         !body.contains("function("),
         "no inline closure at the creation site:\n{body}"
@@ -88,11 +88,11 @@ fn main() {
 fn loop_capture_snapshots_per_iteration_via_record() {
     let lua = emit_module(LOOP_CAPTURE);
     let body = function_body(&lua, "submit_loop");
-    let lam = format!("{}__lambda", mangled_name(&lua, "submit_loop"));
     assert!(
-        body.contains(&format!("setmetatable({{ __fn = {lam}")),
+        body.contains("setmetatable({ __slot = __rock_code_slot_ref("),
         "a loop-created capture hoists to a per-iteration env record:\n{body}"
     );
+    assert!(!body.contains("__fn"), "a Rock closure stores a CodeRef, not a frozen body:\n{body}");
     assert!(!body.contains("return function"), "no by-value snapshot IIFE (deleted in P2.6):\n{body}");
     let out = run_luajit(&format!("{lua}\nmain()\n"), "loopcap");
     assert_eq!(out, "1\n2\n3", "each record must snapshot its iteration's value; got:\n{out}");
@@ -119,13 +119,13 @@ fn main() { let h = capture_box() h() }
 fn mutated_capture_lowers_to_box_threaded_into_record() {
     let lua = emit_module(MUTATED_CAPTURE);
     let body = function_body(&lua, "capture_box");
-    let lam = format!("{}__lambda", mangled_name(&lua, "capture_box"));
     assert!(declares_box(&body), "a mutable capture must declare a box `local c<N> = {{}}`:\n{body}");
     assert!(body.contains(".v = "), "a mutable capture stores through `.v`:\n{body}");
     assert!(
-        body.contains(&format!("setmetatable({{ __fn = {lam}")),
+        body.contains("setmetatable({ __slot = __rock_code_slot_ref("),
         "the box is threaded into an env record:\n{body}"
     );
+    assert!(!body.contains("__fn"), "a Rock closure stores a CodeRef, not a frozen body:\n{body}");
     assert!(!body.contains("return function"), "a boxed capture gets no by-value snapshot IIFE:\n{body}");
 }
 
@@ -153,9 +153,10 @@ fn per_iteration_value_capture_snapshots_flat_leaves() {
     assert!(!declares_box(&body), "a per-iteration value capture must not box its leaves:\n{body}");
     assert!(!body.contains(".v = "), "no leaf is stored through a box:\n{body}");
     assert!(
-        body.contains("setmetatable({ __fn = main__lambda0"),
+        body.contains("setmetatable({ __slot = __rock_code_slot_ref("),
         "the leaves snapshot into a per-iteration env record:\n{body}"
     );
+    assert!(!body.contains("__fn"), "a Rock closure stores a CodeRef, not a frozen body:\n{body}");
     let out = run_luajit(&format!("{lua}\nmain()\n"), "perit");
     assert_eq!(out, "3\n5\n7", "each closure reads ITS iteration's leaves; got:\n{out}");
 }

@@ -9,10 +9,10 @@ autotests = false
 # Lua, independent of rock's `rock-codegen`. See docs/skull-plan.md.
 
 [features]
-# Swap skull's parallel emit/inline (rayon) for sequential iteration, so a
+# Swap skull's and skull-graph's Rayon fanouts for sequential iteration, so a
 # sampling profiler attributes codegen samples to one thread (clean flamegraphs).
 # Mirrors bone's `sequential`. Wired through rock-cli's `sequential` feature.
-sequential = []
+sequential = ["skull-graph/sequential"]
 
 [dependencies]
 bone-semantic = { path = "../bone-semantic" }
@@ -36,6 +36,8 @@ smallvec = { workspace = true }
 
 [dev-dependencies]
 rock-host = { path = "../rock-host" }
+skull-graph = { path = "../skull-graph", features = ["test-hooks"] }
+tempfile = "3.0"
 # The updater's tests drive real incremental inference rather than inventing a
 # reinferred-body set: `UpdateResult::reinferred` is exactly the population
 # `InstanceGraph::update_bodies` takes.

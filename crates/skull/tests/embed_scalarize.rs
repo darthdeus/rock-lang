@@ -198,3 +198,21 @@ fn value_parent_embed_introduces_no_dotted_keys() {
          assertion, not a reencoding:\n{body}"
     );
 }
+
+const NOBOX_REFLECTION_FIELD: &str = r#"
+nobox value Pt { x: int, y: int }
+struct Holder { p: Pt, tag: int }
+
+fn main() {
+    let _ = Holder { p: Pt { x: 1, y: 2 }, tag: 3 }
+}
+"#;
+
+#[test]
+fn type_table_uses_the_shared_plan_for_a_nobox_field() {
+    let lua = emit_module(NOBOX_REFLECTION_FIELD);
+    assert!(
+        lua.contains(r#"name = "p", type = "Pt", nullable = false, embed = true"#),
+        "the nobox field was not reflected from its inline plan:\n{lua}"
+    );
+}

@@ -4,6 +4,8 @@
 
 mod common;
 
+#[path = "abi_plan_memo.rs"]
+mod abi_plan_memo;
 #[path = "backend_externs.rs"]
 mod backend_externs;
 #[path = "bounded_standalone_emission.rs"]
@@ -75,6 +77,10 @@ mod nomangle_roots;
 mod number_format;
 #[path = "session_arena.rs"]
 mod session_arena;
+#[path = "state_schema.rs"]
+mod state_schema;
+#[path = "session_state.rs"]
+mod session_state;
 
 #[path = "overlay.rs"]
 mod overlay;

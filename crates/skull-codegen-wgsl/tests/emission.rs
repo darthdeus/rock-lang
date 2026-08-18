@@ -831,7 +831,16 @@ fn bool_uniforms_cross_as_u32_and_are_compared_at_every_read() {
         .filter(|member| member.kind == skull_mir::gpu_layout::WireKind::Bool32)
         .map(|member| member.name.as_str())
         .collect();
-    assert_eq!(bools, ["uLightsEnabled", "uUnlit", "uGlowEnabled", "uHasNormalTex"]);
+    assert_eq!(
+        bools,
+        [
+            "uLightsEnabled",
+            "uShadowsEnabled",
+            "uUnlit",
+            "uGlowEnabled",
+            "uHasNormalTex",
+        ]
+    );
     for name in &bools {
         assert!(
             artifact.source.contains(&format!("  {name}: u32,")),

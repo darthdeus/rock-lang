@@ -10,11 +10,18 @@ pub enum LiveUpdate {
     NoChange,
     BodyOnly {
         reinferred: Vec<(ModuleId, BodyOwner)>,
+        span_edits: Vec<skull::instance_graph::SpanEdit>,
         cook_ms: f64,
     },
     Full {
         cook_ms: f64,
     },
+}
+
+pub(crate) struct LiveProjectSnapshot {
+    sources: SourceFiles,
+    entry_path: String,
+    previous_contents: Vec<(String, String)>,
 }
 
 pub struct LiveProject {
@@ -36,9 +43,14 @@ impl LiveProject {
         };
         let entry_path = entry_path(&sources)?;
         let files = source_pairs(&sources);
-        let session = crate::bone_backend::bone_session(files).map_err(|e| {
-            anyhow::anyhow!("{}", crate::skull_backend::render_project_err(&sources, &e))
-        })?;
+        // bone_session_for_emission resolves [build.vars] at construction, so
+        // var commands run once per session build -- init and every
+        // `rebuild_session` -- never per incremental update (the Session
+        // mutates its ws in place, so the stamp survives `update_file`).
+        let session = crate::bone_backend::bone_session_for_emission(files, Path::new(dir))
+            .map_err(|e| {
+                anyhow::anyhow!("{}", crate::skull_backend::render_project_err(&sources, &e))
+            })?;
         let project = Self {
             session,
             dir: dir.to_string(),
@@ -50,7 +62,69 @@ impl LiveProject {
         Ok(project)
     }
 
+    pub(crate) fn snapshot(&self, changed: &[PathBuf]) -> LiveProjectSnapshot {
+        let mut previous_contents = Vec::new();
+        for path in changed {
+            let Ok(canonical) = std::fs::canonicalize(path) else { continue };
+            let id = canonical.to_string_lossy().into_owned();
+            let Some(source) = self
+                .sources
+                .files
+                .iter()
+                .find(|source| source.borrow().file.to_id_path() == id)
+            else {
+                continue;
+            };
+            if previous_contents.iter().any(|(old_id, _)| old_id == &id) {
+                continue;
+            }
+            previous_contents.push((id, source.borrow().contents.clone()));
+        }
+        LiveProjectSnapshot {
+            sources: self.sources.clone(),
+            entry_path: self.entry_path.clone(),
+            previous_contents,
+        }
+    }
+
+    pub(crate) fn restore(&mut self, snapshot: LiveProjectSnapshot) -> Result<()> {
+        self.sources = snapshot.sources;
+        self.entry_path = snapshot.entry_path;
+        for (id, contents) in snapshot.previous_contents {
+            if let Some(source) = self
+                .sources
+                .files
+                .iter()
+                .find(|source| source.borrow().file.to_id_path() == id)
+            {
+                source.borrow_mut().contents = contents;
+            }
+        }
+        self.session = crate::bone_backend::bone_session(source_pairs(&self.sources)).map_err(|e| {
+            anyhow::anyhow!(
+                "{}",
+                crate::skull_backend::render_project_err(&self.sources, &e)
+            )
+        })?;
+        self.verdict("after failed publication rollback")
+    }
+
     pub fn recompile(&mut self, changed: &[PathBuf]) -> Result<LiveUpdate> {
+        let snapshot = self.snapshot(changed);
+        match self.recompile_inner(changed) {
+            Ok(update) => Ok(update),
+            Err(error) => {
+                if let Err(restore) = self.restore(snapshot) {
+                    return Err(anyhow::anyhow!(
+                        "live project rollback failed after compile error: {restore}; original error: {error}"
+                    ));
+                }
+                Err(error)
+            }
+        }
+    }
+
+    fn recompile_inner(&mut self, changed: &[PathBuf]) -> Result<LiveUpdate> {
         let started = Instant::now();
         let mut need_full = changed.is_empty();
         let mut feed = Vec::new();
@@ -89,6 +163,21 @@ impl LiveProject {
     }
 
     pub fn apply_edit(&mut self, path: &Path, new_text: &str) -> Result<LiveUpdate> {
+        let snapshot = self.snapshot(&[path.to_path_buf()]);
+        match self.apply_edit_inner(path, new_text) {
+            Ok(update) => Ok(update),
+            Err(error) => {
+                if let Err(restore) = self.restore(snapshot) {
+                    return Err(anyhow::anyhow!(
+                        "live project rollback failed after in-memory edit error: {restore}; original error: {error}"
+                    ));
+                }
+                Err(error)
+            }
+        }
+    }
+
+    fn apply_edit_inner(&mut self, path: &Path, new_text: &str) -> Result<LiveUpdate> {
         let started = Instant::now();
         let canonical = std::fs::canonicalize(path).map_err(|e| {
             anyhow::anyhow!("apply_edit: cannot canonicalize `{}`: {e}", path.display())
@@ -184,19 +273,23 @@ impl LiveProject {
     }
 
     fn rebuild_session(&mut self) -> Result<()> {
-        self.session =
-            crate::bone_backend::bone_session(source_pairs(&self.sources)).map_err(|error| {
-                anyhow::anyhow!(
-                    "{}",
-                    crate::skull_backend::render_project_err(&self.sources, &error)
-                )
-            })?;
+        self.session = crate::bone_backend::bone_session_for_emission(
+            source_pairs(&self.sources),
+            Path::new(&self.dir),
+        )
+        .map_err(|error| {
+            anyhow::anyhow!(
+                "{}",
+                crate::skull_backend::render_project_err(&self.sources, &error)
+            )
+        })?;
         self.verdict("- serving last good output")
     }
 
     fn update(&mut self, feed: &[(String, String)], started: Instant) -> Result<LiveUpdate> {
         let sources = self.sources.clone();
         let mut reinferred = Vec::new();
+        let mut span_edits = Vec::new();
         let mut full = false;
         let mut changed = false;
         for (path, text) in feed {
@@ -208,6 +301,14 @@ impl LiveProject {
                 bone_incremental::session::UpdateTier::BodyOnly => {
                     changed = true;
                     reinferred.extend(update.reinferred);
+                    if let Some(edit) = update.body_update.edit {
+                        span_edits.push(skull::instance_graph::SpanEdit {
+                            file: edit.file,
+                            at: edit.at,
+                            byte_delta: edit.byte_delta,
+                            line_delta: edit.line_delta,
+                        });
+                    }
                 }
                 bone_incremental::session::UpdateTier::Interface
                 | bone_incremental::session::UpdateTier::FullUser => {
@@ -226,6 +327,7 @@ impl LiveProject {
         } else {
             Ok(LiveUpdate::BodyOnly {
                 reinferred,
+                span_edits,
                 cook_ms,
             })
         }
@@ -291,5 +393,39 @@ mod tests {
             project.recompile(std::slice::from_ref(&source)).unwrap(),
             LiveUpdate::Full { .. }
         ));
+    }
+
+    #[test]
+    fn build_var_commands_run_once_for_incremental_updates() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("main.rock");
+        let count = dir.path().join("count");
+        std::fs::write(
+            dir.path().join("stick.toml"),
+            format!(
+                "[package]\nname = \"cadence\"\n[build]\n[build.vars]\nCOUNT = {{ cmd = \"n=$(cat {} 2>/dev/null || echo 0); echo $((n + 1)) > {}; echo counted\" }}\n",
+                count.display(), count.display()
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            &source,
+            "fn value() -> int { 1 }\nfn main() { print(build_var(\"COUNT\")) }\n",
+        )
+        .unwrap();
+
+        let mut project = LiveProject::init(dir.path().to_str().unwrap(), false).unwrap();
+        assert_eq!(std::fs::read_to_string(&count).unwrap().trim(), "1");
+
+        std::fs::write(
+            &source,
+            "fn value() -> int { 2 }\nfn main() { print(build_var(\"COUNT\")) }\n",
+        )
+        .unwrap();
+        project.recompile(std::slice::from_ref(&source)).unwrap();
+        assert_eq!(std::fs::read_to_string(&count).unwrap().trim(), "1");
+
+        project.recompile(&[]).unwrap();
+        assert_eq!(std::fs::read_to_string(&count).unwrap().trim(), "2");
     }
 }

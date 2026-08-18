@@ -9,7 +9,7 @@ use bone_semantic::hir::BodyOwner;
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::ModuleId;
 use skull::mir_emit::{emit_full, emit_incremental, emit_overlay as emit_overlay_result, MirEmit};
-use crate::common::ws_of;
+use crate::common::{ws_of, ws_with_stdlib};
 
 fn emit_overlay(
     ws: &Workspace,
@@ -53,10 +53,7 @@ fn check_edit_with(build: fn(&str) -> Workspace, v1: &str, v2: &str, edited: &[&
 
     let incremental = emit_incremental(&ws2, &mut cache, &reinferred).expect("emit_incremental");
     let fresh = emit_full(&ws2, mid2).expect("emit_full v2").0;
-    assert_eq!(
-        incremental.lua, fresh.lua,
-        "incremental assembly != fresh emit after editing {edited:?}"
-    );
+    assert_eq!(incremental.lua, fresh.lua, "incremental assembly != fresh emit after editing {edited:?}");
 }
 
 #[test]
@@ -71,6 +68,211 @@ fn body_edit_to_inlined_callee_reemits_callers() {
               fn use_it() -> float { helper() }\n\
               fn other() -> int { 7 }";
     check_edit(v1, v2, &["helper"]);
+}
+
+#[test]
+fn exact_body_edit_has_no_full_concrete_or_artifact_rebuild() {
+    let v1 = "fn helper() -> int { 3 }\nfn main() { let x = helper() }";
+    let v2 = "fn helper() -> int { 5 }\nfn main() { let x = helper() }";
+    let ws1 = ws_with_stdlib(v1);
+    let workspace_functions: usize = ws1.modules.iter().map(|module| module.functions.len()).sum();
+    assert!(workspace_functions > 2, "root locality fixture has no unrelated function population");
+    let mid = skull::user_module_id(&ws1).unwrap();
+    let (_full, mut cache) = emit_full(&ws1, mid).expect("emit_full v1");
+    let ws2 = ws_with_stdlib(v2);
+
+    let _overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "helper")]);
+    let stats = cache.repair_stats();
+    assert_eq!(stats.body_only_edits, 1, "the production route did not record a body edit");
+    assert!(stats.owners_revisited > 0, "no graph owner was revisited: {stats:?}");
+    assert!(stats.instances_revisited > 0, "no graph delta subject was visited: {stats:?}");
+    assert!(stats.graph_contributions_retracted > 0, "no graph contribution was retracted: {stats:?}");
+    assert!(stats.graph_contributions_installed > 0, "no graph contribution was installed: {stats:?}");
+    assert!(stats.concrete_entries_derived > 0, "no concrete entry was derived: {stats:?}");
+    assert!(stats.concrete_entries_reused > 0, "no unchanged concrete entry was reused: {stats:?}");
+    assert!(stats.concrete_entries_retracted > 0, "no concrete entry was retracted: {stats:?}");
+    assert!(stats.artifact_chunks_revisited > 0, "no artifact subject was revisited: {stats:?}");
+    assert_eq!(stats.full_graph_rebuilds, 0, "body-only route rebuilt the graph: {stats:?}");
+    assert_eq!(
+        stats.full_concrete_rebuilds, 0,
+        "a body-only edit rebuilt all concrete plans: {stats:?}"
+    );
+    assert_eq!(
+        stats.full_artifact_view_realizations, 0,
+        "a body-only edit rebuilt the full ArtifactView: {stats:?}"
+    );
+    assert_eq!(stats.broad_owner_scans, 0, "body-only route scanned all owners: {stats:?}");
+    assert_eq!(stats.broad_concrete_scans, 0, "body-only route scanned all concrete entries: {stats:?}");
+    assert_eq!(stats.broad_artifact_scans, 0, "body-only route scanned all artifact chunks: {stats:?}");
+    assert_eq!(stats.broad_candidate_scans, 0, "body-only route scanned all candidate keys: {stats:?}");
+    assert!(stats.root_requests > 0, "root locality has no request denominator: {stats:?}");
+    assert_eq!(
+        stats.root_functions_examined, 0,
+        "body-only route enumerated workspace roots: {stats:?}"
+    );
+    assert_eq!(stats.root_reseeds, 0, "body-only route reseeded all roots: {stats:?}");
+    assert_eq!(
+        stats.root_modules_examined, 0,
+        "body-only route enumerated root modules: {stats:?}"
+    );
+    assert_eq!(
+        stats.root_instances_checked, 0,
+        "body-only route scanned retained root instances: {stats:?}"
+    );
+    assert!(
+        stats.shader_delta_requests > 0,
+        "shader-root locality has no body request denominator: {stats:?}"
+    );
+    assert_eq!(
+        stats.artifact_realize_invocations, 0,
+        "body-only route realized a full artifact: {stats:?}"
+    );
+    assert!(
+        stats.artifact_iteration_requests > 0,
+        "artifact locality has no changed-subject denominator: {stats:?}"
+    );
+    assert!(
+        stats.artifact_index_rows_examined > 0,
+        "artifact locality did not count its connected index rows: {stats:?}"
+    );
+    assert!(
+        stats.artifact_iterations >= stats.artifact_index_rows_examined,
+        "artifact iteration census dropped indexed rows: {stats:?}"
+    );
+    assert!(
+        stats.declaration_lookup_requests > 0,
+        "declaration lookup locality has no request denominator: {stats:?}"
+    );
+    assert!(
+        stats.candidate_entries_requested > 0,
+        "candidate locality has no requested-entry denominator: {stats:?}"
+    );
+    assert!(
+        stats.chunk_rebuild_requests > 0,
+        "chunk locality has no rebuild-request denominator: {stats:?}"
+    );
+}
+
+#[test]
+fn an_unrelated_body_overlay_does_not_restage_the_complete_code_artifact() {
+    let v1 = r#"
+@lifecycle(phase="update", owner="session")
+deco init tick {}
+@tick fn first() {}
+@tick fn second() {}
+fn helper() -> int { return 1 }
+fn main() { let _ = helper() }
+"#;
+    let v2 = v1.replace("return 1", "return 2");
+    let ws1 = ws_of(v1);
+    let mid = skull::user_module_id(&ws1).unwrap();
+    let (full, mut cache) = emit_full(&ws1, mid).expect("emit_full v1");
+    let escaping = full.code_artifact.entries.values().filter(|entry| entry.escaping).count();
+    assert!(escaping >= 2, "fixture must expose a nonzero CodeRef population: {escaping}");
+
+    let ws2 = ws_of(&v2);
+    let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "helper")]);
+    let staged = overlay
+        .lua
+        .lines()
+        .filter(|line| line.contains("__rock_code_slot_stage("))
+        .count();
+    assert_eq!(
+        staged, 0,
+        "an unrelated body edit must not restage all {escaping} CodeRefs"
+    );
+    assert!(
+        overlay.lua.contains("__rock_code_slot_publish()"),
+        "the overlay must retain the transactional publication boundary"
+    );
+}
+
+#[test]
+fn a_changed_decorated_body_stages_its_logical_code_ref() {
+    let v1 = r#"
+@lifecycle(phase="update", owner="session")
+deco init tick {}
+@tick fn first() {}
+@tick fn second() {}
+fn main() {}
+"#;
+    let v2 = v1.replace("@tick fn first() {}", "@tick fn first() { let x = 1 }");
+    let ws1 = ws_of(v1);
+    let mid = skull::user_module_id(&ws1).unwrap();
+    let (full, mut cache) = emit_full(&ws1, mid).expect("emit_full v1");
+    let escaping = full.code_artifact.entries.values().filter(|entry| entry.escaping).count();
+    assert!(escaping >= 2, "fixture must expose a nonzero CodeRef population: {escaping}");
+
+    let ws2 = ws_of(&v2);
+    let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "first")]);
+    let staged: Vec<_> = overlay
+        .lua
+        .lines()
+        .filter(|line| line.contains("__rock_code_slot_stage("))
+        .collect();
+    assert_eq!(staged.len(), 1, "only the changed decorated body should be staged: {staged:?}");
+    assert!(
+        staged[0].contains("named:<t>::first<>"),
+        "the staged slot must retain logical identity: {}",
+        staged[0]
+    );
+    let stage_offset = overlay
+        .lua
+        .find("__rock_code_slot_stage(")
+        .expect("the changed CodeRef must be staged");
+    let body_offset = overlay.lua.find("function first").expect("changed body emission");
+    assert!(
+        body_offset < stage_offset,
+        "CodeRef publication must observe the newly emitted body: {body_offset} !< {stage_offset}"
+    );
+}
+
+#[test]
+fn an_unchanged_state_shape_uses_incremental_schema_validation() {
+    let v1 = "@lifecycle(phase=\"update\", owner=\"session\")\nfn first() {}\n";
+    let v2 = v1.replace("first", "second");
+    let ws1 = ws_of(v1);
+    let mid = skull::user_module_id(&ws1).unwrap();
+    let (full, mut cache) = emit_full(&ws1, mid).expect("emit_full v1");
+    let ws2 = ws_of(&v2);
+    let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "second")]);
+    assert_eq!(
+        cache.state_schema().unwrap().schema_id,
+        full.state_schema.schema_id,
+        "a body-only edit changed the state schema"
+    );
+    let full_collect = overlay
+        .phases
+        .iter()
+        .find(|(name, _)| *name == "  StateSchema full collection")
+        .expect("schema phase census");
+    assert_eq!(
+        full_collect.1.as_nanos(),
+        0,
+        "unchanged state shape took the full declaration walk: {full_collect:?}"
+    );
+}
+
+#[test]
+fn removing_the_last_edge_retracts_concrete_and_artifact_entries_locally() {
+    let v1 = "fn leaf<T>(x: T) -> T { x }\nfn main() { let x = leaf(3) }";
+    let v2 = "fn leaf<T>(x: T) -> T { x }\nfn main() { let x = 0 }";
+    let ws1 = ws_of(v1);
+    let mid = skull::user_module_id(&ws1).unwrap();
+    let (full, mut cache) = emit_full(&ws1, mid).expect("emit_full v1");
+    assert!(full.lua.contains("leaf"), "the removal fixture must emit the callee");
+
+    let ws2 = ws_of(v2);
+    let incremental = emit_incremental(&ws2, &mut cache, &[body_id(&ws2, "main")])
+        .expect("emit_incremental v2");
+    let stats = cache.repair_stats();
+    assert!(stats.instances_revisited > 0, "the changed owner was not revisited: {stats:?}");
+    assert!(stats.concrete_entries_retracted > 0, "the removed callee was not retracted: {stats:?}");
+    assert!(stats.artifact_chunks_removed > 0, "the removed callee chunk was not retracted: {stats:?}");
+    assert_eq!(stats.full_concrete_rebuilds, 0, "local removal rebuilt concrete state: {stats:?}");
+    assert_eq!(stats.full_artifact_view_realizations, 0, "local removal realized a full view: {stats:?}");
+    let fresh = emit_full(&ws2, skull::user_module_id(&ws2).unwrap()).expect("emit_full v2").0;
+    assert_eq!(incremental.lua, fresh.lua, "local removal diverged from fresh emission");
 }
 
 #[test]
@@ -387,6 +589,26 @@ fn an_instantiation_that_returns_after_being_pruned_is_rebuilt_not_reused() {
         "the returning instantiation must be REBUILT from the edited generic, not \
          served from the chunk it had before it was pruned:\n{q_body}"
     );
+}
+
+/// The same ABI-width flip on the `emit_incremental` path: taking `foo` by
+/// value flips `taken_by_ref`, which invalidates every memoized ABI plan, so
+/// the reassembled program must equal a fresh full emit rather than serve
+/// plans derived under the old ABI state.
+#[test]
+fn an_incremental_emit_matches_fresh_after_a_taken_by_ref_flip() {
+    let v1 = "value V2 { x: float, y: float }\n\
+              fn foo(v: V2) -> float { v.x }\n\
+              fn other() -> float { foo(V2 { x: 2.0, y: 3.0 }) }\n\
+              fn use_ref() -> float { other() }";
+    let v2 = "value V2 { x: float, y: float }\n\
+              fn foo(v: V2) -> float { v.x }\n\
+              fn other() -> float { foo(V2 { x: 2.0, y: 3.0 }) }\n\
+              fn use_ref() -> float {\n\
+                let f = foo\n\
+                f(V2 { x: 1.0, y: 2.0 })\
+              }";
+    check_edit_with(crate::common::ws_with_stdlib, v1, v2, &["use_ref"]);
 }
 
 #[test]

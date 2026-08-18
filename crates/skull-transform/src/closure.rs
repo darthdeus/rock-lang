@@ -14,15 +14,17 @@
 //!
 //! Every servable path routes through this pass (S1 JS, S2 ordinary Lua fns, S3
 //! coroutine steps + global-init/decorator units), so post-pass codegen sees
-//! `MakeEnv`/`Global`, never an `Inst::Lambda` -- except one nested in a co-fn
-//! hook/defer body, a detached region this pass leaves for the inline arm
-//! (`FrameCtx::hoist_lambdas == false`; see `convert_closures_framed`).
+//! `MakeEnv`/`Global`, never an `Inst::Lambda`.
 
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use comfy_la_arena::Idx;
 use crate::scope::{non_dominating_by_value_captures, Ownership, ScopeId, ScopeTree};
 use skull_mir::cfg::reachable_blocks_from;
+use skull_mir::code_identity::{
+    CaptureField, CaptureMode, CaptureSchema, CodeCompatibility, CodeIdentity, FrameSchema,
+    LambdaSiteId, LambdaTopologyFingerprint,
+};
 use skull_mir::mir::*;
 use ustr::Ustr;
 
@@ -80,10 +82,8 @@ pub fn convert_closures(mf: &mut MirFunc, name_base: &str) {
 /// [`FrameInfo`] for the STEP `MirFunc`). With a frame, captured frame cells
 /// collapse to a capture of `s` (D2) except provenance-tagged loop bindings no
 /// lambda writes, which snapshot by value (D4(b)); a frame-cell access inside a
-/// hoisted body materializes `e.c<S>.c<slot>` (D3). Detached hook/defer lambdas
-/// (unreachable from the step entry) are left untouched -- their bodies still
-/// emit through the inline arm (`FrameCtx::hoist_lambdas == false`), a sanctioned
-/// exception pinned by `cofn_lambda_in_defer_body` (`docs/coroutine-frame-lambda-plan.md`).
+/// hoisted body materializes `e.c<S>.c<slot>` (D3). Detached hook/defer regions
+/// are converted by [`lower_detached_region`] before they reach either backend.
 ///
 /// `precomputed` reuses the coroutine transform's `ScopeTree`+`Ownership` (the
 /// SAME basis `frame.fields` was derived from). This is not merely the P2
@@ -99,6 +99,7 @@ pub fn convert_closures_framed(
     precomputed: Option<(&ScopeTree, &Ownership)>,
 ) {
     if !mf.insts.iter().any(|(_, i)| matches!(i, Inst::Lambda { .. })) {
+        refresh_owner_compatibility(mf, None, LambdaTopologyFingerprint::default());
         return;
     }
 
@@ -121,7 +122,6 @@ pub fn convert_closures_framed(
         s_cell: f.s_cell,
         fields: f.fields.clone(),
         slots: f.slots.clone(),
-        hoist_lambdas: true,
     });
     let mut boxed: HashSet<Idx<Cell>> = tree.boxed_cells(own);
     // Frame cells are table-mediated (via `s` or a by-value loop-binding snapshot
@@ -152,6 +152,22 @@ pub fn convert_closures_framed(
             }
         }
     }
+
+    let topology_sites: Vec<(LambdaSiteId, usize)> = ordered
+        .iter()
+        .filter_map(|&(_, sid)| {
+            let lambda = tree.scopes[sid].lambda?;
+            let site = mf
+                .inst_spans
+                .get(lambda)
+                .copied()
+                .and_then(LambdaSiteId::from_span)?;
+            let Inst::Lambda { params, .. } = &mf.insts[lambda] else { return None };
+            Some((site, params.len()))
+        })
+        .collect();
+    let topology = LambdaTopologyFingerprint::from_sites(&topology_sites);
+    refresh_owner_compatibility(mf, frame, topology);
 
     // Per live lambda scope: hoisted name, sorted captures, an env param cell
     // (only when it captures anything -- a capture-free body takes no env).
@@ -239,10 +255,10 @@ pub fn convert_closures_framed(
                         // A boxed cell reads `.v` on its box table; a by-value
                         // capture is the env field directly.
                         let env = env_plans[&s].env_cell().expect("capture has an env plan");
-                        let il = mf.insts.alloc(Inst::Load(env));
+                        let il = mf.alloc_inst(Inst::Load(env));
                         new.push(il);
                         if boxed_c {
-                            let f = mf.insts.alloc(Inst::Field { base: il, field: field_of(c) });
+                            let f = mf.alloc_inst(Inst::Field { base: il, field: field_of(c) });
                             new.push(f);
                             mf.insts[id] = Inst::Field { base: f, field: Ustr::from("v") };
                         } else {
@@ -250,7 +266,7 @@ pub fn convert_closures_framed(
                         }
                     } else {
                         // Local boxed: `.v` on a load of the box table.
-                        let l = mf.insts.alloc(Inst::Load(c));
+                        let l = mf.alloc_inst(Inst::Load(c));
                         new.push(l);
                         mf.insts[id] = Inst::Field { base: l, field: Ustr::from("v") };
                     }
@@ -276,13 +292,13 @@ pub fn convert_closures_framed(
                         (sbase, frame_field(f.slots[&c]))
                     } else if captured {
                         let env = env_plans[&s].env_cell().expect("capture has an env plan");
-                        let il = mf.insts.alloc(Inst::Load(env));
+                        let il = mf.alloc_inst(Inst::Load(env));
                         new.push(il);
-                        let f = mf.insts.alloc(Inst::Field { base: il, field: field_of(c) });
+                        let f = mf.alloc_inst(Inst::Field { base: il, field: field_of(c) });
                         new.push(f);
                         (f, Ustr::from("v"))
                     } else {
-                        let l = mf.insts.alloc(Inst::Load(c));
+                        let l = mf.alloc_inst(Inst::Load(c));
                         new.push(l);
                         (l, Ustr::from("v"))
                     };
@@ -334,13 +350,13 @@ pub fn convert_closures_framed(
         let is_param = tree.scopes[owner].params.contains(&c);
         let dest = entry_prepend.entry(entry).or_default();
         if is_param {
-            let seed = mf.insts.alloc(Inst::Load(c));
-            let boxv = mf.insts.alloc(Inst::MakeEnv { fn_ref: None, fields: vec![(Ustr::from("v"), seed)] });
-            let st = mf.insts.alloc(Inst::Store { cell: c, value: boxv });
+            let seed = mf.alloc_inst(Inst::Load(c));
+            let boxv = mf.alloc_inst(Inst::MakeEnv { fn_ref: None, fields: vec![(Ustr::from("v"), seed)] });
+            let st = mf.alloc_inst(Inst::Store { cell: c, value: boxv });
             dest.extend([seed, boxv, st]);
         } else {
-            let boxv = mf.insts.alloc(Inst::MakeEnv { fn_ref: None, fields: Vec::new() });
-            let st = mf.insts.alloc(Inst::Store { cell: c, value: boxv });
+            let boxv = mf.alloc_inst(Inst::MakeEnv { fn_ref: None, fields: Vec::new() });
+            let st = mf.alloc_inst(Inst::Store { cell: c, value: boxv });
             dest.extend([boxv, st]);
         }
     }
@@ -360,11 +376,9 @@ pub fn convert_closures_framed(
             );
         }
     }
-    // Under a frame the DETACHED hook/defer blocks (unreachable from the step
-    // entry) still carry `Inst::Lambda`s that their aux emission renders inline
-    // (`FrameCtx::hoist_lambdas == false`), so they must survive -- neutralizing
-    // them would break `cofn_lambda_in_defer_body` (docs/coroutine-frame-lambda-plan.md
-    // D5). Only the frame-less path (ordinary/JS) nils dead residuals.
+    // Detached regions are lowered independently by `lower_detached_region`.
+    // The step arena therefore has no emitted residual closure producers; only
+    // the frame-less path also nils any dead ordinary-function residue.
     if frame.is_none() {
         for (_, inst) in mf.insts.iter_mut() {
             if matches!(inst, Inst::Lambda { .. }) {
@@ -379,21 +393,64 @@ pub fn convert_closures_framed(
     // enclosing + sibling regions go unreachable, exactly as they do in `mf`. ---
     let mut nested: Vec<MirFunc> = Vec::with_capacity(ordered.len());
     for &(_k, sid) in &ordered {
+        let lambda = tree.scopes[sid].lambda.expect("ordered lambda scope has a creator");
         let mut params: Vec<Idx<Cell>> = Vec::new();
         if let Some(e) = env_plans.get(&sid).and_then(ClosureEnvPlan::env_cell) {
             params.push(e);
         }
         params.extend(tree.scopes[sid].params.iter().copied());
+        let code_identity = mf
+            .code_identity
+            .as_ref()
+            .and_then(CodeIdentity::owner)
+            .zip(
+                mf.inst_spans
+                    .get(lambda)
+                    .copied()
+                    .and_then(LambdaSiteId::from_span),
+            )
+            .map(|(enclosing, site)| CodeIdentity::Lambda { enclosing, site });
+        let capture = capture_schema(mf, env_plans[&sid].captures(), &boxed, frame);
+        let compatibility = Some(CodeCompatibility {
+            call_abi: mf
+                .lambda_abi_fingerprints
+                .get(&lambda)
+                .cloned()
+                .unwrap_or_else(|| "missing-lambda-abi".to_string()),
+            capture,
+            frame: frame_schema(frame),
+            lambda_topology: topology,
+        });
+        if let Some(identity) = code_identity.clone() {
+            mf.code_value_identities.insert(lambda, identity.clone());
+            mf.nested_fn_identities.insert(hoisted_name[&sid], identity);
+        }
         nested.push(MirFunc {
             name: hoisted_name[&sid],
+            code_identity,
+            code_abi_fingerprint: mf.lambda_abi_fingerprints.get(&lambda).cloned(),
+            lambda_abi_fingerprints: mf.lambda_abi_fingerprints.clone(),
+            code_value_identities: mf.code_value_identities.clone(),
+            nested_fn_identities: mf.nested_fn_identities.clone(),
+            code_compatibility: compatibility,
             params,
+            lower_timing_enabled: mf.lower_timing_enabled,
+            lower_attribution: mf.lower_attribution.clone(),
             abi_plan: None,
             abi_representation: mf.abi_representation.clone(),
+            rep_arena: mf.rep_arena.clone(),
             global_plan: mf.global_plan.clone(),
             statics: Vec::new(),
+            // Reads were recorded while lowering the whole pre-split fn, so the
+            // parent's set covers every lambda region; carrying it is at worst
+            // an over-invalidation within this fn's own hoists.
+            comptime_reads: mf.comptime_reads.clone(),
+            struct_registry_roots: mf.struct_registry_roots.clone(),
             insts: mf.insts.clone(),
             cells: mf.cells.clone(),
             blocks: mf.blocks.clone(),
+            emit_ids: mf.emit_ids.clone(),
+            inline_cleanup_load_cells: mf.inline_cleanup_load_cells.clone(),
             entry: tree.scopes[sid].entry,
             is_coroutine: false,
             resume_arg: None,
@@ -433,20 +490,74 @@ pub fn convert_closures_framed(
     }
     // APPEND, don't overwrite: lowering already hoisted the enclosing fn's named
     // nested `fn`s into `mf.nested_fns`, and clobbering them would drop those
-    // definitions from the chunk (a real bug for the Lua path, where a fn can hold
-    // both a named nested `fn` and a lambda). The named siblings keep their own
-    // `Inst::Lambda`s, which the emitter converts on their own emission -- the pass
-    // only splits THIS fn's direct lambdas.
+    // definitions from the chunk. Detached regions use the same sibling shape.
     mf.nested_fns.extend(nested);
+}
+
+fn frame_schema(frame: Option<&FrameInfo>) -> Option<FrameSchema> {
+    frame.map(|frame| {
+        let mut slots: Vec<u32> = frame.slots.values().copied().collect();
+        slots.sort_unstable();
+        FrameSchema { slots }
+    })
+}
+
+fn refresh_owner_compatibility(
+    mf: &mut MirFunc,
+    frame: Option<&FrameInfo>,
+    topology: LambdaTopologyFingerprint,
+) {
+    if mf.code_identity.is_none() {
+        return;
+    }
+    mf.code_compatibility = Some(CodeCompatibility {
+        call_abi: mf
+            .code_abi_fingerprint
+            .clone()
+            .unwrap_or_else(|| "missing-code-abi".to_string()),
+        capture: CaptureSchema::empty(),
+        frame: frame_schema(frame),
+        lambda_topology: topology,
+    });
+}
+
+fn capture_schema(
+    mf: &MirFunc,
+    captures: &[Idx<Cell>],
+    boxed: &HashSet<Idx<Cell>>,
+    frame: Option<&FrameInfo>,
+) -> CaptureSchema {
+    let mut complete = true;
+    let mut seen = HashSet::default();
+    let fields = captures
+        .iter()
+        .map(|cell| {
+            let name = mf.cells[*cell]
+                .name
+                .unwrap_or_else(|| Ustr::from("<unknown-capture>"));
+            if name == "<unknown-capture>" || !seen.insert(name) {
+                complete = false;
+            }
+            let mode = if frame.is_some_and(|f| f.s_cell == *cell || f.fields.contains(cell)) {
+                CaptureMode::Frame
+            } else if boxed.contains(cell) {
+                CaptureMode::Shared
+            } else {
+                CaptureMode::ByValue
+            };
+            CaptureField { name, mode }
+        })
+        .collect();
+    CaptureSchema { fields, complete }
 }
 
 /// Materialize `e.c<S>` -- a load of the env record `env` then its `s`-cell field
 /// -- the base a frame-cell access composes `.c<slot>` onto inside a hoisted body
 /// (D3). Helper insts are appended to `new`; returns the `Field` inst.
 fn env_frame_base(mf: &mut MirFunc, env: Idx<Cell>, s_cell: Idx<Cell>, new: &mut Vec<Idx<Inst>>) -> Idx<Inst> {
-    let il = mf.insts.alloc(Inst::Load(env));
+    let il = mf.alloc_inst(Inst::Load(env));
     new.push(il);
-    let f = mf.insts.alloc(Inst::Field { base: il, field: field_of(s_cell) });
+    let f = mf.alloc_inst(Inst::Field { base: il, field: field_of(s_cell) });
     new.push(f);
     f
 }
@@ -473,15 +584,15 @@ fn slot_in_scope(
     // that collapsed to `s`, so it has an env).
     let owner = own.owner.get(&cc).copied().unwrap_or(crate::scope::ROOT);
     if owner == s {
-        let l = mf.insts.alloc(Inst::Load(cc));
+        let l = mf.alloc_inst(Inst::Load(cc));
         new.push(l);
         l
     } else {
         // Transitive capture: threads through THIS scope's env.
         let env = env_plans[&s].env_cell().expect("transitive capture has an env plan");
-        let il = mf.insts.alloc(Inst::Load(env));
+        let il = mf.alloc_inst(Inst::Load(env));
         new.push(il);
-        let f = mf.insts.alloc(Inst::Field { base: il, field: field_of(cc) });
+        let f = mf.alloc_inst(Inst::Field { base: il, field: field_of(cc) });
         new.push(f);
         f
     }

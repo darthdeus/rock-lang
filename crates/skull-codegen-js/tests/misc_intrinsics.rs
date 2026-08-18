@@ -1,7 +1,7 @@
 //! Misc scalar-intrinsic emission (T8d): tuple_first/tuple_second (Lua
 //! `tuple[1]`/`[2]` -> the 0-based JS array `[0]`/`[1]`), __range (materialized
-//! `a..b` -> a Vec-shaped runtime object), is_release_mode (-> false; the JS
-//! harness has no release mode). Node-executed checks are the correctness
+//! `a..b` -> a Vec-shaped runtime object). Node-executed checks are the
+//! correctness
 //! oracle; `tests/js_misc_intrinsics.rock` cross-checks against luajit.
 
 use skull_mir::mir::FuncRef;
@@ -68,13 +68,4 @@ fn range_materializes_vec() {
     let js = emit_closure(&ws, "root").expect("range emits");
     assert!(js.contains("__range"), "renders the range runtime:\n{js}");
     eval_int(&js, "root", 93); // 2+3+4 = 9, len 3
-}
-
-// is_release_mode is always false in the JS harness.
-#[test]
-fn is_release_mode_false() {
-    let src = "fn root() -> int { if is_release_mode() { 1 } else { 0 } }";
-    let ws = ws_with(src);
-    let js = emit_closure(&ws, "root").expect("release emits");
-    eval_int(&js, "root", 0);
 }
