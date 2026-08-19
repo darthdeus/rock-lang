@@ -444,7 +444,7 @@ fn retained_capturing_value_refreshes_while_keeping_mutable_capture() {
 }
 
 #[test]
-fn failed_overlay_after_late_top_level_work_keeps_retained_code_ref_old() {
+fn wire_failure_after_publication_keeps_the_candidate_code_ref_live() {
     let source = |delta: i32, wire: &str| {
         format!(
             "global CALLBACK: (fn() -> int)? = null\n\
@@ -477,7 +477,7 @@ fn failed_overlay_after_late_top_level_work_keeps_retained_code_ref_old() {
         program.program,
         overlay
     ));
-    assert_eq!(output.trim(), "false\ntrue\n0");
+    assert_eq!(output.trim(), "false\ntrue\n10");
 }
 
 #[test]
