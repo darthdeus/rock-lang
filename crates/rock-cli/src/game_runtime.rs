@@ -22,12 +22,11 @@ use std::path::{Path, PathBuf};
 /// What a successful (re)compile asks of the runtime beyond hot-reloading.
 #[derive(Default)]
 pub struct CompileOutcome {
-    /// Reasons whose live state or runtime registry cannot be migrated. Non-empty
-    /// => the runtime must RESTART the game process: kill, then
-    /// `canonicalize_for_restart` (which writes the deferred `main.lua`), then
-    /// respawn. The compile deliberately did NOT write `main.lua` -- the old
-    /// process must never hot-reload the new-shape program
-    /// (docs/hot-reload-schema-drift-plan.md).
+    /// Reasons whose live state or runtime registry cannot take the compatible
+    /// fast path. A live-rewind `rock stone` session stages the new full
+    /// artifact for shadow reconstruction; other runtimes restart. The compile
+    /// deliberately does not write `main.lua` until one of those policies owns
+    /// the cutover.
     pub restart_reasons: Vec<String>,
 }
 
@@ -46,6 +45,14 @@ pub trait GameCompiler {
     /// backends without an overlay.
     fn canonicalize_for_restart(&mut self) -> Result<()> {
         Ok(())
+    }
+
+    /// Materialize the current compiler session as a full candidate Artifact
+    /// for an already-running live-rewind child. Unlike
+    /// `canonicalize_for_restart`, this does not imply that the child will be
+    /// killed; the child owns the off-side publication and may reject it.
+    fn stage_shadow_artifact(&mut self) -> Result<()> {
+        self.canonicalize_for_restart()
     }
 
     /// Absolute paths of the comptime file inputs (`embed_string`) baked into
@@ -104,7 +111,7 @@ impl GameCompiler for SkullGameCompiler {
                 // Feed the Session only the files the watcher saw change (it
                 // re-reads those off disk; unchanged files stay cached).
                 let changed_vec: Vec<PathBuf> = changed.iter().cloned().collect();
-                let reload = st.recompile(&changed_vec, &self.output_path, &self.incremental_path)?;
+                let reload = st.recompile_staged(&changed_vec, &self.output_path, &self.incremental_path)?;
                 match reload {
                     SkullReload::Full { bytes, cook_ms, emit_ms, write_ms } => log::info!(target: "STONE",
                         "skull: full rebuild -> main.lua in {:.1}ms ({:.1} cook + {:.1} emit + {:.1} write, {} KB)",
@@ -139,6 +146,15 @@ impl GameCompiler for SkullGameCompiler {
                 st.force_full(&self.output_path, &self.incremental_path)?;
                 self.pending_shape_write = false;
             }
+        }
+        Ok(())
+    }
+
+    fn stage_shadow_artifact(&mut self) -> Result<()> {
+        if let Some(st) = &mut self.stone {
+            log::info!(target: "STONE", "skull: materializing full Artifact for live shadow reload");
+            st.force_full(&self.output_path, &self.incremental_path)?;
+            self.pending_shape_write = false;
         }
         Ok(())
     }

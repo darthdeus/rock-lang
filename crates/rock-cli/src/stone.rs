@@ -123,6 +123,16 @@ fn reexec_with_new_binary(game_process: &mut Option<Child>) {
     }
 }
 
+fn shadow_full_reload_armed(
+    child_running: bool,
+    flight_recorder: bool,
+    live_rewind: bool,
+    compiler_rebuilt: bool,
+    restart_pending: bool,
+) -> bool {
+    child_running && flight_recorder && live_rewind && !compiler_rebuilt && !restart_pending
+}
+
 pub fn do_stone_watch(
     path: &str,
     quiet: bool,
@@ -395,11 +405,32 @@ pub fn do_stone_watch(
                     clear_error_file();
                     *comptime_watch.lock() = compiler.comptime_watch_files().into_iter().collect();
                     if !outcome.restart_reasons.is_empty() {
-                        info!(
-                            "live reload requires a process restart ({})",
-                            outcome.restart_reasons.join(", ")
+                        let shadow_armed = shadow_full_reload_armed(
+                            game_process.is_some(),
+                            flight.is_some(),
+                            std::env::var("STONE_LIVE_REWIND").ok().as_deref() == Some("1"),
+                            compiler_rebuilt,
+                            should_restart,
                         );
-                        should_restart = true;
+                        if shadow_armed {
+                            match compiler.stage_shadow_artifact() {
+                                Ok(()) => info!(
+                                    "live reload staged a full Artifact for shadow reconstruction ({})",
+                                    outcome.restart_reasons.join(", ")
+                                ),
+                                Err(e) => error!(
+                                    "could not stage shadow Artifact ({}); old live world remains running: {}",
+                                    outcome.restart_reasons.join(", "),
+                                    e
+                                ),
+                            }
+                        } else {
+                            info!(
+                                "live reload requires a process restart ({})",
+                                outcome.restart_reasons.join(", ")
+                            );
+                            should_restart = true;
+                        }
                     }
                 }
                 Err(e) => {
@@ -1265,10 +1296,20 @@ mod tests {
     use super::{
         apply_run_env, build_id_for_lua, consume_request_file, ensure_flight_dir,
         flight_recorder_for, frame_exit_result, frame_watchdog_config, session_usage,
-        session_usage_warning, FlightRecorder, SESSION_USAGE_WARN_BYTES,
+        session_usage_warning, shadow_full_reload_armed, FlightRecorder, SESSION_USAGE_WARN_BYTES,
     };
     use crate::watch::is_compiler_source;
     use std::time::Duration;
+
+    #[test]
+    fn full_reload_stages_shadow_only_for_a_live_recorded_child() {
+        assert!(shadow_full_reload_armed(true, true, true, false, false));
+        assert!(!shadow_full_reload_armed(false, true, true, false, false));
+        assert!(!shadow_full_reload_armed(true, false, true, false, false));
+        assert!(!shadow_full_reload_armed(true, true, false, false, false));
+        assert!(!shadow_full_reload_armed(true, true, true, true, false));
+        assert!(!shadow_full_reload_armed(true, true, true, false, true));
+    }
 
     /// The whole point of the private session dir: `rock stone` must not write
     /// the slot every other command writes. A shared `tmp/main.lua` is loaded
