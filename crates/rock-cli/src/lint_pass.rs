@@ -129,6 +129,32 @@ pub fn print_census(census: &LintPassCensus) {
         cache.span_shifts,
         cache.suppression_invalidations,
     );
+    eprintln!(
+        "    cache dependency: changed_declarations={} call_edges_retracted={} call_edges_installed={} reachability_components={} declarations_revisited={} declarations_reused={} sibling_groups_requested={} sibling_groups_revisited={}",
+        cache.changed_declarations,
+        cache.call_edges_retracted,
+        cache.call_edges_installed,
+        cache.reachability_components_visited,
+        cache.declarations_revisited,
+        cache.declarations_reused,
+        cache.sibling_groups_requested,
+        cache.sibling_groups_revisited,
+    );
+    eprintln!(
+        "    cache action/suppression: action_declarations_requested={} action_declarations_revisited={} action_callers_requested={} action_callers_revisited={} suppression_files_requested={} suppression_files_refiltered={}",
+        cache.action_declarations_requested,
+        cache.action_declarations_revisited,
+        cache.action_callers_requested,
+        cache.action_callers_revisited,
+        cache.suppression_files_requested,
+        cache.suppression_files_refiltered,
+    );
+    eprintln!(
+        "    cache validation: full_lint_workspace_passes={} full_cache_reconstructions={} fresh_cached_finding_comparisons={}",
+        cache.full_lint_workspace_passes,
+        cache.full_cache_reconstructions,
+        cache.fresh_cached_finding_comparisons,
+    );
     let snapshots = &census.cache_snapshots;
     eprintln!(
         "    cache snapshots: count={} entries={} findings={} files={} flat_bodies={} inference_bodies={} other={} global={} last={} count_ms={:.3} clone_ms={:.3}",
