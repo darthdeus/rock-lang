@@ -518,6 +518,21 @@ pub struct ScalarCtx {
     abi_plans: abi::AbiPlanCache,
 }
 
+impl Clone for ScalarCtx {
+    fn clone(&self) -> Self {
+        Self {
+            taken_by_ref: self.taken_by_ref.clone(),
+            per_body: self.per_body.clone(),
+            ref_counts: self.ref_counts.clone(),
+            values_first_class: self.values_first_class,
+            target: self.target,
+            interner: std::sync::Arc::clone(&self.interner),
+            rep_arena: std::sync::Arc::clone(&self.rep_arena),
+            abi_plans: self.abi_plans.clone(),
+        }
+    }
+}
+
 /// The fn-names a single body references by value (`Expr::Global(name)` whose
 /// `name` is a function) — the way `let f = v2_sum` / passing `f` as an arg
 /// surfaces in HIR (a direct call's callee is a `Callee`, not an `Expr`).
@@ -1507,6 +1522,8 @@ fn lower_body(
     // not be in the shared map.
     let abi = owner_abi_plan_for_body(ws, scx, concrete_plans, &subject, concrete_plan)?;
     f.abi_plan = Some(abi.clone());
+    f.code_identity = Some(crate::code_identity::CodeIdentity::Named(subject.clone()));
+    f.code_abi_fingerprint = Some(abi.logical_fingerprint());
     let param_rep_count = abi.representation().params().len();
     let ret_rep = abi.representation().result();
     let mut b = Builder {
@@ -1611,6 +1628,13 @@ fn lower_global_inner(
         .inference(mid)
         .and_then(|ir| ir.per_fn.get(&BodyOwner::Global(gid)));
     let mut f = MirFunc::new(name);
+    f.code_identity = Some(crate::code_identity::CodeIdentity::Artifact(
+        crate::code_identity::CodeOwner::Artifact {
+            kind: crate::code_identity::CodeOwnerKind::Global,
+            module: module.file,
+            name: module.globals[gid].name,
+        },
+    ));
     f.rep_arena = Some(scx.rep_arena());
     let cur = f.entry();
     let mut b = Builder {
@@ -1926,6 +1950,13 @@ fn lower_decorator_inner(
         .deco_target
         .ok_or_else(|| gap("decorator body has no target binding"))?;
     let mut f = MirFunc::new(name);
+    f.code_identity = Some(crate::code_identity::CodeIdentity::Artifact(
+        crate::code_identity::CodeOwner::Artifact {
+            kind: crate::code_identity::CodeOwnerKind::Decorator,
+            module: module.file,
+            name: module.decorators[did].name,
+        },
+    ));
     f.rep_arena = Some(scx.rep_arena());
     let cur = f.entry();
     let representation = scx

@@ -1,8 +1,8 @@
-//! `static` locals across a hot reload. The private cell + done-flag are plain
-//! Lua globals, so they survive a re-`dofile`; the done-flag guard then skips
+//! `static` locals across a hot reload. The private value cell + done-flag are
+//! Session slots, so they survive a re-`dofile`; the done-flag guard then skips
 //! re-init and the value is PRESERVED. Editing the initializer changes the
-//! `__rock_known_globals` key (type + init-hash), so the reset preamble nils the
-//! cell + clears the done-flag and the next reach RE-INITS with the new value.
+//! compiler's initializer identity, so the overlay clears both slots and the
+//! next reach RE-INITS with the new value.
 //! Design: docs/static-locals-plan.md, docs/static-locals-implementation.md.
 //!
 //! No arithmetic here on purpose: the no-stdlib emit harness can't resolve `+`
@@ -59,6 +59,9 @@ fn probe() -> int {
 fn main() { RESULT = probe() }
 ";
 
+const RESULT_KEY: &str = "global:<t>::RESULT::value";
+const DO_SET_KEY: &str = "global:<t>::DO_SET::value";
+
 /// PRESERVE: same source reloaded, key unchanged -> the live value (99, written
 /// pre-reload) survives; the initializer does NOT re-run.
 #[test]
@@ -66,11 +69,11 @@ fn static_survives_hot_reload_no_reinit() {
     let prog = emit_program(PROBE);
     let script = format!(
         "_G.HOT_RELOAD = false\n{prog}\n\
-         DO_SET = true; main()   -- n inits 42, set -> 99, RESULT = 99\n\
+         __rock_state_set(\"{DO_SET_KEY}\", true); main()   -- n inits 42, set -> 99, RESULT = 99\n\
          _G.HOT_RELOAD = true\n{prog}\n\
-         DO_SET = false; main()  -- key unchanged: n preserved (99), RESULT = 99\n\
-         if RESULT == 99 then print(\"PASS\")\n\
-         else print(\"FAIL RESULT=\"..tostring(RESULT)); os.exit(1) end\n"
+         __rock_state_set(\"{DO_SET_KEY}\", false); main()  -- key unchanged: n preserved (99), RESULT = 99\n\
+         if __rock_state_get(\"{RESULT_KEY}\") == 99 then print(\"PASS\")\n\
+         else print(\"FAIL RESULT=\"..tostring(__rock_state_get(\"{RESULT_KEY}\"))); os.exit(1) end\n"
     );
     assert!(run_luajit(&script).trim().starts_with("PASS"), "expected preserved static");
 }
@@ -83,11 +86,11 @@ fn static_reinits_when_initializer_edited() {
     let after = emit_program(&PROBE.replace("static n = 42", "static n = 7"));
     let script = format!(
         "_G.HOT_RELOAD = false\n{before}\n\
-         DO_SET = false; main()  -- n inits 42, RESULT = 42\n\
+         __rock_state_set(\"{DO_SET_KEY}\", false); main()  -- n inits 42, RESULT = 42\n\
          _G.HOT_RELOAD = true\n{after}\n\
-         DO_SET = false; main()  -- init edited: n resets, re-inits 7, RESULT = 7\n\
-         if RESULT == 7 then print(\"PASS\")\n\
-         else print(\"FAIL RESULT=\"..tostring(RESULT)); os.exit(1) end\n"
+         __rock_state_set(\"{DO_SET_KEY}\", false); main()  -- init edited: n resets, re-inits 7, RESULT = 7\n\
+         if __rock_state_get(\"{RESULT_KEY}\") == 7 then print(\"PASS\")\n\
+         else print(\"FAIL RESULT=\"..tostring(__rock_state_get(\"{RESULT_KEY}\"))); os.exit(1) end\n"
     );
     assert!(run_luajit(&script).trim().starts_with("PASS"), "expected re-init on edit");
 }
@@ -102,11 +105,11 @@ fn static_preserved_when_unrelated_body_edited() {
     let after = emit_program(&edited);
     let script = format!(
         "_G.HOT_RELOAD = false\n{before}\n\
-         DO_SET = true; main()   -- RESULT = 99\n\
+         __rock_state_set(\"{DO_SET_KEY}\", true); main()   -- RESULT = 99\n\
          _G.HOT_RELOAD = true\n{after}\n\
-         DO_SET = false; main()  -- key unchanged despite edit: n preserved, RESULT = 99\n\
-         if RESULT == 99 then print(\"PASS\")\n\
-         else print(\"FAIL RESULT=\"..tostring(RESULT)); os.exit(1) end\n"
+         __rock_state_set(\"{DO_SET_KEY}\", false); main()  -- key unchanged despite edit: n preserved, RESULT = 99\n\
+         if __rock_state_get(\"{RESULT_KEY}\") == 99 then print(\"PASS\")\n\
+         else print(\"FAIL RESULT=\"..tostring(__rock_state_get(\"{RESULT_KEY}\"))); os.exit(1) end\n"
     );
     assert!(run_luajit(&script).trim().starts_with("PASS"), "expected key stable under unrelated edit");
 }

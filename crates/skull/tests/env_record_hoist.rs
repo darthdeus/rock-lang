@@ -1,14 +1,14 @@
 //! P2 step 6 of docs/closure-env-records-plan.md: a CAPTURING lambda hoists to a
-//! top-level `function <enclosing>__lambda<k>(__rock_env, <params>) ... end` whose captures
-//! arrive as fields of the env record (`__rock_env`), and the creation site builds a plain
-//! data record `setmetatable({ __fn = <enclosing>__lambda<k>, c<A> = .. }, __rock_fn_mt)`
-//! instead of an inline Lua closure. A by-value capture snapshots the value into
+//! top-level `function <enclosing>__lambda<k>(<env>, <params>) ... end` whose captures
+//! arrive as fields of the env record, and the creation site builds a plain data record
+//! `setmetatable({ __slot = <logical CodeRef>, c<A> = .. }, __rock_fn_mt)` instead of an
+//! inline Lua closure. A by-value capture snapshots the value into
 //! the field; a boxed (mutable) capture threads the shared box TABLE, so two
 //! records that capture it observe one another's writes. A nested capturing lambda
-//! reads its outer's captures through the outer's `__rock_env`.
+//! reads its outer's captures through the outer's env record.
 //!
-//! Contrast `capture_free_hoist.rs`: a lambda that captures NOTHING stays a bare
-//! hoisted global name (no record, no `__call`).
+//! Contrast `capture_free_hoist.rs`: a lambda that captures NOTHING uses the same
+//! reusable CodeRef without allocating an environment record.
 use crate::common::{emit_module, function_body, mangled_name, run_luajit};
 
 /// A lambda capturing a single-assignment fn param: the record + `(__rock_env, ..)` body
@@ -30,7 +30,7 @@ fn main() { let f = mk_cap(5) print("{f()}") }
     );
     let body = function_body(&lua, "mk_cap");
     assert!(
-        body.contains(&format!("setmetatable({{ __fn = {lam}")),
+        body.contains("setmetatable({ __slot = __rock_code_slot_ref("),
         "the creation site builds an env record, not a closure:\n{body}"
     );
     assert!(body.contains("__rock_fn_mt"), "the record uses the shared metatable:\n{body}");
@@ -63,10 +63,9 @@ fn main() {
 "#;
     let lua = emit_module(src);
     let body = function_body(&lua, "pair_box");
-    let lam = format!("{}__lambda", mangled_name(&lua, "pair_box"));
     assert!(body.contains("= {}"), "the mutable capture declares a box `local c<N> = {{}}`:\n{body}");
     assert!(
-        body.contains(&format!("setmetatable({{ __fn = {lam}")),
+        body.contains("setmetatable({ __slot = __rock_code_slot_ref("),
         "both captures hoist to env records:\n{body}"
     );
     // A boxed capture field passes the box TABLE (no `.v`); each hoisted body
@@ -104,7 +103,7 @@ fn main() {
     // `c<N>.c<M>`; the behavior below proves the thread, so pin only the record.
     let outer_builds_inner = (0..2).any(|k| {
         let body = function_body(&lua, &format!("{m}__lambda{k}"));
-        body.contains(&format!("setmetatable({{ __fn = {m}__lambda"))
+        body.contains("setmetatable({ __slot = __rock_code_slot_ref(")
     });
     assert!(outer_builds_inner, "the outer hoisted body must build the inner record:\n{lua}");
     let out = run_luajit(&format!("{lua}\nmain()\n"), "envrec_nested");
@@ -142,8 +141,8 @@ fn main() { print("{drive()}") }
 }
 
 /// SNAPSHOT-SHAPE: a record built for a lambda capturing only non-fn values holds
-/// exactly one function-typed field, `__fn`, and it is the SHARED hoisted global
-/// (rawequal across two creations), never a fresh per-instance closure.
+/// exactly one callable identity field, `__slot`, and it is the SHARED logical
+/// slot (rawequal across two creations), never a fresh per-instance body.
 #[test]
 fn record_fields_hold_no_inline_closures() {
     let src = r#"
@@ -153,14 +152,14 @@ fn main() { let _ = mk_snap(1) }
     let lua = emit_module(src);
     let mk = mangled_name(&lua, "mk_snap");
     let driver = format!("\nlocal a = {mk}(1)\nlocal b = {mk}(2)\n\
-        print(rawequal(a.__fn, b.__fn))\n\
+        print(rawequal(a.__slot, b.__slot))\n\
         local extra = false\n\
-        for k, v in pairs(a) do if k ~= \"__fn\" and type(v) == \"function\" then extra = true end end\n\
+        for k, v in pairs(a) do if k ~= \"__slot\" and type(v) == \"function\" then extra = true end end\n\
         print(extra)\n");
     let out = run_luajit(&format!("{lua}{driver}"), "envrec_snapshape");
     assert_eq!(
         out, "true\nfalse",
-        "two records share one hoisted __fn and hold no other function-typed field; got:\n{out}"
+        "two records share one CodeRef and hold no other function-typed field; got:\n{out}"
     );
 }
 

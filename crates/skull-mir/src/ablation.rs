@@ -19,17 +19,12 @@
 //!
 //! **It COLLECTS rather than aborting.** A mode that failed at the first fatal
 //! would report one call site per run, and the artifact this stage owes is a
-//! taxonomy over the whole corpus. Fatals accumulate in a process-global
-//! registry; the driver reports the census and fails the build at the end.
-//!
-//! The registry is global because the lowering path that discovers a fatal is
-//! several layers below any context object that could carry it, and threading a
-//! sink through every `lower_*` signature would be a large edit to production
-//! code for a diagnostic mode. The cost is that the mode is process-wide and the
-//! census is per-process; both are true of the driver that consumes it.
+//! taxonomy over the whole corpus. The owning compilation context collects the
+//! records and the driver reports the census at the end.
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::cell::RefCell;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use bone_semantic::prelude::Span;
 use ustr::Ustr;
@@ -85,7 +80,85 @@ pub struct Fatal {
     pub detail: String,
 }
 
-static ENABLED: AtomicBool = AtomicBool::new(false);
+struct ContextState {
+    enabled: AtomicBool,
+    examined: AtomicUsize,
+    registry: Mutex<Vec<Fatal>>,
+}
+
+impl ContextState {
+    fn new(enabled: bool) -> Self {
+        Self {
+            enabled: AtomicBool::new(enabled),
+            examined: AtomicUsize::new(0),
+            registry: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+/// The ablation state for one compilation or test scope. A context is
+/// explicitly installed in compiler worker threads, so concurrent callers do
+/// not share a mode or census.
+#[derive(Clone)]
+pub struct Context(Arc<ContextState>);
+
+impl Context {
+    fn fresh(enabled: bool) -> Self {
+        Self(Arc::new(ContextState::new(enabled)))
+    }
+
+    fn from_environment() -> Self {
+        Self::fresh(std::env::var_os("ROCK_MONO_ABLATION").is_some())
+    }
+}
+
+thread_local! {
+    static CURRENT: RefCell<Context> = RefCell::new(Context::from_environment());
+}
+
+/// The context active on the calling thread.
+pub fn current_context() -> Context {
+    CURRENT.with(|slot| slot.borrow().clone())
+}
+
+/// Install a context for the calling thread until the returned guard drops.
+pub fn enter_context(context: Context) -> ContextGuard {
+    let previous = CURRENT.with(|slot| slot.replace(context));
+    ContextGuard { previous }
+}
+
+pub struct ContextGuard {
+    previous: Context,
+}
+
+impl Drop for ContextGuard {
+    fn drop(&mut self) {
+        CURRENT.with(|slot| {
+            let _ = slot.replace(self.previous.clone());
+        });
+    }
+}
+
+/// Scope an isolated ablation census to the calling thread and any compiler
+/// workers that explicitly inherit its context.
+pub struct Scope {
+    _context: ContextGuard,
+}
+
+pub fn scope(on: bool) -> Scope {
+    let context = Context::fresh(on);
+    Scope { _context: enter_context(context) }
+}
+
+impl Drop for Scope {
+    fn drop(&mut self) {
+        clear();
+    }
+}
+
+fn with_current<R>(f: impl FnOnce(&ContextState) -> R) -> R {
+    CURRENT.with(|slot| f(&slot.borrow().0))
+}
 
 /// Generic Rock calls the mode actually EXAMINED.
 ///
@@ -93,43 +166,35 @@ static ENABLED: AtomicBool = AtomicBool::new(false);
 /// build happened" -- and a `rock sim` invocation that failed to resolve its
 /// project printed the clean message while compiling nothing. A census whose
 /// denominator is zero is not evidence of anything.
-static EXAMINED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-
-/// Count one generic Rock call reaching the specialization decision.
 #[inline]
 pub fn note_examined() {
     if enabled() {
-        EXAMINED.fetch_add(1, Ordering::Relaxed);
+        with_current(|context| {
+            context.examined.fetch_add(1, Ordering::Relaxed);
+        });
     }
 }
 
 pub fn examined() -> usize {
-    EXAMINED.load(Ordering::Relaxed)
-}
-
-fn registry() -> &'static Mutex<Vec<Fatal>> {
-    static R: std::sync::OnceLock<Mutex<Vec<Fatal>>> = std::sync::OnceLock::new();
-    R.get_or_init(|| Mutex::new(Vec::new()))
+    with_current(|context| context.examined.load(Ordering::Relaxed))
 }
 
 /// Initialize from the environment. Called once by the driver; separate from
 /// [`set_enabled`] so tests can toggle the mode in-process without touching the
 /// environment of a parallel test.
 pub fn init_from_env() {
-    if std::env::var("ROCK_MONO_ABLATION").is_ok() {
-        ENABLED.store(true, Ordering::Relaxed);
-    }
+    set_enabled(std::env::var_os("ROCK_MONO_ABLATION").is_some());
 }
 
 pub fn set_enabled(on: bool) {
-    ENABLED.store(on, Ordering::Relaxed);
+    with_current(|context| context.enabled.store(on, Ordering::Relaxed));
 }
 
 /// Is the ablation active? Hot -- consulted at every generic call -- so it is a
 /// relaxed atomic load rather than an env lookup.
 #[inline]
 pub fn enabled() -> bool {
-    ENABLED.load(Ordering::Relaxed)
+    with_current(|context| context.enabled.load(Ordering::Relaxed))
 }
 
 /// Record a fatal. A no-op when the mode is off, so call sites need no guard of
@@ -151,17 +216,23 @@ pub fn record(
         span,
         detail: detail.into(),
     };
-    registry().lock().expect("ablation registry poisoned").push(f);
+    with_current(|context| {
+        context.registry.lock().expect("ablation registry poisoned").push(f);
+    });
 }
 
 /// Drain the registry. The driver calls this once after the build.
 pub fn take() -> Vec<Fatal> {
-    std::mem::take(&mut *registry().lock().expect("ablation registry poisoned"))
+    with_current(|context| {
+        std::mem::take(&mut *context.registry.lock().expect("ablation registry poisoned"))
+    })
 }
 
 pub fn clear() {
-    EXAMINED.store(0, Ordering::Relaxed);
-    registry().lock().expect("ablation registry poisoned").clear();
+    with_current(|context| {
+        context.examined.store(0, Ordering::Relaxed);
+        context.registry.lock().expect("ablation registry poisoned").clear();
+    });
 }
 
 /// A record's CALL SITE: the source position, which is what makes two records

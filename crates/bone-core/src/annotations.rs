@@ -89,6 +89,32 @@ fn validate_one(
             }
             Ok(())
         }
+        "state" => {
+            at(anno, pos, AnnoPos::GlobalItem)?;
+            const KEYS: &[&str] = &["ownership", "world", "realization"];
+            let mut seen = FxHashSet::default();
+            for arg in &anno.args {
+                let Some(key) = arg.name.as_ref() else {
+                    comp_error!(
+                        anno.span,
+                        "`@state` arguments must be named: ownership=, world=, realization="
+                    );
+                };
+                if !KEYS.contains(&key.name.as_str())
+                    || !matches!(arg.value, AnnoValue::Ident(_))
+                    || !seen.insert(key.name)
+                {
+                    comp_error!(
+                        anno.span,
+                        "`@state` accepts one each of ownership=, world=, and realization= with identifier values"
+                    );
+                }
+            }
+            if !seen.contains(&Ustr::from("ownership")) {
+                comp_error!(anno.span, "`@state` requires ownership=");
+            }
+            Ok(())
+        }
         "shader" => {
             at(anno, pos, AnnoPos::FnItem)?;
             let ok = anno.args.len() == 1
@@ -219,6 +245,55 @@ fn validate_one(
         "flat" => {
             at(anno, pos, AnnoPos::StructField)?;
             no_args(anno)
+        }
+        "lifecycle" => {
+            at(anno, pos, AnnoPos::DecoItem)?;
+            const KEYS: &[&str] = &["phase", "owner", "stage_param"];
+            for arg in &anno.args {
+                let Some(key) = arg.name.as_ref() else {
+                    comp_error!(anno.span, "`@lifecycle` arguments must be named: phase=, owner=, stage_param=");
+                };
+                if !KEYS.contains(&key.name.as_str()) || !matches!(arg.value, AnnoValue::String(_)) {
+                    comp_error!(anno.span, "`@lifecycle` accepts string arguments phase=, owner=, and optional stage_param=");
+                }
+            }
+            let has = |name: &str| anno.args.iter().any(|a| a.name.as_ref().is_some_and(|n| n.name.as_str() == name));
+            if !has("phase") || !has("owner") {
+                comp_error!(anno.span, "`@lifecycle` requires phase= and owner=");
+            }
+            Ok(())
+        }
+        "artifact_definition" => {
+            at(anno, pos, AnnoPos::DecoItem)?;
+            const KEYS: &[&str] = &["catalog", "key_param"];
+            for arg in &anno.args {
+                let Some(key) = arg.name.as_ref() else {
+                    comp_error!(
+                        anno.span,
+                        "`@artifact_definition` arguments must be named: catalog=, key_param="
+                    );
+                };
+                if !KEYS.contains(&key.name.as_str())
+                    || !matches!(arg.value, AnnoValue::String(_))
+                {
+                    comp_error!(
+                        anno.span,
+                        "`@artifact_definition` accepts string arguments catalog= and key_param="
+                    );
+                }
+            }
+            let has = |name: &str| {
+                anno.args
+                    .iter()
+                    .any(|a| a.name.as_ref().is_some_and(|n| n.name.as_str() == name))
+            };
+            if !has("catalog") || !has("key_param") {
+                comp_error!(
+                    anno.span,
+                    "`@artifact_definition` requires catalog= and key_param="
+                );
+            }
+            Ok(())
         }
         _ if deco_names.contains(&name) => at(anno, pos, AnnoPos::FnItem),
         _ => {

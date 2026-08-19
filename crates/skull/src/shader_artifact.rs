@@ -91,6 +91,7 @@ pub struct ShaderRejection {
 }
 
 /// One target's SHADER artifact.
+#[derive(Clone)]
 pub struct ShaderArtifactView {
     pub profile: GlslProfile,
     /// The entries this artifact registers, as instances of the shared graph.
@@ -239,7 +240,7 @@ pub fn realize_shader_with_context_and_compute(
     }
 
     let mut program_views = Vec::with_capacity(req.programs.len());
-    let concrete_plans =
+    let all_concrete_plans =
         plans.unwrap_or_else(|| skull_graph::concrete_body::build(ws, g).plans);
     for program in req.programs {
         let entry_of = |r: FuncRef| -> Option<&Instance> {
@@ -265,20 +266,29 @@ pub fn realize_shader_with_context_and_compute(
                 ShaderStage::Fragment,
             ));
         }
+        let concrete_plans = Arc::new(skull_mir::concrete::select_concrete_plan_closure(
+            &all_concrete_plans,
+            stages.iter().flat_map(|stage| stage.retained.iter()),
+        ));
         program_views.push(ShaderProgramView {
             program: *program,
             stages,
-            concrete_plans: Arc::clone(&concrete_plans),
+            concrete_plans,
         });
     }
     let mut compute_views = Vec::with_capacity(compute_programs.len());
     for program in compute_programs {
         let key = DeclKey(skull_mir::lower::canonical_variant(ws, program.entry));
         if let Some(entry) = roots.iter().find(|instance| DeclKey(instance.func) == key) {
+            let stage = stage_view(ws, g, &edges, entry, ShaderStage::Compute);
+            let concrete_plans = Arc::new(skull_mir::concrete::select_concrete_plan_closure(
+                &all_concrete_plans,
+                stage.retained.iter(),
+            ));
             compute_views.push(ComputeProgramView {
                 program: *program,
-                stage: stage_view(ws, g, &edges, entry, ShaderStage::Compute),
-                concrete_plans: Arc::clone(&concrete_plans),
+                stage,
+                concrete_plans,
             });
         }
     }

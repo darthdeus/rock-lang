@@ -218,22 +218,157 @@ function __map_next(m, k) {
 "#;
 
 /// The uniform indirect-call dispatch helper (`docs/closure-conversion-mir-plan.md`):
-/// a fn value is either a raw JS function (a named fn / capture-free hoisted
-/// lambda, referenced by global name) or a closure ENV RECORD `{ __fn, .. }`
-/// (a capturing lambda, built by `convert_closures`). `__rock_call` invokes both
-/// -- a function directly, a record through its `__fn(record, ...)` -- so every
-/// `CallValue` emits `__rock_call(f, ...args)`. Prepend to any emitted program
-/// that calls a fn value. (The Lua path uses a `__call` metatable instead; JS
-/// objects carry no metatable, so the dispatch is explicit here.)
+/// Rock values are reusable slot objects, and capturing records carry a slot
+/// plus their captures. Raw JS functions remain an explicit foreign boundary.
 pub const JS_CALL_HELPER: &str = r#"
+var __rock_code_slots = Object.create(null);
+var __rock_code_slot_stage = null;
+function __rock_code_slot_ref(key) {
+  var slot = __rock_code_slots[key];
+  if ((!slot || __rock_definition_plan_materializing) && __rock_code_slot_stage !== null) {
+    var staged = __rock_code_slot_stage[key];
+    if (staged) {
+      var temporary = __rock_code_slot_pending_slots[key];
+      if (!temporary) {
+        temporary = {
+          __rock_code_slot: true, key: key,
+          current_body: staged.body, abi: staged.abi
+        };
+        __rock_code_slot_pending_slots[key] = temporary;
+      }
+      return temporary;
+    }
+  }
+  if (!slot) throw new Error("missing Rock code slot " + key);
+  return slot;
+}
+function __rock_code_slot_pending_ref(key) {
+  var staged = __rock_code_slot_stage === null ? null : __rock_code_slot_stage[key];
+  if (staged) {
+    var temporary = __rock_code_slot_pending_slots[key];
+    if (!temporary) {
+      temporary = {
+        __rock_code_slot: true, key: key,
+        current_body: staged.body, abi: staged.abi
+      };
+      __rock_code_slot_pending_slots[key] = temporary;
+    }
+    return temporary;
+  }
+  return __rock_code_slot_ref(key);
+}
+var __rock_code_slot_pending_slots = Object.create(null);
+var __rock_lifecycle_plan_pending = null;
+var __rock_definition_plan_pending = null;
+var __rock_definition_plan_materializing = false;
+function __rock_code_slot_begin() {
+  if (typeof __rock_state_transaction_begin !== "undefined") __rock_state_transaction_begin();
+  __rock_code_slot_stage = Object.create(null);
+  __rock_code_slot_pending_slots = Object.create(null);
+  __rock_definition_plan_materializing = false;
+  __rock_lifecycle_plan_pending = null;
+  __rock_definition_plan_pending = null;
+}
+function __rock_code_slot_abort() {
+  if (typeof __rock_state_transaction_abort !== "undefined") __rock_state_transaction_abort();
+  __rock_code_slot_stage = null;
+  __rock_code_slot_pending_slots = Object.create(null);
+  __rock_definition_plan_materializing = false;
+  __rock_lifecycle_plan_pending = null;
+  __rock_definition_plan_pending = null;
+  if (typeof __rock_state_transaction_commit !== "undefined") __rock_state_transaction_commit();
+}
+function __rock_lifecycle_plan_stage(plan) {
+  if (__rock_code_slot_stage === null) throw new Error("Rock code slot stage not open");
+  __rock_lifecycle_plan_pending = plan;
+}
+function __rock_definition_plan_stage(plan) {
+  if (__rock_code_slot_stage === null) throw new Error("Rock code slot stage not open");
+  __rock_definition_plan_pending = plan;
+}
+function __rock_definition_plan_materialize(plan) {
+  __rock_definition_plan_materializing = true;
+  Object.keys(plan).forEach(function(catalogKey) {
+    var catalog = plan[catalogKey];
+    if (!catalog || !catalog._data || catalog.len === undefined) return;
+    for (var i = 0; i < catalog.len; i++) {
+      var entry = catalog._data[i];
+      if (entry && entry.factory !== undefined) entry.definition = __rock_call(entry.factory);
+    }
+  });
+  __rock_definition_plan_materializing = false;
+  return plan;
+}
+function __rock_code_slot_stage_one(key, body, abi) {
+  var old = __rock_code_slots[key];
+  if (old && old.abi !== abi) throw new Error("incompatible Rock code slot " + key);
+  if (__rock_code_slot_stage === null) throw new Error("Rock code slot stage not open");
+  __rock_code_slot_stage[key] = { body: body, abi: abi };
+}
+function __rock_code_slot_publish() {
+  if (__rock_code_slot_stage === null) throw new Error("Rock code slot stage not open");
+  var definition_plan = __rock_definition_plan_pending;
+  if (definition_plan !== null) definition_plan = __rock_definition_plan_materialize(definition_plan);
+  var stage = __rock_code_slot_stage;
+  Object.keys(stage).forEach(function(key) {
+    var staged = stage[key], slot = __rock_code_slots[key];
+    if (slot) {
+      slot.current_body = staged.body;
+      slot.abi = staged.abi;
+      var temporary = __rock_code_slot_pending_slots[key];
+      if (temporary) {
+        temporary.current_body = staged.body;
+        temporary.abi = staged.abi;
+        __rock_code_slots[key] = temporary;
+      }
+    } else {
+      __rock_code_slots[key] = __rock_code_slot_pending_slots[key] || {
+        __rock_code_slot: true, key: key,
+        current_body: staged.body, abi: staged.abi
+      };
+    }
+  });
+  if (__rock_lifecycle_plan_pending !== null) __G.__ROCK_LIFECYCLE_PLAN = __rock_lifecycle_plan_pending;
+  if (definition_plan !== null) __G.__ROCK_DEFINITION_PLAN = definition_plan;
+  __rock_code_slot_stage = null;
+  __rock_code_slot_pending_slots = Object.create(null);
+  __rock_lifecycle_plan_pending = null;
+  __rock_definition_plan_pending = null;
+  if (typeof __rock_state_transaction_commit !== "undefined") __rock_state_transaction_commit();
+}
+function __rock_code_ref_kind(v) {
+  if (v === null || typeof v !== "object") return null;
+  if (v.__rock_code_slot === true
+      && Object.prototype.hasOwnProperty.call(v, "key")
+      && Object.prototype.hasOwnProperty.call(v, "current_body")) return "slot";
+  if (Object.prototype.hasOwnProperty.call(v, "__slot")
+      && __rock_code_ref_kind(v.__slot) === "slot") return "env";
+  return null;
+}
 function __rock_call(f) {
   var a = Array.prototype.slice.call(arguments, 1);
+  var kind = __rock_code_ref_kind(f);
+  if (kind === "slot") return f.current_body.apply(null, a);
   if (typeof f === "function") return f.apply(null, a);
-  return f.__fn.apply(null, [f].concat(a));
+  if (kind === "env") return f.__slot.current_body.apply(null, [f].concat(a));
+  throw new Error("cannot call a value that is not a Rock CodeRef or foreign function");
 }
 // `try_call(f)`: run `f` and report whether it errored (Lua `pcall`; returns
 // `not ok`). A JS throw is the pcall failure; the error itself is discarded by
 // design (the caller only wants the did-it-error bool, matching the stdlib body).
+function __try_call(f) {
+  try { __rock_call(f); return false; } catch (e) { return true; }
+}
+"#;
+
+/// The explicit foreign-function boundary used when an artifact has indirect
+/// calls but no escaping Rock CodeRefs.
+pub const JS_FOREIGN_CALL_HELPER: &str = r#"
+function __rock_call(f) {
+  var a = Array.prototype.slice.call(arguments, 1);
+  if (typeof f === "function") return f.apply(null, a);
+  throw new Error("cannot call a value that is not a foreign function");
+}
 function __try_call(f) {
   try { __rock_call(f); return false; } catch (e) { return true; }
 }
@@ -249,8 +384,8 @@ function __try_call(f) {
 /// Structs are `{__ty, ...}` plain objects (the
 /// `__rock_create_struct` shape: a `__ty` string tag, no metatable), so a
 /// key-walk that includes `__ty` covers the type check for free. A capturing
-/// lambda is a closure ENV RECORD `{ __fn, .. }` (`convert_closures`): a callable
-/// value, so -- like a raw fn -- it compares by IDENTITY, never by walking its
+/// lambda is a CodeRef env record `{ __slot, .. }` (`convert_closures`): a callable
+/// value, so -- like a raw foreign fn -- it compares by IDENTITY, never by walking its
 /// captures (matching luajit's `__rock_fn_mt` identity-leaf rule and pre-arc
 /// arrow `===`).
 pub const JS_STRUCTURAL_EQ: &str = r#"
@@ -264,7 +399,8 @@ function __op_eq(a, b) {
   if (an || bn) return an && bn;
   if (a === b) return true;
   if (typeof a !== "object" || typeof b !== "object") return a === b;
-  if (a.__fn !== undefined || b.__fn !== undefined) return a === b;
+  if (typeof __rock_code_ref_kind === "function" &&
+      (__rock_code_ref_kind(a) !== null || __rock_code_ref_kind(b) !== null)) return a === b;
   // A Vec compares by tracked `len` over `_data[0..len)` (len-bounded, like
   // luajit's pairs-walk), so a drained tail slot beyond `len` never breaks eq.
   if (a.__ty === "Vec" || b.__ty === "Vec") {
@@ -323,7 +459,7 @@ function __rock_make_enum(variant, ty, kv) {
 /// object (keys sorted by `lua_tostring`, `__ty`/`__variant` skipped), a Vec
 /// `{_data (0-based), len, __ty:"Vec"}`, a JS `Map` (raw-table
 /// analog), a JS array (Lua array-table analog), and scalars. A capturing-lambda
-/// env record (`__fn`) is an opaque callable LEAF (`String(fn)`), matching the
+/// CodeRef env record (`__slot`) is an opaque callable LEAF (`String(fn)`), matching the
 /// luajit `__rock_fn_mt` rule; a `visited` Map detects cycles. NOTE: most inspect
 /// tests are VACUOUS -- a `@test(output=..)` whose expected contains `{` is an
 /// interpolated string, so its expectation is dropped (`out=nil`) and the test
@@ -405,7 +541,7 @@ function __rock_inspect_value(v, indent, path, visited, precision) {
   var t = v;
   // A capturing-lambda env record is a callable LEAF (never walked) -- rendered
   // as its function, same `function: ` form as a raw fn.
-  if (t.__fn !== undefined) return "function: builtin";
+  if (typeof __rock_code_ref_kind === "function" && __rock_code_ref_kind(t) !== null) return "function: builtin";
   if (visited) {
     if (visited.has(t)) return "<CYCLE: " + visited.get(t) + ">";
     visited.set(t, path);
@@ -505,19 +641,19 @@ function inspect_formatted(obj, precision) { return inspect(obj, true, precision
 
 /// `deepcopy`: the recursive `__rock_deepcopy_value` clone (stdlib/unified.rock).
 /// A `seen` Map (object identity) preserves the graph -- a shared reference copies
-/// ONCE, a cycle terminates. Primitives and bare functions (a closure's `__fn`)
-/// pass through by identity; a TypedArray (NativeBuffer `.ptr`) is `.slice()`d; a
-/// `Map` and an array (a Vec's `_data`) copy element-wise; every other object (a
-/// struct `{__ty,...}`, an env record `{__fn,...}`, a box) copies own keys. A
-/// copied env record keeps its `__fn` and its copied box, so `__rock_call` still
-/// dispatches and shared-box aliasing survives (the closures read captures from
-/// the record arg, not lexically).
+/// ONCE, a cycle terminates. Primitives and bare functions pass through by identity;
+/// a TypedArray (NativeBuffer `.ptr`) is `.slice()`d; a `Map` and an array (a Vec's
+/// `_data`) copy element-wise; every other object (a struct `{__ty,...}`, a CodeRef
+/// env record `{__slot,...}`, a box) copies own keys. A copied env record keeps its
+/// logical slot and copies its captures, so calls remain fresh while mutable boxes
+/// do not alias the source.
 pub const JS_DEEPCOPY_RUNTIME: &str = r#"
 function __rock_deepcopy_value(obj, seen) {
   if (obj === null || obj === undefined) return obj;
   var t = typeof obj;
   if (t !== "object" && t !== "function") return obj;
   if (t === "function") return obj;
+  if (typeof __rock_code_ref_kind === "function" && __rock_code_ref_kind(obj) === "slot") return obj;
   if (seen.has(obj)) return seen.get(obj);
   if (ArrayBuffer.isView(obj)) { var tc = obj.slice(); seen.set(obj, tc); return tc; }
   if (obj instanceof Map) {
@@ -661,12 +797,22 @@ function log_dedup_count() { return Object.keys(__stone_log_dedup).length; }
 /// a semantic, not a nicety).
 pub const JS_RNG_RUNTIME: &str = r#"
 var __rock_rng_state = 0;
-function __rock_rng_seed(s) { __rock_rng_state = s >>> 0; }
-function __rock_rng_state_get() { return __rock_rng_state; }
-function __rock_rng_state_set(s) { __rock_rng_state = s >>> 0; }
+function __rock_rng_current() {
+  if (typeof __rock_active_session !== "undefined" && __rock_active_session
+      && __rock_active_session.__rock_rng_state !== null) return __rock_active_session.__rock_rng_state;
+  return __rock_rng_state;
+}
+function __rock_rng_store(s) {
+  if (typeof __rock_active_session !== "undefined" && __rock_active_session) __rock_active_session.__rock_rng_state = s >>> 0;
+  else __rock_rng_state = s >>> 0;
+}
+function __rock_rng_seed(s) { __rock_rng_store(s); }
+function __rock_rng_state_get() { return __rock_rng_current(); }
+function __rock_rng_state_set(s) { __rock_rng_store(s); }
 function __rock_rng_next32() {
-  __rock_rng_state = (__rock_rng_state + 0x6D2B79F5) >>> 0;
-  var t = __rock_rng_state;
+  var state = (__rock_rng_current() + 0x6D2B79F5) >>> 0;
+  __rock_rng_store(state);
+  var t = state;
   t = Math.imul(t ^ (t >>> 15), t | 1);
   t = (t + Math.imul(t ^ (t >>> 7), t | 61)) ^ t;
   return (t ^ (t >>> 14)) >>> 0;
@@ -2729,12 +2875,465 @@ function __rock_web_arm_raf(frameFn) {
 /// failures go to STDERR, never stdout -- the harness output-compare must not
 /// see them. Nil checks are truthiness (`!c.__defers`, `if (c.__inner)`) so
 /// `undefined` and `null` both count as nil, matching the subset's loose rule.
+pub const JS_SESSION_RUNTIME: &str = r#"
+function __rock_session_new(schema_id) {
+  return { __rock_schema_id: schema_id, __rock_state: Object.create(null), __rock_initialized: Object.create(null), __rock_initializer_keys: Object.create(null), __rock_rng_state: null };
+}
+function __rock_session_activate(session) {
+  if (!session || !session.__rock_state || !session.__rock_initialized) throw new Error("invalid Rock Session");
+  if (__rock_state_schema_id !== null && session.__rock_schema_id !== __rock_state_schema_id) {
+    throw new Error("Rock StateSchema does not match the active Session");
+  }
+  __rock_active_session = session;
+  return session;
+}
+function __rock_session_current() {
+  if (__rock_active_session === null) throw new Error("no active Rock Session");
+  return __rock_active_session;
+}
+function __rock_state_has(key) { return __rock_session_current().__rock_initialized[key] === true; }
+function __rock_state_get(key) { return __rock_session_current().__rock_state[key]; }
+function __rock_state_set(key, value) {
+  var session = __rock_session_current();
+  session.__rock_state[key] = value;
+  session.__rock_initialized[key] = true;
+  return value;
+}
+function __rock_state_transaction_begin() {
+  if (__rock_state_transaction !== null) return;
+  var session = __rock_session_current();
+  var state = Object.create(null);
+  var initialized = Object.create(null);
+  var initializer_keys = Object.create(null);
+  Object.keys(session.__rock_state).forEach(function (key) { state[key] = session.__rock_state[key]; });
+  Object.keys(session.__rock_initialized).forEach(function (key) { initialized[key] = session.__rock_initialized[key]; });
+  Object.keys(session.__rock_initializer_keys).forEach(function (key) { initializer_keys[key] = session.__rock_initializer_keys[key]; });
+  __rock_state_transaction = {
+    session: session,
+    schema_id: session.__rock_schema_id,
+    has_schema: typeof __ROCK_STATE_SCHEMA !== "undefined",
+    schema: (typeof __ROCK_STATE_SCHEMA === "undefined") ? null : __ROCK_STATE_SCHEMA,
+    state: state,
+    initialized: initialized,
+    initializer_keys: initializer_keys,
+    published_schema_id: __rock_state_schema_id
+  };
+}
+function __rock_state_transaction_abort() {
+  var transaction = __rock_state_transaction;
+  if (transaction === null) return;
+  var session = transaction.session;
+  __rock_active_session = session;
+  session.__rock_schema_id = transaction.schema_id;
+  Object.keys(session.__rock_state).forEach(function (key) { delete session.__rock_state[key]; });
+  Object.keys(transaction.state).forEach(function (key) { session.__rock_state[key] = transaction.state[key]; });
+  Object.keys(session.__rock_initialized).forEach(function (key) { delete session.__rock_initialized[key]; });
+  Object.keys(transaction.initialized).forEach(function (key) { session.__rock_initialized[key] = transaction.initialized[key]; });
+  Object.keys(session.__rock_initializer_keys).forEach(function (key) { delete session.__rock_initializer_keys[key]; });
+  Object.keys(transaction.initializer_keys).forEach(function (key) { session.__rock_initializer_keys[key] = transaction.initializer_keys[key]; });
+  if (transaction.has_schema) __ROCK_STATE_SCHEMA = transaction.schema;
+  else if (typeof __ROCK_STATE_SCHEMA !== "undefined") __ROCK_STATE_SCHEMA = undefined;
+  __rock_state_schema_id = transaction.published_schema_id;
+  __rock_state_transaction = null;
+}
+function __rock_state_transaction_commit() { __rock_state_transaction = null; }
+function __rock_state_prepare_static(value_key, done_key, initializer_key) {
+  var session = __rock_session_current();
+  var old = session.__rock_initializer_keys[value_key];
+  if (old !== undefined && old !== initializer_key) {
+    delete session.__rock_state[value_key];
+    delete session.__rock_initialized[value_key];
+    __rock_state_set(done_key, false);
+  }
+  session.__rock_initializer_keys[value_key] = initializer_key;
+}
+function __rock_state_publish_schema(schema_id) {
+  var session = __rock_session_current();
+  if (session.__rock_schema_id !== null && session.__rock_schema_id !== schema_id) {
+    throw new Error("Rock StateSchema changed; restart is required");
+  }
+  session.__rock_schema_id = schema_id;
+  __rock_state_schema_id = schema_id;
+}
+function __rock_state_entry_for_name(name) {
+  if (typeof __ROCK_STATE_SCHEMA === "undefined") return null;
+  for (var i = 0; i < __ROCK_STATE_SCHEMA.length; i++) {
+    var entry = __ROCK_STATE_SCHEMA[i];
+    if (entry.kind !== "global") continue;
+    if (entry.name === name || entry.identity === name) return entry;
+    for (var j = 0; j < (entry.physical || []).length; j++) {
+      if (entry.physical[j] === name) return entry;
+    }
+  }
+  return null;
+}
+function __rock_state_entry_get(entry) {
+  var keys = entry.session_keys || [];
+  if (keys.length === 1) return __rock_state_get(keys[0]);
+  throw new Error("StateSchema entry has no single JS logical realization " + entry.identity);
+}
+function __rock_state_entry_set(entry, value) {
+  var keys = entry.session_keys || [];
+  if (keys.length === 1) return __rock_state_set(keys[0], value);
+  throw new Error("StateSchema entry has no single JS logical realization " + entry.identity);
+}
+function __rock_state_entry_clear(entry) {
+  var keys = entry.session_keys || [];
+  for (var i = 0; i < keys.length; i++) {
+    delete __rock_session_current().__rock_state[keys[i]];
+    delete __rock_session_current().__rock_initialized[keys[i]];
+  }
+}
+function __rock_state_bridge_key(entry, name) {
+  var keys = entry.session_keys || [];
+  if (keys.length === 1) return keys[0];
+  for (var i = 0; i < (entry.physical || []).length; i++) {
+    if (entry.physical[i] === name) return keys[i];
+  }
+  return null;
+}
+function __rock_state_bridge_get(entry, name) {
+  var key = __rock_state_bridge_key(entry, name);
+  if (key === null) throw new Error("StateSchema entry has no JS logical leaf for " + name);
+  return __rock_state_get(key);
+}
+function __rock_state_bridge_set(entry, name, value) {
+  var key = __rock_state_bridge_key(entry, name);
+  if (key === null) throw new Error("StateSchema entry has no JS logical leaf for " + name);
+  return __rock_state_set(key, value);
+}
+function __rock_state_bridge_clear(entry, name) {
+  var key = __rock_state_bridge_key(entry, name);
+  if (key === null) throw new Error("StateSchema entry has no JS logical leaf for " + name);
+  delete __rock_session_current().__rock_state[key];
+  delete __rock_session_current().__rock_initialized[key];
+}
+function __rock_state_install_global_bridge() {
+  if (typeof __G === "undefined" || __G === null) return;
+  if (__G.__rock_state_bridge_target === true) return;
+  var target = __G;
+  Object.defineProperty(target, "__rock_state_bridge_target", {
+    value: true, writable: false, configurable: false, enumerable: false
+  });
+  __G = new Proxy(target, {
+    get: function (object, key, receiver) {
+      var entry = (typeof key === "string") ? __rock_state_entry_for_name(key) : null;
+      if (entry !== null) return __rock_state_bridge_get(entry, key);
+      return Reflect.get(object, key, receiver);
+    },
+    set: function (object, key, value, receiver) {
+      var entry = (typeof key === "string") ? __rock_state_entry_for_name(key) : null;
+      if (entry !== null) {
+        __rock_state_bridge_set(entry, key, value);
+        return true;
+      }
+      return Reflect.set(object, key, value, receiver);
+    },
+    deleteProperty: function (object, key) {
+      var entry = (typeof key === "string") ? __rock_state_entry_for_name(key) : null;
+      if (entry !== null) {
+        __rock_state_bridge_clear(entry, key);
+        return true;
+      }
+      return Reflect.deleteProperty(object, key);
+    },
+    has: function (object, key) {
+      var entry = (typeof key === "string") ? __rock_state_entry_for_name(key) : null;
+      return entry !== null || Reflect.has(object, key);
+    }
+  });
+}
+var __rock_state_image_structural_ids = [
+  "session::schema-id", "session::initialized", "session::initializer-keys",
+  "session::rng-state", "program-artifact::code-slots",
+  "program-artifact::lifecycle-plan", "program-artifact::definition-plan",
+  "host-projection::arena-registry", "host-projection::native-ledger",
+  "runner::logger-state", "unsupported::live-scene-state"
+];
+function __rock_state_image_plan_validate() {
+  var schema = (typeof __ROCK_STATE_SCHEMA === "undefined") ? [] : __ROCK_STATE_SCHEMA;
+  var plan = (typeof __ROCK_STATE_IMAGE_PLAN === "undefined") ? null : __ROCK_STATE_IMAGE_PLAN;
+  if (!plan) throw new Error("StateImagePlan is not published");
+  if (plan.schema_id !== __rock_state_schema_id) throw new Error("StateImagePlan StateSchema mismatch");
+  if (!plan.entries || plan.entries.length !== schema.length + __rock_state_image_structural_ids.length) {
+    throw new Error("StateImagePlan has an incomplete structural tail");
+  }
+  var seen = Object.create(null);
+  var counts = { semantic_session: 0, program_artifact: 0, host_projection: 0,
+    runner_diagnostic: 0, unsupported: 0 };
+  for (var i = 0; i < schema.length; i++) {
+    var imageEntry = plan.entries[i], entry = schema[i];
+    if (!imageEntry || imageEntry.identity !== entry.identity || imageEntry.layout !== entry.fingerprint) {
+      throw new Error("StateImagePlan changed StateSchema ordering at entry " + i);
+    }
+  }
+  for (var j = 0; j < __rock_state_image_structural_ids.length; j++) {
+    var structural = plan.entries[schema.length + j];
+    if (!structural || structural.identity !== __rock_state_image_structural_ids[j]) {
+      throw new Error("StateImagePlan changed structural ownership at entry " + j);
+    }
+  }
+  plan.entries.forEach(function (entry) {
+    if (!entry.identity || seen[entry.identity]) throw new Error("StateImagePlan owns " + entry.identity + " more than once");
+    seen[entry.identity] = true;
+    if (!entry.kind || !entry.layout || !entry.capture_policy || !entry.realization_policy
+        || !entry.world_policy) {
+      throw new Error("incomplete StateImagePlan entry " + entry.identity);
+    }
+    if (counts[entry.kind] === undefined) throw new Error("unknown StateImagePlan kind " + entry.kind);
+    counts[entry.kind]++;
+  });
+  var census = plan.census || {};
+  if (census.examined !== plan.entries.length || census.assigned !== plan.entries.length
+      || census.duplicates !== 0 || census.unknown !== 0) {
+    throw new Error("incomplete StateImagePlan census");
+  }
+  Object.keys(counts).forEach(function (kind) {
+    if (census[kind] !== counts[kind]) throw new Error("StateImagePlan census disagrees for " + kind);
+    if (counts[kind] === 0) throw new Error("StateImagePlan has a zero ownership category: " + kind);
+  });
+  return true;
+}
+function __rock_state_image_clone(value, seen, mode) {
+  if (value === null || value === undefined) return value;
+  var type = typeof value;
+  if (type !== "object" && type !== "function") return value;
+  if (type === "function") {
+    if (mode === "capture" && typeof __rock_code_ref_kind === "function"
+        && __rock_code_ref_kind(value) === "slot") {
+      return { __rock_state_image_code_ref: value.key };
+    }
+    throw new Error("StateImage rejects foreign function value");
+  }
+  if (mode === "capture" && typeof __rock_code_ref_kind === "function"
+      && __rock_code_ref_kind(value) === "slot") {
+    return { __rock_state_image_code_ref: value.key };
+  }
+  if (mode === "materialize" && Object.prototype.hasOwnProperty.call(value, "__rock_state_image_code_ref")) {
+    if (typeof value.__rock_state_image_code_ref !== "string") throw new Error("StateImage has an invalid logical CodeIdentity");
+    if (typeof __rock_code_slot_ref !== "function") throw new Error("StateImage cannot resolve logical CodeIdentity");
+    return __rock_code_slot_ref(value.__rock_state_image_code_ref);
+  }
+  if (seen.has(value)) return seen.get(value);
+  if (ArrayBuffer.isView(value)) {
+    var typed = new value.constructor(value);
+    seen.set(value, typed);
+    return typed;
+  }
+  if (value instanceof Map) {
+    var map = new Map();
+    seen.set(value, map);
+    value.forEach(function (v, k) {
+      map.set(__rock_state_image_clone(k, seen, mode), __rock_state_image_clone(v, seen, mode));
+    });
+    return map;
+  }
+  if (value instanceof ArrayBuffer) {
+    var buffer = value.slice(0);
+    seen.set(value, buffer);
+    return buffer;
+  }
+  var copy = Array.isArray(value) ? [] : {};
+  seen.set(value, copy);
+  Object.keys(value).forEach(function (key) {
+    copy[key] = __rock_state_image_clone(value[key], seen, mode);
+  });
+  return copy;
+}
+function __rock_state_image_scene_is_live() {
+  if (typeof __G === "undefined" || __G === null) return false;
+  var roots = __G.__SCENE_ROOTS;
+  if (roots === null || roots === undefined) return false;
+  if (Array.isArray(roots)) return roots.some(function (v) { return v !== null && v !== undefined; });
+  if (roots._data && roots.len !== undefined) {
+    for (var i = 0; i < roots.len; i++) if (roots._data[i] !== null && roots._data[i] !== undefined) return true;
+  }
+  return Object.keys(roots).some(function (key) { return roots[key] !== null && roots[key] !== undefined; });
+}
+var __rock_state_image_next_id = 0;
+var __rock_state_image_next_session_id = 0;
+var __rock_state_image_images = Object.create(null);
+var __rock_state_image_sessions = Object.create(null);
+function __rock_state_image_world_included(entry) {
+  var imageEntry = __ROCK_STATE_IMAGE_PLAN.entries.find(function (candidate) {
+    return candidate.identity === entry.identity;
+  });
+  return entry.kind === "global" && imageEntry
+    && imageEntry.kind === "semantic_session"
+    && imageEntry.world_policy === "include";
+}
+function __rock_state_image_capture(kind, tick) {
+  if (kind !== "boot" && kind !== "world") throw new Error("unsupported StateImage capture kind " + kind);
+  __rock_state_image_plan_validate();
+  if (kind === "world" && __rock_state_image_scene_is_live()) {
+    throw new Error("StateImage capture rejected live Scene state; SceneImage is not implemented");
+  }
+  var id = ++__rock_state_image_next_id;
+  var image = { id: id, kind: kind, tick: tick, schema_id: __rock_state_schema_id,
+    layouts: Object.create(null), entries: Object.create(null), members: Object.create(null),
+    rng_state: __rock_active_session.__rock_rng_state };
+  __ROCK_STATE_IMAGE_PLAN.entries.forEach(function (entry) { image.layouts[entry.identity] = entry.layout; });
+  var seen = new Map();
+  __ROCK_STATE_SCHEMA.forEach(function (entry) {
+    var planEntry = __ROCK_STATE_IMAGE_PLAN.entries.find(function (candidate) {
+      return candidate.identity === entry.identity;
+    });
+    if (!planEntry) throw new Error("StateImage has unknown schema entry " + entry.identity);
+    if (planEntry.kind !== "semantic_session") return;
+    if (kind === "world" && !__rock_state_image_world_included(entry)) return;
+    var keys = entry.session_keys || [];
+    var values = [], initialized = [];
+    for (var i = 0; i < keys.length; i++) {
+      initialized[i] = __rock_state_has(keys[i]);
+      values[i] = initialized[i] ? __rock_state_image_clone(__rock_state_get(keys[i]), seen, "capture") : undefined;
+    }
+    image.entries[entry.identity] = {
+      keys: keys.slice(), values: values, initialized: initialized,
+      initializer_key: entry.kind === "static"
+        ? __rock_active_session.__rock_initializer_keys[keys[0]] : undefined
+    };
+    image.members[entry.identity] = true;
+  });
+  __rock_state_image_images[id] = image;
+  return id;
+}
+function __rock_state_image_validate_layouts(image) {
+  var plan = __ROCK_STATE_IMAGE_PLAN, count = 0;
+  Object.keys(image.layouts || {}).forEach(function (identity) {
+    count++;
+    var found = plan.entries.find(function (entry) { return entry.identity === identity; });
+    if (!found) throw new Error("StateImage has an unknown layout " + identity);
+    if (found.layout !== image.layouts[identity]) throw new Error("StateImage layout mismatch for " + identity);
+  });
+  if (count !== plan.entries.length) throw new Error("StateImage layout plan is incomplete");
+}
+function __rock_state_image_materialize(image_id, kind) {
+  var image = __rock_state_image_images[image_id];
+  if (!image) throw new Error("unknown StateImage " + image_id);
+  if (image.kind !== kind) throw new Error("StateImage kind mismatch: expected " + kind + ", got " + image.kind);
+  if (image.schema_id !== __rock_state_schema_id) throw new Error("StateImage StateSchema mismatch; restart is required");
+  __rock_state_image_plan_validate();
+  __rock_state_image_validate_layouts(image);
+  var candidate = __rock_session_new(image.schema_id);
+  candidate.__rock_rng_state = image.rng_state;
+  var seen = new Map();
+  var source = __rock_active_session;
+  __ROCK_STATE_SCHEMA.forEach(function (entry) {
+    var planEntry = __ROCK_STATE_IMAGE_PLAN.entries.find(function (candidateEntry) {
+      return candidateEntry.identity === entry.identity;
+    });
+    if (!planEntry) throw new Error("StateImage has unknown schema entry " + entry.identity);
+    if (planEntry.kind !== "semantic_session") return;
+    if (kind === "world" && !__rock_state_image_world_included(entry)) {
+      if (entry.kind !== "static") return;
+      var liveKeys = entry.session_keys || [];
+      if (liveKeys.length !== 2) throw new Error("StateImage static entry has no value/done realization " + entry.identity);
+      var liveValueKey = liveKeys[0], liveDoneKey = liveKeys[1];
+      if (source.__rock_initialized[liveValueKey] === true) {
+        candidate.__rock_state[liveValueKey] = __rock_state_image_clone(
+          source.__rock_state[liveValueKey], seen, "materialize");
+        candidate.__rock_initialized[liveValueKey] = true;
+      }
+      if (source.__rock_initialized[liveDoneKey] === true) {
+        candidate.__rock_state[liveDoneKey] = source.__rock_state[liveDoneKey];
+        candidate.__rock_initialized[liveDoneKey] = true;
+      }
+      var liveInitializer = source.__rock_initializer_keys[liveValueKey];
+      if (liveInitializer !== undefined) candidate.__rock_initializer_keys[liveValueKey] = liveInitializer;
+      return;
+    }
+    var snapshot = image.entries[entry.identity];
+    if (!snapshot || snapshot.keys.length !== (entry.session_keys || []).length) {
+      throw new Error("StateImage omitted semantic entry " + entry.identity);
+    }
+    for (var i = 0; i < entry.session_keys.length; i++) {
+      var key = entry.session_keys[i];
+      if (snapshot.keys[i] !== key) throw new Error("StateImage layout mismatch for " + entry.identity);
+      if (snapshot.initialized[i]) {
+        candidate.__rock_state[key] = __rock_state_image_clone(snapshot.values[i], seen, "materialize");
+        candidate.__rock_initialized[key] = true;
+      }
+    }
+    if (entry.kind === "static" && snapshot.initializer_key !== undefined) {
+      candidate.__rock_initializer_keys[entry.session_keys[0]] = snapshot.initializer_key;
+    }
+  });
+  var session_id = ++__rock_state_image_next_session_id;
+  candidate.__rock_image_materialized = true;
+  __rock_state_image_sessions[session_id] = candidate;
+  return session_id;
+}
+function __rock_state_image_try_materialize(image_id, kind) {
+  try { __rock_state_image_materialize(image_id, kind); return ""; }
+  catch (e) { return String(e && e.message !== undefined ? e.message : e); }
+}
+function __rock_state_image_release_image(image_id) {
+  if (!Object.prototype.hasOwnProperty.call(__rock_state_image_images, image_id)) return false;
+  delete __rock_state_image_images[image_id];
+  return true;
+}
+function __rock_state_image_session_id(session) {
+  var ids = Object.keys(__rock_state_image_sessions);
+  for (var i = 0; i < ids.length; i++) {
+    if (__rock_state_image_sessions[ids[i]] === session) return Number(ids[i]);
+  }
+  return -1;
+}
+function __rock_state_image_release_session(session_id) {
+  var session = __rock_state_image_sessions[session_id];
+  if (!session || session.__rock_image_materialized !== true) return false;
+  if (session === __rock_active_session) {
+    throw new Error("cannot release the active StateImage Session");
+  }
+  delete __rock_state_image_sessions[session_id];
+  return true;
+}
+function __rock_state_image_session_commit(session_id) {
+  var candidate = __rock_state_image_sessions[session_id];
+  if (!candidate || candidate.__rock_image_materialized !== true) {
+    throw new Error("unknown or incomplete materialized StateImage Session " + session_id);
+  }
+  var old = __rock_active_session;
+  if (candidate === old) return true;
+  var old_id = __rock_state_image_session_id(old);
+  try {
+    __rock_session_activate(candidate);
+    if (candidate.__rock_rng_state !== null && candidate.__rock_rng_state !== undefined
+        && typeof __rock_rng_state_set === "function") __rock_rng_state_set(candidate.__rock_rng_state);
+    if (old_id >= 0 && old_id !== session_id) delete __rock_state_image_sessions[old_id];
+    return true;
+  } catch (e) {
+    try { __rock_session_activate(old); } catch (rollback) {}
+    if (candidate !== old) delete __rock_state_image_sessions[session_id];
+    throw e;
+  }
+}
+function __rock_state_image_session_activate(session_id) {
+  var session = __rock_state_image_sessions[session_id];
+  if (!session || session.__rock_image_materialized !== true) throw new Error("unknown or incomplete materialized StateImage Session " + session_id);
+  __rock_session_activate(session);
+  if (session.__rock_rng_state !== null && session.__rock_rng_state !== undefined
+      && typeof __rock_rng_state_set === "function") __rock_rng_state_set(session.__rock_rng_state);
+  return true;
+}
+function __rock_state_image_current_session() {
+  var id = ++__rock_state_image_next_session_id;
+  __rock_active_session.__rock_image_materialized = true;
+  __rock_state_image_sessions[id] = __rock_active_session;
+  return id;
+}
+var __rock_active_session = null;
+var __rock_state_schema_id = null;
+var __rock_state_transaction = null;
+__rock_session_activate(__rock_session_new(null));
+"#;
+
 pub const JS_CORO_RUNTIME: &str = r#"
 function error(m) { throw new Error(m); }
 function __rock_coroutine_run_defers(c) {
   if (!c.__defers) return;
   for (var i = c.__defers.length - 1; i >= 0; i--) {
-    try { c.__defers[i](c); } catch (e) {
+    try { __rock_call(c.__defers[i], c); } catch (e) {
       var m = (e && e.message !== undefined) ? e.message : e;
       process.stderr.write("coroutine defer failed during cleanup: " + m + "\n");
     }
@@ -2745,7 +3344,7 @@ function __rock_coroutine_kill(c) {
   c.__state = -1;
   if (c.__inner) { __rock_coroutine_kill(c.__inner); }
   __rock_coroutine_run_defers(c);
-  if (c.__on_killed) { c.__on_killed(c); }
+  if (c.__on_killed) { __rock_call(c.__on_killed, c); }
 }
 "#;
 

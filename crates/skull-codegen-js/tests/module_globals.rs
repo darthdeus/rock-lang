@@ -36,11 +36,12 @@ fn eval_int(defs: &str, root: &str, expect: i64) {
     // `__G` is the scoped module-globals object the emitter targets; the run
     // harness (js_test.rs) supplies it in its preamble.
     let program = format!(
-        "{}{}{}{}\nvar __G = {{}};\n{defs}\nconsole.log({root}());",
+        "{}{}{}{}{}\nvar __G = {{}};\n{defs}\nconsole.log({root}());",
         skull_codegen_js::JS_NB_CHECK_SHIMS,
         skull_codegen_js::JS_VEC_CHECK_SHIMS,
         skull_codegen_js::JS_CALL_HELPER,
         skull_codegen_js::JS_STRING_RUNTIME,
+        skull_codegen_js::JS_SESSION_RUNTIME,
     );
     let out = crate::common::node().arg("-e").arg(&program).output().expect("spawn node");
     assert!(
@@ -71,7 +72,7 @@ fn mutable_global_state() {
                fn root() -> int { COUNTER = 0; bump(); bump(); return bump() }";
     let ws = ws_with(src);
     let js = emit_closure(&ws, "root").expect("mutable global emits");
-    assert!(js.contains("__G.COUNTER = "), "StoreGlobal renders:\n{js}");
+    assert!(js.contains("__rock_state_set("), "StoreGlobal renders:\n{js}");
     eval_int(&js, "root", 3);
 }
 
@@ -99,8 +100,12 @@ fn transitive_global_init_order_through_call() {
     let ws = ws_with(src);
     let js = emit_closure(&ws, "root").expect("transitive global emits");
     // REG's init line must precede ACT's.
-    let reg_at = js.find("__G.REG = ").expect("REG init emitted");
-    let act_at = js.find("__G.ACT = ").expect("ACT init emitted");
+    let reg_at = js
+        .find("global:<test>::REG::value")
+        .expect("REG init emitted");
+    let act_at = js
+        .find("global:<test>::ACT::value")
+        .expect("ACT init emitted");
     assert!(reg_at < act_at, "REG must init before ACT (transitive dep):\n{js}");
     eval_int(&js, "root", 42);
 }
@@ -127,7 +132,8 @@ fn a_nobox_global_initializes_its_leaves() {
     let ws = ws_with(src);
     let js = emit_closure(&ws, "root").expect("nobox global emits");
     assert!(
-        js.contains("__G.__nbg_ORIGIN_0 = ") && js.contains("__G.__nbg_ORIGIN_1 = "),
+        js.contains("__rock_state_set(\"global:<test>::ORIGIN::leaf0\"")
+            && js.contains("__rock_state_set(\"global:<test>::ORIGIN::leaf1\""),
         "the init must assign both leaves, not the boxed base name:\n{js}"
     );
     eval_int(&js, "root", 34);

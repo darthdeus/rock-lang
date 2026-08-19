@@ -1,106 +1,40 @@
-//! Every `static` cell the emitted program actually USES must be registered.
+//! Every emitted `static` reaches the compiler-owned StateSchema.
 //!
-//! Registration is what makes a cell visible to hot reload's reset/preserve
-//! guards today, and to the worker boot checkpoint that `docs/sim-speed-plan.md`
-//! B1 builds on the same collection. Both consumers can only act on cells the
-//! registry names, so an unregistered live cell is invisible state.
-//!
-//! The check is CROSS-VIEW: one view is the set of `__static_*` cells appearing
-//! in emitted bodies, the other is the registry table `__rock_known_globals`.
-//! Neither is derived from the other -- the first comes from the Lua text the
-//! program will run, the second from `all_statics` in
-//! `crates/skull/src/mir_emit.rs` -- so a collection that misses an owner shows
-//! up as a cell in one view and not the other. A count would not do: cells are
-//! named, and the interesting failure is one specific owner going missing.
+//! The old process-global static registry was a second membership oracle. The
+//! schema is now the one publication consumed by the Lua Session, so this file
+//! compares emitted Session keys with the compiler inventory instead.
 
-use crate::common::emit_module;
-use std::collections::BTreeSet;
+use crate::common::emit_mir;
+use skull_mir::state_schema::StateKind;
 
-/// Cells referenced anywhere in the emitted program, registry line excluded.
-fn live_cells(lua: &str) -> BTreeSet<String> {
-    let registry = registry_line(lua);
-    let mut out = BTreeSet::new();
-    for (i, _) in lua.match_indices("__static_") {
-        // The registry table is the OTHER view; counting it here would make the
-        // comparison compare a thing with itself.
-        if registry.as_ref().is_some_and(|r| lua[i..].starts_with(r.as_str())) {
-            continue;
+fn assert_static_schema_is_live(source: &str, what: &str) {
+    let emit = emit_mir(source);
+    let entries: Vec<_> = emit
+        .state_schema
+        .entries
+        .iter()
+        .filter(|entry| entry.kind == StateKind::Static)
+        .collect();
+    assert!(!entries.is_empty(), "{what}: static population is zero");
+    for entry in entries {
+        assert_eq!(entry.physical.len(), 2, "{what}: {} is not value+done", entry.identity);
+        for key in skull_mir::state_schema::entry_state_keys(entry) {
+            assert!(
+                emit.lua.contains(&format!("{key:?}")),
+                "{what}: Session key {key} for {} is absent from emitted code",
+                entry.identity
+            );
         }
-        let rest = &lua[i..];
-        let end = rest
-            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
-            .unwrap_or(rest.len());
-        let name = &rest[..end];
-        // The done flag is registered under its own key alongside the cell, so
-        // both are tracked; normalize to the cell so a failure names one thing.
-        out.insert(name.trim_end_matches("__done").to_string());
+        assert!(
+            emit.lua.contains("__rock_state_prepare_static"),
+            "{what}: no per-Session initializer preparation was emitted"
+        );
     }
-    out
 }
 
-fn registry_line(lua: &str) -> Option<String> {
-    let start = lua.find("_G.__rock_known_globals = {")?;
-    let rest = &lua[start..];
-    let end = rest.find("}\n")?;
-    Some(rest[..end].to_string())
-}
-
-/// Cells the registry names.
-fn registered_cells(lua: &str) -> BTreeSet<String> {
-    let line = registry_line(lua).expect("the emitted program must register its globals");
-    let mut out = BTreeSet::new();
-    for (i, _) in line.match_indices("[\"__static_") {
-        let rest = &line[i + 2..];
-        let end = rest.find('"').expect("a quoted registry key");
-        out.insert(rest[..end].trim_end_matches("__done").to_string());
-    }
-    out
-}
-
-/// The `__ROCK_STATICS` table as cell -> done flag, or `None` when the emitted
-/// program does not assign it at all.
-fn static_registry(lua: &str) -> Option<std::collections::BTreeMap<String, String>> {
-    let start = lua.find("_G.__ROCK_STATICS = {")?;
-    let rest = &lua[start..];
-    let end = rest.find("}\n")?;
-    let body = &rest[..end];
-    let mut out = std::collections::BTreeMap::new();
-    for (i, _) in body.match_indices("[\"") {
-        let rest = &body[i + 2..];
-        let key_end = rest.find('"').expect("a quoted cell name");
-        let key = rest[..key_end].to_string();
-        let after = &rest[key_end..];
-        let vstart = after.find("= \"").expect("a quoted done flag") + 3;
-        let vend = after[vstart..].find('"').expect("a closed done flag");
-        out.insert(key, after[vstart..vstart + vend].to_string());
-    }
-    Some(out)
-}
-
-fn assert_every_live_cell_is_registered(lua: &str, what: &str) {
-    let live = live_cells(lua);
-    let registered = registered_cells(lua);
-    assert!(
-        !live.is_empty(),
-        "{what}: no static cell reached the emitted program, so this compared \
-         nothing -- the fixture is not exercising a static at all"
-    );
-    let missing: Vec<&String> = live.difference(&registered).collect();
-    assert!(
-        missing.is_empty(),
-        "{what}: these cells are live in the emitted program but absent from \
-         `__rock_known_globals`, so no reset/preserve guard and no boot \
-         checkpoint can see them: {missing:?}\nlive: {live:?}\nregistered: {registered:?}"
-    );
-}
-
-/// The control: an ordinary fn's static, whose definition is emitted standalone
-/// and whose chunk therefore reaches `all_statics`. This is the case that has
-/// always worked, and it is here so a failure in the cases below cannot be read
-/// as "the check itself is wrong".
 #[test]
-fn an_ordinary_functions_static_is_registered() {
-    let lua = emit_module(
+fn an_ordinary_functions_static_is_published_to_state_schema() {
+    assert_static_schema_is_live(
         r#"
 global RESULT: int = 0
 fn hits() -> int {
@@ -110,22 +44,13 @@ fn hits() -> int {
 }
 fn main() { RESULT = hits() }
 "#,
+        "ordinary static",
     );
-    assert_every_live_cell_is_registered(&lua, "an ordinary fn's static");
 }
 
-/// The dropped-definition shape: a generic fn with an `Iterator` bound has NO
-/// standalone emitted definition (`mir_emit`'s fn-def loop skips it) and exists
-/// only inlined at its call sites. Its cell used to miss `all_statics`
-/// entirely, so nothing could reset, preserve or checkpoint it while the
-/// inlined copies read and wrote it every call.
-///
-/// The inliner now carries a spliced callee's `statics` into the body it
-/// splices into, which is where those cells actually live. Was a sentinel; the
-/// fix and this assertion landed together (`docs/sim-speed-plan.md` B1).
 #[test]
-fn a_bounded_generics_static_is_registered_through_its_call_sites() {
-    let lua = emit_module(
+fn a_bounded_generics_static_is_published_through_its_call_sites() {
+    assert_static_schema_is_live(
         r#"
 global RESULT: int = 0
 fn tally<I: Iterator<int>>(it: I) -> int {
@@ -137,23 +62,13 @@ fn tally<I: Iterator<int>>(it: I) -> int {
 }
 fn main() { RESULT = tally([1, 2, 3].iter()) }
 "#,
+        "bounded generic static",
     );
-    assert!(
-        live_cells(&lua).iter().any(|c| c.contains("_tally_")),
-        "the fixture must put the bounded generic's cell in the emitted program, \
-         or it is not testing what it says: {:?}",
-        live_cells(&lua)
-    );
-    assert_every_live_cell_is_registered(&lua, "a bounded generic's static");
 }
 
-/// A `co fn` cannot call a bounded fn, so real sim code reaches one through an
-/// ordinary wrapper -- the shape `games/testbed/tests/sims/b1_static_dropped.rock`
-/// uses. The cell belongs to the bounded owner either way (a `static` is one
-/// cell per owning fn), so the wrapper is where it must be registered from.
 #[test]
-fn a_bounded_generic_reached_through_a_wrapper_is_registered() {
-    let lua = emit_module(
+fn a_bounded_generics_static_behind_a_wrapper_is_published_once() {
+    let emit = emit_mir(
         r#"
 global RESULT: int = 0
 fn tally<I: Iterator<int>>(it: I) -> int {
@@ -167,14 +82,14 @@ fn wrapper(a: int, b: int) -> int { return tally([a, b].iter()) }
 fn main() { RESULT = wrapper(1, 2) }
 "#,
     );
-    assert_every_live_cell_is_registered(&lua, "a bounded generic behind a wrapper");
-}
-
-/// One cell per owning fn, not per call site: a second call site must not mint
-/// a second cell, and registration must not report the same one twice.
-#[test]
-fn two_call_sites_share_one_registered_cell() {
-    let lua = emit_module(
+    let entries: Vec<_> = emit
+        .state_schema
+        .entries
+        .iter()
+        .filter(|entry| entry.kind == StateKind::Static)
+        .collect();
+    assert_eq!(entries.len(), 1, "one owner must yield one logical static");
+    assert_static_schema_is_live(
         r#"
 global RESULT: int = 0
 fn tally<I: Iterator<int>>(it: I) -> int {
@@ -184,112 +99,45 @@ fn tally<I: Iterator<int>>(it: I) -> int {
     for x in it { n = n + x }
     return n + calls
 }
-fn a() -> int { return tally([1].iter()) }
-fn b() -> int { return tally([2, 3].iter()) }
-fn main() { RESULT = a() + b() }
+fn wrapper(a: int, b: int) -> int { return tally([a, b].iter()) }
+fn main() { RESULT = wrapper(1, 2) }
 "#,
-    );
-    let live: Vec<String> = live_cells(&lua).into_iter().filter(|c| c.contains("_tally_")).collect();
-    assert_eq!(live.len(), 1, "two call sites, one cell: {live:?}");
-    assert_every_live_cell_is_registered(&lua, "a bounded generic called twice");
-
-    let line = registry_line(&lua).expect("registry");
-    let cell = &live[0];
-    assert_eq!(
-        line.matches(&format!("[{cell:?}]")).count(),
-        1,
-        "the cell must be registered exactly once, not once per splice"
+        "wrapped bounded generic static",
     );
 }
 
-/// A specialized instantiation shares its source fn's cell name (the owner tag
-/// is the fn name plus its DECLARED param types, not the substitution), so this
-/// is the case that would break if a per-instance owner tag were ever
-/// introduced without extending the collection to `emit_specialized_callees`.
 #[test]
-fn a_specialized_generics_static_is_registered() {
-    let lua = emit_module(
+fn a_specialized_generics_static_is_published() {
+    assert_static_schema_is_live(
         r#"
 value V2 { x: float, y: float }
 global RESULT: float = 0.0
-
 @inline fn tagged<T>(v: T) -> T {
     static seen = 0
     seen = seen + 1
     return v
 }
-
 fn use_it(a: V2) -> float {
     let r = tagged(a)
     return r.x
 }
-
 fn main() { RESULT = use_it(V2 { x: 1.0, y: 2.0 }) }
 "#,
+        "specialized generic static",
     );
-    assert!(
-        live_cells(&lua).iter().any(|c| c.contains("_tagged_")),
-        "the fixture must reach the generic's static: {:?}",
-        live_cells(&lua)
-    );
-    assert_every_live_cell_is_registered(&lua, "a specialized generic's static");
 }
 
-/// The registry the worker boot checkpoint reads (`docs/sim-speed-plan.md` B1).
-///
-/// `__rock_known_globals` is keyed for hot reload's purposes: it maps a NAME to
-/// a type/init key and lists a cell and its done flag as two unrelated entries,
-/// so a consumer wanting "the statics, each with its done flag" has to
-/// re-derive the pairing from a name suffix. `__ROCK_STATICS` states it
-/// directly: cell -> done flag.
-///
-/// It is assigned UNCONDITIONALLY, an empty table included. A per-build
-/// registry that is only assigned when non-empty leaves the previous build's
-/// table in place across a hot reload, which is the skull codegen invariant in
-/// `docs/backends.md`.
 #[test]
-fn the_static_registry_pairs_every_cell_with_its_done_flag() {
-    let lua = emit_module(
-        r#"
-global RESULT: int = 0
-fn hits() -> int {
-    static n = 0
-    n = n + 1
-    return n
-}
-fn tally<I: Iterator<int>>(it: I) -> int {
-    static calls = 0
-    calls = calls + 1
-    let m = 0
-    for x in it { m = m + x }
-    return m + calls
-}
-fn main() { RESULT = hits() + tally([1, 2].iter()) }
-"#,
-    );
-    let pairs = static_registry(&lua).expect("__ROCK_STATICS must be emitted");
-    let live: BTreeSet<String> = live_cells(&lua);
-    assert!(live.len() >= 2, "the fixture must reach both owners: {live:?}");
+fn a_program_without_statics_publishes_a_schema_without_static_entries() {
+    let emit = emit_mir("global RESULT: int = 0\nfn main() { RESULT = 1 }\n");
+    assert!(emit.lua.contains("_G.__ROCK_STATE_SCHEMA = {"));
     assert_eq!(
-        pairs.keys().cloned().collect::<BTreeSet<String>>(),
-        live,
-        "the registry must name exactly the cells the program uses"
+        emit
+            .state_schema
+            .entries
+            .iter()
+            .filter(|entry| entry.kind == StateKind::Static)
+            .count(),
+        0
     );
-    for (cell, done) in &pairs {
-        assert_eq!(done, &format!("{cell}__done"), "each cell carries its own done flag");
-        assert!(
-            lua.contains(done.as_str()),
-            "the done flag `{done}` must be a name the emitted program actually uses"
-        );
-    }
-}
-
-/// A program with no statics still assigns the table. Without this, a reload
-/// would inherit the previous build's registry and the checkpoint would restore
-/// cells this build does not have.
-#[test]
-fn a_program_with_no_statics_still_assigns_an_empty_registry() {
-    let lua = emit_module("global RESULT: int = 0\nfn main() { RESULT = 1 }\n");
-    let pairs = static_registry(&lua).expect("__ROCK_STATICS must be emitted even when empty");
-    assert!(pairs.is_empty(), "no statics, so the table is empty -- but present: {pairs:?}");
 }

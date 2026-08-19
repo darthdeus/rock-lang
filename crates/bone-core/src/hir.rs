@@ -896,6 +896,8 @@ pub struct DecoratorDef {
     pub span: Span,
     pub param_decls: Vec<ParamDecl>,
     pub num_required: usize,
+    /// Compiler-known metadata on the decorator declaration itself.
+    pub annotations: Vec<Annotation>,
 }
 
 #[derive(Clone, Debug)]
@@ -967,6 +969,97 @@ pub struct GlobalDef {
     pub ty: TyId,
     pub span: Span,
     pub is_const: bool,
+    pub state_metadata: StateMetadata,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum StateOwnership {
+    Session,
+    HostProjection,
+    RunnerDiagnostic,
+    Unsupported,
+}
+
+impl StateOwnership {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Session => "session",
+            Self::HostProjection => "host_projection",
+            Self::RunnerDiagnostic => "runner_diagnostic",
+            Self::Unsupported => "unsupported",
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum StateWorldPolicy {
+    Include,
+    BootOnly,
+    Exclude,
+}
+
+impl StateWorldPolicy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Include => "include",
+            Self::BootOnly => "boot_only",
+            Self::Exclude => "exclude",
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum StateRealization {
+    FreshSession,
+    RebuildHostProjection,
+    Font,
+    AssetCache,
+    AssetPaths,
+    ProcessWindow,
+    RunnerResetNil,
+    RunnerResetInt,
+    RunnerResetBool,
+    RunnerResetTrue,
+    RunnerResetString,
+    RunnerRebind,
+    Reject,
+}
+
+impl StateRealization {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::FreshSession => "fresh-session",
+            Self::RebuildHostProjection => "rebuild-host-projection",
+            Self::Font => "font",
+            Self::AssetCache => "asset-cache",
+            Self::AssetPaths => "asset-paths",
+            Self::ProcessWindow => "process-window",
+            Self::RunnerResetNil => "runner-reset:nil",
+            Self::RunnerResetInt => "runner-reset:int",
+            Self::RunnerResetBool => "runner-reset:bool:false",
+            Self::RunnerResetTrue => "runner-reset:bool:true",
+            Self::RunnerResetString => "runner-reset:string",
+            Self::RunnerRebind => "runner-rebind",
+            Self::Reject => "reject",
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct StateMetadata {
+    pub ownership: StateOwnership,
+    pub world: StateWorldPolicy,
+    pub realization: StateRealization,
+}
+
+impl Default for StateMetadata {
+    fn default() -> Self {
+        Self {
+            ownership: StateOwnership::Session,
+            world: StateWorldPolicy::Include,
+            realization: StateRealization::FreshSession,
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug)]
