@@ -42,6 +42,10 @@ fn main() {
 
     let args = Args::parse();
 
+    // Sims force telemetry offline and must not read a production secret merely
+    // to compile; build-var commands use this to distinguish the invocation.
+    unsafe { std::env::set_var("ROCK_BUILD_COMMAND", args.command.cli_name()) };
+
     // Record the invocation's --channel/--var selection before dispatch; the
     // compile chokepoints resolve [build.vars] against it per project
     // (docs/comptime-plan.md). A malformed --var fails here, by name.
