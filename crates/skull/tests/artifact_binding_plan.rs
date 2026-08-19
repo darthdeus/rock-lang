@@ -250,8 +250,8 @@ fn main() { host_effect() }
 fn unclassified_user_native_effect_is_rejected_by_shadow_admission_plan() {
     let lua = try_emit_module(
         r#"
-inline(lua) fn native_allocation() = "ffi.new('uint8_t[1]')"
-fn main() { native_allocation() }
+inline(lua) fn unknown_native_effect() = "ffi.C.mystery('uint8_t[1]')"
+fn main() { unknown_native_effect() }
 "#,
     )
     .expect("native-effect fixture should compile for shadow admission");
