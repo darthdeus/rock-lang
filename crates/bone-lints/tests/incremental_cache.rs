@@ -597,6 +597,54 @@ fn backend_sibling_addition_and_removal_update_the_group() {
 }
 
 #[test]
+fn backend_sibling_file_movement_revisits_old_and_new_groups() {
+    let old_parts = [
+        ("<sibling-a>", "inline(lua) fn probe(x: int) -> int = \"return x\"\nfn main() {}\n"),
+        ("<sibling-b>", "inline(js) fn probe(x: int) -> int = \"return x;\"\n"),
+    ];
+    let new_parts = [
+        ("<sibling-a>", "inline(lua) fn probe(x: int) -> int = \"return x\"\ninline(js) fn probe(x: float) -> int = \"return x;\"\nfn main() {}\n"),
+        ("<sibling-b>", "fn helper() {}\n"),
+    ];
+    let old_ws = workspace_many(&old_parts);
+    let new_ws = workspace_many(&new_parts);
+    let old_sources = sources_many(&old_parts);
+    let new_sources = sources_many(&new_parts);
+    let selection = LintOptions::only([bone_lints::BACKEND_SIBLING_MISMATCH.to_owned()]);
+    let main_file = Ustr::from("<sibling-a>");
+    let (main_mid, main_owner) = function_owner_in(&new_ws, "<sibling-a>", "main");
+    let mut cache = IncrementalLintCache::default();
+    cache.update(
+        &old_ws,
+        &FxHashSet::default(),
+        true,
+        &old_sources,
+        &selection,
+        &LintCacheUpdate::full(),
+    );
+
+    let (cached, stats) = cache.update(
+        &new_ws,
+        &FxHashSet::default(),
+        true,
+        &new_sources,
+        &selection,
+        &LintCacheUpdate::body_only(
+            [Ustr::from("<sibling-a>"), Ustr::from("<sibling-b>")],
+            [(main_mid, main_owner)],
+            [],
+        ),
+    );
+    let fresh = lint_workspace(&new_ws, &FxHashSet::default(), true, &new_sources, &selection);
+    assert_eq!(shapes(&cached), shapes(&fresh));
+    assert!(cached.iter().any(|finding| finding.lint == bone_lints::BACKEND_SIBLING_MISMATCH));
+    assert_eq!(stats.full_rebuilds, 0);
+    assert_eq!(stats.global_passes, 0);
+    assert!(stats.sibling_groups_revisited > 0);
+    assert!(cached.iter().all(|finding| finding.file() == main_file));
+}
+
+#[test]
 fn action_declaration_addition_updates_the_empty_population() {
     let old = "fn main() {}\n";
     let new = "global ACT_NEW: int = 1\nfn main() { let value = ACT_NEW }\n";
