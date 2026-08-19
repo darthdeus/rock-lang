@@ -111,7 +111,10 @@ impl LiveProject {
                 crate::skull_backend::render_project_err(&self.sources, &e)
             )
         })?;
-        self.verdict("after failed publication rollback")
+        self.verdict_with_change(
+            "after failed publication rollback",
+            &bone_lints::LintCacheUpdate::body_only([], [], []),
+        )
     }
 
     pub fn recompile(&mut self, changed: &[PathBuf]) -> Result<LiveUpdate> {
@@ -471,6 +474,7 @@ mod tests {
         let source = dir.path().join("main.rock");
         std::fs::write(&source, "fn main() { let stale = 1 }\n").unwrap();
         let mut project = LiveProject::init(dir.path().to_str().unwrap(), false).unwrap();
+        assert!(project.lint_cache.is_initialized());
         let file = ustr::Ustr::from(
             std::fs::canonicalize(&source)
                 .unwrap()
@@ -483,6 +487,43 @@ mod tests {
         assert!(!project.lint_cache.findings_for_file(file).is_empty());
 
         project.apply_edit(&source, "fn main() {}\n").unwrap();
+        assert!(project.lint_cache.is_initialized());
         assert!(project.lint_cache.findings_for_file(file).is_empty());
+    }
+
+    #[test]
+    fn lint_error_after_cache_update_rolls_back_sources_and_findings_together() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("main.rock");
+        let old = r#"
+fn maybe_int() -> int? { return 1 }
+fn always_int() -> int { return 1 }
+fn main() -> int { let _value: int = cast(always_int()) 3 }
+"#;
+        let bad = old.replace("cast(always_int())", "cast(maybe_int())");
+        std::fs::write(&source, old).unwrap();
+        let mut project = LiveProject::init(dir.path().to_str().unwrap(), false).unwrap();
+        let file = ustr::Ustr::from(
+            std::fs::canonicalize(&source)
+                .unwrap()
+                .to_string_lossy()
+                .as_ref(),
+        );
+        let before = project
+            .lint_cache
+            .findings_for_file(file)
+            .into_iter()
+            .map(|finding| format!("{}:{}", finding.lint, finding.error.message))
+            .collect::<Vec<_>>();
+        assert!(project.apply_edit(&source, &bad).is_err());
+        assert_eq!(project.source_text(&source).as_deref(), Some(old));
+        let after = project
+            .lint_cache
+            .findings_for_file(file)
+            .into_iter()
+            .map(|finding| format!("{}:{}", finding.lint, finding.error.message))
+            .collect::<Vec<_>>();
+        assert_eq!(after, before);
+        assert!(after.iter().all(|finding| !finding.starts_with("transmute_of_nullable:")));
     }
 }

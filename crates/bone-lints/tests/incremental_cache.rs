@@ -1,5 +1,5 @@
 use bone_lints::{
-    IncrementalLintCache, LintCacheUpdate, LintOptions, TextEditDelta, lint_workspace,
+    IncrementalLintCache, LintCacheUpdate, LintOptions, TextEditDelta, UNUSED_VAR, lint_workspace,
 };
 use bone_semantic::prelude::*;
 
@@ -39,13 +39,198 @@ fn shapes(findings: &[bone_lints::Finding]) -> Vec<String> {
 }
 
 fn function_owner(ws: &Workspace, name: &str) -> (ModuleId, BodyOwner) {
-    let module = ws.modules.iter().find(|m| m.file == FILE).expect("module");
+    function_owner_in(ws, FILE, name)
+}
+
+fn function_owner_in(ws: &Workspace, file: &str, name: &str) -> (ModuleId, BodyOwner) {
+    let module = ws
+        .modules
+        .iter()
+        .find(|m| m.file == Ustr::from(file))
+        .expect("module");
     let (fid, _) = module
         .functions
         .iter()
         .find(|(_, function)| function.name.as_str() == name)
         .expect("function");
     (module.id, BodyOwner::Function(fid))
+}
+
+#[test]
+fn local_body_findings_can_be_added_and_removed() {
+    let old = "fn main() { let used = 1\n print(used) }\n";
+    let added = "fn main() { let unused = 1\n let used = 1\n print(used) }\n";
+    let removed = "fn main() { print(1) }\n";
+    let old_ws = workspace(old);
+    let added_ws = workspace(added);
+    let removed_ws = workspace(removed);
+    let file = Ustr::from(FILE);
+    let mut cache = IncrementalLintCache::default();
+    cache.update(
+        &old_ws,
+        &FxHashSet::default(),
+        true,
+        &sources(old),
+        &LintOptions::default(),
+        &LintCacheUpdate::full(),
+    );
+
+    let (added_mid, added_owner) = function_owner(&added_ws, "main");
+    let (added_findings, added_stats) = cache.update(
+        &added_ws,
+        &FxHashSet::default(),
+        true,
+        &sources(added),
+        &LintOptions::default(),
+        &LintCacheUpdate::body_only([file], [(added_mid, added_owner)], []),
+    );
+    assert!(added_findings.iter().any(|f| f.lint == UNUSED_VAR));
+    assert!(added_stats.flat_body_requests > 0);
+
+    let (removed_mid, removed_owner) = function_owner(&removed_ws, "main");
+    let (removed_findings, removed_stats) = cache.update(
+        &removed_ws,
+        &FxHashSet::default(),
+        true,
+        &sources(removed),
+        &LintOptions::default(),
+        &LintCacheUpdate::body_only([file], [(removed_mid, removed_owner)], []),
+    );
+    assert!(removed_findings.iter().all(|f| f.lint != UNUSED_VAR));
+    assert!(removed_stats.flat_body_requests > 0);
+}
+
+#[test]
+fn suppression_only_edits_rebuild_the_affected_file() {
+    let old = "fn main() {\n    let unused = 1\n}\n";
+    let suppressed = "fn main() {\n    // rock: allow(unused_var)\n    let unused = 1\n}\n";
+    let old_ws = workspace(old);
+    let suppressed_ws = workspace(suppressed);
+    let file = Ustr::from(FILE);
+    let mut cache = IncrementalLintCache::default();
+    cache.update(
+        &old_ws,
+        &FxHashSet::default(),
+        true,
+        &sources(old),
+        &LintOptions::default(),
+        &LintCacheUpdate::full(),
+    );
+    let insertion = suppressed.find("// rock").expect("suppression");
+    let (mid, owner) = function_owner(&suppressed_ws, "main");
+    let (hidden, hidden_stats) = cache.update(
+        &suppressed_ws,
+        &FxHashSet::default(),
+        true,
+        &sources(suppressed),
+        &LintOptions::default(),
+        &LintCacheUpdate::body_only(
+            [file],
+            [],
+            [TextEditDelta {
+                file,
+                at: insertion,
+                byte_delta: (suppressed.len() - old.len()) as isize,
+                line_delta: 1,
+            }],
+        ),
+    );
+    assert!(hidden.is_empty());
+    assert_eq!(hidden_stats.full_rebuilds, 1);
+    assert!(hidden_stats.suppression_invalidations > 0);
+
+    let (shown, shown_stats) = cache.update(
+        &old_ws,
+        &FxHashSet::default(),
+        true,
+        &sources(old),
+        &LintOptions::default(),
+        &LintCacheUpdate::body_only([file], [(mid, owner)], []),
+    );
+    assert!(shown.iter().any(|f| f.lint == UNUSED_VAR));
+    assert_eq!(shown_stats.full_rebuilds, 1);
+}
+
+#[test]
+fn reinferred_consumer_refreshes_when_a_callee_changes() {
+    let main = "fn main() -> int { let _value: int = cast(maybe()) 3 }\n";
+    let callee_old =
+        "inline(lua) fn cast<T>(value: any) -> T = \"return value\"\nfn maybe() -> int { return 1 }\n";
+    let callee_new =
+        "inline(lua) fn cast<T>(value: any) -> T = \"return value\"\nfn maybe() -> int? { return 1 }\n";
+    let old_parts = [
+        ("<dep-main>", main),
+        ("<dep-callee>", callee_old),
+    ];
+    let new_parts = [
+        ("<dep-main>", main),
+        ("<dep-callee>", callee_new),
+    ];
+    let old_ws = workspace_many(&old_parts);
+    let new_ws = workspace_many(&new_parts);
+    let old_sources = sources_many(&old_parts);
+    let new_sources = sources_many(&new_parts);
+    let callee_file = Ustr::from("<dep-callee>");
+    let (main_mid, main_owner) = function_owner_in(&new_ws, "<dep-main>", "main");
+    let mut cache = IncrementalLintCache::default();
+    cache.update(
+        &old_ws,
+        &FxHashSet::default(),
+        true,
+        &old_sources,
+        &LintOptions::default(),
+        &LintCacheUpdate::full(),
+    );
+    let (findings, stats) = cache.update(
+        &new_ws,
+        &FxHashSet::default(),
+        true,
+        &new_sources,
+        &LintOptions::default(),
+        &LintCacheUpdate::body_only([callee_file], [(main_mid, main_owner)], []),
+    );
+    let fresh = lint_workspace(
+        &new_ws,
+        &FxHashSet::default(),
+        true,
+        &new_sources,
+        &LintOptions::default(),
+    );
+    assert_eq!(shapes(&findings), shapes(&fresh));
+    assert!(findings
+        .iter()
+        .any(|f| f.lint == bone_lints::TRANSMUTE_OF_NULLABLE));
+    assert!(stats.inference_body_requests > 0);
+}
+
+#[test]
+fn production_only_cache_scans_but_does_not_report_test_files() {
+    let parts = [
+        ("<production>", "fn main() {}\n"),
+        ("<sim>", "fn sim_only() {}\n"),
+    ];
+    let ws = workspace_many(&parts);
+    let production = [parts[0]];
+    let sources = sources_many(&production);
+    let mut cache = IncrementalLintCache::default();
+    let (findings, stats) = cache.update(
+        &ws,
+        &FxHashSet::default(),
+        true,
+        &sources,
+        &LintOptions::default(),
+        &LintCacheUpdate::full(),
+    );
+    let fresh = lint_workspace(
+        &ws,
+        &FxHashSet::default(),
+        true,
+        &sources,
+        &LintOptions::default(),
+    );
+    assert_eq!(shapes(&findings), shapes(&fresh));
+    assert!(findings.iter().all(|f| f.file() != Ustr::from("<sim>")));
+    assert!(stats.full_rebuilds > 0);
 }
 
 #[test]
