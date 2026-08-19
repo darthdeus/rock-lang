@@ -96,7 +96,7 @@ pub fn build_package_map(source_spec: &SourceSpec) -> Vec<(String, PathBuf)> {
         Err(e) => {
             log::warn!(target: "COMPILE",
                 "build_package_map: stick.toml lookup failed: {}. \
-                 Package grouping in _G.__ROCK_GLOBALS will be incomplete.",
+                 StateSchema package metadata will be incomplete.",
                 e
             );
             return Vec::new();
@@ -115,7 +115,7 @@ pub fn build_package_map(source_spec: &SourceSpec) -> Vec<(String, PathBuf)> {
     // resolver earlier in the same compile and propagates errors, so
     // by the time we get here the resolve has already succeeded once.
     // If it fails now (transient FS race, stick.toml rewritten mid-
-    // build), surface it -- the package map feeds _G.__ROCK_GLOBALS
+    // build), surface it -- the package map feeds StateSchema metadata
     // grouping in codegen, and silently dropping deps would produce
     // a subtly-wrong runtime.
     if !stick_config.dependencies.is_empty() {
@@ -130,7 +130,7 @@ pub fn build_package_map(source_spec: &SourceSpec) -> Vec<(String, PathBuf)> {
             Err(e) => {
                 log::warn!(target: "COMPILE",
                     "build_package_map: dependency resolver failed: {}. \
-                     Package grouping in _G.__ROCK_GLOBALS will be incomplete.",
+                     StateSchema package metadata will be incomplete.",
                     e
                 );
             }

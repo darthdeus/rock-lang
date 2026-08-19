@@ -74,6 +74,10 @@ pub fn inline_off_guard() -> InlineOffGuard {
     InlineOffGuard { previous }
 }
 
+pub fn inline_off_active() -> bool {
+    INLINE_OFF.with(|off| off.get())
+}
+
 impl Drop for InlineOffGuard {
     fn drop(&mut self) {
         INLINE_OFF.with(|off| off.set(self.previous));
@@ -81,7 +85,7 @@ impl Drop for InlineOffGuard {
 }
 
 fn inline_disabled() -> bool {
-    INLINE_OFF.with(|off| off.get()) || std::env::var_os("SKULL_INLINE_OFF").is_some()
+    inline_off_active()
 }
 
 /// Whether a candidate callee is a single straight-line block or a CFG.
@@ -94,6 +98,7 @@ enum Kind {
 /// A pristine lowered snapshot of an eligible callee — every splice clones from
 /// this clean body (transitive inlining re-scans the caller, never mutates a
 /// candidate).
+#[derive(Clone)]
 struct CalleeBody {
     func: MirFunc,
     /// The raw lowered body shared with emission consumers. Every mutating
@@ -778,6 +783,7 @@ impl InlineCandidateTable {
     }
 }
 
+#[derive(Clone)]
 pub struct InlineCache {
     cands: HashMap<CacheKey, Option<Arc<CalleeBody>>>,
     shared: Option<Arc<InlineCandidateTable>>,
@@ -787,7 +793,7 @@ pub struct InlineCache {
     worker: String,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct InlineScratch {
     inst_map: HashMap<Idx<Inst>, Idx<Inst>>,
     cell_map: HashMap<Idx<Cell>, Idx<Cell>>,
@@ -1320,6 +1326,20 @@ fn compact_live_template(
     }
 
     let mut template = MirFunc::new(source.name);
+    template.code_identity = source.code_identity.clone();
+    template.code_abi_fingerprint = source.code_abi_fingerprint.clone();
+    template.code_compatibility = source.code_compatibility.clone();
+    template.lambda_abi_fingerprints = source
+        .lambda_abi_fingerprints
+        .iter()
+        .filter_map(|(old_id, fingerprint)| {
+            inst_map
+                .get(old_id)
+                .map(|new_id| (*new_id, fingerprint.clone()))
+        })
+        .collect();
+    template.nested_fn_identities = source.nested_fn_identities.clone();
+    template.rep_arena = source.rep_arena.clone();
     template.params = source.params.iter().map(|param| cell_map[param]).collect();
     template.lower_timing_enabled = source.lower_timing_enabled;
     template.lower_attribution = source.lower_attribution.clone();
@@ -1327,6 +1347,8 @@ fn compact_live_template(
     template.abi_representation = source.abi_representation.clone();
     template.global_plan = source.global_plan.clone();
     template.statics = source.statics.clone();
+    template.comptime_reads = source.comptime_reads.clone();
+    template.struct_registry_roots = source.struct_registry_roots.clone();
     template.insts = insts;
     template.cells = cells;
     template.blocks = blocks;
@@ -1382,6 +1404,11 @@ fn compact_live_template(
     remap_inst_table!(call_abi_plans);
     remap_inst_table!(call_rep_plans);
     remap_inst_table!(fn_value_symbols);
+    for (old_id, identity) in &source.code_value_identities {
+        if let Some(&new_id) = inst_map.get(old_id) {
+            template.code_value_identities.insert(new_id, identity.clone());
+        }
+    }
     for (old_id, plan) in &source.closure_env_plans {
         let Some(&new_id) = inst_map.get(old_id) else { continue };
         let captures = plan.captures().iter().map(|cell| cell_map[cell]).collect();
@@ -2484,10 +2511,13 @@ fn collect_nested_names(nested: &[MirFunc], out: &mut Vec<Ustr>) {
 }
 
 fn remap_nested_global(inst: &mut Inst, names: &HashMap<Ustr, Ustr>) {
-    if let Inst::Global(name) = inst {
-        if let Some(&new) = names.get(name) {
-            *name = new;
+    match inst {
+        Inst::Global(name) | Inst::MakeEnv { fn_ref: Some(name), .. } => {
+            if let Some(&new) = names.get(name) {
+                *name = new;
+            }
         }
+        _ => {}
     }
 }
 
@@ -2499,6 +2529,11 @@ fn rename_nested_tree(nested: &mut [MirFunc], names: &HashMap<Ustr, Ustr>) {
         for (_, inst) in nf.insts.iter_mut() {
             remap_nested_global(inst, names);
         }
+        nf.nested_fn_identities = nf
+            .nested_fn_identities
+            .iter()
+            .map(|(name, identity)| (names.get(name).copied().unwrap_or(*name), identity.clone()))
+            .collect();
         nf.hoisted_fn_globals = nf
             .hoisted_fn_globals
             .iter()
@@ -2605,6 +2640,15 @@ fn import_spec_bindings(
         if let Some(&new_id) = inst_map.get(old_id) {
             func.fn_value_symbols.insert(new_id, *fref);
         }
+    }
+    for (old_id, identity) in &callee.code_value_identities {
+        if let Some(&new_id) = inst_map.get(old_id) {
+            func.code_value_identities.insert(new_id, identity.clone());
+        }
+    }
+    for (name, identity) in &callee.nested_fn_identities {
+        let name = nested_names.get(name).copied().unwrap_or(*name);
+        func.nested_fn_identities.insert(name, identity.clone());
     }
     for n in &callee.hoisted_fn_globals {
         let n = nested_names.get(n).copied().unwrap_or(*n);

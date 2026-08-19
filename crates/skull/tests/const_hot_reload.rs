@@ -1,9 +1,5 @@
-//! `const` globals must re-initialize UNCONDITIONALLY on hot reload (tweak the
-//! source literal, see the new value next reload) -- NO `_G.HOT_RELOAD` /
-//! `__rock_old_globals` preserve guard. Only mutable `global`s get that guard
-//! (their live runtime value survives the re-dofile). Mirrors rock-codegen
-//! (`incremental.rs::generate_global_code`, `if is_const`). skull reads the flag
-//! off `hir::GlobalDef.is_const` in `mir_emit::emit_global_unit`.
+//! `const` globals re-initialize on hot reload, while mutable globals keep their
+//! live value in the active Session.
 //! Design: docs/skull-const-hot-reload-plan.md.
 use crate::common::ws_of;
 
@@ -35,7 +31,7 @@ fn run_luajit(prog: &str) -> String {
 }
 
 #[test]
-fn const_reinits_on_hot_reload_but_global_is_preserved() {
+fn const_reinits_on_hot_reload_but_session_global_is_preserved() {
     let ws = ws_of("const FOO: int = 5\nglobal bar: int = 7\nfn main() {}\n");
     let mid = skull::user_module_id(&ws).unwrap();
     let lua = skull::mir_emit::emit_full(&ws, mid).expect("emit_full").0.lua;
@@ -53,11 +49,11 @@ fn const_reinits_on_hot_reload_but_global_is_preserved() {
         !foo.contains("HOT_RELOAD"),
         "const FOO must re-init unconditionally on reload (no HOT_RELOAD guard); got: {foo}"
     );
-    // mutable global: keeps the preserve guard so its live value survives.
-    let bar = line("bar =");
+    // mutable global: its Session slot guard preserves the live value.
+    let bar = line("__rock_state_set(\"global:<t>::bar::value\"");
     assert!(
-        bar.contains("HOT_RELOAD"),
-        "mutable global bar must keep the preserve guard; got: {bar}"
+        bar.contains("if not __rock_state_has"),
+        "mutable global bar must guard its Session slot; got: {bar}"
     );
 }
 
@@ -72,11 +68,12 @@ fn const_value_edit_takes_effect_on_reload_runtime() {
 
     let script = format!(
         "-- initial cold load\n_G.HOT_RELOAD = false\n{before}\n\
-         -- gameplay mutates the live mutable global\nbar = 99\n\
+         -- gameplay mutates the live mutable global's Session slot\n\
+         __rock_state_set(\"global:<t>::bar::value\", 99)\n\
          -- hot reload: re-dofile the edited program\n_G.HOT_RELOAD = true\n{after}\n\
          -- verdict\n\
-         if FOO == 10 and bar == 99 then print(\"PASS\")\n\
-         else print(\"FAIL FOO=\"..tostring(FOO)..\" bar=\"..tostring(bar)); os.exit(1) end\n"
+         if FOO == 10 and __rock_state_get(\"global:<t>::bar::value\") == 99 then print(\"PASS\")\n\
+         else print(\"FAIL FOO=\"..tostring(FOO)..\" bar=\"..tostring(__rock_state_get(\"global:<t>::bar::value\"))); os.exit(1) end\n"
     );
 
     let out = run_luajit(&script);

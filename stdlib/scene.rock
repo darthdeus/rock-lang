@@ -38,9 +38,13 @@ const __SCENE_DISCARDING: int = 5
 //
 // IDs are monotonic and never reused, which is what stops an escaped handle from
 // resolving into whatever is created next.
+@state(ownership=host_projection, world=exclude, realization=rebuild_host_projection)
 global __SCENE_ROOTS: [any?] = []
+@state(ownership=host_projection, world=exclude, realization=rebuild_host_projection)
 global __SCENE_STATES: [int] = []
+@state(ownership=host_projection, world=exclude, realization=rebuild_host_projection)
 global __SCENE_ARENA_IDS: [[int]] = []
+@state(ownership=host_projection, world=exclude, realization=rebuild_host_projection)
 global __SCENE_NEXT_ID: int = 0
 
 // What this Scene must run before its rows go, in registration order: the
@@ -48,10 +52,12 @@ global __SCENE_NEXT_ID: int = 0
 // releasing memory. A Scene-owned task has defers and an `on_killed` to fire;
 // a Scene-owned native resource (P5) has a handle to release. Both are the
 // same shape, so they share this column rather than growing a second ledger.
+@state(ownership=host_projection, world=exclude, realization=rebuild_host_projection)
 global __SCENE_CLOSERS: [[() -> ()]] = []
 
 // Staging for the safe-point drain, not a second ownership system: every entry
 // here is a Scene whose registry state is already Closing.
+@state(ownership=host_projection, world=exclude, realization=rebuild_host_projection)
 global __SCENE_PENDING_CLOSE: [int] = []
 
 fn __scene_state(scene_id: int) -> int {

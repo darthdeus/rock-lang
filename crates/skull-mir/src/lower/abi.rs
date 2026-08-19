@@ -338,6 +338,13 @@ impl GlobalPlan {
     pub fn lanes(&self) -> usize {
         self.arena.get(self.representation).lanes(&self.arena)
     }
+
+    /// A build-independent description of the stored global representation.
+    /// `RepId` and the arena allocation order are deliberately absent: this is
+    /// the logical StateSchema fingerprint, not a backend publication name.
+    pub fn logical_fingerprint(&self) -> String {
+        rep_logical_fingerprint(&self.arena, self.representation)
+    }
 }
 
 impl FunctionRepPlan {
@@ -359,6 +366,24 @@ impl FunctionRepPlan {
 
     pub fn uses_scalar_abi(&self) -> bool {
         self.scalar_abi
+    }
+
+    /// A build-independent description of the function-value wire. `RepId`s
+    /// are only lookup handles into `arena`; the returned string contains the
+    /// recursive layouts they name, so a later artifact can compare it without
+    /// depending on arena allocation order.
+    pub fn logical_fingerprint(&self, arena: &RepArena) -> String {
+        let params = self
+            .params
+            .iter()
+            .map(|id| rep_logical_fingerprint(arena, *id))
+            .collect::<Vec<_>>()
+            .join(",");
+        let result = self
+            .result
+            .map(|id| rep_logical_fingerprint(arena, id))
+            .unwrap_or_else(|| "none".to_string());
+        format!("params=[{params}];result={result};lanes={};scalar={}", self.return_lanes, self.scalar_abi)
     }
 }
 
@@ -625,6 +650,45 @@ impl Default for AbiPlanCache {
             published_keys: Default::default(),
             plan_size_histogram: std::array::from_fn(|_| std::sync::atomic::AtomicU64::new(0)),
             plan_size_max: Default::default(),
+        }
+    }
+}
+
+impl Clone for AbiPlanCache {
+    fn clone(&self) -> Self {
+        use std::sync::atomic::Ordering;
+
+        let copy = |value: &std::sync::atomic::AtomicU64| {
+            std::sync::atomic::AtomicU64::new(value.load(Ordering::Relaxed))
+        };
+        Self {
+            plans: Mutex::new(self.plans.lock().expect("abi plan cache poisoned").clone()),
+            published: self.published.clone(),
+            epoch: copy(&self.epoch),
+            owner_hits: copy(&self.owner_hits),
+            owner_misses: copy(&self.owner_misses),
+            local_hits: copy(&self.local_hits),
+            callee_hits: copy(&self.callee_hits),
+            callee_misses: copy(&self.callee_misses),
+            stores: copy(&self.stores),
+            duplicate_cold_stores: copy(&self.duplicate_cold_stores),
+            cloned_param_slots: copy(&self.cloned_param_slots),
+            shared_lookups: copy(&self.shared_lookups),
+            shared_hits: copy(&self.shared_hits),
+            shared_misses: copy(&self.shared_misses),
+            plan_clones: copy(&self.plan_clones),
+            plan_clone_param_slots: copy(&self.plan_clone_param_slots),
+            shared_lock_ns: copy(&self.shared_lock_ns),
+            local_clone_ns: copy(&self.local_clone_ns),
+            shared_clone_ns: copy(&self.shared_clone_ns),
+            derivation_ns: copy(&self.derivation_ns),
+            warm_keys: copy(&self.warm_keys),
+            warm_failures: copy(&self.warm_failures),
+            published_hits: copy(&self.published_hits),
+            published_misses: copy(&self.published_misses),
+            published_keys: copy(&self.published_keys),
+            plan_size_histogram: std::array::from_fn(|i| copy(&self.plan_size_histogram[i])),
+            plan_size_max: copy(&self.plan_size_max),
         }
     }
 }
@@ -2144,6 +2208,12 @@ impl BackendFnAbiPlan {
         &self.representation
     }
 
+    /// The ABI compatibility witness for a code slot. It deliberately expands
+    /// the representation through the arena instead of retaining a `RepId`.
+    pub fn logical_fingerprint(&self) -> String {
+        format!("target={:?};{}", self.target, self.representation.logical_fingerprint(&self.arena))
+    }
+
     pub fn rep_plan(&self, id: RepId) -> RepPlan {
         self.arena.get(id)
     }
@@ -2215,6 +2285,33 @@ impl BackendFnAbiPlan {
         self.uses_scalar_abi()
             .then(|| self.param_shapes().iter().map(RetSlot::slot_count).collect())
     }
+}
+fn rep_logical_fingerprint(arena: &RepArena, id: RepId) -> String {
+    let plan = arena.get(id);
+    let layout = match plan.layout() {
+        RepLayout::Opaque => "opaque".to_string(),
+        RepLayout::Foreign { reason } => format!("foreign:{reason}"),
+        RepLayout::Leaves(_) => format!(
+            "leaves:{:?}:{:?}",
+            plan.leaf_paths().unwrap_or_default(),
+            plan.presence_flags().unwrap_or_default()
+        ),
+        RepLayout::Tuple { slots, nullable } => format!(
+            "tuple(nullable={nullable};[{}])",
+            slots
+                .iter()
+                .map(|slot| rep_logical_fingerprint(arena, *slot))
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+    };
+    format!(
+        "{layout};storage={:?};column={};nobox={};lanes={}",
+        plan.value_storage(),
+        plan.column_eligible(),
+        plan.nobox(),
+        plan.lanes(arena)
+    )
 }
 
 #[cfg(test)]

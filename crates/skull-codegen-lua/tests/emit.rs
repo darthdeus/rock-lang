@@ -102,6 +102,7 @@ fn run(src: &str, driver: &str) -> String {
     let graph = skull_graph::instance_graph::build_in(&ws, roots, false, interner.clone());
     let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(interner);
     let concrete = skull_graph::concrete_body::build(&ws, &graph);
+    let mut code_artifact = skull_mir::code_identity::CodeArtifact::default();
     // Capturing lambdas lower to `setmetatable({..}, __rock_fn_mt)` env records
     // (docs/closure-env-records-plan.md); the record metatable lives in skull's
     // runtime prelude, which this bare harness does not emit -- pull in the
@@ -125,12 +126,47 @@ fn run(src: &str, driver: &str) -> String {
         ) {
             skull_transform::cleanup(&mut func).unwrap();
             skull_transform::recover_counted_loops(&ws, &mut func);
+            let name = inst.symbol(&ws, scx.interner());
+            let pre_nested = func.nested_fns.len();
+            skull_transform::convert_closures(&mut func, &name);
+            let mut unit_artifact = skull_mir::code_identity::CodeArtifact::from_mir_tree(&func);
+            unit_artifact.set_body_names(&func, &name);
+            code_artifact.merge(unit_artifact);
             lua.push_str(&skull_codegen_lua::emit_named(
-                &ws,
-                &ctx,
-                scx.interner(),
-                &inst.symbol(&ws, scx.interner()),
-                &func,
+                &ws, &ctx, scx.interner(), &name, &func,
+            ));
+            for nf in func.nested_fns[pre_nested..].iter_mut() {
+                skull_transform::cleanup_with_nobox(&ws, nf);
+                skull_transform::recover_counted_loops(&ws, nf);
+                lua.push_str(&skull_codegen_lua::emit_named(
+                    &ws, &ctx, scx.interner(), nf.name.as_str(), nf,
+                ));
+            }
+        }
+    }
+    assert!(
+        code_artifact.census.is_total(),
+        "incomplete Rock CodeRef census in emitter harness: {:?}",
+        code_artifact.census
+    );
+    let mut entries: Vec<_> = code_artifact
+        .entries
+        .values()
+        .filter(|entry| entry.escaping)
+        .collect();
+    entries.sort_by_key(|entry| entry.identity.logical_key(&ws, scx.interner()));
+    let has_entries = !entries.is_empty();
+    if !entries.is_empty() {
+        lua.push_str("__rock_code_slot_begin()\n");
+        for entry in entries {
+            let body = entry.body_name.expect("escaping CodeRef has no emitted body");
+            lua.push_str(&format!(
+                "__rock_code_slot_stage({}, {}, {})\n",
+                skull_codegen_lua::lua_string(
+                    &entry.identity.logical_key(&ws, scx.interner())
+                ),
+                body,
+                skull_codegen_lua::lua_string(&entry.compatibility.call_abi),
             ));
         }
     }
@@ -153,6 +189,9 @@ fn run(src: &str, driver: &str) -> String {
                 lua.push_str(&format!("_G[\"{}\"] = {}\n", f.name, m));
             }
         }
+    }
+    if has_entries {
+        lua.push_str("__rock_code_slot_publish()\n");
     }
     lua.push_str(&format!("print({})\n", driver));
     // Unique per call: parallel tests must not clobber a shared temp file.
@@ -720,6 +759,8 @@ fn emit_inlined(src: &str, fn_name: &str) -> String {
     .expect("inline failed");
     skull_transform::cleanup(&mut func).unwrap();
     skull_transform::recover_counted_loops(&ws, &mut func);
+    let name = skull_codegen_lua::mangle_fn(&ws, &ws.module(mid).functions[fid]);
+    skull_transform::convert_closures(&mut func, &name);
     let ctx = CodegenCtx::new(&ws);
     emit_function(&ws, &ctx, scx.interner(), self_ref, &func)
 }

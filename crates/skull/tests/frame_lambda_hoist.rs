@@ -72,8 +72,9 @@ fn param_lambda_hoists_as_record_under_frame() {
     let lp = fn_params(&lua, &format!("{w}__step__lambda0"));
     assert_eq!(lp.len(), 2, "the hoisted lambda must take (env, n):\n{lua}");
     assert!(
-        step.contains(&format!("setmetatable({{ __fn = {w}__step__lambda0, {s} =")),
-        "the step must build an env record collapsing the frame capture to `s` (field `{s}`):\n{step}"
+        step.contains(&format!("__slot = __rock_code_slot_ref("))
+            && step.contains(&format!(", {s} =")),
+        "the step must build a CodeRef env record collapsing the frame capture to `s` (field `{s}`):\n{step}"
     );
     assert!(
         !step.contains("function("),
@@ -125,8 +126,8 @@ fn capture_free_lambda_hoists_bare_under_frame() {
         "the capture-free co-fn lambda must hoist to a bare `{w}__step__lambda0()`:\n{lua}"
     );
     assert!(
-        !step.contains("setmetatable") && !step.contains("function("),
-        "capture-free: the step references the bare name (no record, no inline closure):\n{step}"
+        step.contains("__rock_code_slot_ref(") && !step.contains("function("),
+        "capture-free: the step references the reusable CodeRef (no inline closure):\n{step}"
     );
 }
 
@@ -156,8 +157,8 @@ fn loop_binding_snapshots_by_value_into_record() {
     let lp_name = mangled_name(&lua, "looper");
     let step = function_body(&lua, &format!("{lp_name}__step"));
     assert!(
-        step.contains(&format!("setmetatable({{ __fn = {lp_name}__step__lambda")),
-        "the loop lambda must build an env record:\n{step}"
+        step.contains("__slot = __rock_code_slot_ref("),
+        "the loop lambda must build a CodeRef env record:\n{step}"
     );
     // The record field value is a frame-field READ (`= c<S>.c<i>`): snapshot,
     // not a shared reference.

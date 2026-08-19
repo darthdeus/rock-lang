@@ -1,9 +1,4 @@
 //! Stage-0e totality ablation (`docs/monomorphization-plan.md` S 0e).
-//!
-//! The mode is process-global, so every test here holds `common::AblationGuard`
-//! and restores the flag on the way out. That guard's lock is shared with every
-//! other file in this binary that touches the mode -- a per-file `static MODE`
-//! serializes a file against itself and against nothing else.
 
 use std::sync::LazyLock;
 

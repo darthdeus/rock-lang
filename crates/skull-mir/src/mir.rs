@@ -532,7 +532,7 @@ pub enum Inst {
     /// Produced by `skull_transform::convert_closures` (the shared
     /// closure-conversion pass), NEVER by lowering. Two shapes:
     ///   - `fn_ref = Some(name)` is a callable RECORD -- a capturing lambda's
-    ///     value: `{ __fn = <name>, c<A> = .. }`, invoked through the target's
+    ///     value: `{ __slot = <CodeRef>, c<A> = .. }`, invoked through the target's
     ///     `__call` convention (Lua `setmetatable({..}, __rock_fn_mt)`, JS the
     ///     `__rock_call` dispatch helper). A capture-FREE lambda is a bare
     ///     [`Inst::Global`] instead (no record, no alloc).
@@ -761,19 +761,29 @@ impl Default for Block {
 
 /// A `static` local's synthesized storage: a private global cell + a done-flag,
 /// discovered during lowering and surfaced to `skull::mir_emit` for the
-/// hot-reload preservation preamble + `__rock_known_globals` registration. The
+/// compiler-owned StateSchema and per-Session initializer reset. The
 /// in-body first-reach guard is emitted inline (see `Builder::lower_static`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct StaticCell {
     pub cell: Ustr,
     pub done_flag: Ustr,
-    /// Rendered type -- half the `__rock_known_globals` key (reset on mismatch).
+    /// Source binding name and declaration ordinal are the logical identity
+    /// within the owning callable; synthesized cell names are realization only.
+    pub logical_name: Ustr,
+    pub ordinal: u32,
+    /// Rendered type, included in the logical static layout fingerprint.
     pub type_str: String,
-    /// Content hash of the initializer expression -- the other half of the key,
-    /// so editing the initializer resets + re-inits the cell on the next reload.
+    /// Content hash of the initializer expression, so editing the initializer
+    /// resets + re-inits the cell on the next reload.
     /// Stable across edits ELSEWHERE in the body (hashes names / literals, not
     /// arena indices).
     pub init_hash: u64,
+    /// The compiler-owned callable identity that owns this static. This is
+    /// metadata for StateSchema; the emitted cell name is only a realization.
+    pub owner: Option<crate::code_identity::CodeIdentity>,
+    /// Source site of the static declaration. It is stable under body edits and
+    /// independent of lowering traversal order.
+    pub site: Option<crate::code_identity::LambdaSiteId>,
 }
 
 /// Emission identities for a dense arena whose source had unreachable entries
@@ -824,6 +834,24 @@ pub fn comptime_value_hash(value: &str) -> u64 {
 #[derive(Clone, Debug, PartialEq)]
 pub struct MirFunc {
     pub name: Ustr,
+    /// Compiler-owned identity of the callable body, when this MIR is a
+    /// concrete Rock function or a closure/nested-function sibling.
+    pub code_identity: Option<crate::code_identity::CodeIdentity>,
+    /// Canonical ABI witness used to build `code_compatibility` after closure
+    /// conversion. It contains no backend symbol or build-local RepId.
+    pub code_abi_fingerprint: Option<String>,
+    /// Function-value ABI witnesses keyed by the pre-conversion lambda inst.
+    pub lambda_abi_fingerprints:
+        bone_semantic::prelude::FxHashMap<Idx<Inst>, String>,
+    /// Concrete logical target for each named function-value mint.
+    pub code_value_identities:
+        bone_semantic::prelude::FxHashMap<Idx<Inst>, crate::code_identity::CodeIdentity>,
+    /// Identities of source-named nested functions keyed by their hoisted
+    /// backend spelling. The spelling is only the lookup key during lowering;
+    /// the stored value remains compiler-owned.
+    pub nested_fn_identities:
+        bone_semantic::prelude::FxHashMap<Ustr, crate::code_identity::CodeIdentity>,
+    pub code_compatibility: Option<crate::code_identity::CodeCompatibility>,
     /// The build-owned representation catalog used by every plan-tagged value
     /// constructor in this function and its nested functions.
     pub rep_arena: Option<Arc<crate::lower::RepArena>>,
@@ -1000,6 +1028,12 @@ impl MirFunc {
         let entry = blocks.alloc(Block::new());
         Self {
             name,
+            code_identity: None,
+            code_abi_fingerprint: None,
+            lambda_abi_fingerprints: Default::default(),
+            code_value_identities: Default::default(),
+            nested_fn_identities: Default::default(),
+            code_compatibility: None,
             rep_arena: None,
             params: Vec::new(),
             lower_timing_enabled: crate::lower::lower_attribution_timing_enabled(),

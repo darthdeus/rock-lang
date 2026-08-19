@@ -14,15 +14,17 @@
 //!
 //! Every servable path routes through this pass (S1 JS, S2 ordinary Lua fns, S3
 //! coroutine steps + global-init/decorator units), so post-pass codegen sees
-//! `MakeEnv`/`Global`, never an `Inst::Lambda` -- except one nested in a co-fn
-//! hook/defer body, a detached region this pass leaves for the inline arm
-//! (`FrameCtx::hoist_lambdas == false`; see `convert_closures_framed`).
+//! `MakeEnv`/`Global`, never an `Inst::Lambda`.
 
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use comfy_la_arena::Idx;
 use crate::scope::{non_dominating_by_value_captures, Ownership, ScopeId, ScopeTree};
 use skull_mir::cfg::reachable_blocks_from;
+use skull_mir::code_identity::{
+    CaptureField, CaptureMode, CaptureSchema, CodeCompatibility, CodeIdentity, FrameSchema,
+    LambdaSiteId, LambdaTopologyFingerprint,
+};
 use skull_mir::mir::*;
 use ustr::Ustr;
 
@@ -80,10 +82,8 @@ pub fn convert_closures(mf: &mut MirFunc, name_base: &str) {
 /// [`FrameInfo`] for the STEP `MirFunc`). With a frame, captured frame cells
 /// collapse to a capture of `s` (D2) except provenance-tagged loop bindings no
 /// lambda writes, which snapshot by value (D4(b)); a frame-cell access inside a
-/// hoisted body materializes `e.c<S>.c<slot>` (D3). Detached hook/defer lambdas
-/// (unreachable from the step entry) are left untouched -- their bodies still
-/// emit through the inline arm (`FrameCtx::hoist_lambdas == false`), a sanctioned
-/// exception pinned by `cofn_lambda_in_defer_body` (`docs/coroutine-frame-lambda-plan.md`).
+/// hoisted body materializes `e.c<S>.c<slot>` (D3). Detached hook/defer regions
+/// are converted by [`lower_detached_region`] before they reach either backend.
 ///
 /// `precomputed` reuses the coroutine transform's `ScopeTree`+`Ownership` (the
 /// SAME basis `frame.fields` was derived from). This is not merely the P2
@@ -99,6 +99,7 @@ pub fn convert_closures_framed(
     precomputed: Option<(&ScopeTree, &Ownership)>,
 ) {
     if !mf.insts.iter().any(|(_, i)| matches!(i, Inst::Lambda { .. })) {
+        refresh_owner_compatibility(mf, None, LambdaTopologyFingerprint::default());
         return;
     }
 
@@ -121,7 +122,6 @@ pub fn convert_closures_framed(
         s_cell: f.s_cell,
         fields: f.fields.clone(),
         slots: f.slots.clone(),
-        hoist_lambdas: true,
     });
     let mut boxed: HashSet<Idx<Cell>> = tree.boxed_cells(own);
     // Frame cells are table-mediated (via `s` or a by-value loop-binding snapshot
@@ -152,6 +152,22 @@ pub fn convert_closures_framed(
             }
         }
     }
+
+    let topology_sites: Vec<(LambdaSiteId, usize)> = ordered
+        .iter()
+        .filter_map(|&(_, sid)| {
+            let lambda = tree.scopes[sid].lambda?;
+            let site = mf
+                .inst_spans
+                .get(lambda)
+                .copied()
+                .and_then(LambdaSiteId::from_span)?;
+            let Inst::Lambda { params, .. } = &mf.insts[lambda] else { return None };
+            Some((site, params.len()))
+        })
+        .collect();
+    let topology = LambdaTopologyFingerprint::from_sites(&topology_sites);
+    refresh_owner_compatibility(mf, frame, topology);
 
     // Per live lambda scope: hoisted name, sorted captures, an env param cell
     // (only when it captures anything -- a capture-free body takes no env).
@@ -360,11 +376,9 @@ pub fn convert_closures_framed(
             );
         }
     }
-    // Under a frame the DETACHED hook/defer blocks (unreachable from the step
-    // entry) still carry `Inst::Lambda`s that their aux emission renders inline
-    // (`FrameCtx::hoist_lambdas == false`), so they must survive -- neutralizing
-    // them would break `cofn_lambda_in_defer_body` (docs/coroutine-frame-lambda-plan.md
-    // D5). Only the frame-less path (ordinary/JS) nils dead residuals.
+    // Detached regions are lowered independently by `lower_detached_region`.
+    // The step arena therefore has no emitted residual closure producers; only
+    // the frame-less path also nils any dead ordinary-function residue.
     if frame.is_none() {
         for (_, inst) in mf.insts.iter_mut() {
             if matches!(inst, Inst::Lambda { .. }) {
@@ -379,13 +393,46 @@ pub fn convert_closures_framed(
     // enclosing + sibling regions go unreachable, exactly as they do in `mf`. ---
     let mut nested: Vec<MirFunc> = Vec::with_capacity(ordered.len());
     for &(_k, sid) in &ordered {
+        let lambda = tree.scopes[sid].lambda.expect("ordered lambda scope has a creator");
         let mut params: Vec<Idx<Cell>> = Vec::new();
         if let Some(e) = env_plans.get(&sid).and_then(ClosureEnvPlan::env_cell) {
             params.push(e);
         }
         params.extend(tree.scopes[sid].params.iter().copied());
+        let code_identity = mf
+            .code_identity
+            .as_ref()
+            .and_then(CodeIdentity::owner)
+            .zip(
+                mf.inst_spans
+                    .get(lambda)
+                    .copied()
+                    .and_then(LambdaSiteId::from_span),
+            )
+            .map(|(enclosing, site)| CodeIdentity::Lambda { enclosing, site });
+        let capture = capture_schema(mf, env_plans[&sid].captures(), &boxed, frame);
+        let compatibility = Some(CodeCompatibility {
+            call_abi: mf
+                .lambda_abi_fingerprints
+                .get(&lambda)
+                .cloned()
+                .unwrap_or_else(|| "missing-lambda-abi".to_string()),
+            capture,
+            frame: frame_schema(frame),
+            lambda_topology: topology,
+        });
+        if let Some(identity) = code_identity.clone() {
+            mf.code_value_identities.insert(lambda, identity.clone());
+            mf.nested_fn_identities.insert(hoisted_name[&sid], identity);
+        }
         nested.push(MirFunc {
             name: hoisted_name[&sid],
+            code_identity,
+            code_abi_fingerprint: mf.lambda_abi_fingerprints.get(&lambda).cloned(),
+            lambda_abi_fingerprints: mf.lambda_abi_fingerprints.clone(),
+            code_value_identities: mf.code_value_identities.clone(),
+            nested_fn_identities: mf.nested_fn_identities.clone(),
+            code_compatibility: compatibility,
             params,
             lower_timing_enabled: mf.lower_timing_enabled,
             lower_attribution: mf.lower_attribution.clone(),
@@ -443,11 +490,65 @@ pub fn convert_closures_framed(
     }
     // APPEND, don't overwrite: lowering already hoisted the enclosing fn's named
     // nested `fn`s into `mf.nested_fns`, and clobbering them would drop those
-    // definitions from the chunk (a real bug for the Lua path, where a fn can hold
-    // both a named nested `fn` and a lambda). The named siblings keep their own
-    // `Inst::Lambda`s, which the emitter converts on their own emission -- the pass
-    // only splits THIS fn's direct lambdas.
+    // definitions from the chunk. Detached regions use the same sibling shape.
     mf.nested_fns.extend(nested);
+}
+
+fn frame_schema(frame: Option<&FrameInfo>) -> Option<FrameSchema> {
+    frame.map(|frame| {
+        let mut slots: Vec<u32> = frame.slots.values().copied().collect();
+        slots.sort_unstable();
+        FrameSchema { slots }
+    })
+}
+
+fn refresh_owner_compatibility(
+    mf: &mut MirFunc,
+    frame: Option<&FrameInfo>,
+    topology: LambdaTopologyFingerprint,
+) {
+    if mf.code_identity.is_none() {
+        return;
+    }
+    mf.code_compatibility = Some(CodeCompatibility {
+        call_abi: mf
+            .code_abi_fingerprint
+            .clone()
+            .unwrap_or_else(|| "missing-code-abi".to_string()),
+        capture: CaptureSchema::empty(),
+        frame: frame_schema(frame),
+        lambda_topology: topology,
+    });
+}
+
+fn capture_schema(
+    mf: &MirFunc,
+    captures: &[Idx<Cell>],
+    boxed: &HashSet<Idx<Cell>>,
+    frame: Option<&FrameInfo>,
+) -> CaptureSchema {
+    let mut complete = true;
+    let mut seen = HashSet::default();
+    let fields = captures
+        .iter()
+        .map(|cell| {
+            let name = mf.cells[*cell]
+                .name
+                .unwrap_or_else(|| Ustr::from("<unknown-capture>"));
+            if name == "<unknown-capture>" || !seen.insert(name) {
+                complete = false;
+            }
+            let mode = if frame.is_some_and(|f| f.s_cell == *cell || f.fields.contains(cell)) {
+                CaptureMode::Frame
+            } else if boxed.contains(cell) {
+                CaptureMode::Shared
+            } else {
+                CaptureMode::ByValue
+            };
+            CaptureField { name, mode }
+        })
+        .collect();
+    CaptureSchema { fields, complete }
 }
 
 /// Materialize `e.c<S>` -- a load of the env record `env` then its `s`-cell field
