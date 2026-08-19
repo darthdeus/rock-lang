@@ -2735,6 +2735,8 @@ fn shadow_host_projection_failure_releases_candidate_session() {
     assert!(diag.get("STONE_SHADOW_COMMITS").is_none(), "{diag}");
     assert!(diag["STONE_SHADOW_FAILURE"].as_str().unwrap_or("").contains("HostProjection"), "{diag}");
     assert_shadow_owner_rollback(diag);
+    assert!(diag["STONE_SHADOW_CANDIDATE_SESSIONS_DURING"].as_i64().is_some_and(|n| n > 0), "candidate Session denominator is empty: {diag}");
+    assert_eq!(diag["STONE_SHADOW_CANDIDATE_SESSIONS_AFTER"].as_i64(), Some(0), "abort must release every candidate Session: {diag}");
 }
 
 #[test]
