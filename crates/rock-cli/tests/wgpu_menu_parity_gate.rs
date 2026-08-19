@@ -503,9 +503,9 @@ fn mag_splash_and_menu_have_numerical_gl_wgpu_parity() {
         },
         Region {
             name: "version",
-            x0: 1100,
+            x0: 0,
             y0: 650,
-            x1: 1280,
+            x1: 300,
             y1: 720,
         },
     ];
@@ -574,12 +574,12 @@ fn mag_splash_and_menu_have_numerical_gl_wgpu_parity() {
         &gl_splash,
         &wgpu_splash,
         &[
-            ("title", 640, 290),
-            ("presents", 640, 326),
-            ("made with", 640, 384),
-            ("rock logo", 500, 420),
-            ("SDL logo", 640, 408),
-            ("version", 1250, 712),
+            ("title", 600, 275),
+            ("presents", 556, 315),
+            ("made with", 629, 377),
+            ("rock logo", 555, 398),
+            ("SDL logo", 620, 403),
+            ("version", 1100, 708),
         ],
     );
     assert_cross_renderer_pixel_witnesses(
@@ -592,7 +592,7 @@ fn mag_splash_and_menu_have_numerical_gl_wgpu_parity() {
             ("Settings button", 640, 350),
             ("Credits text", 640, 400),
             ("Quit text", 640, 447),
-            ("version", 1250, 712),
+            ("version", 40, 710),
         ],
     );
 }
