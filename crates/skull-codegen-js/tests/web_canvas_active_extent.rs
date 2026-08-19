@@ -33,7 +33,7 @@ fn run(body: &str) -> String {
 var __reads = [];
 __SW.gl = new Proxy({{
   RGBA: 6408, FLOAT: 5126, UNSIGNED_BYTE: 5121, RGBA_INTEGER: 36249, INT: 5124,
-  readPixels: function(x, y) {{ __reads.push([x, y]); }},
+  readPixels: function(x, y, w, h) {{ __reads.push([x, y, w, h]); }},
 }}, {{
   get: function(t, k) {{
     if (k in t) return t[k];
@@ -76,7 +76,7 @@ fn sync_read_flips_against_the_active_height_not_the_backing_texture() {
         "stone_read_canvas_pixel(7, 100, 200);\n\
          out.reads = __reads;",
     );
-    let want = format!("[[100,{}]]", expected_gl_row(200));
+    let want = format!("[[100,{},1,1]]", expected_gl_row(200));
     assert!(
         json.contains(&want),
         "sync readback must flip against the active height ({ACT_H}): wanted row {} in {json}\n\
@@ -163,7 +163,7 @@ fn async_submit_flips_and_bounds_check_against_the_active_extent() {
          out.reads = __reads;",
         ACT_H,
     ));
-    let want = format!("[100,{}]", expected_gl_row(200));
+    let want = format!("[100,{},1,1]", expected_gl_row(200));
     assert!(
         json.contains(&want),
         "async submit must flip against the active height: wanted {want} in {json}"
@@ -175,4 +175,62 @@ fn async_submit_flips_and_bounds_check_against_the_active_extent() {
         2,
         "the submit outside the active rect must issue no readPixels: {json}"
     );
+}
+
+#[test]
+fn async_area_submit_is_centered_and_clipped_to_the_active_extent() {
+    if !node_available() {
+        eprintln!("SKIP: node not found");
+        return;
+    }
+    let json = run(
+        "var slot = stone_pixel_readback_area_new(9);\n\
+         stone_pixel_readback_submit(slot, 7, 100, 200);\n\
+         stone_pixel_readback_submit(slot, 7, 0, 0);\n\
+         out.reads = __reads;",
+    );
+    let full = format!("[96,{},9,9]", ACT_H - 205);
+    let clipped = format!("[0,{},5,5]", ACT_H - 5);
+    assert!(json.contains(&full), "9x9 submit must be centered: wanted {full} in {json}");
+    assert!(json.contains(&clipped), "edge submit must clip: wanted {clipped} in {json}");
+}
+
+#[test]
+fn async_area_slot_accepts_a_smaller_even_submit() {
+    if !node_available() {
+        eprintln!("SKIP: node not found");
+        return;
+    }
+    let json = run(
+        "var slot = stone_pixel_readback_area_new(12);\n\
+         stone_pixel_readback_submit_area(slot, 7, 100, 200, 6);\n\
+         out.reads = __reads;",
+    );
+    let read = format!("[97,{},6,6]", ACT_H - 203);
+    assert!(json.contains(&read), "6x6 submit must use its requested extent: wanted {read} in {json}");
+}
+
+#[test]
+fn web_area_pick_prefers_the_nearest_nonzero_id() {
+    if !node_available() {
+        eprintln!("SKIP: node not found");
+        return;
+    }
+    let json = run(
+        "var ids = new Int32Array(5 * 5 * 4);\n\
+         ids[(0 * 5 + 4) * 4] = 8;\n\
+         ids[(2 * 5 + 3) * 4] = 13;\n\
+         out.id = __sw_nearest_int_id(ids, 5, 5, 10, 20, 12, 22, false);\n\
+         var clipped = new Int32Array(3 * 3 * 4);\n\
+         clipped[(0 * 3 + 1) * 4] = 8;\n\
+         clipped[(2 * 3 + 2) * 4] = 13;\n\
+         out.bottomUp = __sw_nearest_int_id(clipped, 3, 3, 0, 0, 1, 0, true);\n\
+         var tied = new Int32Array(3 * 3 * 4);\n\
+         tied[(1 * 3 + 0) * 4] = 9;\n\
+         tied[(1 * 3 + 2) * 4] = 3;\n\
+         out.tied = __sw_nearest_int_id(tied, 3, 3, 0, 0, 1, 1, false);",
+    );
+    assert!(json.contains("\"id\":13"), "nearest visible id must win: {json}");
+    assert!(json.contains("\"bottomUp\":13"), "WebGL rows must be interpreted bottom-up: {json}");
+    assert!(json.contains("\"tied\":3"), "distance ties must be backend-independent: {json}");
 }
