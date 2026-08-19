@@ -2603,10 +2603,10 @@ pub struct SkullEmitCache {
     emitted: FxHashSet<Instance>,
     /// Logical callable table from the last complete assembly. Body overlays
     /// preserve this identity table; a full/incremental assembly refreshes it.
-    code_artifact: skull_mir::code_identity::CodeArtifact,
+    code_artifact: std::sync::Arc<skull_mir::code_identity::CodeArtifact>,
     /// Logical state table from the last complete assembly. Body overlays keep
     /// it unchanged; a full/incremental assembly replaces it atomically.
-    state_schema: Option<skull_mir::state_schema::StateSchema>,
+    state_schema: Option<std::sync::Arc<skull_mir::state_schema::StateSchema>>,
     /// Comptime reads of the always-emitted units (global initializers,
     /// decorator defs), which have no Chunk. Feeds the watch set
     /// (`comptime_files`) and the overlay's stale-const re-init; refreshed by
@@ -2614,6 +2614,7 @@ pub struct SkullEmitCache {
     unit_comptime_reads: UnitComptimeReads,
     renderer_target: RendererTarget,
     repair_stats: IncrementalRepairStats,
+    body_edit_rollback: Option<BodyEditRollback>,
 }
 
 /// Structural work performed by the last body-only cache update. The counters
@@ -2754,6 +2755,20 @@ struct RootCache {
     sim_root: Option<FuncRef>,
     shader_roots: Vec<FuncRef>,
     roots: Vec<FuncRef>,
+}
+
+#[derive(Clone)]
+struct BodyEditRollback {
+    reinferred: Vec<(ModuleId, BodyOwner)>,
+    edits: Vec<crate::instance_graph::SpanEdit>,
+    changed_since_full: FxHashSet<Instance>,
+    changed_consts_since_full: FxHashSet<(ModuleId, Idx<bone_semantic::hir::GlobalDef>)>,
+    static_key_baseline: FxHashMap<Ustr, String>,
+    emitted: FxHashSet<Instance>,
+    code_artifact: std::sync::Arc<skull_mir::code_identity::CodeArtifact>,
+    state_schema: Option<std::sync::Arc<skull_mir::state_schema::StateSchema>>,
+    unit_comptime_reads: UnitComptimeReads,
+    repair_stats: IncrementalRepairStats,
 }
 
 /// A `static` cell's reload key: rendered type + initializer content hash. Equal
@@ -5917,11 +5932,12 @@ fn emit_full_in_with_mutation(
         shader_registrations,
         shader_view,
         emitted: FxHashSet::default(),
-        code_artifact: skull_mir::code_identity::CodeArtifact::default(),
+        code_artifact: std::sync::Arc::new(skull_mir::code_identity::CodeArtifact::default()),
         state_schema: None,
         unit_comptime_reads: UnitComptimeReads::default(),
         renderer_target,
         repair_stats: IncrementalRepairStats::default(),
+        body_edit_rollback: None,
     };
     let mut built_specs: Vec<(Instance, Chunk)> = Vec::new();
     let (mut emit, emitted, unit_reads) = assemble(ws, &cache.cg, &cache.scx, &cache, &mut built_specs)?;
@@ -5938,8 +5954,8 @@ fn emit_full_in_with_mutation(
     };
     let mut cache = cache;
     cache.emitted = emitted;
-    cache.code_artifact = emit.code_artifact.clone();
-    cache.state_schema = Some(emit.state_schema.clone());
+    cache.code_artifact = std::sync::Arc::new(emit.code_artifact.clone());
+    cache.state_schema = Some(std::sync::Arc::new(emit.state_schema.clone()));
     cache.unit_comptime_reads = unit_reads;
     cache.absorb_spec_chunks(built_specs);
     emit.graph_census = cache.graph.run_stats;
@@ -5994,6 +6010,81 @@ impl SkullEmitCache {
         self.repair_stats
     }
 
+    pub fn begin_body_edit_transaction(
+        &mut self,
+        reinferred: &[(ModuleId, BodyOwner)],
+        edits: &[crate::instance_graph::SpanEdit],
+    ) {
+        assert!(
+            self.body_edit_rollback.is_none(),
+            "body edit transaction already active"
+        );
+        self.body_edit_rollback = Some(BodyEditRollback {
+            reinferred: reinferred.to_vec(),
+            edits: edits.to_vec(),
+            changed_since_full: self.changed_since_full.clone(),
+            changed_consts_since_full: self.changed_consts_since_full.clone(),
+            static_key_baseline: self.static_key_baseline.clone(),
+            emitted: self.emitted.clone(),
+            code_artifact: self.code_artifact.clone(),
+            state_schema: self.state_schema.clone(),
+            unit_comptime_reads: self.unit_comptime_reads.clone(),
+            repair_stats: self.repair_stats,
+        });
+    }
+
+    pub fn commit_body_edit_transaction(&mut self) {
+        self.body_edit_rollback = None;
+    }
+
+    pub fn rollback_body_edit(&mut self, ws: &Workspace) -> Result<(), CompilerError> {
+        let Some(snapshot) = self.body_edit_rollback.take() else {
+            return Ok(());
+        };
+        let BodyEditRollback {
+            reinferred,
+            edits,
+            changed_since_full,
+            changed_consts_since_full,
+            static_key_baseline,
+            emitted,
+            code_artifact,
+            state_schema,
+            unit_comptime_reads,
+            repair_stats,
+        } = snapshot;
+        let inverse_edits: Vec<_> = edits
+            .iter()
+            .map(|edit| crate::instance_graph::SpanEdit {
+                file: edit.file,
+                at: edit.at,
+                byte_delta: -edit.byte_delta,
+                line_delta: -edit.line_delta,
+            })
+            .collect();
+        let result = (|| {
+            let shader_changed = self.update_shader_registrations(ws, &reinferred)?;
+            let (_affected, update, added_errors) =
+                self.update_chunk_cache(ws, &reinferred, &inverse_edits)?;
+            if let Some(error) = Self::combine_errors(added_errors) {
+                return Err(error);
+            }
+            if shader_changed || self.shader_delta_affects_view(&update) {
+                self.refresh_shader_registrations(ws)?;
+            }
+            Ok(())
+        })();
+        self.changed_since_full = changed_since_full;
+        self.changed_consts_since_full = changed_consts_since_full;
+        self.static_key_baseline = static_key_baseline;
+        self.emitted = emitted;
+        self.code_artifact = code_artifact;
+        self.state_schema = state_schema;
+        self.unit_comptime_reads = unit_comptime_reads;
+        self.repair_stats = repair_stats;
+        result
+    }
+
     fn candidate_index_by_func(&self) -> &FxHashMap<FuncRef, FxHashSet<Instance>> {
         self.concrete.candidate_keys_by_func()
     }
@@ -6043,7 +6134,7 @@ impl SkullEmitCache {
     }
 
     pub fn state_schema(&self) -> Option<&skull_mir::state_schema::StateSchema> {
-        self.state_schema.as_ref()
+        self.state_schema.as_deref()
     }
 
     /// A live shader registry cannot remove a key from the running process:
@@ -6870,8 +6961,8 @@ pub fn emit_incremental(
         emit.concrete_stats = cache.concrete.snapshot_build_stats();
     }
     cache.emitted = emitted;
-    cache.code_artifact = emit.code_artifact.clone();
-    cache.state_schema = Some(emit.state_schema.clone());
+    cache.code_artifact = std::sync::Arc::new(emit.code_artifact.clone());
+    cache.state_schema = Some(std::sync::Arc::new(emit.state_schema.clone()));
     cache.unit_comptime_reads = unit_reads;
     cache.absorb_spec_chunks(built_specs);
     let reassemble = t_asm.elapsed();
@@ -7096,10 +7187,11 @@ fn assemble_overlay(
     Ok((
         MirEmit {
             lua: out,
-            code_artifact: cache.code_artifact.clone(),
+            code_artifact: (*cache.code_artifact).clone(),
             state_schema: cache
                 .state_schema
-                .clone()
+                .as_deref()
+                .cloned()
                 .expect("overlay requires a completed StateSchema"),
             skipped,
             phases: Vec::new(),
@@ -7129,9 +7221,6 @@ pub fn emit_overlay(
     emit_overlay_with_span_edits(ws, cache, reinferred, &[])
 }
 
-/// Build an overlay against a staged cache. The caller may publish the returned
-/// cache only after the overlay bytes have been durably written; a write failure
-/// therefore cannot strand compiler metadata ahead of the running program.
 pub fn emit_overlay_staged(
     ws: &Workspace,
     cache: &SkullEmitCache,
@@ -7158,6 +7247,7 @@ pub fn emit_overlay_with_span_edits(
     reinferred: &[(ModuleId, BodyOwner)],
     edits: &[crate::instance_graph::SpanEdit],
 ) -> Result<MirEmit, CompilerError> {
+    cache.concrete.detach_plan_store();
     let t0 = Instant::now();
     // `cg` is cached (interface-derived, identical on body edits) -- no rebuild.
     let t_cg = t0.elapsed();
@@ -7226,7 +7316,7 @@ pub fn emit_overlay_with_span_edits(
                 .dynamic_entries_match(ws, &cache.scx, &next_code_artifact, &statics)
                 .map_err(|error| CompilerError::new_no_location(error.to_string()))?;
             if unchanged {
-                old.clone()
+                (**old).clone()
             } else {
                 full_schema_collection = true;
                 skull_mir::state_schema::StateSchema::collect(
@@ -7267,8 +7357,8 @@ pub fn emit_overlay_with_span_edits(
             "Rock StateSchema changed; safe restart is required".to_string(),
         ));
     }
-    cache.code_artifact = next_code_artifact;
-    cache.state_schema = Some(next_state_schema);
+    cache.code_artifact = std::sync::Arc::new(next_code_artifact);
+    cache.state_schema = Some(std::sync::Arc::new(next_state_schema));
     // A comptime input read by a GLOBAL initializer can go stale with no
     // reinferred body at all (bone hashes only source text). Route a stale
     // const through the same changed-consts machinery -- its ginit re-lowers

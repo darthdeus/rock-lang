@@ -26,6 +26,19 @@ pub struct LintPassCensus {
     pub render_ns: u128,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct LintRouteTiming {
+    pub local_lint_derivation_ns: u128,
+    pub global_lint_dependency_ns: u128,
+    pub global_lint_derivation_ns: u128,
+    pub suppression_filtering_ns: u128,
+    pub suppression_filter_calls: usize,
+    pub report_prepare_ns: u128,
+    pub summary_sort_ns: u128,
+    pub render_ns: u128,
+    pub finding_aggregation_ns: u128,
+}
+
 static CENSUS_ENABLED: OnceLock<bool> = OnceLock::new();
 static CENSUS: OnceLock<Mutex<LintPassCensus>> = OnceLock::new();
 
@@ -263,6 +276,16 @@ pub fn run_build_lints_cached(
     scope: Scope,
     change: &bone_lints::LintCacheUpdate,
 ) -> Vec<CompilerError> {
+    run_build_lints_cached_inner(cache, ws, sources, root, scope, change, None)
+}
+
+pub(crate) fn rollback_build_lints_cached(
+    cache: &mut bone_lints::IncrementalLintCache,
+    ws: &Workspace,
+    sources: &SourceFiles,
+    root: &Path,
+    scope: Scope,
+) -> Result<(), String> {
     let texts = source_texts(sources);
     let warm = warm_module_ids(ws, &texts);
     let is_bin = scope == Scope::WholeProject && rock_host::stick::StickConfig::is_bin_at(root);
@@ -272,14 +295,74 @@ pub fn run_build_lints_cached(
         .filter(|(file, _)| owned.contains(*file))
         .map(|(&file, text)| (file, text.as_str()))
         .collect();
-    let (found, stats) = cache.update(
+    let stats = cache.rollback_body_transaction(
         ws,
         &warm,
         is_bin,
         &owned_sources,
         &bone_lints::LintOptions::default(),
-        change,
-    );
+    )?;
+    record_lint_cache_stats(stats);
+    Ok(())
+}
+
+pub(crate) fn run_build_lints_cached_timed(
+    cache: &mut bone_lints::IncrementalLintCache,
+    ws: &Workspace,
+    sources: &SourceFiles,
+    root: &Path,
+    scope: Scope,
+    change: &bone_lints::LintCacheUpdate,
+    timing: &mut LintRouteTiming,
+) -> Vec<CompilerError> {
+    run_build_lints_cached_inner(cache, ws, sources, root, scope, change, Some(timing))
+}
+
+fn run_build_lints_cached_inner(
+    cache: &mut bone_lints::IncrementalLintCache,
+    ws: &Workspace,
+    sources: &SourceFiles,
+    root: &Path,
+    scope: Scope,
+    change: &bone_lints::LintCacheUpdate,
+    mut timing: Option<&mut LintRouteTiming>,
+) -> Vec<CompilerError> {
+    let texts = source_texts(sources);
+    let warm = warm_module_ids(ws, &texts);
+    let is_bin = scope == Scope::WholeProject && rock_host::stick::StickConfig::is_bin_at(root);
+    let owned = owned_files(&texts, root);
+    let owned_sources: FxHashMap<Ustr, &str> = texts
+        .iter()
+        .filter(|(file, _)| owned.contains(*file))
+        .map(|(&file, text)| (file, text.as_str()))
+        .collect();
+    let timed = timing.is_some();
+    let (found, stats) = if timed {
+        cache.update_timed(
+            ws,
+            &warm,
+            is_bin,
+            &owned_sources,
+            &bone_lints::LintOptions::default(),
+            change,
+        )
+    } else {
+        cache.update(
+            ws,
+            &warm,
+            is_bin,
+            &owned_sources,
+            &bone_lints::LintOptions::default(),
+            change,
+        )
+    };
+    if let Some(timing) = timing.as_deref_mut() {
+        timing.local_lint_derivation_ns += stats.local_lint_derivation_ns;
+        timing.global_lint_dependency_ns += stats.global_lint_dependency_ns;
+        timing.global_lint_derivation_ns += stats.global_lint_derivation_ns;
+        timing.suppression_filtering_ns += stats.suppression_filtering_ns;
+        timing.suppression_filter_calls += stats.suppression_filter_calls;
+    }
     if census_enabled() && stats.full_rebuilds > 0 {
         let (ignored, census) = bone_lints::lint_workspace_with_census(
             ws,
@@ -296,7 +379,7 @@ pub fn run_build_lints_cached(
         record_lint_census(census);
     }
     record_lint_cache_stats(stats);
-    report(found, sources, root, policy())
+    report_timed(found, sources, root, policy(), timing)
 }
 
 /// Split findings by severity, emit the soft tiers per `mode`, and hand back the
@@ -309,6 +392,16 @@ fn report(
     sources: &SourceFiles,
     root: &Path,
     mode: LintReport,
+) -> Vec<CompilerError> {
+    report_timed(found, sources, root, mode, None)
+}
+
+fn report_timed(
+    found: Vec<bone_lints::Finding>,
+    sources: &SourceFiles,
+    root: &Path,
+    mode: LintReport,
+    mut timing: Option<&mut LintRouteTiming>,
 ) -> Vec<CompilerError> {
     if found.is_empty() {
         record_report_census(0, 0, 0);
@@ -339,6 +432,12 @@ fn report(
         }
     }
     record_report_census(report_prepare_ns, summary_sort_ns, render_ns);
+    if let Some(timing) = timing.as_deref_mut() {
+        timing.report_prepare_ns += report_prepare_ns;
+        timing.summary_sort_ns += summary_sort_ns;
+        timing.render_ns += render_ns;
+        timing.finding_aggregation_ns += report_started.elapsed().as_nanos();
+    }
     errors.into_iter().map(|f| f.error).collect()
 }
 

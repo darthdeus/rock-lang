@@ -3681,8 +3681,43 @@ mod force_full_tests {
 
 #[cfg(test)]
 mod skull_stone_lint_snapshot_tests {
-    use super::super::{SkullReload, SkullStone};
+    use super::super::{SkullReload, SkullRouteProfile, SkullStone};
     use std::time::Instant;
+
+    fn print_route_profile(label: &str, profile: &SkullRouteProfile) {
+        eprintln!(
+            "{label}: total={:.3} project_call={:.3} route_call={:.3} snapshot={:.3} live_update={:.3} live_unaccounted={:.3} route_unaccounted={:.3} source_feed={:.3} session={:.3} diagnostics={:.3} lint={:.3} local_lint={:.3} global_lint={:.3} global_findings={:.3} suppression={:.3} suppression_calls={} report_prepare={:.3} summary_sort={:.3} render={:.3} finding={:.3} shape={:.3} checkpoint={:.3} transactions={} commit={:.3} affected={:.3} emit={:.3} write={:.3} rollback={:.3} unaccounted={:.3}",
+            profile.total_ns as f64 / 1_000_000.0,
+            profile.live_project_call_ns as f64 / 1_000_000.0,
+            profile.route_emit_call_ns as f64 / 1_000_000.0,
+            profile.session_snapshot_ns as f64 / 1_000_000.0,
+            profile.live_update_ns as f64 / 1_000_000.0,
+            profile.live_project_unaccounted_ns as f64 / 1_000_000.0,
+            profile.route_unaccounted_ns as f64 / 1_000_000.0,
+            profile.source_lookup_feed_ns as f64 / 1_000_000.0,
+            profile.session_update_ns as f64 / 1_000_000.0,
+            profile.diagnostics_ns as f64 / 1_000_000.0,
+            profile.lint_total_ns as f64 / 1_000_000.0,
+            profile.local_lint_derivation_ns as f64 / 1_000_000.0,
+            profile.global_lint_dependency_ns as f64 / 1_000_000.0,
+            profile.global_lint_derivation_ns as f64 / 1_000_000.0,
+            profile.suppression_filtering_ns as f64 / 1_000_000.0,
+            profile.suppression_filter_calls,
+            profile.report_prepare_ns as f64 / 1_000_000.0,
+            profile.summary_sort_ns as f64 / 1_000_000.0,
+            profile.render_ns as f64 / 1_000_000.0,
+            profile.finding_aggregation_ns as f64 / 1_000_000.0,
+            profile.publication_shape_checks_ns as f64 / 1_000_000.0,
+            profile.transaction_checkpoint_ns as f64 / 1_000_000.0,
+            profile.body_transactions_started,
+            profile.transaction_commit_ns as f64 / 1_000_000.0,
+            profile.affected_chunk_selection_ns as f64 / 1_000_000.0,
+            profile.emit_overlay_ns as f64 / 1_000_000.0,
+            profile.atomic_output_write_ns as f64 / 1_000_000.0,
+            profile.rollback_ns as f64 / 1_000_000.0,
+            profile.unaccounted_ns as f64 / 1_000_000.0,
+        );
+    }
 
     #[test]
     fn skull_stone_body_edit_uses_one_lint_transaction_snapshot() {
@@ -3714,6 +3749,11 @@ mod skull_stone_lint_snapshot_tests {
         );
         assert!(census.cache_snapshots.cached_entries > 0);
         assert!(census.cache_snapshots.cached_findings > 0);
+        assert_eq!(
+            census.cache_snapshots.clone_ns, 0,
+            "body publication must checkpoint the lint cache without cloning it: {:?}",
+            census.cache_snapshots
+        );
         eprintln!(
             "skull-stone one-edit: elapsed_ms={elapsed_ms:.3} snapshots={} entries={} findings={} clone_ms={:.3}",
             census.cache_snapshots.snapshots,
@@ -3887,6 +3927,9 @@ mod skull_stone_lint_snapshot_tests {
             census.cache_snapshots.cached_findings as f64 / census.cache_snapshots.snapshots as f64,
             census.cache_snapshots.clone_ns as f64 / 1_000_000.0,
         );
+        if let Some(profile) = stone.take_last_route_profile() {
+            print_route_profile("skull-stone profile", &profile);
+        }
     }
 
     #[test]
@@ -3936,6 +3979,82 @@ mod skull_stone_lint_snapshot_tests {
             census.cache_snapshots.cached_findings as f64 / census.cache_snapshots.snapshots as f64,
             census.cache_snapshots.clone_ns as f64 / 1_000_000.0,
         );
+        if let Some(profile) = stone.take_last_route_profile() {
+            print_route_profile("skull-stone MAG profile", &profile);
+        }
+    }
+
+    #[test]
+    fn skull_stone_apply_edit_profile_covers_the_real_route() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().to_str().unwrap().to_string();
+        let main = dir.path().join("main.lua");
+        let incremental = dir.path().join("incremental.lua");
+        let source = dir.path().join("main.rock");
+        let v1 = "fn helper() -> int { 3 }\nfn main() { let unused = helper() }\n";
+        let v2 = "fn helper() -> int { 5 }\nfn main() { let unused = helper() }\n";
+        std::fs::write(&source, v1).expect("source");
+        let mut stone = SkullStone::init(&root, &main, &incremental).expect("init");
+        stone.enable_route_profile();
+
+        let reload = stone
+            .apply_edit(&source, v2, &main, &incremental)
+            .expect("body edit");
+        assert!(matches!(reload, SkullReload::Incremental { .. }), "reload: {reload:?}");
+        let profile = stone.take_last_route_profile().expect("route profile");
+        assert!(profile.session_snapshot_ns > 0);
+        assert!(profile.source_lookup_feed_ns > 0);
+        assert!(profile.session_update_ns > 0);
+        assert!(profile.diagnostics_ns > 0);
+        assert!(profile.local_lint_derivation_ns > 0);
+        assert!(profile.global_lint_dependency_ns > 0);
+        assert!(profile.suppression_filtering_ns > 0);
+        assert!(profile.suppression_filter_calls > 0);
+        assert!(profile.report_prepare_ns > 0);
+        assert!(profile.render_ns > 0);
+        assert!(profile.finding_aggregation_ns > 0);
+        assert!(profile.affected_chunk_selection_ns > 0);
+        assert!(profile.emit_overlay_ns > 0);
+        assert!(profile.publication_shape_checks_ns > 0);
+        assert!(profile.transaction_checkpoint_ns > 0);
+        assert_eq!(profile.body_transactions_started, 1);
+        assert!(profile.transaction_commit_ns > 0);
+        assert!(profile.atomic_output_write_ns > 0);
+        assert!(profile.total_ns > 0);
+        assert!(profile.unaccounted_ns < profile.total_ns);
+    }
+
+    #[test]
+    fn failed_body_publication_rolls_back_cache_before_the_next_edit() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().to_str().unwrap().to_string();
+        let main = dir.path().join("main.lua");
+        let incremental = dir.path().join("incremental.lua");
+        let source = dir.path().join("main.rock");
+        let v1 = "fn helper() -> int { 3 }\nfn other() -> int { 10 }\nfn main() { helper() }\n";
+        let v2 = "fn helper() -> int { 5 }\nfn other() -> int { 10 }\nfn main() { helper() }\n";
+        let v3 = "fn helper() -> int { 3 }\nfn other() -> int { 11 }\nfn main() { helper() }\n";
+        std::fs::write(&source, v1).expect("source");
+        let mut stone = SkullStone::init(&root, &main, &incremental).expect("init");
+        if incremental.is_file() {
+            std::fs::remove_file(&incremental).expect("initial overlay");
+        }
+        std::fs::create_dir(&incremental).expect("blocked overlay");
+
+        assert!(
+            stone.apply_edit(&source, v2, &main, &incremental).is_err(),
+            "a body publication to a directory must fail"
+        );
+        assert_eq!(stone.source_text(&source).as_deref(), Some(v1));
+
+        std::fs::remove_dir(&incremental).expect("unblock overlay");
+        let reload = stone
+            .apply_edit(&source, v3, &main, &incremental)
+            .expect("next body edit");
+        assert!(matches!(reload, SkullReload::Incremental { .. }), "reload: {reload:?}");
+        let route_overlay = std::fs::read_to_string(&incremental).expect("overlay");
+        let direct = direct_overlay(&root, "main.rock", v3);
+        assert_eq!(route_overlay, direct, "rollback must retain the last-good cache");
     }
 }
 

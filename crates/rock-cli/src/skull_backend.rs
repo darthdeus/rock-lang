@@ -2878,6 +2878,107 @@ pub enum SkullReload {
     NoChange,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SkullRouteProfile {
+    pub session_snapshot_ns: u128,
+    pub source_lookup_feed_ns: u128,
+    pub session_update_ns: u128,
+    pub diagnostics_ns: u128,
+    pub lint_total_ns: u128,
+    pub local_lint_derivation_ns: u128,
+    pub global_lint_dependency_ns: u128,
+    pub global_lint_derivation_ns: u128,
+    pub suppression_filtering_ns: u128,
+    pub suppression_filter_calls: usize,
+    pub report_prepare_ns: u128,
+    pub summary_sort_ns: u128,
+    pub render_ns: u128,
+    pub finding_aggregation_ns: u128,
+    pub publication_shape_checks_ns: u128,
+    pub transaction_checkpoint_ns: u128,
+    pub body_transactions_started: usize,
+    pub transaction_commit_ns: u128,
+    pub affected_chunk_selection_ns: u128,
+    pub emit_overlay_ns: u128,
+    pub atomic_output_write_ns: u128,
+    pub rollback_ns: u128,
+    pub live_update_ns: u128,
+    pub live_project_call_ns: u128,
+    pub route_emit_call_ns: u128,
+    pub live_project_unaccounted_ns: u128,
+    pub route_unaccounted_ns: u128,
+    pub total_ns: u128,
+    pub unaccounted_ns: u128,
+}
+
+impl SkullRouteProfile {
+    fn from_live(timing: crate::live_project::LiveRouteTiming) -> Self {
+        Self {
+            session_snapshot_ns: timing.session_snapshot_ns,
+            source_lookup_feed_ns: timing.source_lookup_feed_ns,
+            session_update_ns: timing.session_update_ns,
+            diagnostics_ns: timing.diagnostics_ns,
+            lint_total_ns: timing.lint_total_ns,
+            local_lint_derivation_ns: timing.local_lint_derivation_ns,
+            global_lint_dependency_ns: timing.global_lint_dependency_ns,
+            global_lint_derivation_ns: timing.global_lint_derivation_ns,
+            suppression_filtering_ns: timing.suppression_filtering_ns,
+            suppression_filter_calls: timing.suppression_filter_calls,
+            report_prepare_ns: timing.report_prepare_ns,
+            summary_sort_ns: timing.summary_sort_ns,
+            render_ns: timing.render_ns,
+            finding_aggregation_ns: timing.finding_aggregation_ns,
+            rollback_ns: timing.rollback_ns,
+            live_update_ns: timing.live_update_ns,
+            ..Self::default()
+        }
+    }
+
+    fn finish(&mut self, total_ns: u128) {
+        self.total_ns = total_ns;
+        self.live_project_unaccounted_ns = self
+            .live_project_call_ns
+            .saturating_sub(self.session_snapshot_ns + self.live_update_ns);
+        self.route_unaccounted_ns = self
+            .route_emit_call_ns
+            .saturating_sub(
+                self.publication_shape_checks_ns
+                    + self.transaction_checkpoint_ns
+                    + self.transaction_commit_ns
+                    + self.emit_overlay_ns
+                    + self.atomic_output_write_ns,
+            );
+        let accounted = self.live_project_call_ns + self.route_emit_call_ns + self.rollback_ns;
+        self.unaccounted_ns = total_ns.saturating_sub(accounted);
+    }
+
+    fn add_live(&mut self, timing: crate::live_project::LiveRouteTiming) {
+        self.session_snapshot_ns += timing.session_snapshot_ns;
+        self.source_lookup_feed_ns += timing.source_lookup_feed_ns;
+        self.session_update_ns += timing.session_update_ns;
+        self.diagnostics_ns += timing.diagnostics_ns;
+        self.lint_total_ns += timing.lint_total_ns;
+        self.local_lint_derivation_ns += timing.local_lint_derivation_ns;
+        self.global_lint_dependency_ns += timing.global_lint_dependency_ns;
+        self.global_lint_derivation_ns += timing.global_lint_derivation_ns;
+        self.suppression_filtering_ns += timing.suppression_filtering_ns;
+        self.suppression_filter_calls += timing.suppression_filter_calls;
+        self.report_prepare_ns += timing.report_prepare_ns;
+        self.summary_sort_ns += timing.summary_sort_ns;
+        self.render_ns += timing.render_ns;
+        self.finding_aggregation_ns += timing.finding_aggregation_ns;
+        self.rollback_ns += timing.rollback_ns;
+        self.live_update_ns += timing.live_update_ns;
+    }
+}
+
+fn emit_phase_ns(phases: &[(&'static str, Duration)], label: &str) -> u128 {
+    phases
+        .iter()
+        .find(|(name, _)| *name == label)
+        .map_or(0, |(_, duration)| duration.as_nanos())
+}
+
 /// Persistent stone-skull compile state: a warm bone `Session` + skull emit cache
 /// driving the two-file split (`docs/skull-incremental-emit-split.md`). A body
 /// edit re-cooks just the edited file and writes a small `incremental.lua` the
@@ -2893,6 +2994,8 @@ pub struct SkullStone {
     /// `SkullReload::ShapeChanged` (restart request) instead of writing
     /// (docs/hot-reload-schema-drift-plan.md).
     shape_hashes: skull::ShapeHashes,
+    route_profile_enabled: bool,
+    last_route_profile: Option<SkullRouteProfile>,
 }
 
 impl SkullStone {
@@ -2938,7 +3041,37 @@ impl SkullStone {
         write_full_main(&preamble, &lua, main_path, incremental_path)?;
         let shape_hashes = skull::type_shape_hashes(project.workspace())
             .map_err(|e| anyhow::anyhow!(e.message))?;
-        Ok(SkullStone { project, cache, preamble, renderer_target, shape_hashes })
+        Ok(SkullStone {
+            project,
+            cache,
+            preamble,
+            renderer_target,
+            shape_hashes,
+            route_profile_enabled: std::env::var_os("ROCK_SKULL_ROUTE_PROFILE").is_some(),
+            last_route_profile: None,
+        })
+    }
+
+    pub fn enable_route_profile(&mut self) {
+        self.route_profile_enabled = true;
+        self.project.enable_route_profile();
+    }
+
+    pub fn take_last_route_profile(&mut self) -> Option<SkullRouteProfile> {
+        self.last_route_profile.take()
+    }
+
+    fn finish_route_profile(
+        &mut self,
+        started: Option<Instant>,
+        mut profile: SkullRouteProfile,
+    ) {
+        if let Some(started) = started {
+            profile.finish(started.elapsed().as_nanos());
+            self.last_route_profile = Some(profile);
+        } else {
+            self.last_route_profile = None;
+        }
     }
 
     /// On a watch event: refresh the cached sources (re-read only `changed` off
@@ -2949,13 +3082,59 @@ impl SkullStone {
     /// overlay. `changed` is the watcher's changed-path set; pass empty to force a
     /// full re-discover.
     pub fn recompile(&mut self, changed: &[std::path::PathBuf], main_path: &std::path::Path, incremental_path: &std::path::Path) -> Result<SkullReload> {
-        let (update, snapshot) = self.project.recompile_for_publication(changed)?;
-        match self.route_and_emit(update, main_path, incremental_path) {
-            Ok(reload) => Ok(reload),
+        let started = self.route_profile_enabled.then(Instant::now);
+        self.last_route_profile = None;
+        let project_started = self.route_profile_enabled.then(Instant::now);
+        let publication = self.project.recompile_for_publication(changed);
+        let project_call_ns = project_started.map_or(0, |started| started.elapsed().as_nanos());
+        let (update, snapshot) = match publication {
+            Ok(value) => value,
             Err(error) => {
-                if let Err(restore) = self.project.restore(snapshot) {
+                let mut profile = SkullRouteProfile::from_live(self.project.take_route_timing());
+                profile.live_project_call_ns = project_call_ns;
+                self.finish_route_profile(started, profile);
+                return Err(error);
+            }
+        };
+        let mut profile = SkullRouteProfile::from_live(self.project.take_route_timing());
+        profile.live_project_call_ns = project_call_ns;
+        let route_started = self.route_profile_enabled.then(Instant::now);
+        let result = self.route_and_emit(
+            update,
+            main_path,
+            incremental_path,
+            self.route_profile_enabled.then_some(&mut profile),
+        );
+        if let Some(started) = route_started {
+            profile.route_emit_call_ns += started.elapsed().as_nanos();
+        }
+        match result {
+            Ok(reload) => {
+                self.project.commit_body_transaction();
+                self.finish_route_profile(started, profile);
+                Ok(reload)
+            }
+            Err(error) => {
+                let rollback_started = self.route_profile_enabled.then(Instant::now);
+                let restored = self.project.restore(snapshot);
+                let cache_restored = if restored.is_ok() {
+                    self.cache.rollback_body_edit(self.project.workspace())
+                } else {
+                    Ok(())
+                };
+                profile.add_live(self.project.take_route_timing());
+                if let Some(started) = rollback_started {
+                    profile.rollback_ns += started.elapsed().as_nanos();
+                }
+                self.finish_route_profile(started, profile);
+                if let Err(restore) = restored {
                     return Err(anyhow::anyhow!(
                         "skull publication rollback failed after disk edit: {restore}; original error: {error}"
+                    ));
+                }
+                if let Err(restore) = cache_restored {
+                    return Err(anyhow::anyhow!(
+                        "skull cache rollback failed after disk edit: {restore}; original error: {error}"
                     ));
                 }
                 Err(error)
@@ -2970,13 +3149,59 @@ impl SkullStone {
     /// a path the build didn't discover -- an edit to an unknown file would
     /// otherwise silently do nothing.
     pub fn apply_edit(&mut self, path: &std::path::Path, new_text: &str, main_path: &std::path::Path, incremental_path: &std::path::Path) -> Result<SkullReload> {
-        let (update, snapshot) = self.project.apply_edit_for_publication(path, new_text)?;
-        match self.route_and_emit(update, main_path, incremental_path) {
-            Ok(reload) => Ok(reload),
+        let started = self.route_profile_enabled.then(Instant::now);
+        self.last_route_profile = None;
+        let project_started = self.route_profile_enabled.then(Instant::now);
+        let publication = self.project.apply_edit_for_publication(path, new_text);
+        let project_call_ns = project_started.map_or(0, |started| started.elapsed().as_nanos());
+        let (update, snapshot) = match publication {
+            Ok(value) => value,
             Err(error) => {
-                if let Err(restore) = self.project.restore(snapshot) {
+                let mut profile = SkullRouteProfile::from_live(self.project.take_route_timing());
+                profile.live_project_call_ns = project_call_ns;
+                self.finish_route_profile(started, profile);
+                return Err(error);
+            }
+        };
+        let mut profile = SkullRouteProfile::from_live(self.project.take_route_timing());
+        profile.live_project_call_ns = project_call_ns;
+        let route_started = self.route_profile_enabled.then(Instant::now);
+        let result = self.route_and_emit(
+            update,
+            main_path,
+            incremental_path,
+            self.route_profile_enabled.then_some(&mut profile),
+        );
+        if let Some(started) = route_started {
+            profile.route_emit_call_ns += started.elapsed().as_nanos();
+        }
+        match result {
+            Ok(reload) => {
+                self.project.commit_body_transaction();
+                self.finish_route_profile(started, profile);
+                Ok(reload)
+            },
+            Err(error) => {
+                let rollback_started = self.route_profile_enabled.then(Instant::now);
+                let restored = self.project.restore(snapshot);
+                let cache_restored = if restored.is_ok() {
+                    self.cache.rollback_body_edit(self.project.workspace())
+                } else {
+                    Ok(())
+                };
+                profile.add_live(self.project.take_route_timing());
+                if let Some(started) = rollback_started {
+                    profile.rollback_ns += started.elapsed().as_nanos();
+                }
+                self.finish_route_profile(started, profile);
+                if let Err(restore) = restored {
                     return Err(anyhow::anyhow!(
                         "skull publication rollback failed after in-memory edit: {restore}; original error: {error}"
+                    ));
+                }
+                if let Err(restore) = cache_restored {
+                    return Err(anyhow::anyhow!(
+                        "skull cache rollback failed after in-memory edit: {restore}; original error: {error}"
                     ));
                 }
                 Err(error)
@@ -3009,7 +3234,13 @@ impl SkullStone {
     /// overlay. Shared by the disk-driven watcher path ([`SkullStone::recompile`])
     /// and the in-memory sim reload injection ([`SkullStone::apply_edit`]).
     /// `t_cook` is the caller's front-end timer (includes its feed construction).
-    fn route_and_emit(&mut self, update: crate::live_project::LiveUpdate, main_path: &std::path::Path, incremental_path: &std::path::Path) -> Result<SkullReload> {
+    fn route_and_emit(
+        &mut self,
+        update: crate::live_project::LiveUpdate,
+        main_path: &std::path::Path,
+        incremental_path: &std::path::Path,
+        mut profile: Option<&mut SkullRouteProfile>,
+    ) -> Result<SkullReload> {
         use std::path::PathBuf;
         let (full, reinferred, span_edits, cook_ms) = match update {
             crate::live_project::LiveUpdate::NoChange => return Ok(SkullReload::NoChange),
@@ -3022,6 +3253,7 @@ impl SkullStone {
         };
 
         let t_emit = Instant::now();
+        let shape_started = profile.is_some().then(Instant::now);
         let old_shader_contracts = self.cache.shader_registration_contracts();
         let shader_keys_changed = if full {
             self.cache
@@ -3036,6 +3268,9 @@ impl SkullStone {
                 .map_err(|e| anyhow::anyhow!("{}", render_project_err(self.project.sources(), &e)))?
         };
         if shader_keys_changed {
+            if let (Some(started), Some(profile)) = (shape_started, profile.as_deref_mut()) {
+                profile.publication_shape_checks_ns += started.elapsed().as_nanos();
+            }
             return Ok(SkullReload::FullRequired {
                 reasons: vec!["shader registration key set changed".to_string()],
             });
@@ -3101,17 +3336,36 @@ impl SkullStone {
             let write_ms = t_write.elapsed().as_secs_f64() * 1000.0;
             Ok(SkullReload::Full { bytes, cook_ms, emit_ms, write_ms })
         } else {
-            let (overlay, staged_cache) = {
+            if let (Some(started), Some(profile)) = (shape_started, profile.as_deref_mut()) {
+                profile.publication_shape_checks_ns += started.elapsed().as_nanos();
+            }
+            let checkpoint_started = profile.is_some().then(Instant::now);
+            self.cache
+                .begin_body_edit_transaction(&reinferred, &span_edits);
+            if let Some(profile) = profile.as_deref_mut() {
+                profile.body_transactions_started += 1;
+            }
+            if let (Some(started), Some(profile)) = (checkpoint_started, profile.as_deref_mut()) {
+                profile.transaction_checkpoint_ns += started.elapsed().as_nanos();
+            }
+            let emit_started = profile.is_some().then(Instant::now);
+            let overlay = {
                 let ws = self.project.workspace();
-                skull::mir_emit::emit_overlay_with_span_edits_staged(
+                skull::mir_emit::emit_overlay_with_span_edits(
                     ws,
-                    &self.cache,
+                    &mut self.cache,
                     &reinferred,
                     &span_edits,
                 )
                     .map_err(|e| anyhow::anyhow!("{}", render_project_err(self.project.sources(), &e)))?
             };
-            if old_shader_contracts != staged_cache.shader_registration_contracts() {
+            if let (Some(started), Some(profile)) = (emit_started, profile.as_deref_mut()) {
+                profile.emit_overlay_ns += started.elapsed().as_nanos();
+                profile.affected_chunk_selection_ns +=
+                    emit_phase_ns(&overlay.phases, "  affected selection");
+            }
+            if old_shader_contracts != self.cache.shader_registration_contracts() {
+                self.cache.commit_body_edit_transaction();
                 return Ok(SkullReload::FullRequired {
                     reasons: vec!["shader registration ABI changed".to_string()],
                 });
@@ -3120,7 +3374,14 @@ impl SkullStone {
             let emit_ms = t_emit.elapsed().as_secs_f64() * 1000.0;
             let t_write = Instant::now();
             rock_host::project::write_atomic(incremental_path, &overlay.lua)?;
-            self.cache = staged_cache;
+            if let Some(profile) = profile.as_deref_mut() {
+                profile.atomic_output_write_ns += t_write.elapsed().as_nanos();
+            }
+            let commit_started = profile.is_some().then(Instant::now);
+            self.cache.commit_body_edit_transaction();
+            if let (Some(started), Some(profile)) = (commit_started, profile.as_deref_mut()) {
+                profile.transaction_commit_ns += started.elapsed().as_nanos();
+            }
             let write_ms = t_write.elapsed().as_secs_f64() * 1000.0;
             Ok(SkullReload::Incremental { bytes, reinferred: reinferred.len(), cook_ms, emit_ms, write_ms })
         }
