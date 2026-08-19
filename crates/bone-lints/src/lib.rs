@@ -155,7 +155,7 @@ pub const OPT_IN_LINTS: &[&str] = &[
 ///
 /// This gates COMPUTATION, not just output: a silenced lint's analysis never
 /// runs, so an opt-in lint costs a build nothing.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LintOptions {
     only: Option<Vec<String>>,
     only_types: Option<FxHashSet<Ustr>>,
@@ -283,6 +283,537 @@ impl LintCensus {
             dst.findings_suppressed += src.findings_suppressed;
             dst.elapsed_ns += src.elapsed_ns;
         }
+    }
+}
+
+/// The coordinate delta produced by the same body edit that updates semantic
+/// spans. A cache never guesses from the new text: it consumes this metadata.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TextEditDelta {
+    pub file: Ustr,
+    pub at: usize,
+    pub byte_delta: isize,
+    pub line_delta: isize,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LintCacheUpdate {
+    pub full: bool,
+    pub changed_files: FxHashSet<Ustr>,
+    pub reinferred: Vec<(ModuleId, BodyOwner)>,
+    pub edits: Vec<TextEditDelta>,
+}
+
+impl LintCacheUpdate {
+    pub fn body_only(
+        changed_files: impl IntoIterator<Item = Ustr>,
+        reinferred: impl IntoIterator<Item = (ModuleId, BodyOwner)>,
+        edits: impl IntoIterator<Item = TextEditDelta>,
+    ) -> Self {
+        Self {
+            changed_files: changed_files.into_iter().collect(),
+            reinferred: reinferred.into_iter().collect(),
+            edits: edits.into_iter().collect(),
+            ..Default::default()
+        }
+    }
+
+    pub fn full() -> Self {
+        Self { full: true, ..Default::default() }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LintCacheStats {
+    pub full_rebuilds: usize,
+    pub body_updates: usize,
+    pub flat_body_requests: usize,
+    pub inference_body_requests: usize,
+    pub flat_bodies_reused: usize,
+    pub inference_bodies_reused: usize,
+    pub flat_findings_derived: usize,
+    pub inference_findings_derived: usize,
+    pub flat_findings_reused: usize,
+    pub inference_findings_reused: usize,
+    pub span_shifts: usize,
+    pub suppression_invalidations: usize,
+    pub global_passes: usize,
+    pub global_findings_derived: usize,
+}
+
+impl LintCacheStats {
+    pub fn merge(&mut self, other: &Self) {
+        self.full_rebuilds += other.full_rebuilds;
+        self.body_updates += other.body_updates;
+        self.flat_body_requests += other.flat_body_requests;
+        self.inference_body_requests += other.inference_body_requests;
+        self.flat_bodies_reused += other.flat_bodies_reused;
+        self.inference_bodies_reused += other.inference_bodies_reused;
+        self.flat_findings_derived += other.flat_findings_derived;
+        self.inference_findings_derived += other.inference_findings_derived;
+        self.flat_findings_reused += other.flat_findings_reused;
+        self.inference_findings_reused += other.inference_findings_reused;
+        self.span_shifts += other.span_shifts;
+        self.suppression_invalidations += other.suppression_invalidations;
+        self.global_passes += other.global_passes;
+        self.global_findings_derived += other.global_findings_derived;
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct CachedFileFindings {
+    flat: FxHashMap<BodyOwner, Vec<Finding>>,
+    inference: FxHashMap<BodyOwner, Vec<Finding>>,
+    other: Vec<Finding>,
+    suppression_fingerprint: u64,
+}
+
+/// The single reusable incremental lint derivation cache. It owns the local
+/// body entries and the last workspace-global result; reporting policy stays in
+/// the CLI/LSP adapters.
+#[derive(Clone, Debug, Default)]
+pub struct IncrementalLintCache {
+    initialized: bool,
+    is_bin: bool,
+    warm: FxHashSet<ModuleId>,
+    workspace_files: FxHashSet<Ustr>,
+    report_files: FxHashSet<Ustr>,
+    selection: Option<LintOptions>,
+    files: FxHashMap<Ustr, CachedFileFindings>,
+    global: FxHashMap<Ustr, Vec<Finding>>,
+    last_by_file: FxHashMap<Ustr, Vec<Finding>>,
+}
+
+impl IncrementalLintCache {
+    pub fn is_initialized(&self) -> bool {
+        self.initialized
+    }
+
+    pub fn clear(&mut self) {
+        *self = Self::default();
+    }
+
+    pub fn invalidate_file(&mut self, file: Ustr) {
+        self.files.remove(&file);
+        self.global.remove(&file);
+        self.last_by_file.remove(&file);
+    }
+
+    pub fn findings_for_file(&self, file: Ustr) -> Vec<Finding> {
+        self.last_by_file.get(&file).cloned().unwrap_or_default()
+    }
+
+    pub fn update(
+        &mut self,
+        ws: &Workspace,
+        warm: &FxHashSet<ModuleId>,
+        is_bin: bool,
+        sources: &FxHashMap<Ustr, &str>,
+        sel: &LintOptions,
+        change: &LintCacheUpdate,
+    ) -> (Vec<Finding>, LintCacheStats) {
+        let mut stats = LintCacheStats::default();
+        let workspace_files: FxHashSet<Ustr> = ws
+            .modules
+            .iter()
+            .filter(|m| m.id != ModuleId::builtin())
+            .map(|m| m.file)
+            .collect();
+        let report_files: FxHashSet<Ustr> = sources.keys().copied().collect();
+        let metadata_changed = self.initialized
+            && (self.is_bin != is_bin
+                || self.warm != *warm
+                || self.workspace_files != workspace_files
+                || self.report_files != report_files
+                || self.selection.as_ref() != Some(sel));
+        let body_cacheable = *sel == LintOptions::default();
+        if !self.initialized || change.full || metadata_changed || !body_cacheable {
+            let findings = self.rebuild(
+                ws,
+                warm,
+                is_bin,
+                sources,
+                sel,
+                workspace_files,
+                report_files,
+                &mut stats,
+            );
+            return (findings, stats);
+        }
+
+        let suppression_changed = change.changed_files.iter().any(|file| {
+            let Some(source) = sources.get(file) else { return false };
+            let old = self.files.get(file).map(|f| f.suppression_fingerprint);
+            old.is_some_and(|old| old != suppression_fingerprint(source))
+        });
+        if suppression_changed {
+            stats.suppression_invalidations = change
+                .changed_files
+                .iter()
+                .filter(|file| sources.contains_key(file))
+                .count();
+            let findings = self.rebuild(
+                ws,
+                warm,
+                is_bin,
+                sources,
+                sel,
+                workspace_files,
+                report_files,
+                &mut stats,
+            );
+            return (findings, stats);
+        }
+
+        if change.changed_files.is_empty()
+            && change.reinferred.is_empty()
+            && change.edits.is_empty()
+        {
+            let findings = self.rebuild_output(ws, warm, sources);
+            self.last_by_file = by_file_from_findings(&findings);
+            return (findings, stats);
+        }
+
+        stats.body_updates = 1;
+        self.warm = warm.clone();
+        let variants = enum_variant_names(ws, warm);
+        let mut flat_targets: FxHashSet<(ModuleId, BodyOwner)> = FxHashSet::default();
+        let mut inference_targets: FxHashSet<(ModuleId, BodyOwner)> =
+            change.reinferred.iter().copied().collect();
+        for file in &change.changed_files {
+            let Some(module) = ws.modules.iter().find(|m| m.file == *file) else { continue };
+            let owners: Vec<BodyOwner> = module.bodies.keys().copied().collect();
+            if !change.reinferred.iter().any(|(mid, _)| *mid == module.id) {
+                flat_targets.extend(owners.iter().copied().map(|owner| (module.id, owner)));
+                inference_targets.extend(owners.into_iter().map(|owner| (module.id, owner)));
+            }
+        }
+        flat_targets.extend(
+            change
+                .reinferred
+                .iter()
+                .copied()
+                .filter(|(mid, _)| change.changed_files.contains(&ws.module(*mid).file)),
+        );
+        let flat_target_owners = flat_targets.clone();
+        let inference_target_owners = inference_targets.clone();
+
+        let mut target_flat_by_file: FxHashSet<Ustr> = FxHashSet::default();
+        let mut target_inference_by_file: FxHashSet<Ustr> = FxHashSet::default();
+        for (mid, owner) in flat_targets {
+            let file = ws.module(mid).file;
+            if !self.report_files.contains(&file) {
+                continue;
+            }
+            target_flat_by_file.insert(file);
+            let cached = self.files.entry(file).or_default();
+            let source = sources.get(&file).copied().unwrap_or("");
+            let Some(body) = ws.module(mid).bodies.get(&owner) else { continue };
+            let raw = unused_vars_in_body(body, &variants)
+                .into_iter()
+                .map(|f| Finding::of(&f))
+                .chain(unused_pure_exprs_in_body(body).into_iter().map(|f| Finding::of(&f)))
+                .collect::<Vec<_>>();
+            stats.flat_body_requests += 1;
+            stats.flat_findings_derived += raw.len();
+            cached.flat.insert(owner, filter_suppressed_findings(raw, source));
+        }
+        for (mid, owner) in inference_targets {
+            let file = ws.module(mid).file;
+            if !self.report_files.contains(&file) {
+                continue;
+            }
+            target_inference_by_file.insert(file);
+            let cached = self.files.entry(file).or_default();
+            let source = sources.get(&file).copied().unwrap_or("");
+            let module = ws.module(mid);
+            let Some(body) = module.bodies.get(&owner) else { continue };
+            let inf = ws.inference(mid);
+            let bi = inf.and_then(|i| i.per_fn.get(&owner));
+            let raw = transmute_of_nullable_in_body(ws, bi, body)
+                .into_iter()
+                .map(|f| Finding::of(&f))
+                .chain(
+                    task_null_abandon_in_body(ws, bi, body)
+                        .into_iter()
+                        .map(|f| Finding::of(&f)),
+                )
+                .chain(
+                    row_escapes_in_body(ws, bi, body, tail_sink(module, &owner))
+                        .into_iter()
+                        .map(|f| Finding::of(&f)),
+                )
+                .collect::<Vec<_>>();
+            stats.inference_body_requests += 1;
+            stats.inference_findings_derived += raw.len();
+            cached.inference.insert(owner, filter_suppressed_findings(raw, source));
+        }
+
+        for module in user_modules(ws, warm) {
+            let Some(source) = sources.get(&module.file).copied() else { continue };
+            let cached = self.files.entry(module.file).or_default();
+            cached.suppression_fingerprint = suppression_fingerprint(source);
+            for owner in module.bodies.keys().copied() {
+                if !cached.flat.contains_key(&owner) {
+                    cached.flat.insert(owner, Vec::new());
+                }
+                if !cached.inference.contains_key(&owner) {
+                    cached.inference.insert(owner, Vec::new());
+                }
+            }
+            let flat_targeted = target_flat_by_file.contains(&module.file);
+            let inference_targeted = target_inference_by_file.contains(&module.file);
+            if flat_targeted {
+                stats.flat_bodies_reused += cached
+                    .flat
+                    .keys()
+                    .filter(|owner| !flat_target_owners.contains(&(module.id, **owner)))
+                    .count();
+                stats.flat_findings_reused += cached
+                    .flat
+                    .iter()
+                    .filter(|(owner, _)| !flat_target_owners.contains(&(module.id, **owner)))
+                    .map(|(_, findings)| findings.len())
+                    .sum::<usize>();
+            } else {
+                stats.flat_bodies_reused += cached.flat.len();
+                stats.flat_findings_reused += cached.flat.values().map(Vec::len).sum::<usize>();
+            }
+            if inference_targeted {
+                stats.inference_bodies_reused += cached
+                    .inference
+                    .keys()
+                    .filter(|owner| !inference_target_owners.contains(&(module.id, **owner)))
+                    .count();
+                stats.inference_findings_reused += cached
+                    .inference
+                    .iter()
+                    .filter(|(owner, _)| !inference_target_owners.contains(&(module.id, **owner)))
+                    .map(|(_, findings)| findings.len())
+                    .sum::<usize>();
+            } else {
+                stats.inference_bodies_reused += cached.inference.len();
+                stats.inference_findings_reused +=
+                    cached.inference.values().map(Vec::len).sum::<usize>();
+            }
+        }
+
+        for edit in &change.edits {
+            let Some(cached) = self.files.get_mut(&edit.file) else { continue };
+            for (owner, findings) in &mut cached.flat {
+                if !flat_target_owners.contains(&(
+                    ws.modules.iter().find(|m| m.file == edit.file).map_or(ModuleId::builtin(), |m| m.id),
+                    *owner,
+                )) {
+                    stats.span_shifts += shift_findings(findings, edit);
+                }
+            }
+            for (owner, findings) in &mut cached.inference {
+                if !inference_target_owners.contains(&(
+                    ws.modules.iter().find(|m| m.file == edit.file).map_or(ModuleId::builtin(), |m| m.id),
+                    *owner,
+                )) {
+                    stats.span_shifts += shift_findings(findings, edit);
+                }
+            }
+            stats.span_shifts += shift_findings(&mut cached.other, edit);
+        }
+
+        self.global.clear();
+        let by_file = workspace_findings_by_file_with(ws, warm, is_bin, sel);
+        stats.global_passes = 1;
+        for (file, findings) in by_file {
+            let Some(source) = sources.get(&file).copied() else { continue };
+            let kept = filter_suppressed_findings(findings, source);
+            stats.global_findings_derived += kept.len();
+            self.global.insert(file, kept);
+        }
+        let findings = self.rebuild_output(ws, warm, sources);
+        self.last_by_file = by_file_from_findings(&findings);
+        (findings, stats)
+    }
+
+    fn rebuild(
+        &mut self,
+        ws: &Workspace,
+        warm: &FxHashSet<ModuleId>,
+        is_bin: bool,
+        sources: &FxHashMap<Ustr, &str>,
+        sel: &LintOptions,
+        workspace_files: FxHashSet<Ustr>,
+        report_files: FxHashSet<Ustr>,
+        stats: &mut LintCacheStats,
+    ) -> Vec<Finding> {
+        let findings = lint_workspace(ws, warm, is_bin, sources, sel);
+        self.initialized = true;
+        self.is_bin = is_bin;
+        self.warm = warm.clone();
+        self.workspace_files = workspace_files;
+        self.report_files = report_files;
+        self.selection = Some(sel.clone());
+        self.files.clear();
+        self.global.clear();
+        for (&file, source) in sources {
+            self.files.insert(
+                file,
+                CachedFileFindings {
+                    suppression_fingerprint: suppression_fingerprint(source),
+                    ..Default::default()
+                },
+            );
+        }
+        for finding in &findings {
+            if is_global_lint(finding.lint) {
+                self.global.entry(finding.file()).or_default().push(finding.clone());
+                continue;
+            }
+            let file = finding.file();
+            let Some(module) = ws.modules.iter().find(|m| m.file == file) else { continue };
+            let owner = finding_owner(module, finding).map(|owner| {
+                if is_inference_lint(finding.lint) { &mut self.files.get_mut(&file).unwrap().inference }
+                else { &mut self.files.get_mut(&file).unwrap().flat }
+                    .entry(owner)
+                    .or_default()
+                    .push(finding.clone());
+            });
+            if owner.is_none() {
+                self.files.entry(file).or_default().other.push(finding.clone());
+            }
+        }
+        for module in user_modules(ws, warm) {
+            let Some(file) = sources.get(&module.file) else { continue };
+            let cached = self.files.entry(module.file).or_default();
+            cached.suppression_fingerprint = suppression_fingerprint(file);
+            for owner in module.bodies.keys().copied() {
+                cached.flat.entry(owner).or_default();
+                cached.inference.entry(owner).or_default();
+            }
+        }
+        self.last_by_file = by_file_from_findings(&findings);
+        stats.full_rebuilds = 1;
+        findings
+    }
+
+    fn rebuild_output(
+        &self,
+        ws: &Workspace,
+        warm: &FxHashSet<ModuleId>,
+        sources: &FxHashMap<Ustr, &str>,
+    ) -> Vec<Finding> {
+        let mut out = Vec::new();
+        for module in user_modules(ws, warm) {
+            if !sources.contains_key(&module.file) {
+                continue;
+            }
+            let Some(cached) = self.files.get(&module.file) else { continue };
+            for owner in module.bodies.keys() {
+                out.extend(cached.flat.get(owner).cloned().unwrap_or_default());
+            }
+            for owner in module.bodies.keys() {
+                out.extend(cached.inference.get(owner).cloned().unwrap_or_default());
+            }
+            out.extend(cached.other.clone());
+            out.extend(self.global.get(&module.file).cloned().unwrap_or_default());
+        }
+        out
+    }
+}
+
+fn is_global_lint(lint: &str) -> bool {
+    matches!(lint, UNUSED_FN | BACKEND_SIBLING_MISMATCH | ACTION_CALLERS)
+}
+
+fn is_inference_lint(lint: &str) -> bool {
+    matches!(lint, TRANSMUTE_OF_NULLABLE | TASK_NULL_ABANDON | ROW_ESCAPE)
+}
+
+fn finding_offset(finding: &Finding) -> usize {
+    finding
+        .error
+        .labels
+        .first()
+        .map(|label| label.span.offset_range.0)
+        .unwrap_or(finding.error.location.offset)
+}
+
+fn finding_owner(module: &Module, finding: &Finding) -> Option<BodyOwner> {
+    module
+        .item_index()
+        .find(finding_offset(finding), finding_offset(finding).saturating_add(1))
+        .min_by_key(|interval| interval.stop - interval.start)
+        .map(|interval| interval.val)
+}
+
+fn by_file_from_findings(findings: &[Finding]) -> FxHashMap<Ustr, Vec<Finding>> {
+    let mut by_file = FxHashMap::default();
+    for finding in findings {
+        by_file.entry(finding.file()).or_insert_with(Vec::new).push(finding.clone());
+    }
+    by_file
+}
+
+fn suppression_fingerprint(source: &str) -> u64 {
+    let mut hash = 1469598103934665603u64;
+    for line in source.lines() {
+        if line.contains("rock") && line.contains("allow") {
+            for byte in line.as_bytes() {
+                hash ^= u64::from(*byte);
+                hash = hash.wrapping_mul(1099511628211);
+            }
+            hash ^= b'\n' as u64;
+            hash = hash.wrapping_mul(1099511628211);
+        }
+    }
+    hash
+}
+
+fn shift_findings(findings: &mut [Finding], edit: &TextEditDelta) -> usize {
+    let mut shifted = 0;
+    for finding in findings {
+        let mut moved = false;
+        if finding.error.location.file == edit.file
+            && finding.error.location.offset >= edit.at
+        {
+            finding.error.location.offset = shift_value(finding.error.location.offset, edit.byte_delta);
+            finding.error.location.line = shift_value(finding.error.location.line, edit.line_delta);
+            moved = true;
+        }
+        for label in &mut finding.error.labels {
+            if label.span.file != edit.file || label.span.offset_range.0 < edit.at {
+                continue;
+            }
+            label.span = shift_span(label.span, edit);
+            moved = true;
+        }
+        if moved {
+            if let Some(label) = finding.error.labels.first() {
+                finding.line = label.span.line_range.0;
+            } else {
+                finding.line = finding.error.location.line;
+            }
+            shifted += 1;
+        }
+    }
+    shifted
+}
+
+fn shift_span(mut span: Span, edit: &TextEditDelta) -> Span {
+    span.offset_range.0 = shift_value(span.offset_range.0, edit.byte_delta);
+    span.offset_range.1 = shift_value(span.offset_range.1, edit.byte_delta);
+    span.line_range.0 = shift_value(span.line_range.0, edit.line_delta);
+    span.line_range.1 = shift_value(span.line_range.1, edit.line_delta);
+    if edit.line_delta == 0 {
+        span.col_range.0 = shift_value(span.col_range.0, edit.byte_delta);
+        span.col_range.1 = shift_value(span.col_range.1, edit.byte_delta);
+    }
+    span
+}
+
+fn shift_value(value: usize, delta: isize) -> usize {
+    if delta.is_negative() {
+        value.saturating_sub(delta.unsigned_abs())
+    } else {
+        value.saturating_add(delta as usize)
     }
 }
 

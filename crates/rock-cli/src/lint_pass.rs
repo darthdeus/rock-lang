@@ -19,6 +19,7 @@ use std::time::Instant;
 #[derive(Clone, Debug, Default)]
 pub struct LintPassCensus {
     pub lint: bone_lints::LintCensus,
+    pub cache: bone_lints::LintCacheStats,
     pub report_prepare_ns: u128,
     pub summary_sort_ns: u128,
     pub render_ns: u128,
@@ -41,6 +42,17 @@ fn record_lint_census(census: bone_lints::LintCensus) {
         .expect("lint census mutex")
         .lint
         .merge(&census);
+}
+
+fn record_lint_cache_stats(stats: bone_lints::LintCacheStats) {
+    if !census_enabled() {
+        return;
+    }
+    let mut census = CENSUS
+        .get_or_init(|| Mutex::new(LintPassCensus::default()))
+        .lock()
+        .expect("lint census mutex");
+    census.cache.merge(&stats);
 }
 
 fn record_report_census(report_prepare_ns: u128, summary_sort_ns: u128, render_ns: u128) {
@@ -88,6 +100,23 @@ pub fn print_census(census: &LintPassCensus) {
     family("unused_fn", &census.lint.unused_fn);
     family("backend_sibling", &census.lint.backend_sibling);
     family("action_caller", &census.lint.action_caller);
+    let cache = &census.cache;
+    eprintln!(
+        "    cache: full_rebuilds={} body_updates={} global_passes={} flat_requests={} inference_requests={} flat_reused_bodies={} inference_reused_bodies={} flat_derived={} inference_derived={} flat_reused_findings={} inference_reused_findings={} span_shifts={} suppression_invalidations={}",
+        cache.full_rebuilds,
+        cache.body_updates,
+        cache.global_passes,
+        cache.flat_body_requests,
+        cache.inference_body_requests,
+        cache.flat_bodies_reused,
+        cache.inference_bodies_reused,
+        cache.flat_findings_derived,
+        cache.inference_findings_derived,
+        cache.flat_findings_reused,
+        cache.inference_findings_reused,
+        cache.span_shifts,
+        cache.suppression_invalidations,
+    );
     eprintln!(
         "    report: prepare_ms={:.3} summary_sort_ms={:.3} render_ms={:.3}",
         census.report_prepare_ns as f64 / 1_000_000.0,
@@ -168,6 +197,53 @@ pub fn run_build_lints(
     scope: Scope,
 ) -> Vec<CompilerError> {
     report(findings(ws, sources, root, scope), sources, root, policy())
+}
+
+/// The live-build adapter for [`bone_lints::IncrementalLintCache`]. The cache
+/// owns derivation and invalidation; this edge owns the same report set,
+/// severity policy, and error return as the canonical full pass.
+pub fn run_build_lints_cached(
+    cache: &mut bone_lints::IncrementalLintCache,
+    ws: &Workspace,
+    sources: &SourceFiles,
+    root: &Path,
+    scope: Scope,
+    change: &bone_lints::LintCacheUpdate,
+) -> Vec<CompilerError> {
+    let texts = source_texts(sources);
+    let warm = warm_module_ids(ws, &texts);
+    let is_bin = scope == Scope::WholeProject && rock_host::stick::StickConfig::is_bin_at(root);
+    let owned = owned_files(&texts, root);
+    let owned_sources: FxHashMap<Ustr, &str> = texts
+        .iter()
+        .filter(|(file, _)| owned.contains(*file))
+        .map(|(&file, text)| (file, text.as_str()))
+        .collect();
+    let (found, stats) = cache.update(
+        ws,
+        &warm,
+        is_bin,
+        &owned_sources,
+        &bone_lints::LintOptions::default(),
+        change,
+    );
+    if census_enabled() && stats.full_rebuilds > 0 {
+        let (ignored, census) = bone_lints::lint_workspace_with_census(
+            ws,
+            &warm,
+            is_bin,
+            &owned_sources,
+            &bone_lints::LintOptions::default(),
+        );
+        debug_assert_eq!(
+            ignored.iter().map(|f| (f.lint, f.error.message.as_str())).collect::<Vec<_>>(),
+            found.iter().map(|f| (f.lint, f.error.message.as_str())).collect::<Vec<_>>(),
+            "census oracle must match cached full rebuild",
+        );
+        record_lint_census(census);
+    }
+    record_lint_cache_stats(stats);
+    report(found, sources, root, policy())
 }
 
 /// Split findings by severity, emit the soft tiers per `mode`, and hand back the

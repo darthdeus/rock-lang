@@ -22,6 +22,7 @@ pub(crate) struct LiveProjectSnapshot {
     sources: SourceFiles,
     entry_path: String,
     previous_contents: Vec<(String, String)>,
+    lint_cache: bone_lints::IncrementalLintCache,
 }
 
 pub struct LiveProject {
@@ -30,6 +31,7 @@ pub struct LiveProject {
     sources: SourceFiles,
     entry_path: String,
     include_tests: bool,
+    lint_cache: bone_lints::IncrementalLintCache,
 }
 
 impl LiveProject {
@@ -51,12 +53,13 @@ impl LiveProject {
             .map_err(|e| {
                 anyhow::anyhow!("{}", crate::skull_backend::render_project_err(&sources, &e))
             })?;
-        let project = Self {
+        let mut project = Self {
             session,
             dir: dir.to_string(),
             sources,
             entry_path,
             include_tests,
+            lint_cache: Default::default(),
         };
         project.verdict("in initial build")?;
         Ok(project)
@@ -84,12 +87,14 @@ impl LiveProject {
             sources: self.sources.clone(),
             entry_path: self.entry_path.clone(),
             previous_contents,
+            lint_cache: self.lint_cache.clone(),
         }
     }
 
     pub(crate) fn restore(&mut self, snapshot: LiveProjectSnapshot) -> Result<()> {
         self.sources = snapshot.sources;
         self.entry_path = snapshot.entry_path;
+        self.lint_cache = snapshot.lint_cache;
         for (id, contents) in snapshot.previous_contents {
             if let Some(source) = self
                 .sources
@@ -226,7 +231,15 @@ impl LiveProject {
         self.session.workspace().module_ids[&ustr::Ustr::from(&self.entry_path)]
     }
 
-    pub fn verdict(&self, context: &str) -> Result<()> {
+    pub fn verdict(&mut self, context: &str) -> Result<()> {
+        self.verdict_with_change(context, &bone_lints::LintCacheUpdate::full())
+    }
+
+    fn verdict_with_change(
+        &mut self,
+        context: &str,
+        change: &bone_lints::LintCacheUpdate,
+    ) -> Result<()> {
         let diagnostics = self.session.diagnostics();
         if !diagnostics.is_empty() {
             for diagnostic in &diagnostics {
@@ -245,11 +258,13 @@ impl LiveProject {
         } else {
             crate::lint_pass::Scope::ProductionOnly
         };
-        let lint_errs = crate::lint_pass::run_build_lints(
+        let lint_errs = crate::lint_pass::run_build_lints_cached(
+            &mut self.lint_cache,
             self.session.workspace(),
             &self.sources,
             Path::new(&self.dir),
             scope,
+            change,
         );
         if !lint_errs.is_empty() {
             for e in &lint_errs {
@@ -273,6 +288,7 @@ impl LiveProject {
     }
 
     fn rebuild_session(&mut self) -> Result<()> {
+        self.lint_cache.clear();
         self.session = crate::bone_backend::bone_session_for_emission(
             source_pairs(&self.sources),
             Path::new(&self.dir),
@@ -290,6 +306,9 @@ impl LiveProject {
         let sources = self.sources.clone();
         let mut reinferred = Vec::new();
         let mut span_edits = Vec::new();
+        let mut lint_changed_files = Vec::new();
+        let mut lint_reinferred = Vec::new();
+        let mut lint_edits = Vec::new();
         let mut full = false;
         let mut changed = false;
         for (path, text) in feed {
@@ -300,9 +319,17 @@ impl LiveProject {
                 bone_incremental::session::UpdateTier::NoChange => {}
                 bone_incremental::session::UpdateTier::BodyOnly => {
                     changed = true;
+                    lint_changed_files.push(ustr::Ustr::from(path.as_str()));
+                    lint_reinferred.extend(update.reinferred.iter().copied());
                     reinferred.extend(update.reinferred);
                     if let Some(edit) = update.body_update.edit {
                         span_edits.push(skull::instance_graph::SpanEdit {
+                            file: edit.file,
+                            at: edit.at,
+                            byte_delta: edit.byte_delta,
+                            line_delta: edit.line_delta,
+                        });
+                        lint_edits.push(bone_lints::TextEditDelta {
                             file: edit.file,
                             at: edit.at,
                             byte_delta: edit.byte_delta,
@@ -317,7 +344,16 @@ impl LiveProject {
                 }
             }
         }
-        self.verdict("- serving last good output")?;
+        let lint_change = if full {
+            bone_lints::LintCacheUpdate::full()
+        } else {
+            bone_lints::LintCacheUpdate::body_only(
+                lint_changed_files,
+                lint_reinferred,
+                lint_edits,
+            )
+        };
+        self.verdict_with_change("- serving last good output", &lint_change)?;
         if !changed {
             return Ok(LiveUpdate::NoChange);
         }
@@ -427,5 +463,26 @@ mod tests {
 
         project.recompile(&[]).unwrap();
         assert_eq!(std::fs::read_to_string(&count).unwrap().trim(), "2");
+    }
+
+    #[test]
+    fn body_edit_updates_the_shared_lint_cache_and_failed_edit_restores_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("main.rock");
+        std::fs::write(&source, "fn main() { let stale = 1 }\n").unwrap();
+        let mut project = LiveProject::init(dir.path().to_str().unwrap(), false).unwrap();
+        let file = ustr::Ustr::from(
+            std::fs::canonicalize(&source)
+                .unwrap()
+                .to_string_lossy()
+                .as_ref(),
+        );
+        assert!(!project.lint_cache.findings_for_file(file).is_empty());
+
+        assert!(project.apply_edit(&source, "fn main( {\n").is_err());
+        assert!(!project.lint_cache.findings_for_file(file).is_empty());
+
+        project.apply_edit(&source, "fn main() {}\n").unwrap();
+        assert!(project.lint_cache.findings_for_file(file).is_empty());
     }
 }

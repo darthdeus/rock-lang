@@ -2468,6 +2468,22 @@ pub fn skull_iter_incremental(path: &str, iters: usize, warmup: usize) -> Result
         std::mem::swap(&mut state_a, &mut state_b);
     }
 
+    let mut lint_cache = bone_lints::IncrementalLintCache::default();
+    let initial_lint_errors = crate::lint_pass::run_build_lints_cached(
+        &mut lint_cache,
+        session.workspace(),
+        &sources,
+        std::path::Path::new(path),
+        crate::lint_pass::Scope::WholeProject,
+        &bone_lints::LintCacheUpdate::full(),
+    );
+    if !initial_lint_errors.is_empty() {
+        return Err(anyhow::anyhow!(
+            "iter-incremental fixture produced {} initial lint error(s)",
+            initial_lint_errors.len()
+        ));
+    }
+
     let iters = iters.max(1);
     let target_name = std::path::Path::new(&target)
         .file_name()
@@ -2497,6 +2513,13 @@ pub fn skull_iter_incremental(path: &str, iters: usize, warmup: usize) -> Result
         let upd = session
             .update_file(&target, text)
             .map_err(|e| anyhow::anyhow!("update_file: {}", e.message))?;
+        if let Some(source) = sources
+            .files
+            .iter()
+            .find(|source| source.borrow().file.to_id_path() == target)
+        {
+            source.borrow_mut().contents = text.clone();
+        }
         let update_ms = ms(t_u);
         // bone's per-edit phase breakdown (clone/cook/lower/infer), set by
         // rebuild_body_incremental inside the SAME update_file the stone loop calls.
@@ -2524,11 +2547,27 @@ pub fn skull_iter_incremental(path: &str, iters: usize, warmup: usize) -> Result
         let diag_ms = ms(t_d);
 
         let t_l = Instant::now();
-        let lint_errs = crate::lint_pass::run_build_lints(
+        let lint_change = if matches!(upd.tier, bone_incremental::session::UpdateTier::BodyOnly) {
+            bone_lints::LintCacheUpdate::body_only(
+                [ustr::Ustr::from(target.as_str())],
+                upd.reinferred.iter().copied(),
+                upd.body_update.edit.iter().map(|edit| bone_lints::TextEditDelta {
+                    file: edit.file,
+                    at: edit.at,
+                    byte_delta: edit.byte_delta,
+                    line_delta: edit.line_delta,
+                }),
+            )
+        } else {
+            bone_lints::LintCacheUpdate::full()
+        };
+        let lint_errs = crate::lint_pass::run_build_lints_cached(
+            &mut lint_cache,
             session.workspace(),
             &sources,
             std::path::Path::new(path),
             crate::lint_pass::Scope::WholeProject,
+            &lint_change,
         );
         if !lint_errs.is_empty() {
             return Err(anyhow::anyhow!(
