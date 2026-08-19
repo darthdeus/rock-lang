@@ -645,6 +645,41 @@ fn backend_sibling_file_movement_revisits_old_and_new_groups() {
 }
 
 #[test]
+fn backend_sibling_portable_replacement_revisits_the_serving_group() {
+    let old = "inline(lua) fn probe(x: int) -> int = \"return x\"\ninline(js) fn probe(x: int) -> int = \"return x;\"\nfn probe(x: float) -> int { return 0 }\nfn main() {}\n";
+    let new = "inline(lua) fn probe(x: int) -> int = \"return x\"\ninline(js) fn probe(x: int) -> int = \"return x;\"\ninline(lua) fn probe(x: float) -> int = \"return x\"\nfn main() {}\n";
+    let old_ws = workspace(old);
+    let new_ws = workspace(new);
+    let selection = LintOptions::only([bone_lints::BACKEND_SIBLING_MISMATCH.to_owned()]);
+    let file = Ustr::from(FILE);
+    let (main_mid, main_owner) = function_owner(&new_ws, "main");
+    let mut cache = IncrementalLintCache::default();
+    cache.update(
+        &old_ws,
+        &FxHashSet::default(),
+        true,
+        &sources(old),
+        &selection,
+        &LintCacheUpdate::full(),
+    );
+
+    let (cached, stats) = cache.update(
+        &new_ws,
+        &FxHashSet::default(),
+        true,
+        &sources(new),
+        &selection,
+        &LintCacheUpdate::body_only([file], [(main_mid, main_owner)], []),
+    );
+    let fresh = lint_workspace(&new_ws, &FxHashSet::default(), true, &sources(new), &selection);
+    assert_eq!(shapes(&cached), shapes(&fresh));
+    assert!(!cached.is_empty());
+    assert_eq!(stats.full_rebuilds, 0);
+    assert_eq!(stats.global_passes, 0);
+    assert!(stats.sibling_groups_revisited > 0);
+}
+
+#[test]
 fn action_declaration_addition_updates_the_empty_population() {
     let old = "fn main() {}\n";
     let new = "global ACT_NEW: int = 1\nfn main() { let value = ACT_NEW }\n";
