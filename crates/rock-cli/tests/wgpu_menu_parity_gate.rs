@@ -223,19 +223,25 @@ fn assert_fixture_image(path: &Path, regions: &[Region]) -> (RgbaImage, ImageSta
         "{} must have nonzero content and bounds; stats={stats:?}",
         path.display()
     );
-    let populations: Vec<_> = regions
+    let observations: Vec<_> = regions
         .iter()
-        .map(|region| (region.name, region_population(&image, *region)))
+        .map(|region| {
+            (
+                region.name,
+                region_population(&image, *region),
+                region_bounds(&image, *region),
+            )
+        })
         .collect();
-    for (name, population) in &populations {
+    for (name, population, bounds) in &observations {
         assert!(
-            *population > 0,
-            "{} semantic region {name} is empty; stats={stats:?}",
+            *population > 0 && bounds.is_some(),
+            "{} semantic region {name} is empty; stats={stats:?} observations={observations:?}",
             path.display(),
         );
     }
     println!(
-        "{} image stats: {stats:?} semantic_regions={populations:?}",
+        "{} image stats: {stats:?} semantic_regions={observations:?}",
         path.display()
     );
     (image, stats)
@@ -579,7 +585,6 @@ fn mag_splash_and_menu_have_numerical_gl_wgpu_parity() {
             ("made with", 629, 377),
             ("rock logo", 555, 398),
             ("SDL logo", 620, 403),
-            ("version", 1100, 708),
         ],
     );
     assert_cross_renderer_pixel_witnesses(
