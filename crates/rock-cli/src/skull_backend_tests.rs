@@ -1261,6 +1261,57 @@ mod overlay_runtime_tests {
         }
     }
 
+    #[test]
+    fn wire_hook_failure_is_post_publication_and_not_reported_as_rollback() {
+        let v0 = r#"
+@lifecycle(phase="wire", owner="session")
+deco init wire {}
+const DEP: int = 1
+global RUNS: int = 0
+@wire(onchange=[DEP]) fn gated_wire() { RUNS = RUNS + 1 }
+fn main() {}
+"#;
+        let v1 = v0.replace(
+            "RUNS = RUNS + 1",
+            "error(\"wire hook failed after publication\")",
+        );
+        let mut session = bone_session(files(v0)).expect("wire session v0");
+        let mid = skull::user_module_id(session.workspace()).unwrap();
+        let (full0, mut cache) = skull::mir_emit::emit_full(session.workspace(), mid)
+            .expect("wire full v0");
+        let result = session.update_file("main.rock", &v1).expect("wire body edit");
+        let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
+        let driver = r#"
+local function run_wire()
+  local phase = _G.__ROCK_LIFECYCLE_PLAN.wire
+  for i = 1, phase.len do
+    local entry = phase._data[i]
+    if __rock_lifecycle_take_wire(entry.key) then entry.func() end
+  end
+end
+run_wire()
+assert(__rock_state_get("global:main.rock::RUNS::value") == 1, "initial wire did not run exactly once: " .. tostring(__rock_state_get("global:main.rock::RUNS::value")))
+local old_plan = _G.__ROCK_LIFECYCLE_PLAN
+REPLACE_OVERLAY
+local candidate_plan = _G.__ROCK_LIFECYCLE_PLAN
+assert(candidate_plan ~= old_plan, "candidate LifecyclePlan was not published")
+local ok, err = pcall(run_wire)
+assert(not ok and tostring(err):find("wire hook failed after publication", 1, true), "wire failure was not observed: " .. tostring(err))
+assert(_G.__rock_code_slot_pending == nil, "the hook failure must not leave a staging transaction")
+assert(_G.__ROCK_LIFECYCLE_PLAN == candidate_plan, "hook failure must not claim publication rollback")
+assert(__rock_state_get("global:main.rock::RUNS::value") == 1, "wire failure changed the retained effect")
+print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
+"#
+        .replace("REPLACE_OVERLAY", &overlay.lua);
+        let script = format!("{}\n{}\n{}", full0.lua, SYS_STUB, driver);
+        match exec_lua(&script) {
+            ExecOutcome::Output(output) => {
+                assert!(normalize_stdout(&output).contains("WIRE_HOOK_FAILURE_POST_PUBLICATION"))
+            }
+            ExecOutcome::Errored(error) => panic!("wire hook failure driver failed: {error}"),
+        }
+    }
+
     /// A `co fn` BODY edit, delivered through a REAL `Session.update_file`, must
     /// re-emit the coroutine into the overlay so a fresh invocation runs the new
     /// body -- exactly like an ordinary fn. The corpus sweep can't catch this: it
@@ -3416,6 +3467,148 @@ io.write("__STATE__old:" .. plan.len .. ":" .. plan._data[1].key .. ":" .. plan.
                 .map(str::to_string)
                 .collect()
         }
+    }
+}
+
+#[cfg(test)]
+mod wire_transition_tests {
+    use super::super::{SkullReload, SkullStone};
+    use std::path::PathBuf;
+
+    const V0: &str = r#"
+@lifecycle(phase="wire", owner="session")
+deco init wire {}
+
+const DIRECT: int = 1
+const BASE: int = 2
+const DERIVED: int = BASE + 1
+const UNRELATED: int = 9
+
+fn unrelated() -> int { return UNRELATED }
+@wire fn plain_wire() { let _ = unrelated() }
+@wire(onchange=[DIRECT]) fn direct_wire() { let _ = DIRECT }
+@wire(onchange=[DERIVED]) fn transitive_wire() { let _ = DERIVED }
+fn main() {}
+"#;
+
+    fn boot(source: &str) -> (tempfile::TempDir, SkullStone, PathBuf, PathBuf, PathBuf) {
+        let dir = tempfile::tempdir().expect("wire transition tempdir");
+        let root = dir.path().to_str().expect("wire transition root").to_string();
+        let main = dir.path().join("main.lua");
+        let incremental = dir.path().join("incremental.lua");
+        let source_path = dir.path().join("main.rock");
+        std::fs::write(&source_path, source).expect("initial wire source");
+        let stone = SkullStone::init(&root, &main, &incremental).expect("initial wire build");
+        (dir, stone, main, incremental, source_path)
+    }
+
+    fn replace_source(
+        stone: &mut SkullStone,
+        source_path: &PathBuf,
+        source: &str,
+        main: &PathBuf,
+        incremental: &PathBuf,
+    ) -> anyhow::Result<SkullReload> {
+        std::fs::write(source_path, source).expect("wire replacement source");
+        stone.recompile(std::slice::from_ref(source_path), main, incremental)
+    }
+
+    #[test]
+    fn compatible_wire_edits_overlay_and_structural_changes_take_full_path() {
+        let (_dir, mut stone, main, incremental, source_path) = boot(V0);
+        let baseline = std::fs::read_to_string(&main).expect("wire baseline");
+        assert!(baseline.contains("__ROCK_LIFECYCLE_PLAN"), "baseline must publish LifecyclePlan");
+
+        let unrelated = V0.replace("return UNRELATED", "return UNRELATED + 1");
+        assert!(matches!(
+            replace_source(&mut stone, &source_path, &unrelated, &main, &incremental),
+            Ok(SkullReload::Incremental { .. })
+        ));
+        let overlay = std::fs::read_to_string(&incremental).expect("wire overlay");
+        assert!(overlay.contains("__rock_lifecycle_plan_stage("));
+        assert!(overlay.contains("__rock_code_slot_publish()"));
+
+        let direct = unrelated.replace("const DIRECT: int = 1", "const DIRECT: int = 2");
+        assert!(matches!(
+            replace_source(&mut stone, &source_path, &direct, &main, &incremental),
+            Ok(SkullReload::Incremental { .. })
+        ));
+
+        let structural = direct.replace(
+            "@wire(onchange=[DIRECT])",
+            "@wire(onchange=[BASE])",
+        );
+        assert!(matches!(
+            replace_source(&mut stone, &source_path, &structural, &main, &incremental),
+            Ok(SkullReload::Full { .. })
+        ));
+        assert!(!incremental.exists(), "full LifecyclePlan transition must wipe the overlay");
+        let full = std::fs::read_to_string(&main).expect("structural wire artifact");
+        assert_ne!(full, baseline, "structural wire transition must publish the candidate artifact");
+
+        let (_dir_added, mut added_stone, added_main, added_incremental, added_source) = boot(V0);
+        let added = format!(
+            "{V0}\n@wire(onchange=[UNRELATED]) fn added_wire() {{ let _ = UNRELATED }}\n"
+        );
+        assert!(matches!(
+            replace_source(
+                &mut added_stone,
+                &added_source,
+                &added,
+                &added_main,
+                &added_incremental,
+            ),
+            Ok(SkullReload::Full { .. })
+        ));
+        assert!(!added_incremental.exists(), "wire addition must take the full path");
+    }
+
+    #[test]
+    fn gated_wire_removal_requires_restart_and_keeps_the_last_good_artifact() {
+        let (_dir, mut stone, main, incremental, source_path) = boot(V0);
+        let baseline = std::fs::read_to_string(&main).expect("wire baseline");
+        let removed = V0.replace("@wire(onchange=[DIRECT]) fn direct_wire() { let _ = DIRECT }\n", "");
+        let reload = replace_source(&mut stone, &source_path, &removed, &main, &incremental)
+            .expect("gated removal route");
+        match reload {
+            SkullReload::FullRequired { reasons } => assert!(
+                reasons.iter().any(|reason| reason.contains("removing a gated @wire")),
+                "removal reason must request a fresh projection: {reasons:?}"
+            ),
+            other => panic!("gated removal must not publish live state: {other:?}"),
+        }
+        assert_eq!(std::fs::read_to_string(&main).expect("retained artifact"), baseline);
+        assert_eq!(
+            stone.source_text(&source_path).as_deref(),
+            Some(removed.as_str()),
+            "the current source may remain restart-pending while the published artifact stays old"
+        );
+    }
+
+    #[test]
+    fn failed_compile_and_failed_publication_retain_last_good_wire_artifacts() {
+        let (_dir, mut stone, main, incremental, source_path) = boot(V0);
+        let baseline = std::fs::read_to_string(&main).expect("wire baseline");
+        let invalid = V0.replace("@wire(onchange=[DIRECT])", "@wire(onchange=[UNKNOWN])");
+        assert!(
+            replace_source(&mut stone, &source_path, &invalid, &main, &incremental).is_err(),
+            "an unknown dependency must fail before publication"
+        );
+        assert_eq!(std::fs::read_to_string(&main).expect("last-good main"), baseline);
+        assert_eq!(stone.source_text(&source_path).as_deref(), Some(V0));
+
+        let blocked = source_path.parent().unwrap().join("blocked-incremental");
+        std::fs::create_dir(&blocked).expect("blocked publication directory");
+        let body_edit = V0.replace("return UNRELATED", "return UNRELATED + 1");
+        std::fs::write(&source_path, &body_edit).expect("body edit");
+        let failed = stone.recompile(
+            std::slice::from_ref(&source_path),
+            &main,
+            &blocked,
+        );
+        assert!(failed.is_err(), "a failed overlay write must surface");
+        assert_eq!(std::fs::read_to_string(&main).expect("main after failed publication"), baseline);
+        assert_eq!(stone.source_text(&source_path).as_deref(), Some(V0));
     }
 }
 
