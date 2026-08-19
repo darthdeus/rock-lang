@@ -1257,16 +1257,6 @@ impl IncrementalLintCache {
         stats
     }
 
-    pub fn clone_for_snapshot(&self, measure: bool) -> (Self, Option<LintCacheSnapshotStats>) {
-        let mut stats = self.snapshot_stats(measure);
-        let clone_started = stats.as_ref().map(|_| Instant::now());
-        let cloned = self.clone();
-        if let (Some(stats), Some(started)) = (&mut stats, clone_started) {
-            stats.clone_ns = started.elapsed().as_nanos();
-        }
-        (cloned, stats)
-    }
-
     pub fn begin_body_transaction(&mut self, change: &LintCacheUpdate) {
         debug_assert!(!change.full, "body transaction cannot wrap a full lint update");
         debug_assert!(self.body_transaction.is_none(), "nested lint-cache transaction");
