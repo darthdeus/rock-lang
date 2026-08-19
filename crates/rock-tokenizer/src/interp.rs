@@ -120,6 +120,9 @@ pub struct Scan {
     /// unterminated.
     pub end: usize,
     pub terminated: bool,
+    /// Escapes that denote nothing, in source order. The scan stays infallible
+    /// for the LSP's partial trees; the tokenizer rejects on the first of these.
+    pub bad_escapes: Vec<BadEscape>,
 }
 
 impl Scan {
@@ -133,20 +136,20 @@ impl Scan {
         // `map[k]` is the `src` offset of output byte `k`; the trailing entry
         // maps the end, so an exclusive range maps as one.
         let mut map: Vec<usize> = Vec::with_capacity(raw.len() + 1);
-        let mut it = raw.char_indices();
-        while let Some((i, c)) = it.next() {
-            let (ch, at) = match (self.flavor.escapes(), c) {
-                (true, '\\') => match it.next() {
-                    Some((_, esc)) => (unescape(esc), i),
-                    // Trailing `\`: keep it as itself.
-                    None => ('\\', i),
-                },
-                _ => (c, i),
+        let mut i = 0;
+        while i < raw.len() {
+            let c = raw[i..].chars().next().expect("byte index on a char boundary");
+            let (ch, width) = if self.flavor.escapes() && c == '\\' {
+                let e = resolve_escape(raw, i + 1);
+                (e.ch, 1 + e.len)
+            } else {
+                (Some(c), c.len_utf8())
             };
-            let before = out.len();
-            out.push(ch);
-            map.resize(out.len(), expr.0 + at);
-            debug_assert!(out.len() > before);
+            if let Some(ch) = ch {
+                out.push(ch);
+                map.resize(out.len(), expr.0 + i);
+            }
+            i += width;
         }
         map.push(expr.1);
         (out, map)
@@ -176,6 +179,7 @@ pub fn scan_string(src: &str, start: usize) -> Scan {
     let mut i = start + flavor.open().len();
 
     let mut pieces = Vec::new();
+    let mut bad_escapes: Vec<BadEscape> = Vec::new();
     let mut lit_start = i;
     let mut lit_text = String::new();
     // A literal piece ends at the next hole or at the closer; flush what has
@@ -197,20 +201,19 @@ pub fn scan_string(src: &str, start: usize) -> Scan {
     while i < n {
         if b[i..].starts_with(close) {
             flush_literal!(i);
-            return Scan { flavor, pieces, end: i + close.len(), terminated: true };
+            return Scan { flavor, pieces, end: i + close.len(), terminated: true, bad_escapes };
         }
         if flavor.escapes() && b[i] == b'\\' {
-            match src[i + 1..].chars().next() {
-                Some(c) => {
-                    lit_text.push(unescape(c));
-                    i += 1 + c.len_utf8();
-                }
-                // Trailing `\` at end of input: keep it as text.
-                None => {
-                    lit_text.push('\\');
-                    i += 1;
-                }
+            let e = resolve_escape(src, i + 1);
+            if let Some(message) = e.bad {
+                bad_escapes.push(BadEscape { at: i, len: 1 + e.len, message });
             }
+            if let Some(ch) = e.ch {
+                lit_text.push(ch);
+            }
+            // A trailing `\` resolves to itself with no following bytes, so
+            // this still advances and the loop cannot spin.
+            i += 1 + e.len;
             continue;
         }
         if flavor.interpolates()
@@ -237,15 +240,135 @@ pub fn scan_string(src: &str, start: usize) -> Scan {
         i += c.len_utf8();
     }
     flush_literal!(n);
-    Scan { flavor, pieces, end: n, terminated: false }
+    Scan { flavor, pieces, end: n, terminated: false, bad_escapes }
 }
 
-fn unescape(c: char) -> char {
+/// Why an escape is not a valid one. The scan stays infallible so the LSP keeps
+/// getting a tree; the tokenizer turns the first of these into a rejection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BadEscape {
+    /// Byte index of the backslash in `src`.
+    pub at: usize,
+    /// Byte length of the whole escape, so the label underlines `\\u{XY}`
+    /// rather than just its backslash.
+    pub len: usize,
+    pub message: String,
+}
+
+/// One resolved escape: the char it denotes, and how many bytes FOLLOW the
+/// backslash. `bad` is set for an escape that does not denote anything, in
+/// which case `ch` is a best-effort stand-in that keeps the scan walking.
+struct Esc {
+    /// None for an escape that denotes no character at all -- a line
+    /// continuation is the only one.
+    ch: Option<char>,
+    len: usize,
+    bad: Option<String>,
+}
+
+impl Esc {
+    fn ok(ch: char, len: usize) -> Esc {
+        Esc { ch: Some(ch), len, bad: None }
+    }
+    fn empty(len: usize) -> Esc {
+        Esc { ch: None, len, bad: None }
+    }
+    fn bad(ch: char, len: usize, message: impl Into<String>) -> Esc {
+        Esc { ch: Some(ch), len, bad: Some(message.into()) }
+    }
+}
+
+const RAW_HINT: &str = "; write `r\"..\"` for a literal backslash";
+
+/// Resolve the escape whose backslash sits just before `at`.
+///
+/// Unknown escapes REJECT rather than standing for the escaped char: silently
+/// dropping the backslash is how a `\r` becomes the letter `r`, which is a
+/// string the author did not write and which no test can see.
+fn resolve_escape(src: &str, at: usize) -> Esc {
+    let Some(c) = src[at..].chars().next() else {
+        // Trailing `\` at end of input: keep it as itself for the partial tree.
+        return Esc::ok('\\', 0);
+    };
+    let w = c.len_utf8();
     match c {
-        'n' => '\n',
-        't' => '\t',
-        // `\\`, `\"`, `\'` and anything else stand for the escaped char itself.
-        other => other,
+        'n' => Esc::ok('\n', w),
+        't' => Esc::ok('\t', w),
+        'r' => Esc::ok('\r', w),
+        '\\' | '"' | '\'' => Esc::ok(c, w),
+        'u' => resolve_unicode_escape(src, at + w),
+        // Line continuation: the newline and the next line's indentation are
+        // both consumed, so a wrapped message is one line of text. Dropping
+        // only the backslash would leave the newline and the indent IN the
+        // string, which is what every wrapped literal in the corpus was
+        // silently getting.
+        '\n' => {
+            let b = src.as_bytes();
+            let mut j = at + w;
+            while j < b.len() && (b[j] == b' ' || b[j] == b'\t') {
+                j += 1;
+            }
+            Esc::empty(j - at)
+        }
+        '\r' if src[at + w..].starts_with('\n') => {
+            let b = src.as_bytes();
+            let mut j = at + w + 1;
+            while j < b.len() && (b[j] == b' ' || b[j] == b'\t') {
+                j += 1;
+            }
+            Esc::empty(j - at)
+        }
+        other => Esc::bad(
+            other,
+            w,
+            format!("unknown string escape `\\{other}`{RAW_HINT}"),
+        ),
+    }
+}
+
+/// `\u{H..}` -- one to six hex digits naming a Unicode scalar value. Braced
+/// rather than fixed-width so an astral codepoint is written directly; a
+/// surrogate is not a scalar and is refused at both ends of its range.
+fn resolve_unicode_escape(src: &str, at: usize) -> Esc {
+    let b = src.as_bytes();
+    if b.get(at) != Some(&b'{') {
+        return Esc::bad('u', 1, "`\\u` must be written `\\u{H..}` with braces, e.g. `\\u{00c1}`");
+    }
+    let digits_at = at + 1;
+    let mut i = digits_at;
+    while i < b.len() && b[i] != b'}' {
+        i += 1;
+    }
+    // Span consumed on every exit below, so a rejection still advances past the
+    // whole escape and cannot cascade into the rest of the literal.
+    let consumed = |end: usize| end - (at - 1);
+    if i >= b.len() {
+        return Esc::bad('u', consumed(i), "unterminated `\\u{` escape: expected a closing `}`");
+    }
+    let digits = &src[digits_at..i];
+    let len = consumed(i + 1);
+    if digits.is_empty() {
+        return Esc::bad('u', len, "`\\u{}` needs at least one hex digit");
+    }
+    if digits.len() > 6 {
+        return Esc::bad('u', len, format!(
+            "`\\u{{{digits}}}` has {} hex digits; a scalar takes at most six",
+            digits.len()
+        ));
+    }
+    let Ok(cp) = u32::from_str_radix(digits, 16) else {
+        return Esc::bad('u', len, format!("`\\u{{{digits}}}` is not hex"));
+    };
+    if (0xD800..=0xDFFF).contains(&cp) {
+        return Esc::bad('u', len, format!(
+            "U+{cp:04X} is a surrogate, not a Unicode scalar value"
+        ));
+    }
+    match char::from_u32(cp) {
+        Some(ch) => Esc::ok(ch, len),
+        None => Esc::bad('u', len, format!(
+            "U+{cp:X} is above the maximum scalar value U+10FFFF"
+        )),
     }
 }
 

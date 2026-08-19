@@ -38,6 +38,8 @@ mod frame_error_gate;
 mod wgpu_refusal_gate;
 #[path = "rich_text_reject_gate.rs"]
 mod rich_text_reject_gate;
+#[path = "plain_text_reject_gate.rs"]
+mod plain_text_reject_gate;
 #[path = "shader_failure_gate.rs"]
 mod shader_failure_gate;
 #[path = "uniform_block_gate.rs"]
