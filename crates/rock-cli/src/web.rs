@@ -432,21 +432,22 @@ impl WebCompiler {
                 Ok(WebCompile::Reload)
             }
             crate::live_project::LiveUpdate::BodyOnly { reinferred, span_edits, .. } => {
-                match skull_codegen_js::emit::emit_overlay_with_span_edits(
+                let (reload, staged_cache) = skull_codegen_js::emit::emit_overlay_with_span_edits_staged(
                     self.project.workspace(),
                     self.project.entry_module(),
-                    &mut self.cache,
+                    &self.cache,
                     &reinferred,
                     &span_edits,
                 )
                 .map_err(|error| anyhow::anyhow!(
                     "{}",
                     crate::skull_backend::render_project_err(self.project.sources(), &error)
-                ))? {
+                ))?;
+                match reload {
                     skull_codegen_js::emit::JsReload::Overlay(mut overlay) => {
                         let shader_lines = shader_register_lines_js(
                             self.project.workspace(),
-                            &self.cache,
+                            &staged_cache,
                         )?;
                         insert_js_overlay_before_publish(&mut overlay, &shader_lines);
                         rock_host::project::write_atomic(
@@ -454,6 +455,7 @@ impl WebCompiler {
                             &overlay,
                         )?;
                         self.write_current_game(project, out_dir)?;
+                        self.cache = staged_cache;
                         Ok(WebCompile::Overlay)
                     }
                     skull_codegen_js::emit::JsReload::FullRequired => {
@@ -461,7 +463,10 @@ impl WebCompiler {
                         self.emit_full(project, out_dir)?;
                         Ok(WebCompile::Reload)
                     }
-                    skull_codegen_js::emit::JsReload::NoChange => Ok(WebCompile::NoChange),
+                    skull_codegen_js::emit::JsReload::NoChange => {
+                        self.cache = staged_cache;
+                        Ok(WebCompile::NoChange)
+                    }
                 }
             }
         }

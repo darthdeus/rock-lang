@@ -2840,6 +2840,7 @@ struct JsRootPlan {
     refs: Vec<FuncRef>,
 }
 
+#[derive(Clone)]
 struct JsSession {
     roots: Vec<FuncRef>,
     graph: InstanceGraph,
@@ -3621,17 +3622,20 @@ pub struct JsProgram {
     pub state_schema: skull_mir::state_schema::StateSchema,
 }
 
+#[derive(Clone)]
 struct JsChunk {
     js: String,
     statics: Vec<skull_mir::mir::StaticCell>,
 }
 
+#[derive(Clone)]
 struct JsSpecChunk {
     name: String,
     js: String,
     code_artifact: CodeArtifact,
 }
 
+#[derive(Clone)]
 struct ProgramBuild {
     program: String,
     stable: String,
@@ -3644,6 +3648,7 @@ struct ProgramBuild {
     const_order: Vec<ustr::Ustr>,
 }
 
+#[derive(Clone)]
 pub struct JsEmitCache {
     build: ProgramBuild,
     changed_since_full: HashSet<FuncRef>,
@@ -3722,6 +3727,20 @@ pub fn emit_overlay(
     reinferred: &[(bone_semantic::prelude::ModuleId, bone_semantic::hir::BodyOwner)],
 ) -> Result<JsReload, CompilerError> {
     emit_overlay_with_span_edits(ws, user_mid, cache, reinferred, &[])
+}
+
+/// Build an overlay against a staged cache. The caller publishes the returned
+/// cache only after the overlay bytes are durably written.
+pub fn emit_overlay_with_span_edits_staged(
+    ws: &Workspace,
+    user_mid: bone_semantic::prelude::ModuleId,
+    cache: &JsEmitCache,
+    reinferred: &[(bone_semantic::prelude::ModuleId, bone_semantic::hir::BodyOwner)],
+    edits: &[skull_graph::instance_graph::SpanEdit],
+) -> Result<(JsReload, JsEmitCache), CompilerError> {
+    let mut staged = cache.clone();
+    let reload = emit_overlay_with_span_edits(ws, user_mid, &mut staged, reinferred, edits)?;
+    Ok((reload, staged))
 }
 
 pub fn emit_overlay_with_span_edits(
@@ -5131,7 +5150,7 @@ fn lifecycle_plan_stage_js(
                     js_string_lit(&dependency_key)?,
                     js_string_lit(&format!("{:016x}", dependency.fingerprint))?).unwrap();
             }
-            out.push_str("]}}, func: __rock_code_slot_ref(");
+            out.push_str("]}, func: __rock_code_slot_ref(");
             out.push_str(&js_string_lit(&key)?);
             out.push_str(")},\n");
         }
