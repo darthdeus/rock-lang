@@ -4,6 +4,7 @@ use bone_lints::{
 use bone_semantic::prelude::*;
 
 const FILE: &str = "<incremental-cache>";
+const ACTION_FILE: &str = "mag/player.rock";
 
 fn workspace(src: &str) -> Workspace {
     let ast = skull_parser::parse_module_clean(src, Ustr::from(FILE)).expect("parse");
@@ -136,8 +137,10 @@ fn suppression_only_edits_rebuild_the_affected_file() {
         ),
     );
     assert!(hidden.is_empty());
-    assert_eq!(hidden_stats.full_rebuilds, 1);
+    assert_eq!(hidden_stats.full_rebuilds, 0);
     assert!(hidden_stats.suppression_invalidations > 0);
+    assert_eq!(hidden_stats.flat_body_requests, 0);
+    assert!(hidden_stats.suppression_files_refiltered > 0);
 
     let (shown, shown_stats) = cache.update(
         &old_ws,
@@ -148,7 +151,8 @@ fn suppression_only_edits_rebuild_the_affected_file() {
         &LintCacheUpdate::body_only([file], [(mid, owner)], []),
     );
     assert!(shown.iter().any(|f| f.lint == UNUSED_VAR));
-    assert_eq!(shown_stats.full_rebuilds, 1);
+    assert_eq!(shown_stats.full_rebuilds, 0);
+    assert!(shown_stats.suppression_files_refiltered > 0);
 }
 
 #[test]
@@ -335,6 +339,162 @@ fn suppression_change_rebuilds_and_finding_free_entries_are_not_stale() {
     assert_eq!(shapes(&cached), shapes(&fresh));
     assert!(stats.suppression_invalidations > 0);
     assert!(cached.iter().all(|finding| finding.lint != bone_lints::UNUSED_VAR));
+}
+
+#[test]
+fn suppression_add_and_remove_refilters_without_rederiving_findings() {
+    let old = "fn main() {\n    let unused = 1\n}\n";
+    let suppressed = "fn main() {\n    // rock: allow(unused_var)\n    let unused = 1\n}\n";
+    let old_ws = workspace(old);
+    let suppressed_ws = workspace(suppressed);
+    let file = Ustr::from(FILE);
+    let insertion = suppressed.find("// rock").expect("suppression");
+    let (suppressed_mid, suppressed_owner) = function_owner(&suppressed_ws, "main");
+    let mut cache = IncrementalLintCache::default();
+    cache.update(
+        &old_ws,
+        &FxHashSet::default(),
+        true,
+        &sources(old),
+        &LintOptions::default(),
+        &LintCacheUpdate::full(),
+    );
+
+    let (hidden, hidden_stats) = cache.update(
+        &suppressed_ws,
+        &FxHashSet::default(),
+        true,
+        &sources(suppressed),
+        &LintOptions::default(),
+        &LintCacheUpdate::body_only(
+            [file],
+            [],
+            [TextEditDelta {
+                file,
+                at: insertion,
+                byte_delta: (suppressed.len() - old.len()) as isize,
+                line_delta: 1,
+            }],
+        ),
+    );
+    let hidden_fresh = lint_workspace(
+        &suppressed_ws,
+        &FxHashSet::default(),
+        true,
+        &sources(suppressed),
+        &LintOptions::default(),
+    );
+    assert_eq!(shapes(&hidden), shapes(&hidden_fresh));
+    assert!(hidden.is_empty());
+    assert_eq!(hidden_stats.full_rebuilds, 0);
+    assert_eq!(hidden_stats.flat_body_requests, 0);
+    assert_eq!(hidden_stats.global_passes, 0);
+
+    let (shown, shown_stats) = cache.update(
+        &old_ws,
+        &FxHashSet::default(),
+        true,
+        &sources(old),
+        &LintOptions::default(),
+        &LintCacheUpdate::body_only(
+            [file],
+            [(suppressed_mid, suppressed_owner)],
+            [TextEditDelta {
+                file,
+                at: insertion,
+                byte_delta: -((suppressed.len() - old.len()) as isize),
+                line_delta: -1,
+            }],
+        ),
+    );
+    let shown_fresh = lint_workspace(
+        &old_ws,
+        &FxHashSet::default(),
+        true,
+        &sources(old),
+        &LintOptions::default(),
+    );
+    assert_eq!(shapes(&shown), shapes(&shown_fresh));
+    assert!(shown.iter().any(|finding| finding.lint == UNUSED_VAR));
+    assert_eq!(shown_stats.full_rebuilds, 0);
+    assert_eq!(shown_stats.global_passes, 0);
+}
+
+#[test]
+fn action_caller_addition_is_incremental_when_opted_in() {
+    let old = "global ACT_USED: int = 1\nfn gameplay() { let value = 0 }\nfn main() { gameplay() }\n";
+    let new = "global ACT_USED: int = 1\nfn gameplay() { let value = ACT_USED }\nfn main() { gameplay() }\n";
+    let old_ws = workspace_many(&[(ACTION_FILE, old)]);
+    let new_ws = workspace_many(&[(ACTION_FILE, new)]);
+    let file = Ustr::from(ACTION_FILE);
+    let (gameplay_mid, gameplay_owner) = function_owner_in(&new_ws, ACTION_FILE, "gameplay");
+    let selection = LintOptions::only([bone_lints::ACTION_CALLERS.to_owned()]);
+    let mut old_sources = FxHashMap::default();
+    old_sources.insert(file, old);
+    let mut new_sources = FxHashMap::default();
+    new_sources.insert(file, new);
+    let mut cache = IncrementalLintCache::default();
+    cache.update(
+        &old_ws,
+        &FxHashSet::default(),
+        true,
+        &old_sources,
+        &selection,
+        &LintCacheUpdate::full(),
+    );
+
+    let (cached, stats) = cache.update(
+        &new_ws,
+        &FxHashSet::default(),
+        true,
+        &new_sources,
+        &selection,
+        &LintCacheUpdate::body_only([file], [(gameplay_mid, gameplay_owner)], []),
+    );
+    let fresh = lint_workspace(&new_ws, &FxHashSet::default(), true, &new_sources, &selection);
+    assert_eq!(shapes(&cached), shapes(&fresh));
+    assert!(cached.is_empty());
+    assert_eq!(stats.full_rebuilds, 0);
+    assert_eq!(stats.global_passes, 0);
+}
+
+#[test]
+fn action_caller_removal_is_incremental_when_opted_in() {
+    let old = "global ACT_USED: int = 1\nfn gameplay() { let value = ACT_USED }\nfn main() { gameplay() }\n";
+    let new = "global ACT_USED: int = 1\nfn gameplay() { let value = 0 }\nfn main() { gameplay() }\n";
+    let old_ws = workspace_many(&[(ACTION_FILE, old)]);
+    let new_ws = workspace_many(&[(ACTION_FILE, new)]);
+    let file = Ustr::from(ACTION_FILE);
+    let (gameplay_mid, gameplay_owner) = function_owner_in(&new_ws, ACTION_FILE, "gameplay");
+    let selection = LintOptions::only([bone_lints::ACTION_CALLERS.to_owned()]);
+    let mut old_sources = FxHashMap::default();
+    old_sources.insert(file, old);
+    let mut new_sources = FxHashMap::default();
+    new_sources.insert(file, new);
+    let mut cache = IncrementalLintCache::default();
+    cache.update(
+        &old_ws,
+        &FxHashSet::default(),
+        true,
+        &old_sources,
+        &selection,
+        &LintCacheUpdate::full(),
+    );
+
+    let (cached, stats) = cache.update(
+        &new_ws,
+        &FxHashSet::default(),
+        true,
+        &new_sources,
+        &selection,
+        &LintCacheUpdate::body_only([file], [(gameplay_mid, gameplay_owner)], []),
+    );
+    let fresh = lint_workspace(&new_ws, &FxHashSet::default(), true, &new_sources, &selection);
+    assert_eq!(shapes(&cached), shapes(&fresh));
+    assert_eq!(cached.len(), 1);
+    assert!(cached[0].error.message.contains("ACT_USED"));
+    assert_eq!(stats.full_rebuilds, 0);
+    assert_eq!(stats.global_passes, 0);
 }
 
 #[test]
