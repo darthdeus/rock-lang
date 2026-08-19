@@ -40,6 +40,8 @@ global __stone_log_level: int = -1
 // record by declaration instead of sniffing its text
 // (`rock_log::WALL_CLOCK_MARK`); the print() fallback has no stamp to mark.
 @nomangle inline(lua) fn __stone_emit(level: int, category: string, msg: string, wall_clock: bool) = """
+    local shadow = rawget(_G, "__stone_shadow")
+    if shadow then return end
     local sink = _G.__rock_log_sink
     if sink ~= nil then
         sink(level, category or "", msg, wall_clock)
@@ -53,12 +55,16 @@ global __stone_log_level: int = -1
 """
 
 @nomangle inline(lua) fn __stone_log(level: int, category: string, msg: string) = """
+    local shadow = rawget(_G, "__stone_shadow")
+    if shadow then return end
     __stone_log_init()
     if level > __stone_log_level then return end
     __stone_emit(level, category, msg, false)
 """
 
 @nomangle inline(lua) fn __stone_log_wall_clock(level: int, category: string, msg: string) = """
+    local shadow = rawget(_G, "__stone_shadow")
+    if shadow then return end
     __stone_log_init()
     if level > __stone_log_level then return end
     __stone_emit(level, category, msg, true)
@@ -117,6 +123,8 @@ fn log_get_level() -> int { __stone_log_init(); return __stone_log_level }
 //   __stone_log_wall     — site -> true for a declared wall-clock site
 
 @nomangle inline(lua) fn _log_once_impl(category: string, msg: string, site: string) = """
+    local shadow = rawget(_G, "__stone_shadow")
+    if shadow then return end
     __stone_log_init()
     -- log_once is error-class / always-on by design (see the header
     -- comment + tests/log_once.rock: log_set_level(0) must still
@@ -179,6 +187,8 @@ macro log_once(category: expr, msg: expr, site: expr) {
 
 // Mockable-now seam used by log_throttled and exposed for deterministic tests.
 @nomangle inline(lua) fn _log_throttled_with_now_impl(now_sec: float, category: string, msg: string, interval_sec: float, site: string, wall_clock: bool) = """
+    local shadow = rawget(_G, "__stone_shadow")
+    if shadow then return end
     __stone_log_init()
     -- error-class / always-on, same as _log_once_impl (preserves the
     -- original `0 > level` semantics + tests/log_once.rock contract).
@@ -209,10 +219,14 @@ macro log_throttled_with_now(now_sec: expr, category: expr, msg: expr, interval_
 // stone_log_set_now(); non-Stone Rock programs leave it nil and fall back
 // to os.clock() so something still works without the engine running.
 @nomangle inline(lua) fn stone_log_set_now(now_sec: float) = """
+    local shadow = rawget(_G, "__stone_shadow")
+    if shadow then return end
     __stone_log_now_override = now_sec
 """
 
 @nomangle inline(lua) fn stone_log_clear_now() = """
+    local shadow = rawget(_G, "__stone_shadow")
+    if shadow then return end
     __stone_log_now_override = nil
 """
 
