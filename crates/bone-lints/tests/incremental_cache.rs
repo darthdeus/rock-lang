@@ -498,6 +498,268 @@ fn action_caller_removal_is_incremental_when_opted_in() {
 }
 
 #[test]
+fn backend_sibling_signature_change_revisits_only_its_group() {
+    let old = "inline(lua) fn probe(x: int) -> int = \"return x\"\ninline(js) fn probe(x: int) -> int = \"return x;\"\nfn main() {}\n";
+    let new = old.replace("inline(js) fn probe(x: int)", "inline(js) fn probe(x: float)");
+    let old_ws = workspace(old);
+    let new_ws = workspace(&new);
+    let selection = LintOptions::only([bone_lints::BACKEND_SIBLING_MISMATCH.to_owned()]);
+    let file = Ustr::from(FILE);
+    let (main_mid, main_owner) = function_owner(&new_ws, "main");
+    let mut cache = IncrementalLintCache::default();
+    cache.update(
+        &old_ws,
+        &FxHashSet::default(),
+        true,
+        &sources(old),
+        &selection,
+        &LintCacheUpdate::full(),
+    );
+
+    let (cached, stats) = cache.update(
+        &new_ws,
+        &FxHashSet::default(),
+        true,
+        &sources(&new),
+        &selection,
+        &LintCacheUpdate::body_only([file], [(main_mid, main_owner)], []),
+    );
+    let fresh = lint_workspace(&new_ws, &FxHashSet::default(), true, &sources(&new), &selection);
+    assert_eq!(shapes(&cached), shapes(&fresh));
+    assert!(cached.iter().any(|finding| finding.lint == bone_lints::BACKEND_SIBLING_MISMATCH));
+    assert_eq!(stats.full_rebuilds, 0);
+    assert_eq!(stats.global_passes, 0);
+    assert!(stats.sibling_groups_requested > 0);
+    assert!(stats.sibling_groups_revisited > 0);
+}
+
+#[test]
+fn backend_sibling_addition_and_removal_update_the_group() {
+    let lua = "inline(lua) fn probe(x: int) -> int = \"return x\"\nfn main() {}\n";
+    let both = "inline(lua) fn probe(x: int) -> int = \"return x\"\ninline(js) fn probe(x: float) -> int = \"return x;\"\nfn main() {}\n";
+    let lua_ws = workspace(lua);
+    let both_ws = workspace(both);
+    let selection = LintOptions::only([bone_lints::BACKEND_SIBLING_MISMATCH.to_owned()]);
+    let file = Ustr::from(FILE);
+    let (main_mid, main_owner) = function_owner(&both_ws, "main");
+    let mut cache = IncrementalLintCache::default();
+    cache.update(
+        &lua_ws,
+        &FxHashSet::default(),
+        true,
+        &sources(lua),
+        &selection,
+        &LintCacheUpdate::full(),
+    );
+
+    let (added, added_stats) = cache.update(
+        &both_ws,
+        &FxHashSet::default(),
+        true,
+        &sources(both),
+        &selection,
+        &LintCacheUpdate::body_only([file], [(main_mid, main_owner)], []),
+    );
+    let added_fresh = lint_workspace(&both_ws, &FxHashSet::default(), true, &sources(both), &selection);
+    assert_eq!(shapes(&added), shapes(&added_fresh));
+    assert!(!added.is_empty());
+    assert!(added.iter().all(|finding| finding.lint == bone_lints::BACKEND_SIBLING_MISMATCH));
+    assert_eq!(added_stats.full_rebuilds, 0);
+
+    let (removed, removed_stats) = cache.update(
+        &lua_ws,
+        &FxHashSet::default(),
+        true,
+        &sources(lua),
+        &selection,
+        &LintCacheUpdate::body_only([file], [], []),
+    );
+    let removed_fresh = lint_workspace(&lua_ws, &FxHashSet::default(), true, &sources(lua), &selection);
+    assert_eq!(shapes(&removed), shapes(&removed_fresh));
+    assert!(removed.is_empty());
+    assert_eq!(removed_stats.full_rebuilds, 0);
+}
+
+#[test]
+fn action_declaration_addition_updates_the_empty_population() {
+    let old = "fn main() {}\n";
+    let new = "global ACT_NEW: int = 1\nfn main() { let value = ACT_NEW }\n";
+    let old_ws = workspace_many(&[(ACTION_FILE, old)]);
+    let new_ws = workspace_many(&[(ACTION_FILE, new)]);
+    let selection = LintOptions::only([bone_lints::ACTION_CALLERS.to_owned()]);
+    let file = Ustr::from(ACTION_FILE);
+    let (main_mid, main_owner) = function_owner_in(&new_ws, ACTION_FILE, "main");
+    let mut cache = IncrementalLintCache::default();
+    cache.update(
+        &old_ws,
+        &FxHashSet::default(),
+        true,
+        &sources_many(&[(ACTION_FILE, old)]),
+        &selection,
+        &LintCacheUpdate::full(),
+    );
+
+    let (cached, stats) = cache.update(
+        &new_ws,
+        &FxHashSet::default(),
+        true,
+        &sources_many(&[(ACTION_FILE, new)]),
+        &selection,
+        &LintCacheUpdate::body_only([file], [(main_mid, main_owner)], []),
+    );
+    let fresh = lint_workspace(
+        &new_ws,
+        &FxHashSet::default(),
+        true,
+        &sources_many(&[(ACTION_FILE, new)]),
+        &selection,
+    );
+    assert_eq!(shapes(&cached), shapes(&fresh));
+    assert!(cached.is_empty());
+    assert_eq!(stats.full_rebuilds, 0);
+    assert_eq!(stats.global_passes, 0);
+}
+
+#[test]
+fn action_declaration_removal_restores_the_empty_population() {
+    let old = "global ACT_OLD: int = 1\nfn main() { let value = ACT_OLD }\n";
+    let new = "fn main() { let value = 0 }\n";
+    let old_ws = workspace_many(&[(ACTION_FILE, old)]);
+    let new_ws = workspace_many(&[(ACTION_FILE, new)]);
+    let selection = LintOptions::only([bone_lints::ACTION_CALLERS.to_owned()]);
+    let file = Ustr::from(ACTION_FILE);
+    let (main_mid, main_owner) = function_owner_in(&new_ws, ACTION_FILE, "main");
+    let mut cache = IncrementalLintCache::default();
+    cache.update(
+        &old_ws,
+        &FxHashSet::default(),
+        true,
+        &sources_many(&[(ACTION_FILE, old)]),
+        &selection,
+        &LintCacheUpdate::full(),
+    );
+
+    let (cached, stats) = cache.update(
+        &new_ws,
+        &FxHashSet::default(),
+        true,
+        &sources_many(&[(ACTION_FILE, new)]),
+        &selection,
+        &LintCacheUpdate::body_only([file], [(main_mid, main_owner)], []),
+    );
+    let fresh = lint_workspace(
+        &new_ws,
+        &FxHashSet::default(),
+        true,
+        &sources_many(&[(ACTION_FILE, new)]),
+        &selection,
+    );
+    assert_eq!(shapes(&cached), shapes(&fresh));
+    assert_eq!(cached.len(), 1);
+    assert!(cached[0].error.message.contains("no production Mag ACT_*"));
+    assert_eq!(stats.full_rebuilds, 0);
+    assert_eq!(stats.global_passes, 0);
+}
+
+#[test]
+fn declaration_refresh_replaces_raw_global_rows_before_suppression_rollback() {
+    let old = "inline(lua) fn probe(x: int) -> int = \"return x\"\ninline(js) fn probe(x: float) -> int = \"return x;\"\nfn main() {}\n";
+    let matched = "inline(lua) fn probe(x: int) -> int = \"return x\"\ninline(js) fn probe(x: int) -> int = \"return x;\"\nfn main() {}\n";
+    let suppressed = matched
+        .replace(
+            "inline(lua)",
+            "// rock: allow(backend_sibling_mismatch)\ninline(lua)",
+        )
+        .replace(
+            "inline(js)",
+            "// rock: allow(backend_sibling_mismatch)\ninline(js)",
+        );
+    let old_ws = workspace(old);
+    let matched_ws = workspace(matched);
+    let suppressed_ws = workspace(&suppressed);
+    let file = Ustr::from(FILE);
+    let selection = LintOptions::default();
+    let (main_mid, main_owner) = function_owner(&matched_ws, "main");
+    let mut cache = IncrementalLintCache::default();
+    cache.update(
+        &old_ws,
+        &FxHashSet::default(),
+        true,
+        &sources(old),
+        &selection,
+        &LintCacheUpdate::full(),
+    );
+
+    let (matched_findings, _) = cache.update(
+        &matched_ws,
+        &FxHashSet::default(),
+        true,
+        &sources(matched),
+        &selection,
+        &LintCacheUpdate::body_only([file], [(main_mid, main_owner)], []),
+    );
+    let matched_fresh = lint_workspace(
+        &matched_ws,
+        &FxHashSet::default(),
+        true,
+        &sources(matched),
+        &selection,
+    );
+    assert_eq!(shapes(&matched_findings), shapes(&matched_fresh));
+    assert!(matched_findings.iter().all(|finding| {
+        finding.lint != bone_lints::BACKEND_SIBLING_MISMATCH
+    }));
+
+    let insertion = suppressed.find("// rock").expect("allow");
+    let (hidden, _) = cache.update(
+        &suppressed_ws,
+        &FxHashSet::default(),
+        true,
+        &sources(&suppressed),
+        &selection,
+        &LintCacheUpdate::body_only(
+            [file],
+            [],
+            [TextEditDelta {
+                file,
+                at: insertion,
+                byte_delta: (suppressed.len() - matched.len()) as isize,
+                line_delta: 2,
+            }],
+        ),
+    );
+    assert!(hidden.iter().all(|finding| {
+        finding.lint != bone_lints::BACKEND_SIBLING_MISMATCH
+    }));
+
+    let (rolled_back, _) = cache.update(
+        &matched_ws,
+        &FxHashSet::default(),
+        true,
+        &sources(matched),
+        &selection,
+        &LintCacheUpdate::body_only(
+            [file],
+            [],
+            [TextEditDelta {
+                file,
+                at: insertion,
+                byte_delta: -((suppressed.len() - matched.len()) as isize),
+                line_delta: -2,
+            }],
+        ),
+    );
+    let rolled_back_fresh = lint_workspace(
+        &matched_ws,
+        &FxHashSet::default(),
+        true,
+        &sources(matched),
+        &selection,
+    );
+    assert_eq!(shapes(&rolled_back), shapes(&rolled_back_fresh));
+}
+
+#[test]
 fn inference_error_is_added_and_removed_from_the_changed_body() {
     let prelude = r#"
 inline(lua) fn cast<T>(value: any) -> T = "return value"
