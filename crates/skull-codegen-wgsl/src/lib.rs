@@ -1341,10 +1341,10 @@ fn validate_explicit_interface(
     }
     for varying in &iface.varyings {
         identifier(varying.name, "varying name", span)?;
-        if matches!(varying.kind, WireKind::Bool32 | WireKind::I32 | WireKind::F32x3) {
+        if matches!(varying.kind, WireKind::Bool32 | WireKind::I32) {
             return Err(err(
                 span,
-                "WGSL explicit projection currently admits float scalar/vector varyings other than vec3",
+                "WGSL explicit projection currently admits float scalar/vector varyings only",
             ));
         }
     }
@@ -1723,6 +1723,7 @@ fn sampler_params_for_body(
     ws: &Workspace,
     instance: &ShaderInstance,
     body: &MirFunc,
+    interner: &MonoInterner,
     span: Span,
 ) -> Result<SamplerParams, CompilerError> {
     let function = function_for_instance(ws, instance);
@@ -1740,7 +1741,10 @@ fn sampler_params_for_body(
         .iter()
         .enumerate()
         .filter_map(|(index, cell)| {
-            matches!(value_kind_for_type(ws, function.param_decls[index].ty), Some(ValueKind::Sampler(_)))
+            matches!(
+                value_kind_for_instance_type(ws, function.param_decls[index].ty, &instance.inst, interner),
+                Some(ValueKind::Sampler(_))
+            )
                 .then_some(*cell)
         })
         .collect())
@@ -1749,6 +1753,7 @@ fn sampler_params_for_body(
 fn sampler_params_for_stage(
     ws: &Workspace,
     stage: &ShaderStageIr,
+    interner: &MonoInterner,
     span: Span,
 ) -> Result<StageSamplerParams, CompilerError> {
     let mut params = StageSamplerParams::new();
@@ -1762,10 +1767,10 @@ fn sampler_params_for_stage(
                 ),
             )
         })?;
-        let cells = sampler_params_for_body(ws, instance, body, span)?;
+        let cells = sampler_params_for_body(ws, instance, body, interner, span)?;
         params.insert(instance.clone(), cells);
     }
-    let entry_cells = sampler_params_for_body(ws, &stage.entry, &stage.body, span)?;
+    let entry_cells = sampler_params_for_body(ws, &stage.entry, &stage.body, interner, span)?;
     params.insert(stage.entry.clone(), entry_cells);
     Ok(params)
 }
@@ -1841,7 +1846,7 @@ pub fn emit_fullscreen_shader(
     let entry_fn = function_for_instance(ws, &stage.entry);
     let entry_roles = entry_param_roles(ws, entry_fn, &stage.body, iface, abi, span)?;
     validate_known_bodies(stage, span)?;
-    let sampler_params = sampler_params_for_stage(ws, stage, span)?;
+    let sampler_params = sampler_params_for_stage(ws, stage, &ir.interner, span)?;
 
     let mut source = String::new();
     emit_fullscreen_types(&mut source, abi);
@@ -1957,6 +1962,8 @@ pub fn emit_explicit_shader(
     )?;
     validate_known_bodies(vertex, span)?;
     validate_known_bodies(fragment, span)?;
+    let vertex_sampler_params = sampler_params_for_stage(ws, vertex, &ir.interner, span)?;
+    let fragment_sampler_params = sampler_params_for_stage(ws, fragment, &ir.interner, span)?;
 
     let mut source = String::new();
     emit_explicit_types(&mut source, ws, vertex_fn, fragment_fn, abi, span)?;
@@ -1965,7 +1972,10 @@ pub fn emit_explicit_shader(
     emit_textures(&mut source, abi);
     emit_numeric_helpers(&mut source, ir);
 
-    for stage in [vertex, fragment] {
+    for (stage, stage_sampler_params) in [
+        (vertex, &vertex_sampler_params),
+        (fragment, &fragment_sampler_params),
+    ] {
         for instance in &stage.order {
             let body = stage.bodies.get(instance).ok_or_else(|| {
                 err(
@@ -1977,6 +1987,15 @@ pub fn emit_explicit_shader(
                 )
             })?;
             let function = function_for_instance(ws, instance);
+            let instance_sampler_params = stage_sampler_params.get(instance).ok_or_else(|| {
+                err(
+                    span,
+                    format!(
+                        "WGSL sampler lowering has no parameter record for `{}`",
+                        function.name
+                    ),
+                )
+            })?;
             let emitter = FunctionEmitter::new(
                 ws,
                 &ir.interner,
@@ -1986,7 +2005,8 @@ pub fn emit_explicit_shader(
                 abi,
                 HashMap::new(),
                 span,
-            )?;
+            )?
+            .with_sampler_params(instance_sampler_params, stage_sampler_params);
             source.push_str(&emitter.emit_function(function, false)?);
         }
     }
@@ -2000,7 +2020,13 @@ pub fn emit_explicit_shader(
         abi,
         vertex_roles,
         span,
-    )?;
+    )?
+    .with_sampler_params(
+        vertex_sampler_params.get(&vertex.entry).ok_or_else(|| {
+            err(span, "WGSL sampler lowering has no vertex entry parameter record")
+        })?,
+        &vertex_sampler_params,
+    );
     source.push_str(&emitter.emit_function(vertex_fn, true)?);
     let emitter = FunctionEmitter::new(
         ws,
@@ -2012,6 +2038,12 @@ pub fn emit_explicit_shader(
         fragment_roles,
         span,
     )?
+    .with_sampler_params(
+        fragment_sampler_params.get(&fragment.entry).ok_or_else(|| {
+            err(span, "WGSL sampler lowering has no fragment entry parameter record")
+        })?,
+        &fragment_sampler_params,
+    )
     .with_frag_coord(
         fragment_reads_frag_coord(ws, fragment).then(|| FRAG_COORD_PARAM.to_string()),
     );
@@ -2291,13 +2323,23 @@ fn emit_value_struct(
     Ok(())
 }
 
-fn attr_wgsl_type(kind: AttrKind) -> &'static str {
+fn attr_input_wgsl_type(kind: AttrKind) -> &'static str {
     match kind {
-        AttrKind::F32 => "f32",
-        AttrKind::F32x2 => "vec2<f32>",
-        AttrKind::F32x3 => "vec3<f32>",
-        AttrKind::F32x4 => "vec4<f32>",
+        AttrKind::F32 => "u32",
+        AttrKind::F32x2 => "vec2<u32>",
+        AttrKind::F32x3 => "vec3<u32>",
+        AttrKind::F32x4 => "vec4<u32>",
         AttrKind::I32 => "i32",
+    }
+}
+
+fn attr_input_expression(location: u32, kind: AttrKind) -> String {
+    match kind {
+        AttrKind::F32 => format!("bitcast<f32>(input_{location})"),
+        AttrKind::F32x2 => format!("bitcast<vec2<f32>>(input_{location})"),
+        AttrKind::F32x3 => format!("bitcast<vec3<f32>>(input_{location})"),
+        AttrKind::F32x4 => format!("bitcast<vec4<f32>>(input_{location})"),
+        AttrKind::I32 => format!("input_{location}"),
     }
 }
 
@@ -2444,7 +2486,7 @@ fn emit_explicit_entries(
                 "  @location({}) input_{}: {},",
                 attr.location,
                 attr.location,
-                attr_wgsl_type(attr.kind)
+                attr_input_wgsl_type(attr.kind)
             )
             .unwrap();
         }
@@ -2456,7 +2498,7 @@ fn emit_explicit_entries(
         let input_args = input
             .attrs
             .iter()
-            .map(|attr| format!("input_{}", attr.location))
+            .map(|attr| attr_input_expression(attr.location, attr.kind))
             .collect::<Vec<_>>()
             .join(", ");
         let name = format!("{}_attrs", input.struct_name);
@@ -2528,7 +2570,10 @@ fn emit_explicit_entries(
         .collect::<Result<Vec<_>, _>>()?;
     writeln!(out, "  let vary = {varying}({});", varying_args.join(", ")).unwrap();
     let call_args = if fragment_reads_frag_coord(ws, fragment) {
-        "vary, input.position".to_string()
+        format!(
+            "vary, {}",
+            explicit_frag_coord_expression(abi, span)?
+        )
     } else {
         "vary".to_string()
     };
@@ -2570,6 +2615,23 @@ fn fragment_reads_frag_coord(ws: &Workspace, fragment: &ShaderStageIr) -> bool {
         }
         _ => false,
     })
+}
+
+fn explicit_frag_coord_expression(
+    abi: &WgslAbiPlan,
+    span: Span,
+) -> Result<String, CompilerError> {
+    let engine = abi.uniform_block(UniformRole::Engine).ok_or_else(|| {
+        unsupported_err(
+            span,
+            "bottom-left fragment coordinates",
+            "WGSL explicit `frag_coord()` requires an engine uniform block to derive the target height",
+        )
+    })?;
+    Ok(format!(
+        "vec4<f32>(input.position.x, ((2.0 / abs(u_{}.uProjection[1][1])) - input.position.y), input.position.z, input.position.w)",
+        engine.struct_name
+    ))
 }
 
 fn validate_ir_shape(ir: &ShaderIR, span: Span) -> Result<(), CompilerError> {
@@ -3590,6 +3652,9 @@ impl<'a> FunctionEmitter<'a> {
                 rendered.push(format!("{texture}: {}", texture_type(sampler_kind)));
                 if sampler_kind == SamplerKind::Float {
                     rendered.push(format!("{sampler}: sampler"));
+                }
+                if self.texture_v_flip_enabled() {
+                    rendered.push(format!("{}: bool", self.sampler_param_flip_name(*cell)));
                 }
                 continue;
             }
@@ -4989,15 +5054,15 @@ impl<'a> FunctionEmitter<'a> {
                     ));
                 }
                 let (texture_arg, sampler_arg) = self.sampler_expressions(args[0])?;
+                let uv = self.sample_uv(args[0], self.render_val(args[1])?)?;
                 Ok(format!(
-                    "textureSample({texture_arg}, {sampler_arg}, {})",
-                    self.render_val(args[1])?
+                    "textureSample({texture_arg}, {sampler_arg}, {uv})"
                 ))
             }
             Some(WgslIntrinsic::TextureId) => {
                 self.validate_texture_id_args(args)?;
                 let texture_arg = self.texture_expression(args[0])?;
-                let uv = self.render_val(args[1])?;
+                let uv = self.sample_uv(args[0], self.render_val(args[1])?)?;
                 let dimensions = format!("textureDimensions({texture_arg})");
                 Ok(format!(
                     "textureLoad({texture_arg}, clamp(vec2<i32>(i32(floor(clamp({uv}.x, 0.0, 1.0) * f32({dimensions}.x))), i32(floor(clamp({uv}.y, 0.0, 1.0) * f32({dimensions}.y)))), vec2<i32>(0, 0), vec2<i32>(i32({dimensions}.x) - 1, i32({dimensions}.y) - 1)), 0).x"
@@ -5147,6 +5212,9 @@ impl<'a> FunctionEmitter<'a> {
                         if self.value_kind(*arg)? == ValueKind::Sampler(SamplerKind::Float) {
                             rendered.push(self.sampler_expressions(*arg)?.1);
                         }
+                        if self.texture_v_flip_enabled() {
+                            rendered.push(self.sampler_flip_expression(*arg)?);
+                        }
                     } else {
                         rendered.push(self.render_val(*arg)?);
                     }
@@ -5264,6 +5332,63 @@ impl<'a> FunctionEmitter<'a> {
         )
     }
 
+    fn sampler_param_flip_name(&self, cell: Idx<Cell>) -> String {
+        let suffix = cell.into_raw().into_u32();
+        format!("rock_sampler_flip_{suffix}")
+    }
+
+    fn texture_v_flip_enabled(&self) -> bool {
+        self.abi
+            .uniform_block(UniformRole::Engine)
+            .is_some_and(|engine| {
+                engine.members.iter().any(|member| {
+                    member.name == Ustr::from("uTextureVFlip") && member.kind == WireKind::F32x4
+                })
+            })
+    }
+
+    fn texture_v_flip_expression(
+        &self,
+        texture: &WgslTextureBinding,
+    ) -> Result<String, CompilerError> {
+        let component = match texture.slot {
+            0 => "x",
+            1 => "y",
+            2 => "z",
+            3 => "w",
+            _ => {
+                return Err(unsupported_err(
+                    self.span,
+                    "per-texture WGPU Canvas orientation",
+                    "WGSL texture orientation metadata supports at most four texture slots",
+                ));
+            }
+        };
+        let engine = self.abi.uniform_block(UniformRole::Engine).ok_or_else(|| {
+            err(
+                self.span,
+                "WGSL texture orientation has no engine uniform block",
+            )
+        })?;
+        Ok(format!(
+            "u_{}.uTextureVFlip.{component} > 0.5",
+            engine.struct_name
+        ))
+    }
+
+    fn sampler_flip_expression(&self, sampler: Idx<Inst>) -> Result<String, CompilerError> {
+        match self.body.insts[sampler] {
+            Inst::Field { .. } => {
+                let texture = self.sampler_binding(sampler)?;
+                self.texture_v_flip_expression(texture)
+            }
+            Inst::Load(cell) if self.sampler_params.contains(&cell) => {
+                Ok(self.sampler_param_flip_name(cell))
+            }
+            _ => Ok("false".to_string()),
+        }
+    }
+
     fn sampler_expressions(&self, iid: Idx<Inst>) -> Result<(String, String), CompilerError> {
         if let Inst::Load(cell) = self.body.insts[iid] {
             if self.sampler_params.contains(&cell) {
@@ -5287,6 +5412,16 @@ impl<'a> FunctionEmitter<'a> {
         Ok((
             format!("tex_{}", texture.name),
             format!("samp_{}", texture.name),
+        ))
+    }
+
+    fn sample_uv(&self, sampler: Idx<Inst>, uv: String) -> Result<String, CompilerError> {
+        if !self.texture_v_flip_enabled() {
+            return Ok(uv);
+        }
+        let flip = self.sampler_flip_expression(sampler)?;
+        Ok(format!(
+            "vec2<f32>({uv}.x, select({uv}.y, 1.0 - {uv}.y, {flip}))"
         ))
     }
 }

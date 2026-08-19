@@ -491,6 +491,8 @@ pub struct MirEmit {
     pub lua: String,
     /// Artifact-owned callable identities and their self-validating census.
     pub code_artifact: skull_mir::code_identity::CodeArtifact,
+    /// The compiler-owned lifecycle inventory staged by this artifact.
+    pub lifecycle_plan: skull_mir::lifecycle::LifecyclePlan,
     /// The one compiler-owned logical inventory consumed by every backend.
     pub state_schema: skull_mir::state_schema::StateSchema,
     /// `(lua_name, reason)` for every definition the new path skipped.
@@ -2604,6 +2606,9 @@ pub struct SkullEmitCache {
     /// Logical callable table from the last complete assembly. Body overlays
     /// preserve this identity table; a full/incremental assembly refreshes it.
     code_artifact: skull_mir::code_identity::CodeArtifact,
+    /// Lifecycle metadata for the published artifact. Body overlays replace
+    /// fingerprints while structural changes take the full transition path.
+    lifecycle_plan: Option<skull_mir::lifecycle::LifecyclePlan>,
     /// Logical state table from the last complete assembly. Body overlays keep
     /// it unchanged; a full/incremental assembly replaces it atomically.
     state_schema: Option<skull_mir::state_schema::StateSchema>,
@@ -4985,7 +4990,7 @@ fn assemble(
             definition_plan.census
         )));
     }
-    let lifecycle_plan = skull_mir::lifecycle::collect(ws)?;
+    let lifecycle_plan = skull_mir::lifecycle::collect_with_artifact(ws, &code_artifact)?;
     if lifecycle_plan.census.applications != lifecycle_plan.census.admitted {
         return Err(CompilerError::new_no_location(format!(
             "incomplete LifecyclePlan census: {:?}", lifecycle_plan.census
@@ -4994,7 +4999,8 @@ fn assemble(
     let state_schema = skull_mir::state_schema::StateSchema::collect(ws, scx, &code_artifact, &all_statics)
         .map_err(|error| CompilerError::new_no_location(error.to_string()))?;
     let has_state_publication = code_artifact.entries.values().any(|entry| entry.escaping)
-        || definition_plan.census.declarations > 0;
+        || definition_plan.census.declarations > 0
+        || lifecycle_plan.census.declarations > 0;
     out.push_str("__rock_state_transaction_begin()\n");
     out.push_str(&format!(
         "__rock_state_publish_schema({:?})\n",
@@ -5015,7 +5021,9 @@ fn assemble(
     // defined, so slot staging must follow them but precede initializer calls.
     let code_slot_stage = code_slot_registration_lua(ws, scx, &code_artifact)?;
     out.push_str(&code_slot_stage);
-    if has_definition_plan && !code_artifact.entries.values().any(|entry| entry.escaping) {
+    if (has_definition_plan || lifecycle_plan.census.declarations > 0)
+        && !code_artifact.entries.values().any(|entry| entry.escaping)
+    {
         out.push_str("__rock_code_slot_begin()\n");
     }
     out.push_str(&definition_plan_stage_lua(ws, scx, &definition_plan));
@@ -5092,7 +5100,11 @@ fn assemble(
     // one top-level `__rock_shader_register(key, glsl)` per distinct pair, so a
     // reload re-`dofile`s them with the new source (hot-reload parity).
     out.push_str(&cache.shader_registrations.lua);
-    out.push_str(code_slot_publish_lua(&code_artifact, has_definition_plan));
+    out.push_str(code_slot_publish_lua(
+        &code_artifact,
+        has_definition_plan,
+        lifecycle_plan.census.declarations > 0,
+    ));
     if !has_state_publication {
         out.push_str("__rock_state_transaction_commit()\n");
     }
@@ -5151,6 +5163,7 @@ fn assemble(
         MirEmit {
             lua: out,
             code_artifact,
+            lifecycle_plan,
             state_schema,
             skipped,
             phases,
@@ -5247,8 +5260,12 @@ fn overlay_code_artifact(
 fn code_slot_publish_lua(
     artifact: &skull_mir::code_identity::CodeArtifact,
     has_definition_plan: bool,
+    has_lifecycle_plan: bool,
 ) -> &'static str {
-    if artifact.entries.values().any(|entry| entry.escaping) || has_definition_plan {
+    if artifact.entries.values().any(|entry| entry.escaping)
+        || has_definition_plan
+        || has_lifecycle_plan
+    {
         "__rock_code_slot_publish()\n"
     } else {
         ""
@@ -5344,13 +5361,25 @@ fn lifecycle_plan_stage_lua(
         let _ = writeln!(out, "[{}] = {{ len = {}, _data = {{", skull_codegen_lua::lua_string(phase.as_str()), entries.len());
         for (index, entry) in entries.into_iter().enumerate() {
         let key = entry.identity.logical_key(ws, scx.interner());
-        let _ = writeln!(out, "[{}] = {{ phase = {}, owner = {}, key = {}, name = {}, stage = {}, ordinal = {}, func = __rock_code_slot_ref({}) }},", index + 1,
+        let dependencies = entry.qualification.dependencies();
+        let _ = writeln!(out, "[{}] = {{ phase = {}, owner = {}, key = {}, name = {}, stage = {}, ordinal = {}, func = __rock_code_slot_ref({}), qualification = {}, body_fingerprint = {}, dependencies = {{ len = {}, _data = {{", index + 1,
             skull_codegen_lua::lua_string(entry.phase.as_str()),
             skull_codegen_lua::lua_string(entry.owner.as_str()),
             skull_codegen_lua::lua_string(&key),
             skull_codegen_lua::lua_string(entry.diagnostic_name.as_str()),
             entry.stage, entry.declaration_ordinal,
-            skull_codegen_lua::lua_string(&key));
+            skull_codegen_lua::lua_string(&key),
+            skull_codegen_lua::lua_string(entry.qualification.tag()),
+            skull_codegen_lua::lua_string(&format!("{:016x}", entry.body_fingerprint)),
+            dependencies.len());
+        for (dependency_index, dependency) in dependencies.iter().enumerate() {
+            let dependency_key = dependency.identity.logical_key(ws, scx.interner());
+            let _ = writeln!(out, "[{}] = {{ key = {}, fingerprint = {} }},",
+                dependency_index + 1,
+                skull_codegen_lua::lua_string(&dependency_key),
+                skull_codegen_lua::lua_string(&format!("{:016x}", dependency.fingerprint)));
+        }
+        out.push_str("} } },\n");
         }
         out.push_str("} },\n");
     }
@@ -5918,6 +5947,7 @@ fn emit_full_in_with_mutation(
         shader_view,
         emitted: FxHashSet::default(),
         code_artifact: skull_mir::code_identity::CodeArtifact::default(),
+        lifecycle_plan: None,
         state_schema: None,
         unit_comptime_reads: UnitComptimeReads::default(),
         renderer_target,
@@ -5939,6 +5969,7 @@ fn emit_full_in_with_mutation(
     let mut cache = cache;
     cache.emitted = emitted;
     cache.code_artifact = emit.code_artifact.clone();
+    cache.lifecycle_plan = Some(emit.lifecycle_plan.clone());
     cache.state_schema = Some(emit.state_schema.clone());
     cache.unit_comptime_reads = unit_reads;
     cache.absorb_spec_chunks(built_specs);
@@ -6044,6 +6075,10 @@ impl SkullEmitCache {
 
     pub fn state_schema(&self) -> Option<&skull_mir::state_schema::StateSchema> {
         self.state_schema.as_ref()
+    }
+
+    pub fn lifecycle_plan(&self) -> Option<&skull_mir::lifecycle::LifecyclePlan> {
+        self.lifecycle_plan.as_ref()
     }
 
     /// A live shader registry cannot remove a key from the running process:
@@ -6871,6 +6906,7 @@ pub fn emit_incremental(
     }
     cache.emitted = emitted;
     cache.code_artifact = emit.code_artifact.clone();
+    cache.lifecycle_plan = Some(emit.lifecycle_plan.clone());
     cache.state_schema = Some(emit.state_schema.clone());
     cache.unit_comptime_reads = unit_reads;
     cache.absorb_spec_chunks(built_specs);
@@ -6894,6 +6930,7 @@ fn assemble_overlay(
 ) -> Result<(MirEmit, UnitComptimeReads), CompilerError> {
     let mut out = String::from("-- skull incremental overlay (loaded after main.lua)\n");
     let mut skipped: Vec<(String, String)> = Vec::new();
+    let mut candidate_code_artifact = cache.code_artifact.clone();
     out.push_str("__rock_state_transaction_begin()\n");
     let mut unit_reads = UnitComptimeReads::default();
 
@@ -7041,6 +7078,8 @@ fn assemble_overlay(
                     a.mid,
                     a.gid,
                 );
+                candidate_code_artifact =
+                    candidate_code_artifact.with_replacements(&[&unit.code_artifact]);
                 if let Some(err) = unit.hard_error {
                     return Err(err);
                 }
@@ -7088,15 +7127,28 @@ fn assemble_overlay(
     if shader_changed {
         out.push_str(&cache.shader_registrations.lua);
     }
-    out.push_str(code_slot_publish_lua(&cache.code_artifact, false));
-    if !cache.code_artifact.entries.values().any(|entry| entry.escaping) {
+    let lifecycle_plan =
+        skull_mir::lifecycle::collect_with_artifact(ws, &candidate_code_artifact)?;
+    if !has_code_slots && lifecycle_plan.census.declarations > 0 {
+        out.push_str("__rock_code_slot_begin()\n");
+    }
+    out.push_str(&lifecycle_plan_stage_lua(ws, &cache.scx, &lifecycle_plan));
+    out.push_str(code_slot_publish_lua(
+        &candidate_code_artifact,
+        false,
+        lifecycle_plan.census.declarations > 0,
+    ));
+    if !candidate_code_artifact.entries.values().any(|entry| entry.escaping)
+        && lifecycle_plan.census.declarations == 0
+    {
         out.push_str("__rock_state_transaction_commit()\n");
     }
 
     Ok((
         MirEmit {
             lua: out,
-            code_artifact: cache.code_artifact.clone(),
+            code_artifact: candidate_code_artifact,
+            lifecycle_plan,
             state_schema: cache
                 .state_schema
                 .clone()
@@ -7297,6 +7349,8 @@ pub fn emit_overlay_with_span_edits(
     let changed_code_artifact = overlay_code_artifact(ws, cache, &changed_bodies);
     let (mut emit, overlay_unit_reads) =
         assemble_overlay(ws, cache, shader_changed, &changed_code_artifact)?;
+    cache.code_artifact = emit.code_artifact.clone();
+    cache.lifecycle_plan = Some(emit.lifecycle_plan.clone());
     for (key, reads) in overlay_unit_reads.globals {
         if reads.is_empty() {
             cache.unit_comptime_reads.globals.remove(&key);

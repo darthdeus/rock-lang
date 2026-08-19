@@ -3041,6 +3041,16 @@ fn classify_anno_value(a: &Ast, e: Idx<ExprData>) -> hir::AnnoValue {
         ExprKind::Bool(b) => hir::AnnoValue::Bool(*b),
         ExprKind::String(s) => hir::AnnoValue::String(*s),
         ExprKind::Ident(id) => hir::AnnoValue::Ident(id.clone()),
+        ExprKind::ArrayLiteral(items) => {
+            let names = items
+                .iter()
+                .map(|item| match &a.e(item).kind {
+                    ExprKind::Ident(id) => Some(id.clone()),
+                    _ => None,
+                })
+                .collect::<Option<Vec<_>>>();
+            names.map_or(hir::AnnoValue::Other, hir::AnnoValue::IdentList)
+        }
 
         ExprKind::UnaryMinus(inner) => match &a.e(inner).kind {
             ExprKind::Int(i, _) => hir::AnnoValue::Int(-*i),

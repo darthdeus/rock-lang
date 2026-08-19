@@ -205,8 +205,14 @@ pub fn shift_module_after_edit(
                 if let Some(n) = &mut arg.name {
                     sh.span(&mut n.span);
                 }
-                if let AnnoValue::Ident(id) = &mut arg.value {
-                    sh.span(&mut id.span);
+                match &mut arg.value {
+                    AnnoValue::Ident(id) => sh.span(&mut id.span),
+                    AnnoValue::IdentList(ids) => {
+                        for id in ids {
+                            sh.span(&mut id.span);
+                        }
+                    }
+                    _ => {}
                 }
             }
         }

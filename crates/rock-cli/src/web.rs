@@ -432,21 +432,22 @@ impl WebCompiler {
                 Ok(WebCompile::Reload)
             }
             crate::live_project::LiveUpdate::BodyOnly { reinferred, span_edits, .. } => {
-                match skull_codegen_js::emit::emit_overlay_with_span_edits(
+                let (reload, staged_cache) = skull_codegen_js::emit::emit_overlay_with_span_edits_staged(
                     self.project.workspace(),
                     self.project.entry_module(),
-                    &mut self.cache,
+                    &self.cache,
                     &reinferred,
                     &span_edits,
                 )
                 .map_err(|error| anyhow::anyhow!(
                     "{}",
                     crate::skull_backend::render_project_err(self.project.sources(), &error)
-                ))? {
+                ))?;
+                match reload {
                     skull_codegen_js::emit::JsReload::Overlay(mut overlay) => {
                         let shader_lines = shader_register_lines_js(
                             self.project.workspace(),
-                            &self.cache,
+                            &staged_cache,
                         )?;
                         insert_js_overlay_before_publish(&mut overlay, &shader_lines);
                         rock_host::project::write_atomic(
@@ -454,6 +455,7 @@ impl WebCompiler {
                             &overlay,
                         )?;
                         self.write_current_game(project, out_dir)?;
+                        self.cache = staged_cache;
                         Ok(WebCompile::Overlay)
                     }
                     skull_codegen_js::emit::JsReload::FullRequired => {
@@ -461,7 +463,10 @@ impl WebCompiler {
                         self.emit_full(project, out_dir)?;
                         Ok(WebCompile::Reload)
                     }
-                    skull_codegen_js::emit::JsReload::NoChange => Ok(WebCompile::NoChange),
+                    skull_codegen_js::emit::JsReload::NoChange => {
+                        self.cache = staged_cache;
+                        Ok(WebCompile::NoChange)
+                    }
                 }
             }
         }
@@ -498,6 +503,7 @@ impl WebCompiler {
             program: self.cache.current_program().to_string(),
             main_js_name: self.main_js_name.clone(),
             code_artifact: self.cache.code_artifact().clone(),
+            lifecycle_plan: self.cache.lifecycle_plan().clone(),
             state_schema: self.cache.state_schema().clone(),
         };
         let register_lines = shader_register_lines_js(self.project.workspace(), &self.cache)?;
@@ -1325,6 +1331,7 @@ mod tests {
             program: "function main() {}\n".to_string(),
             main_js_name: Some("main".to_string()),
             code_artifact: skull_mir::code_identity::CodeArtifact::default(),
+            lifecycle_plan: skull_mir::lifecycle::LifecyclePlan::default(),
             state_schema: skull_mir::state_schema::StateSchema::default(),
         };
         let bundle = assemble_web_program(&emitted, "", &[], "games/test");
@@ -1346,6 +1353,7 @@ mod tests {
             program: "function main() {}\n".to_string(),
             main_js_name: Some("main".to_string()),
             code_artifact: artifact,
+            lifecycle_plan: skull_mir::lifecycle::LifecyclePlan::default(),
             state_schema: skull_mir::state_schema::StateSchema::default(),
         };
         let bundle = assemble_web_program(&emitted, "", &[], "games/test");
