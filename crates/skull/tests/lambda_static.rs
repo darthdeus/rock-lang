@@ -45,7 +45,8 @@ fn lambda_body_static_folds_into_enclosing_chunk_statics() {
     // The reset preamble (generated from chunk statics) must guard it, so a reload
     // can nil it on an init-edit.
     assert!(
-        lua.lines().any(|l| l.contains("__static_setup_") && l.contains("HOT_RELOAD")),
+        lua.lines()
+            .any(|l| l.contains("static:named:<test>::setup") && l.contains("__rock_state_prepare_static")),
         "the static must appear in the hot-reload reset preamble"
     );
 }
@@ -60,8 +61,8 @@ fn lambda_body_static_reinits_on_initializer_edit() {
     let script = format!(
         "_G.HOT_RELOAD = false\n{before}\nmain()\n\
          _G.HOT_RELOAD = true\n{after}\nmain()\n\
-         if RESULT == 8 then print(\"PASS\")\n\
-         else print(\"FAIL RESULT=\"..tostring(RESULT)) end\n"
+         if __rock_state_get(\"global:<test>::RESULT::value\") == 8 then print(\"PASS\")\n\
+         else print(\"FAIL RESULT=\"..tostring(__rock_state_get(\"global:<test>::RESULT::value\"))) end\n"
     );
     let out = run_luajit(&script, "reinit");
     assert!(out.starts_with("PASS"), "expected lambda static to reset on init-edit; got: {out}");
@@ -76,8 +77,8 @@ fn lambda_body_static_preserved_across_identical_reload() {
     let script = format!(
         "_G.HOT_RELOAD = false\n{prog}\nmain()\n\
          _G.HOT_RELOAD = true\n{prog}\nmain()\n\
-         if RESULT == 102 then print(\"PASS\")\n\
-         else print(\"FAIL RESULT=\"..tostring(RESULT)) end\n"
+         if __rock_state_get(\"global:<test>::RESULT::value\") == 102 then print(\"PASS\")\n\
+         else print(\"FAIL RESULT=\"..tostring(__rock_state_get(\"global:<test>::RESULT::value\"))) end\n"
     );
     let out = run_luajit(&script, "preserve");
     assert!(out.starts_with("PASS"), "expected lambda static preserved across identical reload; got: {out}");

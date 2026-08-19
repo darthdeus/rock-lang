@@ -274,22 +274,7 @@ pub fn run_luajit(prog: &str, tag: &str) -> String {
     stdout.trim().to_string()
 }
 
-/// THE lock for the Stage-0e ablation mode, which is a process-global flag
-/// (`skull_mir::ablation`).
-///
-/// One lock for the whole test binary. Every `tests/*.rs` here is a `#[path]`
-/// module of `main.rs`, so a `static MODE` declared per file locks a DIFFERENT
-/// mutex -- two such files serialize against themselves and not against each
-/// other, which under `cargo test`'s threads is exactly no serialization at
-/// all. The flag then flips under a running test and one fixture's fatals land
-/// in another's census.
-static ABLATION_MODE: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-static INLINE_MODE: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-/// Hold the ablation mode for one test. `Drop` restores it even on a panicking
-/// assert, so a failing test cannot leave the flag on for the next one.
-pub struct AblationGuard(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
+pub struct AblationGuard(#[allow(dead_code)] skull_mir::ablation::Scope);
 
 impl AblationGuard {
     pub fn on() -> Self {
@@ -301,42 +286,14 @@ impl AblationGuard {
     }
 
     fn set(on: bool) -> Self {
-        // `into_inner` on poison: a test that panicked while holding this left
-        // the flag restored by `Drop` regardless, so the lock is still usable
-        // and refusing here would cascade one failure into every sibling.
-        let g = ABLATION_MODE.lock().unwrap_or_else(|e| e.into_inner());
-        skull_mir::ablation::clear();
-        skull_mir::ablation::set_enabled(on);
-        AblationGuard(g)
+        AblationGuard(skull_mir::ablation::scope(on))
     }
 }
 
-impl Drop for AblationGuard {
-    fn drop(&mut self) {
-        skull_mir::ablation::set_enabled(false);
-        skull_mir::ablation::clear();
-    }
-}
-
-pub struct InlineOffGuard(
-    #[allow(dead_code)] std::sync::MutexGuard<'static, ()>,
-    Option<String>,
-);
+pub struct InlineOffGuard(#[allow(dead_code)] skull_transform::InlineOffGuard);
 
 impl InlineOffGuard {
     pub fn on() -> Self {
-        let guard = INLINE_MODE.lock().unwrap_or_else(|e| e.into_inner());
-        let previous = std::env::var("SKULL_INLINE_OFF").ok();
-        unsafe { std::env::set_var("SKULL_INLINE_OFF", "1") };
-        InlineOffGuard(guard, previous)
-    }
-}
-
-impl Drop for InlineOffGuard {
-    fn drop(&mut self) {
-        match &self.1 {
-            Some(value) => unsafe { std::env::set_var("SKULL_INLINE_OFF", value) },
-            None => unsafe { std::env::remove_var("SKULL_INLINE_OFF") },
-        }
+        InlineOffGuard(skull_transform::inline_off_guard())
     }
 }

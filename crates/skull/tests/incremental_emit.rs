@@ -154,6 +154,106 @@ fn exact_body_edit_has_no_full_concrete_or_artifact_rebuild() {
 }
 
 #[test]
+fn an_unrelated_body_overlay_does_not_restage_the_complete_code_artifact() {
+    let v1 = r#"
+@lifecycle(phase="update", owner="session")
+deco init tick {}
+@tick fn first() {}
+@tick fn second() {}
+fn helper() -> int { return 1 }
+fn main() { let _ = helper() }
+"#;
+    let v2 = v1.replace("return 1", "return 2");
+    let ws1 = ws_of(v1);
+    let mid = skull::user_module_id(&ws1).unwrap();
+    let (full, mut cache) = emit_full(&ws1, mid).expect("emit_full v1");
+    let escaping = full.code_artifact.entries.values().filter(|entry| entry.escaping).count();
+    assert!(escaping >= 2, "fixture must expose a nonzero CodeRef population: {escaping}");
+
+    let ws2 = ws_of(&v2);
+    let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "helper")]);
+    let staged = overlay
+        .lua
+        .lines()
+        .filter(|line| line.contains("__rock_code_slot_stage("))
+        .count();
+    assert_eq!(
+        staged, 0,
+        "an unrelated body edit must not restage all {escaping} CodeRefs"
+    );
+    assert!(
+        overlay.lua.contains("__rock_code_slot_publish()"),
+        "the overlay must retain the transactional publication boundary"
+    );
+}
+
+#[test]
+fn a_changed_decorated_body_stages_its_logical_code_ref() {
+    let v1 = r#"
+@lifecycle(phase="update", owner="session")
+deco init tick {}
+@tick fn first() {}
+@tick fn second() {}
+fn main() {}
+"#;
+    let v2 = v1.replace("@tick fn first() {}", "@tick fn first() { let x = 1 }");
+    let ws1 = ws_of(v1);
+    let mid = skull::user_module_id(&ws1).unwrap();
+    let (full, mut cache) = emit_full(&ws1, mid).expect("emit_full v1");
+    let escaping = full.code_artifact.entries.values().filter(|entry| entry.escaping).count();
+    assert!(escaping >= 2, "fixture must expose a nonzero CodeRef population: {escaping}");
+
+    let ws2 = ws_of(&v2);
+    let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "first")]);
+    let staged: Vec<_> = overlay
+        .lua
+        .lines()
+        .filter(|line| line.contains("__rock_code_slot_stage("))
+        .collect();
+    assert_eq!(staged.len(), 1, "only the changed decorated body should be staged: {staged:?}");
+    assert!(
+        staged[0].contains("named:<t>::first<>"),
+        "the staged slot must retain logical identity: {}",
+        staged[0]
+    );
+    let stage_offset = overlay
+        .lua
+        .find("__rock_code_slot_stage(")
+        .expect("the changed CodeRef must be staged");
+    let body_offset = overlay.lua.find("function first").expect("changed body emission");
+    assert!(
+        body_offset < stage_offset,
+        "CodeRef publication must observe the newly emitted body: {body_offset} !< {stage_offset}"
+    );
+}
+
+#[test]
+fn an_unchanged_state_shape_uses_incremental_schema_validation() {
+    let v1 = "@lifecycle(phase=\"update\", owner=\"session\")\nfn first() {}\n";
+    let v2 = v1.replace("first", "second");
+    let ws1 = ws_of(v1);
+    let mid = skull::user_module_id(&ws1).unwrap();
+    let (full, mut cache) = emit_full(&ws1, mid).expect("emit_full v1");
+    let ws2 = ws_of(&v2);
+    let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "second")]);
+    assert_eq!(
+        cache.state_schema().unwrap().schema_id,
+        full.state_schema.schema_id,
+        "a body-only edit changed the state schema"
+    );
+    let full_collect = overlay
+        .phases
+        .iter()
+        .find(|(name, _)| *name == "  StateSchema full collection")
+        .expect("schema phase census");
+    assert_eq!(
+        full_collect.1.as_nanos(),
+        0,
+        "unchanged state shape took the full declaration walk: {full_collect:?}"
+    );
+}
+
+#[test]
 fn removing_the_last_edge_retracts_concrete_and_artifact_entries_locally() {
     let v1 = "fn leaf<T>(x: T) -> T { x }\nfn main() { let x = leaf(3) }";
     let v2 = "fn leaf<T>(x: T) -> T { x }\nfn main() { let x = 0 }";

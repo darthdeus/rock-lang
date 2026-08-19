@@ -8,6 +8,7 @@
 //!
 //! The GLSL emit shape itself is pinned by the skull-codegen-glsl goldens; here
 //! we pin the driver wiring (collapse + dedup + top-level registration).
+use bone_incremental::session::Session;
 use bone_semantic::hir::BodyOwner;
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::ModuleId;
@@ -550,6 +551,109 @@ fn wgpu_registration_follows_graph_owned_shader_pairs() {
             "selected root {root} is missing from WGSL registration"
         );
     }
+}
+
+const CODEREF_WGPU_OVERLAY_SRC: &str = r#"
+global CALLBACK: fn() -> int = callback
+global SHADER_KEY: string = rock_shader(late_frag)
+
+@nomangle
+fn callback() -> int { return 1 }
+
+@shader(fragment)
+fn late_frag(tc: Vec2) -> Vec4 {
+    return v(tc.x, 0.0, 1.0, 1.0)
+}
+
+@nomangle
+fn run_callback() { print(CALLBACK()) }
+"#;
+
+const CODEREF_WGPU_OVERLAY_EDIT: &str = r#"
+global CALLBACK: fn() -> int = callback
+global SHADER_KEY: string = rock_shader(late_frag)
+
+@nomangle
+fn callback() -> int { return 2 }
+
+@shader(fragment)
+fn late_frag(tc: Vec2) -> Vec4 {
+    return v(1.0, tc.y, 0.0, 1.0)
+}
+
+@nomangle
+fn run_callback() { print(CALLBACK()) }
+"#;
+
+fn wgpu_overlay_session(source: &str) -> Session {
+    let stdlib = rock_host::stdlib_loader::stdlib_files()
+        .iter()
+        .map(|file| {
+            let id = ustr::Ustr::from(format!("<stdlib:{}>", file.name).as_str());
+            skull_parser::parse_module_clean(file.contents, id).expect("stdlib parse")
+        })
+        .collect();
+    Session::new(stdlib, vec![("main.rock".to_string(), source.to_string())]).expect("session")
+}
+
+#[test]
+fn a_failed_wgpu_overlay_cannot_publish_a_staged_coderef() {
+    let mut session = wgpu_overlay_session(CODEREF_WGPU_OVERLAY_SRC);
+    let mid = skull::user_module_id(session.workspace()).expect("user module");
+    let (full, mut cache) = emit_full_in_for_renderer(
+        session.workspace(),
+        mid,
+        None,
+        RendererTarget::Wgpu,
+    )
+    .expect("combined CodeRef/WGPU full emit");
+    let escaping = full.code_artifact.entries.values().filter(|entry| entry.escaping).count();
+    assert!(escaping > 0, "CodeArtifact escaping population must be nonzero");
+    let census = cache.wgpu_projection_census().expect("WGPU projection census");
+    assert!(census.examined > 0 && census.admitted > 0, "WGPU projection population must be nonzero: {census:?}");
+
+    let update = session
+        .update_file("main.rock", CODEREF_WGPU_OVERLAY_EDIT)
+        .expect("compatible body edit");
+    let overlay = emit_overlay_result(session.workspace(), &mut cache, &update.reinferred)
+        .expect("combined CodeRef/WGPU overlay");
+    assert!(overlay.lua.contains("__rock_code_slot_stage"));
+    assert!(overlay.lua.contains("__rock_wgpu_shader_register("));
+    assert!(
+        overlay.lua.find("__rock_wgpu_shader_register(").unwrap()
+            < overlay.lua.find("__rock_code_slot_publish").unwrap(),
+        "WGPU registration must precede CodeRef publication"
+    );
+
+    let script = format!(
+        "function __rock_shader_register(...) end\n\
+         _G.PENDING_WGPU_SHADER_SRCS = {{}}\n\
+         _G.FAIL_WGPU = false\n\
+         function stone_wgpu_renderer_register_pending()\n\
+             return not _G.PENDING_WGPU_SHADER_SRCS.failed\n\
+         end\n\
+         function stone_wgpu_renderer_publish_pending()\n\
+             return true\n\
+         end\n\
+         function __rock_wgpu_shader_register(_, _, _, _)\n\
+             if _G.FAIL_WGPU then _G.PENDING_WGPU_SHADER_SRCS.failed = true end\n\
+         end\n\
+         {}\n\
+         run_callback()\n\
+         _G.FAIL_WGPU = true\n\
+         local ok = xpcall(function()\n{}end, debug.traceback)\n\
+         if not ok then __rock_code_slot_abort() end\n\
+         print(ok)\n\
+         print(_G.__rock_code_slot_pending == nil)\n\
+         run_callback()\n\
+         _G.FAIL_WGPU = false\n\
+         {}\n\
+         print(_G.__rock_code_slot_pending == nil)\n\
+         run_callback()\n",
+        full.lua, overlay.lua, overlay.lua
+    );
+    let output = crate::common::run_luajit(&script, "coderef_wgpu_overlay");
+    assert_eq!(output, "1\nfalse\ntrue\n1\ntrue\n2", "failed WGPU load must retain the old CodeRef, then the control publishes the edit");
 }
 
 const BLOOM_PROJECTION_SRC: &str = r#"

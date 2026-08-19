@@ -5,36 +5,18 @@
 //! JS retains a delivery queue, while the shared graph owns each instance and
 //! its resolved bound tree.
 //!
-//! The ablation flag is process-global. `cargo test` runs this crate's tests as
-//! threads in one binary, so the guard below holds a lock shared by every test
-//! in it that touches the mode -- today only this file.
-
 use crate::common::ws_with;
 
-/// THE ablation lock for this test binary. One mutex, not one per file: a
-/// per-file `static` serializes a file against itself and against nothing else.
-static ABLATION_MODE: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
 struct ModeGuard(
-    #[allow(dead_code)] std::sync::MutexGuard<'static, ()>,
     #[allow(dead_code)]
     crate::common::InlineOffGuard,
+    #[allow(dead_code)] skull_mir::ablation::Scope,
 );
 
 impl ModeGuard {
     fn on() -> Self {
-        let g = ABLATION_MODE.lock().unwrap_or_else(|e| e.into_inner());
         let inline = crate::common::InlineOffGuard::on();
-        skull_mir::ablation::clear();
-        skull_mir::ablation::set_enabled(true);
-        ModeGuard(g, inline)
-    }
-}
-
-impl Drop for ModeGuard {
-    fn drop(&mut self) {
-        skull_mir::ablation::set_enabled(false);
-        skull_mir::ablation::clear();
+        ModeGuard(inline, skull_mir::ablation::scope(true))
     }
 }
 

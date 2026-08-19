@@ -1,9 +1,7 @@
 //! P3 of docs/closure-env-records-plan.md: a lambda whose scope captures NOTHING
 //! hoists to a top-level `function <enclosing>__lambda<k>(<params>) ... end` and
-//! is referenced by that global name at the creation site (a raw Lua function
-//! value -- no record, no `__call`, zero alloc). A CAPTURING lambda is untouched
-//! (stays an inline closure). Naming `k` = the `Inst::Lambda`'s inst-arena index
-//! order (shared with the future P2.6 record naming).
+//! is referenced through one reusable logical CodeRef at the creation site. A
+//! capturing lambda carries that CodeRef plus its environment record.
 use crate::common::{emit_module, function_body, mangled_name, run_luajit};
 
 // `free_loop` creates a capture-free lambda (`() => { sink(42) }` closes over
@@ -45,8 +43,8 @@ fn capture_free_lambda_hoists_to_named_toplevel() {
     );
     let body = function_body(&lua, "free_loop");
     assert!(
-        body.contains(&lam),
-        "the creation site must reference the hoisted fn by name:\n{body}"
+        body.contains("__rock_code_slot_ref("),
+        "the creation site must reference the reusable CodeRef:\n{body}"
     );
     // An anonymous inline closure renders `function(` (no space); the enclosing
     // fn header is `function free_loop(` (space + name), so `function(` is the
@@ -70,8 +68,8 @@ fn capturing_lambda_hoists_as_record() {
         "a capturing lambda no longer renders an inline closure at the creation site:\n{body}"
     );
     assert!(
-        body.contains(&format!("setmetatable({{ __fn = {lam}")),
-        "the capturing lambda's creation site builds an env record:\n{body}"
+        body.contains("__slot = __rock_code_slot_ref("),
+        "the capturing lambda's creation site builds a CodeRef env record:\n{body}"
     );
     assert!(
         lua.contains(&format!("function {lam}")),

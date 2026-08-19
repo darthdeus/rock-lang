@@ -3,10 +3,9 @@
 //! Spawns a real `rock stone-test` against a minimal stone-using project,
 //! reads the on-disk compiled main.lua, then runs a hot-reload simulation
 //! under LuaJIT with HOT_RELOAD=true to skip `__rock_main_wrapper` (and
-//! therefore stone's runtime/SDL init). The compiled code's
-//! `decorator_init_code` still runs unconditionally, which is what
-//! populates registries like `SHUTDOWN_SYSTEMS` — so the contract is
-//! exercisable without a graphics context.
+//! therefore stone's runtime/SDL init). The compiler-owned lifecycle plan is
+//! published before that wrapper and remains the only system population the
+//! reload path consumes.
 
 use std::path::Path;
 use std::process::Command;
@@ -78,14 +77,9 @@ fn make_seed(main_rock: &str) -> Vec<(String, String)> {
     ]
 }
 
-/// Pin the post-fix behavior of `clear_all_systems()` for SHUTDOWN_SYSTEMS:
-/// after one load + clear + one reload, the registry holds exactly what one
-/// load registers, not double it (which would mean the clear is a no-op for
-/// that registry — the leak this test prevents). The count is taken from the
-/// first load rather than hardcoded: the engine registers `@shutdown`
-/// handlers of its own (log_sink's suppression summary), so a literal 1
-/// pinned "the seed's handler is the only one in the process", which is not
-/// the contract under test.
+/// Pin the lifecycle-plan behavior across a clear and reload: the immutable
+/// compiler-owned shutdown population remains one plan, rather than a mutable
+/// decorator registry that can accumulate duplicate entries.
 #[test]
 fn shutdown_systems_clear_contract_via_real_engine() {
     let seed_owned = make_seed(
@@ -111,11 +105,8 @@ fn shutdown_systems_clear_contract_via_real_engine() {
     // Simulate two loads with `clear_all_systems()` between them, the
     // shape `do_hot_reload()` uses. HOT_RELOAD=true on the first load
     // so __rock_main_wrapper (which would call stone_run_game and need
-    // libstone.dylib) short-circuits; globals still init because
-    // `__rock_old_globals` is nil and the per-global guard's
-    // ` or not _G.__rock_old_globals` clause fires. Decorator init code
-    // runs unconditionally (no HOT_RELOAD guard), so SHUTDOWN_SYSTEMS
-    // gets pushed to.
+    // libstone.dylib) short-circuits. The staged lifecycle plan publishes
+    // before the wrapper and is not rebuilt by a mutable registry clear.
     //
     // We `dofile` the harness's on-disk main.lua rather than embedding
     // its text — embedding via `[==[...]==]` collides with the engine's
@@ -126,24 +117,25 @@ fn shutdown_systems_clear_contract_via_real_engine() {
          dofile(main_lua)\n\
          _G.HOT_RELOAD = false\n\n\
          -- Phase 1: post-initial-load\n\
-         local len_after_load = _G.SHUTDOWN_SYSTEMS.len\n\
+         local shutdown_plan = _G.__ROCK_LIFECYCLE_PLAN.shutdown\n\
+         local len_after_load = shutdown_plan and shutdown_plan.len or 0\n\
          if len_after_load < 1 then\n\
-             print(\"FAIL: post-load SHUTDOWN_SYSTEMS.len = \" .. tostring(len_after_load) .. \", expected at least the seed's own handler\")\n\
+             print(\"FAIL: post-load lifecycle shutdown plan len = \" .. tostring(len_after_load) .. \", expected at least the seed's own handler\")\n\
              os.exit(1)\n\
          end\n\n\
-         -- Phase 2: engine's pre-dofile clear\n\
+         -- Phase 2: engine's pre-dofile mutable-registry clear\n\
          clear_all_systems_ret_unit()\n\
-         if _G.SHUTDOWN_SYSTEMS.len ~= 0 then\n\
-             print(\"FAIL: post-clear SHUTDOWN_SYSTEMS.len = \" .. tostring(_G.SHUTDOWN_SYSTEMS.len) .. \", expected 0 (clear must wipe SHUTDOWN_SYSTEMS, not just the *_SYSTEMS arrays)\")\n\
+         if _G.__ROCK_LIFECYCLE_PLAN.shutdown.len ~= len_after_load then\n\
+             print(\"FAIL: post-clear lifecycle shutdown plan len = \" .. tostring(_G.__ROCK_LIFECYCLE_PLAN.shutdown.len) .. \", expected \" .. tostring(len_after_load) .. \"\")\n\
              os.exit(1)\n\
          end\n\n\
          -- Phase 3: hot reload re-runs decorator_init_code\n\
          _G.HOT_RELOAD = true\n\
          dofile(main_lua)\n\
          _G.HOT_RELOAD = false\n\n\
-         -- Phase 4: back to one load's worth, not doubled\n\
-         if _G.SHUTDOWN_SYSTEMS.len ~= len_after_load then\n\
-             print(\"FAIL: post-reload SHUTDOWN_SYSTEMS.len = \" .. tostring(_G.SHUTDOWN_SYSTEMS.len) .. \", expected \" .. tostring(len_after_load) .. \" — the cleanup contract is broken (clear_all_systems missed SHUTDOWN_SYSTEMS)\")\n\
+         -- Phase 4: back to one plan's worth, not a duplicated registry\n\
+         if _G.__ROCK_LIFECYCLE_PLAN.shutdown.len ~= len_after_load then\n\
+             print(\"FAIL: post-reload lifecycle shutdown plan len = \" .. tostring(_G.__ROCK_LIFECYCLE_PLAN.shutdown.len) .. \", expected \" .. tostring(len_after_load) .. \"\")\n\
              os.exit(1)\n\
          end\n\
          print(\"PASS\")\n",

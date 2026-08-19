@@ -621,26 +621,18 @@ value SceneBuilder {
     return obj.__ty
 """
 
-// A capturing-lambda env record (`setmetatable({__fn=..,..}, __rock_fn_mt)`) is
-// the one metatable-carrying value in skull output. Every generic table-walker
-// (__op_eq, inspect, serialize) must treat it as an opaque callable LEAF, not a
-// data table -- this is the shared probe (mirrors __rock_get_type sharing). The
-// global is guarded for a bare test harness with no runtime prelude; on a
-// non-table `v`, getmetatable returns nil so the compare is false.
+// A Rock CodeRef slot or env record is the callable value in skull output.
+// Every generic table-walker (__op_eq, inspect, serialize) must treat it as an
+// opaque callable LEAF, not a data table. The classification itself lives in
+// the backend prelude so snapshot/checkpoint walks and ordinary value helpers
+// ask the same question.
 @nomangle inline(lua) fn __rock_is_fn_record(v: any) -> bool = """
-    return _G.__rock_fn_mt ~= nil and getmetatable(v) == _G.__rock_fn_mt
+    return _G.__rock_code_ref_kind ~= nil and _G.__rock_code_ref_kind(v) ~= nil
 """
 
-// Register a callback to fire after each hot reload. Two forms:
-//   - `on_hot_reload(f)` stores a function VALUE — for closures / anonymous
-//     callbacks. The value is captured once, so an EDITED body does not
-//     propagate (the closure is fixed). Fine when the callback CODE is stable
-//     and only its effect must re-run (buff reapply, cache rehydration).
-//   - `on_hot_reload_by_name(name)` stores a global NAME, re-resolved via
-//     `_G[name]` at every fire — so an edited body of that global DOES
-//     propagate (the name-lookup trick coroutine step fns use). The `@on_reload`
-//     deco uses this form, which is why `@on_reload` requires `@nomangle` (the
-//     Lua global must equal the source name for `_G[name]` to resolve).
+// Register a callback to fire after each hot reload. The function value is a
+// CodeRef, so a compatible body overlay refreshes it in place; captures remain
+// the same value stored by the registry.
 //
 // Semantics:
 //   - Callbacks fire in FIFO order of registration.
@@ -661,46 +653,18 @@ value SceneBuilder {
     _G.__rock_on_hot_reload[#_G.__rock_on_hot_reload + 1] = f
 """
 
-// Register a hot-reload callback by its GLOBAL NAME (re-resolved each fire), so
-// an edited callback body propagates. The `@on_reload` deco uses this.
-@nomangle inline(lua) fn on_hot_reload_by_name(name: string) = """
-    if not _G.__rock_on_hot_reload then
-        _G.__rock_on_hot_reload = {}
-    end
-    _G.__rock_on_hot_reload[#_G.__rock_on_hot_reload + 1] = name
-"""
-
 // JS: no hot reload (a browser/node program loads once); registration is a
 // no-op so @on_reload-decorated fns compile unchanged.
 @nomangle inline(js) fn on_hot_reload(f: fn() -> ()) = ""
-@nomangle inline(js) fn on_hot_reload_by_name(name: string) = ""
 
 // Fire every registered on_hot_reload callback. Iterates a COPY and does NOT
-// clear the list (see on_hot_reload's doc). A STRING entry is a global name,
-// resolved via `_G[name]` at fire time (name-lookup → edited bodies propagate);
-// a missing name is logged once and skipped (the global was renamed/removed, or
-// mangled — `@on_reload` requires `@nomangle` to keep it stable). A non-string
-// entry is a function value, called directly.
+// clear the list (see on_hot_reload's doc).
 @nomangle inline(lua) fn __rock_fire_hot_reload_callbacks() = """
     local src = _G.__rock_on_hot_reload or {}
     local cbs = {}
     for i = 1, #src do cbs[i] = src[i] end
     for i = 1, #cbs do
-        local entry = cbs[i]
-        if type(entry) == "string" then
-            local f = _G[entry]
-            if f then
-                f()
-            else
-                _G.__rock_hot_reload_missing = _G.__rock_hot_reload_missing or {}
-                if not _G.__rock_hot_reload_missing[entry] then
-                    _G.__rock_hot_reload_missing[entry] = true
-                    __stone_log(0, "HOTRELOAD", "on_reload callback '" .. entry .. "' is not a global (renamed/mangled? @on_reload needs @nomangle); skipping")
-                end
-            end
-        else
-            entry()
-        end
+        cbs[i]()
     end
 """
 
@@ -718,24 +682,16 @@ value SceneBuilder {
 // definition, so after `clear_all_systems()` wipes the list and the engine
 // re-runs the script, the decorated function re-registers itself.
 //
-// Registers BY NAME (not value), so editing the decorated function's body and
-// hot-reloading runs the NEW body — the global is re-resolved at fire time.
-// This requires the function to be `@nomangle` (the Lua global must equal the
-// source name); a missing `@nomangle` is a compile error.
+// Registers the decorated function value. Its CodeRef slot makes compatible
+// body edits visible without rebuilding the registry entry.
 //
 // This is the canonical way to hook into hot reload for global state
 // that needs to refresh after reload — top-level `on_hot_reload(f)` calls
 // don't work for this purpose because they live in __rock_main, which is
 // HOT_RELOAD-guarded and skipped on reload.
 //
-// Example:
-//   @nomangle
-//   @on_reload
-//   fn reapply_buffs() {
-//       for p in ALL_PLAYERS { p.buffs.reapply() }
-//   }
 deco init on_reload {
-    on_hot_reload_by_name(target.name)
+    on_hot_reload(transmute(target.func))
 }
 
 // Program entry wrapper. The assembler emits a single call to this at the
@@ -1898,11 +1854,10 @@ const EPSILON: float = 0.0000001
 
     -- table case
     local t = v
-    -- A capturing-lambda env record is a callable value, not a data table --
-    -- render it as its function (the hoisted `__fn`), matching a capture-free
-    -- lambda (a raw Lua function), never by walking its capture fields.
+    -- A CodeRef env record is a callable value, not a data table -- render it
+    -- as a function leaf, never by walking its capture fields.
     if __rock_is_fn_record(t) then
-        return tostring(t.__fn)
+        return "function: " .. tostring(t.__slot and t.__slot.key or t)
     end
     if visited then
         if visited[t] then

@@ -244,8 +244,8 @@ pub(crate) fn inst_uses(inst: &Inst, push: &mut impl FnMut(Idx<Inst>)) {
         }
         Inst::MapNext { table, .. } => push(*table),
         Inst::CoroSetInner(x) => push(*x),
-        // The lambda is rendered inline (like `Inst::Lambda`), not a colored
-        // value; and hooks are peeled to the ctor before codegen anyway.
+        // Hooks are peeled to the constructor before codegen; their detached
+        // bodies are ordinary MirFuncs and are colored independently.
         Inst::CoroHook { .. } => {}
     }
 }
@@ -640,9 +640,8 @@ fn cell_uses(inst: &Inst, push: &mut impl FnMut(Idx<Cell>)) {
 /// pass those an all-`u32::MAX` table so they keep raw `c<raw>` names and the
 /// frame-field naming is preserved). Returns a dense `raw(cell) -> color` table
 /// (`u32::MAX` = uncolored). Non-interfering cells share a color; the caller
-/// renders a colored cell as `c<color>`. A cell a closure touches (captured, a
-/// closure-local store, or a lambda param) is forced to a UNIQUE color: the
-/// closure captures that local by identity, so it must never be reused.
+/// renders a colored cell as `c<color>`. Cells in detached nested CFGs are
+/// forced to a unique color and are never emitted with their enclosing body.
 pub fn color_cells(func: &MirFunc) -> Vec<u32> {
     let top: Vec<Idx<Block>> = reachable_blocks_from(func, func.entry());
     let top_set: HashSet<Idx<Block>> = top.iter().copied().collect();
