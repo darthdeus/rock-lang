@@ -4793,6 +4793,18 @@ fn assemble(
     for c in spec_chunks.values() {
         needed_foreign.extend(c.calls.iter().map(|f| shared(*f)));
     }
+    let foreign_bindings: Vec<(FuncRef, String)> = ws
+        .modules
+        .iter()
+        .filter(|module| module.id != ModuleId::builtin())
+        .flat_map(|module| {
+            module.functions.iter().filter_map(|(fid, _)| {
+                let self_ref = FuncRef { module: module.id, func: fid };
+                foreign_artifact_binding(ws, &cache.lua_view, &needed_foreign, self_ref)
+                    .map(|physical| (self_ref, physical))
+            })
+        })
+        .collect();
 
     // Function definitions, every module (cached chunk for ordinary/coroutine,
     // regenerated for extern / inline(lua)). The cached chunks were built in
@@ -4998,9 +5010,20 @@ fn assemble(
     }
     let state_schema = skull_mir::state_schema::StateSchema::collect(ws, scx, &code_artifact, &all_statics)
         .map_err(|error| CompilerError::new_no_location(error.to_string()))?;
+    let (binding_plan, effect_plan) = build_artifact_plans(
+        ws,
+        scx,
+        &code_artifact,
+        &state_schema,
+        &foreign_bindings,
+    )?;
+    code_artifact.binding_plan = binding_plan;
+    code_artifact.effect_plan = effect_plan;
+    let has_artifact_plans = !code_artifact.binding_plan.entries.is_empty();
     let has_state_publication = code_artifact.entries.values().any(|entry| entry.escaping)
         || definition_plan.census.declarations > 0
-        || lifecycle_plan.census.declarations > 0;
+        || lifecycle_plan.census.declarations > 0
+        || has_artifact_plans;
     out.push_str("__rock_state_transaction_begin()\n");
     out.push_str(&format!(
         "__rock_state_publish_schema({:?})\n",
@@ -5014,20 +5037,28 @@ fn assemble(
     out.push_str(&globals_lua);
     skipped.extend(global_skipped);
     let has_definition_plan = definition_plan.census.declarations > 0;
-    if code_artifact.entries.values().any(|entry| entry.escaping) || has_definition_plan {
+    if code_artifact.entries.values().any(|entry| entry.escaping)
+        || has_definition_plan
+        || lifecycle_plan.census.declarations > 0
+        || has_artifact_plans
+    {
         out.push_str(skull_codegen_lua::FN_MT_PRELUDE);
     }
     // Global initializer bodies (including their escaping lambdas) are now
     // defined, so slot staging must follow them but precede initializer calls.
     let code_slot_stage = code_slot_registration_lua(ws, scx, &code_artifact)?;
     out.push_str(&code_slot_stage);
-    if (has_definition_plan || lifecycle_plan.census.declarations > 0)
+    if (has_definition_plan || lifecycle_plan.census.declarations > 0 || has_artifact_plans)
         && !code_artifact.entries.values().any(|entry| entry.escaping)
     {
         out.push_str("__rock_code_slot_begin()\n");
     }
     out.push_str(&definition_plan_stage_lua(ws, scx, &definition_plan));
     out.push_str(&lifecycle_plan_stage_lua(ws, scx, &lifecycle_plan));
+    if has_artifact_plans {
+        out.push_str(&artifact_binding_plan_stage_lua(&code_artifact.binding_plan));
+        out.push_str(&shadow_effect_plan_stage_lua(&code_artifact.effect_plan));
+    }
 
     // Order the init lines by their transitive global-read closure over the full
     // call graph (now that every fn's direct facts are recorded).
@@ -5265,6 +5296,7 @@ fn code_slot_publish_lua(
     if artifact.entries.values().any(|entry| entry.escaping)
         || has_definition_plan
         || has_lifecycle_plan
+        || !artifact.binding_plan.entries.is_empty()
     {
         "__rock_code_slot_publish()\n"
     } else {
@@ -5344,6 +5376,332 @@ fn mark_generated_code_values(
             }
         }
     }
+}
+
+fn foreign_artifact_binding(
+    ws: &Workspace,
+    view: &crate::artifact::ArtifactView,
+    needed_foreign: &FxHashSet<Instance>,
+    self_ref: FuncRef,
+) -> Option<String> {
+    let function = &ws.module(self_ref.module).functions[self_ref.func];
+    if function.backend == bone_semantic::hir::FnBackend::Js {
+        return None;
+    }
+    if function.is_extern {
+        return function
+            .ffi_lib
+            .filter(|_| should_emit_via_view(ws, view, self_ref))
+            .map(|_| function.name.to_string());
+    }
+    function
+        .inline_body
+        .as_ref()
+        .filter(|(backend, _)| *backend == bone_semantic::hir::FnBackend::Lua)
+        .filter(|_| emits_foreign_definition(ws, view, needed_foreign, self_ref))
+        .map(|_| mangle_fn(ws, function))
+}
+
+fn shadow_virtualized_module(file: &str) -> bool {
+    is_stdlib_module_file(file)
+        || file.starts_with("stone/engine/")
+        || file.contains("/stone/engine/")
+}
+
+fn shadow_effect_for_function(
+    file: &str,
+    function: &bone_semantic::hir::Function,
+) -> (skull_mir::artifact_plan::ShadowEffectPolicy, String) {
+    if shadow_virtualized_module(file) {
+        return (
+            skull_mir::artifact_plan::ShadowEffectPolicy::Virtualized,
+            "compiler-owned engine/stdlib boundary".to_string(),
+        );
+    }
+    if function.is_extern {
+        return (
+            skull_mir::artifact_plan::ShadowEffectPolicy::Reject,
+            "opaque external boundary is not classified for shadow replay".to_string(),
+        );
+    }
+    if let Some((bone_semantic::hir::FnBackend::Lua, body)) = &function.inline_body {
+        let body = body.as_str();
+        if body.contains("ffi.C") || body.contains("ffi.load") {
+            return (
+                skull_mir::artifact_plan::ShadowEffectPolicy::Reject,
+                "unclassified native/host effect".to_string(),
+            );
+        }
+        let dangerous = [
+            ("io.", "filesystem effect"),
+            ("os.", "process/environment effect"),
+            ("package.", "module/filesystem effect"),
+            ("require", "module/filesystem effect"),
+            ("socket", "network effect"),
+            ("http", "network effect"),
+        ];
+        if let Some((_, reason)) = dangerous.iter().find(|(needle, _)| body.contains(needle)) {
+            return (
+                skull_mir::artifact_plan::ShadowEffectPolicy::Reject,
+                (*reason).to_string(),
+            );
+        }
+        if body.contains("ffi.") {
+            return (
+                skull_mir::artifact_plan::ShadowEffectPolicy::Virtualized,
+                "compiler-owned native projection".to_string(),
+            );
+        }
+        if body.contains("__rock_") {
+            return (
+                skull_mir::artifact_plan::ShadowEffectPolicy::Virtualized,
+                "compiler-owned runtime boundary".to_string(),
+            );
+        }
+        return (
+            skull_mir::artifact_plan::ShadowEffectPolicy::Reject,
+            "opaque inline Lua body is not classified for shadow replay".to_string(),
+        );
+    }
+    (
+        skull_mir::artifact_plan::ShadowEffectPolicy::Pure,
+        "compiler-owned pure body".to_string(),
+    )
+}
+
+fn build_artifact_plans(
+    ws: &Workspace,
+    scx: &skull_mir::lower::ScalarCtx,
+    artifact: &skull_mir::code_identity::CodeArtifact,
+    state_schema: &skull_mir::state_schema::StateSchema,
+    foreign_bindings: &[(FuncRef, String)],
+) -> Result<
+    (
+        skull_mir::artifact_plan::ArtifactBindingPlan,
+        skull_mir::artifact_plan::ShadowEffectPlan,
+    ),
+    CompilerError,
+> {
+    use skull_mir::artifact_plan::{
+        ArtifactBinding, ArtifactBindingKind, ShadowEffect, ShadowEffectPlan,
+    };
+    use skull_mir::code_identity::{CodeIdentity, CodeOwner};
+    use skull_mir::state_schema::{entry_state_keys, global_identity, StateKind};
+
+    let mut bindings = Vec::new();
+    for module in ws.modules.iter().filter(|m| m.id != ModuleId::builtin()) {
+        for (_, global) in module.globals.iter() {
+            let identity = global_identity(module.file, global.name);
+            if global.is_const {
+                let plan = skull_mir::lower::GlobalPlan::for_declared_type(ws, scx, global.ty)
+                    .map_err(|error| CompilerError::new_no_location(error.message))?;
+                let physical = plan
+                    .leaf_names(global.name)
+                    .unwrap_or_else(|| vec![global.name]);
+                for leaf in physical {
+                    bindings.push(ArtifactBinding {
+                        identity: identity.clone(),
+                        physical: leaf.to_string(),
+                        diagnostic: global.name.to_string(),
+                        kind: ArtifactBindingKind::Global,
+                        state_key: None,
+                    });
+                }
+            } else {
+                let entry = state_schema.entry(StateKind::Global, &identity).ok_or_else(|| {
+                    CompilerError::new_no_location(format!(
+                        "mutable global `{}` has no compiler-owned StateSchema entry",
+                        global.name
+                    ))
+                })?;
+                for (physical, state_key) in entry
+                    .physical
+                    .iter()
+                    .zip(entry_state_keys(entry).into_iter())
+                {
+                    bindings.push(ArtifactBinding {
+                        identity: identity.clone(),
+                        physical: physical.clone(),
+                        diagnostic: global.name.to_string(),
+                        kind: ArtifactBindingKind::Global,
+                        state_key: Some(state_key),
+                    });
+                }
+            }
+        }
+    }
+
+    for entry in artifact.entries.values() {
+        let Some(body_name) = entry.body_name else { continue };
+        bindings.push(ArtifactBinding {
+            identity: entry.identity.logical_key(ws, scx.interner()),
+            physical: body_name.to_string(),
+            diagnostic: entry.identity.logical_key(ws, scx.interner()),
+            kind: ArtifactBindingKind::Callable,
+            state_key: None,
+        });
+    }
+    for (fref, physical) in foreign_bindings {
+        let function = &ws.module(fref.module).functions[fref.func];
+        bindings.push(ArtifactBinding {
+            identity: CodeIdentity::Named(Instance::base(*fref)).logical_key(ws, scx.interner()),
+            physical: physical.clone(),
+            diagnostic: function.name.to_string(),
+            kind: ArtifactBindingKind::Callable,
+            state_key: None,
+        });
+    }
+
+    let mut effects = Vec::new();
+    let mut effect_by_physical = BTreeMap::<String, skull_mir::artifact_plan::ShadowEffect>::new();
+    for entry in artifact.entries.values() {
+        let Some(body_name) = entry.body_name else { continue };
+        let identity = entry.identity.logical_key(ws, scx.interner());
+        let (policy, reason) = match &entry.identity {
+            CodeIdentity::Named(instance) => {
+                let module = ws.module(instance.func.module);
+                shadow_effect_for_function(module.file.as_str(), &module.functions[instance.func.func])
+            }
+            CodeIdentity::Artifact(CodeOwner::Artifact { module, .. })
+                if shadow_virtualized_module(module.as_str()) => (
+                    skull_mir::artifact_plan::ShadowEffectPolicy::Virtualized,
+                    "compiler-owned engine/stdlib boundary".to_string(),
+                ),
+            CodeIdentity::Artifact(CodeOwner::Artifact { .. }) => (
+                skull_mir::artifact_plan::ShadowEffectPolicy::Pure,
+                "compiler-owned artifact root".to_string(),
+            ),
+            _ => (
+                skull_mir::artifact_plan::ShadowEffectPolicy::Pure,
+                "compiler-owned generated body".to_string(),
+            ),
+        };
+        let diagnostic = identity.clone();
+        let effect = ShadowEffect {
+            identity,
+            physical: body_name.to_string(),
+            diagnostic,
+            policy,
+            reason,
+        };
+        effect_by_physical.insert(effect.physical.clone(), effect);
+    }
+
+    for (fref, physical) in foreign_bindings {
+        let module = ws.module(fref.module);
+        let function = &module.functions[fref.func];
+        let identity = CodeIdentity::Named(Instance::base(*fref)).logical_key(ws, scx.interner());
+        let (policy, reason) = shadow_effect_for_function(module.file.as_str(), function);
+        effect_by_physical.entry(physical.clone()).or_insert(ShadowEffect {
+            identity,
+            physical: physical.clone(),
+            diagnostic: function.name.to_string(),
+            policy,
+            reason,
+        });
+    }
+
+    // Opaque declarations can be spliced away and therefore have no Artifact
+    // binding. Keep their compiler classification anyway: a dangerous body is
+    // never admitted merely because lowering erased its standalone symbol.
+    for module in ws.modules.iter().filter(|m| m.id != ModuleId::builtin()) {
+        for (fid, function) in module.functions.iter() {
+            if function.backend == bone_semantic::hir::FnBackend::Js {
+                continue;
+            }
+            let physical = if function.is_extern {
+                function.name.to_string()
+            } else if function
+                .inline_body
+                .as_ref()
+                .is_some_and(|(backend, _)| *backend == bone_semantic::hir::FnBackend::Lua)
+            {
+                mangle_fn(ws, function)
+            } else {
+                continue;
+            };
+            let identity = CodeIdentity::Named(Instance::base(FuncRef {
+                module: module.id,
+                func: fid,
+            }))
+            .logical_key(ws, scx.interner());
+            let (policy, reason) = shadow_effect_for_function(module.file.as_str(), function);
+            effect_by_physical.entry(physical.clone()).or_insert(ShadowEffect {
+                identity,
+                physical,
+                diagnostic: function.name.to_string(),
+                policy,
+                reason,
+            });
+        }
+    }
+    effects.extend(effect_by_physical.into_values());
+
+    let binding_plan = skull_mir::artifact_plan::ArtifactBindingPlan::from_entries(bindings)
+        .map_err(CompilerError::new_no_location)?;
+    let effect_plan = ShadowEffectPlan::from_entries(effects).map_err(CompilerError::new_no_location)?;
+    Ok((binding_plan, effect_plan))
+}
+
+fn artifact_binding_plan_stage_lua(
+    plan: &skull_mir::artifact_plan::ArtifactBindingPlan,
+) -> String {
+    let mut out = String::from("__rock_artifact_binding_plan_stage({ entries = { len = ");
+    let _ = write!(out, "{}, _data = {{\n", plan.entries.len());
+    for (index, entry) in plan.entries.iter().enumerate() {
+        let state_key = entry
+            .state_key
+            .as_deref()
+            .map_or_else(|| "nil".to_string(), skull_codegen_lua::lua_string);
+        let _ = writeln!(
+            out,
+            "[{}] = {{ identity = {}, physical = {}, diagnostic = {}, kind = {}, state_key = {} }},",
+            index + 1,
+            skull_codegen_lua::lua_string(&entry.identity),
+            skull_codegen_lua::lua_string(&entry.physical),
+            skull_codegen_lua::lua_string(&entry.diagnostic),
+            skull_codegen_lua::lua_string(entry.kind.as_str()),
+            state_key,
+        );
+    }
+    let _ = writeln!(
+        out,
+        "}} }}, census = {{ examined = {}, assigned = {}, duplicate = {}, incomplete = {} }} }})",
+        plan.census.examined,
+        plan.census.assigned,
+        plan.census.duplicate,
+        plan.census.incomplete,
+    );
+    out
+}
+
+fn shadow_effect_plan_stage_lua(plan: &skull_mir::artifact_plan::ShadowEffectPlan) -> String {
+    let mut out = String::from("__rock_shadow_effect_plan_stage({ admissible = ");
+    let _ = write!(out, "{}, entries = {{ len = ", plan.admissible);
+    let _ = writeln!(out, "{}, _data = {{", plan.entries.len());
+    for (index, entry) in plan.entries.iter().enumerate() {
+        let _ = writeln!(
+            out,
+            "[{}] = {{ identity = {}, physical = {}, diagnostic = {}, policy = {}, reason = {} }},",
+            index + 1,
+            skull_codegen_lua::lua_string(&entry.identity),
+            skull_codegen_lua::lua_string(&entry.physical),
+            skull_codegen_lua::lua_string(&entry.diagnostic),
+            skull_codegen_lua::lua_string(entry.policy.as_str()),
+            skull_codegen_lua::lua_string(&entry.reason),
+        );
+    }
+    let _ = writeln!(
+        out,
+        "}} }}, census = {{ examined = {}, classified = {}, pure = {}, virtualized = {}, rejected = {}, duplicate = {} }} }})",
+        plan.census.examined,
+        plan.census.classified,
+        plan.census.pure,
+        plan.census.virtualized,
+        plan.census.rejected,
+        plan.census.duplicate,
+    );
+    out
 }
 
 fn lifecycle_plan_stage_lua(

@@ -5,8 +5,9 @@
 mod common;
 
 use common::{emit_mir, run_luajit, try_emit_module};
+use skull_mir::artifact_plan::{ArtifactBinding, ArtifactBindingKind, ArtifactBindingPlan};
 
-fn plan_snapshot(lua: &str) -> String {
+fn plan_snapshot(lua: &str, label: &str) -> String {
     run_luajit(
         &format!(
             r#"
@@ -31,7 +32,7 @@ print(table.concat(rows, "|"))
 "#,
             lua = lua
         ),
-        "artifact_binding_plan",
+        label,
     )
 }
 
@@ -48,7 +49,7 @@ global replay_user_binding: int = 6
 global runtime_binding_not_in_old_classifier: int = 7
 fn main() {}
 "#,
-    ).lua);
+    ).lua, "artifact_binding_before");
     let after = plan_snapshot(&emit_mir(
         r#"
 global ordinary: int = 1
@@ -60,7 +61,7 @@ global replay_user_binding: int = 6
 global runtime_binding_added: int = 8
 fn main() {}
 "#,
-    ).lua);
+    ).lua, "artifact_binding_after");
 
     for name in [
         "ordinary",
@@ -81,16 +82,16 @@ fn main() {}
 fn logical_identity_survives_a_backend_name_change() {
     let old = plan_snapshot(&emit_mir(
         r#"
-@nomangle fn stable_binding(value: int) -> int { return value }
+fn stable_binding(value: int) -> int { return value }
 fn main() {}
 "#,
-    ).lua);
+    ).lua, "artifact_binding_identity_old");
     let new = plan_snapshot(&emit_mir(
         r#"
-@nomangle fn stable_binding(value: int) -> float { return value as float }
+fn stable_binding(value: int) -> float { return 1.0 }
 fn main() {}
 "#,
-    ).lua);
+    ).lua, "artifact_binding_identity_new");
     let old_identity = old
         .split('|')
         .find(|row| row.contains("stable_binding"))
@@ -101,6 +102,32 @@ fn main() {}
         .expect("new stable binding plan row");
     assert_eq!(old_identity.split('=').next(), new_identity.split('=').next(), "logical identity changed with the backend realization: old={old} new={new}");
     assert_ne!(old_identity, new_identity, "fixture did not change a physical binding realization");
+}
+
+#[test]
+fn logical_identity_is_independent_of_physical_and_diagnostic_spelling() {
+    let old = ArtifactBindingPlan::from_entries(vec![ArtifactBinding {
+        identity: "logical:stable".to_string(),
+        physical: "old_backend_symbol".to_string(),
+        diagnostic: "old_source_name".to_string(),
+        kind: ArtifactBindingKind::Callable,
+        state_key: None,
+    }])
+    .expect("old compiler plan");
+    let new = ArtifactBindingPlan::from_entries(vec![ArtifactBinding {
+        identity: "logical:stable".to_string(),
+        physical: "new_backend_symbol".to_string(),
+        diagnostic: "new_source_name".to_string(),
+        kind: ArtifactBindingKind::Callable,
+        state_key: None,
+    }])
+    .expect("new compiler plan");
+
+    assert!(old.census.examined > 0);
+    assert!(new.census.examined > 0);
+    assert_eq!(old.entries[0].identity, new.entries[0].identity);
+    assert_ne!(old.entries[0].physical, new.entries[0].physical);
+    assert_ne!(old.entries[0].diagnostic, new.entries[0].diagnostic);
 }
 
 #[test]
@@ -201,10 +228,29 @@ fn main() { let _ = network_effect() }
 }
 
 #[test]
+fn unclassified_host_effect_is_rejected_by_shadow_admission_plan() {
+    let lua = try_emit_module(
+        r#"
+inline(lua) fn host_effect() = "print('shadow must not present')"
+fn main() { host_effect() }
+"#,
+    )
+    .expect("effect fixture should compile for shadow admission");
+    let out = run_luajit(
+        &format!(
+            "{}\nlocal p = _G.__ROCK_SHADOW_EFFECT_PLAN\nassert(p ~= nil)\nprint(tostring(p.admissible) .. ':' .. p.census.rejected)",
+            lua
+        ),
+        "unclassified_host_effect_plan",
+    );
+    assert_eq!(out, "false:1");
+}
+
+#[test]
 fn effect_free_control_is_admitted_with_a_nonzero_plan() {
     let lua = emit_mir(
         r#"
-inline(lua) fn admitted_control(value: int) -> int = "return value + 1"
+fn admitted_control(value: int) -> int { return value + 1 }
 fn main() { let _ = admitted_control(1) }
 "#,
     )
@@ -216,5 +262,8 @@ fn main() { let _ = admitted_control(1) }
         ),
         "effect_control_plan",
     );
-    assert_eq!(out, "true:1");
+    let (admissible, classified) = out.split_once(':').expect("effect-plan output");
+    assert_eq!(admissible, "true");
+    let classified: usize = classified.parse().expect("classified population");
+    assert!(classified > 0, "effect-plan classified population is zero");
 }

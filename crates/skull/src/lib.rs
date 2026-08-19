@@ -589,6 +589,8 @@ _G.__rock_state_transaction_begin = function()
     schema = rawget(_G, "__ROCK_STATE_SCHEMA"),
     metadata = rawget(_G, "__ROCK_STATE_METADATA"),
     nobox = rawget(_G, "__ROCK_STATE_NOBOX"),
+    artifact_binding_plan = rawget(_G, "__ROCK_ARTIFACT_BINDING_PLAN"),
+    shadow_effect_plan = rawget(_G, "__ROCK_SHADOW_EFFECT_PLAN"),
     name_index = rawget(_G, "__rock_state_name_index"),
     bridge_physical = rawget(_G, "__rock_state_bridge_physical"),
     state = state,
@@ -614,12 +616,20 @@ _G.__rock_state_transaction_abort = function()
   rawset(_G, "__ROCK_STATE_SCHEMA", transaction.schema)
   rawset(_G, "__ROCK_STATE_METADATA", transaction.metadata)
   rawset(_G, "__ROCK_STATE_NOBOX", transaction.nobox)
+  rawset(_G, "__ROCK_ARTIFACT_BINDING_PLAN", transaction.artifact_binding_plan)
+  rawset(_G, "__ROCK_SHADOW_EFFECT_PLAN", transaction.shadow_effect_plan)
+  rawset(_G, "__rock_artifact_binding_plan_pending", nil)
+  rawset(_G, "__rock_shadow_effect_plan_pending", nil)
   rawset(_G, "__rock_state_name_index", transaction.name_index)
   rawset(_G, "__rock_state_bridge_physical", transaction.bridge_physical)
   rawset(_G, "__rock_state_schema_id", transaction.published_schema_id)
   rawset(_G, "__rock_state_transaction", nil)
 end
 _G.__rock_state_transaction_commit = function()
+  local publish_binding = rawget(_G, "__rock_artifact_binding_plan_publish")
+  if publish_binding then publish_binding() end
+  local publish_effect = rawget(_G, "__rock_shadow_effect_plan_publish")
+  if publish_effect then publish_effect() end
   rawset(_G, "__rock_state_transaction", nil)
 end
 _G.__rock_state_entry_for_name = function(name)

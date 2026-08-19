@@ -13,6 +13,7 @@ use comfy_la_arena::Idx;
 use rustc_hash::{FxHashMap, FxHashSet};
 use ustr::Ustr;
 
+use crate::artifact_plan::{ArtifactBindingPlan, ShadowEffectPlan};
 use crate::instance::Instance;
 use crate::mir::{
     ColumnElem, ContainerKind, CoroHookKind, FuncRef, Inst, Lit, MirFunc, Term, ValueCtorForm,
@@ -273,6 +274,8 @@ impl CodeIdentityCensus {
 pub struct CodeArtifact {
     pub entries: BTreeMap<CodeIdentity, CodeEntry>,
     pub census: CodeIdentityCensus,
+    pub binding_plan: ArtifactBindingPlan,
+    pub effect_plan: ShadowEffectPlan,
 }
 
 impl CodeArtifact {
@@ -1282,6 +1285,7 @@ mod tests {
         let incoming = CodeArtifact {
             entries: [(entry.identity.clone(), entry)].into_iter().collect(),
             census: CodeIdentityCensus::default(),
+            ..CodeArtifact::default()
         };
 
         owned.merge(incoming.clone());
