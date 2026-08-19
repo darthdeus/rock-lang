@@ -13,6 +13,88 @@ use rock_core::errors::CompilerErrorLevel;
 use rock_core::{CompilerError, SourceFiles, source_file_from_path_and_contents};
 use std::path::Path;
 use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::{Mutex, OnceLock};
+use std::time::Instant;
+
+#[derive(Clone, Debug, Default)]
+pub struct LintPassCensus {
+    pub lint: bone_lints::LintCensus,
+    pub report_prepare_ns: u128,
+    pub summary_sort_ns: u128,
+    pub render_ns: u128,
+}
+
+static CENSUS_ENABLED: OnceLock<bool> = OnceLock::new();
+static CENSUS: OnceLock<Mutex<LintPassCensus>> = OnceLock::new();
+
+fn census_enabled() -> bool {
+    *CENSUS_ENABLED.get_or_init(|| std::env::var_os("ROCK_LINT_CENSUS").is_some())
+}
+
+fn record_lint_census(census: bone_lints::LintCensus) {
+    if !census_enabled() {
+        return;
+    }
+    CENSUS
+        .get_or_init(|| Mutex::new(LintPassCensus::default()))
+        .lock()
+        .expect("lint census mutex")
+        .lint
+        .merge(&census);
+}
+
+fn record_report_census(report_prepare_ns: u128, summary_sort_ns: u128, render_ns: u128) {
+    if !census_enabled() {
+        return;
+    }
+    let mut census = CENSUS
+        .get_or_init(|| Mutex::new(LintPassCensus::default()))
+        .lock()
+        .expect("lint census mutex");
+    census.report_prepare_ns += report_prepare_ns;
+    census.summary_sort_ns += summary_sort_ns;
+    census.render_ns += render_ns;
+}
+
+pub fn take_census() -> Option<LintPassCensus> {
+    if !census_enabled() {
+        return None;
+    }
+    let mut census = CENSUS
+        .get_or_init(|| Mutex::new(LintPassCensus::default()))
+        .lock()
+        .expect("lint census mutex");
+    Some(std::mem::take(&mut *census))
+}
+
+pub fn print_census(census: &LintPassCensus) {
+    let family = |name: &str, family: &bone_lints::LintFamilyCensus| {
+        eprintln!(
+            "    {name}: requests={} files={} modules={} bodies={} derived={} reused={} suppressed={} ms={:.3}",
+            family.requests,
+            family.files_examined,
+            family.modules_examined,
+            family.bodies_examined,
+            family.findings_derived,
+            family.findings_reused,
+            family.findings_suppressed,
+            family.elapsed_ns as f64 / 1_000_000.0,
+        );
+    };
+    eprintln!("  lint census (ROCK_LINT_CENSUS=1): full_workspace_passes={}", census.lint.full_workspace_passes);
+    family("flat/body-local", &census.lint.flat);
+    family("inference-dependent", &census.lint.inference);
+    family("suppression", &census.lint.suppression);
+    family("unused_fn", &census.lint.unused_fn);
+    family("backend_sibling", &census.lint.backend_sibling);
+    family("action_caller", &census.lint.action_caller);
+    eprintln!(
+        "    report: prepare_ms={:.3} summary_sort_ms={:.3} render_ms={:.3}",
+        census.report_prepare_ns as f64 / 1_000_000.0,
+        census.summary_sort_ns as f64 / 1_000_000.0,
+        census.render_ns as f64 / 1_000_000.0,
+    );
+}
 
 /// How a build reports lint findings. Applies to `Warning`/`Advice` only --
 /// `Error` findings always render in full and always fail the build, which is
@@ -100,24 +182,34 @@ fn report(
     mode: LintReport,
 ) -> Vec<CompilerError> {
     if found.is_empty() {
+        record_report_census(0, 0, 0);
         return Vec::new();
     }
+    let report_started = Instant::now();
     let (errors, soft): (Vec<_>, Vec<_>) =
         found.into_iter().partition(|f| f.level() == CompilerErrorLevel::Error);
+    let report_prepare_ns = report_started.elapsed().as_nanos();
+    let mut summary_sort_ns = 0;
+    let mut render_ns = 0;
     match mode {
         LintReport::Off => {}
         LintReport::Full => {
             // One batch render: the ariadne source cache copies every file in
             // the project, so a per-finding render is ~1.6ms EACH on a game.
             let errs: Vec<CompilerError> = soft.iter().map(|f| f.error.clone()).collect();
+            let started = Instant::now();
             eprintln!("{}", rock_core::errors::render_all(&errs, sources));
+            render_ns = started.elapsed().as_nanos();
         }
         LintReport::Summary => {
             if !soft.is_empty() {
+                let started = Instant::now();
                 eprintln!("{}", summary_line(&soft, root));
+                summary_sort_ns = started.elapsed().as_nanos();
             }
         }
     }
+    record_report_census(report_prepare_ns, summary_sort_ns, render_ns);
     errors.into_iter().map(|f| f.error).collect()
 }
 
@@ -185,7 +277,15 @@ pub fn findings_with(
         .filter(|(file, _)| owned.contains(*file))
         .map(|(&file, text)| (file, text.as_str()))
         .collect();
-    bone_lints::lint_workspace(ws, &warm, is_bin, &report, sel)
+    if census_enabled() {
+        let (findings, census) = bone_lints::lint_workspace_with_census(
+            ws, &warm, is_bin, &report, sel,
+        );
+        record_lint_census(census);
+        findings
+    } else {
+        bone_lints::lint_workspace(ws, &warm, is_bin, &report, sel)
+    }
 }
 
 /// The files a lint invocation REPORTS on: this project's own, never a

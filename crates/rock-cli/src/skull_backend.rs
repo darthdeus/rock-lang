@@ -2707,6 +2707,9 @@ root-hole names={} rows={} decls={} reason-buckets={} erased-catalogue={}",
             stats.erased_catalogue_entries_examined,
         );
     }
+    if let Some(census) = crate::lint_pass::take_census() {
+        crate::lint_pass::print_census(&census);
+    }
     Ok(())
 }
 
