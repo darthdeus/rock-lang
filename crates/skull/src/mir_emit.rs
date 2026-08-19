@@ -5449,9 +5449,24 @@ fn shadow_effect_for_function(
             );
         }
         if body.contains("ffi.") {
+            let safe_ffi = ["cast", "sizeof", "typeof", "istype", "string"];
+            let mut tail = body;
+            while let Some((_, after)) = tail.split_once("ffi.") {
+                let name = after
+                    .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
+                    .next()
+                    .unwrap_or("");
+                if !safe_ffi.contains(&name) {
+                    return (
+                        skull_mir::artifact_plan::ShadowEffectPolicy::Reject,
+                        "unclassified native projection".to_string(),
+                    );
+                }
+                tail = after;
+            }
             return (
-                skull_mir::artifact_plan::ShadowEffectPolicy::Virtualized,
-                "compiler-owned native projection".to_string(),
+                skull_mir::artifact_plan::ShadowEffectPolicy::Pure,
+                "non-owning native projection".to_string(),
             );
         }
         if body.contains("__rock_") {

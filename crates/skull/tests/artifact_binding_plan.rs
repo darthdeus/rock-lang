@@ -247,6 +247,25 @@ fn main() { host_effect() }
 }
 
 #[test]
+fn unclassified_user_native_effect_is_rejected_by_shadow_admission_plan() {
+    let lua = try_emit_module(
+        r#"
+inline(lua) fn native_allocation() = "ffi.new('uint8_t[1]')"
+fn main() { native_allocation() }
+"#,
+    )
+    .expect("native-effect fixture should compile for shadow admission");
+    let out = run_luajit(
+        &format!(
+            "{}\nlocal p = _G.__ROCK_SHADOW_EFFECT_PLAN\nassert(p ~= nil)\nprint(tostring(p.admissible) .. ':' .. p.census.rejected)",
+            lua
+        ),
+        "user_native_effect_plan",
+    );
+    assert_eq!(out, "false:1");
+}
+
+#[test]
 fn effect_free_control_is_admitted_with_a_nonzero_plan() {
     let lua = emit_mir(
         r#"
