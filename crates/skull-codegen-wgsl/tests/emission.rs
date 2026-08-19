@@ -374,6 +374,39 @@ fn bare_frag(_vary: BareVary) -> Vec4 {
 }
 
 #[test]
+fn explicit_sampler_helpers_forward_texture_and_sampler_pairs() {
+    let source = r#"
+struct HelperTextures { source: Sampler2D }
+value HelperVert { pos: Vec2 }
+value HelperVary { position: Vec4, uv: Vec2 }
+
+fn helper_alpha(src: Sampler2D, uv: Vec2) -> float {
+    return texture(src, uv).x
+}
+
+fn helper_filtered(src: Sampler2D, uv: Vec2) -> float {
+    return helper_alpha(src, uv)
+}
+
+@shader(vertex)
+fn helper_vert(@attr a: HelperVert) -> HelperVary {
+    return HelperVary { position: v(a.pos, 0.0, 1.0), uv: a.pos }
+}
+
+@shader(fragment)
+fn helper_frag(vary: HelperVary, @textures t: HelperTextures) -> Vec4 {
+    let alpha = helper_filtered(t.source, vary.uv)
+    return v(alpha, alpha, alpha, 1.0)
+}
+"#;
+    let artifact = try_explicit_artifact_source(source, "helper_vert", "helper_frag")
+        .expect("explicit sampler helpers must emit WGSL");
+    assert!(artifact.source.contains("rock_sampler_tex_"), "{0}", artifact.source);
+    assert!(artifact.source.contains("rock_sampler_samp_"), "{0}", artifact.source);
+    naga_validate(&artifact.source);
+}
+
+#[test]
 fn explicit_multiple_vertex_streams_preserve_instance_inputs_and_vertex_index() {
     let source = r#"
 value Quad { pos: Vec2 }
@@ -461,7 +494,7 @@ fn solid_frag(vary: Vary) -> Vec4 {
 
 // Mirrors rect_batch.rock's `Vertex`; rect_batch itself drags in `DepthMode`,
 // which this workspace's semantic pass cannot resolve.
-const SPRITE_BATCH_VERTEX: &str = "value Vertex { pos: Vec2, uv: Vec2, color: Vec4, pivot_y: float, entity_id: float }";
+const SPRITE_BATCH_VERTEX: &str = "value Vertex { pos: Vec2, uv: Vec2, color: Vec4, pivot_y: float, entity_id: float, colorize: float }";
 
 fn sprite_batch_source() -> String {
     format!(
@@ -624,6 +657,58 @@ fn reordered_frag(vary: ReorderedVary, @textures t: ReorderedTextures) -> Vec4 {
     naga_validate(&artifact.source);
 }
 
+#[test]
+fn explicit_vec3_varying_is_admitted_with_neighboring_widths() {
+    let source = r#"
+value Vec3Attrs { pos: Vec2 }
+value Vec3Vary {
+    position: Vec4,
+    scalar: float,
+    uv: Vec2,
+    @flat emission: Vec3,
+    tint: Vec4,
+}
+@shader(vertex)
+fn vec3_vert(@attr a: Vec3Attrs) -> Vec3Vary {
+    return Vec3Vary {
+        position: v(a.pos, 0.0, 1.0),
+        scalar: 0.25,
+        uv: v(0.25, 0.75),
+        emission: v(1.0, 0.5, 0.25),
+        tint: v(0.8, 0.7, 0.6, 1.0),
+    }
+}
+@shader(fragment)
+fn vec3_frag(vary: Vec3Vary) -> Vec4 {
+    return v(vary.emission, vary.scalar) + vary.tint + v(vary.uv, 0.0, 0.0)
+}
+"#;
+    let artifact = explicit_artifact_source(source, "vec3_vert", "vec3_frag");
+    assert_eq!(
+        artifact
+            .abi
+            .varyings
+            .iter()
+            .map(|varying| (varying.name.as_str(), varying.kind, varying.location))
+            .collect::<Vec<_>>(),
+        vec![
+            ("scalar", skull_mir::gpu_layout::WireKind::F32, 0),
+            ("uv", skull_mir::gpu_layout::WireKind::F32x2, 1),
+            ("emission", skull_mir::gpu_layout::WireKind::F32x3, 2),
+            ("tint", skull_mir::gpu_layout::WireKind::F32x4, 3),
+        ]
+    );
+    assert!(
+        artifact.source.contains("@location(2) @interpolate(flat) emission: vec3<f32>,"),
+        "Vec3 flat varyings must retain their one-location WGSL type:\n{}",
+        artifact.source
+    );
+    let parsed = skull_wgsl_abi::WgslAbi::parse(&artifact.abi.wire())
+        .expect("the Vec3 varying must survive the runtime ABI wire");
+    assert_eq!(parsed.varyings[2].kind, skull_mir::gpu_layout::WireKind::F32x3.code());
+    naga_validate(&artifact.source);
+}
+
 fn naga_validate(source: &str) {
     let module = naga::front::wgsl::parse_str(source)
         .unwrap_or_else(|error| panic!("WGSL parses: {error}\n{source}"));
@@ -651,7 +736,7 @@ fn explicit_float_vertex_inputs_preserve_their_raw_bits() {
     );
     assert!(
         artifact.source.contains(
-            "let Vertex_attrs = Vertex(bitcast<vec2<f32>>(input_0), bitcast<vec2<f32>>(input_1), bitcast<vec4<f32>>(input_2), bitcast<f32>(input_3), bitcast<f32>(input_4));"
+            "let Vertex_attrs = Vertex(bitcast<vec2<f32>>(input_0), bitcast<vec2<f32>>(input_1), bitcast<vec4<f32>>(input_2), bitcast<f32>(input_3), bitcast<f32>(input_4), bitcast<f32>(input_5));"
         ),
         "the logical Vertex value must be reconstructed before the shader body:\n{}",
         artifact.source
@@ -676,6 +761,19 @@ fn sprite_batch_color_is_flat_for_each_primitive() {
             .source
             .contains("@location(1) @interpolate(flat) Color: vec4<f32>,"),
         "the emitted WGPU color varying must be flat:\n{}",
+        artifact.source
+    );
+    naga_validate(&artifact.source);
+}
+
+#[test]
+fn explicit_frag_coord_matches_gl_bottom_left_coordinates() {
+    let (_, artifact) = sprite_batch_artifact();
+    assert!(
+        artifact.source.contains(
+            "vec4<f32>(input.position.x, ((2.0 / abs(u_EngineU.uProjection[1][1])) - input.position.y), input.position.z, input.position.w)"
+        ),
+        "WGSL fragment coordinates must be converted from its top-left builtin to Rock's bottom-left convention:\n{}",
         artifact.source
     );
     naga_validate(&artifact.source);
@@ -730,7 +828,7 @@ fn per_primitive_varyings_carry_the_flat_interpolation_attribute() {
         .map(|varying| varying.name.as_str())
         .collect();
     assert_eq!(flat, ["Color", "EntityId"], "the per-primitive varyings are flat");
-    assert_eq!(artifact.abi.varyings.len(), 4, "and two interpolated varyings remain");
+    assert_eq!(artifact.abi.varyings.len(), 5, "and three interpolated varyings remain");
     assert!(
         artifact
             .source
@@ -741,7 +839,7 @@ fn per_primitive_varyings_carry_the_flat_interpolation_attribute() {
     assert!(
         artifact
             .source
-            .contains("@location(3) @interpolate(flat) EntityId: f32,"),
+            .contains("@location(4) @interpolate(flat) EntityId: f32,"),
         "{}",
         artifact.source
     );
@@ -889,8 +987,10 @@ fn the_fragment_control_flow_and_builtins_reach_wgsl() {
         artifact.source
     );
     assert!(
-        artifact.source.contains("(vary, input.position)"),
-        "and the wrapper passes it: {}",
+        artifact.source.contains(
+            "(vary, vec4<f32>(input.position.x, ((2.0 / abs(u_EngineU.uProjection[1][1])) - input.position.y), input.position.z, input.position.w))"
+        ),
+        "and the wrapper passes the bottom-left conversion: {}",
         artifact.source
     );
     assert_eq!(
