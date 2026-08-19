@@ -727,6 +727,50 @@ fn selected_sprite_batch_pipeline_is_admitted_by_wgsl() {
 }
 
 #[test]
+fn explicit_texture_helpers_carry_canvas_orientation_through_nested_calls() {
+    let source = format!(
+        "{}\n{}\n{}",
+        include_str!("../../../stone/engine/rendering/engine_uniforms.rock"),
+        SPRITE_BATCH_VERTEX,
+        r#"
+struct OrientationTex { main: Sampler2D }
+value OrientationVary { position: Vec4, tex_coord: Vec2 }
+
+@shader(vertex)
+fn orientation_vert(@attr a: Vertex, @engine e: EngineU) -> OrientationVary {
+    return OrientationVary {
+        position: e.uProjection * e.uView * v(a.pos, 0.0, 1.0),
+        tex_coord: a.uv,
+    }
+}
+
+fn orientation_inner(src: Sampler2D, coord: Vec2) -> Vec4 {
+    return texture(src, coord)
+}
+
+fn orientation_outer(src: Sampler2D, coord: Vec2) -> Vec4 {
+    return orientation_inner(src, coord + v(0.0, 0.0))
+}
+
+@shader(fragment)
+fn orientation_frag(vary: OrientationVary, @textures t: OrientationTex) -> Vec4 {
+    return orientation_outer(t.main, vary.tex_coord)
+}
+"#,
+    );
+    let artifact = explicit_artifact_source(&source, "orientation_vert", "orientation_frag");
+    assert!(
+        artifact.source.contains("rock_sampler_flip_")
+            && artifact
+                .source
+                .contains("select(coord.y, 1.0 - coord.y, rock_sampler_flip_"),
+        "WGSL sampler helpers must carry the logical texture's orientation into every nested sample:\n{}",
+        artifact.source
+    );
+    naga_validate(&artifact.source);
+}
+
+#[test]
 fn explicit_float_vertex_inputs_preserve_their_raw_bits() {
     let (_, artifact) = sprite_batch_artifact();
     assert!(

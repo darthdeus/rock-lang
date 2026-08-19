@@ -3653,6 +3653,9 @@ impl<'a> FunctionEmitter<'a> {
                 if sampler_kind == SamplerKind::Float {
                     rendered.push(format!("{sampler}: sampler"));
                 }
+                if self.texture_v_flip_enabled() {
+                    rendered.push(format!("{}: bool", self.sampler_param_flip_name(*cell)));
+                }
                 continue;
             }
             if matches!(self.param_roles.get(cell), Some(ParamRole::Storage))
@@ -5051,15 +5054,15 @@ impl<'a> FunctionEmitter<'a> {
                     ));
                 }
                 let (texture_arg, sampler_arg) = self.sampler_expressions(args[0])?;
+                let uv = self.sample_uv(args[0], self.render_val(args[1])?)?;
                 Ok(format!(
-                    "textureSample({texture_arg}, {sampler_arg}, {})",
-                    self.render_val(args[1])?
+                    "textureSample({texture_arg}, {sampler_arg}, {uv})"
                 ))
             }
             Some(WgslIntrinsic::TextureId) => {
                 self.validate_texture_id_args(args)?;
                 let texture_arg = self.texture_expression(args[0])?;
-                let uv = self.render_val(args[1])?;
+                let uv = self.sample_uv(args[0], self.render_val(args[1])?)?;
                 let dimensions = format!("textureDimensions({texture_arg})");
                 Ok(format!(
                     "textureLoad({texture_arg}, clamp(vec2<i32>(i32(floor(clamp({uv}.x, 0.0, 1.0) * f32({dimensions}.x))), i32(floor(clamp({uv}.y, 0.0, 1.0) * f32({dimensions}.y)))), vec2<i32>(0, 0), vec2<i32>(i32({dimensions}.x) - 1, i32({dimensions}.y) - 1)), 0).x"
@@ -5209,6 +5212,9 @@ impl<'a> FunctionEmitter<'a> {
                         if self.value_kind(*arg)? == ValueKind::Sampler(SamplerKind::Float) {
                             rendered.push(self.sampler_expressions(*arg)?.1);
                         }
+                        if self.texture_v_flip_enabled() {
+                            rendered.push(self.sampler_flip_expression(*arg)?);
+                        }
                     } else {
                         rendered.push(self.render_val(*arg)?);
                     }
@@ -5326,6 +5332,63 @@ impl<'a> FunctionEmitter<'a> {
         )
     }
 
+    fn sampler_param_flip_name(&self, cell: Idx<Cell>) -> String {
+        let suffix = cell.into_raw().into_u32();
+        format!("rock_sampler_flip_{suffix}")
+    }
+
+    fn texture_v_flip_enabled(&self) -> bool {
+        self.abi
+            .uniform_block(UniformRole::Engine)
+            .is_some_and(|engine| {
+                engine.members.iter().any(|member| {
+                    member.name == Ustr::from("uTextureVFlip") && member.kind == WireKind::F32x4
+                })
+            })
+    }
+
+    fn texture_v_flip_expression(
+        &self,
+        texture: &WgslTextureBinding,
+    ) -> Result<String, CompilerError> {
+        let component = match texture.slot {
+            0 => "x",
+            1 => "y",
+            2 => "z",
+            3 => "w",
+            _ => {
+                return Err(unsupported_err(
+                    self.span,
+                    "per-texture WGPU Canvas orientation",
+                    "WGSL texture orientation metadata supports at most four texture slots",
+                ));
+            }
+        };
+        let engine = self.abi.uniform_block(UniformRole::Engine).ok_or_else(|| {
+            err(
+                self.span,
+                "WGSL texture orientation has no engine uniform block",
+            )
+        })?;
+        Ok(format!(
+            "u_{}.uTextureVFlip.{component} > 0.5",
+            engine.struct_name
+        ))
+    }
+
+    fn sampler_flip_expression(&self, sampler: Idx<Inst>) -> Result<String, CompilerError> {
+        match self.body.insts[sampler] {
+            Inst::Field { .. } => {
+                let texture = self.sampler_binding(sampler)?;
+                self.texture_v_flip_expression(texture)
+            }
+            Inst::Load(cell) if self.sampler_params.contains(&cell) => {
+                Ok(self.sampler_param_flip_name(cell))
+            }
+            _ => Ok("false".to_string()),
+        }
+    }
+
     fn sampler_expressions(&self, iid: Idx<Inst>) -> Result<(String, String), CompilerError> {
         if let Inst::Load(cell) = self.body.insts[iid] {
             if self.sampler_params.contains(&cell) {
@@ -5349,6 +5412,16 @@ impl<'a> FunctionEmitter<'a> {
         Ok((
             format!("tex_{}", texture.name),
             format!("samp_{}", texture.name),
+        ))
+    }
+
+    fn sample_uv(&self, sampler: Idx<Inst>, uv: String) -> Result<String, CompilerError> {
+        if !self.texture_v_flip_enabled() {
+            return Ok(uv);
+        }
+        let flip = self.sampler_flip_expression(sampler)?;
+        Ok(format!(
+            "vec2<f32>({uv}.x, select({uv}.y, 1.0 - {uv}.y, {flip}))"
         ))
     }
 }
