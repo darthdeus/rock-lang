@@ -96,6 +96,25 @@ fn main() {
 }
 
 #[test]
+fn an_unmapped_ffi_call_still_rejects() {
+    let ws = ws_with(
+        r#"
+extern(ffi, "stone") fn stone_save_screenshot(path: string, width: int, height: int, max_size: int) -> bool
+
+fn main() {
+    let ok = stone_save_screenshot("shot.png", 1, 1, 1)
+    print("{ok}")
+}
+"#,
+    );
+    let err = emit_program_js(&ws).expect_err("an unmapped FFI call must reject");
+    assert!(
+        err.contains("stone_save_screenshot") && err.contains("not a mapped JS intrinsic"),
+        "unexpected reject message: {err}"
+    );
+}
+
+#[test]
 fn coroutine_reraise_does_not_emit_lua_error_extern() {
     let ws = ws_with(
         r#"
