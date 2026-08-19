@@ -94,19 +94,24 @@ fn binding_changes_survive_a_fresh_process() {
 
     let writer = run("bindings_restart_writer");
     assert_sim_pass("bindings_restart_writer", &writer);
-    let binding_path = data.join("darth.games").join("mag").join("bindings.json");
+    let binding_path = root.join("tmp/spellbook-restart-bindings.json");
     assert!(
         binding_path.is_file(),
         "writer must leave the pref-root binding file"
     );
-    let settings_path = data.join("darth.games").join("mag").join("settings.json");
+    let settings_path = root.join("tmp/spellbook-restart-settings.json");
     assert!(
         settings_path.is_file(),
         "writer must leave the pref-root settings file"
     );
+    let ready_path = root.join("tmp/spellbook-restart-ready");
+    assert!(
+        ready_path.is_file(),
+        "writer must publish its complete-file readiness marker"
+    );
 
-    let reader = run("bindings_restart_reader");
-    assert_sim_pass("bindings_restart_reader", &reader);
+    let reader = run("bindings_restart_z_reader");
+    assert_sim_pass("bindings_restart_z_reader", &reader);
 }
 
 #[test]
