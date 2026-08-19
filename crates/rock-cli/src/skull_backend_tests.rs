@@ -3735,3 +3735,39 @@ mod value_test_exec {
         );
     }
 }
+
+#[cfg(test)]
+mod backend_stats_workspace_tests {
+    use super::super::skull_workspace_timed;
+    use crate::unified_compile::{discover_sources, SourceSpec};
+    use std::path::PathBuf;
+
+    #[test]
+    fn timed_emission_prepares_comptime_inputs_and_populates_attribution() {
+        let dir = tempfile::tempdir().expect("temporary project");
+        std::fs::write(
+            dir.path().join("stick.toml"),
+            "[package]\nname = \"timed-preparation\"\n\n[build.vars]\nREQUIRED = \"prepared\"\n",
+        )
+        .expect("stick.toml");
+        std::fs::write(
+            dir.path().join("main.rock"),
+            "fn main() { print(build_var(\"REQUIRED\")) }\n",
+        )
+        .expect("main.rock");
+
+        let sources = discover_sources(&SourceSpec::Directory(PathBuf::from(dir.path())))
+            .expect("discover timed project");
+        let (ok, times) = skull_workspace_timed(&sources);
+
+        assert!(ok, "timed emission must succeed for a prepared project");
+        assert!(
+            times.attribution.bodies_examined > 0,
+            "successful timed emission must populate its body denominator"
+        );
+        assert!(
+            !times.emit_phases.is_empty(),
+            "successful timed emission must populate production phase attribution"
+        );
+    }
+}

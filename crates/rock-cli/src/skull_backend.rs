@@ -97,7 +97,15 @@ fn skull_emit_full(
 pub struct SkullPhaseTimes {
     pub parse: Duration,
     pub semantic: Duration,
+    /// Comptime/build-variable preparation after semantic checking and before
+    /// code generation. This is setup work, not semantic or emit self-time.
+    pub workspace_setup: Duration,
     pub emit: Duration,
+    /// The last front-end/setup/emit failure, retained so measurement callers
+    /// cannot report a contradictory successful-looking zero population.
+    pub failure: Option<CompilerError>,
+    pub setup_failed: bool,
+    pub emit_failed: bool,
     /// skull's emit broken into coarse stages (lower / cleanup / emit-lua /
     /// scaffold+misc), from `MirEmit::phases`. Empty if bone rejected the
     /// workspace (emit never ran). Summed element-wise across timed runs.
@@ -128,7 +136,10 @@ pub fn skull_workspace_timed(sources: &SourceFiles) -> (bool, SkullPhaseTimes) {
     let mut times = SkullPhaseTimes::default();
     let (user_modules, entry_file, parse) = match crate::bone_backend::parse_user_modules(sources) {
         Ok(v) => v,
-        Err(_) => return (false, times),
+        Err(mut errors) => {
+            times.failure = errors.drain(..).next();
+            return (false, times);
+        }
     };
     times.parse = parse;
 
@@ -137,17 +148,38 @@ pub fn skull_workspace_timed(sources: &SourceFiles) -> (bool, SkullPhaseTimes) {
     // call explicit here (the verdict is a bool, not a gate, and the timer must
     // bracket exactly this call).
     let mut modules = crate::bone_backend::with_stdlib(user_modules);
-    let ws = match bone_semantic::semantic_passes::semantic_pass(&mut modules) {
+    let mut ws = match bone_semantic::semantic_passes::semantic_pass(&mut modules) {
         Ok(ws) => ws,
-        Err(_) => {
+        Err(error) => {
             times.semantic = t.elapsed();
+            times.failure = Some(error);
             return (false, times);
         }
     };
     times.semantic = t.elapsed();
-    if !crate::bone_backend::body_errors(&ws).is_empty() {
+    let body_errors = crate::bone_backend::body_errors(&ws);
+    if let Some(error) = body_errors.into_iter().next() {
+        times.failure = Some(error);
         return (false, times);
     }
+
+    // Production emission stamps declared [build.vars] once after the checked
+    // workspace exists. Keep that preparation visible as its own timed lane;
+    // the emit stopwatch remains codegen-only.
+    let t = Instant::now();
+    if let Err(error) = crate::comptime::stamp_workspace(
+        &mut ws,
+        std::path::Path::new(entry_file.as_str()),
+    ) {
+        times.workspace_setup = t.elapsed();
+        times.setup_failed = true;
+        times.failure = Some(CompilerError::new_no_location(format!(
+            "build var resolution failed: {error:#}"
+        )));
+        return (false, times);
+    }
+    times.workspace_setup = t.elapsed();
+
     let entry_mid = crate::bone_backend::entry_module_id(&ws, entry_file);
 
     let t = Instant::now();
@@ -164,7 +196,11 @@ pub fn skull_workspace_timed(sources: &SourceFiles) -> (bool, SkullPhaseTimes) {
             times.concrete_stats = e.concrete_stats;
             true
         }
-        Err(_) => false,
+        Err(e) => {
+            times.failure = Some(e);
+            times.emit_failed = true;
+            false
+        }
     };
 
     (emit_ok, times)
