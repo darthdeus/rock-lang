@@ -523,6 +523,7 @@ pub enum AnnoValue {
     Float(f64),
     String(Ustr),
     Ident(Ident),
+    IdentList(Vec<Ident>),
     Bool(bool),
     Other,
 }

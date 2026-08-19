@@ -220,6 +220,51 @@ fn a_bool_uniform_member_is_laid_out_and_declared_as_u32() {
 }
 
 #[test]
+fn explicit_vec3_uses_one_location_and_keeps_uniform_fourth_lane() {
+    let mut iface = explicit_fixture(vec![decl("values", WireKind::F32, 1)]);
+    iface.varyings = vec![
+        LogicalVarying { name: Ustr::from("scalar"), kind: WireKind::F32, flat: false },
+        LogicalVarying { name: Ustr::from("uv"), kind: WireKind::F32x2, flat: false },
+        LogicalVarying { name: Ustr::from("emission"), kind: WireKind::F32x3, flat: true },
+        LogicalVarying { name: Ustr::from("tint"), kind: WireKind::F32x4, flat: false },
+    ];
+    iface.uniform_groups = vec![LogicalUniformGroup {
+        role: UniformRole::Engine,
+        struct_name: Ustr::from("EngineU"),
+        members: vec![
+            (Ustr::from("direction"), WireKind::F32x3),
+            (Ustr::from("gain"), WireKind::F32),
+            (Ustr::from("bounds"), WireKind::F32x2),
+        ],
+    }];
+
+    let plan = WgslAbiPlan::explicit(&iface, "vertex_main", "fragment_main", Span::default())
+        .expect("Vec3 explicit ABI");
+    assert_eq!(
+        plan.varyings.iter().map(|varying| varying.location).collect::<Vec<_>>(),
+        [0, 1, 2, 3]
+    );
+    let block = &plan.uniform_blocks[0];
+    assert_eq!(
+        block
+            .members
+            .iter()
+            .map(|member| (member.name.as_str(), member.offset, member.align, member.size))
+            .collect::<Vec<_>>(),
+        [
+            ("direction", 0, 16, 12),
+            ("gain", 12, 4, 4),
+            ("bounds", 16, 8, 8),
+        ]
+    );
+    assert_eq!(block.size, 32);
+
+    let parsed = WgslAbi::parse(&plan.wire()).expect("Vec3 ABI wire");
+    assert_eq!(parsed.varyings[2].kind, WireKind::F32x3.code());
+    assert_eq!(parsed.uniform_blocks[0].members[1].offset, 12);
+}
+
+#[test]
 fn abi_wire_is_deterministic_and_carries_physical_order() {
     let plan = WgslAbiPlan::wgsl(&fixture(), Span::default()).expect("WGSL projection");
     let wire = plan.wire();

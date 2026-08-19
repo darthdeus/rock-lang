@@ -117,6 +117,83 @@ fn main() {}
 }
 
 #[test]
+fn lua_and_js_publish_identical_dependency_gated_lifecycle_plans() {
+    let ws = ws_with(r#"
+        @lifecycle(phase="wire", owner="session") deco init wire {}
+        const BASE: int = 1
+        const DERIVED: int = BASE + 1
+        const OTHER: int = 9
+        @wire fn plain_wire() {}
+        @wire(onchange=[DERIVED, OTHER]) fn gated_wire() {}
+        fn main() {}
+    "#);
+    let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
+    let lua_plan = skull::mir_emit::emit_full(&ws, mid)
+        .expect("Lua emit")
+        .0
+        .lifecycle_plan;
+    let js_plan = skull_codegen_js::emit::emit_program(&ws, mid)
+        .expect("JS emit")
+        .lifecycle_plan;
+    assert_eq!(lua_plan, js_plan, "Lua and JS lifecycle metadata drifted");
+    assert!(lua_plan.census.plain > 0, "plain population must be nonzero");
+    assert!(lua_plan.census.gated > 0, "gated population must be nonzero");
+    assert!(lua_plan.census.dependency_edges > 2, "transitive dependency closure must be populated");
+    let gated = lua_plan
+        .entries
+        .iter()
+        .find(|entry| entry.diagnostic_name.as_str() == "gated_wire")
+        .expect("gated entry");
+    let dependency_names = gated
+        .qualification
+        .dependencies()
+        .iter()
+        .map(|dependency| match &dependency.identity {
+            skull_mir::code_identity::CodeIdentity::Artifact(
+                skull_mir::code_identity::CodeOwner::Artifact { name, .. },
+            ) => name.as_str(),
+            identity => panic!("dependency is not a logical global identity: {identity:?}"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(dependency_names, vec!["DERIVED", "OTHER", "BASE"]);
+}
+
+#[test]
+fn lua_and_js_reject_the_same_unsupported_wire_dependencies() {
+    let cases = [
+        ("[MUTABLE]", "mutable"),
+        ("[callable]", "names a function"),
+        ("[UNKNOWN]", "is unknown"),
+        ("[]", "requires a non-empty dependency list"),
+        ("[GOOD.value]", "structured identifier list"),
+    ];
+    for (annotation, expected) in cases {
+        let source = format!(
+            r#"
+            @lifecycle(phase="wire", owner="session") deco init wire {{}}
+            const GOOD: int = 1
+            global MUTABLE: int = 2
+            fn callable() {{}}
+            @wire(onchange={annotation}) fn apply_game_config() {{}}
+            fn main() {{}}
+            "#
+        );
+        let ws = ws_with(&source);
+        let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
+        let lua_error = match skull::mir_emit::emit_full(&ws, mid) {
+            Ok(_) => panic!("Lua accepted unsupported dependency {annotation}"),
+            Err(error) => error.message,
+        };
+        let js_error = match skull_codegen_js::emit::emit_program(&ws, mid) {
+            Ok(_) => panic!("JS accepted unsupported dependency {annotation}"),
+            Err(error) => error.message,
+        };
+        assert!(lua_error.contains(expected), "Lua {annotation}: {lua_error}");
+        assert!(js_error.contains(expected), "JS {annotation}: {js_error}");
+    }
+}
+
+#[test]
 fn artifact_definition_metadata_uses_the_shared_keyed_plan_in_js() {
     let ws = ws_with(r#"
 @artifact_definition(catalog="widgets", key_param="key")

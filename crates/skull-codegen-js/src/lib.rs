@@ -286,6 +286,55 @@ function __rock_definition_plan_stage(plan) {
   if (__rock_code_slot_stage === null) throw new Error("Rock code slot stage not open");
   __rock_definition_plan_pending = plan;
 }
+function __rock_lifecycle_wire_due(oldPlan, candidatePlan) {
+  var due = Object.create(null);
+  var oldPhase = oldPlan && oldPlan.wire;
+  var oldEntries = Object.create(null);
+  if (oldPhase && oldPhase._data) {
+    for (var i = 0; i < oldPhase.len; i++) {
+      var oldEntry = oldPhase._data[i];
+      if (oldEntry) oldEntries[oldEntry.key] = oldEntry;
+    }
+  }
+  var candidatePhase = candidatePlan && candidatePlan.wire;
+  if (!candidatePhase || !candidatePhase._data) return due;
+  for (var j = 0; j < candidatePhase.len; j++) {
+    var candidate = candidatePhase._data[j];
+    var old = candidate && oldEntries[candidate.key];
+    var changed = !old || candidate.qualification === "plain";
+    if (!changed && candidate.qualification !== old.qualification) changed = true;
+    if (!changed && candidate.body_fingerprint !== old.body_fingerprint) changed = true;
+    if (!changed) {
+      var candidateDeps = candidate.dependencies;
+      var oldDeps = old.dependencies;
+      if (!candidateDeps || !oldDeps || candidateDeps.len !== oldDeps.len) {
+        changed = true;
+      } else {
+        for (var k = 0; k < candidateDeps.len; k++) {
+          var candidateDep = candidateDeps._data[k];
+          var oldDep = oldDeps._data[k];
+          if (!candidateDep || !oldDep
+              || candidateDep.key !== oldDep.key
+              || candidateDep.fingerprint !== oldDep.fingerprint) {
+            changed = true;
+            break;
+          }
+        }
+      }
+    }
+    if (changed) due[candidate.key] = true;
+  }
+  return due;
+}
+function __rock_lifecycle_schedule_all_wires() {
+  __G.__ROCK_WIRE_DUE = __rock_lifecycle_wire_due(null, __G.__ROCK_LIFECYCLE_PLAN);
+}
+function __rock_lifecycle_take_wire(key) {
+  var due = __G.__ROCK_WIRE_DUE;
+  if (!due || !due[key]) return false;
+  delete due[key];
+  return true;
+}
 function __rock_definition_plan_materialize(plan) {
   __rock_definition_plan_materializing = true;
   Object.keys(plan).forEach(function(catalogKey) {
@@ -309,6 +358,11 @@ function __rock_code_slot_publish() {
   if (__rock_code_slot_stage === null) throw new Error("Rock code slot stage not open");
   var definition_plan = __rock_definition_plan_pending;
   if (definition_plan !== null) definition_plan = __rock_definition_plan_materialize(definition_plan);
+  var candidateLifecyclePlan = __rock_lifecycle_plan_pending;
+  var wireDue = null;
+  if (candidateLifecyclePlan !== null) {
+    wireDue = __rock_lifecycle_wire_due(__G.__ROCK_LIFECYCLE_PLAN, candidateLifecyclePlan);
+  }
   var stage = __rock_code_slot_stage;
   Object.keys(stage).forEach(function(key) {
     var staged = stage[key], slot = __rock_code_slots[key];
@@ -335,6 +389,7 @@ function __rock_code_slot_publish() {
   __rock_lifecycle_plan_pending = null;
   __rock_definition_plan_pending = null;
   if (typeof __rock_state_transaction_commit !== "undefined") __rock_state_transaction_commit();
+  if (wireDue !== null) __G.__ROCK_WIRE_DUE = wireDue;
 }
 function __rock_code_ref_kind(v) {
   if (v === null || typeof v !== "object") return null;
