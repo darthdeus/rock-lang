@@ -3680,6 +3680,266 @@ mod force_full_tests {
 }
 
 #[cfg(test)]
+mod skull_stone_lint_snapshot_tests {
+    use super::super::{SkullReload, SkullStone};
+    use std::time::Instant;
+
+    #[test]
+    fn skull_stone_body_edit_uses_one_lint_transaction_snapshot() {
+        if !crate::lint_pass::census_enabled() {
+            return;
+        }
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().to_str().unwrap().to_string();
+        let main = dir.path().join("main.lua");
+        let incremental = dir.path().join("incremental.lua");
+        let source = dir.path().join("main.rock");
+        let v1 = "fn helper() -> int { 3 }\nfn main() { let unused = helper() }\n";
+        let v2 = "fn helper() -> int { 5 }\nfn main() { let unused = helper() }\n";
+        std::fs::write(&source, v1).expect("source");
+        let mut stone = SkullStone::init(&root, &main, &incremental).expect("init");
+        let _ = crate::lint_pass::take_census().expect("census enabled");
+
+        let started = Instant::now();
+        let reload = stone
+            .apply_edit(&source, v2, &main, &incremental)
+            .expect("body edit");
+        let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+        assert!(matches!(reload, SkullReload::Incremental { .. }), "reload: {reload:?}");
+        let census = crate::lint_pass::take_census().expect("census enabled");
+        assert_eq!(
+            census.cache_snapshots.snapshots, 1,
+            "SkullStone body edit should own one lint transaction snapshot: {:?}",
+            census.cache_snapshots
+        );
+        assert!(census.cache_snapshots.cached_entries > 0);
+        assert!(census.cache_snapshots.cached_findings > 0);
+        eprintln!(
+            "skull-stone one-edit: elapsed_ms={elapsed_ms:.3} snapshots={} entries={} findings={} clone_ms={:.3}",
+            census.cache_snapshots.snapshots,
+            census.cache_snapshots.cached_entries,
+            census.cache_snapshots.cached_findings,
+            census.cache_snapshots.clone_ns as f64 / 1_000_000.0,
+        );
+    }
+
+    fn direct_overlay(root: &str, target_suffix: &str, edited: &str) -> String {
+        let spec = crate::unified_compile::SourceSpec::Directory(std::path::PathBuf::from(root));
+        let sources = crate::unified_compile::discover_sources(&spec).expect("discover");
+        let files: Vec<(String, String)> = sources
+            .files
+            .iter()
+            .map(|file| {
+                let file = file.borrow();
+                (file.file.to_id_path(), file.contents.clone())
+            })
+            .collect();
+        let target = files
+            .iter()
+            .find(|(path, _)| path.ends_with(target_suffix))
+            .map(|(path, _)| path.clone())
+            .expect("main source");
+        let mut session = crate::bone_backend::bone_session_for_emission(
+            files,
+            std::path::Path::new(root),
+        )
+        .expect("session");
+        let renderer = super::super::skull_renderer_target(root).expect("renderer");
+        let mid = skull::user_module_id(session.workspace()).expect("user module");
+        let (_, mut cache) = skull::mir_emit::emit_full_in_for_renderer(
+            session.workspace(),
+            mid,
+            Some(root),
+            renderer,
+        )
+        .expect("fresh emit");
+        let update = session.update_file(&target, edited).expect("edit");
+        assert!(matches!(
+            update.tier,
+            bone_incremental::session::UpdateTier::BodyOnly
+        ));
+        let edits = update
+            .body_update
+            .edit
+            .iter()
+            .map(|edit| skull::instance_graph::SpanEdit {
+                file: edit.file,
+                at: edit.at,
+                byte_delta: edit.byte_delta,
+                line_delta: edit.line_delta,
+            })
+            .collect::<Vec<_>>();
+        skull::mir_emit::emit_overlay_with_span_edits(
+            session.workspace(),
+            &mut cache,
+            &update.reinferred,
+            &edits,
+        )
+        .expect("overlay")
+        .lua
+    }
+
+    #[test]
+    fn skull_stone_overlay_matches_cache_independent_route() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().to_str().unwrap().to_string();
+        let main = dir.path().join("main.lua");
+        let incremental = dir.path().join("incremental.lua");
+        let source = dir.path().join("main.rock");
+        let v1 = "fn helper() -> int { 3 }\nfn main() { let unused = helper() }\n";
+        let v2 = "fn helper() -> int { 5 }\nfn main() { let unused = helper() }\n";
+        std::fs::write(&source, v1).expect("source");
+        let mut stone = SkullStone::init(&root, &main, &incremental).expect("init");
+        let reload = stone
+            .apply_edit(&source, v2, &main, &incremental)
+            .expect("body edit");
+        assert!(matches!(reload, SkullReload::Incremental { .. }), "reload: {reload:?}");
+        let route_overlay = std::fs::read_to_string(&incremental).expect("route overlay");
+        let direct = direct_overlay(&root, "main.rock", v2);
+        assert!(!route_overlay.is_empty(), "overlay population must be nonzero");
+        assert_eq!(route_overlay, direct, "lint-cache integration changed overlay bytes");
+        if let Some(capture) = std::env::var_os("ROCK_STONE_OVERLAY_CAPTURE_DIR") {
+            let capture = std::path::Path::new(&capture);
+            std::fs::create_dir_all(capture).expect("capture dir");
+            std::fs::write(capture.join("route-overlay.lua"), route_overlay.as_bytes())
+                .expect("capture route");
+            std::fs::write(capture.join("direct-overlay.lua"), direct.as_bytes())
+                .expect("capture direct");
+        }
+    }
+
+    #[test]
+    fn skull_stone_mag_overlay_matches_cache_independent_route() {
+        let Some(project) = std::env::var_os("ROCK_STONE_MAG_PROJECT") else {
+            return;
+        };
+        let project = std::path::PathBuf::from(project);
+        let source = project.join("mobs.rock");
+        let v1 = std::fs::read_to_string(&source).expect("MAG source");
+        let v2 = super::super::body_digit_flip(&v1, "update_mobs").expect("MAG edit");
+        let outputs = tempfile::tempdir().expect("output dir");
+        let root = project.to_str().unwrap();
+        let main = outputs.path().join("main.lua");
+        let incremental = outputs.path().join("incremental.lua");
+        let mut stone = SkullStone::init(root, &main, &incremental).expect("MAG init");
+        let reload = stone
+            .apply_edit(&source, &v2, &main, &incremental)
+            .expect("MAG body edit");
+        assert!(matches!(reload, SkullReload::Incremental { .. }), "reload: {reload:?}");
+        let route_overlay = std::fs::read_to_string(&incremental).expect("route overlay");
+        let direct = direct_overlay(root, "mobs.rock", &v2);
+        assert!(!route_overlay.is_empty(), "MAG overlay population must be nonzero");
+        assert_eq!(route_overlay, direct, "MAG lint-cache integration changed overlay bytes");
+        if let Some(capture) = std::env::var_os("ROCK_STONE_OVERLAY_CAPTURE_DIR") {
+            let capture = std::path::Path::new(&capture);
+            std::fs::create_dir_all(capture).expect("capture dir");
+            std::fs::write(capture.join("mag-route-overlay.lua"), route_overlay.as_bytes())
+                .expect("capture MAG route");
+            std::fs::write(capture.join("mag-direct-overlay.lua"), direct.as_bytes())
+                .expect("capture MAG direct");
+        }
+    }
+
+    #[test]
+    fn skull_stone_apply_edit_route_benchmark() {
+        if std::env::var_os("ROCK_STONE_ROUTE_BENCH").is_none() {
+            return;
+        }
+        crate::lint_pass::set_policy(crate::lint_pass::LintReport::Off);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().to_str().unwrap().to_string();
+        let main = dir.path().join("main.lua");
+        let incremental = dir.path().join("incremental.lua");
+        let source = dir.path().join("main.rock");
+        let v1 = "fn helper() -> int { 3 }\nfn main() { let unused = helper() }\n";
+        let v2 = "fn helper() -> int { 5 }\nfn main() { let unused = helper() }\n";
+        std::fs::write(&source, v1).expect("source");
+        let mut stone = SkullStone::init(&root, &main, &incremental).expect("init");
+        let _ = crate::lint_pass::take_census();
+        let warmup = 20;
+        let iters = 80;
+        let mut samples = Vec::with_capacity(iters);
+        for i in 0..(warmup + iters) {
+            let text = if i % 2 == 0 { v2 } else { v1 };
+            let started = Instant::now();
+            let reload = stone
+                .apply_edit(&source, text, &main, &incremental)
+                .expect("apply edit");
+            assert!(matches!(reload, SkullReload::Incremental { .. }), "reload: {reload:?}");
+            if i >= warmup {
+                samples.push(started.elapsed().as_secs_f64() * 1000.0);
+            }
+        }
+        let census = crate::lint_pass::take_census().expect("census enabled");
+        let mut sorted = samples.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let percentile = |p: f64| sorted[((p / 100.0) * (sorted.len() as f64 - 1.0)).round() as usize];
+        let mean = samples.iter().sum::<f64>() / samples.len() as f64;
+        assert_eq!(census.cache_snapshots.snapshots, warmup + iters);
+        assert!(census.cache_snapshots.cached_entries > 0);
+        assert!(census.cache_snapshots.cached_findings > 0);
+        eprintln!(
+            "skull-stone apply_edit route: mean={mean:.3} p50={:.3} p99={:.3} snapshots={} entries/edit={:.1} findings/edit={:.1} clone_ms={:.3}",
+            percentile(50.0),
+            percentile(99.0),
+            census.cache_snapshots.snapshots,
+            census.cache_snapshots.cached_entries as f64 / census.cache_snapshots.snapshots as f64,
+            census.cache_snapshots.cached_findings as f64 / census.cache_snapshots.snapshots as f64,
+            census.cache_snapshots.clone_ns as f64 / 1_000_000.0,
+        );
+    }
+
+    #[test]
+    fn skull_stone_mag_apply_edit_route_benchmark() {
+        if std::env::var_os("ROCK_STONE_MAG_BENCH").is_none() {
+            return;
+        }
+        crate::lint_pass::set_policy(crate::lint_pass::LintReport::Off);
+        let project = std::path::PathBuf::from(
+            std::env::var_os("ROCK_STONE_MAG_PROJECT").expect("ROCK_STONE_MAG_PROJECT"),
+        );
+        let source = project.join("mobs.rock");
+        let v1 = std::fs::read_to_string(&source).expect("MAG source");
+        let v2 = super::super::body_digit_flip(&v1, "update_mobs").expect("MAG edit");
+        let outputs = tempfile::tempdir().expect("output dir");
+        let root = project.to_str().unwrap();
+        let main = outputs.path().join("main.lua");
+        let incremental = outputs.path().join("incremental.lua");
+        let mut stone = SkullStone::init(root, &main, &incremental).expect("MAG init");
+        let _ = crate::lint_pass::take_census();
+        let warmup = 20;
+        let iters = 80;
+        let mut samples = Vec::with_capacity(iters);
+        for i in 0..(warmup + iters) {
+            let text = if i % 2 == 0 { &v2 } else { &v1 };
+            let started = Instant::now();
+            let reload = stone
+                .apply_edit(&source, text, &main, &incremental)
+                .expect("MAG apply edit");
+            assert!(matches!(reload, SkullReload::Incremental { .. }), "reload: {reload:?}");
+            if i >= warmup {
+                samples.push(started.elapsed().as_secs_f64() * 1000.0);
+            }
+        }
+        let census = crate::lint_pass::take_census().expect("census enabled");
+        let mut sorted = samples.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let percentile = |p: f64| sorted[((p / 100.0) * (sorted.len() as f64 - 1.0)).round() as usize];
+        let mean = samples.iter().sum::<f64>() / samples.len() as f64;
+        assert_eq!(census.cache_snapshots.snapshots, warmup + iters);
+        eprintln!(
+            "skull-stone MAG apply_edit: mean={mean:.3} p50={:.3} p99={:.3} snapshots={} entries/edit={:.1} findings/edit={:.1} clone_ms={:.3}",
+            percentile(50.0),
+            percentile(99.0),
+            census.cache_snapshots.snapshots,
+            census.cache_snapshots.cached_entries as f64 / census.cache_snapshots.snapshots as f64,
+            census.cache_snapshots.cached_findings as f64 / census.cache_snapshots.snapshots as f64,
+            census.cache_snapshots.clone_ns as f64 / 1_000_000.0,
+        );
+    }
+}
+
+#[cfg(test)]
 mod value_test_exec {
     //! `@test(returns = <literal>)` end-to-end on the luajit executor: the
     //! harness emits a VALUE marker, the host compares

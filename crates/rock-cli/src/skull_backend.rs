@@ -2949,8 +2949,7 @@ impl SkullStone {
     /// overlay. `changed` is the watcher's changed-path set; pass empty to force a
     /// full re-discover.
     pub fn recompile(&mut self, changed: &[std::path::PathBuf], main_path: &std::path::Path, incremental_path: &std::path::Path) -> Result<SkullReload> {
-        let snapshot = self.project.snapshot(changed);
-        let update = self.project.recompile(changed)?;
+        let (update, snapshot) = self.project.recompile_for_publication(changed)?;
         match self.route_and_emit(update, main_path, incremental_path) {
             Ok(reload) => Ok(reload),
             Err(error) => {
@@ -2971,8 +2970,7 @@ impl SkullStone {
     /// a path the build didn't discover -- an edit to an unknown file would
     /// otherwise silently do nothing.
     pub fn apply_edit(&mut self, path: &std::path::Path, new_text: &str, main_path: &std::path::Path, incremental_path: &std::path::Path) -> Result<SkullReload> {
-        let snapshot = self.project.snapshot(&[path.to_path_buf()]);
-        let update = self.project.apply_edit(path, new_text)?;
+        let (update, snapshot) = self.project.apply_edit_for_publication(path, new_text)?;
         match self.route_and_emit(update, main_path, incremental_path) {
             Ok(reload) => Ok(reload),
             Err(error) => {

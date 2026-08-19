@@ -20,6 +20,7 @@ use std::time::Instant;
 pub struct LintPassCensus {
     pub lint: bone_lints::LintCensus,
     pub cache: bone_lints::LintCacheStats,
+    pub cache_snapshots: bone_lints::LintCacheSnapshotStats,
     pub report_prepare_ns: u128,
     pub summary_sort_ns: u128,
     pub render_ns: u128,
@@ -28,7 +29,7 @@ pub struct LintPassCensus {
 static CENSUS_ENABLED: OnceLock<bool> = OnceLock::new();
 static CENSUS: OnceLock<Mutex<LintPassCensus>> = OnceLock::new();
 
-fn census_enabled() -> bool {
+pub(crate) fn census_enabled() -> bool {
     *CENSUS_ENABLED.get_or_init(|| std::env::var_os("ROCK_LINT_CENSUS").is_some())
 }
 
@@ -53,6 +54,17 @@ fn record_lint_cache_stats(stats: bone_lints::LintCacheStats) {
         .lock()
         .expect("lint census mutex");
     census.cache.merge(&stats);
+}
+
+pub(crate) fn record_lint_cache_snapshot(stats: bone_lints::LintCacheSnapshotStats) {
+    if !census_enabled() {
+        return;
+    }
+    let mut census = CENSUS
+        .get_or_init(|| Mutex::new(LintPassCensus::default()))
+        .lock()
+        .expect("lint census mutex");
+    census.cache_snapshots.merge(&stats);
 }
 
 fn record_report_census(report_prepare_ns: u128, summary_sort_ns: u128, render_ns: u128) {
@@ -116,6 +128,21 @@ pub fn print_census(census: &LintPassCensus) {
         cache.inference_findings_reused,
         cache.span_shifts,
         cache.suppression_invalidations,
+    );
+    let snapshots = &census.cache_snapshots;
+    eprintln!(
+        "    cache snapshots: count={} entries={} findings={} files={} flat_bodies={} inference_bodies={} other={} global={} last={} count_ms={:.3} clone_ms={:.3}",
+        snapshots.snapshots,
+        snapshots.cached_entries,
+        snapshots.cached_findings,
+        snapshots.file_entries,
+        snapshots.flat_body_entries,
+        snapshots.inference_body_entries,
+        snapshots.other_entries,
+        snapshots.global_entries,
+        snapshots.last_entries,
+        snapshots.count_ns as f64 / 1_000_000.0,
+        snapshots.clone_ns as f64 / 1_000_000.0,
     );
     eprintln!(
         "    report: prepare_ms={:.3} summary_sort_ms={:.3} render_ms={:.3}",

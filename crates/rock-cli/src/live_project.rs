@@ -83,11 +83,17 @@ impl LiveProject {
             }
             previous_contents.push((id, source.borrow().contents.clone()));
         }
+        let (lint_cache, snapshot_stats) = self
+            .lint_cache
+            .clone_for_snapshot(crate::lint_pass::census_enabled());
+        if let Some(stats) = snapshot_stats {
+            crate::lint_pass::record_lint_cache_snapshot(stats);
+        }
         LiveProjectSnapshot {
             sources: self.sources.clone(),
             entry_path: self.entry_path.clone(),
             previous_contents,
-            lint_cache: self.lint_cache.clone(),
+            lint_cache,
         }
     }
 
@@ -118,9 +124,16 @@ impl LiveProject {
     }
 
     pub fn recompile(&mut self, changed: &[PathBuf]) -> Result<LiveUpdate> {
+        self.recompile_for_publication(changed).map(|(update, _snapshot)| update)
+    }
+
+    pub(crate) fn recompile_for_publication(
+        &mut self,
+        changed: &[PathBuf],
+    ) -> Result<(LiveUpdate, LiveProjectSnapshot)> {
         let snapshot = self.snapshot(changed);
         match self.recompile_inner(changed) {
-            Ok(update) => Ok(update),
+            Ok(update) => Ok((update, snapshot)),
             Err(error) => {
                 if let Err(restore) = self.restore(snapshot) {
                     return Err(anyhow::anyhow!(
@@ -171,9 +184,18 @@ impl LiveProject {
     }
 
     pub fn apply_edit(&mut self, path: &Path, new_text: &str) -> Result<LiveUpdate> {
+        self.apply_edit_for_publication(path, new_text)
+            .map(|(update, _snapshot)| update)
+    }
+
+    pub(crate) fn apply_edit_for_publication(
+        &mut self,
+        path: &Path,
+        new_text: &str,
+    ) -> Result<(LiveUpdate, LiveProjectSnapshot)> {
         let snapshot = self.snapshot(&[path.to_path_buf()]);
         match self.apply_edit_inner(path, new_text) {
-            Ok(update) => Ok(update),
+            Ok(update) => Ok((update, snapshot)),
             Err(error) => {
                 if let Err(restore) = self.restore(snapshot) {
                     return Err(anyhow::anyhow!(
