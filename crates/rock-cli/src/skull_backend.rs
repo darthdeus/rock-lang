@@ -3008,6 +3008,15 @@ impl SkullStone {
                         reasons: vec!["StateSchema changed; process restart is required".to_string()],
                     });
                 }
+                if self.cache.lifecycle_plan().is_some_and(|old| {
+                    old.removed_gated_wire(&emit.lifecycle_plan)
+                }) {
+                    return Ok(SkullReload::FullRequired {
+                        reasons: vec![
+                            "removing a gated @wire requires a fresh Session/HostProjection".to_string(),
+                        ],
+                    });
+                }
                 // StateSchema metadata is regenerated on a structural edit.
                 let spec =
                     crate::unified_compile::SourceSpec::Directory(PathBuf::from(self.project.dir()));
@@ -3038,6 +3047,28 @@ impl SkullStone {
             if old_shader_contracts != staged_cache.shader_registration_contracts() {
                 return Ok(SkullReload::FullRequired {
                     reasons: vec!["shader registration ABI changed".to_string()],
+                });
+            }
+            if self.cache.lifecycle_plan().is_some_and(|old| {
+                old.wire_structure_changed(
+                    staged_cache
+                        .lifecycle_plan()
+                        .expect("overlay always carries a LifecyclePlan"),
+                )
+            }) {
+                let reason = if self.cache.lifecycle_plan().is_some_and(|old| {
+                    old.removed_gated_wire(
+                        staged_cache
+                            .lifecycle_plan()
+                            .expect("overlay always carries a LifecyclePlan"),
+                    )
+                }) {
+                    "removing a gated @wire requires a fresh Session/HostProjection"
+                } else {
+                    "LifecyclePlan wire structure changed; full artifact transition required"
+                };
+                return Ok(SkullReload::FullRequired {
+                    reasons: vec![reason.to_string()],
                 });
             }
             let bytes = overlay.lua.len();

@@ -55,6 +55,141 @@ fn js_runtime() -> String {
 }
 
 #[test]
+fn lifecycle_selector_schedules_only_changed_gated_entries_and_plain_entries() {
+    let source = format!(
+        "{}\nvar __G = {{}};\n{}",
+        js_runtime(),
+        r#"
+var oldPlan = {wire: {len: 4, _data: [
+  {key: "plain", qualification: "plain", body_fingerprint: "a", dependencies: {len: 0, _data: []}},
+  {key: "stable", qualification: "onchange", body_fingerprint: "b", dependencies: {len: 1, _data: [{key: "DEP", fingerprint: "1"}]}},
+  {key: "body", qualification: "onchange", body_fingerprint: "old", dependencies: {len: 1, _data: [{key: "DEP", fingerprint: "1"}]}},
+  {key: "dependency", qualification: "onchange", body_fingerprint: "d", dependencies: {len: 1, _data: [{key: "DEP", fingerprint: "1"}]}}
+]}};
+var candidate = {wire: {len: 5, _data: [
+  {key: "plain", qualification: "plain", body_fingerprint: "changed", dependencies: {len: 0, _data: []}},
+  {key: "stable", qualification: "onchange", body_fingerprint: "b", dependencies: {len: 1, _data: [{key: "DEP", fingerprint: "1"}]}},
+  {key: "body", qualification: "onchange", body_fingerprint: "new", dependencies: {len: 1, _data: [{key: "DEP", fingerprint: "1"}]}},
+  {key: "dependency", qualification: "onchange", body_fingerprint: "d", dependencies: {len: 1, _data: [{key: "DEP", fingerprint: "2"}]}},
+  {key: "added", qualification: "onchange", body_fingerprint: "e", dependencies: {len: 1, _data: [{key: "OTHER", fingerprint: "1"}]}}
+]}};
+var due = __rock_lifecycle_wire_due(oldPlan, candidate);
+if (!(due.plain && !due.stable && due.body && due.dependency && due.added)) throw new Error("selector changed set");
+if (__rock_lifecycle_take_wire("plain") !== false) throw new Error("take read an unset due map");
+__G.__ROCK_WIRE_DUE = due;
+if (!__rock_lifecycle_take_wire("plain") || __rock_lifecycle_take_wire("plain")) throw new Error("take was not exactly once");
+__G.__ROCK_LIFECYCLE_PLAN = candidate;
+__rock_lifecycle_schedule_all_wires();
+if (!(__rock_lifecycle_take_wire("stable") && __rock_lifecycle_take_wire("added"))) throw new Error("fresh scheduling missed an entry");
+console.log("PASS");
+"#
+    );
+    let output = node(&source);
+    assert_eq!(output.trim(), "PASS");
+}
+
+#[test]
+fn dependency_gated_wire_overlay_selects_const_closure_and_calls_runtime_once() {
+    let source = |base: i32, direct: i32, unrelated: i32| {
+        format!(
+            r#"
+@lifecycle(phase="wire", owner="session") deco init wire {{}}
+const BASE: int = {base}
+const DERIVED: int = BASE + 1
+const DIRECT: int = {direct}
+global PLAIN_RUNS: int = 0
+global DIRECT_RUNS: int = 0
+global TRANSITIVE_RUNS: int = 0
+global PLAIN_VALUE: int = 0
+global DIRECT_VALUE: int = 0
+global TRANSITIVE_VALUE: int = 0
+global DRIVER_RUNS: int = 0
+fn unrelated() -> int {{ return {unrelated} }}
+@wire fn plain_wire() {{ PLAIN_RUNS = PLAIN_RUNS + 1; PLAIN_VALUE = unrelated() }}
+@wire(onchange=[DIRECT]) fn direct_wire() {{ DIRECT_RUNS = DIRECT_RUNS + 1; DIRECT_VALUE = DIRECT }}
+@wire(onchange=[DERIVED]) fn transitive_wire() {{ TRANSITIVE_RUNS = TRANSITIVE_RUNS + 1; TRANSITIVE_VALUE = DERIVED }}
+@nomangle fn run_wire_systems() {{ DRIVER_RUNS = DRIVER_RUNS + 1 }}
+fn main() {{ run_wire_systems() }}
+"#
+        )
+    };
+    let before = ws_with(&source(1, 10, 7));
+    let unrelated = ws_with(&source(1, 10, 8));
+    let direct = ws_with(&source(1, 11, 8));
+    let transitive = ws_with(&source(4, 11, 8));
+    let mid = function(&before, "main").module;
+    let (program, mut cache) = skull_codegen_js::emit::emit_program_cached(&before, mid)
+        .expect("initial JS program");
+    let unrelated_fn = function(&unrelated, "unrelated");
+    let direct_global = global(&direct, "DIRECT");
+    let base_global = global(&transitive, "BASE");
+    let overlay_unrelated = skull_codegen_js::emit::emit_overlay(
+        &unrelated,
+        mid,
+        &mut cache,
+        &[(unrelated_fn.module, BodyOwner::Function(unrelated_fn.func))],
+    )
+    .expect("unrelated overlay")
+    .expect_overlay();
+    let overlay_direct = skull_codegen_js::emit::emit_overlay(
+        &direct,
+        mid,
+        &mut cache,
+        &[(direct_global.0, BodyOwner::Global(direct_global.1))],
+    )
+    .expect("direct overlay")
+    .expect_overlay();
+    let overlay_transitive = skull_codegen_js::emit::emit_overlay(
+        &transitive,
+        mid,
+        &mut cache,
+        &[(base_global.0, BodyOwner::Global(base_global.1))],
+    )
+    .expect("transitive overlay")
+    .expect_overlay();
+    for overlay in [&overlay_unrelated, &overlay_direct, &overlay_transitive] {
+        assert_eq!(
+            overlay.matches("run_wire_systems();").count(),
+            1,
+            "a JS overlay must have exactly one runtime wire caller"
+        );
+    }
+    let driver = r#"
+function run_wires() {
+  var phase = __G.__ROCK_LIFECYCLE_PLAN.wire;
+  for (var i = 0; i < phase.len; i++) {
+    var entry = phase._data[i];
+    if (__rock_lifecycle_take_wire(entry.key)) __rock_call(entry.func);
+  }
+}
+function state(name) { return __rock_state_get("global:<test>::" + name + "::value"); }
+run_wires();
+console.log("initial:" + state("PLAIN_RUNS") + ":" + state("DIRECT_RUNS") + ":" + state("TRANSITIVE_RUNS") + ":" + state("DIRECT_VALUE") + ":" + state("TRANSITIVE_VALUE"));
+var driver_before = state("DRIVER_RUNS");
+(0, eval)(OVERLAY_UNRELATED);
+run_wires();
+console.log("unrelated:" + state("PLAIN_RUNS") + ":" + state("DIRECT_RUNS") + ":" + state("TRANSITIVE_RUNS") + ":" + state("PLAIN_VALUE") + ":" + (state("DRIVER_RUNS") - driver_before));
+driver_before = state("DRIVER_RUNS");
+(0, eval)(OVERLAY_DIRECT);
+run_wires();
+console.log("direct:" + state("PLAIN_RUNS") + ":" + state("DIRECT_RUNS") + ":" + state("TRANSITIVE_RUNS") + ":" + state("DIRECT_VALUE") + ":" + (state("DRIVER_RUNS") - driver_before));
+driver_before = state("DRIVER_RUNS");
+(0, eval)(OVERLAY_TRANSITIVE);
+run_wires();
+console.log("transitive:" + state("PLAIN_RUNS") + ":" + state("DIRECT_RUNS") + ":" + state("TRANSITIVE_RUNS") + ":" + state("TRANSITIVE_VALUE") + ":" + (state("DRIVER_RUNS") - driver_before));
+"#;
+    let source = format!(
+        "{}\nvar __G = {{}};\n{}\nvar OVERLAY_UNRELATED = {:?};\nvar OVERLAY_DIRECT = {:?};\nvar OVERLAY_TRANSITIVE = {:?};\n{}",
+        js_runtime(), program.program, overlay_unrelated, overlay_direct, overlay_transitive, driver
+    );
+    let output = node(&source);
+    assert_eq!(
+        output.trim(),
+        "initial:1:1:1:10:2\nunrelated:2:1:1:8:1\ndirect:3:2:1:11:1\ntransitive:4:2:2:5:1"
+    );
+}
+
+#[test]
 fn definition_plan_publishes_and_aborts_with_the_code_slot_transaction() {
     let output = node(&format!(
         "{}\nvar __G = {{}};\n\
@@ -309,7 +444,7 @@ fn retained_capturing_value_refreshes_while_keeping_mutable_capture() {
 }
 
 #[test]
-fn failed_overlay_after_late_top_level_work_keeps_retained_code_ref_old() {
+fn wire_failure_after_publication_keeps_the_candidate_code_ref_live() {
     let source = |delta: i32, wire: &str| {
         format!(
             "global CALLBACK: (fn() -> int)? = null\n\
@@ -342,7 +477,7 @@ fn failed_overlay_after_late_top_level_work_keeps_retained_code_ref_old() {
         program.program,
         overlay
     ));
-    assert_eq!(output.trim(), "false\ntrue\n0");
+    assert_eq!(output.trim(), "false\ntrue\n10");
 }
 
 #[test]

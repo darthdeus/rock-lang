@@ -276,6 +276,10 @@ pub struct CodeArtifact {
 }
 
 impl CodeArtifact {
+    pub fn body_fingerprint(&self, identity: &CodeIdentity) -> Option<u64> {
+        self.entries.get(identity).map(|entry| entry.body_fingerprint)
+    }
+
     pub fn merge(&mut self, other: Self) {
         self.census.direct_call_only += other.census.direct_call_only;
         self.census.missing_identity += other.census.missing_identity;

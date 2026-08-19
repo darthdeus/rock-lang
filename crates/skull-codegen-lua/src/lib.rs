@@ -114,6 +114,55 @@ function __rock_definition_plan_stage(plan)
   if not _G.__rock_code_slot_pending then error("Rock code slot stage not open", 0) end
   _G.__rock_definition_plan_pending = plan
 end
+function __rock_lifecycle_wire_due(old_plan, candidate_plan)
+  local due = {}
+  local old_phase = old_plan and old_plan.wire
+  local old_entries = {}
+  if old_phase and old_phase._data then
+    for i = 1, old_phase.len do
+      local entry = old_phase._data[i]
+      if entry then old_entries[entry.key] = entry end
+    end
+  end
+  local candidate_phase = candidate_plan and candidate_plan.wire
+  if not candidate_phase or not candidate_phase._data then return due end
+  for i = 1, candidate_phase.len do
+    local candidate = candidate_phase._data[i]
+    local old = candidate and old_entries[candidate.key]
+    local changed = old == nil or candidate.qualification == "plain"
+    if not changed and candidate.qualification ~= old.qualification then changed = true end
+    if not changed and candidate.body_fingerprint ~= old.body_fingerprint then changed = true end
+    if not changed then
+      local candidate_deps = candidate.dependencies
+      local old_deps = old.dependencies
+      if not candidate_deps or not old_deps or candidate_deps.len ~= old_deps.len then
+        changed = true
+      else
+        for j = 1, candidate_deps.len do
+          local candidate_dep = candidate_deps._data[j]
+          local old_dep = old_deps._data[j]
+          if not candidate_dep or not old_dep
+              or candidate_dep.key ~= old_dep.key
+              or candidate_dep.fingerprint ~= old_dep.fingerprint then
+            changed = true
+            break
+          end
+        end
+      end
+    end
+    if changed then due[candidate.key] = true end
+  end
+  return due
+end
+function __rock_lifecycle_schedule_all_wires()
+  _G.__ROCK_WIRE_DUE = __rock_lifecycle_wire_due(nil, _G.__ROCK_LIFECYCLE_PLAN)
+end
+function __rock_lifecycle_take_wire(key)
+  local due = rawget(_G, "__ROCK_WIRE_DUE")
+  if not due or not due[key] then return false end
+  due[key] = nil
+  return true
+end
 function __rock_definition_plan_materialize(plan)
   _G.__rock_definition_plan_materializing = true
   for _, catalog in pairs(plan) do
@@ -133,6 +182,11 @@ function __rock_code_slot_publish()
   local definition_plan = _G.__rock_definition_plan_pending
   if definition_plan ~= nil then
     definition_plan = __rock_definition_plan_materialize(definition_plan)
+  end
+  local candidate_lifecycle_plan = _G.__rock_lifecycle_plan_pending
+  local wire_due = nil
+  if candidate_lifecycle_plan ~= nil then
+    wire_due = __rock_lifecycle_wire_due(_G.__ROCK_LIFECYCLE_PLAN, candidate_lifecycle_plan)
   end
   local pending_wgpu = rawget(_G, "PENDING_WGPU_SHADER_SRCS")
   if pending_wgpu and next(pending_wgpu) ~= nil then
@@ -185,6 +239,7 @@ function __rock_code_slot_publish()
   _G.__rock_lifecycle_plan_pending = nil
   _G.__rock_definition_plan_pending = nil
   if _G.__rock_state_transaction_commit then __rock_state_transaction_commit() end
+  if wire_due ~= nil then _G.__ROCK_WIRE_DUE = wire_due end
 end
 if not _G.__rock_fn_mt then
   _G.__rock_fn_mt = {

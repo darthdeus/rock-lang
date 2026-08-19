@@ -380,6 +380,7 @@ pub fn annotation_value_lua(v: &bone_semantic::hir::AnnoValue) -> Option<String>
         A::Bool(b) => b.to_string(),
         A::String(s) => format!("{:?}", s.as_str()),
         A::Ident(id) => id.name.as_str().to_string(),
+        A::IdentList(_) => return None,
         A::Other => return None,
     })
 }
