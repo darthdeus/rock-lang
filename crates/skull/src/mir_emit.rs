@@ -4994,6 +4994,9 @@ fn assemble(
     // scaffolding (init ordering, deco application) whose own errors are
     // unrelated to a body that cannot emit.
     rejections.into_result()?;
+    if let Some(err) = cg.take_rejection() {
+        return Err(err);
+    }
     mark_generated_code_values(ws, &mut code_artifact);
     let definition_plan = skull_mir::definition::collect(ws)?;
     if definition_plan.census.applications != definition_plan.census.admitted {
@@ -5020,10 +5023,10 @@ fn assemble(
     code_artifact.binding_plan = binding_plan;
     code_artifact.effect_plan = effect_plan;
     let has_artifact_plans = !code_artifact.binding_plan.entries.is_empty();
-    let has_state_publication = code_artifact.entries.values().any(|entry| entry.escaping)
+    let has_code_slot_publication = code_artifact.entries.values().any(|entry| entry.escaping)
         || definition_plan.census.declarations > 0
-        || lifecycle_plan.census.declarations > 0
-        || has_artifact_plans;
+        || lifecycle_plan.census.declarations > 0;
+    let has_state_publication = has_code_slot_publication || has_artifact_plans;
     out.push_str("__rock_state_transaction_begin()\n");
     out.push_str(&format!(
         "__rock_state_publish_schema({:?})\n",
@@ -5037,21 +5040,20 @@ fn assemble(
     out.push_str(&globals_lua);
     skipped.extend(global_skipped);
     let has_definition_plan = definition_plan.census.declarations > 0;
-    if code_artifact.entries.values().any(|entry| entry.escaping)
-        || has_definition_plan
-        || lifecycle_plan.census.declarations > 0
-        || has_artifact_plans
-    {
+    if has_artifact_plans {
+        out.push_str(skull_codegen_lua::ARTIFACT_PLAN_PRELUDE);
+    }
+    if has_code_slot_publication {
         out.push_str(skull_codegen_lua::FN_MT_PRELUDE);
     }
     // Global initializer bodies (including their escaping lambdas) are now
     // defined, so slot staging must follow them but precede initializer calls.
     let code_slot_stage = code_slot_registration_lua(ws, scx, &code_artifact)?;
     out.push_str(&code_slot_stage);
-    if (has_definition_plan || lifecycle_plan.census.declarations > 0 || has_artifact_plans)
-        && !code_artifact.entries.values().any(|entry| entry.escaping)
-    {
+    if has_code_slot_publication && !code_artifact.entries.values().any(|entry| entry.escaping) {
         out.push_str("__rock_code_slot_begin()\n");
+    } else if has_artifact_plans && !has_code_slot_publication {
+        out.push_str("__rock_artifact_plan_begin()\n");
     }
     out.push_str(&definition_plan_stage_lua(ws, scx, &definition_plan));
     out.push_str(&lifecycle_plan_stage_lua(ws, scx, &lifecycle_plan));
@@ -5131,11 +5133,15 @@ fn assemble(
     // one top-level `__rock_shader_register(key, glsl)` per distinct pair, so a
     // reload re-`dofile`s them with the new source (hot-reload parity).
     out.push_str(&cache.shader_registrations.lua);
-    out.push_str(code_slot_publish_lua(
-        &code_artifact,
-        has_definition_plan,
-        lifecycle_plan.census.declarations > 0,
-    ));
+    if has_code_slot_publication {
+        out.push_str(code_slot_publish_lua(
+            &code_artifact,
+            has_definition_plan,
+            lifecycle_plan.census.declarations > 0,
+        ));
+    } else if has_artifact_plans {
+        out.push_str("__rock_artifact_plan_publish()\n");
+    }
     if !has_state_publication {
         out.push_str("__rock_state_transaction_commit()\n");
     }
@@ -5164,9 +5170,6 @@ fn assemble(
     // rather than emit two clobbering top-level defs. Covers `emit_full` +
     // `emit_incremental` (both funnel through here); the overlay fast path drains
     // in `emit_overlay` and propagates the same error.
-    if let Some(err) = cg.take_rejection() {
-        return Err(err);
-    }
     let mut emitted_bodies: FxHashSet<Instance> = FxHashSet::default();
     for module in ws.modules.iter() {
         if module.id == ModuleId::builtin() {
@@ -5296,7 +5299,6 @@ fn code_slot_publish_lua(
     if artifact.entries.values().any(|entry| entry.escaping)
         || has_definition_plan
         || has_lifecycle_plan
-        || !artifact.binding_plan.entries.is_empty()
     {
         "__rock_code_slot_publish()\n"
     } else {
