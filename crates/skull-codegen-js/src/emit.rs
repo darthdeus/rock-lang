@@ -2769,7 +2769,11 @@ pub fn emit_with_closure(
             st.names.get(&body.instance).expect("emitted body has a name"),
         )?);
     }
-    out.push_str(code_slot_publish_js(&code_artifact, false));
+    out.push_str(code_slot_publish_js(
+        &code_artifact,
+        false,
+        false,
+    ));
     if has_state_transaction && !code_artifact.entries.values().any(|entry| entry.escaping) {
         out.push_str("if (typeof __rock_state_transaction_commit !== \"undefined\") __rock_state_transaction_commit();\n");
     }
@@ -3022,6 +3026,7 @@ pub fn emit_program(
         program: build.program,
         main_js_name,
         code_artifact: build.code_artifact,
+        lifecycle_plan: build.lifecycle_plan,
         state_schema: build.state_schema,
     })
 }
@@ -3049,6 +3054,7 @@ pub fn emit_program_cached(
         program: build.program.clone(),
         main_js_name,
         code_artifact: build.code_artifact.clone(),
+        lifecycle_plan: build.lifecycle_plan.clone(),
         state_schema: build.state_schema.clone(),
     };
     let cache = JsEmitCache {
@@ -3150,6 +3156,8 @@ fn assemble_program_core(
         &session.concrete.always_plans,
         scx.interner_handle(),
     )?;
+    let lifecycle_skeleton = skull_mir::lifecycle::collect(ws)?;
+    queue_lifecycle_dependency_initializers(ws, &mut st, &lifecycle_skeleton)?;
 
     force_shader_register_sibling(ws, &mut st)?;
 
@@ -3396,11 +3404,13 @@ fn assemble_program_core(
             definition_plan.census
         )));
     }
-    let lifecycle_plan = skull_mir::lifecycle::collect(ws)?;
+    let lifecycle_plan = skull_mir::lifecycle::attach_artifact(lifecycle_skeleton, &code_artifact)?;
     let has_definition_plan = definition_plan.census.declarations > 0;
     let code_slot_stage = code_slot_registration_js(ws, scx.interner(), &code_artifact)?;
     out.push_str(&code_slot_stage);
-    if has_definition_plan && !code_artifact.entries.values().any(|entry| entry.escaping) {
+    if (has_definition_plan || lifecycle_plan.census.declarations > 0)
+        && !code_artifact.entries.values().any(|entry| entry.escaping)
+    {
         out.push_str("__rock_code_slot_begin();\n");
     }
     out.push_str(&definition_plan_stage_js(ws, scx.interner(), &definition_plan)?);
@@ -3410,9 +3420,14 @@ fn assemble_program_core(
     let applications = decorator_application_lines_js(ws, &deco_names, scx.interner(), &st.names)?;
     out.push_str(&applications);
     stable.push_str(&applications);
-    out.push_str(code_slot_publish_js(&code_artifact, has_definition_plan));
+    out.push_str(code_slot_publish_js(
+        &code_artifact,
+        has_definition_plan,
+        lifecycle_plan.census.declarations > 0,
+    ));
     let has_state_publication = code_artifact.entries.values().any(|entry| entry.escaping)
-        || has_definition_plan;
+        || has_definition_plan
+        || lifecycle_plan.census.declarations > 0;
     if !has_state_publication {
         out.push_str("if (typeof __rock_state_transaction_commit !== \"undefined\") __rock_state_transaction_commit();\n");
     }
@@ -3442,6 +3457,7 @@ fn assemble_program_core(
         chunks,
         spec_chunks,
         code_artifact,
+        lifecycle_plan,
         state_schema,
         const_chunks,
         const_order,
@@ -3599,6 +3615,8 @@ pub struct JsProgram {
     pub main_js_name: Option<String>,
     /// Compiler-owned logical callable identities for the emitted JS artifact.
     pub code_artifact: CodeArtifact,
+    /// Compiler-owned lifecycle metadata shared with the Lua artifact.
+    pub lifecycle_plan: skull_mir::lifecycle::LifecyclePlan,
     /// Compiler-owned logical mutable-state inventory for the emitted artifact.
     pub state_schema: skull_mir::state_schema::StateSchema,
 }
@@ -3620,6 +3638,7 @@ struct ProgramBuild {
     chunks: HashMap<FuncRef, JsChunk>,
     spec_chunks: HashMap<Instance, JsSpecChunk>,
     code_artifact: CodeArtifact,
+    lifecycle_plan: skull_mir::lifecycle::LifecyclePlan,
     state_schema: skull_mir::state_schema::StateSchema,
     const_chunks: HashMap<ustr::Ustr, String>,
     const_order: Vec<ustr::Ustr>,
@@ -3667,6 +3686,10 @@ impl JsEmitCache {
 
     pub fn state_schema(&self) -> &skull_mir::state_schema::StateSchema {
         &self.build.state_schema
+    }
+
+    pub fn lifecycle_plan(&self) -> &skull_mir::lifecycle::LifecyclePlan {
+        &self.build.lifecycle_plan
     }
 
     /// The session context's ABI-plan memo counters (parity with the Lua
@@ -3868,6 +3891,13 @@ pub fn emit_overlay_with_span_edits(
             (cache.build.const_chunks.get(name) != Some(chunk)).then_some(*name)
         })
         .collect();
+    if cache
+        .build
+        .lifecycle_plan
+        .wire_structure_changed(&current.lifecycle_plan)
+    {
+        return Ok(JsReload::FullRequired);
+    }
     if changed_now.is_empty()
         && changed_consts.is_empty()
         && changed_specs.is_empty()
@@ -3938,14 +3968,19 @@ pub fn emit_overlay_with_span_edits(
         &current.code_artifact,
     )?;
     out.push_str(&code_slot_stage);
-
-    if let Some(wire) = find_plain_function(ws, "run_wire_systems") {
-        let wire_name = callee_js_name(ws, wire);
-        if current.chunks.contains_key(&wire) {
-            out.push_str(&format!("{wire_name}();\n"));
-        }
+    if !has_code_slots && current.lifecycle_plan.census.declarations > 0 {
+        out.push_str("__rock_code_slot_begin();\n");
     }
-    out.push_str(code_slot_publish_js(&current.code_artifact, false));
+    out.push_str(&lifecycle_plan_stage_js(
+        ws,
+        cache.scx.interner(),
+        &current.lifecycle_plan,
+    )?);
+    out.push_str(code_slot_publish_js(
+        &current.code_artifact,
+        false,
+        current.lifecycle_plan.census.declarations > 0,
+    ));
     if !has_code_slots {
         out.push_str("if (typeof __rock_state_transaction_commit !== \"undefined\") __rock_state_transaction_commit();\n");
     }
@@ -3953,6 +3988,12 @@ pub fn emit_overlay_with_span_edits(
     out.push_str("  __rock_code_slot_abort();\n");
     out.push_str("  throw e;\n");
     out.push_str("}\n");
+    if let Some(wire) = find_plain_function(ws, "run_wire_systems") {
+        let wire_name = callee_js_name(ws, wire);
+        if current.chunks.contains_key(&wire) {
+            out.push_str(&format!("{wire_name}();\n"));
+        }
+    }
 
     cache.build = current;
     Ok(JsReload::Overlay(out))
@@ -4220,6 +4261,51 @@ impl<'a> WorklistState<'a> {
         });
         self.ginits.sort_by_key(|g| g.order);
     }
+}
+
+fn queue_lifecycle_dependency_initializers(
+    ws: &Workspace,
+    st: &mut WorklistState<'_>,
+    plan: &skull_mir::lifecycle::LifecyclePlan,
+) -> Result<(), CompilerError> {
+    for entry in &plan.entries {
+        for dependency in entry.qualification.dependencies() {
+            let CodeIdentity::Artifact(skull_mir::code_identity::CodeOwner::Artifact {
+                kind: skull_mir::code_identity::CodeOwnerKind::Global,
+                module,
+                name,
+            }) = &dependency.identity
+            else {
+                return Err(err("JS: lifecycle dependency is not a top-level global"));
+            };
+            let Some(source_module) = ws.modules.iter().find(|candidate| candidate.file == *module)
+            else {
+                return Err(err(format!(
+                    "JS: lifecycle dependency `{name}` has no source module"
+                )));
+            };
+            let Some(&gid) = source_module.global_by_name.get(name) else {
+                return Err(err(format!(
+                    "JS: lifecycle dependency `{name}` has no source declaration"
+                )));
+            };
+            if !source_module.globals[gid].is_const {
+                return Err(err(format!(
+                    "JS: lifecycle dependency `{name}` is not immutable"
+                )));
+            }
+            if st.ginit_seen.insert(*name) {
+                st.ginit_queue.push((
+                    *name,
+                    GlobalSite {
+                        module: source_module.id,
+                        gid,
+                    },
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Emit an `inline(js)` fn verbatim: `function <js_name>(p1, p2) { <raw js> }`.
@@ -4962,8 +5048,15 @@ fn code_slot_registration_js(
     Ok(out)
 }
 
-fn code_slot_publish_js(artifact: &CodeArtifact, has_definition_plan: bool) -> &'static str {
-    if artifact.entries.values().any(|entry| entry.escaping) || has_definition_plan {
+fn code_slot_publish_js(
+    artifact: &CodeArtifact,
+    has_definition_plan: bool,
+    has_lifecycle_plan: bool,
+) -> &'static str {
+    if artifact.entries.values().any(|entry| entry.escaping)
+        || has_definition_plan
+        || has_lifecycle_plan
+    {
         "__rock_code_slot_publish();\n"
     } else {
         ""
@@ -5023,11 +5116,24 @@ fn lifecycle_plan_stage_js(
     for (phase, entries) in phases {
         writeln!(out, "[{}]: {{len: {}, _data: [", js_string_lit(phase.as_str())?, entries.len()).unwrap();
         for entry in entries {
-        let key = entry.identity.logical_key(ws, interner);
-        writeln!(out, "{{phase: {}, owner: {}, key: {}, name: {}, stage: {}, ordinal: {}, func: __rock_code_slot_ref({})}},",
-            js_string_lit(entry.phase.as_str())?, js_string_lit(entry.owner.as_str())?,
-            js_string_lit(&key)?, js_string_lit(entry.diagnostic_name.as_str())?,
-            entry.stage, entry.declaration_ordinal, js_string_lit(&key)?).unwrap();
+            let key = entry.identity.logical_key(ws, interner);
+            let dependencies = entry.qualification.dependencies();
+            write!(out, "{{phase: {}, owner: {}, key: {}, name: {}, stage: {}, ordinal: {}, qualification: {}, body_fingerprint: {}, dependencies: {{len: {}, _data: [",
+                js_string_lit(entry.phase.as_str())?, js_string_lit(entry.owner.as_str())?,
+                js_string_lit(&key)?, js_string_lit(entry.diagnostic_name.as_str())?,
+                entry.stage, entry.declaration_ordinal,
+                js_string_lit(entry.qualification.tag())?,
+                js_string_lit(&format!("{:016x}", entry.body_fingerprint))?,
+                dependencies.len()).unwrap();
+            for dependency in dependencies {
+                let dependency_key = dependency.identity.logical_key(ws, interner);
+                write!(out, "{{key: {}, fingerprint: {}}},",
+                    js_string_lit(&dependency_key)?,
+                    js_string_lit(&format!("{:016x}", dependency.fingerprint))?).unwrap();
+            }
+            out.push_str("]}}, func: __rock_code_slot_ref(");
+            out.push_str(&js_string_lit(&key)?);
+            out.push_str(")},\n");
         }
         out.push_str("]},\n");
     }
@@ -5325,6 +5431,7 @@ pub fn annotation_value_js(v: &bone_semantic::hir::AnnoValue) -> Option<String> 
         A::Bool(b) => b.to_string(),
         A::String(s) => js_string_lit(s.as_str()).ok()?,
         A::Ident(id) => id.name.as_str().to_string(),
+        A::IdentList(_) => return None,
         A::Other => return None,
     })
 }

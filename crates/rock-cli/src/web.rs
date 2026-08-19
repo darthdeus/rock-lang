@@ -498,6 +498,7 @@ impl WebCompiler {
             program: self.cache.current_program().to_string(),
             main_js_name: self.main_js_name.clone(),
             code_artifact: self.cache.code_artifact().clone(),
+            lifecycle_plan: self.cache.lifecycle_plan().clone(),
             state_schema: self.cache.state_schema().clone(),
         };
         let register_lines = shader_register_lines_js(self.project.workspace(), &self.cache)?;
@@ -1325,6 +1326,7 @@ mod tests {
             program: "function main() {}\n".to_string(),
             main_js_name: Some("main".to_string()),
             code_artifact: skull_mir::code_identity::CodeArtifact::default(),
+            lifecycle_plan: skull_mir::lifecycle::LifecyclePlan::default(),
             state_schema: skull_mir::state_schema::StateSchema::default(),
         };
         let bundle = assemble_web_program(&emitted, "", &[], "games/test");
@@ -1346,6 +1348,7 @@ mod tests {
             program: "function main() {}\n".to_string(),
             main_js_name: Some("main".to_string()),
             code_artifact: artifact,
+            lifecycle_plan: skull_mir::lifecycle::LifecyclePlan::default(),
             state_schema: skull_mir::state_schema::StateSchema::default(),
         };
         let bundle = assemble_web_program(&emitted, "", &[], "games/test");

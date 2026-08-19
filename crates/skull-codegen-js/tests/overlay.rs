@@ -55,6 +55,40 @@ fn js_runtime() -> String {
 }
 
 #[test]
+fn lifecycle_selector_schedules_only_changed_gated_entries_and_plain_entries() {
+    let source = format!(
+        "{}\nvar __G = {{}};\n{}",
+        js_runtime(),
+        r#"
+var oldPlan = {wire: {len: 4, _data: [
+  {key: "plain", qualification: "plain", body_fingerprint: "a", dependencies: {len: 0, _data: []}},
+  {key: "stable", qualification: "onchange", body_fingerprint: "b", dependencies: {len: 1, _data: [{key: "DEP", fingerprint: "1"}]}},
+  {key: "body", qualification: "onchange", body_fingerprint: "old", dependencies: {len: 1, _data: [{key: "DEP", fingerprint: "1"}]}},
+  {key: "dependency", qualification: "onchange", body_fingerprint: "d", dependencies: {len: 1, _data: [{key: "DEP", fingerprint: "1"}]}}
+]}};
+var candidate = {wire: {len: 5, _data: [
+  {key: "plain", qualification: "plain", body_fingerprint: "changed", dependencies: {len: 0, _data: []}},
+  {key: "stable", qualification: "onchange", body_fingerprint: "b", dependencies: {len: 1, _data: [{key: "DEP", fingerprint: "1"}]}},
+  {key: "body", qualification: "onchange", body_fingerprint: "new", dependencies: {len: 1, _data: [{key: "DEP", fingerprint: "1"}]}},
+  {key: "dependency", qualification: "onchange", body_fingerprint: "d", dependencies: {len: 1, _data: [{key: "DEP", fingerprint: "2"}]}},
+  {key: "added", qualification: "onchange", body_fingerprint: "e", dependencies: {len: 1, _data: [{key: "OTHER", fingerprint: "1"}]}}
+]}};
+var due = __rock_lifecycle_wire_due(oldPlan, candidate);
+if (!(due.plain && !due.stable && due.body && due.dependency && due.added)) throw new Error("selector changed set");
+if (__rock_lifecycle_take_wire("plain") !== false) throw new Error("take read an unset due map");
+__G.__ROCK_WIRE_DUE = due;
+if (!__rock_lifecycle_take_wire("plain") || __rock_lifecycle_take_wire("plain")) throw new Error("take was not exactly once");
+__G.__ROCK_LIFECYCLE_PLAN = candidate;
+__rock_lifecycle_schedule_all_wires();
+if (!(__rock_lifecycle_take_wire("stable") && __rock_lifecycle_take_wire("added"))) throw new Error("fresh scheduling missed an entry");
+console.log("PASS");
+"#
+    );
+    let output = node(&source);
+    assert_eq!(output.trim(), "PASS");
+}
+
+#[test]
 fn definition_plan_publishes_and_aborts_with_the_code_slot_transaction() {
     let output = node(&format!(
         "{}\nvar __G = {{}};\n\
