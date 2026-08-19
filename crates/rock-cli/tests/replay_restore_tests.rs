@@ -2215,6 +2215,14 @@ fn lambda_counter(s: &serde_json::Value) -> i64 {
     panic!("lambda_state_counter not present in dump-state");
 }
 
+fn assert_shadow_owner_rollback(diag: &serde_json::Value) {
+    assert_eq!(diag["STONE_SHADOW_OWNER_AFTER"], diag["STONE_SHADOW_OWNER_BEFORE"], "all old Artifact/plan/Session/replay owners must roll back exactly: {diag}");
+    assert!(diag["STONE_SHADOW_NATIVE_BEFORE"].as_i64().is_some_and(|n| n > 0), "native owner denominator is empty: {diag}");
+    assert_eq!(diag["STONE_SHADOW_NATIVE_AFTER"].as_i64(), diag["STONE_SHADOW_NATIVE_BEFORE"].as_i64(), "native owner set must roll back exactly: {diag}");
+    assert!(diag["STONE_SHADOW_LIVE_SESSIONS_BEFORE"].as_i64().is_some_and(|n| n > 0), "live Session denominator is empty: {diag}");
+    assert_eq!(diag["STONE_SHADOW_LIVE_SESSIONS_AFTER"].as_i64(), diag["STONE_SHADOW_LIVE_SESSIONS_BEFORE"].as_i64(), "live Session ownership must roll back exactly: {diag}");
+}
+
 /// The engine keyframe walk (`dc` in stone/engine/snapshot.rock) must copy a
 /// CAPTURING CodeRef env record held in a registered global, keep its captures
 /// isolated across a restore, and leave its logical slot shared with the live
@@ -2464,6 +2472,438 @@ fn ab_loop_survives_incremental_reload_via_rederive() {
     let mut sim = sim_state_names(game, 80);
     sim.remove("dt");
     assert_sim_state_matches(&looped, &reference, &sim, &format!("post-reload loop tick-{t}"));
+}
+
+#[test]
+fn rederive_current_replays_the_live_record_in_a_shadow_session() {
+    let game = "bitgun";
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("rederive-current.replay");
+    let log_s = log.to_string_lossy().into_owned();
+
+    let live = run_record_dump(
+        game,
+        140,
+        &log_s,
+        &[
+            ("BITGUN_LAMBDA_STATE", "1"),
+            ("BITGUN_LAMBDA_STATE_EDIT", "1"),
+            ("STONE_LIVE_REWIND", "1"),
+            ("STONE_SHADOW_TICKS_PER_FRAME", "2"),
+            ("STONE_REDERIVE_CURRENT_AT_FRAME", "60"),
+        ],
+    );
+    let diag = &live["__stone_diag"];
+    assert_eq!(diag["STONE_SHADOW_REQUESTS"].as_i64(), Some(1), "the timeline action must request one shadow run: {diag}");
+    assert_eq!(diag["STONE_SHADOW_COMMITS"].as_i64(), Some(1), "the candidate must publish once: {diag}");
+    assert_eq!(diag.get("STONE_SHADOW_ABORTS").and_then(serde_json::Value::as_i64), None, "the successful candidate must not abort: {diag}");
+    assert!(diag["STONE_SHADOW_TICKS"].as_i64().is_some_and(|n| n > 0), "the candidate must execute observations: {diag}");
+    assert!(diag["STONE_SHADOW_PENDING_MAX"].as_i64().is_some_and(|n| n > 0), "the live recorder must continue while catch-up is incomplete: {diag}");
+    assert_eq!(diag["STONE_SHADOW_PENDING"].as_i64(), Some(0), "the candidate must catch the moving live horizon before commit: {diag}");
+    let recorded = diag["STONE_SHADOW_RECORDED"].as_i64().expect("recorded observation denominator");
+    let consumed = diag["STONE_SHADOW_CONSUMED"].as_i64().expect("consumed observation denominator");
+    let pending = diag["STONE_SHADOW_PENDING"].as_i64().expect("pending observation denominator");
+    assert!(recorded > 0, "the conservation law must examine observations: {diag}");
+    assert_eq!(recorded, consumed + pending, "recorded = consumed + pending: {diag}");
+    assert_eq!(diag["STONE_SHADOW_LIVE_CURSOR_BEFORE"].as_i64(), Some(0), "the live recorder cursor starts at its record-mode origin: {diag}");
+    assert_eq!(diag["STONE_SHADOW_LIVE_CURSOR_MUTATIONS"].as_i64().unwrap_or(0), 0, "shadow replay must not move the live cursor: {diag}");
+    assert_eq!(diag["STONE_SHADOW_SHADOW_CURSOR"].as_i64(), Some(consumed), "the independent shadow cursor must account for every consumed observation: {diag}");
+    assert!(diag["STONE_SHADOW_LIVE_TICK_ADVANCES"].as_i64().is_some_and(|n| n > 0), "the old live Session must advance while shadowing: {diag}");
+    assert_eq!(diag["STONE_SHADOW_PRECOMMIT_LEAKS"].as_i64().unwrap_or(0), 0, "candidate state must not leak before commit: {diag}");
+    assert_eq!(diag["STONE_SHADOW_DIAGNOSTIC_MUTATIONS"].as_i64().unwrap_or(0), 0, "shadow must not mutate live logger diagnostics: {diag}");
+    assert_eq!(diag["STONE_SHADOW_SHARED_STEP_CALLS"].as_i64(), diag["STONE_SHADOW_TICKS"].as_i64(), "shadow ticks must use the shared replay-step authority: {diag}");
+    assert!(diag["STONE_SHADOW_LIVE_SESSIONS_BEFORE"].as_i64().is_some_and(|n| n > 0), "{diag}");
+    assert_eq!(diag["STONE_SHADOW_CANDIDATE_SESSIONS_DURING"].as_i64(), Some(1), "{diag}");
+    assert_eq!(diag["STONE_SHADOW_LIVE_SESSIONS_AFTER"].as_i64(), diag["STONE_SHADOW_LIVE_SESSIONS_BEFORE"].as_i64(), "{diag}");
+    assert_ne!(diag["STONE_SHADOW_OWNER_AFTER"], diag["STONE_SHADOW_OWNER_BEFORE"], "the successful transaction must replace the Artifact/plan/Session owner graph: {diag}");
+    assert_eq!(diag["STONE_SHADOW_NATIVE_AFTER"].as_i64(), diag["STONE_SHADOW_NATIVE_BEFORE"].as_i64(), "candidate native owners must be retired at commit: {diag}");
+    assert_eq!(diag["STONE_SHADOW_SESSION_SWAPS"].as_i64(), Some(1), "{diag}");
+    assert_eq!(diag["STONE_SHADOW_ARTIFACT_SWAPS"].as_i64(), Some(1), "{diag}");
+    assert!(recorded_tick_lines(&log_s) > 60, "the live recorder must keep appending while the candidate catches up");
+    let materialize_ms = diag["STONE_SHADOW_MATERIALIZE_MS"].as_f64().expect("candidate materialization timing");
+    let catchup_ms = diag["STONE_SHADOW_CATCHUP_MS"].as_f64().expect("candidate catch-up timing");
+    let validation_ms = diag["STONE_SHADOW_VALIDATION_MS"].as_f64().expect("candidate validation timing");
+    let commit_ms = diag["STONE_SHADOW_COMMIT_MS"].as_f64().expect("candidate commit timing");
+    assert!(materialize_ms >= 0.0 && catchup_ms >= 0.0 && validation_ms >= 0.0 && commit_ms >= 0.0, "shadow timings must be measured: {diag}");
+    println!("[shadow-costs] materialize {materialize_ms:.2}ms; catch-up {catchup_ms:.2}ms; validation {validation_ms:.2}ms; commit {commit_ms:.2}ms");
+
+    let reference = run_replay_dump(
+        game,
+        140,
+        &log_s,
+        &[
+            ("BITGUN_LAMBDA_STATE", "1"),
+            ("BITGUN_LAMBDA_STATE_EDIT", "1"),
+            ("STONE_START_PAUSED", "1"),
+            ("STONE_STEP_FRAMES", &current_tick(&live).to_string()),
+        ],
+    );
+    assert_eq!(current_tick(&reference), current_tick(&live), "the independent replay must reach the committed live tick");
+    let mut sim = sim_state_names(game, 110);
+    sim.remove("dt");
+    assert_sim_state_matches(&live, &reference, &sim, "rederive-current committed state");
+    assert_eq!(lambda_counter(&live), 100, "the committed candidate must expose the edited lambda result, not the old incrementing body");
+    assert_eq!(lambda_counter(&live), lambda_counter(&reference), "the committed candidate must match fresh replay under the edited artifact");
+}
+
+#[test]
+fn full_artifact_shadow_reload_uses_the_same_commit_boundary() {
+    let game = "bitgun";
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("full-shadow.replay");
+    let log_s = log.to_string_lossy().into_owned();
+    let live = run_record_dump(
+        game,
+        140,
+        &log_s,
+        &[
+            ("BITGUN_LAMBDA_STATE", "1"),
+            ("BITGUN_LAMBDA_STATE_EDIT", "1"),
+            ("STONE_LIVE_REWIND", "1"),
+            ("STONE_SHADOW_TICKS_PER_FRAME", "2"),
+            ("STONE_SHADOW_ARTIFACT_AT_FRAME", "60"),
+            ("STONE_SHADOW_TEST_FULL_ARTIFACT", "1"),
+        ],
+    );
+    let diag = &live["__stone_diag"];
+    assert_eq!(diag["STONE_SHADOW_REQUESTS"].as_i64(), Some(1), "full Artifact must enter through the runtime request: {diag}");
+    assert_eq!(diag["STONE_SHADOW_COMMITS"].as_i64(), Some(1), "full Artifact must commit once: {diag}");
+    assert_eq!(diag["STONE_SHADOW_PENDING"].as_i64(), Some(0), "full Artifact must catch the moving horizon: {diag}");
+    assert_eq!(diag["STONE_REPLAY_RELOADS"].as_i64(), Some(1), "the atomic full swap must retain one reload marker: {diag}");
+}
+
+#[test]
+fn shadow_replay_error_keeps_the_live_owner_and_recorder() {
+    let game = "bitgun";
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("shadow-replay-error.replay");
+    let log_s = log.to_string_lossy().into_owned();
+    let live = run_record_dump(
+        game,
+        80,
+        &log_s,
+        &[
+            ("BITGUN_LAMBDA_STATE", "1"),
+            ("BITGUN_LAMBDA_STATE_EDIT", "1"),
+            ("STONE_LIVE_REWIND", "1"),
+            ("STONE_SHADOW_TICKS_PER_FRAME", "4"),
+            ("STONE_REDERIVE_CURRENT_AT_FRAME", "30"),
+            ("STONE_SHADOW_FORCE_REPLAY_ERROR_AT_CURSOR", "3"),
+        ],
+    );
+    let diag = &live["__stone_diag"];
+    assert_eq!(diag["STONE_SHADOW_REQUESTS"].as_i64(), Some(1), "{diag}");
+    assert_eq!(diag["STONE_SHADOW_ABORTS"].as_i64(), Some(1), "{diag}");
+    assert!(diag.get("STONE_SHADOW_COMMITS").is_none(), "a replay error must not publish: {diag}");
+    assert_shadow_owner_rollback(diag);
+    assert!(recorded_tick_lines(&log_s) > 30, "the live recorder must continue after candidate failure");
+
+    let reference = run_replay_dump(
+        game,
+        80,
+        &log_s,
+        &[("BITGUN_LAMBDA_STATE", "1"), ("BITGUN_LAMBDA_STATE_EDIT", "1")],
+    );
+    let mut sim = sim_state_names(game, 80);
+    sim.remove("dt");
+    assert_sim_state_matches(&live, &reference, &sim, "candidate replay failure keeps live state");
+}
+
+#[test]
+fn shadow_publication_failure_keeps_the_complete_live_owner() {
+    let game = "bitgun";
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("shadow-publication-error.replay");
+    let log_s = log.to_string_lossy().into_owned();
+    let live = run_record_dump(
+        game,
+        80,
+        &log_s,
+        &[
+            ("BITGUN_LAMBDA_STATE", "1"),
+            ("STONE_LIVE_REWIND", "1"),
+            ("STONE_SHADOW_ARTIFACT_AT_FRAME", "30"),
+            ("STONE_SHADOW_FORCE_PUBLICATION_ERROR", "1"),
+        ],
+    );
+    let diag = &live["__stone_diag"];
+    assert_eq!(diag["STONE_SHADOW_REQUESTS"].as_i64(), Some(1), "{diag}");
+    assert_eq!(diag["STONE_SHADOW_ABORTS"].as_i64(), Some(1), "{diag}");
+    assert!(diag.get("STONE_SHADOW_COMMITS").is_none(), "{diag}");
+    assert!(diag["STONE_SHADOW_FAILURE"].as_str().unwrap_or("").contains("publication"), "{diag}");
+    assert_shadow_owner_rollback(diag);
+    assert!(recorded_tick_lines(&log_s) > 30, "publication failure must not promote the recorder");
+}
+
+#[test]
+fn shadow_schema_mismatch_rejects_before_session_materialization() {
+    let game = "bitgun";
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("shadow-schema-error.replay");
+    let log_s = log.to_string_lossy().into_owned();
+    let live = run_record_dump(
+        game,
+        70,
+        &log_s,
+        &[
+            ("STONE_LIVE_REWIND", "1"),
+            ("STONE_SHADOW_ARTIFACT_AT_FRAME", "25"),
+            ("STONE_SHADOW_FORCE_SCHEMA_MISMATCH", "1"),
+        ],
+    );
+    let diag = &live["__stone_diag"];
+    assert_eq!(diag["STONE_SHADOW_REQUESTS"].as_i64(), Some(1), "{diag}");
+    assert_eq!(diag["STONE_SHADOW_ABORTS"].as_i64(), Some(1), "{diag}");
+    assert!(diag.get("STONE_SHADOW_COMMITS").is_none(), "{diag}");
+    assert!(diag["STONE_SHADOW_FAILURE"].as_str().unwrap_or("").contains("mismatch"), "{diag}");
+    assert_shadow_owner_rollback(diag);
+}
+
+#[test]
+fn shadow_boot_materialization_failure_releases_candidate_owner() {
+    let game = "bitgun";
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("shadow-boot-materialization-error.replay");
+    let log_s = log.to_string_lossy().into_owned();
+    let live = run_record_dump(
+        game,
+        70,
+        &log_s,
+        &[
+            ("STONE_LIVE_REWIND", "1"),
+            ("STONE_SHADOW_ARTIFACT_AT_FRAME", "25"),
+            ("STONE_SHADOW_TICKS_PER_FRAME", "100"),
+            ("STONE_SHADOW_FORCE_BOOT_MATERIALIZATION_ERROR", "1"),
+        ],
+    );
+    let diag = &live["__stone_diag"];
+    assert_eq!(diag["STONE_SHADOW_REQUESTS"].as_i64(), Some(1), "{diag}");
+    assert_eq!(diag["STONE_SHADOW_ABORTS"].as_i64(), Some(1), "{diag}");
+    assert!(diag.get("STONE_SHADOW_COMMITS").is_none(), "boot materialization failure must not publish: {diag}");
+    assert!(diag["STONE_SHADOW_FAILURE"].as_str().unwrap_or("").contains("bootstrap"), "{diag}");
+    assert_shadow_owner_rollback(diag);
+}
+
+#[test]
+fn shadow_candidate_compile_failure_keeps_the_old_owner_running() {
+    let game = "bitgun";
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("shadow-candidate-compile-error.replay");
+    let log_s = log.to_string_lossy().into_owned();
+    let artifact = dir.path().join("candidate-invalid.lua");
+    std::fs::write(&artifact, "this is not valid Lua (").unwrap();
+    let artifact_s = artifact.to_string_lossy().into_owned();
+    let live = run_record_dump(
+        game,
+        70,
+        &log_s,
+        &[
+            ("STONE_LIVE_REWIND", "1"),
+            ("STONE_SHADOW_ARTIFACT_AT_FRAME", "25"),
+            ("STONE_SHADOW_TICKS_PER_FRAME", "100"),
+            ("STONE_SHADOW_ARTIFACT_PATH", &artifact_s),
+        ],
+    );
+    let diag = &live["__stone_diag"];
+    assert_eq!(diag["STONE_SHADOW_REQUESTS"].as_i64(), Some(1), "{diag}");
+    assert_eq!(diag["STONE_SHADOW_ABORTS"].as_i64(), Some(1), "{diag}");
+    assert!(diag.get("STONE_SHADOW_COMMITS").is_none(), "candidate compile failure must not publish: {diag}");
+    assert!(diag["STONE_SHADOW_FAILURE"].as_str().unwrap_or("").contains("publication"), "{diag}");
+    assert_shadow_owner_rollback(diag);
+    assert!(recorded_tick_lines(&log_s) > 25, "candidate compile failure must leave the recorder live");
+}
+
+#[test]
+fn shadow_host_projection_failure_releases_candidate_session() {
+    let game = "bitgun";
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("shadow-host-error.replay");
+    let log_s = log.to_string_lossy().into_owned();
+    let live = run_record_dump(
+        game,
+        70,
+        &log_s,
+        &[
+            ("STONE_LIVE_REWIND", "1"),
+            ("STONE_SHADOW_ARTIFACT_AT_FRAME", "25"),
+            ("STONE_SHADOW_FORCE_HOST_PROJECTION_ERROR", "1"),
+        ],
+    );
+    let diag = &live["__stone_diag"];
+    assert_eq!(diag["STONE_SHADOW_REQUESTS"].as_i64(), Some(1), "{diag}");
+    assert_eq!(diag["STONE_SHADOW_ABORTS"].as_i64(), Some(1), "{diag}");
+    assert!(diag.get("STONE_SHADOW_COMMITS").is_none(), "{diag}");
+    assert!(diag["STONE_SHADOW_FAILURE"].as_str().unwrap_or("").contains("HostProjection"), "{diag}");
+    assert_shadow_owner_rollback(diag);
+}
+
+#[test]
+fn late_shadow_commit_failure_rolls_back_the_old_owner() {
+    let game = "bitgun";
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("shadow-commit-error.replay");
+    let log_s = log.to_string_lossy().into_owned();
+    let live = run_record_dump(
+        game,
+        100,
+        &log_s,
+        &[
+            ("BITGUN_LAMBDA_STATE", "1"),
+            ("BITGUN_LAMBDA_STATE_EDIT", "1"),
+            ("STONE_LIVE_REWIND", "1"),
+            ("STONE_SHADOW_TICKS_PER_FRAME", "2"),
+            ("STONE_REDERIVE_CURRENT_AT_FRAME", "35"),
+            ("STONE_SHADOW_FORCE_LATE_COMMIT_ERROR", "1"),
+        ],
+    );
+    let diag = &live["__stone_diag"];
+    assert_eq!(diag["STONE_SHADOW_REQUESTS"].as_i64(), Some(1), "{diag}");
+    assert_eq!(diag["STONE_SHADOW_ABORTS"].as_i64(), Some(1), "{diag}");
+    assert!(diag.get("STONE_SHADOW_COMMITS").is_none(), "{diag}");
+    assert!(diag["STONE_SHADOW_FAILURE"].as_str().unwrap_or("").contains("late commit"), "{diag}");
+    assert_shadow_owner_rollback(diag);
+    assert!(recorded_tick_lines(&log_s) > 35, "late commit failure must leave the recorder live");
+}
+
+#[test]
+fn native_owner_retirement_failure_rolls_back_the_complete_old_owner() {
+    let game = "bitgun";
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("shadow-native-retire-error.replay");
+    let log_s = log.to_string_lossy().into_owned();
+    let live = run_record_dump(
+        game,
+        100,
+        &log_s,
+        &[
+            ("STONE_LIVE_REWIND", "1"),
+            ("STONE_SHADOW_TICKS_PER_FRAME", "2"),
+            ("STONE_REDERIVE_CURRENT_AT_FRAME", "35"),
+            ("STONE_SHADOW_FORCE_NATIVE_RETIRE_ERROR", "1"),
+        ],
+    );
+    let diag = &live["__stone_diag"];
+    assert_eq!(diag["STONE_SHADOW_REQUESTS"].as_i64(), Some(1), "{diag}");
+    assert_eq!(diag["STONE_SHADOW_ABORTS"].as_i64(), Some(1), "{diag}");
+    assert!(diag.get("STONE_SHADOW_COMMITS").is_none(), "native retirement failure must not publish: {diag}");
+    assert!(diag["STONE_SHADOW_FAILURE"].as_str().unwrap_or("").contains("retire"), "{diag}");
+    assert_shadow_owner_rollback(diag);
+    assert!(recorded_tick_lines(&log_s) > 35, "native retirement failure must leave the recorder live");
+}
+
+#[test]
+fn late_created_scene_rejects_shadow_replay_without_publication() {
+    let game = "survivors";
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("shadow-scene-error.replay");
+    let log_s = log.to_string_lossy().into_owned();
+    let live = run_record_dump(
+        game,
+        80,
+        &log_s,
+        &[
+            ("ROCK_TEST_SEED", "42"),
+            ("STONE_LIVE_REWIND", "1"),
+            ("STONE_LIVE_REWIND_UNSUPPORTED", "scene"),
+            ("STONE_LIVE_REWIND_UNSUPPORTED_AT_TICK", "10"),
+            ("STONE_REDERIVE_CURRENT_AT_FRAME", "40"),
+        ],
+    );
+    let diag = &live["__stone_diag"];
+    assert_eq!(diag["STONE_LIVE_REWIND_SUPPORTED"].as_i64(), Some(1), "boot must be admissible: {diag}");
+    assert_eq!(diag["STONE_SHADOW_REQUESTS"].as_i64(), Some(1), "{diag}");
+    assert_eq!(diag["STONE_SHADOW_ABORTS"].as_i64(), Some(1), "{diag}");
+    assert!(diag.get("STONE_SHADOW_COMMITS").is_none(), "SceneImage must not be admitted: {diag}");
+    assert!(diag["STONE_SHADOW_FAILURE"].as_str().unwrap_or("").contains("SceneImage"), "{diag}");
+    assert_shadow_owner_rollback(diag);
+    assert!(recorded_tick_lines(&log_s) > 40, "Scene rejection must leave the recorder running");
+}
+
+#[test]
+fn shadow_replay_blocks_audio_while_remaining_non_presenting() {
+    let game = "bitgun";
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("shadow-effects.replay");
+    let log_s = log.to_string_lossy().into_owned();
+    let live = run_record_dump(
+        game,
+        90,
+        &log_s,
+        &[
+            ("STONE_LIVE_REWIND", "1"),
+            ("STONE_AUDIO_PROBE", "1"),
+            ("STONE_DIRECT_AUDIO_PROBE", "1"),
+            ("STONE_DIRECT_PRESENTATION_PROBE", "1"),
+            ("STONE_SHADOW_TICKS_PER_FRAME", "2"),
+            ("STONE_REDERIVE_CURRENT_AT_FRAME", "30"),
+        ],
+    );
+    let diag = &live["__stone_diag"];
+    assert_eq!(diag["STONE_SHADOW_COMMITS"].as_i64(), Some(1), "{diag}");
+    assert!(diag["STONE_SHADOW_AUDIO_BLOCKS"].as_i64().is_some_and(|n| n > 0), "candidate audio must be blocked: {diag}");
+    assert!(diag["STONE_SHADOW_DIRECT_AUDIO_ATTEMPTS"].as_i64().is_some_and(|n| n > 0), "the direct audio fixture must execute: {diag}");
+    assert!(diag["STONE_SHADOW_DIRECT_AUDIO_BLOCKS"].as_i64().is_some_and(|n| n > 0), "direct audio must be blocked at its binding boundary: {diag}");
+    assert!(diag["STONE_SHADOW_DIRECT_PRESENTATION_ATTEMPTS"].as_i64().is_some_and(|n| n > 0), "the direct presentation fixture must execute: {diag}");
+    assert!(diag["STONE_SHADOW_DIRECT_PRESENTATION_BLOCKS"].as_i64().is_some_and(|n| n > 0), "direct presentation must be blocked at its binding boundary: {diag}");
+    assert!(diag["STONE_SHADOW_LIVE_TICK_ADVANCES"].as_i64().is_some_and(|n| n > 0), "the live Session must advance during effect isolation: {diag}");
+    let reference = run_replay_dump(game, 90, &log_s, &[("STONE_AUDIO_PROBE", "1")]);
+    let mut sim = sim_state_names(game, 90);
+    sim.remove("dt");
+    assert_sim_state_matches(&live, &reference, &sim, "shadow audio isolation");
+}
+
+#[test]
+fn newer_shadow_request_supersedes_an_in_flight_candidate() {
+    let game = "bitgun";
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("shadow-supersede.replay");
+    let log_s = log.to_string_lossy().into_owned();
+    let live = run_record_dump(
+        game,
+        130,
+        &log_s,
+        &[
+            ("STONE_LIVE_REWIND", "1"),
+            ("STONE_SHADOW_TICKS_PER_FRAME", "4"),
+            ("STONE_REDERIVE_CURRENT_AT_FRAME", "25"),
+            ("STONE_REDERIVE_CURRENT_AT_FRAME_2", "26"),
+        ],
+    );
+    let diag = &live["__stone_diag"];
+    assert_eq!(diag["STONE_SHADOW_REQUESTS"].as_i64(), Some(2), "{diag}");
+    assert_eq!(diag["STONE_SHADOW_ABORTS"].as_i64(), Some(1), "the first candidate must be cancelled: {diag}");
+    assert_eq!(diag["STONE_SHADOW_COMMITS"].as_i64(), Some(1), "the replacement candidate must commit: {diag}");
+    assert_eq!(diag["STONE_SHADOW_PENDING"].as_i64(), Some(0), "{diag}");
+    assert!(diag["STONE_SHADOW_OWNER_BEFORE"] != diag["STONE_SHADOW_OWNER_AFTER"], "the replacement candidate must become the new owner: {diag}");
+    assert!(diag["STONE_SHADOW_NATIVE_BEFORE"].as_i64().is_some_and(|n| n > 0), "native owner denominator is empty: {diag}");
+    assert!(diag["STONE_SHADOW_NATIVE_AFTER"].as_i64().is_some_and(|n| n > 0), "replacement native owner was not retained: {diag}");
+    assert!(diag["STONE_SHADOW_LIVE_SESSIONS_BEFORE"].as_i64().is_some_and(|n| n > 0), "live Session denominator is empty: {diag}");
+    assert_eq!(diag["STONE_SHADOW_LIVE_SESSIONS_AFTER"], diag["STONE_SHADOW_LIVE_SESSIONS_BEFORE"], "superseding must not leak a Session: {diag}");
+    assert!(recorded_tick_lines(&log_s) > 26, "superseding must not stop live recording");
+}
+
+#[test]
+fn shutdown_aborts_an_in_flight_shadow_and_keeps_the_live_owner() {
+    let game = "bitgun";
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("shadow-shutdown.replay");
+    let log_s = log.to_string_lossy().into_owned();
+    let live = run_record_dump(
+        game,
+        35,
+        &log_s,
+        &[
+            ("STONE_LIVE_REWIND", "1"),
+            ("STONE_SHADOW_TICKS_PER_FRAME", "1"),
+            ("STONE_REDERIVE_CURRENT_AT_FRAME", "30"),
+        ],
+    );
+    let diag = &live["__stone_diag"];
+    assert_eq!(diag["STONE_SHADOW_REQUESTS"].as_i64(), Some(1), "{diag}");
+    assert_eq!(diag["STONE_SHADOW_ABORTS"].as_i64(), Some(1), "shutdown must release the in-flight candidate: {diag}");
+    assert!(diag.get("STONE_SHADOW_COMMITS").is_none(), "shutdown must not publish a partial candidate: {diag}");
+    assert_shadow_owner_rollback(diag);
+    assert!(recorded_tick_lines(&log_s) > 30, "shutdown abort must not truncate the recorder");
 }
 
 /// Review fix 2: a loop wider than the keyframe window must NOT let eviction drop
