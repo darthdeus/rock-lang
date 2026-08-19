@@ -20,6 +20,8 @@ mod capture_free_hoist;
 mod closure_snapshot;
 #[path = "code_identity_artifact.rs"]
 mod code_identity_artifact;
+#[path = "artifact_binding_plan.rs"]
+mod artifact_binding_plan;
 #[path = "coalesce_value_struct_literal_field.rs"]
 mod coalesce_value_struct_literal_field;
 #[path = "concrete_body.rs"]
