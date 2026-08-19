@@ -429,7 +429,7 @@ fn global_call_edge_and_backend_sibling_changes_do_not_serve_stale_findings() {
     );
     assert_eq!(shapes(&cached), shapes(&fresh));
     assert!(cached.iter().all(|f| f.lint != bone_lints::UNUSED_FN));
-    assert!(stats.global_passes > 0);
+    assert_eq!(stats.global_passes, 0);
 
     let sibling_old = "inline(lua) fn probe(x: int) -> int = \"return x\"\ninline(js) fn probe(x: int) -> int = \"return x;\"\nfn main() {}\n";
     let sibling_new = sibling_old.replace("inline(js) fn probe(x: int)", "inline(js) fn probe(x: float)");
@@ -445,7 +445,7 @@ fn global_call_edge_and_backend_sibling_changes_do_not_serve_stale_findings() {
         &LintOptions::default(),
         &LintCacheUpdate::full(),
     );
-    let (cached, _) = cache.update(
+    let (cached, sibling_stats) = cache.update(
         &new_ws,
         &FxHashSet::default(),
         true,
@@ -462,6 +462,266 @@ fn global_call_edge_and_backend_sibling_changes_do_not_serve_stale_findings() {
     );
     assert_eq!(shapes(&cached), shapes(&fresh));
     assert!(cached.iter().any(|f| f.lint == bone_lints::BACKEND_SIBLING_MISMATCH));
+    assert!(sibling_stats.global_passes > 0);
+}
+
+#[test]
+fn unused_fn_add_last_caller_updates_only_affected_reachability() {
+    let old = "fn helper() {}\nfn other_dead() {}\nfn main() {}\n";
+    let new = "fn helper() {}\nfn other_dead() {}\nfn main() { helper() }\n";
+    let old_ws = workspace(old);
+    let new_ws = workspace(new);
+    let file = Ustr::from(FILE);
+    let (main_mid, main_owner) = function_owner(&new_ws, "main");
+    let mut cache = IncrementalLintCache::default();
+    cache.update(
+        &old_ws,
+        &FxHashSet::default(),
+        true,
+        &sources(old),
+        &LintOptions::default(),
+        &LintCacheUpdate::full(),
+    );
+
+    let (cached, stats) = cache.update(
+        &new_ws,
+        &FxHashSet::default(),
+        true,
+        &sources(new),
+        &LintOptions::default(),
+        &LintCacheUpdate::body_only([file], [(main_mid, main_owner)], []),
+    );
+    let fresh = lint_workspace(
+        &new_ws,
+        &FxHashSet::default(),
+        true,
+        &sources(new),
+        &LintOptions::default(),
+    );
+
+    assert_eq!(shapes(&cached), shapes(&fresh));
+    assert!(cached.iter().any(|finding| {
+        finding.lint == bone_lints::UNUSED_FN && finding.error.message.contains("other_dead")
+    }));
+    assert!(cached.iter().all(|finding| {
+        finding.lint != bone_lints::UNUSED_FN || !finding.error.message.contains("helper")
+    }));
+    assert_eq!(stats.full_rebuilds, 0);
+    assert!(stats.call_edges_installed > 0);
+    assert!(stats.reachability_components_visited > 0);
+    assert_eq!(stats.global_passes, 0, "last-caller addition must not refresh the workspace");
+}
+
+#[test]
+fn unused_fn_remove_last_caller_updates_only_affected_reachability() {
+    let old = "fn helper() {}\nfn other_dead() {}\nfn main() { helper() }\n";
+    let new = "fn helper() {}\nfn other_dead() {}\nfn main() {}\n";
+    let old_ws = workspace(old);
+    let new_ws = workspace(new);
+    let file = Ustr::from(FILE);
+    let mut cache = IncrementalLintCache::default();
+    cache.update(
+        &old_ws,
+        &FxHashSet::default(),
+        true,
+        &sources(old),
+        &LintOptions::default(),
+        &LintCacheUpdate::full(),
+    );
+    let (main_mid, main_owner) = function_owner(&new_ws, "main");
+
+    let (cached, stats) = cache.update(
+        &new_ws,
+        &FxHashSet::default(),
+        true,
+        &sources(new),
+        &LintOptions::default(),
+        &LintCacheUpdate::body_only([file], [(main_mid, main_owner)], []),
+    );
+    let fresh = lint_workspace(
+        &new_ws,
+        &FxHashSet::default(),
+        true,
+        &sources(new),
+        &LintOptions::default(),
+    );
+
+    assert_eq!(shapes(&cached), shapes(&fresh));
+    assert!(cached.iter().any(|finding| {
+        finding.lint == bone_lints::UNUSED_FN && finding.error.message.contains("helper")
+    }));
+    assert_eq!(stats.full_rebuilds, 0);
+    assert!(stats.call_edges_retracted > 0);
+    assert!(stats.reachability_components_visited > 0);
+    assert_eq!(stats.global_passes, 0, "last-caller removal must not refresh the workspace");
+}
+
+#[test]
+fn unused_fn_removing_root_from_cycle_marks_the_cycle_dead() {
+    let old = "fn a() { b() }\nfn b() { a() }\nfn main() { a() }\n";
+    let new = "fn a() { b() }\nfn b() { a() }\nfn main() {}\n";
+    let old_ws = workspace(old);
+    let new_ws = workspace(new);
+    let file = Ustr::from(FILE);
+    let (main_mid, main_owner) = function_owner(&new_ws, "main");
+    let mut cache = IncrementalLintCache::default();
+    cache.update(
+        &old_ws,
+        &FxHashSet::default(),
+        true,
+        &sources(old),
+        &LintOptions::default(),
+        &LintCacheUpdate::full(),
+    );
+
+    let (cached, stats) = cache.update(
+        &new_ws,
+        &FxHashSet::default(),
+        true,
+        &sources(new),
+        &LintOptions::default(),
+        &LintCacheUpdate::body_only([file], [(main_mid, main_owner)], []),
+    );
+    let fresh = lint_workspace(
+        &new_ws,
+        &FxHashSet::default(),
+        true,
+        &sources(new),
+        &LintOptions::default(),
+    );
+
+    assert_eq!(shapes(&cached), shapes(&fresh));
+    assert!(cached.iter().any(|finding| finding.error.message.contains("a")));
+    assert!(cached.iter().any(|finding| finding.error.message.contains("b")));
+    assert_eq!(stats.global_passes, 0);
+    assert!(stats.reachability_components_visited > 0);
+}
+
+#[test]
+fn unused_fn_adding_root_to_cycle_makes_the_cycle_live() {
+    let old = "fn a() { b() }\nfn b() { a() }\nfn main() {}\n";
+    let new = "fn a() { b() }\nfn b() { a() }\nfn main() { a() }\n";
+    let old_ws = workspace(old);
+    let new_ws = workspace(new);
+    let file = Ustr::from(FILE);
+    let (main_mid, main_owner) = function_owner(&new_ws, "main");
+    let mut cache = IncrementalLintCache::default();
+    cache.update(
+        &old_ws,
+        &FxHashSet::default(),
+        true,
+        &sources(old),
+        &LintOptions::default(),
+        &LintCacheUpdate::full(),
+    );
+
+    let (cached, stats) = cache.update(
+        &new_ws,
+        &FxHashSet::default(),
+        true,
+        &sources(new),
+        &LintOptions::default(),
+        &LintCacheUpdate::body_only([file], [(main_mid, main_owner)], []),
+    );
+    let fresh = lint_workspace(
+        &new_ws,
+        &FxHashSet::default(),
+        true,
+        &sources(new),
+        &LintOptions::default(),
+    );
+
+    assert_eq!(shapes(&cached), shapes(&fresh));
+    assert!(cached.iter().all(|finding| {
+        !(finding.lint == bone_lints::UNUSED_FN
+            && (finding.error.message.contains("a") || finding.error.message.contains("b")))
+    }));
+    assert_eq!(stats.global_passes, 0);
+    assert!(stats.reachability_components_visited > 0);
+}
+
+#[test]
+fn unused_fn_generic_caller_change_updates_specialized_edge() {
+    let old = "fn identity<T>(value: T) -> T { value }\nfn main() {}\n";
+    let new = "fn identity<T>(value: T) -> T { value }\nfn main() { identity(1) }\n";
+    let old_ws = workspace(old);
+    let new_ws = workspace(new);
+    let file = Ustr::from(FILE);
+    let (main_mid, main_owner) = function_owner(&new_ws, "main");
+    let mut cache = IncrementalLintCache::default();
+    cache.update(
+        &old_ws,
+        &FxHashSet::default(),
+        true,
+        &sources(old),
+        &LintOptions::default(),
+        &LintCacheUpdate::full(),
+    );
+
+    let (cached, stats) = cache.update(
+        &new_ws,
+        &FxHashSet::default(),
+        true,
+        &sources(new),
+        &LintOptions::default(),
+        &LintCacheUpdate::body_only([file], [(main_mid, main_owner)], []),
+    );
+    let fresh = lint_workspace(
+        &new_ws,
+        &FxHashSet::default(),
+        true,
+        &sources(new),
+        &LintOptions::default(),
+    );
+
+    assert_eq!(shapes(&cached), shapes(&fresh));
+    assert!(cached.iter().all(|finding| {
+        finding.lint != bone_lints::UNUSED_FN || !finding.error.message.contains("identity")
+    }));
+    assert_eq!(stats.global_passes, 0);
+    assert!(stats.call_edges_installed > 0);
+}
+
+#[test]
+fn unused_fn_ufcs_caller_change_updates_resolved_edge() {
+    let old = "struct Mob { hp: int }\nfn Mob.damage(m, amount: int) { m.hp -= amount }\nfn main() {}\n";
+    let new = "struct Mob { hp: int }\nfn Mob.damage(m, amount: int) { m.hp -= amount }\nfn main() { Mob { hp: 1 }.damage(1) }\n";
+    let old_ws = workspace(old);
+    let new_ws = workspace(new);
+    let file = Ustr::from(FILE);
+    let (main_mid, main_owner) = function_owner(&new_ws, "main");
+    let mut cache = IncrementalLintCache::default();
+    cache.update(
+        &old_ws,
+        &FxHashSet::default(),
+        true,
+        &sources(old),
+        &LintOptions::default(),
+        &LintCacheUpdate::full(),
+    );
+
+    let (cached, stats) = cache.update(
+        &new_ws,
+        &FxHashSet::default(),
+        true,
+        &sources(new),
+        &LintOptions::default(),
+        &LintCacheUpdate::body_only([file], [(main_mid, main_owner)], []),
+    );
+    let fresh = lint_workspace(
+        &new_ws,
+        &FxHashSet::default(),
+        true,
+        &sources(new),
+        &LintOptions::default(),
+    );
+
+    assert_eq!(shapes(&cached), shapes(&fresh));
+    assert!(cached.iter().all(|finding| {
+        finding.lint != bone_lints::UNUSED_FN || !finding.error.message.contains("damage")
+    }));
+    assert_eq!(stats.global_passes, 0);
+    assert!(stats.call_edges_installed > 0);
 }
 
 #[test]
