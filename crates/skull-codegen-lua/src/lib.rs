@@ -170,6 +170,13 @@ function __rock_definition_plan_stage(plan)
   if not _G.__rock_code_slot_pending then error("Rock code slot stage not open", 0) end
   _G.__rock_definition_plan_pending = plan
 end
+function __rock_definition_catalog(catalog)
+  local plan = rawget(_G, "__ROCK_DEFINITION_PLAN")
+  if plan == nil then error("DefinitionPlan is not published", 0) end
+  local view = rawget(plan, catalog)
+  if view == nil then error("DefinitionPlan catalog " .. catalog .. " is not published", 0) end
+  return view
+end
 function __rock_lifecycle_wire_due(old_plan, candidate_plan)
   local due = {}
   local old_phase = old_plan and old_plan.wire

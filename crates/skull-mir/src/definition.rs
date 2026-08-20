@@ -1,5 +1,5 @@
 use bone_semantic::inference::Workspace;
-use bone_semantic::hir::AnnoValue;
+use bone_semantic::hir::{AnnoValue, TypeCtor, TypeExpr, TyId};
 use bone_semantic::prelude::CompilerError;
 use bone_semantic::prelude::ModuleId;
 use ustr::Ustr;
@@ -43,8 +43,8 @@ pub struct DefinitionCensus {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DefinitionCatalog {
     pub catalog: Ustr,
-    pub accessor: FuncRef,
-    pub definition_type: Ustr,
+    pub accessor: Option<FuncRef>,
+    pub definition_type: Option<Ustr>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -54,6 +54,7 @@ pub struct DefinitionPlan {
     pub census: DefinitionCensus,
 }
 
+#[derive(Clone)]
 struct Role {
     catalog: Ustr,
     key_param: Ustr,
@@ -66,6 +67,56 @@ fn string_arg(ann: &bone_semantic::hir::Annotation, name: &str) -> Option<Ustr> 
             _ => None,
         })?
     })
+}
+
+fn annotation<'a>(
+    annotations: &'a [bone_semantic::hir::Annotation],
+    name: &str,
+) -> Result<Option<&'a bone_semantic::hir::Annotation>, CompilerError> {
+    let mut found = annotations.iter().filter(|ann| ann.name.name.as_str() == name);
+    let first = found.next();
+    if let Some(second) = found.next() {
+        return Err(CompilerError::new_with_label(
+            second.span,
+            format!("function has more than one `@{name}` annotation"),
+        ));
+    }
+    Ok(first)
+}
+
+fn static_type(ws: &Workspace, ty: TyId) -> Option<TypeExpr> {
+    match ty {
+        TyId::Static(module, index) => Some(ws.module(module).ty_arena[index]),
+        TyId::Local(_) => None,
+    }
+}
+
+fn artifact_definition_type(ws: &Workspace, return_ty: TyId) -> Option<TyId> {
+    let TypeExpr::App {
+        ctor: TypeCtor::Array,
+        params,
+    } = static_type(ws, return_ty)?
+    else {
+        return None;
+    };
+    let mut params = params.into_iter();
+    let element = return_ty.with_idx(params.next()?);
+    if params.next().is_some() {
+        return None;
+    }
+    let TypeExpr::App {
+        ctor: TypeCtor::Nominal(name),
+        params,
+    } = static_type(ws, element)?
+    else {
+        return None;
+    };
+    if name != Ustr::from("ArtifactDefinition") {
+        return None;
+    }
+    let mut params = params.into_iter();
+    let definition = element.with_idx(params.next()?);
+    params.next().is_none().then_some(definition)
 }
 
 fn metadata<'a>(
@@ -93,9 +144,18 @@ fn role_for(
     decorator: &bone_semantic::hir::DecoratorDef,
     ann: &bone_semantic::hir::Annotation,
 ) -> Result<Role, CompilerError> {
-    let catalog = string_arg(ann, "catalog").expect("validated artifact_definition catalog");
-    let key_param =
-        string_arg(ann, "key_param").expect("validated artifact_definition key_param");
+    let Some(catalog) = string_arg(ann, "catalog") else {
+        return Err(CompilerError::new_with_label(
+            ann.span,
+            "`@artifact_definition` requires a string catalog=".to_string(),
+        ));
+    };
+    let Some(key_param) = string_arg(ann, "key_param") else {
+        return Err(CompilerError::new_with_label(
+            ann.span,
+            "`@artifact_definition` requires a string key_param=".to_string(),
+        ));
+    };
     if catalog.is_empty() || key_param.is_empty() {
         return Err(CompilerError::new_with_label(
             ann.span,
@@ -160,6 +220,99 @@ pub fn collect(ws: &Workspace) -> Result<DefinitionPlan, CompilerError> {
         }
     }
 
+    let mut catalogs = std::collections::HashMap::<Ustr, DefinitionCatalog>::new();
+    for role in roles.values() {
+        catalogs.entry(role.catalog).or_insert_with(|| DefinitionCatalog {
+            catalog: role.catalog,
+            accessor: None,
+            definition_type: None,
+        });
+    }
+
+    for module in ws.modules.iter().filter(|m| m.id != ModuleId::builtin()) {
+        for (fid, function) in module.functions.iter() {
+            let Some(ann) = annotation(&function.annotations, "artifact_catalog")? else {
+                continue;
+            };
+            census.accessors += 1;
+            let Some(catalog) = string_arg(ann, "catalog") else {
+                return Err(CompilerError::new_with_label(
+                    ann.span,
+                    "`@artifact_catalog` requires a string catalog=".to_string(),
+                ));
+            };
+            if catalog.is_empty() {
+                return Err(CompilerError::new_with_label(
+                    ann.span,
+                    "`@artifact_catalog` catalog= must not be empty".to_string(),
+                ));
+            }
+            if !catalogs.contains_key(&catalog) {
+                return Err(CompilerError::new_with_label(
+                    ann.span,
+                    format!(
+                        "artifact catalog accessor `{}` names unknown catalog `{catalog}`",
+                        function.name
+                    ),
+                ));
+            }
+            if !function.generics.is_empty()
+                || !function.param_decls.is_empty()
+                || !function.is_extern
+                || function.inline_body.is_some()
+                || !function
+                    .annotations
+                    .iter()
+                    .any(|candidate| candidate.name.name.as_str() == "intrinsic")
+            {
+                return Err(CompilerError::new_with_label(
+                    function.span,
+                    format!(
+                        "artifact catalog accessor `{}` must be a compiler-owned @intrinsic extern fn with no parameters",
+                        function.name
+                    ),
+                ));
+            }
+            let Some(return_ty) = function.return_ty else {
+                return Err(CompilerError::new_with_label(
+                    function.span,
+                    format!(
+                        "artifact catalog accessor `{}` must return [ArtifactDefinition<T>]",
+                        function.name
+                    ),
+                ));
+            };
+            let Some(definition_ty) = artifact_definition_type(ws, return_ty) else {
+                return Err(CompilerError::new_with_label(
+                    function.span,
+                    format!(
+                        "artifact catalog accessor `{}` must return [ArtifactDefinition<T>], got `{}`",
+                        function.name,
+                        ws.render(None, return_ty)
+                    ),
+                ));
+            };
+            let definition_type = Ustr::from(ws.render(None, definition_ty).as_str());
+            let Some(plan_catalog) = catalogs.get_mut(&catalog) else {
+                return Err(CompilerError::new_with_label(
+                    ann.span,
+                    format!("artifact catalog accessor `{}` names unknown catalog `{catalog}`", function.name),
+                ));
+            };
+            if plan_catalog.accessor.is_some() {
+                return Err(CompilerError::new_with_label(
+                    ann.span,
+                    format!("catalog `{catalog}` has more than one typed accessor"),
+                ));
+            }
+            plan_catalog.accessor = Some(FuncRef {
+                module: module.id,
+                func: fid,
+            });
+            plan_catalog.definition_type = Some(definition_type);
+        }
+    }
+
     let mut entries = Vec::new();
     let mut ordinal = 0usize;
     let mut seen = std::collections::HashMap::<(Ustr, Ustr), Ustr>::new();
@@ -194,6 +347,24 @@ pub fn collect(ws: &Workspace) -> Result<DefinitionPlan, CompilerError> {
                             function.name
                         ),
                     ));
+                }
+                if let Some(expected_type) = catalogs
+                    .get(&role.catalog)
+                    .and_then(|catalog| catalog.definition_type)
+                {
+                    let actual_type = function
+                        .return_ty
+                        .map(|ty| Ustr::from(ws.render(None, ty).as_str()))
+                        .unwrap_or_else(|| Ustr::from("()"));
+                    if actual_type != expected_type {
+                        return Err(CompilerError::new_with_label(
+                            function.span,
+                            format!(
+                                "artifact definition target `{}` has definition type `{actual_type}`, but catalog `{}` requires `{expected_type}`",
+                                function.name, role.catalog
+                            ),
+                        ));
+                    }
                 }
                 if application.args.len() != 1
                     || application.args[0].name.as_ref().map(|name| name.name)
@@ -244,8 +415,10 @@ pub fn collect(ws: &Workspace) -> Result<DefinitionPlan, CompilerError> {
         }
     }
     entries.sort_by_key(|entry| (entry.catalog, entry.declaration_ordinal));
+    let mut catalogs = catalogs.into_values().collect::<Vec<_>>();
+    catalogs.sort_by_key(|catalog| catalog.catalog);
     Ok(DefinitionPlan {
-        catalogs: Vec::new(),
+        catalogs,
         entries,
         census,
     })

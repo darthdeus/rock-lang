@@ -122,6 +122,30 @@ fn main() {}
 }
 
 #[test]
+fn typed_catalog_accessor_is_compiler_owned_and_returns_the_published_view() {
+    let emit = emit_mir(r#"
+struct WidgetDef { value: int }
+@artifact_definition(catalog="widgets", key_param="key")
+deco init widget(key: string) {}
+@artifact_catalog(catalog="widgets")
+@intrinsic extern fn widget_definition_plan() -> [ArtifactDefinition<WidgetDef>]
+@widget(key="alpha") fn make_alpha() -> WidgetDef { return WidgetDef { value: 1 } }
+fn main() {}
+"#);
+    assert!(emit.lua.contains("function widget_definition_plan()"));
+    assert!(emit.lua.contains("return __rock_definition_catalog(\"widgets\")"));
+    assert!(!emit.lua.contains("__ROCK_DEFINITION_PLAN or {}"));
+    let out = run_luajit(
+        &format!(
+            "{}\nlocal p = widget_definition_plan(); print(p.len .. ':' .. p._data[1].key .. ':' .. p._data[1].definition.value)",
+            emit.lua
+        ),
+        "typed_definition_catalog_root",
+    );
+    assert_eq!(out, "1:alpha:1");
+}
+
+#[test]
 fn full_publication_replaces_lifecycle_membership_by_logical_key() {
     let v0 = emit_mir(r#"
 @lifecycle(phase="update", owner="session") deco init tick {}

@@ -286,6 +286,13 @@ function __rock_definition_plan_stage(plan) {
   if (__rock_code_slot_stage === null) throw new Error("Rock code slot stage not open");
   __rock_definition_plan_pending = plan;
 }
+function __rock_definition_catalog(catalog) {
+  var plan = __G.__ROCK_DEFINITION_PLAN;
+  if (plan === null || plan === undefined) throw new Error("DefinitionPlan is not published");
+  var view = plan[catalog];
+  if (view === null || view === undefined) throw new Error("DefinitionPlan catalog " + catalog + " is not published");
+  return view;
+}
 function __rock_lifecycle_wire_due(oldPlan, candidatePlan) {
   var due = Object.create(null);
   var oldPhase = oldPlan && oldPlan.wire;

@@ -225,6 +225,34 @@ fn main() {}
 }
 
 #[test]
+fn typed_catalog_accessor_is_compiler_owned_and_returns_the_published_view_in_js() {
+    let ws = ws_with(r#"
+struct WidgetDef { value: int }
+@artifact_definition(catalog="widgets", key_param="key")
+deco init widget(key: string) {}
+@artifact_catalog(catalog="widgets")
+@intrinsic extern fn widget_definition_plan() -> [ArtifactDefinition<WidgetDef>]
+@widget(key="alpha") fn make_alpha() -> WidgetDef { return WidgetDef { value: 1 } }
+fn main() {}
+"#);
+    let js = emit_program(&ws);
+    assert!(js.contains("function widget_definition_plan() { return __rock_definition_catalog(\"widgets\"); }"));
+    assert!(!js.contains("__ROCK_DEFINITION_PLAN || {}"));
+    let source = format!(
+        "var __G = {{}};\n{}\n{}\n{}\nconsole.log(widget_definition_plan().len + ':' + widget_definition_plan()._data[0].key + ':' + widget_definition_plan()._data[0].definition.value);",
+        skull_codegen_js::JS_SESSION_RUNTIME,
+        skull_codegen_js::JS_CALL_HELPER,
+        js,
+    );
+    let output = node()
+        .args(["-e", &source])
+        .output()
+        .expect("node");
+    assert!(output.status.success(), "node failed: {}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "1:alpha:1");
+}
+
+#[test]
 fn typed_definition_catalog_lookup_is_fail_closed_and_counts_population_in_js() {
     let source = format!(
         "var __G = {{}};\n{}\n{}\n{}\nconsole.log(result);",

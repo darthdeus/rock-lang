@@ -3406,7 +3406,7 @@ fn assemble_program_core(
         )));
     }
     let lifecycle_plan = skull_mir::lifecycle::attach_artifact(lifecycle_skeleton, &code_artifact)?;
-    let has_definition_plan = definition_plan.census.declarations > 0;
+    let has_definition_plan = !definition_plan.catalogs.is_empty();
     let code_slot_stage = code_slot_registration_js(ws, scx.interner(), &code_artifact)?;
     out.push_str(&code_slot_stage);
     if (has_definition_plan || lifecycle_plan.census.declarations > 0)
@@ -5087,20 +5087,40 @@ fn definition_plan_stage_js(
     interner: &skull_mir::monoty::MonoInterner,
     plan: &skull_mir::definition::DefinitionPlan,
 ) -> Result<String, CompilerError> {
-    if plan.census.declarations == 0 {
+    if plan.catalogs.is_empty() {
         return Ok(String::new());
     }
-    let mut out = String::from("__rock_definition_plan_stage({\n");
-    let mut catalogs: BTreeMap<ustr::Ustr, Vec<_>> = BTreeMap::new();
+    let mut out = String::new();
+    let mut entries_by_catalog: BTreeMap<ustr::Ustr, Vec<_>> = BTreeMap::new();
     for entry in &plan.entries {
-        catalogs.entry(entry.catalog).or_default().push(entry);
+        entries_by_catalog.entry(entry.catalog).or_default().push(entry);
     }
-    for (catalog, entries) in catalogs {
+    for catalog_plan in &plan.catalogs {
+        if let Some(accessor) = catalog_plan.accessor {
+            let name = skull_mir::mangle::mangle_fn(
+                ws,
+                &ws.module(accessor.module).functions[accessor.func],
+            );
+            writeln!(
+                out,
+                "function {}() {{ return __rock_definition_catalog({}); }}",
+                name,
+                js_string_lit(catalog_plan.catalog.as_str())?,
+            )
+            .unwrap();
+        }
+    }
+    out.push_str("__rock_definition_plan_stage({\n");
+    for catalog_plan in &plan.catalogs {
+        let entries = entries_by_catalog
+            .get(&catalog_plan.catalog)
+            .cloned()
+            .unwrap_or_default();
         writeln!(
             out,
             "{}: {{catalog: {}, len: {}, _data: [",
-            js_string_lit(catalog.as_str())?,
-            js_string_lit(catalog.as_str())?,
+            js_string_lit(catalog_plan.catalog.as_str())?,
+            js_string_lit(catalog_plan.catalog.as_str())?,
             entries.len()
         )
         .unwrap();

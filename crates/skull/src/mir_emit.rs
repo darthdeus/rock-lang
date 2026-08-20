@@ -5025,7 +5025,7 @@ fn assemble(
     code_artifact.effect_plan = effect_plan;
     let has_artifact_plans = !code_artifact.binding_plan.entries.is_empty();
     let has_code_slot_publication = code_artifact.entries.values().any(|entry| entry.escaping)
-        || definition_plan.census.declarations > 0
+        || !definition_plan.catalogs.is_empty()
         || lifecycle_plan.census.declarations > 0;
     let has_state_publication = has_code_slot_publication || has_artifact_plans;
     out.push_str("__rock_state_transaction_begin()\n");
@@ -5040,7 +5040,7 @@ fn assemble(
     // the original slot, so the emitted text is unchanged.)
     out.push_str(&globals_lua);
     skipped.extend(global_skipped);
-    let has_definition_plan = definition_plan.census.declarations > 0;
+    let has_definition_plan = !definition_plan.catalogs.is_empty();
     if has_artifact_plans {
         out.push_str(skull_codegen_lua::ARTIFACT_PLAN_PRELUDE);
     }
@@ -5312,20 +5312,37 @@ fn definition_plan_stage_lua(
     scx: &skull_mir::lower::ScalarCtx,
     plan: &skull_mir::definition::DefinitionPlan,
 ) -> String {
-    if plan.census.declarations == 0 {
+    if plan.catalogs.is_empty() {
         return String::new();
     }
-    let mut out = String::from("__rock_definition_plan_stage({\n");
-    let mut catalogs: std::collections::BTreeMap<Ustr, Vec<_>> = std::collections::BTreeMap::new();
+    let mut out = String::new();
+    let mut entries_by_catalog: std::collections::BTreeMap<Ustr, Vec<_>> = std::collections::BTreeMap::new();
     for entry in &plan.entries {
-        catalogs.entry(entry.catalog).or_default().push(entry);
+        entries_by_catalog.entry(entry.catalog).or_default().push(entry);
     }
-    for (catalog, entries) in catalogs {
+    for catalog_plan in &plan.catalogs {
+        if let Some(accessor) = catalog_plan.accessor {
+            let function = &ws.module(accessor.module).functions[accessor.func];
+            let name = mangle_fn(ws, function);
+            let _ = writeln!(
+                out,
+                "function {}()\n  return __rock_definition_catalog({})\nend",
+                name,
+                skull_codegen_lua::lua_string(catalog_plan.catalog.as_str()),
+            );
+        }
+    }
+    out.push_str("__rock_definition_plan_stage({\n");
+    for catalog_plan in &plan.catalogs {
+        let entries = entries_by_catalog
+            .get(&catalog_plan.catalog)
+            .cloned()
+            .unwrap_or_default();
         let _ = writeln!(
             out,
             "[{}] = {{ catalog = {}, len = {}, _data = {{",
-            skull_codegen_lua::lua_string(catalog.as_str()),
-            skull_codegen_lua::lua_string(catalog.as_str()),
+            skull_codegen_lua::lua_string(catalog_plan.catalog.as_str()),
+            skull_codegen_lua::lua_string(catalog_plan.catalog.as_str()),
             entries.len()
         );
         for (index, entry) in entries.into_iter().enumerate() {
