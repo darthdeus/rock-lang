@@ -307,6 +307,89 @@ fn sort_global_init_lines(inits: Vec<GlobalInit>) -> Result<Vec<String>, Compile
     Ok(lines)
 }
 
+const LUA_INIT_PART_BYTES: usize = 32 * 1024;
+
+fn wrap_large_lua_section(name: &str, body: &str) -> String {
+    if body.len() <= LUA_INIT_PART_BYTES {
+        return body.to_string();
+    }
+    format!("local function {name}()\n{body}end\n{name}()\n")
+}
+
+fn state_initializer_lua(init_lines: &[String]) -> String {
+    let mut parts: Vec<Vec<&str>> = vec![Vec::new()];
+    let mut part_bytes = 0;
+    for line in init_lines {
+        if part_bytes > 0 && part_bytes + line.len() > LUA_INIT_PART_BYTES {
+            parts.push(Vec::new());
+            part_bytes = 0;
+        }
+        parts.last_mut().unwrap().push(line.as_str());
+        part_bytes += line.len();
+    }
+
+    let mut out = String::new();
+    if parts.len() == 1 {
+        out.push_str("function __rock_state_initialize()\n");
+        for line in &parts[0] {
+            out.push_str(line);
+        }
+        out.push_str("end\n__rock_state_initialize()\n");
+        return out;
+    }
+
+    for (index, part) in parts.iter().enumerate() {
+        writeln!(out, "local function __rock_state_initialize_part_{index}()")
+            .unwrap();
+        for line in part {
+            out.push_str(line);
+        }
+        out.push_str("end\n");
+    }
+    out.push_str("function __rock_state_initialize()\n");
+    for index in 0..parts.len() {
+        writeln!(out, "__rock_state_initialize_part_{index}()").unwrap();
+    }
+    out.push_str("end\n__rock_state_initialize()\n");
+    out
+}
+
+#[cfg(test)]
+mod state_initializer_tests {
+    use super::{state_initializer_lua, wrap_large_lua_section};
+
+    #[test]
+    fn large_global_initializer_is_split_without_reordering() {
+        let lines = vec![
+            format!("A = \"{}\"\n", "a".repeat(20_000)),
+            format!("B = \"{}\"\n", "b".repeat(20_000)),
+            format!("C = \"{}\"\n", "c".repeat(20_000)),
+        ];
+        let lua = state_initializer_lua(&lines);
+
+        assert!(lua.contains("local function __rock_state_initialize_part_0()"));
+        assert!(lua.contains("local function __rock_state_initialize_part_1()"));
+        assert!(lua.contains("__rock_state_initialize_part_0()"));
+        assert!(lua.contains("__rock_state_initialize_part_1()"));
+        assert!(lua.find("A =").unwrap() < lua.find("B =").unwrap());
+        assert!(lua.find("B =").unwrap() < lua.find("C =").unwrap());
+        assert_eq!(lua.matches("A =").count(), 1);
+        assert_eq!(lua.matches("B =").count(), 1);
+        assert_eq!(lua.matches("C =").count(), 1);
+    }
+
+    #[test]
+    fn large_publication_section_is_nested_without_reordering() {
+        let body = "A = 1\nB = 2\n".repeat(20_000);
+        let lua = wrap_large_lua_section("__rock_publication_part", &body);
+
+        assert!(lua.starts_with("local function __rock_publication_part()\n"));
+        assert!(lua.ends_with("end\n__rock_publication_part()\n"));
+        assert_eq!(lua.matches("A = 1").count(), 20_000);
+        assert_eq!(lua.matches("B = 2").count(), 20_000);
+    }
+}
+
 /// Forward transitive closure over a symbol-reference graph (`name -> names it
 /// references`): every name reachable FROM `start` by following `deps` edges
 /// (NOT including `start` itself unless a cycle leads back). Used by the const
@@ -5033,7 +5116,11 @@ fn assemble(
         "__rock_state_publish_schema({:?})\n",
         state_schema.schema_id
     ));
-    out.push_str(&state_schema_lua(&state_schema));
+    let state_schema_stage = state_schema_lua(&state_schema);
+    out.push_str(&wrap_large_lua_section(
+        "__rock_state_schema_stage_part",
+        &state_schema_stage,
+    ));
 
     // Globals: an init fn + a dependency-ordered `<NAME> = __skull_ginit_<NAME>()`.
     // (Lowered above, so the walk could see their call edges; appended here, in
@@ -5050,17 +5137,36 @@ fn assemble(
     // Global initializer bodies (including their escaping lambdas) are now
     // defined, so slot staging must follow them but precede initializer calls.
     let code_slot_stage = code_slot_registration_lua(ws, scx, &code_artifact)?;
-    out.push_str(&code_slot_stage);
+    out.push_str(&wrap_large_lua_section(
+        "__rock_code_slot_stage_part",
+        &code_slot_stage,
+    ));
     if has_code_slot_publication && !code_artifact.entries.values().any(|entry| entry.escaping) {
         out.push_str("__rock_code_slot_begin()\n");
     } else if has_artifact_plans && !has_code_slot_publication {
         out.push_str("__rock_artifact_plan_begin()\n");
     }
-    out.push_str(&definition_plan_stage_lua(ws, scx, &definition_plan));
-    out.push_str(&lifecycle_plan_stage_lua(ws, scx, &lifecycle_plan));
+    let definition_plan_stage = definition_plan_stage_lua(ws, scx, &definition_plan);
+    out.push_str(&wrap_large_lua_section(
+        "__rock_definition_plan_stage_part",
+        &definition_plan_stage,
+    ));
+    let lifecycle_plan_stage = lifecycle_plan_stage_lua(ws, scx, &lifecycle_plan);
+    out.push_str(&wrap_large_lua_section(
+        "__rock_lifecycle_plan_stage_part",
+        &lifecycle_plan_stage,
+    ));
     if has_artifact_plans {
-        out.push_str(&artifact_binding_plan_stage_lua(&code_artifact.binding_plan));
-        out.push_str(&shadow_effect_plan_stage_lua(&code_artifact.effect_plan));
+        let binding_plan_stage = artifact_binding_plan_stage_lua(&code_artifact.binding_plan);
+        out.push_str(&wrap_large_lua_section(
+            "__rock_artifact_binding_plan_stage_part",
+            &binding_plan_stage,
+        ));
+        let effect_plan_stage = shadow_effect_plan_stage_lua(&code_artifact.effect_plan);
+        out.push_str(&wrap_large_lua_section(
+            "__rock_shadow_effect_plan_stage_part",
+            &effect_plan_stage,
+        ));
     }
 
     // Order the init lines by their transitive global-read closure over the full
@@ -5120,11 +5226,7 @@ fn assemble(
 
     out.push_str(&static_resets);
     let init_lines = sort_global_init_lines(inits)?;
-    out.push_str("function __rock_state_initialize()\n");
-    for line in init_lines {
-        out.push_str(&line);
-    }
-    out.push_str("end\n__rock_state_initialize()\n");
+    out.push_str(&state_initializer_lua(&init_lines));
 
     // Decorator APPLICATIONS (after global inits so a deco body can push a global).
     out.push_str(&decorator_application_lines(ws, &deco_map, scx, &mut skipped));
