@@ -338,7 +338,16 @@ pub fn collect(ws: &Workspace) -> Result<DefinitionPlan, CompilerError> {
                         ),
                     ));
                 }
-                if function.return_ty.is_none_or(|ty| ty == ws.builtins.unit()) {
+                let Some(return_ty) = function.return_ty else {
+                    return Err(CompilerError::new_with_label(
+                        function.span,
+                        format!(
+                            "artifact definition target `{}` must return a concrete definition",
+                            function.name
+                        ),
+                    ));
+                };
+                if return_ty == ws.builtins.unit() {
                     return Err(CompilerError::new_with_label(
                         function.span,
                         format!(
@@ -351,10 +360,7 @@ pub fn collect(ws: &Workspace) -> Result<DefinitionPlan, CompilerError> {
                     .get(&role.catalog)
                     .and_then(|catalog| catalog.definition_type)
                 {
-                    let actual_type = function
-                        .return_ty
-                        .map(|ty| Ustr::from(ws.render(None, ty).as_str()))
-                        .unwrap_or_else(|| Ustr::from("()"));
+                    let actual_type = Ustr::from(ws.render(None, return_ty).as_str());
                     if actual_type != expected_type {
                         return Err(CompilerError::new_with_label(
                             function.span,

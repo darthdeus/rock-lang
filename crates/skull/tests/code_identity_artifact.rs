@@ -165,7 +165,10 @@ fn main() {}
     let candidate_chunk = format!("{}\n{}", skull_codegen_lua::FN_MT_PRELUDE, accessor);
     let script = format!(
         r#"
-local live_plan = _G.__ROCK_DEFINITION_PLAN
+local live_plan = {{
+  widgets = {{ len = 1, _data = {{ [1] = {{ key = "live", definition = {{ value = 1 }} }} }} }}
+}}
+_G.__ROCK_DEFINITION_PLAN = live_plan
 local candidate = setmetatable({{}}, {{ __index = _G }})
 candidate._G = candidate
 local chunk = assert(loadstring([[
