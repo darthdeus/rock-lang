@@ -16,6 +16,7 @@
 // The shared slot core. Its luajit sibling in `unified.rock` is the contract;
 // this is the same free list over a 0-based JS array. Column Maps are a luajit
 // storage form, so on this backend the only consumer is `Arena<T>`.
+@shadow_effect(pure)
 @nomangle inline(js) fn __slot_alloc(m: any, hw: any) -> int = """
   var fi = m.free_indices;
   var s;
@@ -31,6 +32,7 @@
   return s;
 """
 
+@shadow_effect(pure)
 @nomangle inline(js) fn __slot_release(m: any, slot: int) = """
   var fi = m.free_indices;
   fi._data[fi.len] = slot;
@@ -52,12 +54,14 @@
 
 // There is no FFI pointer on JS at all, so what luajit reconstructs from a
 // `char*` is already a string here; `len` has nothing to bound.
+@shadow_effect(pure)
 inline(js) fn ffi_string(ptr: any, len: int?) -> string = """
   return typeof ptr === "string" ? ptr : String(ptr);
 """
 
 // `unwrap()` on a null reaches this, so a JS program with no stone in it still
 // needs a traceback.
+@shadow_effect(pure)
 @inline inline(js) fn __debug_traceback() -> string = "return new Error().stack || \"\";"
 
 // Reports LUA type names, not JS ones -- the return value is compared against

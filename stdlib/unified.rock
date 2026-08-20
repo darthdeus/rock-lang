@@ -50,7 +50,9 @@ inline(lua) fn read(p: Ptr<int>) -> int = "return p[0]"
 @shadow_effect(pure)
 inline(lua) fn read(p: Ptr<float>) -> float = "return p[0]"
 // JS: a Ptr<T> is the TypedArray itself (NativeBuffer .ptr).
+@shadow_effect(pure)
 inline(js) fn read(p: Ptr<int>) -> int = "return p[0];"
+@shadow_effect(pure)
 inline(js) fn read(p: Ptr<float>) -> float = "return p[0];"
 
 // ============================================================================
@@ -1394,6 +1396,7 @@ inline(lua) fn float_to_int(value: float) -> int = """
     end
     return math.floor(value)
 """
+@shadow_effect(pure)
 inline(js) fn float_to_int(value: float) -> int = "return Math.floor(value);"
 
 @inline fn to_int(value: float) -> int { return float_to_int(value) }
@@ -3318,6 +3321,7 @@ double strtod_l(const char *nptr, char **endptr, __rock_locale_t loc);
 
 @shadow_effect(pure)
 @inline inline(lua) fn string.repeat(s, count: int) -> string = "string.rep(s, count)"
+@shadow_effect(pure)
 @inline inline(js) fn string.repeat(s, count: int) -> string = "return s.repeat(count);"
 
 // StringBuilder: append-and-join accumulator. Naive `+` concat in a loop is
@@ -3361,6 +3365,7 @@ inline(lua) fn format_float(v: float, width: int, decimals: int) -> string = """
 @shadow_effect(pure)
 @inline inline(lua) fn string_match(s: string, pattern: string) -> string? = "string.match(s, pattern)"
 // JS: first capture (or whole match) via the shared Lua-pattern translator.
+@shadow_effect(pure)
 inline(js) fn string_match(s: string, pattern: string) -> string? = """
     var m = s.match(new RegExp(__lua_pattern_to_regex(pattern)));
     if (!m) return null;
@@ -3437,6 +3442,7 @@ inline(lua) fn string.gsub(s, pattern: string, replacement: string) -> string = 
     return out;
 """
 
+@shadow_effect(pure)
 inline(js) fn string.gsub(s, pattern: string, replacement: string) -> string = """
     var rx = new RegExp(__lua_pattern_to_regex(pattern), "g");
     var rep = replacement.replace(/%([0-9%%])/g, function (_, d) { return d === "%" ? "%" : "$" + d; });
