@@ -35,12 +35,21 @@ pub struct DefinitionEntry {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DefinitionCensus {
     pub declarations: usize,
+    pub accessors: usize,
     pub applications: usize,
     pub admitted: usize,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DefinitionCatalog {
+    pub catalog: Ustr,
+    pub accessor: FuncRef,
+    pub definition_type: Ustr,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DefinitionPlan {
+    pub catalogs: Vec<DefinitionCatalog>,
     pub entries: Vec<DefinitionEntry>,
     pub census: DefinitionCensus,
 }
@@ -235,7 +244,11 @@ pub fn collect(ws: &Workspace) -> Result<DefinitionPlan, CompilerError> {
         }
     }
     entries.sort_by_key(|entry| (entry.catalog, entry.declaration_ordinal));
-    Ok(DefinitionPlan { entries, census })
+    Ok(DefinitionPlan {
+        catalogs: Vec::new(),
+        entries,
+        census,
+    })
 }
 
 #[cfg(test)]
@@ -303,6 +316,129 @@ mod tests {
     fn collect_error(source: &str) -> CompilerError {
         let ws = workspace(&[("invalid.rock", source)]);
         collect(&ws).expect_err("invalid artifact definition must reject")
+    }
+
+    const TYPED_PREFIX: &str = r#"
+        struct ArtifactDefinition<T> {
+            catalog: string,
+            key: string,
+            name: string,
+            ordinal: int,
+            definition: T,
+        }
+        struct WidgetDef { value: int }
+    "#;
+
+    fn typed_source(body: &str) -> String {
+        format!(
+            r#"{TYPED_PREFIX}
+                @artifact_definition(catalog="widgets", key_param="key")
+                deco init widget(key: string) {{}}
+                {body}
+                fn main() {{}}
+            "#
+        )
+    }
+
+    #[test]
+    fn typed_nonempty_catalog_has_an_accessor_and_a_nonzero_population() {
+        let ws = workspace(&[(
+            "typed.rock",
+            &typed_source(
+                r#"
+                @artifact_catalog(catalog="widgets")
+                @intrinsic extern fn widget_definition_plan() -> [ArtifactDefinition<WidgetDef>]
+                @widget(key="alpha") fn make_alpha() -> WidgetDef { return WidgetDef { value: 1 } }
+                "#,
+            ),
+        )]);
+        let plan = collect(&ws).expect("typed definition plan");
+        assert_eq!(plan.census.accessors, 1);
+        assert_eq!(plan.catalogs.len(), 1);
+        assert_eq!(plan.entries.len(), 1);
+        assert_eq!(plan.entries.len(), plan.census.admitted);
+    }
+
+    #[test]
+    fn declared_empty_catalog_is_retained_as_a_typed_catalog() {
+        let ws = workspace(&[(
+            "empty.rock",
+            &typed_source(
+                r#"
+                @artifact_catalog(catalog="widgets")
+                @intrinsic extern fn widget_definition_plan() -> [ArtifactDefinition<WidgetDef>]
+                "#,
+            ),
+        )]);
+        let plan = collect(&ws).expect("declared empty definition plan");
+        assert_eq!(plan.catalogs.len(), 1);
+        assert_eq!(plan.entries.len(), 0);
+        assert_eq!(plan.census.admitted, 0);
+    }
+
+    #[test]
+    fn wrong_factory_definition_type_rejects() {
+        let err = collect(&workspace(&[(
+            "wrong_factory.rock",
+            &typed_source(
+                r#"
+                @artifact_catalog(catalog="widgets")
+                @intrinsic extern fn widget_definition_plan() -> [ArtifactDefinition<WidgetDef>]
+                @widget(key="alpha") fn make_alpha() -> int { return 1 }
+                "#,
+            ),
+        )]))
+        .expect_err("factory definition type must be checked");
+        assert!(err.message.contains("definition type"), "{err:?}");
+    }
+
+    #[test]
+    fn wrong_accessor_definition_type_rejects() {
+        let err = collect(&workspace(&[(
+            "wrong_accessor.rock",
+            &typed_source(
+                r#"
+                @artifact_catalog(catalog="widgets")
+                @intrinsic extern fn widget_definition_plan() -> [int]
+                @widget(key="alpha") fn make_alpha() -> WidgetDef { return WidgetDef { value: 1 } }
+                "#,
+            ),
+        )]))
+        .expect_err("accessor definition type must be checked");
+        assert!(err.message.contains("ArtifactDefinition"), "{err:?}");
+    }
+
+    #[test]
+    fn unknown_catalog_accessor_rejects() {
+        let err = collect(&workspace(&[(
+            "unknown_accessor.rock",
+            &format!(
+                r#"{TYPED_PREFIX}
+                    @artifact_catalog(catalog="missing")
+                    @intrinsic extern fn missing_definition_plan() -> [ArtifactDefinition<WidgetDef>]
+                    fn main() {{}}
+                "#
+            ),
+        )]))
+        .expect_err("unknown catalog accessor must reject");
+        assert!(err.message.contains("unknown catalog"), "{err:?}");
+    }
+
+    #[test]
+    fn duplicate_typed_accessors_reject_instead_of_picking_one() {
+        let err = collect(&workspace(&[(
+            "duplicate_accessor.rock",
+            &typed_source(
+                r#"
+                @artifact_catalog(catalog="widgets")
+                @intrinsic extern fn first_plan() -> [ArtifactDefinition<WidgetDef>]
+                @artifact_catalog(catalog="widgets")
+                @intrinsic extern fn second_plan() -> [ArtifactDefinition<WidgetDef>]
+                "#,
+            ),
+        )]))
+        .expect_err("duplicate typed accessors must reject");
+        assert!(err.message.contains("more than one") || err.message.contains("duplicate"), "{err:?}");
     }
 
     #[test]

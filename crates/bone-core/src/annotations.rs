@@ -309,6 +309,19 @@ fn validate_one(
             }
             Ok(())
         }
+        "artifact_catalog" => {
+            at(anno, pos, AnnoPos::FnItem)?;
+            if anno.args.len() != 1
+                || anno.args[0].name.as_ref().is_none_or(|name| name.name.as_str() != "catalog")
+                || !matches!(anno.args[0].value, AnnoValue::String(_))
+            {
+                comp_error!(
+                    anno.span,
+                    "`@artifact_catalog` requires one named string argument: catalog="
+                );
+            }
+            Ok(())
+        }
         _ if deco_names.contains(&name) => at(anno, pos, AnnoPos::FnItem),
         _ => {
             comp_error!(anno.span, "unknown annotation `@{name}` (registry: docs/annotations-design.md)");

@@ -3019,6 +3019,16 @@ fn main() { }
     }
 }
 
+#[test]
+fn mag_panel_definitions_do_not_duplicate_the_catalog_key_in_panel_defs() {
+    let source = include_str!("../../../mag/panels.rock");
+    let field_like_keys = source
+        .lines()
+        .filter(|line| line.trim_start().starts_with("key:"))
+        .count();
+    assert_eq!(field_like_keys, 0, "PanelDef factories must not carry a second membership key");
+}
+
 #[cfg(test)]
 mod definition_transition_tests {
     use super::super::{SkullReload, SkullStone};

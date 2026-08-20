@@ -224,6 +224,37 @@ fn main() {}
     assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "2:alpha:1");
 }
 
+#[test]
+fn typed_definition_catalog_lookup_is_fail_closed_and_counts_population_in_js() {
+    let source = format!(
+        "var __G = {{}};\n{}\n{}\n{}\nconsole.log(result);",
+        skull_codegen_js::JS_SESSION_RUNTIME,
+        skull_codegen_js::JS_CALL_HELPER,
+        r#"
+let missingPlan = false;
+try { __rock_definition_catalog("widgets"); } catch (_) { missingPlan = true; }
+__rock_code_slot_begin();
+__rock_definition_plan_stage({
+  widgets: { len: 1, _data: [{ key: "alpha", factory: function() { return { value: 1 }; } }] },
+  empty: { len: 0, _data: [] },
+});
+__rock_code_slot_publish();
+let missingCatalog = false;
+try { __rock_definition_catalog("missing"); } catch (_) { missingCatalog = true; }
+const empty = __rock_definition_catalog("empty");
+const nonempty = __rock_definition_catalog("widgets");
+const result = missingPlan && missingCatalog && empty.len === 0 && nonempty.len === 1
+  ? "4/4 PASS" : "0/4 FAIL";
+"#,
+    );
+    let output = node()
+        .args(["-e", &source])
+        .output()
+        .expect("node");
+    assert!(output.status.success(), "node failed: {}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "4/4 PASS");
+}
+
 /// A concrete operation whose ONLY caller is a decorator body is still served.
 ///
 /// A `deco` body is a third body kind beside plain fns and global initializers,
