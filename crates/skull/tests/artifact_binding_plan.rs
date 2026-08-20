@@ -4,7 +4,7 @@
 
 mod common;
 
-use common::{emit_mir, run_luajit, try_emit_module};
+use common::{emit_mir, run_luajit, try_emit_module, try_emit_module_with_file};
 use skull_mir::artifact_plan::{ArtifactBinding, ArtifactBindingKind, ArtifactBindingPlan};
 
 fn plan_snapshot(lua: &str, label: &str) -> String {
@@ -285,4 +285,79 @@ fn main() { let _ = admitted_control(1) }
     assert_eq!(admissible, "true");
     let classified: usize = classified.parse().expect("classified population");
     assert!(classified > 0, "effect-plan classified population is zero");
+}
+
+#[test]
+fn engine_path_does_not_admit_unmapped_filesystem_process_native_or_window_effects() {
+    let lua = try_emit_module_with_file(
+        r#"
+inline(lua) fn file_effect() = "return stone.stone_file_write('/tmp/shadow-effect-plan-file', 'x', 1)"
+inline(lua) fn process_effect() = "return os.execute('true')"
+inline(lua) fn native_effect() = "return ffi.C.mystery()"
+inline(lua) fn window_effect() = "return stone.stone_set_window_size(1, 1)"
+fn main() {
+    file_effect()
+    process_effect()
+    native_effect()
+    window_effect()
+}
+"#,
+        "stone/engine/effect_probe.rock",
+        Default::default(),
+    )
+    .expect("declaration effect fixture should compile");
+    let out = run_luajit(
+        &format!(
+            "{}\nlocal p = _G.__ROCK_SHADOW_EFFECT_PLAN\nassert(p ~= nil)\nprint(tostring(p.admissible) .. ':' .. p.census.rejected .. ':' .. p.census.virtualized)",
+            lua
+        ),
+        "engine_declaration_effects",
+    );
+    let (admissible, rest) = out.split_once(':').expect("effect-plan admission output");
+    let (rejected, virtualized) = rest.split_once(':').expect("effect-plan census output");
+    assert_eq!(admissible, "false", "engine path must not admit opaque effects: {out}");
+    assert!(rejected.parse::<usize>().expect("rejected population") >= 4, "all four effects must reject: {out}");
+    assert_eq!(virtualized, "0", "path trust must not create virtualized entries: {out}");
+}
+
+#[test]
+fn every_virtualized_entry_has_a_concrete_shadow_consumer() {
+    let lua = try_emit_module_with_file(
+        r#"
+inline(lua) fn virtualized_control() = "return __shadow_virtualized_control()"
+fn main() { virtualized_control() }
+"#,
+        "stone/engine/effect_probe.rock",
+        Default::default(),
+    )
+    .expect("virtualized effect fixture should compile");
+    let out = run_luajit(
+        &format!(
+            r#"
+{lua}
+local p = _G.__ROCK_SHADOW_EFFECT_PLAN
+assert(p ~= nil)
+assert(p.census.examined > 0, "effect-plan examined denominator is zero")
+assert(p.census.virtualized > 0, "virtualized denominator is zero")
+local virtualized = 0
+local mapped = 0
+for i = 1, p.entries.len do
+  local entry = p.entries._data[i]
+  if entry.policy == "virtualized" then
+    virtualized = virtualized + 1
+    assert(entry.consumer ~= nil and entry.consumer ~= "", "virtualized entry has no concrete consumer: " .. entry.physical)
+    mapped = mapped + 1
+  end
+end
+assert(virtualized > 0, "virtualized entry loop has zero denominator")
+assert(mapped == virtualized, "virtualized consumer mapping is incomplete")
+print(virtualized .. ":" .. mapped)
+"#,
+            lua = lua
+        ),
+        "virtualized_consumer_mapping",
+    );
+    let (virtualized, mapped) = out.split_once(':').expect("virtualized mapping output");
+    assert!(virtualized.parse::<usize>().expect("virtualized count") > 0);
+    assert_eq!(virtualized, mapped);
 }

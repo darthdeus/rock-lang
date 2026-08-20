@@ -2855,6 +2855,35 @@ fn shadow_replay_blocks_audio_while_remaining_non_presenting() {
 }
 
 #[test]
+fn shadow_resimulation_rejects_filesystem_effect_before_it_writes() {
+    let game = "bitgun";
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("shadow-file-effect.replay");
+    let log_s = log.to_string_lossy().into_owned();
+    let target = dir.path().join("shadow-must-not-write.txt");
+    assert!(!target.exists(), "filesystem-effect fixture target was touched before the run");
+    let target_s = target.to_string_lossy().into_owned();
+    let live = run_record_dump(
+        game,
+        80,
+        &log_s,
+        &[
+            ("STONE_LIVE_REWIND", "1"),
+            ("STONE_DIRECT_FILE_WRITE_PROBE", "1"),
+            ("STONE_DIRECT_FILE_WRITE_PATH", &target_s),
+            ("STONE_SHADOW_TICKS_PER_FRAME", "100"),
+            ("STONE_REDERIVE_CURRENT_AT_FRAME", "30"),
+        ],
+    );
+    let diag = &live["__stone_diag"];
+    assert!(!target.exists(), "shadow resimulation emitted a filesystem effect: {diag}");
+    assert_eq!(diag["STONE_SHADOW_REQUESTS"].as_i64(), Some(1), "{diag}");
+    assert_eq!(diag["STONE_SHADOW_ABORTS"].as_i64(), Some(1), "filesystem effects must reject shadow admission: {diag}");
+    assert!(diag.get("STONE_SHADOW_COMMITS").is_none(), "filesystem effects must not reach commit: {diag}");
+    assert!(diag["STONE_SHADOW_FAILURE"].as_str().unwrap_or("").contains("effect"), "{diag}");
+}
+
+#[test]
 fn newer_shadow_request_supersedes_an_in_flight_candidate() {
     let game = "bitgun";
     let dir = tempfile::tempdir().unwrap();
