@@ -298,7 +298,7 @@ fn main() { let _ = admitted_control(1) }
 }
 
 #[test]
-fn engine_path_does_not_admit_unmapped_filesystem_process_native_or_window_effects() {
+fn engine_path_rejects_filesystem_process_native_or_window_effects() {
     let lua = try_emit_module_with_file(
         r#"
 inline(lua) fn file_effect() = "return stone.stone_file_write('/tmp/shadow-effect-plan-file', 'x', 1)"
@@ -331,7 +331,7 @@ fn main() {
 }
 
 #[test]
-fn every_virtualized_entry_has_a_concrete_shadow_consumer() {
+fn shadow_plan_has_no_circular_consumer_metadata() {
     let lua = try_emit_module_with_file(
         r#"
 @shadow_effect(virtualized)
@@ -351,24 +351,20 @@ assert(p ~= nil)
 assert(p.census.examined > 0, "effect-plan examined denominator is zero")
 assert(p.census.virtualized > 0, "virtualized denominator is zero")
 local virtualized = 0
-local mapped = 0
 for i = 1, p.entries.len do
   local entry = p.entries._data[i]
   if entry.policy == "virtualized" then
     virtualized = virtualized + 1
-    assert(entry.consumer ~= nil and entry.consumer ~= "", "virtualized entry has no concrete consumer: " .. entry.physical)
-    mapped = mapped + 1
+    assert(entry.consumer == nil, "shadow plan leaked circular consumer metadata: " .. entry.physical)
   end
 end
 assert(virtualized > 0, "virtualized entry loop has zero denominator")
-assert(mapped == virtualized, "virtualized consumer mapping is incomplete")
-print(virtualized .. ":" .. mapped)
+assert(p.census.unmapped == nil, "shadow plan leaked circular unmapped census")
+print(virtualized)
 "#,
             lua = lua
         ),
-        "virtualized_consumer_mapping",
+        "shadow_plan_no_circular_consumer_metadata",
     );
-    let (virtualized, mapped) = out.split_once(':').expect("virtualized mapping output");
-    assert!(virtualized.parse::<usize>().expect("virtualized count") > 0);
-    assert_eq!(virtualized, mapped);
+    assert!(out.parse::<usize>().expect("virtualized count") > 0);
 }
