@@ -242,3 +242,20 @@ fn real_sources_are_idempotent_reparse_and_keep_comments() {
         fails.join("\n")
     );
 }
+
+#[test]
+fn nullable_parenthesized_function_type_roundtrips_as_the_same_ast() {
+    let source = "struct Hooks {\n    on_close: (fn())? = null,\n}\n";
+    let source_ast = skull_parser::parse_module_clean(source, "<source>".into())
+        .expect("the nullable parenthesized function type must parse");
+    let formatted = skull_fmt::format_code(source);
+    let formatted_ast = skull_parser::parse_module_clean(&formatted, "<formatted>".into())
+        .expect("formatted output must parse");
+
+    assert_eq!(
+        source_ast.module_sexp(),
+        formatted_ast.module_sexp(),
+        "formatting `(fn())?` must preserve its nullable function-type AST; output was:\n{formatted}"
+    );
+    assert_eq!(formatted.trim(), "struct Hooks {\n    on_close: (fn() -> ())? = null,\n}");
+}

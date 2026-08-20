@@ -2701,6 +2701,21 @@ function stone_read_canvas_pixel(h, x, y) {
   gl.bindFramebuffer(gl.FRAMEBUFFER, prev ? prev.fbo : null);
   return shape.get(shape.view);
 }
+function stone_read_canvas_nearest_id(h, x, y, side) {
+  var gl = __SW.gl;
+  var c = __SW.canvases[h];
+  if (!c || c.format !== 3) return 0;
+  var aw = c.activeW || c.w, ah = c.activeH || c.h;
+  var rect = __sw_centered_read_rect(x, y, side, aw, ah);
+  if (!rect) return 0;
+  var view = new Int32Array(rect[2] * rect[3] * 4);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, c.fbo);
+  gl.finish();
+  gl.readPixels(rect[0], ah - rect[1] - rect[3], rect[2], rect[3], gl.RGBA_INTEGER, gl.INT, view);
+  var prev = __SW.canvases[__SW.boundCanvas];
+  gl.bindFramebuffer(gl.FRAMEBUFFER, prev ? prev.fbo : null);
+  return __sw_nearest_int_id(view, rect[2], rect[3], rect[0], rect[1], x, y, true);
+}
 // Read a w*h RGBA8 rect of the WINDOW into `out` in top-left coordinates --
 // the twin of canvas.rs's stone_read_window_rect, and what WindowProbe runs
 // on. Default framebuffer, so it is the DRAWABLE that bounds and flips it, not
@@ -2743,20 +2758,22 @@ function stone_read_depth_pixel(h, x, y) {
   return 1.0;
 }
 
-// --- async single-pixel readback: double-buffered PIXEL_PACK_BUFFER ping-pong
+// --- async pixel readback: double-buffered PIXEL_PACK_BUFFER ping-pong
 // (mirrors stone-rs pixel_readback.rs). submit() promotes prior staging to
 // ready + queues readPixels into staging with a fence; consume() reads the
 // READY pbo (>= 1 frame old BY DESIGN -- mag's async pick). One-shot per
 // promoted submit; OOB / unknown canvas / depth-on-web submits carry the
 // sentinel (0 color, 1 depth far plane). ---
-function stone_pixel_readback_new(isDepth) {
+function __sw_pixel_readback_new(isDepth, areaSide, nearest) {
   var gl = __SW.gl;
   if (!gl || !gl.createBuffer) return 0;
+  if (areaSide <= 0) return 0;
   var R = (__SW.readbacks = __SW.readbacks || { slots: {}, next: 1 });
   var pbos = [gl.createBuffer(), gl.createBuffer()];
+  var bytes = areaSide * areaSide * 16;
   for (var i = 0; i < 2; i++) {
     gl.bindBuffer(gl.PIXEL_PACK_BUFFER, pbos[i]);
-    gl.bufferData(gl.PIXEL_PACK_BUFFER, 16, gl.STREAM_READ);
+    gl.bufferData(gl.PIXEL_PACK_BUFFER, bytes, gl.STREAM_READ);
   }
   gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
   var id = R.next++;
@@ -2765,10 +2782,44 @@ function stone_pixel_readback_new(isDepth) {
     readyPrimed: false, stagingPrimed: false,
     readyGarbage: false, stagingGarbage: false,
     readyFmt: 0, stagingFmt: 0, // 0 f32, 1 bytes, 2 ints
+    readyRect: [0, 0, 1, 1], stagingRect: [0, 0, 1, 1],
+    readyCenter: [0, 0], stagingCenter: [0, 0],
     fences: [null, null],
     depth: !!isDepth,
+    areaSide: areaSide,
+    nearest: !!nearest,
+    bytes: bytes,
   };
   return id;
+}
+function stone_pixel_readback_new(isDepth) {
+  return __sw_pixel_readback_new(isDepth, 1, false);
+}
+function stone_pixel_readback_area_new(side) {
+  return __sw_pixel_readback_new(0, side, true);
+}
+function __sw_centered_read_rect(x, y, side, aw, ah) {
+  if (side <= 0 || x < 0 || y < 0 || x >= aw || y >= ah) return null;
+  var before = side >> 1, after = side - before;
+  var left = Math.max(0, x - before), top = Math.max(0, y - before);
+  var right = Math.min(aw, x + after), bottom = Math.min(ah, y + after);
+  return [left, top, right - left, bottom - top];
+}
+function __sw_nearest_int_id(view, w, h, readX, readY, centerX, centerY, rowsBottomUp) {
+  var nearest = 0, nearestDist = Number.MAX_SAFE_INTEGER;
+  for (var row = 0; row < h; row++) {
+    for (var col = 0; col < w; col++) {
+      var eid = view[(row * w + col) * 4];
+      if (!eid) continue;
+      var topRow = rowsBottomUp ? h - 1 - row : row;
+      var dx = readX + col - centerX, dy = readY + topRow - centerY;
+      var dist = dx * dx + dy * dy;
+      if (dist < nearestDist || (dist === nearestDist && (!nearest || eid < nearest))) {
+        nearest = eid; nearestDist = dist;
+      }
+    }
+  }
+  return nearest;
 }
 function stone_pixel_readback_destroy(id) {
   var R = __SW.readbacks;
@@ -2779,6 +2830,12 @@ function stone_pixel_readback_destroy(id) {
   delete R.slots[id];
 }
 function stone_pixel_readback_submit(id, canvasH, x, y) {
+  __sw_pixel_readback_submit(id, canvasH, x, y, null);
+}
+function stone_pixel_readback_submit_area(id, canvasH, x, y, side) {
+  __sw_pixel_readback_submit(id, canvasH, x, y, side);
+}
+function __sw_pixel_readback_submit(id, canvasH, x, y, requestedSide) {
   var R = __SW.readbacks;
   var s = R && R.slots[id];
   if (!s) return;
@@ -2788,11 +2845,16 @@ function stone_pixel_readback_submit(id, canvasH, x, y) {
     s.readyPrimed = true;
     s.readyGarbage = s.stagingGarbage;
     s.readyFmt = s.stagingFmt;
+    s.readyRect = s.stagingRect;
+    s.readyCenter = s.stagingCenter;
     s.stagingPrimed = false;
   }
   var c = __SW.canvases[canvasH];
   var aw = c ? (c.activeW || c.w) : 0, ah = c ? (c.activeH || c.h) : 0;
-  var ok = !!c && x >= 0 && y >= 0 && x < aw && y < ah;
+  var side = requestedSide === null ? s.areaSide : requestedSide;
+  var sideOk = s.nearest ? side > 0 && side <= s.areaSide : requestedSide === null;
+  var rect = c && sideOk ? __sw_centered_read_rect(x, y, side, aw, ah) : null;
+  var ok = !!rect && (!s.nearest || c.format === 3);
   if (ok && s.depth) {
     __sw_log_once("depth pixel readback unsupported on WebGL2; returning far plane");
     ok = false;
@@ -2803,7 +2865,7 @@ function stone_pixel_readback_submit(id, canvasH, x, y) {
   gl.bindFramebuffer(gl.READ_FRAMEBUFFER, c.fbo);
   gl.bindBuffer(gl.PIXEL_PACK_BUFFER, s.pbos[s.stagingIdx]);
   gl.pixelStorei(gl.PACK_ALIGNMENT, 1);
-  gl.readPixels(x, ah - 1 - y, 1, 1, shape.fmt, shape.type, 0);
+  gl.readPixels(rect[0], ah - rect[1] - rect[3], rect[2], rect[3], shape.fmt, shape.type, 0);
   gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
   if (s.fences[s.stagingIdx]) gl.deleteSync(s.fences[s.stagingIdx]);
   s.fences[s.stagingIdx] = gl.fenceSync ? gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0) : null;
@@ -2811,6 +2873,8 @@ function stone_pixel_readback_submit(id, canvasH, x, y) {
   gl.bindFramebuffer(gl.FRAMEBUFFER, prev ? prev.fbo : null);
   s.stagingPrimed = true;
   s.stagingGarbage = false;
+  s.stagingRect = rect;
+  s.stagingCenter = [x, y];
 }
 function stone_pixel_readback_consume(id) {
   var R = __SW.readbacks;
@@ -2823,10 +2887,13 @@ function stone_pixel_readback_consume(id) {
   var gl = __SW.gl;
   var fence = s.fences[s.readyIdx];
   if (fence) { gl.clientWaitSync(fence, 0, 0); gl.deleteSync(fence); s.fences[s.readyIdx] = null; }
-  var view = s.readyFmt === 2 ? new Int32Array(4) : s.readyFmt === 1 ? new Uint8Array(4) : new Float32Array(4);
+  var view = s.readyFmt === 2 ? new Int32Array(s.bytes / 4) : s.readyFmt === 1 ? new Uint8Array(s.bytes) : new Float32Array(s.bytes / 4);
   gl.bindBuffer(gl.PIXEL_PACK_BUFFER, s.pbos[s.readyIdx]);
   gl.getBufferSubData(gl.PIXEL_PACK_BUFFER, 0, view);
   gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+  if (s.nearest && s.readyFmt === 2) {
+    return __sw_nearest_int_id(view, s.readyRect[2], s.readyRect[3], s.readyRect[0], s.readyRect[1], s.readyCenter[0], s.readyCenter[1], true);
+  }
   return s.readyFmt === 1 ? view[0] / 255.0 : view[0];
 }
 

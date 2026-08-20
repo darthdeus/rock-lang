@@ -52,6 +52,13 @@ pub struct BuildVar {
     pub builtin: Option<String>,
     pub value: Option<String>,
     pub channels: Option<Vec<String>>,
+    /// Channels on which a FAILING `cmd` degrades to `default` with a warning
+    /// instead of failing the build. Per-channel on purpose: a credential a
+    /// development build can do without is one a release build cannot, and an
+    /// all-channel switch would let a retail artifact ship the empty default.
+    /// `validate_build` requires a `default` to fall back to and membership in
+    /// `channels`, so the declaration can never be inert.
+    pub optional_channels: Option<Vec<String>>,
     pub default: Option<String>,
     /// Hash the value into cache keys but never store it in plaintext in any
     /// on-disk artifact or manifest.
@@ -310,7 +317,7 @@ impl<'de> serde::Deserialize<'de> for BuildVar {
         impl<'de> serde::de::Visitor<'de> for Vis {
             type Value = BuildVar;
             fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                write!(f, "a literal string or a table with cmd/builtin/value/channels/default/secret")
+                write!(f, "a literal string or a table with cmd/builtin/value/channels/optional_channels/default/secret")
             }
             fn visit_str<E: serde::de::Error>(self, s: &str) -> Result<BuildVar, E> {
                 Ok(BuildVar { value: Some(s.to_string()), ..BuildVar::default() })
@@ -323,6 +330,7 @@ impl<'de> serde::Deserialize<'de> for BuildVar {
                         "builtin" => { var.builtin = Some(map.next_value()?); }
                         "value" => { var.value = Some(map.next_value()?); }
                         "channels" => { var.channels = Some(map.next_value()?); }
+                        "optional_channels" => { var.optional_channels = Some(map.next_value()?); }
                         "default" => { var.default = Some(map.next_value()?); }
                         "secret" => { var.secret = map.next_value()?; }
                         other => {
@@ -330,7 +338,7 @@ impl<'de> serde::Deserialize<'de> for BuildVar {
                             // var sourceless and every build_var() reading it stale.
                             return Err(serde::de::Error::custom(format!(
                                 "unknown key `{other}` in [build.vars] entry; known keys: \
-                                 cmd, builtin, value, channels, default, secret"
+                                 cmd, builtin, value, channels, optional_channels, default, secret"
                             )));
                         }
                     }
@@ -737,6 +745,42 @@ impl StickConfig {
                             "stick.toml: [build.vars] {name} restricts to channel {:?}, \
                              which is not in [build] channels {:?}",
                             chan, build.channels
+                        );
+                    }
+                }
+            }
+            if let Some(optional) = var.optional_channels.as_deref() {
+                if var.cmd.is_none() {
+                    anyhow::bail!(
+                        "stick.toml: [build.vars] {name} sets optional_channels but has no cmd; \
+                         only a cmd can fail at resolution"
+                    );
+                }
+                if var.default.is_none() {
+                    anyhow::bail!(
+                        "stick.toml: [build.vars] {name} sets optional_channels but has no default \
+                         to degrade to"
+                    );
+                }
+                for chan in optional {
+                    if !build.channels.iter().any(|c| c == chan) {
+                        anyhow::bail!(
+                            "stick.toml: [build.vars] {name} marks channel {:?} optional, \
+                             which is not in [build] channels {:?}",
+                            chan, build.channels
+                        );
+                    }
+                    // Outside `channels` the var already resolves to `default` without
+                    // running the cmd, so marking it optional there would be inert --
+                    // and inert-looking safety declarations are how the real one goes
+                    // missing.
+                    if var.channels.as_deref()
+                        .is_some_and(|runs_on| !runs_on.iter().any(|c| c == chan))
+                    {
+                        anyhow::bail!(
+                            "stick.toml: [build.vars] {name} marks channel {:?} optional but \
+                             does not run there (channels {:?}); it already takes the default",
+                            chan, var.channels.as_deref().unwrap_or(&[])
                         );
                     }
                 }
