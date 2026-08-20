@@ -146,6 +146,43 @@ fn main() {}
 }
 
 #[test]
+fn shadow_candidate_typed_accessor_reads_the_candidate_definition_plan() {
+    let emit = emit_mir(r#"
+struct WidgetDef { value: int }
+@artifact_definition(catalog="widgets", key_param="key")
+deco init widget(key: string) {}
+@artifact_catalog(catalog="widgets")
+@intrinsic extern fn widget_definition_plan() -> [ArtifactDefinition<WidgetDef>]
+@widget(key="live") fn make_live() -> WidgetDef { return WidgetDef { value: 1 } }
+fn main() {}
+"#);
+    let accessor = "function widget_definition_plan()\n  return __rock_definition_catalog(\"widgets\")\nend";
+    assert!(emit.lua.contains(accessor), "compiler did not emit the typed accessor");
+    let candidate_chunk = format!("{}\n{}", skull_codegen_lua::FN_MT_PRELUDE, accessor);
+    let script = format!(
+        r#"
+local live_plan = _G.__ROCK_DEFINITION_PLAN
+local candidate = setmetatable({{}}, {{ __index = _G }})
+candidate._G = candidate
+local chunk = assert(loadstring([[
+{}
+]]))
+setfenv(chunk, candidate)
+chunk()
+candidate.__ROCK_DEFINITION_PLAN = {{
+  widgets = {{ len = 1, _data = {{ [1] = {{ key = "candidate", definition = {{ value = 2 }} }} }} }}
+}}
+local plan = candidate.widget_definition_plan()
+assert(plan._data[1].key == "candidate", "candidate accessor observed the live catalog")
+assert(_G.__ROCK_DEFINITION_PLAN == live_plan, "candidate accessor changed the live owner")
+print("candidate:" .. plan.len .. ":" .. plan._data[1].key)
+"#,
+        candidate_chunk
+    );
+    assert_eq!(run_luajit(&script, "shadow_candidate_typed_catalog"), "candidate:1:candidate");
+}
+
+#[test]
 fn full_publication_replaces_lifecycle_membership_by_logical_key() {
     let v0 = emit_mir(r#"
 @lifecycle(phase="update", owner="session") deco init tick {}
