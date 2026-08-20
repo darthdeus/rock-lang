@@ -186,7 +186,9 @@ fn main() { let _ = filesystem_effect() }
         ),
         "filesystem_effect_plan",
     );
-    assert_eq!(out, "false:1");
+    let (admissible, rejected) = out.split_once(':').expect("filesystem effect output");
+    assert_eq!(admissible, "false");
+    assert!(rejected.parse::<usize>().expect("filesystem rejection population") > 0);
 }
 
 #[test]
@@ -205,7 +207,9 @@ fn main() { process_effect() }
         ),
         "process_effect_plan",
     );
-    assert_eq!(out, "false:1");
+    let (admissible, rejected) = out.split_once(':').expect("process effect output");
+    assert_eq!(admissible, "false");
+    assert!(rejected.parse::<usize>().expect("process rejection population") > 0);
 }
 
 #[test]
@@ -224,7 +228,9 @@ fn main() { let _ = network_effect() }
         ),
         "network_effect_plan",
     );
-    assert_eq!(out, "false:1");
+    let (admissible, rejected) = out.split_once(':').expect("network effect output");
+    assert_eq!(admissible, "false");
+    assert!(rejected.parse::<usize>().expect("network rejection population") > 0);
 }
 
 #[test]
@@ -243,7 +249,9 @@ fn main() { host_effect() }
         ),
         "unclassified_host_effect_plan",
     );
-    assert_eq!(out, "false:1");
+    let (admissible, rejected) = out.split_once(':').expect("host effect output");
+    assert_eq!(admissible, "false");
+    assert!(rejected.parse::<usize>().expect("host rejection population") > 0);
 }
 
 #[test]
@@ -262,7 +270,9 @@ fn main() { unknown_native_effect() }
         ),
         "user_native_effect_plan",
     );
-    assert_eq!(out, "false:1");
+    let (admissible, rejected) = out.split_once(':').expect("native effect output");
+    assert_eq!(admissible, "false");
+    assert!(rejected.parse::<usize>().expect("native rejection population") > 0);
 }
 
 #[test]
@@ -324,6 +334,7 @@ fn main() {
 fn every_virtualized_entry_has_a_concrete_shadow_consumer() {
     let lua = try_emit_module_with_file(
         r#"
+@shadow_effect(virtualized)
 inline(lua) fn virtualized_control() = "return __shadow_virtualized_control()"
 fn main() { virtualized_control() }
 "#,

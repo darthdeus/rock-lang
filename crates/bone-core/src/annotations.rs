@@ -70,9 +70,23 @@ fn validate_one(
         | "uniform_values"
         | "materialize" | "gpu_only"
         | "scalar_abi" | "inline" | "sim"
-        | "sim_render" => {
+        | "sim_render" | "shadow_root" => {
             at(anno, pos, AnnoPos::FnItem)?;
             no_args(anno)
+        }
+        "shadow_effect" => {
+            at(anno, pos, AnnoPos::FnItem)?;
+            let ok = anno.args.len() == 1
+                && anno.args[0].name.is_none()
+                && matches!(&anno.args[0].value, AnnoValue::Ident(policy)
+                    if matches!(policy.name.as_str(), "pure" | "candidate_owned" | "virtualized" | "reject"));
+            if !ok {
+                comp_error!(
+                    anno.span,
+                    "`@shadow_effect` takes one policy: pure, candidate_owned, virtualized, or reject"
+                );
+            }
+            Ok(())
         }
         "sim_env" => {
             at(anno, pos, AnnoPos::FnItem)?;

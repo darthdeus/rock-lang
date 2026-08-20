@@ -2793,8 +2793,13 @@ fn native_owner_retirement_failure_rolls_back_the_complete_old_owner() {
     assert!(recorded_tick_lines(&log_s) > 35, "native retirement failure must leave the recorder live");
 }
 
+/// The compiler-owned effect plan is conservative over the whole reachable
+/// artifact. The survivors test hooks also contain permanent raw/cdata
+/// rejection fixtures, so a scene-mode request is rejected at the effect gate
+/// before late Scene state can be copied. Scene ownership itself is covered by
+/// the boot state-admission fixture above.
 #[test]
-fn late_created_scene_rejects_shadow_replay_without_publication() {
+fn shadow_effect_admission_rejects_unclassified_reachable_effects_without_publication() {
     let game = "survivors";
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("shadow-scene-error.replay");
@@ -2815,8 +2820,9 @@ fn late_created_scene_rejects_shadow_replay_without_publication() {
     assert_eq!(diag["STONE_LIVE_REWIND_SUPPORTED"].as_i64(), Some(1), "boot must be admissible: {diag}");
     assert_eq!(diag["STONE_SHADOW_REQUESTS"].as_i64(), Some(1), "{diag}");
     assert_eq!(diag["STONE_SHADOW_ABORTS"].as_i64(), Some(1), "{diag}");
-    assert!(diag.get("STONE_SHADOW_COMMITS").is_none(), "SceneImage must not be admitted: {diag}");
-    assert!(diag["STONE_SHADOW_FAILURE"].as_str().unwrap_or("").contains("SceneImage"), "{diag}");
+    assert!(diag.get("STONE_SHADOW_COMMITS").is_none(), "unclassified effects must not be admitted: {diag}");
+    let failure = diag["STONE_SHADOW_FAILURE"].as_str().unwrap_or("");
+    assert!(failure.contains("shadow effects") && failure.contains("live_rewind_probe_foreign"), "{diag}");
     assert_shadow_owner_rollback(diag);
     assert!(recorded_tick_lines(&log_s) > 40, "Scene rejection must leave the recorder running");
 }
@@ -2847,11 +2853,35 @@ fn shadow_replay_blocks_audio_while_remaining_non_presenting() {
     assert!(diag["STONE_SHADOW_DIRECT_AUDIO_BLOCKS"].as_i64().is_some_and(|n| n > 0), "direct audio must be blocked at its binding boundary: {diag}");
     assert!(diag["STONE_SHADOW_DIRECT_PRESENTATION_ATTEMPTS"].as_i64().is_some_and(|n| n > 0), "the direct presentation fixture must execute: {diag}");
     assert!(diag["STONE_SHADOW_DIRECT_PRESENTATION_BLOCKS"].as_i64().is_some_and(|n| n > 0), "direct presentation must be blocked at its binding boundary: {diag}");
+    assert!(diag["STONE_SHADOW_EFFECT_CONSUMER_CALLS"].as_i64().is_some_and(|n| n > 0), "shadow effect consumers must be reached: {diag}");
     assert!(diag["STONE_SHADOW_LIVE_TICK_ADVANCES"].as_i64().is_some_and(|n| n > 0), "the live Session must advance during effect isolation: {diag}");
     let reference = run_replay_dump(game, 90, &log_s, &[("STONE_AUDIO_PROBE", "1")]);
     let mut sim = sim_state_names(game, 90);
     sim.remove("dt");
     assert_sim_state_matches(&live, &reference, &sim, "shadow audio isolation");
+}
+
+#[test]
+fn admitted_virtualized_effect_reaches_its_shadow_consumer() {
+    let game = "bitgun";
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("shadow-virtualized-control.replay");
+    let log_s = log.to_string_lossy().into_owned();
+    let live = run_record_dump(
+        game,
+        80,
+        &log_s,
+        &[
+            ("STONE_LIVE_REWIND", "1"),
+            ("STONE_SHADOW_VIRTUALIZED_CONTROL_PROBE", "1"),
+            ("STONE_SHADOW_TICKS_PER_FRAME", "2"),
+            ("STONE_REDERIVE_CURRENT_AT_FRAME", "30"),
+        ],
+    );
+    let diag = &live["__stone_diag"];
+    assert_eq!(diag["STONE_SHADOW_COMMITS"].as_i64(), Some(1), "{diag}");
+    assert!(diag["STONE_SHADOW_VIRTUALIZED_CONTROL_CALLS"].as_i64().is_some_and(|n| n > 0), "admitted virtualized control never reached its consumer: {diag}");
+    assert!(diag["STONE_SHADOW_LIVE_TICK_ADVANCES"].as_i64().is_some_and(|n| n > 0), "the live Session must advance while the control candidate catches up: {diag}");
 }
 
 #[test]
@@ -2880,7 +2910,7 @@ fn shadow_resimulation_rejects_filesystem_effect_before_it_writes() {
     assert_eq!(diag["STONE_SHADOW_REQUESTS"].as_i64(), Some(1), "{diag}");
     assert_eq!(diag["STONE_SHADOW_ABORTS"].as_i64(), Some(1), "filesystem effects must reject shadow admission: {diag}");
     assert!(diag.get("STONE_SHADOW_COMMITS").is_none(), "filesystem effects must not reach commit: {diag}");
-    assert!(diag["STONE_SHADOW_FAILURE"].as_str().unwrap_or("").contains("effect"), "{diag}");
+    assert!(diag["STONE_SHADOW_FAILURE"].as_str().unwrap_or("").contains("filesystem"), "{diag}");
 }
 
 #[test]

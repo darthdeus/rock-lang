@@ -228,6 +228,7 @@ struct SemanticUniformArrayBlock {
     members: [SemanticUniformArrayMember],
 }
 
+@shadow_effect(pure)
 @uniform_values inline(lua) fn uniform_values<T>(u: T) -> SemanticUniformBlock = """
     error("uniform_values is compiler-expanded (docs/shader-binding-layout-plan.md)")
 """
@@ -239,6 +240,7 @@ struct SemanticUniformArrayBlock {
 //
 // The layout comes from `u`'s CONCRETE type. A generic source wrapper is
 // admitted; its retained concrete instance supplies that type to the expander.
+@shadow_effect(pure)
 @uniform_expand inline(lua) fn pack_uniform_block<T>(fv: Ptr<float>, iv: Ptr<int>, u: T) = """
     error("pack_uniform_block is compiler-expanded (docs/shader-binding-layout-plan.md)")
 """
@@ -250,6 +252,7 @@ struct SemanticUniformArrayBlock {
 // This is how a call site says WHICH of a program's blocks it means: an A2
 // pipeline has one block per stage, so the shader name no longer identifies
 // one and the value's type is what does.
+@shadow_effect(pure)
 @uniform_expand inline(lua) fn uniform_block_id<T>(u: T) -> int = """
     error("uniform_block_id is compiler-expanded (docs/shader-binding-layout-plan.md)")
 """

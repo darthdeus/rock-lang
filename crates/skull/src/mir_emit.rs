@@ -5018,6 +5018,7 @@ fn assemble(
         scx,
         &code_artifact,
         &state_schema,
+        &lifecycle_plan,
         &foreign_bindings,
     )?;
     code_artifact.binding_plan = binding_plan;
@@ -5404,88 +5405,248 @@ fn foreign_artifact_binding(
         .map(|_| mangle_fn(ws, function))
 }
 
-fn shadow_virtualized_module(file: &str) -> bool {
-    is_stdlib_module_file(file)
-        || file.starts_with("stone/engine/")
-        || file.contains("/stone/engine/")
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ShadowSummary {
+    policy: skull_mir::artifact_plan::ShadowEffectPolicy,
+    consumer: Option<FuncRef>,
 }
 
-fn shadow_effect_for_function(
-    file: &str,
+fn shadow_effect_annotation(
     function: &bone_semantic::hir::Function,
-) -> (skull_mir::artifact_plan::ShadowEffectPolicy, String) {
-    if shadow_virtualized_module(file) {
-        return (
-            skull_mir::artifact_plan::ShadowEffectPolicy::Virtualized,
-            "compiler-owned engine/stdlib boundary".to_string(),
-        );
-    }
-    if function.is_extern {
-        return (
-            skull_mir::artifact_plan::ShadowEffectPolicy::Reject,
-            "opaque external boundary is not classified for shadow replay".to_string(),
-        );
-    }
-    if let Some((bone_semantic::hir::FnBackend::Lua, body)) = &function.inline_body {
-        let body = body.as_str();
-        if body.contains("ffi.C") || body.contains("ffi.load") {
-            return (
-                skull_mir::artifact_plan::ShadowEffectPolicy::Reject,
-                "unclassified native/host effect".to_string(),
-            );
-        }
-        let dangerous = [
-            ("io.", "filesystem effect"),
-            ("os.", "process/environment effect"),
-            ("package.", "module/filesystem effect"),
-            ("require", "module/filesystem effect"),
-            ("socket", "network effect"),
-            ("http", "network effect"),
-        ];
-        if let Some((_, reason)) = dangerous.iter().find(|(needle, _)| body.contains(needle)) {
-            return (
-                skull_mir::artifact_plan::ShadowEffectPolicy::Reject,
-                (*reason).to_string(),
-            );
-        }
-        if body.contains("ffi.") {
-            let safe_ffi = ["cast", "sizeof", "typeof", "istype", "string"];
-            let mut policy = skull_mir::artifact_plan::ShadowEffectPolicy::Pure;
-            let mut tail = body;
-            while let Some((_, after)) = tail.split_once("ffi.") {
-                let name = after
-                    .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
-                    .next()
-                    .unwrap_or("");
-                if name == "new" {
-                    policy = skull_mir::artifact_plan::ShadowEffectPolicy::Virtualized;
-                } else if !safe_ffi.contains(&name) {
-                    return (policy, "unclassified native projection".to_string());
+) -> Option<skull_mir::artifact_plan::ShadowEffectPolicy> {
+    function
+        .annotations
+        .iter()
+        .find(|annotation| annotation.name.name.as_str() == "shadow_effect")
+        .and_then(|annotation| annotation.args.first())
+        .and_then(|argument| match &argument.value {
+            bone_semantic::hir::AnnoValue::Ident(policy) => Some(match policy.name.as_str() {
+                "pure" => skull_mir::artifact_plan::ShadowEffectPolicy::Pure,
+                "candidate_owned" => {
+                    skull_mir::artifact_plan::ShadowEffectPolicy::CandidateOwned
                 }
-                tail = after;
-            }
-            let reason = if policy == skull_mir::artifact_plan::ShadowEffectPolicy::Virtualized {
-                "candidate-owned native construction"
-            } else {
-                "non-owning native projection"
+                "virtualized" => skull_mir::artifact_plan::ShadowEffectPolicy::Virtualized,
+                "reject" => skull_mir::artifact_plan::ShadowEffectPolicy::Reject,
+                _ => return None,
+            }),
+            _ => None,
+        })
+}
+
+fn shadow_explicit_policy(
+    function: &bone_semantic::hir::Function,
+) -> Option<skull_mir::artifact_plan::ShadowEffectPolicy> {
+    shadow_effect_annotation(function).or_else(|| {
+        function
+            .annotations
+            .iter()
+            .any(|annotation| annotation.name.name.as_str() == "pure")
+            .then_some(skull_mir::artifact_plan::ShadowEffectPolicy::Pure)
+    })
+}
+
+fn shadow_declared_policy(
+    function: &bone_semantic::hir::Function,
+) -> skull_mir::artifact_plan::ShadowEffectPolicy {
+    if let Some(policy) = shadow_effect_annotation(function) {
+        return policy;
+    }
+    if function
+        .annotations
+        .iter()
+        .any(|annotation| annotation.name.name.as_str() == "pure")
+    {
+        return skull_mir::artifact_plan::ShadowEffectPolicy::Pure;
+    }
+    if function.is_extern
+        || function
+            .inline_body
+            .as_ref()
+            .is_some_and(|(backend, _)| *backend == bone_semantic::hir::FnBackend::Lua)
+    {
+        skull_mir::artifact_plan::ShadowEffectPolicy::Reject
+    } else {
+        skull_mir::artifact_plan::ShadowEffectPolicy::Pure
+    }
+}
+
+fn shadow_call_graph(ws: &Workspace) -> FxHashMap<FuncRef, Vec<FuncRef>> {
+    let mut graph = FxHashMap::<FuncRef, Vec<FuncRef>>::default();
+    for module in ws.modules.iter().filter(|module| module.id != ModuleId::builtin()) {
+        for (fid, _function) in module.functions.iter() {
+            let caller = FuncRef { module: module.id, func: fid };
+            let Some(inference) = ws
+                .inference(module.id)
+                .and_then(|result| result.per_fn.get(&BodyOwner::Function(fid)))
+            else {
+                continue;
             };
-            return (policy, reason.to_string());
+            let callees = graph.entry(caller).or_default();
+            for &(callee_module, callee_func) in inference.resolved_overload_calls.values() {
+                let callee = FuncRef { module: callee_module, func: callee_func };
+                if !callees.contains(&callee) {
+                    callees.push(callee);
+                }
+            }
         }
-        if body.contains("__rock_") {
-            return (
-                skull_mir::artifact_plan::ShadowEffectPolicy::Virtualized,
-                "compiler-owned runtime boundary".to_string(),
+    }
+    graph
+}
+
+fn shadow_summary_join(left: ShadowSummary, right: ShadowSummary) -> ShadowSummary {
+    use skull_mir::artifact_plan::ShadowEffectPolicy;
+    let rank = |policy| match policy {
+        ShadowEffectPolicy::Pure => 0,
+        ShadowEffectPolicy::Virtualized => 1,
+        ShadowEffectPolicy::CandidateOwned => 2,
+        ShadowEffectPolicy::Reject => 3,
+    };
+    if rank(right.policy) > rank(left.policy) {
+        right
+    } else {
+        left
+    }
+}
+
+fn shadow_function_summaries(
+    ws: &Workspace,
+    graph: &FxHashMap<FuncRef, Vec<FuncRef>>,
+) -> FxHashMap<FuncRef, ShadowSummary> {
+    use skull_mir::artifact_plan::ShadowEffectPolicy;
+    let mut summaries = FxHashMap::default();
+    let mut declarations = FxHashMap::default();
+    for module in ws.modules.iter().filter(|module| module.id != ModuleId::builtin()) {
+        for (fid, function) in module.functions.iter() {
+            let reference = FuncRef { module: module.id, func: fid };
+            let policy = shadow_declared_policy(function);
+            declarations.insert(reference, policy);
+            summaries.insert(
+                reference,
+                ShadowSummary {
+                    policy,
+                    consumer: matches!(
+                        policy,
+                        ShadowEffectPolicy::CandidateOwned | ShadowEffectPolicy::Virtualized
+                    )
+                    .then_some(reference),
+                },
             );
         }
-        return (
-            skull_mir::artifact_plan::ShadowEffectPolicy::Reject,
-            "opaque inline Lua body is not classified for shadow replay".to_string(),
-        );
     }
-    (
-        skull_mir::artifact_plan::ShadowEffectPolicy::Pure,
-        "compiler-owned pure body".to_string(),
-    )
+
+    loop {
+        let mut changed = false;
+        for (&reference, &declared) in &declarations {
+            if matches!(
+                declared,
+                ShadowEffectPolicy::CandidateOwned
+                    | ShadowEffectPolicy::Virtualized
+                    | ShadowEffectPolicy::Reject
+            ) {
+                continue;
+            }
+            let mut summary = ShadowSummary {
+                policy: ShadowEffectPolicy::Pure,
+                consumer: None,
+            };
+            if let Some(callees) = graph.get(&reference) {
+                for callee in callees {
+                    if let Some(callee_summary) = summaries.get(callee).copied() {
+                        summary = shadow_summary_join(summary, callee_summary);
+                    }
+                }
+            }
+            if summaries.get(&reference).copied() != Some(summary) {
+                summaries.insert(reference, summary);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    summaries
+}
+
+fn shadow_reachable_functions(
+    ws: &Workspace,
+    lifecycle_plan: &skull_mir::lifecycle::LifecyclePlan,
+    graph: &FxHashMap<FuncRef, Vec<FuncRef>>,
+) -> FxHashSet<FuncRef> {
+    let has_shadow_root = ws.modules.iter().any(|module| {
+        module.id != ModuleId::builtin()
+            && module.functions.iter().any(|(_, function)| {
+                function
+                    .annotations
+                    .iter()
+                    .any(|annotation| annotation.name.name.as_str() == "shadow_root")
+            })
+    });
+    let mut roots = Vec::new();
+    for module in ws.modules.iter().filter(|module| module.id != ModuleId::builtin()) {
+        for (fid, function) in module.functions.iter() {
+            if (function.name == "main" && !has_shadow_root)
+                || function
+                    .annotations
+                    .iter()
+                    .any(|annotation| annotation.name.name.as_str() == "shadow_root")
+            {
+                roots.push(FuncRef { module: module.id, func: fid });
+            }
+        }
+    }
+    for entry in &lifecycle_plan.entries {
+        if !matches!(entry.phase.as_str(), "update" | "late_update") {
+            continue;
+        }
+        if let skull_mir::code_identity::CodeIdentity::Named(instance) = &entry.identity {
+            roots.push(instance.func);
+        }
+    }
+
+    let mut reachable = FxHashSet::default();
+    let mut pending = roots;
+    while let Some(reference) = pending.pop() {
+        if !reachable.insert(reference) {
+            continue;
+        }
+        // A declaration-level effect policy owns the boundary. Its body is
+        // admitted by the declaration's shadow consumer; walking through it
+        // would turn the consumer's implementation details into a second
+        // effect authority.
+        if !matches!(
+            shadow_declared_policy(&ws.module(reference.module).functions[reference.func]),
+            skull_mir::artifact_plan::ShadowEffectPolicy::Pure
+        ) {
+            continue;
+        }
+        if let Some(callees) = graph.get(&reference) {
+            pending.extend(callees.iter().copied());
+        }
+    }
+    reachable
+}
+
+fn shadow_summary_reason(
+    policy: skull_mir::artifact_plan::ShadowEffectPolicy,
+    consumer: Option<&str>,
+) -> String {
+    match policy {
+        skull_mir::artifact_plan::ShadowEffectPolicy::Pure => {
+            "compiler-visible pure declaration/call graph".to_string()
+        }
+        skull_mir::artifact_plan::ShadowEffectPolicy::CandidateOwned => format!(
+            "declaration reaches candidate-owned shadow consumer `{}`",
+            consumer.unwrap_or("<missing>")
+        ),
+        skull_mir::artifact_plan::ShadowEffectPolicy::Virtualized => format!(
+            "declaration reaches shadow-virtualized consumer `{}`",
+            consumer.unwrap_or("<missing>")
+        ),
+        skull_mir::artifact_plan::ShadowEffectPolicy::Reject => {
+            "reachable declaration has no admitted shadow effect policy".to_string()
+        }
+    }
 }
 
 fn build_artifact_plans(
@@ -5493,6 +5654,7 @@ fn build_artifact_plans(
     scx: &skull_mir::lower::ScalarCtx,
     artifact: &skull_mir::code_identity::CodeArtifact,
     state_schema: &skull_mir::state_schema::StateSchema,
+    lifecycle_plan: &skull_mir::lifecycle::LifecyclePlan,
     foreign_bindings: &[(FuncRef, String)],
 ) -> Result<
     (
@@ -5504,7 +5666,7 @@ fn build_artifact_plans(
     use skull_mir::artifact_plan::{
         ArtifactBinding, ArtifactBindingKind, ShadowEffect, ShadowEffectPlan,
     };
-    use skull_mir::code_identity::{CodeIdentity, CodeOwner};
+    use skull_mir::code_identity::CodeIdentity;
     use skull_mir::state_schema::{entry_state_keys, global_identity, StateKind};
 
     let mut bindings = Vec::new();
@@ -5571,90 +5733,89 @@ fn build_artifact_plans(
         });
     }
 
-    let mut effects = Vec::new();
+    let graph = shadow_call_graph(ws);
+    let summaries = shadow_function_summaries(ws, &graph);
+    let reachable = shadow_reachable_functions(ws, lifecycle_plan, &graph);
     let mut effect_by_physical = BTreeMap::<String, skull_mir::artifact_plan::ShadowEffect>::new();
-    for entry in artifact.entries.values() {
-        let Some(body_name) = entry.body_name else { continue };
-        let identity = entry.identity.logical_key(ws, scx.interner());
-        let (policy, reason) = match &entry.identity {
-            CodeIdentity::Named(instance) => {
-                let module = ws.module(instance.func.module);
-                shadow_effect_for_function(module.file.as_str(), &module.functions[instance.func.func])
+
+    let mut insert_effect = |effect: ShadowEffect| -> Result<(), CompilerError> {
+        if let Some(old) = effect_by_physical.get(&effect.physical) {
+            if old.identity != effect.identity {
+                return Err(CompilerError::new_no_location(format!(
+                    "shadow effect physical binding `{}` has logical owners `{}` and `{}`",
+                    effect.physical, old.identity, effect.identity
+                )));
             }
-            CodeIdentity::Artifact(CodeOwner::Artifact { module, .. })
-                if shadow_virtualized_module(module.as_str()) => (
-                    skull_mir::artifact_plan::ShadowEffectPolicy::Virtualized,
-                    "compiler-owned engine/stdlib boundary".to_string(),
-                ),
-            CodeIdentity::Artifact(CodeOwner::Artifact { .. }) => (
-                skull_mir::artifact_plan::ShadowEffectPolicy::Pure,
-                "compiler-owned artifact root".to_string(),
-            ),
-            _ => (
-                skull_mir::artifact_plan::ShadowEffectPolicy::Pure,
-                "compiler-owned generated body".to_string(),
-            ),
-        };
-        let diagnostic = identity.clone();
-        let effect = ShadowEffect {
-            identity,
-            physical: body_name.to_string(),
-            diagnostic,
-            policy,
-            reason,
-        };
+            return Ok(());
+        }
         effect_by_physical.insert(effect.physical.clone(), effect);
-    }
+        Ok(())
+    };
 
-    for (fref, physical) in foreign_bindings {
-        let module = ws.module(fref.module);
-        let function = &module.functions[fref.func];
-        let identity = CodeIdentity::Named(Instance::base(*fref)).logical_key(ws, scx.interner());
-        let (policy, reason) = shadow_effect_for_function(module.file.as_str(), function);
-        effect_by_physical.entry(physical.clone()).or_insert(ShadowEffect {
-            identity,
-            physical: physical.clone(),
-            diagnostic: function.name.to_string(),
-            policy,
-            reason,
-        });
-    }
-
-    // Opaque declarations can be spliced away and therefore have no Artifact
-    // binding. Keep their compiler classification anyway: a dangerous body is
-    // never admitted merely because lowering erased its standalone symbol.
-    for module in ws.modules.iter().filter(|m| m.id != ModuleId::builtin()) {
-        for (fid, function) in module.functions.iter() {
-            if function.backend == bone_semantic::hir::FnBackend::Js {
-                continue;
-            }
-            let physical = if function.is_extern {
-                function.name.to_string()
-            } else if function
+    for reference in &reachable {
+        let function = &ws.module(reference.module).functions[reference.func];
+        if function.backend == bone_semantic::hir::FnBackend::Js {
+            continue;
+        }
+        let is_root = function.name == "main"
+            || function
+                .annotations
+                .iter()
+                .any(|annotation| annotation.name.name.as_str() == "shadow_root");
+        let explicit = shadow_explicit_policy(function);
+        let declared = shadow_declared_policy(function);
+        let is_effect_boundary = matches!(
+            declared,
+            skull_mir::artifact_plan::ShadowEffectPolicy::CandidateOwned
+                | skull_mir::artifact_plan::ShadowEffectPolicy::Virtualized
+                | skull_mir::artifact_plan::ShadowEffectPolicy::Reject
+        );
+        let physical = if function.is_extern {
+            function.name.to_string()
+        } else if function
+            .inline_body
+            .as_ref()
+            .is_some_and(|(backend, _)| *backend == bone_semantic::hir::FnBackend::Lua)
+        {
+            mangle_fn(ws, function)
+        } else if is_root || is_effect_boundary {
+            mangle_fn(ws, function)
+        } else {
+            continue;
+        };
+        let opaque = function.is_extern
+            || function
                 .inline_body
                 .as_ref()
-                .is_some_and(|(backend, _)| *backend == bone_semantic::hir::FnBackend::Lua)
-            {
-                mangle_fn(ws, function)
-            } else {
-                continue;
-            };
-            let identity = CodeIdentity::Named(Instance::base(FuncRef {
-                module: module.id,
-                func: fid,
-            }))
-            .logical_key(ws, scx.interner());
-            let (policy, reason) = shadow_effect_for_function(module.file.as_str(), function);
-            effect_by_physical.entry(physical.clone()).or_insert(ShadowEffect {
-                identity,
-                physical,
-                diagnostic: function.name.to_string(),
-                policy,
-                reason,
-            });
-        }
+                .is_some_and(|(backend, _)| *backend == bone_semantic::hir::FnBackend::Lua);
+        let summary = summaries.get(reference).copied().unwrap_or(ShadowSummary {
+            policy: skull_mir::artifact_plan::ShadowEffectPolicy::Reject,
+            consumer: None,
+        });
+        let policy = explicit.map_or_else(
+            || {
+                if opaque {
+                    skull_mir::artifact_plan::ShadowEffectPolicy::Reject
+                } else {
+                    summary.policy
+                }
+            },
+            |_| summary.policy,
+        );
+        let consumer = summary.consumer.map(|consumer| {
+            CodeIdentity::Named(Instance::base(consumer)).logical_key(ws, scx.interner())
+        });
+        let identity = CodeIdentity::Named(Instance::base(*reference)).logical_key(ws, scx.interner());
+        insert_effect(ShadowEffect {
+            identity,
+            physical,
+            diagnostic: function.name.to_string(),
+            policy,
+            reason: shadow_summary_reason(policy, consumer.as_deref()),
+            consumer,
+        })?;
     }
-    effects.extend(effect_by_physical.into_values());
+    let effects = effect_by_physical.into_values().collect::<Vec<_>>();
 
     let binding_plan = skull_mir::artifact_plan::ArtifactBindingPlan::from_entries(bindings)
         .map_err(CompilerError::new_no_location)?;
@@ -5701,24 +5862,30 @@ fn shadow_effect_plan_stage_lua(plan: &skull_mir::artifact_plan::ShadowEffectPla
     for (index, entry) in plan.entries.iter().enumerate() {
         let _ = writeln!(
             out,
-            "[{}] = {{ identity = {}, physical = {}, diagnostic = {}, policy = {}, reason = {} }},",
+            "[{}] = {{ identity = {}, physical = {}, diagnostic = {}, policy = {}, consumer = {}, reason = {} }},",
             index + 1,
             skull_codegen_lua::lua_string(&entry.identity),
             skull_codegen_lua::lua_string(&entry.physical),
             skull_codegen_lua::lua_string(&entry.diagnostic),
             skull_codegen_lua::lua_string(entry.policy.as_str()),
+            entry
+                .consumer
+                .as_deref()
+                .map_or_else(|| "nil".to_string(), skull_codegen_lua::lua_string),
             skull_codegen_lua::lua_string(&entry.reason),
         );
     }
     let _ = writeln!(
         out,
-        "}} }}, census = {{ examined = {}, classified = {}, pure = {}, virtualized = {}, rejected = {}, duplicate = {} }} }})",
+        "}} }}, census = {{ examined = {}, classified = {}, pure = {}, candidate_owned = {}, virtualized = {}, rejected = {}, duplicate = {}, unmapped = {} }} }})",
         plan.census.examined,
         plan.census.classified,
         plan.census.pure,
+        plan.census.candidate_owned,
         plan.census.virtualized,
         plan.census.rejected,
         plan.census.duplicate,
+        plan.census.unmapped,
     );
     out
 }

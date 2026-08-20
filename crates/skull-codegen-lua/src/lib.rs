@@ -54,11 +54,12 @@ function __rock_artifact_binding_plan_publish()
 end
 function __rock_shadow_effect_plan_stage(plan)
   if not _G.__rock_state_transaction then error("shadow effect plan stage not open", 0) end
-  if not plan or not plan.census or plan.census.examined <= 0
+  if not plan or not plan.census
       or plan.census.examined ~= plan.census.classified then
     error("incomplete shadow effect plan", 0)
   end
-  if _G.__stone_shadow and _G.__stone_shadow.active and plan.admissible ~= true then
+  if _G.__stone_shadow and _G.__stone_shadow.active
+      and (plan.census.examined <= 0 or plan.admissible ~= true) then
     error("shadow effect plan rejects an unclassified effect", 0)
   end
   _G.__rock_shadow_effect_plan_pending = plan

@@ -96,6 +96,7 @@ impl ArtifactBindingPlan {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ShadowEffectPolicy {
     Pure,
+    CandidateOwned,
     Virtualized,
     Reject,
 }
@@ -104,6 +105,7 @@ impl ShadowEffectPolicy {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Pure => "pure",
+            Self::CandidateOwned => "candidate_owned",
             Self::Virtualized => "virtualized",
             Self::Reject => "reject",
         }
@@ -117,6 +119,9 @@ pub struct ShadowEffect {
     pub physical: String,
     pub diagnostic: String,
     pub policy: ShadowEffectPolicy,
+    /// Logical declaration that owns the shadow-aware implementation. This is
+    /// required for policies whose safety depends on a consumer or owner.
+    pub consumer: Option<String>,
     pub reason: String,
 }
 
@@ -125,9 +130,11 @@ pub struct ShadowEffectCensus {
     pub examined: usize,
     pub classified: usize,
     pub pure: usize,
+    pub candidate_owned: usize,
     pub virtualized: usize,
     pub rejected: usize,
     pub duplicate: usize,
+    pub unmapped: usize,
 }
 
 impl ShadowEffectCensus {
@@ -135,6 +142,7 @@ impl ShadowEffectCensus {
         self.examined > 0
             && self.examined == self.classified
             && self.duplicate == 0
+            && self.unmapped == 0
     }
 }
 
@@ -161,9 +169,17 @@ impl ShadowEffectPlan {
             if seen.insert(entry.physical.clone(), entry.policy).is_some() {
                 return Err(format!("duplicate shadow effect `{}`", entry.physical));
             }
+            if matches!(
+                entry.policy,
+                ShadowEffectPolicy::CandidateOwned | ShadowEffectPolicy::Virtualized
+            ) && entry.consumer.as_deref().is_none_or(str::is_empty)
+            {
+                census.unmapped += 1;
+            }
             census.classified += 1;
             match entry.policy {
                 ShadowEffectPolicy::Pure => census.pure += 1,
+                ShadowEffectPolicy::CandidateOwned => census.candidate_owned += 1,
                 ShadowEffectPolicy::Virtualized => census.virtualized += 1,
                 ShadowEffectPolicy::Reject => census.rejected += 1,
             }
