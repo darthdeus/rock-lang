@@ -2397,16 +2397,29 @@ impl<'a> Printer<'a> {
             // span over-extends past `>>` in `App<.., fn-returning-generic>`
             // (`Map<.., () -> Foo<Bar>>`), so a verbatim slice grabs an extra `>`.
             TypeExprKind::Function { params, ret } => {
-                let prefix = if self.slice(data.span).trim_start().starts_with("fn") {
+                let source = self.slice(data.span).trim_start();
+                let starts_fn = source.starts_with("fn")
+                    && source[2..].trim_start().starts_with('(');
+                let starts_parenthesized_fn = source.starts_with('(')
+                    && source[1..].trim_start().starts_with("fn")
+                    && {
+                        let inner = source[1..].trim_start();
+                        inner[2..].trim_start().starts_with('(')
+                    };
+                let prefix = if starts_parenthesized_fn {
+                    "(fn("
+                } else if starts_fn {
                     "fn("
                 } else {
                     "("
                 };
+                let suffix = if starts_parenthesized_fn { ")" } else { "" };
                 Doc::concat([
                     Doc::text(prefix),
                     Doc::join(Doc::text(", "), params.iter().map(|p| self.type_expr(*p))),
                     Doc::text(") -> "),
                     self.type_expr(*ret),
+                    Doc::text(suffix),
                 ])
             }
             TypeExprKind::Hole(_, Some(n)) => Doc::text(format!("?{n}")),
