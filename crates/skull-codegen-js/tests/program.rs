@@ -230,8 +230,12 @@ fn typed_catalog_accessor_is_compiler_owned_and_returns_the_published_view_in_js
 struct WidgetDef { value: int }
 @artifact_definition(catalog="widgets", key_param="key")
 deco init widget(key: string) {}
+@artifact_definition(catalog="empty", key_param="key")
+deco init empty(key: string) {}
 @artifact_catalog(catalog="widgets")
 @intrinsic extern fn widget_definition_plan() -> [ArtifactDefinition<WidgetDef>]
+@artifact_catalog(catalog="empty")
+@intrinsic extern fn empty_definition_plan() -> [ArtifactDefinition<WidgetDef>]
 @widget(key="alpha") fn make_alpha() -> WidgetDef { return WidgetDef { value: 1 } }
 fn main() {}
 "#);
@@ -239,7 +243,7 @@ fn main() {}
     assert!(js.contains("function widget_definition_plan() { return __rock_definition_catalog(\"widgets\"); }"));
     assert!(!js.contains("__ROCK_DEFINITION_PLAN || {}"));
     let source = format!(
-        "var __G = {{}};\n{}\n{}\n{}\nconsole.log(widget_definition_plan().len + ':' + widget_definition_plan()._data[0].key + ':' + widget_definition_plan()._data[0].definition.value);",
+        "var __G = {{}};\n{}\n{}\n{}\nconst p = widget_definition_plan(); const e = empty_definition_plan(); let missing = false; try {{ __rock_definition_catalog('missing'); }} catch (_) {{ missing = true; }} console.log(p.len + ':' + p._data[0].key + ':' + p._data[0].definition.value + ':' + e.len + ':' + missing);",
         skull_codegen_js::JS_SESSION_RUNTIME,
         skull_codegen_js::JS_CALL_HELPER,
         js,
@@ -249,7 +253,43 @@ fn main() {}
         .output()
         .expect("node");
     assert!(output.status.success(), "node failed: {}", String::from_utf8_lossy(&output.stderr));
-    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "1:alpha:1");
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "1:alpha:1:0:true");
+}
+
+#[test]
+fn typed_catalog_lua_and_js_emission_share_membership_order_and_type() {
+    let ws = ws_with(r#"
+struct WidgetDef { value: int }
+@artifact_definition(catalog="widgets", key_param="key")
+deco init widget(key: string) {}
+@artifact_definition(catalog="empty", key_param="key")
+deco init empty(key: string) {}
+@artifact_catalog(catalog="widgets")
+@intrinsic extern fn widget_definition_plan() -> [ArtifactDefinition<WidgetDef>]
+@artifact_catalog(catalog="empty")
+@intrinsic extern fn empty_definition_plan() -> [ArtifactDefinition<WidgetDef>]
+@widget(key="beta") fn make_beta() -> WidgetDef { return WidgetDef { value: 2 } }
+@widget(key="alpha") fn make_alpha() -> WidgetDef { return WidgetDef { value: 1 } }
+fn main() {}
+"#);
+    let plan = skull_mir::definition::collect(&ws).expect("typed parity plan");
+    assert_eq!(plan.catalogs.len(), 2);
+    assert_eq!(plan.catalogs[0].catalog.as_str(), "empty");
+    assert_eq!(plan.catalogs[0].definition_type.map(|t| t.as_str()), Some("WidgetDef"));
+    assert_eq!(plan.entries.iter().map(|e| e.key.as_str()).collect::<Vec<_>>(), ["beta", "alpha"]);
+
+    let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
+    let lua = skull::mir_emit::emit_full(&ws, mid).expect("Lua parity emission").0.lua;
+    let js = emit_program(&ws);
+    for output in [&lua, &js] {
+        assert!(output.contains("key = \"beta\"") || output.contains("key: \"beta\""));
+        assert!(output.contains("key = \"alpha\"") || output.contains("key: \"alpha\""));
+        assert!(output.contains("len = 0") || output.contains("len: 0"));
+    }
+    assert!(lua.find("key = \"beta\"") < lua.find("key = \"alpha\""));
+    assert!(js.find("key: \"beta\"") < js.find("key: \"alpha\""));
+    assert!(lua.contains("function widget_definition_plan()"));
+    assert!(js.contains("function widget_definition_plan()"));
 }
 
 #[test]

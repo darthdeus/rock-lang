@@ -251,6 +251,53 @@ fn programs_without_definition_roles_do_not_stage_an_empty_plan() {
 }
 
 #[test]
+fn typed_definition_catalog_body_edits_overlay_but_membership_edits_require_full() {
+    let source = |key: &str, value: i32| {
+        format!(
+            r#"
+struct WidgetDef {{ value: int }}
+@artifact_definition(catalog="widgets", key_param="key")
+deco init widget(key: string) {{}}
+@artifact_catalog(catalog="widgets")
+@intrinsic extern fn widget_definition_plan() -> [ArtifactDefinition<WidgetDef>]
+@widget(key="{key}") fn make_alpha() -> WidgetDef {{ return WidgetDef {{ value: {value} }} }}
+fn main() {{}}
+"#
+        )
+    };
+    let before = ws_with(&source("alpha", 1));
+    let body = ws_with(&source("alpha", 2));
+    let membership = ws_with(&source("beta", 2));
+    let mid = function(&before, "main").module;
+    let (_, mut cache) = skull_codegen_js::emit::emit_program_cached(&before, mid)
+        .expect("initial typed catalog program");
+    let changed = function(&body, "make_alpha");
+    let overlay = skull_codegen_js::emit::emit_overlay(
+        &body,
+        mid,
+        &mut cache,
+        &[(changed.module, BodyOwner::Function(changed.func))],
+    )
+    .expect("typed catalog body overlay")
+    .expect_overlay();
+    assert!(!overlay.contains("__rock_definition_plan_stage("));
+
+    let (_, mut structural_cache) = skull_codegen_js::emit::emit_program_cached(&before, mid)
+        .expect("structural typed catalog program");
+    let changed = function(&membership, "make_alpha");
+    assert!(matches!(
+        skull_codegen_js::emit::emit_overlay(
+            &membership,
+            mid,
+            &mut structural_cache,
+            &[(changed.module, BodyOwner::Function(changed.func))],
+        )
+        .expect("typed catalog membership check"),
+        skull_codegen_js::emit::JsReload::FullRequired
+    ));
+}
+
+#[test]
 fn const_value_overlay_redefines_users_without_reinitializing_state() {
     let before = ws_with(
         "const WISP_COUNT: int = 5\n\

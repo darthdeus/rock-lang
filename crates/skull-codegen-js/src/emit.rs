@@ -3414,7 +3414,9 @@ fn assemble_program_core(
     {
         out.push_str("__rock_code_slot_begin();\n");
     }
-    out.push_str(&definition_plan_stage_js(ws, scx.interner(), &definition_plan)?);
+    let definition_stage = definition_plan_stage_js(ws, scx.interner(), &definition_plan)?;
+    out.push_str(&definition_stage);
+    stable.push_str(&definition_stage);
     out.push_str(&lifecycle_plan_stage_js(ws, scx.interner(), &lifecycle_plan)?);
     // 5. decorator applications (AFTER inits: a deco body pushes into a ginit-
     //    initialized registry -- D4).

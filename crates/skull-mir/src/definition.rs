@@ -292,7 +292,6 @@ pub fn collect(ws: &Workspace) -> Result<DefinitionPlan, CompilerError> {
                     ),
                 ));
             };
-            let definition_type = Ustr::from(ws.render(None, definition_ty).as_str());
             let Some(plan_catalog) = catalogs.get_mut(&catalog) else {
                 return Err(CompilerError::new_with_label(
                     ann.span,
@@ -309,7 +308,7 @@ pub fn collect(ws: &Workspace) -> Result<DefinitionPlan, CompilerError> {
                 module: module.id,
                 func: fid,
             });
-            plan_catalog.definition_type = Some(definition_type);
+            plan_catalog.definition_type = Some(Ustr::from(ws.render(None, definition_ty).as_str()));
         }
     }
 
@@ -361,7 +360,7 @@ pub fn collect(ws: &Workspace) -> Result<DefinitionPlan, CompilerError> {
                             function.span,
                             format!(
                                 "artifact definition target `{}` has definition type `{actual_type}`, but catalog `{}` requires `{expected_type}`",
-                                function.name, role.catalog
+                                function.name, role.catalog,
                             ),
                         ));
                     }
