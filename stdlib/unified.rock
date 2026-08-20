@@ -1576,10 +1576,6 @@ fn next<Y, R>(c: Coroutine<Y, R, ()>) -> (bool, Y) {
 
 @shadow_effect(candidate_owned)
 inline(lua) fn kill<Y, R, N>(c: Coroutine<Y, R, N>) = """
-    if _G.__stone_shadow and _G.__stone_shadow.active then
-        local mark = rawget(_G, "__stone_shadow_effect_consumer")
-        if mark then mark("kill") end
-    end
     __rock_coroutine_kill(c)
 """
 

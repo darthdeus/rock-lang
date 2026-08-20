@@ -119,9 +119,6 @@ pub struct ShadowEffect {
     pub physical: String,
     pub diagnostic: String,
     pub policy: ShadowEffectPolicy,
-    /// Logical declaration that owns the shadow-aware implementation. This is
-    /// required for policies whose safety depends on a consumer or owner.
-    pub consumer: Option<String>,
     pub reason: String,
 }
 
@@ -134,7 +131,6 @@ pub struct ShadowEffectCensus {
     pub virtualized: usize,
     pub rejected: usize,
     pub duplicate: usize,
-    pub unmapped: usize,
 }
 
 impl ShadowEffectCensus {
@@ -142,7 +138,6 @@ impl ShadowEffectCensus {
         self.examined > 0
             && self.examined == self.classified
             && self.duplicate == 0
-            && self.unmapped == 0
     }
 }
 
@@ -168,13 +163,6 @@ impl ShadowEffectPlan {
             }
             if seen.insert(entry.physical.clone(), entry.policy).is_some() {
                 return Err(format!("duplicate shadow effect `{}`", entry.physical));
-            }
-            if matches!(
-                entry.policy,
-                ShadowEffectPolicy::CandidateOwned | ShadowEffectPolicy::Virtualized
-            ) && entry.consumer.as_deref().is_none_or(str::is_empty)
-            {
-                census.unmapped += 1;
             }
             census.classified += 1;
             match entry.policy {

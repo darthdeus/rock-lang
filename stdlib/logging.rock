@@ -43,8 +43,6 @@ global __stone_log_level: int = -1
 @nomangle inline(lua) fn __stone_emit(level: int, category: string, msg: string, wall_clock: bool) = """
     local shadow = rawget(_G, "__stone_shadow")
     if shadow then
-        local mark = rawget(_G, "__stone_shadow_effect_consumer")
-        if mark then mark("__stone_emit") end
         return
     end
     local sink = _G.__rock_log_sink
@@ -63,8 +61,6 @@ global __stone_log_level: int = -1
 @nomangle inline(lua) fn __stone_log(level: int, category: string, msg: string) = """
     local shadow = rawget(_G, "__stone_shadow")
     if shadow then
-        local mark = rawget(_G, "__stone_shadow_effect_consumer")
-        if mark then mark("__stone_log") end
         return
     end
     __stone_log_init()
@@ -76,8 +72,6 @@ global __stone_log_level: int = -1
 @nomangle inline(lua) fn __stone_log_wall_clock(level: int, category: string, msg: string) = """
     local shadow = rawget(_G, "__stone_shadow")
     if shadow then
-        local mark = rawget(_G, "__stone_shadow_effect_consumer")
-        if mark then mark("__stone_log_wall_clock") end
         return
     end
     __stone_log_init()
@@ -141,8 +135,6 @@ fn log_get_level() -> int { __stone_log_init(); return __stone_log_level }
 @nomangle inline(lua) fn _log_once_impl(category: string, msg: string, site: string) = """
     local shadow = rawget(_G, "__stone_shadow")
     if shadow then
-        local mark = rawget(_G, "__stone_shadow_effect_consumer")
-        if mark then mark("_log_once_impl") end
         return
     end
     __stone_log_init()
@@ -210,8 +202,6 @@ macro log_once(category: expr, msg: expr, site: expr) {
 @nomangle inline(lua) fn _log_throttled_with_now_impl(now_sec: float, category: string, msg: string, interval_sec: float, site: string, wall_clock: bool) = """
     local shadow = rawget(_G, "__stone_shadow")
     if shadow then
-        local mark = rawget(_G, "__stone_shadow_effect_consumer")
-        if mark then mark("_log_throttled_with_now_impl") end
         return
     end
     __stone_log_init()
@@ -247,8 +237,6 @@ macro log_throttled_with_now(now_sec: expr, category: expr, msg: expr, interval_
 @nomangle inline(lua) fn stone_log_set_now(now_sec: float) = """
     local shadow = rawget(_G, "__stone_shadow")
     if shadow then
-        local mark = rawget(_G, "__stone_shadow_effect_consumer")
-        if mark then mark("stone_log_set_now") end
         return
     end
     __stone_log_now_override = now_sec

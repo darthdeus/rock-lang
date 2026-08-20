@@ -5408,7 +5408,6 @@ fn foreign_artifact_binding(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ShadowSummary {
     policy: skull_mir::artifact_plan::ShadowEffectPolicy,
-    consumer: Option<FuncRef>,
 }
 
 fn shadow_effect_annotation(
@@ -5522,14 +5521,7 @@ fn shadow_function_summaries(
             declarations.insert(reference, policy);
             summaries.insert(
                 reference,
-                ShadowSummary {
-                    policy,
-                    consumer: matches!(
-                        policy,
-                        ShadowEffectPolicy::CandidateOwned | ShadowEffectPolicy::Virtualized
-                    )
-                    .then_some(reference),
-                },
+                ShadowSummary { policy },
             );
         }
     }
@@ -5545,10 +5537,7 @@ fn shadow_function_summaries(
             ) {
                 continue;
             }
-            let mut summary = ShadowSummary {
-                policy: ShadowEffectPolicy::Pure,
-                consumer: None,
-            };
+            let mut summary = ShadowSummary { policy: ShadowEffectPolicy::Pure };
             if let Some(callees) = graph.get(&reference) {
                 for callee in callees {
                     if let Some(callee_summary) = summaries.get(callee).copied() {
@@ -5610,10 +5599,9 @@ fn shadow_reachable_functions(
         if !reachable.insert(reference) {
             continue;
         }
-        // A declaration-level effect policy owns the boundary. Its body is
-        // admitted by the declaration's shadow consumer; walking through it
-        // would turn the consumer's implementation details into a second
-        // effect authority.
+        // A declaration-level effect policy owns the boundary. Walking through
+        // it would turn the implementation details into a second effect
+        // authority.
         if !matches!(
             shadow_declared_policy(&ws.module(reference.module).functions[reference.func]),
             skull_mir::artifact_plan::ShadowEffectPolicy::Pure
@@ -5629,20 +5617,17 @@ fn shadow_reachable_functions(
 
 fn shadow_summary_reason(
     policy: skull_mir::artifact_plan::ShadowEffectPolicy,
-    consumer: Option<&str>,
 ) -> String {
     match policy {
         skull_mir::artifact_plan::ShadowEffectPolicy::Pure => {
             "compiler-visible pure declaration/call graph".to_string()
         }
-        skull_mir::artifact_plan::ShadowEffectPolicy::CandidateOwned => format!(
-            "declaration reaches candidate-owned shadow consumer `{}`",
-            consumer.unwrap_or("<missing>")
-        ),
-        skull_mir::artifact_plan::ShadowEffectPolicy::Virtualized => format!(
-            "declaration reaches shadow-virtualized consumer `{}`",
-            consumer.unwrap_or("<missing>")
-        ),
+        skull_mir::artifact_plan::ShadowEffectPolicy::CandidateOwned => {
+            "declaration-owned candidate-owned shadow boundary".to_string()
+        }
+        skull_mir::artifact_plan::ShadowEffectPolicy::Virtualized => {
+            "declaration-owned virtualized shadow boundary".to_string()
+        }
         skull_mir::artifact_plan::ShadowEffectPolicy::Reject => {
             "reachable declaration has no admitted shadow effect policy".to_string()
         }
@@ -5788,10 +5773,10 @@ fn build_artifact_plans(
                 .inline_body
                 .as_ref()
                 .is_some_and(|(backend, _)| *backend == bone_semantic::hir::FnBackend::Lua);
-        let summary = summaries.get(reference).copied().unwrap_or(ShadowSummary {
-            policy: skull_mir::artifact_plan::ShadowEffectPolicy::Reject,
-            consumer: None,
-        });
+        let summary = summaries
+            .get(reference)
+            .copied()
+            .unwrap_or(ShadowSummary { policy: skull_mir::artifact_plan::ShadowEffectPolicy::Reject });
         let policy = explicit.map_or_else(
             || {
                 if opaque {
@@ -5802,17 +5787,13 @@ fn build_artifact_plans(
             },
             |_| summary.policy,
         );
-        let consumer = summary.consumer.map(|consumer| {
-            CodeIdentity::Named(Instance::base(consumer)).logical_key(ws, scx.interner())
-        });
         let identity = CodeIdentity::Named(Instance::base(*reference)).logical_key(ws, scx.interner());
         insert_effect(ShadowEffect {
             identity,
             physical,
             diagnostic: function.name.to_string(),
             policy,
-            reason: shadow_summary_reason(policy, consumer.as_deref()),
-            consumer,
+            reason: shadow_summary_reason(policy),
         })?;
     }
     let effects = effect_by_physical.into_values().collect::<Vec<_>>();
@@ -5862,22 +5843,18 @@ fn shadow_effect_plan_stage_lua(plan: &skull_mir::artifact_plan::ShadowEffectPla
     for (index, entry) in plan.entries.iter().enumerate() {
         let _ = writeln!(
             out,
-            "[{}] = {{ identity = {}, physical = {}, diagnostic = {}, policy = {}, consumer = {}, reason = {} }},",
+            "[{}] = {{ identity = {}, physical = {}, diagnostic = {}, policy = {}, reason = {} }},",
             index + 1,
             skull_codegen_lua::lua_string(&entry.identity),
             skull_codegen_lua::lua_string(&entry.physical),
             skull_codegen_lua::lua_string(&entry.diagnostic),
             skull_codegen_lua::lua_string(entry.policy.as_str()),
-            entry
-                .consumer
-                .as_deref()
-                .map_or_else(|| "nil".to_string(), skull_codegen_lua::lua_string),
             skull_codegen_lua::lua_string(&entry.reason),
         );
     }
     let _ = writeln!(
         out,
-        "}} }}, census = {{ examined = {}, classified = {}, pure = {}, candidate_owned = {}, virtualized = {}, rejected = {}, duplicate = {}, unmapped = {} }} }})",
+        "}} }}, census = {{ examined = {}, classified = {}, pure = {}, candidate_owned = {}, virtualized = {}, rejected = {}, duplicate = {} }} }})",
         plan.census.examined,
         plan.census.classified,
         plan.census.pure,
@@ -5885,7 +5862,6 @@ fn shadow_effect_plan_stage_lua(plan: &skull_mir::artifact_plan::ShadowEffectPla
         plan.census.virtualized,
         plan.census.rejected,
         plan.census.duplicate,
-        plan.census.unmapped,
     );
     out
 }

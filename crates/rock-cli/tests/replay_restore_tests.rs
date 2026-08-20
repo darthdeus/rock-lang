@@ -2853,7 +2853,6 @@ fn shadow_replay_blocks_audio_while_remaining_non_presenting() {
     assert!(diag["STONE_SHADOW_DIRECT_AUDIO_BLOCKS"].as_i64().is_some_and(|n| n > 0), "direct audio must be blocked at its binding boundary: {diag}");
     assert!(diag["STONE_SHADOW_DIRECT_PRESENTATION_ATTEMPTS"].as_i64().is_some_and(|n| n > 0), "the direct presentation fixture must execute: {diag}");
     assert!(diag["STONE_SHADOW_DIRECT_PRESENTATION_BLOCKS"].as_i64().is_some_and(|n| n > 0), "direct presentation must be blocked at its binding boundary: {diag}");
-    assert!(diag["STONE_SHADOW_EFFECT_CONSUMER_CALLS"].as_i64().is_some_and(|n| n > 0), "shadow effect consumers must be reached: {diag}");
     assert!(diag["STONE_SHADOW_LIVE_TICK_ADVANCES"].as_i64().is_some_and(|n| n > 0), "the live Session must advance during effect isolation: {diag}");
     let reference = run_replay_dump(game, 90, &log_s, &[("STONE_AUDIO_PROBE", "1")]);
     let mut sim = sim_state_names(game, 90);
@@ -2862,7 +2861,7 @@ fn shadow_replay_blocks_audio_while_remaining_non_presenting() {
 }
 
 #[test]
-fn admitted_virtualized_effect_reaches_its_shadow_consumer() {
+fn admitted_virtualized_effect_is_observed_at_its_runtime_boundary() {
     let game = "bitgun";
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("shadow-virtualized-control.replay");
@@ -2880,7 +2879,7 @@ fn admitted_virtualized_effect_reaches_its_shadow_consumer() {
     );
     let diag = &live["__stone_diag"];
     assert_eq!(diag["STONE_SHADOW_COMMITS"].as_i64(), Some(1), "{diag}");
-    assert!(diag["STONE_SHADOW_VIRTUALIZED_CONTROL_CALLS"].as_i64().is_some_and(|n| n > 0), "admitted virtualized control never reached its consumer: {diag}");
+    assert!(diag["STONE_SHADOW_VIRTUALIZED_CONTROL_CALLS"].as_i64().is_some_and(|n| n > 0), "admitted virtualized control was not observed by its runtime boundary: {diag}");
     assert!(diag["STONE_SHADOW_LIVE_TICK_ADVANCES"].as_i64().is_some_and(|n| n > 0), "the live Session must advance while the control candidate catches up: {diag}");
 }
 
