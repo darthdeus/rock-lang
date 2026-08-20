@@ -2861,7 +2861,7 @@ fn shadow_replay_blocks_audio_while_remaining_non_presenting() {
 }
 
 #[test]
-fn admitted_virtualized_effect_is_observed_at_its_runtime_boundary() {
+fn admitted_virtualized_effect_is_observed_during_shadow_replay() {
     let game = "bitgun";
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("shadow-virtualized-control.replay");
