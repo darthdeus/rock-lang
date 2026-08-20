@@ -275,7 +275,10 @@ fn main() {}
     let plan = skull_mir::definition::collect(&ws).expect("typed parity plan");
     assert_eq!(plan.catalogs.len(), 2);
     assert_eq!(plan.catalogs[0].catalog.as_str(), "empty");
-    assert_eq!(plan.catalogs[0].definition_type.map(|t| t.as_str()), Some("WidgetDef"));
+    assert_eq!(
+        plan.catalogs[0].definition_type.as_ref().map(|t| t.render()),
+        Some("WidgetDef".to_string())
+    );
     assert_eq!(plan.entries.iter().map(|e| e.key.as_str()).collect::<Vec<_>>(), ["beta", "alpha"]);
 
     let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");

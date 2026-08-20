@@ -7,6 +7,7 @@ use ustr::Ustr;
 use crate::code_identity::CodeIdentity;
 use crate::instance::Instance;
 use crate::mir::FuncRef;
+use crate::monoty::{convert_decl, MonoSubst, MonoTy};
 
 pub fn is_artifact_definition(decorator: &bone_semantic::hir::DecoratorDef) -> bool {
     decorator
@@ -44,7 +45,7 @@ pub struct DefinitionCensus {
 pub struct DefinitionCatalog {
     pub catalog: Ustr,
     pub accessor: Option<FuncRef>,
-    pub definition_type: Option<Ustr>,
+    pub definition_type: Option<MonoTy>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -292,6 +293,16 @@ pub fn collect(ws: &Workspace) -> Result<DefinitionPlan, CompilerError> {
                     ),
                 ));
             };
+            let definition_type = convert_decl(ws, definition_ty, &MonoSubst::default()).map_err(|reason| {
+                CompilerError::new_with_label(
+                    function.span,
+                    format!(
+                        "artifact catalog accessor `{}` has non-concrete definition type ({})",
+                        function.name,
+                        reason.bucket(),
+                    ),
+                )
+            })?;
             let Some(plan_catalog) = catalogs.get_mut(&catalog) else {
                 return Err(CompilerError::new_with_label(
                     ann.span,
@@ -308,7 +319,7 @@ pub fn collect(ws: &Workspace) -> Result<DefinitionPlan, CompilerError> {
                 module: module.id,
                 func: fid,
             });
-            plan_catalog.definition_type = Some(Ustr::from(ws.render(None, definition_ty).as_str()));
+            plan_catalog.definition_type = Some(definition_type);
         }
     }
 
@@ -358,15 +369,29 @@ pub fn collect(ws: &Workspace) -> Result<DefinitionPlan, CompilerError> {
                 }
                 if let Some(expected_type) = catalogs
                     .get(&role.catalog)
-                    .and_then(|catalog| catalog.definition_type)
+                    .and_then(|catalog| catalog.definition_type.as_ref())
                 {
-                    let actual_type = Ustr::from(ws.render(None, return_ty).as_str());
-                    if actual_type != expected_type {
+                    let actual_type = convert_decl(ws, return_ty, &MonoSubst::default()).map_err(|reason| {
+                        CompilerError::new_with_label(
+                            function.span,
+                            format!(
+                                "artifact definition target `{}` has non-concrete definition type ({})",
+                                function.name,
+                                reason.bucket(),
+                            ),
+                        )
+                    })?;
+                    if &actual_type != expected_type {
+                        let actual_display = actual_type.render();
+                        let expected_display = expected_type.render();
                         return Err(CompilerError::new_with_label(
                             function.span,
                             format!(
-                                "artifact definition target `{}` has definition type `{actual_type}`, but catalog `{}` requires `{expected_type}`",
-                                function.name, role.catalog,
+                                "artifact definition target `{}` has definition type `{actual_display}` (identity `{}`), but catalog `{}` requires `{expected_display}` (identity `{}`)",
+                                function.name,
+                                actual_type.canonical(),
+                                role.catalog,
+                                expected_type.canonical(),
                             ),
                         ));
                     }
@@ -567,6 +592,23 @@ mod tests {
             ),
         )]))
         .expect_err("factory definition type must be checked");
+        assert!(err.message.contains("definition type"), "{err:?}");
+    }
+
+    #[test]
+    fn semantically_distinct_same_rendering_factory_type_rejects() {
+        let err = collect(&workspace(&[(
+            "same_rendering.rock",
+            &typed_source(
+                r#"
+                @artifact_catalog(catalog="widgets")
+                @intrinsic extern fn widget_definition_plan() -> [ArtifactDefinition<fn(int) -> int?>]
+                @widget(key="collision") fn make_collision() -> (fn(int) -> int)? { return null }
+                "#,
+            ),
+        )]))
+        .expect_err("semantic type mismatch must reject despite equal display spellings");
+        assert!(err.message.contains("identity"), "{err:?}");
         assert!(err.message.contains("definition type"), "{err:?}");
     }
 
