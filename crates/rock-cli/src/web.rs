@@ -344,6 +344,17 @@ enum WebCompile {
     Reload,
 }
 
+fn insert_js_overlay_before_publish(overlay: &mut String, tail: &str) {
+    let marker = "__rock_code_slot_publish();\n";
+    let count = overlay.matches(marker).count();
+    assert!(count <= 1, "an overlay must contain at most one CodeRef publication");
+    if let Some(index) = overlay.rfind(marker) {
+        overlay.insert_str(index, tail);
+    } else {
+        overlay.push_str(tail);
+    }
+}
+
 struct WebCompiler {
     project: crate::live_project::LiveProject,
     cache: skull_codegen_js::emit::JsEmitCache,
@@ -421,27 +432,30 @@ impl WebCompiler {
                 Ok(WebCompile::Reload)
             }
             crate::live_project::LiveUpdate::BodyOnly { reinferred, span_edits, .. } => {
-                match skull_codegen_js::emit::emit_overlay_with_span_edits(
+                let (reload, staged_cache) = skull_codegen_js::emit::emit_overlay_with_span_edits_staged(
                     self.project.workspace(),
                     self.project.entry_module(),
-                    &mut self.cache,
+                    &self.cache,
                     &reinferred,
                     &span_edits,
                 )
                 .map_err(|error| anyhow::anyhow!(
                     "{}",
                     crate::skull_backend::render_project_err(self.project.sources(), &error)
-                ))? {
+                ))?;
+                match reload {
                     skull_codegen_js::emit::JsReload::Overlay(mut overlay) => {
-                        overlay.push_str(&shader_register_lines_js(
+                        let shader_lines = shader_register_lines_js(
                             self.project.workspace(),
-                            &self.cache,
-                        )?);
+                            &staged_cache,
+                        )?;
+                        insert_js_overlay_before_publish(&mut overlay, &shader_lines);
                         rock_host::project::write_atomic(
                             &out_dir.join("incremental.js"),
                             &overlay,
                         )?;
                         self.write_current_game(project, out_dir)?;
+                        self.cache = staged_cache;
                         Ok(WebCompile::Overlay)
                     }
                     skull_codegen_js::emit::JsReload::FullRequired => {
@@ -449,7 +463,10 @@ impl WebCompiler {
                         self.emit_full(project, out_dir)?;
                         Ok(WebCompile::Reload)
                     }
-                    skull_codegen_js::emit::JsReload::NoChange => Ok(WebCompile::NoChange),
+                    skull_codegen_js::emit::JsReload::NoChange => {
+                        self.cache = staged_cache;
+                        Ok(WebCompile::NoChange)
+                    }
                 }
             }
         }
@@ -485,6 +502,9 @@ impl WebCompiler {
         let emitted = skull_codegen_js::emit::JsProgram {
             program: self.cache.current_program().to_string(),
             main_js_name: self.main_js_name.clone(),
+            code_artifact: self.cache.code_artifact().clone(),
+            lifecycle_plan: self.cache.lifecycle_plan().clone(),
+            state_schema: self.cache.state_schema().clone(),
         };
         let register_lines = shader_register_lines_js(self.project.workspace(), &self.cache)?;
         let game_js = assemble_web_program(&emitted, &register_lines, &preload, &game_dir);
@@ -1029,7 +1049,8 @@ fn assemble_web_program(
     p.push_str(skull_codegen_js::JS_MAP_ITER_RUNTIME);
     p.push_str(skull_codegen_js::JS_STRUCTURAL_EQ);
     p.push_str(skull_codegen_js::JS_ENUM_RUNTIME);
-    p.push_str(skull_codegen_js::JS_CALL_HELPER);
+    crate::js_test::append_call_runtime(&mut p, &emitted.program, &emitted.code_artifact);
+    p.push_str(skull_codegen_js::JS_SESSION_RUNTIME);
     p.push_str(skull_codegen_js::JS_CORO_RUNTIME);
     p.push_str(skull_codegen_js::JS_STRING_RUNTIME);
     p.push_str(skull_codegen_js::JS_INSPECT_RUNTIME);
@@ -1302,5 +1323,54 @@ mod tests {
         // non-ASCII in an emitted string literal into mojibake.
         let s = "let s = \"\u{00e9}\u{4e2d}\u{1f600}\";";
         assert_eq!(escape_script_close(s), s);
+    }
+
+    #[test]
+    fn direct_call_only_web_bundle_omits_code_ref_runtime() {
+        let emitted = skull_codegen_js::emit::JsProgram {
+            program: "function main() {}\n".to_string(),
+            main_js_name: Some("main".to_string()),
+            code_artifact: skull_mir::code_identity::CodeArtifact::default(),
+            lifecycle_plan: skull_mir::lifecycle::LifecyclePlan::default(),
+            state_schema: skull_mir::state_schema::StateSchema::default(),
+        };
+        let bundle = assemble_web_program(&emitted, "", &[], "games/test");
+        assert!(!bundle.contains("__rock_code_slot_begin"), "direct-call bundle paid for slots");
+    }
+
+    #[test]
+    fn escaping_artifact_enables_code_ref_runtime() {
+        let mut artifact = skull_mir::code_identity::CodeArtifact::default();
+        artifact.mark_value(skull_mir::code_identity::CodeIdentity::Generated {
+            enclosing: skull_mir::code_identity::CodeOwner::Artifact {
+                kind: skull_mir::code_identity::CodeOwnerKind::Global,
+                module: ustr::Ustr::from("<test>"),
+                name: ustr::Ustr::from("root"),
+            },
+            role: ustr::Ustr::from("callback"),
+        });
+        let emitted = skull_codegen_js::emit::JsProgram {
+            program: "function main() {}\n".to_string(),
+            main_js_name: Some("main".to_string()),
+            code_artifact: artifact,
+            lifecycle_plan: skull_mir::lifecycle::LifecyclePlan::default(),
+            state_schema: skull_mir::state_schema::StateSchema::default(),
+        };
+        let bundle = assemble_web_program(&emitted, "", &[], "games/test");
+        assert!(bundle.contains("__rock_code_slot_begin"), "escaping value lost CodeRef runtime");
+    }
+
+    #[test]
+    fn web_overlay_tail_runs_before_code_ref_publication() {
+        let mut overlay =
+            "try {\n__rock_code_slot_stage_one();\n__rock_code_slot_publish();\n} catch (e) {}\n"
+                .to_string();
+        insert_js_overlay_before_publish(&mut overlay, "__rock_shader_register();\n");
+        let shader = overlay.find("__rock_shader_register").expect("shader tail");
+        let publish = overlay.find("__rock_code_slot_publish").expect("publish");
+        assert!(
+            shader < publish,
+            "shader work must be inside the successful boundary"
+        );
     }
 }

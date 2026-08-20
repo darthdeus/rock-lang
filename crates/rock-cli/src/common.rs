@@ -96,8 +96,45 @@ impl ProcessManager {
     /// timeout fires. Observed: `rock frame mag --dump-state` writing 1.2MB to a
     /// piped stdout took 15s (the full timeout) instead of ~1s.
     pub fn wait_with_timeout(child: &mut Child, timeout: Duration) -> Result<ProcessResult> {
-        use std::io::Read;
+        Self::wait_with_policy(child, WaitPolicy::Total(timeout), false, false)
+    }
+
+    /// Wait for a bounded frame run. The startup allowance applies until the
+    /// first completed-frame marker; after that only inactivity is bounded, so
+    /// a slow run that keeps making progress may outlive its frame count.
+    pub fn wait_with_frame_watchdog(
+        child: &mut Child,
+        startup: Duration,
+        inactivity: Duration,
+        forward_stdout: bool,
+        forward_stderr: bool,
+    ) -> Result<ProcessResult> {
+        Self::wait_with_policy(
+            child,
+            WaitPolicy::Frame { startup, inactivity },
+            forward_stdout,
+            forward_stderr,
+        )
+    }
+
+    fn wait_with_policy(
+        child: &mut Child,
+        policy: WaitPolicy,
+        forward_stdout: bool,
+        forward_stderr: bool,
+    ) -> Result<ProcessResult> {
+        use std::io::{self, BufRead, BufReader, Read, Write};
+        use std::sync::mpsc::{self, Receiver, Sender};
         use std::thread;
+
+        let observe_progress = matches!(policy, WaitPolicy::Frame { .. });
+        let (progress_tx, progress_rx): (Option<Sender<FrameProgress>>, Option<Receiver<FrameProgress>>) =
+            if observe_progress {
+                let (tx, rx) = mpsc::channel();
+                (Some(tx), Some(rx))
+            } else {
+                (None, None)
+            };
 
         // Spawn background threads to drain pipes continuously. This prevents
         // the child from blocking on a full pipe buffer while the parent polls.
@@ -106,27 +143,77 @@ impl ProcessManager {
         let stdout_thread = child.stdout.take().map(|mut h| {
             thread::spawn(move || {
                 let mut buf = Vec::new();
-                if let Err(e) = h.read_to_end(&mut buf) {
-                    log::error!(target: "CLI", "ProcessManager: error reading child stdout: {}", e);
+                let mut chunk = [0u8; 8192];
+                loop {
+                    match h.read(&mut chunk) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            buf.extend_from_slice(&chunk[..n]);
+                            if forward_stdout {
+                                let mut stdout = io::stdout().lock();
+                                let _ = stdout.write_all(&chunk[..n]);
+                                let _ = stdout.flush();
+                            }
+                        }
+                        Err(e) => {
+                            log::error!(target: "CLI", "ProcessManager: error reading child stdout: {}", e);
+                            break;
+                        }
+                    }
                 }
                 buf
             })
         });
-        let stderr_thread = child.stderr.take().map(|mut h| {
+        let stderr_thread = child.stderr.take().map(|h| {
+            let progress_tx = progress_tx.clone();
             thread::spawn(move || {
+                let mut reader = BufReader::new(h);
                 let mut buf = Vec::new();
-                if let Err(e) = h.read_to_end(&mut buf) {
-                    log::error!(target: "CLI", "ProcessManager: error reading child stderr: {}", e);
+                let mut line = Vec::new();
+                loop {
+                    line.clear();
+                    match reader.read_until(b'\n', &mut line) {
+                        Ok(0) => break,
+                        Ok(_) => {
+                            buf.extend_from_slice(&line);
+                            if forward_stderr {
+                                let mut stderr = io::stderr().lock();
+                                let _ = stderr.write_all(&line);
+                                let _ = stderr.flush();
+                            }
+                            if let Some(tx) = &progress_tx {
+                                if let Some(progress) = parse_frame_progress(&line) {
+                                    let _ = tx.send(progress);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            log::error!(target: "CLI", "ProcessManager: error reading child stderr: {}", e);
+                            break;
+                        }
+                    }
                 }
                 buf
             })
         });
+        drop(progress_tx);
 
         let start_time = std::time::Instant::now();
+        let mut last_progress_at = start_time;
+        let mut latest_progress = None;
+        let mut saw_progress = false;
         let timed_out;
         let status;
 
         loop {
+            if let Some(rx) = &progress_rx {
+                for progress in rx.try_iter() {
+                    saw_progress = true;
+                    last_progress_at = std::time::Instant::now();
+                    latest_progress = Some(progress);
+                }
+            }
+
             match child.try_wait()? {
                 Some(s) => {
                     status = s;
@@ -134,14 +221,34 @@ impl ProcessManager {
                     break;
                 }
                 None => {
-                    if start_time.elapsed() > timeout {
+                    let elapsed = if saw_progress {
+                        last_progress_at.elapsed()
+                    } else {
+                        start_time.elapsed()
+                    };
+                    let limit = match policy {
+                        WaitPolicy::Total(timeout) => timeout,
+                        WaitPolicy::Frame { startup, inactivity } => {
+                            if saw_progress { inactivity } else { startup }
+                        }
+                    };
+                    if elapsed >= limit {
                         child.kill()?;
                         status = child.wait()?;
                         timed_out = true;
                         break;
                     }
-                    thread::sleep(Duration::from_millis(100));
+                    thread::sleep(Duration::from_millis(50));
                 }
+            }
+        }
+
+        // A child can exit between the last poll and the reader's final send.
+        // Drain those markers before producing diagnostics, but never use a
+        // post-exit marker to extend a live watchdog.
+        if let Some(rx) = &progress_rx {
+            for progress in rx.try_iter() {
+                latest_progress = Some(progress);
             }
         }
 
@@ -151,8 +258,41 @@ impl ProcessManager {
         Ok(ProcessResult {
             output: std::process::Output { status, stdout, stderr },
             timed_out,
+            frame_progress: latest_progress,
+            progress_stopped: observe_progress && timed_out,
         })
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum WaitPolicy {
+    Total(Duration),
+    Frame { startup: Duration, inactivity: Duration },
+}
+
+fn parse_frame_progress(line: &[u8]) -> Option<FrameProgress> {
+    let line = std::str::from_utf8(line).ok()?;
+    let fields = line.split_once("ROCK_FRAME_PROGRESS ")?.1.split_whitespace();
+    let mut renderer = None;
+    let mut completed = None;
+    let mut requested = None;
+    for field in fields {
+        let (name, value) = field.split_once('=')?;
+        match name {
+            "renderer" => renderer = Some(value.to_owned()),
+            "completed" => completed = value.parse().ok(),
+            "requested" => requested = match value {
+                "-" | "-1" => Some(None),
+                _ => Some(Some(value.parse().ok()?)),
+            },
+            _ => {}
+        }
+    }
+    Some(FrameProgress {
+        renderer: renderer?,
+        completed: completed?,
+        requested: requested?,
+    })
 }
 
 /// Result of waiting for a child process with timeout
@@ -160,4 +300,47 @@ impl ProcessManager {
 pub struct ProcessResult {
     pub output: std::process::Output,
     pub timed_out: bool,
+    pub frame_progress: Option<FrameProgress>,
+    pub progress_stopped: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrameProgress {
+    pub renderer: String,
+    pub completed: usize,
+    pub requested: Option<usize>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_frame_progress, FrameProgress};
+
+    #[test]
+    fn frame_progress_parser_keeps_renderer_and_denominator() {
+        assert_eq!(
+            parse_frame_progress(b"[WATCHDOG] ROCK_FRAME_PROGRESS renderer=wgpu completed=17 requested=600\n"),
+            Some(FrameProgress {
+                renderer: "wgpu".into(),
+                completed: 17,
+                requested: Some(600),
+            })
+        );
+        assert_eq!(
+            parse_frame_progress(b"ROCK_FRAME_PROGRESS renderer=gl completed=4 requested=-1\n"),
+            Some(FrameProgress {
+                renderer: "gl".into(),
+                completed: 4,
+                requested: None,
+            })
+        );
+    }
+
+    #[test]
+    fn frame_progress_parser_rejects_incomplete_markers() {
+        assert_eq!(
+            parse_frame_progress(b"ROCK_FRAME_PROGRESS renderer=wgpu completed=17\n"),
+            None
+        );
+        assert_eq!(parse_frame_progress(b"ordinary game output\n"), None);
+    }
 }

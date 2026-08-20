@@ -7,7 +7,7 @@
 //! (`crates/rock-cli/tests/js_run_gate.rs`); this file pins the assembly ORDER
 //! and application-line CONTENT in the emitted string.
 
-use crate::common::ws_with;
+use crate::common::{node, ws_with};
 
 fn emit_program(ws: &bone_semantic::inference::Workspace) -> String {
     let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
@@ -48,10 +48,18 @@ fn assembly_order() {
     let js = emit_program(&ws);
     ordered(&js, "function __deco_system(", "function main(");
     ordered(&js, "function main(", "function __ginit_DERIVED(");
-    ordered(&js, "function __ginit_DERIVED(", "__G.DERIVED = __ginit_DERIVED();");
+    ordered(
+        &js,
+        "function __ginit_DERIVED(",
+        "__rock_state_set(\"global:<test>::DERIVED::value\"",
+    );
     // `__deco_system({` is the APPLICATION (descriptor obj); the bare
     // `__deco_system(c0` definition sorts earlier and is matched above.
-    ordered(&js, "__G.DERIVED = __ginit_DERIVED();", "__deco_system({");
+    ordered(
+        &js,
+        "__rock_state_set(\"global:<test>::DERIVED::value\"",
+        "__deco_system({",
+    );
 }
 
 // Init lines are dependency-ordered: BASE before DERIVED (DERIVED reads BASE).
@@ -59,7 +67,11 @@ fn assembly_order() {
 fn init_dependency_order() {
     let ws = ws_with(PROG);
     let js = emit_program(&ws);
-    ordered(&js, "__G.BASE = __ginit_BASE();", "__G.DERIVED = __ginit_DERIVED();");
+    ordered(
+        &js,
+        "__rock_state_set(\"global:<test>::BASE::value\"",
+        "__rock_state_set(\"global:<test>::DERIVED::value\"",
+    );
 }
 
 // Application lines: the descriptor `{name, params, func}` mirror + arg
@@ -73,12 +85,143 @@ fn application_line_content() {
         .unwrap_or_else(|| panic!("no alpha application line:\n{js}"));
     assert!(alpha_app.contains("name: \"alpha\""), "descriptor name: {alpha_app}");
     assert!(alpha_app.contains("params: []"), "descriptor params: {alpha_app}");
-    assert!(alpha_app.contains("func: alpha_ret_unit"), "descriptor func js-name: {alpha_app}");
+    assert!(
+        alpha_app.contains("func: __rock_code_slot_ref(\"named:<test>::alpha<>\")"),
+        "decorator function values resolve through their logical CodeRef slot: {alpha_app}"
+    );
+    assert!(!alpha_app.contains("func: alpha_ret_unit"), "decorators must not capture a backend body: {alpha_app}");
     assert!(alpha_app.trim_end().ends_with(", 5);"), "literal stage arg: {alpha_app}");
 
     let beta_app = js.lines().find(|l| l.contains("__deco_system(") && l.contains("\"beta\""))
         .unwrap_or_else(|| panic!("no beta application line:\n{js}"));
     assert!(beta_app.trim_end().ends_with(", null);"), "defaulted stage -> null: {beta_app}");
+}
+
+#[test]
+fn lifecycle_metadata_uses_the_shared_sorted_plan_in_js() {
+    let ws = ws_with(r#"
+@lifecycle(phase="update", owner="session", stage_param="stage")
+deco init tick(stage: int = 100) {}
+@tick(stage=7) fn first() {}
+@tick(stage=7) fn second() {}
+@tick fn defaulted() {}
+fn main() {}
+"#);
+    let js = emit_program(&ws);
+    assert!(!js.contains("function __deco_tick("));
+    assert!(!js.contains("__deco_tick({"));
+    let first = js.find("name: \"first\", stage: 7").expect("first plan entry");
+    let second = js.find("name: \"second\", stage: 7").expect("second plan entry");
+    let defaulted = js.find("name: \"defaulted\", stage: 100").expect("default plan entry");
+    assert!(first < second && second < defaulted);
+}
+
+#[test]
+fn lua_and_js_publish_identical_dependency_gated_lifecycle_plans() {
+    let ws = ws_with(r#"
+        @lifecycle(phase="wire", owner="session") deco init wire {}
+        const BASE: int = 1
+        const DERIVED: int = BASE + 1
+        const OTHER: int = 9
+        @wire fn plain_wire() {}
+        @wire(onchange=[DERIVED, OTHER]) fn gated_wire() {}
+        fn main() {}
+    "#);
+    let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
+    let lua_plan = skull::mir_emit::emit_full(&ws, mid)
+        .expect("Lua emit")
+        .0
+        .lifecycle_plan;
+    let js_plan = skull_codegen_js::emit::emit_program(&ws, mid)
+        .expect("JS emit")
+        .lifecycle_plan;
+    assert_eq!(lua_plan, js_plan, "Lua and JS lifecycle metadata drifted");
+    assert!(lua_plan.census.plain > 0, "plain population must be nonzero");
+    assert!(lua_plan.census.gated > 0, "gated population must be nonzero");
+    assert!(lua_plan.census.dependency_edges > 2, "transitive dependency closure must be populated");
+    let gated = lua_plan
+        .entries
+        .iter()
+        .find(|entry| entry.diagnostic_name.as_str() == "gated_wire")
+        .expect("gated entry");
+    let dependency_names = gated
+        .qualification
+        .dependencies()
+        .iter()
+        .map(|dependency| match &dependency.identity {
+            skull_mir::code_identity::CodeIdentity::Artifact(
+                skull_mir::code_identity::CodeOwner::Artifact { name, .. },
+            ) => name.as_str(),
+            identity => panic!("dependency is not a logical global identity: {identity:?}"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(dependency_names, vec!["DERIVED", "OTHER", "BASE"]);
+}
+
+#[test]
+fn lua_and_js_reject_the_same_unsupported_wire_dependencies() {
+    let cases = [
+        ("[MUTABLE]", "mutable"),
+        ("[callable]", "names a function"),
+        ("[UNKNOWN]", "is unknown"),
+        ("[]", "requires a non-empty dependency list"),
+        ("[GOOD.value]", "structured identifier list"),
+    ];
+    for (annotation, expected) in cases {
+        let source = format!(
+            r#"
+            @lifecycle(phase="wire", owner="session") deco init wire {{}}
+            const GOOD: int = 1
+            global MUTABLE: int = 2
+            fn callable() {{}}
+            @wire(onchange={annotation}) fn apply_game_config() {{}}
+            fn main() {{}}
+            "#
+        );
+        let ws = ws_with(&source);
+        let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
+        let lua_error = match skull::mir_emit::emit_full(&ws, mid) {
+            Ok(_) => panic!("Lua accepted unsupported dependency {annotation}"),
+            Err(error) => error.message,
+        };
+        let js_error = match skull_codegen_js::emit::emit_program(&ws, mid) {
+            Ok(_) => panic!("JS accepted unsupported dependency {annotation}"),
+            Err(error) => error.message,
+        };
+        assert!(lua_error.contains(expected), "Lua {annotation}: {lua_error}");
+        assert!(js_error.contains(expected), "JS {annotation}: {js_error}");
+    }
+}
+
+#[test]
+fn artifact_definition_metadata_uses_the_shared_keyed_plan_in_js() {
+    let ws = ws_with(r#"
+@artifact_definition(catalog="widgets", key_param="key")
+deco init widget(key: string) {}
+@widget(key="alpha") fn make_alpha() -> int { return 1 }
+@widget(key="beta") fn make_beta() -> int { return 2 }
+fn main() {}
+"#);
+    let js = emit_program(&ws);
+    assert!(!js.contains("function __deco_widget("));
+    assert!(!js.contains("__deco_widget({"));
+    assert!(js.contains("__rock_definition_plan_stage({"));
+    let alpha = js.find("key: \"alpha\"").expect("alpha plan entry");
+    let beta = js.find("key: \"beta\"").expect("beta plan entry");
+    assert!(alpha < beta);
+    assert!(js.contains("factory: __rock_code_slot_pending_ref(\"named:<test>::make_alpha<>\")"));
+    assert!(js.contains("factory: __rock_code_slot_pending_ref(\"named:<test>::make_beta<>\")"));
+    let source = format!(
+        "var __G = {{}};\n{}\n{}\nconsole.log(__G.__ROCK_DEFINITION_PLAN.widgets.len + ':' + __G.__ROCK_DEFINITION_PLAN.widgets._data[0].key + ':' + __rock_call(__G.__ROCK_DEFINITION_PLAN.widgets._data[0].factory));",
+        format!("{}\n{}", skull_codegen_js::JS_SESSION_RUNTIME, skull_codegen_js::JS_CALL_HELPER),
+        js
+    );
+    let output = node()
+        .args(["-e", &source])
+        .output()
+        .expect("node");
+    assert!(output.status.success(), "node failed: {}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "2:alpha:1");
 }
 
 /// A concrete operation whose ONLY caller is a decorator body is still served.

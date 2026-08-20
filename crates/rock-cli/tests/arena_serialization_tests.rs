@@ -112,8 +112,12 @@ fn arena_globals_are_hashed_by_their_rows() {
         .filter_map(|rest| rest.split(' ').nth(1))
         .collect();
     assert!(
-        hashed.contains(&"MOBS"),
-        "MOBS must be hashed as simulation state; hashed names: {hashed:?}"
+        hashed.iter().any(|name| name.ends_with("::MOBS")),
+        "MOBS must be hashed by its logical StateSchema identity; hashed names: {hashed:?}"
+    );
+    assert!(
+        !hashed.iter().any(|name| name.contains("<bone-stdlib:arena.rock>::__ARENA_STORES")),
+        "the physical Arena registry is not replay state; hashed names: {hashed:?}"
     );
 
     let scratch2 = tempfile::tempdir().unwrap();

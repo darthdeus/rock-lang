@@ -395,16 +395,12 @@ mod overlay_runtime_tests {
     use crate::bone_backend::bone_session;
     use super::{emit_overlay_checked, exec_lua, normalize_stdout, ExecOutcome};
 
-    /// Standalone `@test`/synthetic programs have no engine, but the overlay
-    /// always calls `clear_all_systems()` (the system rebind). Stub it so the
-    /// overlay loads; these programs register no systems, so the stub is a
-    /// faithful no-op.
+    /// Standalone `@test`/synthetic programs have no engine. Stub the full-reload
+    /// registry reset only when a fixture emits one; body overlays refresh the
+    /// CodeRefs already stored in registries.
     const SYS_STUB: &str = "function clear_all_systems() end\n";
 
-    /// The stub ONLY when the program doesn't define its own `clear_all_systems`.
-    /// Files exercising the decorator/system machinery emit a REAL one (+ the
-    /// registries); stubbing it as a no-op there would shadow it (later-wins) and
-    /// double-register on the rebind. Empty string when a real one is present.
+    /// The stub is omitted when a fixture defines its own reset function.
     fn stub_for(full_lua: &str) -> &'static str {
         if full_lua.contains("function clear_all_systems") { "" } else { SYS_STUB }
     }
@@ -992,7 +988,7 @@ mod overlay_runtime_tests {
     // the overlay (the maximal body edit) and assert each `@test` prints the same
     // composed (baseline ++ overlay) as it does from the baseline alone. Identity
     // bodies mean any divergence is a COMPOSITION bug -- redefining a real-shaped
-    // function after main.lua, or the `clear_all_systems` rebind, breaking it.
+    // function after main.lua, or stale slot publication, breaking it.
 
     use bone_semantic::hir::BodyOwner;
 
@@ -1014,10 +1010,6 @@ mod overlay_runtime_tests {
     struct FileResult {
         compared: usize,
         divergences: Vec<(String, String, String)>,
-        /// Skipped because the overlay's rebind re-registers engine systems -- the
-        /// corpus tier has no real `clear_all_systems`/registries, so the rebind
-        /// double-registers. These belong to the SIM tier (real engine).
-        skipped_system: bool,
     }
 
     /// Compare overlay-composed vs full-build execution for one file. A file that
@@ -1046,15 +1038,6 @@ mod overlay_runtime_tests {
             .map(|(fid, _)| (mid, BodyOwner::Function(fid)))
             .collect();
         let overlay = emit_overlay_checked(&ws, &mut cache, &reinferred);
-
-        // The overlay rebind calls `__rock_rebind_system` (an engine fn absent in
-        // a standalone @test compile) for each changed decorated fn. Files with
-        // decorated systems are the SIM tier's job -- skip them here rather than
-        // error on the undefined helper.
-        if overlay.lua.contains("__rock_rebind_system(") {
-            r.skipped_system = true;
-            return r;
-        }
 
         let stub = stub_for(&full.lua);
         for t in &tests {
@@ -1089,7 +1072,6 @@ mod overlay_runtime_tests {
     struct SweepTotals {
         files_with_tests: usize,
         compared: usize,
-        skipped_system: usize,
         divergences: Vec<(String, String, String)>,
     }
 
@@ -1110,7 +1092,6 @@ mod overlay_runtime_tests {
         SweepTotals {
             compared: per.iter().map(|r| r.compared).sum(),
             files_with_tests: per.iter().filter(|r| r.compared > 0).count(),
-            skipped_system: per.iter().filter(|r| r.skipped_system).count(),
             divergences: per.into_iter().flat_map(|r| r.divergences).collect(),
         }
     }
@@ -1146,16 +1127,12 @@ mod overlay_runtime_tests {
         );
     }
 
-    // --- sim tier: the overlay rebind re-points the system registry ------------
+    // --- sim tier: a registry retains and observes a CodeRef -------------------
     //
     // The corpus tier can't reach this: a `@update`/`@draw` decorator registers a
-    // function VALUE into a registry (`UpdateSystem { func, name, stage }`), so
-    // later-wins on the global does NOT update the copy already in the registry.
-    // The overlay's rebind (`clear_all_systems()` + re-apply every decorator) is
-    // what re-points it. This needs a running system loop + real registries --
-    // here a SELF-CONTAINED fixture with the genuine engine `deco`/registry/clear
-    // shapes (copied from `stone/engine/systems/systems.rock`), driven through the
-    // REAL `emit_overlay`, executed under luajit. (`docs/skull-incremental-emit-split.md`.)
+    // function VALUE into a registry (`UpdateSystem { func, name, stage }`). The
+    // stored value is a CodeRef, so an overlay must refresh it without a
+    // name-based registry repair.
 
     /// A minimal game-shaped module: one `@update` system whose body writes
     /// `tick_val` to an observable global, plus the engine's deco/registry/clear
@@ -1168,11 +1145,6 @@ mod overlay_runtime_tests {
              deco init update(stage: int = 100) {{\n\
                 UPDATE_SYSTEMS.push(UpdateSystem {{ func: transmute(target.func), name: transmute(target.name), stage: stage }})\n\
              }}\n\
-             @nomangle\n\
-             inline(lua) fn __rock_rebind_system(name: string, f: any) = \"\"\"\n\
-                for i = 1, UPDATE_SYSTEMS.len do if UPDATE_SYSTEMS._data[i].name == name then UPDATE_SYSTEMS._data[i].func = f end end\n\
-                return nil\n\
-             \"\"\"\n\
              global TICK_OUT: int = 0\n\
              @update\n\
              fn tick() {{ TICK_OUT = {tick_val} }}\n\
@@ -1184,18 +1156,10 @@ mod overlay_runtime_tests {
     /// Run the registry-driving frame and report the observable global.
     const SIM_DRIVER: &str = "run_frame() print(TICK_OUT)";
 
-    /// The real overlay's rebind must re-point the registry at the EDITED system
-    /// body. Editing a decorated `@update` body, delivered as an overlay, must
-    /// make the frame loop run the NEW body (== a fresh full build), not the stale
-    /// function value the registry captured when `main.lua` registered it at load.
-    ///
-    /// Regression guard for the full chain: bone reports the decorated body in
-    /// `reinferred` (`lower.rs` footprint fix), skull re-emits it into the overlay,
-    /// and the rebind (`clear_all_systems()` + `__deco_update`) re-registers the
-    /// fresh `tick`. `sim_without_rebind_runs_stale_body` is the negative control
-    /// proving the rebind (not just later-wins) is what makes this work.
+    /// An existing lifecycle entry must invoke the edited body through its
+    /// retained CodeRef. The overlay contains no decorator rebind call.
     #[test]
-    fn sim_overlay_rebind_runs_new_system_body() {
+    fn sim_overlay_refreshes_existing_code_ref_registry_entry() {
         let v0 = sim_fixture(1);
         let v1 = sim_fixture(2);
 
@@ -1217,12 +1181,11 @@ mod overlay_runtime_tests {
             "a decorated-fn body edit must re-infer exactly the edited body"
         );
         let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
-        // The overlay carries the redefined body AND a targeted rebind of just the
-        // changed decorated fn (in-place, not clear-all + re-register-all).
+        // The overlay carries the redefined body and slot publication only.
         assert!(
             overlay.lua.contains("function tick_ret_unit()")
-                && overlay.lua.contains("__rock_rebind_system(\"tick\""),
-            "overlay must redefine the body AND rebind the changed system:\n{}",
+                && !overlay.lua.contains("__rock_rebind_system"),
+            "overlay must redefine the body without a name-based registry repair:\n{}",
             overlay.lua
         );
         let fresh = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v1").0;
@@ -1235,35 +1198,117 @@ mod overlay_runtime_tests {
                 assert_eq!(
                     normalize_stdout(&c).trim(),
                     "2",
-                    "overlay rebind must run the EDITED decorated body, not the stale registry func"
+                    "the retained registry CodeRef must run the EDITED decorated body"
                 );
             }
             _ => panic!("composed or fresh run errored"),
         }
     }
 
-    /// Positive control: WITHOUT the rebind -- a naive global redefinition (what
-    /// later-wins alone gives) -- the registry keeps its stale func value and the
-    /// frame loop runs the OLD body. Proves the rebind is load-bearing and a
-    /// regression that dropped it would be caught by the test above.
+    /// Slot publication belongs to the OUTER successful overlay boundary. A
+    /// later top-level initializer failure must leave an already-stored value
+    /// on v0, even though the overlay has staged the edited callback body.
     #[test]
-    fn sim_without_rebind_runs_stale_body() {
-        let v0 = sim_fixture(1);
-        let session = bone_session(files(&v0)).expect("session");
+    fn failed_overlay_after_late_top_level_work_keeps_retained_code_ref_old() {
+        let v0 = format!(
+            "const LATE: int = 0\nfn explode() -> int {{ error(\"late overlay failure\") return 0 }}\n{}",
+            sim_fixture(1).replace("TICK_OUT = 1", "TICK_OUT = 1 + LATE")
+        );
+        let v1 = format!(
+            "const LATE: int = explode()\nfn explode() -> int {{ error(\"late overlay failure\") return 0 }}\n{}",
+            sim_fixture(2).replace("TICK_OUT = 2", "TICK_OUT = 2 + LATE")
+        );
+        let mut session = bone_session(files(&v0)).expect("session v0");
         let mid = skull::user_module_id(session.workspace()).unwrap();
-        let full = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full").0;
+        let (full0, mut cache) = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
 
-        // Redefine the emitted `tick` symbol globally but do NOT clear+re-register
-        // (no rebind): the registry captured the OLD func VALUE, so the redefinition
-        // does not reach it.
-        let naive_redef = "function tick_ret_unit() TICK_OUT = 2 end";
-        match run_parts(&[&full.lua, naive_redef, SIM_DRIVER]) {
-            ExecOutcome::Output(o) => assert_eq!(
-                normalize_stdout(&o).trim(),
-                "1",
-                "without the rebind the registry must run the STALE body (this is the bug the rebind fixes)"
+        let result = session.update_file("main.rock", &v1).expect("update v1");
+        let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
+        let late_line = overlay
+            .lua
+            .lines()
+            .position(|line| line.trim_start().starts_with("LATE ="))
+            .expect("v1 overlay must execute the changed top-level initializer");
+        assert!(
+            overlay.lua.contains("__rock_code_slot_stage")
+                && overlay.lua.contains("__rock_code_slot_publish"),
+            "the failing overlay must stage a compatible callback body:\n{}",
+            overlay.lua
+        );
+
+        let mut failing = String::new();
+        for (index, line) in overlay.lua.lines().enumerate() {
+            if index == late_line {
+                failing.push_str("error('late overlay failure')\n");
+            }
+            failing.push_str(line);
+            failing.push('\n');
+        }
+        let script = format!(
+            "{}\n{}\nlocal ok, err = xpcall(function()\n{}end, debug.traceback)\nif not ok then __rock_code_slot_abort() end\nprint(ok)\nprint(_G.__rock_code_slot_pending == nil)\nrun_frame()\nprint(TICK_OUT)",
+            full0.lua, SYS_STUB, failing
+        );
+
+        match exec_lua(&script) {
+            ExecOutcome::Output(output) => assert_eq!(
+                normalize_stdout(&output).trim(),
+                "false\ntrue\n1",
+                "a failed overlay must report failure and keep the retained v0 CodeRef"
             ),
-            ExecOutcome::Errored(_) => panic!("fixture failed to run"),
+            ExecOutcome::Errored(diagnostic) => {
+                panic!("the loader failure must be caught so the old CodeRef can run: {diagnostic}")
+            }
+        }
+    }
+
+    #[test]
+    fn wire_hook_failure_is_post_publication_and_not_reported_as_rollback() {
+        let v0 = r#"
+@lifecycle(phase="wire", owner="session")
+deco init wire {}
+const DEP: int = 1
+global RUNS: int = 0
+@wire(onchange=[DEP]) fn gated_wire() { RUNS = RUNS + 1 }
+fn main() {}
+"#;
+        let v1 = v0.replace(
+            "RUNS = RUNS + 1",
+            "error(\"wire hook failed after publication\")",
+        );
+        let mut session = bone_session(files(v0)).expect("wire session v0");
+        let mid = skull::user_module_id(session.workspace()).unwrap();
+        let (full0, mut cache) = skull::mir_emit::emit_full(session.workspace(), mid)
+            .expect("wire full v0");
+        let result = session.update_file("main.rock", &v1).expect("wire body edit");
+        let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
+        let driver = r#"
+local function run_wire()
+  local phase = _G.__ROCK_LIFECYCLE_PLAN.wire
+  for i = 1, phase.len do
+    local entry = phase._data[i]
+    if __rock_lifecycle_take_wire(entry.key) then entry.func() end
+  end
+end
+run_wire()
+assert(__rock_state_get("global:main.rock::RUNS::value") == 1, "initial wire did not run exactly once: " .. tostring(__rock_state_get("global:main.rock::RUNS::value")))
+local old_plan = _G.__ROCK_LIFECYCLE_PLAN
+REPLACE_OVERLAY
+local candidate_plan = _G.__ROCK_LIFECYCLE_PLAN
+assert(candidate_plan ~= old_plan, "candidate LifecyclePlan was not published")
+local ok, err = pcall(run_wire)
+assert(not ok and tostring(err):find("wire hook failed after publication", 1, true), "wire failure was not observed: " .. tostring(err))
+assert(_G.__rock_code_slot_pending == nil, "the hook failure must not leave a staging transaction")
+assert(_G.__ROCK_LIFECYCLE_PLAN == candidate_plan, "hook failure must not claim publication rollback")
+assert(__rock_state_get("global:main.rock::RUNS::value") == 1, "wire failure changed the retained effect")
+print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
+"#
+        .replace("REPLACE_OVERLAY", &overlay.lua);
+        let script = format!("{}\n{}\n{}", full0.lua, SYS_STUB, driver);
+        match exec_lua(&script) {
+            ExecOutcome::Output(output) => {
+                assert!(normalize_stdout(&output).contains("WIRE_HOOK_FAILURE_POST_PUBLICATION"))
+            }
+            ExecOutcome::Errored(error) => panic!("wire hook failure driver failed: {error}"),
         }
     }
 
@@ -1317,8 +1362,8 @@ mod overlay_runtime_tests {
     }
 
     /// A FLAT-ENUM-yielding `co fn` body edit, through the overlay, must re-emit the
-    /// frame-slot yield channel (the `__step`'s `s.__y*` slot writes + the ctor's
-    /// `__advance`/`__resume` fields on the merged frame) and a freshly-created coroutine must run the new body,
+    /// frame-slot yield channel and CodeRefs for the ctor's `__advance`/`__resume`
+    /// fields, then a freshly-created coroutine must run the new body,
     /// threading the yield through the slots -- no `{__variant}` box on the concrete
     /// consumer path. Guards the frame-slot channel (`docs/coroutine-allocation-plan.md`
     /// Part A) against a hot-reload regression; the scalar-yield test above does not
@@ -1354,9 +1399,9 @@ mod overlay_runtime_tests {
         assert!(overlay.lua.contains(".__y0 = "), "overlay step must write yield leaves to frame slots:\n{}", overlay.lua);
         assert!(
             overlay.lua.contains("function gen_ret_Coroutine_Ev_unit_unit__advance(")
-                && overlay.lua.contains("__advance = gen_ret_Coroutine_Ev_unit_unit__advance")
-                && overlay.lua.contains("__resume = gen_ret_Coroutine_Ev_unit_unit__resume"),
-            "overlay must re-emit the per-co-fn __advance/__resume fns + the ctor storing them as fields:\n{}",
+                && overlay.lua.contains("__rock_code_slot_ref(\"generated:main.rock::gen<>::advance\")")
+                && overlay.lua.contains("__rock_code_slot_ref(\"generated:main.rock::gen<>::resume\")"),
+            "overlay must re-emit the per-co-fn __advance/__resume fns + CodeRefs in the ctor:\n{}",
             overlay.lua
         );
 
@@ -1432,18 +1477,16 @@ mod overlay_runtime_tests {
         }
     }
 
-    /// Layout drift, cell shift: a live coroutine suspended across a BodyOnly
-    /// overlay that INSERTS a frame-resident local before an existing one,
-    /// shifting its dense slot. The new step would read the shifted local at a
-    /// slot the old frame never wrote -- the frame layout stamp kills the
-    /// coroutine cleanly instead. The inserted `z` is a GENUINE frame cell
+    /// Layout drift, cell shift: inserting a frame-resident local changes the
+    /// StateSchema frame layout, so an overlay must request a safe restart
+    /// before any new CodeRef can reach a live process. The inserted `z` is a GENUINE frame cell
     /// (read after the first yield, so it must survive suspension); a dead local
     /// -- `let z = 999` never read -- is now a ghost dropped from the frame and
     /// does NOT shift the layout (the P2-finding fix; that path has its own
     /// structural test in skull/tests/frame_slot_naming.rs).
     /// docs/coroutine-allocation-plan.md "Layout drift across reloads".
     #[test]
-    fn live_coroutine_cell_layout_shift_overlay_stamp_kills() {
+    fn live_coroutine_cell_layout_shift_requests_safe_restart() {
         // `Act(() -> ())` forces Ev flat (frame-slot channel); `mk()` keeps the
         // locals as real calls so copy-prop/DCE can't erase the frame cells.
         // v1 inserts `z` AND reads it after yield 1 (`a = a + z`), so `z` is a
@@ -1469,7 +1512,7 @@ mod overlay_runtime_tests {
 
         let mut session = bone_session(files(v0)).expect("session v0");
         let mid = skull::user_module_id(session.workspace()).unwrap();
-        let (full0, mut cache) = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
+        let (_full0, mut cache) = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
 
         let result = session.update_file("main.rock", v1).expect("update v1");
         assert!(
@@ -1477,24 +1520,15 @@ mod overlay_runtime_tests {
             "inserting a let is a body edit -- must be BodyOnly (the premise), got {:?}",
             result.tier
         );
-        let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
-
-        // start() + pump() under v0 (Tick(7)=7, suspended at state 1), overlay,
-        // then pump() again on the SAME live coroutine. The frame layout stamp
-        // rejects the v0 frame in the v1 step (the genuine `z` frame cell shifted
-        // `b`'s slot): the check errors INSIDE the pcall, the coroutine dies
-        // cleanly (state -2, on_killed, last_error explains) and pump reads null
-        // -> -1. Pre-stamp this CRASHED the consumer (arithmetic on the nil read
-        // from the shifted slot).
-        let composed = run_parts(&[&full0.lua, stub_for(&full0.lua), "start()", "pump()", &overlay.lua, "pump()", "pump()", "pump()"]);
-        match composed {
-            ExecOutcome::Output(o) => assert_eq!(
-                normalize_stdout(&o).trim(),
-                "7\n-1\n-1\n-1",
-                "a cell-shifting overlay must stamp-kill the live coroutine, not corrupt it"
-            ),
-            ExecOutcome::Errored(_) => panic!("cell-shift + live resume crashed -- the layout stamp regressed"),
-        }
+        let err = match skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &result.reinferred) {
+            Ok(_) => panic!("a changed coroutine frame schema must not overlay"),
+            Err(err) => err,
+        };
+        assert!(
+            err.message.contains("safe restart"),
+            "a cell-shifting frame edit must request the safe restart path, got: {}",
+            err.message
+        );
     }
 
     /// Layout drift, state renumber: yields are numbered by order, so a BodyOnly
@@ -1650,14 +1684,12 @@ mod overlay_runtime_tests {
         }
     }
 
-    /// The mob-soft-lock scenario in miniature: a coroutine holding a game
-    /// invariant cleans up via `defer`, then a layout-shifting overlay
-    /// stamp-kills it mid-flight. The defer must run -- and it must be the
-    /// creation-time (v0) defer against the v0 frame: `__defers` stores the
-    /// per-site fns BY VALUE precisely so stale frames never run current-layout
-    /// cleanup code against old-layout cells.
+    /// A layout-changing coroutine edit must be refused before publication;
+    /// preserving the old Session is what keeps the creation-time defer and its
+    /// live frame coherent. The defer behavior itself remains covered by the
+    /// ordinary coroutine lifecycle tests.
     #[test]
-    fn stamp_kill_runs_creation_time_defers() {
+    fn coroutine_frame_layout_change_refuses_before_publication() {
         // v1 inserts `z` and reads it after the first yield (`a = a + z`), so `z`
         // is a genuine frame cell shifting `b`'s slot -- a real layout change.
         // (A dead `let z = 999` is now a ghost that does NOT shift the frame.)
@@ -1681,22 +1713,18 @@ mod overlay_runtime_tests {
 
         let mut session = bone_session(files(&v0)).expect("session v0");
         let mid = skull::user_module_id(session.workspace()).unwrap();
-        let (full0, mut cache) = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
+        let (_full0, mut cache) = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
         let result = session.update_file("main.rock", &v1).expect("update v1");
         assert!(matches!(result.tier, bone_incremental::session::UpdateTier::BodyOnly));
-        let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
-
-        // pump #1: Tick(7), BUSY=1, suspended. Overlay (cell shift). pump #2:
-        // stamp-kill -> -1, and the v0 defer must have cleared BUSY.
-        let composed = run_parts(&[&full0.lua, stub_for(&full0.lua), "start()", "pump()", &overlay.lua, "pump()", "report()"]);
-        match composed {
-            ExecOutcome::Output(o) => assert_eq!(
-                normalize_stdout(&o).trim(),
-                "7\n-1\nbusy:0",
-                "a stamp-killed coroutine must run its creation-time defers (invariant released, no soft-lock)"
-            ),
-            ExecOutcome::Errored(_) => panic!("stamp-kill defer fixture failed to run"),
-        }
+        let err = match skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &result.reinferred) {
+            Ok(_) => panic!("a changed coroutine frame schema must not overlay"),
+            Err(err) => err,
+        };
+        assert!(
+            err.message.contains("safe restart"),
+            "a frame-layout edit must request the safe restart path, got: {}",
+            err.message
+        );
     }
 
     /// A coroutine hook (`on_killed`/`on_resume`/`on_hot_reload`) argument must
@@ -2117,18 +2145,12 @@ mod overlay_runtime_tests {
     }
 
     /// Editing the BODY of an `@on_reload` fn, delivered as an overlay, must run
-    /// the NEW body on the next fire -- the name-lookup trick. `@on_reload`
-    /// registers the fn's NAME (not its value), and `__rock_fire_hot_reload_callbacks`
-    /// resolves `_G[name]` at fire time, so a redefined global propagates to the
-    /// already-registered entry (same mechanic as a coroutine's `__step`). Requires
-    /// `@nomangle` so the Lua global == the source name. Pre-fix the deco captured
-    /// the function VALUE, so a body edit ran the stale original.
+    /// the NEW body on the next fire through the retained CodeRef.
     #[test]
-    fn on_reload_body_edit_runs_new_body_via_name_lookup() {
+    fn on_reload_body_edit_runs_new_body_via_code_ref() {
         let prog = |v: i32| {
             format!(
                 "global OUT: int = 0\n\
-                 @nomangle\n\
                  @on_reload\n\
                  fn refresh() {{ OUT = {v} }}\n\
                  @nomangle\n\
@@ -2144,14 +2166,11 @@ mod overlay_runtime_tests {
         let r1 = session.update_file("main.rock", &v1).expect("update v1");
         let overlay = emit_overlay_checked(session.workspace(), &mut cache, &r1.reinferred);
 
-        // full0 registers `refresh` by name. The overlay redefines the `refresh`
-        // global (new body); the fire must resolve and run the NEW body -> OUT == 2.
-        // `refresh` is decorated, so the overlay emits a `__rock_rebind_system`
-        // rebind (engine-provided; a no-op for the hot-reload list) -- stub it.
+        // full0 registers the CodeRef. The overlay stages the edited body, and
+        // the existing callback entry must invoke it.
         let composed = run_parts(&[
             &full0.lua,
             stub_for(&full0.lua),
-            "function __rock_rebind_system(name, f) end",
             &overlay.lua,
             "__rock_fire_hot_reload_callbacks()",
             "report()",
@@ -2160,39 +2179,22 @@ mod overlay_runtime_tests {
             ExecOutcome::Output(o) => assert_eq!(
                 normalize_stdout(&o).trim(),
                 "2",
-                "fire must run the EDITED @on_reload body (name-lookup), not the stale original"
+                "fire must run the EDITED @on_reload body through its CodeRef"
             ),
             ExecOutcome::Errored(_) => panic!("on_reload body-edit fixture failed to run"),
         }
     }
 
-    /// `@on_reload` registers by NAME and re-resolves `_G[name]` at fire time, so
-    /// the Lua global must equal the source name -- i.e. the fn must be `@nomangle`
-    /// (else a same-named overload could mangle it and the lookup would silently
-    /// miss). skull rejects a `@on_reload` fn that isn't `@nomangle` at emit time.
+    /// `@on_reload` stores a function value, so ordinary name mangling does not
+    /// affect callback freshness.
     #[test]
-    fn on_reload_without_nomangle_is_a_compile_error() {
+    fn on_reload_without_nomangle_emits_ok() {
         let prog = "@on_reload\nfn refresh() {}\nfn main() {}\n";
-        let session = bone_session(files(prog)).expect("session");
-        let mid = skull::user_module_id(session.workspace()).unwrap();
-        let res = skull::mir_emit::emit_full(session.workspace(), mid);
-        let err = res.err().expect("@on_reload without @nomangle must be a compile error");
-        assert!(
-            err.message.contains("nomangle"),
-            "error should name the @nomangle requirement, got: {}",
-            err.message
-        );
-    }
-
-    /// The positive control: `@nomangle @on_reload` emits cleanly.
-    #[test]
-    fn on_reload_with_nomangle_emits_ok() {
-        let prog = "@nomangle\n@on_reload\nfn refresh() {}\nfn main() {}\n";
         let session = bone_session(files(prog)).expect("session");
         let mid = skull::user_module_id(session.workspace()).unwrap();
         assert!(
             skull::mir_emit::emit_full(session.workspace(), mid).is_ok(),
-            "@nomangle @on_reload must emit cleanly"
+            "@on_reload without @nomangle must emit cleanly"
         );
     }
 
@@ -2208,8 +2210,8 @@ mod overlay_runtime_tests {
         let files: Vec<String> = files.into_iter().filter(|f| !f.contains("/benches/")).collect();
         let t = sweep(&files);
         eprintln!(
-            "overlay corpus sweep: {} files, {} with tests, {} tests compared, {} skipped (system/sim-tier), {} divergences",
-            files.len(), t.files_with_tests, t.compared, t.skipped_system, t.divergences.len()
+            "overlay corpus sweep: {} files, {} with tests, {} tests compared, {} divergences",
+            files.len(), t.files_with_tests, t.compared, t.divergences.len()
         );
         assert!(
             t.divergences.is_empty(),
@@ -2311,15 +2313,11 @@ mod overlay_runtime_tests {
         }
     }
 
-    /// The snapshot-at-creation contract (Risks / watch-outs: "Record staleness
-    /// across hot reload is the same contract as the old inline closure"). A
-    /// LIVE coroutine created BEFORE the reload survives a layout-stable body
-    /// edit. A record created before the reload holds a STALE `__fn` value (the
-    /// global was read into the table at creation); a record created after
-    /// resume-post-reload reads the NEW global. This deliberately diverges from
-    /// a fresh full build (which is uniformly v1), so it is a raw assertion.
+    /// A LIVE coroutine created BEFORE the reload survives a layout-stable body
+    /// edit, and its stored capturing record resolves the edited body through
+    /// the same logical CodeRef as a record created afterwards.
     #[test]
-    fn cofn_lambda_record_snapshot_stale_across_reload_new_record_fresh() {
+    fn cofn_lambda_record_snapshot_refreshes_across_reload() {
         let prog = |op: char| {
             format!(
                 "enum Ev {{ Tick(int), Act(() -> ()) }}\n\
@@ -2354,38 +2352,105 @@ mod overlay_runtime_tests {
         let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
         assert!(overlay.lua.contains("gen_ret_Coroutine_Ev_unit_unit__step__lambda1"), "overlay must carry the hoisted g body");
 
-        // start() + pump() under v0: f = record snapshotting the OLD lambda0
-        // (x+5), f(3)=8. Overlay (op *). pump #2 on the SAME live coroutine:
-        // the stored record f is STALE (still x+5) -> 8. pump #3 creates a fresh
-        // record g reading the NEW lambda1 (x*5) -> 15. pump #4 done -> -1.
+        // start() + pump() under v0: f(3)=8. Overlay (op *). The same stored
+        // record now resolves lambda0's edited body, then g uses lambda1.
         let composed = run_parts(&[&full0.lua, stub_for(&full0.lua), "start()", "pump()", &overlay.lua, "pump()", "pump()", "pump()"]);
-        match composed {
-            ExecOutcome::Output(o) => assert_eq!(
-                normalize_stdout(&o).trim(),
-                "8\n8\n15\n-1",
-                "a pre-reload record is a stale fn snapshot (8), a post-reload record is fresh (15)"
-            ),
-            ExecOutcome::Errored(_) => panic!("live coroutine with stale lambda record failed to run"),
+        let fresh_session = bone_session(files(&v1)).expect("fresh session v1");
+        let fresh_mid = skull::user_module_id(fresh_session.workspace()).unwrap();
+        let fresh = skull::mir_emit::emit_full(fresh_session.workspace(), fresh_mid)
+            .expect("emit fresh v1")
+            .0;
+        let fresh_run = run_parts(&[
+            &fresh.lua,
+            stub_for(&fresh.lua),
+            "start()",
+            "pump()",
+            "pump()",
+            "pump()",
+            "pump()",
+        ]);
+        match (composed, fresh_run) {
+            (ExecOutcome::Output(composed), ExecOutcome::Output(fresh)) => {
+                let composed = normalize_stdout(&composed);
+                let fresh = normalize_stdout(&fresh);
+                assert_eq!(fresh.trim(), "15\n15\n15\n-1", "fresh v1 build output");
+                let mut post_reload = composed.lines();
+                assert_eq!(post_reload.next(), Some("8"), "the pre-reload record ran v0");
+                let mut fresh_after_first = fresh.lines();
+                assert_eq!(fresh_after_first.next(), Some("15"), "fresh v1 first yield");
+                assert_eq!(
+                    post_reload.collect::<Vec<_>>().join("\n"),
+                    fresh_after_first.collect::<Vec<_>>().join("\n"),
+                    "the retained records after reload must match a fresh v1 build"
+                );
+            }
+            (ExecOutcome::Output(_), ExecOutcome::Errored(_)) => {
+                panic!("fresh v1 CodeRef build failed to run")
+            }
+            (ExecOutcome::Errored(_), ExecOutcome::Output(_)) => {
+                panic!("live coroutine CodeRef record failed to run")
+            }
+            (ExecOutcome::Errored(_), ExecOutcome::Errored(_)) => {
+                panic!("both live and fresh CodeRef records failed to run")
+            }
         }
     }
 
-    /// A lambda-local-only edit is layout-stable: dense per-frame slot naming
-    /// (docs/coroutine-frame-lambda-plan.md "P2 finding", now FIXED) keys both
-    /// the emitted `s.c<slot>` field names AND the layout stamp on a dense
-    /// ordinal that lambda-internal cell allocation cannot perturb, so a live
-    /// coroutine SURVIVES the edit instead of stamp-killing. Was a sentinel
-    /// (`assert_ne`, "7\n-1\n-1") pinning the two raw-id-perturbation causes it
-    /// fixes:
-    ///   (A) the canon hashed frame cells by RAW cell-arena id; lowering
-    ///       allocates a lambda's internal cells BEFORE the enclosing `let`'s
-    ///       cell, so adding `let y` inside the lambda shifted the raw id of
-    ///       every frame cell after it (record `f`: c3 -> c4). Slots absorb it.
-    ///   (B) an UNUSED lambda-local fell back to ROOT ownership and became a
-    ///       frame cell outright. The ghost-cell drop (referenced-nowhere ->
-    ///       out of the frame) removes it. (This test uses a USED local, so it
-    ///       exercises (A); the ghost drop has its own structural test.)
     #[test]
-    fn cofn_lambda_local_edit_shifts_layout_live_survives() {
+    fn named_and_capture_free_values_refresh_through_reusable_slots() {
+        let program = |named_delta: i32, free_value: i32| {
+            format!(
+                "global NAMED: (fn(int) -> int)? = null\n\
+                 global FREE: (fn() -> int)? = null\n\
+                 @nomangle fn named(x: int) -> int {{ return x + {named_delta} }}\n\
+                 @nomangle fn make_free() -> fn() -> int {{ return () => {free_value} }}\n\
+                 @nomangle fn start() {{\n\
+                   NAMED = named\n\
+                   FREE = make_free()\n\
+                 }}\n\
+                 @nomangle fn invoke() {{\n\
+                   let a = NAMED\n\
+                   let b = FREE\n\
+                   if a != null {{ if b != null {{ print(\"{{a(3)}} {{b()}}\") }} }}\n\
+                 }}\n"
+            )
+        };
+        let v0 = program(1, 10);
+        let v1 = program(2, 20);
+        let mut session = bone_session(files(&v0)).expect("session v0");
+        let mid = skull::user_module_id(session.workspace()).unwrap();
+        let (full0, mut cache) = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
+        let baseline = run_parts(&[&full0.lua, "start()", "invoke()"]);
+        match baseline {
+            ExecOutcome::Output(output) => assert_eq!(normalize_stdout(&output).trim(), "4 10"),
+            ExecOutcome::Errored(error) => panic!("baseline named/capture-free values failed: {error}"),
+        }
+
+        let update = session.update_file("main.rock", &v1).expect("update v1");
+        let overlay = emit_overlay_checked(session.workspace(), &mut cache, &update.reinferred);
+        assert!(overlay.lua.contains("__rock_code_slot_stage"));
+        assert!(overlay.lua.contains("__rock_code_slot_publish"));
+        let composed = run_parts(&[&full0.lua, "start()", &overlay.lua, "invoke()"]);
+        let fresh = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v1").0;
+        let fresh_run = run_parts(&[&fresh.lua, "start()", "invoke()"]);
+        match (composed, fresh_run) {
+            (ExecOutcome::Output(composed), ExecOutcome::Output(fresh)) => {
+                assert_eq!(normalize_stdout(&composed).trim(), "5 20");
+                assert_eq!(normalize_stdout(&composed), normalize_stdout(&fresh));
+            }
+            (ExecOutcome::Errored(composed), ExecOutcome::Errored(fresh)) => {
+                panic!("slot values both failed: composed={composed}; fresh={fresh}")
+            }
+            (ExecOutcome::Errored(composed), _) => panic!("composed slot values failed: {composed}"),
+            (_, ExecOutcome::Errored(fresh)) => panic!("fresh slot values failed: {fresh}"),
+        }
+    }
+
+    /// A lambda-local edit leaves the coroutine frame stamp stable, but changes
+    /// the compatibility record for its escaping lambda body. It must request a
+    /// safe restart rather than redirect a retained CodeRef.
+    #[test]
+    fn cofn_lambda_local_edit_requests_safe_restart() {
         // v0 body: `x + base`; v1 body: `{ let y = base + base; x + y }` (used
         // local -- reason (A): raw-id shift, not the dead-cell fallback (B)).
         let prog = |body: &str| {
@@ -2413,36 +2478,28 @@ mod overlay_runtime_tests {
             "adding a lambda-local is a body edit, got {:?}",
             result.tier
         );
-        let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
         let fresh = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v1").0;
 
-        // Dense slots leave the stamp fixed under a lambda-internal cell edit.
         assert_eq!(
             layout_stamp(&full0.lua, "gen"),
             layout_stamp(&fresh.lua, "gen"),
-            "a lambda-local edit must be layout-stable (dense slots absorb the raw-id shift)"
+            "the lambda-local edit must not change the coroutine frame stamp"
         );
-
-        // pump #1 under v0: f(3)=7. Overlay. pump #2 on the live coroutine: the
-        // stamp still matches -> survives -> f is unchanged (x+base=7) so 3+4+4=11
-        // via the new body path; pump #3 done -> -1.
-        let composed = run_parts(&[&full0.lua, stub_for(&full0.lua), "start()", "pump()", &overlay.lua, "pump()", "pump()"]);
-        match composed {
-            ExecOutcome::Output(o) => assert_eq!(
-                normalize_stdout(&o).trim(),
-                "7\n11\n-1",
-                "a layout-stable lambda-local edit keeps the live coroutine running (7 then 11)"
-            ),
-            ExecOutcome::Errored(_) => panic!("lambda-local edit scenario crashed instead of surviving"),
-        }
+        let err = match skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &result.reinferred) {
+            Ok(_) => panic!("a changed escaping lambda body must not overlay across its compatibility record"),
+            Err(err) => err,
+        };
+        assert!(
+            err.message.contains("safe restart"),
+            "incompatible lambda body must request the safe restart path, got: {}",
+            err.message
+        );
     }
 
-    /// The converse: adding a co-fn-LEVEL local DOES shift the frame layout, so
-    /// a live coroutine across that overlay is stamp-killed cleanly. Pairs with
-    /// the lambda-local test to pin that P1 moved ONLY lambda-owned cells out of
-    /// the canon, not co-fn-level ones.
+    /// A co-fn-level local changes the coroutine-frame schema, so the overlay
+    /// must request a safe restart before publishing any CodeRef body.
     #[test]
-    fn cofn_toplevel_local_edit_shifts_layout_live_killed() {
+    fn cofn_toplevel_local_edit_requests_safe_restart() {
         // `mk()` keeps the inserted co-fn local as a real call so DCE can't
         // erase its frame cell (same guard as the cell-shift stamp test).
         let prog = |extra: &str| {
@@ -2470,7 +2527,6 @@ mod overlay_runtime_tests {
             "adding a co-fn local is a body edit, got {:?}",
             result.tier
         );
-        let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
         let fresh = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v1").0;
 
         assert_ne!(
@@ -2479,18 +2535,15 @@ mod overlay_runtime_tests {
             "a co-fn-level local must shift the frame layout stamp"
         );
 
-        // pump #1 under v0: f(3)=7. Overlay (z shifts the frame). pump #2 on the
-        // live coroutine: the stamp mismatch errors inside the pcall -> clean
-        // kill -> -1; subsequent pumps stay -1 (dead).
-        let composed = run_parts(&[&full0.lua, stub_for(&full0.lua), "start()", "pump()", &overlay.lua, "pump()", "pump()"]);
-        match composed {
-            ExecOutcome::Output(o) => assert_eq!(
-                normalize_stdout(&o).trim(),
-                "7\n-1\n-1",
-                "a co-fn-level local shift must stamp-kill the live coroutine cleanly"
-            ),
-            ExecOutcome::Errored(_) => panic!("co-fn local shift + live resume crashed instead of clean kill"),
-        }
+        let err = match skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &result.reinferred) {
+            Ok(_) => panic!("a changed coroutine frame schema must not overlay"),
+            Err(err) => err,
+        };
+        assert!(
+            err.message.contains("safe restart"),
+            "incompatible coroutine frame must request the safe restart path, got: {}",
+            err.message
+        );
     }
 }
 #[cfg(test)]
@@ -2595,6 +2648,67 @@ mod shape_drift_tests {
         assert!(
             matches!(&reload, SkullReload::ShapeChanged { types } if types.iter().any(|t| t == "P")),
             "a value-struct field reorder freezes against the process ctype -- must restart, got {reload:?}"
+        );
+    }
+
+    #[test]
+    fn mutable_global_membership_edit_requests_restart_and_keeps_old_session_schema() {
+        let v0 = "global A: int = 1\nfn main() { }\n";
+        let v1 = "global A: int = 1\nglobal B: int = 2\nfn main() { }\n";
+        let (_dir, mut stone, main_lua, inc_lua, rock) = boot(v0);
+        let baseline = std::fs::read_to_string(&main_lua).expect("baseline");
+        let old_schema = stone
+            .cache
+            .state_schema()
+            .expect("baseline StateSchema")
+            .schema_id
+            .clone();
+
+        std::fs::write(&rock, v1).expect("edited source");
+        let reload = stone
+            .recompile(std::slice::from_ref(&rock), &main_lua, &inc_lua)
+            .expect("membership edit");
+        match reload {
+            SkullReload::FullRequired { reasons } => assert!(
+                reasons.iter().any(|reason| reason.contains("StateSchema")),
+                "membership drift must identify StateSchema restart: {reasons:?}"
+            ),
+            other => panic!("adding a mutable global must require restart, got {other:?}"),
+        }
+        assert_eq!(
+            std::fs::read_to_string(&main_lua).expect("main after refusal"),
+            baseline,
+            "an incompatible schema must not replace the old process artifact"
+        );
+        assert_eq!(
+            stone
+                .cache
+                .state_schema()
+                .expect("retained StateSchema")
+                .schema_id
+                .as_str(),
+            old_schema.as_str(),
+            "a refused publication must retain the old compiler schema"
+        );
+
+        stone
+            .force_full(&main_lua, &inc_lua)
+            .expect("restart canonicalization");
+        let current = std::fs::read_to_string(&main_lua).expect("new main");
+        assert_ne!(current, baseline, "force_full must materialize the new schema");
+        assert!(
+            current.contains("identity=\"global:") && current.contains("::B\""),
+            "the new logical global identity must be present in the published schema: {current}"
+        );
+        assert_ne!(
+            stone
+                .cache
+                .state_schema()
+                .expect("new StateSchema")
+                .schema_id
+                .as_str(),
+            old_schema.as_str(),
+            "restart canonicalization must publish the changed schema"
         );
     }
 
@@ -2906,6 +3020,599 @@ fn main() { }
 }
 
 #[cfg(test)]
+mod definition_transition_tests {
+    use super::super::{SkullReload, SkullStone};
+    use std::path::PathBuf;
+
+    const V0: &str = r#"
+@artifact_definition(catalog="widgets", key_param="key")
+deco init widget(key: string) {}
+
+@widget(key="alpha") fn make_alpha() -> int { return 1 }
+@widget(key="beta") fn make_beta() -> int { return 2 }
+fn main() {}
+"#;
+
+    const V1: &str = r#"
+@artifact_definition(catalog="widgets", key_param="key")
+deco init widget(key: string) {}
+
+@widget(key="beta") fn make_beta() -> int { return 20 }
+@widget(key="gamma") fn make_gamma() -> int { return 3 }
+fn main() {}
+"#;
+
+    #[test]
+    fn full_rebuild_transition_replaces_definition_membership_and_rejects_failed_build() {
+        let mut harness = DefinitionTransitionHarness::boot(V0);
+        let old_artifact = harness.current_artifact();
+        let old = harness.published_catalog_from(old_artifact.clone());
+        assert_eq!(old, vec!["2", "alpha", "beta"]);
+        assert!(old.first().is_some_and(|count| count != "0"), "catalog population must be nonzero");
+
+        let reload = harness.replace_source(V1).expect("full definition rebuild");
+        assert!(matches!(reload, SkullReload::Full { .. }), "structural definition edit must use full path: {reload:?}");
+        assert_eq!(harness.published_catalog(), vec!["2", "beta", "gamma"]);
+
+        let failed = harness.replace_source(
+            r#"
+@artifact_definition(catalog="widgets", key_param="key")
+deco init widget(key: string) {}
+@widget(key="beta") fn make_beta() -> int { return 20 }
+            @widget(key="beta") fn make_other() -> int { return 4 }
+fn main() {}
+"#,
+        );
+        assert!(failed.is_err(), "duplicate keys must fail the full rebuild");
+        assert_eq!(harness.last_good_catalog(), vec!["2", "beta", "gamma"]);
+        assert_eq!(harness.published_catalog_from(old_artifact), vec!["2", "alpha", "beta"]);
+    }
+
+    #[test]
+    fn late_full_publication_failure_keeps_the_last_good_artifact() {
+        let mut harness = DefinitionTransitionHarness::boot(V0);
+        let old_main = std::fs::read_to_string(&harness.main).expect("last-good main");
+        let blocked_main = harness._dir.path().join("blocked-main");
+        std::fs::create_dir(&blocked_main).expect("blocked publication path");
+
+        let failed = harness.replace_source_at(V1, &blocked_main);
+        assert!(failed.is_err(), "a publication failure must surface");
+        assert_eq!(
+            std::fs::read_to_string(&harness.main).expect("main after failed publication"),
+            old_main,
+            "failed full publication must not replace the last-good artifact"
+        );
+        assert_eq!(
+            harness
+                .stone
+                .source_text(&harness.source)
+                .expect("retained source"),
+            V0,
+            "failed full publication must roll the compiler Session back with the artifact"
+        );
+        assert_eq!(harness.last_good_catalog(), vec!["2", "alpha", "beta"]);
+    }
+
+    #[test]
+    fn failed_definition_materialization_keeps_old_definitions_and_state() {
+        let mut harness = StateTransitionHarness::boot(STATE_V0);
+        let failing_source = STATE_V1.replace(
+            "@widget(key=\"gamma\") fn make_gamma() -> WidgetDef { return WidgetDef { key: \"gamma\", callback: () => 3 } }",
+            "fn materialization_should_fail() -> bool { return true }\n@widget(key=\"gamma\") fn make_gamma() -> WidgetDef { if materialization_should_fail() { error(\"definition materialization failed\") } return WidgetDef { key: \"gamma\", callback: () => 3 } }",
+        );
+        harness
+            .replace_source(&failing_source)
+            .expect("the failing materializer must compile and publish its new plan");
+        let output = harness.run_materialization_failure_script(harness.current_artifact());
+        assert_eq!(
+            output,
+            vec!["old:2:alpha:beta:9:1:41:1"],
+            "a failed materialization must not leak a new definition or PanelState"
+        );
+    }
+
+    #[test]
+    fn definition_reconciliation_preserves_prunes_and_recreates_state() {
+        let mut harness = StateTransitionHarness::boot(STATE_V0);
+        harness.replace_source(STATE_V1).expect("remove alpha and add gamma");
+        let v1 = harness.current_artifact();
+        harness.replace_source(STATE_V2).expect("remove gamma and re-add alpha");
+        let v2 = harness.current_artifact();
+        let output = harness.run_state_script(v1, v2);
+        assert_eq!(
+            output,
+            vec![
+                "v0:2:alpha:beta",
+                "v1:2:beta:gamma:41:1:20:0:0:3",
+                "v2:2:alpha:beta:0:0:10:41:1:30",
+            ],
+            "state transition verdict must cover the nonzero catalog and every membership/state arm"
+        );
+    }
+
+    #[test]
+    fn body_only_definition_callback_changes_body_and_preserves_state() {
+        let mut harness = StateTransitionHarness::boot(STATE_V0);
+        let body_source = STATE_V0.replace("() => 2", "() => 22");
+        let reload = harness.replace_source(&body_source).expect("body-only definition edit");
+        assert!(matches!(reload, SkullReload::Incremental { .. }), "callback body edit must stay on overlay path: {reload:?}");
+        let overlay = std::fs::read_to_string(&harness.incremental).expect("definition overlay");
+        assert!(!overlay.contains("__rock_definition_plan_stage"), "body-only overlay must not replace catalog membership");
+        assert_eq!(harness.run_body_script(overlay), vec!["body:41:1:22"]);
+    }
+
+    struct DefinitionTransitionHarness {
+        _dir: tempfile::TempDir,
+        stone: SkullStone,
+        main: PathBuf,
+        incremental: PathBuf,
+        source: PathBuf,
+        initial_artifact: String,
+        last_good_artifact: String,
+    }
+
+    type StateTransitionHarness = DefinitionTransitionHarness;
+
+    const STATE_V0: &str = r#"
+struct WidgetDef {
+    key: string,
+    callback: fn() -> int,
+}
+struct WidgetState {
+    seq: int = 0,
+    presence: int = 0,
+}
+struct WidgetPlanEntry {
+    catalog: string,
+    key: string,
+    name: string,
+    ordinal: int,
+    definition: WidgetDef,
+}
+@artifact_definition(catalog="widgets", key_param="key")
+deco init widget(key: string) {}
+@lifecycle(phase="wire", owner="session")
+deco init wire {}
+inline(lua) fn widget_definition_plan() -> [WidgetPlanEntry] = "return (_G.__ROCK_DEFINITION_PLAN or {}).widgets or {len=0,_data={}}"
+global WIDGET_STATES: Map<string, WidgetState> = map_new()
+@widget(key="alpha") fn make_alpha() -> WidgetDef { return WidgetDef { key: "alpha", callback: () => 1 } }
+@widget(key="beta") fn make_beta() -> WidgetDef { return WidgetDef { key: "beta", callback: () => 2 } }
+@wire fn reconcile_widget_state() {
+    let present: Map<string, bool> = map_new()
+    for entry in widget_definition_plan() {
+        present[entry.key] = true
+        if WIDGET_STATES.get(entry.key) == null { WIDGET_STATES[entry.key] = WidgetState {} }
+    }
+    let removed: [string] = []
+    for (key, _) in WIDGET_STATES {
+        if present.get(key) == null { removed.push(key) }
+    }
+    for key in removed { WIDGET_STATES.remove(key) }
+}
+fn main() {}
+"#;
+
+    const STATE_V1: &str = r#"
+struct WidgetDef { key: string, callback: fn() -> int }
+struct WidgetState { seq: int = 0, presence: int = 0 }
+struct WidgetPlanEntry { catalog: string, key: string, name: string, ordinal: int, definition: WidgetDef }
+@artifact_definition(catalog="widgets", key_param="key")
+deco init widget(key: string) {}
+@lifecycle(phase="wire", owner="session")
+deco init wire {}
+inline(lua) fn widget_definition_plan() -> [WidgetPlanEntry] = "return (_G.__ROCK_DEFINITION_PLAN or {}).widgets or {len=0,_data={}}"
+global WIDGET_STATES: Map<string, WidgetState> = map_new()
+@widget(key="beta") fn make_beta() -> WidgetDef { return WidgetDef { key: "beta", callback: () => 20 } }
+@widget(key="gamma") fn make_gamma() -> WidgetDef { return WidgetDef { key: "gamma", callback: () => 3 } }
+@wire fn reconcile_widget_state() {
+    let present: Map<string, bool> = map_new()
+    for entry in widget_definition_plan() {
+        present[entry.key] = true
+        if WIDGET_STATES.get(entry.key) == null { WIDGET_STATES[entry.key] = WidgetState {} }
+    }
+    let removed: [string] = []
+    for (key, _) in WIDGET_STATES {
+        if present.get(key) == null { removed.push(key) }
+    }
+    for key in removed { WIDGET_STATES.remove(key) }
+}
+fn main() {}
+"#;
+
+    const STATE_V2: &str = r#"
+struct WidgetDef { key: string, callback: fn() -> int }
+struct WidgetState { seq: int = 0, presence: int = 0 }
+struct WidgetPlanEntry { catalog: string, key: string, name: string, ordinal: int, definition: WidgetDef }
+@artifact_definition(catalog="widgets", key_param="key")
+deco init widget(key: string) {}
+@lifecycle(phase="wire", owner="session")
+deco init wire {}
+inline(lua) fn widget_definition_plan() -> [WidgetPlanEntry] = "return (_G.__ROCK_DEFINITION_PLAN or {}).widgets or {len=0,_data={}}"
+global WIDGET_STATES: Map<string, WidgetState> = map_new()
+@widget(key="alpha") fn make_alpha() -> WidgetDef { return WidgetDef { key: "alpha", callback: () => 10 } }
+@widget(key="beta") fn make_beta() -> WidgetDef { return WidgetDef { key: "beta", callback: () => 30 } }
+@wire fn reconcile_widget_state() {
+    let present: Map<string, bool> = map_new()
+    for entry in widget_definition_plan() {
+        present[entry.key] = true
+        if WIDGET_STATES.get(entry.key) == null { WIDGET_STATES[entry.key] = WidgetState {} }
+    }
+    let removed: [string] = []
+    for (key, _) in WIDGET_STATES {
+        if present.get(key) == null { removed.push(key) }
+    }
+    for key in removed { WIDGET_STATES.remove(key) }
+}
+fn main() {}
+"#;
+
+    impl DefinitionTransitionHarness {
+        fn boot(source: &str) -> Self {
+            let dir = tempfile::tempdir().expect("transition tempdir");
+            let root = dir.path().to_str().expect("transition root").to_string();
+            let main = dir.path().join("main.lua");
+            let incremental = dir.path().join("incremental.lua");
+            let source_path = dir.path().join("main.rock");
+            std::fs::write(&source_path, source).expect("initial source");
+            let stone = SkullStone::init(&root, &main, &incremental).expect("initial build");
+            let mut harness = Self {
+                _dir: dir,
+                stone,
+                main,
+                incremental,
+                source: source_path,
+                initial_artifact: String::new(),
+                last_good_artifact: String::new(),
+            };
+            harness.initial_artifact = harness.current_artifact();
+            harness.last_good_artifact = harness.current_artifact();
+            harness
+        }
+
+        fn replace_source(&mut self, source: &str) -> anyhow::Result<SkullReload> {
+            let reload = self.replace_source_at(source, &self.main.clone())?;
+            self.last_good_artifact = self.current_artifact();
+            Ok(reload)
+        }
+
+        fn replace_source_at(
+            &mut self,
+            source: &str,
+            main: &std::path::Path,
+        ) -> anyhow::Result<SkullReload> {
+            std::fs::write(&self.source, source).expect("replacement source");
+            let reload = self.stone.recompile(
+                std::slice::from_ref(&self.source),
+                main,
+                &self.incremental,
+            )?;
+            Ok(reload)
+        }
+
+        fn current_artifact(&self) -> String {
+            let full = std::fs::read_to_string(&self.main).expect("written main artifact");
+            full.strip_suffix("\n__rock_main_wrapper(main)\n")
+                .unwrap_or(&full)
+                .to_string()
+        }
+
+        fn published_catalog(&self) -> Vec<String> {
+            self.published_catalog_from(self.current_artifact())
+        }
+
+        fn last_good_catalog(&self) -> Vec<String> {
+            self.published_catalog_from(self.last_good_artifact.clone())
+        }
+
+        fn published_catalog_from(&self, artifact: String) -> Vec<String> {
+            let probe = r#"
+local catalog = (_G.__ROCK_DEFINITION_PLAN or {}).widgets
+assert(catalog ~= nil, "widgets catalog was not published")
+io.write("__DEFINITION__", tostring(catalog.len), "\n")
+for i = 1, catalog.len do
+  io.write("__DEFINITION__", catalog._data[i].key, "\n")
+end
+"#;
+            let output = match super::exec_lua(&format!("{artifact}\n{probe}")) {
+                super::ExecOutcome::Output(output) => output,
+                super::ExecOutcome::Errored(error) => {
+                    panic!("definition transition artifact failed: {error}")
+                }
+            };
+            output
+                .lines()
+                .filter_map(|line| line.strip_prefix("__DEFINITION__"))
+                .map(str::to_string)
+                .collect()
+        }
+
+        fn run_state_script(&self, v1: String, v2: String) -> Vec<String> {
+            let driver = r#"
+_G.HOT_RELOAD = true
+local function wire()
+  local plan = _G.__ROCK_LIFECYCLE_PLAN.wire
+  assert(plan ~= nil and plan.len == 1, "state fixture wire population")
+  plan._data[1].func()
+end
+local function published_plan()
+  return (_G.__ROCK_DEFINITION_PLAN or {}).widgets
+end
+local function find(key)
+  local plan = published_plan()
+  for i = 1, plan.len do
+    local entry = plan._data[i]
+    if entry.key == key then return entry.definition end
+  end
+  return nil
+end
+local function line(s) io.write("__STATE__" .. s .. "\n") end
+
+REPLACE_INITIAL
+wire()
+local plan = published_plan()
+line("v0:" .. plan.len .. ":" .. plan._data[1].key .. ":" .. plan._data[2].key)
+WIDGET_STATES["beta"].seq = 41
+WIDGET_STATES["beta"].presence = 1
+WIDGET_STATES["alpha"].seq = 9
+WIDGET_STATES["alpha"].presence = 1
+
+REPLACE_V1
+wire()
+local beta = find("beta")
+local gamma = find("gamma")
+assert(find("alpha") == nil, "removed key still has a definition")
+plan = published_plan()
+line("v1:" .. plan.len .. ":" .. plan._data[1].key .. ":" .. plan._data[2].key .. ":" .. WIDGET_STATES["beta"].seq .. ":" .. WIDGET_STATES["beta"].presence .. ":" .. beta.callback() .. ":" .. WIDGET_STATES["gamma"].seq .. ":" .. WIDGET_STATES["gamma"].presence .. ":" .. gamma.callback())
+
+REPLACE_V2
+wire()
+local alpha = find("alpha")
+beta = find("beta")
+assert(find("gamma") == nil, "removed key still has state or definition")
+plan = published_plan()
+line("v2:" .. plan.len .. ":" .. plan._data[1].key .. ":" .. plan._data[2].key .. ":" .. WIDGET_STATES["alpha"].seq .. ":" .. WIDGET_STATES["alpha"].presence .. ":" .. alpha.callback() .. ":" .. WIDGET_STATES["beta"].seq .. ":" .. WIDGET_STATES["beta"].presence .. ":" .. beta.callback())
+"#;
+            let script = driver
+                .replace("REPLACE_INITIAL", &self.initial_artifact)
+                .replace("REPLACE_V1", &v1)
+                .replace("REPLACE_V2", &v2);
+            let output = match super::exec_lua(&script) {
+                super::ExecOutcome::Output(output) => output,
+                super::ExecOutcome::Errored(error) => panic!("state transition artifact failed: {error}"),
+            };
+            output
+                .lines()
+                .filter_map(|line| line.strip_prefix("__STATE__"))
+                .map(str::to_string)
+                .collect()
+        }
+
+        fn run_body_script(&self, overlay: String) -> Vec<String> {
+            let driver = r#"
+_G.HOT_RELOAD = true
+local function published_plan()
+  return (_G.__ROCK_DEFINITION_PLAN or {}).widgets
+end
+REPLACE_INITIAL
+local plan = _G.__ROCK_LIFECYCLE_PLAN.wire
+assert(plan ~= nil and plan.len == 1, "body fixture wire population")
+plan._data[1].func()
+WIDGET_STATES["beta"].seq = 41
+WIDGET_STATES["beta"].presence = 1
+REPLACE_OVERLAY
+plan._data[1].func()
+local beta
+plan = published_plan()
+for i = 1, plan.len do
+  if plan._data[i].key == "beta" then beta = plan._data[i].definition end
+end
+assert(beta ~= nil, "body overlay retained beta definition")
+io.write("__STATE__body:" .. WIDGET_STATES["beta"].seq .. ":" .. WIDGET_STATES["beta"].presence .. ":" .. beta.callback() .. "\n")
+"#;
+            let script = driver
+                .replace("REPLACE_INITIAL", &self.initial_artifact)
+                .replace("REPLACE_OVERLAY", &overlay);
+            let output = match super::exec_lua(&script) {
+                super::ExecOutcome::Output(output) => output,
+                super::ExecOutcome::Errored(error) => panic!("body transition artifact failed: {error}"),
+            };
+            output
+                .lines()
+                .filter_map(|line| line.strip_prefix("__STATE__"))
+                .map(str::to_string)
+                .collect()
+        }
+
+        fn run_materialization_failure_script(&self, failed_artifact: String) -> Vec<String> {
+            let driver = r#"
+_G.HOT_RELOAD = true
+local function published_plan()
+  return (_G.__ROCK_DEFINITION_PLAN or {}).widgets
+end
+REPLACE_INITIAL
+local plan = _G.__ROCK_LIFECYCLE_PLAN.wire
+assert(plan ~= nil and plan.len == 1, "materialization fixture wire population")
+plan._data[1].func()
+WIDGET_STATES["alpha"].seq = 9
+WIDGET_STATES["alpha"].presence = 1
+WIDGET_STATES["beta"].seq = 41
+WIDGET_STATES["beta"].presence = 1
+
+local ok = pcall(function()
+REPLACE_FAILED
+end)
+assert(not ok, "the materialization failure must be observed")
+assert(_G.__rock_definition_plan_pending ~= nil, "failed materialization must leave a pending plan for abort")
+__rock_code_slot_abort()
+assert(_G.__rock_definition_plan_pending == nil, "definition plan abort did not clear pending state")
+plan = published_plan()
+assert(plan.len == 2, "failed materialization replaced old definitions")
+assert(plan._data[1].key == "alpha" and plan._data[2].key == "beta", "old definitions were not retained")
+assert(plan._data[1].definition.key == "alpha" and plan._data[2].definition.key == "beta", "old published definitions were not retained")
+assert(WIDGET_STATES["alpha"].seq == 9 and WIDGET_STATES["alpha"].presence == 1, "alpha state changed")
+assert(WIDGET_STATES["beta"].seq == 41 and WIDGET_STATES["beta"].presence == 1, "beta state changed")
+assert(WIDGET_STATES["gamma"] == nil, "failed materialization leaked gamma state")
+io.write("__STATE__old:" .. plan.len .. ":" .. plan._data[1].key .. ":" .. plan._data[2].key .. ":" .. WIDGET_STATES["alpha"].seq .. ":" .. WIDGET_STATES["alpha"].presence .. ":" .. WIDGET_STATES["beta"].seq .. ":" .. WIDGET_STATES["beta"].presence .. "\n")
+"#;
+            let script = driver
+                .replace("REPLACE_INITIAL", &self.initial_artifact)
+                .replace("REPLACE_FAILED", &failed_artifact);
+            let output = match super::exec_lua(&script) {
+                super::ExecOutcome::Output(output) => output,
+                super::ExecOutcome::Errored(error) => panic!("materialization failure artifact failed: {error}"),
+            };
+            output
+                .lines()
+                .filter_map(|line| line.strip_prefix("__STATE__"))
+                .map(str::to_string)
+                .collect()
+        }
+    }
+}
+
+#[cfg(test)]
+mod wire_transition_tests {
+    use super::super::{SkullReload, SkullStone};
+    use std::path::PathBuf;
+
+    const V0: &str = r#"
+@lifecycle(phase="wire", owner="session")
+deco init wire {}
+
+const DIRECT: int = 1
+const BASE: int = 2
+const DERIVED: int = BASE + 1
+const UNRELATED: int = 9
+
+fn unrelated() -> int { return UNRELATED }
+@wire fn plain_wire() { let _ = unrelated() }
+@wire(onchange=[DIRECT]) fn direct_wire() { let _ = DIRECT }
+@wire(onchange=[DERIVED]) fn transitive_wire() { let _ = DERIVED }
+fn main() {}
+"#;
+
+    fn boot(source: &str) -> (tempfile::TempDir, SkullStone, PathBuf, PathBuf, PathBuf) {
+        let dir = tempfile::tempdir().expect("wire transition tempdir");
+        let root = dir.path().to_str().expect("wire transition root").to_string();
+        let main = dir.path().join("main.lua");
+        let incremental = dir.path().join("incremental.lua");
+        let source_path = dir.path().join("main.rock");
+        std::fs::write(&source_path, source).expect("initial wire source");
+        let stone = SkullStone::init(&root, &main, &incremental).expect("initial wire build");
+        (dir, stone, main, incremental, source_path)
+    }
+
+    fn replace_source(
+        stone: &mut SkullStone,
+        source_path: &PathBuf,
+        source: &str,
+        main: &PathBuf,
+        incremental: &PathBuf,
+    ) -> anyhow::Result<SkullReload> {
+        std::fs::write(source_path, source).expect("wire replacement source");
+        stone.recompile(std::slice::from_ref(source_path), main, incremental)
+    }
+
+    #[test]
+    fn compatible_wire_edits_overlay_and_structural_changes_take_full_path() {
+        let (_dir, mut stone, main, incremental, source_path) = boot(V0);
+        let baseline = std::fs::read_to_string(&main).expect("wire baseline");
+        assert!(baseline.contains("__ROCK_LIFECYCLE_PLAN"), "baseline must publish LifecyclePlan");
+
+        let unrelated = V0.replace("return UNRELATED", "return UNRELATED + 1");
+        assert!(matches!(
+            replace_source(&mut stone, &source_path, &unrelated, &main, &incremental),
+            Ok(SkullReload::Incremental { .. })
+        ));
+        let overlay = std::fs::read_to_string(&incremental).expect("wire overlay");
+        assert!(overlay.contains("__rock_lifecycle_plan_stage("));
+        assert!(overlay.contains("__rock_code_slot_publish()"));
+
+        let direct = unrelated.replace("const DIRECT: int = 1", "const DIRECT: int = 2");
+        assert!(matches!(
+            replace_source(&mut stone, &source_path, &direct, &main, &incremental),
+            Ok(SkullReload::Incremental { .. })
+        ));
+
+        let structural = direct.replace(
+            "@wire(onchange=[DIRECT])",
+            "@wire(onchange=[BASE])",
+        );
+        assert!(matches!(
+            replace_source(&mut stone, &source_path, &structural, &main, &incremental),
+            Ok(SkullReload::Full { .. })
+        ));
+        assert!(!incremental.exists(), "full LifecyclePlan transition must wipe the overlay");
+        let full = std::fs::read_to_string(&main).expect("structural wire artifact");
+        assert_ne!(full, baseline, "structural wire transition must publish the candidate artifact");
+
+        let (_dir_added, mut added_stone, added_main, added_incremental, added_source) = boot(V0);
+        let added = format!(
+            "{V0}\n@wire(onchange=[UNRELATED]) fn added_wire() {{ let _ = UNRELATED }}\n"
+        );
+        assert!(matches!(
+            replace_source(
+                &mut added_stone,
+                &added_source,
+                &added,
+                &added_main,
+                &added_incremental,
+            ),
+            Ok(SkullReload::Full { .. })
+        ));
+        assert!(!added_incremental.exists(), "wire addition must take the full path");
+    }
+
+    #[test]
+    fn gated_wire_removal_requires_restart_and_keeps_the_last_good_artifact() {
+        let (_dir, mut stone, main, incremental, source_path) = boot(V0);
+        let baseline = std::fs::read_to_string(&main).expect("wire baseline");
+        let removed = V0.replace("@wire(onchange=[DIRECT]) fn direct_wire() { let _ = DIRECT }\n", "");
+        let reload = replace_source(&mut stone, &source_path, &removed, &main, &incremental)
+            .expect("gated removal route");
+        match reload {
+            SkullReload::FullRequired { reasons } => assert!(
+                reasons.iter().any(|reason| reason.contains("removing a gated @wire")),
+                "removal reason must request a fresh projection: {reasons:?}"
+            ),
+            other => panic!("gated removal must not publish live state: {other:?}"),
+        }
+        assert_eq!(std::fs::read_to_string(&main).expect("retained artifact"), baseline);
+        assert_eq!(
+            stone.source_text(&source_path).as_deref(),
+            Some(removed.as_str()),
+            "the current source may remain restart-pending while the published artifact stays old"
+        );
+    }
+
+    #[test]
+    fn failed_compile_and_failed_publication_retain_last_good_wire_artifacts() {
+        let (_dir, mut stone, main, incremental, source_path) = boot(V0);
+        let baseline = std::fs::read_to_string(&main).expect("wire baseline");
+        let invalid = V0.replace("@wire(onchange=[DIRECT])", "@wire(onchange=[UNKNOWN])");
+        assert!(
+            replace_source(&mut stone, &source_path, &invalid, &main, &incremental).is_err(),
+            "an unknown dependency must fail before publication"
+        );
+        assert_eq!(std::fs::read_to_string(&main).expect("last-good main"), baseline);
+        assert_eq!(stone.source_text(&source_path).as_deref(), Some(V0));
+
+        let blocked = source_path.parent().unwrap().join("blocked-incremental");
+        std::fs::create_dir(&blocked).expect("blocked publication directory");
+        let body_edit = V0.replace("return UNRELATED", "return UNRELATED + 1");
+        std::fs::write(&source_path, &body_edit).expect("body edit");
+        let failed = stone.recompile(
+            std::slice::from_ref(&source_path),
+            &main,
+            &blocked,
+        );
+        assert!(failed.is_err(), "a failed overlay write must surface");
+        assert_eq!(std::fs::read_to_string(&main).expect("main after failed publication"), baseline);
+        assert_eq!(stone.source_text(&source_path).as_deref(), Some(V0));
+    }
+}
+
+#[cfg(test)]
 mod force_full_tests {
     //! `force_full` is the stone restart-path canonicalizer: after body edits
     //! have accumulated into `incremental.lua` (overlaying a stale `main.lua`),
@@ -3126,12 +3833,12 @@ mod force_full_tests {
         );
     }
 
-    /// A recompile that hits a type error bails but leaves the session mutated
-    /// into the broken state. The stone restart path then calls `force_full` to
-    /// fold the overlay -- it must re-gate on diagnostics and refuse to write a
-    /// partial `main.lua`, else the respawned luajit loads broken code.
+    /// A recompile that hits a type error must retain the last-good compiler
+    /// Session as well as the last-good written artifact. The restart fold can
+    /// therefore proceed against the retained program instead of discovering a
+    /// broken intermediate state.
     #[test]
-    fn force_full_rejects_broken_session_after_failed_recompile() {
+    fn failed_recompile_retains_session_and_last_good_artifact() {
         let dir = tempfile::tempdir().expect("tempdir");
         let dir_str = dir.path().to_str().unwrap().to_string();
         let src = |p: &str| dir.path().join(p);
@@ -3146,20 +3853,21 @@ mod force_full_tests {
         let mut skull = SkullStone::init(&dir_str, &main_lua, &inc_lua).expect("init v1");
         let main_v1 = std::fs::read_to_string(&main_lua).expect("main.lua after init");
 
-        // Edit to a broken v2 (calls a non-existent function). recompile bails,
-        // but the session is now mutated into the broken state.
+        // Edit to a broken v2 (calls a non-existent function). recompile bails
+        // and must restore the v1 compiler Session before returning.
         let v2 = "fn helper() -> int { 3 }\nfn use_it() -> int { nope() }\n";
         std::fs::write(&rock, v2).unwrap();
         let reload = skull.recompile(&[rock.clone()], &main_lua, &inc_lua);
         assert!(reload.is_err(), "recompile must bail on the broken edit");
 
-        // The restart fold must refuse rather than emit a partial program.
+        // A fold after the failed update now sees the retained v1 Session and
+        // succeeds without changing the last-good artifact.
         let res = skull.force_full(&main_lua, &inc_lua);
-        assert!(res.is_err(), "force_full must reject a broken session");
+        assert!(res.is_ok(), "force_full must retain the previous good Session");
         assert_eq!(
             std::fs::read_to_string(&main_lua).unwrap(),
             main_v1,
-            "force_full must leave the last-good main.lua untouched, not overwrite with a partial build"
+            "a failed recompile must leave the last-good main.lua untouched"
         );
     }
 }

@@ -1,7 +1,7 @@
 //! Mechanism J of `docs/nobox-case-matrix.md`: marking a global `nobox` must not
 //! change what reflection shows. Its storage IS its leaf globals, so the registry
-//! publishes the logical name and `__ROCK_NOBOX_GLOBALS` carries the
-//! rebuild/take-apart pair that `__rock_global_get`/`_set` call.
+//! publishes the logical StateSchema entry and `__ROCK_STATE_NOBOX` carries the
+//! rebuild/take-apart pair that the active Session adapter calls.
 //!
 //! Three properties, all of which a wrong fix breaks differently: the dump reads
 //! logically (identical to the unmarked control), the persisted keyframe records
@@ -27,8 +27,8 @@ fn workspace_root() -> &'static Path {
         .expect("repo root")
 }
 
-/// A one-global project. `marker` prefixes the decl: "" or "nobox ". The registry is keyed by PACKAGE and
-/// `build_rock_globals_registry` bails when the package map is empty, so a real
+/// A one-global project. `marker` prefixes the decl: "" or "nobox ". Metadata
+/// is keyed by PACKAGE and the host projection is empty without a package map, so a real
 /// `stick.toml` is required -- a single `.rock` file reproduces nothing. The run
 /// must also start the engine (`stone_run_game`), or no dump is produced at all.
 fn dump_one_global_project(pkg: &str, marker: &str) -> serde_json::Value {
@@ -131,15 +131,47 @@ fn marked_global_reflects_logically() {
     );
 }
 
+/// Opaque Lua code sees the logical no-box global through the same active
+/// Session adapter as generated code, including during frame initialization.
+#[test]
+#[ignore = "spawns `rock frame` against a generated project (-P full)"]
+fn opaque_lua_nobox_access_uses_the_active_session() {
+    let pkg = dump_source_project(
+        "nobox_opaque_probe",
+        r#"nobox value Probe { x: int, y: int }
+
+global SPOT: Probe = Probe { x: 3, y: 4 }
+global WITNESS: int = -1
+
+@nomangle inline(lua) fn raw_probe() -> int = """
+    local value = _G.SPOT
+    _G.SPOT = value
+    return value.x
+"""
+
+@update
+fn on_update() {
+    if WITNESS == -1 {
+        WITNESS = raw_probe()
+    }
+}
+"#,
+        2,
+    );
+    assert_eq!(
+        pkg.get("WITNESS"),
+        Some(&serde_json::json!(3)),
+        "opaque Lua must read and write the no-box logical global through the active Session"
+    );
+}
+
 /// A snapshot round-trip over a `nobox` global, driven from a frame hook: take,
 /// clobber, restore, read the logical field back.
 ///
 /// This is the property J's fix ENDANGERS, not a bug -- it passes today and must
-/// keep passing. Restore works right now precisely BECAUSE the registry publishes
-/// physical leaves: they are real `_G` entries, so the consumers' `_G[name]` read
-/// and write hit the actual storage. Moving the registry to the logical name makes
-/// the reconstruct/destructure accessors load-bearing for exactly this path, so a
-/// fix that only relabels the dump would break it.
+/// keep passing. Restore goes through the logical StateSchema adapter, whose
+/// physical leaves are Session-owned, so a dump-only migration cannot leave
+/// snapshot restore on a second authority.
 #[test]
 #[ignore = "spawns `rock frame` against a generated project (-P full)"]
 fn marked_global_snapshot_round_trips() {
@@ -172,7 +204,7 @@ fn on_update(dt: float) {
     );
 }
 
-/// The keyframe stores the registry's names, so this is what reaches persisted
+/// The keyframe stores StateSchema identities, so this is what reaches persisted
 /// replay checkpoints and save files -- the reason a `--dump-state`-only fix would
 /// not have been one.
 #[test]
@@ -212,7 +244,7 @@ fn on_update(dt: float) {
     assert_eq!(
         keys,
         vec!["SPOT"],
-        "the keyframe must record the logical name, not physical leaves -- these \
+        "the keyframe must record the logical StateSchema identity, not physical leaves -- these \
          keys are persisted into replay checkpoints and saves"
     );
 }
@@ -319,7 +351,7 @@ fn emit_project_lua(pkg: &str, source: &str) -> String {
     std::fs::read_to_string(out.path().join("main.lua")).expect("read emitted main.lua")
 }
 
-/// A build with NO `nobox` globals must still RESET `__ROCK_NOBOX_GLOBALS`.
+/// A build with NO `nobox` globals must still RESET `__ROCK_STATE_NOBOX`.
 ///
 /// A full hot reload re-executes the chunk in the LIVE process
 /// (`stone/engine/hot_reload.rock`, `run_loaded_chunk`), so anything the new
@@ -338,8 +370,8 @@ fn a_build_with_no_nobox_globals_still_resets_the_accessor_table() {
         "value Probe { x: int, y: int }\n\nglobal SPOT: Probe = Probe { x: 3, y: 4 }\n",
     );
     assert!(
-        lua.contains("_G.__ROCK_NOBOX_GLOBALS = {"),
-        "a build with no nobox globals must still assign __ROCK_NOBOX_GLOBALS, or a \
+        lua.contains("_G.__ROCK_STATE_NOBOX = {"),
+        "a build with no nobox globals must still assign __ROCK_STATE_NOBOX, or a \
          reload inherits the previous build's accessors"
     );
 }

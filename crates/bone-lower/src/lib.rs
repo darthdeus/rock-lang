@@ -8,7 +8,8 @@ use bone_core::{
     hir::{
         AsKind, BindingInfo, BindingKind, BindingPattern, Callee, DecoratorDef, EnumVariantDef,
         Expr, Function, GlobalDef, InterpPart, InterpSpec, MatchArm, ParamDecl, Pattern,
-        RecordPatField, Scope, Statement, StructLitField, TyId, TypeCtor, TypeExpr, VarId,
+        RecordPatField, Scope, StateMetadata, StateOwnership, StateRealization,
+        StateWorldPolicy, Statement, StructLitField, TyId, TypeCtor, TypeExpr, VarId,
         VariantArgs, VariantPayload,
     },
     prelude::*,
@@ -2498,9 +2499,11 @@ pub fn lower_global(
     ctx: &mut LowerCtx,
     a: &Ast,
     g: &skull_parser::GlobalDef,
+    annotations: &[skull_parser::Annotation],
 ) -> Result<(), CompilerError> {
     let name = g.name.name;
     let mut body = Body::default();
+    let state_metadata = lower_state_metadata(a, annotations)?;
 
     let ty = match &g.ty {
         Some(te) => lower_type_expr(ctx, a, &mut body, a.te(te))?,
@@ -2528,6 +2531,7 @@ pub fn lower_global(
         ty,
         span: g.span,
         is_const: g.is_const,
+        state_metadata,
     });
 
     if ctx.module.global_by_name.insert(name, idx).is_some() {
@@ -2543,6 +2547,95 @@ pub fn lower_global(
     );
 
     Ok(())
+}
+
+fn lower_state_metadata(
+    ast: &Ast,
+    annotations: &[skull_parser::Annotation],
+) -> Result<StateMetadata, CompilerError> {
+    let annotations = lower_annotations(ast, annotations);
+    let Some(annotation) = annotations.iter().find(|annotation| annotation.name.name == "state") else {
+        return Ok(StateMetadata::default());
+    };
+    if annotations
+        .iter()
+        .filter(|candidate| candidate.name.name == "state")
+        .count()
+        != 1
+    {
+        comp_error!(annotation.span, "a global may have only one `@state` annotation");
+    }
+
+    let mut metadata = StateMetadata::default();
+    let mut world_explicit = false;
+    let mut realization_explicit = false;
+    for arg in &annotation.args {
+        let key = arg.name.as_ref().expect("state annotation arguments were validated");
+        let value = match &arg.value {
+            bone_core::hir::AnnoValue::Ident(value) => value.name.as_str(),
+            _ => unreachable!("state annotation values were validated"),
+        };
+        match key.name.as_str() {
+            "ownership" => {
+                metadata.ownership = match value {
+                    "session" => StateOwnership::Session,
+                    "host_projection" => StateOwnership::HostProjection,
+                    "runner_diagnostic" => StateOwnership::RunnerDiagnostic,
+                    "unsupported" => StateOwnership::Unsupported,
+                    _ => comp_error!(
+                        annotation.span,
+                        "unknown StateImage ownership `{value}`"
+                    ),
+                };
+            }
+            "world" => {
+                world_explicit = true;
+                metadata.world = match value {
+                    "include" => StateWorldPolicy::Include,
+                    "boot_only" => StateWorldPolicy::BootOnly,
+                    "exclude" => StateWorldPolicy::Exclude,
+                    _ => comp_error!(annotation.span, "unknown StateImage world policy `{value}`"),
+                };
+            }
+            "realization" => {
+                realization_explicit = true;
+                metadata.realization = match value {
+                    "fresh_session" => StateRealization::FreshSession,
+                    "rebuild_host_projection" => StateRealization::RebuildHostProjection,
+                    "font" => StateRealization::Font,
+                    "asset_cache" => StateRealization::AssetCache,
+                    "asset_paths" => StateRealization::AssetPaths,
+                    "process_window" => StateRealization::ProcessWindow,
+                    "runner_reset_nil" => StateRealization::RunnerResetNil,
+                    "runner_reset_int" => StateRealization::RunnerResetInt,
+                    "runner_reset_bool" => StateRealization::RunnerResetBool,
+                    "runner_reset_true" => StateRealization::RunnerResetTrue,
+                    "runner_reset_string" => StateRealization::RunnerResetString,
+                    "runner_rebind" => StateRealization::RunnerRebind,
+                    "reject" => StateRealization::Reject,
+                    _ => comp_error!(annotation.span, "unknown StateImage realization `{value}`"),
+                };
+            }
+            _ => unreachable!("state annotation keys were validated"),
+        }
+    }
+    if !world_explicit {
+        metadata.world = match metadata.ownership {
+            StateOwnership::Session => StateWorldPolicy::Include,
+            StateOwnership::HostProjection
+            | StateOwnership::RunnerDiagnostic
+            | StateOwnership::Unsupported => StateWorldPolicy::Exclude,
+        };
+    }
+    if !realization_explicit {
+        metadata.realization = match metadata.ownership {
+            StateOwnership::Session => StateRealization::FreshSession,
+            StateOwnership::HostProjection => StateRealization::RebuildHostProjection,
+            StateOwnership::RunnerDiagnostic => StateRealization::RunnerRebind,
+            StateOwnership::Unsupported => StateRealization::Reject,
+        };
+    }
+    Ok(metadata)
 }
 
 fn lower_pattern_value(
@@ -2816,6 +2909,7 @@ pub fn lower_decorator_def(
     ctx: &mut LowerCtx,
     a: &Ast,
     d: &skull_parser::DecoratorDef,
+    annotations: &[skull_parser::Annotation],
 ) -> Result<Idx<DecoratorDef>, CompilerError> {
     ctx.generics_in_scope.clear();
     let mut body = Body::default();
@@ -2907,6 +3001,7 @@ pub fn lower_decorator_def(
         span: d.span,
         param_decls,
         num_required,
+        annotations: lower_annotations(a, annotations),
     });
 
     ctx.module.insert_body(BodyOwner::Decorator(idx), body);
@@ -2946,6 +3041,16 @@ fn classify_anno_value(a: &Ast, e: Idx<ExprData>) -> hir::AnnoValue {
         ExprKind::Bool(b) => hir::AnnoValue::Bool(*b),
         ExprKind::String(s) => hir::AnnoValue::String(*s),
         ExprKind::Ident(id) => hir::AnnoValue::Ident(id.clone()),
+        ExprKind::ArrayLiteral(items) => {
+            let names = items
+                .iter()
+                .map(|item| match &a.e(item).kind {
+                    ExprKind::Ident(id) => Some(id.clone()),
+                    _ => None,
+                })
+                .collect::<Option<Vec<_>>>();
+            names.map_or(hir::AnnoValue::Other, hir::AnnoValue::IdentList)
+        }
 
         ExprKind::UnaryMinus(inner) => match &a.e(inner).kind {
             ExprKind::Int(i, _) => hir::AnnoValue::Int(-*i),

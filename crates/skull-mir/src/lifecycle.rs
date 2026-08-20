@@ -1,0 +1,819 @@
+use bone_semantic::hir::{AnnoValue, BodyOwner, Expr};
+use bone_semantic::inference::Workspace;
+use bone_semantic::prelude::{CompilerError, Idx, ModuleId};
+use ustr::Ustr;
+
+use crate::code_identity::{CodeIdentity, CodeOwner, CodeOwnerKind};
+use crate::code_identity::CodeArtifact;
+use crate::instance::Instance;
+use crate::mir::FuncRef;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LifecycleDependency {
+    pub identity: CodeIdentity,
+    pub fingerprint: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LifecycleQualification {
+    Plain,
+    OnChange { dependencies: Vec<LifecycleDependency> },
+}
+
+impl LifecycleQualification {
+    pub fn is_gated(&self) -> bool {
+        matches!(self, Self::OnChange { .. })
+    }
+
+    pub fn dependencies(&self) -> &[LifecycleDependency] {
+        match self {
+            Self::Plain => &[],
+            Self::OnChange { dependencies } => dependencies,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LifecycleEntry {
+    pub phase: Ustr,
+    pub owner: Ustr,
+    pub identity: CodeIdentity,
+    pub diagnostic_name: Ustr,
+    pub stage: i64,
+    pub declaration_ordinal: usize,
+    pub qualification: LifecycleQualification,
+    pub body_fingerprint: u64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LifecycleCensus {
+    pub declarations: usize,
+    pub applications: usize,
+    pub admitted: usize,
+    pub plain: usize,
+    pub gated: usize,
+    pub dependency_edges: usize,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LifecyclePlan {
+    pub entries: Vec<LifecycleEntry>,
+    pub census: LifecycleCensus,
+}
+
+impl LifecyclePlan {
+    pub fn wire_structure_changed(&self, next: &Self) -> bool {
+        if self.entries.len() != next.entries.len() {
+            return true;
+        }
+        self.entries.iter().zip(&next.entries).any(|(old, candidate)| {
+            old.phase != candidate.phase
+                || old.owner != candidate.owner
+                || old.identity != candidate.identity
+                || old.stage != candidate.stage
+                || old.declaration_ordinal != candidate.declaration_ordinal
+                || qualification_structure_changed(&old.qualification, &candidate.qualification)
+        })
+    }
+
+    pub fn removed_gated_wire(&self, next: &Self) -> bool {
+        self.entries.iter().any(|old| {
+            old.phase == "wire"
+                && old.qualification.is_gated()
+                && !next.entries.iter().any(|candidate| candidate.identity == old.identity)
+        })
+    }
+}
+
+fn qualification_structure_changed(
+    old: &LifecycleQualification,
+    candidate: &LifecycleQualification,
+) -> bool {
+    match (old, candidate) {
+        (LifecycleQualification::Plain, LifecycleQualification::Plain) => false,
+        (
+            LifecycleQualification::OnChange { dependencies: old },
+            LifecycleQualification::OnChange { dependencies: candidate },
+        ) => old.iter().map(|dependency| &dependency.identity).ne(
+            candidate.iter().map(|dependency| &dependency.identity),
+        ),
+        _ => true,
+    }
+}
+
+impl LifecycleQualification {
+    pub fn tag(&self) -> &'static str {
+        match self {
+            Self::Plain => "plain",
+            Self::OnChange { .. } => "onchange",
+        }
+    }
+}
+
+fn phase_rank(phase: Ustr) -> Option<u8> {
+    Some(match phase.as_str() {
+        "early_init" => 0,
+        "init" => 1,
+        "late_init" => 2,
+        "wire" => 3,
+        "update" => 4,
+        "late_update" => 5,
+        "draw" => 6,
+        "late_draw" => 7,
+        "post_imgui_draw" => 8,
+        "reset" => 9,
+        "shutdown" => 10,
+        _ => return None,
+    })
+}
+
+fn string_arg(ann: &bone_semantic::hir::Annotation, name: &str) -> Option<Ustr> {
+    ann.args.iter().find_map(|a| {
+        (a.name.as_ref().is_some_and(|n| n.name.as_str() == name))
+            .then(|| match a.value {
+                AnnoValue::String(s) => Some(s),
+                _ => None,
+            })
+            .flatten()
+    })
+}
+
+fn int_expr(body: &bone_semantic::hir::Body, e: Idx<bone_semantic::hir::Expr>) -> Option<i64> {
+    match body.expr_arena[e] {
+        Expr::Int(n) => Some(n),
+        Expr::UnaryMinus(inner) => int_expr(body, inner)?.checked_neg(),
+        _ => None,
+    }
+}
+
+fn global_identity(
+    ws: &Workspace,
+    module: ModuleId,
+    global: Idx<bone_semantic::hir::GlobalDef>,
+) -> CodeIdentity {
+    CodeIdentity::Artifact(CodeOwner::Artifact {
+        kind: CodeOwnerKind::Global,
+        module: ws.module(module).file,
+        name: ws.module(module).globals[global].name,
+    })
+}
+
+fn global_locations(
+    ws: &Workspace,
+    name: Ustr,
+) -> Vec<(ModuleId, Idx<bone_semantic::hir::GlobalDef>)> {
+    ws.modules
+        .iter()
+        .filter_map(|module| module.global_by_name.get(&name).copied().map(|gid| (module.id, gid)))
+        .collect()
+}
+
+fn user_function_named(ws: &Workspace, name: Ustr) -> bool {
+    ws.functions_by_name.get(&name).is_some_and(|functions| {
+        functions
+            .iter()
+            .any(|(module, _)| *module != ModuleId::builtin())
+    })
+}
+
+fn ordered_global_locations(
+    ws: &Workspace,
+    names: impl IntoIterator<Item = Ustr>,
+) -> Result<Vec<(Ustr, ModuleId, Idx<bone_semantic::hir::GlobalDef>)>, CompilerError> {
+    let mut out = Vec::new();
+    for name in names {
+        let locations = global_locations(ws, name);
+        match locations.as_slice() {
+            [] => continue,
+            [(module, global)] => out.push((name, *module, *global)),
+            _ => {
+                return Err(CompilerError::new_no_location(format!(
+                    "@wire dependency `{name}` has an ambiguous global identity"
+                )));
+            }
+        }
+    }
+    out.sort_by_key(|(_, module, global)| (module.index(), u32::from(global.into_raw())));
+    Ok(out)
+}
+
+fn wire_dependency_identities(
+    ws: &Workspace,
+    names: &[skull_parser::Ident],
+    span: bone_semantic::prelude::Span,
+) -> Result<Vec<CodeIdentity>, CompilerError> {
+    let mut seen = std::collections::HashSet::new();
+    let mut identities = Vec::with_capacity(names.len());
+    for name in names {
+        if !seen.insert(name.name) {
+            return Err(CompilerError::new_with_label(
+                span,
+                format!("@wire(onchange=...) repeats dependency `{}`", name.name),
+            ));
+        }
+        let locations = global_locations(ws, name.name);
+        if !locations.is_empty() && user_function_named(ws, name.name) {
+            return Err(CompilerError::new_with_label(
+                name.span,
+                format!("@wire dependency `{}` has an ambiguous identity", name.name),
+            ));
+        }
+        let (module, global) = match locations.as_slice() {
+            [] => {
+                if user_function_named(ws, name.name) {
+                    return Err(CompilerError::new_with_label(
+                        name.span,
+                        format!("@wire dependency `{}` names a function; expected a top-level const", name.name),
+                    ));
+                }
+                return Err(CompilerError::new_with_label(
+                    name.span,
+                    format!("@wire dependency `{}` is unknown", name.name),
+                ));
+            }
+            [(module, global)] => (*module, *global),
+            _ => {
+                return Err(CompilerError::new_with_label(
+                    name.span,
+                    format!("@wire dependency `{}` has an ambiguous identity", name.name),
+                ));
+            }
+        };
+        if !ws.module(module).globals[global].is_const {
+            return Err(CompilerError::new_with_label(
+                name.span,
+                format!("@wire dependency `{}` is mutable; only top-level const is supported", name.name),
+            ));
+        }
+        identities.push(global_identity(ws, module, global));
+    }
+    if identities.is_empty() {
+        return Err(CompilerError::new_with_label(
+            span,
+            "@wire(onchange=...) requires a non-empty dependency list".to_string(),
+        ));
+    }
+    Ok(identities)
+}
+
+fn dependency_names_for_const(
+    ws: &Workspace,
+    module: ModuleId,
+    global: Idx<bone_semantic::hir::GlobalDef>,
+) -> Result<Vec<(Ustr, ModuleId, Idx<bone_semantic::hir::GlobalDef>)>, CompilerError> {
+    let Some(inference) = ws
+        .inference(module)
+        .and_then(|inference| inference.per_fn.get(&BodyOwner::Global(global)))
+    else {
+        return Err(CompilerError::new_no_location(format!(
+            "@wire cannot fingerprint const `{}` because its initializer has no dependency record",
+            ws.module(module).globals[global].name
+        )));
+    };
+    let dependencies = ordered_global_locations(ws, inference.deps.iter().copied())?;
+    for (name, dependency_module, dependency_global) in &dependencies {
+        if !ws.module(*dependency_module).globals[*dependency_global].is_const {
+            return Err(CompilerError::new_no_location(format!(
+                "@wire const closure for `{}` reaches mutable global `{name}`",
+                ws.module(module).globals[global].name
+            )));
+        }
+    }
+    for name in inference.deps.iter().copied() {
+        let locations = global_locations(ws, name);
+        let user_function = user_function_named(ws, name);
+        if !locations.is_empty() && user_function {
+            return Err(CompilerError::new_no_location(format!(
+                "@wire const closure for `{}` reaches ambiguous identity `{name}`",
+                ws.module(module).globals[global].name
+            )));
+        }
+        if locations.is_empty()
+            && user_function
+            && ws.functions_by_name.get(&name).is_some_and(|functions| {
+                functions.iter().any(|(module, function)| {
+                    *module != ModuleId::builtin()
+                        && bone_semantic::hir::operator_entry(name.as_str()).is_none()
+                        && !crate::intrinsics::is_intrinsic(&ws.module(*module).functions[*function])
+                })
+            })
+        {
+            return Err(CompilerError::new_no_location(format!(
+                "@wire const closure for `{}` reaches function `{name}`, whose value is not a const/comptime identity",
+                ws.module(module).globals[global].name
+            )));
+        }
+    }
+    Ok(dependencies)
+}
+
+fn dependency_closure(
+    ws: &Workspace,
+    identities: &[CodeIdentity],
+) -> Result<Vec<CodeIdentity>, CompilerError> {
+    let mut locations = std::collections::HashMap::new();
+    for module in ws.modules.iter() {
+        for (global, definition) in module.globals.iter() {
+            if definition.is_const {
+                locations.insert(definition.name, (module.id, global));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut pending = std::collections::VecDeque::from(identities.to_vec());
+    while let Some(identity) = pending.pop_front() {
+        if !seen.insert(identity.clone()) {
+            continue;
+        }
+        out.push(identity.clone());
+        let CodeIdentity::Artifact(CodeOwner::Artifact { kind: CodeOwnerKind::Global, name, .. }) = identity else {
+            continue;
+        };
+        let Some(&(module, global)) = locations.get(&name) else {
+            return Err(CompilerError::new_no_location(format!(
+                "@wire dependency `{name}` has no compiler-owned const declaration"
+            )));
+        };
+        let dependencies = dependency_names_for_const(ws, module, global)?;
+        for (_, dependency_module, dependency_global) in dependencies {
+            pending.push_back(global_identity(ws, dependency_module, dependency_global));
+        }
+    }
+    Ok(out)
+}
+
+fn wire_qualification(
+    ws: &Workspace,
+    app: &bone_semantic::hir::Annotation,
+) -> Result<LifecycleQualification, CompilerError> {
+    if app.name.name.as_str() != "wire" {
+        return Ok(LifecycleQualification::Plain);
+    }
+    if app.args.is_empty() {
+        return Ok(LifecycleQualification::Plain);
+    }
+    if app.args.len() != 1
+        || app.args[0]
+            .name
+            .as_ref()
+            .is_none_or(|name| name.name.as_str() != "onchange")
+    {
+        return Err(CompilerError::new_with_label(
+            app.span,
+            "@wire accepts either no arguments or one named onchange=[CONST, ...] argument".to_string(),
+        ));
+    }
+    let names = match &app.args[0].value {
+        AnnoValue::IdentList(names) => names,
+        _ => {
+            return Err(CompilerError::new_with_label(
+                app.span,
+                "@wire(onchange=...) requires a structured identifier list".to_string(),
+            ));
+        }
+    };
+    let declared = wire_dependency_identities(ws, names, app.span)?;
+    let dependencies = dependency_closure(ws, &declared)?
+        .into_iter()
+        .map(|identity| LifecycleDependency { identity, fingerprint: 0 })
+        .collect();
+    Ok(LifecycleQualification::OnChange { dependencies })
+}
+
+pub fn attach_artifact(
+    mut plan: LifecyclePlan,
+    artifact: &CodeArtifact,
+) -> Result<LifecyclePlan, CompilerError> {
+    for entry in &mut plan.entries {
+        let Some(fingerprint) = artifact.body_fingerprint(&entry.identity) else {
+            if entry.phase == "wire" {
+                return Err(CompilerError::new_no_location(format!(
+                    "LifecyclePlan has no emitted body fingerprint for wire `{}`",
+                    entry.diagnostic_name
+                )));
+            }
+            continue;
+        };
+        if entry.phase == "wire" && fingerprint == 0 {
+            return Err(CompilerError::new_no_location(format!(
+                "LifecyclePlan has no canonical body fingerprint for wire `{}`",
+                entry.diagnostic_name
+            )));
+        }
+        entry.body_fingerprint = fingerprint;
+        if let LifecycleQualification::OnChange { dependencies } = &mut entry.qualification {
+            for dependency in dependencies {
+                let Some(fingerprint) = artifact.body_fingerprint(&dependency.identity) else {
+                    return Err(CompilerError::new_no_location(format!(
+                        "LifecyclePlan has no canonical fingerprint for dependency of wire `{}`",
+                        entry.diagnostic_name
+                    )));
+                };
+                if fingerprint == 0 {
+                    return Err(CompilerError::new_no_location(format!(
+                        "LifecyclePlan has no canonical fingerprint for dependency of wire `{}`",
+                        entry.diagnostic_name
+                    )));
+                }
+                dependency.fingerprint = fingerprint;
+            }
+        }
+    }
+    Ok(plan)
+}
+
+pub fn collect_with_artifact(
+    ws: &Workspace,
+    artifact: &CodeArtifact,
+) -> Result<LifecyclePlan, CompilerError> {
+    attach_artifact(collect(ws)?, artifact)
+}
+
+pub fn collect(ws: &Workspace) -> Result<LifecyclePlan, CompilerError> {
+    let mut roles = std::collections::HashMap::new();
+    let mut census = LifecycleCensus::default();
+    for module in ws.modules.iter().filter(|m| m.id != ModuleId::builtin()) {
+        for (did, deco) in module.decorators.iter() {
+            let Some(meta) = deco
+                .annotations
+                .iter()
+                .find(|a| a.name.name.as_str() == "lifecycle")
+            else {
+                continue;
+            };
+            census.declarations += 1;
+            let phase = string_arg(meta, "phase").expect("validated lifecycle phase");
+            if phase_rank(phase).is_none() {
+                return Err(CompilerError::new_with_label(
+                    meta.span,
+                    format!("unsupported lifecycle phase `{phase}`"),
+                ));
+            }
+            let owner = string_arg(meta, "owner").expect("validated lifecycle owner");
+            if owner.as_str() != "session" {
+                return Err(CompilerError::new_with_label(
+                    meta.span,
+                    format!("unsupported lifecycle owner `{owner}`; expected `session`"),
+                ));
+            }
+            let stage_param = string_arg(meta, "stage_param");
+            let stage_index = match stage_param {
+                Some(name) => Some(
+                    deco.param_decls
+                        .iter()
+                        .position(|p| p.name == name)
+                        .ok_or_else(|| {
+                            CompilerError::new_with_label(
+                                meta.span,
+                                format!(
+                                    "lifecycle stage_param `{name}` is not a parameter of `{}`",
+                                    deco.name
+                                ),
+                            )
+                        })?,
+                ),
+                None if deco.param_decls.is_empty() => None,
+                None => {
+                    return Err(CompilerError::new_with_label(
+                        meta.span,
+                        format!(
+                            "lifecycle decorator `{}` has parameters but no stage_param",
+                            deco.name
+                        ),
+                    ));
+                }
+            };
+            roles.insert(deco.name, (module.id, did, phase, owner, stage_index));
+        }
+    }
+
+    let mut entries = Vec::new();
+    let mut ordinal = 0usize;
+    for module in ws.modules.iter().filter(|m| m.id != ModuleId::builtin()) {
+        for (fid, f) in module.functions.iter() {
+            for app in &f.annotations {
+                let Some(&(dmid, did, phase, owner, stage_index)) = roles.get(&app.name.name)
+                else {
+                    continue;
+                };
+                census.applications += 1;
+                if !f.generics.is_empty() || !f.param_decls.is_empty() || f.return_ty.is_some() {
+                    return Err(CompilerError::new_with_label(
+                        f.span,
+                        format!(
+                            "lifecycle target `{}` must be concrete, non-generic, zero-argument, and unit-returning",
+                            f.name
+                        ),
+                    ));
+                }
+                if f.backend != bone_semantic::hir::FnBackend::Any {
+                    return Err(CompilerError::new_with_label(
+                        f.span,
+                        format!(
+                            "lifecycle target `{}` must have a backend-neutral Rock body",
+                            f.name
+                        ),
+                    ));
+                }
+                let deco = &ws.module(dmid).decorators[did];
+                let stage = if let Some(i) = stage_index {
+                    let pname = deco.param_decls[i].name;
+                    if let Some(arg) = app
+                        .args
+                        .iter()
+                        .find(|a| a.name.as_ref().is_some_and(|n| n.name == pname))
+                    {
+                        match arg.value {
+                            AnnoValue::Int(n) => n,
+                            _ => {
+                                return Err(CompilerError::new_with_label(
+                                    app.span,
+                                    format!("lifecycle stage `{pname}` must be an integer literal"),
+                                ));
+                            }
+                        }
+                    } else {
+                        let body = &ws.module(dmid).bodies[&BodyOwner::Decorator(did)];
+                        let e = body.param_defaults.get(i).and_then(|e| *e).ok_or_else(|| {
+                            CompilerError::new_with_label(
+                                app.span,
+                                format!("lifecycle stage `{pname}` has no default"),
+                            )
+                        })?;
+                        int_expr(body, e).ok_or_else(|| {
+                            CompilerError::new_with_label(
+                                deco.span,
+                                format!(
+                                    "lifecycle stage default `{pname}` must be an integer literal"
+                                ),
+                            )
+                        })?
+                    }
+                } else {
+                    0
+                };
+                let qualification = wire_qualification(ws, app)?;
+                if qualification.is_gated() {
+                    census.gated += 1;
+                    census.dependency_edges += qualification.dependencies().len();
+                } else {
+                    census.plain += 1;
+                }
+                entries.push(LifecycleEntry {
+                    phase,
+                    owner,
+                    identity: CodeIdentity::Named(Instance::base(FuncRef {
+                        module: module.id,
+                        func: fid,
+                    })),
+                    diagnostic_name: f.name,
+                    stage,
+                    declaration_ordinal: ordinal,
+                    qualification,
+                    body_fingerprint: 0,
+                });
+                ordinal += 1;
+                census.admitted += 1;
+            }
+        }
+    }
+    entries.sort_by_key(|e| {
+        (
+            phase_rank(e.phase).expect("validated phase"),
+            e.stage,
+            e.declaration_ordinal,
+        )
+    });
+    Ok(LifecyclePlan { entries, census })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bone_semantic::semantic_passes::semantic_pass;
+
+    fn workspace(sources: &[(&str, &str)]) -> Workspace {
+        let mut modules = sources
+            .iter()
+            .map(|(file, src)| {
+                skull_parser::parse_module_clean(src, Ustr::from(*file)).expect("parse")
+            })
+            .collect::<Vec<_>>();
+        semantic_pass(&mut modules).expect("semantic")
+    }
+
+    #[test]
+    fn plan_reads_stage_defaults_and_orders_equal_stage_by_declaration() {
+        let ws = workspace(&[(
+            "plan.rock",
+            r#"
+            @lifecycle(phase="update", owner="session", stage_param="stage")
+            deco init tick(stage: int = 100) {}
+            @tick(stage=20) fn later() {}
+            @tick(stage=10) fn first() {}
+            @tick(stage=10) fn second() {}
+            @tick fn defaulted() {}
+        "#,
+        )]);
+        let plan = collect(&ws).expect("plan");
+        assert_eq!(plan.census.declarations, 1);
+        assert_eq!(plan.census.applications, 4);
+        assert_eq!(plan.census.admitted, 4);
+        assert_eq!(
+            plan.entries
+                .iter()
+                .map(|e| (e.diagnostic_name.as_str(), e.stage))
+                .collect::<Vec<_>>(),
+            vec![
+                ("first", 10),
+                ("second", 10),
+                ("later", 20),
+                ("defaulted", 100)
+            ]
+        );
+        assert!(plan.entries[0].declaration_ordinal < plan.entries[1].declaration_ordinal);
+    }
+
+    #[test]
+    fn qualified_wire_keeps_a_structured_identifier_list() {
+        let ws = workspace(&[(
+            "wire.rock",
+            r#"
+            @lifecycle(phase="wire", owner="session")
+            deco init wire {}
+            const GAME_VOLUME: int = 1
+            const ART_FILTER: int = 2
+            @wire(onchange=[GAME_VOLUME, ART_FILTER])
+            fn apply_game_config() {}
+            "#,
+        )]);
+        let function = ws
+            .modules
+            .iter()
+            .flat_map(|module| module.functions.values())
+            .find(|function| function.name.as_str() == "apply_game_config")
+            .expect("qualified wire function");
+        let annotation = function
+            .annotations
+            .iter()
+            .find(|annotation| annotation.name.name.as_str() == "wire")
+            .expect("wire annotation");
+        let argument = annotation
+            .args
+            .iter()
+            .find(|argument| argument.name.as_ref().is_some_and(|name| name.name.as_str() == "onchange"))
+            .expect("onchange argument");
+        match &argument.value {
+            AnnoValue::IdentList(names) => {
+                assert_eq!(names.iter().map(|name| name.name.as_str()).collect::<Vec<_>>(), vec!["GAME_VOLUME", "ART_FILTER"]);
+            }
+            other => panic!("qualified wire list was lowered as {other:?}"),
+        }
+    }
+
+    #[test]
+    fn qualified_wire_collects_declared_and_transitive_const_dependencies() {
+        let ws = workspace(&[(
+            "wire.rock",
+            r#"
+            @lifecycle(phase="wire", owner="session")
+            deco init wire {}
+            const BASE: int = 1
+            const DERIVED: int = BASE
+            const OTHER: int = 9
+            @wire(onchange=[DERIVED])
+            fn apply_game_config() {}
+            "#,
+        )]);
+        let plan = collect(&ws).expect("lifecycle plan");
+        let entry = plan
+            .entries
+            .iter()
+            .find(|entry| entry.diagnostic_name.as_str() == "apply_game_config")
+            .expect("qualified wire entry");
+        assert!(entry.qualification.is_gated());
+        assert_eq!(plan.census.gated, 1);
+        assert_eq!(plan.census.plain, 0);
+        assert_eq!(entry.qualification.dependencies().len(), 2);
+    }
+
+    fn wire_error(annotation: &str) -> String {
+        let ws = workspace(&[(
+            "wire.rock",
+            &format!(
+                r#"
+                @lifecycle(phase="wire", owner="session")
+                deco init wire {{}}
+                const IMMUTABLE: int = 1
+                global MUTABLE: int = 2
+                fn callable() {{}}
+                @wire(onchange={annotation})
+                fn apply_game_config() {{}}
+                "#
+            ),
+        )]);
+        collect(&ws).expect_err("unsupported dependency must reject").message
+    }
+
+    #[test]
+    fn qualified_wire_rejects_unsupported_dependency_identities() {
+        let cases = [
+            ("[IMMUTABLE, IMMUTABLE]", "repeats dependency"),
+            ("[]", "requires a non-empty dependency list"),
+            ("[MUTABLE]", "mutable"),
+            ("[callable]", "names a function"),
+            ("[UNKNOWN]", "is unknown"),
+            ("[IMMUTABLE.value]", "structured identifier list"),
+            ("[1]", "structured identifier list"),
+        ];
+        for (annotation, expected) in cases {
+            let message = wire_error(annotation);
+            assert!(message.contains(expected), "{annotation}: {message}");
+        }
+    }
+
+    #[test]
+    fn wire_structure_ignores_fingerprint_changes_but_rejects_shape_changes() {
+        let plain = workspace(&[(
+            "wire.rock",
+            r#"
+            @lifecycle(phase="wire", owner="session") deco init wire {}
+            @wire fn apply_game_config() {}
+            "#,
+        )]);
+        let gated = workspace(&[(
+            "wire.rock",
+            r#"
+            @lifecycle(phase="wire", owner="session") deco init wire {}
+            const A: int = 1
+            @wire(onchange=[A]) fn apply_game_config() {}
+            "#,
+        )]);
+        let plain_plan = collect(&plain).expect("plain plan");
+        let mut same_shape = plain_plan.clone();
+        same_shape.entries[0].body_fingerprint = 17;
+        assert!(!plain_plan.wire_structure_changed(&same_shape));
+        assert!(plain_plan.wire_structure_changed(&collect(&gated).expect("gated plan")));
+        assert!(!plain_plan.removed_gated_wire(&same_shape));
+        same_shape.entries[0].qualification = LifecycleQualification::OnChange {
+            dependencies: Vec::new(),
+        };
+        assert!(same_shape.removed_gated_wire(&LifecyclePlan::default()));
+    }
+
+    #[test]
+    fn same_named_cross_module_targets_keep_distinct_logical_identities() {
+        let ws = workspace(&[
+            (
+                "role.rock",
+                "@lifecycle(phase=\"draw\", owner=\"session\") deco init paint {}",
+            ),
+            ("a.rock", "@paint fn render() {}"),
+            ("b.rock", "@paint fn render() {}"),
+        ]);
+        let plan = collect(&ws).expect("plan");
+        assert_eq!(plan.entries.len(), 2);
+        assert_ne!(plan.entries[0].identity, plan.entries[1].identity);
+    }
+
+    #[test]
+    fn lifecycle_target_shape_rejects_before_emission() {
+        let ws = workspace(&[(
+            "bad.rock",
+            r#"
+            @lifecycle(phase="update", owner="session") deco init tick {}
+            @tick fn bad(x: int) {}
+        "#,
+        )]);
+        let err = collect(&ws).expect_err("parameterized lifecycle target must reject");
+        assert!(err.message.contains("zero-argument"), "{err:?}");
+    }
+
+    #[test]
+    fn post_imgui_draw_is_a_compiler_owned_role() {
+        let ws = workspace(&[(
+            "post-imgui.rock",
+            r#"
+            @lifecycle(phase="post_imgui_draw", owner="session", stage_param="stage")
+            deco init post_imgui_draw(stage: int = 100) {}
+            @post_imgui_draw(stage=20) fn later() {}
+            @post_imgui_draw(stage=10) fn first() {}
+        "#,
+        )]);
+        let plan = collect(&ws).expect("post_imgui_draw must be collected");
+        assert_eq!(plan.census.declarations, 1);
+        assert_eq!(plan.census.applications, 2);
+        assert_eq!(plan.census.admitted, 2);
+        assert_eq!(
+            plan.entries
+                .iter()
+                .map(|entry| (entry.phase.as_str(), entry.diagnostic_name.as_str(), entry.stage))
+                .collect::<Vec<_>>(),
+            vec![
+                ("post_imgui_draw", "first", 10),
+                ("post_imgui_draw", "later", 20),
+            ]
+        );
+    }
+}

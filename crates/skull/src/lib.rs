@@ -380,6 +380,7 @@ pub fn annotation_value_lua(v: &bone_semantic::hir::AnnoValue) -> Option<String>
         A::Bool(b) => b.to_string(),
         A::String(s) => format!("{:?}", s.as_str()),
         A::Ident(id) => id.name.as_str().to_string(),
+        A::IdentList(_) => return None,
         A::Other => return None,
     })
 }
@@ -435,13 +436,12 @@ fn runtime_prelude() -> &'static str {
     //   2. splitmix64 RNG (stdlib `random_*` inline(lua) bodies call
     //      `__rock_rng_next`/`__rock_rng_seed` by name); seeded from
     //      ROCK_TEST_SEED for deterministic test runs.
-    // The `{FN_MT}` placeholder is filled once from the canonical
-    // `skull_codegen_lua::FN_MT_PRELUDE` constant (one definition, shared with the
-    // codegen test harness) -- the record metatable is where the emitter's
-    // `setmetatable({..}, __rock_fn_mt)` output lands.
+    // The CodeRef runtime is appended by assembly only when this artifact has an
+    // escaping Rock function value. This keeps direct-call-only output free of
+    // slot machinery while retaining one canonical runtime definition.
     static PRELUDE: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
         let out = PRELUDE_TEMPLATE
-            .replace("{FN_MT}", skull_codegen_lua::FN_MT_PRELUDE)
+            .replace("{FN_MT}", "")
             .replace("{LEAF_VIEWS}", &skull_mir::lower::leaf_views_lua_table())
             .replace("{NB_PRIM_STORAGE}", &skull_mir::lower::nb_prim_storage_lua());
         // `str::replace` on a placeholder that drifted out of the template is a
@@ -501,35 +501,246 @@ end
 _G.__rock_nb_storage = __rock_nb_storage
 {NB_PRIM_STORAGE}
 if not _G.__rock_on_hot_reload then _G.__rock_on_hot_reload = {} end
--- THE way to read/write a global found by name in `__ROCK_GLOBALS`. A `nobox`
--- global has no slot under its own name -- its storage is its leaf globals -- so
--- a bare `_G[name]` would read nil and write a slot nothing else reads. The
--- rebuild/take-apart pair lives in `__ROCK_NOBOX_GLOBALS` (emitted per nobox
--- global); every other global falls through to `_G` unchanged.
-_G.__rock_global_get = function(name)
-  local a = _G.__ROCK_NOBOX_GLOBALS and _G.__ROCK_NOBOX_GLOBALS[name]
-  if a then return a.get() end
-  return _G[name]
+if not _G.__rock_session_new then
+  _G.__rock_session_new = function(schema_id)
+    return {
+      __rock_schema_id = schema_id,
+      __rock_state = {},
+      __rock_initialized = {},
+      __rock_initializer_keys = {},
+      __rock_rng_state = nil
+    }
+  end
+  _G.__rock_session_activate = function(session)
+    if type(session) ~= "table" or type(session.__rock_state) ~= "table"
+        or type(session.__rock_initialized) ~= "table" then
+      error("invalid Rock Session", 0)
+    end
+    local published = _G.__rock_state_schema_id
+    if published ~= nil and session.__rock_schema_id ~= published then
+      error("Rock StateSchema does not match the active Session", 0)
+    end
+    _G.__rock_active_session = session
+    _G.__rock_active_state = session.__rock_state
+    _G.__rock_active_initialized = session.__rock_initialized
+    return session
+  end
+  _G.__rock_session_current = function()
+    local session = _G.__rock_active_session
+    if not session then error("no active Rock Session", 0) end
+    return session
+  end
+  _G.__rock_state_has = function(key)
+    local initialized = _G.__rock_active_initialized
+    if not initialized then error("no active Rock Session", 0) end
+    return initialized[key] == true
+  end
+  _G.__rock_state_get = function(key)
+    local state = _G.__rock_active_state
+    if not state then error("no active Rock Session", 0) end
+    return state[key]
+  end
+  _G.__rock_state_set = function(key, value)
+    local state, initialized = _G.__rock_active_state, _G.__rock_active_initialized
+    if not state or not initialized then error("no active Rock Session", 0) end
+    state[key] = value
+    initialized[key] = true
+    return value
+  end
+  _G.__rock_state_prepare_static = function(value_key, done_key, initializer_key)
+    local session = _G.__rock_session_current()
+    local old = session.__rock_initializer_keys[value_key]
+    if old ~= nil and old ~= initializer_key then
+      session.__rock_state[value_key] = nil
+      session.__rock_initialized[value_key] = nil
+      session.__rock_state[done_key] = false
+      session.__rock_initialized[done_key] = true
+    end
+    session.__rock_initializer_keys[value_key] = initializer_key
+  end
+  _G.__rock_state_publish_schema = function(schema_id)
+    local session = _G.__rock_session_current()
+    if session.__rock_schema_id ~= nil and session.__rock_schema_id ~= schema_id then
+      error("Rock StateSchema changed; restart is required", 0)
+    end
+    session.__rock_schema_id = schema_id
+    rawset(_G, "__rock_state_schema_id", schema_id)
+    rawset(_G, "__rock_state_name_index", nil)
+  end
 end
-_G.__rock_global_set = function(name, v)
-  local a = _G.__ROCK_NOBOX_GLOBALS and _G.__ROCK_NOBOX_GLOBALS[name]
-  if a then a.set(v) else _G[name] = v end
+if not _G.__rock_active_session then
+  _G.__rock_session_activate(_G.__rock_session_new(nil))
+end
+_G.__rock_state_clear = function(key)
+  local session = _G.__rock_session_current()
+  session.__rock_state[key] = nil
+  session.__rock_initialized[key] = nil
+end
+_G.__rock_state_transaction_begin = function()
+  if rawget(_G, "__rock_state_transaction") ~= nil then return end
+  local session = _G.__rock_session_current()
+  local state, initialized, initializer_keys = {}, {}, {}
+  for key, value in pairs(session.__rock_state) do state[key] = value end
+  for key, value in pairs(session.__rock_initialized) do initialized[key] = value end
+  for key, value in pairs(session.__rock_initializer_keys) do initializer_keys[key] = value end
+  rawset(_G, "__rock_state_transaction", {
+    session = session,
+    schema_id = session.__rock_schema_id,
+    schema = rawget(_G, "__ROCK_STATE_SCHEMA"),
+    metadata = rawget(_G, "__ROCK_STATE_METADATA"),
+    nobox = rawget(_G, "__ROCK_STATE_NOBOX"),
+    name_index = rawget(_G, "__rock_state_name_index"),
+    bridge_physical = rawget(_G, "__rock_state_bridge_physical"),
+    state = state,
+    initialized = initialized,
+    initializer_keys = initializer_keys,
+    published_schema_id = rawget(_G, "__rock_state_schema_id")
+  })
+end
+_G.__rock_state_transaction_abort = function()
+  local transaction = rawget(_G, "__rock_state_transaction")
+  if not transaction then return end
+  local session = transaction.session
+  rawset(_G, "__rock_active_session", session)
+  rawset(_G, "__rock_active_state", session.__rock_state)
+  rawset(_G, "__rock_active_initialized", session.__rock_initialized)
+  session.__rock_schema_id = transaction.schema_id
+  for key in pairs(session.__rock_state) do session.__rock_state[key] = nil end
+  for key, value in pairs(transaction.state) do session.__rock_state[key] = value end
+  for key in pairs(session.__rock_initialized) do session.__rock_initialized[key] = nil end
+  for key, value in pairs(transaction.initialized) do session.__rock_initialized[key] = value end
+  for key in pairs(session.__rock_initializer_keys) do session.__rock_initializer_keys[key] = nil end
+  for key, value in pairs(transaction.initializer_keys) do session.__rock_initializer_keys[key] = value end
+  rawset(_G, "__ROCK_STATE_SCHEMA", transaction.schema)
+  rawset(_G, "__ROCK_STATE_METADATA", transaction.metadata)
+  rawset(_G, "__ROCK_STATE_NOBOX", transaction.nobox)
+  rawset(_G, "__rock_state_name_index", transaction.name_index)
+  rawset(_G, "__rock_state_bridge_physical", transaction.bridge_physical)
+  rawset(_G, "__rock_state_schema_id", transaction.published_schema_id)
+  rawset(_G, "__rock_state_transaction", nil)
+end
+_G.__rock_state_transaction_commit = function()
+  rawset(_G, "__rock_state_transaction", nil)
+end
+_G.__rock_state_entry_for_name = function(name)
+  local index = rawget(_G, "__rock_state_name_index")
+  if not index then
+    index = {}
+    local function add(key, entry)
+      if not key then return end
+      local old = index[key]
+      if old == nil or old == entry then index[key] = entry else index[key] = false end
+    end
+    for _, entry in ipairs(rawget(_G, "__ROCK_STATE_SCHEMA") or {}) do
+      add(entry.name, entry)
+      add(entry.identity, entry)
+      if entry.kind == "global" then
+        for _, physical in ipairs(entry.physical or {}) do add(physical, entry) end
+      end
+    end
+    rawset(_G, "__rock_state_name_index", index)
+  end
+  local entry = index[name]
+  return entry ~= false and entry or nil
+end
+_G.__rock_state_entry_for_identity = function(identity)
+  for _, entry in ipairs(rawget(_G, "__ROCK_STATE_SCHEMA") or {}) do
+    if entry.identity == identity then return entry end
+  end
+  return nil
+end
+_G.__rock_state_entry_get = function(entry)
+  local adapters = rawget(_G, "__ROCK_STATE_NOBOX")
+  local adapter = adapters and adapters[entry.identity]
+  if adapter then return adapter.get() end
+  local keys = entry.session_keys or {}
+  if #keys == 1 then return _G.__rock_state_get(keys[1]) end
+  error("StateSchema entry has no logical realization " .. tostring(entry.identity), 0)
+end
+_G.__rock_state_entry_set = function(entry, value)
+  local adapters = rawget(_G, "__ROCK_STATE_NOBOX")
+  local adapter = adapters and adapters[entry.identity]
+  if adapter then return adapter.set(value) end
+  local keys = entry.session_keys or {}
+  if #keys == 1 then return _G.__rock_state_set(keys[1], value) end
+  error("StateSchema entry has no logical realization " .. tostring(entry.identity), 0)
+end
+_G.__rock_state_entry_clear = function(entry)
+  for _, key in ipairs(entry.session_keys or {}) do _G.__rock_state_clear(key) end
+end
+_G.__rock_state_install_global_bridge = function()
+  local schema = rawget(_G, "__ROCK_STATE_SCHEMA") or {}
+  local mt = getmetatable(_G) or {}
+  local old_index, old_newindex = mt.__rock_state_original_index, mt.__rock_state_original_newindex
+  if not mt.__rock_state_bridge then
+    old_index, old_newindex = mt.__index, mt.__newindex
+    mt.__rock_state_original_index = old_index
+    mt.__rock_state_original_newindex = old_newindex
+  end
+  local function old_read(t, key)
+    if type(old_index) == "function" then return old_index(t, key) end
+    if type(old_index) == "table" then return old_index[key] end
+    return nil
+  end
+  local function old_write(t, key, value)
+    if type(old_newindex) == "function" then return old_newindex(t, key, value) end
+    if type(old_newindex) == "table" then old_newindex[key] = value; return end
+    rawset(t, key, value)
+  end
+  local previous_physical = rawget(_G, "__rock_state_bridge_physical") or {}
+  for _, physical in ipairs(previous_physical) do rawset(_G, physical, nil) end
+  local current_physical = {}
+  for _, entry in ipairs(schema) do
+    if entry.kind == "global" then
+      for _, physical in ipairs(entry.physical or {}) do
+        rawset(_G, physical, nil)
+        current_physical[#current_physical + 1] = physical
+      end
+    end
+  end
+  rawset(_G, "__rock_state_bridge_physical", current_physical)
+  mt.__index = function(t, key)
+    local entry = _G.__rock_state_entry_for_name(key)
+    if entry and entry.kind == "global" then return _G.__rock_state_entry_get(entry) end
+    return old_read(t, key)
+  end
+  mt.__newindex = function(t, key, value)
+    local entry = _G.__rock_state_entry_for_name(key)
+    if entry and entry.kind == "global" then return _G.__rock_state_entry_set(entry, value) end
+    return old_write(t, key, value)
+  end
+  mt.__rock_state_bridge = true
+  setmetatable(_G, mt)
 end
 -- Shared metatable of capturing-lambda env records (docs/closure-env-records-plan.md):
--- a record { __fn = <top-level fn>, <captures> } is callable as f(...) via __call.
+-- a record { __slot = <CodeRef>, <captures> } is callable as f(...) via __call.
 -- Preserved across reload so pre- and post-reload records share metatable identity.
 {FN_MT}
 if not _G.__rock_rng_next then
   local __rock_bit = require("bit")
   local __rock_rng_state = _G.ffi.new("uint64_t", 0)
-  _G.__rock_rng_seed = function(s) __rock_rng_state = _G.ffi.new("uint64_t", s) end
+  local function active_rng_state()
+    local session = _G.__rock_active_session
+    if session and session.__rock_rng_state ~= nil then return session.__rock_rng_state end
+    return __rock_rng_state
+  end
+  local function store_rng_state(state)
+    local session = _G.__rock_active_session
+    if session then session.__rock_rng_state = state else __rock_rng_state = state end
+  end
+  _G.__rock_rng_seed = function(s)
+    store_rng_state(_G.ffi.new("uint64_t", s))
+  end
   -- Whole RNG state is this one counter; get/set serialize it for replay
   -- keyframe restore (docs/replay-scrub-plan.md). Returns the uint64 cdata.
-  _G.__rock_rng_state_get = function() return __rock_rng_state end
-  _G.__rock_rng_state_set = function(s) __rock_rng_state = _G.ffi.new("uint64_t", s) end
+  _G.__rock_rng_state_get = function() return active_rng_state() end
+  _G.__rock_rng_state_set = function(s)
+    store_rng_state(_G.ffi.new("uint64_t", s))
+  end
   _G.__rock_rng_next = function()
-    __rock_rng_state = __rock_rng_state + 0x9E3779B97F4A7C15ULL
-    local z = __rock_rng_state
+    local state = active_rng_state() + 0x9E3779B97F4A7C15ULL
+    store_rng_state(state)
+    local z = state
     z = __rock_bit.bxor(z, __rock_bit.rshift(z, 30)) * 0xBF58476D1CE4E5B9ULL
     z = __rock_bit.bxor(z, __rock_bit.rshift(z, 27)) * 0x94D049BB133111EBULL
     z = __rock_bit.bxor(z, __rock_bit.rshift(z, 31))

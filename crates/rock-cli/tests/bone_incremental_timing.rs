@@ -95,12 +95,12 @@ fn measure_body_edit_phase_breakdown() {
 
 /// Verify the incremental OVERLAY (incremental.lua) shape: emit_full -> body edit
 /// -> emit_overlay produces (a) the changed function's definition, (b) the
-/// `clear_all_systems()` + decorator-application rebind, and (c) accumulates
+/// CodeRef slot publication, and (c) accumulates
 /// across edits (a second edit's overlay still carries the first). Run:
 ///   cargo test -p rock-cli --test bone_incremental_timing emit_overlay -- --ignored --nocapture
 #[test]
 #[ignore = "reads a real project off disk; run with --ignored"]
-fn emit_overlay_changed_fn_plus_rebind_accumulates() {
+fn emit_overlay_changed_fn_plus_code_slot_accumulates() {
     let warm = warm_stdlib();
     let proj = concat!(env!("CARGO_MANIFEST_DIR"), "/../../games/match3");
     let files = project_files(proj);
@@ -120,7 +120,7 @@ fn emit_overlay_changed_fn_plus_rebind_accumulates() {
     let needle = "return random_int(0, NUM_TILE_TYPES)";
     assert_eq!(target.1.matches(needle).count(), 1, "edit anchor unique");
 
-    // First body edit -> overlay carries the changed fn + the rebind.
+    // First body edit -> overlay carries the changed fn + its slot publication.
     let edit1 = target.1.replace(needle, &format!("{needle} // overlay-test-1"));
     let r1 = session.update_file(&target.0, &edit1).expect("update 1");
     assert_eq!(r1.tier, bone_incremental::session::UpdateTier::BodyOnly, "body edit");
@@ -128,8 +128,8 @@ fn emit_overlay_changed_fn_plus_rebind_accumulates() {
         .expect("emit_overlay");
 
     assert!(ov1.lua.contains("\nfunction "), "overlay must redefine a fn:\n{}", &ov1.lua[..ov1.lua.len().min(400)]);
-    assert!(ov1.lua.contains("clear_all_systems()"), "overlay must rebind systems");
-    assert!(ov1.lua.contains("__deco_"), "overlay must re-apply decorator registrations");
+    assert!(ov1.lua.contains("__rock_code_slot_stage("), "overlay must publish CodeRef slots");
+    assert!(!ov1.lua.contains("__rock_rebind_system"), "overlay must not emit a name-based registry repair");
     let lines1 = ov1.lua.lines().count();
 
     // Second body edit in a DIFFERENT spot -> overlay accumulates (still has the

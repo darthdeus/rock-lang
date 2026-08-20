@@ -10,9 +10,14 @@
 //! backend.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::fmt::Write as _;
 
+use bone_semantic::hir::BodyOwner;
 use bone_semantic::inference::Workspace;
 use comfy_la_arena::{Idx, RawIdx};
+use skull_mir::code_identity::{
+    CaptureSchema, CodeArtifact, CodeCompatibility, CodeIdentity, FrameSchema,
+};
 use skull_mir::intrinsics::{Emission, IntrinsicTable};
 use skull_mir::instance::Instance;
 use skull_mir::mir::{Block, Cell, ContainerKind, FuncRef, Inst, Lit, MirFunc, Term};
@@ -29,22 +34,39 @@ fn raw<T>(idx: Idx<T>) -> u32 {
     idx.into_raw().into()
 }
 
+fn collect_nested_code_identities(
+    mf: &MirFunc,
+    out: &mut HashSet<skull_mir::code_identity::CodeIdentity>,
+) {
+    for nested in &mf.nested_fns {
+        if let Some(identity) = &nested.code_identity {
+            out.insert(identity.clone());
+        }
+        collect_nested_code_identities(nested, out);
+    }
+}
+
 /// The module-global surface an emitted body may reference through `Inst::Global`
 /// / `Inst::StoreGlobal`. Module-level `let`/`global` STATE renders into a scoped
 /// `__G` object (`__G.<name>`) so no user global can collide with or be shadowed
 /// by an emitted body local (`r<N>`/`v<N>`/`c<N>`/`__rock_env`); a top-level fn
-/// referenced as a VALUE renders as its co-emitted JS name (a bare function, so
-/// `__rock_call` invokes it directly). Built once per program in
+/// referenced as a VALUE renders as a logical CodeRef slot (foreign functions
+/// remain bare JS functions). Built once per program in
 /// [`emit_with_closure`]; empty for the standalone [`emit_fn`] entry.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct GlobalCtx {
-    /// Names that are module-level STATE (-> `__G.<name>`).
-    state: HashSet<ustr::Ustr>,
-    /// A top-level fn used as a value -> its co-emitted JS name.
+    /// Compiler-assigned Session slots for mutable globals and statics.
+    state: HashMap<ustr::Ustr, String>,
+    /// Compile-time globals remain artifact constants in the backend runtime.
+    const_globals: HashSet<ustr::Ustr>,
+    /// A top-level fn used as a value -> its co-emitted JS name for direct calls.
     fns: HashMap<ustr::Ustr, String>,
     /// `__rock_enum_<E>_<V>` singletons / `__rock_enum_<E>_names` tables the body
     /// reads (rendered as a bare top-level name; the def is emitted per program).
     enum_globals: HashSet<ustr::Ustr>,
+    /// Logical Rock callable identities to their runtime slot keys. Foreign
+    /// function values are intentionally absent from this map.
+    code_slots: HashMap<skull_mir::code_identity::CodeIdentity, String>,
 }
 
 fn err(msg: impl Into<String>) -> CompilerError {
@@ -1615,14 +1637,14 @@ impl Emitter<'_> {
                 // (scoped so no body local can collide). The name must be in the
                 // program's state set (`emit_with_closure` registers it before
                 // emit); an unregistered write is a backend bug, not a skip.
-                Inst::StoreGlobal { name, value } => {
-                    if !self.globals.state.contains(name) {
+            Inst::StoreGlobal { name, value } => {
+                    let Some(slot) = self.globals.state.get(name) else {
                         return Err(err(format!(
                             "JS subset: write to unregistered global `{name}`"
                         )));
-                    }
+                    };
                     let v = self.render_val(*value)?;
-                    self.push(&format!("__G.{name} = {v};"));
+                    self.push(&format!("__rock_state_set({}, {v});", js_string_lit(slot)?));
                 }
                 // A checked Vec/NativeBuffer index whose value is UNUSED: its
                 // bounds check throws on OOB, so it must be emitted as a statement
@@ -1899,46 +1921,62 @@ impl Emitter<'_> {
                 format!("((({a} % {b}) + {b}) % {b})")
             }
             Inst::Call { func, args } => self.render_call(iid, *func, args)?,
-            // A capture-free hoisted closure: a bare reference to its top-level
-            // fn (`convert_closures` emits `Inst::Global(<name>__lambda<k>)`).
-            // Same-site references share one value -> `==` (P3 identity parity).
+            // A capture-free hoisted closure resolves its reusable logical slot.
             // Any OTHER global read (module `let`, enum name table, named fn as a
             // value) is not emitted, so it stays out of subset. `error` is the
             // one runtime global: the coroutine transform's layout raise and
             // `await`'s re-raise read it as a value (`JS_CORO_RUNTIME` defines it).
+            Inst::Global(name)
+                if self.mf.code_value_identities.contains_key(&iid) =>
+            {
+                let identity = &self.mf.code_value_identities[&iid];
+                let key = self
+                    .globals
+                    .code_slots
+                    .get(identity)
+                    .ok_or_else(|| err("JS: Rock function value has no CodeRef slot"))?;
+                format!("__rock_code_slot_ref({})", js_string_lit(key)?)
+            }
             Inst::Global(name) if self.hoisted.contains(name) || name.as_str() == "error" => {
                 name.to_string()
             }
-            // A top-level fn referenced as a value: its co-emitted JS name (a
-            // bare function; `__rock_call` invokes it directly).
+            // A boundary function referenced as a value: its co-emitted JS name.
             Inst::Global(name) if self.globals.fns.contains_key(name) => {
                 self.globals.fns[name].clone()
             }
-            // Module-level `let`/`global` state: scoped so no body local can
-            // collide with or shadow it.
-            Inst::Global(name) if self.globals.state.contains(name) => {
+            Inst::Global(name) if self.globals.const_globals.contains(name) => {
                 format!("__G.{name}")
             }
-            // A boxed-enum singleton / names table: a bare top-level name whose def
-            // (`var __rock_enum_...`) `emit_with_closure` prepends to the program.
-            Inst::Global(name) if self.globals.enum_globals.contains(name) => name.to_string(),
-            Inst::Global(name) => {
-                return Err(err(format!("JS subset: global read `{name}` not supported")))
-            }
-            // A closure ENV record `{ __fn, c<A>.. }` (capturing lambda) or a box
-            // `{ v }` (a shared mutable capture) -- built by `convert_closures`.
+            // Module-level `let`/`global` state: scoped so no body local can
+            // collide with or shadow it.
+            Inst::Global(name) => match self.globals.state.get(name) {
+                Some(slot) => format!("__rock_state_get({})", js_string_lit(slot)?),
+                None if self.globals.enum_globals.contains(name) => name.to_string(),
+                None => return Err(err(format!("JS subset: global read `{name}` not supported"))),
+            },
+            // A CodeRef env record `{ __slot, c<A>.. }` (capturing lambda) or a
+            // box `{ v }` (a shared mutable capture) -- built by `convert_closures`.
             Inst::MakeEnv { fn_ref, fields } => {
                 let mut parts: Vec<String> = Vec::new();
-                if let Some(name) = fn_ref {
-                    parts.push(format!("__fn: {name}"));
+                if let Some(_name) = fn_ref {
+                    if let Some(identity) = self.mf.code_value_identities.get(&iid) {
+                        let key = self
+                            .globals
+                            .code_slots
+                            .get(identity)
+                            .ok_or_else(|| err("JS: Rock closure has no CodeRef slot"))?;
+                        parts.push(format!("__slot: __rock_code_slot_ref({})", js_string_lit(key)?));
+                    } else {
+                        return Err(err("JS: Rock closure missing compiler-owned CodeRef identity"));
+                    }
                 }
                 for (f, v) in fields {
                     parts.push(format!("{f}: {}", self.render_val(*v)?));
                 }
                 format!("({{{}}})", parts.join(", "))
             }
-            // An indirect call: a raw fn value calls directly, an env record routes
-            // through its `__fn` -- the `__rock_call` dispatch helper handles both.
+            // An indirect call: foreign raw functions call directly; Rock values
+            // resolve their slot through `__rock_call`.
             Inst::CallValue { callee, args } => {
                 let mut rendered = vec![self.render_val(*callee)?];
                 for a in args {
@@ -2644,6 +2682,15 @@ pub fn emit_with_closure(
     )?;
     drain_worklists(ws, &scx, &mut st)?;
     st.canonicalize_emission_order();
+    for (_, mf) in &st.lowered {
+        register_code_slots(ws, scx.interner(), mf, &mut st.gctx);
+    }
+    for (_, mf) in &st.spec_lowered {
+        register_code_slots(ws, scx.interner(), mf, &mut st.gctx);
+    }
+    for g in &st.ginits {
+        register_code_slots(ws, scx.interner(), &g.mf, &mut st.gctx);
+    }
     let mut rejections = std::mem::take(&mut st.rejections);
     let bodies = st.top_bodies();
     rejections.extend(check_scalar_abi(
@@ -2664,6 +2711,7 @@ pub fn emit_with_closure(
     .map_err(|error| err(error.message))?;
 
     let mut out = String::new();
+    let mut code_artifact = CodeArtifact::default();
     out.push_str(&emit_enum_singletons(&st.gctx, &st.enum_defs));
     out.push_str(&emit_vt_eq(ws, struct_registry.as_ref())?);
     out.push_str(&emit_inspect_ty(ws, struct_registry.as_ref())?);
@@ -2676,11 +2724,21 @@ pub fn emit_with_closure(
     // program path reorders these; per-test order is pinned by the JS suite.)
     for g in &st.ginits {
         match emit_ginit_with_nested(ws, g, &st.names, &hoisted, &st.gctx) {
-            Ok(js) => out.push_str(&js),
+            Ok(js) => {
+                out.push_str(&js);
+                let mut artifact = CodeArtifact::from_mir_tree(&g.mf);
+                artifact.set_body_names(&g.mf, &g.init_name);
+                code_artifact.merge(artifact);
+            }
             Err(e) => rejections.push((g.init_name.clone(), e)),
         }
     }
-    for init in order_global_inits(&st.ginits, &st.lowered, &st.names)? {
+    let init_lines = order_global_inits(&st.ginits, &st.lowered, &st.names, &st.gctx.state)?;
+    let has_state_transaction = !init_lines.is_empty();
+    if has_state_transaction {
+        out.push_str("if (typeof __rock_state_transaction_begin !== \"undefined\") __rock_state_transaction_begin();\n");
+    }
+    for init in &init_lines {
         out.push_str(&init.js);
     }
     for (fr, mf) in &st.lowered {
@@ -2690,12 +2748,17 @@ pub fn emit_with_closure(
             .get(&Instance::base(*fr))
             .ok_or_else(|| err(format!("JS: no concrete plan for `{name}`")))?;
         match emit_lowered_fn(ws, scx.interner(), mf, name, plan, &st.names, &hoisted, &st.gctx) {
-            Ok(js) => out.push_str(&js),
+            Ok((js, artifact)) => {
+                out.push_str(&js);
+                code_artifact.merge(artifact);
+            }
             Err(e) => rejections.push((name.clone(), e)),
         }
     }
     out.push_str(&emit_spec_bodies(ws, scx.interner(), &st, &hoisted, &mut rejections));
     combine_rejections(rejections)?;
+    let code_slot_stage = code_slot_registration_js(ws, scx.interner(), &code_artifact)?;
+    out.push_str(&code_slot_stage);
     for body in &st.inline_js {
         out.push_str(&emit_inline_js_fn(
             ws,
@@ -2705,6 +2768,14 @@ pub fn emit_with_closure(
             body.decl,
             st.names.get(&body.instance).expect("emitted body has a name"),
         )?);
+    }
+    out.push_str(code_slot_publish_js(
+        &code_artifact,
+        false,
+        false,
+    ));
+    if has_state_transaction && !code_artifact.entries.values().any(|entry| entry.escaping) {
+        out.push_str("if (typeof __rock_state_transaction_commit !== \"undefined\") __rock_state_transaction_commit();\n");
     }
     Ok(out)
 }
@@ -2769,6 +2840,7 @@ struct JsRootPlan {
     refs: Vec<FuncRef>,
 }
 
+#[derive(Clone)]
 struct JsSession {
     roots: Vec<FuncRef>,
     graph: InstanceGraph,
@@ -2951,7 +3023,13 @@ pub fn emit_program(
         nm
     });
     let (build, _, _) = build_program_session(ws, &scx, &extra)?;
-    Ok(JsProgram { program: build.program, main_js_name })
+    Ok(JsProgram {
+        program: build.program,
+        main_js_name,
+        code_artifact: build.code_artifact,
+        lifecycle_plan: build.lifecycle_plan,
+        state_schema: build.state_schema,
+    })
 }
 
 pub fn emit_program_cached(
@@ -2976,6 +3054,9 @@ pub fn emit_program_cached(
     let program = JsProgram {
         program: build.program.clone(),
         main_js_name,
+        code_artifact: build.code_artifact.clone(),
+        lifecycle_plan: build.lifecycle_plan.clone(),
+        state_schema: build.state_schema.clone(),
     };
     let cache = JsEmitCache {
         build,
@@ -3003,6 +3084,18 @@ pub fn emit_program_with_roots(
 ) -> Result<String, CompilerError> {
     let scx = js_scx(ws);
     emit_program_core(ws, &scx, roots)
+}
+
+/// The whole-file test emission plus its compiler-owned callable artifact. The
+/// runtime wrapper uses the artifact to decide whether CodeRef machinery is
+/// needed; the string-only API above remains for callers that only execute it.
+pub fn emit_program_with_roots_artifact(
+    ws: &Workspace,
+    roots: &[(FuncRef, String)],
+) -> Result<(String, CodeArtifact), CompilerError> {
+    let scx = js_scx(ws);
+    let build = build_program_session(ws, &scx, roots)?.0;
+    Ok((build.program, build.code_artifact))
 }
 
 /// The shared program assembly for [`emit_program`] / [`emit_program_with_roots`]:
@@ -3064,6 +3157,8 @@ fn assemble_program_core(
         &session.concrete.always_plans,
         scx.interner_handle(),
     )?;
+    let lifecycle_skeleton = skull_mir::lifecycle::collect(ws)?;
+    queue_lifecycle_dependency_initializers(ws, &mut st, &lifecycle_skeleton)?;
 
     force_shader_register_sibling(ws, &mut st)?;
 
@@ -3079,6 +3174,9 @@ fn assemble_program_core(
     let mut deco_bodies: Vec<(String, MirFunc)> = Vec::new();
     for module in ws.modules.iter() {
         for (did, d) in module.decorators.iter() {
+            if skull_mir::definition::is_compiler_owned_decorator(d) {
+                continue;
+            }
             if !applied.contains(&d.name) {
                 continue;
             }
@@ -3145,6 +3243,18 @@ fn assemble_program_core(
 
     drain_worklists(ws, scx, &mut st)?;
     st.canonicalize_emission_order();
+    for (_, mf) in &st.lowered {
+        register_code_slots(ws, scx.interner(), mf, &mut st.gctx);
+    }
+    for (_, mf) in &st.spec_lowered {
+        register_code_slots(ws, scx.interner(), mf, &mut st.gctx);
+    }
+    for g in &st.ginits {
+        register_code_slots(ws, scx.interner(), &g.mf, &mut st.gctx);
+    }
+    for (_, mf) in &deco_bodies {
+        register_code_slots(ws, scx.interner(), mf, &mut st.gctx);
+    }
 
     let mut rejections = std::mem::take(&mut st.rejections);
     let mut bodies = st.top_bodies();
@@ -3168,6 +3278,14 @@ fn assemble_program_core(
 
     let mut out = String::new();
     let mut stable = String::new();
+    let mut code_artifact = CodeArtifact::default();
+    let mut all_statics = Vec::new();
+    for (name, mf) in &deco_bodies {
+        let mut artifact = CodeArtifact::from_mir_tree(mf);
+        artifact.set_body_names(mf, name);
+        code_artifact.merge(artifact);
+        all_statics.extend(collect_statics(mf));
+    }
     let enum_singletons = emit_enum_singletons(&st.gctx, &st.enum_defs);
     out.push_str(&enum_singletons);
     stable.push_str(&enum_singletons);
@@ -3205,9 +3323,14 @@ fn assemble_program_core(
             .get(&Instance::base(*fr))
             .ok_or_else(|| err(format!("JS: no concrete plan for `{name}`")))?;
         match emit_lowered_fn(ws, scx.interner(), mf, name, plan, &st.names, &hoisted, &st.gctx) {
-            Ok(js) => {
+            Ok((js, artifact)) => {
                 out.push_str(&js);
-                chunks.insert(*fr, JsChunk { js, statics: collect_statics(mf) });
+                code_artifact.merge(artifact.clone());
+                all_statics.extend(collect_statics(mf));
+                chunks.insert(
+                    *fr,
+                    JsChunk { js, statics: collect_statics(mf) },
+                );
             }
             Err(e) => rejections.push((name.clone(), e)),
         }
@@ -3218,6 +3341,10 @@ fn assemble_program_core(
     let spec_chunks = emit_spec_chunks(ws, scx.interner(), &st, &hoisted, &mut rejections);
     for chunk in ordered_spec_chunks(&spec_chunks, &st.spec_lowered) {
         out.push_str(&chunk.js);
+        code_artifact.merge(chunk.code_artifact.clone());
+    }
+    for (_, mf) in &st.spec_lowered {
+        all_statics.extend(collect_statics(mf));
     }
     // 2b. inline(js) fns, emitted verbatim.
     for body in &st.inline_js {
@@ -3241,6 +3368,10 @@ fn assemble_program_core(
             }
         };
         out.push_str(&definition);
+        let mut artifact = CodeArtifact::from_mir_tree(&g.mf);
+        artifact.set_body_names(&g.mf, &g.init_name);
+        code_artifact.merge(artifact);
+        all_statics.extend(collect_statics(&g.mf));
         if g.is_const {
             const_chunks.entry(g.name).or_insert_with(String::new).push_str(&definition);
         } else {
@@ -3249,34 +3380,171 @@ fn assemble_program_core(
     }
     // 4. load-time init lines (dependency-ordered).
     let mut const_order = Vec::new();
-    for init in order_global_inits(&st.ginits, &st.lowered, &st.names)? {
+    let init_lines = order_global_inits(&st.ginits, &st.lowered, &st.names, &st.gctx.state)?;
+    out.push_str("function __rock_state_initialize() {\n");
+    stable.push_str("function __rock_state_initialize() {\n");
+    for init in &init_lines {
         out.push_str(&init.js);
-        if let Some(chunk) = const_chunks.get_mut(&init.name) {
-            chunk.push_str(&init.js);
-            const_order.push(init.name);
-        } else {
+        if !const_chunks.contains_key(&init.name) {
             stable.push_str(&init.js);
         }
     }
+    out.push_str("}\n__rock_state_initialize();\n");
+    stable.push_str("}\n");
+    for init in init_lines {
+        if let Some(chunk) = const_chunks.get_mut(&init.name) {
+            chunk.push_str(&init.js);
+            const_order.push(init.name);
+        }
+    }
+    mark_generated_code_values(ws, &mut code_artifact);
+    let definition_plan = skull_mir::definition::collect(ws)?;
+    if definition_plan.census.applications != definition_plan.census.admitted {
+        return Err(err(format!(
+            "incomplete DefinitionPlan census: {:?}",
+            definition_plan.census
+        )));
+    }
+    let lifecycle_plan = skull_mir::lifecycle::attach_artifact(lifecycle_skeleton, &code_artifact)?;
+    let has_definition_plan = definition_plan.census.declarations > 0;
+    let code_slot_stage = code_slot_registration_js(ws, scx.interner(), &code_artifact)?;
+    out.push_str(&code_slot_stage);
+    if (has_definition_plan || lifecycle_plan.census.declarations > 0)
+        && !code_artifact.entries.values().any(|entry| entry.escaping)
+    {
+        out.push_str("__rock_code_slot_begin();\n");
+    }
+    out.push_str(&definition_plan_stage_js(ws, scx.interner(), &definition_plan)?);
+    out.push_str(&lifecycle_plan_stage_js(ws, scx.interner(), &lifecycle_plan)?);
     // 5. decorator applications (AFTER inits: a deco body pushes into a ginit-
     //    initialized registry -- D4).
-    let applications = decorator_application_lines_js(ws, &deco_names, &st.names)?;
+    let applications = decorator_application_lines_js(ws, &deco_names, scx.interner(), &st.names)?;
     out.push_str(&applications);
     stable.push_str(&applications);
+    out.push_str(code_slot_publish_js(
+        &code_artifact,
+        has_definition_plan,
+        lifecycle_plan.census.declarations > 0,
+    ));
+    let has_state_publication = code_artifact.entries.values().any(|entry| entry.escaping)
+        || has_definition_plan
+        || lifecycle_plan.census.declarations > 0;
+    if !has_state_publication {
+        out.push_str("if (typeof __rock_state_transaction_commit !== \"undefined\") __rock_state_transaction_commit();\n");
+    }
 
     // Every definition has been visited, so this is the earliest point where the
     // whole rejection list exists. A non-empty list fails the build and the
     // assembled program is discarded with it.
     combine_rejections(rejections)?;
 
+    let state_schema = skull_mir::state_schema::StateSchema::collect(
+        ws,
+        scx,
+        &code_artifact,
+        &all_statics,
+    )
+    .map_err(|error| err(error.to_string()))?;
+    let program = format!(
+        "if (typeof __rock_state_transaction_begin !== \"undefined\") __rock_state_transaction_begin();\n__rock_state_publish_schema({:?});\n{}{}",
+        state_schema.schema_id,
+        state_schema_js(&state_schema)?,
+        out
+    );
+
     Ok(ProgramBuild {
-        program: out,
+        program,
         stable,
         chunks,
         spec_chunks,
+        code_artifact,
+        lifecycle_plan,
+        state_schema,
         const_chunks,
         const_order,
     })
+}
+
+fn state_schema_js(
+    schema: &skull_mir::state_schema::StateSchema,
+) -> Result<String, CompilerError> {
+    let image_plan = skull_mir::state_image::StateImagePlan::from_schema(schema)
+        .map_err(|error| err(error.to_string()))?;
+    let mut out = String::from("var __ROCK_STATE_SCHEMA = [");
+    for entry in &schema.entries {
+        let kind = match entry.kind {
+            skull_mir::state_schema::StateKind::Global => "global",
+            skull_mir::state_schema::StateKind::Static => "static",
+            skull_mir::state_schema::StateKind::CoroutineFrame => "coroutine_frame",
+            skull_mir::state_schema::StateKind::Storage => "storage",
+        };
+        let name = entry
+            .identity
+            .rsplit("::")
+            .next()
+            .unwrap_or(&entry.identity);
+        let physical = entry
+            .physical
+            .iter()
+            .map(|value| js_string_lit(value))
+            .collect::<Result<Vec<_>, _>>()?
+            .join(",");
+        let session_keys = skull_mir::state_schema::entry_state_keys(entry)
+            .iter()
+            .map(|value| js_string_lit(value))
+            .collect::<Result<Vec<_>, _>>()?
+            .join(",");
+        let owner = match entry.owner.as_deref() {
+            Some(owner) => js_string_lit(owner)?,
+            None => "null".to_string(),
+        };
+        let initializer_identity = entry
+            .initializer_identity
+            .map_or_else(|| "null".to_string(), |identity| identity.to_string());
+        out.push_str(&format!(
+            "{{kind:{},name:{},identity:{},fingerprint:{},physical:[{}],session_keys:[{}],owner:{},initializer_identity:{}}},",
+            js_string_lit(kind)?,
+            js_string_lit(name)?,
+            js_string_lit(&entry.identity)?,
+            js_string_lit(&entry.fingerprint)?,
+            physical,
+            session_keys,
+            owner,
+            initializer_identity,
+        ));
+    }
+    out.push_str("];\nvar __ROCK_STATE_IMAGE_PLAN = {schema_id:");
+    out.push_str(&js_string_lit(image_plan.schema_id())?);
+    out.push_str(",entries:[");
+    for entry in image_plan.entries() {
+        out.push_str("{identity:");
+        out.push_str(&js_string_lit(&entry.identity)?);
+        out.push_str(",kind:");
+        out.push_str(&js_string_lit(entry.kind.as_str())?);
+        out.push_str(",layout:");
+        out.push_str(&js_string_lit(&entry.layout)?);
+        out.push_str(",capture_policy:");
+        out.push_str(&js_string_lit(&entry.capture_policy)?);
+        out.push_str(",realization_policy:");
+        out.push_str(&js_string_lit(&entry.realization_policy)?);
+        out.push_str(",world_policy:");
+        out.push_str(&js_string_lit(&entry.world_policy)?);
+        out.push_str("},");
+    }
+    let census = image_plan.census();
+    out.push_str(&format!(
+        "],census:{{examined:{},assigned:{},duplicates:{},unknown:{},semantic_session:{},program_artifact:{},host_projection:{},runner_diagnostic:{},unsupported:{}}}}};\n__rock_state_install_global_bridge();\n",
+        census.examined,
+        census.assigned,
+        census.duplicates,
+        census.unknown,
+        census.semantic_session,
+        census.program_artifact,
+        census.host_projection,
+        census.runner_diagnostic,
+        census.unsupported,
+    ));
+    Ok(out)
 }
 
 /// Select the JS-served registration declaration for shader driver lines.
@@ -3346,27 +3614,41 @@ fn force_shader_register_sibling(
 pub struct JsProgram {
     pub program: String,
     pub main_js_name: Option<String>,
+    /// Compiler-owned logical callable identities for the emitted JS artifact.
+    pub code_artifact: CodeArtifact,
+    /// Compiler-owned lifecycle metadata shared with the Lua artifact.
+    pub lifecycle_plan: skull_mir::lifecycle::LifecyclePlan,
+    /// Compiler-owned logical mutable-state inventory for the emitted artifact.
+    pub state_schema: skull_mir::state_schema::StateSchema,
 }
 
+#[derive(Clone)]
 struct JsChunk {
     js: String,
     statics: Vec<skull_mir::mir::StaticCell>,
 }
 
+#[derive(Clone)]
 struct JsSpecChunk {
     name: String,
     js: String,
+    code_artifact: CodeArtifact,
 }
 
+#[derive(Clone)]
 struct ProgramBuild {
     program: String,
     stable: String,
     chunks: HashMap<FuncRef, JsChunk>,
     spec_chunks: HashMap<Instance, JsSpecChunk>,
+    code_artifact: CodeArtifact,
+    lifecycle_plan: skull_mir::lifecycle::LifecyclePlan,
+    state_schema: skull_mir::state_schema::StateSchema,
     const_chunks: HashMap<ustr::Ustr, String>,
     const_order: Vec<ustr::Ustr>,
 }
 
+#[derive(Clone)]
 pub struct JsEmitCache {
     build: ProgramBuild,
     changed_since_full: HashSet<FuncRef>,
@@ -3403,6 +3685,17 @@ impl JsEmitCache {
     pub fn graph_update(&self) -> Option<JsGraphUpdate> {
         self.session.last_update.clone()
     }
+    pub fn code_artifact(&self) -> &CodeArtifact {
+        &self.build.code_artifact
+    }
+
+    pub fn state_schema(&self) -> &skull_mir::state_schema::StateSchema {
+        &self.build.state_schema
+    }
+
+    pub fn lifecycle_plan(&self) -> &skull_mir::lifecycle::LifecyclePlan {
+        &self.build.lifecycle_plan
+    }
 
     /// The session context's ABI-plan memo counters (parity with the Lua
     /// path's `MirEmit::abi_plan_stats`).
@@ -3434,6 +3727,20 @@ pub fn emit_overlay(
     reinferred: &[(bone_semantic::prelude::ModuleId, bone_semantic::hir::BodyOwner)],
 ) -> Result<JsReload, CompilerError> {
     emit_overlay_with_span_edits(ws, user_mid, cache, reinferred, &[])
+}
+
+/// Build an overlay against a staged cache. The caller publishes the returned
+/// cache only after the overlay bytes are durably written.
+pub fn emit_overlay_with_span_edits_staged(
+    ws: &Workspace,
+    user_mid: bone_semantic::prelude::ModuleId,
+    cache: &JsEmitCache,
+    reinferred: &[(bone_semantic::prelude::ModuleId, bone_semantic::hir::BodyOwner)],
+    edits: &[skull_graph::instance_graph::SpanEdit],
+) -> Result<(JsReload, JsEmitCache), CompilerError> {
+    let mut staged = cache.clone();
+    let reload = emit_overlay_with_span_edits(ws, user_mid, &mut staged, reinferred, edits)?;
+    Ok((reload, staged))
 }
 
 pub fn emit_overlay_with_span_edits(
@@ -3515,6 +3822,12 @@ pub fn emit_overlay_with_span_edits(
     }
     update_js_session(ws, &mut cache.session, &root_plan.refs, reinferred, edits);
     let current = assemble_program_core(ws, &cache.scx, &root_plan.named, &cache.session)?;
+    if current.state_schema.schema_id != cache.build.state_schema.schema_id {
+        return Ok(JsReload::FullRequired);
+    }
+    if !cache.build.code_artifact.compatible_overlay(&current.code_artifact) {
+        return Ok(JsReload::FullRequired);
+    }
     let update = cache
         .session
         .last_update
@@ -3597,6 +3910,13 @@ pub fn emit_overlay_with_span_edits(
             (cache.build.const_chunks.get(name) != Some(chunk)).then_some(*name)
         })
         .collect();
+    if cache
+        .build
+        .lifecycle_plan
+        .wire_structure_changed(&current.lifecycle_plan)
+    {
+        return Ok(JsReload::FullRequired);
+    }
     if changed_now.is_empty()
         && changed_consts.is_empty()
         && changed_specs.is_empty()
@@ -3607,10 +3927,19 @@ pub fn emit_overlay_with_span_edits(
     }
     cache.changed_since_full.extend(changed_now.iter().copied());
 
+    let has_code_slots = current.code_artifact.entries.values().any(|entry| entry.escaping);
     let mut out = String::from("// skull JS incremental overlay\n");
+    out.push_str("if (typeof __rock_state_transaction_begin !== \"undefined\") __rock_state_transaction_begin();\n");
+    out.push_str("try {\n");
+    let affected_consts = affected_const_names(ws, &changed_consts, &current.const_order);
     for name in &current.const_order {
+        if !affected_consts.contains(name) {
+            continue;
+        }
         if changed_consts.contains(name) {
             out.push_str(&current.const_chunks[name]);
+        } else {
+            out.push_str(&format!("__G.{name} = __ginit_{name}();\n"));
         }
     }
     let mut reset_cells = HashSet::new();
@@ -3624,9 +3953,14 @@ pub fn emit_overlay_with_span_edits(
                 .is_none_or(|previous| *previous != key)
                 && reset_cells.insert(cell.cell)
             {
+                let (value_slot, done_slot) = skull_mir::state_schema::static_cell_state_keys(
+                    ws,
+                    cache.scx.interner(),
+                    cell,
+                )
+                .map_err(|error| err(error.to_string()))?;
                 out.push_str(&format!(
-                    "__G.{} = undefined; __G.{} = false;\n",
-                    cell.cell, cell.done_flag
+                    "__rock_state_set({value_slot:?}, undefined); __rock_state_set({done_slot:?}, false);\n"
                 ));
             }
             cache.static_keys.insert(cell.cell, key);
@@ -3647,41 +3981,32 @@ pub fn emit_overlay_with_span_edits(
     for chunk in changed_specs {
         out.push_str(&chunk.js);
     }
-
-    let decorator_names = decorator_names(ws);
-    let decorated: Vec<FuncRef> = order
-        .iter()
-        .copied()
-        .filter(|fref| {
-            ws.module(fref.module).functions[fref.func]
-                .annotations
-                .iter()
-                .any(|annotation| decorator_names.contains(&annotation.name.name))
-        })
-        .collect();
-    if !decorated.is_empty() {
-        let Some(rebind) = exact_inline_js(ws, "__rock_rebind_system") else {
-            return Ok(JsReload::FullRequired);
-        };
-        let rebind_instance = Instance::base(rebind);
-        out.push_str(&emit_inline_js_fn(
-            ws,
-            &cache.scx,
-            cache.session.concrete.plans.as_ref(),
-            &rebind_instance,
-            rebind,
-            "__rock_rebind_system",
-        )?);
-        for fref in decorated {
-            let function = &ws.module(fref.module).functions[fref.func];
-            out.push_str(&format!(
-                "__rock_rebind_system({}, {});\n",
-                js_string_lit(function.name.as_str())?,
-                callee_js_name(ws, fref)
-            ));
-        }
+    let code_slot_stage = code_slot_registration_js(
+        ws,
+        cache.scx.interner(),
+        &current.code_artifact,
+    )?;
+    out.push_str(&code_slot_stage);
+    if !has_code_slots && current.lifecycle_plan.census.declarations > 0 {
+        out.push_str("__rock_code_slot_begin();\n");
     }
-
+    out.push_str(&lifecycle_plan_stage_js(
+        ws,
+        cache.scx.interner(),
+        &current.lifecycle_plan,
+    )?);
+    out.push_str(code_slot_publish_js(
+        &current.code_artifact,
+        false,
+        current.lifecycle_plan.census.declarations > 0,
+    ));
+    if !has_code_slots {
+        out.push_str("if (typeof __rock_state_transaction_commit !== \"undefined\") __rock_state_transaction_commit();\n");
+    }
+    out.push_str("} catch (e) {\n");
+    out.push_str("  __rock_code_slot_abort();\n");
+    out.push_str("  throw e;\n");
+    out.push_str("}\n");
     if let Some(wire) = find_plain_function(ws, "run_wire_systems") {
         let wire_name = callee_js_name(ws, wire);
         if current.chunks.contains_key(&wire) {
@@ -3703,19 +4028,6 @@ fn collect_statics(function: &MirFunc) -> Vec<skull_mir::mir::StaticCell> {
         cells.extend(collect_statics(nested));
     }
     cells
-}
-
-fn exact_inline_js(ws: &Workspace, name: &str) -> Option<FuncRef> {
-    ws.functions_by_name
-        .get(&ustr::Ustr::from(name))?
-        .iter()
-        .find_map(|(module, function)| {
-            matches!(
-                ws.module(*module).functions[*function].inline_body,
-                Some((bone_semantic::hir::FnBackend::Js, _))
-            )
-            .then_some(FuncRef { module: *module, func: *function })
-        })
 }
 
 fn find_plain_function(ws: &Workspace, name: &str) -> Option<FuncRef> {
@@ -3779,6 +4091,28 @@ fn add_inline_js_body(bodies: &mut Vec<JsInlineBody>, instance: Instance, decl: 
     if bodies.iter().all(|body| body.instance != instance) {
         bodies.push(JsInlineBody { instance, decl });
     }
+}
+
+fn opaque_js_global_names(ws: &Workspace, body: &JsInlineBody) -> Vec<ustr::Ustr> {
+    let Some((bone_semantic::hir::FnBackend::Js, source)) =
+        ws.module(body.decl.module).functions[body.decl.func].inline_body
+    else {
+        return Vec::new();
+    };
+    let mut names = Vec::new();
+    let mut rest = source.as_str();
+    while let Some(offset) = rest.find("__G.") {
+        let after = &rest[offset + "__G.".len()..];
+        let end = after
+            .char_indices()
+            .find(|(_, ch)| !ch.is_ascii_alphanumeric() && *ch != '_')
+            .map_or(after.len(), |(index, _)| index);
+        if end > 0 {
+            names.push(ustr::Ustr::from(&after[..end]));
+        }
+        rest = &after[end..];
+    }
+    names
 }
 
 impl<'a> WorklistState<'a> {
@@ -3845,6 +4179,12 @@ impl<'a> WorklistState<'a> {
             .iter()
             .map(|(inst, realized)| (inst.clone(), realized.decl))
             .collect();
+        let mut gctx = GlobalCtx::default();
+        gctx.state = skull_mir::state_schema::global_state_slots(ws, scx)
+            .map_err(|error| err(error.to_string()))?
+            .into_iter()
+            .collect();
+        gctx.const_globals = build_const_global_names(ws, scx);
         Ok(WorklistState {
             concrete,
             always,
@@ -3863,7 +4203,7 @@ impl<'a> WorklistState<'a> {
             nobox_leaf_globals: build_nobox_leaf_globals(ws, scx)?,
             deco_globals: if program_mode { HashSet::new() } else { decorator_populated_globals(ws) },
             enum_defs: build_enum_global_defs(ws),
-            gctx: GlobalCtx::default(),
+            gctx,
             ginit_queue: Vec::new(),
             ginit_seen: HashSet::new(),
             ginits: Vec::new(),
@@ -3878,6 +4218,31 @@ impl<'a> WorklistState<'a> {
     /// accumulated set -- so the program is never returned with a hole in it.
     fn reject(&mut self, name: &str, e: CompilerError) {
         self.rejections.push((name.to_string(), e));
+    }
+
+    /// An opaque `inline(js)` body has no MIR global-read facts. Recover its
+    /// explicit `__G.name` reads and feed the corresponding initializer through
+    /// the same ginit worklist as lowered bodies. Dynamic `__G[...]` remains
+    /// outside the compiler-known surface and has no silent fallback.
+    fn queue_opaque_js_global_initializers(&mut self, ws: &Workspace) {
+        let names: Vec<ustr::Ustr> = self
+            .inline_js
+            .iter()
+            .flat_map(|body| opaque_js_global_names(ws, body))
+            .collect();
+        for name in names {
+            let base = self
+                .nobox_leaf_globals
+                .get(&name)
+                .copied()
+                .unwrap_or(name);
+            let Some(&site) = self.state_index.get(&base) else {
+                continue;
+            };
+            if self.ginit_seen.insert(base) {
+                self.ginit_queue.push((base, site));
+            }
+        }
     }
 
     /// Every emitted top-level body (fn defs + ginit init fns) for the cross-
@@ -3915,6 +4280,51 @@ impl<'a> WorklistState<'a> {
         });
         self.ginits.sort_by_key(|g| g.order);
     }
+}
+
+fn queue_lifecycle_dependency_initializers(
+    ws: &Workspace,
+    st: &mut WorklistState<'_>,
+    plan: &skull_mir::lifecycle::LifecyclePlan,
+) -> Result<(), CompilerError> {
+    for entry in &plan.entries {
+        for dependency in entry.qualification.dependencies() {
+            let CodeIdentity::Artifact(skull_mir::code_identity::CodeOwner::Artifact {
+                kind: skull_mir::code_identity::CodeOwnerKind::Global,
+                module,
+                name,
+            }) = &dependency.identity
+            else {
+                return Err(err("JS: lifecycle dependency is not a top-level global"));
+            };
+            let Some(source_module) = ws.modules.iter().find(|candidate| candidate.file == *module)
+            else {
+                return Err(err(format!(
+                    "JS: lifecycle dependency `{name}` has no source module"
+                )));
+            };
+            let Some(&gid) = source_module.global_by_name.get(name) else {
+                return Err(err(format!(
+                    "JS: lifecycle dependency `{name}` has no source declaration"
+                )));
+            };
+            if !source_module.globals[gid].is_const {
+                return Err(err(format!(
+                    "JS: lifecycle dependency `{name}` is not immutable"
+                )));
+            }
+            if st.ginit_seen.insert(*name) {
+                st.ginit_queue.push((
+                    *name,
+                    GlobalSite {
+                        module: source_module.id,
+                        gid,
+                    },
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Emit an `inline(js)` fn verbatim: `function <js_name>(p1, p2) { <raw js> }`.
@@ -3965,14 +4375,19 @@ fn emit_inline_js_fn(
 /// `__static_*` cell + done-flag global (`lower_static`). No initializer line
 /// is needed -- an undefined done-flag is falsy, so the first-reach guard runs
 /// the init exactly as Lua's nil does.
-fn register_statics(mf: &MirFunc, gctx: &mut GlobalCtx) {
-    for sc in &mf.statics {
-        gctx.state.insert(sc.cell);
-        gctx.state.insert(sc.done_flag);
-    }
+fn register_statics(
+    ws: &Workspace,
+    interner: &skull_mir::monoty::MonoInterner,
+    mf: &MirFunc,
+    gctx: &mut GlobalCtx,
+) -> Result<(), CompilerError> {
+    let slots = skull_mir::state_schema::static_state_slots(ws, interner, mf)
+        .map_err(|error| err(error.to_string()))?;
+    gctx.state.extend(slots);
     for nf in &mf.nested_fns {
-        register_statics(nf, gctx);
+        register_statics(ws, interner, nf, gctx)?;
     }
+    Ok(())
 }
 
 /// The `(callee, instantiation)` pairs `mf` and its hoisted bodies still ask for
@@ -4321,7 +4736,7 @@ impl<'a, 'b> JsDelivery<'a, 'b> {
     ) -> Result<Vec<CompilerError>, CompilerError> {
         let ws = self.ws;
         let st = &mut *self.st;
-        register_statics(mf, &mut st.gctx);
+        register_statics(ws, self.scx.interner(), mf, &mut st.gctx)?;
         let mut findings = Vec::new();
         let mut demands = Vec::new();
         collect(&mut findings, collect_spec_bound_calls(ws, mf, &mut demands));
@@ -4364,6 +4779,7 @@ fn drain_worklists(
         while let Some(fr) = delivery.st.queue.pop() {
             delivery.visit_fn(fr)?;
         }
+        delivery.st.queue_opaque_js_global_initializers(ws);
         while let Some((gname, _)) = delivery.st.ginit_queue.pop() {
             delivery.visit_ginit(gname)?;
         }
@@ -4391,7 +4807,7 @@ fn emit_lowered_fn(
     names: &CalleeNames,
     hoisted: &HashSet<ustr::Ustr>,
     gctx: &GlobalCtx,
-) -> Result<String, CompilerError> {
+) -> Result<(String, CodeArtifact), CompilerError> {
     if mf.is_coroutine {
         let plan = skull_mir::lower::CoroutinePlan::from_concrete_plan(
             ws,
@@ -4400,13 +4816,15 @@ fn emit_lowered_fn(
             js_name.to_string(),
         )
         .map_err(|reason| err(format!("JS: cannot build concrete coroutine plan: {}", reason.bucket())))?;
-        return emit_coroutine_js(ws, &plan, mf, names, hoisted, gctx);
+        return emit_coroutine_js(ws, interner, &plan, mf, names, hoisted, gctx);
     }
     let mut out = emit_fn_with_callees(ws, mf, js_name, names, hoisted, gctx)?;
     for nf in &mf.nested_fns {
         out.push_str(&emit_fn_with_callees(ws, nf, nf.name.as_str(), names, hoisted, gctx)?);
     }
-    Ok(out)
+    let mut code_artifact = CodeArtifact::from_mir_tree(mf);
+    code_artifact.set_body_names(mf, js_name);
+    Ok((out, code_artifact))
 }
 
 /// The standalone specialized copies, each under its `spec_fn_name`.
@@ -4436,8 +4854,11 @@ fn emit_spec_chunks(
             }
         };
         match emit_lowered_fn(ws, interner, mf, name, plan, &st.names, hoisted, &st.gctx) {
-            Ok(js) => {
-                chunks.insert(inst.clone(), JsSpecChunk { name: name.clone(), js });
+            Ok((js, code_artifact)) => {
+                chunks.insert(
+                    inst.clone(),
+                    JsSpecChunk { name: name.clone(), js, code_artifact },
+                );
             }
             Err(e) => rejections.push((name.clone(), e)),
         }
@@ -4586,6 +5007,190 @@ fn check_scalar_abi(
 /// lambda creation site may reference. Flat: nesting is one level.
 fn collect_hoisted(bodies: &[&MirFunc]) -> HashSet<ustr::Ustr> {
     bodies.iter().flat_map(|mf| mf.nested_fns.iter().map(|nf| nf.name)).collect()
+}
+
+fn register_code_slots(
+    ws: &Workspace,
+    interner: &skull_mir::monoty::MonoInterner,
+    mf: &MirFunc,
+    gctx: &mut GlobalCtx,
+) {
+    if let Some(identity) = &mf.code_identity {
+        gctx.code_slots
+            .entry(identity.clone())
+            .or_insert_with(|| identity.logical_key(ws, interner));
+    }
+    for identity in mf.code_value_identities.values() {
+        gctx.code_slots
+            .entry(identity.clone())
+            .or_insert_with(|| identity.logical_key(ws, interner));
+    }
+    for nested in &mf.nested_fns {
+        register_code_slots(ws, interner, nested, gctx);
+    }
+}
+
+fn code_slot_registration_js(
+    ws: &Workspace,
+    interner: &skull_mir::monoty::MonoInterner,
+    artifact: &CodeArtifact,
+) -> Result<String, CompilerError> {
+    if !artifact.census.is_total() {
+        return Err(err(format!(
+            "cannot stage incomplete Rock CodeRef census: {:?}",
+            artifact.census
+        )));
+    }
+    let mut entries: Vec<_> = artifact.entries.values().filter(|entry| entry.escaping).collect();
+    entries.sort_by_key(|entry| entry.identity.logical_key(ws, interner));
+    if entries.is_empty() {
+        return Ok(String::new());
+    }
+    let mut out = String::new();
+    out.push_str("__rock_code_slot_begin();\n");
+    for entry in entries {
+        let Some(body) = entry.body_name else {
+            return Err(err(format!(
+                "Rock CodeRef `{}` has no emitted body",
+                entry.identity.logical_key(ws, interner)
+            )));
+        };
+        writeln!(
+            out,
+            "__rock_code_slot_stage_one({}, {}, {});",
+            js_string_lit(&entry.identity.logical_key(ws, interner))?,
+            body,
+            js_string_lit(&entry.compatibility.call_abi)?,
+        )
+        .expect("writing a String cannot fail");
+    }
+    Ok(out)
+}
+
+fn code_slot_publish_js(
+    artifact: &CodeArtifact,
+    has_definition_plan: bool,
+    has_lifecycle_plan: bool,
+) -> &'static str {
+    if artifact.entries.values().any(|entry| entry.escaping)
+        || has_definition_plan
+        || has_lifecycle_plan
+    {
+        "__rock_code_slot_publish();\n"
+    } else {
+        ""
+    }
+}
+
+fn definition_plan_stage_js(
+    ws: &Workspace,
+    interner: &skull_mir::monoty::MonoInterner,
+    plan: &skull_mir::definition::DefinitionPlan,
+) -> Result<String, CompilerError> {
+    if plan.census.declarations == 0 {
+        return Ok(String::new());
+    }
+    let mut out = String::from("__rock_definition_plan_stage({\n");
+    let mut catalogs: BTreeMap<ustr::Ustr, Vec<_>> = BTreeMap::new();
+    for entry in &plan.entries {
+        catalogs.entry(entry.catalog).or_default().push(entry);
+    }
+    for (catalog, entries) in catalogs {
+        writeln!(
+            out,
+            "{}: {{catalog: {}, len: {}, _data: [",
+            js_string_lit(catalog.as_str())?,
+            js_string_lit(catalog.as_str())?,
+            entries.len()
+        )
+        .unwrap();
+        for entry in entries {
+            let key = entry.identity.logical_key(ws, interner);
+            writeln!(
+                out,
+                "{{catalog: {}, key: {}, name: {}, ordinal: {}, factory: __rock_code_slot_pending_ref({})}},",
+                js_string_lit(entry.catalog.as_str())?,
+                js_string_lit(entry.key.as_str())?,
+                js_string_lit(entry.diagnostic_name.as_str())?,
+                entry.declaration_ordinal,
+                js_string_lit(&key)?,
+            )
+            .unwrap();
+        }
+        out.push_str("]},\n");
+    }
+    out.push_str("});\n");
+    Ok(out)
+}
+
+fn lifecycle_plan_stage_js(
+    ws: &Workspace,
+    interner: &skull_mir::monoty::MonoInterner,
+    plan: &skull_mir::lifecycle::LifecyclePlan,
+) -> Result<String, CompilerError> {
+    if plan.census.declarations == 0 { return Ok(String::new()); }
+    let mut out = String::from("__rock_lifecycle_plan_stage({\n");
+    let mut phases: BTreeMap<ustr::Ustr, Vec<_>> = BTreeMap::new();
+    for entry in &plan.entries { phases.entry(entry.phase).or_default().push(entry); }
+    for (phase, entries) in phases {
+        writeln!(out, "[{}]: {{len: {}, _data: [", js_string_lit(phase.as_str())?, entries.len()).unwrap();
+        for entry in entries {
+            let key = entry.identity.logical_key(ws, interner);
+            let dependencies = entry.qualification.dependencies();
+            write!(out, "{{phase: {}, owner: {}, key: {}, name: {}, stage: {}, ordinal: {}, qualification: {}, body_fingerprint: {}, dependencies: {{len: {}, _data: [",
+                js_string_lit(entry.phase.as_str())?, js_string_lit(entry.owner.as_str())?,
+                js_string_lit(&key)?, js_string_lit(entry.diagnostic_name.as_str())?,
+                entry.stage, entry.declaration_ordinal,
+                js_string_lit(entry.qualification.tag())?,
+                js_string_lit(&format!("{:016x}", entry.body_fingerprint))?,
+                dependencies.len()).unwrap();
+            for dependency in dependencies {
+                let dependency_key = dependency.identity.logical_key(ws, interner);
+                write!(out, "{{key: {}, fingerprint: {}}},",
+                    js_string_lit(&dependency_key)?,
+                    js_string_lit(&format!("{:016x}", dependency.fingerprint))?).unwrap();
+            }
+            out.push_str("]}, func: __rock_code_slot_ref(");
+            out.push_str(&js_string_lit(&key)?);
+            out.push_str(")},\n");
+        }
+        out.push_str("]},\n");
+    }
+    out.push_str("});\n");
+    Ok(out)
+}
+
+/// Mark function values introduced by generated registration glue. Decorator
+/// applications and `@sim` registration are outside MIR, but their targets are
+/// still escaping Rock values and must use the same mono-owned CodeRefs.
+fn mark_generated_code_values(
+    ws: &Workspace,
+    artifact: &mut CodeArtifact,
+) {
+    let decorator_names: HashSet<ustr::Ustr> = ws
+        .modules
+        .iter()
+        .flat_map(|m| m.decorators.iter().map(|(_, d)| d.name))
+        .collect();
+    for module in ws.modules.iter() {
+        if module.id == bone_semantic::prelude::ModuleId::builtin() {
+            continue;
+        }
+        for (fid, f) in module.functions.iter() {
+            if f.backend == bone_semantic::hir::FnBackend::Lua {
+                continue;
+            }
+            let generated_value = f.annotations.iter().any(|ann| {
+                ann.name.name.as_str() == "sim"
+                    || decorator_names.contains(&ann.name.name)
+            });
+            if generated_value {
+                artifact.mark_value(skull_mir::code_identity::CodeIdentity::Named(
+                    Instance::base(FuncRef { module: module.id, func: fid }),
+                ));
+            }
+        }
+    }
 }
 
 /// Boxed-enum singleton / names-table defs the emitted bodies read, in name
@@ -4845,6 +5450,7 @@ pub fn annotation_value_js(v: &bone_semantic::hir::AnnoValue) -> Option<String> 
         A::Bool(b) => b.to_string(),
         A::String(s) => js_string_lit(s.as_str()).ok()?,
         A::Ident(id) => id.name.as_str().to_string(),
+        A::IdentList(_) => return None,
         A::Other => return None,
     })
 }
@@ -4884,6 +5490,7 @@ fn decorator_call_args_js(
 fn decorator_application_lines_js(
     ws: &Workspace,
     deco_names: &HashSet<ustr::Ustr>,
+    interner: &skull_mir::monoty::MonoInterner,
     names: &CalleeNames,
 ) -> Result<String, CompilerError> {
     let deco_map: HashMap<ustr::Ustr, (bone_semantic::prelude::ModuleId, Idx<bone_semantic::hir::DecoratorDef>)> = ws
@@ -4901,17 +5508,27 @@ fn decorator_application_lines_js(
                 if !deco_names.contains(&ann.name.name) {
                     continue;
                 }
+                if f.backend == bone_semantic::hir::FnBackend::Lua {
+                    continue;
+                }
                 let &(dmid, did) = deco_map.get(&ann.name.name).expect("decorator name resolves");
                 let d = &ws.module(dmid).decorators[did];
+                if skull_mir::definition::is_compiler_owned_decorator(d) {
+                    continue;
+                }
                 let fr = FuncRef { module: module.id, func: fid };
-                let js_fn = names.get(&Instance::base(fr)).ok_or_else(|| {
+                let instance = Instance::base(fr);
+                let _js_fn = names.get(&instance).ok_or_else(|| {
                     err(format!(
                         "JS subset: decorated fn `{}` was not emitted (not a program root)",
                         f.name
                     ))
                 })?;
+                let identity = skull_mir::code_identity::CodeIdentity::Named(instance);
+                let key = identity.logical_key(ws, interner);
+                let code_ref = format!("__rock_code_slot_ref({})", js_string_lit(&key)?);
                 let descriptor = format!(
-                    "{{name: {}, params: [], func: {js_fn}}}",
+                    "{{name: {}, params: [], func: {code_ref}}}",
                     js_string_lit(f.name.as_str())?
                 );
                 let mut call_args = vec![descriptor];
@@ -4988,6 +5605,24 @@ fn build_state_index(ws: &Workspace) -> HashMap<ustr::Ustr, GlobalSite> {
         }
     }
     m
+}
+
+fn build_const_global_names(
+    ws: &Workspace,
+    scx: &skull_mir::lower::ScalarCtx,
+) -> HashSet<ustr::Ustr> {
+    let mut names = HashSet::new();
+    for module in ws.modules.iter().filter(|m| m.id != bone_semantic::prelude::ModuleId::builtin()) {
+        for (_, global) in module.globals.iter().filter(|(_, g)| g.is_const) {
+            names.insert(global.name);
+            if let Ok(plan) = skull_mir::lower::GlobalPlan::for_declared_type(ws, scx, global.ty) {
+                if let Some(leaves) = plan.leaf_names(global.name) {
+                    names.extend(leaves);
+                }
+            }
+        }
+    }
+    names
 }
 
 /// `__nbg_<base>_<i>` -> `<base>`, for every global whose STORAGE is leaves.
@@ -5233,7 +5868,11 @@ fn schedule_global_reads(ws: &Workspace, mf: &MirFunc, st: &mut WorklistState) -
         } else if st.enum_defs.contains_key(&name) {
             st.gctx.enum_globals.insert(name);
         } else if let Some(&base) = st.nobox_leaf_globals.get(&name) {
-            st.gctx.state.insert(name);
+            if !st.gctx.state.contains_key(&name) && !st.gctx.const_globals.contains(&name) {
+                return Err(err(format!(
+                    "JS: nobox leaf `{name}` has no compiler-owned Session slot"
+                )));
+            }
             if let Some(&site) = st.state_index.get(&base) {
                 if st.ginit_seen.insert(base) {
                     st.ginit_queue.push((base, site));
@@ -5246,7 +5885,11 @@ fn schedule_global_reads(ws: &Workspace, mf: &MirFunc, st: &mut WorklistState) -
                      (module-load side effect not emitted)"
                 )));
             }
-            st.gctx.state.insert(name);
+            if !st.gctx.state.contains_key(&name) && !st.gctx.const_globals.contains(&name) {
+                return Err(err(format!(
+                    "JS: global `{name}` has no compiler-owned Session slot"
+                )));
+            }
             if st.ginit_seen.insert(name) {
                 st.ginit_queue.push((name, site));
             }
@@ -5285,6 +5928,57 @@ fn direct_callees(mf: &MirFunc, names: &CalleeNames) -> Vec<ustr::Ustr> {
     out
 }
 
+fn forward_reach(deps: &HashMap<ustr::Ustr, HashSet<ustr::Ustr>>, start: ustr::Ustr) -> HashSet<ustr::Ustr> {
+    let mut seen = HashSet::default();
+    let mut stack = vec![start];
+    while let Some(name) = stack.pop() {
+        if let Some(references) = deps.get(&name) {
+            for &reference in references {
+                if seen.insert(reference) {
+                    stack.push(reference);
+                }
+            }
+        }
+    }
+    seen
+}
+
+fn affected_const_names(
+    ws: &Workspace,
+    changed: &HashSet<ustr::Ustr>,
+    const_order: &[ustr::Ustr],
+) -> HashSet<ustr::Ustr> {
+    if changed.is_empty() {
+        return HashSet::default();
+    }
+    let mut deps: HashMap<ustr::Ustr, HashSet<ustr::Ustr>> = HashMap::default();
+    for module in ws
+        .modules
+        .iter()
+        .filter(|module| module.id != bone_semantic::prelude::ModuleId::builtin())
+    {
+        let Some(inference) = ws.inference(module.id) else { continue };
+        for (fid, function) in module.functions.iter() {
+            if let Some(body) = inference.per_fn.get(&BodyOwner::Function(fid)) {
+                deps.entry(function.name).or_default().extend(body.deps.iter().copied());
+            }
+        }
+        for (gid, global) in module.globals.iter() {
+            if let Some(body) = inference.per_fn.get(&BodyOwner::Global(gid)) {
+                deps.entry(global.name).or_default().extend(body.deps.iter().copied());
+            }
+        }
+    }
+    const_order
+        .iter()
+        .copied()
+        .filter(|name| {
+            changed.contains(name)
+                || forward_reach(&deps, *name).iter().any(|dependency| changed.contains(dependency))
+        })
+        .collect()
+}
+
 /// Order the global-init assignment lines so each global inits AFTER every global
 /// it TRANSITIVELY reads through its call graph: `__G.<name> = <init_name>();`.
 /// A shallow "reads in the init body" edge misses `ACT_UI_CONFIRM = action_new(..)`
@@ -5295,6 +5989,7 @@ fn order_global_inits(
     ginits: &[GlobalInit],
     lowered: &[(FuncRef, MirFunc)],
     names: &CalleeNames,
+    state_slots: &HashMap<ustr::Ustr, String>,
 ) -> Result<Vec<GlobalInitLine>, CompilerError> {
     // Per-fn direct facts, keyed by emit name (ginit = init_name, lowered = js name).
     let mut direct_globals: HashMap<ustr::Ustr, Vec<ustr::Ustr>> = HashMap::new();
@@ -5409,15 +6104,13 @@ fn order_global_inits(
     let mut remaining: Vec<&GlobalInit> = ginits.iter().collect();
     while !remaining.is_empty() {
         let before = remaining.len();
-        remaining.retain(|g| {
+        let mut next = Vec::with_capacity(before);
+        for g in remaining.drain(..) {
             if init_deps[&g.name].iter().all(|d| emitted.contains(d)) {
                 lines.push(GlobalInitLine {
                     name: g.name,
-                    js: match &g.leaves {
-                        // Leaf storage: the ginit splats, so the extra leaves come
-                        // back through the scratch bank and must be read off it
-                        // before anything else can call and clobber it.
-                        Some(leaves) => {
+                    js: match (g.is_const, &g.leaves) {
+                        (true, Some(leaves)) => {
                             let mut js = format!("__G.{} = {}();", leaves[0], g.init_name);
                             for (i, leaf) in leaves.iter().enumerate().skip(1) {
                                 js.push_str(&format!(" __G.{leaf} = __rock_ret{i};"));
@@ -5425,15 +6118,53 @@ fn order_global_inits(
                             js.push('\n');
                             js
                         }
-                        None => format!("__G.{} = {}();\n", g.name, g.init_name),
+                        (true, None) => format!("__G.{} = {}();\n", g.name, g.init_name),
+                        // Leaf storage: the ginit splats, so the extra leaves come
+                        // back through the scratch bank and must be read off it
+                        // before anything else can call and clobber it.
+                        (false, Some(leaves)) => {
+                            let keys: Vec<&str> = leaves
+                                .iter()
+                                .map(|leaf| {
+                                    state_slots.get(leaf).map(String::as_str).ok_or_else(|| {
+                                        err(format!(
+                                            "JS: global `{}` has no compiler-owned Session slot for `{leaf}`",
+                                            g.name
+                                        ))
+                                    })
+                                })
+                                .collect::<Result<_, _>>()?;
+                            let mut js = format!(
+                                "if (!__rock_state_has({:?})) {{ let __rock_init_values = {}(); __rock_state_set({:?}, __rock_init_values);",
+                                keys[0], g.init_name, keys[0]
+                            );
+                            for (i, _) in leaves.iter().enumerate().skip(1) {
+                                let key = keys[i];
+                                js.push_str(&format!(" __rock_state_set({key:?}, __rock_ret{i});"));
+                            }
+                            js.push_str(" }\n");
+                            js
+                        }
+                        (false, None) => {
+                            let key = state_slots.get(&g.name).ok_or_else(|| {
+                                err(format!(
+                                    "JS: global `{}` has no compiler-owned Session slot",
+                                    g.name
+                                ))
+                            })?;
+                            format!(
+                                "if (!__rock_state_has({key:?})) __rock_state_set({key:?}, {}());\n",
+                                g.init_name
+                            )
+                        }
                     },
                 });
                 emitted.insert(g.name);
-                false
             } else {
-                true
+                next.push(g);
             }
-        });
+        }
+        remaining = next;
         if remaining.len() == before {
             let names: Vec<&str> = remaining.iter().map(|g| g.name.as_str()).collect();
             return Err(err(format!(
@@ -5682,39 +6413,134 @@ fn build_vt_eq_defs(ws: &Workspace, names: &BTreeSet<ustr::Ustr>) -> Result<Stri
 /// arena, and the JS ctor (the exact Lua ctor contract: the object IS the
 /// frame; `__resume`/`__advance` drive the step; `JS_CORO_RUNTIME` supplies
 /// `__rock_coroutine_kill`/`__rock_coroutine_run_defers`/`error`).
+fn add_coroutine_code_values(
+    ws: &Workspace,
+    interner: &skull_mir::monoty::MonoInterner,
+    plan: &skull_mir::lower::CoroutinePlan,
+    lowered: &skull_transform::CoroLowered,
+    artifact: &mut CodeArtifact,
+    defer_funcs: &[MirFunc],
+    hook_funcs: &[(&'static str, MirFunc)],
+) -> (Option<String>, String, Vec<String>, Vec<String>) {
+    let root = lowered.step.code_identity.as_ref().expect("co fn identity");
+    let owner = root.owner().expect("co fn owner");
+    let root_compatibility = artifact
+        .entries
+        .get(root)
+        .expect("co fn artifact entry")
+        .compatibility
+        .clone();
+    let generated_compatibility = |role: &str| CodeCompatibility {
+        call_abi: format!("coroutine:{role};{}", root_compatibility.call_abi),
+        capture: CaptureSchema::empty(),
+        frame: root_compatibility.frame.clone(),
+        lambda_topology: root_compatibility.lambda_topology,
+    };
+    let mut generated = |role: &str, body: &str| {
+        let identity = CodeIdentity::Generated {
+            enclosing: owner.clone(),
+            role: Ustr::from(role),
+        };
+        artifact.add_generated_value(identity.clone(), generated_compatibility(role), body);
+        identity.logical_key(ws, interner)
+    };
+    let resume_body = plan.resume();
+    let resume_key = generated("resume", &resume_body);
+    let advance_key = plan.advance().map(|body| generated("advance", &body));
+    let defer_keys = defer_funcs
+        .iter()
+        .map(|aux| {
+            let identity = aux.code_identity.clone().expect("defer identity");
+            artifact.mark_value(identity.clone());
+            identity.logical_key(ws, interner)
+        })
+        .collect();
+    let hook_keys = hook_funcs
+        .iter()
+        .map(|(_, aux)| {
+            let identity = aux.code_identity.clone().expect("hook identity");
+            artifact.mark_value(identity.clone());
+            identity.logical_key(ws, interner)
+        })
+        .collect();
+    (advance_key, resume_key, defer_keys, hook_keys)
+}
+
 fn emit_coroutine_js(
     ws: &Workspace,
+    interner: &skull_mir::monoty::MonoInterner,
     plan: &skull_mir::lower::CoroutinePlan,
     mf: &MirFunc,
     callees: &CalleeNames,
     hoisted: &HashSet<ustr::Ustr>,
     globals: &GlobalCtx,
-) -> Result<String, CompilerError> {
+) -> Result<(String, CodeArtifact), CompilerError> {
     let channel = plan.channel.as_ref();
     let mut lowered = skull_transform::transform_coroutine(mf, channel);
     let resume_arg = mf.resume_arg.ok_or_else(|| err("co fn must carry a resume-arg cell"))?;
     let step_name = plan.step();
-    // Aux slot map BEFORE the closure pass mutates the arena (mirrors the Lua
-    // driver); hook/defer regions are untouched by the pass, so the map stays valid.
-    let aux_slots = lowered.aux_all_cells_slots(resume_arg);
-    let frame_info = skull_transform::FrameInfo {
-        s_cell: lowered.s_cell,
-        fields: lowered.frame_plan.fields().iter().copied().collect(),
-        slots: lowered.frame_plan.slots().clone(),
-    };
+    // Convert detached hook/defer regions as ordinary functions. Their own
+    // lambda parameters and locals stay ordinary cells; only root-owned cells
+    // are materialized through the coroutine state table.
+    let frame_info = lowered.root_frame_info();
+    let defer_entries: Vec<Idx<Block>> =
+        lowered.step.coro_defers.iter().map(|(_, entry)| *entry).collect();
+    let hook_entries: Vec<(&'static str, Idx<Block>)> = lowered
+        .hooks
+        .iter()
+        .map(|(kind, entry)| (kind.slot(), *entry))
+        .collect();
+    let mut defer_funcs = Vec::with_capacity(defer_entries.len());
+    for (k, &entry) in defer_entries.iter().enumerate() {
+        let aux_name = plan.defer(k);
+        defer_funcs.push(skull_transform::lower_detached_region(
+            &lowered.step,
+            entry,
+            &aux_name,
+            &frame_info,
+        ));
+    }
+    let mut hook_funcs = Vec::with_capacity(hook_entries.len());
+    for &(slot, entry) in &hook_entries {
+        let aux_name = plan.hook(slot);
+        hook_funcs.push((
+            slot,
+            skull_transform::lower_detached_region(&lowered.step, entry, &aux_name, &frame_info),
+        ));
+    }
+    skull_transform::erase_detached_lambdas(
+        &mut lowered.step,
+        defer_entries
+            .iter()
+            .copied()
+            .chain(hook_entries.iter().map(|(_, entry)| *entry)),
+    );
     skull_transform::convert_closures_framed(
         &mut lowered.step,
         &step_name,
         Some(&frame_info),
         Some((&lowered.step_tree, &lowered.step_own)),
     );
+    let mut detached_identities = HashSet::new();
+    for aux in &defer_funcs {
+        collect_nested_code_identities(aux, &mut detached_identities);
+    }
+    for (_, aux) in &hook_funcs {
+        collect_nested_code_identities(aux, &mut detached_identities);
+    }
+    lowered
+        .step
+        .nested_fns
+        .retain(|nested| nested.code_identity.as_ref().is_none_or(|id| !detached_identities.contains(id)));
     // This coroutine's hoisted lambda names are referenced only from its own
     // bodies, so extend the program set locally.
     let mut hoisted = hoisted.clone();
     hoisted.extend(lowered.step.nested_fns.iter().map(|nf| nf.name));
-    // Materialize the ROOT region's frame accesses, then each detached
-    // hook/defer region with the all-cells aux map (disjoint block sets over
-    // the shared arena).
+    for aux in defer_funcs.iter().chain(hook_funcs.iter().map(|(_, aux)| aux)) {
+        hoisted.extend(aux.nested_fns.iter().map(|nf| nf.name));
+    }
+    // Materialize only the root region; detached regions were materialized when
+    // they were copied into ordinary MirFuncs.
     let step_entry = lowered.step.entry;
     skull_transform::materialize_frame(
         &mut lowered.step,
@@ -5722,29 +6548,51 @@ fn emit_coroutine_js(
         lowered.s_cell,
         lowered.frame_plan.slots(),
     );
-    let mut hook_entries: Vec<(&'static str, Idx<Block>)> = Vec::new();
-    for (kind, lambda) in &lowered.hooks {
-        let Inst::Lambda { params, entry } = &lowered.step.insts[*lambda] else {
-            return Err(err(format!("co-fn hook {} must be an Inst::Lambda", kind.slot())));
-        };
-        if !params.is_empty() {
-            return Err(err("co-fn lifecycle hooks are nullary"));
+    let mut code_artifact = CodeArtifact::from_mir_tree(&lowered.step);
+    code_artifact.set_body_names(&lowered.step, &step_name);
+    if let Some(identity) = &lowered.step.code_identity {
+        if let Some(entry) = code_artifact.entries.get_mut(identity) {
+            entry.body_name = Some(Ustr::from(plan.base()));
+            let mut slots: Vec<u32> = lowered.frame_plan.slots().values().copied().collect();
+            slots.sort_unstable();
+            slots.dedup();
+            entry.compatibility.frame = Some(FrameSchema { slots });
         }
-        hook_entries.push((kind.slot(), *entry));
     }
-    let defer_entries: Vec<Idx<Block>> =
-        lowered.step.coro_defers.iter().map(|(_, e)| *e).collect();
-    for &e in defer_entries.iter().chain(hook_entries.iter().map(|(_, e)| e)) {
-        skull_transform::materialize_frame(&mut lowered.step, e, lowered.s_cell, &aux_slots);
+    for aux in &defer_funcs {
+        let mut artifact = CodeArtifact::from_mir_tree(aux);
+        artifact.set_body_names(aux, aux.name.as_str());
+        code_artifact.merge(artifact);
     }
-
+    for (_, aux) in &hook_funcs {
+        let mut artifact = CodeArtifact::from_mir_tree(aux);
+        artifact.set_body_names(aux, aux.name.as_str());
+        code_artifact.merge(artifact);
+    }
+    let (advance_key, resume_key, defer_keys, hook_keys) = add_coroutine_code_values(
+        ws,
+        interner,
+        plan,
+        &lowered,
+        &mut code_artifact,
+        &defer_funcs,
+        &hook_funcs,
+    );
+    let mut globals = globals.clone();
+    register_code_slots(ws, interner, &lowered.step, &mut globals);
+    for aux in &defer_funcs {
+        register_code_slots(ws, interner, aux, &mut globals);
+    }
+    for (_, aux) in &hook_funcs {
+        register_code_slots(ws, interner, aux, &mut globals);
+    }
     let mut out = emit_fn_trampoline(
         ws,
         &lowered.step,
         &step_name,
         callees,
         &hoisted,
-        globals,
+        &globals,
         lowered.step.entry,
         &[lowered.s_cell, resume_arg],
         false,
@@ -5755,37 +6603,67 @@ fn emit_coroutine_js(
     for nf in nested.iter_mut() {
         skull_transform::cleanup_with_nobox(ws, nf)?;
         skull_transform::recover_counted_loops(ws, nf);
-        out.push_str(&emit_fn_with_callees(ws, nf, nf.name.as_str(), callees, &hoisted, globals)?);
+        out.push_str(&emit_fn_with_callees(ws, nf, nf.name.as_str(), callees, &hoisted, &globals)?);
     }
     lowered.step.nested_fns = nested;
-    for (k, &entry) in defer_entries.iter().enumerate() {
-        out.push_str(&emit_fn_trampoline(
+    for mut aux in defer_funcs {
+        skull_transform::cleanup_with_nobox(ws, &mut aux)?;
+        out.push_str(&emit_fn_with_callees(
             ws,
-            &lowered.step,
-            &plan.defer(k),
+            &aux,
+            aux.name.as_str(),
             callees,
             &hoisted,
-            globals,
-            entry,
-            &[lowered.s_cell],
-            false,
+            &globals,
         )?);
+        let mut nested = std::mem::take(&mut aux.nested_fns);
+        for nf in nested.iter_mut() {
+            skull_transform::cleanup_with_nobox(ws, nf)?;
+            skull_transform::recover_counted_loops(ws, nf);
+            out.push_str(&emit_fn_with_callees(
+                ws,
+                nf,
+                nf.name.as_str(),
+                callees,
+                &hoisted,
+                &globals,
+            )?);
+        }
     }
-    for &(slot, entry) in &hook_entries {
-        out.push_str(&emit_fn_trampoline(
+    for (_, mut aux) in hook_funcs {
+        skull_transform::cleanup_with_nobox(ws, &mut aux)?;
+        out.push_str(&emit_fn_with_callees(
             ws,
-            &lowered.step,
-            &plan.hook(slot),
+            &aux,
+            aux.name.as_str(),
             callees,
             &hoisted,
-            globals,
-            entry,
-            &[lowered.s_cell],
-            false,
+            &globals,
         )?);
+        let mut nested = std::mem::take(&mut aux.nested_fns);
+        for nf in nested.iter_mut() {
+            skull_transform::cleanup_with_nobox(ws, nf)?;
+            skull_transform::recover_counted_loops(ws, nf);
+            out.push_str(&emit_fn_with_callees(
+                ws,
+                nf,
+                nf.name.as_str(),
+                callees,
+                &hoisted,
+                &globals,
+            )?);
+        }
     }
-    out.push_str(&emit_js_constructor(plan, &step_name, &lowered)?);
-    Ok(out)
+    out.push_str(&emit_js_constructor(
+        plan,
+        &step_name,
+        &lowered,
+        advance_key.as_deref(),
+        &resume_key,
+        &defer_keys,
+        &hook_keys,
+    )?);
+    Ok((out, code_artifact))
 }
 
 /// The JS Coroutine constructor + per-co-fn `__resume` (and `__advance` on the
@@ -5796,6 +6674,10 @@ fn emit_js_constructor(
     plan: &skull_mir::lower::CoroutinePlan,
     step_name: &str,
     lowered: &skull_transform::CoroLowered,
+    advance_key: Option<&str>,
+    resume_key: &str,
+    defer_keys: &[String],
+    hook_keys: &[String],
 ) -> Result<String, CompilerError> {
     use std::fmt::Write as _;
     let name = plan.base();
@@ -5819,21 +6701,26 @@ fn emit_js_constructor(
     for pf in &param_fields {
         init.push(format!("{pf}: {pf}"));
     }
-    let n_defers = lowered.step.coro_defers.len();
-    if n_defers > 0 {
-        let list: Vec<String> = (0..n_defers).map(|k| plan.defer(k)).collect();
+    if !defer_keys.is_empty() {
+        let list: Vec<String> = defer_keys
+            .iter()
+            .map(|key| Ok(format!("__rock_code_slot_ref({})", js_string_lit(key)?)))
+            .collect::<Result<_, CompilerError>>()?;
         init.push(format!("__defers: [{}]", list.join(", ")));
     }
-    for (kind, _) in &lowered.hooks {
+    for ((kind, _), key) in lowered.hooks.iter().zip(hook_keys) {
         let field = kind.slot();
-        init.push(format!("{field}: {}", plan.hook(field)));
+        init.push(format!(
+            "{field}: __rock_code_slot_ref({})",
+            js_string_lit(key)?
+        ));
     }
     // The step-raise recovery shared by both resume shapes: errored terminal,
     // kill the delegated inner, run defers LIFO, fire on_killed.
     let catch_body = "s.__state = -2; s.__error = (e && e.message !== undefined) ? e.message : e; \
                       if (s.__inner) { __rock_coroutine_kill(s.__inner); s.__inner = null; } \
                       __rock_coroutine_run_defers(s); \
-                      if (s.__on_killed) { s.__on_killed(s); }";
+                      if (s.__on_killed) { __rock_call(s.__on_killed, s); }";
     if let Some(ch) = channel {
         let mut box_fields = format!(
             "{{ __variant: s.{tag}, __ty: {ty}",
@@ -5856,10 +6743,15 @@ fn emit_js_constructor(
         box_fields.push_str(" }");
         let advance = plan.advance().expect("a channel is what makes `__advance` exist");
         let resume = plan.resume();
+        let advance_ref = format!(
+            "__rock_code_slot_ref({})",
+            js_string_lit(advance_key.expect("advance CodeRef"))?
+        );
+        let resume_ref = format!("__rock_code_slot_ref({})", js_string_lit(resume_key)?);
         return Ok(format!(
             "function {advance}(s, arg) {{\n\
              \x20 if (s.__state < 0) return true;\n\
-             \x20 if (s.__on_resume) s.__on_resume(s);\n\
+             \x20 if (s.__on_resume) __rock_call(s.__on_resume, s);\n\
              \x20 try {{ {step_name}(s, arg); }} catch (e) {{ {catch_body} return true; }}\n\
              \x20 return s.__state < 0;\n\
              }}\n\
@@ -5868,26 +6760,30 @@ fn emit_js_constructor(
              \x20 return {box_fields};\n\
              }}\n\
              function {name}({paramlist}) {{\n\
-             \x20 return {{ {fields}, __advance: {advance}, __resume: {resume} }};\n\
+             \x20 return {{ {fields}, __advance: {advance_ref}, __resume: {resume_ref} }};\n\
              }}\n",
             paramlist = param_fields.join(", "),
             fields = init.join(", "),
+            advance_ref = advance_ref,
+            resume_ref = resume_ref,
         ));
     }
     let resume = plan.resume();
+    let resume_ref = format!("__rock_code_slot_ref({})", js_string_lit(resume_key)?);
     Ok(format!(
         "function {resume}(s, arg) {{\n\
          \x20 if (s.__state < 0) return null;\n\
-         \x20 if (s.__on_resume) s.__on_resume(s);\n\
+         \x20 if (s.__on_resume) __rock_call(s.__on_resume, s);\n\
          \x20 var val;\n\
          \x20 try {{ val = {step_name}(s, arg); }} catch (e) {{ {catch_body} return null; }}\n\
          \x20 return val === undefined ? null : val;\n\
          }}\n\
          function {name}({paramlist}) {{\n\
-         \x20 return {{ {fields}, __resume: {resume} }};\n\
+         \x20 return {{ {fields}, __resume: {resume_ref} }};\n\
          }}\n",
         paramlist = param_fields.join(", "),
         fields = init.join(", "),
+        resume_ref = resume_ref,
     ))
 }
 
@@ -6142,14 +7038,14 @@ fn host_fn_template(cf: &bone_semantic::hir::Function) -> Option<&'static str> {
         // IIFEs where an arg is read twice; `undefined -> null` normalization so
         // an unset frame field reads as Rock null (Lua nil parity). `resume` has
         // two arities (overload-by-arity: `c.resume()` vs `c.resume(arg)`).
-        ("resume", 1) => Some("(function(c){var v=c.__resume(c);return v===undefined?null:v;})($1)"),
-        ("resume", 2) => Some("(function(c,a){var v=c.__resume(c,a);return v===undefined?null:v;})($1, $2)"),
+        ("resume", 1) => Some("(function(c){var v=__rock_call(c.__resume,c);return v===undefined?null:v;})($1)"),
+        ("resume", 2) => Some("(function(c,a){var v=__rock_call(c.__resume,c,a);return v===undefined?null:v;})($1, $2)"),
         ("result", 1) => Some("(function(c){var v=c.__return;return v===undefined?null:v;})($1)"),
         ("status", 1) => Some("(function(c){return c.__state === -2 ? \"errored\" : (c.__state < 0 ? \"dead\" : \"suspended\");})($1)"),
         ("completed", 1) => Some("($1.__state === -3)"),
         ("last_error", 1) => Some("(function(c){var v=c.__error;return v===undefined?null:v;})($1)"),
         ("kill", 1) => Some("__rock_coroutine_kill($1)"),
-        ("fire_hot_reload", 1) => Some("(function(c){ if (c.__state >= 0 && c.__on_hot_reload) c.__on_hot_reload(c); })($1)"),
+        ("fire_hot_reload", 1) => Some("(function(c){ if (c.__state >= 0 && c.__on_hot_reload) __rock_call(c.__on_hot_reload,c); })($1)"),
         // `error(msg)` diverges; the message is already a string. Wrapped in a
         // throwing IIFE so it is a valid EXPRESSION -- the lowering stores a
         // diverging call's (dead) result into an if-result cell, and a bare

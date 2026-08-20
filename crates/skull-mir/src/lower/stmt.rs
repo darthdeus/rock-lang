@@ -41,7 +41,16 @@ impl Builder<'_> {
             hash_init_expr(self.body, value, &mut hsh);
             hsh.finish()
         };
-        self.f.statics.push(StaticCell { cell, done_flag, type_str, init_hash });
+        self.f.statics.push(StaticCell {
+            cell,
+            done_flag,
+            logical_name: sname,
+            ordinal: ctr,
+            type_str,
+            init_hash,
+            owner: self.f.code_identity.clone(),
+            site: crate::code_identity::LambdaSiteId::from_span(self.body.binding_arena[name].span),
+        });
 
         let done_v = self.emit_cur(Inst::Global(done_flag));
         let init_bb = self.f.new_block();
@@ -124,6 +133,15 @@ impl Builder<'_> {
 
         let mut mf = MirFunc::new(hoisted);
         mf.rep_arena = Some(self.scx.rep_arena());
+        let nested_identity = self
+            .site_owner
+            .clone()
+            .zip(crate::code_identity::LambdaSiteId::from_span(self.body.expr_spans[body]))
+            .map(|(enclosing, site)| crate::code_identity::CodeIdentity::Nested {
+                enclosing: crate::code_identity::CodeOwner::Instance(enclosing),
+                site,
+                name: sname,
+            });
         let entry = mf.entry();
         let param_reps = abi.representation.params().to_vec();
         let mut child = Builder {
@@ -176,6 +194,26 @@ impl Builder<'_> {
         };
 
         child.f.abi_representation = Some(abi.representation.clone());
+        child.f.code_identity = nested_identity;
+        child.f.code_abi_fingerprint = Some(
+            abi.representation.logical_fingerprint(&self.scx.rep_arena()),
+        );
+        if child.f.code_identity.is_some() {
+            child.f.code_compatibility = Some(crate::code_identity::CodeCompatibility {
+                call_abi: child
+                    .f
+                    .code_abi_fingerprint
+                    .clone()
+                    .expect("nested ABI fingerprint"),
+                capture: crate::code_identity::CaptureSchema::empty(),
+                frame: None,
+                lambda_topology: Default::default(),
+            });
+        }
+        if let Some(identity) = child.f.code_identity.clone() {
+            self.f.nested_fn_identities.insert(hoisted, identity);
+        }
+        child.f.nested_fn_identities = self.f.nested_fn_identities.clone();
 
         for (i, pb) in params.into_iter().enumerate() {
             let pname = child.body.binding_arena[pb].name;

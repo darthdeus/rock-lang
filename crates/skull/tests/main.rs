@@ -18,6 +18,8 @@ mod bounded_standalone_emission;
 mod capture_free_hoist;
 #[path = "closure_snapshot.rs"]
 mod closure_snapshot;
+#[path = "code_identity_artifact.rs"]
+mod code_identity_artifact;
 #[path = "coalesce_value_struct_literal_field.rs"]
 mod coalesce_value_struct_literal_field;
 #[path = "concrete_body.rs"]
@@ -89,6 +91,8 @@ mod inline_lua_column_container_param_sentinel;
 mod inline_value_specialization;
 #[path = "inline_stats.rs"]
 mod inline_stats;
+#[path = "parallel_inline_mode.rs"]
+mod parallel_inline_mode;
 #[path = "graph_contributions.rs"]
 mod graph_contributions;
 
@@ -184,6 +188,10 @@ mod compute_surface;
 mod static_hot_reload;
 #[path = "static_registration_coverage.rs"]
 mod static_registration_coverage;
+#[path = "state_schema.rs"]
+mod state_schema;
+#[path = "session_state.rs"]
+mod session_state;
 #[path = "struct_expand.rs"]
 mod struct_expand;
 #[path = "synthetic_name_collision.rs"]

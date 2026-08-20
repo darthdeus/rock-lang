@@ -475,6 +475,7 @@ pub struct ArtifactCensus {
 }
 
 /// One target's realization of a graph it did not build.
+#[derive(Clone)]
 pub struct ArtifactView {
     pub spec: TargetSpec,
     /// The artifact's root instances -- realizable emission roots, plus the
@@ -598,7 +599,7 @@ pub struct ArtifactView {
     index: ArtifactIndex,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct ArtifactIndex {
     realizable: FxHashMap<Instance, Result<Realized, Unrealizable>>,
     outgoing: FxHashMap<Instance, FxHashMap<Site, Instance>>,

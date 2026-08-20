@@ -414,6 +414,21 @@ impl<'a> Tokenizer<'a> {
                     .to_string(),
             ));
         }
+        // After the structural refusals above, so an unterminated literal is
+        // still reported as unterminated rather than as whatever escape its
+        // runaway body happened to contain first.
+        if let Some(bad) = scan.bad_escapes.first() {
+            let (at, len, message) = (bad.at, bad.len, bad.message.clone());
+            // Walk to the escape so the label carries its real line/column,
+            // then to its end, then past the literal: advance_to keeps
+            // line/column in step, so the cursor is where the caller expects.
+            self.advance_to(at);
+            let esc_start = self.start_span();
+            self.advance_to(at + len);
+            let span = self.end_span(esc_start);
+            self.advance_to(scan.end);
+            return Err(CompilerError::new_with_label(span, message));
+        }
         let content = scan.content(self.input);
         self.advance_to(scan.end);
         Ok(match scan.flavor {
@@ -1738,5 +1753,119 @@ fn main() {       // trailing comment
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod escape_tests {
+    use super::*;
+
+    fn lex(src: &str) -> Result<Vec<TokenKind>, CompilerError> {
+        Tokenizer::from_code("t.rock", src).tokenize_kinds()
+    }
+
+    fn text(src: &str) -> String {
+        match lex(src).expect("lexes").into_iter().next().expect("one token") {
+            TokenKind::String(s) | TokenKind::RawString(s) => s.to_string(),
+            other => panic!("not a string token: {other:?}"),
+        }
+    }
+
+    fn rejection(src: &str) -> String {
+        lex(src).expect_err("must reject").message
+    }
+
+    #[test]
+    fn unicode_escapes_resolve_to_their_scalar() {
+        assert_eq!(text(r#""\u{41}""#), "A");
+        assert_eq!(text(r#""M\u{00c1}G""#), "M\u{00c1}G");
+        assert_eq!(text(r#""\u{1F600}""#), "\u{1F600}");
+        // Hex is case-insensitive and 1..=6 digits, so the short and long
+        // spellings of one scalar agree.
+        assert_eq!(text(r#""\u{c1}""#), text(r#""\u{0000C1}""#));
+    }
+
+    // The emitted bytes are what a charset declaration is read as, so the
+    // escape has to produce UTF-8 rather than a lone char in some other width.
+    #[test]
+    fn an_astral_escape_emits_four_utf8_bytes() {
+        let s = text(r#""\u{1F600}""#);
+        assert_eq!(s.len(), 4, "U+1F600 is four UTF-8 bytes");
+        assert_eq!(s.chars().count(), 1);
+    }
+
+    #[test]
+    fn carriage_return_is_an_escape_rather_than_the_letter_r() {
+        assert_eq!(text(r#""a\rb""#), "a\rb");
+        assert_eq!(text(r#""\r""#).as_bytes(), &[13]);
+    }
+
+    #[test]
+    fn the_known_escapes_still_resolve() {
+        assert_eq!(text(r#""a\nb\tc""#), "a\nb\tc");
+        assert_eq!(text(r#""q\"q""#), "q\"q");
+        assert_eq!(text(r#""b\\b""#), "b\\b");
+    }
+
+    // Silently dropping the backslash is what let `stdlib/json.rock` decode a
+    // JSON `\r` as the letter `r`. An unknown escape is a rejection, never a
+    // string the author did not write.
+    #[test]
+    fn an_unknown_escape_is_rejected() {
+        assert!(rejection(r#""\q""#).contains("unknown string escape"));
+        assert!(rejection(r#""C:\path""#).contains("unknown string escape"));
+        // The message names the raw-string escape hatch, which is the fix for
+        // every Windows path and regex in the corpus.
+        assert!(rejection(r#""\d+""#).contains("r\"..\""));
+    }
+
+    #[test]
+    fn a_malformed_unicode_escape_is_rejected() {
+        assert!(rejection(r#""\u41""#).contains("\\u{"), "braces are required");
+        assert!(rejection(r#""\u{}""#).contains("at least one"));
+        assert!(rejection(r#""\u{41""#).contains("unterminated"));
+        assert!(rejection(r#""\u{XY}""#).contains("hex"));
+        assert!(rejection(r#""\u{1234567}""#).contains("at most six"));
+    }
+
+    // Both ends of the scalar range, so the check is not a one-sided bound.
+    #[test]
+    fn a_non_scalar_codepoint_is_rejected() {
+        assert!(rejection(r#""\u{D800}""#).contains("surrogate"));
+        assert!(rejection(r#""\u{DFFF}""#).contains("surrogate"));
+        assert!(rejection(r#""\u{110000}""#).contains("above"));
+        // And the neighbours that ARE scalars still lex, so the rejection is
+        // narrow rather than a range that swallowed them.
+        assert_eq!(text(r#""\u{D7FF}""#), "\u{D7FF}");
+        assert_eq!(text(r#""\u{E000}""#), "\u{E000}");
+        assert_eq!(text(r#""\u{10FFFF}""#), "\u{10FFFF}");
+    }
+
+    // Raw and triple-quoted flavors do not run the escape pass at all, so they
+    // are the escape hatch AND cannot be broken by a stricter one.
+    #[test]
+    fn flavors_without_an_escape_pass_are_untouched() {
+        assert_eq!(text("r\"\\d+\""), "\\d+");
+        assert_eq!(text("r\"C:\\path\\to\""), "C:\\path\\to");
+        assert_eq!(text("\"\"\"\\d+\"\"\""), "\\d+");
+    }
+
+    // A wrapped literal is ONE line of text: the newline and the next line's
+    // indentation are both consumed. Dropping only the backslash left both in
+    // the string, which is what every wrapped message in the corpus was getting.
+    #[test]
+    fn a_backslash_before_a_newline_continues_the_line() {
+        assert_eq!(text("\"one \\\n         two\""), "one two");
+        assert_eq!(text("\"one \\\n\ttwo\""), "one two");
+        // Only leading horizontal space is eaten -- an intentional blank line
+        // still needs `\n`.
+        assert_eq!(text("\"a\\\n  b\\nc\""), "ab\nc");
+    }
+
+    #[test]
+    fn an_escape_inside_an_interpolation_hole_still_resolves() {
+        // The hole text is kept verbatim in the token; the escape pass runs
+        // when the hole is re-parsed, so the token keeps the source spelling.
+        assert_eq!(text(r#""x={f("\u{41}")}""#), "x={f(\"\\u{41}\")}");
     }
 }

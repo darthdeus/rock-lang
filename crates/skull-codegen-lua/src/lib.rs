@@ -36,14 +36,232 @@ use skull_mir::monoty::MonoInterner;
 
 pub use skull_mir::mangle::mangle_fn;
 
-/// The shared metatable of capturing-lambda env records
-/// (`docs/closure-env-records-plan.md`): a record `{ __fn = <top-level fn>,
-/// <captures> }` is callable as `f(...)` via `__call`. Reload-guarded so pre- and
-/// post-reload records share metatable identity. THE canonical definition -- both
-/// `skull::runtime_prelude` (the load-time scaffolding) and the codegen test
-/// harness reference this one constant, not a copy.
-pub const FN_MT_PRELUDE: &str =
-    "if not _G.__rock_fn_mt then _G.__rock_fn_mt = { __call = function(e, ...) return e.__fn(e, ...) end } end";
+/// Runtime support for callable CodeRefs and capturing environment records.
+/// Slots are mutated in place only by the publish step, so existing values see
+/// a compatible body edit while a failed stage leaves the previous body live.
+pub const FN_MT_PRELUDE: &str = r#"
+if not _G.__rock_code_slot_mt then
+  _G.__rock_code_slot_mt = { __call = function(s, ...) return s.current_body(...) end }
+end
+if not _G.__rock_code_slots then _G.__rock_code_slots = {} end
+function __rock_code_slot_ref(key)
+  local slot = _G.__rock_code_slots[key]
+  if (not slot or _G.__rock_definition_plan_materializing) and _G.__rock_code_slot_pending then
+    local staged = _G.__rock_code_slot_pending[key]
+    if staged then
+      local pending = _G.__rock_code_slot_pending_slots
+      local temporary = pending[key]
+      if not temporary then
+        temporary = setmetatable({
+          __rock_code_slot = true,
+          key = key, current_body = staged.body, abi = staged.abi
+        }, _G.__rock_code_slot_mt)
+        pending[key] = temporary
+      end
+      return temporary
+    end
+  end
+  if not slot then error("missing Rock code slot " .. key, 0) end
+  return slot
+end
+function __rock_code_slot_pending_ref(key)
+  local staged = _G.__rock_code_slot_pending and _G.__rock_code_slot_pending[key]
+  if staged then
+    local pending = _G.__rock_code_slot_pending_slots
+    local temporary = pending[key]
+    if not temporary then
+      temporary = setmetatable({
+        __rock_code_slot = true,
+        key = key, current_body = staged.body, abi = staged.abi
+      }, _G.__rock_code_slot_mt)
+      pending[key] = temporary
+    end
+    return temporary
+  end
+  return __rock_code_slot_ref(key)
+end
+function __rock_code_slot_begin()
+  if _G.__rock_state_transaction_begin then __rock_state_transaction_begin() end
+  _G.__rock_code_slot_pending = {}
+  _G.__rock_code_slot_pending_slots = {}
+  _G.__rock_definition_plan_materializing = false
+  _G.__rock_lifecycle_plan_pending = nil
+  _G.__rock_definition_plan_pending = nil
+end
+function __rock_code_slot_abort()
+  if _G.__rock_state_transaction_abort then __rock_state_transaction_abort() end
+  _G.__rock_code_slot_pending = nil
+  _G.__rock_code_slot_pending_slots = nil
+  _G.__rock_definition_plan_materializing = false
+  _G.__rock_lifecycle_plan_pending = nil
+  _G.__rock_definition_plan_pending = nil
+  local pending_wgpu = rawget(_G, "PENDING_WGPU_SHADER_SRCS")
+  if pending_wgpu then
+    for key in pairs(pending_wgpu) do pending_wgpu[key] = nil end
+  end
+end
+function __rock_code_slot_stage(key, body, abi)
+  local old = _G.__rock_code_slots[key]
+  if old and old.abi ~= abi then error("incompatible Rock code slot " .. key, 0) end
+  if not _G.__rock_code_slot_pending then error("Rock code slot stage not open", 0) end
+  _G.__rock_code_slot_pending[key] = { body = body, abi = abi }
+end
+function __rock_lifecycle_plan_stage(plan)
+  if not _G.__rock_code_slot_pending then error("Rock code slot stage not open", 0) end
+  _G.__rock_lifecycle_plan_pending = plan
+end
+function __rock_definition_plan_stage(plan)
+  if not _G.__rock_code_slot_pending then error("Rock code slot stage not open", 0) end
+  _G.__rock_definition_plan_pending = plan
+end
+function __rock_lifecycle_wire_due(old_plan, candidate_plan)
+  local due = {}
+  local old_phase = old_plan and old_plan.wire
+  local old_entries = {}
+  if old_phase and old_phase._data then
+    for i = 1, old_phase.len do
+      local entry = old_phase._data[i]
+      if entry then old_entries[entry.key] = entry end
+    end
+  end
+  local candidate_phase = candidate_plan and candidate_plan.wire
+  if not candidate_phase or not candidate_phase._data then return due end
+  for i = 1, candidate_phase.len do
+    local candidate = candidate_phase._data[i]
+    local old = candidate and old_entries[candidate.key]
+    local changed = old == nil or candidate.qualification == "plain"
+    if not changed and candidate.qualification ~= old.qualification then changed = true end
+    if not changed and candidate.body_fingerprint ~= old.body_fingerprint then changed = true end
+    if not changed then
+      local candidate_deps = candidate.dependencies
+      local old_deps = old.dependencies
+      if not candidate_deps or not old_deps or candidate_deps.len ~= old_deps.len then
+        changed = true
+      else
+        for j = 1, candidate_deps.len do
+          local candidate_dep = candidate_deps._data[j]
+          local old_dep = old_deps._data[j]
+          if not candidate_dep or not old_dep
+              or candidate_dep.key ~= old_dep.key
+              or candidate_dep.fingerprint ~= old_dep.fingerprint then
+            changed = true
+            break
+          end
+        end
+      end
+    end
+    if changed then due[candidate.key] = true end
+  end
+  return due
+end
+function __rock_lifecycle_schedule_all_wires()
+  _G.__ROCK_WIRE_DUE = __rock_lifecycle_wire_due(nil, _G.__ROCK_LIFECYCLE_PLAN)
+end
+function __rock_lifecycle_take_wire(key)
+  local due = rawget(_G, "__ROCK_WIRE_DUE")
+  if not due or not due[key] then return false end
+  due[key] = nil
+  return true
+end
+function __rock_definition_plan_materialize(plan)
+  _G.__rock_definition_plan_materializing = true
+  for _, catalog in pairs(plan) do
+    if type(catalog) == "table" and catalog._data and catalog.len then
+      for i = 1, catalog.len do
+        local entry = catalog._data[i]
+        if entry and entry.factory ~= nil then
+          entry.definition = entry.factory()
+        end
+      end
+    end
+  end
+  _G.__rock_definition_plan_materializing = false
+  return plan
+end
+function __rock_code_slot_publish()
+  local definition_plan = _G.__rock_definition_plan_pending
+  if definition_plan ~= nil then
+    definition_plan = __rock_definition_plan_materialize(definition_plan)
+  end
+  local candidate_lifecycle_plan = _G.__rock_lifecycle_plan_pending
+  local wire_due = nil
+  if candidate_lifecycle_plan ~= nil then
+    wire_due = __rock_lifecycle_wire_due(_G.__ROCK_LIFECYCLE_PLAN, candidate_lifecycle_plan)
+  end
+  local pending_wgpu = rawget(_G, "PENDING_WGPU_SHADER_SRCS")
+  if pending_wgpu and next(pending_wgpu) ~= nil then
+    local register_wgpu = rawget(_G, "stone_wgpu_renderer_register_pending")
+    if not register_wgpu then
+      register_wgpu = rawget(_G, "stone_wgpu_renderer_register_pending_ret_bool")
+    end
+    if not register_wgpu or not register_wgpu() then
+      error("WGPU shader registration did not complete", 0)
+    end
+    local publish_wgpu = rawget(_G, "stone_wgpu_renderer_publish_pending")
+    if not publish_wgpu then
+      publish_wgpu = rawget(_G, "stone_wgpu_renderer_publish_pending_ret_bool")
+    end
+    if publish_wgpu then
+      if not publish_wgpu() then error("WGPU shader registration did not complete", 0) end
+    else
+      error("WGPU shader registration did not complete", 0)
+    end
+  end
+  local stage = _G.__rock_code_slot_pending
+  if not stage then error("Rock code slot stage not open", 0) end
+  for key, staged in pairs(stage) do
+    local slot = _G.__rock_code_slots[key]
+    if slot then
+      slot.current_body = staged.body
+      slot.abi = staged.abi
+      local temporary = _G.__rock_code_slot_pending_slots[key]
+      if temporary then
+        temporary.current_body = staged.body
+        temporary.abi = staged.abi
+        _G.__rock_code_slots[key] = temporary
+      end
+    else
+      local pending = _G.__rock_code_slot_pending_slots
+      _G.__rock_code_slots[key] = pending[key] or setmetatable({
+          __rock_code_slot = true,
+          key = key, current_body = staged.body, abi = staged.abi
+        }, _G.__rock_code_slot_mt)
+    end
+  end
+  if _G.__rock_lifecycle_plan_pending ~= nil then
+    _G.__ROCK_LIFECYCLE_PLAN = _G.__rock_lifecycle_plan_pending
+  end
+  if definition_plan ~= nil then
+    _G.__ROCK_DEFINITION_PLAN = definition_plan
+  end
+  _G.__rock_code_slot_pending = nil
+  _G.__rock_code_slot_pending_slots = nil
+  _G.__rock_lifecycle_plan_pending = nil
+  _G.__rock_definition_plan_pending = nil
+  if _G.__rock_state_transaction_commit then __rock_state_transaction_commit() end
+  if wire_due ~= nil then _G.__ROCK_WIRE_DUE = wire_due end
+end
+if not _G.__rock_fn_mt then
+  _G.__rock_fn_mt = {
+    __call = function(e, ...)
+      if not e.__slot then error("invalid Rock CodeRef environment", 0) end
+      return e.__slot.current_body(e, ...)
+    end
+  }
+end
+function __rock_code_ref_kind(v)
+  if type(v) ~= "table" then return nil end
+  if rawget(v, "__rock_code_slot") == true
+      and getmetatable(v) == _G.__rock_code_slot_mt then
+    return "slot"
+  end
+  if getmetatable(v) == _G.__rock_fn_mt then
+    local slot = rawget(v, "__slot")
+    if slot ~= nil and __rock_code_ref_kind(slot) == "slot" then return "env" end
+  end
+  return nil
+end
+"#;
 
 /// Lua shims for the checked Vec indexing helpers codegen emits
 /// (`__vec_checked_get`/`__vec_checked_set`). In real builds the stdlib
@@ -138,6 +356,18 @@ pub struct CodegenCtx {
     /// emit boundary. `Mutex` because `&CodegenCtx` is shared across rayon
     /// workers; contention is nil (a few per fn).
     rejections: Mutex<Vec<(String, CompilerError)>>,
+    /// Compiler-assigned Session slots for mutable globals.
+    state_slots: HashMap<ustr::Ustr, String>,
+}
+
+impl Clone for CodegenCtx {
+    fn clone(&self) -> Self {
+        Self {
+            reserved: self.reserved.clone(),
+            rejections: Mutex::new(self.rejections.lock().expect("rejection sink").clone()),
+            state_slots: self.state_slots.clone(),
+        }
+    }
 }
 
 /// True if `name` is an identifier skull emits as a bare LOCAL inside function
@@ -183,6 +413,10 @@ fn reserved_namespace_collision(name: &str, span: Span, sink: &mut Vec<(String, 
 
 impl CodegenCtx {
     pub fn new(ws: &Workspace) -> Self {
+        Self::new_with_state(ws, HashMap::default())
+    }
+
+    pub fn new_with_state(ws: &Workspace, state_slots: HashMap<ustr::Ustr, String>) -> Self {
         let mut reserved: HashMap<String, Span> = HashMap::default();
         let mut collisions: Vec<(String, CompilerError)> = Vec::new();
         for m in ws.modules.iter() {
@@ -200,7 +434,11 @@ impl CodegenCtx {
         // signatures mangling alike, or a mangled name equal to an exempt bare
         // name. Drained through the same sink as the synthetic-name collisions.
         collisions.extend(skull_mir::mangle::collision_errors(ws));
-        CodegenCtx { reserved, rejections: Mutex::new(collisions) }
+        CodegenCtx {
+            reserved,
+            rejections: Mutex::new(collisions),
+            state_slots,
+        }
     }
 
     /// Mint a compiler-reserved synthetic top-level Lua name: a hoisted lambda
@@ -241,17 +479,15 @@ impl CodegenCtx {
         sink.sort_by(|a, b| a.0.cmp(&b.0));
         sink.drain(..).next().map(|(_, e)| e)
     }
+
+    pub fn state_slot(&self, name: ustr::Ustr) -> Option<&str> {
+        self.state_slots.get(&name).map(String::as_str)
+    }
 }
 
 /// Cells REFERENCED (Load/Store/`MapNext` or multi-return dest) anywhere the top
-/// scope rooted at `entry` emits: its terminator-reachable blocks PLUS every
-/// inline-lambda sub-region nested within them (reached via `Inst::Lambda`
-/// entries, which a hook/defer body still renders inline). The declaration walk
-/// declares only these -- a hoisted lambda body is a full-arena clone whose dead
-/// enclosing/sibling regions would otherwise declare the WHOLE arena as inert
-/// locals (fatal past LuaJIT's 200-local parse cap on a large co-fn step;
-/// docs/closure-conversion-mir-plan.md S3). Complete by construction: `render_scope`
-/// emits exactly this block set, so every cell it references is included.
+/// scope rooted at `entry` emits. Hoisted closure bodies are separate ordinary
+/// MirFuncs, so the declaration walk only follows this function's CFG.
 fn referenced_cells_in_region(func: &MirFunc, entry: Idx<Block>) -> HashSet<Idx<Cell>> {
     let mut seen: HashSet<Idx<Block>> = HashSet::default();
     let mut stack = vec![entry];
@@ -269,11 +505,6 @@ fn referenced_cells_in_region(func: &MirFunc, entry: Idx<Block>) -> HashSet<Idx<
                 Inst::CallMulti { dests, .. }
                 | Inst::CallValueMulti { dests, .. }
                 | Inst::CallBoundMulti { dests, .. } => cells.extend(dests.iter().copied()),
-                Inst::Lambda { entry: le, .. } => {
-                    if seen.insert(*le) {
-                        stack.push(*le);
-                    }
-                }
                 _ => {}
             }
         }
@@ -286,9 +517,8 @@ fn referenced_cells_in_region(func: &MirFunc, entry: Idx<Block>) -> HashSet<Idx<
     cells
 }
 
-/// Every closure parameter cell in `func` (across all `Lambda` insts). The
-/// enclosing function must NOT declare these as locals — they are each closure's
-/// Lua `function(...)` argument list.
+/// Every closure parameter cell is owned by its nested Lua function rather
+/// than by the enclosing scope's local declaration.
 pub(crate) fn collect_lambda_params(func: &MirFunc) -> HashSet<Idx<Cell>> {
     let mut out = HashSet::default();
     for (_, inst) in func.insts.iter() {
@@ -323,7 +553,21 @@ pub fn emit_named(
     name: &str,
     func: &MirFunc,
 ) -> String {
-    emit_named_framed(ws, ctx, interner, name, func, None, None)
+    emit_named_with_statics(ws, ctx, interner, name, func, &[])
+}
+
+/// Emit a function whose static cells may be owned by an enclosing lowered
+/// function. Closure conversion moves the lambda body into a sibling function,
+/// while its static cell remains owned by the enclosing callable.
+pub fn emit_named_with_statics(
+    ws: &Workspace,
+    ctx: &CodegenCtx,
+    interner: &MonoInterner,
+    name: &str,
+    func: &MirFunc,
+    inherited_statics: &[StaticCell],
+) -> String {
+    emit_named_framed_with_statics(ws, ctx, interner, name, func, None, inherited_statics)
 }
 
 /// The coroutine state-table context: a `co fn`'s `__step` reads/writes its
@@ -333,16 +577,14 @@ pub fn emit_named(
 /// lambda-cell allocation bumps raw ids but never reorders the frame cells, so
 /// a slot -- and the layout stamp keyed on it -- is invariant under
 /// lambda-internal cell-count edits (the P2 finding in
-/// docs/coroutine-frame-lambda-plan.md). `hoist_lambdas` is true only for the
-/// step emission: lambdas hoist like non-frame ones, with frame captures
-/// collapsing to `s` (P1); the hook/defer emissions keep it false
-/// (mechanism 3, an all-cells frame with no plan).
+/// docs/coroutine-frame-lambda-plan.md). Lambdas are converted before emission;
+/// detached hook/defer regions are ordinary `MirFunc`s by the time they reach
+/// this printer.
 pub struct FrameCtx {
     pub s_cell: Idx<Cell>,
     pub fields: HashSet<Idx<Cell>>,
     /// Frame cell -> dense slot (`c<slot>` field name). Total over `fields`.
     pub slots: HashMap<Idx<Cell>, u32>,
-    pub hoist_lambdas: bool,
 }
 
 /// [`emit_named`] with an optional coroutine frame context (the `__step` fn).
@@ -351,9 +593,7 @@ pub struct FrameCtx {
 /// shared MIR pass) has already rewritten every reachable `Inst::Lambda` into a
 /// `MakeEnv` record / bare `Global` + a hoisted sibling `MirFunc` before emission
 /// (S3, docs/closure-conversion-mir-plan.md). So this fn only renders the given
-/// region; the sole surviving inline `Inst::Lambda` is a lambda nested in a co-fn
-/// hook/defer body (`FrameCtx::hoist_lambdas == false`, a detached region the pass
-/// leaves untouched), rendered by the inline arm in `emit_inst`.
+/// region.
 pub fn emit_named_framed(
     ws: &Workspace,
     ctx: &CodegenCtx,
@@ -361,18 +601,21 @@ pub fn emit_named_framed(
     name: &str,
     func: &MirFunc,
     frame: Option<&FrameCtx>,
-    // A hook/defer body is a detached region of the co-fn step: it lives in the
-    // step's own inst/cell/block arena, entered at its own block with `params =
-    // [s]`. This override renders exactly that region of the SHARED `func` instead
-    // of cloning the whole `MirFunc` just to swap `entry`/`params` (the clone
-    // deep-copied the entire arena per hook/defer). `None` uses `func`'s own
-    // entry/params. Everything else reads the shared arena, so a frame-field cell
-    // renders byte-identically to the pre-elision clone.
-    entry_override: Option<(Idx<Block>, &[Idx<Cell>])>,
 ) -> String {
-    let entry = entry_override.map_or_else(|| func.entry(), |(e, _)| e);
-    let params = entry_override.map_or(func.params.as_slice(), |(_, p)| p);
-    let lambda_params = collect_lambda_params(func);
+    emit_named_framed_with_statics(ws, ctx, interner, name, func, frame, &[])
+}
+
+fn emit_named_framed_with_statics(
+    ws: &Workspace,
+    ctx: &CodegenCtx,
+    interner: &MonoInterner,
+    name: &str,
+    func: &MirFunc,
+    frame: Option<&FrameCtx>,
+    inherited_statics: &[StaticCell],
+) -> String {
+    let entry = func.entry();
+    let params = func.params.as_slice();
     // Ordinary functions color cells (collapse them onto luajit's 200-local cap);
     // a coroutine `__step` keeps raw `c<raw>` names (frame-field naming depends on
     // the raw id), so it gets an empty map.
@@ -388,14 +631,65 @@ pub fn emit_named_framed(
     // re-running the def on reload is a harmless no-op (no preservation guard).
     record_representation_violations(ctx, func);
     let (hoist, hoist_names, hoist_defs) = collect_const_hoists(ws, ctx, func, name);
+    let static_slots = static_slots_for(
+        ws,
+        interner,
+        func,
+        inherited_statics,
+        name,
+        ctx,
+    );
     let estimated_body_bytes = func.insts.len() * 24;
     let mut out =
         String::with_capacity(hoist_defs.len() + name.len() + 64 + estimated_body_bytes);
     out.push_str(&hoist_defs);
     let _ = write!(out, "function {}", name);
-    render_scope(ws, ctx, interner, func, entry, params, &lambda_params, true, frame, &cell_colors, &hoist, &hoist_names, &mut out);
+    render_scope(
+        ws,
+        ctx,
+        interner,
+        func,
+        entry,
+        params,
+        true,
+        frame,
+        &cell_colors,
+        &ctx.state_slots,
+        &static_slots,
+        &hoist,
+        &hoist_names,
+        &mut out,
+    );
     out.push('\n');
     out
+}
+
+fn static_slots_for(
+    ws: &Workspace,
+    interner: &MonoInterner,
+    func: &MirFunc,
+    inherited_statics: &[StaticCell],
+    name: &str,
+    ctx: &CodegenCtx,
+) -> HashMap<ustr::Ustr, String> {
+    let mut slots = HashMap::default();
+    for cell in inherited_statics.iter().chain(&func.statics) {
+        let (value, done) = match skull_mir::state_schema::static_cell_state_keys(ws, interner, cell) {
+            Ok(keys) => keys,
+            Err(error) => {
+                ctx.reject(name.to_string(), CompilerError::new_no_location(error.to_string()));
+                return HashMap::default();
+            }
+        };
+        if slots.insert(cell.cell, value).is_some() || slots.insert(cell.done_flag, done).is_some() {
+            ctx.reject(
+                name.to_string(),
+                CompilerError::new_no_location(format!("duplicate static state slot for `{}`", cell.cell)),
+            );
+            return HashMap::default();
+        }
+    }
+    slots
 }
 
 /// Whether every use of `cand` is a provably READ-ONLY consumer, so sharing one
@@ -916,7 +1210,7 @@ fn slot_sound(
 /// value operands only (operands are SSA — immutable once computed) with no read
 /// of mutable state (cell/global/heap) and no side effect. Excludes `Load`/
 /// `Global`/`Field`/`Index`/`Len`/`Call` (order-sensitive memory reads / effects)
-/// and `Lambda` (rendered as its own scope) — those keep their register.
+/// and closure records — those keep their register.
 /// The splice-able shape of an `inline(lua)` body (for `@inline` splicing).
 #[derive(Clone, Copy)]
 enum InlineLuaShape {
@@ -1123,13 +1417,8 @@ fn compute_inlinable(func: &MirFunc, scope: &[Idx<Block>]) -> Vec<bool> {
     inl
 }
 
-/// Render `function(<params>) <locals> <blocks> end` for a scope rooted at
-/// `entry` (the top function or a closure body), appending to `out` AFTER its
-/// already-written name. Values are colored over ONLY this scope's reachable
-/// blocks (a closure's values are independent of the enclosing scope; `r<n>`
-/// names shadow safely since only cells cross the boundary). `is_top` declares
-/// the function's cells (a closure declares none — its params are the arg list,
-/// captures/locals are enclosing upvalues).
+/// Render `function(<params>) <locals> <blocks> end` for the ordinary MIR
+/// function rooted at `entry`, appending to `out` after its name.
 #[allow(clippy::too_many_arguments)]
 fn render_scope(
     ws: &Workspace,
@@ -1138,13 +1427,11 @@ fn render_scope(
     func: &MirFunc,
     entry: Idx<Block>,
     params: &[Idx<Cell>],
-    lambda_params: &HashSet<Idx<Cell>>,
-    // `true` for a top-level fn (declares its cells); `false` for an inline
-    // hook/defer lambda body (shares the enclosing fn's cell namespace, declares
-    // nothing).
     is_top: bool,
     frame: Option<&FrameCtx>,
     cell_colors: &[u32],
+    state_slots: &HashMap<ustr::Ustr, String>,
+    static_slots: &HashMap<ustr::Ustr, String>,
     hoist: &HashMap<Idx<Inst>, u32>,
     hoist_names: &[String],
     out: &mut String,
@@ -1238,7 +1525,7 @@ fn render_scope(
             .collect();
         let mut seen_color: HashSet<u32> = HashSet::default();
         for (cid, _) in func.cells.iter() {
-            if param_cells.contains(&cid) || lambda_params.contains(&cid) || is_frame(&cid) || !referenced.contains(&cid) {
+            if param_cells.contains(&cid) || is_frame(&cid) || !referenced.contains(&cid) {
                 continue;
             }
             let (decl, col) = match cell_colors[raw(cid) as usize] {
@@ -1278,7 +1565,6 @@ fn render_scope(
         colors,
         color_scope,
         cell_colors,
-        lambda_params,
         frame,
         loops: &loops,
         rpo: &rpo,
@@ -1286,6 +1572,8 @@ fn render_scope(
         emitted: vec![false; func.blocks.len()],
         hoist,
         hoist_names,
+        state_slots,
+        static_slots,
     };
     for &bb in &rpo {
         em.emit_block(out, bb); // self-skips an already-emitted block (loop body)
@@ -1335,7 +1623,6 @@ struct Emitter<'a> {
     /// get their `local` line inside the `for` block ([`Self::expand_for`]).
     color_scope: Vec<Option<Idx<Block>>>,
     cell_colors: &'a [u32],
-    lambda_params: &'a HashSet<Idx<Cell>>,
     frame: Option<&'a FrameCtx>,
     /// Recognized counted loops, keyed by header — a goto into an un-emitted
     /// header expands a structured `for`.
@@ -1355,9 +1642,18 @@ struct Emitter<'a> {
     hoist: &'a HashMap<Idx<Inst>, u32>,
     /// `group -> global name` for [`Self::hoist`].
     hoist_names: &'a [String],
+    state_slots: &'a HashMap<ustr::Ustr, String>,
+    static_slots: &'a HashMap<ustr::Ustr, String>,
 }
 
 impl Emitter<'_> {
+    fn state_slot(&self, name: ustr::Ustr) -> Option<&str> {
+        self.state_slots
+            .get(&name)
+            .or_else(|| self.static_slots.get(&name))
+            .map(String::as_str)
+    }
+
     fn emit_block(&mut self, out: &mut String, bb: Idx<Block>) {
         if self.emitted[raw(bb) as usize] {
             return; // already emitted (e.g. as a loop body block)
@@ -1606,7 +1902,19 @@ impl Emitter<'_> {
     fn write_value(&self, out: &mut String, id: Idx<Inst>, inst: &Inst) {
         match inst {
             Inst::Const(l) => write_lit(out, l),
-            Inst::Global(g) => out.push_str(g.as_str()),
+            Inst::Global(g) => {
+                if let Some(identity) = self.func.code_value_identities.get(&id) {
+                    out.push_str("__rock_code_slot_ref(");
+                    out.push_str(&lua_string(&identity.logical_key(self.ws, self.interner)));
+                    out.push(')');
+                } else if let Some(slot) = self.state_slot(*g) {
+                    out.push_str("__rock_active_session.__rock_state[");
+                    out.push_str(&lua_string(slot));
+                    out.push(']');
+                } else {
+                    out.push_str(g.as_str());
+                }
+            }
             Inst::Load(c) => write_cellname(out, self.func, self.frame, self.cell_colors, *c),
 
             Inst::IntAdd(a, b) | Inst::FloatAdd(a, b) => self.write_bin(out, "+", a, b),
@@ -1752,19 +2060,8 @@ impl Emitter<'_> {
                 self.write_csv(out, args);
                 out.push(')');
             }
-            Inst::Lambda { params, entry } => {
-                // The ONLY `Inst::Lambda` that reaches codegen is one nested inside
-                // a co-fn hook/defer body (`FrameCtx::hoist_lambdas == false`): the
-                // shared pass leaves that detached region untouched, so the lambda
-                // renders inline `function(<params>) <body> end` (a sanctioned
-                // exception -- the mechanism-1 pocket, docs/coroutine-frame-lambda-plan.md
-                // D5, pinned by `cofn_lambda_in_defer_body`). Captured cells are
-                // frame fields (`c<s>.c<slot>`) handled by the all-cells aux
-                // FrameCtx; the body declares nothing (`is_top = false`). Every
-                // other lambda was already converted to a `MakeEnv` / `Global` +
-                // hoisted sibling by `convert_closures`.
-                out.push_str("function");
-                render_scope(self.ws, self.ctx, self.interner, self.func, *entry, params, self.lambda_params, false, self.frame, self.cell_colors, self.hoist, self.hoist_names, out);
+            Inst::Lambda { .. } => {
+                unreachable!("residual Inst::Lambda reached Lua emission")
             }
 
             Inst::MakeTuple(vs) => {
@@ -1963,17 +2260,23 @@ impl Emitter<'_> {
             // The shared closure-conversion pass (`skull_transform::convert_closures`)
             // materializes a capturing lambda as an env record and a shared mutable
             // capture as a box, both as `MakeEnv`. `fn_ref = Some(name)` is a
-            // callable record `setmetatable({ __fn = name, c<raw> = .., .. },
+            // callable record `setmetatable({ __slot = ..., c<raw> = .., .. },
             // __rock_fn_mt)` (invoked via `__call`); `fn_ref = None` is a box `{}`
             // / `{ v = <seed> }`. Field access (`e.c<raw>`, `.v`) already flows
             // through `Inst::Field`/`Inst::StoreField`. EVERY servable path (ordinary
             // fns AND the coroutine step, S2+S3) now routes through the pass, so
-            // `MakeEnv` is the only closure shape codegen sees -- the sole surviving
-            // `Inst::Lambda` is a lambda nested in a hook/defer body (rendered inline).
+            // `MakeEnv` is the only capturing closure shape codegen sees.
             Inst::MakeEnv { fn_ref, fields } => match fn_ref {
-                Some(name) => {
-                    out.push_str("setmetatable({ __fn = ");
-                    out.push_str(name.as_str());
+                Some(_name) => {
+                    out.push_str("setmetatable({ ");
+                    let identity = self
+                        .func
+                        .code_value_identities
+                        .get(&id)
+                        .expect("Rock closure MakeEnv missing compiler-owned CodeRef identity");
+                    out.push_str("__slot = __rock_code_slot_ref(");
+                    out.push_str(&lua_string(&identity.logical_key(self.ws, self.interner)));
+                    out.push(')');
                     for (f, v) in fields {
                         out.push_str(", ");
                         out.push_str(f.as_str());
@@ -2180,9 +2483,19 @@ impl Emitter<'_> {
                 }
             }
             Inst::StoreGlobal { name, value } => {
-                let _ = write!(out, "  {name} = ");
-                self.write_opnd(out, *value);
-                out.push('\n');
+                if let Some(slot) = self.state_slot(*name) {
+                    out.push_str("  __rock_active_session.__rock_state[");
+                    out.push_str(&lua_string(slot));
+                    out.push_str("] = ");
+                    self.write_opnd(out, *value);
+                    out.push_str("\n  __rock_active_session.__rock_initialized[");
+                    out.push_str(&lua_string(slot));
+                    out.push_str("] = true\n");
+                } else {
+                    let _ = write!(out, "  {name} = ");
+                    self.write_opnd(out, *value);
+                    out.push('\n');
+                }
             }
             Inst::ArrayPush { arr, value, kind } => {
                 // `arr` is referenced up to 4x; render it once.

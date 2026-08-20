@@ -47,7 +47,7 @@ fn loop_capture_snapshots_per_iteration() {
          }",
     );
     let js = emit_closure(&ws, "f").expect("emits");
-    assert!(js.contains("__fn: f__lambda0"), "per-iteration capture record:\n{js}");
+    assert!(js.contains("__slot: __rock_code_slot_ref("), "per-iteration capture record:\n{js}");
     assert!(js.contains("function f__lambda0("), "hoisted body:\n{js}");
 }
 
@@ -65,7 +65,7 @@ fn loop_counter_capture_now_emits() {
          }",
     );
     let js = emit_closure(&ws, "f").expect("counter capture now emits");
-    assert!(js.contains("__fn: f__lambda0"), "counter snapshotted into a record:\n{js}");
+    assert!(js.contains("__slot: __rock_code_slot_ref("), "counter snapshotted into a record:\n{js}");
 }
 
 // A reassigned param captured in a loop stays function-scoped (shared box), NOT

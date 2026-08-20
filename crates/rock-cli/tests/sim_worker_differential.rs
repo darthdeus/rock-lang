@@ -167,6 +167,22 @@ fn a_predecessors_global_does_not_reach_the_next_entry() {
     assert_eq!(isolated.artifacts["count.txt"], worker.artifacts["count.txt"]);
 }
 
+#[test]
+fn state_image_worker_registries_stay_bounded_across_repeated_entries() {
+    let entries = vec!["t1a_worker_registries_stay_bounded".to_string(); 12];
+    let records = run_worker_suite(Backend::Skull, "testbed", &entries)
+        .expect("the repeated StateImage worker queue must run");
+    assert_eq!(records.len(), entries.len(), "the worker returned one record per entry");
+    let crossed = records.iter().filter(|(_, crossed)| *crossed).count();
+    assert_eq!(crossed, 11, "every entry after the first must cross one worker boundary");
+    assert!(crossed > 0, "the bounded-registry assertion needs a nonzero boundary population");
+    for (record, _) in records {
+        assert_eq!(record.verdict(), "PASS", "worker registry fixture failed: {record:?}");
+        assert!(record.errors.is_empty(), "worker registry fixture emitted errors: {record:?}");
+        assert_eq!(record.expects_pass.len(), 2, "both registry populations were asserted");
+    }
+}
+
 /// A global that was NULL at boot is null again at the next entry.
 ///
 /// Its own class, not a variant of `b0_leak_probe`: the image is keyed by
@@ -188,7 +204,7 @@ fn a_global_that_was_null_at_boot_is_null_again_at_the_next_entry() {
     assert_eq!(worker.verdict(), "PASS", "and after a predecessor that set the global");
     // Agreement over an unmade assertion would be agreement over nothing.
     // (Membership is not asserted in the sim: a one-entry queue takes no
-    // checkpoint at all, so `sim_checkpoint_has` is false in the isolated arm
+    // checkpoint at all, so checkpoint membership is empty in the isolated arm
     // by design and would diverge for a reason unrelated to the class.)
     for (label, record) in [("isolated", &isolated), ("worker", &worker)] {
         assert!(
@@ -253,7 +269,7 @@ fn an_inlined_static_resets_at_the_entry_boundary() {
 
 /// Logger suppression state restores at the boundary -- and this is the reason
 /// the `entry_diagnostics` arm exists. `log_once` dedups per call site in a Lua
-/// global outside `__ROCK_GLOBALS`, so the census never reaches it and a
+/// host/diagnostic global outside the compiler StateSchema, so the census never reaches it and a
 /// predecessor that logged through the same helper used to SUPPRESS the probe's
 /// warning entirely. No other arm can see that: the sim passes, writes nothing,
 /// and exits cleanly either way.
@@ -755,7 +771,7 @@ fn an_out_interpolating_env_is_refused_with_its_own_reason() {
 /// `Iterator`-bounded owner has no standalone emission, so the cell exists only
 /// inlined at call sites; the B1 registration fix carries a spliced callee's
 /// statics into the body they splice into, so the cell reaches
-/// `__ROCK_STATICS` and the checkpoint restores it like any other. Pinned at
+/// StateSchema and the checkpoint restores it like any other. Pinned at
 /// the emitted-Lua level too, by
 /// `crates/skull/tests/static_registration_coverage.rs`.
 #[test]
