@@ -172,6 +172,19 @@ fn scene_population_dispatch_does_not_copy_a_bucket_per_system() {
 }
 
 #[test]
+fn scene_runtime_arms_measure_repeated_fixed_windows_after_churn_drains() {
+    let source = include_str!("../../../games/testbed/tests/sims/scene_lifecycle_runtime_arms.rock");
+    assert!(source.contains("const SLRA_WINDOW_FRAMES: int = 4"));
+    assert!(source.contains("const SLRA_SAMPLE_COUNT: int = 5"));
+    assert!(source.contains("slra_report(\"feature_off\", timing"));
+    assert!(source.contains("cpu_spread={timing.max - timing.min}"));
+    assert!(!source.contains("slra_report(\"feature_off\", 0.0"));
+    assert_eq!(source.matches("await frame(SLRA_WINDOW_FRAMES)").count(), 4);
+    assert!(source.contains("sim_eq_int(vec_len(drained_population), 0, \"churn drain"));
+    assert!(source.contains("sim_eq_int(slra_historical_count() - historical_before, 203"));
+}
+
+#[test]
 fn artifact_definition_metadata_emits_a_keyed_plan_without_running_the_decorator() {
     let emit = emit_mir(r#"
 @artifact_definition(catalog="widgets", key_param="key")
