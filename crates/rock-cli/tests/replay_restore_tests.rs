@@ -996,7 +996,6 @@ fn live_record_rewind_refuses_unsupported_state_without_mutating_world() {
     let runtime_frames = 80;
     let dir = tempfile::tempdir().unwrap();
     for (mode, global, kind) in [
-        ("scene", "LIVE_REWIND_PROBE_SCENE", "Scene"),
         ("foreign", "LIVE_REWIND_PROBE_FOREIGN", "raw"),
         ("cdata", "LIVE_REWIND_PROBE_MUTABLE_CDATA", "cdata"),
     ] {
@@ -1049,8 +1048,8 @@ fn recorded_tick_lines(path: &str) -> usize {
         .count()
 }
 
-/// Boot admission describes boot. Unsupported Scene/raw/native state created
-/// AFTER boot but before H must still refuse the rewind at H -- before mode
+/// Boot admission describes boot. Unsupported raw/native state created AFTER
+/// boot but before H must still refuse the rewind at H -- before mode
 /// promotion and before any restore -- so the live world is never partially
 /// rolled back. The distinguishing evidence against the boot-refusal test is
 /// `STONE_LIVE_REWIND_SUPPORTED == 1`: boot WAS admissible here.
@@ -1060,7 +1059,6 @@ fn live_record_rewind_refuses_late_created_unsupported_state() {
     let runtime_frames = 80;
     let dir = tempfile::tempdir().unwrap();
     for (mode, global, kind) in [
-        ("scene", "LIVE_REWIND_PROBE_SCENE", "Scene"),
         ("foreign", "LIVE_REWIND_PROBE_FOREIGN", "raw"),
         ("cdata", "LIVE_REWIND_PROBE_MUTABLE_CDATA", "cdata"),
     ] {
@@ -1135,7 +1133,7 @@ fn live_cadence_admission_failure_clears_partial_history() {
             ("STONE_LIVE_REWIND", "1"),
             ("STONE_LIVE_REWIND_CADENCE_SECONDS", "0.01"),
             ("STONE_LIVE_REWIND_WINDOW_SECONDS", "2.0"),
-            ("STONE_LIVE_REWIND_UNSUPPORTED", "scene"),
+            ("STONE_LIVE_REWIND_UNSUPPORTED", "foreign"),
             ("STONE_LIVE_REWIND_UNSUPPORTED_AT_TICK", "30"),
             ("STONE_TIMELINE_SEEK_AT_FRAME", "70"),
             ("STONE_TIMELINE_SEEK_TO_TICK", "25"),
