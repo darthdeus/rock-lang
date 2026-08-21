@@ -168,6 +168,25 @@ fn a_predecessors_global_does_not_reach_the_next_entry() {
 }
 
 #[test]
+fn a_predecessors_live_scene_does_not_reach_the_next_entry() {
+    let (isolated, worker) = differential(&["b0_scene_seed"], "b0_scene_probe");
+    let c = compare(&isolated, &worker);
+    assert_equivalent("b0_scene_probe", &c);
+
+    for (label, record) in [("isolated", &isolated), ("worker", &worker)] {
+        assert_eq!(record.verdict(), "PASS", "{label} Scene probe failed: {record:?}");
+        assert!(
+            record
+                .expects_pass
+                .iter()
+                .any(|m| m.message.contains("empty boot Scene registry")),
+            "{label}: the Scene registry assertion never ran: {:?}",
+            record.expects_pass
+        );
+    }
+}
+
+#[test]
 fn state_image_worker_registries_stay_bounded_across_repeated_entries() {
     let entries = vec!["t1a_worker_registries_stay_bounded".to_string(); 12];
     let records = run_worker_suite(Backend::Skull, "testbed", &entries)
