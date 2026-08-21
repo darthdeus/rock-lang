@@ -186,6 +186,7 @@ value Bvec3 { x: bool, y: bool, z: bool }
 // per distinct pair at chunk top level. Annotation-keyed (not name-keyed) so a
 // user fn named rock_shader can't hijack it. The CPU body only fires if the fn
 // is taken as a value (never a silent stub); a real call is always expanded.
+@shadow_effect(pure)
 @shader_expand inline(lua) fn rock_shader<V, F>(vert: V, frag: F) -> string = """
     error("rock_shader is a compile-time shader-pipeline intrinsic (expanded at compile time)")
 """
@@ -195,6 +196,7 @@ value Bvec3 { x: bool, y: bool, z: bool }
 // key (never contains '+', so it cannot collide with a pair key); the driver
 // routes it to the A1 single-entry emitter (PIXEL body + fullscreen VERTEX
 // passthrough). Same @shader_expand, so resolution stays annotation-keyed.
+@shadow_effect(pure)
 @shader_expand inline(lua) fn rock_shader<F>(frag: F) -> string = """
     error("rock_shader is a compile-time shader-pipeline intrinsic (expanded at compile time)")
 """

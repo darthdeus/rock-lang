@@ -952,6 +952,7 @@ inline(lua) fn same_ref(a: any, b: any) -> bool = "rawequal(a, b)"
 // functions that transitively call `print` get demoted with a warning
 // (rather than a hard error) so a `print(x)` dropped into a pure
 // helper for debugging doesn't force stripping the annotation.
+@shadow_effect(virtualized)
 @debug_impure
 extern(lua) fn print(args: ...any)
 
@@ -1651,10 +1652,12 @@ inline(lua) fn table_new() -> any = """return {}"""
 // EMBEDDED field can satisfy, being the one that grants no whole-value read
 // (docs/scalarization-and-boxing-design.md S 6). A `FieldRef` coerces down to
 // it, so call sites are unchanged.
+@shadow_effect(pure)
 @inline inline(lua) fn field_get<T, V>(o: T, f: ReadFieldRef<T, V>) -> V = """
     return o[f]
 """
 
+@shadow_effect(candidate_owned)
 @inline inline(lua) fn field_set<T, V>(o: T, f: WriteFieldRef<T, V>, v: V) = """
     o[f] = v
 """
@@ -2880,6 +2883,7 @@ fn reduce<I: Iterator<T>, T, U>(it: I, initial: U, f: (U, T) -> U) -> U {
     return acc
 }
 
+@shadow_effect(pure)
 @inline
 fn find<I: Iterator<T>, T>(it: I, pred: fn(T) -> bool) -> T? {
     for x in it {
@@ -3217,12 +3221,14 @@ fn Envelope.step_by(e, goal: float, step_dt: float) -> float {
 
 @inline inline(lua) fn string.upper(s) -> string = "string.upper(s)"
 
+@shadow_effect(pure)
 @inline inline(lua) fn string.lower(s) -> string = "string.lower(s)"
 
 // Plain-text search for `substr`, starting the scan at unit index `from`.
 // Returns the 0-based unit index of the first match at or after `from`, or -1.
 // Stays intrinsic (Lua `string.find(..., true)` runs at C speed); Layer-2
 // string algorithms in strings.rock build on it.
+@shadow_effect(pure)
 @intrinsic @native_required inline(lua) fn string.find(s, substr: string, from: int = 0) -> int = """
     local pos = string.find(s, substr, from + 1, true)
     if pos then
@@ -3251,6 +3257,7 @@ fn Envelope.step_by(e, goal: float, step_dt: float) -> float {
 // the setup in this body the decode ran 70% INTERPRETED and canada went to
 // ~105ms against a 32ms baseline. Keep this body free of closures and branches
 // that create upvalues.
+@shadow_effect(pure)
 @intrinsic @native_required inline(lua) fn string.parse_float_at(s, start: int, end_idx: int) -> float = """
     local f = _G.__rock_parse_float_at or __rock_parse_float_at_setup()
     return f(s, start, end_idx)
@@ -3293,8 +3300,10 @@ double strtod_l(const char *nptr, char **endptr, __rock_locale_t loc);
     return f
 """
 
+@shadow_effect(pure)
 @intrinsic @inline inline(lua) fn string_char(code: int) -> string = "string.char(code)"
 
+@shadow_effect(pure)
 @intrinsic inline(lua) fn from_codepoint(cp: int) -> string = """
     if cp < 0 or cp > 0x10FFFF then
         error("from_codepoint: codepoint out of range: " .. tostring(cp))

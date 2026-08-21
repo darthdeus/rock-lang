@@ -2547,6 +2547,42 @@ fn rederive_current_replays_the_live_record_in_a_shadow_session() {
 }
 
 #[test]
+fn mag_rederive_current_publishes_a_live_scene_candidate() {
+    let game = "mag";
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("mag-scene-rederive.replay");
+    let log_s = log.to_string_lossy().into_owned();
+    let live = run_record_dump(
+        game,
+        140,
+        &log_s,
+        &[
+            ("MAG_BOOT_PLAYING", "1"),
+            ("SIM_SKIP_RENDER", "1"),
+            ("STONE_LIVE_REWIND", "1"),
+            ("STONE_SHADOW_TICKS_PER_FRAME", "2"),
+            ("STONE_REDERIVE_CURRENT_AT_FRAME", "30"),
+        ],
+    );
+    let diag = &live["__stone_diag"];
+    assert_eq!(current_tick(&live), 140, "the live MAG recorder must remain active after publication");
+    assert_eq!(diag["STONE_SHADOW_REQUESTS"].as_i64(), Some(1), "the live RunState Scene must enter T1b once: {diag}");
+    assert_eq!(diag["STONE_SHADOW_COMMITS"].as_i64(), Some(1), "the supported live Scene candidate must publish once: {diag}");
+    assert!(diag.get("STONE_SHADOW_ABORTS").is_none(), "the supported live Scene candidate must not abort: {diag}");
+    assert_eq!(diag["STONE_SHADOW_PENDING"].as_i64(), Some(0), "the candidate must catch the moving live horizon: {diag}");
+    let recorded = diag["STONE_SHADOW_RECORDED"].as_i64().expect("recorded observation denominator");
+    let consumed = diag["STONE_SHADOW_CONSUMED"].as_i64().expect("consumed observation denominator");
+    let pending = diag["STONE_SHADOW_PENDING"].as_i64().expect("pending observation denominator");
+    assert!(recorded > 0, "the live Scene shadow run must examine observations: {diag}");
+    assert_eq!(recorded, consumed + pending, "recorded = consumed + pending: {diag}");
+    assert_eq!(diag["STONE_SHADOW_CANDIDATE_SESSIONS_DURING"].as_i64(), Some(1), "one candidate Session must be owned off-side: {diag}");
+    assert_eq!(diag["STONE_SHADOW_LIVE_SESSIONS_AFTER"], diag["STONE_SHADOW_LIVE_SESSIONS_BEFORE"], "publication must retain one live owner population: {diag}");
+    assert_ne!(diag["STONE_SHADOW_OWNER_AFTER"], diag["STONE_SHADOW_OWNER_BEFORE"], "publication must replace the Artifact/Session owner graph: {diag}");
+    assert_eq!(diag["STONE_SHADOW_NATIVE_AFTER"], diag["STONE_SHADOW_NATIVE_BEFORE"], "candidate native owners must be retired at the boundary: {diag}");
+    assert_eq!(recorded_tick_lines(&log_s), 140, "the committed MAG recorder must preserve every live tick");
+}
+
+#[test]
 fn full_artifact_shadow_reload_uses_the_same_commit_boundary() {
     let game = "bitgun";
     let dir = tempfile::tempdir().unwrap();
