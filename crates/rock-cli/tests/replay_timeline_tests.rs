@@ -257,7 +257,7 @@ fn headless_audio_quiet_does_not_suppress_mag_vfx() {
         &[("MAG_SCREENSHOT", "1"), ("MAG_HEADLESS_VFX_PROBE", "1")],
     );
     assert!(
-        state["__stone_diag"]["MAG_HEADLESS_VFX_SPLASHES"].as_i64().unwrap_or(0) > 0,
+        state["__stone_diag"]["MAG_HEADLESS_VFX_PARTICLES"].as_i64().unwrap_or(0) > 0,
         "headless audio muting must not suppress Mag's decorative spell VFX"
     );
 }
