@@ -1011,11 +1011,128 @@ fn run_specs_worker_mode(
 
 /// A mid-sim `reload_edit` request parsed off the `__SIM__` side channel
 /// (`docs/sim-reload-harness-plan.md`).
+#[derive(Debug)]
 struct ReloadEditReq {
+    request_id: Option<u64>,
     file: String,
     find: String,
     replace: String,
     site: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReloadTerminal {
+    Applied,
+    Failed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ReloadCompletion {
+    request_id: Option<u64>,
+    terminal: ReloadTerminal,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct ReloadLedgerSummary {
+    requests: usize,
+    applied: usize,
+    pending: usize,
+    rejected: usize,
+    failed: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReloadRequestState {
+    Booked,
+    Published,
+    Applied,
+    Rejected,
+    Failed,
+}
+
+/// The one parent-side accounting authority for the request -> publication ->
+/// watcher-consumption path. A request is booked before compilation, becomes
+/// published only after `SkullStone` writes the overlay, and can become
+/// terminal only after the production watcher reports what it consumed.
+#[derive(Default, Debug)]
+struct ReloadLedger {
+    requests: BTreeMap<u64, ReloadRequestState>,
+}
+
+impl ReloadLedger {
+    fn book(&mut self, request_id: u64) -> Result<()> {
+        if self.requests.insert(request_id, ReloadRequestState::Booked).is_some() {
+            return Err(anyhow!("reload request {request_id} was booked twice"));
+        }
+        Ok(())
+    }
+
+    fn publish(&mut self, request_id: u64) -> Result<()> {
+        match self.requests.get_mut(&request_id) {
+            Some(state @ ReloadRequestState::Booked) => {
+                *state = ReloadRequestState::Published;
+                Ok(())
+            }
+            Some(state) => Err(anyhow!(
+                "reload request {request_id} published from terminal/non-booked state {state:?}"
+            )),
+            None => Err(anyhow!("reload request {request_id} published before it was booked")),
+        }
+    }
+
+    fn reject(&mut self, request_id: u64) -> Result<()> {
+        match self.requests.get_mut(&request_id) {
+            Some(state @ ReloadRequestState::Booked) => {
+                *state = ReloadRequestState::Rejected;
+                Ok(())
+            }
+            Some(state) => Err(anyhow!(
+                "reload request {request_id} rejected from state {state:?}"
+            )),
+            None => Err(anyhow!("reload request {request_id} rejected before it was booked")),
+        }
+    }
+
+    fn complete(&mut self, request_id: u64, terminal: ReloadTerminal) -> Result<()> {
+        match self.requests.get_mut(&request_id) {
+            Some(state @ ReloadRequestState::Published) => {
+                *state = match terminal {
+                    ReloadTerminal::Applied => ReloadRequestState::Applied,
+                    ReloadTerminal::Failed => ReloadRequestState::Failed,
+                };
+                Ok(())
+            }
+            Some(state) => Err(anyhow!(
+                "reload request {request_id} completed before publication or twice (state {state:?})"
+            )),
+            None => Err(anyhow!("reload request {request_id} completed before it was booked")),
+        }
+    }
+
+    fn summary(&self) -> ReloadLedgerSummary {
+        let mut summary = ReloadLedgerSummary { requests: self.requests.len(), ..Default::default() };
+        for state in self.requests.values() {
+            match state {
+                ReloadRequestState::Booked | ReloadRequestState::Published => summary.pending += 1,
+                ReloadRequestState::Applied => summary.applied += 1,
+                ReloadRequestState::Rejected => summary.rejected += 1,
+                ReloadRequestState::Failed => summary.failed += 1,
+            }
+        }
+        summary
+    }
+
+    fn validate(&self) -> Result<ReloadLedgerSummary> {
+        let summary = self.summary();
+        let classified = summary.applied + summary.pending + summary.rejected + summary.failed;
+        if classified != summary.requests {
+            return Err(anyhow!(
+                "reload ledger conservation violated: requests={} classified={}"
+                , summary.requests, classified
+            ));
+        }
+        Ok(summary)
+    }
 }
 
 /// Apply one `reload_edit`: in-memory find/replace on the file's CURRENT
@@ -1030,7 +1147,7 @@ fn service_reload_edit(
     output: &str,
     pristine: &mut HashMap<String, String>,
     req: &ReloadEditReq,
-) -> Result<()> {
+) -> Result<crate::skull_backend::SkullReload> {
     let path = Path::new(&req.file);
     let current = stone
         .source_text(path)
@@ -1048,10 +1165,10 @@ fn service_reload_edit(
     let main_path = Path::new(output).join(rock_host::project::MAIN_LUA_FILENAME);
     let incremental_path = main_path.with_file_name("incremental.lua");
     match stone.apply_edit(path, &new_text, &main_path, &incremental_path)? {
-        crate::skull_backend::SkullReload::Incremental { bytes, reinferred, .. } => {
+        incremental @ crate::skull_backend::SkullReload::Incremental { bytes, reinferred, .. } => {
             log::info!(target: "SIM",
                 "reload_edit `{}`: overlay {bytes}B, {reinferred} bodies", req.file);
-            Ok(())
+            Ok(incremental)
         }
         other => Err(anyhow!(
             "must stay a body-only edit; `{}` routed to {other:?} \
@@ -1059,6 +1176,25 @@ fn service_reload_edit(
             req.file
         )),
     }
+}
+
+fn book_reload_request(ledger: &mut ReloadLedger, req: &ReloadEditReq) -> Result<u64> {
+    let request_id = req
+        .request_id
+        .ok_or_else(|| anyhow!("reload_edit omitted request_id"))?;
+    ledger.book(request_id)?;
+    Ok(request_id)
+}
+
+fn consume_reload_completion(
+    ledger: &mut ReloadLedger,
+    completion: ReloadCompletion,
+) -> Result<u64> {
+    let request_id = completion
+        .request_id
+        .ok_or_else(|| anyhow!("reload_terminal omitted request_id"))?;
+    ledger.complete(request_id, completion.terminal)?;
+    Ok(request_id)
 }
 
 /// Restore every reload_edit-touched file to its pre-sim text and remove the
@@ -1769,10 +1905,15 @@ fn run_worker(
     // Mid-sim reload_edit ops flow stderr-thread -> wait-loop, which owns the
     // (single-threaded) SkullStone and services them between try_wait polls.
     let (reload_tx, reload_rx) = mpsc::channel::<ReloadEditReq>();
+    // The production watcher sends one terminal event after it has consumed
+    // the published overlay. The parent only accounts for it; it never
+    // fabricates publication or completion for a test.
+    let (reload_completion_tx, reload_completion_rx) = mpsc::channel::<ReloadCompletion>();
 
     let stderr_thread = {
         let lines = Arc::clone(&stderr_lines);
         let anchor = Arc::clone(&deadline_anchor);
+        let reload_completion_tx = reload_completion_tx;
         let mut deadline_guard = DeadlineGuard::for_parts(parts);
         // Buffered runs must not write anything from this thread: several
         // children are live, so a direct write here interleaves into the middle
@@ -1797,11 +1938,27 @@ fn run_worker(
                         // the edit can't apply, which the sim's own wait_for
                         // timeout (or the post-exit drain) surfaces.
                         let _ = reload_tx.send(ReloadEditReq {
+                            request_id: extract_raw_field(rest, "request_id")
+                                .and_then(|id| id.parse::<u64>().ok()),
                             file: extract_str_field(rest, "file").unwrap_or_default(),
                             find: extract_str_field(rest, "find").unwrap_or_default(),
                             replace: extract_str_field(rest, "replace").unwrap_or_default(),
                             site: extract_str_field(rest, "site").unwrap_or_default(),
                         });
+                    }
+                    if op.as_deref() == Some("reload_terminal") {
+                        let terminal = match extract_str_field(rest, "status").as_deref() {
+                            Some("applied") => Some(ReloadTerminal::Applied),
+                            Some("failed") => Some(ReloadTerminal::Failed),
+                            _ => None,
+                        };
+                        if let Some(terminal) = terminal {
+                            let _ = reload_completion_tx.send(ReloadCompletion {
+                                request_id: extract_raw_field(rest, "request_id")
+                                    .and_then(|id| id.parse::<u64>().ok()),
+                                terminal,
+                            });
+                        }
                     }
                     if !quiet {
                         print_progress(rest);
@@ -1840,8 +1997,20 @@ fn run_worker(
     let timeout = Duration::from_secs(sim_timeout_secs());
     let mut pristine: HashMap<String, String> = HashMap::new();
     let mut reload_errors: Vec<SiteMessage> = Vec::new();
+    let mut reload_ledger = ReloadLedger::default();
     let mut stone = stone;
     let (status, timed_out) = loop {
+        while let Ok(completion) = reload_completion_rx.try_recv() {
+            let failed = completion.terminal == ReloadTerminal::Failed;
+            if let Err(e) = consume_reload_completion(&mut reload_ledger, completion) {
+                reload_errors.push(SiteMessage { message: format!("reload completion: {e}"), site: String::new() });
+            } else if failed {
+                reload_errors.push(SiteMessage {
+                    message: "reload watcher reported failed publication; last-good artifact remains active".into(),
+                    site: String::new(),
+                });
+            }
+        }
         match child.try_wait()? {
             Some(s) => break (s, false),
             None => {
@@ -1857,6 +2026,16 @@ fn run_worker(
                 // keep the poll cadence with a plain sleep.
                 match reload_rx.recv_timeout(Duration::from_millis(50)) {
                     Ok(req) => {
+                        let request_id = match book_reload_request(&mut reload_ledger, &req) {
+                            Ok(id) => id,
+                            Err(e) => {
+                                reload_errors.push(SiteMessage {
+                                    message: format!("reload request: {e}"),
+                                    site: compress_site(&req.site),
+                                });
+                                continue;
+                            }
+                        };
                         // An ordinary (non-reload) sim has no session to edit.
                         // Servicing it here would mutate build state shared with
                         // every other child, so refuse loudly rather than
@@ -1869,7 +2048,26 @@ fn run_worker(
                                  reload lane with `@sim_env(\"STONE_HOT_RELOAD\", \"1\")`"
                             )),
                         };
-                        if let Err(e) = serviced {
+                        match serviced {
+                            Ok(crate::skull_backend::SkullReload::Incremental { .. }) => {
+                                if let Err(e) = reload_ledger.publish(request_id) {
+                                    reload_errors.push(SiteMessage {
+                                        message: format!("reload publication: {e}"),
+                                        site: compress_site(&req.site),
+                                    });
+                                }
+                            }
+                            Ok(other) => {
+                                let e = anyhow!("reload_edit returned non-incremental result {other:?}");
+                                let _ = reload_ledger.reject(request_id);
+                                let site = compress_site(&req.site);
+                                reload_errors.push(SiteMessage {
+                                    message: format!("reload_edit: {e}"),
+                                    site: site.clone(),
+                                });
+                            }
+                            Err(e) => {
+                                let _ = reload_ledger.reject(request_id);
                             let site = compress_site(&req.site);
                             // Stream now for a single run; buffered callers emit
                             // the retained error under their record lock.
@@ -1884,6 +2082,18 @@ fn run_worker(
                                 message: format!("reload_edit: {e}"),
                                 site,
                             });
+                            }
+                        }
+                        while let Ok(completion) = reload_completion_rx.try_recv() {
+                            let failed = completion.terminal == ReloadTerminal::Failed;
+                            if let Err(e) = consume_reload_completion(&mut reload_ledger, completion) {
+                                reload_errors.push(SiteMessage { message: format!("reload completion: {e}"), site: String::new() });
+                            } else if failed {
+                                reload_errors.push(SiteMessage {
+                                    message: "reload watcher reported failed publication; last-good artifact remains active".into(),
+                                    site: String::new(),
+                                });
+                            }
                         }
                     }
                     Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -1898,13 +2108,22 @@ fn run_worker(
     // emitted reload_edit and stopped without waiting for the effect. That's
     // a sim-author bug; dropping it silently would hide the mis-ordering.
     while let Ok(req) = reload_rx.try_recv() {
-        reload_errors.push(SiteMessage {
-            message: format!(
-                "reload_edit for `{}` arrived after the child exited (emit it before a wait_for on its effect)",
-                req.file
-            ),
-            site: compress_site(&req.site),
-        });
+        match book_reload_request(&mut reload_ledger, &req) {
+            Ok(request_id) => {
+                let _ = reload_ledger.reject(request_id);
+                reload_errors.push(SiteMessage {
+                    message: format!(
+                        "reload_edit for `{}` arrived after the child exited (emit it before a wait_for on its effect)",
+                        req.file
+                    ),
+                    site: compress_site(&req.site),
+                });
+            }
+            Err(e) => reload_errors.push(SiteMessage {
+                message: format!("reload request after child exit: {e}"),
+                site: compress_site(&req.site),
+            }),
+        }
     }
 
     // Surface reader-thread panics: a silent JoinError here meant a panic
@@ -1926,6 +2145,35 @@ fn run_worker(
         Err(panic) => reader_diagnostics.push(format!(
             "rock sim `{label}`: stdout reader thread panicked; game stdout may be incomplete: {panic:?}"
         )),
+    }
+    while let Ok(completion) = reload_completion_rx.try_recv() {
+        let failed = completion.terminal == ReloadTerminal::Failed;
+        if let Err(e) = consume_reload_completion(&mut reload_ledger, completion) {
+            reload_errors.push(SiteMessage { message: format!("reload completion: {e}"), site: String::new() });
+        } else if failed {
+            reload_errors.push(SiteMessage {
+                message: "reload watcher reported failed publication; last-good artifact remains active".into(),
+                site: String::new(),
+            });
+        }
+    }
+    if let Err(e) = reload_ledger.validate() {
+        reload_errors.push(SiteMessage { message: format!("reload ledger: {e}"), site: String::new() });
+    }
+    let reload_summary = reload_ledger.summary();
+    if reload_summary.requests > 0 && reload_summary.pending > 0 {
+        reload_errors.push(SiteMessage {
+            message: format!(
+                "reload completion ledger has {} pending request(s): requests={} applied={} pending={} rejected={} failed={}",
+                reload_summary.pending,
+                reload_summary.requests,
+                reload_summary.applied,
+                reload_summary.pending,
+                reload_summary.rejected,
+                reload_summary.failed,
+            ),
+            site: String::new(),
+        });
     }
     for p in parts {
         record_sim_lifecycle("end", &p.name);
@@ -1978,6 +2226,9 @@ fn run_worker(
         }
         if i == blamed {
             summary.errors.extend(std::mem::take(&mut reload_errors));
+            if reload_summary.requests > 0 {
+                summary.reload_ledger = Some(reload_summary);
+            }
             summary.timed_out = timed_out;
             if !status.success() {
                 summary.process_failure_code = Some(status.code().unwrap_or(-1));
@@ -3223,6 +3474,9 @@ struct SimSummary {
     /// reruns the entry ALONE and reports the reason, so the record that
     /// survives is the fresh-process one.
     worker_ineligible: Option<String>,
+    /// Parent-side conservation evidence for the real watcher/publication
+    /// completion path. None means this entry issued no reload request.
+    reload_ledger: Option<ReloadLedgerSummary>,
 }
 
 impl SimSummary {
@@ -3249,6 +3503,14 @@ impl SimSummary {
         self.never_started = self.never_started || other.never_started;
         if other.worker_ineligible.is_some() {
             self.worker_ineligible = other.worker_ineligible;
+        }
+        if let Some(other) = other.reload_ledger {
+            let current = self.reload_ledger.get_or_insert_default();
+            current.requests += other.requests;
+            current.applied += other.applied;
+            current.pending += other.pending;
+            current.rejected += other.rejected;
+            current.failed += other.failed;
         }
     }
 }
@@ -3399,6 +3661,12 @@ impl SimSummary {
             } else if !streamed {
                 eprintln!("[sim] FAIL [{}]: {}", f.site, f.message);
             }
+        }
+        if let Some(ledger) = self.reload_ledger {
+            eprintln!(
+                "[sim] reload ledger: requests={} applied={} pending={} rejected={} failed={}",
+                ledger.requests, ledger.applied, ledger.pending, ledger.rejected, ledger.failed
+            );
         }
         let total = self.expects_pass.len() + self.expects_fail.len();
         // The PRINTED verdict must come from the same predicate as the real
@@ -4530,5 +4798,45 @@ __SIM__ {"op":"stop","site":"foo.rock:5"}
         assert_eq!(ledger.summary().pending, 0);
         assert_eq!(ledger.summary().rejected, 0);
         assert_eq!(ledger.summary().failed, 0);
+    }
+
+    #[test]
+    fn reload_ledger_distinguishes_booked_and_published_pending() {
+        let mut ledger = ReloadLedger::default();
+        ledger.book(1).unwrap();
+        ledger.book(2).unwrap();
+        ledger.publish(2).unwrap();
+        assert_eq!(ledger.summary().requests, 2);
+        assert_eq!(ledger.summary().pending, 2);
+        assert_eq!(ledger.validate().unwrap().pending, 2);
+    }
+
+    #[test]
+    fn reload_ledger_accounts_rejection_and_failed_publication() {
+        let mut ledger = ReloadLedger::default();
+        ledger.book(1).unwrap();
+        ledger.reject(1).unwrap();
+        ledger.book(2).unwrap();
+        ledger.publish(2).unwrap();
+        ledger.complete(2, ReloadTerminal::Failed).unwrap();
+        assert_eq!(
+            ledger.validate().unwrap(),
+            ReloadLedgerSummary { requests: 2, applied: 0, pending: 0, rejected: 1, failed: 1 }
+        );
+    }
+
+    #[test]
+    fn reload_ledger_rejects_drop_duplicate_and_early_completion() {
+        let mut dropped = ReloadLedger::default();
+        dropped.book(1).unwrap();
+        assert_eq!(dropped.summary().pending, 1, "a dropped request cannot disappear from accounting");
+
+        let mut duplicate = ReloadLedger::default();
+        duplicate.book(1).unwrap();
+        assert!(duplicate.complete(1, ReloadTerminal::Applied).is_err());
+        duplicate.publish(1).unwrap();
+        assert!(duplicate.publish(1).is_err());
+        duplicate.complete(1, ReloadTerminal::Applied).unwrap();
+        assert!(duplicate.complete(1, ReloadTerminal::Applied).is_err());
     }
 }
