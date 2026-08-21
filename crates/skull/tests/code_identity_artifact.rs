@@ -100,7 +100,7 @@ fn main() {}
 }
 
 #[test]
-fn scene_lifecycle_metadata_emits_the_compiler_validated_root_tag() {
+fn scene_lifecycle_metadata_emits_the_canonical_root_key() {
     let emit = emit_mir(r#"
 struct Dungeon { ticks: int }
 @lifecycle(phase="update", owner="scene")
@@ -109,11 +109,66 @@ deco init scene_update {}
 fn main() {}
 "#);
     assert!(
-        emit.lua.contains("owner = \"scene\", root_type = \"Dungeon\""),
-        "scene plan lost its typed root metadata: {}",
+        emit.lua.contains("owner = \"scene\", root_type = \"a_n7_Dungeon_0_z\""),
+        "scene plan lost its canonical typed root key: {}",
         emit.lua,
     );
     assert!(emit.lua.contains("scene_owned = 1"), "scene phase population is zero");
+}
+
+#[test]
+fn scene_creation_uses_the_monomorphized_type_key_without_runtime_discovery() {
+    let emit = emit_mir(r#"
+struct Room { ticks: int }
+@lifecycle(phase="update", owner="scene")
+deco init scene_update {}
+@scene_update fn tick(root: Room) { root.ticks += 1 }
+global ROOT: Scene<Room>? = null
+fn load() -> Scene<Room> {
+    return scene_create((_b) => {
+        let root: Room? = Room { ticks: 0 }
+        return root
+    }).unwrap()
+}
+fn main() { ROOT = load() }
+"#);
+    let key = "a_n4_Room_0_z";
+    let scene_create_body = emit
+        .lua
+        .split("\nfunction ")
+        .find(|part| part.starts_with("scene_create"))
+        .unwrap_or_else(|| panic!("no emitted scene_create specialization:\n{}", emit.lua));
+    assert!(
+        scene_create_body.contains(key),
+        "scene_create must receive the compiler's MonoTy-derived key: {scene_create_body}"
+    );
+    assert!(
+        !scene_create_body.contains("__rock_get_type"),
+        "Scene construction must not discover its root type from the published value: {scene_create_body}"
+    );
+    assert!(
+        emit.lua.contains(&format!("root_type = \"{key}\"")),
+        "LifecyclePlan must publish the same semantic key as scene_create: {}",
+        emit.lua
+    );
+}
+
+#[test]
+fn scene_population_dispatch_does_not_copy_a_bucket_per_system() {
+    let scene_source = include_str!("../../../stdlib/scene.rock");
+    assert!(
+        !scene_source.contains("let out: [int] = []") && !scene_source.contains("vec_push(out"),
+        "population dispatch must iterate a stable bucket without allocating a per-system copy"
+    );
+    let systems_source = include_str!("../../../stone/engine/systems/systems.rock");
+    assert!(
+        systems_source.contains("let population_len = __scene_type_population_length"),
+        "population dispatch must use the phase-start length"
+    );
+    assert!(
+        !systems_source.contains("__SCENE_NEXT_ID"),
+        "population dispatch must not scan the historical id ceiling"
+    );
 }
 
 #[test]

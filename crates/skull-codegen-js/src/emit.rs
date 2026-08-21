@@ -5161,11 +5161,10 @@ fn lifecycle_plan_stage_js(
             let key = entry.identity.logical_key(ws, interner);
             let dependencies = entry.qualification.dependencies();
             let root_type = match &entry.root_type {
-                Some(skull_mir::monoty::MonoTy::App {
-                    ctor: skull_mir::monoty::MonoCtor::Nominal(name),
-                    params,
-                }) if params.is_empty() => js_string_lit(name.as_str())?,
-                Some(other) => panic!("validated scene lifecycle root reached emission as {other:?}"),
+                Some(root) => js_string_lit(
+                    &skull_mir::lifecycle::scene_root_type_key(root)
+                        .unwrap_or_else(|| panic!("validated scene lifecycle root reached emission as {root:?}")),
+                )?,
                 None => "null".to_string(),
             };
             write!(out, "{{phase: {}, owner: {}, root_type: {}, key: {}, name: {}, stage: {}, ordinal: {}, qualification: {}, body_fingerprint: {}, dependencies: {{len: {}, _data: [",

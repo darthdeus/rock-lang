@@ -937,6 +937,7 @@ fn is_implementation_anno(name: &str) -> bool {
             | "shader_expand"
             | "build_var_expand"
             | "embed_expand"
+            | "scene_type_key"
             | "consume"
     )
 }

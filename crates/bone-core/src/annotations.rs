@@ -67,7 +67,7 @@ fn validate_one(
         "pure" | "nomangle" | "ignore" | "debug_impure" | "intrinsic" | "native_required"
         | "struct_expand" | "shader_expand" | "vertex_expand" | "uniform_expand"
         | "build_var_expand" | "embed_expand"
-        | "uniform_values"
+        | "uniform_values" | "scene_type_key"
         | "materialize" | "gpu_only"
         | "scalar_abi" | "inline" | "sim"
         | "sim_render" | "shadow_root" => {

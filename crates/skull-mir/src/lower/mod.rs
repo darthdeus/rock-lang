@@ -3507,6 +3507,7 @@ impl ExpansionRejections {
             ExpandKind::VertexLayout => &mut self.vertex_layout,
             ExpandKind::UniformBlock => &mut self.uniform_block,
             ExpandKind::UniformValues => &mut self.uniform_values,
+            ExpandKind::SceneTypeKey => return,
             ExpandKind::BuildVar | ExpandKind::EmbedString => return,
             ExpandKind::Materialize => return,
         };
@@ -3568,6 +3569,7 @@ pub fn expansion_rejection(ws: &Workspace, mid: ModuleId) -> Option<CompilerErro
                 ExpandKind::UniformValues => {
                     uniform_values_rejection_for_call(ws, inf, body, e, f, &arg_idxs)
                 }
+                ExpandKind::SceneTypeKey => None,
                 ExpandKind::BuildVar | ExpandKind::EmbedString => None,
                 ExpandKind::Materialize => None,
             };

@@ -117,7 +117,7 @@ fn main() {}
 }
 
 #[test]
-fn scene_lifecycle_metadata_uses_the_same_root_tag_in_js() {
+fn scene_lifecycle_metadata_uses_the_same_canonical_root_key_in_js() {
     let ws = ws_with(r#"
 struct Dungeon { ticks: int }
 @lifecycle(phase="update", owner="scene") deco init scene_update {}
@@ -126,10 +126,40 @@ fn main() {}
 "#);
     let js = emit_program(&ws);
     assert!(
-        js.contains("owner: \"scene\", root_type: \"Dungeon\""),
-        "scene plan lost its typed root metadata: {js}",
+        js.contains("owner: \"scene\", root_type: \"a_n7_Dungeon_0_z\""),
+        "scene plan lost its canonical typed root key: {js}",
     );
     assert!(js.contains("scene_owned: 1"), "scene phase population is zero");
+}
+
+#[test]
+fn scene_creation_uses_the_monomorphized_type_key_without_runtime_discovery_in_js() {
+    let ws = ws_with(r#"
+struct Room { ticks: int }
+@lifecycle(phase="update", owner="scene") deco init scene_update {}
+@scene_update fn tick(root: Room) { root.ticks += 1 }
+global ROOT: Scene<Room>? = null
+fn load() -> Scene<Room> {
+    return scene_create((_b) => {
+        let root: Room? = Room { ticks: 0 }
+        return root
+    }).unwrap()
+}
+fn main() { ROOT = load() }
+"#);
+    let js = emit_program(&ws);
+    let scene_create_body = js
+        .split("\nfunction ")
+        .find(|part| part.starts_with("scene_create"))
+        .unwrap_or_else(|| panic!("no emitted scene_create specialization:\n{js}"));
+    assert!(
+        scene_create_body.contains("a_n4_Room_0_z"),
+        "scene_create must receive the compiler's MonoTy-derived key: {scene_create_body}"
+    );
+    assert!(
+        !scene_create_body.contains("__rock_get_type"),
+        "Scene construction must not discover its root type from the published value: {scene_create_body}"
+    );
 }
 
 #[test]

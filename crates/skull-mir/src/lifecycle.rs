@@ -132,6 +132,18 @@ fn phase_rank(phase: Ustr) -> Option<u8> {
     })
 }
 
+/// The one emitted identity for a validated typed Scene lifecycle root. The
+/// same canonical `MonoTy` encoding is embedded by `scene_create<T>`.
+pub fn scene_root_type_key(root_type: &MonoTy) -> Option<String> {
+    match root_type {
+        MonoTy::App {
+            ctor: MonoCtor::Nominal(_),
+            params,
+        } if params.is_empty() => Some(root_type.canonical()),
+        _ => None,
+    }
+}
+
 fn string_arg(ann: &bone_semantic::hir::Annotation, name: &str) -> Option<Ustr> {
     ann.args.iter().find_map(|a| {
         (a.name.as_ref().is_some_and(|n| n.name.as_str() == name))

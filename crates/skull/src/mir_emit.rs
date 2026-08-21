@@ -6003,11 +6003,10 @@ fn lifecycle_plan_stage_lua(
         let key = entry.identity.logical_key(ws, scx.interner());
         let dependencies = entry.qualification.dependencies();
         let root_type = match &entry.root_type {
-            Some(skull_mir::monoty::MonoTy::App {
-                ctor: skull_mir::monoty::MonoCtor::Nominal(name),
-                params,
-            }) if params.is_empty() => skull_codegen_lua::lua_string(name.as_str()),
-            Some(other) => panic!("validated scene lifecycle root reached emission as {other:?}"),
+            Some(root) => skull_codegen_lua::lua_string(
+                &skull_mir::lifecycle::scene_root_type_key(root)
+                    .unwrap_or_else(|| panic!("validated scene lifecycle root reached emission as {root:?}")),
+            ),
             None => "nil".to_string(),
         };
         // A compiler-synthesized thunk of one uniform signature

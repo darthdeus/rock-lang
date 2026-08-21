@@ -573,6 +573,38 @@ impl Builder<'_> {
         Ok(ValueRepr::Scalar(self.materialize_repr(repr)?))
     }
 
+    /// Expand the generic Scene bucket key from the concrete call instance.
+    /// The value is a compiler identity, not a tag read from the constructed
+    /// root, so construction and lifecycle-plan emission share `MonoTy`.
+    pub(crate) fn expand_scene_type_key(
+        &mut self,
+        call: Idx<Expr>,
+        func: FuncRef,
+        arg_idxs: &[Idx<Expr>],
+    ) -> Result<ValueRepr, CompilerError> {
+        let fname = self.ws.module(func.module).functions[func.func].name;
+        let [ ] = arg_idxs else {
+            return Err(CompilerError::new_with_label(
+                self.body.expr_spans[call],
+                format!("`@scene_type_key` fn `{fname}` takes no arguments"),
+            ));
+        };
+        let instance = self
+            .concrete_callee_for_site(call)?
+            .ok_or_else(|| self.gap_here("Scene type-key expansion has no concrete callee"))?;
+        let arg_types = instance.arg_types(self.scx.interner());
+        let [ty] = arg_types.as_slice() else {
+            return Err(CompilerError::new_with_label(
+                self.body.expr_spans[call],
+                format!("`@scene_type_key` fn `{fname}` must have exactly one type argument"),
+            ));
+        };
+        let key = ty.canonical();
+        Ok(ValueRepr::Scalar(
+            self.emit_cur(Inst::Const(Lit::Str(Ustr::from(key.as_str())))),
+        ))
+    }
+
     pub(crate) fn materialize_repr(&mut self, repr: ValueRepr) -> Result<Idx<Inst>, CompilerError> {
         match repr {
             ValueRepr::Scalar(value) => Ok(value),
