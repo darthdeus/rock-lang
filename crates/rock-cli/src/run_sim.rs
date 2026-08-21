@@ -4516,4 +4516,19 @@ __SIM__ {"op":"stop","site":"foo.rock:5"}
         assert!(!src_declares_sim(src, "smoke"));
         assert!(src_declares_sim(src, "smoke_alt"));
     }
+
+    #[test]
+    fn reload_completion_is_terminal_after_publication() {
+        let mut ledger = ReloadLedger::default();
+        ledger.book(7).expect("request books once");
+        ledger.publish(7).expect("artifact publishes once");
+        ledger
+            .complete(7, ReloadTerminal::Applied)
+            .expect("watcher completion follows publication");
+        assert_eq!(ledger.summary().requests, 1);
+        assert_eq!(ledger.summary().applied, 1);
+        assert_eq!(ledger.summary().pending, 0);
+        assert_eq!(ledger.summary().rejected, 0);
+        assert_eq!(ledger.summary().failed, 0);
+    }
 }
