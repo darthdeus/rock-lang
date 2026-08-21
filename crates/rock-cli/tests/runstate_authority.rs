@@ -35,3 +35,46 @@ fn mag_has_no_runstate_projection_bridge_names() {
     }
     assert!(findings.is_empty(), "projection bridge census is nonzero:\n{}", findings.join("\n"));
 }
+
+#[test]
+fn mag_has_one_typed_runstate_root_and_no_global_runstate_mirror() {
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("rock workspace root");
+    let mut sources = Vec::new();
+    rock_sources(&repo.join("mag"), &mut sources);
+    let active_run_source = repo.join("mag/world_levels.rock").display().to_string();
+    let mut runstate_globals = Vec::new();
+    let mut active_run_defs = Vec::new();
+    for source in sources {
+        let text = fs::read_to_string(&source).expect("read MAG source");
+        for (line_number, line) in text.lines().enumerate() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("global ") && trimmed.contains("RunState") {
+                runstate_globals.push(format!("{}:{}", source.display(), line_number + 1));
+            }
+            if trimmed.starts_with("global MAG_ACTIVE_RUN:") {
+                active_run_defs.push(format!("{}:{}", source.display(), line_number + 1));
+            }
+        }
+    }
+    assert_eq!(
+        runstate_globals.len(),
+        1,
+        "MAG must have exactly one typed RunState global, owned by MAG_ACTIVE_RUN"
+    );
+    assert!(
+        runstate_globals[0].starts_with(&format!("{active_run_source}:")),
+        "typed RunState global must be owned by world_levels.rock: {runstate_globals:?}"
+    );
+    assert_eq!(
+        active_run_defs.len(),
+        1,
+        "MAG_ACTIVE_RUN must have exactly one production definition"
+    );
+    assert!(
+        active_run_defs[0].starts_with(&format!("{active_run_source}:")),
+        "MAG_ACTIVE_RUN definition must live in world_levels.rock: {active_run_defs:?}"
+    );
+}
