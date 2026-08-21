@@ -60,7 +60,9 @@ global __SCENE_CLOSERS: [[() -> ()]] = []
 @state(ownership=host_projection, world=exclude, realization=rebuild_host_projection)
 global __SCENE_PENDING_CLOSE: [int] = []
 
-@scene_type_key inline(lua) fn __rock_scene_type_key<T>() -> string = """
+@scene_type_key
+@shadow_effect(pure)
+inline(lua) fn __rock_scene_type_key<T>() -> string = """
     error("__rock_scene_type_key must be compiler-expanded")
 """
 
