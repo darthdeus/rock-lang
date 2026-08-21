@@ -3446,6 +3446,8 @@ fn assemble_program_core(
         &code_artifact,
         &all_statics,
     )
+    .map_err(|error| err(error.to_string()))?
+    .with_lifecycle_plan(&lifecycle_plan)
     .map_err(|error| err(error.to_string()))?;
     let program = format!(
         "if (typeof __rock_state_transaction_begin !== \"undefined\") __rock_state_transaction_begin();\n__rock_state_publish_schema({:?});\n{}{}",
@@ -3534,8 +3536,36 @@ fn state_schema_js(
         out.push_str("},");
     }
     let census = image_plan.census();
+    let scene = image_plan.scene();
     out.push_str(&format!(
-        "],census:{{examined:{},assigned:{},duplicates:{},unknown:{},semantic_session:{},program_artifact:{},host_projection:{},runner_diagnostic:{},unsupported:{}}}}};\n__rock_state_install_global_bridge();\n",
+        "],scene:{{scene_registry_identity:{},arena_registry_identity:{},scene_root_types:[{}],arena_identity_fields:[{}],census:{{examined:{},assigned:{},scene_registry:{},arena_registry:{},scene_root_types:{},arena_identity_fields:{},scene_lifecycle_entries:{}}}}},census:{{examined:{},assigned:{},duplicates:{},unknown:{},semantic_session:{},program_artifact:{},host_projection:{},runner_diagnostic:{},unsupported:{}}}}};\n__rock_state_install_global_bridge();\n",
+        scene
+            .scene_registry_identity
+            .as_deref()
+            .map_or_else(|| Ok("null".to_string()), js_string_lit)?,
+        scene
+            .arena_registry_identity
+            .as_deref()
+            .map_or_else(|| Ok("null".to_string()), js_string_lit)?,
+        scene
+            .scene_root_types
+            .iter()
+            .map(|value| js_string_lit(value))
+            .collect::<Result<Vec<_>, _>>()?
+            .join(","),
+        scene
+            .arena_identity_fields
+            .iter()
+            .map(|value| js_string_lit(value))
+            .collect::<Result<Vec<_>, _>>()?
+            .join(","),
+        scene.census.examined,
+        scene.census.assigned,
+        scene.census.scene_registry,
+        scene.census.arena_registry,
+        scene.census.scene_root_types,
+        scene.census.arena_identity_fields,
+        scene.scene_lifecycle_entries,
         census.examined,
         census.assigned,
         census.duplicates,

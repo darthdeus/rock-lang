@@ -3177,7 +3177,7 @@ var __rock_state_image_structural_ids = [
   "session::rng-state", "program-artifact::code-slots",
   "program-artifact::lifecycle-plan", "program-artifact::definition-plan",
   "host-projection::arena-registry", "host-projection::native-ledger",
-  "runner::logger-state", "unsupported::live-scene-state"
+  "runner::logger-state"
 ];
 function __rock_state_image_plan_validate() {
   var schema = (typeof __ROCK_STATE_SCHEMA === "undefined") ? [] : __ROCK_STATE_SCHEMA;
@@ -3219,8 +3219,26 @@ function __rock_state_image_plan_validate() {
   }
   Object.keys(counts).forEach(function (kind) {
     if (census[kind] !== counts[kind]) throw new Error("StateImagePlan census disagrees for " + kind);
-    if (counts[kind] === 0) throw new Error("StateImagePlan has a zero ownership category: " + kind);
+    if (kind !== "unsupported" && counts[kind] === 0) {
+      throw new Error("StateImagePlan has a zero ownership category: " + kind);
+    }
   });
+  var scene = plan.scene, sceneCensus = scene && scene.census;
+  if (!scene || !sceneCensus) throw new Error("StateImagePlan has no SceneImage metadata");
+  if (sceneCensus.examined !== sceneCensus.assigned
+      || sceneCensus.scene_registry > 1 || sceneCensus.arena_registry > 1
+      || sceneCensus.scene_registry !== (scene.scene_registry_identity ? 1 : 0)
+      || sceneCensus.arena_registry !== (scene.arena_registry_identity ? 1 : 0)
+      || sceneCensus.scene_root_types !== (scene.scene_root_types || []).length
+      || sceneCensus.arena_identity_fields !== (scene.arena_identity_fields || []).length) {
+    throw new Error("incomplete SceneImage plan census");
+  }
+  if ((scene.scene_lifecycle_entries || 0) > 0
+      && (!scene.scene_registry_identity || !scene.arena_registry_identity
+          || (scene.scene_root_types || []).length === 0
+          || (scene.arena_identity_fields || []).length !== 4)) {
+    throw new Error("SceneImage plan has zero or incomplete live-root populations");
+  }
   return true;
 }
 function __rock_state_image_clone(value, seen, mode) {
@@ -3271,13 +3289,29 @@ function __rock_state_image_clone(value, seen, mode) {
 }
 function __rock_state_image_scene_is_live() {
   if (typeof __G === "undefined" || __G === null) return false;
-  var roots = __G.__SCENE_ROOTS;
+  var registry = __G.__SCENE_REGISTRY;
+  if (registry === null || registry === undefined) return false;
+  var roots = registry.roots;
   if (roots === null || roots === undefined) return false;
-  if (Array.isArray(roots)) return roots.some(function (v) { return v !== null && v !== undefined; });
-  if (roots._data && roots.len !== undefined) {
-    for (var i = 0; i < roots.len; i++) if (roots._data[i] !== null && roots._data[i] !== undefined) return true;
+  var states = registry.states;
+  function value_at(vector, index) {
+    if (Array.isArray(vector)) return vector[index];
+    if (vector._data && vector.len !== undefined) return vector._data[index];
+    return vector[index] !== undefined ? vector[index] : vector[index + 1];
   }
-  return Object.keys(roots).some(function (key) { return roots[key] !== null && roots[key] !== undefined; });
+  var length = Array.isArray(roots) ? roots.length : roots.len;
+  if (length !== undefined) {
+    for (var i = 0; i < length; i++) {
+      var root = value_at(roots, i);
+      var state = states === undefined || states === null ? 2 : value_at(states, i);
+      if (root !== null && root !== undefined && state === 2) return true;
+    }
+    return false;
+  }
+  return Object.keys(roots).some(function (key) {
+    var root = roots[key];
+    return root !== null && root !== undefined;
+  });
 }
 var __rock_state_image_next_id = 0;
 var __rock_state_image_next_session_id = 0;
@@ -3295,7 +3329,7 @@ function __rock_state_image_capture(kind, tick) {
   if (kind !== "boot" && kind !== "world") throw new Error("unsupported StateImage capture kind " + kind);
   __rock_state_image_plan_validate();
   if (kind === "world" && __rock_state_image_scene_is_live()) {
-    throw new Error("StateImage capture rejected live Scene state; SceneImage is not implemented");
+    throw new Error("StateImage capture rejected live Scene state; JS SceneImage shadow execution is unsupported");
   }
   var id = ++__rock_state_image_next_id;
   var image = { id: id, kind: kind, tick: tick, schema_id: __rock_state_schema_id,

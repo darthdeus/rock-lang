@@ -133,6 +133,34 @@ fn main() {}
 }
 
 #[test]
+fn lua_and_js_publish_identical_scene_image_metadata() {
+    let ws = ws_with(r#"
+struct Room { ticks: int }
+@lifecycle(phase="update", owner="scene") deco init scene_update {}
+@scene_update fn tick(root: Room) { root.ticks += 1 }
+fn main() {}
+"#);
+    let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
+    let lua = skull::mir_emit::emit_full(&ws, mid).expect("Lua emit").0;
+    let js = skull_codegen_js::emit::emit_program(&ws, mid).expect("JS emit");
+    assert_eq!(lua.state_schema.scene, js.state_schema.scene, "Lua and JS StateSchema Scene metadata drifted");
+
+    let lua_plan = skull_mir::state_image::StateImagePlan::from_schema(&lua.state_schema)
+        .expect("Lua SceneImage plan");
+    let js_plan = skull_mir::state_image::StateImagePlan::from_schema(&js.state_schema)
+        .expect("JS SceneImage plan");
+    assert_eq!(lua_plan.scene(), js_plan.scene(), "Lua and JS StateImage Scene metadata drifted");
+    let scene = js_plan.scene();
+    assert!(scene.census.examined > 0, "SceneImage metadata denominator is empty: {:?}", scene.census);
+    assert_eq!(scene.census.examined, scene.census.assigned);
+    assert_eq!(scene.census.scene_registry, 1);
+    assert_eq!(scene.census.arena_registry, 1);
+    assert_eq!(scene.census.scene_root_types, 1);
+    assert_eq!(scene.census.arena_identity_fields, 4);
+    assert!(js.program.contains("scene_root_types:[\"a_n4_Room_0_z\"]"), "JS SceneImage root key drifted: {}", js.program);
+}
+
+#[test]
 fn scene_creation_uses_the_monomorphized_type_key_without_runtime_discovery_in_js() {
     let ws = ws_with(r#"
 struct Room { ticks: int }

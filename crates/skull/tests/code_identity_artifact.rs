@@ -117,6 +117,36 @@ fn main() {}
 }
 
 #[test]
+fn scene_state_image_metadata_has_nonzero_registry_and_identity_populations() {
+    let emit = emit_mir(r#"
+struct Room { ticks: int }
+@lifecycle(phase="update", owner="scene") deco init scene_update {}
+@scene_update fn tick(root: Room) { root.ticks += 1 }
+fn main() {}
+"#);
+    let scene = &emit.state_schema.scene;
+    assert!(scene.scene_registry_identity.is_some(), "SceneRegistry logical identity is missing");
+    assert!(scene.arena_registry_identity.is_some(), "ArenaRegistry logical identity is missing");
+    assert_eq!(scene.scene_root_types, vec!["a_n4_Room_0_z"], "root type identity must be canonical");
+    assert_eq!(
+        scene.arena_identity_fields,
+        vec!["scene_id", "arena_id", "slot", "generation"],
+    );
+    assert_eq!(scene.scene_lifecycle_entries, 1);
+
+    let plan = skull_mir::state_image::StateImagePlan::from_schema(&emit.state_schema)
+        .expect("SceneImage plan");
+    let census = &plan.scene().census;
+    assert!(census.examined > 0, "SceneImage metadata denominator is empty: {census:?}");
+    assert_eq!(census.examined, census.assigned, "SceneImage metadata is not total: {census:?}");
+    assert_eq!(census.scene_registry, 1);
+    assert_eq!(census.arena_registry, 1);
+    assert_eq!(census.scene_root_types, 1);
+    assert_eq!(census.arena_identity_fields, 4);
+    assert!(emit.lua.contains("scene_registry_identity="));
+}
+
+#[test]
 fn scene_creation_uses_the_monomorphized_type_key_without_runtime_discovery() {
     let emit = emit_mir(r#"
 struct Room { ticks: int }
@@ -166,7 +196,7 @@ fn scene_population_dispatch_does_not_copy_a_bucket_per_system() {
         "population dispatch must use the phase-start length"
     );
     assert!(
-        !systems_source.contains("__SCENE_NEXT_ID"),
+        !systems_source.contains("__SCENE_REGISTRY.next_id"),
         "population dispatch must not scan the historical id ceiling"
     );
 }

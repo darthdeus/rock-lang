@@ -1781,8 +1781,40 @@ fn state_schema_lua(schema: &skull_mir::state_schema::StateSchema) -> String {
         ));
     }
     let census = image_plan.census();
+    let scene = image_plan.scene();
+    let scene_registry_identity = scene
+        .scene_registry_identity
+        .as_deref()
+        .map_or_else(|| "nil".to_string(), |value| format!("{value:?}"));
+    let arena_registry_identity = scene
+        .arena_registry_identity
+        .as_deref()
+        .map_or_else(|| "nil".to_string(), |value| format!("{value:?}"));
+    let scene_root_types = scene
+        .scene_root_types
+        .iter()
+        .map(|value| format!("{value:?}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let arena_identity_fields = scene
+        .arena_identity_fields
+        .iter()
+        .map(|value| format!("{value:?}"))
+        .collect::<Vec<_>>()
+        .join(",");
     out.push_str(&format!(
-        "}},census={{examined={},assigned={},duplicates={},unknown={},semantic_session={},program_artifact={},host_projection={},runner_diagnostic={},unsupported={}}}}}\n",
+        "}},scene={{scene_registry_identity={},arena_registry_identity={},scene_root_types={{{}}},arena_identity_fields={{{}}},census={{examined={},assigned={},scene_registry={},arena_registry={},scene_root_types={},arena_identity_fields={},scene_lifecycle_entries={}}}}},census={{examined={},assigned={},duplicates={},unknown={},semantic_session={},program_artifact={},host_projection={},runner_diagnostic={},unsupported={}}}}}\n",
+        scene_registry_identity,
+        arena_registry_identity,
+        scene_root_types,
+        arena_identity_fields,
+        scene.census.examined,
+        scene.census.assigned,
+        scene.census.scene_registry,
+        scene.census.arena_registry,
+        scene.census.scene_root_types,
+        scene.census.arena_identity_fields,
+        schema.scene.scene_lifecycle_entries,
         census.examined,
         census.assigned,
         census.duplicates,
@@ -5095,6 +5127,8 @@ fn assemble(
         )));
     }
     let state_schema = skull_mir::state_schema::StateSchema::collect(ws, scx, &code_artifact, &all_statics)
+        .map_err(|error| CompilerError::new_no_location(error.to_string()))?
+        .with_lifecycle_plan(&lifecycle_plan)
         .map_err(|error| CompilerError::new_no_location(error.to_string()))?;
     let (binding_plan, effect_plan) = build_artifact_plans(
         ws,
