@@ -87,11 +87,33 @@ fn main() {}
     let second = emit.lua.find("name = \"second\", stage = 7").expect("second plan entry");
     let defaulted = emit.lua.find("name = \"defaulted\", stage = 100").expect("defaulted plan entry");
     assert!(first < second && second < defaulted, "compiler plan must preserve equal-stage declaration order and read the declared default");
+    // `func` is now a compiler-synthesized uniform thunk (`scene_id -> ()`),
+    // not the raw CodeRef slot -- calling it is what proves the slot behind
+    // it resolved (an unadmitted key throws "missing Rock code slot" at plan
+    // construction, before this snippet even runs); `key` on the entry
+    // itself carries the same identity string the thunk closed over.
     let out = run_luajit(
-        &format!("{}\nlocal p = _G.__ROCK_LIFECYCLE_PLAN.update; print(p.len .. ':' .. p._data[1].func.key)", emit.lua),
+        &format!("{}\nlocal p = _G.__ROCK_LIFECYCLE_PLAN.update; p._data[1].func(0); print(p.len .. ':' .. p._data[1].key)", emit.lua),
         "lifecycle_plan_root",
     );
     assert!(out.starts_with("3:named:<test>::first<>"), "plan targets must be admitted CodeRef roots: {out}");
+}
+
+#[test]
+fn scene_lifecycle_metadata_emits_the_compiler_validated_root_tag() {
+    let emit = emit_mir(r#"
+struct Dungeon { ticks: int }
+@lifecycle(phase="update", owner="scene")
+deco init scene_update {}
+@scene_update fn tick(root: Dungeon) { root.ticks += 1 }
+fn main() {}
+"#);
+    assert!(
+        emit.lua.contains("owner = \"scene\", root_type = \"Dungeon\""),
+        "scene plan lost its typed root metadata: {}",
+        emit.lua,
+    );
+    assert!(emit.lua.contains("scene_owned = 1"), "scene phase population is zero");
 }
 
 #[test]

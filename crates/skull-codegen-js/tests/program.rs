@@ -117,6 +117,22 @@ fn main() {}
 }
 
 #[test]
+fn scene_lifecycle_metadata_uses_the_same_root_tag_in_js() {
+    let ws = ws_with(r#"
+struct Dungeon { ticks: int }
+@lifecycle(phase="update", owner="scene") deco init scene_update {}
+@scene_update fn tick(root: Dungeon) { root.ticks += 1 }
+fn main() {}
+"#);
+    let js = emit_program(&ws);
+    assert!(
+        js.contains("owner: \"scene\", root_type: \"Dungeon\""),
+        "scene plan lost its typed root metadata: {js}",
+    );
+    assert!(js.contains("scene_owned: 1"), "scene phase population is zero");
+}
+
+#[test]
 fn lua_and_js_publish_identical_dependency_gated_lifecycle_plans() {
     let ws = ws_with(r#"
         @lifecycle(phase="wire", owner="session") deco init wire {}

@@ -3915,7 +3915,7 @@ pub fn emit_overlay_with_span_edits(
     if cache
         .build
         .lifecycle_plan
-        .wire_structure_changed(&current.lifecycle_plan)
+        .structure_changed(&current.lifecycle_plan)
     {
         return Ok(JsReload::FullRequired);
     }
@@ -5155,12 +5155,22 @@ fn lifecycle_plan_stage_js(
     let mut phases: BTreeMap<ustr::Ustr, Vec<_>> = BTreeMap::new();
     for entry in &plan.entries { phases.entry(entry.phase).or_default().push(entry); }
     for (phase, entries) in phases {
-        writeln!(out, "[{}]: {{len: {}, _data: [", js_string_lit(phase.as_str())?, entries.len()).unwrap();
+        let scene_owned = entries.iter().filter(|entry| entry.owner.as_str() == "scene").count();
+        writeln!(out, "[{}]: {{len: {}, scene_owned: {}, _data: [", js_string_lit(phase.as_str())?, entries.len(), scene_owned).unwrap();
         for entry in entries {
             let key = entry.identity.logical_key(ws, interner);
             let dependencies = entry.qualification.dependencies();
-            write!(out, "{{phase: {}, owner: {}, key: {}, name: {}, stage: {}, ordinal: {}, qualification: {}, body_fingerprint: {}, dependencies: {{len: {}, _data: [",
+            let root_type = match &entry.root_type {
+                Some(skull_mir::monoty::MonoTy::App {
+                    ctor: skull_mir::monoty::MonoCtor::Nominal(name),
+                    params,
+                }) if params.is_empty() => js_string_lit(name.as_str())?,
+                Some(other) => panic!("validated scene lifecycle root reached emission as {other:?}"),
+                None => "null".to_string(),
+            };
+            write!(out, "{{phase: {}, owner: {}, root_type: {}, key: {}, name: {}, stage: {}, ordinal: {}, qualification: {}, body_fingerprint: {}, dependencies: {{len: {}, _data: [",
                 js_string_lit(entry.phase.as_str())?, js_string_lit(entry.owner.as_str())?,
+                root_type,
                 js_string_lit(&key)?, js_string_lit(entry.diagnostic_name.as_str())?,
                 entry.stage, entry.declaration_ordinal,
                 js_string_lit(entry.qualification.tag())?,
@@ -5172,9 +5182,22 @@ fn lifecycle_plan_stage_js(
                     js_string_lit(&dependency_key)?,
                     js_string_lit(&format!("{:016x}", dependency.fingerprint))?).unwrap();
             }
-            out.push_str("]}, func: __rock_code_slot_ref(");
-            out.push_str(&js_string_lit(&key)?);
-            out.push_str(")},\n");
+            // A compiler-synthesized thunk of one uniform signature
+            // (`scene_id -> ()`) per entry -- see the Lua sibling in
+            // `crates/skull/src/mir_emit.rs::lifecycle_plan_stage_lua` for
+            // the full rationale. A scene thunk resolves the live root for
+            // `scene_id` and calls through; it never asks the value its
+            // runtime type.
+            let key_lit = js_string_lit(&key)?;
+            if entry.owner.as_str() == "scene" {
+                out.push_str("]}, func: (function(){var __s = __rock_code_slot_ref(");
+                out.push_str(&key_lit);
+                out.push_str("); return function(scene_id){var __root = __scene_root_any(scene_id); if (__root !== null) { __rock_call(__s, __root); }};})()},\n");
+            } else {
+                out.push_str("]}, func: (function(){var __s = __rock_code_slot_ref(");
+                out.push_str(&key_lit);
+                out.push_str("); return function(__scene_id){ __rock_call(__s); };})()},\n");
+            }
         }
         out.push_str("]},\n");
     }

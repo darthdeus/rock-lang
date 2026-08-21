@@ -7,6 +7,7 @@ use crate::code_identity::{CodeIdentity, CodeOwner, CodeOwnerKind};
 use crate::code_identity::CodeArtifact;
 use crate::instance::Instance;
 use crate::mir::FuncRef;
+use crate::monoty::{convert_decl, MonoCtor, MonoSubst, MonoTy};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LifecycleDependency {
@@ -37,6 +38,7 @@ impl LifecycleQualification {
 pub struct LifecycleEntry {
     pub phase: Ustr,
     pub owner: Ustr,
+    pub root_type: Option<MonoTy>,
     pub identity: CodeIdentity,
     pub diagnostic_name: Ustr,
     pub stage: i64,
@@ -50,6 +52,8 @@ pub struct LifecycleCensus {
     pub declarations: usize,
     pub applications: usize,
     pub admitted: usize,
+    pub session_owned: usize,
+    pub scene_owned: usize,
     pub plain: usize,
     pub gated: usize,
     pub dependency_edges: usize,
@@ -62,13 +66,14 @@ pub struct LifecyclePlan {
 }
 
 impl LifecyclePlan {
-    pub fn wire_structure_changed(&self, next: &Self) -> bool {
+    pub fn structure_changed(&self, next: &Self) -> bool {
         if self.entries.len() != next.entries.len() {
             return true;
         }
         self.entries.iter().zip(&next.entries).any(|(old, candidate)| {
             old.phase != candidate.phase
                 || old.owner != candidate.owner
+                || old.root_type != candidate.root_type
                 || old.identity != candidate.identity
                 || old.stage != candidate.stage
                 || old.declaration_ordinal != candidate.declaration_ordinal
@@ -451,10 +456,10 @@ pub fn collect(ws: &Workspace) -> Result<LifecyclePlan, CompilerError> {
                 ));
             }
             let owner = string_arg(meta, "owner").expect("validated lifecycle owner");
-            if owner.as_str() != "session" {
+            if owner.as_str() != "session" && owner.as_str() != "scene" {
                 return Err(CompilerError::new_with_label(
                     meta.span,
-                    format!("unsupported lifecycle owner `{owner}`; expected `session`"),
+                    format!("unsupported lifecycle owner `{owner}`; expected `session` or `scene`"),
                 ));
             }
             let stage_param = string_arg(meta, "stage_param");
@@ -498,15 +503,93 @@ pub fn collect(ws: &Workspace) -> Result<LifecyclePlan, CompilerError> {
                     continue;
                 };
                 census.applications += 1;
-                if !f.generics.is_empty() || !f.param_decls.is_empty() || f.return_ty.is_some() {
-                    return Err(CompilerError::new_with_label(
-                        f.span,
-                        format!(
-                            "lifecycle target `{}` must be concrete, non-generic, zero-argument, and unit-returning",
-                            f.name
-                        ),
-                    ));
-                }
+                let root_type = match owner.as_str() {
+                    "session" => {
+                        if !f.generics.is_empty() || !f.param_decls.is_empty() || f.return_ty.is_some() {
+                            return Err(CompilerError::new_with_label(
+                                f.span,
+                                format!(
+                                    "session lifecycle target `{}` must be concrete, non-generic, zero-argument, and unit-returning",
+                                    f.name
+                                ),
+                            ));
+                        }
+                        census.session_owned += 1;
+                        None
+                    }
+                    "scene" => {
+                        if phase.as_str() != "update" {
+                            return Err(CompilerError::new_with_label(
+                                app.span,
+                                format!(
+                                    "scene lifecycle target `{}` uses unsupported phase `{phase}`; expected `update`",
+                                    f.name
+                                ),
+                            ));
+                        }
+                        if !f.generics.is_empty() || f.param_decls.len() != 1 || f.return_ty.is_some() {
+                            return Err(CompilerError::new_with_label(
+                                f.span,
+                                format!(
+                                    "scene lifecycle target `{}` must be concrete, non-generic, take exactly one reference-struct root, and return unit",
+                                    f.name
+                                ),
+                            ));
+                        }
+                        let root = convert_decl(
+                            ws,
+                            f.param_decls[0].ty,
+                            &MonoSubst::default(),
+                        )
+                        .map_err(|reason| {
+                            CompilerError::new_with_label(
+                                f.span,
+                                format!(
+                                    "scene lifecycle target `{}` has a non-concrete root type ({})",
+                                    f.name,
+                                    reason.bucket(),
+                                ),
+                            )
+                        })?;
+                        let MonoTy::App {
+                            ctor: MonoCtor::Nominal(root_name),
+                            params,
+                        } = &root
+                        else {
+                            return Err(CompilerError::new_with_label(
+                                f.span,
+                                format!(
+                                    "scene lifecycle target `{}` root must be a reference struct, got `{}`",
+                                    f.name,
+                                    root.render(),
+                                ),
+                            ));
+                        };
+                        let Some(struct_id) = ws.struct_by_name.get(root_name) else {
+                            return Err(CompilerError::new_with_label(
+                                f.span,
+                                format!(
+                                    "scene lifecycle target `{}` root `{}` is not a struct",
+                                    f.name, root_name,
+                                ),
+                            ));
+                        };
+                        let definition = &ws.module(struct_id.module).structs[struct_id.def];
+                        if definition.is_value || !params.is_empty() {
+                            return Err(CompilerError::new_with_label(
+                                f.span,
+                                format!(
+                                    "scene lifecycle target `{}` root must be a non-generic reference struct, got `{}`",
+                                    f.name,
+                                    root.render(),
+                                ),
+                            ));
+                        }
+                        census.scene_owned += 1;
+                        Some(root)
+                    }
+                    _ => unreachable!("validated lifecycle owner"),
+                };
                 if f.backend != bone_semantic::hir::FnBackend::Any {
                     return Err(CompilerError::new_with_label(
                         f.span,
@@ -563,6 +646,7 @@ pub fn collect(ws: &Workspace) -> Result<LifecyclePlan, CompilerError> {
                 entries.push(LifecycleEntry {
                     phase,
                     owner,
+                    root_type,
                     identity: CodeIdentity::Named(Instance::base(FuncRef {
                         module: module.id,
                         func: fid,
@@ -753,8 +837,8 @@ mod tests {
         let plain_plan = collect(&plain).expect("plain plan");
         let mut same_shape = plain_plan.clone();
         same_shape.entries[0].body_fingerprint = 17;
-        assert!(!plain_plan.wire_structure_changed(&same_shape));
-        assert!(plain_plan.wire_structure_changed(&collect(&gated).expect("gated plan")));
+        assert!(!plain_plan.structure_changed(&same_shape));
+        assert!(plain_plan.structure_changed(&collect(&gated).expect("gated plan")));
         assert!(!plain_plan.removed_gated_wire(&same_shape));
         same_shape.entries[0].qualification = LifecycleQualification::OnChange {
             dependencies: Vec::new(),
@@ -788,6 +872,110 @@ mod tests {
         )]);
         let err = collect(&ws).expect_err("parameterized lifecycle target must reject");
         assert!(err.message.contains("zero-argument"), "{err:?}");
+    }
+
+    #[test]
+    fn scene_lifecycle_accepts_one_concrete_reference_root() {
+        let ws = workspace(&[(
+            "scene.rock",
+            r#"
+            @lifecycle(phase="update", owner="scene", stage_param="stage")
+            deco init scene_update(stage: int = 100) {}
+            struct Dungeon { ticks: int }
+            @scene_update fn tick_dungeon(root: Dungeon) { root.ticks += 1 }
+            "#,
+        )]);
+        let plan = collect(&ws).expect("typed scene lifecycle target");
+        assert_eq!(plan.entries.len(), 1);
+        assert_eq!(plan.entries[0].owner.as_str(), "scene");
+        assert_eq!(plan.entries[0].diagnostic_name.as_str(), "tick_dungeon");
+        assert_eq!(plan.census.session_owned, 0);
+        assert_eq!(plan.census.scene_owned, 1);
+        assert_eq!(
+            plan.entries[0].root_type,
+            Some(MonoTy::App {
+                ctor: MonoCtor::Nominal(Ustr::from("Dungeon")),
+                params: Vec::new(),
+            })
+        );
+    }
+
+    #[test]
+    fn scene_lifecycle_rejects_non_reference_and_generic_roots() {
+        let cases = [
+            ("root: int", "reference struct"),
+            ("root: Vec2", "reference struct"),
+            ("root: Generic<int>", "non-generic reference struct"),
+        ];
+        for (parameter, expected) in cases {
+            let ws = workspace(&[(
+                "bad-scene.rock",
+                &format!(
+                    r#"
+                    value Vec2 {{ x: float, y: float }}
+                    struct Generic<T> {{ value: T }}
+                    @lifecycle(phase="update", owner="scene") deco init scene_update {{}}
+                    @scene_update fn bad({parameter}) {{}}
+                    "#
+                ),
+            )]);
+            let error = collect(&ws).expect_err("unsupported Scene root must reject");
+            assert!(error.message.contains(expected), "{parameter}: {error:?}");
+        }
+    }
+
+    #[test]
+    fn scene_root_type_is_lifecycle_structure() {
+        let collect_root = |root: &str| {
+            let ws = workspace(&[(
+                "root.rock",
+                &format!(
+                    r#"
+                    struct A {{ value: int }}
+                    struct B {{ value: int }}
+                    @lifecycle(phase="update", owner="scene") deco init scene_update {{}}
+                    @scene_update fn tick(root: {root}) {{ root.value += 1 }}
+                    "#
+                ),
+            )]);
+            collect(&ws).expect("scene plan")
+        };
+        let a = collect_root("A");
+        let same = collect_root("A");
+        let b = collect_root("B");
+        assert!(!a.structure_changed(&same));
+        assert!(a.structure_changed(&b));
+    }
+
+    #[test]
+    fn scene_and_session_updates_share_one_stage_order() {
+        let ws = workspace(&[(
+            "mixed.rock",
+            r#"
+            struct Root { value: int }
+            @lifecycle(phase="update", owner="session", stage_param="stage")
+            deco init update(stage: int = 100) {}
+            @lifecycle(phase="update", owner="scene", stage_param="stage")
+            deco init scene_update(stage: int = 100) {}
+            @scene_update(stage=40) fn scene_first(root: Root) { root.value += 1 }
+            @update(stage=41) fn session_middle() {}
+            @scene_update(stage=42) fn scene_last(root: Root) { root.value += 1 }
+            "#,
+        )]);
+        let plan = collect(&ws).expect("mixed lifecycle plan");
+        assert_eq!(plan.census.session_owned, 1);
+        assert_eq!(plan.census.scene_owned, 2);
+        assert_eq!(
+            plan.entries
+                .iter()
+                .map(|entry| (entry.diagnostic_name.as_str(), entry.owner.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("scene_first", "scene"),
+                ("session_middle", "session"),
+                ("scene_last", "scene"),
+            ],
+        );
     }
 
     #[test]

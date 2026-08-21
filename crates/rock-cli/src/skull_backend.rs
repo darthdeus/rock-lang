@@ -3068,7 +3068,7 @@ impl SkullStone {
                 });
             }
             if self.cache.lifecycle_plan().is_some_and(|old| {
-                old.wire_structure_changed(
+                old.structure_changed(
                     staged_cache
                         .lifecycle_plan()
                         .expect("overlay always carries a LifecyclePlan"),
@@ -3083,7 +3083,7 @@ impl SkullStone {
                 }) {
                     "removing a gated @wire requires a fresh Session/HostProjection"
                 } else {
-                    "LifecyclePlan wire structure changed; full artifact transition required"
+                    "LifecyclePlan structure changed; full artifact transition required"
                 };
                 return Ok(SkullReload::FullRequired {
                     reasons: vec![reason.to_string()],

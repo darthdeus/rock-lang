@@ -5997,17 +5997,47 @@ fn lifecycle_plan_stage_lua(
     let mut phases: std::collections::BTreeMap<Ustr, Vec<_>> = std::collections::BTreeMap::new();
     for entry in &plan.entries { phases.entry(entry.phase).or_default().push(entry); }
     for (phase, entries) in phases {
-        let _ = writeln!(out, "[{}] = {{ len = {}, _data = {{", skull_codegen_lua::lua_string(phase.as_str()), entries.len());
+        let scene_owned = entries.iter().filter(|entry| entry.owner.as_str() == "scene").count();
+        let _ = writeln!(out, "[{}] = {{ len = {}, scene_owned = {}, _data = {{", skull_codegen_lua::lua_string(phase.as_str()), entries.len(), scene_owned);
         for (index, entry) in entries.into_iter().enumerate() {
         let key = entry.identity.logical_key(ws, scx.interner());
         let dependencies = entry.qualification.dependencies();
-        let _ = writeln!(out, "[{}] = {{ phase = {}, owner = {}, key = {}, name = {}, stage = {}, ordinal = {}, func = __rock_code_slot_ref({}), qualification = {}, body_fingerprint = {}, dependencies = {{ len = {}, _data = {{", index + 1,
+        let root_type = match &entry.root_type {
+            Some(skull_mir::monoty::MonoTy::App {
+                ctor: skull_mir::monoty::MonoCtor::Nominal(name),
+                params,
+            }) if params.is_empty() => skull_codegen_lua::lua_string(name.as_str()),
+            Some(other) => panic!("validated scene lifecycle root reached emission as {other:?}"),
+            None => "nil".to_string(),
+        };
+        // A compiler-synthesized thunk of one uniform signature
+        // (`scene_id: int -> ()`) per entry, session- and scene-owned alike
+        // -- never the raw slot. A session thunk ignores its argument; a
+        // scene thunk resolves the live root for `scene_id` and calls
+        // through, skipping a Scene that closed since the population
+        // snapshot was taken (`__scene_root_any` returns nil there). Neither
+        // arm asks the value its runtime type: membership in the type's live
+        // population, established once at Scene creation
+        // (`__scene_type_bucket_insert`), is the only test.
+        let func_thunk = if entry.owner.as_str() == "scene" {
+            format!(
+                "(function() local __s = __rock_code_slot_ref({key}); return function(scene_id) local __root = __scene_root_any(scene_id); if __root ~= nil then __s(__root) end end end)()",
+                key = skull_codegen_lua::lua_string(&key),
+            )
+        } else {
+            format!(
+                "(function() local __s = __rock_code_slot_ref({key}); return function(__scene_id) __s() end end)()",
+                key = skull_codegen_lua::lua_string(&key),
+            )
+        };
+        let _ = writeln!(out, "[{}] = {{ phase = {}, owner = {}, root_type = {}, key = {}, name = {}, stage = {}, ordinal = {}, func = {}, qualification = {}, body_fingerprint = {}, dependencies = {{ len = {}, _data = {{", index + 1,
             skull_codegen_lua::lua_string(entry.phase.as_str()),
             skull_codegen_lua::lua_string(entry.owner.as_str()),
+            root_type,
             skull_codegen_lua::lua_string(&key),
             skull_codegen_lua::lua_string(entry.diagnostic_name.as_str()),
             entry.stage, entry.declaration_ordinal,
-            skull_codegen_lua::lua_string(&key),
+            func_thunk,
             skull_codegen_lua::lua_string(entry.qualification.tag()),
             skull_codegen_lua::lua_string(&format!("{:016x}", entry.body_fingerprint)),
             dependencies.len());
