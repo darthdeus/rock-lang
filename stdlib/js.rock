@@ -42,8 +42,10 @@
 
 // docs/field-refs-plan.md 1. A field ref IS the key on both backends, so both
 // bodies are the same indexing operation spelled twice.
+@shadow_effect(pure)
 @inline inline(js) fn field_get<T, V>(o: T, f: ReadFieldRef<T, V>) -> V = "return o[f];"
 
+@shadow_effect(candidate_owned)
 @inline inline(js) fn field_set<T, V>(o: T, f: WriteFieldRef<T, V>, v: V) = "o[f] = v;"
 
 // luajit narrows through the ffi; a JS number is already the value.

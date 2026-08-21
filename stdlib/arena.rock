@@ -49,17 +49,6 @@ global __ARENA_REGISTRY: ArenaRegistry = ArenaRegistry {
     stores: [], scene_ids: [], next_id: 0, session_root: 0,
 }
 
-@nomangle
-fn __arena_retain_identity_ceiling(next_id: int) {
-    while vec_len(__ARENA_REGISTRY.stores) < next_id {
-        vec_push(__ARENA_REGISTRY.stores, null)
-        vec_push(__ARENA_REGISTRY.scene_ids, -1)
-    }
-    if __ARENA_REGISTRY.next_id < next_id {
-        __ARENA_REGISTRY.next_id = next_id
-    }
-}
-
 // THE resolution oracle: every Arena operation, the `enumerate(arena)` loop
 // lowering, and the serializer's logical-Arena projection all reach backing
 // through this one function. Non-generic so a synthesized `Inst::Call` and an

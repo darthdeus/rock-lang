@@ -123,24 +123,6 @@ fn __scene_reserve() -> int {
     return id
 }
 
-@nomangle
-fn __scene_retain_identity_ceiling(next_id: int) {
-    while vec_len(__SCENE_REGISTRY.states) < next_id {
-        let empty_arenas: [int] = []
-        let empty_closers: [() -> ()] = []
-        vec_push(__SCENE_REGISTRY.roots, null)
-        vec_push(__SCENE_REGISTRY.states, __SCENE_DEAD)
-        vec_push(__SCENE_REGISTRY.arena_ids, empty_arenas)
-        vec_push(__SCENE_REGISTRY.closers, empty_closers)
-        vec_push(__SCENE_REGISTRY.root_type_key, "")
-        vec_push(__SCENE_REGISTRY.root_type_bucket, -1)
-        vec_push(__SCENE_REGISTRY.type_bucket_pos, -1)
-    }
-    if __SCENE_REGISTRY.next_id < next_id {
-        __SCENE_REGISTRY.next_id = next_id
-    }
-}
-
 // Finds `type_key`'s bucket index, creating an empty bucket for a type seen
 // for the first time.
 fn __scene_type_bucket_index(type_key: string) -> int {
