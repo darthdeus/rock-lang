@@ -1742,6 +1742,15 @@ function stone_set_blend_mode_i(mode) {
   else if (mode === 2) { gl.enable(gl.BLEND); gl.blendFunc(gl.DST_COLOR, gl.ZERO); }
   else if (mode === 3) { gl.enable(gl.BLEND); gl.blendEquation(gl.MAX); gl.blendFunc(gl.ONE, gl.ONE); }
   else if (mode === 4) { gl.disable(gl.BLEND); }
+  else if (mode === 5) { gl.enable(gl.BLEND); gl.blendFunc(gl.ONE, gl.ONE); }
+  else if (mode === 6) {
+    gl.enable(gl.BLEND);
+    if (gl.blendFuncSeparate) {
+      gl.blendFuncSeparate(gl.ONE, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+    } else {
+      gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+    }
+  }
 }
 
 // --- shaders ---

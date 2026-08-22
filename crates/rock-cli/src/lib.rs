@@ -104,6 +104,8 @@ pub enum CliCommand {
     /// compilation / hot-reload assertions. See
     /// `docs/stone-test-harness-plan.md`.
     StoneTest,
+    /// Profile a bounded real render run. The child is hidden via
+    /// `STONE_HEADLESS=1`; MAG additionally boots directly into gameplay.
     Perf,
     /// `rock sim <project> <name>` — run a Rock-native `@sim`
     /// coroutine. Spawns the game with `ROCK_RUN_SIM=<name>`,

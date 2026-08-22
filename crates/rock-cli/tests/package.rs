@@ -71,9 +71,10 @@ fn package_manifest_is_the_secret_safe_metadata_boundary() {
     let catalog_value: Value = serde_json::from_slice(&std::fs::read(&catalog).unwrap())
         .expect("packaged level catalog JSON");
     let levels = catalog_value["levels"].as_array().expect("catalog level entries");
-    assert_eq!(levels.len(), 2, "package stages both official catalog entries");
-    let mut names = Vec::new();
+    assert!(!levels.is_empty(), "package stages a nonempty official catalog");
+    let mut identities = Vec::new();
     for entry in levels {
+        let namespace = entry["namespace"].as_str().expect("catalog entry namespace");
         let name = entry["name"].as_str().expect("catalog entry name");
         let relative = entry["path"].as_str().expect("catalog entry path");
         let packaged = packaged_root.join(relative);
@@ -84,10 +85,12 @@ fn package_manifest_is_the_secret_safe_metadata_boundary() {
             std::fs::read(&source).unwrap(),
             "packaged {name} bytes must match the catalog source"
         );
-        names.push(name);
+        identities.push(format!("{namespace}:{name}"));
     }
-    assert!(names.contains(&"crypt"), "package catalog includes Crypt");
-    assert!(names.contains(&"crypt-depths"), "package catalog includes Crypt Depths");
+    assert!(identities.iter().any(|id| id == "official:crypt"),
+        "package catalog includes official:crypt");
+    assert!(identities.iter().any(|id| id == "official:crypt-depths"),
+        "package catalog includes official:crypt-depths");
     let packaged_revision = manifest["build_vars"]["CONTENT_REV"]["value"]
         .as_str()
         .expect("CONTENT_REV value");

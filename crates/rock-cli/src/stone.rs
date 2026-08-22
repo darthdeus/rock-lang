@@ -909,6 +909,12 @@ fn kill_game_process(child: &mut Child) -> Result<()> {
 }
 
 /// Run the game for N frames with profiling enabled and display performance summary
+fn apply_perf_env(cmd: &mut Command) {
+    cmd.env("PERF_MODE", "1")
+        .env("STONE_HEADLESS", "1")
+        .env("MAG_BOOT_PLAYING", "1");
+}
+
 pub fn do_perf(
     backend: crate::Backend,
     path: &str,
@@ -947,9 +953,8 @@ pub fn do_perf(
     };
 
     let mut cmd = rock_host::project::build_luajit_command(&lua_file, app_args);
-    cmd.env("PERF_MODE", "1")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    apply_perf_env(&mut cmd);
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
     // Pin the RNG so the measured scene is byte-identical run-to-run: the
     // prelude otherwise seeds `random()` from os.time() (whole-second
@@ -1294,7 +1299,7 @@ pub fn do_replay_window(
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_run_env, build_id_for_lua, consume_request_file, ensure_flight_dir,
+        apply_perf_env, apply_run_env, build_id_for_lua, consume_request_file, ensure_flight_dir,
         flight_recorder_for, frame_exit_result, frame_watchdog_config, session_usage,
         session_usage_warning, shadow_full_reload_armed, FlightRecorder, SESSION_USAGE_WARN_BYTES,
     };
@@ -1311,6 +1316,20 @@ mod tests {
         assert!(!shadow_full_reload_armed(true, true, true, false, true));
     }
 
+    #[test]
+    fn perf_process_is_headless_and_boots_mag_without_screenshot_mode() {
+        let mut cmd = std::process::Command::new("true");
+        apply_perf_env(&mut cmd);
+        let env: std::collections::HashMap<_, _> = cmd
+            .get_envs()
+            .filter_map(|(key, value)| Some((key.to_str()?, value?.to_str()?)))
+            .collect();
+
+        assert_eq!(env.get("PERF_MODE"), Some(&"1"));
+        assert_eq!(env.get("STONE_HEADLESS"), Some(&"1"));
+        assert_eq!(env.get("MAG_BOOT_PLAYING"), Some(&"1"));
+        assert!(!env.contains_key("MAG_SCREENSHOT"));
+    }
     /// The whole point of the private session dir: `rock stone` must not write
     /// the slot every other command writes. A shared `tmp/main.lua` is loaded
     /// into the live game by the watcher (docs/hot-reload-chunk-identity.md).
