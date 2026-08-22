@@ -131,7 +131,9 @@ fn assert_stat_block(block: &Value, ctx: &str, require_samples: bool) {
 fn perf_json_has_top_level_shape() {
     let doc = run_perf_json("games/match3");
 
-    for key in ["frames", "warmup_s", "frame_ms", "sections", "graphics", "memory"] {
+    for key in [
+        "run", "frames", "warmup_s", "frame_ms", "sections", "graphics", "memory",
+    ] {
         assert!(
             doc.get(key).is_some(),
             "missing top-level key `{key}` in perf JSON: {doc}"
@@ -148,6 +150,26 @@ fn perf_json_has_top_level_shape() {
         "warmup_s must be a number, got {}",
         doc["warmup_s"]
     );
+
+    let jit_trace = &doc["run"]["jit_trace"];
+    let available = jit_trace["available"]
+        .as_bool()
+        .unwrap_or_else(|| panic!("run.jit_trace.available must be bool: {jit_trace}"));
+    assert!(
+        jit_trace["logging"].as_bool().is_some(),
+        "run.jit_trace.logging must be bool: {jit_trace}"
+    );
+    if available {
+        assert!(
+            jit_trace["starts"].as_i64().is_some() && jit_trace["aborts"].as_i64().is_some(),
+            "available JIT trace populations must be integers: {jit_trace}"
+        );
+    } else {
+        assert!(
+            jit_trace["starts"].is_null() && jit_trace["aborts"].is_null(),
+            "unavailable JIT trace populations must be null: {jit_trace}"
+        );
+    }
 }
 
 #[test]
