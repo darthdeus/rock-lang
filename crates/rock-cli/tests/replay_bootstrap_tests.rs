@@ -124,9 +124,14 @@ fn env_refs<'a>(env: &'a [(&'static str, String)]) -> Vec<(&'static str, &'a str
 
 fn progress_projection(state: &serde_json::Value) -> serde_json::Value {
     serde_json::json!({
-        "bank_gold": state["mag"]["bank_gold"],
-        "events": state["mag"]["events"],
-        "player": state["mag"]["player"],
+        "bank_gold": state["__stone_diag"]["MAG_REPLAY_BOOTSTRAP_BANK_GOLD"],
+        "event_count": state["__stone_diag"]["MAG_REPLAY_BOOTSTRAP_EVENT_COUNT"],
+        "quest_count": state["__stone_diag"]["MAG_REPLAY_BOOTSTRAP_QUEST_COUNT"],
+        "quest_collapsed": state["__stone_diag"]["MAG_REPLAY_BOOTSTRAP_QUEST_COLLAPSED"],
+        "player_x": state["__stone_diag"]["MAG_REPLAY_BOOTSTRAP_PLAYER_X"],
+        "player_y": state["__stone_diag"]["MAG_REPLAY_BOOTSTRAP_PLAYER_Y"],
+        "inventory_gold": state["__stone_diag"]["MAG_REPLAY_BOOTSTRAP_INVENTORY_GOLD"],
+        "reagent_0": state["__stone_diag"]["MAG_REPLAY_BOOTSTRAP_REAGENT_0"],
     })
 }
 
@@ -167,8 +172,19 @@ fn progress_bootstrap_captures_absence_and_keeps_b_read_only() {
         "replay must apply the progress action once to captured absence"
     );
     assert_ne!(
-        recorded["mag"]["bank_gold"], 0,
+        recorded["__stone_diag"]["MAG_REPLAY_BOOTSTRAP_BANK_GOLD"], 0,
         "the production-shaped progress action must reach the consumer"
+    );
+    assert!(
+        recorded["__stone_diag"]["MAG_REPLAY_BOOTSTRAP_SAVE_WRITES"]
+            .as_i64()
+            .expect("record write witness") > 0,
+        "recording must use the production progress write seam"
+    );
+    assert_eq!(
+        replayed["__stone_diag"]["MAG_REPLAY_BOOTSTRAP_SAVE_WRITES"],
+        0,
+        "playback must not enter the progress write seam"
     );
     assert_eq!(
         std::fs::read(&progress).expect("B must remain present"),
@@ -344,6 +360,19 @@ fn spell_layout_bootstrap_captures_empty_file_and_keeps_b_read_only() {
         recorded["mag"]["SPELL_STRIPS"]["len"],
         1,
         "the production-shaped drag must create exactly one strip"
+    );
+    assert!(
+        recorded["__stone_diag"]["STONE_SNAPSHOT_HISTORY_WRITES"]
+            .as_i64()
+            .expect("record layout write witness") > 0,
+        "recording must use the production snapshot-history write seam"
+    );
+    assert_eq!(
+        replayed["__stone_diag"]["STONE_SNAPSHOT_HISTORY_WRITES"]
+            .as_i64()
+            .unwrap_or(0),
+        0,
+        "playback must not enter the snapshot-history write seam"
     );
     assert_eq!(
         std::fs::read(&layout).expect("B must remain present"),
