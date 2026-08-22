@@ -1074,7 +1074,12 @@ fn mag_second_live_rewind_reflective_sample_is_rebuilt_before_hidden_late_draw()
         diag["STONE_SEEK_TOOL_RENDER_FRAMES"].as_i64(),
         "the hidden late-draw population must match the active seek frames: {diag}"
     );
+    assert!(
+        diag["MAG_MENU_ACTION_STATE_TICKS"].as_i64().is_some_and(|n| n > 0),
+        "the gameplay-relevant menu action consumer must run during hidden resimulation: {diag}"
+    );
     assert_eq!(diag["STONE_PRESENTATION_LATE_DRAW_DURING_SEEK"].as_i64().unwrap_or(0), 0, "reflective gameplay presentation must stay out of active seek frames: {diag}");
+    assert_eq!(diag["STONE_PRESENTED_VIEW_PROMOTED_DURING_SEEK"].as_i64().unwrap_or(0), 0, "the restored host projection must not be published by a tool-only seek frame: {diag}");
     assert!(
         diag["MAG_MENU_LOGO_TEXT_SAMPLE_REQUESTS"].as_i64().is_some_and(|n| n > 0)
             && run.state["mag"]["MENU_LOGO_TEXT_OUTPUT_CALLS"]
