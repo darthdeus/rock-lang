@@ -129,6 +129,27 @@ fn run_replay_dump(game: &str, frames: u32, log: &str, env: &[(&str, &str)]) -> 
 /// Unlike `run_replay_dump`, this keeps the process in live record mode so a
 /// test can prove a rewind happened without a supervisor relaunch.
 fn run_record_dump(game: &str, frames: u32, log: &str, env: &[(&str, &str)]) -> serde_json::Value {
+    let observed = run_record_dump_observed(game, frames, log, env);
+    assert!(
+        observed.status_success,
+        "live record failed: {}",
+        observed.stderr
+    );
+    observed.state
+}
+
+struct ObservedRecordRun {
+    status_success: bool,
+    stderr: String,
+    state: serde_json::Value,
+}
+
+fn run_record_dump_observed(
+    game: &str,
+    frames: u32,
+    log: &str,
+    env: &[(&str, &str)],
+) -> ObservedRecordRun {
     let scratch = tempfile::tempdir().unwrap();
     let frames_s = frames.to_string();
     let out = Command::new(env!("CARGO_BIN_EXE_rock"))
@@ -141,8 +162,17 @@ fn run_record_dump(game: &str, frames: u32, log: &str, env: &[(&str, &str)]) -> 
         .current_dir(workspace_root())
         .output()
         .expect("spawn live record");
-    assert!(out.status.success(), "live record failed: {}", String::from_utf8_lossy(&out.stderr));
-    serde_json::from_slice(&out.stdout).expect("live record dump-state JSON")
+    let state = serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+        panic!(
+            "live record dump-state JSON ({e}); stderr:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        )
+    });
+    ObservedRecordRun {
+        status_success: out.status.success(),
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        state,
+    }
 }
 
 fn current_tick(s: &serde_json::Value) -> i64 {
@@ -985,6 +1015,99 @@ fn mag_main_menu_transition_survives_seek_resimulation() {
         keyboard_sought["mag"]["CREDITS_OPEN"], keyboard_reference["mag"]["CREDITS_OPEN"],
         "restored focus must not activate a different menu item"
     );
+}
+
+#[test]
+fn mag_second_live_rewind_reflective_sample_is_rebuilt_before_hidden_late_draw() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("second-rewind-reflection.replay");
+    let log_s = log.to_string_lossy().into_owned();
+    let run = run_record_dump_observed(
+        "mag",
+        120,
+        &log_s,
+        &[
+            ("PERF_MODE", "1"),
+            ("PERF_DT", "0.1"),
+            ("MAG_BOOT_MENU", "1"),
+            ("STONE_LIVE_REWIND", "1"),
+            ("STONE_KEYFRAME_INTERVAL", "10"),
+            ("STONE_TIMELINE_SEEK_AT_FRAME", "40"),
+            ("STONE_TIMELINE_SEEK_TO_TICK", "10"),
+            ("STONE_TIMELINE_SEEK_AT_FRAME_2", "100"),
+            ("STONE_TIMELINE_SEEK_TO_TICK_2", "27"),
+        ],
+    );
+    assert!(
+        run.status_success,
+        "the bounded run must not raise a frame error; the pre-fix RED arm reports:\n{}",
+        run.stderr
+    );
+    assert!(
+        !run.stderr.contains("reflective TextArt requested a presented scene sample"),
+        "the reflective sample failure must be gone:\n{}",
+        run.stderr
+    );
+
+    let diag = &run.state["__stone_diag"];
+    assert_eq!(diag["STONE_LIVE_REWIND_COUNT"].as_i64(), Some(1), "{diag}");
+    assert_eq!(diag["STONE_SEEK_COUNT"].as_i64(), Some(2), "exactly two admitted seeks: {diag}");
+    assert_eq!(diag["STONE_SEEK_FROM_TICK"].as_i64(), Some(10), "the second seek must be distinguishable: {diag}");
+    assert_eq!(diag["STONE_SEEK_TO_TICK"].as_i64(), Some(27), "{diag}");
+    assert!(
+        diag["STONE_SEEK_RESIM_FRAMES"].as_i64().is_some_and(|n| n > 0),
+        "the second seek must resimulate: {diag}"
+    );
+    assert!(
+        diag["STONE_KEYFRAME_GLOBALS"].as_i64().is_some_and(|n| n > 0)
+            && diag["STONE_KEYFRAME_NODES"].as_i64().is_some_and(|n| n > 0)
+            && diag["STONE_RESTORE_MS"].as_f64().is_some_and(|n| n > 0.0),
+        "the fixture must materialize a non-empty SceneImage/StateImage restore: {diag}"
+    );
+    assert!(
+        diag["STONE_HIDDEN_LATE_DRAW_FRAMES"].as_i64().is_some_and(|n| n > 0),
+        "the hidden late-draw population must be nonzero: {diag}"
+    );
+    assert!(
+        diag["MAG_MENU_LOGO_TEXT_SAMPLE_REQUESTS"].as_i64().is_some_and(|n| n > 0)
+            && diag["MENU_LOGO_TEXT_OUTPUT_CALLS"].as_i64().is_some_and(|n| n > 0),
+        "the reflective menu TextArt consumer must be exercised: {diag}"
+    );
+}
+
+#[test]
+fn mag_first_live_rewind_is_the_nearest_working_reflection_control() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("first-rewind-reflection-control.replay");
+    let log_s = log.to_string_lossy().into_owned();
+    let run = run_record_dump_observed(
+        "mag",
+        50,
+        &log_s,
+        &[
+            ("PERF_MODE", "1"),
+            ("PERF_DT", "0.1"),
+            ("MAG_BOOT_MENU", "1"),
+            ("STONE_LIVE_REWIND", "1"),
+            ("STONE_KEYFRAME_INTERVAL", "10"),
+            ("STONE_TIMELINE_SEEK_AT_FRAME", "40"),
+            ("STONE_TIMELINE_SEEK_TO_TICK", "10"),
+        ],
+    );
+    assert!(
+        run.status_success,
+        "the first-seek control must remain clean; stderr:\n{}",
+        run.stderr
+    );
+    assert!(
+        !run.stderr.contains("reflective TextArt requested a presented scene sample"),
+        "the control must not request a scene sample before its first capture:\n{}",
+        run.stderr
+    );
+    let diag = &run.state["__stone_diag"];
+    assert_eq!(diag["STONE_LIVE_REWIND_COUNT"].as_i64(), Some(1), "{diag}");
+    assert_eq!(diag["STONE_SEEK_COUNT"].as_i64(), Some(1), "the control has one admitted seek: {diag}");
+    assert_eq!(diag.get("MAG_MENU_LOGO_TEXT_SAMPLE_REQUESTS").and_then(serde_json::Value::as_i64), None, "the control must not reach reflective menu sampling: {diag}");
 }
 
 #[test]
