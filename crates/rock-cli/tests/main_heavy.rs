@@ -25,6 +25,8 @@ mod action_layer_v2_landing_gaps;
 mod replay_restore_tests;
 #[path = "replay_roundtrip_tests.rs"]
 mod replay_roundtrip_tests;
+#[path = "replay_bootstrap_tests.rs"]
+mod replay_bootstrap_tests;
 #[path = "replay_timeline_tests.rs"]
 mod replay_timeline_tests;
 #[path = "replay_window_tests.rs"]
