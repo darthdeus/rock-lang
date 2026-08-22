@@ -143,6 +143,33 @@ fn empty_progress_path(dir: &tempfile::TempDir) -> PathBuf {
     dir.path().join("progress.json")
 }
 
+fn known_progress_a() -> Vec<u8> {
+    serde_json::to_vec_pretty(&serde_json::json!({
+        "version": 3,
+        "bank_gold": 41,
+        "events": {
+            "replay_bootstrap_seed": {"c": 2, "f": 11, "l": 22}
+        },
+        "quests": {
+            "runs": [],
+            "tracked": [],
+            "collapsed": {},
+            "quarantined": []
+        },
+        "player": {
+            "grid": [5, 5],
+            "dead": false,
+            "health_cur": 80.0,
+            "mana_cur": 70.0,
+            "stamina_cur": 15.0,
+            "inventory": {"gold": 7, "bandage": 2, "bloody_bandage": 1},
+            "reagents": [1, 2, 3, 4, 5, 6]
+        },
+        "spellbook": {"favorites": []}
+    }))
+    .expect("serialize known progress A")
+}
+
 #[test]
 fn progress_bootstrap_captures_absence_and_keeps_b_read_only() {
     let dir = tempfile::tempdir().expect("fixture dir");
@@ -190,6 +217,41 @@ fn progress_bootstrap_captures_absence_and_keeps_b_read_only() {
         std::fs::read(&progress).expect("B must remain present"),
         persisted_b,
         "progress playback must not rewrite the persisted B file"
+    );
+}
+
+#[test]
+fn progress_bootstrap_captures_existing_save_bytes_and_applies_them_once() {
+    let dir = tempfile::tempdir().expect("fixture dir");
+    let progress = empty_progress_path(&dir);
+    let layout = dir.path().join("spellbook-layout.jsonl");
+    let settings = dir.path().join("settings.json");
+    let replay = dir.path().join("progress-existing.replay");
+    std::fs::write(&progress, known_progress_a()).expect("write progress A");
+    let persisted_a = std::fs::read(&progress).expect("read progress A");
+
+    let env_owned = fixture_env("progress", &progress, &layout, &settings);
+    let env = env_refs(&env_owned);
+    let recorded = run_mag(1, Some(&replay), None, &env);
+    let persisted_b = std::fs::read(&progress).expect("record action must persist B");
+    assert_ne!(persisted_b, persisted_a, "record action must change progress A into B");
+
+    let replayed = run_mag(1, None, Some(&replay), &env);
+
+    assert_eq!(
+        progress_projection(&replayed),
+        progress_projection(&recorded),
+        "replay must apply the captured progress JSON before the action"
+    );
+    assert_eq!(
+        replayed["__stone_diag"]["MAG_REPLAY_BOOTSTRAP_SAVE_WRITES"],
+        0,
+        "existing-save playback must not enter the progress write seam"
+    );
+    assert_eq!(
+        std::fs::read(&progress).expect("B must remain present"),
+        persisted_b,
+        "existing-save playback must not rewrite the persisted B file"
     );
 }
 
