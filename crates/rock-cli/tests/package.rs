@@ -241,3 +241,65 @@ fn package_stages_external_asset_overlays() {
         "from-overlay"
     );
 }
+
+fn write_sound_cue_package_fixture(project: &Path, sheet: &str) {
+    std::fs::create_dir_all(project).unwrap();
+    std::fs::write(
+        project.join("stick.toml"),
+        "[package]\nname = \"cue-release-fixture\"\n\n[release]\nassets = [\"sound_cues.json\"]\n",
+    )
+    .unwrap();
+    std::fs::write(project.join("main.rock"), "fn main() {}\n").unwrap();
+    std::fs::write(project.join("sound_cues.json"), sheet).unwrap();
+}
+
+#[test]
+fn package_rejects_scratch_cue_before_staging_and_accepts_valid_control() {
+    let fixture_root = tempfile::tempdir_in(repo_root()).expect("package fixture");
+    let project = fixture_root.path().join("cue-fixture");
+    let output = tempfile::tempdir().expect("package output");
+    let scratch_sheet = r#"{
+  "version": 1,
+  "cues": [{"id": "spell.fixture.cast", "steps": [{"layers": [{"asset": "a.ogg"}, {"scratch": "/machine/inbox/a.wav"}]}]}]
+}
+"#;
+    write_sound_cue_package_fixture(&project, scratch_sheet);
+
+    let rejected = Command::new(rock_bin())
+        .current_dir(repo_root())
+        .args(["package", project.to_str().unwrap(), "--output", output.path().to_str().unwrap()])
+        .output()
+        .expect("spawn scratch package");
+    let rejected_stderr = String::from_utf8_lossy(&rejected.stderr);
+    assert!(!rejected.status.success(), "scratch package was accepted: {rejected_stderr}");
+    assert!(
+        rejected_stderr.contains("cues[spell.fixture.cast].steps[0].layers[1].scratch")
+            && rejected_stderr.contains("scratch paths are not allowed in a release"),
+        "scratch rejection did not name its exact cue/step/layer: {rejected_stderr}"
+    );
+    assert!(!output.path().join("assets").exists(), "scratch package staged assets before rejecting");
+    assert!(!output.path().join("assets.rock-staging").exists(), "scratch package left a staging marker");
+
+    let valid_sheet = r#"{
+  "version": 1,
+  "cues": [{"id": "spell.fixture.cast", "steps": [{"layers": [{"asset": "a.ogg"}]}]}]
+}
+"#;
+    std::fs::write(project.join("sound_cues.json"), valid_sheet).unwrap();
+    let accepted = Command::new(rock_bin())
+        .current_dir(repo_root())
+        .args(["package", project.to_str().unwrap(), "--output", output.path().to_str().unwrap()])
+        .output()
+        .expect("spawn valid package");
+    assert!(
+        accepted.status.success(),
+        "valid package control failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&accepted.stdout),
+        String::from_utf8_lossy(&accepted.stderr)
+    );
+    let game_key = project.strip_prefix(repo_root()).unwrap();
+    let staged_sheet = output.path().join("assets").join(game_key).join("sound_cues.json");
+    assert!(staged_sheet.is_file(), "valid control did not stage the cue sheet: {}", staged_sheet.display());
+    assert_eq!(std::fs::read_to_string(staged_sheet).unwrap(), valid_sheet);
+    assert!(output.path().join("package-manifest.json").is_file(), "valid control did not write a manifest");
+}

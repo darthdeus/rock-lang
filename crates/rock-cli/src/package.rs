@@ -43,6 +43,7 @@ pub fn run_package(project: &str, output: Option<&str>) -> Result<()> {
         &root_abs,
         false,
     )?;
+    rock_host::release::cue_sheet_validate_release(&selection)?;
     for missing in &selection.missing {
         log::warn!(target: "PACKAGE", "release asset {} does not exist, skipping", missing.display());
     }

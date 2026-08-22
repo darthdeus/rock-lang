@@ -2,6 +2,7 @@ use anyhow::Result;
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
+use serde_json::Value;
 
 use crate::stick::StickConfig;
 
@@ -23,6 +24,69 @@ pub struct AssetSelection {
 pub struct StagedAssets {
     pub file_count: usize,
     pub keys: Vec<String>,
+}
+
+/// Apply the sound-cue release policy to the selected source files before any
+/// package staging occurs. The cue model and runtime validator remain in
+/// `libs/sound-cues`; this host gate only walks the serialized `scratch` field
+/// because package preparation does not execute Rock code.
+pub fn cue_sheet_validate_release(selection: &AssetSelection) -> Result<()> {
+    for asset in &selection.assets {
+        if asset.key != "sound_cues.json" && !asset.key.ends_with("/sound_cues.json") {
+            continue;
+        }
+        let text = fs_err::read_to_string(&asset.source).map_err(|error| {
+            anyhow::anyhow!(
+                "release cue sheet {} could not be read from {}: {error}",
+                asset.key,
+                asset.source.display()
+            )
+        })?;
+        let root: Value = serde_json::from_str(&text).map_err(|error| {
+            anyhow::anyhow!("release cue sheet {} is malformed JSON: {error}", asset.key)
+        })?;
+        let cues = root
+            .get("cues")
+            .and_then(Value::as_array)
+            .ok_or_else(|| anyhow::anyhow!("release cue sheet {}: cues must be an array", asset.key))?;
+        for (cue_index, cue) in cues.iter().enumerate() {
+            let cue_path = format!("cues[{cue_index}]");
+            let cue_id = cue
+                .get("id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow::anyhow!("{}: id must be a string", cue_path))?;
+            let steps = cue
+                .get("steps")
+                .and_then(Value::as_array)
+                .ok_or_else(|| anyhow::anyhow!("cues[{cue_id}].steps must be an array"))?;
+            for (step_index, step) in steps.iter().enumerate() {
+                let layers = step
+                    .get("layers")
+                    .and_then(Value::as_array)
+                    .ok_or_else(|| anyhow::anyhow!(
+                        "cues[{cue_id}].steps[{step_index}].layers must be an array"
+                    ))?;
+                for (layer_index, layer) in layers.iter().enumerate() {
+                    let path = format!(
+                        "cues[{cue_id}].steps[{step_index}].layers[{layer_index}].scratch"
+                    );
+                    let Some(scratch) = layer.get("scratch") else {
+                        continue;
+                    };
+                    let scratch = scratch
+                        .as_str()
+                        .ok_or_else(|| anyhow::anyhow!("{path}: expected a string"))?;
+                    if !scratch.is_empty() {
+                        anyhow::bail!(
+                            "release cue sheet {}: {path}: scratch paths are not allowed in a release",
+                            asset.key
+                        );
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Select the same shipped-key set for native packaging and the web bundle.

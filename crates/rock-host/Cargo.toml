@@ -24,6 +24,7 @@ fs-err = { workspace = true }
 wait-timeout = { workspace = true }
 rustc-hash = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 basic-toml = "0.1"
 sha1 = "0.10"
 walkdir = { workspace = true }
