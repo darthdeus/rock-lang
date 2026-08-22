@@ -1028,6 +1028,7 @@ fn mag_second_live_rewind_reflective_sample_is_rebuilt_before_hidden_late_draw()
         &log_s,
         &[
             ("PERF_MODE", "1"),
+            ("PERF_NO_SECTIONS", "1"),
             ("PERF_DT", "0.1"),
             ("MAG_BOOT_MENU", "1"),
             ("STONE_LIVE_REWIND", "1"),
@@ -1065,12 +1066,20 @@ fn mag_second_live_rewind_reflective_sample_is_rebuilt_before_hidden_late_draw()
         "the fixture must materialize a non-empty SceneImage/StateImage restore: {diag}"
     );
     assert!(
-        diag["STONE_HIDDEN_LATE_DRAW_FRAMES"].as_i64().is_some_and(|n| n > 0),
-        "the hidden late-draw population must be nonzero: {diag}"
+        diag["STONE_SEEK_TOOL_RENDER_FRAMES"].as_i64().is_some_and(|n| n > 0),
+        "the seek-tool render population must be nonzero: {diag}"
     );
+    assert_eq!(
+        diag["STONE_HIDDEN_LATE_DRAW_FRAMES"].as_i64(),
+        diag["STONE_SEEK_TOOL_RENDER_FRAMES"].as_i64(),
+        "the hidden late-draw population must match the active seek frames: {diag}"
+    );
+    assert_eq!(diag["STONE_PRESENTATION_LATE_DRAW_DURING_SEEK"].as_i64().unwrap_or(0), 0, "reflective gameplay presentation must stay out of active seek frames: {diag}");
     assert!(
         diag["MAG_MENU_LOGO_TEXT_SAMPLE_REQUESTS"].as_i64().is_some_and(|n| n > 0)
-            && diag["MENU_LOGO_TEXT_OUTPUT_CALLS"].as_i64().is_some_and(|n| n > 0),
+            && run.state["mag"]["MENU_LOGO_TEXT_OUTPUT_CALLS"]
+                .as_i64()
+                .is_some_and(|n| n > 0),
         "the reflective menu TextArt consumer must be exercised: {diag}"
     );
 }
@@ -1082,10 +1091,11 @@ fn mag_first_live_rewind_is_the_nearest_working_reflection_control() {
     let log_s = log.to_string_lossy().into_owned();
     let run = run_record_dump_observed(
         "mag",
-        50,
+        70,
         &log_s,
         &[
             ("PERF_MODE", "1"),
+            ("PERF_NO_SECTIONS", "1"),
             ("PERF_DT", "0.1"),
             ("MAG_BOOT_MENU", "1"),
             ("STONE_LIVE_REWIND", "1"),
@@ -1107,7 +1117,10 @@ fn mag_first_live_rewind_is_the_nearest_working_reflection_control() {
     let diag = &run.state["__stone_diag"];
     assert_eq!(diag["STONE_LIVE_REWIND_COUNT"].as_i64(), Some(1), "{diag}");
     assert_eq!(diag["STONE_SEEK_COUNT"].as_i64(), Some(1), "the control has one admitted seek: {diag}");
-    assert_eq!(diag.get("MAG_MENU_LOGO_TEXT_SAMPLE_REQUESTS").and_then(serde_json::Value::as_i64), None, "the control must not reach reflective menu sampling: {diag}");
+    assert!(
+        diag["MAG_MENU_LOGO_TEXT_SAMPLE_REQUESTS"].as_i64().is_some_and(|n| n > 0),
+        "the nearest working control must reach the reflective menu consumer: {diag}"
+    );
 }
 
 #[test]

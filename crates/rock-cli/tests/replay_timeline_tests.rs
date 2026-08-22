@@ -642,7 +642,12 @@ fn live_seek_keeps_the_timeline_tool_overlay_interactive() {
     assert_eq!(diag["STONE_INPUT_PROBE_REPLAY_KEY_DOWN"].as_i64().unwrap_or(0), 0, "physical tool input must not become replay game input: {diag}");
     assert_eq!(diag["STONE_INPUT_PROBE_REPLAY_KEY_PRESSED"].as_i64().unwrap_or(0), 0, "physical tool input must not create a replay game edge: {diag}");
     assert!(diag["AUDIO_SEEK_MUTES"].as_i64().is_some_and(|n| n > 0), "catch-up audio must remain suppressed: {diag}");
-    assert_eq!(diag["STONE_HIDDEN_LATE_DRAW_FRAMES"].as_i64().unwrap_or(0), 0, "ordinary gameplay late draw must not run during tool-only seek rendering: {diag}");
+    assert_eq!(diag["STONE_PRESENTATION_LATE_DRAW_DURING_SEEK"].as_i64().unwrap_or(0), 0, "ordinary gameplay presentation must stay out of active seek frames: {diag}");
+    assert_eq!(
+        diag["STONE_HIDDEN_LATE_DRAW_FRAMES"].as_i64(),
+        diag["STONE_SEEK_TOOL_RENDER_FRAMES"].as_i64(),
+        "only the compiler-marked state late-draw pass may accompany seek tooling: {diag}"
+    );
 }
 
 #[test]
