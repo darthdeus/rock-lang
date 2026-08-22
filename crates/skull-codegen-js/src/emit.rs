@@ -5197,11 +5197,11 @@ fn lifecycle_plan_stage_js(
                 )?,
                 None => "null".to_string(),
             };
-            write!(out, "{{phase: {}, owner: {}, root_type: {}, key: {}, name: {}, stage: {}, ordinal: {}, qualification: {}, body_fingerprint: {}, dependencies: {{len: {}, _data: [",
+            write!(out, "{{phase: {}, owner: {}, root_type: {}, key: {}, name: {}, stage: {}, replay_role: {}, ordinal: {}, qualification: {}, body_fingerprint: {}, dependencies: {{len: {}, _data: [",
                 js_string_lit(entry.phase.as_str())?, js_string_lit(entry.owner.as_str())?,
                 root_type,
                 js_string_lit(&key)?, js_string_lit(entry.diagnostic_name.as_str())?,
-                entry.stage, entry.declaration_ordinal,
+                entry.stage, js_string_lit(entry.replay_role.tag())?, entry.declaration_ordinal,
                 js_string_lit(entry.qualification.tag())?,
                 js_string_lit(&format!("{:016x}", entry.body_fingerprint))?,
                 dependencies.len()).unwrap();

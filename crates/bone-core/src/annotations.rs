@@ -262,13 +262,13 @@ fn validate_one(
         }
         "lifecycle" => {
             at(anno, pos, AnnoPos::DecoItem)?;
-            const KEYS: &[&str] = &["phase", "owner", "stage_param"];
+            const KEYS: &[&str] = &["phase", "owner", "stage_param", "replay_param"];
             for arg in &anno.args {
                 let Some(key) = arg.name.as_ref() else {
-                    comp_error!(anno.span, "`@lifecycle` arguments must be named: phase=, owner=, stage_param=");
+                    comp_error!(anno.span, "`@lifecycle` arguments must be named: phase=, owner=, stage_param=, replay_param=");
                 };
                 if !KEYS.contains(&key.name.as_str()) || !matches!(arg.value, AnnoValue::String(_)) {
-                    comp_error!(anno.span, "`@lifecycle` accepts string arguments phase=, owner=, and optional stage_param=");
+                    comp_error!(anno.span, "`@lifecycle` accepts string arguments phase=, owner=, optional stage_param=, and optional replay_param=");
                 }
             }
             let has = |name: &str| anno.args.iter().any(|a| a.name.as_ref().is_some_and(|n| n.name.as_str() == name));

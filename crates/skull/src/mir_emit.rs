@@ -6063,13 +6063,13 @@ fn lifecycle_plan_stage_lua(
                 key = skull_codegen_lua::lua_string(&key),
             )
         };
-        let _ = writeln!(out, "[{}] = {{ phase = {}, owner = {}, root_type = {}, key = {}, name = {}, stage = {}, ordinal = {}, func = {}, qualification = {}, body_fingerprint = {}, dependencies = {{ len = {}, _data = {{", index + 1,
+        let _ = writeln!(out, "[{}] = {{ phase = {}, owner = {}, root_type = {}, key = {}, name = {}, stage = {}, replay_role = {}, ordinal = {}, func = {}, qualification = {}, body_fingerprint = {}, dependencies = {{ len = {}, _data = {{", index + 1,
             skull_codegen_lua::lua_string(entry.phase.as_str()),
             skull_codegen_lua::lua_string(entry.owner.as_str()),
             root_type,
             skull_codegen_lua::lua_string(&key),
             skull_codegen_lua::lua_string(entry.diagnostic_name.as_str()),
-            entry.stage, entry.declaration_ordinal,
+            entry.stage, skull_codegen_lua::lua_string(entry.replay_role.tag()), entry.declaration_ordinal,
             func_thunk,
             skull_codegen_lua::lua_string(entry.qualification.tag()),
             skull_codegen_lua::lua_string(&format!("{:016x}", entry.body_fingerprint)),
