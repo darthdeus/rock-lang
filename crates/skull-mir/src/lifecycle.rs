@@ -1136,4 +1136,18 @@ mod tests {
         changed.entries[0].replay_role = LifecycleReplayRole::Presentation;
         assert!(plan.structure_changed(&changed));
     }
+
+    #[test]
+    fn late_draw_replay_role_rejects_unknown_literals() {
+        let ws = workspace(&[(
+            "role.rock",
+            r#"
+            @lifecycle(phase="late_draw", owner="session", stage_param="stage", replay_param="replay")
+            deco init late_draw(stage: int = 100, replay: string = "presentation") {}
+            @late_draw(replay="snapshot") fn invalid() {}
+            "#,
+        )]);
+        let error = collect(&ws).expect_err("unknown replay role must reject");
+        assert!(error.message.contains("unsupported lifecycle replay role `snapshot`"), "{error:?}");
+    }
 }

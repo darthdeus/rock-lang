@@ -100,6 +100,27 @@ fn main() {}
 }
 
 #[test]
+fn lifecycle_metadata_emits_replay_roles_in_lua() {
+    let emit = emit_mir(r#"
+@lifecycle(phase="late_draw", owner="session", stage_param="stage", replay_param="replay")
+deco init late_draw(stage: int = 100, replay: string = "presentation") {}
+@late_draw(replay="state") fn stateful() {}
+@late_draw fn visual() {}
+fn main() {}
+"#);
+    assert!(emit.lua.contains("name = \"stateful\", stage = 100, replay_role = \"state\""), "state replay role missing: {}", emit.lua);
+    assert!(emit.lua.contains("name = \"visual\", stage = 100, replay_role = \"presentation\""), "presentation replay role missing: {}", emit.lua);
+    let out = run_luajit(
+        &format!(
+            "{}\nlocal p = _G.__ROCK_LIFECYCLE_PLAN.late_draw; print(p.len .. ':' .. p._data[1].replay_role .. ':' .. p._data[2].replay_role)",
+            emit.lua
+        ),
+        "lifecycle_replay_roles_lua",
+    );
+    assert_eq!(out, "2:state:presentation");
+}
+
+#[test]
 fn scene_lifecycle_metadata_emits_the_canonical_root_key() {
     let emit = emit_mir(r#"
 struct Dungeon { ticks: int }
