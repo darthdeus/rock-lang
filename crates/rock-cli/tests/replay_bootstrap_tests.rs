@@ -256,6 +256,46 @@ fn progress_bootstrap_captures_existing_save_bytes_and_applies_them_once() {
 }
 
 #[test]
+fn progress_bootstrap_can_be_captured_when_play_starts_after_menu_ticks() {
+    let dir = tempfile::tempdir().expect("fixture dir");
+    let progress = empty_progress_path(&dir);
+    let layout = dir.path().join("spellbook-layout.jsonl");
+    let settings = dir.path().join("settings.json");
+    let replay = dir.path().join("menu-progress.replay");
+    std::fs::write(&progress, known_progress_a()).expect("write progress A");
+
+    let mut env_owned = fixture_env("delayed_progress", &progress, &layout, &settings);
+    env_owned[0].1 = "0".to_string();
+    let mut env = env_refs(&env_owned);
+    env.push(("MAG_BOOT_MENU", "1"));
+    let recorded = run_mag(4, Some(&replay), None, &env);
+
+    assert_eq!(
+        recorded["mag"]["MAG_RUN_STARTS"],
+        1,
+        "the fixture must enter the same run_start path as Play after menu ticks"
+    );
+    let text = std::fs::read_to_string(&replay).expect("read replay");
+    let first_tick = text.lines().position(|line| line.starts_with("t ")).expect("tick");
+    let progress_key = "6d61672f70726f67726573732e6a736f6e";
+    let progress_boot = text
+        .lines()
+        .position(|line| line.starts_with(&format!("boot {progress_key} ")))
+        .expect("progress bootstrap");
+    assert!(
+        progress_boot > first_tick,
+        "the production menu path must capture progress at first use after earlier menu ticks"
+    );
+
+    let replayed = run_mag(4, None, Some(&replay), &env);
+    assert_eq!(
+        replayed["mag"]["MAG_RUN_STARTS"],
+        1,
+        "playback must reach the delayed run using the captured progress input"
+    );
+}
+
+#[test]
 fn new_replay_fails_closed_when_a_declared_bootstrap_is_missing() {
     let dir = tempfile::tempdir().expect("fixture dir");
     let progress = empty_progress_path(&dir);
