@@ -20,26 +20,35 @@ fn workspace_root() -> &'static Path {
         .expect("workspace root")
 }
 
-fn run_perf_json(game: &str) -> Value {
+fn run_perf_json_window(game: &str, gc_window: Option<(usize, usize)>) -> Value {
     let rock_bin = env!("CARGO_BIN_EXE_rock");
     // Per-test scratch for --output so concurrent invocations don't race
     // on the shared workspace tmp/main.lua. See game_snapshot_tests for
     // the same pattern.
     let scratch = tempfile::tempdir().expect("create scratch dir for --output");
     let scratch_path = scratch.path().to_string_lossy().into_owned();
+    let mut args = vec![
+        "perf".to_string(),
+        game.to_string(),
+        "--seconds".to_string(),
+        "1".to_string(),
+        "--warmup-seconds".to_string(),
+        "0".to_string(),
+        "--format".to_string(),
+        "json".to_string(),
+        "--output".to_string(),
+        scratch_path,
+    ];
+    if let Some((window, start)) = gc_window {
+        args.extend([
+            "--gc-window".to_string(),
+            window.to_string(),
+            "--gc-window-start".to_string(),
+            start.to_string(),
+        ]);
+    }
     let output = Command::new(rock_bin)
-        .args([
-            "perf",
-            game,
-            "--seconds",
-            "1",
-            "--warmup-seconds",
-            "0",
-            "--format",
-            "json",
-            "--output",
-            &scratch_path,
-        ])
+        .args(&args)
         .current_dir(workspace_root())
         .output()
         .expect("failed to spawn rock perf");
@@ -65,6 +74,10 @@ fn run_perf_json(game: &str) -> Value {
 
     serde_json::from_str(line)
         .unwrap_or_else(|e| panic!("perf summary was not valid JSON: {e}\nline: {line}"))
+}
+
+fn run_perf_json(game: &str) -> Value {
+    run_perf_json_window(game, None)
 }
 
 /// Validate one uniform stat block: every field present + numeric, the
@@ -200,6 +213,14 @@ fn perf_json_sections_have_uniform_blocks() {
             .get("alloc_kb")
             .unwrap_or_else(|| panic!("sections[{i}].alloc_kb block missing: {s}"));
         assert_stat_block(alloc, &format!("sections[{i}].alloc_kb"), true);
+
+        let gc = s
+            .get("gc_window_alloc")
+            .unwrap_or_else(|| panic!("sections[{i}].gc_window_alloc missing: {s}"));
+        assert!(gc["inclusive_kb_per_frame"].is_null());
+        assert!(gc["exclusive_kb_per_frame"].is_null());
+        assert!(gc["max_exclusive_kb_per_frame"].is_null());
+        assert!(gc["events"].is_null());
     }
 }
 
@@ -222,15 +243,133 @@ fn perf_json_memory_has_uniform_blocks() {
         "memory.gc_events missing or negative: {mem}"
     );
     assert!(
-        mem.get("true_alloc_kb_per_frame").and_then(Value::as_f64).is_some(),
-        "memory.true_alloc_kb_per_frame missing or not a number: {mem}"
+        mem.get("gross_lua_alloc_request_kb_per_frame")
+            .is_some_and(Value::is_null),
+        "memory.gross_lua_alloc_request_kb_per_frame must be null without a GC window: {mem}"
     );
+    let gc = mem
+        .get("gc_window")
+        .unwrap_or_else(|| panic!("memory.gc_window missing: {mem}"));
+    assert_eq!(gc["available"], Value::Bool(false));
+    assert!(gc["gross_request_kb_per_frame"].is_null());
+    for key in [
+        "positive_growth_kb_per_frame",
+        "explicit_free_kb_per_frame",
+        "reallocation_shrink_kb_per_frame",
+        "allocator_calls",
+        "allocation_calls",
+        "reallocation_calls",
+        "free_calls",
+    ] {
+        assert!(gc[key].is_null(), "memory.gc_window.{key} must be null: {gc}");
+    }
+    assert!(gc["sum_exclusive_section_kb_per_frame"].is_null());
+    assert!(gc["unsectioned_kb_per_frame"].is_null());
+    assert!(gc["accounting_residual_kb_per_frame"].is_null());
+    assert!(gc["unknown_sections"].is_null());
+    for key in [
+        "mean_kb_per_frame",
+        "p50_kb_per_frame",
+        "p95_kb_per_frame",
+        "p99_kb_per_frame",
+        "max_kb_per_frame",
+    ] {
+        assert!(gc["frame_distribution"][key].is_null());
+    }
+    assert!(gc["worst_frame"]["frame_index"].is_null());
+    assert!(gc["worst_frame"]["total_kb"].is_null());
+    assert!(gc["worst_frame"]["max_single_event"]["section_id"].is_null());
+    assert!(gc["worst_frame"]["max_single_event"]["kb"].is_null());
+    assert!(gc["worst_frame"]["sections"].as_array().unwrap().is_empty());
+    assert!(gc["text_layout_cache"].is_null());
 
     // Heap should be non-trivial -- a running match3 holds far more than 1 KB
     // of Lua state. Guards against the helper returning a constant.
     assert!(
         mem["heap_kb"]["max"].as_f64().unwrap() > 1.0,
         "memory.heap_kb.max implausibly small: {mem}"
+    );
+}
+
+#[test]
+fn perf_json_gc_window_has_trustworthy_reconciliation() {
+    let doc = run_perf_json_window("games/match3", Some((4, 2)));
+    let mem = &doc["memory"];
+    let gc = &mem["gc_window"];
+    assert_eq!(gc["requested_frames"].as_i64(), Some(4));
+    assert_eq!(gc["measured_frames"].as_i64(), Some(4));
+    assert_eq!(gc["available"], Value::Bool(true));
+    assert_eq!(gc["valid"], Value::Bool(true));
+    for key in [
+        "gross_request_kb_per_frame",
+        "sum_exclusive_section_kb_per_frame",
+        "unsectioned_kb_per_frame",
+        "accounting_residual_kb_per_frame",
+    ] {
+        assert!(
+            gc[key].as_f64().is_some(),
+            "memory.gc_window.{key} must be numeric: {gc}"
+        );
+    }
+    assert!(gc["gross_request_kb_per_frame"].as_f64().unwrap() >= 0.0);
+    for key in [
+        "positive_growth_kb_per_frame",
+        "explicit_free_kb_per_frame",
+        "reallocation_shrink_kb_per_frame",
+    ] {
+        assert!(gc[key].as_f64().unwrap() >= 0.0);
+    }
+    for key in ["allocator_calls", "allocation_calls", "reallocation_calls", "free_calls"] {
+        assert!(gc[key].as_i64().unwrap() >= 0);
+    }
+    assert!(gc["sum_exclusive_section_kb_per_frame"].as_f64().unwrap() >= 0.0);
+    assert!(gc["unsectioned_kb_per_frame"].as_f64().unwrap() >= 0.0);
+    assert_eq!(gc["unknown_sections"].as_i64(), Some(0));
+    assert!(gc["section_events"].as_i64().unwrap() > 0);
+    for key in [
+        "mean_kb_per_frame",
+        "p50_kb_per_frame",
+        "p95_kb_per_frame",
+        "p99_kb_per_frame",
+        "max_kb_per_frame",
+    ] {
+        assert!(gc["frame_distribution"][key].as_f64().is_some());
+    }
+    assert!(gc["worst_frame"]["frame_index"].as_i64().unwrap() >= 0);
+    assert!(gc["worst_frame"]["total_kb"].as_f64().unwrap() >= 0.0);
+    assert!(gc["worst_frame"]["max_single_event"]["kb"].as_f64().unwrap() >= 0.0);
+    assert!(gc["worst_frame"]["sections"].as_array().unwrap().len() > 0);
+    assert!(gc["frame_section_slots"].as_i64().unwrap() > 0);
+    assert_eq!(gc["frame_section_overflow"].as_i64(), Some(0));
+    let cache = &gc["text_layout_cache"];
+    assert!(cache["requests"].as_i64().unwrap() > 0);
+    assert_eq!(
+        cache["hits"].as_i64().unwrap() + cache["misses"].as_i64().unwrap(),
+        cache["requests"].as_i64().unwrap()
+    );
+    assert_eq!(cache["builds"].as_i64(), cache["misses"].as_i64());
+    assert!(cache["ui"]["requests"].as_i64().unwrap() > 0);
+    assert!(cache["ui"]["hits"].as_i64().unwrap() > 0);
+    assert_eq!(
+        cache["requests"].as_i64().unwrap(),
+        cache["ui"]["requests"].as_i64().unwrap()
+            + cache["world"]["requests"].as_i64().unwrap()
+    );
+    assert_eq!(
+        cache["hits"].as_i64().unwrap(),
+        cache["ui"]["hits"].as_i64().unwrap()
+            + cache["world"]["hits"].as_i64().unwrap()
+    );
+    assert_eq!(
+        cache["misses"].as_i64().unwrap(),
+        cache["ui"]["misses"].as_i64().unwrap()
+            + cache["world"]["misses"].as_i64().unwrap()
+    );
+
+    let sections = doc["sections"].as_array().expect("sections array");
+    assert!(
+        sections.iter().any(|s| s["gc_window_alloc"]["events"].as_i64().unwrap_or(0) > 0),
+        "at least one GC-window section row must expose a non-zero event population"
     );
 }
 
