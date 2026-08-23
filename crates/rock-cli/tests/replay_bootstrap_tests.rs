@@ -203,6 +203,12 @@ fn settings_bootstrap_replays_a_real_ui_setting_without_touching_disk_b() {
         persisted_b,
         "settings playback must leave B byte-identical"
     );
+    assert!(
+        replayed["__stone_diag"]["MAG_SETTINGS_PLAYBACK_SAVE_SKIPS"]
+            .as_i64()
+            .is_some_and(|n| n > 0),
+        "playback must route settings writes through the no-op authority"
+    );
     let log = std::fs::read_to_string(&replay).expect("read settings replay");
     assert!(
         log.lines().any(|line| line.starts_with("boot ")),
