@@ -46,33 +46,47 @@ pub fn compute(
     volatile_vars: &FxHashSet<Ustr>,
     renderer: &str,
 ) -> Result<String, FingerprintError> {
-    validate_inputs(ws, artifact, lifecycle, definitions, state, comptime_reads, volatile_vars)?;
+    validate_inputs(
+        ws,
+        artifact,
+        lifecycle,
+        definitions,
+        state,
+        comptime_reads,
+        volatile_vars,
+    )?;
 
     let mut h = CanonicalHasher::default();
     h.string(FINGERPRINT_VERSION);
     h.string(renderer);
     h.string(&ws.comptime_inputs.channel);
 
-    let mut volatile = volatile_vars.iter().map(|name| name.as_str()).collect::<Vec<_>>();
+    let mut volatile = volatile_vars
+        .iter()
+        .map(|name| name.as_str())
+        .collect::<Vec<_>>();
     volatile.sort_unstable();
     h.len(volatile.len());
     for name in volatile {
         h.string(name);
     }
 
-    h.census("code", &[
-        artifact.census.examined as u64,
-        artifact.census.assigned as u64,
-        artifact.census.missing_identity as u64,
-        artifact.census.duplicate_identity as u64,
-        artifact.census.duplicate_body as u64,
-        artifact.census.unresolved_body as u64,
-        artifact.census.direct_call_only as u64,
-        artifact.census.named_values as u64,
-        artifact.census.lambda_values as u64,
-        artifact.census.capturing_lambdas as u64,
-        artifact.census.capture_free_lambdas as u64,
-    ]);
+    h.census(
+        "code",
+        &[
+            artifact.census.examined as u64,
+            artifact.census.assigned as u64,
+            artifact.census.missing_identity as u64,
+            artifact.census.duplicate_identity as u64,
+            artifact.census.duplicate_body as u64,
+            artifact.census.unresolved_body as u64,
+            artifact.census.direct_call_only as u64,
+            artifact.census.named_values as u64,
+            artifact.census.lambda_values as u64,
+            artifact.census.capturing_lambdas as u64,
+            artifact.census.capture_free_lambdas as u64,
+        ],
+    );
     let mut code = artifact
         .entries
         .values()
@@ -105,17 +119,25 @@ pub fn compute(
         }
         h.u64(entry.compatibility.lambda_topology.0);
         h.u64(entry.body_fingerprint);
-        h.string(entry.body_name.as_deref().unwrap_or(""));
+        h.string(entry.body_name.as_deref().ok_or_else(|| {
+            FingerprintError(format!(
+                "incomplete CodeArtifact body realization for {:?}",
+                entry.identity
+            ))
+        })?);
         h.boolean(entry.escaping);
         h.boolean(entry.capture_free);
     }
 
-    h.census("binding", &[
-        artifact.binding_plan.census.examined as u64,
-        artifact.binding_plan.census.assigned as u64,
-        artifact.binding_plan.census.duplicate as u64,
-        artifact.binding_plan.census.incomplete as u64,
-    ]);
+    h.census(
+        "binding",
+        &[
+            artifact.binding_plan.census.examined as u64,
+            artifact.binding_plan.census.assigned as u64,
+            artifact.binding_plan.census.duplicate as u64,
+            artifact.binding_plan.census.incomplete as u64,
+        ],
+    );
     h.len(artifact.binding_plan.entries.len());
     for binding in &artifact.binding_plan.entries {
         h.string(&binding.identity);
@@ -124,16 +146,19 @@ pub fn compute(
         h.string(binding.state_key.as_deref().unwrap_or(""));
     }
 
-    h.census("lifecycle", &[
-        lifecycle.census.declarations as u64,
-        lifecycle.census.applications as u64,
-        lifecycle.census.admitted as u64,
-        lifecycle.census.session_owned as u64,
-        lifecycle.census.scene_owned as u64,
-        lifecycle.census.plain as u64,
-        lifecycle.census.gated as u64,
-        lifecycle.census.dependency_edges as u64,
-    ]);
+    h.census(
+        "lifecycle",
+        &[
+            lifecycle.census.declarations as u64,
+            lifecycle.census.applications as u64,
+            lifecycle.census.admitted as u64,
+            lifecycle.census.session_owned as u64,
+            lifecycle.census.scene_owned as u64,
+            lifecycle.census.plain as u64,
+            lifecycle.census.gated as u64,
+            lifecycle.census.dependency_edges as u64,
+        ],
+    );
     h.len(lifecycle.entries.len());
     for entry in &lifecycle.entries {
         h.string(entry.phase.as_str());
@@ -158,12 +183,15 @@ pub fn compute(
         h.u64(entry.body_fingerprint);
     }
 
-    h.census("definition", &[
-        definitions.census.declarations as u64,
-        definitions.census.accessors as u64,
-        definitions.census.applications as u64,
-        definitions.census.admitted as u64,
-    ]);
+    h.census(
+        "definition",
+        &[
+            definitions.census.declarations as u64,
+            definitions.census.accessors as u64,
+            definitions.census.applications as u64,
+            definitions.census.admitted as u64,
+        ],
+    );
     h.len(definitions.catalogs.len());
     for catalog in &definitions.catalogs {
         h.string(catalog.catalog.as_str());
@@ -190,16 +218,19 @@ pub fn compute(
     }
 
     h.string(&state.schema_id);
-    h.census("state", &[
-        state.census().examined as u64,
-        state.census().assigned as u64,
-        state.census().incomplete as u64,
-        state.census().duplicate as u64,
-        state.census().globals as u64,
-        state.census().statics as u64,
-        state.census().frames as u64,
-        state.census().storage as u64,
-    ]);
+    h.census(
+        "state",
+        &[
+            state.census().examined as u64,
+            state.census().assigned as u64,
+            state.census().incomplete as u64,
+            state.census().duplicate as u64,
+            state.census().globals as u64,
+            state.census().statics as u64,
+            state.census().frames as u64,
+            state.census().storage as u64,
+        ],
+    );
     h.len(state.entries.len());
     for entry in &state.entries {
         h.string(state_kind(entry.kind));
@@ -259,7 +290,10 @@ fn validate_inputs(
     volatile_vars: &FxHashSet<Ustr>,
 ) -> Result<(), FingerprintError> {
     if !artifact.census.is_total() {
-        return Err(FingerprintError(format!("incomplete CodeArtifact census: {:?}", artifact.census)));
+        return Err(FingerprintError(format!(
+            "incomplete CodeArtifact census: {:?}",
+            artifact.census
+        )));
     }
     for entry in artifact.entries.values() {
         if entry.body_name.is_none() {
@@ -278,15 +312,24 @@ fn validate_inputs(
     if lifecycle.census.applications != lifecycle.census.admitted
         || lifecycle.entries.len() != lifecycle.census.admitted
     {
-        return Err(FingerprintError(format!("incomplete LifecyclePlan census: {:?}", lifecycle.census)));
+        return Err(FingerprintError(format!(
+            "incomplete LifecyclePlan census: {:?}",
+            lifecycle.census
+        )));
     }
     if definitions.census.applications != definitions.census.admitted
         || definitions.entries.len() != definitions.census.admitted
     {
-        return Err(FingerprintError(format!("incomplete DefinitionPlan census: {:?}", definitions.census)));
+        return Err(FingerprintError(format!(
+            "incomplete DefinitionPlan census: {:?}",
+            definitions.census
+        )));
     }
     if !state.census().is_total() {
-        return Err(FingerprintError(format!("incomplete StateSchema census: {:?}", state.census())));
+        return Err(FingerprintError(format!(
+            "incomplete StateSchema census: {:?}",
+            state.census()
+        )));
     }
     for name in volatile_vars {
         if name.is_empty() || !ws.comptime_inputs.vars.contains_key(name) {
@@ -317,7 +360,9 @@ fn canonical_reads(
         let (key, volatile, current_hash) = match &read.input {
             ComptimeInputId::Var(name) => {
                 let value = ws.comptime_inputs.vars.get(name).ok_or_else(|| {
-                    FingerprintError(format!("comptime read `{name}` is missing from resolved build inputs"))
+                    FingerprintError(format!(
+                        "comptime read `{name}` is missing from resolved build inputs"
+                    ))
                 })?;
                 let volatile = volatile_vars.contains(name);
                 let current_hash = comptime_value_hash(&value.value);
@@ -326,14 +371,22 @@ fn canonical_reads(
                         "stale nonvolatile comptime read `{name}` cannot identify the Artifact"
                     )));
                 }
-                (format!("var:{name}"), volatile, if volatile { 0 } else { current_hash })
+                (
+                    format!("var:{name}"),
+                    volatile,
+                    if volatile { 0 } else { current_hash },
+                )
             }
             ComptimeInputId::File(path) => {
                 if path.is_empty() {
-                    return Err(FingerprintError("malformed empty embedded comptime path".to_string()));
+                    return Err(FingerprintError(
+                        "malformed empty embedded comptime path".to_string(),
+                    ));
                 }
                 let text = std::fs::read_to_string(path.as_str()).map_err(|error| {
-                    FingerprintError(format!("embedded comptime input `{path}` is unreadable: {error}"))
+                    FingerprintError(format!(
+                        "embedded comptime input `{path}` is unreadable: {error}"
+                    ))
                 })?;
                 let current_hash = comptime_value_hash(&text);
                 if current_hash != read.value_hash {
@@ -344,13 +397,19 @@ fn canonical_reads(
                 (format!("file:{path}"), false, current_hash)
             }
         };
-        if let Some((old_volatile, old_hash)) = unique.insert(key.clone(), (volatile, current_hash)) {
+        if let Some((old_volatile, old_hash)) = unique.insert(key.clone(), (volatile, current_hash))
+        {
             if old_volatile != volatile || old_hash != current_hash {
-                return Err(FingerprintError(format!("conflicting comptime reads for `{key}`")));
+                return Err(FingerprintError(format!(
+                    "conflicting comptime reads for `{key}`"
+                )));
             }
         }
     }
-    Ok(unique.into_iter().map(|(key, (volatile, hash))| (key, volatile, hash)).collect())
+    Ok(unique
+        .into_iter()
+        .map(|(key, (volatile, hash))| (key, volatile, hash))
+        .collect())
 }
 
 fn function_key(
@@ -359,13 +418,17 @@ fn function_key(
     function: bone_semantic::prelude::Idx<bone_semantic::hir::Function>,
 ) -> Result<String, FingerprintError> {
     let module = ws.modules.get(module.index()).ok_or_else(|| {
-        FingerprintError(format!("definition accessor references missing module {module:?}"))
+        FingerprintError(format!(
+            "definition accessor references missing module {module:?}"
+        ))
     })?;
     let function = module
         .functions
         .iter()
         .find_map(|(id, function_def)| (id == function).then_some(function_def))
-        .ok_or_else(|| FingerprintError("definition accessor references missing function".to_string()))?;
+        .ok_or_else(|| {
+            FingerprintError("definition accessor references missing function".to_string())
+        })?;
     Ok(format!("{}::{}", module.file, function.name))
 }
 
@@ -392,7 +455,10 @@ mod tests {
         let mut ws = Workspace::new();
         ws.comptime_inputs.vars.insert(
             Ustr::from("TOKEN"),
-            ComptimeVarValue { value: value.to_string(), secret: false },
+            ComptimeVarValue {
+                value: value.to_string(),
+                secret: false,
+            },
         );
         let read = ComptimeRead {
             input: ComptimeInputId::Var(Ustr::from("TOKEN")),
