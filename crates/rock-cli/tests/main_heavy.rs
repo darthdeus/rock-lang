@@ -17,6 +17,8 @@ mod quit_teardown_test;
 mod replay_desync_tests;
 #[path = "replay_flight_tests.rs"]
 mod replay_flight_tests;
+#[path = "artifact_fingerprint_replay_tests.rs"]
+mod artifact_fingerprint_replay_tests;
 #[path = "replay_bindings_tests.rs"]
 mod replay_bindings_tests;
 #[path = "action_layer_v2_landing_gaps.rs"]

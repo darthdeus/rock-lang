@@ -325,17 +325,27 @@ impl CodeArtifact {
     /// call-only declaration does not acquire a slot merely because it exists
     /// in the artifact.
     pub fn from_mir_tree(root: &MirFunc) -> Self {
+        Self::from_mir_tree_with_volatile_vars(root, &FxHashSet::default())
+    }
+
+    /// Build the identity table while treating explicitly volatile comptime
+    /// values as metadata in body witnesses. The surrounding code shape is
+    /// still hashed, so a body edit cannot hide behind a changing build clock.
+    pub fn from_mir_tree_with_volatile_vars(
+        root: &MirFunc,
+        volatile_vars: &FxHashSet<Ustr>,
+    ) -> Self {
         let mut out = Self::default();
-        out.visit_mir(root, false);
+        out.visit_mir(root, false, volatile_vars);
         out
     }
 
-    fn visit_mir(&mut self, mf: &MirFunc, escaping: bool) {
+    fn visit_mir(&mut self, mf: &MirFunc, escaping: bool, volatile_vars: &FxHashSet<Ustr>) {
         match (&mf.code_identity, &mf.code_compatibility) {
             (Some(identity), Some(compatibility)) => self.insert(CodeEntry {
                 identity: identity.clone(),
                 compatibility: compatibility.clone(),
-                body_fingerprint: body_fingerprint(mf),
+                body_fingerprint: body_fingerprint(mf, volatile_vars),
                 body_name: Some(mf.name),
                 escaping,
                 capture_free: compatibility.capture.fields.is_empty(),
@@ -370,7 +380,7 @@ impl CodeArtifact {
             }
         }
         for nested in &mf.nested_fns {
-            self.visit_mir(nested, true);
+            self.visit_mir(nested, true, volatile_vars);
         }
     }
 
@@ -630,18 +640,30 @@ impl CodeArtifact {
 
 }
 
-fn body_fingerprint(mf: &MirFunc) -> u64 {
+fn body_fingerprint(mf: &MirFunc, volatile_vars: &FxHashSet<Ustr>) -> u64 {
     // This is a duplicate-body witness only. It intentionally excludes the
     // identity/compatibility fields and is canonicalized across MIR clones;
     // it is never used to find a slot.
     // Generic inlining can leave unrelated cloned lowering artifacts in the
     // same arenas. Hash only the reachable body so those artifacts cannot make
     // two copies of one lambda look like different bodies.
+    let volatile_comptime_spans = mf
+        .comptime_reads
+        .iter()
+        .filter_map(|read| match &read.input {
+            crate::mir::ComptimeInputId::Var(name) if volatile_vars.contains(name) => Some(read.span),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
     let mut hasher = BodyHasher::default();
     for block in crate::cfg::reachable_blocks_from(mf, mf.entry) {
         hasher.tag(1);
         for inst_id in &mf.blocks[block].insts {
-            hasher.inst(&mf.insts[*inst_id], &mf.nested_fn_identities);
+            let volatile = mf
+                .inst_spans
+                .get(*inst_id)
+                .is_some_and(|span| volatile_comptime_spans.contains(span));
+            hasher.inst_with_volatile(&mf.insts[*inst_id], &mf.nested_fn_identities, volatile);
         }
         hasher.tag(2);
         hasher.term(&mf.blocks[block].term);
@@ -773,7 +795,7 @@ impl BodyHasher {
         self.hash.write_u32(func.func.into_raw().into_u32());
     }
 
-    fn lit(&mut self, lit: &Lit) {
+    fn lit(&mut self, lit: &Lit, volatile_comptime: bool) {
         match lit {
             Lit::Int(value) => {
                 self.tag(0);
@@ -792,8 +814,12 @@ impl BodyHasher {
                 self.boolean(*value);
             }
             Lit::Str(value) => {
-                self.tag(4);
-                self.string(value.as_str());
+                if volatile_comptime {
+                    self.tag(6);
+                } else {
+                    self.tag(4);
+                    self.string(value.as_str());
+                }
             }
             Lit::Nil => self.tag(5),
         }
@@ -832,11 +858,16 @@ impl BodyHasher {
         });
     }
 
-    fn inst(&mut self, inst: &Inst, aliases: &FxHashMap<Ustr, CodeIdentity>) {
+    fn inst_with_volatile(
+        &mut self,
+        inst: &Inst,
+        aliases: &FxHashMap<Ustr, CodeIdentity>,
+        volatile_comptime: bool,
+    ) {
         match inst {
             Inst::Const(lit) => {
                 self.tag(0);
-                self.lit(lit);
+                self.lit(lit, volatile_comptime);
             }
             Inst::Global(name) => {
                 self.tag(1);
@@ -1141,7 +1172,7 @@ impl BodyHasher {
                 self.inst_idx(*discr);
                 self.hash.write_usize(cases.len());
                 for (lit, block) in cases {
-                    self.lit(lit);
+                    self.lit(lit, false);
                     self.block_idx(*block);
                 }
                 self.block_idx(*default);
@@ -1299,10 +1330,14 @@ mod tests {
             let aliases = FxHashMap::default();
             let cell_idx = || Idx::from_raw(RawIdx::from_u32(cell_raw));
             let inst_idx = |raw| Idx::from_raw(RawIdx::from_u32(raw));
-            hasher.inst(&Inst::Load(cell_idx()), &aliases);
-            hasher.inst(&Inst::IntAdd(inst_idx(inst_left), inst_idx(inst_right)), &aliases);
+            hasher.inst_with_volatile(&Inst::Load(cell_idx()), &aliases, false);
+            hasher.inst_with_volatile(
+                &Inst::IntAdd(inst_idx(inst_left), inst_idx(inst_right)),
+                &aliases,
+                false,
+            );
             if extra {
-                hasher.inst(&Inst::Const(Lit::Int(1)), &aliases);
+                hasher.inst_with_volatile(&Inst::Const(Lit::Int(1)), &aliases, false);
             }
             hasher.finish()
         };

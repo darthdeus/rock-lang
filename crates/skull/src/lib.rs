@@ -25,6 +25,7 @@ pub mod mir_emit;
 // graph the luajit driver does; consumers name it the same way either side of
 // that move.
 pub use skull_graph::{artifact, concrete_body, expr_subtree, instance_graph, shader, target_projection};
+pub mod artifact_fingerprint;
 
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::ModuleId;

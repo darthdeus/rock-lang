@@ -578,6 +578,12 @@ pub struct MirEmit {
     pub lifecycle_plan: skull_mir::lifecycle::LifecyclePlan,
     /// The one compiler-owned logical inventory consumed by every backend.
     pub state_schema: skull_mir::state_schema::StateSchema,
+    /// The compiler-owned definition inventory included in the exact Artifact
+    /// identity and published to the runtime.
+    pub definition_plan: skull_mir::definition::DefinitionPlan,
+    /// The semantic identity of this exact emitted Artifact. It is computed
+    /// before the backend payload leaves the compiler.
+    pub artifact_fingerprint: String,
     /// `(lua_name, reason)` for every definition the new path skipped.
     pub skipped: Vec<(String, String)>,
     /// Coarse per-stage time for the emit, in run order. `setup:` entries are
@@ -1528,7 +1534,10 @@ fn emit_lowered(
     out.global_names = skull_mir::reach::global_ref_names(mf);
     out.comptime_reads = mf.comptime_reads.clone();
     out.lua = lua;
-    out.code_artifact = skull_mir::code_identity::CodeArtifact::from_mir_tree(mf);
+    out.code_artifact = skull_mir::code_identity::CodeArtifact::from_mir_tree_with_volatile_vars(
+        mf,
+        &ws.comptime_inputs.volatile_vars,
+    );
     out.code_artifact.set_body_names(mf, body_name);
     out.times.validation += tv.elapsed();
     out.times.validation_work = true;
@@ -2727,6 +2736,11 @@ pub struct SkullEmitCache {
     /// Logical state table from the last complete assembly. Body overlays keep
     /// it unchanged; a full/incremental assembly replaces it atomically.
     state_schema: Option<skull_mir::state_schema::StateSchema>,
+    /// Definition inventory from the last complete assembly. Body overlays
+    /// retain it because definition structure is a full-reload boundary.
+    definition_plan: Option<skull_mir::definition::DefinitionPlan>,
+    /// Exact identity of the Artifact currently staged by this cache.
+    artifact_fingerprint: Option<String>,
     /// Comptime reads of the always-emitted units (global initializers,
     /// decorator defs), which have no Chunk. Feeds the watch set
     /// (`comptime_files`) and the overlay's stale-const re-init; refreshed by
@@ -3201,7 +3215,10 @@ fn emit_body_chunk_with_mutation(
     );
     validate_emitted_body(ws, &ctx, &mf, &mut specs).map_err(|r| r.into_error(f.name_span, ""))?;
     collect_callee_frefs(&mf, &mut deps);
-    let mut code_artifact = skull_mir::code_identity::CodeArtifact::from_mir_tree(&mf);
+    let mut code_artifact = skull_mir::code_identity::CodeArtifact::from_mir_tree_with_volatile_vars(
+        &mf,
+        &ws.comptime_inputs.volatile_vars,
+    );
     code_artifact.set_body_names(&mf, &mangle_fn(ws, f));
     let (direct_globals, direct_calls) = direct_refs(ws, &mf);
     times.validation = tv.elapsed();
@@ -3556,7 +3573,10 @@ fn emit_spec_chunk(
     times.validation += tv.elapsed();
     times.validation_work = true;
     let specs = specs[before..].to_vec();
-    let mut code_artifact = skull_mir::code_identity::CodeArtifact::from_mir_tree(&mf);
+    let mut code_artifact = skull_mir::code_identity::CodeArtifact::from_mir_tree_with_volatile_vars(
+        &mf,
+        &ws.comptime_inputs.volatile_vars,
+    );
     code_artifact.set_body_names(&mf, name);
     skull_codegen_lua::regalloc_time_reset();
     let te = Instant::now();
@@ -4693,6 +4713,69 @@ pub struct UnitComptimeReads {
     decorators: Vec<skull_mir::mir::ComptimeRead>,
 }
 
+fn renderer_fingerprint_tag(target: RendererTarget) -> &'static str {
+    match target {
+        RendererTarget::Gl => "gl",
+        RendererTarget::Wgpu => "wgpu",
+    }
+}
+
+fn artifact_comptime_reads(
+    cache: &SkullEmitCache,
+    built_specs: &[(Instance, Chunk)],
+    unit_reads: &UnitComptimeReads,
+    replace_all_units: bool,
+) -> Vec<skull_mir::mir::ComptimeRead> {
+    let mut reads = Vec::new();
+    for chunk in cache.chunks.values().flatten() {
+        reads.extend(chunk.comptime_reads.iter().cloned());
+    }
+    for (_, chunk) in built_specs {
+        reads.extend(chunk.comptime_reads.iter().cloned());
+    }
+    if replace_all_units {
+        reads.extend(unit_reads.globals.values().flatten().cloned());
+        reads.extend(unit_reads.decorators.iter().cloned());
+    } else {
+        for (key, old_reads) in &cache.unit_comptime_reads.globals {
+            if !unit_reads.globals.contains_key(key) {
+                reads.extend(old_reads.iter().cloned());
+            }
+        }
+        reads.extend(unit_reads.globals.values().flatten().cloned());
+        if unit_reads.decorators.is_empty() {
+            reads.extend(cache.unit_comptime_reads.decorators.iter().cloned());
+        } else {
+            reads.extend(unit_reads.decorators.iter().cloned());
+        }
+    }
+    reads
+}
+
+fn artifact_fingerprint(
+    ws: &Workspace,
+    scx: &skull_mir::lower::ScalarCtx,
+    artifact: &skull_mir::code_identity::CodeArtifact,
+    lifecycle: &skull_mir::lifecycle::LifecyclePlan,
+    definitions: &skull_mir::definition::DefinitionPlan,
+    state: &skull_mir::state_schema::StateSchema,
+    reads: &[skull_mir::mir::ComptimeRead],
+    renderer_target: RendererTarget,
+) -> Result<String, CompilerError> {
+    crate::artifact_fingerprint::compute(
+        ws,
+        scx.interner(),
+        artifact,
+        lifecycle,
+        definitions,
+        state,
+        reads,
+        &ws.comptime_inputs.volatile_vars,
+        renderer_fingerprint_tag(renderer_target),
+    )
+    .map_err(|error| CompilerError::new_no_location(format!("Artifact fingerprint generation failed: {error}")))
+}
+
 fn assemble(
     ws: &Workspace,
     cg: &CodegenCtx,
@@ -5323,12 +5406,25 @@ fn assemble(
         }
     }
     emitted_bodies.extend(spec_chunks.keys().cloned());
+    let artifact_reads = artifact_comptime_reads(cache, built_specs, &unit_reads, true);
+    let artifact_fingerprint = artifact_fingerprint(
+        ws,
+        scx,
+        &code_artifact,
+        &lifecycle_plan,
+        &definition_plan,
+        &state_schema,
+        &artifact_reads,
+        cache.renderer_target,
+    )?;
     Ok((
         MirEmit {
             lua: out,
             code_artifact,
             lifecycle_plan,
             state_schema,
+            definition_plan,
+            artifact_fingerprint,
             skipped,
             phases,
             abi_plan_stats: scx.abi_plan_stats(),
@@ -6295,6 +6391,8 @@ fn emit_full_in_with_mutation(
         code_artifact: skull_mir::code_identity::CodeArtifact::default(),
         lifecycle_plan: None,
         state_schema: None,
+        definition_plan: None,
+        artifact_fingerprint: None,
         unit_comptime_reads: UnitComptimeReads::default(),
         renderer_target,
         repair_stats: IncrementalRepairStats::default(),
@@ -6317,6 +6415,8 @@ fn emit_full_in_with_mutation(
     cache.code_artifact = emit.code_artifact.clone();
     cache.lifecycle_plan = Some(emit.lifecycle_plan.clone());
     cache.state_schema = Some(emit.state_schema.clone());
+    cache.definition_plan = Some(emit.definition_plan.clone());
+    cache.artifact_fingerprint = Some(emit.artifact_fingerprint.clone());
     cache.unit_comptime_reads = unit_reads;
     cache.absorb_spec_chunks(built_specs);
     emit.graph_census = cache.graph.run_stats;
@@ -6425,6 +6525,10 @@ impl SkullEmitCache {
 
     pub fn lifecycle_plan(&self) -> Option<&skull_mir::lifecycle::LifecyclePlan> {
         self.lifecycle_plan.as_ref()
+    }
+
+    pub fn artifact_fingerprint(&self) -> Option<&str> {
+        self.artifact_fingerprint.as_deref()
     }
 
     /// A live shader registry cannot remove a key from the running process:
@@ -7254,6 +7358,8 @@ pub fn emit_incremental(
     cache.code_artifact = emit.code_artifact.clone();
     cache.lifecycle_plan = Some(emit.lifecycle_plan.clone());
     cache.state_schema = Some(emit.state_schema.clone());
+    cache.definition_plan = Some(emit.definition_plan.clone());
+    cache.artifact_fingerprint = Some(emit.artifact_fingerprint.clone());
     cache.unit_comptime_reads = unit_reads;
     cache.absorb_spec_chunks(built_specs);
     let reassemble = t_asm.elapsed();
@@ -7489,16 +7595,36 @@ fn assemble_overlay(
     {
         out.push_str("__rock_state_transaction_commit()\n");
     }
+    let definition_plan = cache.definition_plan.clone().ok_or_else(|| {
+        CompilerError::new_no_location(
+            "Artifact fingerprint generation requires a complete DefinitionPlan".to_string(),
+        )
+    })?;
+    let state_schema = cache.state_schema.clone().ok_or_else(|| {
+        CompilerError::new_no_location(
+            "Artifact fingerprint generation requires a complete StateSchema".to_string(),
+        )
+    })?;
+    let artifact_reads = artifact_comptime_reads(cache, &[], &unit_reads, false);
+    let artifact_fingerprint = artifact_fingerprint(
+        ws,
+        &cache.scx,
+        &candidate_code_artifact,
+        &lifecycle_plan,
+        &definition_plan,
+        &state_schema,
+        &artifact_reads,
+        cache.renderer_target,
+    )?;
 
     Ok((
         MirEmit {
             lua: out,
             code_artifact: candidate_code_artifact,
             lifecycle_plan,
-            state_schema: cache
-                .state_schema
-                .clone()
-                .expect("overlay requires a completed StateSchema"),
+            state_schema,
+            definition_plan,
+            artifact_fingerprint,
             skipped,
             phases: Vec::new(),
             abi_plan_stats: cache.scx.abi_plan_stats(),
@@ -7697,6 +7823,8 @@ pub fn emit_overlay_with_span_edits(
         assemble_overlay(ws, cache, shader_changed, &changed_code_artifact)?;
     cache.code_artifact = emit.code_artifact.clone();
     cache.lifecycle_plan = Some(emit.lifecycle_plan.clone());
+    cache.definition_plan = Some(emit.definition_plan.clone());
+    cache.artifact_fingerprint = Some(emit.artifact_fingerprint.clone());
     for (key, reads) in overlay_unit_reads.globals {
         if reads.is_empty() {
             cache.unit_comptime_reads.globals.remove(&key);

@@ -165,6 +165,11 @@ pub fn inputs_for_project_with_config(
 
     let mut inputs = ComptimeInputs::default();
     inputs.channel = resolved.channel;
+    inputs.volatile_vars = resolved
+        .volatile_vars
+        .into_iter()
+        .map(|name| ustr::Ustr::from(&name))
+        .collect();
     // Fallback only: an embed normally resolves against the calling file's own
     // package root, and reaches this when the module has no file on disk.
     inputs.embed_root = Some(project_dir.to_path_buf());

@@ -2814,6 +2814,7 @@ pub struct SkullStone {
     /// `SkullReload::ShapeChanged` (full-reconstruction request) instead of writing
     /// (docs/hot-reload-schema-drift-plan.md).
     shape_hashes: skull::ShapeHashes,
+    artifact_fingerprint: String,
 }
 
 impl SkullStone {
@@ -2835,7 +2836,7 @@ impl SkullStone {
     fn init_impl(dir: &str, main_path: &std::path::Path, incremental_path: &std::path::Path, include_tests: bool) -> Result<SkullStone> {
         let renderer_target = skull_renderer_target(dir)?;
         let project = crate::live_project::LiveProject::init(dir, include_tests)?;
-        let (lua, cache) = {
+        let (lua, cache, artifact_fingerprint) = {
             let ws = project.workspace();
             let mid = skull::user_module_id(ws)
                 .map_err(no_user_module)?;
@@ -2850,16 +2851,21 @@ impl SkullStone {
             let spec = crate::unified_compile::SourceSpec::Directory(
                 std::path::PathBuf::from(dir),
             );
+            let artifact_fingerprint = emit.artifact_fingerprint.clone();
             let mut lua = emit.lua;
             install_rock_state_metadata(&mut lua, ws, &spec)
                 .map_err(|e| anyhow::anyhow!(render_project_err(project.sources(), &e)))?;
-            (lua, c)
+            (lua, c, artifact_fingerprint)
         };
         let preamble = skull_game_preamble(dir)?;
         write_full_main(&preamble, &lua, main_path, incremental_path)?;
         let shape_hashes = skull::type_shape_hashes(project.workspace())
             .map_err(|e| anyhow::anyhow!(e.message))?;
-        Ok(SkullStone { project, cache, preamble, renderer_target, shape_hashes })
+        Ok(SkullStone { project, cache, preamble, renderer_target, shape_hashes, artifact_fingerprint })
+    }
+
+    pub fn artifact_fingerprint(&self) -> &str {
+        &self.artifact_fingerprint
     }
 
     /// On a watch event: refresh the cached sources (re-read only `changed` off
@@ -3033,6 +3039,11 @@ impl SkullStone {
             let (lua, staged_cache) = lua;
             let bytes = write_full_main(&self.preamble, &lua, main_path, incremental_path)?;
             self.cache = staged_cache;
+            self.artifact_fingerprint = self
+                .cache
+                .artifact_fingerprint()
+                .ok_or_else(|| anyhow::anyhow!("compiler did not publish an Artifact fingerprint"))?
+                .to_string();
             let write_ms = t_write.elapsed().as_secs_f64() * 1000.0;
             Ok(SkullReload::Full { bytes, cook_ms, emit_ms, write_ms })
         } else {
@@ -3078,6 +3089,11 @@ impl SkullStone {
             let t_write = Instant::now();
             rock_host::project::write_atomic(incremental_path, &overlay.lua)?;
             self.cache = staged_cache;
+            self.artifact_fingerprint = self
+                .cache
+                .artifact_fingerprint()
+                .ok_or_else(|| anyhow::anyhow!("compiler did not publish an Artifact fingerprint"))?
+                .to_string();
             let write_ms = t_write.elapsed().as_secs_f64() * 1000.0;
             Ok(SkullReload::Incremental { bytes, reinferred: reinferred.len(), cook_ms, emit_ms, write_ms })
         }
@@ -3101,7 +3117,7 @@ impl SkullStone {
         // mutated the session into the broken state, so the restart-path fold must
         // re-gate or it would write a partial `main.lua` to the respawned process.
         self.project.verdict("on restart fold")?;
-        let lua = {
+        let (lua, cache, artifact_fingerprint) = {
             let ws = self.project.workspace();
             let mid = skull::user_module_id(ws)
                 .map_err(no_user_module)?;
@@ -3112,6 +3128,7 @@ impl SkullStone {
                 self.renderer_target,
             )
                 .map_err(|e| anyhow::anyhow!("skull force_full emit: {}", e.message))?;
+            let artifact_fingerprint = emit.artifact_fingerprint.clone();
             // Host package/description metadata is rebuilt with the StateSchema.
             let spec = crate::unified_compile::SourceSpec::Directory(
                 std::path::PathBuf::from(self.project.dir()),
@@ -3119,12 +3136,12 @@ impl SkullStone {
             let mut lua = emit.lua;
             install_rock_state_metadata(&mut lua, ws, &spec)
                 .map_err(|e| anyhow::anyhow!(e.message))?;
-            (lua, c)
+            (lua, c, artifact_fingerprint)
         };
-        let (lua, staged_cache) = lua;
         self.preamble = skull_game_preamble(self.project.dir())?;
         write_full_main(&self.preamble, &lua, main_path, incremental_path)?;
-        self.cache = staged_cache; // resets changed_since_full -- the overlay is now folded in
+        self.artifact_fingerprint = artifact_fingerprint;
+        self.cache = cache; // resets changed_since_full -- the overlay is now folded in
         // This program is what the (re)spawned process loads -- re-baseline the
         // shape hashes to it, including drift that arrived via a recompile that
         // bailed on a type error after mutating the session.

@@ -200,7 +200,10 @@ pub fn emit_coroutine_with_artifact(
     lowered.step.nested_fns = hoisted;
     // Terminal-cleanup defers and lifecycle hooks are ordinary functions, with
     // their converted lambda siblings emitted beside them.
-    let mut code_artifact = CodeArtifact::from_mir_tree(&lowered.step);
+    let mut code_artifact = CodeArtifact::from_mir_tree_with_volatile_vars(
+        &lowered.step,
+        &ws.comptime_inputs.volatile_vars,
+    );
     code_artifact.set_body_names(&lowered.step, &step_name);
     if let Some(identity) = &lowered.step.code_identity {
         if let Some(entry) = code_artifact.entries.get_mut(identity) {
@@ -212,12 +215,18 @@ pub fn emit_coroutine_with_artifact(
         }
     }
     for aux in &defer_funcs {
-        let mut artifact = CodeArtifact::from_mir_tree(aux);
+        let mut artifact = CodeArtifact::from_mir_tree_with_volatile_vars(
+            aux,
+            &ws.comptime_inputs.volatile_vars,
+        );
         artifact.set_body_names(aux, aux.name.as_str());
         code_artifact.merge(artifact);
     }
     for (_, aux) in &hook_funcs {
-        let mut artifact = CodeArtifact::from_mir_tree(aux);
+        let mut artifact = CodeArtifact::from_mir_tree_with_volatile_vars(
+            aux,
+            &ws.comptime_inputs.volatile_vars,
+        );
         artifact.set_body_names(aux, aux.name.as_str());
         code_artifact.merge(artifact);
     }

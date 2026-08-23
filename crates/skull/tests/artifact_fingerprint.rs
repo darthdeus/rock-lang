@@ -25,6 +25,7 @@ fn fingerprint(src: &str, inputs: ComptimeInputs) -> String {
 const VOLATILE_SOURCE: &str = r#"
 global BUILD_DATE: string = build_var("BUILD_DATE")
 global BUILD_UNIX: string = build_var("BUILD_UNIX")
+global BUILD_LABEL: string = "2026-08-23 10:00"
 fn main() {}
 "#;
 
@@ -70,6 +71,18 @@ fn main() {}
         "lifecycle membership is an Artifact input"
     );
 
+    let lifecycle_phase_a = r#"
+@lifecycle(phase="update", owner="session") deco init tick() {}
+@tick fn first() {}
+fn main() {}
+"#;
+    let lifecycle_phase_b = lifecycle_phase_a.replace("phase=\"update\"", "phase=\"late_update\"");
+    assert_ne!(
+        fingerprint(lifecycle_phase_a, ComptimeInputs::default()),
+        fingerprint(&lifecycle_phase_b, ComptimeInputs::default()),
+        "lifecycle structure is an Artifact input even when code bodies are unchanged"
+    );
+
     let definition_a = r#"
 @artifact_definition(catalog="widgets", key_param="key")
 deco init widget(key: string) {}
@@ -86,12 +99,28 @@ fn main() {}
         "definition membership is an Artifact input"
     );
 
+    let definition_catalog_a = definition_a.replace("catalog=\"widgets\"", "catalog=\"widgets_a\"");
+    let definition_catalog_b = definition_a.replace("catalog=\"widgets\"", "catalog=\"widgets_b\"");
+    assert_ne!(
+        fingerprint(&definition_catalog_a, ComptimeInputs::default()),
+        fingerprint(&definition_catalog_b, ComptimeInputs::default()),
+        "definition structure is an Artifact input even when code bodies are unchanged"
+    );
+
     let state_a = "global STATE: int = 0\nfn main() {}";
     let state_b = "global STATE: int = 0\nglobal EXTRA: int = 1\nfn main() {}";
     assert_ne!(
         fingerprint(state_a, ComptimeInputs::default()),
         fingerprint(state_b, ComptimeInputs::default()),
         "StateSchema membership is an Artifact input"
+    );
+
+    let state_metadata_a = "@state(ownership=session, world=include)\nglobal STATE: int = 0\nfn main() {}";
+    let state_metadata_b = "@state(ownership=session, world=boot_only)\nglobal STATE: int = 0\nfn main() {}";
+    assert_ne!(
+        fingerprint(state_metadata_a, ComptimeInputs::default()),
+        fingerprint(state_metadata_b, ComptimeInputs::default()),
+        "StateSchema metadata is an Artifact input even when code is unchanged"
     );
 }
 

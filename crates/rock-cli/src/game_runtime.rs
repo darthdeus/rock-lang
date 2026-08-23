@@ -51,6 +51,13 @@ pub trait GameCompiler {
     fn comptime_watch_files(&self) -> Vec<PathBuf> {
         Vec::new()
     }
+
+    /// The exact compiler-owned identity of the Artifact the next process
+    /// would execute. A missing value is an error at every replay/recording
+    /// launch boundary; callers must not invent a development identity.
+    fn artifact_fingerprint(&self) -> Result<String> {
+        anyhow::bail!("compiler did not publish an Artifact fingerprint")
+    }
 }
 
 /// Skull backend: bone `Session` + `SkullEmitCache` (the `SkullStone` holder),
@@ -148,6 +155,13 @@ impl GameCompiler for SkullGameCompiler {
 
     fn comptime_watch_files(&self) -> Vec<PathBuf> {
         self.stone.as_ref().map(|st| st.comptime_watch_files()).unwrap_or_default()
+    }
+
+    fn artifact_fingerprint(&self) -> Result<String> {
+        self.stone
+            .as_ref()
+            .map(|stone| stone.artifact_fingerprint().to_string())
+            .ok_or_else(|| anyhow::anyhow!("compiler did not publish an Artifact fingerprint"))
     }
 }
 

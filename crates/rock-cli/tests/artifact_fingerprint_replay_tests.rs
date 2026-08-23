@@ -51,6 +51,8 @@ fn v8_admits_artifact_a_and_rejects_each_changed_artifact_before_tick() {
         .find_map(|line| line.strip_prefix("build "))
         .expect("recorded Artifact A fingerprint")
         .to_string();
+    assert_ne!(artifact_a, "1111111111111111", "fixture must observe the compiler fingerprint");
+    assert_ne!(artifact_a, "2222222222222222", "fixture must observe the compiler fingerprint");
 
     let admitted = replay(&log);
     assert!(admitted.status.success(), "Artifact A must admit its own log: {}", String::from_utf8_lossy(&admitted.stderr));

@@ -3741,11 +3741,16 @@ mod force_full_tests {
         // same on-disk source). force_full's main.lua must match it byte-for-byte.
         let fresh_main = src("fresh_main.lua");
         let fresh_inc = src("fresh_incremental.lua");
-        SkullStone::init(&dir_str, &fresh_main, &fresh_inc).expect("fresh init v2");
+        let fresh = SkullStone::init(&dir_str, &fresh_main, &fresh_inc).expect("fresh init v2");
         let main_fresh = std::fs::read_to_string(&fresh_main).expect("fresh main.lua");
         assert_eq!(
             main_forced, main_fresh,
             "force_full main.lua must be byte-identical to a fresh full build of the edited source"
+        );
+        assert_eq!(
+            skull.artifact_fingerprint(),
+            fresh.artifact_fingerprint(),
+            "force_full must publish the fingerprint of the Artifact it writes"
         );
     }
 
