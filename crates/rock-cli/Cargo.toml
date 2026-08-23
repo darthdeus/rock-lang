@@ -23,6 +23,7 @@ sequential = ["bone-semantic/sequential", "skull/sequential", "bone-query/sequen
 
 [dependencies]
 rock-host = { path = "../rock-host" }
+sound-core = { path = "../sound-core" }
 rock-log = { path = "../rock-log" }
 rock-core = { path = "../rock-core" }
 rock-tokenizer = { path = "../rock-tokenizer" }

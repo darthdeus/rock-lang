@@ -9,6 +9,7 @@ use anyhow::Result;
 use bone_semantic::inference::ComptimeInputs;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
+use sound_core::AssetResolver;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -36,14 +37,22 @@ pub fn run_package(project: &str, output: Option<&str>) -> Result<()> {
     if let Some(config) = config.as_ref() {
         config.validate_build()?;
     }
-    let selection = rock_host::release::select_assets(
+    let overlays = rock_host::release::asset_overlay_roots(&project_abs, config.as_ref())?;
+    let mut selection = rock_host::release::select_assets_with_overlays(
         &project_abs,
         &game_key,
         config.as_ref(),
         &root_abs,
         false,
+        &overlays,
     )?;
-    rock_host::release::cue_sheet_validate_release(&selection)?;
+    let sound = compile_sound_project(
+        &project_abs,
+        &game_key,
+        config.as_ref(),
+        &overlays,
+        &mut selection,
+    )?;
     for missing in &selection.missing {
         log::warn!(target: "PACKAGE", "release asset {} does not exist, skipping", missing.display());
     }
@@ -62,7 +71,10 @@ pub fn run_package(project: &str, output: Option<&str>) -> Result<()> {
     remove_if_present(&bytecode_path)?;
     remove_if_present(&manifest_path)?;
     let assets_dir = output_dir.join("assets");
-    let staged = rock_host::release::stage_assets(&selection, &assets_dir)?;
+    let mut staged = rock_host::release::stage_assets(&selection, &assets_dir)?;
+    if let Some(sound) = sound.as_ref() {
+        write_sound_bank(&assets_dir, &mut staged, sound)?;
+    }
 
     // Resolve once for the package and hand the same resolved map to the
     // compiler. In particular, a secret command is never run a second time
@@ -107,6 +119,7 @@ pub fn run_package(project: &str, output: Option<&str>) -> Result<()> {
         &lua_path,
         &bytecode_path,
         &staged,
+        sound.as_ref(),
     )?;
     let bytes = serde_json::to_vec_pretty(&manifest)?;
     rock_host::project::write_atomic(&manifest_path, &bytes)?;
@@ -121,6 +134,124 @@ pub fn run_package(project: &str, output: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+struct CompiledSoundPackage {
+    project: String,
+    bank_key: String,
+    bank_bytes: Vec<u8>,
+    dependencies: Vec<String>,
+}
+
+struct ReleaseSoundResolver<'a> {
+    project_dir: &'a Path,
+    game_key: &'a str,
+    overlays: &'a [PathBuf],
+}
+
+impl AssetResolver for ReleaseSoundResolver<'_> {
+    fn resolve(&self, key: &str) -> Option<PathBuf> {
+        rock_host::release::resolve_asset_with_overlays(
+            self.project_dir,
+            self.game_key,
+            self.overlays,
+            key,
+        )
+        .ok()
+        .flatten()
+        .map(|asset| asset.source)
+    }
+}
+
+fn compile_sound_project(
+    project_dir: &Path,
+    game_key: &str,
+    config: Option<&rock_host::stick::StickConfig>,
+    overlays: &[PathBuf],
+    selection: &mut rock_host::release::AssetSelection,
+) -> Result<Option<CompiledSoundPackage>> {
+    let Some(sound) = config.and_then(|config| config.sound.as_ref()) else {
+        return Ok(None);
+    };
+    let project_path = declared_sound_project_path(project_dir, &sound.project)?;
+    let project_text = std::fs::read_to_string(&project_path).map_err(|error| {
+        anyhow::anyhow!(
+            "package: sound project {} could not be read: {error}",
+            project_path.display()
+        )
+    })?;
+    let project = sound_core::parse_project(&project_text)
+        .map_err(|error| anyhow::anyhow!("package: {}: {error}", sound.project))?;
+    let resolver = ReleaseSoundResolver {
+        project_dir,
+        game_key,
+        overlays,
+    };
+    let bank = sound_core::compile_project(&project, &resolver).map_err(|error| {
+        anyhow::anyhow!("package: sound project {}: {error}", sound.project)
+    })?;
+    let bank_bytes = sound_core::serialize_runtime_bank(&bank)
+        .map_err(|error| anyhow::anyhow!("package: sound project {}: {error}", sound.project))?;
+    let mut dependencies = Vec::with_capacity(bank.dependencies.len());
+    for dependency in &bank.dependencies {
+        let asset = rock_host::release::resolve_asset_with_overlays(
+            project_dir,
+            game_key,
+            overlays,
+            dependency,
+        )?
+        .ok_or_else(|| anyhow::anyhow!("package: sound dependency is not stageable: {dependency}"))?;
+        rock_host::release::include_release_asset(selection, asset);
+        dependencies.push(format!("{game_key}/{dependency}"));
+    }
+    dependencies.sort();
+    Ok(Some(CompiledSoundPackage {
+        project: sound.project.clone(),
+        bank_key: format!("{game_key}/assets/sound_bank.json"),
+        bank_bytes,
+        dependencies,
+    }))
+}
+
+fn declared_sound_project_path(project_dir: &Path, relative: &str) -> Result<PathBuf> {
+    let path = Path::new(relative);
+    if relative.trim().is_empty()
+        || path.is_absolute()
+        || relative.starts_with('~')
+        || relative.contains('\\')
+        || relative.as_bytes().get(1) == Some(&b':')
+        || path
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        anyhow::bail!(
+            "package: [sound].project must be a non-empty relative path without traversal: {relative:?}"
+        );
+    }
+    let project_path = project_dir.join(path);
+    if !project_path.is_file() {
+        anyhow::bail!(
+            "package: declared sound project does not exist: {}",
+            project_path.display()
+        );
+    }
+    Ok(project_path)
+}
+
+fn write_sound_bank(
+    assets_dir: &Path,
+    staged: &mut rock_host::release::StagedAssets,
+    sound: &CompiledSoundPackage,
+) -> Result<()> {
+    let destination = assets_dir.join(&sound.bank_key);
+    if let Some(parent) = destination.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    rock_host::project::write_atomic(&destination, &sound.bank_bytes)?;
+    staged.keys.push(sound.bank_key.clone());
+    staged.keys.sort();
+    staged.file_count = staged.keys.len();
+    Ok(())
+}
+
 fn package_manifest(
     project: &Path,
     game_key: &str,
@@ -129,6 +260,7 @@ fn package_manifest(
     lua_path: &Path,
     bytecode_path: &Path,
     staged: &rock_host::release::StagedAssets,
+    sound: Option<&CompiledSoundPackage>,
 ) -> Result<Value> {
     let mut vars = Map::new();
     let declarations = config
@@ -175,19 +307,34 @@ fn package_manifest(
         }),
     );
 
+    let mut artifacts = Map::new();
+    artifacts.insert("lua".to_string(), artifact_metadata(lua_path)?);
+    artifacts.insert("bytecode".to_string(), artifact_metadata(bytecode_path)?);
+    artifacts.insert(
+        "assets".to_string(),
+        json!({
+            "path": "assets",
+            "file_count": staged.file_count,
+            "keys": staged.keys,
+        }),
+    );
+    if let Some(sound) = sound {
+        artifacts.insert(
+            "sound".to_string(),
+            json!({
+                "project": sound.project,
+                "bank": sound.bank_key,
+                "schema": sound_core::RUNTIME_SCHEMA_VERSION,
+                "dependencies": sound.dependencies,
+            }),
+        );
+    }
+
     Ok(json!({
         "schema": 1,
         "package": package,
         "build_vars": vars,
-        "artifacts": {
-            "lua": artifact_metadata(lua_path)?,
-            "bytecode": artifact_metadata(bytecode_path)?,
-            "assets": {
-                "path": "assets",
-                "file_count": staged.file_count,
-                "keys": staged.keys,
-            },
-        },
+        "artifacts": artifacts,
     }))
 }
 

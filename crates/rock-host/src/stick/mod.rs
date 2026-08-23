@@ -31,6 +31,8 @@ pub struct StickConfig {
     pub release: Option<ReleaseConfig>,
     /// External asset roots used when ROCK_ASSET_OVERLAYS is unset.
     pub assets: Option<AssetsConfig>,
+    /// Optional compiler-owned sound project declaration.
+    pub sound: Option<SoundConfig>,
     pub dependencies: HashMap<String, Dependency>,
 }
 
@@ -66,6 +68,11 @@ pub struct ReleaseConfig {
 #[derive(Debug, Clone, Default)]
 pub struct AssetsConfig {
     pub overlays: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SoundConfig {
+    pub project: String,
 }
 
 pub const KNOWN_BUILD_BUILTINS: [&str; 2] = ["channel", "platform"];
@@ -428,6 +435,34 @@ impl<'de> serde::Deserialize<'de> for AssetsConfig {
     }
 }
 
+impl<'de> serde::Deserialize<'de> for SoundConfig {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct Vis;
+        impl<'de> serde::de::Visitor<'de> for Vis {
+            type Value = SoundConfig;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                write!(f, "SoundConfig struct")
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<SoundConfig, A::Error> {
+                let mut project: Option<String> = None;
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "project" => { project = Some(map.next_value()?); }
+                        other => {
+                            return Err(serde::de::Error::custom(format!(
+                                "unknown key `{other}` in [sound]; known keys: project"
+                            )));
+                        }
+                    }
+                }
+                let project = project.ok_or_else(|| serde::de::Error::missing_field("project"))?;
+                Ok(SoundConfig { project })
+            }
+        }
+        d.deserialize_map(Vis)
+    }
+}
+
 impl<'de> serde::Deserialize<'de> for RendererConfig {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         struct Vis;
@@ -499,6 +534,7 @@ impl<'de> serde::Deserialize<'de> for StickConfig {
                 let mut build: Option<BuildConfig> = None;
                 let mut release: Option<ReleaseConfig> = None;
                 let mut assets: Option<AssetsConfig> = None;
+                let mut sound: Option<SoundConfig> = None;
                 let mut dependencies: HashMap<String, Dependency> = HashMap::new();
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
@@ -506,6 +542,7 @@ impl<'de> serde::Deserialize<'de> for StickConfig {
                         "build" => { build = Some(map.next_value()?); }
                         "release" => { release = Some(map.next_value()?); }
                         "assets" => { assets = Some(map.next_value()?); }
+                        "sound" => { sound = Some(map.next_value()?); }
                         "engine" => { engine = map.next_value()?; }
                         "renderer" => { renderer = map.next_value()?; }
                         "ios" => { ios = map.next_value()?; }
@@ -514,7 +551,7 @@ impl<'de> serde::Deserialize<'de> for StickConfig {
                     }
                 }
                 let package = package.ok_or_else(|| serde::de::Error::missing_field("package"))?;
-                Ok(StickConfig { package, engine, renderer, ios, build, release, assets, dependencies })
+                Ok(StickConfig { package, engine, renderer, ios, build, release, assets, sound, dependencies })
             }
         }
         d.deserialize_map(Vis)
@@ -1246,6 +1283,34 @@ mod tests {
         );
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(cfg.release_assets(dir.path()).unwrap(), vec!["assets", "saves/level.json"]);
+    }
+
+    #[test]
+    fn sound_section_declares_a_project_path() {
+        let cfg = StickConfig::new_from_str(
+            "[package]\nname = \"x\"\n[sound]\nproject = \"sound_project.json\"\n",
+        )
+        .expect("sound section must parse");
+
+        assert_eq!(
+            cfg.sound.as_ref().map(|sound| sound.project.as_str()),
+            Some("sound_project.json")
+        );
+    }
+
+    #[test]
+    fn sound_section_rejects_unknown_keys_and_missing_project() {
+        let unknown = StickConfig::new_from_str(
+            "[package]\nname = \"x\"\n[sound]\npath = \"sound_project.json\"\n",
+        )
+        .expect_err("unknown sound key must reject");
+        assert!(format!("{unknown}").contains("path"));
+
+        let missing = StickConfig::new_from_str(
+            "[package]\nname = \"x\"\n[sound]\n",
+        )
+        .expect_err("sound project is required");
+        assert!(format!("{missing}").contains("project"));
     }
 
     #[test]
