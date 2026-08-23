@@ -303,16 +303,16 @@ fn replay_applies_explicit_v6_pad_buttons_and_axes() {
 }
 
 #[test]
-fn recording_and_branch_rewrite_use_the_v7_pad_record_renderer() {
+fn recording_and_branch_rewrite_use_the_v8_pad_record_renderer() {
     let dir = tempfile::tempdir().expect("replay-log dir");
-    let log = dir.path().join("v7-renderer.replay");
+    let log = dir.path().join("v8-renderer.replay");
     let log_s = log.to_string_lossy().into_owned();
 
     let _ = run_frame("bitgun", 2, &["--record", &log_s]);
-    let text = std::fs::read_to_string(&log).expect("read v7 record");
-    assert!(text.starts_with("STONE_REPLAY 7\n"), "recording must use the v7 header: {text}");
+    let text = std::fs::read_to_string(&log).expect("read v8 record");
+    assert!(text.starts_with("STONE_REPLAY 8\n"), "recording must use the v8 header: {text}");
     let tick = text.lines().find(|line| line.starts_with("t ")).expect("tick");
-    assert_eq!(tick.split(' ').count(), 10, "v7 tick has nine payload fields");
+    assert_eq!(tick.split(' ').count(), 10, "v8 tick has nine payload fields");
     assert!(tick.ends_with(" - -"), "empty live pad state has explicit empty fields: {tick}");
 }
 
