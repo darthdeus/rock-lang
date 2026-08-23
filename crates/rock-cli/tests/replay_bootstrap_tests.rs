@@ -171,6 +171,46 @@ fn known_progress_a() -> Vec<u8> {
 }
 
 #[test]
+fn settings_bootstrap_replays_a_real_ui_setting_without_touching_disk_b() {
+    let dir = tempfile::tempdir().expect("fixture dir");
+    let progress = empty_progress_path(&dir);
+    let layout = dir.path().join("spellbook-layout.jsonl");
+    let settings = dir.path().join("settings.json");
+    let replay = dir.path().join("settings.replay");
+    let settings_a = br#"{"graphics":{"world_scale":0.75}}"#;
+    let settings_b = br#"{"graphics":{"world_scale":2.0}}"#;
+    std::fs::write(&settings, settings_a).expect("write settings A");
+
+    let env_owned = fixture_env("settings", &progress, &layout, &settings);
+    let env = env_refs(&env_owned);
+    let recorded = run_mag(2, Some(&replay), None, &env);
+    std::fs::write(&settings, settings_b).expect("mutate settings to B");
+    let persisted_b = std::fs::read(&settings).expect("read settings B");
+    let replayed = run_mag(2, None, Some(&replay), &env);
+
+    assert_eq!(
+        recorded["mag"]["SETTINGS"]["graphics"]["world_scale"],
+        serde_json::json!(0.75),
+        "recording must reach the real MAG settings consumer"
+    );
+    assert_eq!(
+        replayed["mag"]["SETTINGS"]["graphics"]["world_scale"],
+        serde_json::json!(0.75),
+        "playback must use captured settings A rather than live disk B"
+    );
+    assert_eq!(
+        std::fs::read(&settings).expect("settings B remains present"),
+        persisted_b,
+        "settings playback must leave B byte-identical"
+    );
+    let log = std::fs::read_to_string(&replay).expect("read settings replay");
+    assert!(
+        log.lines().any(|line| line.starts_with("boot ")),
+        "settings must be captured through the generic bootstrap wire\n{log}"
+    );
+}
+
+#[test]
 fn progress_bootstrap_captures_absence_and_keeps_b_read_only() {
     let dir = tempfile::tempdir().expect("fixture dir");
     let progress = empty_progress_path(&dir);

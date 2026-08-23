@@ -117,6 +117,13 @@ fn main() {}
 }
 
 #[test]
+fn emitted_js_has_no_shadow_effect_plan() {
+    let js = emit_program(&ws_with("fn main() {}"));
+    assert!(!js.contains("ShadowEffectPlan"), "JS must not carry the removed effect-plan type");
+    assert!(!js.contains("__ROCK_SHADOW_EFFECT_PLAN"), "JS must not publish the removed effect plan");
+}
+
+#[test]
 fn lifecycle_replay_roles_emit_in_js_and_match_lua() {
     let ws = ws_with(r#"
 @lifecycle(phase="late_draw", owner="session", stage_param="stage", replay_param="replay")

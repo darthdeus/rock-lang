@@ -585,6 +585,75 @@ fn scrub_reports_seek_cost_and_resimulation_population() {
 }
 
 #[test]
+fn exact_recorded_replay_supports_two_backward_scene_image_scrubs() {
+    let game = "bitgun";
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("exact-two-scrubs.replay");
+    let log_s = log.to_string_lossy().into_owned();
+    let scratch = tempfile::tempdir().unwrap();
+    let rec = Command::new(env!("CARGO_BIN_EXE_rock"))
+        .args([
+            "frame", game, "-n", "80", "--record", &log_s,
+            "--output", &scratch.path().to_string_lossy(),
+        ])
+        .env("ROCK_FRAME_TIMEOUT_SECS", "60")
+        .current_dir(workspace_root())
+        .output()
+        .expect("spawn record");
+    assert!(rec.status.success(), "record failed: {}", String::from_utf8_lossy(&rec.stderr));
+    let text = std::fs::read_to_string(&log).expect("read exact replay");
+    assert!(text.starts_with("STONE_REPLAY 8\n"), "the scrub fixture must exercise the new format\n{text}");
+
+    let ordinary = run_replay_dump(
+        game,
+        80,
+        &log_s,
+        &[("STONE_START_PAUSED", "1"), ("STONE_STEP_FRAMES", "30")],
+    );
+    assert_eq!(current_tick(&ordinary), 30, "ordinary playback must reach the comparison tick");
+
+    let sought = run_replay_dump(
+        game,
+        150,
+        &log_s,
+        &[
+            ("STONE_KEYFRAME_INTERVAL", "10"),
+            ("STONE_TIMELINE_SEEK_AT_FRAME", "60"),
+            ("STONE_TIMELINE_SEEK_TO_TICK", "20"),
+            ("STONE_LIVE_PLAY_AT_FRAME", "80"),
+            ("STONE_TIMELINE_SEEK_AT_FRAME_2", "120"),
+            ("STONE_TIMELINE_SEEK_TO_TICK_2", "30"),
+            ("STONE_AUDIO_PROBE", "1"),
+        ],
+    );
+    assert_eq!(current_tick(&sought), 30, "the second backward seek must land at tick 30");
+    let diag = &sought["__stone_diag"];
+    assert_eq!(diag["STONE_SEEK_COUNT"].as_i64(), Some(2), "both backward seeks must complete: {diag}");
+    assert!(
+        diag["STONE_KEYFRAME_GLOBALS"].as_i64().is_some_and(|n| n > 0)
+            && diag["STONE_KEYFRAME_NODES"].as_i64().is_some_and(|n| n > 0),
+        "both restore arms must materialize nonempty WorldImage/SceneImage state: {diag}"
+    );
+    assert!(
+        diag["AUDIO_SEEK_MUTES"].as_i64().is_some_and(|n| n > 0),
+        "audio must stay behind the catch-up gate: {diag}"
+    );
+    assert_eq!(
+        diag["STONE_PRESENTATION_LATE_DRAW_DURING_SEEK"].as_i64().unwrap_or(0),
+        0,
+        "presentation must stay suppressed during catch-up: {diag}"
+    );
+    assert_eq!(
+        diag["STONE_PRESENTED_VIEW_PROMOTED_DURING_SEEK"].as_i64().unwrap_or(0),
+        0,
+        "the seek tool must not publish a presented view: {diag}"
+    );
+    assert_eq!(diag["STONE_SEEK_FIRST_FRAMES"].as_i64(), Some(2), "each seek needs a real post-seek frame: {diag}");
+    let sim = sim_state_names(game, 80);
+    assert_sim_state_matches(&sought, &ordinary, &sim, "the exact two-scrub target");
+}
+
+#[test]
 fn refused_scrub_does_not_leave_seek_active_or_complete() {
     let game = "bitgun";
     let dir = tempfile::tempdir().unwrap();

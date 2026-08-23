@@ -1317,6 +1317,14 @@ mod tests {
     }
 
     #[test]
+    fn structural_reload_never_starts_a_shadow_candidate() {
+        assert!(
+            !shadow_full_reload_armed(true, true, true, false, false),
+            "a structural edit must request the normal clean restart even while live rewind is armed"
+        );
+    }
+
+    #[test]
     fn perf_process_is_headless_and_boots_mag_without_screenshot_mode() {
         let mut cmd = std::process::Command::new("true");
         apply_perf_env(&mut cmd);

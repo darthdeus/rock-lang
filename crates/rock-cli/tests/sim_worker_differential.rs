@@ -202,6 +202,24 @@ fn state_image_worker_registries_stay_bounded_across_repeated_entries() {
     }
 }
 
+#[test]
+fn repeated_bootimage_entries_prove_immutable_owner_conservation() {
+    let entries = vec!["t1a_worker_registries_stay_bounded".to_string(); 8];
+    let records = run_worker_suite(Backend::Skull, "testbed", &entries)
+        .expect("the repeated BootImage ownership queue must run");
+    assert_eq!(records.len(), entries.len(), "the worker returned one record per entry");
+    let crossed = records.iter().filter(|(_, crossed)| *crossed).count();
+    assert_eq!(crossed, 7, "every successor must actually follow a predecessor");
+    assert!(crossed > 0, "the conservation arm needs a nonzero boundary population");
+    for (record, _) in records {
+        assert_eq!(record.verdict(), "PASS", "BootImage ownership fixture failed: {record:?}");
+        assert!(
+            record.expects_pass.iter().any(|m| m.message.contains("BootImage owner conservation")),
+            "the fixture must assert immutable-image ownership and fresh-session ownership, not just finish: {record:?}"
+        );
+    }
+}
+
 /// A global that was NULL at boot is null again at the next entry.
 ///
 /// Its own class, not a variant of `b0_leak_probe`: the image is keyed by
