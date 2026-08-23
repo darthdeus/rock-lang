@@ -224,9 +224,9 @@ fn progress_bootstrap_captures_absence_and_keeps_b_read_only() {
     let recorded = run_mag(1, Some(&replay), None, &env);
     let persisted_b = std::fs::read(&progress).expect("record action must create B");
     let log = std::fs::read_to_string(&replay).expect("read replay");
-    assert!(log.starts_with("STONE_REPLAY 7\n"), "recording must use v7\n{log}");
+    assert!(log.starts_with("STONE_REPLAY 8\n"), "recording must use v8\n{log}");
     let boot_lines: Vec<&str> = log.lines().filter(|line| line.starts_with("boot ")).collect();
-    assert_eq!(boot_lines.len(), 2, "both MAG bootstrap consumers must capture a key");
+    assert_eq!(boot_lines.len(), 4, "settings path selection and both MAG bootstrap consumers must capture keys");
     let first_tick = log.lines().position(|line| line.starts_with("t ")).expect("tick");
     let first_boot = log.lines().position(|line| line.starts_with("boot ")).expect("bootstrap");
     assert!(first_boot < first_tick, "bootstrap records must precede tick records");
@@ -347,16 +347,17 @@ fn new_replay_fails_closed_when_a_declared_bootstrap_is_missing() {
     let _ = run_mag(1, Some(&replay), None, &env);
 
     let text = std::fs::read_to_string(&replay).expect("read replay");
+    let progress_key = "6d61672f70726f67726573732e6a736f6e";
     let without_bootstrap = text
         .lines()
-        .filter(|line| !line.starts_with("boot "))
+        .filter(|line| !line.starts_with(&format!("boot {progress_key} ")))
         .collect::<Vec<_>>()
         .join("\n")
         + "\n";
     std::fs::write(&replay, without_bootstrap).expect("remove bootstrap records");
     let out = run_mag_raw(1, None, Some(&replay), &env);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(!out.status.success(), "missing v7 bootstrap must abort\n{stderr}");
+    assert!(!out.status.success(), "missing v8 bootstrap must abort\n{stderr}");
     assert!(
         stderr.contains("missing required bootstrap input")
             && stderr.contains("mag/progress.json"),
@@ -440,9 +441,9 @@ fn save_repro_retains_bootstrap_entries() {
         .find(|path| path.file_name().and_then(|name| name.to_str()).is_some_and(|name| name.starts_with("repro-")))
         .expect("auto save repro must create a sibling");
     let text = std::fs::read_to_string(repro).expect("read saved repro");
-    assert!(text.starts_with("STONE_REPLAY 7\n"), "repro must retain v7\n{text}");
-    assert_eq!(text.lines().filter(|line| line.starts_with("boot ")).count(), 2,
-        "save repro must retain both bootstrap entries");
+    assert!(text.starts_with("STONE_REPLAY 8\n"), "repro must retain v8\n{text}");
+    assert_eq!(text.lines().filter(|line| line.starts_with("boot ")).count(), 4,
+        "save repro must retain all bootstrap entries");
 }
 
 #[test]
@@ -467,7 +468,7 @@ fn branch_rewrite_retains_bootstrap_entries_in_canonical_key_order() {
 
     let text = std::fs::read_to_string(&replay).expect("read branched replay");
     let boot_lines: Vec<&str> = text.lines().filter(|line| line.starts_with("boot ")).collect();
-    assert_eq!(boot_lines.len(), 2, "branch rewrite must retain both bootstrap entries");
+    assert_eq!(boot_lines.len(), 4, "branch rewrite must retain all bootstrap entries");
     let mut sorted = boot_lines.clone();
     sorted.sort_unstable();
     assert_eq!(boot_lines, sorted, "branch rewrite must emit bootstrap keys canonically");

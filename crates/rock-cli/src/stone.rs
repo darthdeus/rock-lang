@@ -554,15 +554,43 @@ struct FlightRecorder {
 }
 
 /// Content hash of the compiled game (FNV-1a-64, hex) -- the replay-header build
-/// id. Changes whenever codegen output changes, so a log replayed against a
-/// different build warns. Falls back to "dev" if the file can't be read.
+/// id. The generated build clock is presentation metadata, not Artifact
+/// identity, so it is normalized before hashing; every gameplay/codegen byte
+/// remains part of the identity. Falls back to "dev" if the file can't be read.
 fn build_id_for_lua(lua_file: &std::path::Path) -> String {
     match std::fs::read(lua_file) {
         Ok(bytes) => {
+            let mut build_stamp_fn = false;
             let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-            for b in &bytes {
-                h ^= *b as u64;
-                h = h.wrapping_mul(0x0000_0100_0000_01b3);
+            let text = String::from_utf8_lossy(&bytes);
+            for line in text.split_inclusive('\n') {
+                if line.contains("__skull_ginit_MAG_BUILD_INFO_DATE()")
+                    || line.contains("__skull_ginit_MAG_BUILD_INFO_UNIX()")
+                {
+                    build_stamp_fn = true;
+                }
+                let normalized = if build_stamp_fn && line.contains("do return (\"") {
+                    let start = line.find("do return (\"").unwrap() + "do return (\"".len();
+                    let end = line[start..].find("\")").map(|offset| start + offset);
+                    if let Some(end) = end {
+                        let mut replaced = String::with_capacity(line.len());
+                        replaced.push_str(&line[..start]);
+                        replaced.push_str("<volatile-build-stamp>");
+                        replaced.push_str(&line[end..]);
+                        replaced
+                    } else {
+                        line.to_string()
+                    }
+                } else {
+                    line.to_string()
+                };
+                for b in normalized.as_bytes() {
+                    h ^= *b as u64;
+                    h = h.wrapping_mul(0x0000_0100_0000_01b3);
+                }
+                if build_stamp_fn && line.trim() == "end" {
+                    build_stamp_fn = false;
+                }
             }
             format!("{h:016x}")
         }
@@ -1118,7 +1146,10 @@ pub fn do_one_frame(
     cmd.env("FRAME_COUNT", frames.to_string())
         .env("TAKE_SCREENSHOT", "1")  // Always take screenshot when running frames
         .env("STONE_HEADLESS", "1")  // No visible window for frame runs
-        .env("ROCK_FRAME_WATCHDOG", "1");
+        .env("ROCK_FRAME_WATCHDOG", "1")
+        // The replay artifact is the generated Lua itself. Do not let a
+        // caller-provided label turn a different artifact into a match.
+        .env("STONE_BUILD_ID", build_id_for_lua(std::path::Path::new(&lua_file)));
     apply_headless_audio_env(&mut cmd);
     // Replay record/playback (docs/replay-scrub-plan.md). The game process
     // reads these env vars in stone/engine/replay.rock, same pattern as

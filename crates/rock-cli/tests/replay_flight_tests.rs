@@ -90,9 +90,9 @@ fn new_recordings_stamp_a_real_exact_artifact_identity() {
 fn new_format_rejects_a_build_mismatch_before_the_first_game_tick() {
     let (_dir, log) = record_with_env("bitgun", 15, &[("STONE_BUILD_ID", "buildAAA")]);
     let text = std::fs::read_to_string(&log).expect("read log");
-    let new_text = with_header(&text, "8", Some("buildAAA"));
+    let new_text = with_header(&text, "8", Some("1111111111111111"));
     std::fs::write(&log, new_text).expect("rewrite build id");
-    let out = replay_raw("bitgun", &log, &[("STONE_BUILD_ID", "buildBBB")]);
+    let out = replay_raw("bitgun", &log, &[("STONE_BUILD_ID", "2222222222222222")]);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(!out.status.success(), "a mismatched exact artifact must be rejected\n{stderr}");
     assert!(
@@ -150,30 +150,30 @@ fn emitted_lua_has_no_shadow_effect_plan() {
     assert!(!emitted.contains("ShadowEffectPlan"), "emitted Lua still names the removed effect plan type");
 }
 
-/// The v7 header stamps the build id, and a hot-reload during recording writes a
-/// `reload <tick>` marker.
+/// The v8 header stamps the exact build id, and a hot-reload during recording
+/// writes a `reload <tick>` marker.
 #[test]
 fn record_stamps_build_id_and_reload_marker() {
     let (_dir, log) = record_with_env(
         "bitgun", 15,
-        &[("STONE_BUILD_ID", "buildAAA"), ("STONE_RELOAD_AT_FRAME", "5")],
+        &[ ("STONE_RELOAD_AT_FRAME", "5")],
     );
     let text = std::fs::read_to_string(&log).expect("read log");
-    assert!(text.starts_with("STONE_REPLAY 7"), "must be a v7 log\n{text}");
-    assert!(
-        text.lines().any(|l| l == "build buildAAA"),
-        "header must carry the build id\n{text}"
-    );
+    assert!(text.starts_with("STONE_REPLAY 8"), "must be a v8 log\n{text}");
+    let build = text.lines().find_map(|l| l.strip_prefix("build ")).expect("build header");
+    assert!(build.len() == 16 && build.chars().all(|c| c.is_ascii_hexdigit()), "header must carry a real build id\n{text}");
     assert!(
         text.lines().any(|l| l.starts_with("reload ")),
         "a mid-recording reload must write a marker\n{text}"
     );
 }
 
-/// Replaying a reload-marked log warns that determinism ends at the reload.
+/// Legacy replay versions retain warning-only reload compatibility.
 #[test]
 fn replay_warns_on_reload_marked_log() {
     let (_dir, log) = record_with_env("bitgun", 15, &[("STONE_RELOAD_AT_FRAME", "5")]);
+    let text = std::fs::read_to_string(&log).expect("read log");
+    std::fs::write(&log, with_header(&text, "7", Some("buildAAA"))).expect("rewrite legacy log");
     let stderr = replay_stderr("bitgun", &log, &[]);
     assert!(
         stderr.contains("hot-reload marker") && stderr.to_lowercase().contains("determinism"),
@@ -229,19 +229,26 @@ fn f9_save_repro_writes_a_replayable_tick_stamped_file() {
     );
 }
 
-/// Replaying a log against a DIFFERENT build id warns; the same build id does
-/// not.
+/// Legacy replay versions warn on a DIFFERENT build id; the same build id does
+/// not. Exact v8 rejection is covered above.
 #[test]
 fn replay_warns_on_build_id_mismatch_only() {
-    let (_dir, log) = record_with_env("bitgun", 15, &[("STONE_BUILD_ID", "buildAAA")]);
+    let (_dir, log) = record_with_env("bitgun", 15, &[]);
+    let text = std::fs::read_to_string(&log).expect("read log");
+    std::fs::write(&log, with_header(&text, "7", Some("buildAAA"))).expect("rewrite legacy log");
 
-    let mismatched = replay_stderr("bitgun", &log, &[("STONE_BUILD_ID", "buildBBB")]);
+    let mismatched = replay_stderr("bitgun", &log, &[]);
     assert!(
-        mismatched.contains("built against buildAAA") && mismatched.contains("buildBBB"),
+        mismatched.contains("built against buildAAA") && mismatched.contains("current build"),
         "a build mismatch must warn\nstderr:\n{mismatched}"
     );
 
-    let matched = replay_stderr("bitgun", &log, &[("STONE_BUILD_ID", "buildAAA")]);
+    let build = text
+        .lines()
+        .find_map(|line| line.strip_prefix("build "))
+        .expect("recorded build id");
+    std::fs::write(&log, with_header(&text, "7", Some(build))).expect("restore matching legacy log");
+    let matched = replay_stderr("bitgun", &log, &[]);
     assert!(
         !matched.contains("built against"),
         "a matching build id must NOT warn\nstderr:\n{matched}"
