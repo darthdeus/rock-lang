@@ -2009,6 +2009,8 @@ fn explicit_branch_truncates_every_future_bearing_surface_together() {
 
     assert_eq!(diag["STONE_BRANCH_COUNT"].as_i64(), Some(1), "{diag}");
     assert_eq!(diag["STONE_BRANCH_REQUESTS"].as_i64(), Some(1), "the post-frame hook must use the request path: {diag}");
+    assert_eq!(diag["STONE_BRANCH_INPUT_HANDOFFS"].as_i64(), Some(1), "input authority must return only after the branch transaction commits: {diag}");
+    assert_eq!(diag["STONE_BRANCH_INPUT_HANDOFF_EARLY"].as_i64().unwrap_or(0), 0, "input authority must not return before the branch transaction commits: {diag}");
     assert_eq!(diag["STONE_BRANCH_TICK"].as_i64(), Some(branch_tick), "{diag}");
     assert_eq!(
         diag["STONE_BRANCH_DROPPED_RECORDS"].as_i64(), Some(horizon - branch_tick),
@@ -2398,6 +2400,8 @@ fn a_failed_branch_rewrite_leaves_the_future_intact() {
     let diag = &live["__stone_diag"];
     assert_eq!(diag["STONE_BRANCH_FAILURES"].as_i64(), Some(1), "{diag}");
     assert_eq!(diag["STONE_BRANCH_FAILURE_SURFACES_UNCHANGED"].as_i64(), Some(1), "a failed rewrite must prove every future surface and owner stayed intact: {diag}");
+    assert_eq!(diag["STONE_BRANCH_INPUT_HANDOFFS"].as_i64().unwrap_or(0), 0, "a failed rewrite must not hand input back: {diag}");
+    assert_eq!(diag["STONE_BRANCH_INPUT_HANDOFF_EARLY"].as_i64().unwrap_or(0), 0, "a failed rewrite must not hand input back before commit: {diag}");
     assert!(diag.get("STONE_BRANCH_COUNT").is_none(), "a failed rewrite must not branch: {diag}");
     for class in ["RECORDS", "CHECKPOINTS", "RESIZES", "RELOADS", "KEYFRAMES"] {
         let key = format!("STONE_BRANCH_DROPPED_{class}");
