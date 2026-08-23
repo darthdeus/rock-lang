@@ -23,10 +23,8 @@ use std::path::{Path, PathBuf};
 #[derive(Default)]
 pub struct CompileOutcome {
     /// Reasons whose live state or runtime registry cannot take the compatible
-    /// fast path. A live-rewind `rock stone` session stages the new full
-    /// artifact for shadow reconstruction; other runtimes restart. The compile
-    /// deliberately does not write `main.lua` until one of those policies owns
-    /// the cutover.
+    /// fast path. The watcher requests the existing clean process restart for
+    /// these changes; body-only edits remain on the CodeRef overlay path.
     pub restart_reasons: Vec<String>,
 }
 
@@ -45,14 +43,6 @@ pub trait GameCompiler {
     /// backends without an overlay.
     fn canonicalize_for_restart(&mut self) -> Result<()> {
         Ok(())
-    }
-
-    /// Materialize the current compiler session as a full candidate Artifact
-    /// for an already-running live-rewind child. Unlike
-    /// `canonicalize_for_restart`, this does not imply that the child will be
-    /// killed; the child owns the off-side publication and may reject it.
-    fn stage_shadow_artifact(&mut self) -> Result<()> {
-        self.canonicalize_for_restart()
     }
 
     /// Absolute paths of the comptime file inputs (`embed_string`) baked into
@@ -146,15 +136,6 @@ impl GameCompiler for SkullGameCompiler {
                 st.force_full(&self.output_path, &self.incremental_path)?;
                 self.pending_shape_write = false;
             }
-        }
-        Ok(())
-    }
-
-    fn stage_shadow_artifact(&mut self) -> Result<()> {
-        if let Some(st) = &mut self.stone {
-            log::info!(target: "STONE", "skull: materializing full Artifact for live shadow reload");
-            st.force_full(&self.output_path, &self.incremental_path)?;
-            self.pending_shape_write = false;
         }
         Ok(())
     }

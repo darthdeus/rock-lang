@@ -96,7 +96,6 @@ fn string.trim(s) -> string {
 // and the artifact view all share. A plain inline(js) sibling in js.rock works
 // for a whole-program compile but is invisible to the closure walk, which is
 // two seams answering one question.
-@shadow_effect(pure)
 @intrinsic inline(lua) fn join(parts: [string], separator: string) -> string = """
     return table.concat(parts._data, separator, 1, parts.len)
 """

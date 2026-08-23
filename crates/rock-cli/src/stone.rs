@@ -123,14 +123,8 @@ fn reexec_with_new_binary(game_process: &mut Option<Child>) {
     }
 }
 
-fn shadow_full_reload_armed(
-    child_running: bool,
-    flight_recorder: bool,
-    live_rewind: bool,
-    compiler_rebuilt: bool,
-    restart_pending: bool,
-) -> bool {
-    child_running && flight_recorder && live_rewind && !compiler_rebuilt && !restart_pending
+fn full_reload_requires_restart(restart_reasons: &[String]) -> bool {
+    !restart_reasons.is_empty()
 }
 
 pub fn do_stone_watch(
@@ -404,33 +398,12 @@ pub fn do_stone_watch(
                     compilation_succeeded = true;
                     clear_error_file();
                     *comptime_watch.lock() = compiler.comptime_watch_files().into_iter().collect();
-                    if !outcome.restart_reasons.is_empty() {
-                        let shadow_armed = shadow_full_reload_armed(
-                            game_process.is_some(),
-                            flight.is_some(),
-                            std::env::var("STONE_LIVE_REWIND").ok().as_deref() == Some("1"),
-                            compiler_rebuilt,
-                            should_restart,
+                    if full_reload_requires_restart(&outcome.restart_reasons) {
+                        info!(
+                            "live reload requires a process restart ({})",
+                            outcome.restart_reasons.join(", ")
                         );
-                        if shadow_armed {
-                            match compiler.stage_shadow_artifact() {
-                                Ok(()) => info!(
-                                    "live reload staged a full Artifact for shadow reconstruction ({})",
-                                    outcome.restart_reasons.join(", ")
-                                ),
-                                Err(e) => error!(
-                                    "could not stage shadow Artifact ({}); old live world remains running: {}",
-                                    outcome.restart_reasons.join(", "),
-                                    e
-                                ),
-                            }
-                        } else {
-                            info!(
-                                "live reload requires a process restart ({})",
-                                outcome.restart_reasons.join(", ")
-                            );
-                            should_restart = true;
-                        }
+                        should_restart = true;
                     }
                 }
                 Err(e) => {
@@ -1331,27 +1304,19 @@ pub fn do_replay_window(
 mod tests {
     use super::{
         apply_perf_env, apply_run_env, build_id_for_lua, consume_request_file, ensure_flight_dir,
-        flight_recorder_for, frame_exit_result, frame_watchdog_config, session_usage,
-        session_usage_warning, shadow_full_reload_armed, FlightRecorder, SESSION_USAGE_WARN_BYTES,
+        flight_recorder_for, frame_exit_result, frame_watchdog_config, full_reload_requires_restart,
+        session_usage, session_usage_warning, FlightRecorder, SESSION_USAGE_WARN_BYTES,
     };
     use crate::watch::is_compiler_source;
     use std::time::Duration;
 
     #[test]
-    fn full_reload_stages_shadow_only_for_a_live_recorded_child() {
-        assert!(shadow_full_reload_armed(true, true, true, false, false));
-        assert!(!shadow_full_reload_armed(false, true, true, false, false));
-        assert!(!shadow_full_reload_armed(true, false, true, false, false));
-        assert!(!shadow_full_reload_armed(true, true, false, false, false));
-        assert!(!shadow_full_reload_armed(true, true, true, true, false));
-        assert!(!shadow_full_reload_armed(true, true, true, false, true));
-    }
-
     #[test]
-    fn structural_reload_never_starts_a_shadow_candidate() {
+    fn structural_reload_requests_clean_restart() {
+        assert!(full_reload_requires_restart(&["schema changed".to_string()]));
         assert!(
-            !shadow_full_reload_armed(true, true, true, false, false),
-            "a structural edit must request the normal clean restart even while live rewind is armed"
+            !full_reload_requires_restart(&[]),
+            "a body-only edit must not request a restart"
         );
     }
 

@@ -58,7 +58,6 @@ global __SCENE_REGISTRY: SceneRegistry = SceneRegistry {
 }
 
 @scene_type_key
-@shadow_effect(pure)
 inline(lua) fn __rock_scene_type_key<T>() -> string = """
     error("__rock_scene_type_key must be compiler-expanded")
 """

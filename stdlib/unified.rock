@@ -45,22 +45,16 @@ fn is_nan(value: float) -> bool {
 //   stone_get_image_size(handle, w, h)  // extern takes (int, Ptr<int>, Ptr<int>)
 //   return IVec2 { x: w.read(), y: h.read() }
 
-@shadow_effect(candidate_owned)
 @inline inline(lua) fn __ffi_new_int_1() -> Ptr<int> = 'return ffi.new("int[1]")'
-@shadow_effect(candidate_owned)
 @inline inline(lua) fn __ffi_new_float_1() -> Ptr<float> = 'return ffi.new("float[1]")'
 
 fn ffi_out_int() -> Ptr<int> { return __ffi_new_int_1() }
 fn ffi_out_float() -> Ptr<float> { return __ffi_new_float_1() }
 
-@shadow_effect(pure)
 inline(lua) fn read(p: Ptr<int>) -> int = "return p[0]"
-@shadow_effect(pure)
 inline(lua) fn read(p: Ptr<float>) -> float = "return p[0]"
 // JS: a Ptr<T> is the TypedArray itself (NativeBuffer .ptr).
-@shadow_effect(pure)
 inline(js) fn read(p: Ptr<int>) -> int = "return p[0];"
-@shadow_effect(pure)
 inline(js) fn read(p: Ptr<float>) -> float = "return p[0];"
 
 // ============================================================================
@@ -113,7 +107,6 @@ struct NativeBuffer<T> {
 // where `T` resolves to an FFI-clean value struct or int/float/bool; a
 // GC-carrying or opaque-generic `T` is a spanned emit-time error. The body is a
 // never-reached guard (all calls are intercepted before resolution).
-@shadow_effect(candidate_owned)
 inline(lua) fn native_buffer_alloc<T>(n: int) -> NativeBuffer<T> = "error('native_buffer_alloc is a skull compiler intrinsic; a call reached runtime unexpanded')"
 
 // The primitive ctors are thin wrappers over the intrinsic (T binds concretely
@@ -131,33 +124,24 @@ inline(lua) fn native_buffer_alloc<T>(n: int) -> NativeBuffer<T> = "error('nativ
 // Single-hop accessors: the inline(lua) body reaches into the Rock struct's
 // .ptr field directly. This avoids the extra Lua call frame a wrapper would
 // introduce and lets LuaJIT fold the field load + ffi index in one trace.
-@shadow_effect(pure)
 @intrinsic @native_required inline(lua) fn nb_get(b: NativeBuffer<float>, i: int) -> float = "return b.ptr[i]"
-@shadow_effect(pure)
 @intrinsic @native_required inline(lua) fn nb_set(b: NativeBuffer<float>, i: int, v: float) = "b.ptr[i] = v"
-@shadow_effect(pure)
 @intrinsic @native_required inline(lua) fn nb_get(b: NativeBuffer<int>, i: int) -> int = "return b.ptr[i]"
-@shadow_effect(pure)
 @intrinsic @native_required inline(lua) fn nb_set(b: NativeBuffer<int>, i: int, v: int) = "b.ptr[i] = v"
-@shadow_effect(pure)
 @intrinsic @native_required inline(lua) fn nb_get(b: NativeBuffer<uint>, i: int) -> uint = "return b.ptr[i]"
-@shadow_effect(pure)
 @intrinsic @native_required inline(lua) fn nb_set(b: NativeBuffer<uint>, i: int, v: uint) = "b.ptr[i] = v"
 
 // Safe accessor matching the unified `.get(i) -> T?` surface used across
 // all collection types. Returns null on out-of-range; `buf[i]` is the
 // direct-access counterpart.
-@shadow_effect(pure)
 @intrinsic @native_required inline(lua) fn get(b: NativeBuffer<float>, i: int) -> float? = """
     if i < 0 or i >= b.len then return nil end
     return b.ptr[i]
 """
-@shadow_effect(pure)
 @intrinsic @native_required inline(lua) fn get(b: NativeBuffer<int>, i: int) -> int? = """
     if i < 0 or i >= b.len then return nil end
     return b.ptr[i]
 """
-@shadow_effect(pure)
 @intrinsic @native_required inline(lua) fn get(b: NativeBuffer<uint>, i: int) -> uint? = """
     if i < 0 or i >= b.len then return nil end
     return b.ptr[i]
@@ -483,15 +467,10 @@ struct NativeBufferU16 { ptr: PtrU16, len: int }
 struct NativeBufferI16 { ptr: PtrI16, len: int }
 struct NativeBufferU32 { ptr: PtrU32, len: int }
 
-@shadow_effect(candidate_owned)
 @intrinsic @native_required @nomangle inline(lua) fn __nb_alloc_u8(n: int)  -> PtrU8  = 'return ffi.new("uint8_t[?]", n)'
-@shadow_effect(candidate_owned)
 @intrinsic @native_required @nomangle inline(lua) fn __nb_alloc_i8(n: int)  -> PtrI8  = 'return ffi.new("int8_t[?]", n)'
-@shadow_effect(candidate_owned)
 @intrinsic @native_required @nomangle inline(lua) fn __nb_alloc_u16(n: int) -> PtrU16 = 'return ffi.new("uint16_t[?]", n)'
-@shadow_effect(candidate_owned)
 @intrinsic @native_required @nomangle inline(lua) fn __nb_alloc_i16(n: int) -> PtrI16 = 'return ffi.new("int16_t[?]", n)'
-@shadow_effect(candidate_owned)
 @intrinsic @native_required @nomangle inline(lua) fn __nb_alloc_u32(n: int) -> PtrU32 = 'return ffi.new("uint32_t[?]", n)'
 
 fn native_buffer_u8(n: int)  -> NativeBufferU8  { return NativeBufferU8  { ptr: __nb_alloc_u8(n),  len: n } }
@@ -503,53 +482,37 @@ fn native_buffer_u32(n: int) -> NativeBufferU32 { return NativeBufferU32 { ptr: 
 // Single-hop accessors per variant. All surface as int (LuaJIT handles
 // the C<->Lua number conversion at the ffi boundary). One nb_get + nb_set
 // pair per NativeBuffer phantom variant.
-@shadow_effect(pure)
 @intrinsic @native_required inline(lua) fn nb_get(b: NativeBufferU8,  i: int) -> int = "return b.ptr[i]"
-@shadow_effect(pure)
 @intrinsic @native_required inline(lua) fn nb_set(b: NativeBufferU8,  i: int, v: int) = "b.ptr[i] = v"
-@shadow_effect(pure)
 @intrinsic @native_required inline(lua) fn nb_get(b: NativeBufferI8,  i: int) -> int = "return b.ptr[i]"
-@shadow_effect(pure)
 @intrinsic @native_required inline(lua) fn nb_set(b: NativeBufferI8,  i: int, v: int) = "b.ptr[i] = v"
-@shadow_effect(pure)
 @intrinsic @native_required inline(lua) fn nb_get(b: NativeBufferU16, i: int) -> int = "return b.ptr[i]"
-@shadow_effect(pure)
 @intrinsic @native_required inline(lua) fn nb_set(b: NativeBufferU16, i: int, v: int) = "b.ptr[i] = v"
-@shadow_effect(pure)
 @intrinsic @native_required inline(lua) fn nb_get(b: NativeBufferI16, i: int) -> int = "return b.ptr[i]"
-@shadow_effect(pure)
 @intrinsic @native_required inline(lua) fn nb_set(b: NativeBufferI16, i: int, v: int) = "b.ptr[i] = v"
-@shadow_effect(pure)
 @intrinsic @native_required inline(lua) fn nb_get(b: NativeBufferU32, i: int) -> int = "return b.ptr[i]"
-@shadow_effect(pure)
 @intrinsic @native_required inline(lua) fn nb_set(b: NativeBufferU32, i: int, v: int) = "b.ptr[i] = v"
 
 // Safe `.get(i) -> int?` per variant. Codegen for `buf[i]` emits the
 // bounds-checked helper `__nb_checked_get` (type-agnostic on struct).
-@shadow_effect(pure)
 @intrinsic @native_required inline(lua) fn get(b: NativeBufferU8,  i: int) -> int? = """
     if i < 0 or i >= b.len then return nil end; return b.ptr[i]
 """
-@shadow_effect(pure)
 @intrinsic @native_required inline(lua) fn get(b: NativeBufferI8,  i: int) -> int? = """
     if i < 0 or i >= b.len then return nil end; return b.ptr[i]
 """
-@shadow_effect(pure)
 @intrinsic @native_required inline(lua) fn get(b: NativeBufferU16, i: int) -> int? = """
     if i < 0 or i >= b.len then return nil end; return b.ptr[i]
 """
-@shadow_effect(pure)
 @intrinsic @native_required inline(lua) fn get(b: NativeBufferI16, i: int) -> int? = """
     if i < 0 or i >= b.len then return nil end; return b.ptr[i]
 """
-@shadow_effect(pure)
 @intrinsic @native_required inline(lua) fn get(b: NativeBufferU32, i: int) -> int? = """
     if i < 0 or i >= b.len then return nil end; return b.ptr[i]
 """
 
 // Bounds-checked access. The compiler emits calls to these instead of direct
 // buf.ptr[i] access.
-@shadow_effect(pure)
 @nomangle inline(lua) fn __nb_checked_get(buf: any, i: int) -> any = """
     if i < 0 or i >= buf.len then
         error("NativeBuffer index out of bounds: index " .. tostring(i) ..
@@ -691,7 +654,6 @@ value SceneBuilder {
 //     pass lands in the next firing, not this one.
 //   - The engine hot-reload pipeline invokes
 //     `__rock_fire_hot_reload_callbacks()` after `dofile()` completes.
-@shadow_effect(candidate_owned)
 @nomangle inline(lua) fn on_hot_reload(f: fn() -> ()) = """
     if not _G.__rock_on_hot_reload then
         _G.__rock_on_hot_reload = {}
@@ -701,7 +663,6 @@ value SceneBuilder {
 
 // JS: no hot reload (a browser/node program loads once); registration is a
 // no-op so @on_reload-decorated fns compile unchanged.
-@shadow_effect(candidate_owned)
 @nomangle inline(js) fn on_hot_reload(f: fn() -> ()) = ""
 
 // Fire every registered on_hot_reload callback. Iterates a COPY and does NOT
@@ -952,7 +913,6 @@ inline(lua) fn same_ref(a: any, b: any) -> bool = "rawequal(a, b)"
 // functions that transitively call `print` get demoted with a warning
 // (rather than a hard error) so a `print(x)` dropped into a pure
 // helper for debugging doesn't force stripping the annotation.
-@shadow_effect(virtualized)
 @debug_impure
 extern(lua) fn print(args: ...any)
 
@@ -960,11 +920,9 @@ extern(lua) fn print(args: ...any)
 fn print_float(value: float) { print(to_string(value)) }
 
 // Error handling
-@shadow_effect(pure)
 extern(lua) fn error(message: string)
 
 // Note: Lua has built-in tostring(), declare as extern
-@shadow_effect(pure)
 extern(lua) fn tostring(value: any) -> string
 
 // Method versions of tostring for basic types
@@ -1083,7 +1041,6 @@ fn assert_null<T>(value: T?, message: string = "Expected null value") {
 // regardless of origin. `__ty` is the lone type marker (`__rock_get_type` reads
 // it, the serializer checks `v.__ty == "Vec"`, methods resolve statically via
 // UFCS). See docs/skull-vec-representation-divergence.md.
-@shadow_effect(pure)
 inline(lua) fn vec_new<T>() -> [T] = """
     return { _data = {}, len = 0, __ty = "Vec" }
 """
@@ -1117,7 +1074,6 @@ inline(lua) fn __rock_vec_from_lua_array<T>(arr: any, len: int) -> [T] = """
 // so it makes no layout claim and carries the contract that says so. It stays
 // spelled `T`: that is the inference edge giving `vec_new()` its element type,
 // and `any`/`any?` would sever it. See `docs/boundary-contracts.md` 2.4.
-@shadow_effect(pure)
 @inline inline(lua) fn vec_push<T>(vec: [T], @repr(opaque) item: T) = """
     vec.len = vec.len + 1
     vec._data[vec.len] = item
@@ -1331,11 +1287,9 @@ inline(lua) fn __op_null_coalesce<T>(a: T?, b: T?) -> T? = """
 """
 
 // Unwrap functions for nullable types (moved early to support vec functions)
-@shadow_effect(pure)
 @nomangle @inline inline(lua) fn is_null(value: any) -> bool = "return value == nil"
 
 // Expands debug.traceback("", 2) inline — level 2 = caller of the enclosing function.
-@shadow_effect(pure)
 @inline inline(lua) fn __debug_traceback() -> string = 'return debug.traceback("", 2)'
 
 @inline fn unwrap<T>(value: T?) -> T {
@@ -1398,14 +1352,12 @@ fn expect<T>(value: T?, message: string) -> T {
 // it needs a real bound JS fn, not a call-site template: an inline(js) sibling
 // of the inline(lua) body. bone collapses the same-name backend pair to one
 // logical fn in the value path, so the reference / call binds the right variant.
-@shadow_effect(pure)
 inline(lua) fn float_to_int(value: float) -> int = """
     if type(value) ~= "number" then
         error("Expected a number, got " .. type(value))
     end
     return math.floor(value)
 """
-@shadow_effect(pure)
 inline(js) fn float_to_int(value: float) -> int = "return Math.floor(value);"
 
 @inline fn to_int(value: float) -> int { return float_to_int(value) }
@@ -1462,9 +1414,7 @@ inline(lua) fn deepcopy<T>(obj: T) -> T = """
 // Both cast<T> and transmute<A,B> are no-ops at runtime — they just reshape
 // the Rock type, no Lua work needed. `@expand("$1")` substitutes the arg
 // at each call site with zero overhead. See docs/compiler-architecture.md.
-@shadow_effect(pure)
 @inline inline(lua) fn cast<T>(value: any) -> T = "return value"
-@shadow_effect(pure)
 @inline inline(lua) fn transmute<A, B>(x: A) -> B = "return x"
 
 // int and float are both `number` in Lua — this cast is a no-op at runtime.
@@ -1482,7 +1432,6 @@ inline(lua) fn deepcopy<T>(obj: T) -> T = """
 // default-type-params + PR-A arity bump; `.resume()` shape stays
 // `Y?` regardless of R (D2a unit-elision), with the typed return
 // value on `.result()`.
-@shadow_effect(pure)
 inline(lua) fn resume<Y, R, N>(c: Coroutine<Y, R, N>) -> Y? = """
     return c.__resume(c)
 """
@@ -1497,7 +1446,6 @@ inline(lua) fn resume<Y, R, N>(c: Coroutine<Y, R, N>) -> Y? = """
 // For N = (), both forms compile; the 2-arg form is rarely useful
 // (no `let x = yield V` exists for the body to bind), so prefer the
 // arg-less form there.
-@shadow_effect(pure)
 inline(lua) fn resume<Y, R, N>(c: Coroutine<Y, R, N>, arg: N) -> Y? = """
     return c.__resume(c, arg)
 """
@@ -1507,12 +1455,10 @@ inline(lua) fn resume<Y, R, N>(c: Coroutine<Y, R, N>, arg: N) -> Y? = """
 // killed, or fell off without a value-bearing return. For
 // `R = ()` coroutines (the default), `R?` is `()?` and is always
 // null in practice — same observable as before.
-@shadow_effect(pure)
 inline(lua) fn result<Y, R, N>(c: Coroutine<Y, R, N>) -> R? = """
     return c.__return
 """
 
-@shadow_effect(pure)
 inline(lua) fn status<Y, R, N>(c: Coroutine<Y, R, N>) -> string = """
     if c.__state == -2 then return "errored" elseif c.__state < 0 then return "dead" else return "suspended" end
 """
@@ -1536,7 +1482,6 @@ inline(lua) fn completed<Y, R, N>(c: Coroutine<Y, R, N>) -> bool = """
 // whatever the body's `error("...")` raised. Avoid name collision with
 // the stdlib `extern(lua) fn error(message: string)` (the panic-style
 // thrower) -- that's a parking note from the design discussion.
-@shadow_effect(pure)
 inline(lua) fn last_error<Y, R, N>(c: Coroutine<Y, R, N>) -> string? = """
     return c.__error
 """
@@ -1583,7 +1528,6 @@ fn next<Y, R>(c: Coroutine<Y, R, ()>) -> (bool, Y) {
     if c.__on_killed then c.__on_killed(c) end
 """
 
-@shadow_effect(candidate_owned)
 inline(lua) fn kill<Y, R, N>(c: Coroutine<Y, R, N>) = """
     __rock_coroutine_kill(c)
 """
@@ -1602,20 +1546,17 @@ inline(lua) fn fire_hot_reload<Y, R, N>(c: Coroutine<Y, R, N>) = """
 // coroutine instance. MUST be called inside a co fn body — the compiler
 // relocates this call to constructor-time so the hook fires on the first
 // resume too. Invoking outside a co fn body is a runtime error.
-@shadow_effect(pure)
 inline(lua) fn on_resume(f: fn() -> ()) = """
     error("on_resume can only be called inside a co fn body")
 """
 
 // Register a closure to run when the handle's .kill() is invoked. MUST
 // be called inside a co fn body. Invoking outside is a runtime error.
-@shadow_effect(pure)
 inline(lua) fn on_killed(f: fn() -> ()) = """
     error("on_killed can only be called inside a co fn body")
 """
 
 // Low-level Lua table operations for implementing [T]
-@shadow_effect(pure)
 inline(lua) fn table_new() -> any = """return {}"""
 
 @inline inline(lua) fn table_insert(tbl: any, value: any) = "table.insert(tbl, value)"
@@ -1652,12 +1593,10 @@ inline(lua) fn table_new() -> any = """return {}"""
 // EMBEDDED field can satisfy, being the one that grants no whole-value read
 // (docs/scalarization-and-boxing-design.md S 6). A `FieldRef` coerces down to
 // it, so call sites are unchanged.
-@shadow_effect(pure)
 @inline inline(lua) fn field_get<T, V>(o: T, f: ReadFieldRef<T, V>) -> V = """
     return o[f]
 """
 
-@shadow_effect(candidate_owned)
 @inline inline(lua) fn field_set<T, V>(o: T, f: WriteFieldRef<T, V>, v: V) = """
     o[f] = v
 """
@@ -1665,7 +1604,6 @@ inline(lua) fn table_new() -> any = """return {}"""
 // Typed for the same reason the `__vec_data_*` receivers are: `any` claimed no
 // representation, so a missing column route fell through to the boxed body.
 // Both callers are Map methods (`remove`, `clear`).
-@shadow_effect(pure)
 @inline inline(lua) fn table_unset<K, V>(tbl: Map<K, V>, index: K) = """
     tbl[index] = nil
 """
@@ -1683,11 +1621,8 @@ inline(lua) fn table_new() -> any = """return {}"""
 // creates a bare-name obligation for opaque text to call, and these are reached
 // only through ordinary Rock calls and the column intercept, which match the
 // Rock name rather than the emitted symbol.
-@shadow_effect(pure)
 @inline inline(lua) fn __vec_data_get<T>(vec: [T], index: int) -> any = "return vec._data[index + 1]"
-@shadow_effect(pure)
 @inline inline(lua) fn __vec_data_set<T>(vec: [T], index: int, value: any) = "vec._data[index + 1] = value"
-@shadow_effect(pure)
 @inline inline(lua) fn __vec_data_unset<T>(vec: [T], index: int) = "vec._data[index + 1] = nil"
 
 // The COLD half of the same boundary. `get`/`set`/`unset` cover every op that
@@ -1721,7 +1656,6 @@ inline(lua) fn __vec_data_clone<T>(vec: [T]) -> [T] = """
     return { _data = copy, len = vec.len, __ty = "Vec" }
 """
 
-@shadow_effect(pure)
 inline(lua) fn __vec_data_sort<T, K>(vec: [T], key_fn: fn(T) -> K) = """
     table.sort(vec._data, function(a, b)
         return key_fn(a) < key_fn(b)
@@ -2169,19 +2103,16 @@ const EPSILON: float = 0.0000001
 // 53-bit mantissa draw: top 53 bits of the next splitmix64 word / 2^53 gives
 // a uniform [0, 1) double (bit-identical across architectures — math.random
 // is not).
-@shadow_effect(pure)
 inline(lua) fn random() -> float = """
     return tonumber(__rock_rng_next() / 2048ULL) * (1.0 / 9007199254740992.0)
 """
 fn random_range(min: float, max: float) -> float { return random() * (max - min) + min }
-@shadow_effect(pure)
 inline(lua) fn random_int(min: int, max: int) -> int = """
     local r = max - min
     if r <= 0 then return min end
     local z = __rock_rng_next()
     return tonumber(z % ffi.cast("uint64_t", r)) + min
 """
-@shadow_effect(pure)
 inline(lua) fn random_seed(seed: int) = """
     __rock_rng_seed(seed)
 """
@@ -2226,7 +2157,6 @@ inline(lua) fn get_os() -> string = """
     end
 """
 
-@shadow_effect(pure)
 @inline inline(lua) fn phantom<T>() -> T = """return nil"""
 inline(lua) fn tuple_first<A, B>(tuple: (A, B)) -> A = """return tuple[1]"""
 inline(lua) fn tuple_second<A, B>(tuple: (A, B)) -> B = """return tuple[2]"""
@@ -2254,7 +2184,6 @@ inline(lua) fn ffi_null() -> any = """
     return nil
 """
 
-@shadow_effect(pure)
 inline(lua) fn ffi_string(ptr: any, len: int?) -> string = """
     if len then
         return ffi.string(ptr, len)
@@ -2299,7 +2228,6 @@ fn Map<K, V>.insert(map, key: K, value: V) {
 
 // Not `@nomangle`: reached through ordinary Rock calls and the column
 // intercept, both of which match the Rock name rather than the emitted symbol.
-@shadow_effect(pure)
 @inline inline(lua) fn Map<K, V>.get(map, key: K) -> V? = """
     return map[key]
 """
@@ -2352,7 +2280,6 @@ fn Map<K, V>.insert(map, key: K, value: V) {
 // Both halves assume the boxed `_data`/`len` Vec layout for `free_indices`;
 // this is only sound while that stays the representation of `[int]`
 // (`crates/skull/tests/inline_lua_column_container_param_sentinel.rs`).
-@shadow_effect(pure)
 @nomangle inline(lua) fn __slot_alloc(m: any, hw: any) -> int = """
     local fi = m.free_indices
     local s
@@ -2368,7 +2295,6 @@ fn Map<K, V>.insert(map, key: K, value: V) {
     return s
 """
 
-@shadow_effect(pure)
 @nomangle inline(lua) fn __slot_release(m: any, slot: int) = """
     local fi = m.free_indices
     fi.len = fi.len + 1
@@ -2883,7 +2809,6 @@ fn reduce<I: Iterator<T>, T, U>(it: I, initial: U, f: (U, T) -> U) -> U {
     return acc
 }
 
-@shadow_effect(pure)
 @inline
 fn find<I: Iterator<T>, T>(it: I, pred: fn(T) -> bool) -> T? {
     for x in it {
@@ -3209,11 +3134,9 @@ fn Envelope.step_by(e, goal: float, step_dt: float) -> float {
 // String manipulation functions
 // string had a redundant `len` + `length` pair (both `string.len`); keep
 // `len` to match Vec/Map/Arena. (Vec2.length is an unrelated overload.)
-@shadow_effect(pure)
 @intrinsic @inline inline(lua) fn string.len(s) -> int = "string.len(s)"
 
 
-@shadow_effect(pure)
 @intrinsic inline(lua) fn string.substring(s, start: int, end_idx: int) -> string = """
     -- Rock uses 0-based indexing, Lua uses 1-based
     return string.sub(s, start + 1, end_idx)
@@ -3221,14 +3144,12 @@ fn Envelope.step_by(e, goal: float, step_dt: float) -> float {
 
 @inline inline(lua) fn string.upper(s) -> string = "string.upper(s)"
 
-@shadow_effect(pure)
 @inline inline(lua) fn string.lower(s) -> string = "string.lower(s)"
 
 // Plain-text search for `substr`, starting the scan at unit index `from`.
 // Returns the 0-based unit index of the first match at or after `from`, or -1.
 // Stays intrinsic (Lua `string.find(..., true)` runs at C speed); Layer-2
 // string algorithms in strings.rock build on it.
-@shadow_effect(pure)
 @intrinsic @native_required inline(lua) fn string.find(s, substr: string, from: int = 0) -> int = """
     local pos = string.find(s, substr, from + 1, true)
     if pos then
@@ -3257,7 +3178,6 @@ fn Envelope.step_by(e, goal: float, step_dt: float) -> float {
 // the setup in this body the decode ran 70% INTERPRETED and canada went to
 // ~105ms against a 32ms baseline. Keep this body free of closures and branches
 // that create upvalues.
-@shadow_effect(pure)
 @intrinsic @native_required inline(lua) fn string.parse_float_at(s, start: int, end_idx: int) -> float = """
     local f = _G.__rock_parse_float_at or __rock_parse_float_at_setup()
     return f(s, start, end_idx)
@@ -3300,10 +3220,8 @@ double strtod_l(const char *nptr, char **endptr, __rock_locale_t loc);
     return f
 """
 
-@shadow_effect(pure)
 @intrinsic @inline inline(lua) fn string_char(code: int) -> string = "string.char(code)"
 
-@shadow_effect(pure)
 @intrinsic inline(lua) fn from_codepoint(cp: int) -> string = """
     if cp < 0 or cp > 0x10FFFF then
         error("from_codepoint: codepoint out of range: " .. tostring(cp))
@@ -3327,14 +3245,11 @@ double strtod_l(const char *nptr, char **endptr, __rock_locale_t loc);
 // false cross-backend promise -- an index is opaque, feed it back to a string
 // primitive, do not do arithmetic on the value across backends. Real
 // characters come from `chars()`.
-@shadow_effect(pure)
 @intrinsic inline(lua) fn string.unit_at(s, index: int) -> int = """
     return string.byte(s, index + 1) or 0  -- Convert to 1-based, return 0 if out of bounds
 """
 
-@shadow_effect(pure)
 @inline inline(lua) fn string.repeat(s, count: int) -> string = "string.rep(s, count)"
-@shadow_effect(pure)
 @inline inline(js) fn string.repeat(s, count: int) -> string = "return s.repeat(count);"
 
 // StringBuilder: append-and-join accumulator. Naive `+` concat in a loop is
@@ -3375,10 +3290,8 @@ inline(lua) fn format_float(v: float, width: int, decimals: int) -> string = """
 """
 
 // Pattern-based string matching (Lua patterns, not regex)
-@shadow_effect(pure)
 @inline inline(lua) fn string_match(s: string, pattern: string) -> string? = "string.match(s, pattern)"
 // JS: first capture (or whole match) via the shared Lua-pattern translator.
-@shadow_effect(pure)
 inline(js) fn string_match(s: string, pattern: string) -> string? = """
     var m = s.match(new RegExp(__lua_pattern_to_regex(pattern)));
     if (!m) return null;
@@ -3389,7 +3302,6 @@ inline(js) fn string_match(s: string, pattern: string) -> string? = """
 @inline inline(lua) fn string.gmatch(s, pattern: string) -> fn() -> string? = "string.gmatch(s, pattern)"
 
 // Pattern-based replacement (use replace for literal replacement)
-@shadow_effect(pure)
 inline(lua) fn string.gsub(s, pattern: string, replacement: string) -> string = """
     return (string.gsub(s, pattern, replacement))
 """
@@ -3455,7 +3367,6 @@ inline(lua) fn string.gsub(s, pattern: string, replacement: string) -> string = 
     return out;
 """
 
-@shadow_effect(pure)
 inline(js) fn string.gsub(s, pattern: string, replacement: string) -> string = """
     var rx = new RegExp(__lua_pattern_to_regex(pattern), "g");
     var rep = replacement.replace(/%([0-9%%])/g, function (_, d) { return d === "%" ? "%" : "$" + d; });
@@ -3477,11 +3388,9 @@ fn string.parse_int(s) -> int? {
 }
 
 // Parse a float from a string. Returns null if the string is not a valid number.
-@shadow_effect(pure)
 @inline inline(lua) fn string.parse_float(s) -> float? = "tonumber(s)"
 
 // Read an environment variable by name. Returns null if the variable is not set.
-@shadow_effect(pure)
 @inline inline(lua) fn env_var(name: string) -> string? = "os.getenv(name)"
 
 // Read an env var as int. Returns `default_val` if unset or unparseable.
