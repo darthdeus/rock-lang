@@ -329,11 +329,105 @@ fn assert_mag_seek_state_matches(
     label: &str,
 ) {
     let mut exact = sim.clone();
-    for name in ["DROP_PARTICLES", "WISPS"] {
-        assert!(exact.remove(name), "{name} must be admitted as simulation state");
-        assert_f32_state_matches(&got["mag"][name], &want["mag"][name], &format!("mag.{name}"));
-    }
+    assert!(
+        exact.remove("WISPS"),
+        "WISPS must be admitted as simulation state"
+    );
+    assert!(
+        exact.contains("MAG_ACTIVE_RUN"),
+        "MAG_ACTIVE_RUN must own the RunState.world simulation state"
+    );
+    assert_f32_state_matches(&got["mag"]["WISPS"], &want["mag"]["WISPS"], "mag.WISPS");
+    assert_mag_seek_populations_match(got, want, label);
     assert_sim_state_matches(got, want, &exact, label);
+}
+
+fn assert_mag_seek_populations_match(
+    got: &serde_json::Value,
+    want: &serde_json::Value,
+    label: &str,
+) {
+    for key in [
+        "MAG_REPLAY_DROP_PARTICLES",
+        "MAG_REPLAY_DROP_FIRE",
+        "MAG_REPLAY_DROP_MEND",
+        "MAG_REPLAY_WISPS",
+        "MAG_REPLAY_WISP_TRAIL",
+    ] {
+        assert_eq!(
+            got["__stone_diag"][key],
+            want["__stone_diag"][key],
+            "Mag replay population {key} must match {label}: got={} want={}",
+            got["__stone_diag"],
+            want["__stone_diag"]
+        );
+    }
+}
+
+fn assert_mag_seek_populations_are_nonzero(state: &serde_json::Value) {
+    let diag = &state["__stone_diag"];
+    for (key, label) in [
+        ("MAG_REPLAY_DROP_PARTICLES", "drop-particle arena"),
+        ("MAG_REPLAY_DROP_FIRE", "Fire drop particles"),
+        ("MAG_REPLAY_DROP_MEND", "Mend drop particles"),
+        ("MAG_REPLAY_WISPS", "wisp arena"),
+        ("MAG_REPLAY_WISP_TRAIL", "wisp trail history"),
+    ] {
+        assert!(
+            diag[key].as_i64().is_some_and(|n| n > 0),
+            "the reference must populate {label}: {diag}"
+        );
+    }
+}
+
+fn mag_seek_equivalence_state_names(
+    game: &str,
+    frames: u32,
+) -> std::collections::HashSet<String> {
+    let mut sim = sim_state_names(game, frames);
+    for name in ["WORLD_MODE", "MOTES", "MAG_ACTIVE_RUN", "WISPS"] {
+        assert!(sim.contains(name), "{name} must be admitted as simulation state");
+    }
+    for name in ["TALLY", "TELEMETRY_SESSION_OPEN", "TELEMETRY_LAST_FRAME_T"] {
+        assert!(!sim.contains(name), "{name} is telemetry side-channel state");
+    }
+    assert!(!sim.contains("DROP_PARTICLES"), "RunState.world owns DROP_PARTICLES inside MAG_ACTIVE_RUN");
+    assert!(!sim.contains("ENGINE"), "render-only ENGINE settings must not be checkpointed");
+    for name in [
+        "MAG_BUILD_INFO_DATE",
+        "MAG_BUILD_INFO_UNIX",
+        "MAG_DEATH_AUDIO_WRITES",
+        "MAG_DEATH_GRAYSCALE_PASSES",
+        "MAG_GAMEPLAY_PANEL_DRAWS",
+        "MAG_GAMEPLAY_WORLD_DRAWS",
+        "MAG_LIGHTS_ADDED",
+        "MAG_RESURRECTION_UI_DRAWS",
+        "MAG_RUN_STARTS",
+        "MAG_RUN_STOPS",
+        "UI_MOUSE",
+        "MENU_ATMOSPHERE_BATCHES",
+        "MENU_ATMOSPHERE_SUBMISSIONS",
+        "MENU_BOUNDED_FLOOR_SUBMISSIONS",
+        "MENU_BOUNDED_GLYPH_SUBMISSIONS",
+        "MENU_LABEL_CACHE_KEYS",
+        "MENU_LABEL_OUTPUT_ANCHORS",
+        "MENU_LABEL_OUTPUT_CALLS",
+        "MENU_LABEL_ROUTES",
+        "MENU_LABEL_SCENE_CALLS",
+        "MENU_LOGO_REFLECTION_ADDITIONAL_INPUTS",
+        "MENU_LOGO_REFLECTION_FACE_PIXELS",
+        "MENU_LOGO_REFLECTION_LAST_GENERATION",
+        "MENU_LOGO_REFLECTION_LAST_SOURCE_HANDLE",
+        "MENU_LOGO_REFLECTION_MATERIAL_CALLS",
+        "MENU_LOGO_TEXT_ART",
+        "MENU_LOGO_TEXT_STATE",
+        "MENU_LOGO_TEXT_OUTPUT_CALLS",
+        "MENU_OUTPUT_TEXT_ART",
+        "MENU_OUTPUT_TEXT_TARGET_RECT",
+    ] {
+        assert!(sim.remove(name), "{name} must be excluded as a presentation or lifecycle diagnostic");
+    }
+    sim
 }
 
 #[test]
@@ -1030,6 +1124,125 @@ fn mag_main_menu_transition_survives_seek_resimulation() {
         keyboard_sought["mag"]["CREDITS_OPEN"], keyboard_reference["mag"]["CREDITS_OPEN"],
         "restored focus must not activate a different menu item"
     );
+}
+
+#[test]
+fn mag_main_menu_seek_state_equivalence_survives_resimulation() {
+    let game = "mag";
+    let frames = 80;
+    let target: u32 = 40;
+    let census_tick = (target - 1).to_string();
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("menu-state-equivalence.replay");
+    let log_s = log.to_string_lossy().into_owned();
+    let progress_s = dir.path().join("progress.json").to_string_lossy().into_owned();
+    let layout_s = dir.path().join("spellbook-layout.jsonl").to_string_lossy().into_owned();
+    let settings_s = dir.path().join("preconsented-settings.json").to_string_lossy().into_owned();
+    std::fs::write(
+        &settings_s,
+        r#"{"privacy":{"analytics":1,"analytics_version":3}}"#,
+    )
+    .expect("seed the production settings file with an answered consent");
+
+    let _ = run_record_dump(
+        game,
+        frames,
+        &log_s,
+        &[
+            ("MAG_BOOT_MENU", "1"),
+            ("MAG_BOOT_PLAYING", "1"),
+            ("MAG_REPLAY_BOOTSTRAP_FIXTURE", "progress"),
+            ("MAG_PROGRESS_PATH_OVERRIDE", progress_s.as_str()),
+            ("MAG_LAYOUT_HISTORY_PATH_OVERRIDE", layout_s.as_str()),
+            ("MAG_SETTINGS_PATH_OVERRIDE", settings_s.as_str()),
+            ("MAG_SCREENSHOT", "1"),
+            ("STONE_CHECKPOINT_INTERVAL", "0"),
+        ],
+    );
+    let text = std::fs::read_to_string(&log).expect("read Mag state-equivalence replay");
+    let mut tick = 0;
+    let lines = text
+        .lines()
+        .map(|line| {
+            if !line.starts_with("t ") {
+                return line.to_string();
+            }
+            let mut fields: Vec<&str> = line.split_whitespace().collect();
+            assert!(fields.len() == 8 || fields.len() == 10, "recorded tick shape changed: {line}");
+            fields[1] = "0x1.999999999999ap-4";
+            fields[2] = "960";
+            fields[3] = if tick == 30 { "590" } else { "432" };
+            fields[6] = "-";
+            fields[7] = if tick == 30 { "1" } else { "-" };
+            tick += 1;
+            fields.join(" ")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(tick, frames as usize, "fixture must rewrite every requested tick");
+    std::fs::write(&log, lines + "\n").expect("write deterministic state-equivalence replay");
+
+    let reference = run_replay_dump(
+        game,
+        frames,
+        &log_s,
+        &[
+            ("MAG_BOOT_MENU", "1"),
+            ("MAG_SCREENSHOT", "1"),
+            ("MAG_PROGRESS_PATH_OVERRIDE", progress_s.as_str()),
+            ("MAG_LAYOUT_HISTORY_PATH_OVERRIDE", layout_s.as_str()),
+            ("MAG_SETTINGS_PATH_OVERRIDE", settings_s.as_str()),
+            ("STONE_START_PAUSED", "1"),
+            ("STONE_STEP_FRAMES", &target.to_string()),
+            ("MAG_REPLAY_STATE_CENSUS", "1"),
+            ("MAG_REPLAY_STATE_CENSUS_TICK", &census_tick),
+        ],
+    );
+    assert_eq!(current_tick(&reference), i64::from(target));
+    assert_eq!(reference["__stone_diag"]["MAG_PLAY_EFFECT_SCREEN"].as_i64(), Some(2));
+    assert_mag_seek_populations_are_nonzero(&reference);
+    let sim = mag_seek_equivalence_state_names(game, frames);
+
+    let sought = run_replay_dump(
+        game,
+        frames + target + 10,
+        &log_s,
+        &[
+            ("MAG_BOOT_MENU", "1"),
+            ("MAG_SCREENSHOT", "1"),
+            ("MAG_PROGRESS_PATH_OVERRIDE", progress_s.as_str()),
+            ("MAG_LAYOUT_HISTORY_PATH_OVERRIDE", layout_s.as_str()),
+            ("MAG_SETTINGS_PATH_OVERRIDE", settings_s.as_str()),
+            ("STONE_KEYFRAME_INTERVAL", "1000"),
+            ("STONE_TIMELINE_SEEK_AT_FRAME", &frames.to_string()),
+            ("STONE_TIMELINE_SEEK_TO_TICK", &target.to_string()),
+            ("MAG_REPLAY_STATE_CENSUS", "1"),
+            ("MAG_REPLAY_STATE_CENSUS_TICK", &census_tick),
+        ],
+    );
+    assert_eq!(current_tick(&sought), i64::from(target));
+    assert_eq!(sought["__stone_diag"]["STONE_SEEK_RESIM_FRAMES"].as_i64(), Some(i64::from(target)));
+    assert_mag_seek_state_matches(&sought, &reference, &sim, "Mag from-boot state equivalence");
+
+    let cadence_sought = run_replay_dump(
+        game,
+        frames + target + 10,
+        &log_s,
+        &[
+            ("MAG_BOOT_MENU", "1"),
+            ("MAG_SCREENSHOT", "1"),
+            ("MAG_PROGRESS_PATH_OVERRIDE", progress_s.as_str()),
+            ("MAG_LAYOUT_HISTORY_PATH_OVERRIDE", layout_s.as_str()),
+            ("MAG_SETTINGS_PATH_OVERRIDE", settings_s.as_str()),
+            ("STONE_KEYFRAME_INTERVAL", "30"),
+            ("STONE_TIMELINE_SEEK_AT_FRAME", &frames.to_string()),
+            ("STONE_TIMELINE_SEEK_TO_TICK", &target.to_string()),
+            ("MAG_REPLAY_STATE_CENSUS", "1"),
+            ("MAG_REPLAY_STATE_CENSUS_TICK", &census_tick),
+        ],
+    );
+    assert_eq!(cadence_sought["__stone_diag"]["STONE_SEEK_RESIM_FRAMES"].as_i64(), Some(10));
+    assert_mag_seek_state_matches(&cadence_sought, &reference, &sim, "Mag cadence state equivalence");
 }
 
 #[test]
