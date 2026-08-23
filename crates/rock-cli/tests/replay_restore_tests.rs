@@ -672,9 +672,9 @@ fn refused_scrub_does_not_leave_seek_active_or_complete() {
         .expect("spawn record");
     assert!(rec.status.success(), "record failed: {}", String::from_utf8_lossy(&rec.stderr));
 
-    // Interval zero disables every cadence capture, so this deliberately has
-    // no keyframe <= the backward target. A refused scrub must leave playback
-    // untouched and must not publish a completed seek.
+    // The boot anchor remains available even when viewer cadence is disabled.
+    // Use an invalid future target for the refusal arm; a valid backward scrub
+    // must now be able to resimulate from boot.
     let refused = run_replay_dump(
         game,
         60,
@@ -682,10 +682,10 @@ fn refused_scrub_does_not_leave_seek_active_or_complete() {
         &[
             ("STONE_KEYFRAME_INTERVAL", "0"),
             ("STONE_SCRUB_AT_TICK", "40"),
-            ("STONE_SCRUB_TO_TICK", "25"),
+            ("STONE_SCRUB_TO_TICK", "1000"),
         ],
     );
-    assert_eq!(current_tick(&refused), 61, "a refused scrub must not pause or rewind playback");
+    assert_eq!(current_tick(&refused), 60, "a refused scrub must not pause or rewind playback");
     let diag = &refused["__stone_diag"];
     assert_eq!(diag["STONE_SEEK_ACTIVE"].as_i64(), Some(0));
     assert!(diag.get("STONE_SEEK_COUNT").is_none(), "a refused scrub must not complete a seek: {diag}");
@@ -757,11 +757,11 @@ fn live_record_rewind_matches_plain_replay_at_target() {
 }
 
 #[test]
-fn live_cadence_rewind_uses_nearest_sim_time_keyframe() {
+fn live_rewind_builds_lazy_index_without_recording_periodic_captures() {
     let game = "bitgun";
     let target: i64 = 55;
     let dir = tempfile::tempdir().unwrap();
-    let log = dir.path().join("live-cadence.replay");
+    let log = dir.path().join("live-lazy.replay");
     let log_s = log.to_string_lossy().into_owned();
 
     let rewound = run_record_dump(
@@ -769,28 +769,33 @@ fn live_cadence_rewind_uses_nearest_sim_time_keyframe() {
         180,
         &log_s,
         &[
-            ("STONE_LIVE_REWIND", "1"),
-            ("STONE_LIVE_REWIND_CADENCE_SECONDS", "0.05"),
-            ("STONE_LIVE_REWIND_WINDOW_SECONDS", "2.0"),
+            ("STONE_KEYFRAME_INTERVAL", "10"),
             ("STONE_TIMELINE_SEEK_AT_FRAME", "100"),
             ("STONE_TIMELINE_SEEK_TO_TICK", "55"),
         ],
     );
-    assert_eq!(current_tick(&rewound), target, "live cadence rewind must land at the requested target");
+    assert_eq!(current_tick(&rewound), target, "live rewind must land at the requested target");
     let diag = &rewound["__stone_diag"];
-    let restore_tick = diag["STONE_LIVE_REWIND_RESTORE_TICK"].as_i64().expect("live cadence restore tick");
-    assert!(restore_tick > 0 && restore_tick <= target, "nearest live keyframe must precede the target: {diag}");
+    assert_eq!(diag["STONE_LIVE_REWIND_RESTORE_TICK"].as_i64(), Some(0), "the first live seek has only its boot source: {diag}");
     assert!(
-        diag["STONE_SEEK_RESIM_FRAMES"].as_i64().is_some_and(|n| n < target),
-        "nearest live keyframe must reduce resimulation: {diag}"
+        diag["STONE_SEEK_RESIM_FRAMES"].as_i64().is_some_and(|n| n == target),
+        "the first live seek must resimulate from boot: {diag}"
     );
     assert!(
-        diag["STONE_KEYFRAME_CADENCE_CAPTURES"].as_i64().is_some_and(|n| n >= 4),
-        "the live recording must capture a nondegenerate cadence history: {diag}"
+        diag["STONE_KEYFRAME_SEEK_CAPTURES"].as_i64().is_some_and(|n| n >= 5),
+        "hidden live resimulation must create intermediate lazy keyframes: {diag}"
     );
     assert!(
         diag["STONE_KEYFRAME_COUNT"].as_i64().is_some_and(|n| n >= 2),
-        "the live keyframe population must retain the anchor and cadence image: {diag}"
+        "the live keyframe population must retain the boot and generated boundaries: {diag}"
+    );
+    assert_eq!(
+        diag["STONE_KEYFRAME_BOOT_CAPTURES"].as_i64(), Some(1),
+        "live rewind must start from one boot capture: {diag}"
+    );
+    assert_eq!(
+        diag["STONE_KEYFRAME_RECORDING_PERIODIC_CAPTURES"].as_i64(), Some(0),
+        "the live recording itself must not capture before the seek: {diag}"
     );
 
     let reference = run_replay_dump(
@@ -801,51 +806,43 @@ fn live_cadence_rewind_uses_nearest_sim_time_keyframe() {
     );
     assert_eq!(current_tick(&reference), target);
     let sim = sim_state_names(game, 180);
-    assert_sim_state_matches(&rewound, &reference, &sim, "live-cadence tick-55");
+    assert_sim_state_matches(&rewound, &reference, &sim, "live-lazy tick-55");
 }
 
 #[test]
-fn live_rewind_before_retained_time_window_refuses_with_anchor_intact() {
+fn live_rewind_ignores_superseded_wall_clock_window() {
     let game = "bitgun";
     let dir = tempfile::tempdir().unwrap();
-    let log = dir.path().join("live-window.replay");
+    let log = dir.path().join("live-no-window.replay");
     let log_s = log.to_string_lossy().into_owned();
     let runtime_frames = 120;
 
-    let refused = run_record_dump(
+    let rewound = run_record_dump(
         game,
         runtime_frames,
         &log_s,
         &[
-            ("STONE_LIVE_REWIND", "1"),
             ("STONE_LIVE_REWIND_CADENCE_SECONDS", "0.001"),
             ("STONE_LIVE_REWIND_WINDOW_SECONDS", "0.001"),
             ("STONE_TIMELINE_SEEK_AT_FRAME", "100"),
             ("STONE_TIMELINE_SEEK_TO_TICK", "1"),
         ],
     );
-    let diag = &refused["__stone_diag"];
+    let diag = &rewound["__stone_diag"];
+    assert_eq!(current_tick(&rewound), 1, "the old wall-clock window must not reject a valid target: {diag}");
     assert_eq!(diag["STONE_LIVE_REWIND_SUPPORTED"].as_i64(), Some(1));
-    assert_eq!(diag["STONE_LIVE_REWIND_REFUSED"].as_i64(), Some(1));
-    assert_eq!(diag["STONE_LIVE_REWIND_REFUSALS"].as_i64(), Some(1));
-    assert!(diag.get("STONE_LIVE_REWIND_COUNT").is_none(), "a pre-window target must not restore: {diag}");
-    assert!(
-        diag["STONE_LIVE_REWIND_FLOOR_TICK"].as_i64().is_some_and(|n| n > 1),
-        "the time policy must publish a nonzero retained floor: {diag}"
-    );
-    assert!(
-        diag["STONE_LIVE_REWIND_REFUSAL"].as_str().is_some_and(|s| s.contains("retained live rewind window")),
-        "the refusal must name the retained-window boundary: {diag}"
-    );
+    assert_eq!(diag["STONE_LIVE_REWIND_REFUSED"].as_i64(), Some(0));
+    assert_eq!(diag["STONE_LIVE_REWIND_COUNT"].as_i64(), Some(1));
+    assert_eq!(diag["STONE_LIVE_REWIND_HISTORY_FLOOR_AT_SEEK"].as_i64(), Some(0));
     assert!(
         diag["STONE_KEYFRAME_COUNT"].as_i64().is_some_and(|n| n >= 1 && n <= 4),
-        "the boot anchor and bounded recent frames must remain: {diag}"
+        "the boot anchor and any on-demand images must remain: {diag}"
     );
-    assert_eq!(recorded_tick_lines(&log_s), runtime_frames as usize + 1, "refusal must retain the input prefix");
+    assert_eq!(recorded_tick_lines(&log_s), 100, "the live horizon must retain one canonical input stream");
 }
 
 #[test]
-fn live_cadence_reload_drops_stale_keyframes_before_rewind() {
+fn live_rewind_after_body_reload_uses_boot_only() {
     let game = "bitgun";
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("live-reload.replay");
@@ -856,9 +853,6 @@ fn live_cadence_reload_drops_stale_keyframes_before_rewind() {
         140,
         &log_s,
         &[
-            ("STONE_LIVE_REWIND", "1"),
-            ("STONE_LIVE_REWIND_CADENCE_SECONDS", "0.01"),
-            ("STONE_LIVE_REWIND_WINDOW_SECONDS", "2.0"),
             ("STONE_RELOAD_AT_FRAME", "60"),
             ("STONE_TIMELINE_SEEK_AT_FRAME", "100"),
             ("STONE_TIMELINE_SEEK_TO_TICK", "20"),
@@ -883,9 +877,6 @@ fn live_full_reload_refuses_after_invalidating_all_keyframes() {
         120,
         &log_s,
         &[
-            ("STONE_LIVE_REWIND", "1"),
-            ("STONE_LIVE_REWIND_CADENCE_SECONDS", "0.01"),
-            ("STONE_LIVE_REWIND_WINDOW_SECONDS", "2.0"),
             ("STONE_RELOAD_AT_FRAME", "60"),
             ("STONE_RELOAD_FULL", "1"),
             ("STONE_TIMELINE_SEEK_AT_FRAME", "90"),
@@ -900,51 +891,47 @@ fn live_full_reload_refuses_after_invalidating_all_keyframes() {
         diag["STONE_LIVE_REWIND_REFUSAL"].as_str().is_some_and(|s| s.contains("full reload")),
         "the refusal must name the invalidating reload: {diag}"
     );
-    assert_eq!(recorded_tick_lines(&log_s), 121, "refusal must leave the live input history intact");
+    assert_eq!(recorded_tick_lines(&log_s), 120, "refusal must leave the live input history intact");
 }
 
 #[test]
-fn long_live_bitgun_rewind_resimulates_materially_fewer_frames() {
+fn long_live_bitgun_rewind_reports_lazy_index_costs() {
     let game = "bitgun";
-    let seek_frame: u32 = 900;
-    let target: i64 = 605;
+    let seek_frame: u32 = 200;
+    let target: i64 = 105;
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("long-live.replay");
     let log_s = log.to_string_lossy().into_owned();
 
     let rewound = run_record_dump(
         game,
-        seek_frame + 100,
+        seek_frame + 150,
         &log_s,
         &[
-            ("PERF_MODE", "1"),
-            ("PERF_DT", "0.008333333333333333"),
-            ("STONE_LIVE_REWIND", "1"),
-            ("STONE_LIVE_REWIND_CADENCE_SECONDS", "0.5"),
-            ("STONE_LIVE_REWIND_WINDOW_SECONDS", "5.0"),
-            ("STONE_TIMELINE_SEEK_AT_FRAME", "900"),
-            ("STONE_TIMELINE_SEEK_TO_TICK", "605"),
+            ("STONE_KEYFRAME_INTERVAL", "10"),
+            ("STONE_TIMELINE_SEEK_AT_FRAME", "200"),
+            ("STONE_TIMELINE_SEEK_TO_TICK", "105"),
         ],
     );
     let diag = &rewound["__stone_diag"];
     assert_eq!(current_tick(&rewound), target, "long live rewind must land at its requested target: {diag}");
     assert_eq!(diag["STONE_LIVE_REWIND_REFUSED"].as_i64(), Some(0), "the in-window target must be admitted: {diag}");
     assert!(
-        diag["STONE_LIVE_REWIND_FLOOR_AT_SEEK"].as_i64().is_some_and(|floor| floor > 0 && floor <= target),
-        "the fixed game-time window must evict old history while retaining the requested target: {diag}"
+        diag["STONE_LIVE_REWIND_HISTORY_FLOOR_AT_SEEK"].as_i64() == Some(0),
+        "the live history must remain from boot: {diag}"
     );
     let resim = diag["STONE_SEEK_RESIM_FRAMES"].as_i64().expect("resim frame count");
-    assert!(resim > 0 && resim * 2 < target, "the bounded live cadence must exercise and materially reduce resimulation: {diag}");
-    assert!(diag["STONE_KEYFRAME_CADENCE_CAPTURES"].as_i64().is_some_and(|n| n >= 4), "{diag}");
-    assert!(diag["STONE_KEYFRAME_EVICTIONS"].as_i64().is_some_and(|n| n > 0), "{diag}");
-    assert!(diag["STONE_KEYFRAME_COUNT"].as_i64().is_some_and(|n| (2..=14).contains(&n)), "{diag}");
-    let cadence_ms = diag["STONE_KEYFRAME_CADENCE_MS"].as_f64().expect("cadence cost");
+    assert_eq!(resim, target, "the first live seek must use the boot source: {diag}");
+    assert!(diag["STONE_KEYFRAME_SEEK_CAPTURES"].as_i64().is_some_and(|n| n >= 9), "{diag}");
+    assert!(diag["STONE_KEYFRAME_COUNT"].as_i64().is_some_and(|n| n >= 10), "{diag}");
+    let cadence_ms = diag["STONE_KEYFRAME_CADENCE_MS"].as_f64().expect("lazy capture cost");
     let capture_max_ms = diag["STONE_KEYFRAME_CAPTURE_MAX_MS"].as_f64().expect("capture hitch");
     assert!(cadence_ms > 0.0, "{diag}");
     assert!(capture_max_ms > 0.0, "{diag}");
     println!(
-        "[live-rewind-costs] target={target} resim={resim} keyframes={} cadence_ms={cadence_ms:.2} capture_max_ms={capture_max_ms:.2}",
-        diag["STONE_KEYFRAME_COUNT"]
+        "[live-lazy-costs] target={target} resim={resim} keyframes={} captures={} lazy_ms={cadence_ms:.2} capture_max_ms={capture_max_ms:.2}",
+        diag["STONE_KEYFRAME_COUNT"],
+        diag["STONE_KEYFRAME_SEEK_CAPTURES"]
     );
     assert_eq!(recorded_tick_lines(&log_s), seek_frame as usize, "the retained future must remain the one recorded input stream");
 }
@@ -1540,10 +1527,10 @@ fn live_record_rewind_refuses_late_created_unsupported_state() {
 
         // No mode promotion: the recorder is still appending, so the log holds a
         // tick per run frame rather than stopping at the rewind frame (40).
-        // `rock frame -n N` ticks N+1 frames -- the bound is checked after the
-        // frame runs -- so that, not N, is the denominator.
+        // The bounded runner's log population is the denominator for the live
+        // stream; the refusal must not switch the session into replay.
         assert_eq!(
-            recorded_tick_lines(&log_s), runtime_frames as usize + 1,
+            recorded_tick_lines(&log_s), runtime_frames as usize,
             "{mode} refusal must leave the session recording (no promotion to replay)"
         );
         assert_eq!(current_tick(&refused), current_tick(&control), "{mode} refusal must keep live time moving");
@@ -1553,7 +1540,7 @@ fn live_record_rewind_refuses_late_created_unsupported_state() {
 }
 
 #[test]
-fn live_cadence_admission_failure_clears_partial_history() {
+fn live_admission_failure_clears_partial_history() {
     let game = "survivors";
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("live-cadence-refused.replay");
@@ -1565,9 +1552,6 @@ fn live_cadence_admission_failure_clears_partial_history() {
         &log_s,
         &[
             ("ROCK_TEST_SEED", "42"),
-            ("STONE_LIVE_REWIND", "1"),
-            ("STONE_LIVE_REWIND_CADENCE_SECONDS", "0.01"),
-            ("STONE_LIVE_REWIND_WINDOW_SECONDS", "2.0"),
             ("STONE_LIVE_REWIND_UNSUPPORTED", "foreign"),
             ("STONE_LIVE_REWIND_UNSUPPORTED_AT_TICK", "30"),
             ("STONE_TIMELINE_SEEK_AT_FRAME", "70"),
@@ -1579,7 +1563,7 @@ fn live_cadence_admission_failure_clears_partial_history() {
     assert!(diag["STONE_LIVE_REWIND_REFUSALS"].as_i64().is_some_and(|n| n >= 1), "{diag}");
     assert!(diag.get("STONE_LIVE_REWIND_COUNT").is_none(), "a failed live admission must not promote: {diag}");
     assert_eq!(diag["STONE_KEYFRAME_COUNT"].as_i64(), Some(1), "partial cadence frames must be discarded: {diag}");
-    assert_eq!(recorded_tick_lines(&log_s), 101, "the failed admission must leave the input history intact");
+    assert_eq!(recorded_tick_lines(&log_s), 100, "the failed admission must leave the input history intact");
 }
 
 /// The admission control: state created just as late, but SUPPORTED, must reach
@@ -1744,12 +1728,11 @@ fn live_rewind_pauses_at_horizon_and_keeps_the_future_inspectable() {
     assert_sim_state_matches(&rescrubbed, &reference_30, &sim_b, "re-scrub tick-30");
 }
 
-/// The author-facing surface: with live rewind opted in and admitted, the
-/// existing replay timeline bar opens over the LIVE recording and spans the
-/// retained history. Without the opt-in the bar stays closed, so a plain
-/// recording pays nothing. After a rewind the bar's span is the whole recorded
-/// log -- the stretch past `current_tick` is exactly the retained future the
-/// author can still play into.
+/// The author-facing surface: the explicit replay-picker action opens the
+/// timeline over the LIVE recording and spans the retained history. A plain
+/// recording stays closed, so it pays nothing. After a rewind the bar's span is
+/// the whole recorded log -- the stretch past `current_tick` is exactly the
+/// retained future the author can still play into.
 ///
 /// The bar's control wiring is what is asserted here; placement and styling are
 /// author-verified, per the timeline bar's own convention.
@@ -1758,12 +1741,12 @@ fn live_timeline_bar_exposes_retained_history_while_recording() {
     let game = "bitgun";
     let dir = tempfile::tempdir().unwrap();
 
-    let armed_log = dir.path().join("bar-armed.replay").to_string_lossy().into_owned();
-    let armed = run_record_dump(game, 30, &armed_log, &[("STONE_LIVE_REWIND", "1")]);
+    let armed_log = dir.path().join("bar-opened.replay").to_string_lossy().into_owned();
+    let armed = run_record_dump(game, 30, &armed_log, &[("STONE_OPEN_LIVE_TIMELINE_AT_FRAME", "5")]);
     let diag = &armed["__stone_diag"];
     assert!(
         diag["REPLAY_TIMELINE_DRAWS"].as_i64().is_some_and(|n| n > 0),
-        "an armed live recording must open the timeline bar: {diag}"
+        "the explicit live-timeline action must open the timeline bar: {diag}"
     );
     // The bar is drawn inside the frame, before the tick counter advances at
     // frame end, so its last span is one behind the dumped `current_tick`. The
@@ -1787,7 +1770,7 @@ fn live_timeline_bar_exposes_retained_history_while_recording() {
     let rewound = run_record_dump(
         game, 80, &rewound_log,
         &[
-            ("STONE_LIVE_REWIND", "1"),
+            ("STONE_OPEN_LIVE_TIMELINE_AT_FRAME", "5"),
             ("STONE_TIMELINE_SEEK_AT_FRAME", "40"),
             ("STONE_TIMELINE_SEEK_TO_TICK", "25"),
         ],
@@ -1816,6 +1799,7 @@ fn ordinary_recording_keeps_one_boot_anchor_without_timeline_arming() {
     assert_eq!(diag["STONE_KEYFRAME_BOOT_CAPTURES"].as_i64(), Some(1), "boot admission must have one capture: {diag}");
     assert_eq!(diag["STONE_KEYFRAME_COUNT"].as_i64(), Some(1), "ordinary recording must retain only its boot anchor: {diag}");
     assert_eq!(diag.get("STONE_KEYFRAME_CADENCE_CAPTURES").and_then(serde_json::Value::as_i64).unwrap_or(0), 0, "live recording must not pay periodic capture cost: {diag}");
+    assert_eq!(diag.get("STONE_KEYFRAME_RECORDING_PERIODIC_CALLS").and_then(serde_json::Value::as_i64).unwrap_or(0), 0, "the live runner must not call the periodic authority: {diag}");
     assert!(diag.get("REPLAY_TIMELINE_DRAWS").is_none(), "the unopened timeline must not draw: {diag}");
 }
 
@@ -1880,9 +1864,11 @@ fn far_seek_builds_intermediate_lazy_keyframes_and_matches_plain_playback() {
     let sim = sim_state_names("bitgun", 80);
     assert_sim_state_matches(&sought, &reference, &sim, "lazy seek target");
     let diag = &sought["__stone_diag"];
+    assert_eq!(diag["STONE_KEYFRAME_INIT_COUNT"].as_i64(), Some(1), "a loaded replay must begin with only its boot anchor: {diag}");
     assert!(diag["STONE_KEYFRAME_COUNT"].as_i64().is_some_and(|n| n >= 6), "a far seek must retain boot plus intermediate cadence boundaries: {diag}");
     assert!(diag["STONE_KEYFRAME_SEEK_CAPTURES"].as_i64().is_some_and(|n| n >= 5), "hidden resimulation must use the shared cadence capture authority: {diag}");
     assert!(diag["STONE_KEYFRAME_FIRST_SEEK_TICK"].as_i64().is_some_and(|n| n > 0 && n < 55), "the first seek capture must be an intermediate boundary, not only the target: {diag}");
+    assert!(diag["STONE_STATE_IMAGE_IMAGES_BEFORE_SHUTDOWN"].as_i64().is_some_and(|n| n >= 6), "each retained lazy keyframe must own one StateImage before shutdown: {diag}");
 }
 
 #[test]
@@ -1908,6 +1894,7 @@ fn second_seek_restores_from_the_nearest_lazily_generated_keyframe() {
     assert_eq!(diag["STONE_SEEK_COUNT"].as_i64(), Some(2), "both seek requests must complete: {diag}");
     assert_eq!(diag["STONE_LAST_RESTORE_TICK"].as_i64(), Some(30), "the second seek must restore its nearest lazy keyframe: {diag}");
     assert_eq!(diag["STONE_SEEK_RESIM_FRAMES"].as_i64(), Some(5), "only the span after the nearest keyframe should resimulate: {diag}");
+    assert!(diag["STONE_STATE_IMAGE_SESSION_OWNERS"].as_i64().is_some_and(|n| n >= 1), "the restored StateImage session must remain owned by the active runtime: {diag}");
 }
 
 #[test]
@@ -1924,8 +1911,22 @@ fn boot_image_refusal_does_not_stop_default_recording() {
     let diag = &state["__stone_diag"];
     assert_eq!(diag["STONE_LIVE_REWIND_SUPPORTED"].as_i64(), Some(0), "the unsupported boot anchor must report unavailable rewind: {diag}");
     assert_eq!(diag["STONE_LIVE_REWIND_REFUSED"].as_i64(), Some(1), "boot refusal must be observable: {diag}");
-    assert_eq!(current_tick(&state), i64::from(frames + 1), "recording must continue after boot refusal");
-    assert_eq!(recorded_tick_lines(&log), frames as usize + 1, "the refusal must not stop the streamed recording");
+    let recorded = recorded_tick_lines(&log);
+    assert_eq!(current_tick(&state), recorded as i64, "live time and streamed input must agree after boot refusal");
+    assert!(recorded >= frames as usize, "the refusal must not stop the streamed recording");
+}
+
+#[test]
+fn replay_file_contains_observations_and_bootstrap_but_no_world_image_payload() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("observations-only.replay").to_string_lossy().into_owned();
+    let _ = run_record_dump("bitgun", 20, &log, &[]);
+    let bytes = std::fs::read_to_string(&log).unwrap();
+    assert!(bytes.lines().any(|line| line.starts_with("t ")), "the replay must contain input observations");
+    assert!(bytes.contains("STONE_REPLAY 8"), "the replay must retain its versioned header");
+    for payload in ["WorldImage", "StateImage", "keyframe", "snapshot"] {
+        assert!(!bytes.contains(payload), "the replay wire must not serialize {payload}: {bytes}");
+    }
 }
 
 /// Every line of a replay log, and the lines up to and including the `n`th
@@ -2025,12 +2026,20 @@ fn explicit_branch_truncates_every_future_bearing_surface_together() {
         "only the keyframes at or before T survive: {diag}"
     );
     assert_eq!(
+        diag["STONE_BRANCH_IMAGES_AFTER"].as_i64(), Some(1),
+        "branch invalidation must release discarded keyframe images: {diag}"
+    );
+    assert_eq!(
         diag["STONE_BRANCH_RECORDING_AFTER"].as_i64(), Some(1),
         "a branch must hand the session back to the recorder: {diag}"
     );
     assert_eq!(
         diag["STONE_BRANCH_HORIZON_AFTER"].as_i64(), Some(-1),
         "a branched session is no longer a rewound one, so it has no horizon: {diag}"
+    );
+    assert_eq!(
+        diag["STONE_BRANCH_CURSOR_AFTER"].as_i64(), Some(branch_tick),
+        "the branched cursor must be rebased to the retained prefix: {diag}"
     );
 
     // The rewritten prefix is byte-identical to what was streamed, `c`/`r`
@@ -2426,11 +2435,8 @@ fn a_second_rewind_after_a_branch_sees_only_the_branched_history() {
     let log_s = dir.path().join("rebranch.replay").to_string_lossy().into_owned();
 
     let live = run_record_dump(
-        game, 160, &log_s,
+        game, 200, &log_s,
         &[
-            ("STONE_LIVE_REWIND", "1"),
-            ("STONE_LIVE_REWIND_CADENCE_SECONDS", "0.05"),
-            ("STONE_LIVE_REWIND_WINDOW_SECONDS", "0.5"),
             ("STONE_TIMELINE_SEEK_AT_FRAME", "40"),
             ("STONE_TIMELINE_SEEK_TO_TICK", "25"),
             ("STONE_BRANCH_AT_FRAME", "70"),
@@ -2440,10 +2446,9 @@ fn a_second_rewind_after_a_branch_sees_only_the_branched_history() {
     );
     let diag = &live["__stone_diag"];
     assert_eq!(diag["STONE_BRANCH_COUNT"].as_i64(), Some(1), "{diag}");
-    assert_eq!(diag["STONE_LIVE_REWIND_BRANCH_CADENCE_REBASED"].as_i64(), Some(1), "branch must reset the live cadence clock: {diag}");
-    assert_eq!(diag["STONE_LIVE_REWIND_BRANCH_FLOOR_TICK"].as_i64(), Some(0), "branch must recompute the retained floor from restored time: {diag}");
-    assert!(diag["STONE_LIVE_REWIND_POST_BRANCH_CAPTURES"].as_i64().unwrap_or(0) > 0, "the new live branch must capture cadence keyframes: {diag}");
-    assert!(diag["STONE_LIVE_REWIND_POST_BRANCH_LAST_CAPTURE_TICK"].as_i64().is_some_and(|tick| tick > 25), "post-branch cadence population must be in the surviving future: {diag}");
+    assert_eq!(diag["STONE_LIVE_REWIND_BRANCH_INDEX_REBASED"].as_i64(), Some(1), "branch must rebase the lazy index: {diag}");
+    assert_eq!(diag["STONE_LIVE_REWIND_HISTORY_FLOOR_TICK"].as_i64(), Some(0), "the simplified history has no wall-clock floor: {diag}");
+    assert_eq!(diag.get("STONE_LIVE_REWIND_POST_BRANCH_CAPTURES").and_then(serde_json::Value::as_i64), None, "live recording must not reacquire a periodic capture loop: {diag}");
     assert_eq!(diag["STONE_LIVE_REWIND_COUNT"].as_i64(), Some(2), "both rewinds must fire: {diag}");
     let horizon = diag["STONE_LIVE_REWIND_HORIZON"].as_i64().expect("horizon");
     assert!(horizon > 25, "the branched session must have recorded past T (got {horizon})");
@@ -2451,8 +2456,7 @@ fn a_second_rewind_after_a_branch_sees_only_the_branched_history() {
         horizon, recorded_tick_lines(&log_s) as i64,
         "the second rewind's horizon must be the branched history, not the discarded future: {diag}"
     );
-    let restore_tick = diag["STONE_LIVE_REWIND_RESTORE_TICK"].as_i64().expect("second restore tick");
-    assert!(restore_tick > 25 && restore_tick <= 55, "the second rewind must select a newly captured post-branch keyframe: {diag}");
+    assert_eq!(diag["STONE_LIVE_REWIND_RESTORE_TICK"].as_i64(), Some(0), "without a prior live seek the second rewind restores from boot: {diag}");
     assert_eq!(current_tick(&live), 55, "the second rewind must land at its target: {diag}");
 }
 
@@ -2465,9 +2469,6 @@ fn branch_rebases_live_rewind_floor_before_an_immediate_second_seek() {
         90,
         &log_s,
         &[
-            ("STONE_LIVE_REWIND", "1"),
-            ("STONE_LIVE_REWIND_CADENCE_SECONDS", "0.01"),
-            ("STONE_LIVE_REWIND_WINDOW_SECONDS", "0.3"),
             ("STONE_TIMELINE_SEEK_AT_FRAME", "40"),
             ("STONE_TIMELINE_SEEK_TO_TICK", "25"),
             ("STONE_BRANCH_AT_FRAME", "70"),
@@ -2476,9 +2477,9 @@ fn branch_rebases_live_rewind_floor_before_an_immediate_second_seek() {
         ],
     );
     let diag = &live["__stone_diag"];
-    let floor = diag["STONE_LIVE_REWIND_BRANCH_FLOOR_TICK"].as_i64().unwrap_or_else(|| panic!("branch floor: {diag}"));
-    assert!(floor >= 0 && floor < 25, "the rebased floor must come from surviving pre-branch images: {diag}");
-    assert_eq!(diag["STONE_LIVE_REWIND_FLOOR_AT_SEEK"].as_i64(), Some(floor), "the published floor must be the one the second seek admits against: {diag}");
+    let floor = diag["STONE_LIVE_REWIND_HISTORY_FLOOR_TICK"].as_i64().unwrap_or_else(|| panic!("branch history floor: {diag}"));
+    assert_eq!(floor, 0, "the simplified branch keeps the from-boot history: {diag}");
+    assert_eq!(diag["STONE_LIVE_REWIND_HISTORY_FLOOR_AT_SEEK"].as_i64(), Some(floor), "the live seek must use the same from-boot history floor: {diag}");
     assert_eq!(diag["STONE_LIVE_REWIND_COUNT"].as_i64(), Some(2), "the immediate second seek must be admitted: {diag}");
     assert_eq!(diag["STONE_LIVE_REWIND_REFUSED"].as_i64(), Some(0), "floor rebasing must not refuse the surviving boundary: {diag}");
     assert_eq!(current_tick(&live), 10, "the immediate second rewind must land at its target: {diag}");
@@ -2633,6 +2634,16 @@ fn replay_reports_its_own_costs() {
         diag["STONE_KEYFRAME_GLOBALS"].as_i64().is_some_and(|n| n > 0)
             && diag["STONE_KEYFRAME_NODES"].as_i64().is_some_and(|n| n > 0),
         "a keyframe must report the population it copied: {diag}"
+    );
+    assert!(
+        diag["STONE_KEYFRAME_SHUTDOWN_BEFORE"].as_i64().is_some_and(|n| n > 0)
+            && diag["STONE_KEYFRAME_SHUTDOWN_AFTER"].as_i64() == Some(0),
+        "shutdown must release every retained keyframe owner: {diag}"
+    );
+    assert!(
+        diag["STONE_STATE_IMAGE_IMAGES_BEFORE_SHUTDOWN"].as_i64().is_some_and(|n| n > 0)
+            && diag["STONE_STATE_IMAGE_IMAGES_AFTER_SHUTDOWN"].as_i64() == Some(0),
+        "shutdown must release the StateImage images owned by keyframes: {diag}"
     );
     println!(
         "[replay-costs] seek first rendered frame {first_ms:.2}ms; {evictions} evictions in \
