@@ -52,38 +52,16 @@ function __rock_artifact_binding_plan_publish()
     _G.__rock_artifact_binding_plan_pending = nil
   end
 end
-function __rock_shadow_effect_plan_stage(plan)
-  if not _G.__rock_state_transaction then error("shadow effect plan stage not open", 0) end
-  if not plan or not plan.census
-      or plan.census.examined ~= plan.census.classified then
-    error("incomplete shadow effect plan", 0)
-  end
-  if _G.__stone_shadow and _G.__stone_shadow.active
-      and (plan.census.examined <= 0 or plan.admissible ~= true) then
-    error("shadow effect plan rejects an unclassified effect", 0)
-  end
-  _G.__rock_shadow_effect_plan_pending = plan
-end
-function __rock_shadow_effect_plan_publish()
-  local plan = _G.__rock_shadow_effect_plan_pending
-  if plan ~= nil then
-    _G.__ROCK_SHADOW_EFFECT_PLAN = plan
-    _G.__rock_shadow_effect_plan_pending = nil
-  end
-end
 function __rock_artifact_plan_begin()
   if _G.__rock_state_transaction_begin then __rock_state_transaction_begin() end
   _G.__rock_artifact_binding_plan_pending = nil
-  _G.__rock_shadow_effect_plan_pending = nil
 end
 function __rock_artifact_plan_abort()
   if _G.__rock_state_transaction_abort then __rock_state_transaction_abort() end
   _G.__rock_artifact_binding_plan_pending = nil
-  _G.__rock_shadow_effect_plan_pending = nil
 end
 function __rock_artifact_plan_publish()
   __rock_artifact_binding_plan_publish()
-  __rock_shadow_effect_plan_publish()
   if _G.__rock_state_transaction_commit then __rock_state_transaction_commit() end
 end
 "#;
@@ -140,7 +118,6 @@ function __rock_code_slot_begin()
   _G.__rock_lifecycle_plan_pending = nil
   _G.__rock_definition_plan_pending = nil
   _G.__rock_artifact_binding_plan_pending = nil
-  _G.__rock_shadow_effect_plan_pending = nil
 end
 function __rock_code_slot_abort()
   if _G.__rock_state_transaction_abort then __rock_state_transaction_abort() end
@@ -150,7 +127,6 @@ function __rock_code_slot_abort()
   _G.__rock_lifecycle_plan_pending = nil
   _G.__rock_definition_plan_pending = nil
   _G.__rock_artifact_binding_plan_pending = nil
-  _G.__rock_shadow_effect_plan_pending = nil
   local pending_wgpu = rawget(_G, "PENDING_WGPU_SHADER_SRCS")
   if pending_wgpu then
     for key in pairs(pending_wgpu) do pending_wgpu[key] = nil end
@@ -298,7 +274,6 @@ function __rock_code_slot_publish()
     _G.__ROCK_DEFINITION_PLAN = definition_plan
   end
   if __rock_artifact_binding_plan_publish then __rock_artifact_binding_plan_publish() end
-  if __rock_shadow_effect_plan_publish then __rock_shadow_effect_plan_publish() end
   _G.__rock_code_slot_pending = nil
   _G.__rock_code_slot_pending_slots = nil
   _G.__rock_lifecycle_plan_pending = nil
