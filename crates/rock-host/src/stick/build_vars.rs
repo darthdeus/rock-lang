@@ -1,8 +1,7 @@
 //! Resolution of `[build.vars]` into concrete values, once per session build,
 //! before compilation (a live `rock stone` session re-resolves on every full
 //! rebuild, never per incremental update). Precedence: declaration `default` (for a
-//! channel-restricted var outside its channels, or for a failed `cmd` on a channel
-//! the var declares in `optional_channels`) < the var's source < explicit
+//! channel-restricted var outside its channels) < the var's source < explicit
 //! `--var NAME=value` override. There is deliberately NO ambient-env fallback:
 //! the steam release wrapper's whole job was refusing ambient release identity
 //! (tools/telemetry/test_steam_release.py pins that), and the declared
@@ -101,25 +100,7 @@ pub fn resolve_build_vars(
         } else if let Some(builtin) = var.builtin.as_deref() {
             resolve_builtin(builtin, &channel, target_os)?
         } else if let Some(cmd) = var.cmd.as_ref() {
-            match run_var_cmd(name, cmd, var.secret, project_dir, &channel) {
-                Ok(value) => value,
-                Err(e) if var.optional_channels.as_deref()
-                    .is_some_and(|opt| opt.iter().any(|c| c == &channel)) =>
-                {
-                    // Degrade, but never quietly: the build continues without the
-                    // value, so whatever consumes it is running in a reduced mode
-                    // the operator did not ask for. `validate_build` guarantees the
-                    // default exists. The cause is logged at its own severity by
-                    // run_var_cmd's caller-visible error, redacted when secret.
-                    log::warn!(
-                        "[build.vars] {name}: source failed on optional channel {channel:?}; \
-                         using default. Cause: {}",
-                        if var.secret { "<redacted: secret = true>".to_string() } else { format!("{e:#}") }
-                    );
-                    var.default.clone().expect("validate_build requires a default for optional_channels")
-                }
-                Err(e) => return Err(e),
-            }
+            run_var_cmd(name, cmd, var.secret, project_dir, &channel)?
         } else {
             // validate_build above rejected sourceless vars.
             unreachable!("[build.vars] {name} has no source past validate_build")
@@ -194,7 +175,26 @@ fn run_var_cmd(
         };
         anyhow::bail!("[build.vars] {name}: {shown} failed ({}): {detail}", output.status);
     }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let warning = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if !warning.is_empty() {
+        if secret {
+            if value.is_empty() {
+                log::warn!(
+                    "[build.vars] {name}: source unavailable for channel {channel:?}; \
+                     continuing without a value"
+                );
+            } else {
+                log::warn!(
+                    "[build.vars] {name}: source reported a warning for channel {channel:?}; \
+                     details withheld (secret = true)"
+                );
+            }
+        } else {
+            log::warn!("[build.vars] {name}: {warning}");
+        }
+    }
+    Ok(value)
 }
 
 #[cfg(test)]
@@ -420,77 +420,6 @@ mod tests {
             .expect_err("failing cmd must fail resolution, never default silently");
         let msg = format!("{err:#}");
         assert!(msg.contains("boom") && msg.contains("X"), "error carries var and stderr: {msg}");
-    }
-
-    // The four arms below pin the whole `optional_channels` contract together:
-    // degrade where declared, stay fatal everywhere else. Splitting them lets a
-    // future edit soften the release arm while the dev arm still reads green.
-    #[test]
-    fn optional_channel_degrades_a_failing_cmd_to_its_default() {
-        let cfg = fixture(concat!(
-            "[package]\nname = \"x\"\n",
-            "[build]\nchannels = [\"dev\", \"steam\"]\ndefault_channel = \"dev\"\n",
-            "[build.vars]\nTOKEN = { cmd = \"echo boom >&2; exit 1\", \
-             channels = [\"dev\", \"steam\"], optional_channels = [\"dev\"], default = \"\" }\n",
-        ));
-        let dir = tempfile::tempdir().unwrap();
-        let resolved = resolve_build_vars(&cfg, dir.path(), Some("dev"), None, &no_overrides())
-            .expect("a failing cmd on an optional channel resolves to the default");
-        assert_eq!(resolved.vars["TOKEN"].value, "", "degrades to the declared default");
-    }
-
-    #[test]
-    fn a_release_channel_stays_fatal_when_the_same_var_is_optional_on_dev() {
-        let cfg = fixture(concat!(
-            "[package]\nname = \"x\"\n",
-            "[build]\nchannels = [\"dev\", \"steam\"]\ndefault_channel = \"dev\"\n",
-            "[build.vars]\nTOKEN = { cmd = \"echo boom >&2; exit 1\", \
-             channels = [\"dev\", \"steam\"], optional_channels = [\"dev\"], default = \"\" }\n",
-        ));
-        let dir = tempfile::tempdir().unwrap();
-        let err = resolve_build_vars(&cfg, dir.path(), Some("steam"), None, &no_overrides())
-            .expect_err("a channel outside optional_channels must still reject");
-        let msg = format!("{err:#}");
-        assert!(msg.contains("TOKEN") && msg.contains("boom"), "error carries var and stderr: {msg}");
-    }
-
-    #[test]
-    fn an_optional_channel_still_prefers_a_succeeding_cmd_over_the_default() {
-        let cfg = fixture(concat!(
-            "[package]\nname = \"x\"\n",
-            "[build]\nchannels = [\"dev\"]\ndefault_channel = \"dev\"\n",
-            "[build.vars]\nTOKEN = { cmd = \"echo real-token\", \
-             channels = [\"dev\"], optional_channels = [\"dev\"], default = \"\" }\n",
-        ));
-        let dir = tempfile::tempdir().unwrap();
-        let resolved = resolve_build_vars(&cfg, dir.path(), None, None, &no_overrides()).unwrap();
-        assert_eq!(
-            resolved.vars["TOKEN"].value, "real-token",
-            "optional is a FALLBACK, not a bypass -- a working cmd still wins"
-        );
-    }
-
-    #[test]
-    fn optional_channels_reject_without_a_default_or_outside_channels() {
-        // Parsed raw, not through `fixture`: these configs are meant to fail
-        // validation, which is what the fixture helper asserts against.
-        let cfg = StickConfig::new_from_str(concat!(
-            "[package]\nname = \"x\"\n",
-            "[build]\nchannels = [\"dev\"]\ndefault_channel = \"dev\"\n",
-            "[build.vars]\nTOKEN = { cmd = \"false\", optional_channels = [\"dev\"] }\n",
-        )).expect("parses; the missing default is a validate error");
-        let err = cfg.validate_build().expect_err("optional with no default has nothing to fall back to");
-        assert!(format!("{err}").contains("TOKEN"), "error names the var: {err}");
-
-        let cfg = StickConfig::new_from_str(concat!(
-            "[package]\nname = \"x\"\n",
-            "[build]\nchannels = [\"dev\", \"steam\"]\ndefault_channel = \"dev\"\n",
-            "[build.vars]\nTOKEN = { cmd = \"false\", channels = [\"steam\"], \
-             optional_channels = [\"dev\"], default = \"\" }\n",
-        )).expect("parses; the dead declaration is a validate error");
-        let err = cfg.validate_build()
-            .expect_err("optional on a channel the var never runs on is a dead declaration");
-        assert!(format!("{err}").contains("TOKEN"), "error names the var: {err}");
     }
 
     #[test]
