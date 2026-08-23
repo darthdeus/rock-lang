@@ -1077,7 +1077,7 @@ fn mag_main_menu_transition_survives_seek_resimulation() {
     assert_eq!(sought["__stone_diag"]["MAG_PLAY_EFFECT_COUNT"].as_i64(), Some(2), "hidden seek resimulation must perform its own Play transition, not reuse the visible run: {}", sought["__stone_diag"]);
     assert!(sought["__stone_diag"]["MAG_MENU_ACTION_STATE_TICKS"].as_i64().is_some_and(|n| n > 0), "seek resimulation must execute the classified state consumer: {}", sought["__stone_diag"]);
     assert!(sought["__stone_diag"]["MAG_CONSENT_ACTION_STATE_TICKS"].as_i64().is_some_and(|n| n > 0), "fresh-settings seek must consume the consent action in the state-role path: {}", sought["__stone_diag"]);
-    assert!(sought["__stone_diag"]["MAG_SETTINGS_SEEK_SAVE_SKIPS"].as_i64().is_some_and(|n| n > 0), "seek resimulation must not persist the consent choice as an external effect: {}", sought["__stone_diag"]);
+    assert!(sought["__stone_diag"]["MAG_SETTINGS_PLAYBACK_SAVE_SKIPS"].as_i64().is_some_and(|n| n > 0), "seek resimulation must not persist the consent choice as an external effect: {}", sought["__stone_diag"]);
     assert_eq!(
         sought["stone"]["WORLD_MODE"]["game_paused"],
         reference["stone"]["WORLD_MODE"]["game_paused"],
