@@ -82,6 +82,16 @@ inline(js) fn ffi_string(ptr: any, len: int?) -> string = """
   return obj.__ty === undefined ? null : obj.__ty;
 """
 
+// `Map.keys_into` has a Lua sibling in unified.rock. Keep the ordering
+// contract on JS too; the comparator is local because JS has no shared Lua
+// prelude function to bind as Array.sort's callback.
+@nomangle inline(js) fn __sort_map_keys(keys: any) = """
+  keys._data.sort(function(a, b) {
+    var sa = lua_tostring(a), sb = lua_tostring(b);
+    return sa < sb ? -1 : (sa > sb ? 1 : 0);
+  });
+"""
+
 // Column-storage boundary primitives (`docs/js-vec-columns-plan.md` stage B).
 // Their luajit siblings are in `unified.rock`; each is the same operation over a
 // 0-based JS array instead of a 1-based Lua table.
