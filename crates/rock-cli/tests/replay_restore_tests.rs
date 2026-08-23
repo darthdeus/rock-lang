@@ -608,9 +608,9 @@ fn exact_recorded_replay_supports_two_backward_scene_image_scrubs() {
         game,
         80,
         &log_s,
-        &[("STONE_START_PAUSED", "1"), ("STONE_STEP_FRAMES", "30")],
+        &[("STONE_START_PAUSED", "1"), ("STONE_STEP_FRAMES", "35")],
     );
-    assert_eq!(current_tick(&ordinary), 30, "ordinary playback must reach the comparison tick");
+    assert_eq!(current_tick(&ordinary), 35, "ordinary playback must reach the comparison tick");
 
     let sought = run_replay_dump(
         game,
@@ -619,14 +619,14 @@ fn exact_recorded_replay_supports_two_backward_scene_image_scrubs() {
         &[
             ("STONE_KEYFRAME_INTERVAL", "10"),
             ("STONE_TIMELINE_SEEK_AT_FRAME", "60"),
-            ("STONE_TIMELINE_SEEK_TO_TICK", "20"),
+            ("STONE_TIMELINE_SEEK_TO_TICK", "25"),
             ("STONE_LIVE_PLAY_AT_FRAME", "80"),
             ("STONE_TIMELINE_SEEK_AT_FRAME_2", "120"),
-            ("STONE_TIMELINE_SEEK_TO_TICK_2", "30"),
+            ("STONE_TIMELINE_SEEK_TO_TICK_2", "35"),
             ("STONE_AUDIO_PROBE", "1"),
         ],
     );
-    assert_eq!(current_tick(&sought), 30, "the second backward seek must land at tick 30");
+    assert_eq!(current_tick(&sought), 35, "the second backward seek must land at tick 35");
     let diag = &sought["__stone_diag"];
     assert_eq!(diag["STONE_SEEK_COUNT"].as_i64(), Some(2), "both backward seeks must complete: {diag}");
     assert!(

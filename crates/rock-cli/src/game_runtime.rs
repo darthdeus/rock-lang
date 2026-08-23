@@ -60,10 +60,9 @@ pub struct SkullGameCompiler {
     dir: String,
     output_path: PathBuf,
     incremental_path: PathBuf,
-    /// A shape-changed compile deferred its `main.lua` write; the restart
-    /// path's `canonicalize_for_restart` must write it even with no overlay
-    /// on disk.
-    pending_shape_write: bool,
+    /// A safety-gated full publication is written by the restart path before
+    /// the successor process loads the current program.
+    pending_full_write: bool,
 }
 
 impl SkullGameCompiler {
@@ -73,7 +72,7 @@ impl SkullGameCompiler {
             dir: path.to_string(),
             output_path,
             incremental_path,
-            pending_shape_write: false,
+            pending_full_write: false,
         }
     }
 }
@@ -94,27 +93,34 @@ impl GameCompiler for SkullGameCompiler {
                     &self.output_path,
                     &self.incremental_path,
                 )?);
-                self.pending_shape_write = false;
+                self.pending_full_write = false;
                 Ok(CompileOutcome::default())
             }
             Some(st) => {
                 // Feed the Session only the files the watcher saw change (it
                 // re-reads those off disk; unchanged files stay cached).
                 let changed_vec: Vec<PathBuf> = changed.iter().cloned().collect();
-                let reload = st.recompile_staged(&changed_vec, &self.output_path, &self.incremental_path)?;
+                let reload = st.recompile(&changed_vec, &self.output_path, &self.incremental_path)?;
                 match reload {
-                    SkullReload::Full { bytes, cook_ms, emit_ms, write_ms } => log::info!(target: "STONE",
-                        "skull: full rebuild -> main.lua in {:.1}ms ({:.1} cook + {:.1} emit + {:.1} write, {} KB)",
-                        cook_ms + emit_ms + write_ms, cook_ms, emit_ms, write_ms, bytes / 1024),
+                    SkullReload::Full { bytes, cook_ms, emit_ms, write_ms } => {
+                        log::info!(target: "STONE",
+                            "skull: full rebuild -> main.lua in {:.1}ms ({:.1} cook + {:.1} emit + {:.1} write, {} KB)",
+                            cook_ms + emit_ms + write_ms, cook_ms, emit_ms, write_ms, bytes / 1024);
+                        return Ok(CompileOutcome {
+                            restart_reasons: vec![
+                                "full reload requires a clean process restart".to_string(),
+                            ],
+                        });
+                    }
                     SkullReload::Incremental { bytes, reinferred, cook_ms, emit_ms, write_ms } => log::info!(target: "STONE",
                         "skull: body edit -> incremental.lua in {:.1}ms ({:.1} cook + {:.1} emit + {:.1} write, {} fn{}, {} B overlay)",
                         cook_ms + emit_ms + write_ms, cook_ms, emit_ms, write_ms, reinferred, if reinferred == 1 { "" } else { "s" }, bytes),
                     SkullReload::ShapeChanged { types } => {
-                        self.pending_shape_write = true;
+                        self.pending_full_write = true;
                         return Ok(CompileOutcome { restart_reasons: types });
                     }
                     SkullReload::FullRequired { reasons } => {
-                        self.pending_shape_write = true;
+                        self.pending_full_write = true;
                         return Ok(CompileOutcome { restart_reasons: reasons });
                     }
                     SkullReload::NoChange => {}
@@ -129,12 +135,12 @@ impl GameCompiler for SkullGameCompiler {
         // dual-load the accumulated incremental.lua. Fold the overlay back in
         // first so the restarted process gets the complete current program.
         // Runs when an overlay is on disk (body edits since the last full
-        // build) or a shape-changed compile deferred its main.lua write.
-        if self.incremental_path.exists() || self.pending_shape_write {
+        // build) or a safety-gated full publication was deferred.
+        if self.incremental_path.exists() || self.pending_full_write {
             if let Some(st) = &mut self.stone {
                 log::info!(target: "STONE", "skull: canonicalizing main.lua before restart");
                 st.force_full(&self.output_path, &self.incremental_path)?;
-                self.pending_shape_write = false;
+                self.pending_full_write = false;
             }
         }
         Ok(())

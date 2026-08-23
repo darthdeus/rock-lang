@@ -2787,13 +2787,12 @@ pub enum SkullReload {
     /// is the separate disk write of the overlay.
     Incremental { bytes: usize, reinferred: usize, cook_ms: f64, emit_ms: f64, write_ms: f64 },
     /// A full artifact is required before the current process can observe this
-    /// update. The caller may stage it for shadow reconstruction or restart;
-    /// no output was written on this path.
+    /// update; no output was written on this path.
     FullRequired { reasons: Vec<String> },
     /// A type's runtime SHAPE changed (docs/hot-reload-schema-drift-plan.md):
     /// live state cannot be migrated in place. Nothing was written -- the
-    /// supervisor must stage a complete Artifact for armed shadow replay or
-    /// use the restart fallback. `types` names the drifted types for the
+    /// supervisor must use the restart fallback. `types` names the drifted
+    /// types for the
     /// why-log.
     ShapeChanged { types: Vec<String> },
     /// Nothing changed (content-hash no-op).
@@ -2871,21 +2870,15 @@ impl SkullStone {
     /// overlay. `changed` is the watcher's changed-path set; pass empty to force a
     /// full re-discover.
     pub fn recompile(&mut self, changed: &[std::path::PathBuf], main_path: &std::path::Path, incremental_path: &std::path::Path) -> Result<SkullReload> {
-        self.recompile_with_full_policy(changed, main_path, incremental_path, true)
+        self.recompile_with_full_policy(changed, main_path, incremental_path)
     }
 
-    /// Recompile the current project while deferring a full artifact write to
-    /// the live runtime policy. Body overlays remain safe to write; a full
-    /// artifact is returned as `FullRequired` so the caller can choose shadow
-    /// publication or process restart before `main.lua` changes.
-    pub fn recompile_staged(&mut self, changed: &[std::path::PathBuf], main_path: &std::path::Path, incremental_path: &std::path::Path) -> Result<SkullReload> {
-        self.recompile_with_full_policy(changed, main_path, incremental_path, false)
-    }
-
-    fn recompile_with_full_policy(&mut self, changed: &[std::path::PathBuf], main_path: &std::path::Path, incremental_path: &std::path::Path, write_full: bool) -> Result<SkullReload> {
+    /// Recompile the current project and route body edits to the overlay or
+    /// structural edits to a complete program followed by process restart.
+    fn recompile_with_full_policy(&mut self, changed: &[std::path::PathBuf], main_path: &std::path::Path, incremental_path: &std::path::Path) -> Result<SkullReload> {
         let snapshot = self.project.snapshot(changed);
         let update = self.project.recompile(changed)?;
-        match self.route_and_emit(update, main_path, incremental_path, write_full) {
+        match self.route_and_emit(update, main_path, incremental_path) {
             Ok(reload) => Ok(reload),
             Err(error) => {
                 if let Err(restore) = self.project.restore(snapshot) {
@@ -2907,7 +2900,7 @@ impl SkullStone {
     pub fn apply_edit(&mut self, path: &std::path::Path, new_text: &str, main_path: &std::path::Path, incremental_path: &std::path::Path) -> Result<SkullReload> {
         let snapshot = self.project.snapshot(&[path.to_path_buf()]);
         let update = self.project.apply_edit(path, new_text)?;
-        match self.route_and_emit(update, main_path, incremental_path, true) {
+        match self.route_and_emit(update, main_path, incremental_path) {
             Ok(reload) => Ok(reload),
             Err(error) => {
                 if let Err(restore) = self.project.restore(snapshot) {
@@ -2941,10 +2934,10 @@ impl SkullStone {
 
     /// Feed source edits into the Session and route by the worst tier. Body-only
     /// edits write `incremental.lua`; a full artifact is either written or
-    /// returned as `FullRequired` according to `write_full`. Shared by the
-    /// disk-driven watcher and in-memory sim reload paths.
+    /// returned as `FullRequired` when a safety gate defers publication.
+    /// Shared by the disk-driven watcher and in-memory sim reload paths.
     /// `t_cook` is the caller's front-end timer (includes its feed construction).
-    fn route_and_emit(&mut self, update: crate::live_project::LiveUpdate, main_path: &std::path::Path, incremental_path: &std::path::Path, write_full: bool) -> Result<SkullReload> {
+    fn route_and_emit(&mut self, update: crate::live_project::LiveUpdate, main_path: &std::path::Path, incremental_path: &std::path::Path) -> Result<SkullReload> {
         use std::path::PathBuf;
         let (full, reinferred, span_edits, cook_ms) = match update {
             crate::live_project::LiveUpdate::NoChange => return Ok(SkullReload::NoChange),
@@ -2980,9 +2973,7 @@ impl SkullStone {
             // data outlives every reload tier, so if any type's runtime layout
             // moved, hot-reloading the recompiled program would drive old-shape
             // state with new-shape readers. Request a complete reconstruction
-            // and defer ALL writes -- the stone loop either stages the Artifact
-            // for armed shadow replay or kills the process before force_full
-            // writes it for a respawn. Re-baseline the stored hashes now: the
+            // and defer ALL writes until the restart path. Re-baseline the stored hashes now: the
             // delta is consumed by this one full publication.
             let new_shapes = skull::type_shape_hashes(self.project.workspace())
                 .map_err(|e| anyhow::anyhow!(e.message))?;
@@ -3040,17 +3031,10 @@ impl SkullStone {
             let emit_ms = t_emit.elapsed().as_secs_f64() * 1000.0;
             let t_write = Instant::now();
             let (lua, staged_cache) = lua;
-            if write_full {
-                let bytes = write_full_main(&self.preamble, &lua, main_path, incremental_path)?;
-                self.cache = staged_cache;
-                let write_ms = t_write.elapsed().as_secs_f64() * 1000.0;
-                Ok(SkullReload::Full { bytes, cook_ms, emit_ms, write_ms })
-            } else {
-                self.cache = staged_cache;
-                Ok(SkullReload::FullRequired {
-                    reasons: vec!["full Artifact publication deferred to live runtime policy".to_string()],
-                })
-            }
+            let bytes = write_full_main(&self.preamble, &lua, main_path, incremental_path)?;
+            self.cache = staged_cache;
+            let write_ms = t_write.elapsed().as_secs_f64() * 1000.0;
+            Ok(SkullReload::Full { bytes, cook_ms, emit_ms, write_ms })
         } else {
             let (overlay, staged_cache) = {
                 let ws = self.project.workspace();

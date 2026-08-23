@@ -1311,7 +1311,6 @@ mod tests {
     use std::time::Duration;
 
     #[test]
-    #[test]
     fn structural_reload_requests_clean_restart() {
         assert!(full_reload_requires_restart(&["schema changed".to_string()]));
         assert!(
