@@ -542,15 +542,19 @@ fn build_id_for_lua(lua_file: &std::path::Path) -> String {
                 {
                     build_stamp_fn = true;
                 }
-                let normalized = if build_stamp_fn && line.contains("do return (\"") {
-                    let start = line.find("do return (\"").unwrap() + "do return (\"".len();
-                    let end = line[start..].find("\")").map(|offset| start + offset);
-                    if let Some(end) = end {
-                        let mut replaced = String::with_capacity(line.len());
-                        replaced.push_str(&line[..start]);
-                        replaced.push_str("<volatile-build-stamp>");
-                        replaced.push_str(&line[end..]);
-                        replaced
+                let normalized = if build_stamp_fn {
+                    if let Some(marker) = line.find("do return (\"") {
+                        let start = marker + "do return (\"".len();
+                        let end = line[start..].find("\")").map(|offset| start + offset);
+                        if let Some(end) = end {
+                            let mut replaced = String::with_capacity(line.len());
+                            replaced.push_str(&line[..start]);
+                            replaced.push_str("<volatile-build-stamp>");
+                            replaced.push_str(&line[end..]);
+                            replaced
+                        } else {
+                            line.to_string()
+                        }
                     } else {
                         line.to_string()
                     }
