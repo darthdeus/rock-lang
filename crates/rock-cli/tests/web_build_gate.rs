@@ -50,6 +50,33 @@ fn web_build_emits_files_and_runs() {
     assert_eq!(stdout.trim(), "cube3=27", "web game.js output drifted:\n{stdout}");
 }
 
+#[test]
+fn chess_web_build_reaches_shared_runtime_mappings() {
+    let dir = tempfile::tempdir().expect("create web build tempdir");
+    let out = dir.path().join("chess-web");
+    let status = Command::new(rock_bin())
+        .args(["web", "games/chess", "--out", out.to_str().unwrap()])
+        .status()
+        .expect("spawn rock web");
+    assert!(status.success(), "chess web build failed");
+
+    let game = out.join("game.js");
+    assert!(game.is_file(), "chess game.js not emitted");
+    let js = std::fs::read_to_string(game).unwrap();
+    assert!(
+        js.contains("function stone_save_screenshot(path, w, h, max_size)"),
+        "the shared screenshot JS runtime mapping is missing"
+    );
+    assert!(
+        js.contains("function lua_alloc_gross_request_kb"),
+        "the web allocation-census stub is missing"
+    );
+    assert!(
+        js.contains("function lua_gc_is_running"),
+        "the web GC-state stub is missing"
+    );
+}
+
 /// The web driver's `__rock_shader_register` line must carry the `@textures`
 /// slot names as its third argument, in field order. It is a hand-written
 /// mirror of skull's Lua `shader_registration_lines`, so a param added on the
