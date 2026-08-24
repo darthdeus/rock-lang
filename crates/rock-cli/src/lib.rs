@@ -56,6 +56,7 @@ mod lint_cmd;
 pub mod lint_union;
 pub mod lint_pass;
 pub mod ablation_report;
+mod allocation_join;
 mod mono_manifest;
 mod monoty_census;
 mod lsp_survey;
@@ -190,6 +191,10 @@ pub enum CliCommand {
     /// report instance/edge counts, the edge-kind histogram and the recursion
     /// census. Changes no emission. See `mono_manifest::do_mono_manifest`.
     MonoManifest,
+    /// `rock allocation-join <manifest> <activation> [route]` -- join one
+    /// exact-emission manifest to the same artifact's bounded runtime counters,
+    /// filter by `all|update|draw|outside`, and rank executions per frame.
+    AllocationJoin,
     /// `rock iter-lsp <project> [--iters N --warmup W]` -- tight-loop profiler
     /// for the per-edit LSP query path on the bone backend (the work the editor
     /// does per keystroke through `BoneWorkspace`): `update` (didChange) +
@@ -302,6 +307,7 @@ impl clap::ValueEnum for CliCommand {
             Self::IterIncremental,
             Self::MonoTyCensus,
             Self::MonoManifest,
+            Self::AllocationJoin,
             Self::IterLsp,
             Self::LspSurvey,
             Self::IterReinfer,
@@ -353,6 +359,7 @@ impl CliCommand {
             Self::IterIncremental => "iter-incremental",
             Self::MonoTyCensus => "mono-ty-census",
             Self::MonoManifest => "mono-manifest",
+            Self::AllocationJoin => "allocation-join",
             Self::IterLsp => "iter-lsp",
             Self::LspSurvey => "lsp-survey",
             Self::IterReinfer => "iter-reinfer",

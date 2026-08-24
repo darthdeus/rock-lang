@@ -1,5 +1,18 @@
 use std::time::Duration;
 
+#[test]
+fn allocation_report_writer_is_explicit_and_writes_the_compiler_report() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("allocation-report.txt");
+    let report = skull::allocation_report::AllocationReport::default();
+
+    super::write_allocation_report(Some(path.as_os_str()), &report).expect("write report");
+
+    let text = std::fs::read_to_string(path).expect("read report");
+    assert!(text.contains("emitted allocation-capable Lua report: 0 bodies, 0 direct sites"));
+    assert!(text.contains("emitted site manifest: 0 sites"));
+}
+
 fn emit_overlay_checked(
     ws: &bone_semantic::inference::Workspace,
     cache: &mut skull::mir_emit::SkullEmitCache,

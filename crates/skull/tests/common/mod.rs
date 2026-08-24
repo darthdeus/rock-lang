@@ -297,3 +297,21 @@ impl InlineOffGuard {
         InlineOffGuard(skull_transform::inline_off_guard())
     }
 }
+
+pub struct AllocationReportGuard(#[allow(dead_code)] skull::allocation_report::Scope);
+
+impl AllocationReportGuard {
+    pub fn on() -> Self {
+        AllocationReportGuard(skull::allocation_report::scope(true))
+    }
+}
+
+pub struct AllocationActivationGuard(
+    #[allow(dead_code)] skull::allocation_report::ActivationScope,
+);
+
+impl AllocationActivationGuard {
+    pub fn on() -> Self {
+        AllocationActivationGuard(skull::allocation_report::activation_scope(true))
+    }
+}

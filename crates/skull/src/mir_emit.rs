@@ -23,7 +23,7 @@ use bone_semantic::hir::{BodyOwner, Expr};
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::{Idx, ModuleId};
 use rustc_hash::{FxHashMap, FxHashSet};
-use skull_codegen_lua::{emit_function, emit_named, mangle_fn, CodegenCtx};
+use skull_codegen_lua::{emit_function, mangle_fn, CodegenCtx};
 use skull_mir::instance::Instance;
 use skull_mir::mir::{FuncRef, Inst, MirFunc, Term};
 use skull_parser::{CompilerError, CompilerErrorKind};
@@ -42,6 +42,8 @@ use ustr::Ustr;
 struct WorkerMode {
     inline_off: bool,
     ablation: skull_mir::ablation::Context,
+    allocation_report: bool,
+    allocation_activation: bool,
 }
 
 #[cfg(not(feature = "sequential"))]
@@ -50,6 +52,8 @@ impl WorkerMode {
         Self {
             inline_off: skull_transform::inline_off_active(),
             ablation: skull_mir::ablation::current_context(),
+            allocation_report: crate::allocation_report::enabled(),
+            allocation_activation: crate::allocation_report::activation_enabled(),
         }
     }
 
@@ -57,6 +61,10 @@ impl WorkerMode {
         WorkerScope {
             _inline: self.inline_off.then(skull_transform::inline_off_guard),
             _ablation: skull_mir::ablation::enter_context(self.ablation.clone()),
+            _allocation_report: crate::allocation_report::scope(self.allocation_report),
+            _allocation_activation: crate::allocation_report::activation_scope(
+                self.allocation_activation,
+            ),
         }
     }
 }
@@ -65,6 +73,8 @@ impl WorkerMode {
 struct WorkerScope {
     _inline: Option<skull_transform::InlineOffGuard>,
     _ablation: skull_mir::ablation::ContextGuard,
+    _allocation_report: crate::allocation_report::Scope,
+    _allocation_activation: crate::allocation_report::ActivationScope,
 }
 
 #[cfg(not(feature = "sequential"))]
@@ -489,6 +499,9 @@ fn extern_ret(
 /// The assembled new-path program plus the parity gap.
 pub struct MirEmit {
     pub lua: String,
+    /// Allocation-capable operations registered by final Lua emission, with
+    /// residual call edges and compiler-owned per-frame lifecycle routes.
+    pub allocation_report: crate::allocation_report::AllocationReport,
     /// Artifact-owned callable identities and their self-validating census.
     pub code_artifact: skull_mir::code_identity::CodeArtifact,
     /// The compiler-owned lifecycle inventory staged by this artifact.
@@ -1419,6 +1432,7 @@ struct UnitOut {
     /// production comptime reads are global initializers -- dropping them here
     /// is how the cimgui embeds went missing from the watch set.
     comptime_reads: Vec<skull_mir::mir::ComptimeRead>,
+    allocation_bodies: Vec<crate::allocation_report::AllocationBody>,
     times: PhaseTimes,
     attribution: UnitAttribution,
 }
@@ -1532,7 +1546,25 @@ fn emit_decorator_unit(
             }
             skull_codegen_lua::regalloc_time_reset();
             let te = Instant::now();
-            let mut lua = emit_named(ws, cg, scx.interner(), &deco_name, &mf);
+            let emission = emit_named_with_allocation_report(
+                ws,
+                cg,
+                scx.interner(),
+                &deco_name,
+                &mf,
+                &[],
+            );
+            let mut lua = emission.lua;
+            if let Some(body) = crate::allocation_report::collect_emitted_body(
+                ws,
+                scx.interner(),
+                &deco_name,
+                d.name.as_str(),
+                &mf,
+                emission.allocation_sites,
+            ) {
+                out.allocation_bodies.push(body);
+            }
             let root_emit = te.elapsed();
             out.times.emit += root_emit;
             out.times.emit_work |= root_emit > Duration::ZERO;
@@ -1545,6 +1577,7 @@ fn emit_decorator_unit(
                 scx,
                 &mut mf.nested_fns,
                 &mf.statics,
+                Some(&mut out.allocation_bodies),
                 &mut lua,
                 &mut out.times,
             ) {
@@ -1804,7 +1837,25 @@ fn emit_global_unit(
             let key = Ustr::from(&init_name);
             skull_codegen_lua::regalloc_time_reset();
             let te = Instant::now();
-            let mut lua = emit_named(ws, cg, scx.interner(), &init_name, &mf);
+            let emission = emit_named_with_allocation_report(
+                ws,
+                cg,
+                scx.interner(),
+                &init_name,
+                &mf,
+                &[],
+            );
+            let mut lua = emission.lua;
+            if let Some(body) = crate::allocation_report::collect_emitted_body(
+                ws,
+                scx.interner(),
+                &init_name,
+                g.name.as_str(),
+                &mf,
+                emission.allocation_sites,
+            ) {
+                out.allocation_bodies.push(body);
+            }
             let root_emit = te.elapsed();
             out.times.emit += root_emit;
             out.times.emit_work |= root_emit > Duration::ZERO;
@@ -1817,6 +1868,7 @@ fn emit_global_unit(
                 scx,
                 &mut mf.nested_fns,
                 &mf.statics,
+                Some(&mut out.allocation_bodies),
                 &mut lua,
                 &mut out.times,
             ) {
@@ -1886,6 +1938,7 @@ fn merge_units(
     calls: &mut Vec<FuncRef>,
     global_names: &mut Vec<Ustr>,
     code_artifact: &mut skull_mir::code_identity::CodeArtifact,
+    allocation_bodies: &mut Vec<crate::allocation_report::AllocationBody>,
     attribution: &mut AttributionAccumulator,
     times: &mut PhaseTimes,
 ) {
@@ -1904,6 +1957,7 @@ fn merge_units(
         calls.extend(u.calls);
         global_names.extend(u.global_names);
         code_artifact.merge(u.code_artifact);
+        allocation_bodies.extend(u.allocation_bodies);
         attribution.add_unit(&u.attribution);
         times.add(&u.times);
     }
@@ -2260,6 +2314,7 @@ pub fn emit_workspace_mir_in_for_renderer(
 #[derive(Clone)]
 struct Chunk {
     lua: String,
+    allocation_bodies: Vec<crate::allocation_report::AllocationBody>,
     /// Callee bodies whose SOURCE or inline-eligibility affects this chunk:
     /// everything inlined in (transitive) plus every callee still called (its
     /// body could flip eligibility). Re-emit this chunk if any of them re-infer.
@@ -2784,6 +2839,64 @@ fn collect_callee_frefs(mf: &MirFunc, out: &mut FxHashSet<FuncRef>) {
     }
 }
 
+fn emit_function_with_allocation_report(
+    ws: &Workspace,
+    cg: &CodegenCtx,
+    interner: &skull_mir::monoty::MonoInterner,
+    self_ref: FuncRef,
+    mf: &MirFunc,
+) -> skull_codegen_lua::LuaEmission {
+    if crate::allocation_report::enabled() {
+        skull_codegen_lua::emit_function_with_allocation_sites(
+            ws,
+            cg,
+            interner,
+            self_ref,
+            mf,
+            crate::allocation_report::activation_enabled(),
+        )
+    } else {
+        skull_codegen_lua::LuaEmission {
+            lua: emit_function(ws, cg, interner, self_ref, mf),
+            allocation_sites: Vec::new(),
+        }
+    }
+}
+
+fn emit_named_with_allocation_report(
+    ws: &Workspace,
+    cg: &CodegenCtx,
+    interner: &skull_mir::monoty::MonoInterner,
+    name: &str,
+    mf: &MirFunc,
+    inherited_statics: &[skull_mir::mir::StaticCell],
+) -> skull_codegen_lua::LuaEmission {
+    if crate::allocation_report::enabled() {
+        skull_codegen_lua::emit_named_framed_with_allocation_sites(
+            ws,
+            cg,
+            interner,
+            name,
+            mf,
+            None,
+            inherited_statics,
+            crate::allocation_report::activation_enabled(),
+        )
+    } else {
+        skull_codegen_lua::LuaEmission {
+            lua: skull_codegen_lua::emit_named_with_statics(
+                ws,
+                cg,
+                interner,
+                name,
+                mf,
+                inherited_statics,
+            ),
+            allocation_sites: Vec::new(),
+        }
+    }
+}
+
 /// **The one Lua emission of a `co fn`**, shared by the declaration's own body
 /// and by each specialized instantiation of a generic one.
 ///
@@ -2844,6 +2957,9 @@ fn emit_coroutine_chunk(
         &plan,
         mf,
     )?;
+    // Coroutine construction and transformed step/hook bodies are kept as an
+    // opaque boundary until their generated emitter owns site registration.
+    let allocation_bodies = Vec::new();
     times.emit = te.elapsed();
     times.emit_work = times.emit > Duration::ZERO;
     times.regalloc = skull_codegen_lua::regalloc_time_elapsed().min(times.emit);
@@ -2855,6 +2971,7 @@ fn emit_coroutine_chunk(
     let deps = FxHashSet::default();
     Ok(Chunk {
         lua,
+        allocation_bodies,
         deps,
         direct_globals: Vec::new(),
         direct_calls: Vec::new(),
@@ -3093,7 +3210,19 @@ fn emit_body_chunk_with_mutation(
     times.validation_work = true;
     skull_codegen_lua::regalloc_time_reset();
     let te = Instant::now();
-    let mut lua = emit_function(ws, cg, scx.interner(), self_ref, &mf);
+    let emission = emit_function_with_allocation_report(ws, cg, scx.interner(), self_ref, &mf);
+    let mut lua = emission.lua;
+    let mut allocation_bodies = Vec::new();
+    if let Some(body) = crate::allocation_report::collect_emitted_body(
+        ws,
+        scx.interner(),
+        &name,
+        f.name.as_str(),
+        &mf,
+        emission.allocation_sites,
+    ) {
+        allocation_bodies.push(body);
+    }
     times.emit = te.elapsed();
     times.emit_work = times.emit > Duration::ZERO;
     times.regalloc = skull_codegen_lua::regalloc_time_elapsed().min(times.emit);
@@ -3111,6 +3240,7 @@ fn emit_body_chunk_with_mutation(
         &mf.statics,
         &mut deps,
         &mut statics,
+        &mut allocation_bodies,
         &mut lua,
         &mut times,
     )?;
@@ -3119,6 +3249,7 @@ fn emit_body_chunk_with_mutation(
     let calls = skull_mir::reach::call_targets(&mf);
     Ok(Chunk {
         lua,
+        allocation_bodies,
         deps,
         direct_globals,
         direct_calls,
@@ -3145,6 +3276,7 @@ fn emit_nested_fns(
     inherited_statics: &[skull_mir::mir::StaticCell],
     deps: &mut FxHashSet<FuncRef>,
     statics: &mut Vec<skull_mir::mir::StaticCell>,
+    allocation_bodies: &mut Vec<crate::allocation_report::AllocationBody>,
     out: &mut String,
     times: &mut PhaseTimes,
 ) -> Result<(), CompilerError> {
@@ -3163,14 +3295,25 @@ fn emit_nested_fns(
         statics.extend(nf.statics.iter().cloned());
         skull_codegen_lua::regalloc_time_reset();
         let te = Instant::now();
-        out.push_str(&skull_codegen_lua::emit_named_with_statics(
+        let emission = emit_named_with_allocation_report(
             ws,
             cg,
             scx.interner(),
             nf.name.as_str(),
             nf,
             inherited_statics,
-        ));
+        );
+        out.push_str(&emission.lua);
+        if let Some(body) = crate::allocation_report::collect_emitted_body(
+            ws,
+            scx.interner(),
+            nf.name.as_str(),
+            nf.name.as_str(),
+            nf,
+            emission.allocation_sites,
+        ) {
+            allocation_bodies.push(body);
+        }
         let emit = te.elapsed();
         times.emit += emit;
         times.emit_work |= emit > Duration::ZERO;
@@ -3188,6 +3331,7 @@ fn emit_nested_fns(
             &next_inherited,
             deps,
             statics,
+            allocation_bodies,
             out,
             times,
         )?;
@@ -3216,6 +3360,7 @@ fn emit_pass_nested_fns(
     scx: &skull_mir::lower::ScalarCtx,
     nested: &mut [MirFunc],
     inherited_statics: &[skull_mir::mir::StaticCell],
+    mut allocation_bodies: Option<&mut Vec<crate::allocation_report::AllocationBody>>,
     out: &mut String,
     times: &mut PhaseTimes,
 ) -> Result<(), CompilerError> {
@@ -3227,14 +3372,36 @@ fn emit_pass_nested_fns(
         times.cleanup_work |= mir_live_instructions(nf) != cleanup_before;
         skull_codegen_lua::regalloc_time_reset();
         let te = Instant::now();
-        out.push_str(&skull_codegen_lua::emit_named_with_statics(
-            ws,
-            cg,
-            scx.interner(),
-            nf.name.as_str(),
-            nf,
-            inherited_statics,
-        ));
+        if let Some(bodies) = allocation_bodies.as_deref_mut() {
+            let emission = emit_named_with_allocation_report(
+                ws,
+                cg,
+                scx.interner(),
+                nf.name.as_str(),
+                nf,
+                inherited_statics,
+            );
+            out.push_str(&emission.lua);
+            if let Some(body) = crate::allocation_report::collect_emitted_body(
+                ws,
+                scx.interner(),
+                nf.name.as_str(),
+                nf.name.as_str(),
+                nf,
+                emission.allocation_sites,
+            ) {
+                bodies.push(body);
+            }
+        } else {
+            out.push_str(&skull_codegen_lua::emit_named_with_statics(
+                ws,
+                cg,
+                scx.interner(),
+                nf.name.as_str(),
+                nf,
+                inherited_statics,
+            ));
+        }
         let emit = te.elapsed();
         times.emit += emit;
         times.emit_work |= emit > Duration::ZERO;
@@ -3445,7 +3612,19 @@ fn emit_spec_chunk(
     code_artifact.set_body_names(&mf, name);
     skull_codegen_lua::regalloc_time_reset();
     let te = Instant::now();
-    let mut lua = emit_named(ws, cg, scx.interner(), name, &mf);
+    let emission = emit_named_with_allocation_report(ws, cg, scx.interner(), name, &mf, &[]);
+    let mut lua = emission.lua;
+    let mut allocation_bodies = Vec::new();
+    if let Some(body) = crate::allocation_report::collect_emitted_body(
+        ws,
+        scx.interner(),
+        name,
+        f.name.as_str(),
+        &mf,
+        emission.allocation_sites,
+    ) {
+        allocation_bodies.push(body);
+    }
     let root_emit = te.elapsed();
     times.emit += root_emit;
     times.emit_work |= root_emit > Duration::ZERO;
@@ -3455,12 +3634,22 @@ fn emit_spec_chunk(
     let mut statics = mf.statics.clone();
     let mut nested = std::mem::take(&mut mf.nested_fns);
     collect_nested_statics(&nested, &mut statics);
-    emit_pass_nested_fns(ws, cg, scx, &mut nested, &statics, &mut lua, &mut times)?;
+    emit_pass_nested_fns(
+        ws,
+        cg,
+        scx,
+        &mut nested,
+        &statics,
+        Some(&mut allocation_bodies),
+        &mut lua,
+        &mut times,
+    )?;
     collect_callee_frefs(&mf, &mut deps);
     attribution.mir_instructions = mf.insts.len();
     attribution.times = times;
     Ok(Chunk {
         lua,
+        allocation_bodies,
         deps,
         direct_globals: Vec::new(),
         direct_calls: Vec::new(),
@@ -3491,6 +3680,7 @@ fn emit_specialized_callees(
     live: &FxHashMap<Instance, Chunk>,
     rejected: &[(String, CompilerError)],
     built: &mut Vec<(Instance, Chunk)>,
+    allocation_bodies: &mut Vec<crate::allocation_report::AllocationBody>,
     statics: &mut Vec<skull_mir::mir::StaticCell>,
     out: &mut String,
     attribution: &mut AttributionAccumulator,
@@ -3524,6 +3714,7 @@ fn emit_specialized_callees(
             continue;
         };
         out.push_str(&chunk.lua);
+        allocation_bodies.extend(chunk.allocation_bodies.iter().cloned());
         attribution.add_unit(&chunk.attribution);
         times.add(&chunk.times);
         // A specialized definition's `static` cells are cells the program uses,
@@ -4653,10 +4844,14 @@ fn assemble(
     let mut direct_calls: FxHashMap<Ustr, Vec<Ustr>> = FxHashMap::default();
     let mut all_statics: Vec<skull_mir::mir::StaticCell> = Vec::new();
     let mut code_artifact = skull_mir::code_identity::CodeArtifact::default();
+    let mut allocation_bodies = Vec::new();
 
     // IR-agnostic load-time scaffolding (shared with the old backend).
     let ts = Instant::now();
     let mut out = String::from(crate::runtime_prelude());
+    if crate::allocation_report::activation_enabled() {
+        out.push_str(skull_codegen_lua::ALLOCATION_ACTIVATION_PRELUDE);
+    }
     out.push_str(&crate::enum_cdata_defs(ws));
     let rep_arena = scx.rep_arena();
     let (vdefs, value_emitted, value_gc) = crate::value_struct_defs(ws, &rep_arena)?;
@@ -4695,6 +4890,7 @@ fn assemble(
         &mut always_emitted_calls,
         &mut always_emitted_names,
         &mut code_artifact,
+        &mut allocation_bodies,
         &mut attribution,
         &mut times,
     );
@@ -4736,6 +4932,7 @@ fn assemble(
         &mut always_emitted_calls,
         &mut always_emitted_names,
         &mut code_artifact,
+        &mut allocation_bodies,
         &mut attribution,
         &mut times,
     );
@@ -4922,6 +5119,7 @@ fn assemble(
                     attribution.add_unit(&chunk.attribution);
                     if emit_def {
                         out.push_str(&chunk.lua);
+                        allocation_bodies.extend(chunk.allocation_bodies.iter().cloned());
                         code_artifact.merge_ref(&chunk.code_artifact);
                         // A dropped definition's `static` cells do not exist, so
                         // they must not be registered for hot-reload preservation.
@@ -4965,6 +5163,7 @@ fn assemble(
         &spec_chunks,
         &spec_rejected,
         built_specs,
+        &mut allocation_bodies,
         &mut all_statics,
         &mut out,
         &mut attribution,
@@ -4996,6 +5195,14 @@ fn assemble(
             "incomplete LifecyclePlan census: {:?}", lifecycle_plan.census
         )));
     }
+    let allocation_report = if crate::allocation_report::enabled() {
+        let mut report =
+            crate::allocation_report::AllocationReport::from_bodies(allocation_bodies);
+        report.populate_lifecycle_routes(&lifecycle_plan, &code_artifact);
+        report
+    } else {
+        crate::allocation_report::AllocationReport::default()
+    };
     let state_schema = skull_mir::state_schema::StateSchema::collect(ws, scx, &code_artifact, &all_statics)
         .map_err(|error| CompilerError::new_no_location(error.to_string()))?;
     let has_state_publication = code_artifact.entries.values().any(|entry| entry.escaping)
@@ -5162,6 +5369,7 @@ fn assemble(
     Ok((
         MirEmit {
             lua: out,
+            allocation_report,
             code_artifact,
             lifecycle_plan,
             state_schema,
@@ -5447,6 +5655,7 @@ pub fn emit_full_in_for_renderer(
     project_root: Option<&str>,
     renderer_target: RendererTarget,
 ) -> Result<(MirEmit, SkullEmitCache), CompilerError> {
+    let _allocation_environment = crate::allocation_report::environment_scope();
     emit_full_in_with_mutation(
         ws,
         user_mid,
@@ -7147,6 +7356,7 @@ fn assemble_overlay(
     Ok((
         MirEmit {
             lua: out,
+            allocation_report: crate::allocation_report::AllocationReport::default(),
             code_artifact: candidate_code_artifact,
             lifecycle_plan,
             state_schema: cache

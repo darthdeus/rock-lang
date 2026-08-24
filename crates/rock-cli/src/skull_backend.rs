@@ -1408,19 +1408,27 @@ fn skull_emit_project_with_inputs(
 
     // Project build: modules outside `dir` (the `stone` dependency, stdlib) are
     // libraries and prune to what the project reaches.
-    let (lua, skipped) = match skull::mir_emit::emit_workspace_mir_in_for_renderer(
+    let emit = match skull::mir_emit::emit_workspace_mir_in_for_renderer(
         &ws,
         user_mid,
         Some(dir),
         renderer_target,
     ) {
-        Ok(e) => (e.lua, e.skipped),
+        Ok(e) => e,
         Err(e) => {
             eprintln!("{}", render_project_err(&sources, &e));
             log::error!(target: "SKULL", "skull emit failed for project {}", dir);
             crate::ablation_report::exit_with_census(1);
         }
     };
+    let allocation_report_path = allocation_report_path_from_env();
+    if let Err(e) =
+        write_allocation_report(allocation_report_path.as_deref(), &emit.allocation_report)
+    {
+        log::error!(target: "SKULL", "cannot write allocation report for {}: {:#}", dir, e);
+        crate::ablation_report::exit_with_census(1);
+    }
+    let (lua, skipped) = (emit.lua, emit.skipped);
     let compile = t.elapsed();
     crate::bone_backend::log_compile_stats(&sources, &ws, compile, compile, None);
     if std::env::var("SKULL_DEBUG_SKIPPED").is_ok() && !skipped.is_empty() {
@@ -1449,6 +1457,29 @@ fn skull_emit_project_with_inputs(
     #[cfg(feature = "sequential")]
     drop((ws, modules));
     lua
+}
+
+fn write_allocation_report(
+    path: Option<&std::ffi::OsStr>,
+    report: &skull::allocation_report::AllocationReport,
+) -> Result<()> {
+    let Some(path) = path else { return Ok(()) };
+    if path.is_empty() {
+        anyhow::bail!("SKULL_ALLOCATION_REPORT must name an output file");
+    }
+    let path = std::path::Path::new(path);
+    rock_host::project::write_atomic(path, &report.render_text())
+        .map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))
+}
+
+fn allocation_report_path_from_env() -> Option<std::ffi::OsString> {
+    std::env::var_os("SKULL_ALLOCATION_REPORT").or_else(|| {
+        let mut path = std::path::PathBuf::from(std::env::var_os(
+            "SKULL_ALLOCATION_ACTIVATION",
+        )?);
+        path.set_extension("manifest.txt");
+        Some(path.into_os_string())
+    })
 }
 
 /// Attach host-only package grouping and reflection descriptions to the
@@ -2847,6 +2878,11 @@ impl SkullStone {
                 renderer_target,
             )
                 .map_err(|e| anyhow::anyhow!("{}", render_project_err(project.sources(), &e)))?;
+            let allocation_report_path = allocation_report_path_from_env();
+            write_allocation_report(
+                allocation_report_path.as_deref(),
+                &emit.allocation_report,
+            )?;
             // Host package/description metadata is appended to StateSchema.
             let spec = crate::unified_compile::SourceSpec::Directory(
                 std::path::PathBuf::from(dir),

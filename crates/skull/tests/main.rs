@@ -4,6 +4,9 @@
 
 mod common;
 
+#[path = "allocation_report.rs"]
+mod allocation_report;
+
 #[path = "ablation_totality.rs"]
 mod ablation_totality;
 #[path = "arena_column_oracle.rs"]
