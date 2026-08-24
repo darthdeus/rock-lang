@@ -23,12 +23,19 @@ struct ArenaStore<T> {
     next_generation: int = 0,
 }
 
+struct ArenaRegistry {
+    stores: [any?],
+    scene_ids: [int],
+    next_id: int,
+    session_root: int,
+}
+
 // --- the Session Arena registry ----------------------------------------------
 //
 // One flat physical lookup for the whole Session: ownership is a Scene concern,
 // but a nested Session -> Scene -> Arena walk would put two hash lookups in
 // front of every random `Entity.get()`. Arena IDs are dense and monotonic, so
-// `_arena_id` indexes `__ARENA_STORES` directly.
+// `_arena_id` indexes the stores column in `__ARENA_REGISTRY` directly.
 //
 // IDs are never reused: a destroyed Arena's slot is nulled and its ID retires
 // with it, which is what stops an escaped handle from resolving into whatever
@@ -38,14 +45,9 @@ struct ArenaStore<T> {
 // Everything created by `arena_new()` belongs to owner (scene) 0, the Session
 // root, until P2 introduces typed Scenes.
 @state(ownership=session, world=boot_only, realization=fresh_session)
-global __ARENA_STORES: [any?] = []
-@state(ownership=session, world=boot_only, realization=fresh_session)
-global __ARENA_SCENE_IDS: [int] = []
-@state(ownership=session, world=boot_only, realization=fresh_session)
-global __ARENA_NEXT_ID: int = 0
-
-@state(ownership=session, world=boot_only, realization=fresh_session)
-global __ARENA_SESSION_ROOT: int = 0
+global __ARENA_REGISTRY: ArenaRegistry = ArenaRegistry {
+    stores: [], scene_ids: [], next_id: 0, session_root: 0,
+}
 
 // THE resolution oracle: every Arena operation, the `enumerate(arena)` loop
 // lowering, and the serializer's logical-Arena projection all reach backing
@@ -53,11 +55,11 @@ global __ARENA_SESSION_ROOT: int = 0
 // `inline(lua)` walker can both target it; the element type is recovered by the
 // typed wrapper below, which is a no-op at runtime.
 @nomangle fn __arena_store_any(scene_id: int, arena_id: int) -> any? {
-    let slot = __ARENA_STORES.get(arena_id)
+    let slot = __ARENA_REGISTRY.stores.get(arena_id)
     if is_null(slot) { return null }
     let store = slot.unwrap()
     if is_null(store) { return null }
-    if __ARENA_SCENE_IDS[arena_id] != scene_id { return null }
+    if __ARENA_REGISTRY.scene_ids[arena_id] != scene_id { return null }
     return store
 }
 
@@ -114,19 +116,19 @@ fn __arena_store_or_dead<T>(arena: Arena<T>) -> ArenaStore<T> {
 // the same creation path with a different owner ID -- not a second Arena
 // implementation.
 fn arena_new<T>() -> Arena<T> {
-    return __arena_new_owned(__ARENA_SESSION_ROOT)
+    return __arena_new_owned(__ARENA_REGISTRY.session_root)
 }
 
 fn __arena_new_owned<T>(scene_id: int) -> Arena<T> {
-    let id = __ARENA_NEXT_ID
-    assert(id == vec_len(__ARENA_STORES), "Arena registry is not dense at id {id}")
-    __ARENA_NEXT_ID = id + 1
+    let id = __ARENA_REGISTRY.next_id
+    assert(id == vec_len(__ARENA_REGISTRY.stores), "Arena registry is not dense at id {id}")
+    __ARENA_REGISTRY.next_id = id + 1
     let store: ArenaStore<T> = ArenaStore {
         generations: [], occupied: [], data: [], free_indices: [],
         occupied_count: 0, next_generation: 0,
     }
-    vec_push(__ARENA_STORES, store)
-    vec_push(__ARENA_SCENE_IDS, scene_id)
+    vec_push(__ARENA_REGISTRY.stores, store)
+    vec_push(__ARENA_REGISTRY.scene_ids, scene_id)
     return Arena { _scene_id: scene_id, _arena_id: id }
 }
 
@@ -137,7 +139,7 @@ fn __arena_reinitialize<T>(arena: Arena<T>) {
         generations: [], occupied: [], data: [], free_indices: [],
         occupied_count: 0, next_generation: 0,
     }
-    __ARENA_STORES[arena._arena_id] = store
+    __ARENA_REGISTRY.stores[arena._arena_id] = store
 }
 
 // Retires one Arena incarnation, releasing its rows. True on the first call,
@@ -151,7 +153,7 @@ fn arena_destroy<T>(arena: Arena<T>) -> bool {
 // typed handles, so the drain cannot spell `Arena<T>` for each one.
 fn __arena_destroy_id(scene_id: int, arena_id: int) -> bool {
     if is_null(__arena_store_any(scene_id, arena_id)) { return false }
-    __ARENA_STORES.set(arena_id, null)
+    __ARENA_REGISTRY.stores.set(arena_id, null)
     return true
 }
 
@@ -270,8 +272,8 @@ fn Arena<T>.len(arena) -> int {
 // flat, and a test asserting only `len()` cannot see the difference.
 fn arena_live_count() -> int {
     let live = 0
-    for i in 0..vec_len(__ARENA_STORES) {
-        if !is_null(__ARENA_STORES[i]) { live += 1 }
+    for i in 0..vec_len(__ARENA_REGISTRY.stores) {
+        if !is_null(__ARENA_REGISTRY.stores[i]) { live += 1 }
     }
     return live
 }

@@ -22,12 +22,9 @@ use std::path::{Path, PathBuf};
 /// What a successful (re)compile asks of the runtime beyond hot-reloading.
 #[derive(Default)]
 pub struct CompileOutcome {
-    /// Reasons whose live state or runtime registry cannot be migrated. Non-empty
-    /// => the runtime must RESTART the game process: kill, then
-    /// `canonicalize_for_restart` (which writes the deferred `main.lua`), then
-    /// respawn. The compile deliberately did NOT write `main.lua` -- the old
-    /// process must never hot-reload the new-shape program
-    /// (docs/hot-reload-schema-drift-plan.md).
+    /// Reasons whose live state or runtime registry cannot take the compatible
+    /// fast path. The watcher requests the existing clean process restart for
+    /// these changes; body-only edits remain on the CodeRef overlay path.
     pub restart_reasons: Vec<String>,
 }
 
@@ -54,6 +51,13 @@ pub trait GameCompiler {
     fn comptime_watch_files(&self) -> Vec<PathBuf> {
         Vec::new()
     }
+
+    /// The exact compiler-owned identity of the Artifact the next process
+    /// would execute. A missing value is an error at every replay/recording
+    /// launch boundary; callers must not invent a development identity.
+    fn artifact_fingerprint(&self) -> Result<String> {
+        anyhow::bail!("compiler did not publish an Artifact fingerprint")
+    }
 }
 
 /// Skull backend: bone `Session` + `SkullEmitCache` (the `SkullStone` holder),
@@ -63,10 +67,9 @@ pub struct SkullGameCompiler {
     dir: String,
     output_path: PathBuf,
     incremental_path: PathBuf,
-    /// A shape-changed compile deferred its `main.lua` write; the restart
-    /// path's `canonicalize_for_restart` must write it even with no overlay
-    /// on disk.
-    pending_shape_write: bool,
+    /// A safety-gated full publication is written by the restart path before
+    /// the successor process loads the current program.
+    pending_full_write: bool,
 }
 
 impl SkullGameCompiler {
@@ -76,7 +79,7 @@ impl SkullGameCompiler {
             dir: path.to_string(),
             output_path,
             incremental_path,
-            pending_shape_write: false,
+            pending_full_write: false,
         }
     }
 }
@@ -97,7 +100,7 @@ impl GameCompiler for SkullGameCompiler {
                     &self.output_path,
                     &self.incremental_path,
                 )?);
-                self.pending_shape_write = false;
+                self.pending_full_write = false;
                 Ok(CompileOutcome::default())
             }
             Some(st) => {
@@ -106,18 +109,25 @@ impl GameCompiler for SkullGameCompiler {
                 let changed_vec: Vec<PathBuf> = changed.iter().cloned().collect();
                 let reload = st.recompile(&changed_vec, &self.output_path, &self.incremental_path)?;
                 match reload {
-                    SkullReload::Full { bytes, cook_ms, emit_ms, write_ms } => log::info!(target: "STONE",
-                        "skull: full rebuild -> main.lua in {:.1}ms ({:.1} cook + {:.1} emit + {:.1} write, {} KB)",
-                        cook_ms + emit_ms + write_ms, cook_ms, emit_ms, write_ms, bytes / 1024),
+                    SkullReload::Full { bytes, cook_ms, emit_ms, write_ms } => {
+                        log::info!(target: "STONE",
+                            "skull: full rebuild -> main.lua in {:.1}ms ({:.1} cook + {:.1} emit + {:.1} write, {} KB)",
+                            cook_ms + emit_ms + write_ms, cook_ms, emit_ms, write_ms, bytes / 1024);
+                        return Ok(CompileOutcome {
+                            restart_reasons: vec![
+                                "full reload requires a clean process restart".to_string(),
+                            ],
+                        });
+                    }
                     SkullReload::Incremental { bytes, reinferred, cook_ms, emit_ms, write_ms } => log::info!(target: "STONE",
                         "skull: body edit -> incremental.lua in {:.1}ms ({:.1} cook + {:.1} emit + {:.1} write, {} fn{}, {} B overlay)",
                         cook_ms + emit_ms + write_ms, cook_ms, emit_ms, write_ms, reinferred, if reinferred == 1 { "" } else { "s" }, bytes),
                     SkullReload::ShapeChanged { types } => {
-                        self.pending_shape_write = true;
+                        self.pending_full_write = true;
                         return Ok(CompileOutcome { restart_reasons: types });
                     }
                     SkullReload::FullRequired { reasons } => {
-                        self.pending_shape_write = true;
+                        self.pending_full_write = true;
                         return Ok(CompileOutcome { restart_reasons: reasons });
                     }
                     SkullReload::NoChange => {}
@@ -132,12 +142,12 @@ impl GameCompiler for SkullGameCompiler {
         // dual-load the accumulated incremental.lua. Fold the overlay back in
         // first so the restarted process gets the complete current program.
         // Runs when an overlay is on disk (body edits since the last full
-        // build) or a shape-changed compile deferred its main.lua write.
-        if self.incremental_path.exists() || self.pending_shape_write {
+        // build) or a safety-gated full publication was deferred.
+        if self.incremental_path.exists() || self.pending_full_write {
             if let Some(st) = &mut self.stone {
                 log::info!(target: "STONE", "skull: canonicalizing main.lua before restart");
                 st.force_full(&self.output_path, &self.incremental_path)?;
-                self.pending_shape_write = false;
+                self.pending_full_write = false;
             }
         }
         Ok(())
@@ -145,6 +155,13 @@ impl GameCompiler for SkullGameCompiler {
 
     fn comptime_watch_files(&self) -> Vec<PathBuf> {
         self.stone.as_ref().map(|st| st.comptime_watch_files()).unwrap_or_default()
+    }
+
+    fn artifact_fingerprint(&self) -> Result<String> {
+        self.stone
+            .as_ref()
+            .map(|stone| stone.artifact_fingerprint().to_string())
+            .ok_or_else(|| anyhow::anyhow!("compiler did not publish an Artifact fingerprint"))
     }
 }
 

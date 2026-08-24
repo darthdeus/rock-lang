@@ -24,6 +24,32 @@ fn programs_without_definition_roles_do_not_stage_an_empty_plan() {
     assert_eq!(run_luajit(&format!("{lua}\nprint('PASS')"), "empty_definition_plan"), "PASS");
 }
 
+#[test]
+fn typed_definition_catalog_lookup_is_fail_closed_and_counts_population() {
+    let lua = emit_module("fn main() { let f = () => 1; print(f()) }\n");
+    let driver = r#"
+local missing_plan = not pcall(function() __rock_definition_catalog("widgets") end)
+__rock_code_slot_begin()
+__rock_definition_plan_stage({
+  widgets = { len = 1, _data = { [1] = { key = "alpha", factory = function() return { value = 1 } end } } },
+  empty = { len = 0, _data = {} },
+})
+__rock_code_slot_publish()
+local missing_catalog = not pcall(function() __rock_definition_catalog("missing") end)
+local empty = __rock_definition_catalog("empty")
+local nonempty = __rock_definition_catalog("widgets")
+if missing_plan and missing_catalog and empty.len == 0 and nonempty.len == 1 then
+  print("4/4 PASS")
+else
+  print("0/4 FAIL")
+end
+"#;
+    assert_eq!(
+        run_luajit(&format!("{lua}{driver}"), "typed_definition_catalog"),
+        "4/4 PASS"
+    );
+}
+
 /// An escaping Rock function value enables the shared CodeRef runtime.
 #[test]
 fn prelude_defines_shared_fn_metatable() {

@@ -64,6 +64,8 @@ mod nobox_global_reflection_tests;
 mod parser_recovery_surfacing;
 #[path = "production_sources_test.rs"]
 mod production_sources_test;
+#[path = "runstate_authority.rs"]
+mod runstate_authority;
 #[path = "asset_overlay_defaults.rs"]
 mod asset_overlay_defaults;
 #[path = "directory_listing_api.rs"]

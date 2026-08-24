@@ -93,6 +93,36 @@ pub struct LuaEmission {
     pub allocation_sites: Vec<EmittedAllocationSite>,
 }
 
+pub const ARTIFACT_PLAN_PRELUDE: &str = r#"
+function __rock_artifact_binding_plan_stage(plan)
+  if not _G.__rock_state_transaction then error("Artifact binding plan stage not open", 0) end
+  if not plan or not plan.census or plan.census.examined <= 0
+      or plan.census.examined ~= plan.census.assigned then
+    error("incomplete Artifact binding plan", 0)
+  end
+  _G.__rock_artifact_binding_plan_pending = plan
+end
+function __rock_artifact_binding_plan_publish()
+  local plan = _G.__rock_artifact_binding_plan_pending
+  if plan ~= nil then
+    _G.__ROCK_ARTIFACT_BINDING_PLAN = plan
+    _G.__rock_artifact_binding_plan_pending = nil
+  end
+end
+function __rock_artifact_plan_begin()
+  if _G.__rock_state_transaction_begin then __rock_state_transaction_begin() end
+  _G.__rock_artifact_binding_plan_pending = nil
+end
+function __rock_artifact_plan_abort()
+  if _G.__rock_state_transaction_abort then __rock_state_transaction_abort() end
+  _G.__rock_artifact_binding_plan_pending = nil
+end
+function __rock_artifact_plan_publish()
+  __rock_artifact_binding_plan_publish()
+  if _G.__rock_state_transaction_commit then __rock_state_transaction_commit() end
+end
+"#;
+
 /// Runtime support for callable CodeRefs and capturing environment records.
 /// Slots are mutated in place only by the publish step, so existing values see
 /// a compatible body edit while a failed stage leaves the previous body live.
@@ -144,6 +174,7 @@ function __rock_code_slot_begin()
   _G.__rock_definition_plan_materializing = false
   _G.__rock_lifecycle_plan_pending = nil
   _G.__rock_definition_plan_pending = nil
+  _G.__rock_artifact_binding_plan_pending = nil
 end
 function __rock_code_slot_abort()
   if _G.__rock_state_transaction_abort then __rock_state_transaction_abort() end
@@ -152,6 +183,7 @@ function __rock_code_slot_abort()
   _G.__rock_definition_plan_materializing = false
   _G.__rock_lifecycle_plan_pending = nil
   _G.__rock_definition_plan_pending = nil
+  _G.__rock_artifact_binding_plan_pending = nil
   local pending_wgpu = rawget(_G, "PENDING_WGPU_SHADER_SRCS")
   if pending_wgpu then
     for key in pairs(pending_wgpu) do pending_wgpu[key] = nil end
@@ -170,6 +202,13 @@ end
 function __rock_definition_plan_stage(plan)
   if not _G.__rock_code_slot_pending then error("Rock code slot stage not open", 0) end
   _G.__rock_definition_plan_pending = plan
+end
+function __rock_definition_catalog(catalog)
+  local plan = rawget(_G, "__ROCK_DEFINITION_PLAN")
+  if plan == nil then error("DefinitionPlan is not published", 0) end
+  local view = rawget(plan, catalog)
+  if view == nil then error("DefinitionPlan catalog " .. catalog .. " is not published", 0) end
+  return view
 end
 function __rock_lifecycle_wire_due(old_plan, candidate_plan)
   local due = {}
@@ -291,6 +330,7 @@ function __rock_code_slot_publish()
   if definition_plan ~= nil then
     _G.__ROCK_DEFINITION_PLAN = definition_plan
   end
+  if __rock_artifact_binding_plan_publish then __rock_artifact_binding_plan_publish() end
   _G.__rock_code_slot_pending = nil
   _G.__rock_code_slot_pending_slots = nil
   _G.__rock_lifecycle_plan_pending = nil

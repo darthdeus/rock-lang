@@ -2895,15 +2895,14 @@ pub enum SkullReload {
     /// pure `emit_overlay` (directly comparable to `iter-incremental`); `write_ms`
     /// is the separate disk write of the overlay.
     Incremental { bytes: usize, reinferred: usize, cook_ms: f64, emit_ms: f64, write_ms: f64 },
-    /// The live process cannot remove a shader registration. The caller must
-    /// restart it, then call [`SkullStone::force_full`] to materialize the
-    /// current program; no output was written on this path.
+    /// A full artifact is required before the current process can observe this
+    /// update; no output was written on this path.
     FullRequired { reasons: Vec<String> },
     /// A type's runtime SHAPE changed (docs/hot-reload-schema-drift-plan.md):
-    /// live state cannot be migrated, so the game process must RESTART.
-    /// Nothing was written -- the running process must never dofile the
-    /// new-shape program; the restart path's `force_full` writes it after the
-    /// kill. `types` names the drifted types for the why-log.
+    /// live state cannot be migrated in place. Nothing was written -- the
+    /// supervisor must use the restart fallback. `types` names the drifted
+    /// types for the
+    /// why-log.
     ShapeChanged { types: Vec<String> },
     /// Nothing changed (content-hash no-op).
     NoChange,
@@ -3022,11 +3021,12 @@ pub struct SkullStone {
     renderer_target: skull::mir_emit::RendererTarget,
     /// Per-type layout hashes of the last program the game process could have
     /// loaded. A full recompile whose hashes drifted returns
-    /// `SkullReload::ShapeChanged` (restart request) instead of writing
+    /// `SkullReload::ShapeChanged` (full-reconstruction request) instead of writing
     /// (docs/hot-reload-schema-drift-plan.md).
     shape_hashes: skull::ShapeHashes,
     route_profile_enabled: bool,
     last_route_profile: Option<SkullRouteProfile>,
+    artifact_fingerprint: String,
 }
 
 impl SkullStone {
@@ -3048,7 +3048,7 @@ impl SkullStone {
     fn init_impl(dir: &str, main_path: &std::path::Path, incremental_path: &std::path::Path, include_tests: bool) -> Result<SkullStone> {
         let renderer_target = skull_renderer_target(dir)?;
         let project = crate::live_project::LiveProject::init(dir, include_tests)?;
-        let (lua, cache) = {
+        let (lua, cache, artifact_fingerprint) = {
             let ws = project.workspace();
             let mid = skull::user_module_id(ws)
                 .map_err(no_user_module)?;
@@ -3068,10 +3068,11 @@ impl SkullStone {
             let spec = crate::unified_compile::SourceSpec::Directory(
                 std::path::PathBuf::from(dir),
             );
+            let artifact_fingerprint = emit.artifact_fingerprint.clone();
             let mut lua = emit.lua;
             install_rock_state_metadata(&mut lua, ws, &spec)
                 .map_err(|e| anyhow::anyhow!(render_project_err(project.sources(), &e)))?;
-            (lua, c)
+            (lua, c, artifact_fingerprint)
         };
         let preamble = skull_game_preamble(dir)?;
         write_full_main(&preamble, &lua, main_path, incremental_path)?;
@@ -3085,6 +3086,7 @@ impl SkullStone {
             shape_hashes,
             route_profile_enabled: std::env::var_os("ROCK_SKULL_ROUTE_PROFILE").is_some(),
             last_route_profile: None,
+            artifact_fingerprint,
         })
     }
 
@@ -3108,6 +3110,10 @@ impl SkullStone {
         } else {
             self.last_route_profile = None;
         }
+    }
+
+    pub fn artifact_fingerprint(&self) -> &str {
+        &self.artifact_fingerprint
     }
 
     /// On a watch event: refresh the cached sources (re-read only `changed` off
@@ -3264,11 +3270,10 @@ impl SkullStone {
             .collect()
     }
 
-    /// Feed source edits into the Session, route by the worst tier, and write
-    /// the output: any interface/structural edit -> full `main.lua` + overlay
-    /// wipe (behind the schema-drift gate); body-only edits -> `incremental.lua`
-    /// overlay. Shared by the disk-driven watcher path ([`SkullStone::recompile`])
-    /// and the in-memory sim reload injection ([`SkullStone::apply_edit`]).
+    /// Feed source edits into the Session and route by the worst tier. Body-only
+    /// edits write `incremental.lua`; a full artifact is either written or
+    /// returned as `FullRequired` when a safety gate defers publication.
+    /// Shared by the disk-driven watcher and in-memory sim reload paths.
     /// `t_cook` is the caller's front-end timer (includes its feed construction).
     fn route_and_emit(
         &mut self,
@@ -3315,11 +3320,9 @@ impl SkullStone {
             // Schema-drift gate (docs/hot-reload-schema-drift-plan.md): live
             // data outlives every reload tier, so if any type's runtime layout
             // moved, hot-reloading the recompiled program would drive old-shape
-            // state with new-shape readers. Request a process restart and defer
-            // ALL writes -- the stone loop kills the process, then
-            // `force_full` (canonicalize) writes this session's program for the
-            // respawn. Re-baseline the stored hashes now: the delta is consumed
-            // by this one restart.
+            // state with new-shape readers. Request a complete reconstruction
+            // and defer ALL writes until the restart path. Re-baseline the stored hashes now: the
+            // delta is consumed by this one full publication.
             let new_shapes = skull::type_shape_hashes(self.project.workspace())
                 .map_err(|e| anyhow::anyhow!(e.message))?;
             let drifted = skull::shape_diff(&self.shape_hashes, &new_shapes);
@@ -3352,7 +3355,7 @@ impl SkullStone {
                     })
                 {
                     return Ok(SkullReload::FullRequired {
-                        reasons: vec!["StateSchema changed; process restart is required".to_string()],
+                        reasons: vec!["StateSchema changed; fresh Session is required".to_string()],
                     });
                 }
                 if self.cache.lifecycle_plan().is_some_and(|old| {
@@ -3378,6 +3381,11 @@ impl SkullStone {
             let (lua, staged_cache) = lua;
             let bytes = write_full_main(&self.preamble, &lua, main_path, incremental_path)?;
             self.cache = staged_cache;
+            self.artifact_fingerprint = self
+                .cache
+                .artifact_fingerprint()
+                .ok_or_else(|| anyhow::anyhow!("compiler did not publish an Artifact fingerprint"))?
+                .to_string();
             let write_ms = t_write.elapsed().as_secs_f64() * 1000.0;
             Ok(SkullReload::Full { bytes, cook_ms, emit_ms, write_ms })
         } else {
@@ -3416,7 +3424,7 @@ impl SkullStone {
                 });
             }
             if self.cache.body_edit_baseline_lifecycle_plan().is_some_and(|old| {
-                old.wire_structure_changed(
+                old.structure_changed(
                     self.cache
                         .lifecycle_plan()
                         .expect("overlay always carries a LifecyclePlan"),
@@ -3431,7 +3439,7 @@ impl SkullStone {
                 }) {
                     "removing a gated @wire requires a fresh Session/HostProjection"
                 } else {
-                    "LifecyclePlan wire structure changed; full artifact transition required"
+                    "LifecyclePlan structure changed; full artifact transition required"
                 };
                 self.cache.commit_body_edit_transaction();
                 return Ok(SkullReload::FullRequired {
@@ -3445,6 +3453,11 @@ impl SkullStone {
             if let Some(profile) = profile.as_deref_mut() {
                 profile.atomic_output_write_ns += t_write.elapsed().as_nanos();
             }
+            self.artifact_fingerprint = self
+                .cache
+                .artifact_fingerprint()
+                .ok_or_else(|| anyhow::anyhow!("compiler did not publish an Artifact fingerprint"))?
+                .to_string();
             let commit_started = profile.is_some().then(Instant::now);
             self.cache.commit_body_edit_transaction();
             if let (Some(started), Some(profile)) = (commit_started, profile.as_deref_mut()) {
@@ -3473,7 +3486,7 @@ impl SkullStone {
         // mutated the session into the broken state, so the restart-path fold must
         // re-gate or it would write a partial `main.lua` to the respawned process.
         self.project.verdict("on restart fold")?;
-        let lua = {
+        let (lua, cache, artifact_fingerprint) = {
             let ws = self.project.workspace();
             let mid = skull::user_module_id(ws)
                 .map_err(no_user_module)?;
@@ -3484,6 +3497,7 @@ impl SkullStone {
                 self.renderer_target,
             )
                 .map_err(|e| anyhow::anyhow!("skull force_full emit: {}", e.message))?;
+            let artifact_fingerprint = emit.artifact_fingerprint.clone();
             // Host package/description metadata is rebuilt with the StateSchema.
             let spec = crate::unified_compile::SourceSpec::Directory(
                 std::path::PathBuf::from(self.project.dir()),
@@ -3491,12 +3505,12 @@ impl SkullStone {
             let mut lua = emit.lua;
             install_rock_state_metadata(&mut lua, ws, &spec)
                 .map_err(|e| anyhow::anyhow!(e.message))?;
-            (lua, c)
+            (lua, c, artifact_fingerprint)
         };
-        let (lua, staged_cache) = lua;
         self.preamble = skull_game_preamble(self.project.dir())?;
         write_full_main(&self.preamble, &lua, main_path, incremental_path)?;
-        self.cache = staged_cache; // resets changed_since_full -- the overlay is now folded in
+        self.artifact_fingerprint = artifact_fingerprint;
+        self.cache = cache; // resets changed_since_full -- the overlay is now folded in
         // This program is what the (re)spawned process loads -- re-baseline the
         // shape hashes to it, including drift that arrived via a recompile that
         // bailed on a type error after mutating the session.

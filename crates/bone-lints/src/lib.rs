@@ -5,8 +5,8 @@
 //! Plan + catalog: `docs/lint-future-plan.md`, spec `docs/linter.md`.
 
 use bone_core::hir::{
-    BinOp, BindingInfo, BindingKind, BodyOwner, Callee, Expr, FnBackend, Function, Module,
-    Statement, TyId, TypeCtor, TypeExpr,
+    AnnoValue, BinOp, BindingInfo, BindingKind, BodyOwner, Callee, Expr, FnBackend, Function,
+    Module, Statement, TyId, TypeCtor, TypeExpr,
 };
 use bone_core::prelude::*;
 use bone_core::workspace::{BodyInference, BoundNext, BoundTree};
@@ -28,13 +28,60 @@ pub struct UnusedVar {
 /// is the workspace's enum-variant names (see [`enum_variant_names`]), used to
 /// drop payload-less match arms.
 pub fn unused_vars_in_body(body: &Body, variants: &FxHashSet<Ustr>) -> Vec<UnusedVar> {
-    let read = read_bindings(body);
+    unused_vars_in_body_with_metadata(body, variants, &FxHashSet::default())
+}
+
+fn unused_vars_in_body_with_metadata(
+    body: &Body,
+    variants: &FxHashSet<Ustr>,
+    metadata_used: &FxHashSet<Idx<BindingInfo>>,
+) -> Vec<UnusedVar> {
+    let mut read = read_bindings(body);
+    read.extend(metadata_used);
     candidate_bindings(body, variants)
         .into_iter()
         .filter(|idx| !read.contains(idx))
         .map(|idx| &body.binding_arena[idx])
         .filter(|b| !b.name.as_str().starts_with('_'))
         .map(|b| UnusedVar { name: b.name, span: b.span })
+        .collect()
+}
+
+fn decorator_metadata_used_bindings(
+    module: &Module,
+    owner: BodyOwner,
+    body: &Body,
+) -> FxHashSet<Idx<BindingInfo>> {
+    let BodyOwner::Decorator(did) = owner else { return FxHashSet::default() };
+    let decorator = &module.decorators[did];
+    let mut names = FxHashSet::default();
+    for annotation in &decorator.annotations {
+        let metadata_arg = match annotation.name.name.as_str() {
+            "artifact_definition" => "key_param",
+            "lifecycle" => "stage_param",
+            _ => continue,
+        };
+        if let Some(AnnoValue::String(name)) = annotation.args.iter().find_map(|arg| {
+            (arg.name.as_ref().is_some_and(|arg_name| arg_name.name.as_str() == metadata_arg))
+                .then_some(&arg.value)
+        }) {
+            names.insert(*name);
+        }
+    }
+    body.param_bindings
+        .into_iter()
+        .filter(|idx| names.contains(&body.binding_arena[*idx].name))
+        .collect()
+}
+
+fn unused_vars_in_module(module: &Module, variants: &FxHashSet<Ustr>) -> Vec<UnusedVar> {
+    module
+        .bodies
+        .iter()
+        .flat_map(|(owner, body)| {
+            let metadata_used = decorator_metadata_used_bindings(module, *owner, body);
+            unused_vars_in_body_with_metadata(body, variants, &metadata_used)
+        })
         .collect()
 }
 
@@ -2672,8 +2719,7 @@ fn flat_findings_with(
     let module = ws.module(mid);
     let mut out: Vec<Finding> = Vec::new();
     if sel.enabled(UNUSED_VAR) {
-        let found: Vec<_> =
-            module.bodies.values().flat_map(|b| unused_vars_in_body(b, variants)).collect();
+        let found = unused_vars_in_module(module, variants);
         out.extend(
             filter_suppressed_census(found, src, census.as_deref_mut())
                 .iter()
@@ -3578,6 +3624,7 @@ fn is_implementation_anno(name: &str) -> bool {
             | "shader_expand"
             | "build_var_expand"
             | "embed_expand"
+            | "scene_type_key"
             | "consume"
     )
 }
@@ -3683,8 +3730,7 @@ pub fn unused_vars(ws: &Workspace) -> Vec<UnusedVar> {
     let warm = FxHashSet::default();
     let variants = enum_variant_names(ws, &warm);
     user_modules(ws, &warm)
-        .flat_map(|m| m.bodies.values())
-        .flat_map(|b| unused_vars_in_body(b, &variants))
+        .flat_map(|module| unused_vars_in_module(module, &variants))
         .collect()
 }
 

@@ -79,6 +79,10 @@ pub struct Workspace {
 #[derive(Clone, Debug, Default)]
 pub struct ComptimeInputs {
     pub vars: FxHashMap<Ustr, ComptimeVarValue>,
+    /// Declared metadata whose value is intentionally outside executable
+    /// Artifact identity (for example a presentation build clock). The
+    /// compiler validates every name before excluding its value hash.
+    pub volatile_vars: FxHashSet<Ustr>,
     /// Effective declared build channel for package metadata. Empty means a
     /// synthetic/type-only workspace did not come through CLI resolution.
     pub channel: String,

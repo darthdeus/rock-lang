@@ -9,6 +9,7 @@
 //! `docs/skull-bone-mir-faithful-plan.md`.
 
 pub mod ablation;
+pub mod artifact_plan;
 pub mod bound;
 pub mod cfg;
 pub mod concrete;

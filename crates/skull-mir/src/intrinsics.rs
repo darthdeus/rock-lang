@@ -39,6 +39,9 @@ pub enum Emission {
 /// A compile-time expansion kind -- the emission of an expansion intrinsic.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExpandKind {
+    /// `@scene_type_key fn __rock_scene_type_key<T>() -> string` -> the
+    /// canonical semantic identity of the concrete `T` at this call site.
+    SceneTypeKey,
     /// `materialize<T>(value: T) -> T` makes a value aggregate's runtime box
     /// explicit at this source position.
     Materialize,
@@ -90,6 +93,9 @@ pub fn is_intrinsic(f: &Function) -> bool {
 /// intrinsic. THE ONE recognizer -- `lower_call_repr` routes through it instead
 /// of a bespoke annotation check, so there is no second ad-hoc registry.
 pub fn expand_kind(f: &Function) -> Option<ExpandKind> {
+    if has_anno(f, "scene_type_key") {
+        return Some(ExpandKind::SceneTypeKey);
+    }
     if has_anno(f, "materialize") {
         return Some(ExpandKind::Materialize);
     }

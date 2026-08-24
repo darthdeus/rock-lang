@@ -317,6 +317,89 @@ fn sort_global_init_lines(inits: Vec<GlobalInit>) -> Result<Vec<String>, Compile
     Ok(lines)
 }
 
+const LUA_INIT_PART_BYTES: usize = 32 * 1024;
+
+fn wrap_large_lua_section(name: &str, body: &str) -> String {
+    if body.len() <= LUA_INIT_PART_BYTES {
+        return body.to_string();
+    }
+    format!("local function {name}()\n{body}end\n{name}()\n")
+}
+
+fn state_initializer_lua(init_lines: &[String]) -> String {
+    let mut parts: Vec<Vec<&str>> = vec![Vec::new()];
+    let mut part_bytes = 0;
+    for line in init_lines {
+        if part_bytes > 0 && part_bytes + line.len() > LUA_INIT_PART_BYTES {
+            parts.push(Vec::new());
+            part_bytes = 0;
+        }
+        parts.last_mut().unwrap().push(line.as_str());
+        part_bytes += line.len();
+    }
+
+    let mut out = String::new();
+    if parts.len() == 1 {
+        out.push_str("function __rock_state_initialize()\n");
+        for line in &parts[0] {
+            out.push_str(line);
+        }
+        out.push_str("end\n__rock_state_initialize()\n");
+        return out;
+    }
+
+    for (index, part) in parts.iter().enumerate() {
+        writeln!(out, "local function __rock_state_initialize_part_{index}()")
+            .unwrap();
+        for line in part {
+            out.push_str(line);
+        }
+        out.push_str("end\n");
+    }
+    out.push_str("function __rock_state_initialize()\n");
+    for index in 0..parts.len() {
+        writeln!(out, "__rock_state_initialize_part_{index}()").unwrap();
+    }
+    out.push_str("end\n__rock_state_initialize()\n");
+    out
+}
+
+#[cfg(test)]
+mod state_initializer_tests {
+    use super::{state_initializer_lua, wrap_large_lua_section};
+
+    #[test]
+    fn large_global_initializer_is_split_without_reordering() {
+        let lines = vec![
+            format!("A = \"{}\"\n", "a".repeat(20_000)),
+            format!("B = \"{}\"\n", "b".repeat(20_000)),
+            format!("C = \"{}\"\n", "c".repeat(20_000)),
+        ];
+        let lua = state_initializer_lua(&lines);
+
+        assert!(lua.contains("local function __rock_state_initialize_part_0()"));
+        assert!(lua.contains("local function __rock_state_initialize_part_1()"));
+        assert!(lua.contains("__rock_state_initialize_part_0()"));
+        assert!(lua.contains("__rock_state_initialize_part_1()"));
+        assert!(lua.find("A =").unwrap() < lua.find("B =").unwrap());
+        assert!(lua.find("B =").unwrap() < lua.find("C =").unwrap());
+        assert_eq!(lua.matches("A =").count(), 1);
+        assert_eq!(lua.matches("B =").count(), 1);
+        assert_eq!(lua.matches("C =").count(), 1);
+    }
+
+    #[test]
+    fn large_publication_section_is_nested_without_reordering() {
+        let body = "A = 1\nB = 2\n".repeat(20_000);
+        let lua = wrap_large_lua_section("__rock_publication_part", &body);
+
+        assert!(lua.starts_with("local function __rock_publication_part()\n"));
+        assert!(lua.ends_with("end\n__rock_publication_part()\n"));
+        assert_eq!(lua.matches("A = 1").count(), 20_000);
+        assert_eq!(lua.matches("B = 2").count(), 20_000);
+    }
+}
+
 /// Forward transitive closure over a symbol-reference graph (`name -> names it
 /// references`): every name reachable FROM `start` by following `deps` edges
 /// (NOT including `start` itself unless a cycle leads back). Used by the const
@@ -508,6 +591,12 @@ pub struct MirEmit {
     pub lifecycle_plan: skull_mir::lifecycle::LifecyclePlan,
     /// The one compiler-owned logical inventory consumed by every backend.
     pub state_schema: skull_mir::state_schema::StateSchema,
+    /// The compiler-owned definition inventory included in the exact Artifact
+    /// identity and published to the runtime.
+    pub definition_plan: skull_mir::definition::DefinitionPlan,
+    /// The semantic identity of this exact emitted Artifact. It is computed
+    /// before the backend payload leaves the compiler.
+    pub artifact_fingerprint: String,
     /// `(lua_name, reason)` for every definition the new path skipped.
     pub skipped: Vec<(String, String)>,
     /// Coarse per-stage time for the emit, in run order. `setup:` entries are
@@ -1459,7 +1548,10 @@ fn emit_lowered(
     out.global_names = skull_mir::reach::global_ref_names(mf);
     out.comptime_reads = mf.comptime_reads.clone();
     out.lua = lua;
-    out.code_artifact = skull_mir::code_identity::CodeArtifact::from_mir_tree(mf);
+    out.code_artifact = skull_mir::code_identity::CodeArtifact::from_mir_tree_with_volatile_vars(
+        mf,
+        &ws.comptime_inputs.volatile_vars,
+    );
     out.code_artifact.set_body_names(mf, body_name);
     out.times.validation += tv.elapsed();
     out.times.validation_work = true;
@@ -1731,8 +1823,40 @@ fn state_schema_lua(schema: &skull_mir::state_schema::StateSchema) -> String {
         ));
     }
     let census = image_plan.census();
+    let scene = image_plan.scene();
+    let scene_registry_identity = scene
+        .scene_registry_identity
+        .as_deref()
+        .map_or_else(|| "nil".to_string(), |value| format!("{value:?}"));
+    let arena_registry_identity = scene
+        .arena_registry_identity
+        .as_deref()
+        .map_or_else(|| "nil".to_string(), |value| format!("{value:?}"));
+    let scene_root_types = scene
+        .scene_root_types
+        .iter()
+        .map(|value| format!("{value:?}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let arena_identity_fields = scene
+        .arena_identity_fields
+        .iter()
+        .map(|value| format!("{value:?}"))
+        .collect::<Vec<_>>()
+        .join(",");
     out.push_str(&format!(
-        "}},census={{examined={},assigned={},duplicates={},unknown={},semantic_session={},program_artifact={},host_projection={},runner_diagnostic={},unsupported={}}}}}\n",
+        "}},scene={{scene_registry_identity={},arena_registry_identity={},scene_root_types={{{}}},arena_identity_fields={{{}}},census={{examined={},assigned={},scene_registry={},arena_registry={},scene_root_types={},arena_identity_fields={},scene_lifecycle_entries={}}}}},census={{examined={},assigned={},duplicates={},unknown={},semantic_session={},program_artifact={},host_projection={},runner_diagnostic={},unsupported={}}}}}\n",
+        scene_registry_identity,
+        arena_registry_identity,
+        scene_root_types,
+        arena_identity_fields,
+        scene.census.examined,
+        scene.census.assigned,
+        scene.census.scene_registry,
+        scene.census.arena_registry,
+        scene.census.scene_root_types,
+        scene.census.arena_identity_fields,
+        schema.scene.scene_lifecycle_entries,
         census.examined,
         census.assigned,
         census.duplicates,
@@ -2666,6 +2790,11 @@ pub struct SkullEmitCache {
     /// Logical state table from the last complete assembly. Body overlays keep
     /// it unchanged; a full/incremental assembly replaces it atomically.
     state_schema: Option<std::sync::Arc<skull_mir::state_schema::StateSchema>>,
+    /// Definition inventory from the last complete assembly. Body overlays
+    /// retain it because definition structure is a full-reload boundary.
+    definition_plan: Option<std::sync::Arc<skull_mir::definition::DefinitionPlan>>,
+    /// Exact identity of the Artifact currently staged by this cache.
+    artifact_fingerprint: Option<String>,
     /// Comptime reads of the always-emitted units (global initializers,
     /// decorator defs), which have no Chunk. Feeds the watch set
     /// (`comptime_files`) and the overlay's stale-const re-init; refreshed by
@@ -2826,6 +2955,8 @@ struct BodyEditRollback {
     code_artifact: std::sync::Arc<skull_mir::code_identity::CodeArtifact>,
     lifecycle_plan: Option<std::sync::Arc<skull_mir::lifecycle::LifecyclePlan>>,
     state_schema: Option<std::sync::Arc<skull_mir::state_schema::StateSchema>>,
+    definition_plan: Option<std::sync::Arc<skull_mir::definition::DefinitionPlan>>,
+    artifact_fingerprint: Option<String>,
     unit_comptime_reads: UnitComptimeReads,
     repair_stats: IncrementalRepairStats,
 }
@@ -3217,7 +3348,10 @@ fn emit_body_chunk_with_mutation(
     );
     validate_emitted_body(ws, &ctx, &mf, &mut specs).map_err(|r| r.into_error(f.name_span, ""))?;
     collect_callee_frefs(&mf, &mut deps);
-    let mut code_artifact = skull_mir::code_identity::CodeArtifact::from_mir_tree(&mf);
+    let mut code_artifact = skull_mir::code_identity::CodeArtifact::from_mir_tree_with_volatile_vars(
+        &mf,
+        &ws.comptime_inputs.volatile_vars,
+    );
     code_artifact.set_body_names(&mf, &mangle_fn(ws, f));
     let (direct_globals, direct_calls) = direct_refs(ws, &mf);
     times.validation = tv.elapsed();
@@ -3622,7 +3756,10 @@ fn emit_spec_chunk(
     times.validation += tv.elapsed();
     times.validation_work = true;
     let specs = specs[before..].to_vec();
-    let mut code_artifact = skull_mir::code_identity::CodeArtifact::from_mir_tree(&mf);
+    let mut code_artifact = skull_mir::code_identity::CodeArtifact::from_mir_tree_with_volatile_vars(
+        &mf,
+        &ws.comptime_inputs.volatile_vars,
+    );
     code_artifact.set_body_names(&mf, name);
     skull_codegen_lua::regalloc_time_reset();
     let te = Instant::now();
@@ -4783,6 +4920,69 @@ pub struct UnitComptimeReads {
     decorators: Vec<skull_mir::mir::ComptimeRead>,
 }
 
+fn renderer_fingerprint_tag(target: RendererTarget) -> &'static str {
+    match target {
+        RendererTarget::Gl => "gl",
+        RendererTarget::Wgpu => "wgpu",
+    }
+}
+
+fn artifact_comptime_reads(
+    cache: &SkullEmitCache,
+    built_specs: &[(Instance, Chunk)],
+    unit_reads: &UnitComptimeReads,
+    replace_all_units: bool,
+) -> Vec<skull_mir::mir::ComptimeRead> {
+    let mut reads = Vec::new();
+    for chunk in cache.chunks.values().flatten() {
+        reads.extend(chunk.comptime_reads.iter().cloned());
+    }
+    for (_, chunk) in built_specs {
+        reads.extend(chunk.comptime_reads.iter().cloned());
+    }
+    if replace_all_units {
+        reads.extend(unit_reads.globals.values().flatten().cloned());
+        reads.extend(unit_reads.decorators.iter().cloned());
+    } else {
+        for (key, old_reads) in &cache.unit_comptime_reads.globals {
+            if !unit_reads.globals.contains_key(key) {
+                reads.extend(old_reads.iter().cloned());
+            }
+        }
+        reads.extend(unit_reads.globals.values().flatten().cloned());
+        if unit_reads.decorators.is_empty() {
+            reads.extend(cache.unit_comptime_reads.decorators.iter().cloned());
+        } else {
+            reads.extend(unit_reads.decorators.iter().cloned());
+        }
+    }
+    reads
+}
+
+fn artifact_fingerprint(
+    ws: &Workspace,
+    scx: &skull_mir::lower::ScalarCtx,
+    artifact: &skull_mir::code_identity::CodeArtifact,
+    lifecycle: &skull_mir::lifecycle::LifecyclePlan,
+    definitions: &skull_mir::definition::DefinitionPlan,
+    state: &skull_mir::state_schema::StateSchema,
+    reads: &[skull_mir::mir::ComptimeRead],
+    renderer_target: RendererTarget,
+) -> Result<String, CompilerError> {
+    crate::artifact_fingerprint::compute(
+        ws,
+        scx.interner(),
+        artifact,
+        lifecycle,
+        definitions,
+        state,
+        reads,
+        &ws.comptime_inputs.volatile_vars,
+        renderer_fingerprint_tag(renderer_target),
+    )
+    .map_err(|error| CompilerError::new_no_location(format!("Artifact fingerprint generation failed: {error}")))
+}
+
 fn assemble(
     ws: &Workspace,
     cg: &CodegenCtx,
@@ -5004,6 +5204,18 @@ fn assemble(
     for c in spec_chunks.values() {
         needed_foreign.extend(c.calls.iter().map(|f| shared(*f)));
     }
+    let foreign_bindings: Vec<(FuncRef, String)> = ws
+        .modules
+        .iter()
+        .filter(|module| module.id != ModuleId::builtin())
+        .flat_map(|module| {
+            module.functions.iter().filter_map(|(fid, _)| {
+                let self_ref = FuncRef { module: module.id, func: fid };
+                foreign_artifact_binding(ws, &cache.lua_view, &needed_foreign, self_ref)
+                    .map(|physical| (self_ref, physical))
+            })
+        })
+        .collect();
 
     // Function definitions, every module (cached chunk for ordinary/coroutine,
     // regenerated for extern / inline(lua)). The cached chunks were built in
@@ -5195,6 +5407,9 @@ fn assemble(
     // scaffolding (init ordering, deco application) whose own errors are
     // unrelated to a body that cannot emit.
     rejections.into_result()?;
+    if let Some(err) = cg.take_rejection() {
+        return Err(err);
+    }
     mark_generated_code_values(ws, &mut code_artifact);
     let definition_plan = skull_mir::definition::collect(ws)?;
     if definition_plan.census.applications != definition_plan.census.admitted {
@@ -5218,37 +5433,74 @@ fn assemble(
         crate::allocation_report::AllocationReport::default()
     };
     let state_schema = skull_mir::state_schema::StateSchema::collect(ws, scx, &code_artifact, &all_statics)
+        .map_err(|error| CompilerError::new_no_location(error.to_string()))?
+        .with_lifecycle_plan(&lifecycle_plan)
         .map_err(|error| CompilerError::new_no_location(error.to_string()))?;
-    let has_state_publication = code_artifact.entries.values().any(|entry| entry.escaping)
-        || definition_plan.census.declarations > 0
+    let binding_plan = build_artifact_plans(
+        ws,
+        scx,
+        &code_artifact,
+        &state_schema,
+        &foreign_bindings,
+    )?;
+    code_artifact.binding_plan = binding_plan;
+    let has_artifact_plans = !code_artifact.binding_plan.entries.is_empty();
+    let has_code_slot_publication = code_artifact.entries.values().any(|entry| entry.escaping)
+        || !definition_plan.catalogs.is_empty()
         || lifecycle_plan.census.declarations > 0;
+    let has_state_publication = has_code_slot_publication || has_artifact_plans;
     out.push_str("__rock_state_transaction_begin()\n");
     out.push_str(&format!(
         "__rock_state_publish_schema({:?})\n",
         state_schema.schema_id
     ));
-    out.push_str(&state_schema_lua(&state_schema));
+    let state_schema_stage = state_schema_lua(&state_schema);
+    out.push_str(&wrap_large_lua_section(
+        "__rock_state_schema_stage_part",
+        &state_schema_stage,
+    ));
 
     // Globals: an init fn + a dependency-ordered `<NAME> = __skull_ginit_<NAME>()`.
     // (Lowered above, so the walk could see their call edges; appended here, in
     // the original slot, so the emitted text is unchanged.)
     out.push_str(&globals_lua);
     skipped.extend(global_skipped);
-    let has_definition_plan = definition_plan.census.declarations > 0;
-    if code_artifact.entries.values().any(|entry| entry.escaping) || has_definition_plan {
+    let has_definition_plan = !definition_plan.catalogs.is_empty();
+    if has_artifact_plans {
+        out.push_str(skull_codegen_lua::ARTIFACT_PLAN_PRELUDE);
+    }
+    if has_code_slot_publication {
         out.push_str(skull_codegen_lua::FN_MT_PRELUDE);
     }
     // Global initializer bodies (including their escaping lambdas) are now
     // defined, so slot staging must follow them but precede initializer calls.
     let code_slot_stage = code_slot_registration_lua(ws, scx, &code_artifact)?;
-    out.push_str(&code_slot_stage);
-    if (has_definition_plan || lifecycle_plan.census.declarations > 0)
-        && !code_artifact.entries.values().any(|entry| entry.escaping)
-    {
+    out.push_str(&wrap_large_lua_section(
+        "__rock_code_slot_stage_part",
+        &code_slot_stage,
+    ));
+    if has_code_slot_publication && !code_artifact.entries.values().any(|entry| entry.escaping) {
         out.push_str("__rock_code_slot_begin()\n");
+    } else if has_artifact_plans && !has_code_slot_publication {
+        out.push_str("__rock_artifact_plan_begin()\n");
     }
-    out.push_str(&definition_plan_stage_lua(ws, scx, &definition_plan));
-    out.push_str(&lifecycle_plan_stage_lua(ws, scx, &lifecycle_plan));
+    let definition_plan_stage = definition_plan_stage_lua(ws, scx, &definition_plan);
+    out.push_str(&wrap_large_lua_section(
+        "__rock_definition_plan_stage_part",
+        &definition_plan_stage,
+    ));
+    let lifecycle_plan_stage = lifecycle_plan_stage_lua(ws, scx, &lifecycle_plan);
+    out.push_str(&wrap_large_lua_section(
+        "__rock_lifecycle_plan_stage_part",
+        &lifecycle_plan_stage,
+    ));
+    if has_artifact_plans {
+        let binding_plan_stage = artifact_binding_plan_stage_lua(&code_artifact.binding_plan);
+        out.push_str(&wrap_large_lua_section(
+            "__rock_artifact_binding_plan_stage_part",
+            &binding_plan_stage,
+        ));
+    }
 
     // Order the init lines by their transitive global-read closure over the full
     // call graph (now that every fn's direct facts are recorded).
@@ -5307,11 +5559,7 @@ fn assemble(
 
     out.push_str(&static_resets);
     let init_lines = sort_global_init_lines(inits)?;
-    out.push_str("function __rock_state_initialize()\n");
-    for line in init_lines {
-        out.push_str(&line);
-    }
-    out.push_str("end\n__rock_state_initialize()\n");
+    out.push_str(&state_initializer_lua(&init_lines));
 
     // Decorator APPLICATIONS (after global inits so a deco body can push a global).
     out.push_str(&decorator_application_lines(ws, &deco_map, scx, &mut skipped));
@@ -5321,11 +5569,15 @@ fn assemble(
     // one top-level `__rock_shader_register(key, glsl)` per distinct pair, so a
     // reload re-`dofile`s them with the new source (hot-reload parity).
     out.push_str(&cache.shader_registrations.lua);
-    out.push_str(code_slot_publish_lua(
-        &code_artifact,
-        has_definition_plan,
-        lifecycle_plan.census.declarations > 0,
-    ));
+    if has_code_slot_publication {
+        out.push_str(code_slot_publish_lua(
+            &code_artifact,
+            has_definition_plan,
+            lifecycle_plan.census.declarations > 0,
+        ));
+    } else if has_artifact_plans {
+        out.push_str("__rock_artifact_plan_publish()\n");
+    }
     if !has_state_publication {
         out.push_str("__rock_state_transaction_commit()\n");
     }
@@ -5354,9 +5606,6 @@ fn assemble(
     // rather than emit two clobbering top-level defs. Covers `emit_full` +
     // `emit_incremental` (both funnel through here); the overlay fast path drains
     // in `emit_overlay` and propagates the same error.
-    if let Some(err) = cg.take_rejection() {
-        return Err(err);
-    }
     let mut emitted_bodies: FxHashSet<Instance> = FxHashSet::default();
     for module in ws.modules.iter() {
         if module.id == ModuleId::builtin() {
@@ -5380,6 +5629,17 @@ fn assemble(
         }
     }
     emitted_bodies.extend(spec_chunks.keys().cloned());
+    let artifact_reads = artifact_comptime_reads(cache, built_specs, &unit_reads, true);
+    let artifact_fingerprint = artifact_fingerprint(
+        ws,
+        scx,
+        &code_artifact,
+        &lifecycle_plan,
+        &definition_plan,
+        &state_schema,
+        &artifact_reads,
+        cache.renderer_target,
+    )?;
     Ok((
         MirEmit {
             lua: out,
@@ -5387,6 +5647,8 @@ fn assemble(
             code_artifact,
             lifecycle_plan,
             state_schema,
+            definition_plan,
+            artifact_fingerprint,
             skipped,
             phases,
             abi_plan_stats: scx.abi_plan_stats(),
@@ -5507,20 +5769,37 @@ fn definition_plan_stage_lua(
     scx: &skull_mir::lower::ScalarCtx,
     plan: &skull_mir::definition::DefinitionPlan,
 ) -> String {
-    if plan.census.declarations == 0 {
+    if plan.catalogs.is_empty() {
         return String::new();
     }
-    let mut out = String::from("__rock_definition_plan_stage({\n");
-    let mut catalogs: std::collections::BTreeMap<Ustr, Vec<_>> = std::collections::BTreeMap::new();
+    let mut out = String::new();
+    let mut entries_by_catalog: std::collections::BTreeMap<Ustr, Vec<_>> = std::collections::BTreeMap::new();
     for entry in &plan.entries {
-        catalogs.entry(entry.catalog).or_default().push(entry);
+        entries_by_catalog.entry(entry.catalog).or_default().push(entry);
     }
-    for (catalog, entries) in catalogs {
+    for catalog_plan in &plan.catalogs {
+        if let Some(accessor) = catalog_plan.accessor {
+            let function = &ws.module(accessor.module).functions[accessor.func];
+            let name = mangle_fn(ws, function);
+            let _ = writeln!(
+                out,
+                "function {}()\n  return __rock_definition_catalog({})\nend",
+                name,
+                skull_codegen_lua::lua_string(catalog_plan.catalog.as_str()),
+            );
+        }
+    }
+    out.push_str("__rock_definition_plan_stage({\n");
+    for catalog_plan in &plan.catalogs {
+        let entries = entries_by_catalog
+            .get(&catalog_plan.catalog)
+            .cloned()
+            .unwrap_or_default();
         let _ = writeln!(
             out,
             "[{}] = {{ catalog = {}, len = {}, _data = {{",
-            skull_codegen_lua::lua_string(catalog.as_str()),
-            skull_codegen_lua::lua_string(catalog.as_str()),
+            skull_codegen_lua::lua_string(catalog_plan.catalog.as_str()),
+            skull_codegen_lua::lua_string(catalog_plan.catalog.as_str()),
             entries.len()
         );
         for (index, entry) in entries.into_iter().enumerate() {
@@ -5576,6 +5855,142 @@ fn mark_generated_code_values(
     }
 }
 
+fn foreign_artifact_binding(
+    ws: &Workspace,
+    view: &crate::artifact::ArtifactView,
+    needed_foreign: &FxHashSet<Instance>,
+    self_ref: FuncRef,
+) -> Option<String> {
+    let function = &ws.module(self_ref.module).functions[self_ref.func];
+    if function.backend == bone_semantic::hir::FnBackend::Js {
+        return None;
+    }
+    if function.is_extern {
+        return function
+            .ffi_lib
+            .filter(|_| should_emit_via_view(ws, view, self_ref))
+            .map(|_| function.name.to_string());
+    }
+    function
+        .inline_body
+        .as_ref()
+        .filter(|(backend, _)| *backend == bone_semantic::hir::FnBackend::Lua)
+        .filter(|_| emits_foreign_definition(ws, view, needed_foreign, self_ref))
+        .map(|_| mangle_fn(ws, function))
+}
+
+fn build_artifact_plans(
+    ws: &Workspace,
+    scx: &skull_mir::lower::ScalarCtx,
+    artifact: &skull_mir::code_identity::CodeArtifact,
+    state_schema: &skull_mir::state_schema::StateSchema,
+    foreign_bindings: &[(FuncRef, String)],
+) -> Result<skull_mir::artifact_plan::ArtifactBindingPlan, CompilerError> {
+    use skull_mir::artifact_plan::{ArtifactBinding, ArtifactBindingKind};
+    use skull_mir::code_identity::CodeIdentity;
+    use skull_mir::state_schema::{entry_state_keys, global_identity, StateKind};
+
+    let mut bindings = Vec::new();
+    for module in ws.modules.iter().filter(|m| m.id != ModuleId::builtin()) {
+        for (_, global) in module.globals.iter() {
+            let identity = global_identity(module.file, global.name);
+            if global.is_const {
+                let plan = skull_mir::lower::GlobalPlan::for_declared_type(ws, scx, global.ty)
+                    .map_err(|error| CompilerError::new_no_location(error.message))?;
+                let physical = plan
+                    .leaf_names(global.name)
+                    .unwrap_or_else(|| vec![global.name]);
+                for leaf in physical {
+                    bindings.push(ArtifactBinding {
+                        identity: identity.clone(),
+                        physical: leaf.to_string(),
+                        diagnostic: global.name.to_string(),
+                        kind: ArtifactBindingKind::Global,
+                        state_key: None,
+                    });
+                }
+            } else {
+                let entry = state_schema.entry(StateKind::Global, &identity).ok_or_else(|| {
+                    CompilerError::new_no_location(format!(
+                        "mutable global `{}` has no compiler-owned StateSchema entry",
+                        global.name
+                    ))
+                })?;
+                for (physical, state_key) in entry
+                    .physical
+                    .iter()
+                    .zip(entry_state_keys(entry).into_iter())
+                {
+                    bindings.push(ArtifactBinding {
+                        identity: identity.clone(),
+                        physical: physical.clone(),
+                        diagnostic: global.name.to_string(),
+                        kind: ArtifactBindingKind::Global,
+                        state_key: Some(state_key),
+                    });
+                }
+            }
+        }
+    }
+
+    for entry in artifact.entries.values() {
+        let Some(body_name) = entry.body_name else { continue };
+        bindings.push(ArtifactBinding {
+            identity: entry.identity.logical_key(ws, scx.interner()),
+            physical: body_name.to_string(),
+            diagnostic: entry.identity.logical_key(ws, scx.interner()),
+            kind: ArtifactBindingKind::Callable,
+            state_key: None,
+        });
+    }
+    for (fref, physical) in foreign_bindings {
+        let function = &ws.module(fref.module).functions[fref.func];
+        bindings.push(ArtifactBinding {
+            identity: CodeIdentity::Named(Instance::base(*fref)).logical_key(ws, scx.interner()),
+            physical: physical.clone(),
+            diagnostic: function.name.to_string(),
+            kind: ArtifactBindingKind::Callable,
+            state_key: None,
+        });
+    }
+
+    let binding_plan = skull_mir::artifact_plan::ArtifactBindingPlan::from_entries(bindings)
+        .map_err(CompilerError::new_no_location)?;
+    Ok(binding_plan)
+}
+
+fn artifact_binding_plan_stage_lua(
+    plan: &skull_mir::artifact_plan::ArtifactBindingPlan,
+) -> String {
+    let mut out = String::from("__rock_artifact_binding_plan_stage({ entries = { len = ");
+    let _ = write!(out, "{}, _data = {{\n", plan.entries.len());
+    for (index, entry) in plan.entries.iter().enumerate() {
+        let state_key = entry
+            .state_key
+            .as_deref()
+            .map_or_else(|| "nil".to_string(), skull_codegen_lua::lua_string);
+        let _ = writeln!(
+            out,
+            "[{}] = {{ identity = {}, physical = {}, diagnostic = {}, kind = {}, state_key = {} }},",
+            index + 1,
+            skull_codegen_lua::lua_string(&entry.identity),
+            skull_codegen_lua::lua_string(&entry.physical),
+            skull_codegen_lua::lua_string(&entry.diagnostic),
+            skull_codegen_lua::lua_string(entry.kind.as_str()),
+            state_key,
+        );
+    }
+    let _ = writeln!(
+        out,
+        "}} }}, census = {{ examined = {}, assigned = {}, duplicate = {}, incomplete = {} }} }})",
+        plan.census.examined,
+        plan.census.assigned,
+        plan.census.duplicate,
+        plan.census.incomplete,
+    );
+    out
+}
+
 fn lifecycle_plan_stage_lua(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,
@@ -5588,17 +6003,46 @@ fn lifecycle_plan_stage_lua(
     let mut phases: std::collections::BTreeMap<Ustr, Vec<_>> = std::collections::BTreeMap::new();
     for entry in &plan.entries { phases.entry(entry.phase).or_default().push(entry); }
     for (phase, entries) in phases {
-        let _ = writeln!(out, "[{}] = {{ len = {}, _data = {{", skull_codegen_lua::lua_string(phase.as_str()), entries.len());
+        let scene_owned = entries.iter().filter(|entry| entry.owner.as_str() == "scene").count();
+        let _ = writeln!(out, "[{}] = {{ len = {}, scene_owned = {}, _data = {{", skull_codegen_lua::lua_string(phase.as_str()), entries.len(), scene_owned);
         for (index, entry) in entries.into_iter().enumerate() {
         let key = entry.identity.logical_key(ws, scx.interner());
         let dependencies = entry.qualification.dependencies();
-        let _ = writeln!(out, "[{}] = {{ phase = {}, owner = {}, key = {}, name = {}, stage = {}, ordinal = {}, func = __rock_code_slot_ref({}), qualification = {}, body_fingerprint = {}, dependencies = {{ len = {}, _data = {{", index + 1,
+        let root_type = match &entry.root_type {
+            Some(root) => skull_codegen_lua::lua_string(
+                &skull_mir::lifecycle::scene_root_type_key(root)
+                    .unwrap_or_else(|| panic!("validated scene lifecycle root reached emission as {root:?}")),
+            ),
+            None => "nil".to_string(),
+        };
+        // A compiler-synthesized thunk of one uniform signature
+        // (`scene_id: int -> ()`) per entry, session- and scene-owned alike
+        // -- never the raw slot. A session thunk ignores its argument; a
+        // scene thunk resolves the live root for `scene_id` and calls
+        // through, skipping a Scene that closed since the population
+        // snapshot was taken (`__scene_root_any` returns nil there). Neither
+        // arm asks the value its runtime type: membership in the type's live
+        // population, established once at Scene creation
+        // (`__scene_type_bucket_insert`), is the only test.
+        let func_thunk = if entry.owner.as_str() == "scene" {
+            format!(
+                "(function() local __s = __rock_code_slot_ref({key}); return function(scene_id) local __root = __scene_root_any(scene_id); if __root ~= nil then __s(__root) end end end)()",
+                key = skull_codegen_lua::lua_string(&key),
+            )
+        } else {
+            format!(
+                "(function() local __s = __rock_code_slot_ref({key}); return function(__scene_id) __s() end end)()",
+                key = skull_codegen_lua::lua_string(&key),
+            )
+        };
+        let _ = writeln!(out, "[{}] = {{ phase = {}, owner = {}, root_type = {}, key = {}, name = {}, stage = {}, replay_role = {}, ordinal = {}, func = {}, qualification = {}, body_fingerprint = {}, dependencies = {{ len = {}, _data = {{", index + 1,
             skull_codegen_lua::lua_string(entry.phase.as_str()),
             skull_codegen_lua::lua_string(entry.owner.as_str()),
+            root_type,
             skull_codegen_lua::lua_string(&key),
             skull_codegen_lua::lua_string(entry.diagnostic_name.as_str()),
-            entry.stage, entry.declaration_ordinal,
-            skull_codegen_lua::lua_string(&key),
+            entry.stage, skull_codegen_lua::lua_string(entry.replay_role.tag()), entry.declaration_ordinal,
+            func_thunk,
             skull_codegen_lua::lua_string(entry.qualification.tag()),
             skull_codegen_lua::lua_string(&format!("{:016x}", entry.body_fingerprint)),
             dependencies.len());
@@ -6180,6 +6624,8 @@ fn emit_full_in_with_mutation(
         code_artifact: std::sync::Arc::new(skull_mir::code_identity::CodeArtifact::default()),
         lifecycle_plan: None,
         state_schema: None,
+        definition_plan: None,
+        artifact_fingerprint: None,
         unit_comptime_reads: UnitComptimeReads::default(),
         renderer_target,
         repair_stats: IncrementalRepairStats::default(),
@@ -6203,6 +6649,8 @@ fn emit_full_in_with_mutation(
     cache.code_artifact = std::sync::Arc::new(emit.code_artifact.clone());
     cache.lifecycle_plan = Some(std::sync::Arc::new(emit.lifecycle_plan.clone()));
     cache.state_schema = Some(std::sync::Arc::new(emit.state_schema.clone()));
+    cache.definition_plan = Some(std::sync::Arc::new(emit.definition_plan.clone()));
+    cache.artifact_fingerprint = Some(emit.artifact_fingerprint.clone());
     cache.unit_comptime_reads = unit_reads;
     cache.absorb_spec_chunks(built_specs);
     emit.graph_census = cache.graph.run_stats;
@@ -6276,6 +6724,8 @@ impl SkullEmitCache {
             code_artifact: self.code_artifact.clone(),
             lifecycle_plan: self.lifecycle_plan.clone(),
             state_schema: self.state_schema.clone(),
+            definition_plan: self.definition_plan.clone(),
+            artifact_fingerprint: self.artifact_fingerprint.clone(),
             unit_comptime_reads: self.unit_comptime_reads.clone(),
             repair_stats: self.repair_stats,
         });
@@ -6299,6 +6749,8 @@ impl SkullEmitCache {
             code_artifact,
             lifecycle_plan,
             state_schema,
+            definition_plan,
+            artifact_fingerprint,
             unit_comptime_reads,
             repair_stats,
         } = snapshot;
@@ -6330,6 +6782,8 @@ impl SkullEmitCache {
         self.code_artifact = code_artifact;
         self.lifecycle_plan = lifecycle_plan;
         self.state_schema = state_schema;
+        self.definition_plan = definition_plan;
+        self.artifact_fingerprint = artifact_fingerprint;
         self.unit_comptime_reads = unit_comptime_reads;
         self.repair_stats = repair_stats;
         result
@@ -6397,6 +6851,10 @@ impl SkullEmitCache {
         self.body_edit_rollback
             .as_ref()
             .and_then(|snapshot| snapshot.lifecycle_plan.as_deref())
+    }
+
+    pub fn artifact_fingerprint(&self) -> Option<&str> {
+        self.artifact_fingerprint.as_deref()
     }
 
     /// A live shader registry cannot remove a key from the running process:
@@ -7226,6 +7684,8 @@ pub fn emit_incremental(
     cache.code_artifact = std::sync::Arc::new(emit.code_artifact.clone());
     cache.lifecycle_plan = Some(std::sync::Arc::new(emit.lifecycle_plan.clone()));
     cache.state_schema = Some(std::sync::Arc::new(emit.state_schema.clone()));
+    cache.definition_plan = Some(std::sync::Arc::new(emit.definition_plan.clone()));
+    cache.artifact_fingerprint = Some(emit.artifact_fingerprint.clone());
     cache.unit_comptime_reads = unit_reads;
     cache.absorb_spec_chunks(built_specs);
     let reassemble = t_asm.elapsed();
@@ -7461,6 +7921,27 @@ fn assemble_overlay(
     {
         out.push_str("__rock_state_transaction_commit()\n");
     }
+    let definition_plan = cache.definition_plan.as_deref().cloned().ok_or_else(|| {
+        CompilerError::new_no_location(
+            "Artifact fingerprint generation requires a complete DefinitionPlan".to_string(),
+        )
+    })?;
+    let state_schema = cache.state_schema.clone().ok_or_else(|| {
+        CompilerError::new_no_location(
+            "Artifact fingerprint generation requires a complete StateSchema".to_string(),
+        )
+    })?;
+    let artifact_reads = artifact_comptime_reads(cache, &[], &unit_reads, false);
+    let artifact_fingerprint = artifact_fingerprint(
+        ws,
+        &cache.scx,
+        &candidate_code_artifact,
+        &lifecycle_plan,
+        &definition_plan,
+        &state_schema,
+        &artifact_reads,
+        cache.renderer_target,
+    )?;
 
     Ok((
         MirEmit {
@@ -7473,6 +7954,8 @@ fn assemble_overlay(
                 .as_deref()
                 .cloned()
                 .expect("overlay requires a completed StateSchema"),
+            definition_plan,
+            artifact_fingerprint,
             skipped,
             phases: Vec::new(),
             abi_plan_stats: cache.scx.abi_plan_stats(),
@@ -7649,6 +8132,8 @@ pub fn emit_overlay_with_span_edits(
         assemble_overlay(ws, cache, shader_changed, &changed_code_artifact)?;
     cache.code_artifact = std::sync::Arc::new(emit.code_artifact.clone());
     cache.lifecycle_plan = Some(std::sync::Arc::new(emit.lifecycle_plan.clone()));
+    cache.definition_plan = Some(std::sync::Arc::new(emit.definition_plan.clone()));
+    cache.artifact_fingerprint = Some(emit.artifact_fingerprint.clone());
     for (key, reads) in overlay_unit_reads.globals {
         if reads.is_empty() {
             cache.unit_comptime_reads.globals.remove(&key);

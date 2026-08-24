@@ -39,8 +39,14 @@ fn record_with_env(game: &str, frames: u32, env: &[(&str, &str)]) -> (tempfile::
 
 /// Replay a log with the given env; return the process stderr.
 fn replay_stderr(game: &str, log: &str, env: &[(&str, &str)]) -> String {
+    let out = replay_raw(game, log, env);
+    assert!(out.status.success(), "replay must exit 0\nstderr:\n{}", String::from_utf8_lossy(&out.stderr));
+    String::from_utf8_lossy(&out.stderr).into_owned()
+}
+
+fn replay_raw(game: &str, log: &str, env: &[(&str, &str)]) -> std::process::Output {
     let scratch = tempfile::tempdir().expect("scratch");
-    let out = Command::new(env!("CARGO_BIN_EXE_rock"))
+    Command::new(env!("CARGO_BIN_EXE_rock"))
         .args([
             "frame", game, "-n", "15", "--replay", log,
             "--output", &scratch.path().to_string_lossy(),
@@ -49,35 +55,125 @@ fn replay_stderr(game: &str, log: &str, env: &[(&str, &str)]) -> String {
         .envs(env.iter().copied())
         .current_dir(workspace_root())
         .output()
-        .expect("spawn replay");
-    assert!(out.status.success(), "replay must exit 0\nstderr:\n{}", String::from_utf8_lossy(&out.stderr));
-    String::from_utf8_lossy(&out.stderr).into_owned()
+        .expect("spawn replay")
 }
 
-/// The v6 header stamps the build id, and a hot-reload during recording writes a
-/// `reload <tick>` marker.
+fn with_header(text: &str, version: &str, build: Option<&str>) -> String {
+    let mut lines: Vec<String> = text.lines().map(ToOwned::to_owned).collect();
+    assert!(!lines.is_empty(), "replay has a header");
+    lines[0] = format!("STONE_REPLAY {version}");
+    lines.retain(|line| !line.starts_with("build "));
+    if let Some(build) = build {
+        let tick = lines
+            .iter()
+            .position(|line| line.starts_with("t "))
+            .expect("replay has a tick");
+        lines.insert(tick, format!("build {build}"));
+    }
+    lines.join("\n") + "\n"
+}
+
+#[test]
+fn new_recordings_stamp_a_real_exact_artifact_identity() {
+    let (_dir, log) = record_with_env("bitgun", 15, &[]);
+    let text = std::fs::read_to_string(&log).expect("read log");
+    assert!(text.starts_with("STONE_REPLAY 9\n"), "new recordings must use v9\n{text}");
+    let build = text
+        .lines()
+        .find_map(|line| line.strip_prefix("build "))
+        .expect("new recordings must carry a build id");
+    assert!(!build.is_empty() && build != "dev", "the build id must be real and nondegenerate: {build:?}");
+    assert!(build.chars().all(|c| c.is_ascii_hexdigit()), "the exact artifact id is hex: {build:?}");
+}
+
+#[test]
+fn new_format_rejects_a_build_mismatch_before_the_first_game_tick() {
+    let (_dir, log) = record_with_env("bitgun", 15, &[("STONE_BUILD_ID", "buildAAA")]);
+    let text = std::fs::read_to_string(&log).expect("read log");
+    let new_text = with_header(&text, "8", Some("1111111111111111"));
+    std::fs::write(&log, new_text).expect("rewrite build id");
+    let out = replay_raw("bitgun", &log, &[("STONE_BUILD_ID", "2222222222222222")]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "a mismatched exact artifact must be rejected\n{stderr}");
+    assert!(
+        stderr.contains("build mismatch") && stderr.contains("before first game tick"),
+        "the rejection must happen before any game tick and name the mismatch\n{stderr}"
+    );
+}
+
+#[test]
+fn new_format_rejects_a_missing_build_id() {
+    let (_dir, log) = record_with_env("bitgun", 15, &[]);
+    let text = std::fs::read_to_string(&log).expect("read log");
+    std::fs::write(&log, with_header(&text, "8", None)).expect("remove build id");
+    let out = replay_raw("bitgun", &log, &[]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "a new-format replay without a build id must be rejected\n{stderr}");
+    assert!(stderr.contains("non-degenerate build id"), "the rejection must name the missing identity\n{stderr}");
+}
+
+#[test]
+fn new_format_rejects_a_degenerate_build_id() {
+    let (_dir, log) = record_with_env("bitgun", 15, &[]);
+    let text = std::fs::read_to_string(&log).expect("read log");
+    std::fs::write(&log, with_header(&text, "8", Some("dev"))).expect("degrade build id");
+    let out = replay_raw("bitgun", &log, &[]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "a new-format dev build id must be rejected\n{stderr}");
+    assert!(stderr.contains("non-degenerate build id"), "the rejection must name the degenerate identity\n{stderr}");
+}
+
+#[test]
+fn new_format_rejects_a_reload_marker_as_unstable() {
+    let (_dir, log) = record_with_env("bitgun", 15, &[("STONE_RELOAD_AT_FRAME", "5")]);
+    let text = std::fs::read_to_string(&log).expect("read log");
+    assert!(text.lines().any(|line| line.starts_with("reload ")), "fixture must contain a reload marker");
+    std::fs::write(&log, with_header(&text, "8", Some("0123456789abcdef"))).expect("rewrite format");
+    let out = replay_raw("bitgun", &log, &[]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "a reload-marked new-format replay must be rejected\n{stderr}");
+    assert!(stderr.contains("reload marker") && stderr.contains("stable"), "the rejection must explain instability\n{stderr}");
+}
+
+#[test]
+fn emitted_lua_has_no_shadow_effect_plan() {
+    let dir = tempfile::tempdir().expect("compile dir");
+    let lua = dir.path().join("bitgun.lua");
+    let out = Command::new(env!("CARGO_BIN_EXE_rock"))
+        .args(["compile", "../bitgun", "--output", &lua.to_string_lossy()])
+        .current_dir(workspace_root())
+        .output()
+        .expect("spawn Lua compile");
+    assert!(out.status.success(), "Lua compile failed\n{}", String::from_utf8_lossy(&out.stderr));
+    let emitted = std::fs::read_to_string(&lua).expect("read emitted Lua");
+    assert!(!emitted.contains("__ROCK_SHADOW_EFFECT_PLAN"), "emitted Lua still publishes the removed effect plan");
+    assert!(!emitted.contains("ShadowEffectPlan"), "emitted Lua still names the removed effect plan type");
+}
+
+/// The v9 header stamps the exact build id, and a hot-reload during recording
+/// writes a `reload <tick>` marker.
 #[test]
 fn record_stamps_build_id_and_reload_marker() {
     let (_dir, log) = record_with_env(
         "bitgun", 15,
-        &[("STONE_BUILD_ID", "buildAAA"), ("STONE_RELOAD_AT_FRAME", "5")],
+        &[ ("STONE_RELOAD_AT_FRAME", "5")],
     );
     let text = std::fs::read_to_string(&log).expect("read log");
-    assert!(text.starts_with("STONE_REPLAY 6"), "must be a v6 log\n{text}");
-    assert!(
-        text.lines().any(|l| l == "build buildAAA"),
-        "header must carry the build id\n{text}"
-    );
+    assert!(text.starts_with("STONE_REPLAY 9"), "must be a v9 log\n{text}");
+    let build = text.lines().find_map(|l| l.strip_prefix("build ")).expect("build header");
+    assert!(build.len() == 16 && build.chars().all(|c| c.is_ascii_hexdigit()), "header must carry a real build id\n{text}");
     assert!(
         text.lines().any(|l| l.starts_with("reload ")),
         "a mid-recording reload must write a marker\n{text}"
     );
 }
 
-/// Replaying a reload-marked log warns that determinism ends at the reload.
+/// Legacy replay versions retain warning-only reload compatibility.
 #[test]
 fn replay_warns_on_reload_marked_log() {
     let (_dir, log) = record_with_env("bitgun", 15, &[("STONE_RELOAD_AT_FRAME", "5")]);
+    let text = std::fs::read_to_string(&log).expect("read log");
+    std::fs::write(&log, with_header(&text, "7", Some("buildAAA"))).expect("rewrite legacy log");
     let stderr = replay_stderr("bitgun", &log, &[]);
     assert!(
         stderr.contains("hot-reload marker") && stderr.to_lowercase().contains("determinism"),
@@ -133,19 +229,26 @@ fn f9_save_repro_writes_a_replayable_tick_stamped_file() {
     );
 }
 
-/// Replaying a log against a DIFFERENT build id warns; the same build id does
-/// not.
+/// Legacy replay versions warn on a DIFFERENT build id; the same build id does
+/// not. Exact v8 rejection is covered above.
 #[test]
 fn replay_warns_on_build_id_mismatch_only() {
-    let (_dir, log) = record_with_env("bitgun", 15, &[("STONE_BUILD_ID", "buildAAA")]);
+    let (_dir, log) = record_with_env("bitgun", 15, &[]);
+    let text = std::fs::read_to_string(&log).expect("read log");
+    std::fs::write(&log, with_header(&text, "7", Some("buildAAA"))).expect("rewrite legacy log");
 
-    let mismatched = replay_stderr("bitgun", &log, &[("STONE_BUILD_ID", "buildBBB")]);
+    let mismatched = replay_stderr("bitgun", &log, &[]);
     assert!(
-        mismatched.contains("built against buildAAA") && mismatched.contains("buildBBB"),
+        mismatched.contains("built against buildAAA") && mismatched.contains("current build"),
         "a build mismatch must warn\nstderr:\n{mismatched}"
     );
 
-    let matched = replay_stderr("bitgun", &log, &[("STONE_BUILD_ID", "buildAAA")]);
+    let build = text
+        .lines()
+        .find_map(|line| line.strip_prefix("build "))
+        .expect("recorded build id");
+    std::fs::write(&log, with_header(&text, "7", Some(build))).expect("restore matching legacy log");
+    let matched = replay_stderr("bitgun", &log, &[]);
     assert!(
         !matched.contains("built against"),
         "a matching build id must NOT warn\nstderr:\n{matched}"
