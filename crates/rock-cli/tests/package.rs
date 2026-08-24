@@ -316,13 +316,13 @@ fn package_rejects_absolute_and_traversal_sound_keys_before_staging() {
 }
 
 #[test]
-fn package_rejects_obsolete_scratch_shaped_input_before_staging() {
+fn package_rejects_obsolete_sound_schema_before_staging() {
     let fixture_root = tempfile::tempdir_in(repo_root()).expect("package fixture");
     let project = fixture_root.path().join("obsolete-shape");
     let output = tempfile::tempdir().expect("package output");
     let obsolete = r#"{
   "version": 1,
-  "cues": [{"id": "spell.fixture.cast", "steps": [{"layers": [{"asset": "assets/sfx/old.wav", "scratch": "/machine/a.wav"}]}]}]
+  "cues": [{"id": "spell.fixture.cast", "steps": [{"layers": [{"asset": "assets/sfx/old.wav", "legacy_path": "/machine/a.wav"}]}]}]
 }
 "#;
     write_sound_package_fixture(&project, obsolete, &[]);
@@ -399,6 +399,57 @@ fn package_stages_compiled_sound_bank_and_exact_manifest_dependencies() {
 }
 
 #[test]
+fn package_accepts_sound_dependencies_in_arbitrarily_named_asset_directories() {
+    let fixture_root = tempfile::tempdir_in(repo_root()).expect("package fixture");
+    let project = fixture_root.path().join("arbitrary-directories");
+    let output = tempfile::tempdir().expect("package output");
+    let keys = [
+        "assets/sfx/_inbox/new.ogg",
+        "assets/sfx/_sources/raw.ogg",
+        "assets/sfx/scratch/test.ogg",
+        "assets/sfx/tmp/test.ogg",
+        "assets/sfx/temp/test.ogg",
+    ];
+    let sources = keys
+        .iter()
+        .map(|key| format!(r#"{{"sources":["{key}"]}}"#))
+        .collect::<Vec<_>>()
+        .join(",");
+    let sound_project = format!(
+        r#"{{
+  "version": 1,
+  "events": [{{"id": "fixture.event", "steps": [{{"layers": [{sources}]}}]}}]
+}}
+"#
+    );
+    let assets = keys.map(|key| (key, b"sound".as_slice()));
+    write_sound_package_fixture(&project, &sound_project, &assets);
+
+    let accepted = Command::new(rock_bin())
+        .current_dir(repo_root())
+        .args(["package", project.to_str().unwrap(), "--output", output.path().to_str().unwrap()])
+        .output()
+        .expect("spawn package");
+    assert!(
+        accepted.status.success(),
+        "arbitrarily named asset directory was rejected: {}",
+        String::from_utf8_lossy(&accepted.stderr)
+    );
+
+    let manifest: Value = serde_json::from_slice(
+        &std::fs::read(output.path().join("package-manifest.json")).unwrap(),
+    )
+    .expect("package manifest JSON");
+    let dependencies = manifest["artifacts"]["sound"]["dependencies"].as_array().unwrap();
+    assert_eq!(dependencies.len(), keys.len());
+    for key in keys {
+        assert!(dependencies.iter().any(|dependency| {
+            dependency.as_str().is_some_and(|dependency| dependency.ends_with(key))
+        }));
+    }
+}
+
+#[test]
 fn sound_package_failure_is_transactional_for_generated_output() {
     let fixture_root = tempfile::tempdir_in(repo_root()).expect("package fixture");
     let project = fixture_root.path().join("transactional-sound");
@@ -406,7 +457,7 @@ fn sound_package_failure_is_transactional_for_generated_output() {
     std::fs::write(output.path().join("caller-sentinel"), b"keep me").unwrap();
     let invalid = r#"{
   "version": 1,
-  "events": [{"id": "spell.fixture.cast", "steps": [{"layers": [{"sources": ["assets/sfx/_inbox/old.wav"]}]}]}]
+  "events": [{"id": "spell.fixture.cast", "steps": [{"layers": [{"sources": ["assets/sfx/missing.wav"]}]}]}]
 }
 "#;
     write_sound_package_fixture(&project, invalid, &[]);
