@@ -45,7 +45,7 @@ pub fn select_assets(
     )
 }
 
-fn configured_asset_overlays(
+pub fn configured_asset_overlays(
     project_dir: &Path,
     config: Option<&StickConfig>,
 ) -> Result<Vec<PathBuf>> {
@@ -53,7 +53,7 @@ fn configured_asset_overlays(
     configured_asset_overlays_from(project_dir, config, env.as_deref())
 }
 
-fn configured_asset_overlays_from(
+pub fn configured_asset_overlays_from(
     project_dir: &Path,
     config: Option<&StickConfig>,
     env: Option<&OsStr>,
