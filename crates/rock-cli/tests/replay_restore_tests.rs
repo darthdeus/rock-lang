@@ -649,6 +649,11 @@ fn exact_recorded_replay_supports_two_backward_scene_image_scrubs() {
         "the seek tool must not publish a presented view: {diag}"
     );
     assert_eq!(diag["STONE_SEEK_FIRST_FRAMES"].as_i64(), Some(2), "each seek needs a real post-seek frame: {diag}");
+    assert!(
+        diag["STONE_STATE_IMAGE_IMAGES_BEFORE_SHUTDOWN"].as_i64().is_some_and(|n| n > 0)
+            && diag["STONE_STATE_IMAGE_IMAGES_AFTER_SHUTDOWN"].as_i64() == Some(0),
+        "shutdown must release every lazy StateImage owner: {diag}"
+    );
     let sim = sim_state_names(game, 80);
     assert_sim_state_matches(&sought, &ordinary, &sim, "the exact two-scrub target");
 }
