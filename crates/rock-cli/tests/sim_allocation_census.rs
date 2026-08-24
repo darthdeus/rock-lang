@@ -58,6 +58,8 @@ fn census_reports_exact_fixture_frames_and_keeps_both_arms() {
     assert_eq!(records.len(), 2, "examined population must match records");
 
     let mut allocating_measured_kb = None;
+    let mut allocating_calls_per_frame = None;
+    let mut control_calls_per_frame = None;
     for record in records {
         assert_eq!(record["status"], "PASS", "fixture record: {record}");
         assert_eq!(record["measured_frames"], 4, "fixture denominator: {record}");
@@ -70,11 +72,20 @@ fn census_reports_exact_fixture_frames_and_keeps_both_arms() {
         assert!(record["gross_kb_per_frame"].is_number(), "{record}");
         if record["sim_name"] == "sim_allocation_allocating" {
             allocating_measured_kb = record["measured_gross_kb"].as_f64();
+            allocating_calls_per_frame = record["allocation_calls_per_frame"].as_f64();
+        } else if record["sim_name"] == "sim_allocation_control" {
+            control_calls_per_frame = record["allocation_calls_per_frame"].as_f64();
         }
     }
     assert!(
         allocating_measured_kb.is_some_and(|kb| kb > 0.0),
         "the allocating fixture must reach the gross allocator oracle"
+    );
+    let allocating_calls_per_frame = allocating_calls_per_frame.expect("allocating call rate");
+    let control_calls_per_frame = control_calls_per_frame.expect("control call rate");
+    assert!(
+        allocating_calls_per_frame > control_calls_per_frame + 50.0,
+        "vector boundary must clearly exceed scalar control: allocating={allocating_calls_per_frame} control={control_calls_per_frame}"
     );
 
     assert_eq!(artifact["rankings"]["by_gross_kb_per_frame"].as_array().unwrap().len(), 2);
