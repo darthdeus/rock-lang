@@ -217,6 +217,38 @@ fn settings_bootstrap_replays_a_real_ui_setting_without_touching_disk_b() {
 }
 
 #[test]
+fn repeated_settings_consumer_reuses_the_first_bootstrap_read() {
+    let dir = tempfile::tempdir().expect("fixture dir");
+    let progress = empty_progress_path(&dir);
+    let layout = dir.path().join("spellbook-layout.jsonl");
+    let settings = dir.path().join("settings.json");
+    let replay = dir.path().join("settings-repeat.replay");
+    std::fs::write(&settings, br#"{"graphics":{"world_scale":0.75}}"#)
+        .expect("write settings");
+
+    let env_owned = fixture_env("settings", &progress, &layout, &settings);
+    let mut env = env_refs(&env_owned);
+    env.push(("STONE_QUIET", "0"));
+    let state = run_mag(2, Some(&replay), None, &env);
+    assert!(
+        state["__stone_diag"]["STONE_REPLAY_BOOTSTRAP_REUSES"]
+            .as_i64()
+            .is_some_and(|n| n > 0),
+        "the audio-init consumer must reuse the settings captured before window creation"
+    );
+
+    let settings_key = "6d61672f73657474696e67732e6a736f6e";
+    let text = std::fs::read_to_string(&replay).expect("read replay");
+    assert_eq!(
+        text.lines()
+            .filter(|line| line.starts_with(&format!("boot {settings_key} ")))
+            .count(),
+        1,
+        "one logical bootstrap key must have one wire entry\n{text}"
+    );
+}
+
+#[test]
 fn progress_bootstrap_captures_absence_and_keeps_b_read_only() {
     let dir = tempfile::tempdir().expect("fixture dir");
     let progress = empty_progress_path(&dir);
