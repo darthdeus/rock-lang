@@ -328,7 +328,7 @@ fn progress_bootstrap_captures_absence_and_keeps_b_read_only() {
     let log = std::fs::read_to_string(&replay).expect("read replay");
     assert!(log.starts_with("STONE_REPLAY 8\n"), "recording must use v8\n{log}");
     let boot_lines: Vec<&str> = log.lines().filter(|line| line.starts_with("boot ")).collect();
-    assert_eq!(boot_lines.len(), 4, "settings path selection and both MAG bootstrap consumers must capture keys");
+    assert_eq!(boot_lines.len(), 3, "the temporary current-settings path plus progress and layout must capture keys");
     let first_tick = log.lines().position(|line| line.starts_with("t ")).expect("tick");
     let first_boot = log.lines().position(|line| line.starts_with("boot ")).expect("bootstrap");
     assert!(first_boot < first_tick, "bootstrap records must precede tick records");
@@ -544,7 +544,7 @@ fn save_repro_retains_bootstrap_entries() {
         .expect("auto save repro must create a sibling");
     let text = std::fs::read_to_string(repro).expect("read saved repro");
     assert!(text.starts_with("STONE_REPLAY 8\n"), "repro must retain v8\n{text}");
-    assert_eq!(text.lines().filter(|line| line.starts_with("boot ")).count(), 4,
+    assert_eq!(text.lines().filter(|line| line.starts_with("boot ")).count(), 3,
         "save repro must retain all bootstrap entries");
 }
 
@@ -570,7 +570,7 @@ fn branch_rewrite_retains_bootstrap_entries_in_canonical_key_order() {
 
     let text = std::fs::read_to_string(&replay).expect("read branched replay");
     let boot_lines: Vec<&str> = text.lines().filter(|line| line.starts_with("boot ")).collect();
-    assert_eq!(boot_lines.len(), 4, "branch rewrite must retain all bootstrap entries");
+    assert_eq!(boot_lines.len(), 3, "branch rewrite must retain all bootstrap entries");
     let mut sorted = boot_lines.clone();
     sorted.sort_unstable();
     assert_eq!(boot_lines, sorted, "branch rewrite must emit bootstrap keys canonically");
