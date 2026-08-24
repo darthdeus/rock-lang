@@ -31,7 +31,7 @@ use lsp_types::{
 };
 
 use bone_semantic::inference::{self, Gamma};
-use bone_semantic::prelude::{BodyInference, InferenceResult, ModuleId, Span, TyId, Workspace};
+use bone_semantic::prelude::{BodyInference, FxHashMap, FxHashSet, InferenceResult, ModuleId, Span, TyId, Workspace};
 use bone_incremental::session::{Session, UpdateTier};
 use skull_parser::CompilerError;
 use ustr::Ustr;
@@ -123,21 +123,9 @@ struct BoneProject {
     /// file + its reinferred dependents can have changed holes. Invalidated for
     /// exactly those files in `update`.
     hole_cache: HashMap<String, Vec<Diagnostic>>,
-    /// Per-file `unused_var` lint diagnostics, cached across edits. Unlike
-    /// holes, the lint never reads inference, so a file's findings change ONLY
-    /// when that file's own text changes -- recompute the edited file, serve
-    /// the cache for every other tracked file. Gives whole-project coverage
-    /// cheaply. Invalidated for the edited file in `update`, dropped on remove.
-    lint_cache: HashMap<String, Vec<Diagnostic>>,
-    /// Per-file `transmute_of_nullable` lint diagnostics, cached across edits.
-    /// This lint READS inference (arg/result nullability), so unlike
-    /// `lint_cache` a finding can change when a *dependency* edit re-infers this
-    /// file even though its own text is unchanged -- a return type flipping to
-    /// `int?` newly strips at an untouched `cast` site. So it invalidates on the
-    /// hole-cache rule (edited file + reinferred dependents = `changed`), never
-    /// the text-only rule; and a finding-free dependent can gain findings, so
-    /// (unlike holes) an empty cache entry grants no skip.
-    transmute_cache: HashMap<String, Vec<Diagnostic>>,
+    /// The shared lint derivation cache. It is also the cache used by the live
+    /// compiler; this project stores only the LSP rendering policy at the edge.
+    lint_cache: bone_lints::IncrementalLintCache,
     /// Type-reachability index for type-directed completion paths. A pure
     /// function of the type graph (struct fields + fn signatures), so it is
     /// rebuilt only on a non-`BodyOnly` edit and reused across body keystrokes.
@@ -383,8 +371,7 @@ impl BoneWorkspace {
                 session: Session::new(warm_stdlib(), Vec::new())
                     .expect("bone session warm-init (stdlib) must succeed"),
                 texts: stdlib_texts().into_iter().collect(),
-                freq: None, hole_cache: HashMap::new(), lint_cache: HashMap::new(),
-                transmute_cache: HashMap::new(),
+                freq: None, hole_cache: HashMap::new(), lint_cache: Default::default(),
                 reach: None,
                 fn_sigs: None,
                 call_through: None,
@@ -463,9 +450,23 @@ impl BoneWorkspace {
                 // meaningful for modules not yet re-inferred by an edit.
                 let now = std::time::Instant::now();
                 let module_touched = texts.keys().map(|k| (k.clone(), now)).collect();
+                let mut project = BoneProject {
+                    session,
+                    texts,
+                    freq: None,
+                    hole_cache: HashMap::new(),
+                    lint_cache: Default::default(),
+                    reach: None,
+                    fn_sigs: None,
+                    call_through: None,
+                    is_bin,
+                    root: root.clone(),
+                    module_touched,
+                };
+                prime_lint_cache(&mut project);
                 self.projects.insert(
-                    root.clone(),
-                    BoneProject { session, texts, freq: None, hole_cache: HashMap::new(), lint_cache: HashMap::new(), transmute_cache: HashMap::new(), reach: None, fn_sigs: None, call_through: None, is_bin, root, module_touched },
+                    root,
+                    project,
                 );
             }
             Err(e) => {
@@ -537,6 +538,10 @@ impl BoneWorkspace {
         let t_uf = std::time::Instant::now();
         let mut this_file_parse_err: Option<CompilerError> = None;
         let mut changed: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut lint_changed_files = FxHashSet::default();
+        let mut lint_reinferred = Vec::new();
+        let mut lint_edits = Vec::new();
+        let mut lint_full = false;
         changed.insert(path.to_string());
         // Tier governs the type-graph-derived caches (reachability index +
         // completion signature cache): both depend only on the type graph
@@ -548,6 +553,7 @@ impl BoneWorkspace {
             Ok(upd) => {
                 if !matches!(upd.tier, UpdateTier::BodyOnly | UpdateTier::NoChange) {
                     rebuild_type_caches = true;
+                    lint_full = true;
                 }
                 let ws = proj.session.workspace();
                 let touched: Vec<String> = upd
@@ -559,6 +565,22 @@ impl BoneWorkspace {
                 for file in touched {
                     proj.module_touched.insert(file.clone(), now);
                     changed.insert(file);
+                }
+                match upd.tier {
+                    UpdateTier::BodyOnly => {
+                        lint_changed_files.insert(Ustr::from(path));
+                        lint_reinferred.extend(upd.reinferred.iter().copied());
+                        if let Some(edit) = upd.body_update.edit {
+                            lint_edits.push(bone_lints::TextEditDelta {
+                                file: edit.file,
+                                at: edit.at,
+                                byte_delta: edit.byte_delta,
+                                line_delta: edit.line_delta,
+                            });
+                        }
+                    }
+                    UpdateTier::Interface | UpdateTier::FullUser => lint_full = true,
+                    UpdateTier::NoChange => {}
                 }
             }
             Err(e) => this_file_parse_err = Some(e),
@@ -687,74 +709,24 @@ impl BoneWorkspace {
         }
         let holes_ms = t_holes.elapsed().as_secs_f64() * 1000.0;
 
-        // `unused_var` lint diagnostics. A file's findings depend only on its
-        // own body text (the lint never reads inference), so recompute only the
-        // edited file and serve the cache for every other tracked file --
-        // whole-project coverage without re-walking every body per keystroke.
-        for (p, diags) in by_file.iter_mut() {
-            // Broken edited file: it shows only its parse error, and the session
-            // holds stale bodies for it -- drop the cache, append no lints.
-            if p == path && this_file_parse_err.is_some() {
-                proj.lint_cache.remove(p);
-                continue;
-            }
-            let lints = if p == path || !proj.lint_cache.contains_key(p) {
-                let v = lint_diagnostics_for(proj, p);
-                proj.lint_cache.insert(p.clone(), v.clone());
-                v
+        if this_file_parse_err.is_some() {
+            proj.lint_cache.invalidate_file(Ustr::from(path));
+        } else {
+            let lint_change = if lint_full {
+                bone_lints::LintCacheUpdate::full()
             } else {
-                proj.lint_cache.get(p).cloned().unwrap_or_default()
+                bone_lints::LintCacheUpdate::body_only(
+                    lint_changed_files,
+                    lint_reinferred,
+                    lint_edits,
+                )
             };
-            diags.extend(lints);
-        }
-
-        // `transmute_of_nullable` lint diagnostics. Reads inference, so a
-        // finding can change in any re-inferred file (`changed` = edited file +
-        // reinferred dependents), not just the edited one -- recompute those,
-        // serve the cache for everything else. A finding-free entry grants no
-        // skip: a dependency edit can newly strip at an untouched call site.
-        for (p, diags) in by_file.iter_mut() {
-            if p == path && this_file_parse_err.is_some() {
-                proj.transmute_cache.remove(p);
-                continue;
-            }
-            let must_recompute = changed.contains(p.as_str()) || !proj.transmute_cache.contains_key(p);
-            let lints = if must_recompute {
-                let v = transmute_diagnostics_for(proj, p);
-                proj.transmute_cache.insert(p.clone(), v.clone());
-                v
-            } else {
-                proj.transmute_cache.get(p).cloned().unwrap_or_default()
-            };
-            diags.extend(lints);
-        }
-
-        // The whole-workspace lints (`unused_fn`, `backend_sibling_mismatch`).
-        // Unlike `unused_var` these are cross-file: a finding in ANY file can
-        // flip from an edit ANYWHERE (adding or removing a call keeps or kills a
-        // function; a signature edit on either half of a sibling pair), so there
-        // is no per-file cache -- recompute the workspace each edit and
-        // distribute by file. Cheap: no bodies walked for siblings, no inference
-        // for either.
-        {
-            let by_ws = bone_lints::workspace_findings_by_file(
-                proj.session.workspace(),
-                &proj.session.warm_mids,
-                proj.is_bin,
-            );
-            for (p, diags) in by_file.iter_mut() {
-                if p == path && this_file_parse_err.is_some() {
-                    continue;
-                }
-                if !in_report_set(proj, p) {
-                    continue;
-                }
-                let Some(findings) = by_ws.get(&Ustr::from(p.as_str())) else {
-                    continue;
-                };
-                let src = proj.texts.get(p).map(String::as_str).unwrap_or("");
-                let kept = bone_lints::filter_suppressed_findings(findings.clone(), src);
-                diags.extend(kept.iter().map(finding_diagnostic));
+            let findings = update_lint_cache(proj, &lint_change);
+            for finding in findings {
+                by_file
+                    .entry(finding.file().as_str().to_string())
+                    .or_default()
+                    .push(finding_diagnostic(&finding));
             }
         }
 
@@ -776,8 +748,7 @@ impl BoneWorkspace {
         if let Some(proj) = self.projects.get_mut(&root) {
             proj.texts.remove(path);
             proj.hole_cache.remove(path);
-            proj.lint_cache.remove(path);
-            proj.transmute_cache.remove(path);
+            proj.lint_cache.invalidate_file(Ustr::from(path));
             let _ = proj.session.remove_file(path);
         }
     }
@@ -899,10 +870,11 @@ impl BoneWorkspace {
         let Some(proj) = self.project(path) else {
             return Vec::new();
         };
-        let mut diags = lint_diagnostics_for(proj, path);
-        diags.extend(transmute_diagnostics_for(proj, path));
-        diags.extend(workspace_lint_diagnostics_for(proj, path));
-        diags
+        proj.lint_cache
+            .findings_for_file(Ustr::from(path))
+            .iter()
+            .map(finding_diagnostic)
+            .collect()
     }
 
     // -- Feature: goto-definition (stubbed: gaps::definition) ----------------
@@ -4265,71 +4237,35 @@ fn directive_verb_items(typed: &str) -> Vec<CompletionItem> {
         .collect()
 }
 
-/// Per-file lint diagnostics (warnings): run the flat-HIR lints over the target
-/// module's bodies, drop `// rock: allow(<lint>)`-suppressed findings, and
-/// render each as a warning. Both the live `update` path and the one-shot
-/// `diagnostics_for` share this, so a new flat-HIR lint added here reaches every
-/// path and the `lint_cache` automatically.
-fn lint_diagnostics_for(proj: &BoneProject, path: &str) -> Vec<Diagnostic> {
-    let ws = proj.session.workspace();
-    let Some(mid) = user_module_for_path(ws, path) else {
-        return Vec::new();
-    };
-    let src = proj.texts.get(path).map(String::as_str).unwrap_or("");
-    bone_lints::flat_findings(ws, &proj.session.warm_mids, mid, src)
+fn update_lint_cache(
+    proj: &mut BoneProject,
+    change: &bone_lints::LintCacheUpdate,
+) -> Vec<bone_lints::Finding> {
+    let session = &proj.session;
+    let texts = &proj.texts;
+    let root = &proj.root;
+    let is_bin = proj.is_bin;
+    let sources: FxHashMap<Ustr, &str> = texts
         .iter()
-        .map(finding_diagnostic)
-        .collect()
+        .filter_map(|(path, text)| {
+            Path::new(path).starts_with(root)
+                .then_some((Ustr::from(path.as_str()), text.as_str()))
+        })
+        .collect();
+    proj.lint_cache
+        .update(
+            session.workspace(),
+            &session.warm_mids,
+            is_bin,
+            &sources,
+            &bone_lints::LintOptions::default(),
+            change,
+        )
+        .0
 }
 
-/// `transmute_of_nullable` lint diagnostics (warnings) for one file: run the
-/// lint over the target module's bodies -- reading that module's per-body
-/// inference for arg/result nullability -- then drop
-/// `// rock: allow(transmute_of_nullable)`-suppressed findings.
-fn transmute_diagnostics_for(proj: &BoneProject, path: &str) -> Vec<Diagnostic> {
-    let ws = proj.session.workspace();
-    let Some(mid) = user_module_for_path(ws, path) else {
-        return Vec::new();
-    };
-    let src = proj.texts.get(path).map(String::as_str).unwrap_or("");
-    bone_lints::inference_findings(ws, &proj.session.warm_mids, mid, src)
-        .iter()
-        .map(finding_diagnostic)
-        .collect()
-}
-
-/// Whether `path` is the project's OWN code, and so may be reported on. A
-/// tracked file outside the root is a `stick.toml` dependency: it is scanned
-/// (the call graph must be whole) but its findings belong to its own project,
-/// not to whichever consumer happens to be open. Mirrors the build pass's
-/// report set.
-fn in_report_set(proj: &BoneProject, path: &str) -> bool {
-    Path::new(path).starts_with(&proj.root)
-}
-
-/// The whole-workspace lints (`unused_fn`, `backend_sibling_mismatch`) for one
-/// file: run the workspace pass and keep only `path`'s findings. Both are
-/// cross-file properties -- reachability spans the project, a sibling set spans
-/// a decl PAIR -- so there is nothing per-file to compute. `unused_fn` is gated
-/// to `bin` projects inside the runner. The one-shot path; `update` distributes
-/// the same by-file result across every tracked file.
-fn workspace_lint_diagnostics_for(proj: &BoneProject, path: &str) -> Vec<Diagnostic> {
-    if !in_report_set(proj, path) {
-        return Vec::new();
-    }
-    let by_file = bone_lints::workspace_findings_by_file(
-        proj.session.workspace(),
-        &proj.session.warm_mids,
-        proj.is_bin,
-    );
-    let Some(findings) = by_file.get(&Ustr::from(path)) else {
-        return Vec::new();
-    };
-    let src = proj.texts.get(path).map(String::as_str).unwrap_or("");
-    bone_lints::filter_suppressed_findings(findings.clone(), src)
-        .iter()
-        .map(finding_diagnostic)
-        .collect()
+fn prime_lint_cache(proj: &mut BoneProject) {
+    let _ = update_lint_cache(proj, &bone_lints::LintCacheUpdate::full());
 }
 
 /// Render a typed-hole report (kind line + `In scope:` block) as plain text.

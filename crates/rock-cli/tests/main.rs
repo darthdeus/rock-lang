@@ -110,3 +110,5 @@ mod web_fake_gl_tests;
 mod web_package_tests;
 #[path = "web_watch_tests.rs"]
 mod web_watch_tests;
+#[path = "backend_stats_gate.rs"]
+mod backend_stats_gate;

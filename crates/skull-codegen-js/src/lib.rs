@@ -1509,6 +1509,10 @@ function stone_save_png_rgba8(path, w, h, pixels) {
   __sw_log_once("stone_save_png_rgba8 unimplemented on the web (" + path + ")");
   return false;
 }
+function stone_save_screenshot(path, w, h, max_size) {
+  __sw_log_once("stone_save_screenshot unimplemented on the web (" + path + ")");
+  return false;
+}
 
 // --- canvases (FBOs) ---
 function stone_create_canvas(w, h, format, depth) {
