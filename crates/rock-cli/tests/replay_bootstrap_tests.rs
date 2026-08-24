@@ -230,11 +230,25 @@ fn repeated_settings_consumer_reuses_the_first_bootstrap_read() {
     let mut env = env_refs(&env_owned);
     env.push(("STONE_QUIET", "0"));
     let state = run_mag(2, Some(&replay), None, &env);
+    let diag = &state["__stone_diag"];
+    assert_eq!(
+        diag["MAG_SETTINGS_CONSUMER_CALLS"].as_i64(),
+        Some(2),
+        "the pre-window and non-quiet audio settings consumers must both run: {diag}"
+    );
     assert!(
-        state["__stone_diag"]["STONE_REPLAY_BOOTSTRAP_REUSES"]
-            .as_i64()
-            .is_some_and(|n| n > 0),
+        diag["STONE_REPLAY_BOOTSTRAP_REUSES"].as_i64().is_some_and(|n| n > 0),
         "the audio-init consumer must reuse the settings captured before window creation"
+    );
+    assert_eq!(
+        diag["STONE_REPLAY_BOOTSTRAP_DISK_PROBES"].as_i64(),
+        Some(3),
+        "recording must probe each logical file once, including the absent progress and layout files: {diag}"
+    );
+    assert_eq!(
+        diag["STONE_REPLAY_BOOTSTRAP_FILE_READS"].as_i64(),
+        Some(1),
+        "only the present settings file may be read from disk: {diag}"
     );
 
     let settings_key = "6d61672f73657474696e67732e6a736f6e";
@@ -245,6 +259,56 @@ fn repeated_settings_consumer_reuses_the_first_bootstrap_read() {
             .count(),
         1,
         "one logical bootstrap key must have one wire entry\n{text}"
+    );
+}
+
+#[test]
+fn repeated_settings_consumer_reuses_absent_bootstrap_without_second_disk_probe() {
+    let dir = tempfile::tempdir().expect("fixture dir");
+    let progress = empty_progress_path(&dir);
+    let layout = dir.path().join("spellbook-layout.jsonl");
+    let settings = dir.path().join("settings.json");
+    let replay = dir.path().join("settings-absent-repeat.replay");
+    assert!(!settings.exists(), "the absent-settings arm must start without a file");
+
+    let env_owned = fixture_env("settings", &progress, &layout, &settings);
+    let mut env = env_refs(&env_owned);
+    env.push(("STONE_QUIET", "0"));
+    let state = run_mag(2, Some(&replay), None, &env);
+    let diag = &state["__stone_diag"];
+    assert_eq!(
+        diag["MAG_SETTINGS_CONSUMER_CALLS"].as_i64(),
+        Some(2),
+        "both settings consumers must execute for an absent file too: {diag}"
+    );
+    assert_eq!(
+        diag["STONE_REPLAY_BOOTSTRAP_REUSES"].as_i64(),
+        Some(1),
+        "the second consumer must reuse the current settings absence: {diag}"
+    );
+    assert_eq!(
+        diag["STONE_REPLAY_BOOTSTRAP_DISK_PROBES"].as_i64(),
+        Some(3),
+        "each absent logical file must be probed only once: {diag}"
+    );
+    assert_eq!(
+        diag["STONE_REPLAY_BOOTSTRAP_FILE_READS"].as_i64().unwrap_or(0),
+        0,
+        "absence must not turn into a disk read on the repeated consumer: {diag}"
+    );
+
+    let text = std::fs::read_to_string(&replay).expect("read replay");
+    let settings_key = "6d61672f73657474696e67732e6a736f6e";
+    assert_eq!(
+        text.lines()
+            .filter(|line| line.starts_with(&format!("boot {settings_key} 0 -")))
+            .count(),
+        1,
+        "one authoritative settings absence entry must be emitted\n{text}"
+    );
+    assert!(
+        !text.lines().any(|line| line.starts_with("boot 6d61672f6c65676163792d73657474696e67732e6a736f6e ")),
+        "a temporary settings override must not consult or capture the author's legacy path\n{text}"
     );
 }
 
