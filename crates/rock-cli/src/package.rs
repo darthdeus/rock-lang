@@ -15,7 +15,14 @@ use std::process::Command;
 
 pub const PACKAGE_MANIFEST_NAME: &str = "package-manifest.json";
 
-pub fn run_package(project: &str, output: Option<&str>) -> Result<()> {
+struct PackageContext {
+    root: PathBuf,
+    project: PathBuf,
+    game_key: String,
+    config: Option<rock_host::stick::StickConfig>,
+}
+
+fn package_context(project: &str) -> Result<PackageContext> {
     rock_host::project::ensure_workspace_root()?;
     let root = rock_host::project::find_workspace_root(&std::env::current_dir()?)
         .ok_or_else(|| anyhow::anyhow!("package: cannot find the Rock workspace root"))?;
@@ -32,11 +39,53 @@ pub fn run_package(project: &str, output: Option<&str>) -> Result<()> {
     if game_key.is_empty() {
         anyhow::bail!("package: expected a game directory, got the workspace root");
     }
-
     let config = rock_host::stick::StickConfig::from_path_optional(&project_abs.join("stick.toml"))?;
     if let Some(config) = config.as_ref() {
         config.validate_build()?;
     }
+    Ok(PackageContext {
+        root: root_abs,
+        project: project_abs,
+        game_key,
+        config,
+    })
+}
+
+pub fn sound_project_path_for(project: &str) -> Result<Option<PathBuf>> {
+    let context = package_context(project)?;
+    let Some(sound) = context.config.as_ref().and_then(|config| config.sound.as_ref()) else {
+        return Ok(None);
+    };
+    Ok(Some(declared_sound_project_path(&context.project, &sound.project)?.canonicalize()?))
+}
+
+pub fn prepare_sound_bank(project: &str) -> Result<Option<PathBuf>> {
+    let context = package_context(project)?;
+    let overlays = rock_host::release::asset_overlay_roots(&context.project, context.config.as_ref())?;
+    let mut selection = rock_host::release::AssetSelection::default();
+    let Some(sound) = compile_sound_project(
+        &context.project,
+        &context.game_key,
+        context.config.as_ref(),
+        &overlays,
+        &mut selection,
+    )? else {
+        return Ok(None);
+    };
+    let bank_path = context.project.join("assets/sound_bank.json");
+    if let Some(parent) = bank_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    rock_host::project::write_atomic(&bank_path, &sound.bank_bytes)?;
+    Ok(Some(bank_path))
+}
+
+pub fn run_package(project: &str, output: Option<&str>) -> Result<()> {
+    let context = package_context(project)?;
+    let root_abs = context.root;
+    let project_abs = context.project;
+    let game_key = context.game_key;
+    let config = context.config;
     let overlays = rock_host::release::asset_overlay_roots(&project_abs, config.as_ref())?;
     let mut selection = rock_host::release::select_assets_with_overlays(
         &project_abs,

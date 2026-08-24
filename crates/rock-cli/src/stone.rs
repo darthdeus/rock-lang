@@ -168,13 +168,23 @@ pub fn do_stone_watch(
     // (docs/comptime-plan.md): the set comes from the compiled program, seeded
     // after every successful build, and shared with the watcher's filter.
     let comptime_watch: crate::file_watcher::SharedWatchSet = Default::default();
+    let sound_watch: crate::file_watcher::SharedWatchSet = Default::default();
+    if let Some(sound_project) = crate::package::sound_project_path_for(path)? {
+        sound_watch.lock().insert(sound_project.clone());
+        comptime_watch.lock().insert(sound_project);
+    }
 
     // Do initial compilation.
     // If it fails, we'll continue watching and start the game when compilation succeeds
-    let initial_compilation_success = match compiler.compile(&changed_paths, false) {
+    let initial_compilation_success = match crate::package::prepare_sound_bank(path)
+        .and_then(|_| compiler.compile(&changed_paths, false))
+    {
         Ok(_) => {
             clear_error_file();
-            *comptime_watch.lock() = compiler.comptime_watch_files().into_iter().collect();
+            let mut watched: std::collections::HashSet<PathBuf> =
+                compiler.comptime_watch_files().into_iter().collect();
+            watched.extend(sound_watch.lock().iter().cloned());
+            *comptime_watch.lock() = watched;
             true
         }
         Err(e) => {
@@ -243,6 +253,8 @@ pub fn do_stone_watch(
     // Track what needs rebuilding
     let mut needs_libstone_rebuild = false;
     let mut needs_compiler_rebuild = false;
+    let mut sound_dirty = false;
+    let mut force_game_compile = !initial_compilation_success;
 
     for event in change_rx {
         // Check for manual restart trigger first
@@ -265,6 +277,11 @@ pub fn do_stone_watch(
 
             // Skip tmp/ directory files (they're only for restart trigger which we already handled)
             if path_str.contains("tmp/") {
+                continue;
+            }
+
+            if sound_watch.lock().contains(path.as_path()) {
+                sound_dirty = true;
                 continue;
             }
 
@@ -370,6 +387,22 @@ pub fn do_stone_watch(
             needs_compiler_rebuild = false;
         }
 
+        if sound_dirty {
+            match crate::package::prepare_sound_bank(path) {
+                Ok(_) => {
+                    sound_dirty = false;
+                    if game_process.is_none() {
+                        force_game_compile = true;
+                    }
+                }
+                Err(e) => {
+                    let error_message = format!("Error compiling sound project: {}", e);
+                    log::error!(target: "STONE", "{}", error_message);
+                    write_error_file(&error_message);
+                }
+            }
+        }
+
         // A successful compiler rebuild put a NEW `rock` binary on disk, but THIS
         // process is still the old one -- it would keep emitting with the old
         // in-memory codegen. Re-exec the freshly built binary so the new compiler
@@ -383,7 +416,7 @@ pub fn do_stone_watch(
 
         // Recompile game if user changes are pending or the compiler was
         // just rebuilt (force_full re-analyzes with the new compiler).
-        let has_game_changes = !changed_paths.is_empty();
+        let has_game_changes = !changed_paths.is_empty() || force_game_compile;
         let mut compilation_succeeded = false;
         if has_game_changes || compiler_rebuilt {
             match compiler.compile(&changed_paths, compiler_rebuilt) {
@@ -391,9 +424,13 @@ pub fn do_stone_watch(
                     // Consumed successfully; start the next edit clean. On error
                     // we keep them so the next tick retries the same changes.
                     changed_paths.clear();
+                    force_game_compile = false;
                     compilation_succeeded = true;
-                    clear_error_file();
-                    *comptime_watch.lock() = compiler.comptime_watch_files().into_iter().collect();
+                    if !sound_dirty { clear_error_file(); }
+                    let mut watched: std::collections::HashSet<PathBuf> =
+                        compiler.comptime_watch_files().into_iter().collect();
+                    watched.extend(sound_watch.lock().iter().cloned());
+                    *comptime_watch.lock() = watched;
                     if !outcome.restart_reasons.is_empty() {
                         info!(
                             "live reload requires a process restart ({})",

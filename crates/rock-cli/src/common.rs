@@ -19,6 +19,7 @@ pub fn compile_game_for_run(
     use std::collections::HashSet;
 
     rock_host::project::ensure_workspace_root()?;
+    crate::package::prepare_sound_bank(path)?;
     rock_host::engine_build::build_engine_libs(path)?;
 
     let output_path = PathBuf::from(output).join(rock_host::project::MAIN_LUA_FILENAME);

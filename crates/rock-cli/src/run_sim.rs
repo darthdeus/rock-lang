@@ -161,6 +161,7 @@ fn compile_sims(
     // bone workspace once (a live Session, tests included), emit the game-shaped
     // main.lua with its `@sim` registry, and collect the wire/env list from the
     // same build. The returned SkullStone serves mid-sim `reload_edit` ops.
+    crate::package::prepare_sound_bank(&project_path.to_string_lossy())?;
     match backend {
         crate::Backend::Skull => {
             let main_path = output_path.join(rock_host::project::MAIN_LUA_FILENAME);

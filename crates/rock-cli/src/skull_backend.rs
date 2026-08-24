@@ -1779,6 +1779,10 @@ pub fn skull_compile_project_with_inputs(
 
 fn skull_run_project(dir: &str) -> Result<()> {
     use std::path::PathBuf;
+    let is_game = rock_host::project::is_game_project(&PathBuf::from(dir)).unwrap_or(false);
+    if is_game {
+        crate::package::prepare_sound_bank(dir)?;
+    }
     let lua = skull_emit_project(dir);
 
     // Game projects need the rock backend's run recipe, not a bare stdin
@@ -1786,8 +1790,6 @@ fn skull_run_project(dir: &str) -> Result<()> {
     // FILE with LD_LIBRARY_PATH set (build_luajit_command) so
     // `ffi.load("libstone.so")` resolves, and inherit stdio so the
     // window/input work. Non-game projects keep the captured-output pipe.
-    let is_game =
-        rock_host::project::is_game_project(&PathBuf::from(dir)).unwrap_or(false);
     if is_game {
         if !std::env::var("ROCK_SKIP_ENGINE_BUILD").is_ok_and(|v| v == "1") {
             if let Err(e) = rock_host::engine_build::build_engine_libs(dir) {
