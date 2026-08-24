@@ -232,7 +232,10 @@ fn malformed_duplicate_and_orphan_timing_records_are_rejected() {
         .expect("timing population");
 
     let cases = [
-        ("duplicate", format!("{source}\n{first_timing}\n")),
+        (
+            "duplicate",
+            source.replacen(first_timing, &format!("{first_timing}\n{first_timing}"), 1),
+        ),
         (
             "orphan",
             source
@@ -274,11 +277,15 @@ fn recorded_and_playback_tracks_are_distinct_and_timing_cannot_change_state() {
     let original_s = original.to_string_lossy().into_owned();
     let changed_s = changed.to_string_lossy().into_owned();
     let samples = exact_samples(12, 1000);
+    let record_env = [
+        ("STONE_REPLAY_TIMING_US", samples.as_str()),
+        ("STONE_CHECKPOINT_INTERVAL", "1"),
+    ];
     let recorded = record_raw(
         "bitgun",
         12,
         &original_s,
-        &[("STONE_REPLAY_TIMING_US", &samples)],
+        &record_env,
     );
     assert!(recorded.status.success(), "record failed");
     let original_bytes = std::fs::read(&original).expect("original replay bytes");
@@ -298,8 +305,9 @@ fn recorded_and_playback_tracks_are_distinct_and_timing_cannot_change_state() {
         + "\n";
     std::fs::write(&changed, changed_text).expect("changed replay");
 
-    let mut state_a = replay_dump("bitgun", 12, &original_s, &[]);
-    let mut state_b = replay_dump("bitgun", 12, &changed_s, &[]);
+    let replay_env = [("STONE_CHECKPOINT_INTERVAL", "1")];
+    let mut state_a = replay_dump("bitgun", 12, &original_s, &replay_env);
+    let mut state_b = replay_dump("bitgun", 12, &changed_s, &replay_env);
     assert_eq!(
         state_a["__stone_diag"]["STONE_REPLAY_RECORDED_TIMING_COUNT"],
         12
@@ -307,6 +315,14 @@ fn recorded_and_playback_tracks_are_distinct_and_timing_cannot_change_state() {
     assert_eq!(
         state_b["__stone_diag"]["STONE_REPLAY_RECORDED_TIMING_COUNT"],
         12
+    );
+    assert_eq!(
+        state_a["__stone_diag"]["STONE_REPLAY_RECORDED_TIMING_LAST_US"],
+        1011
+    );
+    assert_eq!(
+        state_b["__stone_diag"]["STONE_REPLAY_RECORDED_TIMING_LAST_US"],
+        9000000
     );
     assert!(
         state_a["__stone_diag"]["STONE_REPLAY_PLAYBACK_TIMING_COUNT"]
