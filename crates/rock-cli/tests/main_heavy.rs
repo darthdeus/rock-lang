@@ -33,6 +33,8 @@ mod replay_bootstrap_tests;
 mod replay_timeline_tests;
 #[path = "replay_window_tests.rs"]
 mod replay_window_tests;
+#[path = "replay_timing_tests.rs"]
+mod replay_timing_tests;
 #[path = "engine_cdylib_freshness_gate.rs"]
 mod engine_cdylib_freshness_gate;
 
