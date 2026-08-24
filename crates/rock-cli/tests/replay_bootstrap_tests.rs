@@ -47,11 +47,15 @@ fn run_mag(
         .current_dir(workspace_root())
         .output()
         .expect("spawn MAG frame");
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         output.status.success(),
-        "MAG frame failed: {:?}\nstderr:\n{}",
+        "MAG frame failed: {:?}\nstderr:\n{stderr}",
         output.status,
-        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        stderr.contains("bounded renderer=") && stderr.contains("frame_errors=0"),
+        "bounded MAG run must report completion with zero frame errors:\n{stderr}"
     );
     serde_json::from_slice(&output.stdout).unwrap_or_else(|err| {
         panic!(
@@ -310,6 +314,135 @@ fn repeated_settings_consumer_reuses_absent_bootstrap_without_second_disk_probe(
         !text.lines().any(|line| line.starts_with("boot 6d61672f6c65676163792d73657474696e67732e6a736f6e ")),
         "a temporary settings override must not consult or capture the author's legacy path\n{text}"
     );
+}
+
+#[test]
+fn record_mutate_all_bootstrap_files_then_replay_without_persistence_writes() {
+    let dir = tempfile::tempdir().expect("fixture dir");
+    let progress = empty_progress_path(&dir);
+    let layout = dir.path().join("spellbook-layout.jsonl");
+    let settings = dir.path().join("settings.json");
+    let replay = dir.path().join("all-bootstrap.replay");
+    std::fs::write(&progress, known_progress_a()).expect("write progress A");
+    std::fs::write(&layout, b"").expect("write empty layout A");
+    std::fs::write(&settings, br#"{"graphics":{"world_scale":0.75}}"#)
+        .expect("write settings A");
+
+    let env_owned = fixture_env("all", &progress, &layout, &settings);
+    let mut env = env_refs(&env_owned);
+    env.push(("STONE_QUIET", "0"));
+    let recorded = run_mag(3, Some(&replay), None, &env);
+    let progress_after_record = std::fs::read(&progress).expect("recorded progress B");
+    let layout_after_record = std::fs::read(&layout).expect("recorded layout B");
+    let settings_after_record = std::fs::read(&settings).expect("recorded settings B");
+
+    let progress_mutated = b"mutated progress on disk".to_vec();
+    let layout_mutated = b"mutated layout on disk\n".to_vec();
+    let settings_mutated = br#"{"graphics":{"world_scale":2.0}}"#.to_vec();
+    std::fs::write(&progress, &progress_mutated).expect("mutate progress B");
+    std::fs::write(&layout, &layout_mutated).expect("mutate layout B");
+    std::fs::write(&settings, &settings_mutated).expect("mutate settings B");
+
+    let replayed = run_mag(3, None, Some(&replay), &env);
+    assert_ne!(
+        recorded["__stone_diag"]["MAG_REPLAY_BOOTSTRAP_BANK_GOLD"],
+        serde_json::json!(0),
+        "the combined fixture must exercise the production progress consumer"
+    );
+    assert_eq!(
+        recorded["mag"]["SPELL_STRIPS"]["len"],
+        serde_json::json!(1),
+        "the combined fixture must exercise the production spell-layout consumer"
+    );
+    assert!(
+        recorded["__stone_diag"]["MAG_SETTINGS_SUCCESSFUL_WRITES"]
+            .as_i64()
+            .is_some_and(|n| n > 0),
+        "the combined fixture must exercise the production settings writer"
+    );
+    assert_eq!(
+        progress_projection(&replayed),
+        progress_projection(&recorded),
+        "playback must apply captured progress once, not the mutated disk file"
+    );
+    assert_eq!(
+        layout_projection(&replayed),
+        layout_projection(&recorded),
+        "playback must apply the captured spell layout once, not the mutated disk file"
+    );
+    assert_eq!(
+        replayed["mag"]["SETTINGS"]["graphics"]["world_scale"],
+        serde_json::json!(0.75),
+        "playback must use recorded settings A rather than disk settings B"
+    );
+    assert_eq!(
+        replayed["__stone_diag"]["MAG_REPLAY_BOOTSTRAP_SAVE_WRITES"].as_i64().unwrap_or(0),
+        0,
+        "playback must not enter the progress persistence writer"
+    );
+    assert_eq!(
+        replayed["__stone_diag"]["STONE_SNAPSHOT_HISTORY_WRITES"].as_i64().unwrap_or(0),
+        0,
+        "playback must not enter the spell-layout persistence writer"
+    );
+    assert_eq!(
+        replayed["__stone_diag"]["MAG_SETTINGS_SUCCESSFUL_WRITES"].as_i64().unwrap_or(0),
+        0,
+        "playback must not enter the settings persistence writer"
+    );
+    assert!(
+        replayed["__stone_diag"]["MAG_SETTINGS_PLAYBACK_SAVE_SKIPS"]
+            .as_i64()
+            .is_some_and(|n| n > 0),
+        "playback settings writes must reach the no-op authority"
+    );
+    assert_eq!(
+        std::fs::read(&progress).expect("read mutated progress"),
+        progress_mutated,
+        "playback must leave mutated progress byte-identical"
+    );
+    assert_eq!(
+        std::fs::read(&layout).expect("read mutated layout"),
+        layout_mutated,
+        "playback must leave mutated layout byte-identical"
+    );
+    assert_eq!(
+        std::fs::read(&settings).expect("read mutated settings"),
+        settings_mutated,
+        "playback must leave mutated settings byte-identical"
+    );
+    assert_ne!(
+        progress_after_record, progress_mutated,
+        "recording must exercise progress persistence"
+    );
+    assert_ne!(
+        layout_after_record, layout_mutated,
+        "recording must exercise layout persistence"
+    );
+    assert_ne!(
+        settings_after_record, settings_mutated,
+        "recording must exercise settings persistence"
+    );
+
+    let text = std::fs::read_to_string(&replay).expect("read all-bootstrap replay");
+    assert_eq!(
+        text.lines().filter(|line| line.starts_with("boot ")).count(),
+        3,
+        "all three logical bootstrap inputs must be present exactly once\n{text}"
+    );
+    for key in [
+        "6d61672f70726f67726573732e6a736f6e",
+        "6d61672f73657474696e67732e6a736f6e",
+        "6d61672f7370656c6c626f6f6b2d6c61796f75742e6a736f6e6c",
+    ] {
+        assert_eq!(
+            text.lines()
+                .filter(|line| line.starts_with(&format!("boot {key} ")))
+                .count(),
+            1,
+            "bootstrap key {key} must have one wire entry\n{text}"
+        );
+    }
 }
 
 #[test]
