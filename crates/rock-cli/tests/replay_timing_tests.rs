@@ -112,6 +112,75 @@ struct TimingRow {
     present_us: u64,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SlowSection {
+    name: String,
+    inclusive_us: u64,
+    calls: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SlowFrameRow {
+    ordinal: usize,
+    tick: usize,
+    heap_bytes: u64,
+    heap_growth_bytes: u64,
+    gc: bool,
+    dropped: u64,
+    sections: Vec<SlowSection>,
+}
+
+fn decode_hex_string(text: &str) -> String {
+    assert!(
+        !text.is_empty() && text.len() % 2 == 0,
+        "invalid hex string: {text}"
+    );
+    let bytes = (0..text.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&text[i..i + 2], 16).expect("hex byte"))
+        .collect::<Vec<_>>();
+    String::from_utf8(bytes).expect("UTF-8 section name")
+}
+
+fn slow_frame_lines(text: &str) -> Vec<SlowFrameRow> {
+    text.lines()
+        .filter_map(|line| {
+            let fields = line.split_whitespace().collect::<Vec<_>>();
+            if fields.first().copied() != Some("s") {
+                return None;
+            }
+            assert!(fields.len() >= 8, "incomplete slow-frame row: {line}");
+            let section_count = fields[7].parse::<usize>().expect("section count");
+            assert_eq!(
+                fields.len(),
+                8 + section_count * 3,
+                "slow-frame section population must match its payload: {line}"
+            );
+            let sections = fields[8..]
+                .chunks_exact(3)
+                .map(|section| SlowSection {
+                    name: decode_hex_string(section[0]),
+                    inclusive_us: section[1].parse().expect("section microseconds"),
+                    calls: section[2].parse().expect("section calls"),
+                })
+                .collect();
+            Some(SlowFrameRow {
+                ordinal: fields[1].parse().expect("slow-frame ordinal"),
+                tick: fields[2].parse().expect("slow-frame tick"),
+                heap_bytes: fields[3].parse().expect("heap bytes"),
+                heap_growth_bytes: fields[4].parse().expect("heap growth bytes"),
+                gc: match fields[5] {
+                    "0" => false,
+                    "1" => true,
+                    other => panic!("invalid GC marker: {other}"),
+                },
+                dropped: fields[6].parse().expect("dropped profiler events"),
+                sections,
+            })
+        })
+        .collect()
+}
+
 fn timing_lines(text: &str) -> Vec<TimingRow> {
     text.lines()
         .filter_map(|line| {
@@ -185,8 +254,8 @@ fn timing_samples_align_exactly_with_observation_ordinals_and_ticks() {
 
     let text = std::fs::read_to_string(&log).expect("read replay");
     assert!(
-        text.starts_with("STONE_REPLAY 10\n"),
-        "phase timing logs must use v10\n{text}"
+        text.starts_with("STONE_REPLAY 11\n"),
+        "phase timing logs must use v11\n{text}"
     );
     assert_eq!(tick_count(&text), 8, "fixture must have eight observations");
     assert_eq!(
@@ -202,6 +271,69 @@ fn timing_samples_align_exactly_with_observation_ordinals_and_ticks() {
             })
             .collect::<Vec<_>>(),
         "each exact sample must retain its observation ordinal, tick, and phase tuple"
+    );
+}
+
+#[test]
+fn opted_in_slow_frames_carry_bounded_named_profiler_attribution() {
+    let dir = tempfile::tempdir().expect("log dir");
+    let plain = dir.path().join("plain.replay");
+    let profiled = dir.path().join("profiled.replay");
+    let plain_s = plain.to_string_lossy().into_owned();
+    let profiled_s = profiled.to_string_lossy().into_owned();
+
+    let ordinary = record_raw("bitgun", 8, &plain_s, &[("STONE_FRAME_DELAY_MS", "2")]);
+    assert!(ordinary.status.success(), "ordinary record failed");
+    let ordinary_text = std::fs::read_to_string(&plain).expect("read ordinary replay");
+    assert!(
+        slow_frame_lines(&ordinary_text).is_empty(),
+        "ordinary recording must not emit profiler-section attribution"
+    );
+
+    let profiled_run = record_raw(
+        "bitgun",
+        8,
+        &profiled_s,
+        &[
+            ("STONE_FRAME_DELAY_MS", "2"),
+            ("STONE_REPLAY_SLOW_PROFILE_MS", "1"),
+        ],
+    );
+    assert!(
+        profiled_run.status.success(),
+        "profiled record failed: {}",
+        String::from_utf8_lossy(&profiled_run.stderr)
+    );
+    let text = std::fs::read_to_string(&profiled).expect("read profiled replay");
+    assert!(
+        text.starts_with("STONE_REPLAY 11\n"),
+        "slow-frame attribution requires the versioned v11 grammar\n{text}"
+    );
+    let rows = slow_frame_lines(&text);
+    assert_eq!(
+        rows.len(),
+        tick_count(&text),
+        "every forced-slow frame needs attribution"
+    );
+    assert!(rows.iter().all(|row| row.ordinal == row.tick));
+    assert!(rows.iter().all(|row| !row.sections.is_empty()));
+    assert!(rows.iter().all(|row| row.sections.len() <= 12));
+    assert!(
+        rows.iter().any(|row| row.heap_bytes > 0),
+        "heap evidence must be nondegenerate"
+    );
+    assert!(
+        rows.iter()
+            .flat_map(|row| &row.sections)
+            .any(|section| section.inclusive_us > 0 && section.calls > 0),
+        "named section attribution must contain measured work"
+    );
+
+    let playback = replay_dump("bitgun", 8, &profiled_s, &[]);
+    assert_eq!(
+        playback["__stone_diag"]["STONE_REPLAY_RECORDED_SLOW_PROFILE_COUNT"],
+        rows.len() as u64,
+        "playback must parse the same aligned attribution population"
     );
 }
 
@@ -248,8 +380,8 @@ fn crash_tail_can_omit_only_the_final_completed_timing_sample() {
     let ticks = tick_count(&text);
     let timings = timing_lines(&text);
     assert!(
-        text.starts_with("STONE_REPLAY 10\n"),
-        "crash log must retain v10\n{text}"
+        text.starts_with("STONE_REPLAY 11\n"),
+        "crash log must retain v11\n{text}"
     );
     assert!(ticks > 0, "crash log must retain observations");
     assert_eq!(
@@ -278,7 +410,7 @@ fn legacy_v8_without_timing_remains_playable_and_reports_an_empty_track() {
         .map(str::to_string)
         .collect::<Vec<_>>()
         .join("\n")
-        .replacen("STONE_REPLAY 10", "STONE_REPLAY 8", 1)
+        .replacen("STONE_REPLAY 11", "STONE_REPLAY 8", 1)
         + "\n";
     std::fs::write(&log, legacy).expect("write legacy replay");
 
@@ -309,7 +441,7 @@ fn legacy_v9_total_timing_remains_playable_without_phase_attribution() {
         })
         .collect::<Vec<_>>()
         .join("\n")
-        .replacen("STONE_REPLAY 10", "STONE_REPLAY 9", 1)
+        .replacen("STONE_REPLAY 11", "STONE_REPLAY 9", 1)
         + "\n";
     std::fs::write(&log, legacy).expect("write legacy replay");
 
@@ -321,6 +453,29 @@ fn legacy_v9_total_timing_remains_playable_without_phase_attribution() {
     assert_eq!(
         state["__stone_diag"]["STONE_REPLAY_RECORDED_TIMING_LAST_LOGIC_US"], -1,
         "v9 total timing must not invent phase attribution"
+    );
+}
+
+#[test]
+fn legacy_v10_phase_timing_remains_playable_without_slow_profiles() {
+    let dir = tempfile::tempdir().expect("log dir");
+    let log = dir.path().join("legacy-v10.replay");
+    let log_s = log.to_string_lossy().into_owned();
+    let recorded = record_raw("bitgun", 8, &log_s, &[]);
+    assert!(recorded.status.success(), "record failed");
+    let legacy = std::fs::read_to_string(&log)
+        .expect("read replay")
+        .replacen("STONE_REPLAY 11", "STONE_REPLAY 10", 1);
+    std::fs::write(&log, legacy).expect("write v10 replay");
+
+    let state = replay_dump("bitgun", 8, &log_s, &[]);
+    assert_eq!(
+        state["__stone_diag"]["STONE_REPLAY_RECORDED_TIMING_COUNT"],
+        8
+    );
+    assert_eq!(
+        state["__stone_diag"]["STONE_REPLAY_RECORDED_SLOW_PROFILE_COUNT"], 0,
+        "v10 must not invent slow-frame attribution"
     );
 }
 
@@ -391,6 +546,66 @@ fn malformed_duplicate_and_orphan_timing_records_are_rejected() {
 }
 
 #[test]
+fn malformed_duplicate_and_orphan_slow_profiles_are_rejected() {
+    let dir = tempfile::tempdir().expect("log dir");
+    let base = dir.path().join("profile-base.replay");
+    let base_s = base.to_string_lossy().into_owned();
+    let recorded = record_raw(
+        "bitgun",
+        4,
+        &base_s,
+        &[
+            ("STONE_FRAME_DELAY_MS", "2"),
+            ("STONE_REPLAY_SLOW_PROFILE_MS", "1"),
+        ],
+    );
+    assert!(recorded.status.success(), "record failed");
+    let source = std::fs::read_to_string(&base).expect("read base replay");
+    let first = source
+        .lines()
+        .find(|line| line.starts_with("s "))
+        .expect("slow-profile population");
+    let fields = first.split_whitespace().collect::<Vec<_>>();
+    assert!(
+        fields.len() >= 14,
+        "fixture needs at least two sections: {first}"
+    );
+
+    let mutate_field = |index: usize, value: &str| {
+        let mut changed = fields.clone();
+        changed[index] = value;
+        source.replacen(first, &changed.join(" "), 1)
+    };
+
+    let duplicate_name = {
+        let mut changed = fields.clone();
+        changed[8 + 3] = changed[8];
+        changed.join(" ")
+    };
+    let cases = [
+        (
+            "duplicate-profile",
+            source.replacen(first, &format!("{first}\n{first}"), 1),
+        ),
+        (
+            "orphan-profile",
+            source.clone() + "s 99 99 1 1 0 0 1 78 1 1\n",
+        ),
+        ("wrong-tick", mutate_field(2, "1")),
+        ("zero-calls", mutate_field(10, "0")),
+        ("bad-name", mutate_field(8, "zz")),
+        ("duplicate-name", source.replacen(first, &duplicate_name, 1)),
+        ("wrong-count", mutate_field(7, "13")),
+    ];
+    for (name, text) in cases {
+        let path = dir.path().join(format!("{name}.replay"));
+        std::fs::write(&path, text).expect("write malformed replay");
+        let path_s = path.to_string_lossy().into_owned();
+        assert_load_rejected(&replay_raw("bitgun", 8, &path_s, &[]), name);
+    }
+}
+
+#[test]
 fn recorded_and_playback_tracks_are_distinct_and_timing_cannot_change_state() {
     let dir = tempfile::tempdir().expect("log dir");
     let original = dir.path().join("original.replay");
@@ -401,6 +616,8 @@ fn recorded_and_playback_tracks_are_distinct_and_timing_cannot_change_state() {
     let record_env = [
         ("STONE_REPLAY_TIMING_US", samples.as_str()),
         ("STONE_CHECKPOINT_INTERVAL", "1"),
+        ("STONE_FRAME_DELAY_MS", "2"),
+        ("STONE_REPLAY_SLOW_PROFILE_MS", "1"),
     ];
     let recorded = record_raw("bitgun", 12, &original_s, &record_env);
     assert!(recorded.status.success(), "record failed");
@@ -415,6 +632,15 @@ fn recorded_and_playback_tracks_are_distinct_and_timing_cannot_change_state() {
                     "p {} {} 9000000 8000000 7000000 6000000",
                     fields[0], fields[1]
                 )
+            } else if line.starts_with("s ") {
+                let mut fields = line.split_whitespace().collect::<Vec<_>>();
+                fields[3] = "900000000";
+                fields[4] = "800000000";
+                fields[5] = if fields[5] == "0" { "1" } else { "0" };
+                for i in (9..fields.len()).step_by(3) {
+                    fields[i] = "7000000";
+                }
+                fields.join(" ")
             } else {
                 line.to_string()
             }
@@ -446,6 +672,14 @@ fn recorded_and_playback_tracks_are_distinct_and_timing_cannot_change_state() {
     assert_eq!(
         state_b["__stone_diag"]["STONE_REPLAY_RECORDED_TIMING_LAST_LOGIC_US"],
         8000000
+    );
+    assert_eq!(
+        state_a["__stone_diag"]["STONE_REPLAY_RECORDED_SLOW_PROFILE_COUNT"],
+        12
+    );
+    assert_eq!(
+        state_b["__stone_diag"]["STONE_REPLAY_RECORDED_SLOW_PROFILE_COUNT"],
+        12
     );
     assert!(
         state_a["__stone_diag"]["STONE_REPLAY_PLAYBACK_TIMING_COUNT"]
@@ -486,6 +720,8 @@ fn timeline_populates_timing_and_backward_then_forward_scrub_keeps_alignment() {
         &[
             ("STONE_REPLAY_TIMING_US", &samples),
             ("STONE_REPLAY_PHASE_TIMING_US", &phases),
+            ("STONE_FRAME_DELAY_MS", "2"),
+            ("STONE_REPLAY_SLOW_PROFILE_MS", "1"),
         ],
     );
     assert!(recorded.status.success(), "record failed");
@@ -522,6 +758,10 @@ fn timeline_populates_timing_and_backward_then_forward_scrub_keeps_alignment() {
     assert_eq!(diag["REPLAY_TIMELINE_TIMING_RECORDED_LOGIC_US"], 1012);
     assert_eq!(diag["REPLAY_TIMELINE_TIMING_RECORDED_RENDER_US"], 1112);
     assert_eq!(diag["REPLAY_TIMELINE_TIMING_RECORDED_PRESENT_US"], 1212);
+    assert_eq!(
+        diag["REPLAY_TIMELINE_SLOW_PROFILE_PRESENT"], 1,
+        "the selected slow observation must expose its named profiler snapshot"
+    );
     assert!(
         diag["REPLAY_TIMELINE_TIMING_PLAYBACK_LOGIC_US"]
             .as_i64()
@@ -559,6 +799,8 @@ fn resume_live_here_drops_abandoned_timing_and_appends_fresh_branch_samples() {
         &[
             ("STONE_REPLAY_TIMING_US", &samples),
             ("STONE_REPLAY_PHASE_TIMING_US", &phases),
+            ("STONE_FRAME_DELAY_MS", "2"),
+            ("STONE_REPLAY_SLOW_PROFILE_MS", "1"),
             ("STONE_LIVE_REWIND", "1"),
             ("STONE_TIMELINE_SEEK_AT_FRAME", "20"),
             ("STONE_TIMELINE_SEEK_TO_TICK", "10"),
@@ -572,6 +814,13 @@ fn resume_live_here_drops_abandoned_timing_and_appends_fresh_branch_samples() {
     );
     let text = std::fs::read_to_string(&log).expect("branched replay");
     let timings = timing_lines(&text);
+    let profiles = slow_frame_lines(&text);
+    assert_eq!(
+        profiles.len(),
+        tick_count(&text),
+        "branch rewrite must retain prefix attribution and append fresh branch attribution"
+    );
+    assert!(profiles.iter().all(|row| row.ordinal == row.tick));
     assert_eq!(
         timings.iter().find(|row| row.ordinal == 5).copied(),
         Some(TimingRow {
@@ -624,6 +873,8 @@ fn save_repro_preserves_timing_and_hidden_resimulation_has_no_playback_samples()
         &source_s,
         &[
             ("STONE_REPLAY_TIMING_US", &samples),
+            ("STONE_FRAME_DELAY_MS", "2"),
+            ("STONE_REPLAY_SLOW_PROFILE_MS", "1"),
             ("STONE_SAVE_REPRO_AT_FRAME", "10"),
             ("STONE_SAVE_REPRO_PATH", &repro_s),
         ],
@@ -641,6 +892,11 @@ fn save_repro_preserves_timing_and_hidden_resimulation_has_no_playback_samples()
     assert!(
         timing_lines(&repro_text).len() == tick_count(&repro_text),
         "save repro must flush the pending sample before copying"
+    );
+    assert_eq!(
+        slow_frame_lines(&repro_text).len(),
+        tick_count(&repro_text),
+        "save repro must flush and preserve the aligned slow-frame snapshots"
     );
 
     let seeked = replay_dump("bitgun", 40, &source_s, &[("STONE_RUN_TO_TICK", "25")]);

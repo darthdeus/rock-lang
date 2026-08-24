@@ -77,7 +77,7 @@ fn with_header(text: &str, version: &str, build: Option<&str>) -> String {
 fn new_recordings_stamp_a_real_exact_artifact_identity() {
     let (_dir, log) = record_with_env("bitgun", 15, &[]);
     let text = std::fs::read_to_string(&log).expect("read log");
-    assert!(text.starts_with("STONE_REPLAY 10\n"), "new recordings must use v10\n{text}");
+    assert!(text.starts_with("STONE_REPLAY 11\n"), "new recordings must use v11\n{text}");
     let build = text
         .lines()
         .find_map(|line| line.strip_prefix("build "))
@@ -159,7 +159,7 @@ fn record_stamps_build_id_and_reload_marker() {
         &[ ("STONE_RELOAD_AT_FRAME", "5")],
     );
     let text = std::fs::read_to_string(&log).expect("read log");
-    assert!(text.starts_with("STONE_REPLAY 10"), "must be a v10 log\n{text}");
+    assert!(text.starts_with("STONE_REPLAY 11"), "must be a v11 log\n{text}");
     let build = text.lines().find_map(|l| l.strip_prefix("build ")).expect("build header");
     assert!(build.len() == 16 && build.chars().all(|c| c.is_ascii_hexdigit()), "header must carry a real build id\n{text}");
     assert!(
