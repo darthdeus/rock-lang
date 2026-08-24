@@ -31,6 +31,40 @@ fn record_raw(game: &str, frames: u32, log: &str, env: &[(&str, &str)]) -> Outpu
         .expect("spawn record")
 }
 
+fn record_dump(game: &str, frames: u32, log: &str, env: &[(&str, &str)]) -> serde_json::Value {
+    let scratch = tempfile::tempdir().expect("record scratch");
+    let out = Command::new(env!("CARGO_BIN_EXE_rock"))
+        .args([
+            "frame",
+            game,
+            "-n",
+            &frames.to_string(),
+            "--record",
+            log,
+            "--dump-state",
+            "--output",
+            &scratch.path().to_string_lossy(),
+        ])
+        .env("ROCK_FRAME_TIMEOUT_SECS", "60")
+        .envs(env.iter().copied())
+        .current_dir(workspace_root())
+        .output()
+        .expect("spawn record dump");
+    assert!(
+        out.status.success(),
+        "record dump failed: {:?}\nstderr:\n{}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    serde_json::from_slice(&out.stdout).unwrap_or_else(|error| {
+        panic!(
+            "record dump was not JSON ({error})\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        )
+    })
+}
+
 fn replay_raw(game: &str, frames: u32, log: &str, env: &[(&str, &str)]) -> Output {
     let scratch = tempfile::tempdir().expect("replay scratch");
     Command::new(env!("CARGO_BIN_EXE_rock"))
@@ -290,7 +324,7 @@ fn opted_in_slow_frames_carry_bounded_named_profiler_attribution() {
         "ordinary recording must not emit profiler-section attribution"
     );
 
-    let profiled_run = record_raw(
+    let profiled_state = record_dump(
         "bitgun",
         8,
         &profiled_s,
@@ -299,10 +333,9 @@ fn opted_in_slow_frames_carry_bounded_named_profiler_attribution() {
             ("STONE_REPLAY_SLOW_PROFILE_MS", "1"),
         ],
     );
-    assert!(
-        profiled_run.status.success(),
-        "profiled record failed: {}",
-        String::from_utf8_lossy(&profiled_run.stderr)
+    assert_eq!(
+        profiled_state["__stone_diag"]["STONE_REPLAY_PROFILE_LIGHTWEIGHT_FRAMES"], 8,
+        "opt-in recording must use the replay-only capture path on every frame"
     );
     let text = std::fs::read_to_string(&profiled).expect("read profiled replay");
     assert!(
@@ -334,6 +367,41 @@ fn opted_in_slow_frames_carry_bounded_named_profiler_attribution() {
         playback["__stone_diag"]["STONE_REPLAY_RECORDED_SLOW_PROFILE_COUNT"],
         rows.len() as u64,
         "playback must parse the same aligned attribution population"
+    );
+}
+
+#[test]
+fn playback_profiles_only_recorded_slow_ordinals_without_mutating_the_source() {
+    let dir = tempfile::tempdir().expect("log dir");
+    let log = dir.path().join("playback-profile.replay");
+    let log_s = log.to_string_lossy().into_owned();
+    let timings = "1000,1000,9000,1000,1000,7000,1000,1000";
+    let recorded = record_raw("bitgun", 8, &log_s, &[("STONE_REPLAY_TIMING_US", timings)]);
+    assert!(recorded.status.success(), "record failed");
+    let before = std::fs::read(&log).expect("read source replay");
+    assert!(
+        slow_frame_lines(&String::from_utf8_lossy(&before)).is_empty(),
+        "the source must contain only cheap timing"
+    );
+
+    let playback = replay_dump(
+        "bitgun",
+        8,
+        &log_s,
+        &[("STONE_REPLAY_SLOW_PROFILE_MS", "5")],
+    );
+    assert_eq!(
+        playback["__stone_diag"]["STONE_REPLAY_PLAYBACK_SLOW_PROFILE_COUNT"], 2,
+        "only the two recorded frames at or above 5ms should be profiled"
+    );
+    assert_eq!(
+        playback["__stone_diag"]["STONE_REPLAY_PROFILE_LIGHTWEIGHT_FRAMES"], 2,
+        "section collection must be inactive on the other playback frames"
+    );
+    assert_eq!(
+        std::fs::read(&log).expect("reread source replay"),
+        before,
+        "playback profiling must remain in memory"
     );
 }
 
@@ -737,6 +805,7 @@ fn timeline_populates_timing_and_backward_then_forward_scrub_keeps_alignment() {
             ("STONE_TIMELINE_SEEK_TO_TICK", "5"),
             ("STONE_TIMELINE_SEEK_AT_FRAME_2", "40"),
             ("STONE_TIMELINE_SEEK_TO_TICK_2", "12"),
+            ("STONE_REPLAY_SLOW_PROFILE_MS", "1"),
         ],
     );
     let diag = &state["__stone_diag"];
@@ -761,6 +830,10 @@ fn timeline_populates_timing_and_backward_then_forward_scrub_keeps_alignment() {
     assert_eq!(
         diag["REPLAY_TIMELINE_SLOW_PROFILE_PRESENT"], 1,
         "the selected slow observation must expose its named profiler snapshot"
+    );
+    assert_eq!(
+        diag["REPLAY_TIMELINE_PLAYBACK_SLOW_PROFILE_PRESENT"], 1,
+        "the selected observation must expose replay-time attribution separately"
     );
     assert!(
         diag["REPLAY_TIMELINE_TIMING_PLAYBACK_LOGIC_US"]
