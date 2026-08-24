@@ -476,7 +476,7 @@ fn mag_cast_seek_restores_scheduler_owner() {
     );
     let mut tick = 0;
     let fixture_text = std::fs::read_to_string(&fixture).expect("current Mag replay fixture");
-    assert!(fixture_text.starts_with("STONE_REPLAY 8\n"), "fixture must use the exact-Artifact replay format");
+    assert!(fixture_text.starts_with("STONE_REPLAY 9\n"), "fixture must use the exact-Artifact replay format");
     let fixture_text = fixture_text
         .lines()
         .map(|line| {
@@ -484,7 +484,7 @@ fn mag_cast_seek_restores_scheduler_owner() {
                 return line.to_string();
             }
             let mut fields: Vec<&str> = line.split_whitespace().collect();
-            assert_eq!(fields.len(), 10, "v8 tick shape changed: {line}");
+            assert_eq!(fields.len(), 10, "v9 tick shape changed: {line}");
             fields[1] = "0x1.999999999999ap-5";
             fields[6] = if tick == 6 { "1" } else { "-" };
             tick += 1;
@@ -679,7 +679,7 @@ fn exact_recorded_replay_supports_two_backward_scene_image_scrubs() {
         .expect("spawn record");
     assert!(rec.status.success(), "record failed: {}", String::from_utf8_lossy(&rec.stderr));
     let text = std::fs::read_to_string(&log).expect("read exact replay");
-    assert!(text.starts_with("STONE_REPLAY 8\n"), "the scrub fixture must exercise the new format\n{text}");
+    assert!(text.starts_with("STONE_REPLAY 9\n"), "the scrub fixture must exercise the new format\n{text}");
 
     let ordinary = run_replay_dump(
         game,
@@ -2005,7 +2005,7 @@ fn replay_file_contains_observations_and_bootstrap_but_no_world_image_payload() 
     let _ = run_record_dump("bitgun", 20, &log, &[]);
     let bytes = std::fs::read_to_string(&log).unwrap();
     assert!(bytes.lines().any(|line| line.starts_with("t ")), "the replay must contain input observations");
-    assert!(bytes.contains("STONE_REPLAY 8"), "the replay must retain its versioned header");
+    assert!(bytes.contains("STONE_REPLAY 9"), "the replay must retain its versioned header");
     for payload in ["WorldImage", "StateImage", "keyframe", "snapshot"] {
         assert!(!bytes.contains(payload), "the replay wire must not serialize {payload}: {bytes}");
     }

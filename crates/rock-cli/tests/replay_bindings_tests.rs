@@ -1,4 +1,4 @@
-//! Phase 4: a v8 recording carries the normalized binding overlay before its
+//! Phase 4: a v9 recording carries the normalized binding overlay before its
 //! first tick, so replay startup can select it independently of disk state.
 
 use std::path::Path;
@@ -29,7 +29,7 @@ fn mag_record_stamps_a_nonempty_binding_overlay_before_ticks() {
     let text = std::fs::read_to_string(log).expect("read replay");
     let lines: Vec<&str> = text.lines().collect();
     let overlay_index = lines.iter().position(|line| line.starts_with("bindings "))
-        .expect("v8 header must contain a binding overlay");
+        .expect("v9 header must contain a binding overlay");
     let first_tick = lines.iter().position(|line| line.starts_with("t "))
         .expect("record must contain a tick");
     assert!(overlay_index < first_tick, "overlay must precede the first tick");
@@ -86,7 +86,7 @@ fn replay_uses_recorded_bindings_after_disk_changes() {
     let rewritten = text.lines().map(|line| {
         if !line.starts_with("t ") { return line.to_string(); }
         let mut fields: Vec<&str> = line.split_whitespace().collect();
-        assert_eq!(fields.len(), 10, "v8 tick must have ten fields: {line}");
+        assert_eq!(fields.len(), 10, "v9 tick must have ten fields: {line}");
         if ticks == 3 { fields[6] = "x"; }
         ticks += 1;
         fields.join(" ")

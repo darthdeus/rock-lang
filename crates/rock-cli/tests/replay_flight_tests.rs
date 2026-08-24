@@ -77,7 +77,7 @@ fn with_header(text: &str, version: &str, build: Option<&str>) -> String {
 fn new_recordings_stamp_a_real_exact_artifact_identity() {
     let (_dir, log) = record_with_env("bitgun", 15, &[]);
     let text = std::fs::read_to_string(&log).expect("read log");
-    assert!(text.starts_with("STONE_REPLAY 8\n"), "new recordings must use v8\n{text}");
+    assert!(text.starts_with("STONE_REPLAY 9\n"), "new recordings must use v9\n{text}");
     let build = text
         .lines()
         .find_map(|line| line.strip_prefix("build "))
@@ -150,7 +150,7 @@ fn emitted_lua_has_no_shadow_effect_plan() {
     assert!(!emitted.contains("ShadowEffectPlan"), "emitted Lua still names the removed effect plan type");
 }
 
-/// The v8 header stamps the exact build id, and a hot-reload during recording
+/// The v9 header stamps the exact build id, and a hot-reload during recording
 /// writes a `reload <tick>` marker.
 #[test]
 fn record_stamps_build_id_and_reload_marker() {
@@ -159,7 +159,7 @@ fn record_stamps_build_id_and_reload_marker() {
         &[ ("STONE_RELOAD_AT_FRAME", "5")],
     );
     let text = std::fs::read_to_string(&log).expect("read log");
-    assert!(text.starts_with("STONE_REPLAY 8"), "must be a v8 log\n{text}");
+    assert!(text.starts_with("STONE_REPLAY 9"), "must be a v9 log\n{text}");
     let build = text.lines().find_map(|l| l.strip_prefix("build ")).expect("build header");
     assert!(build.len() == 16 && build.chars().all(|c| c.is_ascii_hexdigit()), "header must carry a real build id\n{text}");
     assert!(

@@ -140,6 +140,19 @@ fn timing_samples_align_exactly_with_observation_ordinals_and_ticks() {
 }
 
 #[test]
+fn real_recording_produces_a_nonzero_timing_population() {
+    let dir = tempfile::tempdir().expect("log dir");
+    let log = dir.path().join("measured.replay");
+    let log_s = log.to_string_lossy().into_owned();
+    let recorded = record_raw("bitgun", 8, &log_s, &[]);
+    assert!(recorded.status.success(), "record failed");
+    let text = std::fs::read_to_string(&log).expect("read replay");
+    let timings = timing_lines(&text);
+    assert!(!timings.is_empty(), "the product recorder must emit measured samples");
+    assert!(timings.iter().all(|(_, tick, _)| *tick < tick_count(&text)));
+}
+
+#[test]
 fn crash_tail_can_omit_only_the_final_completed_timing_sample() {
     let dir = tempfile::tempdir().expect("log dir");
     let log = dir.path().join("crash-tail.replay");
@@ -384,7 +397,7 @@ fn resume_live_here_drops_abandoned_timing_and_appends_fresh_branch_samples() {
             ("STONE_LIVE_REWIND", "1"),
             ("STONE_TIMELINE_SEEK_AT_FRAME", "20"),
             ("STONE_TIMELINE_SEEK_TO_TICK", "10"),
-            ("STONE_BRANCH_AT_FRAME", "30"),
+            ("STONE_BRANCH_AT_FRAME", "40"),
         ],
     );
     assert!(live.status.success(), "branch record failed: {}", String::from_utf8_lossy(&live.stderr));
