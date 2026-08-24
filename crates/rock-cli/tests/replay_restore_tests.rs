@@ -432,56 +432,133 @@ fn mag_seek_equivalence_state_names(
 
 #[test]
 fn mag_cast_seek_restores_scheduler_owner() {
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mag_cast_seek.replay");
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = dir.path().join("mag-cast-seek.replay");
     let fixture_s = fixture.to_string_lossy().into_owned();
-    let fixture_text = std::fs::read_to_string(&fixture).expect("tracked Mag replay fixture");
-    let ticks: Vec<&str> = fixture_text.lines().filter(|line| line.starts_with("t ")).collect();
-    assert!(ticks.len() > 566, "fixture must reach the later Lightning cast");
-    assert_eq!(ticks[292].split_whitespace().nth(6), Some("2"), "tick 292 starts Flamestrike");
-    assert_eq!(ticks[566].split_whitespace().nth(6), Some("1"), "tick 566 starts Lightning");
+    let progress = dir.path().join("progress.json");
+    let progress_s = progress.to_string_lossy().into_owned();
+    let layout_s = dir.path().join("spellbook-layout.jsonl").to_string_lossy().into_owned();
+    let settings_s = dir.path().join("settings.json").to_string_lossy().into_owned();
+    let bindings_s = dir.path().join("bindings.json").to_string_lossy().into_owned();
+    std::fs::write(
+        &progress,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "version": 3,
+            "bank_gold": 0,
+            "events": {},
+            "quests": {"runs": [], "tracked": [], "collapsed": {}, "quarantined": []},
+            "player": {
+                "grid": [25, 8],
+                "dead": false,
+                "health_cur": 100.0,
+                "mana_cur": 100.0,
+                "stamina_cur": 20.0,
+                "inventory": {"gold": 0, "bandage": 0, "bloody_bandage": 0},
+                "reagents": [50, 50, 50, 50, 50, 50]
+            },
+            "spellbook": {"favorites": []}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
 
-    let ordinary = run_replay_dump(
-        "mag", 360, &fixture_s,
+    let _ = run_record_dump(
+        "mag",
+        40,
+        &fixture_s,
         &[
-            ("STONE_START_PAUSED", "1"),
-            ("STONE_STEP_FRAMES", "350"),
-            ("STONE_KEYFRAME_INTERVAL", "60"),
+            ("MAG_BOOT_PLAYING", "1"),
+            ("MAG_PROGRESS_PATH_OVERRIDE", &progress_s),
+            ("MAG_LAYOUT_HISTORY_PATH_OVERRIDE", &layout_s),
+            ("MAG_SETTINGS_PATH_OVERRIDE", &settings_s),
+            ("MAG_BINDINGS_PATH_OVERRIDE", &bindings_s),
         ],
     );
-    assert_eq!(current_tick(&ordinary), 350);
-    assert_eq!(ordinary["mag"]["player"]["spell_state.#"], "Casting");
-    assert_eq!(ordinary["mag"]["player"]["spell_state.0"], 1);
-    assert!(ordinary["mag"]["player"]["spell_state.1"].as_f64().unwrap() > 0.0);
-    assert_eq!(ordinary["mag"]["player"]["spell_state.2"], 2);
-    assert_eq!(ordinary["mag"]["player"]["mana_cur"], 100);
-    assert_eq!(ordinary["mag"]["player"]["reagents"]["counts"]["data"], serde_json::json!([50, 50, 50, 50, 50, 50]));
-    assert!(ordinary["mag"]["player"]["cast_co"].is_object());
-    assert_eq!(ordinary["mag"]["player"]["cast_co"]["last_tick_frame"], 350);
-    assert!(ordinary["stone"]["POLLER"]["coroutines"].as_array().unwrap().len() > 0,
-        "ordinary playback must have live scheduler rows");
+    let mut tick = 0;
+    let fixture_text = std::fs::read_to_string(&fixture).expect("current Mag replay fixture");
+    assert!(fixture_text.starts_with("STONE_REPLAY 8\n"), "fixture must use the exact-Artifact replay format");
+    let fixture_text = fixture_text
+        .lines()
+        .map(|line| {
+            if !line.starts_with("t ") {
+                return line.to_string();
+            }
+            let mut fields: Vec<&str> = line.split_whitespace().collect();
+            assert_eq!(fields.len(), 10, "v8 tick shape changed: {line}");
+            fields[1] = "0x1.999999999999ap-5";
+            fields[6] = if tick == 6 { "1" } else { "-" };
+            tick += 1;
+            fields.join(" ")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(tick, 40, "fixture must rewrite every recorded tick");
+    std::fs::write(&fixture, fixture_text + "\n").expect("write deterministic Mag cast replay");
 
-    let sought = run_replay_dump(
-        "mag", 700, &fixture_s,
-        &[
-            ("STONE_KEYFRAME_INTERVAL", "60"),
-            ("STONE_TIMELINE_SEEK_AT_FRAME", "600"),
-            ("STONE_TIMELINE_SEEK_TO_TICK", "350"),
-        ],
-    );
-    assert_eq!(current_tick(&sought), 350);
-    assert_eq!(sought["mag"]["player"]["spell_state.#"], ordinary["mag"]["player"]["spell_state.#"]);
-    assert_eq!(sought["mag"]["player"]["spell_state.0"], ordinary["mag"]["player"]["spell_state.0"]);
-    assert_eq!(sought["mag"]["player"]["spell_state.1"], ordinary["mag"]["player"]["spell_state.1"]);
-    assert_eq!(sought["mag"]["player"]["mana_cur"], ordinary["mag"]["player"]["mana_cur"]);
-    assert_eq!(sought["mag"]["player"]["reagents"], ordinary["mag"]["player"]["reagents"]);
-    assert!(sought["stone"]["POLLER"]["coroutines"].as_array().unwrap().len() > 0,
-        "a seek landing must retain nonempty scheduler population");
-    assert!(sought["mag"]["player"]["cast_co"]["last_tick_frame"].as_i64().unwrap() > 600,
+    let target = 12;
+    let common_env = [
+        ("MAG_BOOT_PLAYING", "1"),
+        ("MAG_REPLAY_CAST_SCHEDULER_PROBE", "1"),
+        ("MAG_REPLAY_CAST_SCHEDULER_TICK", "11"),
+        ("MAG_PROGRESS_PATH_OVERRIDE", progress_s.as_str()),
+        ("MAG_LAYOUT_HISTORY_PATH_OVERRIDE", layout_s.as_str()),
+        ("MAG_SETTINGS_PATH_OVERRIDE", settings_s.as_str()),
+        ("MAG_BINDINGS_PATH_OVERRIDE", bindings_s.as_str()),
+    ];
+    let mut ordinary_env = common_env.to_vec();
+    ordinary_env.extend([
+        ("STONE_START_PAUSED", "1"),
+        ("STONE_STEP_FRAMES", "12"),
+        ("STONE_KEYFRAME_INTERVAL", "10"),
+    ]);
+
+    let ordinary = run_replay_dump("mag", 20, &fixture_s, &ordinary_env);
+    assert_eq!(current_tick(&ordinary), target);
+    let ordinary_probe = &ordinary["__stone_diag"];
+    assert_eq!(ordinary_probe["MAG_CAST_PROBE_HITS"], 1, "ordinary arm must observe the target once: {ordinary_probe}");
+    assert_eq!(ordinary_probe["MAG_CAST_PROBE_RUN_STATE"], 1, "ordinary arm must have a live RunState: {ordinary_probe}");
+    assert!(ordinary_probe["MAG_CAST_PROBE_SCENE"].as_i64().is_some_and(|id| id > 0),
+        "ordinary arm must resolve a live Scene root: {ordinary_probe}");
+    assert_eq!(ordinary_probe["MAG_CAST_PROBE_CASTING"], 1, "ordinary arm must be mid-cast: {ordinary_probe}");
+    assert_eq!(ordinary_probe["MAG_CAST_PROBE_LIGHTNING"], 1, "ordinary arm must cast Lightning: {ordinary_probe}");
+    let cast_timer = ordinary_probe["MAG_CAST_PROBE_TIMER"].as_f64().expect("cast timer");
+    let cast_duration = ordinary_probe["MAG_CAST_PROBE_DURATION"].as_f64().expect("cast duration");
+    assert!(cast_timer > 0.0 && cast_timer < cast_duration,
+        "ordinary arm must observe a progressing cast: {ordinary_probe}");
+    assert_eq!(ordinary_probe["MAG_CAST_PROBE_TASK"], 1, "ordinary arm must own a casting Task: {ordinary_probe}");
+    assert!(ordinary_probe["MAG_CAST_PROBE_POLLER_ROWS"].as_i64().is_some_and(|n| n > 0),
+        "ordinary arm must have a nonempty POLLER: {ordinary_probe}");
+    assert_eq!(ordinary_probe["MAG_CAST_PROBE_TASK_FRAME"], target,
+        "ordinary casting Task must be pumped on the target tick: {ordinary_probe}");
+    assert!(ordinary_probe["MAG_CAST_PROBE_MANA"].as_f64().is_some_and(|mana| mana > 0.0 && mana < 100.0),
+        "ordinary cast must have spent mana: {ordinary_probe}");
+    assert_eq!(ordinary_probe["MAG_CAST_PROBE_REAGENT_1"], 49);
+    assert_eq!(ordinary_probe["MAG_CAST_PROBE_REAGENT_4"], 49);
+
+    let mut sought_env = common_env.to_vec();
+    sought_env.extend([
+        ("STONE_KEYFRAME_INTERVAL", "10"),
+        ("STONE_TIMELINE_SEEK_AT_FRAME", "30"),
+        ("STONE_TIMELINE_SEEK_TO_TICK", "12"),
+    ]);
+
+    let sought = run_replay_dump("mag", 40, &fixture_s, &sought_env);
+    assert_eq!(current_tick(&sought), target);
+    let sought_probe = &sought["__stone_diag"];
+    assert_eq!(sought_probe["MAG_CAST_PROBE_HITS"], 2,
+        "the target must be observed before and after the backward seek: {sought_probe}");
+    for key in [
+        "MAG_CAST_PROBE_RUN_STATE", "MAG_CAST_PROBE_SCENE", "MAG_CAST_PROBE_CASTING",
+        "MAG_CAST_PROBE_LIGHTNING", "MAG_CAST_PROBE_TIMER", "MAG_CAST_PROBE_DURATION",
+        "MAG_CAST_PROBE_TASK", "MAG_CAST_PROBE_POLLER_ROWS", "MAG_CAST_PROBE_MANA",
+        "MAG_CAST_PROBE_REAGENT_1", "MAG_CAST_PROBE_REAGENT_4",
+    ] {
+        assert_eq!(sought_probe[key], ordinary_probe[key],
+            "seek landing must reproduce ordinary casting state for {key}");
+    }
+    assert!(sought_probe["MAG_CAST_PROBE_TASK_FRAME"].as_i64().unwrap() > 30,
         "the restored task must be pumped after the seek, not left at its keyframe frame");
-    assert!(strip_scheduler_frame_stamps(&mut sought.clone()) > 0,
-        "named exclusion Task.last_tick_frame must have a nonzero population");
-
-    let sim = sim_state_names("mag", 60);
+    let sim = mag_seek_equivalence_state_names("mag", 60);
     assert!(sim.contains("POLLER"), "POLLER must be in the admitted sim-state oracle");
     assert_mag_seek_state_matches(&sought, &ordinary, &sim, "Mag scheduler seek");
 }
@@ -2244,6 +2321,81 @@ fn branch_projects_game_input_authority_and_drops_replay_latches() {
 }
 
 #[test]
+fn resume_live_here_persists_the_branched_mag_world_not_the_discarded_future() {
+    let dir = tempfile::tempdir().unwrap();
+    let log_s = dir.path().join("mag-branch-persistence.replay").to_string_lossy().into_owned();
+    let progress = dir.path().join("progress.json");
+    let progress_s = progress.to_string_lossy().into_owned();
+    let settings = dir.path().join("settings.json");
+    let settings_s = settings.to_string_lossy().into_owned();
+    let layout_s = dir.path().join("spellbook-layout.jsonl").to_string_lossy().into_owned();
+    let bindings_s = dir.path().join("bindings.json").to_string_lossy().into_owned();
+    let bindings_history = dir.path().join("spellbook-bindings.jsonl");
+    let bindings_history_s = bindings_history.to_string_lossy().into_owned();
+    std::fs::write(
+        &progress,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "version": 3,
+            "bank_gold": 111,
+            "events": {},
+            "quests": {"runs": [], "tracked": [], "collapsed": {}, "quarantined": []},
+            "player": {
+                "grid": [25, 8], "dead": false,
+                "health_cur": 100.0, "mana_cur": 100.0, "stamina_cur": 20.0,
+                "inventory": {"gold": 0, "bandage": 0, "bloody_bandage": 0},
+                "reagents": [0, 0, 0, 0, 0, 0]
+            },
+            "spellbook": {"favorites": []}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    std::fs::write(&settings, br#"{"audio":{"master":0.25}}"#).unwrap();
+
+    let state = run_record_dump(
+        "mag",
+        100,
+        &log_s,
+        &[
+            ("MAG_BOOT_PLAYING", "1"),
+            ("MAG_REPLAY_BRANCH_PERSISTENCE_FIXTURE", "1"),
+            ("MAG_PROGRESS_PATH_OVERRIDE", &progress_s),
+            ("MAG_LAYOUT_HISTORY_PATH_OVERRIDE", &layout_s),
+            ("MAG_SETTINGS_PATH_OVERRIDE", &settings_s),
+            ("MAG_BINDINGS_PATH_OVERRIDE", &bindings_s),
+            ("MAG_BINDINGS_HISTORY_PATH_OVERRIDE", &bindings_history_s),
+            ("STONE_LIVE_REWIND", "1"),
+            ("STONE_TIMELINE_SEEK_AT_FRAME", "40"),
+            ("STONE_TIMELINE_SEEK_TO_TICK", "10"),
+            ("STONE_BRANCH_AT_FRAME", "70"),
+        ],
+    );
+    let diag = &state["__stone_diag"];
+    assert_eq!(diag["MAG_REPLAY_BRANCH_FUTURE_PROGRESS_WRITE"].as_i64(), Some(1),
+        "the discarded future must first reach the real progress writer: {diag}");
+    assert_eq!(diag["MAG_REPLAY_BRANCH_FUTURE_SETTINGS_WRITE"].as_i64(), Some(1),
+        "the discarded future must first reach the real settings writer: {diag}");
+    assert_eq!(diag["MAG_REPLAY_BRANCH_FUTURE_BINDINGS_WRITE"].as_i64(), Some(1),
+        "the discarded future must first reach the real binding/history writer: {diag}");
+    assert_eq!(diag["STONE_BRANCH_COUNT"].as_i64(), Some(1),
+        "the fixture must take the production Resume Live Here path: {diag}");
+    assert_eq!(diag["MAG_REPLAY_BRANCH_PERSISTENCE_RECONCILES"].as_i64(), Some(1),
+        "the branched world must pass through one persistence reconciliation: {diag}");
+
+    let persisted_progress: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&progress).unwrap()).unwrap();
+    let persisted_settings: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&settings).unwrap()).unwrap();
+    assert_eq!(persisted_progress["bank_gold"], 111,
+        "the discarded future must not survive in progress.json");
+    assert_eq!(persisted_settings["audio"]["master"], 0.25,
+        "the discarded future must not survive in settings.json");
+    let persisted_bindings_history = std::fs::read_to_string(&bindings_history).unwrap();
+    assert!(!persisted_bindings_history.contains("f12"),
+        "the discarded binding-history future must be replaced by the branched graph:\n{persisted_bindings_history}");
+}
+
+#[test]
 fn recorded_game_input_is_projected_into_replay_authority() {
     let dir = tempfile::tempdir().unwrap();
     let log_s = dir.path().join("recorded-input.replay").to_string_lossy().into_owned();
@@ -2722,8 +2874,9 @@ fn replay_reports_its_own_costs() {
     );
 
     // Keyframe BYTES are only honest where real memory was imaged. Bitgun and
-    // bopt both hold NativeBuffers; a minimal game with no buffer declarations
-    // is the zero control.
+    // bopt hold game buffers in addition to Stone's unavoidable storage floor;
+    // a minimal game proves that floor is measured rather than reported as a
+    // fictitious zero.
     let seek_diag = &seeked["__stone_diag"];
     let bitgun_bytes = seek_diag["STONE_KEYFRAME_STORAGE_BYTES"].as_i64().expect("bitgun storage bytes");
     assert!(
@@ -2731,30 +2884,33 @@ fn replay_reports_its_own_costs() {
         "bitgun holds buffer storage in sim state, so its keyframe must report imaged bytes: {seek_diag}"
     );
 
-    let zero_game = tempfile::tempdir().unwrap();
+    let minimal_game = tempfile::tempdir().unwrap();
     std::fs::write(
-        zero_game.path().join("stick.toml"),
+        minimal_game.path().join("stick.toml"),
         format!(
-            "[package]\nname = \"replay_storage_zero\"\nversion = \"0.1.0\"\ntype = \"bin\"\n\n\
-             [dependencies]\nstone = {{ path = \"{}\" }}\n",
+            "[package]\nname = \"replay_storage_floor\"\nversion = \"0.1.0\"\ntype = \"bin\"\n\n\
+             [dependencies]\nstone = {{ path = \"{}\" }}\n\n\
+             [build.vars]\nGIT_SHA = \"test\"\n",
             workspace_root().parent().expect("repo root").join("stone").display()
         ),
     )
     .unwrap();
     std::fs::write(
-        zero_game.path().join("main.rock"),
-        "fn main() {\n    stone_run_game(GameConfig { title: \"replay storage zero\", width: 64, height: 64 })\n}\n",
+        minimal_game.path().join("main.rock"),
+        "fn main() {\n    stone_run_game(GameConfig { title: \"replay storage floor\", width: 64, height: 64 })\n}\n",
     )
     .unwrap();
-    let zero_game_s = zero_game.path().to_string_lossy().into_owned();
-    let zero_log = dir.path().join("zero-storage.replay").to_string_lossy().into_owned();
-    run_record_dump(&zero_game_s, 25, &zero_log, &[]);
-    let zero = run_replay_dump(&zero_game_s, 30, &zero_log, &[("STONE_KEYFRAME_INTERVAL", "10")]);
-    let zero_diag = &zero["__stone_diag"];
-    assert_eq!(
-        zero_diag["STONE_KEYFRAME_STORAGE_BYTES"].as_i64(),
-        Some(0),
-        "a game with no buffer declarations must report a real zero: {zero_diag}"
+    let minimal_game_s = minimal_game.path().to_string_lossy().into_owned();
+    let minimal_log = dir.path().join("minimal-storage.replay").to_string_lossy().into_owned();
+    run_record_dump(&minimal_game_s, 25, &minimal_log, &[]);
+    let minimal = run_replay_dump(&minimal_game_s, 30, &minimal_log, &[("STONE_KEYFRAME_INTERVAL", "10")]);
+    let minimal_diag = &minimal["__stone_diag"];
+    let engine_floor = minimal_diag["STONE_KEYFRAME_STORAGE_BYTES"]
+        .as_i64().expect("minimal Stone storage bytes");
+    assert!(
+        engine_floor > 0 && bitgun_bytes > engine_floor,
+        "Bitgun storage must exceed the nonzero Stone engine floor: floor={engine_floor} \
+         bitgun={bitgun_bytes} diag={minimal_diag}"
     );
 
     let bopt_log = dir.path().join("bopt.replay").to_string_lossy().into_owned();
@@ -2771,12 +2927,13 @@ fn replay_reports_its_own_costs() {
     let bopt = run_replay_dump("bopt", 30, &bopt_log, &[("STONE_KEYFRAME_INTERVAL", "10")]);
     let bytes = bopt["__stone_diag"]["STONE_KEYFRAME_STORAGE_BYTES"].as_i64().expect("storage bytes");
     assert!(
-        bytes > 0,
-        "bopt holds buffer storage in sim state, so its keyframe must report imaged bytes: {}",
+        bytes > engine_floor,
+        "bopt buffer storage must exceed the Stone engine floor {engine_floor}: {}",
         bopt["__stone_diag"]
     );
     println!(
-        "[replay-costs] keyframe buffer storage: zero-control 0B, bitgun {bitgun_bytes}B, bopt {bytes}B"
+        "[replay-costs] keyframe buffer storage: engine floor {engine_floor}B, \
+         bitgun {bitgun_bytes}B, bopt {bytes}B"
     );
 }
 

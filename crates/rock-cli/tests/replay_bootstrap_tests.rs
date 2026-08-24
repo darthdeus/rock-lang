@@ -1,5 +1,5 @@
-//! Cross-process replay bootstrap coverage for MAG's file-backed progress and
-//! spell-layout history.
+//! Cross-process replay bootstrap coverage for MAG's file-backed progress,
+//! spell-layout history, and binding history.
 //!
 //! Each fixture runs the real MAG boot consumer in one process, lets a
 //! production-shaped action persist B, and then starts a second process with
@@ -103,7 +103,8 @@ fn fixture_env(
     progress: &Path,
     layout: &Path,
     settings: &Path,
-) -> [(&'static str, String); 5] {
+) -> [(&'static str, String); 6] {
+    let bindings_history = layout.with_file_name("spellbook-bindings.jsonl");
     [
         ("MAG_BOOT_PLAYING", "1".to_string()),
         ("MAG_REPLAY_BOOTSTRAP_FIXTURE", kind.to_string()),
@@ -114,6 +115,10 @@ fn fixture_env(
         (
             "MAG_LAYOUT_HISTORY_PATH_OVERRIDE",
             layout.to_string_lossy().into_owned(),
+        ),
+        (
+            "MAG_BINDINGS_HISTORY_PATH_OVERRIDE",
+            bindings_history.to_string_lossy().into_owned(),
         ),
         (
             "MAG_SETTINGS_PATH_OVERRIDE",
@@ -141,6 +146,14 @@ fn progress_projection(state: &serde_json::Value) -> serde_json::Value {
 
 fn layout_projection(state: &serde_json::Value) -> serde_json::Value {
     state["mag"]["SPELL_STRIPS"].clone()
+}
+
+fn bindings_history_projection(state: &serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "nodes": state["__stone_diag"]["MAG_REPLAY_BINDINGS_HISTORY_NODES"],
+        "current": state["__stone_diag"]["MAG_REPLAY_BINDINGS_HISTORY_CURRENT"],
+        "can_undo": state["__stone_diag"]["MAG_REPLAY_BINDINGS_HISTORY_CAN_UNDO"],
+    })
 }
 
 fn empty_progress_path(dir: &tempfile::TempDir) -> PathBuf {
@@ -172,6 +185,90 @@ fn known_progress_a() -> Vec<u8> {
         "spellbook": {"favorites": []}
     }))
     .expect("serialize known progress A")
+}
+
+#[test]
+fn binding_history_bootstrap_ignores_mutated_and_deleted_live_history() {
+    let dir = tempfile::tempdir().expect("fixture dir");
+    let progress = empty_progress_path(&dir);
+    let layout = dir.path().join("spellbook-layout.jsonl");
+    let settings = dir.path().join("settings.json");
+    let bindings = dir.path().join("bindings.json");
+    let bindings_history = dir.path().join("spellbook-bindings.jsonl");
+    let replay = dir.path().join("bindings-history.replay");
+
+    let mut seed_owned = fixture_env("bindings_history_seed", &progress, &layout, &settings).to_vec();
+    seed_owned.push(("MAG_BINDINGS_PATH_OVERRIDE", bindings.to_string_lossy().into_owned()));
+    let seed_env = env_refs(&seed_owned);
+    let seeded = run_mag(2, None, None, &seed_env);
+    assert_eq!(
+        bindings_history_projection(&seeded),
+        serde_json::json!({"nodes": 2, "current": 1, "can_undo": 1}),
+        "the seed must create a nondegenerate production binding history"
+    );
+    let parent_binding = seeded["__stone_diag"]["MAG_REPLAY_BINDINGS_HISTORY_PARENT_BINDING"]
+        .as_str().expect("parent binding label");
+    let current_binding = seeded["__stone_diag"]["MAG_REPLAY_BINDINGS_HISTORY_CURRENT_BINDING"]
+        .as_str().expect("current binding label");
+    assert!(!parent_binding.is_empty() && !current_binding.is_empty(),
+        "both binding-history nodes must decode to real binding projections");
+    assert_ne!(parent_binding, current_binding,
+        "the undo parent must be semantically distinct from the current binding");
+    let history_a = std::fs::read(&bindings_history).expect("read binding history A");
+    assert!(!history_a.is_empty(), "the seed must persist binding history A");
+
+    let mut record_owned = fixture_env("bindings_history_probe", &progress, &layout, &settings).to_vec();
+    record_owned.push(("MAG_BINDINGS_PATH_OVERRIDE", bindings.to_string_lossy().into_owned()));
+    let record_env = env_refs(&record_owned);
+    let recorded = run_mag(2, Some(&replay), None, &record_env);
+    assert_eq!(
+        bindings_history_projection(&recorded),
+        serde_json::json!({"nodes": 2, "current": 1, "can_undo": 1}),
+        "recording must load the seeded history and expose an undo parent"
+    );
+
+    let mutated = b"mutated binding history on disk\n".to_vec();
+    std::fs::write(&bindings_history, &mutated).expect("mutate binding history");
+    let replayed_mutated = run_mag(2, None, Some(&replay), &record_env);
+    assert_eq!(
+        bindings_history_projection(&replayed_mutated),
+        bindings_history_projection(&recorded),
+        "playback must use captured binding history A instead of mutated disk"
+    );
+    assert_eq!(
+        replayed_mutated["__stone_diag"]["STONE_SNAPSHOT_HISTORY_WRITES"]
+            .as_i64().unwrap_or(0),
+        0,
+        "playback must not enter the binding-history write seam"
+    );
+    assert_eq!(
+        std::fs::read(&bindings_history).expect("read mutated binding history"),
+        mutated,
+        "playback must leave mutated binding history byte-identical"
+    );
+
+    std::fs::remove_file(&bindings_history).expect("delete binding history");
+    let replayed_deleted = run_mag(2, None, Some(&replay), &record_env);
+    assert_eq!(
+        bindings_history_projection(&replayed_deleted),
+        bindings_history_projection(&recorded),
+        "playback must preserve captured binding history when the live file is absent"
+    );
+    assert_eq!(
+        replayed_deleted["__stone_diag"]["STONE_SNAPSHOT_HISTORY_WRITES"]
+            .as_i64().unwrap_or(0),
+        0,
+        "deleted-file playback must remain read-only"
+    );
+    assert!(!bindings_history.exists(), "playback must not recreate the deleted live history");
+
+    let text = std::fs::read_to_string(&replay).expect("read binding-history replay");
+    let key = "6d61672f7370656c6c626f6f6b2d62696e64696e67732e6a736f6e6c";
+    assert_eq!(
+        text.lines().filter(|line| line.starts_with(&format!("boot {key} "))).count(),
+        1,
+        "binding history must have one authoritative bootstrap entry\n{text}"
+    );
 }
 
 #[test]
@@ -246,8 +343,8 @@ fn repeated_settings_consumer_reuses_the_first_bootstrap_read() {
     );
     assert_eq!(
         diag["STONE_REPLAY_BOOTSTRAP_DISK_PROBES"].as_i64(),
-        Some(3),
-        "recording must probe each logical file once, including the absent progress and layout files: {diag}"
+        Some(4),
+        "recording must probe each logical file once, including the absent progress and histories: {diag}"
     );
     assert_eq!(
         diag["STONE_REPLAY_BOOTSTRAP_FILE_READS"].as_i64(),
@@ -292,7 +389,7 @@ fn repeated_settings_consumer_reuses_absent_bootstrap_without_second_disk_probe(
     );
     assert_eq!(
         diag["STONE_REPLAY_BOOTSTRAP_DISK_PROBES"].as_i64(),
-        Some(3),
+        Some(4),
         "each absent logical file must be probed only once: {diag}"
     );
     assert_eq!(
@@ -427,13 +524,14 @@ fn record_mutate_all_bootstrap_files_then_replay_without_persistence_writes() {
     let text = std::fs::read_to_string(&replay).expect("read all-bootstrap replay");
     assert_eq!(
         text.lines().filter(|line| line.starts_with("boot ")).count(),
-        3,
-        "all three logical bootstrap inputs must be present exactly once\n{text}"
+        4,
+        "all four logical bootstrap inputs must be present exactly once\n{text}"
     );
     for key in [
         "6d61672f70726f67726573732e6a736f6e",
         "6d61672f73657474696e67732e6a736f6e",
         "6d61672f7370656c6c626f6f6b2d6c61796f75742e6a736f6e6c",
+        "6d61672f7370656c6c626f6f6b2d62696e64696e67732e6a736f6e6c",
     ] {
         assert_eq!(
             text.lines()
@@ -461,7 +559,8 @@ fn progress_bootstrap_captures_absence_and_keeps_b_read_only() {
     let log = std::fs::read_to_string(&replay).expect("read replay");
     assert!(log.starts_with("STONE_REPLAY 8\n"), "recording must use v8\n{log}");
     let boot_lines: Vec<&str> = log.lines().filter(|line| line.starts_with("boot ")).collect();
-    assert_eq!(boot_lines.len(), 3, "the temporary current-settings path plus progress and layout must capture keys");
+    assert_eq!(boot_lines.len(), 4,
+        "the temporary current-settings path plus progress and both histories must capture keys");
     let first_tick = log.lines().position(|line| line.starts_with("t ")).expect("tick");
     let first_boot = log.lines().position(|line| line.starts_with("boot ")).expect("bootstrap");
     assert!(first_boot < first_tick, "bootstrap records must precede tick records");
@@ -652,8 +751,9 @@ fn legacy_replay_warns_about_each_missing_bootstrap_contract() {
     assert!(
         stderr.contains("legacy replay v6")
             && stderr.contains("mag/progress.json")
-            && stderr.contains("mag/spellbook-layout.jsonl"),
-        "legacy playback must name both missing contracts\n{stderr}"
+            && stderr.contains("mag/spellbook-layout.jsonl")
+            && stderr.contains("mag/spellbook-bindings.jsonl"),
+        "legacy playback must name every missing bootstrap contract\n{stderr}"
     );
 }
 
@@ -677,7 +777,7 @@ fn save_repro_retains_bootstrap_entries() {
         .expect("auto save repro must create a sibling");
     let text = std::fs::read_to_string(repro).expect("read saved repro");
     assert!(text.starts_with("STONE_REPLAY 8\n"), "repro must retain v8\n{text}");
-    assert_eq!(text.lines().filter(|line| line.starts_with("boot ")).count(), 3,
+    assert_eq!(text.lines().filter(|line| line.starts_with("boot ")).count(), 4,
         "save repro must retain all bootstrap entries");
 }
 
@@ -703,7 +803,7 @@ fn branch_rewrite_retains_bootstrap_entries_in_canonical_key_order() {
 
     let text = std::fs::read_to_string(&replay).expect("read branched replay");
     let boot_lines: Vec<&str> = text.lines().filter(|line| line.starts_with("boot ")).collect();
-    assert_eq!(boot_lines.len(), 3, "branch rewrite must retain all bootstrap entries");
+    assert_eq!(boot_lines.len(), 4, "branch rewrite must retain all bootstrap entries");
     let mut sorted = boot_lines.clone();
     sorted.sort_unstable();
     assert_eq!(boot_lines, sorted, "branch rewrite must emit bootstrap keys canonically");
