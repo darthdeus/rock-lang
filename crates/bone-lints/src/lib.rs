@@ -11,6 +11,7 @@ use bone_core::hir::{
 use bone_core::prelude::*;
 use bone_core::workspace::{BodyInference, BoundNext, BoundTree};
 use rock_core::errors::CompilerErrorLevel;
+use std::collections::BTreeSet;
 use std::time::Instant;
 
 /// An `unused-var` finding: a local binding that is never read.
@@ -372,11 +373,18 @@ pub struct LintCacheStats {
     pub full_lint_workspace_passes: usize,
     pub full_cache_reconstructions: usize,
     pub fresh_cached_finding_comparisons: usize,
+    pub reuse_totals_reads: usize,
+    pub output_refresh_requests: usize,
+    pub output_files_refreshed: usize,
+    pub output_owner_entries_visited: usize,
+    pub output_file_rows_read: usize,
     pub local_lint_derivation_ns: u128,
     pub global_lint_dependency_ns: u128,
     pub global_lint_derivation_ns: u128,
     pub suppression_filtering_ns: u128,
     pub suppression_filter_calls: usize,
+    pub suppression_source_scans: usize,
+    pub suppression_entry_parses: usize,
     timed: bool,
 }
 
@@ -413,11 +421,18 @@ impl LintCacheStats {
         self.full_lint_workspace_passes += other.full_lint_workspace_passes;
         self.full_cache_reconstructions += other.full_cache_reconstructions;
         self.fresh_cached_finding_comparisons += other.fresh_cached_finding_comparisons;
+        self.reuse_totals_reads += other.reuse_totals_reads;
+        self.output_refresh_requests += other.output_refresh_requests;
+        self.output_files_refreshed += other.output_files_refreshed;
+        self.output_owner_entries_visited += other.output_owner_entries_visited;
+        self.output_file_rows_read += other.output_file_rows_read;
         self.local_lint_derivation_ns += other.local_lint_derivation_ns;
         self.global_lint_dependency_ns += other.global_lint_dependency_ns;
         self.global_lint_derivation_ns += other.global_lint_derivation_ns;
         self.suppression_filtering_ns += other.suppression_filtering_ns;
         self.suppression_filter_calls += other.suppression_filter_calls;
+        self.suppression_source_scans += other.suppression_source_scans;
+        self.suppression_entry_parses += other.suppression_entry_parses;
     }
 }
 
@@ -461,7 +476,11 @@ struct CachedFileFindings {
     other_raw: Vec<Finding>,
     other: Vec<Finding>,
     suppression_fingerprint: u64,
+    suppressions: FxHashSet<(usize, &'static str)>,
     owner_order: Vec<BodyOwner>,
+    owner_rank: FxHashMap<BodyOwner, usize>,
+    active_flat_ranks: BTreeSet<usize>,
+    active_inference_ranks: BTreeSet<usize>,
 }
 
 #[derive(Clone, Debug)]
@@ -1194,11 +1213,20 @@ pub struct IncrementalLintCache {
     workspace_files: FxHashSet<Ustr>,
     report_files: FxHashSet<Ustr>,
     report_order: Vec<Ustr>,
+    report_rank: FxHashMap<Ustr, usize>,
+    active_output_ranks: BTreeSet<usize>,
     selection: Option<LintOptions>,
     files: FxHashMap<Ustr, CachedFileFindings>,
     global_raw: FxHashMap<Ustr, Vec<Finding>>,
     global: FxHashMap<Ustr, Vec<Finding>>,
     last_by_file: FxHashMap<Ustr, Vec<Finding>>,
+    flat_body_entries: usize,
+    inference_body_entries: usize,
+    flat_finding_entries: usize,
+    inference_finding_entries: usize,
+    action_population_file: Option<Ustr>,
+    global_span_owners: FxHashMap<Ustr, FxHashSet<Ustr>>,
+    global_referenced_files: FxHashMap<Ustr, FxHashSet<Ustr>>,
     dependency: LintDependencyIndex,
     timing_enabled: bool,
     body_transaction: Option<LintCacheTransaction>,
@@ -1325,13 +1353,82 @@ impl IncrementalLintCache {
     }
 
     pub fn invalidate_file(&mut self, file: Ustr) {
-        self.files.remove(&file);
+        if let Some(cached) = self.files.remove(&file) {
+            self.flat_body_entries = self.flat_body_entries.saturating_sub(cached.flat.len());
+            self.inference_body_entries =
+                self.inference_body_entries.saturating_sub(cached.inference.len());
+            self.flat_finding_entries = self
+                .flat_finding_entries
+                .saturating_sub(cached.flat.values().map(Vec::len).sum());
+            self.inference_finding_entries = self
+                .inference_finding_entries
+                .saturating_sub(cached.inference.values().map(Vec::len).sum());
+        }
         self.global.remove(&file);
         self.last_by_file.remove(&file);
+        if let Some(rank) = self.report_rank.get(&file) {
+            self.active_output_ranks.remove(rank);
+        }
     }
 
     pub fn findings_for_file(&self, file: Ustr) -> Vec<Finding> {
         self.last_by_file.get(&file).cloned().unwrap_or_default()
+    }
+
+    fn filter_cached_suppressions(
+        &self,
+        file: Ustr,
+        findings: Vec<Finding>,
+        stats: &mut LintCacheStats,
+    ) -> Vec<Finding> {
+        let cached = self
+            .files
+            .get(&file)
+            .expect("lint derivation requires a populated suppression cache");
+        filter_suppressed_findings_with_entries_timed(findings, &cached.suppressions, stats)
+    }
+
+    fn refresh_global_span_index(&mut self, output_files: &FxHashSet<Ustr>) {
+        for &output_file in output_files {
+            if let Some(old) = self.global_referenced_files.remove(&output_file) {
+                for referenced in old {
+                    if let Some(owners) = self.global_span_owners.get_mut(&referenced) {
+                        owners.remove(&output_file);
+                        if owners.is_empty() {
+                            self.global_span_owners.remove(&referenced);
+                        }
+                    }
+                }
+            }
+            let mut referenced = FxHashSet::default();
+            if let Some(findings) = self.global_raw.get(&output_file) {
+                for finding in findings {
+                    referenced.insert(finding.error.location.file);
+                    referenced.extend(finding.error.labels.iter().map(|label| label.span.file));
+                }
+            }
+            for file in &referenced {
+                self.global_span_owners.entry(*file).or_default().insert(output_file);
+            }
+            if !referenced.is_empty() {
+                self.global_referenced_files.insert(output_file, referenced);
+            }
+        }
+    }
+
+    fn refresh_active_owner_ranks(cached: &mut CachedFileFindings) {
+        cached.active_flat_ranks = cached
+            .flat
+            .iter()
+            .filter(|(_, findings)| !findings.is_empty())
+            .filter_map(|(owner, _)| cached.owner_rank.get(owner).copied())
+            .collect();
+        cached.active_inference_ranks = cached
+            .inference
+            .iter()
+            .filter(|(_, findings)| !findings.is_empty())
+            .filter_map(|(owner, _)| cached.owner_rank.get(owner).copied())
+            .collect();
     }
 
     fn replace_unused_findings(
@@ -1394,10 +1491,12 @@ impl IncrementalLintCache {
             if self.dependency.reachable.contains(&(mid, fid)) || function.is_synthetic {
                 continue;
             }
-            let Some(source) = sources.get(&module.file).copied() else { continue };
+            if !sources.contains_key(&module.file) {
+                continue;
+            }
             let raw = Finding::of(&UnusedFn { name: function.name, span: function.name_span });
+            let kept = self.filter_cached_suppressions(module.file, vec![raw.clone()], stats);
             derived_raw.entry(module.file).or_default().push(raw.clone());
-            let kept = filter_suppressed_findings_timed(vec![raw], source, stats);
             stats.global_findings_derived += kept.len();
             derived.entry(module.file).or_default().extend(kept);
         }
@@ -1434,15 +1533,35 @@ impl IncrementalLintCache {
         for &file in files {
             let Some(source) = sources.get(&file).copied() else { continue };
             let Some(cached) = self.files.get_mut(&file) else { continue };
+            cached.suppressions = suppression_entries_for_cache(source, stats);
             let flat_raw = cached.flat_raw.clone();
             for (owner, raw) in flat_raw {
-                cached.flat.insert(owner, filter_suppressed_findings_timed(raw.clone(), source, stats));
+                cached.flat.insert(
+                    owner,
+                    filter_suppressed_findings_with_entries_timed(
+                        raw.clone(),
+                        &cached.suppressions,
+                        stats,
+                    ),
+                );
             }
             let inference_raw = cached.inference_raw.clone();
             for (owner, raw) in inference_raw {
-                cached.inference.insert(owner, filter_suppressed_findings_timed(raw.clone(), source, stats));
+                cached.inference.insert(
+                    owner,
+                    filter_suppressed_findings_with_entries_timed(
+                        raw.clone(),
+                        &cached.suppressions,
+                        stats,
+                    ),
+                );
             }
-            cached.other = filter_suppressed_findings_timed(cached.other_raw.clone(), source, stats);
+            cached.other = filter_suppressed_findings_with_entries_timed(
+                cached.other_raw.clone(),
+                &cached.suppressions,
+                stats,
+            );
+            Self::refresh_active_owner_ranks(cached);
             cached.suppression_fingerprint = suppression_fingerprint(source);
             if let Some(raw) = self.global_raw.get(&file) {
                 self.global.insert(file, filter_suppressed_findings_timed(raw.clone(), source, stats));
@@ -1474,27 +1593,23 @@ impl IncrementalLintCache {
         if let Some(invalidation) = invalidation {
             locations.extend(invalidation.locations.iter().copied());
         }
-        if invalidation.is_some() {
-            for findings in self.global.values_mut() {
-                findings.retain(|finding| finding.lint != ACTION_CALLERS);
+        let population_file = invalidation.is_some().then(|| self.action_population_file.take()).flatten();
+        let mut removal_files = locations.iter().map(|(file, _)| *file).collect::<FxHashSet<_>>();
+        removal_files.extend(population_file);
+        for file in removal_files {
+            if let Some(findings) = self.global.get_mut(&file) {
+                findings.retain(|finding| {
+                    finding.lint != ACTION_CALLERS
+                        || (population_file != Some(file)
+                            && !locations.contains(&(file, finding_offset(finding))))
+                });
             }
-            for findings in self.global_raw.values_mut() {
-                findings.retain(|finding| finding.lint != ACTION_CALLERS);
-            }
-        } else {
-            for file in locations.iter().map(|(file, _)| *file).collect::<FxHashSet<_>>() {
-                if let Some(findings) = self.global.get_mut(&file) {
-                    findings.retain(|finding| {
-                        finding.lint != ACTION_CALLERS
-                            || !locations.contains(&(file, finding_offset(finding)))
-                    });
-                }
-                if let Some(findings) = self.global_raw.get_mut(&file) {
-                    findings.retain(|finding| {
-                        finding.lint != ACTION_CALLERS
-                            || !locations.contains(&(file, finding_offset(finding)))
-                    });
-                }
+            if let Some(findings) = self.global_raw.get_mut(&file) {
+                findings.retain(|finding| {
+                    finding.lint != ACTION_CALLERS
+                        || (population_file != Some(file)
+                            && !locations.contains(&(file, finding_offset(finding))))
+                });
             }
         }
 
@@ -1503,17 +1618,18 @@ impl IncrementalLintCache {
             if let Some(module) = user_modules(ws, warm).find(|module| is_production_mag_module(module.file)) {
                 if let Some((_, function)) = module.functions.iter().next() {
                     let file = module.file;
-                    if let Some(source) = sources.get(&file).copied() {
+                    if sources.contains_key(&file) {
                         let raw = Finding::of(&ActionCallerGap {
                             action: Ustr::from("<none>"),
                             file,
                             span: function.span,
                             population_empty: true,
                         });
+                        let kept = self.filter_cached_suppressions(file, vec![raw.clone()], stats);
                         self.global_raw.entry(file).or_default().push(raw.clone());
-                        let kept = filter_suppressed_findings_timed(vec![raw], source, stats);
                         stats.global_findings_derived += kept.len();
                         self.global.entry(file).or_default().extend(kept);
+                        self.action_population_file = Some(file);
                         files.insert(file);
                     }
                 }
@@ -1534,15 +1650,17 @@ impl IncrementalLintCache {
             let Some(&(file, span)) = self.dependency.action_declarations.get(&action) else {
                 continue;
             };
-            let Some(source) = sources.get(&file).copied() else { continue };
+            if !sources.contains_key(&file) {
+                continue;
+            }
             let raw = Finding::of(&ActionCallerGap {
                 action,
                 file,
                 span,
                 population_empty: false,
             });
+            let kept = self.filter_cached_suppressions(file, vec![raw.clone()], stats);
             self.global_raw.entry(file).or_default().push(raw.clone());
-            let kept = filter_suppressed_findings_timed(vec![raw], source, stats);
             stats.global_findings_derived += kept.len();
             self.global.entry(file).or_default().extend(kept);
             files.insert(file);
@@ -1564,17 +1682,19 @@ impl IncrementalLintCache {
         invalidation: &SiblingInvalidation,
         stats: &mut LintCacheStats,
     ) {
-        for findings in self.global.values_mut() {
-            findings.retain(|finding| {
-                finding.lint != BACKEND_SIBLING_MISMATCH
-                    || !invalidation.locations.contains(&(finding.file(), finding_offset(finding)))
-            });
-        }
-        for findings in self.global_raw.values_mut() {
-            findings.retain(|finding| {
-                finding.lint != BACKEND_SIBLING_MISMATCH
-                    || !invalidation.locations.contains(&(finding.file(), finding_offset(finding)))
-            });
+        for file in invalidation.locations.iter().map(|(file, _)| *file).collect::<FxHashSet<_>>() {
+            if let Some(findings) = self.global.get_mut(&file) {
+                findings.retain(|finding| {
+                    finding.lint != BACKEND_SIBLING_MISMATCH
+                        || !invalidation.locations.contains(&(file, finding_offset(finding)))
+                });
+            }
+            if let Some(findings) = self.global_raw.get_mut(&file) {
+                findings.retain(|finding| {
+                    finding.lint != BACKEND_SIBLING_MISMATCH
+                        || !invalidation.locations.contains(&(file, finding_offset(finding)))
+                });
+            }
         }
 
         let mut files = FxHashSet::default();
@@ -1585,10 +1705,9 @@ impl IncrementalLintCache {
                 if !sources.contains_key(&file) {
                     continue;
                 }
+                let kept = self.filter_cached_suppressions(file, vec![raw.clone()], stats);
                 files.insert(file);
                 self.global_raw.entry(file).or_default().push(raw.clone());
-                let source = sources.get(&file).copied().unwrap_or("");
-                let kept = filter_suppressed_findings_timed(vec![raw], source, stats);
                 stats.global_findings_derived += kept.len();
                 self.global.entry(file).or_default().extend(kept);
             }
@@ -1653,6 +1772,31 @@ impl IncrementalLintCache {
             return (findings, stats);
         }
 
+        let missing_cache_files: FxHashSet<Ustr> = change
+            .changed_files
+            .iter()
+            .copied()
+            .filter(|file| !self.files.contains_key(file))
+            .collect();
+        for &file in &missing_cache_files {
+            let Some(source) = sources.get(&file).copied() else { continue };
+            let mut cached = CachedFileFindings {
+                suppression_fingerprint: suppression_fingerprint(source),
+                suppressions: suppression_entries_for_cache(source, &mut stats),
+                ..Default::default()
+            };
+            if let Some(module) = ws.modules.iter().find(|module| module.file == file) {
+                cached.owner_order = module.bodies.keys().copied().collect();
+                cached.owner_rank = cached
+                    .owner_order
+                    .iter()
+                    .enumerate()
+                    .map(|(rank, &owner)| (owner, rank))
+                    .collect();
+            }
+            self.files.insert(file, cached);
+        }
+
         let suppression_changed_files: FxHashSet<Ustr> = change.changed_files.iter().copied().filter(|file| {
             let Some(source) = sources.get(file) else { return false };
             let old = self.files.get(file).map(|f| f.suppression_fingerprint);
@@ -1665,8 +1809,7 @@ impl IncrementalLintCache {
             && change.reinferred.is_empty()
             && change.edits.is_empty()
         {
-            let findings = self.rebuild_output(sources);
-            self.last_by_file = by_file_from_findings(&findings);
+            let findings = self.current_output(sources, &mut stats);
             self.mark_body_transaction_applied();
             return (findings, stats);
         }
@@ -1751,13 +1894,15 @@ impl IncrementalLintCache {
             let owners: Vec<BodyOwner> = module.bodies.keys().copied().collect();
             if flat_enabled
                 && !suppression_only
-                && !change.reinferred.iter().any(|(mid, _)| *mid == module.id)
+                && (missing_cache_files.contains(file)
+                    || !change.reinferred.iter().any(|(mid, _)| *mid == module.id))
             {
                 flat_targets.extend(owners.iter().copied().map(|owner| (module.id, owner)));
             }
             if inference_enabled
                 && !suppression_only
-                && !change.reinferred.iter().any(|(mid, _)| *mid == module.id)
+                && (missing_cache_files.contains(file)
+                    || !change.reinferred.iter().any(|(mid, _)| *mid == module.id))
             {
                 inference_targets.extend(owners.into_iter().map(|owner| (module.id, owner)));
             }
@@ -1774,19 +1919,38 @@ impl IncrementalLintCache {
         let flat_target_owners = flat_targets.clone();
         let inference_target_owners = inference_targets.clone();
 
-        let total_flat_bodies = self.files.values().map(|file| file.flat.len()).sum::<usize>();
-        let total_inference_bodies =
-            self.files.values().map(|file| file.inference.len()).sum::<usize>();
-        let total_flat_findings = self
-            .files
-            .values()
-            .map(|file| file.flat.values().map(Vec::len).sum::<usize>())
-            .sum::<usize>();
-        let total_inference_findings = self
-            .files
-            .values()
-            .map(|file| file.inference.values().map(Vec::len).sum::<usize>())
-            .sum::<usize>();
+        let mut dirty_output_files = change.changed_files.clone();
+        dirty_output_files.extend(
+            flat_target_owners
+                .iter()
+                .chain(inference_target_owners.iter())
+                .map(|(mid, _)| ws.module(*mid).file),
+        );
+        dirty_output_files.extend(
+            affected_unused
+                .iter()
+                .map(|(mid, _)| ws.module(*mid).file),
+        );
+        if let Some(invalidation) = &unused_invalidation {
+            dirty_output_files.extend(invalidation.locations.iter().map(|(file, _)| *file));
+        }
+        dirty_output_files.extend(affected_actions.iter().filter_map(|action| {
+            self.dependency.action_declarations.get(action).map(|(file, _)| *file)
+        }));
+        if let Some(invalidation) = &action_invalidation {
+            dirty_output_files.extend(invalidation.locations.iter().map(|(file, _)| *file));
+            dirty_output_files.extend(self.action_population_file);
+        }
+        if let Some(invalidation) = &sibling_invalidation {
+            dirty_output_files.extend(invalidation.locations.iter().map(|(file, _)| *file));
+        }
+        dirty_output_files.extend(suppression_changed_files.iter().copied());
+
+        let total_flat_bodies = self.flat_body_entries;
+        let total_inference_bodies = self.inference_body_entries;
+        let total_flat_findings = self.flat_finding_entries;
+        let total_inference_findings = self.inference_finding_entries;
+        stats.reuse_totals_reads += 4;
         let targeted_flat_findings = flat_targets
             .iter()
             .filter_map(|(mid, owner)| self.files.get(&ws.module(*mid).file)?.flat.get(owner))
@@ -1797,16 +1961,14 @@ impl IncrementalLintCache {
             .filter_map(|(mid, owner)| self.files.get(&ws.module(*mid).file)?.inference.get(owner))
             .map(Vec::len)
             .sum::<usize>();
+        let mut flat_bodies_added = 0;
+        let mut flat_findings_removed = 0;
+        let mut flat_findings_added = 0;
         for (mid, owner) in flat_targets {
             let file = ws.module(mid).file;
             if !self.report_files.contains(&file) {
                 continue;
             }
-            let cached = self.files.entry(file).or_default();
-            if !cached.owner_order.contains(&owner) {
-                cached.owner_order.push(owner);
-            }
-            let source = sources.get(&file).copied().unwrap_or("");
             let Some(body) = ws.module(mid).bodies.get(&owner) else { continue };
             let mut raw = Vec::new();
             if sel.enabled(UNUSED_VAR) {
@@ -1817,19 +1979,42 @@ impl IncrementalLintCache {
             }
             stats.flat_body_requests += 1;
             stats.flat_findings_derived += raw.len();
-            cached.flat_raw.insert(owner, raw.clone());
-            cached.flat.insert(owner, filter_suppressed_findings_timed(raw, source, &mut stats));
+            let filtered = {
+                let suppressions = &self.files.entry(file).or_default().suppressions;
+                filter_suppressed_findings_with_entries_timed(raw.clone(), suppressions, &mut stats)
+            };
+            let cached = self.files.entry(file).or_default();
+            if !cached.owner_order.contains(&owner) {
+                cached.owner_rank.insert(owner, cached.owner_order.len());
+                cached.owner_order.push(owner);
+            }
+            cached.flat_raw.insert(owner, raw);
+            if !cached.flat.contains_key(&owner) {
+                flat_bodies_added += 1;
+            }
+            flat_findings_removed += cached.flat.get(&owner).map_or(0, Vec::len);
+            flat_findings_added += filtered.len();
+            cached.flat.insert(owner, filtered);
+            let rank = cached.owner_rank[&owner];
+            if cached.flat[&owner].is_empty() {
+                cached.active_flat_ranks.remove(&rank);
+            } else {
+                cached.active_flat_ranks.insert(rank);
+            }
         }
+        self.flat_body_entries += flat_bodies_added;
+        self.flat_finding_entries = self
+            .flat_finding_entries
+            .saturating_sub(flat_findings_removed)
+            + flat_findings_added;
+        let mut inference_bodies_added = 0;
+        let mut inference_findings_removed = 0;
+        let mut inference_findings_added = 0;
         for (mid, owner) in inference_targets {
             let file = ws.module(mid).file;
             if !self.report_files.contains(&file) {
                 continue;
             }
-            let cached = self.files.entry(file).or_default();
-            if !cached.owner_order.contains(&owner) {
-                cached.owner_order.push(owner);
-            }
-            let source = sources.get(&file).copied().unwrap_or("");
             let module = ws.module(mid);
             let Some(body) = module.bodies.get(&owner) else { continue };
             let inf = ws.inference(mid);
@@ -1858,9 +2043,34 @@ impl IncrementalLintCache {
             }
             stats.inference_body_requests += 1;
             stats.inference_findings_derived += raw.len();
-            cached.inference_raw.insert(owner, raw.clone());
-            cached.inference.insert(owner, filter_suppressed_findings_timed(raw, source, &mut stats));
+            let filtered = {
+                let suppressions = &self.files.entry(file).or_default().suppressions;
+                filter_suppressed_findings_with_entries_timed(raw.clone(), suppressions, &mut stats)
+            };
+            let cached = self.files.entry(file).or_default();
+            if !cached.owner_order.contains(&owner) {
+                cached.owner_rank.insert(owner, cached.owner_order.len());
+                cached.owner_order.push(owner);
+            }
+            cached.inference_raw.insert(owner, raw);
+            if !cached.inference.contains_key(&owner) {
+                inference_bodies_added += 1;
+            }
+            inference_findings_removed += cached.inference.get(&owner).map_or(0, Vec::len);
+            inference_findings_added += filtered.len();
+            cached.inference.insert(owner, filtered);
+            let rank = cached.owner_rank[&owner];
+            if cached.inference[&owner].is_empty() {
+                cached.active_inference_ranks.remove(&rank);
+            } else {
+                cached.active_inference_ranks.insert(rank);
+            }
         }
+        self.inference_body_entries += inference_bodies_added;
+        self.inference_finding_entries = self
+            .inference_finding_entries
+            .saturating_sub(inference_findings_removed)
+            + inference_findings_added;
         if let Some(started) = local_started {
             let suppression = stats
                 .suppression_filtering_ns
@@ -1918,11 +2128,22 @@ impl IncrementalLintCache {
             }
             shift_findings(&mut cached.other_raw, edit);
             stats.span_shifts += shift_findings(&mut cached.other, edit);
-            for findings in self.global.values_mut() {
-                stats.span_shifts += shift_findings(findings, edit);
-            }
-            for findings in self.global_raw.values_mut() {
-                shift_findings(findings, edit);
+            let global_owners = self
+                .global_span_owners
+                .get(&edit.file)
+                .cloned()
+                .unwrap_or_default();
+            for file in global_owners {
+                let shifted = self.global.get_mut(&file).map_or(0, |findings| {
+                    shift_findings(findings, edit)
+                });
+                stats.span_shifts += shifted;
+                if shifted > 0 {
+                    dirty_output_files.insert(file);
+                }
+                if let Some(findings) = self.global_raw.get_mut(&file) {
+                    shift_findings(findings, edit);
+                }
             }
         }
 
@@ -1957,10 +2178,11 @@ impl IncrementalLintCache {
                 action_invalidation.as_ref(),
                 &mut stats,
             );
+            dirty_output_files.extend(self.action_population_file);
         }
         if stats.global_passes == 0 {
             if let Some(invalidation) = sibling_invalidation {
-            self.replace_sibling_findings(ws, sources, &invalidation, &mut stats);
+                self.replace_sibling_findings(ws, sources, &invalidation, &mut stats);
             }
         }
         if let Some(started) = global_findings_started {
@@ -1971,16 +2193,45 @@ impl IncrementalLintCache {
                 started.elapsed().as_nanos().saturating_sub(suppression);
         }
         if !suppression_changed_files.is_empty() {
+            let before_flat = suppression_changed_files
+                .iter()
+                .filter_map(|file| self.files.get(file))
+                .map(|file| file.flat.values().map(Vec::len).sum::<usize>())
+                .sum::<usize>();
+            let before_inference = suppression_changed_files
+                .iter()
+                .filter_map(|file| self.files.get(file))
+                .map(|file| file.inference.values().map(Vec::len).sum::<usize>())
+                .sum::<usize>();
             self.refilter_suppression_files(&suppression_changed_files, sources, &mut stats);
+            let after_flat = suppression_changed_files
+                .iter()
+                .filter_map(|file| self.files.get(file))
+                .map(|file| file.flat.values().map(Vec::len).sum::<usize>())
+                .sum::<usize>();
+            let after_inference = suppression_changed_files
+                .iter()
+                .filter_map(|file| self.files.get(file))
+                .map(|file| file.inference.values().map(Vec::len).sum::<usize>())
+                .sum::<usize>();
+            self.flat_finding_entries =
+                self.flat_finding_entries.saturating_sub(before_flat) + after_flat;
+            self.inference_finding_entries = self
+                .inference_finding_entries
+                .saturating_sub(before_inference)
+                + after_inference;
         }
-        for findings in self.global.values_mut() {
-            sort_global_findings(findings);
+        for file in &dirty_output_files {
+            if let Some(findings) = self.global.get_mut(file) {
+                sort_global_findings(findings);
+            }
+            if let Some(findings) = self.global_raw.get_mut(file) {
+                sort_global_findings(findings);
+            }
         }
-        for findings in self.global_raw.values_mut() {
-            sort_global_findings(findings);
-        }
-        let findings = self.rebuild_output(sources);
-        self.last_by_file = by_file_from_findings(&findings);
+        self.refresh_global_span_index(&dirty_output_files);
+        self.refresh_output_files(&dirty_output_files, sources, &mut stats);
+        let findings = self.current_output(sources, &mut stats);
         self.mark_body_transaction_applied();
         (findings, stats)
     }
@@ -2008,10 +2259,18 @@ impl IncrementalLintCache {
             .filter(|module| sources.contains_key(&module.file))
             .map(|module| module.file)
             .collect();
+        self.report_rank = self
+            .report_order
+            .iter()
+            .enumerate()
+            .map(|(rank, &file)| (file, rank))
+            .collect();
         self.selection = Some(sel.clone());
         self.files.clear();
         self.global_raw.clear();
         self.global.clear();
+        self.global_span_owners.clear();
+        self.global_referenced_files.clear();
         self.dependency = LintDependencyIndex::build(ws, warm, sel.enabled(ACTION_CALLERS));
         stats.declarations_revisited += self.dependency.function_nodes.len();
         stats.sibling_groups_requested += self.dependency.sibling_groups.len();
@@ -2025,6 +2284,7 @@ impl IncrementalLintCache {
                 file,
                 CachedFileFindings {
                     suppression_fingerprint: suppression_fingerprint(source),
+                    suppressions: suppression_entries_for_cache(source, stats),
                     ..Default::default()
                 },
             );
@@ -2052,46 +2312,150 @@ impl IncrementalLintCache {
             }
         }
         for module in user_modules(ws, warm) {
-            let Some(file) = sources.get(&module.file) else { continue };
+            if !sources.contains_key(&module.file) {
+                continue;
+            }
             let cached = self.files.entry(module.file).or_default();
-            cached.suppression_fingerprint = suppression_fingerprint(file);
             cached.owner_order = module.bodies.keys().copied().collect();
+            cached.owner_rank = cached
+                .owner_order
+                .iter()
+                .enumerate()
+                .map(|(rank, &owner)| (owner, rank))
+                .collect();
             for owner in module.bodies.keys().copied() {
                 cached.flat_raw.entry(owner).or_default();
                 cached.inference_raw.entry(owner).or_default();
                 let flat = cached.flat_raw.get(&owner).cloned().unwrap_or_default();
                 let inference = cached.inference_raw.get(&owner).cloned().unwrap_or_default();
-                cached.flat.insert(owner, filter_suppressed_findings_timed(flat, file, stats));
-                cached.inference.insert(owner, filter_suppressed_findings_timed(inference, file, stats));
+                cached.flat.insert(
+                    owner,
+                    filter_suppressed_findings_with_entries_timed(
+                        flat,
+                        &cached.suppressions,
+                        stats,
+                    ),
+                );
+                cached.inference.insert(
+                    owner,
+                    filter_suppressed_findings_with_entries_timed(
+                        inference,
+                        &cached.suppressions,
+                        stats,
+                    ),
+                );
             }
-            cached.other = filter_suppressed_findings_timed(cached.other_raw.clone(), file, stats);
+            cached.other = filter_suppressed_findings_with_entries_timed(
+                cached.other_raw.clone(),
+                &cached.suppressions,
+                stats,
+            );
+            Self::refresh_active_owner_ranks(cached);
         }
         for (&file, raw) in &self.global_raw {
             let Some(source) = sources.get(&file).copied() else { continue };
             self.global.insert(file, filter_suppressed_findings_timed(raw.clone(), source, stats));
         }
+        self.action_population_file = self
+            .dependency
+            .action_declarations
+            .is_empty()
+            .then(|| {
+                self.global_raw.iter().find_map(|(&file, findings)| {
+                    findings.iter().any(|finding| finding.lint == ACTION_CALLERS).then_some(file)
+                })
+            })
+            .flatten();
+        let global_files = self.global_raw.keys().copied().collect();
+        self.refresh_global_span_index(&global_files);
+        self.flat_body_entries = self.files.values().map(|file| file.flat.len()).sum();
+        self.inference_body_entries = self.files.values().map(|file| file.inference.len()).sum();
+        self.flat_finding_entries = self
+            .files
+            .values()
+            .map(|file| file.flat.values().map(Vec::len).sum::<usize>())
+            .sum();
+        self.inference_finding_entries = self
+            .files
+            .values()
+            .map(|file| file.inference.values().map(Vec::len).sum::<usize>())
+            .sum();
         self.last_by_file = by_file_from_findings(&findings);
+        self.active_output_ranks = self
+            .last_by_file
+            .keys()
+            .filter_map(|file| self.report_rank.get(file).copied())
+            .collect();
         stats.full_rebuilds = 1;
         stats.full_lint_workspace_passes = 1;
         stats.full_cache_reconstructions = 1;
         findings
     }
 
-    fn rebuild_output(&self, sources: &FxHashMap<Ustr, &str>) -> Vec<Finding> {
+    fn refresh_output_files(
+        &mut self,
+        files: &FxHashSet<Ustr>,
+        sources: &FxHashMap<Ustr, &str>,
+        stats: &mut LintCacheStats,
+    ) {
+        stats.output_refresh_requests += 1;
+        for &file in files {
+            let rank = self.report_rank.get(&file).copied();
+            if !sources.contains_key(&file) {
+                self.last_by_file.remove(&file);
+                if let Some(rank) = rank {
+                    self.active_output_ranks.remove(&rank);
+                }
+                continue;
+            }
+            let Some(cached) = self.files.get(&file) else {
+                self.last_by_file.remove(&file);
+                if let Some(rank) = rank {
+                    self.active_output_ranks.remove(&rank);
+                }
+                continue;
+            };
+            stats.output_files_refreshed += 1;
+            let mut findings = Vec::new();
+            for rank in &cached.active_flat_ranks {
+                stats.output_owner_entries_visited += 1;
+                let owner = &cached.owner_order[*rank];
+                findings.extend(cached.flat.get(owner).cloned().unwrap_or_default());
+            }
+            for rank in &cached.active_inference_ranks {
+                stats.output_owner_entries_visited += 1;
+                let owner = &cached.owner_order[*rank];
+                findings.extend(cached.inference.get(owner).cloned().unwrap_or_default());
+            }
+            findings.extend(cached.other.clone());
+            findings.extend(self.global.get(&file).cloned().unwrap_or_default());
+            if findings.is_empty() {
+                self.last_by_file.remove(&file);
+                if let Some(rank) = rank {
+                    self.active_output_ranks.remove(&rank);
+                }
+            } else {
+                self.last_by_file.insert(file, findings);
+                if let Some(rank) = rank {
+                    self.active_output_ranks.insert(rank);
+                }
+            }
+        }
+    }
+
+    fn current_output(
+        &self,
+        sources: &FxHashMap<Ustr, &str>,
+        stats: &mut LintCacheStats,
+    ) -> Vec<Finding> {
         let mut out = Vec::new();
-        for file in &self.report_order {
+        for rank in &self.active_output_ranks {
+            stats.output_file_rows_read += 1;
+            let file = &self.report_order[*rank];
             if !sources.contains_key(file) {
                 continue;
             }
-            let Some(cached) = self.files.get(file) else { continue };
-            for owner in &cached.owner_order {
-                out.extend(cached.flat.get(owner).cloned().unwrap_or_default());
-            }
-            for owner in &cached.owner_order {
-                out.extend(cached.inference.get(owner).cloned().unwrap_or_default());
-            }
-            out.extend(cached.other.clone());
-            out.extend(self.global.get(file).cloned().unwrap_or_default());
+            out.extend(self.last_by_file.get(file).cloned().unwrap_or_default());
         }
         out
     }
@@ -2683,6 +3047,7 @@ fn filter_suppressed_findings_timed(
     source: &str,
     stats: &mut LintCacheStats,
 ) -> Vec<Finding> {
+    stats.suppression_source_scans += 1;
     if !stats.timed {
         return filter_suppressed_findings(findings, source);
     }
@@ -2693,14 +3058,22 @@ fn filter_suppressed_findings_timed(
     filtered
 }
 
-fn filter_suppressed_findings_census(
+fn filter_suppressed_findings_with_entries_timed(
     findings: Vec<Finding>,
-    source: &str,
-    census: Option<&mut LintCensus>,
+    allow: &FxHashSet<(usize, &'static str)>,
+    stats: &mut LintCacheStats,
 ) -> Vec<Finding> {
-    let raw = findings.len();
-    let started = std::time::Instant::now();
-    let mut allow: FxHashSet<(usize, &'static str)> = FxHashSet::default();
+    let started = stats.timed.then(Instant::now);
+    let filtered = filter_suppressed_findings_with_entries(findings, allow);
+    if let Some(started) = started {
+        stats.suppression_filtering_ns += started.elapsed().as_nanos();
+        stats.suppression_filter_calls += 1;
+    }
+    filtered
+}
+
+fn suppression_entries(source: &str) -> FxHashSet<(usize, &'static str)> {
+    let mut allow = FxHashSet::default();
     for (n, line) in source.lines().enumerate() {
         for &lint in KNOWN_LINTS {
             if parse_allow_comment(line, lint) {
@@ -2708,17 +3081,42 @@ fn filter_suppressed_findings_census(
             }
         }
     }
-    let filtered = if allow.is_empty() {
-        findings
-    } else {
-        findings
+    allow
+}
+
+fn suppression_entries_for_cache(
+    source: &str,
+    stats: &mut LintCacheStats,
+) -> FxHashSet<(usize, &'static str)> {
+    stats.suppression_entry_parses += 1;
+    suppression_entries(source)
+}
+
+fn filter_suppressed_findings_with_entries(
+    findings: Vec<Finding>,
+    allow: &FxHashSet<(usize, &'static str)>,
+) -> Vec<Finding> {
+    if allow.is_empty() {
+        return findings;
+    }
+    findings
         .into_iter()
         .filter(|f| {
             !allow.contains(&(f.line, f.lint))
                 && !(f.line > 0 && allow.contains(&(f.line - 1, f.lint)))
         })
         .collect()
-    };
+}
+
+fn filter_suppressed_findings_census(
+    findings: Vec<Finding>,
+    source: &str,
+    census: Option<&mut LintCensus>,
+) -> Vec<Finding> {
+    let raw = findings.len();
+    let started = std::time::Instant::now();
+    let allow = suppression_entries(source);
+    let filtered = filter_suppressed_findings_with_entries(findings, &allow);
     if let Some(census) = census {
         let family = &mut census.suppression;
         family.requests += 1;

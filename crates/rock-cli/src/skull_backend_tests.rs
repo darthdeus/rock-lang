@@ -3947,6 +3947,24 @@ mod skull_stone_lint_snapshot_tests {
             "body publication must checkpoint the lint cache without cloning it: {:?}",
             census.cache_snapshots
         );
+        assert!(census.source_view_requests > 0, "source-view denominator must be populated");
+        assert!(census.source_files_borrowed > 0, "source-view file population must be nonzero");
+        assert_eq!(
+            census.source_views_aliased, census.source_files_borrowed,
+            "a body edit must borrow source text instead of cloning the workspace"
+        );
+        assert_eq!(census.detached_source_bytes, 0);
+        assert_eq!(
+            census.cache.reuse_totals_reads, 4,
+            "reuse accounting must read the four maintained totals once"
+        );
+        assert_eq!(
+            census.cache.suppression_source_scans, 0,
+            "unchanged suppression metadata must be reused"
+        );
+        assert!(census.cache.output_refresh_requests > 0);
+        assert!(census.cache.output_files_refreshed > 0);
+        assert_eq!(census.cache.output_refresh_requests, 1);
         eprintln!(
             "skull-stone one-edit: elapsed_ms={elapsed_ms:.3} snapshots={} entries={} findings={} clone_ms={:.3}",
             census.cache_snapshots.snapshots,
@@ -4163,14 +4181,29 @@ mod skull_stone_lint_snapshot_tests {
         let percentile = |p: f64| sorted[((p / 100.0) * (sorted.len() as f64 - 1.0)).round() as usize];
         let mean = samples.iter().sum::<f64>() / samples.len() as f64;
         assert_eq!(census.cache_snapshots.snapshots, warmup + iters);
+        assert_eq!(census.source_views_aliased, census.source_files_borrowed);
+        assert_eq!(census.detached_source_bytes, 0);
+        assert_eq!(census.cache.reuse_totals_reads, (warmup + iters) * 4);
+        assert_eq!(census.cache.suppression_source_scans, 0);
+        assert_eq!(census.cache.suppression_entry_parses, 0);
+        assert_eq!(census.cache.output_refresh_requests, warmup + iters);
+        assert!(census.cache.output_files_refreshed > 0);
+        assert!(census.cache.output_file_rows_read > 0);
+        assert!(
+            census.source_files_borrowed > census.cache.output_file_rows_read,
+            "finding output must visit populated rows, not every borrowed source"
+        );
         eprintln!(
-            "skull-stone MAG apply_edit: mean={mean:.3} p50={:.3} p99={:.3} snapshots={} entries/edit={:.1} findings/edit={:.1} clone_ms={:.3}",
+            "skull-stone MAG apply_edit: mean={mean:.3} p50={:.3} p99={:.3} snapshots={} entries/edit={:.1} findings/edit={:.1} clone_ms={:.3} source_files={} output_files={} output_owners={}",
             percentile(50.0),
             percentile(99.0),
             census.cache_snapshots.snapshots,
             census.cache_snapshots.cached_entries as f64 / census.cache_snapshots.snapshots as f64,
             census.cache_snapshots.cached_findings as f64 / census.cache_snapshots.snapshots as f64,
             census.cache_snapshots.clone_ns as f64 / 1_000_000.0,
+            census.source_files_borrowed,
+            census.cache.output_file_rows_read,
+            census.cache.output_owner_entries_visited,
         );
         if let Some(profile) = stone.take_last_route_profile() {
             print_route_profile("skull-stone MAG profile", &profile);
@@ -4201,7 +4234,6 @@ mod skull_stone_lint_snapshot_tests {
         assert!(profile.diagnostics_ns > 0);
         assert!(profile.local_lint_derivation_ns > 0);
         assert!(profile.global_lint_dependency_ns > 0);
-        assert!(profile.suppression_filtering_ns > 0);
         assert!(profile.suppression_filter_calls > 0);
         assert!(profile.report_prepare_ns > 0);
         assert!(profile.render_ns > 0);

@@ -24,6 +24,10 @@ pub struct LintPassCensus {
     pub report_prepare_ns: u128,
     pub summary_sort_ns: u128,
     pub render_ns: u128,
+    pub source_view_requests: usize,
+    pub source_files_borrowed: usize,
+    pub source_views_aliased: usize,
+    pub detached_source_bytes: usize,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -86,6 +90,17 @@ fn record_report_census(report_prepare_ns: u128, summary_sort_ns: u128, render_n
     census.render_ns += render_ns;
 }
 
+fn record_source_view(files: usize, aliased: usize, detached_bytes: usize) {
+    if !census_enabled() {
+        return;
+    }
+    let mut census = lint_census();
+    census.source_view_requests += 1;
+    census.source_files_borrowed += files;
+    census.source_views_aliased += aliased;
+    census.detached_source_bytes += detached_bytes;
+}
+
 pub fn take_census() -> Option<LintPassCensus> {
     if !census_enabled() {
         return None;
@@ -144,19 +159,29 @@ pub fn print_census(census: &LintPassCensus) {
         cache.sibling_groups_revisited,
     );
     eprintln!(
-        "    cache action/suppression: action_declarations_requested={} action_declarations_revisited={} action_callers_requested={} action_callers_revisited={} suppression_files_requested={} suppression_files_refiltered={}",
+        "    cache action/suppression: action_declarations_requested={} action_declarations_revisited={} action_callers_requested={} action_callers_revisited={} suppression_files_requested={} suppression_files_refiltered={} suppression_source_scans={} suppression_entry_parses={}",
         cache.action_declarations_requested,
         cache.action_declarations_revisited,
         cache.action_callers_requested,
         cache.action_callers_revisited,
         cache.suppression_files_requested,
         cache.suppression_files_refiltered,
+        cache.suppression_source_scans,
+        cache.suppression_entry_parses,
     );
     eprintln!(
         "    cache validation: full_lint_workspace_passes={} full_cache_reconstructions={} fresh_cached_finding_comparisons={}",
         cache.full_lint_workspace_passes,
         cache.full_cache_reconstructions,
         cache.fresh_cached_finding_comparisons,
+    );
+    eprintln!(
+        "    cache locality: reuse_totals_reads={} output_refresh_requests={} output_files_refreshed={} output_owners_visited={} output_file_rows_read={}",
+        cache.reuse_totals_reads,
+        cache.output_refresh_requests,
+        cache.output_files_refreshed,
+        cache.output_owner_entries_visited,
+        cache.output_file_rows_read,
     );
     let snapshots = &census.cache_snapshots;
     eprintln!(
@@ -178,6 +203,13 @@ pub fn print_census(census: &LintPassCensus) {
         census.report_prepare_ns as f64 / 1_000_000.0,
         census.summary_sort_ns as f64 / 1_000_000.0,
         census.render_ns as f64 / 1_000_000.0,
+    );
+    eprintln!(
+        "    source view: requests={} files={} aliased={} detached_bytes={}",
+        census.source_view_requests,
+        census.source_files_borrowed,
+        census.source_views_aliased,
+        census.detached_source_bytes,
     );
 }
 
@@ -276,24 +308,26 @@ pub(crate) fn rollback_build_lints_cached(
     root: &Path,
     scope: Scope,
 ) -> Result<(), String> {
-    let texts = source_texts(sources);
-    let warm = warm_module_ids(ws, &texts);
-    let is_bin = scope == Scope::WholeProject && rock_host::stick::StickConfig::is_bin_at(root);
-    let owned = owned_files(&texts, root);
-    let owned_sources: FxHashMap<Ustr, &str> = texts
-        .iter()
-        .filter(|(file, _)| owned.contains(*file))
-        .map(|(&file, text)| (file, text.as_str()))
-        .collect();
-    let stats = cache.rollback_body_transaction(
-        ws,
-        &warm,
-        is_bin,
-        &owned_sources,
-        &bone_lints::LintOptions::default(),
-    )?;
-    record_lint_cache_stats(stats);
-    Ok(())
+    with_source_texts(sources, |texts| {
+        let warm = warm_module_ids(ws, texts);
+        let is_bin =
+            scope == Scope::WholeProject && rock_host::stick::StickConfig::is_bin_at(root);
+        let owned = owned_files(texts, root);
+        let owned_sources: FxHashMap<Ustr, &str> = texts
+            .iter()
+            .filter(|(file, _)| owned.contains(*file))
+            .map(|(&file, &text)| (file, text))
+            .collect();
+        let stats = cache.rollback_body_transaction(
+            ws,
+            &warm,
+            is_bin,
+            &owned_sources,
+            &bone_lints::LintOptions::default(),
+        )?;
+        record_lint_cache_stats(stats);
+        Ok(())
+    })
 }
 
 pub(crate) fn run_build_lints_cached_timed(
@@ -317,56 +351,59 @@ fn run_build_lints_cached_inner(
     change: &bone_lints::LintCacheUpdate,
     mut timing: Option<&mut LintRouteTiming>,
 ) -> Vec<CompilerError> {
-    let texts = source_texts(sources);
-    let warm = warm_module_ids(ws, &texts);
-    let is_bin = scope == Scope::WholeProject && rock_host::stick::StickConfig::is_bin_at(root);
-    let owned = owned_files(&texts, root);
-    let owned_sources: FxHashMap<Ustr, &str> = texts
-        .iter()
-        .filter(|(file, _)| owned.contains(*file))
-        .map(|(&file, text)| (file, text.as_str()))
-        .collect();
-    let timed = timing.is_some();
-    let (found, stats) = if timed {
-        cache.update_timed(
-            ws,
-            &warm,
-            is_bin,
-            &owned_sources,
-            &bone_lints::LintOptions::default(),
-            change,
-        )
-    } else {
-        cache.update(
-            ws,
-            &warm,
-            is_bin,
-            &owned_sources,
-            &bone_lints::LintOptions::default(),
-            change,
-        )
-    };
+    let (found, stats) = with_source_texts(sources, |texts| {
+        let warm = warm_module_ids(ws, texts);
+        let is_bin =
+            scope == Scope::WholeProject && rock_host::stick::StickConfig::is_bin_at(root);
+        let owned = owned_files(texts, root);
+        let owned_sources: FxHashMap<Ustr, &str> = texts
+            .iter()
+            .filter(|(file, _)| owned.contains(*file))
+            .map(|(&file, &text)| (file, text))
+            .collect();
+        let timed = timing.is_some();
+        let (found, stats) = if timed {
+            cache.update_timed(
+                ws,
+                &warm,
+                is_bin,
+                &owned_sources,
+                &bone_lints::LintOptions::default(),
+                change,
+            )
+        } else {
+            cache.update(
+                ws,
+                &warm,
+                is_bin,
+                &owned_sources,
+                &bone_lints::LintOptions::default(),
+                change,
+            )
+        };
+        if census_enabled() && stats.full_rebuilds > 0 {
+            let (ignored, census) = bone_lints::lint_workspace_with_census(
+                ws,
+                &warm,
+                is_bin,
+                &owned_sources,
+                &bone_lints::LintOptions::default(),
+            );
+            debug_assert_eq!(
+                ignored.iter().map(|f| (f.lint, f.error.message.as_str())).collect::<Vec<_>>(),
+                found.iter().map(|f| (f.lint, f.error.message.as_str())).collect::<Vec<_>>(),
+                "census oracle must match cached full rebuild",
+            );
+            record_lint_census(census);
+        }
+        (found, stats)
+    });
     if let Some(timing) = timing.as_deref_mut() {
         timing.local_lint_derivation_ns += stats.local_lint_derivation_ns;
         timing.global_lint_dependency_ns += stats.global_lint_dependency_ns;
         timing.global_lint_derivation_ns += stats.global_lint_derivation_ns;
         timing.suppression_filtering_ns += stats.suppression_filtering_ns;
         timing.suppression_filter_calls += stats.suppression_filter_calls;
-    }
-    if census_enabled() && stats.full_rebuilds > 0 {
-        let (ignored, census) = bone_lints::lint_workspace_with_census(
-            ws,
-            &warm,
-            is_bin,
-            &owned_sources,
-            &bone_lints::LintOptions::default(),
-        );
-        debug_assert_eq!(
-            ignored.iter().map(|f| (f.lint, f.error.message.as_str())).collect::<Vec<_>>(),
-            found.iter().map(|f| (f.lint, f.error.message.as_str())).collect::<Vec<_>>(),
-            "census oracle must match cached full rebuild",
-        );
-        record_lint_census(census);
     }
     record_lint_cache_stats(stats);
     report_timed(found, sources, root, policy(), timing)
@@ -477,33 +514,33 @@ pub fn findings_with(
     scope: Scope,
     sel: &bone_lints::LintOptions,
 ) -> Vec<bone_lints::Finding> {
-    let texts = source_texts(sources);
-    let warm = warm_module_ids(ws, &texts);
-    let is_bin =
-        scope == Scope::WholeProject && rock_host::stick::StickConfig::is_bin_at(root);
-    // The REPORT set: this project's own files. A `stick.toml` DEPENDENCY
-    // (`stone/engine` under a game) is scanned but never reported on -- its code
-    // is not the author's to fix here, and a consumer must not fail a build on a
-    // dependency's findings. Scanned rather than warm: an engine body calling
-    // into game code is a real reachability edge, and dropping it would
-    // false-flag the game's callbacks as dead. Restricting the set also keeps
-    // the pass off the compile hot path -- a dependency's bodies are never
-    // walked for the per-body lints.
-    let owned = owned_files(&texts, root);
-    let report: FxHashMap<Ustr, &str> = texts
-        .iter()
-        .filter(|(file, _)| owned.contains(*file))
-        .map(|(&file, text)| (file, text.as_str()))
-        .collect();
-    if census_enabled() {
-        let (findings, census) = bone_lints::lint_workspace_with_census(
-            ws, &warm, is_bin, &report, sel,
-        );
-        record_lint_census(census);
-        findings
-    } else {
-        bone_lints::lint_workspace(ws, &warm, is_bin, &report, sel)
-    }
+    with_source_texts(sources, |texts| {
+        let warm = warm_module_ids(ws, texts);
+        let is_bin =
+            scope == Scope::WholeProject && rock_host::stick::StickConfig::is_bin_at(root);
+        // The REPORT set: this project's own files. A `stick.toml` DEPENDENCY
+        // (`stone/engine` under a game) is scanned but never reported on -- its code
+        // is not the author's to fix here, and a consumer must not fail a build on a
+        // dependency's findings. Scanned rather than warm: an engine body calling
+        // into game code is a real reachability edge, and dropping it would
+        // false-flag the game's callbacks as dead. Restricting the set also keeps
+        // the pass off the compile hot path -- a dependency's bodies are never
+        // walked for the per-body lints.
+        let owned = owned_files(texts, root);
+        let report: FxHashMap<Ustr, &str> = texts
+            .iter()
+            .filter(|(file, _)| owned.contains(*file))
+            .map(|(&file, &text)| (file, text))
+            .collect();
+        if census_enabled() {
+            let (findings, census) =
+                bone_lints::lint_workspace_with_census(ws, &warm, is_bin, &report, sel);
+            record_lint_census(census);
+            findings
+        } else {
+            bone_lints::lint_workspace(ws, &warm, is_bin, &report, sel)
+        }
+    })
 }
 
 /// The files a lint invocation REPORTS on: this project's own, never a
@@ -514,10 +551,10 @@ pub fn findings_with(
 /// every project that merely DEPENDS on an arena consumer would report a
 /// nonzero population it does not own.
 pub fn report_files(sources: &SourceFiles, root: &Path) -> FxHashSet<Ustr> {
-    owned_files(&source_texts(sources), root)
+    with_source_texts(sources, |texts| owned_files(texts, root))
 }
 
-fn owned_files(texts: &FxHashMap<Ustr, String>, root: &Path) -> FxHashSet<Ustr> {
+fn owned_files(texts: &FxHashMap<Ustr, &str>, root: &Path) -> FxHashSet<Ustr> {
     let owned = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     texts.keys().copied().filter(|f| Path::new(f.as_str()).starts_with(&owned)).collect()
 }
@@ -555,33 +592,34 @@ pub fn unused_fns_under(
     consumer: &Path,
     report_root: &Path,
 ) -> Vec<bone_lints::Finding> {
-    let texts = source_texts(sources);
-    let warm = warm_module_ids(ws, &texts);
-    let is_bin = rock_host::stick::StickConfig::is_bin_at(consumer);
-    let by_file = bone_lints::workspace_findings_by_file(ws, &warm, is_bin);
-    let mut out = Vec::new();
-    for (file, findings) in by_file {
-        if !Path::new(file.as_str()).starts_with(report_root) {
-            continue;
+    with_source_texts(sources, |texts| {
+        let warm = warm_module_ids(ws, texts);
+        let is_bin = rock_host::stick::StickConfig::is_bin_at(consumer);
+        let by_file = bone_lints::workspace_findings_by_file(ws, &warm, is_bin);
+        let mut out = Vec::new();
+        for (file, findings) in by_file {
+            if !Path::new(file.as_str()).starts_with(report_root) {
+                continue;
+            }
+            let src = texts.get(&file).copied().unwrap_or("");
+            out.extend(
+                bone_lints::filter_suppressed_findings(findings, src)
+                    .into_iter()
+                    .filter(|f| f.lint == bone_lints::UNUSED_FN),
+            );
         }
-        let src = texts.get(&file).map(String::as_str).unwrap_or("");
-        out.extend(
-            bone_lints::filter_suppressed_findings(findings, src)
-                .into_iter()
-                .filter(|f| f.lint == bone_lints::UNUSED_FN),
-        );
-    }
-    out
+        out
+    })
 }
 
 /// The modules of `ws` this build does not own -- [`warm_module_ids`] for a
 /// caller holding only the `SourceFiles`. `rock lint` needs it to validate
 /// `--ignore-types` against the project's own type names.
 pub fn warm_modules(ws: &Workspace, sources: &SourceFiles) -> FxHashSet<ModuleId> {
-    warm_module_ids(ws, &source_texts(sources))
+    with_source_texts(sources, |texts| warm_module_ids(ws, texts))
 }
 
-fn warm_module_ids(ws: &Workspace, texts: &FxHashMap<Ustr, String>) -> FxHashSet<ModuleId> {
+fn warm_module_ids(ws: &Workspace, texts: &FxHashMap<Ustr, &str>) -> FxHashSet<ModuleId> {
     ws.modules
         .iter()
         .filter(|m| m.id != ModuleId::builtin() && !texts.contains_key(&m.file))
@@ -589,15 +627,30 @@ fn warm_module_ids(ws: &Workspace, texts: &FxHashMap<Ustr, String>) -> FxHashSet
         .collect()
 }
 
-fn source_texts(sources: &SourceFiles) -> FxHashMap<Ustr, String> {
-    sources
-        .files
+fn with_source_texts<R>(
+    sources: &SourceFiles,
+    use_texts: impl FnOnce(&FxHashMap<Ustr, &str>) -> R,
+) -> R {
+    let files = sources.files.iter().map(|file| file.borrow()).collect::<Vec<_>>();
+    let texts = files
         .iter()
-        .map(|f| {
-            let f = f.borrow();
-            (Ustr::from(&f.file.to_id_path()), f.contents.clone())
-        })
-        .collect()
+        .map(|file| (Ustr::from(&file.file.to_id_path()), file.contents.as_str()))
+        .collect::<FxHashMap<_, _>>();
+    if census_enabled() {
+        let mut aliased = 0;
+        let mut detached_bytes = 0;
+        for file in &files {
+            let key = Ustr::from(&file.file.to_id_path());
+            let text = texts.get(&key).copied().unwrap_or("");
+            if text.len() == file.contents.len() && text.as_ptr() == file.contents.as_ptr() {
+                aliased += 1;
+            } else {
+                detached_bytes += text.len();
+            }
+        }
+        record_source_view(texts.len(), aliased, detached_bytes);
+    }
+    use_texts(&texts)
 }
 
 #[cfg(test)]

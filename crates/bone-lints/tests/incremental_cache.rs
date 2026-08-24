@@ -235,6 +235,7 @@ fn production_only_cache_scans_but_does_not_report_test_files() {
     assert_eq!(shapes(&findings), shapes(&fresh));
     assert!(findings.iter().all(|f| f.file() != Ustr::from("<sim>")));
     assert!(stats.full_rebuilds > 0);
+    assert_eq!(stats.suppression_entry_parses, 1);
 }
 
 #[test]
@@ -434,6 +435,85 @@ fn suppression_add_and_remove_refilters_without_rederiving_findings() {
     assert!(shown.iter().any(|finding| finding.lint == UNUSED_VAR));
     assert_eq!(shown_stats.full_rebuilds, 0);
     assert_eq!(shown_stats.global_passes, 0);
+}
+
+#[test]
+fn invalidated_file_reloads_its_local_suppressions_before_body_derivation() {
+    let src = "fn main() {\n    // rock: allow(unused_var)\n    let unused = 1\n}\n";
+    let ws = workspace(src);
+    let file = Ustr::from(FILE);
+    let (mid, owner) = function_owner(&ws, "main");
+    let mut cache = IncrementalLintCache::default();
+    let (initial, _) = cache.update(
+        &ws,
+        &FxHashSet::default(),
+        true,
+        &sources(src),
+        &LintOptions::default(),
+        &LintCacheUpdate::full(),
+    );
+    assert!(initial.is_empty());
+
+    cache.invalidate_file(file);
+    let (cached, stats) = cache.update(
+        &ws,
+        &FxHashSet::default(),
+        true,
+        &sources(src),
+        &LintOptions::default(),
+        &LintCacheUpdate::body_only([file], [(mid, owner)], []),
+    );
+    let fresh = lint_workspace(
+        &ws,
+        &FxHashSet::default(),
+        true,
+        &sources(src),
+        &LintOptions::default(),
+    );
+    assert_eq!(shapes(&cached), shapes(&fresh));
+    assert!(cached.is_empty());
+    assert_eq!(stats.full_rebuilds, 0);
+    assert_eq!(stats.suppression_entry_parses, 1);
+}
+
+#[test]
+fn invalidated_file_reloads_suppressions_before_global_derivation() {
+    let old = "// rock: allow(unused_fn)\nfn helper() {}\nfn main() { helper() }\n";
+    let new = "// rock: allow(unused_fn)\nfn helper() {}\nfn main() {}\n";
+    let old_ws = workspace(old);
+    let new_ws = workspace(new);
+    let file = Ustr::from(FILE);
+    let (mid, owner) = function_owner(&new_ws, "main");
+    let mut cache = IncrementalLintCache::default();
+    cache.update(
+        &old_ws,
+        &FxHashSet::default(),
+        true,
+        &sources(old),
+        &LintOptions::default(),
+        &LintCacheUpdate::full(),
+    );
+
+    cache.invalidate_file(file);
+    let (cached, stats) = cache.update(
+        &new_ws,
+        &FxHashSet::default(),
+        true,
+        &sources(new),
+        &LintOptions::default(),
+        &LintCacheUpdate::body_only([file], [(mid, owner)], []),
+    );
+    let fresh = lint_workspace(
+        &new_ws,
+        &FxHashSet::default(),
+        true,
+        &sources(new),
+        &LintOptions::default(),
+    );
+    assert_eq!(shapes(&cached), shapes(&fresh));
+    assert!(cached.is_empty());
+    assert_eq!(stats.full_rebuilds, 0);
+    assert_eq!(stats.suppression_entry_parses, 1);
 }
 
 #[test]
@@ -758,6 +838,55 @@ fn action_declaration_removal_restores_the_empty_population() {
     assert!(cached[0].error.message.contains("no production Mag ACT_*"));
     assert_eq!(stats.full_rebuilds, 0);
     assert_eq!(stats.global_passes, 0);
+}
+
+#[test]
+fn action_population_elected_in_an_unchanged_file_is_published() {
+    let old_parts = [
+        ("mag/other.rock", "fn helper() {}\n"),
+        (
+            ACTION_FILE,
+            "global ACT_OLD: int = 1\nfn main() { let value = ACT_OLD }\n",
+        ),
+    ];
+    let new_parts = [
+        ("mag/other.rock", "fn helper() {}\n"),
+        (ACTION_FILE, "fn main() { let value = 0 }\n"),
+    ];
+    let old_ws = workspace_many(&old_parts);
+    let new_ws = workspace_many(&new_parts);
+    let selection = LintOptions::only([bone_lints::ACTION_CALLERS.to_owned()]);
+    let changed_file = Ustr::from(ACTION_FILE);
+    let (main_mid, main_owner) = function_owner_in(&new_ws, ACTION_FILE, "main");
+    let mut cache = IncrementalLintCache::default();
+    cache.update(
+        &old_ws,
+        &FxHashSet::default(),
+        true,
+        &sources_many(&old_parts),
+        &selection,
+        &LintCacheUpdate::full(),
+    );
+
+    let (cached, stats) = cache.update(
+        &new_ws,
+        &FxHashSet::default(),
+        true,
+        &sources_many(&new_parts),
+        &selection,
+        &LintCacheUpdate::body_only([changed_file], [(main_mid, main_owner)], []),
+    );
+    let fresh = lint_workspace(
+        &new_ws,
+        &FxHashSet::default(),
+        true,
+        &sources_many(&new_parts),
+        &selection,
+    );
+    assert_eq!(shapes(&cached), shapes(&fresh));
+    assert_eq!(cached.len(), 1);
+    assert_eq!(cached[0].file(), Ustr::from("mag/other.rock"));
+    assert_eq!(stats.full_rebuilds, 0);
 }
 
 #[test]
