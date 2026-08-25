@@ -49,6 +49,8 @@ mod expansion_admission;
 mod concrete_expansion;
 #[path = "enum_cdata.rs"]
 mod enum_cdata;
+#[path = "enum_flat_equality.rs"]
+mod enum_flat_equality;
 #[path = "enum_flat_field_spread.rs"]
 mod enum_flat_field_spread;
 #[path = "enum_payload_sroa.rs"]
