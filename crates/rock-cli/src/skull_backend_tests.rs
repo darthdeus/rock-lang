@@ -3181,7 +3181,7 @@ fn main() {}
         let v1 = harness.current_artifact();
         harness.replace_source(STATE_V2).expect("remove gamma and re-add alpha");
         let v2 = harness.current_artifact();
-        let output = harness.run_state_script(v1, v2);
+        let output = harness.session_state_script(v1, v2);
         assert_eq!(
             output,
             vec![
@@ -3382,7 +3382,7 @@ end
                 .collect()
         }
 
-        fn run_state_script(&self, v1: String, v2: String) -> Vec<String> {
+        fn session_state_script(&self, v1: String, v2: String) -> Vec<String> {
             let driver = r#"
 _G.HOT_RELOAD = true
 local function wire()

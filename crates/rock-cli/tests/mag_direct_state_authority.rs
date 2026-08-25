@@ -16,18 +16,22 @@ fn rock_sources(root: &Path, out: &mut Vec<PathBuf>) {
 }
 
 #[test]
-fn mag_has_no_runstate_projection_bridge_names() {
+fn mag_has_no_aggregate_projection_bridge_names() {
     let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
         .expect("rock workspace root");
     let mut sources = Vec::new();
     rock_sources(&repo.join("mag"), &mut sources);
-    let forbidden = ["run_projection_bind", "run_projection_capture", "MAG_BUILDING_RUN"];
+    let forbidden = [
+        ["run_projection", "_bind"].concat(),
+        ["run_projection", "_capture"].concat(),
+        ["MAG_BUILDING", "_RUN"].concat(),
+    ];
     let mut findings = Vec::new();
     for source in sources {
         let text = fs::read_to_string(&source).expect("read MAG source");
-        for name in forbidden {
+        for name in &forbidden {
             if text.contains(name) {
                 findings.push(format!("{}: {name}", source.display()));
             }
@@ -44,11 +48,11 @@ fn mag_uses_direct_session_state_without_a_run_root_or_accessor() {
         .expect("rock workspace root");
     let mut sources = Vec::new();
     rock_sources(&repo.join("mag"), &mut sources);
-    let run_state = ["Run", "State"].concat();
+    let aggregate_type = ["Run", "State"].concat();
     let run_accessor = ["mag", "_run", "_state"].concat();
     let forbidden = [
-        format!("struct {run_state}"),
-        format!("Scene<{run_state}>"),
+        format!("struct {aggregate_type}"),
+        format!("Scene<{aggregate_type}>"),
         ["MAG", "_ACTIVE", "_RUN"].concat(),
         ["mag", "_run", "_scene", "_for", "_access"].concat(),
         format!("fn {run_accessor}"),
