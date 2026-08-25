@@ -10,6 +10,14 @@ struct __DecoTarget {
     func: any,
 }
 
+struct ArtifactDefinition<T> {
+    catalog: string,
+    key: string,
+    name: string,
+    ordinal: int,
+    definition: T,
+}
+
 @pure @inline inline(lua) fn int(value: int) -> int = "return value"
 
 @pure fn int(value: float) -> int { return floor(value) as int }

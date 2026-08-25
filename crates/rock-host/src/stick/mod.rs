@@ -52,10 +52,20 @@ pub struct BuildVar {
     pub builtin: Option<String>,
     pub value: Option<String>,
     pub channels: Option<Vec<String>>,
+    /// Channels on which a failing `cmd` degrades to `default` with a warning
+    /// instead of failing the build. Per-channel on purpose: a credential a
+    /// development build can do without is one a release build cannot, and an
+    /// all-channel switch would let a retail artifact ship the empty default.
+    /// `validate_build` requires a `default` to fall back to and membership in
+    /// `channels`, so the declaration can never be inert.
+    pub optional_channels: Option<Vec<String>>,
     pub default: Option<String>,
     /// Hash the value into cache keys but never store it in plaintext in any
     /// on-disk artifact or manifest.
     pub secret: bool,
+    /// Explicitly declared metadata that may vary without changing executable
+    /// Artifact identity.
+    pub volatile: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -310,7 +320,7 @@ impl<'de> serde::Deserialize<'de> for BuildVar {
         impl<'de> serde::de::Visitor<'de> for Vis {
             type Value = BuildVar;
             fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                write!(f, "a literal string or a table with cmd/builtin/value/channels/default/secret")
+                write!(f, "a literal string or a table with cmd/builtin/value/channels/optional_channels/default/secret/volatile")
             }
             fn visit_str<E: serde::de::Error>(self, s: &str) -> Result<BuildVar, E> {
                 Ok(BuildVar { value: Some(s.to_string()), ..BuildVar::default() })
@@ -323,14 +333,16 @@ impl<'de> serde::Deserialize<'de> for BuildVar {
                         "builtin" => { var.builtin = Some(map.next_value()?); }
                         "value" => { var.value = Some(map.next_value()?); }
                         "channels" => { var.channels = Some(map.next_value()?); }
+                        "optional_channels" => { var.optional_channels = Some(map.next_value()?); }
                         "default" => { var.default = Some(map.next_value()?); }
                         "secret" => { var.secret = map.next_value()?; }
+                        "volatile" => { var.volatile = map.next_value()?; }
                         other => {
                             // Fail closed: a misspelled source key would leave the
                             // var sourceless and every build_var() reading it stale.
                             return Err(serde::de::Error::custom(format!(
                                 "unknown key `{other}` in [build.vars] entry; known keys: \
-                                 cmd, builtin, value, channels, default, secret"
+                                 cmd, builtin, value, channels, optional_channels, default, secret, volatile"
                             )));
                         }
                     }
@@ -1293,6 +1305,28 @@ mod tests {
             "[package]\nname = \"x\"\n[build.vars]\nX = { comand = \"echo hi\" }\n",
         ).expect_err("unknown var key must be rejected");
         assert!(format!("{err}").contains("comand"), "error names the bad key: {err}");
+    }
+
+    #[test]
+    fn build_var_volatile_metadata_is_explicit_and_typed() {
+        let cfg = StickConfig::new_from_str(
+            "[package]\nname = \"x\"\n[build.vars]\nCLOCK = { value = \"now\", volatile = true }\n",
+        ).expect("volatile declaration must parse");
+        assert!(cfg.build.as_ref().unwrap().vars["CLOCK"].volatile);
+        cfg.validate_build().expect("volatile declaration must validate");
+
+        let err = StickConfig::new_from_str(
+            "[package]\nname = \"x\"\n[build.vars]\nCLOCK = { value = \"now\", volatile = \"yes\" }\n",
+        ).expect_err("malformed volatile declaration must reject");
+        assert!(format!("{err}").contains("boolean"), "error explains the volatile type: {err}");
+    }
+
+    #[test]
+    fn build_var_unknown_metadata_cannot_disappear() {
+        let err = StickConfig::new_from_str(
+            "[package]\nname = \"x\"\n[build.vars]\nCLOCK = { value = \"now\", volatlie = true }\n",
+        ).expect_err("misspelled volatile declaration must reject");
+        assert!(format!("{err}").contains("volatlie"), "error names the bad key: {err}");
     }
 
     #[test]

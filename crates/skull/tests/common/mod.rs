@@ -76,6 +76,32 @@ pub fn emit_mir(src: &str) -> skull::mir_emit::MirEmit {
     skull::mir_emit::emit_workspace_mir(&ws, mid).expect("emit")
 }
 
+pub fn emit_mir_with_inputs(
+    src: &str,
+    inputs: bone_semantic::inference::ComptimeInputs,
+) -> skull::mir_emit::MirEmit {
+    let mut modules = STDLIB.clone();
+    modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
+    let mut ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
+    assert_no_bone_errors(&ws);
+    ws.comptime_inputs = inputs;
+    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
+    skull::mir_emit::emit_workspace_mir(&ws, mid).expect("emit")
+}
+
+pub fn try_emit_mir_with_inputs(
+    src: &str,
+    inputs: bone_semantic::inference::ComptimeInputs,
+) -> Result<skull::mir_emit::MirEmit, skull_parser::CompilerError> {
+    let mut modules = STDLIB.clone();
+    modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
+    let mut ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
+    assert_no_bone_errors(&ws);
+    ws.comptime_inputs = inputs;
+    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
+    skull::mir_emit::emit_workspace_mir(&ws, mid)
+}
+
 /// A workspace of `src` (the `<test>` module) over the real stdlib -- for tests
 /// that inspect stdlib declarations (e.g. `@intrinsic` annotations).
 pub fn ws_with_stdlib(src: &str) -> Workspace {
@@ -295,5 +321,23 @@ pub struct InlineOffGuard(#[allow(dead_code)] skull_transform::InlineOffGuard);
 impl InlineOffGuard {
     pub fn on() -> Self {
         InlineOffGuard(skull_transform::inline_off_guard())
+    }
+}
+
+pub struct AllocationReportGuard(#[allow(dead_code)] skull::allocation_report::Scope);
+
+impl AllocationReportGuard {
+    pub fn on() -> Self {
+        AllocationReportGuard(skull::allocation_report::scope(true))
+    }
+}
+
+pub struct AllocationActivationGuard(
+    #[allow(dead_code)] skull::allocation_report::ActivationScope,
+);
+
+impl AllocationActivationGuard {
+    pub fn on() -> Self {
+        AllocationActivationGuard(skull::allocation_report::activation_scope(true))
     }
 }

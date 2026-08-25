@@ -30,38 +30,40 @@ const __SCENE_DEAD: int = 4
 // incarnation's teardown actions.
 const __SCENE_DISCARDING: int = 5
 
-// The Session Scene registry: parallel columns indexed by Scene ID.
-//
-// `__SCENE_ROOTS` holds the typed root behind an any-compatible slot, published
-// only at the moment construction succeeds -- a Building entry's root is null,
-// so an unfinished Scene has nothing to look up even if its ID leaks.
-//
-// IDs are monotonic and never reused, which is what stops an escaped handle from
-// resolving into whatever is created next.
-@state(ownership=host_projection, world=exclude, realization=rebuild_host_projection)
-global __SCENE_ROOTS: [any?] = []
-@state(ownership=host_projection, world=exclude, realization=rebuild_host_projection)
-global __SCENE_STATES: [int] = []
-@state(ownership=host_projection, world=exclude, realization=rebuild_host_projection)
-global __SCENE_ARENA_IDS: [[int]] = []
-@state(ownership=host_projection, world=exclude, realization=rebuild_host_projection)
-global __SCENE_NEXT_ID: int = 0
+// The Session Scene registry: authoritative columns indexed by Scene ID. The
+// compiler records this nominal root in StateSchema so WorldImage can copy it
+// with the ordinary Session graph.
+struct SceneRegistry {
+    roots: [any?],
+    states: [int],
+    arena_ids: [[int]],
+    next_id: int,
+    closers: [[() -> ()]],
+    pending_close: [int],
+    root_type_key: [string],
+    root_type_bucket: [int],
+    type_keys: [string],
+    type_buckets: [[int]],
+    type_bucket_pos: [int],
+    type_bucket_lookup: Map<string, int>,
+    phase_bucket_lengths: [int],
+}
 
-// What this Scene must run before its rows go, in registration order: the
-// terminal half of ownership, for contents whose disposal is more than
-// releasing memory. A Scene-owned task has defers and an `on_killed` to fire;
-// a Scene-owned native resource (P5) has a handle to release. Both are the
-// same shape, so they share this column rather than growing a second ledger.
-@state(ownership=host_projection, world=exclude, realization=rebuild_host_projection)
-global __SCENE_CLOSERS: [[() -> ()]] = []
+@state(ownership=session, world=include, realization=fresh_session)
+global __SCENE_REGISTRY: SceneRegistry = SceneRegistry {
+    roots: [], states: [], arena_ids: [], next_id: 0, closers: [],
+    pending_close: [], root_type_key: [], root_type_bucket: [],
+    type_keys: [], type_buckets: [], type_bucket_pos: [],
+    type_bucket_lookup: map_new(), phase_bucket_lengths: [],
+}
 
-// Staging for the safe-point drain, not a second ownership system: every entry
-// here is a Scene whose registry state is already Closing.
-@state(ownership=host_projection, world=exclude, realization=rebuild_host_projection)
-global __SCENE_PENDING_CLOSE: [int] = []
+@scene_type_key
+inline(lua) fn __rock_scene_type_key<T>() -> string = """
+    error("__rock_scene_type_key must be compiler-expanded")
+"""
 
 fn __scene_state(scene_id: int) -> int {
-    let st = __SCENE_STATES.get(scene_id)
+    let st = __SCENE_REGISTRY.states.get(scene_id)
     if is_null(st) { return __SCENE_DEAD }
     return st.unwrap()
 }
@@ -70,9 +72,13 @@ fn __scene_state(scene_id: int) -> int {
 // by the typed wrapper below rather than inferred at the call site. A Building,
 // Closing or dead Scene answers null -- close takes effect for lookup
 // immediately, whatever the drain has done yet.
+//
+// `@nomangle`: called directly by name from compiler-synthesized Scene
+// lifecycle thunks (`crates/skull/src/mir_emit.rs`, `crates/skull-codegen-js/src/emit.rs`).
+@nomangle
 fn __scene_root_any(scene_id: int) -> any? {
     if __scene_state(scene_id) != __SCENE_LIVE { return null }
-    let slot = __SCENE_ROOTS.get(scene_id)
+    let slot = __SCENE_REGISTRY.roots.get(scene_id)
     if is_null(slot) { return null }
     return slot.unwrap()
 }
@@ -89,25 +95,102 @@ fn Scene<T>.is_live(scene) -> bool {
 }
 
 fn __scene_reserve() -> int {
-    if __SCENE_NEXT_ID == 0 {
+    if __SCENE_REGISTRY.next_id == 0 {
         let root_arenas: [int] = []
         let root_closers: [() -> ()] = []
-        vec_push(__SCENE_ROOTS, null)
-        vec_push(__SCENE_STATES, __SCENE_RESERVED)
-        vec_push(__SCENE_ARENA_IDS, root_arenas)
-        vec_push(__SCENE_CLOSERS, root_closers)
-        __SCENE_NEXT_ID = 1
+        vec_push(__SCENE_REGISTRY.roots, null)
+        vec_push(__SCENE_REGISTRY.states, __SCENE_RESERVED)
+        vec_push(__SCENE_REGISTRY.arena_ids, root_arenas)
+        vec_push(__SCENE_REGISTRY.closers, root_closers)
+        vec_push(__SCENE_REGISTRY.root_type_key, "")
+        vec_push(__SCENE_REGISTRY.root_type_bucket, -1)
+        vec_push(__SCENE_REGISTRY.type_bucket_pos, -1)
+        __SCENE_REGISTRY.next_id = 1
     }
-    let id = __SCENE_NEXT_ID
-    assert(id == vec_len(__SCENE_STATES), "Scene registry is not dense at id {id}")
-    __SCENE_NEXT_ID = id + 1
+    let id = __SCENE_REGISTRY.next_id
+    assert(id == vec_len(__SCENE_REGISTRY.states), "Scene registry is not dense at id {id}")
+    __SCENE_REGISTRY.next_id = id + 1
     let owned: [int] = []
     let closers: [() -> ()] = []
-    vec_push(__SCENE_ROOTS, null)
-    vec_push(__SCENE_STATES, __SCENE_BUILDING)
-    vec_push(__SCENE_ARENA_IDS, owned)
-    vec_push(__SCENE_CLOSERS, closers)
+    vec_push(__SCENE_REGISTRY.roots, null)
+    vec_push(__SCENE_REGISTRY.states, __SCENE_BUILDING)
+    vec_push(__SCENE_REGISTRY.arena_ids, owned)
+    vec_push(__SCENE_REGISTRY.closers, closers)
+    vec_push(__SCENE_REGISTRY.root_type_key, "")
+    vec_push(__SCENE_REGISTRY.root_type_bucket, -1)
+    vec_push(__SCENE_REGISTRY.type_bucket_pos, -1)
     return id
+}
+
+// Finds `type_key`'s bucket index, creating an empty bucket for a type seen
+// for the first time.
+fn __scene_type_bucket_index(type_key: string) -> int {
+    let existing = __SCENE_REGISTRY.type_bucket_lookup.get(type_key)
+    if !is_null(existing) {
+        return existing.unwrap()
+    }
+    let empty: [int] = []
+    let bucket_index = vec_len(__SCENE_REGISTRY.type_keys)
+    vec_push(__SCENE_REGISTRY.type_keys, type_key)
+    vec_push(__SCENE_REGISTRY.type_buckets, empty)
+    __SCENE_REGISTRY.type_bucket_lookup.insert(type_key, bucket_index)
+    return bucket_index
+}
+
+// Inserts `scene_id` into its type's live bucket, recording the bucket
+// position for O(1) swap-removal at retirement.
+fn __scene_type_bucket_insert(scene_id: int, type_key: string) {
+    __SCENE_REGISTRY.root_type_key.set(scene_id, type_key)
+    let bucket_index = __scene_type_bucket_index(type_key)
+    __SCENE_REGISTRY.root_type_bucket.set(scene_id, bucket_index)
+    let live = __SCENE_REGISTRY.type_buckets[bucket_index]
+    __SCENE_REGISTRY.type_bucket_pos.set(scene_id, vec_len(live))
+    vec_push(live, scene_id)
+}
+
+// Swap-removes `scene_id` from its type's live bucket. A no-op for a Scene
+// that never published a root (the reserved id 0, or an aborted `build`).
+fn __scene_type_bucket_remove(scene_id: int) {
+    let bucket_index = __SCENE_REGISTRY.root_type_bucket[scene_id]
+    if bucket_index < 0 { return }
+    let pos = __SCENE_REGISTRY.type_bucket_pos[scene_id]
+    if pos < 0 { return }
+    let live = __SCENE_REGISTRY.type_buckets[bucket_index]
+    let last_index = vec_len(live) - 1
+    let last_id = live[last_index]
+    live.set(pos, last_id)
+    __SCENE_REGISTRY.type_bucket_pos.set(last_id, pos)
+    live.pop()
+    __SCENE_REGISTRY.root_type_key.set(scene_id, "")
+    __SCENE_REGISTRY.root_type_bucket.set(scene_id, -1)
+    __SCENE_REGISTRY.type_bucket_pos.set(scene_id, -1)
+}
+
+@nomangle
+fn __scene_rebuild_type_buckets() {
+    let type_keys: [string] = []
+    let type_buckets: [[int]] = []
+    let type_bucket_pos: [int] = []
+    let root_type_bucket: [int] = []
+    let lookup: Map<string, int> = map_new()
+    __SCENE_REGISTRY.type_keys = type_keys
+    __SCENE_REGISTRY.type_buckets = type_buckets
+    __SCENE_REGISTRY.type_bucket_pos = type_bucket_pos
+    __SCENE_REGISTRY.root_type_bucket = root_type_bucket
+    __SCENE_REGISTRY.type_bucket_lookup = lookup
+    __SCENE_REGISTRY.phase_bucket_lengths = []
+    for i in 0..vec_len(__SCENE_REGISTRY.states) {
+        vec_push(__SCENE_REGISTRY.root_type_bucket, -1)
+        vec_push(__SCENE_REGISTRY.type_bucket_pos, -1)
+    }
+    for i in 0..vec_len(__SCENE_REGISTRY.states) {
+        if __SCENE_REGISTRY.states[i] == __SCENE_LIVE {
+            let key = __SCENE_REGISTRY.root_type_key.get(i)
+            if !is_null(key) && key.unwrap() != "" {
+                __scene_type_bucket_insert(i, key.unwrap())
+            }
+        }
+    }
 }
 
 // Releases everything one incarnation owns and marks it dead. Each owned Arena
@@ -123,21 +206,22 @@ fn __scene_reserve() -> int {
 // half-torn-down, which is the loud failure, not a swallowed one.
 fn __scene_retire(scene_id: int, graceful: bool) {
     if graceful {
-        let closers = __SCENE_CLOSERS[scene_id]
+        let closers = __SCENE_REGISTRY.closers[scene_id]
         for i in 0..vec_len(closers) {
             closers[i]()
         }
     }
     let no_closers: [() -> ()] = []
-    __SCENE_CLOSERS.set(scene_id, no_closers)
-    let owned = __SCENE_ARENA_IDS[scene_id]
+    __SCENE_REGISTRY.closers.set(scene_id, no_closers)
+    let owned = __SCENE_REGISTRY.arena_ids[scene_id]
     for i in 0..vec_len(owned) {
         __arena_destroy_id(scene_id, owned[i])
     }
     let empty: [int] = []
-    __SCENE_ARENA_IDS.set(scene_id, empty)
-    __SCENE_ROOTS.set(scene_id, null)
-    __SCENE_STATES.set(scene_id, __SCENE_DEAD)
+    __SCENE_REGISTRY.arena_ids.set(scene_id, empty)
+    __SCENE_REGISTRY.roots.set(scene_id, null)
+    __SCENE_REGISTRY.states.set(scene_id, __SCENE_DEAD)
+    __scene_type_bucket_remove(scene_id)
 }
 
 // Transactional construction. The Scene's identity exists before its Arenas do,
@@ -158,8 +242,10 @@ fn scene_create<T>(build: fn(SceneBuilder) -> T?) -> Scene<T>? {
         return null
     }
     let published: any = root.unwrap()
-    __SCENE_ROOTS.set(id, published)
-    __SCENE_STATES.set(id, __SCENE_LIVE)
+    __SCENE_REGISTRY.roots.set(id, published)
+    __SCENE_REGISTRY.states.set(id, __SCENE_LIVE)
+    let type_key = __rock_scene_type_key<T>()
+    __scene_type_bucket_insert(id, type_key)
     return Scene { _scene_id: id }
 }
 
@@ -172,7 +258,7 @@ fn SceneBuilder.arena<T>(builder) -> Arena<T> {
     assert(__scene_state(scene_id) == __SCENE_BUILDING,
         "SceneBuilder for scene {scene_id} is no longer constructing (its Scene published or aborted)")
     let arena: Arena<T> = __arena_new_owned(scene_id)
-    vec_push(__SCENE_ARENA_IDS[scene_id], arena._arena_id)
+    vec_push(__SCENE_REGISTRY.arena_ids[scene_id], arena._arena_id)
     return arena
 }
 
@@ -184,7 +270,7 @@ fn SceneBuilder.on_close(builder, action: () -> ()) {
     let scene_id = builder._scene_id
     assert(__scene_state(scene_id) == __SCENE_BUILDING,
         "SceneBuilder for scene {scene_id} is no longer constructing (its Scene published or aborted)")
-    vec_push(__SCENE_CLOSERS[scene_id], action)
+    vec_push(__SCENE_REGISTRY.closers[scene_id], action)
 }
 
 // Requests closure. True on the first call for a live Scene, false for a repeat
@@ -193,8 +279,8 @@ fn SceneBuilder.on_close(builder, action: () -> ()) {
 fn scene_close<T>(scene: Scene<T>) -> bool {
     let id = scene._scene_id
     if __scene_state(id) != __SCENE_LIVE { return false }
-    __SCENE_STATES.set(id, __SCENE_CLOSING)
-    vec_push(__SCENE_PENDING_CLOSE, id)
+    __SCENE_REGISTRY.states.set(id, __SCENE_CLOSING)
+    vec_push(__SCENE_REGISTRY.pending_close, id)
     return true
 }
 
@@ -211,8 +297,8 @@ fn scene_close<T>(scene: Scene<T>) -> bool {
 fn scene_discard<T>(scene: Scene<T>) -> bool {
     let id = scene._scene_id
     if __scene_state(id) != __SCENE_LIVE { return false }
-    __SCENE_STATES.set(id, __SCENE_DISCARDING)
-    vec_push(__SCENE_PENDING_CLOSE, id)
+    __SCENE_REGISTRY.states.set(id, __SCENE_DISCARDING)
+    vec_push(__SCENE_REGISTRY.pending_close, id)
     return true
 }
 
@@ -223,7 +309,7 @@ fn scene_discard<T>(scene: Scene<T>) -> bool {
 fn scene_on_close<T>(scene: Scene<T>, action: () -> ()) -> bool {
     let id = scene._scene_id
     if __scene_state(id) != __SCENE_LIVE { return false }
-    vec_push(__SCENE_CLOSERS[id], action)
+    vec_push(__SCENE_REGISTRY.closers[id], action)
     return true
 }
 
@@ -237,10 +323,10 @@ fn scene_on_close<T>(scene: Scene<T>, action: () -> ()) -> bool {
 // give. Ordinary code uses `scene_close`. Tests drive this directly on purpose,
 // to observe the drain without waiting a frame.
 fn __scene_drain_closed() -> int {
-    let pending = __SCENE_PENDING_CLOSE
+    let pending = __SCENE_REGISTRY.pending_close
     if vec_len(pending) == 0 { return 0 }
     let fresh: [int] = []
-    __SCENE_PENDING_CLOSE = fresh
+    __SCENE_REGISTRY.pending_close = fresh
     let drained = 0
     for i in 0..vec_len(pending) {
         let id = pending[i]
@@ -256,19 +342,41 @@ fn __scene_drain_closed() -> int {
     return drained
 }
 
+// Capture the current length of every typed bucket once at a lifecycle phase
+// boundary. Newborns append to the same buckets but remain beyond these
+// lengths until the next phase.
+fn __scene_begin_update_phase() {
+    let lengths: [int] = []
+    for i in 0..vec_len(__SCENE_REGISTRY.type_buckets) {
+        vec_push(lengths, vec_len(__SCENE_REGISTRY.type_buckets[i]))
+    }
+    __SCENE_REGISTRY.phase_bucket_lengths = lengths
+}
+
+fn __scene_type_population(root_type: string) -> [int] {
+    let bucket_index = __scene_type_bucket_index(root_type)
+    return __SCENE_REGISTRY.type_buckets[bucket_index]
+}
+
+fn __scene_type_population_length(root_type: string) -> int {
+    let bucket_index = __scene_type_bucket_index(root_type)
+    if bucket_index >= vec_len(__SCENE_REGISTRY.phase_bucket_lengths) { return 0 }
+    return __SCENE_REGISTRY.phase_bucket_lengths[bucket_index]
+}
+
 // How many Scene incarnations the registry currently resolves. Closing Scenes
 // are excluded: they are already invisible to lookup.
 fn scene_live_count() -> int {
     let live = 0
-    for i in 0..vec_len(__SCENE_STATES) {
-        if __SCENE_STATES[i] == __SCENE_LIVE { live += 1 }
+    for i in 0..vec_len(__SCENE_REGISTRY.states) {
+        if __SCENE_REGISTRY.states[i] == __SCENE_LIVE { live += 1 }
     }
     return live
 }
 
 // The exact population the next drain will retire.
 fn scene_pending_close_count() -> int {
-    return vec_len(__SCENE_PENDING_CLOSE)
+    return vec_len(__SCENE_REGISTRY.pending_close)
 }
 
 // How many teardown actions this Scene will run on a graceful close. Zero for
@@ -277,7 +385,7 @@ fn scene_pending_close_count() -> int {
 fn scene_closer_count<T>(scene: Scene<T>) -> int {
     let id = scene._scene_id
     if __scene_state(id) == __SCENE_DEAD { return 0 }
-    return vec_len(__SCENE_CLOSERS[id])
+    return vec_len(__SCENE_REGISTRY.closers[id])
 }
 
 // How many Arena incarnations this Scene still owns backing for. The identity
@@ -286,7 +394,7 @@ fn scene_closer_count<T>(scene: Scene<T>) -> int {
 fn scene_arena_count<T>(scene: Scene<T>) -> int {
     let id = scene._scene_id
     if __scene_state(id) == __SCENE_DEAD { return 0 }
-    let owned = __SCENE_ARENA_IDS[id]
+    let owned = __SCENE_REGISTRY.arena_ids[id]
     let live = 0
     for i in 0..vec_len(owned) {
         if !is_null(__arena_store_any(id, owned[i])) { live += 1 }
