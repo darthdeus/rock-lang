@@ -164,6 +164,11 @@ pub enum CliCommand {
     /// each splice copies (per-callee fan-out + inst-copies, top callers). Writes
     /// `skull-inline-stats.txt`. See `skull_backend::skull_inline_stats`.
     SkullInlineStats,
+    /// `rock skull-mem2reg-stats <project>` — DIAGNOSTIC: census final emitted
+    /// non-coroutine MIR and report the surviving cell traffic that direct
+    /// promotion could remove without phi placement. Writes
+    /// `skull-mem2reg-stats.txt`.
+    SkullMem2RegStats,
     /// `rock skull-incremental-profile <project>` — byte-identical correctness
     /// gate for the full-reassembly `emit_incremental` path: for each project
     /// file force a body re-cook, time `update_file` + `emit_incremental`, and
@@ -304,6 +309,7 @@ impl clap::ValueEnum for CliCommand {
             Self::IterCodegen,
             Self::IterCook,
             Self::SkullInlineStats,
+            Self::SkullMem2RegStats,
             Self::SkullIncrementalProfile,
             Self::IterIncremental,
             Self::MonoTyCensus,
@@ -356,6 +362,7 @@ impl CliCommand {
             Self::IterCodegen => "iter-codegen",
             Self::IterCook => "iter-cook",
             Self::SkullInlineStats => "skull-inline-stats",
+            Self::SkullMem2RegStats => "skull-mem2reg-stats",
             Self::SkullIncrementalProfile => "skull-incremental-profile",
             Self::IterIncremental => "iter-incremental",
             Self::MonoTyCensus => "mono-ty-census",
@@ -1030,6 +1037,14 @@ mod caps_tests {
             assert!(!name.is_empty(), "{:?} has empty cli_name", cmd);
             assert!(seen.insert(name), "duplicate cli_name {name}");
         }
+    }
+
+    #[test]
+    fn mem2reg_census_has_a_cli_surface() {
+        assert_eq!(
+            CliCommand::SkullMem2RegStats.cli_name(),
+            "skull-mem2reg-stats"
+        );
     }
 
     use super::resolve_backend;

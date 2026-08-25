@@ -16,6 +16,7 @@
 pub mod allocation_report;
 pub mod coroutine_emit;
 pub mod inline_stats;
+pub mod mem2reg_stats;
 pub mod graph_snapshot;
 pub mod shader_artifact;
 pub mod site_join;

@@ -625,6 +625,10 @@ impl CommandContext {
             let path = self.get_path_or_current()?;
             return crate::skull_backend::skull_inline_stats(&path);
         }
+        if self.args.command == CliCommand::SkullMem2RegStats {
+            let path = self.get_path_or_current()?;
+            return crate::skull_backend::skull_mem2reg_stats(&path);
+        }
         // skull-incremental-profile builds a bone Session + skull emit cache and
         // profiles per-file incremental recompile; skull-specific, dispatched
         // before the backend switch like the other skull diagnostics.

@@ -36,6 +36,7 @@ use skull_mir::mir::*;
 use skull_mir::monoty::MonoInterner;
 
 pub use skull_mir::mangle::mangle_fn;
+pub use regalloc::color_cells;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum EmittedAllocationKind {
@@ -480,9 +481,9 @@ thread_local! {
 /// `regalloc::color_cells`, charged to the `REGALLOC_TIME` accumulator (so the
 /// backend-stats regalloc/stringify split counts cell coloring as regalloc, not
 /// stringify — it is the second half of register allocation).
-fn color_cells_timed(func: &MirFunc) -> Vec<u32> {
+fn color_cells_timed(func: &MirFunc, inlinable: &[bool]) -> Vec<u32> {
     let t = std::time::Instant::now();
-    let colors = regalloc::color_cells(func);
+    let colors = regalloc::color_cells_with_inlined_loads(func, Some(inlinable));
     REGALLOC_TIME.with(|c| c.set(c.get() + t.elapsed()));
     colors
 }
@@ -725,13 +726,25 @@ impl CodegenCtx {
 /// Cells REFERENCED (Load/Store/`MapNext` or multi-return dest) anywhere the top
 /// scope rooted at `entry` emits. Hoisted closure bodies are separate ordinary
 /// MirFuncs, so the declaration walk only follows this function's CFG.
-fn referenced_cells_in_region(func: &MirFunc, entry: Idx<Block>) -> HashSet<Idx<Cell>> {
+fn referenced_cells_in_region(
+    func: &MirFunc,
+    entry: Idx<Block>,
+    tail_forwards: &[Option<TailForward>],
+    suppressed: &[bool],
+) -> HashSet<Idx<Cell>> {
     let mut seen: HashSet<Idx<Block>> = HashSet::default();
     let mut stack = vec![entry];
     seen.insert(entry);
     let mut cells: HashSet<Idx<Cell>> = HashSet::default();
     while let Some(b) = stack.pop() {
-        for &iid in &func.blocks[b].insts {
+        let tail = tail_forwards[raw(b) as usize].as_ref();
+        for (position, &iid) in func.blocks[b].insts.iter().enumerate() {
+            if tail.is_some_and(|tail| position >= tail.first_suppressed) {
+                continue;
+            }
+            if suppressed[raw(iid) as usize] {
+                continue;
+            }
             match &func.insts[iid] {
                 Inst::Load(c) => { cells.insert(*c); }
                 Inst::Store { cell, .. } => { cells.insert(*cell); }
@@ -752,6 +765,183 @@ fn referenced_cells_in_region(func: &MirFunc, entry: Idx<Block>) -> HashSet<Idx<
         });
     }
     cells
+}
+
+#[derive(Clone)]
+enum TailForwardCall {
+    Direct { call: Idx<Inst>, func: FuncRef, args: Vec<Idx<Inst>> },
+    Value { callee: Idx<Inst>, args: Vec<Idx<Inst>> },
+}
+
+#[derive(Clone)]
+struct TailForward {
+    first_suppressed: usize,
+    suppressed: Vec<Idx<Inst>>,
+    call: TailForwardCall,
+}
+
+#[derive(Clone)]
+struct CallArgForward {
+    producer: TailForwardCall,
+    prefix: Vec<Idx<Inst>>,
+    consumer: Idx<Inst>,
+    func: FuncRef,
+}
+
+fn cell_reference_counts(func: &MirFunc) -> Vec<u32> {
+    let mut counts = vec![0; func.cells.len()];
+    for (_, block) in func.blocks.iter() {
+        for &id in &block.insts {
+            match &func.insts[id] {
+                Inst::Load(cell) | Inst::Store { cell, .. } => counts[raw(*cell) as usize] += 1,
+                Inst::CallMulti { dests, .. }
+                | Inst::CallValueMulti { dests, .. }
+                | Inst::CallBoundMulti { dests, .. } => {
+                    for cell in dests {
+                        counts[raw(*cell) as usize] += 1;
+                    }
+                }
+                Inst::MapNext { key_cell, val_cell, .. } => {
+                    counts[raw(*key_cell) as usize] += 1;
+                    counts[raw(*val_cell) as usize] += 1;
+                }
+                Inst::Lambda { params, .. } => {
+                    for cell in params {
+                        counts[raw(*cell) as usize] += 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    counts
+}
+
+fn instruction_reference_counts(func: &MirFunc) -> Vec<u32> {
+    let mut counts = vec![0; func.insts.len()];
+    for (_, block) in func.blocks.iter() {
+        for &id in &block.insts {
+            regalloc::inst_uses(&func.insts[id], &mut |used| {
+                counts[raw(used) as usize] += 1;
+            });
+        }
+        regalloc::term_uses(&block.term, &mut |used| {
+            counts[raw(used) as usize] += 1;
+        });
+    }
+    counts
+}
+
+fn tail_forwards(func: &MirFunc) -> Vec<Option<TailForward>> {
+    let mut forwards = vec![None; func.blocks.len()];
+    let cell_references = cell_reference_counts(func);
+    for (block_id, block) in func.blocks.iter() {
+        let Term::Return(values) = &block.term else { continue };
+        if values.is_empty() || block.insts.len() < values.len() + 1 {
+            continue;
+        }
+        let first = block.insts.len() - values.len() - 1;
+        let call_id = block.insts[first];
+        let (dests, call) = match &func.insts[call_id] {
+            Inst::CallMulti { dests, func, args } => (
+                dests,
+                TailForwardCall::Direct { call: call_id, func: *func, args: args.clone() },
+            ),
+            Inst::CallValueMulti { dests, callee, args } => (
+                dests,
+                TailForwardCall::Value { callee: *callee, args: args.clone() },
+            ),
+            _ => continue,
+        };
+        if dests.len() != values.len() {
+            continue;
+        }
+        let exact_wire = values.iter().zip(dests).enumerate().all(|(i, (&value, &dest))| {
+            block.insts[first + i + 1] == value
+                && matches!(func.insts[value], Inst::Load(cell) if cell == dest)
+                && cell_references[raw(dest) as usize] == 2
+        });
+        if !exact_wire {
+            continue;
+        }
+        forwards[raw(block_id) as usize] = Some(TailForward {
+            first_suppressed: first,
+            suppressed: block.insts[first..].to_vec(),
+            call,
+        });
+    }
+    forwards
+}
+
+fn call_arg_forwards(
+    ws: &Workspace,
+    func: &MirFunc,
+) -> (Vec<Option<CallArgForward>>, Vec<bool>) {
+    let mut forwards = vec![None; func.insts.len()];
+    let mut suppressed = vec![false; func.insts.len()];
+    let cell_references = cell_reference_counts(func);
+    let instruction_references = instruction_reference_counts(func);
+    for (_, block) in func.blocks.iter() {
+        for first in 0..block.insts.len() {
+            let producer_id = block.insts[first];
+            let (dests, producer) = match &func.insts[producer_id] {
+                Inst::CallMulti { dests, func, args } => (
+                    dests,
+                    TailForwardCall::Direct {
+                        call: producer_id,
+                        func: *func,
+                        args: args.clone(),
+                    },
+                ),
+                Inst::CallValueMulti { dests, callee, args } => (
+                    dests,
+                    TailForwardCall::Value {
+                        callee: *callee,
+                        args: args.clone(),
+                    },
+                ),
+                _ => continue,
+            };
+            let consumer_position = first + dests.len() + 1;
+            if dests.is_empty() || consumer_position >= block.insts.len() {
+                continue;
+            }
+            let consumer = block.insts[consumer_position];
+            let Inst::Call { func: consumer_func, args: consumer_args } = &func.insts[consumer]
+            else {
+                continue;
+            };
+            if func_of(ws, *consumer_func).inline_body.is_some()
+                || consumer_args.len() < dests.len()
+            {
+                continue;
+            }
+            let prefix_len = consumer_args.len() - dests.len();
+            let loads = &block.insts[first + 1..consumer_position];
+            let exact_wire = loads.iter().zip(dests).enumerate().all(
+                |(i, (&load, &dest))| {
+                    consumer_args[prefix_len + i] == load
+                        && matches!(func.insts[load], Inst::Load(cell) if cell == dest)
+                        && cell_references[raw(dest) as usize] == 2
+                        && instruction_references[raw(load) as usize] == 1
+                },
+            );
+            if !exact_wire {
+                continue;
+            }
+            suppressed[raw(producer_id) as usize] = true;
+            for &load in loads {
+                suppressed[raw(load) as usize] = true;
+            }
+            forwards[raw(consumer) as usize] = Some(CallArgForward {
+                producer,
+                prefix: consumer_args[..prefix_len].to_vec(),
+                consumer,
+                func: *consumer_func,
+            });
+        }
+    }
+    (forwards, suppressed)
 }
 
 /// Every closure parameter cell is owned by its nested Lua function rather
@@ -964,10 +1154,35 @@ fn emit_named_framed_with_statics_impl(
 ) -> String {
     let entry = func.entry();
     let params = func.params.as_slice();
+    let rpo = reverse_postorder(func, entry);
+    let tail_forwards = tail_forwards(func);
+    let (call_arg_forwards, suppressed) = if frame.is_some() {
+        // Coroutine lifting moves later uses into frame fields, outside the
+        // ordinary cell reference count that proves a producer unobserved.
+        (vec![None; func.insts.len()], vec![false; func.insts.len()])
+    } else {
+        call_arg_forwards(ws, func)
+    };
+    let mut inlinable = compute_inlinable(func, &rpo, params);
+    for tail in tail_forwards.iter().flatten() {
+        for &id in &tail.suppressed[1..] {
+            inlinable[raw(id) as usize] = true;
+        }
+    }
+    for (id, inst) in func.insts.iter() {
+        let raw_id = raw(id) as usize;
+        if suppressed[raw_id] && matches!(inst, Inst::Load(_)) {
+            inlinable[raw_id] = true;
+        }
+    }
     // Ordinary functions color cells (collapse them onto luajit's 200-local cap);
     // a coroutine `__step` keeps raw `c<raw>` names (frame-field naming depends on
     // the raw id), so it gets an empty map.
-    let cell_colors = if frame.is_some() { vec![u32::MAX; func.cells.len()] } else { color_cells_timed(func) };
+    let cell_colors = if frame.is_some() {
+        vec![u32::MAX; func.cells.len()]
+    } else {
+        color_cells_timed(func, &inlinable)
+    };
     // Module-scope const hoisting: an all-constant `value` ctor is built ONCE as a
     // function-owned top-level global and referenced everywhere, instead of rebuilt
     // at each use. On a trace the per-use ctor sinks anyway, but in the interpreter
@@ -999,6 +1214,8 @@ fn emit_named_framed_with_statics_impl(
         func,
         entry,
         params,
+        &rpo,
+        inlinable,
         true,
         frame,
         &cell_colors,
@@ -1007,6 +1224,9 @@ fn emit_named_framed_with_statics_impl(
         &hoist,
         &hoist_names,
         allocation,
+        &tail_forwards,
+        &call_arg_forwards,
+        &suppressed,
         &mut out,
     );
     out.push('\n');
@@ -1714,14 +1934,10 @@ fn always_inlinable(inst: &Inst) -> bool {
     )
 }
 
-/// The set of values to TREE-FOLD into their use site (no `local rN`): an
-/// `always_inlinable` value used EXACTLY ONCE within this scope, def and use in
-/// the same block. Single-use keeps it size-neutral (no duplicated expression);
-/// "always-safe" + same-block means the fold is correct no matter what runs in
-/// between. (Values are single-block by construction, so same-block nearly always
-/// holds; the guard keeps it honest.) The colorer skips these; the emitter emits
-/// each value's expression at its one use via [`Emitter::opnd`].
-fn compute_inlinable(func: &MirFunc, scope: &[Idx<Block>]) -> Vec<bool> {
+/// The set of values to TREE-FOLD into their use site (no `local rN`). Pure
+/// expressions qualify at one same-block use. Loads of parameters never written
+/// in this scope qualify at every use: the Lua parameter is already their value.
+fn compute_inlinable(func: &MirFunc, scope: &[Idx<Block>], params: &[Idx<Cell>]) -> Vec<bool> {
     // Dense side-tables keyed by raw inst id (no hashing): use count, and the
     // block of the (single) use and of the def. `NONE` = unset. Insts outside
     // `scope` (other closures share the arena) stay at 0/NONE and never qualify.
@@ -1730,9 +1946,29 @@ fn compute_inlinable(func: &MirFunc, scope: &[Idx<Block>]) -> Vec<bool> {
     let mut use_count = vec![0u32; ni];
     let mut use_block = vec![NONE; ni];
     let mut def_block = vec![NONE; ni];
+    let mut immutable_params: HashSet<Idx<Cell>> = params.iter().copied().collect();
     for &b in scope {
         let br = raw(b);
         for &id in &func.blocks[b].insts {
+            match &func.insts[id] {
+                Inst::Store { cell, .. } => {
+                    immutable_params.remove(cell);
+                }
+                Inst::CallMulti { dests, .. }
+                | Inst::CallValueMulti { dests, .. }
+                | Inst::CallBoundMulti { dests, .. } => {
+                    for cell in dests {
+                        immutable_params.remove(cell);
+                    }
+                }
+                Inst::MapNext {
+                    key_cell, val_cell, ..
+                } => {
+                    immutable_params.remove(key_cell);
+                    immutable_params.remove(val_cell);
+                }
+                _ => {}
+            }
             if func.insts[id].produces_value() {
                 def_block[raw(id) as usize] = br;
             }
@@ -1754,10 +1990,13 @@ fn compute_inlinable(func: &MirFunc, scope: &[Idx<Block>]) -> Vec<bool> {
     for &b in scope {
         for &id in &func.blocks[b].insts {
             let k = raw(id) as usize;
-            if use_count[k] == 1
-                && def_block[k] != NONE
-                && def_block[k] == use_block[k]
-                && always_inlinable(&func.insts[id])
+            let parameter_load =
+                matches!(&func.insts[id], Inst::Load(cell) if immutable_params.contains(cell));
+            if parameter_load
+                || (use_count[k] == 1
+                    && def_block[k] != NONE
+                    && def_block[k] == use_block[k]
+                    && always_inlinable(&func.insts[id]))
             {
                 inl[k] = true;
             }
@@ -1776,6 +2015,8 @@ fn render_scope(
     func: &MirFunc,
     entry: Idx<Block>,
     params: &[Idx<Cell>],
+    rpo: &[Idx<Block>],
+    inlinable: Vec<bool>,
     is_top: bool,
     frame: Option<&FrameCtx>,
     cell_colors: &[u32],
@@ -1784,14 +2025,14 @@ fn render_scope(
     hoist: &HashMap<Idx<Inst>, u32>,
     hoist_names: &[String],
     allocation: Option<AllocationEmission<'_>>,
+    tail_forwards: &[Option<TailForward>],
+    call_arg_forwards: &[Option<CallArgForward>],
+    suppressed: &[bool],
     out: &mut String,
 ) {
     // RPO drives both block layout (preheader-before-header, for the relooper)
     // and the reachable set the regalloc colors over.
-    let rpo = reverse_postorder(func, entry);
-    let loops = recognize_counted_loops(func, &rpo, frame);
-    // Tree-folded values get no register; the colorer sees through them.
-    let inlinable = compute_inlinable(func, &rpo);
+    let loops = recognize_counted_loops(func, rpo, frame);
     let t_ra = std::time::Instant::now();
     // Counted-loop regions partition the coloring so loop-body temps get
     // body-scoped `local`s (see `ValueAlloc::color_scope`). Partitioning trades
@@ -1802,9 +2043,9 @@ fn render_scope(
         .map(|(&h, cl)| regalloc::LoopScope { header: h, region: cl.region.iter().copied().collect() })
         .collect();
     loop_scopes.sort_by_key(|ls| func.emit_block_id(ls.header));
-    let mut va = regalloc::color_values(func, &rpo, &inlinable, &loop_scopes);
+    let mut va = regalloc::color_values(func, rpo, &inlinable, &loop_scopes);
     if va.color_scope.len() > 150 && !loop_scopes.is_empty() {
-        va = regalloc::color_values(func, &rpo, &inlinable, &[]);
+        va = regalloc::color_values(func, rpo, &inlinable, &[]);
     }
     let regalloc::ValueAlloc { colors, color_scope } = va;
     REGALLOC_TIME.with(|c| c.set(c.get() + t_ra.elapsed()));
@@ -1861,7 +2102,11 @@ fn render_scope(
     // body is a full-arena clone; declaring the dead enclosing/sibling cells would
     // blow LuaJIT's 200-local cap on a large co-fn step). Computed once per top
     // scope; inline (non-`is_top`) renders declare nothing, so they skip it.
-    let referenced = if is_top { referenced_cells_in_region(func, entry) } else { HashSet::default() };
+    let referenced = if is_top {
+        referenced_cells_in_region(func, entry, tail_forwards, suppressed)
+    } else {
+        HashSet::default()
+    };
     if is_top {
         let param_cells: HashSet<Idx<Cell>> = params.iter().copied().collect();
         let is_frame = |c: &Idx<Cell>| frame.is_some_and(|f| f.fields.contains(c));
@@ -1917,7 +2162,7 @@ fn render_scope(
         cell_colors,
         frame,
         loops: &loops,
-        rpo: &rpo,
+        rpo,
         inlinable,
         emitted: vec![false; func.blocks.len()],
         hoist,
@@ -1925,8 +2170,11 @@ fn render_scope(
         state_slots,
         static_slots,
         allocation,
+        tail_forwards,
+        call_arg_forwards,
+        suppressed,
     };
-    for &bb in &rpo {
+    for &bb in rpo {
         em.emit_block(out, bb); // self-skips an already-emitted block (loop body)
     }
     out.push_str("end");
@@ -1996,6 +2244,9 @@ struct Emitter<'a> {
     state_slots: &'a HashMap<ustr::Ustr, u32>,
     static_slots: &'a HashMap<ustr::Ustr, String>,
     allocation: Option<AllocationEmission<'a>>,
+    tail_forwards: &'a [Option<TailForward>],
+    call_arg_forwards: &'a [Option<CallArgForward>],
+    suppressed: &'a [bool],
 }
 
 impl Emitter<'_> {
@@ -2066,8 +2317,17 @@ impl Emitter<'_> {
         push_uint(out, self.func.emit_block_id(bb));
         out.push_str("::\n");
         let insts: &[Idx<Inst>] = &self.func.blocks[bb].insts;
-        for &id in insts {
+        let tail = self.tail_forwards[raw(bb) as usize].as_ref();
+        let emitted_len = tail.map_or(insts.len(), |tail| tail.first_suppressed);
+        for &id in &insts[..emitted_len] {
+            if self.suppressed[raw(id) as usize] {
+                continue;
+            }
             self.emit_inst(out, id);
+        }
+        if let Some(tail) = tail {
+            self.emit_tail_forward(out, tail);
+            return;
         }
         // A goto into an un-emitted counted-loop header becomes a structured
         // `for` (the preheader falls through into it); everything else is a goto.
@@ -2080,6 +2340,23 @@ impl Emitter<'_> {
             }
         }
         self.emit_term(out, &self.func.blocks[bb].term);
+    }
+
+    fn emit_tail_forward(&self, out: &mut String, tail: &TailForward) {
+        out.push_str("  do return ");
+        match &tail.call {
+            TailForwardCall::Direct { call, func, args } => {
+                out.push_str(&self.callee_name(*call, *func));
+                out.push('(');
+                self.write_csv(out, args);
+            }
+            TailForwardCall::Value { callee, args } => {
+                self.write_opnd(out, *callee);
+                out.push('(');
+                self.write_csv(out, args);
+            }
+        }
+        out.push_str(") end\n");
     }
 
     /// Emit a recognized counted loop as `for <slot> = <slot>, hi[-1] do .. end`.
@@ -2156,6 +2433,10 @@ impl Emitter<'_> {
         if self.hoist.contains_key(&id) {
             return;
         }
+        if let Some(forward) = &self.call_arg_forwards[raw(id) as usize] {
+            self.emit_call_arg_forward(out, forward);
+            return;
+        }
         // An `@inline inline(lua)` call is spliced inline (body in the caller's
         // scope) instead of emitting a `callee(args)` call -- see the method.
         if matches!(&self.func.insts[id], Inst::Call { .. })
@@ -2173,6 +2454,31 @@ impl Emitter<'_> {
         } else {
             self.write_effect(out, id, inst);
         }
+    }
+
+    fn emit_call_arg_forward(&self, out: &mut String, forward: &CallArgForward) {
+        out.push_str("  ");
+        write_vname(out, self.func, &self.colors, forward.consumer);
+        out.push_str(" = ");
+        out.push_str(&self.callee_name(forward.consumer, forward.func));
+        out.push('(');
+        self.write_csv(out, &forward.prefix);
+        if !forward.prefix.is_empty() {
+            out.push_str(", ");
+        }
+        match &forward.producer {
+            TailForwardCall::Direct { call, func, args } => {
+                out.push_str(&self.callee_name(*call, *func));
+                out.push('(');
+                self.write_csv(out, args);
+            }
+            TailForwardCall::Value { callee, args } => {
+                self.write_opnd(out, *callee);
+                out.push('(');
+                self.write_csv(out, args);
+            }
+        }
+        out.push_str("))\n");
     }
 
     /// Splice an `@inline inline(lua)` `Call` inline, if `id` is one. Returns
@@ -2248,6 +2554,12 @@ impl Emitter<'_> {
     /// register `r<color>`, or — if it was tree-folded — its expression in
     /// parentheses, recursively. Every value-operand reference goes through here.
     fn write_opnd(&self, out: &mut String, id: Idx<Inst>) {
+        if self.inlinable[raw(id) as usize] {
+            if let Inst::Load(cell) = self.func.insts[id] {
+                write_cellname(out, self.func, self.frame, self.cell_colors, cell);
+                return;
+            }
+        }
         // int->float subsumption is identity on luajit (all doubles): a FOLDED
         // (inlinable) coercion renders exactly as the inner operand in this
         // position -- no register, no extra precedence wrap -- so emitted Lua

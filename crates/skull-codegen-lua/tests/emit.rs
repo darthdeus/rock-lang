@@ -136,7 +136,7 @@ fn run(src: &str, driver: &str) -> String {
                 &ws, &ctx, scx.interner(), &name, &func,
             ));
             for nf in func.nested_fns[pre_nested..].iter_mut() {
-                skull_transform::cleanup_with_nobox(&ws, nf);
+                skull_transform::cleanup_with_nobox(&ws, nf).unwrap();
                 skull_transform::recover_counted_loops(&ws, nf);
                 lua.push_str(&skull_codegen_lua::emit_named(
                     &ws, &ctx, scx.interner(), nf.name.as_str(), nf,
@@ -250,10 +250,8 @@ fn param_cell_read() {
         emit("fn id(x: int) -> int { x }", "id"),
         "\
 function id_int_ret_int(c0)
-  local r0
   ::bb0::
-  r0 = c0
-  do return r0 end
+  do return c0 end
 end
 "
     );
@@ -265,11 +263,8 @@ fn int_arithmetic() {
         emit_std("fn add(a: int, b: int) -> int { a + b }", "add"),
         "\
 function add_int_int_ret_int(c0, c1)
-  local r0, r1
   ::bb0::
-  r0 = c0
-  r1 = c1
-  do return (r0 + r1) end
+  do return (c0 + c1) end
 end
 "
     );
@@ -678,18 +673,15 @@ fn use_it() -> int { let t = pair(); t.1 }";
 #[test]
 fn if_as_value_branch_and_cell_join() {
     // The `if`-as-value joins through a cell (no block params). Cell coloring
-    // coalesces the param `x` (dead after its `r0 = c0` read in bb0) with the
-    // join cell, so both are `c0`. Single-use pure values are tree-folded: the
-    // `x < 0` compare folds into the branch and the `0`/`1` literals into the
-    // join stores, so only `r0` (the cross-block `Load x`) keeps a register.
+    // coalesces the param `x` (dead after the branch in bb0) with the join cell,
+    // so both are `c0`. Single-use pure values are tree-folded into their uses.
     assert_eq!(
         emit("fn sign(x: int) -> int { if x < 0 { 0 } else { 1 } }", "sign"),
         "\
 function sign_int_ret_int(c0)
   local r0
   ::bb0::
-  r0 = c0
-  if (r0 < (0)) then goto bb1 else goto bb2 end
+  if (c0 < (0)) then goto bb1 else goto bb2 end
   ::bb1::
   c0 = (0)
   goto bb3

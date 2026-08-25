@@ -317,6 +317,57 @@ pub fn skull_inline_stats(path: &str) -> Result<()> {
     Ok(())
 }
 
+pub fn skull_mem2reg_stats(path: &str) -> Result<()> {
+    let source_spec = crate::common::path_to_source_spec(path);
+    let sources = crate::unified_compile::discover_sources(&source_spec)?;
+    let sources = sources.production_only();
+    let (mut modules, entry_file) = match skull_assemble_project(&sources) {
+        Ok(v) => v,
+        Err(errs) => {
+            eprintln!("{}", render_project_errs(&sources, &errs));
+            crate::ablation_report::exit_with_census(1);
+        }
+    };
+    let mut ws = match crate::bone_backend::check_modules(&mut modules) {
+        Ok(ws) => ws,
+        Err(errs) => {
+            eprintln!("{}", render_project_errs(&sources, &errs));
+            crate::ablation_report::exit_with_census(1);
+        }
+    };
+    if let Err(e) = crate::comptime::stamp_workspace(&mut ws, std::path::Path::new(path)) {
+        eprintln!("Error: build var resolution failed for {path}: {e:#}");
+        crate::ablation_report::exit_with_census(1);
+    }
+
+    let entry_mid = crate::bone_backend::entry_module_id(&ws, entry_file);
+    let r = match skull::mem2reg_stats::report_in(&ws, entry_mid, Some(path)) {
+        Ok(report) => report,
+        Err(error) => {
+            eprintln!("{}", render_project_err(&sources, &error));
+            crate::ablation_report::exit_with_census(1);
+        }
+    };
+    let out = "skull-mem2reg-stats.txt";
+    std::fs::write(out, &r.text).map_err(|e| anyhow::anyhow!("writing {out}: {e}"))?;
+
+    println!("{} ({path})", "skull mem2reg residual census".bold());
+    println!(
+        "  {} bodies, {} surviving MIR loads ({} cross-block direct)",
+        r.bodies_scanned, r.totals.loads, r.totals.cross_block_promotable_loads,
+    );
+    println!(
+        "  {} parameter loads folded by Lua emission; {} residual Store loads",
+        r.totals.parameter_promotable_loads, r.totals.store_promotable_loads,
+    );
+    println!(
+        "  {} MIR cell colors; {} residual removable Store colors",
+        r.totals.current_cell_slots, r.totals.guaranteed_removable_cell_slots,
+    );
+    println!("  full report -> {}", out.bold());
+    Ok(())
+}
+
 /// `rock iter-cook <project> --iters N` — benchmark the front-end COOK
 /// (`skull_parser::cook` = macro-expand + per-module desugar), the work bone's
 /// `expand_and_desugar` does on every compile. Parses stdlib+project to raw

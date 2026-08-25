@@ -37,6 +37,7 @@ pub mod bound;
 mod closure;
 mod forl;
 mod inline;
+mod mem2reg;
 pub mod scope;
 pub use closure::{convert_closures, convert_closures_framed, FrameInfo};
 pub use forl::recover_counted_loops;
@@ -46,6 +47,7 @@ pub use inline::{
     InlineCandidateProfile, InlineCandidateTableStats, InlineCandidateWarm, InlineScanStats,
     SpliceRecord,
 };
+pub use mem2reg::{Mem2RegCensus, Mem2RegPromotion, mem2reg_census, promote_direct_cells};
 
 pub const STATE: &str = "__state";
 
@@ -760,6 +762,7 @@ pub fn cleanup_with_nobox(ws: &Workspace, func: &mut MirFunc) -> Result<(), Comp
         cleanup(func)?;
     }
     dce(func);
+    promote_direct_cells(func);
     Ok(())
 }
 
