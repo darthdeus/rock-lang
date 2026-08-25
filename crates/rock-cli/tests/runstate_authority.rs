@@ -52,12 +52,14 @@ fn mag_uses_direct_session_state_without_a_run_root_or_accessor() {
         "fn mag_run_state",
         "mag_run_state()",
         "mag_world_scene",
+        "fn current_run",
     ];
     let required = [
         "global player: Player",
         "global bank_gold: int",
         "global journal: [JournalLine]",
         "global history: [SnapshotHistoryNode]",
+        "global spell_panel_open: bool",
         "global MAG_ACTIVE_WORLD: Scene<WorldState>?",
     ];
     let mut findings = Vec::new();
