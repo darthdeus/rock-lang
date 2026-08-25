@@ -399,7 +399,15 @@ fn perf_json_gc_window_has_trustworthy_reconciliation() {
 fn perf_json_graphics_has_counters() {
     let doc = run_perf_json("games/match3");
     let g = &doc["graphics"];
-    for key in ["draw_calls", "text_draws"] {
+    for key in [
+        "draw_calls",
+        "text_draws",
+        "shader_switches",
+        "canvas_switches",
+        "stream_upload_calls",
+        "stream_upload_bytes",
+        "streamed_vertices",
+    ] {
         assert!(
             g.get(key).and_then(Value::as_i64).is_some(),
             "graphics.{key} missing or not an int: {g}"
