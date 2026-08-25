@@ -1692,11 +1692,10 @@ fn global_init_session_line(
         .map_err(|_| CompilerError::new_no_location(format!("no state plan for global `{}`", g.name)))?;
     match plan.leaf_names(g.name) {
         Some(leaves) => {
-            let keys: Vec<String> = leaves
+            let keys: Vec<u32> = leaves
                 .iter()
                 .map(|leaf| {
                     cg.state_slot(*leaf)
-                        .map(str::to_string)
                         .ok_or_else(|| {
                             CompilerError::new_no_location(format!(
                                 "global `{}` has no compiler-owned Session slot for `{leaf}`",
@@ -1706,11 +1705,11 @@ fn global_init_session_line(
                 })
                 .collect::<Result<_, _>>()?;
             let first = keys.first().expect("a leaf plan has a first Session slot");
-            let mut line = format!("if not __rock_state_has({first:?}) then\n");
+            let mut line = format!("if not __rock_state_has({first}) then\n");
             line.push_str(&format!("  local __rock_init_values = {{ {init_name}() }}\n"));
             for (index, key) in keys.iter().enumerate() {
                 line.push_str(&format!(
-                    "  __rock_state_set({key:?}, __rock_init_values[{}])\n",
+                    "  __rock_state_set({key}, __rock_init_values[{}])\n",
                     index + 1
                 ));
             }
@@ -1725,16 +1724,37 @@ fn global_init_session_line(
                         "global `{}` has no compiler-owned Session slot",
                         g.name
                     ))
-                })?
-                .to_string();
+                })?;
             Ok(format!(
-                "if not __rock_state_has({key:?}) then __rock_state_set({key:?}, {init_name}()) end\n"
+                "if not __rock_state_has({key}) then __rock_state_set({key}, {init_name}()) end\n"
             ))
         }
     }
 }
 
-fn state_schema_lua(schema: &skull_mir::state_schema::StateSchema) -> String {
+pub fn lua_global_state_slots(
+    ws: &Workspace,
+    scx: &skull_mir::lower::ScalarCtx,
+) -> Result<std::collections::BTreeMap<ustr::Ustr, u32>, CompilerError> {
+    let mut slots = skull_mir::state_schema::global_state_slots(ws, scx)
+        .map_err(|error| CompilerError::new_no_location(error.to_string()))?
+        .into_iter()
+        .collect::<Vec<_>>();
+    slots.sort_by(|a, b| a.1.cmp(&b.1));
+    Ok(slots
+        .into_iter()
+        .enumerate()
+        .map(|(index, (physical, _))| {
+            let slot = u32::try_from(index + 1).expect("Lua Session slot population exceeds u32");
+            (physical, slot)
+        })
+        .collect())
+}
+
+fn state_schema_lua(
+    schema: &skull_mir::state_schema::StateSchema,
+    cg: &CodegenCtx,
+) -> String {
     let image_plan = skull_mir::state_image::StateImagePlan::from_schema(schema)
         .expect("compiler-owned StateSchema must produce one StateImagePlan");
     let mut out = String::from("_G.__ROCK_STATE_SCHEMA = {");
@@ -1751,11 +1771,24 @@ fn state_schema_lua(schema: &skull_mir::state_schema::StateSchema) -> String {
             .map(|name| format!("{name:?}"))
             .collect::<Vec<_>>()
             .join(",");
-        let keys = skull_mir::state_schema::entry_state_keys(entry)
-            .iter()
-            .map(|key| format!("{key:?}"))
-            .collect::<Vec<_>>()
-            .join(",");
+        let keys = if entry.kind == skull_mir::state_schema::StateKind::Global {
+            entry
+                .physical
+                .iter()
+                .map(|name| {
+                    cg.state_slot(ustr::Ustr::from(name.as_str()))
+                        .expect("every Lua global StateSchema leaf has a physical Session slot")
+                        .to_string()
+                })
+                .collect::<Vec<_>>()
+                .join(",")
+        } else {
+            skull_mir::state_schema::entry_state_keys(entry)
+                .iter()
+                .map(|key| format!("{key:?}"))
+                .collect::<Vec<_>>()
+                .join(",")
+        };
         let owner = entry
             .owner
             .as_deref()
@@ -5231,7 +5264,7 @@ fn assemble(
         "__rock_state_publish_schema({:?})\n",
         state_schema.schema_id
     ));
-    let state_schema_stage = state_schema_lua(&state_schema);
+    let state_schema_stage = state_schema_lua(&state_schema, cg);
     out.push_str(&wrap_large_lua_section(
         "__rock_state_schema_stage_part",
         &state_schema_stage,
@@ -5272,7 +5305,7 @@ fn assemble(
         &lifecycle_plan_stage,
     ));
     if has_artifact_plans {
-        let binding_plan_stage = artifact_binding_plan_stage_lua(&code_artifact.binding_plan);
+        let binding_plan_stage = artifact_binding_plan_stage_lua(&code_artifact.binding_plan, cg);
         out.push_str(&wrap_large_lua_section(
             "__rock_artifact_binding_plan_stage_part",
             &binding_plan_stage,
@@ -5729,14 +5762,19 @@ fn build_artifact_plans(
 
 fn artifact_binding_plan_stage_lua(
     plan: &skull_mir::artifact_plan::ArtifactBindingPlan,
+    cg: &CodegenCtx,
 ) -> String {
     let mut out = String::from("__rock_artifact_binding_plan_stage({ entries = { len = ");
     let _ = write!(out, "{}, _data = {{\n", plan.entries.len());
     for (index, entry) in plan.entries.iter().enumerate() {
-        let state_key = entry
-            .state_key
-            .as_deref()
-            .map_or_else(|| "nil".to_string(), skull_codegen_lua::lua_string);
+        let state_key = entry.state_key.as_ref().map_or_else(
+            || "nil".to_string(),
+            |_| {
+                cg.state_slot(ustr::Ustr::from(entry.physical.as_str()))
+                    .expect("every Lua artifact global binding has a physical Session slot")
+                    .to_string()
+            },
+        );
         let _ = writeln!(
             out,
             "[{}] = {{ identity = {}, physical = {}, diagnostic = {}, kind = {}, state_key = {} }},",
@@ -6255,10 +6293,7 @@ fn emit_full_in_with_mutation(
     let (shader_result, shader_lane) = shader_result;
     let (shader_view, shader_registrations) = shader_result?;
     scx.adopt_warmed_abi(abi_scx);
-    let state_slots = skull_mir::state_schema::global_state_slots(ws, &scx)
-        .map_err(|error| CompilerError::new_no_location(error.to_string()))?
-        .into_iter()
-        .collect();
+    let state_slots = lua_global_state_slots(ws, &scx)?.into_iter().collect();
     let cg = CodegenCtx::new_with_state(ws, state_slots);
     let setup_lanes = SetupLaneAttribution {
         cpu_population: cpu_lane.population,

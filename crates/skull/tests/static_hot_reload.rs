@@ -59,9 +59,6 @@ fn probe() -> int {
 fn main() { RESULT = probe() }
 ";
 
-const RESULT_KEY: &str = "global:<t>::RESULT::value";
-const DO_SET_KEY: &str = "global:<t>::DO_SET::value";
-
 /// PRESERVE: same source reloaded, key unchanged -> the live value (99, written
 /// pre-reload) survives; the initializer does NOT re-run.
 #[test]
@@ -69,11 +66,13 @@ fn static_survives_hot_reload_no_reinit() {
     let prog = emit_program(PROBE);
     let script = format!(
         "_G.HOT_RELOAD = false\n{prog}\n\
-         __rock_state_set(\"{DO_SET_KEY}\", true); main()   -- n inits 42, set -> 99, RESULT = 99\n\
+         local result_key = __rock_state_entry_for_name(\"RESULT\").session_keys[1]\n\
+         local do_set_key = __rock_state_entry_for_name(\"DO_SET\").session_keys[1]\n\
+         __rock_state_set(do_set_key, true); main()   -- n inits 42, set -> 99, RESULT = 99\n\
          _G.HOT_RELOAD = true\n{prog}\n\
-         __rock_state_set(\"{DO_SET_KEY}\", false); main()  -- key unchanged: n preserved (99), RESULT = 99\n\
-         if __rock_state_get(\"{RESULT_KEY}\") == 99 then print(\"PASS\")\n\
-         else print(\"FAIL RESULT=\"..tostring(__rock_state_get(\"{RESULT_KEY}\"))); os.exit(1) end\n"
+         __rock_state_set(do_set_key, false); main()  -- key unchanged: n preserved (99), RESULT = 99\n\
+         if __rock_state_get(result_key) == 99 then print(\"PASS\")\n\
+         else print(\"FAIL RESULT=\"..tostring(__rock_state_get(result_key))); os.exit(1) end\n"
     );
     assert!(run_luajit(&script).trim().starts_with("PASS"), "expected preserved static");
 }
@@ -86,11 +85,13 @@ fn static_reinits_when_initializer_edited() {
     let after = emit_program(&PROBE.replace("static n = 42", "static n = 7"));
     let script = format!(
         "_G.HOT_RELOAD = false\n{before}\n\
-         __rock_state_set(\"{DO_SET_KEY}\", false); main()  -- n inits 42, RESULT = 42\n\
+         local result_key = __rock_state_entry_for_name(\"RESULT\").session_keys[1]\n\
+         local do_set_key = __rock_state_entry_for_name(\"DO_SET\").session_keys[1]\n\
+         __rock_state_set(do_set_key, false); main()  -- n inits 42, RESULT = 42\n\
          _G.HOT_RELOAD = true\n{after}\n\
-         __rock_state_set(\"{DO_SET_KEY}\", false); main()  -- init edited: n resets, re-inits 7, RESULT = 7\n\
-         if __rock_state_get(\"{RESULT_KEY}\") == 7 then print(\"PASS\")\n\
-         else print(\"FAIL RESULT=\"..tostring(__rock_state_get(\"{RESULT_KEY}\"))); os.exit(1) end\n"
+         __rock_state_set(do_set_key, false); main()  -- init edited: n resets, re-inits 7, RESULT = 7\n\
+         if __rock_state_get(result_key) == 7 then print(\"PASS\")\n\
+         else print(\"FAIL RESULT=\"..tostring(__rock_state_get(result_key))); os.exit(1) end\n"
     );
     assert!(run_luajit(&script).trim().starts_with("PASS"), "expected re-init on edit");
 }
@@ -105,11 +106,13 @@ fn static_preserved_when_unrelated_body_edited() {
     let after = emit_program(&edited);
     let script = format!(
         "_G.HOT_RELOAD = false\n{before}\n\
-         __rock_state_set(\"{DO_SET_KEY}\", true); main()   -- RESULT = 99\n\
+         local result_key = __rock_state_entry_for_name(\"RESULT\").session_keys[1]\n\
+         local do_set_key = __rock_state_entry_for_name(\"DO_SET\").session_keys[1]\n\
+         __rock_state_set(do_set_key, true); main()   -- RESULT = 99\n\
          _G.HOT_RELOAD = true\n{after}\n\
-         __rock_state_set(\"{DO_SET_KEY}\", false); main()  -- key unchanged despite edit: n preserved, RESULT = 99\n\
-         if __rock_state_get(\"{RESULT_KEY}\") == 99 then print(\"PASS\")\n\
-         else print(\"FAIL RESULT=\"..tostring(__rock_state_get(\"{RESULT_KEY}\"))); os.exit(1) end\n"
+         __rock_state_set(do_set_key, false); main()  -- key unchanged despite edit: n preserved, RESULT = 99\n\
+         if __rock_state_get(result_key) == 99 then print(\"PASS\")\n\
+         else print(\"FAIL RESULT=\"..tostring(__rock_state_get(result_key))); os.exit(1) end\n"
     );
     assert!(run_luajit(&script).trim().starts_with("PASS"), "expected key stable under unrelated edit");
 }

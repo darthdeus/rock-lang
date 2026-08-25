@@ -1,5 +1,24 @@
 use std::time::Duration;
 
+#[test]
+fn nobox_reflection_uses_the_compiler_owned_lua_slots() {
+    let source = r#"
+nobox value Probe { x: int, y: int }
+global SPOT: Probe = Probe { x: 3, y: 4 }
+fn main() {}
+"#;
+    let module = skull_parser::parse_module(source, ustr::Ustr::from("main.rock"))
+        .expect("parse nobox reflection fixture");
+    let workspace = bone_semantic::semantic_passes::semantic_pass(&mut [module])
+        .expect("typecheck nobox reflection fixture");
+    let scalar = skull_mir::lower::ScalarCtx::new(&workspace);
+    let bridge = super::build_state_nobox_accessors(&workspace, &scalar)
+        .expect("build nobox reflection bridge");
+    assert!(bridge.contains("__rock_state_get(1)"), "first leaf did not use its numeric slot:\n{bridge}");
+    assert!(bridge.contains("__rock_state_get(2)"), "second leaf did not use its numeric slot:\n{bridge}");
+    assert!(!bridge.contains("global:main.rock::SPOT::"), "logical identity leaked into physical access:\n{bridge}");
+}
+
 fn emit_overlay_checked(
     ws: &bone_semantic::inference::Workspace,
     cache: &mut skull::mir_emit::SkullEmitCache,
@@ -1289,8 +1308,9 @@ local function run_wire()
     if __rock_lifecycle_take_wire(entry.key) then entry.func() end
   end
 end
+local runs_key = __rock_state_entry_for_name("RUNS").session_keys[1]
 run_wire()
-assert(__rock_state_get("global:main.rock::RUNS::value") == 1, "initial wire did not run exactly once: " .. tostring(__rock_state_get("global:main.rock::RUNS::value")))
+assert(__rock_state_get(runs_key) == 1, "initial wire did not run exactly once: " .. tostring(__rock_state_get(runs_key)))
 local old_plan = _G.__ROCK_LIFECYCLE_PLAN
 REPLACE_OVERLAY
 local candidate_plan = _G.__ROCK_LIFECYCLE_PLAN
@@ -1299,7 +1319,7 @@ local ok, err = pcall(run_wire)
 assert(not ok and tostring(err):find("wire hook failed after publication", 1, true), "wire failure was not observed: " .. tostring(err))
 assert(_G.__rock_code_slot_pending == nil, "the hook failure must not leave a staging transaction")
 assert(_G.__ROCK_LIFECYCLE_PLAN == candidate_plan, "hook failure must not claim publication rollback")
-assert(__rock_state_get("global:main.rock::RUNS::value") == 1, "wire failure changed the retained effect")
+assert(__rock_state_get(runs_key) == 1, "wire failure changed the retained effect")
 print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
 "#
         .replace("REPLACE_OVERLAY", &overlay.lua);

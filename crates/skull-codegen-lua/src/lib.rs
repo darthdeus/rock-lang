@@ -397,7 +397,7 @@ pub struct CodegenCtx {
     /// workers; contention is nil (a few per fn).
     rejections: Mutex<Vec<(String, CompilerError)>>,
     /// Compiler-assigned Session slots for mutable globals.
-    state_slots: HashMap<ustr::Ustr, String>,
+    state_slots: HashMap<ustr::Ustr, u32>,
 }
 
 impl Clone for CodegenCtx {
@@ -456,7 +456,7 @@ impl CodegenCtx {
         Self::new_with_state(ws, HashMap::default())
     }
 
-    pub fn new_with_state(ws: &Workspace, state_slots: HashMap<ustr::Ustr, String>) -> Self {
+    pub fn new_with_state(ws: &Workspace, state_slots: HashMap<ustr::Ustr, u32>) -> Self {
         let mut reserved: HashMap<String, Span> = HashMap::default();
         let mut collisions: Vec<(String, CompilerError)> = Vec::new();
         for m in ws.modules.iter() {
@@ -520,8 +520,8 @@ impl CodegenCtx {
         sink.drain(..).next().map(|(_, e)| e)
     }
 
-    pub fn state_slot(&self, name: ustr::Ustr) -> Option<&str> {
-        self.state_slots.get(&name).map(String::as_str)
+    pub fn state_slot(&self, name: ustr::Ustr) -> Option<u32> {
+        self.state_slots.get(&name).copied()
     }
 }
 
@@ -1470,7 +1470,7 @@ fn render_scope(
     is_top: bool,
     frame: Option<&FrameCtx>,
     cell_colors: &[u32],
-    state_slots: &HashMap<ustr::Ustr, String>,
+    state_slots: &HashMap<ustr::Ustr, u32>,
     static_slots: &HashMap<ustr::Ustr, String>,
     hoist: &HashMap<Idx<Inst>, u32>,
     hoist_names: &[String],
@@ -1682,16 +1682,23 @@ struct Emitter<'a> {
     hoist: &'a HashMap<Idx<Inst>, u32>,
     /// `group -> global name` for [`Self::hoist`].
     hoist_names: &'a [String],
-    state_slots: &'a HashMap<ustr::Ustr, String>,
+    state_slots: &'a HashMap<ustr::Ustr, u32>,
     static_slots: &'a HashMap<ustr::Ustr, String>,
 }
 
 impl Emitter<'_> {
-    fn state_slot(&self, name: ustr::Ustr) -> Option<&str> {
-        self.state_slots
-            .get(&name)
-            .or_else(|| self.static_slots.get(&name))
-            .map(String::as_str)
+    fn has_state_slot(&self, name: ustr::Ustr) -> bool {
+        self.state_slots.contains_key(&name) || self.static_slots.contains_key(&name)
+    }
+
+    fn write_state_slot(&self, out: &mut String, name: ustr::Ustr) {
+        if let Some(&slot) = self.state_slots.get(&name) {
+            push_uint(out, slot);
+        } else if let Some(slot) = self.static_slots.get(&name) {
+            out.push_str(&lua_string(slot));
+        } else {
+            unreachable!("state slot checked before emission")
+        }
     }
 
     fn emit_block(&mut self, out: &mut String, bb: Idx<Block>) {
@@ -1947,9 +1954,9 @@ impl Emitter<'_> {
                     out.push_str("__rock_code_slot_ref(");
                     out.push_str(&lua_string(&identity.logical_key(self.ws, self.interner)));
                     out.push(')');
-                } else if let Some(slot) = self.state_slot(*g) {
+                } else if self.has_state_slot(*g) {
                     out.push_str("__rock_active_session.__rock_state[");
-                    out.push_str(&lua_string(slot));
+                    self.write_state_slot(out, *g);
                     out.push(']');
                 } else {
                     out.push_str(g.as_str());
@@ -2523,13 +2530,13 @@ impl Emitter<'_> {
                 }
             }
             Inst::StoreGlobal { name, value } => {
-                if let Some(slot) = self.state_slot(*name) {
+                if self.has_state_slot(*name) {
                     out.push_str("  __rock_active_session.__rock_state[");
-                    out.push_str(&lua_string(slot));
+                    self.write_state_slot(out, *name);
                     out.push_str("] = ");
                     self.write_opnd(out, *value);
                     out.push_str("\n  __rock_active_session.__rock_initialized[");
-                    out.push_str(&lua_string(slot));
+                    self.write_state_slot(out, *name);
                     out.push_str("] = true\n");
                 } else {
                     let _ = write!(out, "  {name} = ");

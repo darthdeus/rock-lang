@@ -27,6 +27,57 @@ fn compiler_generated_mutable_global_accesses_require_the_active_session() {
 }
 
 #[test]
+fn lua_global_session_slots_are_dense_numeric_realizations() {
+    let emitted = emit_mir(FIXTURE);
+    assert!(
+        emitted
+            .lua
+            .contains("__rock_active_session.__rock_state[5]"),
+        "the fixture global must use its compact numeric Lua Session slot"
+    );
+    assert!(
+        emitted.lua.contains(
+            "identity=\"global:<test>::COUNTER\",fingerprint=\"type=int;representation=opaque;storage=None;column=false;nobox=false;lanes=1\",physical={\"COUNTER\"},session_keys={5}"
+        ),
+        "StateSchema must map the logical identity to the same numeric Lua slot"
+    );
+    assert!(
+        !emitted
+            .lua
+            .contains("__rock_active_session.__rock_state[\"global:<test>::COUNTER::value\"]"),
+        "logical StateSchema identities must not remain hot Lua table keys"
+    );
+}
+
+#[test]
+fn lua_global_session_slot_order_is_declaration_independent() {
+    let first = emit_mir(
+        "global ZED: int = 0\n\
+         global ALPHA: int = 0\n\
+         fn main() { ZED = ALPHA }\n",
+    );
+    let second = emit_mir(
+        "global ALPHA: int = 0\n\
+         global ZED: int = 0\n\
+         fn main() { ZED = ALPHA }\n",
+    );
+    for emitted in [&first.lua, &second.lua] {
+        assert!(
+            emitted.contains(
+                "identity=\"global:<test>::ALPHA\",fingerprint=\"type=int;representation=opaque;storage=None;column=false;nobox=false;lanes=1\",physical={\"ALPHA\"},session_keys={5}"
+            ),
+            "ALPHA must keep the first user-global Lua slot"
+        );
+        assert!(
+            emitted.contains(
+                "identity=\"global:<test>::ZED\",fingerprint=\"type=int;representation=opaque;storage=None;column=false;nobox=false;lanes=1\",physical={\"ZED\"},session_keys={6}"
+            ),
+            "ZED must keep the second user-global Lua slot"
+        );
+    }
+}
+
+#[test]
 fn generated_state_accesses_follow_mid_call_session_swaps() {
     let emitted = emit_mir(FIXTURE);
     assert!(
@@ -38,13 +89,13 @@ fn generated_state_accesses_follow_mid_call_session_swaps() {
     assert!(
         emitted
             .lua
-            .contains("__rock_active_session.__rock_state[\"global:<test>::COUNTER::value\"]"),
+            .contains("__rock_active_session.__rock_state[5]"),
         "mutable global reads and writes must follow the active Session"
     );
     assert!(
-        emitted.lua.contains(
-            "__rock_active_session.__rock_initialized[\"global:<test>::COUNTER::value\"] = true"
-        ),
+        emitted
+            .lua
+            .contains("__rock_active_session.__rock_initialized[5] = true"),
         "mutable global writes must mark the active Session initialized"
     );
 }
@@ -188,7 +239,8 @@ fn lifecycle_bump() {
     let program = format!(
         r#"{lua}
 local run = __ROCK_LIFECYCLE_PLAN.init._data[1].func
-local key = "global:<test>::COUNTER::value"
+local entry = __rock_state_entry_for_name("COUNTER")
+local key = entry.session_keys[1]
 local a = __rock_active_session
 run()
 local b = __rock_session_new(__rock_state_schema_id)
