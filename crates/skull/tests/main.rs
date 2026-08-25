@@ -70,6 +70,8 @@ mod generic_coroutine_column_param;
 mod hole_runtime_error;
 #[path = "incremental_emit.rs"]
 mod incremental_emit;
+#[path = "lua_definition_scopes.rs"]
+mod lua_definition_scopes;
 #[path = "opaque_declared_type_reach.rs"]
 mod opaque_declared_type_reach;
 

@@ -2291,6 +2291,49 @@ struct Chunk {
     code_artifact: skull_mir::code_identity::CodeArtifact,
 }
 
+// Each global definition costs the enclosing LuaJIT proto a child proto and name.
+const LUA_DEFINITIONS_PER_SCOPE: usize = 4_096;
+
+#[derive(Default)]
+struct LuaDefinitionBuffer {
+    lua: String,
+    units: Vec<(usize, usize, usize)>,
+    definition_count: usize,
+}
+
+impl LuaDefinitionBuffer {
+    fn push_str(&mut self, lua: &str) {
+        let start = self.lua.len();
+        let count = lua.lines().filter(|line| line.starts_with("function ")).count();
+        self.lua.push_str(lua);
+        self.units.push((start, self.lua.len(), count));
+        self.definition_count += count;
+    }
+
+    fn append_to(self, out: &mut String) {
+        if self.definition_count <= LUA_DEFINITIONS_PER_SCOPE {
+            out.push_str(&self.lua);
+            return;
+        }
+
+        out.push_str("do\n(function()\n");
+        let mut definitions_in_scope = 0;
+        for (start, end, count) in self.units {
+            if definitions_in_scope > 0
+                && definitions_in_scope + count > LUA_DEFINITIONS_PER_SCOPE
+            {
+                out.push_str(
+                    "end)()\nend\ndo\n(function()\n",
+                );
+                definitions_in_scope = 0;
+            }
+            out.push_str(&self.lua[start..end]);
+            definitions_in_scope += count;
+        }
+        out.push_str("end)()\nend\n");
+    }
+}
+
 #[derive(Clone, Copy)]
 enum BodyMutation {
     None,
@@ -3492,7 +3535,7 @@ fn emit_specialized_callees(
     rejected: &[(String, CompilerError)],
     built: &mut Vec<(Instance, Chunk)>,
     statics: &mut Vec<skull_mir::mir::StaticCell>,
-    out: &mut String,
+    out: &mut LuaDefinitionBuffer,
     attribution: &mut AttributionAccumulator,
     times: &mut PhaseTimes,
 ) -> Vec<CompilerError> {
@@ -4685,9 +4728,10 @@ fn assemble(
     }
     let mut always_emitted_calls: Vec<FuncRef> = Vec::new();
     let mut always_emitted_names: Vec<Ustr> = Vec::new();
+    let mut decorator_lua = String::new();
     merge_units(
         deco_results,
-        &mut out,
+        &mut decorator_lua,
         &mut skipped,
         &mut direct_globals,
         &mut direct_calls,
@@ -4698,6 +4742,9 @@ fn assemble(
         &mut attribution,
         &mut times,
     );
+    let mut decorator_definitions = LuaDefinitionBuffer::default();
+    decorator_definitions.push_str(&decorator_lua);
+    decorator_definitions.append_to(&mut out);
 
     // Global initializers are emitted below, in their original slot, but they are
     // LOWERED here: their call edges are reachability roots (a global init is
@@ -4793,6 +4840,7 @@ fn assemble(
     for c in spec_chunks.values() {
         needed_foreign.extend(c.calls.iter().map(|f| shared(*f)));
     }
+    let mut definitions = LuaDefinitionBuffer::default();
 
     // Function definitions, every module (cached chunk for ordinary/coroutine,
     // regenerated for extern / inline(lua)). The cached chunks were built in
@@ -4853,7 +4901,7 @@ fn assemble(
                     // `extern_ret`'s unbound-generic rejection, whose subject is
                     // a generic declaration the view holds no base instance for.
                     if emit_def {
-                        let _ = writeln!(out, "function {nm}({params})\n{body}\nend");
+                        definitions.push_str(&format!("function {nm}({params})\n{body}\nend\n"));
                     }
                 }
                 continue;
@@ -4899,7 +4947,9 @@ fn assemble(
                         }
                     }
                 }
-                let _ = writeln!(out, "function {name}({params})\n{prologue}{body}\nend");
+                definitions.push_str(&format!(
+                    "function {name}({params})\n{prologue}{body}\nend\n"
+                ));
                 continue;
             }
             // An `Iterator`-bounded fn has no standalone emission (it exists
@@ -4921,7 +4971,7 @@ fn assemble(
                     times.add(&chunk.times);
                     attribution.add_unit(&chunk.attribution);
                     if emit_def {
-                        out.push_str(&chunk.lua);
+                        definitions.push_str(&chunk.lua);
                         code_artifact.merge_ref(&chunk.code_artifact);
                         // A dropped definition's `static` cells do not exist, so
                         // they must not be registered for hot-reload preservation.
@@ -4966,7 +5016,7 @@ fn assemble(
         &spec_rejected,
         built_specs,
         &mut all_statics,
-        &mut out,
+        &mut definitions,
         &mut attribution,
         &mut times,
     ));
@@ -4982,6 +5032,7 @@ fn assemble(
     // scaffolding (init ordering, deco application) whose own errors are
     // unrelated to a body that cannot emit.
     rejections.into_result()?;
+    definitions.append_to(&mut out);
     mark_generated_code_values(ws, &mut code_artifact);
     let definition_plan = skull_mir::definition::collect(ws)?;
     if definition_plan.census.applications != definition_plan.census.admitted {
@@ -5011,7 +5062,9 @@ fn assemble(
     // Globals: an init fn + a dependency-ordered `<NAME> = __skull_ginit_<NAME>()`.
     // (Lowered above, so the walk could see their call edges; appended here, in
     // the original slot, so the emitted text is unchanged.)
-    out.push_str(&globals_lua);
+    let mut global_definitions = LuaDefinitionBuffer::default();
+    global_definitions.push_str(&globals_lua);
+    global_definitions.append_to(&mut out);
     skipped.extend(global_skipped);
     let has_definition_plan = definition_plan.census.declarations > 0;
     if code_artifact.entries.values().any(|entry| entry.escaping) || has_definition_plan {
@@ -6938,9 +6991,10 @@ fn assemble_overlay(
     let mut order: Vec<Instance> = cache.changed_since_full.iter().cloned().collect();
     order.sort_by_key(|b| overlay_order_key(&cache.scx, b));
     order.dedup();
+    let mut definitions = LuaDefinitionBuffer::default();
     for body in &order {
         match cache.chunks.get(body) {
-            Some(Ok(chunk)) => out.push_str(&chunk.lua),
+            Some(Ok(chunk)) => definitions.push_str(&chunk.lua),
             Some(Err(err)) => {
                 let fref = body.func;
                 let f = &ws.module(fref.module).functions[fref.func];
@@ -6950,6 +7004,7 @@ fn assemble_overlay(
             None => {}
         }
     }
+    definitions.append_to(&mut out);
     let has_code_slots = cache.code_artifact.entries.values().any(|entry| entry.escaping);
     let code_slot_stage = code_slot_registration_lua_entries(
         ws,
@@ -7068,6 +7123,7 @@ fn assemble_overlay(
         // Emit each affected const's ginit fn (changed only) now; build its init
         // line + dependency edges (restricted to affected consts) for the sort.
         let mut inits: Vec<GlobalInit> = Vec::new();
+        let mut definitions = LuaDefinitionBuffer::default();
         for a in &affected {
             let line = if a.changed {
                 let unit = emit_global_unit(
@@ -7086,7 +7142,7 @@ fn assemble_overlay(
                 unit_reads
                     .globals
                     .insert((a.mid, a.gid), unit.comptime_reads.clone());
-                out.push_str(&unit.lua); // the (new) ginit fn def
+                definitions.push_str(&unit.lua);
                 if let Some(s) = unit.skipped {
                     skipped.push(s);
                 }
@@ -7117,6 +7173,7 @@ fn assemble_overlay(
                 .collect();
             inits.push(GlobalInit { name: a.name, deps: edges, line });
         }
+        definitions.append_to(&mut out);
 
         match sort_global_init_lines(inits) {
             Ok(lines) => out.push_str(&lines.concat()),
@@ -7405,6 +7462,63 @@ pub fn emit_overlay_with_span_edits(
         ("assemble_overlay (+build_deco_map)", t_asm),
     ];
     Ok(emit)
+}
+
+#[cfg(test)]
+mod lua_definition_scope_tests {
+    use super::*;
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    fn luajit_loads(lua: &str) -> Option<(bool, String)> {
+        let mut child = Command::new("luajit")
+            .arg("-")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .ok()?;
+        if let Err(error) = child.stdin.take().unwrap().write_all(lua.as_bytes()) {
+            assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
+        }
+        let output = child.wait_with_output().unwrap();
+        Some((output.status.success(), String::from_utf8_lossy(&output.stderr).into_owned()))
+    }
+
+    #[test]
+    fn definition_scopes_cross_the_luajit_main_constant_limit() {
+        let mut raw = String::new();
+        let mut definitions = LuaDefinitionBuffer::default();
+        for i in 0..32_769 {
+            let function = format!("function generated_{i}() return {i} end\n");
+            raw.push_str(&function);
+            definitions.push_str(&function);
+        }
+        let Some((raw_loaded, raw_error)) = luajit_loads(&raw) else {
+            return;
+        };
+        assert!(!raw_loaded, "the unpartitioned control unexpectedly loaded");
+        assert!(
+            raw_error.contains("more than 65536 constants"),
+            "the control failed for the wrong reason: {raw_error}"
+        );
+
+        let mut scoped = String::new();
+        definitions.append_to(&mut scoped);
+        scoped.push_str("assert(generated_0() == 0 and generated_32768() == 32768)\n");
+        let (scoped_loaded, scoped_error) = luajit_loads(&scoped).unwrap();
+        assert!(scoped_loaded, "partitioned definitions did not load: {scoped_error}");
+    }
+
+    #[test]
+    fn small_definition_population_keeps_its_exact_text() {
+        let source = "function one() return 1 end\nfunction two() return one() + 1 end\n";
+        let mut definitions = LuaDefinitionBuffer::default();
+        definitions.push_str(source);
+        let mut out = String::new();
+        definitions.append_to(&mut out);
+        assert_eq!(out, source);
+    }
 }
 
 #[cfg(test)]
