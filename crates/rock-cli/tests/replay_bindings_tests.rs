@@ -1,4 +1,4 @@
-//! Phase 4: a v6 recording carries the normalized binding overlay before its
+//! Phase 4: a v9 recording carries the normalized binding overlay before its
 //! first tick, so replay startup can select it independently of disk state.
 
 use std::path::Path;
@@ -29,7 +29,7 @@ fn mag_record_stamps_a_nonempty_binding_overlay_before_ticks() {
     let text = std::fs::read_to_string(log).expect("read replay");
     let lines: Vec<&str> = text.lines().collect();
     let overlay_index = lines.iter().position(|line| line.starts_with("bindings "))
-        .expect("v6 header must contain a binding overlay");
+        .expect("v9 header must contain a binding overlay");
     let first_tick = lines.iter().position(|line| line.starts_with("t "))
         .expect("record must contain a tick");
     assert!(overlay_index < first_tick, "overlay must precede the first tick");
@@ -52,6 +52,19 @@ fn replay_uses_recorded_bindings_after_disk_changes() {
     let data = home.path().join("data");
     let dir = tempfile::tempdir().expect("record dir");
     let log = dir.path().join("bindings-input.replay");
+    let bindings_path = data.join("darth.games").join("mag").join("bindings.json");
+    std::fs::create_dir_all(bindings_path.parent().unwrap()).expect("pref directory");
+    let recorded = serde_json::json!({
+        "version": 1,
+        "actions": {
+            "toggle_spells": [{
+                "kind": "key", "scan": "x", "ctrl": false,
+                "shift": false, "alt": false, "gui": false
+            }]
+        }
+    });
+    std::fs::write(&bindings_path, serde_json::to_vec(&recorded).unwrap())
+        .expect("recorded bindings");
     let scratch = tempfile::tempdir().expect("record scratch");
     let record = Command::new(env!("CARGO_BIN_EXE_rock"))
         .args([
@@ -59,6 +72,8 @@ fn replay_uses_recorded_bindings_after_disk_changes() {
             "--output", &scratch.path().to_string_lossy(),
         ])
         .env("ROCK_FRAME_TIMEOUT_SECS", "60")
+        .env("MAG_BOOT_PLAYING", "1")
+        .env("MAG_BINDINGS_PATH_OVERRIDE", &bindings_path)
         .env("HOME", home.path())
         .env("XDG_DATA_HOME", &data)
         .current_dir(workspace_root())
@@ -71,8 +86,8 @@ fn replay_uses_recorded_bindings_after_disk_changes() {
     let rewritten = text.lines().map(|line| {
         if !line.starts_with("t ") { return line.to_string(); }
         let mut fields: Vec<&str> = line.split_whitespace().collect();
-        assert_eq!(fields.len(), 10, "v6 tick must have ten fields: {line}");
-        if ticks == 3 { fields[6] = "b"; }
+        assert_eq!(fields.len(), 10, "v9 tick must have ten fields: {line}");
+        if ticks == 3 { fields[6] = "x"; }
         ticks += 1;
         fields.join(" ")
     }).collect::<Vec<_>>().join("\n") + "\n";
@@ -88,9 +103,7 @@ fn replay_uses_recorded_bindings_after_disk_changes() {
             }]
         }
     });
-    let changed_path = data.join("darth.games").join("mag").join("bindings.json");
-    std::fs::create_dir_all(changed_path.parent().unwrap()).expect("pref directory");
-    std::fs::write(&changed_path, serde_json::to_vec(&changed).unwrap()).expect("changed bindings");
+    std::fs::write(&bindings_path, serde_json::to_vec(&changed).unwrap()).expect("changed bindings");
 
     let changed_scratch = tempfile::tempdir().expect("changed replay scratch");
     let changed_run = Command::new(env!("CARGO_BIN_EXE_rock"))
@@ -99,6 +112,8 @@ fn replay_uses_recorded_bindings_after_disk_changes() {
             "--output", &changed_scratch.path().to_string_lossy(),
         ])
         .env("ROCK_FRAME_TIMEOUT_SECS", "60")
+        .env("MAG_BOOT_PLAYING", "1")
+        .env("MAG_BINDINGS_PATH_OVERRIDE", &bindings_path)
         .env("HOME", home.path())
         .env("XDG_DATA_HOME", &data)
         .current_dir(workspace_root())
@@ -107,8 +122,7 @@ fn replay_uses_recorded_bindings_after_disk_changes() {
     assert!(changed_run.status.success(), "changed replay failed: {}", String::from_utf8_lossy(&changed_run.stderr));
     let changed_state: serde_json::Value = serde_json::from_slice(&changed_run.stdout).expect("changed replay state");
 
-    let clean_home = tempfile::tempdir().expect("clean replay home");
-    let clean_data = clean_home.path().join("data");
+    std::fs::remove_file(&bindings_path).expect("restore bindings disk");
     let clean_scratch = tempfile::tempdir().expect("clean replay scratch");
     let clean_run = Command::new(env!("CARGO_BIN_EXE_rock"))
         .args([
@@ -116,15 +130,19 @@ fn replay_uses_recorded_bindings_after_disk_changes() {
             "--output", &clean_scratch.path().to_string_lossy(),
         ])
         .env("ROCK_FRAME_TIMEOUT_SECS", "60")
-        .env("HOME", clean_home.path())
-        .env("XDG_DATA_HOME", &clean_data)
+        .env("MAG_BOOT_PLAYING", "1")
+        .env("MAG_BINDINGS_PATH_OVERRIDE", &bindings_path)
+        .env("HOME", home.path())
+        .env("XDG_DATA_HOME", &data)
         .current_dir(workspace_root())
         .output()
         .expect("spawn clean replay");
     assert!(clean_run.status.success(), "clean replay failed: {}", String::from_utf8_lossy(&clean_run.stderr));
     let clean_state: serde_json::Value = serde_json::from_slice(&clean_run.stdout).expect("clean replay state");
-    assert_eq!(changed_state["mag"]["SPELL_PANEL_OPEN"], serde_json::Value::Bool(false),
-        "the recorded b binding must toggle the spell panel");
-    assert_eq!(changed_state["mag"]["SPELL_PANEL_OPEN"], clean_state["mag"]["SPELL_PANEL_OPEN"],
+    let changed_spellbook_open = &changed_state["mag"]["SETTINGS"]["ui"]["spells"]["open"];
+    let clean_spellbook_open = &clean_state["mag"]["SETTINGS"]["ui"]["spells"]["open"];
+    assert_eq!(changed_spellbook_open, &serde_json::Value::Bool(false),
+        "the recorded x binding must close the spell panel");
+    assert_eq!(changed_spellbook_open, clean_spellbook_open,
         "changing disk bindings must not change replay behavior");
 }

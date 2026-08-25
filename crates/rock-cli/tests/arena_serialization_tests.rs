@@ -116,7 +116,7 @@ fn arena_globals_are_hashed_by_their_rows() {
         "MOBS must be hashed by its logical StateSchema identity; hashed names: {hashed:?}"
     );
     assert!(
-        !hashed.iter().any(|name| name.contains("<bone-stdlib:arena.rock>::__ARENA_STORES")),
+        !hashed.iter().any(|name| name.contains("<bone-stdlib:arena.rock>::__ARENA_REGISTRY")),
         "the physical Arena registry is not replay state; hashed names: {hashed:?}"
     );
 

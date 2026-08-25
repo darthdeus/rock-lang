@@ -98,6 +98,30 @@ fn unused_param_is_flagged() {
 }
 
 #[test]
+fn artifact_definition_key_param_is_metadata_used() {
+    let src = r#"
+@artifact_definition(catalog="widgets", key_param="key")
+deco init widget(key: string) {}
+"#;
+    assert!(names(src).is_empty(), "artifact-definition metadata consumes `key`");
+}
+
+#[test]
+fn lifecycle_stage_param_is_metadata_used() {
+    let src = r#"
+@lifecycle(phase="update", owner="session", stage_param="stage")
+deco init update(stage: int = 100) {}
+"#;
+    assert!(names(src).is_empty(), "lifecycle metadata consumes `stage`");
+}
+
+#[test]
+fn ordinary_decorator_param_still_requires_a_body_read() {
+    let src = "deco init tagged(value: int) {}";
+    assert_eq!(names(src), vec!["value".to_string()]);
+}
+
+#[test]
 fn read_param_is_not_flagged() {
     let src = "fn f(a: int) -> int { a }";
     assert!(names(src).is_empty(), "a is read");

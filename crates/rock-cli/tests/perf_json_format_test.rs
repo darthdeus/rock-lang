@@ -399,10 +399,49 @@ fn perf_json_gc_window_has_trustworthy_reconciliation() {
 fn perf_json_graphics_has_counters() {
     let doc = run_perf_json("games/match3");
     let g = &doc["graphics"];
-    for key in ["draw_calls", "text_draws"] {
+    for key in [
+        "draw_calls",
+        "text_draws",
+        "shader_switches",
+        "canvas_switches",
+        "stream_upload_calls",
+        "stream_storage_replacements",
+        "stream_upload_bytes",
+        "streamed_vertices",
+        "retained_upload_calls",
+        "retained_upload_bytes",
+        "retained_uploaded_vertices",
+        "world_active_batches",
+        "world_mesh_batches",
+        "world_batch_vertices",
+        "ui_active_batches",
+        "ui_mesh_batches",
+        "ui_batch_vertices",
+        "overlay_active_batches",
+        "overlay_mesh_batches",
+        "overlay_batch_vertices",
+    ] {
         assert!(
             g.get(key).and_then(Value::as_i64).is_some(),
             "graphics.{key} missing or not an int: {g}"
         );
     }
+    let active = g["world_active_batches"].as_i64().unwrap()
+        + g["ui_active_batches"].as_i64().unwrap()
+        + g["overlay_active_batches"].as_i64().unwrap();
+    let vertices = g["world_batch_vertices"].as_i64().unwrap()
+        + g["ui_batch_vertices"].as_i64().unwrap()
+        + g["overlay_batch_vertices"].as_i64().unwrap();
+    assert!(
+        active > 0,
+        "graphics batch census observed no active batches: {g}"
+    );
+    assert!(
+        vertices > 0,
+        "graphics batch census observed no vertices: {g}"
+    );
+    let mesh = g["world_mesh_batches"].as_i64().unwrap()
+        + g["ui_mesh_batches"].as_i64().unwrap()
+        + g["overlay_mesh_batches"].as_i64().unwrap();
+    assert!(mesh > 0 && mesh <= active, "invalid mesh/active population: {g}");
 }

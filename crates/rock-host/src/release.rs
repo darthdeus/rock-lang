@@ -45,7 +45,14 @@ pub fn select_assets(
     )
 }
 
-pub fn configured_asset_overlays(
+pub fn asset_overlay_roots(
+    project_dir: &Path,
+    config: Option<&StickConfig>,
+) -> Result<Vec<PathBuf>> {
+    configured_asset_overlays(project_dir, config)
+}
+
+fn configured_asset_overlays(
     project_dir: &Path,
     config: Option<&StickConfig>,
 ) -> Result<Vec<PathBuf>> {
@@ -104,7 +111,7 @@ fn validate_asset_overlay_paths(paths: Vec<PathBuf>, source: &str) -> Result<Vec
         .collect()
 }
 
-fn select_assets_with_overlays(
+pub fn select_assets_with_overlays(
     project_dir: &Path,
     game_key: &str,
     config: Option<&StickConfig>,
@@ -185,6 +192,38 @@ fn select_assets_with_overlays(
             .collect(),
         missing,
     })
+}
+
+pub fn resolve_asset_with_overlays(
+    project_dir: &Path,
+    game_key: &str,
+    overlays: &[PathBuf],
+    logical_key: &str,
+) -> Result<Option<ReleaseAsset>> {
+    validate_relative_key(logical_key, "sound asset key")?;
+    if !logical_key.starts_with("assets/") || logical_key.contains('\\') {
+        anyhow::bail!("sound asset key must be a canonical assets-relative key: {logical_key:?}");
+    }
+    let mut candidates = Vec::with_capacity(overlays.len() + 1);
+    candidates.push(project_dir.join(logical_key));
+    candidates.extend(overlays.iter().rev().map(|overlay| overlay.join(logical_key)));
+    for candidate in candidates.into_iter().rev() {
+        if candidate.is_file() {
+            return Ok(Some(ReleaseAsset {
+                key: key_for(game_key, logical_key),
+                source: candidate,
+            }));
+        }
+    }
+    Ok(None)
+}
+
+pub fn include_release_asset(selection: &mut AssetSelection, asset: ReleaseAsset) {
+    if selection.assets.iter().any(|existing| existing.key == asset.key) {
+        return;
+    }
+    selection.assets.push(asset);
+    selection.assets.sort_by(|left, right| left.key.cmp(&right.key));
 }
 
 fn add_path(

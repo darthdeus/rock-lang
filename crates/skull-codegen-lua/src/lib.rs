@@ -21,6 +21,7 @@
 mod regalloc;
 
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
+use std::cell::RefCell;
 use std::fmt::Write as _;
 use std::sync::Mutex;
 
@@ -35,6 +36,95 @@ use skull_mir::mir::*;
 use skull_mir::monoty::MonoInterner;
 
 pub use skull_mir::mangle::mangle_fn;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum EmittedAllocationKind {
+    StringConcat,
+    StringConversion,
+    StringFormat,
+    TupleConstruction,
+    VecConstruction,
+    VecColumnConstruction,
+    VecColumnHeader,
+    StructConstruction,
+    ValueConstruction,
+    ExplicitValueMaterialization,
+    EnumConstruction,
+    DynamicEnumConstruction,
+    ClosureEnvironment,
+    FfiArray,
+    FfiView,
+    ContainerGrowth,
+}
+
+impl EmittedAllocationKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::StringConcat => "string-concat",
+            Self::StringConversion => "string-conversion",
+            Self::StringFormat => "string-format",
+            Self::TupleConstruction => "tuple-construction",
+            Self::VecConstruction => "vec-construction",
+            Self::VecColumnConstruction => "vec-column-construction",
+            Self::VecColumnHeader => "vec-column-header",
+            Self::StructConstruction => "struct-construction",
+            Self::ValueConstruction => "value-construction",
+            Self::ExplicitValueMaterialization => "explicit-value-materialization",
+            Self::EnumConstruction => "enum-construction",
+            Self::DynamicEnumConstruction => "dynamic-enum-construction",
+            Self::ClosureEnvironment => "closure-environment",
+            Self::FfiArray => "ffi-array",
+            Self::FfiView => "ffi-view",
+            Self::ContainerGrowth => "container-growth",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EmittedAllocationSite {
+    pub id: u64,
+    pub kind: EmittedAllocationKind,
+    pub span: Option<Span>,
+    pub lua_body_line: u32,
+    pub mir_inst: u32,
+    lua_byte_offset: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LuaEmission {
+    pub lua: String,
+    pub allocation_sites: Vec<EmittedAllocationSite>,
+}
+
+pub const ARTIFACT_PLAN_PRELUDE: &str = r#"
+function __rock_artifact_binding_plan_stage(plan)
+  if not _G.__rock_state_transaction then error("Artifact binding plan stage not open", 0) end
+  if not plan or not plan.census or plan.census.examined <= 0
+      or plan.census.examined ~= plan.census.assigned then
+    error("incomplete Artifact binding plan", 0)
+  end
+  _G.__rock_artifact_binding_plan_pending = plan
+end
+function __rock_artifact_binding_plan_publish()
+  local plan = _G.__rock_artifact_binding_plan_pending
+  if plan ~= nil then
+    _G.__ROCK_ARTIFACT_BINDING_PLAN = plan
+    _G.__rock_artifact_binding_plan_pending = nil
+  end
+end
+function __rock_artifact_plan_begin()
+  if _G.__rock_state_transaction_begin then __rock_state_transaction_begin() end
+  _G.__rock_artifact_binding_plan_pending = nil
+end
+function __rock_artifact_plan_abort()
+  if _G.__rock_state_transaction_abort then __rock_state_transaction_abort() end
+  _G.__rock_artifact_binding_plan_pending = nil
+end
+function __rock_artifact_plan_publish()
+  __rock_artifact_binding_plan_publish()
+  if _G.__rock_state_transaction_commit then __rock_state_transaction_commit() end
+end
+"#;
 
 /// Runtime support for callable CodeRefs and capturing environment records.
 /// Slots are mutated in place only by the publish step, so existing values see
@@ -87,6 +177,7 @@ function __rock_code_slot_begin()
   _G.__rock_definition_plan_materializing = false
   _G.__rock_lifecycle_plan_pending = nil
   _G.__rock_definition_plan_pending = nil
+  _G.__rock_artifact_binding_plan_pending = nil
 end
 function __rock_code_slot_abort()
   if _G.__rock_state_transaction_abort then __rock_state_transaction_abort() end
@@ -95,6 +186,7 @@ function __rock_code_slot_abort()
   _G.__rock_definition_plan_materializing = false
   _G.__rock_lifecycle_plan_pending = nil
   _G.__rock_definition_plan_pending = nil
+  _G.__rock_artifact_binding_plan_pending = nil
   local pending_wgpu = rawget(_G, "PENDING_WGPU_SHADER_SRCS")
   if pending_wgpu then
     for key in pairs(pending_wgpu) do pending_wgpu[key] = nil end
@@ -113,6 +205,13 @@ end
 function __rock_definition_plan_stage(plan)
   if not _G.__rock_code_slot_pending then error("Rock code slot stage not open", 0) end
   _G.__rock_definition_plan_pending = plan
+end
+function __rock_definition_catalog(catalog)
+  local plan = rawget(_G, "__ROCK_DEFINITION_PLAN")
+  if plan == nil then error("DefinitionPlan is not published", 0) end
+  local view = rawget(plan, catalog)
+  if view == nil then error("DefinitionPlan catalog " .. catalog .. " is not published", 0) end
+  return view
 end
 function __rock_lifecycle_wire_due(old_plan, candidate_plan)
   local due = {}
@@ -234,6 +333,7 @@ function __rock_code_slot_publish()
   if definition_plan ~= nil then
     _G.__ROCK_DEFINITION_PLAN = definition_plan
   end
+  if __rock_artifact_binding_plan_publish then __rock_artifact_binding_plan_publish() end
   _G.__rock_code_slot_pending = nil
   _G.__rock_code_slot_pending_slots = nil
   _G.__rock_lifecycle_plan_pending = nil
@@ -260,6 +360,85 @@ function __rock_code_ref_kind(v)
     if slot ~= nil and __rock_code_ref_kind(slot) == "slot" then return "env" end
   end
   return nil
+end
+"#;
+
+pub const ALLOCATION_ACTIVATION_PRELUDE: &str = r#"
+if not _G.__rock_alloc_hits then _G.__rock_alloc_hits = {} end
+if not _G.__rock_alloc_frame_hits then _G.__rock_alloc_frame_hits = {} end
+if not _G.__rock_alloc_active_frames then _G.__rock_alloc_active_frames = {} end
+if not _G.__rock_alloc_max_frame_hits then _G.__rock_alloc_max_frame_hits = {} end
+if not _G.__rock_alloc_outside_hits then _G.__rock_alloc_outside_hits = {} end
+if not _G.__rock_alloc_last_frame then _G.__rock_alloc_last_frame = {} end
+if not _G.__rock_alloc_current_frame_hits then _G.__rock_alloc_current_frame_hits = {} end
+function __rock_alloc_hit(id, value)
+  local hits = _G.__rock_alloc_hits
+  hits[id] = (hits[id] or 0) + 1
+  local frame = _G.__rock_alloc_frame
+  if frame ~= nil then
+    local frame_hits = _G.__rock_alloc_frame_hits
+    frame_hits[id] = (frame_hits[id] or 0) + 1
+    local last = _G.__rock_alloc_last_frame
+    local counts = _G.__rock_alloc_current_frame_hits
+    if last[id] ~= frame then
+      last[id] = frame
+      _G.__rock_alloc_active_frames[id] = (_G.__rock_alloc_active_frames[id] or 0) + 1
+      counts[id] = 0
+    end
+    counts[id] = counts[id] + 1
+    if counts[id] > (_G.__rock_alloc_max_frame_hits[id] or 0) then
+      _G.__rock_alloc_max_frame_hits[id] = counts[id]
+    end
+  else
+    _G.__rock_alloc_outside_hits[id] = (_G.__rock_alloc_outside_hits[id] or 0) + 1
+  end
+  return value
+end
+function __rock_alloc_hit_effect(id)
+  __rock_alloc_hit(id, false)
+end
+function __rock_allocation_activation_begin()
+  _G.__rock_alloc_hits = {}
+  _G.__rock_alloc_frame_hits = {}
+  _G.__rock_alloc_active_frames = {}
+  _G.__rock_alloc_max_frame_hits = {}
+  _G.__rock_alloc_outside_hits = {}
+  _G.__rock_alloc_last_frame = {}
+  _G.__rock_alloc_current_frame_hits = {}
+  _G.__rock_alloc_frame_serial = 0
+  _G.__rock_alloc_frame = nil
+end
+function __rock_allocation_activation_frame_begin()
+  _G.__rock_alloc_frame_serial = (_G.__rock_alloc_frame_serial or 0) + 1
+  _G.__rock_alloc_frame = _G.__rock_alloc_frame_serial
+end
+function __rock_allocation_activation_frame_end()
+  _G.__rock_alloc_frame = nil
+end
+function __rock_allocation_activation_dump(frames)
+  local path = os.getenv("SKULL_ALLOCATION_ACTIVATION")
+  if not path or path == "" then return false end
+  local ids = {}
+  for id in pairs(_G.__rock_alloc_hits) do ids[#ids + 1] = id end
+  table.sort(ids)
+  local file, err = io.open(path, "w")
+  if not file then
+    io.stderr:write("[ALLOC] cannot write activation report " .. path .. ": " .. tostring(err) .. "\n")
+    return false
+  end
+  file:write("rock.allocation-activation.v2\n")
+  file:write("frames\t", tostring(frames), "\n")
+  file:write("sites\t", tostring(#ids), "\n")
+  for _, id in ipairs(ids) do
+    file:write(id,
+      "\t", tostring(_G.__rock_alloc_hits[id]),
+      "\t", tostring(_G.__rock_alloc_frame_hits[id] or 0),
+      "\t", tostring(_G.__rock_alloc_active_frames[id] or 0),
+      "\t", tostring(_G.__rock_alloc_max_frame_hits[id] or 0),
+      "\t", tostring(_G.__rock_alloc_outside_hits[id] or 0), "\n")
+  end
+  file:close()
+  return true
 end
 "#;
 
@@ -322,6 +501,64 @@ fn raw<T>(idx: Idx<T>) -> u32 {
     idx.into_raw().into()
 }
 
+fn emitted_value_allocation_kind(inst: &Inst) -> Option<EmittedAllocationKind> {
+    Some(match inst {
+        Inst::StringConcat(..) => EmittedAllocationKind::StringConcat,
+        Inst::ToString(..) => EmittedAllocationKind::StringConversion,
+        Inst::Format { .. } | Inst::FormatDyn { .. } => EmittedAllocationKind::StringFormat,
+        Inst::MakeTuple(..) => EmittedAllocationKind::TupleConstruction,
+        Inst::MakeVec(..) => EmittedAllocationKind::VecConstruction,
+        Inst::MakeVecColumns { .. } => EmittedAllocationKind::VecColumnConstruction,
+        Inst::MakeVecColumnHeader { .. } => EmittedAllocationKind::VecColumnHeader,
+        Inst::MakeStruct { .. } => EmittedAllocationKind::StructConstruction,
+        Inst::MakeValueStruct { .. } => EmittedAllocationKind::ValueConstruction,
+        Inst::MaterializeValueStruct { .. } => {
+            EmittedAllocationKind::ExplicitValueMaterialization
+        }
+        Inst::MakeEnum { .. } => EmittedAllocationKind::EnumConstruction,
+        Inst::MakeEnumDyn { .. } => EmittedAllocationKind::DynamicEnumConstruction,
+        Inst::MakeEnv { .. } => EmittedAllocationKind::ClosureEnvironment,
+        Inst::FfiNewArray { .. } => EmittedAllocationKind::FfiArray,
+        Inst::FfiViewCast { .. } => EmittedAllocationKind::FfiView,
+        _ => return None,
+    })
+}
+
+fn emitted_effect_allocation_kind(inst: &Inst) -> Option<EmittedAllocationKind> {
+    match inst {
+        Inst::ArrayPush { .. }
+        | Inst::StoreIndex {
+            kind: ContainerKind::Map,
+            ..
+        } => Some(EmittedAllocationKind::ContainerGrowth),
+        _ => None,
+    }
+}
+
+fn allocation_site_id(
+    body: &str,
+    id: Idx<Inst>,
+    kind: EmittedAllocationKind,
+    span: Option<Span>,
+) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    let mut write = |bytes: &[u8]| {
+        for byte in bytes {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+    };
+    write(body.as_bytes());
+    write(kind.as_str().as_bytes());
+    write(&raw(id).to_le_bytes());
+    if let Some(span) = span {
+        write(span.file.as_str().as_bytes());
+        write(&span.offset_range.0.to_le_bytes());
+        write(&span.offset_range.1.to_le_bytes());
+    }
+    hash
+}
+
 /// Append `n`'s base-10 digits to `out`. A small fast path that skips
 /// `core::fmt`'s padding-aware `Display for u32` machinery — ~2x on the per-
 /// operand `r<n>` / `c<n>` / `bb<n>` sites that dominate the printer.
@@ -357,7 +594,7 @@ pub struct CodegenCtx {
     /// workers; contention is nil (a few per fn).
     rejections: Mutex<Vec<(String, CompilerError)>>,
     /// Compiler-assigned Session slots for mutable globals.
-    state_slots: HashMap<ustr::Ustr, String>,
+    state_slots: HashMap<ustr::Ustr, u32>,
 }
 
 impl Clone for CodegenCtx {
@@ -416,7 +653,7 @@ impl CodegenCtx {
         Self::new_with_state(ws, HashMap::default())
     }
 
-    pub fn new_with_state(ws: &Workspace, state_slots: HashMap<ustr::Ustr, String>) -> Self {
+    pub fn new_with_state(ws: &Workspace, state_slots: HashMap<ustr::Ustr, u32>) -> Self {
         let mut reserved: HashMap<String, Span> = HashMap::default();
         let mut collisions: Vec<(String, CompilerError)> = Vec::new();
         for m in ws.modules.iter() {
@@ -480,8 +717,8 @@ impl CodegenCtx {
         sink.drain(..).next().map(|(_, e)| e)
     }
 
-    pub fn state_slot(&self, name: ustr::Ustr) -> Option<&str> {
-        self.state_slots.get(&name).map(String::as_str)
+    pub fn state_slot(&self, name: ustr::Ustr) -> Option<u32> {
+        self.state_slots.get(&name).copied()
     }
 }
 
@@ -543,6 +780,18 @@ pub fn emit_function(
     emit_named(ws, ctx, interner, &name, func)
 }
 
+pub fn emit_function_with_allocation_sites(
+    ws: &Workspace,
+    ctx: &CodegenCtx,
+    interner: &MonoInterner,
+    self_ref: FuncRef,
+    func: &MirFunc,
+    instrument: bool,
+) -> LuaEmission {
+    let name = mangle_fn(ws, func_of(ws, self_ref));
+    emit_named_with_allocation_sites(ws, ctx, interner, &name, func, instrument)
+}
+
 /// Emit a MIR function under the EXACT Lua name `name` (no mangling) — for
 /// synthetic functions with an already-final name (a global-initializer fn).
 /// Calls inside the body still mangle their `FuncRef`s via `ctx`.
@@ -554,6 +803,26 @@ pub fn emit_named(
     func: &MirFunc,
 ) -> String {
     emit_named_with_statics(ws, ctx, interner, name, func, &[])
+}
+
+pub fn emit_named_with_allocation_sites(
+    ws: &Workspace,
+    ctx: &CodegenCtx,
+    interner: &MonoInterner,
+    name: &str,
+    func: &MirFunc,
+    instrument: bool,
+) -> LuaEmission {
+    emit_named_framed_with_allocation_sites(
+        ws,
+        ctx,
+        interner,
+        name,
+        func,
+        None,
+        &[],
+        instrument,
+    )
 }
 
 /// Emit a function whose static cells may be owned by an enclosing lowered
@@ -587,6 +856,13 @@ pub struct FrameCtx {
     pub slots: HashMap<Idx<Cell>, u32>,
 }
 
+#[derive(Clone, Copy)]
+struct AllocationEmission<'a> {
+    body: &'a str,
+    sites: &'a RefCell<Vec<EmittedAllocationSite>>,
+    instrument: bool,
+}
+
 /// [`emit_named`] with an optional coroutine frame context (the `__step` fn).
 ///
 /// Closures no longer convert here: `skull_transform::convert_closures` (the
@@ -613,6 +889,78 @@ fn emit_named_framed_with_statics(
     func: &MirFunc,
     frame: Option<&FrameCtx>,
     inherited_statics: &[StaticCell],
+) -> String {
+    emit_named_framed_with_statics_impl(
+        ws,
+        ctx,
+        interner,
+        name,
+        func,
+        frame,
+        inherited_statics,
+        None,
+    )
+}
+
+pub fn emit_named_framed_with_allocation_sites(
+    ws: &Workspace,
+    ctx: &CodegenCtx,
+    interner: &MonoInterner,
+    name: &str,
+    func: &MirFunc,
+    frame: Option<&FrameCtx>,
+    inherited_statics: &[StaticCell],
+    instrument: bool,
+) -> LuaEmission {
+    let sites = RefCell::new(Vec::new());
+    let lua = emit_named_framed_with_statics_impl(
+        ws,
+        ctx,
+        interner,
+        name,
+        func,
+        frame,
+        inherited_statics,
+        Some(AllocationEmission {
+            body: name,
+            sites: &sites,
+            instrument,
+        }),
+    );
+    let mut allocation_sites = sites.into_inner();
+    let function_line_offset = lua
+        .find(&format!("function {name}"))
+        .map(|offset| lua.as_bytes()[..offset].iter().filter(|byte| **byte == b'\n').count())
+        .unwrap_or(0) as u32;
+    allocation_sites.sort_by_key(|site| site.lua_byte_offset);
+    let mut byte_cursor = 0;
+    let mut line = 1;
+    for site in &mut allocation_sites {
+        for byte in &lua.as_bytes()[byte_cursor..site.lua_byte_offset] {
+            if *byte == b'\n' {
+                line += 1;
+            }
+        }
+        site.lua_body_line = line - function_line_offset;
+        byte_cursor = site.lua_byte_offset;
+    }
+    allocation_sites.sort_by_key(|site| site.id);
+    allocation_sites.dedup_by_key(|site| site.id);
+    LuaEmission {
+        lua,
+        allocation_sites,
+    }
+}
+
+fn emit_named_framed_with_statics_impl(
+    ws: &Workspace,
+    ctx: &CodegenCtx,
+    interner: &MonoInterner,
+    name: &str,
+    func: &MirFunc,
+    frame: Option<&FrameCtx>,
+    inherited_statics: &[StaticCell],
+    allocation: Option<AllocationEmission<'_>>,
 ) -> String {
     let entry = func.entry();
     let params = func.params.as_slice();
@@ -658,6 +1006,7 @@ fn emit_named_framed_with_statics(
         &static_slots,
         &hoist,
         &hoist_names,
+        allocation,
         &mut out,
     );
     out.push('\n');
@@ -1430,10 +1779,11 @@ fn render_scope(
     is_top: bool,
     frame: Option<&FrameCtx>,
     cell_colors: &[u32],
-    state_slots: &HashMap<ustr::Ustr, String>,
+    state_slots: &HashMap<ustr::Ustr, u32>,
     static_slots: &HashMap<ustr::Ustr, String>,
     hoist: &HashMap<Idx<Inst>, u32>,
     hoist_names: &[String],
+    allocation: Option<AllocationEmission<'_>>,
     out: &mut String,
 ) {
     // RPO drives both block layout (preheader-before-header, for the relooper)
@@ -1574,6 +1924,7 @@ fn render_scope(
         hoist_names,
         state_slots,
         static_slots,
+        allocation,
     };
     for &bb in &rpo {
         em.emit_block(out, bb); // self-skips an already-emitted block (loop body)
@@ -1642,16 +1993,68 @@ struct Emitter<'a> {
     hoist: &'a HashMap<Idx<Inst>, u32>,
     /// `group -> global name` for [`Self::hoist`].
     hoist_names: &'a [String],
-    state_slots: &'a HashMap<ustr::Ustr, String>,
+    state_slots: &'a HashMap<ustr::Ustr, u32>,
     static_slots: &'a HashMap<ustr::Ustr, String>,
+    allocation: Option<AllocationEmission<'a>>,
 }
 
 impl Emitter<'_> {
-    fn state_slot(&self, name: ustr::Ustr) -> Option<&str> {
-        self.state_slots
-            .get(&name)
-            .or_else(|| self.static_slots.get(&name))
-            .map(String::as_str)
+    fn has_state_slot(&self, name: ustr::Ustr) -> bool {
+        self.state_slots.contains_key(&name) || self.static_slots.contains_key(&name)
+    }
+
+    fn write_state_slot(&self, out: &mut String, name: ustr::Ustr) {
+        if let Some(&slot) = self.state_slots.get(&name) {
+            push_uint(out, slot);
+        } else if let Some(slot) = self.static_slots.get(&name) {
+            out.push_str(&lua_string(slot));
+        } else {
+            unreachable!("state slot checked before emission")
+        }
+    }
+
+    fn record_value_allocation_site(
+        &self,
+        id: Idx<Inst>,
+        inst: &Inst,
+        lua_byte_offset: usize,
+    ) -> Option<EmittedAllocationSite> {
+        let allocation = self.allocation?;
+        let kind = emitted_value_allocation_kind(inst)?;
+        let site = self.record_allocation_site(allocation, id, kind, lua_byte_offset);
+        allocation.instrument.then_some(site)
+    }
+
+    fn record_effect_allocation_site(
+        &self,
+        id: Idx<Inst>,
+        inst: &Inst,
+        lua_byte_offset: usize,
+    ) -> Option<EmittedAllocationSite> {
+        let allocation = self.allocation?;
+        let kind = emitted_effect_allocation_kind(inst)?;
+        let site = self.record_allocation_site(allocation, id, kind, lua_byte_offset);
+        allocation.instrument.then_some(site)
+    }
+
+    fn record_allocation_site(
+        &self,
+        allocation: AllocationEmission<'_>,
+        id: Idx<Inst>,
+        kind: EmittedAllocationKind,
+        lua_byte_offset: usize,
+    ) -> EmittedAllocationSite {
+        let span = self.func.inst_spans.get(id).copied();
+        let site = EmittedAllocationSite {
+            id: allocation_site_id(allocation.body, id, kind, span),
+            kind,
+            span,
+            lua_body_line: 0,
+            mir_inst: raw(id),
+            lua_byte_offset,
+        };
+        allocation.sites.borrow_mut().push(site.clone());
+        site
     }
 
     fn emit_block(&mut self, out: &mut String, bb: Idx<Block>) {
@@ -1898,8 +2301,21 @@ impl Emitter<'_> {
         s
     }
 
-    /// The RHS expression for a value-producing instruction.
     fn write_value(&self, out: &mut String, id: Idx<Inst>, inst: &Inst) {
+        let instrument = self.record_value_allocation_site(id, inst, out.len());
+        if let Some(ref site) = instrument {
+            out.push_str("__rock_alloc_hit(\"");
+            write!(out, "{:016x}", site.id).unwrap();
+            out.push_str("\", ");
+        }
+        self.write_value_inner(out, id, inst);
+        if instrument.is_some() {
+            out.push(')');
+        }
+    }
+
+    /// The RHS expression for a value-producing instruction.
+    fn write_value_inner(&self, out: &mut String, id: Idx<Inst>, inst: &Inst) {
         match inst {
             Inst::Const(l) => write_lit(out, l),
             Inst::Global(g) => {
@@ -1907,9 +2323,9 @@ impl Emitter<'_> {
                     out.push_str("__rock_code_slot_ref(");
                     out.push_str(&lua_string(&identity.logical_key(self.ws, self.interner)));
                     out.push(')');
-                } else if let Some(slot) = self.state_slot(*g) {
+                } else if self.has_state_slot(*g) {
                     out.push_str("__rock_active_session.__rock_state[");
-                    out.push_str(&lua_string(slot));
+                    self.write_state_slot(out, *g);
                     out.push(']');
                 } else {
                     out.push_str(g.as_str());
@@ -2420,6 +2836,11 @@ impl Emitter<'_> {
     }
 
     fn write_effect(&self, out: &mut String, id: Idx<Inst>, inst: &Inst) {
+        if let Some(site) = self.record_effect_allocation_site(id, inst, out.len()) {
+            out.push_str("  __rock_alloc_hit_effect(\"");
+            write!(out, "{:016x}", site.id).unwrap();
+            out.push_str("\")\n");
+        }
         match inst {
             Inst::Store { cell, value } => {
                 out.push_str("  ");
@@ -2483,13 +2904,13 @@ impl Emitter<'_> {
                 }
             }
             Inst::StoreGlobal { name, value } => {
-                if let Some(slot) = self.state_slot(*name) {
+                if self.has_state_slot(*name) {
                     out.push_str("  __rock_active_session.__rock_state[");
-                    out.push_str(&lua_string(slot));
+                    self.write_state_slot(out, *name);
                     out.push_str("] = ");
                     self.write_opnd(out, *value);
                     out.push_str("\n  __rock_active_session.__rock_initialized[");
-                    out.push_str(&lua_string(slot));
+                    self.write_state_slot(out, *name);
                     out.push_str("] = true\n");
                 } else {
                     let _ = write!(out, "  {name} = ");

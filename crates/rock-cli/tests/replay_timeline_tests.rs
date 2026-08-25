@@ -55,6 +55,45 @@ fn run_frame_env(
     })
 }
 
+struct ObservedRecordRun {
+    status_success: bool,
+    stderr: String,
+    state: serde_json::Value,
+}
+
+fn run_record_dump_observed(
+    game: &str,
+    frames: u32,
+    log: &str,
+    env: &[(&str, &str)],
+) -> ObservedRecordRun {
+    let rock_bin = env!("CARGO_BIN_EXE_rock");
+    let scratch = tempfile::tempdir().expect("scratch");
+    let scratch_path = scratch.path().to_string_lossy().into_owned();
+    let frames_s = frames.to_string();
+    let out = Command::new(rock_bin)
+        .args([
+            "frame", game, "-n", &frames_s, "--record", log,
+            "--dump-state", "--output", &scratch_path,
+        ])
+        .env("ROCK_FRAME_TIMEOUT_SECS", "60")
+        .envs(env.iter().copied())
+        .current_dir(workspace_root())
+        .output()
+        .expect("spawn live record");
+    let state = serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+        panic!(
+            "dump-state not valid JSON ({e}); stderr:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        )
+    });
+    ObservedRecordRun {
+        status_success: out.status.success(),
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        state,
+    }
+}
+
 fn current_tick(state: &serde_json::Value) -> i64 {
     state["stone"]["current_tick"].as_i64().expect("current_tick")
 }
@@ -532,6 +571,82 @@ fn shift_right_uses_the_modifier_mapping_for_fast_forward() {
         current_tick(&jumped),
         30,
         "Shift+Right must use the live modifier channel for the 30-tick fast-forward"
+    );
+}
+
+#[test]
+fn live_seek_keeps_the_timeline_tool_overlay_interactive() {
+    let dir = tempfile::tempdir().expect("dir");
+    let log = dir.path().join("live-tool-seek.replay");
+    let log_s = log.to_string_lossy().into_owned();
+    let run = run_record_dump_observed(
+        "bitgun",
+        240,
+        &log_s,
+        &[
+            ("STONE_LIVE_REWIND", "1"),
+            ("STONE_KEYFRAME_INTERVAL", "10"),
+            ("STONE_TIMELINE_SEEK_AT_FRAME", "200"),
+            ("STONE_TIMELINE_SEEK_TO_TICK", "7"),
+            ("STONE_PHYSICAL_TOOL_KEY_AT", "201"),
+            ("STONE_PHYSICAL_TOOL_KEY", "lshift"),
+            ("STONE_PHYSICAL_TOOL_KEY_AT_2", "202"),
+            ("STONE_PHYSICAL_TOOL_KEY_2", "right"),
+            ("STONE_PHYSICAL_TOOL_KEY_RELEASE_AT", "203"),
+            ("STONE_PHYSICAL_TOOL_KEY_RELEASE", "lshift"),
+            ("STONE_PHYSICAL_TOOL_KEY_RELEASE_AT_2", "204"),
+            ("STONE_PHYSICAL_TOOL_KEY_RELEASE_2", "right"),
+            ("STONE_INPUT_PROBE_KEY", "right"),
+            ("STONE_AUDIO_PROBE", "1"),
+        ],
+    );
+    assert!(
+        run.status_success,
+        "the bounded active-seek run must not raise a frame error; pre-fix stderr:\n{}",
+        run.stderr
+    );
+    assert!(
+        !run.stderr.contains("reflective TextArt requested a presented scene sample"),
+        "tool-only rendering must not invoke gameplay presentation:\n{}",
+        run.stderr
+    );
+
+    let diag = &run.state["__stone_diag"];
+    assert_eq!(diag["STONE_LIVE_REWIND_COUNT"].as_i64(), Some(1), "{diag}");
+    assert!(
+        diag["STONE_SEEK_RESIM_FRAMES"].as_i64().is_some_and(|n| n > 0),
+        "the fixture must resimulate a nonzero span: {diag}"
+    );
+    assert!(
+        diag["REPLAY_TIMELINE_DRAWS"].as_i64().is_some_and(|n| n > 0)
+            && diag["REPLAY_TIMELINE_SEEK_DRAWS"].as_i64().is_some_and(|n| n > 0),
+        "the timeline must be drawn both ordinarily and while seeking: {diag}"
+    );
+    assert_eq!(diag["REPLAY_TIMELINE_TOOL_INTERACTIONS"].as_i64(), Some(1), "{diag}");
+    assert_eq!(diag["REPLAY_TIMELINE_RETARGET_REQUESTS"].as_i64(), Some(1), "retarget must use the shared authority: {diag}");
+    assert!(
+        diag["REPLAY_TIMELINE_SEEK_REQUESTS"].as_i64().is_some_and(|n| n >= 2),
+        "the initial seek and active retarget must both reach timeline_seek_request: {diag}"
+    );
+    assert!(
+        diag["REPLAY_TIMELINE_INTERACTION_FRAME"].as_i64().is_some_and(|n| n > 0)
+            && diag["STONE_SEEK_FINISH_FRAME"].as_i64().is_some_and(|finish| {
+                finish > diag["REPLAY_TIMELINE_INTERACTION_FRAME"].as_i64().unwrap()
+            }),
+        "the tool interaction must be consumed before the original seek finishes: {diag}"
+    );
+    assert!(
+        diag["STONE_PHYSICAL_TOOL_EVENT_PUSHES"].as_i64() >= Some(4),
+        "the fixture must inject a nonzero physical event population: {diag}"
+    );
+    assert_eq!(diag["STONE_INPUT_PROBE_REPLAY_KEY_DOWN"].as_i64().unwrap_or(0), 0, "physical tool input must not become replay game input: {diag}");
+    assert_eq!(diag["STONE_INPUT_PROBE_REPLAY_KEY_PRESSED"].as_i64().unwrap_or(0), 0, "physical tool input must not create a replay game edge: {diag}");
+    assert!(diag["AUDIO_SEEK_MUTES"].as_i64().is_some_and(|n| n > 0), "catch-up audio must remain suppressed: {diag}");
+    assert_eq!(diag["STONE_PRESENTATION_LATE_DRAW_DURING_SEEK"].as_i64().unwrap_or(0), 0, "ordinary gameplay presentation must stay out of active seek frames: {diag}");
+    assert_eq!(
+        diag["STONE_HIDDEN_LATE_DRAW_FRAMES"].as_i64(),
+        diag["STONE_SEEK_TOOL_RENDER_FRAMES"].as_i64(),
+        "only the compiler-marked state late-draw pass may accompany seek tooling: {diag}"
     );
 }
 

@@ -31,6 +31,8 @@ pub struct StickConfig {
     pub release: Option<ReleaseConfig>,
     /// External asset roots used when ROCK_ASSET_OVERLAYS is unset.
     pub assets: Option<AssetsConfig>,
+    /// Optional compiler-owned sound project declaration.
+    pub sound: Option<SoundConfig>,
     pub dependencies: HashMap<String, Dependency>,
 }
 
@@ -52,10 +54,20 @@ pub struct BuildVar {
     pub builtin: Option<String>,
     pub value: Option<String>,
     pub channels: Option<Vec<String>>,
+    /// Channels on which a failing `cmd` degrades to `default` with a warning
+    /// instead of failing the build. Per-channel on purpose: a credential a
+    /// development build can do without is one a release build cannot, and an
+    /// all-channel switch would let a retail artifact ship the empty default.
+    /// `validate_build` requires a `default` to fall back to and membership in
+    /// `channels`, so the declaration can never be inert.
+    pub optional_channels: Option<Vec<String>>,
     pub default: Option<String>,
     /// Hash the value into cache keys but never store it in plaintext in any
     /// on-disk artifact or manifest.
     pub secret: bool,
+    /// Explicitly declared metadata that may vary without changing executable
+    /// Artifact identity.
+    pub volatile: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -66,6 +78,11 @@ pub struct ReleaseConfig {
 #[derive(Debug, Clone, Default)]
 pub struct AssetsConfig {
     pub overlays: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SoundConfig {
+    pub project: String,
 }
 
 pub const KNOWN_BUILD_BUILTINS: [&str; 2] = ["channel", "platform"];
@@ -310,7 +327,7 @@ impl<'de> serde::Deserialize<'de> for BuildVar {
         impl<'de> serde::de::Visitor<'de> for Vis {
             type Value = BuildVar;
             fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                write!(f, "a literal string or a table with cmd/builtin/value/channels/default/secret")
+                write!(f, "a literal string or a table with cmd/builtin/value/channels/optional_channels/default/secret/volatile")
             }
             fn visit_str<E: serde::de::Error>(self, s: &str) -> Result<BuildVar, E> {
                 Ok(BuildVar { value: Some(s.to_string()), ..BuildVar::default() })
@@ -323,14 +340,16 @@ impl<'de> serde::Deserialize<'de> for BuildVar {
                         "builtin" => { var.builtin = Some(map.next_value()?); }
                         "value" => { var.value = Some(map.next_value()?); }
                         "channels" => { var.channels = Some(map.next_value()?); }
+                        "optional_channels" => { var.optional_channels = Some(map.next_value()?); }
                         "default" => { var.default = Some(map.next_value()?); }
                         "secret" => { var.secret = map.next_value()?; }
+                        "volatile" => { var.volatile = map.next_value()?; }
                         other => {
                             // Fail closed: a misspelled source key would leave the
                             // var sourceless and every build_var() reading it stale.
                             return Err(serde::de::Error::custom(format!(
                                 "unknown key `{other}` in [build.vars] entry; known keys: \
-                                 cmd, builtin, value, channels, default, secret"
+                                 cmd, builtin, value, channels, optional_channels, default, secret, volatile"
                             )));
                         }
                     }
@@ -428,6 +447,34 @@ impl<'de> serde::Deserialize<'de> for AssetsConfig {
     }
 }
 
+impl<'de> serde::Deserialize<'de> for SoundConfig {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct Vis;
+        impl<'de> serde::de::Visitor<'de> for Vis {
+            type Value = SoundConfig;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                write!(f, "SoundConfig struct")
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<SoundConfig, A::Error> {
+                let mut project: Option<String> = None;
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "project" => { project = Some(map.next_value()?); }
+                        other => {
+                            return Err(serde::de::Error::custom(format!(
+                                "unknown key `{other}` in [sound]; known keys: project"
+                            )));
+                        }
+                    }
+                }
+                let project = project.ok_or_else(|| serde::de::Error::missing_field("project"))?;
+                Ok(SoundConfig { project })
+            }
+        }
+        d.deserialize_map(Vis)
+    }
+}
+
 impl<'de> serde::Deserialize<'de> for RendererConfig {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         struct Vis;
@@ -499,6 +546,7 @@ impl<'de> serde::Deserialize<'de> for StickConfig {
                 let mut build: Option<BuildConfig> = None;
                 let mut release: Option<ReleaseConfig> = None;
                 let mut assets: Option<AssetsConfig> = None;
+                let mut sound: Option<SoundConfig> = None;
                 let mut dependencies: HashMap<String, Dependency> = HashMap::new();
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
@@ -506,6 +554,7 @@ impl<'de> serde::Deserialize<'de> for StickConfig {
                         "build" => { build = Some(map.next_value()?); }
                         "release" => { release = Some(map.next_value()?); }
                         "assets" => { assets = Some(map.next_value()?); }
+                        "sound" => { sound = Some(map.next_value()?); }
                         "engine" => { engine = map.next_value()?; }
                         "renderer" => { renderer = map.next_value()?; }
                         "ios" => { ios = map.next_value()?; }
@@ -514,7 +563,7 @@ impl<'de> serde::Deserialize<'de> for StickConfig {
                     }
                 }
                 let package = package.ok_or_else(|| serde::de::Error::missing_field("package"))?;
-                Ok(StickConfig { package, engine, renderer, ios, build, release, assets, dependencies })
+                Ok(StickConfig { package, engine, renderer, ios, build, release, assets, sound, dependencies })
             }
         }
         d.deserialize_map(Vis)
@@ -1249,6 +1298,34 @@ mod tests {
     }
 
     #[test]
+    fn sound_section_declares_a_project_path() {
+        let cfg = StickConfig::new_from_str(
+            "[package]\nname = \"x\"\n[sound]\nproject = \"sound_project.json\"\n",
+        )
+        .expect("sound section must parse");
+
+        assert_eq!(
+            cfg.sound.as_ref().map(|sound| sound.project.as_str()),
+            Some("sound_project.json")
+        );
+    }
+
+    #[test]
+    fn sound_section_rejects_unknown_keys_and_missing_project() {
+        let unknown = StickConfig::new_from_str(
+            "[package]\nname = \"x\"\n[sound]\npath = \"sound_project.json\"\n",
+        )
+        .expect_err("unknown sound key must reject");
+        assert!(format!("{unknown}").contains("path"));
+
+        let missing = StickConfig::new_from_str(
+            "[package]\nname = \"x\"\n[sound]\n",
+        )
+        .expect_err("sound project is required");
+        assert!(format!("{missing}").contains("project"));
+    }
+
+    #[test]
     fn release_section_rejects_unknown_keys_and_escape_paths() {
         let err = StickConfig::new_from_str(
             "[package]\nname = \"x\"\n[release]\nasset = [\"assets\"]\n",
@@ -1293,6 +1370,28 @@ mod tests {
             "[package]\nname = \"x\"\n[build.vars]\nX = { comand = \"echo hi\" }\n",
         ).expect_err("unknown var key must be rejected");
         assert!(format!("{err}").contains("comand"), "error names the bad key: {err}");
+    }
+
+    #[test]
+    fn build_var_volatile_metadata_is_explicit_and_typed() {
+        let cfg = StickConfig::new_from_str(
+            "[package]\nname = \"x\"\n[build.vars]\nCLOCK = { value = \"now\", volatile = true }\n",
+        ).expect("volatile declaration must parse");
+        assert!(cfg.build.as_ref().unwrap().vars["CLOCK"].volatile);
+        cfg.validate_build().expect("volatile declaration must validate");
+
+        let err = StickConfig::new_from_str(
+            "[package]\nname = \"x\"\n[build.vars]\nCLOCK = { value = \"now\", volatile = \"yes\" }\n",
+        ).expect_err("malformed volatile declaration must reject");
+        assert!(format!("{err}").contains("boolean"), "error explains the volatile type: {err}");
+    }
+
+    #[test]
+    fn build_var_unknown_metadata_cannot_disappear() {
+        let err = StickConfig::new_from_str(
+            "[package]\nname = \"x\"\n[build.vars]\nCLOCK = { value = \"now\", volatlie = true }\n",
+        ).expect_err("misspelled volatile declaration must reject");
+        assert!(format!("{err}").contains("volatlie"), "error names the bad key: {err}");
     }
 
     #[test]
