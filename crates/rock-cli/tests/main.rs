@@ -14,6 +14,8 @@ mod allocation_jit_trace_gate;
 mod bone_incremental_timing;
 #[path = "completions_cli.rs"]
 mod completions_cli;
+#[path = "sound_inspect_cli.rs"]
+mod sound_inspect_cli;
 #[path = "glsl_backend_ratchet.rs"]
 mod glsl_backend_ratchet;
 #[path = "glsl_runner_gate.rs"]

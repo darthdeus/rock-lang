@@ -50,6 +50,7 @@ pub mod js_test;
 pub mod live_project;
 pub mod web;
 pub mod package;
+mod sound_inspect;
 pub mod zip_writer;
 mod test_protocol;
 mod lint_cmd;
@@ -286,6 +287,9 @@ pub enum CliCommand {
     /// `rock package <game>` -- stage native release inputs, bake bytecode,
     /// and write the manifest consumed by Fire and release verification.
     Package,
+    /// `rock sound-inspect <game>` -- compile the game's declared sound
+    /// project and open its runtime bank in the independent inspector.
+    SoundInspect,
 }
 
 impl clap::ValueEnum for CliCommand {
@@ -322,6 +326,7 @@ impl clap::ValueEnum for CliCommand {
             Self::ShaderValidate,
             Self::Web,
             Self::Package,
+            Self::SoundInspect,
         ]
     }
     fn to_possible_value(&self) -> Option<clap::builder::PossibleValue> {
@@ -374,6 +379,7 @@ impl CliCommand {
             Self::ShaderValidate => "shader-validate",
             Self::Web => "web",
             Self::Package => "package",
+            Self::SoundInspect => "sound-inspect",
         }
     }
 }

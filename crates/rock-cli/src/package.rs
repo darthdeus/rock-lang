@@ -22,6 +22,13 @@ struct PackageContext {
     config: Option<rock_host::stick::StickConfig>,
 }
 
+pub(crate) struct SoundInspectionTarget {
+    pub root: PathBuf,
+    pub project: PathBuf,
+    pub game_key: String,
+    pub overlays: Vec<PathBuf>,
+}
+
 fn package_context(project: &str) -> Result<PackageContext> {
     rock_host::project::ensure_workspace_root()?;
     let root = rock_host::project::find_workspace_root(&std::env::current_dir()?)
@@ -78,6 +85,26 @@ pub fn prepare_sound_bank(project: &str) -> Result<Option<PathBuf>> {
     }
     rock_host::project::write_atomic(&bank_path, &sound.bank_bytes)?;
     Ok(Some(bank_path))
+}
+
+pub(crate) fn prepare_sound_inspection_target(project: &str) -> Result<SoundInspectionTarget> {
+    let context = package_context(project)?;
+    if prepare_sound_bank(project)?.is_none() {
+        anyhow::bail!(
+            "sound-inspect: {} has no [sound].project declaration",
+            context.game_key,
+        );
+    }
+    let overlays = rock_host::release::asset_overlay_roots(
+        &context.project,
+        context.config.as_ref(),
+    )?;
+    Ok(SoundInspectionTarget {
+        root: context.root,
+        project: context.project,
+        game_key: context.game_key,
+        overlays,
+    })
 }
 
 pub fn run_package(project: &str, output: Option<&str>) -> Result<()> {
