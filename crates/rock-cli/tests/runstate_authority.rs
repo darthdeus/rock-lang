@@ -58,7 +58,7 @@ fn mag_uses_direct_session_state_without_a_run_root_or_accessor() {
         "global bank_gold: int",
         "global journal: [JournalLine]",
         "global history: [SnapshotHistoryNode]",
-        "global MAG_RUN_ACTIVE: bool",
+        "global MAG_ACTIVE_WORLD: Scene<WorldState>?",
     ];
     let mut findings = Vec::new();
     let mut definitions = required.map(|_| Vec::new());

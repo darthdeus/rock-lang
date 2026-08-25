@@ -333,10 +333,16 @@ fn assert_mag_seek_state_matches(
         exact.remove("WISPS"),
         "WISPS must be admitted as simulation state"
     );
-    assert!(
-        exact.contains("MAG_ACTIVE_RUN"),
-        "MAG_ACTIVE_RUN must own the RunState.world simulation state"
-    );
+    for name in [
+        "MAG_ACTIVE_WORLD",
+        "player",
+        "bank_gold",
+        "journal",
+        "history",
+        "quest_log_open",
+    ] {
+        assert!(exact.contains(name), "{name} must be admitted as direct simulation state");
+    }
     assert_f32_state_matches(&got["mag"]["WISPS"], &want["mag"]["WISPS"], "mag.WISPS");
     assert_mag_seek_populations_match(got, want, label);
     assert_sim_state_matches(got, want, &exact, label);
@@ -385,13 +391,23 @@ fn mag_seek_equivalence_state_names(
     frames: u32,
 ) -> std::collections::HashSet<String> {
     let mut sim = sim_state_names(game, frames);
-    for name in ["WORLD_MODE", "MOTES", "MAG_ACTIVE_RUN", "WISPS"] {
+    for name in [
+        "WORLD_MODE",
+        "MOTES",
+        "MAG_ACTIVE_WORLD",
+        "WISPS",
+        "player",
+        "bank_gold",
+        "journal",
+        "history",
+        "quest_log_open",
+    ] {
         assert!(sim.contains(name), "{name} must be admitted as simulation state");
     }
-    for name in ["TALLY", "TELEMETRY_SESSION_OPEN", "TELEMETRY_LAST_FRAME_T"] {
+    for name in ["TELEMETRY_SESSION_OPEN", "TELEMETRY_LAST_FRAME_T"] {
         assert!(!sim.contains(name), "{name} is telemetry side-channel state");
     }
-    assert!(!sim.contains("DROP_PARTICLES"), "RunState.world owns DROP_PARTICLES inside MAG_ACTIVE_RUN");
+    assert!(!sim.contains("DROP_PARTICLES"), "WorldState owns drop-particle storage inside MAG_ACTIVE_WORLD");
     assert!(!sim.contains("ENGINE"), "render-only ENGINE settings must not be checkpointed");
     for name in [
         "MAG_BUILD_INFO_DATE",
@@ -516,7 +532,7 @@ fn mag_cast_seek_restores_scheduler_owner() {
     assert_eq!(current_tick(&ordinary), target);
     let ordinary_probe = &ordinary["__stone_diag"];
     assert_eq!(ordinary_probe["MAG_CAST_PROBE_HITS"], 1, "ordinary arm must observe the target once: {ordinary_probe}");
-    assert_eq!(ordinary_probe["MAG_CAST_PROBE_RUN_STATE"], 1, "ordinary arm must have a live RunState: {ordinary_probe}");
+    assert_eq!(ordinary_probe["MAG_CAST_PROBE_DIRECT_STATE"], 1, "ordinary arm must have live direct state: {ordinary_probe}");
     assert!(ordinary_probe["MAG_CAST_PROBE_SCENE"].as_i64().is_some_and(|id| id > 0),
         "ordinary arm must resolve a live Scene root: {ordinary_probe}");
     assert_eq!(ordinary_probe["MAG_CAST_PROBE_CASTING"], 1, "ordinary arm must be mid-cast: {ordinary_probe}");
@@ -548,7 +564,7 @@ fn mag_cast_seek_restores_scheduler_owner() {
     assert_eq!(sought_probe["MAG_CAST_PROBE_HITS"], 2,
         "the target must be observed before and after the backward seek: {sought_probe}");
     for key in [
-        "MAG_CAST_PROBE_RUN_STATE", "MAG_CAST_PROBE_SCENE", "MAG_CAST_PROBE_CASTING",
+        "MAG_CAST_PROBE_DIRECT_STATE", "MAG_CAST_PROBE_SCENE", "MAG_CAST_PROBE_CASTING",
         "MAG_CAST_PROBE_LIGHTNING", "MAG_CAST_PROBE_TIMER", "MAG_CAST_PROBE_DURATION",
         "MAG_CAST_PROBE_TASK", "MAG_CAST_PROBE_POLLER_ROWS", "MAG_CAST_PROBE_MANA",
         "MAG_CAST_PROBE_REAGENT_1", "MAG_CAST_PROBE_REAGENT_4",
