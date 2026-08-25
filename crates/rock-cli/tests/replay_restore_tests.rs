@@ -2412,6 +2412,106 @@ fn resume_live_here_persists_the_branched_mag_world_not_the_discarded_future() {
 }
 
 #[test]
+fn literal_temporary_path_mag_product_smoke() {
+    let dir = tempfile::tempdir().unwrap();
+    let replay = dir.path().join("literal-product.replay");
+    let replay_s = replay.to_string_lossy().into_owned();
+    let first_progress = dir.path().join("first-progress.json");
+    let first_progress_s = first_progress.to_string_lossy().into_owned();
+    let second_progress = dir.path().join("second-progress.json");
+    let second_progress_s = second_progress.to_string_lossy().into_owned();
+    let settings = dir.path().join("settings.json");
+    let settings_s = settings.to_string_lossy().into_owned();
+    let bindings = dir.path().join("bindings.json");
+    let bindings_s = bindings.to_string_lossy().into_owned();
+    let binding_history = dir.path().join("bindings-history.jsonl");
+    let binding_history_s = binding_history.to_string_lossy().into_owned();
+    let layout_history = dir.path().join("layout-history.jsonl");
+    let layout_history_s = layout_history.to_string_lossy().into_owned();
+    let editor_history = dir.path().join("editor-history.jsonl");
+    let editor_history_s = editor_history.to_string_lossy().into_owned();
+    let editor_history_v1 = dir.path().join("editor-history.json");
+    let editor_history_v1_s = editor_history_v1.to_string_lossy().into_owned();
+    std::fs::write(&settings, r#"{"privacy":{"analytics":1,"analytics_version":3}}"#).unwrap();
+
+    let real_paths = [
+        workspace_root().join("mag/saves/progress.json"),
+        workspace_root().join("mag/saves/history.jsonl"),
+        workspace_root().join("mag/saves/history.json"),
+    ];
+    let real_before = real_paths.iter().map(|path| std::fs::read(path).ok()).collect::<Vec<_>>();
+
+    let run = run_record_dump_observed(
+        "mag",
+        540,
+        &replay_s,
+        &[
+            ("MAG_BOOT_MENU", "1"),
+            ("MAG_LITERAL_PRODUCT_SMOKE", "1"),
+            ("MAG_PROGRESS_PATH_OVERRIDE", &first_progress_s),
+            ("MAG_LITERAL_PRODUCT_SMOKE_SECOND_PATH", &second_progress_s),
+            ("MAG_SETTINGS_PATH_OVERRIDE", &settings_s),
+            ("MAG_BINDINGS_PATH_OVERRIDE", &bindings_s),
+            ("MAG_BINDINGS_HISTORY_PATH_OVERRIDE", &binding_history_s),
+            ("MAG_LAYOUT_HISTORY_PATH_OVERRIDE", &layout_history_s),
+            ("MAG_LITERAL_PRODUCT_SMOKE_HISTORY_PATH", &editor_history_s),
+            ("MAG_LITERAL_PRODUCT_SMOKE_HISTORY_V1_PATH", &editor_history_v1_s),
+            ("STONE_LIVE_REWIND", "1"),
+            ("STONE_KEYFRAME_INTERVAL", "10"),
+            ("STONE_PHYSICAL_MOUSE_PRESS_AT", "2"),
+            ("STONE_PHYSICAL_MOUSE_RELEASE_AT", "3"),
+            ("STONE_PHYSICAL_KEY_PRESS_AT", "100"),
+            ("STONE_PHYSICAL_KEY_RELEASE_AT", "101"),
+            ("STONE_PHYSICAL_KEY", "down"),
+            ("STONE_PHYSICAL_SCANCODE", "down"),
+            ("STONE_PHYSICAL_KEY_PRESS_AT_2", "105"),
+            ("STONE_PHYSICAL_KEY_RELEASE_AT_2", "106"),
+            ("STONE_PHYSICAL_KEY_2", "return"),
+            ("STONE_PHYSICAL_SCANCODE_2", "return"),
+            ("STONE_TIMELINE_SEEK_AT_FRAME", "260"),
+            ("STONE_TIMELINE_SEEK_TO_TICK", "150"),
+            ("STONE_TIMELINE_SEEK_AT_FRAME_2", "430"),
+            ("STONE_TIMELINE_SEEK_TO_TICK_2", "180"),
+            ("STONE_BRANCH_DRAW_AT_FRAME", "480"),
+        ],
+    );
+    assert!(run.status_success, "literal product run failed:\n{}", run.stderr);
+    assert!(
+        run.stderr.contains("completed/requested=540/540 frame_errors=0"),
+        "the literal bounded run must report zero frame errors:\n{}",
+        run.stderr
+    );
+    let diag = &run.state["__stone_diag"];
+    assert_eq!(diag["MAG_LITERAL_SMOKE_MENU"].as_i64(), Some(1), "{diag}");
+    assert_eq!(diag["MAG_LITERAL_SMOKE_FIRST_START"].as_i64(), Some(1), "{diag}");
+    assert!(diag["MAG_LITERAL_SMOKE_FIRST_START_FRAME"].as_i64().is_some_and(|n| n < 150), "the first seek target must contain the live run: {diag}");
+    assert_eq!(diag["STONE_SEEK_COUNT"].as_i64(), Some(2), "{diag}");
+    assert_eq!(diag["STONE_SEEK_FROM_TICK"].as_i64(), Some(150), "the second scrub must start at the backward target: {diag}");
+    assert_eq!(diag["STONE_SEEK_TO_TICK"].as_i64(), Some(180), "the second scrub must move forward: {diag}");
+    assert_eq!(diag["STONE_BRANCH_DRAW_ACTIVE"].as_i64(), Some(1), "Resume Live Here must run from the timeline draw path: {diag}");
+    assert_eq!(diag["STONE_BRANCH_COUNT"].as_i64(), Some(1), "Resume Live Here must commit: {diag}");
+    assert_eq!(diag["MAG_LITERAL_SMOKE_FIRST_SURVIVED"].as_i64(), Some(1), "{diag}");
+    for field in ["BANK", "POSITION", "INVENTORY", "REAGENTS", "EVENTS", "QUEST", "JOURNAL", "HISTORY", "PANEL", "TARGET"] {
+        assert_eq!(diag[format!("MAG_LITERAL_SMOKE_FIRST_{field}")].as_i64(), Some(1), "first-run {field} state did not survive replay: {diag}");
+    }
+    assert_eq!(diag["MAG_LITERAL_SMOKE_SECOND_CLEAN"].as_i64(), Some(1), "{diag}");
+    for field in ["BANK", "POSITION", "INVENTORY", "REAGENTS", "EVENTS", "QUEST", "JOURNAL", "HISTORY", "PANEL", "TARGET", "RETIRED", "ARENA"] {
+        assert_eq!(diag[format!("MAG_LITERAL_SMOKE_SECOND_{field}")].as_i64(), Some(1), "second-run {field} state was not clean: {diag}");
+    }
+    assert_eq!(diag["MAG_LITERAL_SMOKE_FINAL_MENU"].as_i64(), Some(1), "{diag}");
+    assert_eq!(diag["MAG_LITERAL_SMOKE_TEMP_PATHS"].as_i64(), Some(1), "every writable product path must be temporary: {diag}");
+    assert_eq!(diag["MAG_LITERAL_SMOKE_STARTS_BEFORE_SECOND"].as_i64(), Some(1), "the first product run must remain active through the replay scrub: {diag}");
+    assert_eq!(diag["MAG_LITERAL_SMOKE_STARTS"].as_i64(), Some(2), "exactly two product runs must start: {diag}");
+    assert_eq!(diag["MAG_LITERAL_SMOKE_STOPS"].as_i64(), Some(2), "{diag}");
+    assert!(recorded_tick_lines(&replay_s) > 0, "the literal product run must record a replay");
+    for path in [&first_progress, &settings, &bindings, &binding_history, &layout_history] {
+        assert!(path.exists(), "the product path must write only inside the temporary root: {}", path.display());
+    }
+    let real_after = real_paths.iter().map(|path| std::fs::read(path).ok()).collect::<Vec<_>>();
+    assert_eq!(real_after, real_before, "the literal smoke must not write MAG's real persistence files");
+}
+
+#[test]
 fn recorded_game_input_is_projected_into_replay_authority() {
     let dir = tempfile::tempdir().unwrap();
     let log_s = dir.path().join("recorded-input.replay").to_string_lossy().into_owned();
