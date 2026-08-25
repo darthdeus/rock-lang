@@ -32,6 +32,14 @@ fn definitions_of(lua: &str, name: &str) -> Vec<String> {
         .collect()
 }
 
+fn body_calls(body: &str, symbol: &str) -> bool {
+    body.match_indices(symbol).any(|(at, _)| {
+        let before = body[..at].chars().next_back();
+        let after = body[at + symbol.len()..].chars().next();
+        after == Some('(') && before.is_none_or(|c| !c.is_ascii_alphanumeric() && c != '_')
+    })
+}
+
 /// The definition symbols the body of `caller` actually CALLS, restricted to
 /// derivations of `callee`. Read from the caller's emitted body, so a
 /// definition that exists but is never reached does not satisfy it.
@@ -39,7 +47,7 @@ fn callees_named_in(lua: &str, caller: &str, callee: &str) -> Vec<String> {
     let body = function_body(lua, caller);
     let mut out: Vec<String> = definitions_of(lua, callee)
         .into_iter()
-        .filter(|s| body.contains(&format!("{s}(")))
+        .filter(|s| body_calls(body, s))
         .collect();
     out.sort();
     out.dedup();
@@ -307,7 +315,7 @@ fn main() {
             if !view.instances.contains(inst) {
                 continue;
             }
-            if body.contains(&format!("{sym}(")) {
+            if body_calls(body, sym) {
                 checked_residual_calls += 1;
                 assert!(
                     defs.contains(sym),

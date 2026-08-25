@@ -67,10 +67,10 @@ fn validate_one(
         "pure" | "nomangle" | "ignore" | "debug_impure" | "intrinsic" | "native_required"
         | "struct_expand" | "shader_expand" | "vertex_expand" | "uniform_expand"
         | "build_var_expand" | "embed_expand"
-        | "uniform_values"
+        | "uniform_values" | "scene_type_key"
         | "materialize" | "gpu_only"
         | "scalar_abi" | "inline" | "sim"
-        | "sim_render" => {
+        | "sim_render" | "shadow_root" => {
             at(anno, pos, AnnoPos::FnItem)?;
             no_args(anno)
         }
@@ -248,13 +248,13 @@ fn validate_one(
         }
         "lifecycle" => {
             at(anno, pos, AnnoPos::DecoItem)?;
-            const KEYS: &[&str] = &["phase", "owner", "stage_param"];
+            const KEYS: &[&str] = &["phase", "owner", "stage_param", "replay_param"];
             for arg in &anno.args {
                 let Some(key) = arg.name.as_ref() else {
-                    comp_error!(anno.span, "`@lifecycle` arguments must be named: phase=, owner=, stage_param=");
+                    comp_error!(anno.span, "`@lifecycle` arguments must be named: phase=, owner=, stage_param=, replay_param=");
                 };
                 if !KEYS.contains(&key.name.as_str()) || !matches!(arg.value, AnnoValue::String(_)) {
-                    comp_error!(anno.span, "`@lifecycle` accepts string arguments phase=, owner=, and optional stage_param=");
+                    comp_error!(anno.span, "`@lifecycle` accepts string arguments phase=, owner=, optional stage_param=, and optional replay_param=");
                 }
             }
             let has = |name: &str| anno.args.iter().any(|a| a.name.as_ref().is_some_and(|n| n.name.as_str() == name));
@@ -291,6 +291,19 @@ fn validate_one(
                 comp_error!(
                     anno.span,
                     "`@artifact_definition` requires catalog= and key_param="
+                );
+            }
+            Ok(())
+        }
+        "artifact_catalog" => {
+            at(anno, pos, AnnoPos::FnItem)?;
+            if anno.args.len() != 1
+                || anno.args[0].name.as_ref().is_none_or(|name| name.name.as_str() != "catalog")
+                || !matches!(anno.args[0].value, AnnoValue::String(_))
+            {
+                comp_error!(
+                    anno.span,
+                    "`@artifact_catalog` requires one named string argument: catalog="
                 );
             }
             Ok(())

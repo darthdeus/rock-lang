@@ -422,7 +422,7 @@ fn main() {}
          image_data.layouts[{box_identity:?}] = original_layout;\n\
          var failure_ok = rejected.indexOf('layout mismatch') >= 0\n\
              && __rock_active_session === old;\n\
-         __G.__SCENE_ROOTS = {{ live: true }};\n\
+         __G.__SCENE_REGISTRY = {{ roots: {{ live: true }}, states: {{ live: 2 }} }};\n\
          var scene_rejected = false;\n\
          try {{ __rock_state_image_capture('world', 1); }}\n\
          catch (e) {{ scene_rejected = e.message.indexOf('SceneImage') >= 0; }}\n\

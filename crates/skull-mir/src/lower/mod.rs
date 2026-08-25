@@ -2550,18 +2550,8 @@ impl Builder<'_> {
     /// single (boxed) value, or empty for a bare return.
     fn return_leaves(&mut self, opt: Option<Idx<Expr>>) -> Result<Vec<Idx<Inst>>, CompilerError> {
         let Some(e) = opt else { return Ok(vec![]) };
-        if self
-            .concrete_plan
-            .signature
-            .result
-            .is_some_and(|id| {
-                matches!(
-                    &*self.concrete_mono_view(id, ConcreteMonoConsumer::ReturnLowering),
-                    crate::monoty::MonoTy::Unit
-                )
-            })
-        {
-            self.lower_expr(e)?;
+        if self.ret_rep.is_none() {
+            self.lower_stmt_expr(e)?;
             return Ok(vec![]);
         }
         if let Some(shape) = self.result_shape() {
@@ -3507,6 +3497,7 @@ impl ExpansionRejections {
             ExpandKind::VertexLayout => &mut self.vertex_layout,
             ExpandKind::UniformBlock => &mut self.uniform_block,
             ExpandKind::UniformValues => &mut self.uniform_values,
+            ExpandKind::SceneTypeKey => return,
             ExpandKind::BuildVar | ExpandKind::EmbedString => return,
             ExpandKind::Materialize => return,
         };
@@ -3568,6 +3559,7 @@ pub fn expansion_rejection(ws: &Workspace, mid: ModuleId) -> Option<CompilerErro
                 ExpandKind::UniformValues => {
                     uniform_values_rejection_for_call(ws, inf, body, e, f, &arg_idxs)
                 }
+                ExpandKind::SceneTypeKey => None,
                 ExpandKind::BuildVar | ExpandKind::EmbedString => None,
                 ExpandKind::Materialize => None,
             };

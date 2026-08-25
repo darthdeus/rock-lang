@@ -251,10 +251,13 @@ impl Builder<'_> {
     /// copy takes the presence-aware path instead
     /// ([`Self::nullable_place_value_of`]).
     pub(crate) fn value_struct_of(&self, e: Idx<Expr>) -> Option<Ustr> {
-        if self.expr_is_nullable(e) {
+        let ty = self.concrete_expr_ty(e)?;
+        let (payload, nullable) = ty.peel_nullable();
+        if nullable {
             return None;
         }
-        self.value_struct_name_of(e)
+        let name = payload.nominal()?;
+        self.is_value_struct(name).then_some(name)
     }
 
     /// The value-struct type of `e` IGNORING nullability (`expr_ty` peels
@@ -573,6 +576,38 @@ impl Builder<'_> {
         Ok(ValueRepr::Scalar(self.materialize_repr(repr)?))
     }
 
+    /// Expand the generic Scene bucket key from the concrete call instance.
+    /// The value is a compiler identity, not a tag read from the constructed
+    /// root, so construction and lifecycle-plan emission share `MonoTy`.
+    pub(crate) fn expand_scene_type_key(
+        &mut self,
+        call: Idx<Expr>,
+        func: FuncRef,
+        arg_idxs: &[Idx<Expr>],
+    ) -> Result<ValueRepr, CompilerError> {
+        let fname = self.ws.module(func.module).functions[func.func].name;
+        let [ ] = arg_idxs else {
+            return Err(CompilerError::new_with_label(
+                self.body.expr_spans[call],
+                format!("`@scene_type_key` fn `{fname}` takes no arguments"),
+            ));
+        };
+        let instance = self
+            .concrete_callee_for_site(call)?
+            .ok_or_else(|| self.gap_here("Scene type-key expansion has no concrete callee"))?;
+        let arg_types = instance.arg_types(self.scx.interner());
+        let [ty] = arg_types.as_slice() else {
+            return Err(CompilerError::new_with_label(
+                self.body.expr_spans[call],
+                format!("`@scene_type_key` fn `{fname}` must have exactly one type argument"),
+            ));
+        };
+        let key = ty.canonical();
+        Ok(ValueRepr::Scalar(
+            self.emit_cur(Inst::Const(Lit::Str(Ustr::from(key.as_str())))),
+        ))
+    }
+
     pub(crate) fn materialize_repr(&mut self, repr: ValueRepr) -> Result<Idx<Inst>, CompilerError> {
         match repr {
             ValueRepr::Scalar(value) => Ok(value),
@@ -760,11 +795,12 @@ impl Builder<'_> {
             (_, Some(abs)) => crate::mir::ComptimeInputId::File(abs),
             (_, None) => unreachable!("embed resolution always lands on a file"),
         };
+        let inst = self.emit_cur(Inst::Const(Lit::Str(Ustr::from(resolved.value.as_str()))));
         self.f.comptime_reads.push(crate::mir::ComptimeRead {
             input,
             value_hash: crate::mir::comptime_value_hash(&resolved.value),
+            span: self.body.expr_spans[call],
         });
-        let inst = self.emit_cur(Inst::Const(Lit::Str(Ustr::from(resolved.value.as_str()))));
         Ok(ValueRepr::Scalar(inst))
     }
 

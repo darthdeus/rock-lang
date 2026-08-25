@@ -7,6 +7,7 @@ use crate::code_identity::{CodeIdentity, CodeOwner, CodeOwnerKind};
 use crate::code_identity::CodeArtifact;
 use crate::instance::Instance;
 use crate::mir::FuncRef;
+use crate::monoty::{convert_decl, MonoCtor, MonoSubst, MonoTy};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LifecycleDependency {
@@ -18,6 +19,21 @@ pub struct LifecycleDependency {
 pub enum LifecycleQualification {
     Plain,
     OnChange { dependencies: Vec<LifecycleDependency> },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LifecycleReplayRole {
+    Presentation,
+    State,
+}
+
+impl LifecycleReplayRole {
+    pub fn tag(&self) -> &'static str {
+        match self {
+            Self::Presentation => "presentation",
+            Self::State => "state",
+        }
+    }
 }
 
 impl LifecycleQualification {
@@ -37,9 +53,11 @@ impl LifecycleQualification {
 pub struct LifecycleEntry {
     pub phase: Ustr,
     pub owner: Ustr,
+    pub root_type: Option<MonoTy>,
     pub identity: CodeIdentity,
     pub diagnostic_name: Ustr,
     pub stage: i64,
+    pub replay_role: LifecycleReplayRole,
     pub declaration_ordinal: usize,
     pub qualification: LifecycleQualification,
     pub body_fingerprint: u64,
@@ -50,6 +68,8 @@ pub struct LifecycleCensus {
     pub declarations: usize,
     pub applications: usize,
     pub admitted: usize,
+    pub session_owned: usize,
+    pub scene_owned: usize,
     pub plain: usize,
     pub gated: usize,
     pub dependency_edges: usize,
@@ -62,15 +82,17 @@ pub struct LifecyclePlan {
 }
 
 impl LifecyclePlan {
-    pub fn wire_structure_changed(&self, next: &Self) -> bool {
+    pub fn structure_changed(&self, next: &Self) -> bool {
         if self.entries.len() != next.entries.len() {
             return true;
         }
         self.entries.iter().zip(&next.entries).any(|(old, candidate)| {
             old.phase != candidate.phase
                 || old.owner != candidate.owner
+                || old.root_type != candidate.root_type
                 || old.identity != candidate.identity
                 || old.stage != candidate.stage
+                || old.replay_role != candidate.replay_role
                 || old.declaration_ordinal != candidate.declaration_ordinal
                 || qualification_structure_changed(&old.qualification, &candidate.qualification)
         })
@@ -127,6 +149,18 @@ fn phase_rank(phase: Ustr) -> Option<u8> {
     })
 }
 
+/// The one emitted identity for a validated typed Scene lifecycle root. The
+/// same canonical `MonoTy` encoding is embedded by `scene_create<T>`.
+pub fn scene_root_type_key(root_type: &MonoTy) -> Option<String> {
+    match root_type {
+        MonoTy::App {
+            ctor: MonoCtor::Nominal(_),
+            params,
+        } if params.is_empty() => Some(root_type.canonical()),
+        _ => None,
+    }
+}
+
 fn string_arg(ann: &bone_semantic::hir::Annotation, name: &str) -> Option<Ustr> {
     ann.args.iter().find_map(|a| {
         (a.name.as_ref().is_some_and(|n| n.name.as_str() == name))
@@ -143,6 +177,76 @@ fn int_expr(body: &bone_semantic::hir::Body, e: Idx<bone_semantic::hir::Expr>) -
         Expr::Int(n) => Some(n),
         Expr::UnaryMinus(inner) => int_expr(body, inner)?.checked_neg(),
         _ => None,
+    }
+}
+
+fn string_expr(body: &bone_semantic::hir::Body, e: Idx<bone_semantic::hir::Expr>) -> Option<Ustr> {
+    match body.expr_arena[e] {
+        Expr::String(value) => Some(value),
+        _ => None,
+    }
+}
+
+fn lifecycle_replay_role(
+    ws: &Workspace,
+    dmid: ModuleId,
+    did: Idx<bone_semantic::hir::DecoratorDef>,
+    app: &bone_semantic::hir::Annotation,
+    replay_param: Option<Ustr>,
+) -> Result<LifecycleReplayRole, CompilerError> {
+    let Some(param_name) = replay_param else {
+        return Ok(LifecycleReplayRole::Presentation);
+    };
+    let deco = &ws.module(dmid).decorators[did];
+    let index = deco
+        .param_decls
+        .iter()
+        .position(|param| param.name == param_name)
+        .ok_or_else(|| {
+            CompilerError::new_with_label(
+                app.span,
+                format!(
+                    "lifecycle replay_param `{param_name}` is not a parameter of `{}`",
+                    deco.name
+                ),
+            )
+        })?;
+    let value = if let Some(arg) = app
+        .args
+        .iter()
+        .find(|arg| arg.name.as_ref().is_some_and(|name| name.name == param_name))
+    {
+        match arg.value {
+            AnnoValue::String(value) => value,
+            _ => {
+                return Err(CompilerError::new_with_label(
+                    app.span,
+                    format!("lifecycle replay role `{param_name}` must be a string literal"),
+                ));
+            }
+        }
+    } else {
+        let body = &ws.module(dmid).bodies[&BodyOwner::Decorator(did)];
+        let e = body.param_defaults.get(index).and_then(|e| *e).ok_or_else(|| {
+            CompilerError::new_with_label(
+                app.span,
+                format!("lifecycle replay role `{param_name}` has no default"),
+            )
+        })?;
+        string_expr(body, e).ok_or_else(|| {
+            CompilerError::new_with_label(
+                deco.span,
+                format!("lifecycle replay role default `{param_name}` must be a string literal"),
+            )
+        })?
+    };
+    match value.as_str() {
+        "presentation" => Ok(LifecycleReplayRole::Presentation),
+        "state" => Ok(LifecycleReplayRole::State),
+        _ => Err(CompilerError::new_with_label(
+            app.span,
+            format!("unsupported lifecycle replay role `{value}`; expected `presentation` or `state`"),
+        )),
     }
 }
 
@@ -451,13 +555,14 @@ pub fn collect(ws: &Workspace) -> Result<LifecyclePlan, CompilerError> {
                 ));
             }
             let owner = string_arg(meta, "owner").expect("validated lifecycle owner");
-            if owner.as_str() != "session" {
+            if owner.as_str() != "session" && owner.as_str() != "scene" {
                 return Err(CompilerError::new_with_label(
                     meta.span,
-                    format!("unsupported lifecycle owner `{owner}`; expected `session`"),
+                    format!("unsupported lifecycle owner `{owner}`; expected `session` or `scene`"),
                 ));
             }
             let stage_param = string_arg(meta, "stage_param");
+            let replay_param = string_arg(meta, "replay_param");
             let stage_index = match stage_param {
                 Some(name) => Some(
                     deco.param_decls
@@ -484,7 +589,7 @@ pub fn collect(ws: &Workspace) -> Result<LifecyclePlan, CompilerError> {
                     ));
                 }
             };
-            roles.insert(deco.name, (module.id, did, phase, owner, stage_index));
+            roles.insert(deco.name, (module.id, did, phase, owner, stage_index, replay_param));
         }
     }
 
@@ -493,20 +598,98 @@ pub fn collect(ws: &Workspace) -> Result<LifecyclePlan, CompilerError> {
     for module in ws.modules.iter().filter(|m| m.id != ModuleId::builtin()) {
         for (fid, f) in module.functions.iter() {
             for app in &f.annotations {
-                let Some(&(dmid, did, phase, owner, stage_index)) = roles.get(&app.name.name)
+                let Some(&(dmid, did, phase, owner, stage_index, replay_param)) = roles.get(&app.name.name)
                 else {
                     continue;
                 };
                 census.applications += 1;
-                if !f.generics.is_empty() || !f.param_decls.is_empty() || f.return_ty.is_some() {
-                    return Err(CompilerError::new_with_label(
-                        f.span,
-                        format!(
-                            "lifecycle target `{}` must be concrete, non-generic, zero-argument, and unit-returning",
-                            f.name
-                        ),
-                    ));
-                }
+                let root_type = match owner.as_str() {
+                    "session" => {
+                        if !f.generics.is_empty() || !f.param_decls.is_empty() || f.return_ty.is_some() {
+                            return Err(CompilerError::new_with_label(
+                                f.span,
+                                format!(
+                                    "session lifecycle target `{}` must be concrete, non-generic, zero-argument, and unit-returning",
+                                    f.name
+                                ),
+                            ));
+                        }
+                        census.session_owned += 1;
+                        None
+                    }
+                    "scene" => {
+                        if phase.as_str() != "update" {
+                            return Err(CompilerError::new_with_label(
+                                app.span,
+                                format!(
+                                    "scene lifecycle target `{}` uses unsupported phase `{phase}`; expected `update`",
+                                    f.name
+                                ),
+                            ));
+                        }
+                        if !f.generics.is_empty() || f.param_decls.len() != 1 || f.return_ty.is_some() {
+                            return Err(CompilerError::new_with_label(
+                                f.span,
+                                format!(
+                                    "scene lifecycle target `{}` must be concrete, non-generic, take exactly one reference-struct root, and return unit",
+                                    f.name
+                                ),
+                            ));
+                        }
+                        let root = convert_decl(
+                            ws,
+                            f.param_decls[0].ty,
+                            &MonoSubst::default(),
+                        )
+                        .map_err(|reason| {
+                            CompilerError::new_with_label(
+                                f.span,
+                                format!(
+                                    "scene lifecycle target `{}` has a non-concrete root type ({})",
+                                    f.name,
+                                    reason.bucket(),
+                                ),
+                            )
+                        })?;
+                        let MonoTy::App {
+                            ctor: MonoCtor::Nominal(root_name),
+                            params,
+                        } = &root
+                        else {
+                            return Err(CompilerError::new_with_label(
+                                f.span,
+                                format!(
+                                    "scene lifecycle target `{}` root must be a reference struct, got `{}`",
+                                    f.name,
+                                    root.render(),
+                                ),
+                            ));
+                        };
+                        let Some(struct_id) = ws.struct_by_name.get(root_name) else {
+                            return Err(CompilerError::new_with_label(
+                                f.span,
+                                format!(
+                                    "scene lifecycle target `{}` root `{}` is not a struct",
+                                    f.name, root_name,
+                                ),
+                            ));
+                        };
+                        let definition = &ws.module(struct_id.module).structs[struct_id.def];
+                        if definition.is_value || !params.is_empty() {
+                            return Err(CompilerError::new_with_label(
+                                f.span,
+                                format!(
+                                    "scene lifecycle target `{}` root must be a non-generic reference struct, got `{}`",
+                                    f.name,
+                                    root.render(),
+                                ),
+                            ));
+                        }
+                        census.scene_owned += 1;
+                        Some(root)
+                    }
+                    _ => unreachable!("validated lifecycle owner"),
+                };
                 if f.backend != bone_semantic::hir::FnBackend::Any {
                     return Err(CompilerError::new_with_label(
                         f.span,
@@ -553,6 +736,7 @@ pub fn collect(ws: &Workspace) -> Result<LifecyclePlan, CompilerError> {
                 } else {
                     0
                 };
+                let replay_role = lifecycle_replay_role(ws, dmid, did, app, replay_param)?;
                 let qualification = wire_qualification(ws, app)?;
                 if qualification.is_gated() {
                     census.gated += 1;
@@ -563,12 +747,14 @@ pub fn collect(ws: &Workspace) -> Result<LifecyclePlan, CompilerError> {
                 entries.push(LifecycleEntry {
                     phase,
                     owner,
+                    root_type,
                     identity: CodeIdentity::Named(Instance::base(FuncRef {
                         module: module.id,
                         func: fid,
                     })),
                     diagnostic_name: f.name,
                     stage,
+                    replay_role,
                     declaration_ordinal: ordinal,
                     qualification,
                     body_fingerprint: 0,
@@ -753,8 +939,8 @@ mod tests {
         let plain_plan = collect(&plain).expect("plain plan");
         let mut same_shape = plain_plan.clone();
         same_shape.entries[0].body_fingerprint = 17;
-        assert!(!plain_plan.wire_structure_changed(&same_shape));
-        assert!(plain_plan.wire_structure_changed(&collect(&gated).expect("gated plan")));
+        assert!(!plain_plan.structure_changed(&same_shape));
+        assert!(plain_plan.structure_changed(&collect(&gated).expect("gated plan")));
         assert!(!plain_plan.removed_gated_wire(&same_shape));
         same_shape.entries[0].qualification = LifecycleQualification::OnChange {
             dependencies: Vec::new(),
@@ -791,6 +977,110 @@ mod tests {
     }
 
     #[test]
+    fn scene_lifecycle_accepts_one_concrete_reference_root() {
+        let ws = workspace(&[(
+            "scene.rock",
+            r#"
+            @lifecycle(phase="update", owner="scene", stage_param="stage")
+            deco init scene_update(stage: int = 100) {}
+            struct Dungeon { ticks: int }
+            @scene_update fn tick_dungeon(root: Dungeon) { root.ticks += 1 }
+            "#,
+        )]);
+        let plan = collect(&ws).expect("typed scene lifecycle target");
+        assert_eq!(plan.entries.len(), 1);
+        assert_eq!(plan.entries[0].owner.as_str(), "scene");
+        assert_eq!(plan.entries[0].diagnostic_name.as_str(), "tick_dungeon");
+        assert_eq!(plan.census.session_owned, 0);
+        assert_eq!(plan.census.scene_owned, 1);
+        assert_eq!(
+            plan.entries[0].root_type,
+            Some(MonoTy::App {
+                ctor: MonoCtor::Nominal(Ustr::from("Dungeon")),
+                params: Vec::new(),
+            })
+        );
+    }
+
+    #[test]
+    fn scene_lifecycle_rejects_non_reference_and_generic_roots() {
+        let cases = [
+            ("root: int", "reference struct"),
+            ("root: Vec2", "reference struct"),
+            ("root: Generic<int>", "non-generic reference struct"),
+        ];
+        for (parameter, expected) in cases {
+            let ws = workspace(&[(
+                "bad-scene.rock",
+                &format!(
+                    r#"
+                    value Vec2 {{ x: float, y: float }}
+                    struct Generic<T> {{ value: T }}
+                    @lifecycle(phase="update", owner="scene") deco init scene_update {{}}
+                    @scene_update fn bad({parameter}) {{}}
+                    "#
+                ),
+            )]);
+            let error = collect(&ws).expect_err("unsupported Scene root must reject");
+            assert!(error.message.contains(expected), "{parameter}: {error:?}");
+        }
+    }
+
+    #[test]
+    fn scene_root_type_is_lifecycle_structure() {
+        let collect_root = |root: &str| {
+            let ws = workspace(&[(
+                "root.rock",
+                &format!(
+                    r#"
+                    struct A {{ value: int }}
+                    struct B {{ value: int }}
+                    @lifecycle(phase="update", owner="scene") deco init scene_update {{}}
+                    @scene_update fn tick(root: {root}) {{ root.value += 1 }}
+                    "#
+                ),
+            )]);
+            collect(&ws).expect("scene plan")
+        };
+        let a = collect_root("A");
+        let same = collect_root("A");
+        let b = collect_root("B");
+        assert!(!a.structure_changed(&same));
+        assert!(a.structure_changed(&b));
+    }
+
+    #[test]
+    fn scene_and_session_updates_share_one_stage_order() {
+        let ws = workspace(&[(
+            "mixed.rock",
+            r#"
+            struct Root { value: int }
+            @lifecycle(phase="update", owner="session", stage_param="stage")
+            deco init update(stage: int = 100) {}
+            @lifecycle(phase="update", owner="scene", stage_param="stage")
+            deco init scene_update(stage: int = 100) {}
+            @scene_update(stage=40) fn scene_first(root: Root) { root.value += 1 }
+            @update(stage=41) fn session_middle() {}
+            @scene_update(stage=42) fn scene_last(root: Root) { root.value += 1 }
+            "#,
+        )]);
+        let plan = collect(&ws).expect("mixed lifecycle plan");
+        assert_eq!(plan.census.session_owned, 1);
+        assert_eq!(plan.census.scene_owned, 2);
+        assert_eq!(
+            plan.entries
+                .iter()
+                .map(|entry| (entry.diagnostic_name.as_str(), entry.owner.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("scene_first", "scene"),
+                ("session_middle", "session"),
+                ("scene_last", "scene"),
+            ],
+        );
+    }
+
+    #[test]
     fn post_imgui_draw_is_a_compiler_owned_role() {
         let ws = workspace(&[(
             "post-imgui.rock",
@@ -815,5 +1105,49 @@ mod tests {
                 ("post_imgui_draw", "later", 20),
             ]
         );
+    }
+
+    #[test]
+    fn late_draw_replay_role_is_compiler_owned_and_structural() {
+        let ws = workspace(&[
+            (
+                "role.rock",
+                r#"
+                @lifecycle(phase="late_draw", owner="session", stage_param="stage", replay_param="replay")
+                deco init late_draw(stage: int = 100, replay: string = "presentation") {}
+                @late_draw(replay="state") fn stateful() {}
+                @late_draw fn visual() {}
+                "#,
+            ),
+        ]);
+        let plan = collect(&ws).expect("late-draw replay roles");
+        assert_eq!(
+            plan.entries
+                .iter()
+                .map(|entry| (&entry.diagnostic_name, &entry.replay_role))
+                .collect::<Vec<_>>(),
+            vec![
+                (&Ustr::from("stateful"), &LifecycleReplayRole::State),
+                (&Ustr::from("visual"), &LifecycleReplayRole::Presentation),
+            ]
+        );
+
+        let mut changed = plan.clone();
+        changed.entries[0].replay_role = LifecycleReplayRole::Presentation;
+        assert!(plan.structure_changed(&changed));
+    }
+
+    #[test]
+    fn late_draw_replay_role_rejects_unknown_literals() {
+        let ws = workspace(&[(
+            "role.rock",
+            r#"
+            @lifecycle(phase="late_draw", owner="session", stage_param="stage", replay_param="replay")
+            deco init late_draw(stage: int = 100, replay: string = "presentation") {}
+            @late_draw(replay="snapshot") fn invalid() {}
+            "#,
+        )]);
+        let error = collect(&ws).expect_err("unknown replay role must reject");
+        assert!(error.message.contains("unsupported lifecycle replay role `snapshot`"), "{error:?}");
     }
 }

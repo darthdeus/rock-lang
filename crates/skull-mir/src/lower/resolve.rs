@@ -319,6 +319,12 @@ impl Builder<'_> {
                 let (pbase, key) = self.physical_field(base, field)?;
                 if key != field {
                     let parent = self.lower_expr(pbase)?;
+                    if let Some(name) = self.value_struct_of(e)
+                        && self.is_nobox_struct(name)
+                    {
+                        let nullable = self.embed_read_is_nullable(base, field)?;
+                        return self.load_embed_repr(parent, key, name, nullable);
+                    }
                     return Ok(ValueRepr::Scalar(
                         self.emit_cur(Inst::Field { base: parent, field: key }),
                     ));

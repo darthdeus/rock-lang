@@ -87,11 +87,152 @@ fn main() {}
     let second = emit.lua.find("name = \"second\", stage = 7").expect("second plan entry");
     let defaulted = emit.lua.find("name = \"defaulted\", stage = 100").expect("defaulted plan entry");
     assert!(first < second && second < defaulted, "compiler plan must preserve equal-stage declaration order and read the declared default");
+    // `func` is now a compiler-synthesized uniform thunk (`scene_id -> ()`),
+    // not the raw CodeRef slot -- calling it is what proves the slot behind
+    // it resolved (an unadmitted key throws "missing Rock code slot" at plan
+    // construction, before this snippet even runs); `key` on the entry
+    // itself carries the same identity string the thunk closed over.
     let out = run_luajit(
-        &format!("{}\nlocal p = _G.__ROCK_LIFECYCLE_PLAN.update; print(p.len .. ':' .. p._data[1].func.key)", emit.lua),
+        &format!("{}\nlocal p = _G.__ROCK_LIFECYCLE_PLAN.update; p._data[1].func(0); print(p.len .. ':' .. p._data[1].key)", emit.lua),
         "lifecycle_plan_root",
     );
     assert!(out.starts_with("3:named:<test>::first<>"), "plan targets must be admitted CodeRef roots: {out}");
+}
+
+#[test]
+fn lifecycle_metadata_emits_replay_roles_in_lua() {
+    let emit = emit_mir(r#"
+@lifecycle(phase="late_draw", owner="session", stage_param="stage", replay_param="replay")
+deco init late_draw(stage: int = 100, replay: string = "presentation") {}
+@late_draw(replay="state") fn stateful() {}
+@late_draw fn visual() {}
+fn main() {}
+"#);
+    assert!(emit.lua.contains("name = \"stateful\", stage = 100, replay_role = \"state\""), "state replay role missing: {}", emit.lua);
+    assert!(emit.lua.contains("name = \"visual\", stage = 100, replay_role = \"presentation\""), "presentation replay role missing: {}", emit.lua);
+    let out = run_luajit(
+        &format!(
+            "{}\nlocal p = _G.__ROCK_LIFECYCLE_PLAN.late_draw; print(p.len .. ':' .. p._data[1].replay_role .. ':' .. p._data[2].replay_role)",
+            emit.lua
+        ),
+        "lifecycle_replay_roles_lua",
+    );
+    assert_eq!(out, "2:state:presentation");
+}
+
+#[test]
+fn scene_lifecycle_metadata_emits_the_canonical_root_key() {
+    let emit = emit_mir(r#"
+struct Dungeon { ticks: int }
+@lifecycle(phase="update", owner="scene")
+deco init scene_update {}
+@scene_update fn tick(root: Dungeon) { root.ticks += 1 }
+fn main() {}
+"#);
+    assert!(
+        emit.lua.contains("owner = \"scene\", root_type = \"a_n7_Dungeon_0_z\""),
+        "scene plan lost its canonical typed root key: {}",
+        emit.lua,
+    );
+    assert!(emit.lua.contains("scene_owned = 1"), "scene phase population is zero");
+}
+
+#[test]
+fn scene_state_image_metadata_has_nonzero_registry_and_identity_populations() {
+    let emit = emit_mir(r#"
+struct Room { ticks: int }
+@lifecycle(phase="update", owner="scene") deco init scene_update {}
+@scene_update fn tick(root: Room) { root.ticks += 1 }
+fn main() {}
+"#);
+    let scene = &emit.state_schema.scene;
+    assert!(scene.scene_registry_identity.is_some(), "SceneRegistry logical identity is missing");
+    assert!(scene.arena_registry_identity.is_some(), "ArenaRegistry logical identity is missing");
+    assert_eq!(scene.scene_root_types, vec!["a_n4_Room_0_z"], "root type identity must be canonical");
+    assert_eq!(
+        scene.arena_identity_fields,
+        vec!["scene_id", "arena_id", "slot", "generation"],
+    );
+    assert_eq!(scene.scene_lifecycle_entries, 1);
+
+    let plan = skull_mir::state_image::StateImagePlan::from_schema(&emit.state_schema)
+        .expect("SceneImage plan");
+    let census = &plan.scene().census;
+    assert!(census.examined > 0, "SceneImage metadata denominator is empty: {census:?}");
+    assert_eq!(census.examined, census.assigned, "SceneImage metadata is not total: {census:?}");
+    assert_eq!(census.scene_registry, 1);
+    assert_eq!(census.arena_registry, 1);
+    assert_eq!(census.scene_root_types, 1);
+    assert_eq!(census.arena_identity_fields, 4);
+    assert!(emit.lua.contains("scene_registry_identity="));
+}
+
+#[test]
+fn scene_creation_uses_the_monomorphized_type_key_without_runtime_discovery() {
+    let emit = emit_mir(r#"
+struct Room { ticks: int }
+@lifecycle(phase="update", owner="scene")
+deco init scene_update {}
+@scene_update fn tick(root: Room) { root.ticks += 1 }
+global ROOT: Scene<Room>? = null
+fn load() -> Scene<Room> {
+    return scene_create((_b) => {
+        let root: Room? = Room { ticks: 0 }
+        return root
+    }).unwrap()
+}
+fn main() { ROOT = load() }
+"#);
+    let key = "a_n4_Room_0_z";
+    let scene_create_body = emit
+        .lua
+        .split("\nfunction ")
+        .find(|part| part.starts_with("scene_create"))
+        .unwrap_or_else(|| panic!("no emitted scene_create specialization:\n{}", emit.lua));
+    assert!(
+        scene_create_body.contains(key),
+        "scene_create must receive the compiler's MonoTy-derived key: {scene_create_body}"
+    );
+    assert!(
+        !scene_create_body.contains("__rock_get_type"),
+        "Scene construction must not discover its root type from the published value: {scene_create_body}"
+    );
+    assert!(
+        emit.lua.contains(&format!("root_type = \"{key}\"")),
+        "LifecyclePlan must publish the same semantic key as scene_create: {}",
+        emit.lua
+    );
+}
+
+#[test]
+fn scene_population_dispatch_does_not_copy_a_bucket_per_system() {
+    let scene_source = include_str!("../../../stdlib/scene.rock");
+    assert!(
+        !scene_source.contains("let out: [int] = []") && !scene_source.contains("vec_push(out"),
+        "population dispatch must iterate a stable bucket without allocating a per-system copy"
+    );
+    let systems_source = include_str!("../../../stone/engine/systems/systems.rock");
+    assert!(
+        systems_source.contains("let population_len = __scene_type_population_length"),
+        "population dispatch must use the phase-start length"
+    );
+    assert!(
+        !systems_source.contains("__SCENE_REGISTRY.next_id"),
+        "population dispatch must not scan the historical id ceiling"
+    );
+}
+
+#[test]
+fn scene_runtime_arms_measure_repeated_fixed_windows_after_churn_drains() {
+    let source = include_str!("../../../games/testbed/tests/sims/scene_lifecycle_runtime_arms.rock");
+    assert!(source.contains("const SLRA_WINDOW_FRAMES: int = 4"));
+    assert!(source.contains("const SLRA_SAMPLE_COUNT: int = 5"));
+    assert!(source.contains("slra_report(\"feature_off\", timing"));
+    assert!(source.contains("cpu_spread={timing.max - timing.min}"));
+    assert!(!source.contains("slra_report(\"feature_off\", 0.0"));
+    assert_eq!(source.matches("await frame(SLRA_WINDOW_FRAMES)").count(), 4);
+    assert!(source.contains("sim_eq_int(vec_len(drained_population), 0, \"churn drain"));
+    assert!(source.contains("sim_eq_int(slra_historical_count() - historical_before, 203"));
 }
 
 #[test]
@@ -119,6 +260,34 @@ fn main() {}
         "definition_plan_root",
     );
     assert_eq!(out, "2:alpha:1");
+}
+
+#[test]
+fn typed_catalog_accessor_is_compiler_owned_and_returns_the_published_view() {
+    let emit = emit_mir(r#"
+struct WidgetDef { value: int }
+@artifact_definition(catalog="widgets", key_param="key")
+deco init widget(key: string) {}
+@artifact_definition(catalog="empty", key_param="key")
+deco init empty(key: string) {}
+@artifact_catalog(catalog="widgets")
+@intrinsic extern fn widget_definition_plan() -> [ArtifactDefinition<WidgetDef>]
+@artifact_catalog(catalog="empty")
+@intrinsic extern fn empty_definition_plan() -> [ArtifactDefinition<WidgetDef>]
+@widget(key="alpha") fn make_alpha() -> WidgetDef { return WidgetDef { value: 1 } }
+fn main() {}
+"#);
+    assert!(emit.lua.contains("function widget_definition_plan()"));
+    assert!(emit.lua.contains("return __rock_definition_catalog(\"widgets\")"));
+    assert!(!emit.lua.contains("__ROCK_DEFINITION_PLAN or {}"));
+    let out = run_luajit(
+        &format!(
+            "{}\nlocal p = widget_definition_plan(); local e = empty_definition_plan(); local missing = not pcall(function() return __rock_definition_catalog('missing') end); print(p.len .. ':' .. p._data[1].key .. ':' .. p._data[1].definition.value .. ':' .. e.len .. ':' .. tostring(missing))",
+            emit.lua
+        ),
+        "typed_definition_catalog_root",
+    );
+    assert_eq!(out, "1:alpha:1:0:true");
 }
 
 #[test]

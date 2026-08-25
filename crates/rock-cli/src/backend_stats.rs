@@ -61,6 +61,9 @@ struct SkullStats {
     times: SkullPhaseTimes,
     files: usize,
     ok: bool,
+    failure: Option<rock_core::CompilerError>,
+    setup_failed: bool,
+    emit_failed: bool,
     /// skull's emit phases summed across timed runs (mean = value / iters), in
     /// run order — same element-wise accumulation as bone's `phases`. `setup:`
     /// entries are direct wall-clock measurements; the remaining entries are
@@ -104,6 +107,13 @@ pub fn do_backend_stats(input: &str, iters: usize, warmup: usize) -> Result<()> 
     let skull = run_skull(&sources, iters, warmup);
 
     print_report(input, iters, warmup, &bone, &skull);
+    if skull.setup_failed || skull.emit_failed {
+        let stage = if skull.setup_failed { "workspace setup" } else { "emit" };
+        if let Some(error) = &skull.failure {
+            anyhow::bail!("backend-stats skull {stage} failed: {error}");
+        }
+        anyhow::bail!("backend-stats skull {stage} failed without a diagnostic");
+    }
     Ok(())
 }
 
@@ -151,7 +161,11 @@ fn run_skull(sources: &SourceFiles, iters: usize, warmup: usize) -> SkullStats {
         }
         stats.times.parse += times.parse;
         stats.times.semantic += times.semantic;
+        stats.times.workspace_setup += times.workspace_setup;
         stats.times.emit += times.emit;
+        stats.failure = times.failure.clone();
+        stats.setup_failed = times.setup_failed;
+        stats.emit_failed = times.emit_failed;
         merge_phases(&mut stats.emit_phases, &times.emit_phases);
         stats.abi_plan_stats.merge(&times.abi_plan_stats);
         stats.arena_traffic = times.arena_traffic;
@@ -531,7 +545,7 @@ fn print_report(input: &str, iters: usize, warmup: usize, bone: &BoneStats, skul
     // Post-parse = the part that actually differs between the stages. Parsing is
     // shared skull_parser infra, so it's excluded from the A/B.
     let bone_postparse = bone.times.semantic;
-    let skull_postparse = skull.times.semantic + skull.times.emit;
+    let skull_postparse = skull.times.semantic + skull.times.workspace_setup + skull.times.emit;
 
     // --- bone (parse + semantic_pass over the whole workspace) ---
     println!("\n{}", "BONE (parse + semantic[lower+check], whole workspace)".bold());
@@ -564,6 +578,10 @@ fn print_report(input: &str, iters: usize, warmup: usize, bone: &BoneStats, skul
     println!("\n{}", "SKULL (parse + semantic[bone] + emit[codegen], whole workspace)".bold());
     println!("  parse          : {:>9.3} ms  (excluded from A/B)", ms(skull.times.parse));
     println!("  semantic       : {:>9.3} ms  (bone front-half)", ms(skull.times.semantic));
+    println!(
+        "  workspace setup: {:>9.3} ms  (comptime/build-var preparation; separate from emit)",
+        ms(skull.times.workspace_setup)
+    );
     println!("  emit           : {:>9.3} ms  (skull codegen delta)", ms(skull.times.emit));
     if !skull.emit_phases.is_empty() {
         let setup_sum: Duration = skull
@@ -853,10 +871,31 @@ fn print_report(input: &str, iters: usize, warmup: usize, bone: &BoneStats, skul
         );
     }
     println!("  post-parse     : {:>9.3} ms", ms(skull_postparse));
-    println!(
-        "  emit           : {}",
-        verdict(skull.ok, "OK", "skipped (bone rejected workspace)")
-    );
+    if skull.ok {
+        println!("  emit           : {}", "OK".green());
+    } else if skull.emit_failed {
+        println!(
+            "  emit           : {} ({})",
+            "FAILED".red(),
+            skull
+                .failure
+                .as_ref()
+                .map_or("missing diagnostic".to_string(), ToString::to_string)
+        );
+    } else if skull.setup_failed {
+        println!(
+            "  emit           : {} (workspace setup: {})",
+            "SKIPPED".red(),
+            skull
+                .failure
+                .as_ref()
+                .map_or("missing diagnostic".to_string(), ToString::to_string)
+        );
+    } else if let Some(error) = &skull.failure {
+        println!("  emit           : {} ({})", "SKIPPED".red(), error);
+    } else {
+        println!("  emit           : {}", "skipped (bone rejected workspace)".red());
+    }
 
     // --- A/B (post-parse only) ---
     // bone is the type-check floor (semantic only); skull is that same front
@@ -867,7 +906,7 @@ fn print_report(input: &str, iters: usize, warmup: usize, bone: &BoneStats, skul
     let skull_emit_ms = ms(skull.times.emit);
     println!("\n{}", "A/B (post-parse work; parsing excluded)".bold());
     println!("  bone  : {:>9.3} ms  (semantic only — typecheck floor)", bone_ms);
-    println!("  skull : {:>9.3} ms  (semantic + codegen)", skull_ms);
+    println!("  skull : {:>9.3} ms  (semantic + workspace setup + codegen)", skull_ms);
     println!("  skull emit (codegen delta over bone) : {:>9.3} ms", skull_emit_ms);
     if skull_sem_ms > 0.0 {
         println!(

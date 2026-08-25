@@ -24,6 +24,7 @@
 //! cast, stringify/format, inline-lua) — see the plan's phase checklist.
 
 use bone_semantic::hir::TyId;
+use bone_semantic::prelude::Span;
 use comfy_la_arena::{Arena, Idx};
 use std::sync::Arc;
 use std::time::Instant;
@@ -810,6 +811,9 @@ pub struct EmitIds {
 pub struct ComptimeRead {
     pub input: ComptimeInputId,
     pub value_hash: u64,
+    /// Source identity lets body witnesses distinguish the expanded literal
+    /// from an ordinary string with the same bytes.
+    pub span: Span,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]

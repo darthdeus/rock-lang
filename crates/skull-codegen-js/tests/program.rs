@@ -117,6 +117,106 @@ fn main() {}
 }
 
 #[test]
+fn emitted_js_has_no_shadow_effect_plan() {
+    let js = emit_program(&ws_with("fn main() {}"));
+    assert!(!js.contains("ShadowEffectPlan"), "JS must not carry the removed effect-plan type");
+    assert!(!js.contains("__ROCK_SHADOW_EFFECT_PLAN"), "JS must not publish the removed effect plan");
+}
+
+#[test]
+fn lifecycle_replay_roles_emit_in_js_and_match_lua() {
+    let ws = ws_with(r#"
+@lifecycle(phase="late_draw", owner="session", stage_param="stage", replay_param="replay")
+deco init late_draw(stage: int = 100, replay: string = "presentation") {}
+@late_draw(replay="state") fn stateful() {}
+@late_draw fn visual() {}
+fn main() {}
+"#);
+    let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
+    let lua = skull::mir_emit::emit_full(&ws, mid).expect("Lua emit").0;
+    let js = skull_codegen_js::emit::emit_program(&ws, mid).expect("JS emit");
+    assert_eq!(lua.lifecycle_plan, js.lifecycle_plan, "Lua and JS replay-role metadata drifted");
+    assert!(js.program.contains("name: \"stateful\", stage: 100, replay_role: \"state\""), "state replay role missing: {}", js.program);
+    assert!(js.program.contains("name: \"visual\", stage: 100, replay_role: \"presentation\""), "presentation replay role missing: {}", js.program);
+    assert!(js.lifecycle_plan.entries.iter().any(|entry| entry.replay_role.tag() == "state"));
+    assert!(js.lifecycle_plan.entries.iter().any(|entry| entry.replay_role.tag() == "presentation"));
+}
+
+#[test]
+fn scene_lifecycle_metadata_uses_the_same_canonical_root_key_in_js() {
+    let ws = ws_with(r#"
+struct Dungeon { ticks: int }
+@lifecycle(phase="update", owner="scene") deco init scene_update {}
+@scene_update fn tick(root: Dungeon) { root.ticks += 1 }
+fn main() {}
+"#);
+    let js = emit_program(&ws);
+    assert!(
+        js.contains("owner: \"scene\", root_type: \"a_n7_Dungeon_0_z\""),
+        "scene plan lost its canonical typed root key: {js}",
+    );
+    assert!(js.contains("scene_owned: 1"), "scene phase population is zero");
+}
+
+#[test]
+fn lua_and_js_publish_identical_scene_image_metadata() {
+    let ws = ws_with(r#"
+struct Room { ticks: int }
+@lifecycle(phase="update", owner="scene") deco init scene_update {}
+@scene_update fn tick(root: Room) { root.ticks += 1 }
+fn main() {}
+"#);
+    let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
+    let lua = skull::mir_emit::emit_full(&ws, mid).expect("Lua emit").0;
+    let js = skull_codegen_js::emit::emit_program(&ws, mid).expect("JS emit");
+    assert_eq!(lua.state_schema.scene, js.state_schema.scene, "Lua and JS StateSchema Scene metadata drifted");
+
+    let lua_plan = skull_mir::state_image::StateImagePlan::from_schema(&lua.state_schema)
+        .expect("Lua SceneImage plan");
+    let js_plan = skull_mir::state_image::StateImagePlan::from_schema(&js.state_schema)
+        .expect("JS SceneImage plan");
+    assert_eq!(lua_plan.scene(), js_plan.scene(), "Lua and JS StateImage Scene metadata drifted");
+    let scene = js_plan.scene();
+    assert!(scene.census.examined > 0, "SceneImage metadata denominator is empty: {:?}", scene.census);
+    assert_eq!(scene.census.examined, scene.census.assigned);
+    assert_eq!(scene.census.scene_registry, 1);
+    assert_eq!(scene.census.arena_registry, 1);
+    assert_eq!(scene.census.scene_root_types, 1);
+    assert_eq!(scene.census.arena_identity_fields, 4);
+    assert!(js.program.contains("scene_root_types:[\"a_n4_Room_0_z\"]"), "JS SceneImage root key drifted: {}", js.program);
+}
+
+#[test]
+fn scene_creation_uses_the_monomorphized_type_key_without_runtime_discovery_in_js() {
+    let ws = ws_with(r#"
+struct Room { ticks: int }
+@lifecycle(phase="update", owner="scene") deco init scene_update {}
+@scene_update fn tick(root: Room) { root.ticks += 1 }
+global ROOT: Scene<Room>? = null
+fn load() -> Scene<Room> {
+    return scene_create((_b) => {
+        let root: Room? = Room { ticks: 0 }
+        return root
+    }).unwrap()
+}
+fn main() { ROOT = load() }
+"#);
+    let js = emit_program(&ws);
+    let scene_create_body = js
+        .split("\nfunction ")
+        .find(|part| part.starts_with("scene_create"))
+        .unwrap_or_else(|| panic!("no emitted scene_create specialization:\n{js}"));
+    assert!(
+        scene_create_body.contains("a_n4_Room_0_z"),
+        "scene_create must receive the compiler's MonoTy-derived key: {scene_create_body}"
+    );
+    assert!(
+        !scene_create_body.contains("__rock_get_type"),
+        "Scene construction must not discover its root type from the published value: {scene_create_body}"
+    );
+}
+
+#[test]
 fn lua_and_js_publish_identical_dependency_gated_lifecycle_plans() {
     let ws = ws_with(r#"
         @lifecycle(phase="wire", owner="session") deco init wire {}
@@ -222,6 +322,108 @@ fn main() {}
         .expect("node");
     assert!(output.status.success(), "node failed: {}", String::from_utf8_lossy(&output.stderr));
     assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "2:alpha:1");
+}
+
+#[test]
+fn typed_catalog_accessor_is_compiler_owned_and_returns_the_published_view_in_js() {
+    let ws = ws_with(r#"
+struct WidgetDef { value: int }
+@artifact_definition(catalog="widgets", key_param="key")
+deco init widget(key: string) {}
+@artifact_definition(catalog="empty", key_param="key")
+deco init empty(key: string) {}
+@artifact_catalog(catalog="widgets")
+@intrinsic extern fn widget_definition_plan() -> [ArtifactDefinition<WidgetDef>]
+@artifact_catalog(catalog="empty")
+@intrinsic extern fn empty_definition_plan() -> [ArtifactDefinition<WidgetDef>]
+@widget(key="alpha") fn make_alpha() -> WidgetDef { return WidgetDef { value: 1 } }
+fn main() {}
+"#);
+    let js = emit_program(&ws);
+    assert!(js.contains("function widget_definition_plan() { return __rock_definition_catalog(\"widgets\"); }"));
+    assert!(!js.contains("__ROCK_DEFINITION_PLAN || {}"));
+    let source = format!(
+        "var __G = {{}};\n{}\n{}\n{}\nconst p = widget_definition_plan(); const e = empty_definition_plan(); let missing = false; try {{ __rock_definition_catalog('missing'); }} catch (_) {{ missing = true; }} console.log(p.len + ':' + p._data[0].key + ':' + p._data[0].definition.value + ':' + e.len + ':' + missing);",
+        skull_codegen_js::JS_SESSION_RUNTIME,
+        skull_codegen_js::JS_CALL_HELPER,
+        js,
+    );
+    let output = node()
+        .args(["-e", &source])
+        .output()
+        .expect("node");
+    assert!(output.status.success(), "node failed: {}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "1:alpha:1:0:true");
+}
+
+#[test]
+fn typed_catalog_lua_and_js_emission_share_membership_order_and_type() {
+    let ws = ws_with(r#"
+struct WidgetDef { value: int }
+@artifact_definition(catalog="widgets", key_param="key")
+deco init widget(key: string) {}
+@artifact_definition(catalog="empty", key_param="key")
+deco init empty(key: string) {}
+@artifact_catalog(catalog="widgets")
+@intrinsic extern fn widget_definition_plan() -> [ArtifactDefinition<WidgetDef>]
+@artifact_catalog(catalog="empty")
+@intrinsic extern fn empty_definition_plan() -> [ArtifactDefinition<WidgetDef>]
+@widget(key="beta") fn make_beta() -> WidgetDef { return WidgetDef { value: 2 } }
+@widget(key="alpha") fn make_alpha() -> WidgetDef { return WidgetDef { value: 1 } }
+fn main() {}
+"#);
+    let plan = skull_mir::definition::collect(&ws).expect("typed parity plan");
+    assert_eq!(plan.catalogs.len(), 2);
+    assert_eq!(plan.catalogs[0].catalog.as_str(), "empty");
+    assert_eq!(
+        plan.catalogs[0].definition_type.as_ref().map(|t| t.render()),
+        Some("WidgetDef".to_string())
+    );
+    assert_eq!(plan.entries.iter().map(|e| e.key.as_str()).collect::<Vec<_>>(), ["beta", "alpha"]);
+
+    let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
+    let lua = skull::mir_emit::emit_full(&ws, mid).expect("Lua parity emission").0.lua;
+    let js = emit_program(&ws);
+    for output in [&lua, &js] {
+        assert!(output.contains("key = \"beta\"") || output.contains("key: \"beta\""));
+        assert!(output.contains("key = \"alpha\"") || output.contains("key: \"alpha\""));
+        assert!(output.contains("len = 0") || output.contains("len: 0"));
+    }
+    assert!(lua.find("key = \"beta\"") < lua.find("key = \"alpha\""));
+    assert!(js.find("key: \"beta\"") < js.find("key: \"alpha\""));
+    assert!(lua.contains("function widget_definition_plan()"));
+    assert!(js.contains("function widget_definition_plan()"));
+}
+
+#[test]
+fn typed_definition_catalog_lookup_is_fail_closed_and_counts_population_in_js() {
+    let source = format!(
+        "var __G = {{}};\n{}\n{}\n{}\nconsole.log(result);",
+        skull_codegen_js::JS_SESSION_RUNTIME,
+        skull_codegen_js::JS_CALL_HELPER,
+        r#"
+let missingPlan = false;
+try { __rock_definition_catalog("widgets"); } catch (_) { missingPlan = true; }
+__rock_code_slot_begin();
+__rock_definition_plan_stage({
+  widgets: { len: 1, _data: [{ key: "alpha", factory: function() { return { value: 1 }; } }] },
+  empty: { len: 0, _data: [] },
+});
+__rock_code_slot_publish();
+let missingCatalog = false;
+try { __rock_definition_catalog("missing"); } catch (_) { missingCatalog = true; }
+const empty = __rock_definition_catalog("empty");
+const nonempty = __rock_definition_catalog("widgets");
+const result = missingPlan && missingCatalog && empty.len === 0 && nonempty.len === 1
+  ? "4/4 PASS" : "0/4 FAIL";
+"#,
+    );
+    let output = node()
+        .args(["-e", &source])
+        .output()
+        .expect("node");
+    assert!(output.status.success(), "node failed: {}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "4/4 PASS");
 }
 
 /// A concrete operation whose ONLY caller is a decorator body is still served.

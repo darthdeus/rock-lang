@@ -8,6 +8,8 @@ mod web_test_process;
 mod ablation_census_survives_failure;
 #[path = "arena_reuse_alloc_gate.rs"]
 mod arena_reuse_alloc_gate;
+#[path = "allocation_jit_trace_gate.rs"]
+mod allocation_jit_trace_gate;
 #[path = "bone_incremental_timing.rs"]
 mod bone_incremental_timing;
 #[path = "completions_cli.rs"]
@@ -64,6 +66,8 @@ mod nobox_global_reflection_tests;
 mod parser_recovery_surfacing;
 #[path = "production_sources_test.rs"]
 mod production_sources_test;
+#[path = "runstate_authority.rs"]
+mod runstate_authority;
 #[path = "asset_overlay_defaults.rs"]
 mod asset_overlay_defaults;
 #[path = "directory_listing_api.rs"]
@@ -110,3 +114,5 @@ mod web_fake_gl_tests;
 mod web_package_tests;
 #[path = "web_watch_tests.rs"]
 mod web_watch_tests;
+#[path = "backend_stats_gate.rs"]
+mod backend_stats_gate;
