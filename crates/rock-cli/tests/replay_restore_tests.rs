@@ -333,10 +333,16 @@ fn assert_mag_seek_state_matches(
         exact.remove("WISPS"),
         "WISPS must be admitted as simulation state"
     );
-    assert!(
-        exact.contains("MAG_ACTIVE_RUN"),
-        "MAG_ACTIVE_RUN must own the RunState.world simulation state"
-    );
+    for name in [
+        "MAG_ACTIVE_WORLD",
+        "player",
+        "bank_gold",
+        "journal",
+        "history",
+        "quest_log_open",
+    ] {
+        assert!(exact.contains(name), "{name} must be admitted as direct simulation state");
+    }
     assert_f32_state_matches(&got["mag"]["WISPS"], &want["mag"]["WISPS"], "mag.WISPS");
     assert_mag_seek_populations_match(got, want, label);
     assert_sim_state_matches(got, want, &exact, label);
@@ -385,13 +391,23 @@ fn mag_seek_equivalence_state_names(
     frames: u32,
 ) -> std::collections::HashSet<String> {
     let mut sim = sim_state_names(game, frames);
-    for name in ["WORLD_MODE", "MOTES", "MAG_ACTIVE_RUN", "WISPS"] {
+    for name in [
+        "WORLD_MODE",
+        "MOTES",
+        "MAG_ACTIVE_WORLD",
+        "WISPS",
+        "player",
+        "bank_gold",
+        "journal",
+        "history",
+        "quest_log_open",
+    ] {
         assert!(sim.contains(name), "{name} must be admitted as simulation state");
     }
-    for name in ["TALLY", "TELEMETRY_SESSION_OPEN", "TELEMETRY_LAST_FRAME_T"] {
+    for name in ["TELEMETRY_SESSION_OPEN", "TELEMETRY_LAST_FRAME_T"] {
         assert!(!sim.contains(name), "{name} is telemetry side-channel state");
     }
-    assert!(!sim.contains("DROP_PARTICLES"), "RunState.world owns DROP_PARTICLES inside MAG_ACTIVE_RUN");
+    assert!(!sim.contains("DROP_PARTICLES"), "WorldState owns drop-particle storage inside MAG_ACTIVE_WORLD");
     assert!(!sim.contains("ENGINE"), "render-only ENGINE settings must not be checkpointed");
     for name in [
         "MAG_BUILD_INFO_DATE",
@@ -476,7 +492,7 @@ fn mag_cast_seek_restores_scheduler_owner() {
     );
     let mut tick = 0;
     let fixture_text = std::fs::read_to_string(&fixture).expect("current Mag replay fixture");
-    assert!(fixture_text.starts_with("STONE_REPLAY 9\n"), "fixture must use the exact-Artifact replay format");
+    assert!(fixture_text.starts_with("STONE_REPLAY 11\n"), "fixture must use the exact-Artifact replay format");
     let fixture_text = fixture_text
         .lines()
         .map(|line| {
@@ -516,7 +532,7 @@ fn mag_cast_seek_restores_scheduler_owner() {
     assert_eq!(current_tick(&ordinary), target);
     let ordinary_probe = &ordinary["__stone_diag"];
     assert_eq!(ordinary_probe["MAG_CAST_PROBE_HITS"], 1, "ordinary arm must observe the target once: {ordinary_probe}");
-    assert_eq!(ordinary_probe["MAG_CAST_PROBE_RUN_STATE"], 1, "ordinary arm must have a live RunState: {ordinary_probe}");
+    assert_eq!(ordinary_probe["MAG_CAST_PROBE_DIRECT_STATE"], 1, "ordinary arm must have live direct state: {ordinary_probe}");
     assert!(ordinary_probe["MAG_CAST_PROBE_SCENE"].as_i64().is_some_and(|id| id > 0),
         "ordinary arm must resolve a live Scene root: {ordinary_probe}");
     assert_eq!(ordinary_probe["MAG_CAST_PROBE_CASTING"], 1, "ordinary arm must be mid-cast: {ordinary_probe}");
@@ -548,7 +564,7 @@ fn mag_cast_seek_restores_scheduler_owner() {
     assert_eq!(sought_probe["MAG_CAST_PROBE_HITS"], 2,
         "the target must be observed before and after the backward seek: {sought_probe}");
     for key in [
-        "MAG_CAST_PROBE_RUN_STATE", "MAG_CAST_PROBE_SCENE", "MAG_CAST_PROBE_CASTING",
+        "MAG_CAST_PROBE_DIRECT_STATE", "MAG_CAST_PROBE_SCENE", "MAG_CAST_PROBE_CASTING",
         "MAG_CAST_PROBE_LIGHTNING", "MAG_CAST_PROBE_TIMER", "MAG_CAST_PROBE_DURATION",
         "MAG_CAST_PROBE_TASK", "MAG_CAST_PROBE_POLLER_ROWS", "MAG_CAST_PROBE_MANA",
         "MAG_CAST_PROBE_REAGENT_1", "MAG_CAST_PROBE_REAGENT_4",
@@ -679,7 +695,7 @@ fn exact_recorded_replay_supports_two_backward_scene_image_scrubs() {
         .expect("spawn record");
     assert!(rec.status.success(), "record failed: {}", String::from_utf8_lossy(&rec.stderr));
     let text = std::fs::read_to_string(&log).expect("read exact replay");
-    assert!(text.starts_with("STONE_REPLAY 9\n"), "the scrub fixture must exercise the new format\n{text}");
+    assert!(text.starts_with("STONE_REPLAY 11\n"), "the scrub fixture must exercise the new format\n{text}");
 
     let ordinary = run_replay_dump(
         game,
@@ -2005,7 +2021,7 @@ fn replay_file_contains_observations_and_bootstrap_but_no_world_image_payload() 
     let _ = run_record_dump("bitgun", 20, &log, &[]);
     let bytes = std::fs::read_to_string(&log).unwrap();
     assert!(bytes.lines().any(|line| line.starts_with("t ")), "the replay must contain input observations");
-    assert!(bytes.contains("STONE_REPLAY 9"), "the replay must retain its versioned header");
+    assert!(bytes.contains("STONE_REPLAY 11"), "the replay must retain its versioned header");
     for payload in ["WorldImage", "StateImage", "keyframe", "snapshot"] {
         assert!(!bytes.contains(payload), "the replay wire must not serialize {payload}: {bytes}");
     }
@@ -2393,6 +2409,106 @@ fn resume_live_here_persists_the_branched_mag_world_not_the_discarded_future() {
     let persisted_bindings_history = std::fs::read_to_string(&bindings_history).unwrap();
     assert!(!persisted_bindings_history.contains("f12"),
         "the discarded binding-history future must be replaced by the branched graph:\n{persisted_bindings_history}");
+}
+
+#[test]
+fn literal_temporary_path_mag_product_smoke() {
+    let dir = tempfile::tempdir().unwrap();
+    let replay = dir.path().join("literal-product.replay");
+    let replay_s = replay.to_string_lossy().into_owned();
+    let first_progress = dir.path().join("first-progress.json");
+    let first_progress_s = first_progress.to_string_lossy().into_owned();
+    let second_progress = dir.path().join("second-progress.json");
+    let second_progress_s = second_progress.to_string_lossy().into_owned();
+    let settings = dir.path().join("settings.json");
+    let settings_s = settings.to_string_lossy().into_owned();
+    let bindings = dir.path().join("bindings.json");
+    let bindings_s = bindings.to_string_lossy().into_owned();
+    let binding_history = dir.path().join("bindings-history.jsonl");
+    let binding_history_s = binding_history.to_string_lossy().into_owned();
+    let layout_history = dir.path().join("layout-history.jsonl");
+    let layout_history_s = layout_history.to_string_lossy().into_owned();
+    let editor_history = dir.path().join("editor-history.jsonl");
+    let editor_history_s = editor_history.to_string_lossy().into_owned();
+    let editor_history_v1 = dir.path().join("editor-history.json");
+    let editor_history_v1_s = editor_history_v1.to_string_lossy().into_owned();
+    std::fs::write(&settings, r#"{"privacy":{"analytics":1,"analytics_version":3}}"#).unwrap();
+
+    let real_paths = [
+        workspace_root().join("mag/saves/progress.json"),
+        workspace_root().join("mag/saves/history.jsonl"),
+        workspace_root().join("mag/saves/history.json"),
+    ];
+    let real_before = real_paths.iter().map(|path| std::fs::read(path).ok()).collect::<Vec<_>>();
+
+    let run = run_record_dump_observed(
+        "mag",
+        540,
+        &replay_s,
+        &[
+            ("MAG_BOOT_MENU", "1"),
+            ("MAG_LITERAL_PRODUCT_SMOKE", "1"),
+            ("MAG_PROGRESS_PATH_OVERRIDE", &first_progress_s),
+            ("MAG_LITERAL_PRODUCT_SMOKE_SECOND_PATH", &second_progress_s),
+            ("MAG_SETTINGS_PATH_OVERRIDE", &settings_s),
+            ("MAG_BINDINGS_PATH_OVERRIDE", &bindings_s),
+            ("MAG_BINDINGS_HISTORY_PATH_OVERRIDE", &binding_history_s),
+            ("MAG_LAYOUT_HISTORY_PATH_OVERRIDE", &layout_history_s),
+            ("MAG_LITERAL_PRODUCT_SMOKE_HISTORY_PATH", &editor_history_s),
+            ("MAG_LITERAL_PRODUCT_SMOKE_HISTORY_V1_PATH", &editor_history_v1_s),
+            ("STONE_LIVE_REWIND", "1"),
+            ("STONE_KEYFRAME_INTERVAL", "10"),
+            ("STONE_PHYSICAL_MOUSE_PRESS_AT", "2"),
+            ("STONE_PHYSICAL_MOUSE_RELEASE_AT", "3"),
+            ("STONE_PHYSICAL_KEY_PRESS_AT", "100"),
+            ("STONE_PHYSICAL_KEY_RELEASE_AT", "101"),
+            ("STONE_PHYSICAL_KEY", "down"),
+            ("STONE_PHYSICAL_SCANCODE", "down"),
+            ("STONE_PHYSICAL_KEY_PRESS_AT_2", "105"),
+            ("STONE_PHYSICAL_KEY_RELEASE_AT_2", "106"),
+            ("STONE_PHYSICAL_KEY_2", "return"),
+            ("STONE_PHYSICAL_SCANCODE_2", "return"),
+            ("STONE_TIMELINE_SEEK_AT_FRAME", "260"),
+            ("STONE_TIMELINE_SEEK_TO_TICK", "150"),
+            ("STONE_TIMELINE_SEEK_AT_FRAME_2", "430"),
+            ("STONE_TIMELINE_SEEK_TO_TICK_2", "180"),
+            ("STONE_BRANCH_DRAW_AT_FRAME", "480"),
+        ],
+    );
+    assert!(run.status_success, "literal product run failed:\n{}", run.stderr);
+    assert!(
+        run.stderr.contains("completed/requested=540/540 frame_errors=0"),
+        "the literal bounded run must report zero frame errors:\n{}",
+        run.stderr
+    );
+    let diag = &run.state["__stone_diag"];
+    assert_eq!(diag["MAG_LITERAL_SMOKE_MENU"].as_i64(), Some(1), "{diag}");
+    assert_eq!(diag["MAG_LITERAL_SMOKE_FIRST_START"].as_i64(), Some(1), "{diag}");
+    assert!(diag["MAG_LITERAL_SMOKE_FIRST_START_FRAME"].as_i64().is_some_and(|n| n < 150), "the first seek target must contain the live run: {diag}");
+    assert_eq!(diag["STONE_SEEK_COUNT"].as_i64(), Some(2), "{diag}");
+    assert_eq!(diag["STONE_SEEK_FROM_TICK"].as_i64(), Some(150), "the second scrub must start at the backward target: {diag}");
+    assert_eq!(diag["STONE_SEEK_TO_TICK"].as_i64(), Some(180), "the second scrub must move forward: {diag}");
+    assert_eq!(diag["STONE_BRANCH_DRAW_ACTIVE"].as_i64(), Some(1), "Resume Live Here must run from the timeline draw path: {diag}");
+    assert_eq!(diag["STONE_BRANCH_COUNT"].as_i64(), Some(1), "Resume Live Here must commit: {diag}");
+    assert_eq!(diag["MAG_LITERAL_SMOKE_FIRST_SURVIVED"].as_i64(), Some(1), "{diag}");
+    for field in ["BANK", "POSITION", "INVENTORY", "REAGENTS", "EVENTS", "QUEST", "JOURNAL", "HISTORY", "PANEL", "TARGET"] {
+        assert_eq!(diag[format!("MAG_LITERAL_SMOKE_FIRST_{field}")].as_i64(), Some(1), "first-run {field} state did not survive replay: {diag}");
+    }
+    assert_eq!(diag["MAG_LITERAL_SMOKE_SECOND_CLEAN"].as_i64(), Some(1), "{diag}");
+    for field in ["BANK", "POSITION", "INVENTORY", "REAGENTS", "EVENTS", "QUEST", "JOURNAL", "HISTORY", "PANEL", "TARGET", "RETIRED", "ARENA"] {
+        assert_eq!(diag[format!("MAG_LITERAL_SMOKE_SECOND_{field}")].as_i64(), Some(1), "second-run {field} state was not clean: {diag}");
+    }
+    assert_eq!(diag["MAG_LITERAL_SMOKE_FINAL_MENU"].as_i64(), Some(1), "{diag}");
+    assert_eq!(diag["MAG_LITERAL_SMOKE_TEMP_PATHS"].as_i64(), Some(1), "every writable product path must be temporary: {diag}");
+    assert_eq!(diag["MAG_LITERAL_SMOKE_STARTS_BEFORE_SECOND"].as_i64(), Some(1), "the first product run must remain active through the replay scrub: {diag}");
+    assert_eq!(diag["MAG_LITERAL_SMOKE_STARTS"].as_i64(), Some(2), "exactly two product runs must start: {diag}");
+    assert_eq!(diag["MAG_LITERAL_SMOKE_STOPS"].as_i64(), Some(2), "{diag}");
+    assert!(recorded_tick_lines(&replay_s) > 0, "the literal product run must record a replay");
+    for path in [&first_progress, &settings, &bindings, &binding_history, &layout_history] {
+        assert!(path.exists(), "the product path must write only inside the temporary root: {}", path.display());
+    }
+    let real_after = real_paths.iter().map(|path| std::fs::read(path).ok()).collect::<Vec<_>>();
+    assert_eq!(real_after, real_before, "the literal smoke must not write MAG's real persistence files");
 }
 
 #[test]

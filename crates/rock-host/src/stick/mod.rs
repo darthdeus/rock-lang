@@ -52,6 +52,13 @@ pub struct BuildVar {
     pub builtin: Option<String>,
     pub value: Option<String>,
     pub channels: Option<Vec<String>>,
+    /// Channels on which a failing `cmd` degrades to `default` with a warning
+    /// instead of failing the build. Per-channel on purpose: a credential a
+    /// development build can do without is one a release build cannot, and an
+    /// all-channel switch would let a retail artifact ship the empty default.
+    /// `validate_build` requires a `default` to fall back to and membership in
+    /// `channels`, so the declaration can never be inert.
+    pub optional_channels: Option<Vec<String>>,
     pub default: Option<String>,
     /// Hash the value into cache keys but never store it in plaintext in any
     /// on-disk artifact or manifest.
@@ -313,7 +320,7 @@ impl<'de> serde::Deserialize<'de> for BuildVar {
         impl<'de> serde::de::Visitor<'de> for Vis {
             type Value = BuildVar;
             fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                write!(f, "a literal string or a table with cmd/builtin/value/channels/default/secret/volatile")
+                write!(f, "a literal string or a table with cmd/builtin/value/channels/optional_channels/default/secret/volatile")
             }
             fn visit_str<E: serde::de::Error>(self, s: &str) -> Result<BuildVar, E> {
                 Ok(BuildVar { value: Some(s.to_string()), ..BuildVar::default() })
@@ -326,6 +333,7 @@ impl<'de> serde::Deserialize<'de> for BuildVar {
                         "builtin" => { var.builtin = Some(map.next_value()?); }
                         "value" => { var.value = Some(map.next_value()?); }
                         "channels" => { var.channels = Some(map.next_value()?); }
+                        "optional_channels" => { var.optional_channels = Some(map.next_value()?); }
                         "default" => { var.default = Some(map.next_value()?); }
                         "secret" => { var.secret = map.next_value()?; }
                         "volatile" => { var.volatile = map.next_value()?; }
@@ -334,7 +342,7 @@ impl<'de> serde::Deserialize<'de> for BuildVar {
                             // var sourceless and every build_var() reading it stale.
                             return Err(serde::de::Error::custom(format!(
                                 "unknown key `{other}` in [build.vars] entry; known keys: \
-                                 cmd, builtin, value, channels, default, secret, volatile"
+                                 cmd, builtin, value, channels, optional_channels, default, secret, volatile"
                             )));
                         }
                     }

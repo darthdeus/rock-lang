@@ -3,6 +3,25 @@ use crate::common::{
     try_emit_with_stdlib_module,
 };
 
+fn global_session_slots(lua: &str, name: &str) -> Vec<u32> {
+    let marker = format!("identity=\"global:<test>::{name}\"");
+    let entry = lua
+        .split(&marker)
+        .nth(1)
+        .unwrap_or_else(|| panic!("missing StateSchema entry for {name}"));
+    let slots = entry
+        .split("session_keys={")
+        .nth(1)
+        .expect("StateSchema entry has Session keys")
+        .split('}')
+        .next()
+        .expect("StateSchema Session keys close");
+    slots
+        .split(',')
+        .map(|slot| slot.parse::<u32>().expect("Lua global Session slot is numeric"))
+        .collect()
+}
+
 const NOBOX_FIELD: &str = r#"
 nobox value NV2 { x: float, y: float }
 struct Player { pos: NV2, hp: int }
@@ -461,6 +480,45 @@ fn a_plain_owner_reads_every_leaf_of_a_nested_nobox_field() {
     );
 }
 
+const NOBOX_NESTED_PLAIN_OWNER_FIELD_WRITE: &str = r#"
+nobox value Id { value: int }
+nobox value Grid { x: int, y: int }
+nobox value Place { space: Id, grid: Grid }
+struct Owner { place: Place }
+
+fn move_grid(owner: Owner) {
+    owner.place.grid = Grid { x: 80, y: 81 }
+}
+
+fn main() {
+    let owner = Owner {
+        place: Place { space: Id { value: 11 }, grid: Grid { x: 13, y: 17 } }
+    }
+    move_grid(owner)
+    print("{owner.place.grid.x},{owner.place.grid.y}")
+}
+"#;
+
+#[test]
+fn a_plain_owner_writes_every_leaf_of_a_nested_nobox_field() {
+    let lua = emit_module(NOBOX_NESTED_PLAIN_OWNER_FIELD_WRITE);
+    let body = function_body(&lua, "move_grid");
+    for field in ["place.grid.x", "place.grid.y"] {
+        assert!(
+            body.contains(&format!(r#"["{field}"]"#)),
+            "nested nobox field write stopped before `{field}`:\n{body}"
+        );
+    }
+    assert!(
+        !body.contains("Grid_ct("),
+        "nested nobox field write materialized its child:\n{body}"
+    );
+    assert_eq!(
+        run_luajit(&format!("{lua}\nmain()\n"), "nobox_nested_plain_owner_write"),
+        "80,81"
+    );
+}
+
 const NOBOX_COLUMN_WIDEN: &str = r#"
 nobox value NV2 { x: float, y: float }
 
@@ -802,9 +860,10 @@ fn global_of_a_nobox_value_stores_leaves() {
         init.contains("do return (1.0), (2.0) end"),
         "the initializer did not return leaves:\n{init}"
     );
+    let slots = global_session_slots(&lua, "SPOT");
+    assert_eq!(slots.len(), 2, "the nobox global must own two Session leaves");
     assert!(
-        lua.contains("global:<test>::SPOT::leaf0")
-            && lua.contains("global:<test>::SPOT::leaf1"),
+        slots.iter().all(|slot| lua.contains(&format!("__rock_active_session.__rock_state[{slot}]"))),
         "the global leaves were not bound through the active Session:\n{lua}"
     );
     for f in ["read", "main"] {
@@ -866,11 +925,13 @@ fn main() {
 #[test]
 fn a_nobox_global_read_orders_its_dependent_initializer() {
     let lua = emit_module(NOBOX_GLOBAL_INIT_ORDER);
+    let base_slot = global_session_slots(&lua, "BASE")[0];
+    let derived_slot = global_session_slots(&lua, "DERIVED")[0];
     let base = lua
-        .find("if not __rock_state_has(\"global:<test>::BASE::leaf0\")")
+        .find(&format!("if not __rock_state_has({base_slot})"))
         .expect("BASE Session init line");
     let derived = lua
-        .find("if not __rock_state_has(\"global:<test>::DERIVED::leaf0\")")
+        .find(&format!("if not __rock_state_has({derived_slot})"))
         .expect("DERIVED Session init line");
     assert!(base < derived, "DERIVED initialized before the BASE it reads:\n{lua}");
     assert_eq!(
@@ -905,11 +966,10 @@ fn a_refined_nullable_nobox_global_addresses_the_right_leaves() {
     // A refined read's expr type is `NV2`, whose 2-leaf shape would put `x` on
     // the presence leaf. Layout follows the DECLARED type, so it must not.
     let lua = emit_module(NOBOX_NULLABLE_GLOBAL);
-    assert!(
-        lua.contains("global:<test>::MAYBE::leaf0")
-            && lua.contains("global:<test>::MAYBE::leaf1")
-            && lua.contains("global:<test>::MAYBE::leaf2"),
-        "a nullable nobox global did not reserve Session presence/data leaves:\n{lua}"
+    assert_eq!(
+        global_session_slots(&lua, "MAYBE").len(),
+        3,
+        "a nullable nobox global must reserve Session presence/data leaves"
     );
     assert_eq!(
         run_luajit(&format!("{lua}\nmain()\n"), "nobox_global_nullable"),

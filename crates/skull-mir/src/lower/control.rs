@@ -193,7 +193,10 @@ impl Builder<'_> {
                     self.flat_enum_value_shape_of(lhs)?,
                     self.flat_enum_value_shape_of(rhs)?,
                 ) {
-                    if lhs_shape.name == rhs_shape.name && lhs_shape.fields == rhs_shape.fields {
+                    if lhs_shape.name == rhs_shape.name
+                        && lhs_shape.fields == rhs_shape.fields
+                        && flat_enum_equality_is_leafwise(self.ws, lhs_shape.name)
+                    {
                         let lhs_repr = self.lower_expr_repr(lhs)?;
                         let lhs_leaves = self.repr_to_leaves_bundle(&lhs_repr)?;
                         let rhs_repr = self.lower_expr_repr(rhs)?;

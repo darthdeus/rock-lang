@@ -1599,10 +1599,8 @@ fn install_rock_state_metadata(
 /// Both directions consume one canonical accessor plan
 /// (`nobox_global_accessor_shape`), so they cannot drift from each other or from the
 /// storage: `get` is the positional leaf ctor over the plan's paths, and
-/// `set` assigns `v.<path>` per leaf in the same order. The ctor suffix follows
-/// the same three-way rule as every other pack site (`skull-codegen-lua`'s
-/// `_lct` / `_vt` / `_ct` choice) -- dotted paths mean the flattened leaf ctor,
-/// otherwise the GC tier's table ctor or the cdata one.
+/// `set` reads the same paths in order. Nested cdata uses the flattened `_lct`
+/// representation; ordinary cdata and GC-table values retain `_ct` and `_vt`.
 ///
 fn build_state_nobox_accessors(
     ws: &bone_semantic::inference::Workspace,
@@ -1611,13 +1609,15 @@ fn build_state_nobox_accessors(
     use bone_semantic::prelude::ModuleId;
 
     let mut rows: Vec<String> = Vec::new();
+    let state_slots = skull::mir_emit::lua_global_state_slots(ws, scx)?;
     for m in ws.modules.iter().filter(|m| m.id != ModuleId::builtin()) {
-        for (_gid, g) in m.globals.iter() {
+        for (_gid, g) in m.globals.iter().filter(|(_, global)| !global.is_const) {
             let Some(acc) = skull_mir::lower::nobox_global_accessor_shape(ws, scx, g.ty)
                 .map_err(|e| CompilerError::new_no_location(e.message))?
             else { continue };
             let skull_mir::lower::NoboxGlobalAccessorShape {
-                ty_name, paths, nullable, ctor_suffix: suffix, presence_path: _, unbuildable,
+                ty_name, paths, nullable, storage, ctor_suffix: suffix,
+                presence_path: _, unbuildable,
             } = acc;
             let plan = skull_mir::lower::GlobalPlan::for_declared_type(ws, scx, g.ty)
                 .map_err(|e| CompilerError::new_no_location(e.message))?;
@@ -1659,7 +1659,6 @@ fn build_state_nobox_accessors(
                     g.name
                 )));
             }
-            let identity = skull_mir::state_schema::global_identity(m.file, g.name);
             let all_leaf_names = if let Some(present) = present {
                 std::iter::once(present).chain(leaves.iter().copied()).collect::<Vec<_>>()
             } else {
@@ -1667,39 +1666,42 @@ fn build_state_nobox_accessors(
             };
             let state_keys = all_leaf_names
                 .iter()
-                .enumerate()
-                .map(|(index, _)| {
-                    let leaf = if all_leaf_names.len() == 1 {
-                        "value".to_string()
-                    } else {
-                        format!("leaf{index}")
-                    };
-                    skull_mir::state_schema::state_key(&identity, &leaf)
+                .map(|leaf| {
+                    state_slots.get(leaf).copied().ok_or_else(|| {
+                        CompilerError::new_no_location(format!(
+                            "nobox global `{}` leaf `{leaf}` has no Lua Session slot",
+                            g.name
+                        ))
+                    })
                 })
-                .collect::<Vec<_>>();
+                .collect::<Result<Vec<_>, _>>()?;
             let (present_key, value_keys) = if nullable {
                 let (present, values) = state_keys
                     .split_first()
                     .expect("a nullable shape has a presence Session slot");
-                (Some(present.clone()), values.to_vec())
+                (Some(*present), values.to_vec())
             } else {
                 (None, state_keys)
             };
             let args = value_keys
                 .iter()
-                .map(|key| format!("__rock_state_get({key:?})"))
+                .map(|key| format!("__rock_state_get({key})"))
                 .collect::<Vec<_>>()
                 .join(", ");
             let writes = leaves
                 .iter()
                 .zip(&paths)
-                // Bracketed, not `v.{p}`: a leaf-table struct's key for a nested
-                // child is the literal dotted string, so `v.m.x` reads `(v.m).x`
-                // -- a field of nil. The prefix guard above never caught it,
-                // because a NON-nullable nested child contributes `m.x`/`m.y`
-                // with no `m`, so no path is a prefix of another.
+                // Flattened leaf tables store dotted paths as literal keys;
+                // declared cdata fields remain ordinary nested field reads.
                 .zip(&value_keys)
-                .map(|((_, p), key)| format!("__rock_state_set({key:?}, v[{:?}])", p.as_str()))
+                .map(|((_, p), key)| {
+                    let value = if storage == skull_mir::lower::ValueStorage::LeafTable {
+                        format!("v[{:?}]", p.as_str())
+                    } else {
+                        format!("v.{}", p.as_str())
+                    };
+                    format!("__rock_state_set({key}, {value})")
+                })
                 .collect::<Vec<_>>()
                 .join("; ");
             let (get, set) = match present {
@@ -1708,16 +1710,16 @@ fn build_state_nobox_accessors(
                 // behind would let a later read resurrect the old value.
                 Some(_) => (
                     format!(
-                        "if not __rock_state_get({:?}) then return nil end return {ty_name}{suffix}({args})",
+                        "if not __rock_state_get({}) then return nil end return {ty_name}{suffix}({args})",
                         present_key.as_ref().expect("nullable accessor has a presence key")
                     ),
                     format!(
-                        "__rock_state_set({:?}, v ~= nil); if v ~= nil then {writes} else {} end",
+                        "__rock_state_set({}, v ~= nil); if v ~= nil then {writes} else {} end",
                         present_key.as_ref().expect("nullable accessor has a presence key"),
                         leaves
                             .iter()
                             .zip(&value_keys)
-                            .map(|(_, key)| format!("__rock_state_clear({key:?})"))
+                            .map(|(_, key)| format!("__rock_state_clear({key})"))
                             .collect::<Vec<_>>()
                             .join("; ")
                     ),
@@ -1726,7 +1728,7 @@ fn build_state_nobox_accessors(
             };
             rows.push(format!(
                 "[{:?}]={{get=function() {get} end,set=function(v) {set} end}},",
-                identity
+                skull_mir::state_schema::global_identity(m.file, g.name)
             ));
         }
     }

@@ -191,8 +191,7 @@ function checked(c0) {
 }
 "
     );
-    // The first call is statement-position (value unused); the trailing one is
-    // bone's tail-expression return shape.
+    // Both calls are statement-position because the function declares no result.
     let stmt_call = lower_test_fn(&ws, "stmt_call");
     assert_eq!(
         skull_codegen_js::emit::emit_fn(&ws, &stmt_call, "stmt_call").unwrap(),
@@ -201,8 +200,8 @@ function stmt_call(c0) {
   let v0 = c0;
   (v0.ptr[0] = 2.5);
   let v4 = c0;
-  let v7 = (v4.ptr[1] = 3.5);
-  return v7;
+  (v4.ptr[1] = 3.5);
+  return;
 }
 "
     );

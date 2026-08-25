@@ -1195,6 +1195,7 @@ pub struct NoboxGlobalAccessorShape {
     pub ty_name: Ustr,
     pub paths: Vec<Ustr>,
     pub nullable: bool,
+    pub storage: ValueStorage,
     /// From the shared physical storage classification -- the same answer the
     /// `_lct` ctor and the leaf-form pack site consume.
     pub ctor_suffix: &'static str,
@@ -1203,13 +1204,9 @@ pub struct NoboxGlobalAccessorShape {
     /// ctor takes tags like any other leaf, so this does NOT by itself make a
     /// shape unbuildable.
     pub presence_path: Option<Ustr>,
-    /// Why no accessor can be built, if so. The ctor is positional, so the
-    /// accessor is only sound when the ctor's parameter sequence IS the leaf
-    /// sequence. `_lct` is that by construction. `_ct` and `_vt` are positional
-    /// over DECLARED FIELDS, which coincides with the leaves only while every
-    /// field is primitive -- a nested value field makes the two differ in both
-    /// arity and type, and the mismatch is silent (`Held_ct` fed six floats
-    /// where it wants an `Inner` cdata and four floats).
+    /// Why no accessor can be built, if so. `_lct` is positional over physical
+    /// leaves, while `_vt` is positional over declared fields; nested GC-table
+    /// fields therefore cannot be rebuilt from the flattened global storage.
     pub unbuildable: Option<String>,
 }
 
@@ -1248,12 +1245,14 @@ pub fn nobox_global_accessor_shape(
         span: None,
         message: format!("`{}` has no physical storage plan for global accessors", shape.name),
     })?;
+    let has_nested = paths.iter().any(|p| p.contains('.'));
     let ctor_suffix = match storage {
         ValueStorage::LeafTable => "_lct",
         ValueStorage::GcTable => "_vt",
+        ValueStorage::CData if has_nested => "_lct",
         ValueStorage::CData => "_ct",
     };
-    let unbuildable = if ctor_suffix != "_lct" {
+    let unbuildable = if storage == ValueStorage::GcTable {
         paths.iter().find(|p| p.contains('.')).map(|nested| {
             format!(
                 "`{}{ctor_suffix}` is positional over DECLARED FIELDS, but this type's \
@@ -1270,6 +1269,7 @@ pub fn nobox_global_accessor_shape(
         ty_name: shape.name,
         paths,
         nullable: shape.nullable,
+        storage,
         ctor_suffix,
         presence_path,
         unbuildable,
@@ -2092,11 +2092,23 @@ impl EnumFlatShape {
 
 /// `Some(shape)` iff `name` is a mixed/boxed enum eligible for field flattening.
 fn build_flat_enum_shape(ws: &Workspace, name: Ustr) -> Option<EnumFlatShape> {
+    build_flat_enum_shape_inner(ws, name, &mut Vec::new())
+}
+
+fn build_flat_enum_shape_inner(
+    ws: &Workspace,
+    name: Ustr,
+    visiting: &mut Vec<Ustr>,
+) -> Option<EnumFlatShape> {
     let eid = *ws.enums_by_name.get(&name)?;
     // Payload-free enums are ints; cdata-eligible enums scalarize via cdata.
     if payload_free_enum_variants(ws, name).is_some() || build_enum_cdata_shape(ws, name).is_some() {
         return None;
     }
+    if visiting.contains(&name) {
+        return None;
+    }
+    visiting.push(name);
     let ed = &ws.modules[eid.module.index()].enums[eid.def];
     // Per position: every DISTINCT scalarizable value payload shape any variant
     // carries there. Empty = no such payload, so one opaque slot. Several shapes
@@ -2113,7 +2125,7 @@ fn build_flat_enum_shape(ws: &Workspace, name: Ustr) -> Option<EnumFlatShape> {
                     want.resize(tys.len(), Vec::new());
                 }
                 for (i, ty) in tys.iter().enumerate() {
-                    let Some(vs) = flat_payload_shape(ws, *ty) else { continue };
+                    let Some(vs) = flat_payload_shape(ws, *ty, visiting) else { continue };
                     if !want[i].iter().any(|prev| prev.name == vs.name) {
                         want[i].push(vs);
                     }
@@ -2132,6 +2144,7 @@ fn build_flat_enum_shape(ws: &Workspace, name: Ustr) -> Option<EnumFlatShape> {
         .into_iter()
         .map(|w| if w.is_empty() { FlatSlot::Opaque } else { FlatSlot::Leaves(w) })
         .collect();
+    visiting.pop();
     Some(EnumFlatShape { name, slots, record_fields })
 }
 
@@ -2194,19 +2207,96 @@ impl EnumPlan {
     }
 }
 
-/// The leaf shape of a scalarizable value-struct payload, else `None`.
+/// The leaf shape of a scalarizable payload, else `None`.
 ///
 /// Keyed on the DECLARED payload type, like every other splat decision on this
 /// arc: both the ctor that writes the slots and the match arm that reads them
 /// derive the layout from the enum declaration, so neither has to see the other.
-fn flat_payload_shape(ws: &Workspace, ty: TyId) -> Option<ValueShape> {
+fn flat_payload_shape(
+    ws: &Workspace,
+    ty: TyId,
+    visiting: &mut Vec<Ustr>,
+) -> Option<ValueShape> {
     let TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } = static_ty(ws, ty)? else {
         return None;
     };
-    if !map_is_value_struct(ws, n) {
-        return None;
+    if map_is_value_struct(ws, n) {
+        return sig_shape_of_nominal(ws, n);
     }
-    sig_shape_of_nominal(ws, n)
+    build_flat_enum_shape_inner(ws, n, visiting).map(|shape| shape.value_shape())
+}
+
+pub(crate) fn flat_enum_equality_is_leafwise(ws: &Workspace, name: Ustr) -> bool {
+    flat_enum_equality_is_leafwise_inner(ws, name, &mut Vec::new())
+}
+
+fn flat_enum_equality_is_leafwise_inner(
+    ws: &Workspace,
+    name: Ustr,
+    visiting: &mut Vec<Ustr>,
+) -> bool {
+    if visiting.contains(&name) {
+        return false;
+    }
+    let Some(eid) = ws.enums_by_name.get(&name) else {
+        return false;
+    };
+    visiting.push(name);
+    let ed = &ws.modules[eid.module.index()].enums[eid.def];
+    let leafwise = ed.variants.iter().all(|variant| match &variant.payload {
+        VariantPayload::Unit => true,
+        VariantPayload::Tuple(tys) => {
+            tys.iter().all(|ty| equality_payload_is_leafwise(ws, *ty, visiting))
+        }
+        VariantPayload::Record(fields) => {
+            fields.iter().all(|field| equality_payload_is_leafwise(ws, field.ty, visiting))
+        }
+    });
+    visiting.pop();
+    leafwise
+}
+
+fn equality_payload_is_leafwise(
+    ws: &Workspace,
+    ty: TyId,
+    visiting: &mut Vec<Ustr>,
+) -> bool {
+    let TyId::Static(mid, idx) = ty else {
+        return false;
+    };
+    match ws.module(mid).ty_arena[idx] {
+        TypeExpr::Builtin(
+            BuiltinTy::Unit
+            | BuiltinTy::Int
+            | BuiltinTy::Uint
+            | BuiltinTy::Float
+            | BuiltinTy::Bool
+            | BuiltinTy::String
+            | BuiltinTy::Never,
+        )
+        | TypeExpr::Function { .. } => true,
+        TypeExpr::Nullable(inner) => {
+            equality_payload_is_leafwise(ws, TyId::Static(mid, inner), visiting)
+        }
+        TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => {
+            if map_is_value_struct(ws, n) {
+                return true;
+            }
+            let Some(plan) = EnumPlan::for_name(ws, n) else {
+                return false;
+            };
+            match plan.layout() {
+                EnumLayout::PayloadFree | EnumLayout::Cdata(_) => true,
+                EnumLayout::Flat(_) => flat_enum_equality_is_leafwise_inner(ws, n, visiting),
+                EnumLayout::Boxed => false,
+            }
+        }
+        TypeExpr::Builtin(BuiltinTy::Any | BuiltinTy::Error)
+        | TypeExpr::Generic(..)
+        | TypeExpr::Infer(..)
+        | TypeExpr::App { .. }
+        | TypeExpr::Tuple { .. } => false,
+    }
 }
 
 /// The frame-slot yield channel of a `co fn` whose declared return type is

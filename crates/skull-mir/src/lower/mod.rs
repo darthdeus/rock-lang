@@ -2551,7 +2551,18 @@ impl Builder<'_> {
     fn return_leaves(&mut self, opt: Option<Idx<Expr>>) -> Result<Vec<Idx<Inst>>, CompilerError> {
         let Some(e) = opt else { return Ok(vec![]) };
         if self.ret_rep.is_none() {
-            self.lower_stmt_expr(e)?;
+            let gpu_context = self.site_owner.as_ref().is_some_and(|owner| {
+                crate::intrinsics::is_gpu_context(
+                    &self.ws.module(owner.func.module).functions[owner.func.func],
+                )
+            });
+            if gpu_context {
+                // Shader planning consumes value-form control flow to retain
+                // GPU-only effects in a discarded tail expression.
+                self.lower_expr(e)?;
+            } else {
+                self.lower_stmt_expr(e)?;
+            }
             return Ok(vec![]);
         }
         if let Some(shape) = self.result_shape() {

@@ -1725,11 +1725,10 @@ fn global_init_session_line(
         .map_err(|_| CompilerError::new_no_location(format!("no state plan for global `{}`", g.name)))?;
     match plan.leaf_names(g.name) {
         Some(leaves) => {
-            let keys: Vec<String> = leaves
+            let keys: Vec<u32> = leaves
                 .iter()
                 .map(|leaf| {
                     cg.state_slot(*leaf)
-                        .map(str::to_string)
                         .ok_or_else(|| {
                             CompilerError::new_no_location(format!(
                                 "global `{}` has no compiler-owned Session slot for `{leaf}`",
@@ -1739,11 +1738,11 @@ fn global_init_session_line(
                 })
                 .collect::<Result<_, _>>()?;
             let first = keys.first().expect("a leaf plan has a first Session slot");
-            let mut line = format!("if not __rock_state_has({first:?}) then\n");
+            let mut line = format!("if not __rock_state_has({first}) then\n");
             line.push_str(&format!("  local __rock_init_values = {{ {init_name}() }}\n"));
             for (index, key) in keys.iter().enumerate() {
                 line.push_str(&format!(
-                    "  __rock_state_set({key:?}, __rock_init_values[{}])\n",
+                    "  __rock_state_set({key}, __rock_init_values[{}])\n",
                     index + 1
                 ));
             }
@@ -1758,16 +1757,37 @@ fn global_init_session_line(
                         "global `{}` has no compiler-owned Session slot",
                         g.name
                     ))
-                })?
-                .to_string();
+                })?;
             Ok(format!(
-                "if not __rock_state_has({key:?}) then __rock_state_set({key:?}, {init_name}()) end\n"
+                "if not __rock_state_has({key}) then __rock_state_set({key}, {init_name}()) end\n"
             ))
         }
     }
 }
 
-fn state_schema_lua(schema: &skull_mir::state_schema::StateSchema) -> String {
+pub fn lua_global_state_slots(
+    ws: &Workspace,
+    scx: &skull_mir::lower::ScalarCtx,
+) -> Result<std::collections::BTreeMap<ustr::Ustr, u32>, CompilerError> {
+    let mut slots = skull_mir::state_schema::global_state_slots(ws, scx)
+        .map_err(|error| CompilerError::new_no_location(error.to_string()))?
+        .into_iter()
+        .collect::<Vec<_>>();
+    slots.sort_by(|a, b| a.1.cmp(&b.1));
+    Ok(slots
+        .into_iter()
+        .enumerate()
+        .map(|(index, (physical, _))| {
+            let slot = u32::try_from(index + 1).expect("Lua Session slot population exceeds u32");
+            (physical, slot)
+        })
+        .collect())
+}
+
+fn state_schema_lua(
+    schema: &skull_mir::state_schema::StateSchema,
+    cg: &CodegenCtx,
+) -> String {
     let image_plan = skull_mir::state_image::StateImagePlan::from_schema(schema)
         .expect("compiler-owned StateSchema must produce one StateImagePlan");
     let mut out = String::from("_G.__ROCK_STATE_SCHEMA = {");
@@ -1784,11 +1804,24 @@ fn state_schema_lua(schema: &skull_mir::state_schema::StateSchema) -> String {
             .map(|name| format!("{name:?}"))
             .collect::<Vec<_>>()
             .join(",");
-        let keys = skull_mir::state_schema::entry_state_keys(entry)
-            .iter()
-            .map(|key| format!("{key:?}"))
-            .collect::<Vec<_>>()
-            .join(",");
+        let keys = if entry.kind == skull_mir::state_schema::StateKind::Global {
+            entry
+                .physical
+                .iter()
+                .map(|name| {
+                    cg.state_slot(ustr::Ustr::from(name.as_str()))
+                        .expect("every Lua global StateSchema leaf has a physical Session slot")
+                        .to_string()
+                })
+                .collect::<Vec<_>>()
+                .join(",")
+        } else {
+            skull_mir::state_schema::entry_state_keys(entry)
+                .iter()
+                .map(|key| format!("{key:?}"))
+                .collect::<Vec<_>>()
+                .join(",")
+        };
         let owner = entry
             .owner
             .as_deref()
@@ -2468,6 +2501,49 @@ struct Chunk {
     specs: Vec<skull_mir::bound::SpecDemand>,
     /// Compiler-owned logical callable identities in this emitted body.
     code_artifact: skull_mir::code_identity::CodeArtifact,
+}
+
+// Each global definition costs the enclosing LuaJIT proto a child proto and name.
+const LUA_DEFINITIONS_PER_SCOPE: usize = 4_096;
+
+#[derive(Default)]
+struct LuaDefinitionBuffer {
+    lua: String,
+    units: Vec<(usize, usize, usize)>,
+    definition_count: usize,
+}
+
+impl LuaDefinitionBuffer {
+    fn push_str(&mut self, lua: &str) {
+        let start = self.lua.len();
+        let count = lua.lines().filter(|line| line.starts_with("function ")).count();
+        self.lua.push_str(lua);
+        self.units.push((start, self.lua.len(), count));
+        self.definition_count += count;
+    }
+
+    fn append_to(self, out: &mut String) {
+        if self.definition_count <= LUA_DEFINITIONS_PER_SCOPE {
+            out.push_str(&self.lua);
+            return;
+        }
+
+        out.push_str("do\n(function()\n");
+        let mut definitions_in_scope = 0;
+        for (start, end, count) in self.units {
+            if definitions_in_scope > 0
+                && definitions_in_scope + count > LUA_DEFINITIONS_PER_SCOPE
+            {
+                out.push_str(
+                    "end)()\nend\ndo\n(function()\n",
+                );
+                definitions_in_scope = 0;
+            }
+            out.push_str(&self.lua[start..end]);
+            definitions_in_scope += count;
+        }
+        out.push_str("end)()\nend\n");
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -3833,7 +3909,7 @@ fn emit_specialized_callees(
     built: &mut Vec<(Instance, Chunk)>,
     allocation_bodies: &mut Vec<crate::allocation_report::AllocationBody>,
     statics: &mut Vec<skull_mir::mir::StaticCell>,
-    out: &mut String,
+    out: &mut LuaDefinitionBuffer,
     attribution: &mut AttributionAccumulator,
     times: &mut PhaseTimes,
 ) -> Vec<CompilerError> {
@@ -5094,9 +5170,10 @@ fn assemble(
     }
     let mut always_emitted_calls: Vec<FuncRef> = Vec::new();
     let mut always_emitted_names: Vec<Ustr> = Vec::new();
+    let mut decorator_lua = String::new();
     merge_units(
         deco_results,
-        &mut out,
+        &mut decorator_lua,
         &mut skipped,
         &mut direct_globals,
         &mut direct_calls,
@@ -5108,6 +5185,9 @@ fn assemble(
         &mut attribution,
         &mut times,
     );
+    let mut decorator_definitions = LuaDefinitionBuffer::default();
+    decorator_definitions.push_str(&decorator_lua);
+    decorator_definitions.append_to(&mut out);
 
     // Global initializers are emitted below, in their original slot, but they are
     // LOWERED here: their call edges are reachability roots (a global init is
@@ -5204,6 +5284,7 @@ fn assemble(
     for c in spec_chunks.values() {
         needed_foreign.extend(c.calls.iter().map(|f| shared(*f)));
     }
+    let mut definitions = LuaDefinitionBuffer::default();
     let foreign_bindings: Vec<(FuncRef, String)> = ws
         .modules
         .iter()
@@ -5276,7 +5357,7 @@ fn assemble(
                     // `extern_ret`'s unbound-generic rejection, whose subject is
                     // a generic declaration the view holds no base instance for.
                     if emit_def {
-                        let _ = writeln!(out, "function {nm}({params})\n{body}\nend");
+                        definitions.push_str(&format!("function {nm}({params})\n{body}\nend\n"));
                     }
                 }
                 continue;
@@ -5322,7 +5403,9 @@ fn assemble(
                         }
                     }
                 }
-                let _ = writeln!(out, "function {name}({params})\n{prologue}{body}\nend");
+                definitions.push_str(&format!(
+                    "function {name}({params})\n{prologue}{body}\nend\n"
+                ));
                 continue;
             }
             // An `Iterator`-bounded fn has no standalone emission (it exists
@@ -5344,7 +5427,7 @@ fn assemble(
                     times.add(&chunk.times);
                     attribution.add_unit(&chunk.attribution);
                     if emit_def {
-                        out.push_str(&chunk.lua);
+                        definitions.push_str(&chunk.lua);
                         allocation_bodies.extend(chunk.allocation_bodies.iter().cloned());
                         code_artifact.merge_ref(&chunk.code_artifact);
                         // A dropped definition's `static` cells do not exist, so
@@ -5391,7 +5474,7 @@ fn assemble(
         built_specs,
         &mut allocation_bodies,
         &mut all_statics,
-        &mut out,
+        &mut definitions,
         &mut attribution,
         &mut times,
     ));
@@ -5410,6 +5493,7 @@ fn assemble(
     if let Some(err) = cg.take_rejection() {
         return Err(err);
     }
+    definitions.append_to(&mut out);
     mark_generated_code_values(ws, &mut code_artifact);
     let definition_plan = skull_mir::definition::collect(ws)?;
     if definition_plan.census.applications != definition_plan.census.admitted {
@@ -5454,7 +5538,7 @@ fn assemble(
         "__rock_state_publish_schema({:?})\n",
         state_schema.schema_id
     ));
-    let state_schema_stage = state_schema_lua(&state_schema);
+    let state_schema_stage = state_schema_lua(&state_schema, cg);
     out.push_str(&wrap_large_lua_section(
         "__rock_state_schema_stage_part",
         &state_schema_stage,
@@ -5463,7 +5547,9 @@ fn assemble(
     // Globals: an init fn + a dependency-ordered `<NAME> = __skull_ginit_<NAME>()`.
     // (Lowered above, so the walk could see their call edges; appended here, in
     // the original slot, so the emitted text is unchanged.)
-    out.push_str(&globals_lua);
+    let mut global_definitions = LuaDefinitionBuffer::default();
+    global_definitions.push_str(&globals_lua);
+    global_definitions.append_to(&mut out);
     skipped.extend(global_skipped);
     let has_definition_plan = !definition_plan.catalogs.is_empty();
     if has_artifact_plans {
@@ -5495,7 +5581,7 @@ fn assemble(
         &lifecycle_plan_stage,
     ));
     if has_artifact_plans {
-        let binding_plan_stage = artifact_binding_plan_stage_lua(&code_artifact.binding_plan);
+        let binding_plan_stage = artifact_binding_plan_stage_lua(&code_artifact.binding_plan, cg);
         out.push_str(&wrap_large_lua_section(
             "__rock_artifact_binding_plan_stage_part",
             &binding_plan_stage,
@@ -5961,14 +6047,19 @@ fn build_artifact_plans(
 
 fn artifact_binding_plan_stage_lua(
     plan: &skull_mir::artifact_plan::ArtifactBindingPlan,
+    cg: &CodegenCtx,
 ) -> String {
     let mut out = String::from("__rock_artifact_binding_plan_stage({ entries = { len = ");
     let _ = write!(out, "{}, _data = {{\n", plan.entries.len());
     for (index, entry) in plan.entries.iter().enumerate() {
-        let state_key = entry
-            .state_key
-            .as_deref()
-            .map_or_else(|| "nil".to_string(), skull_codegen_lua::lua_string);
+        let state_key = entry.state_key.as_ref().map_or_else(
+            || "nil".to_string(),
+            |_| {
+                cg.state_slot(ustr::Ustr::from(entry.physical.as_str()))
+                    .expect("every Lua artifact global binding has a physical Session slot")
+                    .to_string()
+            },
+        );
         let _ = writeln!(
             out,
             "[{}] = {{ identity = {}, physical = {}, diagnostic = {}, kind = {}, state_key = {} }},",
@@ -6488,10 +6579,7 @@ fn emit_full_in_with_mutation(
     let (shader_result, shader_lane) = shader_result;
     let (shader_view, shader_registrations) = shader_result?;
     scx.adopt_warmed_abi(abi_scx);
-    let state_slots = skull_mir::state_schema::global_state_slots(ws, &scx)
-        .map_err(|error| CompilerError::new_no_location(error.to_string()))?
-        .into_iter()
-        .collect();
+    let state_slots = lua_global_state_slots(ws, &scx)?.into_iter().collect();
     let cg = CodegenCtx::new_with_state(ws, state_slots);
     let setup_lanes = SetupLaneAttribution {
         cpu_population: cpu_lane.population,
@@ -7716,9 +7804,10 @@ fn assemble_overlay(
     let mut order: Vec<Instance> = cache.changed_since_full.iter().cloned().collect();
     order.sort_by_key(|b| overlay_order_key(&cache.scx, b));
     order.dedup();
+    let mut definitions = LuaDefinitionBuffer::default();
     for body in &order {
         match cache.chunks.get(body) {
-            Some(Ok(chunk)) => out.push_str(&chunk.lua),
+            Some(Ok(chunk)) => definitions.push_str(&chunk.lua),
             Some(Err(err)) => {
                 let fref = body.func;
                 let f = &ws.module(fref.module).functions[fref.func];
@@ -7728,6 +7817,7 @@ fn assemble_overlay(
             None => {}
         }
     }
+    definitions.append_to(&mut out);
     let has_code_slots = cache.code_artifact.entries.values().any(|entry| entry.escaping);
     let code_slot_stage = code_slot_registration_lua_entries(
         ws,
@@ -7846,6 +7936,7 @@ fn assemble_overlay(
         // Emit each affected const's ginit fn (changed only) now; build its init
         // line + dependency edges (restricted to affected consts) for the sort.
         let mut inits: Vec<GlobalInit> = Vec::new();
+        let mut definitions = LuaDefinitionBuffer::default();
         for a in &affected {
             let line = if a.changed {
                 let unit = emit_global_unit(
@@ -7864,7 +7955,7 @@ fn assemble_overlay(
                 unit_reads
                     .globals
                     .insert((a.mid, a.gid), unit.comptime_reads.clone());
-                out.push_str(&unit.lua); // the (new) ginit fn def
+                definitions.push_str(&unit.lua);
                 if let Some(s) = unit.skipped {
                     skipped.push(s);
                 }
@@ -7895,6 +7986,7 @@ fn assemble_overlay(
                 .collect();
             inits.push(GlobalInit { name: a.name, deps: edges, line });
         }
+        definitions.append_to(&mut out);
 
         match sort_global_init_lines(inits) {
             Ok(lines) => out.push_str(&lines.concat()),
@@ -8188,6 +8280,63 @@ pub fn emit_overlay_with_span_edits(
         ("assemble_overlay (+build_deco_map)", t_asm),
     ];
     Ok(emit)
+}
+
+#[cfg(test)]
+mod lua_definition_scope_tests {
+    use super::*;
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    fn luajit_loads(lua: &str) -> Option<(bool, String)> {
+        let mut child = Command::new("luajit")
+            .arg("-")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .ok()?;
+        if let Err(error) = child.stdin.take().unwrap().write_all(lua.as_bytes()) {
+            assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
+        }
+        let output = child.wait_with_output().unwrap();
+        Some((output.status.success(), String::from_utf8_lossy(&output.stderr).into_owned()))
+    }
+
+    #[test]
+    fn definition_scopes_cross_the_luajit_main_constant_limit() {
+        let mut raw = String::new();
+        let mut definitions = LuaDefinitionBuffer::default();
+        for i in 0..32_769 {
+            let function = format!("function generated_{i}() return {i} end\n");
+            raw.push_str(&function);
+            definitions.push_str(&function);
+        }
+        let Some((raw_loaded, raw_error)) = luajit_loads(&raw) else {
+            return;
+        };
+        assert!(!raw_loaded, "the unpartitioned control unexpectedly loaded");
+        assert!(
+            raw_error.contains("more than 65536 constants"),
+            "the control failed for the wrong reason: {raw_error}"
+        );
+
+        let mut scoped = String::new();
+        definitions.append_to(&mut scoped);
+        scoped.push_str("assert(generated_0() == 0 and generated_32768() == 32768)\n");
+        let (scoped_loaded, scoped_error) = luajit_loads(&scoped).unwrap();
+        assert!(scoped_loaded, "partitioned definitions did not load: {scoped_error}");
+    }
+
+    #[test]
+    fn small_definition_population_keeps_its_exact_text() {
+        let source = "function one() return 1 end\nfunction two() return one() + 1 end\n";
+        let mut definitions = LuaDefinitionBuffer::default();
+        definitions.push_str(source);
+        let mut out = String::new();
+        definitions.append_to(&mut out);
+        assert_eq!(out, source);
+    }
 }
 
 #[cfg(test)]
