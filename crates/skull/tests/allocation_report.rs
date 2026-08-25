@@ -142,6 +142,56 @@ fn update_root() -> int {
 }
 
 #[test]
+fn allocation_report_accumulates_local_and_call_edge_loop_depth() {
+    let _inline = InlineOffGuard::on();
+    let _report = AllocationReportGuard::on();
+    let emit = emit_mir(
+        r#"
+fn direct_leaf() -> [int] {
+    return [1]
+}
+
+fn loop_leaf(i: int) -> [int] {
+    return [i]
+}
+
+fn update_root() -> int {
+    let total = direct_leaf().len()
+    for i in 0..3 {
+        total += loop_leaf(i).len()
+        for j in 0..2 {
+            let pair = [i, j]
+            total += pair.len()
+        }
+    }
+    return total
+}
+"#,
+    );
+
+    let route = emit
+        .allocation_report
+        .trace_from_diagnostic_names("manual.update", &["update_root"]);
+    let depth_for = |line: &str| {
+        route
+            .findings
+            .iter()
+            .find(|finding| {
+                finding
+                    .site
+                    .span
+                    .is_some_and(|span| span.format_site() == line)
+            })
+            .map(|finding| finding.structural_loop_depth)
+            .unwrap_or_else(|| panic!("missing allocation at {line}: {route:#?}"))
+    };
+
+    assert_eq!(depth_for("<test>:3"), 0, "straight-line call stays scalar");
+    assert_eq!(depth_for("<test>:7"), 1, "a looped call amplifies its callee");
+    assert_eq!(depth_for("<test>:15"), 2, "nested local construction keeps both loops");
+}
+
+#[test]
 fn allocation_report_counts_the_flat_emitted_concat_not_its_folded_mir_children() {
     let _report = AllocationReportGuard::on();
     let emit = emit_mir(
@@ -215,6 +265,16 @@ fn render(a: int) -> string {
         emit.lua
             .contains("function __rock_allocation_activation_begin()"),
         "the runner needs an explicit boundary that excludes initialization",
+    );
+    assert!(
+        emit.lua
+            .contains("function __rock_allocation_activation_frame_begin()"),
+        "the runtime must distinguish active frames from outside-frame hits",
+    );
+    assert!(
+        emit.lua
+            .contains("function __rock_allocation_activation_frame_end()"),
+        "the runtime must close the frame envelope after drawing",
     );
 }
 

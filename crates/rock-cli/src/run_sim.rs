@@ -238,6 +238,15 @@ fn compile_sims(
     project_path: PathBuf,
     output_path: PathBuf,
 ) -> Result<(Vec<String>, HashMap<String, Vec<(String, String)>>, crate::skull_backend::SkullStone)> {
+    compile_sims_with_allocation(backend, project_path, output_path, None)
+}
+
+fn compile_sims_with_allocation(
+    backend: crate::Backend,
+    project_path: PathBuf,
+    output_path: PathBuf,
+    allocation_manifest: Option<&Path>,
+) -> Result<(Vec<String>, HashMap<String, Vec<(String, String)>>, crate::skull_backend::SkullStone)> {
     // Only skull serves sims now (bone has no codegen, rock is gone): build the
     // bone workspace once (a live Session, tests included), emit the game-shaped
     // main.lua with its `@sim` registry, and collect the wire/env list from the
@@ -245,9 +254,10 @@ fn compile_sims(
     match backend {
         crate::Backend::Skull => {
             let main_path = output_path.join(rock_host::project::MAIN_LUA_FILENAME);
-            crate::skull_backend::skull_compile_game_and_collect_sims(
+            crate::skull_backend::skull_compile_game_and_collect_sims_with_allocation(
                 &project_path.to_string_lossy(),
                 &main_path,
+                allocation_manifest,
             )
         }
         other => panic!(
@@ -1210,6 +1220,200 @@ pub fn do_run_allocation_census(
             failed.len(),
             failed.join(", ")
         ));
+    }
+    Ok(())
+}
+
+fn allocation_site_artifact_stem(index: usize, name: &str) -> String {
+    let safe = name
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' { ch } else { '_' })
+        .collect::<String>();
+    format!("{index:04}-{safe}")
+}
+
+fn allocation_activation_population(text: &str) -> Result<(usize, usize)> {
+    let mut lines = text.lines();
+    if lines.next() != Some("rock.allocation-activation.v2") {
+        return Err(anyhow!("sim allocation-site activation is not frame-aware v2"));
+    }
+    let frames = lines
+        .next()
+        .and_then(|line| line.strip_prefix("frames\t"))
+        .and_then(|value| value.parse::<usize>().ok())
+        .ok_or_else(|| anyhow!("sim allocation-site activation has no frame denominator"))?;
+    let sites = lines
+        .next()
+        .and_then(|line| line.strip_prefix("sites\t"))
+        .and_then(|value| value.parse::<usize>().ok())
+        .ok_or_else(|| anyhow!("sim allocation-site activation has no site population"))?;
+    let rows = lines.count();
+    if rows != sites {
+        return Err(anyhow!("sim allocation-site activation declared {sites} sites but wrote {rows} rows"));
+    }
+    Ok((frames, sites))
+}
+
+pub fn do_run_allocation_sites(
+    backend: crate::Backend,
+    project: &str,
+    names: &[String],
+    output_dir: &str,
+    jobs: Option<usize>,
+) -> Result<()> {
+    let artifact_dir = PathBuf::from(output_dir);
+    if artifact_dir.exists() {
+        if !artifact_dir.is_dir() {
+            return Err(anyhow!("allocation-site output `{}` is not a directory", artifact_dir.display()));
+        }
+        if fs_err::read_dir(&artifact_dir)?.next().is_some() {
+            return Err(anyhow!("allocation-site output directory `{}` is not empty", artifact_dir.display()));
+        }
+    } else {
+        fs_err::create_dir_all(&artifact_dir)?;
+    }
+    let artifact_dir = fs_err::canonicalize(&artifact_dir)?;
+    let manifest_path = artifact_dir.join("manifest.txt");
+
+    rock_host::project::ensure_workspace_root()?;
+    let project_path = rock_host::project::resolve_project_dir(project)?;
+    let project = project_path.to_string_lossy().into_owned();
+    rock_host::engine_build::build_engine_libs(&project)?;
+
+    let out_dir = sim_output_dir()?;
+    let output = out_dir.path().to_string_lossy().into_owned();
+    let (wire_names, env_by_wire, stone) = compile_sims_with_allocation(
+        backend,
+        project_path,
+        PathBuf::from(&output),
+        Some(&manifest_path),
+    )?;
+    let artifact_fingerprint = stone.artifact_fingerprint().to_string();
+    drop(stone);
+    let generated_lua_path = artifact_dir.join("main.lua");
+    fs_err::copy(
+        Path::new(&output).join(rock_host::project::MAIN_LUA_FILENAME),
+        &generated_lua_path,
+    )?;
+    let manifest = fs_err::read_to_string(&manifest_path)?;
+    let generated_lua = fs_err::read_to_string(&generated_lua_path)?;
+    sim_spawn_barrier();
+
+    let selected = if names.is_empty() { wire_names.clone() } else { names.to_vec() };
+    if selected.is_empty() {
+        return Err(anyhow!("no @sim coroutines found in project `{project}`"));
+    }
+    for name in &selected {
+        if parse_sim_chain(name).len() != 1 {
+            return Err(anyhow!("allocation-site diagnostics accept one sim per entry; comma-chain `{name}` would merge frame populations"));
+        }
+        if !wire_names.iter().any(|known| known == name) {
+            return Err(anyhow!("no sim named `{name}` in project `{project}`"));
+        }
+        if entry_is_reload_lane(name, &env_by_wire) {
+            return Err(anyhow!("allocation-site diagnostics do not support reload sim `{name}` because its emitted site IDs can change after the initial manifest"));
+        }
+    }
+
+    let jobs = resolve_jobs(jobs, false);
+    let run_at = |index: usize| -> Result<(String, SimSummary)> {
+        let name = &selected[index];
+        let stem = allocation_site_artifact_stem(index, name);
+        let activation_path = artifact_dir.join(format!("{stem}.activation.tsv"));
+        let mut instrumented_env = env_by_wire.clone();
+        instrumented_env.entry(name.clone()).or_default().push((
+            "SKULL_ALLOCATION_ACTIVATION".to_string(),
+            activation_path.to_string_lossy().into_owned(),
+        ));
+        run_named_entry(
+            &project,
+            name,
+            true,
+            true,
+            false,
+            &output,
+            &instrumented_env,
+            None,
+            None,
+        )
+    };
+    let mut results = HashMap::new();
+    for (index, result) in run_bounded(jobs, selected.len(), run_at) {
+        results.insert(index, result);
+    }
+
+    let mut records = Vec::with_capacity(selected.len());
+    let mut failed = Vec::new();
+    for (index, name) in selected.iter().enumerate() {
+        let stem = allocation_site_artifact_stem(index, name);
+        let activation_name = format!("{stem}.activation.tsv");
+        let joined_name = format!("{stem}.joined.tsv");
+        let activation_path = artifact_dir.join(&activation_name);
+        let joined_path = artifact_dir.join(&joined_name);
+        match results.remove(&index) {
+            Some(Ok((display_name, summary))) => {
+                let status = verdict_word(&summary);
+                if status != "PASS" {
+                    failed.push(display_name.clone());
+                }
+                let activation = fs_err::read_to_string(&activation_path).with_context(|| {
+                    format!("reading allocation-site activation for `{display_name}` from `{}`", activation_path.display())
+                })?;
+                let (frames, active_sites) = allocation_activation_population(&activation)?;
+                let joined = crate::allocation_join::render_joined_report_with_jit(
+                    &manifest,
+                    &activation,
+                    Some("all"),
+                    Some(&generated_lua),
+                    None,
+                )?;
+                fs_err::write(&joined_path, joined)?;
+                let env = env_by_wire.get(name).map_or(&[][..], Vec::as_slice);
+                records.push(serde_json::json!({
+                    "sim_name": display_name,
+                    "status": status,
+                    "process_id": summary.process_id,
+                    "rendering_enabled": entry_renders(env),
+                    "completed_frames": frames,
+                    "active_sites": active_sites,
+                    "activation": activation_name,
+                    "joined": joined_name,
+                }));
+            }
+            Some(Err(error)) => {
+                failed.push(name.clone());
+                records.push(serde_json::json!({
+                    "sim_name": name,
+                    "status": "process failure",
+                    "failure": error.to_string(),
+                    "completed_frames": 0,
+                    "active_sites": 0,
+                }));
+            }
+            None => return Err(anyhow!("sim `{name}` was never scheduled")),
+        }
+    }
+    let index = serde_json::json!({
+        "schema": "rock.sim-allocation-sites.v1",
+        "project": project,
+        "artifact_fingerprint": artifact_fingerprint,
+        "examined": selected.len(),
+        "manifest": "manifest.txt",
+        "generated_lua": "main.lua",
+        "sensor": {
+            "jit": true,
+            "trace_observer": false,
+            "frame_envelope": "update_and_draw",
+            "timing": false,
+            "allocator_sampling": false,
+        },
+        "records": records,
+        "interpretation": "Execution counts identify persistent and amplified compiler-known allocation-capable sites. They do not prove LuaJIT materialized heap memory; validate candidates with an ordinary JIT-on witness.",
+    });
+    fs_err::write(artifact_dir.join("index.json"), serde_json::to_vec_pretty(&index)?)?;
+    println!("[sim] allocation sites: {} examined, artifact={}", selected.len(), artifact_dir.display());
+    if !failed.is_empty() {
+        return Err(anyhow!("allocation-site diagnostics recorded {} failed sims: {}", failed.len(), failed.join(", ")));
     }
     Ok(())
 }

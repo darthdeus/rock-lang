@@ -43,6 +43,26 @@ struct Site<'a> {
     draw_chain: Option<&'a str>,
     update_callers: Option<&'a str>,
     draw_callers: Option<&'a str>,
+    local_loop_depth: u32,
+    update_loop_depth: Option<u32>,
+    draw_loop_depth: Option<u32>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ActivationHit<'a> {
+    id: &'a str,
+    total_hits: u64,
+    frame_hits: u64,
+    active_frames: Option<u64>,
+    max_frame_hits: Option<u64>,
+    outside_hits: Option<u64>,
+}
+
+#[derive(Debug)]
+struct Activation<'a> {
+    frames: u64,
+    frame_aware: bool,
+    hits: Vec<ActivationHit<'a>>,
 }
 
 #[derive(Debug, Default)]
@@ -165,7 +185,7 @@ fn parse_manifest(manifest: &str) -> Result<BTreeMap<&str, Site<'_>>> {
         let trimmed = line.trim_start();
         if route.is_none() {
             let fields = trimmed.split('\t').collect::<Vec<_>>();
-            if (fields.len() == 4 || fields.len() == 5) && site_id(fields[0]) {
+            if (fields.len() == 4 || fields.len() == 5 || fields.len() == 6) && site_id(fields[0]) {
                 let lua_body_line = fields
                     .get(4)
                     .map(|line| line.parse::<u32>())
@@ -182,6 +202,14 @@ fn parse_manifest(manifest: &str) -> Result<BTreeMap<&str, Site<'_>>> {
                         fields[0]
                     );
                 }
+                let local_loop_depth = fields
+                    .get(5)
+                    .map(|depth| depth.parse::<u32>())
+                    .transpose()
+                    .map_err(|error| anyhow::anyhow!(
+                        "allocation manifest site {} has invalid local loop depth: {error}", fields[0]
+                    ))?
+                    .unwrap_or(0);
                 if sites
                     .insert(
                         fields[0],
@@ -194,6 +222,9 @@ fn parse_manifest(manifest: &str) -> Result<BTreeMap<&str, Site<'_>>> {
                             draw_chain: None,
                             update_callers: None,
                             draw_callers: None,
+                            local_loop_depth,
+                            update_loop_depth: None,
+                            draw_loop_depth: None,
                         },
                     )
                     .is_some()
@@ -213,9 +244,15 @@ fn parse_manifest(manifest: &str) -> Result<BTreeMap<&str, Site<'_>>> {
         let (_, route_detail) = rest
             .split_once(" via ")
             .ok_or_else(|| anyhow::anyhow!("allocation route site {id} has no call chain"))?;
-        let (chain, callers) = route_detail
+        let (route_and_depth, callers) = route_detail
             .split_once("\tcallers\t")
-            .map_or((route_detail, ""), |(chain, callers)| (chain, callers));
+            .map_or((route_detail, ""), |(route, callers)| (route, callers));
+        let (chain, loop_depth) = match route_and_depth.split_once("\tloop_depth\t") {
+            Some((chain, depth)) => (chain, depth.parse::<u32>().map_err(|error| anyhow::anyhow!(
+                "allocation route site {id} has invalid loop depth: {error}"
+            ))?),
+            None => (route_and_depth, 0),
+        };
         let site = sites
             .get_mut(id)
             .ok_or_else(|| anyhow::anyhow!("allocation route site {id} is absent from manifest"))?;
@@ -223,10 +260,12 @@ fn parse_manifest(manifest: &str) -> Result<BTreeMap<&str, Site<'_>>> {
             RouteFilter::Update => {
                 site.update_chain = Some(chain);
                 site.update_callers = Some(callers);
+                site.update_loop_depth = Some(loop_depth);
             }
             RouteFilter::Draw => {
                 site.draw_chain = Some(chain);
                 site.draw_callers = Some(callers);
+                site.draw_loop_depth = Some(loop_depth);
             }
             _ => unreachable!(),
         }
@@ -237,11 +276,13 @@ fn parse_manifest(manifest: &str) -> Result<BTreeMap<&str, Site<'_>>> {
     Ok(sites)
 }
 
-fn parse_activation(activation: &str) -> Result<(u64, Vec<(&str, u64)>)> {
+fn parse_activation(activation: &str) -> Result<Activation<'_>> {
     let mut lines = activation.lines();
-    if lines.next() != Some("rock.allocation-activation.v1") {
-        anyhow::bail!("allocation activation has the wrong or missing format header");
-    }
+    let frame_aware = match lines.next() {
+        Some("rock.allocation-activation.v1") => false,
+        Some("rock.allocation-activation.v2") => true,
+        _ => anyhow::bail!("allocation activation has the wrong or missing format header"),
+    };
     let frames = lines
         .next()
         .and_then(|line| line.strip_prefix("frames\t"))
@@ -258,16 +299,57 @@ fn parse_activation(activation: &str) -> Result<(u64, Vec<(&str, u64)>)> {
     let mut seen = HashSet::new();
     let mut hits = Vec::with_capacity(declared);
     for line in lines {
-        let (id, count) = line
-            .split_once('\t')
-            .ok_or_else(|| anyhow::anyhow!("malformed allocation activation row `{line}`"))?;
+        let fields = line.split('\t').collect::<Vec<_>>();
+        let expected = if frame_aware { 6 } else { 2 };
+        if fields.len() != expected {
+            anyhow::bail!("malformed allocation activation row `{line}`");
+        }
+        let id = fields[0];
         if !site_id(id) {
             anyhow::bail!("malformed allocation site ID `{id}`");
         }
         if !seen.insert(id) {
             anyhow::bail!("allocation activation repeats site {id}");
         }
-        hits.push((id, count.parse::<u64>()?));
+        let total_hits = fields[1].parse::<u64>()?;
+        let (frame_hits, active_frames, max_frame_hits, outside_hits) = if frame_aware {
+            let frame_hits = fields[2].parse::<u64>()?;
+            let active_frames = fields[3].parse::<u64>()?;
+            let max_frame_hits = fields[4].parse::<u64>()?;
+            let outside_hits = fields[5].parse::<u64>()?;
+            if frame_hits + outside_hits != total_hits {
+                anyhow::bail!(
+                    "allocation activation site {id} has {total_hits} total hits but {} classified hits",
+                    frame_hits + outside_hits
+                );
+            }
+            if active_frames > frames {
+                anyhow::bail!(
+                    "allocation activation site {id} is active on {active_frames} of {frames} frames"
+                );
+            }
+            if (active_frames == 0) != (frame_hits == 0) {
+                anyhow::bail!(
+                    "allocation activation site {id} has inconsistent frame hits and active frames"
+                );
+            }
+            if max_frame_hits > frame_hits || (frame_hits > 0 && max_frame_hits == 0) {
+                anyhow::bail!(
+                    "allocation activation site {id} has invalid maximum {max_frame_hits} for {frame_hits} frame hits"
+                );
+            }
+            (frame_hits, Some(active_frames), Some(max_frame_hits), Some(outside_hits))
+        } else {
+            (total_hits, None, None, None)
+        };
+        hits.push(ActivationHit {
+            id,
+            total_hits,
+            frame_hits,
+            active_frames,
+            max_frame_hits,
+            outside_hits,
+        });
     }
     if hits.len() != declared {
         anyhow::bail!(
@@ -275,7 +357,7 @@ fn parse_activation(activation: &str) -> Result<(u64, Vec<(&str, u64)>)> {
             hits.len()
         );
     }
-    Ok((frames, hits))
+    Ok(Activation { frames, frame_aware, hits })
 }
 
 #[cfg(test)]
@@ -297,14 +379,17 @@ pub fn render_joined_report_with_jit(
 ) -> Result<String> {
     let filter = RouteFilter::parse(route)?;
     let sites = parse_manifest(manifest)?;
-    let (frames, mut hits) = parse_activation(activation)?;
-    for (id, _) in &hits {
-        if !sites.contains_key(id) {
-            anyhow::bail!("active site {id} is absent from the allocation manifest");
+    let activation = parse_activation(activation)?;
+    let frames = activation.frames;
+    let frame_aware = activation.frame_aware;
+    let mut hits = activation.hits;
+    for hit in &hits {
+        if !sites.contains_key(hit.id) {
+            anyhow::bail!("active site {} is absent from the allocation manifest", hit.id);
         }
     }
-    hits.retain(|(id, _)| {
-        let site = &sites[id];
+    hits.retain(|hit| {
+        let site = &sites[hit.id];
         match filter {
             RouteFilter::All => true,
             RouteFilter::Update => site.update_chain.is_some(),
@@ -312,7 +397,7 @@ pub fn render_joined_report_with_jit(
             RouteFilter::Outside => site.update_chain.is_none() && site.draw_chain.is_none(),
         }
     });
-    hits.sort_by(|(a_id, a_hits), (b_id, b_hits)| b_hits.cmp(a_hits).then_with(|| a_id.cmp(b_id)));
+    hits.sort_by(|a, b| b.frame_hits.cmp(&a.frame_hits).then_with(|| a.id.cmp(b.id)));
 
     let mut body_starts = BTreeMap::new();
     let lua_lines = lua.map(|text| text.lines().collect::<Vec<_>>());
@@ -336,27 +421,34 @@ pub fn render_joined_report_with_jit(
     writeln!(
         out,
         "{}",
-        if jit.is_some() {
-            "rock.allocation-join.v5"
+        if jit.is_some() && frame_aware {
+            "rock.allocation-join.v9"
+        } else if jit.is_some() {
+            "rock.allocation-join.v7"
+        } else if frame_aware {
+            "rock.allocation-join.v8"
         } else {
-            "rock.allocation-join.v4"
+            "rock.allocation-join.v6"
         }
     )?;
     writeln!(out, "frames\t{frames}")?;
     writeln!(out, "filter\t{}", filter.as_str())?;
     writeln!(out, "active_sites\t{}", hits.len())?;
+    let base_header = if frame_aware {
+        "hits/frame\thits\tframe_hits\tactive_frames\tframe_coverage\thits/active_frame\tmax_hits/frame\toutside_hits\troute\tstructural_loop_depth\tkind\tsource\tbody\tlua_body_line\tlua_artifact_line\tcall_chain\tdirect_caller_count\tdirect_callers\tid"
+    } else {
+        "hits/frame\thits\troute\tstructural_loop_depth\tkind\tsource\tbody\tlua_body_line\tlua_artifact_line\tcall_chain\tdirect_caller_count\tdirect_callers\tid"
+    };
     if jit.is_some() {
         writeln!(
             out,
-            "hits/frame\thits\troute\tkind\tsource\tbody\tlua_body_line\tlua_artifact_line\tcall_chain\tdirect_caller_count\tdirect_callers\tid\tjit_state\tjit_class\tjit_traces\tjit_ir\tjit_ops"
+            "{base_header}\tjit_state\tjit_class\tjit_traces\tjit_ir\tjit_ops"
         )?;
     } else {
-        writeln!(
-            out,
-            "hits/frame\thits\troute\tkind\tsource\tbody\tlua_body_line\tlua_artifact_line\tcall_chain\tdirect_caller_count\tdirect_callers\tid"
-        )?;
+        writeln!(out, "{base_header}")?;
     }
-    for (id, count) in hits {
+    for hit in hits {
+        let id = hit.id;
         let site = &sites[id];
         let (route, chain) = match (site.update_chain, site.draw_chain) {
             (Some(update), Some(draw)) => ("update+draw", format!("update:{update} | draw:{draw}")),
@@ -372,6 +464,12 @@ pub fn render_joined_report_with_jit(
             .collect::<BTreeSet<_>>();
         let caller_count = callers.len();
         let callers = callers.into_iter().collect::<Vec<_>>().join(" | ");
+        let structural_loop_depth = [site.local_loop_depth]
+            .into_iter()
+            .chain(site.update_loop_depth)
+            .chain(site.draw_loop_depth)
+            .max()
+            .unwrap_or(0);
         let artifact_line = match (site.lua_body_line, lua_lines.as_ref()) {
             (Some(body_line), Some(lines)) => {
                 let body_start = body_starts.get(site.body).ok_or_else(|| {
@@ -392,12 +490,32 @@ pub fn render_joined_report_with_jit(
             }
             _ => "?".to_string(),
         };
+        if frame_aware {
+            let active_frames = hit.active_frames.unwrap_or(0);
+            let coverage = active_frames as f64 / frames as f64;
+            let per_active = if active_frames == 0 { 0.0 } else {
+                hit.frame_hits as f64 / active_frames as f64
+            };
+            write!(
+                out,
+                "{:.4}\t{}\t{}\t{}\t{:.4}\t{:.4}\t{}\t{}\t",
+                hit.frame_hits as f64 / frames as f64,
+                hit.total_hits,
+                hit.frame_hits,
+                active_frames,
+                coverage,
+                per_active,
+                hit.max_frame_hits.unwrap_or(0),
+                hit.outside_hits.unwrap_or(0),
+            )?;
+        } else {
+            write!(out, "{:.4}\t{}\t", hit.frame_hits as f64 / frames as f64, hit.total_hits)?;
+        }
         write!(
             out,
-            "{:.4}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
-            count as f64 / frames as f64,
-            count,
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
             route,
+            structural_loop_depth,
             site.kind,
             site.source,
             site.body,
@@ -520,17 +638,64 @@ bbbbbbbbbbbbbbbb	20
 cccccccccccccccc	2
 "#;
 
+    const FRAME_ACTIVATION: &str = r#"rock.allocation-activation.v2
+frames	4
+sites	3
+aaaaaaaaaaaaaaaa	8	8	4	2	0
+bbbbbbbbbbbbbbbb	20	18	3	9	2
+cccccccccccccccc	2	1	1	1	1
+"#;
+
     #[test]
     fn join_filters_by_route_and_ranks_executions_per_frame() {
         let report = render_joined_report(MANIFEST, ACTIVATION, Some("draw"), None)
             .expect("joined allocation report");
 
         assert!(report.contains("filter\tdraw"));
-        assert!(report.contains("5.0000\t20\tdraw\tvec-construction"));
+        assert!(report.contains("5.0000\t20\tdraw\t0\tvec-construction"));
         assert!(report.contains("draw_leaf\t2\t?\tdraw_root -> draw_leaf"));
         assert!(report.contains("draw_root -> draw_leaf"));
         assert!(!report.contains("update_leaf"));
         assert!(!report.contains("outside_leaf"));
+    }
+
+    #[test]
+    fn join_reports_frame_coverage_multiplicity_and_outside_hits() {
+        let report = render_joined_report(MANIFEST, FRAME_ACTIVATION, Some("draw"), None)
+            .expect("joined frame-aware activation report");
+        let mut lines = report.lines().skip(4);
+        let header = lines.next().expect("joined header").split('\t').collect::<Vec<_>>();
+        let row = lines.next().expect("joined row").split('\t').collect::<Vec<_>>();
+        let value = |name: &str| {
+            let index = header.iter().position(|column| *column == name)
+                .unwrap_or_else(|| panic!("missing {name} column: {report}"));
+            row[index]
+        };
+
+        assert_eq!(value("hits/frame"), "4.5000");
+        assert_eq!(value("frame_hits"), "18");
+        assert_eq!(value("active_frames"), "3");
+        assert_eq!(value("frame_coverage"), "0.7500");
+        assert_eq!(value("hits/active_frame"), "6.0000");
+        assert_eq!(value("max_hits/frame"), "9");
+        assert_eq!(value("outside_hits"), "2");
+    }
+
+    #[test]
+    fn join_preserves_structural_loop_amplification() {
+        let manifest = MANIFEST.replace(
+            "via draw_root -> draw_leaf\tcallers",
+            "via draw_root -> draw_leaf\tloop_depth\t2\tcallers",
+        );
+        let report = render_joined_report(&manifest, FRAME_ACTIVATION, Some("draw"), None)
+            .expect("joined loop-aware allocation report");
+        let mut lines = report.lines().skip(4);
+        let header = lines.next().expect("joined header").split('\t').collect::<Vec<_>>();
+        let row = lines.next().expect("joined row").split('\t').collect::<Vec<_>>();
+        let depth = header.iter().position(|column| *column == "structural_loop_depth")
+            .expect("structural loop depth column");
+
+        assert_eq!(row[depth], "2", "{report}");
     }
 
     #[test]
@@ -597,7 +762,7 @@ trace	ir	state	op	body_start	lua_line
         )
         .expect("joined JIT allocation evidence");
 
-        assert!(report.starts_with("rock.allocation-join.v5\n"));
+        assert!(report.starts_with("rock.allocation-join.v7\n"));
         assert!(report.contains("jit_state\tjit_class\tjit_traces\tjit_ir\tjit_ops"));
         assert!(report.contains("mixed\tobject\t2\t2\tTNEW"));
     }
@@ -648,6 +813,6 @@ trace	ir	state	op	body_start	lua_line
 
         assert!(report.contains("frames\t4"));
         assert!(report.contains("active_sites\t1"));
-        assert!(report.contains("0.5000\t2\toutside\tstruct-construction"));
+        assert!(report.contains("0.5000\t2\toutside\t0\tstruct-construction"));
     }
 }

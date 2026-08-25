@@ -329,7 +329,24 @@ impl CommandContext {
     /// skull: the bone workspace + skull's emitted registry).
     fn handle_sim(&self) -> Result<()> {
         let backend = self.args.backend;
-        if let Some(path) = self.args.allocation_census.as_deref() {
+        if self.args.allocation_census.is_some() && self.args.allocation_sites.is_some() {
+            anyhow::bail!("--allocation-census and --allocation-sites are separate diagnostic arms");
+        }
+        if let Some(path) = self.args.allocation_sites.as_deref() {
+            if self.args.list {
+                anyhow::bail!("--allocation-sites cannot be combined with sim --list");
+            }
+            if self.args.files.is_empty() {
+                anyhow::bail!("allocation sites need a project: rock sim --allocation-sites DIR <project> [name]");
+            }
+            crate::run_sim::do_run_allocation_sites(
+                backend,
+                &self.args.files[0],
+                &self.args.files[1..],
+                path,
+                self.args.jobs,
+            )
+        } else if let Some(path) = self.args.allocation_census.as_deref() {
             if self.args.list {
                 anyhow::bail!("--allocation-census cannot be combined with sim --list");
             }

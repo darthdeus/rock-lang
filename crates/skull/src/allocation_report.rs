@@ -1,10 +1,10 @@
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::{Idx, Span};
-use skull_mir::cfg::reachable_blocks_from;
-use skull_mir::mir::{FuncRef, Inst, MirFunc};
+use skull_mir::cfg::{dominators, dominates, predecessors, reachable_blocks_from, reverse_postorder, successors};
+use skull_mir::mir::{Block, FuncRef, Inst, MirFunc};
 use skull_mir::monoty::MonoInterner;
 use std::cell::Cell;
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 thread_local! {
     static ENABLED: Cell<bool> = const { Cell::new(false) };
@@ -137,6 +137,13 @@ pub struct AllocationSite {
     pub span: Option<Span>,
     pub detail: Option<String>,
     pub lua_body_line: u32,
+    pub local_loop_depth: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AllocationCallEdge {
+    pub callee: String,
+    pub local_loop_depth: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -144,7 +151,7 @@ pub struct AllocationBody {
     pub emitted_name: String,
     pub diagnostic_name: String,
     pub direct_sites: Vec<AllocationSite>,
-    pub callees: Vec<String>,
+    pub call_edges: Vec<AllocationCallEdge>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -153,6 +160,7 @@ pub struct AllocationFinding {
     pub site: AllocationSite,
     pub call_chain: Vec<String>,
     pub direct_callers: Vec<String>,
+    pub structural_loop_depth: u32,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -193,11 +201,13 @@ impl AllocationReport {
         roots.sort();
         roots.dedup();
         let mut parent: BTreeMap<String, Option<String>> = BTreeMap::new();
+        let mut route_loop_depth: BTreeMap<String, u32> = BTreeMap::new();
         let mut direct_callers: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         let mut queue = VecDeque::new();
         for root in &roots {
             if self.bodies.contains_key(root) && !parent.contains_key(root) {
                 parent.insert(root.clone(), None);
+                route_loop_depth.insert(root.clone(), 0);
                 queue.push_back(root.clone());
             }
         }
@@ -205,15 +215,19 @@ impl AllocationReport {
             let Some(body) = self.bodies.get(&body_name) else {
                 continue;
             };
-            for callee in &body.callees {
-                if self.bodies.contains_key(callee) {
+            for edge in &body.call_edges {
+                if self.bodies.contains_key(&edge.callee) {
                     direct_callers
-                        .entry(callee.clone())
+                        .entry(edge.callee.clone())
                         .or_default()
                         .insert(body_name.clone());
-                    if !parent.contains_key(callee) {
-                        parent.insert(callee.clone(), Some(body_name.clone()));
-                        queue.push_back(callee.clone());
+                    if !parent.contains_key(&edge.callee) {
+                        parent.insert(edge.callee.clone(), Some(body_name.clone()));
+                        route_loop_depth.insert(
+                            edge.callee.clone(),
+                            route_loop_depth[&body_name] + edge.local_loop_depth,
+                        );
+                        queue.push_back(edge.callee.clone());
                     }
                 }
             }
@@ -239,6 +253,7 @@ impl AllocationReport {
                         .get(body_name)
                         .map(|callers| callers.iter().cloned().collect())
                         .unwrap_or_default(),
+                    structural_loop_depth: route_loop_depth[body_name] + site.local_loop_depth,
                 };
                 if site.kind == AllocationKind::OpaqueCall {
                     opaque_boundaries.push(finding);
@@ -332,12 +347,13 @@ impl AllocationReport {
                 .unwrap_or_else(|| "<compiler-generated>".to_string());
             let _ = writeln!(
                 out,
-                "  {:016x}\t{}\t{}\t{}\t{}",
+                "  {:016x}\t{}\t{}\t{}\t{}\t{}",
                 site.id,
                 site.kind.as_str(),
                 source,
                 body,
                 site.lua_body_line,
+                site.local_loop_depth,
             );
         }
         for route in &self.lifecycle_routes {
@@ -371,12 +387,13 @@ impl AllocationReport {
                     .unwrap_or_default();
                 let _ = writeln!(
                     out,
-                    "  {:016x} {}{} at {} via {}\tcallers\t{}",
+                    "  {:016x} {}{} at {} via {}\tloop_depth\t{}\tcallers\t{}",
                     finding.site.id,
                     finding.site.kind.as_str(),
                     detail,
                     site,
                     finding.call_chain.join(" -> "),
+                    finding.structural_loop_depth,
                     finding.direct_callers.join(" | "),
                 );
             }
@@ -396,6 +413,14 @@ pub(crate) fn collect_emitted_body(
     if !enabled() {
         return None;
     }
+    let block_loop_depths = natural_loop_depths(func);
+    let mut inst_loop_depths = HashMap::new();
+    for block in reachable_blocks_from(func, func.entry) {
+        let depth = block_loop_depths.get(&block).copied().unwrap_or(0);
+        for &iid in &func.blocks[block].insts {
+            inst_loop_depths.insert(iid.into_raw().into_u32(), depth);
+        }
+    }
     let mut direct_sites = emitted_sites
         .into_iter()
         .map(|site| AllocationSite {
@@ -404,10 +429,12 @@ pub(crate) fn collect_emitted_body(
             span: site.span,
             detail: None,
             lua_body_line: site.lua_body_line,
+            local_loop_depth: inst_loop_depths.get(&site.mir_inst).copied().unwrap_or(0),
         })
         .collect::<Vec<_>>();
-    let mut callees = Vec::new();
+    let mut call_edges: BTreeMap<String, u32> = BTreeMap::new();
     for block in reachable_blocks_from(func, func.entry) {
+        let loop_depth = block_loop_depths.get(&block).copied().unwrap_or(0);
         for &iid in &func.blocks[block].insts {
             let inst = &func.insts[iid];
             match inst {
@@ -421,9 +448,11 @@ pub(crate) fn collect_emitted_body(
                             AllocationKind::OpaqueCall,
                             func.inst_spans.get(iid).copied(),
                             Some(target_name),
+                            loop_depth,
                         ));
                     } else {
-                        callees.push(target_name);
+                        let depth = call_edges.entry(target_name).or_default();
+                        *depth = (*depth).max(loop_depth);
                     }
                 }
                 Inst::CallValue { .. } | Inst::CallValueMulti { .. } => direct_sites.push(site(
@@ -432,19 +461,53 @@ pub(crate) fn collect_emitted_body(
                     AllocationKind::OpaqueCall,
                     func.inst_spans.get(iid).copied(),
                     Some("indirect function value".to_string()),
+                    loop_depth,
                 )),
                 _ => {}
             }
         }
     }
-    callees.sort();
-    callees.dedup();
     Some(AllocationBody {
         emitted_name: emitted_name.to_string(),
         diagnostic_name: diagnostic_name.to_string(),
         direct_sites,
-        callees,
+        call_edges: call_edges
+            .into_iter()
+            .map(|(callee, local_loop_depth)| AllocationCallEdge {
+                callee,
+                local_loop_depth,
+            })
+            .collect(),
     })
+}
+
+fn natural_loop_depths(func: &MirFunc) -> HashMap<Idx<Block>, u32> {
+    let rpo = reverse_postorder(func, func.entry);
+    let (all_preds, _) = predecessors(func, &rpo);
+    let idom = dominators(func, func.entry);
+    let mut loops: HashMap<Idx<Block>, HashSet<Idx<Block>>> = HashMap::new();
+
+    for &latch in &rpo {
+        successors(&func.blocks[latch].term, |header| {
+            if !dominates(&idom, header, latch) { return }
+            let body = loops.entry(header).or_default();
+            body.insert(header);
+            if body.insert(latch) {
+                let mut stack = vec![latch];
+                while let Some(block) = stack.pop() {
+                    for &pred in all_preds.get(&block).map_or(&[][..], Vec::as_slice) {
+                        if pred != header && body.insert(pred) { stack.push(pred) }
+                    }
+                }
+            }
+        });
+    }
+
+    let mut depths = HashMap::new();
+    for body in loops.values() {
+        for &block in body { *depths.entry(block).or_default() += 1 }
+    }
+    depths
 }
 
 fn call_target(
@@ -466,6 +529,7 @@ fn site(
     kind: AllocationKind,
     span: Option<Span>,
     detail: Option<String>,
+    local_loop_depth: u32,
 ) -> AllocationSite {
     let mut hash = Fnv64::new();
     hash.write(body.as_bytes());
@@ -482,6 +546,7 @@ fn site(
         span,
         detail,
         lua_body_line: 0,
+        local_loop_depth,
     }
 }
 

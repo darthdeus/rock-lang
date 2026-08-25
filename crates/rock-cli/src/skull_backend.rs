@@ -1789,13 +1789,29 @@ pub fn skull_compile_game_and_collect_sims(
     dir: &str,
     main_path: &std::path::Path,
 ) -> Result<(Vec<String>, HashMap<String, Vec<(String, String)>>, SkullStone)> {
+    skull_compile_game_and_collect_sims_with_allocation(dir, main_path, None)
+}
+
+pub fn skull_compile_game_and_collect_sims_with_allocation(
+    dir: &str,
+    main_path: &std::path::Path,
+    allocation_manifest: Option<&std::path::Path>,
+) -> Result<(Vec<String>, HashMap<String, Vec<(String, String)>>, SkullStone)> {
     // Session-based build (same machinery as `rock stone`, tests included so the
     // `@sim` bodies are in the program). The live SkullStone is returned so the
     // runner can serve mid-sim `reload_edit` ops through the REAL incremental
     // path (`docs/sim-reload-harness-plan.md`).
     let incremental_path = main_path.with_file_name("incremental.lua");
-    let stone = SkullStone::init_with_tests(dir, main_path, &incremental_path)
-        .map_err(|e| anyhow::anyhow!("cannot compile project {dir}: {e}"))?;
+    let stone = match allocation_manifest {
+        Some(path) => SkullStone::init_with_tests_and_allocation_report(
+            dir,
+            main_path,
+            &incremental_path,
+            path,
+        ),
+        None => SkullStone::init_with_tests(dir, main_path, &incremental_path),
+    }
+    .map_err(|e| anyhow::anyhow!("cannot compile project {dir}: {e}"))?;
 
     let sims = collect_skull_sims(stone.project.workspace());
     let mut wire_names = Vec::with_capacity(sims.len());
@@ -3035,17 +3051,39 @@ impl SkullStone {
     /// Game build: excludes test-only files (tests/ dirs) so a broken sim/test
     /// can't break the running game. See `docs/sim-layering.md`.
     pub fn init(dir: &str, main_path: &std::path::Path, incremental_path: &std::path::Path) -> Result<SkullStone> {
-        Self::init_impl(dir, main_path, incremental_path, false)
+        Self::init_impl(dir, main_path, incremental_path, false, None)
     }
 
     /// Sim-runner build: same as [`SkullStone::init`] but discovery KEEPS
     /// test-only files -- `@sim` bodies live in `tests/sims/` and must be part
     /// of the emitted program.
     pub fn init_with_tests(dir: &str, main_path: &std::path::Path, incremental_path: &std::path::Path) -> Result<SkullStone> {
-        Self::init_impl(dir, main_path, incremental_path, true)
+        Self::init_impl(dir, main_path, incremental_path, true, None)
     }
 
-    fn init_impl(dir: &str, main_path: &std::path::Path, incremental_path: &std::path::Path, include_tests: bool) -> Result<SkullStone> {
+    pub fn init_with_tests_and_allocation_report(
+        dir: &str,
+        main_path: &std::path::Path,
+        incremental_path: &std::path::Path,
+        allocation_manifest: &std::path::Path,
+    ) -> Result<SkullStone> {
+        let _activation = skull::allocation_report::activation_scope(true);
+        Self::init_impl(
+            dir,
+            main_path,
+            incremental_path,
+            true,
+            Some(allocation_manifest),
+        )
+    }
+
+    fn init_impl(
+        dir: &str,
+        main_path: &std::path::Path,
+        incremental_path: &std::path::Path,
+        include_tests: bool,
+        explicit_allocation_report: Option<&std::path::Path>,
+    ) -> Result<SkullStone> {
         let renderer_target = skull_renderer_target(dir)?;
         let project = crate::live_project::LiveProject::init(dir, include_tests)?;
         let (lua, cache, artifact_fingerprint) = {
@@ -3061,7 +3099,9 @@ impl SkullStone {
                 .map_err(|e| anyhow::anyhow!("{}", render_project_err(project.sources(), &e)))?;
             let allocation_report_path = allocation_report_path_from_env();
             write_allocation_report(
-                allocation_report_path.as_deref(),
+                explicit_allocation_report
+                    .map(std::path::Path::as_os_str)
+                    .or(allocation_report_path.as_deref()),
                 &emit.allocation_report,
             )?;
             // Host package/description metadata is appended to StateSchema.

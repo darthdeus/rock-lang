@@ -86,6 +86,7 @@ pub struct EmittedAllocationSite {
     pub kind: EmittedAllocationKind,
     pub span: Option<Span>,
     pub lua_body_line: u32,
+    pub mir_inst: u32,
     lua_byte_offset: usize,
 }
 
@@ -364,17 +365,55 @@ end
 
 pub const ALLOCATION_ACTIVATION_PRELUDE: &str = r#"
 if not _G.__rock_alloc_hits then _G.__rock_alloc_hits = {} end
+if not _G.__rock_alloc_frame_hits then _G.__rock_alloc_frame_hits = {} end
+if not _G.__rock_alloc_active_frames then _G.__rock_alloc_active_frames = {} end
+if not _G.__rock_alloc_max_frame_hits then _G.__rock_alloc_max_frame_hits = {} end
+if not _G.__rock_alloc_outside_hits then _G.__rock_alloc_outside_hits = {} end
+if not _G.__rock_alloc_last_frame then _G.__rock_alloc_last_frame = {} end
+if not _G.__rock_alloc_current_frame_hits then _G.__rock_alloc_current_frame_hits = {} end
 function __rock_alloc_hit(id, value)
   local hits = _G.__rock_alloc_hits
   hits[id] = (hits[id] or 0) + 1
+  local frame = _G.__rock_alloc_frame
+  if frame ~= nil then
+    local frame_hits = _G.__rock_alloc_frame_hits
+    frame_hits[id] = (frame_hits[id] or 0) + 1
+    local last = _G.__rock_alloc_last_frame
+    local counts = _G.__rock_alloc_current_frame_hits
+    if last[id] ~= frame then
+      last[id] = frame
+      _G.__rock_alloc_active_frames[id] = (_G.__rock_alloc_active_frames[id] or 0) + 1
+      counts[id] = 0
+    end
+    counts[id] = counts[id] + 1
+    if counts[id] > (_G.__rock_alloc_max_frame_hits[id] or 0) then
+      _G.__rock_alloc_max_frame_hits[id] = counts[id]
+    end
+  else
+    _G.__rock_alloc_outside_hits[id] = (_G.__rock_alloc_outside_hits[id] or 0) + 1
+  end
   return value
 end
 function __rock_alloc_hit_effect(id)
-  local hits = _G.__rock_alloc_hits
-  hits[id] = (hits[id] or 0) + 1
+  __rock_alloc_hit(id, false)
 end
 function __rock_allocation_activation_begin()
   _G.__rock_alloc_hits = {}
+  _G.__rock_alloc_frame_hits = {}
+  _G.__rock_alloc_active_frames = {}
+  _G.__rock_alloc_max_frame_hits = {}
+  _G.__rock_alloc_outside_hits = {}
+  _G.__rock_alloc_last_frame = {}
+  _G.__rock_alloc_current_frame_hits = {}
+  _G.__rock_alloc_frame_serial = 0
+  _G.__rock_alloc_frame = nil
+end
+function __rock_allocation_activation_frame_begin()
+  _G.__rock_alloc_frame_serial = (_G.__rock_alloc_frame_serial or 0) + 1
+  _G.__rock_alloc_frame = _G.__rock_alloc_frame_serial
+end
+function __rock_allocation_activation_frame_end()
+  _G.__rock_alloc_frame = nil
 end
 function __rock_allocation_activation_dump(frames)
   local path = os.getenv("SKULL_ALLOCATION_ACTIVATION")
@@ -387,11 +426,16 @@ function __rock_allocation_activation_dump(frames)
     io.stderr:write("[ALLOC] cannot write activation report " .. path .. ": " .. tostring(err) .. "\n")
     return false
   end
-  file:write("rock.allocation-activation.v1\n")
+  file:write("rock.allocation-activation.v2\n")
   file:write("frames\t", tostring(frames), "\n")
   file:write("sites\t", tostring(#ids), "\n")
   for _, id in ipairs(ids) do
-    file:write(id, "\t", tostring(_G.__rock_alloc_hits[id]), "\n")
+    file:write(id,
+      "\t", tostring(_G.__rock_alloc_hits[id]),
+      "\t", tostring(_G.__rock_alloc_frame_hits[id] or 0),
+      "\t", tostring(_G.__rock_alloc_active_frames[id] or 0),
+      "\t", tostring(_G.__rock_alloc_max_frame_hits[id] or 0),
+      "\t", tostring(_G.__rock_alloc_outside_hits[id] or 0), "\n")
   end
   file:close()
   return true
@@ -1999,6 +2043,7 @@ impl Emitter<'_> {
             kind,
             span,
             lua_body_line: 0,
+            mir_inst: raw(id),
             lua_byte_offset,
         };
         allocation.sites.borrow_mut().push(site.clone());
