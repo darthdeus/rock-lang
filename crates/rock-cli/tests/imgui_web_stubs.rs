@@ -335,6 +335,9 @@ fn stub_body(d: &Decl) -> String {
     if ret == "Vec2" {
         return "return { __ty: 'Vec2', x: 0, y: 0 };".to_string();
     }
+    if ret == "any" {
+        return "return null;".to_string();
+    }
     match neutral_scalar(ret) {
         Some(v) => format!("return {v};"),
         None => panic!(

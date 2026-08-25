@@ -480,6 +480,45 @@ fn a_plain_owner_reads_every_leaf_of_a_nested_nobox_field() {
     );
 }
 
+const NOBOX_NESTED_PLAIN_OWNER_FIELD_WRITE: &str = r#"
+nobox value Id { value: int }
+nobox value Grid { x: int, y: int }
+nobox value Place { space: Id, grid: Grid }
+struct Owner { place: Place }
+
+fn move_grid(owner: Owner) {
+    owner.place.grid = Grid { x: 80, y: 81 }
+}
+
+fn main() {
+    let owner = Owner {
+        place: Place { space: Id { value: 11 }, grid: Grid { x: 13, y: 17 } }
+    }
+    move_grid(owner)
+    print("{owner.place.grid.x},{owner.place.grid.y}")
+}
+"#;
+
+#[test]
+fn a_plain_owner_writes_every_leaf_of_a_nested_nobox_field() {
+    let lua = emit_module(NOBOX_NESTED_PLAIN_OWNER_FIELD_WRITE);
+    let body = function_body(&lua, "move_grid");
+    for field in ["place.grid.x", "place.grid.y"] {
+        assert!(
+            body.contains(&format!(r#"["{field}"]"#)),
+            "nested nobox field write stopped before `{field}`:\n{body}"
+        );
+    }
+    assert!(
+        !body.contains("Grid_ct("),
+        "nested nobox field write materialized its child:\n{body}"
+    );
+    assert_eq!(
+        run_luajit(&format!("{lua}\nmain()\n"), "nobox_nested_plain_owner_write"),
+        "80,81"
+    );
+}
+
 const NOBOX_COLUMN_WIDEN: &str = r#"
 nobox value NV2 { x: float, y: float }
 
