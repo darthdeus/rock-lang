@@ -37,44 +37,48 @@ fn mag_has_no_runstate_projection_bridge_names() {
 }
 
 #[test]
-fn mag_has_one_typed_runstate_root_and_no_global_runstate_mirror() {
+fn mag_uses_direct_session_state_without_a_run_root_or_accessor() {
     let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
         .expect("rock workspace root");
     let mut sources = Vec::new();
     rock_sources(&repo.join("mag"), &mut sources);
-    let active_run_source = repo.join("mag/world_levels.rock").display().to_string();
-    let mut runstate_globals = Vec::new();
-    let mut active_run_defs = Vec::new();
+    let forbidden = [
+        "struct RunState",
+        "Scene<RunState>",
+        "MAG_ACTIVE_RUN",
+        "mag_run_scene_for_access",
+        "fn mag_run_state",
+        "mag_run_state()",
+        "mag_world_scene",
+    ];
+    let required = [
+        "global player: Player",
+        "global bank_gold: int",
+        "global journal: [JournalLine]",
+        "global history: [SnapshotHistoryNode]",
+        "global MAG_RUN_ACTIVE: bool",
+    ];
+    let mut findings = Vec::new();
+    let mut definitions = required.map(|_| Vec::new());
     for source in sources {
         let text = fs::read_to_string(&source).expect("read MAG source");
         for (line_number, line) in text.lines().enumerate() {
-            let trimmed = line.trim_start();
-            if trimmed.starts_with("global ") && trimmed.contains("RunState") {
-                runstate_globals.push(format!("{}:{}", source.display(), line_number + 1));
+            for name in forbidden {
+                if line.contains(name) {
+                    findings.push(format!("{}:{}: {name}", source.display(), line_number + 1));
+                }
             }
-            if trimmed.starts_with("global MAG_ACTIVE_RUN:") {
-                active_run_defs.push(format!("{}:{}", source.display(), line_number + 1));
+            for (index, declaration) in required.iter().enumerate() {
+                if line.trim_start().starts_with(declaration) {
+                    definitions[index].push(format!("{}:{}", source.display(), line_number + 1));
+                }
             }
         }
     }
-    assert_eq!(
-        runstate_globals.len(),
-        1,
-        "MAG must have exactly one typed RunState global, owned by MAG_ACTIVE_RUN"
-    );
-    assert!(
-        runstate_globals[0].starts_with(&format!("{active_run_source}:")),
-        "typed RunState global must be owned by world_levels.rock: {runstate_globals:?}"
-    );
-    assert_eq!(
-        active_run_defs.len(),
-        1,
-        "MAG_ACTIVE_RUN must have exactly one production definition"
-    );
-    assert!(
-        active_run_defs[0].starts_with(&format!("{active_run_source}:")),
-        "MAG_ACTIVE_RUN definition must live in world_levels.rock: {active_run_defs:?}"
-    );
+    assert!(findings.is_empty(), "superseded run-root/accessor census is nonzero:\n{}", findings.join("\n"));
+    for (declaration, found) in required.iter().zip(definitions) {
+        assert_eq!(found.len(), 1, "`{declaration}` must have one production definition: {found:?}");
+    }
 }
