@@ -66,6 +66,8 @@ mod nobox_global_reflection_tests;
 mod parser_recovery_surfacing;
 #[path = "production_sources_test.rs"]
 mod production_sources_test;
+#[path = "launcher_engine_commands.rs"]
+mod launcher_engine_commands;
 #[path = "mag_direct_state_authority.rs"]
 mod mag_direct_state_authority;
 #[path = "asset_overlay_defaults.rs"]
