@@ -97,7 +97,15 @@ fn skull_emit_full(
 pub struct SkullPhaseTimes {
     pub parse: Duration,
     pub semantic: Duration,
+    /// Comptime/build-variable preparation after semantic checking and before
+    /// code generation. This is setup work, not semantic or emit self-time.
+    pub workspace_setup: Duration,
     pub emit: Duration,
+    /// The last front-end/setup/emit failure, retained so measurement callers
+    /// cannot report a contradictory successful-looking zero population.
+    pub failure: Option<CompilerError>,
+    pub setup_failed: bool,
+    pub emit_failed: bool,
     /// skull's emit broken into coarse stages (lower / cleanup / emit-lua /
     /// scaffold+misc), from `MirEmit::phases`. Empty if bone rejected the
     /// workspace (emit never ran). Summed element-wise across timed runs.
@@ -128,7 +136,10 @@ pub fn skull_workspace_timed(sources: &SourceFiles) -> (bool, SkullPhaseTimes) {
     let mut times = SkullPhaseTimes::default();
     let (user_modules, entry_file, parse) = match crate::bone_backend::parse_user_modules(sources) {
         Ok(v) => v,
-        Err(_) => return (false, times),
+        Err(mut errors) => {
+            times.failure = errors.drain(..).next();
+            return (false, times);
+        }
     };
     times.parse = parse;
 
@@ -137,17 +148,38 @@ pub fn skull_workspace_timed(sources: &SourceFiles) -> (bool, SkullPhaseTimes) {
     // call explicit here (the verdict is a bool, not a gate, and the timer must
     // bracket exactly this call).
     let mut modules = crate::bone_backend::with_stdlib(user_modules);
-    let ws = match bone_semantic::semantic_passes::semantic_pass(&mut modules) {
+    let mut ws = match bone_semantic::semantic_passes::semantic_pass(&mut modules) {
         Ok(ws) => ws,
-        Err(_) => {
+        Err(error) => {
             times.semantic = t.elapsed();
+            times.failure = Some(error);
             return (false, times);
         }
     };
     times.semantic = t.elapsed();
-    if !crate::bone_backend::body_errors(&ws).is_empty() {
+    let body_errors = crate::bone_backend::body_errors(&ws);
+    if let Some(error) = body_errors.into_iter().next() {
+        times.failure = Some(error);
         return (false, times);
     }
+
+    // Production emission stamps declared [build.vars] once after the checked
+    // workspace exists. Keep that preparation visible as its own timed lane;
+    // the emit stopwatch remains codegen-only.
+    let t = Instant::now();
+    if let Err(error) = crate::comptime::stamp_workspace(
+        &mut ws,
+        std::path::Path::new(entry_file.as_str()),
+    ) {
+        times.workspace_setup = t.elapsed();
+        times.setup_failed = true;
+        times.failure = Some(CompilerError::new_no_location(format!(
+            "build var resolution failed: {error:#}"
+        )));
+        return (false, times);
+    }
+    times.workspace_setup = t.elapsed();
+
     let entry_mid = crate::bone_backend::entry_module_id(&ws, entry_file);
 
     let t = Instant::now();
@@ -164,7 +196,11 @@ pub fn skull_workspace_timed(sources: &SourceFiles) -> (bool, SkullPhaseTimes) {
             times.concrete_stats = e.concrete_stats;
             true
         }
-        Err(_) => false,
+        Err(e) => {
+            times.failure = Some(e);
+            times.emit_failed = true;
+            false
+        }
     };
 
     (emit_ok, times)
@@ -1408,19 +1444,27 @@ fn skull_emit_project_with_inputs(
 
     // Project build: modules outside `dir` (the `stone` dependency, stdlib) are
     // libraries and prune to what the project reaches.
-    let (lua, skipped) = match skull::mir_emit::emit_workspace_mir_in_for_renderer(
+    let emit = match skull::mir_emit::emit_workspace_mir_in_for_renderer(
         &ws,
         user_mid,
         Some(dir),
         renderer_target,
     ) {
-        Ok(e) => (e.lua, e.skipped),
+        Ok(e) => e,
         Err(e) => {
             eprintln!("{}", render_project_err(&sources, &e));
             log::error!(target: "SKULL", "skull emit failed for project {}", dir);
             crate::ablation_report::exit_with_census(1);
         }
     };
+    let allocation_report_path = allocation_report_path_from_env();
+    if let Err(e) =
+        write_allocation_report(allocation_report_path.as_deref(), &emit.allocation_report)
+    {
+        log::error!(target: "SKULL", "cannot write allocation report for {}: {:#}", dir, e);
+        crate::ablation_report::exit_with_census(1);
+    }
+    let (lua, skipped) = (emit.lua, emit.skipped);
     let compile = t.elapsed();
     crate::bone_backend::log_compile_stats(&sources, &ws, compile, compile, None);
     if std::env::var("SKULL_DEBUG_SKIPPED").is_ok() && !skipped.is_empty() {
@@ -1449,6 +1493,29 @@ fn skull_emit_project_with_inputs(
     #[cfg(feature = "sequential")]
     drop((ws, modules));
     lua
+}
+
+fn write_allocation_report(
+    path: Option<&std::ffi::OsStr>,
+    report: &skull::allocation_report::AllocationReport,
+) -> Result<()> {
+    let Some(path) = path else { return Ok(()) };
+    if path.is_empty() {
+        anyhow::bail!("SKULL_ALLOCATION_REPORT must name an output file");
+    }
+    let path = std::path::Path::new(path);
+    rock_host::project::write_atomic(path, &report.render_text())
+        .map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))
+}
+
+fn allocation_report_path_from_env() -> Option<std::ffi::OsString> {
+    std::env::var_os("SKULL_ALLOCATION_REPORT").or_else(|| {
+        let mut path = std::path::PathBuf::from(std::env::var_os(
+            "SKULL_ALLOCATION_ACTIVATION",
+        )?);
+        path.set_extension("manifest.txt");
+        Some(path.into_os_string())
+    })
 }
 
 /// Attach host-only package grouping and reflection descriptions to the
@@ -1532,10 +1599,8 @@ fn install_rock_state_metadata(
 /// Both directions consume one canonical accessor plan
 /// (`nobox_global_accessor_shape`), so they cannot drift from each other or from the
 /// storage: `get` is the positional leaf ctor over the plan's paths, and
-/// `set` assigns `v.<path>` per leaf in the same order. The ctor suffix follows
-/// the same three-way rule as every other pack site (`skull-codegen-lua`'s
-/// `_lct` / `_vt` / `_ct` choice) -- dotted paths mean the flattened leaf ctor,
-/// otherwise the GC tier's table ctor or the cdata one.
+/// `set` reads the same paths in order. Nested cdata uses the flattened `_lct`
+/// representation; ordinary cdata and GC-table values retain `_ct` and `_vt`.
 ///
 fn build_state_nobox_accessors(
     ws: &bone_semantic::inference::Workspace,
@@ -1544,13 +1609,15 @@ fn build_state_nobox_accessors(
     use bone_semantic::prelude::ModuleId;
 
     let mut rows: Vec<String> = Vec::new();
+    let state_slots = skull::mir_emit::lua_global_state_slots(ws, scx)?;
     for m in ws.modules.iter().filter(|m| m.id != ModuleId::builtin()) {
-        for (_gid, g) in m.globals.iter() {
+        for (_gid, g) in m.globals.iter().filter(|(_, global)| !global.is_const) {
             let Some(acc) = skull_mir::lower::nobox_global_accessor_shape(ws, scx, g.ty)
                 .map_err(|e| CompilerError::new_no_location(e.message))?
             else { continue };
             let skull_mir::lower::NoboxGlobalAccessorShape {
-                ty_name, paths, nullable, ctor_suffix: suffix, presence_path: _, unbuildable,
+                ty_name, paths, nullable, storage, ctor_suffix: suffix,
+                presence_path: _, unbuildable,
             } = acc;
             let plan = skull_mir::lower::GlobalPlan::for_declared_type(ws, scx, g.ty)
                 .map_err(|e| CompilerError::new_no_location(e.message))?;
@@ -1592,7 +1659,6 @@ fn build_state_nobox_accessors(
                     g.name
                 )));
             }
-            let identity = skull_mir::state_schema::global_identity(m.file, g.name);
             let all_leaf_names = if let Some(present) = present {
                 std::iter::once(present).chain(leaves.iter().copied()).collect::<Vec<_>>()
             } else {
@@ -1600,39 +1666,42 @@ fn build_state_nobox_accessors(
             };
             let state_keys = all_leaf_names
                 .iter()
-                .enumerate()
-                .map(|(index, _)| {
-                    let leaf = if all_leaf_names.len() == 1 {
-                        "value".to_string()
-                    } else {
-                        format!("leaf{index}")
-                    };
-                    skull_mir::state_schema::state_key(&identity, &leaf)
+                .map(|leaf| {
+                    state_slots.get(leaf).copied().ok_or_else(|| {
+                        CompilerError::new_no_location(format!(
+                            "nobox global `{}` leaf `{leaf}` has no Lua Session slot",
+                            g.name
+                        ))
+                    })
                 })
-                .collect::<Vec<_>>();
+                .collect::<Result<Vec<_>, _>>()?;
             let (present_key, value_keys) = if nullable {
                 let (present, values) = state_keys
                     .split_first()
                     .expect("a nullable shape has a presence Session slot");
-                (Some(present.clone()), values.to_vec())
+                (Some(*present), values.to_vec())
             } else {
                 (None, state_keys)
             };
             let args = value_keys
                 .iter()
-                .map(|key| format!("__rock_state_get({key:?})"))
+                .map(|key| format!("__rock_state_get({key})"))
                 .collect::<Vec<_>>()
                 .join(", ");
             let writes = leaves
                 .iter()
                 .zip(&paths)
-                // Bracketed, not `v.{p}`: a leaf-table struct's key for a nested
-                // child is the literal dotted string, so `v.m.x` reads `(v.m).x`
-                // -- a field of nil. The prefix guard above never caught it,
-                // because a NON-nullable nested child contributes `m.x`/`m.y`
-                // with no `m`, so no path is a prefix of another.
+                // Flattened leaf tables store dotted paths as literal keys;
+                // declared cdata fields remain ordinary nested field reads.
                 .zip(&value_keys)
-                .map(|((_, p), key)| format!("__rock_state_set({key:?}, v[{:?}])", p.as_str()))
+                .map(|((_, p), key)| {
+                    let value = if storage == skull_mir::lower::ValueStorage::LeafTable {
+                        format!("v[{:?}]", p.as_str())
+                    } else {
+                        format!("v.{}", p.as_str())
+                    };
+                    format!("__rock_state_set({key}, {value})")
+                })
                 .collect::<Vec<_>>()
                 .join("; ");
             let (get, set) = match present {
@@ -1641,16 +1710,16 @@ fn build_state_nobox_accessors(
                 // behind would let a later read resurrect the old value.
                 Some(_) => (
                     format!(
-                        "if not __rock_state_get({:?}) then return nil end return {ty_name}{suffix}({args})",
+                        "if not __rock_state_get({}) then return nil end return {ty_name}{suffix}({args})",
                         present_key.as_ref().expect("nullable accessor has a presence key")
                     ),
                     format!(
-                        "__rock_state_set({:?}, v ~= nil); if v ~= nil then {writes} else {} end",
+                        "__rock_state_set({}, v ~= nil); if v ~= nil then {writes} else {} end",
                         present_key.as_ref().expect("nullable accessor has a presence key"),
                         leaves
                             .iter()
                             .zip(&value_keys)
-                            .map(|(_, key)| format!("__rock_state_clear({key:?})"))
+                            .map(|(_, key)| format!("__rock_state_clear({key})"))
                             .collect::<Vec<_>>()
                             .join("; ")
                     ),
@@ -1659,7 +1728,7 @@ fn build_state_nobox_accessors(
             };
             rows.push(format!(
                 "[{:?}]={{get=function() {get} end,set=function(v) {set} end}},",
-                identity
+                skull_mir::state_schema::global_identity(m.file, g.name)
             ));
         }
     }
@@ -1722,13 +1791,29 @@ pub fn skull_compile_game_and_collect_sims(
     dir: &str,
     main_path: &std::path::Path,
 ) -> Result<(Vec<String>, HashMap<String, Vec<(String, String)>>, SkullStone)> {
+    skull_compile_game_and_collect_sims_with_allocation(dir, main_path, None)
+}
+
+pub fn skull_compile_game_and_collect_sims_with_allocation(
+    dir: &str,
+    main_path: &std::path::Path,
+    allocation_manifest: Option<&std::path::Path>,
+) -> Result<(Vec<String>, HashMap<String, Vec<(String, String)>>, SkullStone)> {
     // Session-based build (same machinery as `rock stone`, tests included so the
     // `@sim` bodies are in the program). The live SkullStone is returned so the
     // runner can serve mid-sim `reload_edit` ops through the REAL incremental
     // path (`docs/sim-reload-harness-plan.md`).
     let incremental_path = main_path.with_file_name("incremental.lua");
-    let stone = SkullStone::init_with_tests(dir, main_path, &incremental_path)
-        .map_err(|e| anyhow::anyhow!("cannot compile project {dir}: {e}"))?;
+    let stone = match allocation_manifest {
+        Some(path) => SkullStone::init_with_tests_and_allocation_report(
+            dir,
+            main_path,
+            &incremental_path,
+            path,
+        ),
+        None => SkullStone::init_with_tests(dir, main_path, &incremental_path),
+    }
+    .map_err(|e| anyhow::anyhow!("cannot compile project {dir}: {e}"))?;
 
     let sims = collect_skull_sims(stone.project.workspace());
     let mut wire_names = Vec::with_capacity(sims.len());
@@ -2434,6 +2519,22 @@ pub fn skull_iter_incremental(path: &str, iters: usize, warmup: usize) -> Result
         std::mem::swap(&mut state_a, &mut state_b);
     }
 
+    let mut lint_cache = bone_lints::IncrementalLintCache::default();
+    let initial_lint_errors = crate::lint_pass::run_build_lints_cached(
+        &mut lint_cache,
+        session.workspace(),
+        &sources,
+        std::path::Path::new(path),
+        crate::lint_pass::Scope::WholeProject,
+        &bone_lints::LintCacheUpdate::full(),
+    );
+    if !initial_lint_errors.is_empty() {
+        return Err(anyhow::anyhow!(
+            "iter-incremental fixture produced {} initial lint error(s)",
+            initial_lint_errors.len()
+        ));
+    }
+
     let iters = iters.max(1);
     let target_name = std::path::Path::new(&target)
         .file_name()
@@ -2463,6 +2564,13 @@ pub fn skull_iter_incremental(path: &str, iters: usize, warmup: usize) -> Result
         let upd = session
             .update_file(&target, text)
             .map_err(|e| anyhow::anyhow!("update_file: {}", e.message))?;
+        if let Some(source) = sources
+            .files
+            .iter()
+            .find(|source| source.borrow().file.to_id_path() == target)
+        {
+            source.borrow_mut().contents = text.clone();
+        }
         let update_ms = ms(t_u);
         // bone's per-edit phase breakdown (clone/cook/lower/infer), set by
         // rebuild_body_incremental inside the SAME update_file the stone loop calls.
@@ -2490,11 +2598,27 @@ pub fn skull_iter_incremental(path: &str, iters: usize, warmup: usize) -> Result
         let diag_ms = ms(t_d);
 
         let t_l = Instant::now();
-        let lint_errs = crate::lint_pass::run_build_lints(
+        let lint_change = if matches!(upd.tier, bone_incremental::session::UpdateTier::BodyOnly) {
+            bone_lints::LintCacheUpdate::body_only(
+                [ustr::Ustr::from(target.as_str())],
+                upd.reinferred.iter().copied(),
+                upd.body_update.edit.iter().map(|edit| bone_lints::TextEditDelta {
+                    file: edit.file,
+                    at: edit.at,
+                    byte_delta: edit.byte_delta,
+                    line_delta: edit.line_delta,
+                }),
+            )
+        } else {
+            bone_lints::LintCacheUpdate::full()
+        };
+        let lint_errs = crate::lint_pass::run_build_lints_cached(
+            &mut lint_cache,
             session.workspace(),
             &sources,
             std::path::Path::new(path),
             crate::lint_pass::Scope::WholeProject,
+            &lint_change,
         );
         if !lint_errs.is_empty() {
             return Err(anyhow::anyhow!(
@@ -2673,6 +2797,9 @@ root-hole names={} rows={} decls={} reason-buckets={} erased-catalogue={}",
             stats.erased_catalogue_entries_examined,
         );
     }
+    if let Some(census) = crate::lint_pass::take_census() {
+        crate::lint_pass::print_census(&census);
+    }
     Ok(())
 }
 
@@ -2788,18 +2915,118 @@ pub enum SkullReload {
     /// pure `emit_overlay` (directly comparable to `iter-incremental`); `write_ms`
     /// is the separate disk write of the overlay.
     Incremental { bytes: usize, reinferred: usize, cook_ms: f64, emit_ms: f64, write_ms: f64 },
-    /// The live process cannot remove a shader registration. The caller must
-    /// restart it, then call [`SkullStone::force_full`] to materialize the
-    /// current program; no output was written on this path.
+    /// A full artifact is required before the current process can observe this
+    /// update; no output was written on this path.
     FullRequired { reasons: Vec<String> },
     /// A type's runtime SHAPE changed (docs/hot-reload-schema-drift-plan.md):
-    /// live state cannot be migrated, so the game process must RESTART.
-    /// Nothing was written -- the running process must never dofile the
-    /// new-shape program; the restart path's `force_full` writes it after the
-    /// kill. `types` names the drifted types for the why-log.
+    /// live state cannot be migrated in place. Nothing was written -- the
+    /// supervisor must use the restart fallback. `types` names the drifted
+    /// types for the
+    /// why-log.
     ShapeChanged { types: Vec<String> },
     /// Nothing changed (content-hash no-op).
     NoChange,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SkullRouteProfile {
+    pub session_snapshot_ns: u128,
+    pub source_lookup_feed_ns: u128,
+    pub session_update_ns: u128,
+    pub diagnostics_ns: u128,
+    pub lint_total_ns: u128,
+    pub local_lint_derivation_ns: u128,
+    pub global_lint_dependency_ns: u128,
+    pub global_lint_derivation_ns: u128,
+    pub suppression_filtering_ns: u128,
+    pub suppression_filter_calls: usize,
+    pub report_prepare_ns: u128,
+    pub summary_sort_ns: u128,
+    pub render_ns: u128,
+    pub finding_aggregation_ns: u128,
+    pub publication_shape_checks_ns: u128,
+    pub transaction_checkpoint_ns: u128,
+    pub body_transactions_started: usize,
+    pub transaction_commit_ns: u128,
+    pub affected_chunk_selection_ns: u128,
+    pub emit_overlay_ns: u128,
+    pub atomic_output_write_ns: u128,
+    pub rollback_ns: u128,
+    pub live_update_ns: u128,
+    pub live_project_call_ns: u128,
+    pub route_emit_call_ns: u128,
+    pub live_project_unaccounted_ns: u128,
+    pub route_unaccounted_ns: u128,
+    pub total_ns: u128,
+    pub unaccounted_ns: u128,
+}
+
+impl SkullRouteProfile {
+    fn from_live(timing: crate::live_project::LiveRouteTiming) -> Self {
+        Self {
+            session_snapshot_ns: timing.session_snapshot_ns,
+            source_lookup_feed_ns: timing.source_lookup_feed_ns,
+            session_update_ns: timing.session_update_ns,
+            diagnostics_ns: timing.diagnostics_ns,
+            lint_total_ns: timing.lint_total_ns,
+            local_lint_derivation_ns: timing.local_lint_derivation_ns,
+            global_lint_dependency_ns: timing.global_lint_dependency_ns,
+            global_lint_derivation_ns: timing.global_lint_derivation_ns,
+            suppression_filtering_ns: timing.suppression_filtering_ns,
+            suppression_filter_calls: timing.suppression_filter_calls,
+            report_prepare_ns: timing.report_prepare_ns,
+            summary_sort_ns: timing.summary_sort_ns,
+            render_ns: timing.render_ns,
+            finding_aggregation_ns: timing.finding_aggregation_ns,
+            rollback_ns: timing.rollback_ns,
+            live_update_ns: timing.live_update_ns,
+            ..Self::default()
+        }
+    }
+
+    fn finish(&mut self, total_ns: u128) {
+        self.total_ns = total_ns;
+        self.live_project_unaccounted_ns = self
+            .live_project_call_ns
+            .saturating_sub(self.session_snapshot_ns + self.live_update_ns);
+        self.route_unaccounted_ns = self
+            .route_emit_call_ns
+            .saturating_sub(
+                self.publication_shape_checks_ns
+                    + self.transaction_checkpoint_ns
+                    + self.transaction_commit_ns
+                    + self.emit_overlay_ns
+                    + self.atomic_output_write_ns,
+            );
+        let accounted = self.live_project_call_ns + self.route_emit_call_ns + self.rollback_ns;
+        self.unaccounted_ns = total_ns.saturating_sub(accounted);
+    }
+
+    fn add_live(&mut self, timing: crate::live_project::LiveRouteTiming) {
+        self.session_snapshot_ns += timing.session_snapshot_ns;
+        self.source_lookup_feed_ns += timing.source_lookup_feed_ns;
+        self.session_update_ns += timing.session_update_ns;
+        self.diagnostics_ns += timing.diagnostics_ns;
+        self.lint_total_ns += timing.lint_total_ns;
+        self.local_lint_derivation_ns += timing.local_lint_derivation_ns;
+        self.global_lint_dependency_ns += timing.global_lint_dependency_ns;
+        self.global_lint_derivation_ns += timing.global_lint_derivation_ns;
+        self.suppression_filtering_ns += timing.suppression_filtering_ns;
+        self.suppression_filter_calls += timing.suppression_filter_calls;
+        self.report_prepare_ns += timing.report_prepare_ns;
+        self.summary_sort_ns += timing.summary_sort_ns;
+        self.render_ns += timing.render_ns;
+        self.finding_aggregation_ns += timing.finding_aggregation_ns;
+        self.rollback_ns += timing.rollback_ns;
+        self.live_update_ns += timing.live_update_ns;
+    }
+}
+
+fn emit_phase_ns(phases: &[(&'static str, Duration)], label: &str) -> u128 {
+    phases
+        .iter()
+        .find(|(name, _)| *name == label)
+        .map_or(0, |(_, duration)| duration.as_nanos())
 }
 
 /// Persistent stone-skull compile state: a warm bone `Session` + skull emit cache
@@ -2814,9 +3041,12 @@ pub struct SkullStone {
     renderer_target: skull::mir_emit::RendererTarget,
     /// Per-type layout hashes of the last program the game process could have
     /// loaded. A full recompile whose hashes drifted returns
-    /// `SkullReload::ShapeChanged` (restart request) instead of writing
+    /// `SkullReload::ShapeChanged` (full-reconstruction request) instead of writing
     /// (docs/hot-reload-schema-drift-plan.md).
     shape_hashes: skull::ShapeHashes,
+    route_profile_enabled: bool,
+    last_route_profile: Option<SkullRouteProfile>,
+    artifact_fingerprint: String,
 }
 
 impl SkullStone {
@@ -2825,20 +3055,42 @@ impl SkullStone {
     /// Game build: excludes test-only files (tests/ dirs) so a broken sim/test
     /// can't break the running game. See `docs/sim-layering.md`.
     pub fn init(dir: &str, main_path: &std::path::Path, incremental_path: &std::path::Path) -> Result<SkullStone> {
-        Self::init_impl(dir, main_path, incremental_path, false)
+        Self::init_impl(dir, main_path, incremental_path, false, None)
     }
 
     /// Sim-runner build: same as [`SkullStone::init`] but discovery KEEPS
     /// test-only files -- `@sim` bodies live in `tests/sims/` and must be part
     /// of the emitted program.
     pub fn init_with_tests(dir: &str, main_path: &std::path::Path, incremental_path: &std::path::Path) -> Result<SkullStone> {
-        Self::init_impl(dir, main_path, incremental_path, true)
+        Self::init_impl(dir, main_path, incremental_path, true, None)
     }
 
-    fn init_impl(dir: &str, main_path: &std::path::Path, incremental_path: &std::path::Path, include_tests: bool) -> Result<SkullStone> {
+    pub fn init_with_tests_and_allocation_report(
+        dir: &str,
+        main_path: &std::path::Path,
+        incremental_path: &std::path::Path,
+        allocation_manifest: &std::path::Path,
+    ) -> Result<SkullStone> {
+        let _activation = skull::allocation_report::activation_scope(true);
+        Self::init_impl(
+            dir,
+            main_path,
+            incremental_path,
+            true,
+            Some(allocation_manifest),
+        )
+    }
+
+    fn init_impl(
+        dir: &str,
+        main_path: &std::path::Path,
+        incremental_path: &std::path::Path,
+        include_tests: bool,
+        explicit_allocation_report: Option<&std::path::Path>,
+    ) -> Result<SkullStone> {
         let renderer_target = skull_renderer_target(dir)?;
         let project = crate::live_project::LiveProject::init(dir, include_tests)?;
-        let (lua, cache) = {
+        let (lua, cache, artifact_fingerprint) = {
             let ws = project.workspace();
             let mid = skull::user_module_id(ws)
                 .map_err(no_user_module)?;
@@ -2849,20 +3101,63 @@ impl SkullStone {
                 renderer_target,
             )
                 .map_err(|e| anyhow::anyhow!("{}", render_project_err(project.sources(), &e)))?;
+            let allocation_report_path = allocation_report_path_from_env();
+            write_allocation_report(
+                explicit_allocation_report
+                    .map(std::path::Path::as_os_str)
+                    .or(allocation_report_path.as_deref()),
+                &emit.allocation_report,
+            )?;
             // Host package/description metadata is appended to StateSchema.
             let spec = crate::unified_compile::SourceSpec::Directory(
                 std::path::PathBuf::from(dir),
             );
+            let artifact_fingerprint = emit.artifact_fingerprint.clone();
             let mut lua = emit.lua;
             install_rock_state_metadata(&mut lua, ws, &spec)
                 .map_err(|e| anyhow::anyhow!(render_project_err(project.sources(), &e)))?;
-            (lua, c)
+            (lua, c, artifact_fingerprint)
         };
         let preamble = skull_game_preamble(dir)?;
         write_full_main(&preamble, &lua, main_path, incremental_path)?;
         let shape_hashes = skull::type_shape_hashes(project.workspace())
             .map_err(|e| anyhow::anyhow!(e.message))?;
-        Ok(SkullStone { project, cache, preamble, renderer_target, shape_hashes })
+        Ok(SkullStone {
+            project,
+            cache,
+            preamble,
+            renderer_target,
+            shape_hashes,
+            route_profile_enabled: std::env::var_os("ROCK_SKULL_ROUTE_PROFILE").is_some(),
+            last_route_profile: None,
+            artifact_fingerprint,
+        })
+    }
+
+    pub fn enable_route_profile(&mut self) {
+        self.route_profile_enabled = true;
+        self.project.enable_route_profile();
+    }
+
+    pub fn take_last_route_profile(&mut self) -> Option<SkullRouteProfile> {
+        self.last_route_profile.take()
+    }
+
+    fn finish_route_profile(
+        &mut self,
+        started: Option<Instant>,
+        mut profile: SkullRouteProfile,
+    ) {
+        if let Some(started) = started {
+            profile.finish(started.elapsed().as_nanos());
+            self.last_route_profile = Some(profile);
+        } else {
+            self.last_route_profile = None;
+        }
+    }
+
+    pub fn artifact_fingerprint(&self) -> &str {
+        &self.artifact_fingerprint
     }
 
     /// On a watch event: refresh the cached sources (re-read only `changed` off
@@ -2873,14 +3168,59 @@ impl SkullStone {
     /// overlay. `changed` is the watcher's changed-path set; pass empty to force a
     /// full re-discover.
     pub fn recompile(&mut self, changed: &[std::path::PathBuf], main_path: &std::path::Path, incremental_path: &std::path::Path) -> Result<SkullReload> {
-        let snapshot = self.project.snapshot(changed);
-        let update = self.project.recompile(changed)?;
-        match self.route_and_emit(update, main_path, incremental_path) {
-            Ok(reload) => Ok(reload),
+        let started = self.route_profile_enabled.then(Instant::now);
+        self.last_route_profile = None;
+        let project_started = self.route_profile_enabled.then(Instant::now);
+        let publication = self.project.recompile_for_publication(changed);
+        let project_call_ns = project_started.map_or(0, |started| started.elapsed().as_nanos());
+        let (update, snapshot) = match publication {
+            Ok(value) => value,
             Err(error) => {
-                if let Err(restore) = self.project.restore(snapshot) {
+                let mut profile = SkullRouteProfile::from_live(self.project.take_route_timing());
+                profile.live_project_call_ns = project_call_ns;
+                self.finish_route_profile(started, profile);
+                return Err(error);
+            }
+        };
+        let mut profile = SkullRouteProfile::from_live(self.project.take_route_timing());
+        profile.live_project_call_ns = project_call_ns;
+        let route_started = self.route_profile_enabled.then(Instant::now);
+        let result = self.route_and_emit(
+            update,
+            main_path,
+            incremental_path,
+            self.route_profile_enabled.then_some(&mut profile),
+        );
+        if let Some(started) = route_started {
+            profile.route_emit_call_ns += started.elapsed().as_nanos();
+        }
+        match result {
+            Ok(reload) => {
+                self.project.commit_body_transaction();
+                self.finish_route_profile(started, profile);
+                Ok(reload)
+            }
+            Err(error) => {
+                let rollback_started = self.route_profile_enabled.then(Instant::now);
+                let restored = self.project.restore(snapshot);
+                let cache_restored = if restored.is_ok() {
+                    self.cache.rollback_body_edit(self.project.workspace())
+                } else {
+                    Ok(())
+                };
+                profile.add_live(self.project.take_route_timing());
+                if let Some(started) = rollback_started {
+                    profile.rollback_ns += started.elapsed().as_nanos();
+                }
+                self.finish_route_profile(started, profile);
+                if let Err(restore) = restored {
                     return Err(anyhow::anyhow!(
                         "skull publication rollback failed after disk edit: {restore}; original error: {error}"
+                    ));
+                }
+                if let Err(restore) = cache_restored {
+                    return Err(anyhow::anyhow!(
+                        "skull cache rollback failed after disk edit: {restore}; original error: {error}"
                     ));
                 }
                 Err(error)
@@ -2895,14 +3235,59 @@ impl SkullStone {
     /// a path the build didn't discover -- an edit to an unknown file would
     /// otherwise silently do nothing.
     pub fn apply_edit(&mut self, path: &std::path::Path, new_text: &str, main_path: &std::path::Path, incremental_path: &std::path::Path) -> Result<SkullReload> {
-        let snapshot = self.project.snapshot(&[path.to_path_buf()]);
-        let update = self.project.apply_edit(path, new_text)?;
-        match self.route_and_emit(update, main_path, incremental_path) {
-            Ok(reload) => Ok(reload),
+        let started = self.route_profile_enabled.then(Instant::now);
+        self.last_route_profile = None;
+        let project_started = self.route_profile_enabled.then(Instant::now);
+        let publication = self.project.apply_edit_for_publication(path, new_text);
+        let project_call_ns = project_started.map_or(0, |started| started.elapsed().as_nanos());
+        let (update, snapshot) = match publication {
+            Ok(value) => value,
             Err(error) => {
-                if let Err(restore) = self.project.restore(snapshot) {
+                let mut profile = SkullRouteProfile::from_live(self.project.take_route_timing());
+                profile.live_project_call_ns = project_call_ns;
+                self.finish_route_profile(started, profile);
+                return Err(error);
+            }
+        };
+        let mut profile = SkullRouteProfile::from_live(self.project.take_route_timing());
+        profile.live_project_call_ns = project_call_ns;
+        let route_started = self.route_profile_enabled.then(Instant::now);
+        let result = self.route_and_emit(
+            update,
+            main_path,
+            incremental_path,
+            self.route_profile_enabled.then_some(&mut profile),
+        );
+        if let Some(started) = route_started {
+            profile.route_emit_call_ns += started.elapsed().as_nanos();
+        }
+        match result {
+            Ok(reload) => {
+                self.project.commit_body_transaction();
+                self.finish_route_profile(started, profile);
+                Ok(reload)
+            },
+            Err(error) => {
+                let rollback_started = self.route_profile_enabled.then(Instant::now);
+                let restored = self.project.restore(snapshot);
+                let cache_restored = if restored.is_ok() {
+                    self.cache.rollback_body_edit(self.project.workspace())
+                } else {
+                    Ok(())
+                };
+                profile.add_live(self.project.take_route_timing());
+                if let Some(started) = rollback_started {
+                    profile.rollback_ns += started.elapsed().as_nanos();
+                }
+                self.finish_route_profile(started, profile);
+                if let Err(restore) = restored {
                     return Err(anyhow::anyhow!(
                         "skull publication rollback failed after in-memory edit: {restore}; original error: {error}"
+                    ));
+                }
+                if let Err(restore) = cache_restored {
+                    return Err(anyhow::anyhow!(
+                        "skull cache rollback failed after in-memory edit: {restore}; original error: {error}"
                     ));
                 }
                 Err(error)
@@ -2929,13 +3314,18 @@ impl SkullStone {
             .collect()
     }
 
-    /// Feed source edits into the Session, route by the worst tier, and write
-    /// the output: any interface/structural edit -> full `main.lua` + overlay
-    /// wipe (behind the schema-drift gate); body-only edits -> `incremental.lua`
-    /// overlay. Shared by the disk-driven watcher path ([`SkullStone::recompile`])
-    /// and the in-memory sim reload injection ([`SkullStone::apply_edit`]).
+    /// Feed source edits into the Session and route by the worst tier. Body-only
+    /// edits write `incremental.lua`; a full artifact is either written or
+    /// returned as `FullRequired` when a safety gate defers publication.
+    /// Shared by the disk-driven watcher and in-memory sim reload paths.
     /// `t_cook` is the caller's front-end timer (includes its feed construction).
-    fn route_and_emit(&mut self, update: crate::live_project::LiveUpdate, main_path: &std::path::Path, incremental_path: &std::path::Path) -> Result<SkullReload> {
+    fn route_and_emit(
+        &mut self,
+        update: crate::live_project::LiveUpdate,
+        main_path: &std::path::Path,
+        incremental_path: &std::path::Path,
+        mut profile: Option<&mut SkullRouteProfile>,
+    ) -> Result<SkullReload> {
         use std::path::PathBuf;
         let (full, reinferred, span_edits, cook_ms) = match update {
             crate::live_project::LiveUpdate::NoChange => return Ok(SkullReload::NoChange),
@@ -2948,6 +3338,7 @@ impl SkullStone {
         };
 
         let t_emit = Instant::now();
+        let shape_started = profile.is_some().then(Instant::now);
         let old_shader_contracts = self.cache.shader_registration_contracts();
         let shader_keys_changed = if full {
             self.cache
@@ -2962,6 +3353,9 @@ impl SkullStone {
                 .map_err(|e| anyhow::anyhow!("{}", render_project_err(self.project.sources(), &e)))?
         };
         if shader_keys_changed {
+            if let (Some(started), Some(profile)) = (shape_started, profile.as_deref_mut()) {
+                profile.publication_shape_checks_ns += started.elapsed().as_nanos();
+            }
             return Ok(SkullReload::FullRequired {
                 reasons: vec!["shader registration key set changed".to_string()],
             });
@@ -2970,11 +3364,9 @@ impl SkullStone {
             // Schema-drift gate (docs/hot-reload-schema-drift-plan.md): live
             // data outlives every reload tier, so if any type's runtime layout
             // moved, hot-reloading the recompiled program would drive old-shape
-            // state with new-shape readers. Request a process restart and defer
-            // ALL writes -- the stone loop kills the process, then
-            // `force_full` (canonicalize) writes this session's program for the
-            // respawn. Re-baseline the stored hashes now: the delta is consumed
-            // by this one restart.
+            // state with new-shape readers. Request a complete reconstruction
+            // and defer ALL writes until the restart path. Re-baseline the stored hashes now: the
+            // delta is consumed by this one full publication.
             let new_shapes = skull::type_shape_hashes(self.project.workspace())
                 .map_err(|e| anyhow::anyhow!(e.message))?;
             let drifted = skull::shape_diff(&self.shape_hashes, &new_shapes);
@@ -3007,7 +3399,7 @@ impl SkullStone {
                     })
                 {
                     return Ok(SkullReload::FullRequired {
-                        reasons: vec!["StateSchema changed; process restart is required".to_string()],
+                        reasons: vec!["StateSchema changed; fresh Session is required".to_string()],
                     });
                 }
                 if self.cache.lifecycle_plan().is_some_and(|old| {
@@ -3033,42 +3425,67 @@ impl SkullStone {
             let (lua, staged_cache) = lua;
             let bytes = write_full_main(&self.preamble, &lua, main_path, incremental_path)?;
             self.cache = staged_cache;
+            self.artifact_fingerprint = self
+                .cache
+                .artifact_fingerprint()
+                .ok_or_else(|| anyhow::anyhow!("compiler did not publish an Artifact fingerprint"))?
+                .to_string();
             let write_ms = t_write.elapsed().as_secs_f64() * 1000.0;
             Ok(SkullReload::Full { bytes, cook_ms, emit_ms, write_ms })
         } else {
-            let (overlay, staged_cache) = {
+            if let (Some(started), Some(profile)) = (shape_started, profile.as_deref_mut()) {
+                profile.publication_shape_checks_ns += started.elapsed().as_nanos();
+            }
+            let checkpoint_started = profile.is_some().then(Instant::now);
+            self.cache
+                .begin_body_edit_transaction(&reinferred, &span_edits);
+            if let Some(profile) = profile.as_deref_mut() {
+                profile.body_transactions_started += 1;
+            }
+            if let (Some(started), Some(profile)) = (checkpoint_started, profile.as_deref_mut()) {
+                profile.transaction_checkpoint_ns += started.elapsed().as_nanos();
+            }
+            let emit_started = profile.is_some().then(Instant::now);
+            let overlay = {
                 let ws = self.project.workspace();
-                skull::mir_emit::emit_overlay_with_span_edits_staged(
+                skull::mir_emit::emit_overlay_with_span_edits(
                     ws,
-                    &self.cache,
+                    &mut self.cache,
                     &reinferred,
                     &span_edits,
                 )
                     .map_err(|e| anyhow::anyhow!("{}", render_project_err(self.project.sources(), &e)))?
             };
-            if old_shader_contracts != staged_cache.shader_registration_contracts() {
+            if let (Some(started), Some(profile)) = (emit_started, profile.as_deref_mut()) {
+                profile.emit_overlay_ns += started.elapsed().as_nanos();
+                profile.affected_chunk_selection_ns +=
+                    emit_phase_ns(&overlay.phases, "  affected selection");
+            }
+            if old_shader_contracts != self.cache.shader_registration_contracts() {
+                self.cache.commit_body_edit_transaction();
                 return Ok(SkullReload::FullRequired {
                     reasons: vec!["shader registration ABI changed".to_string()],
                 });
             }
-            if self.cache.lifecycle_plan().is_some_and(|old| {
-                old.wire_structure_changed(
-                    staged_cache
+            if self.cache.body_edit_baseline_lifecycle_plan().is_some_and(|old| {
+                old.structure_changed(
+                    self.cache
                         .lifecycle_plan()
                         .expect("overlay always carries a LifecyclePlan"),
                 )
             }) {
-                let reason = if self.cache.lifecycle_plan().is_some_and(|old| {
+                let reason = if self.cache.body_edit_baseline_lifecycle_plan().is_some_and(|old| {
                     old.removed_gated_wire(
-                        staged_cache
+                        self.cache
                             .lifecycle_plan()
                             .expect("overlay always carries a LifecyclePlan"),
                     )
                 }) {
                     "removing a gated @wire requires a fresh Session/HostProjection"
                 } else {
-                    "LifecyclePlan wire structure changed; full artifact transition required"
+                    "LifecyclePlan structure changed; full artifact transition required"
                 };
+                self.cache.commit_body_edit_transaction();
                 return Ok(SkullReload::FullRequired {
                     reasons: vec![reason.to_string()],
                 });
@@ -3077,7 +3494,19 @@ impl SkullStone {
             let emit_ms = t_emit.elapsed().as_secs_f64() * 1000.0;
             let t_write = Instant::now();
             rock_host::project::write_atomic(incremental_path, &overlay.lua)?;
-            self.cache = staged_cache;
+            if let Some(profile) = profile.as_deref_mut() {
+                profile.atomic_output_write_ns += t_write.elapsed().as_nanos();
+            }
+            self.artifact_fingerprint = self
+                .cache
+                .artifact_fingerprint()
+                .ok_or_else(|| anyhow::anyhow!("compiler did not publish an Artifact fingerprint"))?
+                .to_string();
+            let commit_started = profile.is_some().then(Instant::now);
+            self.cache.commit_body_edit_transaction();
+            if let (Some(started), Some(profile)) = (commit_started, profile.as_deref_mut()) {
+                profile.transaction_commit_ns += started.elapsed().as_nanos();
+            }
             let write_ms = t_write.elapsed().as_secs_f64() * 1000.0;
             Ok(SkullReload::Incremental { bytes, reinferred: reinferred.len(), cook_ms, emit_ms, write_ms })
         }
@@ -3101,7 +3530,7 @@ impl SkullStone {
         // mutated the session into the broken state, so the restart-path fold must
         // re-gate or it would write a partial `main.lua` to the respawned process.
         self.project.verdict("on restart fold")?;
-        let lua = {
+        let (lua, cache, artifact_fingerprint) = {
             let ws = self.project.workspace();
             let mid = skull::user_module_id(ws)
                 .map_err(no_user_module)?;
@@ -3112,6 +3541,7 @@ impl SkullStone {
                 self.renderer_target,
             )
                 .map_err(|e| anyhow::anyhow!("skull force_full emit: {}", e.message))?;
+            let artifact_fingerprint = emit.artifact_fingerprint.clone();
             // Host package/description metadata is rebuilt with the StateSchema.
             let spec = crate::unified_compile::SourceSpec::Directory(
                 std::path::PathBuf::from(self.project.dir()),
@@ -3119,12 +3549,12 @@ impl SkullStone {
             let mut lua = emit.lua;
             install_rock_state_metadata(&mut lua, ws, &spec)
                 .map_err(|e| anyhow::anyhow!(e.message))?;
-            (lua, c)
+            (lua, c, artifact_fingerprint)
         };
-        let (lua, staged_cache) = lua;
         self.preamble = skull_game_preamble(self.project.dir())?;
         write_full_main(&self.preamble, &lua, main_path, incremental_path)?;
-        self.cache = staged_cache; // resets changed_since_full -- the overlay is now folded in
+        self.artifact_fingerprint = artifact_fingerprint;
+        self.cache = cache; // resets changed_since_full -- the overlay is now folded in
         // This program is what the (re)spawned process loads -- re-baseline the
         // shape hashes to it, including drift that arrived via a recompile that
         // bailed on a type error after mutating the session.

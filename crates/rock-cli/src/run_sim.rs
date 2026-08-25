@@ -55,6 +55,87 @@ fn frame_budget_for(sim_name: &str, env_pairs: &[(String, String)]) -> Result<us
 /// `ROCK_SIM_TIMEOUT_SECS` for a genuinely long-running sim.
 const DEFAULT_TIMEOUT_SECS: u64 = 300;
 
+#[derive(Clone, Debug, PartialEq)]
+struct AllocationCensus {
+    build_sha: String,
+    rendering_enabled: bool,
+    warmup_frames_requested: usize,
+    warmup_frames: usize,
+    frame_count: usize,
+    measured_frames: usize,
+    initialization_gross_kb: f64,
+    outside_frame_gross_kb: f64,
+    warmup_gross_kb: f64,
+    measured_gross_kb: f64,
+    total_gross_kb: f64,
+    measured_allocator_calls: u64,
+    measured_allocation_calls: u64,
+    measured_reallocation_calls: u64,
+    stop_sim_reached: bool,
+    measurement_complete: bool,
+}
+
+impl AllocationCensus {
+    fn from_json(json: &str) -> Result<Self> {
+        let value: serde_json::Value = serde_json::from_str(json)
+            .context("allocation census side-channel payload is not JSON")?;
+        let required_str = |name: &str| {
+            value
+                .get(name)
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+                .ok_or_else(|| anyhow!("allocation census field `{name}` is not a string"))
+        };
+        let required_bool = |name: &str| {
+            value
+                .get(name)
+                .and_then(serde_json::Value::as_bool)
+                .ok_or_else(|| anyhow!("allocation census field `{name}` is not a bool"))
+        };
+        let required_usize = |name: &str| {
+            value
+                .get(name)
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|n| usize::try_from(n).ok())
+                .ok_or_else(|| anyhow!("allocation census field `{name}` is not a nonnegative integer"))
+        };
+        let required_float = |name: &str| {
+            value
+                .get(name)
+                .and_then(serde_json::Value::as_f64)
+                .ok_or_else(|| anyhow!("allocation census field `{name}` is not a number"))
+        };
+
+        Ok(Self {
+            build_sha: required_str("build_sha")?,
+            rendering_enabled: required_bool("rendering_enabled")?,
+            warmup_frames_requested: required_usize("warmup_frames_requested")?,
+            warmup_frames: required_usize("warmup_frames")?,
+            frame_count: required_usize("frame_count")?,
+            measured_frames: required_usize("measured_frames")?,
+            initialization_gross_kb: required_float("initialization_gross_kb")?,
+            outside_frame_gross_kb: required_float("outside_frame_gross_kb")?,
+            warmup_gross_kb: required_float("warmup_gross_kb")?,
+            measured_gross_kb: required_float("measured_gross_kb")?,
+            total_gross_kb: required_float("total_gross_kb")?,
+            measured_allocator_calls: value
+                .get("measured_allocator_calls")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| anyhow!("allocation census field `measured_allocator_calls` is not an integer"))?,
+            measured_allocation_calls: value
+                .get("measured_allocation_calls")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| anyhow!("allocation census field `measured_allocation_calls` is not an integer"))?,
+            measured_reallocation_calls: value
+                .get("measured_reallocation_calls")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| anyhow!("allocation census field `measured_reallocation_calls` is not an integer"))?,
+            stop_sim_reached: required_bool("stop_sim_reached")?,
+            measurement_complete: required_bool("measurement_complete")?,
+        })
+    }
+}
+
 fn sim_timeout_secs() -> u64 {
     match std::env::var("ROCK_SIM_TIMEOUT_SECS") {
         Ok(v) => match v.parse::<u64>() {
@@ -157,6 +238,15 @@ fn compile_sims(
     project_path: PathBuf,
     output_path: PathBuf,
 ) -> Result<(Vec<String>, HashMap<String, Vec<(String, String)>>, crate::skull_backend::SkullStone)> {
+    compile_sims_with_allocation(backend, project_path, output_path, None)
+}
+
+fn compile_sims_with_allocation(
+    backend: crate::Backend,
+    project_path: PathBuf,
+    output_path: PathBuf,
+    allocation_manifest: Option<&Path>,
+) -> Result<(Vec<String>, HashMap<String, Vec<(String, String)>>, crate::skull_backend::SkullStone)> {
     // Only skull serves sims now (bone has no codegen, rock is gone): build the
     // bone workspace once (a live Session, tests included), emit the game-shaped
     // main.lua with its `@sim` registry, and collect the wire/env list from the
@@ -165,9 +255,10 @@ fn compile_sims(
     match backend {
         crate::Backend::Skull => {
             let main_path = output_path.join(rock_host::project::MAIN_LUA_FILENAME);
-            crate::skull_backend::skull_compile_game_and_collect_sims(
+            crate::skull_backend::skull_compile_game_and_collect_sims_with_allocation(
                 &project_path.to_string_lossy(),
                 &main_path,
+                allocation_manifest,
             )
         }
         other => panic!(
@@ -226,6 +317,7 @@ pub fn do_run_sim_opts(backend: crate::Backend, project: &str, sim_name: &str, q
         &output,
         &env_by_wire,
         Some(&mut stone),
+        None,
     )?;
     let sim_name = display_name.as_str();
 
@@ -342,6 +434,7 @@ fn run_named_entry(
     output: &str,
     env_by_wire: &HashMap<String, Vec<(String, String)>>,
     stone: Option<&mut crate::skull_backend::SkullStone>,
+    census_warmup_frames: Option<usize>,
 ) -> Result<(String, SimSummary)> {
     let artifacts = SimArtifacts::new()?;
     let out_path = artifacts.path().to_path_buf();
@@ -380,6 +473,7 @@ fn run_named_entry(
             output,
             &env_pairs,
             lane,
+            census_warmup_frames,
         )?;
         combined.merge(part_summary);
     }
@@ -506,6 +600,7 @@ pub fn do_run_named_sims(
             &output,
             &env_by_wire,
             stone,
+            None,
         )?;
         let _lock = report.lock().unwrap();
         if !quiet {
@@ -718,6 +813,7 @@ pub fn do_run_all_sims(
             &output,
             &env_pairs,
             stone,
+            None,
         )?;
 
         let _lock = report.lock().unwrap();
@@ -780,6 +876,545 @@ pub fn do_run_all_sims(
             failed.len(),
             wire_names.len()
         ));
+    }
+    Ok(())
+}
+
+const DEFAULT_SIM_ALLOCATION_WARMUP_FRAMES: usize = 2;
+
+fn census_status(summary: &SimSummary) -> &'static str {
+    if summary.timed_out {
+        "timeout"
+    } else if summary.process_failure_code.is_some() {
+        "process failure"
+    } else if !summary.saw_stop {
+        "no-verdict"
+    } else if summary.has_failures() {
+        "FAIL"
+    } else if summary.allocation_census.is_none()
+        || summary.allocation_census.as_ref().unwrap().measured_frames == 0
+        || !summary.allocation_census.as_ref().unwrap().measurement_complete
+    {
+        "no-verdict"
+    } else {
+        "PASS"
+    }
+}
+
+fn census_failure_messages(summary: &SimSummary) -> Vec<String> {
+    let mut messages: Vec<String> = summary
+        .errors
+        .iter()
+        .map(|m| if m.site.is_empty() {
+            m.message.clone()
+        } else {
+            format!("{}: {}", m.site, m.message)
+        })
+        .collect();
+    messages.extend(summary.expects_fail.iter().map(|m| if m.site.is_empty() {
+        m.message.clone()
+    } else {
+        format!("{}: {}", m.site, m.message)
+    }));
+    messages
+}
+
+fn allocation_census_record(name: &str, summary: &SimSummary) -> (serde_json::Value, Option<(f64, f64)>) {
+    let census = summary.allocation_census.as_ref();
+    let measured_frames = census.map_or(0, |c| c.measured_frames);
+    let measured_frames_f = measured_frames as f64;
+    let measured_gross_kb = census.map_or(0.0, |c| c.measured_gross_kb);
+    let measured_allocator_calls = census.map_or(0, |c| c.measured_allocator_calls);
+    let measured_allocation_calls = census.map_or(0, |c| c.measured_allocation_calls);
+    let measured_reallocation_calls = census.map_or(0, |c| c.measured_reallocation_calls);
+    let gross_kb_per_frame = if measured_frames > 0 {
+        measured_gross_kb / measured_frames_f
+    } else {
+        0.0
+    };
+    let allocator_calls_per_frame = if measured_frames > 0 {
+        measured_allocator_calls as f64 / measured_frames_f
+    } else {
+        0.0
+    };
+    let allocation_calls_per_frame = if measured_frames > 0 {
+        measured_allocation_calls as f64 / measured_frames_f
+    } else {
+        0.0
+    };
+    let reallocation_calls_per_frame = if measured_frames > 0 {
+        measured_reallocation_calls as f64 / measured_frames_f
+    } else {
+        0.0
+    };
+    let record = serde_json::json!({
+        "sim_name": name,
+        "process_id": summary.process_id,
+        "build_sha": census.map(|c| c.build_sha.clone()),
+        "status": census_status(summary),
+        "sim_verdict": if entry_passed(summary) { "PASS" } else { "FAIL" },
+        "failure_messages": census_failure_messages(summary),
+        "stop_sim_reached": summary.saw_stop,
+        "rendering_enabled": census.map(|c| c.rendering_enabled),
+        "rendering_skipped": census.map(|c| !c.rendering_enabled),
+        "measurement_complete": census.map(|c| c.measurement_complete),
+        "warmup_frames_requested": census.map_or(0, |c| c.warmup_frames_requested),
+        "warmup_frames": census.map_or(0, |c| c.warmup_frames),
+        "frame_count": census.map_or(0, |c| c.frame_count),
+        "measured_frames": measured_frames,
+        "initialization_gross_kb": census.map_or(0.0, |c| c.initialization_gross_kb),
+        "outside_frame_gross_kb": census.map_or(0.0, |c| c.outside_frame_gross_kb),
+        "warmup_gross_kb": census.map_or(0.0, |c| c.warmup_gross_kb),
+        "measured_gross_kb": measured_gross_kb,
+        "total_gross_kb": census.map_or(0.0, |c| c.total_gross_kb),
+        "gross_kb_per_frame": gross_kb_per_frame,
+        "measured_allocator_calls": measured_allocator_calls,
+        "measured_allocation_calls": measured_allocation_calls,
+        "measured_reallocation_calls": measured_reallocation_calls,
+        "allocator_calls_per_frame": allocator_calls_per_frame,
+        "allocation_calls_per_frame": allocation_calls_per_frame,
+        "reallocation_calls_per_frame": reallocation_calls_per_frame,
+    });
+    let rank_values = census
+        .filter(|c| c.measurement_complete && c.measured_frames > 0)
+        .map(|_| (gross_kb_per_frame, allocation_calls_per_frame));
+    (record, rank_values)
+}
+
+fn census_rankings(
+    ranked: &[(String, &'static str, f64, f64, usize)],
+    by_gross: bool,
+) -> Vec<serde_json::Value> {
+    let mut rows = ranked.to_vec();
+    rows.sort_by(|a, b| {
+        let left = if by_gross { a.2 } else { a.3 };
+        let right = if by_gross { b.2 } else { b.3 };
+        right
+            .partial_cmp(&left)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.0.cmp(&b.0))
+    });
+    rows.into_iter()
+        .enumerate()
+        .map(|(rank, (name, status, gross, calls, frames))| {
+            serde_json::json!({
+                "rank": rank + 1,
+                "sim_name": name,
+                "status": status,
+                "gross_kb_per_frame": gross,
+                "allocation_calls_per_frame": calls,
+                "measured_frames": frames,
+            })
+        })
+        .collect()
+}
+
+/// Run each selected sim in its own process with the allocator census enabled.
+/// This is deliberately separate from ordinary `rock sim`: the sensor is a
+/// discovery instrument, not a default test-suite cost or a regression gate.
+pub fn do_run_allocation_census(
+    backend: crate::Backend,
+    project: &str,
+    names: &[String],
+    output_path: &str,
+    jobs: Option<usize>,
+) -> Result<()> {
+    let path = PathBuf::from(output_path);
+    if path.exists() {
+        std::fs::remove_file(&path)
+            .with_context(|| format!("removing stale census artifact `{}`", path.display()))?;
+    }
+    rock_host::project::ensure_workspace_root()?;
+    let project_path = rock_host::project::resolve_project_dir(project)?;
+    let project = project_path.to_string_lossy().into_owned();
+    rock_host::engine_build::build_engine_libs(&project)?;
+
+    let out_dir = sim_output_dir()?;
+    let output = out_dir.path().to_string_lossy().into_owned();
+    let (wire_names, env_by_wire, mut stone) =
+        compile_sims(backend, project_path, PathBuf::from(&output))?;
+    sim_spawn_barrier();
+
+    let selected = if names.is_empty() {
+        wire_names.clone()
+    } else {
+        names.to_vec()
+    };
+    if selected.is_empty() {
+        return Err(anyhow!("no @sim coroutines found in project `{project}`"));
+    }
+    for name in &selected {
+        if parse_sim_chain(name).len() != 1 {
+            return Err(anyhow!(
+                "allocation census accepts one sim per entry; comma-chain `{name}` would hide a per-sim row"
+            ));
+        }
+        if !wire_names.iter().any(|known| known == name) {
+            return Err(anyhow!("no sim named `{name}` in project `{project}`"));
+        }
+    }
+
+    let mut reload_idx = Vec::new();
+    let mut ordinary_idx = Vec::new();
+    for (i, name) in selected.iter().enumerate() {
+        if entry_is_reload_lane(name, &env_by_wire) {
+            reload_idx.push(i);
+        } else {
+            ordinary_idx.push(i);
+        }
+    }
+    let jobs = resolve_jobs(jobs, false);
+    let run_at = |i: usize, stone: Option<&mut crate::skull_backend::SkullStone>| {
+        run_named_entry(
+            &project,
+            &selected[i],
+            true,
+            true,
+            false,
+            &output,
+            &env_by_wire,
+            stone,
+            Some(DEFAULT_SIM_ALLOCATION_WARMUP_FRAMES),
+        )
+    };
+
+    let mut results: HashMap<usize, Result<(String, SimSummary)>> = HashMap::new();
+    for (slot, result) in run_bounded(jobs, ordinary_idx.len(), |slot| {
+        run_at(ordinary_idx[slot], None)
+    }) {
+        results.insert(ordinary_idx[slot], result);
+    }
+    for &i in &reload_idx {
+        results.insert(i, run_at(i, Some(&mut stone)));
+    }
+
+    let mut records = Vec::with_capacity(selected.len());
+    let mut ranked = Vec::new();
+    let mut failed = Vec::new();
+    for (i, name) in selected.iter().enumerate() {
+        match results.remove(&i) {
+            Some(Ok((display_name, summary))) => {
+                let (record, rank_values) = allocation_census_record(&display_name, &summary);
+                let status = census_status(&summary);
+                if status != "PASS" {
+                    failed.push(format!("{display_name} ({status})"));
+                }
+                if let Some((gross, calls)) = rank_values {
+                    ranked.push((
+                        display_name,
+                        status,
+                        gross,
+                        calls,
+                        record["measured_frames"].as_u64().unwrap_or(0) as usize,
+                    ));
+                }
+                records.push(record);
+            }
+            Some(Err(error)) => {
+                failed.push(format!("{name} (process failure)"));
+                records.push(serde_json::json!({
+                    "sim_name": name,
+                    "process_id": serde_json::Value::Null,
+                    "build_sha": serde_json::Value::Null,
+                    "status": "process failure",
+                    "sim_verdict": "FAIL",
+                    "failure_messages": [error.to_string()],
+                    "stop_sim_reached": false,
+                    "rendering_enabled": serde_json::Value::Null,
+                    "rendering_skipped": serde_json::Value::Null,
+                    "measurement_complete": false,
+                    "warmup_frames_requested": DEFAULT_SIM_ALLOCATION_WARMUP_FRAMES,
+                    "warmup_frames": 0,
+                    "frame_count": 0,
+                    "measured_frames": 0,
+                    "initialization_gross_kb": 0.0,
+                    "outside_frame_gross_kb": 0.0,
+                    "warmup_gross_kb": 0.0,
+                    "measured_gross_kb": 0.0,
+                    "total_gross_kb": 0.0,
+                    "gross_kb_per_frame": 0.0,
+                    "measured_allocator_calls": 0,
+                    "measured_allocation_calls": 0,
+                    "measured_reallocation_calls": 0,
+                    "allocator_calls_per_frame": 0.0,
+                    "allocation_calls_per_frame": 0.0,
+                    "reallocation_calls_per_frame": 0.0,
+                }));
+            }
+            None => {
+                return Err(anyhow!("sim `{name}` was never scheduled"));
+            }
+        }
+    }
+    if records.len() != selected.len() {
+        return Err(anyhow!(
+            "allocation census emitted {} records for {} examined sims",
+            records.len(),
+            selected.len()
+        ));
+    }
+
+    let ranked_names: std::collections::HashSet<&str> = ranked
+        .iter()
+        .map(|(name, _, _, _, _)| name.as_str())
+        .collect();
+    let excluded: Vec<serde_json::Value> = records
+        .iter()
+        .filter_map(|record| {
+            let name = record["sim_name"].as_str()?;
+            if ranked_names.contains(name) {
+                return None;
+            }
+            let reason = if record["status"] == "no-verdict" {
+                "no complete measured window"
+            } else if record["status"] == "timeout" {
+                "timeout"
+            } else if record["status"] == "process failure" {
+                "process failure"
+            } else {
+                "zero measured frames or missing census"
+            };
+            Some(serde_json::json!({"sim_name": name, "status": record["status"], "reason": reason}))
+        })
+        .collect();
+    let artifact = serde_json::json!({
+        "schema": "rock.sim-allocation-census.v1",
+        "project": project,
+        "examined": selected.len(),
+        "sensor": {
+            "accounting": "gross_lua_allocator_requests",
+            "jit": true,
+            "trace_observer": false,
+            "warmup_frames_requested": DEFAULT_SIM_ALLOCATION_WARMUP_FRAMES,
+            "final_frame": "after_deferred_stop_sim",
+        },
+        "records": records,
+        "rankings": {
+            "eligible_records": ranked.len(),
+            "by_gross_kb_per_frame": census_rankings(&ranked, true),
+            "by_allocation_calls_per_frame": census_rankings(&ranked, false),
+            "excluded": excluded,
+        },
+        "interpretation": "Discovery evidence only. Sims differ in workload, duration, rendering mode, trace warmup, and accelerated game time; these values are not interchangeable gameplay benchmarks and are not regression thresholds.",
+    });
+    if let Some(parent) = path.parent() {
+        fs_err::create_dir_all(parent)?;
+    }
+    let bytes = serde_json::to_vec_pretty(&artifact).context("serialize allocation census")?;
+    fs_err::write(&path, bytes)
+        .with_context(|| format!("writing allocation census `{}`", path.display()))?;
+    if !path.is_file() {
+        return Err(anyhow!(
+            "allocation census write did not recreate `{}`",
+            path.display()
+        ));
+    }
+    println!(
+        "[sim] allocation census: {} examined, {} complete ranked records, artifact={}",
+        selected.len(),
+        ranked.len(),
+        path.display()
+    );
+    if !failed.is_empty() {
+        return Err(anyhow!(
+            "allocation census recorded {} failed/incomplete sims: {}",
+            failed.len(),
+            failed.join(", ")
+        ));
+    }
+    Ok(())
+}
+
+fn allocation_site_artifact_stem(index: usize, name: &str) -> String {
+    let safe = name
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' { ch } else { '_' })
+        .collect::<String>();
+    format!("{index:04}-{safe}")
+}
+
+fn allocation_activation_population(text: &str) -> Result<(usize, usize)> {
+    let mut lines = text.lines();
+    if lines.next() != Some("rock.allocation-activation.v2") {
+        return Err(anyhow!("sim allocation-site activation is not frame-aware v2"));
+    }
+    let frames = lines
+        .next()
+        .and_then(|line| line.strip_prefix("frames\t"))
+        .and_then(|value| value.parse::<usize>().ok())
+        .ok_or_else(|| anyhow!("sim allocation-site activation has no frame denominator"))?;
+    let sites = lines
+        .next()
+        .and_then(|line| line.strip_prefix("sites\t"))
+        .and_then(|value| value.parse::<usize>().ok())
+        .ok_or_else(|| anyhow!("sim allocation-site activation has no site population"))?;
+    let rows = lines.count();
+    if rows != sites {
+        return Err(anyhow!("sim allocation-site activation declared {sites} sites but wrote {rows} rows"));
+    }
+    Ok((frames, sites))
+}
+
+pub fn do_run_allocation_sites(
+    backend: crate::Backend,
+    project: &str,
+    names: &[String],
+    output_dir: &str,
+    jobs: Option<usize>,
+) -> Result<()> {
+    let artifact_dir = PathBuf::from(output_dir);
+    if artifact_dir.exists() {
+        if !artifact_dir.is_dir() {
+            return Err(anyhow!("allocation-site output `{}` is not a directory", artifact_dir.display()));
+        }
+        if fs_err::read_dir(&artifact_dir)?.next().is_some() {
+            return Err(anyhow!("allocation-site output directory `{}` is not empty", artifact_dir.display()));
+        }
+    } else {
+        fs_err::create_dir_all(&artifact_dir)?;
+    }
+    let artifact_dir = fs_err::canonicalize(&artifact_dir)?;
+    let manifest_path = artifact_dir.join("manifest.txt");
+
+    rock_host::project::ensure_workspace_root()?;
+    let project_path = rock_host::project::resolve_project_dir(project)?;
+    let project = project_path.to_string_lossy().into_owned();
+    rock_host::engine_build::build_engine_libs(&project)?;
+
+    let out_dir = sim_output_dir()?;
+    let output = out_dir.path().to_string_lossy().into_owned();
+    let (wire_names, env_by_wire, stone) = compile_sims_with_allocation(
+        backend,
+        project_path,
+        PathBuf::from(&output),
+        Some(&manifest_path),
+    )?;
+    let artifact_fingerprint = stone.artifact_fingerprint().to_string();
+    drop(stone);
+    let generated_lua_path = artifact_dir.join("main.lua");
+    fs_err::copy(
+        Path::new(&output).join(rock_host::project::MAIN_LUA_FILENAME),
+        &generated_lua_path,
+    )?;
+    let manifest = fs_err::read_to_string(&manifest_path)?;
+    let generated_lua = fs_err::read_to_string(&generated_lua_path)?;
+    sim_spawn_barrier();
+
+    let selected = if names.is_empty() { wire_names.clone() } else { names.to_vec() };
+    if selected.is_empty() {
+        return Err(anyhow!("no @sim coroutines found in project `{project}`"));
+    }
+    for name in &selected {
+        if parse_sim_chain(name).len() != 1 {
+            return Err(anyhow!("allocation-site diagnostics accept one sim per entry; comma-chain `{name}` would merge frame populations"));
+        }
+        if !wire_names.iter().any(|known| known == name) {
+            return Err(anyhow!("no sim named `{name}` in project `{project}`"));
+        }
+        if entry_is_reload_lane(name, &env_by_wire) {
+            return Err(anyhow!("allocation-site diagnostics do not support reload sim `{name}` because its emitted site IDs can change after the initial manifest"));
+        }
+    }
+
+    let jobs = resolve_jobs(jobs, false);
+    let run_at = |index: usize| -> Result<(String, SimSummary)> {
+        let name = &selected[index];
+        let stem = allocation_site_artifact_stem(index, name);
+        let activation_path = artifact_dir.join(format!("{stem}.activation.tsv"));
+        let mut instrumented_env = env_by_wire.clone();
+        instrumented_env.entry(name.clone()).or_default().push((
+            "SKULL_ALLOCATION_ACTIVATION".to_string(),
+            activation_path.to_string_lossy().into_owned(),
+        ));
+        run_named_entry(
+            &project,
+            name,
+            true,
+            true,
+            false,
+            &output,
+            &instrumented_env,
+            None,
+            None,
+        )
+    };
+    let mut results = HashMap::new();
+    for (index, result) in run_bounded(jobs, selected.len(), run_at) {
+        results.insert(index, result);
+    }
+
+    let mut records = Vec::with_capacity(selected.len());
+    let mut failed = Vec::new();
+    for (index, name) in selected.iter().enumerate() {
+        let stem = allocation_site_artifact_stem(index, name);
+        let activation_name = format!("{stem}.activation.tsv");
+        let joined_name = format!("{stem}.joined.tsv");
+        let activation_path = artifact_dir.join(&activation_name);
+        let joined_path = artifact_dir.join(&joined_name);
+        match results.remove(&index) {
+            Some(Ok((display_name, summary))) => {
+                let status = verdict_word(&summary);
+                if status != "PASS" {
+                    failed.push(display_name.clone());
+                }
+                let activation = fs_err::read_to_string(&activation_path).with_context(|| {
+                    format!("reading allocation-site activation for `{display_name}` from `{}`", activation_path.display())
+                })?;
+                let (frames, active_sites) = allocation_activation_population(&activation)?;
+                let joined = crate::allocation_join::render_joined_report_with_jit(
+                    &manifest,
+                    &activation,
+                    Some("all"),
+                    Some(&generated_lua),
+                    None,
+                )?;
+                fs_err::write(&joined_path, joined)?;
+                let env = env_by_wire.get(name).map_or(&[][..], Vec::as_slice);
+                records.push(serde_json::json!({
+                    "sim_name": display_name,
+                    "status": status,
+                    "process_id": summary.process_id,
+                    "rendering_enabled": entry_renders(env),
+                    "completed_frames": frames,
+                    "active_sites": active_sites,
+                    "activation": activation_name,
+                    "joined": joined_name,
+                }));
+            }
+            Some(Err(error)) => {
+                failed.push(name.clone());
+                records.push(serde_json::json!({
+                    "sim_name": name,
+                    "status": "process failure",
+                    "failure": error.to_string(),
+                    "completed_frames": 0,
+                    "active_sites": 0,
+                }));
+            }
+            None => return Err(anyhow!("sim `{name}` was never scheduled")),
+        }
+    }
+    let index = serde_json::json!({
+        "schema": "rock.sim-allocation-sites.v1",
+        "project": project,
+        "artifact_fingerprint": artifact_fingerprint,
+        "examined": selected.len(),
+        "manifest": "manifest.txt",
+        "generated_lua": "main.lua",
+        "sensor": {
+            "jit": true,
+            "trace_observer": false,
+            "frame_envelope": "update_and_draw",
+            "timing": false,
+            "allocator_sampling": false,
+        },
+        "records": records,
+        "interpretation": "Execution counts identify persistent and amplified compiler-known allocation-capable sites. They do not prove LuaJIT materialized heap memory; validate candidates with an ordinary JIT-on witness.",
+    });
+    fs_err::write(artifact_dir.join("index.json"), serde_json::to_vec_pretty(&index)?)?;
+    println!("[sim] allocation sites: {} examined, artifact={}", selected.len(), artifact_dir.display());
+    if !failed.is_empty() {
+        return Err(anyhow!("allocation-site diagnostics recorded {} failed sims: {}", failed.len(), failed.join(", ")));
     }
     Ok(())
 }
@@ -960,8 +1595,17 @@ fn run_specs_worker_mode(
                 .collect::<Vec<_>>())
         }
         Lane::Isolated(i) => {
-            let (_, summary) =
-                run_named_entry(project, &specs[i], quiet, true, update_snapshots, output, env_by_wire, None)?;
+            let (_, summary) = run_named_entry(
+                project,
+                &specs[i],
+                quiet,
+                true,
+                update_snapshots,
+                output,
+                env_by_wire,
+                None,
+                None,
+            )?;
             Ok(vec![(i, summary)])
         }
     }) {
@@ -983,6 +1627,7 @@ fn run_specs_worker_mode(
             output,
             env_by_wire,
             Some(&mut *stone),
+            None,
         )?;
         slots[i] = Some(summary);
     }
@@ -1012,11 +1657,128 @@ fn run_specs_worker_mode(
 
 /// A mid-sim `reload_edit` request parsed off the `__SIM__` side channel
 /// (`docs/sim-reload-harness-plan.md`).
+#[derive(Debug)]
 struct ReloadEditReq {
+    request_id: Option<u64>,
     file: String,
     find: String,
     replace: String,
     site: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReloadTerminal {
+    Applied,
+    Failed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ReloadCompletion {
+    request_id: Option<u64>,
+    terminal: ReloadTerminal,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct ReloadLedgerSummary {
+    requests: usize,
+    applied: usize,
+    pending: usize,
+    rejected: usize,
+    failed: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReloadRequestState {
+    Booked,
+    Published,
+    Applied,
+    Rejected,
+    Failed,
+}
+
+/// The one parent-side accounting authority for the request -> publication ->
+/// watcher-consumption path. A request is booked before compilation, becomes
+/// published only after `SkullStone` writes the overlay, and can become
+/// terminal only after the production watcher reports what it consumed.
+#[derive(Default, Debug)]
+struct ReloadLedger {
+    requests: BTreeMap<u64, ReloadRequestState>,
+}
+
+impl ReloadLedger {
+    fn book(&mut self, request_id: u64) -> Result<()> {
+        if self.requests.insert(request_id, ReloadRequestState::Booked).is_some() {
+            return Err(anyhow!("reload request {request_id} was booked twice"));
+        }
+        Ok(())
+    }
+
+    fn publish(&mut self, request_id: u64) -> Result<()> {
+        match self.requests.get_mut(&request_id) {
+            Some(state @ ReloadRequestState::Booked) => {
+                *state = ReloadRequestState::Published;
+                Ok(())
+            }
+            Some(state) => Err(anyhow!(
+                "reload request {request_id} published from terminal/non-booked state {state:?}"
+            )),
+            None => Err(anyhow!("reload request {request_id} published before it was booked")),
+        }
+    }
+
+    fn reject(&mut self, request_id: u64) -> Result<()> {
+        match self.requests.get_mut(&request_id) {
+            Some(state @ ReloadRequestState::Booked) => {
+                *state = ReloadRequestState::Rejected;
+                Ok(())
+            }
+            Some(state) => Err(anyhow!(
+                "reload request {request_id} rejected from state {state:?}"
+            )),
+            None => Err(anyhow!("reload request {request_id} rejected before it was booked")),
+        }
+    }
+
+    fn complete(&mut self, request_id: u64, terminal: ReloadTerminal) -> Result<()> {
+        match self.requests.get_mut(&request_id) {
+            Some(state @ ReloadRequestState::Published) => {
+                *state = match terminal {
+                    ReloadTerminal::Applied => ReloadRequestState::Applied,
+                    ReloadTerminal::Failed => ReloadRequestState::Failed,
+                };
+                Ok(())
+            }
+            Some(state) => Err(anyhow!(
+                "reload request {request_id} completed before publication or twice (state {state:?})"
+            )),
+            None => Err(anyhow!("reload request {request_id} completed before it was booked")),
+        }
+    }
+
+    fn summary(&self) -> ReloadLedgerSummary {
+        let mut summary = ReloadLedgerSummary { requests: self.requests.len(), ..Default::default() };
+        for state in self.requests.values() {
+            match state {
+                ReloadRequestState::Booked | ReloadRequestState::Published => summary.pending += 1,
+                ReloadRequestState::Applied => summary.applied += 1,
+                ReloadRequestState::Rejected => summary.rejected += 1,
+                ReloadRequestState::Failed => summary.failed += 1,
+            }
+        }
+        summary
+    }
+
+    fn validate(&self) -> Result<ReloadLedgerSummary> {
+        let summary = self.summary();
+        let classified = summary.applied + summary.pending + summary.rejected + summary.failed;
+        if classified != summary.requests {
+            return Err(anyhow!(
+                "reload ledger conservation violated: requests={} classified={}"
+                , summary.requests, classified
+            ));
+        }
+        Ok(summary)
+    }
 }
 
 /// Apply one `reload_edit`: in-memory find/replace on the file's CURRENT
@@ -1031,7 +1793,7 @@ fn service_reload_edit(
     output: &str,
     pristine: &mut HashMap<String, String>,
     req: &ReloadEditReq,
-) -> Result<()> {
+) -> Result<crate::skull_backend::SkullReload> {
     let path = Path::new(&req.file);
     let current = stone
         .source_text(path)
@@ -1049,10 +1811,10 @@ fn service_reload_edit(
     let main_path = Path::new(output).join(rock_host::project::MAIN_LUA_FILENAME);
     let incremental_path = main_path.with_file_name("incremental.lua");
     match stone.apply_edit(path, &new_text, &main_path, &incremental_path)? {
-        crate::skull_backend::SkullReload::Incremental { bytes, reinferred, .. } => {
+        incremental @ crate::skull_backend::SkullReload::Incremental { bytes, reinferred, .. } => {
             log::info!(target: "SIM",
                 "reload_edit `{}`: overlay {bytes}B, {reinferred} bodies", req.file);
-            Ok(())
+            Ok(incremental)
         }
         other => Err(anyhow!(
             "must stay a body-only edit; `{}` routed to {other:?} \
@@ -1060,6 +1822,25 @@ fn service_reload_edit(
             req.file
         )),
     }
+}
+
+fn book_reload_request(ledger: &mut ReloadLedger, req: &ReloadEditReq) -> Result<u64> {
+    let request_id = req
+        .request_id
+        .ok_or_else(|| anyhow!("reload_edit omitted request_id"))?;
+    ledger.book(request_id)?;
+    Ok(request_id)
+}
+
+fn consume_reload_completion(
+    ledger: &mut ReloadLedger,
+    completion: ReloadCompletion,
+) -> Result<u64> {
+    let request_id = completion
+        .request_id
+        .ok_or_else(|| anyhow!("reload_terminal omitted request_id"))?;
+    ledger.complete(request_id, completion.terminal)?;
+    Ok(request_id)
 }
 
 /// Restore every reload_edit-touched file to its pre-sim text and remove the
@@ -1598,6 +2379,7 @@ fn run_worker(
     update_snapshots: bool,
     output: &str,
     recording: bool,
+    census_warmup_frames: Option<usize>,
     stone: Option<&mut crate::skull_backend::SkullStone>,
 ) -> Result<Vec<SimSummary>> {
     let Some(first) = parts.first() else {
@@ -1735,6 +2517,16 @@ fn run_worker(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
+    match census_warmup_frames {
+        Some(warmup) => {
+            cmd.env("STONE_SIM_ALLOCATION_CENSUS", "1")
+                .env("STONE_SIM_ALLOCATION_WARMUP_FRAMES", warmup.to_string());
+        }
+        None => {
+            cmd.env("STONE_SIM_ALLOCATION_CENSUS", "0");
+        }
+    }
+
     // Concise (quiet) runs: quiet the child's own logger to warn+ so the
     // `[sim]` verdict lines aren't buried under [STONE]/[MAG]/[ENV] INFO
     // noise. The `__SIM__` side channel is emitted directly, not through the
@@ -1748,6 +2540,7 @@ fn run_worker(
 
     let label = parts.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(",");
     let mut child = cmd.spawn()?;
+    let process_id = child.id();
     record_sim_lifecycle("proc_start", &label);
     for p in parts {
         record_sim_lifecycle("start", &p.name);
@@ -1770,10 +2563,15 @@ fn run_worker(
     // Mid-sim reload_edit ops flow stderr-thread -> wait-loop, which owns the
     // (single-threaded) SkullStone and services them between try_wait polls.
     let (reload_tx, reload_rx) = mpsc::channel::<ReloadEditReq>();
+    // The production watcher sends one terminal event after it has consumed
+    // the published overlay. The parent only accounts for it; it never
+    // fabricates publication or completion for a test.
+    let (reload_completion_tx, reload_completion_rx) = mpsc::channel::<ReloadCompletion>();
 
     let stderr_thread = {
         let lines = Arc::clone(&stderr_lines);
         let anchor = Arc::clone(&deadline_anchor);
+        let reload_completion_tx = reload_completion_tx;
         let mut deadline_guard = DeadlineGuard::for_parts(parts);
         // Buffered runs must not write anything from this thread: several
         // children are live, so a direct write here interleaves into the middle
@@ -1798,11 +2596,27 @@ fn run_worker(
                         // the edit can't apply, which the sim's own wait_for
                         // timeout (or the post-exit drain) surfaces.
                         let _ = reload_tx.send(ReloadEditReq {
+                            request_id: extract_raw_field(rest, "request_id")
+                                .and_then(|id| id.parse::<u64>().ok()),
                             file: extract_str_field(rest, "file").unwrap_or_default(),
                             find: extract_str_field(rest, "find").unwrap_or_default(),
                             replace: extract_str_field(rest, "replace").unwrap_or_default(),
                             site: extract_str_field(rest, "site").unwrap_or_default(),
                         });
+                    }
+                    if op.as_deref() == Some("reload_terminal") {
+                        let terminal = match extract_str_field(rest, "status").as_deref() {
+                            Some("applied") => Some(ReloadTerminal::Applied),
+                            Some("failed") => Some(ReloadTerminal::Failed),
+                            _ => None,
+                        };
+                        if let Some(terminal) = terminal {
+                            let _ = reload_completion_tx.send(ReloadCompletion {
+                                request_id: extract_raw_field(rest, "request_id")
+                                    .and_then(|id| id.parse::<u64>().ok()),
+                                terminal,
+                            });
+                        }
                     }
                     if !quiet {
                         print_progress(rest);
@@ -1841,8 +2655,20 @@ fn run_worker(
     let timeout = Duration::from_secs(sim_timeout_secs());
     let mut pristine: HashMap<String, String> = HashMap::new();
     let mut reload_errors: Vec<SiteMessage> = Vec::new();
+    let mut reload_ledger = ReloadLedger::default();
     let mut stone = stone;
     let (status, timed_out) = loop {
+        while let Ok(completion) = reload_completion_rx.try_recv() {
+            let failed = completion.terminal == ReloadTerminal::Failed;
+            if let Err(e) = consume_reload_completion(&mut reload_ledger, completion) {
+                reload_errors.push(SiteMessage { message: format!("reload completion: {e}"), site: String::new() });
+            } else if failed {
+                reload_errors.push(SiteMessage {
+                    message: "reload watcher reported failed publication; last-good artifact remains active".into(),
+                    site: String::new(),
+                });
+            }
+        }
         match child.try_wait()? {
             Some(s) => break (s, false),
             None => {
@@ -1858,6 +2684,16 @@ fn run_worker(
                 // keep the poll cadence with a plain sleep.
                 match reload_rx.recv_timeout(Duration::from_millis(50)) {
                     Ok(req) => {
+                        let request_id = match book_reload_request(&mut reload_ledger, &req) {
+                            Ok(id) => id,
+                            Err(e) => {
+                                reload_errors.push(SiteMessage {
+                                    message: format!("reload request: {e}"),
+                                    site: compress_site(&req.site),
+                                });
+                                continue;
+                            }
+                        };
                         // An ordinary (non-reload) sim has no session to edit.
                         // Servicing it here would mutate build state shared with
                         // every other child, so refuse loudly rather than
@@ -1870,7 +2706,26 @@ fn run_worker(
                                  reload lane with `@sim_env(\"STONE_HOT_RELOAD\", \"1\")`"
                             )),
                         };
-                        if let Err(e) = serviced {
+                        match serviced {
+                            Ok(crate::skull_backend::SkullReload::Incremental { .. }) => {
+                                if let Err(e) = reload_ledger.publish(request_id) {
+                                    reload_errors.push(SiteMessage {
+                                        message: format!("reload publication: {e}"),
+                                        site: compress_site(&req.site),
+                                    });
+                                }
+                            }
+                            Ok(other) => {
+                                let e = anyhow!("reload_edit returned non-incremental result {other:?}");
+                                let _ = reload_ledger.reject(request_id);
+                                let site = compress_site(&req.site);
+                                reload_errors.push(SiteMessage {
+                                    message: format!("reload_edit: {e}"),
+                                    site: site.clone(),
+                                });
+                            }
+                            Err(e) => {
+                                let _ = reload_ledger.reject(request_id);
                             let site = compress_site(&req.site);
                             // Stream now for a single run; buffered callers emit
                             // the retained error under their record lock.
@@ -1885,6 +2740,18 @@ fn run_worker(
                                 message: format!("reload_edit: {e}"),
                                 site,
                             });
+                            }
+                        }
+                        while let Ok(completion) = reload_completion_rx.try_recv() {
+                            let failed = completion.terminal == ReloadTerminal::Failed;
+                            if let Err(e) = consume_reload_completion(&mut reload_ledger, completion) {
+                                reload_errors.push(SiteMessage { message: format!("reload completion: {e}"), site: String::new() });
+                            } else if failed {
+                                reload_errors.push(SiteMessage {
+                                    message: "reload watcher reported failed publication; last-good artifact remains active".into(),
+                                    site: String::new(),
+                                });
+                            }
                         }
                     }
                     Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -1899,13 +2766,22 @@ fn run_worker(
     // emitted reload_edit and stopped without waiting for the effect. That's
     // a sim-author bug; dropping it silently would hide the mis-ordering.
     while let Ok(req) = reload_rx.try_recv() {
-        reload_errors.push(SiteMessage {
-            message: format!(
-                "reload_edit for `{}` arrived after the child exited (emit it before a wait_for on its effect)",
-                req.file
-            ),
-            site: compress_site(&req.site),
-        });
+        match book_reload_request(&mut reload_ledger, &req) {
+            Ok(request_id) => {
+                let _ = reload_ledger.reject(request_id);
+                reload_errors.push(SiteMessage {
+                    message: format!(
+                        "reload_edit for `{}` arrived after the child exited (emit it before a wait_for on its effect)",
+                        req.file
+                    ),
+                    site: compress_site(&req.site),
+                });
+            }
+            Err(e) => reload_errors.push(SiteMessage {
+                message: format!("reload request after child exit: {e}"),
+                site: compress_site(&req.site),
+            }),
+        }
     }
 
     // Surface reader-thread panics: a silent JoinError here meant a panic
@@ -1927,6 +2803,35 @@ fn run_worker(
         Err(panic) => reader_diagnostics.push(format!(
             "rock sim `{label}`: stdout reader thread panicked; game stdout may be incomplete: {panic:?}"
         )),
+    }
+    while let Ok(completion) = reload_completion_rx.try_recv() {
+        let failed = completion.terminal == ReloadTerminal::Failed;
+        if let Err(e) = consume_reload_completion(&mut reload_ledger, completion) {
+            reload_errors.push(SiteMessage { message: format!("reload completion: {e}"), site: String::new() });
+        } else if failed {
+            reload_errors.push(SiteMessage {
+                message: "reload watcher reported failed publication; last-good artifact remains active".into(),
+                site: String::new(),
+            });
+        }
+    }
+    if let Err(e) = reload_ledger.validate() {
+        reload_errors.push(SiteMessage { message: format!("reload ledger: {e}"), site: String::new() });
+    }
+    let reload_summary = reload_ledger.summary();
+    if reload_summary.requests > 0 && reload_summary.pending > 0 {
+        reload_errors.push(SiteMessage {
+            message: format!(
+                "reload completion ledger has {} pending request(s): requests={} applied={} pending={} rejected={} failed={}",
+                reload_summary.pending,
+                reload_summary.requests,
+                reload_summary.applied,
+                reload_summary.pending,
+                reload_summary.rejected,
+                reload_summary.failed,
+            ),
+            site: String::new(),
+        });
     }
     for p in parts {
         record_sim_lifecycle("end", &p.name);
@@ -1952,6 +2857,7 @@ fn run_worker(
     let mut summaries = Vec::with_capacity(parts.len());
     for (i, (part, stream)) in parts.iter().zip(streams.iter()).enumerate() {
         let mut summary = SimSummary::from_stderr(&stream.sim.join("\n"));
+        summary.process_id = Some(process_id);
         if !stream.started {
             summary.never_started = true;
             summary.errors.push(SiteMessage {
@@ -1979,6 +2885,9 @@ fn run_worker(
         }
         if i == blamed {
             summary.errors.extend(std::mem::take(&mut reload_errors));
+            if reload_summary.requests > 0 {
+                summary.reload_ledger = Some(reload_summary);
+            }
             summary.timed_out = timed_out;
             if !status.success() {
                 summary.process_failure_code = Some(status.code().unwrap_or(-1));
@@ -2079,6 +2988,7 @@ fn run_one_sim(
     output: &str,
     env_pairs: &[(String, String)],
     stone: Option<&mut crate::skull_backend::SkullStone>,
+    census_warmup_frames: Option<usize>,
 ) -> Result<SimSummary> {
     let part = WorkerPart {
         name: sim_part.to_string(),
@@ -2096,6 +3006,7 @@ fn run_one_sim(
         // Both callers build their `$OUT` from a non-recording `SimArtifacts`,
         // so no record from here is ever compared.
         false,
+        census_warmup_frames,
         stone,
     )?;
     Ok(summaries.remove(0))
@@ -2163,7 +3074,7 @@ fn run_entries(
     // Not quiet, but buffered: nothing is written live (several entries share
     // one stream), and every diagnostic is retained into its record instead.
     let summaries = match grouping {
-        Grouping::Shared => run_worker(project, &parts, false, true, false, output, true, None)?,
+        Grouping::Shared => run_worker(project, &parts, false, true, false, output, true, None, None)?,
         Grouping::PerPart => {
             let mut out = Vec::with_capacity(parts.len());
             for part in &parts {
@@ -2175,6 +3086,7 @@ fn run_entries(
                     false,
                     output,
                     true,
+                    None,
                     None,
                 )?);
             }
@@ -2265,7 +3177,7 @@ fn run_specs_recovering(
             );
         }
         let summaries =
-            run_worker(project, &parts, false, true, update_snapshots, output, record_manifest, None)?;
+            run_worker(project, &parts, false, true, update_snapshots, output, record_manifest, None, None)?;
 
         // Reassemble per spec and decide how far this round got. Specs whose
         // parts all started are final; the first spec with an unstarted part is
@@ -3198,6 +4110,8 @@ struct SimSummary {
     expects_fail: Vec<SiteMessage>,
     errors: Vec<SiteMessage>,
     saw_stop: bool,
+    process_id: Option<u32>,
+    allocation_census: Option<AllocationCensus>,
     snapshots: Vec<SnapshotOp>,
     image_snapshots: Vec<ImageSnapshotOp>,
     video_assertions: Vec<VideoAssertion>,
@@ -3224,6 +4138,9 @@ struct SimSummary {
     /// reruns the entry ALONE and reports the reason, so the record that
     /// survives is the fresh-process one.
     worker_ineligible: Option<String>,
+    /// Parent-side conservation evidence for the real watcher/publication
+    /// completion path. None means this entry issued no reload request.
+    reload_ledger: Option<ReloadLedgerSummary>,
 }
 
 impl SimSummary {
@@ -3235,6 +4152,10 @@ impl SimSummary {
         // didn't reach stop_sim, surface it. Earlier parts in a
         // multi-start chain are expected to stop and respawn.
         self.saw_stop = other.saw_stop;
+        self.process_id = other.process_id.or(self.process_id);
+        if other.allocation_census.is_some() {
+            self.allocation_census = other.allocation_census;
+        }
         self.snapshots.extend(other.snapshots);
         self.image_snapshots.extend(other.image_snapshots);
         self.video_assertions.extend(other.video_assertions);
@@ -3250,6 +4171,14 @@ impl SimSummary {
         self.never_started = self.never_started || other.never_started;
         if other.worker_ineligible.is_some() {
             self.worker_ineligible = other.worker_ineligible;
+        }
+        if let Some(other) = other.reload_ledger {
+            let current = self.reload_ledger.get_or_insert_default();
+            current.requests += other.requests;
+            current.applied += other.applied;
+            current.pending += other.pending;
+            current.rejected += other.rejected;
+            current.failed += other.failed;
         }
     }
 }
@@ -3311,6 +4240,19 @@ impl SimSummary {
                     s.errors.push(SiteMessage { message, site });
                 }
                 "stop" => s.saw_stop = true,
+                "allocation_census" => match AllocationCensus::from_json(rest) {
+                    Ok(census) if s.allocation_census.is_none() => {
+                        s.allocation_census = Some(census)
+                    }
+                    Ok(_) => s.errors.push(SiteMessage {
+                        message: "duplicate allocation census result".to_string(),
+                        site,
+                    }),
+                    Err(e) => s.errors.push(SiteMessage {
+                        message: format!("invalid allocation census result: {e}"),
+                        site,
+                    }),
+                },
                 "worker_ineligible" => {
                     s.worker_ineligible =
                         Some(extract_str_field(rest, "message").unwrap_or_default());
@@ -3400,6 +4342,12 @@ impl SimSummary {
             } else if !streamed {
                 eprintln!("[sim] FAIL [{}]: {}", f.site, f.message);
             }
+        }
+        if let Some(ledger) = self.reload_ledger {
+            eprintln!(
+                "[sim] reload ledger: requests={} applied={} pending={} rejected={} failed={}",
+                ledger.requests, ledger.applied, ledger.pending, ledger.rejected, ledger.failed
+            );
         }
         let total = self.expects_pass.len() + self.expects_fail.len();
         // The PRINTED verdict must come from the same predicate as the real
@@ -4480,6 +5428,73 @@ __SIM__ {"op":"stop","site":"foo.rock:5"}
     }
 
     #[test]
+    fn summary_parses_allocation_census_and_preserves_frame_window() {
+        let stderr = "__SIM__ {\"op\":\"allocation_census\",\"build_sha\":\"abc123\",\"rendering_enabled\":false,\"warmup_frames_requested\":2,\"warmup_frames\":2,\"frame_count\":6,\"measured_frames\":4,\"initialization_gross_kb\":3.5,\"outside_frame_gross_kb\":1.25,\"warmup_gross_kb\":8.0,\"measured_gross_kb\":24.0,\"total_gross_kb\":36.75,\"measured_allocator_calls\":40,\"measured_allocation_calls\":32,\"measured_reallocation_calls\":8,\"stop_sim_reached\":true,\"measurement_complete\":true}\n__SIM__ {\"op\":\"stop\"}";
+        let summary = SimSummary::from_stderr(stderr);
+        let census = summary.allocation_census.as_ref().expect("census result");
+        assert_eq!(census.build_sha, "abc123");
+        assert!(!census.rendering_enabled);
+        assert_eq!(census.frame_count, 6);
+        assert_eq!(census.measured_frames, 4);
+        assert_eq!(census.measured_allocation_calls, 32);
+
+        let (record, rank_values) = allocation_census_record("fixture", &summary);
+        assert_eq!(record["status"], "PASS");
+        assert_eq!(record["rendering_skipped"], true);
+        assert_eq!(record["measured_frames"], 4);
+        assert_eq!(record["gross_kb_per_frame"], 6.0);
+        assert_eq!(record["allocation_calls_per_frame"], 8.0);
+        assert_eq!(rank_values, Some((6.0, 8.0)));
+    }
+
+    #[test]
+    fn census_missing_or_incomplete_result_is_not_a_zero_success() {
+        let mut missing = SimSummary::default();
+        missing.saw_stop = true;
+        let (record, rank_values) = allocation_census_record("missing", &missing);
+        assert_eq!(census_status(&missing), "no-verdict");
+        assert_eq!(record["status"], "no-verdict");
+        assert_eq!(record["measured_frames"], 0);
+        assert!(rank_values.is_none());
+
+        let incomplete = AllocationCensus {
+            build_sha: "abc123".into(),
+            rendering_enabled: false,
+            warmup_frames_requested: 2,
+            warmup_frames: 2,
+            frame_count: 2,
+            measured_frames: 0,
+            initialization_gross_kb: 0.0,
+            outside_frame_gross_kb: 0.0,
+            warmup_gross_kb: 1.0,
+            measured_gross_kb: 0.0,
+            total_gross_kb: 1.0,
+            measured_allocator_calls: 0,
+            measured_allocation_calls: 0,
+            measured_reallocation_calls: 0,
+            stop_sim_reached: false,
+            measurement_complete: false,
+        };
+        let incomplete = SimSummary {
+            saw_stop: true,
+            allocation_census: Some(incomplete),
+            ..SimSummary::default()
+        };
+        assert_eq!(census_status(&incomplete), "no-verdict");
+        assert!(allocation_census_record("incomplete", &incomplete).1.is_none());
+    }
+
+    #[test]
+    fn census_rankings_use_the_requested_per_frame_metric() {
+        let rows = vec![
+            ("gross".to_string(), "PASS", 20.0, 1.0, 4),
+            ("calls".to_string(), "PASS", 10.0, 3.0, 4),
+        ];
+        assert_eq!(census_rankings(&rows, true)[0]["sim_name"], "gross");
+        assert_eq!(census_rankings(&rows, false)[0]["sim_name"], "calls");
+    }
+
+    #[test]
     fn summary_compresses_site_to_stem_and_line() {
         let stderr = r#"__SIM__ {"op":"expect_fail","message":"x","site":"/work/repo/mag/tests/sims/bandage.rock:29"}"#;
         let s = SimSummary::from_stderr(stderr);
@@ -4516,5 +5531,60 @@ __SIM__ {"op":"stop","site":"foo.rock:5"}
         let src = "co fn smoke_alt() -> Coroutine<Wait> {\n  smoke()\n}\n";
         assert!(!src_declares_sim(src, "smoke"));
         assert!(src_declares_sim(src, "smoke_alt"));
+    }
+
+    #[test]
+    fn reload_completion_is_terminal_after_publication() {
+        let mut ledger = ReloadLedger::default();
+        ledger.book(7).expect("request books once");
+        ledger.publish(7).expect("artifact publishes once");
+        ledger
+            .complete(7, ReloadTerminal::Applied)
+            .expect("watcher completion follows publication");
+        assert_eq!(ledger.summary().requests, 1);
+        assert_eq!(ledger.summary().applied, 1);
+        assert_eq!(ledger.summary().pending, 0);
+        assert_eq!(ledger.summary().rejected, 0);
+        assert_eq!(ledger.summary().failed, 0);
+    }
+
+    #[test]
+    fn reload_ledger_distinguishes_booked_and_published_pending() {
+        let mut ledger = ReloadLedger::default();
+        ledger.book(1).unwrap();
+        ledger.book(2).unwrap();
+        ledger.publish(2).unwrap();
+        assert_eq!(ledger.summary().requests, 2);
+        assert_eq!(ledger.summary().pending, 2);
+        assert_eq!(ledger.validate().unwrap().pending, 2);
+    }
+
+    #[test]
+    fn reload_ledger_accounts_rejection_and_failed_publication() {
+        let mut ledger = ReloadLedger::default();
+        ledger.book(1).unwrap();
+        ledger.reject(1).unwrap();
+        ledger.book(2).unwrap();
+        ledger.publish(2).unwrap();
+        ledger.complete(2, ReloadTerminal::Failed).unwrap();
+        assert_eq!(
+            ledger.validate().unwrap(),
+            ReloadLedgerSummary { requests: 2, applied: 0, pending: 0, rejected: 1, failed: 1 }
+        );
+    }
+
+    #[test]
+    fn reload_ledger_rejects_drop_duplicate_and_early_completion() {
+        let mut dropped = ReloadLedger::default();
+        dropped.book(1).unwrap();
+        assert_eq!(dropped.summary().pending, 1, "a dropped request cannot disappear from accounting");
+
+        let mut duplicate = ReloadLedger::default();
+        duplicate.book(1).unwrap();
+        assert!(duplicate.complete(1, ReloadTerminal::Applied).is_err());
+        duplicate.publish(1).unwrap();
+        assert!(duplicate.publish(1).is_err());
+        duplicate.complete(1, ReloadTerminal::Applied).unwrap();
+        assert!(duplicate.complete(1, ReloadTerminal::Applied).is_err());
     }
 }

@@ -10,6 +10,21 @@ fn emit_program(src: &str) -> String {
     skull::mir_emit::emit_workspace_mir(&ws, mid).expect("emit").lua
 }
 
+fn global_session_slot(lua: &str, name: &str) -> u32 {
+    let marker = format!("identity=\"global:<t>::{name}\"");
+    lua.split(&marker)
+        .nth(1)
+        .unwrap_or_else(|| panic!("missing StateSchema entry for {name}"))
+        .split("session_keys={")
+        .nth(1)
+        .expect("StateSchema entry has Session keys")
+        .split(|c| c == ',' || c == '}')
+        .next()
+        .expect("StateSchema entry has a first Session key")
+        .parse()
+        .expect("Lua global Session slot is numeric")
+}
+
 /// Run a Lua program under luajit with a wall-clock timeout; returns stdout
 /// (panicking with stderr on a non-zero exit so a runtime error is visible).
 fn run_luajit(prog: &str) -> String {
@@ -50,7 +65,8 @@ fn const_reinits_on_hot_reload_but_session_global_is_preserved() {
         "const FOO must re-init unconditionally on reload (no HOT_RELOAD guard); got: {foo}"
     );
     // mutable global: its Session slot guard preserves the live value.
-    let bar = line("__rock_state_set(\"global:<t>::bar::value\"");
+    let bar_slot = global_session_slot(&lua, "bar");
+    let bar = line(&format!("__rock_state_set({bar_slot}"));
     assert!(
         bar.contains("if not __rock_state_has"),
         "mutable global bar must guard its Session slot; got: {bar}"
@@ -65,15 +81,16 @@ fn const_reinits_on_hot_reload_but_session_global_is_preserved() {
 fn const_value_edit_takes_effect_on_reload_runtime() {
     let before = emit_program("const FOO: int = 5\nglobal bar: int = 7\nfn main() {}\n");
     let after = emit_program("const FOO: int = 10\nglobal bar: int = 7\nfn main() {}\n");
+    let bar_slot = global_session_slot(&before, "bar");
 
     let script = format!(
         "-- initial cold load\n_G.HOT_RELOAD = false\n{before}\n\
          -- gameplay mutates the live mutable global's Session slot\n\
-         __rock_state_set(\"global:<t>::bar::value\", 99)\n\
+         __rock_state_set({bar_slot}, 99)\n\
          -- hot reload: re-dofile the edited program\n_G.HOT_RELOAD = true\n{after}\n\
          -- verdict\n\
-         if FOO == 10 and __rock_state_get(\"global:<t>::bar::value\") == 99 then print(\"PASS\")\n\
-         else print(\"FAIL FOO=\"..tostring(FOO)..\" bar=\"..tostring(__rock_state_get(\"global:<t>::bar::value\"))); os.exit(1) end\n"
+         if FOO == 10 and __rock_state_get({bar_slot}) == 99 then print(\"PASS\")\n\
+         else print(\"FAIL FOO=\"..tostring(FOO)..\" bar=\"..tostring(__rock_state_get({bar_slot}))); os.exit(1) end\n"
     );
 
     let out = run_luajit(&script);

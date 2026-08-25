@@ -56,6 +56,7 @@ mod lint_cmd;
 pub mod lint_union;
 pub mod lint_pass;
 pub mod ablation_report;
+mod allocation_join;
 mod mono_manifest;
 mod monoty_census;
 mod lsp_survey;
@@ -190,6 +191,11 @@ pub enum CliCommand {
     /// report instance/edge counts, the edge-kind histogram and the recursion
     /// census. Changes no emission. See `mono_manifest::do_mono_manifest`.
     MonoManifest,
+    /// `rock allocation-join <manifest> <activation> [route] [Lua] [JIT trace]` -- join one
+    /// exact-emission manifest to the same artifact's bounded runtime counters,
+    /// filter by `all|update|draw|outside`, rank executions per frame, and
+    /// optionally classify observed LuaJIT allocation IR as sunk/retained.
+    AllocationJoin,
     /// `rock iter-lsp <project> [--iters N --warmup W]` -- tight-loop profiler
     /// for the per-edit LSP query path on the bone backend (the work the editor
     /// does per keystroke through `BoneWorkspace`): `update` (didChange) +
@@ -302,6 +308,7 @@ impl clap::ValueEnum for CliCommand {
             Self::IterIncremental,
             Self::MonoTyCensus,
             Self::MonoManifest,
+            Self::AllocationJoin,
             Self::IterLsp,
             Self::LspSurvey,
             Self::IterReinfer,
@@ -353,6 +360,7 @@ impl CliCommand {
             Self::IterIncremental => "iter-incremental",
             Self::MonoTyCensus => "mono-ty-census",
             Self::MonoManifest => "mono-manifest",
+            Self::AllocationJoin => "allocation-join",
             Self::IterLsp => "iter-lsp",
             Self::LspSurvey => "lsp-survey",
             Self::IterReinfer => "iter-reinfer",
@@ -496,6 +504,12 @@ pub struct Args {
     pub command: CliCommand,
     pub files: Vec<String>,
     pub output: Option<String>,
+    /// For `rock sim`: opt into a complete sim-wide gross Lua allocation
+    /// census and write its machine-readable artifact to this path.
+    pub allocation_census: Option<String>,
+    /// For `rock sim`: instrument compiler-known allocation sites across
+    /// isolated sims and write frame-aware joined reports to this directory.
+    pub allocation_sites: Option<String>,
     /// For `rock shader` two-root pipeline form: GLSL profile (`330core` |
     /// `300es`). Default `330core`. See `skull_backend::skull_shader`.
     pub profile: Option<String>,
@@ -662,6 +676,12 @@ impl Args {
             )
             .arg(Arg::new("files").num_args(0..))
             .arg(Arg::new("output").long("output").alias("out"))
+            .arg(Arg::new("allocation-census").long("allocation-census")
+                .value_name("PATH")
+                .help("For `rock sim`: opt into a sim-wide gross Lua allocation census and write a complete JSON artifact to PATH (discovery evidence only)."))
+            .arg(Arg::new("allocation-sites").long("allocation-sites")
+                .value_name("DIR")
+                .help("For `rock sim`: instrument compiler-known allocation sites in isolated sims and write frame-aware joined reports to DIR."))
             .arg(Arg::new("profile").long("profile"))
             .arg(Arg::new("no-stdlib").long("no-stdlib").action(ArgAction::SetTrue)
                 .help("Compile without the standard library"))
@@ -798,6 +818,8 @@ impl Args {
             command,
             files: many_str("files"),
             output: m.get_one::<String>("output").cloned(),
+            allocation_census: m.get_one::<String>("allocation-census").cloned(),
+            allocation_sites: m.get_one::<String>("allocation-sites").cloned(),
             profile: m.get_one::<String>("profile").cloned(),
             no_stdlib: m.get_flag("no-stdlib"),
             stdout: m.get_flag("stdout"),

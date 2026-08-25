@@ -168,6 +168,25 @@ fn a_predecessors_global_does_not_reach_the_next_entry() {
 }
 
 #[test]
+fn a_predecessors_live_scene_does_not_reach_the_next_entry() {
+    let (isolated, worker) = differential(&["b0_scene_seed"], "b0_scene_probe");
+    let c = compare(&isolated, &worker);
+    assert_equivalent("b0_scene_probe", &c);
+
+    for (label, record) in [("isolated", &isolated), ("worker", &worker)] {
+        assert_eq!(record.verdict(), "PASS", "{label} Scene probe failed: {record:?}");
+        assert!(
+            record
+                .expects_pass
+                .iter()
+                .any(|m| m.message.contains("empty boot Scene registry")),
+            "{label}: the Scene registry assertion never ran: {:?}",
+            record.expects_pass
+        );
+    }
+}
+
+#[test]
 fn state_image_worker_registries_stay_bounded_across_repeated_entries() {
     let entries = vec!["t1a_worker_registries_stay_bounded".to_string(); 12];
     let records = run_worker_suite(Backend::Skull, "testbed", &entries)
@@ -180,6 +199,24 @@ fn state_image_worker_registries_stay_bounded_across_repeated_entries() {
         assert_eq!(record.verdict(), "PASS", "worker registry fixture failed: {record:?}");
         assert!(record.errors.is_empty(), "worker registry fixture emitted errors: {record:?}");
         assert_eq!(record.expects_pass.len(), 2, "both registry populations were asserted");
+    }
+}
+
+#[test]
+fn repeated_bootimage_entries_prove_immutable_owner_conservation() {
+    let entries = vec!["t1a_worker_registries_stay_bounded".to_string(); 8];
+    let records = run_worker_suite(Backend::Skull, "testbed", &entries)
+        .expect("the repeated BootImage ownership queue must run");
+    assert_eq!(records.len(), entries.len(), "the worker returned one record per entry");
+    let crossed = records.iter().filter(|(_, crossed)| *crossed).count();
+    assert_eq!(crossed, 7, "every successor must actually follow a predecessor");
+    assert!(crossed > 0, "the conservation arm needs a nonzero boundary population");
+    for (record, _) in records {
+        assert_eq!(record.verdict(), "PASS", "BootImage ownership fixture failed: {record:?}");
+        assert!(
+            record.expects_pass.iter().any(|m| m.message.contains("BootImage owner conservation")),
+            "the fixture must assert immutable-image ownership and fresh-session ownership, not just finish: {record:?}"
+        );
     }
 }
 

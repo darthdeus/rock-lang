@@ -4,6 +4,9 @@
 
 mod common;
 
+#[path = "allocation_report.rs"]
+mod allocation_report;
+
 #[path = "ablation_totality.rs"]
 mod ablation_totality;
 #[path = "arena_column_oracle.rs"]
@@ -20,6 +23,10 @@ mod capture_free_hoist;
 mod closure_snapshot;
 #[path = "code_identity_artifact.rs"]
 mod code_identity_artifact;
+#[path = "artifact_binding_plan.rs"]
+mod artifact_binding_plan;
+#[path = "artifact_fingerprint.rs"]
+mod artifact_fingerprint;
 #[path = "coalesce_value_struct_literal_field.rs"]
 mod coalesce_value_struct_literal_field;
 #[path = "concrete_body.rs"]
@@ -42,6 +49,8 @@ mod expansion_admission;
 mod concrete_expansion;
 #[path = "enum_cdata.rs"]
 mod enum_cdata;
+#[path = "enum_flat_equality.rs"]
+mod enum_flat_equality;
 #[path = "enum_flat_field_spread.rs"]
 mod enum_flat_field_spread;
 #[path = "enum_payload_sroa.rs"]
@@ -70,6 +79,8 @@ mod generic_coroutine_column_param;
 mod hole_runtime_error;
 #[path = "incremental_emit.rs"]
 mod incremental_emit;
+#[path = "lua_definition_scopes.rs"]
+mod lua_definition_scopes;
 #[path = "opaque_declared_type_reach.rs"]
 mod opaque_declared_type_reach;
 

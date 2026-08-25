@@ -228,6 +228,46 @@ fn main() {}
 }
 
 #[test]
+fn a_changed_caller_can_restage_an_unchanged_callback() {
+    let v1 = r#"
+fn apply<T>(value: T, callback: fn(T) -> T) -> T { return callback(value) }
+fn unchanged(value: int) -> int { return value }
+fn caller() -> int { return apply(1, unchanged) }
+"#;
+    let v2 = v1.replace("apply(1, unchanged)", "apply(2, unchanged)");
+    let ws1 = ws_of(v1);
+    let mid = skull::user_module_id(&ws1).unwrap();
+    let (full, mut cache) = emit_full(&ws1, mid).expect("emit_full v1");
+    let callback = full
+        .code_artifact
+        .entries
+        .values()
+        .find(|entry| {
+            entry.escaping
+                && entry
+                    .body_name
+                    .is_some_and(|name| name.as_str().starts_with("unchanged"))
+        })
+        .expect("fixture must publish the unchanged callback");
+    assert!(callback.body_name.is_some(), "fresh emission must realize the callback body");
+
+    let ws2 = ws_of(&v2);
+    let overlay = emit_overlay_result(&ws2, &mut cache, &[body_id(&ws2, "caller")])
+        .expect("an unchanged callback referenced by the changed caller must retain its body");
+    let staged: Vec<_> = overlay
+        .lua
+        .lines()
+        .filter(|line| line.contains("__rock_code_slot_stage(") && line.contains("unchanged"))
+        .collect();
+    assert_eq!(staged.len(), 1, "the changed caller must stage its unchanged callback: {staged:?}");
+    assert!(
+        staged[0].contains("unchanged_int_ret_int"),
+        "the callback stage must point at the body already loaded from the full artifact: {}",
+        staged[0]
+    );
+}
+
+#[test]
 fn an_unchanged_state_shape_uses_incremental_schema_validation() {
     let v1 = "@lifecycle(phase=\"update\", owner=\"session\")\nfn first() {}\n";
     let v2 = v1.replace("first", "second");

@@ -3406,7 +3406,7 @@ fn assemble_program_core(
         )));
     }
     let lifecycle_plan = skull_mir::lifecycle::attach_artifact(lifecycle_skeleton, &code_artifact)?;
-    let has_definition_plan = definition_plan.census.declarations > 0;
+    let has_definition_plan = !definition_plan.catalogs.is_empty();
     let code_slot_stage = code_slot_registration_js(ws, scx.interner(), &code_artifact)?;
     out.push_str(&code_slot_stage);
     if (has_definition_plan || lifecycle_plan.census.declarations > 0)
@@ -3414,7 +3414,9 @@ fn assemble_program_core(
     {
         out.push_str("__rock_code_slot_begin();\n");
     }
-    out.push_str(&definition_plan_stage_js(ws, scx.interner(), &definition_plan)?);
+    let definition_stage = definition_plan_stage_js(ws, scx.interner(), &definition_plan)?;
+    out.push_str(&definition_stage);
+    stable.push_str(&definition_stage);
     out.push_str(&lifecycle_plan_stage_js(ws, scx.interner(), &lifecycle_plan)?);
     // 5. decorator applications (AFTER inits: a deco body pushes into a ginit-
     //    initialized registry -- D4).
@@ -3444,6 +3446,8 @@ fn assemble_program_core(
         &code_artifact,
         &all_statics,
     )
+    .map_err(|error| err(error.to_string()))?
+    .with_lifecycle_plan(&lifecycle_plan)
     .map_err(|error| err(error.to_string()))?;
     let program = format!(
         "if (typeof __rock_state_transaction_begin !== \"undefined\") __rock_state_transaction_begin();\n__rock_state_publish_schema({:?});\n{}{}",
@@ -3532,8 +3536,36 @@ fn state_schema_js(
         out.push_str("},");
     }
     let census = image_plan.census();
+    let scene = image_plan.scene();
     out.push_str(&format!(
-        "],census:{{examined:{},assigned:{},duplicates:{},unknown:{},semantic_session:{},program_artifact:{},host_projection:{},runner_diagnostic:{},unsupported:{}}}}};\n__rock_state_install_global_bridge();\n",
+        "],scene:{{scene_registry_identity:{},arena_registry_identity:{},scene_root_types:[{}],arena_identity_fields:[{}],census:{{examined:{},assigned:{},scene_registry:{},arena_registry:{},scene_root_types:{},arena_identity_fields:{},scene_lifecycle_entries:{}}}}},census:{{examined:{},assigned:{},duplicates:{},unknown:{},semantic_session:{},program_artifact:{},host_projection:{},runner_diagnostic:{},unsupported:{}}}}};\n__rock_state_install_global_bridge();\n",
+        scene
+            .scene_registry_identity
+            .as_deref()
+            .map_or_else(|| Ok("null".to_string()), js_string_lit)?,
+        scene
+            .arena_registry_identity
+            .as_deref()
+            .map_or_else(|| Ok("null".to_string()), js_string_lit)?,
+        scene
+            .scene_root_types
+            .iter()
+            .map(|value| js_string_lit(value))
+            .collect::<Result<Vec<_>, _>>()?
+            .join(","),
+        scene
+            .arena_identity_fields
+            .iter()
+            .map(|value| js_string_lit(value))
+            .collect::<Result<Vec<_>, _>>()?
+            .join(","),
+        scene.census.examined,
+        scene.census.assigned,
+        scene.census.scene_registry,
+        scene.census.arena_registry,
+        scene.census.scene_root_types,
+        scene.census.arena_identity_fields,
+        scene.scene_lifecycle_entries,
         census.examined,
         census.assigned,
         census.duplicates,
@@ -3913,7 +3945,7 @@ pub fn emit_overlay_with_span_edits(
     if cache
         .build
         .lifecycle_plan
-        .wire_structure_changed(&current.lifecycle_plan)
+        .structure_changed(&current.lifecycle_plan)
     {
         return Ok(JsReload::FullRequired);
     }
@@ -5087,20 +5119,40 @@ fn definition_plan_stage_js(
     interner: &skull_mir::monoty::MonoInterner,
     plan: &skull_mir::definition::DefinitionPlan,
 ) -> Result<String, CompilerError> {
-    if plan.census.declarations == 0 {
+    if plan.catalogs.is_empty() {
         return Ok(String::new());
     }
-    let mut out = String::from("__rock_definition_plan_stage({\n");
-    let mut catalogs: BTreeMap<ustr::Ustr, Vec<_>> = BTreeMap::new();
+    let mut out = String::new();
+    let mut entries_by_catalog: BTreeMap<ustr::Ustr, Vec<_>> = BTreeMap::new();
     for entry in &plan.entries {
-        catalogs.entry(entry.catalog).or_default().push(entry);
+        entries_by_catalog.entry(entry.catalog).or_default().push(entry);
     }
-    for (catalog, entries) in catalogs {
+    for catalog_plan in &plan.catalogs {
+        if let Some(accessor) = catalog_plan.accessor {
+            let name = skull_mir::mangle::mangle_fn(
+                ws,
+                &ws.module(accessor.module).functions[accessor.func],
+            );
+            writeln!(
+                out,
+                "function {}() {{ return __rock_definition_catalog({}); }}",
+                name,
+                js_string_lit(catalog_plan.catalog.as_str())?,
+            )
+            .unwrap();
+        }
+    }
+    out.push_str("__rock_definition_plan_stage({\n");
+    for catalog_plan in &plan.catalogs {
+        let entries = entries_by_catalog
+            .get(&catalog_plan.catalog)
+            .cloned()
+            .unwrap_or_default();
         writeln!(
             out,
             "{}: {{catalog: {}, len: {}, _data: [",
-            js_string_lit(catalog.as_str())?,
-            js_string_lit(catalog.as_str())?,
+            js_string_lit(catalog_plan.catalog.as_str())?,
+            js_string_lit(catalog_plan.catalog.as_str())?,
             entries.len()
         )
         .unwrap();
@@ -5133,14 +5185,23 @@ fn lifecycle_plan_stage_js(
     let mut phases: BTreeMap<ustr::Ustr, Vec<_>> = BTreeMap::new();
     for entry in &plan.entries { phases.entry(entry.phase).or_default().push(entry); }
     for (phase, entries) in phases {
-        writeln!(out, "[{}]: {{len: {}, _data: [", js_string_lit(phase.as_str())?, entries.len()).unwrap();
+        let scene_owned = entries.iter().filter(|entry| entry.owner.as_str() == "scene").count();
+        writeln!(out, "[{}]: {{len: {}, scene_owned: {}, _data: [", js_string_lit(phase.as_str())?, entries.len(), scene_owned).unwrap();
         for entry in entries {
             let key = entry.identity.logical_key(ws, interner);
             let dependencies = entry.qualification.dependencies();
-            write!(out, "{{phase: {}, owner: {}, key: {}, name: {}, stage: {}, ordinal: {}, qualification: {}, body_fingerprint: {}, dependencies: {{len: {}, _data: [",
+            let root_type = match &entry.root_type {
+                Some(root) => js_string_lit(
+                    &skull_mir::lifecycle::scene_root_type_key(root)
+                        .unwrap_or_else(|| panic!("validated scene lifecycle root reached emission as {root:?}")),
+                )?,
+                None => "null".to_string(),
+            };
+            write!(out, "{{phase: {}, owner: {}, root_type: {}, key: {}, name: {}, stage: {}, replay_role: {}, ordinal: {}, qualification: {}, body_fingerprint: {}, dependencies: {{len: {}, _data: [",
                 js_string_lit(entry.phase.as_str())?, js_string_lit(entry.owner.as_str())?,
+                root_type,
                 js_string_lit(&key)?, js_string_lit(entry.diagnostic_name.as_str())?,
-                entry.stage, entry.declaration_ordinal,
+                entry.stage, js_string_lit(entry.replay_role.tag())?, entry.declaration_ordinal,
                 js_string_lit(entry.qualification.tag())?,
                 js_string_lit(&format!("{:016x}", entry.body_fingerprint))?,
                 dependencies.len()).unwrap();
@@ -5150,9 +5211,22 @@ fn lifecycle_plan_stage_js(
                     js_string_lit(&dependency_key)?,
                     js_string_lit(&format!("{:016x}", dependency.fingerprint))?).unwrap();
             }
-            out.push_str("]}, func: __rock_code_slot_ref(");
-            out.push_str(&js_string_lit(&key)?);
-            out.push_str(")},\n");
+            // A compiler-synthesized thunk of one uniform signature
+            // (`scene_id -> ()`) per entry -- see the Lua sibling in
+            // `crates/skull/src/mir_emit.rs::lifecycle_plan_stage_lua` for
+            // the full rationale. A scene thunk resolves the live root for
+            // `scene_id` and calls through; it never asks the value its
+            // runtime type.
+            let key_lit = js_string_lit(&key)?;
+            if entry.owner.as_str() == "scene" {
+                out.push_str("]}, func: (function(){var __s = __rock_code_slot_ref(");
+                out.push_str(&key_lit);
+                out.push_str("); return function(scene_id){var __root = __scene_root_any(scene_id); if (__root !== null) { __rock_call(__s, __root); }};})()},\n");
+            } else {
+                out.push_str("]}, func: (function(){var __s = __rock_code_slot_ref(");
+                out.push_str(&key_lit);
+                out.push_str("); return function(__scene_id){ __rock_call(__s); };})()},\n");
+            }
         }
         out.push_str("]},\n");
     }

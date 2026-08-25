@@ -11,11 +11,16 @@ use std::time::Duration;
 ///
 /// `output` is the output directory (typically "tmp"); the returned
 /// path is `<output>/main.lua`.
+pub struct CompiledGame {
+    pub lua_file: std::path::PathBuf,
+    pub artifact_fingerprint: String,
+}
+
 pub fn compile_game_for_run(
     backend: Backend,
     path: &str,
     output: &str,
-) -> Result<std::path::PathBuf> {
+) -> Result<CompiledGame> {
     use std::collections::HashSet;
 
     rock_host::project::ensure_workspace_root()?;
@@ -28,8 +33,9 @@ pub fn compile_game_for_run(
         // One-shot from-scratch compile: always the init path, so the outcome
         // can never request a shape restart (there is no live process).
         Ok(_) => {
+            let artifact_fingerprint = compiler.artifact_fingerprint()?;
             clear_error_file();
-            Ok(output_path)
+            Ok(CompiledGame { lua_file: output_path, artifact_fingerprint })
         }
         Err(e) => {
             record_compilation_error(&e);

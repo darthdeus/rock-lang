@@ -50,6 +50,32 @@ pub struct StateImagePlanCensus {
     pub unsupported: usize,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SceneImagePlanCensus {
+    pub examined: usize,
+    pub assigned: usize,
+    pub scene_registry: usize,
+    pub arena_registry: usize,
+    pub scene_root_types: usize,
+    pub arena_identity_fields: usize,
+}
+
+impl SceneImagePlanCensus {
+    pub fn is_total(&self) -> bool {
+        self.examined == self.assigned
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SceneImagePlanMetadata {
+    pub scene_registry_identity: Option<String>,
+    pub arena_registry_identity: Option<String>,
+    pub scene_root_types: Vec<String>,
+    pub arena_identity_fields: Vec<String>,
+    pub scene_lifecycle_entries: usize,
+    pub census: SceneImagePlanCensus,
+}
+
 impl StateImagePlanCensus {
     pub fn is_total(&self) -> bool {
         self.examined == self.assigned && self.duplicates == 0 && self.unknown == 0
@@ -61,6 +87,7 @@ pub struct StateImagePlan {
     schema_id: String,
     entries: Vec<StateImageEntry>,
     census: StateImagePlanCensus,
+    scene: SceneImagePlanMetadata,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -237,15 +264,6 @@ impl StateImagePlan {
             "runner-owned",
         );
 
-        push_structural(
-            &mut entries,
-            ImageEntryKind::Unsupported,
-            "unsupported::live-scene-state",
-            "scene-registry-reconstruction",
-            "reject",
-            "reject",
-        );
-
         let mut identities = BTreeSet::new();
         let mut census = StateImagePlanCensus {
             examined: entries.len(),
@@ -264,10 +282,42 @@ impl StateImagePlan {
                 ImageEntryKind::Unsupported => census.unsupported += 1,
             }
         }
+        let scene = SceneImagePlanMetadata {
+            scene_registry_identity: schema.scene.scene_registry_identity.clone(),
+            arena_registry_identity: schema.scene.arena_registry_identity.clone(),
+            scene_root_types: schema.scene.scene_root_types.clone(),
+            arena_identity_fields: schema.scene.arena_identity_fields.clone(),
+            scene_lifecycle_entries: schema.scene.scene_lifecycle_entries,
+            census: SceneImagePlanCensus {
+                examined: usize::from(schema.scene.scene_registry_identity.is_some())
+                    + usize::from(schema.scene.arena_registry_identity.is_some())
+                    + schema.scene.scene_root_types.len()
+                    + schema.scene.arena_identity_fields.len(),
+                assigned: usize::from(schema.scene.scene_registry_identity.is_some())
+                    + usize::from(schema.scene.arena_registry_identity.is_some())
+                    + schema.scene.scene_root_types.len()
+                    + schema.scene.arena_identity_fields.len(),
+                scene_registry: usize::from(schema.scene.scene_registry_identity.is_some()),
+                arena_registry: usize::from(schema.scene.arena_registry_identity.is_some()),
+                scene_root_types: schema.scene.scene_root_types.len(),
+                arena_identity_fields: schema.scene.arena_identity_fields.len(),
+            },
+        };
+        if schema.scene.scene_lifecycle_entries > 0
+            && (scene.census.scene_registry != 1
+                || scene.census.arena_registry != 1
+                || scene.census.scene_root_types == 0
+                || scene.census.arena_identity_fields != 4)
+        {
+            return Err(StateImagePlanError::InvalidMetadata(
+                "scene-image metadata has incomplete nonzero populations".into(),
+            ));
+        }
         Ok(Self {
             schema_id: schema.schema_id.clone(),
             entries,
             census,
+            scene,
         })
     }
 
@@ -281,6 +331,10 @@ impl StateImagePlan {
 
     pub fn census(&self) -> &StateImagePlanCensus {
         &self.census
+    }
+
+    pub fn scene(&self) -> &SceneImagePlanMetadata {
+        &self.scene
     }
 }
 
@@ -366,7 +420,7 @@ mod tests {
         assert!(census.program_artifact > 0);
         assert!(census.host_projection > 0);
         assert!(census.runner_diagnostic > 0);
-        assert!(census.unsupported > 0);
+        assert_eq!(census.unsupported, 0);
         assert_eq!(
             plan.entries()
                 .iter()
@@ -414,7 +468,6 @@ mod tests {
                 "host-projection::arena-registry",
                 "host-projection::native-ledger",
                 "runner::logger-state",
-                "unsupported::live-scene-state",
             ]
         );
     }

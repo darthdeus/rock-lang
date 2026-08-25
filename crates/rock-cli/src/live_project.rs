@@ -18,6 +18,26 @@ pub enum LiveUpdate {
     },
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct LiveRouteTiming {
+    pub session_snapshot_ns: u128,
+    pub source_lookup_feed_ns: u128,
+    pub session_update_ns: u128,
+    pub diagnostics_ns: u128,
+    pub lint_total_ns: u128,
+    pub local_lint_derivation_ns: u128,
+    pub global_lint_dependency_ns: u128,
+    pub global_lint_derivation_ns: u128,
+    pub suppression_filtering_ns: u128,
+    pub suppression_filter_calls: usize,
+    pub report_prepare_ns: u128,
+    pub summary_sort_ns: u128,
+    pub render_ns: u128,
+    pub finding_aggregation_ns: u128,
+    pub rollback_ns: u128,
+    pub live_update_ns: u128,
+}
+
 pub(crate) struct LiveProjectSnapshot {
     sources: SourceFiles,
     entry_path: String,
@@ -30,6 +50,9 @@ pub struct LiveProject {
     sources: SourceFiles,
     entry_path: String,
     include_tests: bool,
+    lint_cache: bone_lints::IncrementalLintCache,
+    route_profile_enabled: bool,
+    last_route_timing: LiveRouteTiming,
 }
 
 impl LiveProject {
@@ -51,18 +74,22 @@ impl LiveProject {
             .map_err(|e| {
                 anyhow::anyhow!("{}", crate::skull_backend::render_project_err(&sources, &e))
             })?;
-        let project = Self {
+        let mut project = Self {
             session,
             dir: dir.to_string(),
             sources,
             entry_path,
             include_tests,
+            lint_cache: Default::default(),
+            route_profile_enabled: std::env::var_os("ROCK_SKULL_ROUTE_PROFILE").is_some(),
+            last_route_timing: LiveRouteTiming::default(),
         };
         project.verdict("in initial build")?;
         Ok(project)
     }
 
-    pub(crate) fn snapshot(&self, changed: &[PathBuf]) -> LiveProjectSnapshot {
+    pub(crate) fn snapshot(&mut self, changed: &[PathBuf]) -> LiveProjectSnapshot {
+        let started = self.route_profile_enabled.then(Instant::now);
         let mut previous_contents = Vec::new();
         for path in changed {
             let Ok(canonical) = std::fs::canonicalize(path) else { continue };
@@ -80,11 +107,21 @@ impl LiveProject {
             }
             previous_contents.push((id, source.borrow().contents.clone()));
         }
-        LiveProjectSnapshot {
+        if let Some(stats) = self
+            .lint_cache
+            .snapshot_stats(crate::lint_pass::census_enabled())
+        {
+            crate::lint_pass::record_lint_cache_snapshot(stats);
+        }
+        let snapshot = LiveProjectSnapshot {
             sources: self.sources.clone(),
             entry_path: self.entry_path.clone(),
             previous_contents,
+        };
+        if let Some(started) = started {
+            self.last_route_timing.session_snapshot_ns += started.elapsed().as_nanos();
         }
+        snapshot
     }
 
     pub(crate) fn restore(&mut self, snapshot: LiveProjectSnapshot) -> Result<()> {
@@ -106,18 +143,69 @@ impl LiveProject {
                 crate::skull_backend::render_project_err(&self.sources, &e)
             )
         })?;
-        self.verdict("after failed publication rollback")
+        crate::lint_pass::rollback_build_lints_cached(
+            &mut self.lint_cache,
+            self.session.workspace(),
+            &self.sources,
+            Path::new(&self.dir),
+            if self.include_tests {
+                crate::lint_pass::Scope::WholeProject
+            } else {
+                crate::lint_pass::Scope::ProductionOnly
+            },
+        )
+        .map_err(|error| anyhow::anyhow!("lint-cache rollback failed: {error}"))?;
+        self.verdict_with_change(
+            "after failed publication rollback",
+            &bone_lints::LintCacheUpdate::body_only([], [], []),
+        )
+    }
+
+    pub(crate) fn enable_route_profile(&mut self) {
+        self.route_profile_enabled = true;
+    }
+
+    pub(crate) fn take_route_timing(&mut self) -> LiveRouteTiming {
+        std::mem::take(&mut self.last_route_timing)
+    }
+
+    pub(crate) fn commit_body_transaction(&mut self) {
+        self.lint_cache.commit_body_transaction();
     }
 
     pub fn recompile(&mut self, changed: &[PathBuf]) -> Result<LiveUpdate> {
+        self.recompile_for_publication(changed).map(|(update, _snapshot)| update)
+    }
+
+    pub(crate) fn recompile_for_publication(
+        &mut self,
+        changed: &[PathBuf],
+    ) -> Result<(LiveUpdate, LiveProjectSnapshot)> {
+        self.last_route_timing = LiveRouteTiming::default();
         let snapshot = self.snapshot(changed);
+        let started = self.route_profile_enabled.then(Instant::now);
         match self.recompile_inner(changed) {
-            Ok(update) => Ok(update),
+            Ok(update) => {
+                if let Some(started) = started {
+                    self.last_route_timing.live_update_ns += started.elapsed().as_nanos();
+                }
+                Ok((update, snapshot))
+            }
             Err(error) => {
+                if let Some(started) = started {
+                    self.last_route_timing.live_update_ns += started.elapsed().as_nanos();
+                }
+                let rollback_started = self.route_profile_enabled.then(Instant::now);
                 if let Err(restore) = self.restore(snapshot) {
+                    if let Some(started) = rollback_started {
+                        self.last_route_timing.rollback_ns += started.elapsed().as_nanos();
+                    }
                     return Err(anyhow::anyhow!(
                         "live project rollback failed after compile error: {restore}; original error: {error}"
                     ));
+                }
+                if let Some(started) = rollback_started {
+                    self.last_route_timing.rollback_ns += started.elapsed().as_nanos();
                 }
                 Err(error)
             }
@@ -128,6 +216,7 @@ impl LiveProject {
         let started = Instant::now();
         let mut need_full = changed.is_empty();
         let mut feed = Vec::new();
+        let feed_started = self.route_profile_enabled.then(Instant::now);
         if !need_full {
             for path in changed {
                 let Ok(canonical) = std::fs::canonicalize(path) else {
@@ -152,6 +241,9 @@ impl LiveProject {
                 feed.push((id, text));
             }
         }
+        if let Some(started) = feed_started {
+            self.last_route_timing.source_lookup_feed_ns += started.elapsed().as_nanos();
+        }
         if need_full {
             self.rediscover()?;
             self.rebuild_session()?;
@@ -163,14 +255,40 @@ impl LiveProject {
     }
 
     pub fn apply_edit(&mut self, path: &Path, new_text: &str) -> Result<LiveUpdate> {
+        self.apply_edit_for_publication(path, new_text)
+            .map(|(update, _snapshot)| update)
+    }
+
+    pub(crate) fn apply_edit_for_publication(
+        &mut self,
+        path: &Path,
+        new_text: &str,
+    ) -> Result<(LiveUpdate, LiveProjectSnapshot)> {
+        self.last_route_timing = LiveRouteTiming::default();
         let snapshot = self.snapshot(&[path.to_path_buf()]);
+        let started = self.route_profile_enabled.then(Instant::now);
         match self.apply_edit_inner(path, new_text) {
-            Ok(update) => Ok(update),
+            Ok(update) => {
+                if let Some(started) = started {
+                    self.last_route_timing.live_update_ns += started.elapsed().as_nanos();
+                }
+                Ok((update, snapshot))
+            }
             Err(error) => {
+                if let Some(started) = started {
+                    self.last_route_timing.live_update_ns += started.elapsed().as_nanos();
+                }
+                let rollback_started = self.route_profile_enabled.then(Instant::now);
                 if let Err(restore) = self.restore(snapshot) {
+                    if let Some(started) = rollback_started {
+                        self.last_route_timing.rollback_ns += started.elapsed().as_nanos();
+                    }
                     return Err(anyhow::anyhow!(
                         "live project rollback failed after in-memory edit error: {restore}; original error: {error}"
                     ));
+                }
+                if let Some(started) = rollback_started {
+                    self.last_route_timing.rollback_ns += started.elapsed().as_nanos();
                 }
                 Err(error)
             }
@@ -179,6 +297,7 @@ impl LiveProject {
 
     fn apply_edit_inner(&mut self, path: &Path, new_text: &str) -> Result<LiveUpdate> {
         let started = Instant::now();
+        let feed_started = self.route_profile_enabled.then(Instant::now);
         let canonical = std::fs::canonicalize(path).map_err(|e| {
             anyhow::anyhow!("apply_edit: cannot canonicalize `{}`: {e}", path.display())
         })?;
@@ -195,6 +314,9 @@ impl LiveProject {
             );
         };
         source.borrow_mut().contents = new_text.to_string();
+        if let Some(started) = feed_started {
+            self.last_route_timing.source_lookup_feed_ns += started.elapsed().as_nanos();
+        }
         self.update(&[(id, new_text.to_string())], started)
     }
 
@@ -226,8 +348,20 @@ impl LiveProject {
         self.session.workspace().module_ids[&ustr::Ustr::from(&self.entry_path)]
     }
 
-    pub fn verdict(&self, context: &str) -> Result<()> {
+    pub fn verdict(&mut self, context: &str) -> Result<()> {
+        self.verdict_with_change(context, &bone_lints::LintCacheUpdate::full())
+    }
+
+    fn verdict_with_change(
+        &mut self,
+        context: &str,
+        change: &bone_lints::LintCacheUpdate,
+    ) -> Result<()> {
+        let diagnostics_started = self.route_profile_enabled.then(Instant::now);
         let diagnostics = self.session.diagnostics();
+        if let Some(started) = diagnostics_started {
+            self.last_route_timing.diagnostics_ns += started.elapsed().as_nanos();
+        }
         if !diagnostics.is_empty() {
             for diagnostic in &diagnostics {
                 eprintln!(
@@ -245,12 +379,40 @@ impl LiveProject {
         } else {
             crate::lint_pass::Scope::ProductionOnly
         };
-        let lint_errs = crate::lint_pass::run_build_lints(
-            self.session.workspace(),
-            &self.sources,
-            Path::new(&self.dir),
-            scope,
-        );
+        let lint_started = self.route_profile_enabled.then(Instant::now);
+        let mut lint_timing = crate::lint_pass::LintRouteTiming::default();
+        let lint_errs = if self.route_profile_enabled {
+            crate::lint_pass::run_build_lints_cached_timed(
+                &mut self.lint_cache,
+                self.session.workspace(),
+                &self.sources,
+                Path::new(&self.dir),
+                scope,
+                change,
+                &mut lint_timing,
+            )
+        } else {
+            crate::lint_pass::run_build_lints_cached(
+                &mut self.lint_cache,
+                self.session.workspace(),
+                &self.sources,
+                Path::new(&self.dir),
+                scope,
+                change,
+            )
+        };
+        if let Some(started) = lint_started {
+            self.last_route_timing.lint_total_ns += started.elapsed().as_nanos();
+            self.last_route_timing.local_lint_derivation_ns += lint_timing.local_lint_derivation_ns;
+            self.last_route_timing.global_lint_dependency_ns += lint_timing.global_lint_dependency_ns;
+            self.last_route_timing.global_lint_derivation_ns += lint_timing.global_lint_derivation_ns;
+            self.last_route_timing.suppression_filtering_ns += lint_timing.suppression_filtering_ns;
+            self.last_route_timing.suppression_filter_calls += lint_timing.suppression_filter_calls;
+            self.last_route_timing.report_prepare_ns += lint_timing.report_prepare_ns;
+            self.last_route_timing.summary_sort_ns += lint_timing.summary_sort_ns;
+            self.last_route_timing.render_ns += lint_timing.render_ns;
+            self.last_route_timing.finding_aggregation_ns += lint_timing.finding_aggregation_ns;
+        }
         if !lint_errs.is_empty() {
             for e in &lint_errs {
                 eprintln!("{}", crate::skull_backend::render_project_err(&self.sources, e));
@@ -273,6 +435,7 @@ impl LiveProject {
     }
 
     fn rebuild_session(&mut self) -> Result<()> {
+        self.lint_cache.clear();
         self.session = crate::bone_backend::bone_session_for_emission(
             source_pairs(&self.sources),
             Path::new(&self.dir),
@@ -290,19 +453,34 @@ impl LiveProject {
         let sources = self.sources.clone();
         let mut reinferred = Vec::new();
         let mut span_edits = Vec::new();
+        let mut lint_changed_files = Vec::new();
+        let mut lint_reinferred = Vec::new();
+        let mut lint_edits = Vec::new();
         let mut full = false;
         let mut changed = false;
         for (path, text) in feed {
+            let session_started = self.route_profile_enabled.then(Instant::now);
             let update = self.session.update_file(path, text).map_err(|e| {
                 anyhow::anyhow!("{}", crate::skull_backend::render_project_err(&sources, &e))
             })?;
+            if let Some(started) = session_started {
+                self.last_route_timing.session_update_ns += started.elapsed().as_nanos();
+            }
             match update.tier {
                 bone_incremental::session::UpdateTier::NoChange => {}
                 bone_incremental::session::UpdateTier::BodyOnly => {
                     changed = true;
+                    lint_changed_files.push(ustr::Ustr::from(path.as_str()));
+                    lint_reinferred.extend(update.reinferred.iter().copied());
                     reinferred.extend(update.reinferred);
                     if let Some(edit) = update.body_update.edit {
                         span_edits.push(skull::instance_graph::SpanEdit {
+                            file: edit.file,
+                            at: edit.at,
+                            byte_delta: edit.byte_delta,
+                            line_delta: edit.line_delta,
+                        });
+                        lint_edits.push(bone_lints::TextEditDelta {
                             file: edit.file,
                             at: edit.at,
                             byte_delta: edit.byte_delta,
@@ -317,7 +495,19 @@ impl LiveProject {
                 }
             }
         }
-        self.verdict("- serving last good output")?;
+        let lint_change = if full {
+            bone_lints::LintCacheUpdate::full()
+        } else {
+            bone_lints::LintCacheUpdate::body_only(
+                lint_changed_files,
+                lint_reinferred,
+                lint_edits,
+            )
+        };
+        if changed && !full {
+            self.lint_cache.begin_body_transaction(&lint_change);
+        }
+        self.verdict_with_change("- serving last good output", &lint_change)?;
         if !changed {
             return Ok(LiveUpdate::NoChange);
         }
@@ -427,5 +617,64 @@ mod tests {
 
         project.recompile(&[]).unwrap();
         assert_eq!(std::fs::read_to_string(&count).unwrap().trim(), "2");
+    }
+
+    #[test]
+    fn body_edit_updates_the_shared_lint_cache_and_failed_edit_restores_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("main.rock");
+        std::fs::write(&source, "fn main() { let stale = 1 }\n").unwrap();
+        let mut project = LiveProject::init(dir.path().to_str().unwrap(), false).unwrap();
+        assert!(project.lint_cache.is_initialized());
+        let file = ustr::Ustr::from(
+            std::fs::canonicalize(&source)
+                .unwrap()
+                .to_string_lossy()
+                .as_ref(),
+        );
+        assert!(!project.lint_cache.findings_for_file(file).is_empty());
+
+        assert!(project.apply_edit(&source, "fn main( {\n").is_err());
+        assert!(!project.lint_cache.findings_for_file(file).is_empty());
+
+        project.apply_edit(&source, "fn main() {}\n").unwrap();
+        assert!(project.lint_cache.is_initialized());
+        assert!(project.lint_cache.findings_for_file(file).is_empty());
+    }
+
+    #[test]
+    fn lint_error_after_cache_update_rolls_back_sources_and_findings_together() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("main.rock");
+        let old = r#"
+fn maybe_int() -> int? { return 1 }
+fn always_int() -> int { return 1 }
+fn main() -> int { let _value: int = cast(always_int()) 3 }
+"#;
+        let bad = old.replace("cast(always_int())", "cast(maybe_int())");
+        std::fs::write(&source, old).unwrap();
+        let mut project = LiveProject::init(dir.path().to_str().unwrap(), false).unwrap();
+        let file = ustr::Ustr::from(
+            std::fs::canonicalize(&source)
+                .unwrap()
+                .to_string_lossy()
+                .as_ref(),
+        );
+        let before = project
+            .lint_cache
+            .findings_for_file(file)
+            .into_iter()
+            .map(|finding| format!("{}:{}", finding.lint, finding.error.message))
+            .collect::<Vec<_>>();
+        assert!(project.apply_edit(&source, &bad).is_err());
+        assert_eq!(project.source_text(&source).as_deref(), Some(old));
+        let after = project
+            .lint_cache
+            .findings_for_file(file)
+            .into_iter()
+            .map(|finding| format!("{}:{}", finding.lint, finding.error.message))
+            .collect::<Vec<_>>();
+        assert_eq!(after, before);
+        assert!(after.iter().all(|finding| !finding.starts_with("transmute_of_nullable:")));
     }
 }

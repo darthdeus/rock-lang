@@ -123,6 +123,10 @@ fn reexec_with_new_binary(game_process: &mut Option<Child>) {
     }
 }
 
+fn full_reload_requires_restart(restart_reasons: &[String]) -> bool {
+    !restart_reasons.is_empty()
+}
+
 pub fn do_stone_watch(
     path: &str,
     quiet: bool,
@@ -198,9 +202,14 @@ pub fn do_stone_watch(
 
     // Always-on flight recorder (P3.5): record every `rock stone` session from
     // boot to a gitignored <game>/replays/last.replay so any bug is already a
-    // file. Computed once (build id = the initial compile); a restart re-spawns
-    // with the same config.
-    let flight = flight_recorder_for(path, &output_path, no_record);
+    // file. The compiler-owned identity is refreshed before every process
+    // restart, so a successor cannot inherit an earlier Artifact label.
+    let mut flight = if initial_compilation_success {
+        let artifact_fingerprint = compiler.artifact_fingerprint()?;
+        flight_recorder_for(path, &artifact_fingerprint, no_record)?
+    } else {
+        None
+    };
     if let Some(f) = &flight {
         info!("Flight recorder: {} (build {})", f.record_path, f.build_id);
     }
@@ -431,7 +440,7 @@ pub fn do_stone_watch(
                         compiler.comptime_watch_files().into_iter().collect();
                     watched.extend(sound_watch.lock().iter().cloned());
                     *comptime_watch.lock() = watched;
-                    if !outcome.restart_reasons.is_empty() {
+                    if full_reload_requires_restart(&outcome.restart_reasons) {
                         info!(
                             "live reload requires a process restart ({})",
                             outcome.restart_reasons.join(", ")
@@ -454,6 +463,10 @@ pub fn do_stone_watch(
             // overlay / deferred shape write in first, same as a restart.
             if let Err(e) = compiler.canonicalize_for_restart() {
                 error!("fold before start failed: {} (start may load a stale main.lua)", e);
+            }
+            if flight.is_none() {
+                let artifact_fingerprint = compiler.artifact_fingerprint()?;
+                flight = flight_recorder_for(path, &artifact_fingerprint, no_record)?;
             }
             info!("First successful compilation! Starting game...");
             game_process = Some(start_game_process(&output_path, app_args, flight.as_ref(), None)?);
@@ -490,6 +503,9 @@ pub fn do_stone_watch(
                             p.path
                         ),
                     }
+                }
+                if let Some(f) = flight.as_mut() {
+                    f.build_id = compiler.artifact_fingerprint()?;
                 }
                 game_process =
                     Some(start_game_process(&output_path, app_args, flight.as_ref(), replay_request.as_ref())?);
@@ -559,23 +575,6 @@ struct FlightRecorder {
     checkpoint_interval: usize,
 }
 
-/// Content hash of the compiled game (FNV-1a-64, hex) -- the replay-header build
-/// id. Changes whenever codegen output changes, so a log replayed against a
-/// different build warns. Falls back to "dev" if the file can't be read.
-fn build_id_for_lua(lua_file: &std::path::Path) -> String {
-    match std::fs::read(lua_file) {
-        Ok(bytes) => {
-            let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-            for b in &bytes {
-                h ^= *b as u64;
-                h = h.wrapping_mul(0x0000_0100_0000_01b3);
-            }
-            format!("{h:016x}")
-        }
-        Err(_) => "dev".to_string(),
-    }
-}
-
 /// Ensure `<game>/replays/` exists and is gitignored (a `.gitignore` of `*`
 /// keeps flight logs -- and itself -- out of version control). Returns the dir.
 fn ensure_flight_dir(game_path: &str) -> Result<std::path::PathBuf> {
@@ -596,30 +595,33 @@ fn ensure_flight_dir(game_path: &str) -> Result<std::path::PathBuf> {
 /// respected).
 fn flight_recorder_for(
     game_path: &str,
-    lua_file: &std::path::Path,
+    artifact_fingerprint: &str,
     no_record: bool,
-) -> Option<FlightRecorder> {
+) -> Result<Option<FlightRecorder>> {
     if no_record {
-        return None;
+        return Ok(None);
     }
     if std::env::var("STONE_NO_FLIGHT_RECORDER").as_deref() == Ok("1") {
-        return None;
+        return Ok(None);
     }
     if std::env::var("STONE_RECORD").is_ok() {
-        return None;
+        return Ok(None);
+    }
+    if artifact_fingerprint.is_empty() || artifact_fingerprint == "dev" {
+        anyhow::bail!("cannot start flight recorder without a real Artifact fingerprint");
     }
     let dir = match ensure_flight_dir(game_path) {
         Ok(d) => d,
         Err(e) => {
             log::warn!(target: "STONE", "flight recorder disabled: could not create replays dir: {e}");
-            return None;
+            return Ok(None);
         }
     };
-    Some(FlightRecorder {
+    Ok(Some(FlightRecorder {
         record_path: dir.join("last.replay").to_string_lossy().into_owned(),
-        build_id: build_id_for_lua(lua_file),
+        build_id: artifact_fingerprint.to_string(),
         checkpoint_interval: 0,
-    })
+    }))
 }
 
 /// Apply the flight-recorder env to a game-process command (both spawn branches).
@@ -939,7 +941,8 @@ pub fn do_perf(
 ) -> Result<()> {
     use crate::common::ProcessManager;
 
-    let lua_file = compile_game_for_run(backend, path, &output)?;
+    let compiled = compile_game_for_run(backend, path, &output)?;
+    let lua_file = &compiled.lua_file;
 
     // `frames == 1` is the clap default (user didn't pass --frames).
     // If --seconds is also missing, fall back to 300 frames (~5s at 60fps).
@@ -962,8 +965,9 @@ pub fn do_perf(
         seconds
     };
 
-    let mut cmd = rock_host::project::build_luajit_command(&lua_file, app_args);
+    let mut cmd = rock_host::project::build_luajit_command(lua_file, app_args);
     apply_perf_env(&mut cmd);
+    cmd.env("STONE_BUILD_ID", &compiled.artifact_fingerprint);
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
     // Pin the RNG so the measured scene is byte-identical run-to-run: the
@@ -1115,7 +1119,8 @@ pub fn do_one_frame(
 ) -> Result<()> {
     use crate::common::ProcessManager;
 
-    let lua_file = compile_game_for_run(backend, path, &output)?;
+    let compiled = compile_game_for_run(backend, path, &output)?;
+    let lua_file = &compiled.lua_file;
 
     if frames == 1 {
         info!("Running stone for one frame...");
@@ -1124,11 +1129,12 @@ pub fn do_one_frame(
     }
 
     // Run the compiled Lua with luajit (stone handles window creation)
-    let mut cmd = rock_host::project::build_luajit_command(&lua_file, app_args);
+    let mut cmd = rock_host::project::build_luajit_command(lua_file, app_args);
     cmd.env("FRAME_COUNT", frames.to_string())
         .env("TAKE_SCREENSHOT", "1")  // Always take screenshot when running frames
         .env("STONE_HEADLESS", "1")  // No visible window for frame runs
-        .env("ROCK_FRAME_WATCHDOG", "1");
+        .env("ROCK_FRAME_WATCHDOG", "1")
+        .env("STONE_BUILD_ID", &compiled.artifact_fingerprint);
     apply_headless_audio_env(&mut cmd);
     // Replay record/playback (docs/replay-scrub-plan.md). The game process
     // reads these env vars in stone/engine/replay.rock, same pattern as
@@ -1280,19 +1286,18 @@ pub fn do_replay_window(
     replay_file: &str,
     app_args: &[String],
 ) -> Result<()> {
-    let lua_file = compile_game_for_run(backend, game, &output)?;
+    let compiled = compile_game_for_run(backend, game, &output)?;
+    let lua_file = &compiled.lua_file;
 
     info!("Replaying {} in a window (close the window to exit)", replay_file);
 
-    let mut cmd = rock_host::project::build_luajit_command(&lua_file, app_args);
+    let mut cmd = rock_host::project::build_luajit_command(lua_file, app_args);
     if std::env::var("STONE_HEADLESS").as_deref() == Ok("1") {
         apply_headless_audio_env(&mut cmd);
     }
     cmd.env("STONE_REPLAY", replay_file)
         .env("STONE_REPLAY_WINDOW", "1")
-        // Stamp the CURRENT build so replay_init can warn when the log was
-        // recorded against different code (build-id mismatch).
-        .env("STONE_BUILD_ID", build_id_for_lua(std::path::Path::new(&lua_file)))
+        .env("STONE_BUILD_ID", &compiled.artifact_fingerprint)
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
 
@@ -1309,12 +1314,21 @@ pub fn do_replay_window(
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_perf_env, apply_run_env, build_id_for_lua, consume_request_file, ensure_flight_dir,
-        flight_recorder_for, frame_exit_result, frame_watchdog_config, session_usage,
-        session_usage_warning, FlightRecorder, SESSION_USAGE_WARN_BYTES,
+        apply_perf_env, apply_run_env, consume_request_file, ensure_flight_dir,
+        flight_recorder_for, frame_exit_result, frame_watchdog_config, full_reload_requires_restart,
+        session_usage, session_usage_warning, FlightRecorder, SESSION_USAGE_WARN_BYTES,
     };
     use crate::watch::is_compiler_source;
     use std::time::Duration;
+
+    #[test]
+    fn structural_reload_requests_clean_restart() {
+        assert!(full_reload_requires_restart(&["schema changed".to_string()]));
+        assert!(
+            !full_reload_requires_restart(&[]),
+            "a body-only edit must not request a restart"
+        );
+    }
 
     #[test]
     fn perf_process_is_headless_and_boots_mag_without_screenshot_mode() {
@@ -1332,7 +1346,6 @@ mod tests {
         assert_eq!(env.get("MAG_PERF_SAVE_FIXTURE"), Some(&"1"));
         assert!(!env.contains_key("MAG_SCREENSHOT"));
     }
-
     /// The whole point of the private session dir: `rock stone` must not write
     /// the slot every other command writes. A shared `tmp/main.lua` is loaded
     /// into the live game by the watcher (docs/hot-reload-chunk-identity.md).
@@ -1421,8 +1434,7 @@ mod tests {
     fn no_record_flag_disables_flight_recorder() {
         let game = std::env::temp_dir().join("rock_no_record_flag_test_game");
         let _ = std::fs::remove_dir_all(&game);
-        let flight =
-            flight_recorder_for(game.to_str().unwrap(), std::path::Path::new("tmp/main.lua"), true);
+        let flight = flight_recorder_for(game.to_str().unwrap(), "fp", true).unwrap();
         assert!(flight.is_none(), "--no-record must disable the flight recorder");
         assert!(
             !game.join("replays").exists(),
@@ -1525,21 +1537,6 @@ mod tests {
             parse_replay_request("p\tloop\tNaN\t90").loop_ab, None,
             "malformed loop suffix -> plain replay"
         );
-    }
-
-    #[test]
-    fn build_id_is_deterministic_and_content_sensitive() {
-        let dir = tempfile::tempdir().unwrap();
-        let a = dir.path().join("a.lua");
-        let b = dir.path().join("b.lua");
-        std::fs::write(&a, b"print('hello')").unwrap();
-        std::fs::write(&b, b"print('world')").unwrap();
-        // Deterministic: same bytes -> same id across calls (no per-process seed).
-        assert_eq!(build_id_for_lua(&a), build_id_for_lua(&a));
-        // Content-sensitive: a codegen change changes the id (mismatch warning).
-        assert_ne!(build_id_for_lua(&a), build_id_for_lua(&b));
-        // Missing file -> "dev" fallback, never a panic.
-        assert_eq!(build_id_for_lua(&dir.path().join("missing.lua")), "dev");
     }
 
     #[test]

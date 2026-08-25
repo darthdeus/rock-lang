@@ -246,6 +246,46 @@ fn arena_scan_returning_entity_materializes_via_vt() {
     );
 }
 
+const ARENA_ENTITY_IN_ENUM: &str = r#"
+struct Mob { health: int }
+
+enum Target {
+    Player,
+    Mob(Entity<Mob>),
+}
+
+fn score(target: Target) -> int {
+    return match target {
+        Target::Mob(found) => if get(found) != null { 1 } else { 0 },
+        Target::Player => 0,
+    }
+}
+
+fn hot(mobs: Arena<Mob>) -> int {
+    let total = 0
+    for (e, _m) in mobs {
+        total += score(Target::Mob(e))
+    }
+    return total
+}
+
+fn main() {
+    let mobs: Arena<Mob> = arena_new()
+    insert(mobs, Mob { health: 10 })
+    let _ = hot(mobs)
+}
+"#;
+
+#[test]
+fn arena_entity_threads_through_enum_payload_without_boxing() {
+    let lua = emit_module(ARENA_ENTITY_IN_ENUM);
+    let hot = function_body(&lua, "hot");
+    assert!(
+        !hot.contains("Entity_vt("),
+        "an entity carried through a local enum payload must stay in scalar lanes:\n{hot}"
+    );
+}
+
 // Gate-stays-put pin (item 8): a NULLABLE value binding (`let v: V? = ...`) is
 // never flagged for escape-rematerialization -- so its escaping return stays a
 // boxed load, NOT a rebuild-from-field-cells (which would reconstruct a bogus

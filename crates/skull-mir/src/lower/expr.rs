@@ -813,6 +813,19 @@ impl Builder<'_> {
                 // that holds it (`h.p.x = 9` -> `h["p.x"] = 9`).
                 let (pbase, key) = self.physical_field(base, field)?;
                 let b = self.lower_place_base(pbase)?;
+                let spliced_embed = match self.expr_ty(base) {
+                    Some(TypeExpr::App { ctor: TypeCtor::Nominal(sname), .. })
+                        if key != field && self.swizzle_of(base, field).is_none() =>
+                        self.struct_field_plan(sname, field, true)?.embed(),
+                    _ => None,
+                };
+                if let Some((cname, nullable)) = spliced_embed {
+                    let leaves = self.embed_value_leaves(nullable, cname, value)?;
+                    for (slot, v) in Self::embed_field_slots(key, leaves) {
+                        self.emit_cur(Inst::StoreField { base: b, field: slot, value: v });
+                    }
+                    return Ok(());
+                }
                 // A flattened enum field: write the discriminant + payload slots
                 // directly on the parent table (no nested box).
                 let flat_plan = match self.expr_ty(base) {
