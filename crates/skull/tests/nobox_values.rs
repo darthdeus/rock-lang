@@ -1011,6 +1011,119 @@ fn a_nested_fn_threads_nobox_leaves_through_params_and_return() {
     assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "nobox_nested_fn"), "27");
 }
 
+const WIDE_NOBOX_TAIL_FORWARD: &str = r#"
+nobox value Wide {
+    a: int, b: int, c: int, d: int,
+    e: int, f: int, g: int, h: int,
+}
+
+fn make_wide(seed: int) -> Wide {
+    return Wide {
+        a: seed, b: seed + 1, c: seed + 2, d: seed + 3,
+        e: seed + 4, f: seed + 5, g: seed + 6, h: seed + 7,
+    }
+}
+
+fn forward_wide(seed: int) -> Wide {
+    return make_wide(seed)
+}
+
+fn forward_wide_indirect(f: (int) -> Wide, seed: int) -> Wide {
+    return f(seed)
+}
+
+@inline inline(lua) fn observe(value: int) = "if value == -2147483648 then error('unreachable') end"
+
+fn inspect_then_forward(seed: int) -> Wide {
+    let w = make_wide(seed)
+    observe(w.h)
+    return w
+}
+
+fn consume_wide(prefix: int, w: Wide) -> int {
+    return prefix + w.a + w.b + w.c + w.d + w.e + w.f + w.g + w.h
+}
+
+fn forward_into_call(seed: int) -> int {
+    return consume_wide(100, make_wide(seed))
+}
+
+fn forward_indirect_into_call(f: (int) -> Wide, seed: int) -> int {
+    return consume_wide(100, f(seed))
+}
+
+fn inspect_then_consume(seed: int) -> int {
+    let w = make_wide(seed)
+    observe(w.h)
+    return consume_wide(100, w)
+}
+
+fn report_wide(w: Wide) { print("{w.a}") }
+
+fn consume_then_return(seed: int) -> Wide {
+    let w = make_wide(seed)
+    report_wide(w)
+    return w
+}
+
+fn main() {
+    let w = forward_wide(10)
+    print("{w.a + w.b + w.c + w.d + w.e + w.f + w.g + w.h}")
+    let i = forward_wide_indirect(make_wide, 10)
+    print("{i.a + i.b + i.c + i.d + i.e + i.f + i.g + i.h}")
+    let c = inspect_then_forward(10)
+    print("{c.a + c.b + c.c + c.d + c.e + c.f + c.g + c.h}")
+    print("{forward_into_call(10)}")
+    print("{forward_indirect_into_call(make_wide, 10)}")
+    print("{inspect_then_consume(10)}")
+    let r = consume_then_return(10)
+    print("{r.a + r.b + r.c + r.d + r.e + r.f + r.g + r.h}")
+}
+"#;
+
+#[test]
+fn a_wide_nobox_tail_forward_returns_the_scalar_wire_directly() {
+    let lua = emit_module(WIDE_NOBOX_TAIL_FORWARD);
+    let body = function_body(&lua, "forward_wide");
+    assert!(
+        body.lines().any(|line| line.contains("do return ") && line.contains("make_wide")),
+        "wide scalar return was captured and copied instead of tail-forwarded:\n{body}"
+    );
+    let indirect = function_body(&lua, "forward_wide_indirect");
+    assert!(
+        indirect.lines().any(|line| line.contains("do return ") && line.contains('(')),
+        "indirect scalar return was captured and copied instead of tail-forwarded:\n{indirect}"
+    );
+    let inspected = function_body(&lua, "inspect_then_forward");
+    assert!(
+        inspected.lines().any(|line| line.matches(',').count() >= 7 && line.contains(" = ")),
+        "a result observed before return was incorrectly tail-forwarded:\n{inspected}"
+    );
+    let call_arg = function_body(&lua, "forward_into_call");
+    assert!(
+        call_arg.lines().any(|line| line.contains("consume_wide") && line.contains("make_wide")),
+        "an unobserved scalar wire was captured only to become trailing call arguments:\n{call_arg}"
+    );
+    let indirect_call_arg = function_body(&lua, "forward_indirect_into_call");
+    assert!(
+        indirect_call_arg.lines().any(|line| {
+            line.contains("consume_wide") && line.matches('(').count() >= 2
+        }),
+        "an indirect scalar wire was captured only to become trailing call arguments:\n{indirect_call_arg}"
+    );
+    let inspected_call_arg = function_body(&lua, "inspect_then_consume");
+    assert!(
+        inspected_call_arg
+            .lines()
+            .any(|line| line.matches(',').count() >= 7 && line.contains(" = ")),
+        "a result observed before becoming call arguments was incorrectly forwarded:\n{inspected_call_arg}"
+    );
+    assert_eq!(
+        run_luajit(&format!("{lua}\nmain()\n"), "wide_nobox_tail_forward"),
+        "108\n108\n108\n208\n208\n208\n10\n108"
+    );
+}
+
 const NOBOX_NESTED_FN_INFERRED_RETURN: &str = r#"
 nobox value NV2 { x: float, y: float }
 
@@ -1148,7 +1261,7 @@ fn direct_and_indirect_calls_of_one_fn_agree_on_arity() {
     let lua = emit_module(NOBOX_FN_TYPE_AGREES);
     let body = function_body(&lua, "indirect");
     assert!(
-        body.contains("r0(r1, r2)"),
+        body.contains("c0(c1, c2)"),
         "the indirect call must pass two leaves, not one box:\n{body}"
     );
     assert_eq!(

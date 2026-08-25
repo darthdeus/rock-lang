@@ -149,6 +149,8 @@ mod leaf_form_invariant;
 mod loop_scoped_locals;
 #[path = "mangle_rename_hot_reload.rs"]
 mod mangle_rename_hot_reload;
+#[path = "mem2reg_stats.rs"]
+mod mem2reg_stats;
 #[path = "mir_execution_oracle.rs"]
 mod mir_execution_oracle;
 #[path = "multi_rejection.rs"]

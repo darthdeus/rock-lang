@@ -153,9 +153,9 @@ inline(lua) fn native_buffer_alloc<T>(n: int) -> NativeBuffer<T> = "error('nativ
 // Holds a trailing window of `cap` samples plus its live summary
 // (mean/stddev/min/max/p50/p90/p99). `sorted` stays ascending so order stats
 // are index lookups; `ring` is insertion order, giving the oldest sample to
-// evict and the raw per-frame signal for plots. metric_add recomputes the
-// summary in O(cap) with zero allocation and uniform cost, so a reader can
-// pull p99 every frame without perturbing what it measures.
+// evict and the raw per-frame signal for plots. Rolling totals keep mean and
+// variance out of the sorted-window scan; order statistics remain direct
+// lookups, so a reader can pull p99 every frame without perturbing the metric.
 // Design: docs/effective-fps-and-stats-plan.md.
 // ============================================================================
 
@@ -177,6 +177,8 @@ struct Metric {
     sorted: NativeBuffer<float>,  // same values, ascending (order stats)
     head: int,
     count: int,
+    sum: float,
+    sum_sq: float,
     // Live summary -- overwritten in place by every metric_add.
     mean: float,
     stddev: float,
@@ -195,6 +197,8 @@ fn metric_new(name: string, cap: int) -> Metric {
         sorted: native_buffer_float(cap),
         head: 0,
         count: 0,
+        sum: 0.0,
+        sum_sq: 0.0,
         mean: 0.0,
         stddev: 0.0,
         min: 0.0,
@@ -218,18 +222,11 @@ fn metric_percentile_index(p: int, n: int) -> int {
 // Only called from metric_add, which adds a sample first, so count >= 1.
 fn metric_recompute(m: Metric) {
     let n = m.count
-    let sum = 0.0
-    let sum_sq = 0.0
-    for i in 0..n {
-        let x = nb_get(m.sorted, i)
-        sum = sum + x
-        sum_sq = sum_sq + x * x
-    }
     let nf = n as float
-    let mean = sum / nf
+    let mean = m.sum / nf
     m.mean = mean
     // Clamp guards float cancellation in the sum_sq - mean^2 variance form.
-    m.stddev = sqrt(max(0.0, sum_sq / nf - mean * mean))
+    m.stddev = sqrt(max(0.0, m.sum_sq / nf - mean * mean))
     m.min = nb_get(m.sorted, 0)
     m.max = nb_get(m.sorted, n - 1)
     m.p50 = nb_get(m.sorted, metric_percentile_index(50, n))
@@ -238,17 +235,18 @@ fn metric_recompute(m: Metric) {
 }
 
 // Add one sample: maintain the ascending `sorted` window (evict oldest if
-// full, insert the new value) and the insertion-order `ring`, then recompute
-// the summary fields. O(cap), zero allocation, uniform cost per call.
+// full, insert the new value) and the insertion-order `ring`, then refresh the
+// summary fields. O(cap), zero allocation, uniform cost per call.
 fn metric_add(m: Metric, v: float) {
     let evicting = m.count >= m.cap
+    let old = 0.0
 
     // `len` = valid length of `sorted` after any eviction, before inserting v.
     let len = if evicting {
         // Remove the oldest sample (ring[head]) from sorted: linear scan for
         // its slot, then shift left. Equality is exact -- ring and sorted hold
         // the same bit-for-bit float32 (both written via nb_set).
-        let old = nb_get(m.ring, m.head)
+        old = nb_get(m.ring, m.head)
         let oi = 0
         for i in 0..m.count {
             if nb_get(m.sorted, i) == old {
@@ -281,6 +279,13 @@ fn metric_add(m: Metric, v: float) {
 
     // Insertion-order ring + cursor.
     nb_set(m.ring, m.head, v)
+    let stored = nb_get(m.ring, m.head)
+    if evicting {
+        m.sum -= old
+        m.sum_sq -= old * old
+    }
+    m.sum += stored
+    m.sum_sq += stored * stored
     m.head = (m.head + 1) % m.cap
     if !evicting {
         m.count = m.count + 1
@@ -297,6 +302,8 @@ fn metric_add(m: Metric, v: float) {
 fn metric_reset(m: Metric) {
     m.head = 0
     m.count = 0
+    m.sum = 0.0
+    m.sum_sq = 0.0
     m.mean = 0.0
     m.stddev = 0.0
     m.min = 0.0

@@ -44,6 +44,7 @@ struct WorkerMode {
     ablation: skull_mir::ablation::Context,
     allocation_report: bool,
     allocation_activation: bool,
+    mem2reg_census: bool,
 }
 
 #[cfg(not(feature = "sequential"))]
@@ -54,6 +55,7 @@ impl WorkerMode {
             ablation: skull_mir::ablation::current_context(),
             allocation_report: crate::allocation_report::enabled(),
             allocation_activation: crate::allocation_report::activation_enabled(),
+            mem2reg_census: crate::mem2reg_stats::enabled(),
         }
     }
 
@@ -65,6 +67,7 @@ impl WorkerMode {
             _allocation_activation: crate::allocation_report::activation_scope(
                 self.allocation_activation,
             ),
+            _mem2reg_census: crate::mem2reg_stats::scope(self.mem2reg_census),
         }
     }
 }
@@ -75,6 +78,7 @@ struct WorkerScope {
     _ablation: skull_mir::ablation::ContextGuard,
     _allocation_report: crate::allocation_report::Scope,
     _allocation_activation: crate::allocation_report::ActivationScope,
+    _mem2reg_census: crate::mem2reg_stats::Scope,
 }
 
 #[cfg(not(feature = "sequential"))]
