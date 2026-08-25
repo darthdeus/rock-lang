@@ -405,6 +405,7 @@ fn perf_json_graphics_has_counters() {
         "shader_switches",
         "canvas_switches",
         "stream_upload_calls",
+        "stream_storage_replacements",
         "stream_upload_bytes",
         "streamed_vertices",
     ] {
