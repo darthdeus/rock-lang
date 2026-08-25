@@ -309,10 +309,7 @@ pub fn skull_inline_stats(path: &str) -> Result<()> {
         "  {} fns scanned, {} inlined into, {} splices, {} inst-copies",
         r.funcs_scanned, r.callers_inlined, r.total_splices, r.total_copies
     );
-    println!(
-        "  {} distinct callees ({} @inline-forced, {} over the size cap)",
-        r.distinct_callees, r.forced, r.over_cap
-    );
+    println!("  {} distinct callees", r.distinct_callees);
     if let Some((name, body, times, copies)) = &r.top_callee {
         println!("  most-copied callee: {name} ({body} insts x {times} = {copies} copies)");
     }
