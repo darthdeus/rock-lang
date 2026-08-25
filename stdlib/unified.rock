@@ -2044,6 +2044,10 @@ const EPSILON: float = 0.0000001
     return tostring(a) < tostring(b)
 """
 
+@nomangle inline(lua) fn __sort_map_keys(keys: any) = """
+    table.sort(keys._data, __rock_inspect_key_lt)
+"""
+
 @nomangle inline(lua) fn inspect(obj: any, cycle_detect: bool = true, precision: int = -1) -> string = """
     if type(obj) == "cdata" and _G.__ROCK_C_STRUCT then
         for _, info in pairs(_G.__ROCK_C_STRUCT) do
@@ -2391,13 +2395,18 @@ fn Map<K, V>.clear(map) {
     }
 }
 
+fn Map<K, V>.keys_into(map, result: [K]) -> [K] {
+    result.clear()
+    for (k, v) in map {
+        vec_push(result, k)
+    }
+    __sort_map_keys(result)
+    return result
+}
+
 fn Map<K, V>.keys(map) -> [K] {
     let keys: [K] = []
-    for (k, v) in map {
-        vec_push(keys, k)
-    }
-    sort(keys, (k: K) => tostring(k))
-    return keys
+    return map.keys_into(keys)
 }
 
 fn Map<K, V>.values(map) -> [V] {

@@ -4,7 +4,7 @@
 //! fixed-workload bench) and asserts the measured bytes/call stays at noise.
 //!
 //! This is the trustworthy oracle per CLAUDE.md: a fixed standalone workload,
-//! not the in-game true_alloc (which swings ~80 KB/frame run-to-run).
+//! not the in-game gross Lua allocator request (which swings ~80 KB/frame run-to-run).
 
 use std::path::Path;
 use std::process::Command;

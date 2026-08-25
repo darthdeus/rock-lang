@@ -881,9 +881,13 @@ fn kill_game_process(child: &mut Child) -> Result<()> {
 
 /// Run the game for N frames with profiling enabled and display performance summary
 fn apply_perf_env(cmd: &mut Command) {
+    let perf_no_sections =
+        std::env::var("PERF_NO_SECTIONS").unwrap_or_else(|_| "1".to_string());
     cmd.env("PERF_MODE", "1")
         .env("STONE_HEADLESS", "1")
-        .env("MAG_BOOT_PLAYING", "1");
+        .env("MAG_BOOT_PLAYING", "1")
+        .env("PERF_NO_SECTIONS", perf_no_sections)
+        .env("MAG_PERF_SAVE_FIXTURE", "1");
 }
 
 pub fn do_perf(
@@ -1301,6 +1305,8 @@ mod tests {
         assert_eq!(env.get("PERF_MODE"), Some(&"1"));
         assert_eq!(env.get("STONE_HEADLESS"), Some(&"1"));
         assert_eq!(env.get("MAG_BOOT_PLAYING"), Some(&"1"));
+        assert_eq!(env.get("PERF_NO_SECTIONS"), Some(&"1"));
+        assert_eq!(env.get("MAG_PERF_SAVE_FIXTURE"), Some(&"1"));
         assert!(!env.contains_key("MAG_SCREENSHOT"));
     }
     /// The whole point of the private session dir: `rock stone` must not write

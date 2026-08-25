@@ -17,6 +17,27 @@ fn run_rock(args: &[&str]) -> std::process::Output {
         .expect("spawn rock")
 }
 
+fn run_mag_without_host_key(
+    channel: &str,
+    ignore_missing_key: bool,
+) -> (tempfile::TempDir, PathBuf, std::process::Output) {
+    let dir = tempfile::tempdir().unwrap();
+    let output = dir.path().join("mag.lua");
+    let output_arg = output.to_str().unwrap().to_string();
+    let mut args = vec!["compile", "mag", "--channel", channel];
+    if ignore_missing_key {
+        args.extend(["--var", "TELEMETRY_TOKEN="]);
+    }
+    args.extend(["--output", &output_arg]);
+    let out = Command::new(rock_bin())
+        .current_dir(repo_root())
+        .args(args)
+        .env("ROCK_TELEMETRY_HOST_CONFIG", dir.path().join("missing-host"))
+        .output()
+        .expect("spawn mag build without a host key");
+    (dir, output, out)
+}
+
 #[test]
 fn mag_stamp_surfaces_are_declared_build_vars() {
     let root = repo_root();
@@ -64,6 +85,56 @@ fn mag_stamp_surfaces_are_declared_build_vars() {
     assert!(!build_info.contains("inline(js)"), "build_info still has an inline(js) stamp accessor");
     assert!(!telemetry.contains("__ROCK_"), "telemetry still reads a compatibility global");
     assert!(!build_info.contains("__ROCK_"), "build_info still reads a compatibility global");
+}
+
+#[test]
+fn mag_dev_build_without_the_declared_telemetry_key_warns_and_succeeds() {
+    let (_dir, output, out) = run_mag_without_host_key("dev", false);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "keyless dev build failed:\n{stderr}"
+    );
+    assert!(
+        output.exists(),
+        "a keyless dev build must produce its artifact"
+    );
+    assert!(
+        stderr.contains("TELEMETRY_TOKEN") && stderr.contains("continuing without a value"),
+        "keyless dev build must warn that its telemetry token is absent:\n{stderr}"
+    );
+}
+
+#[test]
+fn mag_release_build_without_the_declared_telemetry_key_fails_closed() {
+    let (_dir, output, out) = run_mag_without_host_key("steam", false);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "keyless release build unexpectedly succeeded:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("TELEMETRY_TOKEN"),
+        "failure must name the missing build var:\n{stderr}"
+    );
+    assert!(
+        !output.exists(),
+        "a failed keyless release build must not leave an artifact"
+    );
+}
+
+#[test]
+fn mag_release_build_can_explicitly_disable_telemetry() {
+    let (_dir, output, out) = run_mag_without_host_key("steam", true);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "explicit telemetry opt-out failed:\n{stderr}"
+    );
+    assert!(
+        output.exists(),
+        "an explicitly keyless release build must produce its artifact"
+    );
 }
 
 #[test]

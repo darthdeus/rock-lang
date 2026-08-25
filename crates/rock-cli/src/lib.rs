@@ -690,7 +690,7 @@ impl Args {
                 .help("Skip the first N wall-clock seconds from perf statistics (warmup). Applies to `rock perf` only. Default 2.0s. Set to 0 to disable."))
             .arg(Arg::new("gc-window").long("gc-window").default_value("0")
                 .value_parser(clap::value_parser!(usize))
-                .help("`rock perf` only: run a GC-stopped window of N frames (opening at --gc-window-start) and report TRUE bytes/frame allocated in the summary (memory.true_alloc_kb_per_frame). The trustworthy allocation oracle; the per-section alloc_kb is duration-correlated. 0 = disabled."))
+                .help("`rock perf` only: run a GC-stopped window of N frames (opening at --gc-window-start) and report gross Lua allocator request traffic KB/frame (every positive nsize, including full realloc targets) plus positive growth, explicit frees, realloc shrinks, and call counts. This is request traffic, not heap growth; per-section alloc_kb remains the duration-correlated proxy. 0 = disabled."))
             .arg(Arg::new("gc-window-start").long("gc-window-start").default_value("100")
                 .value_parser(clap::value_parser!(usize))
                 .help("`rock perf` only: frame the --gc-window opens on (default 100). Push it past warmup so the window lands on a warm JIT; `rock perf` sizes its frame budget to cover start + window."))

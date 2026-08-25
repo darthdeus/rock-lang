@@ -419,21 +419,16 @@ pub fn decorator_call_args(
 /// enough — the stdlib's accessors (`__rock_create_struct`, `vec_new`)
 /// nil-guard per-key, so they self-heal off a present-but-empty registry.
 fn runtime_prelude() -> &'static str {
-    // Mirrors rock-codegen's assembler init (`rock-codegen/src/backend/lua/
-    // assembler.rs`) -- skull is an independent backend emitting for the same
-    // LuaJIT runtime, so it needs the same runtime setup. Two parts:
+    // Runtime setup has two parts:
     //   1. LuaJIT mcode/trace tuning. skull (like rock-codegen) emits more Lua
     //      than LuaJIT's small-script defaults assume (32 KB mcode blocks /
     //      512 KB total / 1000 traces). A real game's hot traces overflow the
     //      mcode arena -> "failed to allocate mcode memory" -> a GLOBAL trace
     //      flush wipes every good trace -> the hot loop drops to the interpreter
     //      and re-traces on a cliff/spiral (mag floors_walls: ~2.6 ms vs ~0.5
-    //      with this). `sizemcode=512` is the load-bearing knob -- a trace's
-    //      machine code must fit ONE block, and the big inlined vertex-fill
-    //      traces assemble to >64 KB. Values kept IDENTICAL to assembler.rs
-    //      (full diagnosis there + docs/jit-fnew-codegen-investigation.md and
-    //      docs/skull-throughput-investigation.md); keep in sync -- shared-home
-    //      follow-up logged in docs/unfuck-backlog.md.
+    //      with this). A trace must fit one `sizemcode` block. On arm64 macOS,
+    //      dyld leaves room for the first block near the VM but later mappings
+    //      prevent a second one, so that first block must hold the hot set.
     //   2. splitmix64 RNG (stdlib `random_*` inline(lua) bodies call
     //      `__rock_rng_next`/`__rock_rng_seed` by name); seeded from
     //      ROCK_TEST_SEED for deterministic test runs.
@@ -465,7 +460,7 @@ fn runtime_prelude() -> &'static str {
 }
 
 const PRELUDE_TEMPLATE: &str =
-    r#"if jit and jit.opt then jit.opt.start("maxmcode=8192", "sizemcode=512", "maxtrace=4000", "maxrecord=32000", "maxsnap=4000") end
+    r#"if jit and jit.opt then jit.opt.start("maxmcode=8192", "sizemcode=8192", "maxtrace=4000", "maxrecord=32000", "maxsnap=4000") end
 if not _G.ffi then _G.ffi = require("ffi") end
 if not _G.__ROCK_C_STRUCT then _G.__ROCK_C_STRUCT = {} end
 if not _G.__ROCK_TYPE_TABLE then _G.__ROCK_TYPE_TABLE = {} end
@@ -628,24 +623,26 @@ _G.__rock_state_transaction_commit = function()
   if publish_binding then publish_binding() end
   rawset(_G, "__rock_state_transaction", nil)
 end
+_G.__rock_state_name_index_build = function()
+  local index = {}
+  local function add(key, entry)
+    if not key then return end
+    local old = index[key]
+    if old == nil or old == entry then index[key] = entry else index[key] = false end
+  end
+  for _, entry in ipairs(rawget(_G, "__ROCK_STATE_SCHEMA") or {}) do
+    add(entry.name, entry)
+    add(entry.identity, entry)
+    if entry.kind == "global" then
+      for _, physical in ipairs(entry.physical or {}) do add(physical, entry) end
+    end
+  end
+  rawset(_G, "__rock_state_name_index", index)
+  return index
+end
 _G.__rock_state_entry_for_name = function(name)
   local index = rawget(_G, "__rock_state_name_index")
-  if not index then
-    index = {}
-    local function add(key, entry)
-      if not key then return end
-      local old = index[key]
-      if old == nil or old == entry then index[key] = entry else index[key] = false end
-    end
-    for _, entry in ipairs(rawget(_G, "__ROCK_STATE_SCHEMA") or {}) do
-      add(entry.name, entry)
-      add(entry.identity, entry)
-      if entry.kind == "global" then
-        for _, physical in ipairs(entry.physical or {}) do add(physical, entry) end
-      end
-    end
-    rawset(_G, "__rock_state_name_index", index)
-  end
+  if not index then index = _G.__rock_state_name_index_build() end
   local entry = index[name]
   return entry ~= false and entry or nil
 end
@@ -1809,6 +1806,12 @@ mod tests {
 
     fn emit(src: &str) -> String {
         compile_source(src).unwrap_or_else(|e| panic!("skull compile failed: {}", e.message))
+    }
+
+    #[test]
+    fn runtime_prelude_keeps_the_mag_trace_working_set() {
+        let prelude = super::runtime_prelude();
+        assert!(prelude.contains("maxmcode=8192\", \"sizemcode=8192"));
     }
 
     /// Bare-name aliases (`_G["pick"] = pick_bool_ret_int`) for the user module's

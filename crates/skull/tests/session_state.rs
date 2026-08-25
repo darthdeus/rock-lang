@@ -50,6 +50,23 @@ fn generated_state_accesses_follow_mid_call_session_swaps() {
 }
 
 #[test]
+fn state_name_lookup_keeps_index_construction_out_of_the_hot_function() {
+    let emitted = emit_mir(FIXTURE);
+    let hot = emitted
+        .lua
+        .split("_G.__rock_state_entry_for_name = function(name)")
+        .nth(1)
+        .expect("state-name lookup function")
+        .split("_G.__rock_state_entry_for_identity")
+        .next()
+        .expect("state-name lookup body");
+    assert!(
+        !hot.contains("local function"),
+        "the traced state-name lookup must not carry the cold index-builder closure"
+    );
+}
+
+#[test]
 fn two_lua_sessions_initialize_and_isolate_mutable_globals() {
     let emitted = emit_mir(FIXTURE);
     let bump = mangled_name(&emitted.lua, "bump");
