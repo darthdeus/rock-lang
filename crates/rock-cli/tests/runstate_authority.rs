@@ -44,15 +44,17 @@ fn mag_uses_direct_session_state_without_a_run_root_or_accessor() {
         .expect("rock workspace root");
     let mut sources = Vec::new();
     rock_sources(&repo.join("mag"), &mut sources);
+    let run_state = ["Run", "State"].concat();
+    let run_accessor = ["mag", "_run", "_state"].concat();
     let forbidden = [
-        "struct RunState",
-        "Scene<RunState>",
-        "MAG_ACTIVE_RUN",
-        "mag_run_scene_for_access",
-        "fn mag_run_state",
-        "mag_run_state()",
-        "mag_world_scene",
-        "fn current_run",
+        format!("struct {run_state}"),
+        format!("Scene<{run_state}>"),
+        ["MAG", "_ACTIVE", "_RUN"].concat(),
+        ["mag", "_run", "_scene", "_for", "_access"].concat(),
+        format!("fn {run_accessor}"),
+        format!("{run_accessor}()"),
+        ["mag", "_world", "_scene"].concat(),
+        ["fn current", "_run"].concat(),
     ];
     let required = [
         "global player: Player",
@@ -67,7 +69,7 @@ fn mag_uses_direct_session_state_without_a_run_root_or_accessor() {
     for source in sources {
         let text = fs::read_to_string(&source).expect("read MAG source");
         for (line_number, line) in text.lines().enumerate() {
-            for name in forbidden {
+            for name in &forbidden {
                 if line.contains(name) {
                     findings.push(format!("{}:{}: {name}", source.display(), line_number + 1));
                 }
