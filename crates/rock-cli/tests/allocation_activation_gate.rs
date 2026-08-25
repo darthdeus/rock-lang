@@ -74,7 +74,7 @@ fn bounded_run_writes_activation_counts_joined_to_the_compiler_manifest() {
             (fields.len() == 5
                 && fields[0].len() == 16
                 && fields[4].parse::<u32>().is_ok_and(|line| line > 0))
-                .then_some(fields[0])
+            .then_some(fields[0])
         })
         .collect::<Vec<_>>();
     let manifest_ids = manifest_rows
@@ -91,7 +91,11 @@ fn bounded_run_writes_activation_counts_joined_to_the_compiler_manifest() {
         "a runtime site was absent from the compiler manifest",
     );
 
-    let lua_artifact = if lua.is_dir() { lua.join("main.lua") } else { lua.clone() };
+    let lua_artifact = if lua.is_dir() {
+        lua.join("main.lua")
+    } else {
+        lua.clone()
+    };
     assert!(lua_artifact.is_file(), "generated Lua artifact is missing");
     let joined = Command::new(env!("CARGO_BIN_EXE_rock"))
         .current_dir(repo_root())
@@ -109,21 +113,50 @@ fn bounded_run_writes_activation_counts_joined_to_the_compiler_manifest() {
         String::from_utf8_lossy(&joined.stderr),
     );
     let joined = String::from_utf8(joined.stdout).expect("UTF-8 joined report");
-    assert!(joined.starts_with("rock.allocation-join.v2\n"));
+    assert!(joined.starts_with("rock.allocation-join.v4\n"));
     let mut lines = joined.lines().skip(4);
     let header = lines.next().expect("joined report header");
     let artifact_line = header
         .split('\t')
         .position(|column| column == "lua_artifact_line")
         .expect("generated Lua column");
+    let direct_caller_count = header
+        .split('\t')
+        .position(|column| column == "direct_caller_count")
+        .expect("direct caller count column");
+    let direct_callers = header
+        .split('\t')
+        .position(|column| column == "direct_callers")
+        .expect("direct callers column");
     let joined_rows = lines
         .map(|line| line.split('\t').collect::<Vec<_>>())
         .collect::<Vec<_>>();
     assert_eq!(joined_rows.len(), declared, "joined active-site population");
     assert!(
-        joined_rows.iter().all(|row| row[artifact_line]
-            .parse::<u32>()
-            .is_ok_and(|line| line > 0)),
+        joined_rows
+            .iter()
+            .all(|row| row[artifact_line].parse::<u32>().is_ok_and(|line| line > 0)),
         "every active site must resolve to an exact generated Lua line",
+    );
+    assert!(
+        joined_rows.iter().any(|row| row[direct_caller_count]
+            .parse::<usize>()
+            .is_ok_and(|count| count > 1)),
+        "the populated artifact must expose at least one shared allocation body",
+    );
+    assert!(
+        joined_rows.iter().all(|row| {
+            let count = row[direct_caller_count]
+                .parse::<usize>()
+                .expect("numeric direct caller count");
+            let callers = row[direct_callers];
+            let names = if callers.is_empty() {
+                0
+            } else {
+                callers.split(" | ").count()
+            };
+            count == names
+        }),
+        "every caller count must match its named caller population",
     );
 }

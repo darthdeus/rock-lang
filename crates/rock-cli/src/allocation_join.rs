@@ -1,5 +1,5 @@
 use crate::Result;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt::Write as _;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -41,6 +41,8 @@ struct Site<'a> {
     lua_body_line: Option<u32>,
     update_chain: Option<&'a str>,
     draw_chain: Option<&'a str>,
+    update_callers: Option<&'a str>,
+    draw_callers: Option<&'a str>,
 }
 
 #[derive(Debug, Default)]
@@ -168,10 +170,12 @@ fn parse_manifest(manifest: &str) -> Result<BTreeMap<&str, Site<'_>>> {
                     .get(4)
                     .map(|line| line.parse::<u32>())
                     .transpose()
-                    .map_err(|error| anyhow::anyhow!(
-                        "allocation manifest site {} has invalid Lua body line: {error}",
-                        fields[0]
-                    ))?;
+                    .map_err(|error| {
+                        anyhow::anyhow!(
+                            "allocation manifest site {} has invalid Lua body line: {error}",
+                            fields[0]
+                        )
+                    })?;
                 if lua_body_line == Some(0) {
                     anyhow::bail!(
                         "allocation manifest site {} has zero Lua body line",
@@ -188,6 +192,8 @@ fn parse_manifest(manifest: &str) -> Result<BTreeMap<&str, Site<'_>>> {
                             lua_body_line,
                             update_chain: None,
                             draw_chain: None,
+                            update_callers: None,
+                            draw_callers: None,
                         },
                     )
                     .is_some()
@@ -204,15 +210,24 @@ fn parse_manifest(manifest: &str) -> Result<BTreeMap<&str, Site<'_>>> {
         if !site_id(id) {
             continue;
         }
-        let (_, chain) = rest
+        let (_, route_detail) = rest
             .split_once(" via ")
             .ok_or_else(|| anyhow::anyhow!("allocation route site {id} has no call chain"))?;
+        let (chain, callers) = route_detail
+            .split_once("\tcallers\t")
+            .map_or((route_detail, ""), |(chain, callers)| (chain, callers));
         let site = sites
             .get_mut(id)
             .ok_or_else(|| anyhow::anyhow!("allocation route site {id} is absent from manifest"))?;
         match route.expect("route checked above") {
-            RouteFilter::Update => site.update_chain = Some(chain),
-            RouteFilter::Draw => site.draw_chain = Some(chain),
+            RouteFilter::Update => {
+                site.update_chain = Some(chain);
+                site.update_callers = Some(callers);
+            }
+            RouteFilter::Draw => {
+                site.draw_chain = Some(chain);
+                site.draw_callers = Some(callers);
+            }
             _ => unreachable!(),
         }
     }
@@ -322,9 +337,9 @@ pub fn render_joined_report_with_jit(
         out,
         "{}",
         if jit.is_some() {
-            "rock.allocation-join.v3"
+            "rock.allocation-join.v5"
         } else {
-            "rock.allocation-join.v2"
+            "rock.allocation-join.v4"
         }
     )?;
     writeln!(out, "frames\t{frames}")?;
@@ -333,12 +348,12 @@ pub fn render_joined_report_with_jit(
     if jit.is_some() {
         writeln!(
             out,
-            "hits/frame\thits\troute\tkind\tsource\tbody\tlua_body_line\tlua_artifact_line\tcall_chain\tid\tjit_state\tjit_class\tjit_traces\tjit_ir\tjit_ops"
+            "hits/frame\thits\troute\tkind\tsource\tbody\tlua_body_line\tlua_artifact_line\tcall_chain\tdirect_caller_count\tdirect_callers\tid\tjit_state\tjit_class\tjit_traces\tjit_ir\tjit_ops"
         )?;
     } else {
         writeln!(
             out,
-            "hits/frame\thits\troute\tkind\tsource\tbody\tlua_body_line\tlua_artifact_line\tcall_chain\tid"
+            "hits/frame\thits\troute\tkind\tsource\tbody\tlua_body_line\tlua_artifact_line\tcall_chain\tdirect_caller_count\tdirect_callers\tid"
         )?;
     }
     for (id, count) in hits {
@@ -349,6 +364,14 @@ pub fn render_joined_report_with_jit(
             (None, Some(draw)) => ("draw", draw.to_string()),
             (None, None) => ("outside", String::new()),
         };
+        let callers = [site.update_callers, site.draw_callers]
+            .into_iter()
+            .flatten()
+            .flat_map(|callers| callers.split(" | "))
+            .filter(|caller| !caller.is_empty())
+            .collect::<BTreeSet<_>>();
+        let caller_count = callers.len();
+        let callers = callers.into_iter().collect::<Vec<_>>().join(" | ");
         let artifact_line = match (site.lua_body_line, lua_lines.as_ref()) {
             (Some(body_line), Some(lines)) => {
                 let body_start = body_starts.get(site.body).ok_or_else(|| {
@@ -371,22 +394,25 @@ pub fn render_joined_report_with_jit(
         };
         write!(
             out,
-            "{:.4}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            "{:.4}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
             count as f64 / frames as f64,
             count,
             route,
             site.kind,
             site.source,
             site.body,
-            site.lua_body_line.map_or_else(|| "?".to_string(), |line| line.to_string()),
+            site.lua_body_line
+                .map_or_else(|| "?".to_string(), |line| line.to_string()),
             artifact_line,
             chain,
+            caller_count,
+            callers,
             id,
         )?;
         if let Some(jit) = &jit {
             let key = (
                 site.body.to_string(),
-                site.lua_body_line.expect("v3 manifest checked above"),
+                site.lua_body_line.expect("JIT manifest checked above"),
             );
             if let Some(evidence) = jit.get(&key) {
                 let state = match (evidence.sunk, evidence.retained) {
@@ -437,10 +463,12 @@ pub fn run(files: &[String]) -> Result<()> {
         .get(3)
         .map(std::fs::read_to_string)
         .transpose()
-        .map_err(|error| anyhow::anyhow!(
-            "cannot read generated Lua {}: {error}",
-            files.get(3).map_or("", String::as_str)
-        ))?;
+        .map_err(|error| {
+            anyhow::anyhow!(
+                "cannot read generated Lua {}: {error}",
+                files.get(3).map_or("", String::as_str)
+            )
+        })?;
     let jit_trace = files
         .get(4)
         .map(std::fs::read_to_string)
@@ -481,7 +509,7 @@ route frame.update: 1 roots, 1 reachable bodies, 1 allocation-capable sites, 0 o
   aaaaaaaaaaaaaaaa string-concat at game.rock:10 via update_root -> update_leaf
 
 route frame.draw: 1 roots, 1 reachable bodies, 1 allocation-capable sites, 0 opaque boundaries
-  bbbbbbbbbbbbbbbb vec-construction at game.rock:20 via draw_root -> draw_leaf
+  bbbbbbbbbbbbbbbb vec-construction at game.rock:20 via draw_root -> draw_leaf	callers	draw_left | draw_right
 "#;
 
     const ACTIVATION: &str = r#"rock.allocation-activation.v1
@@ -503,6 +531,35 @@ cccccccccccccccc	2
         assert!(report.contains("draw_root -> draw_leaf"));
         assert!(!report.contains("update_leaf"));
         assert!(!report.contains("outside_leaf"));
+    }
+
+    #[test]
+    fn join_exposes_every_direct_caller_beside_the_shortest_chain() {
+        let report = render_joined_report(MANIFEST, ACTIVATION, Some("draw"), None)
+            .expect("joined caller-aware allocation report");
+        let mut lines = report.lines().skip(4);
+        let header = lines
+            .next()
+            .expect("joined header")
+            .split('\t')
+            .collect::<Vec<_>>();
+        let caller_count = header
+            .iter()
+            .position(|column| *column == "direct_caller_count")
+            .expect("direct caller count column");
+        let callers = header
+            .iter()
+            .position(|column| *column == "direct_callers")
+            .expect("direct callers column");
+        let row = lines
+            .next()
+            .expect("joined row")
+            .split('\t')
+            .collect::<Vec<_>>();
+
+        assert_eq!(row.len(), header.len(), "joined row must match its schema");
+        assert_eq!(row[caller_count], "2", "{report}");
+        assert_eq!(row[callers], "draw_left | draw_right");
     }
 
     #[test]
@@ -540,7 +597,7 @@ trace	ir	state	op	body_start	lua_line
         )
         .expect("joined JIT allocation evidence");
 
-        assert!(report.starts_with("rock.allocation-join.v3\n"));
+        assert!(report.starts_with("rock.allocation-join.v5\n"));
         assert!(report.contains("jit_state\tjit_class\tjit_traces\tjit_ir\tjit_ops"));
         assert!(report.contains("mixed\tobject\t2\t2\tTNEW"));
     }
@@ -568,7 +625,9 @@ trace	ir	state	op	body_start	lua_line
         )
         .expect_err("JIT join needs exact body-local lines");
 
-        assert!(error.to_string().contains("five-column allocation manifest"));
+        assert!(error
+            .to_string()
+            .contains("five-column allocation manifest"));
     }
 
     #[test]
@@ -577,11 +636,9 @@ trace	ir	state	op	body_start	lua_line
         let error = render_joined_report(MANIFEST, &activation, None, None)
             .expect_err("cross-artifact site IDs must reject");
 
-        assert!(
-            error
-                .to_string()
-                .contains("absent from the allocation manifest")
-        );
+        assert!(error
+            .to_string()
+            .contains("absent from the allocation manifest"));
     }
 
     #[test]

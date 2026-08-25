@@ -4,7 +4,7 @@ use skull_mir::cfg::reachable_blocks_from;
 use skull_mir::mir::{FuncRef, Inst, MirFunc};
 use skull_mir::monoty::MonoInterner;
 use std::cell::Cell;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 thread_local! {
     static ENABLED: Cell<bool> = const { Cell::new(false) };
@@ -152,6 +152,7 @@ pub struct AllocationFinding {
     pub body: String,
     pub site: AllocationSite,
     pub call_chain: Vec<String>,
+    pub direct_callers: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -192,6 +193,7 @@ impl AllocationReport {
         roots.sort();
         roots.dedup();
         let mut parent: BTreeMap<String, Option<String>> = BTreeMap::new();
+        let mut direct_callers: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         let mut queue = VecDeque::new();
         for root in &roots {
             if self.bodies.contains_key(root) && !parent.contains_key(root) {
@@ -204,9 +206,15 @@ impl AllocationReport {
                 continue;
             };
             for callee in &body.callees {
-                if self.bodies.contains_key(callee) && !parent.contains_key(callee) {
-                    parent.insert(callee.clone(), Some(body_name.clone()));
-                    queue.push_back(callee.clone());
+                if self.bodies.contains_key(callee) {
+                    direct_callers
+                        .entry(callee.clone())
+                        .or_default()
+                        .insert(body_name.clone());
+                    if !parent.contains_key(callee) {
+                        parent.insert(callee.clone(), Some(body_name.clone()));
+                        queue.push_back(callee.clone());
+                    }
                 }
             }
         }
@@ -227,6 +235,10 @@ impl AllocationReport {
                     body: body_name.clone(),
                     site: site.clone(),
                     call_chain,
+                    direct_callers: direct_callers
+                        .get(body_name)
+                        .map(|callers| callers.iter().cloned().collect())
+                        .unwrap_or_default(),
                 };
                 if site.kind == AllocationKind::OpaqueCall {
                     opaque_boundaries.push(finding);
@@ -359,12 +371,13 @@ impl AllocationReport {
                     .unwrap_or_default();
                 let _ = writeln!(
                     out,
-                    "  {:016x} {}{} at {} via {}",
+                    "  {:016x} {}{} at {} via {}\tcallers\t{}",
                     finding.site.id,
                     finding.site.kind.as_str(),
                     detail,
                     site,
                     finding.call_chain.join(" -> "),
+                    finding.direct_callers.join(" | "),
                 );
             }
         }

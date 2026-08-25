@@ -1,16 +1,15 @@
-use crate::common::{AllocationActivationGuard, AllocationReportGuard, InlineOffGuard, emit_mir};
+use crate::common::{emit_mir, AllocationActivationGuard, AllocationReportGuard, InlineOffGuard};
 
 #[test]
 fn allocation_report_is_off_for_an_ordinary_compile() {
     let emit = emit_mir("fn root() -> [int] { return [1] }");
     assert!(emit.allocation_report.bodies.is_empty());
     assert!(!emit.lua.contains("__rock_alloc_hit"));
-    assert!(
-        emit.allocation_report
-            .lifecycle_routes
-            .iter()
-            .all(|route| route.findings.is_empty())
-    );
+    assert!(emit
+        .allocation_report
+        .lifecycle_routes
+        .iter()
+        .all(|route| route.findings.is_empty()));
 }
 
 #[test]
@@ -92,6 +91,54 @@ fn update_root() -> int {
     );
     assert!(finding.call_chain[0].contains("update_root"));
     assert!(finding.call_chain[1].contains("alloc_leaf"));
+}
+
+#[test]
+fn allocation_report_retains_every_reachable_direct_caller() {
+    let _inline = InlineOffGuard::on();
+    let _report = AllocationReportGuard::on();
+    let emit = emit_mir(
+        r#"
+fn alloc_leaf() -> [int] {
+    return [1, 2, 3]
+}
+
+fn left() -> int {
+    return alloc_leaf().len()
+}
+
+fn right() -> int {
+    return alloc_leaf().len()
+}
+
+fn update_root() -> int {
+    return left() + right()
+}
+"#,
+    );
+
+    let route = emit
+        .allocation_report
+        .trace_from_diagnostic_names("manual.update", &["update_root"]);
+    let finding = route
+        .findings
+        .iter()
+        .find(|finding| finding.site.kind.as_str() == "vec-construction")
+        .expect("shared Vec construction");
+
+    assert_eq!(
+        finding.direct_callers.len(),
+        2,
+        "a shared allocation body must not collapse to one arbitrary caller",
+    );
+    assert!(finding
+        .direct_callers
+        .iter()
+        .any(|caller| caller.contains("left")));
+    assert!(finding
+        .direct_callers
+        .iter()
+        .any(|caller| caller.contains("right")));
 }
 
 #[test]
