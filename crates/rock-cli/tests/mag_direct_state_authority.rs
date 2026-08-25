@@ -90,3 +90,36 @@ fn mag_uses_direct_session_state_without_a_run_root_or_accessor() {
         assert_eq!(found.len(), 1, "`{declaration}` must have one production definition: {found:?}");
     }
 }
+
+#[test]
+fn mag_player_queries_are_receiver_methods() {
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("rock workspace root");
+    let source = fs::read_to_string(repo.join("mag/player.rock")).expect("read MAG player source");
+    let required = [
+        "fn Player.is_paralyzed(player)",
+        "fn Player.effective_armor(player)",
+        "fn Player.shaped_progress(player)",
+        "fn Player.sprite(player)",
+        "fn Player.stamina_regen_per_sec(player)",
+        "fn Player.mana_per_sec(player)",
+        "fn Player.tint(player)",
+    ];
+    for declaration in required {
+        assert!(source.contains(declaration), "missing Player receiver declaration `{declaration}`");
+    }
+    let forbidden = [
+        "fn player_is_paralyzed()",
+        "fn player_effective_armor()",
+        "fn player_shaped_progress()",
+        "fn player_sprite()",
+        "fn player_stamina_regen_per_sec()",
+        "fn player_mana_per_sec()",
+        "fn player_tint()",
+    ];
+    for declaration in forbidden {
+        assert!(!source.contains(declaration), "prefix-only Player query remains `{declaration}`");
+    }
+}
