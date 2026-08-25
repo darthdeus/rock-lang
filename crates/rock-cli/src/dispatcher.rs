@@ -329,7 +329,21 @@ impl CommandContext {
     /// skull: the bone workspace + skull's emitted registry).
     fn handle_sim(&self) -> Result<()> {
         let backend = self.args.backend;
-        if self.args.list {
+        if let Some(path) = self.args.allocation_census.as_deref() {
+            if self.args.list {
+                anyhow::bail!("--allocation-census cannot be combined with sim --list");
+            }
+            if self.args.files.is_empty() {
+                anyhow::bail!("allocation census needs a project: rock sim --allocation-census PATH <project> [name]");
+            }
+            crate::run_sim::do_run_allocation_census(
+                backend,
+                &self.args.files[0],
+                &self.args.files[1..],
+                path,
+                self.args.jobs,
+            )
+        } else if self.args.list {
             if self.args.files.is_empty() {
                 anyhow::bail!("sim --list needs a project: rock sim --list <project>");
             }
@@ -622,6 +636,9 @@ impl CommandContext {
             // there. A target disagreement is only diagnosable by diffing them.
             let dump = std::env::var("ROCK_MONO_DUMP").ok();
             return crate::mono_manifest::do_mono_manifest(Some(&root), dump.as_deref());
+        }
+        if self.args.command == CliCommand::AllocationJoin {
+            return crate::allocation_join::run(&self.args.files);
         }
         // iter-lsp is the tight-loop profiler for the per-edit LSP query path
         // (BoneWorkspace on the bone backend); dispatched early like the other

@@ -4,6 +4,9 @@
 
 mod common;
 
+#[path = "allocation_report.rs"]
+mod allocation_report;
+
 #[path = "ablation_totality.rs"]
 mod ablation_totality;
 #[path = "arena_column_oracle.rs"]
@@ -46,6 +49,8 @@ mod expansion_admission;
 mod concrete_expansion;
 #[path = "enum_cdata.rs"]
 mod enum_cdata;
+#[path = "enum_flat_equality.rs"]
+mod enum_flat_equality;
 #[path = "enum_flat_field_spread.rs"]
 mod enum_flat_field_spread;
 #[path = "enum_payload_sroa.rs"]

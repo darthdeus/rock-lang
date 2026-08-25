@@ -403,10 +403,10 @@ impl Builder<'_> {
     }
 
     /// The leaf shape of THIS VARIANT's payload at position `i`, when the position
-    /// is widened to a `nobox` value's leaves. `None` for every ordinary position.
+    /// is widened to a scalarizable value's leaves. `None` for every ordinary position.
     ///
     /// Both the position AND the variant have to be asked. A position is widened
-    /// because SOME variant carries a `nobox` value there; a sibling variant with
+    /// because SOME variant carries a scalarizable value there; a sibling variant with
     /// an ordinary payload at the same position occupies only the first slot, and
     /// reading it through the widened shape binds a float as if it were a value
     /// struct. Read off the enum DECLARATION, the same source the ctor's placement

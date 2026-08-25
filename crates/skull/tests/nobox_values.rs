@@ -437,6 +437,49 @@ fn a_nested_nobox_child_widens_without_materializing() {
     );
 }
 
+const NOBOX_NESTED_PLAIN_OWNER_FIELD_READ: &str = r#"
+nobox value Id { value: int }
+nobox value Grid { x: int, y: int }
+nobox value Place { space: Id, grid: Grid }
+struct Owner { place: Place }
+
+fn id_equal(a: Id, b: Id) -> bool { return a.value == b.value }
+
+fn contains(owners: Arena<Owner>, space: Id, grid: Grid) -> bool {
+    for (_, owner) in owners {
+        if id_equal(owner.place.space, space) && owner.place.grid == grid {
+            return true
+        }
+    }
+    return false
+}
+
+fn main() {
+    let owner = Owner {
+        place: Place { space: Id { value: 11 }, grid: Grid { x: 13, y: 17 } }
+    }
+    let owners: Arena<Owner> = arena_new()
+    owners.insert(owner)
+    print(contains(owners, Id { value: 11 }, Grid { x: 13, y: 17 }))
+}
+"#;
+
+#[test]
+fn a_plain_owner_reads_every_leaf_of_a_nested_nobox_field() {
+    let lua = emit_module(NOBOX_NESTED_PLAIN_OWNER_FIELD_READ);
+    let body = function_body(&lua, "contains");
+    for field in ["place.space.value", "place.grid.x", "place.grid.y"] {
+        assert!(
+            body.contains(&format!(r#"["{field}"]"#)),
+            "nested nobox field read stopped before `{field}`:\n{body}"
+        );
+    }
+    assert_eq!(
+        run_luajit(&format!("{lua}\nmain()\n"), "nobox_nested_plain_owner_read"),
+        "true"
+    );
+}
+
 const NOBOX_COLUMN_WIDEN: &str = r#"
 nobox value NV2 { x: float, y: float }
 

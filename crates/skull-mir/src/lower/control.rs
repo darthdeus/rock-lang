@@ -189,6 +189,23 @@ impl Builder<'_> {
                         });
                     }
                 }
+                if let (Some(lhs_shape), Some(rhs_shape)) = (
+                    self.flat_enum_value_shape_of(lhs)?,
+                    self.flat_enum_value_shape_of(rhs)?,
+                ) {
+                    if lhs_shape.name == rhs_shape.name && lhs_shape.fields == rhs_shape.fields {
+                        let lhs_repr = self.lower_expr_repr(lhs)?;
+                        let lhs_leaves = self.repr_to_leaves_bundle(&lhs_repr)?;
+                        let rhs_repr = self.lower_expr_repr(rhs)?;
+                        let rhs_leaves = self.repr_to_leaves_bundle(&rhs_repr)?;
+                        let equal = self.emit_all_equal(&lhs_leaves, &rhs_leaves);
+                        return Ok(if matches!(op, BinOp::Eq) {
+                            equal
+                        } else {
+                            self.emit_cur(Inst::Not(equal))
+                        });
+                    }
+                }
                 // Non-scalar equality is STRUCTURAL, not Lua reference
                 // equality: it routes through the stdlib `__op_eq`/`__op_ne`,
                 // which walk fields via `pairs()` (cdata value structs hit the

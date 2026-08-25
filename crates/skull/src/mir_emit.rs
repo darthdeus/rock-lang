@@ -23,7 +23,7 @@ use bone_semantic::hir::{BodyOwner, Expr};
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::{Idx, ModuleId};
 use rustc_hash::{FxHashMap, FxHashSet};
-use skull_codegen_lua::{emit_function, emit_named, mangle_fn, CodegenCtx};
+use skull_codegen_lua::{emit_function, mangle_fn, CodegenCtx};
 use skull_mir::instance::Instance;
 use skull_mir::mir::{FuncRef, Inst, MirFunc, Term};
 use skull_parser::{CompilerError, CompilerErrorKind};
@@ -42,6 +42,8 @@ use ustr::Ustr;
 struct WorkerMode {
     inline_off: bool,
     ablation: skull_mir::ablation::Context,
+    allocation_report: bool,
+    allocation_activation: bool,
 }
 
 #[cfg(not(feature = "sequential"))]
@@ -50,6 +52,8 @@ impl WorkerMode {
         Self {
             inline_off: skull_transform::inline_off_active(),
             ablation: skull_mir::ablation::current_context(),
+            allocation_report: crate::allocation_report::enabled(),
+            allocation_activation: crate::allocation_report::activation_enabled(),
         }
     }
 
@@ -57,6 +61,10 @@ impl WorkerMode {
         WorkerScope {
             _inline: self.inline_off.then(skull_transform::inline_off_guard),
             _ablation: skull_mir::ablation::enter_context(self.ablation.clone()),
+            _allocation_report: crate::allocation_report::scope(self.allocation_report),
+            _allocation_activation: crate::allocation_report::activation_scope(
+                self.allocation_activation,
+            ),
         }
     }
 }
@@ -65,6 +73,8 @@ impl WorkerMode {
 struct WorkerScope {
     _inline: Option<skull_transform::InlineOffGuard>,
     _ablation: skull_mir::ablation::ContextGuard,
+    _allocation_report: crate::allocation_report::Scope,
+    _allocation_activation: crate::allocation_report::ActivationScope,
 }
 
 #[cfg(not(feature = "sequential"))]
@@ -572,6 +582,9 @@ fn extern_ret(
 /// The assembled new-path program plus the parity gap.
 pub struct MirEmit {
     pub lua: String,
+    /// Allocation-capable operations registered by final Lua emission, with
+    /// residual call edges and compiler-owned per-frame lifecycle routes.
+    pub allocation_report: crate::allocation_report::AllocationReport,
     /// Artifact-owned callable identities and their self-validating census.
     pub code_artifact: skull_mir::code_identity::CodeArtifact,
     /// The compiler-owned lifecycle inventory staged by this artifact.
@@ -1508,6 +1521,7 @@ struct UnitOut {
     /// production comptime reads are global initializers -- dropping them here
     /// is how the cimgui embeds went missing from the watch set.
     comptime_reads: Vec<skull_mir::mir::ComptimeRead>,
+    allocation_bodies: Vec<crate::allocation_report::AllocationBody>,
     times: PhaseTimes,
     attribution: UnitAttribution,
 }
@@ -1624,7 +1638,25 @@ fn emit_decorator_unit(
             }
             skull_codegen_lua::regalloc_time_reset();
             let te = Instant::now();
-            let mut lua = emit_named(ws, cg, scx.interner(), &deco_name, &mf);
+            let emission = emit_named_with_allocation_report(
+                ws,
+                cg,
+                scx.interner(),
+                &deco_name,
+                &mf,
+                &[],
+            );
+            let mut lua = emission.lua;
+            if let Some(body) = crate::allocation_report::collect_emitted_body(
+                ws,
+                scx.interner(),
+                &deco_name,
+                d.name.as_str(),
+                &mf,
+                emission.allocation_sites,
+            ) {
+                out.allocation_bodies.push(body);
+            }
             let root_emit = te.elapsed();
             out.times.emit += root_emit;
             out.times.emit_work |= root_emit > Duration::ZERO;
@@ -1637,6 +1669,7 @@ fn emit_decorator_unit(
                 scx,
                 &mut mf.nested_fns,
                 &mf.statics,
+                Some(&mut out.allocation_bodies),
                 &mut lua,
                 &mut out.times,
             ) {
@@ -1961,7 +1994,25 @@ fn emit_global_unit(
             let key = Ustr::from(&init_name);
             skull_codegen_lua::regalloc_time_reset();
             let te = Instant::now();
-            let mut lua = emit_named(ws, cg, scx.interner(), &init_name, &mf);
+            let emission = emit_named_with_allocation_report(
+                ws,
+                cg,
+                scx.interner(),
+                &init_name,
+                &mf,
+                &[],
+            );
+            let mut lua = emission.lua;
+            if let Some(body) = crate::allocation_report::collect_emitted_body(
+                ws,
+                scx.interner(),
+                &init_name,
+                g.name.as_str(),
+                &mf,
+                emission.allocation_sites,
+            ) {
+                out.allocation_bodies.push(body);
+            }
             let root_emit = te.elapsed();
             out.times.emit += root_emit;
             out.times.emit_work |= root_emit > Duration::ZERO;
@@ -1974,6 +2025,7 @@ fn emit_global_unit(
                 scx,
                 &mut mf.nested_fns,
                 &mf.statics,
+                Some(&mut out.allocation_bodies),
                 &mut lua,
                 &mut out.times,
             ) {
@@ -2043,6 +2095,7 @@ fn merge_units(
     calls: &mut Vec<FuncRef>,
     global_names: &mut Vec<Ustr>,
     code_artifact: &mut skull_mir::code_identity::CodeArtifact,
+    allocation_bodies: &mut Vec<crate::allocation_report::AllocationBody>,
     attribution: &mut AttributionAccumulator,
     times: &mut PhaseTimes,
 ) {
@@ -2061,6 +2114,7 @@ fn merge_units(
         calls.extend(u.calls);
         global_names.extend(u.global_names);
         code_artifact.merge(u.code_artifact);
+        allocation_bodies.extend(u.allocation_bodies);
         attribution.add_unit(&u.attribution);
         times.add(&u.times);
     }
@@ -2417,6 +2471,7 @@ pub fn emit_workspace_mir_in_for_renderer(
 #[derive(Clone)]
 struct Chunk {
     lua: String,
+    allocation_bodies: Vec<crate::allocation_report::AllocationBody>,
     /// Callee bodies whose SOURCE or inline-eligibility affects this chunk:
     /// everything inlined in (transitive) plus every callee still called (its
     /// body could flip eligibility). Re-emit this chunk if any of them re-infer.
@@ -2674,7 +2729,6 @@ fn rebuild_chunk(
 /// (ordinary + coroutine bodies), keyed by [`Instance`]. `Err` records a body the
 /// new path could not lower (the parity gap). Everything else is regenerated by
 /// [`assemble`] every time. See `docs/skull-incremental-emit-plan.md`.
-#[derive(Clone)]
 pub struct SkullEmitCache {
     chunks: FxHashMap<Instance, Result<Chunk, CompilerError>>,
     concrete: crate::concrete_body::ConcreteBodies,
@@ -2762,16 +2816,16 @@ pub struct SkullEmitCache {
     emitted: FxHashSet<Instance>,
     /// Logical callable table from the last complete assembly. Body overlays
     /// preserve this identity table; a full/incremental assembly refreshes it.
-    code_artifact: skull_mir::code_identity::CodeArtifact,
+    code_artifact: std::sync::Arc<skull_mir::code_identity::CodeArtifact>,
     /// Lifecycle metadata for the published artifact. Body overlays replace
     /// fingerprints while structural changes take the full transition path.
-    lifecycle_plan: Option<skull_mir::lifecycle::LifecyclePlan>,
+    lifecycle_plan: Option<std::sync::Arc<skull_mir::lifecycle::LifecyclePlan>>,
     /// Logical state table from the last complete assembly. Body overlays keep
     /// it unchanged; a full/incremental assembly replaces it atomically.
-    state_schema: Option<skull_mir::state_schema::StateSchema>,
+    state_schema: Option<std::sync::Arc<skull_mir::state_schema::StateSchema>>,
     /// Definition inventory from the last complete assembly. Body overlays
     /// retain it because definition structure is a full-reload boundary.
-    definition_plan: Option<skull_mir::definition::DefinitionPlan>,
+    definition_plan: Option<std::sync::Arc<skull_mir::definition::DefinitionPlan>>,
     /// Exact identity of the Artifact currently staged by this cache.
     artifact_fingerprint: Option<String>,
     /// Comptime reads of the always-emitted units (global initializers,
@@ -2781,6 +2835,7 @@ pub struct SkullEmitCache {
     unit_comptime_reads: UnitComptimeReads,
     renderer_target: RendererTarget,
     repair_stats: IncrementalRepairStats,
+    body_edit_rollback: Option<BodyEditRollback>,
 }
 
 /// Structural work performed by the last body-only cache update. The counters
@@ -2923,6 +2978,22 @@ struct RootCache {
     roots: Vec<FuncRef>,
 }
 
+struct BodyEditRollback {
+    reinferred: Vec<(ModuleId, BodyOwner)>,
+    edits: Vec<crate::instance_graph::SpanEdit>,
+    changed_since_full: FxHashSet<Instance>,
+    changed_consts_since_full: FxHashSet<(ModuleId, Idx<bone_semantic::hir::GlobalDef>)>,
+    static_key_baseline: FxHashMap<Ustr, String>,
+    emitted: FxHashSet<Instance>,
+    code_artifact: std::sync::Arc<skull_mir::code_identity::CodeArtifact>,
+    lifecycle_plan: Option<std::sync::Arc<skull_mir::lifecycle::LifecyclePlan>>,
+    state_schema: Option<std::sync::Arc<skull_mir::state_schema::StateSchema>>,
+    definition_plan: Option<std::sync::Arc<skull_mir::definition::DefinitionPlan>>,
+    artifact_fingerprint: Option<String>,
+    unit_comptime_reads: UnitComptimeReads,
+    repair_stats: IncrementalRepairStats,
+}
+
 /// A `static` cell's reload key: rendered type + initializer content hash. Equal
 /// keys mean "same meaning, preserve the live cell"; a changed key triggers a
 /// reset + re-init. Shared by `assemble` and `assemble_overlay` so complete and
@@ -2942,6 +3013,64 @@ fn collect_callee_frefs(mf: &MirFunc, out: &mut FxHashSet<FuncRef>) {
                 out.insert(*func);
             }
             _ => {}
+        }
+    }
+}
+
+fn emit_function_with_allocation_report(
+    ws: &Workspace,
+    cg: &CodegenCtx,
+    interner: &skull_mir::monoty::MonoInterner,
+    self_ref: FuncRef,
+    mf: &MirFunc,
+) -> skull_codegen_lua::LuaEmission {
+    if crate::allocation_report::enabled() {
+        skull_codegen_lua::emit_function_with_allocation_sites(
+            ws,
+            cg,
+            interner,
+            self_ref,
+            mf,
+            crate::allocation_report::activation_enabled(),
+        )
+    } else {
+        skull_codegen_lua::LuaEmission {
+            lua: emit_function(ws, cg, interner, self_ref, mf),
+            allocation_sites: Vec::new(),
+        }
+    }
+}
+
+fn emit_named_with_allocation_report(
+    ws: &Workspace,
+    cg: &CodegenCtx,
+    interner: &skull_mir::monoty::MonoInterner,
+    name: &str,
+    mf: &MirFunc,
+    inherited_statics: &[skull_mir::mir::StaticCell],
+) -> skull_codegen_lua::LuaEmission {
+    if crate::allocation_report::enabled() {
+        skull_codegen_lua::emit_named_framed_with_allocation_sites(
+            ws,
+            cg,
+            interner,
+            name,
+            mf,
+            None,
+            inherited_statics,
+            crate::allocation_report::activation_enabled(),
+        )
+    } else {
+        skull_codegen_lua::LuaEmission {
+            lua: skull_codegen_lua::emit_named_with_statics(
+                ws,
+                cg,
+                interner,
+                name,
+                mf,
+                inherited_statics,
+            ),
+            allocation_sites: Vec::new(),
         }
     }
 }
@@ -3006,6 +3135,9 @@ fn emit_coroutine_chunk(
         &plan,
         mf,
     )?;
+    // Coroutine construction and transformed step/hook bodies are kept as an
+    // opaque boundary until their generated emitter owns site registration.
+    let allocation_bodies = Vec::new();
     times.emit = te.elapsed();
     times.emit_work = times.emit > Duration::ZERO;
     times.regalloc = skull_codegen_lua::regalloc_time_elapsed().min(times.emit);
@@ -3017,6 +3149,7 @@ fn emit_coroutine_chunk(
     let deps = FxHashSet::default();
     Ok(Chunk {
         lua,
+        allocation_bodies,
         deps,
         direct_globals: Vec::new(),
         direct_calls: Vec::new(),
@@ -3258,7 +3391,19 @@ fn emit_body_chunk_with_mutation(
     times.validation_work = true;
     skull_codegen_lua::regalloc_time_reset();
     let te = Instant::now();
-    let mut lua = emit_function(ws, cg, scx.interner(), self_ref, &mf);
+    let emission = emit_function_with_allocation_report(ws, cg, scx.interner(), self_ref, &mf);
+    let mut lua = emission.lua;
+    let mut allocation_bodies = Vec::new();
+    if let Some(body) = crate::allocation_report::collect_emitted_body(
+        ws,
+        scx.interner(),
+        &name,
+        f.name.as_str(),
+        &mf,
+        emission.allocation_sites,
+    ) {
+        allocation_bodies.push(body);
+    }
     times.emit = te.elapsed();
     times.emit_work = times.emit > Duration::ZERO;
     times.regalloc = skull_codegen_lua::regalloc_time_elapsed().min(times.emit);
@@ -3276,6 +3421,7 @@ fn emit_body_chunk_with_mutation(
         &mf.statics,
         &mut deps,
         &mut statics,
+        &mut allocation_bodies,
         &mut lua,
         &mut times,
     )?;
@@ -3284,6 +3430,7 @@ fn emit_body_chunk_with_mutation(
     let calls = skull_mir::reach::call_targets(&mf);
     Ok(Chunk {
         lua,
+        allocation_bodies,
         deps,
         direct_globals,
         direct_calls,
@@ -3310,6 +3457,7 @@ fn emit_nested_fns(
     inherited_statics: &[skull_mir::mir::StaticCell],
     deps: &mut FxHashSet<FuncRef>,
     statics: &mut Vec<skull_mir::mir::StaticCell>,
+    allocation_bodies: &mut Vec<crate::allocation_report::AllocationBody>,
     out: &mut String,
     times: &mut PhaseTimes,
 ) -> Result<(), CompilerError> {
@@ -3328,14 +3476,25 @@ fn emit_nested_fns(
         statics.extend(nf.statics.iter().cloned());
         skull_codegen_lua::regalloc_time_reset();
         let te = Instant::now();
-        out.push_str(&skull_codegen_lua::emit_named_with_statics(
+        let emission = emit_named_with_allocation_report(
             ws,
             cg,
             scx.interner(),
             nf.name.as_str(),
             nf,
             inherited_statics,
-        ));
+        );
+        out.push_str(&emission.lua);
+        if let Some(body) = crate::allocation_report::collect_emitted_body(
+            ws,
+            scx.interner(),
+            nf.name.as_str(),
+            nf.name.as_str(),
+            nf,
+            emission.allocation_sites,
+        ) {
+            allocation_bodies.push(body);
+        }
         let emit = te.elapsed();
         times.emit += emit;
         times.emit_work |= emit > Duration::ZERO;
@@ -3353,6 +3512,7 @@ fn emit_nested_fns(
             &next_inherited,
             deps,
             statics,
+            allocation_bodies,
             out,
             times,
         )?;
@@ -3381,6 +3541,7 @@ fn emit_pass_nested_fns(
     scx: &skull_mir::lower::ScalarCtx,
     nested: &mut [MirFunc],
     inherited_statics: &[skull_mir::mir::StaticCell],
+    mut allocation_bodies: Option<&mut Vec<crate::allocation_report::AllocationBody>>,
     out: &mut String,
     times: &mut PhaseTimes,
 ) -> Result<(), CompilerError> {
@@ -3392,14 +3553,36 @@ fn emit_pass_nested_fns(
         times.cleanup_work |= mir_live_instructions(nf) != cleanup_before;
         skull_codegen_lua::regalloc_time_reset();
         let te = Instant::now();
-        out.push_str(&skull_codegen_lua::emit_named_with_statics(
-            ws,
-            cg,
-            scx.interner(),
-            nf.name.as_str(),
-            nf,
-            inherited_statics,
-        ));
+        if let Some(bodies) = allocation_bodies.as_deref_mut() {
+            let emission = emit_named_with_allocation_report(
+                ws,
+                cg,
+                scx.interner(),
+                nf.name.as_str(),
+                nf,
+                inherited_statics,
+            );
+            out.push_str(&emission.lua);
+            if let Some(body) = crate::allocation_report::collect_emitted_body(
+                ws,
+                scx.interner(),
+                nf.name.as_str(),
+                nf.name.as_str(),
+                nf,
+                emission.allocation_sites,
+            ) {
+                bodies.push(body);
+            }
+        } else {
+            out.push_str(&skull_codegen_lua::emit_named_with_statics(
+                ws,
+                cg,
+                scx.interner(),
+                nf.name.as_str(),
+                nf,
+                inherited_statics,
+            ));
+        }
         let emit = te.elapsed();
         times.emit += emit;
         times.emit_work |= emit > Duration::ZERO;
@@ -3613,7 +3796,19 @@ fn emit_spec_chunk(
     code_artifact.set_body_names(&mf, name);
     skull_codegen_lua::regalloc_time_reset();
     let te = Instant::now();
-    let mut lua = emit_named(ws, cg, scx.interner(), name, &mf);
+    let emission = emit_named_with_allocation_report(ws, cg, scx.interner(), name, &mf, &[]);
+    let mut lua = emission.lua;
+    let mut allocation_bodies = Vec::new();
+    if let Some(body) = crate::allocation_report::collect_emitted_body(
+        ws,
+        scx.interner(),
+        name,
+        f.name.as_str(),
+        &mf,
+        emission.allocation_sites,
+    ) {
+        allocation_bodies.push(body);
+    }
     let root_emit = te.elapsed();
     times.emit += root_emit;
     times.emit_work |= root_emit > Duration::ZERO;
@@ -3623,12 +3818,22 @@ fn emit_spec_chunk(
     let mut statics = mf.statics.clone();
     let mut nested = std::mem::take(&mut mf.nested_fns);
     collect_nested_statics(&nested, &mut statics);
-    emit_pass_nested_fns(ws, cg, scx, &mut nested, &statics, &mut lua, &mut times)?;
+    emit_pass_nested_fns(
+        ws,
+        cg,
+        scx,
+        &mut nested,
+        &statics,
+        Some(&mut allocation_bodies),
+        &mut lua,
+        &mut times,
+    )?;
     collect_callee_frefs(&mf, &mut deps);
     attribution.mir_instructions = mf.insts.len();
     attribution.times = times;
     Ok(Chunk {
         lua,
+        allocation_bodies,
         deps,
         direct_globals: Vec::new(),
         direct_calls: Vec::new(),
@@ -3659,6 +3864,7 @@ fn emit_specialized_callees(
     live: &FxHashMap<Instance, Chunk>,
     rejected: &[(String, CompilerError)],
     built: &mut Vec<(Instance, Chunk)>,
+    allocation_bodies: &mut Vec<crate::allocation_report::AllocationBody>,
     statics: &mut Vec<skull_mir::mir::StaticCell>,
     out: &mut String,
     attribution: &mut AttributionAccumulator,
@@ -3692,6 +3898,7 @@ fn emit_specialized_callees(
             continue;
         };
         out.push_str(&chunk.lua);
+        allocation_bodies.extend(chunk.allocation_bodies.iter().cloned());
         attribution.add_unit(&chunk.attribution);
         times.add(&chunk.times);
         // A specialized definition's `static` cells are cells the program uses,
@@ -4884,10 +5091,14 @@ fn assemble(
     let mut direct_calls: FxHashMap<Ustr, Vec<Ustr>> = FxHashMap::default();
     let mut all_statics: Vec<skull_mir::mir::StaticCell> = Vec::new();
     let mut code_artifact = skull_mir::code_identity::CodeArtifact::default();
+    let mut allocation_bodies = Vec::new();
 
     // IR-agnostic load-time scaffolding (shared with the old backend).
     let ts = Instant::now();
     let mut out = String::from(crate::runtime_prelude());
+    if crate::allocation_report::activation_enabled() {
+        out.push_str(skull_codegen_lua::ALLOCATION_ACTIVATION_PRELUDE);
+    }
     out.push_str(&crate::enum_cdata_defs(ws));
     let rep_arena = scx.rep_arena();
     let (vdefs, value_emitted, value_gc) = crate::value_struct_defs(ws, &rep_arena)?;
@@ -4926,6 +5137,7 @@ fn assemble(
         &mut always_emitted_calls,
         &mut always_emitted_names,
         &mut code_artifact,
+        &mut allocation_bodies,
         &mut attribution,
         &mut times,
     );
@@ -4967,6 +5179,7 @@ fn assemble(
         &mut always_emitted_calls,
         &mut always_emitted_names,
         &mut code_artifact,
+        &mut allocation_bodies,
         &mut attribution,
         &mut times,
     );
@@ -5165,6 +5378,7 @@ fn assemble(
                     attribution.add_unit(&chunk.attribution);
                     if emit_def {
                         out.push_str(&chunk.lua);
+                        allocation_bodies.extend(chunk.allocation_bodies.iter().cloned());
                         code_artifact.merge_ref(&chunk.code_artifact);
                         // A dropped definition's `static` cells do not exist, so
                         // they must not be registered for hot-reload preservation.
@@ -5208,6 +5422,7 @@ fn assemble(
         &spec_chunks,
         &spec_rejected,
         built_specs,
+        &mut allocation_bodies,
         &mut all_statics,
         &mut out,
         &mut attribution,
@@ -5242,6 +5457,14 @@ fn assemble(
             "incomplete LifecyclePlan census: {:?}", lifecycle_plan.census
         )));
     }
+    let allocation_report = if crate::allocation_report::enabled() {
+        let mut report =
+            crate::allocation_report::AllocationReport::from_bodies(allocation_bodies);
+        report.populate_lifecycle_routes(&lifecycle_plan, &code_artifact);
+        report
+    } else {
+        crate::allocation_report::AllocationReport::default()
+    };
     let state_schema = skull_mir::state_schema::StateSchema::collect(ws, scx, &code_artifact, &all_statics)
         .map_err(|error| CompilerError::new_no_location(error.to_string()))?
         .with_lifecycle_plan(&lifecycle_plan)
@@ -5453,6 +5676,7 @@ fn assemble(
     Ok((
         MirEmit {
             lua: out,
+            allocation_report,
             code_artifact,
             lifecycle_plan,
             state_schema,
@@ -5531,7 +5755,15 @@ fn overlay_code_artifact(
     for body in bodies {
         if let Some(Ok(chunk)) = cache.chunks.get(body) {
             for entry in chunk.code_artifact.entries.values().filter(|entry| entry.escaping) {
-                artifact.insert(entry.clone());
+                let mut entry = entry.clone();
+                if entry.body_name.is_none() {
+                    entry.body_name = cache
+                        .code_artifact
+                        .entries
+                        .get(&entry.identity)
+                        .and_then(|published| published.body_name);
+                }
+                artifact.insert(entry);
             }
         }
         if !body.args.is_empty() {
@@ -5927,6 +6159,7 @@ pub fn emit_full_in_for_renderer(
     project_root: Option<&str>,
     renderer_target: RendererTarget,
 ) -> Result<(MirEmit, SkullEmitCache), CompilerError> {
+    let _allocation_environment = crate::allocation_report::environment_scope();
     emit_full_in_with_mutation(
         ws,
         user_mid,
@@ -6423,7 +6656,7 @@ fn emit_full_in_with_mutation(
         shader_registrations,
         shader_view,
         emitted: FxHashSet::default(),
-        code_artifact: skull_mir::code_identity::CodeArtifact::default(),
+        code_artifact: std::sync::Arc::new(skull_mir::code_identity::CodeArtifact::default()),
         lifecycle_plan: None,
         state_schema: None,
         definition_plan: None,
@@ -6431,6 +6664,7 @@ fn emit_full_in_with_mutation(
         unit_comptime_reads: UnitComptimeReads::default(),
         renderer_target,
         repair_stats: IncrementalRepairStats::default(),
+        body_edit_rollback: None,
     };
     let mut built_specs: Vec<(Instance, Chunk)> = Vec::new();
     let (mut emit, emitted, unit_reads) = assemble(ws, &cache.cg, &cache.scx, &cache, &mut built_specs)?;
@@ -6447,10 +6681,10 @@ fn emit_full_in_with_mutation(
     };
     let mut cache = cache;
     cache.emitted = emitted;
-    cache.code_artifact = emit.code_artifact.clone();
-    cache.lifecycle_plan = Some(emit.lifecycle_plan.clone());
-    cache.state_schema = Some(emit.state_schema.clone());
-    cache.definition_plan = Some(emit.definition_plan.clone());
+    cache.code_artifact = std::sync::Arc::new(emit.code_artifact.clone());
+    cache.lifecycle_plan = Some(std::sync::Arc::new(emit.lifecycle_plan.clone()));
+    cache.state_schema = Some(std::sync::Arc::new(emit.state_schema.clone()));
+    cache.definition_plan = Some(std::sync::Arc::new(emit.definition_plan.clone()));
     cache.artifact_fingerprint = Some(emit.artifact_fingerprint.clone());
     cache.unit_comptime_reads = unit_reads;
     cache.absorb_spec_chunks(built_specs);
@@ -6506,6 +6740,90 @@ impl SkullEmitCache {
         self.repair_stats
     }
 
+    pub fn begin_body_edit_transaction(
+        &mut self,
+        reinferred: &[(ModuleId, BodyOwner)],
+        edits: &[crate::instance_graph::SpanEdit],
+    ) {
+        assert!(
+            self.body_edit_rollback.is_none(),
+            "body edit transaction already active"
+        );
+        self.body_edit_rollback = Some(BodyEditRollback {
+            reinferred: reinferred.to_vec(),
+            edits: edits.to_vec(),
+            changed_since_full: self.changed_since_full.clone(),
+            changed_consts_since_full: self.changed_consts_since_full.clone(),
+            static_key_baseline: self.static_key_baseline.clone(),
+            emitted: self.emitted.clone(),
+            code_artifact: self.code_artifact.clone(),
+            lifecycle_plan: self.lifecycle_plan.clone(),
+            state_schema: self.state_schema.clone(),
+            definition_plan: self.definition_plan.clone(),
+            artifact_fingerprint: self.artifact_fingerprint.clone(),
+            unit_comptime_reads: self.unit_comptime_reads.clone(),
+            repair_stats: self.repair_stats,
+        });
+    }
+
+    pub fn commit_body_edit_transaction(&mut self) {
+        self.body_edit_rollback = None;
+    }
+
+    pub fn rollback_body_edit(&mut self, ws: &Workspace) -> Result<(), CompilerError> {
+        let Some(snapshot) = self.body_edit_rollback.take() else {
+            return Ok(());
+        };
+        let BodyEditRollback {
+            reinferred,
+            edits,
+            changed_since_full,
+            changed_consts_since_full,
+            static_key_baseline,
+            emitted,
+            code_artifact,
+            lifecycle_plan,
+            state_schema,
+            definition_plan,
+            artifact_fingerprint,
+            unit_comptime_reads,
+            repair_stats,
+        } = snapshot;
+        let inverse_edits: Vec<_> = edits
+            .iter()
+            .map(|edit| crate::instance_graph::SpanEdit {
+                file: edit.file,
+                at: edit.at,
+                byte_delta: -edit.byte_delta,
+                line_delta: -edit.line_delta,
+            })
+            .collect();
+        let result = (|| {
+            let shader_changed = self.update_shader_registrations(ws, &reinferred)?;
+            let (_affected, update, added_errors) =
+                self.update_chunk_cache(ws, &reinferred, &inverse_edits)?;
+            if let Some(error) = Self::combine_errors(added_errors) {
+                return Err(error);
+            }
+            if shader_changed || self.shader_delta_affects_view(&update) {
+                self.refresh_shader_registrations(ws)?;
+            }
+            Ok(())
+        })();
+        self.changed_since_full = changed_since_full;
+        self.changed_consts_since_full = changed_consts_since_full;
+        self.static_key_baseline = static_key_baseline;
+        self.emitted = emitted;
+        self.code_artifact = code_artifact;
+        self.lifecycle_plan = lifecycle_plan;
+        self.state_schema = state_schema;
+        self.definition_plan = definition_plan;
+        self.artifact_fingerprint = artifact_fingerprint;
+        self.unit_comptime_reads = unit_comptime_reads;
+        self.repair_stats = repair_stats;
+        result
+    }
+
     fn candidate_index_by_func(&self) -> &FxHashMap<FuncRef, FxHashSet<Instance>> {
         self.concrete.candidate_keys_by_func()
     }
@@ -6555,11 +6873,19 @@ impl SkullEmitCache {
     }
 
     pub fn state_schema(&self) -> Option<&skull_mir::state_schema::StateSchema> {
-        self.state_schema.as_ref()
+        self.state_schema.as_deref()
     }
 
     pub fn lifecycle_plan(&self) -> Option<&skull_mir::lifecycle::LifecyclePlan> {
-        self.lifecycle_plan.as_ref()
+        self.lifecycle_plan.as_deref()
+    }
+
+    pub fn body_edit_baseline_lifecycle_plan(
+        &self,
+    ) -> Option<&skull_mir::lifecycle::LifecyclePlan> {
+        self.body_edit_rollback
+            .as_ref()
+            .and_then(|snapshot| snapshot.lifecycle_plan.as_deref())
     }
 
     pub fn artifact_fingerprint(&self) -> Option<&str> {
@@ -7390,10 +7716,10 @@ pub fn emit_incremental(
         emit.concrete_stats = cache.concrete.snapshot_build_stats();
     }
     cache.emitted = emitted;
-    cache.code_artifact = emit.code_artifact.clone();
-    cache.lifecycle_plan = Some(emit.lifecycle_plan.clone());
-    cache.state_schema = Some(emit.state_schema.clone());
-    cache.definition_plan = Some(emit.definition_plan.clone());
+    cache.code_artifact = std::sync::Arc::new(emit.code_artifact.clone());
+    cache.lifecycle_plan = Some(std::sync::Arc::new(emit.lifecycle_plan.clone()));
+    cache.state_schema = Some(std::sync::Arc::new(emit.state_schema.clone()));
+    cache.definition_plan = Some(std::sync::Arc::new(emit.definition_plan.clone()));
     cache.artifact_fingerprint = Some(emit.artifact_fingerprint.clone());
     cache.unit_comptime_reads = unit_reads;
     cache.absorb_spec_chunks(built_specs);
@@ -7417,7 +7743,7 @@ fn assemble_overlay(
 ) -> Result<(MirEmit, UnitComptimeReads), CompilerError> {
     let mut out = String::from("-- skull incremental overlay (loaded after main.lua)\n");
     let mut skipped: Vec<(String, String)> = Vec::new();
-    let mut candidate_code_artifact = cache.code_artifact.clone();
+    let mut candidate_code_artifact = (*cache.code_artifact).clone();
     out.push_str("__rock_state_transaction_begin()\n");
     let mut unit_reads = UnitComptimeReads::default();
 
@@ -7630,7 +7956,7 @@ fn assemble_overlay(
     {
         out.push_str("__rock_state_transaction_commit()\n");
     }
-    let definition_plan = cache.definition_plan.clone().ok_or_else(|| {
+    let definition_plan = cache.definition_plan.as_deref().cloned().ok_or_else(|| {
         CompilerError::new_no_location(
             "Artifact fingerprint generation requires a complete DefinitionPlan".to_string(),
         )
@@ -7655,9 +7981,14 @@ fn assemble_overlay(
     Ok((
         MirEmit {
             lua: out,
+            allocation_report: crate::allocation_report::AllocationReport::default(),
             code_artifact: candidate_code_artifact,
             lifecycle_plan,
-            state_schema,
+            state_schema: cache
+                .state_schema
+                .as_deref()
+                .cloned()
+                .expect("overlay requires a completed StateSchema"),
             definition_plan,
             artifact_fingerprint,
             skipped,
@@ -7688,35 +8019,13 @@ pub fn emit_overlay(
     emit_overlay_with_span_edits(ws, cache, reinferred, &[])
 }
 
-/// Build an overlay against a staged cache. The caller may publish the returned
-/// cache only after the overlay bytes have been durably written; a write failure
-/// therefore cannot strand compiler metadata ahead of the running program.
-pub fn emit_overlay_staged(
-    ws: &Workspace,
-    cache: &SkullEmitCache,
-    reinferred: &[(ModuleId, BodyOwner)],
-) -> Result<(MirEmit, SkullEmitCache), CompilerError> {
-    emit_overlay_with_span_edits_staged(ws, cache, reinferred, &[])
-}
-
-pub fn emit_overlay_with_span_edits_staged(
-    ws: &Workspace,
-    cache: &SkullEmitCache,
-    reinferred: &[(ModuleId, BodyOwner)],
-    edits: &[crate::instance_graph::SpanEdit],
-) -> Result<(MirEmit, SkullEmitCache), CompilerError> {
-    let mut staged = cache.clone();
-    staged.concrete.detach_plan_store();
-    let emit = emit_overlay_with_span_edits(ws, &mut staged, reinferred, edits)?;
-    Ok((emit, staged))
-}
-
 pub fn emit_overlay_with_span_edits(
     ws: &Workspace,
     cache: &mut SkullEmitCache,
     reinferred: &[(ModuleId, BodyOwner)],
     edits: &[crate::instance_graph::SpanEdit],
 ) -> Result<MirEmit, CompilerError> {
+    cache.concrete.detach_plan_store();
     let t0 = Instant::now();
     // `cg` is cached (interface-derived, identical on body edits) -- no rebuild.
     let t_cg = t0.elapsed();
@@ -7785,7 +8094,7 @@ pub fn emit_overlay_with_span_edits(
                 .dynamic_entries_match(ws, &cache.scx, &next_code_artifact, &statics)
                 .map_err(|error| CompilerError::new_no_location(error.to_string()))?;
             if unchanged {
-                old.clone()
+                (**old).clone()
             } else {
                 full_schema_collection = true;
                 skull_mir::state_schema::StateSchema::collect(
@@ -7826,8 +8135,8 @@ pub fn emit_overlay_with_span_edits(
             "Rock StateSchema changed; safe restart is required".to_string(),
         ));
     }
-    cache.code_artifact = next_code_artifact;
-    cache.state_schema = Some(next_state_schema);
+    cache.code_artifact = std::sync::Arc::new(next_code_artifact);
+    cache.state_schema = Some(std::sync::Arc::new(next_state_schema));
     // A comptime input read by a GLOBAL initializer can go stale with no
     // reinferred body at all (bone hashes only source text). Route a stale
     // const through the same changed-consts machinery -- its ginit re-lowers
@@ -7856,9 +8165,9 @@ pub fn emit_overlay_with_span_edits(
     let changed_code_artifact = overlay_code_artifact(ws, cache, &changed_bodies);
     let (mut emit, overlay_unit_reads) =
         assemble_overlay(ws, cache, shader_changed, &changed_code_artifact)?;
-    cache.code_artifact = emit.code_artifact.clone();
-    cache.lifecycle_plan = Some(emit.lifecycle_plan.clone());
-    cache.definition_plan = Some(emit.definition_plan.clone());
+    cache.code_artifact = std::sync::Arc::new(emit.code_artifact.clone());
+    cache.lifecycle_plan = Some(std::sync::Arc::new(emit.lifecycle_plan.clone()));
+    cache.definition_plan = Some(std::sync::Arc::new(emit.definition_plan.clone()));
     cache.artifact_fingerprint = Some(emit.artifact_fingerprint.clone());
     for (key, reads) in overlay_unit_reads.globals {
         if reads.is_empty() {

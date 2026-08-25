@@ -251,10 +251,13 @@ impl Builder<'_> {
     /// copy takes the presence-aware path instead
     /// ([`Self::nullable_place_value_of`]).
     pub(crate) fn value_struct_of(&self, e: Idx<Expr>) -> Option<Ustr> {
-        if self.expr_is_nullable(e) {
+        let ty = self.concrete_expr_ty(e)?;
+        let (payload, nullable) = ty.peel_nullable();
+        if nullable {
             return None;
         }
-        self.value_struct_name_of(e)
+        let name = payload.nominal()?;
+        self.is_value_struct(name).then_some(name)
     }
 
     /// The value-struct type of `e` IGNORING nullability (`expr_ty` peels

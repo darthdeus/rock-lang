@@ -134,11 +134,9 @@ fn a_child_with_data_leaves_agrees_under_both_rules() {
     assert!(acc.unbuildable.is_none(), "a leaf-table ctor IS its leaf sequence");
 }
 
-/// An FFI-clean parent with a NON-nullable nested value field. No presence tag,
-/// so the old prefix guard passed; dotted paths, so the old suffix rule said
-/// `_lct` -- but the type is cdata and its real ctor is `Held_ct`, positional
-/// over `(Inner, float, float, float, float)`. Feeding it six floats was the
-/// live `cannot convert 'number' to 'struct'`.
+/// An FFI-clean parent with a NON-nullable nested value field. Its ordinary
+/// cdata ctor takes the nested value whole, while global storage has scalar
+/// leaves; reflection therefore rebuilds it with the generated leaf ctor.
 const FFI_CLEAN_NESTED: &str = r#"
 nobox value Inner { x: float, y: float }
 nobox value Held { m: Inner, a: float, b: float, c: float, d: float }
@@ -167,15 +165,12 @@ fn main() { print("{MAYBE}") }
 "#;
 
 #[test]
-fn an_ffi_clean_nested_field_is_unbuildable_and_says_why() {
+fn an_ffi_clean_nested_field_uses_the_flattened_leaf_ctor() {
     let (_ws, acc) = accessor_of(FFI_CLEAN_NESTED, "H");
-    assert_eq!(acc.ctor_suffix, "_ct", "an FFI-clean parent is cdata, not leaf-table");
+    assert_eq!(acc.ctor_suffix, "_lct");
     assert_eq!(acc.presence_path, None, "no nullable child, so no presence tag");
-    let why = acc.unbuildable.expect("a declared-field ctor cannot take a leaf sequence");
-    assert!(
-        why.contains("Held_ct") && why.contains("m.x"),
-        "the message must name the ctor and the nested leaf: {why}"
-    );
+    assert!(acc.paths.iter().any(|path| path == "m.x"));
+    assert!(acc.unbuildable.is_none());
 }
 
 /// Bounds the rejection: the shape in every game must stay buildable, or the

@@ -587,7 +587,7 @@ fn planned_value_rec(
     visiting.push(name);
     let mut fields = Vec::with_capacity(sd.fields.len());
     let mut cdata = sd.generics.is_empty();
-    let mut scalarizable = sd.generics.is_empty();
+    let mut scalarizable = true;
     for field in &sd.fields {
         let planned = match static_ty(ws, field.ty) {
             Some(TypeExpr::Builtin(BuiltinTy::Int)) => PlannedField::Primitive("int"),
@@ -650,7 +650,7 @@ fn planned_value_rec(
     let shape = scalarizable.then(|| planned_shape(name, &fields, false)).flatten();
     let storage = if cdata {
         ValueStorage::CData
-    } else if scalarizable {
+    } else if scalarizable && sd.generics.is_empty() {
         ValueStorage::LeafTable
     } else {
         ValueStorage::GcTable
@@ -1195,6 +1195,7 @@ pub struct NoboxGlobalAccessorShape {
     pub ty_name: Ustr,
     pub paths: Vec<Ustr>,
     pub nullable: bool,
+    pub storage: ValueStorage,
     /// From the shared physical storage classification -- the same answer the
     /// `_lct` ctor and the leaf-form pack site consume.
     pub ctor_suffix: &'static str,
@@ -1203,13 +1204,9 @@ pub struct NoboxGlobalAccessorShape {
     /// ctor takes tags like any other leaf, so this does NOT by itself make a
     /// shape unbuildable.
     pub presence_path: Option<Ustr>,
-    /// Why no accessor can be built, if so. The ctor is positional, so the
-    /// accessor is only sound when the ctor's parameter sequence IS the leaf
-    /// sequence. `_lct` is that by construction. `_ct` and `_vt` are positional
-    /// over DECLARED FIELDS, which coincides with the leaves only while every
-    /// field is primitive -- a nested value field makes the two differ in both
-    /// arity and type, and the mismatch is silent (`Held_ct` fed six floats
-    /// where it wants an `Inner` cdata and four floats).
+    /// Why no accessor can be built, if so. `_lct` is positional over physical
+    /// leaves, while `_vt` is positional over declared fields; nested GC-table
+    /// fields therefore cannot be rebuilt from the flattened global storage.
     pub unbuildable: Option<String>,
 }
 
@@ -1248,12 +1245,14 @@ pub fn nobox_global_accessor_shape(
         span: None,
         message: format!("`{}` has no physical storage plan for global accessors", shape.name),
     })?;
+    let has_nested = paths.iter().any(|p| p.contains('.'));
     let ctor_suffix = match storage {
         ValueStorage::LeafTable => "_lct",
         ValueStorage::GcTable => "_vt",
+        ValueStorage::CData if has_nested => "_lct",
         ValueStorage::CData => "_ct",
     };
-    let unbuildable = if ctor_suffix != "_lct" {
+    let unbuildable = if storage == ValueStorage::GcTable {
         paths.iter().find(|p| p.contains('.')).map(|nested| {
             format!(
                 "`{}{ctor_suffix}` is positional over DECLARED FIELDS, but this type's \
@@ -1270,6 +1269,7 @@ pub fn nobox_global_accessor_shape(
         ty_name: shape.name,
         paths,
         nullable: shape.nullable,
+        storage,
         ctor_suffix,
         presence_path,
         unbuildable,
@@ -1996,7 +1996,7 @@ pub(crate) fn value_storage_is_gc_guarded(ws: &Workspace, name: Ustr) -> bool {
 pub struct EnumFlatShape {
     pub(crate) name: Ustr,
     /// One entry per payload POSITION, widest variant first-wins. A position is
-    /// several SLOTS when it carries a `nobox` value, so this is not the slot
+    /// several SLOTS when it carries a scalarizable value, so this is not the slot
     /// count -- ask [`EnumFlatShape::tuple_width`] for that and
     /// [`EnumFlatShape::slot_offset`] for where a position starts.
     pub(crate) slots: Vec<FlatSlot>,
@@ -2009,14 +2009,14 @@ pub struct EnumFlatShape {
 /// The wire shape of ONE positional payload of a flat enum.
 ///
 /// A payload slot is a dynamically-typed Lua field, so ANY single value fits in
-/// one -- except a `nobox` value, which is several leaves and has no box to sit
-/// in. Widening the position to its leaves is the whole point: the value's
+/// one -- except a scalarizable value, which can be several leaves. Widening the
+/// position to its leaves keeps it on the scalar ABI: the value's
 /// leaves ARE the slots, so an enum payload never materializes one.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum FlatSlot {
-    /// One dynamic slot -- today's shape, and what every non-`nobox` payload keeps.
+    /// One dynamic slot -- today's shape, and what every non-scalarizable payload keeps.
     Opaque,
-    /// The `nobox` value payloads SHARING this position, in variant-declaration
+    /// The scalarizable value payloads SHARING this position, in variant-declaration
     /// order and deduplicated by name. The position is as wide as the widest;
     /// each variant writes and reads only its own leaves in the leading slots and
     /// nil-pads the rest, discriminated by the tag the ctor makes static and the
@@ -2098,11 +2098,11 @@ fn build_flat_enum_shape(ws: &Workspace, name: Ustr) -> Option<EnumFlatShape> {
         return None;
     }
     let ed = &ws.modules[eid.module.index()].enums[eid.def];
-    // Per position: every DISTINCT `nobox` payload shape any variant carries
-    // there. Empty = no `nobox` payload seen, so one opaque slot. Several shapes
+    // Per position: every DISTINCT scalarizable value payload shape any variant
+    // carries there. Empty = no such payload, so one opaque slot. Several shapes
     // share the position by width, each variant addressing its own leaves under
     // the tag -- the alternative, letting the losing variant fall back to the
-    // opaque slot, is the implicit materialization the mark forbids.
+    // opaque slot, would reintroduce an aggregate at the enum boundary.
     let mut want: Vec<Vec<ValueShape>> = Vec::new();
     let mut record_fields: Vec<Ustr> = Vec::new();
     for v in &ed.variants {
@@ -2113,7 +2113,7 @@ fn build_flat_enum_shape(ws: &Workspace, name: Ustr) -> Option<EnumFlatShape> {
                     want.resize(tys.len(), Vec::new());
                 }
                 for (i, ty) in tys.iter().enumerate() {
-                    let Some(vs) = nobox_payload_shape(ws, *ty) else { continue };
+                    let Some(vs) = flat_payload_shape(ws, *ty) else { continue };
                     if !want[i].iter().any(|prev| prev.name == vs.name) {
                         want[i].push(vs);
                     }
@@ -2194,16 +2194,16 @@ impl EnumPlan {
     }
 }
 
-/// The leaf shape of a payload type that is a `nobox` value struct, else `None`.
+/// The leaf shape of a scalarizable value-struct payload, else `None`.
 ///
 /// Keyed on the DECLARED payload type, like every other splat decision on this
 /// arc: both the ctor that writes the slots and the match arm that reads them
 /// derive the layout from the enum declaration, so neither has to see the other.
-fn nobox_payload_shape(ws: &Workspace, ty: TyId) -> Option<ValueShape> {
+fn flat_payload_shape(ws: &Workspace, ty: TyId) -> Option<ValueShape> {
     let TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } = static_ty(ws, ty)? else {
         return None;
     };
-    if !is_nobox_nominal(ws, n) {
+    if !map_is_value_struct(ws, n) {
         return None;
     }
     sig_shape_of_nominal(ws, n)
