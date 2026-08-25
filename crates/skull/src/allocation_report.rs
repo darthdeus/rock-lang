@@ -136,6 +136,7 @@ pub struct AllocationSite {
     pub kind: AllocationKind,
     pub span: Option<Span>,
     pub detail: Option<String>,
+    pub lua_body_line: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -319,11 +320,12 @@ impl AllocationReport {
                 .unwrap_or_else(|| "<compiler-generated>".to_string());
             let _ = writeln!(
                 out,
-                "  {:016x}\t{}\t{}\t{}",
+                "  {:016x}\t{}\t{}\t{}\t{}",
                 site.id,
                 site.kind.as_str(),
                 source,
                 body,
+                site.lua_body_line,
             );
         }
         for route in &self.lifecycle_routes {
@@ -388,6 +390,7 @@ pub(crate) fn collect_emitted_body(
             kind: site.kind.into(),
             span: site.span,
             detail: None,
+            lua_body_line: site.lua_body_line,
         })
         .collect::<Vec<_>>();
     let mut callees = Vec::new();
@@ -465,6 +468,7 @@ fn site(
         kind,
         span,
         detail,
+        lua_body_line: 0,
     }
 }
 

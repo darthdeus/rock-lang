@@ -38,6 +38,7 @@ struct Site<'a> {
     kind: &'a str,
     source: &'a str,
     body: &'a str,
+    lua_body_line: Option<u32>,
     update_chain: Option<&'a str>,
     draw_chain: Option<&'a str>,
 }
@@ -66,7 +67,21 @@ fn parse_manifest(manifest: &str) -> Result<BTreeMap<&str, Site<'_>>> {
         let trimmed = line.trim_start();
         if route.is_none() {
             let fields = trimmed.split('\t').collect::<Vec<_>>();
-            if fields.len() == 4 && site_id(fields[0]) {
+            if (fields.len() == 4 || fields.len() == 5) && site_id(fields[0]) {
+                let lua_body_line = fields
+                    .get(4)
+                    .map(|line| line.parse::<u32>())
+                    .transpose()
+                    .map_err(|error| anyhow::anyhow!(
+                        "allocation manifest site {} has invalid Lua body line: {error}",
+                        fields[0]
+                    ))?;
+                if lua_body_line == Some(0) {
+                    anyhow::bail!(
+                        "allocation manifest site {} has zero Lua body line",
+                        fields[0]
+                    );
+                }
                 if sites
                     .insert(
                         fields[0],
@@ -74,6 +89,7 @@ fn parse_manifest(manifest: &str) -> Result<BTreeMap<&str, Site<'_>>> {
                             kind: fields[1],
                             source: fields[2],
                             body: fields[3],
+                            lua_body_line,
                             update_chain: None,
                             draw_chain: None,
                         },
@@ -155,6 +171,7 @@ pub fn render_joined_report(
     manifest: &str,
     activation: &str,
     route: Option<&str>,
+    lua: Option<&str>,
 ) -> Result<String> {
     let filter = RouteFilter::parse(route)?;
     let sites = parse_manifest(manifest)?;
@@ -175,14 +192,26 @@ pub fn render_joined_report(
     });
     hits.sort_by(|(a_id, a_hits), (b_id, b_hits)| b_hits.cmp(a_hits).then_with(|| a_id.cmp(b_id)));
 
+    let mut body_starts = BTreeMap::new();
+    let lua_lines = lua.map(|text| text.lines().collect::<Vec<_>>());
+    if let Some(lines) = &lua_lines {
+        for (index, line) in lines.iter().enumerate() {
+            if let Some(rest) = line.strip_prefix("function ") {
+                if let Some((name, _)) = rest.split_once('(') {
+                    body_starts.insert(name, index as u32 + 1);
+                }
+            }
+        }
+    }
+
     let mut out = String::new();
-    writeln!(out, "rock.allocation-join.v1")?;
+    writeln!(out, "rock.allocation-join.v2")?;
     writeln!(out, "frames\t{frames}")?;
     writeln!(out, "filter\t{}", filter.as_str())?;
     writeln!(out, "active_sites\t{}", hits.len())?;
     writeln!(
         out,
-        "hits/frame\thits\troute\tkind\tsource\tbody\tcall_chain\tid"
+        "hits/frame\thits\troute\tkind\tsource\tbody\tlua_body_line\tlua_artifact_line\tcall_chain\tid"
     )?;
     for (id, count) in hits {
         let site = &sites[id];
@@ -192,15 +221,37 @@ pub fn render_joined_report(
             (None, Some(draw)) => ("draw", draw.to_string()),
             (None, None) => ("outside", String::new()),
         };
+        let artifact_line = match (site.lua_body_line, lua_lines.as_ref()) {
+            (Some(body_line), Some(lines)) => {
+                let body_start = body_starts.get(site.body).ok_or_else(|| {
+                    anyhow::anyhow!("generated Lua has no emitted body `{}`", site.body)
+                })?;
+                let artifact_line = body_start + body_line - 1;
+                let emitted = lines.get(artifact_line as usize - 1).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "allocation site {id} points past generated Lua at line {artifact_line}"
+                    )
+                })?;
+                if !emitted.contains(id) {
+                    anyhow::bail!(
+                        "allocation site {id} does not occur at generated Lua line {artifact_line}"
+                    );
+                }
+                artifact_line.to_string()
+            }
+            _ => "?".to_string(),
+        };
         writeln!(
             out,
-            "{:.4}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            "{:.4}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
             count as f64 / frames as f64,
             count,
             route,
             site.kind,
             site.source,
             site.body,
+            site.lua_body_line.map_or_else(|| "?".to_string(), |line| line.to_string()),
+            artifact_line,
             chain,
             id,
         )?;
@@ -209,9 +260,9 @@ pub fn render_joined_report(
 }
 
 pub fn run(files: &[String]) -> Result<()> {
-    if !(files.len() == 2 || files.len() == 3) {
+    if !(files.len() >= 2 && files.len() <= 4) {
         anyhow::bail!(
-            "usage: rock allocation-join <manifest> <activation> [all|update|draw|outside]"
+            "usage: rock allocation-join <manifest> <activation> [all|update|draw|outside] [generated-lua]"
         );
     }
     let manifest = std::fs::read_to_string(&files[0]).map_err(|error| {
@@ -220,7 +271,20 @@ pub fn run(files: &[String]) -> Result<()> {
     let activation = std::fs::read_to_string(&files[1]).map_err(|error| {
         anyhow::anyhow!("cannot read allocation activation {}: {error}", files[1])
     })?;
-    let report = render_joined_report(&manifest, &activation, files.get(2).map(String::as_str))?;
+    let lua = files
+        .get(3)
+        .map(std::fs::read_to_string)
+        .transpose()
+        .map_err(|error| anyhow::anyhow!(
+            "cannot read generated Lua {}: {error}",
+            files.get(3).map_or("", String::as_str)
+        ))?;
+    let report = render_joined_report(
+        &manifest,
+        &activation,
+        files.get(2).map(String::as_str),
+        lua.as_deref(),
+    )?;
     let mut stdout = std::io::stdout().lock();
     match std::io::Write::write_all(&mut stdout, report.as_bytes()) {
         Ok(()) => Ok(()),
@@ -236,9 +300,9 @@ mod tests {
     const MANIFEST: &str = r#"emitted allocation-capable Lua report: 3 bodies, 3 direct sites
 
 emitted site manifest: 3 sites
-  aaaaaaaaaaaaaaaa	string-concat	game.rock:10	update_leaf
-  bbbbbbbbbbbbbbbb	vec-construction	game.rock:20	draw_leaf
-  cccccccccccccccc	struct-construction	game.rock:30	outside_leaf
+  aaaaaaaaaaaaaaaa	string-concat	game.rock:10	update_leaf	7
+  bbbbbbbbbbbbbbbb	vec-construction	game.rock:20	draw_leaf	2
+  cccccccccccccccc	struct-construction	game.rock:30	outside_leaf	3
 
 route frame.update: 1 roots, 1 reachable bodies, 1 allocation-capable sites, 0 opaque boundaries
   aaaaaaaaaaaaaaaa string-concat at game.rock:10 via update_root -> update_leaf
@@ -257,20 +321,34 @@ cccccccccccccccc	2
 
     #[test]
     fn join_filters_by_route_and_ranks_executions_per_frame() {
-        let report = render_joined_report(MANIFEST, ACTIVATION, Some("draw"))
+        let report = render_joined_report(MANIFEST, ACTIVATION, Some("draw"), None)
             .expect("joined allocation report");
 
         assert!(report.contains("filter\tdraw"));
         assert!(report.contains("5.0000\t20\tdraw\tvec-construction"));
+        assert!(report.contains("draw_leaf\t2\t?\tdraw_root -> draw_leaf"));
         assert!(report.contains("draw_root -> draw_leaf"));
         assert!(!report.contains("update_leaf"));
         assert!(!report.contains("outside_leaf"));
     }
 
     #[test]
+    fn join_resolves_and_checks_the_exact_generated_lua_line() {
+        let lua = r#"-- runtime preamble
+function draw_leaf()
+  local v = __rock_alloc_hit("bbbbbbbbbbbbbbbb", __rock_vec_new())
+end
+"#;
+        let report = render_joined_report(MANIFEST, ACTIVATION, Some("draw"), Some(lua))
+            .expect("joined allocation report with generated Lua");
+
+        assert!(report.contains("draw_leaf\t2\t3\tdraw_root -> draw_leaf"));
+    }
+
+    #[test]
     fn join_rejects_an_activation_from_a_different_manifest() {
         let activation = ACTIVATION.replace("aaaaaaaaaaaaaaaa", "dddddddddddddddd");
-        let error = render_joined_report(MANIFEST, &activation, None)
+        let error = render_joined_report(MANIFEST, &activation, None, None)
             .expect_err("cross-artifact site IDs must reject");
 
         assert!(
@@ -282,7 +360,7 @@ cccccccccccccccc	2
 
     #[test]
     fn outside_filter_has_a_nonzero_population_and_the_recorded_denominator() {
-        let report = render_joined_report(MANIFEST, ACTIVATION, Some("outside"))
+        let report = render_joined_report(MANIFEST, ACTIVATION, Some("outside"), None)
             .expect("outside allocation report");
 
         assert!(report.contains("frames\t4"));

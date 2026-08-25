@@ -70,9 +70,11 @@ fn bounded_run_writes_activation_counts_joined_to_the_compiler_manifest() {
     let manifest_rows = manifest_text
         .lines()
         .filter_map(|line| {
-            let mut fields = line.trim_start().split('\t');
-            let id = fields.next()?;
-            (id.len() == 16 && fields.clone().count() == 3).then_some(id)
+            let fields = line.trim_start().split('\t').collect::<Vec<_>>();
+            (fields.len() == 5
+                && fields[0].len() == 16
+                && fields[4].parse::<u32>().is_ok_and(|line| line > 0))
+                .then_some(fields[0])
         })
         .collect::<Vec<_>>();
     let manifest_ids = manifest_rows
@@ -87,5 +89,41 @@ fn bounded_run_writes_activation_counts_joined_to_the_compiler_manifest() {
     assert!(
         rows.iter().all(|(id, _)| manifest_ids.contains(id)),
         "a runtime site was absent from the compiler manifest",
+    );
+
+    let lua_artifact = if lua.is_dir() { lua.join("main.lua") } else { lua.clone() };
+    assert!(lua_artifact.is_file(), "generated Lua artifact is missing");
+    let joined = Command::new(env!("CARGO_BIN_EXE_rock"))
+        .current_dir(repo_root())
+        .args(["allocation-join"])
+        .arg(&manifest)
+        .arg(&counts)
+        .arg("all")
+        .arg(&lua_artifact)
+        .output()
+        .expect("join allocation sites to generated Lua");
+    assert!(
+        joined.status.success(),
+        "allocation join failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&joined.stdout),
+        String::from_utf8_lossy(&joined.stderr),
+    );
+    let joined = String::from_utf8(joined.stdout).expect("UTF-8 joined report");
+    assert!(joined.starts_with("rock.allocation-join.v2\n"));
+    let mut lines = joined.lines().skip(4);
+    let header = lines.next().expect("joined report header");
+    let artifact_line = header
+        .split('\t')
+        .position(|column| column == "lua_artifact_line")
+        .expect("generated Lua column");
+    let joined_rows = lines
+        .map(|line| line.split('\t').collect::<Vec<_>>())
+        .collect::<Vec<_>>();
+    assert_eq!(joined_rows.len(), declared, "joined active-site population");
+    assert!(
+        joined_rows.iter().all(|row| row[artifact_line]
+            .parse::<u32>()
+            .is_ok_and(|line| line > 0)),
+        "every active site must resolve to an exact generated Lua line",
     );
 }

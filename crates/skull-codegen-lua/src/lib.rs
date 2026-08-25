@@ -85,6 +85,8 @@ pub struct EmittedAllocationSite {
     pub id: u64,
     pub kind: EmittedAllocationKind,
     pub span: Option<Span>,
+    pub lua_body_line: u32,
+    lua_byte_offset: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -882,6 +884,22 @@ pub fn emit_named_framed_with_allocation_sites(
         }),
     );
     let mut allocation_sites = sites.into_inner();
+    let function_line_offset = lua
+        .find(&format!("function {name}"))
+        .map(|offset| lua.as_bytes()[..offset].iter().filter(|byte| **byte == b'\n').count())
+        .unwrap_or(0) as u32;
+    allocation_sites.sort_by_key(|site| site.lua_byte_offset);
+    let mut byte_cursor = 0;
+    let mut line = 1;
+    for site in &mut allocation_sites {
+        for byte in &lua.as_bytes()[byte_cursor..site.lua_byte_offset] {
+            if *byte == b'\n' {
+                line += 1;
+            }
+        }
+        site.lua_body_line = line - function_line_offset;
+        byte_cursor = site.lua_byte_offset;
+    }
     allocation_sites.sort_by_key(|site| site.id);
     allocation_sites.dedup_by_key(|site| site.id);
     LuaEmission {
@@ -1948,10 +1966,11 @@ impl Emitter<'_> {
         &self,
         id: Idx<Inst>,
         inst: &Inst,
+        lua_byte_offset: usize,
     ) -> Option<EmittedAllocationSite> {
         let allocation = self.allocation?;
         let kind = emitted_value_allocation_kind(inst)?;
-        let site = self.record_allocation_site(allocation, id, kind);
+        let site = self.record_allocation_site(allocation, id, kind, lua_byte_offset);
         allocation.instrument.then_some(site)
     }
 
@@ -1959,10 +1978,11 @@ impl Emitter<'_> {
         &self,
         id: Idx<Inst>,
         inst: &Inst,
+        lua_byte_offset: usize,
     ) -> Option<EmittedAllocationSite> {
         let allocation = self.allocation?;
         let kind = emitted_effect_allocation_kind(inst)?;
-        let site = self.record_allocation_site(allocation, id, kind);
+        let site = self.record_allocation_site(allocation, id, kind, lua_byte_offset);
         allocation.instrument.then_some(site)
     }
 
@@ -1971,12 +1991,15 @@ impl Emitter<'_> {
         allocation: AllocationEmission<'_>,
         id: Idx<Inst>,
         kind: EmittedAllocationKind,
+        lua_byte_offset: usize,
     ) -> EmittedAllocationSite {
         let span = self.func.inst_spans.get(id).copied();
         let site = EmittedAllocationSite {
             id: allocation_site_id(allocation.body, id, kind, span),
             kind,
             span,
+            lua_body_line: 0,
+            lua_byte_offset,
         };
         allocation.sites.borrow_mut().push(site.clone());
         site
@@ -2227,7 +2250,7 @@ impl Emitter<'_> {
     }
 
     fn write_value(&self, out: &mut String, id: Idx<Inst>, inst: &Inst) {
-        let instrument = self.record_value_allocation_site(id, inst);
+        let instrument = self.record_value_allocation_site(id, inst, out.len());
         if let Some(ref site) = instrument {
             out.push_str("__rock_alloc_hit(\"");
             write!(out, "{:016x}", site.id).unwrap();
@@ -2761,7 +2784,7 @@ impl Emitter<'_> {
     }
 
     fn write_effect(&self, out: &mut String, id: Idx<Inst>, inst: &Inst) {
-        if let Some(site) = self.record_effect_allocation_site(id, inst) {
+        if let Some(site) = self.record_effect_allocation_site(id, inst, out.len()) {
             out.push_str("  __rock_alloc_hit_effect(\"");
             write!(out, "{:016x}", site.id).unwrap();
             out.push_str("\")\n");

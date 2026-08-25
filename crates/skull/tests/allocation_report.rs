@@ -73,6 +73,10 @@ fn update_root() -> int {
     );
     let finding = &route.findings[0];
     assert_eq!(finding.site.kind.as_str(), "vec-construction");
+    assert!(
+        finding.site.lua_body_line > 0,
+        "the allocation site must name its line inside the emitted Lua body",
+    );
     assert_eq!(
         finding
             .site
@@ -138,6 +142,23 @@ fn render(a: int) -> string {
         emit.lua
             .contains(&format!("__rock_alloc_hit(\"{:016x}\", ", concat.site.id)),
         "the runtime hit must use the manifest's exact artifact-local ID",
+    );
+    let function_line = emit
+        .lua
+        .lines()
+        .position(|line| line.starts_with(&format!("function {}", concat.body)))
+        .expect("instrumented emitted body")
+        + 1;
+    let emitted_line = emit
+        .lua
+        .lines()
+        .position(|line| line.contains(&format!("{:016x}", concat.site.id)))
+        .expect("instrumented allocation expression line")
+        + 1;
+    assert_eq!(
+        concat.site.lua_body_line,
+        (emitted_line - function_line + 1) as u32,
+        "the manifest line must address the instrumented emitted body",
     );
     assert!(
         emit.lua.contains("function __rock_alloc_hit(id, value)"),
