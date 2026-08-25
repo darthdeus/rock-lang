@@ -516,6 +516,30 @@ fn update_publishes_unused_var_warning() {
     );
 }
 
+#[test]
+fn update_treats_decorator_metadata_params_as_used() {
+    let src = r#"
+@artifact_definition(catalog="widgets", key_param="key")
+deco init widget(key: string) {}
+fn f() { let dead = 1 }
+"#;
+    let mut bone = BoneWorkspace::new();
+    let per_file = bone.update(PATH, src.to_string());
+    let diags: Vec<_> = per_file
+        .into_iter()
+        .filter(|(p, _)| p == PATH)
+        .flat_map(|(_, d)| d)
+        .collect();
+    assert!(
+        diags.iter().any(|d| d.message.contains("unused variable `dead`")),
+        "fixture must exercise the live unused-var diagnostic path: {diags:?}"
+    );
+    assert!(
+        !diags.iter().any(|d| d.message.contains("unused variable `key`")),
+        "artifact-definition metadata consumes `key`: {diags:?}"
+    );
+}
+
 // `unused_fn` is whole-project reachability, gated to `bin` packages. A game
 // with an uncalled non-root function should see it flagged on the live path.
 #[test]

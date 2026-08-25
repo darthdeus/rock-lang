@@ -13,8 +13,10 @@ use bone_semantic::prelude::ModuleId;
 use ustr::Ustr;
 
 use crate::code_identity::{CodeArtifact, CodeIdentity, FrameSchema};
+use crate::lifecycle::LifecyclePlan;
 use crate::lower::{GlobalPlan, NB_PRIM_ELEMS, ScalarCtx, ValueStorage};
 use crate::mir::{MirFunc, StaticCell};
+use crate::monoty::{convert_decl, MonoCtor, MonoSubst, MonoTy};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum StateKind {
@@ -59,10 +61,20 @@ impl StateSchemaCensus {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct StateSchemaSceneMetadata {
+    pub scene_registry_identity: Option<String>,
+    pub arena_registry_identity: Option<String>,
+    pub scene_root_types: Vec<String>,
+    pub arena_identity_fields: Vec<String>,
+    pub scene_lifecycle_entries: usize,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct StateSchema {
     pub entries: Vec<StateEntry>,
     pub schema_id: String,
     census: StateSchemaCensus,
+    pub scene: StateSchemaSceneMetadata,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -74,6 +86,9 @@ pub enum StateSchemaError {
     UnownedPhysical { identity: String, physical: String },
     MissingEntry { kind: StateKind, identity: String },
     UnexpectedEntry { kind: StateKind, identity: String },
+    MissingSceneRegistry,
+    MissingArenaRegistry,
+    MissingSceneRootTypes,
 }
 
 impl fmt::Display for StateSchemaError {
@@ -104,6 +119,15 @@ impl fmt::Display for StateSchemaError {
             Self::UnexpectedEntry { kind, identity } => {
                 write!(f, "StateSchema has unexpected {kind:?} entry `{identity}`")
             }
+            Self::MissingSceneRegistry => {
+                write!(f, "StateSchema has Scene lifecycle roots but no SceneRegistry state root")
+            }
+            Self::MissingArenaRegistry => {
+                write!(f, "StateSchema has Scene lifecycle roots but no ArenaRegistry state root")
+            }
+            Self::MissingSceneRootTypes => {
+                write!(f, "StateSchema has Scene lifecycle roots but no logical root types")
+            }
         }
     }
 }
@@ -119,6 +143,52 @@ impl StateSchema {
         self.entries
             .iter()
             .find(|e| e.kind == kind && e.identity == identity)
+    }
+
+    /// Attach compiler-owned Scene lifecycle roots to the same state schema.
+    /// Root membership is the canonical logical `MonoTy` key from the
+    /// LifecyclePlan, never a diagnostic or emitted name.
+    pub fn with_lifecycle_plan(
+        mut self,
+        lifecycle: &LifecyclePlan,
+    ) -> Result<Self, StateSchemaError> {
+        let scene_entries = lifecycle
+            .entries
+            .iter()
+            .filter(|entry| entry.owner.as_str() == "scene")
+            .collect::<Vec<_>>();
+        let mut root_types = BTreeSet::new();
+        for entry in &scene_entries {
+            let Some(root_type) = entry.root_type.as_ref() else {
+                return Err(StateSchemaError::MissingSceneRootTypes);
+            };
+            let Some(root_type) = crate::lifecycle::scene_root_type_key(root_type) else {
+                return Err(StateSchemaError::MissingSceneRootTypes);
+            };
+            root_types.insert(root_type);
+        }
+        let mut root_types: Vec<String> = root_types.into_iter().collect();
+        root_types.sort();
+        if !scene_entries.is_empty() && self.scene.scene_registry_identity.is_none() {
+            return Err(StateSchemaError::MissingSceneRegistry);
+        }
+        if !scene_entries.is_empty() && self.scene.arena_registry_identity.is_none() {
+            return Err(StateSchemaError::MissingArenaRegistry);
+        }
+        if !scene_entries.is_empty() && root_types.is_empty() {
+            return Err(StateSchemaError::MissingSceneRootTypes);
+        }
+        self.scene.scene_root_types = root_types;
+        self.scene.scene_lifecycle_entries = scene_entries.len();
+        self.scene.arena_identity_fields = if scene_entries.is_empty() {
+            Vec::new()
+        } else {
+            ["scene_id", "arena_id", "slot", "generation"]
+                .into_iter()
+                .map(str::to_string)
+                .collect()
+        };
+        Ok(self)
     }
 
     /// Validate a materialized entry list. This public constructor is also the
@@ -183,6 +253,7 @@ impl StateSchema {
             entries: ordered,
             schema_id,
             census,
+            scene: StateSchemaSceneMetadata::default(),
         })
     }
 
@@ -300,7 +371,8 @@ impl StateSchema {
             entries.push(entry);
         }
 
-        let schema = Self::from_entries(entries)?;
+        let mut schema = Self::from_entries(entries)?;
+        schema.scene = scene_metadata(ws);
         for kind in [
             StateKind::Global,
             StateKind::Static,
@@ -351,6 +423,44 @@ impl StateSchema {
         current.sort_by(|a, b| (a.kind, &a.identity).cmp(&(b.kind, &b.identity)));
         previous.sort_by(|a, b| (a.kind, &a.identity).cmp(&(b.kind, &b.identity)));
         Ok(current == previous)
+    }
+}
+
+fn scene_metadata(ws: &Workspace) -> StateSchemaSceneMetadata {
+    let mut metadata = StateSchemaSceneMetadata::default();
+    for module in ws.modules.iter().filter(|module| module.id != ModuleId::builtin()) {
+        for (_, global) in module.globals.iter().filter(|(_, global)| !global.is_const) {
+            let role = registry_role(ws, global.ty);
+            let identity = global_identity(module.file, global.name);
+            match role {
+                Some("SceneRegistry") => metadata.scene_registry_identity = Some(identity),
+                Some("ArenaRegistry") => metadata.arena_registry_identity = Some(identity),
+                _ => {}
+            }
+        }
+    }
+    metadata
+}
+
+/// These are nominal compiler contracts, not source-name or runtime-type
+/// classifiers: the standard library owns the two reference-struct types and
+/// StateSchema records their logical identities for every backend.
+fn registry_role(ws: &Workspace, ty: bone_semantic::prelude::TyId) -> Option<&'static str> {
+    let logical = convert_decl(ws, ty, &MonoSubst::default()).ok()?;
+    let MonoTy::App {
+        ctor: MonoCtor::Nominal(name),
+        params,
+    } = logical
+    else {
+        return None;
+    };
+    if !params.is_empty() {
+        return None;
+    }
+    match name.as_str() {
+        "SceneRegistry" => Some("SceneRegistry"),
+        "ArenaRegistry" => Some("ArenaRegistry"),
+        _ => None,
     }
 }
 

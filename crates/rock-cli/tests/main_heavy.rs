@@ -17,6 +17,8 @@ mod quit_teardown_test;
 mod replay_desync_tests;
 #[path = "replay_flight_tests.rs"]
 mod replay_flight_tests;
+#[path = "artifact_fingerprint_replay_tests.rs"]
+mod artifact_fingerprint_replay_tests;
 #[path = "replay_bindings_tests.rs"]
 mod replay_bindings_tests;
 #[path = "action_layer_v2_landing_gaps.rs"]
@@ -25,15 +27,21 @@ mod action_layer_v2_landing_gaps;
 mod replay_restore_tests;
 #[path = "replay_roundtrip_tests.rs"]
 mod replay_roundtrip_tests;
+#[path = "replay_bootstrap_tests.rs"]
+mod replay_bootstrap_tests;
 #[path = "replay_timeline_tests.rs"]
 mod replay_timeline_tests;
 #[path = "replay_window_tests.rs"]
 mod replay_window_tests;
+#[path = "replay_timing_tests.rs"]
+mod replay_timing_tests;
 #[path = "engine_cdylib_freshness_gate.rs"]
 mod engine_cdylib_freshness_gate;
 
 #[path = "frame_error_gate.rs"]
 mod frame_error_gate;
+#[path = "allocation_activation_gate.rs"]
+mod allocation_activation_gate;
 #[path = "frame_watchdog_gate.rs"]
 mod frame_watchdog_gate;
 #[path = "macos_wgpu_lifecycle_gate.rs"]
@@ -70,6 +78,8 @@ mod sim_concurrent_invocations;
 mod sim_allocation_census;
 #[path = "sim_worker_differential.rs"]
 mod sim_worker_differential;
+#[path = "mag_worker_product_tests.rs"]
+mod mag_worker_product_tests;
 #[path = "sim_reload_lane_drain.rs"]
 mod sim_reload_lane_drain;
 #[path = "sim_worker_pool.rs"]

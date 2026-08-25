@@ -26,6 +26,7 @@ pub struct ResolvedVar {
 pub struct ResolvedBuildVars {
     pub channel: String,
     pub vars: HashMap<String, ResolvedVar>,
+    pub volatile_vars: std::collections::HashSet<String>,
 }
 
 pub fn resolve_build_vars(
@@ -50,7 +51,11 @@ pub fn resolve_build_vars(
         if let Some(name) = overrides.keys().next() {
             anyhow::bail!("--var {name} is not declared in [build.vars]");
         }
-        return Ok(ResolvedBuildVars { channel: "dev".to_string(), vars: HashMap::new() });
+        return Ok(ResolvedBuildVars {
+            channel: "dev".to_string(),
+            vars: HashMap::new(),
+            volatile_vars: std::collections::HashSet::new(),
+        });
     };
     cfg.validate_build()?;
 
@@ -107,7 +112,13 @@ pub fn resolve_build_vars(
         };
         vars.insert(name.clone(), ResolvedVar { value, secret: var.secret });
     }
-    Ok(ResolvedBuildVars { channel, vars })
+    let volatile_vars = build
+        .vars
+        .iter()
+        .filter(|(_, var)| var.volatile)
+        .map(|(name, _)| name.clone())
+        .collect();
+    Ok(ResolvedBuildVars { channel, vars, volatile_vars })
 }
 
 /// The platform names the runtime distinguishes; `--target-os` accepts
@@ -216,13 +227,14 @@ mod tests {
         let cfg = fixture(concat!(
             "[package]\nname = \"x\"\n",
             "[build]\nchannels = [\"dev\", \"steam\"]\ndefault_channel = \"dev\"\n",
-            "[build.vars]\nENDPOINT = \"https://example.test\"\nCHANNEL = { builtin = \"channel\" }\n",
+            "[build.vars]\nENDPOINT = \"https://example.test\"\nCHANNEL = { builtin = \"channel\" }\nCLOCK = { value = \"now\", volatile = true }\n",
         ));
         let dir = tempfile::tempdir().unwrap();
         let resolved = resolve_build_vars(&cfg, dir.path(), Some("steam"), None, &no_overrides()).unwrap();
         assert_eq!(resolved.channel, "steam");
         assert_eq!(resolved.vars["ENDPOINT"].value, "https://example.test");
         assert_eq!(resolved.vars["CHANNEL"].value, "steam");
+        assert!(resolved.volatile_vars.contains("CLOCK"));
     }
 
     #[test]

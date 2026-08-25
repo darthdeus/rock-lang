@@ -637,6 +637,9 @@ impl CommandContext {
             let dump = std::env::var("ROCK_MONO_DUMP").ok();
             return crate::mono_manifest::do_mono_manifest(Some(&root), dump.as_deref());
         }
+        if self.args.command == CliCommand::AllocationJoin {
+            return crate::allocation_join::run(&self.args.files);
+        }
         // iter-lsp is the tight-loop profiler for the per-edit LSP query path
         // (BoneWorkspace on the bone backend); dispatched early like the other
         // iter-* profilers.

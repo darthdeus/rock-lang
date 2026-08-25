@@ -218,6 +218,39 @@ return v0
 }
 
 #[test]
+fn omitted_result_discards_tail_value_after_its_effects() {
+    let dump = mir_std(
+        "value V2 { x: int, y: int }\n\
+         fn produce() -> V2 { V2 { x: 1, y: 2 } }\n\
+         fn sink() { produce() }",
+        "sink",
+    );
+    assert!(dump.contains("call"), "the tail call must still execute, got:\n{dump}");
+    assert!(
+        dump.lines().any(|line| line.trim() == "return"),
+        "a function with no declared result must return no value, got:\n{dump}"
+    );
+    assert!(
+        !dump.lines().any(|line| line.trim().starts_with("return v")),
+        "the ignored tail value must not escape the unit function, got:\n{dump}"
+    );
+    assert!(
+        !dump.contains("V2_ct"),
+        "discarding the scalar return must not reconstruct its value type, got:\n{dump}"
+    );
+}
+
+#[test]
+fn inferred_lambda_result_remains_value_bearing() {
+    let dump = mir_std("fn sink() { let xs = [2, 1]\n xs.sort(x => x) }", "sink");
+    assert!(dump.contains("lambda"), "fixture must lower the sort key lambda, got:\n{dump}");
+    assert!(
+        dump.lines().any(|line| line.trim().starts_with("return v")),
+        "the context-inferred lambda result must remain value-bearing, got:\n{dump}"
+    );
+}
+
+#[test]
 fn param_is_a_cell_read_via_load() {
     assert_eq!(
         mir("fn id(x: int) -> int { x }", "id"),

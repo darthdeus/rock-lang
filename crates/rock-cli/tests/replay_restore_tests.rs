@@ -129,6 +129,27 @@ fn run_replay_dump(game: &str, frames: u32, log: &str, env: &[(&str, &str)]) -> 
 /// Unlike `run_replay_dump`, this keeps the process in live record mode so a
 /// test can prove a rewind happened without a supervisor relaunch.
 fn run_record_dump(game: &str, frames: u32, log: &str, env: &[(&str, &str)]) -> serde_json::Value {
+    let observed = run_record_dump_observed(game, frames, log, env);
+    assert!(
+        observed.status_success,
+        "live record failed: {}",
+        observed.stderr
+    );
+    observed.state
+}
+
+struct ObservedRecordRun {
+    status_success: bool,
+    stderr: String,
+    state: serde_json::Value,
+}
+
+fn run_record_dump_observed(
+    game: &str,
+    frames: u32,
+    log: &str,
+    env: &[(&str, &str)],
+) -> ObservedRecordRun {
     let scratch = tempfile::tempdir().unwrap();
     let frames_s = frames.to_string();
     let out = Command::new(env!("CARGO_BIN_EXE_rock"))
@@ -141,8 +162,17 @@ fn run_record_dump(game: &str, frames: u32, log: &str, env: &[(&str, &str)]) -> 
         .current_dir(workspace_root())
         .output()
         .expect("spawn live record");
-    assert!(out.status.success(), "live record failed: {}", String::from_utf8_lossy(&out.stderr));
-    serde_json::from_slice(&out.stdout).expect("live record dump-state JSON")
+    let state = serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+        panic!(
+            "live record dump-state JSON ({e}); stderr:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        )
+    });
+    ObservedRecordRun {
+        status_success: out.status.success(),
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        state,
+    }
 }
 
 fn current_tick(s: &serde_json::Value) -> i64 {
@@ -299,65 +329,236 @@ fn assert_mag_seek_state_matches(
     label: &str,
 ) {
     let mut exact = sim.clone();
-    for name in ["DROP_PARTICLES", "WISPS"] {
-        assert!(exact.remove(name), "{name} must be admitted as simulation state");
-        assert_f32_state_matches(&got["mag"][name], &want["mag"][name], &format!("mag.{name}"));
-    }
+    assert!(
+        exact.remove("WISPS"),
+        "WISPS must be admitted as simulation state"
+    );
+    assert!(
+        exact.contains("MAG_ACTIVE_RUN"),
+        "MAG_ACTIVE_RUN must own the RunState.world simulation state"
+    );
+    assert_f32_state_matches(&got["mag"]["WISPS"], &want["mag"]["WISPS"], "mag.WISPS");
+    assert_mag_seek_populations_match(got, want, label);
     assert_sim_state_matches(got, want, &exact, label);
+}
+
+fn assert_mag_seek_populations_match(
+    got: &serde_json::Value,
+    want: &serde_json::Value,
+    label: &str,
+) {
+    for key in [
+        "MAG_REPLAY_DROP_PARTICLES",
+        "MAG_REPLAY_DROP_FIRE",
+        "MAG_REPLAY_DROP_MEND",
+        "MAG_REPLAY_WISPS",
+        "MAG_REPLAY_WISP_TRAIL",
+    ] {
+        assert_eq!(
+            got["__stone_diag"][key],
+            want["__stone_diag"][key],
+            "Mag replay population {key} must match {label}: got={} want={}",
+            got["__stone_diag"],
+            want["__stone_diag"]
+        );
+    }
+}
+
+fn assert_mag_seek_populations_are_nonzero(state: &serde_json::Value) {
+    let diag = &state["__stone_diag"];
+    for (key, label) in [
+        ("MAG_REPLAY_DROP_PARTICLES", "drop-particle arena"),
+        ("MAG_REPLAY_DROP_FIRE", "Fire drop particles"),
+        ("MAG_REPLAY_DROP_MEND", "Mend drop particles"),
+        ("MAG_REPLAY_WISPS", "wisp arena"),
+        ("MAG_REPLAY_WISP_TRAIL", "wisp trail history"),
+    ] {
+        assert!(
+            diag[key].as_i64().is_some_and(|n| n > 0),
+            "the reference must populate {label}: {diag}"
+        );
+    }
+}
+
+fn mag_seek_equivalence_state_names(
+    game: &str,
+    frames: u32,
+) -> std::collections::HashSet<String> {
+    let mut sim = sim_state_names(game, frames);
+    for name in ["WORLD_MODE", "MOTES", "MAG_ACTIVE_RUN", "WISPS"] {
+        assert!(sim.contains(name), "{name} must be admitted as simulation state");
+    }
+    for name in ["TALLY", "TELEMETRY_SESSION_OPEN", "TELEMETRY_LAST_FRAME_T"] {
+        assert!(!sim.contains(name), "{name} is telemetry side-channel state");
+    }
+    assert!(!sim.contains("DROP_PARTICLES"), "RunState.world owns DROP_PARTICLES inside MAG_ACTIVE_RUN");
+    assert!(!sim.contains("ENGINE"), "render-only ENGINE settings must not be checkpointed");
+    for name in [
+        "MAG_BUILD_INFO_DATE",
+        "MAG_BUILD_INFO_UNIX",
+        "MAG_DEATH_AUDIO_WRITES",
+        "MAG_DEATH_GRAYSCALE_PASSES",
+        "MAG_GAMEPLAY_PANEL_DRAWS",
+        "MAG_GAMEPLAY_WORLD_DRAWS",
+        "MAG_LIGHTS_ADDED",
+        "MAG_RESURRECTION_UI_DRAWS",
+        "MAG_RUN_STARTS",
+        "MAG_RUN_STOPS",
+        "UI_MOUSE",
+        "MENU_ATMOSPHERE_BATCHES",
+        "MENU_ATMOSPHERE_SUBMISSIONS",
+        "MENU_BOUNDED_FLOOR_SUBMISSIONS",
+        "MENU_BOUNDED_GLYPH_SUBMISSIONS",
+        "MENU_LABEL_CACHE_KEYS",
+        "MENU_LABEL_OUTPUT_ANCHORS",
+        "MENU_LABEL_OUTPUT_CALLS",
+        "MENU_LABEL_ROUTES",
+        "MENU_LABEL_SCENE_CALLS",
+        "MENU_LOGO_REFLECTION_ADDITIONAL_INPUTS",
+        "MENU_LOGO_REFLECTION_FACE_PIXELS",
+        "MENU_LOGO_REFLECTION_LAST_GENERATION",
+        "MENU_LOGO_REFLECTION_LAST_SOURCE_HANDLE",
+        "MENU_LOGO_REFLECTION_MATERIAL_CALLS",
+        "MENU_LOGO_TEXT_ART",
+        "MENU_LOGO_TEXT_STATE",
+        "MENU_LOGO_TEXT_OUTPUT_CALLS",
+        "MENU_OUTPUT_TEXT_ART",
+        "MENU_OUTPUT_TEXT_TARGET_RECT",
+    ] {
+        assert!(sim.remove(name), "{name} must be excluded as a presentation or lifecycle diagnostic");
+    }
+    sim
 }
 
 #[test]
 fn mag_cast_seek_restores_scheduler_owner() {
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mag_cast_seek.replay");
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = dir.path().join("mag-cast-seek.replay");
     let fixture_s = fixture.to_string_lossy().into_owned();
-    let fixture_text = std::fs::read_to_string(&fixture).expect("tracked Mag replay fixture");
-    let ticks: Vec<&str> = fixture_text.lines().filter(|line| line.starts_with("t ")).collect();
-    assert!(ticks.len() > 566, "fixture must reach the later Lightning cast");
-    assert_eq!(ticks[292].split_whitespace().nth(6), Some("2"), "tick 292 starts Flamestrike");
-    assert_eq!(ticks[566].split_whitespace().nth(6), Some("1"), "tick 566 starts Lightning");
+    let progress = dir.path().join("progress.json");
+    let progress_s = progress.to_string_lossy().into_owned();
+    let layout_s = dir.path().join("spellbook-layout.jsonl").to_string_lossy().into_owned();
+    let settings_s = dir.path().join("settings.json").to_string_lossy().into_owned();
+    let bindings_s = dir.path().join("bindings.json").to_string_lossy().into_owned();
+    std::fs::write(
+        &progress,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "version": 3,
+            "bank_gold": 0,
+            "events": {},
+            "quests": {"runs": [], "tracked": [], "collapsed": {}, "quarantined": []},
+            "player": {
+                "grid": [25, 8],
+                "dead": false,
+                "health_cur": 100.0,
+                "mana_cur": 100.0,
+                "stamina_cur": 20.0,
+                "inventory": {"gold": 0, "bandage": 0, "bloody_bandage": 0},
+                "reagents": [50, 50, 50, 50, 50, 50]
+            },
+            "spellbook": {"favorites": []}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
 
-    let ordinary = run_replay_dump(
-        "mag", 360, &fixture_s,
+    let _ = run_record_dump(
+        "mag",
+        40,
+        &fixture_s,
         &[
-            ("STONE_START_PAUSED", "1"),
-            ("STONE_STEP_FRAMES", "350"),
-            ("STONE_KEYFRAME_INTERVAL", "60"),
+            ("MAG_BOOT_PLAYING", "1"),
+            ("MAG_PROGRESS_PATH_OVERRIDE", &progress_s),
+            ("MAG_LAYOUT_HISTORY_PATH_OVERRIDE", &layout_s),
+            ("MAG_SETTINGS_PATH_OVERRIDE", &settings_s),
+            ("MAG_BINDINGS_PATH_OVERRIDE", &bindings_s),
         ],
     );
-    assert_eq!(current_tick(&ordinary), 350);
-    assert_eq!(ordinary["mag"]["player"]["spell_state.#"], "Casting");
-    assert_eq!(ordinary["mag"]["player"]["spell_state.0"], 1);
-    assert!(ordinary["mag"]["player"]["spell_state.1"].as_f64().unwrap() > 0.0);
-    assert_eq!(ordinary["mag"]["player"]["spell_state.2"], 2);
-    assert_eq!(ordinary["mag"]["player"]["mana_cur"], 100);
-    assert_eq!(ordinary["mag"]["player"]["reagents"]["counts"]["data"], serde_json::json!([50, 50, 50, 50, 50, 50]));
-    assert!(ordinary["mag"]["player"]["cast_co"].is_object());
-    assert_eq!(ordinary["mag"]["player"]["cast_co"]["last_tick_frame"], 350);
-    assert!(ordinary["stone"]["POLLER"]["coroutines"].as_array().unwrap().len() > 0,
-        "ordinary playback must have live scheduler rows");
+    let mut tick = 0;
+    let fixture_text = std::fs::read_to_string(&fixture).expect("current Mag replay fixture");
+    assert!(fixture_text.starts_with("STONE_REPLAY 9\n"), "fixture must use the exact-Artifact replay format");
+    let fixture_text = fixture_text
+        .lines()
+        .map(|line| {
+            if !line.starts_with("t ") {
+                return line.to_string();
+            }
+            let mut fields: Vec<&str> = line.split_whitespace().collect();
+            assert_eq!(fields.len(), 10, "v9 tick shape changed: {line}");
+            fields[1] = "0x1.999999999999ap-5";
+            fields[6] = if tick == 6 { "1" } else { "-" };
+            tick += 1;
+            fields.join(" ")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(tick, 40, "fixture must rewrite every recorded tick");
+    std::fs::write(&fixture, fixture_text + "\n").expect("write deterministic Mag cast replay");
 
-    let sought = run_replay_dump(
-        "mag", 700, &fixture_s,
-        &[
-            ("STONE_KEYFRAME_INTERVAL", "60"),
-            ("STONE_TIMELINE_SEEK_AT_FRAME", "600"),
-            ("STONE_TIMELINE_SEEK_TO_TICK", "350"),
-        ],
-    );
-    assert_eq!(current_tick(&sought), 350);
-    assert_eq!(sought["mag"]["player"]["spell_state.#"], ordinary["mag"]["player"]["spell_state.#"]);
-    assert_eq!(sought["mag"]["player"]["spell_state.0"], ordinary["mag"]["player"]["spell_state.0"]);
-    assert_eq!(sought["mag"]["player"]["spell_state.1"], ordinary["mag"]["player"]["spell_state.1"]);
-    assert_eq!(sought["mag"]["player"]["mana_cur"], ordinary["mag"]["player"]["mana_cur"]);
-    assert_eq!(sought["mag"]["player"]["reagents"], ordinary["mag"]["player"]["reagents"]);
-    assert!(sought["stone"]["POLLER"]["coroutines"].as_array().unwrap().len() > 0,
-        "a seek landing must retain nonempty scheduler population");
-    assert!(sought["mag"]["player"]["cast_co"]["last_tick_frame"].as_i64().unwrap() > 600,
+    let target = 12;
+    let common_env = [
+        ("MAG_BOOT_PLAYING", "1"),
+        ("MAG_REPLAY_CAST_SCHEDULER_PROBE", "1"),
+        ("MAG_REPLAY_CAST_SCHEDULER_TICK", "11"),
+        ("MAG_PROGRESS_PATH_OVERRIDE", progress_s.as_str()),
+        ("MAG_LAYOUT_HISTORY_PATH_OVERRIDE", layout_s.as_str()),
+        ("MAG_SETTINGS_PATH_OVERRIDE", settings_s.as_str()),
+        ("MAG_BINDINGS_PATH_OVERRIDE", bindings_s.as_str()),
+    ];
+    let mut ordinary_env = common_env.to_vec();
+    ordinary_env.extend([
+        ("STONE_START_PAUSED", "1"),
+        ("STONE_STEP_FRAMES", "12"),
+        ("STONE_KEYFRAME_INTERVAL", "10"),
+    ]);
+
+    let ordinary = run_replay_dump("mag", 20, &fixture_s, &ordinary_env);
+    assert_eq!(current_tick(&ordinary), target);
+    let ordinary_probe = &ordinary["__stone_diag"];
+    assert_eq!(ordinary_probe["MAG_CAST_PROBE_HITS"], 1, "ordinary arm must observe the target once: {ordinary_probe}");
+    assert_eq!(ordinary_probe["MAG_CAST_PROBE_RUN_STATE"], 1, "ordinary arm must have a live RunState: {ordinary_probe}");
+    assert!(ordinary_probe["MAG_CAST_PROBE_SCENE"].as_i64().is_some_and(|id| id > 0),
+        "ordinary arm must resolve a live Scene root: {ordinary_probe}");
+    assert_eq!(ordinary_probe["MAG_CAST_PROBE_CASTING"], 1, "ordinary arm must be mid-cast: {ordinary_probe}");
+    assert_eq!(ordinary_probe["MAG_CAST_PROBE_LIGHTNING"], 1, "ordinary arm must cast Lightning: {ordinary_probe}");
+    let cast_timer = ordinary_probe["MAG_CAST_PROBE_TIMER"].as_f64().expect("cast timer");
+    let cast_duration = ordinary_probe["MAG_CAST_PROBE_DURATION"].as_f64().expect("cast duration");
+    assert!(cast_timer > 0.0 && cast_timer < cast_duration,
+        "ordinary arm must observe a progressing cast: {ordinary_probe}");
+    assert_eq!(ordinary_probe["MAG_CAST_PROBE_TASK"], 1, "ordinary arm must own a casting Task: {ordinary_probe}");
+    assert!(ordinary_probe["MAG_CAST_PROBE_POLLER_ROWS"].as_i64().is_some_and(|n| n > 0),
+        "ordinary arm must have a nonempty POLLER: {ordinary_probe}");
+    assert_eq!(ordinary_probe["MAG_CAST_PROBE_TASK_FRAME"], target,
+        "ordinary casting Task must be pumped on the target tick: {ordinary_probe}");
+    assert!(ordinary_probe["MAG_CAST_PROBE_MANA"].as_f64().is_some_and(|mana| mana > 0.0 && mana < 100.0),
+        "ordinary cast must have spent mana: {ordinary_probe}");
+    assert_eq!(ordinary_probe["MAG_CAST_PROBE_REAGENT_1"], 49);
+    assert_eq!(ordinary_probe["MAG_CAST_PROBE_REAGENT_4"], 49);
+
+    let mut sought_env = common_env.to_vec();
+    sought_env.extend([
+        ("STONE_KEYFRAME_INTERVAL", "10"),
+        ("STONE_TIMELINE_SEEK_AT_FRAME", "30"),
+        ("STONE_TIMELINE_SEEK_TO_TICK", "12"),
+    ]);
+
+    let sought = run_replay_dump("mag", 40, &fixture_s, &sought_env);
+    assert_eq!(current_tick(&sought), target);
+    let sought_probe = &sought["__stone_diag"];
+    assert_eq!(sought_probe["MAG_CAST_PROBE_HITS"], 2,
+        "the target must be observed before and after the backward seek: {sought_probe}");
+    for key in [
+        "MAG_CAST_PROBE_RUN_STATE", "MAG_CAST_PROBE_SCENE", "MAG_CAST_PROBE_CASTING",
+        "MAG_CAST_PROBE_LIGHTNING", "MAG_CAST_PROBE_TIMER", "MAG_CAST_PROBE_DURATION",
+        "MAG_CAST_PROBE_TASK", "MAG_CAST_PROBE_POLLER_ROWS", "MAG_CAST_PROBE_MANA",
+        "MAG_CAST_PROBE_REAGENT_1", "MAG_CAST_PROBE_REAGENT_4",
+    ] {
+        assert_eq!(sought_probe[key], ordinary_probe[key],
+            "seek landing must reproduce ordinary casting state for {key}");
+    }
+    assert!(sought_probe["MAG_CAST_PROBE_TASK_FRAME"].as_i64().unwrap() > 30,
         "the restored task must be pumped after the seek, not left at its keyframe frame");
-    assert!(strip_scheduler_frame_stamps(&mut sought.clone()) > 0,
-        "named exclusion Task.last_tick_frame must have a nonzero population");
-
-    let sim = sim_state_names("mag", 60);
+    let sim = mag_seek_equivalence_state_names("mag", 60);
     assert!(sim.contains("POLLER"), "POLLER must be in the admitted sim-state oracle");
     assert_mag_seek_state_matches(&sought, &ordinary, &sim, "Mag scheduler seek");
 }
@@ -461,6 +662,80 @@ fn scrub_reports_seek_cost_and_resimulation_population() {
 }
 
 #[test]
+fn exact_recorded_replay_supports_two_backward_scene_image_scrubs() {
+    let game = "bitgun";
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("exact-two-scrubs.replay");
+    let log_s = log.to_string_lossy().into_owned();
+    let scratch = tempfile::tempdir().unwrap();
+    let rec = Command::new(env!("CARGO_BIN_EXE_rock"))
+        .args([
+            "frame", game, "-n", "80", "--record", &log_s,
+            "--output", &scratch.path().to_string_lossy(),
+        ])
+        .env("ROCK_FRAME_TIMEOUT_SECS", "60")
+        .current_dir(workspace_root())
+        .output()
+        .expect("spawn record");
+    assert!(rec.status.success(), "record failed: {}", String::from_utf8_lossy(&rec.stderr));
+    let text = std::fs::read_to_string(&log).expect("read exact replay");
+    assert!(text.starts_with("STONE_REPLAY 9\n"), "the scrub fixture must exercise the new format\n{text}");
+
+    let ordinary = run_replay_dump(
+        game,
+        80,
+        &log_s,
+        &[("STONE_START_PAUSED", "1"), ("STONE_STEP_FRAMES", "35")],
+    );
+    assert_eq!(current_tick(&ordinary), 35, "ordinary playback must reach the comparison tick");
+
+    let sought = run_replay_dump(
+        game,
+        150,
+        &log_s,
+        &[
+            ("STONE_KEYFRAME_INTERVAL", "10"),
+            ("STONE_TIMELINE_SEEK_AT_FRAME", "60"),
+            ("STONE_TIMELINE_SEEK_TO_TICK", "25"),
+            ("STONE_LIVE_PLAY_AT_FRAME", "80"),
+            ("STONE_TIMELINE_SEEK_AT_FRAME_2", "120"),
+            ("STONE_TIMELINE_SEEK_TO_TICK_2", "35"),
+            ("STONE_AUDIO_PROBE", "1"),
+        ],
+    );
+    assert_eq!(current_tick(&sought), 35, "the second backward seek must land at tick 35");
+    let diag = &sought["__stone_diag"];
+    assert_eq!(diag["STONE_SEEK_COUNT"].as_i64(), Some(2), "both backward seeks must complete: {diag}");
+    assert!(
+        diag["STONE_KEYFRAME_GLOBALS"].as_i64().is_some_and(|n| n > 0)
+            && diag["STONE_KEYFRAME_NODES"].as_i64().is_some_and(|n| n > 0),
+        "both restore arms must materialize nonempty WorldImage/SceneImage state: {diag}"
+    );
+    assert!(
+        diag["AUDIO_SEEK_MUTES"].as_i64().is_some_and(|n| n > 0),
+        "audio must stay behind the catch-up gate: {diag}"
+    );
+    assert_eq!(
+        diag["STONE_PRESENTATION_LATE_DRAW_DURING_SEEK"].as_i64().unwrap_or(0),
+        0,
+        "presentation must stay suppressed during catch-up: {diag}"
+    );
+    assert_eq!(
+        diag["STONE_PRESENTED_VIEW_PROMOTED_DURING_SEEK"].as_i64().unwrap_or(0),
+        0,
+        "the seek tool must not publish a presented view: {diag}"
+    );
+    assert_eq!(diag["STONE_SEEK_FIRST_FRAMES"].as_i64(), Some(2), "each seek needs a real post-seek frame: {diag}");
+    assert!(
+        diag["STONE_STATE_IMAGE_IMAGES_BEFORE_SHUTDOWN"].as_i64().is_some_and(|n| n > 0)
+            && diag["STONE_STATE_IMAGE_IMAGES_AFTER_SHUTDOWN"].as_i64() == Some(0),
+        "shutdown must release every lazy StateImage owner: {diag}"
+    );
+    let sim = sim_state_names(game, 80);
+    assert_sim_state_matches(&sought, &ordinary, &sim, "the exact two-scrub target");
+}
+
+#[test]
 fn refused_scrub_does_not_leave_seek_active_or_complete() {
     let game = "bitgun";
     let dir = tempfile::tempdir().unwrap();
@@ -479,9 +754,9 @@ fn refused_scrub_does_not_leave_seek_active_or_complete() {
         .expect("spawn record");
     assert!(rec.status.success(), "record failed: {}", String::from_utf8_lossy(&rec.stderr));
 
-    // Interval zero disables every cadence capture, so this deliberately has
-    // no keyframe <= the backward target. A refused scrub must leave playback
-    // untouched and must not publish a completed seek.
+    // The boot anchor remains available even when viewer cadence is disabled.
+    // Use an invalid future target for the refusal arm; a valid backward scrub
+    // must now be able to resimulate from boot.
     let refused = run_replay_dump(
         game,
         60,
@@ -489,10 +764,10 @@ fn refused_scrub_does_not_leave_seek_active_or_complete() {
         &[
             ("STONE_KEYFRAME_INTERVAL", "0"),
             ("STONE_SCRUB_AT_TICK", "40"),
-            ("STONE_SCRUB_TO_TICK", "25"),
+            ("STONE_SCRUB_TO_TICK", "1000"),
         ],
     );
-    assert_eq!(current_tick(&refused), 61, "a refused scrub must not pause or rewind playback");
+    assert_eq!(current_tick(&refused), 60, "a refused scrub must not pause or rewind playback");
     let diag = &refused["__stone_diag"];
     assert_eq!(diag["STONE_SEEK_ACTIVE"].as_i64(), Some(0));
     assert!(diag.get("STONE_SEEK_COUNT").is_none(), "a refused scrub must not complete a seek: {diag}");
@@ -564,11 +839,11 @@ fn live_record_rewind_matches_plain_replay_at_target() {
 }
 
 #[test]
-fn live_cadence_rewind_uses_nearest_sim_time_keyframe() {
+fn live_rewind_builds_lazy_index_without_recording_periodic_captures() {
     let game = "bitgun";
     let target: i64 = 55;
     let dir = tempfile::tempdir().unwrap();
-    let log = dir.path().join("live-cadence.replay");
+    let log = dir.path().join("live-lazy.replay");
     let log_s = log.to_string_lossy().into_owned();
 
     let rewound = run_record_dump(
@@ -576,28 +851,33 @@ fn live_cadence_rewind_uses_nearest_sim_time_keyframe() {
         180,
         &log_s,
         &[
-            ("STONE_LIVE_REWIND", "1"),
-            ("STONE_LIVE_REWIND_CADENCE_SECONDS", "0.05"),
-            ("STONE_LIVE_REWIND_WINDOW_SECONDS", "2.0"),
+            ("STONE_KEYFRAME_INTERVAL", "10"),
             ("STONE_TIMELINE_SEEK_AT_FRAME", "100"),
             ("STONE_TIMELINE_SEEK_TO_TICK", "55"),
         ],
     );
-    assert_eq!(current_tick(&rewound), target, "live cadence rewind must land at the requested target");
+    assert_eq!(current_tick(&rewound), target, "live rewind must land at the requested target");
     let diag = &rewound["__stone_diag"];
-    let restore_tick = diag["STONE_LIVE_REWIND_RESTORE_TICK"].as_i64().expect("live cadence restore tick");
-    assert!(restore_tick > 0 && restore_tick <= target, "nearest live keyframe must precede the target: {diag}");
+    assert_eq!(diag["STONE_LIVE_REWIND_RESTORE_TICK"].as_i64(), Some(0), "the first live seek has only its boot source: {diag}");
     assert!(
-        diag["STONE_SEEK_RESIM_FRAMES"].as_i64().is_some_and(|n| n < target),
-        "nearest live keyframe must reduce resimulation: {diag}"
+        diag["STONE_SEEK_RESIM_FRAMES"].as_i64().is_some_and(|n| n == target),
+        "the first live seek must resimulate from boot: {diag}"
     );
     assert!(
-        diag["STONE_KEYFRAME_CADENCE_CAPTURES"].as_i64().is_some_and(|n| n >= 4),
-        "the live recording must capture a nondegenerate cadence history: {diag}"
+        diag["STONE_KEYFRAME_SEEK_CAPTURES"].as_i64().is_some_and(|n| n >= 5),
+        "hidden live resimulation must create intermediate lazy keyframes: {diag}"
     );
     assert!(
         diag["STONE_KEYFRAME_COUNT"].as_i64().is_some_and(|n| n >= 2),
-        "the live keyframe population must retain the anchor and cadence image: {diag}"
+        "the live keyframe population must retain the boot and generated boundaries: {diag}"
+    );
+    assert_eq!(
+        diag["STONE_KEYFRAME_BOOT_CAPTURES"].as_i64(), Some(1),
+        "live rewind must start from one boot capture: {diag}"
+    );
+    assert_eq!(
+        diag["STONE_KEYFRAME_RECORDING_PERIODIC_CAPTURES"].as_i64(), Some(0),
+        "the live recording itself must not capture before the seek: {diag}"
     );
 
     let reference = run_replay_dump(
@@ -608,51 +888,43 @@ fn live_cadence_rewind_uses_nearest_sim_time_keyframe() {
     );
     assert_eq!(current_tick(&reference), target);
     let sim = sim_state_names(game, 180);
-    assert_sim_state_matches(&rewound, &reference, &sim, "live-cadence tick-55");
+    assert_sim_state_matches(&rewound, &reference, &sim, "live-lazy tick-55");
 }
 
 #[test]
-fn live_rewind_before_retained_time_window_refuses_with_anchor_intact() {
+fn live_rewind_ignores_superseded_wall_clock_window() {
     let game = "bitgun";
     let dir = tempfile::tempdir().unwrap();
-    let log = dir.path().join("live-window.replay");
+    let log = dir.path().join("live-no-window.replay");
     let log_s = log.to_string_lossy().into_owned();
     let runtime_frames = 120;
 
-    let refused = run_record_dump(
+    let rewound = run_record_dump(
         game,
         runtime_frames,
         &log_s,
         &[
-            ("STONE_LIVE_REWIND", "1"),
             ("STONE_LIVE_REWIND_CADENCE_SECONDS", "0.001"),
             ("STONE_LIVE_REWIND_WINDOW_SECONDS", "0.001"),
             ("STONE_TIMELINE_SEEK_AT_FRAME", "100"),
             ("STONE_TIMELINE_SEEK_TO_TICK", "1"),
         ],
     );
-    let diag = &refused["__stone_diag"];
+    let diag = &rewound["__stone_diag"];
+    assert_eq!(current_tick(&rewound), 1, "the old wall-clock window must not reject a valid target: {diag}");
     assert_eq!(diag["STONE_LIVE_REWIND_SUPPORTED"].as_i64(), Some(1));
-    assert_eq!(diag["STONE_LIVE_REWIND_REFUSED"].as_i64(), Some(1));
-    assert_eq!(diag["STONE_LIVE_REWIND_REFUSALS"].as_i64(), Some(1));
-    assert!(diag.get("STONE_LIVE_REWIND_COUNT").is_none(), "a pre-window target must not restore: {diag}");
-    assert!(
-        diag["STONE_LIVE_REWIND_FLOOR_TICK"].as_i64().is_some_and(|n| n > 1),
-        "the time policy must publish a nonzero retained floor: {diag}"
-    );
-    assert!(
-        diag["STONE_LIVE_REWIND_REFUSAL"].as_str().is_some_and(|s| s.contains("retained live rewind window")),
-        "the refusal must name the retained-window boundary: {diag}"
-    );
+    assert_eq!(diag["STONE_LIVE_REWIND_REFUSED"].as_i64(), Some(0));
+    assert_eq!(diag["STONE_LIVE_REWIND_COUNT"].as_i64(), Some(1));
+    assert_eq!(diag["STONE_LIVE_REWIND_HISTORY_FLOOR_AT_SEEK"].as_i64(), Some(0));
     assert!(
         diag["STONE_KEYFRAME_COUNT"].as_i64().is_some_and(|n| n >= 1 && n <= 4),
-        "the boot anchor and bounded recent frames must remain: {diag}"
+        "the boot anchor and any on-demand images must remain: {diag}"
     );
-    assert_eq!(recorded_tick_lines(&log_s), runtime_frames as usize + 1, "refusal must retain the input prefix");
+    assert_eq!(recorded_tick_lines(&log_s), 100, "the live horizon must retain one canonical input stream");
 }
 
 #[test]
-fn live_cadence_reload_drops_stale_keyframes_before_rewind() {
+fn live_rewind_after_body_reload_uses_boot_only() {
     let game = "bitgun";
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("live-reload.replay");
@@ -663,9 +935,6 @@ fn live_cadence_reload_drops_stale_keyframes_before_rewind() {
         140,
         &log_s,
         &[
-            ("STONE_LIVE_REWIND", "1"),
-            ("STONE_LIVE_REWIND_CADENCE_SECONDS", "0.01"),
-            ("STONE_LIVE_REWIND_WINDOW_SECONDS", "2.0"),
             ("STONE_RELOAD_AT_FRAME", "60"),
             ("STONE_TIMELINE_SEEK_AT_FRAME", "100"),
             ("STONE_TIMELINE_SEEK_TO_TICK", "20"),
@@ -690,9 +959,6 @@ fn live_full_reload_refuses_after_invalidating_all_keyframes() {
         120,
         &log_s,
         &[
-            ("STONE_LIVE_REWIND", "1"),
-            ("STONE_LIVE_REWIND_CADENCE_SECONDS", "0.01"),
-            ("STONE_LIVE_REWIND_WINDOW_SECONDS", "2.0"),
             ("STONE_RELOAD_AT_FRAME", "60"),
             ("STONE_RELOAD_FULL", "1"),
             ("STONE_TIMELINE_SEEK_AT_FRAME", "90"),
@@ -707,51 +973,47 @@ fn live_full_reload_refuses_after_invalidating_all_keyframes() {
         diag["STONE_LIVE_REWIND_REFUSAL"].as_str().is_some_and(|s| s.contains("full reload")),
         "the refusal must name the invalidating reload: {diag}"
     );
-    assert_eq!(recorded_tick_lines(&log_s), 121, "refusal must leave the live input history intact");
+    assert_eq!(recorded_tick_lines(&log_s), 120, "refusal must leave the live input history intact");
 }
 
 #[test]
-fn long_live_bitgun_rewind_resimulates_materially_fewer_frames() {
+fn long_live_bitgun_rewind_reports_lazy_index_costs() {
     let game = "bitgun";
-    let seek_frame: u32 = 900;
-    let target: i64 = 605;
+    let seek_frame: u32 = 200;
+    let target: i64 = 105;
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("long-live.replay");
     let log_s = log.to_string_lossy().into_owned();
 
     let rewound = run_record_dump(
         game,
-        seek_frame + 100,
+        seek_frame + 150,
         &log_s,
         &[
-            ("PERF_MODE", "1"),
-            ("PERF_DT", "0.008333333333333333"),
-            ("STONE_LIVE_REWIND", "1"),
-            ("STONE_LIVE_REWIND_CADENCE_SECONDS", "0.5"),
-            ("STONE_LIVE_REWIND_WINDOW_SECONDS", "5.0"),
-            ("STONE_TIMELINE_SEEK_AT_FRAME", "900"),
-            ("STONE_TIMELINE_SEEK_TO_TICK", "605"),
+            ("STONE_KEYFRAME_INTERVAL", "10"),
+            ("STONE_TIMELINE_SEEK_AT_FRAME", "200"),
+            ("STONE_TIMELINE_SEEK_TO_TICK", "105"),
         ],
     );
     let diag = &rewound["__stone_diag"];
     assert_eq!(current_tick(&rewound), target, "long live rewind must land at its requested target: {diag}");
     assert_eq!(diag["STONE_LIVE_REWIND_REFUSED"].as_i64(), Some(0), "the in-window target must be admitted: {diag}");
     assert!(
-        diag["STONE_LIVE_REWIND_FLOOR_AT_SEEK"].as_i64().is_some_and(|floor| floor > 0 && floor <= target),
-        "the fixed game-time window must evict old history while retaining the requested target: {diag}"
+        diag["STONE_LIVE_REWIND_HISTORY_FLOOR_AT_SEEK"].as_i64() == Some(0),
+        "the live history must remain from boot: {diag}"
     );
     let resim = diag["STONE_SEEK_RESIM_FRAMES"].as_i64().expect("resim frame count");
-    assert!(resim > 0 && resim * 2 < target, "the bounded live cadence must exercise and materially reduce resimulation: {diag}");
-    assert!(diag["STONE_KEYFRAME_CADENCE_CAPTURES"].as_i64().is_some_and(|n| n >= 4), "{diag}");
-    assert!(diag["STONE_KEYFRAME_EVICTIONS"].as_i64().is_some_and(|n| n > 0), "{diag}");
-    assert!(diag["STONE_KEYFRAME_COUNT"].as_i64().is_some_and(|n| (2..=14).contains(&n)), "{diag}");
-    let cadence_ms = diag["STONE_KEYFRAME_CADENCE_MS"].as_f64().expect("cadence cost");
+    assert_eq!(resim, target, "the first live seek must use the boot source: {diag}");
+    assert!(diag["STONE_KEYFRAME_SEEK_CAPTURES"].as_i64().is_some_and(|n| n >= 9), "{diag}");
+    assert!(diag["STONE_KEYFRAME_COUNT"].as_i64().is_some_and(|n| n >= 10), "{diag}");
+    let cadence_ms = diag["STONE_KEYFRAME_CADENCE_MS"].as_f64().expect("lazy capture cost");
     let capture_max_ms = diag["STONE_KEYFRAME_CAPTURE_MAX_MS"].as_f64().expect("capture hitch");
     assert!(cadence_ms > 0.0, "{diag}");
     assert!(capture_max_ms > 0.0, "{diag}");
     println!(
-        "[live-rewind-costs] target={target} resim={resim} keyframes={} cadence_ms={cadence_ms:.2} capture_max_ms={capture_max_ms:.2}",
-        diag["STONE_KEYFRAME_COUNT"]
+        "[live-lazy-costs] target={target} resim={resim} keyframes={} captures={} lazy_ms={cadence_ms:.2} capture_max_ms={capture_max_ms:.2}",
+        diag["STONE_KEYFRAME_COUNT"],
+        diag["STONE_KEYFRAME_SEEK_CAPTURES"]
     );
     assert_eq!(recorded_tick_lines(&log_s), seek_frame as usize, "the retained future must remain the one recorded input stream");
 }
@@ -767,6 +1029,10 @@ fn mag_main_menu_transition_survives_seek_resimulation() {
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("menu.replay");
     let log_s = log.to_string_lossy().into_owned();
+    let progress_s = dir.path().join("progress.json").to_string_lossy().into_owned();
+    let layout_s = dir.path().join("spellbook-layout.jsonl").to_string_lossy().into_owned();
+    let settings_s = dir.path().join("settings.json").to_string_lossy().into_owned();
+    let seek_settings_s = dir.path().join("seek-settings.json").to_string_lossy().into_owned();
 
     let _ = run_record_dump(
         game,
@@ -774,6 +1040,11 @@ fn mag_main_menu_transition_survives_seek_resimulation() {
         &log_s,
         &[
             ("MAG_BOOT_MENU", "1"),
+            ("MAG_BOOT_PLAYING", "1"),
+            ("MAG_REPLAY_BOOTSTRAP_FIXTURE", "progress"),
+            ("MAG_PROGRESS_PATH_OVERRIDE", progress_s.as_str()),
+            ("MAG_LAYOUT_HISTORY_PATH_OVERRIDE", layout_s.as_str()),
+            ("MAG_SETTINGS_PATH_OVERRIDE", settings_s.as_str()),
             ("MAG_SCREENSHOT", "1"),
             ("STONE_CHECKPOINT_INTERVAL", "0"),
         ],
@@ -790,8 +1061,16 @@ fn mag_main_menu_transition_survives_seek_resimulation() {
             let mut fields: Vec<&str> = line.split_whitespace().collect();
             assert!(fields.len() == 8 || fields.len() == 10, "recorded tick shape changed: {line}");
             fields[1] = "0x1.999999999999ap-4";
-            fields[2] = if tick == 30 { "1100" } else { "960" };
-            fields[3] = if tick == 30 { "700" } else { "432" };
+            fields[2] = match tick {
+                30 => "960",
+                32 => "1100",
+                _ => "960",
+            };
+            fields[3] = match tick {
+                30 => "590",
+                32 => "700",
+                _ => "432",
+            };
             fields[6] = match tick {
                 20 => "o",
                 28 => "down",
@@ -805,7 +1084,7 @@ fn mag_main_menu_transition_survives_seek_resimulation() {
         })
         .collect::<Vec<_>>()
         .join("\n");
-    assert_eq!(tick, frames as usize + 1, "fixture must rewrite every recorded tick");
+    assert_eq!(tick, frames as usize, "fixture must rewrite every requested tick");
     std::fs::write(&log, lines + "\n").expect("write deterministic Mag replay");
 
     let reference = run_replay_dump(
@@ -815,12 +1094,18 @@ fn mag_main_menu_transition_survives_seek_resimulation() {
         &[
             ("MAG_BOOT_MENU", "1"),
             ("MAG_SCREENSHOT", "1"),
+            ("MAG_PROGRESS_PATH_OVERRIDE", progress_s.as_str()),
+            ("MAG_LAYOUT_HISTORY_PATH_OVERRIDE", layout_s.as_str()),
+            ("MAG_SETTINGS_PATH_OVERRIDE", settings_s.as_str()),
             ("STONE_START_PAUSED", "1"),
             ("STONE_STEP_FRAMES", &target.to_string()),
         ],
     );
     assert_eq!(current_tick(&reference), i64::from(target));
-    assert_eq!(reference["mag"]["SCREEN"].as_i64(), Some(2), "ordinary playback must activate Play");
+    assert_eq!(reference["__stone_diag"]["MAG_PLAY_EFFECT_SCREEN"].as_i64(), Some(2), "ordinary playback must leave the menu for Playing");
+    assert_eq!(reference["__stone_diag"]["MAG_PLAY_EFFECT_COUNT"].as_i64(), Some(1), "ordinary playback must perform one Play transition");
+    assert!(reference["__stone_diag"]["MAG_PLAY_EFFECT_SCENE"].as_i64().is_some_and(|id| id >= 0), "ordinary playback must activate a fresh Scene: {}", reference["__stone_diag"]);
+    assert_eq!(reference["mag"]["MAG_RUN_STARTS"].as_i64(), Some(1), "ordinary playback must reach the production run-start seam");
     // The recorded 'o' at tick 35 reaches the GAME and no longer reaches the
     // engine's debug toggles, which read tool input: whether a recorded key can
     // drive a tool is owned by
@@ -832,30 +1117,6 @@ fn mag_main_menu_transition_survives_seek_resimulation() {
         Some(false),
         "the reference target precedes the pause input"
     );
-    let sim = sim_state_names(game, frames);
-    for name in ["WORLD_MODE", "MOTES"] {
-        assert!(sim.contains(name), "{name} must be admitted as simulation state");
-    }
-    for name in ["TALLY", "TELEMETRY_SESSION_OPEN", "TELEMETRY_LAST_FRAME_T"] {
-        assert!(!sim.contains(name), "{name} is telemetry side-channel state");
-    }
-    assert!(!sim.contains("ENGINE"), "render-only ENGINE settings must not be checkpointed");
-    let drops = reference["mag"]["DROP_PARTICLES"].as_array().expect("drop particle arena");
-    for kind in ["Fire", "Mend"] {
-        assert!(
-            drops.iter().any(|p| p["kind"]["__variant"].as_str() == Some(kind)),
-            "the reference must populate the {kind} producer moved out of @draw"
-        );
-    }
-    let wisps = reference["mag"]["WISPS"]["data"].as_array().expect("wisp vector");
-    assert!(!wisps.is_empty(), "the reference must contain gameplay Motes");
-    assert!(
-        wisps[0]["trail"]["depth_ys"]["data"]
-            .as_array()
-            .is_some_and(|points| !points.is_empty()),
-        "the reference must populate trail history outside @draw"
-    );
-
     let sought = run_replay_dump(
         game,
         frames + target + 10,
@@ -863,6 +1124,9 @@ fn mag_main_menu_transition_survives_seek_resimulation() {
         &[
             ("MAG_BOOT_MENU", "1"),
             ("MAG_SCREENSHOT", "1"),
+            ("MAG_PROGRESS_PATH_OVERRIDE", progress_s.as_str()),
+            ("MAG_LAYOUT_HISTORY_PATH_OVERRIDE", layout_s.as_str()),
+            ("MAG_SETTINGS_PATH_OVERRIDE", seek_settings_s.as_str()),
             ("STONE_KEYFRAME_INTERVAL", "1000"),
             ("STONE_TIMELINE_SEEK_AT_FRAME", &frames.to_string()),
             ("STONE_TIMELINE_SEEK_TO_TICK", &target.to_string()),
@@ -875,9 +1139,14 @@ fn mag_main_menu_transition_survives_seek_resimulation() {
         "the fixture must exercise from-boot resimulation"
     );
     assert_eq!(
-        sought["mag"]["SCREEN"], reference["mag"]["SCREEN"],
-        "seek resimulation must preserve Mag's @late_draw Play transition"
+        sought["__stone_diag"]["MAG_PLAY_EFFECT_SCREEN"], reference["__stone_diag"]["MAG_PLAY_EFFECT_SCREEN"],
+        "seek resimulation must preserve Mag's actual Play screen transition"
     );
+    assert!(sought["__stone_diag"]["MAG_PLAY_EFFECT_SCENE"].as_i64().is_some_and(|id| id >= 0), "seek resimulation must activate a fresh Scene: {}", sought["__stone_diag"]);
+    assert_eq!(sought["__stone_diag"]["MAG_PLAY_EFFECT_COUNT"].as_i64(), Some(2), "hidden seek resimulation must perform its own Play transition, not reuse the visible run: {}", sought["__stone_diag"]);
+    assert!(sought["__stone_diag"]["MAG_MENU_ACTION_STATE_TICKS"].as_i64().is_some_and(|n| n > 0), "seek resimulation must execute the classified state consumer: {}", sought["__stone_diag"]);
+    assert!(sought["__stone_diag"]["MAG_CONSENT_ACTION_STATE_TICKS"].as_i64().is_some_and(|n| n > 0), "fresh-settings seek must consume the consent action in the state-role path: {}", sought["__stone_diag"]);
+    assert!(sought["__stone_diag"]["MAG_SETTINGS_PLAYBACK_SAVE_SKIPS"].as_i64().is_some_and(|n| n > 0), "seek resimulation must not persist the consent choice as an external effect: {}", sought["__stone_diag"]);
     assert_eq!(
         sought["stone"]["WORLD_MODE"]["game_paused"],
         reference["stone"]["WORLD_MODE"]["game_paused"],
@@ -889,8 +1158,6 @@ fn mag_main_menu_transition_survives_seek_resimulation() {
         sought["stone"]["CAMERA_SHAKE_OFFSET"],
         reference["stone"]["CAMERA_SHAKE_OFFSET"]
     );
-    assert_mag_seek_state_matches(&sought, &reference, &sim, "Mag from-boot menu seek");
-
     let cadence_sought = run_replay_dump(
         game,
         frames + target + 10,
@@ -898,6 +1165,9 @@ fn mag_main_menu_transition_survives_seek_resimulation() {
         &[
             ("MAG_BOOT_MENU", "1"),
             ("MAG_SCREENSHOT", "1"),
+            ("MAG_PROGRESS_PATH_OVERRIDE", progress_s.as_str()),
+            ("MAG_LAYOUT_HISTORY_PATH_OVERRIDE", layout_s.as_str()),
+            ("MAG_SETTINGS_PATH_OVERRIDE", seek_settings_s.as_str()),
             ("STONE_KEYFRAME_INTERVAL", "30"),
             ("STONE_TIMELINE_SEEK_AT_FRAME", &frames.to_string()),
             ("STONE_TIMELINE_SEEK_TO_TICK", &target.to_string()),
@@ -909,15 +1179,16 @@ fn mag_main_menu_transition_survives_seek_resimulation() {
         "the fixture must restore immediately before the click"
     );
     assert_eq!(
-        cadence_sought["mag"]["SCREEN"], reference["mag"]["SCREEN"],
-        "a cadence-keyframe seek must restore Mag's retained mouse state"
+        cadence_sought["__stone_diag"]["MAG_PLAY_EFFECT_SCREEN"], reference["__stone_diag"]["MAG_PLAY_EFFECT_SCREEN"],
+        "a cadence-keyframe seek must preserve Mag's actual Play screen transition"
     );
+    assert!(cadence_sought["__stone_diag"]["MAG_PLAY_EFFECT_SCENE"].as_i64().is_some_and(|id| id >= 0), "cadence seek must activate a fresh Scene: {}", cadence_sought["__stone_diag"]);
+    assert_eq!(cadence_sought["__stone_diag"]["MAG_PLAY_EFFECT_COUNT"].as_i64(), Some(2), "cadence seek must perform its own Play transition: {}", cadence_sought["__stone_diag"]);
     assert_eq!(
         cadence_sought["stone"]["WORLD_MODE"]["game_paused"],
         reference["stone"]["WORLD_MODE"]["game_paused"],
         "a cadence-keyframe seek must restore engine-owned pause state"
     );
-    assert_mag_seek_state_matches(&cadence_sought, &reference, &sim, "Mag cadence menu seek");
 
     let keyboard_log = dir.path().join("menu-keyboard.replay");
     let keyboard_log_s = keyboard_log.to_string_lossy().into_owned();
@@ -946,7 +1217,7 @@ fn mag_main_menu_transition_survives_seek_resimulation() {
         })
         .collect::<Vec<_>>()
         .join("\n");
-    assert_eq!(tick, frames as usize + 1, "fixture must rewrite every recorded tick");
+    assert_eq!(tick, frames as usize, "fixture must rewrite every requested tick");
     std::fs::write(&keyboard_log, lines + "\n").expect("write keyboard Mag replay");
 
     let keyboard_reference = run_replay_dump(
@@ -956,6 +1227,9 @@ fn mag_main_menu_transition_survives_seek_resimulation() {
         &[
             ("MAG_BOOT_MENU", "1"),
             ("MAG_SCREENSHOT", "1"),
+            ("MAG_PROGRESS_PATH_OVERRIDE", progress_s.as_str()),
+            ("MAG_LAYOUT_HISTORY_PATH_OVERRIDE", layout_s.as_str()),
+            ("MAG_SETTINGS_PATH_OVERRIDE", settings_s.as_str()),
             ("STONE_START_PAUSED", "1"),
             ("STONE_STEP_FRAMES", &target.to_string()),
         ],
@@ -972,6 +1246,9 @@ fn mag_main_menu_transition_survives_seek_resimulation() {
         &[
             ("MAG_BOOT_MENU", "1"),
             ("MAG_SCREENSHOT", "1"),
+            ("MAG_PROGRESS_PATH_OVERRIDE", progress_s.as_str()),
+            ("MAG_LAYOUT_HISTORY_PATH_OVERRIDE", layout_s.as_str()),
+            ("MAG_SETTINGS_PATH_OVERRIDE", settings_s.as_str()),
             ("STONE_KEYFRAME_INTERVAL", "32"),
             ("STONE_TIMELINE_SEEK_AT_FRAME", &frames.to_string()),
             ("STONE_TIMELINE_SEEK_TO_TICK", &target.to_string()),
@@ -988,12 +1265,241 @@ fn mag_main_menu_transition_survives_seek_resimulation() {
 }
 
 #[test]
+fn mag_main_menu_seek_state_equivalence_survives_resimulation() {
+    let game = "mag";
+    let frames = 80;
+    let target: u32 = 40;
+    let census_tick = (target - 1).to_string();
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("menu-state-equivalence.replay");
+    let log_s = log.to_string_lossy().into_owned();
+    let progress_s = dir.path().join("progress.json").to_string_lossy().into_owned();
+    let layout_s = dir.path().join("spellbook-layout.jsonl").to_string_lossy().into_owned();
+    let settings_s = dir.path().join("preconsented-settings.json").to_string_lossy().into_owned();
+    std::fs::write(
+        &settings_s,
+        r#"{"privacy":{"analytics":1,"analytics_version":3}}"#,
+    )
+    .expect("seed the production settings file with an answered consent");
+
+    let _ = run_record_dump(
+        game,
+        frames,
+        &log_s,
+        &[
+            ("MAG_BOOT_MENU", "1"),
+            ("MAG_BOOT_PLAYING", "1"),
+            ("MAG_REPLAY_BOOTSTRAP_FIXTURE", "progress"),
+            ("MAG_PROGRESS_PATH_OVERRIDE", progress_s.as_str()),
+            ("MAG_LAYOUT_HISTORY_PATH_OVERRIDE", layout_s.as_str()),
+            ("MAG_SETTINGS_PATH_OVERRIDE", settings_s.as_str()),
+            ("MAG_SCREENSHOT", "1"),
+            ("STONE_CHECKPOINT_INTERVAL", "0"),
+        ],
+    );
+    let text = std::fs::read_to_string(&log).expect("read Mag state-equivalence replay");
+    let mut tick = 0;
+    let lines = text
+        .lines()
+        .map(|line| {
+            if !line.starts_with("t ") {
+                return line.to_string();
+            }
+            let mut fields: Vec<&str> = line.split_whitespace().collect();
+            assert!(fields.len() == 8 || fields.len() == 10, "recorded tick shape changed: {line}");
+            fields[1] = "0x1.999999999999ap-4";
+            fields[2] = "960";
+            fields[3] = if tick == 30 { "590" } else { "432" };
+            fields[6] = "-";
+            fields[7] = if tick == 30 { "1" } else { "-" };
+            tick += 1;
+            fields.join(" ")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(tick, frames as usize, "fixture must rewrite every requested tick");
+    std::fs::write(&log, lines + "\n").expect("write deterministic state-equivalence replay");
+
+    let reference = run_replay_dump(
+        game,
+        frames,
+        &log_s,
+        &[
+            ("MAG_BOOT_MENU", "1"),
+            ("MAG_SCREENSHOT", "1"),
+            ("MAG_PROGRESS_PATH_OVERRIDE", progress_s.as_str()),
+            ("MAG_LAYOUT_HISTORY_PATH_OVERRIDE", layout_s.as_str()),
+            ("MAG_SETTINGS_PATH_OVERRIDE", settings_s.as_str()),
+            ("STONE_START_PAUSED", "1"),
+            ("STONE_STEP_FRAMES", &target.to_string()),
+            ("MAG_REPLAY_STATE_CENSUS", "1"),
+            ("MAG_REPLAY_STATE_CENSUS_TICK", &census_tick),
+        ],
+    );
+    assert_eq!(current_tick(&reference), i64::from(target));
+    assert_eq!(reference["__stone_diag"]["MAG_PLAY_EFFECT_SCREEN"].as_i64(), Some(2));
+    assert_mag_seek_populations_are_nonzero(&reference);
+    let sim = mag_seek_equivalence_state_names(game, frames);
+
+    let sought = run_replay_dump(
+        game,
+        frames + target + 10,
+        &log_s,
+        &[
+            ("MAG_BOOT_MENU", "1"),
+            ("MAG_SCREENSHOT", "1"),
+            ("MAG_PROGRESS_PATH_OVERRIDE", progress_s.as_str()),
+            ("MAG_LAYOUT_HISTORY_PATH_OVERRIDE", layout_s.as_str()),
+            ("MAG_SETTINGS_PATH_OVERRIDE", settings_s.as_str()),
+            ("STONE_KEYFRAME_INTERVAL", "1000"),
+            ("STONE_TIMELINE_SEEK_AT_FRAME", &frames.to_string()),
+            ("STONE_TIMELINE_SEEK_TO_TICK", &target.to_string()),
+            ("MAG_REPLAY_STATE_CENSUS", "1"),
+            ("MAG_REPLAY_STATE_CENSUS_TICK", &census_tick),
+        ],
+    );
+    assert_eq!(current_tick(&sought), i64::from(target));
+    assert_eq!(sought["__stone_diag"]["STONE_SEEK_RESIM_FRAMES"].as_i64(), Some(i64::from(target)));
+    assert_mag_seek_state_matches(&sought, &reference, &sim, "Mag from-boot state equivalence");
+
+    let cadence_sought = run_replay_dump(
+        game,
+        frames + target + 10,
+        &log_s,
+        &[
+            ("MAG_BOOT_MENU", "1"),
+            ("MAG_SCREENSHOT", "1"),
+            ("MAG_PROGRESS_PATH_OVERRIDE", progress_s.as_str()),
+            ("MAG_LAYOUT_HISTORY_PATH_OVERRIDE", layout_s.as_str()),
+            ("MAG_SETTINGS_PATH_OVERRIDE", settings_s.as_str()),
+            ("STONE_KEYFRAME_INTERVAL", "30"),
+            ("STONE_TIMELINE_SEEK_AT_FRAME", &frames.to_string()),
+            ("STONE_TIMELINE_SEEK_TO_TICK", &target.to_string()),
+            ("MAG_REPLAY_STATE_CENSUS", "1"),
+            ("MAG_REPLAY_STATE_CENSUS_TICK", &census_tick),
+        ],
+    );
+    assert_eq!(cadence_sought["__stone_diag"]["STONE_SEEK_RESIM_FRAMES"].as_i64(), Some(10));
+    assert_mag_seek_state_matches(&cadence_sought, &reference, &sim, "Mag cadence state equivalence");
+}
+
+#[test]
+fn mag_second_live_rewind_reflective_sample_is_rebuilt_before_hidden_late_draw() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("second-rewind-reflection.replay");
+    let log_s = log.to_string_lossy().into_owned();
+    let run = run_record_dump_observed(
+        "mag",
+        120,
+        &log_s,
+        &[
+            ("PERF_MODE", "1"),
+            ("PERF_NO_SECTIONS", "1"),
+            ("PERF_DT", "0.1"),
+            ("MAG_BOOT_MENU", "1"),
+            ("STONE_LIVE_REWIND", "1"),
+            ("STONE_KEYFRAME_INTERVAL", "10"),
+            ("STONE_TIMELINE_SEEK_AT_FRAME", "40"),
+            ("STONE_TIMELINE_SEEK_TO_TICK", "10"),
+            ("STONE_TIMELINE_SEEK_AT_FRAME_2", "100"),
+            ("STONE_TIMELINE_SEEK_TO_TICK_2", "27"),
+        ],
+    );
+    assert!(
+        run.status_success,
+        "the bounded run must not raise a frame error; the pre-fix RED arm reports:\n{}",
+        run.stderr
+    );
+    assert!(
+        !run.stderr.contains("reflective TextArt requested a presented scene sample"),
+        "the reflective sample failure must be gone:\n{}",
+        run.stderr
+    );
+
+    let diag = &run.state["__stone_diag"];
+    assert_eq!(diag["STONE_LIVE_REWIND_COUNT"].as_i64(), Some(1), "{diag}");
+    assert_eq!(diag["STONE_SEEK_COUNT"].as_i64(), Some(2), "exactly two admitted seeks: {diag}");
+    assert_eq!(diag["STONE_SEEK_FROM_TICK"].as_i64(), Some(10), "the second seek must be distinguishable: {diag}");
+    assert_eq!(diag["STONE_SEEK_TO_TICK"].as_i64(), Some(27), "{diag}");
+    assert!(
+        diag["STONE_SEEK_RESIM_FRAMES"].as_i64().is_some_and(|n| n > 0),
+        "the second seek must resimulate: {diag}"
+    );
+    assert!(
+        diag["STONE_KEYFRAME_GLOBALS"].as_i64().is_some_and(|n| n > 0)
+            && diag["STONE_KEYFRAME_NODES"].as_i64().is_some_and(|n| n > 0)
+            && diag["STONE_RESTORE_MS"].as_f64().is_some_and(|n| n > 0.0),
+        "the fixture must materialize a non-empty SceneImage/StateImage restore: {diag}"
+    );
+    assert!(
+        diag["STONE_SEEK_TOOL_RENDER_FRAMES"].as_i64().is_some_and(|n| n > 0),
+        "the seek-tool render population must be nonzero: {diag}"
+    );
+    assert_eq!(
+        diag["STONE_HIDDEN_LATE_DRAW_FRAMES"].as_i64(),
+        diag["STONE_SEEK_TOOL_RENDER_FRAMES"].as_i64(),
+        "the hidden late-draw population must match the active seek frames: {diag}"
+    );
+    assert!(
+        diag["MAG_MENU_ACTION_STATE_TICKS"].as_i64().is_some_and(|n| n > 0),
+        "the gameplay-relevant menu action consumer must run during hidden resimulation: {diag}"
+    );
+    assert_eq!(diag["STONE_PRESENTATION_LATE_DRAW_DURING_SEEK"].as_i64().unwrap_or(0), 0, "reflective gameplay presentation must stay out of active seek frames: {diag}");
+    assert_eq!(diag["STONE_PRESENTED_VIEW_PROMOTED_DURING_SEEK"].as_i64().unwrap_or(0), 0, "the restored host projection must not be published by a tool-only seek frame: {diag}");
+    assert!(
+        diag["MAG_MENU_LOGO_TEXT_SAMPLE_REQUESTS"].as_i64().is_some_and(|n| n > 0)
+            && run.state["mag"]["MENU_LOGO_TEXT_OUTPUT_CALLS"]
+                .as_i64()
+                .is_some_and(|n| n > 0),
+        "the reflective menu TextArt consumer must be exercised: {diag}"
+    );
+}
+
+#[test]
+fn mag_first_live_rewind_is_the_nearest_working_reflection_control() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("first-rewind-reflection-control.replay");
+    let log_s = log.to_string_lossy().into_owned();
+    let run = run_record_dump_observed(
+        "mag",
+        70,
+        &log_s,
+        &[
+            ("PERF_MODE", "1"),
+            ("PERF_NO_SECTIONS", "1"),
+            ("PERF_DT", "0.1"),
+            ("MAG_BOOT_MENU", "1"),
+            ("STONE_LIVE_REWIND", "1"),
+            ("STONE_KEYFRAME_INTERVAL", "10"),
+            ("STONE_TIMELINE_SEEK_AT_FRAME", "40"),
+            ("STONE_TIMELINE_SEEK_TO_TICK", "10"),
+        ],
+    );
+    assert!(
+        run.status_success,
+        "the first-seek control must remain clean; stderr:\n{}",
+        run.stderr
+    );
+    assert!(
+        !run.stderr.contains("reflective TextArt requested a presented scene sample"),
+        "the control must not request a scene sample before its first capture:\n{}",
+        run.stderr
+    );
+    let diag = &run.state["__stone_diag"];
+    assert_eq!(diag["STONE_LIVE_REWIND_COUNT"].as_i64(), Some(1), "{diag}");
+    assert_eq!(diag["STONE_SEEK_COUNT"].as_i64(), Some(1), "the control has one admitted seek: {diag}");
+    assert!(
+        diag["MAG_MENU_LOGO_TEXT_SAMPLE_REQUESTS"].as_i64().is_some_and(|n| n > 0),
+        "the nearest working control must reach the reflective menu consumer: {diag}"
+    );
+}
+
+#[test]
 fn live_record_rewind_refuses_unsupported_state_without_mutating_world() {
     let game = "survivors";
     let runtime_frames = 80;
     let dir = tempfile::tempdir().unwrap();
     for (mode, global, kind) in [
-        ("scene", "LIVE_REWIND_PROBE_SCENE", "Scene"),
         ("foreign", "LIVE_REWIND_PROBE_FOREIGN", "raw"),
         ("cdata", "LIVE_REWIND_PROBE_MUTABLE_CDATA", "cdata"),
     ] {
@@ -1046,8 +1552,8 @@ fn recorded_tick_lines(path: &str) -> usize {
         .count()
 }
 
-/// Boot admission describes boot. Unsupported Scene/raw/native state created
-/// AFTER boot but before H must still refuse the rewind at H -- before mode
+/// Boot admission describes boot. Unsupported raw/native state created AFTER
+/// boot but before H must still refuse the rewind at H -- before mode
 /// promotion and before any restore -- so the live world is never partially
 /// rolled back. The distinguishing evidence against the boot-refusal test is
 /// `STONE_LIVE_REWIND_SUPPORTED == 1`: boot WAS admissible here.
@@ -1057,7 +1563,6 @@ fn live_record_rewind_refuses_late_created_unsupported_state() {
     let runtime_frames = 80;
     let dir = tempfile::tempdir().unwrap();
     for (mode, global, kind) in [
-        ("scene", "LIVE_REWIND_PROBE_SCENE", "Scene"),
         ("foreign", "LIVE_REWIND_PROBE_FOREIGN", "raw"),
         ("cdata", "LIVE_REWIND_PROBE_MUTABLE_CDATA", "cdata"),
     ] {
@@ -1104,10 +1609,10 @@ fn live_record_rewind_refuses_late_created_unsupported_state() {
 
         // No mode promotion: the recorder is still appending, so the log holds a
         // tick per run frame rather than stopping at the rewind frame (40).
-        // `rock frame -n N` ticks N+1 frames -- the bound is checked after the
-        // frame runs -- so that, not N, is the denominator.
+        // The bounded runner's log population is the denominator for the live
+        // stream; the refusal must not switch the session into replay.
         assert_eq!(
-            recorded_tick_lines(&log_s), runtime_frames as usize + 1,
+            recorded_tick_lines(&log_s), runtime_frames as usize,
             "{mode} refusal must leave the session recording (no promotion to replay)"
         );
         assert_eq!(current_tick(&refused), current_tick(&control), "{mode} refusal must keep live time moving");
@@ -1117,7 +1622,7 @@ fn live_record_rewind_refuses_late_created_unsupported_state() {
 }
 
 #[test]
-fn live_cadence_admission_failure_clears_partial_history() {
+fn live_admission_failure_clears_partial_history() {
     let game = "survivors";
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("live-cadence-refused.replay");
@@ -1129,10 +1634,7 @@ fn live_cadence_admission_failure_clears_partial_history() {
         &log_s,
         &[
             ("ROCK_TEST_SEED", "42"),
-            ("STONE_LIVE_REWIND", "1"),
-            ("STONE_LIVE_REWIND_CADENCE_SECONDS", "0.01"),
-            ("STONE_LIVE_REWIND_WINDOW_SECONDS", "2.0"),
-            ("STONE_LIVE_REWIND_UNSUPPORTED", "scene"),
+            ("STONE_LIVE_REWIND_UNSUPPORTED", "foreign"),
             ("STONE_LIVE_REWIND_UNSUPPORTED_AT_TICK", "30"),
             ("STONE_TIMELINE_SEEK_AT_FRAME", "70"),
             ("STONE_TIMELINE_SEEK_TO_TICK", "25"),
@@ -1143,7 +1645,7 @@ fn live_cadence_admission_failure_clears_partial_history() {
     assert!(diag["STONE_LIVE_REWIND_REFUSALS"].as_i64().is_some_and(|n| n >= 1), "{diag}");
     assert!(diag.get("STONE_LIVE_REWIND_COUNT").is_none(), "a failed live admission must not promote: {diag}");
     assert_eq!(diag["STONE_KEYFRAME_COUNT"].as_i64(), Some(1), "partial cadence frames must be discarded: {diag}");
-    assert_eq!(recorded_tick_lines(&log_s), 101, "the failed admission must leave the input history intact");
+    assert_eq!(recorded_tick_lines(&log_s), 100, "the failed admission must leave the input history intact");
 }
 
 /// The admission control: state created just as late, but SUPPORTED, must reach
@@ -1308,12 +1810,11 @@ fn live_rewind_pauses_at_horizon_and_keeps_the_future_inspectable() {
     assert_sim_state_matches(&rescrubbed, &reference_30, &sim_b, "re-scrub tick-30");
 }
 
-/// The author-facing surface: with live rewind opted in and admitted, the
-/// existing replay timeline bar opens over the LIVE recording and spans the
-/// retained history. Without the opt-in the bar stays closed, so a plain
-/// recording pays nothing. After a rewind the bar's span is the whole recorded
-/// log -- the stretch past `current_tick` is exactly the retained future the
-/// author can still play into.
+/// The author-facing surface: the explicit replay-picker action opens the
+/// timeline over the LIVE recording and spans the retained history. A plain
+/// recording stays closed, so it pays nothing. After a rewind the bar's span is
+/// the whole recorded log -- the stretch past `current_tick` is exactly the
+/// retained future the author can still play into.
 ///
 /// The bar's control wiring is what is asserted here; placement and styling are
 /// author-verified, per the timeline bar's own convention.
@@ -1322,12 +1823,12 @@ fn live_timeline_bar_exposes_retained_history_while_recording() {
     let game = "bitgun";
     let dir = tempfile::tempdir().unwrap();
 
-    let armed_log = dir.path().join("bar-armed.replay").to_string_lossy().into_owned();
-    let armed = run_record_dump(game, 30, &armed_log, &[("STONE_LIVE_REWIND", "1")]);
+    let armed_log = dir.path().join("bar-opened.replay").to_string_lossy().into_owned();
+    let armed = run_record_dump(game, 30, &armed_log, &[("STONE_OPEN_LIVE_TIMELINE_AT_FRAME", "5")]);
     let diag = &armed["__stone_diag"];
     assert!(
         diag["REPLAY_TIMELINE_DRAWS"].as_i64().is_some_and(|n| n > 0),
-        "an armed live recording must open the timeline bar: {diag}"
+        "the explicit live-timeline action must open the timeline bar: {diag}"
     );
     // The bar is drawn inside the frame, before the tick counter advances at
     // frame end, so its last span is one behind the dumped `current_tick`. The
@@ -1351,7 +1852,7 @@ fn live_timeline_bar_exposes_retained_history_while_recording() {
     let rewound = run_record_dump(
         game, 80, &rewound_log,
         &[
-            ("STONE_LIVE_REWIND", "1"),
+            ("STONE_OPEN_LIVE_TIMELINE_AT_FRAME", "5"),
             ("STONE_TIMELINE_SEEK_AT_FRAME", "40"),
             ("STONE_TIMELINE_SEEK_TO_TICK", "25"),
         ],
@@ -1363,6 +1864,151 @@ fn live_timeline_bar_exposes_retained_history_while_recording() {
         diag["REPLAY_TIMELINE_TOTAL"].as_i64(), Some(40),
         "at the paused historical tick the bar must span the retained future: {diag}"
     );
+}
+
+#[test]
+fn ordinary_recording_keeps_one_boot_anchor_without_timeline_arming() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("default-anchor.replay").to_string_lossy().into_owned();
+    let state = run_record_dump(
+        "bitgun",
+        30,
+        &log,
+        &[("STONE_KEYFRAME_INTERVAL", "1")],
+    );
+    let diag = &state["__stone_diag"];
+    assert_eq!(diag["STONE_LIVE_REWIND_SUPPORTED"].as_i64(), Some(1), "default recording must admit live rewind: {diag}");
+    assert_eq!(diag["STONE_KEYFRAME_BOOT_CAPTURES"].as_i64(), Some(1), "boot admission must have one capture: {diag}");
+    assert_eq!(diag["STONE_KEYFRAME_COUNT"].as_i64(), Some(1), "ordinary recording must retain only its boot anchor: {diag}");
+    assert_eq!(diag.get("STONE_KEYFRAME_CADENCE_CAPTURES").and_then(serde_json::Value::as_i64).unwrap_or(0), 0, "live recording must not pay periodic capture cost: {diag}");
+    assert_eq!(diag.get("STONE_KEYFRAME_RECORDING_PERIODIC_CALLS").and_then(serde_json::Value::as_i64).unwrap_or(0), 0, "the live runner must not call the periodic authority: {diag}");
+    assert!(diag.get("REPLAY_TIMELINE_DRAWS").is_none(), "the unopened timeline must not draw: {diag}");
+}
+
+#[test]
+fn live_recording_without_timeline_has_zero_periodic_captures_even_with_old_cadence_env() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("no-periodic.replay").to_string_lossy().into_owned();
+    let state = run_record_dump(
+        "bitgun",
+        60,
+        &log,
+        &[
+            ("STONE_LIVE_REWIND", "1"),
+            ("STONE_LIVE_REWIND_CADENCE_SECONDS", "0.001"),
+            ("STONE_LIVE_REWIND_WINDOW_SECONDS", "2.0"),
+        ],
+    );
+    let diag = &state["__stone_diag"];
+    assert_eq!(diag["STONE_KEYFRAME_COUNT"].as_i64(), Some(1), "old live cadence settings must not create a second mechanism: {diag}");
+    assert_eq!(diag.get("STONE_KEYFRAME_CADENCE_CAPTURES").and_then(serde_json::Value::as_i64).unwrap_or(0), 0, "no timeline use means no periodic WorldImage captures: {diag}");
+}
+
+#[test]
+fn replay_picker_live_action_opens_history_without_indexing_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("picker-live.replay").to_string_lossy().into_owned();
+    let state = run_record_dump(
+        "bitgun",
+        30,
+        &log,
+        &[("STONE_OPEN_LIVE_TIMELINE_AT_FRAME", "5")],
+    );
+    let diag = &state["__stone_diag"];
+    assert_eq!(diag["STONE_LIVE_TIMELINE_OPEN"].as_i64(), Some(1), "the replay picker action must open the live timeline: {diag}");
+    assert!(diag["REPLAY_TIMELINE_DRAWS"].as_i64().is_some_and(|n| n > 0), "opening the live timeline must expose its retained history: {diag}");
+    assert_eq!(diag["STONE_KEYFRAME_COUNT"].as_i64(), Some(1), "opening the timeline must not pre-index the recording: {diag}");
+}
+
+#[test]
+fn far_seek_builds_intermediate_lazy_keyframes_and_matches_plain_playback() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("lazy-far-seek.replay").to_string_lossy().into_owned();
+    let _ = run_record_dump("bitgun", 80, &log, &[]);
+    let sought = run_replay_dump(
+        "bitgun",
+        100,
+        &log,
+        &[
+            ("STONE_START_PAUSED", "1"),
+            ("STONE_KEYFRAME_INTERVAL", "10"),
+            ("STONE_TIMELINE_SEEK_AT_FRAME", "1"),
+            ("STONE_TIMELINE_SEEK_TO_TICK", "55"),
+        ],
+    );
+    assert_eq!(current_tick(&sought), 55, "the immediate seek must land at its target");
+    let reference = run_replay_dump(
+        "bitgun",
+        100,
+        &log,
+        &[("STONE_START_PAUSED", "1"), ("STONE_STEP_FRAMES", "55")],
+    );
+    let sim = sim_state_names("bitgun", 80);
+    assert_sim_state_matches(&sought, &reference, &sim, "lazy seek target");
+    let diag = &sought["__stone_diag"];
+    assert_eq!(diag["STONE_KEYFRAME_INIT_COUNT"].as_i64(), Some(1), "a loaded replay must begin with only its boot anchor: {diag}");
+    assert!(diag["STONE_KEYFRAME_COUNT"].as_i64().is_some_and(|n| n >= 6), "a far seek must retain boot plus intermediate cadence boundaries: {diag}");
+    assert!(diag["STONE_KEYFRAME_SEEK_CAPTURES"].as_i64().is_some_and(|n| n >= 5), "hidden resimulation must use the shared cadence capture authority: {diag}");
+    assert!(diag["STONE_KEYFRAME_FIRST_SEEK_TICK"].as_i64().is_some_and(|n| n > 0 && n < 55), "the first seek capture must be an intermediate boundary, not only the target: {diag}");
+    assert!(diag["STONE_STATE_IMAGE_IMAGES_BEFORE_SHUTDOWN"].as_i64().is_some_and(|n| n >= 6), "each retained lazy keyframe must own one StateImage before shutdown: {diag}");
+}
+
+#[test]
+fn second_seek_restores_from_the_nearest_lazily_generated_keyframe() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("lazy-nearest.replay").to_string_lossy().into_owned();
+    let _ = run_record_dump("bitgun", 80, &log, &[]);
+    let sought = run_replay_dump(
+        "bitgun",
+        120,
+        &log,
+        &[
+            ("STONE_START_PAUSED", "1"),
+            ("STONE_KEYFRAME_INTERVAL", "10"),
+            ("STONE_TIMELINE_SEEK_AT_FRAME", "1"),
+            ("STONE_TIMELINE_SEEK_TO_TICK", "55"),
+            ("STONE_TIMELINE_SEEK_AT_FRAME_2", "80"),
+            ("STONE_TIMELINE_SEEK_TO_TICK_2", "35"),
+        ],
+    );
+    assert_eq!(current_tick(&sought), 35, "the second seek must land at its target");
+    let diag = &sought["__stone_diag"];
+    assert_eq!(diag["STONE_SEEK_COUNT"].as_i64(), Some(2), "both seek requests must complete: {diag}");
+    assert_eq!(diag["STONE_LAST_RESTORE_TICK"].as_i64(), Some(30), "the second seek must restore its nearest lazy keyframe: {diag}");
+    assert_eq!(diag["STONE_SEEK_RESIM_FRAMES"].as_i64(), Some(5), "only the span after the nearest keyframe should resimulate: {diag}");
+    assert!(diag["STONE_STATE_IMAGE_SESSION_OWNERS"].as_i64().is_some_and(|n| n >= 1), "the restored StateImage session must remain owned by the active runtime: {diag}");
+}
+
+#[test]
+fn boot_image_refusal_does_not_stop_default_recording() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("boot-refusal-recording.replay").to_string_lossy().into_owned();
+    let frames = 40;
+    let state = run_record_dump(
+        "survivors",
+        frames,
+        &log,
+        &[("ROCK_TEST_SEED", "42"), ("STONE_LIVE_REWIND_UNSUPPORTED", "foreign")],
+    );
+    let diag = &state["__stone_diag"];
+    assert_eq!(diag["STONE_LIVE_REWIND_SUPPORTED"].as_i64(), Some(0), "the unsupported boot anchor must report unavailable rewind: {diag}");
+    assert_eq!(diag["STONE_LIVE_REWIND_REFUSED"].as_i64(), Some(1), "boot refusal must be observable: {diag}");
+    let recorded = recorded_tick_lines(&log);
+    assert_eq!(current_tick(&state), recorded as i64, "live time and streamed input must agree after boot refusal");
+    assert!(recorded >= frames as usize, "the refusal must not stop the streamed recording");
+}
+
+#[test]
+fn replay_file_contains_observations_and_bootstrap_but_no_world_image_payload() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("observations-only.replay").to_string_lossy().into_owned();
+    let _ = run_record_dump("bitgun", 20, &log, &[]);
+    let bytes = std::fs::read_to_string(&log).unwrap();
+    assert!(bytes.lines().any(|line| line.starts_with("t ")), "the replay must contain input observations");
+    assert!(bytes.contains("STONE_REPLAY 9"), "the replay must retain its versioned header");
+    for payload in ["WorldImage", "StateImage", "keyframe", "snapshot"] {
+        assert!(!bytes.contains(payload), "the replay wire must not serialize {payload}: {bytes}");
+    }
 }
 
 /// Every line of a replay log, and the lines up to and including the `n`th
@@ -1445,6 +2091,8 @@ fn explicit_branch_truncates_every_future_bearing_surface_together() {
 
     assert_eq!(diag["STONE_BRANCH_COUNT"].as_i64(), Some(1), "{diag}");
     assert_eq!(diag["STONE_BRANCH_REQUESTS"].as_i64(), Some(1), "the post-frame hook must use the request path: {diag}");
+    assert_eq!(diag["STONE_BRANCH_INPUT_HANDOFFS"].as_i64(), Some(1), "input authority must return only after the branch transaction commits: {diag}");
+    assert_eq!(diag["STONE_BRANCH_INPUT_HANDOFF_EARLY"].as_i64().unwrap_or(0), 0, "input authority must not return before the branch transaction commits: {diag}");
     assert_eq!(diag["STONE_BRANCH_TICK"].as_i64(), Some(branch_tick), "{diag}");
     assert_eq!(
         diag["STONE_BRANCH_DROPPED_RECORDS"].as_i64(), Some(horizon - branch_tick),
@@ -1462,12 +2110,20 @@ fn explicit_branch_truncates_every_future_bearing_surface_together() {
         "only the keyframes at or before T survive: {diag}"
     );
     assert_eq!(
+        diag["STONE_BRANCH_IMAGES_AFTER"].as_i64(), Some(1),
+        "branch invalidation must release discarded keyframe images: {diag}"
+    );
+    assert_eq!(
         diag["STONE_BRANCH_RECORDING_AFTER"].as_i64(), Some(1),
         "a branch must hand the session back to the recorder: {diag}"
     );
     assert_eq!(
         diag["STONE_BRANCH_HORIZON_AFTER"].as_i64(), Some(-1),
         "a branched session is no longer a rewound one, so it has no horizon: {diag}"
+    );
+    assert_eq!(
+        diag["STONE_BRANCH_CURSOR_AFTER"].as_i64(), Some(branch_tick),
+        "the branched cursor must be rebased to the retained prefix: {diag}"
     );
 
     // The rewritten prefix is byte-identical to what was streamed, `c`/`r`
@@ -1665,6 +2321,81 @@ fn branch_projects_game_input_authority_and_drops_replay_latches() {
 }
 
 #[test]
+fn resume_live_here_persists_the_branched_mag_world_not_the_discarded_future() {
+    let dir = tempfile::tempdir().unwrap();
+    let log_s = dir.path().join("mag-branch-persistence.replay").to_string_lossy().into_owned();
+    let progress = dir.path().join("progress.json");
+    let progress_s = progress.to_string_lossy().into_owned();
+    let settings = dir.path().join("settings.json");
+    let settings_s = settings.to_string_lossy().into_owned();
+    let layout_s = dir.path().join("spellbook-layout.jsonl").to_string_lossy().into_owned();
+    let bindings_s = dir.path().join("bindings.json").to_string_lossy().into_owned();
+    let bindings_history = dir.path().join("spellbook-bindings.jsonl");
+    let bindings_history_s = bindings_history.to_string_lossy().into_owned();
+    std::fs::write(
+        &progress,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "version": 3,
+            "bank_gold": 111,
+            "events": {},
+            "quests": {"runs": [], "tracked": [], "collapsed": {}, "quarantined": []},
+            "player": {
+                "grid": [25, 8], "dead": false,
+                "health_cur": 100.0, "mana_cur": 100.0, "stamina_cur": 20.0,
+                "inventory": {"gold": 0, "bandage": 0, "bloody_bandage": 0},
+                "reagents": [0, 0, 0, 0, 0, 0]
+            },
+            "spellbook": {"favorites": []}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    std::fs::write(&settings, br#"{"audio":{"master":0.25}}"#).unwrap();
+
+    let state = run_record_dump(
+        "mag",
+        100,
+        &log_s,
+        &[
+            ("MAG_BOOT_PLAYING", "1"),
+            ("MAG_REPLAY_BRANCH_PERSISTENCE_FIXTURE", "1"),
+            ("MAG_PROGRESS_PATH_OVERRIDE", &progress_s),
+            ("MAG_LAYOUT_HISTORY_PATH_OVERRIDE", &layout_s),
+            ("MAG_SETTINGS_PATH_OVERRIDE", &settings_s),
+            ("MAG_BINDINGS_PATH_OVERRIDE", &bindings_s),
+            ("MAG_BINDINGS_HISTORY_PATH_OVERRIDE", &bindings_history_s),
+            ("STONE_LIVE_REWIND", "1"),
+            ("STONE_TIMELINE_SEEK_AT_FRAME", "40"),
+            ("STONE_TIMELINE_SEEK_TO_TICK", "10"),
+            ("STONE_BRANCH_AT_FRAME", "70"),
+        ],
+    );
+    let diag = &state["__stone_diag"];
+    assert_eq!(diag["MAG_REPLAY_BRANCH_FUTURE_PROGRESS_WRITE"].as_i64(), Some(1),
+        "the discarded future must first reach the real progress writer: {diag}");
+    assert_eq!(diag["MAG_REPLAY_BRANCH_FUTURE_SETTINGS_WRITE"].as_i64(), Some(1),
+        "the discarded future must first reach the real settings writer: {diag}");
+    assert_eq!(diag["MAG_REPLAY_BRANCH_FUTURE_BINDINGS_WRITE"].as_i64(), Some(1),
+        "the discarded future must first reach the real binding/history writer: {diag}");
+    assert_eq!(diag["STONE_BRANCH_COUNT"].as_i64(), Some(1),
+        "the fixture must take the production Resume Live Here path: {diag}");
+    assert_eq!(diag["MAG_REPLAY_BRANCH_PERSISTENCE_RECONCILES"].as_i64(), Some(1),
+        "the branched world must pass through one persistence reconciliation: {diag}");
+
+    let persisted_progress: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&progress).unwrap()).unwrap();
+    let persisted_settings: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&settings).unwrap()).unwrap();
+    assert_eq!(persisted_progress["bank_gold"], 111,
+        "the discarded future must not survive in progress.json");
+    assert_eq!(persisted_settings["audio"]["master"], 0.25,
+        "the discarded future must not survive in settings.json");
+    let persisted_bindings_history = std::fs::read_to_string(&bindings_history).unwrap();
+    assert!(!persisted_bindings_history.contains("f12"),
+        "the discarded binding-history future must be replaced by the branched graph:\n{persisted_bindings_history}");
+}
+
+#[test]
 fn recorded_game_input_is_projected_into_replay_authority() {
     let dir = tempfile::tempdir().unwrap();
     let log_s = dir.path().join("recorded-input.replay").to_string_lossy().into_owned();
@@ -1825,6 +2556,9 @@ fn a_failed_branch_rewrite_leaves_the_future_intact() {
     );
     let diag = &live["__stone_diag"];
     assert_eq!(diag["STONE_BRANCH_FAILURES"].as_i64(), Some(1), "{diag}");
+    assert_eq!(diag["STONE_BRANCH_FAILURE_SURFACES_UNCHANGED"].as_i64(), Some(1), "a failed rewrite must prove every future surface and owner stayed intact: {diag}");
+    assert_eq!(diag["STONE_BRANCH_INPUT_HANDOFFS"].as_i64().unwrap_or(0), 0, "a failed rewrite must not hand input back: {diag}");
+    assert_eq!(diag["STONE_BRANCH_INPUT_HANDOFF_EARLY"].as_i64().unwrap_or(0), 0, "a failed rewrite must not hand input back before commit: {diag}");
     assert!(diag.get("STONE_BRANCH_COUNT").is_none(), "a failed rewrite must not branch: {diag}");
     for class in ["RECORDS", "CHECKPOINTS", "RESIZES", "RELOADS", "KEYFRAMES"] {
         let key = format!("STONE_BRANCH_DROPPED_{class}");
@@ -1862,11 +2596,8 @@ fn a_second_rewind_after_a_branch_sees_only_the_branched_history() {
     let log_s = dir.path().join("rebranch.replay").to_string_lossy().into_owned();
 
     let live = run_record_dump(
-        game, 160, &log_s,
+        game, 200, &log_s,
         &[
-            ("STONE_LIVE_REWIND", "1"),
-            ("STONE_LIVE_REWIND_CADENCE_SECONDS", "0.05"),
-            ("STONE_LIVE_REWIND_WINDOW_SECONDS", "0.5"),
             ("STONE_TIMELINE_SEEK_AT_FRAME", "40"),
             ("STONE_TIMELINE_SEEK_TO_TICK", "25"),
             ("STONE_BRANCH_AT_FRAME", "70"),
@@ -1876,10 +2607,9 @@ fn a_second_rewind_after_a_branch_sees_only_the_branched_history() {
     );
     let diag = &live["__stone_diag"];
     assert_eq!(diag["STONE_BRANCH_COUNT"].as_i64(), Some(1), "{diag}");
-    assert_eq!(diag["STONE_LIVE_REWIND_BRANCH_CADENCE_REBASED"].as_i64(), Some(1), "branch must reset the live cadence clock: {diag}");
-    assert_eq!(diag["STONE_LIVE_REWIND_BRANCH_FLOOR_TICK"].as_i64(), Some(0), "branch must recompute the retained floor from restored time: {diag}");
-    assert!(diag["STONE_LIVE_REWIND_POST_BRANCH_CAPTURES"].as_i64().unwrap_or(0) > 0, "the new live branch must capture cadence keyframes: {diag}");
-    assert!(diag["STONE_LIVE_REWIND_POST_BRANCH_LAST_CAPTURE_TICK"].as_i64().is_some_and(|tick| tick > 25), "post-branch cadence population must be in the surviving future: {diag}");
+    assert_eq!(diag["STONE_LIVE_REWIND_BRANCH_INDEX_REBASED"].as_i64(), Some(1), "branch must rebase the lazy index: {diag}");
+    assert_eq!(diag["STONE_LIVE_REWIND_HISTORY_FLOOR_TICK"].as_i64(), Some(0), "the simplified history has no wall-clock floor: {diag}");
+    assert_eq!(diag.get("STONE_LIVE_REWIND_POST_BRANCH_CAPTURES").and_then(serde_json::Value::as_i64), None, "live recording must not reacquire a periodic capture loop: {diag}");
     assert_eq!(diag["STONE_LIVE_REWIND_COUNT"].as_i64(), Some(2), "both rewinds must fire: {diag}");
     let horizon = diag["STONE_LIVE_REWIND_HORIZON"].as_i64().expect("horizon");
     assert!(horizon > 25, "the branched session must have recorded past T (got {horizon})");
@@ -1887,8 +2617,7 @@ fn a_second_rewind_after_a_branch_sees_only_the_branched_history() {
         horizon, recorded_tick_lines(&log_s) as i64,
         "the second rewind's horizon must be the branched history, not the discarded future: {diag}"
     );
-    let restore_tick = diag["STONE_LIVE_REWIND_RESTORE_TICK"].as_i64().expect("second restore tick");
-    assert!(restore_tick > 25 && restore_tick <= 55, "the second rewind must select a newly captured post-branch keyframe: {diag}");
+    assert_eq!(diag["STONE_LIVE_REWIND_RESTORE_TICK"].as_i64(), Some(0), "without a prior live seek the second rewind restores from boot: {diag}");
     assert_eq!(current_tick(&live), 55, "the second rewind must land at its target: {diag}");
 }
 
@@ -1901,9 +2630,6 @@ fn branch_rebases_live_rewind_floor_before_an_immediate_second_seek() {
         90,
         &log_s,
         &[
-            ("STONE_LIVE_REWIND", "1"),
-            ("STONE_LIVE_REWIND_CADENCE_SECONDS", "0.01"),
-            ("STONE_LIVE_REWIND_WINDOW_SECONDS", "0.3"),
             ("STONE_TIMELINE_SEEK_AT_FRAME", "40"),
             ("STONE_TIMELINE_SEEK_TO_TICK", "25"),
             ("STONE_BRANCH_AT_FRAME", "70"),
@@ -1912,9 +2638,9 @@ fn branch_rebases_live_rewind_floor_before_an_immediate_second_seek() {
         ],
     );
     let diag = &live["__stone_diag"];
-    let floor = diag["STONE_LIVE_REWIND_BRANCH_FLOOR_TICK"].as_i64().unwrap_or_else(|| panic!("branch floor: {diag}"));
-    assert!(floor >= 0 && floor < 25, "the rebased floor must come from surviving pre-branch images: {diag}");
-    assert_eq!(diag["STONE_LIVE_REWIND_FLOOR_AT_SEEK"].as_i64(), Some(floor), "the published floor must be the one the second seek admits against: {diag}");
+    let floor = diag["STONE_LIVE_REWIND_HISTORY_FLOOR_TICK"].as_i64().unwrap_or_else(|| panic!("branch history floor: {diag}"));
+    assert_eq!(floor, 0, "the simplified branch keeps the from-boot history: {diag}");
+    assert_eq!(diag["STONE_LIVE_REWIND_HISTORY_FLOOR_AT_SEEK"].as_i64(), Some(floor), "the live seek must use the same from-boot history floor: {diag}");
     assert_eq!(diag["STONE_LIVE_REWIND_COUNT"].as_i64(), Some(2), "the immediate second seek must be admitted: {diag}");
     assert_eq!(diag["STONE_LIVE_REWIND_REFUSED"].as_i64(), Some(0), "floor rebasing must not refuse the surviving boundary: {diag}");
     assert_eq!(current_tick(&live), 10, "the immediate second rewind must land at its target: {diag}");
@@ -2070,6 +2796,16 @@ fn replay_reports_its_own_costs() {
             && diag["STONE_KEYFRAME_NODES"].as_i64().is_some_and(|n| n > 0),
         "a keyframe must report the population it copied: {diag}"
     );
+    assert!(
+        diag["STONE_KEYFRAME_SHUTDOWN_BEFORE"].as_i64().is_some_and(|n| n > 0)
+            && diag["STONE_KEYFRAME_SHUTDOWN_AFTER"].as_i64() == Some(0),
+        "shutdown must release every retained keyframe owner: {diag}"
+    );
+    assert!(
+        diag["STONE_STATE_IMAGE_IMAGES_BEFORE_SHUTDOWN"].as_i64().is_some_and(|n| n > 0)
+            && diag["STONE_STATE_IMAGE_IMAGES_AFTER_SHUTDOWN"].as_i64() == Some(0),
+        "shutdown must release the StateImage images owned by keyframes: {diag}"
+    );
     println!(
         "[replay-costs] seek first rendered frame {first_ms:.2}ms; {evictions} evictions in \
          {:.2}ms; {cadence_n} cadence captures in {cadence_ms:.2}ms",
@@ -2138,8 +2874,9 @@ fn replay_reports_its_own_costs() {
     );
 
     // Keyframe BYTES are only honest where real memory was imaged. Bitgun and
-    // bopt both hold NativeBuffers; a minimal game with no buffer declarations
-    // is the zero control.
+    // bopt hold game buffers in addition to Stone's unavoidable storage floor;
+    // a minimal game proves that floor is measured rather than reported as a
+    // fictitious zero.
     let seek_diag = &seeked["__stone_diag"];
     let bitgun_bytes = seek_diag["STONE_KEYFRAME_STORAGE_BYTES"].as_i64().expect("bitgun storage bytes");
     assert!(
@@ -2147,30 +2884,33 @@ fn replay_reports_its_own_costs() {
         "bitgun holds buffer storage in sim state, so its keyframe must report imaged bytes: {seek_diag}"
     );
 
-    let zero_game = tempfile::tempdir().unwrap();
+    let minimal_game = tempfile::tempdir().unwrap();
     std::fs::write(
-        zero_game.path().join("stick.toml"),
+        minimal_game.path().join("stick.toml"),
         format!(
-            "[package]\nname = \"replay_storage_zero\"\nversion = \"0.1.0\"\ntype = \"bin\"\n\n\
-             [dependencies]\nstone = {{ path = \"{}\" }}\n",
+            "[package]\nname = \"replay_storage_floor\"\nversion = \"0.1.0\"\ntype = \"bin\"\n\n\
+             [dependencies]\nstone = {{ path = \"{}\" }}\n\n\
+             [build.vars]\nGIT_SHA = \"test\"\n",
             workspace_root().parent().expect("repo root").join("stone").display()
         ),
     )
     .unwrap();
     std::fs::write(
-        zero_game.path().join("main.rock"),
-        "fn main() {\n    stone_run_game(GameConfig { title: \"replay storage zero\", width: 64, height: 64 })\n}\n",
+        minimal_game.path().join("main.rock"),
+        "fn main() {\n    stone_run_game(GameConfig { title: \"replay storage floor\", width: 64, height: 64 })\n}\n",
     )
     .unwrap();
-    let zero_game_s = zero_game.path().to_string_lossy().into_owned();
-    let zero_log = dir.path().join("zero-storage.replay").to_string_lossy().into_owned();
-    run_record_dump(&zero_game_s, 25, &zero_log, &[]);
-    let zero = run_replay_dump(&zero_game_s, 30, &zero_log, &[("STONE_KEYFRAME_INTERVAL", "10")]);
-    let zero_diag = &zero["__stone_diag"];
-    assert_eq!(
-        zero_diag["STONE_KEYFRAME_STORAGE_BYTES"].as_i64(),
-        Some(0),
-        "a game with no buffer declarations must report a real zero: {zero_diag}"
+    let minimal_game_s = minimal_game.path().to_string_lossy().into_owned();
+    let minimal_log = dir.path().join("minimal-storage.replay").to_string_lossy().into_owned();
+    run_record_dump(&minimal_game_s, 25, &minimal_log, &[]);
+    let minimal = run_replay_dump(&minimal_game_s, 30, &minimal_log, &[("STONE_KEYFRAME_INTERVAL", "10")]);
+    let minimal_diag = &minimal["__stone_diag"];
+    let engine_floor = minimal_diag["STONE_KEYFRAME_STORAGE_BYTES"]
+        .as_i64().expect("minimal Stone storage bytes");
+    assert!(
+        engine_floor > 0 && bitgun_bytes > engine_floor,
+        "Bitgun storage must exceed the nonzero Stone engine floor: floor={engine_floor} \
+         bitgun={bitgun_bytes} diag={minimal_diag}"
     );
 
     let bopt_log = dir.path().join("bopt.replay").to_string_lossy().into_owned();
@@ -2187,12 +2927,13 @@ fn replay_reports_its_own_costs() {
     let bopt = run_replay_dump("bopt", 30, &bopt_log, &[("STONE_KEYFRAME_INTERVAL", "10")]);
     let bytes = bopt["__stone_diag"]["STONE_KEYFRAME_STORAGE_BYTES"].as_i64().expect("storage bytes");
     assert!(
-        bytes > 0,
-        "bopt holds buffer storage in sim state, so its keyframe must report imaged bytes: {}",
+        bytes > engine_floor,
+        "bopt buffer storage must exceed the Stone engine floor {engine_floor}: {}",
         bopt["__stone_diag"]
     );
     println!(
-        "[replay-costs] keyframe buffer storage: zero-control 0B, bitgun {bitgun_bytes}B, bopt {bytes}B"
+        "[replay-costs] keyframe buffer storage: engine floor {engine_floor}B, \
+         bitgun {bitgun_bytes}B, bopt {bytes}B"
     );
 }
 
@@ -2462,6 +3203,7 @@ fn ab_loop_survives_incremental_reload_via_rederive() {
     sim.remove("dt");
     assert_sim_state_matches(&looped, &reference, &sim, &format!("post-reload loop tick-{t}"));
 }
+
 
 /// Review fix 2: a loop wider than the keyframe window must NOT let eviction drop
 /// its A keyframe (nor the tick-0 boot anchor). With A=10, B=90, window=30, at

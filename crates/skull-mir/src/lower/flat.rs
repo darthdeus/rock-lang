@@ -18,7 +18,7 @@ impl Builder<'_> {
             if enum_name == shape.name {
                 let tag = self.emit_cur(Inst::Const(Lit::Str(variant)));
                 // Positional args are placed at their POSITION's slot offset, and a
-                // `nobox` one spreads into its leaves there -- the layout comes
+                // scalarizable value spreads into its leaves there -- the layout comes
                 // from the enum declaration, so this and the match arm that reads
                 // it back agree without either seeing the other.
                 let mut slots: Vec<Option<Idx<Inst>>> = vec![None; shape.tuple_width()];
@@ -28,10 +28,10 @@ impl Builder<'_> {
                         for (pos, a) in range.into_iter().enumerate() {
                             let off = shape.slot_offset(pos);
                             // Widened only for THIS variant's own shape: a
-                            // sibling carrying an ordinary payload, or a `nobox`
+                            // sibling carrying an ordinary payload, or a scalarizable
                             // value of another shape, addresses its own leading
                             // slots and the rest of the position nil-pads.
-                            match shape.position_shape(pos, self.nobox_value_name(a)) {
+                            match self.flat_payload_leaf_shape(Some(enum_name), variant, pos) {
                                 Some(_vs) => {
                                     let r = self.lower_expr_repr(a)?;
                                     for (k, lv) in self.repr_to_leaves_bundle(&r)?.into_iter().enumerate()

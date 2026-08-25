@@ -1,5 +1,18 @@
 use std::time::Duration;
 
+#[test]
+fn allocation_report_writer_is_explicit_and_writes_the_compiler_report() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("allocation-report.txt");
+    let report = skull::allocation_report::AllocationReport::default();
+
+    super::write_allocation_report(Some(path.as_os_str()), &report).expect("write report");
+
+    let text = std::fs::read_to_string(path).expect("read report");
+    assert!(text.contains("emitted allocation-capable Lua report: 0 bodies, 0 direct sites"));
+    assert!(text.contains("emitted site manifest: 0 sites"));
+}
+
 fn emit_overlay_checked(
     ws: &bone_semantic::inference::Workspace,
     cache: &mut skull::mir_emit::SkullEmitCache,
@@ -3019,6 +3032,16 @@ fn main() { }
     }
 }
 
+#[test]
+fn mag_panel_definitions_do_not_duplicate_the_catalog_key_in_panel_defs() {
+    let source = include_str!("../../../mag/panels.rock");
+    let field_like_keys = source
+        .lines()
+        .filter(|line| line.trim_start().starts_with("key:"))
+        .count();
+    assert_eq!(field_like_keys, 0, "PanelDef factories must not carry a second membership key");
+}
+
 #[cfg(test)]
 mod definition_transition_tests {
     use super::super::{SkullReload, SkullStone};
@@ -3097,8 +3120,8 @@ fn main() {}
     fn failed_definition_materialization_keeps_old_definitions_and_state() {
         let mut harness = StateTransitionHarness::boot(STATE_V0);
         let failing_source = STATE_V1.replace(
-            "@widget(key=\"gamma\") fn make_gamma() -> WidgetDef { return WidgetDef { key: \"gamma\", callback: () => 3 } }",
-            "fn materialization_should_fail() -> bool { return true }\n@widget(key=\"gamma\") fn make_gamma() -> WidgetDef { if materialization_should_fail() { error(\"definition materialization failed\") } return WidgetDef { key: \"gamma\", callback: () => 3 } }",
+            "@widget(key=\"gamma\") fn make_gamma() -> WidgetDef { return WidgetDef { callback: () => 3 } }",
+            "fn materialization_should_fail() -> bool { return true }\n@widget(key=\"gamma\") fn make_gamma() -> WidgetDef { if materialization_should_fail() { error(\"definition materialization failed\") } return WidgetDef { callback: () => 3 } }",
         );
         harness
             .replace_source(&failing_source)
@@ -3155,28 +3178,21 @@ fn main() {}
 
     const STATE_V0: &str = r#"
 struct WidgetDef {
-    key: string,
     callback: fn() -> int,
 }
 struct WidgetState {
     seq: int = 0,
     presence: int = 0,
 }
-struct WidgetPlanEntry {
-    catalog: string,
-    key: string,
-    name: string,
-    ordinal: int,
-    definition: WidgetDef,
-}
 @artifact_definition(catalog="widgets", key_param="key")
 deco init widget(key: string) {}
 @lifecycle(phase="wire", owner="session")
 deco init wire {}
-inline(lua) fn widget_definition_plan() -> [WidgetPlanEntry] = "return (_G.__ROCK_DEFINITION_PLAN or {}).widgets or {len=0,_data={}}"
+@artifact_catalog(catalog="widgets")
+@intrinsic extern fn widget_definition_plan() -> [ArtifactDefinition<WidgetDef>]
 global WIDGET_STATES: Map<string, WidgetState> = map_new()
-@widget(key="alpha") fn make_alpha() -> WidgetDef { return WidgetDef { key: "alpha", callback: () => 1 } }
-@widget(key="beta") fn make_beta() -> WidgetDef { return WidgetDef { key: "beta", callback: () => 2 } }
+@widget(key="alpha") fn make_alpha() -> WidgetDef { return WidgetDef { callback: () => 1 } }
+@widget(key="beta") fn make_beta() -> WidgetDef { return WidgetDef { callback: () => 2 } }
 @wire fn reconcile_widget_state() {
     let present: Map<string, bool> = map_new()
     for entry in widget_definition_plan() {
@@ -3193,17 +3209,17 @@ fn main() {}
 "#;
 
     const STATE_V1: &str = r#"
-struct WidgetDef { key: string, callback: fn() -> int }
+struct WidgetDef { callback: fn() -> int }
 struct WidgetState { seq: int = 0, presence: int = 0 }
-struct WidgetPlanEntry { catalog: string, key: string, name: string, ordinal: int, definition: WidgetDef }
 @artifact_definition(catalog="widgets", key_param="key")
 deco init widget(key: string) {}
 @lifecycle(phase="wire", owner="session")
 deco init wire {}
-inline(lua) fn widget_definition_plan() -> [WidgetPlanEntry] = "return (_G.__ROCK_DEFINITION_PLAN or {}).widgets or {len=0,_data={}}"
+@artifact_catalog(catalog="widgets")
+@intrinsic extern fn widget_definition_plan() -> [ArtifactDefinition<WidgetDef>]
 global WIDGET_STATES: Map<string, WidgetState> = map_new()
-@widget(key="beta") fn make_beta() -> WidgetDef { return WidgetDef { key: "beta", callback: () => 20 } }
-@widget(key="gamma") fn make_gamma() -> WidgetDef { return WidgetDef { key: "gamma", callback: () => 3 } }
+@widget(key="beta") fn make_beta() -> WidgetDef { return WidgetDef { callback: () => 20 } }
+@widget(key="gamma") fn make_gamma() -> WidgetDef { return WidgetDef { callback: () => 3 } }
 @wire fn reconcile_widget_state() {
     let present: Map<string, bool> = map_new()
     for entry in widget_definition_plan() {
@@ -3220,17 +3236,17 @@ fn main() {}
 "#;
 
     const STATE_V2: &str = r#"
-struct WidgetDef { key: string, callback: fn() -> int }
+struct WidgetDef { callback: fn() -> int }
 struct WidgetState { seq: int = 0, presence: int = 0 }
-struct WidgetPlanEntry { catalog: string, key: string, name: string, ordinal: int, definition: WidgetDef }
 @artifact_definition(catalog="widgets", key_param="key")
 deco init widget(key: string) {}
 @lifecycle(phase="wire", owner="session")
 deco init wire {}
-inline(lua) fn widget_definition_plan() -> [WidgetPlanEntry] = "return (_G.__ROCK_DEFINITION_PLAN or {}).widgets or {len=0,_data={}}"
+@artifact_catalog(catalog="widgets")
+@intrinsic extern fn widget_definition_plan() -> [ArtifactDefinition<WidgetDef>]
 global WIDGET_STATES: Map<string, WidgetState> = map_new()
-@widget(key="alpha") fn make_alpha() -> WidgetDef { return WidgetDef { key: "alpha", callback: () => 10 } }
-@widget(key="beta") fn make_beta() -> WidgetDef { return WidgetDef { key: "beta", callback: () => 30 } }
+@widget(key="alpha") fn make_alpha() -> WidgetDef { return WidgetDef { callback: () => 10 } }
+@widget(key="beta") fn make_beta() -> WidgetDef { return WidgetDef { callback: () => 30 } }
 @wire fn reconcile_widget_state() {
     let present: Map<string, bool> = map_new()
     for entry in widget_definition_plan() {
@@ -3448,7 +3464,7 @@ assert(_G.__rock_definition_plan_pending == nil, "definition plan abort did not 
 plan = published_plan()
 assert(plan.len == 2, "failed materialization replaced old definitions")
 assert(plan._data[1].key == "alpha" and plan._data[2].key == "beta", "old definitions were not retained")
-assert(plan._data[1].definition.key == "alpha" and plan._data[2].definition.key == "beta", "old published definitions were not retained")
+assert(plan._data[1].definition.callback() == 1 and plan._data[2].definition.callback() == 2, "old published definitions were not retained")
 assert(WIDGET_STATES["alpha"].seq == 9 and WIDGET_STATES["alpha"].presence == 1, "alpha state changed")
 assert(WIDGET_STATES["beta"].seq == 41 and WIDGET_STATES["beta"].presence == 1, "beta state changed")
 assert(WIDGET_STATES["gamma"] == nil, "failed materialization leaked gamma state")
@@ -3738,11 +3754,16 @@ mod force_full_tests {
         // same on-disk source). force_full's main.lua must match it byte-for-byte.
         let fresh_main = src("fresh_main.lua");
         let fresh_inc = src("fresh_incremental.lua");
-        SkullStone::init(&dir_str, &fresh_main, &fresh_inc).expect("fresh init v2");
+        let fresh = SkullStone::init(&dir_str, &fresh_main, &fresh_inc).expect("fresh init v2");
         let main_fresh = std::fs::read_to_string(&fresh_main).expect("fresh main.lua");
         assert_eq!(
             main_forced, main_fresh,
             "force_full main.lua must be byte-identical to a fresh full build of the edited source"
+        );
+        assert_eq!(
+            skull.artifact_fingerprint(),
+            fresh.artifact_fingerprint(),
+            "force_full must publish the fingerprint of the Artifact it writes"
         );
     }
 

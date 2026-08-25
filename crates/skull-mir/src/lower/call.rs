@@ -562,6 +562,9 @@ impl Builder<'_> {
                 // registry off the resolved FuncRef, so no user fn is hijacked by
                 // name and the common non-intrinsic call pays only one field read.
                 Ok(func) => match self.fn_expand_kind(func) {
+                    Some(ExpandKind::SceneTypeKey) => {
+                        self.expand_scene_type_key(e, func, &arg_idxs)
+                    }
                     Some(ExpandKind::StructPairs) => self.expand_struct_pairs(e, func, &arg_idxs),
                     Some(ExpandKind::Materialize) => self.expand_materialize(&arg_idxs),
                     Some(ExpandKind::ShaderPipeline) => {
