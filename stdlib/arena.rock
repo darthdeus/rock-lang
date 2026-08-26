@@ -229,10 +229,8 @@ fn Arena<T>.insert(arena, value: T) -> Entity<T> {
     return entity_new(arena, slot, generation)
 }
 
-// Reactivates a removed slot and returns the object already stored there.
-// This is useful for mutable reference payloads that can be fully reset in
-// place; unlike insert, it cannot grow the Arena.
-fn Arena<T>.reuse_retained(arena) -> T? {
+// The payload stays untouched; callers must reset every mutable field.
+fn Arena<T>.reuse_retained_entity(arena) -> Entity<T>? {
     let store = __arena_store_mut(arena)
     if store.free_indices.len() == 0 { return null }
 
@@ -242,7 +240,13 @@ fn Arena<T>.reuse_retained(arena) -> T? {
     assert(slot < vec_len(store.data), "Arena retained slot is outside its data column")
     store.generations.set(slot, generation)
     store.occupied.set(slot, true)
-    return store.data[slot]
+    return entity_new(arena, slot, generation)
+}
+
+// For callers that reset the mutable payload and do not need its new handle.
+fn Arena<T>.reuse_retained(arena) -> T? {
+    let entity = arena.reuse_retained_entity() ?? return null
+    return entity.get()
 }
 
 fn Arena<T>.get(arena, entity: Entity<T>) -> T? {
