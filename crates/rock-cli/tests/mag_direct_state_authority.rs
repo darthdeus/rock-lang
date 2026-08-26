@@ -41,7 +41,7 @@ fn mag_has_no_aggregate_projection_bridge_names() {
 }
 
 #[test]
-fn mag_uses_direct_session_state_without_a_run_root_or_accessor() {
+fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_accessor() {
     let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
@@ -59,9 +59,12 @@ fn mag_uses_direct_session_state_without_a_run_root_or_accessor() {
         format!("{run_accessor}()"),
         ["mag", "_world", "_scene"].concat(),
         ["fn current", "_run"].concat(),
+        "global player:".to_string(),
+        ["fn current", "_player()"].concat(),
+        ["fn mag", "_player()"].concat(),
+        ["fn player", "_for", "_access"].concat(),
     ];
     let required = [
-        "global player: Player",
         "global bank_gold: int",
         "global journal: [JournalLine]",
         "global history: [SnapshotHistoryNode]",
@@ -83,10 +86,79 @@ fn mag_uses_direct_session_state_without_a_run_root_or_accessor() {
                     definitions[index].push(format!("{}:{}", source.display(), line_number + 1));
                 }
             }
+            if line.contains("() => render_pos(player.movable)")
+                || line.contains("() => player.movable.render_pos()")
+            {
+                findings.push(format!(
+                    "{}:{}: deferred callback captures raw Player",
+                    source.display(),
+                    line_number + 1
+                ));
+            }
         }
     }
     assert!(findings.is_empty(), "superseded run-root/accessor census is nonzero:\n{}", findings.join("\n"));
     for (declaration, found) in required.iter().zip(definitions) {
         assert_eq!(found.len(), 1, "`{declaration}` must have one production definition: {found:?}");
+    }
+
+    let world = fs::read_to_string(repo.join("mag/world_levels.rock"))
+        .expect("read MAG world source");
+    for field in [
+        "players: Arena<Player>",
+        "player: Entity<Player>",
+        "tasks: CoroutinePoller",
+    ] {
+        assert!(world.contains(field), "WorldState is missing Scene-owned `{field}`");
+    }
+    assert!(
+        world.contains("player.get().unwrap().entity = player"),
+        "WorldState construction must publish the Player's self identity"
+    );
+
+    let player = fs::read_to_string(repo.join("mag/player.rock"))
+        .expect("read MAG player source");
+    assert!(
+        player.contains("entity: Entity<Player>?"),
+        "Player must carry its generation-safe Scene identity for deferred work"
+    );
+    let feedback = fs::read_to_string(repo.join("mag/combat_text.rock"))
+        .expect("read MAG feedback source");
+    assert!(
+        feedback.contains("fn mag_player_feedback_pos(target: Entity<Player>)"),
+        "deferred Player feedback must re-resolve the Scene entity"
+    );
+}
+
+#[test]
+fn mag_player_queries_are_receiver_methods() {
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("rock workspace root");
+    let source = fs::read_to_string(repo.join("mag/player.rock")).expect("read MAG player source");
+    let required = [
+        "fn Player.is_paralyzed(player)",
+        "fn Player.effective_armor(player)",
+        "fn Player.shaped_progress(player)",
+        "fn Player.sprite(player)",
+        "fn Player.stamina_regen_per_sec(player)",
+        "fn Player.mana_per_sec(player)",
+        "fn Player.tint(player)",
+    ];
+    for declaration in required {
+        assert!(source.contains(declaration), "missing Player receiver declaration `{declaration}`");
+    }
+    let forbidden = [
+        "fn player_is_paralyzed()",
+        "fn player_effective_armor()",
+        "fn player_shaped_progress()",
+        "fn player_sprite()",
+        "fn player_stamina_regen_per_sec()",
+        "fn player_mana_per_sec()",
+        "fn player_tint()",
+    ];
+    for declaration in forbidden {
+        assert!(!source.contains(declaration), "prefix-only Player query remains `{declaration}`");
     }
 }

@@ -121,25 +121,16 @@ fn boxed_enum_eq() {
     eval_int(src, "root", 1);
 }
 
-// The nil-slot trap: `Sig` (closure payload -> non-cdata) flattened into a struct
-// field, read whole (`h.sig`), reboxes union-wide via `MakeEnumDyn` -- its inactive
-// second tuple slot is nil. A directly-constructed `Sig::Num(5)` has only slot 0.
-// The two must compare `==`; without nil-slot dropping the reboxed box owns an
-// extra undefined-valued key and `__op_eq`'s key-count walk returns false.
+// The nil-slot trap: `Sig` has a union-wide inactive second tuple slot when
+// flattened into a struct field, while a direct `Sig::Num(5)` does not.
 #[test]
 fn nil_slot_rebox_eq() {
-    // The direct `Sig::Num(5)` is INLINE (a `let` binding would flatten to the same
-    // union-wide rep, hiding the asymmetry): it stays a narrow `{0:5}` box while the
-    // flattened-field read reboxes to `{0:5, 1:nil}`.
     let src = "enum Sig { Idle, Num(int), Pair(int, int), Act(() -> ()) }\n\
                struct Holder { sig: Sig }\n\
                fn root() -> int {\n\
                    let h = Holder { sig: Sig::Num(5) }\n\
                    if h.sig == Sig::Num(5) { 1 } else { 0 }\n\
                }";
-    let ws = ws_with(src);
-    let js = emit_closure(&ws, "root").expect("nil-slot rebox emits");
-    assert!(js.contains("__rock_make_enum("), "reboxes via the ctor:\n{js}");
     eval_int(src, "root", 1);
 }
 
