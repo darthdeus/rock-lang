@@ -62,6 +62,7 @@ mod monoty_census;
 mod lsp_survey;
 mod lsp_test;
 mod parallel_runner;
+mod replay_report;
 mod image_video;
 pub mod run_sim;
 pub mod sim_record;
@@ -100,6 +101,10 @@ pub enum CliCommand {
     /// and freezes at the last tick with the timeline bar live so the developer
     /// can scrub. Do NOT overload `rock frame` -- its contract is batch headless.
     Replay,
+    /// `rock replay-report <file>` — inspect recorded gameplay timing without
+    /// launching the game, rank slow observations and bursts, and print ranges
+    /// ready for replay-scoped profiling/allocation diagnostics.
+    ReplayReport,
     /// `rock stone-test <root>` — long-lived headless watch process driven
     /// over JSON-line stdio. Test infrastructure for incremental
     /// compilation / hot-reload assertions. See
@@ -298,7 +303,7 @@ impl clap::ValueEnum for CliCommand {
         &[
             Self::Compile, Self::CompileSingle, Self::Test,
             Self::TestCompile, Self::Run, Self::Watch, Self::Fmt, Self::Frame,
-            Self::Stone, Self::Replay, Self::Perf,
+            Self::Stone, Self::Replay, Self::ReplayReport, Self::Perf,
             Self::Sim,
             Self::Completions,
             Self::Lint,
@@ -351,6 +356,7 @@ impl CliCommand {
             Self::Frame => "frame",
             Self::Stone => "stone",
             Self::Replay => "replay",
+            Self::ReplayReport => "replay-report",
             Self::StoneTest => "stone-test",
             Self::Perf => "perf",
             Self::Sim => "sim",
@@ -533,6 +539,10 @@ pub struct Args {
     pub gc_window: usize,
     pub gc_window_start: usize,
     pub perf_format: String,
+    /// For `rock replay-report`: number of slow observations to rank.
+    pub top: usize,
+    /// For `rock replay-report`: observations of context around suggested ranges.
+    pub context: usize,
     pub type_validation: bool,
     pub headless: bool,
     /// Build and run game commands against this renderer without changing the
@@ -722,7 +732,13 @@ impl Args {
                 .value_parser(clap::value_parser!(usize))
                 .help("`rock perf` only: frame the --gc-window opens on (default 100). Push it past warmup so the window lands on a warm JIT; `rock perf` sizes its frame budget to cover start + window."))
             .arg(Arg::new("perf-format").long("format").default_value("pretty")
-                .help("Output format for `rock perf` summary: \"pretty\" (default) or \"json\"."))
+                .help("Output format for `rock perf` or `rock replay-report`: \"pretty\" (default) or \"json\"."))
+            .arg(Arg::new("top").long("top").default_value("20")
+                .value_parser(clap::value_parser!(usize))
+                .help("For `rock replay-report`: rank this many slow observations (default 20)."))
+            .arg(Arg::new("context").long("context").default_value("2")
+                .value_parser(clap::value_parser!(usize))
+                .help("For `rock replay-report`: pad suggested observation ranges by this many frames (default 2)."))
             .arg(Arg::new("type-validation").long("type-validation").action(ArgAction::SetTrue)
                 .help("Enable type validation warnings for unresolved types after inference"))
             .arg(Arg::new("headless").long("headless").action(ArgAction::SetTrue)
@@ -841,6 +857,8 @@ impl Args {
             gc_window: *m.get_one::<usize>("gc-window").unwrap(),
             gc_window_start: *m.get_one::<usize>("gc-window-start").unwrap(),
             perf_format: m.get_one::<String>("perf-format").cloned().unwrap_or_else(|| "pretty".to_string()),
+            top: *m.get_one::<usize>("top").unwrap(),
+            context: *m.get_one::<usize>("context").unwrap(),
             type_validation: m.get_flag("type-validation"),
             headless: m.get_flag("headless"),
             renderer: m.get_one::<String>("renderer").map(|value| match value.as_str() {
@@ -950,6 +968,23 @@ mod arg_tests {
         );
         assert_eq!(args.renderer, Some(super::RendererBackend::Wgpu));
         assert_eq!(args.frames, 30);
+    }
+
+    #[test]
+    fn replay_report_options_parse_without_a_game_argument() {
+        let args = Args::from_matches(
+            Args::command()
+                .try_get_matches_from([
+                    "rock", "replay-report", "session.replay",
+                    "--top", "7", "--context", "3", "--format", "json",
+                ])
+                .expect("parse"),
+        );
+        assert_eq!(args.command, super::CliCommand::ReplayReport);
+        assert_eq!(args.files, ["session.replay"]);
+        assert_eq!(args.top, 7);
+        assert_eq!(args.context, 3);
+        assert_eq!(args.perf_format, "json");
     }
 }
 

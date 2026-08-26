@@ -383,6 +383,11 @@ fn replay_picker_lists_and_parses_headers() {
         "STONE_REPLAY 4\nseed 2\nt 0 0 0 0 0  \nt 0 0 0 0 0  \n",
     )
     .unwrap();
+    std::fs::write(
+        dir.path().join("last.replay"),
+        "STONE_REPLAY 4\nseed 2\nt 0 0 0 0 0  \nt 0 0 0 0 0  \n",
+    )
+    .unwrap();
     // A non-replay file must be ignored by the listing.
     std::fs::write(dir.path().join("notes.txt"), "ignore me").unwrap();
 
@@ -398,7 +403,8 @@ fn replay_picker_lists_and_parses_headers() {
     let summary = s["__stone_diag"]["REPLAY_PICKER_SUMMARY"]
         .as_str()
         .expect("REPLAY_PICKER_SUMMARY present");
-    assert_eq!(count, 2, "must list exactly the two .replay files (got {count}, summary {summary:?})");
+    assert_eq!(count, 2, "must list the two durable recordings without duplicating the last.replay alias (got {count}, summary {summary:?})");
+    assert!(!summary.contains("last.replay"), "the alias is not a second recording: {summary:?}");
     assert!(
         summary.contains("a.replay:3:aaa111"),
         "a.replay: 3 ticks + build aaa111; summary was {summary:?}"

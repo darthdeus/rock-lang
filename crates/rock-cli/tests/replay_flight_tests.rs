@@ -77,13 +77,51 @@ fn with_header(text: &str, version: &str, build: Option<&str>) -> String {
 fn new_recordings_stamp_a_real_exact_artifact_identity() {
     let (_dir, log) = record_with_env("bitgun", 15, &[]);
     let text = std::fs::read_to_string(&log).expect("read log");
-    assert!(text.starts_with("STONE_REPLAY 11\n"), "new recordings must use v11\n{text}");
+    assert!(text.starts_with("STONE_REPLAY 12\n"), "new recordings must use v12\n{text}");
+    assert!(
+        text.lines().any(|line| line == "source 62697467756e"),
+        "the logical project source `bitgun` must be encoded in the header\n{text}"
+    );
     let build = text
         .lines()
         .find_map(|line| line.strip_prefix("build "))
         .expect("new recordings must carry a build id");
     assert!(!build.is_empty() && build != "dev", "the build id must be real and nondegenerate: {build:?}");
     assert!(build.chars().all(|c| c.is_ascii_hexdigit()), "the exact artifact id is hex: {build:?}");
+}
+
+#[test]
+fn new_format_rejects_a_different_project_source_before_the_first_game_tick() {
+    let (_dir, log) = record_with_env("bitgun", 15, &[]);
+    let text = std::fs::read_to_string(&log).expect("read log");
+    let changed = text.lines().map(|line| {
+        if line.starts_with("source ") { "source 6d6167".to_string() } else { line.to_string() }
+    }).collect::<Vec<_>>().join("\n");
+    std::fs::write(&log, changed).expect("rewrite source");
+
+    let out = replay_raw("bitgun", &log, &[]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "a replay from another project source must be rejected\n{stderr}");
+    assert!(
+        stderr.contains("source mismatch") && stderr.contains("before first game tick"),
+        "the refusal must name the source boundary\n{stderr}"
+    );
+}
+
+#[test]
+fn legacy_v11_without_source_remains_playable() {
+    let (_dir, log) = record_with_env("bitgun", 15, &[]);
+    let legacy = std::fs::read_to_string(&log)
+        .expect("read log")
+        .lines()
+        .filter(|line| !line.starts_with("source "))
+        .map(|line| {
+            if line == "STONE_REPLAY 12" { "STONE_REPLAY 11" } else { line }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(&log, legacy).expect("write v11 replay");
+    replay_stderr("bitgun", &log, &[]);
 }
 
 #[test]
@@ -159,7 +197,7 @@ fn record_stamps_build_id_and_reload_marker() {
         &[ ("STONE_RELOAD_AT_FRAME", "5")],
     );
     let text = std::fs::read_to_string(&log).expect("read log");
-    assert!(text.starts_with("STONE_REPLAY 11"), "must be a v11 log\n{text}");
+    assert!(text.starts_with("STONE_REPLAY 12"), "must be a v12 log\n{text}");
     let build = text.lines().find_map(|l| l.strip_prefix("build ")).expect("build header");
     assert!(build.len() == 16 && build.chars().all(|c| c.is_ascii_hexdigit()), "header must carry a real build id\n{text}");
     assert!(
