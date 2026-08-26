@@ -47,6 +47,7 @@ mod iter_lsp;
 mod iter_parse;
 pub mod glsl_test;
 pub mod js_test;
+pub mod c_test;
 pub mod live_project;
 pub mod web;
 pub mod package;
@@ -411,11 +412,15 @@ pub enum Backend {
     /// Tests with no `returns=` are outside the value class; tests whose GLSL
     /// emission rejects report SKIP(reason). Serves `test` only.
     Glsl,
+    /// `c` — the initial native value-test executor: bone type-checks, skull
+    /// monomorphizes, C is emitted for the supported closure, then Clang builds
+    /// and runs it. Unsupported constructs report SKIP(reason). Serves `test`.
+    C,
 }
 
 impl clap::ValueEnum for Backend {
     fn value_variants<'a>() -> &'a [Self] {
-        &[Self::Bone, Self::Skull, Self::Js, Self::Glsl]
+        &[Self::Bone, Self::Skull, Self::Js, Self::Glsl, Self::C]
     }
     fn to_possible_value(&self) -> Option<clap::builder::PossibleValue> {
         Some(clap::builder::PossibleValue::new(self.name()))
@@ -430,6 +435,7 @@ impl Backend {
             Self::Skull => "skull",
             Self::Js => "js",
             Self::Glsl => "glsl",
+            Self::C => "c",
         }
     }
 
@@ -440,6 +446,7 @@ impl Backend {
             Self::Skull => "skull is a bone-HIR codegen",
             Self::Js => "js is a JS-subset executor (node); no game/engine runtime",
             Self::Glsl => "glsl is a GLSL value-test executor (GPU), not a program codegen",
+            Self::C => "c is an initial native value-test executor (Clang), not a full runtime backend",
         }
     }
 
@@ -466,6 +473,7 @@ impl Backend {
             ],
             Self::Js => &[Test, Run],
             Self::Glsl => &[Test],
+            Self::C => &[Test],
         }
     }
 
@@ -901,6 +909,7 @@ impl Args {
                         Some("skull") => Some(Backend::Skull),
                         Some("js") => Some(Backend::Js),
                         Some("glsl") => Some(Backend::Glsl),
+                        Some("c") => Some(Backend::C),
                         _ => None,
                     }
                 });
@@ -913,7 +922,7 @@ impl Args {
 
 #[cfg(test)]
 mod arg_tests {
-    use super::Args;
+    use super::{Args, Backend};
 
     #[test]
     fn no_record_flag_parses_and_defaults_off() {
@@ -950,6 +959,16 @@ mod arg_tests {
         );
         assert_eq!(args.renderer, Some(super::RendererBackend::Wgpu));
         assert_eq!(args.frames, 30);
+    }
+
+    #[test]
+    fn c_backend_parses_for_test() {
+        let args = Args::from_matches(
+            Args::command()
+                .try_get_matches_from(["rock", "test", "tests/c_backend_smoke.rock", "--backend", "c"])
+                .expect("parse"),
+        );
+        assert_eq!(args.backend, Backend::C);
     }
 }
 
@@ -1008,6 +1027,18 @@ mod caps_tests {
         }
         let msg = Backend::Glsl.reject_reason(CliCommand::Run).expect("glsl rejects run");
         assert!(msg.contains("`glsl` backend cannot serve `run`"), "{msg}");
+        assert!(msg.contains("test"), "supported list names test: {msg}");
+    }
+
+    #[test]
+    fn c_serves_test_only() {
+        use CliCommand::*;
+        assert!(Backend::C.serves(Test), "c serves test");
+        for cmd in [Compile, CompileSingle, TestCompile, Run, Watch, Stone, Frame, Perf, Sim] {
+            assert!(!Backend::C.serves(cmd), "c should reject {:?}", cmd);
+        }
+        let msg = Backend::C.reject_reason(CliCommand::Run).expect("c rejects run");
+        assert!(msg.contains("`c` backend cannot serve `run`"), "{msg}");
         assert!(msg.contains("test"), "supported list names test: {msg}");
     }
 
