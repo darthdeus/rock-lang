@@ -380,11 +380,22 @@ fn compile_source(source: &str) -> std::result::Result<CompiledC, String> {
     let c_path = dir.path().join("test.c");
     let binary = dir.path().join("test-bin");
     fs_err::write(&c_path, source).map_err(|error| error.to_string())?;
+    clang_compile(source, &c_path, &binary)?;
+    Ok(CompiledC { _dir: dir, binary })
+}
+
+fn clang_compile(
+    source: &str,
+    c_path: &std::path::Path,
+    binary: &std::path::Path,
+) -> std::result::Result<(), String> {
+    invalidate_artifact(binary)
+        .map_err(|error| format!("could not invalidate {}: {error}", binary.display()))?;
     let compile = Command::new("clang")
         .args(["-std=c11", "-O2", "-Wall", "-Wextra", "-Werror"])
-        .arg(&c_path)
+        .arg(c_path)
         .arg("-o")
-        .arg(&binary)
+        .arg(binary)
         .output()
         .map_err(|error| format!("could not run clang: {error}"))?;
     if !compile.status.success() {
@@ -394,12 +405,18 @@ fn compile_source(source: &str) -> std::result::Result<CompiledC, String> {
             source
         ));
     }
-    Ok(CompiledC { _dir: dir, binary })
+    if !binary.is_file() {
+        return Err(format!(
+            "clang succeeded without creating {}",
+            binary.display()
+        ));
+    }
+    Ok(())
 }
 
-pub fn c_run(path: &str) -> Result<()> {
+fn emit_main_program(path: &str) -> Result<skull_codegen_c::CProgram> {
     if std::path::Path::new(path).is_dir() {
-        anyhow::bail!("C backend run currently accepts one .rock file, not a project directory");
+        anyhow::bail!("C backend currently accepts one .rock file, not a project directory");
     }
     let checked = check_file(path).map_err(|error| anyhow::anyhow!(error.rendered))?;
     let mut mains = checked
@@ -411,22 +428,85 @@ pub fn c_run(path: &str) -> Result<()> {
             function.name.as_str() == "main" && function.param_decls.is_empty()
         });
     let Some((main, _)) = mains.next() else {
-        anyhow::bail!("C backend run requires a nullary `main` in the entry file");
+        anyhow::bail!("C backend requires a nullary `main` in the entry file");
     };
     if mains.next().is_some() {
-        anyhow::bail!("C backend run found more than one nullary `main` in the entry file");
+        anyhow::bail!("C backend found more than one nullary `main` in the entry file");
     }
     let main = FuncRef {
         module: checked.user_mid,
         func: main,
     };
-    let emitted = skull_codegen_c::emit_program(&checked.ws, main).map_err(|error| {
+    skull_codegen_c::emit_program(&checked.ws, main).map_err(|error| {
         anyhow::anyhow!(crate::skull_backend::render_file_errs(
             path,
             &checked.source,
             &[error]
         ))
-    })?;
+    })
+}
+
+fn c_artifact_paths(
+    path: &str,
+    output: Option<String>,
+) -> Result<(std::path::PathBuf, std::path::PathBuf)> {
+    let binary = match output {
+        Some(output) => std::path::PathBuf::from(output),
+        None => {
+            let stem = std::path::Path::new(path)
+                .file_stem()
+                .ok_or_else(|| anyhow::anyhow!("C backend input has no file name: {path}"))?;
+            std::path::Path::new("tmp").join(stem)
+        }
+    };
+    let mut c_name = binary.as_os_str().to_os_string();
+    c_name.push(".c");
+    Ok((std::path::PathBuf::from(c_name), binary))
+}
+
+fn reject_input_alias(path: &str, artifact: &std::path::Path) -> Result<()> {
+    let input = std::path::Path::new(path);
+    let aliases = input == artifact
+        || match (fs_err::canonicalize(input), fs_err::canonicalize(artifact)) {
+            (Ok(input), Ok(artifact)) => input == artifact,
+            _ => false,
+        };
+    if aliases {
+        anyhow::bail!("C backend output must not refer to the input file");
+    }
+    Ok(())
+}
+
+fn invalidate_artifact(path: &std::path::Path) -> std::io::Result<()> {
+    match fs_err::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+pub fn c_compile(path: &str, output: Option<String>) -> Result<()> {
+    let (c_path, binary) = c_artifact_paths(path, output)?;
+    reject_input_alias(path, &c_path)?;
+    reject_input_alias(path, &binary)?;
+    invalidate_artifact(&c_path)?;
+    invalidate_artifact(&binary)?;
+    let emitted = emit_main_program(path)?;
+    for artifact in [&c_path, &binary] {
+        if let Some(parent) = artifact.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            fs_err::create_dir_all(parent)?;
+        }
+    }
+    rock_host::project::write_atomic(&c_path, &emitted.source)?;
+    clang_compile(&emitted.source, &c_path, &binary).map_err(anyhow::Error::msg)?;
+    log::info!(target: "C", "{} -> {}, {}", path, c_path.display(), binary.display());
+    Ok(())
+}
+
+pub fn c_run(path: &str) -> Result<()> {
+    let emitted = emit_main_program(path)?;
     let compiled = compile_source(&emitted.source).map_err(anyhow::Error::msg)?;
     let status = Command::new(&compiled.binary).status()?;
     if !status.success() {

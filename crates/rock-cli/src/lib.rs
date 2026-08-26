@@ -412,10 +412,10 @@ pub enum Backend {
     /// Tests with no `returns=` are outside the value class; tests whose GLSL
     /// emission rejects report SKIP(reason). Serves `test` only.
     Glsl,
-    /// `c` — the initial native value-test executor: bone type-checks, skull
+    /// `c` — the initial native scalar backend: bone type-checks, skull
     /// monomorphizes, C is emitted for the supported closure, then Clang builds
-    /// and runs it. Unsupported constructs report SKIP(reason). Serves `test`
-    /// and single-file scalar `run`.
+    /// it. Unsupported tests report SKIP(reason); compile/run reject unsupported
+    /// programs. Serves single-file `compile`, `test`, and `run`.
     C,
 }
 
@@ -474,7 +474,7 @@ impl Backend {
             ],
             Self::Js => &[Test, Run],
             Self::Glsl => &[Test],
-            Self::C => &[Test, Run],
+            Self::C => &[Compile, Test, Run],
         }
     }
 
@@ -1032,17 +1032,19 @@ mod caps_tests {
     }
 
     #[test]
-    fn c_serves_test_and_run() {
+    fn c_serves_compile_test_and_run() {
         use CliCommand::*;
+        assert!(Backend::C.serves(Compile), "c serves compile");
         assert!(Backend::C.serves(Test), "c serves test");
         assert!(Backend::C.serves(Run), "c serves run");
-        for cmd in [Compile, CompileSingle, TestCompile, Watch, Stone, Frame, Perf, Sim] {
+        for cmd in [CompileSingle, TestCompile, Watch, Stone, Frame, Perf, Sim] {
             assert!(!Backend::C.serves(cmd), "c should reject {:?}", cmd);
         }
         let msg = Backend::C.reject_reason(CliCommand::Stone).expect("c rejects stone");
         assert!(msg.contains("`c` backend cannot serve `stone`"), "{msg}");
         assert!(msg.contains("test"), "supported list names test: {msg}");
         assert!(msg.contains("run"), "supported list names run: {msg}");
+        assert!(msg.contains("compile"), "supported list names compile: {msg}");
     }
 
     #[test]

@@ -8,6 +8,73 @@ fn run(path: &std::path::Path) -> std::process::Output {
 }
 
 #[test]
+fn c_compile_keeps_artifacts_and_invalidates_stale_defaults() {
+    assert!(
+        Command::new("clang")
+            .arg("--version")
+            .output()
+            .is_ok_and(|output| output.status.success()),
+        "C backend gate requires clang"
+    );
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("foo.rock"), "fn main() { print(\"hi\") }\n")
+        .expect("write program");
+    let compile = Command::new(env!("CARGO_BIN_EXE_rock"))
+        .args(["compile", "foo.rock", "--backend", "c"])
+        .current_dir(dir.path())
+        .output()
+        .expect("spawn rock compile");
+    assert!(
+        compile.status.success(),
+        "C compile failed:\nstdout:{}\nstderr:{}",
+        String::from_utf8_lossy(&compile.stdout),
+        String::from_utf8_lossy(&compile.stderr)
+    );
+
+    let c_path = dir.path().join("tmp/foo.c");
+    let binary = dir.path().join("tmp/foo");
+    let source = std::fs::read_to_string(&c_path).expect("generated C source");
+    assert!(source.contains("rock_print_string"), "{source}");
+    assert!(binary.is_file(), "native binary was not written");
+    let run = Command::new(&binary).output().expect("run native binary");
+    assert!(run.status.success(), "native binary failed: {run:?}");
+    assert_eq!(run.stdout, b"hi\n");
+
+    let explicit_compile = Command::new(env!("CARGO_BIN_EXE_rock"))
+        .args([
+            "compile",
+            "foo.rock",
+            "--backend",
+            "c",
+            "--output",
+            "build/custom",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .expect("spawn explicit rock compile");
+    assert!(explicit_compile.status.success(), "explicit C compile failed");
+    assert!(dir.path().join("build/custom.c").is_file());
+    assert!(dir.path().join("build/custom").is_file());
+
+    std::fs::write(
+        dir.path().join("foo.rock"),
+        "extern(lua) fn unsupported_runtime()\nfn main() { unsupported_runtime() }\n",
+    )
+    .expect("write unsupported program");
+    let failed_compile = Command::new(env!("CARGO_BIN_EXE_rock"))
+        .args(["compile", "foo.rock", "--backend", "c"])
+        .current_dir(dir.path())
+        .output()
+        .expect("spawn failing rock compile");
+    assert!(
+        !failed_compile.status.success(),
+        "unsupported compile passed"
+    );
+    assert!(!c_path.exists(), "failed compile left stale C source");
+    assert!(!binary.exists(), "failed compile left stale binary");
+}
+
+#[test]
 fn c_run_executes_main_and_propagates_native_failure() {
     assert!(
         Command::new("clang")

@@ -502,6 +502,10 @@ impl CommandContext {
 
     fn run_command_c(&self) -> Result<()> {
         match self.args.command {
+            CliCommand::Compile => {
+                let file = self.get_required_file("compile")?;
+                crate::c_test::c_compile(file, self.get_compile_output()?)
+            }
             CliCommand::Test => {
                 let files = self.get_test_files()?;
                 crate::c_test::c_test(&files)
