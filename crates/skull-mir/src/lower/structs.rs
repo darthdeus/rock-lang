@@ -542,9 +542,15 @@ impl Builder<'_> {
                 None => {
                     // This variant has no such field -> pad with the slot's zero.
                     let zero = match *c {
+                        "int" => Lit::Int(0),
                         "float" => Lit::Float(0.0),
                         "bool" => Lit::Bool(false),
-                        _ => Lit::Int(0),
+                        "uint32_t" => Lit::Uint(0),
+                        other => {
+                            return Err(gap(format!(
+                                "enum cdata slot has unknown scalar type `{other}`"
+                            )));
+                        }
                     };
                     self.emit_cur(Inst::Const(zero))
                 }
