@@ -3,18 +3,24 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 #[derive(Debug, Clone, Default)]
-struct ReplayInput {
-    keys: Vec<String>,
-    buttons: Vec<i64>,
+pub(crate) struct ReplayInput {
+    pub(crate) mouse_x: String,
+    pub(crate) mouse_y: String,
+    pub(crate) wheel: i64,
+    pub(crate) imgui: bool,
+    pub(crate) keys: Vec<String>,
+    pub(crate) buttons: Vec<i64>,
+    pub(crate) pad_buttons: Vec<String>,
+    pub(crate) pad_axes: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone)]
-struct ReplayTiming {
-    ordinal: usize,
-    total_us: u64,
-    logic_us: u64,
-    render_us: u64,
-    present_us: u64,
+pub(crate) struct ReplayTiming {
+    pub(crate) ordinal: usize,
+    pub(crate) total_us: u64,
+    pub(crate) logic_us: u64,
+    pub(crate) render_us: u64,
+    pub(crate) present_us: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -35,14 +41,15 @@ pub struct RecordedProfile {
 
 #[derive(Debug)]
 pub struct ReplayReport {
-    version: u32,
-    seed: Option<i64>,
-    game: String,
-    source: String,
-    build: String,
-    inputs: Vec<ReplayInput>,
-    timings: Vec<ReplayTiming>,
-    profiles: HashMap<usize, RecordedProfile>,
+    pub(crate) version: u32,
+    pub(crate) seed: Option<i64>,
+    pub(crate) game: String,
+    pub(crate) source: String,
+    pub(crate) revision: String,
+    pub(crate) build: String,
+    pub(crate) inputs: Vec<ReplayInput>,
+    pub(crate) timings: Vec<ReplayTiming>,
+    pub(crate) profiles: HashMap<usize, RecordedProfile>,
 }
 
 #[derive(Debug)]
@@ -75,6 +82,7 @@ pub struct ReplayAnalysis {
     pub seed: Option<i64>,
     pub game: String,
     pub source: String,
+    pub revision: String,
     pub build: String,
     pub observation_count: usize,
     pub timing_count: usize,
@@ -116,11 +124,15 @@ impl ReplayReport {
             .context("not a replay log")?
             .parse::<u32>()
             .context("malformed replay version")?;
+        if !(1..=13).contains(&version) {
+            bail!("unsupported replay version {version}");
+        }
         let mut report = Self {
             version,
             seed: None,
             game: String::new(),
             source: String::new(),
+            revision: String::new(),
             build: String::new(),
             inputs: Vec::new(),
             timings: Vec::new(),
@@ -142,17 +154,43 @@ impl ReplayReport {
                 "source" if fields.len() == 2 => {
                     report.source = decode_hex(fields[1], line_number, "replay source")?;
                 }
+                "revision" if fields.len() == 2 => {
+                    if !report.revision.is_empty() {
+                        bail!("line {line_number}: duplicate replay revision");
+                    }
+                    report.revision = decode_hex(fields[1], line_number, "replay revision")?;
+                }
                 "build" if fields.len() == 2 => report.build = fields[1].to_string(),
                 "t" => {
-                    if fields.len() < 8 {
+                    if fields.len() < 8 || fields.len() > 10 {
                         bail!("line {line_number}: malformed replay observation");
                     }
+                    let imgui = match fields[5] {
+                        "0" => false,
+                        "1" => true,
+                        value => bail!("line {line_number}: invalid ImGui flag `{value}`"),
+                    };
+                    let pad_buttons = fields.get(8).copied().unwrap_or("-");
+                    let pad_axes = fields.get(9).copied().unwrap_or("-");
                     report.inputs.push(ReplayInput {
+                        mouse_x: fields[2].to_string(),
+                        mouse_y: fields[3].to_string(),
+                        wheel: fields[4].parse::<i64>().with_context(|| {
+                            format!("line {line_number}: invalid mouse wheel `{}`", fields[4])
+                        })?,
+                        imgui,
                         keys: parse_list(fields[6], |value| Ok(value.to_string()))?,
                         buttons: parse_list(fields[7], |value| {
                             value.parse::<i64>().with_context(|| {
                                 format!("line {line_number}: invalid mouse button `{value}`")
                             })
+                        })?,
+                        pad_buttons: parse_list(pad_buttons, |value| Ok(value.to_string()))?,
+                        pad_axes: parse_list(pad_axes, |value| {
+                            let (axis, magnitude) = value.split_once('=').with_context(|| {
+                                format!("line {line_number}: invalid gamepad axis `{value}`")
+                            })?;
+                            Ok((axis.to_string(), magnitude.to_string()))
                         })?,
                     });
                 }
@@ -225,12 +263,15 @@ impl ReplayReport {
         }
 
         if report.version >= 12 && report.source.is_empty() {
-            bail!("v12 replay is missing its project source");
+            bail!("v12+ replay is missing its project source");
+        }
+        if report.version >= 13 && report.revision.is_empty() {
+            bail!("v13 replay is missing its source revision");
         }
         Ok(report)
     }
 
-    pub fn from_path(path: &Path) -> Result<Self> {
+    pub(crate) fn from_path(path: &Path) -> Result<Self> {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("read replay {}", path.display()))?;
         Self::parse(&text).with_context(|| format!("parse replay {}", path.display()))
@@ -315,6 +356,7 @@ impl ReplayReport {
             seed: self.seed,
             game: self.game.clone(),
             source: self.source.clone(),
+            revision: self.revision.clone(),
             build: self.build.clone(),
             observation_count: self.inputs.len(),
             timing_count: self.timings.len(),
@@ -374,6 +416,7 @@ impl ReplayAnalysis {
                 "seed": self.seed,
                 "game": self.game,
                 "source": self.source,
+                "revision": self.revision,
                 "build": self.build,
                 "observations": self.observation_count,
                 "timing_rows": self.timing_count,
@@ -387,9 +430,10 @@ impl ReplayAnalysis {
 
     fn render_text(&self) -> String {
         let mut out = format!(
-            "Replay: {} [{}] build {} (v{}, seed {})\nObservations: {} | timings: {} | p50 {:.2} ms | p95 {:.2} ms | p99 {:.2} ms\nSlow burst threshold: {:.2} ms (max(2 x p50, 16.667 ms))\n\nTop frames:\n",
+            "Replay: {} [{}] revision {} build {} (v{}, seed {})\nObservations: {} | timings: {} | p50 {:.2} ms | p95 {:.2} ms | p99 {:.2} ms\nSlow burst threshold: {:.2} ms (max(2 x p50, 16.667 ms))\n\nTop frames:\n",
             self.source,
             self.game,
+            if self.revision.is_empty() { "?" } else { &self.revision },
             self.build,
             self.version,
             self.seed.map(|seed| seed.to_string()).unwrap_or_else(|| "?".to_string()),
@@ -516,5 +560,15 @@ p 3 3 11000 4000 6000 1000";
         .expect("the replay itself parses");
         let error = replay.analyze(10, 2).unwrap_err().to_string();
         assert!(error.contains("no recorded timing"), "{error}");
+    }
+
+    #[test]
+    fn v13_report_requires_the_recorded_source_revision() {
+        let error = ReplayReport::parse(
+            "STONE_REPLAY 13\nseed 1\ngame MAG\nsource 6d6167\nbuild 0123456789abcdef\nt 0 0 0 0 0 - - - -",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("source revision"), "{error}");
     }
 }

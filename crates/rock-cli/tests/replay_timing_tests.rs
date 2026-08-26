@@ -136,6 +136,56 @@ fn exact_phase_samples(n: usize, first: u64) -> String {
         .join(",")
 }
 
+#[test]
+fn replay_profile_range_emits_every_requested_observation_and_the_final_boundary() {
+    let dir = tempfile::tempdir().expect("replay profile range");
+    let log = dir.path().join("range.replay");
+    let timings = exact_samples(8, 10_000);
+    let phases = exact_phase_samples(8, 1_000);
+    let recorded = record_raw(
+        "bitgun",
+        8,
+        log.to_str().unwrap(),
+        &[
+            ("STONE_REPLAY_TIMING_US", timings.as_str()),
+            ("STONE_REPLAY_PHASE_TIMING_US", phases.as_str()),
+        ],
+    );
+    assert!(
+        recorded.status.success(),
+        "record failed: {}",
+        String::from_utf8_lossy(&recorded.stderr)
+    );
+
+    let playback = replay_raw(
+        "bitgun",
+        5,
+        log.to_str().unwrap(),
+        &[
+            ("STONE_REPLAY_PROFILE_FROM", "2"),
+            ("STONE_REPLAY_PROFILE_TO", "4"),
+            ("STONE_REPLAY_PROFILE_WIRE", "1"),
+        ],
+    );
+    assert!(
+        playback.status.success(),
+        "profile playback failed: {}",
+        String::from_utf8_lossy(&playback.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&playback.stdout);
+    let rows = stdout
+        .lines()
+        .filter(|line| line.starts_with("ROCK_REPLAY_PROFILE_ROW "))
+        .collect::<Vec<_>>();
+    assert_eq!(rows.len(), 3, "requested 2-4 inclusive:\n{stdout}");
+    for (row, ordinal) in rows.iter().zip(2..=4) {
+        assert!(
+            row.starts_with(&format!("ROCK_REPLAY_PROFILE_ROW {ordinal} ")),
+            "range rows must be exact and ordered: {rows:?}"
+        );
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct TimingRow {
     ordinal: usize,
@@ -288,8 +338,8 @@ fn timing_samples_align_exactly_with_observation_ordinals_and_ticks() {
 
     let text = std::fs::read_to_string(&log).expect("read replay");
     assert!(
-        text.starts_with("STONE_REPLAY 12\n"),
-        "phase timing logs must use v12\n{text}"
+        text.starts_with("STONE_REPLAY 13\n"),
+        "phase timing logs must use v13\n{text}"
     );
     assert_eq!(tick_count(&text), 8, "fixture must have eight observations");
     assert_eq!(
@@ -339,8 +389,8 @@ fn opted_in_slow_frames_carry_bounded_named_profiler_attribution() {
     );
     let text = std::fs::read_to_string(&profiled).expect("read profiled replay");
     assert!(
-        text.starts_with("STONE_REPLAY 12\n"),
-        "slow-frame attribution requires the versioned v12 grammar\n{text}"
+        text.starts_with("STONE_REPLAY 13\n"),
+        "slow-frame attribution requires the versioned v13 grammar\n{text}"
     );
     let rows = slow_frame_lines(&text);
     assert_eq!(
@@ -448,8 +498,8 @@ fn crash_tail_can_omit_only_the_final_completed_timing_sample() {
     let ticks = tick_count(&text);
     let timings = timing_lines(&text);
     assert!(
-        text.starts_with("STONE_REPLAY 12\n"),
-        "crash log must retain v12\n{text}"
+        text.starts_with("STONE_REPLAY 13\n"),
+        "crash log must retain v13\n{text}"
     );
     assert!(ticks > 0, "crash log must retain observations");
     assert_eq!(
@@ -478,7 +528,7 @@ fn legacy_v8_without_timing_remains_playable_and_reports_an_empty_track() {
         .map(str::to_string)
         .collect::<Vec<_>>()
         .join("\n")
-        .replacen("STONE_REPLAY 12", "STONE_REPLAY 8", 1)
+        .replacen("STONE_REPLAY 13", "STONE_REPLAY 8", 1)
         + "\n";
     std::fs::write(&log, legacy).expect("write legacy replay");
 
@@ -509,7 +559,7 @@ fn legacy_v9_total_timing_remains_playable_without_phase_attribution() {
         })
         .collect::<Vec<_>>()
         .join("\n")
-        .replacen("STONE_REPLAY 12", "STONE_REPLAY 9", 1)
+        .replacen("STONE_REPLAY 13", "STONE_REPLAY 9", 1)
         + "\n";
     std::fs::write(&log, legacy).expect("write legacy replay");
 
@@ -533,7 +583,7 @@ fn legacy_v10_phase_timing_remains_playable_without_slow_profiles() {
     assert!(recorded.status.success(), "record failed");
     let legacy = std::fs::read_to_string(&log)
         .expect("read replay")
-        .replacen("STONE_REPLAY 12", "STONE_REPLAY 10", 1);
+        .replacen("STONE_REPLAY 13", "STONE_REPLAY 10", 1);
     std::fs::write(&log, legacy).expect("write v10 replay");
 
     let state = replay_dump("bitgun", 8, &log_s, &[]);

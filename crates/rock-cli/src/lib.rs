@@ -63,6 +63,7 @@ mod lsp_survey;
 mod lsp_test;
 mod parallel_runner;
 mod replay_report;
+mod replay_profile;
 mod image_video;
 pub mod run_sim;
 pub mod sim_record;
@@ -105,6 +106,10 @@ pub enum CliCommand {
     /// launching the game, rank slow observations and bursts, and print ranges
     /// ready for replay-scoped profiling/allocation diagnostics.
     ReplayReport,
+    /// `rock replay-profile <game> <file> --range A-B [--runs N]` — replay an
+    /// exact Artifact headlessly and emit one machine-readable row for every
+    /// measured observation plus a terminal row for each fresh-process run.
+    ReplayProfile,
     /// `rock stone-test <root>` — long-lived headless watch process driven
     /// over JSON-line stdio. Test infrastructure for incremental
     /// compilation / hot-reload assertions. See
@@ -303,7 +308,7 @@ impl clap::ValueEnum for CliCommand {
         &[
             Self::Compile, Self::CompileSingle, Self::Test,
             Self::TestCompile, Self::Run, Self::Watch, Self::Fmt, Self::Frame,
-            Self::Stone, Self::Replay, Self::ReplayReport, Self::Perf,
+            Self::Stone, Self::Replay, Self::ReplayReport, Self::ReplayProfile, Self::Perf,
             Self::Sim,
             Self::Completions,
             Self::Lint,
@@ -357,6 +362,7 @@ impl CliCommand {
             Self::Stone => "stone",
             Self::Replay => "replay",
             Self::ReplayReport => "replay-report",
+            Self::ReplayProfile => "replay-profile",
             Self::StoneTest => "stone-test",
             Self::Perf => "perf",
             Self::Sim => "sim",
@@ -468,7 +474,7 @@ impl Backend {
                 Test, Compile, CompileSingle, TestCompile, Run, Watch,
             ],
             Self::Skull => &[
-                Test, Compile, CompileSingle, TestCompile, Run, Watch, Stone, Frame, Replay, Perf, Sim,
+                Test, Compile, CompileSingle, TestCompile, Run, Watch, Stone, Frame, Replay, ReplayProfile, Perf, Sim,
             ],
             Self::Js => &[Test, Run],
             Self::Glsl => &[Test],
@@ -543,6 +549,10 @@ pub struct Args {
     pub top: usize,
     /// For `rock replay-report`: observations of context around suggested ranges.
     pub context: usize,
+    /// For `rock replay-profile`: inclusive observation range `A-B`.
+    pub replay_range: Option<String>,
+    /// For `rock replay-profile`: fresh-process repetitions of the range.
+    pub runs: usize,
     pub type_validation: bool,
     pub headless: bool,
     /// Build and run game commands against this renderer without changing the
@@ -739,6 +749,11 @@ impl Args {
             .arg(Arg::new("context").long("context").default_value("2")
                 .value_parser(clap::value_parser!(usize))
                 .help("For `rock replay-report`: pad suggested observation ranges by this many frames (default 2)."))
+            .arg(Arg::new("replay-range").long("range")
+                .help("For `rock replay-profile`: inclusive observation range A-B."))
+            .arg(Arg::new("runs").long("runs").default_value("1")
+                .value_parser(clap::value_parser!(usize))
+                .help("For `rock replay-profile`: number of fresh-process repetitions (default 1)."))
             .arg(Arg::new("type-validation").long("type-validation").action(ArgAction::SetTrue)
                 .help("Enable type validation warnings for unresolved types after inference"))
             .arg(Arg::new("headless").long("headless").action(ArgAction::SetTrue)
@@ -859,6 +874,8 @@ impl Args {
             perf_format: m.get_one::<String>("perf-format").cloned().unwrap_or_else(|| "pretty".to_string()),
             top: *m.get_one::<usize>("top").unwrap(),
             context: *m.get_one::<usize>("context").unwrap(),
+            replay_range: m.get_one::<String>("replay-range").cloned(),
+            runs: *m.get_one::<usize>("runs").unwrap(),
             type_validation: m.get_flag("type-validation"),
             headless: m.get_flag("headless"),
             renderer: m.get_one::<String>("renderer").map(|value| match value.as_str() {
@@ -985,6 +1002,22 @@ mod arg_tests {
         assert_eq!(args.top, 7);
         assert_eq!(args.context, 3);
         assert_eq!(args.perf_format, "json");
+    }
+
+    #[test]
+    fn replay_profile_range_and_repetitions_parse() {
+        let args = Args::from_matches(
+            Args::command()
+                .try_get_matches_from([
+                    "rock", "replay-profile", "mag", "session.replay",
+                    "--range", "20-40", "--runs", "3",
+                ])
+                .expect("parse"),
+        );
+        assert_eq!(args.command, super::CliCommand::ReplayProfile);
+        assert_eq!(args.files, ["mag", "session.replay"]);
+        assert_eq!(args.replay_range.as_deref(), Some("20-40"));
+        assert_eq!(args.runs, 3);
     }
 }
 
