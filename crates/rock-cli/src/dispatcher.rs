@@ -589,6 +589,18 @@ impl CommandContext {
                 &self.args.perf_format,
             );
         }
+        if self.args.command == CliCommand::ReplayProfileReport {
+            if self.args.files.len() != 1 {
+                anyhow::bail!(
+                    "usage: rock replay-profile-report <file.jsonl> [--top N] [--format pretty|json]"
+                );
+            }
+            return crate::replay_profile_report::run(
+                std::path::Path::new(&self.args.files[0]),
+                self.args.top,
+                &self.args.perf_format,
+            );
+        }
         // iter-compile is a bone-inference profiling loop; it ignores --backend
         // and runs its own pipeline, so dispatch it before the backend switch.
         if self.args.command == CliCommand::IterCompile {

@@ -67,6 +67,8 @@ fn replay_profile_emits_exact_repeated_range_as_json_lines() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    let profile_jsonl = dir.path().join("profile.jsonl");
+    std::fs::write(&profile_jsonl, &output.stdout).unwrap();
 
     let rows = String::from_utf8(output.stdout)
         .expect("UTF-8 profile output")
@@ -128,6 +130,28 @@ fn replay_profile_emits_exact_repeated_range_as_json_lines() {
         frames[2]["ordinal"], 4,
         "the inclusive final boundary must be captured"
     );
+
+    let report = Command::new(env!("CARGO_BIN_EXE_rock"))
+        .args([
+            "replay-profile-report",
+            profile_jsonl.to_str().unwrap(),
+            "--format",
+            "json",
+        ])
+        .current_dir(workspace_root())
+        .output()
+        .expect("summarize replay profile");
+    assert!(
+        report.status.success(),
+        "profile report failed:\n{}",
+        String::from_utf8_lossy(&report.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&report.stdout).unwrap();
+    assert_eq!(report["runs"]["complete"], 2);
+    assert_eq!(report["runs"]["incomplete"], 0);
+    assert_eq!(report["observations"], 3);
+    assert_eq!(report["top_frames"].as_array().unwrap().len(), 3);
+    assert_eq!(report["top_frames"][0]["samples"], 2);
 }
 
 #[test]
