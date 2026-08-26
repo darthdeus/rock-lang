@@ -53,8 +53,24 @@ fn c_run_executes_main_and_propagates_native_failure() {
         "native failure was reported as success"
     );
 
+    let printing = dir.path().join("printing.rock");
+    std::fs::write(&printing, "fn main() {\n    print(\"hi\")\n}\n")
+        .expect("write printing program");
+    let printing_run = run(&printing);
+    assert!(
+        printing_run.status.success(),
+        "C print program failed:\nstdout:{}\nstderr:{}",
+        String::from_utf8_lossy(&printing_run.stdout),
+        String::from_utf8_lossy(&printing_run.stderr)
+    );
+    assert_eq!(printing_run.stdout, b"hi\n");
+
     let unsupported = dir.path().join("unsupported.rock");
-    std::fs::write(&unsupported, "fn main() { print(1) }\n").expect("write unsupported program");
+    std::fs::write(
+        &unsupported,
+        "extern(lua) fn unsupported_runtime()\nfn main() { unsupported_runtime() }\n",
+    )
+    .expect("write unsupported program");
     let unsupported_run = run(&unsupported);
     let unsupported_output = format!(
         "{}{}",
