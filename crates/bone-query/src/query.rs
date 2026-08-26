@@ -2593,6 +2593,7 @@ fn render_type_expr(ast: &Ast, idx: skull_parser::Idx<skull_parser::TypeExprData
         K::Uint => "uint".to_string(),
         K::Float => "float".to_string(),
         K::Bool => "bool".to_string(),
+        K::Ref(target) => format!("ref {}", render_type_expr(ast, *target)),
         K::Ident(id) => id.name.to_string(),
         K::Array(el) => format!("[{}]", render_type_expr(ast, *el)),
         K::App { ctor, args } => format!("{}<{}>", ctor.name, join(args)),

@@ -1,5 +1,39 @@
 use super::*;
 
+fn reject_ref_captures(
+    c: BodyCtx,
+    gamma: &Gamma,
+    lambda_span: Span,
+) -> Result<(), CompilerError> {
+    let contains = |outer: Span, inner: Span| {
+        outer.file == inner.file
+            && outer.offset_range.0 <= inner.offset_range.0
+            && inner.offset_range.1 <= outer.offset_range.1
+    };
+
+    for (expr, node) in c.body.expr_arena.iter() {
+        let Expr::Var(binding) = node else { continue };
+        let use_span = c.body.expr_spans[expr];
+        if !contains(lambda_span, use_span) || contains(lambda_span, c.body.binding_spans[*binding]) {
+            continue;
+        }
+        let ty = gamma
+            .out
+            .binding_types
+            .get(*binding)
+            .copied()
+            .or(c.body.binding_arena[*binding].declared_ty);
+        if ty.is_some_and(|ty| contains_frame_ref(gamma, ty)) {
+            comp_error!(
+                use_span,
+                "closure cannot capture frame reference `{}`; capture an `Entity<T>` and resolve it inside the closure",
+                c.body.binding_arena[*binding].name
+            );
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn infer_lambda(
     c: BodyCtx,
     gamma: &mut Gamma,
@@ -72,6 +106,8 @@ pub(crate) fn infer_lambda(
     gamma.coroutine_ret = saved_coro;
     gamma.declared_ret_ty = saved_ret;
     let body_ty = body_res?;
+
+    reject_ref_captures(c, gamma, expr_span)?;
 
     unify(gamma, ret_var, body_ty, expr_span)?;
     let ret_ty = resolve(gamma, ret_var, expr_span);

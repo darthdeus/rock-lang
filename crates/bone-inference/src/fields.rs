@@ -54,6 +54,19 @@ pub(crate) fn struct_field_ty(
     field: Ustr,
     span: Span,
 ) -> Result<TyId, CompilerError> {
+    let base_ty = match *gamma.get(base_ty) {
+        TypeExpr::App {
+            ctor: TypeCtor::Ref,
+            params,
+        } => {
+            let mut params = params;
+            let Some(inner) = params.next() else {
+                comp_error!(span, "malformed `ref` type has no target");
+            };
+            base_ty.with_idx(inner)
+        }
+        _ => base_ty,
+    };
     let (struct_name, params) = match *gamma.get(base_ty) {
         TypeExpr::App {
             ctor: TypeCtor::Nominal(name),

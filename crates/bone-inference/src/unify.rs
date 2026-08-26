@@ -1,5 +1,96 @@
 use super::*;
 
+pub(crate) fn contains_frame_ref(gamma: &Gamma, ty: TyId) -> bool {
+    fn visit(gamma: &Gamma, ty: TyId, seen: &mut FxHashSet<TyId>) -> bool {
+        if !seen.insert(ty) {
+            return false;
+        }
+        match *gamma.get(ty) {
+            TypeExpr::App {
+                ctor: TypeCtor::Ref,
+                ..
+            } => true,
+            TypeExpr::Infer(var, _) => gamma
+                .out
+                .substitutions
+                .get(var)
+                .is_some_and(|next| visit(gamma, next, seen)),
+            TypeExpr::Nullable(inner) => visit(gamma, ty.with_idx(inner), seen),
+            TypeExpr::App { params, .. } => {
+                let mut params = params;
+                params.any(|p| visit(gamma, ty.with_idx(p), seen))
+            }
+            TypeExpr::Function { params, ret } => {
+                let mut params = params;
+                params.any(|p| visit(gamma, ty.with_idx(p), seen))
+                    || visit(gamma, ty.with_idx(ret), seen)
+            }
+            TypeExpr::Tuple { elements } => {
+                let mut elements = elements;
+                elements.any(|p| visit(gamma, ty.with_idx(p), seen))
+            }
+            TypeExpr::Builtin(_) | TypeExpr::Generic(..) => false,
+        }
+    }
+
+    visit(gamma, ty, &mut FxHashSet::default())
+}
+
+pub(crate) fn frame_ref_target(gamma: &Gamma, ty: TyId) -> Option<TyId> {
+    match *gamma.get(ty) {
+        TypeExpr::App {
+            ctor: TypeCtor::Ref,
+            params,
+        } => params.into_iter().next().map(|inner| ty.with_idx(inner)),
+        TypeExpr::Nullable(inner) => {
+            let inner_ty = ty.with_idx(inner);
+            match *gamma.get(inner_ty) {
+                TypeExpr::App {
+                    ctor: TypeCtor::Ref,
+                    params,
+                } => params.into_iter().next().map(|target| inner_ty.with_idx(target)),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+pub(crate) fn persistent_type_contains_frame_ref(gamma: &Gamma, ty: TyId) -> bool {
+    fn visit(gamma: &Gamma, ty: TyId, seen: &mut FxHashSet<TyId>) -> bool {
+        if !seen.insert(ty) {
+            return false;
+        }
+        match *gamma.get(ty) {
+            TypeExpr::Infer(var, _) => gamma
+                .out
+                .substitutions
+                .get(var)
+                .is_some_and(|next| visit(gamma, next, seen)),
+            TypeExpr::Nullable(inner) => visit(gamma, ty.with_idx(inner), seen),
+            TypeExpr::Tuple { elements } => elements
+                .into_iter()
+                .any(|part| visit(gamma, ty.with_idx(part), seen)),
+            TypeExpr::App {
+                ctor: TypeCtor::Ref,
+                ..
+            } => false,
+            TypeExpr::App { params, .. } => params
+                .into_iter()
+                .any(|part| contains_frame_ref(gamma, ty.with_idx(part))),
+            TypeExpr::Function { params, ret } => {
+                contains_frame_ref(gamma, ty.with_idx(ret))
+                    || params
+                        .into_iter()
+                        .any(|part| contains_frame_ref(gamma, ty.with_idx(part)))
+            }
+            TypeExpr::Builtin(_) | TypeExpr::Generic(..) => false,
+        }
+    }
+
+    visit(gamma, ty, &mut FxHashSet::default())
+}
+
 pub(crate) fn substitute(
     gamma: &mut Gamma,
     ty: TyId,
@@ -555,6 +646,12 @@ pub fn coerce(gamma: &mut Gamma, from: TyId, to: TyId, span: Span) -> Result<(),
     // nullable VALUE with a concrete inner (e.g. `int?`) IS allowed (rock
     // parity: only the null literal is rejected here).
     if matches!(gamma.get(to_r), TypeExpr::Builtin(BuiltinTy::Any)) {
+        if contains_frame_ref(gamma, from_r) {
+            return Err(CompilerError::new_with_label(
+                span,
+                "a frame reference cannot be erased to `any`".to_string(),
+            ));
+        }
         if let TypeExpr::Nullable(inner) = *gamma.get(from_r) {
             let inner_r = resolve(gamma, from_r.with_idx(inner), span);
             if matches!(gamma.get(inner_r), TypeExpr::Infer(..)) {
@@ -569,6 +666,12 @@ pub fn coerce(gamma: &mut Gamma, from: TyId, to: TyId, span: Span) -> Result<(),
 
     let from_ty = gamma.get(from_r);
     let to_ty = gamma.get(to_r);
+
+    if let Some(target) = frame_ref_target(gamma, to_r) {
+        if !contains_frame_ref(gamma, from_r) && !matches!(from_ty, TypeExpr::Nullable(_)) {
+            return unify(gamma, from_r, target, span);
+        }
+    }
 
     if matches!(to_ty, TypeExpr::Builtin(BuiltinTy::Any)) {
         return Ok(());

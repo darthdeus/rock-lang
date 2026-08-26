@@ -266,6 +266,9 @@ impl Workspace {
                     hir::TypeCtor::Map => {
                         format!("Map<{}>", params_str)
                     }
+                    hir::TypeCtor::Ref => {
+                        format!("ref {}", params_str)
+                    }
 
                     hir::TypeCtor::Nominal(name) => {
                         if params.is_empty() {

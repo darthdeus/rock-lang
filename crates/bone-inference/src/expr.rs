@@ -96,6 +96,13 @@ pub(crate) fn infer_statement(c: BodyCtx, gamma: &mut Gamma, s: Idx<Statement>) 
                 },
             };
 
+            if contains_frame_ref(gamma, binding_ty) {
+                comp_error!(
+                    c.body.statement_spans[s],
+                    "a `static` local cannot store a frame reference; store an `Entity<T>` or a value instead"
+                );
+            }
+
             gamma.assign_named_type(*name, binding_ty)?;
 
             reject_static_init_captures(c, *value, c.body.statement_spans[s])?;
@@ -1777,6 +1784,27 @@ pub(crate) fn check_expr(
     expected: TyId,
     span: Span,
 ) -> Result<(), CompilerError> {
+    let expected_r = resolve(gamma, expected, span);
+    if frame_ref_target(gamma, expected_r).is_some()
+        && !matches!(c.body.expr_arena[e], Expr::Null)
+    {
+        let actual = infer_expr(c, gamma, e)?;
+        let actual_r = resolve(gamma, actual, span);
+        if !contains_frame_ref(gamma, actual_r)
+            && !matches!(
+                c.body.expr_arena[e],
+                Expr::Var(_) | Expr::FieldAccess { .. } | Expr::Index { .. }
+            )
+        {
+            comp_error!(
+                span,
+                "a `ref` can only borrow a stable place (a local, field, or indexed slot)"
+            );
+        }
+        coerce(gamma, actual_r, expected_r, span)?;
+        return Ok(());
+    }
+
     // Integer literals are int by default, but a non-negative literal in a
     // uint context is admitted without widening arbitrary int values. The
     // range check stays here, before inference can erase the literal's

@@ -2878,6 +2878,9 @@ fn map_key_rejection_reason(
         TypeExpr::App { ctor: TypeCtor::Map, .. } => {
             Some("a `Map` is an aggregate, keyed by object identity".to_string())
         }
+        TypeExpr::App { ctor: TypeCtor::Ref, .. } => {
+            Some("a frame reference cannot be stored as a map key".to_string())
+        }
         TypeExpr::Nullable(..) => {
             Some("a nullable key cannot be distinguished from a missing entry".to_string())
         }

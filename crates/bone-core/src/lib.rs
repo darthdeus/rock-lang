@@ -11,4 +11,5 @@
 pub mod prelude;
 pub mod annotations;
 pub mod hir;
+pub mod suspension;
 pub mod workspace;

@@ -398,6 +398,20 @@ pub fn lower_type_expr_in(
             )
         }
 
+        TypeExprKind::Ref(inner) => {
+            let inner = lower_type_expr_helper(ctx, a, body, pos, a.te(inner))?;
+            let params = alloc_tys_contiguous(ctx, body, pos, [inner]);
+            alloc_ty(
+                ctx,
+                body,
+                pos,
+                TypeExpr::App {
+                    ctor: TypeCtor::Ref,
+                    params,
+                },
+            )
+        }
+
         TypeExprKind::App { ctor, args } if ctor.name == "Map" => {
             if args.len() != 2 {
                 comp_error!(te.span, "Map type must have exactly 2 type arguments");

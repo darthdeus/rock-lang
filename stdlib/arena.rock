@@ -177,6 +177,8 @@ fn __entity_arena<T>(entity: Entity<T>) -> Arena<T> {
 
 fn Entity<T>.get(entity) -> T? { return get(__entity_arena(entity), entity) }
 
+fn Entity<T>.borrow(entity) -> (ref T)? { return borrow(__entity_arena(entity), entity) }
+
 fn Entity<T>.remove(entity) -> T? { return remove(__entity_arena(entity), entity) }
 
 fn Entity<T>.equals(a, b: Entity<T>) -> bool {
@@ -250,6 +252,15 @@ fn Arena<T>.reuse_retained(arena) -> T? {
 }
 
 fn Arena<T>.get(arena, entity: Entity<T>) -> T? {
+    if !__arena_owns(arena, entity) { return null }
+    let found = __arena_store(arena)
+    if is_null(found) { return null }
+    let store = found.unwrap()
+    if !arena_slot_live(store, entity._slot, entity._generation) { return null }
+    return store.data[entity._slot]
+}
+
+fn Arena<T>.borrow(arena, entity: Entity<T>) -> (ref T)? {
     if !__arena_owns(arena, entity) { return null }
     let found = __arena_store(arena)
     if is_null(found) { return null }

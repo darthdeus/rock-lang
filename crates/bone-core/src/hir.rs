@@ -108,6 +108,7 @@ pub enum BuiltinTy {
 pub enum TypeCtor {
     Array,
     Map,
+    Ref,
     Nominal(Ustr),
 }
 
@@ -116,6 +117,7 @@ impl TypeCtor {
         match name.as_str() {
             "Vec" => TypeCtor::Array,
             "Map" => TypeCtor::Map,
+            "Ref" => TypeCtor::Ref,
             _ => TypeCtor::Nominal(name),
         }
     }

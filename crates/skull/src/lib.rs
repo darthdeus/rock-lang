@@ -1562,6 +1562,9 @@ fn desc_into(ws: &Workspace, ty: bone_semantic::prelude::TyId, out: &mut String,
                 out.push('}');
                 found
             }
+            TypeCtor::Ref => {
+                unreachable!("frame references are rejected from reflected storage")
+            }
             TypeCtor::Nominal(name) => {
                 // The name is the whole answer for a nominal leaf: the consumer
                 // asks the ONE classifier whether it is a native class, and a

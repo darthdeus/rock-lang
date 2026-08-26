@@ -154,6 +154,11 @@ fn encode_into(ws: &Workspace, ty: TyId, out: &mut String) {
                     out.push_str(SEP);
                     append_args(out);
                 }
+                hir::TypeCtor::Ref => {
+                    out.push_str("ref");
+                    out.push_str(SEP);
+                    append_args(out);
+                }
                 hir::TypeCtor::Nominal(name) => {
                     out.push_str(name.as_str());
                     if !params.is_empty() {
@@ -235,6 +240,7 @@ fn ty_key(ws: &Workspace, ty: TyId, out: &mut String) {
             match ctor {
                 hir::TypeCtor::Array => out.push_str("arr("),
                 hir::TypeCtor::Map => out.push_str("map("),
+                hir::TypeCtor::Ref => out.push_str("ref("),
                 hir::TypeCtor::Nominal(name) => {
                     out.push_str("nom:");
                     out.push_str(name.as_str());

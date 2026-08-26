@@ -2376,6 +2376,14 @@ impl<'a> Printer<'a> {
             TypeExprKind::Uint => Doc::text("uint"),
             TypeExprKind::Float => Doc::text("float"),
             TypeExprKind::Bool => Doc::text("bool"),
+            TypeExprKind::Ref(target) => {
+                let reference = Doc::concat([Doc::text("ref "), self.type_expr(*target)]);
+                if data.is_nullable {
+                    Doc::concat([Doc::text("("), reference, Doc::text(")")])
+                } else {
+                    reference
+                }
+            }
             TypeExprKind::Ident(id) => Doc::text(kw(id.name)),
             TypeExprKind::Array(el) => {
                 Doc::concat([Doc::text("["), self.type_expr(*el), Doc::text("]")])

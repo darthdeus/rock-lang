@@ -3,7 +3,7 @@ use skull_parser::{Ast, ItemKind};
 use bone_core::annotations::{validate_annotations, AnnoPos};
 use bone_lower::lower_annotations;
 
-use crate::hir::{BuiltinTy, TypeCtor, TypeExpr};
+use crate::hir::{BuiltinTy, TypeCtor, TypeExpr, VariantPayload};
 use crate::{hir::Module, prelude::*};
 
 struct LowerItem<'a> {
@@ -337,8 +337,153 @@ pub fn lower_modules(
     }
 
     check_embed_site_legality(ws, &ids);
+    check_frame_ref_storage(ws, &ids);
 
     Ok(ids)
+}
+
+fn static_type_contains_ref(ws: &Workspace, ty: TyId) -> bool {
+    fn visit(ws: &Workspace, ty: TyId, seen: &mut FxHashSet<TyId>) -> bool {
+        if !seen.insert(ty) {
+            return false;
+        }
+        match ty {
+            TyId::Local(_) => false,
+            TyId::Static(mid, idx) => match ws.module(mid).ty_arena[idx] {
+                TypeExpr::App {
+                    ctor: TypeCtor::Ref,
+                    ..
+                } => true,
+                TypeExpr::Nullable(inner) => visit(ws, ty.with_idx(inner), seen),
+                TypeExpr::App { mut params, .. } => params.any(|p| visit(ws, ty.with_idx(p), seen)),
+                TypeExpr::Function { mut params, ret } => {
+                    params.any(|p| visit(ws, ty.with_idx(p), seen))
+                        || visit(ws, ty.with_idx(ret), seen)
+                }
+                TypeExpr::Tuple { mut elements } => {
+                    elements.any(|p| visit(ws, ty.with_idx(p), seen))
+                }
+                TypeExpr::Builtin(_) | TypeExpr::Generic(..) | TypeExpr::Infer(..) => false,
+            },
+        }
+    }
+
+    visit(ws, ty, &mut FxHashSet::default())
+}
+
+fn check_frame_ref_storage(ws: &mut Workspace, fresh: &[ModuleId]) {
+    let mut errs = Vec::new();
+    for module in ws.modules.iter() {
+        if !fresh.contains(&module.id) {
+            continue;
+        }
+        for (_, def) in module.structs.iter() {
+            for field in &def.fields {
+                if static_type_contains_ref(ws, field.ty) {
+                    errs.push((
+                        module.id,
+                        CompilerError::new_with_label(
+                            field.span,
+                            format!(
+                                "field `{}` cannot store a frame reference; store an `Entity<T>` or a value instead",
+                                field.name
+                            ),
+                        ),
+                    ));
+                }
+            }
+        }
+        for (_, def) in module.enums.iter() {
+            for variant in &def.variants {
+                match &variant.payload {
+                    VariantPayload::Unit => {}
+                    VariantPayload::Tuple(types) => {
+                        if types.iter().any(|ty| static_type_contains_ref(ws, *ty)) {
+                            errs.push((
+                                module.id,
+                                CompilerError::new_with_label(
+                                    variant.name_span,
+                                    format!(
+                                        "enum variant `{}` cannot store a frame reference; store an `Entity<T>` or a value instead",
+                                        variant.name
+                                    ),
+                                ),
+                            ));
+                        }
+                    }
+                    VariantPayload::Record(fields) => {
+                        for field in fields {
+                            if static_type_contains_ref(ws, field.ty) {
+                                errs.push((
+                                    module.id,
+                                    CompilerError::new_with_label(
+                                        field.span,
+                                        format!(
+                                            "enum field `{}` cannot store a frame reference; store an `Entity<T>` or a value instead",
+                                            field.name
+                                        ),
+                                    ),
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for (_, def) in module.newtypes.iter() {
+            if static_type_contains_ref(ws, def.wrapped) {
+                errs.push((
+                    module.id,
+                    CompilerError::new_with_label(
+                        def.span,
+                        format!("newtype `{}` cannot store a frame reference", def.name),
+                    ),
+                ));
+            }
+        }
+        for (_, global) in module.globals.iter() {
+            if static_type_contains_ref(ws, global.ty) {
+                errs.push((
+                    module.id,
+                    CompilerError::new_with_label(
+                        global.span,
+                        format!(
+                            "global `{}` cannot store a frame reference; store an `Entity<T>` or a value instead",
+                            global.name
+                        ),
+                    ),
+                ));
+            }
+        }
+        for (_, function) in module.functions.iter() {
+            if !function.is_extern && function.inline_body.is_none() {
+                continue;
+            }
+            let carries_ref = function
+                .param_decls
+                .iter()
+                .any(|param| static_type_contains_ref(ws, param.ty))
+                || function
+                    .return_ty
+                    .is_some_and(|ty| static_type_contains_ref(ws, ty));
+            if carries_ref {
+                errs.push((
+                    module.id,
+                    CompilerError::new_with_label(
+                        function.span,
+                        format!(
+                            "foreign or inline function `{}` cannot carry a frame reference across an opaque boundary",
+                            function.name
+                        ),
+                    ),
+                ));
+            }
+        }
+    }
+
+    for (mid, err) in errs {
+        ws.module_mut(mid).interface_errors.push(err);
+    }
 }
 
 /// What an `embed f: T` field points at, once `T` is peeled of nullability.
@@ -374,6 +519,9 @@ fn embed_target(ws: &Workspace, ty: TyId) -> EmbedTarget {
         | TypeExpr::App {
             ctor: TypeCtor::Map, ..
         } => EmbedTarget::NotAStruct("a collection"),
+        TypeExpr::App {
+            ctor: TypeCtor::Ref, ..
+        } => EmbedTarget::NotAStruct("a frame reference"),
         TypeExpr::Builtin(BuiltinTy::Any) => EmbedTarget::NotAStruct("`any`"),
         TypeExpr::Builtin(_) => EmbedTarget::NotAStruct("a primitive"),
         TypeExpr::Generic(..) | TypeExpr::Infer(..) => {

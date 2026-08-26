@@ -1333,6 +1333,89 @@ fn value_annotation_on_struct_rejected() {
 }
 
 #[test]
+fn ref_type_survives_lowering_and_inference() {
+    let ws = check(
+        "struct Player { hp: int }\nfn identity(player: ref Player) -> ref Player { player }",
+    )
+    .expect("ref signature type checks");
+    let module = ws.modules.iter().find(|m| m.id != ModuleId::builtin()).unwrap();
+    let (_, identity) = module.functions.iter().find(|(_, f)| f.name.as_str() == "identity").unwrap();
+    assert_eq!(ws.render(None, identity.param_decls[0].ty), "ref Player");
+    assert_eq!(ws.render(None, identity.return_ty.expect("return type")), "ref Player");
+}
+
+#[test]
+fn ref_supports_direct_field_access_and_mutation() {
+    let src = "struct Player { hp: int }\nfn main(player: ref Player) { player.hp = 1 }";
+    let errors = main_body_error_messages(src);
+    assert!(errors.is_empty(), "a ref must expose the target struct's fields: {errors:?}");
+}
+
+#[test]
+fn reference_struct_place_can_be_borrowed_for_a_ref_parameter() {
+    let src = "struct Player { hp: int }\nfn set_hp(player: ref Player) { player.hp = 2 }\nfn main() { let player = Player { hp: 1 }  set_hp(player) }";
+    assert!(!bone_rejects(src), "a reference-struct place can form a temporary ref argument");
+}
+
+#[test]
+fn temporary_cannot_be_borrowed_for_a_ref_parameter() {
+    let src = "struct Player { hp: int }\nfn read(player: ref Player) -> int { player.hp }\nfn main() -> int { read(Player { hp: 1 }) }";
+    assert!(bone_rejects(src), "a temporary has no stable place for a ref to address");
+}
+
+#[test]
+fn ref_cannot_cross_opaque_or_persistent_boundaries() {
+    for (label, src) in [
+        (
+            "any erasure",
+            "struct Player { hp: int }\nfn main(player: ref Player) { let erased: any = player }",
+        ),
+        (
+            "foreign parameter",
+            "struct Player { hp: int }\nextern fn host(player: ref Player)",
+        ),
+        (
+            "ordinary array",
+            "struct Player { hp: int }\nfn main(player: ref Player) { let retained = [player] }",
+        ),
+    ] {
+        assert!(bone_rejects(src), "{label} must reject a frame reference");
+    }
+}
+
+#[test]
+fn ref_types_are_rejected_in_persistent_declarations() {
+    for (label, src) in [
+        ("reference struct field", "struct Player { hp: int }\nstruct Holder { player: ref Player }"),
+        ("value field", "struct Player { hp: int }\nvalue Holder { player: ref Player }"),
+        ("enum payload", "struct Player { hp: int }\nenum Event { Player(ref Player) }"),
+        ("global", "struct Player { hp: int }\nglobal PLAYER: (ref Player)? = null"),
+        ("container element", "struct Player { hp: int }\nglobal PLAYERS: [ref Player]"),
+        ("static local", "struct Player { hp: int }\nfn keep() { static PLAYER: (ref Player)? = null }"),
+    ] {
+        assert!(bone_rejects(src), "{label} must reject frame-bound storage");
+    }
+}
+
+#[test]
+fn closure_cannot_capture_a_ref() {
+    let src = "struct Player { hp: int }\nfn bad(player: ref Player) -> () -> int { return () => player.hp }";
+    assert!(bone_rejects(src), "a persistent closure environment cannot contain a ref");
+}
+
+#[test]
+fn ref_cannot_live_across_a_coroutine_suspension() {
+    let src = "struct Player { hp: int }\nco fn bad(player: ref Player) -> Coroutine<int> { yield 1  player.hp = 1 }";
+    assert!(bone_rejects(src), "a coroutine frame cannot retain a ref across yield");
+}
+
+#[test]
+fn ref_finished_before_a_coroutine_suspension_is_allowed() {
+    let src = "struct Player { hp: int }\nco fn fine(player: ref Player) -> Coroutine<int> { player.hp = 1  yield 1 }";
+    assert!(!bone_rejects(src), "last use before yield does not put the ref in the coroutine frame");
+}
+
+#[test]
 fn nobox_marker_reaches_typed_struct() {
     let ws = check("nobox value V { x: int }").expect("nobox value type checks");
     let module = ws.modules.iter().find(|m| m.id != ModuleId::builtin()).unwrap();

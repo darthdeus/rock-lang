@@ -1,4 +1,5 @@
 use bone_core::hir::{Expr, Module, Statement};
+use bone_core::suspension::{uses_after_suspension, SuspensionPolicy};
 
 use bone_core::{
     hir::{
@@ -67,6 +68,26 @@ static HOLE: LazyLock<Ustr> = LazyLock::new(|| ustr("hole"));
 pub enum Use {
     Value,
     Discard,
+}
+
+struct RefSuspensionPolicy<'a> {
+    gamma: &'a Gamma<'a>,
+}
+
+impl SuspensionPolicy for RefSuspensionPolicy<'_> {
+    fn binding_holds_frame_data(
+        &self,
+        binding: Idx<BindingInfo>,
+        _value: Option<Idx<Expr>>,
+    ) -> bool {
+        self.gamma
+            .out
+            .binding_types
+            .get(binding)
+            .copied()
+            .or(self.gamma.body.binding_arena[binding].declared_ty)
+            .is_some_and(|ty| contains_frame_ref(self.gamma, ty))
+    }
 }
 
 #[derive(Debug)]
@@ -487,6 +508,29 @@ pub fn check_function(
     }
 
     embed::verify_embed_projection(c, &mut gamma);
+
+    for (binding, ty) in gamma.out.binding_types.iter() {
+        if persistent_type_contains_frame_ref(&gamma, *ty) {
+            gamma.body_errors.push(CompilerError::new_with_label(
+                c.body.binding_spans[binding],
+                format!(
+                    "`{}` cannot store a frame reference in a persistent container or closure type",
+                    c.body.binding_arena[binding].name
+                ),
+            ));
+        }
+    }
+
+    if f.is_coroutine {
+        let policy = RefSuspensionPolicy { gamma: &gamma };
+        for at in uses_after_suspension(c.body, &policy) {
+            gamma.body_errors.push(CompilerError::new_with_label(
+                c.body.expr_spans[at],
+                "frame reference is used after a coroutine suspension; retain an `Entity<T>` and resolve it after the yield"
+                    .to_string(),
+            ));
+        }
+    }
 
     report_unpinned_lambda_params(&mut gamma);
 

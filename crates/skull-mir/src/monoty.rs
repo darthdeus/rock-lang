@@ -59,6 +59,7 @@ impl MonoTyId {
 pub enum MonoCtor {
     Array,
     Map,
+    Ref,
     Nominal(Ustr),
 }
 
@@ -121,6 +122,7 @@ impl MonoTy {
                 match ctor {
                     MonoCtor::Array => out.push_str("Vec"),
                     MonoCtor::Map => out.push_str("Map"),
+                    MonoCtor::Ref => out.push_str("ref"),
                     MonoCtor::Nominal(n) => out.push_str(n.as_str()),
                 }
                 if !params.is_empty() {
@@ -233,6 +235,7 @@ impl MonoTy {
                 match ctor {
                     MonoCtor::Array => out.push('v'),
                     MonoCtor::Map => out.push('m'),
+                    MonoCtor::Ref => out.push('r'),
                     MonoCtor::Nominal(name) => {
                         out.push('n');
                         out.push_str(&name.len().to_string());
@@ -928,6 +931,7 @@ fn convert_at<S: std::hash::BuildHasher>(
             let ctor = match ctor {
                 TypeCtor::Array => MonoCtor::Array,
                 TypeCtor::Map => MonoCtor::Map,
+                TypeCtor::Ref => MonoCtor::Ref,
                 TypeCtor::Nominal(n) => MonoCtor::Nominal(n),
             };
             let mut ps = Vec::new();
