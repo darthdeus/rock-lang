@@ -151,6 +151,8 @@ fn arena_destroy<T>(arena: Arena<T>) -> bool {
     return __arena_destroy_id(arena._scene_id, arena._arena_id)
 }
 
+fn __arena_drain_retired() {}
+
 // The element-type-free half, for Scene teardown: a Scene owns Arena IDs, not
 // typed handles, so the drain cannot spell `Arena<T>` for each one.
 fn __arena_destroy_id(scene_id: int, arena_id: int) -> bool {
