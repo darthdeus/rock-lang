@@ -7,6 +7,7 @@ enum RouteFilter {
     All,
     Update,
     Draw,
+    Coroutine,
     Outside,
 }
 
@@ -16,9 +17,10 @@ impl RouteFilter {
             "all" => Ok(Self::All),
             "update" => Ok(Self::Update),
             "draw" => Ok(Self::Draw),
+            "coroutine" => Ok(Self::Coroutine),
             "outside" => Ok(Self::Outside),
             other => anyhow::bail!(
-                "allocation route must be all, update, draw, or outside; got `{other}`"
+                "allocation route must be all, update, draw, coroutine, or outside; got `{other}`"
             ),
         }
     }
@@ -28,6 +30,7 @@ impl RouteFilter {
             Self::All => "all",
             Self::Update => "update",
             Self::Draw => "draw",
+            Self::Coroutine => "coroutine",
             Self::Outside => "outside",
         }
     }
@@ -41,11 +44,14 @@ struct Site<'a> {
     lua_body_line: Option<u32>,
     update_chain: Option<&'a str>,
     draw_chain: Option<&'a str>,
+    coroutine_chain: Option<&'a str>,
     update_callers: Option<&'a str>,
     draw_callers: Option<&'a str>,
+    coroutine_callers: Option<&'a str>,
     local_loop_depth: u32,
     update_loop_depth: Option<u32>,
     draw_loop_depth: Option<u32>,
+    coroutine_loop_depth: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -62,6 +68,7 @@ struct ActivationHit<'a> {
 struct Activation<'a> {
     frames: u64,
     frame_aware: bool,
+    observations: Option<&'a str>,
     hits: Vec<ActivationHit<'a>>,
 }
 
@@ -177,6 +184,10 @@ fn parse_manifest(manifest: &str) -> Result<BTreeMap<&str, Site<'_>>> {
             route = Some(RouteFilter::Draw);
             continue;
         }
+        if line.starts_with("route coroutine.resume:") {
+            route = Some(RouteFilter::Coroutine);
+            continue;
+        }
         if line.starts_with("route ") {
             route = None;
             continue;
@@ -220,11 +231,14 @@ fn parse_manifest(manifest: &str) -> Result<BTreeMap<&str, Site<'_>>> {
                             lua_body_line,
                             update_chain: None,
                             draw_chain: None,
+                            coroutine_chain: None,
                             update_callers: None,
                             draw_callers: None,
+                            coroutine_callers: None,
                             local_loop_depth,
                             update_loop_depth: None,
                             draw_loop_depth: None,
+                            coroutine_loop_depth: None,
                         },
                     )
                     .is_some()
@@ -267,6 +281,11 @@ fn parse_manifest(manifest: &str) -> Result<BTreeMap<&str, Site<'_>>> {
                 site.draw_callers = Some(callers);
                 site.draw_loop_depth = Some(loop_depth);
             }
+            RouteFilter::Coroutine => {
+                site.coroutine_chain = Some(chain);
+                site.coroutine_callers = Some(callers);
+                site.coroutine_loop_depth = Some(loop_depth);
+            }
             _ => unreachable!(),
         }
     }
@@ -278,9 +297,10 @@ fn parse_manifest(manifest: &str) -> Result<BTreeMap<&str, Site<'_>>> {
 
 fn parse_activation(activation: &str) -> Result<Activation<'_>> {
     let mut lines = activation.lines();
-    let frame_aware = match lines.next() {
-        Some("rock.allocation-activation.v1") => false,
-        Some("rock.allocation-activation.v2") => true,
+    let (frame_aware, observation_scoped) = match lines.next() {
+        Some("rock.allocation-activation.v1") => (false, false),
+        Some("rock.allocation-activation.v2") => (true, false),
+        Some("rock.allocation-activation.v3") => (true, true),
         _ => anyhow::bail!("allocation activation has the wrong or missing format header"),
     };
     let frames = lines
@@ -291,6 +311,30 @@ fn parse_activation(activation: &str) -> Result<Activation<'_>> {
     if frames == 0 {
         anyhow::bail!("allocation activation frame denominator is zero");
     }
+    let observations = if observation_scoped {
+        let value = lines
+            .next()
+            .and_then(|line| line.strip_prefix("observations\t"))
+            .ok_or_else(|| anyhow::anyhow!("observation-scoped activation has no observation population"))?;
+        let mut previous = None;
+        let mut count = 0_u64;
+        for item in value.split(',') {
+            let observation = item.parse::<u64>()?;
+            if previous.is_some_and(|previous| observation <= previous) {
+                anyhow::bail!("activation observations are not strictly increasing");
+            }
+            previous = Some(observation);
+            count += 1;
+        }
+        if count == 0 || count > frames {
+            anyhow::bail!(
+                "activation records {count} distinct observations over {frames} selected frames"
+            );
+        }
+        Some(value)
+    } else {
+        None
+    };
     let declared = lines
         .next()
         .and_then(|line| line.strip_prefix("sites\t"))
@@ -357,7 +401,7 @@ fn parse_activation(activation: &str) -> Result<Activation<'_>> {
             hits.len()
         );
     }
-    Ok(Activation { frames, frame_aware, hits })
+    Ok(Activation { frames, frame_aware, observations, hits })
 }
 
 #[cfg(test)]
@@ -382,6 +426,7 @@ pub fn render_joined_report_with_jit(
     let activation = parse_activation(activation)?;
     let frames = activation.frames;
     let frame_aware = activation.frame_aware;
+    let observations = activation.observations;
     let mut hits = activation.hits;
     for hit in &hits {
         if !sites.contains_key(hit.id) {
@@ -394,7 +439,12 @@ pub fn render_joined_report_with_jit(
             RouteFilter::All => true,
             RouteFilter::Update => site.update_chain.is_some(),
             RouteFilter::Draw => site.draw_chain.is_some(),
-            RouteFilter::Outside => site.update_chain.is_none() && site.draw_chain.is_none(),
+            RouteFilter::Coroutine => site.coroutine_chain.is_some(),
+            RouteFilter::Outside => {
+                site.update_chain.is_none()
+                    && site.draw_chain.is_none()
+                    && site.coroutine_chain.is_none()
+            }
         }
     });
     hits.sort_by(|a, b| b.frame_hits.cmp(&a.frame_hits).then_with(|| a.id.cmp(b.id)));
@@ -432,6 +482,9 @@ pub fn render_joined_report_with_jit(
         }
     )?;
     writeln!(out, "frames\t{frames}")?;
+    if let Some(observations) = observations {
+        writeln!(out, "observations\t{observations}")?;
+    }
     writeln!(out, "filter\t{}", filter.as_str())?;
     writeln!(out, "active_sites\t{}", hits.len())?;
     let base_header = if frame_aware {
@@ -450,13 +503,29 @@ pub fn render_joined_report_with_jit(
     for hit in hits {
         let id = hit.id;
         let site = &sites[id];
-        let (route, chain) = match (site.update_chain, site.draw_chain) {
-            (Some(update), Some(draw)) => ("update+draw", format!("update:{update} | draw:{draw}")),
-            (Some(update), None) => ("update", update.to_string()),
-            (None, Some(draw)) => ("draw", draw.to_string()),
-            (None, None) => ("outside", String::new()),
+        let routes = [
+            ("update", site.update_chain),
+            ("draw", site.draw_chain),
+            ("coroutine", site.coroutine_chain),
+        ]
+        .into_iter()
+        .filter_map(|(name, chain)| chain.map(|chain| (name, chain)))
+        .collect::<Vec<_>>();
+        let route = if routes.is_empty() {
+            "outside".to_string()
+        } else {
+            routes.iter().map(|(name, _)| *name).collect::<Vec<_>>().join("+")
         };
-        let callers = [site.update_callers, site.draw_callers]
+        let chain = if routes.len() == 1 {
+            routes[0].1.to_string()
+        } else {
+            routes
+                .iter()
+                .map(|(name, chain)| format!("{name}:{chain}"))
+                .collect::<Vec<_>>()
+                .join(" | ")
+        };
+        let callers = [site.update_callers, site.draw_callers, site.coroutine_callers]
             .into_iter()
             .flatten()
             .flat_map(|callers| callers.split(" | "))
@@ -468,6 +537,7 @@ pub fn render_joined_report_with_jit(
             .into_iter()
             .chain(site.update_loop_depth)
             .chain(site.draw_loop_depth)
+            .chain(site.coroutine_loop_depth)
             .max()
             .unwrap_or(0);
         let artifact_line = match (site.lua_body_line, lua_lines.as_ref()) {
@@ -568,7 +638,7 @@ pub fn render_joined_report_with_jit(
 pub fn run(files: &[String]) -> Result<()> {
     if !(files.len() >= 2 && files.len() <= 5) {
         anyhow::bail!(
-            "usage: rock allocation-join <manifest> <activation> [all|update|draw|outside] [generated-lua] [jit-allocation-trace]"
+            "usage: rock allocation-join <manifest> <activation> [all|update|draw|coroutine|outside] [generated-lua] [jit-allocation-trace]"
         );
     }
     let manifest = std::fs::read_to_string(&files[0]).map_err(|error| {
@@ -645,6 +715,36 @@ aaaaaaaaaaaaaaaa	8	8	4	2	0
 bbbbbbbbbbbbbbbb	20	18	3	9	2
 cccccccccccccccc	2	1	1	1	1
 "#;
+
+    const OBSERVATION_ACTIVATION: &str = r#"rock.allocation-activation.v3
+frames	3
+observations	329,330,331
+sites	1
+aaaaaaaaaaaaaaaa	11	11	3	5	0
+"#;
+
+    #[test]
+    fn join_retains_the_exact_replay_observation_population() {
+        let report = render_joined_report(MANIFEST, OBSERVATION_ACTIVATION, Some("update"), None)
+            .expect("joined observation-scoped activation report");
+        assert!(report.starts_with("rock.allocation-join.v8\n"));
+        assert!(report.contains("frames\t3\nobservations\t329,330,331\nfilter\tupdate\n"));
+        assert!(report.contains("3.6667\t11\t11\t3\t1.0000\t3.6667\t5\t0"));
+    }
+
+    #[test]
+    fn join_can_isolate_coroutine_resume_routes() {
+        let manifest = format!(
+            "{MANIFEST}\nroute coroutine.resume: 1 roots, 1 reachable bodies, 1 allocation-capable sites, 0 opaque boundaries\n  cccccccccccccccc struct-construction at game.rock:30 via worker__step\tloop_depth\t1\tcallers\t\n"
+        );
+        let report = render_joined_report(&manifest, FRAME_ACTIVATION, Some("coroutine"), None)
+            .expect("joined coroutine route");
+        assert!(report.contains("filter\tcoroutine"));
+        assert!(report.contains("0.2500\t2\t1\t1\t0.2500\t1.0000\t1\t1\tcoroutine\t1"));
+        assert!(report.contains("worker__step"));
+        assert!(!report.contains("update_leaf"));
+        assert!(!report.contains("draw_leaf"));
+    }
 
     #[test]
     fn join_filters_by_route_and_ranks_executions_per_frame() {

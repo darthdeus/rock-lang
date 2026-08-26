@@ -10,7 +10,7 @@
 //! cdata-eligible (cut 1 is single-scalar-payload) and keep the table -- exactly
 //! the case this SROA targets. (A single-scalar enum is now a value cdata instead;
 //! see `enum_cdata.rs`.) Escaping table enums keep the table.
-use crate::common::emit_module;
+use crate::common::{emit_module, function_body};
 
 // Direct ctor stores into `s` (the second guarded by an `if`), then match-with-
 // binding -- the non-escaping construct/match path. Only `w` (an int) is observed.
@@ -146,4 +146,89 @@ fn nonescaping_payload_enum_runs_correctly() {
 fn mixed_payload_and_unit_enum_runs_correctly() {
     let Some(stdout) = run_t(MIXED_SRC) else { return };
     assert_eq!(stdout, "1 99 7 4", "got {stdout:?}");
+}
+
+const DYNAMIC_SPREAD_LOOP: &str = r#"
+enum Binding {
+    Key { scan: string, ctrl: bool },
+    Mouse(int),
+}
+
+fn score(binding: Binding) -> int {
+    return match binding {
+        Binding::Key { scan, ctrl } => if ctrl { scan.len() } else { 0 },
+        Binding::Mouse(button) => button,
+    }
+}
+
+fn hot(bindings: [Binding]) -> int {
+    let total = 0
+    for binding in bindings { total += score(binding) }
+    return total
+}
+
+@test(output = "9")
+fn t() {
+    let bindings = [Binding::Key { scan: "AB", ctrl: true }, Binding::Mouse(7)]
+    print(hot(bindings))
+}
+
+fn main() { t() }
+"#;
+
+#[test]
+fn dynamic_enum_spread_immediately_consumed_by_loop_stays_scalar() {
+    let lua = emit_module(DYNAMIC_SPREAD_LOOP);
+    let hot = function_body(&lua, "hot");
+    assert!(
+        !hot.contains("{__variant = "),
+        "the iterator must not rebuild a dynamic enum that its loop header immediately spreads:\n{hot}"
+    );
+}
+
+#[test]
+fn dynamic_enum_spread_loop_runs_correctly() {
+    let Some(stdout) = run_t(DYNAMIC_SPREAD_LOOP) else { return };
+    assert_eq!(stdout, "9", "got {stdout:?}");
+}
+
+const DYNAMIC_SPREAD_ESCAPE: &str = r#"
+enum Binding {
+    Key { scan: string, ctrl: bool },
+    Mouse(int),
+}
+
+fn copy(bindings: [Binding]) -> [Binding] {
+    let out: [Binding] = []
+    for binding in bindings { out.push(binding) }
+    return out
+}
+
+@test(output = "2 Mouse")
+fn t() {
+    let copied = copy([Binding::Key { scan: "AB", ctrl: true }, Binding::Mouse(7)])
+    let name = match copied[1] {
+        Binding::Key { .. } => "Key",
+        Binding::Mouse(_) => "Mouse",
+    }
+    print("{copied.len()} {name}")
+}
+
+fn main() { t() }
+"#;
+
+#[test]
+fn dynamic_enum_spread_keeps_box_at_vector_escape() {
+    let lua = emit_module(DYNAMIC_SPREAD_ESCAPE);
+    let copy = function_body(&lua, "copy");
+    assert!(
+        copy.contains("{__variant = "),
+        "an enum pushed into retained vector storage must still materialize:\n{copy}"
+    );
+}
+
+#[test]
+fn dynamic_enum_spread_escape_runs_correctly() {
+    let Some(stdout) = run_t(DYNAMIC_SPREAD_ESCAPE) else { return };
+    assert_eq!(stdout, "2 Mouse", "got {stdout:?}");
 }

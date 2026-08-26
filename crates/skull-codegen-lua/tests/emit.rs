@@ -10,6 +10,58 @@ mod common;
 use skull_codegen_lua::{emit_function, CodegenCtx};
 use skull_mir::mir::FuncRef;
 
+#[test]
+fn allocation_activation_scopes_hits_and_callbacks_to_replay_observations() {
+    if std::process::Command::new("luajit").arg("-v").output().is_err() {
+        eprintln!("luajit not found; skipping execution check");
+        return;
+    }
+    let output = std::env::temp_dir().join(format!(
+        "rock-allocation-observations-{}.tsv",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&output);
+    let driver = format!(
+        r#"{}
+local began, ended = {{}}, {{}}
+function __rock_observation_profile_begin(observation)
+  began[#began + 1] = observation
+end
+function __rock_observation_profile_end(observation)
+  ended[#ended + 1] = observation
+end
+__rock_allocation_activation_begin()
+for observation = 1, 5 do
+  __rock_allocation_activation_frame_begin(observation)
+  for _ = 1, observation do __rock_alloc_hit("aaaaaaaaaaaaaaaa", false) end
+  __rock_allocation_activation_frame_end()
+end
+assert(table.concat(began, ",") == "2,4,5")
+assert(table.concat(ended, ",") == "2,4,5")
+assert(__rock_allocation_activation_dump(5))
+"#,
+        skull_codegen_lua::ALLOCATION_ACTIVATION_PRELUDE,
+    );
+    let run = std::process::Command::new("luajit")
+        .arg("-e")
+        .arg(driver)
+        .env("SKULL_ALLOCATION_ACTIVATION", &output)
+        .env("SKULL_ALLOCATION_OBSERVATIONS", "2,4-5")
+        .output()
+        .expect("run allocation activation prelude");
+    assert!(
+        run.status.success(),
+        "observation-scoped activation failed: {}",
+        String::from_utf8_lossy(&run.stderr),
+    );
+    let activation = std::fs::read_to_string(&output).expect("activation artifact");
+    let _ = std::fs::remove_file(&output);
+    assert_eq!(
+        activation,
+        "rock.allocation-activation.v3\nframes\t3\nobservations\t2,4,5\nsites\t1\naaaaaaaaaaaaaaaa\t11\t11\t3\t5\t0\n"
+    );
+}
+
 /// Lower `fn_name` from `modules` (last = the user `<test>` module), emit Lua.
 fn emit_dump(mut modules: Vec<skull_parser::Ast>, fn_name: &str) -> String {
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");

@@ -3175,16 +3175,13 @@ fn emit_coroutine_chunk(
             format!("cannot build concrete coroutine plan for `{}`: {}", f.name, reason.bucket()),
         )
     })?;
-    let (lua, code_artifact) = crate::coroutine_emit::emit_coroutine_with_artifact(
+    let (lua, code_artifact, allocation_bodies) = crate::coroutine_emit::emit_coroutine_with_artifact(
         ws,
         cg,
         scx.interner(),
         &plan,
         mf,
     )?;
-    // Coroutine construction and transformed step/hook bodies are kept as an
-    // opaque boundary until their generated emitter owns site registration.
-    let allocation_bodies = Vec::new();
     times.emit = te.elapsed();
     times.emit_work = times.emit > Duration::ZERO;
     times.regalloc = skull_codegen_lua::regalloc_time_elapsed().min(times.emit);

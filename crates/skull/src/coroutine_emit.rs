@@ -9,7 +9,7 @@ use std::collections::HashSet;
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::CompilerError;
 use comfy_la_arena::Idx;
-use skull_codegen_lua::{emit_named_framed, CodegenCtx, FrameCtx};
+use skull_codegen_lua::{emit_named_framed, emit_named_framed_with_allocation_sites, CodegenCtx, FrameCtx, LuaEmission};
 use skull_mir::code_identity::{
     CaptureSchema, CodeArtifact, CodeCompatibility, CodeIdentity, FrameSchema,
 };
@@ -98,7 +98,7 @@ pub fn emit_coroutine(
     plan: &CoroutinePlan,
     func: &MirFunc,
 ) -> Result<String, CompilerError> {
-    emit_coroutine_with_artifact(ws, ctx, interner, plan, func).map(|(lua, _)| lua)
+    emit_coroutine_with_artifact(ws, ctx, interner, plan, func).map(|(lua, _, _)| lua)
 }
 
 pub fn emit_coroutine_with_artifact(
@@ -107,7 +107,7 @@ pub fn emit_coroutine_with_artifact(
     interner: &skull_mir::monoty::MonoInterner,
     plan: &CoroutinePlan,
     func: &MirFunc,
-) -> Result<(String, CodeArtifact), CompilerError> {
+) -> Result<(String, CodeArtifact, Vec<crate::allocation_report::AllocationBody>), CompilerError> {
     // A co fn yielding a flat enum threads through the frame-slot channel (0 alloc
     // per yield); the channel's shape drives both the slot writes (transform) and
     // the generic/boxed `resume()` rebuild (constructor).
@@ -183,8 +183,12 @@ pub fn emit_coroutine_with_artifact(
     for nf in lowered.step.nested_fns[pre_nested..].iter() {
         ctx.mint_synthetic(nf.name.to_string());
     }
-    let step_lua =
-        emit_named_framed(ws, ctx, interner, &step_name, &lowered.step, Some(&frame));
+    let mut allocation_bodies = Vec::new();
+    let step_emission = emit_coroutine_body(
+        ws, ctx, interner, &step_name, plan.base(), &lowered.step, Some(&frame),
+    );
+    let step_lua = step_emission.lua;
+    if let Some(body) = step_emission.body { allocation_bodies.push(body); }
     // Hoisted lambda bodies: frame-free sibling fns (the pass materialized their
     // frame accesses as `e.c<S>.c<slot>`, so they need no `FrameCtx`). cleanup
     // drops the clone's dead ROOT-region insts; a co fn's loops are recovered by
@@ -194,8 +198,11 @@ pub fn emit_coroutine_with_artifact(
     let mut hoisted = std::mem::take(&mut lowered.step.nested_fns);
     for nf in hoisted[pre_nested..].iter_mut() {
         skull_transform::cleanup_with_nobox(ws, nf)?;
-        nested_luas
-            .push_str(&skull_codegen_lua::emit_named(ws, ctx, interner, nf.name.as_str(), nf));
+        let emission = emit_coroutine_body(
+            ws, ctx, interner, nf.name.as_str(), nf.name.as_str(), nf, None,
+        );
+        nested_luas.push_str(&emission.lua);
+        if let Some(body) = emission.body { allocation_bodies.push(body); }
     }
     lowered.step.nested_fns = hoisted;
     // Terminal-cleanup defers and lifecycle hooks are ordinary functions, with
@@ -242,29 +249,37 @@ pub fn emit_coroutine_with_artifact(
     let mut defer_luas = String::new();
     for mut aux in defer_funcs {
         skull_transform::cleanup_with_nobox(ws, &mut aux)?;
-        defer_luas.push_str(&skull_codegen_lua::emit_named(
-            ws, ctx, interner, aux.name.as_str(), &aux,
-        ));
+        let emission = emit_coroutine_body(
+            ws, ctx, interner, aux.name.as_str(), aux.name.as_str(), &aux, None,
+        );
+        defer_luas.push_str(&emission.lua);
+        if let Some(body) = emission.body { allocation_bodies.push(body); }
         let mut nested = std::mem::take(&mut aux.nested_fns);
         for nf in nested.iter_mut() {
             skull_transform::cleanup_with_nobox(ws, nf)?;
-            defer_luas.push_str(&skull_codegen_lua::emit_named(
-                ws, ctx, interner, nf.name.as_str(), nf,
-            ));
+            let emission = emit_coroutine_body(
+                ws, ctx, interner, nf.name.as_str(), nf.name.as_str(), nf, None,
+            );
+            defer_luas.push_str(&emission.lua);
+            if let Some(body) = emission.body { allocation_bodies.push(body); }
         }
     }
     let mut hook_luas = String::new();
     for (_, mut aux) in hook_funcs {
         skull_transform::cleanup_with_nobox(ws, &mut aux)?;
-        hook_luas.push_str(&skull_codegen_lua::emit_named(
-            ws, ctx, interner, aux.name.as_str(), &aux,
-        ));
+        let emission = emit_coroutine_body(
+            ws, ctx, interner, aux.name.as_str(), aux.name.as_str(), &aux, None,
+        );
+        hook_luas.push_str(&emission.lua);
+        if let Some(body) = emission.body { allocation_bodies.push(body); }
         let mut nested = std::mem::take(&mut aux.nested_fns);
         for nf in nested.iter_mut() {
             skull_transform::cleanup_with_nobox(ws, nf)?;
-            hook_luas.push_str(&skull_codegen_lua::emit_named(
-                ws, ctx, interner, nf.name.as_str(), nf,
-            ));
+            let emission = emit_coroutine_body(
+                ws, ctx, interner, nf.name.as_str(), nf.name.as_str(), nf, None,
+            );
+            hook_luas.push_str(&emission.lua);
+            if let Some(body) = emission.body { allocation_bodies.push(body); }
         }
     }
     let ctor = emit_constructor(
@@ -280,7 +295,38 @@ pub fn emit_coroutine_with_artifact(
     Ok((
         format!("{step_lua}{nested_luas}{defer_luas}{hook_luas}{ctor}"),
         code_artifact,
+        allocation_bodies,
     ))
+}
+
+struct CoroutineBodyEmission {
+    lua: String,
+    body: Option<crate::allocation_report::AllocationBody>,
+}
+
+fn emit_coroutine_body(
+    ws: &Workspace,
+    ctx: &CodegenCtx,
+    interner: &skull_mir::monoty::MonoInterner,
+    emitted_name: &str,
+    diagnostic_name: &str,
+    func: &MirFunc,
+    frame: Option<&FrameCtx>,
+) -> CoroutineBodyEmission {
+    if !crate::allocation_report::enabled() {
+        return CoroutineBodyEmission {
+            lua: emit_named_framed(ws, ctx, interner, emitted_name, func, frame),
+            body: None,
+        };
+    }
+    let LuaEmission { lua, allocation_sites } = emit_named_framed_with_allocation_sites(
+        ws, ctx, interner, emitted_name, func, frame, &[],
+        crate::allocation_report::activation_enabled(),
+    );
+    let body = crate::allocation_report::collect_emitted_body(
+        ws, interner, emitted_name, diagnostic_name, func, allocation_sites,
+    );
+    CoroutineBodyEmission { lua, body }
 }
 
 /// The constructor: build the state table (seed param fields + relocated

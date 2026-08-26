@@ -373,6 +373,9 @@ if not _G.__rock_alloc_outside_hits then _G.__rock_alloc_outside_hits = {} end
 if not _G.__rock_alloc_last_frame then _G.__rock_alloc_last_frame = {} end
 if not _G.__rock_alloc_current_frame_hits then _G.__rock_alloc_current_frame_hits = {} end
 function __rock_alloc_hit(id, value)
+  if _G.__rock_alloc_observation_filter ~= nil and not _G.__rock_alloc_frame_selected then
+    return value
+  end
   local hits = _G.__rock_alloc_hits
   hits[id] = (hits[id] or 0) + 1
   local frame = _G.__rock_alloc_frame
@@ -408,13 +411,67 @@ function __rock_allocation_activation_begin()
   _G.__rock_alloc_current_frame_hits = {}
   _G.__rock_alloc_frame_serial = 0
   _G.__rock_alloc_frame = nil
+  _G.__rock_alloc_in_frame = false
+  _G.__rock_alloc_frame_selected = false
+  _G.__rock_alloc_observation = nil
+  _G.__rock_alloc_selected_frame_count = 0
+  _G.__rock_alloc_selected_observations = {}
+  _G.__rock_alloc_selected_observation_seen = {}
+  local requested = os.getenv("SKULL_ALLOCATION_OBSERVATIONS")
+  _G.__rock_alloc_observation_filter = nil
+  if requested ~= nil and requested ~= "" then
+    local filter = {}
+    for token in string.gmatch(requested, "[^,]+") do
+      local first, last = string.match(token, "^%s*(%d+)%s*%-%s*(%d+)%s*$")
+      if first == nil then
+        first = string.match(token, "^%s*(%d+)%s*$")
+        last = first
+      end
+      if first == nil then
+        error("invalid SKULL_ALLOCATION_OBSERVATIONS token `" .. token .. "`", 0)
+      end
+      first, last = tonumber(first), tonumber(last)
+      if last < first then
+        error("descending SKULL_ALLOCATION_OBSERVATIONS range `" .. token .. "`", 0)
+      end
+      for observation = first, last do filter[observation] = true end
+    end
+    _G.__rock_alloc_observation_filter = filter
+  end
 end
-function __rock_allocation_activation_frame_begin()
+function __rock_allocation_activation_frame_begin(observation)
+  _G.__rock_alloc_in_frame = true
+  _G.__rock_alloc_observation = observation
+  local filter = _G.__rock_alloc_observation_filter
+  local selected = filter == nil or filter[observation] == true
+  _G.__rock_alloc_frame_selected = selected
+  if not selected then
+    _G.__rock_alloc_frame = nil
+    return
+  end
   _G.__rock_alloc_frame_serial = (_G.__rock_alloc_frame_serial or 0) + 1
   _G.__rock_alloc_frame = _G.__rock_alloc_frame_serial
+  if filter ~= nil then
+    _G.__rock_alloc_selected_frame_count = _G.__rock_alloc_selected_frame_count + 1
+    local seen = _G.__rock_alloc_selected_observation_seen
+    if not seen[observation] then
+      seen[observation] = true
+      local observations = _G.__rock_alloc_selected_observations
+      observations[#observations + 1] = observation
+    end
+  end
+  local profile_begin = _G.__rock_observation_profile_begin
+  if profile_begin ~= nil then profile_begin(observation) end
 end
 function __rock_allocation_activation_frame_end()
+  if _G.__rock_alloc_frame_selected then
+    local profile_end = _G.__rock_observation_profile_end
+    if profile_end ~= nil then profile_end(_G.__rock_alloc_observation) end
+  end
   _G.__rock_alloc_frame = nil
+  _G.__rock_alloc_in_frame = false
+  _G.__rock_alloc_frame_selected = false
+  _G.__rock_alloc_observation = nil
 end
 function __rock_allocation_activation_dump(frames)
   local path = os.getenv("SKULL_ALLOCATION_ACTIVATION")
@@ -427,8 +484,17 @@ function __rock_allocation_activation_dump(frames)
     io.stderr:write("[ALLOC] cannot write activation report " .. path .. ": " .. tostring(err) .. "\n")
     return false
   end
-  file:write("rock.allocation-activation.v2\n")
-  file:write("frames\t", tostring(frames), "\n")
+  local filter = _G.__rock_alloc_observation_filter
+  if filter ~= nil then
+    local observations = _G.__rock_alloc_selected_observations
+    table.sort(observations)
+    file:write("rock.allocation-activation.v3\n")
+    file:write("frames\t", tostring(_G.__rock_alloc_selected_frame_count), "\n")
+    file:write("observations\t", table.concat(observations, ","), "\n")
+  else
+    file:write("rock.allocation-activation.v2\n")
+    file:write("frames\t", tostring(frames), "\n")
+  end
   file:write("sites\t", tostring(#ids), "\n")
   for _, id in ipairs(ids) do
     file:write(id,

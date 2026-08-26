@@ -198,7 +198,7 @@ pub enum CliCommand {
     MonoManifest,
     /// `rock allocation-join <manifest> <activation> [route] [Lua] [JIT trace]` -- join one
     /// exact-emission manifest to the same artifact's bounded runtime counters,
-    /// filter by `all|update|draw|outside`, rank executions per frame, and
+    /// filter by `all|update|draw|coroutine|outside`, rank executions per frame, and
     /// optionally classify observed LuaJIT allocation IR as sunk/retained.
     AllocationJoin,
     /// `rock iter-lsp <project> [--iters N --warmup W]` -- tight-loop profiler
