@@ -17,8 +17,12 @@ fn c_compile_keeps_artifacts_and_invalidates_stale_defaults() {
         "C backend gate requires clang"
     );
     let dir = tempfile::tempdir().expect("tempdir");
-    std::fs::write(dir.path().join("foo.rock"), "fn main() { print(\"hi\") }\n")
-        .expect("write program");
+    std::fs::write(
+        dir.path().join("foo.rock"),
+        "fn echo(value: string) -> string { return value }\n\
+         fn main() { let message = echo(\"hi\"); print(message) }\n",
+    )
+    .expect("write program");
     let compile = Command::new(env!("CARGO_BIN_EXE_rock"))
         .args(["compile", "foo.rock", "--backend", "c"])
         .current_dir(dir.path())
@@ -35,6 +39,7 @@ fn c_compile_keeps_artifacts_and_invalidates_stale_defaults() {
     let binary = dir.path().join("tmp/foo");
     let source = std::fs::read_to_string(&c_path).expect("generated C source");
     assert!(source.contains("rock_print_string"), "{source}");
+    assert!(source.contains("rock_string p0"), "{source}");
     assert!(binary.is_file(), "native binary was not written");
     let run = Command::new(&binary).output().expect("run native binary");
     assert!(run.status.success(), "native binary failed: {run:?}");
@@ -121,8 +126,12 @@ fn c_run_executes_main_and_propagates_native_failure() {
     );
 
     let printing = dir.path().join("printing.rock");
-    std::fs::write(&printing, "fn main() {\n    print(\"hi\")\n}\n")
-        .expect("write printing program");
+    std::fs::write(
+        &printing,
+        "fn echo(value: string) -> string { let copy = value; return copy }\n\
+         fn main() {\n    let message = echo(\"hi\")\n    print(message)\n}\n",
+    )
+    .expect("write printing program");
     let printing_run = run(&printing);
     assert!(
         printing_run.status.success(),
