@@ -326,6 +326,7 @@ fn has_scalarizable_store(func: &MirFunc) -> bool {
                         Inst::MakeValueStruct { .. }
                             | Inst::MakeStruct { .. }
                             | Inst::MakeEnum { .. }
+                            | Inst::MakeEnumDyn { .. }
                             | Inst::MakeTuple(_)
                     )
             )
@@ -793,7 +794,8 @@ enum StructId {
     /// `MakeStruct` -- a mutable plain-struct table (`ty` is the `__ty` nominal,
     /// `None` for a foreign nominal).
     Plain(Option<ustr::Ustr>),
-    /// `MakeEnum` -- a payload-variant enum table (`{__variant, __ty, [i]=..}`).
+    /// `MakeEnum` / `MakeEnumDyn` -- a payload-variant enum table
+    /// (`{__variant, __ty, [i]=..}`).
     /// Keyed by the ENUM name (`__ty`), so every variant of one enum stored to a
     /// cell is consistent (the field union covers all variants' payload slots).
     Enum(ustr::Ustr),
@@ -846,6 +848,19 @@ fn ctor_fields(
         Inst::MakeEnum { tag, ty, positional, named } => {
             let mut f = vec![
                 (ustr::Ustr::from("__variant"), FieldSrc::ConstStr(*tag)),
+                (ustr::Ustr::from("__ty"), FieldSrc::ConstStr(*ty)),
+            ];
+            for (i, p) in positional.iter().enumerate() {
+                f.push((ustr::Ustr::from(&format!("_{i}")), FieldSrc::Operand(*p)));
+            }
+            for (n, v) in named {
+                f.push((*n, FieldSrc::Operand(*v)));
+            }
+            Some((StructId::Enum(*ty), f))
+        }
+        Inst::MakeEnumDyn { tag, ty, positional, named } => {
+            let mut f = vec![
+                (ustr::Ustr::from("__variant"), FieldSrc::Operand(*tag)),
                 (ustr::Ustr::from("__ty"), FieldSrc::ConstStr(*ty)),
             ];
             for (i, p) in positional.iter().enumerate() {
@@ -986,7 +1001,9 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> Result<bool, CompilerError
     for (_, b) in func.blocks.iter() {
         for &i in &b.insts {
             if let Inst::Store { cell, value } = &func.insts[i] {
-                if let Inst::MakeEnum { ty, .. } = &func.insts[*value] {
+                if let Inst::MakeEnum { ty, .. } | Inst::MakeEnumDyn { ty, .. } =
+                    &func.insts[*value]
+                {
                     cell_enum[raw(*cell) as usize].get_or_insert(*ty);
                 }
             }
@@ -1146,6 +1163,7 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> Result<bool, CompilerError
             }
         }
     }
+    let mut enum_nil_tests: Vec<(Idx<Inst>, Idx<Inst>, Idx<Cell>)> = Vec::new();
     for (_, b) in func.blocks.iter() {
         for &i in &b.insts {
             value_operands(&func.insts[i], &mut |op| {
@@ -1161,6 +1179,23 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> Result<bool, CompilerError
                         // An enum positional payload read: `v[index+1]`, named `_<index>`.
                         Inst::TupleIndex { base, index } => {
                             *base == op && known(&ustr::Ustr::from(&format!("_{index}")))
+                        }
+                        Inst::Eq(a, b)
+                            if matches!(cand[rep[raw(c) as usize]], Some(StructId::Enum(_))) =>
+                        {
+                            let other = if *a == op {
+                                Some(*b)
+                            } else if *b == op {
+                                Some(*a)
+                            } else {
+                                None
+                            };
+                            let is_nil = other
+                                .is_some_and(|v| matches!(func.insts[v], Inst::Const(Lit::Nil)));
+                            if is_nil {
+                                enum_nil_tests.push((i, op, c));
+                            }
+                            is_nil
                         }
                         // The alias store itself: `Store(y, Load(x))` where y and x
                         // unify to the same root (deleted by the rewrite), or where
@@ -1259,6 +1294,43 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> Result<bool, CompilerError
                 func.new_cell(name)
             })
         };
+
+    let mut nil_test_loads: HashMap<Idx<Inst>, Idx<Inst>> = HashMap::default();
+    for (test, old, c) in enum_nil_tests {
+        if !is_cand(c) {
+            continue;
+        }
+        // Every enum ctor writes a nonnil `__ty`; exhaustion nils every lane.
+        let type_cell = get_field_cell(func, to_rep(c), ustr::Ustr::from("__ty"));
+        let present = func.alloc_inst(Inst::Load(type_cell));
+        match &mut func.insts[test] {
+            Inst::Eq(a, b) => {
+                if *a == old {
+                    *a = present;
+                } else if *b == old {
+                    *b = present;
+                }
+            }
+            _ => unreachable!("recorded enum nil test changed instruction kind"),
+        }
+        nil_test_loads.insert(test, present);
+    }
+    if !nil_test_loads.is_empty() {
+        for (_, block) in func.blocks.iter_mut() {
+            if !block.insts.iter().any(|i| nil_test_loads.contains_key(i)) {
+                continue;
+            }
+            let old = std::mem::take(&mut block.insts);
+            let mut new = Vec::with_capacity(old.len() + nil_test_loads.len());
+            for i in old {
+                if let Some(&load) = nil_test_loads.get(&i) {
+                    new.push(load);
+                }
+                new.push(i);
+            }
+            block.insts = new;
+        }
+    }
 
     // Rewrite `Field { base: load(cand), field }` in place into `Load(field_cell)`,
     // and `StoreField { base: load(cand), field, value }` into `Store(field_cell,
