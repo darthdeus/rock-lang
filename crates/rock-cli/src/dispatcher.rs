@@ -506,6 +506,10 @@ impl CommandContext {
                 let files = self.get_test_files()?;
                 crate::c_test::c_test(&files)
             }
+            CliCommand::Run => {
+                let file = self.get_required_file("run")?;
+                crate::c_test::c_run(file)
+            }
             other => unreachable!(
                 "c dispatch reached unsupported command {:?}; the capability \
                  gate should have rejected it — Backend::supported_commands and \

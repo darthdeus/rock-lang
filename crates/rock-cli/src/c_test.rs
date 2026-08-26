@@ -30,6 +30,23 @@ pub struct CSuiteSummary {
     pub skip_reasons: Vec<(String, usize)>,
 }
 
+struct CheckedFile {
+    source: String,
+    ws: bone_semantic::inference::Workspace,
+    user_mid: bone_semantic::prelude::ModuleId,
+}
+
+struct FileCheckError {
+    reason: String,
+    rendered: String,
+    expected_failure_tests: Option<usize>,
+}
+
+struct CompiledC {
+    _dir: tempfile::TempDir,
+    binary: std::path::PathBuf,
+}
+
 pub fn c_test(paths: &[String]) -> Result<()> {
     let probe = Command::new("clang").arg("--version").output();
     if !matches!(probe, Ok(ref output) if output.status.success()) {
@@ -166,38 +183,25 @@ fn record_unit(
 }
 
 fn build_file(file: &str) -> CUnitOutcome {
-    let src = match fs_err::read_to_string(file) {
-        Ok(src) => src,
+    let checked = match check_file(file) {
+        Ok(checked) => checked,
         Err(error) => {
+            if let Some(tests) = error.expected_failure_tests {
+                return CUnitOutcome::ExpectFailPass { tests };
+            }
             return CUnitOutcome::UnitFail {
-                reason: error.to_string(),
-                rendered: error.to_string(),
+                reason: error.reason,
+                rendered: error.rendered,
             };
         }
     };
-    let user = match skull_parser::parse_module(&src, ustr::Ustr::from(file)) {
-        Ok(user) => user,
-        Err(error) => return compile_failure(file, &src, &[error]),
-    };
-    let user_file = user.file;
-    let mut ws = match crate::bone_backend::check_with_stdlib([user]) {
-        Ok(ws) => ws,
-        Err(errors) => return compile_failure(file, &src, &errors),
-    };
-    if let Err(error) = crate::comptime::stamp_workspace(&mut ws, std::path::Path::new(file)) {
-        return CUnitOutcome::UnitFail {
-            reason: "build var resolution failed".to_string(),
-            rendered: format!("build var resolution failed for {file}: {error:#}"),
-        };
-    }
-    let user_mid = crate::bone_backend::entry_module_id(&ws, user_file);
-    let tests = match skull::module_tests_with_ids(&ws, user_mid) {
+    let tests = match skull::module_tests_with_ids(&checked.ws, checked.user_mid) {
         Ok(tests) => tests
             .into_iter()
             .map(|(func, test)| {
                 (
                     FuncRef {
-                        module: user_mid,
+                        module: checked.user_mid,
                         func,
                     },
                     test,
@@ -207,11 +211,50 @@ fn build_file(file: &str) -> CUnitOutcome {
         Err(error) => {
             return CUnitOutcome::UnitFail {
                 reason: categorize(&error.message),
-                rendered: crate::skull_backend::render_file_errs(file, &src, &[error]),
+                rendered: crate::skull_backend::render_file_errs(file, &checked.source, &[error]),
             };
         }
     };
-    run_tests(&ws, &tests)
+    run_tests(&checked.ws, &tests)
+}
+
+fn check_file(file: &str) -> std::result::Result<CheckedFile, FileCheckError> {
+    let source = fs_err::read_to_string(file).map_err(|error| FileCheckError {
+        reason: error.to_string(),
+        rendered: error.to_string(),
+        expected_failure_tests: None,
+    })?;
+    let user = skull_parser::parse_module(&source, ustr::Ustr::from(file)).map_err(|error| {
+        FileCheckError {
+            reason: categorize(&error.message),
+            rendered: crate::skull_backend::render_file_errs(file, &source, &[error]),
+            expected_failure_tests: crate::skull_backend::all_tests_expect_compile_failure(
+                file, &source,
+            ),
+        }
+    })?;
+    let user_file = user.file;
+    let mut ws =
+        crate::bone_backend::check_with_stdlib([user]).map_err(|errors| FileCheckError {
+            reason: categorize(&errors[0].message),
+            rendered: crate::skull_backend::render_file_errs(file, &source, &errors),
+            expected_failure_tests: crate::skull_backend::all_tests_expect_compile_failure(
+                file, &source,
+            ),
+        })?;
+    crate::comptime::stamp_workspace(&mut ws, std::path::Path::new(file)).map_err(|error| {
+        FileCheckError {
+            reason: "build var resolution failed".to_string(),
+            rendered: format!("build var resolution failed for {file}: {error:#}"),
+            expected_failure_tests: None,
+        }
+    })?;
+    let user_mid = crate::bone_backend::entry_module_id(&ws, user_file);
+    Ok(CheckedFile {
+        source,
+        ws,
+        user_mid,
+    })
 }
 
 fn build_package(dir: &str) -> CUnitOutcome {
@@ -261,16 +304,6 @@ fn build_package(dir: &str) -> CUnitOutcome {
     run_tests(&ws, &tests)
 }
 
-fn compile_failure(file: &str, src: &str, errors: &[rock_core::CompilerError]) -> CUnitOutcome {
-    if let Some(tests) = crate::skull_backend::all_tests_expect_compile_failure(file, src) {
-        return CUnitOutcome::ExpectFailPass { tests };
-    }
-    CUnitOutcome::UnitFail {
-        reason: categorize(&errors[0].message),
-        rendered: crate::skull_backend::render_file_errs(file, src, errors),
-    }
-}
-
 fn run_tests(
     ws: &bone_semantic::inference::Workspace,
     tests: &[(FuncRef, skull::SkullTest)],
@@ -309,25 +342,8 @@ fn run_tests(
 }
 
 fn compile_and_run(test_name: &str, source: &str) -> std::result::Result<String, String> {
-    let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
-    let c_path = dir.path().join("test.c");
-    let binary = dir.path().join("test-bin");
-    fs_err::write(&c_path, source).map_err(|error| error.to_string())?;
-    let compile = Command::new("clang")
-        .args(["-std=c11", "-O2", "-Wall", "-Wextra", "-Werror"])
-        .arg(&c_path)
-        .arg("-o")
-        .arg(&binary)
-        .output()
-        .map_err(|error| format!("could not run clang: {error}"))?;
-    if !compile.status.success() {
-        return Err(format!(
-            "generated C did not compile:\n{}\n--- generated C ---\n{}",
-            String::from_utf8_lossy(&compile.stderr),
-            source
-        ));
-    }
-    let run = Command::new(&binary)
+    let compiled = compile_source(source)?;
+    let run = Command::new(&compiled.binary)
         .output()
         .map_err(|error| format!("native test could not start: {error}"))?;
     if !run.status.success() {
@@ -357,6 +373,66 @@ fn compile_and_run(test_name: &str, source: &str) -> std::result::Result<String,
         ));
     }
     Ok(value.clone())
+}
+
+fn compile_source(source: &str) -> std::result::Result<CompiledC, String> {
+    let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let c_path = dir.path().join("test.c");
+    let binary = dir.path().join("test-bin");
+    fs_err::write(&c_path, source).map_err(|error| error.to_string())?;
+    let compile = Command::new("clang")
+        .args(["-std=c11", "-O2", "-Wall", "-Wextra", "-Werror"])
+        .arg(&c_path)
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .map_err(|error| format!("could not run clang: {error}"))?;
+    if !compile.status.success() {
+        return Err(format!(
+            "generated C did not compile:\n{}\n--- generated C ---\n{}",
+            String::from_utf8_lossy(&compile.stderr),
+            source
+        ));
+    }
+    Ok(CompiledC { _dir: dir, binary })
+}
+
+pub fn c_run(path: &str) -> Result<()> {
+    if std::path::Path::new(path).is_dir() {
+        anyhow::bail!("C backend run currently accepts one .rock file, not a project directory");
+    }
+    let checked = check_file(path).map_err(|error| anyhow::anyhow!(error.rendered))?;
+    let mut mains = checked
+        .ws
+        .module(checked.user_mid)
+        .functions
+        .iter()
+        .filter(|(_, function)| {
+            function.name.as_str() == "main" && function.param_decls.is_empty()
+        });
+    let Some((main, _)) = mains.next() else {
+        anyhow::bail!("C backend run requires a nullary `main` in the entry file");
+    };
+    if mains.next().is_some() {
+        anyhow::bail!("C backend run found more than one nullary `main` in the entry file");
+    }
+    let main = FuncRef {
+        module: checked.user_mid,
+        func: main,
+    };
+    let emitted = skull_codegen_c::emit_program(&checked.ws, main).map_err(|error| {
+        anyhow::anyhow!(crate::skull_backend::render_file_errs(
+            path,
+            &checked.source,
+            &[error]
+        ))
+    })?;
+    let compiled = compile_source(&emitted.source).map_err(anyhow::Error::msg)?;
+    let status = Command::new(&compiled.binary).status()?;
+    if !status.success() {
+        anyhow::bail!("native C program exited {status}");
+    }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -44,6 +44,8 @@ mod package;
 mod fire_manifest;
 #[path = "js_run_gate.rs"]
 mod js_run_gate;
+#[path = "c_run_gate.rs"]
+mod c_run_gate;
 #[path = "js_value_tests.rs"]
 mod js_value_tests;
 #[path = "json_serialize_tests.rs"]

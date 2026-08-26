@@ -414,7 +414,8 @@ pub enum Backend {
     Glsl,
     /// `c` — the initial native value-test executor: bone type-checks, skull
     /// monomorphizes, C is emitted for the supported closure, then Clang builds
-    /// and runs it. Unsupported constructs report SKIP(reason). Serves `test`.
+    /// and runs it. Unsupported constructs report SKIP(reason). Serves `test`
+    /// and single-file scalar `run`.
     C,
 }
 
@@ -446,7 +447,7 @@ impl Backend {
             Self::Skull => "skull is a bone-HIR codegen",
             Self::Js => "js is a JS-subset executor (node); no game/engine runtime",
             Self::Glsl => "glsl is a GLSL value-test executor (GPU), not a program codegen",
-            Self::C => "c is an initial native value-test executor (Clang), not a full runtime backend",
+            Self::C => "c is an initial native scalar executor (Clang), not a game/runtime backend",
         }
     }
 
@@ -473,7 +474,7 @@ impl Backend {
             ],
             Self::Js => &[Test, Run],
             Self::Glsl => &[Test],
-            Self::C => &[Test],
+            Self::C => &[Test, Run],
         }
     }
 
@@ -1031,15 +1032,17 @@ mod caps_tests {
     }
 
     #[test]
-    fn c_serves_test_only() {
+    fn c_serves_test_and_run() {
         use CliCommand::*;
         assert!(Backend::C.serves(Test), "c serves test");
-        for cmd in [Compile, CompileSingle, TestCompile, Run, Watch, Stone, Frame, Perf, Sim] {
+        assert!(Backend::C.serves(Run), "c serves run");
+        for cmd in [Compile, CompileSingle, TestCompile, Watch, Stone, Frame, Perf, Sim] {
             assert!(!Backend::C.serves(cmd), "c should reject {:?}", cmd);
         }
-        let msg = Backend::C.reject_reason(CliCommand::Run).expect("c rejects run");
-        assert!(msg.contains("`c` backend cannot serve `run`"), "{msg}");
+        let msg = Backend::C.reject_reason(CliCommand::Stone).expect("c rejects stone");
+        assert!(msg.contains("`c` backend cannot serve `stone`"), "{msg}");
         assert!(msg.contains("test"), "supported list names test: {msg}");
+        assert!(msg.contains("run"), "supported list names run: {msg}");
     }
 
     #[test]
