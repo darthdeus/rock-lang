@@ -260,6 +260,7 @@ fn Arena<T>.get(arena, entity: Entity<T>) -> T? {
     return store.data[entity._slot]
 }
 
+@frame_ref_source
 fn Arena<T>.borrow(arena, entity: Entity<T>) -> (ref T)? {
     if !__arena_owns(arena, entity) { return null }
     let found = __arena_store(arena)

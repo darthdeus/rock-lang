@@ -126,6 +126,8 @@ pub struct Gamma<'a> {
     pub(crate) pending: Vec<Option<Pending>>,
     pub(crate) pending_by_var: FxHashMap<VarId, SmallVec<[usize; 2]>>,
 
+    pub(crate) allow_frame_ref_return_place: bool,
+
     pub out: BodyInference,
 }
 
@@ -159,6 +161,8 @@ impl<'a> Gamma<'a> {
             deferrable_vars: Default::default(),
             pending: Vec::new(),
             pending_by_var: Default::default(),
+
+            allow_frame_ref_return_place: false,
 
             out: BodyInference {
                 body_generation: body.generation,
@@ -382,6 +386,23 @@ pub fn check_function(
     let body = &module.bodies[&BodyOwner::Function(f_id)];
     let mut gamma = Gamma::new(ws, body, module_id);
     let c = BodyCtx { module, body };
+    let frame_ref_source = f
+        .annotations
+        .iter()
+        .find(|annotation| annotation.name.name.as_str() == "frame_ref_source");
+    let is_arena_stdlib = matches!(
+        module.file.as_str(),
+        "<stdlib:arena.rock>" | "<bone-stdlib:arena.rock>"
+    );
+    if let Some(annotation) = frame_ref_source
+        && !is_arena_stdlib
+    {
+        comp_error!(
+            annotation.span,
+            "`@frame_ref_source` is reserved for the standard arena storage primitive"
+        );
+    }
+    gamma.allow_frame_ref_return_place = frame_ref_source.is_some();
 
     for (idx, (g, b)) in f.generics.iter().zip(f.generic_bounds.iter()).enumerate() {
         let Some(elem) = *b else { continue };
@@ -461,6 +482,8 @@ pub fn check_function(
             // fn-value ABI disagrees at the two ends. The coerce still happens --
             // it moved down to the tail, keeping this span.
             if let Err(e) = check_expr(c, &mut gamma, body, ret_ty, c.body.expr_spans[tail]) {
+                gamma.body_errors.push(e);
+            } else if let Err(e) = validate_frame_ref_return(c, &mut gamma, body, ret_ty) {
                 gamma.body_errors.push(e);
             }
         } else if {

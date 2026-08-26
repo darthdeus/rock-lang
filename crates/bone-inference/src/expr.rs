@@ -20,6 +20,7 @@ pub(crate) fn infer_statement(c: BodyCtx, gamma: &mut Gamma, s: Idx<Statement>) 
             match (e, gamma.declared_ret_ty) {
                 (Some(e), Some(declared)) => {
                     check_expr(c, gamma, *e, declared, c.body.statement_spans[s])?;
+                    validate_frame_ref_return(c, gamma, *e, declared)?;
                 }
                 (Some(e), None) => {
                     infer_expr(c, gamma, *e)?;
@@ -126,6 +127,8 @@ pub(crate) fn infer_statement(c: BodyCtx, gamma: &mut Gamma, s: Idx<Statement>) 
             // enclosing return-context is saved and restored around it.
             let saved_ret = gamma.declared_ret_ty.take();
             let saved_coro = gamma.coroutine_ret.take();
+            let saved_ref_source =
+                std::mem::replace(&mut gamma.allow_frame_ref_return_place, false);
             let saved_globals: Vec<Narrow> = gamma
                 .refined_nonnull
                 .iter()
@@ -174,6 +177,7 @@ pub(crate) fn infer_statement(c: BodyCtx, gamma: &mut Gamma, s: Idx<Statement>) 
             gamma.refined_nonnull.extend(saved_globals);
             gamma.coroutine_ret = saved_coro;
             gamma.declared_ret_ty = saved_ret;
+            gamma.allow_frame_ref_return_place = saved_ref_source;
             result?;
 
             reject_nested_fn_captures(c, body, span)?;
@@ -1596,6 +1600,7 @@ pub fn infer_expr_used(
             match (e, gamma.declared_ret_ty) {
                 (Some(e), Some(declared)) => {
                     check_expr(c, gamma, *e, declared, expr_span)?;
+                    validate_frame_ref_return(c, gamma, *e, declared)?;
                 }
                 (Some(e), None) => {
                     infer_expr(c, gamma, *e)?;
@@ -1628,6 +1633,71 @@ pub fn infer_expr_used(
 
 pub fn infer_expr(c: BodyCtx, gamma: &mut Gamma, e: Idx<Expr>) -> Result<TyId, CompilerError> {
     infer_expr_used(c, gamma, e, Use::Value)
+}
+
+pub(crate) fn validate_frame_ref_return(
+    c: BodyCtx,
+    gamma: &mut Gamma,
+    e: Idx<Expr>,
+    declared: TyId,
+) -> Result<(), CompilerError> {
+    let span = c.body.expr_spans[e];
+    let declared = resolve(gamma, declared, span);
+    if frame_ref_target(gamma, declared).is_none() || gamma.allow_frame_ref_return_place {
+        return Ok(());
+    }
+
+    fn has_valid_origin(c: BodyCtx, gamma: &mut Gamma, e: Idx<Expr>) -> bool {
+        let span = c.body.expr_spans[e];
+        if let Some(ty) = gamma.out.expr_types.get(e).copied() {
+            let ty = resolve(gamma, ty, span);
+            if contains_frame_ref(gamma, ty) {
+                return true;
+            }
+        }
+
+        match c.body.expr_arena[e] {
+            Expr::Null | Expr::Global(_) => true,
+            Expr::FieldAccess { base, .. }
+            | Expr::SafeNav { base, .. }
+            | Expr::Index { base, .. }
+            | Expr::TupleIndex { tuple: base, .. }
+            | Expr::As { value: base, .. } => has_valid_origin(c, gamma, base),
+            Expr::Block { tail, .. } => tail.is_some_and(|tail| has_valid_origin(c, gamma, tail)),
+            Expr::If {
+                then_branch,
+                else_branch,
+                ..
+            }
+            | Expr::IfLet {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                has_valid_origin(c, gamma, then_branch)
+                    && else_branch.is_some_and(|branch| has_valid_origin(c, gamma, branch))
+            }
+            Expr::Match { arms, .. } => {
+                let mut arms = arms.into_iter();
+                arms.next().is_some_and(|arm| {
+                    has_valid_origin(c, gamma, c.body.match_arm_arena[arm].body)
+                        && arms.all(|arm| {
+                            has_valid_origin(c, gamma, c.body.match_arm_arena[arm].body)
+                        })
+                })
+            }
+            _ => false,
+        }
+    }
+
+    if has_valid_origin(c, gamma, e) {
+        return Ok(());
+    }
+
+    comp_error!(
+        span,
+        "cannot return a frame reference to a local place; return an input reference or a reference obtained from owner storage"
+    );
 }
 
 /// Infer the common scalar type of a half-open range's bounds. Integer

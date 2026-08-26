@@ -1364,6 +1364,41 @@ fn temporary_cannot_be_borrowed_for_a_ref_parameter() {
 }
 
 #[test]
+fn local_place_cannot_be_returned_as_a_frame_reference() {
+    for (label, src) in [
+        (
+            "top-level function",
+            "struct Player { hp: int }\nfn bad() -> ref Player { let player = Player { hp: 1 }  return player }",
+        ),
+        (
+            "nested function tail",
+            "struct Player { hp: int }\nfn outer() { fn bad() -> ref Player { let player = Player { hp: 1 }  player } }",
+        ),
+        (
+            "lambda tail",
+            "struct Player { hp: int }\nfn bad() -> () -> ref Player { return () => { let player = Player { hp: 1 }  player } }",
+        ),
+    ] {
+        assert!(bone_rejects(src), "{label} cannot return a ref to a local place");
+    }
+}
+
+#[test]
+fn returned_frame_reference_must_propagate_a_valid_origin() {
+    let propagated = "struct Stats { hp: int }\nstruct Player { stats: Stats }\nfn stats(player: ref Player) -> ref Stats { return player.stats }";
+    assert!(
+        !bone_rejects(propagated),
+        "a returned field ref may inherit an input ref's lifetime"
+    );
+
+    let forged = "@frame_ref_source fn bad() {}";
+    assert!(
+        bone_rejects(forged),
+        "the privileged storage-origin marker is unavailable to ordinary source"
+    );
+}
+
+#[test]
 fn ref_cannot_cross_opaque_or_persistent_boundaries() {
     for (label, src) in [
         (

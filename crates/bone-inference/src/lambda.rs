@@ -84,6 +84,8 @@ pub(crate) fn infer_lambda(
 
     let saved_ret = gamma.declared_ret_ty.replace(ret_var);
     let saved_coro = gamma.coroutine_ret.take();
+    let saved_ref_source =
+        std::mem::replace(&mut gamma.allow_frame_ref_return_place, false);
     // A lambda body runs at CALL time, after arbitrary intervening effects, and a
     // global is read fresh on each call -- so no enclosing GLOBAL refinement holds
     // inside it. Save + clear the global entries for the body, restore after.
@@ -105,6 +107,7 @@ pub(crate) fn infer_lambda(
     gamma.refined_nonnull.extend(saved_globals);
     gamma.coroutine_ret = saved_coro;
     gamma.declared_ret_ty = saved_ret;
+    gamma.allow_frame_ref_return_place = saved_ref_source;
     let body_ty = body_res?;
 
     reject_ref_captures(c, gamma, expr_span)?;
