@@ -519,14 +519,14 @@ pub fn c_run(path: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn c_backend_smoke_runs_five_native_value_tests() {
+    fn c_backend_smoke_runs_six_native_value_tests() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/c_backend_smoke.rock")
             .to_string_lossy()
             .into_owned();
         let summary = super::c_test_run(&[path], false).expect("run C backend smoke");
         assert_eq!(summary.files, 1);
-        assert_eq!(summary.tests_passed, 5);
+        assert_eq!(summary.tests_passed, 6);
         assert_eq!(summary.tests_failed, 0);
         assert_eq!(summary.tests_skipped, 0);
         assert_eq!(summary.unit_failures, 0);
