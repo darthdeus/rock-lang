@@ -60,10 +60,9 @@ fn package_context(project: &str) -> Result<PackageContext> {
 
 pub fn sound_project_path_for(project: &str) -> Result<Option<PathBuf>> {
     let context = package_context(project)?;
-    let Some(sound) = context.config.as_ref().and_then(|config| config.sound.as_ref()) else {
-        return Ok(None);
-    };
-    Ok(Some(declared_sound_project_path(&context.project, &sound.project)?.canonicalize()?))
+    rock_host::release::sound_project_path(&context.project, context.config.as_ref())?
+        .map(|path| path.canonicalize().map_err(Into::into))
+        .transpose()
 }
 
 pub fn prepare_sound_bank(project: &str) -> Result<Option<PathBuf>> {
@@ -247,7 +246,8 @@ fn compile_sound_project(
     let Some(sound) = config.and_then(|config| config.sound.as_ref()) else {
         return Ok(None);
     };
-    let project_path = declared_sound_project_path(project_dir, &sound.project)?;
+    let project_path = rock_host::release::sound_project_path(project_dir, config)?
+        .ok_or_else(|| anyhow::anyhow!("package: sound project declaration disappeared"))?;
     let project_text = std::fs::read_to_string(&project_path).map_err(|error| {
         anyhow::anyhow!(
             "package: sound project {} could not be read: {error}",
@@ -285,31 +285,6 @@ fn compile_sound_project(
         bank_bytes,
         dependencies,
     }))
-}
-
-fn declared_sound_project_path(project_dir: &Path, relative: &str) -> Result<PathBuf> {
-    let path = Path::new(relative);
-    if relative.trim().is_empty()
-        || path.is_absolute()
-        || relative.starts_with('~')
-        || relative.contains('\\')
-        || relative.as_bytes().get(1) == Some(&b':')
-        || path
-            .components()
-            .any(|component| matches!(component, std::path::Component::ParentDir))
-    {
-        anyhow::bail!(
-            "package: [sound].project must be a non-empty relative path without traversal: {relative:?}"
-        );
-    }
-    let project_path = project_dir.join(path);
-    if !project_path.is_file() {
-        anyhow::bail!(
-            "package: declared sound project does not exist: {}",
-            project_path.display()
-        );
-    }
-    Ok(project_path)
 }
 
 fn write_sound_bank(
