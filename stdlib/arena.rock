@@ -78,7 +78,9 @@ fn __arena_store<T>(arena: Arena<T>) -> ArenaStore<T>? {
 // reject here.
 fn __arena_store_mut<T>(arena: Arena<T>) -> ArenaStore<T> {
     let store = __arena_store(arena)
-    assert(!is_null(store), "Arena {arena._arena_id} is not live (destroyed, or its scene was unloaded)")
+    if is_null(store) {
+        error("Arena {arena._arena_id} is not live (destroyed, or its scene was unloaded)")
+    }
     return store.unwrap()
 }
 
