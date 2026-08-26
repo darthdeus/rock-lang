@@ -160,7 +160,7 @@ pub fn select_assets_with_overlays(
     let mut by_key = BTreeMap::<String, PathBuf>::new();
     let mut missing = Vec::new();
     for name in &names {
-        let source = project_dir.join(&name);
+        let source = project_dir.join(name);
         if !source.exists() {
             missing.push(source);
             continue;
