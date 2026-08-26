@@ -232,3 +232,67 @@ fn dynamic_enum_spread_escape_runs_correctly() {
     let Some(stdout) = run_t(DYNAMIC_SPREAD_ESCAPE) else { return };
     assert_eq!(stdout, "2 Mouse", "got {stdout:?}");
 }
+
+const TUPLE_ENUM_MATCH: &str = r#"
+enum Binding {
+    Key { scan: string, ctrl: bool },
+    Mouse(int),
+}
+
+fn same(a: Binding, b: Binding) -> bool {
+    return match (a, b) {
+        (Binding::Key { scan: ax, ctrl: ac }, Binding::Key { scan: bx, ctrl: bc }) =>
+            ax == bx && ac == bc,
+        (Binding::Mouse(ax), Binding::Mouse(bx)) => ax == bx,
+        _ => false,
+    }
+}
+
+fn retain_first(a: Binding, b: Binding) -> [Binding] {
+    return match (a, b) { (first, _) => [first] }
+}
+
+@test(output = "true false true false 1 Key")
+fn t() {
+    let key = Binding::Key { scan: "A", ctrl: true }
+    let other = Binding::Key { scan: "B", ctrl: true }
+    let kept = retain_first(key, Binding::Mouse(3))
+    let name = match kept[0] {
+        Binding::Key { .. } => "Key",
+        Binding::Mouse(_) => "Mouse",
+    }
+    print("{same(key, key)} {same(key, other)} {same(Binding::Mouse(3), Binding::Mouse(3))} {same(key, Binding::Mouse(3))} {kept.len()} {name}")
+}
+
+fn main() { t() }
+"#;
+
+#[test]
+fn tuple_match_consumes_scalar_enum_params_without_boxes() {
+    let lua = emit_module(TUPLE_ENUM_MATCH);
+    let same = function_body(&lua, "same");
+    assert!(
+        !same.contains("{__variant = "),
+        "a tuple match must consume scalar enum parameters without rebuilding them:\n{same}"
+    );
+    assert!(
+        !same.contains("({"),
+        "a tuple match over scalar elements must not materialize its tuple:\n{same}"
+    );
+}
+
+#[test]
+fn tuple_match_materializes_a_bound_enum_that_escapes() {
+    let lua = emit_module(TUPLE_ENUM_MATCH);
+    let retain = function_body(&lua, "retain_first");
+    assert!(
+        retain.contains("{__variant = "),
+        "an enum bound from a tuple and retained in a vector must materialize:\n{retain}"
+    );
+}
+
+#[test]
+fn tuple_enum_match_runs_correctly() {
+    let Some(stdout) = run_t(TUPLE_ENUM_MATCH) else { return };
+    assert_eq!(stdout, "true false true false 1 Key", "got {stdout:?}");
+}
