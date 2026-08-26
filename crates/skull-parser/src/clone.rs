@@ -302,6 +302,7 @@ fn clone_type_kind(ast: &mut Ast, kind: TypeExprKind) -> TypeExprKind {
         | TypeExprKind::Bool
         | TypeExprKind::Hole(_, _)
         | TypeExprKind::Ident(_) => kind,
+        TypeExprKind::Ref(t) => TypeExprKind::Ref(clone_type(ast, t)),
         TypeExprKind::Array(t) => TypeExprKind::Array(clone_type(ast, t)),
         TypeExprKind::App { ctor, args } => TypeExprKind::App {
             ctor,

@@ -1561,6 +1561,7 @@ impl<'a> Parser<'a> {
                     "uint" => TypeExprKind::Uint,
                     "float" => TypeExprKind::Float,
                     "bool" => TypeExprKind::Bool,
+                    "ref" => TypeExprKind::Ref(self.parse_type()?),
                     _ => {
                         let ctor = Ident { span: ident_span, name };
                         // Generic application `Foo<A, B>`.

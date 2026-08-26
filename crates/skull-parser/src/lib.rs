@@ -713,6 +713,20 @@ mod tests {
     }
 
     #[test]
+    fn ref_type_is_a_prefix_type_former() {
+        let ast = parse_module_clean(
+            "fn use_player(player: ref Player, maybe: (ref Player)?) -> ref Player { player }",
+            Ustr::from("t.rock"),
+        )
+        .expect("ref types parse");
+        let ItemKind::Function(f) = &ast.items[0].kind else { panic!("expected fn") };
+
+        assert_eq!(ast.type_surface(f.params[0].ty), "ref Player");
+        assert_eq!(ast.type_surface(f.params[1].ty), "(ref Player)?");
+        assert_eq!(ast.type_surface(f.return_ty.expect("return type")), "ref Player");
+    }
+
+    #[test]
     fn sibling_field_ref_in_default() {
         // `field: T = .sibling` — leading-dot sibling ref. No corpus file
         // exercises this, so the cook oracle can't catch a parser gap here;

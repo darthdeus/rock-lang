@@ -432,6 +432,7 @@ fn graft_type_kind(src: &Ast, dst: &mut Ast, kind: &TypeExprKind) -> TypeExprKin
         | TypeExprKind::Bool
         | TypeExprKind::Hole(_, _)
         | TypeExprKind::Ident(_) => kind.clone(),
+        TypeExprKind::Ref(t) => TypeExprKind::Ref(graft_type(src, dst, *t)),
         TypeExprKind::Array(t) => TypeExprKind::Array(graft_type(src, dst, *t)),
         TypeExprKind::App { ctor, args } => TypeExprKind::App {
             ctor: ctor.clone(),

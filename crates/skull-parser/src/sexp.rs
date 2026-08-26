@@ -561,6 +561,7 @@ impl Ast {
             TypeExprKind::Uint => "uint".to_string(),
             TypeExprKind::Float => "float".to_string(),
             TypeExprKind::Bool => "bool".to_string(),
+            TypeExprKind::Ref(inner) => format!("(ref {})", self.type_sexp(*inner)),
             TypeExprKind::Ident(id) => id.name.to_string(),
             TypeExprKind::Array(inner) => format!("[{}]", self.type_sexp(*inner)),
             TypeExprKind::App { ctor, args } => {
@@ -604,6 +605,7 @@ impl Ast {
             TypeExprKind::Uint => "uint".to_string(),
             TypeExprKind::Float => "float".to_string(),
             TypeExprKind::Bool => "bool".to_string(),
+            TypeExprKind::Ref(inner) => format!("ref {}", self.type_surface(*inner)),
             TypeExprKind::Hole(..) => "?".to_string(),
             TypeExprKind::Ident(id) => id.name.to_string(),
             TypeExprKind::Array(inner) => format!("[{}]", self.type_surface(*inner)),
@@ -624,7 +626,11 @@ impl Ast {
             ),
         };
         if td.is_nullable {
-            format!("{base}?")
+            if matches!(td.kind, TypeExprKind::Ref(_)) {
+                format!("({base})?")
+            } else {
+                format!("{base}?")
+            }
         } else {
             base
         }

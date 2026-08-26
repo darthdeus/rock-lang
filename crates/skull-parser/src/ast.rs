@@ -471,6 +471,7 @@ pub enum TypeExprKind {
     Uint,
     Float,
     Bool,
+    Ref(Idx<TypeExprData>),
     Ident(Ident),
     Array(Idx<TypeExprData>),
     App {

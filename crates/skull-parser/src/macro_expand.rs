@@ -931,6 +931,7 @@ fn subst_in_type(ast: &mut Ast, t: Idx<TypeExprData>, ty_subs: &HashMap<Ustr, Id
             }
         }
         TypeExprKind::Array(inner) => subst_in_type(ast, inner, ty_subs),
+        TypeExprKind::Ref(inner) => subst_in_type(ast, inner, ty_subs),
         TypeExprKind::Tuple(items) => {
             for it in items {
                 subst_in_type(ast, it, ty_subs);
@@ -1777,6 +1778,7 @@ fn refs_in_item(ast: &Ast, item: &Item, names: &HashSet<Ustr>, occ: &mut Vec<(Us
 fn refs_in_type(ast: &Ast, t: Idx<TypeExprData>, names: &HashSet<Ustr>, occ: &mut Vec<(Ustr, Span)>) {
     match &ast.types[t].kind {
         TypeExprKind::Ident(id) => note(id, names, occ),
+        TypeExprKind::Ref(inner) => refs_in_type(ast, *inner, names, occ),
         TypeExprKind::Array(inner) => refs_in_type(ast, *inner, names, occ),
         TypeExprKind::App { ctor, args } => {
             note(ctor, names, occ);
