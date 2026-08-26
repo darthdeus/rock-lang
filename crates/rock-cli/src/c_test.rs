@@ -394,6 +394,7 @@ fn clang_compile(
     let compile = Command::new("clang")
         .args(["-std=c11", "-O2", "-Wall", "-Wextra", "-Werror"])
         .arg(c_path)
+        .arg("-lm")
         .arg("-o")
         .arg(binary)
         .output()
