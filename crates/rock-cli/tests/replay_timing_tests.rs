@@ -11,6 +11,66 @@ fn workspace_root() -> &'static Path {
         .expect("workspace root")
 }
 
+#[test]
+fn replay_playback_cannot_emit_live_telemetry() {
+    let repository = workspace_root().parent().expect("repository root");
+    let source = std::fs::read_to_string(repository.join("stone/engine/systems/telemetry.rock"))
+        .expect("telemetry source");
+    let record = source
+        .split("fn telemetry_record(")
+        .nth(1)
+        .expect("telemetry_record")
+        .split("inline(lua) fn telemetry_record_native")
+        .next()
+        .expect("telemetry_record body");
+    let native = source
+        .split("inline(lua) fn telemetry_record_native")
+        .nth(1)
+        .expect("native telemetry wrapper")
+        .split("inline(lua) fn telemetry_close")
+        .next()
+        .expect("native telemetry body");
+
+    assert!(
+        record.contains("if replay_is_replay() { return true }"),
+        "ordinary replay playback still reaches the live telemetry sink"
+    );
+    assert!(
+        !native.contains("__playback_seeking"),
+        "the native wrapper retains a second seek-only telemetry policy"
+    );
+
+    let mag_policy = std::fs::read_to_string(repository.join("mag/telemetry.rock"))
+        .expect("MAG telemetry policy");
+    let can_record = mag_policy
+        .split("fn mag_telemetry_can_record()")
+        .nth(1)
+        .expect("mag_telemetry_can_record")
+        .split("fn mag_telemetry_apply")
+        .next()
+        .expect("mag_telemetry_can_record body");
+    assert!(
+        can_record.contains("&& !replay_is_replay()"),
+        "replay playback still enables eager MAG telemetry construction"
+    );
+
+    let events = std::fs::read_to_string(repository.join("mag/telemetry_events.rock"))
+        .expect("MAG telemetry events");
+    let spell_phase = events
+        .split("fn telemetry_spell_phase(")
+        .nth(1)
+        .expect("telemetry_spell_phase")
+        .split("fn telemetry_source_cohort_name")
+        .next()
+        .expect("telemetry_spell_phase body");
+    assert!(
+        spell_phase
+            .find("if !mag_telemetry_can_record() { return }")
+            .is_some_and(|guard| guard < spell_phase.find("telemetry_data()").unwrap()),
+        "spell telemetry constructs its payload before replay policy can reject it"
+    );
+}
+
 fn record_raw(game: &str, frames: u32, log: &str, env: &[(&str, &str)]) -> Output {
     let scratch = tempfile::tempdir().expect("record scratch");
     Command::new(env!("CARGO_BIN_EXE_rock"))
