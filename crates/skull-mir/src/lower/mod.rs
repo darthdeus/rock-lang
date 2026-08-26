@@ -447,6 +447,10 @@ struct FlatCells {
 #[derive(Clone)]
 enum Scrut {
     Val(Idx<Inst>),
+    /// A tuple expression whose elements still carry their scalar
+    /// representations. Tuple patterns consume these directly; a whole-value
+    /// bind materializes the ordinary tuple and any escaping element.
+    Tuple(Vec<Scrut>),
     Flat {
         parent: Idx<Inst>,
         prefix: Ustr,

@@ -98,6 +98,20 @@ fn run_mag_raw(
         .expect("spawn MAG frame")
 }
 
+fn assert_layout_fixture_added_one(state: &serde_json::Value) {
+    let diag = &state["__stone_diag"];
+    let before = diag["MAG_REPLAY_LAYOUT_STRIPS_BEFORE"]
+        .as_i64()
+        .expect("layout fixture must report its starting strip population");
+    let after = diag["MAG_REPLAY_LAYOUT_STRIPS_AFTER"]
+        .as_i64()
+        .expect("layout fixture must report its final strip population");
+    assert_eq!(before, 3, "empty history must seed the three category strips: {diag}");
+    assert_eq!(after, before + 1, "the production drag must add exactly one strip: {diag}");
+    assert_eq!(state["mag"]["SPELL_STRIPS"]["len"], after,
+        "the fixture census must describe the authoritative strip population");
+}
+
 fn fixture_env(
     kind: &str,
     progress: &Path,
@@ -446,11 +460,7 @@ fn record_mutate_all_bootstrap_files_then_replay_without_persistence_writes() {
         serde_json::json!(0),
         "the combined fixture must exercise the production progress consumer"
     );
-    assert_eq!(
-        recorded["mag"]["SPELL_STRIPS"]["len"],
-        serde_json::json!(1),
-        "the combined fixture must exercise the production spell-layout consumer"
-    );
+    assert_layout_fixture_added_one(&recorded);
     assert!(
         recorded["__stone_diag"]["MAG_SETTINGS_SUCCESSFUL_WRITES"]
             .as_i64()
@@ -557,7 +567,7 @@ fn progress_bootstrap_captures_absence_and_keeps_b_read_only() {
     let recorded = run_mag(1, Some(&replay), None, &env);
     let persisted_b = std::fs::read(&progress).expect("record action must create B");
     let log = std::fs::read_to_string(&replay).expect("read replay");
-    assert!(log.starts_with("STONE_REPLAY 11\n"), "recording must use v11\n{log}");
+    assert!(log.starts_with("STONE_REPLAY 13\n"), "recording must use v13\n{log}");
     let boot_lines: Vec<&str> = log.lines().filter(|line| line.starts_with("boot ")).collect();
     assert_eq!(boot_lines.len(), 4,
         "the temporary current-settings path plus progress and both histories must capture keys");
@@ -776,7 +786,7 @@ fn save_repro_retains_bootstrap_entries() {
         .find(|path| path.file_name().and_then(|name| name.to_str()).is_some_and(|name| name.starts_with("repro-")))
         .expect("auto save repro must create a sibling");
     let text = std::fs::read_to_string(repro).expect("read saved repro");
-    assert!(text.starts_with("STONE_REPLAY 11\n"), "repro must retain v11\n{text}");
+    assert!(text.starts_with("STONE_REPLAY 13\n"), "repro must retain v13\n{text}");
     assert_eq!(text.lines().filter(|line| line.starts_with("boot ")).count(), 4,
         "save repro must retain all bootstrap entries");
 }
@@ -834,11 +844,7 @@ fn spell_layout_bootstrap_captures_empty_file_and_keeps_b_read_only() {
         layout_projection(&recorded),
         "replay must restore empty layout A before the recorded drag"
     );
-    assert_eq!(
-        recorded["mag"]["SPELL_STRIPS"]["len"],
-        1,
-        "the production-shaped drag must create exactly one strip"
-    );
+    assert_layout_fixture_added_one(&recorded);
     assert!(
         recorded["__stone_diag"]["STONE_SNAPSHOT_HISTORY_WRITES"]
             .as_i64()

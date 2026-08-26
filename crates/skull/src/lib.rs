@@ -16,6 +16,7 @@
 pub mod allocation_report;
 pub mod coroutine_emit;
 pub mod inline_stats;
+pub mod mem2reg_stats;
 pub mod graph_snapshot;
 pub mod shader_artifact;
 pub mod site_join;
@@ -660,6 +661,14 @@ _G.__rock_state_entry_get = function(entry)
   local keys = entry.session_keys or {}
   if #keys == 1 then return _G.__rock_state_get(keys[1]) end
   error("StateSchema entry has no logical realization " .. tostring(entry.identity), 0)
+end
+_G.__rock_state_entry_try_get = function(entry)
+  for _, key in ipairs(entry.session_keys or {}) do
+    if _G.__rock_state_has(key) then
+      return true, _G.__rock_state_entry_get(entry)
+    end
+  end
+  return false, nil
 end
 _G.__rock_state_entry_set = function(entry, value)
   local adapters = rawget(_G, "__ROCK_STATE_NOBOX")

@@ -9,18 +9,12 @@
 //! cell and a returned value is a `Store` into a result/dest cell — the caller's
 //! `cleanup` (copy-prop + DCE) then elides the round-trips.
 //!
-//! Policy is ANNOTATION-GATED: only `@inline`/`@pure` functions inline (both
-//! authoritative -- they bypass the size caps). This keeps the hot-reload re-emit
+//! Policy is ANNOTATION-GATED: only `@inline`/`@pure` functions inline. This
+//! keeps the hot-reload re-emit
 //! fan-out + overlay small (a body edit re-emits every fn that inlined the
 //! changed callee, so fewer inlines = fewer dependents). The hot stdlib helpers
 //! (math, getters, value-struct ctors) carry `@inline`/`@pure`, so they still
 //! inline; incidental small accessors no longer do.
-//!
-//! `SKULL_INLINE_SIZE_HEURISTIC=1` opts back into the OLD size-based policy (any
-//! small body inlines; the choice the old skull validated at `skull-diff` = 0) --
-//! the A/B lever for the inlining-cost investigation (TODO.md). Both policies are
-//! behavior-preserving (`skull-diff` = 0); they differ only in how much inlines,
-//! i.e. in compile/emit cost, hot-reload size, and runtime trace shape.
 
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::cell::Cell as ThreadCell;
@@ -39,12 +33,6 @@ use ustr::Ustr;
 
 use crate::top_level_blocks;
 
-/// Straight-line callee inst cap (entry-Return body). A small body is the win;
-/// a large one bloats emit and overflows LuaJIT's snapshot budget (old skull:
-/// 300 regressed perf). Re-tune only with `-jv` / `--gc-window` evidence.
-const STRAIGHT_INSTS: usize = 48;
-/// Multi-block callee total-reachable-inst cap.
-const GENERAL_INSTS: usize = 72;
 /// Per-caller splice budget — bounds mutual-recursion expansion. A remaining
 /// real call is always correct.
 const MAX_INLINES_PER_FN: usize = 1000;
@@ -120,8 +108,6 @@ struct CalleeBody {
     /// Reachable inst count of the (cleaned) body — the code each splice copies.
     /// Diagnostic only (drives `skull-inline-stats`); not used by the policy.
     insts: usize,
-    /// `@inline`-forced (bypassed the size caps). Diagnostic only.
-    forced: bool,
     /// Iterator-bounded body, which has no standalone placeholder-bearing emit.
     bounded: bool,
     /// Source/live arena and side-table populations. The first census uses the
@@ -146,7 +132,6 @@ struct CalleeBody {
 pub struct SpliceRecord {
     pub callee: FuncRef,
     pub straight: bool,
-    pub forced: bool,
     pub bounded: bool,
     pub transitive: bool,
     /// Reachable inst count of the callee body copied at this site.
@@ -1043,27 +1028,8 @@ impl InlineCache {
     }
 }
 
-/// `SKULL_INLINE_SIZE_HEURISTIC=1`: opt back into the OLD size-based policy (any
-/// small body inlines, `@inline` bypasses the caps). The default is now
-/// annotation-gated -- only `@inline`/`@pure` inline -- which keeps the
-/// hot-reload re-emit fan-out + overlay small. Kept as the A/B lever for the
-/// inlining-cost investigation (TODO.md). Read once per process.
-fn size_heuristic() -> bool {
-    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *V.get_or_init(|| std::env::var("SKULL_INLINE_SIZE_HEURISTIC").is_ok())
-}
-
-/// The annotation gate for inlining: `None` = this fn must not inline at all;
-/// `Some(force)` = eligible, with `force` meaning "bypass the size caps". Pure
-/// (no env) so it is unit-testable. DEFAULT: ONLY `@inline`/`@pure` inline, and
-/// both force (the annotation is authoritative). `size_heuristic` opts back into
-/// the old policy: any fn eligible, only `@inline` forces.
-fn annotation_gate(has_inline: bool, has_pure: bool, size_heuristic: bool) -> Option<bool> {
-    if size_heuristic {
-        Some(has_inline)
-    } else {
-        (has_inline || has_pure).then_some(true)
-    }
+fn annotation_gate(has_inline: bool, has_pure: bool) -> bool {
+    has_inline || has_pure
 }
 
 #[derive(Default)]
@@ -1620,11 +1586,9 @@ fn classify(
     // splice or standalone demand resolves them, so inline eligibility forces
     // the optimization when the body is otherwise eligible.
     let has_bounds = f.generic_bounds.iter().any(Option::is_some);
-    let force = match annotation_gate(has_inline, has_pure, size_heuristic()) {
-        Some(force) => force || has_bounds,
-        None if has_bounds => true,
-        None => return reject_candidate(&mut timing, "missing_inline_annotation"),
-    };
+    if !annotation_gate(has_inline, has_pure) && !has_bounds {
+        return reject_candidate(&mut timing, "missing_inline_annotation");
+    }
     // A snapshot lowers the body as if hand-written for the concrete
     // instantiation (`docs/flatvec-plan.md`); a non-generic instance's is the
     // declaration's own body.
@@ -1750,9 +1714,6 @@ fn classify(
     // sub-CFG (referenced by `Inst::Lambda { entry }`) would dangle.
     if !has_lambda && matches!(mf.blocks[mf.entry].term, Term::Return(_)) {
         // Straight: entry ends in Return, so it is the only reachable block.
-        if !force && reachable_insts > STRAIGHT_INSTS {
-            return reject_candidate(&mut timing, "straight_size_cap");
-        }
         let ret_arity = match &mf.blocks[mf.entry].term {
             Term::Return(vs) => vs.len(),
             _ => unreachable!(),
@@ -1766,7 +1727,6 @@ fn classify(
             ret_arity,
             reachable: Vec::new(),
             insts: reachable_insts,
-            forced: force,
             bounded: has_bounds,
             template,
             coalescable_params,
@@ -1787,9 +1747,6 @@ fn classify(
         if !arities.all(|a| a == ret_arity) {
             return reject_candidate(&mut timing, "nonuniform_return_arity");
         }
-        if !force && reachable_insts > GENERAL_INSTS {
-            return reject_candidate(&mut timing, "general_size_cap");
-        }
         Ok(Some(CalleeBody {
             func: mf,
             canonical,
@@ -1799,7 +1756,6 @@ fn classify(
             ret_arity,
             reachable,
             insts: reachable_insts,
-            forced: force,
             bounded: has_bounds,
             template,
             coalescable_params,
@@ -3105,7 +3061,6 @@ fn inline_functions_inner(
         records.push(SpliceRecord {
             callee: fref,
             straight: cand.kind == Kind::Straight,
-            forced: cand.forced,
             bounded: cand.bounded,
             transitive,
             callee_insts: cand.insts,
@@ -3386,21 +3341,11 @@ mod tests {
     }
 
     #[test]
-    fn annotation_gate_default_annotated_only() {
-        // Default (size_heuristic=false): ONLY @inline / @pure inline, both force.
-        assert_eq!(annotation_gate(false, false, false), None);       // plain -> NOT inlined
-        assert_eq!(annotation_gate(true, false, false), Some(true));  // @inline -> forced
-        assert_eq!(annotation_gate(false, true, false), Some(true));  // @pure -> forced
-        assert_eq!(annotation_gate(true, true, false), Some(true));
-    }
-
-    #[test]
-    fn annotation_gate_size_heuristic_escape_hatch() {
-        // SKULL_INLINE_SIZE_HEURISTIC: old policy -- any fn eligible, @inline forces.
-        assert_eq!(annotation_gate(false, false, true), Some(false)); // plain -> eligible, not forced
-        assert_eq!(annotation_gate(true, false, true), Some(true));   // @inline -> forced
-        assert_eq!(annotation_gate(false, true, true), Some(false));  // @pure inert in this mode
-        assert_eq!(annotation_gate(true, true, true), Some(true));
+    fn annotation_gate_requires_explicit_opt_in() {
+        assert!(!annotation_gate(false, false));
+        assert!(annotation_gate(true, false));
+        assert!(annotation_gate(false, true));
+        assert!(annotation_gate(true, true));
     }
 
     fn candidate_test_key() -> Instance {

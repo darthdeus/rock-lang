@@ -78,7 +78,9 @@ fn __arena_store<T>(arena: Arena<T>) -> ArenaStore<T>? {
 // reject here.
 fn __arena_store_mut<T>(arena: Arena<T>) -> ArenaStore<T> {
     let store = __arena_store(arena)
-    assert(!is_null(store), "Arena {arena._arena_id} is not live (destroyed, or its scene was unloaded)")
+    if is_null(store) {
+        error("Arena {arena._arena_id} is not live (destroyed, or its scene was unloaded)")
+    }
     return store.unwrap()
 }
 
@@ -225,6 +227,26 @@ fn Arena<T>.insert(arena, value: T) -> Entity<T> {
     store.occupied.set(slot, true)
 
     return entity_new(arena, slot, generation)
+}
+
+// The payload stays untouched; callers must reset every mutable field.
+fn Arena<T>.reuse_retained_entity(arena) -> Entity<T>? {
+    let store = __arena_store_mut(arena)
+    if store.free_indices.len() == 0 { return null }
+
+    let generation = store.next_generation
+    store.next_generation = generation + 1
+    let slot = __slot_alloc(store, store.occupied)
+    assert(slot < vec_len(store.data), "Arena retained slot is outside its data column")
+    store.generations.set(slot, generation)
+    store.occupied.set(slot, true)
+    return entity_new(arena, slot, generation)
+}
+
+// For callers that reset the mutable payload and do not need its new handle.
+fn Arena<T>.reuse_retained(arena) -> T? {
+    let entity = arena.reuse_retained_entity() ?? return null
+    return entity.get()
 }
 
 fn Arena<T>.get(arena, entity: Entity<T>) -> T? {

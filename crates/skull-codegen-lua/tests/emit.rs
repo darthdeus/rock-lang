@@ -10,6 +10,58 @@ mod common;
 use skull_codegen_lua::{emit_function, CodegenCtx};
 use skull_mir::mir::FuncRef;
 
+#[test]
+fn allocation_activation_scopes_hits_and_callbacks_to_replay_observations() {
+    if std::process::Command::new("luajit").arg("-v").output().is_err() {
+        eprintln!("luajit not found; skipping execution check");
+        return;
+    }
+    let output = std::env::temp_dir().join(format!(
+        "rock-allocation-observations-{}.tsv",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&output);
+    let driver = format!(
+        r#"{}
+local began, ended = {{}}, {{}}
+function __rock_observation_profile_begin(observation)
+  began[#began + 1] = observation
+end
+function __rock_observation_profile_end(observation)
+  ended[#ended + 1] = observation
+end
+__rock_allocation_activation_begin()
+for observation = 1, 5 do
+  __rock_allocation_activation_frame_begin(observation)
+  for _ = 1, observation do __rock_alloc_hit("aaaaaaaaaaaaaaaa", false) end
+  __rock_allocation_activation_frame_end()
+end
+assert(table.concat(began, ",") == "2,4,5")
+assert(table.concat(ended, ",") == "2,4,5")
+assert(__rock_allocation_activation_dump(5))
+"#,
+        skull_codegen_lua::ALLOCATION_ACTIVATION_PRELUDE,
+    );
+    let run = std::process::Command::new("luajit")
+        .arg("-e")
+        .arg(driver)
+        .env("SKULL_ALLOCATION_ACTIVATION", &output)
+        .env("SKULL_ALLOCATION_OBSERVATIONS", "2,4-5")
+        .output()
+        .expect("run allocation activation prelude");
+    assert!(
+        run.status.success(),
+        "observation-scoped activation failed: {}",
+        String::from_utf8_lossy(&run.stderr),
+    );
+    let activation = std::fs::read_to_string(&output).expect("activation artifact");
+    let _ = std::fs::remove_file(&output);
+    assert_eq!(
+        activation,
+        "rock.allocation-activation.v3\nframes\t3\nobservations\t2,4,5\nsites\t1\naaaaaaaaaaaaaaaa\t11\t11\t3\t5\t0\n"
+    );
+}
+
 /// Lower `fn_name` from `modules` (last = the user `<test>` module), emit Lua.
 fn emit_dump(mut modules: Vec<skull_parser::Ast>, fn_name: &str) -> String {
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
@@ -136,7 +188,7 @@ fn run(src: &str, driver: &str) -> String {
                 &ws, &ctx, scx.interner(), &name, &func,
             ));
             for nf in func.nested_fns[pre_nested..].iter_mut() {
-                skull_transform::cleanup_with_nobox(&ws, nf);
+                skull_transform::cleanup_with_nobox(&ws, nf).unwrap();
                 skull_transform::recover_counted_loops(&ws, nf);
                 lua.push_str(&skull_codegen_lua::emit_named(
                     &ws, &ctx, scx.interner(), nf.name.as_str(), nf,
@@ -250,10 +302,8 @@ fn param_cell_read() {
         emit("fn id(x: int) -> int { x }", "id"),
         "\
 function id_int_ret_int(c0)
-  local r0
   ::bb0::
-  r0 = c0
-  do return r0 end
+  do return c0 end
 end
 "
     );
@@ -265,11 +315,8 @@ fn int_arithmetic() {
         emit_std("fn add(a: int, b: int) -> int { a + b }", "add"),
         "\
 function add_int_int_ret_int(c0, c1)
-  local r0, r1
   ::bb0::
-  r0 = c0
-  r1 = c1
-  do return (r0 + r1) end
+  do return (c0 + c1) end
 end
 "
     );
@@ -678,18 +725,15 @@ fn use_it() -> int { let t = pair(); t.1 }";
 #[test]
 fn if_as_value_branch_and_cell_join() {
     // The `if`-as-value joins through a cell (no block params). Cell coloring
-    // coalesces the param `x` (dead after its `r0 = c0` read in bb0) with the
-    // join cell, so both are `c0`. Single-use pure values are tree-folded: the
-    // `x < 0` compare folds into the branch and the `0`/`1` literals into the
-    // join stores, so only `r0` (the cross-block `Load x`) keeps a register.
+    // coalesces the param `x` (dead after the branch in bb0) with the join cell,
+    // so both are `c0`. Single-use pure values are tree-folded into their uses.
     assert_eq!(
         emit("fn sign(x: int) -> int { if x < 0 { 0 } else { 1 } }", "sign"),
         "\
 function sign_int_ret_int(c0)
   local r0
   ::bb0::
-  r0 = c0
-  if (r0 < (0)) then goto bb1 else goto bb2 end
+  if (c0 < (0)) then goto bb1 else goto bb2 end
   ::bb1::
   c0 = (0)
   goto bb3

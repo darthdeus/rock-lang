@@ -36,6 +36,10 @@ mod sample_game_c_build_vars;
 mod cimgui_prelude;
 #[path = "release_mode_deleted.rs"]
 mod release_mode_deleted;
+#[path = "replay_report_tests.rs"]
+mod replay_report_tests;
+#[path = "replay_profile_tests.rs"]
+mod replay_profile_tests;
 #[path = "mag_build_vars.rs"]
 mod mag_build_vars;
 #[path = "package.rs"]
@@ -66,6 +70,8 @@ mod nobox_global_reflection_tests;
 mod parser_recovery_surfacing;
 #[path = "production_sources_test.rs"]
 mod production_sources_test;
+#[path = "launcher_engine_commands.rs"]
+mod launcher_engine_commands;
 #[path = "mag_direct_state_authority.rs"]
 mod mag_direct_state_authority;
 #[path = "asset_overlay_defaults.rs"]

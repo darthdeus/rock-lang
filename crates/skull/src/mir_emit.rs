@@ -44,6 +44,7 @@ struct WorkerMode {
     ablation: skull_mir::ablation::Context,
     allocation_report: bool,
     allocation_activation: bool,
+    mem2reg_census: bool,
 }
 
 #[cfg(not(feature = "sequential"))]
@@ -54,6 +55,7 @@ impl WorkerMode {
             ablation: skull_mir::ablation::current_context(),
             allocation_report: crate::allocation_report::enabled(),
             allocation_activation: crate::allocation_report::activation_enabled(),
+            mem2reg_census: crate::mem2reg_stats::enabled(),
         }
     }
 
@@ -65,6 +67,7 @@ impl WorkerMode {
             _allocation_activation: crate::allocation_report::activation_scope(
                 self.allocation_activation,
             ),
+            _mem2reg_census: crate::mem2reg_stats::scope(self.mem2reg_census),
         }
     }
 }
@@ -75,6 +78,7 @@ struct WorkerScope {
     _ablation: skull_mir::ablation::ContextGuard,
     _allocation_report: crate::allocation_report::Scope,
     _allocation_activation: crate::allocation_report::ActivationScope,
+    _mem2reg_census: crate::mem2reg_stats::Scope,
 }
 
 #[cfg(not(feature = "sequential"))]
@@ -3171,16 +3175,13 @@ fn emit_coroutine_chunk(
             format!("cannot build concrete coroutine plan for `{}`: {}", f.name, reason.bucket()),
         )
     })?;
-    let (lua, code_artifact) = crate::coroutine_emit::emit_coroutine_with_artifact(
+    let (lua, code_artifact, allocation_bodies) = crate::coroutine_emit::emit_coroutine_with_artifact(
         ws,
         cg,
         scx.interner(),
         &plan,
         mf,
     )?;
-    // Coroutine construction and transformed step/hook bodies are kept as an
-    // opaque boundary until their generated emitter owns site registration.
-    let allocation_bodies = Vec::new();
     times.emit = te.elapsed();
     times.emit_work = times.emit > Duration::ZERO;
     times.regalloc = skull_codegen_lua::regalloc_time_elapsed().min(times.emit);

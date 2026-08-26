@@ -150,6 +150,8 @@ pub struct AllocationCallEdge {
 pub struct AllocationBody {
     pub emitted_name: String,
     pub diagnostic_name: String,
+    /// Populated only by the separate mem2reg diagnostic scope.
+    pub mem2reg_census: Option<skull_transform::Mem2RegCensus>,
     pub direct_sites: Vec<AllocationSite>,
     pub call_edges: Vec<AllocationCallEdge>,
 }
@@ -301,12 +303,19 @@ impl AllocationReport {
                 .map(|name| name.to_string())
                 .collect::<Vec<_>>()
         };
+        let coroutine_roots = self
+            .bodies
+            .keys()
+            .filter(|name| name.ends_with("__step"))
+            .cloned()
+            .collect::<Vec<_>>();
         self.lifecycle_routes = vec![
             self.trace_from_emitted_names("frame.update", roots_for(&["update", "late_update"])),
             self.trace_from_emitted_names(
                 "frame.draw",
                 roots_for(&["draw", "late_draw", "post_imgui_draw"]),
             ),
+            self.trace_from_emitted_names("coroutine.resume", coroutine_roots),
         ];
     }
 
@@ -470,6 +479,8 @@ pub(crate) fn collect_emitted_body(
     Some(AllocationBody {
         emitted_name: emitted_name.to_string(),
         diagnostic_name: diagnostic_name.to_string(),
+        mem2reg_census: (crate::mem2reg_stats::enabled() && !func.is_coroutine)
+            .then(|| skull_transform::mem2reg_census(func)),
         direct_sites,
         call_edges: call_edges
             .into_iter()

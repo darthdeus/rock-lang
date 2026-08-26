@@ -97,6 +97,31 @@ fn main() {
 }
 "#;
 
+const COROUTINE_RETAINS_MULTI_RETURN_AFTER_INITIAL_CALL: &str = r#"
+value Handle { a: int, b: int, c: int, d: int }
+
+fn make_handle() -> Handle {
+    return Handle { a: 1, b: 2, c: 3, d: 4 }
+}
+
+fn first(h: Handle) -> int { return h.a + h.b }
+fn all(h: Handle) -> int { return h.a + h.b + h.c + h.d }
+fn optional_all(h: Handle?) -> int { return all(h.unwrap()) }
+
+co fn keep_handle() -> Coroutine<int, int, ()> {
+    let h = make_handle()
+    let initial = first(h)
+    let retained = optional_all(h)
+    yield initial
+    yield retained
+    return retained
+}
+
+fn main() {
+    for n in keep_handle() { print(n) }
+}
+"#;
+
 fn run(src: &str, tag: &str) -> String {
     let lua = common::try_emit_module(src)
         .unwrap_or_else(|e| panic!("must emit ({tag}): {}", e.message));
@@ -161,6 +186,14 @@ fn each_column_instantiation_owns_its_own_step_symbol() {
 #[test]
 fn a_non_generic_coroutine_over_a_column_vec_is_correct() {
     assert_eq!(run(CONCRETE_CO_COLUMN, "concrete_co_col"), "2");
+}
+
+#[test]
+fn a_coroutine_keeps_a_multi_return_used_after_its_first_call() {
+    assert_eq!(
+        run(COROUTINE_RETAINS_MULTI_RETURN_AFTER_INITIAL_CALL, "co_retained_multi"),
+        "3\n10"
+    );
 }
 
 /// Every top-level definition whose symbol starts with `prefix`, and every
