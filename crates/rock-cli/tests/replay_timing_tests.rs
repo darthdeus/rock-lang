@@ -293,6 +293,13 @@ fn tick_count(text: &str) -> usize {
     text.lines().filter(|line| line.starts_with("t ")).count()
 }
 
+fn image_resource_lines(text: &str) -> Vec<Vec<&str>> {
+    text.lines()
+        .filter(|line| line.starts_with("i "))
+        .map(|line| line.split_whitespace().collect())
+        .collect()
+}
+
 fn assert_load_rejected(out: &Output, label: &str) {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(!out.status.success(), "{label} must be rejected\n{stderr}");
@@ -355,6 +362,44 @@ fn timing_samples_align_exactly_with_observation_ordinals_and_ticks() {
             })
             .collect::<Vec<_>>(),
         "each exact sample must retain its observation ordinal, tick, and phase tuple"
+    );
+}
+
+#[test]
+fn a_runtime_image_miss_is_attached_to_its_completed_replay_observation() {
+    let dir = tempfile::tempdir().expect("log dir");
+    let log = dir.path().join("image-load.replay");
+    let log_s = log.to_string_lossy().into_owned();
+    let recorded = record_raw(
+        "bitgun",
+        6,
+        &log_s,
+        &[
+            ("STONE_TEST_IMAGE_LOAD_AT_FRAME", "3"),
+            ("STONE_TEST_IMAGE_LOAD_PATH", "assets/Sprites/error.png"),
+        ],
+    );
+    assert!(
+        recorded.status.success(),
+        "record failed: {}",
+        String::from_utf8_lossy(&recorded.stderr)
+    );
+
+    let text = std::fs::read_to_string(&log).expect("read replay");
+    let rows = image_resource_lines(&text);
+    assert_eq!(rows.len(), 1, "one forced cache miss must emit one image-resource row\n{text}");
+    assert_eq!(rows[0][1], "2", "the third frame is observation ordinal two");
+    assert_eq!(rows[0][2], "2", "resource ordinal and tick must agree");
+    assert_eq!(rows[0][3], "1", "one native image load succeeds");
+    assert_eq!(rows[0][4], "0", "the fixture path must not fail");
+    assert_eq!(rows[0][11], "1", "the row must carry one exact path");
+    assert_eq!(decode_hex_string(rows[0][13]), "assets/Sprites/error.png");
+
+    let playback = replay_dump("bitgun", 6, &log_s, &[]);
+    assert_eq!(
+        playback["__stone_diag"]["STONE_REPLAY_RECORDED_IMAGE_RESOURCE_COUNT"],
+        1,
+        "playback must retain the recorded image row on its observation"
     );
 }
 
