@@ -276,7 +276,7 @@ fn render(a: int) -> string {
     );
     assert!(
         emit.lua
-            .contains("function __rock_allocation_activation_frame_begin()"),
+            .contains("function __rock_allocation_activation_frame_begin(observation)"),
         "the runtime must distinguish active frames from outside-frame hits",
     );
     assert!(
@@ -343,5 +343,97 @@ global FRAME_VALUE: int = 0
         draw.findings.len(),
         0,
         "the scalar draw route has no allocation-capable site"
+    );
+}
+
+#[test]
+fn allocation_report_registers_and_instruments_transformed_coroutine_bodies() {
+    let _activation = AllocationActivationGuard::on();
+    let emit = emit_mir(
+        r#"
+enum Event { Text(string) }
+global SINK: string = ""
+
+co fn worker(seed: int) -> Coroutine<Event> {
+    defer {
+        SINK = "cleanup={seed}"
+    }
+    on_killed(() => {
+        SINK = "killed={seed}"
+    })
+    yield Event::Text("value={seed}")
+}
+
+fn make_worker() -> Coroutine<Event> {
+    return worker(7)
+}
+"#,
+    );
+
+    let coroutine_bodies = emit
+        .allocation_report
+        .bodies
+        .values()
+        .filter(|body| body.emitted_name.contains("worker_int_ret_Coroutine_Event"))
+        .collect::<Vec<_>>();
+    assert!(
+        coroutine_bodies
+            .iter()
+            .any(|body| body.emitted_name.ends_with("__step")),
+        "the transformed coroutine step must be a reported body: {coroutine_bodies:#?}",
+    );
+    assert!(
+        coroutine_bodies
+            .iter()
+            .any(|body| body.emitted_name.contains("__defer")),
+        "the detached defer must be a reported body: {coroutine_bodies:#?}",
+    );
+    assert!(
+        coroutine_bodies
+            .iter()
+            .any(|body| body.emitted_name.contains("__on_killed")),
+        "the detached lifecycle hook must be a reported body: {coroutine_bodies:#?}",
+    );
+
+    let sites = coroutine_bodies
+        .iter()
+        .flat_map(|body| body.direct_sites.iter())
+        .filter(|site| site.kind.as_str() != "opaque-call")
+        .collect::<Vec<_>>();
+    assert!(sites.len() >= 3, "step, defer, and hook sites must be visible: {sites:#?}");
+    for site in sites {
+        assert!(
+            emit.lua.contains(&format!("__rock_alloc_hit(\"{:016x}\", ", site.id)),
+            "coroutine site {:016x} must share its ID with runtime activation",
+            site.id,
+        );
+    }
+
+    let resumes = emit
+        .allocation_report
+        .lifecycle_routes
+        .iter()
+        .find(|route| route.name == "coroutine.resume")
+        .expect("coroutine resume route");
+    assert!(
+        resumes.roots.iter().any(|root| root.ends_with("__step")),
+        "transformed steps are the resume roots: {resumes:#?}",
+    );
+    assert!(
+        resumes.findings.iter().any(|finding| {
+            finding.body.ends_with("__step") && finding.site.kind.as_str() == "string-concat"
+        }),
+        "the resume route must reach allocations in transformed steps: {resumes:#?}",
+    );
+
+    let route = emit
+        .allocation_report
+        .trace_from_diagnostic_names("manual.make", &["make_worker"]);
+    assert!(
+        route
+            .opaque_boundaries
+            .iter()
+            .any(|finding| finding.site.detail.as_deref().is_some_and(|detail| detail.contains("worker"))),
+        "constructing a coroutine must remain an explicit opaque boundary rather than falsely tracing a future resume",
     );
 }
