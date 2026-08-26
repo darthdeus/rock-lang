@@ -335,7 +335,6 @@ fn assert_mag_seek_state_matches(
     );
     for name in [
         "MAG_ACTIVE_WORLD",
-        "player",
         "bank_gold",
         "journal",
         "history",
@@ -343,6 +342,8 @@ fn assert_mag_seek_state_matches(
     ] {
         assert!(exact.contains(name), "{name} must be admitted as direct simulation state");
     }
+    assert!(!exact.contains("player"),
+        "Player ownership must remain inside MAG_ACTIVE_WORLD, not a duplicate global");
     assert_f32_state_matches(&got["mag"]["WISPS"], &want["mag"]["WISPS"], "mag.WISPS");
     assert_mag_seek_populations_match(got, want, label);
     assert_sim_state_matches(got, want, &exact, label);
@@ -396,7 +397,6 @@ fn mag_seek_equivalence_state_names(
         "MOTES",
         "MAG_ACTIVE_WORLD",
         "WISPS",
-        "player",
         "bank_gold",
         "journal",
         "history",
@@ -404,6 +404,8 @@ fn mag_seek_equivalence_state_names(
     ] {
         assert!(sim.contains(name), "{name} must be admitted as simulation state");
     }
+    assert!(!sim.contains("player"),
+        "Player ownership must remain inside MAG_ACTIVE_WORLD, not a duplicate global");
     for name in ["TELEMETRY_SESSION_OPEN", "TELEMETRY_LAST_FRAME_T"] {
         assert!(!sim.contains(name), "{name} is telemetry side-channel state");
     }

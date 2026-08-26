@@ -661,6 +661,14 @@ _G.__rock_state_entry_get = function(entry)
   if #keys == 1 then return _G.__rock_state_get(keys[1]) end
   error("StateSchema entry has no logical realization " .. tostring(entry.identity), 0)
 end
+_G.__rock_state_entry_try_get = function(entry)
+  for _, key in ipairs(entry.session_keys or {}) do
+    if _G.__rock_state_has(key) then
+      return true, _G.__rock_state_entry_get(entry)
+    end
+  end
+  return false, nil
+end
 _G.__rock_state_entry_set = function(entry, value)
   local adapters = rawget(_G, "__ROCK_STATE_NOBOX")
   local adapter = adapters and adapters[entry.identity]
