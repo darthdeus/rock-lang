@@ -36,6 +36,12 @@ mod sample_game_c_build_vars;
 mod cimgui_prelude;
 #[path = "release_mode_deleted.rs"]
 mod release_mode_deleted;
+#[path = "replay_report_tests.rs"]
+mod replay_report_tests;
+#[path = "replay_profile_tests.rs"]
+mod replay_profile_tests;
+#[path = "replay_profile_report_tests.rs"]
+mod replay_profile_report_tests;
 #[path = "mag_build_vars.rs"]
 mod mag_build_vars;
 #[path = "package.rs"]
