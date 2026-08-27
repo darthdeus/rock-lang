@@ -186,104 +186,6 @@ struct GlobalInit {
     line: String,
 }
 
-/// Transitive global-read closure over the call graph, on interned u32 ids so the
-/// fixpoint's repeated set unions don't hash/clone strings. An init `g = f()` must
-/// run after every global `f` touches even when the init expression names none of
-/// them (`global sprite_batch_shader = watched_shader(...)` reaches
-/// `SHADERS_TO_LOAD` only through `watched_shader`). Mirrors rock-codegen's
-/// `global_dependencies.sorted_order`.
-struct GlobalReach {
-    id_of: FxHashMap<Ustr, u32>,
-    names: Vec<Ustr>,
-    closure: Vec<FxHashSet<u32>>,
-}
-
-impl GlobalReach {
-    /// The global names a fn transitively reads (empty if the name is unknown).
-    fn deps_of(&self, fn_name: Ustr) -> Vec<Ustr> {
-        let Some(&id) = self.id_of.get(&fn_name) else {
-            return Vec::new();
-        };
-        self.closure[id as usize]
-            .iter()
-            .map(|&g| self.names[g as usize])
-            .collect()
-    }
-}
-
-/// Build the transitive closure from per-fn direct global reads + direct calls.
-fn transitive_global_reads(
-    direct_globals: &FxHashMap<Ustr, Vec<Ustr>>,
-    direct_calls: &FxHashMap<Ustr, Vec<Ustr>>,
-) -> GlobalReach {
-    let mut id_of: FxHashMap<Ustr, u32> = FxHashMap::default();
-    let mut names: Vec<Ustr> = Vec::new();
-    let intern = |s: Ustr, id_of: &mut FxHashMap<Ustr, u32>, names: &mut Vec<Ustr>| -> u32 {
-        match id_of.get(&s) {
-            Some(&i) => i,
-            None => {
-                let i = names.len() as u32;
-                names.push(s);
-                id_of.insert(s, i);
-                i
-            }
-        }
-    };
-    for (f, gs) in direct_globals {
-        intern(*f, &mut id_of, &mut names);
-        for g in gs {
-            intern(*g, &mut id_of, &mut names);
-        }
-    }
-    for (f, cs) in direct_calls {
-        intern(*f, &mut id_of, &mut names);
-        for c in cs {
-            intern(*c, &mut id_of, &mut names);
-        }
-    }
-    let n = names.len();
-    let mut closure: Vec<FxHashSet<u32>> = vec![FxHashSet::default(); n];
-    let mut callees: Vec<Vec<u32>> = vec![Vec::new(); n];
-    for (f, gs) in direct_globals {
-        let fi = id_of[f] as usize;
-        for g in gs {
-            closure[fi].insert(id_of[g]);
-        }
-    }
-    for (f, cs) in direct_calls {
-        let fi = id_of[f] as usize;
-        callees[fi].extend(cs.iter().map(|c| id_of[c]));
-    }
-    // Fixpoint: closure[f] |= closure[callee]. `add` separates the read of callee
-    // sets from the write to `closure[f]` (borrow), and is u32, not String.
-    let mut add: Vec<u32> = Vec::new();
-    loop {
-        let mut changed = false;
-        for fi in 0..n {
-            if callees[fi].is_empty() {
-                continue;
-            }
-            add.clear();
-            for &c in &callees[fi] {
-                for &g in &closure[c as usize] {
-                    if !closure[fi].contains(&g) {
-                        add.push(g);
-                    }
-                }
-            }
-            for &g in &add {
-                if closure[fi].insert(g) {
-                    changed = true;
-                }
-            }
-        }
-        if !changed {
-            break;
-        }
-    }
-    GlobalReach { id_of, names, closure }
-}
-
 /// Round-based topo-sort: an init emits once every global it (transitively) reads
 /// that ALSO has an init line is already emitted (self-refs ignored). Source order
 /// is kept within a round. No progress => mutually-referential initializers —
@@ -5592,7 +5494,7 @@ fn assemble(
     // Order the init lines by their transitive global-read closure over the full
     // call graph (now that every fn's direct facts are recorded).
     let ts = Instant::now();
-    let reach = transitive_global_reads(&direct_globals, &direct_calls);
+    let reach = skull_mir::reach::transitive_global_reads(&direct_globals, &direct_calls);
     // Init ordering is stated over SOURCE globals, but a `nobox` global is READ
     // through its leaves, so a leaf dep has to resolve back to the group that
     // owns it or the dependent initializer sorts before it. Built from the

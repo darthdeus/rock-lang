@@ -22,8 +22,94 @@ use crate::mir::{Block, FuncRef, Inst, MirFunc};
 use comfy_la_arena::Idx;
 use ustr::Ustr;
 use bone_semantic::prelude::CompilerError;
-use rustc_hash::FxHashSet as HashSet;
+use rustc_hash::{FxHashMap, FxHashSet as HashSet};
 use std::hash::Hash;
+
+pub struct GlobalReach {
+    id_of: FxHashMap<Ustr, u32>,
+    names: Vec<Ustr>,
+    closure: Vec<HashSet<u32>>,
+}
+
+impl GlobalReach {
+    pub fn deps_of(&self, body: Ustr) -> Vec<Ustr> {
+        let Some(&id) = self.id_of.get(&body) else {
+            return Vec::new();
+        };
+        self.closure[id as usize]
+            .iter()
+            .map(|&global| self.names[global as usize])
+            .collect()
+    }
+}
+
+pub fn transitive_global_reads(
+    direct_globals: &FxHashMap<Ustr, Vec<Ustr>>,
+    direct_calls: &FxHashMap<Ustr, Vec<Ustr>>,
+) -> GlobalReach {
+    let mut id_of = FxHashMap::default();
+    let mut names = Vec::new();
+    let intern = |name: Ustr, id_of: &mut FxHashMap<Ustr, u32>, names: &mut Vec<Ustr>| {
+        match id_of.get(&name) {
+            Some(&index) => index,
+            None => {
+                let index = names.len() as u32;
+                names.push(name);
+                id_of.insert(name, index);
+                index
+            }
+        }
+    };
+    for (body, globals) in direct_globals {
+        intern(*body, &mut id_of, &mut names);
+        for global in globals {
+            intern(*global, &mut id_of, &mut names);
+        }
+    }
+    for (body, callees) in direct_calls {
+        intern(*body, &mut id_of, &mut names);
+        for callee in callees {
+            intern(*callee, &mut id_of, &mut names);
+        }
+    }
+    let mut closure = vec![HashSet::default(); names.len()];
+    let mut callees = vec![Vec::new(); names.len()];
+    for (body, globals) in direct_globals {
+        let body = id_of[body] as usize;
+        for global in globals {
+            closure[body].insert(id_of[global]);
+        }
+    }
+    for (body, direct) in direct_calls {
+        let body = id_of[body] as usize;
+        callees[body].extend(direct.iter().map(|callee| id_of[callee]));
+    }
+    let mut additions = Vec::new();
+    loop {
+        let mut changed = false;
+        for body in 0..closure.len() {
+            additions.clear();
+            for &callee in &callees[body] {
+                for &global in &closure[callee as usize] {
+                    if !closure[body].contains(&global) {
+                        additions.push(global);
+                    }
+                }
+            }
+            for &global in &additions {
+                changed |= closure[body].insert(global);
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    GlobalReach {
+        id_of,
+        names,
+        closure,
+    }
+}
 
 /// The per-backend parameters of the reachability search.
 ///
