@@ -182,6 +182,33 @@ mod tests {
             .expect_err("typo must be rejected");
         assert!(err.to_string().contains("wgpuu"), "unhelpful error: {err}");
     }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn staged_cdylib_uses_its_stable_name() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source = dir.path().join("probe.c");
+        let dylib = dir.path().join("libsource.dylib");
+        fs_err::write(&source, "int probe(void) { return 1; }\n").expect("write source");
+        let compile = Command::new("clang")
+            .args(["-dynamiclib"])
+            .arg(&source)
+            .arg("-o")
+            .arg(&dylib)
+            .status()
+            .expect("run clang");
+        assert!(compile.success(), "compile probe dylib");
+
+        set_macos_install_name(&dylib, "stone").expect("set install name");
+        let output = Command::new("otool")
+            .arg("-D")
+            .arg(&dylib)
+            .output()
+            .expect("run otool");
+        assert!(output.status.success(), "read install name");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.lines().any(|line| line == "@rpath/libstone.dylib"), "{stdout}");
+    }
 }
 
 /// Build a cargo crate and stage its cdylib into tmp/ under the given name.
@@ -273,6 +300,10 @@ pub fn stage_cdylib(src_stem: &str, dst_stem: &str) -> Result<()> {
     // path so concurrent stagers can't read a mid-resign file.
     #[cfg(target_os = "macos")]
     {
+        if let Err(error) = set_macos_install_name(Path::new(&staging), dst_stem) {
+            let _ = fs_err::remove_file(&staging);
+            return Err(error);
+        }
         let status = Command::new("codesign")
             .args(["--force", "--sign", "-", &staging])
             .status()?;
@@ -283,6 +314,18 @@ pub fn stage_cdylib(src_stem: &str, dst_stem: &str) -> Result<()> {
     }
 
     fs_err::rename(&staging, &dst)?;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn set_macos_install_name(path: &Path, dst_stem: &str) -> Result<()> {
+    let status = Command::new("install_name_tool")
+        .args(["-id", &format!("@rpath/lib{dst_stem}.dylib")])
+        .arg(path)
+        .status()?;
+    if !status.success() {
+        anyhow::bail!("install_name_tool -id failed for {}", path.display());
+    }
     Ok(())
 }
 
