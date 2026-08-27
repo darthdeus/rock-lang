@@ -11,6 +11,66 @@ fn workspace_root() -> &'static Path {
         .expect("workspace root")
 }
 
+#[test]
+fn replay_playback_cannot_emit_live_telemetry() {
+    let repository = workspace_root().parent().expect("repository root");
+    let source = std::fs::read_to_string(repository.join("stone/engine/systems/telemetry.rock"))
+        .expect("telemetry source");
+    let record = source
+        .split("fn telemetry_record(")
+        .nth(1)
+        .expect("telemetry_record")
+        .split("inline(lua) fn telemetry_record_native")
+        .next()
+        .expect("telemetry_record body");
+    let native = source
+        .split("inline(lua) fn telemetry_record_native")
+        .nth(1)
+        .expect("native telemetry wrapper")
+        .split("inline(lua) fn telemetry_close")
+        .next()
+        .expect("native telemetry body");
+
+    assert!(
+        record.contains("if replay_is_replay() { return true }"),
+        "ordinary replay playback still reaches the live telemetry sink"
+    );
+    assert!(
+        !native.contains("__playback_seeking"),
+        "the native wrapper retains a second seek-only telemetry policy"
+    );
+
+    let mag_policy = std::fs::read_to_string(repository.join("mag/telemetry.rock"))
+        .expect("MAG telemetry policy");
+    let can_record = mag_policy
+        .split("fn mag_telemetry_can_record()")
+        .nth(1)
+        .expect("mag_telemetry_can_record")
+        .split("fn mag_telemetry_apply")
+        .next()
+        .expect("mag_telemetry_can_record body");
+    assert!(
+        can_record.contains("&& !replay_is_replay()"),
+        "replay playback still enables eager MAG telemetry construction"
+    );
+
+    let events = std::fs::read_to_string(repository.join("mag/telemetry_events.rock"))
+        .expect("MAG telemetry events");
+    let spell_phase = events
+        .split("fn telemetry_spell_phase(")
+        .nth(1)
+        .expect("telemetry_spell_phase")
+        .split("fn telemetry_source_cohort_name")
+        .next()
+        .expect("telemetry_spell_phase body");
+    assert!(
+        spell_phase
+            .find("if !mag_telemetry_can_record() { return }")
+            .is_some_and(|guard| guard < spell_phase.find("telemetry_data()").unwrap()),
+        "spell telemetry constructs its payload before replay policy can reject it"
+    );
+}
+
 fn record_raw(game: &str, frames: u32, log: &str, env: &[(&str, &str)]) -> Output {
     let scratch = tempfile::tempdir().expect("record scratch");
     Command::new(env!("CARGO_BIN_EXE_rock"))
@@ -136,6 +196,56 @@ fn exact_phase_samples(n: usize, first: u64) -> String {
         .join(",")
 }
 
+#[test]
+fn replay_profile_range_emits_every_requested_observation_and_the_final_boundary() {
+    let dir = tempfile::tempdir().expect("replay profile range");
+    let log = dir.path().join("range.replay");
+    let timings = exact_samples(8, 10_000);
+    let phases = exact_phase_samples(8, 1_000);
+    let recorded = record_raw(
+        "bitgun",
+        8,
+        log.to_str().unwrap(),
+        &[
+            ("STONE_REPLAY_TIMING_US", timings.as_str()),
+            ("STONE_REPLAY_PHASE_TIMING_US", phases.as_str()),
+        ],
+    );
+    assert!(
+        recorded.status.success(),
+        "record failed: {}",
+        String::from_utf8_lossy(&recorded.stderr)
+    );
+
+    let playback = replay_raw(
+        "bitgun",
+        5,
+        log.to_str().unwrap(),
+        &[
+            ("STONE_REPLAY_PROFILE_FROM", "2"),
+            ("STONE_REPLAY_PROFILE_TO", "4"),
+            ("STONE_REPLAY_PROFILE_WIRE", "1"),
+        ],
+    );
+    assert!(
+        playback.status.success(),
+        "profile playback failed: {}",
+        String::from_utf8_lossy(&playback.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&playback.stdout);
+    let rows = stdout
+        .lines()
+        .filter(|line| line.starts_with("ROCK_REPLAY_PROFILE_ROW "))
+        .collect::<Vec<_>>();
+    assert_eq!(rows.len(), 3, "requested 2-4 inclusive:\n{stdout}");
+    for (row, ordinal) in rows.iter().zip(2..=4) {
+        assert!(
+            row.starts_with(&format!("ROCK_REPLAY_PROFILE_ROW {ordinal} ")),
+            "range rows must be exact and ordered: {rows:?}"
+        );
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct TimingRow {
     ordinal: usize,
@@ -243,6 +353,13 @@ fn tick_count(text: &str) -> usize {
     text.lines().filter(|line| line.starts_with("t ")).count()
 }
 
+fn image_resource_lines(text: &str) -> Vec<Vec<&str>> {
+    text.lines()
+        .filter(|line| line.starts_with("i "))
+        .map(|line| line.split_whitespace().collect())
+        .collect()
+}
+
 fn assert_load_rejected(out: &Output, label: &str) {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(!out.status.success(), "{label} must be rejected\n{stderr}");
@@ -288,8 +405,8 @@ fn timing_samples_align_exactly_with_observation_ordinals_and_ticks() {
 
     let text = std::fs::read_to_string(&log).expect("read replay");
     assert!(
-        text.starts_with("STONE_REPLAY 11\n"),
-        "phase timing logs must use v11\n{text}"
+        text.starts_with("STONE_REPLAY 13\n"),
+        "phase timing logs must use v13\n{text}"
     );
     assert_eq!(tick_count(&text), 8, "fixture must have eight observations");
     assert_eq!(
@@ -305,6 +422,44 @@ fn timing_samples_align_exactly_with_observation_ordinals_and_ticks() {
             })
             .collect::<Vec<_>>(),
         "each exact sample must retain its observation ordinal, tick, and phase tuple"
+    );
+}
+
+#[test]
+fn a_runtime_image_miss_is_attached_to_its_completed_replay_observation() {
+    let dir = tempfile::tempdir().expect("log dir");
+    let log = dir.path().join("image-load.replay");
+    let log_s = log.to_string_lossy().into_owned();
+    let recorded = record_raw(
+        "bitgun",
+        6,
+        &log_s,
+        &[
+            ("STONE_TEST_IMAGE_LOAD_AT_FRAME", "3"),
+            ("STONE_TEST_IMAGE_LOAD_PATH", "assets/Sprites/error.png"),
+        ],
+    );
+    assert!(
+        recorded.status.success(),
+        "record failed: {}",
+        String::from_utf8_lossy(&recorded.stderr)
+    );
+
+    let text = std::fs::read_to_string(&log).expect("read replay");
+    let rows = image_resource_lines(&text);
+    assert_eq!(rows.len(), 1, "one forced cache miss must emit one image-resource row\n{text}");
+    assert_eq!(rows[0][1], "2", "the third frame is observation ordinal two");
+    assert_eq!(rows[0][2], "2", "resource ordinal and tick must agree");
+    assert_eq!(rows[0][3], "1", "one native image load succeeds");
+    assert_eq!(rows[0][4], "0", "the fixture path must not fail");
+    assert_eq!(rows[0][11], "1", "the row must carry one exact path");
+    assert_eq!(decode_hex_string(rows[0][13]), "assets/Sprites/error.png");
+
+    let playback = replay_dump("bitgun", 6, &log_s, &[]);
+    assert_eq!(
+        playback["__stone_diag"]["STONE_REPLAY_RECORDED_IMAGE_RESOURCE_COUNT"],
+        1,
+        "playback must retain the recorded image row on its observation"
     );
 }
 
@@ -339,8 +494,8 @@ fn opted_in_slow_frames_carry_bounded_named_profiler_attribution() {
     );
     let text = std::fs::read_to_string(&profiled).expect("read profiled replay");
     assert!(
-        text.starts_with("STONE_REPLAY 11\n"),
-        "slow-frame attribution requires the versioned v11 grammar\n{text}"
+        text.starts_with("STONE_REPLAY 13\n"),
+        "slow-frame attribution requires the versioned v13 grammar\n{text}"
     );
     let rows = slow_frame_lines(&text);
     assert_eq!(
@@ -448,8 +603,8 @@ fn crash_tail_can_omit_only_the_final_completed_timing_sample() {
     let ticks = tick_count(&text);
     let timings = timing_lines(&text);
     assert!(
-        text.starts_with("STONE_REPLAY 11\n"),
-        "crash log must retain v11\n{text}"
+        text.starts_with("STONE_REPLAY 13\n"),
+        "crash log must retain v13\n{text}"
     );
     assert!(ticks > 0, "crash log must retain observations");
     assert_eq!(
@@ -478,7 +633,7 @@ fn legacy_v8_without_timing_remains_playable_and_reports_an_empty_track() {
         .map(str::to_string)
         .collect::<Vec<_>>()
         .join("\n")
-        .replacen("STONE_REPLAY 11", "STONE_REPLAY 8", 1)
+        .replacen("STONE_REPLAY 13", "STONE_REPLAY 8", 1)
         + "\n";
     std::fs::write(&log, legacy).expect("write legacy replay");
 
@@ -509,7 +664,7 @@ fn legacy_v9_total_timing_remains_playable_without_phase_attribution() {
         })
         .collect::<Vec<_>>()
         .join("\n")
-        .replacen("STONE_REPLAY 11", "STONE_REPLAY 9", 1)
+        .replacen("STONE_REPLAY 13", "STONE_REPLAY 9", 1)
         + "\n";
     std::fs::write(&log, legacy).expect("write legacy replay");
 
@@ -533,7 +688,7 @@ fn legacy_v10_phase_timing_remains_playable_without_slow_profiles() {
     assert!(recorded.status.success(), "record failed");
     let legacy = std::fs::read_to_string(&log)
         .expect("read replay")
-        .replacen("STONE_REPLAY 11", "STONE_REPLAY 10", 1);
+        .replacen("STONE_REPLAY 13", "STONE_REPLAY 10", 1);
     std::fs::write(&log, legacy).expect("write v10 replay");
 
     let state = replay_dump("bitgun", 8, &log_s, &[]);

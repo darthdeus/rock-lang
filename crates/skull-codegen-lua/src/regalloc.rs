@@ -636,6 +636,56 @@ fn cell_uses(inst: &Inst, push: &mut impl FnMut(Idx<Cell>)) {
     }
 }
 
+fn inlined_operand_cell_uses(
+    func: &MirFunc,
+    inline: &[bool],
+    inst: &Inst,
+    push: &mut impl FnMut(Idx<Cell>),
+) {
+    inst_uses(inst, &mut |value| {
+        if !inline[raw(value)] {
+            return;
+        }
+        match &func.insts[value] {
+            Inst::Load(cell) => push(*cell),
+            nested => inlined_operand_cell_uses(func, inline, nested, push),
+        }
+    });
+}
+
+fn emitted_cell_uses(
+    func: &MirFunc,
+    inline: Option<&[bool]>,
+    id: Idx<Inst>,
+    push: &mut impl FnMut(Idx<Cell>),
+) {
+    if inline.is_some_and(|inline| inline[raw(id)]) {
+        return;
+    }
+    cell_uses(&func.insts[id], push);
+    if let Some(inline) = inline {
+        inlined_operand_cell_uses(func, inline, &func.insts[id], push);
+    }
+}
+
+fn term_cell_uses(
+    func: &MirFunc,
+    inline: Option<&[bool]>,
+    term: &Term,
+    push: &mut impl FnMut(Idx<Cell>),
+) {
+    let Some(inline) = inline else { return };
+    term_uses(term, &mut |value| {
+        if !inline[raw(value)] {
+            return;
+        }
+        match &func.insts[value] {
+            Inst::Load(cell) => push(*cell),
+            nested => inlined_operand_cell_uses(func, inline, nested, push),
+        }
+    });
+}
+
 /// Color the cells of an ORDINARY function (NOT a coroutine `__step` — callers
 /// pass those an all-`u32::MAX` table so they keep raw `c<raw>` names and the
 /// frame-field naming is preserved). Returns a dense `raw(cell) -> color` table
@@ -643,6 +693,10 @@ fn cell_uses(inst: &Inst, push: &mut impl FnMut(Idx<Cell>)) {
 /// renders a colored cell as `c<color>`. Cells in detached nested CFGs are
 /// forced to a unique color and are never emitted with their enclosing body.
 pub fn color_cells(func: &MirFunc) -> Vec<u32> {
+    color_cells_with_inlined_loads(func, None)
+}
+
+pub(crate) fn color_cells_with_inlined_loads(func: &MirFunc, inline: Option<&[bool]>) -> Vec<u32> {
     let top: Vec<Idx<Block>> = reachable_blocks_from(func, func.entry());
     let top_set: HashSet<Idx<Block>> = top.iter().copied().collect();
     let n = top.len();
@@ -699,7 +753,7 @@ pub fn color_cells(func: &MirFunc) -> Vec<u32> {
         for &id in &func.blocks[b].insts {
             // A MapNext both uses (cursor) and defs (key,val); process the use
             // first so the cursor read is upward-exposed.
-            cell_uses(&func.insts[id], &mut |c| {
+            emitted_cell_uses(func, inline, id, &mut |c| {
                 let k = ci[raw(c)] as usize;
                 if def_set[bi].words[k >> 6] & (1u64 << (k & 63)) == 0 {
                     use_set[bi].set(k);
@@ -707,6 +761,12 @@ pub fn color_cells(func: &MirFunc) -> Vec<u32> {
             });
             cell_defs(&func.insts[id], &mut |c| def_set[bi].set(ci[raw(c)] as usize));
         }
+        term_cell_uses(func, inline, &func.blocks[b].term, &mut |c| {
+            let k = ci[raw(c)] as usize;
+            if def_set[bi].words[k >> 6] & (1u64 << (k & 63)) == 0 {
+                use_set[bi].set(k);
+            }
+        });
     }
 
     // Backward liveness via a WORKLIST (in = use ∪ (out \ def)). Cells cross
@@ -824,6 +884,7 @@ pub fn color_cells(func: &MirFunc) -> Vec<u32> {
                 live.or_with(&live_in[si]);
             }
         });
+        term_cell_uses(func, inline, &block.term, &mut |c| live.set(ci[raw(c)] as usize));
         for &id in block.insts.iter().rev() {
             defs.clear();
             cell_defs(&func.insts[id], &mut |c| defs.push(ci[raw(c)] as usize));
@@ -833,7 +894,7 @@ pub fn color_cells(func: &MirFunc) -> Vec<u32> {
             for &d in &defs {
                 live.remove(d);
             }
-            cell_uses(&func.insts[id], &mut |c| live.set(ci[raw(c)] as usize));
+            emitted_cell_uses(func, inline, id, &mut |c| live.set(ci[raw(c)] as usize));
         }
         // Params are live from entry: interfere them with live-in to entry and
         // with one another.

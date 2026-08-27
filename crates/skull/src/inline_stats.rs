@@ -34,8 +34,6 @@ pub struct InlineStatsReport {
     pub total_splices: usize,
     pub total_copies: usize,
     pub distinct_callees: usize,
-    pub forced: usize,
-    pub over_cap: usize,
     /// `(name, body_insts, times, total_copies)` of the most-copied callee.
     pub top_callee: Option<(String, usize, usize, usize)>,
 }
@@ -44,7 +42,6 @@ struct CalleeAgg {
     name: String,
     body_insts: usize,
     kind: &'static str,
-    forced: bool,
     times: usize,
     total_copies: usize,
 }
@@ -105,7 +102,6 @@ pub fn report(ws: &Workspace) -> InlineStatsReport {
                 name: ws.module(r.callee.module).functions[r.callee.func].name.to_string(),
                 body_insts: r.callee_insts,
                 kind: if r.straight { "straight" } else { "general" },
-                forced: r.forced,
                 times: 0,
                 total_copies: 0,
             });
@@ -119,8 +115,6 @@ pub fn report(ws: &Workspace) -> InlineStatsReport {
     callee_rows.sort_by(|a, b| b.total_copies.cmp(&a.total_copies).then(a.name.cmp(&b.name)));
     callers.sort_by(|a, b| b.2.cmp(&a.2).then(a.0.cmp(&b.0)));
 
-    let forced = per_callee.values().filter(|c| c.forced).count();
-    let over_cap = per_callee.values().filter(|c| c.body_insts > 72).count();
     let top_callee = callee_rows
         .first()
         .map(|c| (c.name.clone(), c.body_insts, c.times, c.total_copies));
@@ -132,9 +126,6 @@ pub fn report(ws: &Workspace) -> InlineStatsReport {
     let _ = writeln!(t, "  total splices:                          {total_splices}");
     let _ = writeln!(t, "  distinct callees inlined:               {}", per_callee.len());
     let _ = writeln!(t, "  total inst-copies (sum callee_insts):   {total_copies}");
-    let _ = writeln!(t, "  @inline-forced callees:                 {forced}");
-    let _ = writeln!(t, "  callees larger than GENERAL cap (72):   {over_cap}  (only reachable via @inline)");
-
     let _ = writeln!(t, "\n=== TOP 25 CALLERS BY INST-COPIES ADDED ===");
     let _ = writeln!(t, "{:>8}  {:>8}  caller", "copies", "splices");
     for (name, splices, copies) in callers.iter().take(25) {
@@ -142,13 +133,13 @@ pub fn report(ws: &Workspace) -> InlineStatsReport {
     }
 
     let _ = writeln!(t, "\n=== ALL INLINED CALLEES (by total inst-copies) ===");
-    let _ = writeln!(t, "{:>8}  {:>6}  {:>5}  {:>5}  {:<8} {:<6} callee", "copies", "times", "body", "avg", "kind", "forced");
+    let _ = writeln!(t, "{:>8}  {:>6}  {:>5}  {:>5}  {:<8} callee", "copies", "times", "body", "avg", "kind");
     for c in &callee_rows {
         let _ = writeln!(
             t,
-            "{:>8}  {:>6}  {:>5}  {:>5}  {:<8} {:<6} {}",
+            "{:>8}  {:>6}  {:>5}  {:>5}  {:<8} {}",
             c.total_copies, c.times, c.body_insts, c.total_copies / c.times.max(1),
-            c.kind, if c.forced { "yes" } else { "" }, c.name
+            c.kind, c.name
         );
     }
 
@@ -159,8 +150,6 @@ pub fn report(ws: &Workspace) -> InlineStatsReport {
         total_splices,
         total_copies,
         distinct_callees: per_callee.len(),
-        forced,
-        over_cap,
         top_callee,
     }
 }

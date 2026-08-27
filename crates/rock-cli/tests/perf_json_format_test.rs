@@ -20,7 +20,11 @@ fn workspace_root() -> &'static Path {
         .expect("workspace root")
 }
 
-fn run_perf_json_window(game: &str, gc_window: Option<(usize, usize)>) -> Value {
+fn run_perf_json_window_with_sections(
+    game: &str,
+    gc_window: Option<(usize, usize)>,
+    detailed_sections: bool,
+) -> Value {
     let rock_bin = env!("CARGO_BIN_EXE_rock");
     // Per-test scratch for --output so concurrent invocations don't race
     // on the shared workspace tmp/main.lua. See game_snapshot_tests for
@@ -47,11 +51,12 @@ fn run_perf_json_window(game: &str, gc_window: Option<(usize, usize)>) -> Value 
             start.to_string(),
         ]);
     }
-    let output = Command::new(rock_bin)
-        .args(&args)
-        .current_dir(workspace_root())
-        .output()
-        .expect("failed to spawn rock perf");
+    let mut command = Command::new(rock_bin);
+    command.args(&args).current_dir(workspace_root());
+    if detailed_sections {
+        command.env("PERF_NO_SECTIONS", "0");
+    }
+    let output = command.output().expect("failed to spawn rock perf");
 
     assert!(
         output.status.success(),
@@ -76,8 +81,16 @@ fn run_perf_json_window(game: &str, gc_window: Option<(usize, usize)>) -> Value 
         .unwrap_or_else(|e| panic!("perf summary was not valid JSON: {e}\nline: {line}"))
 }
 
+fn run_perf_json_window(game: &str, gc_window: Option<(usize, usize)>) -> Value {
+    run_perf_json_window_with_sections(game, gc_window, false)
+}
+
 fn run_perf_json(game: &str) -> Value {
     run_perf_json_window(game, None)
+}
+
+fn run_perf_json_with_sections(game: &str) -> Value {
+    run_perf_json_window_with_sections(game, None, true)
 }
 
 /// Validate one uniform stat block: every field present + numeric, the
@@ -132,7 +145,7 @@ fn perf_json_has_top_level_shape() {
     let doc = run_perf_json("games/match3");
 
     for key in [
-        "run", "frames", "warmup_s", "frame_ms", "sections", "graphics", "memory",
+        "run", "frames", "warmup_s", "frame_ms", "sections", "graphics", "memory", "resources",
     ] {
         assert!(
             doc.get(key).is_some(),
@@ -150,6 +163,25 @@ fn perf_json_has_top_level_shape() {
         "warmup_s must be a number, got {}",
         doc["warmup_s"]
     );
+
+    assert_eq!(
+        doc["run"]["sections"],
+        Value::String("off".to_string()),
+        "rock perf defaults must record detailed sections as off: {}",
+        doc["run"]
+    );
+
+    let images = &doc["resources"]["images"];
+    for field in [
+        "load_calls", "load_failures", "decoded_bytes", "load_us",
+        "upload_calls", "upload_bytes", "wait_us", "upload_us",
+        "active_frames", "max_wait_us",
+    ] {
+        assert!(
+            images[field].as_i64().is_some(),
+            "resources.images.{field} must be an integer: {images}"
+        );
+    }
 
     let jit_trace = &doc["run"]["jit_trace"];
     let available = jit_trace["available"]
@@ -206,7 +238,8 @@ fn perf_json_frame_ms_is_uniform_series() {
 
 #[test]
 fn perf_json_sections_have_uniform_blocks() {
-    let doc = run_perf_json("games/match3");
+    let doc = run_perf_json_with_sections("games/match3");
+    assert_eq!(doc["run"]["sections"], Value::String("on".to_string()));
     let sections = doc["sections"]
         .as_array()
         .expect("sections must be an array");
@@ -315,7 +348,7 @@ fn perf_json_memory_has_uniform_blocks() {
 
 #[test]
 fn perf_json_gc_window_has_trustworthy_reconciliation() {
-    let doc = run_perf_json_window("games/match3", Some((4, 2)));
+    let doc = run_perf_json_window_with_sections("games/match3", Some((4, 2)), true);
     let mem = &doc["memory"];
     let gc = &mem["gc_window"];
     assert_eq!(gc["requested_frames"].as_i64(), Some(4));

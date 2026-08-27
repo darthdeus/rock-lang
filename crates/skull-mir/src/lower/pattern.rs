@@ -184,10 +184,19 @@ impl Builder<'_> {
                 Ok(())
             }
             Pattern::Tuple { elements } => {
-                let val = self.scrut_value(scrut);
-                for (i, sp) in elements.into_iter().enumerate() {
-                    let elem = self.emit_cur(Inst::TupleIndex { base: val, index: i });
-                    self.match_pattern(&Scrut::Val(elem), sp, fail, variants, false, None)?;
+                if let Scrut::Tuple(parts) = scrut {
+                    for (i, sp) in elements.into_iter().enumerate() {
+                        let elem = parts
+                            .get(i)
+                            .ok_or_else(|| gap("tuple pattern exceeds its scrutinee representation"))?;
+                        self.match_pattern(elem, sp, fail, variants, false, None)?;
+                    }
+                } else {
+                    let val = self.scrut_value(scrut);
+                    for (i, sp) in elements.into_iter().enumerate() {
+                        let elem = self.emit_cur(Inst::TupleIndex { base: val, index: i });
+                        self.match_pattern(&Scrut::Val(elem), sp, fail, variants, false, None)?;
+                    }
                 }
                 Ok(())
             }
@@ -367,22 +376,38 @@ impl Builder<'_> {
                 }
             }
         }
-        // A flat enum that threads as a Group (scalarized param/return, or a freshly
-        // constructed enum) matches from its cells -- no box.
-        let r = self.lower_expr_repr(e)?.into_value();
-        if let ValueRepr::Group { name, .. } = &r {
-            if let Some(shape) = EnumPlan::for_name(self.ws, *name).and_then(|plan| plan.flat().cloned()) {
-                let ValueRepr::Group { parts, .. } = r else { unreachable!() };
+        if let Expr::Tuple(elements) = self.body.expr_arena[e].clone() {
+            let mut parts = Vec::with_capacity(elements.len());
+            for element in elements {
+                let repr = self.lower_expr_repr(element)?.into_value();
+                parts.push(self.scrut_from_repr(repr)?);
+            }
+            return Ok(Scrut::Tuple(parts));
+        }
+        let repr = self.lower_expr_repr(e)?.into_value();
+        self.scrut_from_repr(repr)
+    }
+
+    /// Preserve a tuple element's flat-enum representation until the pattern
+    /// proves it needs a whole value.
+    fn scrut_from_repr(&mut self, repr: ValueRepr) -> Result<Scrut, CompilerError> {
+        match repr {
+            ValueRepr::Group { name, parts, .. }
+                if EnumPlan::for_name(self.ws, name).is_some_and(|plan| plan.flat().is_some()) =>
+            {
+                let shape = EnumPlan::for_name(self.ws, name)
+                    .and_then(|plan| plan.flat().cloned())
+                    .ok_or_else(|| gap(format!("flat enum `{name}` lost its match representation")))?;
                 let cells = self.repr_group_to_cells(&shape, parts)?;
-                return Ok(Scrut::Cells {
+                Ok(Scrut::Cells {
                     tag: cells.tag,
                     positional: cells.positional,
                     named: cells.named,
                     shape,
-                });
+                })
             }
+            other => Ok(Scrut::Val(self.pack(other)?)),
         }
-        Ok(Scrut::Val(self.pack(r)?))
     }
 
     /// The scrutinee as a whole value -- materializing a flattened field / threaded
@@ -390,6 +415,10 @@ impl Builder<'_> {
     pub(crate) fn scrut_value(&mut self, scrut: &Scrut) -> Idx<Inst> {
         match scrut {
             Scrut::Val(v) => *v,
+            Scrut::Tuple(parts) => {
+                let values = parts.iter().map(|p| self.scrut_value(p)).collect();
+                self.emit_cur(Inst::MakeTuple(values))
+            }
             Scrut::Flat { parent, prefix, shape } => self.materialize_flat(*parent, *prefix, shape),
             Scrut::Cells { tag, positional, named, shape } => self.materialize_flat_cells(
                 shape,
@@ -441,7 +470,7 @@ impl Builder<'_> {
         let shape = match scrut {
             Scrut::Cells { shape, .. } => Some(shape.clone()),
             Scrut::Flat { shape, .. } => Some(shape.clone()),
-            Scrut::Val(_) => None,
+            Scrut::Val(_) | Scrut::Tuple(_) => None,
         };
         let off = shape.as_ref().map_or(i, |s| s.slot_offset(i));
         (0..vs.leaf_count())
@@ -457,6 +486,10 @@ impl Builder<'_> {
                 self.emit_cur(Inst::Field { base: *parent, field: flat_payload_slot(*prefix, slot) })
             }
             Scrut::Val(v) => self.emit_cur(Inst::TupleIndex { base: *v, index: slot }),
+            Scrut::Tuple(_) => {
+                let value = self.scrut_value(scrut);
+                self.emit_cur(Inst::TupleIndex { base: value, index: slot })
+            }
         }
     }
 
@@ -473,6 +506,10 @@ impl Builder<'_> {
                 self.emit_cur(Inst::Field { base: *v, field: Ustr::from(format!("_{i}").as_str()) })
             }
             Scrut::Val(v) => self.emit_cur(Inst::TupleIndex { base: *v, index: i }),
+            Scrut::Tuple(_) => {
+                let value = self.scrut_value(scrut);
+                self.emit_cur(Inst::TupleIndex { base: value, index: i })
+            }
         }
     }
 
@@ -493,6 +530,10 @@ impl Builder<'_> {
                 let f = if cdata { slot_name(field.as_str()) } else { field };
                 self.emit_cur(Inst::Field { base: *v, field: f })
             }
+            Scrut::Tuple(_) => {
+                let value = self.scrut_value(scrut);
+                self.emit_cur(Inst::Field { base: value, field })
+            }
         }
     }
 
@@ -506,7 +547,7 @@ impl Builder<'_> {
                 Some(self.emit_cur(Inst::Field { base: *parent, field: flat_tag_slot(*prefix) }))
             }
             Scrut::Cells { tag, .. } => Some(*tag),
-            Scrut::Val(_) => None,
+            Scrut::Val(_) | Scrut::Tuple(_) => None,
         };
         if let Some(tag) = flat_tag {
             let want = self.emit_cur(Inst::Const(Lit::Str(variant)));

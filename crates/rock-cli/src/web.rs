@@ -539,7 +539,7 @@ fn collect_web_assets(project: &Path, game_dir: &str) -> Result<Vec<WebAsset>> {
     let workspace_root = rock_host::project::find_workspace_root(project)
         .or_else(|| rock_host::project::find_workspace_root(&std::env::current_dir().unwrap_or_default()))
         .ok_or_else(|| anyhow::anyhow!("web: cannot find the Rock workspace root for {}", project.display()))?;
-    let selection = rock_host::release::select_assets(
+    let selection = crate::package::select_release_assets(
         project,
         game_dir,
         config.as_ref(),

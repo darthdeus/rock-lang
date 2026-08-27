@@ -1,6 +1,29 @@
 use std::time::Duration;
 
 #[test]
+fn iter_incremental_uses_the_same_production_sources_as_live_builds() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join("stick.toml"),
+        "[package]\nname = \"iter-production-sources\"\n",
+    )
+    .expect("manifest");
+    std::fs::write(dir.path().join("main.rock"), "fn main() { let value = 1 }\n")
+        .expect("main source");
+    std::fs::create_dir(dir.path().join("tests")).expect("tests dir");
+    std::fs::write(dir.path().join("tests/broken.rock"), "fn broken( {\n")
+        .expect("broken test source");
+
+    let sources = super::iter_incremental_sources(dir.path().to_str().unwrap())
+        .expect("discover profiler sources");
+    assert_eq!(sources.files.len(), 1);
+    assert!(sources
+        .files
+        .iter()
+        .all(|source| !source.borrow().file.to_id_path().contains("/tests/")));
+}
+
+#[test]
 fn nobox_reflection_uses_the_compiler_owned_lua_slots() {
     let source = r#"
 nobox value Probe { x: int, y: int }
@@ -3983,6 +4006,13 @@ mod skull_stone_lint_snapshot_tests {
         let main = dir.path().join("main.lua");
         let incremental = dir.path().join("incremental.lua");
         let source = dir.path().join("main.rock");
+        std::fs::write(
+            dir.path().join("stick.toml"),
+            "[package]\nname = \"lint-output-locality\"\n",
+        )
+        .expect("manifest");
+        std::fs::write(dir.path().join("other.rock"), "fn other() -> int { 7 }\n")
+            .expect("other source");
         let v1 = "fn helper() -> int { 3 }\nfn main() { let unused = helper() }\n";
         let v2 = "fn helper() -> int { 5 }\nfn main() { let unused = helper() }\n";
         std::fs::write(&source, v1).expect("source");
@@ -4026,6 +4056,11 @@ mod skull_stone_lint_snapshot_tests {
         assert!(census.cache.output_refresh_requests > 0);
         assert!(census.cache.output_files_refreshed > 0);
         assert_eq!(census.cache.output_refresh_requests, 1);
+        assert!(census.cache.output_file_rows_read > 0);
+        assert!(
+            census.source_files_borrowed > census.cache.output_file_rows_read,
+            "finding output must visit populated rows, not every borrowed source"
+        );
         eprintln!(
             "skull-stone one-edit: elapsed_ms={elapsed_ms:.3} snapshots={} entries={} findings={} clone_ms={:.3}",
             census.cache_snapshots.snapshots,
@@ -4102,14 +4137,30 @@ mod skull_stone_lint_snapshot_tests {
         let v2 = "fn helper() -> int { 5 }\nfn main() { let unused = helper() }\n";
         std::fs::write(&source, v1).expect("source");
         let mut stone = SkullStone::init(&root, &main, &incremental).expect("init");
+        let initial_fingerprint = stone.artifact_fingerprint().to_string();
         let reload = stone
             .apply_edit(&source, v2, &main, &incremental)
             .expect("body edit");
         assert!(matches!(reload, SkullReload::Incremental { .. }), "reload: {reload:?}");
+        let incremental_fingerprint = stone.artifact_fingerprint().to_string();
+        assert_ne!(incremental_fingerprint, initial_fingerprint);
         let route_overlay = std::fs::read_to_string(&incremental).expect("route overlay");
         let direct = direct_overlay(&root, "main.rock", v2);
         assert!(!route_overlay.is_empty(), "overlay population must be nonzero");
         assert_eq!(route_overlay, direct, "lint-cache integration changed overlay bytes");
+        std::fs::write(&source, v2).expect("fresh source");
+        let fresh_outputs = tempfile::tempdir().expect("fresh outputs");
+        let fresh = SkullStone::init(
+            &root,
+            &fresh_outputs.path().join("main.lua"),
+            &fresh_outputs.path().join("incremental.lua"),
+        )
+        .expect("fresh edited project");
+        assert_eq!(
+            incremental_fingerprint,
+            fresh.artifact_fingerprint(),
+            "incremental fingerprint must equal the canonical fresh identity"
+        );
         if let Some(capture) = std::env::var_os("ROCK_STONE_OVERLAY_CAPTURE_DIR") {
             let capture = std::path::Path::new(&capture);
             std::fs::create_dir_all(capture).expect("capture dir");
@@ -4128,7 +4179,7 @@ mod skull_stone_lint_snapshot_tests {
         let project = std::path::PathBuf::from(project);
         let source = project.join("mobs.rock");
         let v1 = std::fs::read_to_string(&source).expect("MAG source");
-        let v2 = super::super::body_digit_flip(&v1, "update_mobs").expect("MAG edit");
+        let v2 = super::super::body_digit_flip(&v1, "Player.update_mobs").expect("MAG edit");
         let outputs = tempfile::tempdir().expect("output dir");
         let root = project.to_str().unwrap();
         let main = outputs.path().join("main.lua");
@@ -4215,7 +4266,7 @@ mod skull_stone_lint_snapshot_tests {
         );
         let source = project.join("mobs.rock");
         let v1 = std::fs::read_to_string(&source).expect("MAG source");
-        let v2 = super::super::body_digit_flip(&v1, "update_mobs").expect("MAG edit");
+        let v2 = super::super::body_digit_flip(&v1, "Player.update_mobs").expect("MAG edit");
         let outputs = tempfile::tempdir().expect("output dir");
         let root = project.to_str().unwrap();
         let main = outputs.path().join("main.lua");
@@ -4249,11 +4300,6 @@ mod skull_stone_lint_snapshot_tests {
         assert_eq!(census.cache.suppression_entry_parses, 0);
         assert_eq!(census.cache.output_refresh_requests, warmup + iters);
         assert!(census.cache.output_files_refreshed > 0);
-        assert!(census.cache.output_file_rows_read > 0);
-        assert!(
-            census.source_files_borrowed > census.cache.output_file_rows_read,
-            "finding output must visit populated rows, not every borrowed source"
-        );
         eprintln!(
             "skull-stone MAG apply_edit: mean={mean:.3} p50={:.3} p99={:.3} snapshots={} entries/edit={:.1} findings/edit={:.1} clone_ms={:.3} source_files={} output_files={} output_owners={}",
             percentile(50.0),

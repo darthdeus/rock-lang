@@ -310,7 +310,7 @@ fn recording_and_branch_rewrite_use_the_v9_pad_record_renderer() {
 
     let _ = run_frame("bitgun", 2, &["--record", &log_s]);
     let text = std::fs::read_to_string(&log).expect("read v9 record");
-    assert!(text.starts_with("STONE_REPLAY 11\n"), "recording must use the v11 header: {text}");
+    assert!(text.starts_with("STONE_REPLAY 13\n"), "recording must use the v13 header: {text}");
     let tick = text.lines().find(|line| line.starts_with("t ")).expect("tick");
     assert_eq!(tick.split(' ').count(), 10, "v9 tick has nine payload fields");
     assert!(tick.ends_with(" - -"), "empty live pad state has explicit empty fields: {tick}");

@@ -15,7 +15,7 @@ fn mag_inspector_never_repositions_itself_from_the_selection() {
         "the Inspector window itself must remain"
     );
     let inspector = source
-        .split_once("fn draw_inspector_window()")
+        .split_once("fn Player.draw_inspector_window(player)")
         .expect("Inspector draw function")
         .1
         .split_once("fn draw_outliner_window()")

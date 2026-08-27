@@ -91,6 +91,8 @@ fn package_manifest_is_the_secret_safe_metadata_boundary() {
         "package catalog includes official:crypt");
     assert!(identities.iter().any(|id| id == "official:crypt-depths"),
         "package catalog includes official:crypt-depths");
+    assert!(packaged_root.join("magic_trials.json").is_file(),
+        "packaged Magic Trials catalog is missing");
     let packaged_revision = manifest["build_vars"]["CONTENT_REV"]["value"]
         .as_str()
         .expect("CONTENT_REV value");
@@ -208,7 +210,7 @@ fn failed_package_does_not_leave_stale_top_level_artifacts() {
 }
 
 #[test]
-fn package_stages_external_asset_overlays() {
+fn package_excludes_unrelated_external_asset_overlays() {
     let overlay = tempfile::tempdir().expect("overlay tempdir");
     let source = overlay.path().join("assets/overlay-package-sentinel.txt");
     std::fs::create_dir_all(source.parent().unwrap()).unwrap();
@@ -235,12 +237,9 @@ fn package_stages_external_asset_overlays() {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
-    assert_eq!(
-        std::fs::read_to_string(
-            out_dir.path().join("assets/mag/assets/overlay-package-sentinel.txt")
-        )
-        .unwrap(),
-        "from-overlay"
+    assert!(
+        !out_dir.path().join("assets/mag/assets/overlay-package-sentinel.txt").exists(),
+        "unrelated overlay asset must not stage"
     );
 }
 

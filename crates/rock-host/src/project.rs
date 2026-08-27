@@ -154,6 +154,10 @@ pub fn is_release_layout() -> bool {
 /// In release layout: `<rock_dir>/bin/luajit`
 /// In dev layout: `<rock_dir>/prebuilt/gamelibs-<platform>/bin/luajit`
 pub fn luajit_path() -> PathBuf {
+    if let Some(path) = std::env::var_os("ROCK_LUAJIT").filter(|path| !path.is_empty()) {
+        return PathBuf::from(path);
+    }
+
     let root = PathBuf::from(crate::rock_dir());
 
     // Release layout: bin/luajit next to bin/rock
@@ -752,6 +756,22 @@ mod tests {
             match prev {
                 Some(v) => std::env::set_var("STONE_JV", v),
                 None => std::env::remove_var("STONE_JV"),
+            }
+        }
+    }
+
+    #[test]
+    fn rock_luajit_env_selects_the_diagnostic_runtime() {
+        let prev = std::env::var_os("ROCK_LUAJIT");
+        let diagnostic = std::path::PathBuf::from("/diagnostics/tarantool-luajit");
+
+        unsafe { std::env::set_var("ROCK_LUAJIT", &diagnostic) };
+        assert_eq!(luajit_path(), diagnostic);
+
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("ROCK_LUAJIT", v),
+                None => std::env::remove_var("ROCK_LUAJIT"),
             }
         }
     }
