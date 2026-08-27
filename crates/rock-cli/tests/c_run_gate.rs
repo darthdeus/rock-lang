@@ -80,6 +80,78 @@ fn c_compile_keeps_artifacts_and_invalidates_stale_defaults() {
 }
 
 #[test]
+fn c_compile_and_run_load_project_dependencies() {
+    assert!(
+        Command::new("clang")
+            .arg("--version")
+            .output()
+            .is_ok_and(|output| output.status.success()),
+        "C backend gate requires clang"
+    );
+    let root = tempfile::tempdir().expect("tempdir");
+    let library = root.path().join("numbers");
+    let game = root.path().join("game");
+    std::fs::create_dir_all(&library).expect("create library");
+    std::fs::create_dir_all(&game).expect("create game");
+    std::fs::write(
+        library.join("stick.toml"),
+        "[package]\nname = \"numbers\"\ntype = \"lib\"\n",
+    )
+    .expect("write library manifest");
+    std::fs::write(
+        library.join("numbers.rock"),
+        "fn project_answer() -> string { return \"answer=42\" }\n",
+    )
+    .expect("write library source");
+    std::fs::write(
+        game.join("stick.toml"),
+        "[package]\nname = \"game\"\ntype = \"bin\"\n\n[dependencies]\nnumbers = { path = \"../numbers\" }\n",
+    )
+    .expect("write game manifest");
+    std::fs::write(
+        game.join("main.rock"),
+        "fn main() { print(project_answer()) }\n",
+    )
+    .expect("write game source");
+
+    let compile = Command::new(env!("CARGO_BIN_EXE_rock"))
+        .args([
+            "compile",
+            game.to_str().expect("utf8 game path"),
+            "--backend",
+            "c",
+            "--output",
+            "native-game",
+        ])
+        .current_dir(root.path())
+        .output()
+        .expect("spawn rock compile");
+    assert!(
+        compile.status.success(),
+        "C project compile failed:\nstdout:{}\nstderr:{}",
+        String::from_utf8_lossy(&compile.stdout),
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    let compiled_run = Command::new(root.path().join("native-game"))
+        .output()
+        .expect("run compiled project");
+    assert!(
+        compiled_run.status.success(),
+        "compiled project failed: {compiled_run:?}"
+    );
+    assert_eq!(compiled_run.stdout, b"answer=42\n");
+
+    let project_run = run(&game);
+    assert!(
+        project_run.status.success(),
+        "C project run failed:\nstdout:{}\nstderr:{}",
+        String::from_utf8_lossy(&project_run.stdout),
+        String::from_utf8_lossy(&project_run.stderr)
+    );
+    assert_eq!(project_run.stdout, b"answer=42\n");
+}
+
+#[test]
 fn c_run_executes_main_and_propagates_native_failure() {
     assert!(
         Command::new("clang")

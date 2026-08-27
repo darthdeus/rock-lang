@@ -36,6 +36,12 @@ struct CheckedFile {
     user_mid: bone_semantic::prelude::ModuleId,
 }
 
+struct CheckedProject {
+    sources: crate::SourceFiles,
+    ws: bone_semantic::inference::Workspace,
+    entry_mid: bone_semantic::prelude::ModuleId,
+}
+
 struct FileCheckError {
     reason: String,
     rendered: String,
@@ -258,41 +264,16 @@ fn check_file(file: &str) -> std::result::Result<CheckedFile, FileCheckError> {
 }
 
 fn build_package(dir: &str) -> CUnitOutcome {
-    let spec = crate::unified_compile::SourceSpec::Directory(std::path::PathBuf::from(dir));
-    let sources = match crate::unified_compile::discover_sources(&spec) {
-        Ok(sources) => sources,
+    let checked = match check_project(dir, false) {
+        Ok(checked) => checked,
         Err(error) => {
             return CUnitOutcome::UnitFail {
-                reason: "cannot load project".to_string(),
-                rendered: error.to_string(),
+                reason: error.reason,
+                rendered: error.rendered,
             };
         }
     };
-    let (mut modules, _) = match crate::skull_backend::skull_assemble_project(&sources) {
-        Ok(result) => result,
-        Err(errors) => {
-            return CUnitOutcome::UnitFail {
-                reason: categorize(&errors[0].message),
-                rendered: crate::skull_backend::render_project_errs(&sources, &errors),
-            };
-        }
-    };
-    let mut ws = match crate::bone_backend::check_modules(&mut modules) {
-        Ok(ws) => ws,
-        Err(errors) => {
-            return CUnitOutcome::UnitFail {
-                reason: categorize(&errors[0].message),
-                rendered: crate::skull_backend::render_project_errs(&sources, &errors),
-            };
-        }
-    };
-    if let Err(error) = crate::comptime::stamp_workspace(&mut ws, std::path::Path::new(dir)) {
-        return CUnitOutcome::UnitFail {
-            reason: "build var resolution failed".to_string(),
-            rendered: format!("build var resolution failed for {dir}: {error:#}"),
-        };
-    }
-    let tests = match crate::skull_backend::collect_package_test_fns(&ws, dir) {
+    let tests = match crate::skull_backend::collect_package_test_fns(&checked.ws, dir) {
         Ok(tests) => tests,
         Err(error) => {
             return CUnitOutcome::UnitFail {
@@ -301,7 +282,58 @@ fn build_package(dir: &str) -> CUnitOutcome {
             };
         }
     };
-    run_tests(&ws, &tests)
+    run_tests(&checked.ws, &tests)
+}
+
+fn check_project(
+    dir: &str,
+    production_only: bool,
+) -> std::result::Result<CheckedProject, FileCheckError> {
+    let spec = crate::unified_compile::SourceSpec::Directory(std::path::PathBuf::from(dir));
+    let sources =
+        crate::unified_compile::discover_sources(&spec).map_err(|error| FileCheckError {
+            reason: "cannot load project".to_string(),
+            rendered: error.to_string(),
+            expected_failure_tests: None,
+        })?;
+    let game_project = production_only
+        && rock_host::project::is_game_project(&std::path::PathBuf::from(dir)).map_err(
+            |error| FileCheckError {
+                reason: "cannot load project".to_string(),
+                rendered: error.to_string(),
+                expected_failure_tests: None,
+            },
+        )?;
+    let sources = if game_project {
+        sources.production_only()
+    } else {
+        sources
+    };
+    let (mut modules, entry_file) = crate::skull_backend::skull_assemble_project(&sources)
+        .map_err(|errors| FileCheckError {
+            reason: categorize(&errors[0].message),
+            rendered: crate::skull_backend::render_project_errs(&sources, &errors),
+            expected_failure_tests: None,
+        })?;
+    let mut ws =
+        crate::bone_backend::check_modules(&mut modules).map_err(|errors| FileCheckError {
+            reason: categorize(&errors[0].message),
+            rendered: crate::skull_backend::render_project_errs(&sources, &errors),
+            expected_failure_tests: None,
+        })?;
+    crate::comptime::stamp_workspace(&mut ws, std::path::Path::new(dir)).map_err(|error| {
+        FileCheckError {
+            reason: "build var resolution failed".to_string(),
+            rendered: format!("build var resolution failed for {dir}: {error:#}"),
+            expected_failure_tests: None,
+        }
+    })?;
+    let entry_mid = crate::bone_backend::entry_module_id(&ws, entry_file);
+    Ok(CheckedProject {
+        sources,
+        ws,
+        entry_mid,
+    })
 }
 
 fn run_tests(
@@ -416,35 +448,49 @@ fn clang_compile(
 }
 
 fn emit_main_program(path: &str) -> Result<skull_codegen_c::CProgram> {
+    fn main_ref(
+        ws: &bone_semantic::inference::Workspace,
+        entry_mid: bone_semantic::prelude::ModuleId,
+    ) -> Result<FuncRef> {
+        let mut mains = ws
+            .module(entry_mid)
+            .functions
+            .iter()
+            .filter(|(_, function)| {
+                function.name.as_str() == "main" && function.param_decls.is_empty()
+            });
+        let Some((main, _)) = mains.next() else {
+            anyhow::bail!("C backend requires a nullary `main` in the entry file");
+        };
+        if mains.next().is_some() {
+            anyhow::bail!("C backend found more than one nullary `main` in the entry file");
+        }
+        Ok(FuncRef {
+            module: entry_mid,
+            func: main,
+        })
+    }
+
     if std::path::Path::new(path).is_dir() {
-        anyhow::bail!("C backend currently accepts one .rock file, not a project directory");
+        let checked = check_project(path, true).map_err(|error| anyhow::anyhow!(error.rendered))?;
+        let main = main_ref(&checked.ws, checked.entry_mid)?;
+        skull_codegen_c::emit_program(&checked.ws, main).map_err(|error| {
+            anyhow::anyhow!(crate::skull_backend::render_project_err(
+                &checked.sources,
+                &error
+            ))
+        })
+    } else {
+        let checked = check_file(path).map_err(|error| anyhow::anyhow!(error.rendered))?;
+        let main = main_ref(&checked.ws, checked.user_mid)?;
+        skull_codegen_c::emit_program(&checked.ws, main).map_err(|error| {
+            anyhow::anyhow!(crate::skull_backend::render_file_errs(
+                path,
+                &checked.source,
+                &[error]
+            ))
+        })
     }
-    let checked = check_file(path).map_err(|error| anyhow::anyhow!(error.rendered))?;
-    let mut mains = checked
-        .ws
-        .module(checked.user_mid)
-        .functions
-        .iter()
-        .filter(|(_, function)| {
-            function.name.as_str() == "main" && function.param_decls.is_empty()
-        });
-    let Some((main, _)) = mains.next() else {
-        anyhow::bail!("C backend requires a nullary `main` in the entry file");
-    };
-    if mains.next().is_some() {
-        anyhow::bail!("C backend found more than one nullary `main` in the entry file");
-    }
-    let main = FuncRef {
-        module: checked.user_mid,
-        func: main,
-    };
-    skull_codegen_c::emit_program(&checked.ws, main).map_err(|error| {
-        anyhow::anyhow!(crate::skull_backend::render_file_errs(
-            path,
-            &checked.source,
-            &[error]
-        ))
-    })
 }
 
 fn c_artifact_paths(
