@@ -6,6 +6,25 @@ use crate::monoty::MonoTy;
 use std::rc::Rc;
 
 impl Builder<'_> {
+    pub(crate) fn container_plan_for_type(
+        &self,
+        ty: &MonoTy,
+        family: ContainerFamily,
+    ) -> Result<ContainerPlan, CompilerError> {
+        ContainerPlan::for_type(self.ws, self.scx.target, &self.scx.rep_arena(), family, ty)
+            .map(|plan| {
+                if self.scx.row_value_vecs {
+                    plan.into_row_storage()
+                } else {
+                    plan
+                }
+            })
+            .map_err(|error| match error.span.or(self.cur_span) {
+                Some(span) => CompilerError::new_with_label(span, error.message),
+                None => CompilerError::new_no_location(error.message),
+            })
+    }
+
     pub(crate) fn container_plan_for(
         &self,
         e: Idx<Expr>,
@@ -15,12 +34,7 @@ impl Builder<'_> {
         if !ContainerPlan::matches_type(family, &ty) {
             return Ok(None);
         }
-        ContainerPlan::for_type(self.ws, self.scx.target, &self.scx.rep_arena(), family, &ty)
-            .map(Some)
-            .map_err(|error| match error.span.or(self.cur_span) {
-                Some(span) => CompilerError::new_with_label(span, error.message),
-                None => CompilerError::new_no_location(error.message),
-            })
+        self.container_plan_for_type(&ty, family).map(Some)
     }
 
     pub(crate) fn expr_is_flat_vec(&self, e: Idx<Expr>) -> bool {
@@ -54,11 +68,7 @@ impl Builder<'_> {
             _ => return Ok(None),
         };
         let arena = self.scx.rep_arena();
-        let plan = ContainerPlan::for_type(self.ws, self.scx.target, &arena, family, &concrete)
-            .map_err(|error| match error.span.or(self.cur_span) {
-                Some(span) => CompilerError::new_with_label(span, error.message),
-                None => CompilerError::new_no_location(error.message),
-            })?;
+        let plan = self.container_plan_for_type(&concrete, family)?;
         Ok(plan.ffi_element_name(&arena))
     }
 

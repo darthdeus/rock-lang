@@ -44,6 +44,15 @@ pub struct ContainerPlan {
 }
 
 impl ContainerPlan {
+    pub(crate) fn into_row_storage(mut self) -> Self {
+        if self.family == ContainerFamily::Vec
+            && let ContainerStorage::Columns { element } = self.storage
+        {
+            self.storage = ContainerStorage::Boxed { element };
+        }
+        self
+    }
+
     pub fn matches_type(family: ContainerFamily, ty: &crate::monoty::MonoTy) -> bool {
         match (family, ty.peel_nullable().0) {
             (

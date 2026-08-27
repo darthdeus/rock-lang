@@ -141,17 +141,7 @@ impl Builder<'_> {
                 params: Vec::new(),
             }],
         };
-        ContainerPlan::for_type(
-            self.ws,
-            self.scx.target,
-            &self.scx.rep_arena(),
-            ContainerFamily::NativeBuffer,
-            &ty,
-        )
-        .map_err(|error| match error.span.or(self.cur_span) {
-            Some(span) => CompilerError::new_with_label(span, error.message),
-            None => CompilerError::new_no_location(error.message),
-        })
+        self.container_plan_for_type(&ty, ContainerFamily::NativeBuffer)
     }
 
     pub(crate) fn is_leaf_addressed(&self, elem: Ustr) -> Result<bool, CompilerError> {

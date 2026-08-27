@@ -166,59 +166,26 @@ impl Builder<'_> {
         &self,
         mono: &crate::monoty::MonoTy,
     ) -> Result<Option<(String, &'static str)>, CompilerError> {
-        let arena = self.scx.rep_arena();
-        let plan = match mono {
+        let family = match mono {
             crate::monoty::MonoTy::App { ctor: crate::monoty::MonoCtor::Array, .. } => {
-                Some(ContainerPlan::for_type(
-                    self.ws,
-                    self.scx.target,
-                    &arena,
-                    ContainerFamily::Vec,
-                    mono,
-                ))
+                Some(ContainerFamily::Vec)
             }
             crate::monoty::MonoTy::App { ctor: crate::monoty::MonoCtor::Map, .. } => {
-                Some(ContainerPlan::for_type(
-                    self.ws,
-                    self.scx.target,
-                    &arena,
-                    ContainerFamily::Map,
-                    mono,
-                ))
+                Some(ContainerFamily::Map)
             }
             crate::monoty::MonoTy::App {
                 ctor: crate::monoty::MonoCtor::Nominal(name), ..
             } => match name.as_str() {
-                "Arena" => Some(ContainerPlan::for_type(
-                    self.ws,
-                    self.scx.target,
-                    &arena,
-                    ContainerFamily::Arena,
-                    mono,
-                )),
-                "NativeBuffer" => Some(ContainerPlan::for_type(
-                    self.ws,
-                    self.scx.target,
-                    &arena,
-                    ContainerFamily::NativeBuffer,
-                    mono,
-                )),
-                "FlatVec" => Some(ContainerPlan::for_type(
-                    self.ws,
-                    self.scx.target,
-                    &arena,
-                    ContainerFamily::FlatVec,
-                    mono,
-                )),
+                "Arena" => Some(ContainerFamily::Arena),
+                "NativeBuffer" => Some(ContainerFamily::NativeBuffer),
+                "FlatVec" => Some(ContainerFamily::FlatVec),
                 _ => None,
             },
             _ => None,
         };
-        let Some(plan) = plan else { return Ok(None) };
-        let plan = plan.map_err(|error| match error.span.or(self.cur_span) {
-            Some(span) => CompilerError::new_with_label(span, error.message),
-            None => CompilerError::new_no_location(error.message),
-        })?;
+        let Some(family) = family else { return Ok(None) };
+        let plan = self.container_plan_for_type(mono, family)?;
+        let arena = self.scx.rep_arena();
         match plan.storage() {
             ContainerStorage::Columns { .. } => {
                 let elem = plan
