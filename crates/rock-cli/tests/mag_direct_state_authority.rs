@@ -63,9 +63,16 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
         ["fn current", "_player()"].concat(),
         ["fn mag", "_player()"].concat(),
         ["fn player", "_for", "_access"].concat(),
+        ["fn mag", "_progress"].concat(),
+        "global bank_gold:".to_string(),
+        "global events:".to_string(),
+        "global quest_runs:".to_string(),
+        "global quest_tracked:".to_string(),
+        "global quest_collapsed:".to_string(),
+        "global quest_quarantined:".to_string(),
     ];
     let required = [
-        "global bank_gold: int",
+        "global MAG_PROGRESS: ProgressState",
         "global journal: [JournalLine]",
         "global history: [SnapshotHistoryNode]",
         "global spell_panel_open: bool",
@@ -128,6 +135,49 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
         feedback.contains("fn mag_player_feedback_pos(target: Entity<Player>)"),
         "deferred Player feedback must re-resolve the Scene entity"
     );
+
+    let progress = fs::read_to_string(repo.join("mag/progress.rock"))
+        .expect("read MAG progress source");
+    for field in [
+        "bank_gold: int",
+        "events: Map<string, EventRecord>",
+        "quest_runs: Map<string, QuestProgress>",
+        "quest_tracked: [string]",
+        "quest_collapsed: Map<string, bool>",
+        "quest_quarantined: [JsonValue]",
+    ] {
+        assert_eq!(
+            progress.matches(field).count(),
+            1,
+            "ProgressState must contain `{field}` exactly once"
+        );
+    }
+
+    let run = fs::read_to_string(repo.join("mag/run.rock")).expect("read MAG run source");
+    assert_eq!(
+        run.matches("MAG_PROGRESS = ProgressState {}").count(),
+        1,
+        "run reset must replace the complete progress domain exactly once"
+    );
+
+    let save = fs::read_to_string(repo.join("mag/save.rock")).expect("read MAG save source");
+    assert!(
+        save.contains("fn Player.progress_to_json(player, progress: ProgressState)"),
+        "save serialization must consume the typed progress domain explicitly"
+    );
+    assert!(
+        save.contains("save_progress(player, MAG_PROGRESS)"),
+        "the persistence boundary must pass the authoritative progress domain"
+    );
+    for (line_number, line) in save.lines().enumerate() {
+        if line.contains("save_progress(player") && !line.contains("fn Player.save_progress") {
+            assert!(
+                line.contains("save_progress(player, MAG_PROGRESS"),
+                "save caller at mag/save.rock:{} bypasses the progress domain: {line}",
+                line_number + 1
+            );
+        }
+    }
 }
 
 #[test]
