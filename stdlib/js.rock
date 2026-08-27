@@ -58,7 +58,7 @@ inline(js) fn ffi_string(ptr: any, len: int?) -> string = """
 
 // `unwrap()` on a null reaches this, so a JS program with no stone in it still
 // needs a traceback.
-@inline inline(js) fn __debug_traceback() -> string = "return new Error().stack || \"\";"
+@intrinsic @inline inline(js) fn __debug_traceback() -> string = "return new Error().stack || \"\";"
 
 // Reports LUA type names, not JS ones -- the return value is compared against
 // `"table"` / `"function"` in Rock source, so the names are the contract and JS

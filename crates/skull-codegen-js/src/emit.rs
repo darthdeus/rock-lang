@@ -6998,10 +6998,8 @@ fn host_fn_template(cf: &bone_semantic::hir::Function) -> Option<&'static str> {
         ("int_to_float", 1) => Some("$1"),
         ("to_float", 1) => Some("$1"),
         // `phantom<T>()` is a nil placeholder (iterator `done`, post-`error`
-        // unreachable). `__debug_traceback` is error-message-only (never on
-        // stdout, so an empty string suffices). `is_null` mirrors `== nil`.
+        // unreachable). `is_null` mirrors `== nil`.
         ("phantom", 0) => Some("null"),
-        ("__debug_traceback", 0) => Some("\"\""),
         ("is_null", 1) => Some("($1 == null)"),
         // `cast`/`transmute` are runtime identities (type recovery only).
         ("cast", 1) | ("transmute", 1) => Some("$1"),

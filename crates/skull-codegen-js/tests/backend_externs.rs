@@ -5,7 +5,7 @@
 //!   variant);
 //! - `extern(js)` emits a bare driver-/runtime-provided call, no definition;
 //! - a lua-only non-host-mapped fn reached from JS still rejects.
-use crate::common::ws_with;
+use crate::common::{node, ws_with};
 
 
 fn emit_program_js(ws: &bone_semantic::inference::Workspace) -> Result<String, String> {
@@ -138,6 +138,38 @@ fn main() {
     assert!(
         !prog.contains("function error("),
         "the runtime throwing `error` global must not be shadowed:\n{prog}"
+    );
+}
+
+#[test]
+fn debug_traceback_uses_the_declared_js_sibling() {
+    let ws = ws_with(
+        r#"
+fn main() {
+    print(__debug_traceback())
+}
+"#,
+    );
+    let prog = emit_program_js(&ws).expect("emit js program");
+    assert!(
+        prog.contains("return new Error().stack || \"\";"),
+        "the declared JS traceback body must own the JS implementation:\n{prog}"
+    );
+    let source = format!(
+        "var __G = {{}};\nfunction print(value) {{ console.log(value); }}\n{}\n{}\nmain();",
+        skull_codegen_js::JS_SESSION_RUNTIME,
+        prog,
+    );
+    let output = node().args(["-e", &source]).output().expect("node");
+    assert!(
+        output.status.success(),
+        "node failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).starts_with("Error\n"),
+        "the JS traceback was empty: {:?}",
+        String::from_utf8_lossy(&output.stdout)
     );
 }
 
