@@ -75,6 +75,7 @@ fn encode_ty(ws: &Workspace, ty: TyId, sep: &str) -> String {
                     }
                 }
                 hir::TypeCtor::Map => format!("map{sep}{args}"),
+                hir::TypeCtor::Ref => format!("ref{sep}{args}"),
                 hir::TypeCtor::Nominal(name) => {
                     if params.is_empty() {
                         name.to_string()
@@ -150,6 +151,7 @@ fn ty_key(ws: &Workspace, ty: TyId, out: &mut String) {
             match ctor {
                 hir::TypeCtor::Array => out.push_str("arr("),
                 hir::TypeCtor::Map => out.push_str("map("),
+                hir::TypeCtor::Ref => out.push_str("ref("),
                 hir::TypeCtor::Nominal(name) => {
                     out.push_str("nom:");
                     out.push_str(name.as_str());
