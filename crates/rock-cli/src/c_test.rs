@@ -53,6 +53,38 @@ struct CompiledC {
     binary: std::path::PathBuf,
 }
 
+#[derive(Debug, Default)]
+struct CLinkPlan {
+    include_dirs: Vec<std::path::PathBuf>,
+    library_dirs: Vec<std::path::PathBuf>,
+    libraries: Vec<String>,
+    rpaths: Vec<std::path::PathBuf>,
+}
+
+struct CForeignProvider {
+    library: &'static str,
+    header: &'static str,
+    include_dir: &'static str,
+    build: CForeignBuild,
+}
+
+#[derive(Clone, Copy)]
+enum CForeignBuild {
+    Stone,
+}
+
+fn c_foreign_provider(library: &str) -> Option<CForeignProvider> {
+    match library {
+        "stone" => Some(CForeignProvider {
+            library: "stone",
+            header: "stone.h",
+            include_dir: "stone-rs/include",
+            build: CForeignBuild::Stone,
+        }),
+        _ => None,
+    }
+}
+
 pub fn c_test(paths: &[String]) -> Result<()> {
     let probe = Command::new("clang").arg("--version").output();
     if !matches!(probe, Ok(ref output) if output.status.success()) {
@@ -412,7 +444,7 @@ fn compile_source(source: &str) -> std::result::Result<CompiledC, String> {
     let c_path = dir.path().join("test.c");
     let binary = dir.path().join("test-bin");
     fs_err::write(&c_path, source).map_err(|error| error.to_string())?;
-    clang_compile(source, &c_path, &binary)?;
+    clang_compile(source, &c_path, &binary, &CLinkPlan::default())?;
     Ok(CompiledC { _dir: dir, binary })
 }
 
@@ -420,12 +452,26 @@ fn clang_compile(
     source: &str,
     c_path: &std::path::Path,
     binary: &std::path::Path,
+    link: &CLinkPlan,
 ) -> std::result::Result<(), String> {
     invalidate_artifact(binary)
         .map_err(|error| format!("could not invalidate {}: {error}", binary.display()))?;
-    let compile = Command::new("clang")
-        .args(["-std=c11", "-O2", "-Wall", "-Wextra", "-Werror"])
-        .arg(c_path)
+    let mut command = Command::new("clang");
+    command.args(["-std=c11", "-O2", "-Wall", "-Wextra", "-Werror"]);
+    for dir in &link.include_dirs {
+        command.arg("-I").arg(dir);
+    }
+    command.arg(c_path);
+    for dir in &link.library_dirs {
+        command.arg("-L").arg(dir);
+    }
+    for library in &link.libraries {
+        command.arg(format!("-l{library}"));
+    }
+    for rpath in &link.rpaths {
+        command.arg(format!("-Wl,-rpath,{}", rpath.display()));
+    }
+    let compile = command
         .arg("-lm")
         .arg("-o")
         .arg(binary)
@@ -445,6 +491,76 @@ fn clang_compile(
         ));
     }
     Ok(())
+}
+
+fn c_link_plan(path: &str, emitted: &skull_codegen_c::CProgram) -> Result<CLinkPlan> {
+    let mut providers = Vec::new();
+    for library in &emitted.foreign_libraries {
+        let provider = c_foreign_provider(library).ok_or_else(|| {
+            anyhow::anyhow!(
+                "C backend has no native header/link provider for foreign library `{library}`"
+            )
+        })?;
+        if !emitted
+            .foreign_headers
+            .iter()
+            .any(|header| header == provider.header)
+        {
+            anyhow::bail!(
+                "C backend foreign metadata for `{library}` is missing `{}`",
+                provider.header
+            );
+        }
+        providers.push(provider);
+    }
+    if providers.is_empty() {
+        return Ok(CLinkPlan::default());
+    }
+    let mut link = CLinkPlan::default();
+    for provider in &providers {
+        link.libraries.push(provider.library.to_string());
+    }
+
+    let build_stone = providers
+        .iter()
+        .any(|provider| matches!(provider.build, CForeignBuild::Stone));
+
+    let cwd = std::env::current_dir()?;
+    let root = rock_host::project::find_workspace_root(&cwd).ok_or_else(|| {
+        anyhow::anyhow!(
+            "C backend cannot locate the Stone workspace from {}",
+            cwd.display()
+        )
+    })?;
+    if cwd != root {
+        anyhow::bail!(
+            "C backend native Stone builds currently run from the workspace root {}; current directory is {}",
+            root.display(),
+            cwd.display()
+        );
+    }
+    if build_stone
+        && !std::env::var("ROCK_SKIP_ENGINE_BUILD").is_ok_and(|value| value == "1")
+    {
+        let game_path = if std::path::Path::new(path).is_dir() {
+            path
+        } else {
+            "."
+        };
+        rock_host::engine_build::build_engine_libs(game_path)?;
+    }
+
+    for provider in &providers {
+        link.include_dirs.push(root.join(provider.include_dir));
+    }
+    let library = if rock_host::project::is_release_layout() {
+        root.join("lib")
+    } else {
+        root.join("tmp")
+    };
+    link.library_dirs.push(library.clone());
+    link.rpaths.push(library);
+    Ok(link)
 }
 
 fn emit_main_program(path: &str) -> Result<skull_codegen_c::CProgram> {
@@ -539,6 +655,7 @@ pub fn c_compile(path: &str, output: Option<String>) -> Result<()> {
     invalidate_artifact(&c_path)?;
     invalidate_artifact(&binary)?;
     let emitted = emit_main_program(path)?;
+    let link = c_link_plan(path, &emitted)?;
     for artifact in [&c_path, &binary] {
         if let Some(parent) = artifact.parent()
             && !parent.as_os_str().is_empty()
@@ -547,14 +664,20 @@ pub fn c_compile(path: &str, output: Option<String>) -> Result<()> {
         }
     }
     rock_host::project::write_atomic(&c_path, &emitted.source)?;
-    clang_compile(&emitted.source, &c_path, &binary).map_err(anyhow::Error::msg)?;
+    clang_compile(&emitted.source, &c_path, &binary, &link).map_err(anyhow::Error::msg)?;
     log::info!(target: "C", "{} -> {}, {}", path, c_path.display(), binary.display());
     Ok(())
 }
 
 pub fn c_run(path: &str) -> Result<()> {
     let emitted = emit_main_program(path)?;
-    let compiled = compile_source(&emitted.source).map_err(anyhow::Error::msg)?;
+    let link = c_link_plan(path, &emitted)?;
+    let dir = tempfile::tempdir()?;
+    let c_path = dir.path().join("program.c");
+    let binary = dir.path().join("program-bin");
+    fs_err::write(&c_path, &emitted.source)?;
+    clang_compile(&emitted.source, &c_path, &binary, &link).map_err(anyhow::Error::msg)?;
+    let compiled = CompiledC { _dir: dir, binary };
     let status = Command::new(&compiled.binary).status()?;
     if !status.success() {
         anyhow::bail!("native C program exited {status}");
@@ -564,6 +687,29 @@ pub fn c_run(path: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn c_link_plan_rejects_an_unregistered_foreign_provider() {
+        let emitted = skull_codegen_c::CProgram {
+            source: "#include <unknown.h>\n".to_string(),
+            foreign_libraries: vec!["unknown".to_string()],
+            foreign_headers: vec!["unknown.h".to_string()],
+        };
+        let error = super::c_link_plan("unused.rock", &emitted)
+            .expect_err("unknown provider must reject");
+        assert!(
+            error.to_string().contains("no native header/link provider"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn stone_foreign_provider_uses_the_authoritative_header() {
+        let provider = super::c_foreign_provider("stone").expect("Stone provider");
+        assert_eq!(provider.header, "stone.h");
+        assert_eq!(provider.include_dir, "stone-rs/include");
+        assert!(super::c_foreign_provider("unknown").is_none());
+    }
+
     #[test]
     fn c_backend_smoke_runs_ten_native_value_tests() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
