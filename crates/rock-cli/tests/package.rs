@@ -91,6 +91,8 @@ fn package_manifest_is_the_secret_safe_metadata_boundary() {
         "package catalog includes official:crypt");
     assert!(identities.iter().any(|id| id == "official:crypt-depths"),
         "package catalog includes official:crypt-depths");
+    assert!(packaged_root.join("magic_trials.json").is_file(),
+        "packaged Magic Trials catalog is missing");
     let packaged_revision = manifest["build_vars"]["CONTENT_REV"]["value"]
         .as_str()
         .expect("CONTENT_REV value");
