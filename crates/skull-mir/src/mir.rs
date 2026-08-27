@@ -646,6 +646,130 @@ pub enum Inst {
 }
 
 impl Inst {
+    /// Call `push` for every value operand this instruction reads.
+    pub fn uses_each(&self, push: &mut impl FnMut(Idx<Inst>)) {
+        match self {
+            Inst::Const(_) | Inst::Global(_) | Inst::Load(_) => {}
+            Inst::FfiViewCast { ptr, .. } => push(*ptr),
+            Inst::IntAdd(a, b)
+            | Inst::IntSub(a, b)
+            | Inst::IntMul(a, b)
+            | Inst::IntDiv(a, b)
+            | Inst::IntMod(a, b)
+            | Inst::UintAdd(a, b)
+            | Inst::UintSub(a, b)
+            | Inst::UintMul(a, b)
+            | Inst::UintDiv(a, b)
+            | Inst::UintMod(a, b)
+            | Inst::FloatAdd(a, b)
+            | Inst::FloatSub(a, b)
+            | Inst::FloatMul(a, b)
+            | Inst::FloatDiv(a, b)
+            | Inst::FloatMod(a, b)
+            | Inst::StringConcat(a, b)
+            | Inst::IntLt(a, b)
+            | Inst::IntLeq(a, b)
+            | Inst::IntGt(a, b)
+            | Inst::IntGeq(a, b)
+            | Inst::UintLt(a, b)
+            | Inst::UintLeq(a, b)
+            | Inst::UintGt(a, b)
+            | Inst::UintGeq(a, b)
+            | Inst::FloatLt(a, b)
+            | Inst::FloatLeq(a, b)
+            | Inst::FloatGt(a, b)
+            | Inst::FloatGeq(a, b)
+            | Inst::Eq(a, b)
+            | Inst::NotEq(a, b)
+            | Inst::BitAnd(a, b)
+            | Inst::BitOr(a, b)
+            | Inst::BitXor(a, b)
+            | Inst::Shl(a, b)
+            | Inst::Shr(a, b)
+            | Inst::UintBitAnd(a, b)
+            | Inst::UintBitOr(a, b)
+            | Inst::UintBitXor(a, b)
+            | Inst::UintShl(a, b)
+            | Inst::UintShr(a, b) => {
+                push(*a);
+                push(*b);
+            }
+            Inst::Format { value, .. } => push(*value),
+            Inst::FormatDyn { value, fmt } => {
+                push(*value);
+                push(*fmt);
+            }
+            Inst::Neg(value)
+            | Inst::Not(value)
+            | Inst::BitNot(value)
+            | Inst::UintBitNot(value)
+            | Inst::ToString(value)
+            | Inst::FloatToInt(value)
+            | Inst::IntToFloat(value)
+            | Inst::UintToFloat(value)
+            | Inst::IntToUint(value)
+            | Inst::UintToInt(value)
+            | Inst::FloatToUint(value)
+            | Inst::UintBitcastInt(value)
+            | Inst::IntBitcastUint(value) => push(*value),
+            Inst::Call { args, .. }
+            | Inst::CallMulti { args, .. }
+            | Inst::CallBoundMulti { args, .. } => args.iter().for_each(|arg| push(*arg)),
+            Inst::CallValue { callee, args } | Inst::CallValueMulti { callee, args, .. } => {
+                push(*callee);
+                args.iter().for_each(|arg| push(*arg));
+            }
+            Inst::Lambda { .. } => {}
+            Inst::MakeVecColumns { columns, capacity, .. } => {
+                push(*capacity);
+                columns.iter().flat_map(|(_, values)| values).for_each(|&value| push(value));
+            }
+            Inst::MakeVecColumnHeader { capacity, .. } => push(*capacity),
+            Inst::MakeTuple(values) | Inst::MakeVec(values) => {
+                values.iter().for_each(|value| push(*value));
+            }
+            Inst::MakeStruct { fields, .. }
+            | Inst::MakeValueStruct { fields, .. }
+            | Inst::MaterializeValueStruct { fields, .. }
+            | Inst::MakeEnv { fields, .. } => {
+                fields.iter().for_each(|(_, value)| push(*value));
+            }
+            Inst::MakeEnum { positional, named, .. } => {
+                positional.iter().for_each(|value| push(*value));
+                named.iter().for_each(|(_, value)| push(*value));
+            }
+            Inst::MakeEnumDyn { tag, positional, named, .. } => {
+                push(*tag);
+                positional.iter().for_each(|value| push(*value));
+                named.iter().for_each(|(_, value)| push(*value));
+            }
+            Inst::FfiNewArray { count, .. } => push(*count),
+            Inst::Field { base, .. } | Inst::TupleIndex { base, .. } => push(*base),
+            Inst::Index { base, index, .. } | Inst::VecCheckedIndex { vec: base, index } => {
+                push(*base);
+                push(*index);
+            }
+            Inst::Len { base, .. } => push(*base),
+            Inst::Store { value, .. } | Inst::StoreGlobal { value, .. } => push(*value),
+            Inst::StoreField { base, value, .. } => {
+                push(*base);
+                push(*value);
+            }
+            Inst::StoreIndex { base, index, value, .. } => {
+                push(*base);
+                push(*index);
+                push(*value);
+            }
+            Inst::ArrayPush { arr, value, .. } => {
+                push(*arr);
+                push(*value);
+            }
+            Inst::MapNext { table, .. } => push(*table),
+            Inst::CoroSetInner(value) => push(*value),
+            Inst::CoroHook { .. } => {}
+        }
+    }
+
     /// Whether this instruction binds a value (gets a `vN` in the dump and a
     /// target local). Effects like [`Inst::Store`] do not.
     pub fn produces_value(&self) -> bool {
@@ -734,6 +858,20 @@ pub enum Term {
         values: Vec<Idx<Inst>>,
         resume: Idx<Block>,
     },
+}
+
+impl Term {
+    /// Call `push` for every value operand this terminator reads.
+    pub fn uses_each(&self, push: &mut impl FnMut(Idx<Inst>)) {
+        match self {
+            Term::Return(values) | Term::Yield { values, .. } => {
+                values.iter().for_each(|value| push(*value));
+            }
+            Term::Branch { cond, .. } => push(*cond),
+            Term::Switch { discr, .. } => push(*discr),
+            Term::Unreachable | Term::Goto(_) => {}
+        }
+    }
 }
 
 /// A basic block: its instructions in order, then one terminator. **No params**

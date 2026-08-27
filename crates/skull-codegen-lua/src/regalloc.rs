@@ -115,139 +115,7 @@ fn raw<T>(i: Idx<T>) -> usize {
 
 /// Value operands an instruction READS (not the value it defines).
 pub(crate) fn inst_uses(inst: &Inst, push: &mut impl FnMut(Idx<Inst>)) {
-    match inst {
-        Inst::Const(_) | Inst::Global(_) | Inst::Load(_) => {}
-        Inst::FfiViewCast { ptr, .. } => push(*ptr),
-        Inst::IntAdd(a, b)
-        | Inst::IntSub(a, b)
-        | Inst::IntMul(a, b)
-        | Inst::IntDiv(a, b)
-        | Inst::IntMod(a, b)
-        | Inst::UintAdd(a, b)
-        | Inst::UintSub(a, b)
-        | Inst::UintMul(a, b)
-        | Inst::UintDiv(a, b)
-        | Inst::UintMod(a, b)
-        | Inst::FloatAdd(a, b)
-        | Inst::FloatSub(a, b)
-        | Inst::FloatMul(a, b)
-        | Inst::FloatDiv(a, b)
-        | Inst::FloatMod(a, b)
-        | Inst::StringConcat(a, b)
-        | Inst::IntLt(a, b)
-        | Inst::IntLeq(a, b)
-        | Inst::IntGt(a, b)
-        | Inst::IntGeq(a, b)
-        | Inst::UintLt(a, b)
-        | Inst::UintLeq(a, b)
-        | Inst::UintGt(a, b)
-        | Inst::UintGeq(a, b)
-        | Inst::FloatLt(a, b)
-        | Inst::FloatLeq(a, b)
-        | Inst::FloatGt(a, b)
-        | Inst::FloatGeq(a, b)
-        | Inst::Eq(a, b)
-        | Inst::NotEq(a, b)
-        | Inst::BitAnd(a, b)
-        | Inst::BitOr(a, b)
-        | Inst::BitXor(a, b)
-        | Inst::Shl(a, b)
-        | Inst::Shr(a, b)
-        | Inst::UintBitAnd(a, b)
-        | Inst::UintBitOr(a, b)
-        | Inst::UintBitXor(a, b)
-        | Inst::UintShl(a, b)
-        | Inst::UintShr(a, b) => {
-            push(*a);
-            push(*b);
-        }
-        Inst::Format { value, .. } => push(*value),
-        Inst::FormatDyn { value, fmt } => {
-            push(*value);
-            push(*fmt);
-        }
-        Inst::Neg(x)
-        | Inst::Not(x)
-        | Inst::BitNot(x)
-        | Inst::UintBitNot(x)
-        | Inst::ToString(x)
-        | Inst::FloatToInt(x)
-        | Inst::IntToFloat(x)
-        | Inst::UintToFloat(x)
-        | Inst::IntToUint(x)
-        | Inst::UintToInt(x)
-        | Inst::FloatToUint(x)
-        | Inst::UintBitcastInt(x)
-        | Inst::IntBitcastUint(x) => {
-            push(*x)
-        }
-        Inst::Call { args, .. } | Inst::CallMulti { args, .. } | Inst::CallBoundMulti { args, .. } => args.iter().for_each(|a| push(*a)),
-        Inst::CallValue { callee, args } => {
-            push(*callee);
-            args.iter().for_each(|a| push(*a));
-        }
-        Inst::CallValueMulti { callee, args, .. } => {
-            push(*callee);
-            args.iter().for_each(|a| push(*a));
-        }
-        // A closure captures cells (not values); its body's value uses live in
-        // its own scope, colored separately.
-        Inst::Lambda { .. } => {}
-        Inst::MakeVecColumns {
-            columns, capacity, ..
-        } => {
-            push(*capacity);
-            columns.iter().flat_map(|(_, vs)| vs).for_each(|&i| push(i));
-        }
-        Inst::MakeVecColumnHeader { capacity, .. } => push(*capacity),
-        Inst::MakeTuple(vs) | Inst::MakeVec(vs) => {
-            vs.iter().for_each(|a| push(*a))
-        }
-        Inst::MakeStruct { fields, .. }
-        | Inst::MakeValueStruct { fields, .. }
-        | Inst::MaterializeValueStruct { fields, .. }
-        | Inst::MakeEnv { fields, .. } => fields.iter().for_each(|(_, a)| push(*a)),
-        Inst::MakeEnum { positional, named, .. } => {
-            positional.iter().for_each(|a| push(*a));
-            named.iter().for_each(|(_, a)| push(*a));
-        }
-        Inst::MakeEnumDyn { tag, positional, named, .. } => {
-            push(*tag);
-            positional.iter().for_each(|a| push(*a));
-            named.iter().for_each(|(_, a)| push(*a));
-        }
-        Inst::FfiNewArray { count, .. } => push(*count),
-        Inst::Field { base, .. } | Inst::TupleIndex { base, .. } => push(*base),
-        Inst::Index { base, index, .. } => {
-            push(*base);
-            push(*index);
-        }
-        Inst::VecCheckedIndex { vec, index } => {
-            push(*vec);
-            push(*index);
-        }
-        Inst::Len { base, .. } => push(*base),
-        Inst::Store { value, .. } => push(*value),
-        Inst::StoreField { base, value, .. } => {
-            push(*base);
-            push(*value);
-        }
-        Inst::StoreIndex { base, index, value, .. } => {
-            push(*base);
-            push(*index);
-            push(*value);
-        }
-        Inst::StoreGlobal { value, .. } => push(*value),
-        Inst::ArrayPush { arr, value, .. } => {
-            push(*arr);
-            push(*value);
-        }
-        Inst::MapNext { table, .. } => push(*table),
-        Inst::CoroSetInner(x) => push(*x),
-        // Hooks are peeled to the constructor before codegen; their detached
-        // bodies are ordinary MirFuncs and are colored independently.
-        Inst::CoroHook { .. } => {}
-    }
+    inst.uses_each(push);
 }
 
 /// Value operands a terminator reads, seeing THROUGH inlined operands: if an
@@ -271,13 +139,7 @@ pub(crate) fn effective_uses(
 
 /// Value operands a terminator reads.
 pub(crate) fn term_uses(term: &Term, push: &mut impl FnMut(Idx<Inst>)) {
-    match term {
-        Term::Return(vs) => vs.iter().for_each(|v| push(*v)),
-        Term::Branch { cond, .. } => push(*cond),
-        Term::Switch { discr, .. } => push(*discr),
-        Term::Yield { values, .. } => values.iter().for_each(|v| push(*v)),
-        _ => {}
-    }
+    term.uses_each(push);
 }
 
 /// A counted loop the emitter renders as a Lua `for ... do .. end` block:
