@@ -646,6 +646,24 @@ pub enum Inst {
 }
 
 impl Inst {
+    /// Call `push` for every variable cell this instruction reads or writes.
+    pub fn cells_each(&self, push: &mut impl FnMut(Idx<Cell>)) {
+        match self {
+            Inst::Load(cell) | Inst::Store { cell, .. } => push(*cell),
+            Inst::CallMulti { dests, .. }
+            | Inst::CallValueMulti { dests, .. }
+            | Inst::CallBoundMulti { dests, .. } => {
+                dests.iter().for_each(|cell| push(*cell));
+            }
+            Inst::Lambda { params, .. } => params.iter().for_each(|cell| push(*cell)),
+            Inst::MapNext { key_cell, val_cell, .. } => {
+                push(*key_cell);
+                push(*val_cell);
+            }
+            _ => {}
+        }
+    }
+
     /// Call `push` for every value operand this instruction reads.
     pub fn uses_each(&self, push: &mut impl FnMut(Idx<Inst>)) {
         match self {
