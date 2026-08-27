@@ -1,0 +1,9 @@
+//! @no_check
+
+//- aggregate_as_rejects @fail
+value Source { x: int }
+value Target { x: int }
+fn convert(value: Source) -> Target {
+    return value as Target
+           //^ Target
+}

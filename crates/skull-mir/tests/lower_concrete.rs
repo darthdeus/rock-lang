@@ -218,6 +218,15 @@ return v0
 }
 
 #[test]
+fn explicit_int_to_float_is_a_typed_mir_conversion() {
+    let dump = mir("fn widen(value: int) -> float { value as float }", "widen");
+    assert!(
+        dump.contains("int_to_float"),
+        "an explicit scalar cast must survive lowering as a typed conversion:\n{dump}"
+    );
+}
+
+#[test]
 fn omitted_result_discards_tail_value_after_its_effects() {
     let dump = mir_std(
         "value V2 { x: int, y: int }\n\

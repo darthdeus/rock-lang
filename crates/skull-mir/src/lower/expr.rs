@@ -533,8 +533,6 @@ impl Builder<'_> {
                 Ok(id)
             }
 
-            // `as` is identity at runtime EXCEPT `float as int`, which floors
-            // (Lua numbers are all doubles) — mirrors rock-codegen.
             Expr::As { value, target, kind } => {
                 let v = self.lower_expr(value)?;
                 let to_int = self
@@ -574,6 +572,8 @@ impl Builder<'_> {
                     Ok(self.emit_cur(Inst::FloatToUint(v)))
                 } else if to_float && from_uint {
                     Ok(self.emit_cur(Inst::UintToFloat(v)))
+                } else if to_float && from_int {
+                    Ok(self.emit_cur(Inst::IntToFloat(v)))
                 } else {
                     Ok(v)
                 }
