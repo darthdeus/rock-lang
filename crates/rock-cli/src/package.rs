@@ -70,6 +70,7 @@ pub fn prepare_sound_bank(project: &str) -> Result<Option<PathBuf>> {
         context.config.as_ref(),
         &overlays,
         &mut selection,
+        MissingSoundAssets::Allow,
     )? else {
         return Ok(None);
     };
@@ -237,7 +238,14 @@ fn compile_declared_asset_banks(
     Option<CompiledSoundPackage>,
     Option<CompiledVisualPackage>,
 )> {
-    let sound = compile_sound_project(project_dir, game_key, config, overlays, &mut selection)?;
+    let sound = compile_sound_project(
+        project_dir,
+        game_key,
+        config,
+        overlays,
+        &mut selection,
+        MissingSoundAssets::Reject,
+    )?;
     let visual = compile_visual_bank(project_dir, game_key, overlays, &mut selection)?;
     narrow_asset_overlay_selection(
         &mut selection,
@@ -268,12 +276,19 @@ impl AssetResolver for ReleaseSoundResolver<'_> {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MissingSoundAssets {
+    Allow,
+    Reject,
+}
+
 fn compile_sound_project(
     project_dir: &Path,
     game_key: &str,
     config: Option<&rock_host::stick::StickConfig>,
     overlays: &[PathBuf],
     selection: &mut rock_host::release::AssetSelection,
+    missing_assets: MissingSoundAssets,
 ) -> Result<Option<CompiledSoundPackage>> {
     let Some(sound) = config.and_then(|config| config.sound.as_ref()) else {
         return Ok(None);
@@ -292,7 +307,13 @@ fn compile_sound_project(
         game_key,
         overlays,
     };
-    let bank = sound_core::compile_project(&project, &resolver).map_err(|error| {
+    let bank = match missing_assets {
+        MissingSoundAssets::Allow => {
+            sound_core::compile_project_allowing_missing_assets(&project, &resolver)
+        }
+        MissingSoundAssets::Reject => sound_core::compile_project(&project, &resolver),
+    }
+    .map_err(|error| {
         anyhow::anyhow!("package: sound project {}: {error}", sound.project)
     })?;
     let bank_bytes = sound_core::serialize_runtime_bank(&bank)
@@ -304,8 +325,21 @@ fn compile_sound_project(
             game_key,
             overlays,
             dependency,
-        )?
-        .ok_or_else(|| anyhow::anyhow!("package: sound dependency is not stageable: {dependency}"))?;
+        )?;
+        let Some(asset) = asset else {
+            if missing_assets == MissingSoundAssets::Allow {
+                log::warn!(
+                    target: "SOUND",
+                    "sound project {} references missing asset {}; plays using it will be silent",
+                    sound.project,
+                    dependency,
+                );
+                continue;
+            }
+            return Err(anyhow::anyhow!(
+                "package: sound dependency is not stageable: {dependency}"
+            ));
+        };
         rock_host::release::include_release_asset(selection, asset);
         dependencies.push(format!("{game_key}/{dependency}"));
     }
@@ -603,6 +637,38 @@ fn remove_if_present(path: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn development_bank_allows_a_missing_sound_dependency() {
+        let workspace = rock_host::project::find_workspace_root(
+            &std::env::current_dir().expect("current directory"),
+        )
+        .expect("workspace root");
+        let fixture = tempfile::tempdir_in(workspace).expect("sound fixture");
+        std::fs::write(
+            fixture.path().join("stick.toml"),
+            "[package]\nname = \"missing-sound-dev\"\n\n[sound]\nproject = \"sound_project.json\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            fixture.path().join("sound_project.json"),
+            r#"{
+  "version": 1,
+  "events": [{"id": "fixture.event", "steps": [{"layers": [{"sources": ["assets/sfx/missing.ogg"]}]}]}]
+}
+"#,
+        )
+        .unwrap();
+
+        let bank_path = prepare_sound_bank(fixture.path().to_str().unwrap())
+            .expect("a missing sound must not prevent a development run")
+            .expect("fixture declares a sound bank");
+        let bank: Value = serde_json::from_slice(&std::fs::read(bank_path).unwrap()).unwrap();
+        assert_eq!(
+            bank["events"][0]["steps"][0]["layers"][0]["sources"],
+            json!(["assets/sfx/missing.ogg"])
+        );
+    }
 
     #[test]
     fn secret_manifest_value_is_replaced_by_a_fingerprint() {

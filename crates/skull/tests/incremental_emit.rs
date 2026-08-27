@@ -151,6 +151,18 @@ fn exact_body_edit_has_no_full_concrete_or_artifact_rebuild() {
         stats.chunk_rebuild_requests > 0,
         "chunk locality has no rebuild-request denominator: {stats:?}"
     );
+    assert!(
+        stats.dynamic_state_chunks_compared > 0,
+        "state locality has no changed-chunk denominator: {stats:?}"
+    );
+    assert_eq!(
+        stats.dynamic_state_full_scans, 0,
+        "an unchanged body-local state shape scanned every emitted chunk: {stats:?}"
+    );
+    assert_eq!(
+        stats.dynamic_state_static_rows_scanned, 0,
+        "an unchanged body-local state shape rebuilt the static inventory: {stats:?}"
+    );
 }
 
 #[test]
@@ -290,6 +302,34 @@ fn an_unchanged_state_shape_uses_incremental_schema_validation() {
         full_collect.1.as_nanos(),
         0,
         "unchanged state shape took the full declaration walk: {full_collect:?}"
+    );
+}
+
+#[test]
+fn a_static_initializer_edit_refreshes_dynamic_state_facts() {
+    let v1 = "fn helper() -> int { static n = 1 return n }\nfn main() { let _ = helper() }";
+    let v2 = "fn helper() -> int { static n = 2 return n }\nfn main() { let _ = helper() }";
+    let ws1 = ws_of(v1);
+    let mid = skull::user_module_id(&ws1).unwrap();
+    let (_full, mut cache) = emit_full(&ws1, mid).expect("emit_full v1");
+    let ws2 = ws_of(v2);
+    let _overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "helper")]);
+    let stats = cache.repair_stats();
+    assert!(
+        stats.dynamic_state_chunks_compared > 0,
+        "missing comparison population: {stats:?}"
+    );
+    assert!(
+        stats.dynamic_state_facts_changed,
+        "the initializer change was classified as state-neutral"
+    );
+    assert_eq!(
+        stats.dynamic_state_full_scans, 1,
+        "the changed state facts were not validated"
+    );
+    assert!(
+        stats.dynamic_state_static_rows_scanned > 0,
+        "the changed static did not reach validation: {stats:?}"
     );
 }
 
