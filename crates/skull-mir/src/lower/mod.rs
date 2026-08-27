@@ -490,6 +490,7 @@ pub struct ScalarCtx {
     /// policy behind [`BackendFnAbiPlan`], which definitions and direct calls
     /// both read.
     values_first_class: bool,
+    native_flat_enums: bool,
     /// The codegen backend this lowering feeds. Drives backend-variant selection
     /// at every resolved call ([`Builder::resolve_funcref`]): `Lua` rejects a
     /// call whose only binding is a JS decl; `Js` swaps a call to its JS sibling
@@ -529,6 +530,7 @@ impl Clone for ScalarCtx {
             per_body: self.per_body.clone(),
             ref_counts: self.ref_counts.clone(),
             values_first_class: self.values_first_class,
+            native_flat_enums: self.native_flat_enums,
             target: self.target,
             interner: std::sync::Arc::clone(&self.interner),
             rep_arena: std::sync::Arc::clone(&self.rep_arena),
@@ -577,6 +579,7 @@ impl ScalarCtx {
             per_body,
             ref_counts,
             values_first_class: false,
+            native_flat_enums: false,
             target: bone_semantic::hir::FnBackend::Lua,
             interner: std::sync::Arc::new(crate::monoty::MonoInterner::new()),
             rep_arena: std::sync::Arc::new(abi::RepArena::default()),
@@ -673,6 +676,7 @@ impl ScalarCtx {
     pub fn adopt_warmed_abi(&mut self, warmed: Self) {
         assert!(
             self.values_first_class == warmed.values_first_class
+                && self.native_flat_enums == warmed.native_flat_enums
                 && self.target == warmed.target
                 && std::sync::Arc::ptr_eq(&self.interner, &warmed.interner),
             "ABI warm context does not match the emission context"
@@ -710,6 +714,11 @@ impl ScalarCtx {
         scx.values_first_class = true;
         scx.target = bone_semantic::hir::FnBackend::Any;
         scx
+    }
+
+    pub fn with_native_flat_enums(mut self) -> Self {
+        self.native_flat_enums = true;
+        self
     }
 
     /// Incrementally fold one re-inferred body's value-reference contribution into

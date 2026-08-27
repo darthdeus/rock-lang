@@ -125,10 +125,9 @@ impl Builder<'_> {
                         // dotted slots, while the default is still a boxed enum.
                         let cells = match base_inst {
                             Some(bi) => self.load_flat_cells(bi, fname, &shape),
-                            None => {
-                                let dv = self.lower_struct_default(name, fname)?;
-                                self.spread_maybe_null_box_to_cells(dv, &shape)?
-                            }
+                            None => self.with_struct_default(name, fname, |s, def| {
+                                s.lower_flat_value(&shape, def)
+                            })?,
                         };
                         fs.extend(self.flat_literal_slots(fname, cells));
                     } else {

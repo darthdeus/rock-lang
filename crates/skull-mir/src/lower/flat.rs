@@ -257,6 +257,14 @@ impl Builder<'_> {
         cells: FlatCells,
     ) -> Idx<Inst> {
         let tag = cells.tag;
+        if self.scx.native_flat_enums {
+            return self.emit_cur(Inst::MakeEnumDyn {
+                tag,
+                ty: shape.name,
+                positional: cells.positional,
+                named: cells.named,
+            });
+        }
         if let Inst::Const(Lit::Str(variant)) = self.f.insts[tag] {
             if self.variant_is_unit(shape.name, variant) {
                 let global = Ustr::from(format!("__rock_enum_{}_{}", shape.name, variant).as_str());

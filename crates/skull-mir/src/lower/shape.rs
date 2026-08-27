@@ -2041,14 +2041,14 @@ impl FlatSlot {
 impl EnumFlatShape {
     /// Total positional SLOTS -- `_0 .. _{tuple_width-1}`. Distinct from the
     /// position count (`slots.len()`): a `nobox` position spans several.
-    pub(crate) fn tuple_width(&self) -> usize {
+    pub fn tuple_width(&self) -> usize {
         self.slots.iter().map(FlatSlot::width).sum()
     }
 
     /// The first slot index of payload position `pos`. Positions past the end
     /// answer with the total width, so a variant narrower than the union simply
     /// has nothing to write.
-    pub(crate) fn slot_offset(&self, pos: usize) -> usize {
+    pub fn slot_offset(&self, pos: usize) -> usize {
         self.slots.iter().take(pos).map(FlatSlot::width).sum()
     }
 
@@ -2063,6 +2063,14 @@ impl EnumFlatShape {
         };
         let n = name?;
         vss.iter().find(|vs| vs.name == n)
+    }
+
+    pub fn position_leaf_paths(&self, pos: usize, name: Ustr) -> Option<Vec<Ustr>> {
+        self.position_shape(pos, Some(name)).map(value_leaf_paths)
+    }
+
+    pub fn record_fields(&self) -> &[Ustr] {
+        &self.record_fields
     }
 
     /// The number of scalar leaves this enum threads as across a call: the
