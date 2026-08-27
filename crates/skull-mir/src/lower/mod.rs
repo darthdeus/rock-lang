@@ -2463,6 +2463,7 @@ impl Builder<'_> {
                 let cur = self.emit_cur(Inst::Load(cells[0]));
                 let nil = self.emit_cur(Inst::Const(Lit::Nil));
                 let is_nil = self.emit_cur(Inst::Eq(cur, nil));
+                self.f.param_default_guards.insert(is_nil, i);
                 let then_bb = self.f.new_block();
                 let join = self.f.new_block();
                 self.f.set_term(self.cur, Term::Branch { cond: is_nil, then_bb, else_bb: join });
@@ -2482,6 +2483,7 @@ impl Builder<'_> {
             let cur = self.emit_cur(Inst::Load(cell));
             let nil = self.emit_cur(Inst::Const(Lit::Nil));
             let is_nil = self.emit_cur(Inst::Eq(cur, nil));
+            self.f.param_default_guards.insert(is_nil, i);
             let then_bb = self.f.new_block();
             let join = self.f.new_block();
             self.f.set_term(self.cur, Term::Branch { cond: is_nil, then_bb, else_bb: join });

@@ -1016,6 +1016,11 @@ pub struct MirFunc {
     /// constructor in this function and its nested functions.
     pub rep_arena: Option<Arc<crate::lower::RepArena>>,
     pub params: Vec<Idx<Cell>>,
+    /// Callee-entry comparisons that ask whether a declared parameter was
+    /// omitted. Backends with typed parameters cannot use the Lua/JS nil
+    /// sentinel and consume this provenance through their own call ABI.
+    pub param_default_guards:
+        bone_semantic::prelude::FxHashMap<Idx<Inst>, usize>,
     /// Opt-in timing for arena growth attribution.
     pub lower_timing_enabled: bool,
     pub lower_attribution: crate::lower::LowerAttribution,
@@ -1196,6 +1201,7 @@ impl MirFunc {
             code_compatibility: None,
             rep_arena: None,
             params: Vec::new(),
+            param_default_guards: Default::default(),
             lower_timing_enabled: crate::lower::lower_attribution_timing_enabled(),
             lower_attribution: Default::default(),
             abi_plan: None,
