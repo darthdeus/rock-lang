@@ -927,7 +927,7 @@ extern(lua) fn print(args: ...any)
 fn print_float(value: float) { print(to_string(value)) }
 
 // Error handling
-extern(lua) fn error(message: string)
+@intrinsic extern(lua) fn error(message: string)
 
 // Note: Lua has built-in tostring(), declare as extern
 extern(lua) fn tostring(value: any) -> string
