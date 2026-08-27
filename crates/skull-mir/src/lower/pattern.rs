@@ -603,9 +603,34 @@ impl Builder<'_> {
         then_branch: Idx<Expr>,
         else_branch: Option<Idx<Expr>>,
     ) -> Result<Idx<Inst>, CompilerError> {
+        let result = self.f.new_cell(None);
+        Ok(self
+            .lower_if_let_inner(pattern, value, then_branch, else_branch, Some(result))?
+            .expect("value-position if let returns a result"))
+    }
+
+    pub(crate) fn lower_if_let_stmt(
+        &mut self,
+        pattern: Idx<Pattern>,
+        value: Idx<Expr>,
+        then_branch: Idx<Expr>,
+        else_branch: Option<Idx<Expr>>,
+    ) -> Result<(), CompilerError> {
+        self.lower_if_let_inner(pattern, value, then_branch, else_branch, None)
+            .map(drop)
+    }
+
+    fn lower_if_let_inner(
+        &mut self,
+        pattern: Idx<Pattern>,
+        value: Idx<Expr>,
+        then_branch: Idx<Expr>,
+        else_branch: Option<Idx<Expr>>,
+        result: Option<Idx<Cell>>,
+    ) -> Result<Option<Idx<Inst>>, CompilerError> {
         if let Pattern::Bind(b) = self.body.pattern_arena[pattern] {
             if self.expr_is_nullable(value) && self.nobox_binding_shape(b)?.is_some() {
-                return self.lower_if_let_nobox(b, value, then_branch, else_branch);
+                return self.lower_if_let_nobox(b, value, then_branch, else_branch, result);
             }
         }
         // Any name-only pattern, `Bind` included: the presence is a WIRE slot, so
@@ -621,10 +646,10 @@ impl Builder<'_> {
                     &shape,
                     then_branch,
                     else_branch,
+                    result,
                 );
             }
         }
-        let result = self.f.new_cell(None);
         let scrut = self.lower_scrut(value)?;
         let else_bb = self.f.new_block();
         let join = self.f.new_block();
@@ -644,18 +669,7 @@ impl Builder<'_> {
         let variants = self.scrut_variants(value);
         let scrut_enum = self.scrut_enum_name(value);
         self.match_pattern(&scrut, pattern, else_bb, &variants, true, scrut_enum)?;
-        let tv = self.lower_expr(then_branch)?;
-        self.store_and_join(result, tv, join);
-
-        self.cur = else_bb;
-        let ev = match else_branch {
-            Some(eb) => self.lower_expr(eb)?,
-            None => self.emit_cur(Inst::Const(Lit::Nil)),
-        };
-        self.store_and_join(result, ev, join);
-
-        self.cur = join;
-        Ok(self.emit_cur(Inst::Load(result)))
+        self.finish_if_let(then_branch, else_branch, else_bb, join, result)
     }
 
     /// `if let q = p` binding a nullable `nobox` value: the scrutinee's presence
@@ -663,20 +677,20 @@ impl Builder<'_> {
     /// so nothing is packed to be tested and immediately unpacked again. Only a
     /// plain `Bind` takes this path -- a destructuring pattern still matches
     /// against the boxed scrutinee.
-    pub(crate) fn lower_if_let_nobox(
+    fn lower_if_let_nobox(
         &mut self,
         b: Idx<BindingInfo>,
         value: Idx<Expr>,
         then_branch: Idx<Expr>,
         else_branch: Option<Idx<Expr>>,
-    ) -> Result<Idx<Inst>, CompilerError> {
+        result: Option<Idx<Cell>>,
+    ) -> Result<Option<Idx<Inst>>, CompilerError> {
         let shape = self
             .nobox_binding_shape(b)?
             .ok_or_else(|| gap("nullable nobox binding has no scalar shape"))?;
         let mut scrut_shape = shape.clone();
         scrut_shape.nullable = true;
 
-        let result = self.f.new_cell(None);
         let bundle = self.lower_expr_repr(value)?;
         let leaves = self.repr_to_slot_values_bundle(&bundle, &RetSlot::Leaves(scrut_shape))?;
         let (present, values) = leaves
@@ -691,18 +705,7 @@ impl Builder<'_> {
 
         self.cur = then_bb;
         self.bind_leaves(b, &values, shape);
-        let tv = self.lower_expr(then_branch)?;
-        self.store_and_join(result, tv, join);
-
-        self.cur = else_bb;
-        let ev = match else_branch {
-            Some(eb) => self.lower_expr(eb)?,
-            None => self.emit_cur(Inst::Const(Lit::Nil)),
-        };
-        self.store_and_join(result, ev, join);
-
-        self.cur = join;
-        Ok(self.emit_cur(Inst::Load(result)))
+        self.finish_if_let(then_branch, else_branch, else_bb, join, result)
     }
 
     /// The DECLARED nullable-tuple shape of a call, without lowering it.
@@ -847,8 +850,8 @@ impl Builder<'_> {
         shape: &TupleRetShape,
         then_branch: Idx<Expr>,
         else_branch: Option<Idx<Expr>>,
-    ) -> Result<Idx<Inst>, CompilerError> {
-        let result = self.f.new_cell(None);
+        result: Option<Idx<Cell>>,
+    ) -> Result<Option<Idx<Inst>>, CompilerError> {
         let repr = self.lower_expr_repr(value)?.into_value();
         let ValueRepr::Tuple {
             parts,
@@ -876,18 +879,45 @@ impl Builder<'_> {
         // `nobox` element meets the guarantee's rejection.
         let mut idx = 0;
         self.bind_names_slot(pattern, &RetSlot::Nested(bound_shape), &slots, &mut idx)?;
-        let tv = self.lower_expr(then_branch)?;
-        self.store_and_join(result, tv, join);
+        self.finish_if_let(then_branch, else_branch, else_bb, join, result)
+    }
 
+    fn finish_if_let(
+        &mut self,
+        then_branch: Idx<Expr>,
+        else_branch: Option<Idx<Expr>>,
+        else_bb: Idx<Block>,
+        join: Idx<Block>,
+        result: Option<Idx<Cell>>,
+    ) -> Result<Option<Idx<Inst>>, CompilerError> {
+        if let Some(result) = result {
+            let then_value = self.lower_expr(then_branch)?;
+            self.store_and_join(result, then_value, join);
+
+            self.cur = else_bb;
+            let else_value = match else_branch {
+                Some(else_branch) => self.lower_expr(else_branch)?,
+                None => self.emit_cur(Inst::Const(Lit::Nil)),
+            };
+            self.store_and_join(result, else_value, join);
+
+            self.cur = join;
+            return Ok(Some(self.emit_cur(Inst::Load(result))));
+        }
+
+        self.lower_stmt_expr(then_branch)?;
+        if self.is_open() {
+            self.f.set_term(self.cur, Term::Goto(join));
+        }
         self.cur = else_bb;
-        let ev = match else_branch {
-            Some(eb) => self.lower_expr(eb)?,
-            None => self.emit_cur(Inst::Const(Lit::Nil)),
-        };
-        self.store_and_join(result, ev, join);
-
+        if let Some(else_branch) = else_branch {
+            self.lower_stmt_expr(else_branch)?;
+        }
+        if self.is_open() {
+            self.f.set_term(self.cur, Term::Goto(join));
+        }
         self.cur = join;
-        Ok(self.emit_cur(Inst::Load(result)))
+        Ok(None)
     }
 
     /// `while let pat = value { body }`: re-evaluate `value` each iteration in

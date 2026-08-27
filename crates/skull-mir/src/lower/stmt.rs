@@ -546,6 +546,12 @@ impl Builder<'_> {
             Expr::If { cond, then_branch, else_branch } => {
                 self.lower_if_stmt(cond, then_branch, else_branch)
             }
+            Expr::IfLet {
+                pattern,
+                value,
+                then_branch,
+                else_branch,
+            } => self.lower_if_let_stmt(pattern, value, then_branch, else_branch),
             Expr::Match { scrutinee, arms } => self.lower_match_stmt(scrutinee, arms),
             // Assignments are statements (unit value); lower the effect directly
             // so statement position leaves no dead unit.
