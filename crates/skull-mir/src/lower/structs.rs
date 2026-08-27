@@ -12,10 +12,9 @@ impl Builder<'_> {
         range.into_iter().map(|e| self.lower_expr(e)).collect()
     }
 
-    /// A struct literal -> `MakeStruct`, fields in DECLARED order. Every declared
-    /// field must be present; an omitted (defaulted) field gaps for now —
-    /// injecting its default means lowering the `StructDefaults` body, a later
-    /// step. Emitting an incomplete struct would be a silent miscompile.
+    /// A struct literal -> `MakeStruct`, fields in DECLARED order. Omitted fields
+    /// are evaluated from the declaring `StructDefaults` body, so every declared
+    /// field reaches MIR explicitly.
     pub(crate) fn lower_struct_literal(
         &mut self,
         e: Idx<Expr>,
