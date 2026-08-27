@@ -44,10 +44,9 @@ fn findings_carry_their_lint_name_and_file() {
 }
 
 #[test]
-fn every_catalog_lint_is_warning_or_advice_today() {
-    // The build gate fails only on `Error`. Nothing in the catalog is `Error`
-    // yet (entity_across_yield will be the first); this pins that, so adding an
-    // Error lint is a deliberate change that goes red here first.
+fn this_fixture_produces_only_soft_findings() {
+    // This fixture reaches unused_fn and unused_var only. Error-level catalog
+    // coverage belongs to each correctness lint's own discriminating fixture.
     let src = "fn dead() -> int { 1 }\nfn main() {\n    let unread = 5\n}";
     for f in findings(src) {
         assert!(
