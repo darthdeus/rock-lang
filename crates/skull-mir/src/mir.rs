@@ -924,6 +924,9 @@ impl Default for Block {
 pub struct StaticCell {
     pub cell: Ustr,
     pub done_flag: Ustr,
+    /// Declared/inferred source type, resolved through the owning concrete
+    /// body's type table by typed native backends.
+    pub ty: Option<bone_semantic::prelude::TyId>,
     /// Source binding name and declaration ordinal are the logical identity
     /// within the owning callable; synthesized cell names are realization only.
     pub logical_name: Ustr,

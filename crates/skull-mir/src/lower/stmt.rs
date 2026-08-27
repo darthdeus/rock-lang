@@ -44,6 +44,7 @@ impl Builder<'_> {
         self.f.statics.push(StaticCell {
             cell,
             done_flag,
+            ty,
             logical_name: sname,
             ordinal: ctr,
             type_str,
