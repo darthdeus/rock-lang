@@ -673,6 +673,38 @@ mod tests {
     }
 
     #[test]
+    fn release_visual_bank_rejects_a_missing_dependency() {
+        let workspace = rock_host::project::find_workspace_root(
+            &std::env::current_dir().expect("current directory"),
+        )
+        .expect("workspace root");
+        let fixture = tempfile::tempdir_in(workspace).expect("visual fixture");
+        let overlay = fixture.path().join("overlay");
+        std::fs::create_dir_all(overlay.join("assets")).unwrap();
+        std::fs::write(
+            overlay.join("assets/visual_bank.json"),
+            format!(
+                "{{\"schema_version\":1,\"plan_fingerprint\":\"sha256:{}\",\"dependencies\":[\"assets/.eat/missing/image.png\"]}}",
+                "0".repeat(64),
+            ),
+        )
+        .unwrap();
+
+        let mut selection = rock_host::release::AssetSelection::default();
+        let result = compile_visual_bank(
+            fixture.path(),
+            "fixture",
+            &[overlay],
+            &mut selection,
+        );
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("release admission accepted a missing visual dependency"),
+        };
+        assert!(error.to_string().contains("visual dependency is not stageable"));
+    }
+
+    #[test]
     fn secret_manifest_value_is_replaced_by_a_fingerprint() {
         let secret = "known-secret";
         assert_eq!(fingerprint(secret), format!("sha256:{:x}", Sha256::digest(secret.as_bytes())));
