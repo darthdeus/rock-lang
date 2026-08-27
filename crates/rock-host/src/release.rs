@@ -200,9 +200,9 @@ pub fn resolve_asset_with_overlays(
     overlays: &[PathBuf],
     logical_key: &str,
 ) -> Result<Option<ReleaseAsset>> {
-    validate_relative_key(logical_key, "sound asset key")?;
+    validate_relative_key(logical_key, "asset key")?;
     if !logical_key.starts_with("assets/") || logical_key.contains('\\') {
-        anyhow::bail!("sound asset key must be a canonical assets-relative key: {logical_key:?}");
+        anyhow::bail!("asset key must be a canonical assets-relative key: {logical_key:?}");
     }
     let mut candidates = Vec::with_capacity(overlays.len() + 1);
     candidates.push(project_dir.join(logical_key));

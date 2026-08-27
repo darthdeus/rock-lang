@@ -145,7 +145,7 @@ fn perf_json_has_top_level_shape() {
     let doc = run_perf_json("games/match3");
 
     for key in [
-        "run", "frames", "warmup_s", "frame_ms", "sections", "graphics", "memory",
+        "run", "frames", "warmup_s", "frame_ms", "sections", "graphics", "memory", "resources",
     ] {
         assert!(
             doc.get(key).is_some(),
@@ -170,6 +170,18 @@ fn perf_json_has_top_level_shape() {
         "rock perf defaults must record detailed sections as off: {}",
         doc["run"]
     );
+
+    let images = &doc["resources"]["images"];
+    for field in [
+        "load_calls", "load_failures", "decoded_bytes", "load_us",
+        "upload_calls", "upload_bytes", "wait_us", "upload_us",
+        "active_frames", "max_wait_us",
+    ] {
+        assert!(
+            images[field].as_i64().is_some(),
+            "resources.images.{field} must be an integer: {images}"
+        );
+    }
 
     let jit_trace = &doc["run"]["jit_trace"];
     let available = jit_trace["available"]

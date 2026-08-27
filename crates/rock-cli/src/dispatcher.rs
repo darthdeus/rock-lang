@@ -298,6 +298,30 @@ impl CommandContext {
         do_replay_window(self.args.backend, &game, output, &replay_file, &self.args.app_args)
     }
 
+    fn handle_replay_profile(&self) -> Result<()> {
+        if self.args.files.len() != 2 {
+            anyhow::bail!("usage: rock replay-profile <game> <file.replay> --range A-B [--runs N]");
+        }
+        let range = self.args.replay_range.as_deref().ok_or_else(|| {
+            anyhow::anyhow!("rock replay-profile requires an inclusive --range A-B")
+        })?;
+        let game = self.resolve_project_arg(&self.args.files[0])?;
+        let replay_file = std::path::Path::new(&self.args.files[1]);
+        if !replay_file.exists() {
+            anyhow::bail!("replay log not found: {}", replay_file.display());
+        }
+        let output = self.get_output_or_default("tmp")?;
+        crate::replay_profile::run(
+            self.args.backend,
+            &game,
+            output,
+            replay_file,
+            range,
+            self.args.runs,
+            &self.args.app_args,
+        )
+    }
+
     /// `rock perf` on the skull backend.
     fn handle_perf(&self) -> Result<()> {
         let file = self.get_game_file()?;
@@ -538,6 +562,7 @@ impl CommandContext {
             // collection routes through skull, the spawn/profile/run half is shared.
             CliCommand::Frame => self.handle_frame(),
             CliCommand::Replay => self.handle_replay(),
+            CliCommand::ReplayProfile => self.handle_replay_profile(),
             CliCommand::Perf => self.handle_perf(),
             CliCommand::Sim => self.handle_sim(),
             // See the bone fallthrough: the capability gate already rejected
@@ -561,6 +586,18 @@ impl CommandContext {
                 std::path::Path::new(&self.args.files[0]),
                 self.args.top,
                 self.args.context,
+                &self.args.perf_format,
+            );
+        }
+        if self.args.command == CliCommand::ReplayProfileReport {
+            if self.args.files.len() != 1 {
+                anyhow::bail!(
+                    "usage: rock replay-profile-report <file.jsonl> [--top N] [--format pretty|json]"
+                );
+            }
+            return crate::replay_profile_report::run(
+                std::path::Path::new(&self.args.files[0]),
+                self.args.top,
                 &self.args.perf_format,
             );
         }

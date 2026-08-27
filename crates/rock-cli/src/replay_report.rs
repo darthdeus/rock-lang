@@ -3,18 +3,24 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 #[derive(Debug, Clone, Default)]
-struct ReplayInput {
-    keys: Vec<String>,
-    buttons: Vec<i64>,
+pub(crate) struct ReplayInput {
+    pub(crate) mouse_x: String,
+    pub(crate) mouse_y: String,
+    pub(crate) wheel: i64,
+    pub(crate) imgui: bool,
+    pub(crate) keys: Vec<String>,
+    pub(crate) buttons: Vec<i64>,
+    pub(crate) pad_buttons: Vec<String>,
+    pub(crate) pad_axes: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone)]
-struct ReplayTiming {
-    ordinal: usize,
-    total_us: u64,
-    logic_us: u64,
-    render_us: u64,
-    present_us: u64,
+pub(crate) struct ReplayTiming {
+    pub(crate) ordinal: usize,
+    pub(crate) total_us: u64,
+    pub(crate) logic_us: u64,
+    pub(crate) render_us: u64,
+    pub(crate) present_us: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -33,16 +39,37 @@ pub struct RecordedProfile {
     pub sections: Vec<RecordedSection>,
 }
 
+#[derive(Debug, Clone)]
+pub struct RecordedImagePath {
+    pub path: String,
+    pub succeeded: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct RecordedImageResources {
+    pub load_calls: u64,
+    pub load_failures: u64,
+    pub decoded_bytes: u64,
+    pub load_us: u64,
+    pub upload_calls: u64,
+    pub upload_bytes: u64,
+    pub wait_us: u64,
+    pub upload_us: u64,
+    pub paths: Vec<RecordedImagePath>,
+}
+
 #[derive(Debug)]
 pub struct ReplayReport {
-    version: u32,
-    seed: Option<i64>,
-    game: String,
-    source: String,
-    build: String,
-    inputs: Vec<ReplayInput>,
-    timings: Vec<ReplayTiming>,
-    profiles: HashMap<usize, RecordedProfile>,
+    pub(crate) version: u32,
+    pub(crate) seed: Option<i64>,
+    pub(crate) game: String,
+    pub(crate) source: String,
+    pub(crate) revision: String,
+    pub(crate) build: String,
+    pub(crate) inputs: Vec<ReplayInput>,
+    pub(crate) timings: Vec<ReplayTiming>,
+    pub(crate) profiles: HashMap<usize, RecordedProfile>,
+    pub(crate) image_resources: HashMap<usize, RecordedImageResources>,
 }
 
 #[derive(Debug)]
@@ -59,6 +86,7 @@ pub struct TopFrame {
     pub pressed_buttons: Vec<i64>,
     pub released_buttons: Vec<i64>,
     pub profile: Option<RecordedProfile>,
+    pub image_resources: Option<RecordedImageResources>,
 }
 
 #[derive(Debug)]
@@ -70,11 +98,19 @@ pub struct SlowCluster {
 }
 
 #[derive(Debug)]
+pub struct ImageResourceFrame {
+    pub ordinal: usize,
+    pub total_us: u64,
+    pub resources: RecordedImageResources,
+}
+
+#[derive(Debug)]
 pub struct ReplayAnalysis {
     pub version: u32,
     pub seed: Option<i64>,
     pub game: String,
     pub source: String,
+    pub revision: String,
     pub build: String,
     pub observation_count: usize,
     pub timing_count: usize,
@@ -84,6 +120,7 @@ pub struct ReplayAnalysis {
     pub slow_threshold_us: u64,
     pub top: Vec<TopFrame>,
     pub clusters: Vec<SlowCluster>,
+    pub image_resource_frames: Vec<ImageResourceFrame>,
 }
 
 fn parse_u64(value: &str, line: usize, field: &str) -> Result<u64> {
@@ -116,15 +153,20 @@ impl ReplayReport {
             .context("not a replay log")?
             .parse::<u32>()
             .context("malformed replay version")?;
+        if !(1..=13).contains(&version) {
+            bail!("unsupported replay version {version}");
+        }
         let mut report = Self {
             version,
             seed: None,
             game: String::new(),
             source: String::new(),
+            revision: String::new(),
             build: String::new(),
             inputs: Vec::new(),
             timings: Vec::new(),
             profiles: HashMap::new(),
+            image_resources: HashMap::new(),
         };
         let mut timing_ordinals = HashSet::new();
 
@@ -142,17 +184,43 @@ impl ReplayReport {
                 "source" if fields.len() == 2 => {
                     report.source = decode_hex(fields[1], line_number, "replay source")?;
                 }
+                "revision" if fields.len() == 2 => {
+                    if !report.revision.is_empty() {
+                        bail!("line {line_number}: duplicate replay revision");
+                    }
+                    report.revision = decode_hex(fields[1], line_number, "replay revision")?;
+                }
                 "build" if fields.len() == 2 => report.build = fields[1].to_string(),
                 "t" => {
-                    if fields.len() < 8 {
+                    if fields.len() < 8 || fields.len() > 10 {
                         bail!("line {line_number}: malformed replay observation");
                     }
+                    let imgui = match fields[5] {
+                        "0" => false,
+                        "1" => true,
+                        value => bail!("line {line_number}: invalid ImGui flag `{value}`"),
+                    };
+                    let pad_buttons = fields.get(8).copied().unwrap_or("-");
+                    let pad_axes = fields.get(9).copied().unwrap_or("-");
                     report.inputs.push(ReplayInput {
+                        mouse_x: fields[2].to_string(),
+                        mouse_y: fields[3].to_string(),
+                        wheel: fields[4].parse::<i64>().with_context(|| {
+                            format!("line {line_number}: invalid mouse wheel `{}`", fields[4])
+                        })?,
+                        imgui,
                         keys: parse_list(fields[6], |value| Ok(value.to_string()))?,
                         buttons: parse_list(fields[7], |value| {
                             value.parse::<i64>().with_context(|| {
                                 format!("line {line_number}: invalid mouse button `{value}`")
                             })
+                        })?,
+                        pad_buttons: parse_list(pad_buttons, |value| Ok(value.to_string()))?,
+                        pad_axes: parse_list(pad_axes, |value| {
+                            let (axis, magnitude) = value.split_once('=').with_context(|| {
+                                format!("line {line_number}: invalid gamepad axis `{value}`")
+                            })?;
+                            Ok((axis.to_string(), magnitude.to_string()))
                         })?,
                     });
                 }
@@ -220,17 +288,60 @@ impl ReplayReport {
                         bail!("line {line_number}: duplicate slow profile for observation {ordinal}");
                     }
                 }
+                "i" => {
+                    if fields.len() < 12 {
+                        bail!("line {line_number}: malformed image resource row");
+                    }
+                    let ordinal = parse_u64(fields[1], line_number, "image ordinal")? as usize;
+                    let tick = parse_u64(fields[2], line_number, "image tick")? as usize;
+                    let path_count = parse_u64(fields[11], line_number, "image path count")? as usize;
+                    if ordinal != tick || !timing_ordinals.contains(&ordinal) {
+                        bail!("line {line_number}: image resource row does not follow timing observation {ordinal}");
+                    }
+                    if fields.len() != 12 + path_count * 2 {
+                        bail!("line {line_number}: malformed image path population");
+                    }
+                    let mut paths = Vec::with_capacity(path_count);
+                    for path in fields[12..].chunks_exact(2) {
+                        let succeeded = match path[0] {
+                            "0" => false,
+                            "1" => true,
+                            value => bail!("line {line_number}: invalid image success flag `{value}`"),
+                        };
+                        paths.push(RecordedImagePath {
+                            succeeded,
+                            path: decode_hex(path[1], line_number, "image path")?,
+                        });
+                    }
+                    let resources = RecordedImageResources {
+                        load_calls: parse_u64(fields[3], line_number, "image load calls")?,
+                        load_failures: parse_u64(fields[4], line_number, "image load failures")?,
+                        decoded_bytes: parse_u64(fields[5], line_number, "decoded image bytes")?,
+                        load_us: parse_u64(fields[6], line_number, "image load time")?,
+                        upload_calls: parse_u64(fields[7], line_number, "image upload calls")?,
+                        upload_bytes: parse_u64(fields[8], line_number, "uploaded image bytes")?,
+                        wait_us: parse_u64(fields[9], line_number, "image wait time")?,
+                        upload_us: parse_u64(fields[10], line_number, "image upload time")?,
+                        paths,
+                    };
+                    if report.image_resources.insert(ordinal, resources).is_some() {
+                        bail!("line {line_number}: duplicate image resource row for observation {ordinal}");
+                    }
+                }
                 _ => {}
             }
         }
 
         if report.version >= 12 && report.source.is_empty() {
-            bail!("v12 replay is missing its project source");
+            bail!("v12+ replay is missing its project source");
+        }
+        if report.version >= 13 && report.revision.is_empty() {
+            bail!("v13 replay is missing its source revision");
         }
         Ok(report)
     }
 
-    pub fn from_path(path: &Path) -> Result<Self> {
+    pub(crate) fn from_path(path: &Path) -> Result<Self> {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("read replay {}", path.display()))?;
         Self::parse(&text).with_context(|| format!("parse replay {}", path.display()))
@@ -286,6 +397,7 @@ impl ReplayReport {
                 pressed_buttons,
                 released_buttons,
                 profile: self.profiles.get(&row.ordinal).cloned(),
+                image_resources: self.image_resources.get(&row.ordinal).cloned(),
             }
         }).collect();
 
@@ -310,11 +422,24 @@ impl ReplayReport {
             }
         }
 
+        let timing_by_ordinal = self.timings.iter()
+            .map(|row| (row.ordinal, row.total_us))
+            .collect::<HashMap<_, _>>();
+        let mut image_resource_frames = self.image_resources.iter()
+            .map(|(ordinal, resources)| ImageResourceFrame {
+                ordinal: *ordinal,
+                total_us: timing_by_ordinal[ordinal],
+                resources: resources.clone(),
+            })
+            .collect::<Vec<_>>();
+        image_resource_frames.sort_by_key(|row| row.ordinal);
+
         Ok(ReplayAnalysis {
             version: self.version,
             seed: self.seed,
             game: self.game.clone(),
             source: self.source.clone(),
+            revision: self.revision.clone(),
             build: self.build.clone(),
             observation_count: self.inputs.len(),
             timing_count: self.timings.len(),
@@ -324,6 +449,7 @@ impl ReplayReport {
             slow_threshold_us,
             top,
             clusters,
+            image_resource_frames,
         })
     }
 }
@@ -360,12 +486,42 @@ impl ReplayAnalysis {
                     "calls": section.calls,
                 })).collect::<Vec<_>>(),
             })),
+            "image_resources": row.image_resources.as_ref().map(|resources| serde_json::json!({
+                "load_calls": resources.load_calls,
+                "load_failures": resources.load_failures,
+                "decoded_bytes": resources.decoded_bytes,
+                "load_us": resources.load_us,
+                "upload_calls": resources.upload_calls,
+                "upload_bytes": resources.upload_bytes,
+                "wait_us": resources.wait_us,
+                "upload_us": resources.upload_us,
+                "paths": resources.paths.iter().map(|path| serde_json::json!({
+                    "path": path.path,
+                    "succeeded": path.succeeded,
+                })).collect::<Vec<_>>(),
+            })),
         })).collect::<Vec<_>>();
         let clusters = self.clusters.iter().map(|cluster| serde_json::json!({
             "start": cluster.start,
             "end": cluster.end,
             "frames": cluster.frames,
             "peak_us": cluster.peak_us,
+        })).collect::<Vec<_>>();
+        let image_resource_frames = self.image_resource_frames.iter().map(|row| serde_json::json!({
+            "ordinal": row.ordinal,
+            "total_us": row.total_us,
+            "load_calls": row.resources.load_calls,
+            "load_failures": row.resources.load_failures,
+            "decoded_bytes": row.resources.decoded_bytes,
+            "load_us": row.resources.load_us,
+            "upload_calls": row.resources.upload_calls,
+            "upload_bytes": row.resources.upload_bytes,
+            "wait_us": row.resources.wait_us,
+            "upload_us": row.resources.upload_us,
+            "paths": row.resources.paths.iter().map(|path| serde_json::json!({
+                "path": path.path,
+                "succeeded": path.succeeded,
+            })).collect::<Vec<_>>(),
         })).collect::<Vec<_>>();
         Ok(serde_json::to_string_pretty(&serde_json::json!({
             "format": "rock.replay-report.v1",
@@ -374,6 +530,7 @@ impl ReplayAnalysis {
                 "seed": self.seed,
                 "game": self.game,
                 "source": self.source,
+                "revision": self.revision,
                 "build": self.build,
                 "observations": self.observation_count,
                 "timing_rows": self.timing_count,
@@ -382,14 +539,16 @@ impl ReplayAnalysis {
             "slow_threshold_us": self.slow_threshold_us,
             "top_frames": top,
             "slow_clusters": clusters,
+            "image_resource_frames": image_resource_frames,
         }))?)
     }
 
     fn render_text(&self) -> String {
         let mut out = format!(
-            "Replay: {} [{}] build {} (v{}, seed {})\nObservations: {} | timings: {} | p50 {:.2} ms | p95 {:.2} ms | p99 {:.2} ms\nSlow burst threshold: {:.2} ms (max(2 x p50, 16.667 ms))\n\nTop frames:\n",
+            "Replay: {} [{}] revision {} build {} (v{}, seed {})\nObservations: {} | timings: {} | p50 {:.2} ms | p95 {:.2} ms | p99 {:.2} ms\nSlow burst threshold: {:.2} ms (max(2 x p50, 16.667 ms))\n\nTop frames:\n",
             self.source,
             self.game,
+            if self.revision.is_empty() { "?" } else { &self.revision },
             self.build,
             self.version,
             self.seed.map(|seed| seed.to_string()).unwrap_or_else(|| "?".to_string()),
@@ -432,6 +591,50 @@ impl ReplayAnalysis {
                         section.name,
                         section.inclusive_us as f64 / 1000.0,
                         section.calls,
+                    ));
+                }
+            }
+            if let Some(resources) = &row.image_resources {
+                out.push_str(&format!(
+                    "           images load {}/{} ({:.2} MiB, {:.2} ms), upload {} ({:.2} MiB, {:.2} ms), wait {:.2} ms\n",
+                    resources.load_calls,
+                    resources.load_failures,
+                    resources.decoded_bytes as f64 / 1_048_576.0,
+                    resources.load_us as f64 / 1000.0,
+                    resources.upload_calls,
+                    resources.upload_bytes as f64 / 1_048_576.0,
+                    resources.upload_us as f64 / 1000.0,
+                    resources.wait_us as f64 / 1000.0,
+                ));
+                for path in &resources.paths {
+                    out.push_str(&format!(
+                        "             {} {}\n",
+                        if path.succeeded { "loaded" } else { "failed" },
+                        path.path,
+                    ));
+                }
+            }
+        }
+        out.push_str("\nImage resource frames:\n");
+        if self.image_resource_frames.is_empty() {
+            out.push_str("  none\n");
+        } else {
+            for row in &self.image_resource_frames {
+                out.push_str(&format!(
+                    "  #{} {:.2} ms: {} load(s), {} failure(s), {:.2} MiB decoded, {:.2} ms load, {:.2} ms wait\n",
+                    row.ordinal,
+                    row.total_us as f64 / 1000.0,
+                    row.resources.load_calls,
+                    row.resources.load_failures,
+                    row.resources.decoded_bytes as f64 / 1_048_576.0,
+                    row.resources.load_us as f64 / 1000.0,
+                    row.resources.wait_us as f64 / 1000.0,
+                ));
+                for path in &row.resources.paths {
+                    out.push_str(&format!(
+                        "    {} {}\n",
+                        if path.succeeded { "loaded" } else { "failed" },
+                        path.path,
                     ));
                 }
             }
@@ -478,6 +681,7 @@ t 0x1p-6 0x0p+0 0x0p+0 0 0 W - - -\n\
 p 1 1 40000 28000 10000 2000\n\
 t 0x1p-6 0x0p+0 0x0p+0 0 0 W 1 - -\n\
 p 2 2 50000 12000 35000 3000\n\
+i 2 2 1 0 16777216 1500 1 16777216 9000 2000 1 1 6173736574732f7666782f666c616d65737472696b652e706e67\n\
 s 2 2 1000 200 0 0 1 64726177 30000 4\n\
 t 0x1p-6 0x0p+0 0x0p+0 0 0 - - - -\n\
 p 3 3 11000 4000 6000 1000";
@@ -506,6 +710,11 @@ p 3 3 11000 4000 6000 1000";
         assert_eq!(value["percentiles_us"]["p95"], 50_000);
         assert_eq!(value["top_frames"][0]["suggested_range"], "1-3");
         assert_eq!(value["top_frames"][0]["recorded_profile"]["sections"][0]["name"], "draw");
+        assert_eq!(value["top_frames"][0]["image_resources"]["load_calls"], 1);
+        assert_eq!(value["top_frames"][0]["image_resources"]["decoded_bytes"], 16_777_216);
+        assert_eq!(value["top_frames"][0]["image_resources"]["paths"][0]["path"],
+            "assets/vfx/flamestrike.png");
+        assert_eq!(value["image_resource_frames"][0]["ordinal"], 2);
     }
 
     #[test]
@@ -516,5 +725,24 @@ p 3 3 11000 4000 6000 1000";
         .expect("the replay itself parses");
         let error = replay.analyze(10, 2).unwrap_err().to_string();
         assert!(error.contains("no recorded timing"), "{error}");
+    }
+    #[test]
+    fn v13_report_requires_the_recorded_source_revision() {
+        let error = ReplayReport::parse(
+            "STONE_REPLAY 13\nseed 1\ngame MAG\nsource 6d6167\nbuild 0123456789abcdef\nt 0 0 0 0 0 - - - -",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("source revision"), "{error}");
+    }
+
+    #[test]
+    fn report_rejects_a_duplicate_image_resource_row() {
+        let duplicated = FIXTURE.replace(
+            "s 2 2 1000",
+            "i 2 2 0 0 0 0 0 0 0 0 0\ns 2 2 1000",
+        );
+        let error = ReplayReport::parse(&duplicated).unwrap_err().to_string();
+        assert!(error.contains("duplicate image resource row"), "{error}");
     }
 }

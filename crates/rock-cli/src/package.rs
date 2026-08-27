@@ -10,6 +10,7 @@ use bone_semantic::inference::ComptimeInputs;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use sound_core::AssetResolver;
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -87,7 +88,7 @@ pub fn run_package(project: &str, output: Option<&str>) -> Result<()> {
     let game_key = context.game_key;
     let config = context.config;
     let overlays = rock_host::release::asset_overlay_roots(&project_abs, config.as_ref())?;
-    let mut selection = rock_host::release::select_assets_with_overlays(
+    let selection = rock_host::release::select_assets_with_overlays(
         &project_abs,
         &game_key,
         config.as_ref(),
@@ -95,12 +96,12 @@ pub fn run_package(project: &str, output: Option<&str>) -> Result<()> {
         false,
         &overlays,
     )?;
-    let sound = compile_sound_project(
+    let (selection, sound, visual) = compile_declared_asset_banks(
         &project_abs,
         &game_key,
         config.as_ref(),
         &overlays,
-        &mut selection,
+        selection,
     )?;
     for missing in &selection.missing {
         log::warn!(target: "PACKAGE", "release asset {} does not exist, skipping", missing.display());
@@ -169,6 +170,7 @@ pub fn run_package(project: &str, output: Option<&str>) -> Result<()> {
         &bytecode_path,
         &staged,
         sound.as_ref(),
+        visual.as_ref(),
     )?;
     let bytes = serde_json::to_vec_pretty(&manifest)?;
     rock_host::project::write_atomic(&manifest_path, &bytes)?;
@@ -183,11 +185,67 @@ pub fn run_package(project: &str, output: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+pub fn select_release_assets(
+    project_dir: &Path,
+    game_key: &str,
+    config: Option<&rock_host::stick::StickConfig>,
+    workspace_root: &Path,
+    include_web_font: bool,
+) -> Result<rock_host::release::AssetSelection> {
+    let overlays = rock_host::release::asset_overlay_roots(project_dir, config)?;
+    let selection = rock_host::release::select_assets_with_overlays(
+        project_dir,
+        game_key,
+        config,
+        workspace_root,
+        include_web_font,
+        &overlays,
+    )?;
+    let (selection, _, _) = compile_declared_asset_banks(
+        project_dir,
+        game_key,
+        config,
+        &overlays,
+        selection,
+    )?;
+    Ok(selection)
+}
+
 struct CompiledSoundPackage {
     project: String,
     bank_key: String,
     bank_bytes: Vec<u8>,
     dependencies: Vec<String>,
+}
+
+struct CompiledVisualPackage {
+    bank_key: String,
+    schema: u64,
+    plan_fingerprint: String,
+    dependencies: Vec<String>,
+    fixed_output_keys: BTreeSet<String>,
+}
+
+fn compile_declared_asset_banks(
+    project_dir: &Path,
+    game_key: &str,
+    config: Option<&rock_host::stick::StickConfig>,
+    overlays: &[PathBuf],
+    mut selection: rock_host::release::AssetSelection,
+) -> Result<(
+    rock_host::release::AssetSelection,
+    Option<CompiledSoundPackage>,
+    Option<CompiledVisualPackage>,
+)> {
+    let sound = compile_sound_project(project_dir, game_key, config, overlays, &mut selection)?;
+    let visual = compile_visual_bank(project_dir, game_key, overlays, &mut selection)?;
+    narrow_asset_overlay_selection(
+        &mut selection,
+        overlays,
+        sound.as_ref(),
+        visual.as_ref(),
+    );
+    Ok((selection, sound, visual))
 }
 
 struct ReleaseSoundResolver<'a> {
@@ -260,6 +318,111 @@ fn compile_sound_project(
     }))
 }
 
+fn compile_visual_bank(
+    project_dir: &Path,
+    game_key: &str,
+    overlays: &[PathBuf],
+    selection: &mut rock_host::release::AssetSelection,
+) -> Result<Option<CompiledVisualPackage>> {
+    let bank_logical_key = "assets/visual_bank.json";
+    let Some(bank_asset) = rock_host::release::resolve_asset_with_overlays(
+        project_dir,
+        game_key,
+        overlays,
+        bank_logical_key,
+    )? else {
+        return Ok(None);
+    };
+    let bytes = std::fs::read(&bank_asset.source)
+        .map_err(|error| anyhow::anyhow!("package: visual bank could not be read: {error}"))?;
+    let root: Value = serde_json::from_slice(&bytes)
+        .map_err(|error| anyhow::anyhow!("package: visual bank is invalid JSON: {error}"))?;
+    let schema = root.get("schema_version").and_then(Value::as_u64)
+        .ok_or_else(|| anyhow::anyhow!("package: visual bank has no integer schema_version"))?;
+    if schema != 1 {
+        anyhow::bail!("package: unsupported visual bank schema {schema}");
+    }
+    let plan_fingerprint = root.get("plan_fingerprint").and_then(Value::as_str)
+        .filter(|value| value.starts_with("sha256:") && value.len() == 71)
+        .ok_or_else(|| anyhow::anyhow!("package: visual bank has no valid plan_fingerprint"))?
+        .to_string();
+    let values = root.get("dependencies").and_then(Value::as_array)
+        .ok_or_else(|| anyhow::anyhow!("package: visual bank has no dependency array"))?;
+    let mut logical_dependencies = Vec::with_capacity(values.len());
+    for value in values {
+        let dependency = value.as_str()
+            .ok_or_else(|| anyhow::anyhow!("package: visual bank dependency is not a string"))?;
+        if !dependency.starts_with("assets/.eat/") {
+            anyhow::bail!("package: visual dependency is not immutable: {dependency}");
+        }
+        logical_dependencies.push(dependency.to_string());
+    }
+    if !logical_dependencies.windows(2).all(|pair| pair[0] < pair[1]) {
+        anyhow::bail!("package: visual bank dependencies must be sorted and unique");
+    }
+
+    rock_host::release::include_release_asset(selection, bank_asset.clone());
+    let mut dependencies = Vec::with_capacity(logical_dependencies.len());
+    let mut fixed_output_keys = BTreeSet::new();
+    for dependency in &logical_dependencies {
+        let asset = rock_host::release::resolve_asset_with_overlays(
+            project_dir,
+            game_key,
+            overlays,
+            dependency,
+        )?
+        .ok_or_else(|| anyhow::anyhow!("package: visual dependency is not stageable: {dependency}"))?;
+        rock_host::release::include_release_asset(selection, asset);
+        dependencies.push(format!("{game_key}/{dependency}"));
+        if let Some((_, original)) = dependency
+            .strip_prefix("assets/.eat/")
+            .and_then(|rest| rest.split_once('/'))
+        {
+            let fixed = format!("{game_key}/assets/{original}");
+            fixed_output_keys.insert(fixed.clone());
+            if let Some(stem) = fixed.strip_suffix(".png") {
+                let base = stem.strip_suffix("-normal")
+                    .or_else(|| stem.strip_suffix("-shadow"))
+                    .unwrap_or(stem);
+                fixed_output_keys.insert(format!("{base}.json"));
+            }
+        }
+    }
+    dependencies.sort();
+    Ok(Some(CompiledVisualPackage {
+        bank_key: format!("{game_key}/{bank_logical_key}"),
+        schema,
+        plan_fingerprint,
+        dependencies,
+        fixed_output_keys,
+    }))
+}
+
+fn narrow_asset_overlay_selection(
+    selection: &mut rock_host::release::AssetSelection,
+    overlays: &[PathBuf],
+    sound: Option<&CompiledSoundPackage>,
+    visual: Option<&CompiledVisualPackage>,
+) {
+    let Some(visual) = visual else { return };
+    let mut admitted = BTreeSet::new();
+    if let Some(sound) = sound {
+        admitted.extend(sound.dependencies.iter().cloned());
+    }
+    admitted.insert(visual.bank_key.clone());
+    admitted.extend(visual.dependencies.iter().cloned());
+    selection.assets.retain(|asset| {
+        if visual.fixed_output_keys.contains(&asset.key) {
+            return false;
+        }
+        let from_overlay = overlays.iter().any(|overlay| asset.source.starts_with(overlay));
+        if from_overlay || asset.key.contains("/assets/.eat/") {
+            return admitted.contains(&asset.key);
+        }
+        true
+    });
+}
+
 fn declared_sound_project_path(project_dir: &Path, relative: &str) -> Result<PathBuf> {
     let path = Path::new(relative);
     if relative.trim().is_empty()
@@ -295,8 +458,10 @@ fn write_sound_bank(
         std::fs::create_dir_all(parent)?;
     }
     rock_host::project::write_atomic(&destination, &sound.bank_bytes)?;
-    staged.keys.push(sound.bank_key.clone());
-    staged.keys.sort();
+    if !staged.keys.iter().any(|key| key == &sound.bank_key) {
+        staged.keys.push(sound.bank_key.clone());
+        staged.keys.sort();
+    }
     staged.file_count = staged.keys.len();
     Ok(())
 }
@@ -310,6 +475,7 @@ fn package_manifest(
     bytecode_path: &Path,
     staged: &rock_host::release::StagedAssets,
     sound: Option<&CompiledSoundPackage>,
+    visual: Option<&CompiledVisualPackage>,
 ) -> Result<Value> {
     let mut vars = Map::new();
     let declarations = config
@@ -378,6 +544,17 @@ fn package_manifest(
             }),
         );
     }
+    if let Some(visual) = visual {
+        artifacts.insert(
+            "visual".to_string(),
+            json!({
+                "bank": visual.bank_key,
+                "schema": visual.schema,
+                "plan_fingerprint": visual.plan_fingerprint,
+                "dependencies": visual.dependencies,
+            }),
+        );
+    }
 
     Ok(json!({
         "schema": 1,
@@ -435,5 +612,68 @@ mod tests {
         vars.insert("TOKEN", fingerprint(secret));
         let encoded = serde_json::to_string(&vars).unwrap();
         assert!(!encoded.contains(secret));
+    }
+
+    #[test]
+    fn exact_banks_exclude_fixed_stale_and_unrelated_overlay_assets() {
+        let overlay = PathBuf::from("/asset-overlay");
+        let game = "mag";
+        let generated = format!("{game}/assets/.eat/current/characters/mage/mage-idle.png");
+        let sound_key = format!("{game}/assets/sfx/cast.ogg");
+        let bank_key = format!("{game}/assets/visual_bank.json");
+        let mut selection = rock_host::release::AssetSelection {
+            assets: vec![
+                rock_host::release::ReleaseAsset { key: generated.clone(), source: overlay.join("assets/.eat/current/mage.png") },
+                rock_host::release::ReleaseAsset { key: format!("{game}/assets/.eat/stale/mage.png"), source: overlay.join("assets/.eat/stale/mage.png") },
+                rock_host::release::ReleaseAsset { key: bank_key.clone(), source: overlay.join("assets/visual_bank.json") },
+                rock_host::release::ReleaseAsset { key: sound_key.clone(), source: overlay.join("assets/sfx/cast.ogg") },
+                rock_host::release::ReleaseAsset { key: format!("{game}/assets/unrelated-sentinel.txt"), source: overlay.join("assets/unrelated-sentinel.txt") },
+                rock_host::release::ReleaseAsset { key: format!("{game}/assets/characters/mage/mage-idle.png"), source: PathBuf::from("/project/assets/characters/mage/mage-idle.png") },
+                rock_host::release::ReleaseAsset { key: format!("{game}/assets/ui/frame.png"), source: PathBuf::from("/project/assets/ui/frame.png") },
+            ],
+            missing: Vec::new(),
+        };
+        let sound = CompiledSoundPackage {
+            project: "sound_project.json".to_string(),
+            bank_key: format!("{game}/assets/sound_bank.json"),
+            bank_bytes: Vec::new(),
+            dependencies: vec![sound_key.clone()],
+        };
+        let visual = CompiledVisualPackage {
+            bank_key: bank_key.clone(),
+            schema: 1,
+            plan_fingerprint: format!("sha256:{}", "0".repeat(64)),
+            dependencies: vec![generated.clone()],
+            fixed_output_keys: [format!("{game}/assets/characters/mage/mage-idle.png")].into(),
+        };
+
+        narrow_asset_overlay_selection(&mut selection, &[overlay], Some(&sound), Some(&visual));
+        let keys: BTreeSet<_> = selection.assets.iter().map(|asset| asset.key.as_str()).collect();
+        assert_eq!(keys.len(), 4, "admission and exclusion populations");
+        assert!(keys.contains(generated.as_str()));
+        assert!(keys.contains(bank_key.as_str()));
+        assert!(keys.contains(sound_key.as_str()));
+        assert!(keys.contains("mag/assets/ui/frame.png"));
+        assert!(!keys.iter().any(|key| key.contains("stale") || key.contains("sentinel")));
+        assert!(!keys.contains("mag/assets/characters/mage/mage-idle.png"));
+    }
+
+    #[test]
+    fn generated_sound_bank_does_not_duplicate_an_already_selected_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = "mag/assets/sound_bank.json".to_string();
+        let mut staged = rock_host::release::StagedAssets {
+            file_count: 1,
+            keys: vec![key.clone()],
+        };
+        let sound = CompiledSoundPackage {
+            project: "sound_project.json".to_string(),
+            bank_key: key.clone(),
+            bank_bytes: b"bank".to_vec(),
+            dependencies: Vec::new(),
+        };
+        write_sound_bank(dir.path(), &mut staged, &sound).unwrap();
+        assert_eq!(staged.file_count, 1);
+        assert_eq!(staged.keys, vec![key]);
     }
 }

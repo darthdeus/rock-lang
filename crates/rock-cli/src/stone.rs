@@ -605,7 +605,7 @@ fn replay_state_root() -> Option<std::path::PathBuf> {
     })
 }
 
-fn replay_source_for(game_path: &str) -> Result<String> {
+pub(crate) fn replay_source_for(game_path: &str) -> Result<String> {
     let project = fs_err::canonicalize(game_path)?;
     let source = rock_host::project::find_workspace_root(&project)
         .and_then(|root| project.strip_prefix(root).ok().map(std::path::Path::to_path_buf))
@@ -1253,7 +1253,7 @@ fn frame_watchdog() -> FrameWatchdogConfig {
     )
 }
 
-fn apply_headless_audio_env(cmd: &mut Command) {
+pub(crate) fn apply_headless_audio_env(cmd: &mut Command) {
     if std::env::var_os("STONE_AUDIO_STUB").is_none() {
         cmd.env("STONE_AUDIO_STUB", "1");
     }

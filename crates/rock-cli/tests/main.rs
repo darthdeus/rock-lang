@@ -38,6 +38,10 @@ mod cimgui_prelude;
 mod release_mode_deleted;
 #[path = "replay_report_tests.rs"]
 mod replay_report_tests;
+#[path = "replay_profile_tests.rs"]
+mod replay_profile_tests;
+#[path = "replay_profile_report_tests.rs"]
+mod replay_profile_report_tests;
 #[path = "mag_build_vars.rs"]
 mod mag_build_vars;
 #[path = "package.rs"]
