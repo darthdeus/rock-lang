@@ -2616,6 +2616,7 @@ fn lower_state_metadata(
                 metadata.realization = match value {
                     "fresh_session" => StateRealization::FreshSession,
                     "rebuild_host_projection" => StateRealization::RebuildHostProjection,
+                    "native_frame_delta" => StateRealization::NativeFrameDelta,
                     "font" => StateRealization::Font,
                     "asset_cache" => StateRealization::AssetCache,
                     "asset_paths" => StateRealization::AssetPaths,

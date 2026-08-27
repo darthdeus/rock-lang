@@ -1015,6 +1015,7 @@ impl StateWorldPolicy {
 pub enum StateRealization {
     FreshSession,
     RebuildHostProjection,
+    NativeFrameDelta,
     Font,
     AssetCache,
     AssetPaths,
@@ -1033,6 +1034,7 @@ impl StateRealization {
         match self {
             Self::FreshSession => "fresh-session",
             Self::RebuildHostProjection => "rebuild-host-projection",
+            Self::NativeFrameDelta => "native-frame-delta",
             Self::Font => "font",
             Self::AssetCache => "asset-cache",
             Self::AssetPaths => "asset-paths",
