@@ -411,6 +411,29 @@ return v5
 }
 
 #[test]
+fn diverging_if_join_does_not_declare_never_storage() {
+    let ast = skull_parser::parse_module(
+        "fn f(x: int) -> int { if x > 0 { return 1 } else { return 2 } }",
+        ustr::Ustr::from("<test>"),
+    )
+    .expect("parse");
+    let mut modules = vec![ast];
+    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
+    let mid = ws.module_ids[&ustr::Ustr::from("<test>")];
+    let (fid, _) = ws
+        .module(mid)
+        .functions
+        .iter()
+        .find(|(_, function)| function.name.as_str() == "f")
+        .expect("function");
+    let mir = lower_test_root(&ws, mid, fid).expect("lower");
+    assert!(
+        mir.cells.iter().skip(1).all(|(_, cell)| cell.ty.is_none()),
+        "a diverging join cannot materialize a never-typed local: {mir}"
+    );
+}
+
+#[test]
 fn and_short_circuits_through_a_cell() {
     assert_eq!(
         mir("fn f(a: bool, b: bool) -> bool { a && b }", "f"),

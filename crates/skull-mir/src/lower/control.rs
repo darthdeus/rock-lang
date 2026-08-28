@@ -284,8 +284,11 @@ impl Builder<'_> {
         else_branch: Option<Idx<Expr>>,
         shape: RetSlot,
     ) -> Result<ValueRepr, CompilerError> {
+        let result_ty = matches!(shape, RetSlot::Opaque)
+            .then(|| self.current_expr_storage_ty_id())
+            .flatten();
         let results: Vec<Idx<Cell>> =
-            (0..shape.slot_count()).map(|_| self.f.new_cell(None)).collect();
+            (0..shape.slot_count()).map(|_| self.f.new_cell_typed(None, result_ty)).collect();
         let cond_v = self.lower_expr(cond)?;
         let then_bb = self.f.new_block();
         let else_bb = self.f.new_block();
@@ -460,7 +463,7 @@ impl Builder<'_> {
 
     /// `a && b` == `if a then b else false`.
     pub(crate) fn lower_and(&mut self, lhs: Idx<Expr>, rhs: Idx<Expr>) -> Result<Idx<Inst>, CompilerError> {
-        let result = self.f.new_cell(None);
+        let result = self.f.new_cell_typed(None, self.current_expr_storage_ty_id());
         let lv = self.lower_expr(lhs)?;
         let rhs_bb = self.f.new_block();
         let else_bb = self.f.new_block();
@@ -485,7 +488,7 @@ impl Builder<'_> {
 
     /// `a || b` == `if a then true else b`.
     pub(crate) fn lower_or(&mut self, lhs: Idx<Expr>, rhs: Idx<Expr>) -> Result<Idx<Inst>, CompilerError> {
-        let result = self.f.new_cell(None);
+        let result = self.f.new_cell_typed(None, self.current_expr_storage_ty_id());
         let lv = self.lower_expr(lhs)?;
         let then_bb = self.f.new_block();
         let rhs_bb = self.f.new_block();
@@ -514,7 +517,7 @@ impl Builder<'_> {
         lhs: Idx<Expr>,
         rhs: Idx<Expr>,
     ) -> Result<Idx<Inst>, CompilerError> {
-        let result = self.f.new_cell(None);
+        let result = self.f.new_cell_typed(None, self.current_expr_storage_ty_id());
         let lv = self.lower_expr(lhs)?;
         let nil = self.emit_cur(Inst::Const(Lit::Nil));
         let is_nil = self.emit_cur(Inst::Eq(lv, nil));

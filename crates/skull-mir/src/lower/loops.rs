@@ -951,7 +951,9 @@ impl Builder<'_> {
     pub(crate) fn bind_for_pattern(&mut self, vars: &BindingPattern, value: Idx<Inst>) {
         match vars {
             BindingPattern::Leaf(b) => {
-                let cell = self.f.new_cell(Some(self.body.binding_arena[*b].name));
+                let cell = self
+                    .f
+                    .new_cell_typed(Some(self.body.binding_arena[*b].name), self.binding_ty(*b));
                 if self.binding_is_nonnull_value_struct(*b) {
                     self.f.mark_nonnull_value_struct(cell);
                 }

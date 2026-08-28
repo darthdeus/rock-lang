@@ -538,6 +538,66 @@ impl Builder<'_> {
         self.dispatch().expr_ty(e)
     }
 
+    pub(crate) fn current_expr_storage_ty_id(&self) -> Option<TyId> {
+        let ty = self.cur_expr.and_then(|e| self.inf?.expr_types.get(e).copied())?;
+        let resolved = self.resolve_tyid(ty)?;
+        if matches!(
+            self.dispatch().ty_node(resolved),
+            Some(TypeExpr::Builtin(BuiltinTy::Never | BuiltinTy::Error))
+        ) {
+            None
+        } else {
+            Some(ty)
+        }
+    }
+
+    pub(crate) fn tuple_opaque_slot_types(
+        &self,
+        e: Idx<Expr>,
+        shape: &TupleRetShape,
+    ) -> Vec<Option<TyId>> {
+        fn append(
+            b: &Builder<'_>,
+            ty: TyId,
+            shape: &TupleRetShape,
+            out: &mut Vec<Option<TyId>>,
+        ) -> Option<()> {
+            if shape.nullable {
+                out.push(None);
+            }
+            let ty = b.resolve_tyid(ty)?;
+            let ty = match b.dispatch().ty_node(ty)? {
+                TypeExpr::Nullable(inner) => ty.with_idx(inner),
+                _ => ty,
+            };
+            let TypeExpr::Tuple { elements } = b.dispatch().ty_node(ty)? else {
+                return None;
+            };
+            if elements.len() != shape.slots.len() {
+                return None;
+            }
+            for (element, slot) in elements.into_iter().zip(&shape.slots) {
+                let element = ty.with_idx(element);
+                match slot {
+                    RetSlot::Opaque => out.push(Some(element)),
+                    RetSlot::Leaves(value) => out.extend((0..value.leaf_count()).map(|_| None)),
+                    RetSlot::Nested(inner) => append(b, element, inner, out)?,
+                }
+            }
+            Some(())
+        }
+
+        let Some(ty) = self.inf.and_then(|inf| inf.expr_types.get(e).copied()) else {
+            return vec![None; shape.slot_count()];
+        };
+        let mut out = Vec::with_capacity(shape.slot_count());
+        if append(self, ty, shape, &mut out).is_some() && out.len() == shape.slot_count() {
+            out
+        } else {
+            vec![None; shape.slot_count()]
+        }
+    }
+
     /// `Some` iff `e`'s concrete or inferred type is a (non-nullable) tuple. Used
     /// to route a tuple result across a call boundary (the call expr's own type
     /// IS the callee's return type, so direct and INDIRECT calls agree).

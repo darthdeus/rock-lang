@@ -859,7 +859,7 @@ impl Builder<'_> {
             // day a `@gpu_only` intrinsic returns a tuple.
             self.authorize_gpu_boundary_boxes(&func, &args);
             if let Some(shape) = &ret_tuple {
-                return Ok(self.emit_tuple_call_tree(func, args, shape, &dc)?);
+                return Ok(self.emit_tuple_call_tree(e, func, args, shape, &dc)?);
             }
             let call = self.emit_cur(Inst::Call { func, args });
             self.record_call(call, func, &dc)?;
@@ -885,7 +885,7 @@ impl Builder<'_> {
                 Ok(self.rebuild_from_leaves(&shape, &leaves, &mut idx))
             }
             None => match &ret_tuple {
-                Some(shape) => Ok(self.emit_tuple_call_tree(func, args, shape, &dc)?),
+                Some(shape) => Ok(self.emit_tuple_call_tree(e, func, args, shape, &dc)?),
                 None => {
                     let call = self.emit_cur(Inst::Call { func, args });
                     self.record_call(call, func, &dc)?;
@@ -912,13 +912,17 @@ impl Builder<'_> {
     /// target.
     pub(crate) fn emit_tuple_call_tree(
         &mut self,
+        e: Idx<Expr>,
         func: FuncRef,
         args: Vec<Idx<Inst>>,
         shape: &TupleRetShape,
         dc: &DirectCall,
     ) -> Result<ValueRepr, CompilerError> {
-        let dests: Vec<Idx<Cell>> =
-            (0..shape.slot_count()).map(|_| self.f.new_cell(None)).collect();
+        let slot_types = self.tuple_opaque_slot_types(e, shape);
+        let dests: Vec<Idx<Cell>> = slot_types
+            .into_iter()
+            .map(|ty| self.f.new_cell_typed(None, ty))
+            .collect();
         let call = self.emit_cur(Inst::CallMulti { dests: dests.clone(), func, args });
         self.record_call(call, func, dc)?;
         let loads: Vec<Idx<Inst>> = dests.iter().map(|c| self.emit_cur(Inst::Load(*c))).collect();
@@ -1061,7 +1065,7 @@ impl Builder<'_> {
             // join forwards that tag rather than minting `true` -- `a?.m()` is
             // absent when either link is.
             return Ok(match dc.plan.ret_tuple() {
-                Some(shape) => self.emit_tuple_call_tree(func, argv, &shape, &dc)?,
+                Some(shape) => self.emit_tuple_call_tree(e, func, argv, &shape, &dc)?,
                 None => {
                     let call = self.emit_cur(Inst::Call { func, args: argv });
                     self.record_call(call, func, &dc)?;

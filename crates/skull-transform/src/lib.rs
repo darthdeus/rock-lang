@@ -1914,6 +1914,70 @@ mod tests {
     }
 
     #[test]
+    fn coroutine_frame_cells_retain_types_across_conditional_yields() {
+        let func = lower(
+            "co fn f(flag: bool) -> Coroutine<int> {\n\
+                 if flag { yield 1 yield 2 } else { yield 10 yield 20 }\n\
+             }",
+            "f",
+        );
+        let lowered = transform_coroutine(&func, None);
+        let untyped: Vec<_> = lowered
+            .frame_plan
+            .fields()
+            .iter()
+            .copied()
+            .filter(|&cell| lowered.step.cells[cell].ty.is_none())
+            .map(|cell| (cell, lowered.step.cells[cell].name))
+            .collect();
+        assert!(untyped.is_empty(), "untyped frame cells: {untyped:?}\n{}", lowered.step);
+    }
+
+    #[test]
+    fn coroutine_frame_cells_retain_types_across_null_coalesce() {
+        let func = lower(
+            "co fn f(x: int?) -> Coroutine<int> {\n\
+                 yield x ?? -1\n\
+                 yield x ?? -2\n\
+             }",
+            "f",
+        );
+        let lowered = transform_coroutine(&func, None);
+        let untyped: Vec<_> = lowered
+            .frame_plan
+            .fields()
+            .iter()
+            .copied()
+            .filter(|&cell| lowered.step.cells[cell].ty.is_none())
+            .map(|cell| (cell, lowered.step.cells[cell].name))
+            .collect();
+        assert!(untyped.is_empty(), "untyped frame cells: {untyped:?}\n{}", lowered.step);
+    }
+
+    #[test]
+    fn coroutine_frame_cells_retain_types_across_tuple_destructure() {
+        let func = lower(
+            "fn pair() -> (int, int) { return (10, 20) }\n\
+             co fn f() -> Coroutine<int> {\n\
+                 let (a, b) = pair()\n\
+                 yield a\n\
+                 yield b\n\
+             }",
+            "f",
+        );
+        let lowered = transform_coroutine(&func, None);
+        let untyped: Vec<_> = lowered
+            .frame_plan
+            .fields()
+            .iter()
+            .copied()
+            .filter(|&cell| lowered.step.cells[cell].ty.is_none())
+            .map(|cell| (cell, lowered.step.cells[cell].name))
+            .collect();
+        assert!(untyped.is_empty(), "untyped frame cells: {untyped:?}\n{}", lowered.step);
+    }
+
+    #[test]
     fn closure_conversion_exposes_one_owned_environment_plan() {
         let mut func = lower(
             "fn f() -> int { let captured = 3; let g = () => captured; return g() }",
