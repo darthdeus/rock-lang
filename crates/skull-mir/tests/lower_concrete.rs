@@ -914,6 +914,36 @@ goto bb1
 }
 
 #[test]
+fn match_payload_bindings_retain_their_semantic_types() {
+    let ast = skull_parser::parse_module(
+        "enum Mixed { Flag(bool), Number(int) }\n\
+         fn f(value: Mixed) -> int { match value { Mixed::Flag(flag) => if flag { 1 } else { 0 }, Mixed::Number(number) => number } }",
+        ustr::Ustr::from("<test>"),
+    )
+    .expect("parse");
+    let mut modules = vec![ast];
+    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
+    let mid = ws.module_ids[&ustr::Ustr::from("<test>")];
+    let (fid, _) = ws
+        .module(mid)
+        .functions
+        .iter()
+        .find(|(_, function)| function.name.as_str() == "f")
+        .expect("function");
+    let mir = lower_test_root(&ws, mid, fid).expect("lower");
+
+    for name in ["flag", "number"] {
+        let cell = mir
+            .cells
+            .iter()
+            .find(|(_, cell)| cell.name.is_some_and(|cell_name| cell_name.as_str() == name))
+            .map(|(_, cell)| cell)
+            .unwrap_or_else(|| panic!("missing match binding `{name}`: {mir}"));
+        assert!(cell.ty.is_some(), "match binding `{name}` lost its semantic type: {mir}");
+    }
+}
+
+#[test]
 fn match_nested_enum_gates_child_read_behind_parent_tag() {
     // `Some(Circle(r))`: the inner Circle tag test must be GATED behind the
     // outer Some tag (parent tag before any child read) — a cont block after

@@ -128,7 +128,7 @@ impl Builder<'_> {
                     return Ok(());
                 }
                 let val = self.scrut_value(scrut);
-                let cell = self.f.new_cell(Some(name));
+                let cell = self.f.new_cell_typed(Some(name), self.binding_ty(b));
                 self.emit_cur(Inst::Store { cell, value: val });
                 self.binds.insert(raw(b), cell);
                 Ok(())
