@@ -6,9 +6,11 @@ use crate::mir::{Cell, FuncRef, Inst, Lit, MirFunc, Term};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Place {
+    Pending,
     Static,
     Session,
     Frame,
+    Destination,
     Param(u16),
     Unknown,
 }
@@ -17,16 +19,19 @@ impl Place {
     fn join(self, other: Self) -> Self {
         match (self, other) {
             (left, right) if left == right => left,
+            (Self::Pending, other) | (other, Self::Pending) => other,
             (Self::Static, other) | (other, Self::Static) => other,
+            (Self::Destination, other) | (other, Self::Destination) => other,
             (Self::Frame, Self::Session) | (Self::Session, Self::Frame) => Self::Frame,
             (Self::Unknown, _) | (_, Self::Unknown) => Self::Unknown,
             _ => Self::Unknown,
         }
     }
 
-    fn substitute(self, args: &[Self]) -> Self {
+    fn substitute(self, args: &[Self], destination: Self) -> Self {
         match self {
             Self::Param(index) => args.get(index as usize).copied().unwrap_or(Self::Unknown),
+            Self::Destination => destination,
             other => other,
         }
     }
@@ -77,7 +82,7 @@ impl AnalysisContext {
     pub fn frame() -> Self {
         Self {
             default_allocation: Place::Frame,
-            return_destination: None,
+            return_destination: Some(Place::Destination),
         }
     }
 
@@ -120,10 +125,13 @@ pub struct PlacementAnalysis {
 
 fn known_outlives(value: Place, destination: Place) -> Option<bool> {
     match (value, destination) {
+        (Place::Pending, _) | (_, Place::Pending) => None,
         (Place::Static, _) => Some(true),
+        (left, right) if left == right => Some(true),
         (Place::Unknown, _) | (_, Place::Unknown) => None,
-        (Place::Param(left), Place::Param(right)) if left == right => Some(true),
-        (Place::Param(_), _) | (_, Place::Param(_)) => None,
+        (Place::Param(_) | Place::Destination, _) | (_, Place::Param(_) | Place::Destination) => {
+            None
+        }
         (Place::Session, Place::Session | Place::Frame) => Some(true),
         (Place::Frame, Place::Frame) => Some(true),
         _ => Some(false),
@@ -153,6 +161,12 @@ fn merge_requirement<T>(map: &mut ArenaMap<Idx<T>, Place>, key: Idx<T>, value: P
         (None, value) => value,
         (Some(old), value) if old == value => old,
         (Some(Place::Frame), Place::Session) | (Some(Place::Session), Place::Frame) => {
+            Place::Session
+        }
+        (Some(Place::Frame), Place::Destination) | (Some(Place::Destination), Place::Frame) => {
+            Place::Destination
+        }
+        (Some(Place::Destination), Place::Session) | (Some(Place::Session), Place::Destination) => {
             Place::Session
         }
         (Some(Place::Unknown), _) | (Some(_), Place::Unknown) => Place::Unknown,
@@ -210,9 +224,22 @@ fn infer_requirements(
                             changed |= merge_requirement(&mut requirements.cells, *cell, required);
                         }
                     }
-                    Inst::MakeTuple(values) => {
+                    Inst::MakeTuple(values) | Inst::MakeVec(values) => {
                         if let Some(required) = requirements.values.get(id).copied() {
                             for &value in values {
+                                if oracle.carries_placement(mir, value) {
+                                    changed |= merge_requirement(
+                                        &mut requirements.values,
+                                        value,
+                                        required,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    Inst::MakeVecColumns { columns, .. } => {
+                        if let Some(required) = requirements.values.get(id).copied() {
+                            for &value in columns.iter().flat_map(|(_, values)| values) {
                                 if oracle.carries_placement(mir, value) {
                                     changed |= merge_requirement(
                                         &mut requirements.values,
@@ -271,23 +298,26 @@ fn infer_requirements(
 }
 
 fn inst_place(analysis: &PlacementAnalysis, inst: Idx<Inst>) -> Place {
-    analysis.values.get(inst).copied().unwrap_or(Place::Unknown)
+    analysis.values.get(inst).copied().unwrap_or(Place::Pending)
 }
 
 fn cell_place(analysis: &PlacementAnalysis, cell: Idx<Cell>) -> Place {
-    analysis.cells.get(cell).copied().unwrap_or(Place::Unknown)
+    analysis.cells.get(cell).copied().unwrap_or(Place::Pending)
 }
 
 fn add_constraint(analysis: &mut PlacementAnalysis, value: Place, destination: Place, span: Span) {
     match known_outlives(value, destination) {
         Some(true) => {}
+        None if matches!(value, Place::Pending) || matches!(destination, Place::Pending) => {}
         Some(false) => analysis.violations.push(PlacementViolation {
             value,
             destination,
             span,
             kind: PlacementViolationKind::DoesNotOutlive,
         }),
-        None if matches!(value, Place::Param(_)) || matches!(destination, Place::Param(_)) => {
+        None if matches!(value, Place::Param(_) | Place::Destination)
+            || matches!(destination, Place::Param(_) | Place::Destination) =>
+        {
             let constraint = OutlivesConstraint {
                 value,
                 destination,
@@ -310,11 +340,14 @@ fn substitute_constraint(
     analysis: &mut PlacementAnalysis,
     constraint: OutlivesConstraint,
     args: &[Place],
+    call_destination: Place,
     call_span: Span,
 ) {
-    let value = constraint.value.substitute(args);
-    let destination = constraint.destination.substitute(args);
-    let span = if matches!(value, Place::Param(_)) || matches!(destination, Place::Param(_)) {
+    let value = constraint.value.substitute(args, call_destination);
+    let destination = constraint.destination.substitute(args, call_destination);
+    let span = if matches!(value, Place::Param(_) | Place::Destination)
+        || matches!(destination, Place::Param(_) | Place::Destination)
+    {
         constraint.span
     } else {
         call_span
@@ -415,14 +448,14 @@ fn value_place(
                 add_constraint(analysis, value, destination, span);
             }
             for constraint in effect.constraints {
-                substitute_constraint(analysis, constraint, &args, span);
+                substitute_constraint(analysis, constraint, &args, allocation, span);
             }
             for retained in effect.opaque_retains {
                 let value = args
                     .get(retained as usize)
                     .copied()
                     .unwrap_or(Place::Unknown);
-                if value != Place::Static {
+                if !matches!(value, Place::Static | Place::Pending) {
                     analysis.violations.push(PlacementViolation {
                         value,
                         destination: Place::Unknown,
@@ -436,7 +469,7 @@ fn value_place(
             }
             effect
                 .result
-                .map(|place| place.substitute(&args))
+                .map(|place| place.substitute(&args, allocation))
                 .unwrap_or(Place::Unknown)
         }
         _ => operand_join(analysis, inst),
