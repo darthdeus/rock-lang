@@ -377,9 +377,19 @@ pub fn stone_session_main_lua_path(game: &str, pid: u32) -> PathBuf {
 /// one process never collide on the temp path. The single atomic-write
 /// path shared by every generated-Lua writer (rock + skull backends).
 pub fn write_atomic(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> std::io::Result<()> {
+    write_atomic_impl(path.as_ref(), contents.as_ref(), false)
+}
+
+pub fn write_atomic_durable(
+    path: impl AsRef<Path>,
+    contents: impl AsRef<[u8]>,
+) -> std::io::Result<()> {
+    write_atomic_impl(path.as_ref(), contents.as_ref(), true)
+}
+
+fn write_atomic_impl(path: &Path, contents: &[u8], durable: bool) -> std::io::Result<()> {
     use std::io::Write;
 
-    let path = path.as_ref();
     let parent = match path.parent() {
         Some(p) if !p.as_os_str().is_empty() => p,
         _ => Path::new("."),
@@ -390,11 +400,17 @@ pub fn write_atomic(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> std::
     // (atomic) rename. NamedTempFile gives an OS-level unique name -- no
     // collisions between concurrent compiler / test instances -- and is
     // removed on any early return, so a failed write leaves no `.tmp`
-    // litter. No fsync: main.lua is a regenerated build artifact, and
-    // rename atomicity alone closes the concurrent-reader race.
+    // litter. Generated artifacts skip fsync; authored documents request it.
     let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
-    tmp.write_all(contents.as_ref())?;
+    tmp.write_all(contents)?;
+    if durable {
+        tmp.as_file().sync_all()?;
+    }
     tmp.persist(path).map_err(|e| e.error)?;
+    #[cfg(unix)]
+    if durable {
+        fs_err::File::open(parent)?.sync_all()?;
+    }
     Ok(())
 }
 
@@ -626,6 +642,18 @@ mod tests {
         // Should generate the same ID for the same path
         assert_eq!(id1, id2);
         assert_eq!(id1.len(), 8);
+    }
+
+    #[test]
+    fn durable_atomic_write_replaces_the_file_without_temp_artifacts() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("arrangement.json");
+        fs::write(&path, "old").unwrap();
+
+        write_atomic_durable(&path, "new").unwrap();
+
+        assert_eq!(fs::read_to_string(&path).unwrap(), "new");
+        assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 1);
     }
 
     #[test]

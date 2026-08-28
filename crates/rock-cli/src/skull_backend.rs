@@ -2471,12 +2471,14 @@ pub fn skull_incremental_profile(path: &str) -> Result<()> {
 /// `SKULL_ITER_FN=update_mobs` flips mag's `tick_anim(.., 3, ..)` 3<->2).
 /// `SKULL_ITER_WRITE=1` additionally measures the production atomic overlay
 /// write into a temporary output path.
-pub fn skull_iter_incremental(path: &str, iters: usize, warmup: usize) -> Result<()> {
-    use std::path::PathBuf;
+fn iter_incremental_sources(path: &str) -> Result<rock_core::SourceFiles> {
+    let spec = crate::unified_compile::SourceSpec::Directory(std::path::PathBuf::from(path));
+    Ok(crate::unified_compile::discover_sources(&spec)?.production_only())
+}
 
+pub fn skull_iter_incremental(path: &str, iters: usize, warmup: usize) -> Result<()> {
     let renderer_target = skull_renderer_target(path)?;
-    let spec = crate::unified_compile::SourceSpec::Directory(PathBuf::from(path));
-    let sources = crate::unified_compile::discover_sources(&spec)?;
+    let sources = iter_incremental_sources(path)?;
     let files: Vec<(String, String)> = sources
         .files
         .iter()

@@ -492,7 +492,7 @@ pub struct MirEmit {
     /// residual call edges and compiler-owned per-frame lifecycle routes.
     pub allocation_report: crate::allocation_report::AllocationReport,
     /// Artifact-owned callable identities and their self-validating census.
-    pub code_artifact: skull_mir::code_identity::CodeArtifact,
+    pub code_artifact: std::sync::Arc<skull_mir::code_identity::CodeArtifact>,
     /// The compiler-owned lifecycle inventory staged by this artifact.
     pub lifecycle_plan: skull_mir::lifecycle::LifecyclePlan,
     /// The one compiler-owned logical inventory consumed by every backend.
@@ -2409,6 +2409,29 @@ struct Chunk {
     code_artifact: skull_mir::code_identity::CodeArtifact,
 }
 
+fn chunk_dynamic_state_matches(left: &Chunk, right: &Chunk) -> bool {
+    fn frames(
+        chunk: &Chunk,
+    ) -> impl Iterator<
+        Item = (
+            &skull_mir::code_identity::CodeIdentity,
+            &skull_mir::code_identity::FrameSchema,
+        ),
+    > {
+        chunk
+            .code_artifact
+            .entries
+            .values()
+            .filter_map(|entry| match (&entry.identity, &entry.compatibility.frame) {
+                (skull_mir::code_identity::CodeIdentity::Named(_), Some(frame)) => {
+                    Some((&entry.identity, frame))
+                }
+                _ => None,
+            })
+    }
+    left.statics == right.statics && frames(left).eq(frames(right))
+}
+
 // Each global definition costs the enclosing LuaJIT proto a child proto and name.
 const LUA_DEFINITIONS_PER_SCOPE: usize = 4_096;
 
@@ -2844,6 +2867,11 @@ pub struct IncrementalRepairStats {
     pub candidate_update_ns: u64,
     pub affected_selection_ns: u64,
     pub relowering_ns: u64,
+    pub dynamic_state_chunks_compared: usize,
+    pub dynamic_state_facts_changed: bool,
+    pub dynamic_state_full_scans: usize,
+    pub dynamic_state_static_rows_scanned: usize,
+    pub code_artifact_assembly_reused: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -5633,7 +5661,7 @@ fn assemble(
         MirEmit {
             lua: out,
             allocation_report,
-            code_artifact,
+            code_artifact: std::sync::Arc::new(code_artifact),
             lifecycle_plan,
             state_schema,
             definition_plan,
@@ -6637,7 +6665,7 @@ fn emit_full_in_with_mutation(
     };
     let mut cache = cache;
     cache.emitted = emitted;
-    cache.code_artifact = std::sync::Arc::new(emit.code_artifact.clone());
+    cache.code_artifact = emit.code_artifact.clone();
     cache.lifecycle_plan = Some(std::sync::Arc::new(emit.lifecycle_plan.clone()));
     cache.state_schema = Some(std::sync::Arc::new(emit.state_schema.clone()));
     cache.definition_plan = Some(std::sync::Arc::new(emit.definition_plan.clone()));
@@ -7583,6 +7611,7 @@ fn update_chunk_cache(
     cache.repair_stats.affected_selection_ns = _t_aff.elapsed().as_nanos() as u64;
     cache.repair_stats.chunk_rebuild_requests = affected.len();
     let _aff_ms = Duration::from_nanos(cache.repair_stats.affected_selection_ns);
+    let mut dynamic_state_facts_changed = !update.added.is_empty() || !update.removed.is_empty();
 
     // The persistent InlineCache keeps unchanged callee bodies across edits; the
     // affected entries are exactly those whose lowered body could have changed
@@ -7613,6 +7642,13 @@ fn update_chunk_cache(
         if is_cached_emitted_body(f, body) {
             chunks_rebuilt += 1;
             let chunk = rebuild_chunk(ws, cg, scx, &cache.concrete, body, f, &mut cache.inline_cache);
+            match (cache.chunks.get(body), &chunk) {
+                (Some(Ok(old)), Ok(new)) => {
+                    cache.repair_stats.dynamic_state_chunks_compared += 1;
+                    dynamic_state_facts_changed |= !chunk_dynamic_state_matches(old, new);
+                }
+                _ => dynamic_state_facts_changed = true,
+            }
             if let Ok(c) = &chunk {
                 let new_deps: Vec<FuncRef> = c.deps.iter().copied().collect();
                 for d in new_deps {
@@ -7621,9 +7657,11 @@ fn update_chunk_cache(
             }
             cache.chunks.insert(body.clone(), chunk);
         } else {
+            dynamic_state_facts_changed |= cache.chunks.contains_key(body);
             cache.chunks.remove(body);
         }
     }
+    cache.repair_stats.dynamic_state_facts_changed = dynamic_state_facts_changed;
     cache.repair_stats.chunks_rebuilt = chunks_rebuilt;
     let added_errors = Self::build_graph_added_chunks(cache, ws, &update.added);
     cache.repair_stats.relowering_ns = _t_relow.elapsed().as_nanos() as u64;
@@ -7672,7 +7710,7 @@ pub fn emit_incremental(
         emit.concrete_stats = cache.concrete.snapshot_build_stats();
     }
     cache.emitted = emitted;
-    cache.code_artifact = std::sync::Arc::new(emit.code_artifact.clone());
+    cache.code_artifact = emit.code_artifact.clone();
     cache.lifecycle_plan = Some(std::sync::Arc::new(emit.lifecycle_plan.clone()));
     cache.state_schema = Some(std::sync::Arc::new(emit.state_schema.clone()));
     cache.definition_plan = Some(std::sync::Arc::new(emit.definition_plan.clone()));
@@ -7697,13 +7735,16 @@ fn assemble_overlay(
     shader_changed: bool,
     overlay_code_artifact: &skull_mir::code_identity::CodeArtifact,
 ) -> Result<(MirEmit, UnitComptimeReads), CompilerError> {
+    let t_clone_artifact = Instant::now();
     let mut out = String::from("-- skull incremental overlay (loaded after main.lua)\n");
     let mut skipped: Vec<(String, String)> = Vec::new();
-    let mut candidate_code_artifact = (*cache.code_artifact).clone();
+    let mut candidate_code_artifact = cache.code_artifact.clone();
+    let d_clone_artifact = t_clone_artifact.elapsed();
     out.push_str("__rock_state_transaction_begin()\n");
     let mut unit_reads = UnitComptimeReads::default();
 
     // Redefine the changed functions, deterministic order for a stable diff.
+    let t_definitions = Instant::now();
     let mut order: Vec<Instance> = cache.changed_since_full.iter().cloned().collect();
     order.sort_by_key(|b| overlay_order_key(&cache.scx, b));
     order.dedup();
@@ -7721,6 +7762,8 @@ fn assemble_overlay(
         }
     }
     definitions.append_to(&mut out);
+    let d_definitions = t_definitions.elapsed();
+    let t_code_slot_stage = Instant::now();
     let has_code_slots = cache.code_artifact.entries.values().any(|entry| entry.escaping);
     let code_slot_stage = code_slot_registration_lua_entries(
         ws,
@@ -7729,6 +7772,7 @@ fn assemble_overlay(
         has_code_slots,
     )?;
     out.push_str(&code_slot_stage);
+    let d_code_slot_stage = t_code_slot_stage.elapsed();
     // Reset `static` cells whose initializer MEANING changed since the last full
     // build (`type@init_hash` key differs from the baseline). A static is
     // name-keyed and lazy, so redefining its fn above leaves the warmed cell +
@@ -7738,6 +7782,7 @@ fn assemble_overlay(
     // body edit preserves the live cell). Only the changed fns' statics are
     // considered -- a static's key can't change without its enclosing fn being
     // re-lowered into `changed_since_full`.
+    let t_static_resets = Instant::now();
     let mut seen_static: FxHashSet<Ustr> = FxHashSet::default();
     for body in &order {
         let Some(Ok(chunk)) = cache.chunks.get(body) else { continue };
@@ -7764,6 +7809,7 @@ fn assemble_overlay(
             }
         }
     }
+    let d_static_resets = t_static_resets.elapsed();
 
     // Re-emit only the AFFECTED `const` inits when a const changed since the last
     // full build: the edited const(s) PLUS their transitive DEPENDENTS (consts
@@ -7778,6 +7824,7 @@ fn assemble_overlay(
     // dependent reuses the ginit already in main.lua and only re-runs its line
     // (after its upstream is reassigned). Mutable globals are never re-emitted:
     // their guard preserves the live value across reload.
+    let t_const_inits = Instant::now();
     if !cache.changed_consts_since_full.is_empty() {
         // Forward symbol-reference graph (name -> names it references) from the
         // CURRENT inference. Overloads merge under one name (conservative: at worst
@@ -7850,8 +7897,9 @@ fn assemble_overlay(
                     a.mid,
                     a.gid,
                 );
-                candidate_code_artifact =
-                    candidate_code_artifact.with_replacements(&[&unit.code_artifact]);
+                candidate_code_artifact = std::sync::Arc::new(
+                    candidate_code_artifact.with_replacements(&[&unit.code_artifact]),
+                );
                 if let Some(err) = unit.hard_error {
                     return Err(err);
                 }
@@ -7896,15 +7944,19 @@ fn assemble_overlay(
             Err(e) => skipped.push(("const init ordering".to_string(), e.message)),
         }
     }
+    let d_const_inits = t_const_inits.elapsed();
 
     if shader_changed {
         out.push_str(&cache.shader_registrations.lua);
     }
+    let t_lifecycle = Instant::now();
     let lifecycle_plan =
         skull_mir::lifecycle::collect_with_artifact(ws, &candidate_code_artifact)?;
+    let d_lifecycle = t_lifecycle.elapsed();
     if !has_code_slots && lifecycle_plan.census.declarations > 0 {
         out.push_str("__rock_code_slot_begin()\n");
     }
+    let t_publication = Instant::now();
     out.push_str(&lifecycle_plan_stage_lua(ws, &cache.scx, &lifecycle_plan));
     out.push_str(code_slot_publish_lua(
         &candidate_code_artifact,
@@ -7916,6 +7968,8 @@ fn assemble_overlay(
     {
         out.push_str("__rock_state_transaction_commit()\n");
     }
+    let d_publication = t_publication.elapsed();
+    let t_metadata = Instant::now();
     let definition_plan = cache.definition_plan.as_deref().cloned().ok_or_else(|| {
         CompilerError::new_no_location(
             "Artifact fingerprint generation requires a complete DefinitionPlan".to_string(),
@@ -7927,6 +7981,8 @@ fn assemble_overlay(
         )
     })?;
     let artifact_reads = artifact_comptime_reads(cache, &[], &unit_reads, false);
+    let d_metadata = t_metadata.elapsed();
+    let t_fingerprint = Instant::now();
     let artifact_fingerprint = artifact_fingerprint(
         ws,
         &cache.scx,
@@ -7937,6 +7993,7 @@ fn assemble_overlay(
         &artifact_reads,
         cache.renderer_target,
     )?;
+    let d_fingerprint = t_fingerprint.elapsed();
 
     Ok((
         MirEmit {
@@ -7952,7 +8009,17 @@ fn assemble_overlay(
             definition_plan,
             artifact_fingerprint,
             skipped,
-            phases: Vec::new(),
+            phases: vec![
+                ("  overlay artifact clone", d_clone_artifact),
+                ("  overlay definitions", d_definitions),
+                ("  overlay code-slot stage", d_code_slot_stage),
+                ("  overlay static resets", d_static_resets),
+                ("  overlay const inits", d_const_inits),
+                ("  overlay lifecycle collection", d_lifecycle),
+                ("  overlay publication", d_publication),
+                ("  overlay metadata", d_metadata),
+                ("  overlay fingerprint", d_fingerprint),
+            ],
             abi_plan_stats: cache.scx.abi_plan_stats(),
             attribution: EmitAttribution::default(),
             arena_traffic: ArenaTraffic::default(),
@@ -8034,21 +8101,46 @@ pub fn emit_overlay_with_span_edits(
             "Rock CodeRef compatibility requires a safe restart".to_string(),
         ));
     }
-    let t_statics = Instant::now();
-    let statics: Vec<skull_mir::mir::StaticCell> = cache
-        .chunks
-        .iter()
-        .filter(|(body, _)| cache.lua_view.instances.contains(*body))
-        .filter_map(|(_, chunk)| chunk.as_ref().ok())
-        .flat_map(|chunk| chunk.statics.iter().cloned())
-        .collect();
-    let d_statics = t_statics.elapsed();
-    let t_schema = Instant::now();
     let body_only_state_change = reinferred
         .iter()
         .all(|(_, owner)| matches!(owner, BodyOwner::Function(_)));
+    let needs_dynamic_state_scan = !body_only_state_change
+        || cache.repair_stats.dynamic_state_facts_changed
+        || cache.state_schema.is_none();
+    let t_statics = Instant::now();
+    let statics: Vec<skull_mir::mir::StaticCell> = if needs_dynamic_state_scan {
+        cache.repair_stats.dynamic_state_full_scans = 1;
+        let statics = cache
+            .chunks
+            .iter()
+            .filter(|(body, _)| cache.lua_view.instances.contains(*body))
+            .filter_map(|(_, chunk)| chunk.as_ref().ok())
+            .flat_map(|chunk| chunk.statics.iter().cloned())
+            .collect::<Vec<_>>();
+        cache.repair_stats.dynamic_state_static_rows_scanned = statics.len();
+        statics
+    } else {
+        Vec::new()
+    };
+    let d_statics = t_statics.elapsed();
+    let t_schema = Instant::now();
     let mut full_schema_collection = false;
-    let next_state_schema = if body_only_state_change {
+    let next_state_schema = if body_only_state_change
+        && !cache.repair_stats.dynamic_state_facts_changed
+    {
+        if let Some(old) = cache.state_schema.as_ref() {
+            (**old).clone()
+        } else {
+            full_schema_collection = true;
+            skull_mir::state_schema::StateSchema::collect(
+                ws,
+                &cache.scx,
+                &next_code_artifact,
+                &statics,
+            )
+            .map_err(|error| CompilerError::new_no_location(error.to_string()))?
+        }
+    } else if body_only_state_change {
         if let Some(old) = cache.state_schema.as_ref() {
             let unchanged = old
                 .dynamic_entries_match(ws, &cache.scx, &next_code_artifact, &statics)
@@ -8123,9 +8215,12 @@ pub fn emit_overlay_with_span_edits(
     let t3 = Instant::now();
     let changed_bodies: Vec<Instance> = cache.changed_since_full.iter().cloned().collect();
     let changed_code_artifact = overlay_code_artifact(ws, cache, &changed_bodies);
+    let published_code_artifact = cache.code_artifact.clone();
     let (mut emit, overlay_unit_reads) =
         assemble_overlay(ws, cache, shader_changed, &changed_code_artifact)?;
-    cache.code_artifact = std::sync::Arc::new(emit.code_artifact.clone());
+    cache.repair_stats.code_artifact_assembly_reused =
+        std::sync::Arc::ptr_eq(&published_code_artifact, &emit.code_artifact);
+    cache.code_artifact = emit.code_artifact.clone();
     cache.lifecycle_plan = Some(std::sync::Arc::new(emit.lifecycle_plan.clone()));
     cache.definition_plan = Some(std::sync::Arc::new(emit.definition_plan.clone()));
     cache.artifact_fingerprint = Some(emit.artifact_fingerprint.clone());
@@ -8160,7 +8255,7 @@ pub fn emit_overlay_with_span_edits(
     if let Some(err) = cache.cg.take_rejection() {
         return Err(err);
     }
-    emit.phases = vec![
+    emit.phases.extend([
         ("CodegenCtx::new", t_cg),
         ("ScalarCtx::new", t_scx),
         ("update_chunk_cache (re-lower changed)", t_relower),
@@ -8181,7 +8276,7 @@ pub fn emit_overlay_with_span_edits(
         ("  affected selection", Duration::from_nanos(cache.repair_stats.affected_selection_ns)),
         ("  relowering", Duration::from_nanos(cache.repair_stats.relowering_ns)),
         ("assemble_overlay (+build_deco_map)", t_asm),
-    ];
+    ]);
     Ok(emit)
 }
 
@@ -8608,6 +8703,40 @@ fn main() {
             cache.candidate_index_by_func() as *const _,
             canonical as *const _,
             "repair must borrow the concrete publisher's index rather than a copied map"
+        );
+    }
+
+    #[test]
+    fn body_overlay_shares_the_published_code_artifact_handle() {
+        let parse = |source: &str| {
+            skull_parser::parse_module_clean(source, Ustr::from("<artifact-handle-test>"))
+                .expect("parse")
+        };
+        let mut modules = vec![parse(SRC)];
+        let ws1 = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic v1");
+        let mid = *ws1
+            .module_ids
+            .get(&Ustr::from("<artifact-handle-test>"))
+            .unwrap();
+        let (_, mut cache) = emit_full(&ws1, mid).expect("full v1");
+
+        let changed = SRC.replace("return x", "let y = x\n return y");
+        let mut modules = vec![parse(&changed)];
+        let ws2 = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic v2");
+        let wrap = ref_for(&ws2, "wrap");
+        let overlay = emit_overlay(
+            &ws2,
+            &mut cache,
+            &[(wrap.module, BodyOwner::Function(wrap.func))],
+        )
+        .expect("overlay");
+        assert!(
+            std::sync::Arc::ptr_eq(&overlay.code_artifact, &cache.code_artifact),
+            "the overlay result and cache must share one immutable CodeArtifact publication"
+        );
+        assert!(
+            cache.repair_stats().code_artifact_assembly_reused,
+            "overlay assembly duplicated the already-published replacement artifact"
         );
     }
 

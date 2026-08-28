@@ -52,6 +52,38 @@ pub fn asset_overlay_roots(
     configured_asset_overlays(project_dir, config)
 }
 
+pub fn sound_project_path(
+    project_dir: &Path,
+    config: Option<&StickConfig>,
+) -> Result<Option<PathBuf>> {
+    let Some(sound) = config.and_then(|config| config.sound.as_ref()) else {
+        return Ok(None);
+    };
+    let relative = &sound.project;
+    let path = Path::new(relative);
+    if relative.trim().is_empty()
+        || path.is_absolute()
+        || relative.starts_with('~')
+        || relative.contains('\\')
+        || relative.as_bytes().get(1) == Some(&b':')
+        || path
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        anyhow::bail!(
+            "[sound].project must be a non-empty relative path without traversal: {relative:?}"
+        );
+    }
+    let project_path = project_dir.join(path);
+    if !project_path.is_file() {
+        anyhow::bail!(
+            "declared sound project does not exist: {}",
+            project_path.display()
+        );
+    }
+    Ok(Some(project_path))
+}
+
 fn configured_asset_overlays(
     project_dir: &Path,
     config: Option<&StickConfig>,
@@ -128,7 +160,7 @@ pub fn select_assets_with_overlays(
     let mut by_key = BTreeMap::<String, PathBuf>::new();
     let mut missing = Vec::new();
     for name in &names {
-        let source = project_dir.join(&name);
+        let source = project_dir.join(name);
         if !source.exists() {
             missing.push(source);
             continue;
@@ -473,6 +505,31 @@ mod tests {
         let err = select_assets(&project, "/tmp/demo", None, root.path(), false)
             .expect_err("absolute game key must reject");
         assert!(format!("{err}").contains("relative"), "error explains key restriction: {err}");
+    }
+
+    #[test]
+    fn sound_project_path_resolves_the_stick_declaration_without_allowing_escape() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("game");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join("sounds.json"), "{}").unwrap();
+        let cfg = StickConfig::new_from_str(
+            "[package]\nname = \"game\"\n[sound]\nproject = \"sounds.json\"\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            sound_project_path(&project, Some(&cfg)).unwrap(),
+            Some(project.join("sounds.json"))
+        );
+
+        let escaped = StickConfig::new_from_str(
+            "[package]\nname = \"game\"\n[sound]\nproject = \"../sounds.json\"\n",
+        )
+        .unwrap();
+        let error = sound_project_path(&project, Some(&escaped))
+            .expect_err("a declared sound project cannot escape its game");
+        assert!(format!("{error}").contains("without traversal"));
     }
 
     #[test]
