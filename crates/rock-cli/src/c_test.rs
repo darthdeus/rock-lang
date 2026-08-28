@@ -253,7 +253,7 @@ fn build_file(file: &str) -> CUnitOutcome {
             };
         }
     };
-    run_tests(&checked.ws, &tests)
+    run_tests(file, &checked.ws, &tests)
 }
 
 fn check_file(file: &str) -> std::result::Result<CheckedFile, FileCheckError> {
@@ -314,7 +314,7 @@ fn build_package(dir: &str) -> CUnitOutcome {
             };
         }
     };
-    run_tests(&checked.ws, &tests)
+    run_tests(dir, &checked.ws, &tests)
 }
 
 fn check_project(
@@ -369,6 +369,7 @@ fn check_project(
 }
 
 fn run_tests(
+    path: &str,
     ws: &bone_semantic::inference::Workspace,
     tests: &[(FuncRef, skull::SkullTest)],
 ) -> CUnitOutcome {
@@ -377,10 +378,31 @@ fn run_tests(
     let mut skips = Vec::new();
     for (func, test) in tests {
         let Some(expect) = &test.returns else {
-            skips.push((
-                test.name.clone(),
-                "C backend currently runs value tests only".to_string(),
-            ));
+            let emitted = match skull_codegen_c::emit_test(ws, *func) {
+                Ok(emitted) => emitted,
+                Err(error) => {
+                    skips.push((test.name.clone(), error.message));
+                    continue;
+                }
+            };
+            match compile_and_run_program(path, &emitted) {
+                Ok(stdout) => {
+                    if let Some(expected) = &test.output {
+                        let got = stdout.trim_end();
+                        if got == expected {
+                            passed += 1;
+                        } else {
+                            fails.push(format!(
+                                "{}: output mismatch: expected <{:?}> got <{:?}>",
+                                test.name, expected, got
+                            ));
+                        }
+                    } else {
+                        passed += 1;
+                    }
+                }
+                Err(detail) => fails.push(format!("{}: {detail}", test.name)),
+            }
             continue;
         };
         let emitted = match skull_codegen_c::emit_value_test(ws, *func, &test.name) {
@@ -403,6 +425,25 @@ fn run_tests(
         fails,
         skips,
     }
+}
+
+fn compile_and_run_program(
+    path: &str,
+    emitted: &skull_codegen_c::CProgram,
+) -> std::result::Result<String, String> {
+    let link = c_link_plan(path, emitted).map_err(|error| error.to_string())?;
+    let compiled = compile_source_with_link(&emitted.source, &link)?;
+    let run = Command::new(&compiled.binary)
+        .output()
+        .map_err(|error| format!("native test could not start: {error}"))?;
+    if !run.status.success() {
+        return Err(format!(
+            "native test exited {}: {}",
+            run.status,
+            String::from_utf8_lossy(&run.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&run.stdout).into_owned())
 }
 
 fn compile_and_run(test_name: &str, source: &str) -> std::result::Result<String, String> {
@@ -440,11 +481,18 @@ fn compile_and_run(test_name: &str, source: &str) -> std::result::Result<String,
 }
 
 fn compile_source(source: &str) -> std::result::Result<CompiledC, String> {
+    compile_source_with_link(source, &CLinkPlan::default())
+}
+
+fn compile_source_with_link(
+    source: &str,
+    link: &CLinkPlan,
+) -> std::result::Result<CompiledC, String> {
     let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
     let c_path = dir.path().join("test.c");
     let binary = dir.path().join("test-bin");
     fs_err::write(&c_path, source).map_err(|error| error.to_string())?;
-    clang_compile(source, &c_path, &binary, &CLinkPlan::default())?;
+    clang_compile(source, &c_path, &binary, link)?;
     Ok(CompiledC { _dir: dir, binary })
 }
 
@@ -719,6 +767,20 @@ mod tests {
         let summary = super::c_test_run(&[path], false).expect("run C backend smoke");
         assert_eq!(summary.files, 1);
         assert_eq!(summary.tests_passed, 10);
+        assert_eq!(summary.tests_failed, 0);
+        assert_eq!(summary.tests_skipped, 0);
+        assert_eq!(summary.unit_failures, 0);
+    }
+
+    #[test]
+    fn c_backend_smoke_runs_native_output_tests() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/c_backend_output_smoke.rock")
+            .to_string_lossy()
+            .into_owned();
+        let summary = super::c_test_run(&[path], false).expect("run C backend output smoke");
+        assert_eq!(summary.files, 1);
+        assert_eq!(summary.tests_passed, 1);
         assert_eq!(summary.tests_failed, 0);
         assert_eq!(summary.tests_skipped, 0);
         assert_eq!(summary.unit_failures, 0);
