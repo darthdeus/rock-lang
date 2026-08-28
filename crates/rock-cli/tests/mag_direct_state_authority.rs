@@ -64,16 +64,24 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
         ["fn mag", "_player()"].concat(),
         ["fn player", "_for", "_access"].concat(),
         ["fn mag", "_progress"].concat(),
+        ["fn mag", "_journal"].concat(),
+        ["fn journal", "_state"].concat(),
         "global bank_gold:".to_string(),
         "global events:".to_string(),
         "global quest_runs:".to_string(),
         "global quest_tracked:".to_string(),
         "global quest_collapsed:".to_string(),
         "global quest_quarantined:".to_string(),
+        "global journal: [JournalLine]".to_string(),
+        "global journal_next_row_id:".to_string(),
+        "global journal_next_cast_id:".to_string(),
+        "global journal_active_cast_id:".to_string(),
+        "global journal_submitted_contributions:".to_string(),
+        "global journal_retired_contributions:".to_string(),
     ];
     let required = [
         "global MAG_PROGRESS: ProgressState",
-        "global journal: [JournalLine]",
+        "global MAG_JOURNAL: JournalState",
         "global history: [SnapshotHistoryNode]",
         "global spell_panel_open: bool",
         "global MAG_ACTIVE_WORLD: Scene<WorldState>?",
@@ -158,6 +166,59 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
         run.matches("MAG_PROGRESS = ProgressState {}").count(),
         1,
         "run reset must replace the complete progress domain exactly once"
+    );
+
+    let journal = fs::read_to_string(repo.join("mag/journal.rock"))
+        .expect("read MAG journal source");
+    for field in [
+        "lines: [JournalLine]",
+        "next_row_id: int",
+        "next_cast_id: int",
+        "active_cast_id: int",
+        "submitted_contributions: int",
+        "retired_contributions: int",
+    ] {
+        assert_eq!(
+            journal.matches(field).count(),
+            1,
+            "JournalState must contain `{field}` exactly once"
+        );
+    }
+    let journal_state = journal
+        .split_once("struct JournalState {")
+        .and_then(|(_, rest)| rest.split_once("\n}"))
+        .map(|(body, _)| body)
+        .expect("read JournalState body");
+    for derived in ["JOURNAL_DRAW_ORDER", "JOURNAL_DRAW_ROWS"] {
+        assert!(
+            !journal_state.contains(derived),
+            "derived cache `{derived}` must not become semantic JournalState"
+        );
+    }
+    assert_eq!(
+        journal.matches("global journal_open: bool").count(),
+        1,
+        "journal window visibility remains separate UI state"
+    );
+    for cache in [
+        "global JOURNAL_DRAW_ORDER: [int]",
+        "global JOURNAL_DRAW_ROWS: Map<int, JournalDrawRow>",
+    ] {
+        assert_eq!(
+            journal.matches(cache).count(),
+            1,
+            "derived journal cache `{cache}` must remain separately owned"
+        );
+    }
+    assert_eq!(
+        journal.matches("MAG_JOURNAL = JournalState {}").count(),
+        1,
+        "the journal reset authority must replace the complete domain exactly once"
+    );
+    assert_eq!(
+        run.matches("journal_reset()").count(),
+        1,
+        "run reset must consume the journal reset authority exactly once"
     );
 
     let save = fs::read_to_string(repo.join("mag/save.rock")).expect("read MAG save source");
