@@ -433,7 +433,7 @@ fn compile_and_run_program(
 ) -> std::result::Result<String, String> {
     let link = c_link_plan(path, emitted).map_err(|error| error.to_string())?;
     let compiled = compile_source_with_link(&emitted.source, &link)?;
-    let run = Command::new(&compiled.binary)
+    let run = c_native_command(&compiled.binary)
         .output()
         .map_err(|error| format!("native test could not start: {error}"))?;
     if !run.status.success() {
@@ -448,7 +448,7 @@ fn compile_and_run_program(
 
 fn compile_and_run(test_name: &str, source: &str) -> std::result::Result<String, String> {
     let compiled = compile_source(source)?;
-    let run = Command::new(&compiled.binary)
+    let run = c_native_command(&compiled.binary)
         .output()
         .map_err(|error| format!("native test could not start: {error}"))?;
     if !run.status.success() {
@@ -696,6 +696,15 @@ fn invalidate_artifact(path: &std::path::Path) -> std::io::Result<()> {
     }
 }
 
+fn c_native_command(binary: &std::path::Path) -> Command {
+    let mut command = Command::new(binary);
+    command.env(
+        rock_host::project::lib_path_var(),
+        rock_host::project::lib_path_with_inherited(),
+    );
+    command
+}
+
 pub fn c_compile(path: &str, output: Option<String>) -> Result<()> {
     let (c_path, binary) = c_artifact_paths(path, output)?;
     reject_input_alias(path, &c_path)?;
@@ -726,7 +735,7 @@ pub fn c_run(path: &str) -> Result<()> {
     fs_err::write(&c_path, &emitted.source)?;
     clang_compile(&emitted.source, &c_path, &binary, &link).map_err(anyhow::Error::msg)?;
     let compiled = CompiledC { _dir: dir, binary };
-    let status = Command::new(&compiled.binary).status()?;
+    let status = c_native_command(&compiled.binary).status()?;
     if !status.success() {
         anyhow::bail!("native C program exited {status}");
     }
@@ -784,5 +793,20 @@ mod tests {
         assert_eq!(summary.tests_failed, 0);
         assert_eq!(summary.tests_skipped, 0);
         assert_eq!(summary.unit_failures, 0);
+    }
+
+    #[test]
+    fn c_native_commands_use_the_authoritative_library_path() {
+        let command = super::c_native_command(std::path::Path::new("unused-native-program"));
+        let actual = command
+            .get_envs()
+            .find(|(name, _)| *name == std::ffi::OsStr::new(rock_host::project::lib_path_var()))
+            .and_then(|(_, value)| value);
+        assert_eq!(
+            actual,
+            Some(std::ffi::OsStr::new(
+                &rock_host::project::lib_path_with_inherited()
+            ))
+        );
     }
 }
