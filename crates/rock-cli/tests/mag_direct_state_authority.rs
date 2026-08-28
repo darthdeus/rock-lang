@@ -29,7 +29,7 @@ fn mag_has_no_aggregate_projection_bridge_names() {
         ["MAG_BUILDING", "_RUN"].concat(),
     ];
     let mut findings = Vec::new();
-    for source in sources {
+    for source in &sources {
         let text = fs::read_to_string(&source).expect("read MAG source");
         for name in &forbidden {
             if text.contains(name) {
@@ -69,6 +69,27 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
         "global player_dead:".to_string(),
         "global player_attack_target:".to_string(),
         "fn reset_player_death_state()".to_string(),
+        "global player_gesture:".to_string(),
+        "global player_gesture_timer:".to_string(),
+        "global player_idle_ticks:".to_string(),
+        "global player_loco:".to_string(),
+        "global player_stop_ru:".to_string(),
+        "global player_stride_hops:".to_string(),
+        "global PLAYER_START_SPR:".to_string(),
+        "global player_cast_words:".to_string(),
+        "global branched_ritual_cast:".to_string(),
+        "global player_cast_acceleration:".to_string(),
+        "global branched_ritual_acquisition_event_seq:".to_string(),
+        "global PLAYER_NOTORIETY:".to_string(),
+        "global PLAYER_COMBAT_LAST_CONTACT:".to_string(),
+        "fn player_is_murderer()".to_string(),
+        "fn clear_player_combat_latch()".to_string(),
+        "fn refresh_player_combat_latch()".to_string(),
+        "fn player_in_combat()".to_string(),
+        "fn reset_player_notoriety()".to_string(),
+        "fn reset_player_combat_latch()".to_string(),
+        "fn reset_branched_ritual_cast()".to_string(),
+        "fn reset_player_cast_acceleration()".to_string(),
         "global bank_gold:".to_string(),
         "global events:".to_string(),
         "global quest_runs:".to_string(),
@@ -91,7 +112,7 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
     ];
     let mut findings = Vec::new();
     let mut definitions = required.map(|_| Vec::new());
-    for source in sources {
+    for source in &sources {
         let text = fs::read_to_string(&source).expect("read MAG source");
         for (line_number, line) in text.lines().enumerate() {
             for name in &forbidden {
@@ -140,11 +161,40 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
         player.contains("entity: Entity<Player>?"),
         "Player must carry its generation-safe Scene identity for deferred work"
     );
-    for field in ["dead: bool", "attack_target: Entity<Mob>?"] {
+    for field in [
+        "dead: bool",
+        "attack_target: Entity<Mob>?",
+        "gesture: PlayerGesture",
+        "gesture_timer: float",
+        "idle_ticks: int",
+        "loco: LocoState",
+        "stop_ru: bool",
+        "stride_hops: int",
+        "loco_start_variant: PlayerStartVariant",
+        "cast_words: CastWords",
+        "ritual_cast: BranchedRitualCast",
+        "cast_acceleration: PlayerCastAcceleration",
+        "ritual_acquisition_event_seq: int",
+        "notoriety: PlayerNotoriety",
+        "combat_last_contact: float",
+    ] {
         assert_eq!(
             player.matches(field).count(),
             1,
             "scene-owned Player must contain `{field}` exactly once"
+        );
+    }
+    for method in [
+        "fn Player.is_murderer(player)",
+        "fn Player.clear_combat_latch(player)",
+        "fn Player.refresh_combat_latch(player)",
+        "fn Player.in_combat(player)",
+    ] {
+        assert!(
+            sources.iter().any(|source| fs::read_to_string(source)
+                .expect("read MAG source")
+                .contains(method)),
+            "missing Player-owned receiver declaration `{method}`"
         );
     }
     let feedback = fs::read_to_string(repo.join("mag/combat_text.rock"))
@@ -177,6 +227,23 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
         1,
         "run reset must replace the complete progress domain exactly once"
     );
+    for stale_reset in [
+        "player_gesture =",
+        "player_gesture_timer =",
+        "player_idle_ticks =",
+        "player_loco =",
+        "player_stop_ru =",
+        "player_stride_hops =",
+        "player_cast_words =",
+        "branched_ritual_cast =",
+        "player_cast_acceleration =",
+        "branched_ritual_acquisition_event_seq =",
+    ] {
+        assert!(
+            !run.contains(stale_reset),
+            "run reset still owns Player field `{stale_reset}`"
+        );
+    }
 
     let journal = fs::read_to_string(repo.join("mag/journal.rock"))
         .expect("read MAG journal source");
