@@ -66,6 +66,9 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
         ["fn mag", "_progress"].concat(),
         ["fn mag", "_journal"].concat(),
         ["fn journal", "_state"].concat(),
+        "global player_dead:".to_string(),
+        "global player_attack_target:".to_string(),
+        "fn reset_player_death_state()".to_string(),
         "global bank_gold:".to_string(),
         "global events:".to_string(),
         "global quest_runs:".to_string(),
@@ -137,6 +140,13 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
         player.contains("entity: Entity<Player>?"),
         "Player must carry its generation-safe Scene identity for deferred work"
     );
+    for field in ["dead: bool", "attack_target: Entity<Mob>?"] {
+        assert_eq!(
+            player.matches(field).count(),
+            1,
+            "scene-owned Player must contain `{field}` exactly once"
+        );
+    }
     let feedback = fs::read_to_string(repo.join("mag/combat_text.rock"))
         .expect("read MAG feedback source");
     assert!(
