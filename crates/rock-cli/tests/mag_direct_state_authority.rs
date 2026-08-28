@@ -66,7 +66,7 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
         ["fn mag", "_progress"].concat(),
         ["fn mag", "_journal"].concat(),
         ["fn journal", "_state"].concat(),
-        "global player_dead:".to_string(),
+        "player_dead".to_string(),
         "global player_attack_target:".to_string(),
         "fn reset_player_death_state()".to_string(),
         "global player_gesture:".to_string(),
