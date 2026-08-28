@@ -102,10 +102,43 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
         "global journal_active_cast_id:".to_string(),
         "global journal_submitted_contributions:".to_string(),
         "global journal_retired_contributions:".to_string(),
+        "global rmb_consumed:".to_string(),
+        "global drag_nameplate_from:".to_string(),
+        "global drag_nameplate_start:".to_string(),
+        "global last_target:".to_string(),
+        "global target_cycle:".to_string(),
+        "global target_cycle_idx:".to_string(),
+        "global target_jump_active:".to_string(),
+        "global target_jump_targets:".to_string(),
+        "global cursor_stack:".to_string(),
+        "global hover_nameplate_mob:".to_string(),
+        "global selection:".to_string(),
+        "global dead_last_click_target:".to_string(),
+        "global dead_last_click_at:".to_string(),
+        "global hover_entity_id:".to_string(),
+        "global hovered_mob:".to_string(),
+        "global hovered_corpse:".to_string(),
+        "global hovered_npc:".to_string(),
+        "global hovered_door:".to_string(),
+        "global hovered_ground_item:".to_string(),
+        "global hovered_prop_tile:".to_string(),
+        "global hovered_wall_tile:".to_string(),
+        "global quest_pending_events:".to_string(),
+        "global quest_reconciling:".to_string(),
+        "global quest_reconcile_queued:".to_string(),
+        "global quest_event_subscribers:".to_string(),
+        "global quest_state_subscribers:".to_string(),
+        "global quest_region_subscribers:".to_string(),
+        "global quest_dependents:".to_string(),
+        "global quest_needs_reconcile:".to_string(),
+        "global quest_last_region_place:".to_string(),
+        "global quest_state_changed:".to_string(),
     ];
     let required = [
         "global MAG_PROGRESS: ProgressState",
         "global MAG_JOURNAL: JournalState",
+        "global MAG_INTERACTION: InteractionState",
+        "global MAG_QUEST_RUNTIME: QuestRuntimeState",
         "global history: [SnapshotHistoryNode]",
         "global spell_panel_open: bool",
         "global MAG_ACTIVE_WORLD: Scene<WorldState>?",
@@ -184,6 +217,40 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
             "scene-owned Player must contain `{field}` exactly once"
         );
     }
+
+    let main = fs::read_to_string(repo.join("mag/main.rock"))
+        .expect("read MAG main source");
+    for field in [
+        "rmb_consumed: bool",
+        "last_target: Entity<Mob>?",
+        "target_cycle: [Entity<Mob>]",
+        "target_jump_targets: [Entity<Mob>]",
+        "selection: SelectionStore",
+        "hovered_ground_item: Entity<GroundItem>?",
+    ] {
+        assert_eq!(
+            main.matches(field).count(),
+            1,
+            "InteractionState must contain `{field}` exactly once"
+        );
+    }
+
+    let quests = fs::read_to_string(repo.join("mag/quests.rock"))
+        .expect("read MAG quest source");
+    for field in [
+        "pending_events: [string]",
+        "event_subscribers: Map<string, [string]>",
+        "state_subscribers: Map<string, [string]>",
+        "region_subscribers: [string]",
+        "dependents: Map<string, [string]>",
+        "last_region_place: Place?",
+    ] {
+        assert_eq!(
+            quests.matches(field).count(),
+            1,
+            "QuestRuntimeState must contain `{field}` exactly once"
+        );
+    }
     for method in [
         "fn Player.is_murderer(player)",
         "fn Player.clear_combat_latch(player)",
@@ -226,6 +293,21 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
         run.matches("MAG_PROGRESS = ProgressState {}").count(),
         1,
         "run reset must replace the complete progress domain exactly once"
+    );
+    assert_eq!(
+        run.matches("MAG_INTERACTION = InteractionState {}").count(),
+        1,
+        "run reset must replace the complete interaction domain exactly once"
+    );
+    assert_eq!(
+        run.matches("quest_runtime_reset()").count(),
+        1,
+        "run reset must use the quest runtime's shared reset authority exactly once"
+    );
+    assert_eq!(
+        quests.matches("MAG_QUEST_RUNTIME = QuestRuntimeState {}").count(),
+        1,
+        "quest runtime reset must replace the complete domain exactly once"
     );
     for stale_reset in [
         "player_gesture =",
