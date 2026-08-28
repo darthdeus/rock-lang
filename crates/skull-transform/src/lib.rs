@@ -1779,6 +1779,7 @@ fn raw<T>(i: Idx<T>) -> u32 {
 pub struct CoroutineFramePlan {
     frame_cells: HashSet<Idx<Cell>>,
     frame_slots: HashMap<Idx<Cell>, u32>,
+    spill_values: Vec<Idx<Inst>>,
     layout_hash: i64,
 }
 
@@ -1786,9 +1787,10 @@ impl CoroutineFramePlan {
     fn new(
         frame_cells: HashSet<Idx<Cell>>,
         frame_slots: HashMap<Idx<Cell>, u32>,
+        spill_values: Vec<Idx<Inst>>,
         layout_hash: i64,
     ) -> Self {
-        Self { frame_cells, frame_slots, layout_hash }
+        Self { frame_cells, frame_slots, spill_values, layout_hash }
     }
 
     pub fn fields(&self) -> &HashSet<Idx<Cell>> {
@@ -1801,6 +1803,10 @@ impl CoroutineFramePlan {
 
     pub fn slot(&self, cell: Idx<Cell>) -> Option<u32> {
         self.frame_slots.get(&cell).copied()
+    }
+
+    pub fn spill_values(&self) -> &[Idx<Inst>] {
+        &self.spill_values
     }
 
     pub fn layout_hash(&self) -> i64 {
@@ -2497,10 +2503,9 @@ fn vfield(v: Idx<Inst>) -> ustr::Ustr {
 /// outlives a yield (a loop-carried collection/bound, a multi-yield arg)
 /// survives the suspend/resume. (P2 — "only cells cross a yield" — is an
 /// over-statement: lowering routes some data through values; this is the
-/// canonical stackless spill, documented as a finding.) `protect` are param-like
-/// values never spilled. Returns the sorted spill field names (`v<N>`) — an
-/// input to the frame layout stamp.
-fn spill_cross_block_values(step: &mut MirFunc, s_cell: Idx<Cell>, block_ids: &[Idx<Block>]) -> Vec<String> {
+/// canonical stackless spill, documented as a finding.) Returns the sorted
+/// spilled values; their `v<N>` fields are part of the frame layout stamp.
+fn spill_cross_block_values(step: &mut MirFunc, s_cell: Idx<Cell>, block_ids: &[Idx<Block>]) -> Vec<Idx<Inst>> {
     // def block of every value.
     let mut def_block: HashMap<Idx<Inst>, Idx<Block>> = HashMap::default();
     for &bid in block_ids {
@@ -2576,9 +2581,9 @@ fn spill_cross_block_values(step: &mut MirFunc, s_cell: Idx<Cell>, block_ids: &[
         remap_term(&mut term, &m);
         step.blocks[bid].term = term;
     }
-    let mut names: Vec<String> = frame_values.iter().map(|&v| vfield(v).as_str().to_string()).collect();
-    names.sort();
-    names
+    let mut values: Vec<Idx<Inst>> = frame_values.into_iter().collect();
+    values.sort_by_key(|value| raw(*value));
+    values
 }
 
 /// Transform a lowered `co fn` into its `__step` state machine + frame info.
@@ -2785,7 +2790,7 @@ pub fn transform_coroutine(func: &MirFunc, channel: Option<&skull_mir::lower::Yi
 
     // 3b. Spill cross-block values (loop-carried collections/bounds, multi-yield
     // args) so they survive a suspend/resume — see `spill_cross_block_values`.
-    let spill_fields = spill_cross_block_values(&mut step, s_cell, &orig_blocks);
+    let spill_values = spill_cross_block_values(&mut step, s_cell, &orig_blocks);
 
     // 3c. Frame layout stamp. Hash everything that fixes the frame's field
     // meanings + the state numbering: (cell idx, source name) pairs, the spill
@@ -2806,8 +2811,8 @@ pub fn transform_coroutine(func: &MirFunc, channel: Option<&skull_mir::lower::Yi
                 let _ = write!(canon, "c{}:{};", slot, cell.name.map(|n| n.as_str().to_string()).unwrap_or_default());
             }
         }
-        for f in &spill_fields {
-            let _ = write!(canon, "{f};");
+        for &value in &spill_values {
+            let _ = write!(canon, "{};", vfield(value));
         }
         for (i, t) in state_tags.iter().enumerate() {
             let _ = write!(canon, "s{i}:{t};");
@@ -2883,7 +2888,7 @@ pub fn transform_coroutine(func: &MirFunc, channel: Option<&skull_mir::lower::Yi
     CoroLowered {
         step,
         s_cell,
-        frame_plan: CoroutineFramePlan::new(frame_cells, frame_slots, layout_hash),
+        frame_plan: CoroutineFramePlan::new(frame_cells, frame_slots, spill_values, layout_hash),
         params,
         num_states,
         hooks,

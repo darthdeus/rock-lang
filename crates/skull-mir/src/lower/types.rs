@@ -551,6 +551,16 @@ impl Builder<'_> {
         }
     }
 
+    pub(crate) fn current_expr_unit_storage_ty_id(&self) -> Option<TyId> {
+        let ty = self.cur_expr.and_then(|e| self.inf?.expr_types.get(e).copied())?;
+        let resolved = self.resolve_tyid(ty)?;
+        matches!(
+            self.dispatch().ty_node(resolved),
+            Some(TypeExpr::Builtin(BuiltinTy::Unit))
+        )
+        .then_some(ty)
+    }
+
     pub(crate) fn tuple_opaque_slot_types(
         &self,
         e: Idx<Expr>,

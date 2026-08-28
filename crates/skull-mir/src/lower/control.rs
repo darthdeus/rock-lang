@@ -285,7 +285,7 @@ impl Builder<'_> {
         shape: RetSlot,
     ) -> Result<ValueRepr, CompilerError> {
         let result_ty = matches!(shape, RetSlot::Opaque)
-            .then(|| self.current_expr_storage_ty_id())
+            .then(|| self.current_expr_unit_storage_ty_id())
             .flatten();
         let results: Vec<Idx<Cell>> =
             (0..shape.slot_count()).map(|_| self.f.new_cell_typed(None, result_ty)).collect();

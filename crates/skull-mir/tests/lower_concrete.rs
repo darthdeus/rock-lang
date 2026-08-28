@@ -434,6 +434,37 @@ fn diverging_if_join_does_not_declare_never_storage() {
 }
 
 #[test]
+fn nullable_aggregate_if_join_does_not_declare_payload_storage() {
+    let ast = skull_parser::parse_module(
+        "value Pair { x: int, y: int }\n\
+         fn f(present: bool) -> Pair? {\n\
+             return if present { Pair { x: 1, y: 2 } } else { null }\n\
+         }",
+        ustr::Ustr::from("<test>"),
+    )
+    .expect("parse");
+    let mut modules = vec![ast];
+    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
+    let mid = ws.module_ids[&ustr::Ustr::from("<test>")];
+    let (fid, _) = ws
+        .module(mid)
+        .functions
+        .iter()
+        .find(|(_, function)| function.name.as_str() == "f")
+        .expect("function");
+    let mir = lower_test_root(&ws, mid, fid).expect("lower");
+    let typed_temporaries: Vec<_> = mir
+        .cells
+        .iter()
+        .filter(|(_, cell)| cell.name.is_none() && cell.ty.is_some())
+        .collect();
+    assert!(
+        typed_temporaries.is_empty(),
+        "nullable payload storage cannot represent its absent arm: {mir}"
+    );
+}
+
+#[test]
 fn and_short_circuits_through_a_cell() {
     assert_eq!(
         mir("fn f(a: bool, b: bool) -> bool { a && b }", "f"),
