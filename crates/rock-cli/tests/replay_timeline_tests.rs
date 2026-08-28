@@ -839,6 +839,7 @@ fn recorded_keys_cannot_toggle_engine_debug_windows() {
             (24, "lctrl,f8"),
             (25, "lctrl,f6"),
             (26, "lctrl,f10"),
+            (27, "lctrl,f11"),
         ],
     );
     let log = dir.path().join("keys.replay");
@@ -848,12 +849,11 @@ fn recorded_keys_cannot_toggle_engine_debug_windows() {
         "bitgun", 40, &["--replay", &log_s], &[("STONE_TOOL_KEY_PROBE", "1")],
     );
     let engine = &replayed["stone"]["ENGINE"];
-    // Every field these keys reach, not only the windows: F6 and F8 are each
-    // bound twice (SFX browser + visibility, pipeline inspector + profiler),
-    // and F10 has its graphics-stats window consumer.
+    // Every field these keys reach, not only the windows: F6 is bound twice
+    // (SFX browser + visibility), while F8, F10, and F11 each own one tool.
     let recorded_consumers = [
         ("show_graphics_stats_window", "o/F10"),
-        ("show_pipeline_inspector", "f8"),
+        ("show_pipeline_inspector", "f11"),
         ("show_sfx_browser", "f6"),
         ("debug_draw_visibility", "f6"),
         ("profiler_enabled", "f8"),
@@ -888,8 +888,9 @@ fn recorded_keys_cannot_toggle_engine_debug_windows() {
 
     let bare_function_consumers = [
         ("f6", vec!["show_sfx_browser", "debug_draw_visibility"]),
-        ("f8", vec!["show_pipeline_inspector", "profiler_enabled"]),
+        ("f8", vec!["profiler_enabled"]),
         ("f10", vec!["show_graphics_stats_window"]),
+        ("f11", vec!["show_pipeline_inspector"]),
     ];
     let bare_consumer_count: usize = bare_function_consumers.iter().map(|(_, fields)| fields.len()).sum();
     assert_eq!(bare_consumer_count, 5, "bare F-key consumer census must be nonzero");
@@ -909,8 +910,9 @@ fn recorded_keys_cannot_toggle_engine_debug_windows() {
 
     let live_chords = [
         ("f6", vec!["show_sfx_browser", "debug_draw_visibility"]),
-        ("f8", vec!["show_pipeline_inspector", "profiler_enabled"]),
+        ("f8", vec!["profiler_enabled"]),
         ("f10", vec!["show_graphics_stats_window"]),
+        ("f11", vec!["show_pipeline_inspector"]),
     ];
     let live_consumer_count: usize = live_chords.iter().map(|(_, fields)| fields.len()).sum();
     assert_eq!(live_consumer_count, 5, "Ctrl+F consumer census must be nonzero");

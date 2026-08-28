@@ -342,6 +342,7 @@ impl CommandContext {
             self.args.warmup_seconds,
             self.args.gc_window,
             self.args.gc_window_start,
+            &self.args.gc_window_mode,
             &self.args.perf_format,
             &self.args.app_args,
         )

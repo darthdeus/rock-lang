@@ -1095,6 +1095,7 @@ pub fn do_perf(
     warmup_seconds: f64,
     gc_window: usize,
     gc_window_start: usize,
+    gc_window_mode: &str,
     format: &str,
     app_args: &[String],
 ) -> Result<()> {
@@ -1112,7 +1113,7 @@ pub fn do_perf(
         (false, Some(_)) => None,
     };
 
-    // The GC-stopped window (profiler: warm `gc_window_start` frames + N
+    // The GC allocation window (profiler: warm `gc_window_start` frames + N
     // measured) must run to completion to produce a result. Force a frame cap
     // that covers start + window + tail (overriding a smaller --frames /
     // --seconds) and drop the seconds cap so frames deterministically govern.
@@ -1152,6 +1153,7 @@ pub fn do_perf(
     if gc_window > 0 {
         cmd.env("PERF_GC_WINDOW", gc_window.to_string());
         cmd.env("PERF_GC_WINDOW_START", gc_window_start.to_string());
+        cmd.env("PERF_GC_WINDOW_MODE", gc_window_mode);
     }
     cmd.env("PERF_FORMAT", format);
 

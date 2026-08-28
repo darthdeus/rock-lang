@@ -559,6 +559,7 @@ pub struct Args {
     pub warmup_seconds: f64,
     pub gc_window: usize,
     pub gc_window_start: usize,
+    pub gc_window_mode: String,
     pub perf_format: String,
     /// For replay reports: number of slow observations to rank.
     pub top: usize,
@@ -752,10 +753,13 @@ impl Args {
                 .help("Skip the first N wall-clock seconds from perf statistics (warmup). Applies to `rock perf` only. Default 2.0s. Set to 0 to disable."))
             .arg(Arg::new("gc-window").long("gc-window").default_value("0")
                 .value_parser(clap::value_parser!(usize))
-                .help("`rock perf` only: run a GC-stopped window of N frames (opening at --gc-window-start) and report gross Lua allocator request traffic KB/frame (every positive nsize, including full realloc targets) plus positive growth, explicit frees, realloc shrinks, and call counts. This is request traffic, not heap growth; per-section alloc_kb remains the duration-correlated proxy. 0 = disabled."))
+                .help("`rock perf` only: record N frames of gross Lua allocator request traffic (opening at --gc-window-start), byte flow, and request populations. This is request traffic, not retained heap growth. 0 = disabled."))
             .arg(Arg::new("gc-window-start").long("gc-window-start").default_value("100")
                 .value_parser(clap::value_parser!(usize))
                 .help("`rock perf` only: frame the --gc-window opens on (default 100). Push it past warmup so the window lands on a warm JIT; `rock perf` sizes its frame budget to cover start + window."))
+            .arg(Arg::new("gc-window-mode").long("gc-window-mode").default_value("stopped")
+                .value_parser(["stopped", "running"])
+                .help("`rock perf --gc-window` only: `stopped` isolates mutator allocation after a collection; `running` preserves the ordinary collector schedule. The mode is recorded in profiler output."))
             .arg(Arg::new("perf-format").long("format").default_value("pretty")
                 .help("Output format for `rock perf`, `rock replay-report`, or `rock replay-profile-report`: \"pretty\" (default) or \"json\"."))
             .arg(Arg::new("top").long("top").default_value("20")
@@ -886,6 +890,7 @@ impl Args {
             warmup_seconds: *m.get_one::<f64>("warmup-seconds").unwrap(),
             gc_window: *m.get_one::<usize>("gc-window").unwrap(),
             gc_window_start: *m.get_one::<usize>("gc-window-start").unwrap(),
+            gc_window_mode: m.get_one::<String>("gc-window-mode").cloned().unwrap(),
             perf_format: m.get_one::<String>("perf-format").cloned().unwrap_or_else(|| "pretty".to_string()),
             top: *m.get_one::<usize>("top").unwrap(),
             context: *m.get_one::<usize>("context").unwrap(),
