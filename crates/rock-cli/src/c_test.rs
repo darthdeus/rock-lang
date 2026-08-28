@@ -3,8 +3,10 @@ use crate::bone_backend::{categorize, short_path};
 use crate::test_protocol::{FLOAT_REL_TOL, compare_value, parse_skull_markers, reason_histogram};
 use colored::Colorize;
 use skull_mir::mir::FuncRef;
-use std::process::Command;
-use std::time::Instant;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
+
+const C_NATIVE_TEST_TIMEOUT: Duration = Duration::from_secs(15);
 
 enum CUnitOutcome {
     Ran {
@@ -433,9 +435,7 @@ fn compile_and_run_program(
 ) -> std::result::Result<String, String> {
     let link = c_link_plan(path, emitted).map_err(|error| error.to_string())?;
     let compiled = compile_source_with_link(&emitted.source, &link)?;
-    let run = c_native_command(&compiled.binary)
-        .output()
-        .map_err(|error| format!("native test could not start: {error}"))?;
+    let run = run_native_test(&compiled.binary, C_NATIVE_TEST_TIMEOUT)?;
     if !run.status.success() {
         return Err(format!(
             "native test exited {}: {}",
@@ -448,9 +448,7 @@ fn compile_and_run_program(
 
 fn compile_and_run(test_name: &str, source: &str) -> std::result::Result<String, String> {
     let compiled = compile_source(source)?;
-    let run = c_native_command(&compiled.binary)
-        .output()
-        .map_err(|error| format!("native test could not start: {error}"))?;
+    let run = run_native_test(&compiled.binary, C_NATIVE_TEST_TIMEOUT)?;
     if !run.status.success() {
         return Err(format!(
             "native test exited {}: {}",
@@ -705,6 +703,28 @@ fn c_native_command(binary: &std::path::Path) -> Command {
     command
 }
 
+fn run_native_test(
+    binary: &std::path::Path,
+    timeout: Duration,
+) -> std::result::Result<std::process::Output, String> {
+    let mut child = c_native_command(binary)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("native test could not start: {error}"))?;
+    let run = crate::common::ProcessManager::wait_with_timeout(&mut child, timeout)
+        .map_err(|error| format!("native test wait failed: {error}"))?;
+    if run.timed_out {
+        let elapsed = if timeout.subsec_nanos() == 0 {
+            format!("{}s", timeout.as_secs())
+        } else {
+            format!("{}ms", timeout.as_millis())
+        };
+        return Err(format!("native test timed out after {elapsed}"));
+    }
+    Ok(run.output)
+}
+
 pub fn c_compile(path: &str, output: Option<String>) -> Result<()> {
     let (c_path, binary) = c_artifact_paths(path, output)?;
     reject_input_alias(path, &c_path)?;
@@ -744,6 +764,8 @@ pub fn c_run(path: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, Instant};
+
     #[test]
     fn c_link_plan_rejects_an_unregistered_foreign_provider() {
         let emitted = skull_codegen_c::CProgram {
@@ -808,5 +830,16 @@ mod tests {
                 &rock_host::project::lib_path_with_inherited()
             ))
         );
+    }
+
+    #[test]
+    fn native_test_timeout_kills_a_wedged_binary() {
+        let compiled = super::compile_source("int main(void) { for (;;) {} }")
+            .expect("wedged fixture must compile");
+        let start = Instant::now();
+        let error = super::run_native_test(&compiled.binary, Duration::from_millis(100))
+            .expect_err("wedged native test must time out");
+        assert!(error.contains("timed out after 100ms"), "{error}");
+        assert!(start.elapsed() < Duration::from_secs(5));
     }
 }
