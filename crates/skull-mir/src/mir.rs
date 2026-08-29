@@ -1154,6 +1154,12 @@ pub struct MirFunc {
     /// those. Keys are remapped on splice, like [`Self::spec_bindings`];
     /// transform-synthesized instructions simply have no entry.
     pub inst_spans: bone_semantic::prelude::ArenaMap<Idx<Inst>, bone_semantic::prelude::Span>,
+    /// Concrete logical types for source-produced value constructors.
+    /// Representation plans intentionally erase nominal generic arguments, so
+    /// native backends consume this build-owned identity instead of guessing
+    /// them from a constructor's field shape.
+    pub inst_logical_types:
+        bone_semantic::prelude::FxHashMap<Idx<Inst>, crate::monoty::MonoTyId>,
     /// **Which callee obligation of the source body each call instruction is**
     /// (plan S 9, Stage 3). The join key between a lowered call and the callee
     /// `skull::concrete_body::ConcreteBody` already resolved for that site, so
@@ -1232,6 +1238,7 @@ impl MirFunc {
             bound_next_split: Default::default(),
             nested_fns: Vec::new(),
             inst_spans: Default::default(),
+            inst_logical_types: Default::default(),
             call_sites: Default::default(),
             callee_instances: Default::default(),
             call_abi_plans: Default::default(),

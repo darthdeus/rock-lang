@@ -17,6 +17,28 @@ impl Builder<'_> {
         self.cur_span = outer;
         self.cur_expr = outer_expr;
         let v = v?;
+        if matches!(
+            self.f.insts[v],
+            Inst::MakeValueStruct { .. } | Inst::MaterializeValueStruct { .. }
+        ) {
+            if let Some(ty) = self
+                .concrete_plan
+                .domain_types(&self.cur_domain)
+                .and_then(|types| types.expr_type(e))
+            {
+                match self.f.inst_logical_types.get(&v) {
+                    Some(existing) if *existing != ty => {
+                        return Err(self.gap_here(
+                            "one MIR value was assigned conflicting concrete logical types",
+                        ));
+                    }
+                    Some(_) => {}
+                    None => {
+                        self.f.inst_logical_types.insert(v, ty);
+                    }
+                }
+            }
+        }
         // Implicit iterable->iterator coercion at a bounded call arg: bone
         // recorded the resolved `iter` fn; wrap the arg value in that call
         // (the call-arg analog of `lower_for_user_iter`'s `iter_fn`).

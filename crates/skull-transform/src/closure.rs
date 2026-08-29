@@ -474,6 +474,7 @@ pub fn convert_closures_framed(
             // Same arena clone, same `Idx` space: the parent's spans address the
             // instructions this body now owns.
             inst_spans: mf.inst_spans.clone(),
+            inst_logical_types: mf.inst_logical_types.clone(),
             // Same arena clone, same `Idx` space -- and the same reason the
             // `spec_bindings` above come across: this lambda's own calls are
             // keyed to insts whose only reachable home is now this body, so

@@ -1380,6 +1380,7 @@ fn compact_live_template(
     remap_inst_table!(call_rep_plans);
     remap_inst_table!(fn_value_symbols);
     remap_inst_table!(param_default_guards);
+    remap_inst_table!(inst_logical_types);
     for (old_id, identity) in &source.code_value_identities {
         if let Some(&new_id) = inst_map.get(old_id) {
             template.code_value_identities.insert(new_id, identity.clone());
@@ -2628,6 +2629,11 @@ fn import_spec_bindings(
     for (old_id, span) in callee.inst_spans.iter() {
         if let Some(&new_id) = inst_map.get(&old_id) {
             func.inst_spans.insert(new_id, *span);
+        }
+    }
+    for (old_id, ty) in &callee.inst_logical_types {
+        if let Some(&new_id) = inst_map.get(old_id) {
+            func.inst_logical_types.insert(new_id, *ty);
         }
     }
     // Site identity travels with the body, and its OWNER travels with it: a
