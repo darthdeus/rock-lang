@@ -3103,8 +3103,8 @@ pub fn erase_detached_lambdas(func: &mut MirFunc, entries: impl IntoIterator<Ite
 /// reachable from `entry` via terminators, a bare `Load`/`Store` of a cell in
 /// `slots` becomes a `Field`/`StoreField` on `s` (field `c<slot>`), and a
 /// multi-call dest that is a frame cell is redirected through a fresh temp
-/// cell + a spliced store-back. `MapNext` cells are left untouched (out of the
-/// JS subset; its own inst rejects downstream). Afterwards every remaining
+/// cell + a spliced store-back. `MapNext`'s key and value cells use the same
+/// seeded-temp/store-back shape. Afterwards every remaining
 /// `Load`/`Store` cell in the region must be `s`, one of `mf.params`, or a
 /// temp this pass minted -- anything else is a frame-membership finding, so it
 /// panics rather than emitting an undeclared local.
