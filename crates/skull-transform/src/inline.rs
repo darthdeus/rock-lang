@@ -1379,6 +1379,7 @@ fn compact_live_template(
     remap_inst_table!(call_abi_plans);
     remap_inst_table!(call_rep_plans);
     remap_inst_table!(fn_value_symbols);
+    remap_inst_table!(param_default_guards);
     for (old_id, identity) in &source.code_value_identities {
         if let Some(&new_id) = inst_map.get(old_id) {
             template.code_value_identities.insert(new_id, identity.clone());
@@ -3279,6 +3280,23 @@ mod tests {
         assert_eq!(template.emit_cell_span(), 2);
         assert_eq!(template.blocks.len(), 1);
         assert_eq!(template.emit_block_span(), 2);
+    }
+
+    #[test]
+    fn compact_template_remaps_parameter_default_guards() {
+        let mut source = MirFunc::new(Ustr::from("template_default_guard"));
+        let dead = source.new_block();
+        source.emit(dead, Inst::Const(Lit::Bool(false)));
+        source.set_term(dead, Term::Return(Vec::new()));
+        let guard = source.emit(source.entry, Inst::Const(Lit::Bool(true)));
+        source.param_default_guards.insert(guard, 2);
+        source.set_term(source.entry, Term::Return(vec![guard]));
+
+        let live = live_closure(&source);
+        let (template, _) = compact_live_template(source, &live);
+
+        let remapped_guard = template.blocks[template.entry].insts[0];
+        assert_eq!(template.param_default_guards.get(&remapped_guard), Some(&2));
     }
 
     #[test]
