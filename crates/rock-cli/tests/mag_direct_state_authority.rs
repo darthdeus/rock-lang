@@ -90,6 +90,15 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
         "fn reset_player_combat_latch()".to_string(),
         "fn reset_branched_ritual_cast()".to_string(),
         "fn reset_player_cast_acceleration()".to_string(),
+        "global POTION_READY_AT:".to_string(),
+        "reset_potion_cooldown(".to_string(),
+        "global bandage_slips:".to_string(),
+        "global summon_slots:".to_string(),
+        "global outline_last_t:".to_string(),
+        "global outline_last_color:".to_string(),
+        "global spell_pump_outline_until:".to_string(),
+        "global spell_pump_outline_color:".to_string(),
+        "reset_spell_pump_feedback(".to_string(),
         "global bank_gold:".to_string(),
         "global events:".to_string(),
         "global quest_runs:".to_string(),
@@ -202,6 +211,27 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
             }
         }
     }
+    for (field, qualified, declaration) in [
+        ("potion_ready_at", "player.potion_ready_at", "potion_ready_at:"),
+        ("bandage_slips", "player.bandage_slips", "bandage_slips:"),
+        ("summon_slots", "player.summon_slots", "summon_slots:"),
+    ] {
+        for source in &sources {
+            let text = fs::read_to_string(source).expect("read MAG source");
+            for (line_number, line) in text.lines().enumerate() {
+                if line.contains(field)
+                    && !line.contains(qualified)
+                    && !line.trim_start().starts_with(declaration)
+                {
+                    findings.push(format!(
+                        "{}:{}: unqualified Player-owned field `{field}`",
+                        source.display(),
+                        line_number + 1
+                    ));
+                }
+            }
+        }
+    }
     assert!(findings.is_empty(), "superseded run-root/accessor census is nonzero:\n{}", findings.join("\n"));
     for (declaration, found) in required.iter().zip(definitions) {
         assert_eq!(found.len(), 1, "`{declaration}` must have one production definition: {found:?}");
@@ -302,6 +332,11 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
 
     let player = fs::read_to_string(repo.join("mag/player.rock"))
         .expect("read MAG player source");
+    let player_state = player
+        .split_once("struct Player {")
+        .and_then(|(_, rest)| rest.split_once("\n}"))
+        .map(|(body, _)| body)
+        .expect("read Player body");
     assert!(
         player.contains("entity: Entity<Player>?"),
         "Player must carry its generation-safe Scene identity for deferred work"
@@ -322,11 +357,62 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
         "ritual_acquisition_event_seq: int",
         "notoriety: PlayerNotoriety",
         "combat_last_contact: float",
+        "potion_ready_at: float",
+        "bandage_slips: int",
+        "summon_slots: [Entity<Mob>?]",
+        "cast_outline: PlayerCastOutline",
     ] {
         assert_eq!(
-            player.matches(field).count(),
+            player_state.matches(field).count(),
             1,
             "scene-owned Player must contain `{field}` exactly once"
+        );
+    }
+    for field in [
+        "potion_ready_at: float = 0.0",
+        "bandage_slips: int = 0",
+        "summon_slots: [Entity<Mob>?] = [null, null, null, null]",
+        "cast_outline: PlayerCastOutline = PlayerCastOutline {}",
+    ] {
+        assert_eq!(
+            player_state.matches(field).count(),
+            1,
+            "scene-owned Player must initialize `{field}` exactly once"
+        );
+    }
+    let cast_outline = player
+        .split_once("struct PlayerCastOutline {")
+        .and_then(|(_, rest)| rest.split_once("\n}"))
+        .map(|(body, _)| body)
+        .expect("read PlayerCastOutline body");
+    for field in [
+        "last_t: float = 0.0",
+        "last_color: Color = WHITE",
+        "pump_until: float = 0.0",
+        "pump_color: Color = WHITE",
+    ] {
+        assert_eq!(
+            cast_outline.matches(field).count(),
+            1,
+            "PlayerCastOutline must initialize `{field}` exactly once"
+        );
+    }
+    for method in [
+        "fn Player.bandage_heal_left(player)",
+        "fn Player.summon_slot_pet(player",
+        "fn Player.summon_slot_pet_in_space(player",
+        "fn Player.max_pets(player)",
+        "fn Player.summon_label_spans(player",
+        "fn Player.party_any_pet(player)",
+        "fn Player.spell_pump_highlights_player(player)",
+        "fn Player.spell_pump_outline(player",
+        "fn Player.channel_outline(player",
+    ] {
+        assert!(
+            sources.iter().any(|source| fs::read_to_string(source)
+                .expect("read MAG source")
+                .contains(method)),
+            "missing Player-owned receiver declaration `{method}`"
         );
     }
 
@@ -469,6 +555,19 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
         assert!(
             !run.contains(stale_reset),
             "run reset still owns Player field `{stale_reset}`"
+        );
+    }
+    for stale_reset in [
+        "potion_ready_at =",
+        "bandage_slips =",
+        "summon_slots =",
+        "cast_outline =",
+        "reset_potion_cooldown(",
+        "reset_spell_pump_feedback(",
+    ] {
+        assert!(
+            !run.contains(stale_reset),
+            "run reset still owns migrated Player state `{stale_reset}`"
         );
     }
 
