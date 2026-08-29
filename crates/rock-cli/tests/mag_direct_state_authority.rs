@@ -151,6 +151,21 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
         "global COMBAT_REPORT_DETAILS:".to_string(),
         "global COMBAT_REPORT_SCROLL:".to_string(),
         "global COMBAT_REPORT_EXPANDED:".to_string(),
+        "global precast_tutorial_dummy:".to_string(),
+        "global precast_tutorial_dummy_hp:".to_string(),
+        "global target_practice_dummy_hp:".to_string(),
+        "global precast_dummy_tile:".to_string(),
+        "global precast_entrance_tiles:".to_string(),
+        "global precast_barrier_tiles:".to_string(),
+        "global precast_highlight_next:".to_string(),
+        "global target_practice_dummies:".to_string(),
+        "global target_practice_dummy_tiles:".to_string(),
+        "global target_practice_rewarded:".to_string(),
+        "global target_practice_entrance_tiles:".to_string(),
+        "global target_practice_exit_tiles:".to_string(),
+        "global tutorial_space:".to_string(),
+        "global tutorial_space_ready:".to_string(),
+        "fn tutorial_reset(".to_string(),
     ];
     let required = [
         "global MAG_PROGRESS: ProgressState",
@@ -198,8 +213,37 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
         "players: Arena<Player>",
         "player: Entity<Player>",
         "tasks: CoroutinePoller",
+        "tutorial: TutorialState",
     ] {
         assert!(world.contains(field), "WorldState is missing Scene-owned `{field}`");
+    }
+
+    let tutorial = fs::read_to_string(repo.join("mag/tutorial.rock"))
+        .expect("read MAG tutorial source");
+    let tutorial_state = tutorial
+        .split_once("struct TutorialState {")
+        .and_then(|(_, rest)| rest.split_once("\n}"))
+        .map(|(body, _)| body)
+        .expect("read TutorialState body");
+    for field in [
+        "precast_dummy: Entity<Mob>?",
+        "precast_dummy_tile: IVec2",
+        "precast_entrance_tiles: [IVec2]",
+        "precast_barrier_tiles: [IVec2]",
+        "precast_highlight_next: float",
+        "practice_dummies: [Entity<Mob>?]",
+        "practice_dummy_tiles: [IVec2]",
+        "practice_rewarded: [bool]",
+        "practice_entrance_tiles: [IVec2]",
+        "practice_exit_tiles: [IVec2]",
+        "space: SpaceId",
+        "space_ready: bool",
+    ] {
+        assert_eq!(
+            tutorial_state.matches(field).count(),
+            1,
+            "TutorialState must contain `{field}` exactly once"
+        );
     }
 
     let run_ui = fs::read_to_string(repo.join("mag/quest_ui.rock"))
