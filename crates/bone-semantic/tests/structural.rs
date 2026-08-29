@@ -1559,6 +1559,27 @@ fn implicit_identity_borrow_finished_before_suspension_is_allowed() {
 }
 
 #[test]
+fn explicit_identity_ref_fills_an_implicit_identity_borrow_parameter() {
+    let src = r#"
+struct Player { hp: int }
+fn damage(player: Player) { player.hp = 1 }
+fn main(player: ref Player) { damage(player) }
+"#;
+    let ws = check(src).expect("semantic pass");
+    let errors = ws
+        .modules
+        .iter()
+        .filter_map(|module| ws.inference(module.id))
+        .flat_map(|inference| inference.errors.values().flatten())
+        .map(|error| error.message.clone())
+        .collect::<Vec<_>>();
+    assert!(
+        errors.is_empty(),
+        "an explicit ref to an identity is the same borrow expected by an identity parameter: {errors:?}"
+    );
+}
+
+#[test]
 fn nobox_marker_reaches_typed_struct() {
     let ws = check("nobox value V { x: int }").expect("nobox value type checks");
     let module = ws.modules.iter().find(|m| m.id != ModuleId::builtin()).unwrap();

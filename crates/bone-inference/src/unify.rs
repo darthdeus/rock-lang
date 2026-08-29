@@ -702,6 +702,12 @@ pub fn coerce(gamma: &mut Gamma, from: TyId, to: TyId, span: Span) -> Result<(),
         }
     }
 
+    if is_identity_struct_type(gamma, to_r)
+        && let Some(target) = frame_ref_target(gamma, from_r)
+    {
+        return unify(gamma, target, to_r, span);
+    }
+
     if matches!(to_ty, TypeExpr::Builtin(BuiltinTy::Any)) {
         return Ok(());
     }

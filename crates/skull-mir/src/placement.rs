@@ -12,6 +12,7 @@ pub enum Place {
     Frame,
     Destination,
     Param(u16),
+    Runtime(Idx<Inst>),
     Unknown,
 }
 
@@ -53,6 +54,7 @@ pub struct OutlivesConstraint {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CallEffect {
     pub result: Option<Place>,
+    pub owner: Option<Place>,
     pub stores: Vec<StoreEffect>,
     pub constraints: Vec<OutlivesConstraint>,
     pub opaque_retains: Vec<u16>,
@@ -97,6 +99,7 @@ impl AnalysisContext {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FunctionPlacement {
     pub result: Option<Place>,
+    pub owner: Option<Place>,
     pub constraints: Vec<OutlivesConstraint>,
 }
 
@@ -119,6 +122,7 @@ pub struct PlacementViolation {
 pub struct PlacementAnalysis {
     pub values: ArenaMap<Idx<Inst>, Place>,
     pub cells: ArenaMap<Idx<Cell>, Place>,
+    pub call_owners: ArenaMap<Idx<Inst>, Place>,
     pub summary: FunctionPlacement,
     pub violations: Vec<PlacementViolation>,
 }
@@ -133,6 +137,9 @@ fn known_outlives(value: Place, destination: Place) -> Option<bool> {
             None
         }
         (Place::Session, Place::Session | Place::Frame) => Some(true),
+        (Place::Session, Place::Runtime(_)) => Some(true),
+        (Place::Runtime(_), Place::Frame) => Some(true),
+        (Place::Runtime(left), Place::Runtime(right)) => Some(left == right),
         (Place::Frame, Place::Frame) => Some(true),
         _ => Some(false),
     }
@@ -168,6 +175,19 @@ fn merge_requirement<T>(map: &mut ArenaMap<Idx<T>, Place>, key: Idx<T>, value: P
         }
         (Some(Place::Destination), Place::Session) | (Some(Place::Session), Place::Destination) => {
             Place::Session
+        }
+        (Some(Place::Session), Place::Runtime(_))
+        | (Some(Place::Runtime(_)), Place::Session) => Place::Session,
+        (Some(Place::Frame), runtime @ Place::Runtime(_))
+        | (Some(runtime @ Place::Runtime(_)), Place::Frame) => runtime,
+        (Some(Place::Runtime(left)), Place::Runtime(right)) => {
+            if left == right { Place::Runtime(left) } else { Place::Unknown }
+        }
+        (Some(Place::Param(left)), Place::Param(right)) => {
+            if left == right { Place::Param(left) } else { Place::Unknown }
+        }
+        (Some(Place::Runtime(_) | Place::Param(_)), Place::Runtime(_) | Place::Param(_)) => {
+            Place::Unknown
         }
         (Some(Place::Unknown), _) | (Some(_), Place::Unknown) => Place::Unknown,
         (Some(_), value) => value,
@@ -450,6 +470,11 @@ fn value_place(
             for constraint in effect.constraints {
                 substitute_constraint(analysis, constraint, &args, allocation, span);
             }
+            if let Some(owner) = effect.owner {
+                analysis
+                    .call_owners
+                    .insert(id, owner.substitute(&args, allocation));
+            }
             for retained in effect.opaque_retains {
                 let value = args
                     .get(retained as usize)
@@ -481,75 +506,116 @@ pub fn analyze(
     context: AnalysisContext,
     oracle: &impl PlacementOracle,
 ) -> PlacementAnalysis {
-    let mut analysis = PlacementAnalysis::default();
-    for (index, cell) in mir.params.iter().copied().enumerate() {
-        let place = u16::try_from(index).map_or(Place::Unknown, Place::Param);
-        analysis.cells.insert(cell, place);
-    }
-
     let blocks = crate::reach::emitted_blocks(mir);
-    let requirements = infer_requirements(mir, context, oracle, &blocks);
+    let mut requirements = infer_requirements(mir, context, oracle, &blocks);
     loop {
-        let mut changed = false;
-        for &block in &blocks {
-            for &id in &mir.blocks[block].insts {
-                let span = mir.inst_spans.get(id).copied().unwrap_or_default();
-                match &mir.insts[id] {
-                    Inst::Store { cell, value } => {
-                        let value = inst_place(&analysis, *value);
-                        changed |= merge_cell(&mut analysis.cells, *cell, value);
-                    }
-                    Inst::StoreGlobal { value, .. } => {
-                        let value = inst_place(&analysis, *value);
-                        add_constraint(&mut analysis, value, Place::Session, span);
-                    }
-                    Inst::StoreField { base, value, .. } | Inst::StoreIndex { base, value, .. } => {
-                        let value = inst_place(&analysis, *value);
-                        let destination = inst_place(&analysis, *base);
-                        add_constraint(&mut analysis, value, destination, span);
-                    }
-                    Inst::ArrayPush { arr, value, .. } => {
-                        let value = inst_place(&analysis, *value);
-                        let destination = inst_place(&analysis, *arr);
-                        add_constraint(&mut analysis, value, destination, span);
-                    }
-                    _ => {
-                        let place =
-                            value_place(mir, &mut analysis, oracle, context, &requirements, id);
-                        changed |= merge_inst(&mut analysis.values, id, place);
+        let mut analysis = PlacementAnalysis::default();
+        for (index, cell) in mir.params.iter().copied().enumerate() {
+            let place = u16::try_from(index).map_or(Place::Unknown, Place::Param);
+            analysis.cells.insert(cell, place);
+        }
+
+        loop {
+            let mut changed = false;
+            for &block in &blocks {
+                for &id in &mir.blocks[block].insts {
+                    let span = mir.inst_spans.get(id).copied().unwrap_or_default();
+                    match &mir.insts[id] {
+                        Inst::Store { cell, value } => {
+                            let value = inst_place(&analysis, *value);
+                            changed |= merge_cell(&mut analysis.cells, *cell, value);
+                        }
+                        Inst::StoreGlobal { value, .. } => {
+                            let value = inst_place(&analysis, *value);
+                            add_constraint(&mut analysis, value, Place::Session, span);
+                        }
+                        Inst::StoreField { base, value, .. }
+                        | Inst::StoreIndex { base, value, .. } => {
+                            let value = inst_place(&analysis, *value);
+                            let destination = inst_place(&analysis, *base);
+                            add_constraint(&mut analysis, value, destination, span);
+                        }
+                        Inst::ArrayPush { arr, value, .. } => {
+                            let value = inst_place(&analysis, *value);
+                            let destination = inst_place(&analysis, *arr);
+                            add_constraint(&mut analysis, value, destination, span);
+                        }
+                        _ => {
+                            let place = value_place(
+                                mir,
+                                &mut analysis,
+                                oracle,
+                                context,
+                                &requirements,
+                                id,
+                            );
+                            changed |= merge_inst(&mut analysis.values, id, place);
+                        }
                     }
                 }
             }
+            if !changed {
+                break;
+            }
+            analysis.violations.clear();
+            analysis.summary.constraints.clear();
         }
-        if !changed {
-            break;
-        }
-        analysis.violations.clear();
-        analysis.summary.constraints.clear();
-    }
 
-    for &block in &blocks {
-        if let Term::Return(values) = &mir.blocks[block].term {
-            let result = values.iter().fold(Place::Static, |place, value| {
-                place.join(inst_place(&analysis, *value))
-            });
-            if !values.is_empty() {
-                analysis.summary.result = Some(
+        let mut contextualized = false;
+        for &block in &blocks {
+            for &id in &mir.blocks[block].insts {
+                let Inst::StoreField { base, value, .. } = &mir.insts[id] else {
+                    continue;
+                };
+                if matches!(mir.insts[*value], Inst::Load(_)) || !oracle.carries_placement(mir, *value)
+                {
+                    continue;
+                }
+                let destination = inst_place(&analysis, *base);
+                if matches!(destination, Place::Param(_) | Place::Runtime(_)) {
+                    contextualized |=
+                        merge_requirement(&mut requirements.values, *value, destination);
+                }
+            }
+        }
+        if contextualized {
+            continue;
+        }
+
+        for &block in &blocks {
+            if let Term::Return(values) = &mir.blocks[block].term {
+                let result = values.iter().fold(Place::Static, |place, value| {
+                    place.join(inst_place(&analysis, *value))
+                });
+                if !values.is_empty() {
+                    analysis.summary.result = Some(
+                        analysis
+                            .summary
+                            .result
+                            .map_or(result, |previous| previous.join(result)),
+                    );
+                }
+                if let Some(destination) = context.return_destination {
+                    let span = values
+                        .first()
+                        .and_then(|value| mir.inst_spans.get(*value).copied())
+                        .unwrap_or_default();
+                    add_constraint(&mut analysis, result, destination, span);
+                }
+            }
+        }
+
+        for (_, required) in requirements.values.iter() {
+            if matches!(required, Place::Param(_) | Place::Destination) {
+                analysis.summary.owner = Some(
                     analysis
                         .summary
-                        .result
-                        .map_or(result, |previous| previous.join(result)),
+                        .owner
+                        .map_or(*required, |previous| previous.join(*required)),
                 );
             }
-            if let Some(destination) = context.return_destination {
-                let span = values
-                    .first()
-                    .and_then(|value| mir.inst_spans.get(*value).copied())
-                    .unwrap_or_default();
-                add_constraint(&mut analysis, result, destination, span);
-            }
         }
-    }
 
-    analysis
+        return analysis;
+    }
 }
