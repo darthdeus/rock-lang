@@ -16,7 +16,7 @@ use bone_semantic::inference::Workspace;
 use skull::instance_graph::{self, InstanceGraph};
 use skull::site_join::{self, SiteJoinCensus, Unjoined};
 use skull_mir::lower::ScalarCtx;
-use skull_mir::mir::MirFunc;
+use skull_mir::mir::{Inst, MirFunc};
 use skull_mir::site::SiteOp;
 use ustr::Ustr;
 
@@ -91,7 +91,7 @@ fn prepared_body(ws: &Workspace, name: &str) -> MirFunc {
     mf
 }
 
-fn lowered_body(ws: &Workspace, name: &str) -> MirFunc {
+fn lowered_body_in_mode(ws: &Workspace, name: &str, values_first_class: bool) -> MirFunc {
     let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
     let (fid, _) = ws
         .module(mid)
@@ -102,10 +102,23 @@ fn lowered_body(ws: &Workspace, name: &str) -> MirFunc {
     let fref = skull_mir::mir::FuncRef { module: mid, func: fid };
     let graph = graph_of(ws);
     let bodies = skull::concrete_body::build(ws, &graph);
-    let scx = ScalarCtx::new(ws).sharing(graph.interner().clone());
+    let scx = if values_first_class {
+        ScalarCtx::new_values_first_class(ws)
+    } else {
+        ScalarCtx::new(ws)
+    }
+    .sharing(graph.interner().clone());
     let instance = skull_mir::instance::Instance::base(fref);
     let plan = bodies.plans.get(&instance).expect("concrete plan");
     skull_mir::lower::lower_instance_with_plans(ws, &scx, plan, &bodies.plans).expect("lower")
+}
+
+fn lowered_body(ws: &Workspace, name: &str) -> MirFunc {
+    lowered_body_in_mode(ws, name, false)
+}
+
+fn lowered_values_first_class_body(ws: &Workspace, name: &str) -> MirFunc {
+    lowered_body_in_mode(ws, name, true)
 }
 
 /// The names lowering stamped as `SiteOp::Dispatched` in `name`'s body.
@@ -551,6 +564,29 @@ fn main() {
     assert_eq!(walk_dispatched_in(&ws, "eq_nobox"), empty);
 
     assert_dispatched_population(&census_of(src), 2);
+}
+
+#[test]
+fn values_first_class_nobox_equality_stays_a_typed_operation() {
+    let ws = check(
+        r#"
+nobox value Point { x: int, y: int }
+fn same(a: Point, b: Point) -> bool { return a == b }
+fn main() { print("{same(Point { x: 1, y: 2 }, Point { x: 1, y: 2 })}") }
+"#,
+    );
+    assert_eq!(walk_dispatched_in(&ws, "same"), Vec::<&'static str>::new());
+    let mf = lowered_values_first_class_body(&ws, "same");
+    assert!(
+        mf.insts.iter().any(|(_, inst)| matches!(inst, Inst::Eq(_, _))),
+        "values-first-class equality must remain a typed MIR operation"
+    );
+    assert!(
+        mf.call_sites
+            .values()
+            .all(|site| !matches!(site.site.op, SiteOp::Dispatched { .. })),
+        "the target-neutral graph records no dispatched helper for nobox equality"
+    );
 }
 
 /// `__op_eq` names SIX declarations and only one of them is callable by that

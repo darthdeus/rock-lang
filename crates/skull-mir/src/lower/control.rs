@@ -219,6 +219,13 @@ impl Builder<'_> {
                 let route = self.dispatch().eq_route(lhs, rhs);
                 let lv = self.lower_expr(lhs)?;
                 let rv = self.lower_expr(rhs)?;
+                if self.scx.values_first_class && matches!(route, EqRoute::Structural) {
+                    return Ok(self.emit_cur(if matches!(op, BinOp::Eq) {
+                        Inst::Eq(lv, rv)
+                    } else {
+                        Inst::NotEq(lv, rv)
+                    }));
+                }
                 if let Some(name) = route.synthesized_callee(op) {
                     return self.dispatched_call(name, Vec::new(), vec![lv, rv]);
                 }
