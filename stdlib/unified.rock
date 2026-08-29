@@ -2051,7 +2051,7 @@ const EPSILON: float = 0.0000001
     return tostring(a) < tostring(b)
 """
 
-@nomangle inline(lua) fn __sort_map_keys(keys: any) = """
+@nomangle inline(lua) fn __sort_map_keys<K>(keys: [K]) = """
     table.sort(keys._data, __rock_inspect_key_lt)
 """
 
