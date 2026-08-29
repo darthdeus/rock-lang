@@ -355,7 +355,9 @@ impl Builder<'_> {
                 let ptr = self.emit_cur(Inst::FfiNewArray { ctype, count, representation });
                 let mut fields =
                     vec![(Ustr::from("ptr"), ptr), (Ustr::from("len"), count)];
-                fields.extend(self.leaf_view_fields(ctype, ptr));
+                if representation.is_some() && self.is_leaf_addressed(ctype)? {
+                    fields.extend(self.leaf_view_fields(ctype, ptr));
+                }
                 let nb = self.emit_cur(Inst::MakeStruct {
                     ty: Some(Ustr::from("NativeBuffer")),
                     fields,

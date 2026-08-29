@@ -494,7 +494,7 @@ pub struct ScalarCtx {
     /// Keep value-struct Vec elements as first-class rows. Native backends use
     /// their concrete aggregate layout directly instead of Lua's scalar-column
     /// storage representation.
-    row_value_vecs: bool,
+    row_value_containers: bool,
     /// The codegen backend this lowering feeds. Drives backend-variant selection
     /// at every resolved call ([`Builder::resolve_funcref`]): `Lua` rejects a
     /// call whose only binding is a JS decl; `Js` swaps a call to its JS sibling
@@ -535,7 +535,7 @@ impl Clone for ScalarCtx {
             ref_counts: self.ref_counts.clone(),
             values_first_class: self.values_first_class,
             native_flat_enums: self.native_flat_enums,
-            row_value_vecs: self.row_value_vecs,
+            row_value_containers: self.row_value_containers,
             target: self.target,
             interner: std::sync::Arc::clone(&self.interner),
             rep_arena: std::sync::Arc::clone(&self.rep_arena),
@@ -585,7 +585,7 @@ impl ScalarCtx {
             ref_counts,
             values_first_class: false,
             native_flat_enums: false,
-            row_value_vecs: false,
+            row_value_containers: false,
             target: bone_semantic::hir::FnBackend::Lua,
             interner: std::sync::Arc::new(crate::monoty::MonoInterner::new()),
             rep_arena: std::sync::Arc::new(abi::RepArena::default()),
@@ -684,7 +684,7 @@ impl ScalarCtx {
             self.values_first_class == warmed.values_first_class
                 && self.native_flat_enums == warmed.native_flat_enums
                 && self.native_flat_enums == warmed.native_flat_enums
-                && self.row_value_vecs == warmed.row_value_vecs
+                && self.row_value_containers == warmed.row_value_containers
                 && self.target == warmed.target
                 && std::sync::Arc::ptr_eq(&self.interner, &warmed.interner),
             "ABI warm context does not match the emission context"
@@ -712,8 +712,8 @@ impl ScalarCtx {
         self
     }
 
-    pub fn with_row_value_vecs(mut self) -> Self {
-        self.row_value_vecs = true;
+    pub fn with_row_value_containers(mut self) -> Self {
+        self.row_value_containers = true;
         self
     }
 

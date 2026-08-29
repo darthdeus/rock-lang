@@ -13,7 +13,7 @@ impl Builder<'_> {
     ) -> Result<ContainerPlan, CompilerError> {
         ContainerPlan::for_type(self.ws, self.scx.target, &self.scx.rep_arena(), family, ty)
             .map(|plan| {
-                if self.scx.row_value_vecs {
+                if self.scx.row_value_containers {
                     plan.into_row_storage()
                 } else {
                     plan
@@ -69,6 +69,9 @@ impl Builder<'_> {
         };
         let arena = self.scx.rep_arena();
         let plan = self.container_plan_for_type(&concrete, family)?;
+        if !plan.is_leaf_addressed() {
+            return Ok(None);
+        }
         Ok(plan.ffi_element_name(&arena))
     }
 

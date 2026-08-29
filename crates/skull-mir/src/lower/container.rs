@@ -45,10 +45,13 @@ pub struct ContainerPlan {
 
 impl ContainerPlan {
     pub(crate) fn into_row_storage(mut self) -> Self {
-        if self.family == ContainerFamily::Vec
-            && let ContainerStorage::Columns { element } = self.storage
-        {
-            self.storage = ContainerStorage::Boxed { element };
+        match self.storage {
+            ContainerStorage::Columns { element }
+            | ContainerStorage::LeafAddressed { element } => {
+                self.storage = ContainerStorage::Boxed { element };
+                self.leaf_addresses = None;
+            }
+            ContainerStorage::Boxed { .. } => {}
         }
         self
     }
