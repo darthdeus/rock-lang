@@ -710,7 +710,7 @@ impl Builder<'_> {
                 }
                 continue;
             }
-            let v = self.lower_expr(a)?;
+            let v = self.lower_call_arg(e, a)?;
             let pidx = match self.body.arg_names.get(&a) {
                 Some(nm) => param_names
                     .iter()

@@ -315,6 +315,12 @@ impl Builder<'_> {
             .or(self.body.binding_arena[name].declared_ty)
     }
 
+    pub(crate) fn binding_is_ref(&self, name: Idx<BindingInfo>) -> bool {
+        self.binding_ty(name)
+            .and_then(|ty| self.concrete_ty_id(ty))
+            .is_some_and(|ty| matches!(ty.as_ref(), MonoTy::App { ctor: MonoCtor::Ref, .. }))
+    }
+
     /// [`Self::coerced`] against a `let`/assignment target binding's type.
     pub(crate) fn coerced_to_binding(&mut self, value: Idx<Inst>, value_expr: Idx<Expr>, name: Idx<BindingInfo>) -> Idx<Inst> {
         match self.binding_ty(name) {

@@ -614,7 +614,7 @@ impl Builder<'_> {
                     let g = self.emit_cur(Inst::Global(abi.hoisted));
                     let param_shapes = abi.param_slots(&self.scx.rep_arena());
                     let arg_vals =
-                        self.slotted_call_args(&abi.param_names, &param_shapes, &arg_idxs)?;
+                        self.slotted_call_args(e, &abi.param_names, &param_shapes, &arg_idxs)?;
                     let Some(shape) = abi.result_shape(&self.scx.rep_arena()) else {
                         let v = self.emit_call_value(e, g, arg_vals)?;
                         return Ok(ValueRepr::Scalar(v));
@@ -849,7 +849,7 @@ impl Builder<'_> {
                 .any(|&id| matches!(dc.plan.rep_plan(id).layout(), RepLayout::Tuple { .. }));
             let args = if has_tuple_storage {
                 let opaque = vec![RetSlot::Opaque; callee.param_decls.len()];
-                self.scalar_call_args(func, arg_idxs, any_named, &opaque)?
+                self.scalar_call_args(e, func, arg_idxs, any_named, &opaque)?
             } else if any_named {
                 self.reorder_named_args(e, arg_idxs, func, Some(&dc.callee_inst))?
             } else {
@@ -857,7 +857,7 @@ impl Builder<'_> {
                     .iter()
                     .enumerate()
                     .map(|(i, &a)| {
-                        let v = self.lower_expr(a)?;
+                        let v = self.lower_call_arg(e, a)?;
                         let t = self
                             .concrete_callee_param_ty(e, &dc.callee_inst, i)?
                             .ok_or_else(|| self.gap_here("concrete call has no callee parameter type"))?;
@@ -878,6 +878,7 @@ impl Builder<'_> {
         }
         let param_shapes = dc.plan.param_shapes();
         let args = self.scalar_call_args(
+            e,
             func,
             arg_idxs,
             any_named,
@@ -1141,6 +1142,7 @@ impl Builder<'_> {
     /// fires; an omitted scalar param emits one nil).
     pub(crate) fn scalar_call_args(
         &mut self,
+        e: Idx<Expr>,
         func: FuncRef,
         arg_idxs: &[Idx<Expr>],
         any_named: bool,
@@ -1157,7 +1159,7 @@ impl Builder<'_> {
                     |slot| slot.clone(),
                     |message| self.gap_here(message),
                 )?;
-                out.extend(self.arg_values_for_slot(&slot, a)?);
+                out.extend(self.arg_values_for_call_slot(e, &slot, a)?);
             }
             return Ok(out);
         }
@@ -1166,7 +1168,7 @@ impl Builder<'_> {
             .iter()
             .map(|pd| pd.name)
             .collect();
-        self.slotted_call_args(&param_names, param_shapes, arg_idxs)
+        self.slotted_call_args(e, &param_names, param_shapes, arg_idxs)
     }
 
     /// Build a call's argument list by placing each argument into its PARAM SLOT
@@ -1178,6 +1180,7 @@ impl Builder<'_> {
     /// `param_shapes` shorter than `param_names` (or all-`Opaque`) is the boxed ABI.
     pub(crate) fn slotted_call_args(
         &mut self,
+        e: Idx<Expr>,
         param_names: &[Ustr],
         param_shapes: &[RetSlot],
         arg_idxs: &[Idx<Expr>],
@@ -1196,7 +1199,12 @@ impl Builder<'_> {
                 }
                 continue;
             }
-            let r = self.lower_expr_repr(a)?;
+            let r = if self.is_ref_call_arg(e, a) {
+                let place = self.lower_place_base(a)?;
+                self.value_bundle_for_expr(a, ValueRepr::Scalar(place))?
+            } else {
+                self.lower_expr_repr(a)?
+            };
             let pidx = match self.body.arg_names.get(&a) {
                 Some(nm) => param_names
                     .iter()

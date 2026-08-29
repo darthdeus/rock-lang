@@ -401,6 +401,9 @@ pub struct BodyInference {
 
     pub expr_types: ArenaMap<Idx<Expr>, TyId>,
     pub binding_types: ArenaMap<Idx<BindingInfo>, TyId>,
+    /// The actual arguments that filled `ref T` parameters at a resolved call.
+    /// MIR uses this to preserve the argument place instead of copying it.
+    pub ref_call_args: FxHashMap<Idx<Expr>, Vec<Idx<Expr>>>,
     pub resolved_overload_calls: FxHashMap<Idx<Expr>, (ModuleId, Idx<Function>)>,
     /// Calls to GENERIC fns: the winning candidate's instantiated generics in
     /// declaration order, keyed like `resolved_overload_calls`. Entries may

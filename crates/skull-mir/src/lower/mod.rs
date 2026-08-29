@@ -2828,6 +2828,36 @@ impl Builder<'_> {
         self.repr_to_slot_values_bundle(&r, slot)
     }
 
+    fn is_ref_call_arg(&self, call: Idx<Expr>, arg: Idx<Expr>) -> bool {
+        self.inf
+            .and_then(|inf| inf.ref_call_args.get(&call))
+            .is_some_and(|args| args.contains(&arg))
+    }
+
+    pub(crate) fn lower_call_arg(
+        &mut self,
+        call: Idx<Expr>,
+        arg: Idx<Expr>,
+    ) -> Result<Idx<Inst>, CompilerError> {
+        if self.is_ref_call_arg(call, arg) {
+            self.lower_place_base(arg)
+        } else {
+            self.lower_expr(arg)
+        }
+    }
+
+    pub(crate) fn arg_values_for_call_slot(
+        &mut self,
+        call: Idx<Expr>,
+        slot: &RetSlot,
+        arg: Idx<Expr>,
+    ) -> Result<Vec<Idx<Inst>>, CompilerError> {
+        if self.is_ref_call_arg(call, arg) {
+            return Ok(vec![self.lower_place_base(arg)?]);
+        }
+        self.arg_values_for_slot(slot, arg)
+    }
+
 }
 
 // -- Map value-struct key rejection (a fatal emit-time pass; see

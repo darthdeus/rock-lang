@@ -307,6 +307,7 @@ impl Builder<'_> {
                         } else {
                         let v = match opaque_repr {
                             Some(r) => self.pack(r.into_value())?,
+                            None if self.binding_is_ref(name) => self.lower_place_base(value)?,
                             None => self.lower_expr(value)?,
                         };
                         let v = self.coerced_to_binding(v, value, name);

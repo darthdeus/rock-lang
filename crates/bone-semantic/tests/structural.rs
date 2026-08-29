@@ -1399,6 +1399,96 @@ fn returned_frame_reference_must_propagate_a_valid_origin() {
 }
 
 #[test]
+fn ref_into_vec_storage_cannot_be_retained_across_growth() {
+    let src = r#"
+value Position { x: int }
+fn vec_push(values: [Position], value: Position) {}
+fn main() {
+    let positions = [Position { x: 1 }]
+    let position: ref Position = positions[0]
+    vec_push(positions, Position { x: 2 })
+    position.x = 3
+}
+"#;
+    let errors = main_body_error_messages(src);
+    assert!(
+        errors.iter().any(|message| message.contains("relocatable Vec storage")),
+        "a retained Vec-element ref would dangle when growth relocates the buffer: {errors:?}"
+    );
+}
+
+#[test]
+fn ref_return_cannot_launder_a_vec_element_into_a_retained_ref() {
+    let src = r#"
+value Position { x: int }
+fn same(position: ref Position) -> ref Position { return position }
+fn vec_push(values: [Position], value: Position) {}
+fn main() {
+    let positions = [Position { x: 1 }]
+    let position: ref Position = same(positions[0])
+    vec_push(positions, Position { x: 2 })
+    position.x = 3
+}
+"#;
+    let errors = main_body_error_messages(src);
+    assert!(
+        errors.iter().any(|message| message.contains("relocatable Vec storage")),
+        "a ref-returning helper must preserve its Vec-element argument's ephemeral origin: {errors:?}"
+    );
+}
+
+#[test]
+fn ref_return_cannot_expose_an_element_of_a_relocatable_vec() {
+    let src = r#"
+value Position { x: int }
+fn main(positions: [Position]) -> ref Position { return positions[0] }
+"#;
+    let errors = main_body_error_messages(src);
+    assert!(
+        errors.iter().any(|message| message.contains("relocatable Vec storage")),
+        "borrowing the Vec header does not pin its relocatable element buffer: {errors:?}"
+    );
+}
+
+#[test]
+fn vec_element_can_be_borrowed_for_one_immediate_call() {
+    let src = r#"
+value Position { x: int }
+fn vec_push(values: [Position], value: Position) {}
+fn move(position: ref Position) { position.x = 2 }
+fn main() {
+    let positions = [Position { x: 1 }]
+    move(positions[0])
+    vec_push(positions, Position { x: 2 })
+}
+"#;
+    assert!(
+        !bone_rejects(src),
+        "a Vec element stays live through the immediate ref-parameter call"
+    );
+}
+
+#[test]
+fn ref_parameter_subfields_and_globals_remain_retainable() {
+    let src = r#"
+value Position { x: int }
+struct Player { position: Position }
+global ORIGIN: Position = Position { x: 0 }
+fn position(player: ref Player) -> ref Position { return player.position }
+fn same(position: ref Position) -> ref Position { return position }
+fn main(player: ref Player) {
+    let from_player: ref Position = same(player.position)
+    let from_global: ref Position = ORIGIN
+    from_player.x = from_global.x
+}
+"#;
+    assert!(
+        !bone_rejects(src),
+        "frame-stable input subfields and globals remain retainable"
+    );
+}
+
+#[test]
 fn ref_cannot_cross_opaque_or_persistent_boundaries() {
     for (label, src) in [
         (
