@@ -596,7 +596,9 @@ impl Builder<'_> {
                 let bv = self.lower_expr(base)?;
                 let nil = self.emit_cur(Inst::Const(Lit::Nil));
                 let is_nil = self.emit_cur(Inst::Eq(bv, nil));
-                let result = self.f.new_cell(None);
+                let result = self
+                    .f
+                    .new_cell_typed(None, self.current_expr_storage_ty_id());
                 let nil_bb = self.f.new_block();
                 let val_bb = self.f.new_block();
                 let join = self.f.new_block();
@@ -729,6 +731,48 @@ impl Builder<'_> {
                 ))
             }
             _ => self.lower_expr(e),
+        }
+    }
+
+    fn lower_guarded_place_base(
+        &mut self,
+        e: Idx<Expr>,
+        absent_join: Idx<Block>,
+    ) -> Result<Idx<Inst>, CompilerError> {
+        let flat_field = match self.body.expr_arena[e].clone() {
+            Expr::FieldAccess { base, field } if self.swizzle_of(base, field).is_none() => match self.expr_ty(base) {
+                Some(TypeExpr::App { ctor: TypeCtor::Nominal(sname), .. }) =>
+                    Some(self.struct_field_plan(sname, field, false)?),
+                _ => None,
+            },
+            _ => None,
+        };
+        match self.body.expr_arena[e].clone() {
+            Expr::SafeNav { base, field } => {
+                let recv = self.lower_guarded_place_base(base, absent_join)?;
+                let nil = self.emit_cur(Inst::Const(Lit::Nil));
+                let is_nil = self.emit_cur(Inst::Eq(recv, nil));
+                let present = self.f.new_block();
+                self.f.set_term(
+                    self.cur,
+                    Term::Branch {
+                        cond: is_nil,
+                        then_bb: absent_join,
+                        else_bb: present,
+                    },
+                );
+                self.cur = present;
+                Ok(self.emit_cur(Inst::Field { base: recv, field }))
+            }
+            Expr::FieldAccess { base, field }
+                if self.swizzle_of(base, field).is_none()
+                    && !flat_field.as_ref().is_some_and(|p| p.flat_shape().is_some()) =>
+            {
+                let (pbase, key) = self.physical_field(base, field)?;
+                let base = self.lower_guarded_place_base(pbase, absent_join)?;
+                Ok(self.emit_cur(Inst::Field { base, field: key }))
+            }
+            _ => self.lower_place_base(e),
         }
     }
 
@@ -893,11 +937,11 @@ impl Builder<'_> {
             // non-null path. Deep `a?.b?.c = v` works: `base` (`a?.b`) is itself
             // a SafeNav that lowers to nil if any inner link is null.
             Expr::SafeNav { base, field } => {
-                let recv = self.lower_place_base(base)?;
+                let join = self.f.new_block();
+                let recv = self.lower_guarded_place_base(base, join)?;
                 let nil = self.emit_cur(Inst::Const(Lit::Nil));
                 let is_nil = self.emit_cur(Inst::Eq(recv, nil));
                 let store_bb = self.f.new_block();
-                let join = self.f.new_block();
                 self.f.set_term(self.cur, Term::Branch { cond: is_nil, then_bb: join, else_bb: store_bb });
                 self.cur = store_bb;
                 let v = self.lower_expr(value)?;
@@ -995,11 +1039,11 @@ impl Builder<'_> {
             // `base?.field <op>= value` — skip silently if any `?.` link is null.
             // The read-modify-write and `value` run only on the non-null path.
             Expr::SafeNav { base, field } => {
-                let recv = self.lower_place_base(base)?;
+                let join = self.f.new_block();
+                let recv = self.lower_guarded_place_base(base, join)?;
                 let nil = self.emit_cur(Inst::Const(Lit::Nil));
                 let is_nil = self.emit_cur(Inst::Eq(recv, nil));
                 let store_bb = self.f.new_block();
-                let join = self.f.new_block();
                 self.f.set_term(self.cur, Term::Branch { cond: is_nil, then_bb: join, else_bb: store_bb });
                 self.cur = store_bb;
                 let cur = self.emit_cur(Inst::Field { base: recv, field });
@@ -1253,7 +1297,9 @@ impl Builder<'_> {
     ) -> Result<Idx<Inst>, CompilerError> {
         let recv = self.lower_safe_nav_receiver(receiver)?;
         let is_nil = self.safe_nav_absent_cond(&recv);
-        let result = self.f.new_cell(None);
+        let result = self
+            .f
+            .new_cell_typed(None, self.current_expr_storage_ty_id());
         let nil_bb = self.f.new_block();
         let call_bb = self.f.new_block();
         let join = self.f.new_block();
@@ -1310,7 +1356,9 @@ impl Builder<'_> {
             return Ok(None);
         };
         let part = parts[i].clone();
-        let result = self.f.new_cell(None);
+        let result = self
+            .f
+            .new_cell_typed(None, self.current_expr_storage_ty_id());
         let absent_bb = self.f.new_block();
         let val_bb = self.f.new_block();
         let join = self.f.new_block();
@@ -1479,7 +1527,9 @@ impl Builder<'_> {
     ) -> Result<Idx<Inst>, CompilerError> {
         let recv = self.lower_safe_nav_receiver(receiver)?;
         let is_nil = self.safe_nav_absent_cond(&recv);
-        let result = self.f.new_cell(None);
+        let result = self
+            .f
+            .new_cell_typed(None, self.current_expr_storage_ty_id());
         let nil_bb = self.f.new_block();
         let let_bb = self.f.new_block();
         let join = self.f.new_block();
