@@ -2181,11 +2181,23 @@ impl Builder<'_> {
     }
 
     fn param_slot(&self, index: usize) -> Result<RetSlot, CompilerError> {
-        self.param_plan
-            .as_ref()
-            .and_then(|plan| plan.representation().params().get(index))
+        if let Some(plan) = self.param_plan.as_ref() {
+            if !plan.representation().uses_scalar_abi() {
+                return Ok(RetSlot::Opaque);
+            }
+            return plan
+                .representation()
+                .params()
+                .get(index)
+                .copied()
+                .map(|id| self.rep_slot(id))
+                .ok_or_else(|| {
+                    self.gap_here(format!("parameter {index} has no representation plan"))
+                });
+        }
+        self.param_reps
+            .get(index)
             .copied()
-            .or_else(|| self.param_reps.get(index).copied())
             .map(|id| self.rep_slot(id))
             .ok_or_else(|| self.gap_here(format!("parameter {index} has no representation plan")))
     }
@@ -2796,10 +2808,10 @@ impl Builder<'_> {
         slot: &RetSlot,
         a: Idx<Expr>,
     ) -> Result<Vec<Idx<Inst>>, CompilerError> {
-        if !slot.splats() {
-            return Ok(vec![self.lower_expr(a)?]);
-        }
         let r = self.lower_expr_repr(a)?;
+        if !slot.splats() {
+            return Ok(vec![self.pack_bundle(&r)?]);
+        }
         self.repr_to_slot_values_bundle(&r, slot)
     }
 

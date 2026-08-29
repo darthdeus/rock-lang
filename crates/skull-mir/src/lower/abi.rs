@@ -1667,6 +1667,14 @@ impl RepArena {
                     },
                     RepGuarantees { nobox: mode.nobox_only, allow_opaque: true },
                 )?,
+                (None, Some(ty)) if declared_tuple_spelled(ws, param.ty) => self.plan(
+                    ws,
+                    target,
+                    &ty,
+                    RepUse::Parameter,
+                    &RepUseFacts { tuple_spelled: true, span: None },
+                    RepGuarantees { nobox: false, allow_opaque: true },
+                )?,
                 _ => self.intern(target, RepUse::Parameter, RepLayout::Opaque),
             };
             params.push(id);
@@ -1761,7 +1769,22 @@ impl RepArena {
         } else {
             params
                 .iter()
-                .map(|_| self.intern(target, RepUse::Parameter, RepLayout::Opaque))
+                .zip(param_tuple_spelled)
+                .map(|(ty, &tuple_spelled)| {
+                    if tuple_spelled {
+                        self.plan(
+                            ws,
+                            target,
+                            ty,
+                            RepUse::Parameter,
+                            &RepUseFacts { tuple_spelled: true, span: None },
+                            RepGuarantees { nobox: false, allow_opaque: true },
+                        )
+                        .expect("concrete ABI planner must accept a validated tuple parameter")
+                    } else {
+                        self.intern(target, RepUse::Parameter, RepLayout::Opaque)
+                    }
+                })
                 .collect()
         };
         let result = result_ty.map(|ty| {

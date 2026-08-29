@@ -841,7 +841,16 @@ impl Builder<'_> {
                 e,
                 &dc.callee_inst,
             )?;
-            let args = if any_named {
+            let has_tuple_storage = dc
+                .plan
+                .representation()
+                .params()
+                .iter()
+                .any(|&id| matches!(dc.plan.rep_plan(id).layout(), RepLayout::Tuple { .. }));
+            let args = if has_tuple_storage {
+                let opaque = vec![RetSlot::Opaque; callee.param_decls.len()];
+                self.scalar_call_args(func, arg_idxs, any_named, &opaque)?
+            } else if any_named {
                 self.reorder_named_args(e, arg_idxs, func, Some(&dc.callee_inst))?
             } else {
                 arg_idxs
@@ -1338,6 +1347,55 @@ impl Builder<'_> {
         }
     }
 
+    pub(crate) fn pack_bundle(
+        &mut self,
+        bundle: &ValueBundle,
+    ) -> Result<Idx<Inst>, CompilerError> {
+        let Some(shape) = self
+            .scx
+            .rep_arena()
+            .tuple_shape(bundle.representation())
+        else {
+            return self.pack(bundle.value().clone());
+        };
+        let mut slots = self.tuple_repr_to_slots(bundle.value().clone(), &shape)?;
+        if !shape.nullable {
+            return Ok(self.emit_cur(Inst::MakeTuple(slots)));
+        }
+        let present = slots.remove(0);
+        let result = self.f.new_cell(None);
+        let absent_bb = self.f.new_block();
+        let present_bb = self.f.new_block();
+        let join = self.f.new_block();
+        self.f.set_term(
+            self.cur,
+            Term::Branch {
+                cond: present,
+                then_bb: present_bb,
+                else_bb: absent_bb,
+            },
+        );
+
+        self.cur = absent_bb;
+        let nil = self.emit_cur(Inst::Const(Lit::Nil));
+        self.emit_cur(Inst::Store {
+            cell: result,
+            value: nil,
+        });
+        self.f.set_term(self.cur, Term::Goto(join));
+
+        self.cur = present_bb;
+        let tuple = self.emit_cur(Inst::MakeTuple(slots));
+        self.emit_cur(Inst::Store {
+            cell: result,
+            value: tuple,
+        });
+        self.f.set_term(self.cur, Term::Goto(join));
+
+        self.cur = join;
+        Ok(self.emit_cur(Inst::Load(result)))
+    }
+
     /// [`Self::pack`] for a consumer that can observe NIL-ness of the result --
     /// a boxed slot an absent value has to reach as `nil`, not as a statically
     /// non-nil ctor.
@@ -1681,7 +1739,7 @@ impl Builder<'_> {
         slot: &RetSlot,
     ) -> Result<Vec<Idx<Inst>>, CompilerError> {
         match slot {
-            RetSlot::Opaque => self.pack(bundle.value().clone()).map(|value| vec![value]),
+            RetSlot::Opaque => self.pack_bundle(bundle).map(|value| vec![value]),
             RetSlot::Leaves(expected) => {
                 let plan = self
                     .scx
