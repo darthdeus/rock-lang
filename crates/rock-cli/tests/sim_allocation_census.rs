@@ -53,6 +53,8 @@ fn census_reports_exact_fixture_frames_and_keeps_both_arms() {
     assert_eq!(artifact["sensor"]["accounting"], "gross_lua_allocator_requests");
     assert_eq!(artifact["sensor"]["jit"], true);
     assert_eq!(artifact["sensor"]["trace_observer"], false);
+    assert_eq!(artifact["sensor"]["text_layout_sim_probes"], false);
+    assert_eq!(artifact["sensor"]["imgui_sim_probes"], false);
     assert_eq!(artifact["sensor"]["final_frame"], "after_deferred_stop_sim");
     let records = artifact["records"].as_array().expect("records array");
     assert_eq!(records.len(), 2, "examined population must match records");

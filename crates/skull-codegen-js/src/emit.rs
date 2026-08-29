@@ -5218,14 +5218,41 @@ fn lifecycle_plan_stage_js(
             // `scene_id` and calls through; it never asks the value its
             // runtime type.
             let key_lit = js_string_lit(&key)?;
+            let sim_guard = (!entry.sim_wires.is_empty())
+                .then(|| {
+                    entry
+                        .sim_wires
+                        .iter()
+                        .map(|wire| {
+                            Ok(format!(
+                                "__G.__ROCK_ACTIVE_SIM === {}",
+                                js_string_lit(wire.as_str())?
+                            ))
+                        })
+                        .collect::<Result<Vec<_>, CompilerError>>()
+                        .map(|parts| parts.join(" || "))
+                })
+                .transpose()?;
             if entry.owner.as_str() == "scene" {
                 out.push_str("]}, func: (function(){var __s = __rock_code_slot_ref(");
                 out.push_str(&key_lit);
-                out.push_str("); return function(scene_id){var __root = __scene_root_any(scene_id); if (__root !== null) { __rock_call(__s, __root); }};})()},\n");
+                out.push_str("); return function(scene_id){");
+                if let Some(guard) = &sim_guard {
+                    write!(out, "if ({guard}) {{").unwrap();
+                }
+                out.push_str("var __root = __scene_root_any(scene_id); if (__root !== null) { __rock_call(__s, __root); }");
+                if sim_guard.is_some() { out.push('}'); }
+                out.push_str("};})()},\n");
             } else {
                 out.push_str("]}, func: (function(){var __s = __rock_code_slot_ref(");
                 out.push_str(&key_lit);
-                out.push_str("); return function(__scene_id){ __rock_call(__s); };})()},\n");
+                out.push_str("); return function(__scene_id){");
+                if let Some(guard) = &sim_guard {
+                    write!(out, "if ({guard}) {{").unwrap();
+                }
+                out.push_str("__rock_call(__s);");
+                if sim_guard.is_some() { out.push('}'); }
+                out.push_str("};})()},\n");
             }
         }
         out.push_str("]},\n");

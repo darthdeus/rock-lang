@@ -197,6 +197,8 @@ fn sim_command_writes_one_frame_aware_join_per_selected_sim() {
     assert_eq!(index["sensor"]["jit"], true);
     assert_eq!(index["sensor"]["trace_observer"], false);
     assert_eq!(index["sensor"]["frame_envelope"], "update_and_draw");
+    assert_eq!(index["sensor"]["text_layout_sim_probes"], false);
+    assert_eq!(index["sensor"]["imgui_sim_probes"], false);
     let records = index["records"].as_array().expect("records");
     assert_eq!(records.len(), 2);
     for record in records {

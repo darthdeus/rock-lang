@@ -4338,21 +4338,16 @@ fn decorator_application_lines(
 /// (`collect_skull_sims`) so the registered name and the name the runner asks
 /// to dispatch cannot drift.
 pub fn collect_sim_fns(ws: &Workspace) -> Vec<(&bone_semantic::hir::Function, String)> {
-    use bone_semantic::hir::AnnoValue;
     let mut sims = Vec::new();
     for module in ws.modules.iter() {
         if module.id == ModuleId::builtin() {
             continue;
         }
         for (_fid, f) in module.functions.iter() {
-            let Some(ann) = f.annotations.iter().find(|a| a.name.name.as_str() == "sim") else {
+            let Some(wire) = skull_mir::lifecycle::sim_wire_name(f) else {
                 continue;
             };
-            let wire = match ann.args.first().map(|a| &a.value) {
-                Some(AnnoValue::String(s)) => s.to_string(),
-                _ => f.name.as_str().to_string(),
-            };
-            sims.push((f, wire));
+            sims.push((f, wire.as_str().to_string()));
         }
     }
     sims
@@ -6059,14 +6054,37 @@ fn lifecycle_plan_stage_lua(
         // arm asks the value its runtime type: membership in the type's live
         // population, established once at Scene creation
         // (`__scene_type_bucket_insert`), is the only test.
+        let sim_guard = (!entry.sim_wires.is_empty()).then(|| {
+            entry
+                .sim_wires
+                .iter()
+                .map(|wire| {
+                    format!(
+                        "_G.__ROCK_ACTIVE_SIM == {}",
+                        skull_codegen_lua::lua_string(wire.as_str())
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(" or ")
+        });
         let func_thunk = if entry.owner.as_str() == "scene" {
+            let call = "local __root = __scene_root_any(scene_id); if __root ~= nil then __s(__root) end";
+            let body = sim_guard
+                .as_ref()
+                .map(|guard| format!("if {guard} then {call} end"))
+                .unwrap_or_else(|| call.to_string());
             format!(
-                "(function() local __s = __rock_code_slot_ref({key}); return function(scene_id) local __root = __scene_root_any(scene_id); if __root ~= nil then __s(__root) end end end)()",
+                "(function() local __s = __rock_code_slot_ref({key}); return function(scene_id) {body} end end)()",
                 key = skull_codegen_lua::lua_string(&key),
             )
         } else {
+            let call = "__s()";
+            let body = sim_guard
+                .as_ref()
+                .map(|guard| format!("if {guard} then {call} end"))
+                .unwrap_or_else(|| call.to_string());
             format!(
-                "(function() local __s = __rock_code_slot_ref({key}); return function(__scene_id) __s() end end)()",
+                "(function() local __s = __rock_code_slot_ref({key}); return function(__scene_id) {body} end end)()",
                 key = skull_codegen_lua::lua_string(&key),
             )
         };

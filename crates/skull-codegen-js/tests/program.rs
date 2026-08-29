@@ -7,7 +7,7 @@
 //! (`crates/rock-cli/tests/js_run_gate.rs`); this file pins the assembly ORDER
 //! and application-line CONTENT in the emitted string.
 
-use crate::common::{node, ws_with};
+use crate::common::{node, ws_with, ws_with_named};
 
 fn emit_program(ws: &bone_semantic::inference::Workspace) -> String {
     let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
@@ -140,6 +140,38 @@ fn main() {}
     assert!(js.program.contains("name: \"visual\", stage: 100, replay_role: \"presentation\""), "presentation replay role missing: {}", js.program);
     assert!(js.lifecycle_plan.entries.iter().any(|entry| entry.replay_role.tag() == "state"));
     assert!(js.lifecycle_plan.entries.iter().any(|entry| entry.replay_role.tag() == "presentation"));
+}
+
+#[test]
+fn lua_and_js_guard_frame_hooks_owned_by_a_sim_fixture_module() {
+    let file = "/repo/game/tests/sims/scoped.rock";
+    let ws = ws_with_named(
+        file,
+        r#"
+        @lifecycle(phase="update", owner="session") deco init update {}
+        fn register_sim(name: string, body: () -> ()) {}
+        @update fn observed_tick() {}
+        @sim("wire-name") fn selected_sim() {}
+        fn main() {
+            let keep: () -> () = selected_sim
+            keep()
+        }
+        "#,
+    );
+    let mid = *ws.module_ids.get(&ustr::Ustr::from(file)).expect("fixture module");
+    let lua = skull::mir_emit::emit_full(&ws, mid).expect("Lua emit").0;
+    let js = skull_codegen_js::emit::emit_program(&ws, mid).expect("JS emit");
+    assert_eq!(lua.lifecycle_plan, js.lifecycle_plan, "Lua and JS sim scopes drifted");
+    assert!(
+        lua.lua.contains("_G.__ROCK_ACTIVE_SIM == \"wire-name\""),
+        "Lua lifecycle thunk is not scoped to the fixture sim: {}",
+        lua.lua
+    );
+    assert!(
+        js.program.contains("__G.__ROCK_ACTIVE_SIM === \"wire-name\""),
+        "JS lifecycle thunk is not scoped to the fixture sim: {}",
+        js.program
+    );
 }
 
 #[test]

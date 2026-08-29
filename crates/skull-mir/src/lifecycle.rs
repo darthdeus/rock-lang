@@ -60,6 +60,7 @@ pub struct LifecycleEntry {
     pub replay_role: LifecycleReplayRole,
     pub declaration_ordinal: usize,
     pub qualification: LifecycleQualification,
+    pub sim_wires: Vec<Ustr>,
     pub body_fingerprint: u64,
 }
 
@@ -94,6 +95,7 @@ impl LifecyclePlan {
                 || old.stage != candidate.stage
                 || old.replay_role != candidate.replay_role
                 || old.declaration_ordinal != candidate.declaration_ordinal
+                || old.sim_wires != candidate.sim_wires
                 || qualification_structure_changed(&old.qualification, &candidate.qualification)
         })
     }
@@ -147,6 +149,35 @@ fn phase_rank(phase: Ustr) -> Option<u8> {
         "shutdown" => 10,
         _ => return None,
     })
+}
+
+pub fn sim_wire_name(function: &bone_semantic::hir::Function) -> Option<Ustr> {
+    let annotation = function
+        .annotations
+        .iter()
+        .find(|annotation| annotation.name.name.as_str() == "sim")?;
+    Some(match annotation.args.first().map(|argument| &argument.value) {
+        Some(AnnoValue::String(name)) => *name,
+        _ => function.name,
+    })
+}
+
+fn is_sim_fixture_module(file: &str) -> bool {
+    let mut previous = "";
+    for part in file.split(['/', '\\']) {
+        if previous == "tests" && part == "sims" {
+            return true;
+        }
+        previous = part;
+    }
+    false
+}
+
+fn is_frame_phase(phase: Ustr) -> bool {
+    matches!(
+        phase.as_str(),
+        "update" | "late_update" | "draw" | "late_draw" | "post_imgui_draw"
+    )
 }
 
 /// The one emitted identity for a validated typed Scene lifecycle root. The
@@ -535,6 +566,21 @@ pub fn collect_with_artifact(
 }
 
 pub fn collect(ws: &Workspace) -> Result<LifecyclePlan, CompilerError> {
+    let sim_wires_by_module = ws
+        .modules
+        .iter()
+        .filter(|module| {
+            module.id != ModuleId::builtin() && is_sim_fixture_module(module.file.as_str())
+        })
+        .filter_map(|module| {
+            let wires = module
+                .functions
+                .values()
+                .filter_map(sim_wire_name)
+                .collect::<Vec<_>>();
+            (!wires.is_empty()).then_some((module.id, wires))
+        })
+        .collect::<std::collections::HashMap<_, _>>();
     let mut roles = std::collections::HashMap::new();
     let mut census = LifecycleCensus::default();
     for module in ws.modules.iter().filter(|m| m.id != ModuleId::builtin()) {
@@ -757,6 +803,11 @@ pub fn collect(ws: &Workspace) -> Result<LifecyclePlan, CompilerError> {
                     replay_role,
                     declaration_ordinal: ordinal,
                     qualification,
+                    sim_wires: if is_frame_phase(phase) {
+                        sim_wires_by_module.get(&module.id).cloned().unwrap_or_default()
+                    } else {
+                        Vec::new()
+                    },
                     body_fingerprint: 0,
                 });
                 ordinal += 1;
@@ -961,6 +1012,57 @@ mod tests {
         let plan = collect(&ws).expect("plan");
         assert_eq!(plan.entries.len(), 2);
         assert_ne!(plan.entries[0].identity, plan.entries[1].identity);
+    }
+
+    #[test]
+    fn frame_hooks_in_sim_modules_are_scoped_to_that_modules_wire_names() {
+        let ws = workspace(&[
+            (
+                "roles.rock",
+                "@lifecycle(phase=\"update\", owner=\"session\") deco init tick {}",
+            ),
+            (
+                "/repo/game/tests/sims/owned.rock",
+                r#"
+                @tick fn owned_tick() {}
+                @sim("first-wire") fn first_sim() {}
+                @sim fn second_sim() {}
+                "#,
+            ),
+            (
+                "/repo/game/src/gameplay.rock",
+                r#"
+                @tick fn production_tick() {}
+                @sim fn embedded_diagnostic() {}
+                "#,
+            ),
+        ]);
+        let plan = collect(&ws).expect("plan");
+        let owned = plan
+            .entries
+            .iter()
+            .find(|entry| entry.diagnostic_name.as_str() == "owned_tick")
+            .expect("sim-owned lifecycle entry");
+        assert_eq!(
+            owned.sim_wires.iter().map(Ustr::as_str).collect::<Vec<_>>(),
+            vec!["first-wire", "second_sim"]
+        );
+        let production = plan
+            .entries
+            .iter()
+            .find(|entry| entry.diagnostic_name.as_str() == "production_tick")
+            .expect("production lifecycle entry");
+        assert!(production.sim_wires.is_empty());
+
+        let mut changed = plan.clone();
+        changed
+            .entries
+            .iter_mut()
+            .find(|entry| entry.diagnostic_name.as_str() == "owned_tick")
+            .expect("sim-owned lifecycle entry")
+            .sim_wires
+            .pop();
+        assert!(plan.structure_changed(&changed));
     }
 
     #[test]

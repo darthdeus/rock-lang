@@ -1187,6 +1187,8 @@ pub fn do_run_allocation_census(
             "trace_observer": false,
             "warmup_frames_requested": DEFAULT_SIM_ALLOCATION_WARMUP_FRAMES,
             "final_frame": "after_deferred_stop_sim",
+            "text_layout_sim_probes": false,
+            "imgui_sim_probes": false,
         },
         "records": records,
         "rankings": {
@@ -1326,6 +1328,10 @@ pub fn do_run_allocation_sites(
             "SKULL_ALLOCATION_ACTIVATION".to_string(),
             activation_path.to_string_lossy().into_owned(),
         ));
+        instrumented_env.entry(name.clone()).or_default().extend([
+            ("STONE_TEXT_LAYOUT_SIM_PROBES".to_string(), "0".to_string()),
+            ("STONE_IMGUI_SIM_PROBES".to_string(), "0".to_string()),
+        ]);
         run_named_entry(
             &project,
             name,
@@ -1407,6 +1413,8 @@ pub fn do_run_allocation_sites(
             "frame_envelope": "update_and_draw",
             "timing": false,
             "allocator_sampling": false,
+            "text_layout_sim_probes": false,
+            "imgui_sim_probes": false,
         },
         "records": records,
         "interpretation": "Execution counts identify persistent and amplified compiler-known allocation-capable sites. They do not prove LuaJIT materialized heap memory; validate candidates with an ordinary JIT-on witness.",
@@ -2529,7 +2537,9 @@ fn run_worker(
     match census_warmup_frames {
         Some(warmup) => {
             cmd.env("STONE_SIM_ALLOCATION_CENSUS", "1")
-                .env("STONE_SIM_ALLOCATION_WARMUP_FRAMES", warmup.to_string());
+                .env("STONE_SIM_ALLOCATION_WARMUP_FRAMES", warmup.to_string())
+                .env("STONE_TEXT_LAYOUT_SIM_PROBES", "0")
+                .env("STONE_IMGUI_SIM_PROBES", "0");
         }
         None => {
             cmd.env("STONE_SIM_ALLOCATION_CENSUS", "0");
