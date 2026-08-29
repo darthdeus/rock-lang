@@ -2492,7 +2492,8 @@ impl Builder<'_> {
             let join = self.f.new_block();
             self.f.set_term(self.cur, Term::Branch { cond: is_nil, then_bb, else_bb: join });
             self.cur = then_bb;
-            let dv = self.lower_expr(*def)?;
+            let expected = self.binding_ty(pb).and_then(|ty| self.concrete_ty_id(ty));
+            let dv = self.lower_expr_with_expected(*def, expected.as_deref())?;
             self.emit_cur(Inst::Store { cell, value: dv });
             self.f.set_term(self.cur, Term::Goto(join));
             self.cur = join;
@@ -2627,7 +2628,12 @@ impl Builder<'_> {
             let v = self.lower_expr(e)?;
             return Ok(self.tuple_return_operands(v, shape.slots.len()));
         }
-        let v = self.lower_expr(e)?;
+        let expected = self
+            .concrete_plan
+            .signature
+            .result
+            .map(|result| self.concrete_mono_view(result, ConcreteMonoConsumer::ReturnLowering));
+        let v = self.lower_expr_with_expected(e, expected.as_deref())?;
         let v = match self.concrete_plan.signature.result {
             Some(result) => {
                 let result = self.concrete_mono_view(result, ConcreteMonoConsumer::ReturnLowering);

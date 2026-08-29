@@ -58,7 +58,8 @@ impl Builder<'_> {
         self.f
             .set_term(self.cur, Term::Branch { cond: done_v, then_bb: join, else_bb: init_bb });
         self.cur = init_bb;
-        let v = self.lower_expr(value)?;
+        let expected = self.binding_ty(name).and_then(|ty| self.concrete_ty_id(ty));
+        let v = self.lower_expr_with_expected(value, expected.as_deref())?;
         self.emit_cur(Inst::StoreGlobal { name: cell, value: v });
         let t = self.emit_cur(Inst::Const(Lit::Bool(true)));
         self.emit_cur(Inst::StoreGlobal { name: done_flag, value: t });
@@ -309,9 +310,10 @@ impl Builder<'_> {
                         let slots = self.tuple_repr_to_slots(r, &shape)?;
                             self.bind_tuple_slots(name, &slots, shape);
                         } else {
+                        let expected = self.binding_ty(name).and_then(|ty| self.concrete_ty_id(ty));
                         let v = match opaque_repr {
                             Some(r) => self.pack(r.into_value())?,
-                            None => self.lower_expr(value)?,
+                            None => self.lower_expr_with_expected(value, expected.as_deref())?,
                         };
                         let v = self.coerced_to_binding(v, value, name);
                         let cty = self.binding_ty(name);

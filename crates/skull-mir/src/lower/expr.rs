@@ -4,6 +4,14 @@ use super::*;
 
 impl Builder<'_> {
     pub(crate) fn lower_expr(&mut self, e: Idx<Expr>) -> Result<Idx<Inst>, CompilerError> {
+        self.lower_expr_with_expected(e, None)
+    }
+
+    pub(crate) fn lower_expr_with_expected(
+        &mut self,
+        e: Idx<Expr>,
+        expected: Option<&crate::monoty::MonoTy>,
+    ) -> Result<Idx<Inst>, CompilerError> {
         // Source cursor for instruction-level diagnostics: whatever is lowered
         // from here down came from `e` unless a nested `lower_expr` narrows it,
         // and the restore puts the enclosing expression back on the way out.
@@ -13,7 +21,13 @@ impl Builder<'_> {
         // expression back, so a call always carries the innermost expression
         // that produced it -- which is the key `ConcreteBody` is built on.
         let outer_expr = self.cur_expr.replace(e);
-        let v = self.lower_expr_inner(e);
+        let v = match self.body.expr_arena[e].clone() {
+            Expr::Array(elems)
+                if expected.is_some_and(|ty| {
+                    ContainerPlan::matches_type(ContainerFamily::Vec, ty)
+                }) => self.lower_array_literal_with_expected(e, elems, expected),
+            _ => self.lower_expr_inner(e),
+        };
         self.cur_span = outer;
         self.cur_expr = outer_expr;
         let v = v?;
@@ -769,7 +783,8 @@ impl Builder<'_> {
                     .binds
                     .get(&raw(b))
                     .ok_or_else(|| gap("assignment to an unbound variable"))?;
-                let v = self.lower_expr(value)?;
+                let expected = self.binding_ty(b).and_then(|ty| self.concrete_ty_id(ty));
+                let v = self.lower_expr_with_expected(value, expected.as_deref())?;
                 let v = self.coerced_to_binding(v, value, b);
                 self.emit_cur(Inst::Store { cell, value: v });
             }
@@ -839,7 +854,8 @@ impl Builder<'_> {
                     self.store_flat_cells(b, key, cells);
                     return Ok(());
                 }
-                let v = self.lower_expr(value)?;
+                let expected = self.concrete_expr_ty(target);
+                let v = self.lower_expr_with_expected(value, expected.as_deref())?;
                 self.emit_cur(Inst::StoreField {
                     base: b,
                     field: key,
@@ -1553,6 +1569,15 @@ impl Builder<'_> {
         lit: Idx<Expr>,
         elems: IdxRange<Expr>,
     ) -> Result<Idx<Inst>, CompilerError> {
+        self.lower_array_literal_with_expected(lit, elems, None)
+    }
+
+    fn lower_array_literal_with_expected(
+        &mut self,
+        lit: Idx<Expr>,
+        elems: IdxRange<Expr>,
+        expected: Option<&crate::monoty::MonoTy>,
+    ) -> Result<Idx<Inst>, CompilerError> {
         let idxs: Vec<Idx<Expr>> = elems.into_iter().collect();
         let has_spread = idxs
             .iter()
@@ -1561,13 +1586,21 @@ impl Builder<'_> {
             // Column storage: transpose the literal's elements into one array
             // per leaf. Each element lowers as a repr, so no element box is
             // built even for a literal with entries.
-            if let Some(elem) = self.vec_column_elem_of(lit)? {
+            let column_elem = match expected {
+                Some(ty) => self.vec_column_elem_for_type(ty)?,
+                None => self.vec_column_elem_of(lit)?,
+            };
+            if let Some(elem) = column_elem {
                 return self.column_vec_literal(&idxs, elem);
             }
             let vs: Vec<Idx<Inst>> = idxs.iter().map(|&e| self.lower_expr(e)).collect::<Result<_, _>>()?;
             return Ok(self.emit_cur(Inst::MakeVec(vs)));
         }
-        if let Some(elem) = self.vec_column_elem_of(lit)? {
+        let column_elem = match expected {
+            Some(ty) => self.vec_column_elem_for_type(ty)?,
+            None => self.vec_column_elem_of(lit)?,
+        };
+        if let Some(elem) = column_elem {
             let capacity = self.emit_cur(Inst::Const(Lit::Int(0)));
             let arr = self.empty_column_vec(elem, capacity)?;
             for &e in &idxs {

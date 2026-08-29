@@ -73,7 +73,8 @@ impl Builder<'_> {
                 let v = match by_value.get(&key) {
                     Some(&v) => v,
                     None => {
-                        let v = self.lower_expr(lf.value)?;
+                        let expected = self.concrete_struct_field_ty(e, lf.name);
+                        let v = self.lower_expr_with_expected(lf.value, expected.as_deref())?;
                         by_value.insert(key, v);
                         v
                     }
@@ -385,7 +386,12 @@ impl Builder<'_> {
         struct_name: Ustr,
         field: Ustr,
     ) -> Result<Idx<Inst>, CompilerError> {
-        self.with_struct_default(struct_name, field, |s, def| s.lower_expr(def))
+        let expected = self
+            .cur_expr
+            .and_then(|literal| self.concrete_struct_field_ty(literal, field));
+        self.with_struct_default(struct_name, field, |s, def| {
+            s.lower_expr_with_expected(def, expected.as_deref())
+        })
     }
 
     /// The declaring struct's generic ARGUMENTS at this injection.

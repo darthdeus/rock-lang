@@ -710,7 +710,6 @@ impl Builder<'_> {
                 }
                 continue;
             }
-            let v = self.lower_expr(a)?;
             let pidx = match self.body.arg_names.get(&a) {
                 Some(nm) => param_names
                     .iter()
@@ -728,16 +727,18 @@ impl Builder<'_> {
                     slots.len()
                 )));
             }
-            let v = match callee_inst
+            let t = match callee_inst
                 .map(|inst| self.concrete_callee_param_ty(e, inst, pidx))
                 .transpose()?
                 .flatten()
             {
-                Some(t) => self.coerced_mono(v, a, t.as_ref()),
+                Some(t) => t,
                 None => {
                     return Err(self.gap_here("concrete call has no callee parameter type"));
                 }
             };
+            let v = self.lower_expr_with_expected(a, Some(t.as_ref()))?;
+            let v = self.coerced_mono(v, a, t.as_ref());
             slots[pidx] = Some(v);
         }
         let hi = slots.iter().rposition(|s| s.is_some()).map_or(0, |i| i + 1);

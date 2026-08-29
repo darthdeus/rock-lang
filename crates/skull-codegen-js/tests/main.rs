@@ -132,3 +132,5 @@ mod value_gc_eq;
 mod value_structs;
 #[path = "vec_columns.rs"]
 mod vec_columns;
+#[path = "optional_entity_vec.rs"]
+mod optional_entity_vec;

@@ -83,6 +83,8 @@ mod incremental_emit;
 mod lua_definition_scopes;
 #[path = "opaque_declared_type_reach.rs"]
 mod opaque_declared_type_reach;
+#[path = "optional_entity_vec.rs"]
+mod optional_entity_vec;
 
 #[path = "opaque_container_axes.rs"]
 mod opaque_container_axes;
