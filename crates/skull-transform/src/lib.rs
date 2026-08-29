@@ -2314,6 +2314,29 @@ mod tests {
             "the emitted artifact must have no detached residual lambda"
         );
     }
+
+    #[test]
+    fn detached_nested_closure_reaches_frame_only_capture_through_state() {
+        let mut source = lower(
+            "fn f(seed: int) -> int { let get = () => seed; return get() }",
+            "f",
+        );
+        let entry = source.entry();
+        let seed = source.params[0];
+        let s_cell = source.new_cell(Some(Ustr::from("s")));
+        let frame = FrameInfo {
+            s_cell,
+            fields: [seed].into_iter().collect(),
+            slots: [(seed, 0)].into_iter().collect(),
+        };
+        let aux = lower_detached_region(&source, entry, "f__detached", &frame);
+        let plan = aux
+            .closure_env_plans
+            .values()
+            .next()
+            .expect("nested closure must have an environment plan");
+        assert_eq!(plan.captures(), &[s_cell]);
+    }
 }
 
 /// FNV-1a 32 over the canonical layout string. 32-bit so the constant is
@@ -3041,12 +3064,17 @@ fn detached_region_blocks(func: &MirFunc, entry: Idx<Block>) -> HashSet<Idx<Bloc
 /// closure conversion over it. The detached function receives the coroutine
 /// state table as its only parameter; cells owned by the coroutine root still
 /// resolve through that table, while cells introduced by the region are locals.
-pub fn lower_detached_region(
+pub struct LoweredDetachedRegion {
+    pub source: MirFunc,
+    pub lowered: MirFunc,
+}
+
+pub fn lower_detached_region_with_source(
     source: &MirFunc,
     entry: Idx<Block>,
     name: &str,
     frame: &FrameInfo,
-) -> MirFunc {
+) -> LoweredDetachedRegion {
     let region = detached_region_blocks(source, entry);
     let mut aux = source.clone();
     aux.name = Ustr::from(name);
@@ -3097,6 +3125,7 @@ pub fn lower_detached_region(
         }
     }
 
+    let source = aux.clone();
     convert_closures_framed(&mut aux, name, Some(frame), None);
     let aux_entry = aux.entry;
     materialize_frame_cells(&mut aux, aux_entry, frame.s_cell, &frame.slots);
@@ -3104,7 +3133,19 @@ pub fn lower_detached_region(
         !aux.insts.iter().any(|(_, inst)| matches!(inst, Inst::Lambda { .. })),
         "detached region `{name}` retained an Inst::Lambda after conversion"
     );
-    aux
+    LoweredDetachedRegion {
+        source,
+        lowered: aux,
+    }
+}
+
+pub fn lower_detached_region(
+    source: &MirFunc,
+    entry: Idx<Block>,
+    name: &str,
+    frame: &FrameInfo,
+) -> MirFunc {
+    lower_detached_region_with_source(source, entry, name, frame).lowered
 }
 
 fn detached_region_site(

@@ -203,6 +203,11 @@ pub fn convert_closures_framed(
                     false
                 }
             });
+            // A detached hook/defer has only `s` as a parameter. Rebuilding its
+            // scope tree therefore makes a frame field used solely by a nested
+            // lambda look lambda-owned; the coroutine transform remains the
+            // authority for that cell's ownership.
+            via_s |= f.fields.iter().any(|c| own.owner.get(c) == Some(&sid));
             if via_s {
                 caps.push(f.s_cell);
             }
