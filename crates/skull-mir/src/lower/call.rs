@@ -686,11 +686,15 @@ impl Builder<'_> {
         e: Idx<Expr>,
         func: FuncRef,
     ) -> Result<DirectCall, CompilerError> {
-        let tree = self
-            .inf
-            .and_then(|i| i.bound_call_trees.get(&e))
-            .filter(|t| !t.is_empty())
-            .cloned();
+        // A dispatched helper shares the hole's expression, not its user call's bound tree.
+        let tree = if matches!(self.cur_op, crate::site::SiteOp::DirectCall) {
+            self.inf
+                .and_then(|i| i.bound_call_trees.get(&e))
+                .filter(|t| !t.is_empty())
+                .cloned()
+        } else {
+            None
+        };
         // IDENTITY, computed beside the delivery decision and independent of it.
         // A call the policy declines to specialize still names exactly one
         // concrete instance, and this is where it says which.

@@ -975,9 +975,15 @@ impl Builder<'_> {
     ) -> Result<Idx<Inst>, CompilerError> {
         let func = super::dispatch::dispatched_callee_decl(self.ws, name)
             .ok_or_else(|| gap(format!("dispatch helper `{name}` is missing or ambiguous")))?;
-        Ok(self.with_site_op(crate::site::SiteOp::Dispatched { name, path }, |b| {
-            b.emit_cur(Inst::Call { func, args })
-        }))
+        let expr = self
+            .cur_expr
+            .ok_or_else(|| gap(format!("dispatch helper `{name}` has no source expression")))?;
+        self.with_site_op(crate::site::SiteOp::Dispatched { name, path }, |b| {
+            let direct = b.plan_direct_call(expr, func)?;
+            let call = b.emit_cur(Inst::Call { func, args });
+            b.record_call(call, func, &direct)?;
+            Ok(call)
+        })
     }
 
     /// `m[k] = v` into a column-stored Map: take (or allocate) the key's slot,
