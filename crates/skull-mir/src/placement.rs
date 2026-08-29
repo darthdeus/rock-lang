@@ -394,6 +394,33 @@ fn operand_join(analysis: &PlacementAnalysis, inst: &Inst) -> Place {
     result
 }
 
+fn composite_place(
+    mir: &MirFunc,
+    analysis: &mut PlacementAnalysis,
+    requirements: &PlacementRequirements,
+    id: Idx<Inst>,
+    initial: Place,
+    operands: impl IntoIterator<Item = Idx<Inst>>,
+) -> Place {
+    let operands = operands
+        .into_iter()
+        .map(|operand| inst_place(analysis, operand))
+        .collect::<Vec<_>>();
+    let Some(destination) = requirements.values.get(id).copied() else {
+        return operands
+            .into_iter()
+            .fold(initial, |place, operand| place.join(operand));
+    };
+    if matches!(destination, Place::Pending | Place::Unknown) {
+        return Place::Unknown;
+    }
+    let span = mir.inst_spans.get(id).copied().unwrap_or_default();
+    for operand in operands {
+        add_constraint(analysis, operand, destination, span);
+    }
+    destination
+}
+
 fn value_place(
     mir: &MirFunc,
     analysis: &mut PlacementAnalysis,
@@ -430,9 +457,14 @@ fn value_place(
         | Inst::Index { base, .. }
         | Inst::Len { base, .. }
         | Inst::VecCheckedIndex { vec: base, .. } => inst_place(analysis, *base),
-        Inst::MakeTuple(values) => values.iter().fold(Place::Static, |place, value| {
-            place.join(inst_place(analysis, *value))
-        }),
+        Inst::MakeTuple(values) => composite_place(
+            mir,
+            analysis,
+            requirements,
+            id,
+            Place::Static,
+            values.iter().copied(),
+        ),
         Inst::MakeStruct { fields, .. }
         | Inst::MakeValueStruct { fields, .. }
         | Inst::MaterializeValueStruct { fields, .. } => {
@@ -441,32 +473,51 @@ fn value_place(
             } else {
                 Place::Static
             };
-            fields.iter().fold(initial, |place, (_, value)| {
-                place.join(inst_place(analysis, *value))
-            })
+            composite_place(
+                mir,
+                analysis,
+                requirements,
+                id,
+                initial,
+                fields.iter().map(|(_, value)| *value),
+            )
         }
-        Inst::MakeEnv { fields, .. } => fields.iter().fold(allocation, |place, (_, value)| {
-            place.join(inst_place(analysis, *value))
-        }),
+        Inst::MakeEnv { fields, .. } => composite_place(
+            mir,
+            analysis,
+            requirements,
+            id,
+            allocation,
+            fields.iter().map(|(_, value)| *value),
+        ),
         Inst::MakeEnum {
             positional, named, ..
-        } => positional
-            .iter()
-            .chain(named.iter().map(|(_, value)| value))
-            .fold(Place::Static, |place, value| {
-                place.join(inst_place(analysis, *value))
-            }),
+        } => composite_place(
+            mir,
+            analysis,
+            requirements,
+            id,
+            Place::Static,
+            positional
+                .iter()
+                .copied()
+                .chain(named.iter().map(|(_, value)| *value)),
+        ),
         Inst::MakeEnumDyn {
             tag,
             positional,
             named,
             ..
-        } => std::iter::once(tag)
-            .chain(positional)
-            .chain(named.iter().map(|(_, value)| value))
-            .fold(Place::Static, |place, value| {
-                place.join(inst_place(analysis, *value))
-            }),
+        } => composite_place(
+            mir,
+            analysis,
+            requirements,
+            id,
+            Place::Static,
+            std::iter::once(*tag)
+                .chain(positional.iter().copied())
+                .chain(named.iter().map(|(_, value)| *value)),
+        ),
         Inst::Call { func, args } | Inst::CallMulti { func, args, .. } => {
             let args = args
                 .iter()
