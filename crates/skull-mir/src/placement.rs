@@ -65,6 +65,8 @@ pub trait PlacementOracle {
 
     fn carries_placement(&self, mir: &MirFunc, inst: Idx<Inst>) -> bool;
 
+    fn is_allocation_site(&self, mir: &MirFunc, inst: Idx<Inst>) -> bool;
+
     fn call_effect(
         &self,
         mir: &MirFunc,
@@ -434,7 +436,12 @@ fn value_place(
         Inst::MakeStruct { fields, .. }
         | Inst::MakeValueStruct { fields, .. }
         | Inst::MaterializeValueStruct { fields, .. } => {
-            fields.iter().fold(Place::Static, |place, (_, value)| {
+            let initial = if oracle.is_allocation_site(mir, id) {
+                allocation
+            } else {
+                Place::Static
+            };
+            fields.iter().fold(initial, |place, (_, value)| {
                 place.join(inst_place(analysis, *value))
             })
         }
