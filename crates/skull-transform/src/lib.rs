@@ -1984,6 +1984,35 @@ mod tests {
     }
 
     #[test]
+    fn coroutine_frame_rematerializes_cross_block_null_but_spills_the_global_handle() {
+        let func = lower(
+            "global SELF: Coroutine<int>? = null\n\
+             co fn f() -> Coroutine<int> {\n\
+                 yield 1\n\
+                 if let self = SELF { SELF = self }\n\
+                 yield 2\n\
+             }",
+            "f",
+        );
+        let lowered = transform_coroutine(&func, None);
+        let spills = lowered.frame_plan.spill_values();
+        assert!(
+            spills
+                .iter()
+                .any(|value| matches!(lowered.step.insts[*value], Inst::Global(name) if name.as_str() == "SELF")),
+            "the evaluated global handle must retain its pre-branch identity:\n{}",
+            lowered.step
+        );
+        assert!(
+            spills
+                .iter()
+                .all(|value| !matches!(lowered.step.insts[*value], Inst::Const(_))),
+            "constants must not acquire frame fields: {spills:?}\n{}",
+            lowered.step
+        );
+    }
+
+    #[test]
     fn closure_conversion_exposes_one_owned_environment_plan() {
         let mut func = lower(
             "fn f() -> int { let captured = 3; let g = () => captured; return g() }",
@@ -2501,10 +2530,12 @@ fn vfield(v: Idx<Inst>) -> ustr::Ustr {
 /// Spill every CROSS-BLOCK value (defined in one block, used in another) to the
 /// state table at its def and reload it at each using block — so a value that
 /// outlives a yield (a loop-carried collection/bound, a multi-yield arg)
-/// survives the suspend/resume. (P2 — "only cells cross a yield" — is an
-/// over-statement: lowering routes some data through values; this is the
-/// canonical stackless spill, documented as a finding.) Returns the sorted
-/// spilled values; their `v<N>` fields are part of the frame layout stamp.
+/// survives the suspend/resume. Constants are rematerialized at each use block:
+/// they have no evaluation-time identity to preserve, and polymorphic null has
+/// no standalone physical type for a frame field. (P2 — "only cells cross a
+/// yield" — is an over-statement: lowering routes some data through values;
+/// this is the canonical stackless spill, documented as a finding.) Returns the
+/// sorted spilled values; their `v<N>` fields are part of the frame layout stamp.
 fn spill_cross_block_values(step: &mut MirFunc, s_cell: Idx<Cell>, block_ids: &[Idx<Block>]) -> Vec<Idx<Inst>> {
     // def block of every value.
     let mut def_block: HashMap<Idx<Inst>, Idx<Block>> = HashMap::default();
@@ -2515,8 +2546,8 @@ fn spill_cross_block_values(step: &mut MirFunc, s_cell: Idx<Cell>, block_ids: &[
             }
         }
     }
-    // frame_values = values used in a block other than where defined.
-    let mut frame_values: HashSet<Idx<Inst>> = HashSet::default();
+    // cross_block_values = values used in a block other than where defined.
+    let mut cross_block_values: HashSet<Idx<Inst>> = HashSet::default();
     for &bid in block_ids {
         let mut used: Vec<Idx<Inst>> = Vec::new();
         for &id in &step.blocks[bid].insts {
@@ -2525,11 +2556,20 @@ fn spill_cross_block_values(step: &mut MirFunc, s_cell: Idx<Cell>, block_ids: &[
         used.extend(term_value(&step.blocks[bid].term));
         for v in used {
             if def_block.get(&v).copied() != Some(bid) {
-                frame_values.insert(v);
+                cross_block_values.insert(v);
             }
         }
     }
-    if frame_values.is_empty() {
+    let rematerialized = cross_block_values
+        .iter()
+        .copied()
+        .filter(|value| matches!(step.insts[*value], Inst::Const(_)))
+        .collect::<HashSet<_>>();
+    let frame_values = cross_block_values
+        .difference(&rematerialized)
+        .copied()
+        .collect::<HashSet<_>>();
+    if cross_block_values.is_empty() {
         return Vec::new();
     }
 
@@ -2541,13 +2581,19 @@ fn spill_cross_block_values(step: &mut MirFunc, s_cell: Idx<Cell>, block_ids: &[
             let mut seen = HashSet::default();
             for &id in &step.blocks[bid].insts {
                 value_operands(&step.insts[id], &mut |v| {
-                    if frame_values.contains(&v) && def_block.get(&v).copied() != Some(bid) && seen.insert(v) {
+                    if cross_block_values.contains(&v)
+                        && def_block.get(&v).copied() != Some(bid)
+                        && seen.insert(v)
+                    {
                         used_here.push(v);
                     }
                 });
             }
             if let Some(v) = term_value(&step.blocks[bid].term) {
-                if frame_values.contains(&v) && def_block.get(&v).copied() != Some(bid) && seen.insert(v) {
+                if cross_block_values.contains(&v)
+                    && def_block.get(&v).copied() != Some(bid)
+                    && seen.insert(v)
+                {
                     used_here.push(v);
                 }
             }
@@ -2558,9 +2604,13 @@ fn spill_cross_block_values(step: &mut MirFunc, s_cell: Idx<Cell>, block_ids: &[
         let mut reload: HashMap<Idx<Inst>, Idx<Inst>> = HashMap::default();
         let mut new_list: Vec<Idx<Inst>> = Vec::new();
         for v in used_here {
-            let sv = step.alloc_inst(Inst::Load(s_cell));
-            let rv = step.alloc_inst(Inst::Field { base: sv, field: vfield(v) });
-            new_list.push(sv);
+            let rv = if rematerialized.contains(&v) {
+                step.alloc_inst(step.insts[v].clone())
+            } else {
+                let sv = step.alloc_inst(Inst::Load(s_cell));
+                new_list.push(sv);
+                step.alloc_inst(Inst::Field { base: sv, field: vfield(v) })
+            };
             new_list.push(rv);
             reload.insert(v, rv);
         }
