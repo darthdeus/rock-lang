@@ -244,6 +244,17 @@ fn infer_requirements(
                             changed |= merge_requirement(&mut requirements.cells, *cell, required);
                         }
                     }
+                    Inst::TupleIndex { base, .. } => {
+                        if let Some(required) = requirements.values.get(id).copied()
+                            && oracle.carries_placement(mir, *base)
+                        {
+                            changed |= merge_requirement(
+                                &mut requirements.values,
+                                *base,
+                                required,
+                            );
+                        }
+                    }
                     Inst::MakeTuple(values) | Inst::MakeVec(values) => {
                         if let Some(required) = requirements.values.get(id).copied() {
                             for &value in values {
