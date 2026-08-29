@@ -36,6 +36,35 @@ pub(crate) fn contains_frame_ref(gamma: &Gamma, ty: TyId) -> bool {
     visit(gamma, ty, &mut FxHashSet::default())
 }
 
+pub(crate) fn is_identity_struct_type(gamma: &Gamma, ty: TyId) -> bool {
+    fn visit(gamma: &Gamma, ty: TyId, seen: &mut FxHashSet<TyId>) -> bool {
+        if !seen.insert(ty) {
+            return false;
+        }
+        match *gamma.get(ty) {
+            TypeExpr::Infer(var, _) => gamma
+                .out
+                .substitutions
+                .get(var)
+                .is_some_and(|next| visit(gamma, next, seen)),
+            TypeExpr::Nullable(inner) => visit(gamma, ty.with_idx(inner), seen),
+            TypeExpr::App {
+                ctor: TypeCtor::Nominal(name),
+                ..
+            } => resolve_struct(gamma, name).is_some_and(|sid| {
+                !gamma.workspace.module(sid.module).structs[sid.def].is_value
+            }),
+            _ => false,
+        }
+    }
+
+    visit(gamma, ty, &mut FxHashSet::default())
+}
+
+pub(crate) fn is_frame_borrow_type(gamma: &Gamma, ty: TyId) -> bool {
+    contains_frame_ref(gamma, ty) || is_identity_struct_type(gamma, ty)
+}
+
 pub(crate) fn frame_ref_target(gamma: &Gamma, ty: TyId) -> Option<TyId> {
     match *gamma.get(ty) {
         TypeExpr::App {

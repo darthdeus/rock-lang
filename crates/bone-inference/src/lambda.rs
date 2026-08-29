@@ -23,10 +23,10 @@ fn reject_ref_captures(
             .get(*binding)
             .copied()
             .or(c.body.binding_arena[*binding].declared_ty);
-        if ty.is_some_and(|ty| contains_frame_ref(gamma, ty)) {
+        if ty.is_some_and(|ty| is_frame_borrow_type(gamma, ty)) {
             comp_error!(
                 use_span,
-                "closure cannot capture frame reference `{}`; capture an `Entity<T>` and resolve it inside the closure",
+                "closure cannot capture frame borrow `{}`; capture an `Entity<T>` and resolve it inside the closure",
                 c.body.binding_arena[*binding].name
             );
         }

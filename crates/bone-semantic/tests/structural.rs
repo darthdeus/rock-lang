@@ -1439,6 +1439,24 @@ fn closure_cannot_capture_a_ref() {
 }
 
 #[test]
+fn closure_cannot_capture_an_implicit_identity_borrow() {
+    let src = "struct Player { hp: int }\nfn bad(player: Player) -> () -> int { return () => player.hp }";
+    assert!(
+        bone_rejects(src),
+        "an identity parameter is an implicit borrow and cannot enter a closure environment"
+    );
+}
+
+#[test]
+fn closure_may_capture_an_entity_value() {
+    let src = "struct Player { hp: int }\nvalue Entity<T> { slot: int }\nfn fine(player: Entity<Player>) -> () -> int { return () => player.slot }";
+    assert!(
+        !bone_rejects(src),
+        "an Entity<T> is the storable value used by a persistent closure"
+    );
+}
+
+#[test]
 fn ref_cannot_live_across_a_coroutine_suspension() {
     let src = "struct Player { hp: int }\nco fn bad(player: ref Player) -> Coroutine<int> { yield 1  player.hp = 1 }";
     assert!(bone_rejects(src), "a coroutine frame cannot retain a ref across yield");
@@ -1448,6 +1466,24 @@ fn ref_cannot_live_across_a_coroutine_suspension() {
 fn ref_finished_before_a_coroutine_suspension_is_allowed() {
     let src = "struct Player { hp: int }\nco fn fine(player: ref Player) -> Coroutine<int> { player.hp = 1  yield 1 }";
     assert!(!bone_rejects(src), "last use before yield does not put the ref in the coroutine frame");
+}
+
+#[test]
+fn implicit_identity_borrow_cannot_live_across_a_coroutine_suspension() {
+    let src = "struct Player { hp: int }\nco fn bad(player: Player) -> Coroutine<int> { yield 1  player.hp = 1 }";
+    assert!(
+        bone_rejects(src),
+        "an identity parameter cannot be retained in a coroutine frame"
+    );
+}
+
+#[test]
+fn implicit_identity_borrow_finished_before_suspension_is_allowed() {
+    let src = "struct Player { hp: int }\nco fn fine(player: Player) -> Coroutine<int> { player.hp = 1  yield 1 }";
+    assert!(
+        !bone_rejects(src),
+        "last use before yield does not retain the identity borrow"
+    );
 }
 
 #[test]

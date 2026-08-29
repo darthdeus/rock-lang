@@ -86,7 +86,7 @@ impl SuspensionPolicy for RefSuspensionPolicy<'_> {
             .get(binding)
             .copied()
             .or(self.gamma.body.binding_arena[binding].declared_ty)
-            .is_some_and(|ty| contains_frame_ref(self.gamma, ty))
+            .is_some_and(|ty| is_frame_borrow_type(self.gamma, ty))
     }
 }
 
@@ -549,7 +549,7 @@ pub fn check_function(
         for at in uses_after_suspension(c.body, &policy) {
             gamma.body_errors.push(CompilerError::new_with_label(
                 c.body.expr_spans[at],
-                "frame reference is used after a coroutine suspension; retain an `Entity<T>` and resolve it after the yield"
+                "frame borrow is used after a coroutine suspension; retain an `Entity<T>` and resolve it after the yield"
                     .to_string(),
             ));
         }
