@@ -100,6 +100,8 @@ mod inline_body_column_map_param;
 mod inline_lua_column_container_param_sentinel;
 #[path = "inline_value_specialization.rs"]
 mod inline_value_specialization;
+#[path = "live_call_conversion.rs"]
+mod live_call_conversion;
 #[path = "inline_stats.rs"]
 mod inline_stats;
 #[path = "parallel_inline_mode.rs"]
