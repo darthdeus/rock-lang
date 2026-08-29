@@ -35,7 +35,7 @@ use skull_parser::CompilerError;
 use crate::intrinsics::ExpandKind;
 use crate::mir::*;
 use crate::concrete::{ConcreteBodyPlan, ConcreteOwner, ConcretePlans, ConcreteTypeTables};
-use crate::monoty::{MonoTy, MonoTyId};
+use crate::monoty::{MonoCtor, MonoTy, MonoTyId};
 
 type ConcreteTypeCache = RefCell<rustc_hash::FxHashMap<MonoTyId, Rc<MonoTy>>>;
 
@@ -2604,6 +2604,19 @@ impl Builder<'_> {
                 self.lower_stmt_expr(e)?;
             }
             return Ok(vec![]);
+        }
+        if self
+            .concrete_plan
+            .signature
+            .result
+            .is_some_and(|result| {
+                matches!(
+                    &*self.concrete_mono_view(result, ConcreteMonoConsumer::ReturnLowering),
+                    MonoTy::App { ctor: MonoCtor::Ref, .. }
+                )
+            })
+        {
+            return Ok(vec![self.lower_place_base(e)?]);
         }
         if let Some(shape) = self.result_shape() {
             let is_phantom = match &self.body.expr_arena[e] {
