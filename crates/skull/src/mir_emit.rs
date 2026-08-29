@@ -764,7 +764,7 @@ pub struct ArenaTraffic {
 /// cached chunk + decorator/global unit in [`assemble`] to produce the
 /// `backend-stats` breakdown.
 #[derive(Default, Clone, Copy)]
-struct PhaseTimes {
+pub(crate) struct PhaseTimes {
     lower: Duration,
     lower_work: bool,
     inline: Duration,
@@ -3105,10 +3105,11 @@ fn emit_coroutine_chunk(
             format!("cannot build concrete coroutine plan for `{}`: {}", f.name, reason.bucket()),
         )
     })?;
-    let (lua, code_artifact, allocation_bodies) = crate::coroutine_emit::emit_coroutine_with_artifact(
+    let (lua, code_artifact, allocation_bodies, deps, statics) = crate::coroutine_emit::emit_coroutine_with_artifact(
         ws,
         cg,
-        scx.interner(),
+        scx,
+        f,
         &plan,
         mf,
     )?;
@@ -3120,7 +3121,6 @@ fn emit_coroutine_chunk(
     // the GRAPH's fact, and `update_chunk_cache` reads it through
     // `instances_of`. `deps` carries only what codegen alone knows -- which
     // bodies this chunk's TEXT contains.
-    let deps = FxHashSet::default();
     Ok(Chunk {
         lua,
         allocation_bodies,
@@ -3129,7 +3129,7 @@ fn emit_coroutine_chunk(
         direct_calls: Vec::new(),
         times,
         attribution: UnitAttribution::default(),
-        statics: mf.statics.clone(),
+        statics,
         comptime_reads: mf.comptime_reads.clone(),
         calls: skull_mir::reach::call_targets(mf),
         specs,
@@ -3312,6 +3312,7 @@ fn emit_body_chunk_with_mutation(
     for nf in &mf.nested_fns[pre_nested..] {
         cg.mint_synthetic(nf.name.to_string());
     }
+    convert_named_nested_closures(cg, &mut mf.nested_fns[..pre_nested]);
     let counted_before = mf.blocks.len();
     let tcounted = Instant::now();
     skull_transform::recover_counted_loops(ws, &mut mf); // desugared iter loops -> FORL shape
@@ -3423,7 +3424,7 @@ fn emit_body_chunk_with_mutation(
 /// cleanup pipeline per fn, folds their callee refs into the chunk's deps (so an
 /// edit to a callee still invalidates the enclosing chunk) and their `static`
 /// cells into the chunk's `statics` (so hot-reload can reset them).
-fn emit_nested_fns(
+pub(crate) fn emit_nested_fns(
     ws: &Workspace,
     cg: &CodegenCtx,
     scx: &skull_mir::lower::ScalarCtx,
@@ -3492,6 +3493,18 @@ fn emit_nested_fns(
         )?;
     }
     Ok(())
+}
+
+pub(crate) fn convert_named_nested_closures(cg: &CodegenCtx, nested: &mut [MirFunc]) {
+    for nf in nested {
+        let pre_nested = nf.nested_fns.len();
+        let name = nf.name;
+        skull_transform::convert_closures(nf, name.as_str());
+        for child in &nf.nested_fns[pre_nested..] {
+            cg.mint_synthetic(child.name.to_string());
+        }
+        convert_named_nested_closures(cg, &mut nf.nested_fns[..pre_nested]);
+    }
 }
 
 /// Emit the flat list of pass-produced hoisted lambda bodies (`convert_closures`

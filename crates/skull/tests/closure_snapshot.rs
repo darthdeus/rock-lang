@@ -160,3 +160,42 @@ fn per_iteration_value_capture_snapshots_flat_leaves() {
     let out = run_luajit(&format!("{lua}\nmain()\n"), "perit");
     assert_eq!(out, "3\n5\n7", "each closure reads ITS iteration's leaves; got:\n{out}");
 }
+
+const PER_ITER_ENUM_CAPTURE: &str = r#"
+enum InnerChoice { Number(int) }
+enum Choice { Pick(InnerChoice), Other(InnerChoice) }
+
+fn capture_choices(choices: [Choice]) -> [fn() -> int] {
+    let fns: [fn() -> int] = []
+    for choice in choices {
+        fns.push(() => match choice {
+            Choice::Pick(InnerChoice::Number(n)) => n,
+            Choice::Other(InnerChoice::Number(n)) => n,
+        })
+    }
+    return fns
+}
+
+fn main() {
+    let fns = capture_choices([
+        Choice::Pick(InnerChoice::Number(1)),
+        Choice::Other(InnerChoice::Number(2)),
+        Choice::Pick(InnerChoice::Number(3)),
+    ])
+    for f in fns { print(f()) }
+}
+"#;
+
+#[test]
+fn per_iteration_enum_capture_snapshots_flat_leaves() {
+    let lua = emit_module(PER_ITER_ENUM_CAPTURE);
+    let body = function_body(&lua, "capture_choices");
+    assert!(!declares_box(&body), "a per-iteration enum capture must not box its leaves:\n{body}");
+    assert!(!body.contains(".v = "), "no enum leaf is stored through a box:\n{body}");
+    assert!(
+        body.contains("setmetatable({ __slot = __rock_code_slot_ref("),
+        "the enum leaves snapshot into a per-iteration env record:\n{body}"
+    );
+    let out = run_luajit(&format!("{lua}\nmain()\n"), "perit-enum");
+    assert_eq!(out, "1\n2\n3", "each closure reads its own enum value; got:\n{out}");
+}

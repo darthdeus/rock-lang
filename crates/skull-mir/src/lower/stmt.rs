@@ -279,7 +279,12 @@ impl Builder<'_> {
                                 .into_iter()
                                 .enumerate()
                                 .map(|(li, lv)| {
-                                    let c = self.f.new_cell(Some(Ustr::from(format!("{bname}__{li}").as_str())));
+                                    let c = self.new_binding_cell(
+                                        name,
+                                        Ustr::from(format!("{bname}__{li}").as_str()),
+                                        None,
+                                        Ustr::from(li.to_string().as_str()),
+                                    );
                                     self.emit_cur(Inst::Store { cell: c, value: lv });
                                     c
                                 })
@@ -310,7 +315,12 @@ impl Builder<'_> {
                         };
                         let v = self.coerced_to_binding(v, value, name);
                         let cty = self.binding_ty(name);
-                        let cell = self.f.new_cell_typed(Some(self.body.binding_arena[name].name), cty);
+                        let cell = self.new_binding_cell(
+                            name,
+                            self.body.binding_arena[name].name,
+                            cty,
+                            Ustr::from(""),
+                        );
                         if self.binding_is_nonnull_value_struct(name) {
                             self.f.mark_nonnull_value_struct(cell);
                         }
@@ -366,7 +376,12 @@ impl Builder<'_> {
                 // the inner, so `x` binds directly to the value.
                 Statement::LetNewtype { var, value, .. } => {
                     let v = self.lower_expr(value)?;
-                    let cell = self.f.new_cell(Some(self.body.binding_arena[var].name));
+                    let cell = self.new_binding_cell(
+                        var,
+                        self.body.binding_arena[var].name,
+                        self.binding_ty(var),
+                        Ustr::from(""),
+                    );
                     self.emit_cur(Inst::Store { cell, value: v });
                     self.binds.insert(raw(var), cell);
                 }

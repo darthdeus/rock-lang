@@ -128,7 +128,12 @@ impl Builder<'_> {
                     return Ok(());
                 }
                 let val = self.scrut_value(scrut);
-                let cell = self.f.new_cell(Some(name));
+                let cell = self.new_binding_cell(
+                    b,
+                    name,
+                    self.binding_ty(b),
+                    Ustr::from(""),
+                );
                 self.emit_cur(Inst::Store { cell, value: val });
                 self.binds.insert(raw(b), cell);
                 Ok(())
@@ -942,7 +947,12 @@ impl Builder<'_> {
         high: Idx<Expr>,
         body: Idx<Expr>,
     ) -> Result<(), CompilerError> {
-        let i_cell = self.f.new_cell(Some(self.body.binding_arena[var_b].name));
+        let i_cell = self.new_binding_cell(
+            var_b,
+            self.body.binding_arena[var_b].name,
+            self.binding_ty(var_b),
+            Ustr::from(""),
+        );
         self.binds.insert(raw(var_b), i_cell);
         self.f.mark_loop_binding(i_cell);
         let lo_v = self.lower_expr(low)?;

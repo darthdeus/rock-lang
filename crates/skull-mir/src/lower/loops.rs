@@ -536,7 +536,12 @@ impl Builder<'_> {
         // enumerate counter: bind to the current count, then bump (occupied only).
         if let (Some(ev), Some(ec)) = (enum_var, enum_cell) {
             let cur = self.emit_cur(Inst::Load(ec));
-            let bind_cell = self.f.new_cell(Some(self.body.binding_arena[ev].name));
+            let bind_cell = self.new_binding_cell(
+                ev,
+                self.body.binding_arena[ev].name,
+                self.binding_ty(ev),
+                Ustr::from(""),
+            );
             self.binds.insert(raw(ev), bind_cell);
             self.emit_cur(Inst::Store { cell: bind_cell, value: cur });
             let one = self.emit_cur(Inst::Const(Lit::Int(1)));
@@ -651,7 +656,12 @@ impl Builder<'_> {
         self.f.mark_loop_binding(val_cell);
         let nil = self.emit_cur(Inst::Const(Lit::Nil));
         self.emit_cur(Inst::Store { cell: key_cell, value: nil });
-        let i_cell = self.f.new_cell(Some(self.body.binding_arena[ib].name));
+        let i_cell = self.new_binding_cell(
+            ib,
+            self.body.binding_arena[ib].name,
+            self.binding_ty(ib),
+            Ustr::from(""),
+        );
         self.binds.insert(raw(ib), i_cell);
         self.f.mark_loop_binding(i_cell);
         let zero = self.emit_cur(Inst::Const(Lit::Int(0)));
@@ -753,7 +763,12 @@ impl Builder<'_> {
         // cell in single-binding mode (the index is folded into the tuple).
         let i_cell = match &split {
             Some((ib, _)) => {
-                let c = self.f.new_cell(Some(self.body.binding_arena[*ib].name));
+                let c = self.new_binding_cell(
+                    *ib,
+                    self.body.binding_arena[*ib].name,
+                    self.binding_ty(*ib),
+                    Ustr::from(""),
+                );
                 self.binds.insert(raw(*ib), c);
                 c
             }
@@ -930,9 +945,12 @@ impl Builder<'_> {
                     .iter()
                     .enumerate()
                     .map(|(li, &value)| {
-                        let c = self
-                            .f
-                            .new_cell(Some(Ustr::from(format!("{name}__{li}").as_str())));
+                        let c = self.new_binding_cell(
+                            *b,
+                            Ustr::from(format!("{name}__{li}").as_str()),
+                            None,
+                            Ustr::from(li.to_string().as_str()),
+                        );
                         self.emit_cur(Inst::Store { cell: c, value });
                         c
                     })
@@ -951,7 +969,12 @@ impl Builder<'_> {
     pub(crate) fn bind_for_pattern(&mut self, vars: &BindingPattern, value: Idx<Inst>) {
         match vars {
             BindingPattern::Leaf(b) => {
-                let cell = self.f.new_cell(Some(self.body.binding_arena[*b].name));
+                let cell = self.new_binding_cell(
+                    *b,
+                    self.body.binding_arena[*b].name,
+                    self.binding_ty(*b),
+                    Ustr::from(""),
+                );
                 if self.binding_is_nonnull_value_struct(*b) {
                     self.f.mark_nonnull_value_struct(cell);
                 }
@@ -1037,7 +1060,12 @@ impl Builder<'_> {
             .iter()
             .enumerate()
             .map(|(li, &value)| {
-                let c = self.f.new_cell(Some(Ustr::from(format!("{bname}__{li}").as_str())));
+                let c = self.new_binding_cell(
+                    b,
+                    Ustr::from(format!("{bname}__{li}").as_str()),
+                    None,
+                    Ustr::from(li.to_string().as_str()),
+                );
                 self.emit_cur(Inst::Store { cell: c, value });
                 c
             })
@@ -1060,7 +1088,12 @@ impl Builder<'_> {
             .iter()
             .enumerate()
             .map(|(si, &value)| {
-                let c = self.f.new_cell(Some(Ustr::from(format!("{bname}__{si}").as_str())));
+                let c = self.new_binding_cell(
+                    b,
+                    Ustr::from(format!("{bname}__{si}").as_str()),
+                    None,
+                    Ustr::from(si.to_string().as_str()),
+                );
                 self.emit_cur(Inst::Store { cell: c, value });
                 c
             })

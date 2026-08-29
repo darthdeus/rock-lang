@@ -681,6 +681,7 @@ impl Inst {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Cell {
     pub name: Option<Ustr>,
+    pub capture_identity: Option<crate::code_identity::CaptureIdentity>,
     pub loop_binding: bool,
     /// bone's type for this variable, when known at the binding site (params,
     /// `let`s). Non-Lua backends declare typed locals from it (the GLSL emitter
@@ -1085,7 +1086,13 @@ impl MirFunc {
     pub fn new_cell(&mut self, name: Option<Ustr>) -> Idx<Cell> {
         let capacity = self.cells.capacity();
         let start = self.lower_timing_enabled.then(Instant::now);
-        let id = self.cells.alloc(Cell { name, loop_binding: false, ty: None, nonnull_value_struct: false });
+        let id = self.cells.alloc(Cell {
+            name,
+            capture_identity: None,
+            loop_binding: false,
+            ty: None,
+            nonnull_value_struct: false,
+        });
         self.record_new_cell();
         if self.cells.capacity() != capacity {
             self.lower_attribution.mir_cell_reallocations += 1;
@@ -1099,7 +1106,13 @@ impl MirFunc {
     pub fn new_cell_typed(&mut self, name: Option<Ustr>, ty: Option<TyId>) -> Idx<Cell> {
         let capacity = self.cells.capacity();
         let start = self.lower_timing_enabled.then(Instant::now);
-        let id = self.cells.alloc(Cell { name, loop_binding: false, ty, nonnull_value_struct: false });
+        let id = self.cells.alloc(Cell {
+            name,
+            capture_identity: None,
+            loop_binding: false,
+            ty,
+            nonnull_value_struct: false,
+        });
         self.record_new_cell();
         if self.cells.capacity() != capacity {
             self.lower_attribution.mir_cell_reallocations += 1;

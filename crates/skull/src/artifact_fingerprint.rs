@@ -100,7 +100,18 @@ pub fn compute(
         h.boolean(entry.compatibility.capture.complete);
         h.len(entry.compatibility.capture.fields.len());
         for field in &entry.compatibility.capture.fields {
-            h.string(field.name.as_str());
+            match &field.identity {
+                skull_mir::code_identity::CaptureIdentity::Binding { site, projection } => {
+                    h.string("binding");
+                    h.string(site.file.as_str());
+                    h.u64(site.offset);
+                    h.string(projection.as_str());
+                }
+                skull_mir::code_identity::CaptureIdentity::Generated { role } => {
+                    h.string("generated");
+                    h.string(role.as_str());
+                }
+            }
             h.string(match field.mode {
                 CaptureMode::ByValue => "by-value",
                 CaptureMode::Shared => "shared",

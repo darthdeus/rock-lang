@@ -517,6 +517,40 @@ mod overlay_runtime_tests {
         vec![("main.rock".to_string(), src.to_string())]
     }
 
+    #[test]
+    fn capture_identity_rejects_switching_between_shadowed_bindings() {
+        let v0 = "global CALLBACK: fn() -> int = () => 0\n\
+                  fn install() {\n  let value = 1\n  {\n    let value = 2\n    CALLBACK = () => value\n  }\n}\n\
+                  fn main() {}\n";
+        let v1 = "global CALLBACK: fn() -> int = () => 0\n\
+                  fn install() {\n  let value = 1\n  {\n    let other = 2\n    CALLBACK = () => value\n  }\n}\n\
+                  fn main() {}\n";
+
+        let mut session = bone_session(files(v0)).expect("session v0");
+        let mid = skull::user_module_id(session.workspace()).unwrap();
+        let (_full, mut cache) =
+            skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
+        let result = session.update_file("main.rock", v1).expect("update v1");
+        assert!(
+            matches!(result.tier, bone_incremental::session::UpdateTier::BodyOnly),
+            "renaming a shadow binding is a body edit, got {:?}",
+            result.tier
+        );
+        let err = match skull::mir_emit::emit_overlay(
+            session.workspace(),
+            &mut cache,
+            &result.reinferred,
+        ) {
+            Ok(_) => panic!("the same lambda site adopted another binding's capture cell"),
+            Err(err) => err,
+        };
+        assert!(
+            err.message.contains("safe restart"),
+            "a capture-binding switch must request a safe restart, got: {}",
+            err.message
+        );
+    }
+
     /// The skull watcher's robustness contract: a BROKEN edit between two valid
     /// states must (a) surface diagnostics so the watcher skips the hot reload
     /// and keeps the last-good program running, and (b) leave the session able to

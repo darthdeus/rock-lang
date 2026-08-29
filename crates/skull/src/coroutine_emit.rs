@@ -9,6 +9,7 @@ use std::collections::HashSet;
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::CompilerError;
 use comfy_la_arena::Idx;
+use rustc_hash::FxHashSet;
 use skull_codegen_lua::{emit_named_framed, emit_named_framed_with_allocation_sites, CodegenCtx, FrameCtx, LuaEmission};
 use skull_mir::code_identity::{
     CaptureSchema, CodeArtifact, CodeCompatibility, CodeIdentity, FrameSchema,
@@ -94,20 +95,30 @@ fn add_coroutine_code_values(
 pub fn emit_coroutine(
     ws: &Workspace,
     ctx: &CodegenCtx,
-    interner: &skull_mir::monoty::MonoInterner,
+    scx: &skull_mir::lower::ScalarCtx,
+    source_func: &bone_semantic::hir::Function,
     plan: &CoroutinePlan,
     func: &MirFunc,
 ) -> Result<String, CompilerError> {
-    emit_coroutine_with_artifact(ws, ctx, interner, plan, func).map(|(lua, _, _)| lua)
+    emit_coroutine_with_artifact(ws, ctx, scx, source_func, plan, func)
+        .map(|(lua, _, _, _, _)| lua)
 }
 
 pub fn emit_coroutine_with_artifact(
     ws: &Workspace,
     ctx: &CodegenCtx,
-    interner: &skull_mir::monoty::MonoInterner,
+    scx: &skull_mir::lower::ScalarCtx,
+    source_func: &bone_semantic::hir::Function,
     plan: &CoroutinePlan,
     func: &MirFunc,
-) -> Result<(String, CodeArtifact, Vec<crate::allocation_report::AllocationBody>), CompilerError> {
+) -> Result<(
+    String,
+    CodeArtifact,
+    Vec<crate::allocation_report::AllocationBody>,
+    FxHashSet<FuncRef>,
+    Vec<StaticCell>,
+), CompilerError> {
+    let interner = scx.interner();
     // A co fn yielding a flat enum threads through the frame-slot channel (0 alloc
     // per yield); the channel's shape drives both the slot writes (transform) and
     // the generic/boxed `resume()` rebuild (constructor).
@@ -161,6 +172,10 @@ pub fn emit_coroutine_with_artifact(
             .chain(hook_entries.iter().map(|(_, entry)| *entry)),
     );
     let pre_nested = lowered.step.nested_fns.len();
+    crate::mir_emit::convert_named_nested_closures(
+        ctx,
+        &mut lowered.step.nested_fns[..pre_nested],
+    );
     skull_transform::convert_closures_framed(
         &mut lowered.step,
         &step_name,
@@ -183,6 +198,7 @@ pub fn emit_coroutine_with_artifact(
     for nf in lowered.step.nested_fns[pre_nested..].iter() {
         ctx.mint_synthetic(nf.name.to_string());
     }
+    skull_transform::validate_no_residual_bound_calls(ws, source_func, &lowered.step)?;
     let mut allocation_bodies = Vec::new();
     let step_emission = emit_coroutine_body(
         ws, ctx, interner, &step_name, plan.base(), &lowered.step, Some(&frame),
@@ -195,8 +211,24 @@ pub fn emit_coroutine_with_artifact(
     // codegen's relooper (`recognize_counted_loops`), same as the step -- so no
     // `recover_counted_loops` transform here (unlike an ordinary fn's nested_fns).
     let mut nested_luas = String::new();
+    let mut nested_deps = FxHashSet::default();
+    let mut nested_statics = lowered.step.statics.clone();
+    let mut nested_times = crate::mir_emit::PhaseTimes::default();
     let mut hoisted = std::mem::take(&mut lowered.step.nested_fns);
-    for nf in hoisted[pre_nested..].iter_mut() {
+    let (named_nested, lambda_nested) = hoisted.split_at_mut(pre_nested);
+    crate::mir_emit::emit_nested_fns(
+        ws,
+        ctx,
+        scx,
+        named_nested,
+        &lowered.step.statics,
+        &mut nested_deps,
+        &mut nested_statics,
+        &mut allocation_bodies,
+        &mut nested_luas,
+        &mut nested_times,
+    )?;
+    for nf in lambda_nested.iter_mut() {
         skull_transform::cleanup_with_nobox(ws, nf)?;
         let emission = emit_coroutine_body(
             ws, ctx, interner, nf.name.as_str(), nf.name.as_str(), nf, None,
@@ -296,6 +328,8 @@ pub fn emit_coroutine_with_artifact(
         format!("{step_lua}{nested_luas}{defer_luas}{hook_luas}{ctor}"),
         code_artifact,
         allocation_bodies,
+        nested_deps,
+        nested_statics,
     ))
 }
 

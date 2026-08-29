@@ -14,7 +14,7 @@ use std::collections::{BTreeMap, HashMap};
 use colored::Colorize;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::process::{Child, ExitStatus, Stdio};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 use tempfile::TempDir;
@@ -1843,6 +1843,15 @@ fn consume_reload_completion(
     Ok(request_id)
 }
 
+fn terminate_reload_child(child: &mut Child) -> Result<ExitStatus> {
+    if let Err(kill_error) = child.kill() {
+        if child.try_wait()?.is_none() {
+            return Err(kill_error).context("stopping sim after reload rejection");
+        }
+    }
+    child.wait().context("reaping sim after reload rejection")
+}
+
 /// Restore every reload_edit-touched file to its pre-sim text and remove the
 /// overlay. Both matter for the NEXT child in a suite run: `emit_overlay`
 /// accumulates, so an unreverted session would leak this sim's edits into a
@@ -2657,17 +2666,22 @@ fn run_worker(
     let mut reload_errors: Vec<SiteMessage> = Vec::new();
     let mut reload_ledger = ReloadLedger::default();
     let mut stone = stone;
-    let (status, timed_out) = loop {
+    let (status, timed_out) = 'child: loop {
+        let mut completion_protocol_error = false;
         while let Ok(completion) = reload_completion_rx.try_recv() {
             let failed = completion.terminal == ReloadTerminal::Failed;
             if let Err(e) = consume_reload_completion(&mut reload_ledger, completion) {
                 reload_errors.push(SiteMessage { message: format!("reload completion: {e}"), site: String::new() });
+                completion_protocol_error = true;
             } else if failed {
                 reload_errors.push(SiteMessage {
                     message: "reload watcher reported failed publication; last-good artifact remains active".into(),
                     site: String::new(),
                 });
             }
+        }
+        if completion_protocol_error {
+            break (terminate_reload_child(&mut child)?, false);
         }
         match child.try_wait()? {
             Some(s) => break (s, false),
@@ -2691,7 +2705,7 @@ fn run_worker(
                                     message: format!("reload request: {e}"),
                                     site: compress_site(&req.site),
                                 });
-                                continue;
+                                break 'child (terminate_reload_child(&mut child)?, false);
                             }
                         };
                         // An ordinary (non-reload) sim has no session to edit.
@@ -2709,10 +2723,12 @@ fn run_worker(
                         match serviced {
                             Ok(crate::skull_backend::SkullReload::Incremental { .. }) => {
                                 if let Err(e) = reload_ledger.publish(request_id) {
+                                    let _ = reload_ledger.reject(request_id);
                                     reload_errors.push(SiteMessage {
                                         message: format!("reload publication: {e}"),
                                         site: compress_site(&req.site),
                                     });
+                                    break 'child (terminate_reload_child(&mut child)?, false);
                                 }
                             }
                             Ok(other) => {
@@ -2723,23 +2739,25 @@ fn run_worker(
                                     message: format!("reload_edit: {e}"),
                                     site: site.clone(),
                                 });
+                                break 'child (terminate_reload_child(&mut child)?, false);
                             }
                             Err(e) => {
                                 let _ = reload_ledger.reject(request_id);
-                            let site = compress_site(&req.site);
-                            // Stream now for a single run; buffered callers emit
-                            // the retained error under their record lock.
-                            if writes_live(buffered) {
-                                eprintln!(
-                                    "{}{} reload_edit: {e}",
-                                    format!("[{}] ", site).bright_black(),
-                                    "error:".red().bold(),
-                                );
-                            }
-                            reload_errors.push(SiteMessage {
-                                message: format!("reload_edit: {e}"),
-                                site,
-                            });
+                                let site = compress_site(&req.site);
+                                // Stream now for a single run; buffered callers emit
+                                // the retained error under their record lock.
+                                if writes_live(buffered) {
+                                    eprintln!(
+                                        "{}{} reload_edit: {e}",
+                                        format!("[{}] ", site).bright_black(),
+                                        "error:".red().bold(),
+                                    );
+                                }
+                                reload_errors.push(SiteMessage {
+                                    message: format!("reload_edit: {e}"),
+                                    site,
+                                });
+                                break 'child (terminate_reload_child(&mut child)?, false);
                             }
                         }
                         while let Ok(completion) = reload_completion_rx.try_recv() {

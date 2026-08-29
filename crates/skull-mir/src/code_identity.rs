@@ -181,12 +181,35 @@ pub enum CaptureMode {
     Frame,
 }
 
-/// One logical environment field. `name` is a source binding name when the
-/// compiler can prove it is unique; incomplete schemas fail compatibility
+#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
+pub enum CaptureIdentity {
+    Binding { site: LambdaSiteId, projection: Ustr },
+    Generated { role: Ustr },
+}
+
+impl CaptureIdentity {
+    pub fn projected(&self, projection: Ustr) -> Self {
+        let append = |base: Ustr| {
+            if base.is_empty() {
+                projection
+            } else {
+                Ustr::from(format!("{base}.{projection}").as_str())
+            }
+        };
+        match self {
+            Self::Binding { site, projection: base } => {
+                Self::Binding { site: *site, projection: append(*base) }
+            }
+            Self::Generated { role } => Self::Generated { role: append(*role) },
+        }
+    }
+}
+
+/// One logical environment field. Incomplete schemas fail compatibility
 /// closed rather than pretending two unknown fields are interchangeable.
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub struct CaptureField {
-    pub name: Ustr,
+    pub identity: CaptureIdentity,
     pub mode: CaptureMode,
 }
 

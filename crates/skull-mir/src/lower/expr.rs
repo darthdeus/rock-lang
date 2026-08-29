@@ -1408,7 +1408,12 @@ impl Builder<'_> {
         shape: RetSlot,
     ) -> Result<ValueRepr, CompilerError> {
         self.safe_nav_repr(receiver, shape, |s, recv| {
-            let cell = s.f.new_cell(Some(s.body.binding_arena[binding].name));
+            let cell = s.new_binding_cell(
+                binding,
+                s.body.binding_arena[binding].name,
+                s.binding_ty(binding),
+                Ustr::from(""),
+            );
             s.emit_cur(Inst::Store { cell, value: recv });
             s.binds.insert(raw(binding), cell);
             s.lower_expr_repr(body)
@@ -1491,7 +1496,12 @@ impl Builder<'_> {
 
         self.cur = let_bb;
         let recv_v = self.safe_nav_present_value(recv)?;
-        let cell = self.f.new_cell(Some(self.body.binding_arena[binding].name));
+        let cell = self.new_binding_cell(
+            binding,
+            self.body.binding_arena[binding].name,
+            self.binding_ty(binding),
+            Ustr::from(""),
+        );
         self.emit_cur(Inst::Store { cell, value: recv_v });
         self.binds.insert(raw(binding), cell);
         let bv = self.lower_expr(body)?;

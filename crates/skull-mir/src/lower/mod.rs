@@ -1513,9 +1513,13 @@ fn lower_body(
     // A `co fn` lowers to an ordinary CFG with `Term::Yield`s + a resume-arg cell
     // (the value `yield e` evaluates to). `skull-transform`'s coroutine pass then
     // rewrites it into the stackless state machine.
-    let resume_arg = func
-        .is_coroutine
-        .then(|| f.new_cell(Some(Ustr::from("__resume_arg"))));
+    let resume_arg = func.is_coroutine.then(|| {
+        let cell = f.new_cell(Some(Ustr::from("__resume_arg")));
+        f.cells[cell].capture_identity = Some(crate::code_identity::CaptureIdentity::Generated {
+            role: Ustr::from("coroutine-resume-arg"),
+        });
+        cell
+    });
     f.is_coroutine = func.is_coroutine;
     f.resume_arg = resume_arg;
     let cur = f.entry();
@@ -2012,7 +2016,12 @@ fn lower_decorator_inner(
         presence_only: None,
     };
     // `target` is param 0, then the decorator's declared params.
-    let tcell = b.f.new_cell(Some(b.body.binding_arena[target].name));
+    let tcell = b.new_binding_cell(
+        target,
+        b.body.binding_arena[target].name,
+        b.binding_ty(target),
+        Ustr::from(""),
+    );
     b.f.params.push(tcell);
     b.binds.insert(raw(target), tcell);
     b.lower_params()?;
@@ -2154,6 +2163,20 @@ struct Builder<'a> {
 }
 
 impl Builder<'_> {
+    fn new_binding_cell(
+        &mut self,
+        binding: Idx<BindingInfo>,
+        name: Ustr,
+        ty: Option<TyId>,
+        projection: Ustr,
+    ) -> Idx<Cell> {
+        let cell = self.f.new_cell_typed(Some(name), ty);
+        self.f.cells[cell].capture_identity =
+            crate::code_identity::LambdaSiteId::from_span(self.body.binding_arena[binding].span)
+                .map(|site| crate::code_identity::CaptureIdentity::Binding { site, projection });
+        cell
+    }
+
     fn rep_slot(&self, id: RepId) -> RetSlot {
         self.scx.rep_arena().ret_slot(id)
     }
@@ -2401,14 +2424,19 @@ impl Builder<'_> {
     ) {
         if !slot.splats() {
             let cty = self.binding_ty(pb);
-            let cell = self.f.new_cell_typed(Some(name), cty);
+            let cell = self.new_binding_cell(pb, name, cty, Ustr::from(""));
             self.f.params.push(cell);
             self.binds.insert(raw(pb), cell);
             return;
         }
         let cells: Vec<Idx<Cell>> = (0..slot.slot_count())
             .map(|li| {
-                let c = self.f.new_cell(Some(Ustr::from(format!("{name}__{li}").as_str())));
+                let c = self.new_binding_cell(
+                    pb,
+                    Ustr::from(format!("{name}__{li}").as_str()),
+                    None,
+                    Ustr::from(li.to_string().as_str()),
+                );
                 self.f.params.push(c);
                 c
             })

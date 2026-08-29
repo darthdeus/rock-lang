@@ -945,6 +945,21 @@ pub fn scalarize_struct_cells(func: &mut MirFunc) -> Result<(), CompilerError> {
 /// One SROA round; returns whether it rewrote anything (drives the fixpoint).
 fn scalarize_struct_cells_once(func: &mut MirFunc) -> Result<bool, CompilerError> {
     let nc = func.cells.len();
+    let captured_cells: HashSet<Idx<Cell>> = if func
+        .insts
+        .iter()
+        .any(|(_, inst)| matches!(inst, Inst::Lambda { .. }))
+    {
+        let tree = scope::ScopeTree::build(func);
+        let ownership = tree.analyze(func);
+        ownership
+            .captures
+            .iter()
+            .flat_map(|captures| captures.iter().copied())
+            .collect()
+    } else {
+        HashSet::default()
+    };
     // Escape-site rematerialization (item 8): a whole-value load of a
     // `nonnull_value_struct` binding that would otherwise ESCAPE (disqualifying
     // its family) is instead rebuilt from the ctor's per-field cells AT the use
@@ -1125,8 +1140,13 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> Result<bool, CompilerError
         }
     }
 
-    // A VALUE-struct alias member is a distinct BINDING, not the same object.
-    // `value` types are immutable, so unification buys no by-ref sharing, while
+    // An immutable aggregate alias member whose lifetime can escape is a
+    // distinct BINDING, not the same object. Value structs already keep their
+    // own leaves because whole-value rematerialization is available for them.
+    // An enum needs distinct leaves only when a closure captures the alias;
+    // otherwise the root cannot change before the alias's last observable use,
+    // and sharing its scalar cells avoids rematerializing enum tables.
+    // In either case,
     // collapsing the cells hands the member the ROOT's live range -- which a
     // closure capture observes: the leaves of a per-iteration `for` binding
     // become the loop cursor's multi-store slots, boxed once for the whole
@@ -1136,7 +1156,11 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> Result<bool, CompilerError
     // land in shared cells.
     let mut copy_alias: Vec<Option<Idx<Cell>>> = vec![None; nc];
     for k in 0..nc {
-        if rep[k] == k || disq[k] || !matches!(cand[rep[k]], Some(StructId::Value(_))) {
+        let cell = Idx::from_raw(RawIdx::from_u32(k as u32));
+        let copies_binding = matches!(cand[rep[k]], Some(StructId::Value(_)))
+            || (matches!(cand[rep[k]], Some(StructId::Enum(_)))
+                && captured_cells.contains(&cell));
+        if rep[k] == k || disq[k] || !copies_binding {
             continue;
         }
         copy_alias[k] = Some(Idx::from_raw(RawIdx::from_u32(rep[k] as u32)));
@@ -1291,7 +1315,13 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> Result<bool, CompilerError
             *field_cell.entry((c, f)).or_insert_with(|| {
                 let base = func.cells[c].name.map(|n| n.as_str().to_string());
                 let name = base.map(|b| ustr::Ustr::from(&format!("{b}__{f}")));
-                func.new_cell(name)
+                let capture_identity = func.cells[c]
+                    .capture_identity
+                    .as_ref()
+                    .map(|identity| identity.projected(f));
+                let cell = func.new_cell(name);
+                func.cells[cell].capture_identity = capture_identity;
+                cell
             })
         };
 
@@ -2524,6 +2554,11 @@ pub fn transform_coroutine(func: &MirFunc, channel: Option<&skull_mir::lower::Yi
     let resume_arg = func.resume_arg.expect("co fn must carry a resume-arg cell");
     let params = func.params.clone();
     let s_cell = step.new_cell(Some(ustr::Ustr::from("s")));
+    step.cells[s_cell].capture_identity = Some(
+        skull_mir::code_identity::CaptureIdentity::Generated {
+            role: ustr::Ustr::from("coroutine-frame"),
+        },
+    );
 
     // Only the co-fn's TOP-LEVEL blocks are transformed — NOT closure sub-blocks
     // (which share the arena but are their own CFGs, reached via `Inst::Lambda`,

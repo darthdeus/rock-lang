@@ -289,7 +289,7 @@ fn js_cofn_detached_lambda_is_executed() {
     assert_eq!(summary.unit_failures, 0, "detached closure unit must build");
     assert_eq!(summary.tests_failed, 0, "no detached closure test may fail");
     assert_eq!(summary.tests_skipped, 0, "detached closures must emit on JS: {:?}", summary.skip_reasons);
-    assert_eq!(summary.tests_passed, 12);
+    assert_eq!(summary.tests_passed, 13);
 }
 
 #[test]
