@@ -387,9 +387,9 @@ impl Builder<'_> {
                 // alloc); a scalar/non-flat value stays a single packed value.
                 let values: Vec<Idx<Inst>> = match opt {
                     Some(eb) => match self.flat_enum_value_shape_of(eb)? {
-                        Some(_shape) => {
+                        Some(shape) => {
                             let r = self.lower_expr_repr(eb)?;
-                            self.repr_to_leaves_bundle(&r)?
+                            self.repr_to_storage_leaves(&r, &shape, "flat enum yield")?
                         }
                         None => vec![self.lower_expr(eb)?],
                     },
@@ -483,6 +483,27 @@ impl Builder<'_> {
                 // over the standalone body -- but that happens after lowering, so
                 // this decision cannot see the specialized callee it would need.
                 self.ret_rep = lam_plan.result();
+                if self.ret_rep.is_none() {
+                    self.lower_stmt_expr(body)?;
+                    if self.is_open() {
+                        self.f.set_term(self.cur, Term::Return(Vec::new()));
+                    }
+                    self.defers = saved_defers;
+                    self.in_defer_body = saved_in_defer;
+                    self.ret_rep = saved_ret_rep;
+                    self.cur = saved;
+                    let id = self.emit_cur(Inst::Lambda {
+                        params: param_cells,
+                        entry,
+                    });
+                    self.f
+                        .lambda_abi_fingerprints
+                        .insert(id, lam_plan.logical_fingerprint(&self.scx.rep_arena()));
+                    self.f
+                        .lambda_abi_representations
+                        .insert(id, lam_plan.clone());
+                    return Ok(id);
+                }
                 if let Some(_shape) = self.result_shape() {
                     let r = self.lower_expr_repr(body)?;
                     if self.is_open() {
