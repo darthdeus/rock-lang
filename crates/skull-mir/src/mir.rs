@@ -1006,6 +1006,8 @@ pub struct MirFunc {
     /// Function-value ABI witnesses keyed by the pre-conversion lambda inst.
     pub lambda_abi_fingerprints:
         bone_semantic::prelude::FxHashMap<Idx<Inst>, String>,
+    pub lambda_abi_representations:
+        bone_semantic::prelude::FxHashMap<Idx<Inst>, crate::lower::FunctionRepPlan>,
     /// Concrete logical target for each named function-value mint.
     pub code_value_identities:
         bone_semantic::prelude::FxHashMap<Idx<Inst>, crate::code_identity::CodeIdentity>,
@@ -1199,6 +1201,7 @@ impl MirFunc {
             code_identity: None,
             code_abi_fingerprint: None,
             lambda_abi_fingerprints: Default::default(),
+            lambda_abi_representations: Default::default(),
             code_value_identities: Default::default(),
             nested_fn_identities: Default::default(),
             code_compatibility: None,

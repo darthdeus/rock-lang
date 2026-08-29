@@ -498,6 +498,9 @@ impl Builder<'_> {
                         id,
                         lam_plan.logical_fingerprint(&self.scx.rep_arena()),
                     );
+                    self.f
+                        .lambda_abi_representations
+                        .insert(id, lam_plan.clone());
                     return Ok(id);
                 }
                 match self.result_tuple() {
@@ -530,6 +533,9 @@ impl Builder<'_> {
                     id,
                     lam_plan.logical_fingerprint(&self.scx.rep_arena()),
                 );
+                self.f
+                    .lambda_abi_representations
+                    .insert(id, lam_plan.clone());
                 Ok(id)
             }
 

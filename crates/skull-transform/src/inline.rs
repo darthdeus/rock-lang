@@ -1304,6 +1304,15 @@ fn compact_live_template(
                 .map(|new_id| (*new_id, fingerprint.clone()))
         })
         .collect();
+    template.lambda_abi_representations = source
+        .lambda_abi_representations
+        .iter()
+        .filter_map(|(old_id, representation)| {
+            inst_map
+                .get(old_id)
+                .map(|new_id| (*new_id, representation.clone()))
+        })
+        .collect();
     template.nested_fn_identities = source.nested_fn_identities.clone();
     template.rep_arena = source.rep_arena.clone();
     template.params = source.params.iter().map(|param| cell_map[param]).collect();
