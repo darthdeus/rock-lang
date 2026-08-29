@@ -32,9 +32,14 @@ impl Builder<'_> {
                             // value of another shape, addresses its own leading
                             // slots and the rest of the position nil-pads.
                             match self.flat_payload_leaf_shape(Some(enum_name), variant, pos) {
-                                Some(_vs) => {
+                                Some(vs) => {
                                     let r = self.lower_expr_repr(a)?;
-                                    for (k, lv) in self.repr_to_leaves_bundle(&r)?.into_iter().enumerate()
+                                    let leaves = self.repr_to_storage_leaves(
+                                        &r,
+                                        &vs,
+                                        "flat enum constructor payload",
+                                    )?;
+                                    for (k, lv) in leaves.into_iter().enumerate()
                                     {
                                         slots[off + k] = Some(lv);
                                     }
