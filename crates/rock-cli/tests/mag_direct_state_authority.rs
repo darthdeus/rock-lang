@@ -133,14 +133,32 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
         "global quest_needs_reconcile:".to_string(),
         "global quest_last_region_place:".to_string(),
         "global quest_state_changed:".to_string(),
+        "global bank_open:".to_string(),
+        "global shop_open:".to_string(),
+        "global inventory_open:".to_string(),
+        "global spell_panel_open:".to_string(),
+        "global journal_open:".to_string(),
+        "global quest_log_open:".to_string(),
+        "global quest_tracker_open:".to_string(),
+        "global quest_log_tab:".to_string(),
+        "global quest_log_scroll:".to_string(),
+        "global quest_tracker_scroll:".to_string(),
+        "global quest_giver_open_id:".to_string(),
+        "global quest_giver_confirm_id:".to_string(),
+        "global quest_giver_open_npc:".to_string(),
+        "global ui_menu_is_open:".to_string(),
+        "global COMBAT_REPORT_OPEN:".to_string(),
+        "global COMBAT_REPORT_DETAILS:".to_string(),
+        "global COMBAT_REPORT_SCROLL:".to_string(),
+        "global COMBAT_REPORT_EXPANDED:".to_string(),
     ];
     let required = [
         "global MAG_PROGRESS: ProgressState",
         "global MAG_JOURNAL: JournalState",
         "global MAG_INTERACTION: InteractionState",
         "global MAG_QUEST_RUNTIME: QuestRuntimeState",
+        "global MAG_RUN_UI: RunUiState",
         "global history: [SnapshotHistoryNode]",
-        "global spell_panel_open: bool",
         "global MAG_ACTIVE_WORLD: Scene<WorldState>?",
     ];
     let mut findings = Vec::new();
@@ -183,6 +201,56 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
     ] {
         assert!(world.contains(field), "WorldState is missing Scene-owned `{field}`");
     }
+
+    let run_ui = fs::read_to_string(repo.join("mag/quest_ui.rock"))
+        .expect("read MAG run UI source");
+    for field in [
+        "bank_open: bool",
+        "shop_open: bool",
+        "inventory_open: bool",
+        "spells_open: bool",
+        "journal_open: bool",
+        "quest_log_open: bool",
+        "quest_tracker_open: bool",
+        "quest_log_tab: string",
+        "quest_log_scroll: float",
+        "quest_tracker_scroll: float",
+        "quest_giver_open_id: string",
+        "quest_giver_confirm_id: string",
+        "quest_giver_open_npc: Entity<Npc>?",
+        "menu_open: bool",
+        "combat_report_open: bool",
+        "combat_report_details: bool",
+        "combat_report_scroll: float",
+        "combat_report_expanded: Map<string, bool>",
+    ] {
+        assert_eq!(
+            run_ui.matches(field).count(),
+            1,
+            "RunUiState must contain `{field}` exactly once"
+        );
+    }
+    let panels = fs::read_to_string(repo.join("mag/panels.rock"))
+        .expect("read MAG panel source");
+    assert!(
+        panels.contains("is_open: fn(RunUiState) -> bool"),
+        "panel openness must consume the typed run UI value"
+    );
+    assert_eq!(
+        panels.matches("let ui = MAG_RUN_UI").count(),
+        5,
+        "each panel scan must bind the run UI value once"
+    );
+    assert_eq!(
+        panels.matches(".is_open(ui)").count(),
+        5,
+        "every production panel scan must use its bound run UI value"
+    );
+    assert_eq!(
+        panels.matches("is_open: () => MAG_RUN_UI").count(),
+        0,
+        "panel definitions must not reload Session state per catalog entry"
+    );
     assert!(
         world.contains("player.get().unwrap().entity = player"),
         "WorldState construction must publish the Player's self identity"
@@ -305,6 +373,39 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
         "run reset must use the quest runtime's shared reset authority exactly once"
     );
     assert_eq!(
+        run.matches("run_ui_reset()").count(),
+        1,
+        "run reset must use the run UI's shared reset authority exactly once"
+    );
+    assert_eq!(
+        run_ui.matches("MAG_RUN_UI = RunUiState {}").count(),
+        1,
+        "run UI reset must replace the complete domain exactly once"
+    );
+    for stale_reset in [
+        "bank_open =",
+        "shop_open =",
+        "inventory_open =",
+        "spell_panel_open =",
+        "journal_open =",
+        "quest_log_open =",
+        "quest_tracker_open =",
+        "quest_log_tab =",
+        "quest_log_scroll =",
+        "quest_tracker_scroll =",
+        "quest_giver_open_id =",
+        "quest_giver_confirm_id =",
+        "quest_giver_open_npc =",
+        "ui_menu_is_open =",
+        "COMBAT_REPORT_OPEN =",
+        "COMBAT_REPORT_DETAILS =",
+    ] {
+        assert!(
+            !run.contains(stale_reset),
+            "run reset still owns run UI field `{stale_reset}`"
+        );
+    }
+    assert_eq!(
         quests.matches("MAG_QUEST_RUNTIME = QuestRuntimeState {}").count(),
         1,
         "quest runtime reset must replace the complete domain exactly once"
@@ -354,11 +455,8 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
             "derived cache `{derived}` must not become semantic JournalState"
         );
     }
-    assert_eq!(
-        journal.matches("global journal_open: bool").count(),
-        1,
-        "journal window visibility remains separate UI state"
-    );
+    assert_eq!(journal.matches("global journal_open: bool").count(), 0,
+        "journal visibility belongs to RunUiState");
     for cache in [
         "global JOURNAL_DRAW_ORDER: [int]",
         "global JOURNAL_DRAW_ROWS: Map<int, JournalDrawRow>",
