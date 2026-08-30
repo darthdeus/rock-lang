@@ -840,6 +840,10 @@ pub struct Cell {
     /// emission; only a wrongly-set flag can miscompile, so all conservatism
     /// lands here (`docs/value-two-tier-plan.md` item 8).
     pub nonnull_value_struct: bool,
+    /// Build-owned concrete type for a scalarized value leaf when its HIR
+    /// `TyId` cannot name the physical leaf. Native backends consume this
+    /// alongside the shared mono interner; source-level backends ignore it.
+    pub native_ty: Option<crate::monoty::MonoTyId>,
 }
 
 /// How a block ends. Control flow lives ONLY here.
@@ -1260,7 +1264,13 @@ impl MirFunc {
     pub fn new_cell(&mut self, name: Option<Ustr>) -> Idx<Cell> {
         let capacity = self.cells.capacity();
         let start = self.lower_timing_enabled.then(Instant::now);
-        let id = self.cells.alloc(Cell { name, loop_binding: false, ty: None, nonnull_value_struct: false });
+        let id = self.cells.alloc(Cell {
+            name,
+            loop_binding: false,
+            ty: None,
+            nonnull_value_struct: false,
+            native_ty: None,
+        });
         self.record_new_cell();
         if self.cells.capacity() != capacity {
             self.lower_attribution.mir_cell_reallocations += 1;
@@ -1274,13 +1284,32 @@ impl MirFunc {
     pub fn new_cell_typed(&mut self, name: Option<Ustr>, ty: Option<TyId>) -> Idx<Cell> {
         let capacity = self.cells.capacity();
         let start = self.lower_timing_enabled.then(Instant::now);
-        let id = self.cells.alloc(Cell { name, loop_binding: false, ty, nonnull_value_struct: false });
+        let id = self.cells.alloc(Cell {
+            name,
+            loop_binding: false,
+            ty,
+            nonnull_value_struct: false,
+            native_ty: None,
+        });
         self.record_new_cell();
         if self.cells.capacity() != capacity {
             self.lower_attribution.mir_cell_reallocations += 1;
             self.lower_attribution.mir_cell_reallocation_ns +=
                 start.map(|start| start.elapsed().as_nanos() as u64).unwrap_or_default();
         }
+        id
+    }
+
+    /// Allocate a cell whose physical native type is known but whose source
+    /// type arena has no concrete leaf node to reference.
+    pub fn new_cell_native_typed(
+        &mut self,
+        name: Option<Ustr>,
+        ty: Option<TyId>,
+        native_ty: Option<crate::monoty::MonoTyId>,
+    ) -> Idx<Cell> {
+        let id = self.new_cell_typed(name, ty);
+        self.cells[id].native_ty = native_ty;
         id
     }
 
