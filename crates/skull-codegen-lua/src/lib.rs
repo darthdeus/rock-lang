@@ -2769,12 +2769,10 @@ impl Emitter<'_> {
                 self.write_opnd(out, *x);
                 out.push(')');
             }
-            // int->float subsumption is invisible on luajit (all doubles): render
-            // the inner value's expression verbatim (identity). Reached only if a
-            // pass ever materializes one; the operand path (`write_opnd`) folds it
-            // away. `write_value` (not `write_opnd`) to avoid a double wrap.
+            // These LuaJIT identity conversions must reference their operand:
+            // rendering it would evaluate a producer twice.
             Inst::IntToFloat(x) | Inst::UintToFloat(x) | Inst::UintToInt(x) => {
-                self.write_value(out, *x, &self.func.insts[*x])
+                self.write_opnd(out, *x)
             }
             Inst::IntToUint(x) | Inst::FloatToUint(x) => {
                 self.write_checked_u32(out, *x, "uint conversion out of range")
