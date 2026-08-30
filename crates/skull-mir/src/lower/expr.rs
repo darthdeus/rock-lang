@@ -19,7 +19,9 @@ impl Builder<'_> {
         let v = v?;
         if matches!(
             self.f.insts[v],
-            Inst::MakeValueStruct { .. } | Inst::MaterializeValueStruct { .. }
+            Inst::MakeValueStruct { .. }
+                | Inst::MaterializeValueStruct { .. }
+                | Inst::MakeTuple(..)
         ) {
             if let Some(ty) = self
                 .concrete_plan
