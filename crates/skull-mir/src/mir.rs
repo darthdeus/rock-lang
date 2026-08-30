@@ -1043,6 +1043,10 @@ pub struct MirFunc {
     /// sentinel and consume this provenance through their own call ABI.
     pub param_default_guards:
         bone_semantic::prelude::FxHashMap<Idx<Inst>, usize>,
+    /// Default expression roots keyed by source parameter index. Placement
+    /// callers need the callee-owned value when a wire slot is omitted.
+    pub param_default_values:
+        bone_semantic::prelude::FxHashMap<usize, Vec<Idx<Inst>>>,
     /// Opt-in timing for arena growth attribution.
     pub lower_timing_enabled: bool,
     pub lower_attribution: crate::lower::LowerAttribution,
@@ -1231,6 +1235,7 @@ impl MirFunc {
             rep_arena: None,
             params: Vec::new(),
             param_default_guards: Default::default(),
+            param_default_values: Default::default(),
             lower_timing_enabled: crate::lower::lower_attribution_timing_enabled(),
             lower_attribution: Default::default(),
             abi_plan: None,

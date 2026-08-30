@@ -1381,6 +1381,15 @@ fn compact_live_template(
     remap_inst_table!(fn_value_symbols);
     remap_inst_table!(param_default_guards);
     remap_inst_table!(inst_logical_types);
+    for (param, values) in &source.param_default_values {
+        let values = values
+            .iter()
+            .filter_map(|value| inst_map.get(value).copied())
+            .collect::<Vec<_>>();
+        if !values.is_empty() {
+            template.param_default_values.insert(*param, values);
+        }
+    }
     for (old_id, identity) in &source.code_value_identities {
         if let Some(&new_id) = inst_map.get(old_id) {
             template.code_value_identities.insert(new_id, identity.clone());

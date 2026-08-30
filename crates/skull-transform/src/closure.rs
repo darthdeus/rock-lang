@@ -441,6 +441,7 @@ pub fn convert_closures_framed(
             code_compatibility: compatibility,
             params,
             param_default_guards: mf.param_default_guards.clone(),
+            param_default_values: mf.param_default_values.clone(),
             lower_timing_enabled: mf.lower_timing_enabled,
             lower_attribution: mf.lower_attribution.clone(),
             abi_plan: None,

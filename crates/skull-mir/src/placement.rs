@@ -58,6 +58,7 @@ pub struct CallEffect {
     pub stores: Vec<StoreEffect>,
     pub constraints: Vec<OutlivesConstraint>,
     pub opaque_retains: Vec<u16>,
+    pub omitted_args: Vec<(u16, Place)>,
 }
 
 pub trait PlacementOracle {
@@ -103,6 +104,7 @@ pub struct FunctionPlacement {
     pub result: Option<Place>,
     pub owner: Option<Place>,
     pub constraints: Vec<OutlivesConstraint>,
+    pub default_params: Vec<Option<Place>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -388,6 +390,16 @@ fn substitute_constraint(
     add_constraint(analysis, value, destination, span);
 }
 
+fn apply_omitted_args(args: &mut Vec<Place>, omitted_args: &[(u16, Place)]) {
+    for &(index, place) in omitted_args {
+        let index = usize::from(index);
+        if args.len() <= index {
+            args.resize(index + 1, Place::Unknown);
+        }
+        args[index] = place;
+    }
+}
+
 fn operand_join(analysis: &PlacementAnalysis, inst: &Inst) -> Place {
     let mut result = Place::Static;
     inst.uses_each(&mut |operand| result = result.join(inst_place(analysis, operand)));
@@ -519,11 +531,12 @@ fn value_place(
                 .chain(named.iter().map(|(_, value)| *value)),
         ),
         Inst::Call { func, args } | Inst::CallMulti { func, args, .. } => {
-            let args = args
+            let mut args = args
                 .iter()
                 .map(|arg| inst_place(analysis, *arg))
                 .collect::<Vec<_>>();
             let effect = oracle.call_effect(mir, id, *func, allocation);
+            apply_omitted_args(&mut args, &effect.omitted_args);
             let span = mir.inst_spans.get(id).copied().unwrap_or_default();
             for store in effect.stores {
                 let value = args
@@ -683,6 +696,20 @@ pub fn analyze(
                         .map_or(*required, |previous| previous.join(*required)),
                 );
             }
+        }
+
+        for (&index, roots) in &mir.param_default_values {
+            let place = roots.iter().fold(Place::Static, |place, root| {
+                let value = match analysis.values.get(*root).copied() {
+                    Some(Place::Pending) | None => Place::Unknown,
+                    Some(value) => value,
+                };
+                place.join(value)
+            });
+            if analysis.summary.default_params.len() <= index {
+                analysis.summary.default_params.resize(index + 1, None);
+            }
+            analysis.summary.default_params[index] = Some(place);
         }
 
         return analysis;

@@ -2505,6 +2505,7 @@ impl Builder<'_> {
                 self.cur = then_bb;
                 let r = self.lower_expr_repr(*def)?;
                 let leaves = self.repr_to_storage_leaves(&r, &shape, "struct default")?;
+                self.f.param_default_values.insert(i, leaves.clone());
                 for (c, v) in cells.iter().zip(leaves) {
                     self.emit_cur(Inst::Store { cell: *c, value: v });
                 }
@@ -2525,6 +2526,7 @@ impl Builder<'_> {
             self.f.set_term(self.cur, Term::Branch { cond: is_nil, then_bb, else_bb: join });
             self.cur = then_bb;
             let dv = self.lower_expr(*def)?;
+            self.f.param_default_values.insert(i, vec![dv]);
             self.emit_cur(Inst::Store { cell, value: dv });
             self.f.set_term(self.cur, Term::Goto(join));
             self.cur = join;
