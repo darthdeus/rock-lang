@@ -2529,7 +2529,18 @@ impl Builder<'_> {
             if self.f.is_coroutine {
                 self.reject_nonunit_coroutine_falloff()?;
             }
-            let leaves = self.return_leaves(tail)?;
+            let leaves = if self.f.is_coroutine {
+                if let Some(tail) = tail {
+                    self.lower_stmt_expr(tail)?;
+                }
+                if !self.is_open() {
+                    self.defers.pop();
+                    return Ok(());
+                }
+                Vec::new()
+            } else {
+                self.return_leaves(tail)?
+            };
             self.run_top_frame()?; // splice this scope's defers before the return
             self.defers.pop();
             self.f.set_term(self.cur, Term::Return(leaves));

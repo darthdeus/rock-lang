@@ -20,10 +20,9 @@
 //!   4. prepends a dispatch entry that branches on `s.__state` to the resume
 //!      block for each state (falling through to the original entry for state 0).
 //!
-//! Frame = every cell except the state table `s` and `__resume_arg` (the step's
-//! two params). This is a correct over-approximation (hoisting a block-local
-//! cell to `s` is still correct; precise liveness is a later perf refinement —
-//! the plan's P2). The constructor seeds only the declared param fields.
+//! Frame = cells live at a resume point, plus parameters and cells retained by a
+//! closure or detached lifecycle body. The constructor seeds only the declared
+//! param fields.
 
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
@@ -1920,6 +1919,27 @@ mod tests {
     }
 
     #[test]
+    fn coroutine_demotes_a_local_confined_to_one_resume_segment() {
+        let func = lower(
+            "co fn f(x: int) -> Coroutine<int> {\n\
+                 yield 1\n\
+                 let after = x\n\
+             }",
+            "f",
+        );
+        let lowered = transform_coroutine(&func, None, false);
+        assert!(
+            lowered
+                .frame_plan
+                .fields()
+                .iter()
+                .all(|&cell| lowered.step.cells[cell].name != Some(ustr::Ustr::from("after"))),
+            "a local used only after the last yield must stay out of the frame:\n{}",
+            lowered.step
+        );
+    }
+
+    #[test]
     fn coroutine_frame_cells_retain_types_across_conditional_yields() {
         let func = lower(
             "co fn f(flag: bool) -> Coroutine<int> {\n\
@@ -1984,16 +2004,27 @@ mod tests {
     }
 
     #[test]
-    fn coroutine_frame_rematerializes_cross_block_null_but_spills_the_global_handle() {
-        let func = lower(
-            "global SELF: Coroutine<int>? = null\n\
-             co fn f() -> Coroutine<int> {\n\
-                 yield 1\n\
-                 if let self = SELF { SELF = self }\n\
-                 yield 2\n\
-             }",
-            "f",
+    fn coroutine_frame_rematerializes_cross_block_constants_but_spills_a_live_global() {
+        let mut func = MirFunc::new(ustr::Ustr::from("f"));
+        func.is_coroutine = true;
+        func.resume_arg = Some(func.new_cell(Some(ustr::Ustr::from("__resume_arg"))));
+        let resume = func.new_block();
+        let then_bb = func.new_block();
+        let else_bb = func.new_block();
+        let global = func.emit(func.entry, Inst::Global(ustr::Ustr::from("SELF")));
+        let constant = func.emit(func.entry, Inst::Const(Lit::Int(7)));
+        func.set_term(func.entry, Term::Yield { values: vec![constant], resume });
+        func.emit(
+            resume,
+            Inst::StoreGlobal {
+                name: ustr::Ustr::from("SAVED"),
+                value: global,
+            },
         );
+        let condition = func.emit(resume, Inst::IntLt(constant, constant));
+        func.set_term(resume, Term::Branch { cond: condition, then_bb, else_bb });
+        func.set_term(then_bb, Term::Return(Vec::new()));
+        func.set_term(else_bb, Term::Return(Vec::new()));
         let lowered = transform_coroutine(&func, None, false);
         let spills = lowered.frame_plan.spill_values();
         assert!(
@@ -2550,16 +2581,19 @@ fn vfield(v: Idx<Inst>) -> ustr::Ustr {
     ustr::Ustr::from(format!("v{}", raw(v)).as_str())
 }
 
-/// Spill every CROSS-BLOCK value (defined in one block, used in another) to the
-/// state table at its def and reload it at each using block — so a value that
-/// outlives a yield (a loop-carried collection/bound, a multi-yield arg)
-/// survives the suspend/resume. Constants are rematerialized at each use block:
-/// they have no evaluation-time identity to preserve, and polymorphic null has
-/// no standalone physical type for a frame field. (P2 — "only cells cross a
-/// yield" — is an over-statement: lowering routes some data through values;
-/// this is the canonical stackless spill, documented as a finding.) Returns the
-/// sorted spilled values; their `v<N>` fields are part of the frame layout stamp.
-fn spill_cross_block_values(step: &mut MirFunc, s_cell: Idx<Cell>, block_ids: &[Idx<Block>]) -> Vec<Idx<Inst>> {
+/// Spill a CROSS-BLOCK value that is also live across a suspension to the state
+/// table at its def and reload it at each using block. Values crossing ordinary
+/// branches stay as step locals; only a value live into a yield's resume block
+/// needs persistence. Constants are rematerialized at each use block: they have
+/// no evaluation-time identity to preserve, and polymorphic null has no
+/// standalone physical type for a frame field. Returns the sorted spilled
+/// values; their `v<N>` fields are part of the frame layout stamp.
+fn spill_cross_block_values(
+    step: &mut MirFunc,
+    s_cell: Idx<Cell>,
+    block_ids: &[Idx<Block>],
+    resume_blocks: &[Idx<Block>],
+) -> Vec<Idx<Inst>> {
     // def block of every value.
     let mut def_block: HashMap<Idx<Inst>, Idx<Block>> = HashMap::default();
     for &bid in block_ids {
@@ -2583,16 +2617,21 @@ fn spill_cross_block_values(step: &mut MirFunc, s_cell: Idx<Cell>, block_ids: &[
             }
         }
     }
-    let rematerialized = cross_block_values
+    let live_values = values_live_at_resume_blocks(step, block_ids, resume_blocks);
+    let persistent_values = cross_block_values
+        .intersection(&live_values)
+        .copied()
+        .collect::<HashSet<_>>();
+    let rematerialized = persistent_values
         .iter()
         .copied()
         .filter(|value| matches!(step.insts[*value], Inst::Const(_)))
         .collect::<HashSet<_>>();
-    let frame_values = cross_block_values
+    let frame_values = persistent_values
         .difference(&rematerialized)
         .copied()
         .collect::<HashSet<_>>();
-    if cross_block_values.is_empty() {
+    if persistent_values.is_empty() {
         return Vec::new();
     }
 
@@ -2604,7 +2643,7 @@ fn spill_cross_block_values(step: &mut MirFunc, s_cell: Idx<Cell>, block_ids: &[
             let mut seen = HashSet::default();
             for &id in &step.blocks[bid].insts {
                 value_operands(&step.insts[id], &mut |v| {
-                    if cross_block_values.contains(&v)
+                    if persistent_values.contains(&v)
                         && def_block.get(&v).copied() != Some(bid)
                         && seen.insert(v)
                     {
@@ -2613,7 +2652,7 @@ fn spill_cross_block_values(step: &mut MirFunc, s_cell: Idx<Cell>, block_ids: &[
                 });
             }
             if let Some(v) = term_value(&step.blocks[bid].term) {
-                if cross_block_values.contains(&v)
+                if persistent_values.contains(&v)
                     && def_block.get(&v).copied() != Some(bid)
                     && seen.insert(v)
                 {
@@ -2657,6 +2696,177 @@ fn spill_cross_block_values(step: &mut MirFunc, s_cell: Idx<Cell>, block_ids: &[
     let mut values: Vec<Idx<Inst>> = frame_values.into_iter().collect();
     values.sort_by_key(|value| raw(*value));
     values
+}
+
+/// Cells needed on the far side of at least one suspension. Ordinary CFG
+/// branches do not make a cell persistent; only a cell live into a yield's
+/// resume block does. The dataflow is deliberately cell-only because MIR
+/// values crossing blocks already use `spill_cross_block_values`.
+fn cells_live_at_yield_resumes(func: &MirFunc, blocks: &[Idx<Block>]) -> HashSet<Idx<Cell>> {
+    let mut block_use: HashMap<Idx<Block>, HashSet<Idx<Cell>>> = HashMap::default();
+    let mut block_def: HashMap<Idx<Block>, HashSet<Idx<Cell>>> = HashMap::default();
+    for &block in blocks {
+        let mut uses = HashSet::default();
+        let mut defs = HashSet::default();
+        for &id in &func.blocks[block].insts {
+            match &func.insts[id] {
+                Inst::Load(cell) => {
+                    if !defs.contains(cell) {
+                        uses.insert(*cell);
+                    }
+                }
+                Inst::Store { cell, .. } => {
+                    defs.insert(*cell);
+                }
+                Inst::CallMulti { dests, .. }
+                | Inst::CallValueMulti { dests, .. }
+                | Inst::CallBoundMulti { dests, .. } => {
+                    defs.extend(dests.iter().copied());
+                }
+                Inst::MapNext { key_cell, val_cell, .. } => {
+                    if !defs.contains(key_cell) {
+                        uses.insert(*key_cell);
+                    }
+                    defs.insert(*key_cell);
+                    defs.insert(*val_cell);
+                }
+                _ => {}
+            }
+        }
+        block_use.insert(block, uses);
+        block_def.insert(block, defs);
+    }
+
+    let mut live_in: HashMap<Idx<Block>, HashSet<Idx<Cell>>> = blocks
+        .iter()
+        .copied()
+        .map(|block| (block, HashSet::default()))
+        .collect();
+    let mut live_out: HashMap<Idx<Block>, HashSet<Idx<Cell>>> = blocks
+        .iter()
+        .copied()
+        .map(|block| (block, HashSet::default()))
+        .collect();
+    loop {
+        let mut changed = false;
+        for &block in blocks.iter().rev() {
+            let mut out = HashSet::default();
+            term_succs(&func.blocks[block].term, |succ| {
+                if let Some(next) = live_in.get(&succ) {
+                    out.extend(next.iter().copied());
+                }
+            });
+            let mut input = block_use[&block].clone();
+            input.extend(out.difference(&block_def[&block]).copied());
+            if live_out.insert(block, out.clone()).is_some_and(|old| old != out) {
+                changed = true;
+            }
+            if live_in.insert(block, input.clone()).is_some_and(|old| old != input) {
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    let mut live = HashSet::default();
+    for &block in blocks {
+        if let Term::Yield { resume, .. } = func.blocks[block].term {
+            live.extend(live_in[&resume].iter().copied());
+        }
+    }
+    live
+}
+
+/// Cells used by detached defer/hook regions must remain in the shared frame;
+/// those regions run independently of the current step segment.
+fn cells_referenced_by_detached_regions(
+    func: &MirFunc,
+    entries: impl IntoIterator<Item = Idx<Block>>,
+) -> HashSet<Idx<Cell>> {
+    let mut cells = HashSet::default();
+    for entry in entries {
+        for block in detached_region_blocks(func, entry) {
+            for &id in &func.blocks[block].insts {
+                func.insts[id].cells_each(&mut |cell| {
+                    cells.insert(cell);
+                });
+            }
+        }
+    }
+    cells
+}
+
+/// Values live into resume blocks, used to narrow the cross-block spill
+/// candidates to values that must survive a suspension rather than a branch.
+fn values_live_at_resume_blocks(
+    func: &MirFunc,
+    blocks: &[Idx<Block>],
+    resume_blocks: &[Idx<Block>],
+) -> HashSet<Idx<Inst>> {
+    let mut block_use: HashMap<Idx<Block>, HashSet<Idx<Inst>>> = HashMap::default();
+    let mut block_def: HashMap<Idx<Block>, HashSet<Idx<Inst>>> = HashMap::default();
+    for &block in blocks {
+        let mut uses = HashSet::default();
+        let mut defs = HashSet::default();
+        for &id in &func.blocks[block].insts {
+            value_operands(&func.insts[id], &mut |value| {
+                if !defs.contains(&value) {
+                    uses.insert(value);
+                }
+            });
+            if func.insts[id].produces_value() {
+                defs.insert(id);
+            }
+        }
+        term_uses_each(&func.blocks[block].term, &mut |value| {
+            if !defs.contains(&value) {
+                uses.insert(value);
+            }
+        });
+        block_use.insert(block, uses);
+        block_def.insert(block, defs);
+    }
+
+    let mut live_in: HashMap<Idx<Block>, HashSet<Idx<Inst>>> = blocks
+        .iter()
+        .copied()
+        .map(|block| (block, HashSet::default()))
+        .collect();
+    let mut live_out: HashMap<Idx<Block>, HashSet<Idx<Inst>>> = blocks
+        .iter()
+        .copied()
+        .map(|block| (block, HashSet::default()))
+        .collect();
+    loop {
+        let mut changed = false;
+        for &block in blocks.iter().rev() {
+            let mut out = HashSet::default();
+            term_succs(&func.blocks[block].term, |succ| {
+                if let Some(next) = live_in.get(&succ) {
+                    out.extend(next.iter().copied());
+                }
+            });
+            let mut input = block_use[&block].clone();
+            input.extend(out.difference(&block_def[&block]).copied());
+            if live_out.insert(block, out.clone()).is_some_and(|old| old != out) {
+                changed = true;
+            }
+            if live_in.insert(block, input.clone()).is_some_and(|old| old != input) {
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    let mut live = HashSet::default();
+    for &resume in resume_blocks {
+        live.extend(live_in[&resume].iter().copied());
+    }
+    live
 }
 
 /// Transform a lowered `co fn` into its `__step` state machine + frame info.
@@ -2704,13 +2914,12 @@ pub fn transform_coroutine(
         }
     }
 
-    // 0b. Frame membership is OWNERSHIP-based (P1 of
-    // docs/coroutine-frame-lambda-plan.md): a cell owned by a live lambda scope
-    // is that lambda's plain local in its hoisted body, NOT a frame field.
-    // Everything else (ROOT-owned, or accessed only from dead/peeled/detached
-    // blocks -- hook bodies, defer copies -- which have no owner) stays in the
-    // frame. Built post-peel so hook lambdas are dead, pre-rewrite so `Yield`
-    // resume edges still link the CFG (`successors` follows them).
+    // 0b. Frame membership is liveness-based with ownership pins (P1 of
+    // docs/coroutine-frame-lambda-plan.md): root cells live at a resume point
+    // become fields. Root cells captured by a live lambda or referenced by a
+    // detached hook/defer stay fields even when the local CFG has no later use.
+    // Built post-peel so hook lambdas are detached, pre-rewrite so `Yield`
+    // resume edges still link the CFG.
     // The tree + ownership are built ONCE here (post-hook-peel, pre-yield-rewrite)
     // and threaded to emission through `CoroLowered` -- emission reuses them for
     // the step's hoist plan instead of rebuilding on the post-rewrite CFG. The
@@ -2721,23 +2930,28 @@ pub fn transform_coroutine(
     let tree = crate::scope::ScopeTree::build(&step);
     let own = tree.analyze(&step);
     let frame_cells: HashSet<Idx<Cell>> = {
-        // Ghost cells (cause B of the P2 finding): a cell referenced in NO block
-        // anywhere -- scanned over ALL blocks incl. detached defer copies and
-        // peeled hook bodies, deliberately broader than `scope::accesses` (which
-        // only walks live-scope regions) -- is dropped. A dead lambda-local has
-        // no owner so it would fall to ROOT/frame, but it is read/written
-        // nowhere; a hook-only cell IS referenced in its detached block, so it
-        // stays. Params always stay (the ctor seeds a field for each, used or
-        // not) regardless of references.
-        let referenced = referenced_cells(&step);
-        let is_param: HashSet<Idx<Cell>> = params.iter().copied().collect();
-        step.cells
+        let root = crate::scope::ROOT;
+        let root_owned = |cell: &Idx<Cell>| own.owner.get(cell).is_some_and(|&owner| owner == root);
+        let mut fields = cells_live_at_yield_resumes(&step, &orig_blocks);
+        fields.extend(params.iter().copied());
+        fields.extend(
+            own.captures
+                .iter()
+                .flat_map(|cells| cells.iter().copied())
+                .filter(|cell| root_owned(cell)),
+        );
+        let detached_entries = step
+            .coro_defers
             .iter()
-            .map(|(id, _)| id)
-            .filter(|&c| c != s_cell && c != resume_arg)
-            .filter(|c| is_param.contains(c) || referenced.contains(c))
-            .filter(|c| own.owner.get(c).is_none_or(|&o| o == crate::scope::ROOT))
-            .collect()
+            .map(|(_, entry)| *entry)
+            .chain(hooks.iter().map(|(_, entry)| *entry));
+        fields.extend(
+            cells_referenced_by_detached_regions(&step, detached_entries)
+                .into_iter()
+                .filter(|cell| root_owned(cell)),
+        );
+        fields.retain(|cell| *cell != s_cell && *cell != resume_arg && root_owned(cell));
+        fields
     };
     // Dense per-frame slots: frame cells numbered 0.. in raw-id order. Both the
     // emitted `s.c<slot>` field names and the layout canon key on the slot, so a
@@ -2775,6 +2989,13 @@ pub fn transform_coroutine(
     // Per state, also record the yielded variant tag when statically known (a
     // `Const` tag leaf) -- a layout-stamp input that catches cross-variant yield
     // reordering, which cell/spill/state-count hashing alone cannot see.
+    let suspension_resumes: Vec<Idx<Block>> = orig_blocks
+        .iter()
+        .filter_map(|&block| match step.blocks[block].term {
+            Term::Yield { resume, .. } => Some(resume),
+            _ => None,
+        })
+        .collect();
     let mut resume_of_state: Vec<Idx<Block>> = Vec::new();
     let mut state_tags: Vec<String> = Vec::new();
     let mut yield_blocks: HashSet<Idx<Block>> = HashSet::default();
@@ -2868,7 +3089,8 @@ pub fn transform_coroutine(
 
     // 3b. Spill cross-block values (loop-carried collections/bounds, multi-yield
     // args) so they survive a suspend/resume — see `spill_cross_block_values`.
-    let spill_values = spill_cross_block_values(&mut step, s_cell, &orig_blocks);
+    let spill_values =
+        spill_cross_block_values(&mut step, s_cell, &orig_blocks, &suspension_resumes);
 
     // 3c. Frame layout stamp. Hash everything that fixes the frame's field
     // meanings + the state numbering: (cell idx, source name) pairs, the spill
@@ -2973,39 +3195,6 @@ pub fn transform_coroutine(
         step_tree: tree,
         step_own: own,
     }
-}
-
-/// Cells referenced (read or written) anywhere in `func`'s block inst-lists --
-/// over ALL blocks in the arena, including detached defer/hook bodies not
-/// reachable from the entry. Matches `scope::accesses`'s reference set (`Load`,
-/// `Store`, `MapNext` dests, multi-call dests) but is deliberately broader in
-/// block coverage. Used to distinguish a genuinely-dead ghost cell (referenced
-/// nowhere) from a hook-only cell (referenced in a detached block).
-fn referenced_cells(func: &MirFunc) -> HashSet<Idx<Cell>> {
-    let mut set: HashSet<Idx<Cell>> = HashSet::default();
-    for (_, blk) in func.blocks.iter() {
-        for &iid in &blk.insts {
-            match &func.insts[iid] {
-                Inst::Load(c) => {
-                    set.insert(*c);
-                }
-                Inst::Store { cell, .. } => {
-                    set.insert(*cell);
-                }
-                Inst::MapNext { key_cell, val_cell, .. } => {
-                    set.insert(*key_cell);
-                    set.insert(*val_cell);
-                }
-                Inst::CallMulti { dests, .. }
-                | Inst::CallValueMulti { dests, .. }
-                | Inst::CallBoundMulti { dests, .. } => {
-                    set.extend(dests.iter().copied());
-                }
-                _ => {}
-            }
-        }
-    }
-    set
 }
 
 /// Dense per-frame slot map: the given cells numbered 0.. by raw-id order.
@@ -3200,10 +3389,8 @@ pub fn erase_detached_lambdas(func: &mut MirFunc, entries: impl IntoIterator<Ite
 /// `slots` becomes a `Field`/`StoreField` on `s` (field `c<slot>`), and a
 /// multi-call dest that is a frame cell is redirected through a fresh temp
 /// cell + a spliced store-back. `MapNext`'s key and value cells use the same
-/// seeded-temp/store-back shape. Afterwards every remaining
-/// `Load`/`Store` cell in the region must be `s`, one of `mf.params`, or a
-/// temp this pass minted -- anything else is a frame-membership finding, so it
-/// panics rather than emitting an undeclared local.
+/// seeded-temp/store-back shape. Non-frame cells remain ordinary step locals;
+/// every remaining bare frame cell is a transform finding.
 pub fn materialize_frame(
     mf: &mut MirFunc,
     entry: Idx<Block>,
@@ -3350,17 +3537,16 @@ fn materialize_frame_inner(
     if !strict {
         return;
     }
-    // Exhaustiveness: a surviving bare cell is a frame-membership finding.
-    let allowed = |c: Idx<Cell>| {
-        c == s_cell || mf.params.contains(&c) || minted.contains(&c) || mf.resume_arg == Some(c)
-    };
+    // Exhaustiveness: a surviving bare cell is permitted only when it is not a
+    // planned frame slot. Precise liveness intentionally leaves segment-local
+    // cells bare; the slot check still catches a missed materialization.
     for &bid in &region {
         for &id in &mf.blocks[bid].insts {
             let bad = match &mf.insts[id] {
-                Inst::Load(c) if !allowed(*c) => Some(*c),
-                Inst::Store { cell, .. } if !allowed(*cell) => Some(*cell),
-                Inst::MapNext { key_cell, .. } if !allowed(*key_cell) => Some(*key_cell),
-                Inst::MapNext { val_cell, .. } if !allowed(*val_cell) => Some(*val_cell),
+                Inst::Load(c) if slots.contains_key(c) => Some(*c),
+                Inst::Store { cell, .. } if slots.contains_key(cell) => Some(*cell),
+                Inst::MapNext { key_cell, .. } if slots.contains_key(key_cell) => Some(*key_cell),
+                Inst::MapNext { val_cell, .. } if slots.contains_key(val_cell) => Some(*val_cell),
                 _ => None,
             };
             if let Some(c) = bad {

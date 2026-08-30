@@ -603,7 +603,9 @@ impl Builder<'_> {
         then_branch: Idx<Expr>,
         else_branch: Option<Idx<Expr>>,
     ) -> Result<Idx<Inst>, CompilerError> {
-        let result = self.f.new_cell(None);
+        let result = self
+            .f
+            .new_cell_typed(None, self.current_expr_unit_storage_ty_id());
         Ok(self
             .lower_if_let_inner(pattern, value, then_branch, else_branch, Some(result))?
             .expect("value-position if let returns a result"))
