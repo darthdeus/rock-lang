@@ -98,7 +98,8 @@ fn heat_shimmer_diverges_from_its_c_layout() {
 fn sprite_frag_bools_are_four_bytes_on_the_wire() {
     let p = plan_of(
         "value SpriteFragU { uColor: Vec4, uLightsEnabled: bool, uUnlit: bool, uLightCount: int, \
-         uAmbientColor: Vec4, uGlowEnabled: bool, uHasNormalTex: bool, uNormalLightParams: Vec2 }",
+         uAmbientColor: Vec4, uGlowEnabled: bool, uHasNormalTex: bool, uNormalLightParams: Vec2, \
+         uNormalRelief: float }",
         "SpriteFragU",
     );
     assert_eq!(
@@ -112,11 +113,12 @@ fn sprite_frag_bools_are_four_bytes_on_the_wire() {
             ("uGlowEnabled", 48),
             ("uHasNormalTex", 52),
             ("uNormalLightParams", 56),
+            ("uNormalRelief", 64),
         ]
     );
-    // C layout is [0, 16, 17, 20, 24, 40, 41, 44] size 52: the two bool runs
+    // C layout is [0, 16, 17, 20, 24, 40, 41, 44, 52] size 56: the two bool runs
     // pack one-per-byte and drag everything after them.
-    assert_eq!(p.size, 64);
+    assert_eq!(p.size, 80);
 
     // The wire kind is what carries the 1-byte-to-32-bit conversion. A packer
     // that wrote a Rock bool's byte here would leave three bytes of garbage
