@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use bone_semantic::prelude::{ArenaMap, SmallVec, Span};
 use comfy_la_arena::Idx;
@@ -295,10 +295,43 @@ fn is_composite_constructor(inst: &Inst) -> bool {
     )
 }
 
+fn requirement_flow_source(
+    mir: &MirFunc,
+    oracle: &impl PlacementOracle,
+    parameter_cells: &HashSet<Idx<Cell>>,
+    flow_cells: &HashSet<Idx<Cell>>,
+    inst: Idx<Inst>,
+) -> bool {
+    if !oracle.carries_placement(mir, inst) {
+        return false;
+    }
+    match mir.insts[inst] {
+        Inst::Load(cell) => parameter_cells.contains(&cell) || flow_cells.contains(&cell),
+        _ => {
+            is_call_result(mir, inst)
+                || (is_composite_constructor(&mir.insts[inst])
+                    && !oracle.is_allocation_site(mir, inst))
+        }
+    }
+}
+
+fn carries_requirement(
+    mir: &MirFunc,
+    oracle: &impl PlacementOracle,
+    flow_cells: &HashSet<Idx<Cell>>,
+    inst: Idx<Inst>,
+) -> bool {
+    oracle.carries_placement(mir, inst)
+        && (is_call_result(mir, inst)
+            || is_composite_constructor(&mir.insts[inst])
+            || matches!(mir.insts[inst], Inst::Load(cell) if flow_cells.contains(&cell)))
+}
+
 fn infer_call_requirements(
     mir: &MirFunc,
     context: AnalysisContext,
     oracle: &impl PlacementOracle,
+    flow_cells: &HashSet<Idx<Cell>>,
     analysis: Option<&PlacementAnalysis>,
     requirements: &mut PlacementRequirements,
     call_effects: &mut HashMap<(Idx<Inst>, Place), CallEffect>,
@@ -308,10 +341,10 @@ fn infer_call_requirements(
         Inst::Call { func, args } | Inst::CallMulti { func, args, .. } => (*func, args),
         _ => return false,
     };
-    if !raw_args.iter().any(|arg| {
-        oracle.carries_placement(mir, *arg)
-            && (is_call_result(mir, *arg) || is_composite_constructor(&mir.insts[*arg]))
-    }) {
+    if !raw_args
+        .iter()
+        .any(|arg| carries_requirement(mir, oracle, flow_cells, *arg))
+    {
         return false;
     }
     let allocation = requirements
@@ -382,6 +415,7 @@ fn infer_requirements(
     context: AnalysisContext,
     oracle: &impl PlacementOracle,
     blocks: &[Idx<crate::mir::Block>],
+    flow_cells: &HashSet<Idx<Cell>>,
     analysis: Option<&PlacementAnalysis>,
     mut requirements: PlacementRequirements,
     call_effects: &mut HashMap<(Idx<Inst>, Place), CallEffect>,
@@ -407,7 +441,9 @@ fn infer_requirements(
                     }
                     Inst::Store { cell, value } => {
                         if let Some(required) = requirements.cells.get(*cell).copied() {
-                            if oracle.carries_placement(mir, *value) {
+                            if oracle.carries_placement(mir, *value)
+                                && !oracle.is_allocation_site(mir, *value)
+                            {
                                 changed |=
                                     merge_requirement(&mut requirements.values, *value, required);
                             }
@@ -423,6 +459,7 @@ fn infer_requirements(
                             mir,
                             context,
                             oracle,
+                            flow_cells,
                             analysis,
                             &mut requirements,
                             call_effects,
@@ -519,6 +556,13 @@ fn inst_place(analysis: &PlacementAnalysis, inst: Idx<Inst>) -> Place {
 
 fn cell_place(analysis: &PlacementAnalysis, cell: Idx<Cell>) -> Place {
     analysis.cells.get(cell).copied().unwrap_or(Place::Pending)
+}
+
+fn is_derived_load(mir: &MirFunc, flow_cells: &HashSet<Idx<Cell>>, value: Idx<Inst>) -> bool {
+    match mir.insts[value] {
+        Inst::Load(cell) => flow_cells.contains(&cell),
+        _ => false,
+    }
 }
 
 fn is_default_param_store(mir: &MirFunc, cell: Idx<Cell>, value: Idx<Inst>) -> bool {
@@ -630,6 +674,7 @@ fn value_place(
     context: AnalysisContext,
     requirements: &PlacementRequirements,
     call_effects: &mut HashMap<(Idx<Inst>, Place), CallEffect>,
+    flow_cells: &HashSet<Idx<Cell>>,
     id: Idx<Inst>,
 ) -> Place {
     let inst = &mir.insts[id];
@@ -735,8 +780,16 @@ fn value_place(
                 .chain(positional.iter().copied())
                 .chain(named.iter().map(|(_, value)| *value)),
         ),
-        Inst::Call { func, args } | Inst::CallMulti { func, args, .. } => {
-            let mut args: SmallVec<[Place; 8]> = args
+        Inst::Call {
+            func,
+            args: raw_args,
+        }
+        | Inst::CallMulti {
+            func,
+            args: raw_args,
+            ..
+        } => {
+            let mut args: SmallVec<[Place; 8]> = raw_args
                 .iter()
                 .map(|arg| inst_place(analysis, *arg))
                 .collect();
@@ -746,6 +799,13 @@ fn value_place(
             apply_omitted_args(&mut args, &effect.omitted_args);
             let span = mir.inst_spans.get(id).copied().unwrap_or_default();
             for store in &effect.stores {
+                if raw_args
+                    .get(store.value as usize)
+                    .copied()
+                    .is_some_and(|value| is_derived_load(mir, flow_cells, value))
+                {
+                    continue;
+                }
                 let value = args
                     .get(store.value as usize)
                     .copied()
@@ -757,6 +817,14 @@ fn value_place(
                 add_constraint(analysis, value, destination, span);
             }
             for &constraint in &effect.constraints {
+                if let Place::Param(index) = constraint.value
+                    && raw_args
+                        .get(index as usize)
+                        .copied()
+                        .is_some_and(|value| is_derived_load(mir, flow_cells, value))
+                {
+                    continue;
+                }
                 substitute_constraint(analysis, constraint, &args, allocation, span);
             }
             if let Some(owner) = effect.owner {
@@ -796,12 +864,37 @@ pub fn analyze(
     oracle: &impl PlacementOracle,
 ) -> PlacementAnalysis {
     let blocks = crate::reach::emitted_blocks(mir);
+    let parameter_cells = mir.params.iter().copied().collect::<HashSet<_>>();
+    let mut flow_cells = HashSet::new();
+    loop {
+        let mut changed = false;
+        for &block in &blocks {
+            for &id in &mir.blocks[block].insts {
+                let Inst::Store { cell, value } = mir.insts[id] else {
+                    continue;
+                };
+                if requirement_flow_source(
+                    mir,
+                    oracle,
+                    &parameter_cells,
+                    &flow_cells,
+                    value,
+                ) {
+                    changed |= flow_cells.insert(cell);
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
     let mut call_effects = HashMap::new();
     let mut requirements = infer_requirements(
         mir,
         context,
         oracle,
         &blocks,
+        &flow_cells,
         None,
         PlacementRequirements::default(),
         &mut call_effects,
@@ -823,7 +916,13 @@ pub fn analyze(
                             if is_default_param_store(mir, *cell, *value) {
                                 continue;
                             }
-                            let value = inst_place(&analysis, *value);
+                            let value_inst = *value;
+                            let value = inst_place(&analysis, value_inst);
+                            if let Some(destination) = requirements.cells.get(*cell).copied()
+                                && !is_derived_load(mir, &flow_cells, value_inst)
+                            {
+                                add_constraint(&mut analysis, value, destination, span);
+                            }
                             changed |= merge_cell(&mut analysis.cells, *cell, value);
                         }
                         Inst::StoreGlobal { value, .. } => {
@@ -849,6 +948,7 @@ pub fn analyze(
                                 context,
                                 &requirements,
                                 &mut call_effects,
+                                &flow_cells,
                                 id,
                             );
                             changed |= merge_inst(&mut analysis.values, id, place);
@@ -886,6 +986,7 @@ pub fn analyze(
                 context,
                 oracle,
                 &blocks,
+                &flow_cells,
                 Some(&analysis),
                 requirements,
                 &mut call_effects,
@@ -898,6 +999,7 @@ pub fn analyze(
             context,
             oracle,
             &blocks,
+            &flow_cells,
             Some(&analysis),
             requirements.clone(),
             &mut call_effects,
