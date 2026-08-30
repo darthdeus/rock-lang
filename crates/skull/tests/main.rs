@@ -83,6 +83,8 @@ mod incremental_emit;
 mod lua_definition_scopes;
 #[path = "opaque_declared_type_reach.rs"]
 mod opaque_declared_type_reach;
+#[path = "optional_entity_vec.rs"]
+mod optional_entity_vec;
 
 #[path = "opaque_container_axes.rs"]
 mod opaque_container_axes;
@@ -100,6 +102,8 @@ mod inline_body_column_map_param;
 mod inline_lua_column_container_param_sentinel;
 #[path = "inline_value_specialization.rs"]
 mod inline_value_specialization;
+#[path = "live_call_conversion.rs"]
+mod live_call_conversion;
 #[path = "inline_stats.rs"]
 mod inline_stats;
 #[path = "parallel_inline_mode.rs"]

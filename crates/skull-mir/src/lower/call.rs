@@ -846,10 +846,10 @@ impl Builder<'_> {
                     .iter()
                     .enumerate()
                     .map(|(i, &a)| {
-                        let v = self.lower_expr(a)?;
                         let t = self
                             .concrete_callee_param_ty(e, &dc.callee_inst, i)?
                             .ok_or_else(|| self.gap_here("concrete call has no callee parameter type"))?;
+                        let v = self.lower_expr_with_expected(a, Some(t.as_ref()))?;
                         Ok(self.coerced_mono(v, a, t.as_ref()))
                     })
                     .collect::<Result<_, CompilerError>>()?

@@ -103,6 +103,21 @@ impl Builder<'_> {
             .and_then(|plan| plan.column_elem(&self.scx.rep_arena())))
     }
 
+    pub(crate) fn vec_column_elem_for_type(
+        &self,
+        ty: &MonoTy,
+    ) -> Result<Option<ColumnElem>, CompilerError> {
+        if !ContainerPlan::matches_type(ContainerFamily::Vec, ty) {
+            return Ok(None);
+        }
+        ContainerPlan::for_type(self.ws, self.scx.target, &self.scx.rep_arena(), ContainerFamily::Vec, ty)
+            .map(|plan| plan.column_elem(&self.scx.rep_arena()))
+            .map_err(|error| match error.span.or(self.cur_span) {
+                Some(span) => CompilerError::new_with_label(span, error.message),
+                None => CompilerError::new_no_location(error.message),
+            })
+    }
+
     /// The column shape of `elem`: its value shape, marked nullable when the
     /// ELEMENT type is. Every column site builds its shape here, so the leaf
     /// wire (`repr_to_leaves` / `rebuild_from_leaves`, which both lead a nullable

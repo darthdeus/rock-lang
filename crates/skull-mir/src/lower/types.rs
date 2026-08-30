@@ -20,6 +20,17 @@ impl Builder<'_> {
         self.dispatch().concrete_expr_ty(e)
     }
 
+    pub(crate) fn concrete_struct_field_ty(
+        &self,
+        literal: Idx<Expr>,
+        field: Ustr,
+    ) -> Option<Rc<MonoTy>> {
+        self.dispatch()
+            .concrete_types
+            .and_then(|tables| tables.struct_field_type(literal, field))
+            .map(|id| self.concrete_mono_view(id, ConcreteMonoConsumer::Dispatch))
+    }
+
     pub(crate) fn concrete_ty_id(&self, ty: TyId) -> Option<Rc<MonoTy>> {
         self.dispatch().concrete_ty(ty)
     }
