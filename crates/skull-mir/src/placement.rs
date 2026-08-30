@@ -210,7 +210,7 @@ fn merge_requirement<T>(map: &mut ArenaMap<Idx<T>, Place>, key: Idx<T>, value: P
     true
 }
 
-#[derive(Default)]
+#[derive(Clone, Default, PartialEq, Eq)]
 struct PlacementRequirements {
     values: ArenaMap<Idx<Inst>, Place>,
     cells: ArenaMap<Idx<Cell>, Place>,
@@ -221,8 +221,18 @@ fn inferred_argument_place(
     requirements: &PlacementRequirements,
     oracle: &impl PlacementOracle,
     context: AnalysisContext,
+    analysis: Option<&PlacementAnalysis>,
     arg: Idx<Inst>,
 ) -> Place {
+    if let Some(analysis) = analysis {
+        let place = match mir.insts[arg] {
+            Inst::Load(cell) => analysis.cells.get(cell).copied(),
+            _ => analysis.values.get(arg).copied(),
+        };
+        if let Some(place) = place.filter(|place| !matches!(place, Place::Pending)) {
+            return place;
+        }
+    }
     match &mir.insts[arg] {
         Inst::Const(_) => Place::Static,
         Inst::Global(name) => oracle.global_place(*name),
@@ -239,7 +249,7 @@ fn inferred_argument_place(
         | Inst::Index { base, .. }
         | Inst::Len { base, .. }
         | Inst::VecCheckedIndex { vec: base, .. } => {
-            inferred_argument_place(mir, requirements, oracle, context, *base)
+            inferred_argument_place(mir, requirements, oracle, context, analysis, *base)
         }
         _ => requirements.values.get(arg).copied().unwrap_or_else(|| {
             if oracle.carries_placement(mir, arg) {
@@ -289,6 +299,7 @@ fn infer_call_requirements(
     mir: &MirFunc,
     context: AnalysisContext,
     oracle: &impl PlacementOracle,
+    analysis: Option<&PlacementAnalysis>,
     requirements: &mut PlacementRequirements,
     call_effects: &mut HashMap<(Idx<Inst>, Place), CallEffect>,
     id: Idx<Inst>,
@@ -314,7 +325,7 @@ fn infer_call_requirements(
         .or_insert_with(|| oracle.call_effect(mir, id, func, allocation));
     let mut args: SmallVec<[Place; 8]> = raw_args
         .iter()
-        .map(|arg| inferred_argument_place(mir, requirements, oracle, context, *arg))
+        .map(|arg| inferred_argument_place(mir, requirements, oracle, context, analysis, *arg))
         .collect();
     apply_omitted_args(&mut args, &effect.omitted_args);
     let call_requirement = requirements
@@ -371,6 +382,7 @@ fn infer_requirements(
     context: AnalysisContext,
     oracle: &impl PlacementOracle,
     blocks: &[Idx<crate::mir::Block>],
+    analysis: Option<&PlacementAnalysis>,
     mut requirements: PlacementRequirements,
     call_effects: &mut HashMap<(Idx<Inst>, Place), CallEffect>,
 ) -> PlacementRequirements {
@@ -411,6 +423,7 @@ fn infer_requirements(
                             mir,
                             context,
                             oracle,
+                            analysis,
                             &mut requirements,
                             call_effects,
                             id,
@@ -789,6 +802,7 @@ pub fn analyze(
         context,
         oracle,
         &blocks,
+        None,
         PlacementRequirements::default(),
         &mut call_effects,
     );
@@ -872,9 +886,24 @@ pub fn analyze(
                 context,
                 oracle,
                 &blocks,
+                Some(&analysis),
                 requirements,
                 &mut call_effects,
             );
+            continue;
+        }
+
+        let refined = infer_requirements(
+            mir,
+            context,
+            oracle,
+            &blocks,
+            Some(&analysis),
+            requirements.clone(),
+            &mut call_effects,
+        );
+        if refined != requirements {
+            requirements = refined;
             continue;
         }
 
