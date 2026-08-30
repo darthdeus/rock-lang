@@ -270,6 +270,21 @@ fn is_call_result(mir: &MirFunc, inst: Idx<Inst>) -> bool {
     matches!(mir.insts[inst], Inst::Call { .. } | Inst::CallMulti { .. })
 }
 
+fn is_composite_constructor(inst: &Inst) -> bool {
+    matches!(
+        inst,
+        Inst::MakeTuple(_)
+            | Inst::MakeVec(_)
+            | Inst::MakeVecColumns { .. }
+            | Inst::MakeStruct { .. }
+            | Inst::MakeValueStruct { .. }
+            | Inst::MaterializeValueStruct { .. }
+            | Inst::MakeEnv { .. }
+            | Inst::MakeEnum { .. }
+            | Inst::MakeEnumDyn { .. }
+    )
+}
+
 fn infer_call_requirements(
     mir: &MirFunc,
     context: AnalysisContext,
@@ -284,11 +299,7 @@ fn infer_call_requirements(
     };
     if !raw_args.iter().any(|arg| {
         oracle.carries_placement(mir, *arg)
-            && (is_call_result(mir, *arg)
-                || matches!(
-                    mir.insts[*arg],
-                    Inst::MakeVec(_) | Inst::MakeVecColumns { .. }
-                ))
+            && (is_call_result(mir, *arg) || is_composite_constructor(&mir.insts[*arg]))
     }) {
         return false;
     }
