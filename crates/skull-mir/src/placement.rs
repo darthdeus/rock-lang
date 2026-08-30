@@ -295,26 +295,6 @@ fn is_composite_constructor(inst: &Inst) -> bool {
     )
 }
 
-fn requirement_flow_source(
-    mir: &MirFunc,
-    oracle: &impl PlacementOracle,
-    parameter_cells: &HashSet<Idx<Cell>>,
-    flow_cells: &HashSet<Idx<Cell>>,
-    inst: Idx<Inst>,
-) -> bool {
-    if !oracle.carries_placement(mir, inst) {
-        return false;
-    }
-    match mir.insts[inst] {
-        Inst::Load(cell) => parameter_cells.contains(&cell) || flow_cells.contains(&cell),
-        _ => {
-            is_call_result(mir, inst)
-                || (is_composite_constructor(&mir.insts[inst])
-                    && !oracle.is_allocation_site(mir, inst))
-        }
-    }
-}
-
 fn carries_requirement(
     mir: &MirFunc,
     oracle: &impl PlacementOracle,
@@ -864,8 +844,19 @@ pub fn analyze(
     oracle: &impl PlacementOracle,
 ) -> PlacementAnalysis {
     let blocks = crate::reach::emitted_blocks(mir);
-    let parameter_cells = mir.params.iter().copied().collect::<HashSet<_>>();
-    let mut flow_cells = HashSet::new();
+    let mut cell_blocks = HashMap::<Idx<Cell>, HashSet<Idx<crate::mir::Block>>>::new();
+    for &block in &blocks {
+        for &id in &mir.blocks[block].insts {
+            let Inst::Store { cell, .. } = mir.insts[id] else {
+                continue;
+            };
+            cell_blocks.entry(cell).or_default().insert(block);
+        }
+    }
+    let mut flow_cells = cell_blocks
+        .into_iter()
+        .filter_map(|(cell, blocks)| (blocks.len() > 1).then_some(cell))
+        .collect::<HashSet<_>>();
     loop {
         let mut changed = false;
         for &block in &blocks {
@@ -873,13 +864,7 @@ pub fn analyze(
                 let Inst::Store { cell, value } = mir.insts[id] else {
                     continue;
                 };
-                if requirement_flow_source(
-                    mir,
-                    oracle,
-                    &parameter_cells,
-                    &flow_cells,
-                    value,
-                ) {
+                if matches!(mir.insts[value], Inst::Load(source) if flow_cells.contains(&source)) {
                     changed |= flow_cells.insert(cell);
                 }
             }
