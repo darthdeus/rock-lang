@@ -112,7 +112,7 @@ pub fn emit_coroutine_with_artifact(
     // per yield); the channel's shape drives both the slot writes (transform) and
     // the generic/boxed `resume()` rebuild (constructor).
     let channel = plan.channel.as_ref();
-    let mut lowered = skull_transform::transform_coroutine(func, channel);
+    let mut lowered = skull_transform::transform_coroutine(func, channel, plan.has_return_value());
     let frame = FrameCtx {
         s_cell: lowered.s_cell,
         fields: lowered.frame_plan.fields().iter().copied().collect(),

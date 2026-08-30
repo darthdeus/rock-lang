@@ -6550,7 +6550,7 @@ fn emit_coroutine_js(
     globals: &GlobalCtx,
 ) -> Result<(String, CodeArtifact), CompilerError> {
     let channel = plan.channel.as_ref();
-    let mut lowered = skull_transform::transform_coroutine(mf, channel);
+    let mut lowered = skull_transform::transform_coroutine(mf, channel, plan.has_return_value());
     let resume_arg = mf.resume_arg.ok_or_else(|| err("co fn must carry a resume-arg cell"))?;
     let step_name = plan.step();
     // Convert detached hook/defer regions as ordinary functions. Their own

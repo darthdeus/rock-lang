@@ -1907,7 +1907,7 @@ mod tests {
             "co fn f(x: int) -> Coroutine<int> { let saved = x yield saved }",
             "f",
         );
-        let lowered = transform_coroutine(&func, None);
+        let lowered = transform_coroutine(&func, None, false);
         assert!(
             !lowered.frame_plan.slots().is_empty(),
             "the coroutine fixture must have a nonzero frame population"
@@ -1927,7 +1927,7 @@ mod tests {
              }",
             "f",
         );
-        let lowered = transform_coroutine(&func, None);
+        let lowered = transform_coroutine(&func, None, false);
         let untyped: Vec<_> = lowered
             .frame_plan
             .fields()
@@ -1948,7 +1948,7 @@ mod tests {
              }",
             "f",
         );
-        let lowered = transform_coroutine(&func, None);
+        let lowered = transform_coroutine(&func, None, false);
         let untyped: Vec<_> = lowered
             .frame_plan
             .fields()
@@ -1971,7 +1971,7 @@ mod tests {
              }",
             "f",
         );
-        let lowered = transform_coroutine(&func, None);
+        let lowered = transform_coroutine(&func, None, false);
         let untyped: Vec<_> = lowered
             .frame_plan
             .fields()
@@ -1994,7 +1994,7 @@ mod tests {
              }",
             "f",
         );
-        let lowered = transform_coroutine(&func, None);
+        let lowered = transform_coroutine(&func, None, false);
         let spills = lowered.frame_plan.spill_values();
         assert!(
             spills
@@ -2660,7 +2660,11 @@ fn spill_cross_block_values(step: &mut MirFunc, s_cell: Idx<Cell>, block_ids: &[
 }
 
 /// Transform a lowered `co fn` into its `__step` state machine + frame info.
-pub fn transform_coroutine(func: &MirFunc, channel: Option<&skull_mir::lower::YieldChannel>) -> CoroLowered {
+pub fn transform_coroutine(
+    func: &MirFunc,
+    channel: Option<&skull_mir::lower::YieldChannel>,
+    has_return_value: bool,
+) -> CoroLowered {
     let frame_slot_channel = channel.is_some();
     let mut step = func.clone();
     let resume_arg = func.resume_arg.expect("co fn must carry a resume-arg cell");
@@ -2829,9 +2833,10 @@ pub fn transform_coroutine(func: &MirFunc, channel: Option<&skull_mir::lower::Yi
         if yield_blocks.contains(&bid) {
             continue;
         }
-        let ret_val = match &step.blocks[bid].term {
+        let ret_val = match (&step.blocks[bid].term, has_return_value) {
             // A co fn's completion value is single (never scalarized); take it.
-            Term::Return(vs) => Some(vs.first().copied()),
+            (Term::Return(vs), true) => Some(vs.first().copied()),
+            (Term::Return(_), false) => Some(None),
             _ => None,
         };
         if let Some(v0) = ret_val {
