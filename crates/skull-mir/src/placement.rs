@@ -282,10 +282,14 @@ fn infer_call_requirements(
         Inst::Call { func, args } | Inst::CallMulti { func, args, .. } => (*func, args),
         _ => return false,
     };
-    if !raw_args
-        .iter()
-        .any(|arg| is_call_result(mir, *arg) && oracle.carries_placement(mir, *arg))
-    {
+    if !raw_args.iter().any(|arg| {
+        oracle.carries_placement(mir, *arg)
+            && (is_call_result(mir, *arg)
+                || matches!(
+                    mir.insts[*arg],
+                    Inst::MakeVec(_) | Inst::MakeVecColumns { .. }
+                ))
+    }) {
         return false;
     }
     let allocation = requirements
@@ -335,10 +339,7 @@ fn infer_call_requirements(
                 else {
                     continue;
                 };
-                if is_call_result(mir, arg)
-                    && oracle.carries_placement(mir, arg)
-                    && let Some(destination) = destination
-                {
+                if oracle.carries_placement(mir, arg) && let Some(destination) = destination {
                     changed |= merge_requirement(&mut requirements.values, arg, destination);
                 }
             }
@@ -616,10 +617,24 @@ fn value_place(
         Inst::StringConcat(..)
         | Inst::Format { .. }
         | Inst::FormatDyn { .. }
-        | Inst::MakeVec(..)
-        | Inst::MakeVecColumns { .. }
         | Inst::MakeVecColumnHeader { .. }
         | Inst::Lambda { .. } => allocation,
+        Inst::MakeVec(values) => composite_place(
+            mir,
+            analysis,
+            requirements,
+            id,
+            allocation,
+            values.iter().copied(),
+        ),
+        Inst::MakeVecColumns { columns, .. } => composite_place(
+            mir,
+            analysis,
+            requirements,
+            id,
+            allocation,
+            columns.iter().flat_map(|(_, values)| values.iter().copied()),
+        ),
         Inst::ToString(value) => inst_place(analysis, *value).join(allocation),
         Inst::Field { base, .. }
         | Inst::TupleIndex { base, .. }
