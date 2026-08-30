@@ -536,14 +536,24 @@ impl Builder<'_> {
         ty: TyId,
     ) -> Result<Option<FunctionRepPlan>, CompilerError> {
         if let Some(concrete) = self.concrete_ty_id(ty) {
-            return BackendFnAbiPlan::for_function_value(self.ws, self.scx, &concrete)
-                .map(Some)
-                .map_err(|error| match error.span.or(self.cur_span) {
-                    Some(span) => CompilerError::new_with_label(span, error.message),
-                    None => CompilerError::new_no_location(error.message),
-                });
+            return self.fn_value_rep_plan_for_mono(&concrete);
         }
         Ok(None)
+    }
+
+    pub(crate) fn fn_value_rep_plan_for_mono(
+        &self,
+        ty: &MonoTy,
+    ) -> Result<Option<FunctionRepPlan>, CompilerError> {
+        if !matches!(ty.peel_nullable().0, MonoTy::Function { .. }) {
+            return Ok(None);
+        }
+        BackendFnAbiPlan::for_function_value(self.ws, self.scx, ty)
+            .map(Some)
+            .map_err(|error| match error.span.or(self.cur_span) {
+                Some(span) => CompilerError::new_with_label(span, error.message),
+                None => CompilerError::new_no_location(error.message),
+            })
     }
 
     pub(crate) fn nobox_shape_of_ty(

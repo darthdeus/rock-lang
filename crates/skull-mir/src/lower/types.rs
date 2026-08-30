@@ -398,12 +398,12 @@ impl Builder<'_> {
         Ok(ValueBundle::new(representation, value))
     }
 
-    fn struct_field_representation(
+    pub(crate) fn struct_field_mono_ty(
         &self,
         sname: Ustr,
         field: Ustr,
         origin: Option<Idx<Expr>>,
-    ) -> Result<RepId, CompilerError> {
+    ) -> Result<Rc<MonoTy>, CompilerError> {
         let sid = *self
             .ws
             .struct_by_name
@@ -426,13 +426,13 @@ impl Builder<'_> {
             None => match origin.and_then(|subject| self.concrete_expr_ty(subject)) {
                 Some(ty)
                     if matches!(
-                        ty.as_ref(),
+                        ty.peel_nullable().0,
                         MonoTy::App {
                             ctor: crate::monoty::MonoCtor::Nominal(base),
                             ..
                         } if *base == sname
                     ) => {
-                        let MonoTy::App { params, .. } = ty.as_ref() else {
+                        let MonoTy::App { params, .. } = ty.peel_nullable().0 else {
                             unreachable!()
                         };
                         let def = &self.ws.modules[sid.module.index()].structs[sid.def];
@@ -468,7 +468,7 @@ impl Builder<'_> {
                 None => self.concrete_ty_id(fdef.ty),
             },
         };
-        let ty = match ty {
+        Ok(match ty {
             Some(ty) => ty,
             None => Rc::new(
                 crate::monoty::convert_decl(
@@ -482,7 +482,16 @@ impl Builder<'_> {
                     ))
                 })?,
             ),
-        };
+        })
+    }
+
+    fn struct_field_representation(
+        &self,
+        sname: Ustr,
+        field: Ustr,
+        origin: Option<Idx<Expr>>,
+    ) -> Result<RepId, CompilerError> {
+        let ty = self.struct_field_mono_ty(sname, field, origin)?;
         let tuple_spelled = matches!(ty.peel_nullable().0, MonoTy::Tuple(_));
         let nobox = matches!(
             ty.peel_nullable().0,
