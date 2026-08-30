@@ -219,7 +219,7 @@ impl Builder<'_> {
         for (i, pb) in params.into_iter().enumerate() {
             let pname = child.body.binding_arena[pb].name;
             let slot = child.param_slot(i)?;
-            child.bind_param_slot(pb, pname, &slot);
+            child.bind_param_slot(pb, pname, &slot)?;
         }
 
         child.defers.push(Vec::new());
@@ -276,15 +276,30 @@ impl Builder<'_> {
                             let shape = actual;
                             let leaves = self.repr_to_leaves_bundle(&r)?;
                             let bname = self.body.binding_arena[name].name;
-                            let cells: Vec<Idx<Cell>> = leaves
-                                .into_iter()
-                                .enumerate()
-                                .map(|(li, lv)| {
-                                    let c = self.f.new_cell(Some(Ustr::from(format!("{bname}__{li}").as_str())));
-                                    self.emit_cur(Inst::Store { cell: c, value: lv });
-                                    c
-                                })
-                                .collect();
+                            let cells = self
+                                .new_flat_enum_cells(bname, &shape)?
+                                .unwrap_or_else(|| {
+                                    leaves
+                                        .iter()
+                                        .enumerate()
+                                        .map(|(li, _)| {
+                                            self.f.new_cell(Some(Ustr::from(
+                                                format!("{bname}__{li}").as_str(),
+                                            )))
+                                        })
+                                        .collect()
+                                });
+                            if cells.len() != leaves.len() {
+                                return Err(self.gap_here(format!(
+                                    "flat enum {} has {} call-binding cells for {} leaves",
+                                    shape.name,
+                                    cells.len(),
+                                    leaves.len()
+                                )));
+                            }
+                            for (cell, value) in cells.iter().copied().zip(leaves) {
+                                self.emit_cur(Inst::Store { cell, value });
+                            }
                             self.group_binds.insert(raw(name), (cells, shape));
                             threaded = true;
                         } else {

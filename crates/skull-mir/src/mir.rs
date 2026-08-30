@@ -847,6 +847,16 @@ pub struct Cell {
     /// `TyId` cannot name the physical leaf. Native backends consume this
     /// alongside the shared mono interner; source-level backends ignore it.
     pub native_ty: Option<crate::monoty::MonoTyId>,
+    /// Compiler-owned flat-enum slot identity for a scalarized local. The
+    /// physical slot may carry several logical members, so a single
+    /// `MonoTyId` is not enough to describe its native representation.
+    pub native_flat_slot: Option<NativeFlatSlot>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NativeFlatSlot {
+    pub owner: crate::monoty::MonoTyId,
+    pub field: ustr::Ustr,
 }
 
 /// How a block ends. Control flow lives ONLY here.
@@ -1274,6 +1284,7 @@ impl MirFunc {
             nonnull_value_struct: false,
             default_param: false,
             native_ty: None,
+            native_flat_slot: None,
         });
         self.record_new_cell();
         if self.cells.capacity() != capacity {
@@ -1295,6 +1306,7 @@ impl MirFunc {
             nonnull_value_struct: false,
             default_param: false,
             native_ty: None,
+            native_flat_slot: None,
         });
         self.record_new_cell();
         if self.cells.capacity() != capacity {
@@ -1315,6 +1327,17 @@ impl MirFunc {
     ) -> Idx<Cell> {
         let id = self.new_cell_typed(name, ty);
         self.cells[id].native_ty = native_ty;
+        id
+    }
+
+    pub fn new_cell_native_flat_slot(
+        &mut self,
+        name: Option<Ustr>,
+        owner: crate::monoty::MonoTyId,
+        field: Ustr,
+    ) -> Idx<Cell> {
+        let id = self.new_cell(name);
+        self.cells[id].native_flat_slot = Some(NativeFlatSlot { owner, field });
         id
     }
 

@@ -161,7 +161,7 @@ impl Builder<'_> {
                     if let Some(vs) = self.flat_payload_leaf_shape(en, variant, i) {
                         if let Pattern::Bind(b) = self.body.pattern_arena[sp] {
                             let leaves = self.scrut_payload_leaves(scrut, i, &vs);
-                            self.bind_leaves(b, &leaves, vs);
+                            self.bind_leaves(b, &leaves, vs)?;
                             continue;
                         }
                     }
@@ -706,7 +706,7 @@ impl Builder<'_> {
         self.f.set_term(self.cur, Term::Branch { cond: present, then_bb, else_bb });
 
         self.cur = then_bb;
-        self.bind_leaves(b, &values, shape);
+        self.bind_leaves(b, &values, shape)?;
         self.finish_if_let(then_branch, else_branch, else_bb, join, result)
     }
 

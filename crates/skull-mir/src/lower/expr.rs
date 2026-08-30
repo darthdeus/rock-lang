@@ -472,7 +472,7 @@ impl Builder<'_> {
                     let slot = param_slots.get(i).cloned().ok_or_else(|| {
                         self.gap_here(format!("lambda ABI has no collected parameter slot {i}"))
                     })?;
-                    self.bind_param_slot(pb, pname, &slot);
+                    self.bind_param_slot(pb, pname, &slot)?;
                 }
                 let param_cells: Vec<Idx<Cell>> = self.f.params.split_off(before);
                 let entry = self.f.new_block();

@@ -2412,7 +2412,7 @@ impl Builder<'_> {
         for (i, pb) in pbs.iter().enumerate() {
             let name = self.body.binding_arena[*pb].name;
             let slot = self.param_slot(i)?;
-            self.bind_param_slot(*pb, name, &slot);
+            self.bind_param_slot(*pb, name, &slot)?;
         }
         Ok(())
     }
@@ -2432,21 +2432,40 @@ impl Builder<'_> {
         pb: Idx<BindingInfo>,
         name: Ustr,
         slot: &RetSlot,
-    ) {
+    ) -> Result<(), CompilerError> {
         if !slot.splats() {
             let cty = self.binding_ty(pb);
             let cell = self.f.new_cell_typed(Some(name), cty);
             self.f.params.push(cell);
             self.binds.insert(raw(pb), cell);
-            return;
+            return Ok(());
         }
-        let cells: Vec<Idx<Cell>> = (0..slot.slot_count())
-            .map(|li| {
-                let c = self.f.new_cell(Some(Ustr::from(format!("{name}__{li}").as_str())));
-                self.f.params.push(c);
-                c
-            })
-            .collect();
+        let cells = match slot {
+            RetSlot::Leaves(shape) => self
+                .new_flat_enum_cells(name, shape)?
+                .unwrap_or_else(|| {
+                    (0..slot.slot_count())
+                        .map(|li| {
+                            self.f
+                                .new_cell(Some(Ustr::from(format!("{name}__{li}").as_str())))
+                        })
+                        .collect()
+                }),
+            RetSlot::Nested(_) | RetSlot::Opaque => (0..slot.slot_count())
+                .map(|li| {
+                    self.f
+                        .new_cell(Some(Ustr::from(format!("{name}__{li}").as_str())))
+                })
+                .collect(),
+        };
+        if cells.len() != slot.slot_count() {
+            return Err(self.gap_here(format!(
+                "parameter {name} has {} cells for {} ABI slots",
+                cells.len(),
+                slot.slot_count()
+            )));
+        }
+        self.f.params.extend(cells.iter().copied());
         match slot {
             RetSlot::Leaves(shape) => {
                 self.group_binds.insert(raw(pb), (cells, shape.clone()));
@@ -2454,8 +2473,9 @@ impl Builder<'_> {
             RetSlot::Nested(inner) => {
                 self.tuple_binds.insert(raw(pb), (cells, inner.clone()));
             }
-            RetSlot::Opaque => unreachable!("guarded by `splats`"),
+            RetSlot::Opaque => unreachable!("guarded by slot.splats"),
         }
+        Ok(())
     }
 
     /// Callee-side default fill: an omitted argument arrives as Lua `nil`, so for

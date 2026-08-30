@@ -925,7 +925,7 @@ impl Builder<'_> {
                 )?;
                 let bundle = ValueBundle::new(representation, repr);
                 let leaves = self.repr_to_leaves_bundle_for_shape(&bundle, &shape)?;
-                self.bind_leaves(*b, &leaves, shape);
+                self.bind_leaves(*b, &leaves, shape)?;
                 return Ok(());
             }
         }
@@ -989,7 +989,7 @@ impl Builder<'_> {
                 let n = shape.leaf_count();
                 let leaves = values[*idx..*idx + n].to_vec();
                 *idx += n;
-                self.bind_leaves(*b, &leaves, shape.clone());
+                self.bind_leaves(*b, &leaves, shape.clone())?;
             }
             (BindingPattern::Tuple(subs), RetSlot::Nested(inner))
                 if subs.len() == inner.slots.len() =>
@@ -1021,8 +1021,28 @@ impl Builder<'_> {
     /// Bind `b` to a value's LEAVES: one cell per leaf, registered in
     /// `group_binds`. The single form for "this binding is a scalarized value",
     /// shared by `if let` and the splatting tuple destructures.
-    pub(crate) fn bind_leaves(&mut self, b: Idx<BindingInfo>, leaves: &[Idx<Inst>], shape: ValueShape) {
+    pub(crate) fn bind_leaves(
+        &mut self,
+        b: Idx<BindingInfo>,
+        leaves: &[Idx<Inst>],
+        shape: ValueShape,
+    ) -> Result<(), CompilerError> {
         let bname = self.body.binding_arena[b].name;
+        if let Some(cells) = self.new_flat_enum_cells(bname, &shape)? {
+            if cells.len() != leaves.len() {
+                return Err(self.gap_here(format!(
+                    "flat enum {} has {} binding cells for {} leaves",
+                    shape.name,
+                    cells.len(),
+                    leaves.len()
+                )));
+            }
+            for (cell, &value) in cells.iter().zip(leaves) {
+                self.emit_cur(Inst::Store { cell: *cell, value });
+            }
+            self.group_binds.insert(raw(b), (cells, shape));
+            return Ok(());
+        }
         let leaf_tys = self.value_shape_leaf_monos(&shape).map(|tys| {
             tys.into_iter()
                 .map(|ty| self.scx.interner().intern(ty))
@@ -1042,6 +1062,7 @@ impl Builder<'_> {
             })
             .collect();
         self.group_binds.insert(raw(b), (cells, shape));
+        Ok(())
     }
 
     fn value_shape_leaf_monos(&self, shape: &ValueShape) -> Option<Vec<MonoTy>> {

@@ -3,6 +3,55 @@
 //! and a flat literal both go through.
 use super::*;
 impl Builder<'_> {
+    pub(crate) fn new_flat_enum_cells(
+        &mut self,
+        name: Ustr,
+        shape: &ValueShape,
+    ) -> Result<Option<Vec<Idx<Cell>>>, CompilerError> {
+        let Some(flat) =
+            EnumPlan::for_name(self.ws, shape.name).and_then(|plan| plan.flat().cloned())
+        else {
+            return Ok(None);
+        };
+        if flat.name != shape.name || shape.leaf_count() != flat.leaf_count() {
+            return Err(self.gap_here(format!(
+                "flat enum {} has a cell shape that differs from its compiler-owned layout",
+                shape.name
+            )));
+        }
+        let owner = self.scx.interner().intern(MonoTy::App {
+            ctor: MonoCtor::Nominal(flat.name),
+            params: Vec::new(),
+        });
+        let tuple_width = flat.tuple_width();
+        let mut scalarized_fields = vec![None; tuple_width];
+        let mut offset = 0;
+        for slot in &flat.slots {
+            if matches!(slot, FlatSlot::Leaves(_)) {
+                for index in offset..offset + slot.width() {
+                    scalarized_fields[index] = Some(Ustr::from(index.to_string().as_str()));
+                }
+            }
+            offset += slot.width();
+        }
+        let cells = (0..flat.leaf_count())
+            .map(|index| {
+                let cell_name = Ustr::from(format!("{name}__{index}").as_str());
+                if index == 0 {
+                    return self.f.new_cell(Some(cell_name));
+                }
+                let slot = index - 1;
+                if let Some(field) = scalarized_fields.get(slot).and_then(|field| *field) {
+                    self.f
+                        .new_cell_native_flat_slot(Some(cell_name), owner, field)
+                } else {
+                    self.f.new_cell(Some(cell_name))
+                }
+            })
+            .collect();
+        Ok(Some(cells))
+    }
+
     /// Lower an enum-typed value into its flattened cells: the discriminant
     /// (variant-name string) plus ALL union slots (every positional + every record
     /// field), nil where the live variant doesn't fill them so stale slots from a
