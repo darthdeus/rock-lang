@@ -209,13 +209,136 @@ struct PlacementRequirements {
     cells: ArenaMap<Idx<Cell>, Place>,
 }
 
+fn inferred_argument_place(
+    mir: &MirFunc,
+    requirements: &PlacementRequirements,
+    oracle: &impl PlacementOracle,
+    context: AnalysisContext,
+    arg: Idx<Inst>,
+) -> Place {
+    match &mir.insts[arg] {
+        Inst::Const(_) => Place::Static,
+        Inst::Global(name) => oracle.global_place(*name),
+        Inst::Load(cell) => mir
+            .params
+            .iter()
+            .position(|param| *param == *cell)
+            .and_then(|index| u16::try_from(index).ok())
+            .map(Place::Param)
+            .or_else(|| requirements.cells.get(*cell).copied())
+            .unwrap_or(context.default_allocation),
+        Inst::Field { base, .. }
+        | Inst::TupleIndex { base, .. }
+        | Inst::Index { base, .. }
+        | Inst::Len { base, .. }
+        | Inst::VecCheckedIndex { vec: base, .. } => {
+            inferred_argument_place(mir, requirements, oracle, context, *base)
+        }
+        _ => requirements.values.get(arg).copied().unwrap_or_else(|| {
+            if oracle.carries_placement(mir, arg) {
+                context.default_allocation
+            } else {
+                Place::Static
+            }
+        }),
+    }
+}
+
+fn explicit_call_argument(
+    mir: &MirFunc,
+    args: &[Idx<Inst>],
+    index: u16,
+    omitted_args: &[(u16, Place)],
+) -> Option<Idx<Inst>> {
+    let arg = *args.get(index as usize)?;
+    if omitted_args.iter().any(|(omitted, _)| *omitted == index)
+        || matches!(mir.insts[arg], Inst::Const(Lit::Nil))
+    {
+        return None;
+    }
+    Some(arg)
+}
+
+fn is_call_result(mir: &MirFunc, inst: Idx<Inst>) -> bool {
+    matches!(mir.insts[inst], Inst::Call { .. } | Inst::CallMulti { .. })
+}
+
+fn infer_call_requirements(
+    mir: &MirFunc,
+    context: AnalysisContext,
+    oracle: &impl PlacementOracle,
+    requirements: &mut PlacementRequirements,
+    id: Idx<Inst>,
+) -> bool {
+    let (func, raw_args) = match &mir.insts[id] {
+        Inst::Call { func, args } | Inst::CallMulti { func, args, .. } => (*func, args),
+        _ => return false,
+    };
+    let allocation = requirements
+        .values
+        .get(id)
+        .copied()
+        .filter(|place| !matches!(place, Place::Pending))
+        .unwrap_or(context.default_allocation);
+    let effect = oracle.call_effect(mir, id, func, allocation);
+    let mut args = raw_args
+        .iter()
+        .map(|arg| inferred_argument_place(mir, requirements, oracle, context, *arg))
+        .collect::<Vec<_>>();
+    apply_omitted_args(&mut args, &effect.omitted_args);
+    let call_requirement = requirements
+        .values
+        .get(id)
+        .copied()
+        .filter(|place| !matches!(place, Place::Pending))
+        .unwrap_or(context.default_allocation);
+    let mut changed = false;
+
+    if let Some(Place::Param(index)) = effect.result
+        && let Some(arg) = explicit_call_argument(mir, raw_args, index, &effect.omitted_args)
+        && is_call_result(mir, arg)
+        && oracle.carries_placement(mir, arg)
+    {
+        changed |= merge_requirement(&mut requirements.values, arg, call_requirement);
+    }
+
+    for constraint in &effect.constraints {
+        let destination = match constraint.destination {
+            Place::Destination => call_requirement,
+            Place::Param(index) => args
+                .get(index as usize)
+                .copied()
+                .unwrap_or(Place::Unknown),
+            place => place,
+        };
+        match constraint.value {
+            Place::Param(index) => {
+                let Some(arg) =
+                    explicit_call_argument(mir, raw_args, index, &effect.omitted_args)
+                else {
+                    continue;
+                };
+                if is_call_result(mir, arg) && oracle.carries_placement(mir, arg) {
+                    changed |= merge_requirement(&mut requirements.values, arg, destination);
+                }
+            }
+            Place::Destination if oracle.carries_placement(mir, id) => {
+                changed |= merge_requirement(&mut requirements.values, id, destination);
+            }
+            _ => {}
+        }
+    }
+
+    changed
+}
+
 fn infer_requirements(
     mir: &MirFunc,
     context: AnalysisContext,
     oracle: &impl PlacementOracle,
     blocks: &[Idx<crate::mir::Block>],
+    mut requirements: PlacementRequirements,
 ) -> PlacementRequirements {
-    let mut requirements = PlacementRequirements::default();
     loop {
         let mut changed = false;
         for &block in blocks {
@@ -247,6 +370,15 @@ fn infer_requirements(
                         if let Some(required) = requirements.values.get(id).copied() {
                             changed |= merge_requirement(&mut requirements.cells, *cell, required);
                         }
+                    }
+                    Inst::Call { .. } | Inst::CallMulti { .. } => {
+                        changed |= infer_call_requirements(
+                            mir,
+                            context,
+                            oracle,
+                            &mut requirements,
+                            id,
+                        );
                     }
                     Inst::TupleIndex { base, .. } => {
                         if let Some(required) = requirements.values.get(id).copied()
@@ -589,7 +721,13 @@ pub fn analyze(
     oracle: &impl PlacementOracle,
 ) -> PlacementAnalysis {
     let blocks = crate::reach::emitted_blocks(mir);
-    let mut requirements = infer_requirements(mir, context, oracle, &blocks);
+    let mut requirements = infer_requirements(
+        mir,
+        context,
+        oracle,
+        &blocks,
+        PlacementRequirements::default(),
+    );
     loop {
         let mut analysis = PlacementAnalysis::default();
         for (index, cell) in mir.params.iter().copied().enumerate() {
@@ -661,6 +799,7 @@ pub fn analyze(
             }
         }
         if contextualized {
+            requirements = infer_requirements(mir, context, oracle, &blocks, requirements);
             continue;
         }
 
