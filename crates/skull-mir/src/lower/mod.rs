@@ -2472,6 +2472,9 @@ impl Builder<'_> {
             // A scalarized value param's omitted arg arrives as N nils — guard on
             // the FIRST leaf cell and fill all leaves from the default's leaves.
             if let Some((cells, shape)) = self.group_binds.get(&raw(pb)).cloned() {
+                for &cell in &cells {
+                    self.f.mark_default_param(cell);
+                }
                 let cur = self.emit_cur(Inst::Load(cells[0]));
                 let nil = self.emit_cur(Inst::Const(Lit::Nil));
                 let is_nil = self.emit_cur(Inst::Eq(cur, nil));
@@ -2492,6 +2495,7 @@ impl Builder<'_> {
                 continue;
             }
             let Some(&cell) = self.binds.get(&raw(pb)) else { continue };
+            self.f.mark_default_param(cell);
             let cur = self.emit_cur(Inst::Load(cell));
             let nil = self.emit_cur(Inst::Const(Lit::Nil));
             let is_nil = self.emit_cur(Inst::Eq(cur, nil));

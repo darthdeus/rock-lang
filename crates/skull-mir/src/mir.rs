@@ -840,6 +840,9 @@ pub struct Cell {
     /// emission; only a wrongly-set flag can miscompile, so all conservatism
     /// lands here (`docs/value-two-tier-plan.md` item 8).
     pub nonnull_value_struct: bool,
+    /// A source parameter has a compiler-generated default-fill store. Closure
+    /// ownership treats that store as initialization, not mutation.
+    pub default_param: bool,
     /// Build-owned concrete type for a scalarized value leaf when its HIR
     /// `TyId` cannot name the physical leaf. Native backends consume this
     /// alongside the shared mono interner; source-level backends ignore it.
@@ -1269,6 +1272,7 @@ impl MirFunc {
             loop_binding: false,
             ty: None,
             nonnull_value_struct: false,
+            default_param: false,
             native_ty: None,
         });
         self.record_new_cell();
@@ -1289,6 +1293,7 @@ impl MirFunc {
             loop_binding: false,
             ty,
             nonnull_value_struct: false,
+            default_param: false,
             native_ty: None,
         });
         self.record_new_cell();
@@ -1317,6 +1322,13 @@ impl MirFunc {
     /// [`Cell::loop_binding`]).
     pub fn mark_loop_binding(&mut self, cell: Idx<Cell>) {
         self.cells[cell].loop_binding = true;
+    }
+
+    /// Mark a parameter cell whose default expression is filled in the callee
+    /// prologue, so closure capture does not mistake that initialization for a
+    /// later mutation.
+    pub fn mark_default_param(&mut self, cell: Idx<Cell>) {
+        self.cells[cell].default_param = true;
     }
 
     /// Tag a source-binding cell as holding a non-nullable value struct (licenses
