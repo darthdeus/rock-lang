@@ -272,10 +272,12 @@ fn main() { print(two(1.0, 2.0)) }
     assert_dispatched_population(&c, 2);
 }
 
-/// A nobox `value` hole renders ONE call PER LEAF FIELD, all at one expression
-/// and all named `__rock_format_float`. The field-index PATH is what keeps them
-/// distinct; without it the walk records one obligation and the census reports
-/// the rest as `site-not-in-body`.
+/// A nobox `value` hole renders ONE call PER LEAF FIELD in scalarized bodies,
+/// all at one expression and all named `__rock_format_float`. Native C keeps
+/// the same value first-class and renders the aggregate through `inspect`, so
+/// the shared graph retains that second ABI obligation too. The field-index
+/// PATH keeps the scalarized calls distinct; without it the walk records one
+/// obligation and the census reports the rest as `site-not-in-body`.
 ///
 /// The int and string fields are the admission control: they take non-calling
 /// routes, so the count is two rather than "one per field".
@@ -294,7 +296,7 @@ fn main() { print(show(V { a: 1.0, b: 2.0, c: 3, s: "x" })) }
     );
     assert_eq!(
         walk_dispatched_in(&ws, "show"),
-        vec!["__rock_format_float", "__rock_format_float"]
+        vec!["__rock_format_float", "__rock_format_float", "inspect"]
     );
     assert_dispatched_population(&census_of(src), 2);
 }

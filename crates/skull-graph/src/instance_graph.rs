@@ -5576,6 +5576,18 @@ fn dispatched_sites(
         logical_subst: Some(subst),
         values_first_class: false,
     };
+    // The shared graph serves both scalarized Lua bodies and native C bodies.
+    // A `nobox value` interpolates as leaves in the former but as one aggregate
+    // in the latter, so retain the union of the same oracle under both ABI
+    // modes. The site key keeps the two forms distinct; each lowerer consumes
+    // only the obligation its own mode emits.
+    let dispatches = [
+        dcx,
+        skull_mir::lower::DispatchCtx {
+            values_first_class: true,
+            ..dcx
+        },
+    ];
     let mut out: Vec<(Site, &'static str)> = Vec::new();
     for (e, expr) in body.expr_arena.iter() {
         match expr {
@@ -5584,11 +5596,13 @@ fn dispatched_sites(
                     let InterpPart::Value { expr: hole, spec } = &body.interp_part_arena[p] else {
                         continue;
                     };
-                    for (path, name) in dcx.hole_plan(*hole, spec.as_ref()).obligations() {
-                        out.push((
-                            Site { domain: domain.clone(), expr: *hole, op: SiteOp::Dispatched { name, path } },
-                            name,
-                        ));
+                    for dispatch in &dispatches {
+                        for (path, name) in dispatch.hole_plan(*hole, spec.as_ref()).obligations() {
+                            out.push((
+                                Site { domain: domain.clone(), expr: *hole, op: SiteOp::Dispatched { name, path } },
+                                name,
+                            ));
+                        }
                     }
                 }
             }
@@ -5604,6 +5618,7 @@ fn dispatched_sites(
         }
     }
     out.sort();
+    out.dedup();
     out
 }
 
