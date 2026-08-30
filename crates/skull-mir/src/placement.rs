@@ -1,4 +1,6 @@
-use bone_semantic::prelude::{ArenaMap, Span};
+use std::collections::HashMap;
+
+use bone_semantic::prelude::{ArenaMap, SmallVec, Span};
 use comfy_la_arena::Idx;
 use ustr::Ustr;
 
@@ -177,6 +179,11 @@ fn merge_requirement<T>(map: &mut ArenaMap<Idx<T>, Place>, key: Idx<T>, value: P
         (Some(Place::Frame), Place::Destination) | (Some(Place::Destination), Place::Frame) => {
             Place::Destination
         }
+        (Some(Place::Frame), param @ Place::Param(_))
+        | (Some(param @ Place::Param(_)), Place::Frame) => param,
+        (Some(Place::Session), Place::Param(_)) | (Some(Place::Param(_)), Place::Session) => {
+            Place::Session
+        }
         (Some(Place::Destination), Place::Session) | (Some(Place::Session), Place::Destination) => {
             Place::Session
         }
@@ -268,36 +275,45 @@ fn infer_call_requirements(
     context: AnalysisContext,
     oracle: &impl PlacementOracle,
     requirements: &mut PlacementRequirements,
+    call_effects: &mut HashMap<(Idx<Inst>, Place), CallEffect>,
     id: Idx<Inst>,
 ) -> bool {
     let (func, raw_args) = match &mir.insts[id] {
         Inst::Call { func, args } | Inst::CallMulti { func, args, .. } => (*func, args),
         _ => return false,
     };
+    if !raw_args
+        .iter()
+        .any(|arg| is_call_result(mir, *arg) && oracle.carries_placement(mir, *arg))
+    {
+        return false;
+    }
     let allocation = requirements
         .values
         .get(id)
         .copied()
         .filter(|place| !matches!(place, Place::Pending))
         .unwrap_or(context.default_allocation);
-    let effect = oracle.call_effect(mir, id, func, allocation);
-    let mut args = raw_args
+    let effect = call_effects
+        .entry((id, allocation))
+        .or_insert_with(|| oracle.call_effect(mir, id, func, allocation));
+    let mut args: SmallVec<[Place; 8]> = raw_args
         .iter()
         .map(|arg| inferred_argument_place(mir, requirements, oracle, context, *arg))
-        .collect::<Vec<_>>();
+        .collect();
     apply_omitted_args(&mut args, &effect.omitted_args);
     let call_requirement = requirements
         .values
         .get(id)
         .copied()
-        .filter(|place| !matches!(place, Place::Pending))
-        .unwrap_or(context.default_allocation);
+        .filter(|place| !matches!(place, Place::Pending));
     let mut changed = false;
 
     if let Some(Place::Param(index)) = effect.result
         && let Some(arg) = explicit_call_argument(mir, raw_args, index, &effect.omitted_args)
         && is_call_result(mir, arg)
         && oracle.carries_placement(mir, arg)
+        && let Some(call_requirement) = call_requirement
     {
         changed |= merge_requirement(&mut requirements.values, arg, call_requirement);
     }
@@ -305,11 +321,12 @@ fn infer_call_requirements(
     for constraint in &effect.constraints {
         let destination = match constraint.destination {
             Place::Destination => call_requirement,
-            Place::Param(index) => args
-                .get(index as usize)
-                .copied()
-                .unwrap_or(Place::Unknown),
-            place => place,
+            Place::Param(index) => Some(
+                args.get(index as usize)
+                    .copied()
+                    .unwrap_or(Place::Unknown),
+            ),
+            place => Some(place),
         };
         match constraint.value {
             Place::Param(index) => {
@@ -318,12 +335,17 @@ fn infer_call_requirements(
                 else {
                     continue;
                 };
-                if is_call_result(mir, arg) && oracle.carries_placement(mir, arg) {
+                if is_call_result(mir, arg)
+                    && oracle.carries_placement(mir, arg)
+                    && let Some(destination) = destination
+                {
                     changed |= merge_requirement(&mut requirements.values, arg, destination);
                 }
             }
             Place::Destination if oracle.carries_placement(mir, id) => {
-                changed |= merge_requirement(&mut requirements.values, id, destination);
+                if let Some(destination) = destination {
+                    changed |= merge_requirement(&mut requirements.values, id, destination);
+                }
             }
             _ => {}
         }
@@ -338,6 +360,7 @@ fn infer_requirements(
     oracle: &impl PlacementOracle,
     blocks: &[Idx<crate::mir::Block>],
     mut requirements: PlacementRequirements,
+    call_effects: &mut HashMap<(Idx<Inst>, Place), CallEffect>,
 ) -> PlacementRequirements {
     loop {
         let mut changed = false;
@@ -377,6 +400,7 @@ fn infer_requirements(
                             context,
                             oracle,
                             &mut requirements,
+                            call_effects,
                             id,
                         );
                     }
@@ -522,7 +546,7 @@ fn substitute_constraint(
     add_constraint(analysis, value, destination, span);
 }
 
-fn apply_omitted_args(args: &mut Vec<Place>, omitted_args: &[(u16, Place)]) {
+fn apply_omitted_args(args: &mut SmallVec<[Place; 8]>, omitted_args: &[(u16, Place)]) {
     for &(index, place) in omitted_args {
         let index = usize::from(index);
         if args.len() <= index {
@@ -571,6 +595,7 @@ fn value_place(
     oracle: &impl PlacementOracle,
     context: AnalysisContext,
     requirements: &PlacementRequirements,
+    call_effects: &mut HashMap<(Idx<Inst>, Place), CallEffect>,
     id: Idx<Inst>,
 ) -> Place {
     let inst = &mir.insts[id];
@@ -663,14 +688,16 @@ fn value_place(
                 .chain(named.iter().map(|(_, value)| *value)),
         ),
         Inst::Call { func, args } | Inst::CallMulti { func, args, .. } => {
-            let mut args = args
+            let mut args: SmallVec<[Place; 8]> = args
                 .iter()
                 .map(|arg| inst_place(analysis, *arg))
-                .collect::<Vec<_>>();
-            let effect = oracle.call_effect(mir, id, *func, allocation);
+                .collect();
+            let effect = call_effects
+                .entry((id, allocation))
+                .or_insert_with(|| oracle.call_effect(mir, id, *func, allocation));
             apply_omitted_args(&mut args, &effect.omitted_args);
             let span = mir.inst_spans.get(id).copied().unwrap_or_default();
-            for store in effect.stores {
+            for store in &effect.stores {
                 let value = args
                     .get(store.value as usize)
                     .copied()
@@ -681,7 +708,7 @@ fn value_place(
                     .unwrap_or(Place::Unknown);
                 add_constraint(analysis, value, destination, span);
             }
-            for constraint in effect.constraints {
+            for &constraint in &effect.constraints {
                 substitute_constraint(analysis, constraint, &args, allocation, span);
             }
             if let Some(owner) = effect.owner {
@@ -689,7 +716,7 @@ fn value_place(
                     .call_owners
                     .insert(id, owner.substitute(&args, allocation));
             }
-            for retained in effect.opaque_retains {
+            for &retained in &effect.opaque_retains {
                 let value = args
                     .get(retained as usize)
                     .copied()
@@ -721,12 +748,14 @@ pub fn analyze(
     oracle: &impl PlacementOracle,
 ) -> PlacementAnalysis {
     let blocks = crate::reach::emitted_blocks(mir);
+    let mut call_effects = HashMap::new();
     let mut requirements = infer_requirements(
         mir,
         context,
         oracle,
         &blocks,
         PlacementRequirements::default(),
+        &mut call_effects,
     );
     loop {
         let mut analysis = PlacementAnalysis::default();
@@ -767,6 +796,7 @@ pub fn analyze(
                                 oracle,
                                 context,
                                 &requirements,
+                                &mut call_effects,
                                 id,
                             );
                             changed |= merge_inst(&mut analysis.values, id, place);
@@ -799,7 +829,14 @@ pub fn analyze(
             }
         }
         if contextualized {
-            requirements = infer_requirements(mir, context, oracle, &blocks, requirements);
+            requirements = infer_requirements(
+                mir,
+                context,
+                oracle,
+                &blocks,
+                requirements,
+                &mut call_effects,
+            );
             continue;
         }
 
@@ -852,5 +889,58 @@ pub fn analyze(
         }
 
         return analysis;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn requirement_merge_is_order_independent_for_param_and_frame() {
+        let mut mir = MirFunc::new(Ustr::from("requirement_merge"));
+        let block = mir.entry();
+        let key = mir.emit(block, Inst::Const(Lit::Int(0)));
+
+        let mut param_then_frame = ArenaMap::default();
+        merge_requirement(&mut param_then_frame, key, Place::Param(3));
+        merge_requirement(&mut param_then_frame, key, Place::Frame);
+
+        let mut frame_then_param = ArenaMap::default();
+        merge_requirement(&mut frame_then_param, key, Place::Frame);
+        merge_requirement(&mut frame_then_param, key, Place::Param(3));
+
+        assert_eq!(
+            param_then_frame.get(key).copied(),
+            Some(Place::Param(3))
+        );
+        assert_eq!(
+            frame_then_param.get(key).copied(),
+            Some(Place::Param(3))
+        );
+    }
+
+    #[test]
+    fn requirement_merge_is_order_independent_for_session_and_param() {
+        let mut mir = MirFunc::new(Ustr::from("requirement_merge"));
+        let block = mir.entry();
+        let key = mir.emit(block, Inst::Const(Lit::Int(0)));
+
+        let mut param_then_session = ArenaMap::default();
+        merge_requirement(&mut param_then_session, key, Place::Param(3));
+        merge_requirement(&mut param_then_session, key, Place::Session);
+
+        let mut session_then_param = ArenaMap::default();
+        merge_requirement(&mut session_then_param, key, Place::Session);
+        merge_requirement(&mut session_then_param, key, Place::Param(3));
+
+        assert_eq!(
+            param_then_session.get(key).copied(),
+            Some(Place::Session)
+        );
+        assert_eq!(
+            session_then_param.get(key).copied(),
+            Some(Place::Session)
+        );
     }
 }
