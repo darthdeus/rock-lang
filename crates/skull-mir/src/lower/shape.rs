@@ -414,7 +414,9 @@ fn planned_layout_rec(
                 off = child_base + size;
                 align = align.max(child_align);
             }
-            PlannedField::Nullable(_) | PlannedField::Opaque => return None,
+            PlannedField::FlatEnum(_) | PlannedField::Nullable(_) | PlannedField::Opaque => {
+                return None;
+            }
         }
     }
     Some((round_up(off - base, align), align))
@@ -425,7 +427,9 @@ fn planned_alignment(plan: &PlannedValue) -> Option<usize> {
         let field_align = match field {
             PlannedField::Primitive(cty) => c_prim_size_align(cty)?.1,
             PlannedField::Nested(child) => planned_alignment(child)?,
-            PlannedField::Nullable(_) | PlannedField::Opaque => return None,
+            PlannedField::FlatEnum(_) | PlannedField::Nullable(_) | PlannedField::Opaque => {
+                return None;
+            }
         };
         Some(align.max(field_align))
     })
@@ -496,6 +500,7 @@ impl ValueShape {
 pub(crate) enum PlannedField {
     Primitive(&'static str),
     Nested(Box<PlannedValue>),
+    FlatEnum(ValueShape),
     Nullable(Box<PlannedValue>),
     Opaque,
 }
@@ -522,6 +527,8 @@ fn planned_shape(
             PlannedField::Primitive(_) => FieldShape::Prim,
             PlannedField::Opaque if gc => FieldShape::Prim,
             PlannedField::Opaque => return None,
+            PlannedField::FlatEnum(shape) if gc => FieldShape::Nested(shape.clone()),
+            PlannedField::FlatEnum(_) => return None,
             PlannedField::Nested(child) => {
                 let child = if gc {
                     child.shape.clone().or_else(|| child.gc_shape.clone())
@@ -600,6 +607,16 @@ fn planned_value_rec(
                 PlannedField::Primitive("int")
             }
             Some(TypeExpr::App { ctor: TypeCtor::Nominal(child), .. }) => {
+                if sd.is_nobox {
+                    if let Some(flat) =
+                        EnumPlan::for_name(ws, child).and_then(|plan| plan.flat().cloned())
+                    {
+                        cdata = false;
+                        scalarizable = false;
+                        fields.push((field.name, PlannedField::FlatEnum(flat.value_shape())));
+                        continue;
+                    }
+                }
                 let Some(child_plan) = planned_value_rec(ws, child, visiting) else {
                     cdata = false;
                     scalarizable = false;
