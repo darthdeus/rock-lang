@@ -497,6 +497,15 @@ fn cell_place(analysis: &PlacementAnalysis, cell: Idx<Cell>) -> Place {
     analysis.cells.get(cell).copied().unwrap_or(Place::Pending)
 }
 
+fn is_default_param_store(mir: &MirFunc, cell: Idx<Cell>, value: Idx<Inst>) -> bool {
+    let Some(index) = mir.params.iter().position(|param| *param == cell) else {
+        return false;
+    };
+    mir.param_default_values
+        .get(&index)
+        .is_some_and(|roots| roots.contains(&value))
+}
+
 fn add_constraint(analysis: &mut PlacementAnalysis, value: Place, destination: Place, span: Span) {
     match known_outlives(value, destination) {
         Some(true) => {}
@@ -786,6 +795,9 @@ pub fn analyze(
                     let span = mir.inst_spans.get(id).copied().unwrap_or_default();
                     match &mir.insts[id] {
                         Inst::Store { cell, value } => {
+                            if is_default_param_store(mir, *cell, *value) {
+                                continue;
+                            }
                             let value = inst_place(&analysis, *value);
                             changed |= merge_cell(&mut analysis.cells, *cell, value);
                         }
