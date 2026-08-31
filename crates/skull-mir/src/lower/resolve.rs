@@ -377,6 +377,16 @@ impl Builder<'_> {
                     None => Ok(ValueRepr::Scalar(fv)),
                 }
             }
+            // Native first-class values are copied by the target's value load. In
+            // particular, a nullable global may be statically narrowed after a
+            // presence guard while its storage still carries the wrapper; keep
+            // that wrapper until the native consumer reads it.
+            Expr::Global(g)
+                if self.scx.values_first_class
+                    && !self.ws.functions_by_name.contains_key(&g) =>
+            {
+                Ok(ValueRepr::Scalar(self.emit_cur(Inst::Global(g))))
+            }
             // A `nobox` global lives in K scalar globals, so the read IS the leaf
             // snapshot -- no box to copy out of.
             Expr::Global(_) if nobox_global_place.is_some() => {

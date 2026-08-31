@@ -194,9 +194,12 @@ impl Builder<'_> {
             // A global holding a value struct routes through the repr layer so a
             // whole-value read copies the box (a global is a mutable place).
             Expr::Global(name) => {
-                if self.value_struct_of(e).is_some() || self.nullable_place_value_of(e)?.is_some() {
+                if self.value_struct_of(e).is_some()
+                    || self.nullable_place_value_of(e)?.is_some()
+                    || self.nobox_global_place(e)?.is_some()
+                {
                     let r = self.lower_expr_repr(e)?.into_value();
-                    return Ok(self.pack(r)?);
+                    return Ok(self.pack_maybe_absent(r)?);
                 }
                 Ok(self.emit_cur(Inst::Global(name)))
             }
