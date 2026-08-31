@@ -579,10 +579,16 @@ fn infer_requirements(
             Inst::StoreGlobal { value, .. } if oracle.carries_placement(mir, *value) => {
                 worklist.merge_value(&mut requirements, *value, Place::Session);
             }
-            Inst::StoreIndex { base, value, .. } if oracle.carries_placement(mir, *value) => {
+            Inst::StoreField { base, value, .. } | Inst::StoreIndex { base, value, .. }
+                if oracle.carries_placement(mir, *value) =>
+            {
+                let can_contextualize = match mir.insts[*value] {
+                    Inst::Load(cell) => cell_has_contextual_source(mir, oracle, blocks, cell),
+                    _ => true,
+                };
                 let destination =
                     inferred_argument_place(mir, &requirements, oracle, context, analysis, *base);
-                if !matches!(destination, Place::Pending) {
+                if can_contextualize && !matches!(destination, Place::Pending) {
                     worklist.merge_value(&mut requirements, *value, destination);
                 }
             }
@@ -703,6 +709,37 @@ fn is_default_param_store(mir: &MirFunc, cell: Idx<Cell>, value: Idx<Inst>) -> b
     mir.param_default_values
         .get(&index)
         .is_some_and(|roots| roots.contains(&value))
+}
+
+fn cell_has_contextual_source(
+    mir: &MirFunc,
+    oracle: &impl PlacementOracle,
+    blocks: &[Idx<crate::mir::Block>],
+    cell: Idx<Cell>,
+) -> bool {
+    let mut found = false;
+    for &block in blocks {
+        for &id in &mir.blocks[block].insts {
+            let Inst::Store {
+                cell: stored,
+                value,
+            } = mir.insts[id]
+            else {
+                continue;
+            };
+            if stored != cell || is_default_param_store(mir, stored, value) {
+                continue;
+            }
+            found = true;
+            if !is_call_result(mir, value)
+                && !(is_composite_constructor(&mir.insts[value])
+                    && !oracle.is_allocation_site(mir, value))
+            {
+                return false;
+            }
+        }
+    }
+    found
 }
 
 fn add_constraint(analysis: &mut PlacementAnalysis, value: Place, destination: Place, span: Span) {
