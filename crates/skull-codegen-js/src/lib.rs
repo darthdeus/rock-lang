@@ -440,9 +440,8 @@ function __try_call(f) {
 /// `__op_eq` (verified on luajit: reference structs, value structs, tuples,
 /// enums, newtypes all compare BY CONTENTS; primitives by value). Lua `nil` maps
 /// to both JS `null` and `undefined` (an absent arg / an array hole), so both
-/// count as nil. A Vec compares by its tracked `len` over `_data[0..len)`, not
-/// as a dense array -- mirroring luajit's `pairs`-walk, which is len-bounded, so
-/// a drained tail slot (`_data[len] = undefined` after pop/clear) is invisible.
+/// count as nil. A Vec compares its live logical storage, not reserved capacity
+/// or representation metadata, so a drained tail slot is invisible.
 /// Structs are `{__ty, ...}` plain objects (the
 /// `__rock_create_struct` shape: a `__ty` string tag, no metatable), so a
 /// key-walk that includes `__ty` covers the type check for free. A capturing
@@ -463,10 +462,35 @@ function __op_eq(a, b) {
   if (typeof a !== "object" || typeof b !== "object") return a === b;
   if (typeof __rock_code_ref_kind === "function" &&
       (__rock_code_ref_kind(a) !== null || __rock_code_ref_kind(b) !== null)) return a === b;
-  // A Vec compares by tracked `len` over `_data[0..len)` (len-bounded, like
-  // luajit's pairs-walk), so a drained tail slot beyond `len` never breaks eq.
+  // A Vec compares live storage only. Each concrete element type has one
+  // compiler-selected representation, so unlike representations cannot be
+  // values of the same concrete Vec type.
   if (a.__ty === "Vec" || b.__ty === "Vec") {
     if (a.__ty !== "Vec" || b.__ty !== "Vec" || a.len !== b.len) return false;
+    var ah = a["@vec"], bh = b["@vec"];
+    var ar = ah !== null && typeof ah === "object" ? ah.repr : "boxed";
+    var br = bh !== null && typeof bh === "object" ? bh.repr : "boxed";
+    if (ar !== br) return false;
+    if (ar === "strided") {
+      if (ah.elem !== bh.elem || ah.stride !== bh.stride) return false;
+      for (var si = 0; si < a.len * ah.stride; si++) {
+        if (!__op_eq(a._data[si], b._data[si])) return false;
+      }
+      return true;
+    }
+    if (ar === "columns") {
+      if (ah.elem !== bh.elem) return false;
+      var ak = Object.keys(a).filter(function(k) { return k !== "len" && k !== "__ty" && k !== "@vec"; });
+      var bk = Object.keys(b).filter(function(k) { return k !== "len" && k !== "__ty" && k !== "@vec"; });
+      if (ak.length !== bk.length) return false;
+      for (var ci = 0; ci < ak.length; ci++) {
+        var ck = ak[ci];
+        if (!Array.isArray(a[ck]) || !Array.isArray(b[ck])) return false;
+        for (var cj = 0; cj < a.len; cj++) if (!__op_eq(a[ck][cj], b[ck][cj])) return false;
+      }
+      return true;
+    }
+    if (!Array.isArray(a._data) || !Array.isArray(b._data)) return false;
     for (var vi = 0; vi < a.len; vi++) if (!__op_eq(a._data[vi], b._data[vi])) return false;
     return true;
   }
@@ -548,6 +572,19 @@ function __rock_col_header(t) {
   var h = t["@vec"];
   return (h !== null && typeof h === "object" && h.repr === "columns") ? h : null;
 }
+function __rock_stride_header(t) {
+  var h = t["@vec"];
+  return (h !== null && typeof h === "object" && h.repr === "strided") ? h : null;
+}
+function __rock_stride_element(t, h, index) {
+  var base = index * h.stride;
+  var out = {__variant: t._data[base], __ty: h.elem};
+  for (var j = 1; j < h.stride; j++) {
+    var value = t._data[base + j];
+    if (value !== false) out[j - 1] = value;
+  }
+  return out;
+}
 function __rock_inspect_key_lt(a, b) {
   var sa = lua_tostring(a), sb = lua_tostring(b);
   return sa < sb ? -1 : (sa > sb ? 1 : 0);
@@ -610,14 +647,15 @@ function __rock_inspect_value(v, indent, path, visited, precision) {
   }
   var type_name = t.__ty;
   var colh = type_name === "Vec" && t.len !== undefined ? __rock_col_header(t) : null;
-  if (type_name === "Vec" && t.len !== undefined && (t._data || colh)) {
+  var strideh = type_name === "Vec" && t.len !== undefined ? __rock_stride_header(t) : null;
+  if (type_name === "Vec" && t.len !== undefined && (t._data || colh || strideh)) {
     var mat = colh ? __rock_col_mat[colh.elem] : null;
     if (colh && mat === undefined) {
       throw new Error("no column materializer emitted for element type " + colh.elem);
     }
     var vparts = [];
     for (var i = 0; i < t.len; i++) {
-      var elem = colh ? mat(t, i) : t._data[i];
+      var elem = colh ? mat(t, i) : strideh ? __rock_stride_element(t, strideh, i) : t._data[i];
       vparts.push(__rock_inspect_value(elem, indent, path + "[" + i + "]", visited, precision));
     }
     if (visited) visited.delete(t);

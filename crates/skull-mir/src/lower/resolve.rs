@@ -435,6 +435,12 @@ impl Builder<'_> {
                 let i = self.lower_expr(index)?;
                 self.column_element_repr(b, i, elem).map(ValueBundle::into_value)
             }
+            Expr::Index { base, index } if self.vec_strided_elem_of(base)?.is_some() => {
+                let elem = self.vec_strided_elem_of(base)?.expect("guard matched");
+                let (b, _) = self.lower_index_base(base)?;
+                let i = self.lower_expr(index)?;
+                self.strided_element_repr(b, i, elem).map(ValueBundle::into_value)
+            }
             // A value-struct ELEMENT read (`buf[i]`/`fv[i]`/`v[i]`) as an unboxed
             // Group of leaf reads off the checked slot: a leaf projection reads the
             // part live, while `pack` (a whole-value use -- let-bind, arg, return,
@@ -455,6 +461,9 @@ impl Builder<'_> {
                 // direct column reads. Bounds are checked ONCE for the element.
                 if let ContainerKind::VecValueColumns(elem) = kind {
                     return self.column_element_repr(b, i, elem).map(ValueBundle::into_value);
+                }
+                if let ContainerKind::VecValueStrided(elem) = kind {
+                    return self.strided_element_repr(b, i, elem).map(ValueBundle::into_value);
                 }
                 // A column-stored Map reaches its leaves the same way, one
                 // indirection out: the spine resolves the key to a slot, and the

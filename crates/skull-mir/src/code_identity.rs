@@ -870,6 +870,11 @@ impl BodyHasher {
             ContainerKind::VecColumn => self.tag(4),
             ContainerKind::NativeBufferLeaf => self.tag(5),
             ContainerKind::Map => self.tag(6),
+            ContainerKind::VecValueStrided(elem) => {
+                self.tag(7);
+                self.column_elem(elem);
+            }
+            ContainerKind::VecStrideSlot => self.tag(8),
         }
     }
 
@@ -1023,6 +1028,46 @@ impl BodyHasher {
                 self.rep_id(*representation);
                 self.boolean(*nobox);
                 self.inst_idx(*capacity);
+            }
+            Inst::MakeVecStrided {
+                elem,
+                representation,
+                nobox,
+                stride,
+                values,
+                len,
+                capacity,
+            } => {
+                self.tag(89);
+                self.string(elem.as_str());
+                self.rep_id(*representation);
+                self.boolean(*nobox);
+                self.hash.write_usize(*stride);
+                self.inst_list(values);
+                self.hash.write_usize(*len);
+                self.inst_idx(*capacity);
+            }
+            Inst::MakeVecStridedHeader {
+                elem,
+                representation,
+                nobox,
+                stride,
+                capacity,
+            } => {
+                self.tag(90);
+                self.string(elem.as_str());
+                self.rep_id(*representation);
+                self.boolean(*nobox);
+                self.hash.write_usize(*stride);
+                self.inst_idx(*capacity);
+            }
+            Inst::VecStrideNilToFalse(value) => {
+                self.tag(91);
+                self.inst_idx(*value);
+            }
+            Inst::VecStrideFalseToNil(value) => {
+                self.tag(92);
+                self.inst_idx(*value);
             }
             Inst::MakeStruct { ty, fields } => {
                 self.tag(68);

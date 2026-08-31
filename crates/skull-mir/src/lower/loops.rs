@@ -120,7 +120,9 @@ impl Builder<'_> {
             // Either Vec flavor: columns change storage, not the iteration
             // protocol -- `VecIter.next` reads `it.vec[it.i]`, which is an
             // `Index` and picks up the column kind on its own.
-            ContainerKind::Vec | ContainerKind::VecValueColumns(_) => Err(gap(
+            ContainerKind::Vec
+            | ContainerKind::VecValueColumns(_)
+            | ContainerKind::VecValueStrided(_) => Err(gap(
                 "for over [T] must route through the iterator protocol (for_iter_protocol missing)",
             )),
             ContainerKind::NativeBuffer | ContainerKind::NativeBufferValue(_) => {
@@ -131,6 +133,7 @@ impl Builder<'_> {
             // element lowering and are never user types, so neither can be a
             // `for` head.
             ContainerKind::VecColumn => Err(gap("for over a synthetic Vec leaf column")),
+            ContainerKind::VecStrideSlot => Err(gap("for over a synthetic Vec strided slot")),
             ContainerKind::NativeBufferLeaf => Err(gap("for over a synthetic NativeBuffer leaf view")),
         }
     }

@@ -13,6 +13,7 @@ pub enum ContainerFamily {
 pub enum ContainerStorage {
     Boxed { element: RepId },
     Columns { element: RepId },
+    Strided { element: RepId },
     LeafAddressed { element: RepId },
 }
 
@@ -156,6 +157,15 @@ impl ContainerPlan {
         let element_rep = arena.plan_container_element(ws, target, &physical_element)?;
         let shape = arena.value_shape(element_rep);
         let column_eligible = arena.column_eligible(element_rep);
+        let dense_strided = matches!(family, ContainerFamily::Vec)
+            && !nullable
+            && match &element {
+                crate::monoty::MonoTy::App {
+                    ctor: crate::monoty::MonoCtor::Nominal(name),
+                    ..
+                } => crate::lower::dense_flat_enum_vec_eligible(ws, *name),
+                _ => false,
+            };
         let columns = match (family, shape.as_ref()) {
             (ContainerFamily::Vec, Some(shape)) if column_eligible => {
                 let paths = crate::lower::value_leaf_paths(shape);
@@ -183,6 +193,8 @@ impl ContainerPlan {
         let leaf_addressed = leaf_addresses.is_some();
         let storage = if columns {
             ContainerStorage::Columns { element: element_rep }
+        } else if dense_strided {
+            ContainerStorage::Strided { element: element_rep }
         } else if leaf_addressed {
             ContainerStorage::LeafAddressed { element: element_rep }
         } else {
@@ -207,6 +219,7 @@ impl ContainerPlan {
         match self.storage {
             ContainerStorage::Boxed { element }
             | ContainerStorage::Columns { element }
+            | ContainerStorage::Strided { element }
             | ContainerStorage::LeafAddressed { element } => element,
         }
     }
@@ -217,6 +230,17 @@ impl ContainerPlan {
 
     pub fn column_elem(&self, arena: &RepArena) -> Option<crate::mir::ColumnElem> {
         let ContainerStorage::Columns { element } = self.storage else { return None };
+        let shape = arena.value_shape(element)?;
+        Some(crate::mir::ColumnElem::planned(
+            shape.name,
+            shape.nullable,
+            self.element_rep(),
+            arena.get(self.element_rep()).nobox(),
+        ))
+    }
+
+    pub fn strided_elem(&self, arena: &RepArena) -> Option<crate::mir::ColumnElem> {
+        let ContainerStorage::Strided { element } = self.storage else { return None };
         let shape = arena.value_shape(element)?;
         Some(crate::mir::ColumnElem::planned(
             shape.name,

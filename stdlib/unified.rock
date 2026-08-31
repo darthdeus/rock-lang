@@ -754,6 +754,50 @@ deco init on_reload {
         return false
     end
 
+    -- Vec equality is over its live elements, not its backing capacity or
+    -- representation metadata. Each element type has one compiler-selected
+    -- representation, so unequal representations cannot be values of the same
+    -- concrete Vec type.
+    if type_a == "Vec" or type_b == "Vec" then
+        if type_a ~= "Vec" or type_b ~= "Vec" or a.len ~= b.len then
+            return false
+        end
+        local ah, bh = rawget(a, "@vec"), rawget(b, "@vec")
+        local ar = type(ah) == "table" and ah.repr or "boxed"
+        local br = type(bh) == "table" and bh.repr or "boxed"
+        if ar ~= br then return false end
+        if ar == "strided" then
+            if ah.elem ~= bh.elem or ah.stride ~= bh.stride then return false end
+            for i = 1, a.len * ah.stride do
+                if not __op_eq(a._data[i], b._data[i]) then return false end
+            end
+            return true
+        end
+        if ar == "columns" then
+            if ah.elem ~= bh.elem then return false end
+            for k, col in pairs(a) do
+                if k ~= "len" and k ~= "__ty" and k ~= "@vec" then
+                    local other = b[k]
+                    if type(col) ~= "table" or type(other) ~= "table" then return false end
+                    for i = 1, a.len do
+                        if not __op_eq(col[i], other[i]) then return false end
+                    end
+                end
+            end
+            for k, _ in pairs(b) do
+                if k ~= "len" and k ~= "__ty" and k ~= "@vec" and a[k] == nil then
+                    return false
+                end
+            end
+            return true
+        end
+        if type(a._data) ~= "table" or type(b._data) ~= "table" then return false end
+        for i = 1, a.len do
+            if not __op_eq(a._data[i], b._data[i]) then return false end
+        end
+        return true
+    end
+
     -- A GC-carrying value struct (table repr) carries a per-type `__eq`
     -- metatable that is the AUTHORITY: scalar/value fields structural, GC-ref
     -- fields BY REFERENCE. The `a == b` reference check above already invoked it
@@ -1693,11 +1737,85 @@ inline(lua) fn __vec_data_sort<T, K>(vec: [T], key_fn: fn(T) -> K) = """
     return physical
 """
 
+@nomangle inline(lua) fn __rock_stride_capacity(
+    reserved: int,
+    physical: int,
+    stride: int
+) -> int = """
+    local populated = math.floor(physical / stride)
+    if reserved > populated then return reserved end
+    return populated
+"""
+
+@nomangle inline(lua) fn __rock_stride_insert(
+    data: any,
+    lua_index: int,
+    len: int,
+    stride: int
+) = """
+    local start = (lua_index - 1) * stride + 1
+    for i = len * stride, start, -1 do data[i + stride] = data[i] end
+    for i = start, start + stride - 1 do data[i] = false end
+"""
+
+@nomangle inline(lua) fn __rock_stride_copy(data: any, len: int, stride: int) -> any = """
+    local copy = {}
+    for i = 1, len * stride do copy[i] = data[i] end
+    return copy
+"""
+
+@nomangle inline(lua) fn __rock_stride_sort(
+    vec: any,
+    key_fn: any,
+    stride: int
+) = """
+    local n, data = vec.len or 0, vec._data
+    local order = {}
+    for i = 1, n do order[i] = i end
+    local function key_at(row)
+        return key_fn(__rock_materialize_strided_element(vec, row))
+    end
+    table.sort(order, function(a, b) return key_at(a) < key_at(b) end)
+    local sorted = {}
+    for row = 1, n do
+        local source = (order[row] - 1) * stride
+        local target = (row - 1) * stride
+        for j = 1, stride do sorted[target + j] = data[source + j] end
+    end
+    for i = 1, n * stride do data[i] = sorted[i] end
+"""
+
 // Whether `v` is a column-stored Vec.
 @nomangle inline(lua) fn __rock_is_column_vec(v: any) -> bool = """
     if type(v) ~= "table" or v.__ty ~= "Vec" then return false end
     local h = rawget(v, "@vec")
     return type(h) == "table" and h.repr == "columns"
+"""
+
+@nomangle inline(lua) fn __rock_is_strided_vec(v: any) -> bool = """
+    if type(v) ~= "table" or v.__ty ~= "Vec" then return false end
+    local h = rawget(v, "@vec")
+    return type(h) == "table" and h.repr == "strided"
+"""
+
+@nomangle inline(lua) fn __rock_materialize_strided_element(vec: any, index: int) -> any = """
+    local h = rawget(vec, "@vec")
+    if type(h) ~= "table" or h.repr ~= "strided" then
+        error("expected strided Vec")
+    end
+    local base = (index - 1) * h.stride
+    local out = { __variant = vec._data[base + 1], __ty = h.elem }
+    for j = 2, h.stride do
+        local value = vec._data[base + j]
+        if value ~= false then out[j - 1] = value end
+    end
+    return out
+"""
+
+@nomangle inline(lua) fn __rock_vec_strided_elements(vec: any) -> any = """
+    local out = {}
+    for i = 1, vec.len or 0 do out[i] = __rock_materialize_strided_element(vec, i) end
+    return out
 """
 
 // The sorted leaf paths of a column Vec -- the shared key discovery, so zip and
@@ -1886,10 +2004,13 @@ const EPSILON: float = 0.0000001
     -- Vec type
     -- The explicit column marker wins even when the element itself has an
     -- `_data` leaf column.
-    if type_name == "Vec" and t.len and (t._data or __rock_is_column_vec(t)) then
+    if type_name == "Vec" and t.len and
+            (t._data or __rock_is_column_vec(t) or __rock_is_strided_vec(t)) then
         local elems
         if __rock_is_column_vec(t) then
             elems = __rock_vec_column_elements(t)
+        elseif __rock_is_strided_vec(t) then
+            elems = __rock_vec_strided_elements(t)
         else
             elems = t._data
         end
