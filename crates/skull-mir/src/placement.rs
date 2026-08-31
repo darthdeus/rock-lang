@@ -198,6 +198,8 @@ fn merge_requirement<T>(map: &mut ArenaMap<Idx<T>, Place>, key: Idx<T>, value: P
         (Some(Place::Destination), Place::Session) | (Some(Place::Session), Place::Destination) => {
             Place::Session
         }
+        (Some(Place::Destination), param @ Place::Param(_))
+        | (Some(param @ Place::Param(_)), Place::Destination) => param,
         (Some(Place::Session), Place::Runtime(_))
         | (Some(Place::Runtime(_)), Place::Session) => Place::Session,
         (Some(Place::Frame), runtime @ Place::Runtime(_))
@@ -1366,6 +1368,30 @@ mod tests {
         assert_eq!(
             runtime_then_destination.get(key).copied(),
             Some(Place::Unknown)
+        );
+    }
+
+    #[test]
+    fn requirement_merge_is_order_independent_for_destination_and_param() {
+        let mut mir = MirFunc::new(Ustr::from("requirement_merge"));
+        let block = mir.entry();
+        let key = mir.emit(block, Inst::Const(Lit::Int(0)));
+
+        let mut destination_then_param = ArenaMap::default();
+        merge_requirement(&mut destination_then_param, key, Place::Destination);
+        merge_requirement(&mut destination_then_param, key, Place::Param(3));
+
+        let mut param_then_destination = ArenaMap::default();
+        merge_requirement(&mut param_then_destination, key, Place::Param(3));
+        merge_requirement(&mut param_then_destination, key, Place::Destination);
+
+        assert_eq!(
+            destination_then_param.get(key).copied(),
+            Some(Place::Param(3))
+        );
+        assert_eq!(
+            param_then_destination.get(key).copied(),
+            Some(Place::Param(3))
         );
     }
 
