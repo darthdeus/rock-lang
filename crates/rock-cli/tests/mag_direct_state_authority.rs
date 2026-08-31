@@ -41,6 +41,118 @@ fn mag_has_no_aggregate_projection_bridge_names() {
 }
 
 #[test]
+fn mag_world_environment_state_is_owned_by_the_scene_graph() {
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("rock workspace root");
+    let mut sources = Vec::new();
+    rock_sources(&repo.join("mag"), &mut sources);
+
+    let forbidden = [
+        "global restorative_ready_at:",
+        "global harvest_ready:",
+        "global harvest_node_tiles:",
+        "global harvest_node_spaces:",
+        "global harvest_scan_t:",
+        "global hazard_ready_at:",
+        "global hazard_last_settled_place:",
+        "global gate_lock_seen:",
+        "struct HarvestSpaceNodes",
+        "fn reset_restoration()",
+        "fn reset_harvest()",
+        "fn reset_hazards()",
+    ];
+    let mut findings = Vec::new();
+    for source in &sources {
+        let text = fs::read_to_string(source).expect("read MAG source");
+        for (line_number, line) in text.lines().enumerate() {
+            for declaration in forbidden {
+                if line.contains(declaration) {
+                    findings.push(format!(
+                        "{}:{}: {declaration}",
+                        source.display(),
+                        line_number + 1
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        findings.is_empty(),
+        "world-environment state still has Session-global/reset authority:\n{}",
+        findings.join("\n")
+    );
+
+    let world = fs::read_to_string(repo.join("mag/world_levels.rock"))
+        .expect("read MAG world source");
+    let space_state = world
+        .split_once("struct SpaceState {")
+        .and_then(|(_, rest)| rest.split_once("\n}"))
+        .map(|(body, _)| body)
+        .expect("read SpaceState body");
+    for field in [
+        "restoration: RestorationState",
+        "harvest: HarvestState",
+        "hazards: HazardState",
+        "gates: GateObservationState",
+    ] {
+        assert_eq!(
+            space_state.matches(field).count(),
+            1,
+            "SpaceState must own `{field}` exactly once"
+        );
+    }
+    assert!(
+        world.contains("struct SpaceState {") && world.contains("restoration: RestorationState"),
+        "SpaceState must be the constructed owner, not a parallel cache registry"
+    );
+
+    let harvest = fs::read_to_string(repo.join("mag/harvest.rock"))
+        .expect("read MAG harvest source");
+    assert_eq!(
+        harvest.matches("fn harvest_ready_key(g: IVec2)").count(),
+        1,
+        "per-Space harvest state must not pack SpaceId into local tile keys"
+    );
+    let hazards = fs::read_to_string(repo.join("mag/hazards.rock"))
+        .expect("read MAG hazards source");
+    assert_eq!(
+        hazards.matches("fn hazard_ready_key(grid: IVec2)").count(),
+        1,
+        "per-Space hazard state must not pack SpaceId into local tile keys"
+    );
+
+    let player = fs::read_to_string(repo.join("mag/player.rock"))
+        .expect("read MAG player source");
+    assert_eq!(
+        player.matches("hazard_last_settled_place: Place?").count(),
+        1,
+        "Player must own its previous settled hazard tile"
+    );
+
+    let run = fs::read_to_string(repo.join("mag/run.rock"))
+        .expect("read MAG run source");
+    for assignment in [
+        "restorative_ready_at =",
+        "harvest_ready =",
+        "harvest_node_tiles =",
+        "harvest_node_spaces =",
+        "harvest_scan_t =",
+        "hazard_ready_at =",
+        "hazard_last_settled_place =",
+        "hazard_hits =",
+        "gate_lock_seen =",
+    ] {
+        assert_eq!(
+            run.matches(assignment).count(),
+            0,
+            "run_reset_direct_state must not reset Scene-owned `{assignment}`"
+        );
+    }
+}
+
+#[test]
 fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_accessor() {
     let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
