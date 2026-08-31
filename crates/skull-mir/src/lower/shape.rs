@@ -90,11 +90,11 @@ pub fn value_struct_slot_fields(ws: &Workspace, name: Ustr) -> Option<Vec<ValueS
     Some(out)
 }
 
-/// Max leaf count that stores as columns. Above it, columns fall off a measured
-/// write cliff (9.3x on LuaJIT / 9.1x on V8 at K=16, x86; 17.1x / 11.7x on
-/// arm64) and strided AoS wins -- so a wider type keeps today's representation
-/// rather than silently taking the slow layout. Every collection site in the
-/// tree is K <= 4. Numbers + the AoS tier: `docs/vec-value-columns-plan.md`.
+/// Max leaf count that stores an unmarked value in columns. Above it, columns
+/// fall off a measured write cliff (9.3x on LuaJIT / 9.1x on V8 at K=16, x86;
+/// 17.1x / 11.7x on arm64), so an unmarked wider type stays boxed. An explicit
+/// `nobox` guarantee bypasses this heuristic because boxing is not a legal
+/// fallback. Numbers + the AoS tier: `docs/vec-value-columns-plan.md`.
 pub(crate) const MAX_COLUMN_LEAVES: usize = 4;
 
 /// The column KEYS of `shape`, presence first when the element type is nullable.

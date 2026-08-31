@@ -159,8 +159,8 @@ impl ContainerPlan {
         let columns = match (family, shape.as_ref()) {
             (ContainerFamily::Vec, Some(shape)) if column_eligible => {
                 let paths = crate::lower::value_leaf_paths(shape);
-                (paths.len() + usize::from(nullable)
-                    <= crate::lower::MAX_COLUMN_LEAVES)
+                (paths.len() + usize::from(nullable) <= crate::lower::MAX_COLUMN_LEAVES
+                    || arena.get(element_rep).nobox())
                     .then(|| !paths.iter().any(|path| path.as_str() == "len"))
                     .unwrap_or(false)
             }
