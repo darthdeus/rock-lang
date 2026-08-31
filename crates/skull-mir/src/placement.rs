@@ -179,7 +179,16 @@ fn merge_cell(map: &mut ArenaMap<Idx<Cell>, Place>, key: Idx<Cell>, value: Place
 }
 
 fn merge_requirement<T>(map: &mut ArenaMap<Idx<T>, Place>, key: Idx<T>, value: Place) -> bool {
-    let merged = match (map.get(key).copied(), value) {
+    let merged = merge_requirement_place(map.get(key).copied(), value);
+    if map.get(key).copied() == Some(merged) {
+        return false;
+    }
+    map.insert(key, merged);
+    true
+}
+
+fn merge_requirement_place(old: Option<Place>, value: Place) -> Place {
+    match (old, value) {
         (None, value) => value,
         (Some(old), value) if old == value => old,
         (Some(Place::Pending), value) | (Some(value), Place::Pending) => value,
@@ -217,12 +226,7 @@ fn merge_requirement<T>(map: &mut ArenaMap<Idx<T>, Place>, key: Idx<T>, value: P
         }
         (Some(Place::Unknown), _) | (Some(_), Place::Unknown) => Place::Unknown,
         (Some(_), value) => value,
-    };
-    if map.get(key).copied() == Some(merged) {
-        return false;
     }
-    map.insert(key, merged);
-    true
 }
 
 #[derive(Clone, Default, PartialEq, Eq)]
@@ -242,6 +246,8 @@ struct RequirementWorklist {
     queue: VecDeque<RequirementKey>,
     queued_values: ArenaMap<Idx<Inst>, bool>,
     queued_cells: ArenaMap<Idx<Cell>, bool>,
+    cell_loads: ArenaMap<Idx<Cell>, Vec<Idx<Inst>>>,
+    cell_multi_calls: ArenaMap<Idx<Cell>, Vec<Idx<Inst>>>,
     cell_stores: ArenaMap<Idx<Cell>, Vec<Idx<Inst>>>,
     call_users: ArenaMap<Idx<Inst>, Vec<Idx<Inst>>>,
 }
@@ -303,10 +309,21 @@ impl RequirementWorklist {
         for &block in blocks {
             for &id in &mir.blocks[block].insts {
                 match &mir.insts[id] {
+                    Inst::Load(cell) => {
+                        self.cell_loads.entry(*cell).or_default().push(id);
+                    }
                     Inst::Store { cell, .. } => {
                         self.cell_stores.entry(*cell).or_default().push(id);
                     }
-                    Inst::Call { args, .. } | Inst::CallMulti { args, .. } => {
+                    Inst::Call { args, .. } => {
+                        for &arg in args {
+                            self.call_users.entry(arg).or_default().push(id);
+                        }
+                    }
+                    Inst::CallMulti { dests, args, .. } => {
+                        for &dest in dests {
+                            self.cell_multi_calls.entry(dest).or_default().push(id);
+                        }
                         for &arg in args {
                             self.call_users.entry(arg).or_default().push(id);
                         }
@@ -323,6 +340,16 @@ impl RequirementWorklist {
     }
 
     fn process_cell(&mut self, cell: Idx<Cell>) {
+        if let Some(loads) = self.cell_loads.get(cell).cloned() {
+            for load in loads {
+                self.enqueue_value(load);
+            }
+        }
+        if let Some(calls) = self.cell_multi_calls.get(cell).cloned() {
+            for call in calls {
+                self.enqueue_value(call);
+            }
+        }
         if let Some(stores) = self.cell_stores.get(cell).cloned() {
             for store in stores {
                 self.enqueue_value(store);
@@ -374,6 +401,33 @@ fn inferred_argument_place(
             }
         }),
     }
+}
+
+fn contextual_argument_place(
+    mir: &MirFunc,
+    requirements: &PlacementRequirements,
+    oracle: &impl PlacementOracle,
+    arg: Idx<Inst>,
+) -> Option<Place> {
+    let place = match mir.insts[arg] {
+        Inst::Global(name) => Some(oracle.global_place(name)),
+        Inst::Load(cell) => mir
+            .params
+            .iter()
+            .position(|param| *param == cell)
+            .and_then(|index| u16::try_from(index).ok())
+            .map(Place::Param)
+            .or_else(|| requirements.cells.get(cell).copied()),
+        Inst::Field { base, .. }
+        | Inst::TupleIndex { base, .. }
+        | Inst::Index { base, .. }
+        | Inst::Len { base, .. }
+        | Inst::VecCheckedIndex { vec: base, .. } => {
+            contextual_argument_place(mir, requirements, oracle, base)
+        }
+        _ => requirements.values.get(arg).copied(),
+    };
+    place.filter(|place| !matches!(place, Place::Pending))
 }
 
 fn explicit_call_argument(
@@ -466,11 +520,23 @@ fn infer_call_requirements(
         Inst::Call { func, args } | Inst::CallMulti { func, args, .. } => (*func, args),
         _ => return false,
     };
-    let call_requirement = requirements
+    let mut call_requirement = requirements
         .values
         .get(id)
         .copied()
         .filter(|place| !matches!(place, Place::Pending));
+    if let Inst::CallMulti { dests, .. } = &mir.insts[id] {
+        for &dest in dests {
+            if let Some(place) = requirements
+                .cells
+                .get(dest)
+                .copied()
+                .filter(|place| !matches!(place, Place::Pending))
+            {
+                call_requirement = Some(merge_requirement_place(call_requirement, place));
+            }
+        }
+    }
     let direct_requirement = raw_args
         .iter()
         .any(|arg| carries_requirement(mir, oracle, flow_cells, *arg));
@@ -487,10 +553,45 @@ fn infer_call_requirements(
                     Place::Param(_) | Place::Destination | Place::Pending
                 )
         });
+    let contextual_store = effect.stores.iter().any(|store| {
+        let Some(destination) = raw_args.get(usize::from(store.destination)) else {
+            return false;
+        };
+        let Some(value) = raw_args.get(usize::from(store.value)) else {
+            return false;
+        };
+        contextual_argument_place(mir, requirements, oracle, *destination).is_some()
+            && (is_call_result(mir, *value) || is_composite_constructor(&mir.insts[*value]))
+            && oracle.carries_placement(mir, *value)
+    });
+    let contextual_constraint = effect.constraints.iter().any(|constraint| {
+        let (Place::Param(value_index), Place::Param(destination_index)) =
+            (constraint.value, constraint.destination)
+        else {
+            return false;
+        };
+        let Some(destination) = explicit_call_argument(
+            mir,
+            raw_args,
+            destination_index,
+            &effect.omitted_args,
+        )
+        .and_then(|destination| contextual_argument_place(mir, requirements, oracle, destination))
+        else {
+            return false;
+        };
+        let Some(value) = explicit_call_argument(mir, raw_args, value_index, &effect.omitted_args)
+        else {
+            return false;
+        };
+        !matches!(destination, Place::Pending) && oracle.carries_placement(mir, value)
+    });
+    let contextual_retention = contextual_store || contextual_constraint;
     if !direct_requirement
         && !flow_argument
         && call_requirement.is_none()
         && !unconditional_retention
+        && !contextual_retention
     {
         return false;
     }
@@ -503,6 +604,7 @@ fn infer_call_requirements(
             })
         })
         && !unconditional_retention
+        && !contextual_retention
     {
         return false;
     }
@@ -512,6 +614,28 @@ fn infer_call_requirements(
         .collect();
     apply_omitted_args(&mut args, &effect.omitted_args);
     let mut changed = false;
+
+    for store in &effect.stores {
+        let Some(destination) = explicit_call_argument(
+            mir,
+            raw_args,
+            store.destination,
+            &effect.omitted_args,
+        )
+        .and_then(|destination| contextual_argument_place(mir, requirements, oracle, destination))
+        else {
+            continue;
+        };
+        let Some(value) = explicit_call_argument(mir, raw_args, store.value, &effect.omitted_args)
+        else {
+            continue;
+        };
+        if (is_call_result(mir, value) || is_composite_constructor(&mir.insts[value]))
+            && oracle.carries_placement(mir, value)
+        {
+            changed |= merge_requirement(&mut requirements.values, value, destination);
+        }
+    }
 
     if let Some(Place::Param(index)) = effect.result
         && let Some(arg) = explicit_call_argument(mir, raw_args, index, &effect.omitted_args)
@@ -524,11 +648,15 @@ fn infer_call_requirements(
     for constraint in &effect.constraints {
         let destination = match constraint.destination {
             Place::Destination => call_requirement,
-            Place::Param(index) => Some(
-                args.get(index as usize)
-                    .copied()
-                    .unwrap_or(Place::Unknown),
-            ),
+            Place::Param(index) => explicit_call_argument(
+                mir,
+                raw_args,
+                index,
+                &effect.omitted_args,
+            )
+            .and_then(|arg| contextual_argument_place(mir, requirements, oracle, arg))
+            .or_else(|| args.get(index as usize).copied())
+            .or(Some(Place::Unknown)),
             place => Some(place),
         };
         match constraint.value {
@@ -608,6 +736,7 @@ fn infer_requirements(
             Inst::Store { cell, value } => {
                 if let Some(required) = requirements.cells.get(*cell).copied()
                     && oracle.carries_placement(mir, *value)
+                    && !is_default_param_store(mir, *cell, *value)
                     && !oracle.is_allocation_site(mir, *value)
                 {
                     worklist.merge_value(&mut requirements, *value, required);
