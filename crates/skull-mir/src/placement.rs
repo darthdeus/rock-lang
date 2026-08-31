@@ -475,13 +475,25 @@ fn infer_call_requirements(
         .iter()
         .any(|arg| carries_requirement(mir, oracle, flow_cells, *arg));
     let flow_argument = flow_calls.contains(&id);
-    if !direct_requirement && !flow_argument && call_requirement.is_none() {
-        return false;
-    }
     let allocation = call_requirement.unwrap_or(context.default_allocation);
     let effect = call_effects
         .entry((id, allocation))
         .or_insert_with(|| oracle.call_effect(mir, id, func, allocation));
+    let unconditional_retention = !effect.opaque_retains.is_empty()
+        || effect.constraints.iter().any(|constraint| {
+            matches!(constraint.value, Place::Param(_) | Place::Destination)
+                && !matches!(
+                    constraint.destination,
+                    Place::Param(_) | Place::Destination | Place::Pending
+                )
+        });
+    if !direct_requirement
+        && !flow_argument
+        && call_requirement.is_none()
+        && !unconditional_retention
+    {
+        return false;
+    }
     if call_requirement.is_none()
         && !direct_requirement
         && !raw_args.iter().enumerate().any(|(index, arg)| {
@@ -490,6 +502,7 @@ fn infer_call_requirements(
                     && call_effect_consumes_argument(effect, index)
             })
         })
+        && !unconditional_retention
     {
         return false;
     }
