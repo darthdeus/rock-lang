@@ -785,3 +785,58 @@ fn mag_player_queries_are_receiver_methods() {
         assert!(!source.contains(declaration), "prefix-only Player query remains `{declaration}`");
     }
 }
+
+#[test]
+fn mag_world_presentation_state_has_explicit_owners() {
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("rock workspace root");
+    let mut sources = Vec::new();
+    rock_sources(&repo.join("mag"), &mut sources);
+    let forbidden = [
+        "global teleport_arrive_t:",
+        "global teleport_arrive_at:",
+        "global teleport_arrive_color:",
+        "global world_marks:",
+        "global world_mark_head:",
+        "global DROP_PARTICLE_SEQ:",
+        "global cloud:",
+        "teleport_arrive_t =",
+        "teleport_arrive_at =",
+        "teleport_arrive_color =",
+        "world_marks =",
+        "world_mark_head =",
+        "    cloud = []",
+    ];
+    for source in &sources {
+        let text = fs::read_to_string(source).expect("read MAG source");
+        for declaration in forbidden {
+            assert!(!text.contains(declaration), "ambient presentation state remains in {}: {declaration}", source.display());
+        }
+    }
+    let player = fs::read_to_string(repo.join("mag/player.rock")).expect("read Player source");
+    assert!(player.contains("teleport_arrival: TeleportArrivalState"));
+    assert!(player.contains("cloud: [Cloud]"));
+    let teleport = fs::read_to_string(repo.join("mag/teleport.rock")).expect("read teleport source");
+    for field in ["place: Place", "remaining: float", "color: Color"] {
+        assert_eq!(teleport.matches(field).count(), 1, "TeleportArrivalState owns {field}");
+    }
+    assert!(teleport.contains("player.teleport_arrival.place = dest"));
+    assert!(teleport.contains("player.teleport_arrival.remaining"));
+    assert!(teleport.contains("editor_presented_tile_center(player.teleport_arrival.place.space"));
+    let run = fs::read_to_string(repo.join("mag/run.rock")).expect("read run source");
+    assert!(run.contains("player.update_teleport_arrival()"));
+    assert!(run.contains("player.update_cloud()"));
+    let world = fs::read_to_string(repo.join("mag/world_levels.rock")).expect("read world source");
+    assert!(world.contains("decals: [WorldMark]"));
+    assert!(world.contains("decal_head: int"));
+    assert!(world.contains("drop_particle_seq: int"));
+    let blood = fs::read_to_string(repo.join("mag/blood.rock")).expect("read blood source");
+    assert!(blood.contains("world_space_index(world, space)"));
+    assert!(blood.contains("world.spaces[index].decals"));
+    assert!(blood.contains("world.drop_particle_seq"));
+    let cloud = fs::read_to_string(repo.join("mag/cloud.rock")).expect("read cloud source");
+    assert!(cloud.contains("const CLOUD_SIZE: int = 12"));
+    assert!(cloud.contains("fn Player.update_cloud(player)"));
+}
