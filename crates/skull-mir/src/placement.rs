@@ -960,6 +960,13 @@ fn add_constraint(analysis: &mut PlacementAnalysis, value: Place, destination: P
     }
 }
 
+fn export_place(place: Place) -> Place {
+    match place {
+        Place::Runtime(_) => Place::Frame,
+        place => place,
+    }
+}
+
 fn substitute_constraint(
     analysis: &mut PlacementAnalysis,
     constraint: OutlivesConstraint,
@@ -1538,6 +1545,16 @@ pub fn analyze(
             analysis.summary.default_params[index] = Some(place);
         }
 
+        analysis.summary.result = analysis.summary.result.map(export_place);
+        analysis.summary.owner = analysis.summary.owner.map(export_place);
+        for constraint in &mut analysis.summary.constraints {
+            constraint.value = export_place(constraint.value);
+            constraint.destination = export_place(constraint.destination);
+        }
+        for place in &mut analysis.summary.default_params {
+            *place = place.map(export_place);
+        }
+
         return analysis;
     }
 }
@@ -1545,6 +1562,60 @@ pub fn analyze(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct RuntimeResultOracle;
+
+    impl PlacementOracle for RuntimeResultOracle {
+        fn global_place(&self, _name: Ustr) -> Place {
+            Place::Static
+        }
+
+        fn carries_placement(&self, _mir: &MirFunc, _inst: Idx<Inst>) -> bool {
+            true
+        }
+
+        fn is_allocation_site(&self, _mir: &MirFunc, _inst: Idx<Inst>) -> bool {
+            false
+        }
+
+        fn call_effect(
+            &self,
+            _mir: &MirFunc,
+            _inst: Idx<Inst>,
+            _func: FuncRef,
+            _default_allocation: Place,
+        ) -> CallEffect {
+            CallEffect {
+                result: Some(Place::Runtime(_inst)),
+                ..CallEffect::default()
+            }
+        }
+    }
+
+    #[test]
+    fn function_summaries_do_not_export_callee_local_runtime_places() {
+        let mut mir = MirFunc::new(Ustr::from("runtime_result"));
+        let block = mir.entry();
+        let call = mir.emit(
+            block,
+            Inst::Call {
+                func: FuncRef {
+                    module: bone_semantic::prelude::ModuleId::builtin(),
+                    func: Idx::from_raw(comfy_la_arena::RawIdx::from_u32(0)),
+                },
+                args: Vec::new(),
+            },
+        );
+        mir.set_term(block, Term::Return(vec![call]));
+
+        let analysis = analyze(&mir, AnalysisContext::frame(), &RuntimeResultOracle);
+
+        assert_eq!(analysis.summary.result, Some(Place::Frame));
+        assert!(analysis.summary.constraints.iter().all(|constraint| {
+            !matches!(constraint.value, Place::Runtime(_))
+                && !matches!(constraint.destination, Place::Runtime(_))
+        }));
+    }
 
     #[test]
     fn requirement_merge_is_order_independent_for_param_and_frame() {
