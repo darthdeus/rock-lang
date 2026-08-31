@@ -51,7 +51,7 @@ assert(sum == 1002000)
     );
 
     let trace = std::fs::read_to_string(trace).expect("trace artifact");
-    assert!(trace.starts_with("rock.jit-allocation-trace.v1\n"));
+    assert!(trace.starts_with("rock.jit-allocation-trace.v2\n"));
     let rows = trace.lines().skip(3).collect::<Vec<_>>();
     assert!(!rows.is_empty(), "trace contains no allocation IR rows");
     assert!(
@@ -61,5 +61,58 @@ assert(sum == 1002000)
     assert!(
         rows.iter().any(|row| row.contains("\tretained\tTNEW\t")),
         "trace did not identify the retained table allocation:\n{trace}",
+    );
+}
+
+#[test]
+fn luajit_trace_distinguishes_trace_ids_reused_after_flush() {
+    let scratch = tempfile::tempdir().expect("scratch");
+    let probe = scratch.path().join("probe.lua");
+    let trace = scratch.path().join("trace.tsv");
+    std::fs::write(
+        &probe,
+        r#"local retained = {}
+
+local function retained_value(first, last)
+  for i = first, last do
+    retained[i] = {i, i + 1}
+  end
+end
+
+retained_value(1, 1000)
+jit.flush()
+retained_value(1001, 2000)
+assert(retained[2000][1] == 2000)
+"#,
+    )
+    .expect("trace reuse probe source");
+
+    let output = Command::new(rock_host::project::luajit_path())
+        .arg("-e")
+        .arg(
+            "local a=require('tools.luajit.allocation_trace'); \
+             a.start(os.getenv('ROCK_TRACE'), os.getenv('ROCK_PROBE')); \
+             dofile(os.getenv('ROCK_PROBE')); a.stop()",
+        )
+        .env("LUA_PATH", rock_host::project::lua_path_value())
+        .env("ROCK_TRACE", &trace)
+        .env("ROCK_PROBE", &probe)
+        .output()
+        .expect("run trace reuse probe");
+    assert!(
+        output.status.success(),
+        "trace reuse probe failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    let trace = std::fs::read_to_string(trace).expect("trace artifact");
+    assert!(trace.starts_with("rock.jit-allocation-trace.v2\n"));
+    let rows = trace.lines().skip(3).collect::<Vec<_>>();
+    assert!(!rows.is_empty(), "trace contains no allocation IR rows");
+    assert!(
+        rows.iter().any(|row| row.starts_with("0\t"))
+            && rows.iter().any(|row| row.starts_with("1\t")),
+        "trace did not record both generations around jit.flush():\n{trace}",
     );
 }

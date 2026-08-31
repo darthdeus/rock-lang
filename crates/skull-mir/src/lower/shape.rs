@@ -607,15 +607,13 @@ fn planned_value_rec(
                 PlannedField::Primitive("int")
             }
             Some(TypeExpr::App { ctor: TypeCtor::Nominal(child), .. }) => {
-                if sd.is_nobox {
-                    if let Some(flat) =
-                        EnumPlan::for_name(ws, child).and_then(|plan| plan.flat().cloned())
-                    {
-                        cdata = false;
-                        scalarizable = false;
-                        fields.push((field.name, PlannedField::FlatEnum(flat.value_shape())));
-                        continue;
-                    }
+                if let Some(flat) =
+                    EnumPlan::for_name(ws, child).and_then(|plan| plan.flat().cloned())
+                {
+                    cdata = false;
+                    scalarizable = false;
+                    fields.push((field.name, PlannedField::FlatEnum(flat.value_shape())));
+                    continue;
                 }
                 let Some(child_plan) = planned_value_rec(ws, child, visiting) else {
                     cdata = false;
@@ -681,6 +679,18 @@ fn planned_value_rec(
 
 pub(crate) fn planned_value(ws: &Workspace, name: Ustr) -> Option<PlannedValue> {
     planned_value_rec(ws, name, &mut Vec::new())
+}
+
+pub(crate) fn planned_value_contains_flat_enum(ws: &Workspace, name: Ustr) -> bool {
+    fn contains(plan: &PlannedValue) -> bool {
+        plan.fields.iter().any(|(_, field)| match field {
+            PlannedField::FlatEnum(_) => true,
+            PlannedField::Nested(child) | PlannedField::Nullable(child) => contains(child),
+            PlannedField::Primitive(_) | PlannedField::Opaque => false,
+        })
+    }
+
+    planned_value(ws, name).is_some_and(|plan| contains(&plan))
 }
 
 /// `Some(ordered variant names)` iff `name` is a PAYLOAD-FREE enum (every variant

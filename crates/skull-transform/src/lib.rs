@@ -2307,7 +2307,7 @@ pub(crate) fn top_level_blocks(f: &MirFunc) -> Vec<Idx<Block>> {
 
 /// Value operands an instruction READS, pushed to `push` (callback form — avoids
 /// a per-inst `Vec` allocation in the dce hot loop).
-pub(crate) fn value_operands(inst: &Inst, push: &mut impl FnMut(Idx<Inst>)) {
+pub fn value_operands(inst: &Inst, push: &mut impl FnMut(Idx<Inst>)) {
     let mut p = |x: &Idx<Inst>| push(*x);
     match inst {
         Inst::Const(_) | Inst::Global(_) | Inst::Load(_) | Inst::Lambda { .. }

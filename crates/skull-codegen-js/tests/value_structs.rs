@@ -125,3 +125,31 @@ fn nobox_value_return_crosses_as_leaves_not_a_box() {
     assert!(js.contains("__rock_ret1 = "), "leaf 1 must ride the scratch bank:\n{js}");
     eval_int(&js, "root", 12);
 }
+
+#[test]
+fn ordinary_value_with_a_flat_enum_return_crosses_as_leaves() {
+    let src = "enum Payload { A, B }\n\
+               enum Kind { Plain, Payload(Payload) }\n\
+               value Row { kind: Kind, key: string, count: int }\n\
+               fn make(kind: Kind, n: int) -> Row {\n\
+                   return match kind {\n\
+                       Kind::Plain => Row { kind, key: \"plain\", count: n + 1 },\n\
+                       Kind::Payload(_) => Row { kind, key: \"payload\", count: n + 1 },\n\
+                   }\n\
+               }\n\
+               fn consume(row: Row) -> int {\n\
+                   let key_bonus = if row.key == \"payload\" { 10 } else { 0 }\n\
+                   return match row.kind {\n\
+                       Kind::Plain => row.count + key_bonus,\n\
+                       Kind::Payload(payload) => match payload {\n\
+                           Payload::A => row.count + key_bonus,\n\
+                           Payload::B => row.count + key_bonus + 4,\n\
+                       },\n\
+                   }\n\
+               }\n\
+               fn root() -> int { consume(make(Kind::Payload(Payload::B), 4)) }";
+    let ws = ws_with(src);
+    let js = emit_closure(&ws, "root").expect("ordinary nested-enum value emits");
+    assert!(!js.contains("__ty: \"Row\""), "the returned row materialized an object:\n{js}");
+    eval_int(&js, "root", 19);
+}
