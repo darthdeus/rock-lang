@@ -78,7 +78,7 @@ struct Activation<'a> {
 
 #[derive(Debug, Default)]
 struct JitEvidence<'a> {
-    traces: HashSet<u32>,
+    traces: HashSet<(u32, u32)>,
     ir: usize,
     sunk: bool,
     retained: bool,
@@ -98,7 +98,10 @@ fn parse_jit_trace<'a>(
     lua: &str,
 ) -> Result<BTreeMap<(String, u32), JitEvidence<'a>>> {
     let mut lines = trace.lines();
-    if lines.next() != Some("rock.jit-allocation-trace.v1") {
+    let format = lines.next();
+    let legacy = format == Some("rock.jit-allocation-trace.v1");
+    let current = format == Some("rock.jit-allocation-trace.v2");
+    if !legacy && !current {
         anyhow::bail!("JIT allocation trace has the wrong or missing format header");
     }
     let artifact = lines
@@ -108,7 +111,12 @@ fn parse_jit_trace<'a>(
     if artifact.is_empty() {
         anyhow::bail!("JIT allocation trace has an empty artifact path");
     }
-    if lines.next() != Some("trace\tir\tstate\top\tbody_start\tlua_line") {
+    let expected_header = if legacy {
+        "trace\tir\tstate\top\tbody_start\tlua_line"
+    } else {
+        "trace_generation\ttrace\tir\tstate\top\tbody_start\tlua_line"
+    };
+    if lines.next() != Some(expected_header) {
         anyhow::bail!("JIT allocation trace has the wrong column header");
     }
 
@@ -124,24 +132,31 @@ fn parse_jit_trace<'a>(
     let mut evidence: BTreeMap<(String, u32), JitEvidence<'a>> = BTreeMap::new();
     for line in lines {
         let fields = line.split('\t').collect::<Vec<_>>();
-        if fields.len() != 6 {
+        if fields.len() != if legacy { 6 } else { 7 } {
             anyhow::bail!("malformed JIT allocation trace row `{line}`");
         }
-        let trace_id = fields[0].parse::<u32>()?;
-        let ir = fields[1].parse::<u32>()?;
-        if !seen.insert((trace_id, ir)) {
-            anyhow::bail!("JIT allocation trace repeats trace {trace_id} IR {ir}");
+        let (trace_generation, trace_index, ir_index) = if legacy {
+            (0, 0, 1)
+        } else {
+            (fields[0].parse::<u32>()?, 1, 2)
+        };
+        let trace_id = fields[trace_index].parse::<u32>()?;
+        let ir = fields[ir_index].parse::<u32>()?;
+        if !seen.insert((trace_generation, trace_id, ir)) {
+            anyhow::bail!(
+                "JIT allocation trace repeats generation {trace_generation} trace {trace_id} IR {ir}"
+            );
         }
-        let state = fields[2];
+        let state = fields[ir_index + 1];
         if state != "sunk" && state != "retained" {
             anyhow::bail!("JIT allocation trace has invalid state `{state}`");
         }
-        let op = fields[3];
+        let op = fields[ir_index + 2];
         if op.is_empty() {
             anyhow::bail!("JIT allocation trace has an empty IR operation");
         }
-        let body_start = fields[4].parse::<u32>()?;
-        let lua_line = fields[5].parse::<u32>()?;
+        let body_start = fields[ir_index + 3].parse::<u32>()?;
+        let lua_line = fields[ir_index + 4].parse::<u32>()?;
         if body_start == 0 || lua_line < body_start {
             anyhow::bail!(
                 "JIT allocation trace has invalid body/artifact lines {body_start}/{lua_line}"
@@ -159,7 +174,7 @@ fn parse_jit_trace<'a>(
         }
         let local_line = lua_line - emitted_start + 1;
         let entry = evidence.entry((body_name.clone(), local_line)).or_default();
-        entry.traces.insert(trace_id);
+        entry.traces.insert((trace_generation, trace_id));
         entry.ir += 1;
         entry.sunk |= state == "sunk";
         entry.retained |= state == "retained";
@@ -934,6 +949,30 @@ trace	ir	state	op	body_start	lua_line
         assert!(report.starts_with("rock.allocation-join.v11\n"));
         assert!(report.contains("jit_state\tjit_class\tjit_traces\tjit_ir\tjit_ops"));
         assert!(report.contains("mixed\tobject\t2\t2\tTNEW"));
+    }
+
+    #[test]
+    fn jit_join_accepts_reused_trace_ids_when_generations_differ() {
+        let lua = r#"function draw_leaf()
+  local v = __rock_alloc_hit("bbbbbbbbbbbbbbbb", __rock_vec_new())
+end
+"#;
+        let trace = r#"rock.jit-allocation-trace.v2
+artifact	/generated/main.lua
+trace_generation	trace	ir	state	op	body_start	lua_line
+0	1	4	sunk	TNEW	1	2
+1	1	4	retained	TNEW	1	2
+"#;
+        let report = render_joined_report_with_jit(
+            MANIFEST,
+            ACTIVATION,
+            Some("draw"),
+            Some(lua),
+            Some(trace),
+        )
+        .expect("joined generation-aware JIT allocation evidence");
+
+        assert!(report.contains("mixed\tobject\t2\t2\tTNEW"), "{report}");
     }
 
     #[test]
