@@ -859,29 +859,52 @@ fn cell_has_contextual_source(
     blocks: &[Idx<crate::mir::Block>],
     cell: Idx<Cell>,
 ) -> bool {
-    let mut found = false;
-    for &block in blocks {
-        for &id in &mir.blocks[block].insts {
-            let Inst::Store {
-                cell: stored,
-                value,
-            } = mir.insts[id]
-            else {
-                continue;
-            };
-            if stored != cell || is_default_param_store(mir, stored, value) {
-                continue;
-            }
-            found = true;
-            if !is_call_result(mir, value)
-                && !(is_composite_constructor(&mir.insts[value])
-                    && !oracle.is_allocation_site(mir, value))
-            {
-                return false;
+    fn visit(
+        mir: &MirFunc,
+        oracle: &impl PlacementOracle,
+        blocks: &[Idx<crate::mir::Block>],
+        cell: Idx<Cell>,
+        visiting: &mut HashSet<Idx<Cell>>,
+    ) -> bool {
+        if mir.params.contains(&cell) {
+            return true;
+        }
+        if !visiting.insert(cell) {
+            return false;
+        }
+        let mut found = false;
+        for &block in blocks {
+            for &id in &mir.blocks[block].insts {
+                let Inst::Store {
+                    cell: stored,
+                    value,
+                } = mir.insts[id]
+                else {
+                    continue;
+                };
+                if stored != cell || is_default_param_store(mir, stored, value) {
+                    continue;
+                }
+                found = true;
+                let contextual = match mir.insts[value] {
+                    Inst::Load(source) => visit(mir, oracle, blocks, source, visiting),
+                    _ => {
+                        is_call_result(mir, value)
+                            || (is_composite_constructor(&mir.insts[value])
+                                && !oracle.is_allocation_site(mir, value))
+                    }
+                };
+                if !contextual {
+                    visiting.remove(&cell);
+                    return false;
+                }
             }
         }
+        visiting.remove(&cell);
+        found
     }
-    found
+
+    visit(mir, oracle, blocks, cell, &mut HashSet::new())
 }
 
 fn add_constraint(analysis: &mut PlacementAnalysis, value: Place, destination: Place, span: Span) {
@@ -1156,7 +1179,9 @@ fn value_place(
                     });
                 }
             }
-            if !oracle.carries_placement(mir, id) {
+            if !oracle.carries_placement(mir, id)
+                && !matches!(inst, Inst::CallMulti { .. })
+            {
                 return Place::Static;
             }
             effect
@@ -1175,6 +1200,14 @@ pub fn analyze(
 ) -> PlacementAnalysis {
     let blocks = crate::reach::emitted_blocks(mir);
     let parameter_cells = mir.params.iter().copied().collect::<HashSet<_>>();
+    let multi_result_cells = blocks
+        .iter()
+        .flat_map(|block| mir.blocks[*block].insts.iter().copied())
+        .filter_map(|id| match mir.insts[id] {
+            Inst::Load(cell) if oracle.carries_placement(mir, id) => Some(cell),
+            _ => None,
+        })
+        .collect::<HashSet<_>>();
     let mut call_effects = HashMap::new();
     let mut cell_blocks = HashMap::<Idx<Cell>, HashSet<Idx<crate::mir::Block>>>::new();
     let mut alias_predecessors = HashMap::<Idx<Cell>, HashSet<Idx<Cell>>>::new();
@@ -1341,6 +1374,24 @@ pub fn analyze(
                             let value = inst_place(&analysis, *value);
                             let destination = inst_place(&analysis, *arr);
                             add_constraint(&mut analysis, value, destination, span);
+                        }
+                        Inst::CallMulti { dests, .. } => {
+                            let place = value_place(
+                                mir,
+                                &mut analysis,
+                                oracle,
+                                context,
+                                &requirements,
+                                &mut call_effects,
+                                &flow_cells,
+                                id,
+                            );
+                            changed |= merge_inst(&mut analysis.values, id, place);
+                            for &dest in dests {
+                                if multi_result_cells.contains(&dest) {
+                                    changed |= merge_cell(&mut analysis.cells, dest, place);
+                                }
+                            }
                         }
                         _ => {
                             let place = value_place(
