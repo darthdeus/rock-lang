@@ -12,6 +12,7 @@ pub enum Place {
     Static,
     Session,
     Frame,
+    Environment,
     Destination,
     Param(u16),
     Runtime(Idx<Inst>),
@@ -24,8 +25,14 @@ impl Place {
             (left, right) if left == right => left,
             (Self::Pending, other) | (other, Self::Pending) => other,
             (Self::Static, other) | (other, Self::Static) => other,
+            (Self::Environment, Self::Frame) | (Self::Frame, Self::Environment) => {
+                Self::Environment
+            }
             (Self::Destination, other) | (other, Self::Destination) => other,
             (Self::Frame, Self::Session) | (Self::Session, Self::Frame) => Self::Frame,
+            (Self::Session, Self::Param(index)) | (Self::Param(index), Self::Session) => {
+                Self::Param(index)
+            }
             (Self::Unknown, _) | (_, Self::Unknown) => Self::Unknown,
             _ => Self::Unknown,
         }
@@ -142,6 +149,8 @@ fn known_outlives(value: Place, destination: Place) -> Option<bool> {
         (Place::Param(_) | Place::Destination, _) | (_, Place::Param(_) | Place::Destination) => {
             None
         }
+        (Place::Environment, Place::Frame) => Some(true),
+        (Place::Environment, _) => None,
         (Place::Session, Place::Session | Place::Frame) => Some(true),
         (Place::Session, Place::Runtime(_)) => Some(true),
         (Place::Runtime(_), Place::Frame) => Some(true),
@@ -421,10 +430,14 @@ fn requirement_flow_source(
 fn carries_requirement(
     mir: &MirFunc,
     oracle: &impl PlacementOracle,
+    flow_cells: &HashSet<Idx<Cell>>,
     inst: Idx<Inst>,
 ) -> bool {
     oracle.carries_placement(mir, inst)
-        && (is_call_result(mir, inst) || is_composite_constructor(&mir.insts[inst]))
+        && (is_call_result(mir, inst)
+            || is_composite_constructor(&mir.insts[inst])
+            || matches!(mir.insts[inst], Inst::StringConcat(..))
+            || matches!(mir.insts[inst], Inst::Load(cell) if flow_cells.contains(&cell)))
 }
 
 fn call_effect_consumes_argument(effect: &CallEffect, index: u16) -> bool {
@@ -451,23 +464,24 @@ fn infer_call_requirements(
         Inst::Call { func, args } | Inst::CallMulti { func, args, .. } => (*func, args),
         _ => return false,
     };
-    let direct_requirement = raw_args
-        .iter()
-        .any(|arg| carries_requirement(mir, oracle, *arg));
-    let flow_argument = flow_calls.contains(&id);
-    if !direct_requirement && !flow_argument {
-        return false;
-    }
-    let allocation = requirements
+    let call_requirement = requirements
         .values
         .get(id)
         .copied()
-        .filter(|place| !matches!(place, Place::Pending))
-        .unwrap_or(context.default_allocation);
+        .filter(|place| !matches!(place, Place::Pending));
+    let direct_requirement = raw_args
+        .iter()
+        .any(|arg| carries_requirement(mir, oracle, flow_cells, *arg));
+    let flow_argument = flow_calls.contains(&id);
+    if !direct_requirement && !flow_argument && call_requirement.is_none() {
+        return false;
+    }
+    let allocation = call_requirement.unwrap_or(context.default_allocation);
     let effect = call_effects
         .entry((id, allocation))
         .or_insert_with(|| oracle.call_effect(mir, id, func, allocation));
-    if !direct_requirement
+    if call_requirement.is_none()
+        && !direct_requirement
         && !raw_args.iter().enumerate().any(|(index, arg)| {
             u16::try_from(index).ok().is_some_and(|index| {
                 is_derived_load(mir, flow_cells, *arg)
@@ -482,16 +496,10 @@ fn infer_call_requirements(
         .map(|arg| inferred_argument_place(mir, requirements, oracle, context, analysis, *arg))
         .collect();
     apply_omitted_args(&mut args, &effect.omitted_args);
-    let call_requirement = requirements
-        .values
-        .get(id)
-        .copied()
-        .filter(|place| !matches!(place, Place::Pending));
     let mut changed = false;
 
     if let Some(Place::Param(index)) = effect.result
         && let Some(arg) = explicit_call_argument(mir, raw_args, index, &effect.omitted_args)
-        && is_call_result(mir, arg)
         && oracle.carries_placement(mir, arg)
         && let Some(call_requirement) = call_requirement
     {
@@ -569,6 +577,13 @@ fn infer_requirements(
             Inst::StoreGlobal { value, .. } if oracle.carries_placement(mir, *value) => {
                 worklist.merge_value(&mut requirements, *value, Place::Session);
             }
+            Inst::StoreIndex { base, value, .. } if oracle.carries_placement(mir, *value) => {
+                let destination =
+                    inferred_argument_place(mir, &requirements, oracle, context, analysis, *base);
+                if !matches!(destination, Place::Pending) {
+                    worklist.merge_value(&mut requirements, *value, destination);
+                }
+            }
             Inst::Store { cell, value } => {
                 if let Some(required) = requirements.cells.get(*cell).copied()
                     && oracle.carries_placement(mir, *value)
@@ -602,7 +617,9 @@ fn infer_requirements(
                     }
                 }
             }
-            Inst::Field { base, .. } | Inst::TupleIndex { base, .. } => {
+            Inst::Field { base, .. }
+            | Inst::TupleIndex { base, .. }
+            | Inst::Index { base, .. } => {
                 if let Some(required) = requirements.values.get(id).copied()
                     && oracle.carries_placement(mir, *base)
                 {
@@ -982,6 +999,7 @@ pub fn analyze(
     let mut alias_predecessors = HashMap::<Idx<Cell>, HashSet<Idx<Cell>>>::new();
     let mut alias_successors = HashMap::<Idx<Cell>, HashSet<Idx<Cell>>>::new();
     let mut source_cells = HashSet::new();
+    let mut single_call_sources = HashSet::new();
     for &block in &blocks {
         for &id in &mir.blocks[block].insts {
             let Inst::Store { cell, value } = mir.insts[id] else {
@@ -994,6 +1012,9 @@ pub fn analyze(
             }
             if requirement_flow_source(mir, oracle, &parameter_cells, value) {
                 source_cells.insert(cell);
+                if is_call_result(mir, value) {
+                    single_call_sources.insert(cell);
+                }
             }
         }
     }
@@ -1019,8 +1040,16 @@ pub fn analyze(
             (blocks.len() > 1 && source_cells.contains(&cell)).then_some(cell)
         })
         .collect::<HashSet<_>>();
-    let mut candidate_cells = joined_sources.clone();
-    let mut pending = joined_sources.iter().copied().collect::<Vec<_>>();
+    let flow_sources = joined_sources
+        .into_iter()
+        .chain(single_call_sources.iter().copied())
+        .collect::<HashSet<_>>();
+    let mut candidate_cells = flow_sources
+        .iter()
+        .filter(|cell| !single_call_sources.contains(cell))
+        .copied()
+        .collect::<HashSet<_>>();
+    let mut pending = candidate_cells.iter().copied().collect::<Vec<_>>();
     while let Some(cell) = pending.pop() {
         if let Some(successors) = alias_successors.get(&cell) {
             for &successor in successors {
@@ -1047,7 +1076,7 @@ pub fn analyze(
                     continue;
                 };
                 if let Inst::Load(cell) = mir.insts[*arg]
-                    && candidate_cells.contains(&cell)
+                    && (candidate_cells.contains(&cell) || single_call_sources.contains(&cell))
                     && oracle.carries_placement(mir, *arg)
                     && call_effect_consumes_argument(effect, index)
                 {
@@ -1065,14 +1094,14 @@ pub fn analyze(
             if !path.insert(cell) {
                 continue;
             }
-            if joined_sources.contains(&cell) {
+            if flow_sources.contains(&cell) {
                 continue;
             }
             if let Some(predecessors) = alias_predecessors.get(&cell) {
                 pending.extend(predecessors.iter().copied());
             }
         }
-        if path.iter().any(|cell| joined_sources.contains(cell)) {
+        if path.iter().any(|cell| flow_sources.contains(cell)) {
             flow_cells.extend(path);
         }
     }
