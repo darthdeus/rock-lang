@@ -801,13 +801,17 @@ fn mag_world_presentation_state_has_explicit_owners() {
         "global world_marks:",
         "global world_mark_head:",
         "global DROP_PARTICLE_SEQ:",
-        "global cloud:",
         "teleport_arrive_t =",
         "teleport_arrive_at =",
         "teleport_arrive_color =",
         "world_marks =",
         "world_mark_head =",
         "    cloud = []",
+        "struct Cloud {",
+        "CLOUD_SIZE",
+        "fn init_cloud()",
+        "fn Player.update_cloud(player)",
+        "fn Player.draw_cloud(player)",
     ];
     for source in &sources {
         let text = fs::read_to_string(source).expect("read MAG source");
@@ -817,7 +821,6 @@ fn mag_world_presentation_state_has_explicit_owners() {
     }
     let player = fs::read_to_string(repo.join("mag/player.rock")).expect("read Player source");
     assert!(player.contains("teleport_arrival: TeleportArrivalState"));
-    assert!(player.contains("cloud: [Cloud]"));
     let teleport = fs::read_to_string(repo.join("mag/teleport.rock")).expect("read teleport source");
     for field in ["place: Place", "remaining: float", "color: Color"] {
         assert_eq!(teleport.matches(field).count(), 1, "TeleportArrivalState owns {field}");
@@ -827,7 +830,6 @@ fn mag_world_presentation_state_has_explicit_owners() {
     assert!(teleport.contains("editor_presented_tile_center(player.teleport_arrival.place.space"));
     let run = fs::read_to_string(repo.join("mag/run.rock")).expect("read run source");
     assert!(run.contains("player.update_teleport_arrival()"));
-    assert!(run.contains("player.update_cloud()"));
     let world = fs::read_to_string(repo.join("mag/world_levels.rock")).expect("read world source");
     assert!(world.contains("decals: [WorldMark]"));
     assert!(world.contains("decal_head: int"));
@@ -836,7 +838,4 @@ fn mag_world_presentation_state_has_explicit_owners() {
     assert!(blood.contains("world_space_index(world, space)"));
     assert!(blood.contains("world.spaces[index].decals"));
     assert!(blood.contains("world.drop_particle_seq"));
-    let cloud = fs::read_to_string(repo.join("mag/cloud.rock")).expect("read cloud source");
-    assert!(cloud.contains("const CLOUD_SIZE: int = 12"));
-    assert!(cloud.contains("fn Player.update_cloud(player)"));
 }
