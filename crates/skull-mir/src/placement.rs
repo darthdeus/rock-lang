@@ -602,7 +602,7 @@ fn infer_requirements(
                     }
                 }
             }
-            Inst::TupleIndex { base, .. } => {
+            Inst::Field { base, .. } | Inst::TupleIndex { base, .. } => {
                 if let Some(required) = requirements.values.get(id).copied()
                     && oracle.carries_placement(mir, *base)
                 {
@@ -1166,7 +1166,7 @@ pub fn analyze(
                     continue;
                 }
                 let destination = inst_place(&analysis, *base);
-                if matches!(destination, Place::Param(_) | Place::Runtime(_)) {
+                if matches!(destination, Place::Param(_) | Place::Runtime(_) | Place::Session) {
                     contextualized |=
                         merge_requirement(&mut requirements.values, *value, destination);
                 }
