@@ -407,9 +407,10 @@ fn contextual_argument_place(
     mir: &MirFunc,
     requirements: &PlacementRequirements,
     oracle: &impl PlacementOracle,
+    analysis: Option<&PlacementAnalysis>,
     arg: Idx<Inst>,
 ) -> Option<Place> {
-    let place = match mir.insts[arg] {
+    let contextual = match mir.insts[arg] {
         Inst::Global(name) => Some(oracle.global_place(name)),
         Inst::Load(cell) => mir
             .params
@@ -423,11 +424,22 @@ fn contextual_argument_place(
         | Inst::Index { base, .. }
         | Inst::Len { base, .. }
         | Inst::VecCheckedIndex { vec: base, .. } => {
-            contextual_argument_place(mir, requirements, oracle, base)
+            contextual_argument_place(mir, requirements, oracle, analysis, base)
         }
         _ => requirements.values.get(arg).copied(),
     };
-    place.filter(|place| !matches!(place, Place::Pending))
+    let analyzed = analysis.and_then(|analysis| match mir.insts[arg] {
+        Inst::Load(cell) => analysis.cells.get(cell).copied(),
+        _ => analysis.values.get(arg).copied(),
+    });
+    match (contextual, analyzed) {
+        (Some(contextual), Some(analyzed)) => {
+            Some(merge_requirement_place(Some(contextual), analyzed))
+        }
+        (Some(place), None) | (None, Some(place)) => Some(place),
+        (None, None) => None,
+    }
+    .filter(|place| !matches!(place, Place::Pending))
 }
 
 fn explicit_call_argument(
@@ -560,7 +572,7 @@ fn infer_call_requirements(
         let Some(value) = raw_args.get(usize::from(store.value)) else {
             return false;
         };
-        contextual_argument_place(mir, requirements, oracle, *destination).is_some()
+        contextual_argument_place(mir, requirements, oracle, analysis, *destination).is_some()
             && (is_call_result(mir, *value) || is_composite_constructor(&mir.insts[*value]))
             && oracle.carries_placement(mir, *value)
     });
@@ -576,7 +588,9 @@ fn infer_call_requirements(
             destination_index,
             &effect.omitted_args,
         )
-        .and_then(|destination| contextual_argument_place(mir, requirements, oracle, destination))
+        .and_then(|destination| {
+            contextual_argument_place(mir, requirements, oracle, analysis, destination)
+        })
         else {
             return false;
         };
@@ -626,7 +640,9 @@ fn infer_call_requirements(
             store.destination,
             &effect.omitted_args,
         )
-        .and_then(|destination| contextual_argument_place(mir, requirements, oracle, destination))
+        .and_then(|destination| {
+            contextual_argument_place(mir, requirements, oracle, analysis, destination)
+        })
         else {
             continue;
         };
@@ -658,7 +674,9 @@ fn infer_call_requirements(
                 index,
                 &effect.omitted_args,
             )
-            .and_then(|arg| contextual_argument_place(mir, requirements, oracle, arg))
+            .and_then(|arg| {
+                contextual_argument_place(mir, requirements, oracle, analysis, arg)
+            })
             .or_else(|| args.get(index as usize).copied())
             .or(Some(Place::Unknown)),
             place => Some(place),
