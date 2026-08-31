@@ -16,11 +16,14 @@ pub enum Place {
     Destination,
     Param(u16),
     Runtime(Idx<Inst>),
+    /// A borrowed runtime value whose concrete owner is one of several
+    /// runtime paths. It proves Frame lifetime but cannot select an allocator.
+    RuntimeAny,
     Unknown,
 }
 
 impl Place {
-    fn join(self, other: Self) -> Self {
+    pub fn join(self, other: Self) -> Self {
         match (self, other) {
             (left, right) if left == right => left,
             (Self::Pending, other) | (other, Self::Pending) => other,
@@ -33,6 +36,14 @@ impl Place {
             (Self::Session, Self::Param(index)) | (Self::Param(index), Self::Session) => {
                 Self::Param(index)
             }
+            (Self::Runtime(left), Self::Runtime(right)) => {
+                if left == right { Self::Runtime(left) } else { Self::RuntimeAny }
+            }
+            (Self::RuntimeAny, Self::RuntimeAny)
+            | (Self::RuntimeAny, Self::Runtime(_))
+            | (Self::Runtime(_), Self::RuntimeAny)
+            | (Self::RuntimeAny, Self::Frame)
+            | (Self::Frame, Self::RuntimeAny) => Self::RuntimeAny,
             (Self::Unknown, _) | (_, Self::Unknown) => Self::Unknown,
             _ => Self::Unknown,
         }
@@ -73,6 +84,14 @@ pub struct CallEffect {
 pub trait PlacementOracle {
     fn global_place(&self, name: Ustr) -> Place;
 
+    fn parameter_derived_place(&self, _mir: &MirFunc, _inst: Idx<Inst>) -> Option<Place> {
+        None
+    }
+
+    fn entity_place(&self, _mir: &MirFunc, _inst: Idx<Inst>) -> Option<Place> {
+        None
+    }
+
     fn carries_placement(&self, mir: &MirFunc, inst: Idx<Inst>) -> bool;
 
     fn is_allocation_site(&self, mir: &MirFunc, inst: Idx<Inst>) -> bool;
@@ -111,6 +130,7 @@ impl AnalysisContext {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FunctionPlacement {
     pub result: Option<Place>,
+    pub entity_result: Option<Place>,
     pub owner: Option<Place>,
     pub constraints: Vec<OutlivesConstraint>,
     pub default_params: Vec<Option<Place>>,
@@ -151,10 +171,13 @@ fn known_outlives(value: Place, destination: Place) -> Option<bool> {
         }
         (Place::Environment, Place::Frame) => Some(true),
         (Place::Environment, _) => None,
-        (Place::Session, Place::Session | Place::Frame) => Some(true),
+        (Place::Session, Place::Session | Place::Frame | Place::RuntimeAny) => Some(true),
         (Place::Session, Place::Runtime(_)) => Some(true),
         (Place::Runtime(_), Place::Frame) => Some(true),
+        (Place::RuntimeAny, Place::Frame) => Some(true),
         (Place::Runtime(left), Place::Runtime(right)) => Some(left == right),
+        (Place::Runtime(_), Place::RuntimeAny) | (Place::RuntimeAny, Place::Runtime(_)) => None,
+        (Place::RuntimeAny, Place::RuntimeAny) => None,
         (Place::Frame, Place::Frame) => Some(true),
         _ => Some(false),
     }
@@ -211,13 +234,27 @@ fn merge_requirement_place(old: Option<Place>, value: Place) -> Place {
         | (Some(param @ Place::Param(_)), Place::Destination) => param,
         (Some(Place::Session), Place::Runtime(_))
         | (Some(Place::Runtime(_)), Place::Session) => Place::Session,
+        (Some(Place::RuntimeAny), Place::Session) | (Some(Place::Session), Place::RuntimeAny) => {
+            Place::Unknown
+        }
         (Some(Place::Frame), runtime @ Place::Runtime(_))
         | (Some(runtime @ Place::Runtime(_)), Place::Frame) => runtime,
+        (Some(Place::Frame), Place::RuntimeAny)
+        | (Some(Place::RuntimeAny), Place::Frame) => Place::RuntimeAny,
         (Some(Place::Destination), Place::Runtime(_))
         | (Some(Place::Runtime(_)), Place::Destination) => Place::Unknown,
+        (Some(Place::Destination), Place::RuntimeAny)
+        | (Some(Place::RuntimeAny), Place::Destination) => Place::Unknown,
+        (Some(Place::RuntimeAny), Place::Param(_))
+        | (Some(Place::Param(_)), Place::RuntimeAny) => Place::Unknown,
+        (Some(Place::RuntimeAny), Place::Environment)
+        | (Some(Place::Environment), Place::RuntimeAny) => Place::Unknown,
         (Some(Place::Runtime(left)), Place::Runtime(right)) => {
             if left == right { Place::Runtime(left) } else { Place::Unknown }
         }
+        (Some(Place::RuntimeAny), Place::Runtime(_))
+        | (Some(Place::Runtime(_)), Place::RuntimeAny)
+        | (Some(Place::RuntimeAny), Place::RuntimeAny) => Place::RuntimeAny,
         (Some(Place::Param(left)), Place::Param(right)) => {
             if left == right { Place::Param(left) } else { Place::Unknown }
         }
@@ -366,6 +403,9 @@ fn inferred_argument_place(
     analysis: Option<&PlacementAnalysis>,
     arg: Idx<Inst>,
 ) -> Place {
+    if let Some(place) = oracle.parameter_derived_place(mir, arg) {
+        return place;
+    }
     if let Some(analysis) = analysis {
         let place = match mir.insts[arg] {
             Inst::Load(cell) => analysis.cells.get(cell).copied(),
@@ -410,7 +450,7 @@ fn contextual_argument_place(
     analysis: Option<&PlacementAnalysis>,
     arg: Idx<Inst>,
 ) -> Option<Place> {
-    let contextual = match mir.insts[arg] {
+    let contextual = oracle.parameter_derived_place(mir, arg).or_else(|| match mir.insts[arg] {
         Inst::Global(name) => Some(oracle.global_place(name)),
         Inst::Load(cell) => mir
             .params
@@ -427,12 +467,13 @@ fn contextual_argument_place(
             contextual_argument_place(mir, requirements, oracle, analysis, base)
         }
         _ => requirements.values.get(arg).copied(),
-    };
+    });
     let analyzed = analysis.and_then(|analysis| match mir.insts[arg] {
         Inst::Load(cell) => analysis.cells.get(cell).copied(),
         _ => analysis.values.get(arg).copied(),
     });
     match (contextual, analyzed) {
+        (Some(contextual), Some(Place::Static)) if contextual != Place::Static => Some(contextual),
         (Some(contextual), Some(analyzed)) => {
             Some(merge_requirement_place(Some(contextual), analyzed))
         }
@@ -746,7 +787,9 @@ fn infer_requirements(
                 if oracle.carries_placement(mir, *value) =>
             {
                 let can_contextualize = match mir.insts[*value] {
-                    Inst::Load(cell) => cell_has_contextual_source(mir, oracle, blocks, cell),
+                    Inst::Load(cell) => {
+                        cell_can_contextualize(mir, oracle, blocks, cell)
+                    }
                     _ => true,
                 };
                 let destination =
@@ -801,7 +844,7 @@ fn infer_requirements(
             Inst::MakeTuple(values) | Inst::MakeVec(values) => {
                 if let Some(required) = requirements.values.get(id).copied() {
                     for &value in values {
-                        if oracle.carries_placement(mir, value) {
+                        if composite_operand_needs_context(mir, oracle, blocks, context, value) {
                             worklist.merge_value(&mut requirements, value, required);
                         }
                     }
@@ -810,7 +853,7 @@ fn infer_requirements(
             Inst::MakeVecColumns { columns, .. } => {
                 if let Some(required) = requirements.values.get(id).copied() {
                     for &value in columns.iter().flat_map(|(_, values)| values) {
-                        if oracle.carries_placement(mir, value) {
+                        if composite_operand_needs_context(mir, oracle, blocks, context, value) {
                             worklist.merge_value(&mut requirements, value, required);
                         }
                     }
@@ -822,7 +865,7 @@ fn infer_requirements(
             | Inst::MakeEnv { fields, .. } => {
                 if let Some(required) = requirements.values.get(id).copied() {
                     for &(_, value) in fields {
-                        if oracle.carries_placement(mir, value) {
+                        if composite_operand_needs_context(mir, oracle, blocks, context, value) {
                             worklist.merge_value(&mut requirements, value, required);
                         }
                     }
@@ -839,7 +882,7 @@ fn infer_requirements(
                         .iter()
                         .chain(named.iter().map(|(_, value)| value))
                     {
-                        if oracle.carries_placement(mir, value) {
+                        if composite_operand_needs_context(mir, oracle, blocks, context, value) {
                             worklist.merge_value(&mut requirements, value, required);
                         }
                     }
@@ -875,7 +918,188 @@ fn is_default_param_store(mir: &MirFunc, cell: Idx<Cell>, value: Idx<Inst>) -> b
         .is_some_and(|roots| roots.contains(&value))
 }
 
-fn cell_has_contextual_source(
+fn all_contextual_source<I>(
+    mir: &MirFunc,
+    oracle: &impl PlacementOracle,
+    blocks: &[Idx<crate::mir::Block>],
+    context: AnalysisContext,
+    operands: I,
+    visiting_values: &mut HashSet<Idx<Inst>>,
+    visiting_cells: &mut HashSet<Idx<Cell>>,
+) -> bool
+where
+    I: IntoIterator<Item = Idx<Inst>>,
+{
+    let mut found = false;
+    for operand in operands {
+        if !oracle.carries_placement(mir, operand) {
+            continue;
+        }
+        found = true;
+        if !value_has_contextual_source(
+            mir,
+            oracle,
+            blocks,
+            context,
+            operand,
+            visiting_values,
+            visiting_cells,
+        ) {
+            return false;
+        }
+    }
+    found
+}
+
+fn visit_contextual_source_cell(
+    mir: &MirFunc,
+    oracle: &impl PlacementOracle,
+    blocks: &[Idx<crate::mir::Block>],
+    context: AnalysisContext,
+    cell: Idx<Cell>,
+    visiting_values: &mut HashSet<Idx<Inst>>,
+    visiting_cells: &mut HashSet<Idx<Cell>>,
+) -> bool {
+    if mir.params.contains(&cell) {
+        return true;
+    }
+    if !visiting_cells.insert(cell) {
+        return false;
+    }
+    let mut found = false;
+    let mut contextual = true;
+    for &block in blocks {
+        for &id in &mir.blocks[block].insts {
+            let Inst::Store {
+                cell: stored,
+                value,
+            } = mir.insts[id]
+            else {
+                continue;
+            };
+            if stored != cell || is_default_param_store(mir, stored, value) {
+                continue;
+            }
+            if !oracle.carries_placement(mir, value) {
+                continue;
+            }
+            found = true;
+            contextual &= value_has_contextual_source(
+                mir,
+                oracle,
+                blocks,
+                context,
+                value,
+                visiting_values,
+                visiting_cells,
+            );
+        }
+    }
+    visiting_cells.remove(&cell);
+    found && contextual
+}
+
+fn value_has_contextual_source(
+    mir: &MirFunc,
+    oracle: &impl PlacementOracle,
+    blocks: &[Idx<crate::mir::Block>],
+    context: AnalysisContext,
+    value: Idx<Inst>,
+    visiting_values: &mut HashSet<Idx<Inst>>,
+    visiting_cells: &mut HashSet<Idx<Cell>>,
+) -> bool {
+    if !oracle.carries_placement(mir, value) || !visiting_values.insert(value) {
+        return false;
+    }
+    let contextual = match &mir.insts[value] {
+        Inst::Const(_) => true,
+        Inst::Load(cell) => visit_contextual_source_cell(
+            mir,
+            oracle,
+            blocks,
+            context,
+            *cell,
+            visiting_values,
+            visiting_cells,
+        ),
+        Inst::Global(_) => true,
+        Inst::Field { base, .. }
+        | Inst::TupleIndex { base, .. }
+        | Inst::Index { base, .. }
+        | Inst::Len { base, .. }
+        | Inst::VecCheckedIndex { vec: base, .. } => value_has_contextual_source(
+            mir,
+            oracle,
+            blocks,
+            context,
+            *base,
+            visiting_values,
+            visiting_cells,
+        ),
+        Inst::MakeTuple(values) => all_contextual_source(
+            mir,
+            oracle,
+            blocks,
+            context,
+            values.iter().copied(),
+            visiting_values,
+            visiting_cells,
+        ),
+        Inst::MakeStruct { fields, .. }
+        | Inst::MaterializeValueStruct { fields, .. }
+        | Inst::MakeValueStruct { fields, .. } => {
+            if oracle.is_allocation_site(mir, value) {
+                false
+            } else {
+                all_contextual_source(
+                    mir,
+                    oracle,
+                    blocks,
+                    context,
+                    fields.iter().map(|(_, value)| *value),
+                    visiting_values,
+                    visiting_cells,
+                )
+            }
+        }
+        Inst::MakeEnum {
+            positional, named, ..
+        }
+        | Inst::MakeEnumDyn {
+            positional, named, ..
+        } => all_contextual_source(
+            mir,
+            oracle,
+            blocks,
+            context,
+            positional
+                .iter()
+                .copied()
+                .chain(named.iter().map(|(_, value)| *value)),
+            visiting_values,
+            visiting_cells,
+        ),
+        Inst::Call { func, .. } | Inst::CallMulti { func, .. } => {
+            matches!(
+                oracle
+                    .call_effect(mir, value, *func, context.default_allocation)
+                    .result,
+                Some(
+                    Place::Static
+                        | Place::Session
+                        | Place::Param(_)
+                        | Place::Runtime(_)
+                        | Place::RuntimeAny
+                )
+            )
+        }
+        _ => false,
+    };
+    visiting_values.remove(&value);
+    contextual
+}
+
+fn cell_can_contextualize(
     mir: &MirFunc,
     oracle: &impl PlacementOracle,
     blocks: &[Idx<crate::mir::Block>],
@@ -895,6 +1119,7 @@ fn cell_has_contextual_source(
             return false;
         }
         let mut found = false;
+        let mut can_contextualize = true;
         for &block in blocks {
             for &id in &mir.blocks[block].insts {
                 let Inst::Store {
@@ -908,7 +1133,7 @@ fn cell_has_contextual_source(
                     continue;
                 }
                 found = true;
-                let contextual = match mir.insts[value] {
+                can_contextualize &= match mir.insts[value] {
                     Inst::Load(source) => visit(mir, oracle, blocks, source, visiting),
                     _ => {
                         is_call_result(mir, value)
@@ -916,17 +1141,33 @@ fn cell_has_contextual_source(
                                 && !oracle.is_allocation_site(mir, value))
                     }
                 };
-                if !contextual {
-                    visiting.remove(&cell);
-                    return false;
-                }
             }
         }
         visiting.remove(&cell);
-        found
+        found && can_contextualize
     }
 
     visit(mir, oracle, blocks, cell, &mut HashSet::new())
+}
+
+fn composite_operand_needs_context(
+    mir: &MirFunc,
+    oracle: &impl PlacementOracle,
+    blocks: &[Idx<crate::mir::Block>],
+    context: AnalysisContext,
+    value: Idx<Inst>,
+) -> bool {
+    let carries = oracle.carries_placement(mir, value);
+    carries
+        && !value_has_contextual_source(
+            mir,
+            oracle,
+            blocks,
+            context,
+            value,
+            &mut HashSet::new(),
+            &mut HashSet::new(),
+        )
 }
 
 fn add_constraint(analysis: &mut PlacementAnalysis, value: Place, destination: Place, span: Span) {
@@ -962,7 +1203,7 @@ fn add_constraint(analysis: &mut PlacementAnalysis, value: Place, destination: P
 
 fn export_place(place: Place) -> Place {
     match place {
-        Place::Runtime(_) => Place::Frame,
+        Place::Runtime(_) | Place::RuntimeAny => Place::Frame,
         place => place,
     }
 }
@@ -1021,6 +1262,9 @@ fn composite_place(
     };
     if matches!(destination, Place::Pending | Place::Unknown) {
         return Place::Unknown;
+    }
+    if initial == Place::Static && operands.iter().all(|operand| *operand == Place::Static) {
+        return Place::Static;
     }
     let span = mir.inst_spans.get(id).copied().unwrap_or_default();
     for operand in operands {
@@ -1153,7 +1397,16 @@ fn value_place(
         } => {
             let mut args: SmallVec<[Place; 8]> = raw_args
                 .iter()
-                .map(|arg| inst_place(analysis, *arg))
+                .map(|arg| {
+                    inferred_argument_place(
+                        mir,
+                        requirements,
+                        oracle,
+                        context,
+                        Some(analysis),
+                        *arg,
+                    )
+                })
                 .collect();
             let effect = call_effects
                 .entry((id, allocation))
@@ -1502,12 +1755,26 @@ pub fn analyze(
                 let result = values.iter().fold(Place::Static, |place, value| {
                     place.join(inst_place(&analysis, *value))
                 });
+                let entity_result = values
+                    .iter()
+                    .filter_map(|value| oracle.entity_place(mir, *value))
+                    .fold(None::<Place>, |place, value| {
+                        Some(place.map_or(value, |place| place.join(value)))
+                    });
                 if !values.is_empty() {
                     analysis.summary.result = Some(
                         analysis
                             .summary
                             .result
                             .map_or(result, |previous| previous.join(result)),
+                    );
+                }
+                if let Some(entity_result) = entity_result {
+                    analysis.summary.entity_result = Some(
+                        analysis
+                            .summary
+                            .entity_result
+                            .map_or(entity_result, |previous| previous.join(entity_result)),
                     );
                 }
                 if let Some(destination) = context.return_destination {
@@ -1520,8 +1787,18 @@ pub fn analyze(
             }
         }
 
-        for (_, required) in requirements.values.iter() {
-            if matches!(required, Place::Param(_) | Place::Destination) {
+        for (value, required) in requirements.values.iter() {
+            let requires_owner = oracle.carries_placement(mir, value)
+                && !value_has_contextual_source(
+                    mir,
+                    oracle,
+                    &blocks,
+                    context,
+                    value,
+                    &mut HashSet::new(),
+                    &mut HashSet::new(),
+                );
+            if requires_owner && matches!(required, Place::Param(_) | Place::Destination) {
                 analysis.summary.owner = Some(
                     analysis
                         .summary
@@ -1546,6 +1823,7 @@ pub fn analyze(
         }
 
         analysis.summary.result = analysis.summary.result.map(export_place);
+        analysis.summary.entity_result = analysis.summary.entity_result.map(export_place);
         analysis.summary.owner = analysis.summary.owner.map(export_place);
         for constraint in &mut analysis.summary.constraints {
             constraint.value = export_place(constraint.value);
@@ -1749,5 +2027,58 @@ mod tests {
             runtime_then_static.get(key).copied(),
             Some(Place::Runtime(runtime))
         );
+    }
+
+    #[test]
+    fn distinct_runtime_places_keep_frame_lifetime_without_owner_identity() {
+        let mut mir = MirFunc::new(Ustr::from("runtime_join"));
+        let block = mir.entry();
+        let left = mir.emit(block, Inst::Const(Lit::Int(0)));
+        let right = mir.emit(block, Inst::Const(Lit::Int(1)));
+
+        assert_eq!(
+            Place::Runtime(left).join(Place::Runtime(right)),
+            Place::RuntimeAny
+        );
+        assert_eq!(
+            known_outlives(Place::RuntimeAny, Place::Frame),
+            Some(true)
+        );
+        assert_eq!(
+            known_outlives(Place::RuntimeAny, Place::Session),
+            Some(false)
+        );
+        assert_eq!(
+            known_outlives(Place::RuntimeAny, Place::Runtime(left)),
+            None
+        );
+        assert_eq!(export_place(Place::RuntimeAny), Place::Frame);
+    }
+
+    #[test]
+    fn static_composite_does_not_acquire_a_destination_owner() {
+        let mut mir = MirFunc::new(Ustr::from("static_composite"));
+        let block = mir.entry();
+        let operand = mir.emit(block, Inst::Const(Lit::Int(1)));
+        let aggregate = mir.emit(block, Inst::Const(Lit::Int(0)));
+        let mut analysis = PlacementAnalysis::default();
+        analysis.values.insert(operand, Place::Static);
+        let mut requirements = PlacementRequirements::default();
+        requirements
+            .values
+            .insert(aggregate, Place::Destination);
+
+        assert_eq!(
+            composite_place(
+                &mir,
+                &mut analysis,
+                &requirements,
+                aggregate,
+                Place::Static,
+                [operand],
+            ),
+            Place::Static
+        );
+        assert!(analysis.violations.is_empty());
     }
 }
