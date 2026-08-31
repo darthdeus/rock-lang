@@ -79,6 +79,51 @@ pub enum AllocationKind {
     OpaqueCall,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum AllocationResultUse {
+    Effect,
+    Unused,
+    DirectCall,
+    FieldOnly,
+    Returned,
+    Yielded,
+    LocalStore,
+    GlobalStore,
+    FieldStore,
+    ContainerStore,
+    Mutated,
+    Identity,
+    IndirectCall,
+    NestedAggregate,
+    Other,
+    Mixed,
+    Unknown,
+}
+
+impl AllocationResultUse {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Effect => "effect",
+            Self::Unused => "unused",
+            Self::DirectCall => "direct-call",
+            Self::FieldOnly => "field-only",
+            Self::Returned => "returned",
+            Self::Yielded => "yielded",
+            Self::LocalStore => "local-store",
+            Self::GlobalStore => "global-store",
+            Self::FieldStore => "field-store",
+            Self::ContainerStore => "container-store",
+            Self::Mutated => "mutated",
+            Self::Identity => "identity",
+            Self::IndirectCall => "indirect-call",
+            Self::NestedAggregate => "nested-aggregate",
+            Self::Other => "other",
+            Self::Mixed => "mixed",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
 impl AllocationKind {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -136,6 +181,10 @@ pub struct AllocationSite {
     pub kind: AllocationKind,
     pub span: Option<Span>,
     pub detail: Option<String>,
+    pub result_use: AllocationResultUse,
+    pub result_uses: u32,
+    pub aggregate_type: Option<String>,
+    pub aggregate_fields: u32,
     pub lua_body_line: u32,
     pub local_loop_depth: u32,
 }
@@ -356,13 +405,17 @@ impl AllocationReport {
                 .unwrap_or_else(|| "<compiler-generated>".to_string());
             let _ = writeln!(
                 out,
-                "  {:016x}\t{}\t{}\t{}\t{}\t{}",
+                "  {:016x}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
                 site.id,
                 site.kind.as_str(),
                 source,
                 body,
                 site.lua_body_line,
                 site.local_loop_depth,
+                site.result_use.as_str(),
+                site.result_uses,
+                site.aggregate_type.as_deref().unwrap_or("-"),
+                site.aggregate_fields,
             );
         }
         for route in &self.lifecycle_routes {
@@ -430,15 +483,30 @@ pub(crate) fn collect_emitted_body(
             inst_loop_depths.insert(iid.into_raw().into_u32(), depth);
         }
     }
+    let result_uses = allocation_result_uses(func);
     let mut direct_sites = emitted_sites
         .into_iter()
-        .map(|site| AllocationSite {
-            id: site.id,
-            kind: site.kind.into(),
-            span: site.span,
-            detail: None,
-            lua_body_line: site.lua_body_line,
-            local_loop_depth: inst_loop_depths.get(&site.mir_inst).copied().unwrap_or(0),
+        .map(|site| {
+            let iid = Idx::from_raw(site.mir_inst.into());
+            let use_facts = result_uses[site.mir_inst as usize];
+            let (result_use, result_uses) = if func.insts[iid].produces_value() {
+                (use_facts.result_use(), use_facts.uses)
+            } else {
+                (AllocationResultUse::Effect, 0)
+            };
+            let (aggregate_type, aggregate_fields) = allocation_aggregate(&func.insts[iid]);
+            AllocationSite {
+                id: site.id,
+                kind: site.kind.into(),
+                span: site.span,
+                detail: None,
+                result_use,
+                result_uses,
+                aggregate_type,
+                aggregate_fields,
+                lua_body_line: site.lua_body_line,
+                local_loop_depth: inst_loop_depths.get(&site.mir_inst).copied().unwrap_or(0),
+            }
         })
         .collect::<Vec<_>>();
     let mut call_edges: BTreeMap<String, u32> = BTreeMap::new();
@@ -490,6 +558,213 @@ pub(crate) fn collect_emitted_body(
             })
             .collect(),
     })
+}
+
+fn allocation_aggregate(inst: &Inst) -> (Option<String>, u32) {
+    match inst {
+        Inst::MakeStruct { ty, fields } => (
+            Some(ty.map_or_else(|| "<anonymous>".to_string(), |ty| ty.to_string())),
+            fields.len() as u32,
+        ),
+        Inst::MakeValueStruct { name, fields, .. }
+        | Inst::MaterializeValueStruct { name, fields, .. } => {
+            (Some(name.to_string()), fields.len() as u32)
+        }
+        Inst::MakeEnum { ty, positional, named, .. } => (
+            Some(ty.to_string()),
+            (positional.len() + named.len()) as u32,
+        ),
+        Inst::MakeEnumDyn { ty, positional, named, .. } => (
+            Some(ty.to_string()),
+            (1 + positional.len() + named.len()) as u32,
+        ),
+        Inst::MakeTuple(values) => (Some("<tuple>".to_string()), values.len() as u32),
+        Inst::MakeVec(values) => (Some("<vec>".to_string()), values.len() as u32),
+        Inst::MakeVecColumns { elem, columns, .. } => {
+            (Some(format!("Vec<{elem}>")), columns.len() as u32)
+        }
+        Inst::MakeVecColumnHeader { elem, .. } => (Some(format!("Vec<{elem}>")), 0),
+        Inst::MakeEnv { fields, .. } => {
+            (Some("<closure-environment>".to_string()), fields.len() as u32)
+        }
+        _ => (None, 0),
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct AllocationUseFacts {
+    bits: u32,
+    uses: u32,
+}
+
+impl AllocationUseFacts {
+    fn record(&mut self, kind: AllocationResultUse) {
+        self.bits |= kind.bit();
+    }
+
+    fn result_use(self) -> AllocationResultUse {
+        if self.bits == 0 {
+            return AllocationResultUse::Unused;
+        }
+        if self.bits.count_ones() > 1 {
+            return AllocationResultUse::Mixed;
+        }
+        AllocationResultUse::from_bit(self.bits)
+    }
+}
+
+impl AllocationResultUse {
+    fn bit(self) -> u32 {
+        match self {
+            Self::DirectCall => 1 << 0,
+            Self::FieldOnly => 1 << 1,
+            Self::Returned => 1 << 2,
+            Self::Yielded => 1 << 3,
+            Self::LocalStore => 1 << 4,
+            Self::GlobalStore => 1 << 5,
+            Self::FieldStore => 1 << 6,
+            Self::ContainerStore => 1 << 7,
+            Self::Mutated => 1 << 8,
+            Self::Identity => 1 << 9,
+            Self::IndirectCall => 1 << 10,
+            Self::NestedAggregate => 1 << 11,
+            Self::Other => 1 << 12,
+            Self::Effect | Self::Unused | Self::Mixed | Self::Unknown => 0,
+        }
+    }
+
+    fn from_bit(bit: u32) -> Self {
+        match bit {
+            x if x == Self::DirectCall.bit() => Self::DirectCall,
+            x if x == Self::FieldOnly.bit() => Self::FieldOnly,
+            x if x == Self::Returned.bit() => Self::Returned,
+            x if x == Self::Yielded.bit() => Self::Yielded,
+            x if x == Self::LocalStore.bit() => Self::LocalStore,
+            x if x == Self::GlobalStore.bit() => Self::GlobalStore,
+            x if x == Self::FieldStore.bit() => Self::FieldStore,
+            x if x == Self::ContainerStore.bit() => Self::ContainerStore,
+            x if x == Self::Mutated.bit() => Self::Mutated,
+            x if x == Self::Identity.bit() => Self::Identity,
+            x if x == Self::IndirectCall.bit() => Self::IndirectCall,
+            x if x == Self::NestedAggregate.bit() => Self::NestedAggregate,
+            x if x == Self::Other.bit() => Self::Other,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+fn allocation_result_uses(func: &MirFunc) -> Vec<AllocationUseFacts> {
+    let mut facts = vec![AllocationUseFacts::default(); func.insts.len()];
+    for block in reachable_blocks_from(func, func.entry) {
+        for &iid in &func.blocks[block].insts {
+            let inst = &func.insts[iid];
+            skull_transform::value_operands(inst, &mut |operand| {
+                let use_facts = &mut facts[operand.into_raw().into_u32() as usize];
+                use_facts.uses += 1;
+                allocation_inst_use(inst, operand, use_facts);
+            });
+        }
+        match &func.blocks[block].term {
+            skull_mir::mir::Term::Return(values) => {
+                for &value in values {
+                    let use_facts = &mut facts[value.into_raw().into_u32() as usize];
+                    use_facts.uses += 1;
+                    use_facts.record(AllocationResultUse::Returned);
+                }
+            }
+            skull_mir::mir::Term::Yield { values, .. } => {
+                for &value in values {
+                    let use_facts = &mut facts[value.into_raw().into_u32() as usize];
+                    use_facts.uses += 1;
+                    use_facts.record(AllocationResultUse::Yielded);
+                }
+            }
+            skull_mir::mir::Term::Branch { cond, .. } => {
+                let use_facts = &mut facts[cond.into_raw().into_u32() as usize];
+                use_facts.uses += 1;
+                use_facts.record(AllocationResultUse::Other);
+            }
+            skull_mir::mir::Term::Switch { discr, .. } => {
+                let use_facts = &mut facts[discr.into_raw().into_u32() as usize];
+                use_facts.uses += 1;
+                use_facts.record(AllocationResultUse::Other);
+            }
+            _ => {}
+        }
+    }
+    facts
+}
+
+fn allocation_inst_use(inst: &Inst, target: Idx<Inst>, facts: &mut AllocationUseFacts) {
+    match inst {
+        Inst::Field { base, .. } | Inst::TupleIndex { base, .. } if *base == target => {
+            facts.record(AllocationResultUse::FieldOnly);
+        }
+        Inst::Call { args, .. }
+        | Inst::CallMulti { args, .. }
+        | Inst::CallBoundMulti { args, .. }
+            if args.contains(&target) =>
+        {
+            facts.record(AllocationResultUse::DirectCall);
+        }
+        Inst::CallValue { callee, args }
+        | Inst::CallValueMulti { callee, args, .. }
+            if *callee == target || args.contains(&target) =>
+        {
+            facts.record(AllocationResultUse::IndirectCall);
+        }
+        Inst::Store { value, .. } if *value == target => {
+            facts.record(AllocationResultUse::LocalStore);
+        }
+        Inst::StoreGlobal { value, .. } if *value == target => {
+            facts.record(AllocationResultUse::GlobalStore);
+        }
+        Inst::StoreField { base, value, .. } => {
+            if *base == target {
+                facts.record(AllocationResultUse::Mutated);
+            }
+            if *value == target {
+                facts.record(AllocationResultUse::FieldStore);
+            }
+        }
+        Inst::StoreIndex { base, value, .. } | Inst::ArrayPush { arr: base, value, .. } => {
+            if *base == target {
+                facts.record(AllocationResultUse::Mutated);
+            }
+            if *value == target {
+                facts.record(AllocationResultUse::ContainerStore);
+            }
+        }
+        Inst::Eq(a, b) | Inst::NotEq(a, b) if *a == target || *b == target => {
+            facts.record(AllocationResultUse::Identity);
+        }
+        Inst::MakeTuple(values) | Inst::MakeVec(values) if values.contains(&target) => {
+            facts.record(AllocationResultUse::NestedAggregate);
+        }
+        Inst::MakeStruct { fields, .. }
+        | Inst::MakeValueStruct { fields, .. }
+        | Inst::MaterializeValueStruct { fields, .. }
+        | Inst::MakeEnv { fields, .. }
+            if fields.iter().any(|(_, value)| *value == target) =>
+        {
+            facts.record(AllocationResultUse::NestedAggregate);
+        }
+        Inst::MakeEnum { positional, named, .. }
+            if positional.contains(&target) || named.iter().any(|(_, value)| *value == target) =>
+        {
+            facts.record(AllocationResultUse::NestedAggregate);
+        }
+        Inst::MakeEnumDyn { tag, positional, named, .. }
+            if *tag == target
+                || positional.contains(&target)
+                || named.iter().any(|(_, value)| *value == target) =>
+        {
+            facts.record(AllocationResultUse::NestedAggregate);
+        }
+        _ => {
+            facts.record(AllocationResultUse::Other);
+        }
+    }
 }
 
 fn natural_loop_depths(func: &MirFunc) -> HashMap<Idx<Block>, u32> {
@@ -556,6 +831,10 @@ fn site(
         kind,
         span,
         detail,
+        result_use: AllocationResultUse::Unknown,
+        result_uses: 0,
+        aggregate_type: None,
+        aggregate_fields: 0,
         lua_body_line: 0,
         local_loop_depth,
     }

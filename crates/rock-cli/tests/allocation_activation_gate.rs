@@ -78,10 +78,12 @@ fn bounded_run_writes_activation_counts_joined_to_the_compiler_manifest() {
         .lines()
         .filter_map(|line| {
             let fields = line.trim_start().split('\t').collect::<Vec<_>>();
-            (fields.len() == 6
+            (fields.len() == 10
                 && fields[0].len() == 16
                 && fields[4].parse::<u32>().is_ok_and(|line| line > 0)
-                && fields[5].parse::<u32>().is_ok())
+                && fields[5].parse::<u32>().is_ok()
+                && fields[7].parse::<u32>().is_ok()
+                && fields[9].parse::<u32>().is_ok())
             .then_some(fields[0])
         })
         .collect::<Vec<_>>();
@@ -121,7 +123,7 @@ fn bounded_run_writes_activation_counts_joined_to_the_compiler_manifest() {
         String::from_utf8_lossy(&joined.stderr),
     );
     let joined = String::from_utf8(joined.stdout).expect("UTF-8 joined report");
-    assert!(joined.starts_with("rock.allocation-join.v8\n"));
+    assert!(joined.starts_with("rock.allocation-join.v12\n"));
     let mut lines = joined.lines().skip(4);
     let header = lines.next().expect("joined report header");
     let artifact_line = header
@@ -210,7 +212,7 @@ fn sim_command_writes_one_frame_aware_join_per_selected_sim() {
         assert!(activation.is_file(), "missing {}", activation.display());
         let joined = std::fs::read_to_string(&joined)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", joined.display()));
-        assert!(joined.starts_with("rock.allocation-join.v8\n"));
+        assert!(joined.starts_with("rock.allocation-join.v12\n"));
         assert!(joined.contains("frame_coverage"));
         assert!(joined.contains("structural_loop_depth"));
     }

@@ -225,6 +225,72 @@ fn render(a: int, b: int) -> string {
 }
 
 #[test]
+fn allocation_report_classifies_aggregate_result_uses_without_calling_them_safe() {
+    let _report = AllocationReportGuard::on();
+    let emit = emit_mir(
+        r#"
+struct Carrier { value: int }
+
+global RETAINED: Carrier? = null
+
+fn consume(carrier: Carrier) -> int {
+    return carrier.value
+}
+
+fn direct() -> int {
+    return consume(Carrier { value: 1 })
+}
+
+fn projected() -> int {
+    return Carrier { value: 2 }.value
+}
+
+fn returned() -> Carrier {
+    return Carrier { value: 3 }
+}
+
+fn retained() {
+    RETAINED = Carrier { value: 4 }
+}
+"#,
+    );
+
+    let disposition = |name: &str| {
+        let body = emit
+            .allocation_report
+            .bodies
+            .values()
+            .find(|body| body.diagnostic_name == name)
+            .unwrap_or_else(|| panic!("missing body {name}"));
+        let sites = body
+            .direct_sites
+            .iter()
+            .filter(|site| site.kind.as_str() == "struct-construction")
+            .collect::<Vec<_>>();
+        assert_eq!(sites.len(), 1, "{name} must own exactly one struct site: {sites:#?}");
+        let site = sites[0];
+        assert_eq!(site.aggregate_type.as_deref(), Some("Carrier"));
+        assert_eq!(site.aggregate_fields, 1);
+        assert_eq!(site.result_uses, 1);
+        site.result_use.as_str()
+    };
+
+    assert_eq!(disposition("direct"), "direct-call");
+    assert_eq!(disposition("projected"), "field-only");
+    assert_eq!(disposition("returned"), "returned");
+    assert_eq!(disposition("retained"), "global-store");
+
+    let manifest = emit.allocation_report.render_text();
+    assert!(
+        manifest.lines().any(|line| {
+            line.contains("\tstruct-construction\t")
+                && line.contains("\tdirect-call\t1\tCarrier\t1")
+        }),
+        "the serialized manifest must retain the direct-use and aggregate-shape facts: {manifest}",
+    );
+}
+
+#[test]
 fn allocation_activation_wraps_the_same_manifest_site_and_installs_its_runtime() {
     let _activation = AllocationActivationGuard::on();
     let emit = emit_mir(
