@@ -2232,7 +2232,13 @@ function __sw_bake_font(path, pixelSize, existingAtlas, faceMask) {
   faceMask = faceMask | 0;
   if (globalThis.__STONE_WEB_FAKE_ENV || typeof document === "undefined") {
     __sw_log_once("stone_load_font: no canvas2d in this environment -- glyphless fallback font");
-    return { em: pixelSize, atlas: existingAtlas || 0, glyphs: [{}, {}, {}, {}], maxH: pixelSize, fake: true, sourcePath: path, faceMask: faceMask };
+    return {
+      em: pixelSize, atlas: existingAtlas || 0, glyphs: [{}, {}, {}, {}],
+      maxH: pixelSize,
+      unitMetrics: new Float32Array([pixelSize, pixelSize, 0, 0, pixelSize]),
+      unitGlyphs: [{}, {}, {}, {}],
+      fake: true, sourcePath: path, faceMask: faceMask,
+    };
   }
   var fams = __SW.fontFamilies || {};
   var fam = fams[__sw_font_path_key(path)];
@@ -2251,6 +2257,16 @@ function __sw_bake_font(path, pixelSize, existingAtlas, faceMask) {
   mctx.font = fontSpec;
   mctx.fontSynthesis = "none"; // never the browser's own faux face; see above
   mctx.textBaseline = "alphabetic";
+
+  var vertical = mctx.measureText("Hg");
+  var cap = mctx.measureText("X");
+  var fontAscent = vertical.fontBoundingBoxAscent || vertical.emHeightAscent || pixelSize;
+  var fontDescent = vertical.fontBoundingBoxDescent || vertical.emHeightDescent || 0;
+  var capHeight = (cap.actualBoundingBoxAscent || pixelSize)
+    + (cap.actualBoundingBoxDescent || 0);
+  var unitMetrics = new Float32Array([
+    pixelSize, fontAscent, -fontDescent, 0, capHeight,
+  ]);
 
   var baked = [];
   for (var f = 0; f < 4; f++) if (__sw_face_declared(faceMask, f)) baked.push(f);
@@ -2370,7 +2386,21 @@ function __sw_bake_font(path, pixelSize, existingAtlas, faceMask) {
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
   __SW.imageSizes[texHandle] = { w: aw, h: ah };
 
-  return { em: pixelSize, atlas: texHandle, glyphs: glyphs, maxH: maxH, sourcePath: path, faceMask: faceMask };
+  var unitGlyphs = [{}, {}, {}, {}];
+  for (var uf = 0; uf < 4; uf++) {
+    for (var slot in glyphs[uf]) {
+      var source = glyphs[uf][slot];
+      unitGlyphs[uf][slot] = new Float32Array([
+        source[6], source[7], source[4], source[5], source[8],
+      ]);
+    }
+  }
+
+  return {
+    em: pixelSize, atlas: texHandle, glyphs: glyphs, maxH: maxH,
+    unitMetrics: unitMetrics, unitGlyphs: unitGlyphs,
+    sourcePath: path, faceMask: faceMask,
+  };
 }
 
 function stone_load_font(path, pixelSize, faceMask) {
@@ -2379,6 +2409,7 @@ function stone_load_font(path, pixelSize, faceMask) {
 
   __SW.fonts = __SW.fonts || {};
   var fid = (__SW.nextFont = (__SW.nextFont || 0) + 1);
+  baked.instances = [baked];
   __SW.fonts[fid] = baked;
   console.log("[STONE-WEB] font atlas baked @ " + pixelSize + "px");
   return fid;
@@ -2391,6 +2422,7 @@ function stone_reload_font(fontId, path, pixelSize) {
   // bytes or the size, never what the family declared at load.
   var baked = __sw_bake_font(path, pixelSize, old.atlas, old.faceMask);
   if (!baked) return false;
+  if (!__sw_refresh_font_instances(old, baked)) return false;
   __SW.fonts[fontId] = baked;
   console.log("[STONE-WEB] font atlas rebaked @ " + pixelSize + "px");
   return true;
@@ -2400,6 +2432,9 @@ function stone_resize_font(fontId, pixelSize) {
   if (!old || pixelSize < 1) return false;
   var baked = __sw_bake_font(old.sourcePath, pixelSize, old.atlas, old.faceMask);
   if (!baked) return false;
+  baked.unitMetrics = old.unitMetrics;
+  baked.unitGlyphs = old.unitGlyphs;
+  if (!__sw_refresh_font_instances(old, baked)) return false;
   __SW.fonts[fontId] = baked;
   console.log("[STONE-WEB] font atlas rebaked @ " + pixelSize + "px");
   return true;
@@ -2415,12 +2450,102 @@ function stone_get_font_pixel_size_for(fontId) {
   var f = __sw_font(fontId);
   return f ? f.em : 48;
 }
+function __sw_refresh_font_instances(old, baked) {
+  baked.instances = [baked];
+  for (var i = 1; i < old.instances.length; i++) {
+    var prior = old.instances[i];
+    var refreshed = __sw_bake_font(
+      baked.sourcePath, prior.em, prior.atlas, baked.faceMask);
+    if (!refreshed) return false;
+    baked.instances.push(refreshed);
+  }
+  return true;
+}
+function __sw_font_instance_id(fontId, index) {
+  return fontId * 4294967296 + index + 1;
+}
+function __sw_font_instance(instanceId) {
+  if (!Number.isSafeInteger(instanceId) || instanceId <= 0) return null;
+  var fontId = Math.floor(instanceId / 4294967296);
+  var index = instanceId - fontId * 4294967296 - 1;
+  var font = __sw_font(fontId);
+  if (!font || !font.instances || index < 0 || index >= font.instances.length) return null;
+  return font.instances[index];
+}
+function stone_ensure_font_atlas_instance(fontId, pixelSize) {
+  var font = __sw_font(fontId);
+  if (!font || pixelSize < 1) return 0;
+  for (var i = 0; i < font.instances.length; i++) {
+    if (font.instances[i].em === pixelSize) return __sw_font_instance_id(fontId, i);
+  }
+  var baked = __sw_bake_font(font.sourcePath, pixelSize, 0, font.faceMask);
+  if (!baked) return 0;
+  font.instances.push(baked);
+  return __sw_font_instance_id(fontId, font.instances.length - 1);
+}
+function stone_get_font_instance_image(instanceId) {
+  var instance = __sw_font_instance(instanceId);
+  return instance && instance.atlas ? instance.atlas : 0;
+}
+function stone_get_font_atlas_instance_pixel_size(fontId, index) {
+  var font = __sw_font(fontId);
+  var instance = font && font.instances ? font.instances[index] : null;
+  return instance ? instance.em : 0;
+}
+function stone_get_font_atlas_instance_image(fontId, index) {
+  var font = __sw_font(fontId);
+  var instance = font && font.instances ? font.instances[index] : null;
+  return instance && instance.atlas ? instance.atlas : 0;
+}
+function stone_get_font_instance_size(instanceId, width, height) {
+  var instance = __sw_font_instance(instanceId);
+  var size = instance ? __SW.imageSizes[instance.atlas] : null;
+  if (!size) return false;
+  width[0] = size.w;
+  height[0] = size.h;
+  return size.w > 0 && size.h > 0;
+}
+function stone_get_font_instance_byte_len(instanceId) {
+  var instance = __sw_font_instance(instanceId);
+  var size = instance ? __SW.imageSizes[instance.atlas] : null;
+  return size ? size.w * size.h * 4 : 0;
+}
+function stone_get_font_instance_glyph_info(instanceId, face, ch, out) {
+  var instance = __sw_font_instance(instanceId);
+  if (!instance || face < 0 || face > 3) return false;
+  var g = instance.glyphs[face][ch];
+  if (!g) return false;
+  for (var i = 0; i < 9; i++) out[i] = g[i];
+  return true;
+}
+function stone_get_font_instance_pixel_size(instanceId) {
+  var instance = __sw_font_instance(instanceId);
+  return instance ? instance.em : 0;
+}
+function stone_font_atlas_instance_count(fontId) {
+  var font = __sw_font(fontId);
+  return font && font.instances ? font.instances.length : 0;
+}
 function stone_get_glyph_info_for(fontId, face, ch, out) {
   var f = __sw_font(fontId);
   if (!f || face < 0 || face > 3) return false;
   var g = f.glyphs[face][ch];
   if (!g) return false;
   for (var i = 0; i < 9; i++) out[i] = g[i];
+  return true;
+}
+function stone_get_font_unit_metrics(fontId, out) {
+  var f = __sw_font(fontId);
+  if (!f || !f.unitMetrics) return false;
+  for (var i = 0; i < 5; i++) out[i] = f.unitMetrics[i];
+  return true;
+}
+function stone_get_glyph_unit_metrics(fontId, face, ch, out) {
+  var f = __sw_font(fontId);
+  if (!f || face < 0 || face > 3) return false;
+  var g = f.unitGlyphs[face][ch];
+  if (!g) return false;
+  for (var i = 0; i < 5; i++) out[i] = g[i];
   return true;
 }
 function __sw_glyph_slot(cp) {
