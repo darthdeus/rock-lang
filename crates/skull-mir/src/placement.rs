@@ -1206,10 +1206,14 @@ fn value_place(
             {
                 return Place::Static;
             }
-            effect
+            match effect
                 .result
                 .map(|place| place.substitute(&args, allocation))
                 .unwrap_or(Place::Unknown)
+            {
+                Place::Unknown if effect.owner == Some(Place::Destination) => allocation,
+                result => result,
+            }
         }
         _ => operand_join(analysis, inst),
     }
