@@ -7,6 +7,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 const C_NATIVE_TEST_TIMEOUT: Duration = Duration::from_secs(15);
+const C_NATIVE_FRAME_TIMEOUT: Duration = Duration::from_secs(30);
 
 enum CUnitOutcome {
     Ran {
@@ -703,6 +704,39 @@ fn c_native_command(binary: &std::path::Path) -> Command {
     command
 }
 
+fn validate_c_frame_request(
+    frames: usize,
+    requested_renderer: Option<crate::RendererBackend>,
+) -> Result<()> {
+    if frames == 0 {
+        anyhow::bail!("the C backend native frame runner requires --frames greater than zero");
+    }
+    if requested_renderer == Some(crate::RendererBackend::Wgpu) {
+        anyhow::bail!(
+            "the C backend native frame runner supports OpenGL only; `--renderer wgpu` is unsupported"
+        );
+    }
+    Ok(())
+}
+
+fn c_native_frame_command(
+    binary: &std::path::Path,
+    frames: usize,
+    headless: bool,
+) -> Command {
+    let mut command = c_native_command(binary);
+    command
+        .env("FRAME_COUNT", frames.to_string())
+        .env("STONE_NATIVE_FRAME_GATE", "1");
+    if headless {
+        command.env("STONE_HEADLESS", "1");
+        crate::stone::apply_headless_audio_env(&mut command);
+    } else {
+        command.env_remove("STONE_HEADLESS");
+    }
+    command
+}
+
 fn run_native_test(
     binary: &std::path::Path,
     timeout: Duration,
@@ -758,6 +792,56 @@ pub fn c_run(path: &str) -> Result<()> {
     let status = c_native_command(&compiled.binary).status()?;
     if !status.success() {
         anyhow::bail!("native C program exited {status}");
+    }
+    Ok(())
+}
+
+pub fn c_frame(
+    path: &str,
+    frames: usize,
+    headless: bool,
+    requested_renderer: Option<crate::RendererBackend>,
+) -> Result<()> {
+    validate_c_frame_request(frames, requested_renderer)?;
+    let _gl_renderer =
+        rock_host::stick::install_renderer_override(Some(crate::RendererBackend::Gl));
+    let emitted = emit_main_program(path)?;
+    let link = c_link_plan(path, &emitted)?;
+    let compiled = compile_source_with_link(&emitted.source, &link).map_err(anyhow::Error::msg)?;
+    let mut child = c_native_frame_command(&compiled.binary, frames, headless)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let run = crate::common::ProcessManager::wait_with_timeout(
+        &mut child,
+        C_NATIVE_FRAME_TIMEOUT,
+    )?;
+    if run.timed_out {
+        anyhow::bail!(
+            "native C frame run timed out after {}s",
+            C_NATIVE_FRAME_TIMEOUT.as_secs()
+        );
+    }
+    if !run.output.status.success() {
+        let stderr = String::from_utf8_lossy(&run.output.stderr).trim().to_owned();
+        let stdout = String::from_utf8_lossy(&run.output.stdout).trim().to_owned();
+        let detail = if !stderr.is_empty() {
+            stderr
+        } else if !stdout.is_empty() {
+            stdout
+        } else {
+            "no child diagnostics".to_owned()
+        };
+        anyhow::bail!(
+            "native C frame run exited {}; {}",
+            run.output.status,
+            detail
+        );
+    }
+    if frames == 1 {
+        log::info!(target: "C", "One frame executed successfully");
+    } else {
+        log::info!(target: "C", "{} frames executed successfully", frames);
     }
     Ok(())
 }
@@ -841,5 +925,38 @@ mod tests {
             .expect_err("wedged native test must time out");
         assert!(error.contains("timed out after 100ms"), "{error}");
         assert!(start.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn native_frame_request_accepts_opengl_and_rejects_unbounded_or_wgpu() {
+        assert!(super::validate_c_frame_request(1, None).is_ok());
+        assert!(super::validate_c_frame_request(2, Some(crate::RendererBackend::Gl)).is_ok());
+        let zero = super::validate_c_frame_request(0, None).expect_err("zero frames must reject");
+        assert!(zero.to_string().contains("greater than zero"), "{zero}");
+        let wgpu = super::validate_c_frame_request(
+            1,
+            Some(crate::RendererBackend::Wgpu),
+        )
+        .expect_err("WGPU must reject");
+        assert!(wgpu.to_string().contains("OpenGL only"), "{wgpu}");
+    }
+
+    #[test]
+    fn native_frame_command_sets_the_bounded_headless_gate() {
+        let command = super::c_native_frame_command(
+            std::path::Path::new("unused-native-program"),
+            2,
+            true,
+        );
+        let env = |name: &str| {
+            command
+                .get_envs()
+                .find(|(key, _)| *key == std::ffi::OsStr::new(name))
+                .and_then(|(_, value)| value)
+                .map(|value| value.to_string_lossy().into_owned())
+        };
+        assert_eq!(env("FRAME_COUNT").as_deref(), Some("2"));
+        assert_eq!(env("STONE_NATIVE_FRAME_GATE").as_deref(), Some("1"));
+        assert_eq!(env("STONE_HEADLESS").as_deref(), Some("1"));
     }
 }

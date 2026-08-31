@@ -538,6 +538,30 @@ impl CommandContext {
                 let file = self.get_required_file("run")?;
                 crate::c_test::c_run(file)
             }
+            CliCommand::Frame => {
+                if self.args.dump_state {
+                    anyhow::bail!(
+                        "the C backend native frame runner does not support --dump-state"
+                    );
+                }
+                if self.args.record.is_some() || self.args.replay.is_some() {
+                    anyhow::bail!(
+                        "the C backend native frame runner does not support --record or --replay"
+                    );
+                }
+                if self.args.checkpoint_interval.is_some() {
+                    anyhow::bail!(
+                        "the C backend native frame runner does not support --checkpoint-interval"
+                    );
+                }
+                let file = self.get_game_file()?;
+                crate::c_test::c_frame(
+                    &file,
+                    self.args.frames,
+                    self.args.headless,
+                    self.args.renderer,
+                )
+            }
             other => unreachable!(
                 "c dispatch reached unsupported command {:?}; the capability \
                  gate should have rejected it — Backend::supported_commands and \

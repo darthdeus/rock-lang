@@ -430,10 +430,9 @@ pub enum Backend {
     /// Tests with no `returns=` are outside the value class; tests whose GLSL
     /// emission rejects report SKIP(reason). Serves `test` only.
     Glsl,
-    /// `c` — the initial native scalar backend: bone type-checks, skull
-    /// monomorphizes, C is emitted for the supported closure, then Clang builds
-    /// it. Unsupported tests report SKIP(reason); compile/run reject unsupported
-    /// programs. Serves single-file `compile`, `test`, and `run`.
+    /// `c` — the native C backend: bone type-checks, skull monomorphizes, C is
+    /// emitted for the supported closure, then Clang builds it. Unsupported
+    /// tests report SKIP(reason); compile/run/frame reject unsupported programs.
     C,
 }
 
@@ -465,7 +464,7 @@ impl Backend {
             Self::Skull => "skull is a bone-HIR codegen",
             Self::Js => "js is a JS-subset executor (node); no game/engine runtime",
             Self::Glsl => "glsl is a GLSL value-test executor (GPU), not a program codegen",
-            Self::C => "c is an initial native scalar executor (Clang), not a game/runtime backend",
+            Self::C => "c is a native C executor (Clang) with a bounded OpenGL game runner",
         }
     }
 
@@ -492,7 +491,7 @@ impl Backend {
             ],
             Self::Js => &[Test, Run],
             Self::Glsl => &[Test],
-            Self::C => &[Compile, Test, Run],
+            Self::C => &[Compile, Test, Run, Frame],
         }
     }
 
@@ -1127,7 +1126,8 @@ mod caps_tests {
         assert!(Backend::C.serves(Compile), "c serves compile");
         assert!(Backend::C.serves(Test), "c serves test");
         assert!(Backend::C.serves(Run), "c serves run");
-        for cmd in [CompileSingle, TestCompile, Watch, Stone, Frame, Perf, Sim] {
+        assert!(Backend::C.serves(Frame), "c serves frame");
+        for cmd in [CompileSingle, TestCompile, Watch, Stone, Perf, Sim] {
             assert!(!Backend::C.serves(cmd), "c should reject {:?}", cmd);
         }
         let msg = Backend::C.reject_reason(CliCommand::Stone).expect("c rejects stone");
