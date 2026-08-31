@@ -80,6 +80,9 @@ struct PtrU16 { }
 struct PtrI16 { }
 struct PtrU32 { }
 
+// Compiler-owned destination capability for explicit deep copies.
+struct Storage { }
+
 // ============================================================================
 // NativeBuffer<T> — typed contiguous ffi buffers
 // ============================================================================
@@ -1414,6 +1417,10 @@ inline(lua) fn deepcopy<T>(obj: T) -> T = """
     return __rock_deepcopy_value(obj, {})
 """
 
+@intrinsic @native_required inline(lua) fn clone_into<T>(value: T, storage: Storage) -> T = """
+    return __rock_deepcopy_value(value, {})
+"""
+
 @materialize @intrinsic @pure fn materialize<T>(value: T) -> T {
     return value
 }
@@ -2532,6 +2539,7 @@ fn float_range(start: float, end_val: float, step: float) -> [float] {
 struct Vec<T> {
     _data: any,
     len: int,
+    storage: Storage = phantom(),
 }
 
 // Vec iteration -- `for x in vec` desugars through this iter/next pair
