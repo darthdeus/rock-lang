@@ -273,13 +273,54 @@ fn compile_declared_asset_banks(
         MissingSoundAssets::Reject,
     )?;
     let visual = compile_visual_bank(project_dir, game_key, overlays, &mut selection)?;
+    let loose_overlay = include_declared_overlay_assets(
+        project_dir,
+        game_key,
+        config,
+        overlays,
+        &mut selection,
+    )?;
     narrow_asset_overlay_selection(
         &mut selection,
         overlays,
         sound.as_ref(),
         visual.as_ref(),
+        &loose_overlay,
     );
     Ok((selection, sound, visual))
+}
+
+fn include_declared_overlay_assets(
+    project_dir: &Path,
+    game_key: &str,
+    config: Option<&rock_host::stick::StickConfig>,
+    overlays: &[PathBuf],
+    selection: &mut rock_host::release::AssetSelection,
+) -> Result<Vec<String>> {
+    let Some(config) = config else { return Ok(Vec::new()) };
+    let logical_keys = config.release_overlay_assets()?;
+    let mut dependencies = Vec::with_capacity(logical_keys.len());
+    for logical_key in logical_keys {
+        let asset = rock_host::release::resolve_asset_with_overlays(
+            project_dir,
+            game_key,
+            overlays,
+            &logical_key,
+        )?
+        .ok_or_else(|| anyhow::anyhow!(
+            "package: declared overlay asset does not exist: {logical_key}"
+        ))?;
+        if !overlays.iter().any(|overlay| asset.source.starts_with(overlay)) {
+            anyhow::bail!(
+                "package: declared overlay asset resolves outside configured overlays: {logical_key}"
+            );
+        }
+        dependencies.push(asset.key.clone());
+        rock_host::release::include_release_asset(selection, asset);
+    }
+    dependencies.sort();
+    dependencies.dedup();
+    Ok(dependencies)
 }
 
 struct ReleaseSoundResolver<'a> {
@@ -464,12 +505,14 @@ fn narrow_asset_overlay_selection(
     overlays: &[PathBuf],
     sound: Option<&CompiledSoundPackage>,
     visual: Option<&CompiledVisualPackage>,
+    loose_overlay: &[String],
 ) {
     let Some(visual) = visual else { return };
     let mut admitted = BTreeSet::new();
     if let Some(sound) = sound {
         admitted.extend(sound.dependencies.iter().cloned());
     }
+    admitted.extend(loose_overlay.iter().cloned());
     admitted.insert(visual.bank_key.clone());
     admitted.extend(visual.dependencies.iter().cloned());
     selection.assets.retain(|asset| {
@@ -720,6 +763,7 @@ mod tests {
         let game = "mag";
         let generated = format!("{game}/assets/.eat/current/characters/mage/mage-idle.png");
         let sound_key = format!("{game}/assets/sfx/cast.ogg");
+        let loose_key = format!("{game}/assets/particles/blood.png");
         let bank_key = format!("{game}/assets/visual_bank.json");
         let mut selection = rock_host::release::AssetSelection {
             assets: vec![
@@ -727,6 +771,7 @@ mod tests {
                 rock_host::release::ReleaseAsset { key: format!("{game}/assets/.eat/stale/mage.png"), source: overlay.join("assets/.eat/stale/mage.png") },
                 rock_host::release::ReleaseAsset { key: bank_key.clone(), source: overlay.join("assets/visual_bank.json") },
                 rock_host::release::ReleaseAsset { key: sound_key.clone(), source: overlay.join("assets/sfx/cast.ogg") },
+                rock_host::release::ReleaseAsset { key: loose_key.clone(), source: overlay.join("assets/particles/blood.png") },
                 rock_host::release::ReleaseAsset { key: format!("{game}/assets/unrelated-sentinel.txt"), source: overlay.join("assets/unrelated-sentinel.txt") },
                 rock_host::release::ReleaseAsset { key: format!("{game}/assets/characters/mage/mage-idle.png"), source: PathBuf::from("/project/assets/characters/mage/mage-idle.png") },
                 rock_host::release::ReleaseAsset { key: format!("{game}/assets/ui/frame.png"), source: PathBuf::from("/project/assets/ui/frame.png") },
@@ -747,12 +792,19 @@ mod tests {
             fixed_output_keys: [format!("{game}/assets/characters/mage/mage-idle.png")].into(),
         };
 
-        narrow_asset_overlay_selection(&mut selection, &[overlay], Some(&sound), Some(&visual));
+        narrow_asset_overlay_selection(
+            &mut selection,
+            &[overlay],
+            Some(&sound),
+            Some(&visual),
+            std::slice::from_ref(&loose_key),
+        );
         let keys: BTreeSet<_> = selection.assets.iter().map(|asset| asset.key.as_str()).collect();
-        assert_eq!(keys.len(), 4, "admission and exclusion populations");
+        assert_eq!(keys.len(), 5, "admission and exclusion populations");
         assert!(keys.contains(generated.as_str()));
         assert!(keys.contains(bank_key.as_str()));
         assert!(keys.contains(sound_key.as_str()));
+        assert!(keys.contains(loose_key.as_str()));
         assert!(keys.contains("mag/assets/ui/frame.png"));
         assert!(!keys.iter().any(|key| key.contains("stale") || key.contains("sentinel")));
         assert!(!keys.contains("mag/assets/characters/mage/mage-idle.png"));

@@ -243,6 +243,98 @@ fn package_excludes_unrelated_external_asset_overlays() {
     );
 }
 
+#[test]
+fn package_stages_declared_loose_overlay_assets_and_excludes_neighbors() {
+    let fixture_root = tempfile::tempdir_in(repo_root()).expect("package fixture");
+    let project = fixture_root.path().join("loose-overlay-asset");
+    let overlay = tempfile::tempdir().expect("overlay fixture");
+    let output = tempfile::tempdir().expect("package output");
+    std::fs::create_dir_all(project.join("assets")).unwrap();
+    std::fs::write(project.join("main.rock"), "fn main() {}\n").unwrap();
+    std::fs::write(
+        project.join("stick.toml"),
+        concat!(
+            "[package]\nname = \"loose-overlay-asset\"\n",
+            "[release]\nassets = [\"assets\"]\n",
+            "overlay_assets = [\"assets/particles/declared.png\"]\n",
+        ),
+    )
+    .unwrap();
+
+    let overlay_assets = overlay.path().join("assets");
+    std::fs::create_dir_all(overlay_assets.join("particles")).unwrap();
+    std::fs::write(overlay_assets.join("particles/declared.png"), b"declared").unwrap();
+    std::fs::write(overlay_assets.join("particles/unrelated.png"), b"unrelated").unwrap();
+    std::fs::write(
+        overlay_assets.join("visual_bank.json"),
+        concat!(
+            "{\"schema_version\":1,",
+            "\"plan_fingerprint\":\"sha256:0000000000000000000000000000000000000000000000000000000000000000\",",
+            "\"dependencies\":[]}\n",
+        ),
+    )
+    .unwrap();
+
+    let packaged = Command::new(rock_bin())
+        .current_dir(repo_root())
+        .env("ROCK_ASSET_OVERLAYS", overlay.path())
+        .args(["package", project.to_str().unwrap(), "--output", output.path().to_str().unwrap()])
+        .output()
+        .expect("spawn package");
+    assert!(
+        packaged.status.success(),
+        "declared loose overlay asset package failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&packaged.stdout),
+        String::from_utf8_lossy(&packaged.stderr)
+    );
+
+    let game_key = project.strip_prefix(repo_root()).unwrap().to_string_lossy().replace('\\', "/");
+    let packaged_assets = output.path().join("assets").join(game_key).join("assets");
+    let declared = packaged_assets.join("particles/declared.png");
+    assert!(declared.is_file(), "declared loose overlay asset must stage");
+    assert_eq!(
+        std::fs::read(declared).unwrap(),
+        b"declared"
+    );
+    assert!(
+        !packaged_assets.join("particles/unrelated.png").exists(),
+        "undeclared overlay neighbor must not stage"
+    );
+
+    std::fs::write(
+        project.join("stick.toml"),
+        concat!(
+            "[package]\nname = \"loose-overlay-asset\"\n",
+            "[release]\nassets = [\"assets\"]\n",
+            "overlay_assets = [\"assets/particles/missing.png\"]\n",
+        ),
+    )
+    .unwrap();
+    let rejected_output = tempfile::tempdir().expect("rejected package output");
+    let rejected = Command::new(rock_bin())
+        .current_dir(repo_root())
+        .env("ROCK_ASSET_OVERLAYS", overlay.path())
+        .args([
+            "package",
+            project.to_str().unwrap(),
+            "--output",
+            rejected_output.path().to_str().unwrap(),
+        ])
+        .output()
+        .expect("spawn missing-overlay package");
+    let stderr = String::from_utf8_lossy(&rejected.stderr);
+    assert!(!rejected.status.success(), "missing declared overlay asset was accepted");
+    assert!(
+        stderr.contains("declared overlay asset does not exist")
+            && stderr.contains("assets/particles/missing.png"),
+        "missing overlay diagnostic was unclear: {stderr}"
+    );
+    assert!(
+        !rejected_output.path().join("package-manifest.json").exists(),
+        "rejected package published a manifest"
+    );
+}
+
 fn write_sound_package_fixture(project: &Path, sound_project: &str, assets: &[(&str, &[u8])]) {
     std::fs::create_dir_all(project).unwrap();
     std::fs::write(

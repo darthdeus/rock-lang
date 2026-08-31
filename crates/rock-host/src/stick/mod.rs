@@ -73,6 +73,7 @@ pub struct BuildVar {
 #[derive(Debug, Clone, Default)]
 pub struct ReleaseConfig {
     pub assets: Option<Vec<String>>,
+    pub overlay_assets: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -406,9 +407,10 @@ impl<'de> serde::Deserialize<'de> for ReleaseConfig {
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
                         "assets" => { release.assets = Some(map.next_value()?); }
+                        "overlay_assets" => { release.overlay_assets = Some(map.next_value()?); }
                         other => {
                             return Err(serde::de::Error::custom(format!(
-                                "unknown key `{other}` in [release]; known keys: assets"
+                                "unknown key `{other}` in [release]; known keys: assets, overlay_assets"
                             )));
                         }
                     }
@@ -819,6 +821,28 @@ impl StickConfig {
             {
                 anyhow::bail!(
                     "stick.toml: [release].assets entry {:?} must be a non-empty relative path inside the project",
+                    rel
+                );
+            }
+        }
+        Ok(assets)
+    }
+
+    pub fn release_overlay_assets(&self) -> Result<Vec<String>> {
+        let assets = self
+            .release
+            .as_ref()
+            .and_then(|release| release.overlay_assets.clone())
+            .unwrap_or_default();
+        for rel in &assets {
+            let path = Path::new(rel);
+            if !rel.starts_with("assets/")
+                || rel.contains('\\')
+                || path.is_absolute()
+                || path.components().any(|c| matches!(c, std::path::Component::ParentDir))
+            {
+                anyhow::bail!(
+                    "stick.toml: [release].overlay_assets entry {:?} must be a canonical assets-relative file",
                     rel
                 );
             }
@@ -1287,6 +1311,7 @@ mod tests {
         let cfg = StickConfig::new_from_str(concat!(
             "[package]\nname = \"x\"\n",
             "[release]\nassets = [\"assets\", \"saves/level.json\"]\n",
+            "overlay_assets = [\"assets/particles/blood.png\"]\n",
         ))
         .expect("release section must parse");
         assert_eq!(
@@ -1295,6 +1320,10 @@ mod tests {
         );
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(cfg.release_assets(dir.path()).unwrap(), vec!["assets", "saves/level.json"]);
+        assert_eq!(
+            cfg.release_overlay_assets().unwrap(),
+            vec!["assets/particles/blood.png"]
+        );
     }
 
     #[test]
@@ -1340,6 +1369,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let err = cfg.release_assets(dir.path()).expect_err("asset escape must reject");
         assert!(format!("{err}").contains("outside"), "error names the escape: {err}");
+
+        let cfg = StickConfig::new_from_str(
+            "[package]\nname = \"x\"\n[release]\noverlay_assets = [\"../outside.png\"]\n",
+        )
+        .expect("overlay path validation happens when selecting assets");
+        let err = cfg.release_overlay_assets().expect_err("overlay asset escape must reject");
+        assert!(format!("{err}").contains("outside.png"), "error names the escape: {err}");
     }
 
     #[test]
