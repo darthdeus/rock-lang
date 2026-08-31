@@ -14,17 +14,18 @@ pub struct StdlibFile {
 /// is LAST so adding one shifts no `__SITE__` line in a lua-emitting file.
 const STDLIB_NAMES: &[&str] = &["unified.rock", "logging.rock", "vec.rock", "mat.rock", "arena.rock", "scene.rock", "strings.rock", "json.rock", "shader.rock", "js.rock"];
 
-/// Directory the stdlib `.rock` files are read from at RUNTIME (not embedded).
-/// `ROCK_STDLIB_DIR` overrides; otherwise it's the repo's `stdlib/`, resolved
-/// from this crate's location at build time -- so `cargo run` from the repo, and
-/// any binary built there, find the live files. Reading from disk means editing
-/// a stdlib file no longer needs a recompile: a fresh process (or LSP restart)
-/// picks it up.
+/// Directory the stdlib `.rock` files are read from at runtime (not embedded).
+/// `ROCK_STDLIB_DIR` overrides; otherwise the shared Rock-root resolver selects
+/// the active checkout. A fresh process (or LSP restart) picks up stdlib edits.
 pub fn stdlib_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("ROCK_STDLIB_DIR") {
-        return PathBuf::from(dir);
-    }
-    PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../stdlib"))
+    resolve_stdlib_dir(
+        std::env::var("ROCK_STDLIB_DIR").ok().map(PathBuf::from),
+        PathBuf::from(crate::rock_dir())
+    )
+}
+
+fn resolve_stdlib_dir(override_dir: Option<PathBuf>, rock_root: PathBuf) -> PathBuf {
+    override_dir.unwrap_or_else(|| rock_root.join("stdlib"))
 }
 
 /// All stdlib files, read from disk on first call and cached for the process
@@ -104,4 +105,30 @@ pub fn load_stdlib_for_backend(backend: &str) -> Vec<(String, String, String)> {
     }
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_stdlib_follows_runtime_rock_root() {
+        let rock_root = PathBuf::from("/runtime/rock-worktree");
+        assert_eq!(
+            resolve_stdlib_dir(None, rock_root.clone()),
+            rock_root.join("stdlib")
+        );
+    }
+
+    #[test]
+    fn explicit_stdlib_override_wins() {
+        let override_dir = PathBuf::from("/controlled/stdlib");
+        assert_eq!(
+            resolve_stdlib_dir(
+                Some(override_dir.clone()),
+                PathBuf::from("/runtime/rock-worktree")
+            ),
+            override_dir
+        );
+    }
 }
