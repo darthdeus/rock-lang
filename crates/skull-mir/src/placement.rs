@@ -155,6 +155,7 @@ pub struct PlacementViolation {
 pub struct PlacementAnalysis {
     pub values: ArenaMap<Idx<Inst>, Place>,
     pub cells: ArenaMap<Idx<Cell>, Place>,
+    cell_origins: ArenaMap<Idx<Cell>, Vec<Place>>,
     pub call_owners: ArenaMap<Idx<Inst>, Place>,
     pub summary: FunctionPlacement,
     pub violations: Vec<PlacementViolation>,
@@ -199,6 +200,26 @@ fn merge_cell(map: &mut ArenaMap<Idx<Cell>, Place>, key: Idx<Cell>, value: Place
     }
     map.insert(key, joined);
     true
+}
+
+fn merge_cell_origins(
+    map: &mut ArenaMap<Idx<Cell>, Vec<Place>>,
+    key: Idx<Cell>,
+    origins: impl IntoIterator<Item = Place>,
+) -> bool {
+    let mut merged = map.get(key).cloned().unwrap_or_default();
+    let mut changed = false;
+    for origin in origins {
+        if matches!(origin, Place::Pending) || merged.contains(&origin) {
+            continue;
+        }
+        merged.push(origin);
+        changed = true;
+    }
+    if changed {
+        map.insert(key, merged);
+    }
+    changed
 }
 
 fn merge_requirement<T>(map: &mut ArenaMap<Idx<T>, Place>, key: Idx<T>, value: Place) -> bool {
@@ -1253,7 +1274,7 @@ fn composite_place(
 ) -> Place {
     let operands = operands
         .into_iter()
-        .map(|operand| inst_place(analysis, operand))
+        .flat_map(|operand| provenance_places(mir, analysis, operand))
         .collect::<Vec<_>>();
     let Some(destination) = requirements.values.get(id).copied() else {
         return operands
@@ -1271,6 +1292,31 @@ fn composite_place(
         add_constraint(analysis, operand, destination, span);
     }
     destination
+}
+
+fn provenance_places(
+    mir: &MirFunc,
+    analysis: &PlacementAnalysis,
+    inst: Idx<Inst>,
+) -> Vec<Place> {
+    let place = inst_place(analysis, inst);
+    if !matches!(place, Place::Pending | Place::Unknown) {
+        return vec![place];
+    }
+    let mut places = match mir.insts[inst] {
+        Inst::Load(cell) => analysis.cell_origins.get(cell).cloned().unwrap_or_default(),
+        Inst::Field { base, .. }
+        | Inst::TupleIndex { base, .. }
+        | Inst::Index { base, .. }
+        | Inst::Len { base, .. }
+        | Inst::VecCheckedIndex { vec: base, .. } => provenance_places(mir, analysis, base),
+        _ => Vec::new(),
+    };
+    if places.is_empty() {
+        places.push(place);
+    }
+    places.dedup();
+    places
 }
 
 fn value_place(
@@ -1320,11 +1366,13 @@ fn value_place(
             columns.iter().flat_map(|(_, values)| values.iter().copied()),
         ),
         Inst::ToString(value) => inst_place(analysis, *value).join(allocation),
-        Inst::Field { base, .. }
-        | Inst::TupleIndex { base, .. }
-        | Inst::Index { base, .. }
-        | Inst::Len { base, .. }
-        | Inst::VecCheckedIndex { vec: base, .. } => inst_place(analysis, *base),
+        Inst::Field { .. }
+        | Inst::TupleIndex { .. }
+        | Inst::Index { .. }
+        | Inst::Len { .. }
+        | Inst::VecCheckedIndex { .. } => provenance_places(mir, analysis, id)
+            .into_iter()
+            .fold(Place::Static, Place::join),
         Inst::MakeTuple(values) => composite_place(
             mir,
             analysis,
@@ -1625,6 +1673,7 @@ pub fn analyze(
         for (index, cell) in mir.params.iter().copied().enumerate() {
             let place = u16::try_from(index).map_or(Place::Unknown, Place::Param);
             analysis.cells.insert(cell, place);
+            analysis.cell_origins.insert(cell, vec![place]);
         }
 
         loop {
@@ -1639,27 +1688,34 @@ pub fn analyze(
                             }
                             let value_inst = *value;
                             let value = inst_place(&analysis, value_inst);
+                            let origins = provenance_places(mir, &analysis, value_inst);
                             if let Some(destination) = requirements.cells.get(*cell).copied()
                                 && !is_derived_load(mir, &flow_cells, value_inst)
                             {
-                                add_constraint(&mut analysis, value, destination, span);
+                                for value in &origins {
+                                    add_constraint(&mut analysis, *value, destination, span);
+                                }
                             }
                             changed |= merge_cell(&mut analysis.cells, *cell, value);
+                            changed |= merge_cell_origins(&mut analysis.cell_origins, *cell, origins);
                         }
                         Inst::StoreGlobal { value, .. } => {
-                            let value = inst_place(&analysis, *value);
-                            add_constraint(&mut analysis, value, Place::Session, span);
+                            for value in provenance_places(mir, &analysis, *value) {
+                                add_constraint(&mut analysis, value, Place::Session, span);
+                            }
                         }
                         Inst::StoreField { base, value, .. }
                         | Inst::StoreIndex { base, value, .. } => {
-                            let value = inst_place(&analysis, *value);
                             let destination = inst_place(&analysis, *base);
-                            add_constraint(&mut analysis, value, destination, span);
+                            for value in provenance_places(mir, &analysis, *value) {
+                                add_constraint(&mut analysis, value, destination, span);
+                            }
                         }
                         Inst::ArrayPush { arr, value, .. } => {
-                            let value = inst_place(&analysis, *value);
                             let destination = inst_place(&analysis, *arr);
-                            add_constraint(&mut analysis, value, destination, span);
+                            for value in provenance_places(mir, &analysis, *value) {
+                                add_constraint(&mut analysis, value, destination, span);
+                            }
                         }
                         Inst::CallMulti { dests, .. } => {
                             let place = value_place(
@@ -1676,6 +1732,11 @@ pub fn analyze(
                             for &dest in dests {
                                 if multi_result_cells.contains(&dest) {
                                     changed |= merge_cell(&mut analysis.cells, dest, place);
+                                    changed |= merge_cell_origins(
+                                        &mut analysis.cell_origins,
+                                        dest,
+                                        [place],
+                                    );
                                 }
                             }
                         }
@@ -1778,11 +1839,12 @@ pub fn analyze(
                     );
                 }
                 if let Some(destination) = context.return_destination {
-                    let span = values
-                        .first()
-                        .and_then(|value| mir.inst_spans.get(*value).copied())
-                        .unwrap_or_default();
-                    add_constraint(&mut analysis, result, destination, span);
+                    for &value in values {
+                        let span = mir.inst_spans.get(value).copied().unwrap_or_default();
+                        for value in provenance_places(mir, &analysis, value) {
+                            add_constraint(&mut analysis, value, destination, span);
+                        }
+                    }
                 }
             }
         }
