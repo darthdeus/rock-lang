@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use bone_semantic::prelude::{ArenaMap, SmallVec, Span};
 use comfy_la_arena::Idx;
@@ -173,6 +173,8 @@ fn merge_requirement<T>(map: &mut ArenaMap<Idx<T>, Place>, key: Idx<T>, value: P
     let merged = match (map.get(key).copied(), value) {
         (None, value) => value,
         (Some(old), value) if old == value => old,
+        (Some(Place::Pending), value) | (Some(value), Place::Pending) => value,
+        (Some(Place::Static), value) | (Some(value), Place::Static) => value,
         (Some(Place::Frame), Place::Session) | (Some(Place::Session), Place::Frame) => {
             Place::Session
         }
@@ -191,6 +193,8 @@ fn merge_requirement<T>(map: &mut ArenaMap<Idx<T>, Place>, key: Idx<T>, value: P
         | (Some(Place::Runtime(_)), Place::Session) => Place::Session,
         (Some(Place::Frame), runtime @ Place::Runtime(_))
         | (Some(runtime @ Place::Runtime(_)), Place::Frame) => runtime,
+        (Some(Place::Destination), Place::Runtime(_))
+        | (Some(Place::Runtime(_)), Place::Destination) => Place::Unknown,
         (Some(Place::Runtime(left)), Place::Runtime(right)) => {
             if left == right { Place::Runtime(left) } else { Place::Unknown }
         }
@@ -214,6 +218,106 @@ fn merge_requirement<T>(map: &mut ArenaMap<Idx<T>, Place>, key: Idx<T>, value: P
 struct PlacementRequirements {
     values: ArenaMap<Idx<Inst>, Place>,
     cells: ArenaMap<Idx<Cell>, Place>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RequirementKey {
+    Value(Idx<Inst>),
+    Cell(Idx<Cell>),
+}
+
+#[derive(Default)]
+struct RequirementWorklist {
+    queue: VecDeque<RequirementKey>,
+    queued_values: ArenaMap<Idx<Inst>, bool>,
+    queued_cells: ArenaMap<Idx<Cell>, bool>,
+    cell_stores: ArenaMap<Idx<Cell>, Vec<Idx<Inst>>>,
+    call_users: ArenaMap<Idx<Inst>, Vec<Idx<Inst>>>,
+}
+
+impl RequirementWorklist {
+    fn enqueue_value(&mut self, value: Idx<Inst>) {
+        if !self.queued_values.get(value).copied().unwrap_or(false) {
+            self.queued_values.insert(value, true);
+            self.queue.push_back(RequirementKey::Value(value));
+        }
+        if let Some(users) = self.call_users.get(value).cloned() {
+            for user in users {
+                self.enqueue_value_only(user);
+            }
+        }
+    }
+
+    fn enqueue_value_only(&mut self, value: Idx<Inst>) {
+        if !self.queued_values.get(value).copied().unwrap_or(false) {
+            self.queued_values.insert(value, true);
+            self.queue.push_back(RequirementKey::Value(value));
+        }
+    }
+
+    fn enqueue_cell(&mut self, cell: Idx<Cell>) {
+        if !self.queued_cells.get(cell).copied().unwrap_or(false) {
+            self.queued_cells.insert(cell, true);
+            self.queue.push_back(RequirementKey::Cell(cell));
+        }
+    }
+
+    fn merge_value(
+        &mut self,
+        requirements: &mut PlacementRequirements,
+        value: Idx<Inst>,
+        place: Place,
+    ) -> bool {
+        let changed = merge_requirement(&mut requirements.values, value, place);
+        if changed {
+            self.enqueue_value(value);
+        }
+        changed
+    }
+
+    fn merge_cell(
+        &mut self,
+        requirements: &mut PlacementRequirements,
+        cell: Idx<Cell>,
+        place: Place,
+    ) -> bool {
+        let changed = merge_requirement(&mut requirements.cells, cell, place);
+        if changed {
+            self.enqueue_cell(cell);
+        }
+        changed
+    }
+
+    fn initialize(&mut self, mir: &MirFunc, blocks: &[Idx<crate::mir::Block>]) {
+        for &block in blocks {
+            for &id in &mir.blocks[block].insts {
+                match &mir.insts[id] {
+                    Inst::Store { cell, .. } => {
+                        self.cell_stores.entry(*cell).or_default().push(id);
+                    }
+                    Inst::Call { args, .. } | Inst::CallMulti { args, .. } => {
+                        for &arg in args {
+                            self.call_users.entry(arg).or_default().push(id);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        for &block in blocks {
+            for &id in &mir.blocks[block].insts {
+                self.enqueue_value_only(id);
+            }
+        }
+    }
+
+    fn process_cell(&mut self, cell: Idx<Cell>) {
+        if let Some(stores) = self.cell_stores.get(cell).cloned() {
+            for store in stores {
+                self.enqueue_value(store);
+            }
+        }
+    }
 }
 
 fn inferred_argument_place(
@@ -317,13 +421,19 @@ fn requirement_flow_source(
 fn carries_requirement(
     mir: &MirFunc,
     oracle: &impl PlacementOracle,
-    flow_cells: &HashSet<Idx<Cell>>,
     inst: Idx<Inst>,
 ) -> bool {
     oracle.carries_placement(mir, inst)
-        && (is_call_result(mir, inst)
-            || is_composite_constructor(&mir.insts[inst])
-            || matches!(mir.insts[inst], Inst::Load(cell) if flow_cells.contains(&cell)))
+        && (is_call_result(mir, inst) || is_composite_constructor(&mir.insts[inst]))
+}
+
+fn call_effect_consumes_argument(effect: &CallEffect, index: u16) -> bool {
+    effect.stores.iter().any(|store| store.value == index)
+        || effect.constraints.iter().any(|constraint| {
+            matches!(constraint.value, Place::Param(value) if value == index)
+        })
+        || effect.result == Some(Place::Param(index))
+        || effect.opaque_retains.contains(&index)
 }
 
 fn infer_call_requirements(
@@ -331,6 +441,7 @@ fn infer_call_requirements(
     context: AnalysisContext,
     oracle: &impl PlacementOracle,
     flow_cells: &HashSet<Idx<Cell>>,
+    flow_calls: &HashSet<Idx<Inst>>,
     analysis: Option<&PlacementAnalysis>,
     requirements: &mut PlacementRequirements,
     call_effects: &mut HashMap<(Idx<Inst>, Place), CallEffect>,
@@ -340,10 +451,11 @@ fn infer_call_requirements(
         Inst::Call { func, args } | Inst::CallMulti { func, args, .. } => (*func, args),
         _ => return false,
     };
-    if !raw_args
+    let direct_requirement = raw_args
         .iter()
-        .any(|arg| carries_requirement(mir, oracle, flow_cells, *arg))
-    {
+        .any(|arg| carries_requirement(mir, oracle, *arg));
+    let flow_argument = flow_calls.contains(&id);
+    if !direct_requirement && !flow_argument {
         return false;
     }
     let allocation = requirements
@@ -355,6 +467,16 @@ fn infer_call_requirements(
     let effect = call_effects
         .entry((id, allocation))
         .or_insert_with(|| oracle.call_effect(mir, id, func, allocation));
+    if !direct_requirement
+        && !raw_args.iter().enumerate().any(|(index, arg)| {
+            u16::try_from(index).ok().is_some_and(|index| {
+                is_derived_load(mir, flow_cells, *arg)
+                    && call_effect_consumes_argument(effect, index)
+            })
+        })
+    {
+        return false;
+    }
     let mut args: SmallVec<[Place; 8]> = raw_args
         .iter()
         .map(|arg| inferred_argument_place(mir, requirements, oracle, context, analysis, *arg))
@@ -415,138 +537,129 @@ fn infer_requirements(
     oracle: &impl PlacementOracle,
     blocks: &[Idx<crate::mir::Block>],
     flow_cells: &HashSet<Idx<Cell>>,
+    flow_calls: &HashSet<Idx<Inst>>,
     analysis: Option<&PlacementAnalysis>,
     mut requirements: PlacementRequirements,
     call_effects: &mut HashMap<(Idx<Inst>, Place), CallEffect>,
 ) -> PlacementRequirements {
-    loop {
-        let mut changed = false;
+    let mut worklist = RequirementWorklist::default();
+    worklist.initialize(mir, blocks);
+    if let Some(destination) = context.return_destination {
         for &block in blocks {
             if let Term::Return(values) = &mir.blocks[block].term {
-                if let Some(destination) = context.return_destination {
-                    for &value in values {
-                        if oracle.carries_placement(mir, value) {
-                            changed |=
-                                merge_requirement(&mut requirements.values, value, destination);
-                        }
+                for &value in values {
+                    if oracle.carries_placement(mir, value) {
+                        worklist.merge_value(&mut requirements, value, destination);
                     }
                 }
             }
-            for &id in &mir.blocks[block].insts {
-                match &mir.insts[id] {
-                    Inst::StoreGlobal { value, .. } if oracle.carries_placement(mir, *value) => {
-                        changed |=
-                            merge_requirement(&mut requirements.values, *value, Place::Session);
-                    }
-                    Inst::Store { cell, value } => {
-                        if let Some(required) = requirements.cells.get(*cell).copied() {
-                            if oracle.carries_placement(mir, *value)
-                                && !oracle.is_allocation_site(mir, *value)
-                            {
-                                changed |=
-                                    merge_requirement(&mut requirements.values, *value, required);
-                            }
-                        }
-                    }
-                    Inst::Load(cell) => {
-                        if let Some(required) = requirements.values.get(id).copied() {
-                            changed |= merge_requirement(&mut requirements.cells, *cell, required);
-                        }
-                    }
-                    Inst::Call { .. } | Inst::CallMulti { .. } => {
-                        changed |= infer_call_requirements(
-                            mir,
-                            context,
-                            oracle,
-                            flow_cells,
-                            analysis,
-                            &mut requirements,
-                            call_effects,
-                            id,
-                        );
-                    }
-                    Inst::TupleIndex { base, .. } => {
-                        if let Some(required) = requirements.values.get(id).copied()
-                            && oracle.carries_placement(mir, *base)
-                        {
-                            changed |= merge_requirement(
-                                &mut requirements.values,
-                                *base,
-                                required,
-                            );
-                        }
-                    }
-                    Inst::MakeTuple(values) | Inst::MakeVec(values) => {
-                        if let Some(required) = requirements.values.get(id).copied() {
-                            for &value in values {
-                                if oracle.carries_placement(mir, value) {
-                                    changed |= merge_requirement(
-                                        &mut requirements.values,
-                                        value,
-                                        required,
-                                    );
-                                }
-                            }
-                        }
-                    }
-                    Inst::MakeVecColumns { columns, .. } => {
-                        if let Some(required) = requirements.values.get(id).copied() {
-                            for &value in columns.iter().flat_map(|(_, values)| values) {
-                                if oracle.carries_placement(mir, value) {
-                                    changed |= merge_requirement(
-                                        &mut requirements.values,
-                                        value,
-                                        required,
-                                    );
-                                }
-                            }
-                        }
-                    }
-                    Inst::MakeStruct { fields, .. }
-                    | Inst::MakeValueStruct { fields, .. }
-                    | Inst::MaterializeValueStruct { fields, .. }
-                    | Inst::MakeEnv { fields, .. } => {
-                        if let Some(required) = requirements.values.get(id).copied() {
-                            for &(_, value) in fields {
-                                if oracle.carries_placement(mir, value) {
-                                    changed |= merge_requirement(
-                                        &mut requirements.values,
-                                        value,
-                                        required,
-                                    );
-                                }
-                            }
-                        }
-                    }
-                    Inst::MakeEnum {
-                        positional, named, ..
-                    }
-                    | Inst::MakeEnumDyn {
-                        positional, named, ..
-                    } => {
-                        if let Some(required) = requirements.values.get(id).copied() {
-                            for &value in positional
-                                .iter()
-                                .chain(named.iter().map(|(_, value)| value))
-                            {
-                                if oracle.carries_placement(mir, value) {
-                                    changed |= merge_requirement(
-                                        &mut requirements.values,
-                                        value,
-                                        required,
-                                    );
-                                }
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-        if !changed {
-            return requirements;
         }
     }
+    while let Some(key) = worklist.queue.pop_front() {
+        let RequirementKey::Value(id) = key else {
+            let RequirementKey::Cell(cell) = key else {
+                unreachable!()
+            };
+            worklist.queued_cells.remove(cell);
+            worklist.process_cell(cell);
+            continue;
+        };
+        worklist.queued_values.remove(id);
+        match &mir.insts[id] {
+            Inst::StoreGlobal { value, .. } if oracle.carries_placement(mir, *value) => {
+                worklist.merge_value(&mut requirements, *value, Place::Session);
+            }
+            Inst::Store { cell, value } => {
+                if let Some(required) = requirements.cells.get(*cell).copied()
+                    && oracle.carries_placement(mir, *value)
+                    && !oracle.is_allocation_site(mir, *value)
+                {
+                    worklist.merge_value(&mut requirements, *value, required);
+                }
+            }
+            Inst::Load(cell) => {
+                if let Some(required) = requirements.values.get(id).copied() {
+                    worklist.merge_cell(&mut requirements, *cell, required);
+                }
+            }
+            Inst::Call { .. } | Inst::CallMulti { .. } => {
+                if infer_call_requirements(
+                    mir,
+                    context,
+                    oracle,
+                    flow_cells,
+                    flow_calls,
+                    analysis,
+                    &mut requirements,
+                    call_effects,
+                    id,
+                ) {
+                    worklist.enqueue_value(id);
+                    if let Inst::Call { args, .. } | Inst::CallMulti { args, .. } = &mir.insts[id] {
+                        for &arg in args {
+                            worklist.enqueue_value(arg);
+                        }
+                    }
+                }
+            }
+            Inst::TupleIndex { base, .. } => {
+                if let Some(required) = requirements.values.get(id).copied()
+                    && oracle.carries_placement(mir, *base)
+                {
+                    worklist.merge_value(&mut requirements, *base, required);
+                }
+            }
+            Inst::MakeTuple(values) | Inst::MakeVec(values) => {
+                if let Some(required) = requirements.values.get(id).copied() {
+                    for &value in values {
+                        if oracle.carries_placement(mir, value) {
+                            worklist.merge_value(&mut requirements, value, required);
+                        }
+                    }
+                }
+            }
+            Inst::MakeVecColumns { columns, .. } => {
+                if let Some(required) = requirements.values.get(id).copied() {
+                    for &value in columns.iter().flat_map(|(_, values)| values) {
+                        if oracle.carries_placement(mir, value) {
+                            worklist.merge_value(&mut requirements, value, required);
+                        }
+                    }
+                }
+            }
+            Inst::MakeStruct { fields, .. }
+            | Inst::MakeValueStruct { fields, .. }
+            | Inst::MaterializeValueStruct { fields, .. }
+            | Inst::MakeEnv { fields, .. } => {
+                if let Some(required) = requirements.values.get(id).copied() {
+                    for &(_, value) in fields {
+                        if oracle.carries_placement(mir, value) {
+                            worklist.merge_value(&mut requirements, value, required);
+                        }
+                    }
+                }
+            }
+            Inst::MakeEnum {
+                positional, named, ..
+            }
+            | Inst::MakeEnumDyn {
+                positional, named, ..
+            } => {
+                if let Some(required) = requirements.values.get(id).copied() {
+                    for &value in positional
+                        .iter()
+                        .chain(named.iter().map(|(_, value)| value))
+                    {
+                        if oracle.carries_placement(mir, value) {
+                            worklist.merge_value(&mut requirements, value, required);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    requirements
 }
 
 fn inst_place(analysis: &PlacementAnalysis, inst: Idx<Inst>) -> Place {
@@ -864,7 +977,10 @@ pub fn analyze(
 ) -> PlacementAnalysis {
     let blocks = crate::reach::emitted_blocks(mir);
     let parameter_cells = mir.params.iter().copied().collect::<HashSet<_>>();
+    let mut call_effects = HashMap::new();
     let mut cell_blocks = HashMap::<Idx<Cell>, HashSet<Idx<crate::mir::Block>>>::new();
+    let mut alias_predecessors = HashMap::<Idx<Cell>, HashSet<Idx<Cell>>>::new();
+    let mut alias_successors = HashMap::<Idx<Cell>, HashSet<Idx<Cell>>>::new();
     let mut source_cells = HashSet::new();
     for &block in &blocks {
         for &id in &mir.blocks[block].insts {
@@ -872,6 +988,10 @@ pub fn analyze(
                 continue;
             };
             cell_blocks.entry(cell).or_default().insert(block);
+            if let Inst::Load(source) = mir.insts[value] {
+                alias_predecessors.entry(cell).or_default().insert(source);
+                alias_successors.entry(source).or_default().insert(cell);
+            }
             if requirement_flow_source(mir, oracle, &parameter_cells, value) {
                 source_cells.insert(cell);
             }
@@ -893,35 +1013,80 @@ pub fn analyze(
             break;
         }
     }
-    let mut flow_cells = cell_blocks
-        .into_iter()
-        .filter_map(|(cell, blocks)| {
+    let joined_sources = cell_blocks
+        .iter()
+        .filter_map(|(&cell, blocks)| {
             (blocks.len() > 1 && source_cells.contains(&cell)).then_some(cell)
         })
         .collect::<HashSet<_>>();
-    loop {
-        let mut changed = false;
-        for &block in &blocks {
-            for &id in &mir.blocks[block].insts {
-                let Inst::Store { cell, value } = mir.insts[id] else {
-                    continue;
-                };
-                if matches!(mir.insts[value], Inst::Load(source) if flow_cells.contains(&source)) {
-                    changed |= flow_cells.insert(cell);
+    let mut candidate_cells = joined_sources.clone();
+    let mut pending = joined_sources.iter().copied().collect::<Vec<_>>();
+    while let Some(cell) = pending.pop() {
+        if let Some(successors) = alias_successors.get(&cell) {
+            for &successor in successors {
+                if candidate_cells.insert(successor) {
+                    pending.push(successor);
                 }
             }
         }
-        if !changed {
-            break;
+    }
+    let mut sink_cells = HashSet::new();
+    let mut sink_calls = Vec::new();
+    for &block in &blocks {
+        for &id in &mir.blocks[block].insts {
+            let (func, raw_args) = match &mir.insts[id] {
+                Inst::Call { func, args } | Inst::CallMulti { func, args, .. } => (*func, args),
+                _ => continue,
+            };
+            let allocation = context.default_allocation;
+            let effect = call_effects
+                .entry((id, allocation))
+                .or_insert_with(|| oracle.call_effect(mir, id, func, allocation));
+            for (index, arg) in raw_args.iter().enumerate() {
+                let Ok(index) = u16::try_from(index) else {
+                    continue;
+                };
+                if let Inst::Load(cell) = mir.insts[*arg]
+                    && candidate_cells.contains(&cell)
+                    && oracle.carries_placement(mir, *arg)
+                    && call_effect_consumes_argument(effect, index)
+                {
+                    sink_cells.insert(cell);
+                    sink_calls.push((id, cell));
+                }
+            }
         }
     }
-    let mut call_effects = HashMap::new();
+    let mut flow_cells = HashSet::new();
+    for sink in sink_cells {
+        let mut path = HashSet::new();
+        let mut pending = vec![sink];
+        while let Some(cell) = pending.pop() {
+            if !path.insert(cell) {
+                continue;
+            }
+            if joined_sources.contains(&cell) {
+                continue;
+            }
+            if let Some(predecessors) = alias_predecessors.get(&cell) {
+                pending.extend(predecessors.iter().copied());
+            }
+        }
+        if path.iter().any(|cell| joined_sources.contains(cell)) {
+            flow_cells.extend(path);
+        }
+    }
+    let flow_calls = sink_calls
+        .into_iter()
+        .filter_map(|(id, cell)| flow_cells.contains(&cell).then_some(id))
+        .collect::<HashSet<_>>();
     let mut requirements = infer_requirements(
         mir,
         context,
         oracle,
         &blocks,
         &flow_cells,
+        &flow_calls,
         None,
         PlacementRequirements::default(),
         &mut call_effects,
@@ -1014,6 +1179,7 @@ pub fn analyze(
                 oracle,
                 &blocks,
                 &flow_cells,
+                &flow_calls,
                 Some(&analysis),
                 requirements,
                 &mut call_effects,
@@ -1027,6 +1193,7 @@ pub fn analyze(
             oracle,
             &blocks,
             &flow_cells,
+            &flow_calls,
             Some(&analysis),
             requirements.clone(),
             &mut call_effects,
@@ -1137,6 +1304,68 @@ mod tests {
         assert_eq!(
             session_then_param.get(key).copied(),
             Some(Place::Session)
+        );
+    }
+
+    #[test]
+    fn requirement_merge_is_order_independent_for_destination_and_runtime() {
+        let mut mir = MirFunc::new(Ustr::from("requirement_merge"));
+        let block = mir.entry();
+        let key = mir.emit(block, Inst::Const(Lit::Int(0)));
+        let runtime = mir.emit(block, Inst::Const(Lit::Int(1)));
+
+        let mut destination_then_runtime = ArenaMap::default();
+        merge_requirement(&mut destination_then_runtime, key, Place::Destination);
+        merge_requirement(
+            &mut destination_then_runtime,
+            key,
+            Place::Runtime(runtime),
+        );
+
+        let mut runtime_then_destination = ArenaMap::default();
+        merge_requirement(&mut runtime_then_destination, key, Place::Runtime(runtime));
+        merge_requirement(
+            &mut runtime_then_destination,
+            key,
+            Place::Destination,
+        );
+
+        assert_eq!(
+            destination_then_runtime.get(key).copied(),
+            Some(Place::Unknown)
+        );
+        assert_eq!(
+            runtime_then_destination.get(key).copied(),
+            Some(Place::Unknown)
+        );
+    }
+
+    #[test]
+    fn requirement_merge_is_order_independent_for_static_and_runtime() {
+        let mut mir = MirFunc::new(Ustr::from("requirement_merge"));
+        let block = mir.entry();
+        let key = mir.emit(block, Inst::Const(Lit::Int(0)));
+        let runtime = mir.emit(block, Inst::Const(Lit::Int(1)));
+
+        let mut static_then_runtime = ArenaMap::default();
+        merge_requirement(&mut static_then_runtime, key, Place::Static);
+        merge_requirement(
+            &mut static_then_runtime,
+            key,
+            Place::Runtime(runtime),
+        );
+
+        let mut runtime_then_static = ArenaMap::default();
+        merge_requirement(&mut runtime_then_static, key, Place::Runtime(runtime));
+        merge_requirement(&mut runtime_then_static, key, Place::Static);
+
+        assert_eq!(
+            static_then_runtime.get(key).copied(),
+            Some(Place::Runtime(runtime))
+        );
+        assert_eq!(
+            runtime_then_static.get(key).copied(),
+            Some(Place::Runtime(runtime))
         );
     }
 }
