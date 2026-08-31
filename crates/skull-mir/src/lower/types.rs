@@ -585,7 +585,24 @@ impl Builder<'_> {
         if let Some(shape) = self.nullable_tuple_wire_shape(e)? {
             return Ok(Some(RetSlot::Nested(shape)));
         }
-        let Some(mut shape) = self.nobox_value_shape_of(e)? else { return Ok(None) };
+        let mut shape = match self.nobox_value_shape_of(e)? {
+            Some(shape) => shape,
+            None => {
+                let Some(name) = self.value_struct_of(e) else { return Ok(None) };
+                if self.scx.values_first_class
+                    || !planned_value_contains_flat_enum(self.ws, name)
+                {
+                    return Ok(None);
+                }
+                let Some(rep) = self.expr_rep_id(e, RepUse::Value, false)? else {
+                    return Ok(None);
+                };
+                let Some(shape) = self.scx.rep_arena().value_shape(rep) else {
+                    return Ok(None);
+                };
+                shape
+            }
+        };
         // A join's shape must represent every value that reaches it, and the
         // arms are right here. `if c { P { .. } } else { null }` infers as plain
         // `P` -- the `null` arm does not widen it -- so reading nullability off
