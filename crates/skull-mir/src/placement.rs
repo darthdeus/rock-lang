@@ -615,6 +615,10 @@ fn infer_call_requirements(
     apply_omitted_args(&mut args, &effect.omitted_args);
     let mut changed = false;
 
+    if let Some(call_requirement) = call_requirement {
+        changed |= merge_requirement(&mut requirements.values, id, call_requirement);
+    }
+
     for store in &effect.stores {
         let Some(destination) = explicit_call_argument(
             mir,
