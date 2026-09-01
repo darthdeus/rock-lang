@@ -135,6 +135,32 @@ fn mag_seek_census_admits_aggregate_owners_not_superseded_direct_globals() {
     assert_mag_seek_census_owners(&names);
 }
 
+fn assert_mag_panel_plan_census(sim: &std::collections::HashSet<String>) {
+    assert!(
+        !sim.contains("PANEL_DRAW_PLAN"),
+        "PANEL_DRAW_PLAN is a rebuildable catalog cache, not WorldImage state"
+    );
+    assert!(
+        !sim.contains("PANEL_DRAW_PLAN_BUILDS"),
+        "PANEL_DRAW_PLAN_BUILDS is a diagnostic rebuild counter, not WorldImage state"
+    );
+    assert!(
+        sim.contains("PANEL_STATES"),
+        "PANEL_STATES must remain semantic panel ownership"
+    );
+    assert!(
+        sim.contains("PANEL_SEQ"),
+        "PANEL_SEQ must remain semantic panel ownership"
+    );
+}
+
+#[test]
+fn mag_panel_draw_plan_is_derived_not_world_image() {
+    let names = sim_state_names("mag", 3);
+    assert!(!names.is_empty(), "the Mag panel-plan census must examine a nonzero population");
+    assert_mag_panel_plan_census(&names);
+}
+
 /// `rock frame <game> -n N --replay <log> --dump-state [env]` -> parsed JSON.
 fn run_replay_dump(game: &str, frames: u32, log: &str, env: &[(&str, &str)]) -> serde_json::Value {
     let scratch = tempfile::tempdir().unwrap();
@@ -442,6 +468,7 @@ fn mag_seek_equivalence_state_names(
         assert!(sim.contains(name), "{name} must be admitted as simulation state");
     }
     assert_mag_seek_census_owners(&sim);
+    assert_mag_panel_plan_census(&sim);
     for name in ["TELEMETRY_SESSION_OPEN", "TELEMETRY_LAST_FRAME_T"] {
         assert!(!sim.contains(name), "{name} is telemetry side-channel state");
     }
