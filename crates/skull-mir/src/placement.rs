@@ -1653,12 +1653,20 @@ fn value_place(
                     .get(retained as usize)
                     .copied()
                     .unwrap_or(Place::Unknown);
-                if !matches!(value, Place::Static | Place::Pending) {
+                let outlives = known_outlives(value, allocation);
+                if !matches!(value, Place::Static | Place::Pending)
+                    && outlives != Some(true)
+                {
+                    let kind = if outlives == Some(false) {
+                        PlacementViolationKind::DoesNotOutlive
+                    } else {
+                        PlacementViolationKind::OpaqueRetention
+                    };
                     analysis.violations.push(PlacementViolation {
                         value,
                         destination: allocation,
                         span,
-                        kind: PlacementViolationKind::OpaqueRetention,
+                        kind,
                     });
                 }
             }
