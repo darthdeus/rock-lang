@@ -511,6 +511,95 @@ fn mag_seek_equivalence_state_names(
     sim
 }
 
+const MAG_RECOVERY_RECORDED_AT: &str = "1000";
+const MAG_RECOVERY_REPLAYED_AT: &str = "1004";
+
+fn mag_recovery_last_observed_at(state: &serde_json::Value) -> i64 {
+    state["mag"]["RECOVERY_RESERVOIR"]["last_observed_at"]
+        .as_i64()
+        .expect("RECOVERY_RESERVOIR.last_observed_at")
+}
+
+fn mag_recovery_record_replay_arms(progress: &serde_json::Value) -> (serde_json::Value, serde_json::Value) {
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = dir.path().join("recovery-clock.replay");
+    let fixture_s = fixture.to_string_lossy().into_owned();
+    let progress_path = dir.path().join("progress.json");
+    let progress_s = progress_path.to_string_lossy().into_owned();
+    let layout_s = dir.path().join("spellbook-layout.jsonl").to_string_lossy().into_owned();
+    let settings_s = dir.path().join("settings.json").to_string_lossy().into_owned();
+    let bindings_s = dir.path().join("bindings.json").to_string_lossy().into_owned();
+    std::fs::write(&progress_path, serde_json::to_vec_pretty(progress).unwrap()).unwrap();
+
+    let record_env = [
+        ("MAG_BOOT_PLAYING", "1"),
+        ("MAG_PROGRESS_PATH_OVERRIDE", progress_s.as_str()),
+        ("MAG_LAYOUT_HISTORY_PATH_OVERRIDE", layout_s.as_str()),
+        ("MAG_SETTINGS_PATH_OVERRIDE", settings_s.as_str()),
+        ("MAG_BINDINGS_PATH_OVERRIDE", bindings_s.as_str()),
+        ("STONE_TEST_UNIX_SECONDS", MAG_RECOVERY_RECORDED_AT),
+    ];
+    let recorded = run_record_dump("mag", 3, &fixture_s, &record_env);
+
+    let replayed = run_replay_dump(
+        "mag",
+        3,
+        &fixture_s,
+        &[
+            ("MAG_BOOT_PLAYING", "1"),
+            ("MAG_PROGRESS_PATH_OVERRIDE", progress_s.as_str()),
+            ("MAG_LAYOUT_HISTORY_PATH_OVERRIDE", layout_s.as_str()),
+            ("MAG_SETTINGS_PATH_OVERRIDE", settings_s.as_str()),
+            ("MAG_BINDINGS_PATH_OVERRIDE", bindings_s.as_str()),
+            ("STONE_TEST_UNIX_SECONDS", MAG_RECOVERY_REPLAYED_AT),
+        ],
+    );
+    (recorded, replayed)
+}
+
+fn mag_current_progress_with_recovery(measures: i64, last_observed_at: i64) -> serde_json::Value {
+    serde_json::json!({
+        "version": 4,
+        "bank_gold": 0,
+        "events": {},
+        "quests": {"runs": [], "tracked": [], "collapsed": {}, "quarantined": []},
+        "player": {
+            "level": {"namespace": "official", "name": "crypt"},
+            "grid": [25, 8],
+            "dead": false,
+            "health_cur": 100.0,
+            "mana_cur": 100.0,
+            "stamina_cur": 20.0,
+            "inventory": {"gold": 0, "bandage": 0, "bloody_bandage": 0},
+            "reagents": [50, 50, 50, 50, 50, 50]
+        },
+        "spellbook": {"favorites": []},
+        "recovery": {
+            "measures": measures,
+            "last_observed_at": last_observed_at,
+            "packet_cursor": 0,
+            "pending_measures": 0
+        }
+    })
+}
+
+#[test]
+fn mag_full_recovery_replay_uses_each_process_wall_clock_sentinel() {
+    let (recorded, replayed) =
+        mag_recovery_record_replay_arms(&mag_current_progress_with_recovery(10, 100));
+    let recorded_at = mag_recovery_last_observed_at(&recorded);
+    let replayed_at = mag_recovery_last_observed_at(&replayed);
+    assert_eq!(recorded_at, 1000, "recorded reservoir last_observed_at={recorded_at}");
+    assert_eq!(replayed_at, 1004, "replayed reservoir last_observed_at={replayed_at}");
+    // PINNED BUG: replay reads the new process wall clock instead of recorded input.
+    // This inverted assertion passes because the bug exists. When it fails, rederive
+    // the mechanism; if replay now preserves 1000, flip this to assert_eq!.
+    assert_ne!(
+        recorded_at, replayed_at,
+        "replay now preserves the recorded wall clock; flip this sentinel to assert_eq!"
+    );
+}
+
 #[test]
 fn mag_cast_seek_restores_scheduler_owner() {
     let dir = tempfile::tempdir().unwrap();
