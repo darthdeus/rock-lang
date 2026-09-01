@@ -147,6 +147,9 @@ impl Builder<'_> {
                 if let Some(elem) = self.vec_column_elem_of(base)? {
                     return Ok(Some(elem.representation()));
                 }
+                if let Some(elem) = self.vec_strided_elem_of(base)? {
+                    return Ok(Some(elem.representation()));
+                }
                 if let Some(elem) = self.map_column_value_of(base)? {
                     return Ok(Some(elem.representation()));
                 }
@@ -170,6 +173,11 @@ impl Builder<'_> {
                     if name.as_str() == "__vec_data_get" {
                         if let Some(&recv) = arg_idxs.first()
                             && let Some(elem) = self.vec_column_elem_of(recv)?
+                        {
+                            return Ok(Some(elem.representation()));
+                        }
+                        if let Some(&recv) = arg_idxs.first()
+                            && let Some(elem) = self.vec_strided_elem_of(recv)?
                         {
                             return Ok(Some(elem.representation()));
                         }

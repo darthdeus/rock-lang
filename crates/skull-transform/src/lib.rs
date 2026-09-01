@@ -2328,7 +2328,9 @@ pub fn value_operands(inst: &Inst, push: &mut impl FnMut(Idx<Inst>)) {
         Inst::Neg(x) | Inst::Not(x) | Inst::BitNot(x) | Inst::UintBitNot(x) | Inst::ToString(x)
         | Inst::FloatToInt(x) | Inst::IntToFloat(x) | Inst::UintToFloat(x) | Inst::IntToUint(x)
         | Inst::UintToInt(x) | Inst::FloatToUint(x) | Inst::UintBitcastInt(x) | Inst::IntBitcastUint(x)
-        | Inst::CoroSetInner(x) => p(x),
+        | Inst::CoroSetInner(x)
+        | Inst::VecStrideNilToFalse(x)
+        | Inst::VecStrideFalseToNil(x) => p(x),
         Inst::Format { value, .. } => p(value),
         Inst::FormatDyn { value, fmt } => { p(value); p(fmt); }
         Inst::Call { args, .. } | Inst::CallMulti { args, .. } | Inst::CallBoundMulti { args, .. } => args.iter().for_each(&mut p),
@@ -2342,6 +2344,11 @@ pub fn value_operands(inst: &Inst, push: &mut impl FnMut(Idx<Inst>)) {
             columns.iter().flat_map(|(_, vs)| vs).for_each(&mut p)
         }
         Inst::MakeVecColumnHeader { capacity, .. } => p(capacity),
+        Inst::MakeVecStrided { values, capacity, .. } => {
+            p(capacity);
+            values.iter().for_each(&mut p);
+        }
+        Inst::MakeVecStridedHeader { capacity, .. } => p(capacity),
         Inst::MakeStruct { fields, .. }
         | Inst::MakeValueStruct { fields, .. }
         | Inst::MaterializeValueStruct { fields, .. }
@@ -2391,7 +2398,9 @@ pub(crate) fn remap_inst(inst: &mut Inst, m: &impl Fn(Idx<Inst>) -> Idx<Inst>) {
         Inst::Neg(x) | Inst::Not(x) | Inst::BitNot(x) | Inst::UintBitNot(x) | Inst::ToString(x)
         | Inst::FloatToInt(x) | Inst::IntToFloat(x) | Inst::UintToFloat(x) | Inst::IntToUint(x)
         | Inst::UintToInt(x) | Inst::FloatToUint(x) | Inst::UintBitcastInt(x) | Inst::IntBitcastUint(x)
-        | Inst::CoroSetInner(x) => f(x),
+        | Inst::CoroSetInner(x)
+        | Inst::VecStrideNilToFalse(x)
+        | Inst::VecStrideFalseToNil(x) => f(x),
         Inst::Format { value, .. } => f(value),
         Inst::FormatDyn { value, fmt } => { f(value); f(fmt); }
         Inst::Call { args, .. } | Inst::CallMulti { args, .. } | Inst::CallBoundMulti { args, .. } => args.iter_mut().for_each(&mut f),
@@ -2405,6 +2414,11 @@ pub(crate) fn remap_inst(inst: &mut Inst, m: &impl Fn(Idx<Inst>) -> Idx<Inst>) {
             columns.iter_mut().flat_map(|(_, vs)| vs).for_each(&mut f)
         }
         Inst::MakeVecColumnHeader { capacity, .. } => f(capacity),
+        Inst::MakeVecStrided { values, capacity, .. } => {
+            f(capacity);
+            values.iter_mut().for_each(&mut f);
+        }
+        Inst::MakeVecStridedHeader { capacity, .. } => f(capacity),
         Inst::MakeStruct { fields, .. }
         | Inst::MakeValueStruct { fields, .. }
         | Inst::MaterializeValueStruct { fields, .. }

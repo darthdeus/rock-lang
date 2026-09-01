@@ -857,6 +857,8 @@ pub struct InstanceGraph {
 pub enum StorageCond {
     /// The receiver's `[E]` element is column-stored.
     VecColumn,
+    /// The receiver's `[E]` element is stored in one dense strided backing.
+    VecStrided,
     /// The receiver's `Map<K, V>` value is column-stored.
     MapColumn,
     /// No storage condition: the debug-mode `NativeBuffer` bounds check fires on
@@ -867,8 +869,8 @@ pub enum StorageCond {
 /// Calls lowering SYNTHESIZES, keyed by the source operation that triggers them:
 /// `(trigger name, storage condition, the `stdlib_funcref`/`call_spine` names
 /// the arm emits WHEN THAT CONDITION HOLDS)`. Read off
-/// `crates/skull-mir/src/lower/storage.rs`; the complete 15-name set is
-/// catalogued in `docs/boundary-contracts.md` S 1.4.
+/// `crates/skull-mir/src/lower/storage.rs`; the complete set is catalogued in
+/// `docs/boundary-contracts.md` S 1.4.
 ///
 /// The condition uses the same `skull_mir::lower::ContainerPlan` as lowering.
 /// The names are the column-path ones only -- a non-column
@@ -891,6 +893,11 @@ pub const COMPILER_GENERATED_TRIGGERS: &[(&str, StorageCond, &[&str])] = &[
     ("__vec_data_clone", StorageCond::VecColumn, &["__rock_col_copy"]),
     ("__vec_data_sort", StorageCond::VecColumn, &["__rock_col_sort", "__rock_col_sort_leaves"]),
     ("__rock_vec_to_lua_array", StorageCond::VecColumn, &["__rock_vec_column_elements"]),
+    ("__vec_data_capacity", StorageCond::VecStrided, &["table_len", "__rock_stride_capacity"]),
+    ("__vec_data_insert", StorageCond::VecStrided, &["__rock_stride_insert"]),
+    ("__vec_data_clone", StorageCond::VecStrided, &["__rock_stride_copy"]),
+    ("__vec_data_sort", StorageCond::VecStrided, &["__rock_stride_sort"]),
+    ("__rock_vec_to_lua_array", StorageCond::VecStrided, &["__rock_vec_strided_elements"]),
     ("map_new", StorageCond::MapColumn, &["__map_col_new_spine"]),
     ("table_unset", StorageCond::MapColumn, &["__map_col_free"]),
     ("len", StorageCond::MapColumn, &["__map_col_len"]),
@@ -954,7 +961,13 @@ pub const ERASED_RUNTIME_ENTRIES: &[&str] = &[
     "__rock_col_insert",
     "__rock_col_sort",
     "__rock_col_sort_leaves",
+    "__rock_materialize_strided_element",
+    "__rock_stride_capacity",
+    "__rock_stride_copy",
+    "__rock_stride_insert",
+    "__rock_stride_sort",
     "__rock_vec_column_elements",
+    "__rock_vec_strided_elements",
     "table_len",
 ];
 
@@ -5424,6 +5437,18 @@ fn compiler_generated_sites(
                     &mono,
                 )
             }
+            StorageCond::VecStrided => {
+                if !ContainerPlan::matches_type(ContainerFamily::Vec, &mono) {
+                    return CondVerdict::DoesNot;
+                }
+                ContainerPlan::for_type(
+                    ws,
+                    bone_semantic::hir::FnBackend::Any,
+                    &rep_arena,
+                    ContainerFamily::Vec,
+                    &mono,
+                )
+            }
             StorageCond::MapColumn => {
                 if !ContainerPlan::matches_type(ContainerFamily::Map, &mono) {
                     return CondVerdict::DoesNot;
@@ -5439,6 +5464,7 @@ fn compiler_generated_sites(
             StorageCond::Always => return CondVerdict::Holds(None),
         };
         let elem = match plan {
+            Ok(plan) if cond == StorageCond::VecStrided => plan.strided_elem(&rep_arena),
             Ok(plan) => plan.column_elem(&rep_arena),
             Err(_) => return CondVerdict::Failed(MonoTyReason::NoNode),
         };
@@ -5486,30 +5512,29 @@ fn compiler_generated_sites(
     for (e, expr) in body.expr_arena.iter() {
         match expr {
             E::Call { callee: Callee::Unresolved { name, .. }, args, .. } => {
-                let Some((trigger, cond, names)) =
-                    COMPILER_GENERATED_TRIGGERS.iter().find(|(t, _, _)| *t == name.as_str())
-                else {
-                    continue;
-                };
-                if *trigger == "map_new" {
-                    if args.clone().next().is_some() {
+                for (trigger, cond, names) in COMPILER_GENERATED_TRIGGERS
+                    .iter()
+                    .filter(|(trigger, _, _)| *trigger == name.as_str())
+                {
+                    if *trigger == "map_new" {
+                        if args.clone().next().is_some() {
+                            continue;
+                        }
+                        let Some(_) = settle(e, *cond, e) else { continue };
+                        out.extend(names.iter().map(|name| GeneratedSite { expr: e, name }));
                         continue;
                     }
-                    let Some(_) = settle(e, *cond, e) else { continue };
-                    out.extend(names.iter().map(|n| GeneratedSite { expr: e, name: n }));
-                    continue;
+                    // The receiver is the UFCS first argument; an arm with no
+                    // receiver cannot be a specialized storage form.
+                    let Some(recv) = args.clone().next() else { continue };
+                    let Some(elem) = settle(recv, *cond, e) else { continue };
+                    if *trigger == "__vec_data_sort" && *cond == StorageCond::VecColumn {
+                        let Some(elem) = elem else { continue };
+                        out.push(GeneratedSite { expr: e, name: sort_entry(&elem) });
+                        continue;
+                    }
+                    out.extend(names.iter().map(|name| GeneratedSite { expr: e, name }));
                 }
-                // The receiver is the UFCS first argument; an arm with no
-                // receiver cannot be the column form.
-                let Some(recv) = args.clone().next() else { continue };
-                let Some(elem) = settle(recv, *cond, e) else { continue };
-                // The one trigger with alternatives: the element decides which.
-                if *trigger == "__vec_data_sort" {
-                    let Some(elem) = elem else { continue };
-                    out.push(GeneratedSite { expr: e, name: sort_entry(&elem) });
-                    continue;
-                }
-                out.extend(names.iter().map(|n| GeneratedSite { expr: e, name: n }));
             }
             // The index forms have no callee name to key on: the receiver's
             // CONSTRUCTOR is the trigger. Rendering is confined to index exprs,

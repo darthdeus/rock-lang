@@ -90,12 +90,67 @@ pub fn value_struct_slot_fields(ws: &Workspace, name: Ustr) -> Option<Vec<ValueS
     Some(out)
 }
 
-/// Max leaf count that stores as columns. Above it, columns fall off a measured
-/// write cliff (9.3x on LuaJIT / 9.1x on V8 at K=16, x86; 17.1x / 11.7x on
-/// arm64) and strided AoS wins -- so a wider type keeps today's representation
-/// rather than silently taking the slow layout. Every collection site in the
-/// tree is K <= 4. Numbers + the AoS tier: `docs/vec-value-columns-plan.md`.
+/// Max leaf count that stores an unmarked value in columns. Above it, columns
+/// fall off a measured write cliff (9.3x on LuaJIT / 9.1x on V8 at K=16, x86;
+/// 17.1x / 11.7x on arm64), so an unmarked wider type stays boxed. An explicit
+/// `nobox` guarantee bypasses this heuristic because boxing is not a legal
+/// fallback. Numbers + the AoS tier: `docs/vec-value-columns-plan.md`.
 pub(crate) const MAX_COLUMN_LEAVES: usize = 4;
+
+pub(crate) fn dense_flat_enum_vec_eligible(ws: &Workspace, name: Ustr) -> bool {
+    fn dense_payload_ty(ws: &Workspace, ty: TyId, visiting: &mut Vec<Ustr>) -> bool {
+        match static_ty(ws, ty) {
+            Some(TypeExpr::Builtin(BuiltinTy::Int | BuiltinTy::Uint | BuiltinTy::Float)) => true,
+            Some(TypeExpr::App {
+                ctor: TypeCtor::Nominal(child),
+                ..
+            }) if payload_free_enum_variants(ws, child).is_some() => true,
+            Some(TypeExpr::App {
+                ctor: TypeCtor::Nominal(child),
+                ..
+            }) => {
+                let Some(sid) = ws.struct_by_name.get(&child) else {
+                    return false;
+                };
+                let decl = &ws.modules[sid.module.index()].structs[sid.def];
+                if !decl.is_value || visiting.contains(&child) {
+                    return false;
+                }
+                visiting.push(child);
+                let dense = decl
+                    .fields
+                    .iter()
+                    .all(|field| dense_payload_ty(ws, field.ty, visiting));
+                visiting.pop();
+                dense
+            }
+            _ => false,
+        }
+    }
+
+    let Some(plan) = EnumPlan::for_name(ws, name) else {
+        return false;
+    };
+    let Some(shape) = plan.flat() else {
+        return false;
+    };
+    if shape.leaf_count() <= MAX_COLUMN_LEAVES {
+        return false;
+    }
+    let Some(eid) = ws.enums_by_name.get(&name) else {
+        return false;
+    };
+    ws.modules[eid.module.index()].enums[eid.def]
+        .variants
+        .iter()
+        .all(|variant| match &variant.payload {
+            VariantPayload::Unit => true,
+            VariantPayload::Tuple(tys) => tys
+                .iter()
+                .all(|ty| dense_payload_ty(ws, *ty, &mut vec![name])),
+            VariantPayload::Record(_) => false,
+        })
+}
 
 /// The column KEYS of `shape`, presence first when the element type is nullable.
 ///
@@ -788,6 +843,7 @@ pub(crate) enum SafeNavRecv {
 pub(crate) enum SpreadDest {
     Container(ContainerKind),
     Columns(ColumnElem),
+    Strided(ColumnElem),
 }
 
 /// The result repr of a swizzle: one selected component is the bare scalar;

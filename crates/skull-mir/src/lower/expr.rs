@@ -314,6 +314,7 @@ impl Builder<'_> {
                 if self.value_struct_of(e).is_some()
                     || self.nullable_place_value_of(e)?.is_some()
                     || self.vec_column_elem_of(base)?.is_some()
+                    || self.vec_strided_elem_of(base)?.is_some()
                 {
                     let r = self.lower_expr_repr(e)?.into_value();
                     return Ok(self.pack(r)?);
@@ -876,6 +877,9 @@ impl Builder<'_> {
                 // boxed. Mirrors `column_element_repr` on the read side.
                 if let ContainerKind::VecValueColumns(elem) = kind {
                     return s.column_element_store(b, i, value, elem);
+                }
+                if let ContainerKind::VecValueStrided(elem) = kind {
+                    return s.strided_element_store(b, i, value, elem);
                 }
                 // A column-stored Map has no slot at the key either: the write
                 // goes through the spine to a slot, then leaf-wise into `data`.
@@ -1564,6 +1568,42 @@ impl Builder<'_> {
         }))
     }
 
+    pub(crate) fn strided_vec_literal(
+        &mut self,
+        elems: &[Idx<Expr>],
+        elem: ColumnElem,
+    ) -> Result<Idx<Inst>, CompilerError> {
+        let shape = self.column_shape(elem)?;
+        let stride = shape.leaf_count();
+        let mut values = Vec::with_capacity(elems.len() * stride);
+        for &expr in elems {
+            let bundle = self.lower_expr_repr(expr)?;
+            let leaves = self.repr_to_storage_leaves(&bundle, &shape, "strided literal")?;
+            if leaves.len() != stride {
+                return Err(gap(format!(
+                    "strided literal arity mismatch for [{}]: {} leaves vs {stride} slots",
+                    elem.name,
+                    leaves.len()
+                )));
+            }
+            values.extend(
+                leaves
+                    .into_iter()
+                    .map(|leaf| self.emit_cur(Inst::VecStrideNilToFalse(leaf))),
+            );
+        }
+        let capacity = self.emit_cur(Inst::Const(Lit::Int(elems.len() as i64)));
+        Ok(self.emit_cur(Inst::MakeVecStrided {
+            elem: elem.name,
+            representation: elem.representation(),
+            nobox: elem.is_nobox(),
+            stride,
+            values,
+            len: elems.len(),
+            capacity,
+        }))
+    }
+
     pub(crate) fn lower_array_literal(
         &mut self,
         lit: Idx<Expr>,
@@ -1583,6 +1623,13 @@ impl Builder<'_> {
             .iter()
             .any(|&e| matches!(self.body.expr_arena[e], Expr::Spread(_)));
         if !has_spread {
+            let strided_elem = match expected {
+                Some(ty) => self.vec_strided_elem_for_type(ty)?,
+                None => self.vec_strided_elem_of(lit)?,
+            };
+            if let Some(elem) = strided_elem {
+                return self.strided_vec_literal(&idxs, elem);
+            }
             // Column storage: transpose the literal's elements into one array
             // per leaf. Each element lowers as a repr, so no element box is
             // built even for a literal with entries.
@@ -1595,6 +1642,23 @@ impl Builder<'_> {
             }
             let vs: Vec<Idx<Inst>> = idxs.iter().map(|&e| self.lower_expr(e)).collect::<Result<_, _>>()?;
             return Ok(self.emit_cur(Inst::MakeVec(vs)));
+        }
+        let strided_elem = match expected {
+            Some(ty) => self.vec_strided_elem_for_type(ty)?,
+            None => self.vec_strided_elem_of(lit)?,
+        };
+        if let Some(elem) = strided_elem {
+            let capacity = self.emit_cur(Inst::Const(Lit::Int(0)));
+            let arr = self.empty_strided_vec(elem, capacity)?;
+            for &expr in &idxs {
+                if let Expr::Spread(inner) = self.body.expr_arena[expr] {
+                    self.spread_into(arr, inner, SpreadDest::Strided(elem))?;
+                } else {
+                    let bundle = self.lower_expr_repr(expr)?;
+                    self.strided_append_bundle(arr, &bundle, elem)?;
+                }
+            }
+            return Ok(arr);
         }
         let column_elem = match expected {
             Some(ty) => self.vec_column_elem_for_type(ty)?,
@@ -1638,6 +1702,7 @@ impl Builder<'_> {
                 Ok(())
             }
             SpreadDest::Columns(elem) => self.column_append_bundle(arr, &bundle, elem),
+            SpreadDest::Strided(elem) => self.strided_append_bundle(arr, &bundle, elem),
         }
     }
 
@@ -1658,6 +1723,11 @@ impl Builder<'_> {
                 ValueBundle::new(elem.representation(), value),
                 dest,
             ),
+            SpreadDest::Strided(elem) => self.append_spread_bundle(
+                arr,
+                ValueBundle::new(elem.representation(), value),
+                dest,
+            ),
         }
     }
 
@@ -1670,14 +1740,17 @@ impl Builder<'_> {
         inner: Idx<Expr>,
         dest: SpreadDest,
     ) -> Result<(), CompilerError> {
-        if let (SpreadDest::Columns(elem), Expr::Tuple(elements)) =
-            (dest, self.body.expr_arena[inner])
-        {
-            for element in elements {
-                let bundle = self.lower_expr_repr(element)?;
-                self.column_append_bundle(arr, &bundle, elem)?;
+        if let Expr::Tuple(elements) = self.body.expr_arena[inner] {
+            match dest {
+                SpreadDest::Columns(_) | SpreadDest::Strided(_) => {
+                    for element in elements {
+                        let bundle = self.lower_expr_repr(element)?;
+                        self.append_spread_bundle(arr, bundle, dest)?;
+                    }
+                    return Ok(());
+                }
+                SpreadDest::Container(_) => {}
             }
-            return Ok(());
         }
         let v = self.lower_expr(inner)?;
         if let Some(ty) = self.concrete_expr_ty(inner) {

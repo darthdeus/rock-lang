@@ -7,6 +7,402 @@
 use super::*;
 
 impl Builder<'_> {
+    pub(crate) fn strided_element_repr(
+        &mut self,
+        vec: Idx<Inst>,
+        index: Idx<Inst>,
+        elem: ColumnElem,
+    ) -> Result<ValueBundle, CompilerError> {
+        let shape = self.column_shape(elem)?;
+        let stride = shape.leaf_count();
+        let slot = self.checked_column_index(vec, index);
+        let data = self.emit_cur(Inst::Field {
+            base: vec,
+            field: Ustr::from("_data"),
+        });
+        let leaves = (0..stride)
+            .map(|offset| {
+                let at = self.strided_slot_index(slot, stride, offset);
+                let raw = self.emit_cur(Inst::Index {
+                    base: data,
+                    index: at,
+                    kind: ContainerKind::VecStrideSlot,
+                });
+                self.emit_cur(Inst::VecStrideFalseToNil(raw))
+            })
+            .collect::<Vec<_>>();
+        let mut idx = 0;
+        Ok(ValueBundle::new(
+            elem.representation(),
+            self.rebuild_from_leaves(&shape, &leaves, &mut idx),
+        ))
+    }
+
+    pub(crate) fn strided_element_store(
+        &mut self,
+        vec: Idx<Inst>,
+        index: Idx<Inst>,
+        value: Idx<Expr>,
+        elem: ColumnElem,
+    ) -> Result<(), CompilerError> {
+        let bundle = self.lower_expr_repr(value)?;
+        self.strided_element_store_bundle(vec, index, &bundle, elem)
+    }
+
+    pub(crate) fn strided_element_store_bundle(
+        &mut self,
+        vec: Idx<Inst>,
+        index: Idx<Inst>,
+        bundle: &ValueBundle,
+        elem: ColumnElem,
+    ) -> Result<(), CompilerError> {
+        let shape = self.column_shape(elem)?;
+        let leaves = self.repr_to_storage_leaves(bundle, &shape, "strided store")?;
+        let stride = shape.leaf_count();
+        if leaves.len() != stride {
+            return Err(gap(format!(
+                "strided store arity mismatch for [{}]: {} leaves vs {stride} slots",
+                elem.name,
+                leaves.len()
+            )));
+        }
+        let slot = self.checked_column_index(vec, index);
+        self.strided_store_leaves_at(vec, slot, leaves, stride);
+        Ok(())
+    }
+
+    fn strided_store_leaves_at(
+        &mut self,
+        vec: Idx<Inst>,
+        slot: Idx<Inst>,
+        leaves: Vec<Idx<Inst>>,
+        stride: usize,
+    ) {
+        let data = self.emit_cur(Inst::Field {
+            base: vec,
+            field: Ustr::from("_data"),
+        });
+        for (offset, leaf) in leaves.into_iter().enumerate() {
+            let at = self.strided_slot_index(slot, stride, offset);
+            let value = self.emit_cur(Inst::VecStrideNilToFalse(leaf));
+            self.emit_cur(Inst::StoreIndex {
+                base: data,
+                index: at,
+                value,
+                kind: ContainerKind::VecStrideSlot,
+            });
+        }
+    }
+
+    fn strided_slot_index(
+        &mut self,
+        checked: Idx<Inst>,
+        stride: usize,
+        offset: usize,
+    ) -> Idx<Inst> {
+        let logical = if self.column_base_is_one() {
+            let one = self.emit_cur(Inst::Const(Lit::Int(1)));
+            self.emit_cur(Inst::IntSub(checked, one))
+        } else {
+            checked
+        };
+        let width = self.emit_cur(Inst::Const(Lit::Int(stride as i64)));
+        let base = self.emit_cur(Inst::IntMul(logical, width));
+        let physical = offset + usize::from(self.column_base_is_one());
+        if physical == 0 {
+            base
+        } else {
+            let offset = self.emit_cur(Inst::Const(Lit::Int(physical as i64)));
+            self.emit_cur(Inst::IntAdd(base, offset))
+        }
+    }
+
+    pub(crate) fn strided_push(
+        &mut self,
+        recv: Idx<Expr>,
+        item: Idx<Expr>,
+        elem: ColumnElem,
+    ) -> Result<ValueRepr, CompilerError> {
+        let vec = self.lower_expr(recv)?;
+        let bundle = self.lower_expr_repr(item)?;
+        self.strided_append_bundle(vec, &bundle, elem)?;
+        Ok(ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil))))
+    }
+
+    pub(crate) fn strided_append_bundle(
+        &mut self,
+        vec: Idx<Inst>,
+        bundle: &ValueBundle,
+        elem: ColumnElem,
+    ) -> Result<(), CompilerError> {
+        let shape = self.column_shape(elem)?;
+        let leaves = self.repr_to_storage_leaves(bundle, &shape, "strided append")?;
+        let stride = shape.leaf_count();
+        if leaves.len() != stride {
+            return Err(gap(format!(
+                "strided append arity mismatch for [{}]: {} leaves vs {stride} slots",
+                elem.name,
+                leaves.len()
+            )));
+        }
+        let len = self.emit_cur(Inst::Field {
+            base: vec,
+            field: Ustr::from("len"),
+        });
+        let slot = if self.column_base_is_one() {
+            let one = self.emit_cur(Inst::Const(Lit::Int(1)));
+            self.emit_cur(Inst::IntAdd(len, one))
+        } else {
+            len
+        };
+        self.strided_store_leaves_at(vec, slot, leaves, stride);
+        let one = self.emit_cur(Inst::Const(Lit::Int(1)));
+        let next = self.emit_cur(Inst::IntAdd(len, one));
+        self.emit_cur(Inst::StoreField {
+            base: vec,
+            field: Ustr::from("len"),
+            value: next,
+        });
+        Ok(())
+    }
+
+    pub(crate) fn empty_strided_vec(
+        &mut self,
+        elem: ColumnElem,
+        capacity: Idx<Inst>,
+    ) -> Result<Idx<Inst>, CompilerError> {
+        let stride = self.column_shape(elem)?.leaf_count();
+        Ok(self.emit_cur(Inst::MakeVecStrided {
+            elem: elem.name,
+            representation: elem.representation(),
+            nobox: elem.is_nobox(),
+            stride,
+            values: Vec::new(),
+            len: 0,
+            capacity,
+        }))
+    }
+
+    fn make_strided_header(
+        &mut self,
+        elem: ColumnElem,
+        stride: usize,
+        capacity: Idx<Inst>,
+    ) -> Idx<Inst> {
+        self.emit_cur(Inst::MakeVecStridedHeader {
+            elem: elem.name,
+            representation: elem.representation(),
+            nobox: elem.is_nobox(),
+            stride,
+            capacity,
+        })
+    }
+
+    pub(crate) fn strided_data_primitive(
+        &mut self,
+        name: &str,
+        arg_idxs: &[Idx<Expr>],
+    ) -> Result<Option<ValueRepr>, CompilerError> {
+        match (name, arg_idxs) {
+            ("__vec_data_get", [recv, index]) => {
+                let Some(elem) = self.vec_strided_elem_of(*recv)? else {
+                    return Ok(None);
+                };
+                let vec = self.lower_expr(*recv)?;
+                let index = self.lower_expr(*index)?;
+                Ok(Some(
+                    self.strided_element_repr(vec, index, elem)?.into_value(),
+                ))
+            }
+            ("__vec_data_set", [recv, index, value]) => {
+                let Some(elem) = self.vec_strided_elem_of(*recv)? else {
+                    return Ok(None);
+                };
+                let vec = self.lower_expr(*recv)?;
+                let index = self.lower_expr(*index)?;
+                self.strided_element_store(vec, index, *value, elem)?;
+                Ok(Some(ValueRepr::Scalar(
+                    self.emit_cur(Inst::Const(Lit::Nil)),
+                )))
+            }
+            ("__vec_data_unset", [recv, index]) => {
+                let Some(elem) = self.vec_strided_elem_of(*recv)? else {
+                    return Ok(None);
+                };
+                let stride = self.column_shape(elem)?.leaf_count();
+                let vec = self.lower_expr(*recv)?;
+                let index = self.lower_expr(*index)?;
+                let slot = self.checked_column_index(vec, index);
+                let leaves = (0..stride)
+                    .map(|_| self.emit_cur(Inst::Const(Lit::Bool(false))))
+                    .collect();
+                self.strided_store_leaves_at(vec, slot, leaves, stride);
+                Ok(Some(ValueRepr::Scalar(
+                    self.emit_cur(Inst::Const(Lit::Nil)),
+                )))
+            }
+            ("__vec_data_capacity", [recv]) => {
+                let Some(elem) = self.vec_strided_elem_of(*recv)? else {
+                    return Ok(None);
+                };
+                let stride = self.column_shape(elem)?.leaf_count();
+                let vec = self.lower_expr(*recv)?;
+                let header = self.column_header(vec);
+                let reserved = self.emit_cur(Inst::Field {
+                    base: header,
+                    field: Ustr::from("cap"),
+                });
+                let data = self.emit_cur(Inst::Field {
+                    base: vec,
+                    field: Ustr::from("_data"),
+                });
+                let physical = self.call_spine("table_len", vec![data])?;
+                let width = self.emit_cur(Inst::Const(Lit::Int(stride as i64)));
+                Ok(Some(ValueRepr::Scalar(self.call_spine(
+                    "__rock_stride_capacity",
+                    vec![reserved, physical, width],
+                )?)))
+            }
+            ("__vec_data_insert", [recv, index, value]) => {
+                let Some(elem) = self.vec_strided_elem_of(*recv)? else {
+                    return Ok(None);
+                };
+                let shape = self.column_shape(elem)?;
+                let stride = shape.leaf_count();
+                let vec = self.lower_expr(*recv)?;
+                let index = self.lower_expr(*index)?;
+                let bundle = self.lower_expr_repr(*value)?;
+                let leaves = self.repr_to_storage_leaves(&bundle, &shape, "strided insert")?;
+                let data = self.emit_cur(Inst::Field {
+                    base: vec,
+                    field: Ustr::from("_data"),
+                });
+                let len = self.emit_cur(Inst::Field {
+                    base: vec,
+                    field: Ustr::from("len"),
+                });
+                let width = self.emit_cur(Inst::Const(Lit::Int(stride as i64)));
+                self.call_spine("__rock_stride_insert", vec![data, index, len, width])?;
+                let slot = if self.column_base_is_one() {
+                    index
+                } else {
+                    let one = self.emit_cur(Inst::Const(Lit::Int(1)));
+                    self.emit_cur(Inst::IntSub(index, one))
+                };
+                self.strided_store_leaves_at(vec, slot, leaves, stride);
+                Ok(Some(ValueRepr::Scalar(
+                    self.emit_cur(Inst::Const(Lit::Nil)),
+                )))
+            }
+            ("__vec_data_clone", [recv]) => {
+                let Some(elem) = self.vec_strided_elem_of(*recv)? else {
+                    return Ok(None);
+                };
+                let stride = self.column_shape(elem)?.leaf_count();
+                let vec = self.lower_expr(*recv)?;
+                let data = self.emit_cur(Inst::Field {
+                    base: vec,
+                    field: Ustr::from("_data"),
+                });
+                let len = self.emit_cur(Inst::Field {
+                    base: vec,
+                    field: Ustr::from("len"),
+                });
+                let width = self.emit_cur(Inst::Const(Lit::Int(stride as i64)));
+                let copied = self.call_spine("__rock_stride_copy", vec![data, len, width])?;
+                let old_header = self.column_header(vec);
+                let capacity = self.emit_cur(Inst::Field {
+                    base: old_header,
+                    field: Ustr::from("cap"),
+                });
+                let header = self.make_strided_header(elem, stride, capacity);
+                Ok(Some(ValueRepr::Scalar(self.emit_cur(Inst::MakeStruct {
+                    ty: Some(Ustr::from("Vec")),
+                    fields: vec![
+                        (Ustr::from("_data"), copied),
+                        (Ustr::from("len"), len),
+                        (Ustr::from(VEC_COLUMN_HEADER_FIELD), header),
+                    ],
+                }))))
+            }
+            ("__vec_data_sort", [recv, key_fn]) => {
+                let Some(elem) = self.vec_strided_elem_of(*recv)? else {
+                    return Ok(None);
+                };
+                let stride = self.column_shape(elem)?.leaf_count();
+                let vec = self.lower_expr(*recv)?;
+                let key = self.lower_expr(*key_fn)?;
+                let width = self.emit_cur(Inst::Const(Lit::Int(stride as i64)));
+                Ok(Some(ValueRepr::Scalar(self.call_spine(
+                    "__rock_stride_sort",
+                    vec![vec, key, width],
+                )?)))
+            }
+            ("__rock_vec_to_lua_array", [recv]) => {
+                if self.vec_strided_elem_of(*recv)?.is_none() {
+                    return Ok(None);
+                }
+                let vec = self.lower_expr(*recv)?;
+                Ok(Some(ValueRepr::Scalar(
+                    self.call_spine("__rock_vec_strided_elements", vec![vec])?,
+                )))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    pub(crate) fn strided_vec_from_raw_array(
+        &mut self,
+        raw: Idx<Inst>,
+        len: Idx<Inst>,
+        elem: ColumnElem,
+    ) -> Result<Idx<Inst>, CompilerError> {
+        let vec = self.empty_strided_vec(elem, len)?;
+        let cell = self.f.new_cell(None);
+        let zero = self.emit_cur(Inst::Const(Lit::Int(0)));
+        self.emit_cur(Inst::Store { cell, value: zero });
+        let header = self.f.new_block();
+        let body = self.f.new_block();
+        let exit = self.f.new_block();
+        self.f.set_term(self.cur, Term::Goto(header));
+        self.cur = header;
+        let i = self.emit_cur(Inst::Load(cell));
+        let more = self.emit_cur(Inst::IntLt(i, len));
+        self.f.set_term(
+            self.cur,
+            Term::Branch {
+                cond: more,
+                then_bb: body,
+                else_bb: exit,
+            },
+        );
+        self.cur = body;
+        let i = self.emit_cur(Inst::Load(cell));
+        let raw_index = if self.column_base_is_one() {
+            let one = self.emit_cur(Inst::Const(Lit::Int(1)));
+            self.emit_cur(Inst::IntAdd(i, one))
+        } else {
+            i
+        };
+        let value = self.emit_cur(Inst::Index {
+            base: raw,
+            index: raw_index,
+            kind: ContainerKind::VecStrideSlot,
+        });
+        let shape = self.column_shape(elem)?;
+        let leaves = self.cdata_leaves(value, &shape)?;
+        let mut leaf = 0;
+        let unpacked = self.rebuild_from_leaves(&shape, &leaves, &mut leaf);
+        let bundle = ValueBundle::new(elem.representation(), unpacked);
+        self.strided_append_bundle(vec, &bundle, elem)?;
+        let one = self.emit_cur(Inst::Const(Lit::Int(1)));
+        let next = self.emit_cur(Inst::IntAdd(i, one));
+        self.emit_cur(Inst::Store { cell, value: next });
+        self.f.set_term(self.cur, Term::Goto(header));
+        self.cur = exit;
+        Ok(vec)
+    }
+
     /// A column-stored element (`xs[i]` where `xs: [E]` stores flat columns) as
     /// an unboxed `Group`: bounds-check `i` once, then read leaf `k` from column
     /// `k`. No element table is touched because none exists.

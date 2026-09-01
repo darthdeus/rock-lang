@@ -577,6 +577,8 @@ fn emitted_value_allocation_kind(inst: &Inst) -> Option<EmittedAllocationKind> {
         Inst::MakeVec(..) => EmittedAllocationKind::VecConstruction,
         Inst::MakeVecColumns { .. } => EmittedAllocationKind::VecColumnConstruction,
         Inst::MakeVecColumnHeader { .. } => EmittedAllocationKind::VecColumnHeader,
+        Inst::MakeVecStrided { .. } => EmittedAllocationKind::VecConstruction,
+        Inst::MakeVecStridedHeader { .. } => EmittedAllocationKind::StructConstruction,
         Inst::MakeStruct { .. } => EmittedAllocationKind::StructConstruction,
         Inst::MakeValueStruct { .. } => EmittedAllocationKind::ValueConstruction,
         Inst::MaterializeValueStruct { .. } => {
@@ -2728,6 +2730,16 @@ impl Emitter<'_> {
             Inst::FloatDiv(a, b) => self.write_bin(out, "/", a, b),
             Inst::IntMod(a, b) | Inst::FloatMod(a, b) => self.write_bin(out, "%", a, b),
             Inst::UintMod(a, b) => self.write_u32_bin(out, "%", a, b),
+            Inst::VecStrideNilToFalse(value) => {
+                out.push('(');
+                self.write_opnd(out, *value);
+                out.push_str(" or false)");
+            }
+            Inst::VecStrideFalseToNil(value) => {
+                out.push('(');
+                self.write_opnd(out, *value);
+                out.push_str(" or nil)");
+            }
             Inst::StringConcat(a, b) => {
                 // Emit the whole inlinable concat tree as ONE flat `..` run
                 // (`x .. y .. z`) rather than left-nested binary concats
@@ -2903,6 +2915,30 @@ impl Emitter<'_> {
                 self.write_opnd(out, *capacity);
                 out.push('}');
             }
+            Inst::MakeVecStrided { elem, stride, values, len, capacity, .. } => {
+                out.push_str("{_data = {");
+                self.write_csv(out, values);
+                out.push_str("}, len = ");
+                let _ = write!(out, "{len}");
+                out.push_str(", __ty = \"Vec\", [");
+                write_lua_string(out, skull_mir::mir::VEC_COLUMN_HEADER_FIELD);
+                out.push_str("] = {repr = ");
+                write_lua_string(out, skull_mir::mir::VEC_STRIDED_REPR);
+                out.push_str(", elem = ");
+                write_lua_string(out, elem.as_str());
+                let _ = write!(out, ", stride = {stride}, cap = ");
+                self.write_opnd(out, *capacity);
+                out.push_str("}}");
+            }
+            Inst::MakeVecStridedHeader { elem, stride, capacity, .. } => {
+                out.push_str("{repr = ");
+                write_lua_string(out, skull_mir::mir::VEC_STRIDED_REPR);
+                out.push_str(", elem = ");
+                write_lua_string(out, elem.as_str());
+                let _ = write!(out, ", stride = {stride}, cap = ");
+                self.write_opnd(out, *capacity);
+                out.push('}');
+            }
             Inst::MakeStruct { ty, fields } => {
                 out.push('{');
                 let mut first = true;
@@ -3009,6 +3045,7 @@ impl Emitter<'_> {
             Inst::Len { base, kind } => match kind {
                 ContainerKind::Vec
                 | ContainerKind::VecValueColumns(_)
+                | ContainerKind::VecValueStrided(_)
                 | ContainerKind::NativeBuffer
                 | ContainerKind::NativeBufferValue(_) => {
                     self.write_opnd(out, *base);
@@ -3020,7 +3057,7 @@ impl Emitter<'_> {
                 ContainerKind::NativeBufferLeaf => {
                     unreachable!("`len` of a leaf view: lowering must ask the owning buffer")
                 }
-                ContainerKind::VecColumn => {
+                ContainerKind::VecColumn | ContainerKind::VecStrideSlot => {
                     out.push('#');
                     self.write_opnd(out, *base);
                 }
@@ -3182,6 +3219,12 @@ impl Emitter<'_> {
                 self.write_opnd(out, index);
                 out.push(']');
             }
+            ContainerKind::VecStrideSlot => {
+                self.write_opnd(out, base);
+                out.push('[');
+                self.write_opnd(out, index);
+                out.push(']');
+            }
             // A whole-element read has no single slot to name -- column storage
             // has no element table. Lowering decomposes every such read into
             // per-column reads (`column_element_repr`), so reaching emit means
@@ -3190,6 +3233,12 @@ impl Emitter<'_> {
             ContainerKind::VecValueColumns(elem) => {
                 unreachable!(
                     "whole-element index of column-stored [{elem}] reached emit, in `{}`",
+                    self.func.name
+                )
+            }
+            ContainerKind::VecValueStrided(elem) => {
+                unreachable!(
+                    "whole-element index of strided [{elem}] reached emit, in `{}`",
                     self.func.name
                 )
             }
@@ -3263,6 +3312,7 @@ impl Emitter<'_> {
                     // `len` was checked once by `VecCheckedIndex`.
                     ContainerKind::Map
                     | ContainerKind::VecColumn
+                    | ContainerKind::VecStrideSlot
                     | ContainerKind::NativeBufferLeaf => {
                         out.push_str("  ");
                         self.write_opnd(out, *base);
@@ -3276,6 +3326,9 @@ impl Emitter<'_> {
                     // an element write into per-column stores.
                     ContainerKind::VecValueColumns(elem) => {
                         unreachable!("whole-element store into column-stored [{elem}] reached emit")
+                    }
+                    ContainerKind::VecValueStrided(elem) => {
+                        unreachable!("whole-element store into strided [{elem}] reached emit")
                     }
                 }
             }
@@ -3311,7 +3364,9 @@ impl Emitter<'_> {
                     | ContainerKind::NativeBufferValue(_)
                     | ContainerKind::NativeBufferLeaf
                     | ContainerKind::VecValueColumns(_)
+                    | ContainerKind::VecValueStrided(_)
                     | ContainerKind::VecColumn
+                    | ContainerKind::VecStrideSlot
                     | ContainerKind::Map => {
                         unreachable!("ArrayPush only lowers for Vec array literals, got {kind:?}")
                     }

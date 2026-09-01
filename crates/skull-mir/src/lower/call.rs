@@ -371,10 +371,16 @@ impl Builder<'_> {
         if let Callee::Unresolved { name, .. } = callee {
             if matches!(name.as_str(), "push" | "vec_push") {
                 if let [recv, item] = arg_idxs[..] {
+                    if let Some(elem) = self.vec_strided_elem_of(recv)? {
+                        return self.strided_push(recv, item, elem);
+                    }
                     if let Some(elem) = self.vec_column_elem_of(recv)? {
                         return self.column_push(recv, item, elem);
                     }
                 }
+            }
+            if let Some(r) = self.strided_data_primitive(name.as_str(), &arg_idxs)? {
+                return Ok(r);
             }
             // The three raw-backing primitives ARE the representation boundary.
             // Nearly every stdlib Vec helper -- `get`, `set`, `pop`, `clear`,
@@ -397,12 +403,20 @@ impl Builder<'_> {
             // boundary; the concrete plan must select the column representation
             // before the body would otherwise expose a table-backed `_data`.
             if name.as_str() == "__vec_data_alloc" && arg_idxs.len() == 1 {
+                if let Some(elem) = self.vec_strided_elem_of(e)? {
+                    let capacity = self.lower_expr(arg_idxs[0])?;
+                    return Ok(ValueRepr::Scalar(self.empty_strided_vec(elem, capacity)?));
+                }
                 if let Some(elem) = self.vec_column_elem_of(e)? {
                     let capacity = self.lower_expr(arg_idxs[0])?;
                     return Ok(ValueRepr::Scalar(self.empty_column_vec(elem, capacity)?));
                 }
             }
             if name.as_str() == "vec_new" && arg_idxs.is_empty() {
+                if let Some(elem) = self.vec_strided_elem_of(e)? {
+                    let capacity = self.emit_cur(Inst::Const(Lit::Int(0)));
+                    return Ok(ValueRepr::Scalar(self.empty_strided_vec(elem, capacity)?));
+                }
                 if let Some(elem) = self.vec_column_elem_of(e)? {
                     let capacity = self.emit_cur(Inst::Const(Lit::Int(0)));
                     return Ok(ValueRepr::Scalar(self.empty_column_vec(elem, capacity)?));
@@ -426,6 +440,13 @@ impl Builder<'_> {
                 }
             }
             if name.as_str() == "__rock_vec_from_lua_array" {
+                if let ([raw, len], Some(elem)) = (&arg_idxs[..], self.vec_strided_elem_of(e)?) {
+                    let raw = self.lower_expr(*raw)?;
+                    let len = self.lower_expr(*len)?;
+                    return Ok(ValueRepr::Scalar(
+                        self.strided_vec_from_raw_array(raw, len, elem)?,
+                    ));
+                }
                 if let ([raw, len], Some(elem)) = (&arg_idxs[..], self.vec_column_elem_of(e)?) {
                     let raw = self.lower_expr(*raw)?;
                     let len = self.lower_expr(*len)?;
@@ -1912,6 +1933,9 @@ impl Builder<'_> {
         match kind {
             ContainerKind::VecValueColumns(elem) => {
                 self.column_element_repr(arr, index, elem).map(ValueBundle::into_value)
+            }
+            ContainerKind::VecValueStrided(elem) => {
+                self.strided_element_repr(arr, index, elem).map(ValueBundle::into_value)
             }
             ContainerKind::NativeBufferValue(elem) if self.is_leaf_addressed(elem)? => {
                 self.nb_leaf_element_repr(arr, index, elem)

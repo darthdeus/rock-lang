@@ -191,6 +191,31 @@ fn fmt_inst(
         Inst::MakeVecColumnHeader { elem, capacity, .. } => {
             format!("vec.column_header {elem} cap=v{}", num[capacity])
         }
+        Inst::MakeVecStrided {
+            elem,
+            stride,
+            values,
+            len,
+            capacity,
+            ..
+        } => format!(
+            "vec.strided {elem} stride={stride} len={len} cap=v{} [{}]",
+            num[capacity],
+            list(values)
+        ),
+        Inst::MakeVecStridedHeader {
+            elem,
+            stride,
+            capacity,
+            ..
+        } => {
+            format!(
+                "vec.strided_header {elem} stride={stride} cap=v{}",
+                num[capacity]
+            )
+        }
+        Inst::VecStrideNilToFalse(value) => format!("stride.nil_to_false v{}", v(*value)),
+        Inst::VecStrideFalseToNil(value) => format!("stride.false_to_nil v{}", v(*value)),
         Inst::MakeStruct { ty, fields } => {
             let fs = fields
                 .iter()

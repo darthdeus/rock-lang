@@ -1,19 +1,47 @@
 //! `[Opt]` where `Opt` is a `value` struct with a nullable `nobox` field, swept
 //! by LEAF COUNT.
 //!
-//! The sweep is the point. `MAX_COLUMN_LEAVES` (`skull-mir/src/lower.rs`) makes
-//! the STORAGE flip at 4 leaves -- flat columns at or below it, a boxed element
-//! above -- and that flip is invisible from any single repro: a 2-field `Opt` is
-//! 4 leaves (presence + x + y + a) and column-stores, a 3-field `Opt` is 5 and
-//! boxes. Both must round-trip, present and absent, and the count is what tells
-//! you which path a row exercised. This was long read as a leaf-count LIMIT on
-//! the nobox guarantee; it is a storage tier, and the guarantee holds on both
-//! sides of it. Raising the constant only moves the flip.
+//! The sweep is the point. `MAX_COLUMN_LEAVES`
+//! (`skull-mir/src/lower/shape.rs`) makes the implicit STORAGE flip at 4 leaves
+//! -- flat columns at or below it, a boxed element above -- and that flip is
+//! invisible from any single repro: a 2-field `Opt` is 4 leaves (presence + x +
+//! y + a) and column-stores, a 3-field `Opt` is 5 and boxes. Both must round-trip,
+//! present and absent, and the count is what tells you which path a row exercised.
+//! An element explicitly marked `nobox` bypasses this heuristic and stays in
+//! columns at any supported width; the constant only chooses storage for
+//! unmarked values.
 //!
 //! The GC-tier ctor itself (one field, no Vec) is pinned by
 //! `nobox_nested_ctor.rs`.
 
-use crate::common::{run_luajit, try_emit_module};
+use crate::common::{function_body, run_luajit, try_emit_module};
+
+const WIDE_NOBOX_OVERWRITE: &str = r#"
+nobox value Wide { a: int, b: int, c: int, d: int, e: int }
+
+fn main() {
+    let values: [Wide] = []
+    values.push(Wide { a: 1, b: 2, c: 3, d: 4, e: 5 })
+    values[0] = Wide { a: 6, b: 7, c: 8, d: 9, e: 10 }
+    print("{values[0].a} {values[0].e}")
+}
+"#;
+
+#[test]
+fn wide_nobox_vec_uses_columns_past_the_implicit_threshold() {
+    let lua = try_emit_module(WIDE_NOBOX_OVERWRITE)
+        .expect("an explicit nobox guarantee must not fall back to boxed Vec elements");
+    let body = function_body(&lua, "main");
+    assert!(
+        !body.contains("Wide_lct("),
+        "wide nobox Vec materialized an element:\n{body}"
+    );
+    assert!(
+        !body.contains("._data"),
+        "wide nobox Vec reached boxed storage:\n{body}"
+    );
+    assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "wide_nobox_vec"), "6 10");
+}
 
 /// `n` float fields after `pos`, so the element carries `n + 3` leaves
 /// (presence, `pos.x`, `pos.y`, then the floats).
