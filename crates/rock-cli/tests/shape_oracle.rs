@@ -2596,7 +2596,7 @@ fn the_emitted_shape_holds_the_materialization_invariants() {
 /// The JS backend over the SAME generated shapes. It is a real rung, not a
 /// placeholder -- but its verdict set differs on purpose: `--backend js` reports
 /// `SKIP(reason)` for shapes its emitter does not cover yet (that histogram IS
-/// the emitter worklist, `docs/js-backend-plan.md`), and a rejection there can be
+/// the emitter worklist, `docs/backends.md`), and a rejection there can be
 /// an unbuilt emitter arm rather than a language rule. So this test gates on the
 /// one thing that means the same on every backend: a program that compiles, runs
 /// and answers wrong.

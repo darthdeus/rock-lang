@@ -26,7 +26,9 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use skull_codegen_lua::{emit_function, mangle_fn, CodegenCtx};
 use skull_mir::instance::Instance;
 use skull_mir::mir::{FuncRef, Inst, MirFunc, Term};
-use skull_parser::{CompilerError, CompilerErrorKind};
+use skull_parser::CompilerError;
+#[cfg(feature = "renderer-wgpu")]
+use skull_parser::CompilerErrorKind;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write as _;
 use std::time::{Duration, Instant};
@@ -2888,11 +2890,13 @@ pub struct WgpuProjectionCensus {
     pub omissions: BTreeMap<String, String>,
 }
 
+#[cfg(feature = "renderer-wgpu")]
 enum WgpuProjection<T> {
     Admitted(T),
     Unsupported { capability: String },
 }
 
+#[cfg(feature = "renderer-wgpu")]
 fn classify_wgpu_projection<T>(result: Result<T, CompilerError>) -> Result<WgpuProjection<T>, CompilerError> {
     match result {
         Ok(value) => Ok(WgpuProjection::Admitted(value)),
@@ -2905,6 +2909,7 @@ fn classify_wgpu_projection<T>(result: Result<T, CompilerError>) -> Result<WgpuP
     }
 }
 
+#[cfg(feature = "renderer-wgpu")]
 fn collect_wgpu_projections<T, K>(
     items: impl IntoIterator<Item = (String, K)>,
     mut project: impl FnMut(&str, K) -> Result<T, CompilerError>,
@@ -4647,6 +4652,7 @@ fn graph_rejection_error(
 /// unconditional, while a pair whose WGSL projection cannot represent its
 /// graph-owned interface is omitted from the WGPU artifact view and rejected
 /// by the runtime before effects.
+#[cfg(feature = "renderer-wgpu")]
 fn concrete_stage_input(
     view: &skull_graph::shader::ShaderStageView,
     concrete_plans: &std::sync::Arc<skull_mir::concrete::ConcretePlans>,
@@ -4684,7 +4690,10 @@ fn shader_registration_lines(
     }
     let mut out = String::new();
     let mut dependencies = FxHashSet::default();
+    #[cfg(feature = "renderer-wgpu")]
     let mut abi_wires = BTreeMap::new();
+    #[cfg(not(feature = "renderer-wgpu"))]
+    let abi_wires = BTreeMap::new();
     for (pair, program_view) in collection.pairs.iter().zip(&view.program_views) {
         // vert=None is the A3c single-arg fullscreen form -> the A1 single-entry
         // emitter (PIXEL body + fullscreen VERTEX passthrough).
@@ -4736,8 +4745,17 @@ fn shader_registration_lines(
         .map(|pair| pair.key.clone())
         .chain(compute_collection.entries.iter().map(|entry| entry.key.clone()))
         .collect();
+    #[cfg(feature = "renderer-wgpu")]
     let mut wgpu_projection_census = None;
+    #[cfg(not(feature = "renderer-wgpu"))]
+    let wgpu_projection_census = None;
     if renderer_target == RendererTarget::Wgpu {
+        #[cfg(not(feature = "renderer-wgpu"))]
+        return Err(CompilerError::new_no_location(
+            "the `wgpu` renderer was omitted from this build; enable the `renderer-wgpu` feature (for example, `just test-wgpu`)".to_string(),
+        ));
+        #[cfg(feature = "renderer-wgpu")]
+        {
         let items = collection
             .pairs
             .iter()
@@ -4824,6 +4842,7 @@ fn shader_registration_lines(
             );
         }
         wgpu_projection_census = Some(census);
+        }
     }
     if view.compute_views.len() != compute_collection.entries.len() {
         return Err(CompilerError::new_no_location(format!(
@@ -4833,45 +4852,50 @@ fn shader_registration_lines(
         )));
     }
     let has_compute = !compute_collection.entries.is_empty();
-    if has_compute {
-        out.push_str("__rock_wgpu_compute_snapshot_begin()\n");
-    }
-    for (entry, compute_view) in compute_collection.entries.iter().zip(&view.compute_views) {
-        let input = concrete_stage_input(&compute_view.stage, &compute_view.concrete_plans);
-        let neutral = skull_codegen_shader::plan_compute_from_concrete(
-            ws,
-            scx,
-            &input,
-            &skull_codegen_wgsl::WgslShaderPolicy,
-        )?;
-        dependencies.extend(neutral.dependencies);
-        let logical_entry = neutral.entry.inst.symbol(ws, &neutral.ir.interner);
-        let abi = skull_codegen_wgsl::WgslAbiPlan::compute(
-            &neutral.interface,
-            &format!("{logical_entry}_compute"),
-            bone_semantic::prelude::Span::default(),
-        )?;
-        let emission = skull_codegen_wgsl::emit_compute_shader(
-            ws,
-            &neutral.ir,
-            &neutral.interface,
-            &abi,
-            bone_semantic::prelude::Span::default(),
-        )?;
-        dependencies.extend(emission.dependencies);
-        let wire = emission.abi.wire();
-        abi_wires.insert(entry.key.clone(), wire.clone());
-        let _ = writeln!(
-            out,
-            "__rock_wgpu_compute_register({}, {}, {}, {})",
-            skull_codegen_lua::lua_string(&entry.key),
-            skull_codegen_lua::lua_string(&emission.source),
-            skull_codegen_lua::lua_string(&wire),
-            skull_codegen_lua::lua_string(&neutral.interface.semantic_wire(false)),
-        );
-    }
-    if has_compute {
-        out.push_str("if not __rock_wgpu_compute_snapshot_end() then error(\"compiler compute snapshot failed\") end\n");
+    if renderer_target == RendererTarget::Wgpu && has_compute {
+        #[cfg(not(feature = "renderer-wgpu"))]
+        return Err(CompilerError::new_no_location(
+            "the `wgpu` renderer was omitted from this build; enable the `renderer-wgpu` feature (for example, `just test-wgpu`)".to_string(),
+        ));
+        #[cfg(feature = "renderer-wgpu")]
+        {
+            out.push_str("__rock_wgpu_compute_snapshot_begin()\n");
+            for (entry, compute_view) in compute_collection.entries.iter().zip(&view.compute_views) {
+                let input = concrete_stage_input(&compute_view.stage, &compute_view.concrete_plans);
+                let neutral = skull_codegen_shader::plan_compute_from_concrete(
+                    ws,
+                    scx,
+                    &input,
+                    &skull_codegen_wgsl::WgslShaderPolicy,
+                )?;
+                dependencies.extend(neutral.dependencies);
+                let logical_entry = neutral.entry.inst.symbol(ws, &neutral.ir.interner);
+                let abi = skull_codegen_wgsl::WgslAbiPlan::compute(
+                    &neutral.interface,
+                    &format!("{logical_entry}_compute"),
+                    bone_semantic::prelude::Span::default(),
+                )?;
+                let emission = skull_codegen_wgsl::emit_compute_shader(
+                    ws,
+                    &neutral.ir,
+                    &neutral.interface,
+                    &abi,
+                    bone_semantic::prelude::Span::default(),
+                )?;
+                dependencies.extend(emission.dependencies);
+                let wire = emission.abi.wire();
+                abi_wires.insert(entry.key.clone(), wire.clone());
+                let _ = writeln!(
+                    out,
+                    "__rock_wgpu_compute_register({}, {}, {}, {})",
+                    skull_codegen_lua::lua_string(&entry.key),
+                    skull_codegen_lua::lua_string(&emission.source),
+                    skull_codegen_lua::lua_string(&wire),
+                    skull_codegen_lua::lua_string(&neutral.interface.semantic_wire(false)),
+                );
+            }
+            out.push_str("if not __rock_wgpu_compute_snapshot_end() then error(\"compiler compute snapshot failed\") end\n");
+        }
     }
     let mut shader_pair_users = BTreeMap::new();
     for pairs in collection.contributions.values() {
@@ -8368,7 +8392,7 @@ mod lua_definition_scope_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "renderer-wgpu"))]
 mod wgpu_projection_tests {
     use super::*;
 
@@ -8389,7 +8413,7 @@ mod wgpu_projection_tests {
         );
         let error = result.expect_err("an unexpected emitter error must fail the collection");
         assert_eq!(error.message, "unexpected WGSL emitter failure");
-        assert_eq!(error.kind, CompilerErrorKind::Generic);
+        assert_eq!(error.kind, skull_parser::CompilerErrorKind::Generic);
         assert_eq!(visited, ["admitted", "unexpected"]);
     }
 }

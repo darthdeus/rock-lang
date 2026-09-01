@@ -135,6 +135,7 @@ pub fn do_stone_watch(
     no_record: bool,
 ) -> Result<()> {
     rock_host::project::ensure_workspace_root()?;
+    crate::skull_backend::ensure_renderer_feature(path)?;
     let replay_source = replay_source_for(path)?;
 
     if !quiet {

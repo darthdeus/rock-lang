@@ -1,11 +1,8 @@
-//! stone-web arc 1: per-backend same-name decls end to end. A same-name
-//! `inline(lua)` + `inline(js)` pair collapses to one overload in bone (no
-//! "Ambiguous overload"), then each backend emits + binds ITS variant: luajit
-//! runs the lua body, node runs the js body, and both produce identical output.
+//! JS lane for per-backend same-name decls end to end. A same-name
+//! `inline(lua)` + `inline(js)` pair collapses to one overload in bone, then the
+//! JS backend emits and binds its variant under node.
 //!
-//! Drives the real binary on both backends so the whole path (collapse ->
-//! resolve_funcref backend select -> verbatim inline(js) emission / lua inline
-//! emission) is exercised.
+//! The desktop Lua control lives in `js_backend_externs_lua.rs`.
 
 use std::process::Command;
 
@@ -52,11 +49,6 @@ fn same_name_backend_pair_runs_on_both() {
     let path = dir.join("pair.rock");
     std::fs::write(&path, GATE).unwrap();
 
-    // luajit binds the inline(lua) variant.
-    let (lua_out, lua_ok) = run(None, &path);
-    assert!(lua_ok, "luajit run failed:\n{lua_out}");
-    assert_eq!(lua_out, EXPECTED, "luajit output drifted");
-
     if !node_available() {
         eprintln!("SKIP node half: node not found");
         return;
@@ -65,7 +57,6 @@ fn same_name_backend_pair_runs_on_both() {
     let (js_out, js_ok) = run(Some("js"), &path);
     assert!(js_ok, "js run failed:\n{js_out}");
     assert_eq!(js_out, EXPECTED, "js output drifted");
-    assert_eq!(js_out, lua_out, "js and luajit output must match");
 }
 
 // A backend-variant sibling pair taken as a fn-VALUE (stored in a local, passed
@@ -96,10 +87,6 @@ fn sibling_pair_as_fn_value_binds_each_backend() {
     let path = dir.join("value.rock");
     std::fs::write(&path, VALUE_GATE).unwrap();
 
-    let (lua_out, lua_ok) = run(None, &path);
-    assert!(lua_ok, "luajit run failed:\n{lua_out}");
-    assert_eq!(lua_out, VALUE_EXPECTED, "luajit fn-value output drifted");
-
     if !node_available() {
         eprintln!("SKIP node half: node not found");
         return;
@@ -107,5 +94,4 @@ fn sibling_pair_as_fn_value_binds_each_backend() {
     let (js_out, js_ok) = run(Some("js"), &path);
     assert!(js_ok, "js run failed:\n{js_out}");
     assert_eq!(js_out, VALUE_EXPECTED, "js fn-value output drifted");
-    assert_eq!(js_out, lua_out, "js and luajit fn-value output must match");
 }

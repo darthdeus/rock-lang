@@ -199,8 +199,6 @@ mod reserved_namespace;
 mod comptime_inputs;
 #[path = "shader_pipeline_register.rs"]
 mod shader_pipeline_register;
-#[path = "compute_surface.rs"]
-mod compute_surface;
 #[path = "static_hot_reload.rs"]
 mod static_hot_reload;
 #[path = "static_registration_coverage.rs"]
