@@ -1,6 +1,6 @@
 //! `rock test <path> --backend js` -- execute the `@test` suite under node via
 //! the JS-subset emitter (`skull-codegen-js`), T1 of
-//! `docs/multi-backend-testing-plan.md`.
+//! `docs/backends.md`.
 //!
 //! Shares the backend-neutral half of the test driver with the luajit path
 //! (`skull_backend::skull_test`): unit discovery (`collect_test_units`), the

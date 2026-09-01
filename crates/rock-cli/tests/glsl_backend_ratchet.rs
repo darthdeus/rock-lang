@@ -1,5 +1,5 @@
 //! Anti-rot ratchet for the `--backend glsl` value-test executor
-//! (`docs/multi-backend-testing-plan.md` G1): pins a per-profile floor on the
+//! (`docs/backends.md`): pins a per-profile floor on the
 //! number of `@test(returns = ...)` value tests currently RUNNABLE (emitted +
 //! executed green on the GPU) over a small fixed corpus, so a GLSL-emitter or
 //! readback regression that silently shrinks coverage goes red. Emitter growth

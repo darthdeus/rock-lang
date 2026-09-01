@@ -1,4 +1,4 @@
-//! MIR->JS emitter tests (docs/js-backend-plan.md S2). Lowers each of the eight
+//! MIR->JS emitter tests (docs/backends.md). Lowers each of the eight
 //! differential intrinsics' scalar fallback bodies and pins the emitted JS
 //! exactly -- the two control-flow shapes (clamp's returning-arms diamond,
 //! sign's store-then-merge via post-dominators) and the straight-line

@@ -5197,7 +5197,7 @@ impl ValueTestRet {
 }
 
 /// A complete GLSL shader pair driving one `@test(returns = ...)` value test
-/// (`docs/multi-backend-testing-plan.md` G1). The fragment shader wraps the
+/// (`docs/backends.md`). The fragment shader wraps the
 /// emitted root fn and writes its scalar result to `layout(location = 0)`; the
 /// vertex shader draws a fullscreen triangle (no vertex attributes). Both carry
 /// the profile's `#version` line so the GL runner compiles them as one program.

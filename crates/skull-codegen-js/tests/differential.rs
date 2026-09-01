@@ -1,4 +1,4 @@
-//! JS execution harness (docs/js-backend-plan.md S3): emit an intrinsic's Rock
+//! JS execution harness (docs/backends.md): emit an intrinsic's Rock
 //! fallback body to JS, run it under `node`, and read back the number. This is
 //! the second EXECUTING backend the intrinsics arc needed (`node`); S4 uses it
 //! for the full mapping-vs-fallback differential.

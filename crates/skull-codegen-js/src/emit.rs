@@ -1,4 +1,4 @@
-//! Minimal MIR->JS emitter (docs/js-backend-plan.md S2) for the conformance
+//! Minimal MIR->JS emitter (docs/backends.md) for the conformance
 //! subset: the scalar fallback bodies of the eight differential intrinsics,
 //! plus the NativeBuffer four-fn surface (TypedArray-backed `{ptr, len}`
 //! structs, checked `buf[i]` via the `__nb_checked_*` shim names --
@@ -2863,7 +2863,7 @@ fn emit_ginit_with_nested(
     emit_body_with_nested(ws, &g.mf, &g.init_name, names, hoisted, gctx)
 }
 
-/// The whole workspace as ONE JS program (M1, `docs/js-deployment-plan.md`):
+/// The whole workspace as ONE JS program (`docs/backends.md`):
 /// module-driven assembly mirroring skull's Lua `assemble`, but reachability-
 /// driven (roots = `main` + every DECORATED fn + every `deco` body; the whole
 /// stdlib is NOT emitted, only what those roots reach). Emission order:
@@ -3673,7 +3673,7 @@ fn shader_register_sibling(ws: &Workspace) -> Result<Option<FuncRef>, CompilerEr
 /// `@nomangle` name whenever a pair exists, so the register lines resolve. The
 /// native Rock body (WATCHER lookup + GL compile) is not JS-emittable, so a
 /// program with a shader pair but no reachable js sibling REJECTS rather than
-/// silently dropping the registration (P2, docs/stone-web-plan.md).
+/// silently dropping the registration (`docs/backends.md`).
 fn force_shader_register_sibling(
     ws: &Workspace,
     st: &mut WorklistState,
