@@ -1244,20 +1244,33 @@ fn export_place(place: Place) -> Place {
 fn substitute_constraint(
     analysis: &mut PlacementAnalysis,
     constraint: OutlivesConstraint,
-    args: &[Place],
+    argument_origins: &[Vec<Place>],
     call_destination: Place,
     call_span: Span,
 ) {
-    let value = constraint.value.substitute(args, call_destination);
-    let destination = constraint.destination.substitute(args, call_destination);
-    let span = if matches!(value, Place::Param(_) | Place::Destination)
-        || matches!(destination, Place::Param(_) | Place::Destination)
-    {
-        constraint.span
-    } else {
-        call_span
+    let substitute = |place| match place {
+        Place::Param(index) => argument_origins
+            .get(index as usize)
+            .cloned()
+            .filter(|places| !places.is_empty())
+            .unwrap_or_else(|| vec![Place::Unknown]),
+        Place::Destination => vec![call_destination],
+        place => vec![place],
     };
-    add_constraint(analysis, value, destination, span);
+    let values = substitute(constraint.value);
+    let destinations = substitute(constraint.destination);
+    for value in values {
+        for destination in &destinations {
+            let span = if matches!(value, Place::Param(_) | Place::Destination)
+                || matches!(destination, Place::Param(_) | Place::Destination)
+            {
+                constraint.span
+            } else {
+                call_span
+            };
+            add_constraint(analysis, value, *destination, span);
+        }
+    }
 }
 
 fn apply_omitted_args(args: &mut SmallVec<[Place; 8]>, omitted_args: &[(u16, Place)]) {
@@ -1523,6 +1536,17 @@ fn value_place(
                 .or_insert_with(|| oracle.call_effect(mir, id, *func, allocation));
             apply_omitted_args(&mut args, &effect.omitted_args);
             let span = mir.inst_spans.get(id).copied().unwrap_or_default();
+            let mut argument_origins = raw_args
+                .iter()
+                .map(|arg| provenance_places(mir, analysis, *arg))
+                .collect::<Vec<_>>();
+            for &(index, place) in &effect.omitted_args {
+                let index = usize::from(index);
+                if argument_origins.len() <= index {
+                    argument_origins.resize(index + 1, vec![Place::Unknown]);
+                }
+                argument_origins[index] = vec![place];
+            }
             for store in &effect.stores {
                 if raw_args
                     .get(store.value as usize)
@@ -1550,7 +1574,13 @@ fn value_place(
                 {
                     continue;
                 }
-                substitute_constraint(analysis, constraint, &args, allocation, span);
+                substitute_constraint(
+                    analysis,
+                    constraint,
+                    &argument_origins,
+                    allocation,
+                    span,
+                );
             }
             if let Some(owner) = effect.owner {
                 analysis
