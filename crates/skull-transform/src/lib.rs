@@ -2875,6 +2875,24 @@ pub fn transform_coroutine(
     channel: Option<&skull_mir::lower::YieldChannel>,
     has_return_value: bool,
 ) -> CoroLowered {
+    transform_coroutine_with_nonescaping_lambdas(
+        func,
+        channel,
+        has_return_value,
+        &HashSet::default(),
+    )
+}
+
+/// Transform a coroutine while excluding captures proven to be consumed by a
+/// synchronous callback call from the persistent frame. The proof is supplied
+/// by the backend that owns the callable ABI; an empty set preserves the
+/// conservative frame pin for backends without that proof.
+pub fn transform_coroutine_with_nonescaping_lambdas(
+    func: &MirFunc,
+    channel: Option<&skull_mir::lower::YieldChannel>,
+    has_return_value: bool,
+    nonescaping_lambdas: &HashSet<Idx<Inst>>,
+) -> CoroLowered {
     let frame_slot_channel = channel.is_some();
     let mut step = func.clone();
     let resume_arg = func.resume_arg.expect("co fn must carry a resume-arg cell");
@@ -2932,12 +2950,22 @@ pub fn transform_coroutine(
     let frame_cells: HashSet<Idx<Cell>> = {
         let root = crate::scope::ROOT;
         let root_owned = |cell: &Idx<Cell>| own.owner.get(cell).is_some_and(|&owner| owner == root);
+        let captured_by_escaping_lambda = own
+            .captures
+            .iter()
+            .enumerate()
+            .filter(|(scope, _)| {
+                tree.scopes[*scope]
+                    .lambda
+                    .is_none_or(|lambda| !nonescaping_lambdas.contains(&lambda))
+            })
+            .flat_map(|(_, cells)| cells.iter().copied())
+            .collect::<HashSet<_>>();
         let mut fields = cells_live_at_yield_resumes(&step, &orig_blocks);
         fields.extend(params.iter().copied());
         fields.extend(
-            own.captures
-                .iter()
-                .flat_map(|cells| cells.iter().copied())
+            captured_by_escaping_lambda
+                .into_iter()
                 .filter(|cell| root_owned(cell)),
         );
         let detached_entries = step

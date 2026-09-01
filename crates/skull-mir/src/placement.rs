@@ -111,6 +111,16 @@ pub trait PlacementOracle {
         func: FuncRef,
         default_allocation: Place,
     ) -> CallEffect;
+
+    fn call_value_effect(
+        &self,
+        _mir: &MirFunc,
+        _inst: Idx<Inst>,
+        _callee: Idx<Inst>,
+        _default_allocation: Place,
+    ) -> CallEffect {
+        CallEffect::default()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -382,12 +392,13 @@ impl RequirementWorklist {
                     Inst::Store { cell, .. } => {
                         self.cell_stores.entry(*cell).or_default().push(id);
                     }
-                    Inst::Call { args, .. } => {
+                    Inst::Call { args, .. } | Inst::CallValue { args, .. } => {
                         for &arg in args {
                             self.call_users.entry(arg).or_default().push(id);
                         }
                     }
-                    Inst::CallMulti { dests, args, .. } => {
+                    Inst::CallMulti { dests, args, .. }
+                    | Inst::CallValueMulti { dests, args, .. } => {
                         for &dest in dests {
                             self.cell_multi_calls.entry(dest).or_default().push(id);
                         }
@@ -529,7 +540,13 @@ fn explicit_call_argument(
 }
 
 fn is_call_result(mir: &MirFunc, inst: Idx<Inst>) -> bool {
-    matches!(mir.insts[inst], Inst::Call { .. } | Inst::CallMulti { .. })
+    matches!(
+        mir.insts[inst],
+        Inst::Call { .. }
+            | Inst::CallMulti { .. }
+            | Inst::CallValue { .. }
+            | Inst::CallValueMulti { .. }
+    )
 }
 
 fn is_composite_constructor(inst: &Inst) -> bool {
@@ -599,8 +616,11 @@ fn infer_call_requirements(
     call_effects: &mut HashMap<(Idx<Inst>, Place), CallEffect>,
     id: Idx<Inst>,
 ) -> bool {
-    let (func, raw_args) = match &mir.insts[id] {
-        Inst::Call { func, args } | Inst::CallMulti { func, args, .. } => (*func, args),
+    let raw_args = match &mir.insts[id] {
+        Inst::Call { args, .. }
+        | Inst::CallMulti { args, .. }
+        | Inst::CallValue { args, .. }
+        | Inst::CallValueMulti { args, .. } => args,
         _ => return false,
     };
     let mut call_requirement = requirements
@@ -608,7 +628,7 @@ fn infer_call_requirements(
         .get(id)
         .copied()
         .filter(|place| !matches!(place, Place::Pending));
-    if let Inst::CallMulti { dests, .. } = &mir.insts[id] {
+    if let Inst::CallMulti { dests, .. } | Inst::CallValueMulti { dests, .. } = &mir.insts[id] {
         for &dest in dests {
             if let Some(place) = requirements
                 .cells
@@ -625,9 +645,17 @@ fn infer_call_requirements(
         .any(|arg| carries_requirement(mir, oracle, flow_cells, *arg));
     let flow_argument = flow_calls.contains(&id);
     let allocation = call_requirement.unwrap_or(context.default_allocation);
-    let effect = call_effects
-        .entry((id, allocation))
-        .or_insert_with(|| oracle.call_effect(mir, id, func, allocation));
+    let effect = call_effects.entry((id, allocation)).or_insert_with(|| {
+        match mir.insts[id] {
+            Inst::Call { func, .. } | Inst::CallMulti { func, .. } => {
+                oracle.call_effect(mir, id, func, allocation)
+            }
+            Inst::CallValue { callee, .. } | Inst::CallValueMulti { callee, .. } => {
+                oracle.call_value_effect(mir, id, callee, allocation)
+            }
+            _ => unreachable!("call requirements requested for a non-call"),
+        }
+    });
     let unconditional_retention = !effect.opaque_retains.is_empty()
         || effect.constraints.iter().any(|constraint| {
             matches!(constraint.value, Place::Param(_) | Place::Destination)
@@ -845,7 +873,10 @@ fn infer_requirements(
                     worklist.merge_cell(&mut requirements, *cell, required);
                 }
             }
-            Inst::Call { .. } | Inst::CallMulti { .. } => {
+            Inst::Call { .. }
+            | Inst::CallMulti { .. }
+            | Inst::CallValue { .. }
+            | Inst::CallValueMulti { .. } => {
                 if infer_call_requirements(
                     mir,
                     context,
@@ -858,7 +889,11 @@ fn infer_requirements(
                     id,
                 ) {
                     worklist.enqueue_value(id);
-                    if let Inst::Call { args, .. } | Inst::CallMulti { args, .. } = &mir.insts[id] {
+                    if let Inst::Call { args, .. }
+                    | Inst::CallMulti { args, .. }
+                    | Inst::CallValue { args, .. }
+                    | Inst::CallValueMulti { args, .. } = &mir.insts[id]
+                    {
                         for &arg in args {
                             worklist.enqueue_value(arg);
                         }
@@ -1112,20 +1147,30 @@ fn value_has_contextual_source(
             visiting_values,
             visiting_cells,
         ),
-        Inst::Call { func, .. } | Inst::CallMulti { func, .. } => {
-            matches!(
-                oracle
-                    .call_effect(mir, value, *func, context.default_allocation)
-                    .result,
-                Some(
-                    Place::Static
-                        | Place::Session
-                        | Place::Param(_)
-                        | Place::Runtime(_)
-                        | Place::RuntimeAny
-                )
+        Inst::Call { func, .. } | Inst::CallMulti { func, .. } => matches!(
+            oracle
+                .call_effect(mir, value, *func, context.default_allocation)
+                .result,
+            Some(
+                Place::Static
+                    | Place::Session
+                    | Place::Param(_)
+                    | Place::Runtime(_)
+                    | Place::RuntimeAny
             )
-        }
+        ),
+        Inst::CallValue { callee, .. } | Inst::CallValueMulti { callee, .. } => matches!(
+            oracle
+                .call_value_effect(mir, value, *callee, context.default_allocation)
+                .result,
+            Some(
+                Place::Static
+                    | Place::Session
+                    | Place::Param(_)
+                    | Place::Runtime(_)
+                    | Place::RuntimeAny
+            )
+        ),
         _ => false,
     };
     visiting_values.remove(&value);
@@ -1405,7 +1450,13 @@ fn value_place(
     id: Idx<Inst>,
 ) -> Place {
     let inst = &mir.insts[id];
-    let is_call = matches!(inst, Inst::Call { .. } | Inst::CallMulti { .. });
+    let is_call = matches!(
+        inst,
+        Inst::Call { .. }
+            | Inst::CallMulti { .. }
+            | Inst::CallValue { .. }
+            | Inst::CallValueMulti { .. }
+    );
     if !is_call && !oracle.carries_placement(mir, id) {
         return Place::Static;
     }
@@ -1509,15 +1560,28 @@ fn value_place(
                 .chain(positional.iter().copied())
                 .chain(named.iter().map(|(_, value)| *value)),
         ),
-        Inst::Call {
-            func,
-            args: raw_args,
-        }
-        | Inst::CallMulti {
-            func,
-            args: raw_args,
-            ..
-        } => {
+        Inst::Call { .. }
+        | Inst::CallMulti { .. }
+        | Inst::CallValue { .. }
+        | Inst::CallValueMulti { .. } => {
+            let raw_args = match inst {
+                Inst::Call { args, .. }
+                | Inst::CallMulti { args, .. }
+                | Inst::CallValue { args, .. }
+                | Inst::CallValueMulti { args, .. } => args,
+                _ => unreachable!("call placement requested for a non-call"),
+            };
+            let effect = call_effects.entry((id, allocation)).or_insert_with(|| {
+                match inst {
+                    Inst::Call { func, .. } | Inst::CallMulti { func, .. } => {
+                        oracle.call_effect(mir, id, *func, allocation)
+                    }
+                    Inst::CallValue { callee, .. } | Inst::CallValueMulti { callee, .. } => {
+                        oracle.call_value_effect(mir, id, *callee, allocation)
+                    }
+                    _ => unreachable!("call placement requested for a non-call"),
+                }
+            });
             let mut args: SmallVec<[Place; 8]> = raw_args
                 .iter()
                 .map(|arg| {
@@ -1531,9 +1595,6 @@ fn value_place(
                     )
                 })
                 .collect();
-            let effect = call_effects
-                .entry((id, allocation))
-                .or_insert_with(|| oracle.call_effect(mir, id, *func, allocation));
             apply_omitted_args(&mut args, &effect.omitted_args);
             let span = mir.inst_spans.get(id).copied().unwrap_or_default();
             let mut argument_origins = raw_args
@@ -1595,15 +1656,14 @@ fn value_place(
                 if !matches!(value, Place::Static | Place::Pending) {
                     analysis.violations.push(PlacementViolation {
                         value,
-                        destination: Place::Unknown,
+                        destination: allocation,
                         span,
                         kind: PlacementViolationKind::OpaqueRetention,
                     });
                 }
             }
-            if !oracle.carries_placement(mir, id)
-                && !matches!(inst, Inst::CallMulti { .. })
-            {
+            let is_multi = matches!(inst, Inst::CallMulti { .. } | Inst::CallValueMulti { .. });
+            if !oracle.carries_placement(mir, id) && !is_multi {
                 return Place::Static;
             }
             match effect
@@ -1703,14 +1763,25 @@ pub fn analyze(
     let mut sink_calls = Vec::new();
     for &block in &blocks {
         for &id in &mir.blocks[block].insts {
-            let (func, raw_args) = match &mir.insts[id] {
-                Inst::Call { func, args } | Inst::CallMulti { func, args, .. } => (*func, args),
+            let raw_args = match &mir.insts[id] {
+                Inst::Call { args, .. }
+                | Inst::CallMulti { args, .. }
+                | Inst::CallValue { args, .. }
+                | Inst::CallValueMulti { args, .. } => args,
                 _ => continue,
             };
             let allocation = context.default_allocation;
-            let effect = call_effects
-                .entry((id, allocation))
-                .or_insert_with(|| oracle.call_effect(mir, id, func, allocation));
+            let effect = call_effects.entry((id, allocation)).or_insert_with(|| {
+                match mir.insts[id] {
+                    Inst::Call { func, .. } | Inst::CallMulti { func, .. } => {
+                        oracle.call_effect(mir, id, func, allocation)
+                    }
+                    Inst::CallValue { callee, .. } | Inst::CallValueMulti { callee, .. } => {
+                        oracle.call_value_effect(mir, id, callee, allocation)
+                    }
+                    _ => unreachable!("call sink requested for a non-call"),
+                }
+            });
             for (index, arg) in raw_args.iter().enumerate() {
                 let Ok(index) = u16::try_from(index) else {
                     continue;
@@ -1811,7 +1882,7 @@ pub fn analyze(
                                 add_constraint(&mut analysis, value, destination, span);
                             }
                         }
-                        Inst::CallMulti { dests, .. } => {
+                        Inst::CallMulti { dests, .. } | Inst::CallValueMulti { dests, .. } => {
                             let place = value_place(
                                 mir,
                                 &mut analysis,
