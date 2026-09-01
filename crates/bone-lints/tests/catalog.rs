@@ -2,7 +2,7 @@
 //! `rock lint`, the build pass) drives, so no surface assembles the lint list
 //! itself. Harness mirrors unused_var.rs.
 
-use bone_lints::{lint_workspace, Finding, KNOWN_LINTS};
+use bone_lints::{lint_workspace, Finding, LintOptions, KNOWN_LINTS};
 use bone_semantic::prelude::*;
 use rock_core::errors::CompilerErrorLevel;
 
@@ -13,10 +13,14 @@ fn parse(src: &str) -> skull_parser::Ast {
 }
 
 fn findings(src: &str) -> Vec<Finding> {
+    findings_with(src, &LintOptions::default())
+}
+
+fn findings_with(src: &str, options: &LintOptions) -> Vec<Finding> {
     let ws = semantic_pass(&mut [parse(src)]).expect("clean program typechecks");
     let mut sources = FxHashMap::default();
     sources.insert(Ustr::from(FILE), src);
-    lint_workspace(&ws, &FxHashSet::default(), true, &sources, &Default::default())
+    lint_workspace(&ws, &FxHashSet::default(), true, &sources, options)
 }
 
 fn lints_of(src: &str) -> Vec<&'static str> {
@@ -83,6 +87,23 @@ fn unused_fn_is_gated_on_bin_packages() {
     sources.insert(Ustr::from(FILE), src);
     let lib = lint_workspace(&ws, &FxHashSet::default(), false, &sources, &Default::default());
     assert!(lib.is_empty(), "a lib's public fn has no in-project caller, got {lib:?}");
+}
+
+#[test]
+fn backend_sibling_mismatch_is_opt_in() {
+    let src = "inline(lua) fn probe(x: int) -> int = \"return x\"\ninline(js) fn probe(x: float) -> int = \"return x;\"\nfn main() {}";
+    let default_findings = findings(src);
+    assert!(
+        default_findings.iter().all(|f| f.lint != bone_lints::BACKEND_SIBLING_MISMATCH),
+        "default lint selection reached backend_sibling_mismatch: {default_findings:?}"
+    );
+    let explicit = LintOptions::only([bone_lints::BACKEND_SIBLING_MISMATCH.to_owned()]);
+    assert!(
+        findings_with(src, &explicit)
+            .iter()
+            .any(|f| f.lint == bone_lints::BACKEND_SIBLING_MISMATCH),
+        "explicit backend_sibling_mismatch selection produced no finding"
+    );
 }
 
 #[test]
