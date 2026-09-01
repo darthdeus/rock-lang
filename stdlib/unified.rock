@@ -2240,8 +2240,7 @@ fn random_range(min: float, max: float) -> float { return random() * (max - min)
 inline(lua) fn random_int(min: int, max: int) -> int = """
     local r = max - min
     if r <= 0 then return min end
-    local z = __rock_rng_next()
-    if r <= 4294967296 then return z % r + min end
+    if r <= 4294967296 then return __rock_rng_next() % r + min end
     local hi = __rock_rng_next()
     local lo = __rock_rng_next()
     return (hi * 2097152 + math.floor(lo / 2048)) % r + min

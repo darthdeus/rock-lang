@@ -753,14 +753,12 @@ if not _G.__rock_rng_next then
     store_rng_state(state)
   end
   _G.__rock_rng_next = function()
-    local state = active_rng_state()
-    if state == 0 then state = 1 end
-    state = __rock_bit.bxor(state, __rock_bit.lshift(state, 13))
-    state = __rock_bit.bxor(state, __rock_bit.rshift(state, 17))
-    state = __rock_bit.bxor(state, __rock_bit.lshift(state, 5))
+    -- Full-period 32-bit LCG; fold high bits into the result for modulo users.
+    local state = __rock_bit.tobit(active_rng_state() * 1664525 + 1013904223)
     store_rng_state(state)
-    if state < 0 then return state + 4294967296 end
-    return state
+    local output = __rock_bit.bxor(state, __rock_bit.rshift(state, 16))
+    if output < 0 then return output + 4294967296 end
+    return output
   end
   local __seed = tonumber(os.getenv("ROCK_TEST_SEED"))
   if __seed then _G.__rock_rng_seed(__seed)
