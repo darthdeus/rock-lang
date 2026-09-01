@@ -96,6 +96,10 @@ pub trait PlacementOracle {
         None
     }
 
+    fn entity_content_place(&self, _mir: &MirFunc, _inst: Idx<Inst>) -> Option<Place> {
+        None
+    }
+
     fn carries_placement(&self, mir: &MirFunc, inst: Idx<Inst>) -> bool;
 
     fn is_allocation_site(&self, mir: &MirFunc, inst: Idx<Inst>) -> bool;
@@ -135,6 +139,7 @@ impl AnalysisContext {
 pub struct FunctionPlacement {
     pub result: Option<Place>,
     pub entity_result: Option<Place>,
+    pub entity_content: Option<Place>,
     pub owner: Option<Place>,
     pub constraints: Vec<OutlivesConstraint>,
     pub default_params: Vec<Option<Place>>,
@@ -1831,6 +1836,12 @@ pub fn analyze(
                     .fold(None::<Place>, |place, value| {
                         Some(place.map_or(value, |place| place.join(value)))
                     });
+                let entity_content = values
+                    .iter()
+                    .filter_map(|value| oracle.entity_content_place(mir, *value))
+                    .fold(None::<Place>, |place, value| {
+                        Some(place.map_or(value, |place| place.join(value)))
+                    });
                 if !values.is_empty() {
                     analysis.summary.result = Some(
                         analysis
@@ -1845,6 +1856,14 @@ pub fn analyze(
                             .summary
                             .entity_result
                             .map_or(entity_result, |previous| previous.join(entity_result)),
+                    );
+                }
+                if let Some(entity_content) = entity_content {
+                    analysis.summary.entity_content = Some(
+                        analysis
+                            .summary
+                            .entity_content
+                            .map_or(entity_content, |previous| previous.join(entity_content)),
                     );
                 }
                 if let Some(destination) = context.return_destination {
@@ -1895,6 +1914,7 @@ pub fn analyze(
 
         analysis.summary.result = analysis.summary.result.map(export_place);
         analysis.summary.entity_result = analysis.summary.entity_result.map(export_place);
+        analysis.summary.entity_content = analysis.summary.entity_content.map(export_place);
         analysis.summary.owner = analysis.summary.owner.map(export_place);
         for constraint in &mut analysis.summary.constraints {
             constraint.value = export_place(constraint.value);
