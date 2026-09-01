@@ -62,6 +62,12 @@ pub const OPTIONAL_ENGINE_LIBS: &[EngineLib] = &[
         src_stem: "stone_wgpu",
         dst_stem: "stone_wgpu",
     },
+    EngineLib {
+        need: "3d",
+        crate_name: "stone-3d",
+        src_stem: "stone_3d",
+        dst_stem: "stone_3d",
+    },
 ];
 
 /// Parse the game's stick.toml (if present), validate `[engine] needs` early so
@@ -123,6 +129,16 @@ mod tests {
     }
 
     #[test]
+    fn a_declared_3d_need_resolves_to_its_crate() {
+        let dir = game_with("\"3d\"");
+        let resolved = game_engine_libs(dir.path().to_str().unwrap()).unwrap();
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].crate_name, "stone-3d");
+        assert_eq!(resolved[0].src_stem, "stone_3d");
+        assert_eq!(resolved[0].dst_stem, "stone_3d");
+    }
+
+    #[test]
     fn renderer_selection_resolves_wgpu_without_a_compute_need() {
         let dir = tempfile::tempdir().expect("tempdir");
         fs_err::write(
@@ -138,12 +154,16 @@ mod tests {
     fn an_undeclared_lib_is_not_resolved() {
         assert_eq!(libs(&game_with("\"wgpu\"")), vec!["wgpu"]);
         assert_eq!(libs(&game_with("\"video\"")), vec!["video"]);
+        assert_eq!(libs(&game_with("\"3d\"")), vec!["3d"]);
         assert_eq!(libs(&game_with("")), Vec::<&str>::new());
     }
 
     #[test]
-    fn both_libs_resolve_together_in_table_order() {
-        assert_eq!(libs(&game_with("\"wgpu\", \"video\"")), vec!["video", "wgpu"]);
+    fn engine_libs_resolve_together_in_table_order() {
+        assert_eq!(
+            libs(&game_with("\"3d\", \"wgpu\", \"video\"")),
+            vec!["video", "wgpu", "3d"]
+        );
     }
 
     /// No manifest at all is core-only, not an error: most games have none.
