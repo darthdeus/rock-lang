@@ -87,6 +87,14 @@ fn replay_snapshot_oracle_includes_effective_pad_state_only() {
     }
     assert!(!names.contains("LAST_INPUT_DEVICE"), "glyph modality must not be snapshotted: {names:?}");
     assert!(!names.contains("UI_INPUT_CAPTURE"), "capture mode must not be snapshotted: {names:?}");
+    for name in [
+        "RENDER_BATCH_SORT_KEYS",
+        "UI_RENDER_SORT_KEYS",
+        "UI_BATCH_KEY_BUILDS",
+        "WORLD_BATCH_KEY_BUILDS",
+    ] {
+        assert!(!names.contains(name), "renderer flush scratch {name} was snapshotted: {names:?}");
+    }
 }
 
 #[test]
@@ -103,6 +111,10 @@ fn mag_audio_and_vfx_projections_are_not_world_image_state() {
         "UI_RASTER_CANVAS",
         "UI_OUTPUT_CANVAS",
         "UI_EFFECT_COMPOSITE_PIPELINE",
+        "RENDER_BATCH_SORT_KEYS",
+        "UI_RENDER_SORT_KEYS",
+        "UI_BATCH_KEY_BUILDS",
+        "WORLD_BATCH_KEY_BUILDS",
     ] {
         assert!(!names.contains(name), "host projection {name} leaked into WorldImage: {names:?}");
     }
