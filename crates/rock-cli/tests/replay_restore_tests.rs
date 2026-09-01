@@ -95,6 +95,10 @@ fn replay_snapshot_oracle_includes_effective_pad_state_only() {
     ] {
         assert!(!names.contains(name), "renderer flush scratch {name} was snapshotted: {names:?}");
     }
+    assert!(
+        !names.contains("TEXT_MISSING_GLYPH_POLICY"),
+        "process-derived TEXT_MISSING_GLYPH_POLICY was snapshotted: {names:?}"
+    );
 }
 
 #[test]
@@ -118,6 +122,10 @@ fn mag_audio_and_vfx_projections_are_not_world_image_state() {
     ] {
         assert!(!names.contains(name), "host projection {name} leaked into WorldImage: {names:?}");
     }
+    assert!(
+        !names.contains("TEXT_MISSING_GLYPH_POLICY"),
+        "process-derived TEXT_MISSING_GLYPH_POLICY leaked into WorldImage: {names:?}"
+    );
 }
 
 /// `rock frame <game> -n N --replay <log> --dump-state [env]` -> parsed JSON.
