@@ -719,15 +719,37 @@ fn validate_c_frame_request(
     Ok(())
 }
 
+fn c_native_frame_asset_environment(
+    path: &str,
+) -> Result<(std::path::PathBuf, std::ffi::OsString)> {
+    let game_dir = fs_err::canonicalize(path)?;
+    if !game_dir.is_dir() {
+        anyhow::bail!(
+            "C backend frame input is not a game directory: {}",
+            game_dir.display()
+        );
+    }
+    let config = rock_host::stick::StickConfig::find_from_dir(&game_dir)?
+        .map(|(_, config)| config);
+    let overlays = rock_host::release::asset_overlay_roots(&game_dir, config.as_ref())?;
+    let overlay_env = std::env::join_paths(&overlays)
+        .map_err(|error| anyhow::anyhow!("could not encode native asset overlays: {error}"))?;
+    Ok((game_dir, overlay_env))
+}
+
 fn c_native_frame_command(
     binary: &std::path::Path,
     frames: usize,
     headless: bool,
+    game_source_dir: &std::path::Path,
+    asset_overlays: &std::ffi::OsStr,
 ) -> Command {
     let mut command = c_native_command(binary);
     command
         .env("FRAME_COUNT", frames.to_string())
-        .env("STONE_NATIVE_FRAME_GATE", "1");
+        .env("STONE_NATIVE_FRAME_GATE", "1")
+        .env("GAME_SOURCE_DIR", game_source_dir)
+        .env(rock_host::release::ASSET_OVERLAYS_ENV, asset_overlays);
     if headless {
         command.env("STONE_HEADLESS", "1");
         crate::stone::apply_headless_audio_env(&mut command);
@@ -805,10 +827,17 @@ pub fn c_frame(
     validate_c_frame_request(frames, requested_renderer)?;
     let _gl_renderer =
         rock_host::stick::install_renderer_override(Some(crate::RendererBackend::Gl));
+    let (game_source_dir, asset_overlays) = c_native_frame_asset_environment(path)?;
     let emitted = emit_main_program(path)?;
     let link = c_link_plan(path, &emitted)?;
     let compiled = compile_source_with_link(&emitted.source, &link).map_err(anyhow::Error::msg)?;
-    let mut child = c_native_frame_command(&compiled.binary, frames, headless)
+    let mut child = c_native_frame_command(
+        &compiled.binary,
+        frames,
+        headless,
+        &game_source_dir,
+        &asset_overlays,
+    )
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
@@ -947,6 +976,8 @@ mod tests {
             std::path::Path::new("unused-native-program"),
             2,
             true,
+            std::path::Path::new("/workspace/mag"),
+            std::ffi::OsStr::new("/vault/mag"),
         );
         let env = |name: &str| {
             command
@@ -958,5 +989,7 @@ mod tests {
         assert_eq!(env("FRAME_COUNT").as_deref(), Some("2"));
         assert_eq!(env("STONE_NATIVE_FRAME_GATE").as_deref(), Some("1"));
         assert_eq!(env("STONE_HEADLESS").as_deref(), Some("1"));
+        assert_eq!(env("GAME_SOURCE_DIR").as_deref(), Some("/workspace/mag"));
+        assert_eq!(env("ROCK_ASSET_OVERLAYS").as_deref(), Some("/vault/mag"));
     }
 }
