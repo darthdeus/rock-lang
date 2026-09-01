@@ -31,7 +31,6 @@ const JS_MODULES: &[&str] = &[
     "js_run_gate",
     "js_value_tests",
     "shader_register_arity_gate",
-    "shape_oracle",
     "imgui_web_stubs",
     "mono_js_backend_realization",
     "web_build_gate",
@@ -143,6 +142,9 @@ fn optional_backend_harnesses_are_separate_from_desktop_harnesses() {
                 continue;
             }
             let module_source = std::fs::read_to_string(tests.join(path)).unwrap();
+            if path == "shape_oracle.rs" {
+                continue;
+            }
             for marker in [
                 "\"--backend\", \"js\"",
                 ".args([\"web\"",
@@ -152,5 +154,21 @@ fn optional_backend_harnesses_are_separate_from_desktop_harnesses() {
                 assert!(!module_source.contains(marker), "{root} module {path} owns optional marker {marker}");
             }
         }
+    }
+}
+
+#[test]
+fn shape_oracle_has_one_canonical_owner() {
+    let tests = crates_dir().join("rock-cli/tests");
+    for root in ["main.rs", "main_js.rs"] {
+        let source = std::fs::read_to_string(tests.join(root)).expect("harness");
+        assert!(
+            source.contains("#[path = \"shape_oracle.rs\"]\nmod shape_oracle;"),
+            "{root} must reach the canonical shape_oracle.rs"
+        );
+        assert!(
+            !source.contains("shape_oracle_desktop.rs"),
+            "{root} must not reach a second shape-oracle owner"
+        );
     }
 }

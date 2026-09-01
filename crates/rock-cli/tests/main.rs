@@ -38,8 +38,8 @@ mod js_backend_externs_lua;
 mod comptime_build_vars_lua;
 #[path = "lua_run_gate.rs"]
 mod lua_run_gate;
-#[path = "shape_oracle_desktop.rs"]
-mod shape_oracle_desktop;
+#[path = "shape_oracle.rs"]
+mod shape_oracle;
 #[path = "sample_game_c_build_vars.rs"]
 mod sample_game_c_build_vars;
 #[path = "release_mode_deleted.rs"]
