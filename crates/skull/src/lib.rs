@@ -753,8 +753,10 @@ if not _G.__rock_rng_next then
     store_rng_state(state)
   end
   _G.__rock_rng_next = function()
-    -- Full-period 32-bit LCG; fold high bits into the result for modulo users.
-    local state = __rock_bit.tobit(active_rng_state() * 1664525 + 1013904223)
+    local state = __rock_bit.tobit(active_rng_state() + 0x9E3779B9)
+    state = __rock_bit.bxor(state, __rock_bit.lshift(state, 13))
+    state = __rock_bit.bxor(state, __rock_bit.rshift(state, 17))
+    state = __rock_bit.bxor(state, __rock_bit.lshift(state, 5))
     store_rng_state(state)
     local output = __rock_bit.bxor(state, __rock_bit.rshift(state, 16))
     if output < 0 then return output + 4294967296 end
