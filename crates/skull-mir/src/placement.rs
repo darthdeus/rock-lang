@@ -1311,22 +1311,72 @@ fn provenance_places(
     analysis: &PlacementAnalysis,
     inst: Idx<Inst>,
 ) -> Vec<Place> {
-    let place = inst_place(analysis, inst);
-    if !matches!(place, Place::Pending | Place::Unknown) {
-        return vec![place];
+    fn visit(
+        mir: &MirFunc,
+        analysis: &PlacementAnalysis,
+        inst: Idx<Inst>,
+        visiting: &mut HashSet<Idx<Inst>>,
+    ) -> Vec<Place> {
+        let place = inst_place(analysis, inst);
+        if !matches!(place, Place::Pending | Place::Unknown) {
+            return vec![place];
+        }
+        if !visiting.insert(inst) {
+            return vec![place];
+        }
+        let operands = match &mir.insts[inst] {
+            Inst::Load(cell) => return {
+                visiting.remove(&inst);
+                let mut places = analysis
+                    .cell_origins
+                    .get(*cell)
+                    .cloned()
+                    .unwrap_or_default();
+                if places.is_empty() {
+                    places.push(place);
+                }
+                places
+            },
+            Inst::Field { base, .. }
+            | Inst::TupleIndex { base, .. }
+            | Inst::Index { base, .. }
+            | Inst::Len { base, .. }
+            | Inst::VecCheckedIndex { vec: base, .. } => vec![*base],
+            Inst::MakeTuple(values) | Inst::MakeVec(values) => values.clone(),
+            Inst::MakeVecColumns { columns, .. } => {
+                columns
+                    .iter()
+                    .flat_map(|(_, values)| values.iter().copied())
+                    .collect()
+            }
+            Inst::MakeStruct { fields, .. }
+            | Inst::MaterializeValueStruct { fields, .. }
+            | Inst::MakeValueStruct { fields, .. }
+            | Inst::MakeEnv { fields, .. } => fields.iter().map(|(_, value)| *value).collect(),
+            Inst::MakeEnum {
+                positional, named, ..
+            }
+            | Inst::MakeEnumDyn {
+                positional, named, ..
+            } => positional
+                .iter()
+                .copied()
+                .chain(named.iter().map(|(_, value)| *value))
+                .collect(),
+            _ => Vec::new(),
+        };
+        let mut places = operands
+            .into_iter()
+            .flat_map(|operand| visit(mir, analysis, operand, visiting))
+            .collect::<Vec<_>>();
+        visiting.remove(&inst);
+        if places.is_empty() {
+            places.push(place);
+        }
+        places
     }
-    let mut places = match mir.insts[inst] {
-        Inst::Load(cell) => analysis.cell_origins.get(cell).cloned().unwrap_or_default(),
-        Inst::Field { base, .. }
-        | Inst::TupleIndex { base, .. }
-        | Inst::Index { base, .. }
-        | Inst::Len { base, .. }
-        | Inst::VecCheckedIndex { vec: base, .. } => provenance_places(mir, analysis, base),
-        _ => Vec::new(),
-    };
-    if places.is_empty() {
-        places.push(place);
-    }
+
+    let mut places = visit(mir, analysis, inst, &mut HashSet::new());
     places.dedup();
     places
 }
