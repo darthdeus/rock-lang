@@ -179,6 +179,11 @@ fn __entity_arena<T>(entity: Entity<T>) -> Arena<T> {
 
 fn Entity<T>.get(entity) -> T? { return get(__entity_arena(entity), entity) }
 
+@intrinsic @native_required inline(lua)
+fn Entity<T>.storage(entity) -> Storage = """
+    return nil
+"""
+
 fn Entity<T>.borrow(entity) -> (ref T)? { return borrow(__entity_arena(entity), entity) }
 
 fn Entity<T>.remove(entity) -> T? { return remove(__entity_arena(entity), entity) }
