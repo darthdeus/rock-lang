@@ -190,6 +190,7 @@ pub const KNOWN_LINTS: &[&str] = &[
 /// conversion needs: the sweep is readable, and the build/LSP surfaces stay
 /// quiet the whole time.
 pub const OPT_IN_LINTS: &[&str] = &[
+    BACKEND_SIBLING_MISMATCH,
     METHOD_SYNTAX,
     ROW_ESCAPE,
     RAW_INPUT_MIGRATION,
@@ -2836,7 +2837,9 @@ fn inference_findings_with(
 /// holds the per-file text and applies [`filter_suppressed_findings`].
 ///
 /// `unused_fn` is closed-world and runs only for a `bin` package;
-/// `backend_sibling_mismatch` is not gated (a lib's siblings must agree too).
+/// `backend_sibling_mismatch` is opt-in because JS is an optional backend; use
+/// `LintOptions::only` or `rock lint --lints=backend_sibling_mismatch` when
+/// auditing parity explicitly.
 pub fn workspace_findings_by_file(
     ws: &Workspace,
     warm: &FxHashSet<ModuleId>,

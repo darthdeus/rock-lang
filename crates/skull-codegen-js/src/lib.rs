@@ -1,4 +1,4 @@
-//! The JS intrinsic table (docs/js-backend-plan.md): the THIRD
+//! The JS intrinsic table (docs/backends.md): the THIRD
 //! [`IntrinsicTable`] shape after luajit (in-source `inline(lua)` bodies) and
 //! GLSL. Covers the eight scalar fallback+mapping intrinsics of the conformance
 //! differential (`tests/intrinsics/fallback_reference.rock`), the base math
@@ -15,7 +15,7 @@
 //! the S4 diff compares two implementations, not a thing to itself. `round`
 //! (floor(x+0.5)) and `fract` (x-floor(x)) coincide with their fallback math --
 //! the diff there only proves both emit paths produce runnable JS (logged in
-//! js-backend-plan Risks).
+//! optional backend risk).
 
 use bone_semantic::hir::Function;
 use skull_mir::intrinsics::{Emission, IntrinsicEntry, IntrinsicTable};
@@ -2236,7 +2236,7 @@ function stone_draw_fullscreen_quad() {
   __sw_mark_drawn(sh);
 }
 
-// --- text: canvas2d glyph atlas (MC, docs/stone-web-plan.md § text) ---
+// --- text: canvas2d glyph atlas (optional web backend) ---
 // The boot preload registered each shipped TTF as a FontFace; the bake here
 // is synchronous canvas2d against that family. ASCII 32..126 plus Á bakes as
 // one 16-glyph-wide atlas; density changes explicitly rebake into the same

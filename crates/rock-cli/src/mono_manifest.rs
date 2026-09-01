@@ -92,6 +92,7 @@ struct ProjectRow {
     stable: bool,
 }
 
+#[cfg(feature = "backend-js")]
 pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
     let root = Path::new(root.unwrap_or(".")).canonicalize().map_err(|e| {
         anyhow::anyhow!("mono-manifest: cannot resolve `{}`: {e}", root.unwrap_or("."))
@@ -1566,6 +1567,7 @@ fn relativize_row(row: &str, root: &Path) -> String {
     fields.join("\t")
 }
 
+#[cfg(feature = "backend-js")]
 fn one_project(
     dir: &PathBuf,
     name: &str,

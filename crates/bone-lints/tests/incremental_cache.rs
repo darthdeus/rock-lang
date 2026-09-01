@@ -906,7 +906,7 @@ fn declaration_refresh_replaces_raw_global_rows_before_suppression_rollback() {
     let matched_ws = workspace(matched);
     let suppressed_ws = workspace(&suppressed);
     let file = Ustr::from(FILE);
-    let selection = LintOptions::default();
+    let selection = LintOptions::only([bone_lints::BACKEND_SIBLING_MISMATCH.to_owned()]);
     let (main_mid, main_owner) = function_owner(&matched_ws, "main");
     let mut cache = IncrementalLintCache::default();
     cache.update(
@@ -1180,9 +1180,9 @@ fn global_call_edge_and_backend_sibling_changes_do_not_serve_stale_findings() {
         &LintOptions::default(),
     );
     assert_eq!(shapes(&cached), shapes(&fresh));
-    assert!(cached.iter().any(|f| f.lint == bone_lints::BACKEND_SIBLING_MISMATCH));
+    assert!(cached.iter().all(|f| f.lint != bone_lints::BACKEND_SIBLING_MISMATCH));
     assert_eq!(sibling_stats.global_passes, 0);
-    assert!(sibling_stats.sibling_groups_revisited > 0);
+    assert_eq!(sibling_stats.sibling_groups_revisited, 0);
 }
 
 #[test]

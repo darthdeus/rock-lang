@@ -1751,7 +1751,7 @@ fn unary_minus_miss_reads_as_operator_error() {
 // Float literals in annotation args must survive lowering as
 // `AnnoValue::Float` (incl. the unary-minus form) -- the value-test
 // expectation surface (`@test(returns = 1.5)`,
-// docs/multi-backend-testing-plan.md V1) reads them; `Other` would make
+// docs/backends.md) reads them; `Other` would make
 // float expectations silently unreadable.
 #[test]
 fn annotation_float_args_lower_as_float() {

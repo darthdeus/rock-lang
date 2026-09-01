@@ -1,5 +1,5 @@
 //! `@test(returns = <literal>)` under the JS executor (V1 of
-//! `docs/multi-backend-testing-plan.md`): the node harness emits VALUE marker
+//! `docs/backends.md`): the node harness emits VALUE marker
 //! lines and the shared driver compares host-side, so a value mismatch FAILs
 //! and matching int/float/bool values pass -- mirror of the luajit-side
 //! `value_test_exec` mod in `skull_backend.rs`.

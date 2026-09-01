@@ -1,5 +1,5 @@
 //! Anti-rot ratchet for the `--backend js` test executor
-//! (`docs/multi-backend-testing-plan.md` T1): pins a floor on the number of
+//! (`docs/backends.md`): pins a floor on the number of
 //! suite `@test`s currently RUNNABLE (emitted + executed green under node)
 //! over a small fixed corpus, so an emitter regression that silently shrinks
 //! JS coverage goes red. Emitter growth raises the floor.

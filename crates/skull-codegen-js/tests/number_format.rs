@@ -1,4 +1,4 @@
-//! Number-formatting parity (docs/multi-backend-testing-plan.md T2, Stage 3):
+//! Number-formatting parity (docs/backends.md):
 //! the JS `lua_tostring` runtime (`JS_STRING_RUNTIME`, C `%.14g` reconstructed
 //! with round-half-to-even) must byte-match Lua's `tostring` for the battery in
 //! `fixtures/number_format.rock`. Runs the SAME fn through the full skull

@@ -1,6 +1,6 @@
 //! `rock web <project> [--out <dir>]` -- emit a static browser build
 //! (`index.html` + `game.js`) for a Rock project via the JS backend (stone-web
-//! Arc 2, `docs/stone-web-plan.md`).
+//! `docs/backends.md`).
 //!
 //! `game.js` is ONE classic script (the JS path is already classic/ES5-ish, no
 //! ESM): the same runtime prelude set the node path uses (`build_run_program`),

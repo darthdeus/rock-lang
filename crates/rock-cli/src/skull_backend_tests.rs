@@ -3023,7 +3023,7 @@ fn main() { print(choose_a()); print(choose_b()) }
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "renderer-wgpu"))]
 mod compute_registration_contract_tests {
     use super::super::{SkullReload, SkullStone};
     use std::path::PathBuf;
@@ -3054,6 +3054,11 @@ fn main() { }
         let main = dir.path().join("main.lua");
         let incremental = dir.path().join("incremental.lua");
         let rock = dir.path().join("main.rock");
+        std::fs::write(
+            dir.path().join("stick.toml"),
+            "[package]\nname = \"compute_contract\"\ntype = \"bin\"\n\n[renderer]\nbackend = \"wgpu\"\n",
+        )
+            .expect("renderer config");
         std::fs::write(&rock, source).expect("source");
         let stone = SkullStone::init(&root, &main, &incremental).expect("initial compile");
         (dir, stone, main, incremental, rock)
