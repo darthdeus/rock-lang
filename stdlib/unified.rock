@@ -2228,22 +2228,23 @@ const EPSILON: float = 0.0000001
 
 // Math functions
 // random / random_range / random_int / random_seed read and mutate the
-// splitmix64 RNG state (`__rock_rng_next`, seeded in skull's prelude) —
+// 32-bit RNG state (`__rock_rng_next`, seeded in skull's prelude) —
 // NotPure, intentionally no @pure. One stream: the state is a single
-// serializable uint64 counter, so replay/keyframe restore can round-trip it
+// serializable number, so replay/keyframe restore can round-trip it
 // (docs/replay-scrub-plan.md).
-// 53-bit mantissa draw: top 53 bits of the next splitmix64 word / 2^53 gives
-// a uniform [0, 1) double (bit-identical across architectures — math.random
-// is not).
+// A 32-bit draw / 2^32 gives a uniform [0, 1) double.
 inline(lua) fn random() -> float = """
-    return tonumber(__rock_rng_next() / 2048ULL) * (1.0 / 9007199254740992.0)
+    return __rock_rng_next() * (1.0 / 4294967296.0)
 """
 fn random_range(min: float, max: float) -> float { return random() * (max - min) + min }
 inline(lua) fn random_int(min: int, max: int) -> int = """
     local r = max - min
     if r <= 0 then return min end
     local z = __rock_rng_next()
-    return tonumber(z % ffi.cast("uint64_t", r)) + min
+    if r <= 4294967296 then return z % r + min end
+    local hi = __rock_rng_next()
+    local lo = __rock_rng_next()
+    return (hi * 2097152 + math.floor(lo / 2048)) % r + min
 """
 inline(lua) fn random_seed(seed: int) = """
     __rock_rng_seed(seed)

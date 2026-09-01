@@ -431,7 +431,7 @@ fn runtime_prelude() -> &'static str {
     //      with this). A trace must fit one `sizemcode` block. On arm64 macOS,
     //      dyld leaves room for the first block near the VM but later mappings
     //      prevent a second one, so that first block must hold the hot set.
-    //   2. splitmix64 RNG (stdlib `random_*` inline(lua) bodies call
+    //   2. 32-bit RNG (stdlib `random_*` inline(lua) bodies call
     //      `__rock_rng_next`/`__rock_rng_seed` by name); seeded from
     //      ROCK_TEST_SEED for deterministic test runs.
     // The CodeRef runtime is appended by assembly only when this artifact has an
@@ -731,7 +731,7 @@ end
 {FN_MT}
 if not _G.__rock_rng_next then
   local __rock_bit = require("bit")
-  local __rock_rng_state = _G.ffi.new("uint64_t", 0)
+  local __rock_rng_state = 0
   local function active_rng_state()
     local session = _G.__rock_active_session
     if session and session.__rock_rng_state ~= nil then return session.__rock_rng_state end
@@ -742,22 +742,25 @@ if not _G.__rock_rng_next then
     if session then session.__rock_rng_state = state else __rock_rng_state = state end
   end
   _G.__rock_rng_seed = function(s)
-    store_rng_state(_G.ffi.new("uint64_t", s))
+    local state = __rock_bit.tobit(tonumber(s))
+    store_rng_state(state)
   end
   -- Whole RNG state is this one counter; get/set serialize it for replay
-  -- keyframe restore (docs/replay-scrub-plan.md). Returns the uint64 cdata.
+  -- keyframe restore (docs/replay-scrub-plan.md). It is a plain 32-bit number.
   _G.__rock_rng_state_get = function() return active_rng_state() end
   _G.__rock_rng_state_set = function(s)
-    store_rng_state(_G.ffi.new("uint64_t", s))
+    local state = __rock_bit.tobit(tonumber(s))
+    store_rng_state(state)
   end
   _G.__rock_rng_next = function()
-    local state = active_rng_state() + 0x9E3779B97F4A7C15ULL
+    local state = active_rng_state()
+    if state == 0 then state = 1 end
+    state = __rock_bit.bxor(state, __rock_bit.lshift(state, 13))
+    state = __rock_bit.bxor(state, __rock_bit.rshift(state, 17))
+    state = __rock_bit.bxor(state, __rock_bit.lshift(state, 5))
     store_rng_state(state)
-    local z = state
-    z = __rock_bit.bxor(z, __rock_bit.rshift(z, 30)) * 0xBF58476D1CE4E5B9ULL
-    z = __rock_bit.bxor(z, __rock_bit.rshift(z, 27)) * 0x94D049BB133111EBULL
-    z = __rock_bit.bxor(z, __rock_bit.rshift(z, 31))
-    return z
+    if state < 0 then return state + 4294967296 end
+    return state
   end
   local __seed = tonumber(os.getenv("ROCK_TEST_SEED"))
   if __seed then _G.__rock_rng_seed(__seed)
@@ -1825,6 +1828,13 @@ mod tests {
     fn runtime_prelude_keeps_the_mag_trace_working_set() {
         let prelude = super::runtime_prelude();
         assert!(prelude.contains("maxmcode=8192\", \"sizemcode=8192"));
+    }
+
+    #[test]
+    fn runtime_prelude_rng_state_is_numeric() {
+        let prelude = super::runtime_prelude();
+        assert!(prelude.contains("local __rock_rng_state = 0"));
+        assert!(!prelude.contains("ffi.new(\"uint64_t\", 0)"));
     }
 
     /// Bare-name aliases (`_G["pick"] = pick_bool_ret_int`) for the user module's
