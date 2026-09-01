@@ -128,6 +128,13 @@ fn mag_audio_and_vfx_projections_are_not_world_image_state() {
     );
 }
 
+#[test]
+fn mag_seek_census_admits_aggregate_owners_not_superseded_direct_globals() {
+    let names = sim_state_names("mag", 3);
+    assert!(!names.is_empty(), "the Mag checkpoint census must examine a nonzero population");
+    assert_mag_seek_census_owners(&names);
+}
+
 /// `rock frame <game> -n N --replay <log> --dump-state [env]` -> parsed JSON.
 fn run_replay_dump(game: &str, frames: u32, log: &str, env: &[(&str, &str)]) -> serde_json::Value {
     let scratch = tempfile::tempdir().unwrap();
@@ -342,28 +349,47 @@ fn assert_f32_state_matches(got: &serde_json::Value, want: &serde_json::Value, p
     }
 }
 
+/// Current MAG seek census owners, plus the superseded direct globals they
+/// replaced. Both MAG seek census consumers must call this rather than
+/// re-listing the names.
+fn assert_mag_seek_census_owners(sim: &std::collections::HashSet<String>) {
+    for name in [
+        "MAG_ACTIVE_WORLD",
+        "MAG_PROGRESS",
+        "MAG_JOURNAL",
+        "MAG_RUN_UI",
+        "history",
+    ] {
+        assert!(sim.contains(name), "{name} must be admitted as simulation state");
+    }
+    for (name, owner) in [
+        ("bank_gold", "MAG_PROGRESS"),
+        ("journal", "MAG_JOURNAL"),
+        ("quest_log_open", "MAG_RUN_UI"),
+    ] {
+        assert!(
+            !sim.contains(name),
+            "{name} is a superseded direct global; sim-state belongs to {owner}"
+        );
+    }
+    assert!(
+        !sim.contains("player"),
+        "Player ownership must remain inside MAG_ACTIVE_WORLD, not a duplicate global"
+    );
+}
+
 fn assert_mag_seek_state_matches(
     got: &serde_json::Value,
     want: &serde_json::Value,
     sim: &std::collections::HashSet<String>,
     label: &str,
 ) {
+    assert_mag_seek_census_owners(sim);
     let mut exact = sim.clone();
     assert!(
         exact.remove("WISPS"),
         "WISPS must be admitted as simulation state"
     );
-    for name in [
-        "MAG_ACTIVE_WORLD",
-        "bank_gold",
-        "journal",
-        "history",
-        "quest_log_open",
-    ] {
-        assert!(exact.contains(name), "{name} must be admitted as direct simulation state");
-    }
-    assert!(!exact.contains("player"),
-        "Player ownership must remain inside MAG_ACTIVE_WORLD, not a duplicate global");
     assert_f32_state_matches(&got["mag"]["WISPS"], &want["mag"]["WISPS"], "mag.WISPS");
     assert_mag_seek_populations_match(got, want, label);
     assert_sim_state_matches(got, want, &exact, label);
@@ -412,20 +438,10 @@ fn mag_seek_equivalence_state_names(
     frames: u32,
 ) -> std::collections::HashSet<String> {
     let mut sim = sim_state_names(game, frames);
-    for name in [
-        "WORLD_MODE",
-        "MOTES",
-        "MAG_ACTIVE_WORLD",
-        "WISPS",
-        "bank_gold",
-        "journal",
-        "history",
-        "quest_log_open",
-    ] {
+    for name in ["WORLD_MODE", "MOTES", "WISPS"] {
         assert!(sim.contains(name), "{name} must be admitted as simulation state");
     }
-    assert!(!sim.contains("player"),
-        "Player ownership must remain inside MAG_ACTIVE_WORLD, not a duplicate global");
+    assert_mag_seek_census_owners(&sim);
     for name in ["TELEMETRY_SESSION_OPEN", "TELEMETRY_LAST_FRAME_T"] {
         assert!(!sim.contains(name), "{name} is telemetry side-channel state");
     }
