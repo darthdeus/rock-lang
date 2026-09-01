@@ -820,6 +820,35 @@ fn function_value_plan_mode_is_part_of_the_owned_signature() {
 }
 
 #[test]
+fn first_class_function_values_match_first_class_boundary_declarations() {
+    let ws = ws_of(
+        r#"
+nobox value Leaf { x: float, y: float }
+fn named(value: Leaf) { print("ok") }
+fn main() { print("main") }
+"#,
+    );
+    let scx = ScalarCtx::new_values_first_class(&ws);
+    let named = func_ref(&ws, "named");
+    let declaration = BackendFnAbiPlan::for_boundary_declaration(&ws, &scx, named);
+    let value = BackendFnAbiPlan::for_function_value(
+        &ws,
+        &scx,
+        &MonoTy::Function {
+            params: vec![nominal("Leaf")],
+            ret: Box::new(MonoTy::Unit),
+        },
+    )
+    .expect("a first-class function value must have a physical plan");
+    assert_eq!(
+        value,
+        declaration.representation().clone(),
+        "a first-class indirect caller must use the declaration's opaque aggregate lane"
+    );
+    assert!(!value.uses_scalar_abi());
+}
+
+#[test]
 fn aggregate_value_projection_has_an_owned_value_context() {
     let ws = ws_of("nobox value V2 { x: float, y: float }\nfn main() { print(\"ok\") }\n");
     let arena = RepArena::default();

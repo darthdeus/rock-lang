@@ -1578,12 +1578,32 @@ impl RepArena {
         self.function_value_with_mode(ws, target, ty, true)
     }
 
+    pub fn function_value_first_class(
+        &self,
+        ws: &Workspace,
+        target: FnBackend,
+        ty: &crate::monoty::MonoTy,
+    ) -> Result<FunctionRepPlan, RepError> {
+        self.function_value_with_policy(ws, target, ty, false, true)
+    }
+
     pub fn function_value_with_mode(
         &self,
         ws: &Workspace,
         target: FnBackend,
         ty: &crate::monoty::MonoTy,
         nobox_only: bool,
+    ) -> Result<FunctionRepPlan, RepError> {
+        self.function_value_with_policy(ws, target, ty, nobox_only, false)
+    }
+
+    fn function_value_with_policy(
+        &self,
+        ws: &Workspace,
+        target: FnBackend,
+        ty: &crate::monoty::MonoTy,
+        nobox_only: bool,
+        first_class: bool,
     ) -> Result<FunctionRepPlan, RepError> {
         let (ty, _) = ty.peel_nullable();
         let crate::monoty::MonoTy::Function { params, ret } = ty else {
@@ -1608,18 +1628,26 @@ impl RepArena {
                 } else {
                     false
                 };
-                self.plan(
-                    ws,
-                    target,
-                    param,
-                    RepUse::Parameter,
-                    &RepUseFacts { tuple_spelled, span: None },
-                    RepGuarantees { nobox: nobox_only, allow_opaque: true },
-                )
+                if first_class && !tuple_spelled {
+                    Ok(self.intern(target, RepUse::Parameter, RepLayout::Opaque))
+                } else {
+                    self.plan(
+                        ws,
+                        target,
+                        param,
+                        RepUse::Parameter,
+                        &RepUseFacts { tuple_spelled, span: None },
+                        RepGuarantees { nobox: nobox_only, allow_opaque: true },
+                    )
+                }
             })
             .collect::<Result<Vec<_>, _>>()?;
         let result = if matches!(ret.as_ref(), crate::monoty::MonoTy::Unit) {
             None
+        } else if first_class
+            && !matches!(ret.peel_nullable().0, crate::monoty::MonoTy::Tuple(_))
+        {
+            Some(self.intern(target, RepUse::Return, RepLayout::Opaque))
         } else {
             Some(self.plan(
                 ws,
@@ -2185,7 +2213,11 @@ impl BackendFnAbiPlan {
         scx: &ScalarCtx,
         ty: &crate::monoty::MonoTy,
     ) -> Result<FunctionRepPlan, RepError> {
-        scx.rep_arena().function_value(ws, scx.target, ty)
+        if scx.values_first_class {
+            scx.rep_arena().function_value_first_class(ws, scx.target, ty)
+        } else {
+            scx.rep_arena().function_value(ws, scx.target, ty)
+        }
     }
 
     pub fn for_function_value_with_mode(
