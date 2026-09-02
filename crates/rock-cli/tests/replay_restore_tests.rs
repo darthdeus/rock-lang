@@ -87,6 +87,18 @@ fn replay_snapshot_oracle_includes_effective_pad_state_only() {
     }
     assert!(!names.contains("LAST_INPUT_DEVICE"), "glyph modality must not be snapshotted: {names:?}");
     assert!(!names.contains("UI_INPUT_CAPTURE"), "capture mode must not be snapshotted: {names:?}");
+    for name in [
+        "RENDER_BATCH_SORT_KEYS",
+        "UI_RENDER_SORT_KEYS",
+        "UI_BATCH_KEY_BUILDS",
+        "WORLD_BATCH_KEY_BUILDS",
+    ] {
+        assert!(!names.contains(name), "renderer flush scratch {name} was snapshotted: {names:?}");
+    }
+    assert!(
+        !names.contains("TEXT_MISSING_GLYPH_POLICY"),
+        "process-derived TEXT_MISSING_GLYPH_POLICY was snapshotted: {names:?}"
+    );
 }
 
 #[test]
@@ -103,9 +115,50 @@ fn mag_audio_and_vfx_projections_are_not_world_image_state() {
         "UI_RASTER_CANVAS",
         "UI_OUTPUT_CANVAS",
         "UI_EFFECT_COMPOSITE_PIPELINE",
+        "RENDER_BATCH_SORT_KEYS",
+        "UI_RENDER_SORT_KEYS",
+        "UI_BATCH_KEY_BUILDS",
+        "WORLD_BATCH_KEY_BUILDS",
     ] {
         assert!(!names.contains(name), "host projection {name} leaked into WorldImage: {names:?}");
     }
+    assert!(
+        !names.contains("TEXT_MISSING_GLYPH_POLICY"),
+        "process-derived TEXT_MISSING_GLYPH_POLICY leaked into WorldImage: {names:?}"
+    );
+}
+
+#[test]
+fn mag_seek_census_admits_aggregate_owners_not_superseded_direct_globals() {
+    let names = sim_state_names("mag", 3);
+    assert!(!names.is_empty(), "the Mag checkpoint census must examine a nonzero population");
+    assert_mag_seek_census_owners(&names);
+}
+
+fn assert_mag_panel_plan_census(sim: &std::collections::HashSet<String>) {
+    assert!(
+        !sim.contains("PANEL_DRAW_PLAN"),
+        "PANEL_DRAW_PLAN is a rebuildable catalog cache, not WorldImage state"
+    );
+    assert!(
+        !sim.contains("PANEL_DRAW_PLAN_BUILDS"),
+        "PANEL_DRAW_PLAN_BUILDS is a diagnostic rebuild counter, not WorldImage state"
+    );
+    assert!(
+        sim.contains("PANEL_STATES"),
+        "PANEL_STATES must remain semantic panel ownership"
+    );
+    assert!(
+        sim.contains("PANEL_SEQ"),
+        "PANEL_SEQ must remain semantic panel ownership"
+    );
+}
+
+#[test]
+fn mag_panel_draw_plan_is_derived_not_world_image() {
+    let names = sim_state_names("mag", 3);
+    assert!(!names.is_empty(), "the Mag panel-plan census must examine a nonzero population");
+    assert_mag_panel_plan_census(&names);
 }
 
 /// `rock frame <game> -n N --replay <log> --dump-state [env]` -> parsed JSON.
@@ -322,28 +375,47 @@ fn assert_f32_state_matches(got: &serde_json::Value, want: &serde_json::Value, p
     }
 }
 
+/// Current MAG seek census owners, plus the superseded direct globals they
+/// replaced. Both MAG seek census consumers must call this rather than
+/// re-listing the names.
+fn assert_mag_seek_census_owners(sim: &std::collections::HashSet<String>) {
+    for name in [
+        "MAG_ACTIVE_WORLD",
+        "MAG_PROGRESS",
+        "MAG_JOURNAL",
+        "MAG_RUN_UI",
+        "history",
+    ] {
+        assert!(sim.contains(name), "{name} must be admitted as simulation state");
+    }
+    for (name, owner) in [
+        ("bank_gold", "MAG_PROGRESS"),
+        ("journal", "MAG_JOURNAL"),
+        ("quest_log_open", "MAG_RUN_UI"),
+    ] {
+        assert!(
+            !sim.contains(name),
+            "{name} is a superseded direct global; sim-state belongs to {owner}"
+        );
+    }
+    assert!(
+        !sim.contains("player"),
+        "Player ownership must remain inside MAG_ACTIVE_WORLD, not a duplicate global"
+    );
+}
+
 fn assert_mag_seek_state_matches(
     got: &serde_json::Value,
     want: &serde_json::Value,
     sim: &std::collections::HashSet<String>,
     label: &str,
 ) {
+    assert_mag_seek_census_owners(sim);
     let mut exact = sim.clone();
     assert!(
         exact.remove("WISPS"),
         "WISPS must be admitted as simulation state"
     );
-    for name in [
-        "MAG_ACTIVE_WORLD",
-        "bank_gold",
-        "journal",
-        "history",
-        "quest_log_open",
-    ] {
-        assert!(exact.contains(name), "{name} must be admitted as direct simulation state");
-    }
-    assert!(!exact.contains("player"),
-        "Player ownership must remain inside MAG_ACTIVE_WORLD, not a duplicate global");
     assert_f32_state_matches(&got["mag"]["WISPS"], &want["mag"]["WISPS"], "mag.WISPS");
     assert_mag_seek_populations_match(got, want, label);
     assert_sim_state_matches(got, want, &exact, label);
@@ -392,20 +464,11 @@ fn mag_seek_equivalence_state_names(
     frames: u32,
 ) -> std::collections::HashSet<String> {
     let mut sim = sim_state_names(game, frames);
-    for name in [
-        "WORLD_MODE",
-        "MOTES",
-        "MAG_ACTIVE_WORLD",
-        "WISPS",
-        "bank_gold",
-        "journal",
-        "history",
-        "quest_log_open",
-    ] {
+    for name in ["WORLD_MODE", "MOTES", "WISPS"] {
         assert!(sim.contains(name), "{name} must be admitted as simulation state");
     }
-    assert!(!sim.contains("player"),
-        "Player ownership must remain inside MAG_ACTIVE_WORLD, not a duplicate global");
+    assert_mag_seek_census_owners(&sim);
+    assert_mag_panel_plan_census(&sim);
     for name in ["TELEMETRY_SESSION_OPEN", "TELEMETRY_LAST_FRAME_T"] {
         assert!(!sim.contains(name), "{name} is telemetry side-channel state");
     }
@@ -446,6 +509,95 @@ fn mag_seek_equivalence_state_names(
         assert!(sim.remove(name), "{name} must be excluded as a presentation or lifecycle diagnostic");
     }
     sim
+}
+
+const MAG_RECOVERY_RECORDED_AT: &str = "1000";
+const MAG_RECOVERY_REPLAYED_AT: &str = "1004";
+
+fn mag_recovery_last_observed_at(state: &serde_json::Value) -> i64 {
+    state["mag"]["RECOVERY_RESERVOIR"]["last_observed_at"]
+        .as_i64()
+        .expect("RECOVERY_RESERVOIR.last_observed_at")
+}
+
+fn mag_recovery_record_replay_arms(progress: &serde_json::Value) -> (serde_json::Value, serde_json::Value) {
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = dir.path().join("recovery-clock.replay");
+    let fixture_s = fixture.to_string_lossy().into_owned();
+    let progress_path = dir.path().join("progress.json");
+    let progress_s = progress_path.to_string_lossy().into_owned();
+    let layout_s = dir.path().join("spellbook-layout.jsonl").to_string_lossy().into_owned();
+    let settings_s = dir.path().join("settings.json").to_string_lossy().into_owned();
+    let bindings_s = dir.path().join("bindings.json").to_string_lossy().into_owned();
+    std::fs::write(&progress_path, serde_json::to_vec_pretty(progress).unwrap()).unwrap();
+
+    let record_env = [
+        ("MAG_BOOT_PLAYING", "1"),
+        ("MAG_PROGRESS_PATH_OVERRIDE", progress_s.as_str()),
+        ("MAG_LAYOUT_HISTORY_PATH_OVERRIDE", layout_s.as_str()),
+        ("MAG_SETTINGS_PATH_OVERRIDE", settings_s.as_str()),
+        ("MAG_BINDINGS_PATH_OVERRIDE", bindings_s.as_str()),
+        ("STONE_TEST_UNIX_SECONDS", MAG_RECOVERY_RECORDED_AT),
+    ];
+    let recorded = run_record_dump("mag", 3, &fixture_s, &record_env);
+
+    let replayed = run_replay_dump(
+        "mag",
+        3,
+        &fixture_s,
+        &[
+            ("MAG_BOOT_PLAYING", "1"),
+            ("MAG_PROGRESS_PATH_OVERRIDE", progress_s.as_str()),
+            ("MAG_LAYOUT_HISTORY_PATH_OVERRIDE", layout_s.as_str()),
+            ("MAG_SETTINGS_PATH_OVERRIDE", settings_s.as_str()),
+            ("MAG_BINDINGS_PATH_OVERRIDE", bindings_s.as_str()),
+            ("STONE_TEST_UNIX_SECONDS", MAG_RECOVERY_REPLAYED_AT),
+        ],
+    );
+    (recorded, replayed)
+}
+
+fn mag_current_progress_with_recovery(measures: i64, last_observed_at: i64) -> serde_json::Value {
+    serde_json::json!({
+        "version": 4,
+        "bank_gold": 0,
+        "events": {},
+        "quests": {"runs": [], "tracked": [], "collapsed": {}, "quarantined": []},
+        "player": {
+            "level": {"namespace": "official", "name": "crypt"},
+            "grid": [25, 8],
+            "dead": false,
+            "health_cur": 100.0,
+            "mana_cur": 100.0,
+            "stamina_cur": 20.0,
+            "inventory": {"gold": 0, "bandage": 0, "bloody_bandage": 0},
+            "reagents": [50, 50, 50, 50, 50, 50]
+        },
+        "spellbook": {"favorites": []},
+        "recovery": {
+            "measures": measures,
+            "last_observed_at": last_observed_at,
+            "packet_cursor": 0,
+            "pending_measures": 0
+        }
+    })
+}
+
+#[test]
+fn mag_full_recovery_replay_uses_each_process_wall_clock_sentinel() {
+    let (recorded, replayed) =
+        mag_recovery_record_replay_arms(&mag_current_progress_with_recovery(10, 100));
+    let recorded_at = mag_recovery_last_observed_at(&recorded);
+    let replayed_at = mag_recovery_last_observed_at(&replayed);
+    assert_eq!(recorded_at, 1000, "recorded reservoir last_observed_at={recorded_at}");
+    assert_eq!(replayed_at, 1004, "replayed reservoir last_observed_at={replayed_at}");
+    // PINNED BUG: replay reads the new process wall clock instead of recorded input.
+    // This inverted assertion passes because the bug exists. When it fails, rederive
+    // the mechanism; if replay now preserves 1000, flip this to assert_eq!.
+    assert_ne!(
+        recorded_at, replayed_at,
+        "replay now preserves the recorded wall clock; flip this sentinel to assert_eq!"
+    );
 }
 
 #[test]
