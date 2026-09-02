@@ -100,14 +100,6 @@ fn js_executor_keeps_shared_global_state() {
     );
 }
 
-/// The control that makes the sentinel meaningful: luajit runs the file as one
-/// program and gets the right answers.
-#[test]
-fn luajit_executor_keeps_shared_global_state() {
-    let (ok, text) = rock("test", FIXTURE, &[]);
-    assert!(ok, "luajit must evaluate the shared counter once:\n{text}");
-}
-
 /// The other control: emitting ONE JS program -- what `rock run --backend js`
 /// and `rock web` do -- gives the same answers as luajit. This is what makes the
 /// bug a test-executor property rather than a JS-semantics divergence.

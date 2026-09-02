@@ -199,8 +199,6 @@ mod reserved_namespace;
 mod comptime_inputs;
 #[path = "shader_pipeline_register.rs"]
 mod shader_pipeline_register;
-#[path = "compute_surface.rs"]
-mod compute_surface;
 #[path = "static_hot_reload.rs"]
 mod static_hot_reload;
 #[path = "static_registration_coverage.rs"]
@@ -229,6 +227,8 @@ mod value_push_generic_boundary;
 mod value_scalarize;
 #[path = "value_test_discovery.rs"]
 mod value_test_discovery;
+#[path = "vec_flat_enum_strided.rs"]
+mod vec_flat_enum_strided;
 #[path = "valid_type_identity.rs"]
 mod valid_type_identity;
 #[path = "vec_value_columns.rs"]

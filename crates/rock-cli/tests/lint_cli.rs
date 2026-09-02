@@ -194,6 +194,17 @@ fn method_project(dir: &Path) {
     .unwrap();
 }
 
+fn backend_sibling_project(dir: &Path) {
+    std::fs::write(dir.join("stick.toml"), "[package]\nname = \"siblingee\"\n").unwrap();
+    std::fs::write(
+        dir.join("main.rock"),
+        "inline(lua) fn probe(x: int) -> int = \"return x\"\n\
+         inline(js) fn probe(x: float) -> int = \"return x;\"\n\
+         fn main() {}\n",
+    )
+    .unwrap();
+}
+
 #[test]
 fn method_syntax_is_off_until_the_invocation_names_it() {
     // The opt-in contract end to end: a migration lint reaches the author only
@@ -212,6 +223,21 @@ fn method_syntax_is_off_until_the_invocation_names_it() {
     assert!(err.contains("declare it as `fn Mob.damage(m, n: int)`"), "{err}");
     assert!(err.contains("1 method_syntax"), "the tally names the lint: {err}");
     assert!(!err.contains("unused"), "a selection silences every other lint: {err}");
+}
+
+#[test]
+fn backend_sibling_mismatch_is_reached_only_when_named() {
+    let dir = tempfile::tempdir().unwrap();
+    backend_sibling_project(dir.path());
+    let path = dir.path().to_str().unwrap();
+
+    let bare = stderr(&run(&["lint", path]));
+    assert!(!bare.contains("backend_sibling_mismatch"), "bare lint must omit it: {bare}");
+
+    let out = run(&["lint", path, "--lints=backend_sibling_mismatch"]);
+    let err = stderr(&out);
+    assert!(out.status.success(), "a warning-tier parity finding must not fail lint: {err}");
+    assert!(err.contains("backend_sibling_mismatch"), "explicit lint selection was ignored: {err}");
 }
 
 #[test]

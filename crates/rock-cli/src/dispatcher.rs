@@ -14,6 +14,7 @@ impl CommandContext {
         if self.args.verbose {
             log::debug!(target: "CLI", "using direct compilation");
         }
+        self.require_optional_features()?;
         // `--profile` is global in the clap definition but only `rock shader`
         // acts on it: the profile is a property of the GL context, and the
         // engine adapts the header per context at shader-compile time. Every
@@ -39,6 +40,27 @@ impl CommandContext {
         }
         let _renderer_override = rock_host::stick::install_renderer_override(self.args.renderer);
         self.run_command()
+    }
+
+    fn require_optional_features(&self) -> Result<()> {
+        if self.args.command == CliCommand::Web && !cfg!(feature = "backend-js") {
+            anyhow::bail!(
+                "the `rock web` command was omitted from this build; enable the `backend-js` feature (for example, `just test-js` or `cargo run --features backend-js --bin rock web ...)"
+            );
+        }
+        if self.args.command == CliCommand::MonoManifest && !cfg!(feature = "backend-js") {
+            anyhow::bail!(
+                "the `mono-manifest` command was omitted from this build; enable the `backend-js` feature (for example, `cargo run --features backend-js --bin rock mono-manifest ...)"
+            );
+        }
+        if matches!(self.args.renderer, Some(RendererBackend::Wgpu))
+            && !cfg!(feature = "renderer-wgpu")
+        {
+            anyhow::bail!(
+                "the `wgpu` renderer was omitted from this build; enable the `renderer-wgpu` feature (for example, `just test-wgpu` or `cargo run --features renderer-wgpu --bin rock ... --renderer wgpu)"
+            );
+        }
+        Ok(())
     }
 
     pub fn get_required_file(&self, command_name: &str) -> Result<&str> {
@@ -489,6 +511,9 @@ impl CommandContext {
     /// per-test emission, run under node). Serves `test` only -- the `serves`
     /// table gates everything else before this switch.
     fn run_command_js(&self) -> Result<()> {
+        #[cfg(not(feature = "backend-js"))]
+        unreachable!("JS dispatch requires the `backend-js` feature");
+        #[cfg(feature = "backend-js")]
         match self.args.command {
             CliCommand::Test => {
                 let files = self.get_test_files()?;
@@ -634,6 +659,7 @@ impl CommandContext {
         // web emits a static browser build (index.html + game.js) via the JS
         // backend; it runs project-mode JS emission itself and ignores
         // --backend, so it dispatches before the backend switch like shader/fmt.
+        #[cfg(feature = "backend-js")]
         if self.args.command == CliCommand::Web {
             let project = self.get_project_dir_or_current()?;
             return crate::web::run_web(
@@ -727,6 +753,7 @@ impl CommandContext {
         }
         // mono-manifest builds the Stage-0d shadow instance graph; a diagnostic
         // that touches no emission, dispatched early like its 0c sibling.
+        #[cfg(feature = "backend-js")]
         if self.args.command == CliCommand::MonoManifest {
             let root = self.get_path_or_current()?;
             // `ROCK_MONO_DUMP=<dir>` writes the per-project Lua and JS manifests

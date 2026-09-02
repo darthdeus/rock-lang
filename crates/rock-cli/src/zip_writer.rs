@@ -8,7 +8,7 @@
 //! The format limits are ENFORCED rather than wrapped: past 4 GiB or 65535
 //! entries the 32-bit fields in the central directory silently truncate, and a
 //! truncated header produces an archive that some readers open and others
-//! reject. Those cases reject here instead (`docs/js-deployment-plan.md`).
+//! reject. Those cases reject here instead (`docs/backends.md`).
 
 use crate::Result;
 use std::io::Write;

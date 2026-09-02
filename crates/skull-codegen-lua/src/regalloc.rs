@@ -178,7 +178,9 @@ pub(crate) fn inst_uses(inst: &Inst, push: &mut impl FnMut(Idx<Inst>)) {
         | Inst::UintToInt(x)
         | Inst::FloatToUint(x)
         | Inst::UintBitcastInt(x)
-        | Inst::IntBitcastUint(x) => {
+        | Inst::IntBitcastUint(x)
+        | Inst::VecStrideNilToFalse(x)
+        | Inst::VecStrideFalseToNil(x) => {
             push(*x)
         }
         Inst::Call { args, .. } | Inst::CallMulti { args, .. } | Inst::CallBoundMulti { args, .. } => args.iter().for_each(|a| push(*a)),
@@ -200,6 +202,11 @@ pub(crate) fn inst_uses(inst: &Inst, push: &mut impl FnMut(Idx<Inst>)) {
             columns.iter().flat_map(|(_, vs)| vs).for_each(|&i| push(i));
         }
         Inst::MakeVecColumnHeader { capacity, .. } => push(*capacity),
+        Inst::MakeVecStrided { values, capacity, .. } => {
+            push(*capacity);
+            values.iter().for_each(|&value| push(value));
+        }
+        Inst::MakeVecStridedHeader { capacity, .. } => push(*capacity),
         Inst::MakeTuple(vs) | Inst::MakeVec(vs) => {
             vs.iter().for_each(|a| push(*a))
         }

@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 autotests = false
 
-# skull-codegen-js: the conformance-differential JS backend (docs/js-backend-plan.md).
+# skull-codegen-js: the conformance-differential JS backend (docs/backends.md).
 # A structured MIR->JS emitter for the scalar + NativeBuffer subset, run under
 # node as the second executing backend: mapping-vs-fallback for the scalar
 # intrinsics, JS-native vs luajit-native for the @native_required NativeBuffer

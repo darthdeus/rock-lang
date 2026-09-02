@@ -40,6 +40,7 @@ pub enum ValueCtorForm {
     Leaves,
 }
 pub const VEC_COLUMN_REPR: &str = "columns";
+pub const VEC_STRIDED_REPR: &str = "strided";
 /// The PRESENCE column of a `[E?]` whose `E` is `nobox`: one bool per slot,
 /// leading the leaf columns exactly as the presence leaf leads a nullable
 /// shape's leaves. `@` cannot appear in a Rock identifier, so the key can never
@@ -137,11 +138,19 @@ pub enum ContainerKind {
     /// Replaces the single `_data` backing of [`ContainerKind::Vec`].
     /// Eligibility + layout rationale: `docs/vec-value-columns-plan.md`.
     VecValueColumns(ColumnElem),
+    /// `[E]` where `E` is a wide flat enum with non-false scalar payload leaves.
+    /// Elements occupy fixed-width rows in one dense backing array; inactive
+    /// enum lanes store `false`, never `nil`.
+    VecValueStrided(ColumnElem),
     /// One leaf column OF a [`ContainerKind::VecValueColumns`] Vec — a bare
     /// 1-indexed Lua array. The index is ALREADY 1-based and already
     /// bounds-checked (`__vec_checked_index` against the owning Vec's `len`),
     /// so this indexes raw: no `+1`, no check. Never a user-facing type.
     VecColumn,
+    /// One raw slot in a strided Vec backing. The index is already translated
+    /// to the backend's physical array base and bounds were checked by the
+    /// owning logical element access.
+    VecStrideSlot,
     /// One typed LEAF VIEW over a `NativeBuffer`'s storage — a raw C pointer of
     /// a primitive type ([`Inst::FfiViewCast`]), indexed in units of that type.
     /// The index is absolute (`i * stride + leaf_off`, both compile-time
@@ -238,7 +247,12 @@ impl ContainerKind {
 
     /// Either Vec flavor — the `{ .., len }` growable shape, 1-indexed.
     pub fn is_vec(self) -> bool {
-        matches!(self, ContainerKind::Vec | ContainerKind::VecValueColumns(_))
+        matches!(
+            self,
+            ContainerKind::Vec
+                | ContainerKind::VecValueColumns(_)
+                | ContainerKind::VecValueStrided(_)
+        )
     }
 }
 
@@ -456,6 +470,27 @@ pub enum Inst {
         nobox: bool,
         capacity: Idx<Inst>,
     },
+    MakeVecStrided {
+        elem: Ustr,
+        representation: crate::lower::RepId,
+        nobox: bool,
+        stride: usize,
+        values: Vec<Idx<Inst>>,
+        len: usize,
+        capacity: Idx<Inst>,
+    },
+    MakeVecStridedHeader {
+        elem: Ustr,
+        representation: crate::lower::RepId,
+        nobox: bool,
+        stride: usize,
+        capacity: Idx<Inst>,
+    },
+    /// Physical strided rows cannot contain nil without punching a Lua array
+    /// hole. The selected element population has no active bool leaves, so
+    /// false is an unambiguous inactive-lane sentinel.
+    VecStrideNilToFalse(Idx<Inst>),
+    VecStrideFalseToNil(Idx<Inst>),
     /// A struct value. `ty` is the nominal name for the `__ty` reflective field
     /// (`None` for an unknown/foreign nominal).
     MakeStruct {

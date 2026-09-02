@@ -1,4 +1,4 @@
-//! Minimal MIR->JS emitter (docs/js-backend-plan.md S2) for the conformance
+//! Minimal MIR->JS emitter (docs/backends.md) for the conformance
 //! subset: the scalar fallback bodies of the eight differential intrinsics,
 //! plus the NativeBuffer four-fn surface (TypedArray-backed `{ptr, len}`
 //! structs, checked `buf[i]` via the `__nb_checked_*` shim names --
@@ -1562,7 +1562,14 @@ impl Emitter<'_> {
                                  reached emit -- lowering must split it per column"
                             )));
                         }
-                        ContainerKind::VecColumn => format!("{b}[{i}] = {v};"),
+                        ContainerKind::VecValueStrided(elem) => {
+                            return Err(err(format!(
+                                "JS subset: whole-element store into strided `[{elem}]` reached emit"
+                            )));
+                        }
+                        ContainerKind::VecColumn | ContainerKind::VecStrideSlot => {
+                            format!("{b}[{i}] = {v};")
+                        }
                         // Raw: the element index was bounds-checked once ahead of
                         // every leaf write. A JS boolean into a Uint8Array stores
                         // 1/0 already, so the write side needs no coercion.
@@ -1895,6 +1902,14 @@ impl Emitter<'_> {
             Inst::UintToInt(x) => self.render_val(*x)?,
             Inst::UintBitcastInt(x) => format!("({} | 0)", self.render_val(*x)?),
             Inst::IntBitcastUint(x) => format!("({} >>> 0)", self.render_val(*x)?),
+            Inst::VecStrideNilToFalse(x) => {
+                let value = self.render_val(*x)?;
+                format!("((value) => value == null ? false : value)({value})")
+            }
+            Inst::VecStrideFalseToNil(x) => {
+                let value = self.render_val(*x)?;
+                format!("((value) => value === false ? null : value)({value})")
+            }
             // Rock float->int truncates toward -inf == floor.
             Inst::FloatToInt(x) => format!("Math.floor({})", self.render_val(*x)?),
             // Lua `..` coerces each operand via `tostring` (number formatting is
@@ -2096,9 +2111,14 @@ impl Emitter<'_> {
                              emit -- lowering must decompose it into per-column reads"
                         )));
                     }
+                    ContainerKind::VecValueStrided(elem) => {
+                        return Err(err(format!(
+                            "JS subset: whole-element read of strided `[{elem}]` reached emit"
+                        )));
+                    }
                     // One leaf column: the index is already checked
                     // (`VecCheckedIndex`) and already 0-based, so this is raw.
-                    ContainerKind::VecColumn => format!("{b}[{i}]"),
+                    ContainerKind::VecColumn | ContainerKind::VecStrideSlot => format!("{b}[{i}]"),
                     // One typed leaf view. The index is absolute and already
                     // bounds-checked once per ELEMENT, so this indexes raw. A
                     // `bool` view is a Uint8Array holding 0/1, which the language
@@ -2119,10 +2139,13 @@ impl Emitter<'_> {
                 ContainerKind::NativeBuffer
                 | ContainerKind::NativeBufferValue(_)
                 | ContainerKind::Vec
-                | ContainerKind::VecValueColumns(_) => {
+                | ContainerKind::VecValueColumns(_)
+                | ContainerKind::VecValueStrided(_) => {
                     format!("{}.len", self.render_val(*base)?)
                 }
-                ContainerKind::VecColumn => format!("{}.length", self.render_val(*base)?),
+                ContainerKind::VecColumn | ContainerKind::VecStrideSlot => {
+                    format!("{}.length", self.render_val(*base)?)
+                }
                 // A view has no length of its own: it spans the whole buffer, and
                 // only the owning NativeBuffer knows the element count. Reaching
                 // here means a `len` was taken on the wrong base.
@@ -2251,6 +2274,38 @@ impl Emitter<'_> {
             Inst::MakeVecColumnHeader { elem, capacity, .. } => format!(
                 "{{repr: {}, elem: {}, cap: {}}}",
                 js_string_lit(skull_mir::mir::VEC_COLUMN_REPR)?,
+                js_string_lit(elem.as_str())?,
+                self.render_val(*capacity)?,
+            ),
+            Inst::MakeVecStrided {
+                elem,
+                stride,
+                values,
+                len,
+                capacity,
+                ..
+            } => {
+                let values = values
+                    .iter()
+                    .map(|value| self.render_val(*value))
+                    .collect::<Result<Vec<_>, _>>()?;
+                format!(
+                    "{{_data: [{}], len: {len}, __ty: \"Vec\", {}: {{repr: {}, elem: {}, stride: {stride}, cap: {}}}}}",
+                    values.join(", "),
+                    js_string_lit(skull_mir::mir::VEC_COLUMN_HEADER_FIELD)?,
+                    js_string_lit(skull_mir::mir::VEC_STRIDED_REPR)?,
+                    js_string_lit(elem.as_str())?,
+                    self.render_val(*capacity)?,
+                )
+            }
+            Inst::MakeVecStridedHeader {
+                elem,
+                stride,
+                capacity,
+                ..
+            } => format!(
+                "{{repr: {}, elem: {}, stride: {stride}, cap: {}}}",
+                js_string_lit(skull_mir::mir::VEC_STRIDED_REPR)?,
                 js_string_lit(elem.as_str())?,
                 self.render_val(*capacity)?,
             ),
@@ -2808,7 +2863,7 @@ fn emit_ginit_with_nested(
     emit_body_with_nested(ws, &g.mf, &g.init_name, names, hoisted, gctx)
 }
 
-/// The whole workspace as ONE JS program (M1, `docs/js-deployment-plan.md`):
+/// The whole workspace as ONE JS program (`docs/backends.md`):
 /// module-driven assembly mirroring skull's Lua `assemble`, but reachability-
 /// driven (roots = `main` + every DECORATED fn + every `deco` body; the whole
 /// stdlib is NOT emitted, only what those roots reach). Emission order:
@@ -3618,7 +3673,7 @@ fn shader_register_sibling(ws: &Workspace) -> Result<Option<FuncRef>, CompilerEr
 /// `@nomangle` name whenever a pair exists, so the register lines resolve. The
 /// native Rock body (WATCHER lookup + GL compile) is not JS-emittable, so a
 /// program with a shader pair but no reachable js sibling REJECTS rather than
-/// silently dropping the registration (P2, docs/stone-web-plan.md).
+/// silently dropping the registration (`docs/backends.md`).
 fn force_shader_register_sibling(
     ws: &Workspace,
     st: &mut WorklistState,
@@ -7369,6 +7424,8 @@ fn for_each_operand(inst: &Inst, f: &mut impl FnMut(Idx<Inst>)) {
         | Inst::FloatToUint(x)
         | Inst::UintBitcastInt(x)
         | Inst::IntBitcastUint(x)
+        | Inst::VecStrideNilToFalse(x)
+        | Inst::VecStrideFalseToNil(x)
         | Inst::Neg(x)
         | Inst::Not(x)
         | Inst::BitNot(x)
@@ -7390,6 +7447,13 @@ fn for_each_operand(inst: &Inst, f: &mut impl FnMut(Idx<Inst>)) {
             columns.iter().for_each(|(_, vs)| mark(vs));
         }
         Inst::MakeVecColumnHeader { capacity, .. } => mark(&[*capacity]),
+        Inst::MakeVecStrided {
+            values, capacity, ..
+        } => {
+            mark(&[*capacity]);
+            mark(values);
+        }
+        Inst::MakeVecStridedHeader { capacity, .. } => mark(&[*capacity]),
         Inst::MakeStruct { fields, .. }
         | Inst::MakeValueStruct { fields, .. }
         | Inst::MaterializeValueStruct { fields, .. }

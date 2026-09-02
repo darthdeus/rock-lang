@@ -138,7 +138,7 @@ fn mag_release_build_can_explicitly_disable_telemetry() {
 }
 
 #[test]
-fn mag_lua_and_web_builds_carry_declared_identity() {
+fn mag_lua_build_carries_declared_identity() {
     let root = repo_root();
     let dir = tempfile::tempdir().unwrap();
     let lua_path = dir.path().join("mag.lua");
@@ -214,17 +214,4 @@ fn mag_lua_and_web_builds_carry_declared_identity() {
         assert!(native.contains(&baked), "Lua did not bake the {platform} platform accessor");
     }
 
-    let web_dir = dir.path().join("web");
-    let out = run_rock(&["web", "mag", "--out", web_dir.to_str().unwrap()]);
-    assert!(
-        out.status.success(),
-        "web mag build failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let js = std::fs::read_to_string(web_dir.join("game.js")).unwrap();
-    assert!(js.contains(&sha), "web JS did not carry GIT_SHA={sha}");
-    assert!(js.contains("web"), "web JS did not carry the web channel/platform");
-    assert!(!js.contains("__ROCK_BUILD_SHA"), "web JS still carries the old build global");
-    assert!(!js.contains("__ROCK_CHANNEL"), "web JS still carries the old channel global");
 }

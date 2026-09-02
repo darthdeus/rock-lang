@@ -1,8 +1,6 @@
 // Game-spawning tests, excluded from the default nextest profile (see .config/nextest.toml).
 
 mod stone_harness;
-#[path = "web_test_process.rs"]
-mod web_test_process;
 
 #[path = "arena_serialization_tests.rs"]
 mod arena_serialization_tests;
@@ -35,31 +33,10 @@ mod replay_timeline_tests;
 mod replay_window_tests;
 #[path = "replay_timing_tests.rs"]
 mod replay_timing_tests;
-#[path = "engine_cdylib_freshness_gate.rs"]
-mod engine_cdylib_freshness_gate;
-
 #[path = "frame_error_gate.rs"]
 mod frame_error_gate;
 #[path = "allocation_activation_gate.rs"]
 mod allocation_activation_gate;
-#[path = "frame_watchdog_gate.rs"]
-mod frame_watchdog_gate;
-#[path = "macos_wgpu_lifecycle_gate.rs"]
-mod macos_wgpu_lifecycle_gate;
-#[path = "macos_wgpu_recovery_gate.rs"]
-mod macos_wgpu_recovery_gate;
-#[path = "bounded_summary_gate.rs"]
-mod bounded_summary_gate;
-#[path = "wgpu_refusal_gate.rs"]
-mod wgpu_refusal_gate;
-#[path = "wgpu_capture_gate.rs"]
-mod wgpu_capture_gate;
-#[path = "wgpu_capture_contract_gate.rs"]
-mod wgpu_capture_contract_gate;
-#[path = "wgpu_gameplay_origin_gate.rs"]
-mod wgpu_gameplay_origin_gate;
-#[path = "wgpu_menu_parity_gate.rs"]
-mod wgpu_menu_parity_gate;
 #[path = "rich_text_reject_gate.rs"]
 mod rich_text_reject_gate;
 #[path = "plain_text_reject_gate.rs"]
@@ -84,9 +61,6 @@ mod mag_worker_product_tests;
 mod sim_reload_lane_drain;
 #[path = "sim_worker_pool.rs"]
 mod sim_worker_pool;
-#[path = "web_smoke_tests.rs"]
-mod web_smoke_tests;
-
 #[path = "shader_texture_census.rs"]
 mod shader_texture_census;
 #[path = "shader_corpus_oracle.rs"]

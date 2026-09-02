@@ -70,8 +70,9 @@ enum Bucket {
     /// value oracle is blind to it, which is the whole reason the emitted-shape
     /// surface exists.
     Materialized,
-    /// The backend cannot express the shape and said so (`SKIP(reason)` on JS).
+    /// The JS backend cannot express the shape and said so (`SKIP(reason)`).
     /// Not a verdict about the language.
+    #[cfg(feature = "backend-js")]
     BackendSkip,
     /// Nothing ran -- zero `@test`s executed and no diagnostic. A harness bug,
     /// never a language finding.
@@ -86,6 +87,7 @@ impl Bucket {
             Bucket::LoudReject => "LOUD REJECT",
             Bucket::SilentReject => "SILENT REJECT",
             Bucket::Materialized => "MATERIALIZED",
+            #[cfg(feature = "backend-js")]
             Bucket::BackendSkip => "BACKEND SKIP",
             Bucket::Inconclusive => "INCONCLUSIVE",
         }
@@ -108,6 +110,7 @@ enum Surface {
     /// `rock test` on the default (skull/luajit) backend.
     Luajit,
     /// `rock test --backend js`.
+    #[cfg(feature = "backend-js")]
     Js,
     /// `rock shader <file> <entry>` for both profiles. The oracle is the emitted
     /// GLSL, since a shader is not `@test`-executable from here.
@@ -188,7 +191,12 @@ fn classify_test_run(text: &str, ok: bool) -> Observation {
     // and matching on their text instead let the `cast`-hijack mutation ("attempt
     // to index local 'r0' (a number value)") read as CORRECT.
     let (passed, total, failed, skipped) = test_counts(text);
-    if failed > 0 || (skipped == 0 && total > 0 && passed < total) {
+    let incomplete = if cfg!(feature = "backend-js") {
+        skipped == 0 && total > 0 && passed < total
+    } else {
+        total > 0 && passed < total
+    };
+    if failed > 0 || incomplete {
         let detail: Vec<&str> = text
             .lines()
             .map(str::trim)
@@ -211,6 +219,7 @@ fn classify_test_run(text: &str, ok: bool) -> Observation {
             detail: reason,
         };
     }
+    #[cfg(feature = "backend-js")]
     if skipped > 0 {
         // `--backend js` reports an unemittable test as a SKIP with a reason, and
         // that histogram is the emitter worklist -- a fact about the backend, not
@@ -420,6 +429,7 @@ fn observe(file: &Path, surface: Surface, stdlib: StdlibVariant) -> Observation 
             let (text, ok) = run_rock(&["test", &path], stdlib);
             classify_test_run(&text, ok)
         }
+        #[cfg(feature = "backend-js")]
         Surface::Js => {
             let path = file.to_string_lossy().into_owned();
             let (text, ok) = run_rock(&["test", "--backend", "js", &path], stdlib);
@@ -466,6 +476,7 @@ fn observe(file: &Path, surface: Surface, stdlib: StdlibVariant) -> Observation 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Expect {
     Correct,
+    #[cfg(feature = "backend-js")]
     /// Live bug. `flip_when` says what closes it.
     Miscompile {
         flip_when: &'static str,
@@ -539,6 +550,7 @@ const SEEDS: &[SeedCase] = &[
         expect: Expect::Correct,
         gap: Some("nullable whole-value read aliases (fixed, presence-aware copy-out)"),
     },
+    #[cfg(feature = "backend-js")]
     SeedCase {
         // The same lowering, one backend over. Kept separate because a fix that
         // lands in the Lua emitter only would leave this red.
@@ -921,6 +933,7 @@ fn reconcile(expect: Expect, obs: &Observation) -> (Bucket, Option<String>) {
                 )),
             ),
         },
+        #[cfg(feature = "backend-js")]
         Expect::Miscompile { flip_when } => match obs.bucket {
             Bucket::Miscompile => (Bucket::Miscompile, None),
             Bucket::Correct => (
@@ -993,6 +1006,7 @@ fn bucket_table(counts: &BTreeMap<Bucket, usize>) -> String {
         Bucket::LoudReject,
         Bucket::SilentReject,
         Bucket::Materialized,
+        #[cfg(feature = "backend-js")]
         Bucket::BackendSkip,
         Bucket::Inconclusive,
     ] {
@@ -2596,10 +2610,11 @@ fn the_emitted_shape_holds_the_materialization_invariants() {
 /// The JS backend over the SAME generated shapes. It is a real rung, not a
 /// placeholder -- but its verdict set differs on purpose: `--backend js` reports
 /// `SKIP(reason)` for shapes its emitter does not cover yet (that histogram IS
-/// the emitter worklist, `docs/js-backend-plan.md`), and a rejection there can be
+/// the emitter worklist, `docs/backends.md`), and a rejection there can be
 /// an unbuilt emitter arm rather than a language rule. So this test gates on the
 /// one thing that means the same on every backend: a program that compiles, runs
 /// and answers wrong.
+#[cfg(feature = "backend-js")]
 #[test]
 #[ignore = "opt-in: spawns one rock process per shape (`just shape-sweep`)"]
 fn the_pairwise_sweep_on_js_finds_no_unexpected_miscompile() {
@@ -3043,6 +3058,7 @@ fn the_glsl_subset_agrees_across_backends() {
 
     let mut glsl_counts: BTreeMap<Bucket, usize> = BTreeMap::new();
     let mut lua_counts: BTreeMap<Bucket, usize> = BTreeMap::new();
+    #[cfg(feature = "backend-js")]
     let mut js_counts: BTreeMap<Bucket, usize> = BTreeMap::new();
     let mut unrepresentable = 0usize;
     let mut rows: Vec<String> = Vec::new();
@@ -3072,22 +3088,29 @@ fn the_glsl_subset_agrees_across_backends() {
             *reasons.entry(format!("[glsl] {}", glsl.detail)).or_insert(0) += 1;
         }
 
-        let (lua, js) = if prog.cpu_observable {
+        let lua = if prog.cpu_observable {
             let lua = observe(&file, Surface::Luajit, shape.stdlib);
-            let js = observe(&file, Surface::Js, shape.stdlib);
             *lua_counts.entry(lua.bucket).or_insert(0) += 1;
-            *js_counts.entry(js.bucket).or_insert(0) += 1;
             if lua.bucket == Bucket::LoudReject {
                 *reasons.entry(format!("[luajit] {}", lua.detail)).or_insert(0) += 1;
             }
-            (Some(lua), Some(js))
+            Some(lua)
         } else {
-            (None, None)
+            None
+        };
+        #[cfg(feature = "backend-js")]
+        let js = if prog.cpu_observable {
+            let js = observe(&file, Surface::Js, shape.stdlib);
+            *js_counts.entry(js.bucket).or_insert(0) += 1;
+            Some(js)
+        } else {
+            None
         };
 
         let cell = |o: &Option<Observation>| -> &'static str {
             o.as_ref().map(|o| o.bucket.label()).unwrap_or("n/a")
         };
+        #[cfg(feature = "backend-js")]
         rows.push(format!(
             "  {:<62} glsl={:<12} luajit={:<12} js={}",
             name,
@@ -3095,10 +3118,18 @@ fn the_glsl_subset_agrees_across_backends() {
             cell(&lua),
             cell(&js)
         ));
+        #[cfg(not(feature = "backend-js"))]
+        rows.push(format!(
+            "  {:<62} glsl={:<12} luajit={}",
+            name,
+            glsl.bucket.label(),
+            cell(&lua)
+        ));
 
         // A shape whose GLSL and CPU verdicts differ. Some of these are expected
         // (a `@gpu_only` call has no CPU image); each one still gets named, because
         // "expected" is a judgement and it has to be visible to be judged.
+        #[cfg(feature = "backend-js")]
         if let (Some(lua), Some(js)) = (&lua, &js) {
             if glsl.bucket != lua.bucket || lua.bucket != js.bucket {
                 divergences.push(format!(
@@ -3109,6 +3140,20 @@ fn the_glsl_subset_agrees_across_backends() {
                     lua.detail,
                     js.bucket.label(),
                     js.detail,
+                    prog.expected,
+                    indent_block(&prog.source)
+                ));
+            }
+        }
+        #[cfg(not(feature = "backend-js"))]
+        if let Some(lua) = &lua {
+            if glsl.bucket != lua.bucket {
+                divergences.push(format!(
+                    "{name}\n    glsl:   {} -- {}\n    luajit: {} -- {}\n    expected value {:?}\n    source:\n{}",
+                    glsl.bucket.label(),
+                    glsl.detail,
+                    lua.bucket.label(),
+                    lua.detail,
                     prog.expected,
                     indent_block(&prog.source)
                 ));
@@ -3126,7 +3171,9 @@ fn the_glsl_subset_agrees_across_backends() {
     report.push_str(&bucket_table(&glsl_counts));
     report.push_str("\nluajit (same files):");
     report.push_str(&bucket_table(&lua_counts));
+    #[cfg(feature = "backend-js")]
     report.push_str("\njs (same files):");
+    #[cfg(feature = "backend-js")]
     report.push_str(&bucket_table(&js_counts));
     report.push_str("\nrejection reasons:\n");
     for (reason, n) in &reasons {

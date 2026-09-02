@@ -1,0 +1,135 @@
+use std::path::{Component, Path, PathBuf};
+use std::process::Command;
+
+fn root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf()
+}
+
+fn rock_bin() -> PathBuf {
+    PathBuf::from(env!("CARGO_BIN_EXE_rock"))
+}
+
+fn toml_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+fn game_key(project: &Path) -> String {
+    project
+        .strip_prefix(root())
+        .unwrap()
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(part) => Some(part.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn project_fixture(name: &str, main: &str) -> (tempfile::TempDir, PathBuf, PathBuf) {
+    std::fs::create_dir_all(root().join("tmp")).unwrap();
+    let scratch = tempfile::Builder::new().prefix(name).tempdir_in(root().join("tmp")).unwrap();
+    let project = scratch.path().join("game");
+    let overlay = scratch.path().join("overlay");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::create_dir_all(overlay.join("assets/sfx")).unwrap();
+    std::fs::write(project.join("main.rock"), main).unwrap();
+    std::fs::write(
+        project.join("stick.toml"),
+        format!(
+            "[package]\nname = \"overlay-default-test\"\ntype = \"bin\"\n\
+             [dependencies]\nstone = {{ path = \"{}\" }}\n\
+             [build.vars]\nGIT_SHA = \"test\"\n\
+             [assets]\noverlays = [\"{}\"]\n\
+             [release]\nassets = [\"assets\"]\n",
+            toml_path(&root().join("stone")),
+            toml_path(&overlay),
+        ),
+    )
+    .unwrap();
+    (scratch, project, overlay)
+}
+
+#[test]
+fn stick_asset_overlays_stage_web_assets() {
+    let (_scratch, project, overlay) = project_fixture("overlay-web-stage-", "fn main() {}\n");
+    std::fs::write(overlay.join("assets/sfx/configured.txt"), "configured").unwrap();
+    let web = project.join("web-out");
+    let build = Command::new(rock_bin())
+        .current_dir(root())
+        .args(["web", project.to_str().unwrap(), "--out", web.to_str().unwrap()])
+        .output()
+        .expect("web configured-overlay fixture");
+    assert!(
+        build.status.success(),
+        "web failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&build.stdout),
+        String::from_utf8_lossy(&build.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(web.join(game_key(&project)).join("assets/sfx/configured.txt"))
+            .unwrap(),
+        "configured"
+    );
+}
+
+#[test]
+fn web_directory_listing_executes_the_shared_contract() {
+    if Command::new("node").arg("--version").output().map(|o| !o.status.success()).unwrap_or(true) {
+        eprintln!("SKIP: node not found");
+        return;
+    }
+    let (_scratch, project, _overlay) = project_fixture("overlay-web-list-", "fn main() {}\n");
+    let key = game_key(&project);
+    let backslash = key.replace('/', "\\\\");
+    std::fs::write(
+        project.join("main.rock"),
+        format!(
+            r#"fn main() {{
+    let direct = stone_list_directory("{backslash}\\assets\\sfx")
+    if direct == null {{
+        print("direct=null")
+    }} else {{
+        print("direct={{direct.unwrap().len}}")
+        for name in direct.unwrap() {{ print("name={{name}}") }}
+    }}
+    for path in asset_list_dir("assets/sfx") {{ print("logical={{path}}") }}
+}}
+"#,
+        ),
+    )
+    .unwrap();
+    let out = project.join("web-out");
+    let build = Command::new(rock_bin())
+        .current_dir(root())
+        .args(["web", project.to_str().unwrap(), "--out", out.to_str().unwrap()])
+        .output()
+        .expect("build web listing fixture");
+    assert!(build.status.success(), "web failed:\n{}", String::from_utf8_lossy(&build.stderr));
+
+    let game_js = out.join("game.js");
+    let mut js = std::fs::read_to_string(&game_js).unwrap();
+    let boot = js.find("var __ROCK_WEB_READY =").expect("web boot line");
+    let injected = format!(
+        "__ROCK_WEB_ASSETS[{a:?}] = new Uint8Array([1]);\n\
+         __ROCK_WEB_ASSETS[{z:?}] = new Uint8Array([2]);\n",
+        a = format!("{key}/assets/sfx/a.wav"),
+        z = format!("{key}/assets/sfx/z.wav"),
+    );
+    js.insert_str(boot, &injected);
+    js.insert_str(0, "globalThis.__STONE_WEB_FAKE_ENV = {};\n");
+    std::fs::write(&game_js, js).unwrap();
+
+    let run = Command::new("node").arg(&game_js).output().expect("run web listing fixture");
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(run.status.success(), "game.js failed:\n{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(
+        stdout.trim(),
+        "direct=2\nname=a.wav\nname=z.wav\nlogical=assets/sfx/a.wav\nlogical=assets/sfx/z.wav"
+    );
+}

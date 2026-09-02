@@ -1,6 +1,6 @@
 //! `rock test <path> --backend glsl` -- execute the value-test class
 //! (`@test(returns = <literal>)`) on the GPU via the GLSL emitter
-//! (`skull-codegen-glsl`), G1 of `docs/multi-backend-testing-plan.md`.
+//! (`skull-codegen-glsl`), as described by `docs/backends.md`.
 //!
 //! Shares the backend-neutral half of the test driver with the luajit and node
 //! paths: unit discovery (`collect_test_units`), the `@test` metadata

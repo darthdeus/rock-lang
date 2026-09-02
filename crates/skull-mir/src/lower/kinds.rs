@@ -81,10 +81,13 @@ impl Builder<'_> {
     /// backing. An unresolved / generic element is NOT eligible -- the columns
     /// need a concrete value-struct leaf list, and an opaque `T` has none.
     pub(crate) fn vec_kind(&self, e: Idx<Expr>) -> Result<ContainerKind, CompilerError> {
-        Ok(match self.vec_column_elem_of(e)? {
-            Some(elem) => ContainerKind::VecValueColumns(elem),
-            None => ContainerKind::Vec,
-        })
+        if let Some(elem) = self.vec_column_elem_of(e)? {
+            return Ok(ContainerKind::VecValueColumns(elem));
+        }
+        if let Some(elem) = self.vec_strided_elem_of(e)? {
+            return Ok(ContainerKind::VecValueStrided(elem));
+        }
+        Ok(ContainerKind::Vec)
     }
 
     /// The column-eligible value-struct element of `e`'s `[E]` type, if any.
@@ -116,6 +119,36 @@ impl Builder<'_> {
                 Some(span) => CompilerError::new_with_label(span, error.message),
                 None => CompilerError::new_no_location(error.message),
             })
+    }
+
+    pub(crate) fn vec_strided_elem_of(
+        &self,
+        e: Idx<Expr>,
+    ) -> Result<Option<ColumnElem>, CompilerError> {
+        Ok(self
+            .container_plan_for(e, ContainerFamily::Vec)?
+            .and_then(|plan| plan.strided_elem(&self.scx.rep_arena())))
+    }
+
+    pub(crate) fn vec_strided_elem_for_type(
+        &self,
+        ty: &MonoTy,
+    ) -> Result<Option<ColumnElem>, CompilerError> {
+        if !ContainerPlan::matches_type(ContainerFamily::Vec, ty) {
+            return Ok(None);
+        }
+        ContainerPlan::for_type(
+            self.ws,
+            self.scx.target,
+            &self.scx.rep_arena(),
+            ContainerFamily::Vec,
+            ty,
+        )
+        .map(|plan| plan.strided_elem(&self.scx.rep_arena()))
+        .map_err(|error| match error.span.or(self.cur_span) {
+            Some(span) => CompilerError::new_with_label(span, error.message),
+            None => CompilerError::new_no_location(error.message),
+        })
     }
 
     /// The column shape of `elem`: its value shape, marked nullable when the

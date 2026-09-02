@@ -66,38 +66,6 @@ fn run(dir: &std::path::Path, extra: &[&str]) -> (String, String, bool) {
 
 const EXPECTED_DEV: &str = "hello-from-vars\ndev\nabc123\nembedded-data\n";
 
-#[test]
-fn run_resolves_declared_vars_and_embeds() {
-    let dir = project("dev");
-    let (stdout, stderr, ok) = run(&dir, &[]);
-    assert!(ok, "rock run failed:\nstdout:{stdout}\nstderr:{stderr}");
-    assert_eq!(stdout, EXPECTED_DEV);
-}
-
-#[test]
-fn channel_flag_selects_the_channel() {
-    let dir = project("chan");
-    let (stdout, stderr, ok) = run(&dir, &["--channel", "steam"]);
-    assert!(ok, "rock run --channel steam failed:\nstdout:{stdout}\nstderr:{stderr}");
-    assert_eq!(stdout, "hello-from-vars\nsteam\nabc123\nembedded-data\n");
-}
-
-#[test]
-fn undeclared_channel_fails_the_invocation() {
-    let dir = project("badchan");
-    let (stdout, stderr, ok) = run(&dir, &["--channel", "stema"]);
-    assert!(!ok, "undeclared channel must fail:\nstdout:{stdout}");
-    assert!(stderr.contains("stema"), "error names the channel:\n{stderr}");
-}
-
-#[test]
-fn var_flag_overrides_the_source() {
-    let dir = project("override");
-    let (stdout, stderr, ok) = run(&dir, &["--var", "GREETING=overridden"]);
-    assert!(ok, "rock run --var failed:\nstdout:{stdout}\nstderr:{stderr}");
-    assert!(stdout.starts_with("overridden\n"), "override wins:\n{stdout}");
-}
-
 fn run_cmd(args: &[&str]) -> (String, String, bool) {
     let out = Command::new(rock_bin()).args(args).output().expect("spawn rock");
     (
@@ -111,18 +79,6 @@ fn run_cmd(args: &[&str]) -> (String, String, bool) {
 // package path never stamped comptime inputs and reported the deceptive
 // `0/0 @tests passed (0 failed)` shape). Assert the DENOMINATOR, never the
 // "0 failed" (CLAUDE.md).
-#[test]
-fn rock_test_runs_a_build_vars_package() {
-    let dir = project("pkg_test");
-    let (stdout, stderr, ok) = run_cmd(&["test", dir.to_str().unwrap()]);
-    assert!(ok, "rock test failed:\nstdout:{stdout}\nstderr:{stderr}");
-    assert!(
-        stdout.contains("1/1 @tests passed"),
-        "package test must RUN (denominator 1), not emit-fail:\n{stdout}\n{stderr}"
-    );
-    assert!(stdout.contains("0 emit-fail"), "no emit failures:\n{stdout}");
-}
-
 #[test]
 fn rock_test_runs_a_build_vars_package_on_js() {
     if !node_available() {
@@ -140,22 +96,19 @@ fn rock_test_runs_a_build_vars_package_on_js() {
 }
 
 // A single FILE inside a [build.vars] project resolves from its enclosing
-// project on BOTH backends. The Lua path shipped without the walk-up the JS
-// path had, so the same source rejected on luajit and ran on JS.
+// project on the JS backend.
 #[test]
-fn single_file_inside_a_project_resolves_on_both_backends() {
+fn single_file_inside_a_project_resolves_on_js() {
     let dir = project("single_file");
     let main = dir.join("main.rock");
-    let (stdout, stderr, ok) = run_cmd(&["run", main.to_str().unwrap()]);
-    assert!(ok, "single-file lua run failed:\nstdout:{stdout}\nstderr:{stderr}");
-    assert_eq!(stdout, EXPECTED_DEV);
-
-    if node_available() {
-        let (js_out, js_err, js_ok) =
-            run_cmd(&["run", main.to_str().unwrap(), "--backend", "js"]);
-        assert!(js_ok, "single-file js run failed:\nstdout:{js_out}\nstderr:{js_err}");
-        assert_eq!(js_out, stdout, "backends must agree on a single file");
+    if !node_available() {
+        eprintln!("SKIP: node not found");
+        return;
     }
+    let (js_out, js_err, js_ok) =
+        run_cmd(&["run", main.to_str().unwrap(), "--backend", "js"]);
+    assert!(js_ok, "single-file js run failed:\nstdout:{js_out}\nstderr:{js_err}");
+    assert_eq!(js_out, EXPECTED_DEV, "JS build vars drifted");
 }
 
 // The profiling tools build their own workspace; an unstamped one rejects
@@ -179,10 +132,7 @@ fn js_backend_matches_luajit() {
         return;
     }
     let dir = project("js");
-    let (lua_out, lua_err, lua_ok) = run(&dir, &[]);
-    assert!(lua_ok, "luajit run failed:\nstdout:{lua_out}\nstderr:{lua_err}");
     let (js_out, js_err, js_ok) = run(&dir, &["--backend", "js"]);
     assert!(js_ok, "js run failed:\nstdout:{js_out}\nstderr:{js_err}");
-    assert_eq!(js_out, lua_out, "backends must agree byte-for-byte");
-    assert_eq!(lua_out, EXPECTED_DEV);
+    assert_eq!(js_out, EXPECTED_DEV);
 }

@@ -46,9 +46,11 @@ mod iter_completion;
 mod iter_lsp;
 mod iter_parse;
 pub mod glsl_test;
+#[cfg(feature = "backend-js")]
 pub mod js_test;
 pub mod c_test;
 pub mod live_project;
+#[cfg(feature = "backend-js")]
 pub mod web;
 pub mod package;
 mod sound_inspect;
@@ -59,6 +61,7 @@ pub mod lint_union;
 pub mod lint_pass;
 pub mod ablation_report;
 mod allocation_join;
+#[cfg(feature = "backend-js")]
 mod mono_manifest;
 mod monoty_census;
 mod lsp_survey;
@@ -302,7 +305,7 @@ pub enum CliCommand {
     /// `CliCommand` dispatched pre-backend-switch (like `fmt`/`shader`): it runs
     /// project-mode JS emission and assembles the browser bundle (runtime
     /// preludes + `JS_WEB_RUNTIME` + emitted program + a boot line). Serve the
-    /// out dir with any static file server. See `docs/stone-web-plan.md` Arc 2.
+    /// out dir with any static file server. See `docs/backends.md`.
     Web,
     /// `rock package <game>` -- stage native release inputs, bake bytecode,
     /// and write the manifest consumed by Fire and release verification.
@@ -424,12 +427,13 @@ pub enum Backend {
     Bone,
     /// `skull` — the Claude-managed codegen on bone's HIR (emits + runs Lua).
     Skull,
-    /// `js` — the JS-subset test executor (`docs/multi-backend-testing-plan.md`
+    /// `js` — the JS-subset test executor (`docs/backends.md`
     /// T1): bone type-checks, then each `@test` fn + its callee closure is
     /// emitted via `skull-codegen-js` and run under node; tests outside the
-    /// subset report SKIP(reason). Serves `test` only.
+    /// subset report SKIP(reason). Serves `test` and `run` when the `backend-js`
+    /// feature is enabled.
     Js,
-    /// `glsl` — the GLSL value-test executor (`docs/multi-backend-testing-plan.md`
+    /// `glsl` — the GLSL value-test executor (`docs/backends.md`
     /// G1): bone type-checks, then each `@test(returns = ...)` value test is
     /// emitted as a fragment shader (both 330 core + 300 es profiles) and run on
     /// the GPU headlessly, the returned scalar read back and compared host-side.
@@ -507,11 +511,28 @@ impl Backend {
         self.supported_commands().contains(&cmd)
     }
 
+    pub(crate) fn feature_disabled_reason(self) -> Option<String> {
+        let (feature, hint) = match self {
+            Self::Js if !cfg!(feature = "backend-js") => (
+                "backend-js",
+                "just test-js or `cargo run --features backend-js --bin rock ... --backend js`",
+            ),
+            _ => return None,
+        };
+        Some(format!(
+            "the `{}` backend was omitted from this build; enable the `{}` feature ({})",
+            self.name(), feature, hint,
+        ))
+    }
+
     /// `Some(message)` if this backend cannot serve `cmd`; `None` if it can.
     /// The uniform reject message, with its "Supported" list generated from
     /// `supported_commands`. The capability gate (`require_backend_support`)
     /// is the only caller; split out so it is pure and unit-testable.
     pub fn reject_reason(self, cmd: CliCommand) -> Option<String> {
+        if let Some(message) = self.feature_disabled_reason() {
+            return Some(message);
+        }
         if self.serves(cmd) {
             return None;
         }
@@ -1110,14 +1131,25 @@ mod caps_tests {
         use CliCommand::*;
         assert!(Backend::Js.serves(Test), "js serves test");
         assert!(Backend::Js.serves(Run), "js serves run (M1: node program emission)");
+        let feature_reason = Backend::Js.reject_reason(Test);
+        if cfg!(feature = "backend-js") {
+            assert!(feature_reason.is_none(), "feature-enabled JS should be available: {feature_reason:?}");
+        } else {
+            let message = feature_reason.expect("default JS build must reject the omitted backend");
+            assert!(message.contains("backend-js"), "{message}");
+        }
         // No game/engine surface: everything past headless program execution
         // stays rejected.
         for cmd in [Compile, CompileSingle, TestCompile, Watch, Stone, Frame, Perf, Sim] {
             assert!(!Backend::Js.serves(cmd), "js should reject {:?}", cmd);
         }
         let msg = Backend::Js.reject_reason(CliCommand::Stone).expect("js rejects stone");
-        assert!(msg.contains("`js` backend cannot serve `stone`"), "{msg}");
-        assert!(msg.contains("run"), "supported list names run: {msg}");
+        if cfg!(feature = "backend-js") {
+            assert!(msg.contains("`js` backend cannot serve `stone`"), "{msg}");
+            assert!(msg.contains("run"), "supported list names run: {msg}");
+        } else {
+            assert!(msg.contains("backend-js"), "{msg}");
+        }
     }
 
     #[test]

@@ -1912,6 +1912,7 @@ pub fn skull_compile_project_with_inputs(
 
 fn skull_run_project(dir: &str) -> Result<()> {
     use std::path::PathBuf;
+    ensure_renderer_feature(dir)?;
     let is_game = rock_host::project::is_game_project(&PathBuf::from(dir)).unwrap_or(false);
     if is_game {
         crate::package::prepare_sound_bank(dir)?;
@@ -2868,10 +2869,9 @@ fn skull_game_preamble(dir: &str) -> Result<String> {
         Some((_, config)) => config.asset_overlay_defaults(&abs)?,
         None => Vec::new(),
     };
-    let renderer = match skull_renderer_target(dir) {
-        Ok(skull::mir_emit::RendererTarget::Gl) => "gl",
-        Ok(skull::mir_emit::RendererTarget::Wgpu) => "wgpu",
-        Err(e) => panic!("cannot read renderer selection for {dir}: {e}"),
+    let renderer = match skull_renderer_target(dir)? {
+        skull::mir_emit::RendererTarget::Gl => "gl",
+        skull::mir_emit::RendererTarget::Wgpu => "wgpu",
     };
     let mut full = format!("__ROCK_GAME_SOURCE_DIR = \"{escaped}\"\n");
     full.push_str("__ROCK_ASSET_OVERLAY_DEFAULTS = {");
@@ -2894,6 +2894,10 @@ fn skull_game_preamble(dir: &str) -> Result<String> {
     Ok(full)
 }
 
+pub(crate) fn ensure_renderer_feature(dir: &str) -> Result<()> {
+    skull_renderer_target(dir).map(|_| ())
+}
+
 fn skull_renderer_target(dir: &str) -> Result<skull::mir_emit::RendererTarget> {
     let abs = std::path::Path::new(dir)
         .canonicalize()
@@ -2902,6 +2906,13 @@ fn skull_renderer_target(dir: &str) -> Result<skull::mir_emit::RendererTarget> {
         Some((_, cfg)) => cfg.renderer_backend()?,
         None => rock_host::stick::RendererBackend::Gl,
     };
+    if matches!(backend, rock_host::stick::RendererBackend::Wgpu)
+        && !cfg!(feature = "renderer-wgpu")
+    {
+        anyhow::bail!(
+            "the `wgpu` renderer was omitted from this build; enable the `renderer-wgpu` feature (for example, `just test-wgpu` or `cargo run --features renderer-wgpu --bin rock ... --renderer wgpu)"
+        );
+    }
     Ok(match backend {
         rock_host::stick::RendererBackend::Gl => skull::mir_emit::RendererTarget::Gl,
         rock_host::stick::RendererBackend::Wgpu => skull::mir_emit::RendererTarget::Wgpu,
