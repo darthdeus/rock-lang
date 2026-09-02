@@ -81,13 +81,19 @@ fn main() {{
 /// storage tier having moved, when `Opt_lct` was still being called and every
 /// round-trip row above still passed. A spelling is not a tier.
 ///
-/// `__op_eq` lines are excluded because the fixture's `V[1] == V[0]` MATERIALIZES
-/// both operands through the same ctor whatever the storage is -- at 3 leaves
-/// that comparison is the only `Opt_lct(` in the chunk. Matching the bare name
-/// therefore reports "boxed" for every row, which is the same failure from the
-/// other side. The tier is whether the STORE builds an element.
+/// The equality comparison line is excluded because the fixture's
+/// `V[1] == V[0]` MATERIALIZES both operands through the same ctor whatever
+/// the storage is -- at 3 leaves that comparison is the only `Opt_lct(` in
+/// the chunk. Matching the bare name therefore reports "boxed" for every row,
+/// which is the same failure from the other side. The tier is whether the
+/// STORE builds an element, not whether a same-type equality compares two
+/// materialized operands (same-named `value` struct equality is native `==`
+/// now, not a `__op_eq` call -- see `value_struct_eq_dispatch.rs` -- so the
+/// comparison line no longer names a callee; it is instead the only line
+/// where `Opt_lct(` appears TWICE, once per operand, whereas a genuine
+/// element store calls it exactly once).
 fn is_column_stored(lua: &str) -> bool {
-    !lua.lines().filter(|l| !l.contains("__op_eq")).any(|l| l.contains("Opt_lct("))
+    !lua.lines().any(|l| l.matches("Opt_lct(").count() == 1)
 }
 
 #[test]
