@@ -590,13 +590,17 @@ fn mag_full_recovery_replay_uses_each_process_wall_clock_sentinel() {
     let recorded_at = mag_recovery_last_observed_at(&recorded);
     let replayed_at = mag_recovery_last_observed_at(&replayed);
     assert_eq!(recorded_at, 1000, "recorded reservoir last_observed_at={recorded_at}");
+    // PINNED BUG: replay reads the new process wall clock (1004) instead of the
+    // recorded observation (1000). This line and the assert_ne! below both encode
+    // today's buggy value; a fix that makes replay preserve the recorded clock
+    // must flip BOTH in the same commit, or the pair contradicts itself:
+    //   - this line: 1004 -> 1000
+    //   - the assert_ne! below: assert_ne! -> assert_eq!
     assert_eq!(replayed_at, 1004, "replayed reservoir last_observed_at={replayed_at}");
-    // PINNED BUG: replay reads the new process wall clock instead of recorded input.
-    // This inverted assertion passes because the bug exists. When it fails, rederive
-    // the mechanism; if replay now preserves 1000, flip this to assert_eq!.
     assert_ne!(
         recorded_at, replayed_at,
-        "replay now preserves the recorded wall clock; flip this sentinel to assert_eq!"
+        "replay now preserves the recorded wall clock; flip this sentinel to assert_eq! \
+         (and the assert_eq!(replayed_at, ...) above from 1004 to 1000)"
     );
 }
 
