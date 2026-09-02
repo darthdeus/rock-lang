@@ -129,6 +129,40 @@ fn two_lua_sessions_initialize_and_isolate_mutable_globals() {
 }
 
 #[test]
+fn rng_state_suffix_restore_and_session_isolation() {
+    let emitted = emit_mir("fn main() {}\n");
+    let program = format!(
+        r#"{lua}
+local a = __rock_active_session
+__rock_rng_seed(17)
+local first = __rock_rng_next()
+local checkpoint = __rock_rng_state_get()
+local second = __rock_rng_next()
+local third = __rock_rng_next()
+__rock_rng_state_set(checkpoint)
+local replay_second = __rock_rng_next()
+local replay_third = __rock_rng_next()
+local b = __rock_session_new(__rock_state_schema_id)
+__rock_session_activate(b)
+__rock_rng_seed(99)
+local b_first = __rock_rng_next()
+local b_checkpoint = __rock_rng_state_get()
+local b_second = __rock_rng_next()
+__rock_session_activate(a)
+local a_fourth = __rock_rng_next()
+__rock_session_activate(b)
+__rock_rng_state_set(b_checkpoint)
+local replay_b_second = __rock_rng_next()
+print(first ~= second and second ~= third
+  and second == replay_second and third == replay_third
+  and a_fourth ~= b_first and b_second == replay_b_second)
+"#,
+        lua = emitted.lua,
+    );
+    assert_eq!(run_luajit(&program, "rng_suffix_and_sessions"), "true");
+}
+
+#[test]
 fn static_value_and_done_state_are_session_local() {
     let source = r#"
 fn bump_static() -> int {

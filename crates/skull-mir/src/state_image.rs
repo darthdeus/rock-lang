@@ -221,7 +221,7 @@ impl StateImagePlan {
             &mut entries,
             ImageEntryKind::SemanticSession,
             "session::rng-state",
-            "uint64-rng-state",
+            "uint32-rng-state",
             "scalar",
             "fresh-session",
         );
@@ -470,6 +470,12 @@ mod tests {
                 "runner::logger-state",
             ]
         );
+        let rng = plan
+            .entries()
+            .iter()
+            .find(|entry| entry.identity == "session::rng-state")
+            .expect("RNG structural entry");
+        assert_eq!(rng.layout, "uint32-rng-state");
     }
 
     #[test]
