@@ -153,7 +153,7 @@ impl ReplayReport {
             .context("not a replay log")?
             .parse::<u32>()
             .context("malformed replay version")?;
-        if !(1..=13).contains(&version) {
+        if !(1..=14).contains(&version) {
             bail!("unsupported replay version {version}");
         }
         let mut report = Self {
