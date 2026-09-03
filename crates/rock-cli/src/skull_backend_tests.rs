@@ -4520,4 +4520,28 @@ mod backend_stats_workspace_tests {
             "successful timed emission must populate production phase attribution"
         );
     }
+
+    #[test]
+    fn package_tests_dir_resolves_to_package_root() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        std::fs::write(
+            dir.path().join("stick.toml"),
+            "[package]\nname = \"test-pkg\"\n",
+        )
+        .expect("stick.toml");
+        let tests_dir = dir.path().join("tests");
+        std::fs::create_dir_all(&tests_dir).expect("create tests dir");
+        std::fs::write(tests_dir.join("foo_test.rock"), "@test fn t() { assert(true) }\n")
+            .expect("foo_test.rock");
+
+        let tests_str = tests_dir.to_string_lossy().to_string();
+        let resolved = crate::skull_backend::is_package_tests_dir(&tests_str);
+        assert_eq!(resolved, Some(dir.path().to_string_lossy().to_string()));
+
+        let unrelated_dir = tempfile::TempDir::new().expect("tempdir");
+        let bare_tests = unrelated_dir.path().join("tests");
+        std::fs::create_dir_all(&bare_tests).expect("create bare tests");
+        assert_eq!(crate::skull_backend::is_package_tests_dir(&bare_tests.to_string_lossy()), None);
+    }
 }
+

@@ -764,6 +764,25 @@ fn is_test_package_dir(path: &str) -> bool {
     p.is_dir() && p.join("stick.toml").is_file()
 }
 
+pub(crate) fn is_package_tests_dir(path: &str) -> Option<String> {
+    let p = std::path::Path::new(path);
+    if p.is_dir() {
+        let name = p.file_name().and_then(|n| n.to_str());
+        if name == Some("tests") || name == Some("tests/") {
+            let parent = p.parent().unwrap_or(std::path::Path::new(""));
+            let candidate = if parent.as_os_str().is_empty() {
+                std::path::Path::new(".")
+            } else {
+                parent
+            };
+            if candidate.join("stick.toml").is_file() {
+                return Some(candidate.to_string_lossy().to_string());
+            }
+        }
+    }
+    None
+}
+
 /// Assemble + type-check + emit a whole package (tests INCLUDED), then run its
 /// `@test`s. The package analogue of [`skull_build`]. Cross-file references
 /// resolve because every file is in one workspace.
@@ -1991,6 +2010,8 @@ pub(crate) fn collect_test_units(paths: &[String]) -> Result<(Vec<String>, Vec<S
     for path in paths {
         if is_test_package_dir(path) {
             package_dirs.push(path.clone());
+        } else if let Some(pkg) = is_package_tests_dir(path) {
+            package_dirs.push(pkg);
         } else {
             files.extend(collect_rock_files(path)?);
         }
