@@ -202,7 +202,7 @@ pub fn lib_path_value() -> String {
         }
     }
 
-    // Dev layout: relative paths from CWD (which is the workspace root).
+    // Dev layout: prebuilt libraries and tmp/ rooted at rock_dir().
     // The prebuilt lib dir MUST be on the search path: stone's Rock global
     // initializer does ffi.load("libcimgui_complete.{dylib,so,dll}") before
     // stone_init has had a chance to dlopen anything via rpath.
@@ -531,11 +531,10 @@ pub fn is_game_project(path: &Path) -> Result<bool> {
 /// check, so they need no entry here.
 pub const PROJECT_PARENTS: &[&str] = &["games"];
 
-/// Resolve a project argument (`rock sim`/`--list`) to a directory, relative to
-/// the current directory -- callers run `ensure_workspace_root` first, so cwd is
-/// the workspace root. An existing path wins as-is; otherwise the bare name is
-/// expanded against `PROJECT_PARENTS`. Zero or more-than-one matches reject with
-/// the candidates listed -- never guess.
+/// Resolve a project argument (`rock sim`/`--list`) to a directory. Checks
+/// relative to current directory first (allowing execution from game subdirectories);
+/// if not found in CWD, expands against `PROJECT_PARENTS` relative to `rock_dir()`.
+/// Zero or more-than-one matches reject with the candidates listed -- never guess.
 pub fn resolve_project_dir(arg: &str) -> Result<PathBuf> {
     if let Ok(dir) = resolve_project_dir_in(Path::new(""), PROJECT_PARENTS, arg) {
         return Ok(dir);
