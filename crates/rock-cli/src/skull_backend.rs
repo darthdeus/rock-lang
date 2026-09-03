@@ -2873,7 +2873,23 @@ fn skull_game_preamble(dir: &str) -> Result<String> {
         skull::mir_emit::RendererTarget::Gl => "gl",
         skull::mir_emit::RendererTarget::Wgpu => "wgpu",
     };
-    let mut full = format!("__ROCK_GAME_SOURCE_DIR = \"{escaped}\"\n");
+    let stone_dir = {
+        let mut found = None;
+        if let Ok(Some((config_path, stick_config))) = rock_host::stick::StickConfig::find_from_dir(&abs) {
+            if stick_config.dependencies.contains_key("stone") {
+                let root_path = config_path.parent().unwrap_or(&config_path).to_path_buf();
+                let mut resolver = rock_host::stick::resolver::DependencyResolver::new(root_path);
+                if let Ok(resolved) = resolver.resolve(&stick_config) {
+                    if let Some(stone_dep) = resolved.into_iter().find(|d| d.name == "stone") {
+                        found = Some(stone_dep.path.canonicalize().unwrap_or(stone_dep.path));
+                    }
+                }
+            }
+        }
+        found.unwrap_or_else(|| PathBuf::from(rock_host::rock_dir()).join("stone"))
+    };
+    let escaped_stone = stone_dir.display().to_string().replace('\\', "\\\\").replace('"', "\\\"");
+    let mut full = format!("__ROCK_GAME_SOURCE_DIR = \"{escaped}\"\n__ROCK_STONE_DIR = \"{escaped_stone}\"\n");
     full.push_str("__ROCK_ASSET_OVERLAY_DEFAULTS = {");
     for (index, path) in overlay_defaults.iter().enumerate() {
         if index > 0 {

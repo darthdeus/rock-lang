@@ -60,23 +60,21 @@ fn release_root_from_exe() -> Option<PathBuf> {
     }
 }
 
-/// Ensure the process is running from the Rock workspace root.
+/// Ensure that the Rock root directory can be located and is valid.
 ///
-/// Resolution order:
-///   1. Executable-based release layout (authoritative for release installs).
-///   2. CWD is already a rock root.
-///   3. Walk up from CWD to find one.
+/// Does NOT change process current directory, allowing callers to execute
+/// from project subdirectories while finding toolchain resources.
 pub fn ensure_workspace_root() -> Result<()> {
-    if let Some(root) = release_root_from_exe() {
-        std::env::set_current_dir(&root)?;
+    if release_root_from_exe().is_some() {
         return Ok(());
     }
-    let cwd = std::env::current_dir()?;
-    if is_rock_root(&cwd) {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    if is_rock_root(&cwd) || find_workspace_root(&cwd).is_some() {
         return Ok(());
     }
-    if let Some(root) = find_workspace_root(&cwd) {
-        std::env::set_current_dir(&root)?;
+    let rock_dir = crate::rock_dir();
+    let root = Path::new(&rock_dir);
+    if is_rock_root(root) || root.join("Cargo.toml").exists() || root.join("lib").is_dir() {
         return Ok(());
     }
     Err(anyhow::anyhow!(
@@ -84,6 +82,7 @@ pub fn ensure_workspace_root() -> Result<()> {
          Run this command from within the Rock workspace, or set the ROCK_DIR environment variable."
     ))
 }
+
 
 /// Find project directory by looking for stick.toml or other project markers
 /// This walks up the directory tree from the given path until it finds a project root
@@ -210,6 +209,8 @@ pub fn lib_path_value() -> String {
     // Without prebuilt on the path, dyld/dl_open cannot find the lib and
     // the prelude silently falls back to a no-op imgui stub — symptom:
     // every imgui.Begin call succeeds but no window ever renders.
+    let dev_tmp = root.join("tmp");
+    let dev_tmp_str = dev_tmp.to_string_lossy();
     if cfg!(target_os = "macos") {
         // ARM first, x64 fallback (matches luajit_path resolution above).
         let arm_lib = root.join("prebuilt/gamelibs-macos-arm64/lib");
@@ -218,11 +219,11 @@ pub fn lib_path_value() -> String {
         } else {
             root.join("prebuilt/gamelibs-macos-x64/lib")
         };
-        format!("tmp:{}", chosen.to_string_lossy())
+        format!("tmp:{}:{}", dev_tmp_str, chosen.to_string_lossy())
     } else if cfg!(target_os = "windows") {
-        "tmp;prebuilt\\gamelibs-windows-x86_64\\bin".to_string()
+        format!("tmp;{};{}", dev_tmp_str, root.join("prebuilt\\gamelibs-windows-x86_64\\bin").display())
     } else {
-        "tmp:prebuilt/gamelibs-linux-x86_64/lib".to_string()
+        format!("tmp:{}:{}", dev_tmp_str, root.join("prebuilt/gamelibs-linux-x86_64/lib").display())
     }
 }
 
@@ -536,6 +537,15 @@ pub const PROJECT_PARENTS: &[&str] = &["games"];
 /// expanded against `PROJECT_PARENTS`. Zero or more-than-one matches reject with
 /// the candidates listed -- never guess.
 pub fn resolve_project_dir(arg: &str) -> Result<PathBuf> {
+    if let Ok(dir) = resolve_project_dir_in(Path::new(""), PROJECT_PARENTS, arg) {
+        return Ok(dir);
+    }
+    let rock_root = PathBuf::from(crate::rock_dir());
+    if rock_root != Path::new("") && rock_root != Path::new(".") {
+        if let Ok(dir) = resolve_project_dir_in(&rock_root, PROJECT_PARENTS, arg) {
+            return Ok(dir);
+        }
+    }
     resolve_project_dir_in(Path::new(""), PROJECT_PARENTS, arg)
 }
 
@@ -798,4 +808,20 @@ mod tests {
             ]
         );
     }
+
+    #[test]
+    fn ensure_workspace_root_preserves_cwd() {
+        let temp = TempDir::new().unwrap();
+        let project_dir = temp.path().canonicalize().unwrap();
+        fs_err::write(project_dir.join("stick.toml"), "[package]\nname = \"game\"\n").unwrap();
+        let orig_cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&project_dir).unwrap();
+        let res = ensure_workspace_root();
+        let new_cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&orig_cwd).unwrap();
+
+        assert!(res.is_ok());
+        assert_eq!(new_cwd, project_dir, "ensure_workspace_root must not change caller CWD");
+    }
 }
+
