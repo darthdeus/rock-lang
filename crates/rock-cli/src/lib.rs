@@ -31,6 +31,7 @@ pub use log::{debug, error, info, trace, warn};
 pub mod backend_stats;
 pub mod bone_backend;
 pub mod skull_backend;
+pub mod docs_index;
 pub mod common;
 mod compile_cmd;
 pub mod comptime;
@@ -313,6 +314,9 @@ pub enum CliCommand {
     /// `rock sound-inspect <game>` -- compile the game's declared sound
     /// project and open its runtime bank in the independent inspector.
     SoundInspect,
+    /// `rock docs-index <dir|file>... --output <file>` — generate a
+    /// deterministic declaration/signature index from Rock source.
+    DocsIndex,
 }
 
 impl clap::ValueEnum for CliCommand {
@@ -352,6 +356,7 @@ impl clap::ValueEnum for CliCommand {
             Self::Web,
             Self::Package,
             Self::SoundInspect,
+            Self::DocsIndex,
         ]
     }
     fn to_possible_value(&self) -> Option<clap::builder::PossibleValue> {
@@ -409,6 +414,7 @@ impl CliCommand {
             Self::Web => "web",
             Self::Package => "package",
             Self::SoundInspect => "sound-inspect",
+            Self::DocsIndex => "docs-index",
         }
     }
 }
