@@ -2886,17 +2886,22 @@ fn skull_game_preamble(dir: &str) -> Result<String> {
     use std::path::PathBuf;
     let abs = PathBuf::from(dir).canonicalize().unwrap_or_else(|_| PathBuf::from(dir));
     let escaped = abs.display().to_string().replace('\\', "\\\\").replace('"', "\\\"");
-    let overlay_defaults = match rock_host::stick::StickConfig::find_from_dir(&abs)? {
-        Some((_, config)) => config.asset_overlay_defaults(&abs)?,
-        None => Vec::new(),
+    let (config_path, config) = match rock_host::stick::StickConfig::find_from_dir(&abs)? {
+        Some((path, config)) => (Some(path), Some(config)),
+        None => (None, None),
     };
+    let overlay_defaults = rock_host::release::configured_asset_overlays_from(
+        &abs,
+        config.as_ref(),
+        std::env::var_os(rock_host::release::ASSET_OVERLAYS_ENV).as_deref(),
+    )?;
     let renderer = match skull_renderer_target(dir)? {
         skull::mir_emit::RendererTarget::Gl => "gl",
         skull::mir_emit::RendererTarget::Wgpu => "wgpu",
     };
     let stone_dir = {
         let mut found = None;
-        if let Ok(Some((config_path, stick_config))) = rock_host::stick::StickConfig::find_from_dir(&abs) {
+        if let (Some(config_path), Some(stick_config)) = (&config_path, &config) {
             if stick_config.dependencies.contains_key("stone") {
                 let root_path = config_path.parent().unwrap_or(&config_path).to_path_buf();
                 let mut resolver = rock_host::stick::resolver::DependencyResolver::new(root_path);

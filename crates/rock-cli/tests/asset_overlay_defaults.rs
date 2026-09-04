@@ -95,3 +95,33 @@ fn native_preamble_clears_removed_stick_overlay_defaults() {
         "a reload must actively clear defaults removed from stick.toml"
     );
 }
+
+#[test]
+fn explicit_empty_overlay_environment_suppresses_stick_defaults_in_preamble() {
+    let (_scratch, project, overlay) = project_fixture("overlay-default-env-", "fn main() {}\n");
+    let lua = project.join("main.lua");
+    let compile = Command::new(rock_bin())
+        .current_dir(root())
+        .env("ROCK_ASSET_OVERLAYS", "")
+        .args(["compile", project.to_str().unwrap(), "--output", lua.to_str().unwrap()])
+        .output()
+        .expect("compile overlay environment fixture");
+    assert!(
+        compile.status.success(),
+        "compile failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&compile.stdout),
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    let emitted = std::fs::read_to_string(&lua).unwrap();
+    assert!(
+        emitted.contains("__ROCK_ASSET_OVERLAY_DEFAULTS = {}"),
+        "an explicit empty overlay environment must suppress the private default {}\n{}",
+        overlay.display(),
+        emitted.lines().take(8).collect::<Vec<_>>().join("\n")
+    );
+    assert!(
+        !emitted.contains(&overlay.to_string_lossy().replace('\\', "\\\\")),
+        "private overlay path leaked into the preamble:\n{}",
+        emitted.lines().take(8).collect::<Vec<_>>().join("\n")
+    );
+}
