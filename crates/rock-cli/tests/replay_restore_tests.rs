@@ -810,6 +810,45 @@ fn mag_full_recovery_replay_reconstructs_advancing_wall_clock() {
     );
 }
 
+// Every other header fact is fail-closed: a missing `seed` returns -2 ("bad
+// magic"), and `source`/`revision` count into the parser's `bad` tally and are
+// re-checked in replay_init. `start` was not -- a v14 log whose start line is
+// missing or truncated replayed silently with SESSION_START_UNIX = 0, putting
+// every reconstructed timestamp in 1970. recovery_reservoir_reconcile then
+// takes its `now <= last_observed_at` early return forever and build_info
+// renders a negative build age, with no diagnostic anywhere.
+#[test]
+fn a_v14_replay_without_a_start_is_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let log_s = dir.path().join("no-start.replay").to_string_lossy().into_owned();
+    run_record_dump("bitgun", 15, &log_s, &[]);
+
+    let text = std::fs::read_to_string(&log_s).expect("read log");
+    assert!(text.lines().any(|l| l.starts_with("start ")), "the recording must carry a start line");
+    let stripped: Vec<&str> = text.lines().filter(|l| !l.starts_with("start ")).collect();
+    std::fs::write(&log_s, stripped.join("\n")).expect("write log");
+
+    let scratch = tempfile::tempdir().unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_rock"))
+        .args([
+            "frame", "bitgun", "-n", "10", "--replay", &log_s,
+            "--dump-state", "--output", &scratch.path().to_string_lossy(),
+        ])
+        .env("ROCK_FRAME_TIMEOUT_SECS", "60")
+        .current_dir(workspace_root())
+        .output()
+        .expect("spawn replay");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "a v14 log with no recorded start must be rejected, not replayed from epoch 0\n{stderr}"
+    );
+    assert!(
+        stderr.contains("recorded session start"),
+        "the rejection must name the missing header fact: {stderr}"
+    );
+}
+
 #[test]
 fn mag_cast_seek_restores_scheduler_owner() {
     let dir = tempfile::tempdir().unwrap();
