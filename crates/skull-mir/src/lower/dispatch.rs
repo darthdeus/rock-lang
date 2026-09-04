@@ -496,6 +496,48 @@ impl<'a> DispatchCtx<'a> {
         self.is_nobox_struct(name).then_some(name)
     }
 
+    /// Whether `name` declares a `value` struct (any storage tier -- cdata,
+    /// GC-carrying table, or leaf table). Every tier gets an unconditionally
+    /// emitted per-type `__eq` (`value_struct_metatypes` for cdata,
+    /// `value_struct_gc_defs` for the GC-carrying and leaf-table tiers in
+    /// `skull/src/lib.rs`), so a bare `a == b` on two same-named `value`
+    /// operands already invokes exactly that metamethod -- native `==` is not
+    /// a weaker answer than the structural walk here, it IS the walk's own
+    /// authority for this case (`stdlib/unified.rock`'s `__op_eq` comment:
+    /// "cdata value structs ... hit the primitive `==` fast path", and its
+    /// GC-carrying branch documents the per-type metatable as authoritative).
+    pub fn is_value_struct(&self, name: Ustr) -> bool {
+        self.ws
+            .struct_by_name
+            .get(&name)
+            .is_some_and(|sid| self.ws.modules[sid.module.index()].structs[sid.def].is_value)
+    }
+
+    /// The declared `value` struct name of `e`'s (nullable-peeled) static
+    /// type, or `None` when it is not a `value` struct. Unlike
+    /// [`Self::nobox_value_name`] this does NOT require the `nobox`
+    /// annotation -- it is the equality-only question "does this type already
+    /// carry a native-`==`-reachable `__eq`", which every `value` struct
+    /// answers yes to regardless of storage tier or ABI opt-in.
+    pub fn value_struct_name(&self, e: Idx<Expr>) -> Option<Ustr> {
+        if let Some(ty) = self.concrete_expr_ty(e) {
+            let (payload, _) = ty.peel_nullable();
+            return match payload {
+                crate::monoty::MonoTy::App {
+                    ctor: crate::monoty::MonoCtor::Nominal(name), ..
+                } => self.is_value_struct(*name).then_some(*name),
+                _ => None,
+            };
+        }
+        if self.concrete_plan.is_some() {
+            return None;
+        }
+        let TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } = self.expr_ty(e)? else {
+            return None;
+        };
+        self.is_value_struct(name).then_some(name)
+    }
+
     /// Whether `e`'s static type is an enum ALL of whose variants are unit (no
     /// payload). Those variants lower to interned singleton globals --
     /// reference-equal across uses -- so `==`/`!=` is native Lua `==`/`~=`, not
@@ -840,6 +882,17 @@ impl<'a> DispatchCtx<'a> {
             return EqRoute::Primitive;
         }
         if let (Some(ln), Some(rn)) = (self.nobox_value_name(lhs), self.nobox_value_name(rhs)) {
+            if ln == rn {
+                return EqRoute::Primitive;
+            }
+        }
+        // Two operands of the SAME declared `value` struct already carry a
+        // native-`==`-reachable `__eq` regardless of storage tier (see
+        // `is_value_struct`), so the structural walk would only re-derive
+        // what that metamethod already computes. Different value-struct
+        // names fall through unchanged -- `__op_eq`'s own "different Rock
+        // types are never equal" rule stays the structural walk's job.
+        if let (Some(ln), Some(rn)) = (self.value_struct_name(lhs), self.value_struct_name(rhs)) {
             if ln == rn {
                 return EqRoute::Primitive;
             }

@@ -201,6 +201,50 @@ fn known_progress_a() -> Vec<u8> {
     .expect("serialize known progress A")
 }
 
+fn hex_bytes(value: &str) -> String {
+    value
+        .as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn world_damage_snapshot_path(progress: &Path) -> PathBuf {
+    PathBuf::from(format!(
+        "{}.damage/chunks/{}/{}/x1-y0-g1.png",
+        progress.display(),
+        hex_bytes("official"),
+        hex_bytes("crypt"),
+    ))
+}
+
+fn add_world_damage_snapshot_fixture(progress: &Path) -> PathBuf {
+    let mut root: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(progress).expect("read generated current progress"),
+    )
+    .expect("generated progress must be JSON");
+    root["version"] = serde_json::json!(5);
+    root["world_damage"] = serde_json::json!([{
+        "level": {"namespace": "official", "name": "crypt"},
+        "stamps": [],
+        "chunks": [{"x": 1, "y": 0, "generation": 1, "tail": []}],
+    }]);
+    std::fs::write(
+        progress,
+        serde_json::to_vec_pretty(&root).expect("serialize snapshot fixture manifest"),
+    )
+    .expect("write snapshot fixture manifest");
+
+    let snapshot = world_damage_snapshot_path(progress);
+    std::fs::create_dir_all(snapshot.parent().expect("snapshot parent"))
+        .expect("create snapshot fixture directory");
+    let image = image::RgbaImage::from_pixel(128, 128, image::Rgba([151, 19, 27, 211]));
+    image
+        .save_with_format(&snapshot, image::ImageFormat::Png)
+        .expect("write snapshot fixture PNG");
+    snapshot
+}
+
 #[test]
 fn binding_history_bootstrap_ignores_mutated_and_deleted_live_history() {
     let dir = tempfile::tempdir().expect("fixture dir");
@@ -637,6 +681,69 @@ fn progress_bootstrap_captures_existing_save_bytes_and_applies_them_once() {
         persisted_b,
         "existing-save playback must not rewrite the persisted B file"
     );
+}
+
+#[test]
+fn world_damage_snapshot_bootstrap_survives_deleted_live_blob_without_writes() {
+    let dir = tempfile::tempdir().expect("fixture dir");
+    let progress = empty_progress_path(&dir);
+    let layout = dir.path().join("spellbook-layout.jsonl");
+    let settings = dir.path().join("settings.json");
+    let replay = dir.path().join("world-damage.replay");
+
+    let setup_owned = fixture_env("progress", &progress, &layout, &settings);
+    let setup_env = env_refs(&setup_owned);
+    let _ = run_mag(1, None, None, &setup_env);
+    let snapshot = add_world_damage_snapshot_fixture(&progress);
+    let snapshot_key = format!(
+        "mag.damage.snapshot/{}/{}/{}/1/0/1",
+        hex_bytes(&progress.to_string_lossy()),
+        hex_bytes("official"),
+        hex_bytes("crypt"),
+    );
+    let wire_key = hex_bytes(&snapshot_key);
+
+    let env_owned = fixture_env("world_damage", &progress, &layout, &settings);
+    let env = env_refs(&env_owned);
+    let recorded = run_mag(2, Some(&replay), None, &env);
+    let recorded_snapshot = std::fs::read(&snapshot).expect("read recorded snapshot");
+    let log = std::fs::read_to_string(&replay).expect("read world damage replay");
+    assert_eq!(
+        log.lines().filter(|line| line.starts_with("boot ")).count(),
+        5,
+        "the sidecar adds one captured bootstrap input"
+    );
+    assert_eq!(
+        log.lines()
+            .filter(|line| line.starts_with(&format!("boot {wire_key} ")))
+            .count(),
+        1,
+        "the snapshot identity has one collision-free bootstrap entry\n{log}"
+    );
+    assert_eq!(recorded["__stone_diag"]["MAG_REPLAY_WORLD_DAMAGE_GENERATION"], 1);
+    assert_eq!(recorded["__stone_diag"]["MAG_REPLAY_WORLD_DAMAGE_TAIL"], 0);
+    assert_eq!(recorded["__stone_diag"]["MAG_REPLAY_WORLD_DAMAGE_SAVE_WRITES"], 1);
+
+    std::fs::remove_file(&snapshot).expect("delete live snapshot before playback");
+    let replayed = run_mag(2, None, Some(&replay), &env);
+    assert_eq!(
+        replayed["__stone_diag"]["MAG_REPLAY_WORLD_DAMAGE_GENERATION"],
+        recorded["__stone_diag"]["MAG_REPLAY_WORLD_DAMAGE_GENERATION"]
+    );
+    assert_eq!(
+        replayed["__stone_diag"]["MAG_REPLAY_WORLD_DAMAGE_TAIL"],
+        recorded["__stone_diag"]["MAG_REPLAY_WORLD_DAMAGE_TAIL"]
+    );
+    assert_eq!(replayed["__stone_diag"]["MAG_REPLAY_WORLD_DAMAGE_SAVE_OK"], 1);
+    assert_eq!(replayed["__stone_diag"]["MAG_REPLAY_WORLD_DAMAGE_SAVE_WRITES"], 0);
+    assert!(
+        replayed["__stone_diag"]["MAG_REPLAY_WORLD_DAMAGE_UPLOAD_CALLS"]
+            .as_i64()
+            .is_some_and(|n| n > 0),
+        "playback must upload the captured sidecar bytes\n{replayed}"
+    );
+    assert!(!snapshot.exists(), "playback must not recreate the deleted blob");
+    assert_ne!(recorded_snapshot.len(), 0, "the record must contain PNG bytes");
 }
 
 #[test]
