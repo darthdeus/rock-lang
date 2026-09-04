@@ -24,6 +24,10 @@ fn is_rock_root(path: &Path) -> bool {
 ///
 /// Walks up from the given path. Returns None if no workspace root is found.
 pub fn find_workspace_root(path: &Path) -> Option<PathBuf> {
+    if let Some(root) = release_root_from_exe() {
+        return Some(root);
+    }
+
     let initial_path = fs_err::canonicalize(path)
         .unwrap_or_else(|_| path.to_path_buf());
 
@@ -823,4 +827,3 @@ mod tests {
         assert_eq!(new_cwd, project_dir, "ensure_workspace_root must not change caller CWD");
     }
 }
-

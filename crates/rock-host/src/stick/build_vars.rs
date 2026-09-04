@@ -105,7 +105,21 @@ pub fn resolve_build_vars(
         } else if let Some(builtin) = var.builtin.as_deref() {
             resolve_builtin(builtin, &channel, target_os)?
         } else if let Some(cmd) = var.cmd.as_ref() {
-            run_var_cmd(name, cmd, var.secret, project_dir, &channel)?
+            match run_var_cmd(name, cmd, var.secret, project_dir, &channel) {
+                Ok(value) => value,
+                Err(_error)
+                    if var
+                        .optional_channels
+                        .as_deref()
+                        .is_some_and(|channels| channels.iter().any(|entry| entry == &channel)) =>
+                {
+                    log::warn!(
+                        "[build.vars] {name}: source unavailable for channel {channel:?}; continuing with its declared default"
+                    );
+                    var.default.clone().expect("validate_build requires an optional default")
+                }
+                Err(error) => return Err(error),
+            }
         } else {
             // validate_build above rejected sourceless vars.
             unreachable!("[build.vars] {name} has no source past validate_build")
@@ -418,6 +432,23 @@ mod tests {
         ));
         let resolved = resolve_build_vars(&cfg, dir.path(), Some("dev"), None, &no_overrides()).unwrap();
         assert_eq!(resolved.vars["TOKEN"].value, "none", "off-channel uses default, cmd never runs");
+    }
+
+    #[test]
+    fn optional_command_failure_uses_default_only_on_the_declared_channel() {
+        let cfg = fixture(concat!(
+            "[package]\nname = \"x\"\n",
+            "[build]\nchannels = [\"dev\", \"steam\"]\ndefault_channel = \"dev\"\n",
+            "[build.vars]\nTOKEN = { cmd = \"false\", optional_channels = [\"dev\"], default = \"\" }\n",
+        ));
+        let dir = tempfile::tempdir().unwrap();
+        let dev = resolve_build_vars(&cfg, dir.path(), Some("dev"), None, &no_overrides())
+            .expect("optional dev command failure uses its default");
+        assert_eq!(dev.vars["TOKEN"].value, "");
+
+        let err = resolve_build_vars(&cfg, dir.path(), Some("steam"), None, &no_overrides())
+            .expect_err("the same command must remain required on steam");
+        assert!(format!("{err}").contains("TOKEN"));
     }
 
     #[test]

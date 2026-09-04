@@ -792,6 +792,27 @@ impl StickConfig {
                     }
                 }
             }
+            if let Some(optional_channels) = var.optional_channels.as_deref() {
+                if var.cmd.is_none() {
+                    anyhow::bail!(
+                        "[build.vars] {name} declares optional_channels but has no cmd source"
+                    );
+                }
+                if var.default.is_none() {
+                    anyhow::bail!(
+                        "[build.vars] {name} declares optional_channels but has no default"
+                    );
+                }
+                for chan in optional_channels {
+                    if !build.channels.iter().any(|c| c == chan) {
+                        anyhow::bail!(
+                            "[build.vars] {name} declares optional channel {:?}, which is not in [build] channels {:?}",
+                            chan,
+                            build.channels
+                        );
+                    }
+                }
+            }
         }
         Ok(())
     }
