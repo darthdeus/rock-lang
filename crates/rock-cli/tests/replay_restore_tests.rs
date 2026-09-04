@@ -161,6 +161,24 @@ fn mag_panel_draw_plan_is_derived_not_world_image() {
     assert_mag_panel_plan_census(&names);
 }
 
+/// `rock frame <game> -n N --dump-state [env]` -> parsed JSON, with NEITHER
+/// --record nor --replay: ordinary play, the mode a shipped build runs in.
+fn run_plain_dump(game: &str, frames: u32, env: &[(&str, &str)]) -> serde_json::Value {
+    let scratch = tempfile::tempdir().unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_rock"))
+        .args([
+            "frame", game, "-n", &frames.to_string(),
+            "--dump-state", "--output", &scratch.path().to_string_lossy(),
+        ])
+        .envs(env.iter().copied())
+        .env("ROCK_FRAME_TIMEOUT_SECS", "60")
+        .current_dir(workspace_root())
+        .output()
+        .expect("spawn plain run");
+    assert!(out.status.success(), "plain run failed: {}", String::from_utf8_lossy(&out.stderr));
+    serde_json::from_slice(&out.stdout).expect("dump-state JSON")
+}
+
 /// `rock frame <game> -n N --replay <log> --dump-state [env]` -> parsed JSON.
 fn run_replay_dump(game: &str, frames: u32, log: &str, env: &[(&str, &str)]) -> serde_json::Value {
     let scratch = tempfile::tempdir().unwrap();
@@ -602,6 +620,52 @@ fn mag_full_recovery_replay_uses_each_process_wall_clock_sentinel() {
     assert_eq!(
         recorded_at, replayed_at,
         "replay must preserve the recorded wall clock (see get_timestamp() reconstruction)"
+    );
+}
+
+// The STONE_TEST_UNIX_SECONDS override exists so a replay fixture can pin two
+// processes to distinct clocks without sleeping. It is a REPLAY-HARNESS knob:
+// ordinary play -- the mode a shipped build runs in -- must ignore it, or a
+// shipped game's save timestamps, quest stage timers, and recovery-reservoir
+// grants are all settable from the environment. Gated on
+// `__replay_preboot_mode()` (stone/engine/replay.rock), the same env-derived
+// authority the record path already uses before `__stone_replay` exists.
+#[test]
+fn ordinary_play_ignores_the_replay_clock_override() {
+    let dir = tempfile::tempdir().unwrap();
+    let progress_path = dir.path().join("progress.json");
+    let progress_s = progress_path.to_string_lossy().into_owned();
+    let layout_s = dir.path().join("spellbook-layout.jsonl").to_string_lossy().into_owned();
+    let settings_s = dir.path().join("settings.json").to_string_lossy().into_owned();
+    let bindings_s = dir.path().join("bindings.json").to_string_lossy().into_owned();
+    std::fs::write(
+        &progress_path,
+        serde_json::to_vec_pretty(&mag_current_progress_with_recovery(10, 100)).unwrap(),
+    )
+    .unwrap();
+
+    let state = run_plain_dump(
+        "mag",
+        3,
+        &[
+            ("MAG_BOOT_PLAYING", "1"),
+            ("MAG_PROGRESS_PATH_OVERRIDE", progress_s.as_str()),
+            ("MAG_LAYOUT_HISTORY_PATH_OVERRIDE", layout_s.as_str()),
+            ("MAG_SETTINGS_PATH_OVERRIDE", settings_s.as_str()),
+            ("MAG_BINDINGS_PATH_OVERRIDE", bindings_s.as_str()),
+            ("STONE_TEST_UNIX_SECONDS", MAG_RECOVERY_RECORDED_AT),
+        ],
+    );
+
+    let observed = mag_recovery_last_observed_at(&state);
+    assert_ne!(
+        observed, 1000,
+        "ordinary play honored STONE_TEST_UNIX_SECONDS; the override must be replay-harness only"
+    );
+    // A real wall clock, not the override and not the uninitialized -1 default.
+    assert!(
+        observed > 1_700_000_000,
+        "ordinary play must stamp a real wall clock, got {observed}"
     );
 }
 
