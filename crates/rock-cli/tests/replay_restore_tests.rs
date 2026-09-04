@@ -849,6 +849,62 @@ fn a_v14_replay_without_a_start_is_rejected() {
     );
 }
 
+// Replay must not enter MAG's progress persistence writer: a side feature for
+// inspection and profiling must not mutate the real game's save. The guard is
+// `if replay_is_replay() { return true }` at the top of `Player.save_progress`
+// (mag/save.rock), which reports success without writing and leaves
+// REPLAY_PERSISTENCE_RECONCILE_PENDING set, so a session that later branches
+// back to live persists what it deferred.
+//
+// replay_bootstrap_tests states the same contract but dies earlier on an
+// unrelated binding-history precondition and never reaches its assertion, so
+// this is the only live coverage of it. MAG_REPLAY_BOOTSTRAP_SAVE_WRITES
+// publishes SAVE_SUCCESSFUL_WRITE_COUNT (mag/test_hooks.rock), so the behavior
+// is observed through an explicit fixture path, never the real save file.
+#[test]
+fn replay_does_not_write_mag_progress() {
+    let dir = tempfile::tempdir().unwrap();
+    let fixture_s = dir.path().join("no-persist.replay").to_string_lossy().into_owned();
+    let progress_path = dir.path().join("progress.json");
+    let progress_s = progress_path.to_string_lossy().into_owned();
+    let layout_s = dir.path().join("spellbook-layout.jsonl").to_string_lossy().into_owned();
+    let settings_s = dir.path().join("settings.json").to_string_lossy().into_owned();
+    let bindings_s = dir.path().join("bindings.json").to_string_lossy().into_owned();
+    std::fs::write(
+        &progress_path,
+        serde_json::to_vec_pretty(&mag_current_progress_with_recovery(10, 100)).unwrap(),
+    )
+    .unwrap();
+
+    let env: Vec<(&str, &str)> = vec![
+        ("MAG_BOOT_PLAYING", "1"),
+        ("MAG_PROGRESS_PATH_OVERRIDE", progress_s.as_str()),
+        ("MAG_LAYOUT_HISTORY_PATH_OVERRIDE", layout_s.as_str()),
+        ("MAG_SETTINGS_PATH_OVERRIDE", settings_s.as_str()),
+        ("MAG_BINDINGS_PATH_OVERRIDE", bindings_s.as_str()),
+        // Drives the production progress writer and publishes its successful
+        // write count as MAG_REPLAY_BOOTSTRAP_SAVE_WRITES (mag/test_hooks.rock).
+        ("MAG_REPLAY_BOOTSTRAP_FIXTURE", "progress"),
+    ];
+
+    let recorded = run_record_dump("mag", 12, &fixture_s, &env);
+    let recorded_writes = recorded["__stone_diag"]["MAG_REPLAY_BOOTSTRAP_SAVE_WRITES"]
+        .as_i64().unwrap_or(0);
+    assert!(
+        recorded_writes > 0,
+        "control: the recording must exercise the progress writer, or the replay arm \
+         proves nothing (recorded_writes={recorded_writes})"
+    );
+
+    let replayed = run_replay_dump("mag", 12, &fixture_s, &env);
+    let replayed_writes = replayed["__stone_diag"]["MAG_REPLAY_BOOTSTRAP_SAVE_WRITES"]
+        .as_i64().unwrap_or(0);
+    assert_eq!(
+        replayed_writes, 0,
+        "replay must not enter MAG's progress persistence writer (replayed_writes={replayed_writes})"
+    );
+}
+
 #[test]
 fn mag_cast_seek_restores_scheduler_owner() {
     let dir = tempfile::tempdir().unwrap();
