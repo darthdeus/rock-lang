@@ -24,6 +24,9 @@ fn is_rock_root(path: &Path) -> bool {
 ///
 /// Walks up from the given path. Returns None if no workspace root is found.
 pub fn find_workspace_root(path: &Path) -> Option<PathBuf> {
+    if let Some(root) = context_root_from_env() {
+        return Some(root);
+    }
     if let Some(root) = release_root_from_exe() {
         return Some(root);
     }
@@ -45,6 +48,18 @@ pub fn find_workspace_root(path: &Path) -> Option<PathBuf> {
             Some(parent) => current = parent.to_path_buf(),
             None => return None,
         }
+    }
+}
+
+fn context_root_from_env() -> Option<PathBuf> {
+    let root = PathBuf::from(std::env::var_os("ROCK_CONTEXT_ROOT")?);
+    if root.is_dir()
+        && root.join("sdk").is_dir()
+        && root.join(".context/context.json").is_file()
+    {
+        Some(root)
+    } else {
+        None
     }
 }
 
@@ -825,5 +840,27 @@ mod tests {
 
         assert!(res.is_ok());
         assert_eq!(new_cwd, project_dir, "ensure_workspace_root must not change caller CWD");
+    }
+
+    #[test]
+    fn context_root_env_admits_a_project_sibling_to_the_sdk() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        fs::create_dir_all(root.join("sdk")).unwrap();
+        fs::create_dir_all(root.join("game")).unwrap();
+        fs::create_dir_all(root.join(".context")).unwrap();
+        fs::write(root.join(".context/context.json"), "{}\n").unwrap();
+
+        let previous = std::env::var_os("ROCK_CONTEXT_ROOT");
+        unsafe { std::env::set_var("ROCK_CONTEXT_ROOT", &root) };
+        let found = find_workspace_root(&root.join("game"));
+        unsafe {
+            match previous {
+                Some(value) => std::env::set_var("ROCK_CONTEXT_ROOT", value),
+                None => std::env::remove_var("ROCK_CONTEXT_ROOT"),
+            }
+        }
+
+        assert_eq!(found, Some(root));
     }
 }
