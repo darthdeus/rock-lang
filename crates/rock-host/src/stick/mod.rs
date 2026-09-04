@@ -86,7 +86,7 @@ pub struct SoundConfig {
     pub project: String,
 }
 
-pub const KNOWN_BUILD_BUILTINS: [&str; 2] = ["channel", "platform"];
+pub const KNOWN_BUILD_BUILTINS: [&str; 3] = ["channel", "platform", "source_revision"];
 
 #[derive(Debug, Clone)]
 pub struct EngineConfig {

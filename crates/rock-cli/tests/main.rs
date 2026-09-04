@@ -30,6 +30,8 @@ mod asset_overlay_defaults;
 mod stone_root_resolution;
 #[path = "docs_index.rs"]
 mod docs_index;
+#[path = "source_revision.rs"]
+mod source_revision;
 #[path = "cimgui_prelude.rs"]
 mod cimgui_prelude;
 #[path = "test_exit_status_gate.rs"]

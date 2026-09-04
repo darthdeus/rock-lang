@@ -51,7 +51,7 @@ pub fn find_workspace_root(path: &Path) -> Option<PathBuf> {
     }
 }
 
-fn context_root_from_env() -> Option<PathBuf> {
+pub(crate) fn context_root_from_env() -> Option<PathBuf> {
     let root = PathBuf::from(std::env::var_os("ROCK_CONTEXT_ROOT")?);
     if root.is_dir()
         && root.join("sdk").is_dir()
