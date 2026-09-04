@@ -106,6 +106,8 @@ fn mag_audio_and_vfx_projections_are_not_world_image_state() {
     let names = sim_state_names("mag", 3);
     assert!(!names.is_empty(), "the Mag checkpoint census must examine a nonzero population");
     assert!(names.contains("pad_down"), "the Mag census must include effective input state: {names:?}");
+    assert!(names.contains("tally"), "the Mag census must include gameplay tally state: {names:?}");
+    assert!(!names.contains("tally_perf"), "the frame histogram must remain runner diagnostic state: {names:?}");
     for name in [
         "SFX_SPELL_FLAMESTRIKE_HIT",
         "SFX_CAST_LIGHTNING",
@@ -292,13 +294,6 @@ fn strip_scheduler_frame_stamps(value: &mut serde_json::Value) -> usize {
     }
 }
 
-fn strip_mag_tally_perf(value: &mut serde_json::Value) -> usize {
-    match value {
-        serde_json::Value::Object(fields) => usize::from(fields.remove("perf").is_some()),
-        _ => 0,
-    }
-}
-
 #[test]
 fn restore_returns_to_snapshot_tick_state() {
     let game = "bitgun";
@@ -371,18 +366,6 @@ fn assert_sim_state_matches(
             let mut b = want_pkg[name].clone();
             strip_scheduler_frame_stamps(&mut a);
             strip_scheduler_frame_stamps(&mut b);
-            if pkg == "mag" && name == "tally" {
-                assert_eq!(
-                    strip_mag_tally_perf(&mut a),
-                    1,
-                    "Mag tally must carry its diagnostic perf histogram"
-                );
-                assert_eq!(
-                    strip_mag_tally_perf(&mut b),
-                    1,
-                    "Mag tally must carry its diagnostic perf histogram"
-                );
-            }
             stripped += crate::stone_harness::count_host_projections(&a);
             stripped += crate::stone_harness::count_host_projections(&b);
             assert_eq!(a, b, "sim-state {pkg}.{name} must match {label}");
@@ -573,7 +556,6 @@ fn mag_seek_equivalence_state_names(
         "MENU_LOGO_TEXT_OUTPUT_CALLS",
         "MENU_OUTPUT_TEXT_ART",
         "MENU_OUTPUT_TEXT_TARGET_RECT",
-        "TEXT_ART_CONSUMER_KEY_FORMATS",
     ] {
         assert!(sim.remove(name), "{name} must be excluded as a presentation or lifecycle diagnostic");
     }
