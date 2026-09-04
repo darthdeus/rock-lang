@@ -555,6 +555,12 @@ fn mag_recovery_record_replay_arms(progress: &serde_json::Value) -> (serde_json:
         ("MAG_LAYOUT_HISTORY_PATH_OVERRIDE", layout_s.as_str()),
         ("MAG_SETTINGS_PATH_OVERRIDE", settings_s.as_str()),
         ("MAG_BINDINGS_PATH_OVERRIDE", bindings_s.as_str()),
+        // Pinned dt: record stamps the real clock while replay reconstructs
+        // start + int(time), so the two agree only while the sampled frames
+        // accumulate under one second of engine time. Real frame deltas would
+        // make that a race against MAG's boot cost.
+        ("PERF_MODE", "1"),
+        ("PERF_DT", "0.01"),
         ("STONE_TEST_UNIX_SECONDS", MAG_RECOVERY_RECORDED_AT),
     ];
     let recorded = run_record_dump("mag", 3, &fixture_s, &record_env);
@@ -608,14 +614,10 @@ fn mag_full_recovery_replay_uses_each_process_wall_clock_sentinel() {
     let recorded_at = mag_recovery_last_observed_at(&recorded);
     let replayed_at = mag_recovery_last_observed_at(&replayed);
     assert_eq!(recorded_at, 1000, "recorded reservoir last_observed_at={recorded_at}");
-    // FIXED: get_timestamp() reconstructs from the replay header's captured
-    // SESSION_START_UNIX plus the dt-accumulated `time` global
-    // (stone/engine/serialization.rock get_timestamp()), so replay no longer
-    // reads this process's own wall clock (STONE_TEST_UNIX_SECONDS=1004 here is
-    // deliberately set on the replay process to prove it is ignored). Both
-    // assertions were flipped together when the fix landed: the line below from
-    // `assert_eq!(replayed_at, 1004, ...)` and this pair from `assert_ne!` to
-    // `assert_eq!`.
+    // Replay reconstructs from the header's captured SESSION_START_UNIX plus the
+    // dt-accumulated `time` global (stone/engine/serialization.rock), so it does
+    // not read its own process clock. STONE_TEST_UNIX_SECONDS=1004 is set on the
+    // replay process precisely to prove that value is ignored.
     assert_eq!(replayed_at, 1000, "replayed reservoir last_observed_at={replayed_at}");
     assert_eq!(
         recorded_at, replayed_at,
@@ -666,6 +668,60 @@ fn ordinary_play_ignores_the_replay_clock_override() {
     assert!(
         observed > 1_700_000_000,
         "ordinary play must stamp a real wall clock, got {observed}"
+    );
+}
+
+// Record mode is not a niche path: `rock stone <game>` enables the flight
+// recorder by default (crates/rock-cli/src/stone.rs flight_recorder_for), so
+// the ordinary development game run has STONE_RECORD set. It must therefore
+// keep ordinary gameplay clock semantics -- the real wall clock -- and must NOT
+// derive timestamps from `time`, which frame_core_select_dt scales by
+// TIME_SCALE (0.05x..4x, stone/engine/timeline.rock) and freezes on a paused
+// frame. Deriving them from `time` let a 4x session stamp `first_time` hours
+// ahead of reality into the live progress.json; a later session then wrote a
+// SMALLER `last_time`, and mag/save.rock's `l < f` check rejected the entire
+// save file on the next boot.
+//
+// Recording at two tick counts with a pinned clock: a real-clock stamp is the
+// same at both, an engine-time reconstruction advances between them.
+#[test]
+fn record_mode_stamps_the_real_clock_not_engine_time() {
+    let dir = tempfile::tempdir().unwrap();
+    let fixture_early = dir.path().join("record-clock-early.replay").to_string_lossy().into_owned();
+    let fixture_late = dir.path().join("record-clock-late.replay").to_string_lossy().into_owned();
+    let progress_path = dir.path().join("progress.json");
+    let progress_s = progress_path.to_string_lossy().into_owned();
+    let layout_s = dir.path().join("spellbook-layout.jsonl").to_string_lossy().into_owned();
+    let settings_s = dir.path().join("settings.json").to_string_lossy().into_owned();
+    let bindings_s = dir.path().join("bindings.json").to_string_lossy().into_owned();
+    let mut progress = mag_current_progress_with_recovery(10, 100);
+    progress["player"]["level"] = serde_json::json!({"namespace": "official", "name": "recovery-gauntlet"});
+    progress["player"]["grid"] = serde_json::json!([27, 27]);
+    std::fs::write(&progress_path, serde_json::to_vec_pretty(&progress).unwrap()).unwrap();
+
+    let env: Vec<(&str, &str)> = vec![
+        ("MAG_BOOT_PLAYING", "1"),
+        ("MAG_PROGRESS_PATH_OVERRIDE", progress_s.as_str()),
+        ("MAG_LAYOUT_HISTORY_PATH_OVERRIDE", layout_s.as_str()),
+        ("MAG_SETTINGS_PATH_OVERRIDE", settings_s.as_str()),
+        ("MAG_BINDINGS_PATH_OVERRIDE", bindings_s.as_str()),
+        ("PERF_MODE", "1"),
+        ("PERF_DT", "0.25"),
+        ("STONE_TEST_UNIX_SECONDS", "2000"),
+    ];
+
+    let early = mag_recovery_last_observed_at(&run_record_dump("mag", 6, &fixture_early, &env));
+    let late = mag_recovery_last_observed_at(&run_record_dump("mag", 18, &fixture_late, &env));
+
+    assert_eq!(
+        early, 2000,
+        "a 6-tick recording must stamp the real clock (2000), got {early}"
+    );
+    assert_eq!(
+        late, 2000,
+        "an 18-tick recording must stamp the same real clock (2000), got {late}; \
+         a value advancing with tick count means record mode is deriving timestamps \
+         from scaled engine time, which persists ahead-of-real stamps into progress.json"
     );
 }
 
@@ -728,10 +784,18 @@ fn mag_full_recovery_replay_reconstructs_advancing_wall_clock() {
     let replayed_full = run_replay_dump("mag", 18, &fixture_s, &replay_env);
     let replayed_full_at = mag_recovery_last_observed_at(&replayed_full);
 
+    // Record stamps the real clock (2000 flat, pinned by the override), so it is
+    // not the comparison arm: replay reconstructs from the RECORDED start plus
+    // engine time (2000 + int(18 * 0.25) = 2004). The recording is asserted flat
+    // by record_mode_stamps_the_real_clock_not_engine_time.
     assert_eq!(
-        replayed_full_at, recorded_at_full,
-        "a full-length replay must match the recording's own wall-clock reconstruction \
-         (recorded_at_full={recorded_at_full}, replayed_full_at={replayed_full_at})"
+        recorded_at_full, 2000,
+        "the recording must stamp the real clock, got {recorded_at_full}"
+    );
+    assert_eq!(
+        replayed_full_at, 2004,
+        "replay must reconstruct from the recorded start (2000) plus engine time, never \
+         from its own process clock (9999); got {replayed_full_at}"
     );
     assert_ne!(
         replayed_early_at, replayed_full_at,
