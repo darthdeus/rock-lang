@@ -246,6 +246,37 @@ fn run_record_dump_observed(
     }
 }
 
+#[test]
+fn record_without_dump_state_ignores_clock_override() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("record-clock-authority.replay");
+    let scratch = tempfile::tempdir().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_rock"))
+        .args([
+            "frame", "bitgun", "-n", "1", "--record", &log.to_string_lossy(),
+            "--output", &scratch.path().to_string_lossy(),
+        ])
+        .env("STONE_TEST_UNIX_SECONDS", "1000")
+        .env_remove("DUMP_STATE")
+        .env_remove("STONE_REPLAY")
+        .env("ROCK_FRAME_TIMEOUT_SECS", "60")
+        .current_dir(workspace_root())
+        .output()
+        .expect("spawn record without dump-state");
+    assert!(
+        output.status.success(),
+        "record without dump-state failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = std::fs::read_to_string(&log).expect("read record");
+    let start = text
+        .lines()
+        .find_map(|line| line.strip_prefix("start ")?.parse::<i64>().ok())
+        .expect("recorded header start");
+    assert_ne!(start, 1000, "default record path honored the test clock: {text}");
+    assert!(start > 1_700_000_000, "recorded start must be a real epoch: {start}");
+}
+
 fn current_tick(s: &serde_json::Value) -> i64 {
     s["stone"]["current_tick"].as_i64().expect("current_tick")
 }
@@ -626,12 +657,11 @@ fn mag_full_recovery_replay_uses_each_process_wall_clock_sentinel() {
 }
 
 // The STONE_TEST_UNIX_SECONDS override exists so a replay fixture can pin two
-// processes to distinct clocks without sleeping. It is a REPLAY-HARNESS knob:
-// ordinary play -- the mode a shipped build runs in -- must ignore it, or a
-// shipped game's save timestamps, quest stage timers, and recovery-reservoir
-// grants are all settable from the environment. Gated on
-// `__replay_preboot_mode()` (stone/engine/replay.rock), the same env-derived
-// authority the record path already uses before `__stone_replay` exists.
+// processes to distinct clocks without sleeping. It is a dump-state replay
+// harness knob: ordinary play must ignore it, or a game's save timestamps,
+// quest stage timers, and recovery-reservoir grants are all settable from the
+// environment. The guard requires both `DUMP_STATE=1` and the preboot record /
+// replay mode (stone/engine/replay.rock), before `__stone_replay` exists.
 #[test]
 fn ordinary_play_ignores_the_replay_clock_override() {
     let dir = tempfile::tempdir().unwrap();
