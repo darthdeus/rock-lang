@@ -2946,10 +2946,11 @@ fn skull_game_preamble(dir: &str) -> Result<String> {
         skull::mir_emit::RendererTarget::Gl => "gl",
         skull::mir_emit::RendererTarget::Wgpu => "wgpu",
     };
-    let stone_dir = configured_stone_dir(&abs)?
-        .ok_or_else(|| anyhow::anyhow!("game project must declare a Stone path dependency"))?;
-    let escaped_stone = stone_dir.display().to_string().replace('\\', "\\\\").replace('"', "\\\"");
-    let mut full = format!("__ROCK_GAME_SOURCE_DIR = \"{escaped}\"\n__ROCK_STONE_DIR = \"{escaped_stone}\"\n");
+    let mut full = format!("__ROCK_GAME_SOURCE_DIR = \"{escaped}\"\n");
+    if let Some(stone_dir) = configured_stone_dir(&abs)? {
+        let escaped_stone = stone_dir.display().to_string().replace('\\', "\\\\").replace('"', "\\\"");
+        full.push_str(&format!("__ROCK_STONE_DIR = \"{escaped_stone}\"\n"));
+    }
     full.push_str("__ROCK_ASSET_OVERLAY_DEFAULTS = {");
     for (index, path) in overlay_defaults.iter().enumerate() {
         if index > 0 {

@@ -120,3 +120,40 @@ fn package_tests_receive_the_injected_stone_root() {
         String::from_utf8_lossy(&result.stderr)
     );
 }
+
+#[test]
+fn projects_without_stone_do_not_receive_an_invented_root() {
+    let repo = root();
+    std::fs::create_dir_all(repo.join("tmp")).unwrap();
+    let scratch = tempfile::Builder::new()
+        .prefix("stone-root-no-dependency-")
+        .tempdir_in(repo.join("tmp"))
+        .unwrap();
+    let project = scratch.path().join("game");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        project.join("stick.toml"),
+        "[package]\nname = \"stone-root-no-dependency\"\ntype = \"bin\"\n\n[build.vars]\nGIT_SHA = \"test\"\n",
+    )
+    .unwrap();
+    std::fs::write(project.join("main.rock"), "fn main() {}\n").unwrap();
+    std::fs::write(project.join("stone_ffi.rock"), "// legacy game marker\n").unwrap();
+
+    let lua = project.join("main.lua");
+    let compile = Command::new(rock_bin())
+        .current_dir(&repo)
+        .args(["compile", project.to_str().unwrap(), "--output", lua.to_str().unwrap()])
+        .output()
+        .expect("compile project without Stone");
+    assert!(
+        compile.status.success(),
+        "a compiler fixture without Stone must still compile\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&compile.stdout),
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    let emitted = std::fs::read_to_string(lua).unwrap();
+    assert!(
+        !emitted.contains("__ROCK_STONE_DIR = "),
+        "the preamble must not invent a Stone root for a project without a Stone dependency"
+    );
+}
