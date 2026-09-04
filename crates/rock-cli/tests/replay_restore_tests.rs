@@ -292,6 +292,13 @@ fn strip_scheduler_frame_stamps(value: &mut serde_json::Value) -> usize {
     }
 }
 
+fn strip_mag_tally_perf(value: &mut serde_json::Value) -> usize {
+    match value {
+        serde_json::Value::Object(fields) => usize::from(fields.remove("perf").is_some()),
+        _ => 0,
+    }
+}
+
 #[test]
 fn restore_returns_to_snapshot_tick_state() {
     let game = "bitgun";
@@ -364,6 +371,18 @@ fn assert_sim_state_matches(
             let mut b = want_pkg[name].clone();
             strip_scheduler_frame_stamps(&mut a);
             strip_scheduler_frame_stamps(&mut b);
+            if pkg == "mag" && name == "tally" {
+                assert_eq!(
+                    strip_mag_tally_perf(&mut a),
+                    1,
+                    "Mag tally must carry its diagnostic perf histogram"
+                );
+                assert_eq!(
+                    strip_mag_tally_perf(&mut b),
+                    1,
+                    "Mag tally must carry its diagnostic perf histogram"
+                );
+            }
             stripped += crate::stone_harness::count_host_projections(&a);
             stripped += crate::stone_harness::count_host_projections(&b);
             assert_eq!(a, b, "sim-state {pkg}.{name} must match {label}");
@@ -554,6 +573,7 @@ fn mag_seek_equivalence_state_names(
         "MENU_LOGO_TEXT_OUTPUT_CALLS",
         "MENU_OUTPUT_TEXT_ART",
         "MENU_OUTPUT_TEXT_TARGET_RECT",
+        "TEXT_ART_CONSUMER_KEY_FORMATS",
     ] {
         assert!(sim.remove(name), "{name} must be excluded as a presentation or lifecycle diagnostic");
     }
@@ -639,7 +659,7 @@ fn mag_current_progress_with_recovery(measures: i64, last_observed_at: i64) -> s
 }
 
 #[test]
-fn mag_full_recovery_replay_uses_each_process_wall_clock_sentinel() {
+fn mag_full_recovery_replay_uses_recorded_session_clock() {
     let (recorded, replayed) =
         mag_recovery_record_replay_arms(&mag_current_progress_with_recovery(10, 100));
     let recorded_at = mag_recovery_last_observed_at(&recorded);
@@ -755,7 +775,7 @@ fn record_mode_stamps_the_real_clock_not_engine_time() {
     );
 }
 
-// Adversarial control for the sentinel above: an implementation that simply
+// Adversarial control for the recorded-clock test above: an implementation that simply
 // FREEZES the clock in replay (always returns the header's SESSION_START_UNIX,
 // ignoring `time`) also satisfies "replay matches the recording" when both are
 // sampled at the same tick. This test distinguishes reconstruction from
@@ -765,7 +785,7 @@ fn record_mode_stamps_the_real_clock_not_engine_time() {
 // the later tick, while a frozen clock would report the same header value
 // (2000) at both.
 //
-// The sentinel's spawn (crypt, grid [25, 8]) has no recovery-reservoir prop
+// The recorded-clock test's spawn (crypt, grid [25, 8]) has no recovery-reservoir prop
 // nearby, so the reservoir reconciles once at boot load and never again --
 // fine for a single-tick sample, useless for observing advancement. Spawning
 // in "recovery-gauntlet" at grid [27, 27] (one tile from the reservoir prop
