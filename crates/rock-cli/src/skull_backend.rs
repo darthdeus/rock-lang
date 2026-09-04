@@ -621,6 +621,20 @@ fn skull_build(file: &str, src: &str) -> std::result::Result<SkullOutcome, Skull
         }
     };
 
+    let lua = match configured_stone_dir(
+        std::path::Path::new(file)
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new(".")),
+    ) {
+        Ok(Some(stone_dir)) => prepend_stone_root(lua, &stone_dir),
+        Ok(None) => lua,
+        Err(error) => {
+            return Err(SkullFailure {
+                reason: "Stone root resolution failed".to_string(),
+                rendered: error.to_string(),
+            })
+        }
+    };
     run_emitted_tests(&lua, &tests)
 }
 
@@ -822,6 +836,16 @@ fn skull_build_package(dir: &str) -> std::result::Result<SkullOutcome, SkullFail
         reason: categorize(&e.message),
         rendered: render_project_err(&sources, &e),
     })?;
+    let lua = match configured_stone_dir(std::path::Path::new(dir)) {
+        Ok(Some(stone_dir)) => prepend_stone_root(lua, &stone_dir),
+        Ok(None) => lua,
+        Err(error) => {
+            return Err(SkullFailure {
+                reason: "Stone root resolution failed".to_string(),
+                rendered: error.to_string(),
+            })
+        }
+    };
     run_emitted_tests(&lua, &tests)
 }
 
@@ -2879,6 +2903,29 @@ root-hole names={} rows={} decls={} reason-buckets={} erased-catalogue={}",
 // stone --backend skull: two-file incremental output (main.lua + incremental.lua)
 // ---------------------------------------------------------------------------
 
+fn configured_stone_dir(path: &std::path::Path) -> Result<Option<std::path::PathBuf>> {
+    let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let Some((config_path, config)) = rock_host::stick::StickConfig::find_from_dir(&path)? else {
+        return Ok(None);
+    };
+    if !config.dependencies.contains_key("stone") {
+        return Ok(None);
+    }
+    let root_path = config_path.parent().unwrap_or(&config_path).to_path_buf();
+    let mut resolver = rock_host::stick::resolver::DependencyResolver::new(root_path);
+    let resolved = resolver.resolve(&config)?;
+    let stone = resolved
+        .into_iter()
+        .find(|dependency| dependency.name == "stone")
+        .ok_or_else(|| anyhow::anyhow!("Stone dependency is declared but could not be resolved"))?;
+    Ok(Some(stone.path.canonicalize().unwrap_or(stone.path)))
+}
+
+fn prepend_stone_root(lua: String, stone_dir: &std::path::Path) -> String {
+    let escaped = stone_dir.display().to_string().replace('\\', "\\\\").replace('"', "\\\"");
+    format!("__ROCK_STONE_DIR = \"{escaped}\"\n{lua}")
+}
+
 /// The game preamble injected at the top of `main.lua`: `GAME_SOURCE_DIR` for
 /// asset resolution. cimgui is initialized by stone's global initializer.
 /// Factored so `skull_run_project` and the stone two-file path build it identically.
@@ -2886,9 +2933,9 @@ fn skull_game_preamble(dir: &str) -> Result<String> {
     use std::path::PathBuf;
     let abs = PathBuf::from(dir).canonicalize().unwrap_or_else(|_| PathBuf::from(dir));
     let escaped = abs.display().to_string().replace('\\', "\\\\").replace('"', "\\\"");
-    let (config_path, config) = match rock_host::stick::StickConfig::find_from_dir(&abs)? {
-        Some((path, config)) => (Some(path), Some(config)),
-        None => (None, None),
+    let config = match rock_host::stick::StickConfig::find_from_dir(&abs)? {
+        Some((_, config)) => Some(config),
+        None => None,
     };
     let overlay_defaults = rock_host::release::configured_asset_overlays_from(
         &abs,
@@ -2899,21 +2946,8 @@ fn skull_game_preamble(dir: &str) -> Result<String> {
         skull::mir_emit::RendererTarget::Gl => "gl",
         skull::mir_emit::RendererTarget::Wgpu => "wgpu",
     };
-    let stone_dir = {
-        let mut found = None;
-        if let (Some(config_path), Some(stick_config)) = (&config_path, &config) {
-            if stick_config.dependencies.contains_key("stone") {
-                let root_path = config_path.parent().unwrap_or(&config_path).to_path_buf();
-                let mut resolver = rock_host::stick::resolver::DependencyResolver::new(root_path);
-                if let Ok(resolved) = resolver.resolve(&stick_config) {
-                    if let Some(stone_dep) = resolved.into_iter().find(|d| d.name == "stone") {
-                        found = Some(stone_dep.path.canonicalize().unwrap_or(stone_dep.path));
-                    }
-                }
-            }
-        }
-        found.unwrap_or_else(|| PathBuf::from(rock_host::rock_dir()).join("stone"))
-    };
+    let stone_dir = configured_stone_dir(&abs)?
+        .ok_or_else(|| anyhow::anyhow!("game project must declare a Stone path dependency"))?;
     let escaped_stone = stone_dir.display().to_string().replace('\\', "\\\\").replace('"', "\\\"");
     let mut full = format!("__ROCK_GAME_SOURCE_DIR = \"{escaped}\"\n__ROCK_STONE_DIR = \"{escaped_stone}\"\n");
     full.push_str("__ROCK_ASSET_OVERLAY_DEFAULTS = {");

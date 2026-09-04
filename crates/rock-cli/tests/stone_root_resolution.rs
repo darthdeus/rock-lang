@@ -87,3 +87,36 @@ fn missing_stone_root_fails_at_the_asset_resolution_boundary() {
         "missing Stone root error must name the boundary:\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
 }
+
+#[test]
+fn package_tests_receive_the_injected_stone_root() {
+    let repo = root();
+    std::fs::create_dir_all(repo.join("tmp")).unwrap();
+    let scratch = tempfile::Builder::new()
+        .prefix("stone-root-test-package-")
+        .tempdir_in(repo.join("tmp"))
+        .unwrap();
+    let project = scratch.path().join("game");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        project.join("stick.toml"),
+        format!(
+            "[package]\nname = \"stone-root-test-package\"\ntype = \"bin\"\n\n[dependencies]\nstone = {{ path = \"{}\" }}\n\n[build.vars]\nGIT_SHA = \"test\"\n",
+            toml_path(&repo.join("stone")),
+        ),
+    )
+    .unwrap();
+    std::fs::write(project.join("main.rock"), "fn main() {}\n").unwrap();
+
+    let result = Command::new(rock_bin())
+        .current_dir(&repo)
+        .args(["test", project.to_str().unwrap(), "--test-threads", "1"])
+        .output()
+        .expect("run package Stone-root fixture tests");
+    assert!(
+        result.status.success(),
+        "package tests must receive an injected Stone root\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
