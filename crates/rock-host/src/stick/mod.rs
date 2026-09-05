@@ -130,6 +130,60 @@ pub fn install_renderer_override(backend: Option<RendererBackend>) -> RendererOv
     RendererOverrideGuard { previous }
 }
 
+/// The invocation's channel selection, recorded once by the CLI before
+/// dispatch. rock-host consumers of the channel (dependency resolution, source
+/// loading) cannot read rock-cli's comptime selection, so the CLI mirrors the
+/// same values here. Explicit `--channel` and a command-implied channel arrive
+/// separately; resolution applies the same precedence as `resolve_build_vars`.
+static INVOCATION_CHANNELS: OnceLock<Mutex<(Option<String>, Option<String>)>> = OnceLock::new();
+
+fn invocation_channels_slot() -> &'static Mutex<(Option<String>, Option<String>)> {
+    INVOCATION_CHANNELS.get_or_init(|| Mutex::new((None, None)))
+}
+
+pub fn set_invocation_channel(explicit: Option<String>, implied: Option<String>) {
+    *invocation_channels_slot().lock().expect("invocation channel lock") = (explicit, implied);
+}
+
+/// Resolve the channel a manifest's channel-scoped selections evaluate
+/// against: explicit `--channel` > command-implied channel (when the project
+/// declares it) > the project's `default_channel` > `"dev"`. Mirrors
+/// `resolve_build_vars` so a dependency filter and a build var can never
+/// disagree about which channel a build is on.
+pub fn resolved_channel_for(cfg: &StickConfig) -> String {
+    let (explicit, implied) = invocation_channels_slot()
+        .lock()
+        .expect("invocation channel lock")
+        .clone();
+    if let Some(channel) = explicit {
+        return channel;
+    }
+    if let Some(channel) = implied {
+        if cfg
+            .build
+            .as_ref()
+            .is_some_and(|b| b.channels.iter().any(|c| c == &channel))
+        {
+            return channel;
+        }
+    }
+    cfg.build
+        .as_ref()
+        .and_then(|b| b.default_channel.clone())
+        .unwrap_or_else(|| "dev".to_string())
+}
+
+/// True when `dep` compiles into a build on `channel`. A dependency with no
+/// declared channels is unscoped and matches everywhere.
+pub fn dependency_matches_channel(dep: &Dependency, channel: &str) -> bool {
+    match dep {
+        Dependency::Path(_) => true,
+        Dependency::Detailed(detailed) => {
+            detailed.channels.is_empty() || detailed.channels.iter().any(|c| c == channel)
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct IosConfig {
     /// `landscape` | `portrait` | `all`. None = unset, deploy uses landscape.
@@ -218,6 +272,11 @@ pub enum Dependency {
 #[derive(Debug, Clone)]
 pub struct DetailedDependency {
     pub path: String,
+    /// Channels the dependency compiles into. Empty = every channel. This is
+    /// the declared gate for development-only packages (the MAG agent bridge):
+    /// a shipping channel excludes the package from the compile set entirely,
+    /// so generated shipping code carries none of its symbols.
+    pub channels: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -255,14 +314,16 @@ impl<'de> serde::Deserialize<'de> for DetailedDependency {
             }
             fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<DetailedDependency, A::Error> {
                 let mut path: Option<String> = None;
+                let mut channels: Vec<String> = Vec::new();
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
                         "path" => { path = Some(map.next_value()?); }
+                        "channels" => { channels = map.next_value()?; }
                         _ => { let _ = map.next_value::<serde::de::IgnoredAny>()?; }
                     }
                 }
                 let path = path.ok_or_else(|| serde::de::Error::missing_field("path"))?;
-                Ok(DetailedDependency { path })
+                Ok(DetailedDependency { path, channels })
             }
         }
         d.deserialize_map(Vis)
@@ -285,14 +346,16 @@ impl<'de> serde::Deserialize<'de> for Dependency {
             }
             fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Dependency, A::Error> {
                 let mut path: Option<String> = None;
+                let mut channels: Vec<String> = Vec::new();
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
                         "path" => { path = Some(map.next_value()?); }
+                        "channels" => { channels = map.next_value()?; }
                         _ => { let _ = map.next_value::<serde::de::IgnoredAny>()?; }
                     }
                 }
                 let path = path.ok_or_else(|| serde::de::Error::missing_field("path"))?;
-                Ok(Dependency::Detailed(DetailedDependency { path }))
+                Ok(Dependency::Detailed(DetailedDependency { path, channels }))
             }
         }
         d.deserialize_any(Vis)
@@ -1086,6 +1149,7 @@ pub fn get_compiler_sha1() -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::stick::resolver::DependencyResolver;
 
     #[test]
     fn sha1_hex_matches_known_vectors() {
@@ -1095,6 +1159,83 @@ mod tests {
         // stay valid.
         assert_eq!(sha1_hex(b""), "da39a3ee5e6b4b0d3255bfef95601890afd80709");
         assert_eq!(sha1_hex(b"abc"), "a9993e364706816aba3e25717850c26c9cd0d89d");
+    }
+
+    #[test]
+    fn a_channel_scoped_dependency_parses_its_channel_list() {
+        let cfg = StickConfig::new_from_str(
+            "[package]\nname = \"x\"\n[dependencies]\ndev-only = { path = \"../dep\", channels = [\"dev\"] }\n",
+        )
+        .expect("channel-scoped dependency parses");
+        let Dependency::Detailed(dep) = &cfg.dependencies["dev-only"] else {
+            panic!("inline table dependency must parse as detailed");
+        };
+        assert_eq!(dep.path, "../dep");
+        assert_eq!(dep.channels, vec!["dev".to_string()]);
+    }
+
+    #[test]
+    fn a_path_dependency_has_no_channel_scope() {
+        let cfg = StickConfig::new_from_str(
+            "[package]\nname = \"x\"\n[dependencies]\ncore = \"../core\"\n",
+        )
+        .expect("path dependency parses");
+        assert!(matches!(cfg.dependencies["core"], Dependency::Path(_)));
+    }
+
+    #[test]
+    fn a_channel_scoped_dependency_resolves_only_on_a_matching_channel() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let consumer = workspace.path().join("consumer");
+        let dep = workspace.path().join("dep");
+        fs_err::create_dir_all(&consumer).unwrap();
+        fs_err::create_dir_all(&dep).unwrap();
+        fs_err::write(
+            consumer.join("stick.toml"),
+            "[package]\nname = \"consumer\"\n[dependencies]\ndev-only = { path = \"../dep\", channels = [\"dev\"] }\n",
+        )
+        .unwrap();
+        fs_err::write(
+            dep.join("stick.toml"),
+            "[package]\nname = \"dep\"\ntype = \"lib\"\n",
+        )
+        .unwrap();
+
+        let cfg = StickConfig::from_path(&consumer.join("stick.toml")).unwrap();
+        let mut dev_resolver = DependencyResolver::new(consumer.clone());
+        let dev = dev_resolver.resolve_with_channel(&cfg, "dev").expect("dev resolve");
+        assert_eq!(dev.len(), 1, "matching channel includes the scoped dep");
+        assert_eq!(dev[0].name, "dev-only");
+
+        let mut steam_resolver = DependencyResolver::new(consumer.clone());
+        let steam = steam_resolver.resolve_with_channel(&cfg, "steam").expect("steam resolve");
+        assert!(steam.is_empty(), "non-matching channel excludes the scoped dep");
+    }
+
+    #[test]
+    fn an_unscoped_dependency_resolves_on_every_channel() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let consumer = workspace.path().join("consumer");
+        let dep = workspace.path().join("dep");
+        fs_err::create_dir_all(&consumer).unwrap();
+        fs_err::create_dir_all(&dep).unwrap();
+        fs_err::write(
+            consumer.join("stick.toml"),
+            "[package]\nname = \"consumer\"\n[dependencies]\ncore = \"../dep\"\n",
+        )
+        .unwrap();
+        fs_err::write(
+            dep.join("stick.toml"),
+            "[package]\nname = \"dep\"\ntype = \"lib\"\n",
+        )
+        .unwrap();
+
+        let cfg = StickConfig::from_path(&consumer.join("stick.toml")).unwrap();
+        for channel in ["dev", "steam", "itch"] {
+            let mut resolver = DependencyResolver::new(consumer.clone());
+            let resolved = resolver.resolve_with_channel(&cfg, channel).expect("resolve");
+            assert_eq!(resolved.len(), 1, "unscoped dep resolves on {channel}");
+        }
     }
 
     #[test]

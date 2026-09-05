@@ -606,3 +606,82 @@ fn packaged_sound_dependencies_survive_install_outside_source_tree() {
         manifest["artifacts"]["sound"]["bank"].as_str().unwrap()
     ).is_file());
 }
+
+/// The development-capability gate: a channel-scoped dependency compiles into
+/// development builds and is excluded from shipping builds entirely, so
+/// generated shipping code carries none of its symbols. The game references
+/// no dependency symbol (the MAG shape: production code never names the agent
+/// bridge), so the shipping arm must compile CLEANLY while excluding it. A
+/// compile failure on the shipping arm is the fail-closed direction and is
+/// covered by the resolver tests, not here.
+#[test]
+fn shipping_channel_excludes_a_channel_scoped_dependency_from_generated_code() {
+    let fixture_root = tempfile::tempdir_in(repo_root()).expect("package fixture");
+    let project = fixture_root.path().join("channel-gated");
+    let dep = fixture_root.path().join("dev-bridge-lib");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::create_dir_all(&dep).unwrap();
+    std::fs::write(
+        project.join("stick.toml"),
+        "[package]\nname = \"channel-gated\"\nversion = \"0.1.0\"\ntype = \"bin\"\n\n\
+         [build]\nchannels = [\"dev\", \"steam\"]\ndefault_channel = \"dev\"\n\n\
+         [dependencies]\ndev-bridge-lib = { path = \"../dev-bridge-lib\", channels = [\"dev\"] }\n",
+    )
+    .unwrap();
+    std::fs::write(project.join("main.rock"), "fn main() {\n    print(\"game-body-only\")\n}\n").unwrap();
+    std::fs::write(
+        dep.join("stick.toml"),
+        "[package]\nname = \"dev-bridge-lib\"\nversion = \"0.1.0\"\ntype = \"lib\"\n",
+    )
+    .unwrap();
+    // The global initializer is the emission witness: an uncalled fn in the
+    // dependency is dead-stripped, but a module-load effect is always emitted,
+    // so its presence in the output proves the package compiled into the build.
+    std::fs::write(
+        dep.join("bridge.rock"),
+        "global AGENT_BRIDGE_PRESENT: bool = false\n\nfn agent_bridge_marker() -> string {\n    return \"agent-bridge-marker\"\n}\n",
+    )
+    .unwrap();
+
+    let output_dir = tempfile::tempdir().expect("compile output");
+    let compile = |channel: &str, file: &str| {
+        let output = output_dir.path().join(file);
+        let result = Command::new(rock_bin())
+            .current_dir(repo_root())
+            .args([
+                "compile",
+                project.to_str().unwrap(),
+                "--channel",
+                channel,
+                "--output",
+                output.to_str().unwrap(),
+            ])
+            .output()
+            .expect("spawn compile");
+        (result, output)
+    };
+
+    let (shipping, shipping_path) = compile("steam", "steam.lua");
+    assert!(
+        shipping.status.success(),
+        "shipping compile must succeed without the scoped dependency: {}",
+        String::from_utf8_lossy(&shipping.stderr)
+    );
+    let shipping_lua = std::fs::read_to_string(&shipping_path).unwrap();
+    assert!(
+        !shipping_lua.contains("AGENT_BRIDGE_PRESENT"),
+        "generated shipping code must exclude the channel-scoped dependency"
+    );
+
+    let (development, dev_path) = compile("dev", "dev.lua");
+    assert!(
+        development.status.success(),
+        "development compile failed: {}",
+        String::from_utf8_lossy(&development.stderr)
+    );
+    let dev_lua = std::fs::read_to_string(&dev_path).unwrap();
+    assert!(
+        dev_lua.contains("AGENT_BRIDGE_PRESENT"),
+        "generated development code must include the channel-scoped dependency"
+    );
+}
