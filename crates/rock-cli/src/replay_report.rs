@@ -105,6 +105,14 @@ pub struct ImageResourceFrame {
 }
 
 #[derive(Debug)]
+pub struct RepeatedImageLoad {
+    pub path: String,
+    pub loads: usize,
+    pub failures: usize,
+    pub ordinals: Vec<usize>,
+}
+
+#[derive(Debug)]
 pub struct ReplayAnalysis {
     pub version: u32,
     pub seed: Option<i64>,
@@ -121,6 +129,7 @@ pub struct ReplayAnalysis {
     pub top: Vec<TopFrame>,
     pub clusters: Vec<SlowCluster>,
     pub image_resource_frames: Vec<ImageResourceFrame>,
+    pub repeated_image_loads: Vec<RepeatedImageLoad>,
 }
 
 fn parse_u64(value: &str, line: usize, field: &str) -> Result<u64> {
@@ -153,7 +162,7 @@ impl ReplayReport {
             .context("not a replay log")?
             .parse::<u32>()
             .context("malformed replay version")?;
-        if !(1..=13).contains(&version) {
+        if !(1..=14).contains(&version) {
             bail!("unsupported replay version {version}");
         }
         let mut report = Self {
@@ -433,6 +442,23 @@ impl ReplayReport {
             })
             .collect::<Vec<_>>();
         image_resource_frames.sort_by_key(|row| row.ordinal);
+        let mut loads_by_path: HashMap<String, (usize, usize, Vec<usize>)> = HashMap::new();
+        for row in &image_resource_frames {
+            for path in &row.resources.paths {
+                let entry = loads_by_path.entry(path.path.clone()).or_default();
+                entry.0 += 1;
+                if !path.succeeded { entry.1 += 1; }
+                entry.2.push(row.ordinal);
+            }
+        }
+        let mut repeated_image_loads = loads_by_path.into_iter()
+            .filter_map(|(path, (loads, failures, ordinals))| {
+                (loads > 1).then_some(RepeatedImageLoad { path, loads, failures, ordinals })
+            })
+            .collect::<Vec<_>>();
+        repeated_image_loads.sort_by(|left, right| {
+            right.loads.cmp(&left.loads).then_with(|| left.path.cmp(&right.path))
+        });
 
         Ok(ReplayAnalysis {
             version: self.version,
@@ -450,6 +476,7 @@ impl ReplayReport {
             top,
             clusters,
             image_resource_frames,
+            repeated_image_loads,
         })
     }
 }
@@ -523,6 +550,14 @@ impl ReplayAnalysis {
                 "succeeded": path.succeeded,
             })).collect::<Vec<_>>(),
         })).collect::<Vec<_>>();
+        let repeated_image_loads = self.repeated_image_loads.iter().map(|row| serde_json::json!({
+            "path": row.path,
+            "loads": row.loads,
+            "failures": row.failures,
+            "first_ordinal": row.ordinals[0],
+            "last_ordinal": row.ordinals[row.ordinals.len() - 1],
+            "ordinals": row.ordinals,
+        })).collect::<Vec<_>>();
         Ok(serde_json::to_string_pretty(&serde_json::json!({
             "format": "rock.replay-report.v1",
             "replay": {
@@ -540,6 +575,7 @@ impl ReplayAnalysis {
             "top_frames": top,
             "slow_clusters": clusters,
             "image_resource_frames": image_resource_frames,
+            "repeated_image_loads": repeated_image_loads,
         }))?)
     }
 
@@ -615,6 +651,21 @@ impl ReplayAnalysis {
                 }
             }
         }
+        out.push_str("\nRepeated image loads:\n");
+        if self.repeated_image_loads.is_empty() {
+            out.push_str("  none\n");
+        } else {
+            for row in &self.repeated_image_loads {
+                out.push_str(&format!(
+                    "  {} load(s), {} failure(s), ordinals {}: {}\n",
+                    row.loads,
+                    row.failures,
+                    row.ordinals.iter().map(|ordinal| ordinal.to_string())
+                        .collect::<Vec<_>>().join(","),
+                    row.path,
+                ));
+            }
+        }
         out.push_str("\nImage resource frames:\n");
         if self.image_resource_frames.is_empty() {
             out.push_str("  none\n");
@@ -684,7 +735,8 @@ p 2 2 50000 12000 35000 3000\n\
 i 2 2 1 0 16777216 1500 1 16777216 9000 2000 1 1 6173736574732f7666782f666c616d65737472696b652e706e67\n\
 s 2 2 1000 200 0 0 1 64726177 30000 4\n\
 t 0x1p-6 0x0p+0 0x0p+0 0 0 - - - -\n\
-p 3 3 11000 4000 6000 1000";
+p 3 3 11000 4000 6000 1000\n\
+i 3 3 1 0 16777216 900 0 0 0 0 1 1 6173736574732f7666782f666c616d65737472696b652e706e67";
 
     #[test]
     fn report_ranks_frames_clusters_suggested_ranges_and_input_changes() {
@@ -715,6 +767,11 @@ p 3 3 11000 4000 6000 1000";
         assert_eq!(value["top_frames"][0]["image_resources"]["paths"][0]["path"],
             "assets/vfx/flamestrike.png");
         assert_eq!(value["image_resource_frames"][0]["ordinal"], 2);
+        assert_eq!(value["repeated_image_loads"][0]["path"],
+            "assets/vfx/flamestrike.png");
+        assert_eq!(value["repeated_image_loads"][0]["loads"], 2);
+        assert_eq!(value["repeated_image_loads"][0]["first_ordinal"], 2);
+        assert_eq!(value["repeated_image_loads"][0]["last_ordinal"], 3);
     }
 
     #[test]

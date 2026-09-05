@@ -405,8 +405,8 @@ fn timing_samples_align_exactly_with_observation_ordinals_and_ticks() {
 
     let text = std::fs::read_to_string(&log).expect("read replay");
     assert!(
-        text.starts_with("STONE_REPLAY 13\n"),
-        "phase timing logs must use v13\n{text}"
+        text.starts_with("STONE_REPLAY 14\n"),
+        "phase timing logs must use v14\n{text}"
     );
     assert_eq!(tick_count(&text), 8, "fixture must have eight observations");
     assert_eq!(
@@ -494,8 +494,8 @@ fn opted_in_slow_frames_carry_bounded_named_profiler_attribution() {
     );
     let text = std::fs::read_to_string(&profiled).expect("read profiled replay");
     assert!(
-        text.starts_with("STONE_REPLAY 13\n"),
-        "slow-frame attribution requires the versioned v13 grammar\n{text}"
+        text.starts_with("STONE_REPLAY 14\n"),
+        "slow-frame attribution requires the versioned v14 grammar\n{text}"
     );
     let rows = slow_frame_lines(&text);
     assert_eq!(
@@ -603,8 +603,8 @@ fn crash_tail_can_omit_only_the_final_completed_timing_sample() {
     let ticks = tick_count(&text);
     let timings = timing_lines(&text);
     assert!(
-        text.starts_with("STONE_REPLAY 13\n"),
-        "crash log must retain v13\n{text}"
+        text.starts_with("STONE_REPLAY 14\n"),
+        "crash log must retain v14\n{text}"
     );
     assert!(ticks > 0, "crash log must retain observations");
     assert_eq!(
@@ -633,7 +633,7 @@ fn legacy_v8_without_timing_remains_playable_and_reports_an_empty_track() {
         .map(str::to_string)
         .collect::<Vec<_>>()
         .join("\n")
-        .replacen("STONE_REPLAY 13", "STONE_REPLAY 8", 1)
+        .replacen("STONE_REPLAY 14", "STONE_REPLAY 8", 1)
         + "\n";
     std::fs::write(&log, legacy).expect("write legacy replay");
 
@@ -664,7 +664,7 @@ fn legacy_v9_total_timing_remains_playable_without_phase_attribution() {
         })
         .collect::<Vec<_>>()
         .join("\n")
-        .replacen("STONE_REPLAY 13", "STONE_REPLAY 9", 1)
+        .replacen("STONE_REPLAY 14", "STONE_REPLAY 9", 1)
         + "\n";
     std::fs::write(&log, legacy).expect("write legacy replay");
 
@@ -688,7 +688,7 @@ fn legacy_v10_phase_timing_remains_playable_without_slow_profiles() {
     assert!(recorded.status.success(), "record failed");
     let legacy = std::fs::read_to_string(&log)
         .expect("read replay")
-        .replacen("STONE_REPLAY 13", "STONE_REPLAY 10", 1);
+        .replacen("STONE_REPLAY 14", "STONE_REPLAY 10", 1);
     std::fs::write(&log, legacy).expect("write v10 replay");
 
     let state = replay_dump("bitgun", 8, &log_s, &[]);

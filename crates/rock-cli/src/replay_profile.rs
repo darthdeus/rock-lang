@@ -429,7 +429,7 @@ mod tests {
     fn zero_runs_and_future_replay_versions_fail_closed() {
         assert!(validate_runs(0).is_err());
         assert!(validate_runs(1).is_ok());
-        assert!(ReplayReport::parse("STONE_REPLAY 14").is_err());
+        assert!(ReplayReport::parse("STONE_REPLAY 15").is_err());
         assert!(parse_range("0-0", 0).is_err());
     }
 }

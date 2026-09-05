@@ -225,6 +225,8 @@ mod value_leaf_layout;
 mod value_push_generic_boundary;
 #[path = "value_scalarize.rs"]
 mod value_scalarize;
+#[path = "value_struct_eq_dispatch.rs"]
+mod value_struct_eq_dispatch;
 #[path = "value_test_discovery.rs"]
 mod value_test_discovery;
 #[path = "vec_flat_enum_strided.rs"]
