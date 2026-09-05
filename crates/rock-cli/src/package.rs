@@ -44,9 +44,9 @@ fn project_and_config(project: &str) -> Result<(PathBuf, Option<rock_host::stick
 
 fn package_context(project: &str) -> Result<PackageContext> {
     rock_host::project::ensure_workspace_root()?;
-    let root = rock_host::project::find_workspace_root(&std::env::current_dir()?)
-        .ok_or_else(|| anyhow::anyhow!("package: cannot find the Rock workspace root"))?;
     let (project_abs, config) = project_and_config(project)?;
+    let root = rock_host::project::find_source_root(&project_abs)
+        .ok_or_else(|| anyhow::anyhow!("package: cannot find the source workspace root for {}", project_abs.display()))?;
     let root_abs = root.canonicalize()?;
     let game_key = project_abs
         .strip_prefix(&root_abs)

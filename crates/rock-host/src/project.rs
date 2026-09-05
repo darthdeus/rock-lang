@@ -51,6 +51,32 @@ pub fn find_workspace_root(path: &Path) -> Option<PathBuf> {
     }
 }
 
+/// Find the source workspace root for a project path without consulting the
+/// executable's installed toolchain layout.
+pub fn find_source_root(path: &Path) -> Option<PathBuf> {
+    if let Some(root) = context_root_from_env() {
+        return Some(root);
+    }
+
+    let initial_path = fs_err::canonicalize(path)
+        .unwrap_or_else(|_| path.to_path_buf());
+    let mut current = if initial_path.is_file() {
+        initial_path.parent()?.to_path_buf()
+    } else {
+        initial_path
+    };
+
+    loop {
+        if current.join("Cargo.toml").exists() && current.join("prebuilt").is_dir() {
+            return Some(current);
+        }
+        match current.parent() {
+            Some(parent) => current = parent.to_path_buf(),
+            None => return None,
+        }
+    }
+}
+
 pub(crate) fn context_root_from_env() -> Option<PathBuf> {
     let root = PathBuf::from(std::env::var_os("ROCK_CONTEXT_ROOT")?);
     if root.is_dir()
@@ -854,6 +880,7 @@ mod tests {
         let previous = std::env::var_os("ROCK_CONTEXT_ROOT");
         unsafe { std::env::set_var("ROCK_CONTEXT_ROOT", &root) };
         let found = find_workspace_root(&root.join("game"));
+        let found_source = find_source_root(&root.join("game"));
         unsafe {
             match previous {
                 Some(value) => std::env::set_var("ROCK_CONTEXT_ROOT", value),
@@ -861,6 +888,7 @@ mod tests {
             }
         }
 
-        assert_eq!(found, Some(root));
+        assert_eq!(found, Some(root.clone()));
+        assert_eq!(found_source, Some(root));
     }
 }
