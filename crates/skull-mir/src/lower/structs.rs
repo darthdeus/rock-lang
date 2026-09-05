@@ -1042,7 +1042,7 @@ impl Builder<'_> {
         let Some(kind) = ret.and_then(|r| vertex_expand_return(self.ws, r)) else {
             return Err(reject(call_span, vertex_expand_ret_msg(self.ws, fname, ret)));
         };
-        let Some(elem) = self.nb_value_elem(arg)? else {
+        let Some(elem) = self.nb_type_value_elem(arg)? else {
             return Err(reject(arg_span, vertex_expand_arg_msg(fname)));
         };
 

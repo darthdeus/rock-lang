@@ -75,6 +75,50 @@ impl Builder<'_> {
         Ok(plan.ffi_element_name(&arena))
     }
 
+    /// The concrete `value`-struct element of `e`'s `NativeBuffer<E>` /
+    /// `FlatVec<E>` TYPE, independent of the container's storage
+    /// representation. [`Self::nb_value_elem`] answers the representation-gated
+    /// question element access and literal leaf views need; the `@vertex_expand`
+    /// expander consumes this one, because the vertex layout is derived from the
+    /// element's C leaf layout whether the container stores rows, columns, or
+    /// leaf views.
+    pub(crate) fn nb_type_value_elem(&self, e: Idx<Expr>) -> Result<Option<Ustr>, CompilerError> {
+        let Some(concrete) = self.concrete_expr_ty(e) else { return Ok(None) };
+        let element = match concrete.peel_nullable().0 {
+            MonoTy::App {
+                ctor: crate::monoty::MonoCtor::Nominal(name),
+                params,
+            } if matches!(name.as_str(), "NativeBuffer" | "FlatVec") => params.first(),
+            _ => return Ok(None),
+        };
+        let Some(element) = element else { return Ok(None) };
+        let (payload, nullable) = element.peel_nullable();
+        if nullable {
+            return Ok(None);
+        }
+        let crate::monoty::MonoTy::App {
+            ctor: crate::monoty::MonoCtor::Nominal(name),
+            ..
+        } = payload
+        else {
+            return Ok(None);
+        };
+        let Some(&sid) = self.ws.struct_by_name.get(&name) else {
+            return Ok(None);
+        };
+        if !self.ws.modules[sid.module.index()].structs[sid.def].is_value {
+            return Ok(None);
+        }
+        let arena = self.scx.rep_arena();
+        let rep = arena
+            .plan_container_element(self.ws, self.scx.target, &payload)
+            .map_err(|error| match error.span.or(self.cur_span) {
+                Some(span) => CompilerError::new_with_label(span, error.message),
+                None => CompilerError::new_no_location(error.message),
+            })?;
+        Ok(arena.value_shape(rep).map(|shape| shape.name))
+    }
+
     /// The column-eligible element of `e`'s `Arena<E>` type, if any. The twin of
     /// [`Self::vec_column_elem_of`] one container out: an arena's `data` field is
     /// an ordinary `[E]`, so it columnizes on exactly the same rule, and the
