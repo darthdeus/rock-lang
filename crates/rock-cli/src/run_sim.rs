@@ -39,6 +39,29 @@ fn frame_budget_for(sim_name: &str, env_pairs: &[(String, String)]) -> Result<us
         anyhow!("sim `{sim_name}` declares @sim_env(\"FRAME_COUNT\", \"{raw}\"), which is not a positive integer")
     })
 }
+
+fn sim_required_backend(env_pairs: &[(String, String)]) -> Option<&str> {
+    for (k, v) in env_pairs {
+        if k == "SIM_BACKEND"
+            || k == "STONE_RENDERER"
+            || k == "SIM_REQUIRES"
+            || k == "SIM_REQUIRED_RENDERER"
+        {
+            return Some(v.as_str());
+        }
+    }
+    None
+}
+
+fn active_sim_renderer(project_dir: &Path) -> &'static str {
+    match rock_host::stick::StickConfig::find_from_dir(project_dir) {
+        Ok(Some((_, cfg))) => match cfg.renderer_backend() {
+            Ok(rock_host::stick::RendererBackend::Wgpu) => "wgpu",
+            _ => "gl",
+        },
+        _ => "gl",
+    }
+}
 /// Wall-clock timeout. An INDEPENDENT bound, not a backstop for the frame
 /// budget: it is the only thing that catches a child which never advances a
 /// frame at all -- an infinite loop inside one tick, a blocked FFI call, a
@@ -325,6 +348,10 @@ pub fn do_run_sim_opts(backend: crate::Backend, project: &str, sim_name: &str, q
         summary.print(sim_name, true);
     }
 
+    if summary.excluded.is_some() {
+        return Ok(());
+    }
+
     if summary.timed_out {
         return Err(anyhow!(
             "sim `{sim_name}` timed out after {}s (wall clock, not its frame budget); \
@@ -452,6 +479,20 @@ fn run_named_entry(
         chain_spec.to_string()
     };
 
+    let active_renderer = active_sim_renderer(Path::new(project));
+    for part in &parts {
+        let env_pairs = env_by_wire.get(*part).cloned().unwrap_or_default();
+        if let Some(req) = sim_required_backend(&env_pairs) {
+            if req != active_renderer {
+                let reason = format!("requires {req} renderer (active is {active_renderer})");
+                let mut s = SimSummary::default();
+                s.excluded = Some(reason);
+                s.saw_stop = true;
+                return Ok((display_name, s));
+            }
+        }
+    }
+
     let mut combined = SimSummary::default();
     let mut stone = stone;
     for part in &parts {
@@ -484,10 +525,15 @@ fn run_named_entry(
     Ok((display_name, combined))
 }
 
+fn entry_excluded(summary: &SimSummary) -> bool {
+    summary.excluded.is_some()
+}
+
 /// Whether an entry's summary is a clean pass (no fail, no timeout, no
 /// process error, reached `stop_sim()`).
 fn entry_passed(summary: &SimSummary) -> bool {
-    !summary.timed_out
+    !entry_excluded(summary)
+        && !summary.timed_out
         && summary.process_failure_code.is_none()
         && summary.saw_stop
         && !summary.has_failures()
@@ -498,7 +544,9 @@ fn entry_passed(summary: &SimSummary) -> bool {
 /// used to be computed from `has_failures()` alone, which printed `PASS` for a
 /// sim that aborted mid-body (an abort fails no expect).
 fn verdict_word(summary: &SimSummary) -> &'static str {
-    if entry_passed(summary) {
+    if entry_excluded(summary) {
+        "EXCLUDED"
+    } else if entry_passed(summary) {
         "PASS"
     } else {
         "FAIL"
@@ -551,25 +599,34 @@ pub fn do_run_named_sims(
             &mut stone,
         )?;
         let mut passed = 0usize;
+        let mut excluded = 0usize;
         let mut failed: Vec<String> = Vec::new();
         for (name, summary) in &results {
-            if entry_passed(summary) {
+            if entry_excluded(summary) {
+                excluded += 1;
+            } else if entry_passed(summary) {
                 passed += 1;
             } else {
                 failed.push(name.clone());
             }
         }
+        let executed = names.len() - excluded;
+        let excl_suffix = if excluded > 0 {
+            format!(" (selected {}, {excluded} excluded)", names.len())
+        } else {
+            String::new()
+        };
         let suffix = if failed.is_empty() {
             String::new()
         } else {
             format!(" -- FAILED: {}", failed.join(", "))
         };
-        println!("[sim] {passed}/{} sims passed{suffix}", names.len());
+        println!("[sim] {passed}/{executed} sims passed{excl_suffix}{suffix}");
         if !failed.is_empty() {
             return Err(anyhow!(
                 "{} of {} named sims failed in `{project}`",
                 failed.len(),
-                names.len()
+                executed
             ));
         }
         return Ok(());
@@ -641,6 +698,7 @@ pub fn do_run_named_sims(
     // Accounting walks the order the user gave, so the failed list matches a
     // serial run's regardless of completion order.
     let mut passed = 0usize;
+    let mut excluded = 0usize;
     let mut failed: Vec<String> = Vec::new();
     for i in 0..names.len() {
         let (display_name, summary) = match results.remove(&i) {
@@ -648,7 +706,9 @@ pub fn do_run_named_sims(
             Some(Err(e)) => return Err(e),
             None => return Err(anyhow!("sim `{}` was never scheduled", names[i])),
         };
-        if entry_passed(&summary) {
+        if entry_excluded(&summary) {
+            excluded += 1;
+        } else if entry_passed(&summary) {
             passed += 1;
         } else {
             failed.push(display_name);
@@ -656,18 +716,24 @@ pub fn do_run_named_sims(
     }
 
     // Result output, NOT logging: the multi-run verdict, consumed by you/CI.
+    let executed = names.len() - excluded;
+    let excl_suffix = if excluded > 0 {
+        format!(" (selected {}, {excluded} excluded)", names.len())
+    } else {
+        String::new()
+    };
     let suffix = if failed.is_empty() {
         String::new()
     } else {
         format!(" -- FAILED: {}", failed.join(", "))
     };
-    println!("[sim] {passed}/{} sims passed{suffix}", names.len());
+    println!("[sim] {passed}/{executed} sims passed{excl_suffix}{suffix}");
 
     if !failed.is_empty() {
         return Err(anyhow!(
             "{} of {} named sims failed in `{project}`",
             failed.len(),
-            names.len()
+            executed
         ));
     }
     Ok(())
@@ -731,7 +797,7 @@ pub fn do_run_all_sims(
     let out_dir = sim_output_dir()?;
     let output = out_dir.path().to_string_lossy().into_owned();
     let (wire_names, env_by_wire, mut stone) =
-        compile_sims(backend, project_path, PathBuf::from(&output))?;
+        compile_sims(backend, project_path.clone(), PathBuf::from(&output))?;
     sim_spawn_barrier();
     if wire_names.is_empty() {
         return Err(anyhow!("no @sim coroutines found in project `{project}`"));
@@ -750,39 +816,66 @@ pub fn do_run_all_sims(
             &mut stone,
         )?;
         let mut passed = 0usize;
+        let mut excluded = 0usize;
         let mut failed: Vec<String> = Vec::new();
         for (name, summary) in &results {
-            if entry_passed(summary) {
+            if entry_excluded(summary) {
+                excluded += 1;
+            } else if entry_passed(summary) {
                 passed += 1;
             } else {
                 failed.push(name.clone());
             }
         }
+        let executed = wire_names.len() - excluded;
+        let excl_suffix = if excluded > 0 {
+            format!(" (selected {}, {excluded} excluded)", wire_names.len())
+        } else {
+            String::new()
+        };
         let suffix = if failed.is_empty() {
             String::new()
         } else {
             format!(" -- FAILED: {}", failed.join(", "))
         };
         println!(
-            "[sim] {project} suite: {passed}/{} sims passed{suffix}",
-            wire_names.len()
+            "[sim] {project} suite: {passed}/{executed} sims passed{excl_suffix}{suffix}"
         );
         if !failed.is_empty() {
             return Err(anyhow!(
                 "{} of {} sims failed in `{project}`",
                 failed.len(),
-                wire_names.len()
+                executed
             ));
         }
         return Ok(());
     }
 
     let jobs = resolve_jobs(jobs, update_snapshots);
+    let active_renderer = active_sim_renderer(&project_path);
+    let mut summaries: HashMap<usize, Result<SimSummary>> = HashMap::new();
+    let mut active_indices: Vec<usize> = Vec::new();
+
+    for i in 0..wire_names.len() {
+        let env_pairs = env_by_wire.get(&wire_names[i]).map_or(&[][..], |v| v);
+        if let Some(req) = sim_required_backend(env_pairs) {
+            if req != active_renderer {
+                let reason = format!("requires {req} renderer (active is {active_renderer})");
+                let mut s = SimSummary::default();
+                s.excluded = Some(reason);
+                s.saw_stop = true;
+                summaries.insert(i, Ok(s));
+                continue;
+            }
+        }
+        active_indices.push(i);
+    }
 
     // Two lanes. Reload sims mutate the one session and the one overlay, so
     // they run alone with nothing else in flight; everything else is
     // independent once the compiled output is invocation-owned.
-    let (reload_idx, ordinary_idx): (Vec<usize>, Vec<usize>) = (0..wire_names.len())
+    let (reload_idx, ordinary_idx): (Vec<usize>, Vec<usize>) = active_indices
+        .into_iter()
         .partition(|&i| is_reload_lane(env_by_wire.get(&wire_names[i]).map_or(&[][..], |v| v)));
 
     // Concurrent children cannot stream: their progress lines would interleave
@@ -790,7 +883,6 @@ pub fn do_run_all_sims(
     // registry order below, which is what the concise multi-run path already
     // does. Serial runs keep today's live stream.
     let streaming = jobs == 1 && !quiet;
-    let mut summaries: HashMap<usize, Result<SimSummary>> = HashMap::new();
 
     // A record is finished, printed, and accounted in ONE place, so a sim's
     // lines can never interleave with another's: everything after the child
@@ -844,6 +936,7 @@ pub fn do_run_all_sims(
     // Records printed in completion order; the ACCOUNTING is registry order, so
     // the failed list and tally are identical to a serial run's.
     let mut passed = 0usize;
+    let mut excluded = 0usize;
     let mut failed: Vec<String> = Vec::new();
     for (i, name) in wire_names.iter().enumerate() {
         let summary = match summaries.remove(&i) {
@@ -851,7 +944,9 @@ pub fn do_run_all_sims(
             Some(Err(e)) => return Err(e),
             None => return Err(anyhow!("sim `{name}` was never scheduled")),
         };
-        if entry_passed(&summary) {
+        if entry_excluded(&summary) {
+            excluded += 1;
+        } else if entry_passed(&summary) {
             passed += 1;
         } else {
             failed.push(name.clone());
@@ -860,21 +955,26 @@ pub fn do_run_all_sims(
 
     // Result output, NOT logging: the suite verdict is this command's
     // answer, consumed by the user / CI.
+    let executed = wire_names.len() - excluded;
+    let excl_suffix = if excluded > 0 {
+        format!(" (selected {}, {excluded} excluded)", wire_names.len())
+    } else {
+        String::new()
+    };
     let suffix = if failed.is_empty() {
         String::new()
     } else {
         format!(" -- FAILED: {}", failed.join(", "))
     };
     println!(
-        "[sim] {project} suite: {passed}/{} sims passed{suffix}",
-        wire_names.len()
+        "[sim] {project} suite: {passed}/{executed} sims passed{excl_suffix}{suffix}"
     );
 
     if !failed.is_empty() {
         return Err(anyhow!(
             "{} of {} sims failed in `{project}`",
             failed.len(),
-            wire_names.len()
+            executed
         ));
     }
     Ok(())
@@ -1510,10 +1610,33 @@ fn run_specs_worker_mode(
 ) -> Result<Vec<(String, SimSummary)>> {
 
     let jobs = resolve_jobs(jobs, update_snapshots);
-    let (groups, isolated) = group_worker_specs(specs, env_by_wire);
-    // One slot per spec POSITION: the same sim can be named twice, and each
-    // occurrence is its own entry with its own result.
+    let active_renderer = active_sim_renderer(Path::new(project));
     let mut slots: Vec<Option<SimSummary>> = specs.iter().map(|_| None).collect();
+    let mut active_specs: Vec<String> = Vec::new();
+    let mut active_indices: Vec<usize> = Vec::new();
+
+    for (i, spec) in specs.iter().enumerate() {
+        let mut excluded_reason = None;
+        for part in parse_sim_chain(spec) {
+            if let Some(req) = sim_required_backend(env_by_wire.get(part).map_or(&[][..], |v| v)) {
+                if req != active_renderer {
+                    excluded_reason = Some(format!("requires {req} renderer (active is {active_renderer})"));
+                    break;
+                }
+            }
+        }
+        if let Some(reason) = excluded_reason {
+            let mut s = SimSummary::default();
+            s.excluded = Some(reason);
+            s.saw_stop = true;
+            slots[i] = Some(s);
+        } else {
+            active_specs.push(spec.clone());
+            active_indices.push(i);
+        }
+    }
+
+    let (groups, isolated) = group_worker_specs(&active_specs, env_by_wire);
 
     // The lane plan. A group splits into contiguous blocks so the entries a
     // worker serves stay in their requested order; splitting round-robin would
@@ -1525,7 +1648,7 @@ fn run_specs_worker_mode(
             let lo = group.len() * b / blocks;
             let hi = group.len() * (b + 1) / blocks;
             if lo < hi {
-                lanes.push(group[lo..hi].to_vec());
+                lanes.push(group[lo..hi].iter().map(|&idx| active_indices[idx]).collect());
             }
         }
     }
@@ -1534,13 +1657,23 @@ fn run_specs_worker_mode(
     // and can overlap. `worker_ineligibility` has other reasons (a `$OUT`-
     // interpolating env, disagreeing chain parts, `SIM_WORKER_ISOLATED`) and
     // none of them touch the session.
-    let (exclusive, poolable): (Vec<_>, Vec<_>) = isolated.into_iter().partition(|(i, _)| {
-        parse_sim_chain(&specs[*i])
-            .iter()
-            .any(|p| is_reload_lane(env_by_wire.get(*p).map_or(&[][..], |v| v)))
-    });
+    let (exclusive, poolable): (Vec<_>, Vec<_>) = isolated
+        .into_iter()
+        .map(|(idx, r)| (active_indices[idx], r))
+        .partition(|(i, _)| {
+            parse_sim_chain(&specs[*i])
+                .iter()
+                .any(|p| is_reload_lane(env_by_wire.get(*p).map_or(&[][..], |v| v)))
+        });
 
     if !quiet {
+        for (i, slot) in slots.iter().enumerate() {
+            if let Some(s) = slot {
+                if let Some(reason) = &s.excluded {
+                    println!("[sim] {}: EXCLUDED ({reason})", specs[i]);
+                }
+            }
+        }
         // EVERY lane is a boot, so every lane reports one. A singleton lane
         // printed nothing, which made a sim that silently got its own process
         // indistinguishable in the log from one sharing a 46-way worker -- the
@@ -4169,6 +4302,9 @@ struct SimSummary {
     /// Parent-side conservation evidence for the real watcher/publication
     /// completion path. None means this entry issued no reload request.
     reload_ledger: Option<ReloadLedgerSummary>,
+    /// Why this entry was excluded from execution by an admission check
+    /// (e.g. requires a different renderer backend like WGPU on an active GL suite).
+    excluded: Option<String>,
 }
 
 impl SimSummary {
@@ -4199,6 +4335,9 @@ impl SimSummary {
         self.never_started = self.never_started || other.never_started;
         if other.worker_ineligible.is_some() {
             self.worker_ineligible = other.worker_ineligible;
+        }
+        if other.excluded.is_some() {
+            self.excluded = other.excluded;
         }
         if let Some(other) = other.reload_ledger {
             let current = self.reload_ledger.get_or_insert_default();
@@ -4268,6 +4407,12 @@ impl SimSummary {
                     s.errors.push(SiteMessage { message, site });
                 }
                 "stop" => s.saw_stop = true,
+                "exclude" => {
+                    let reason = extract_str_field(rest, "reason")
+                        .unwrap_or_else(|| "unspecified".to_string());
+                    s.excluded = Some(reason);
+                    s.saw_stop = true;
+                }
                 "allocation_census" => match AllocationCensus::from_json(rest) {
                     Ok(census) if s.allocation_census.is_none() => {
                         s.allocation_census = Some(census)
@@ -4387,6 +4532,10 @@ impl SimSummary {
         // worse than either being wrong alone: a log reader and a shell `&&`
         // disagreed.
         let status = verdict_word(self);
+        if let Some(reason) = &self.excluded {
+            eprintln!("[sim] {sim_name}: {status} ({reason})");
+            return;
+        }
         let stop_note = if !self.saw_stop {
             " (no stop_sim() observed -- sim aborted early)"
         } else {
@@ -5426,6 +5575,32 @@ mod tests {
         let mut died = SimSummary { saw_stop: true, ..SimSummary::default() };
         died.process_failure_code = Some(1);
         assert_eq!(verdict_word(&died), "FAIL");
+    }
+
+    #[test]
+    fn entry_excluded_is_not_passed_and_verdict_word_is_excluded() {
+        let mut s = SimSummary::default();
+        s.excluded = Some("requires wgpu".to_string());
+        s.saw_stop = true;
+        assert!(!entry_passed(&s));
+        assert!(entry_excluded(&s));
+        assert_eq!(verdict_word(&s), "EXCLUDED");
+    }
+
+    #[test]
+    fn sim_summary_from_stderr_parses_exclude_op() {
+        let stderr = "__SIM__ {\"op\":\"exclude\",\"reason\":\"requires wgpu\"}\n";
+        let s = SimSummary::from_stderr(stderr);
+        assert_eq!(s.excluded.as_deref(), Some("requires wgpu"));
+        assert!(s.saw_stop);
+    }
+
+    #[test]
+    fn sim_required_backend_parses_env_pairs() {
+        assert_eq!(sim_required_backend(&[("SIM_BACKEND".into(), "wgpu".into())]), Some("wgpu"));
+        assert_eq!(sim_required_backend(&[("STONE_RENDERER".into(), "wgpu".into())]), Some("wgpu"));
+        assert_eq!(sim_required_backend(&[("SIM_REQUIRES".into(), "wgpu".into())]), Some("wgpu"));
+        assert_eq!(sim_required_backend(&[("FRAME_COUNT".into(), "10".into())]), None);
     }
 
     #[test]
