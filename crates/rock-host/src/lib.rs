@@ -106,4 +106,3 @@ mod tests {
         assert_eq!(result, root.to_string_lossy());
     }
 }
-
