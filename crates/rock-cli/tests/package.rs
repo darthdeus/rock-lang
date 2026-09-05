@@ -27,6 +27,64 @@ fn content_revision(catalog: &Path) -> String {
     String::from_utf8(out.stdout).unwrap().trim().to_string()
 }
 
+/// The shipping package of the real game excludes the development agent
+/// bridge on every surface the package owns: emitted game code, the staged
+/// manifest, and staged assets. The development inclusion control is the
+/// channel-scoped fixture test below; this test pins the production artifact.
+#[test]
+fn shipping_package_of_mag_excludes_the_agent_bridge() {
+    let out_dir = tempfile::tempdir().expect("package output");
+    let out = Command::new(rock_bin())
+        .current_dir(repo_root())
+        .args([
+            "package",
+            "mag",
+            "--channel",
+            "steam",
+            "--output",
+            out_dir.path().to_str().unwrap(),
+        ])
+        .output()
+        .expect("spawn rock package");
+    assert!(
+        out.status.success(),
+        "rock package failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let build = out_dir.path();
+    let markers = [
+        "agent_bridge_poll_system",
+        "editor_ipc_dispatch",
+        "stone_ipc_listen",
+        "mag-agent",
+        "stone-agent",
+    ];
+    let lua = std::fs::read_to_string(build.join("main.lua")).expect("packaged main.lua");
+    for marker in markers {
+        assert!(!lua.contains(marker), "packaged game code contains agent marker {marker:?}");
+    }
+    let manifest = std::fs::read_to_string(build.join("package-manifest.json")).expect("manifest");
+    for marker in ["mag-agent", "stone-agent"] {
+        assert!(!manifest.contains(marker), "package manifest references {marker:?}");
+    }
+    let staged = walkdir::WalkDir::new(build.join("assets"))
+        .into_iter()
+        .filter_map(Result::ok)
+        .count();
+    assert!(staged > 0, "package staged no assets");
+    for entry in walkdir::WalkDir::new(build.join("assets"))
+        .into_iter()
+        .filter_map(Result::ok)
+    {
+        if entry.file_type().is_file() {
+            let name = entry.file_name().to_string_lossy();
+            assert!(!name.contains("stone_agent"), "staged asset carries the agent cdylib: {}", name);
+            assert!(!name.contains("mag-agent"), "staged asset carries the bridge package: {}", name);
+        }
+    }
+}
+
 #[test]
 fn package_manifest_is_the_secret_safe_metadata_boundary() {
     let out_dir = tempfile::tempdir().expect("package output");
