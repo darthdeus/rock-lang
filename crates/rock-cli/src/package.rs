@@ -427,7 +427,7 @@ fn compile_visual_bank(
     selection: &mut rock_host::release::AssetSelection,
 ) -> Result<Option<CompiledVisualPackage>> {
     let bank_logical_key = "assets/visual_bank.json";
-    let Some(bank_asset) = rock_host::release::resolve_asset_with_overlays(
+    let Some(bank_asset) = rock_host::release::resolve_worktree_asset_with_overlays(
         project_dir,
         game_key,
         overlays,
@@ -463,7 +463,7 @@ fn compile_visual_bank(
         anyhow::bail!("package: visual bank dependencies must be sorted and unique");
     }
 
-    rock_host::release::include_release_asset(selection, bank_asset.clone());
+    rock_host::release::replace_release_asset(selection, bank_asset.clone());
     let mut dependencies = Vec::with_capacity(logical_dependencies.len());
     let mut fixed_output_keys = BTreeSet::new();
     for dependency in &logical_dependencies {
@@ -745,6 +745,51 @@ mod tests {
             Ok(_) => panic!("release admission accepted a missing visual dependency"),
         };
         assert!(error.to_string().contains("visual dependency is not stageable"));
+    }
+
+    #[test]
+    fn release_visual_bank_prefers_the_worktree_bank_over_a_stale_overlay_bank() {
+        let workspace = rock_host::project::find_workspace_root(
+            &std::env::current_dir().expect("current directory"),
+        )
+        .expect("workspace root");
+        let fixture = tempfile::tempdir_in(workspace).expect("visual fixture");
+        let overlay = fixture.path().join("overlay");
+        let project_object = fixture
+            .path()
+            .join("assets/.eat/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        std::fs::create_dir_all(&project_object).unwrap();
+        std::fs::create_dir_all(overlay.join("assets")).unwrap();
+        std::fs::write(
+            fixture.path().join("assets/visual_bank.json"),
+            "{\"schema_version\":1,\"plan_fingerprint\":\"sha256:0000000000000000000000000000000000000000000000000000000000000000\",\"dependencies\":[\"assets/.eat/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/image.png\"]}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            project_object.join("image.png"),
+            b"project-object",
+        )
+        .unwrap();
+        std::fs::write(
+            overlay.join("assets/visual_bank.json"),
+            "{\"schema_version\":1,\"plan_fingerprint\":\"sha256:0000000000000000000000000000000000000000000000000000000000000000\",\"dependencies\":[\"assets/.eat/missing/image.png\"]}\n",
+        )
+        .unwrap();
+
+        let mut selection = rock_host::release::AssetSelection::default();
+        compile_visual_bank(
+            fixture.path(),
+            "fixture",
+            &[overlay],
+            &mut selection,
+        )
+        .expect("the project-owned bank should be selected");
+        let bank = selection
+            .assets
+            .iter()
+            .find(|asset| asset.key == "fixture/assets/visual_bank.json")
+            .expect("selected bank");
+        assert_eq!(bank.source, fixture.path().join("assets/visual_bank.json"));
     }
 
     #[test]
