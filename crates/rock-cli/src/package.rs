@@ -427,12 +427,25 @@ fn compile_visual_bank(
     selection: &mut rock_host::release::AssetSelection,
 ) -> Result<Option<CompiledVisualPackage>> {
     let bank_logical_key = "assets/visual_bank.json";
-    let Some(bank_asset) = rock_host::release::resolve_worktree_asset_with_overlays(
+    let Some(bank_asset) = rock_host::release::resolve_worktree_asset(
         project_dir,
         game_key,
-        overlays,
         bank_logical_key,
     )? else {
+        let bank_key = format!("{game_key}/{bank_logical_key}");
+        selection.assets.retain(|asset| asset.key != bank_key);
+        if rock_host::release::resolve_asset_with_overlays(
+            project_dir,
+            game_key,
+            overlays,
+            bank_logical_key,
+        )?
+        .is_some()
+        {
+            anyhow::bail!(
+                "package: worktree visual bank is missing; refusing the overlay bank"
+            );
+        }
         return Ok(None);
     };
     let bytes = std::fs::read(&bank_asset.source)

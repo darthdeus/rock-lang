@@ -263,6 +263,15 @@ fn package_stages_declared_loose_overlay_assets_and_excludes_neighbors() {
 
     let overlay_assets = overlay.path().join("assets");
     std::fs::create_dir_all(overlay_assets.join("particles")).unwrap();
+    std::fs::write(
+        project.join("assets/visual_bank.json"),
+        concat!(
+            "{\"schema_version\":1,",
+            "\"plan_fingerprint\":\"sha256:0000000000000000000000000000000000000000000000000000000000000000\",",
+            "\"dependencies\":[]}\n",
+        ),
+    )
+    .unwrap();
     std::fs::write(overlay_assets.join("particles/declared.png"), b"declared").unwrap();
     std::fs::write(overlay_assets.join("particles/unrelated.png"), b"unrelated").unwrap();
     std::fs::write(
@@ -428,6 +437,52 @@ fn package_stages_the_worktree_visual_bank_and_exact_shared_dependencies() {
     assert!(!keys
         .iter()
         .any(|key| key == &format!("{game_key}/assets/.eat/unrelated/neighbor.png")));
+}
+
+#[test]
+fn package_rejects_an_overlay_bank_when_the_worktree_bank_is_missing() {
+    let fixture_root = tempfile::tempdir_in(repo_root()).expect("package fixture");
+    let project = fixture_root.path().join("missing-worktree-visual-bank");
+    let overlay = fixture_root.path().join("overlay");
+    let output = fixture_root.path().join("package");
+    std::fs::create_dir_all(project.join("assets")).unwrap();
+    std::fs::write(project.join("main.rock"), "fn main() {}\n").unwrap();
+    std::fs::write(
+        project.join("stick.toml"),
+        "[package]\nname = \"missing-worktree-visual-bank\"\n\n[release]\nassets = [\"assets\"]\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(overlay.join("assets")).unwrap();
+    std::fs::write(
+        overlay.join("assets/visual_bank.json"),
+        concat!(
+            "{\"schema_version\":1,",
+            "\"plan_fingerprint\":\"sha256:0000000000000000000000000000000000000000000000000000000000000000\",",
+            "\"dependencies\":[]}\n",
+        ),
+    )
+    .unwrap();
+
+    let overlays = std::env::join_paths([overlay.as_path()]).unwrap();
+    let packaged = Command::new(rock_bin())
+        .current_dir(repo_root())
+        .env("ROCK_ASSET_OVERLAYS", overlays)
+        .args([
+            "package",
+            project.to_str().unwrap(),
+            "--output",
+            output.to_str().unwrap(),
+        ])
+        .output()
+        .expect("spawn package");
+    let stderr = String::from_utf8_lossy(&packaged.stderr);
+    assert!(!packaged.status.success(), "package accepted an overlay bank without a worktree bank");
+    assert!(
+        stderr.contains("worktree visual bank is missing")
+            && stderr.contains("refusing the overlay bank"),
+        "missing worktree bank diagnostic was unclear: {stderr}"
+    );
+    assert!(!output.join("package-manifest.json").exists());
 }
 
 fn write_sound_package_fixture(project: &Path, sound_project: &str, assets: &[(&str, &[u8])]) {
