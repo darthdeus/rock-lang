@@ -736,7 +736,16 @@ mod tests {
         .expect("workspace root");
         let fixture = tempfile::tempdir_in(workspace).expect("visual fixture");
         let overlay = fixture.path().join("overlay");
+        std::fs::create_dir_all(fixture.path().join("assets")).unwrap();
         std::fs::create_dir_all(overlay.join("assets")).unwrap();
+        std::fs::write(
+            fixture.path().join("assets/visual_bank.json"),
+            format!(
+                "{{\"schema_version\":1,\"plan_fingerprint\":\"sha256:{}\",\"dependencies\":[\"assets/.eat/missing/image.png\"]}}",
+                "0".repeat(64),
+            ),
+        )
+        .unwrap();
         std::fs::write(
             overlay.join("assets/visual_bank.json"),
             format!(
