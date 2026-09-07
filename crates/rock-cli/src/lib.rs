@@ -74,6 +74,7 @@ mod replay_profile_report;
 mod image_video;
 pub mod run_sim;
 pub mod sim_record;
+pub mod sim_observability;
 mod stone;
 pub mod stone_test;
 mod test;

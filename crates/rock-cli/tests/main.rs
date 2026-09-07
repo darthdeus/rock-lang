@@ -112,3 +112,5 @@ mod watcher_tmp_project_path;
 mod iter_parse_cli;
 #[path = "backend_stats_gate.rs"]
 mod backend_stats_gate;
+#[path = "sim_observability.rs"]
+mod sim_observability;
