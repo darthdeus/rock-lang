@@ -264,6 +264,9 @@ fn fmt_inst(
                 fields.iter().map(|(fname, f)| format!("{fname}: v{}", v(*f))).collect();
             format!("{name}_ct({})", parts.join(", "))
         }
+        Inst::MakeNullableValue { present, value } => {
+            format!("nullable(v{}, v{})", v(*present), v(*value))
+        }
         Inst::MaterializeValueStruct { name, fields, .. } => {
             let parts: Vec<String> =
                 fields.iter().map(|(fname, f)| format!("{fname}: v{}", v(*f))).collect();

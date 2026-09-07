@@ -1361,6 +1361,13 @@ impl Builder<'_> {
         &mut self,
         bundle: &ValueBundle,
     ) -> Result<Idx<Inst>, CompilerError> {
+        if let ValueRepr::Group { present: Some(present), .. } = bundle.value() {
+            let value = self.pack(bundle.value().clone())?;
+            return Ok(self.emit_cur(Inst::MakeNullableValue {
+                present: *present,
+                value,
+            }));
+        }
         let Some(shape) = self
             .scx
             .rep_arena()

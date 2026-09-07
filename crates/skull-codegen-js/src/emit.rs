@@ -7369,6 +7369,7 @@ fn for_each_operand(inst: &Inst, f: &mut impl FnMut(Idx<Inst>)) {
                 f(*v);
             }
         }
+        Inst::MakeNullableValue { present, value } => mark(&[*present, *value]),
         Inst::MakeEnum { positional, named, .. } => {
             mark(positional);
             for (_, v) in named {
@@ -7431,7 +7432,9 @@ fn always_inlinable(inst: &Inst) -> bool {
             | Inst::UintToInt(_) | Inst::FloatToUint(_) | Inst::UintBitcastInt(_) | Inst::IntBitcastUint(_)
             | Inst::Format { .. } | Inst::FormatDyn { .. }
             | Inst::MakeTuple(_) | Inst::MakeVec(_)
-            | Inst::MakeStruct { .. } | Inst::MakeValueStruct { .. } | Inst::MakeEnum { .. } | Inst::MakeEnumDyn { .. }
+            | Inst::MakeStruct { .. } | Inst::MakeValueStruct { .. }
+            | Inst::MakeNullableValue { .. }
+            | Inst::MakeEnum { .. } | Inst::MakeEnumDyn { .. }
             | Inst::MakeEnv { .. }
     )
 }

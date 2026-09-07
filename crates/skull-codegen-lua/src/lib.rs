@@ -1995,7 +1995,8 @@ fn always_inlinable(inst: &Inst) -> bool {
             | Inst::UintToInt(_) | Inst::FloatToUint(_) | Inst::UintBitcastInt(_) | Inst::IntBitcastUint(_)
             | Inst::Format { .. } | Inst::FormatDyn { .. }
             | Inst::MakeTuple(_) | Inst::MakeVec(_)
-            | Inst::MakeStruct { .. } | Inst::MakeValueStruct { .. } | Inst::MakeEnum { .. }
+            | Inst::MakeStruct { .. } | Inst::MakeValueStruct { .. }
+            | Inst::MakeNullableValue { .. } | Inst::MakeEnum { .. }
             | Inst::MakeEnumDyn { .. }
     )
 }
@@ -2942,6 +2943,13 @@ impl Emitter<'_> {
                     self.write_opnd(out, *id);
                 }
                 out.push(')');
+            }
+            Inst::MakeNullableValue { present, value } => {
+                out.push('(');
+                self.write_opnd(out, *present);
+                out.push_str(" and ");
+                self.write_opnd(out, *value);
+                out.push_str(" or nil)");
             }
             Inst::MakeEnum {
                 tag,

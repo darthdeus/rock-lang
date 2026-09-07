@@ -492,6 +492,13 @@ pub enum Inst {
         /// Lua emitter asserts.
         fields: Vec<(Ustr, Idx<Inst>)>,
     },
+    /// A first-class nullable value whose payload has already been built by
+    /// MakeValueStruct. The explicit presence operand is required when a
+    /// flattened Group crosses an opaque function-value parameter boundary.
+    MakeNullableValue {
+        present: Idx<Inst>,
+        value: Idx<Inst>,
+    },
     /// A value-struct box that is AUTHORIZED rather than implicit: requested by
     /// `materialize(value)`, or minted by the compiler at a `@gpu_only` call
     /// boundary (`authorize_gpu_boundary_boxes`), where the callee's boxed param
@@ -751,6 +758,10 @@ impl Inst {
             | Inst::MaterializeValueStruct { fields, .. }
             | Inst::MakeEnv { fields, .. } => {
                 fields.iter().for_each(|(_, value)| push(*value));
+            }
+            Inst::MakeNullableValue { present, value } => {
+                push(*present);
+                push(*value);
             }
             Inst::MakeEnum { positional, named, .. } => {
                 positional.iter().for_each(|value| push(*value));

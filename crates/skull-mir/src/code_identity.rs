@@ -1032,6 +1032,11 @@ impl BodyHasher {
                     self.inst_idx(*value);
                 }
             }
+            Inst::MakeNullableValue { present, value } => {
+                self.tag(89);
+                self.inst_idx(*present);
+                self.inst_idx(*value);
+            }
             Inst::MakeEnum { tag, ty, positional, named } => {
                 self.tag(71);
                 self.string(tag.as_str());
