@@ -430,3 +430,108 @@ fn results_stay_positional_and_ordered_under_the_pool() {
         run.stderr
     );
 }
+
+#[test]
+fn manual_sims_are_excluded_only_from_implicit_suites() {
+    let fixture = tempfile::tempdir().expect("manual sim fixture");
+    let project = fixture.path().join("manual_fixture");
+    std::fs::create_dir_all(project.join("tests/sims")).unwrap();
+    std::fs::write(project.join("stick.toml"), format!(
+        "[package]\nname = \"manual_fixture\"\nversion = \"0.1.0\"\ntype = \"bin\"\n[dependencies]\nstone = {{ path = {:?} }}\n[build.vars]\nGIT_SHA = \"fixture\"\n",
+        workspace_root().join("stone")
+    )).unwrap();
+    std::fs::write(project.join("main.rock"),
+        "fn main() { stone_run_game(GameConfig { title: \"manual_fixture\", width: 64, height: 64 }) }\n"
+    ).unwrap();
+    std::fs::write(project.join("tests/sims/selection.rock"), r#"
+@sim
+co fn routine() -> Coroutine<Wait> {
+    start_game "manual_fixture"
+    sim_expect(true, "routine executed")
+    stop_sim()
+}
+@sim_env("SIM_MANUAL", "1")
+@sim
+co fn gallery() -> Coroutine<Wait> {
+    start_game "manual_fixture"
+    sim_expect(false, "explicit gallery executed")
+    stop_sim()
+}
+"#).unwrap();
+    for mode in ["--workers", "--isolated"] {
+        let history = fixture.path().join(mode.trim_start_matches('-'));
+        let run = |names: &[&str]| {
+            Command::new(rock_bin()).arg("sim").arg(&project).args(names)
+                .args([mode, "-j", "1"])
+                .current_dir(workspace_root())
+                .env("ROCK_SIM_TIMEOUT_SECS", "30")
+                .env("ROCK_SIM_LOG_DIR", &history)
+                .env("ROCK_SIM_WARN_SECS", "0.001")
+                .output().expect("run manual fixture")
+        };
+        let implicit = run(&[]);
+        let text = format!("{}{}", String::from_utf8_lossy(&implicit.stdout), String::from_utf8_lossy(&implicit.stderr));
+        assert!(implicit.status.success(), "{text}");
+        assert!(text.contains("1/1 sims passed (selected 2, 1 excluded)"), "{text}");
+        assert!(text.contains("gallery: EXCLUDED (manual; run by name)"), "{text}");
+        let entries = std::fs::read_dir(&history).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(entries.len(), 1);
+        let events = std::fs::read_to_string(entries[0].path().join("events.jsonl")).unwrap();
+        let events = events.lines().map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap()).collect::<Vec<_>>();
+        assert!(events.iter().any(|event| event["event"] == "entry_result" && event["verdict"] == "EXCLUDED"));
+        assert_eq!(events.last().unwrap()["complete"], true);
+        assert!(events.iter().any(|event| event["event"] == "timing_warning"));
+        let timings: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(entries[0].path().join("timings.json")).unwrap()).unwrap();
+        assert_eq!(timings["entries"].as_array().unwrap().len(), 1);
+        assert_eq!(timings["entries"][0]["completed"], true);
+        let runtime = events.iter().find(|event| event["event"] == "entry_runtime_context").expect("native timing context");
+        assert!(runtime["context"]["width"].as_u64().unwrap() > 0);
+        assert!(runtime["context"]["jit"].as_str().unwrap().starts_with("on"));
+        let explicit = run(&["gallery"]);
+        let text = format!("{}{}", String::from_utf8_lossy(&explicit.stdout), String::from_utf8_lossy(&explicit.stderr));
+        assert!(!explicit.status.success(), "{text}");
+        assert!(text.contains("explicit gallery executed"), "{text}");
+        assert!(!text.contains("EXCLUDED"), "{text}");
+    }
+}
+
+fn assert_shared_bank_edit_is_exclusive(name: &str) {
+    let run = run_project_workers("mag", &[name, "mob_attack_waits_for_arrival", "target_cycle_sim"], "2");
+    assert!(run.success, "{}", run.combined());
+    let mut live = HashSet::new();
+    let mut writer_started = false;
+    let mut ordinary_finished = 0;
+    for line in run.trace.lines() {
+        let (event, entry) = line.split_once('\t').expect("lifecycle event");
+        match event {
+            "start" if entry == name => {
+                assert!(live.is_empty(), "shared bank writer overlapped {live:?}:\n{}", run.trace);
+                assert_eq!(ordinary_finished, 2, "shared bank writer must follow the pool:\n{}", run.trace);
+                writer_started = true;
+                live.insert(entry);
+            }
+            "start" => {
+                assert!(!writer_started, "ordinary entry started after the shared bank writer:\n{}", run.trace);
+                live.insert(entry);
+            }
+            "end" => {
+                live.remove(entry);
+                if entry != name { ordinary_finished += 1; }
+            }
+            "proc_start" | "proc_end" => {},
+            _ => panic!("unexpected lifecycle event: {line}"),
+        }
+    }
+    assert!(writer_started && live.is_empty(), "{}", run.trace);
+    assert_eq!(peak_procs(&run.trace).1, 2, "both ordinary entries must retain their shared boot:\n{}", run.trace);
+}
+
+#[test]
+fn shared_sound_bank_edits_follow_the_worker_pool() {
+    assert_shared_bank_edit_is_exclusive("sound_bank_transaction");
+}
+
+#[test]
+fn shared_visual_bank_edits_follow_the_worker_pool() {
+    assert_shared_bank_edit_is_exclusive("visual_bank_worktree_watcher");
+}

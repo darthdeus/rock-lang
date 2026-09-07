@@ -615,6 +615,14 @@ fn run_named_entry(
     Ok((display_name, combined))
 }
 
+fn manual_sim(env: &[(String, String)]) -> Result<bool> {
+    match env.iter().rev().find(|(key, _)| key == "SIM_MANUAL").map(|(_, value)| value.as_str()) {
+        None | Some("0") => Ok(false),
+        Some("1") => Ok(true),
+        Some(value) => Err(anyhow!("SIM_MANUAL must be 0 or 1, got `{value}`")),
+    }
+}
+
 fn record_excluded_entry(recorder: Option<&SimRunRecorder>, occurrence_id: Option<u64>) {
     if let (Some(recorder), Some(id)) = (recorder, occurrence_id) {
         recorder.entry_result(id, 0, "EXCLUDED", None, 0, false, None);
@@ -1010,6 +1018,21 @@ fn do_run_all_sims_recorded(
         sim_exec_mode_name(mode),
         update_snapshots,
     );
+    let selected = wire_names.len();
+    let mut routine_names = Vec::new();
+    let mut routine_ids = Vec::new();
+    for (name, id) in wire_names.into_iter().zip(entry_ids) {
+        if manual_sim(env_by_wire.get(&name).map_or(&[][..], |v| v))? {
+            record_excluded_entry(Some(recorder), Some(id));
+            println!("[sim] {name}: EXCLUDED (manual; run by name)");
+        } else {
+            routine_names.push(name);
+            routine_ids.push(id);
+        }
+    }
+    let wire_names = routine_names;
+    let entry_ids = routine_ids;
+    let manual_excluded = selected - wire_names.len();
     if mode != SimExecMode::Isolated {
         let results = run_specs_worker_mode(
             &project,
@@ -1024,7 +1047,7 @@ fn do_run_all_sims_recorded(
             Some(&entry_ids),
         )?;
         let mut passed = 0usize;
-        let mut excluded = 0usize;
+        let mut excluded = manual_excluded;
         let mut failed: Vec<String> = Vec::new();
         for (name, summary) in &results {
             if entry_excluded(summary) {
@@ -1035,9 +1058,9 @@ fn do_run_all_sims_recorded(
                 failed.push(name.clone());
             }
         }
-        let executed = wire_names.len() - excluded;
+        let executed = selected - excluded;
         let excl_suffix = if excluded > 0 {
-            format!(" (selected {}, {excluded} excluded)", wire_names.len())
+            format!(" (selected {selected}, {excluded} excluded)")
         } else {
             String::new()
         };
@@ -1141,7 +1164,7 @@ fn do_run_all_sims_recorded(
     // Records printed in completion order; the ACCOUNTING is registry order, so
     // the failed list and tally are identical to a serial run's.
     let mut passed = 0usize;
-    let mut excluded = 0usize;
+    let mut excluded = manual_excluded;
     let mut failed: Vec<String> = Vec::new();
     for (i, name) in wire_names.iter().enumerate() {
         let summary = match summaries.remove(&i) {
@@ -1160,9 +1183,9 @@ fn do_run_all_sims_recorded(
 
     // Result output, NOT logging: the suite verdict is this command's
     // answer, consumed by the user / CI.
-    let executed = wire_names.len() - excluded;
+    let executed = selected - excluded;
     let excl_suffix = if excluded > 0 {
-        format!(" (selected {}, {excluded} excluded)", wire_names.len())
+        format!(" (selected {selected}, {excluded} excluded)")
     } else {
         String::new()
     };
@@ -2335,7 +2358,7 @@ fn writes_live(buffered: bool) -> bool {
 /// after `preset_env`, so a declared one never reaches the child and cannot
 /// stand for a difference between two entries. Splitting a group on an inert
 /// value would isolate sims for nothing.
-const RUNNER_OWNED_ENV_KEYS: &[&str] = &["FRAME_COUNT", "ROCK_MASK_WALL_CLOCK"];
+const RUNNER_OWNED_ENV_KEYS: &[&str] = &["FRAME_COUNT", "ROCK_MASK_WALL_CLOCK", "SIM_MANUAL"];
 
 /// Fixed values the runner publishes to EVERY sim child, layered BEFORE
 /// `preset_env` so a declaration still wins.
@@ -3091,6 +3114,12 @@ fn run_worker(
                                         *part,
                                     );
                                 }
+                                if let Some(context) = line.strip_prefix("__SIM__ ")
+                                    .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+                                    .and_then(|event| event.get("runtime").cloned())
+                                {
+                                    recorder.entry_runtime_context(worker_attempt, *occurrence_id, *part, context);
+                                }
                                 recorder.entry_start(
                                     worker_attempt,
                                     *occurrence_id,
@@ -3228,7 +3257,15 @@ fn run_worker(
                         // silently dropping the request or reaching for the
                         // session from a parallel lane.
                         let serviced = match stone.as_deref_mut() {
-                            Some(st) => service_reload_edit(st, output, &mut pristine, &req),
+                            Some(st) => {
+                                let mut apply = || service_reload_edit(st, output, &mut pristine, &req);
+                                if let Some(recorder) = recorder {
+                                    let names = parts.iter().map(|part| part.name.as_str()).collect::<Vec<_>>().join(",");
+                                    recorder.phase(&format!("reload_apply:{names}"), apply)
+                                } else {
+                                    apply()
+                                }
+                            },
                             None => Err(anyhow!(
                                 "reload_edit is only available to sims that opt into the \
                                  reload lane with `@sim_env(\"STONE_HOT_RELOAD\", \"1\")`"
@@ -3502,7 +3539,18 @@ fn run_worker(
     // sim in the suite).
     if let Err(e) = stone
         .as_deref_mut()
-        .map(|st| revert_reload_edits(st, output, &mut pristine))
+        .map(|st| {
+            if pristine.is_empty() {
+                return revert_reload_edits(st, output, &mut pristine);
+            }
+            let mut restore = || revert_reload_edits(st, output, &mut pristine);
+            if let Some(recorder) = recorder {
+                let names = parts.iter().map(|part| part.name.as_str()).collect::<Vec<_>>().join(",");
+                recorder.phase(&format!("reload_restore:{names}"), restore)
+            } else {
+                restore()
+            }
+        })
         .unwrap_or(Ok(()))
     {
         summaries[blamed].errors.push(SiteMessage {
@@ -6136,6 +6184,15 @@ mod tests {
         let mut died = SimSummary { saw_stop: true, ..SimSummary::default() };
         died.process_failure_code = Some(1);
         assert_eq!(verdict_word(&died), "FAIL");
+    }
+
+    #[test]
+    fn manual_gallery_selection_is_explicit_and_last_wins() {
+        assert!(manual_sim(&[("SIM_MANUAL".into(), "1".into())]).unwrap());
+        assert!(!manual_sim(&[]).unwrap());
+        assert!(!manual_sim(&[("SIM_MANUAL".into(), "1".into()),
+            ("SIM_MANUAL".into(), "0".into())]).unwrap());
+        assert!(manual_sim(&[("SIM_MANUAL".into(), "yes".into())]).is_err());
     }
 
     #[test]
