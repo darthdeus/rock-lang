@@ -735,17 +735,24 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
 
     let save = fs::read_to_string(repo.join("mag/save.rock")).expect("read MAG save source");
     assert!(
-        save.contains("fn Player.progress_to_json(player, progress: ProgressState)"),
+        save.contains("fn Player.progress_to_json(player, progress: ProgressState,"),
         "save serialization must consume the typed progress domain explicitly"
     );
+    let async_save = fs::read_to_string(repo.join("mag/save_async.rock"))
+        .expect("read MAG asynchronous save source");
     assert!(
-        save.contains("save_progress(player, MAG_PROGRESS)"),
+        async_save.contains("save_async_metadata(player, MAG_PROGRESS"),
         "the persistence boundary must pass the authoritative progress domain"
+    );
+    assert!(
+        save.contains("fn Player.save_progress_migration(player, progress: ProgressState,"),
+        "migration must forward an explicitly typed progress domain"
     );
     for (line_number, line) in save.lines().enumerate() {
         if line.contains("save_progress(player") && !line.contains("fn Player.save_progress") {
             assert!(
-                line.contains("save_progress(player, MAG_PROGRESS"),
+                line.contains("save_progress(player, MAG_PROGRESS")
+                    || line.contains("save_progress(player, progress,"),
                 "save caller at mag/save.rock:{} bypasses the progress domain: {line}",
                 line_number + 1
             );
