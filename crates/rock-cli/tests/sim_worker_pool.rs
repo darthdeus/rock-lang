@@ -231,6 +231,17 @@ fn omitted_skip_render_shares_with_explicit_default() {
 }
 
 #[test]
+fn world_restore_does_not_leave_keyframes_in_the_successor() {
+    let run = run_workers(&[
+        "scene_owned_task_survives_world_image_restore",
+        "t1a_worker_registries_stay_bounded",
+    ], "1");
+    assert!(run.success, "the successor owns only its boot state:\n{}", run.combined());
+    assert!(run.stdout.contains("[sim] 2/2 sims passed"), "{}", run.combined());
+    assert_eq!(peak_procs(&run.trace), (1, 1), "{}", run.trace);
+}
+
+#[test]
 fn mag_world_restore_preserves_successor_boot_fonts() {
     for specs in [
         ["mag_live_run_world_image_rewinds", "direct_session_state_world_image_restores_the_authority"],
