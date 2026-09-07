@@ -145,6 +145,68 @@ fn main() {
 }
 
 #[test]
+fn c_imgui_popup_bindings_link_against_actual_stone_artifact() {
+    let root = workspace_root();
+    let dir = tempfile::tempdir().expect("popup imgui fixture directory");
+    let source_path = dir.path().join("stone/engine/ui/imgui.rock");
+    std::fs::create_dir_all(source_path.parent().expect("popup fixture parent"))
+        .expect("create popup fixture parent");
+    let source = r#"
+inline(lua) fn imgui_open_popup(id: string) = "imgui.OpenPopup_Str(id, 0)"
+@inline inline(lua) fn imgui_begin_popup(id: string) -> bool = "return imgui.BeginPopup(id, 0)"
+@inline inline(lua) fn imgui_end_popup() = "imgui.EndPopup()"
+
+fn main() {
+    imgui_open_popup("QuestActions")
+    if imgui_begin_popup("QuestActions") { print("popup-open") }
+    imgui_end_popup()
+    print("popup-imgui-ok")
+}
+"#;
+    std::fs::write(&source_path, source).expect("write popup imgui fixture");
+    let output = dir.path().join("popup-imgui-consumer");
+    let compile = Command::new(env!("CARGO_BIN_EXE_rock"))
+        .args([
+            "compile",
+            source_path.to_str().expect("utf8 popup fixture"),
+            "--backend",
+            "c",
+            "--output",
+            output.to_str().expect("utf8 popup output"),
+        ])
+        .current_dir(&root)
+        .env_remove("ROCK_SKIP_ENGINE_BUILD")
+        .output()
+        .expect("spawn C popup compile");
+    assert!(
+        compile.status.success(),
+        "C popup consumer did not link against Stone:\nstdout:{}\nstderr:{}",
+        String::from_utf8_lossy(&compile.stdout),
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    let generated = std::fs::read_to_string(output.with_extension("c"))
+        .expect("read generated C popup consumer");
+    for symbol in [
+        "stone_imgui_open_popup",
+        "stone_imgui_begin_popup",
+        "stone_imgui_end_popup",
+    ] {
+        assert!(generated.contains(symbol), "generated consumer omitted {symbol}");
+    }
+    let run = Command::new(&output)
+        .current_dir(&root)
+        .output()
+        .expect("run linked C popup consumer");
+    assert!(
+        run.status.success(),
+        "linked C popup consumer failed:\nstdout:{}\nstderr:{}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(run.stdout, b"popup-imgui-ok\n");
+}
+
+#[test]
 fn c_compile_keeps_artifacts_and_invalidates_stale_defaults() {
     assert!(
         Command::new("clang")
