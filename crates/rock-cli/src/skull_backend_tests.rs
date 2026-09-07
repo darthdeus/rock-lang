@@ -3772,32 +3772,40 @@ mod force_full_tests {
         let source = dir.path().join("main.rock");
         let stick = dir.path().join("stick.toml");
         std::fs::write(&source, "fn main() {}\n").unwrap();
-        let write_stick = |overlay: &str| {
+        let write_stick = |overlay: &std::path::Path| {
+            std::fs::create_dir_all(overlay).unwrap();
             std::fs::write(
                 &stick,
                 format!(
-                    "[package]\nname = \"preamble-refresh\"\n[assets]\noverlays = [{overlay:?}]\n"
+                    "[package]\nname = \"preamble-refresh\"\n[assets]\noverlays = [{:?}]\n",
+                    overlay.to_string_lossy()
                 ),
             )
             .unwrap();
         };
 
-        write_stick("/tmp/overlay-v1");
-        let mut skull = SkullStone::init(&dir_str, &main_lua, &incremental).expect("init");
-        assert!(std::fs::read_to_string(&main_lua).unwrap().contains("/tmp/overlay-v1"));
+        let overlay_v1 = dir.path().join("overlay-v1");
+        let overlay_v2 = dir.path().join("overlay-v2");
+        let overlay_v3 = dir.path().join("overlay-v3");
 
-        write_stick("/tmp/overlay-v2");
+        write_stick(&overlay_v1);
+        let mut skull = SkullStone::init(&dir_str, &main_lua, &incremental).expect("init");
+        assert!(std::fs::read_to_string(&main_lua)
+            .unwrap()
+            .contains(overlay_v1.to_str().unwrap()));
+
+        write_stick(&overlay_v2);
         let reload = skull.recompile(std::slice::from_ref(&stick), &main_lua, &incremental).unwrap();
         assert!(matches!(reload, SkullReload::Full { .. }));
         let rebuilt = std::fs::read_to_string(&main_lua).unwrap();
-        assert!(rebuilt.contains("/tmp/overlay-v2"));
-        assert!(!rebuilt.contains("/tmp/overlay-v1"));
+        assert!(rebuilt.contains(overlay_v2.to_str().unwrap()));
+        assert!(!rebuilt.contains(overlay_v1.to_str().unwrap()));
 
-        write_stick("/tmp/overlay-v3");
+        write_stick(&overlay_v3);
         skull.force_full(&main_lua, &incremental).unwrap();
         let forced = std::fs::read_to_string(&main_lua).unwrap();
-        assert!(forced.contains("/tmp/overlay-v3"));
-        assert!(!forced.contains("/tmp/overlay-v2"));
+        assert!(forced.contains(overlay_v3.to_str().unwrap()));
+        assert!(!forced.contains(overlay_v2.to_str().unwrap()));
     }
 
     /// init at v1 -> body-edit to v2 (writes the overlay) -> force_full. The
@@ -4519,5 +4527,28 @@ mod backend_stats_workspace_tests {
             !times.emit_phases.is_empty(),
             "successful timed emission must populate production phase attribution"
         );
+    }
+
+    #[test]
+    fn package_tests_dir_resolves_to_package_root() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        std::fs::write(
+            dir.path().join("stick.toml"),
+            "[package]\nname = \"test-pkg\"\n",
+        )
+        .expect("stick.toml");
+        let tests_dir = dir.path().join("tests");
+        std::fs::create_dir_all(&tests_dir).expect("create tests dir");
+        std::fs::write(tests_dir.join("foo_test.rock"), "@test fn t() { assert(true) }\n")
+            .expect("foo_test.rock");
+
+        let tests_str = tests_dir.to_string_lossy().to_string();
+        let resolved = crate::skull_backend::is_package_tests_dir(&tests_str);
+        assert_eq!(resolved, Some(dir.path().to_string_lossy().to_string()));
+
+        let unrelated_dir = tempfile::TempDir::new().expect("tempdir");
+        let bare_tests = unrelated_dir.path().join("tests");
+        std::fs::create_dir_all(&bare_tests).expect("create bare tests");
+        assert_eq!(crate::skull_backend::is_package_tests_dir(&bare_tests.to_string_lossy()), None);
     }
 }

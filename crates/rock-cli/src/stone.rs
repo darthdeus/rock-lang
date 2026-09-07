@@ -231,21 +231,23 @@ pub fn do_stone_watch(
     // tmp/ for the restart-trigger file. FileWatcher silently skips
     // nonexistent paths, so listing the optional crates is safe on machines
     // where they aren't checked out.
+    let rock_root = PathBuf::from(rock_host::rock_dir());
     let mut watch_paths = crate::watch::project_engine_watch_paths(path);
     watch_paths.extend([
-        PathBuf::from("stone-rs/src"),
-        PathBuf::from("stone-rs/Cargo.toml"),
-        PathBuf::from("stone-rs/build.rs"),
-        PathBuf::from("tmp"),  // Watch tmp/ for restart.txt trigger
+        rock_root.join("stone-rs/src"),
+        rock_root.join("stone-rs/Cargo.toml"),
+        rock_root.join("stone-rs/build.rs"),
+        rock_root.join("tmp"),  // Watch tmp/ for restart.txt trigger
+        PathBuf::from("tmp"),
     ]);
     // Every optional lib, from the build table: a crate that can be BUILT on an
     // edit but is not WATCHED for one is a hot-reload hole that looks like the
     // edit did nothing.
     for lib in rock_host::engine_build::OPTIONAL_ENGINE_LIBS {
         watch_paths.extend([
-            PathBuf::from(format!("{}/src", lib.crate_name)),
-            PathBuf::from(format!("{}/Cargo.toml", lib.crate_name)),
-            PathBuf::from(format!("{}/build.rs", lib.crate_name)),
+            rock_root.join(format!("{}/src", lib.crate_name)),
+            rock_root.join(format!("{}/Cargo.toml", lib.crate_name)),
+            rock_root.join(format!("{}/build.rs", lib.crate_name)),
         ]);
     }
     watch_paths.extend(crate::watch::compiler_watch_paths());

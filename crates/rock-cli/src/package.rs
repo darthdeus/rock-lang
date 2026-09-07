@@ -30,14 +30,23 @@ pub(crate) struct SoundInspectionTarget {
     pub overlays: Vec<PathBuf>,
 }
 
-fn package_context(project: &str) -> Result<PackageContext> {
-    rock_host::project::ensure_workspace_root()?;
-    let root = rock_host::project::find_workspace_root(&std::env::current_dir()?)
-        .ok_or_else(|| anyhow::anyhow!("package: cannot find the Rock workspace root"))?;
+fn project_and_config(project: &str) -> Result<(PathBuf, Option<rock_host::stick::StickConfig>)> {
     let project_path = PathBuf::from(project);
     let project_abs = project_path
         .canonicalize()
-        .map_err(|e| anyhow::anyhow!("package: cannot resolve project {}: {e}", project_path.display()))?;
+        .map_err(|e| anyhow::anyhow!("cannot resolve project {}: {e}", project_path.display()))?;
+    let config = rock_host::stick::StickConfig::from_path_optional(&project_abs.join("stick.toml"))?;
+    if let Some(config) = config.as_ref() {
+        config.validate_build()?;
+    }
+    Ok((project_abs, config))
+}
+
+fn package_context(project: &str) -> Result<PackageContext> {
+    rock_host::project::ensure_workspace_root()?;
+    let (project_abs, config) = project_and_config(project)?;
+    let root = rock_host::project::find_source_root(&project_abs)
+        .ok_or_else(|| anyhow::anyhow!("package: cannot find the source workspace root for {}", project_abs.display()))?;
     let root_abs = root.canonicalize()?;
     let game_key = project_abs
         .strip_prefix(&root_abs)
@@ -46,10 +55,6 @@ fn package_context(project: &str) -> Result<PackageContext> {
         .replace('\\', "/");
     if game_key.is_empty() {
         anyhow::bail!("package: expected a game directory, got the workspace root");
-    }
-    let config = rock_host::stick::StickConfig::from_path_optional(&project_abs.join("stick.toml"))?;
-    if let Some(config) = config.as_ref() {
-        config.validate_build()?;
     }
     Ok(PackageContext {
         root: root_abs,
@@ -60,6 +65,10 @@ fn package_context(project: &str) -> Result<PackageContext> {
 }
 
 pub fn sound_project_path_for(project: &str) -> Result<Option<PathBuf>> {
+    let (_, config) = project_and_config(project)?;
+    if config.as_ref().and_then(|config| config.sound.as_ref()).is_none() {
+        return Ok(None);
+    }
     let context = package_context(project)?;
     rock_host::release::sound_project_path(&context.project, context.config.as_ref())?
         .map(|path| path.canonicalize().map_err(Into::into))
@@ -67,6 +76,10 @@ pub fn sound_project_path_for(project: &str) -> Result<Option<PathBuf>> {
 }
 
 pub fn prepare_sound_bank(project: &str) -> Result<Option<PathBuf>> {
+    let (_, config) = project_and_config(project)?;
+    if config.as_ref().and_then(|config| config.sound.as_ref()).is_none() {
+        return Ok(None);
+    }
     let context = package_context(project)?;
     let overlays = rock_host::release::asset_overlay_roots(&context.project, context.config.as_ref())?;
     let mut selection = rock_host::release::AssetSelection::default();
@@ -695,6 +708,25 @@ fn remove_if_present(path: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn external_project_without_sound_does_not_need_workspace_context() {
+        let fixture = tempfile::tempdir().expect("external fixture");
+        std::fs::write(
+            fixture.path().join("stick.toml"),
+            "[package]\nname = \"external-no-sound\"\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            sound_project_path_for(fixture.path().to_str().unwrap()).unwrap(),
+            None
+        );
+        assert_eq!(
+            prepare_sound_bank(fixture.path().to_str().unwrap()).unwrap(),
+            None
+        );
+    }
 
     #[test]
     fn development_bank_allows_a_missing_sound_dependency() {
