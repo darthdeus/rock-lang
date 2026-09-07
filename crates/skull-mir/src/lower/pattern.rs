@@ -158,6 +158,7 @@ impl Builder<'_> {
                     EnumPlan::for_name(self.ws, e).and_then(|plan| plan.flat().cloned())
                 });
                 for (i, sp) in sub.into_iter().enumerate() {
+                    let sub_enum = en.and_then(|e| self.variant_payload_enum(e, variant, i));
                     // A payload position widened to a `nobox` value's leaves binds
                     // THE LEAVES -- rebuilding a box here to bind one cell is the
                     // materialization the widening exists to avoid.
@@ -168,6 +169,48 @@ impl Builder<'_> {
                             };
                             let leaves = self.scrut_payload_leaves(scrut, i, &vs, shape);
                             self.bind_leaves(b, &leaves, vs)?;
+                            continue;
+                        }
+                        if let Some(sub_enum) = sub_enum
+                            && let Some(nested_shape) = EnumPlan::for_name(self.ws, sub_enum)
+                                .and_then(|plan| plan.flat().cloned())
+                        {
+                            let leaves = self.scrut_payload_leaves(
+                                scrut,
+                                i,
+                                &vs,
+                                flat_shape
+                                    .as_ref()
+                                    .ok_or_else(|| gap("flat enum payload lost its compiler-owned shape"))?,
+                            );
+                            let (tag, rest) = leaves
+                                .split_first()
+                                .ok_or_else(|| gap("flat enum payload has no nested tag leaf"))?;
+                            let width = nested_shape.tuple_width();
+                            let record_fields = nested_shape.record_fields();
+                            if rest.len() != width + record_fields.len() {
+                                return Err(gap(
+                                    "nested flat enum payload differs from its compiler-owned shape",
+                                ));
+                            }
+                            let nested_scrut = Scrut::Cells {
+                                tag: *tag,
+                                positional: rest[..width].to_vec(),
+                                named: record_fields
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(index, field)| (*field, rest[width + index]))
+                                    .collect(),
+                                shape: nested_shape,
+                            };
+                            self.match_pattern(
+                                &nested_scrut,
+                                sp,
+                                fail,
+                                variants,
+                                false,
+                                Some(sub_enum),
+                            )?;
                             continue;
                         }
                     }
@@ -182,7 +225,6 @@ impl Builder<'_> {
                     // type) so a NESTED enum pattern (`L(J(x))`) tests its own tag
                     // repr -- else an unqualified `J` defaults to the `.__variant`
                     // table path and faults on a cdata inner enum.
-                    let sub_enum = en.and_then(|e| self.variant_payload_enum(e, variant, i));
                     self.match_pattern(&Scrut::Val(payload), sp, fail, variants, false, sub_enum)?;
                 }
                 Ok(())
