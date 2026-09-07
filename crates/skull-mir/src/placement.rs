@@ -1616,15 +1616,19 @@ fn value_place(
                 {
                     continue;
                 }
-                let value = args
+                let values = argument_origins
                     .get(store.value as usize)
-                    .copied()
-                    .unwrap_or(Place::Unknown);
-                let destination = args
+                    .cloned()
+                    .unwrap_or_else(|| vec![Place::Unknown]);
+                let destinations = argument_origins
                     .get(store.destination as usize)
-                    .copied()
-                    .unwrap_or(Place::Unknown);
-                add_constraint(analysis, value, destination, span);
+                    .cloned()
+                    .unwrap_or_else(|| vec![Place::Unknown]);
+                for value in values {
+                    for destination in &destinations {
+                        add_constraint(analysis, value, *destination, span);
+                    }
+                }
             }
             for &constraint in &effect.constraints {
                 if let Place::Param(index) = constraint.value
