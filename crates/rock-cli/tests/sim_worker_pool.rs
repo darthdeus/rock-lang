@@ -46,12 +46,12 @@ impl Run {
     }
 }
 
-/// `rock sim testbed --workers <specs> -j <jobs>` with a lifecycle trace.
-fn run_workers(specs: &[&str], jobs: &str) -> Run {
+/// `rock sim <project> --workers <specs> -j <jobs>` with a lifecycle trace.
+fn run_project_workers(project: &str, specs: &[&str], jobs: &str) -> Run {
     let dir = tempfile::tempdir().expect("trace tempdir");
     let trace_path = dir.path().join("lifecycle.log");
 
-    let mut args = vec!["sim", "testbed"];
+    let mut args = vec!["sim", project];
     args.extend_from_slice(specs);
     args.extend_from_slice(&["--workers", "-j", jobs]);
 
@@ -60,6 +60,7 @@ fn run_workers(specs: &[&str], jobs: &str) -> Run {
         .current_dir(workspace_root())
         .env("ROCK_SIM_TIMEOUT_SECS", "180")
         .env("ROCK_SIM_LIFECYCLE_LOG", &trace_path)
+        .env_remove("SIM_SKIP_RENDER")
         .output()
         .expect("run rock sim --workers");
 
@@ -71,6 +72,10 @@ fn run_workers(specs: &[&str], jobs: &str) -> Run {
         trace,
         _dir: dir,
     }
+}
+
+fn run_workers(specs: &[&str], jobs: &str) -> Run {
+    run_project_workers("testbed", specs, jobs)
 }
 
 /// The high-water mark of simultaneously live CHILD PROCESSES, plus how many
@@ -185,6 +190,42 @@ fn small_signature_groups_do_not_buy_singleton_boots() {
     assert_eq!(
         total, 2,
         "two compatible groups should use one two-entry worker each, not four singleton boots:\n{}",
+        run.trace
+    );
+}
+
+#[test]
+fn omitted_skip_render_shares_with_explicit_default() {
+    let specs = [
+        "spell_damages",
+        "target_cycle_sim",
+        "cure_base_removes_one_poison_level",
+        "cure_unpumped_still_uses_entity_targeting",
+    ];
+    let run = run_project_workers("mag", &specs, "4");
+    assert!(run.success, "every sim here passes standalone:\n{}", run.combined());
+    assert!(
+        run.stdout.contains("[sim] 4/4 sims passed"),
+        "all entries must be accounted for:\n{}",
+        run.stdout
+    );
+    let result_lines: Vec<&str> = run
+        .stderr
+        .lines()
+        .filter(|line| line.starts_with("[sim] ") && line.contains(": PASS ("))
+        .collect();
+    assert_eq!(result_lines.len(), specs.len(), "every entry emitted a result:\n{}", run.stderr);
+    assert!(
+        result_lines.iter().all(|line| !line.contains("(0/0 expects passed)")),
+        "the signature witness must contain real assertions:\n{}",
+        run.stderr
+    );
+
+    let (peak, total) = peak_procs(&run.trace);
+    assert_eq!(peak, 1, "the equivalent defaults should share one worker:\n{}", run.trace);
+    assert_eq!(
+        total, 1,
+        "omitted and explicit SIM_SKIP_RENDER=1 should not split a boot:\n{}",
         run.trace
     );
 }

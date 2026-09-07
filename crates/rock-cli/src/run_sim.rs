@@ -36,7 +36,7 @@ const DEFAULT_FRAME_BUDGET: usize = 600;
 /// back -- a sim asking for a bound the runner silently replaces would be
 /// guarded by a number nobody wrote.
 fn frame_budget_for(sim_name: &str, env_pairs: &[(String, String)]) -> Result<usize> {
-    let Some((_, raw)) = env_pairs.iter().find(|(k, _)| k == "FRAME_COUNT") else {
+    let Some((_, raw)) = env_pairs.iter().rev().find(|(k, _)| k == "FRAME_COUNT") else {
         return Ok(DEFAULT_FRAME_BUDGET);
     };
     raw.parse::<usize>().ok().filter(|n| *n > 0).ok_or_else(|| {
@@ -2210,23 +2210,32 @@ const RUNNER_OWNED_ENV_KEYS: &[&str] = &["FRAME_COUNT", "ROCK_MASK_WALL_CLOCK"];
 /// Only fixed literals belong here. `STONE_ASSET_STUB` and `STONE_AUDIO_STUB`
 /// are computed from the group's own composition, so discounting them would be
 /// circular -- the value depends on the grouping this decides.
-const RUNNER_BASELINE_ENV: &[(&str, &str)] = &[("ROCK_TEST_SEED", "42"), ("STONE_HEADLESS", "1")];
+const RUNNER_BASELINE_ENV: &[(&str, &str)] = &[
+    ("ROCK_TEST_SEED", "42"),
+    ("SIM_SKIP_RENDER", "1"),
+    ("STONE_HEADLESS", "1"),
+];
 
 /// The part of a sim's `@sim_env` that is consumed during global init, engine
 /// init and `@init` -- what a shared process cannot vary between entries.
 ///
-/// Canonical (stable-sorted by key) so declaration order does not split a
-/// group: two sims agreeing on the same pairs share a signature however they
-/// spelled them. The sort is stable, so a duplicated key keeps its last-wins
-/// application order and a genuine effective difference still refuses.
+/// Canonical (last-wins, then stable-sorted by key) so redundant declarations
+/// do not split a group: two sims agreeing on the same effective pairs share a
+/// signature however they spelled them. A different final value still refuses.
 fn boot_signature(env_pairs: &[(String, String)]) -> Vec<(String, String)> {
-    let mut sig: Vec<(String, String)> = env_pairs
-        .iter()
+    let mut effective = Vec::with_capacity(env_pairs.len());
+    for (key, value) in env_pairs {
+        if let Some(previous) = effective.iter().position(|(k, _)| k == key) {
+            effective.remove(previous);
+        }
+        effective.push((key.clone(), value.clone()));
+    }
+    let mut sig: Vec<(String, String)> = effective
+        .into_iter()
         .filter(|(k, _)| !RUNNER_OWNED_ENV_KEYS.contains(&k.as_str()))
         .filter(|(k, v)| {
             !RUNNER_BASELINE_ENV.iter().any(|(bk, bv)| *bk == k.as_str() && *bv == v.as_str())
         })
-        .cloned()
         .collect();
     sig.sort_by(|a, b| a.0.cmp(&b.0));
     sig
@@ -5451,6 +5460,49 @@ mod tests {
                 "`FRAME_COUNT={bad}` must reject rather than silently become the default"
             );
         }
+    }
+
+    #[test]
+    fn a_frame_count_uses_the_last_declaration() {
+        assert_eq!(
+            frame_budget_for("s", &env(&[("FRAME_COUNT", "80"), ("FRAME_COUNT", "90")]))
+                .expect("last declaration is valid"),
+            90
+        );
+        assert_eq!(
+            frame_budget_for("s", &env(&[("FRAME_COUNT", "bad"), ("FRAME_COUNT", "90")]))
+                .expect("an overridden invalid declaration is inert"),
+            90
+        );
+        assert!(
+            frame_budget_for("s", &env(&[("FRAME_COUNT", "90"), ("FRAME_COUNT", "bad")]))
+                .is_err(),
+            "the effective last declaration is the one that must be validated"
+        );
+    }
+
+    #[test]
+    fn the_boot_signature_uses_effective_defaults_and_last_wins() {
+        assert_eq!(
+            sig(&[("SIM_SKIP_RENDER", "1")]),
+            sig(&[]),
+            "explicit skip-render default matches the runner-published default"
+        );
+        assert_eq!(
+            sig(&[("SIM_SKIP_RENDER", "0"), ("SIM_SKIP_RENDER", "1")]),
+            sig(&[]),
+            "an overridden render value does not split on its discarded value"
+        );
+        assert_ne!(
+            sig(&[("SIM_SKIP_RENDER", "1"), ("SIM_SKIP_RENDER", "0")]),
+            sig(&[]),
+            "the effective explicit render opt-in remains a boot difference"
+        );
+        assert_eq!(
+            sig(&[("OTHER", "old"), ("OTHER", "new")]),
+            sig(&[("OTHER", "new")]),
+            "ordinary environment declarations use last-wins semantics too"
+        );
     }
 
     #[test]
