@@ -11,6 +11,64 @@ fn rock_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_rock"))
 }
 
+#[cfg(unix)]
+#[test]
+fn sdk_executable_can_discover_sound_project_in_separate_source_worktree() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let sdk = tempfile::tempdir().expect("release SDK fixture");
+    std::fs::create_dir_all(sdk.path().join("bin")).unwrap();
+    std::fs::create_dir_all(sdk.path().join("lib")).unwrap();
+    std::os::unix::fs::symlink(repo_root().join("stone"), sdk.path().join("stone")).unwrap();
+    std::os::unix::fs::symlink(repo_root().join("stdlib"), sdk.path().join("stdlib")).unwrap();
+    let sdk_rock = sdk.path().join("bin/rock");
+    std::fs::copy(rock_bin(), &sdk_rock).expect("copy release-layout executable");
+    let mut permissions = std::fs::metadata(&sdk_rock).unwrap().permissions();
+    permissions.set_mode(permissions.mode() | 0o111);
+    std::fs::set_permissions(&sdk_rock, permissions).unwrap();
+
+    let source = tempfile::tempdir().expect("source worktree fixture");
+    std::fs::write(source.path().join("Cargo.toml"), "[workspace]\n").unwrap();
+    std::fs::create_dir(source.path().join("prebuilt")).unwrap();
+    let project = source.path().join("mag");
+    std::fs::create_dir_all(project.join("tests/sims")).unwrap();
+    std::fs::write(
+        project.join("stick.toml"),
+        format!(
+            "[package]\nname = \"external-sound-sim\"\ntype = \"bin\"\n\n[dependencies]\nstone = {{ path = \"{}\" }}\n\n[build.vars]\nGIT_SHA = \"fixture\"\n\n[sound]\nproject = \"sound_project.json\"\n",
+            sdk.path().join("stone").display()
+        ),
+    )
+    .unwrap();
+    std::fs::write(project.join("main.rock"), "fn main() {}\n").unwrap();
+    std::fs::write(
+        project.join("sound_project.json"),
+        r#"{
+  "version": 1,
+  "events": [{"id": "fixture.event", "steps": [{"layers": [{"sources": ["assets/sfx/fixture.ogg"]}]}]}]
+}
+"#,
+    )
+    .unwrap();
+    std::fs::create_dir_all(project.join("assets/sfx")).unwrap();
+    std::fs::write(project.join("assets/sfx/fixture.ogg"), b"fixture").unwrap();
+
+    let output = Command::new(&sdk_rock)
+        .current_dir(&project)
+        .env_remove("ROCK_DIR")
+        .env_remove("ROCK_CONTEXT_ROOT")
+        .env_remove("ROCK_STDLIB_DIR")
+        .args(["sim", "--list", "."])
+        .output()
+        .expect("run release-layout executable against external source worktree");
+    assert!(
+        output.status.success(),
+        "external sound project failed through release executable\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 fn content_revision(catalog: &Path) -> String {
     let script = repo_root().join("tools/release/content_revision.py");
     let out = Command::new("python3")

@@ -627,6 +627,9 @@ impl CommandContext {
 
     /// Run command directly
     fn run_command(&self) -> Result<()> {
+        if self.args.command == CliCommand::DocsIndex {
+            return crate::docs_index::run(&self.args.files, self.args.output.as_deref());
+        }
         if self.args.command == CliCommand::ReplayReport {
             if self.args.files.len() != 1 {
                 anyhow::bail!("usage: rock replay-report <file.replay> [--top N] [--context N] [--format pretty|json]");
