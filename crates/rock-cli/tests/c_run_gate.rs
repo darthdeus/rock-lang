@@ -83,6 +83,61 @@ fn main() {
 }
 
 #[test]
+fn c_imgui_begin_combo_links_against_actual_stone_artifact() {
+    let root = workspace_root();
+    let dir = tempfile::tempdir().expect("combo imgui fixture directory");
+    let source_path = dir.path().join("stone/engine/ui/imgui.rock");
+    std::fs::create_dir_all(source_path.parent().expect("combo fixture parent"))
+        .expect("create combo fixture parent");
+    let source = r#"
+@inline inline(lua) fn imgui_begin_combo(label: string, preview: string) -> bool = "return imgui.BeginCombo(label, preview, 0)"
+
+fn main() {
+    if imgui_begin_combo("Modes", "Normal") { let _ = 1 ./ 0 }
+    print("combo-imgui-ok")
+}
+"#;
+    std::fs::write(&source_path, source).expect("write combo imgui fixture");
+    let output = dir.path().join("combo-imgui-consumer");
+    let compile = Command::new(env!("CARGO_BIN_EXE_rock"))
+        .args([
+            "compile",
+            source_path.to_str().expect("utf8 combo fixture"),
+            "--backend",
+            "c",
+            "--output",
+            output.to_str().expect("utf8 combo output"),
+        ])
+        .current_dir(&root)
+        .env_remove("ROCK_SKIP_ENGINE_BUILD")
+        .output()
+        .expect("spawn C combo compile");
+    assert!(
+        compile.status.success(),
+        "C combo consumer did not link against Stone:\nstdout:{}\nstderr:{}",
+        String::from_utf8_lossy(&compile.stdout),
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    let generated = std::fs::read_to_string(output.with_extension("c"))
+        .expect("read generated C combo consumer");
+    assert!(
+        generated.contains("stone_imgui_begin_combo"),
+        "generated consumer omitted the combo provider"
+    );
+    let run = Command::new(&output)
+        .current_dir(&root)
+        .output()
+        .expect("run linked C combo consumer");
+    assert!(
+        run.status.success(),
+        "linked C combo consumer failed:\nstdout:{}\nstderr:{}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(run.stdout, b"combo-imgui-ok\n");
+}
+
+#[test]
 fn c_compile_keeps_artifacts_and_invalidates_stale_defaults() {
     assert!(
         Command::new("clang")
