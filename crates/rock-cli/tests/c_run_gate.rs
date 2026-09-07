@@ -153,8 +153,8 @@ fn c_imgui_popup_bindings_link_against_actual_stone_artifact() {
         .expect("create popup fixture parent");
     let source = r#"
 inline(lua) fn imgui_open_popup(id: string) = "imgui.OpenPopup_Str(id, 0)"
-@inline inline(lua) fn imgui_begin_popup(id: string) -> bool = "return imgui.BeginPopup(id, 0)"
-@inline inline(lua) fn imgui_end_popup() = "imgui.EndPopup()"
+inline(lua) fn imgui_begin_popup(id: string) -> bool = "return imgui.BeginPopup(id, 0)"
+inline(lua) fn imgui_end_popup() = "imgui.EndPopup()"
 
 fn main() {
     imgui_open_popup("QuestActions")
