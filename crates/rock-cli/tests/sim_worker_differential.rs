@@ -845,6 +845,77 @@ fn a_budget_cut_predecessor_still_restores_boot() {
     assert_eq!(isolated.artifacts["count.txt"], worker.artifacts["count.txt"]);
 }
 
+/// An ordinary main-coroutine error is a finished entry, not a worker crash.
+/// The head is deliberately manual-only because its FAIL/no-stop record is the
+/// boundary under test. The update marker proves that the runner did not leave
+/// the errored raw handle live until its frame budget; the successor's crossing
+/// proves no recovery boot was inserted between the two entries.
+#[test]
+fn an_errored_main_closes_without_recovery_or_tail_updates() {
+    let records = run_worker_suite(
+        Backend::Skull,
+        "testbed",
+        &[
+            "b0_main_error_head".to_string(),
+            "b0_main_error_probe".to_string(),
+        ],
+    )
+    .expect("an ordinary main error must finalize its entry and keep the worker alive");
+    assert_eq!(records.len(), 2, "both entries must be finalized");
+
+    let boots = records
+        .iter()
+        .map(|(record, _)| record.diagnostics.as_str())
+        .collect::<Vec<_>>()
+        .join("\n")
+        .matches("[STONE] Initialized successfully")
+        .count();
+    assert_eq!(boots, 1, "the ordinary error must not trigger a recovery boot");
+
+    let (head, head_crossed) = &records[0];
+    assert!(!head_crossed, "the head follows no predecessor");
+    assert_eq!(head.verdict(), "FAIL", "the deliberate main error must remain visible");
+    assert!(!head.saw_stop, "the failed main never called stop_sim(): {head:?}");
+    assert!(
+        head.expects_pass
+            .iter()
+            .any(|message| message.message.contains("reached an actual game frame")),
+        "the head must perform its real fixture assertion before raising: {head:?}"
+    );
+    assert!(
+        head.entry_diagnostics.contains("b0-main-error-boundary"),
+        "the main coroutine error must be logged on the failed entry: {head:?}"
+    );
+    assert!(
+        !head.entry_diagnostics.contains("b0-main-error-tail-update"),
+        "the failed entry must not execute the post-error update witness: {head:?}"
+    );
+    assert!(
+        head.expects_fail.is_empty(),
+        "the update witness must report marker-write failures instead of hiding them: {head:?}"
+    );
+    assert!(
+        !head.artifacts.contains_key("post_error_update.txt"),
+        "an errored main must not burn its frame budget in update systems: {head:?}"
+    );
+
+    let (probe, probe_crossed) = &records[1];
+    assert!(
+        *probe_crossed,
+        "the successor must follow the failed entry in the same worker: {probe:?}"
+    );
+    assert_eq!(probe.verdict(), "PASS", "the successor must still complete: {probe:?}");
+    assert!(probe.saw_stop, "the successor must call stop_sim(): {probe:?}");
+    assert!(
+        probe
+            .expects_pass
+            .iter()
+            .any(|message| message.message.contains("successor ran")),
+        "the successor assertion must execute: {probe:?}"
+    );
+    assert!(probe.artifacts.contains_key("successor.txt"));
+}
+
 /// Failure containment (`docs/sim-speed-plan.md` B2): a worker that DIES
 /// mid-queue loses only the entry it died inside; every unstarted entry reruns
 /// in a fresh worker of the same boot signature and behaves as it does alone.
