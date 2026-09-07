@@ -1718,20 +1718,12 @@ fn run_specs_worker_mode(
     // occurrence is its own entry with its own result.
     let mut slots: Vec<Option<SimSummary>> = specs.iter().map(|_| None).collect();
 
-    // The lane plan. A group splits into contiguous blocks so the entries a
-    // worker serves stay in their requested order; splitting round-robin would
-    // reshuffle every predecessor for no gain.
-    let mut lanes: Vec<Vec<usize>> = Vec::new();
-    for group in &groups {
-        let blocks = jobs.min(group.len()).max(1);
-        for b in 0..blocks {
-            let lo = group.len() * b / blocks;
-            let hi = group.len() * (b + 1) / blocks;
-            if lo < hi {
-                lanes.push(group[lo..hi].to_vec());
-            }
-        }
-    }
+    // A group splits into contiguous blocks so the entries a worker serves stay
+    // in their requested order; splitting round-robin would reshuffle every
+    // predecessor for no gain. Keep one boot for a group that fits in one
+    // scheduling quantum. A larger group gets the fewest lanes that keep each
+    // lane within that quantum, capped by the global pool size.
+    let lanes = allocate_worker_lanes(&groups, jobs);
 
     // An isolated entry needs the compile SESSION only when it opted into the
     // hot-reload lane; everything else isolated is an ordinary fresh process
@@ -2410,6 +2402,31 @@ fn group_worker_specs(
         }
     }
     (groups.into_iter().map(|(_, members)| members).collect(), isolated)
+}
+
+fn worker_lane_count(group_len: usize, jobs: usize) -> usize {
+    if group_len == 0 {
+        return 0;
+    }
+    let jobs = jobs.max(1);
+    let full_lanes = group_len / jobs;
+    let partial_lane = usize::from(group_len % jobs != 0);
+    (full_lanes + partial_lane).min(jobs).max(1)
+}
+
+fn allocate_worker_lanes(groups: &[Vec<usize>], jobs: usize) -> Vec<Vec<usize>> {
+    let mut lanes = Vec::new();
+    for group in groups {
+        let blocks = worker_lane_count(group.len(), jobs);
+        for block in 0..blocks {
+            let lo = group.len() * block / blocks;
+            let hi = group.len() * (block + 1) / blocks;
+            if lo < hi {
+                lanes.push(group[lo..hi].to_vec());
+            }
+        }
+    }
+    lanes
 }
 
 /// One queued sim body. A worker child runs these in order in ONE process;
@@ -5317,6 +5334,28 @@ mod tests {
         // --update-snapshots wins over ANY explicit request.
         assert_eq!(resolve_jobs(None, true), 1);
         assert_eq!(resolve_jobs(Some(8), true), 1);
+    }
+
+    #[test]
+    fn worker_lane_allocation_keeps_small_groups_intact() {
+        let groups = vec![vec![0, 1], vec![2, 3]];
+        assert_eq!(allocate_worker_lanes(&groups, 4), groups);
+    }
+
+    #[test]
+    fn worker_lane_allocation_uses_available_work_for_large_groups() {
+        let group: Vec<usize> = (0..16).collect();
+        assert_eq!(
+            allocate_worker_lanes(&[group], 4),
+            vec![
+                vec![0, 1, 2, 3],
+                vec![4, 5, 6, 7],
+                vec![8, 9, 10, 11],
+                vec![12, 13, 14, 15],
+            ]
+        );
+        assert_eq!(worker_lane_count(0, 4), 0);
+        assert_eq!(worker_lane_count(3, 0), 1);
     }
 
     /// A comma-chain is scheduled as one entry, so ONE reload part makes the

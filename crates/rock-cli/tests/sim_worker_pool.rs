@@ -153,6 +153,42 @@ fn several_booted_workers_run_at_once() {
     );
 }
 
+#[test]
+fn small_signature_groups_do_not_buy_singleton_boots() {
+    let specs = [
+        "b0_budget_pred",
+        "b0_budget_probe",
+        "b0_env_pred",
+        "b0_env_probe",
+    ];
+    let run = run_workers(&specs, "4");
+    assert!(run.success, "every sim here passes standalone:\n{}", run.combined());
+    assert!(
+        run.stdout.contains("[sim] 4/4 sims passed"),
+        "all entries must be accounted for:\n{}",
+        run.stdout
+    );
+    let result_lines: Vec<&str> = run
+        .stderr
+        .lines()
+        .filter(|line| line.starts_with("[sim] ") && line.contains(": PASS ("))
+        .collect();
+    assert_eq!(result_lines.len(), specs.len(), "every entry emitted a result:\n{}", run.stderr);
+    assert!(
+        result_lines.iter().all(|line| !line.contains("(0/0 expects passed)")),
+        "the scheduling witness must contain real assertions:\n{}",
+        run.stderr
+    );
+
+    let (peak, total) = peak_procs(&run.trace);
+    assert!(peak > 1, "the independent groups must still overlap:\n{}", run.trace);
+    assert_eq!(
+        total, 2,
+        "two compatible groups should use one two-entry worker each, not four singleton boots:\n{}",
+        run.trace
+    );
+}
+
 /// `-j 1` is the serial path, and it has to STAY the serial path: the composed
 /// scheduler must not overlap work the user asked not to overlap. This is the
 /// control for the arm above -- without it, a peak above one would be evidence
