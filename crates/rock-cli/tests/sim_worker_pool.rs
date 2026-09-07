@@ -231,6 +231,26 @@ fn omitted_skip_render_shares_with_explicit_default() {
 }
 
 #[test]
+fn mag_world_restore_preserves_successor_boot_fonts() {
+    for specs in [
+        ["mag_live_run_world_image_rewinds", "direct_session_state_world_image_restores_the_authority"],
+        ["world_environment_state_round_trips_through_world_image"; 2],
+    ] {
+        let run = run_project_workers("mag", &specs, "1");
+        let output = run.combined();
+        assert!(run.success, "world restores preserve gameplay state:\n{output}");
+        assert!(run.stdout.contains("[sim] 2/2 sims passed"), "{output}");
+        let results: Vec<_> = run.stderr.lines()
+            .filter(|line| line.starts_with("[sim] ") && line.contains(": PASS ("))
+            .collect();
+        assert_eq!(results.len(), specs.len(), "{output}");
+        assert!(results.iter().all(|line| !line.contains("(0/0 expects passed)")), "{output}");
+        assert_eq!(peak_procs(&run.trace), (1, 1), "world restore must retain the worker's fonts:\n{output}\n{}", run.trace);
+        assert!(!output.contains("worker_ineligible"), "{output}");
+    }
+}
+
+#[test]
 fn mag_run_stop_preserves_successor_boot_assets() {
     let specs = [
         "build_watermark_layout", "target_cycle_sim",
