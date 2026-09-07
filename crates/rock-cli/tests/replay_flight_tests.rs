@@ -77,7 +77,7 @@ fn with_header(text: &str, version: &str, build: Option<&str>) -> String {
 fn new_recordings_stamp_a_real_exact_artifact_identity() {
     let (_dir, log) = record_with_env("bitgun", 15, &[]);
     let text = std::fs::read_to_string(&log).expect("read log");
-    assert!(text.starts_with("STONE_REPLAY 13\n"), "new recordings must use v13\n{text}");
+    assert!(text.starts_with("STONE_REPLAY 14\n"), "new recordings must use v14\n{text}");
     assert!(
         text.lines().any(|line| line == "source 62697467756e"),
         "the logical project source `bitgun` must be encoded in the header\n{text}"
@@ -145,7 +145,7 @@ fn legacy_v11_without_source_remains_playable() {
         .lines()
         .filter(|line| !line.starts_with("source "))
         .map(|line| {
-            if line == "STONE_REPLAY 13" { "STONE_REPLAY 11" } else { line }
+            if line == "STONE_REPLAY 14" { "STONE_REPLAY 11" } else { line }
         })
         .collect::<Vec<_>>()
         .join("\n");
@@ -226,7 +226,7 @@ fn record_stamps_build_id_and_reload_marker() {
         &[ ("STONE_RELOAD_AT_FRAME", "5")],
     );
     let text = std::fs::read_to_string(&log).expect("read log");
-    assert!(text.starts_with("STONE_REPLAY 13"), "must be a v13 log\n{text}");
+    assert!(text.starts_with("STONE_REPLAY 14"), "must be a v14 log\n{text}");
     let build = text.lines().find_map(|l| l.strip_prefix("build ")).expect("build header");
     assert!(build.len() == 16 && build.chars().all(|c| c.is_ascii_hexdigit()), "header must carry a real build id\n{text}");
     assert!(

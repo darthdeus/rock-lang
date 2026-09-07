@@ -161,6 +161,24 @@ fn mag_panel_draw_plan_is_derived_not_world_image() {
     assert_mag_panel_plan_census(&names);
 }
 
+/// `rock frame <game> -n N --dump-state [env]` -> parsed JSON, with NEITHER
+/// --record nor --replay: ordinary play, the mode a shipped build runs in.
+fn run_plain_dump(game: &str, frames: u32, env: &[(&str, &str)]) -> serde_json::Value {
+    let scratch = tempfile::tempdir().unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_rock"))
+        .args([
+            "frame", game, "-n", &frames.to_string(),
+            "--dump-state", "--output", &scratch.path().to_string_lossy(),
+        ])
+        .envs(env.iter().copied())
+        .env("ROCK_FRAME_TIMEOUT_SECS", "60")
+        .current_dir(workspace_root())
+        .output()
+        .expect("spawn plain run");
+    assert!(out.status.success(), "plain run failed: {}", String::from_utf8_lossy(&out.stderr));
+    serde_json::from_slice(&out.stdout).expect("dump-state JSON")
+}
+
 /// `rock frame <game> -n N --replay <log> --dump-state [env]` -> parsed JSON.
 fn run_replay_dump(game: &str, frames: u32, log: &str, env: &[(&str, &str)]) -> serde_json::Value {
     let scratch = tempfile::tempdir().unwrap();
@@ -226,6 +244,37 @@ fn run_record_dump_observed(
         stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
         state,
     }
+}
+
+#[test]
+fn record_without_dump_state_ignores_clock_override() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("record-clock-authority.replay");
+    let scratch = tempfile::tempdir().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_rock"))
+        .args([
+            "frame", "bitgun", "-n", "1", "--record", &log.to_string_lossy(),
+            "--output", &scratch.path().to_string_lossy(),
+        ])
+        .env("STONE_TEST_UNIX_SECONDS", "1000")
+        .env_remove("DUMP_STATE")
+        .env_remove("STONE_REPLAY")
+        .env("ROCK_FRAME_TIMEOUT_SECS", "60")
+        .current_dir(workspace_root())
+        .output()
+        .expect("spawn record without dump-state");
+    assert!(
+        output.status.success(),
+        "record without dump-state failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = std::fs::read_to_string(&log).expect("read record");
+    let start = text
+        .lines()
+        .find_map(|line| line.strip_prefix("start ")?.parse::<i64>().ok())
+        .expect("recorded header start");
+    assert_ne!(start, 1000, "default record path honored the test clock: {text}");
+    assert!(start > 1_700_000_000, "recorded start must be a real epoch: {start}");
 }
 
 fn current_tick(s: &serde_json::Value) -> i64 {
@@ -537,6 +586,12 @@ fn mag_recovery_record_replay_arms(progress: &serde_json::Value) -> (serde_json:
         ("MAG_LAYOUT_HISTORY_PATH_OVERRIDE", layout_s.as_str()),
         ("MAG_SETTINGS_PATH_OVERRIDE", settings_s.as_str()),
         ("MAG_BINDINGS_PATH_OVERRIDE", bindings_s.as_str()),
+        // Pinned dt: record stamps the real clock while replay reconstructs
+        // start + int(time), so the two agree only while the sampled frames
+        // accumulate under one second of engine time. Real frame deltas would
+        // make that a race against MAG's boot cost.
+        ("PERF_MODE", "1"),
+        ("PERF_DT", "0.01"),
         ("STONE_TEST_UNIX_SECONDS", MAG_RECOVERY_RECORDED_AT),
     ];
     let recorded = run_record_dump("mag", 3, &fixture_s, &record_env);
@@ -590,13 +645,293 @@ fn mag_full_recovery_replay_uses_each_process_wall_clock_sentinel() {
     let recorded_at = mag_recovery_last_observed_at(&recorded);
     let replayed_at = mag_recovery_last_observed_at(&replayed);
     assert_eq!(recorded_at, 1000, "recorded reservoir last_observed_at={recorded_at}");
-    assert_eq!(replayed_at, 1004, "replayed reservoir last_observed_at={replayed_at}");
-    // PINNED BUG: replay reads the new process wall clock instead of recorded input.
-    // This inverted assertion passes because the bug exists. When it fails, rederive
-    // the mechanism; if replay now preserves 1000, flip this to assert_eq!.
-    assert_ne!(
+    // Replay reconstructs from the header's captured SESSION_START_UNIX plus the
+    // dt-accumulated `time` global (stone/engine/serialization.rock), so it does
+    // not read its own process clock. STONE_TEST_UNIX_SECONDS=1004 is set on the
+    // replay process precisely to prove that value is ignored.
+    assert_eq!(replayed_at, 1000, "replayed reservoir last_observed_at={replayed_at}");
+    assert_eq!(
         recorded_at, replayed_at,
-        "replay now preserves the recorded wall clock; flip this sentinel to assert_eq!"
+        "replay must preserve the recorded wall clock (see get_timestamp() reconstruction)"
+    );
+}
+
+// The STONE_TEST_UNIX_SECONDS override exists so a replay fixture can pin two
+// processes to distinct clocks without sleeping. It is a dump-state replay
+// harness knob: ordinary play must ignore it, or a game's save timestamps,
+// quest stage timers, and recovery-reservoir grants are all settable from the
+// environment. The guard requires both `DUMP_STATE=1` and the preboot record /
+// replay mode (stone/engine/replay.rock), before `__stone_replay` exists.
+#[test]
+fn ordinary_play_ignores_the_replay_clock_override() {
+    let dir = tempfile::tempdir().unwrap();
+    let progress_path = dir.path().join("progress.json");
+    let progress_s = progress_path.to_string_lossy().into_owned();
+    let layout_s = dir.path().join("spellbook-layout.jsonl").to_string_lossy().into_owned();
+    let settings_s = dir.path().join("settings.json").to_string_lossy().into_owned();
+    let bindings_s = dir.path().join("bindings.json").to_string_lossy().into_owned();
+    std::fs::write(
+        &progress_path,
+        serde_json::to_vec_pretty(&mag_current_progress_with_recovery(10, 100)).unwrap(),
+    )
+    .unwrap();
+
+    let state = run_plain_dump(
+        "mag",
+        3,
+        &[
+            ("MAG_BOOT_PLAYING", "1"),
+            ("MAG_PROGRESS_PATH_OVERRIDE", progress_s.as_str()),
+            ("MAG_LAYOUT_HISTORY_PATH_OVERRIDE", layout_s.as_str()),
+            ("MAG_SETTINGS_PATH_OVERRIDE", settings_s.as_str()),
+            ("MAG_BINDINGS_PATH_OVERRIDE", bindings_s.as_str()),
+            ("STONE_TEST_UNIX_SECONDS", MAG_RECOVERY_RECORDED_AT),
+        ],
+    );
+
+    let observed = mag_recovery_last_observed_at(&state);
+    assert_ne!(
+        observed, 1000,
+        "ordinary play honored STONE_TEST_UNIX_SECONDS; the override must be replay-harness only"
+    );
+    // A real wall clock, not the override and not the uninitialized -1 default.
+    assert!(
+        observed > 1_700_000_000,
+        "ordinary play must stamp a real wall clock, got {observed}"
+    );
+}
+
+// Record mode is not a niche path: `rock stone <game>` enables the flight
+// recorder by default (crates/rock-cli/src/stone.rs flight_recorder_for), so
+// the ordinary development game run has STONE_RECORD set. It must therefore
+// keep ordinary gameplay clock semantics -- the real wall clock -- and must NOT
+// derive timestamps from `time`, which frame_core_select_dt scales by
+// TIME_SCALE (0.05x..4x, stone/engine/timeline.rock) and freezes on a paused
+// frame. Deriving them from `time` let a 4x session stamp `first_time` hours
+// ahead of reality into the live progress.json; a later session then wrote a
+// SMALLER `last_time`, and mag/save.rock's `l < f` check rejected the entire
+// save file on the next boot.
+//
+// Recording at two tick counts with a pinned clock: a real-clock stamp is the
+// same at both, an engine-time reconstruction advances between them.
+#[test]
+fn record_mode_stamps_the_real_clock_not_engine_time() {
+    let dir = tempfile::tempdir().unwrap();
+    let fixture_early = dir.path().join("record-clock-early.replay").to_string_lossy().into_owned();
+    let fixture_late = dir.path().join("record-clock-late.replay").to_string_lossy().into_owned();
+    let progress_path = dir.path().join("progress.json");
+    let progress_s = progress_path.to_string_lossy().into_owned();
+    let layout_s = dir.path().join("spellbook-layout.jsonl").to_string_lossy().into_owned();
+    let settings_s = dir.path().join("settings.json").to_string_lossy().into_owned();
+    let bindings_s = dir.path().join("bindings.json").to_string_lossy().into_owned();
+    let mut progress = mag_current_progress_with_recovery(10, 100);
+    progress["player"]["level"] = serde_json::json!({"namespace": "official", "name": "recovery-gauntlet"});
+    progress["player"]["grid"] = serde_json::json!([27, 27]);
+    std::fs::write(&progress_path, serde_json::to_vec_pretty(&progress).unwrap()).unwrap();
+
+    let env: Vec<(&str, &str)> = vec![
+        ("MAG_BOOT_PLAYING", "1"),
+        ("MAG_PROGRESS_PATH_OVERRIDE", progress_s.as_str()),
+        ("MAG_LAYOUT_HISTORY_PATH_OVERRIDE", layout_s.as_str()),
+        ("MAG_SETTINGS_PATH_OVERRIDE", settings_s.as_str()),
+        ("MAG_BINDINGS_PATH_OVERRIDE", bindings_s.as_str()),
+        ("PERF_MODE", "1"),
+        ("PERF_DT", "0.25"),
+        ("STONE_TEST_UNIX_SECONDS", "2000"),
+    ];
+
+    let early = mag_recovery_last_observed_at(&run_record_dump("mag", 6, &fixture_early, &env));
+    let late = mag_recovery_last_observed_at(&run_record_dump("mag", 18, &fixture_late, &env));
+
+    assert_eq!(
+        early, 2000,
+        "a 6-tick recording must stamp the real clock (2000), got {early}"
+    );
+    assert_eq!(
+        late, 2000,
+        "an 18-tick recording must stamp the same real clock (2000), got {late}; \
+         a value advancing with tick count means record mode is deriving timestamps \
+         from scaled engine time, which persists ahead-of-real stamps into progress.json"
+    );
+}
+
+// Adversarial control for the sentinel above: an implementation that simply
+// FREEZES the clock in replay (always returns the header's SESSION_START_UNIX,
+// ignoring `time`) also satisfies "replay matches the recording" when both are
+// sampled at the same tick. This test distinguishes reconstruction from
+// freezing by sampling the SAME recorded log at two different tick counts, far
+// enough apart (PERF_DT=0.25 fixed dt, 6 vs 18 ticks -> 1.5s vs 4.5s of engine
+// time) that a correct reconstruction must report a LATER wall-clock second at
+// the later tick, while a frozen clock would report the same header value
+// (2000) at both.
+//
+// The sentinel's spawn (crypt, grid [25, 8]) has no recovery-reservoir prop
+// nearby, so the reservoir reconciles once at boot load and never again --
+// fine for a single-tick sample, useless for observing advancement. Spawning
+// in "recovery-gauntlet" at grid [27, 27] (one tile from the reservoir prop
+// at (27, 28) in mag/levels/recovery-gauntlet.json) instead draws that prop
+// every frame, so `draw_recovery_reservoir_charge`
+// (mag/recovery.rock:145, calls `get_timestamp()` on every draw) reconciles
+// the reservoir on every tick -- which is required to observe a value that
+// advances mid-replay at all.
+#[test]
+fn mag_full_recovery_replay_reconstructs_advancing_wall_clock() {
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = dir.path().join("recovery-clock-advance.replay");
+    let fixture_s = fixture.to_string_lossy().into_owned();
+    let progress_path = dir.path().join("progress.json");
+    let progress_s = progress_path.to_string_lossy().into_owned();
+    let layout_s = dir.path().join("spellbook-layout.jsonl").to_string_lossy().into_owned();
+    let settings_s = dir.path().join("settings.json").to_string_lossy().into_owned();
+    let bindings_s = dir.path().join("bindings.json").to_string_lossy().into_owned();
+    let mut progress = mag_current_progress_with_recovery(10, 100);
+    progress["player"]["level"] = serde_json::json!({"namespace": "official", "name": "recovery-gauntlet"});
+    progress["player"]["grid"] = serde_json::json!([27, 27]);
+    std::fs::write(&progress_path, serde_json::to_vec_pretty(&progress).unwrap()).unwrap();
+
+    let base_env: Vec<(&str, &str)> = vec![
+        ("MAG_BOOT_PLAYING", "1"),
+        ("MAG_PROGRESS_PATH_OVERRIDE", progress_s.as_str()),
+        ("MAG_LAYOUT_HISTORY_PATH_OVERRIDE", layout_s.as_str()),
+        ("MAG_SETTINGS_PATH_OVERRIDE", settings_s.as_str()),
+        ("MAG_BINDINGS_PATH_OVERRIDE", bindings_s.as_str()),
+        ("PERF_MODE", "1"),
+        ("PERF_DT", "0.25"),
+    ];
+
+    let mut record_env = base_env.clone();
+    record_env.push(("STONE_TEST_UNIX_SECONDS", "2000"));
+    let recorded_full = run_record_dump("mag", 18, &fixture_s, &record_env);
+    let recorded_at_full = mag_recovery_last_observed_at(&recorded_full);
+
+    // The replay process is given a DIFFERENT wall clock than the recording
+    // (9999 vs 2000): if it were read at all, both replay samples below would
+    // come out wrong in a way unrelated to tick count.
+    let mut replay_env = base_env.clone();
+    replay_env.push(("STONE_TEST_UNIX_SECONDS", "9999"));
+    let replayed_early = run_replay_dump("mag", 6, &fixture_s, &replay_env);
+    let replayed_early_at = mag_recovery_last_observed_at(&replayed_early);
+    let replayed_full = run_replay_dump("mag", 18, &fixture_s, &replay_env);
+    let replayed_full_at = mag_recovery_last_observed_at(&replayed_full);
+
+    // Record stamps the real clock (2000 flat, pinned by the override), so it is
+    // not the comparison arm: replay reconstructs from the RECORDED start plus
+    // engine time (2000 + int(18 * 0.25) = 2004). The recording is asserted flat
+    // by record_mode_stamps_the_real_clock_not_engine_time.
+    assert_eq!(
+        recorded_at_full, 2000,
+        "the recording must stamp the real clock, got {recorded_at_full}"
+    );
+    assert_eq!(
+        replayed_full_at, 2004,
+        "replay must reconstruct from the recorded start (2000) plus engine time, never \
+         from its own process clock (9999); got {replayed_full_at}"
+    );
+    assert_ne!(
+        replayed_early_at, replayed_full_at,
+        "a frozen implementation (always the header's SESSION_START_UNIX) would report the \
+         same value at every tick; reconstruction must advance across ticks within a replay \
+         (replayed_early_at={replayed_early_at}, replayed_full_at={replayed_full_at})"
+    );
+    assert!(
+        replayed_early_at < replayed_full_at,
+        "reconstruction must advance forward, never backward, as engine time accumulates \
+         (replayed_early_at={replayed_early_at}, replayed_full_at={replayed_full_at})"
+    );
+}
+
+// Every other header fact is fail-closed: a missing `seed` returns -2 ("bad
+// magic"), and `source`/`revision` count into the parser's `bad` tally and are
+// re-checked in replay_init. `start` was not -- a v14 log whose start line is
+// missing or truncated replayed silently with SESSION_START_UNIX = 0, putting
+// every reconstructed timestamp in 1970. recovery_reservoir_reconcile then
+// takes its `now <= last_observed_at` early return forever and build_info
+// renders a negative build age, with no diagnostic anywhere.
+#[test]
+fn a_v14_replay_without_a_start_is_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let log_s = dir.path().join("no-start.replay").to_string_lossy().into_owned();
+    run_record_dump("bitgun", 15, &log_s, &[]);
+
+    let text = std::fs::read_to_string(&log_s).expect("read log");
+    assert!(text.lines().any(|l| l.starts_with("start ")), "the recording must carry a start line");
+    let stripped: Vec<&str> = text.lines().filter(|l| !l.starts_with("start ")).collect();
+    std::fs::write(&log_s, stripped.join("\n")).expect("write log");
+
+    let scratch = tempfile::tempdir().unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_rock"))
+        .args([
+            "frame", "bitgun", "-n", "10", "--replay", &log_s,
+            "--dump-state", "--output", &scratch.path().to_string_lossy(),
+        ])
+        .env("ROCK_FRAME_TIMEOUT_SECS", "60")
+        .current_dir(workspace_root())
+        .output()
+        .expect("spawn replay");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "a v14 log with no recorded start must be rejected, not replayed from epoch 0\n{stderr}"
+    );
+    assert!(
+        stderr.contains("recorded session start"),
+        "the rejection must name the missing header fact: {stderr}"
+    );
+}
+
+// Replay must not enter MAG's progress persistence writer: a side feature for
+// inspection and profiling must not mutate the real game's save. The guard is
+// `if replay_is_replay() { return true }` at the top of `Player.save_progress`
+// (mag/save.rock), which reports success without writing and leaves
+// REPLAY_PERSISTENCE_RECONCILE_PENDING set, so a session that later branches
+// back to live persists what it deferred.
+//
+// replay_bootstrap_tests states the same contract but dies earlier on an
+// unrelated binding-history precondition and never reaches its assertion, so
+// this is the only live coverage of it. MAG_REPLAY_BOOTSTRAP_SAVE_WRITES
+// publishes SAVE_SUCCESSFUL_WRITE_COUNT (mag/test_hooks.rock), so the behavior
+// is observed through an explicit fixture path, never the real save file.
+#[test]
+fn replay_does_not_write_mag_progress() {
+    let dir = tempfile::tempdir().unwrap();
+    let fixture_s = dir.path().join("no-persist.replay").to_string_lossy().into_owned();
+    let progress_path = dir.path().join("progress.json");
+    let progress_s = progress_path.to_string_lossy().into_owned();
+    let layout_s = dir.path().join("spellbook-layout.jsonl").to_string_lossy().into_owned();
+    let settings_s = dir.path().join("settings.json").to_string_lossy().into_owned();
+    let bindings_s = dir.path().join("bindings.json").to_string_lossy().into_owned();
+    std::fs::write(
+        &progress_path,
+        serde_json::to_vec_pretty(&mag_current_progress_with_recovery(10, 100)).unwrap(),
+    )
+    .unwrap();
+
+    let env: Vec<(&str, &str)> = vec![
+        ("MAG_BOOT_PLAYING", "1"),
+        ("MAG_PROGRESS_PATH_OVERRIDE", progress_s.as_str()),
+        ("MAG_LAYOUT_HISTORY_PATH_OVERRIDE", layout_s.as_str()),
+        ("MAG_SETTINGS_PATH_OVERRIDE", settings_s.as_str()),
+        ("MAG_BINDINGS_PATH_OVERRIDE", bindings_s.as_str()),
+        // Drives the production progress writer and publishes its successful
+        // write count as MAG_REPLAY_BOOTSTRAP_SAVE_WRITES (mag/test_hooks.rock).
+        ("MAG_REPLAY_BOOTSTRAP_FIXTURE", "progress"),
+    ];
+
+    let recorded = run_record_dump("mag", 12, &fixture_s, &env);
+    let recorded_writes = recorded["__stone_diag"]["MAG_REPLAY_BOOTSTRAP_SAVE_WRITES"]
+        .as_i64().unwrap_or(0);
+    assert!(
+        recorded_writes > 0,
+        "control: the recording must exercise the progress writer, or the replay arm \
+         proves nothing (recorded_writes={recorded_writes})"
+    );
+
+    let replayed = run_replay_dump("mag", 12, &fixture_s, &env);
+    let replayed_writes = replayed["__stone_diag"]["MAG_REPLAY_BOOTSTRAP_SAVE_WRITES"]
+        .as_i64().unwrap_or(0);
+    assert_eq!(
+        replayed_writes, 0,
+        "replay must not enter MAG's progress persistence writer (replayed_writes={replayed_writes})"
     );
 }
 
@@ -646,7 +981,7 @@ fn mag_cast_seek_restores_scheduler_owner() {
     );
     let mut tick = 0;
     let fixture_text = std::fs::read_to_string(&fixture).expect("current Mag replay fixture");
-    assert!(fixture_text.starts_with("STONE_REPLAY 13\n"), "fixture must use the exact-Artifact replay format");
+    assert!(fixture_text.starts_with("STONE_REPLAY 14\n"), "fixture must use the exact-Artifact replay format");
     let fixture_text = fixture_text
         .lines()
         .map(|line| {
@@ -849,7 +1184,7 @@ fn exact_recorded_replay_supports_two_backward_scene_image_scrubs() {
         .expect("spawn record");
     assert!(rec.status.success(), "record failed: {}", String::from_utf8_lossy(&rec.stderr));
     let text = std::fs::read_to_string(&log).expect("read exact replay");
-    assert!(text.starts_with("STONE_REPLAY 13\n"), "the scrub fixture must exercise the new format\n{text}");
+    assert!(text.starts_with("STONE_REPLAY 14\n"), "the scrub fixture must exercise the new format\n{text}");
 
     let ordinary = run_replay_dump(
         game,
@@ -2175,7 +2510,7 @@ fn replay_file_contains_observations_and_bootstrap_but_no_world_image_payload() 
     let _ = run_record_dump("bitgun", 20, &log, &[]);
     let bytes = std::fs::read_to_string(&log).unwrap();
     assert!(bytes.lines().any(|line| line.starts_with("t ")), "the replay must contain input observations");
-    assert!(bytes.contains("STONE_REPLAY 13"), "the replay must retain its versioned header");
+    assert!(bytes.contains("STONE_REPLAY 14"), "the replay must retain its versioned header");
     for payload in ["WorldImage", "StateImage", "keyframe", "snapshot"] {
         assert!(!bytes.contains(payload), "the replay wire must not serialize {payload}: {bytes}");
     }
