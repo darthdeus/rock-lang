@@ -621,6 +621,20 @@ fn skull_build(file: &str, src: &str) -> std::result::Result<SkullOutcome, Skull
         }
     };
 
+    let lua = match configured_stone_dir(
+        std::path::Path::new(file)
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new(".")),
+    ) {
+        Ok(Some(stone_dir)) => prepend_stone_root(lua, &stone_dir),
+        Ok(None) => lua,
+        Err(error) => {
+            return Err(SkullFailure {
+                reason: "Stone root resolution failed".to_string(),
+                rendered: error.to_string(),
+            })
+        }
+    };
     run_emitted_tests(&lua, &tests)
 }
 
@@ -764,6 +778,25 @@ fn is_test_package_dir(path: &str) -> bool {
     p.is_dir() && p.join("stick.toml").is_file()
 }
 
+pub(crate) fn is_package_tests_dir(path: &str) -> Option<String> {
+    let p = std::path::Path::new(path);
+    if p.is_dir() {
+        let name = p.file_name().and_then(|n| n.to_str());
+        if name == Some("tests") || name == Some("tests/") {
+            let parent = p.parent().unwrap_or(std::path::Path::new(""));
+            let candidate = if parent.as_os_str().is_empty() {
+                std::path::Path::new(".")
+            } else {
+                parent
+            };
+            if candidate.join("stick.toml").is_file() {
+                return Some(candidate.to_string_lossy().to_string());
+            }
+        }
+    }
+    None
+}
+
 /// Assemble + type-check + emit a whole package (tests INCLUDED), then run its
 /// `@test`s. The package analogue of [`skull_build`]. Cross-file references
 /// resolve because every file is in one workspace.
@@ -803,6 +836,16 @@ fn skull_build_package(dir: &str) -> std::result::Result<SkullOutcome, SkullFail
         reason: categorize(&e.message),
         rendered: render_project_err(&sources, &e),
     })?;
+    let lua = match configured_stone_dir(std::path::Path::new(dir)) {
+        Ok(Some(stone_dir)) => prepend_stone_root(lua, &stone_dir),
+        Ok(None) => lua,
+        Err(error) => {
+            return Err(SkullFailure {
+                reason: "Stone root resolution failed".to_string(),
+                rendered: error.to_string(),
+            })
+        }
+    };
     run_emitted_tests(&lua, &tests)
 }
 
@@ -1991,6 +2034,8 @@ pub(crate) fn collect_test_units(paths: &[String]) -> Result<(Vec<String>, Vec<S
     for path in paths {
         if is_test_package_dir(path) {
             package_dirs.push(path.clone());
+        } else if let Some(pkg) = is_package_tests_dir(path) {
+            package_dirs.push(pkg);
         } else {
             files.extend(collect_rock_files(path)?);
         }
@@ -2858,6 +2903,29 @@ root-hole names={} rows={} decls={} reason-buckets={} erased-catalogue={}",
 // stone --backend skull: two-file incremental output (main.lua + incremental.lua)
 // ---------------------------------------------------------------------------
 
+fn configured_stone_dir(path: &std::path::Path) -> Result<Option<std::path::PathBuf>> {
+    let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let Some((config_path, config)) = rock_host::stick::StickConfig::find_from_dir(&path)? else {
+        return Ok(None);
+    };
+    if !config.dependencies.contains_key("stone") {
+        return Ok(None);
+    }
+    let root_path = config_path.parent().unwrap_or(&config_path).to_path_buf();
+    let mut resolver = rock_host::stick::resolver::DependencyResolver::new(root_path);
+    let resolved = resolver.resolve(&config)?;
+    let stone = resolved
+        .into_iter()
+        .find(|dependency| dependency.name == "stone")
+        .ok_or_else(|| anyhow::anyhow!("Stone dependency is declared but could not be resolved"))?;
+    Ok(Some(stone.path.canonicalize().unwrap_or(stone.path)))
+}
+
+fn prepend_stone_root(lua: String, stone_dir: &std::path::Path) -> String {
+    let escaped = stone_dir.display().to_string().replace('\\', "\\\\").replace('"', "\\\"");
+    format!("__ROCK_STONE_DIR = \"{escaped}\"\n{lua}")
+}
+
 /// The game preamble injected at the top of `main.lua`: `GAME_SOURCE_DIR` for
 /// asset resolution. cimgui is initialized by stone's global initializer.
 /// Factored so `skull_run_project` and the stone two-file path build it identically.
@@ -2865,15 +2933,24 @@ fn skull_game_preamble(dir: &str) -> Result<String> {
     use std::path::PathBuf;
     let abs = PathBuf::from(dir).canonicalize().unwrap_or_else(|_| PathBuf::from(dir));
     let escaped = abs.display().to_string().replace('\\', "\\\\").replace('"', "\\\"");
-    let overlay_defaults = match rock_host::stick::StickConfig::find_from_dir(&abs)? {
-        Some((_, config)) => config.asset_overlay_defaults(&abs)?,
-        None => Vec::new(),
+    let config = match rock_host::stick::StickConfig::find_from_dir(&abs)? {
+        Some((_, config)) => Some(config),
+        None => None,
     };
+    let overlay_defaults = rock_host::release::configured_asset_overlays_from(
+        &abs,
+        config.as_ref(),
+        std::env::var_os(rock_host::release::ASSET_OVERLAYS_ENV).as_deref(),
+    )?;
     let renderer = match skull_renderer_target(dir)? {
         skull::mir_emit::RendererTarget::Gl => "gl",
         skull::mir_emit::RendererTarget::Wgpu => "wgpu",
     };
     let mut full = format!("__ROCK_GAME_SOURCE_DIR = \"{escaped}\"\n");
+    if let Some(stone_dir) = configured_stone_dir(&abs)? {
+        let escaped_stone = stone_dir.display().to_string().replace('\\', "\\\\").replace('"', "\\\"");
+        full.push_str(&format!("__ROCK_STONE_DIR = \"{escaped_stone}\"\n"));
+    }
     full.push_str("__ROCK_ASSET_OVERLAY_DEFAULTS = {");
     for (index, path) in overlay_defaults.iter().enumerate() {
         if index > 0 {

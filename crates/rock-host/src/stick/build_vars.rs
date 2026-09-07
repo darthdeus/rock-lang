@@ -103,9 +103,23 @@ pub fn resolve_build_vars(
         } else if let Some(value) = var.value.as_ref() {
             value.clone()
         } else if let Some(builtin) = var.builtin.as_deref() {
-            resolve_builtin(builtin, &channel, target_os)?
+            resolve_builtin(builtin, &channel, target_os, project_dir)?
         } else if let Some(cmd) = var.cmd.as_ref() {
-            run_var_cmd(name, cmd, var.secret, project_dir, &channel)?
+            match run_var_cmd(name, cmd, var.secret, project_dir, &channel) {
+                Ok(value) => value,
+                Err(_error)
+                    if var
+                        .optional_channels
+                        .as_deref()
+                        .is_some_and(|channels| channels.iter().any(|entry| entry == &channel)) =>
+                {
+                    log::warn!(
+                        "[build.vars] {name}: source unavailable for channel {channel:?}; continuing with its declared default"
+                    );
+                    var.default.clone().expect("validate_build requires an optional default")
+                }
+                Err(error) => return Err(error),
+            }
         } else {
             // validate_build above rejected sourceless vars.
             unreachable!("[build.vars] {name} has no source past validate_build")
@@ -136,7 +150,12 @@ fn validate_target_os(target: &str) -> Result<&str> {
     }
 }
 
-fn resolve_builtin(name: &str, channel: &str, target_os: Option<&str>) -> Result<String> {
+fn resolve_builtin(
+    name: &str,
+    channel: &str,
+    target_os: Option<&str>,
+    project_dir: &Path,
+) -> Result<String> {
     match name {
         "channel" => Ok(channel.to_string()),
         // An explicit target is the artifact truth (a Linux host packaging a
@@ -154,8 +173,36 @@ fn resolve_builtin(name: &str, channel: &str, target_os: Option<&str>) -> Result
                 other => other.to_string(),
             }
         }),
+        "source_revision" => resolve_source_revision(project_dir, channel),
         other => anyhow::bail!("unknown [build.vars] builtin {other:?}"),
     }
+}
+
+fn resolve_source_revision(project_dir: &Path, channel: &str) -> Result<String> {
+    if let Some(context_root) = crate::project::context_root_from_env() {
+        let revision = std::env::var("ROCK_SOURCE_REVISION").map_err(|_| {
+            anyhow::anyhow!(
+                "[build.vars] GIT_SHA: context {} has no ROCK_SOURCE_REVISION stamp",
+                context_root.display()
+            )
+        })?;
+        let revision = revision.trim();
+        if revision.is_empty() || revision.chars().any(char::is_whitespace) {
+            anyhow::bail!(
+                "[build.vars] GIT_SHA: ROCK_SOURCE_REVISION in context {} is empty or contains whitespace",
+                context_root.display()
+            );
+        }
+        return Ok(revision.to_string());
+    }
+
+    run_var_cmd(
+        "GIT_SHA",
+        "git rev-parse --short HEAD",
+        false,
+        project_dir,
+        channel,
+    )
 }
 
 /// A `secret = true` var's diagnostics are redacted on the failure path: the
@@ -418,6 +465,23 @@ mod tests {
         ));
         let resolved = resolve_build_vars(&cfg, dir.path(), Some("dev"), None, &no_overrides()).unwrap();
         assert_eq!(resolved.vars["TOKEN"].value, "none", "off-channel uses default, cmd never runs");
+    }
+
+    #[test]
+    fn optional_command_failure_uses_default_only_on_the_declared_channel() {
+        let cfg = fixture(concat!(
+            "[package]\nname = \"x\"\n",
+            "[build]\nchannels = [\"dev\", \"steam\"]\ndefault_channel = \"dev\"\n",
+            "[build.vars]\nTOKEN = { cmd = \"false\", optional_channels = [\"dev\"], default = \"\" }\n",
+        ));
+        let dir = tempfile::tempdir().unwrap();
+        let dev = resolve_build_vars(&cfg, dir.path(), Some("dev"), None, &no_overrides())
+            .expect("optional dev command failure uses its default");
+        assert_eq!(dev.vars["TOKEN"].value, "");
+
+        let err = resolve_build_vars(&cfg, dir.path(), Some("steam"), None, &no_overrides())
+            .expect_err("the same command must remain required on steam");
+        assert!(format!("{err}").contains("TOKEN"));
     }
 
     #[test]

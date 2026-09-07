@@ -238,10 +238,17 @@ fn json_indent(level: int) -> string {
 }
 
 fn encode_string(s: string) -> string {
-    let parts: [string] = []
-    parts.push("\"")
     let n = s.len()
     let i = 0
+    while i < n {
+        let b = s.unit_at(i)
+        if b < 32 || b == 34 || b == 92 { break }
+        i += 1
+    }
+    if i == n { return "\"" + s + "\"" }
+    let parts: [string] = []
+    parts.push("\"")
+    if i > 0 { parts.push(s.substring(0, i)) }
     while i < n {
         let b = s.unit_at(i)
         if b == 34 {
