@@ -83,7 +83,7 @@ fn main() {
 }
 
 #[test]
-fn c_imgui_begin_combo_links_against_actual_stone_artifact() {
+fn c_imgui_combo_bindings_link_against_actual_stone_artifact() {
     let root = workspace_root();
     let dir = tempfile::tempdir().expect("combo imgui fixture directory");
     let source_path = dir.path().join("stone/engine/ui/imgui.rock");
@@ -91,9 +91,13 @@ fn c_imgui_begin_combo_links_against_actual_stone_artifact() {
         .expect("create combo fixture parent");
     let source = r#"
 @inline inline(lua) fn imgui_begin_combo(label: string, preview: string) -> bool = "return imgui.BeginCombo(label, preview, 0)"
+@inline inline(lua) fn imgui_end_combo() = "imgui.EndCombo()"
+@inline inline(lua) fn imgui_set_item_default_focus() = "imgui.SetItemDefaultFocus()"
 
 fn main() {
     if imgui_begin_combo("Modes", "Normal") { let _ = 1 ./ 0 }
+    imgui_end_combo()
+    imgui_set_item_default_focus()
     print("combo-imgui-ok")
 }
 "#;
@@ -120,10 +124,13 @@ fn main() {
     );
     let generated = std::fs::read_to_string(output.with_extension("c"))
         .expect("read generated C combo consumer");
-    assert!(
-        generated.contains("stone_imgui_begin_combo"),
-        "generated consumer omitted the combo provider"
-    );
+    for symbol in [
+        "stone_imgui_begin_combo",
+        "stone_imgui_end_combo",
+        "stone_imgui_set_item_default_focus",
+    ] {
+        assert!(generated.contains(symbol), "generated consumer omitted {symbol}");
+    }
     let run = Command::new(&output)
         .current_dir(&root)
         .output()
