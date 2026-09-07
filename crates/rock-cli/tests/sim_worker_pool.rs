@@ -230,6 +230,43 @@ fn omitted_skip_render_shares_with_explicit_default() {
     );
 }
 
+#[test]
+fn mag_run_stop_currently_forces_a_successor_boot() {
+    // PINNED BUG: build_watermark_layout starts and stops a MAG run, whose
+    // visual-residency release currently destroys images owned by the boot
+    // world. The native boundary therefore has to recover target_cycle_sim in
+    // a fresh worker even though both entries pass. This assertion is inverted
+    // because it passes today because the ownership bug exists. If this now
+    // fails with one process, the ownership fix landed: flip the assertion to
+    // `assert_eq!(total, 1, ...)` and update this comment in the same commit.
+    let specs = ["build_watermark_layout", "target_cycle_sim"];
+    let run = run_project_workers("mag", &specs, "1");
+    assert!(run.success, "both entries pass after recovery:\n{}", run.combined());
+    assert!(
+        run.stdout.contains("[sim] 2/2 sims passed"),
+        "both occurrences must be accounted for:\n{}",
+        run.stdout
+    );
+    let result_lines: Vec<&str> = run
+        .stderr
+        .lines()
+        .filter(|line| line.starts_with("[sim] ") && line.contains(": PASS ("))
+        .collect();
+    assert_eq!(result_lines.len(), specs.len(), "every entry emitted a result:\n{}", run.stderr);
+    assert!(
+        result_lines.iter().all(|line| !line.contains("(0/0 expects passed)")),
+        "the ownership witness must contain real assertions:\n{}",
+        run.stderr
+    );
+    let (peak, total) = peak_procs(&run.trace);
+    assert_eq!(peak, 1, "-j 1 keeps the recovery serial:\n{}", run.trace);
+    assert_eq!(
+        total, 2,
+        "the boot-owned image destruction currently buys a successor boot:\n{}",
+        run.trace
+    );
+}
+
 /// `-j 1` is the serial path, and it has to STAY the serial path: the composed
 /// scheduler must not overlap work the user asked not to overlap. This is the
 /// control for the arm above -- without it, a peak above one would be evidence
