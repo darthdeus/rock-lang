@@ -594,7 +594,7 @@ fn c_link_plan(path: &str, emitted: &skull_codegen_c::CProgram) -> Result<CLinkP
         } else {
             "."
         };
-        rock_host::engine_build::build_engine_libs(game_path)?;
+        rock_host::engine_build::build_engine_libs_for_c(game_path)?;
     }
 
     for provider in &providers {

@@ -339,6 +339,19 @@ pub fn build_libstone() -> Result<()> {
     Ok(())
 }
 
+/// Build the ImGui-free Stone cdylib used by native C artifacts. The C
+/// backend maps the tool bindings to their imgui-absent contract, so linking
+/// the default-featured cdylib would leave those provider symbols undefined.
+pub fn build_libstone_for_c() -> Result<()> {
+    cargo_build_and_stage_lib(
+        "stone-rs for the C backend",
+        &["build", "-p", "stone-rs", "--lib", "--no-default-features"],
+        "stone_rs",
+        "stone",
+    )?;
+    Ok(())
+}
+
 /// Build one optional engine cdylib and stage it into tmp/.
 ///
 /// A declared lib whose crate is absent is an ERROR, not a skip. This is a
@@ -373,6 +386,16 @@ pub fn build_optional_engine_lib(lib: &EngineLib) -> Result<()> {
 /// during compile if the game is misconfigured.
 pub fn build_engine_libs(game_path: &str) -> Result<()> {
     build_libstone()?;
+    for lib in game_engine_libs(game_path)? {
+        build_optional_engine_lib(lib)?;
+    }
+    Ok(())
+}
+
+/// Build the engine cdylibs needed by a native C artifact. Its core Stone
+/// provider deliberately omits the optional cimgui dependency.
+pub fn build_engine_libs_for_c(game_path: &str) -> Result<()> {
+    build_libstone_for_c()?;
     for lib in game_engine_libs(game_path)? {
         build_optional_engine_lib(lib)?;
     }

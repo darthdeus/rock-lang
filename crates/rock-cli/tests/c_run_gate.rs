@@ -7,6 +7,81 @@ fn run(path: &std::path::Path) -> std::process::Output {
         .expect("spawn rock")
 }
 
+fn workspace_root() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
+
+#[test]
+fn c_tool_imgui_bindings_link_and_run_against_actual_stone_artifact() {
+    let root = workspace_root();
+    let dir = tempfile::tempdir().expect("tool imgui fixture directory");
+    let source_path = dir.path().join("stone/engine/input/tool.rock");
+    std::fs::create_dir_all(source_path.parent().expect("tool fixture parent"))
+        .expect("create tool fixture parent");
+    let mut source = std::fs::read_to_string(root.join("stone/engine/input/tool.rock"))
+        .expect("read authoritative tool source");
+    source.push_str(
+        r#"
+
+fn stone_diag_set_s(key: string, value: string) {}
+
+fn main() {
+    let id = __tool_imgui_key_id("space")
+    if id != -2 { let _ = 1 ./ 0 }
+    if __tool_imgui_key_down_id(42) { let _ = 1 ./ 0 }
+    if __tool_imgui_key_pressed_id(42) { let _ = 1 ./ 0 }
+    if __tool_imgui_ctrl_down() { let _ = 1 ./ 0 }
+    __tool_imgui_inject_key_id(42)
+    __tool_imgui_release_key_id(42)
+    print("tool-imgui-ok")
+}
+"#,
+    );
+    std::fs::write(&source_path, source).expect("write tool imgui fixture");
+    let output = dir.path().join("tool-imgui-consumer");
+    let compile = Command::new(env!("CARGO_BIN_EXE_rock"))
+        .args([
+            "compile",
+            source_path.to_str().expect("utf8 tool fixture"),
+            "--backend",
+            "c",
+            "--output",
+            output.to_str().expect("utf8 tool output"),
+        ])
+        .current_dir(&root)
+        .env_remove("ROCK_SKIP_ENGINE_BUILD")
+        .output()
+        .expect("spawn C tool compile");
+    assert!(
+        compile.status.success(),
+        "C tool consumer did not link against Stone:\nstdout:{}\nstderr:{}",
+        String::from_utf8_lossy(&compile.stdout),
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    let generated = std::fs::read_to_string(output.with_extension("c"))
+        .expect("read generated C tool consumer");
+    for symbol in [
+        "stone_imgui_is_key_down",
+        "stone_imgui_ctrl_down",
+        "stone_imgui_key_id",
+        "stone_imgui_inject_key",
+        "stone_imgui_release_key",
+    ] {
+        assert!(generated.contains(symbol), "generated consumer omitted {symbol}");
+    }
+    let run = Command::new(&output)
+        .current_dir(&root)
+        .output()
+        .expect("run linked C tool consumer");
+    assert!(
+        run.status.success(),
+        "linked C tool consumer failed:\nstdout:{}\nstderr:{}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(run.stdout, b"tool-imgui-ok\n");
+}
+
 #[test]
 fn c_compile_keeps_artifacts_and_invalidates_stale_defaults() {
     assert!(
