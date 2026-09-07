@@ -2857,6 +2857,7 @@ pub struct IncrementalRepairStats {
     pub artifact_iteration_requests: usize,
     pub artifact_root_entries_examined: usize,
     pub artifact_index_rows_examined: usize,
+    pub artifact_scalar_context_builds: usize,
     pub artifact_realize_invocations: usize,
     pub root_hole_names_examined: usize,
     pub root_hole_rows_examined: usize,
@@ -6442,17 +6443,17 @@ fn emit_full_in_with_mutation(
                         .as_deref()
                         .map(|scheduler| scheduler.wait(SetupLaneKind::CpuArtifact));
                     let started = Instant::now();
+                    let scx = skull_mir::lower::ScalarCtx::new(ws)
+                        .sharing(std::sync::Arc::clone(graph.interner()));
                     let lua_view = crate::artifact::realize(
                         ws,
                         &graph,
                         &crate::artifact::ArtifactRequest::new(
                             crate::target_projection::LUAJIT_DESKTOP,
                             &emission_roots,
-                        ),
+                        ).with_scalar_context(&scx),
                     );
                     let population = lua_view.instances.len() + lua_view.boundaries.len();
-                    let scx = skull_mir::lower::ScalarCtx::new(ws)
-                        .sharing(std::sync::Arc::clone(graph.interner()));
                     let finished = Instant::now();
                     #[cfg(all(test, not(feature = "sequential")))]
                     setup_scheduler
@@ -7524,7 +7525,7 @@ fn update_chunk_cache(
                 &crate::artifact::ArtifactRequest::new(
                     crate::target_projection::LUAJIT_DESKTOP,
                 forced_roots.as_deref().unwrap_or(cache.roots.roots.as_slice()),
-            ),
+            ).with_scalar_context(&cache.scx),
         );
     }
     let artifact_update = cache.lua_view.update_local_with_root_delta(
@@ -7533,7 +7534,7 @@ fn update_chunk_cache(
         &crate::artifact::ArtifactRequest::new(
             crate::target_projection::LUAJIT_DESKTOP,
             forced_roots.as_deref().unwrap_or(cache.roots.roots.as_slice()),
-        ),
+        ).with_scalar_context(&cache.scx),
         &update.revisited,
         &update.added,
         &update.removed,
@@ -7546,6 +7547,7 @@ fn update_chunk_cache(
     cache.repair_stats.artifact_iterations = artifact_update.iterations;
     cache.repair_stats.artifact_root_entries_examined = artifact_update.root_entries_examined;
     cache.repair_stats.artifact_index_rows_examined = artifact_update.local_index_rows_examined;
+    cache.repair_stats.artifact_scalar_context_builds = artifact_update.scalar_context_builds;
     cache.repair_stats.artifact_realize_invocations = crate::artifact::realize_invocations()
         .saturating_sub(artifact_realize_before) as usize;
     cache.repair_stats.full_artifact_view_realizations = cache.repair_stats.artifact_realize_invocations;

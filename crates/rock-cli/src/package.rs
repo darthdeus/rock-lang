@@ -94,6 +94,12 @@ pub fn prepare_sound_bank(project: &str) -> Result<Option<PathBuf>> {
         return Ok(None);
     };
     let bank_path = context.project.join("assets/sound_bank.json");
+    match std::fs::read(&bank_path) {
+        Ok(existing) if existing == sound.bank_bytes => return Ok(Some(bank_path)),
+        Ok(_) => {},
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+        Err(error) => return Err(error.into()),
+    }
     if let Some(parent) = bank_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -708,6 +714,33 @@ fn remove_if_present(path: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn development_bank_publishes_only_content_changes() {
+        let workspace = rock_host::project::find_workspace_root(&std::env::current_dir().unwrap()).unwrap();
+        let fixture = tempfile::tempdir_in(workspace).unwrap();
+        std::fs::write(fixture.path().join("stick.toml"),
+            "[package]\nname = \"stable-sound-dev\"\n[sound]\nproject = \"sound_project.json\"\n").unwrap();
+        let project = fixture.path().join("sound_project.json");
+        let source = r#"{"version":1,"events":[{"id":"fixture.first","steps":[{"layers":[{"sources":["assets/missing.ogg"]}]}]}]}"#;
+        std::fs::write(&project, source).unwrap();
+        let path = fixture.path().to_str().unwrap();
+        let bank = prepare_sound_bank(path).unwrap().unwrap();
+        let original = std::fs::read(&bank).unwrap();
+        std::fs::File::options().write(true).open(&bank).unwrap()
+            .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000)).unwrap();
+        let timestamp = std::fs::metadata(&bank).unwrap().modified().unwrap();
+        assert_eq!(prepare_sound_bank(path).unwrap(), Some(bank.clone()));
+        assert_eq!(std::fs::read(&bank).unwrap(), original);
+        assert_eq!(std::fs::metadata(&bank).unwrap().modified().unwrap(), timestamp,
+            "identical compiler output must not trigger a running game's asset watcher");
+        std::fs::write(&project, source.replace("fixture.first", "fixture.second")).unwrap();
+        prepare_sound_bank(path).unwrap();
+        let changed = std::fs::read(&bank).unwrap();
+        assert_ne!(changed, original);
+        let value: Value = serde_json::from_slice(&changed).unwrap();
+        assert_eq!(value["events"][0]["id"], "fixture.second");
+    }
 
     #[test]
     fn external_project_without_sound_does_not_need_workspace_context() {
