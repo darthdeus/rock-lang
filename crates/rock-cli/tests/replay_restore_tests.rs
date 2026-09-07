@@ -27,7 +27,10 @@ use std::path::Path;
 use std::process::Command;
 
 fn workspace_root() -> &'static Path {
-    Path::new(env!("CARGO_MANIFEST_DIR")).parent().expect("workspace root")
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root")
 }
 
 /// Sim-state global names = the engine predicate's output, resolved to the

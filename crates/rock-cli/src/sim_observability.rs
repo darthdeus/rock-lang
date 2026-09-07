@@ -15,6 +15,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+mod timing;
+
 const SCHEMA_VERSION: u64 = 1;
 
 #[derive(Clone)]
@@ -33,14 +35,15 @@ struct State {
     completed: BTreeSet<u64>,
     finished: bool,
     warning_emitted: bool,
+    timings: timing::Timings,
 }
 
 static RUN_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 impl SimRunRecorder {
     /// Start a recording under the configured history root. Relative roots
-    /// are resolved against the caller's current directory, which is already
-    /// the workspace root for ordinary sim commands.
+    /// are resolved against the caller's current directory; discovering the
+    /// workspace does not change that directory.
     pub fn begin(
         project: &str,
         selection: &str,
@@ -86,6 +89,7 @@ impl SimRunRecorder {
                 Some(format!("could not create persistent sim history under `{}`: {e:#}", root.display())),
             ),
         };
+        let timing_host = timing::host_context();
         let recorder = Self {
             inner: Arc::new(Mutex::new(State {
                 run_id,
@@ -98,6 +102,7 @@ impl SimRunRecorder {
                 completed: BTreeSet::new(),
                 finished: false,
                 warning_emitted: false,
+                timings: timing::Timings::new(root, timing::TimingPolicy::from_env(), timing_host.clone()),
             })),
         };
         if let Some(message) = initial_warning {
@@ -106,6 +111,7 @@ impl SimRunRecorder {
             recorder.event(
                 "run_start",
                 json!({
+                    "timing_host": timing_host,
                     "project_arg": project,
                     "selection": selection,
                     "quiet": quiet,
@@ -278,6 +284,11 @@ impl SimRunRecorder {
         );
     }
 
+    pub fn entry_runtime_context(&self, worker_id: u64, occurrence_id: u64, part: usize, context: Value) {
+        self.event("entry_runtime_context", json!({ "worker_attempt": worker_id,
+            "occurrence_id": occurrence_id, "part": part, "context": context }));
+    }
+
     pub fn entry_start(&self, worker_id: u64, occurrence_id: u64, name: &str, part: usize) {
         self.event(
             "entry_start",
@@ -426,32 +437,53 @@ impl SimRunRecorder {
 
     fn event(&self, name: &str, fields: Value) {
         let mut warning = None;
+        let mut timing_messages = Vec::new();
         match self.inner.lock() {
             Ok(mut state) => {
-                let mut object = fields.as_object().cloned().unwrap_or_default();
-                object.insert("schema_version".into(), Value::from(SCHEMA_VERSION));
-                object.insert("event".into(), Value::from(name));
-                object.insert("run_id".into(), Value::from(state.run_id.clone()));
-                object.insert(
-                    "elapsed_ms".into(),
-                    Value::from(state.started.elapsed().as_millis() as u64),
-                );
-                let Some(writer) = state.writer.as_mut() else {
-                    return;
-                };
-                if let Err(e) = serde_json::to_writer(&mut *writer, &Value::Object(object))
-                    .map_err(std::io::Error::other)
-                    .and_then(|_| writer.write_all(b"\n"))
-                    .and_then(|_| writer.flush())
-                {
-                    state.writer = None;
-                    if !state.warning_emitted {
-                        state.warning_emitted = true;
-                        warning = Some(format!("sim history write failed: {e:#}"));
+                let elapsed_ms = state.started.elapsed().as_millis() as u64;
+                let timing_warnings = state.timings.observe(name, &fields, elapsed_ms);
+                let mut records = vec![(name, fields.clone())];
+                for timing in timing_warnings {
+                    timing_messages.push(state.timings.message(&timing));
+                    records.push(("timing_warning", json!({ "name": timing.label,
+                        "kind": match timing.kind {
+                            timing::TimingWarningKind::Absolute => "absolute",
+                            timing::TimingWarningKind::Historical => "historical",
+                        },
+                        "duration_ms": timing.duration_ms, "baseline_ms": timing.baseline_ms })));
+                }
+                for (name, fields) in records {
+                    let mut object = fields.as_object().cloned().unwrap_or_default();
+                    object.insert("schema_version".into(), Value::from(SCHEMA_VERSION));
+                    object.insert("event".into(), Value::from(name));
+                    object.insert("run_id".into(), Value::from(state.run_id.clone()));
+                    object.insert("elapsed_ms".into(), Value::from(elapsed_ms));
+                    if let Some(writer) = state.writer.as_mut() {
+                        if let Err(e) = serde_json::to_writer(&mut *writer, &Value::Object(object))
+                            .map_err(std::io::Error::other)
+                            .and_then(|_| writer.write_all(b"\n"))
+                            .and_then(|_| writer.flush())
+                        {
+                            state.writer = None;
+                            if !state.warning_emitted {
+                                state.warning_emitted = true;
+                                warning = Some(format!("sim history write failed: {e:#}"));
+                            }
+                        }
+                    }
+                }
+                if name == "run_end" {
+                    if let Some(path) = state.events_path.as_ref() {
+                        if let Err(e) = state.timings.save(&path.with_file_name("timings.json"), &fields) {
+                            warning = Some(format!("sim timing summary write failed: {e}"));
+                        }
                     }
                 }
             }
             Err(_) => warning = Some(format!("sim history lock was poisoned while writing `{name}`")),
+        }
+        for message in timing_messages {
+            log::warn!(target: "SIM", "{message}");
         }
         if let Some(message) = warning {
             log::warn!(target: "SIM", "{message}; sim verdicts are unchanged");

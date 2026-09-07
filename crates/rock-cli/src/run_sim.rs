@@ -36,7 +36,7 @@ const DEFAULT_FRAME_BUDGET: usize = 600;
 /// back -- a sim asking for a bound the runner silently replaces would be
 /// guarded by a number nobody wrote.
 fn frame_budget_for(sim_name: &str, env_pairs: &[(String, String)]) -> Result<usize> {
-    let Some((_, raw)) = env_pairs.iter().find(|(k, _)| k == "FRAME_COUNT") else {
+    let Some((_, raw)) = env_pairs.iter().rev().find(|(k, _)| k == "FRAME_COUNT") else {
         return Ok(DEFAULT_FRAME_BUDGET);
     };
     raw.parse::<usize>().ok().filter(|n| *n > 0).ok_or_else(|| {
@@ -615,6 +615,14 @@ fn run_named_entry(
     Ok((display_name, combined))
 }
 
+fn manual_sim(env: &[(String, String)]) -> Result<bool> {
+    match env.iter().rev().find(|(key, _)| key == "SIM_MANUAL").map(|(_, value)| value.as_str()) {
+        None | Some("0") => Ok(false),
+        Some("1") => Ok(true),
+        Some(value) => Err(anyhow!("SIM_MANUAL must be 0 or 1, got `{value}`")),
+    }
+}
+
 fn record_excluded_entry(recorder: Option<&SimRunRecorder>, occurrence_id: Option<u64>) {
     if let (Some(recorder), Some(id)) = (recorder, occurrence_id) {
         recorder.entry_result(id, 0, "EXCLUDED", None, 0, false, None);
@@ -1010,6 +1018,21 @@ fn do_run_all_sims_recorded(
         sim_exec_mode_name(mode),
         update_snapshots,
     );
+    let selected = wire_names.len();
+    let mut routine_names = Vec::new();
+    let mut routine_ids = Vec::new();
+    for (name, id) in wire_names.into_iter().zip(entry_ids) {
+        if manual_sim(env_by_wire.get(&name).map_or(&[][..], |v| v))? {
+            record_excluded_entry(Some(recorder), Some(id));
+            println!("[sim] {name}: EXCLUDED (manual; run by name)");
+        } else {
+            routine_names.push(name);
+            routine_ids.push(id);
+        }
+    }
+    let wire_names = routine_names;
+    let entry_ids = routine_ids;
+    let manual_excluded = selected - wire_names.len();
     if mode != SimExecMode::Isolated {
         let results = run_specs_worker_mode(
             &project,
@@ -1024,7 +1047,7 @@ fn do_run_all_sims_recorded(
             Some(&entry_ids),
         )?;
         let mut passed = 0usize;
-        let mut excluded = 0usize;
+        let mut excluded = manual_excluded;
         let mut failed: Vec<String> = Vec::new();
         for (name, summary) in &results {
             if entry_excluded(summary) {
@@ -1035,9 +1058,9 @@ fn do_run_all_sims_recorded(
                 failed.push(name.clone());
             }
         }
-        let executed = wire_names.len() - excluded;
+        let executed = selected - excluded;
         let excl_suffix = if excluded > 0 {
-            format!(" (selected {}, {excluded} excluded)", wire_names.len())
+            format!(" (selected {selected}, {excluded} excluded)")
         } else {
             String::new()
         };
@@ -1141,7 +1164,7 @@ fn do_run_all_sims_recorded(
     // Records printed in completion order; the ACCOUNTING is registry order, so
     // the failed list and tally are identical to a serial run's.
     let mut passed = 0usize;
-    let mut excluded = 0usize;
+    let mut excluded = manual_excluded;
     let mut failed: Vec<String> = Vec::new();
     for (i, name) in wire_names.iter().enumerate() {
         let summary = match summaries.remove(&i) {
@@ -1160,9 +1183,9 @@ fn do_run_all_sims_recorded(
 
     // Result output, NOT logging: the suite verdict is this command's
     // answer, consumed by the user / CI.
-    let executed = wire_names.len() - excluded;
+    let executed = selected - excluded;
     let excl_suffix = if excluded > 0 {
-        format!(" (selected {}, {excluded} excluded)", wire_names.len())
+        format!(" (selected {selected}, {excluded} excluded)")
     } else {
         String::new()
     };
@@ -1850,20 +1873,15 @@ fn run_specs_worker_mode(
 
     let (groups, isolated) = group_worker_specs(&active_specs, env_by_wire);
 
-    // The lane plan. A group splits into contiguous blocks so the entries a
-    // worker serves stay in their requested order; splitting round-robin would
-    // reshuffle every predecessor for no gain.
-    let mut lanes: Vec<Vec<usize>> = Vec::new();
-    for group in &groups {
-        let blocks = jobs.min(group.len()).max(1);
-        for b in 0..blocks {
-            let lo = group.len() * b / blocks;
-            let hi = group.len() * (b + 1) / blocks;
-            if lo < hi {
-                lanes.push(group[lo..hi].iter().map(|&idx| active_indices[idx]).collect());
-            }
-        }
-    }
+    // A group splits into contiguous blocks so the entries a worker serves stay
+    // in their requested order; splitting round-robin would reshuffle every
+    // predecessor for no gain. Keep one boot for a group that fits in one
+    // scheduling quantum. A larger group gets the fewest lanes that keep each
+    // lane within that quantum, capped by the global pool size.
+    let lanes: Vec<Vec<usize>> = allocate_worker_lanes(&groups, jobs)
+        .into_iter()
+        .map(|lane| lane.into_iter().map(|idx| active_indices[idx]).collect())
+        .collect();
 
     // An isolated entry needs the compile SESSION only when it opted into the
     // hot-reload lane; everything else isolated is an ordinary fresh process
@@ -2340,7 +2358,7 @@ fn writes_live(buffered: bool) -> bool {
 /// after `preset_env`, so a declared one never reaches the child and cannot
 /// stand for a difference between two entries. Splitting a group on an inert
 /// value would isolate sims for nothing.
-const RUNNER_OWNED_ENV_KEYS: &[&str] = &["FRAME_COUNT", "ROCK_MASK_WALL_CLOCK"];
+const RUNNER_OWNED_ENV_KEYS: &[&str] = &["FRAME_COUNT", "ROCK_MASK_WALL_CLOCK", "SIM_MANUAL"];
 
 /// Fixed values the runner publishes to EVERY sim child, layered BEFORE
 /// `preset_env` so a declaration still wins.
@@ -2360,23 +2378,32 @@ const RUNNER_OWNED_ENV_KEYS: &[&str] = &["FRAME_COUNT", "ROCK_MASK_WALL_CLOCK"];
 /// Only fixed literals belong here. `STONE_ASSET_STUB` and `STONE_AUDIO_STUB`
 /// are computed from the group's own composition, so discounting them would be
 /// circular -- the value depends on the grouping this decides.
-const RUNNER_BASELINE_ENV: &[(&str, &str)] = &[("ROCK_TEST_SEED", "42"), ("STONE_HEADLESS", "1")];
+const RUNNER_BASELINE_ENV: &[(&str, &str)] = &[
+    ("ROCK_TEST_SEED", "42"),
+    ("SIM_SKIP_RENDER", "1"),
+    ("STONE_HEADLESS", "1"),
+];
 
 /// The part of a sim's `@sim_env` that is consumed during global init, engine
 /// init and `@init` -- what a shared process cannot vary between entries.
 ///
-/// Canonical (stable-sorted by key) so declaration order does not split a
-/// group: two sims agreeing on the same pairs share a signature however they
-/// spelled them. The sort is stable, so a duplicated key keeps its last-wins
-/// application order and a genuine effective difference still refuses.
+/// Canonical (last-wins, then stable-sorted by key) so redundant declarations
+/// do not split a group: two sims agreeing on the same effective pairs share a
+/// signature however they spelled them. A different final value still refuses.
 fn boot_signature(env_pairs: &[(String, String)]) -> Vec<(String, String)> {
-    let mut sig: Vec<(String, String)> = env_pairs
-        .iter()
+    let mut effective = Vec::with_capacity(env_pairs.len());
+    for (key, value) in env_pairs {
+        if let Some(previous) = effective.iter().position(|(k, _)| k == key) {
+            effective.remove(previous);
+        }
+        effective.push((key.clone(), value.clone()));
+    }
+    let mut sig: Vec<(String, String)> = effective
+        .into_iter()
         .filter(|(k, _)| !RUNNER_OWNED_ENV_KEYS.contains(&k.as_str()))
         .filter(|(k, v)| {
             !RUNNER_BASELINE_ENV.iter().any(|(bk, bv)| *bk == k.as_str() && *bv == v.as_str())
         })
-        .cloned()
         .collect();
     sig.sort_by(|a, b| a.0.cmp(&b.0));
     sig
@@ -2552,6 +2579,31 @@ fn group_worker_specs(
         }
     }
     (groups.into_iter().map(|(_, members)| members).collect(), isolated)
+}
+
+fn worker_lane_count(group_len: usize, jobs: usize) -> usize {
+    if group_len == 0 {
+        return 0;
+    }
+    let jobs = jobs.max(1);
+    let full_lanes = group_len / jobs;
+    let partial_lane = usize::from(group_len % jobs != 0);
+    (full_lanes + partial_lane).min(jobs).max(1)
+}
+
+fn allocate_worker_lanes(groups: &[Vec<usize>], jobs: usize) -> Vec<Vec<usize>> {
+    let mut lanes = Vec::new();
+    for group in groups {
+        let blocks = worker_lane_count(group.len(), jobs);
+        for block in 0..blocks {
+            let lo = group.len() * block / blocks;
+            let hi = group.len() * (block + 1) / blocks;
+            if lo < hi {
+                lanes.push(group[lo..hi].to_vec());
+            }
+        }
+    }
+    lanes
 }
 
 /// One queued sim body. A worker child runs these in order in ONE process;
@@ -3062,6 +3114,12 @@ fn run_worker(
                                         *part,
                                     );
                                 }
+                                if let Some(context) = line.strip_prefix("__SIM__ ")
+                                    .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+                                    .and_then(|event| event.get("runtime").cloned())
+                                {
+                                    recorder.entry_runtime_context(worker_attempt, *occurrence_id, *part, context);
+                                }
                                 recorder.entry_start(
                                     worker_attempt,
                                     *occurrence_id,
@@ -3199,7 +3257,15 @@ fn run_worker(
                         // silently dropping the request or reaching for the
                         // session from a parallel lane.
                         let serviced = match stone.as_deref_mut() {
-                            Some(st) => service_reload_edit(st, output, &mut pristine, &req),
+                            Some(st) => {
+                                let mut apply = || service_reload_edit(st, output, &mut pristine, &req);
+                                if let Some(recorder) = recorder {
+                                    let names = parts.iter().map(|part| part.name.as_str()).collect::<Vec<_>>().join(",");
+                                    recorder.phase(&format!("reload_apply:{names}"), apply)
+                                } else {
+                                    apply()
+                                }
+                            },
                             None => Err(anyhow!(
                                 "reload_edit is only available to sims that opt into the \
                                  reload lane with `@sim_env(\"STONE_HOT_RELOAD\", \"1\")`"
@@ -3473,7 +3539,18 @@ fn run_worker(
     // sim in the suite).
     if let Err(e) = stone
         .as_deref_mut()
-        .map(|st| revert_reload_edits(st, output, &mut pristine))
+        .map(|st| {
+            if pristine.is_empty() {
+                return revert_reload_edits(st, output, &mut pristine);
+            }
+            let mut restore = || revert_reload_edits(st, output, &mut pristine);
+            if let Some(recorder) = recorder {
+                let names = parts.iter().map(|part| part.name.as_str()).collect::<Vec<_>>().join(",");
+                recorder.phase(&format!("reload_restore:{names}"), restore)
+            } else {
+                restore()
+            }
+        })
         .unwrap_or(Ok(()))
     {
         summaries[blamed].errors.push(SiteMessage {
@@ -5477,6 +5554,28 @@ mod tests {
         assert_eq!(resolve_jobs(Some(8), true), 1);
     }
 
+    #[test]
+    fn worker_lane_allocation_keeps_small_groups_intact() {
+        let groups = vec![vec![0, 1], vec![2, 3]];
+        assert_eq!(allocate_worker_lanes(&groups, 4), groups);
+    }
+
+    #[test]
+    fn worker_lane_allocation_uses_available_work_for_large_groups() {
+        let group: Vec<usize> = (0..16).collect();
+        assert_eq!(
+            allocate_worker_lanes(&[group], 4),
+            vec![
+                vec![0, 1, 2, 3],
+                vec![4, 5, 6, 7],
+                vec![8, 9, 10, 11],
+                vec![12, 13, 14, 15],
+            ]
+        );
+        assert_eq!(worker_lane_count(0, 4), 0);
+        assert_eq!(worker_lane_count(3, 0), 1);
+    }
+
     /// A comma-chain is scheduled as one entry, so ONE reload part makes the
     /// whole entry exclusive. Missing that would let the session go live while
     /// other children exist.
@@ -5570,6 +5669,49 @@ mod tests {
                 "`FRAME_COUNT={bad}` must reject rather than silently become the default"
             );
         }
+    }
+
+    #[test]
+    fn a_frame_count_uses_the_last_declaration() {
+        assert_eq!(
+            frame_budget_for("s", &env(&[("FRAME_COUNT", "80"), ("FRAME_COUNT", "90")]))
+                .expect("last declaration is valid"),
+            90
+        );
+        assert_eq!(
+            frame_budget_for("s", &env(&[("FRAME_COUNT", "bad"), ("FRAME_COUNT", "90")]))
+                .expect("an overridden invalid declaration is inert"),
+            90
+        );
+        assert!(
+            frame_budget_for("s", &env(&[("FRAME_COUNT", "90"), ("FRAME_COUNT", "bad")]))
+                .is_err(),
+            "the effective last declaration is the one that must be validated"
+        );
+    }
+
+    #[test]
+    fn the_boot_signature_uses_effective_defaults_and_last_wins() {
+        assert_eq!(
+            sig(&[("SIM_SKIP_RENDER", "1")]),
+            sig(&[]),
+            "explicit skip-render default matches the runner-published default"
+        );
+        assert_eq!(
+            sig(&[("SIM_SKIP_RENDER", "0"), ("SIM_SKIP_RENDER", "1")]),
+            sig(&[]),
+            "an overridden render value does not split on its discarded value"
+        );
+        assert_ne!(
+            sig(&[("SIM_SKIP_RENDER", "1"), ("SIM_SKIP_RENDER", "0")]),
+            sig(&[]),
+            "the effective explicit render opt-in remains a boot difference"
+        );
+        assert_eq!(
+            sig(&[("OTHER", "old"), ("OTHER", "new")]),
+            sig(&[("OTHER", "new")]),
+            "ordinary environment declarations use last-wins semantics too"
+        );
     }
 
     #[test]
@@ -6042,6 +6184,15 @@ mod tests {
         let mut died = SimSummary { saw_stop: true, ..SimSummary::default() };
         died.process_failure_code = Some(1);
         assert_eq!(verdict_word(&died), "FAIL");
+    }
+
+    #[test]
+    fn manual_gallery_selection_is_explicit_and_last_wins() {
+        assert!(manual_sim(&[("SIM_MANUAL".into(), "1".into())]).unwrap());
+        assert!(!manual_sim(&[]).unwrap());
+        assert!(!manual_sim(&[("SIM_MANUAL".into(), "1".into()),
+            ("SIM_MANUAL".into(), "0".into())]).unwrap());
+        assert!(manual_sim(&[("SIM_MANUAL".into(), "yes".into())]).is_err());
     }
 
     #[test]
