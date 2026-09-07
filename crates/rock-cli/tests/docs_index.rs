@@ -99,3 +99,35 @@ fn declaration_index_is_deterministic_and_stamped() {
             && declaration["source"] == "stdlib/unified.rock"
     }));
 }
+
+#[test]
+fn declaration_index_preserves_parameter_defaults() {
+    let repo = root();
+    let scratch = tempfile::tempdir_in(repo.join("tmp")).expect("default signature scratch");
+    let source = scratch.path().join("defaults.rock");
+    let output = scratch.path().join("defaults.json");
+    std::fs::write(&source, concat!(
+        "// UTF-8 before defaults: \u{e9}\n",
+        "fn sample(required: int, amount: float = 1.0, label: string = \"two  spaces, = \\\"quote\\\"\", ",
+        "enabled: bool = false, value: int? = null, grouped: int = (2 + 3) * 4, ",
+        "position: Vec2 = v(1, 2), values: [int] = [1, 2]) {}\n",
+        "deco init marker(stage: int = 100, mode: string = \"presentation\") {}\n",
+        "fn multiline(value: int = (\n    2 + // keep this comment\n    3\n)) {}\n",
+    )).unwrap();
+    let result = Command::new(rock_bin())
+        .current_dir(&repo)
+        .args(["docs-index", source.to_str().unwrap(), "--output", output.to_str().unwrap()])
+        .output().expect("index default arguments");
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    let index: serde_json::Value = serde_json::from_slice(&std::fs::read(output).unwrap()).unwrap();
+    let declarations = index["declarations"].as_array().unwrap();
+    let signature = |name: &str| declarations.iter()
+        .find(|declaration| declaration["name"] == name).unwrap()["signature"].as_str().unwrap();
+    assert_eq!(signature("sample"), concat!(
+        "fn sample(required: int, amount: float = 1.0, label: string = \"two  spaces, = \\\"quote\\\"\", ",
+        "enabled: bool = false, value: int? = null, grouped: int = (2 + 3) * 4, ",
+        "position: Vec2 = v(1, 2), values: [int] = [1, 2]) -> ()",
+    ));
+    assert_eq!(signature("marker"), "decorator marker(stage: int = 100, mode: string = \"presentation\")");
+    assert_eq!(signature("multiline"), "fn multiline(value: int = (\n    2 + // keep this comment\n    3\n)) -> ()");
+}

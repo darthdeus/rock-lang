@@ -838,17 +838,74 @@ impl Builder<'_> {
         }
     }
 
+    fn column_contains_references(&self, elem: ColumnElem) -> bool {
+        self.scx.rep_arena().get(elem.representation()).value_storage()
+            == Some(ValueStorage::GcTable)
+    }
+
+    fn column_unset(&mut self, vec: Idx<Inst>, index: Idx<Inst>, elem: ColumnElem)
+        -> Result<(), CompilerError>
+    {
+        if !self.column_contains_references(elem) { return Ok(()) }
+        let shape = self.column_shape(elem)?;
+        let slot = self.checked_column_index(vec, index);
+        let nil = self.emit_cur(Inst::Const(Lit::Nil));
+        for path in column_leaf_paths(&shape) {
+            let col = self.emit_cur(Inst::Field { base: vec, field: path });
+            self.emit_cur(Inst::StoreIndex {
+                base: col, index: slot, value: nil, kind: ContainerKind::VecColumn,
+            });
+        }
+        Ok(())
+    }
+
+    fn map_column_free(&mut self, map: Idx<Inst>, key: Idx<Inst>, elem: ColumnElem)
+        -> Result<(), CompilerError>
+    {
+        let slot = self.call_spine("__map_col_free", vec![map, key])?;
+        if !self.column_contains_references(elem) { return Ok(()) }
+        let zero = self.emit_cur(Inst::Const(Lit::Int(0)));
+        let present = self.emit_cur(Inst::IntGeq(slot, zero));
+        let hit = self.f.new_block();
+        let join = self.f.new_block();
+        self.f.set_term(self.cur, Term::Branch { cond: present, then_bb: hit, else_bb: join });
+        self.cur = hit;
+        let data = self.map_col_data(map);
+        self.column_unset(data, slot, elem)?;
+        self.f.set_term(self.cur, Term::Goto(join));
+        self.cur = join;
+        Ok(())
+    }
+
+    fn column_release_all(&mut self, vec: Idx<Inst>, elem: ColumnElem)
+        -> Result<(), CompilerError>
+    {
+        if !self.column_contains_references(elem) { return Ok(()) }
+        let len = self.emit_cur(Inst::Field { base: vec, field: Ustr::from("len") });
+        let cell = self.f.new_cell(None);
+        let zero = self.emit_cur(Inst::Const(Lit::Int(0)));
+        self.emit_cur(Inst::Store { cell, value: zero });
+        let head = self.f.new_block();
+        let body = self.f.new_block();
+        let exit = self.f.new_block();
+        self.f.set_term(self.cur, Term::Goto(head));
+        self.cur = head;
+        let i = self.emit_cur(Inst::Load(cell));
+        let more = self.emit_cur(Inst::IntLt(i, len));
+        self.f.set_term(self.cur, Term::Branch { cond: more, then_bb: body, else_bb: exit });
+        self.cur = body;
+        self.column_unset(vec, i, elem)?;
+        let one = self.emit_cur(Inst::Const(Lit::Int(1)));
+        let next = self.emit_cur(Inst::IntAdd(i, one));
+        self.emit_cur(Inst::Store { cell, value: next });
+        self.f.set_term(self.cur, Term::Goto(head));
+        self.cur = exit;
+        Ok(())
+    }
+
     /// Column-aware lowering of `__vec_data_get/_set/_unset` when the receiver's
     /// element type is concretely column-stored. `Ok(None)` = not one of these, or
     /// a boxed element, in which case the stdlib `inline(lua)` body stands.
-    ///
-    /// `unset` is deliberately a NO-OP. On the boxed backing it exists to drop the
-    /// reference so the element can be collected; a column holds scalars, so there
-    /// is nothing to release, and nothing reads past `len` (every column access
-    /// goes through `__vec_checked_index`, which bounds-checks against it). Writing
-    /// nil into the columns would also be actively harmful: it punches holes in
-    /// dense numeric arrays and can push them from array to hash part, which is the
-    /// representation's whole advantage.
     pub(crate) fn column_data_primitive(
         &mut self,
         name: &str,
@@ -868,8 +925,13 @@ impl Builder<'_> {
                 self.column_element_store(vec, i, *value, elem)?;
                 Ok(Some(ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil)))))
             }
-            ("__vec_data_unset", [recv, _index]) => {
-                let Some(_) = self.vec_column_elem_of(*recv)? else { return Ok(None) };
+            ("__vec_data_unset", [recv, index]) => {
+                let Some(elem) = self.vec_column_elem_of(*recv)? else { return Ok(None) };
+                if self.column_contains_references(elem) {
+                    let vec = self.lower_expr(*recv)?;
+                    let index = self.lower_expr(*index)?;
+                    self.column_unset(vec, index, elem)?;
+                }
                 Ok(Some(ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil)))))
             }
             ("__vec_data_capacity", [recv]) => {
@@ -881,21 +943,19 @@ impl Builder<'_> {
                     base: header,
                     field: Ustr::from("cap"),
                 });
-                // The PRESENCE column when there is one: it holds a real bool for
-                // every slot, where a leaf column of an absent element holds nil,
-                // and `#` over a table with holes is undefined in Lua.
-                let physical = match column_leaf_paths(&shape).first() {
-                    Some(path) => {
-                        let col = self.emit_cur(Inst::Field {
-                            base: vec,
-                            field: *path,
-                        });
-                        self.call_spine("table_len", vec![col])?
+                // Reference leaves can be nil even when the element is present.
+                let physical = if self.column_contains_references(elem) {
+                    self.emit_cur(Inst::Field { base: vec, field: Ustr::from("len") })
+                } else {
+                    match column_leaf_paths(&shape).first() {
+                        Some(path) => {
+                            let col = self.emit_cur(Inst::Field { base: vec, field: *path });
+                            self.call_spine("table_len", vec![col])?
+                        }
+                        None => self.emit_cur(Inst::Field {
+                            base: vec, field: Ustr::from("len"),
+                        }),
                     }
-                    None => self.emit_cur(Inst::Field {
-                        base: vec,
-                        field: Ustr::from("len"),
-                    }),
                 };
                 Ok(Some(ValueRepr::Scalar(
                     self.call_spine("__rock_col_capacity", vec![reserved, physical])?,
@@ -1094,10 +1154,10 @@ impl Builder<'_> {
                 Ok(Some(self.map_column_get_repr(m, k, elem)?))
             }
             ("table_unset", [recv, key]) => {
-                let Some(_) = self.map_column_value_of(*recv)? else { return Ok(None) };
+                let Some(elem) = self.map_column_value_of(*recv)? else { return Ok(None) };
                 let m = self.lower_expr(*recv)?;
                 let k = self.lower_expr(*key)?;
-                self.call_spine("__map_col_free", vec![m, k])?;
+                self.map_column_free(m, k, elem)?;
                 Ok(Some(ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil)))))
             }
             ("len" | "map_len", [recv]) => {
@@ -1114,8 +1174,12 @@ impl Builder<'_> {
                 )))
             }
             ("clear", [recv]) => {
-                let Some(_) = self.map_column_value_of(*recv)? else { return Ok(None) };
+                let Some(elem) = self.map_column_value_of(*recv)? else { return Ok(None) };
                 let m = self.lower_expr(*recv)?;
+                if self.column_contains_references(elem) {
+                    let data = self.map_col_data(m);
+                    self.column_release_all(data, elem)?;
+                }
                 self.call_spine("__map_col_clear", vec![m])?;
                 Ok(Some(ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil)))))
             }
@@ -1441,7 +1505,7 @@ impl Builder<'_> {
         self.column_element_store_bundle(data, slot, &stored, elem)?;
         self.f.set_term(self.cur, Term::Goto(join));
         self.cur = del_bb;
-        self.call_spine("__map_col_free", vec![m, key])?;
+        self.map_column_free(m, key, elem)?;
         self.f.set_term(self.cur, Term::Goto(join));
         self.cur = join;
         Ok(())

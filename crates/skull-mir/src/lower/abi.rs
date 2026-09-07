@@ -976,7 +976,9 @@ fn column_eligible_for_shape(
     };
     let Some(sid) = ws.struct_by_name.get(&name) else { return false };
     ws.modules[sid.module.index()].structs[sid.def].is_value
-        && super::shape::planned_value(ws, shape.name).is_some_and(|plan| plan.shape.is_some())
+        && super::shape::planned_value(ws, shape.name).is_some_and(|plan| {
+            plan.shape.is_some() || (declared_nobox(ws, ty) && plan.gc_shape.is_some())
+        })
 }
 
 impl RepArena {

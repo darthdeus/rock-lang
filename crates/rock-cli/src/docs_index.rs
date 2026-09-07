@@ -64,8 +64,10 @@ pub fn run(inputs: &[String], output: Option<&str>) -> Result<()> {
             "bytes": source.raw.len(),
             "lines": line_count(&source.raw),
         }));
+        let text = std::str::from_utf8(&source.raw)
+            .with_context(|| format!("read declaration source '{}'", source.display_path))?;
         for item in &source.ast.items {
-            if let Some(declaration) = declaration(&source.ast, item, &source.display_path) {
+            if let Some(declaration) = declaration(&source.ast, item, &source.display_path, text)? {
                 declarations.push(declaration);
             }
         }
@@ -165,13 +167,13 @@ fn repository_revision(cwd: &Path) -> Option<String> {
     (!revision.is_empty()).then_some(revision)
 }
 
-fn declaration(ast: &Ast, item: &Item, source: &str) -> Option<Declaration> {
+fn declaration(ast: &Ast, item: &Item, source: &str, text: &str) -> Result<Option<Declaration>> {
     let line = item.span.line_range.0 + 1;
     let (kind, name, signature) = match &item.kind {
         ItemKind::Function(function) if !function.is_synthetic => (
             "function",
             function_name(function),
-            function_signature(ast, function),
+            function_signature(ast, function, text)?,
         ),
         ItemKind::Struct(structure) => (
             "struct",
@@ -199,7 +201,7 @@ fn declaration(ast: &Ast, item: &Item, source: &str) -> Option<Declaration> {
             format!(
                 "decorator {}({})",
                 decorator.name.name,
-                params_signature(ast, &decorator.params)
+                params_signature(ast, &decorator.params, text)?
             ),
         ),
         ItemKind::Global(global) => {
@@ -210,15 +212,15 @@ fn declaration(ast: &Ast, item: &Item, source: &str) -> Option<Declaration> {
             );
             ("global", global.name.name.to_string(), format!("{keyword} {typed_name}"))
         }
-        _ => return None,
+        _ => return Ok(None),
     };
-    Some(Declaration {
+    Ok(Some(Declaration {
         kind,
         name,
         signature,
         source: source.to_string(),
         line,
-    })
+    }))
 }
 
 fn declaration_value(declaration: &Declaration) -> Value {
@@ -238,7 +240,7 @@ fn function_name(function: &FunctionDef) -> String {
     }
 }
 
-fn function_signature(ast: &Ast, function: &FunctionDef) -> String {
+fn function_signature(ast: &Ast, function: &FunctionDef, text: &str) -> Result<String> {
     let keyword = if function.is_macro {
         "macro"
     } else if function.is_coroutine {
@@ -249,12 +251,12 @@ fn function_signature(ast: &Ast, function: &FunctionDef) -> String {
     let return_type = function
         .return_ty
         .map_or_else(|| "()".to_string(), |ty| ast.type_surface(ty));
-    format!(
+    Ok(format!(
         "{keyword} {}{}({}) -> {return_type}",
         function_name(function),
         generic_suffix(ast, &function.generics),
-        params_signature(ast, &function.params)
-    )
+        params_signature(ast, &function.params, text)?
+    ))
 }
 
 fn generic_suffix(ast: &Ast, generics: &[Generic]) -> String {
@@ -282,19 +284,29 @@ fn generic_suffix(ast: &Ast, generics: &[Generic]) -> String {
     )
 }
 
-fn params_signature(ast: &Ast, params: &[Param]) -> String {
+fn params_signature(ast: &Ast, params: &[Param], text: &str) -> Result<String> {
     params
         .iter()
         .map(|param| {
             let prefix = if param.is_variadic { "..." } else { "" };
-            format!(
+            let mut signature = format!(
                 "{prefix}{}: {}",
                 param.name.name,
                 ast.type_surface(param.ty)
-            )
+            );
+            if let Some(default) = param.default {
+                let (start, end) = ast.exprs[default].span.offset_range;
+                // Source spelling preserves literals and grouping without an expression printer.
+                let expression = text.get(start..end).with_context(|| {
+                    format!("invalid default expression span for parameter '{}'", param.name.name)
+                })?;
+                signature.push_str(" = ");
+                signature.push_str(expression);
+            }
+            Ok(signature)
         })
-        .collect::<Vec<_>>()
-        .join(", ")
+        .collect::<Result<Vec<_>>>()
+        .map(|params| params.join(", "))
 }
 
 fn struct_signature(ast: &Ast, structure: &skull_parser::StructDef) -> String {
