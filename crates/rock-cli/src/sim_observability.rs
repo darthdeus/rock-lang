@@ -50,7 +50,7 @@ impl SimRunRecorder {
     ) -> Self {
         let root = std::env::var_os("ROCK_SIM_LOG_DIR")
             .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("sim-runs"));
+            .unwrap_or_else(|| PathBuf::from(".sim-runs"));
         Self::begin_at_with_root(&root, project, selection, quiet, requested_jobs, requested_mode)
     }
 
