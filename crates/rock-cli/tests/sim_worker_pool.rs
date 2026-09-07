@@ -535,3 +535,19 @@ fn shared_sound_bank_edits_follow_the_worker_pool() {
 fn shared_visual_bank_edits_follow_the_worker_pool() {
     assert_shared_bank_edit_is_exclusive("visual_bank_worktree_watcher");
 }
+
+#[test]
+fn jit_boot_mode_enabled_is_restored_between_entries() {
+    let run = run_workers(&["b0_jit_on_seed", "b0_jit_on_probe"], "1");
+    assert_eq!(peak_procs(&run.trace), (1, 1), "must share one boot:\n{}", run.combined());
+    assert!(run.success, "JIT boot mode must survive a predecessor toggle:\n{}", run.combined());
+    assert!(run.stdout.contains("[sim] 2/2 sims passed"), "{}", run.combined());
+}
+
+#[test]
+fn jit_boot_mode_explicitly_disabled_is_restored_between_entries() {
+    let run = run_workers(&["b0_jit_off_seed", "b0_jit_off_probe"], "1");
+    assert_eq!(peak_procs(&run.trace), (1, 1), "must share one boot:\n{}", run.combined());
+    assert!(run.success, "explicit JIT-off boot policy must survive a predecessor toggle:\n{}", run.combined());
+    assert!(run.stdout.contains("[sim] 2/2 sims passed"), "{}", run.combined());
+}
