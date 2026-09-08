@@ -87,7 +87,7 @@ impl Builder<'_> {
         let boxed = NestedFn {
             hoisted,
             param_names: param_names.clone(),
-            representation: self.scx.rep_arena().boxed_function(self.scx.target, param_names.len()),
+            representation: self.scx.rep_arena().boxed_function(self.call_scx.target, param_names.len()),
             logical_type: (*fn_ty).clone(),
         };
         let taken_by_value = self
@@ -95,12 +95,12 @@ impl Builder<'_> {
             .expr_arena
             .iter()
             .any(|(_, e)| matches!(e, Expr::Var(b) if *b == name));
-        if self.scx.values_first_class {
+        if self.call_scx.values_first_class {
             return Ok(boxed);
         }
         let representation = BackendFnAbiPlan::for_function_value_with_mode(
             self.ws,
-            self.scx,
+            self.call_scx,
             &fn_ty,
             taken_by_value,
         )
@@ -154,6 +154,7 @@ impl Builder<'_> {
         let mut child = Builder {
             ws: self.ws,
             scx: self.scx,
+            call_scx: self.call_scx,
             concrete_plan: self.concrete_plan,
             concrete_plans: self.concrete_plans,
             concrete_type_cache: std::cell::RefCell::new(rustc_hash::FxHashMap::default()),

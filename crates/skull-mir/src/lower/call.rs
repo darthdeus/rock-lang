@@ -219,7 +219,7 @@ impl Builder<'_> {
     ) -> Result<BackendFnAbiPlanHandle, CompilerError> {
         crate::lower::abi::callee_abi_plan_for_instance(
             self.ws,
-            self.scx,
+            self.call_scx,
             self.concrete_plans,
             inst,
         )
@@ -836,7 +836,7 @@ impl Builder<'_> {
         } else {
             self.reject_nobox_opaque_value_return(e, func, &dc.callee_inst)?;
         }
-        let lua_opaque = self.scx.target() == bone_semantic::hir::FnBackend::Lua
+        let lua_opaque = self.call_scx.target() == bone_semantic::hir::FnBackend::Lua
             && callee.inline_body.is_some()
             && !callee.generics.is_empty()
             && !callee.annotations.iter().any(|a| a.name.name.as_str() == "scalar_abi");

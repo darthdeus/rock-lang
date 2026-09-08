@@ -729,6 +729,15 @@ impl ScalarCtx {
         scx
     }
 
+    /// Share this context's representation arena while selecting the
+    /// first-class value ABI for a caller that emits into the same target.
+    /// Global initializers use this for calls, while retaining their separate
+    /// scalar storage policy.
+    pub fn with_values_first_class(mut self) -> Self {
+        self.values_first_class = true;
+        self
+    }
+
     pub fn with_native_flat_enums(mut self) -> Self {
         self.native_flat_enums = true;
         self
@@ -1556,6 +1565,7 @@ fn lower_body(
     let mut b = Builder {
         ws,
         scx,
+        call_scx: scx,
         concrete_plan,
         concrete_plans,
         concrete_type_cache: RefCell::new(rustc_hash::FxHashMap::default()),
@@ -1622,6 +1632,20 @@ pub fn lower_global_with_plans(
     concrete_plans: &ConcretePlans,
     name: Ustr,
 ) -> Result<Option<MirFunc>, CompilerError> {
+    lower_global_with_call_context(ws, scx, scx, plan, concrete_plans, name)
+}
+
+/// Lower a global with a storage context and a possibly different call ABI
+/// context. Native C globals keep their scalarized storage while calls into
+/// ordinary C bodies use those bodies' first-class value ABI.
+pub fn lower_global_with_call_context(
+    ws: &Workspace,
+    scx: &ScalarCtx,
+    call_scx: &ScalarCtx,
+    plan: &ConcreteBodyPlan,
+    concrete_plans: &ConcretePlans,
+    name: Ustr,
+) -> Result<Option<MirFunc>, CompilerError> {
     let ConcreteOwner::Global { module, index } = &plan.owner else {
         return Err(gap("concrete plan does not own a global"));
     };
@@ -1631,12 +1655,13 @@ pub fn lower_global_with_plans(
     }
     let gid = Idx::from_raw(RawIdx::from_u32(*index));
     validate_always_plan(ws, scx, *module, BodyOwner::Global(gid), plan, concrete_plans)?;
-    lower_global_inner(ws, scx, *module, gid, name, plan, concrete_plans)
+    lower_global_inner(ws, scx, call_scx, *module, gid, name, plan, concrete_plans)
 }
 
 fn lower_global_inner(
     ws: &Workspace,
     scx: &ScalarCtx,
+    call_scx: &ScalarCtx,
     mid: ModuleId,
     gid: Idx<bone_semantic::hir::GlobalDef>,
     name: Ustr,
@@ -1667,6 +1692,7 @@ fn lower_global_inner(
     let mut b = Builder {
         ws,
         scx,
+        call_scx,
         concrete_plan,
         concrete_plans,
         concrete_type_cache: RefCell::new(rustc_hash::FxHashMap::default()),
@@ -1998,6 +2024,7 @@ fn lower_decorator_inner(
     let mut b = Builder {
         ws,
         scx,
+        call_scx: scx,
         concrete_plan,
         concrete_plans,
         concrete_type_cache: RefCell::new(rustc_hash::FxHashMap::default()),
@@ -2048,6 +2075,7 @@ fn lower_decorator_inner(
 struct Builder<'a> {
     ws: &'a Workspace,
     scx: &'a ScalarCtx,
+    call_scx: &'a ScalarCtx,
     concrete_plan: &'a ConcreteBodyPlan,
     concrete_plans: &'a ConcretePlans,
     concrete_type_cache: ConcreteTypeCache,
