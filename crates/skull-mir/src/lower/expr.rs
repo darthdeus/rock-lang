@@ -308,7 +308,12 @@ impl Builder<'_> {
                             let vals = self.repr_to_slot_values_bundle(&bundle, &slot)?;
                             vs.extend(vals);
                         }
-                        _ => vs.push(self.pack_maybe_absent(bundle.into_value())?),
+                        _ => {
+                            let outer_expr = self.cur_expr.replace(el);
+                            let packed = self.pack_maybe_absent(bundle.into_value());
+                            self.cur_expr = outer_expr;
+                            vs.push(packed?);
+                        }
                     }
                 }
                 Ok(self.emit_cur(Inst::MakeTuple(vs)))

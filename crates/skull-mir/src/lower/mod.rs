@@ -2265,6 +2265,29 @@ impl Builder<'_> {
         if let Some(span) = self.cur_span {
             self.f.inst_spans.insert(id, span);
         }
+        let enum_name = match self.f.insts[id] {
+            Inst::MakeEnum { ty, .. } | Inst::MakeEnumDyn { ty, .. } => Some(ty),
+            _ => None,
+        };
+        if let (Some(enum_name), Some(expr)) = (enum_name, self.cur_expr) {
+            if let Some(logical_ty) = self
+                .concrete_plan
+                .domain_types(&self.cur_domain)
+                .and_then(|types| types.expr_type(expr))
+            {
+                let logical = self.scx.interner().get(logical_ty);
+                let matches_owner = matches!(
+                    logical.peel_nullable().0,
+                    MonoTy::App {
+                        ctor: MonoCtor::Nominal(name),
+                        ..
+                    } if *name == enum_name
+                );
+                if matches_owner {
+                    self.f.inst_logical_types.entry(id).or_insert(logical_ty);
+                }
+            }
+        }
         // THE choke point for call-site identity: every call FORM entering the
         // arena is stamped here, so a missing stamp is a property of this ONE
         // branch rather than of 48 call-emitting sites each remembering to
@@ -2470,8 +2493,12 @@ impl Builder<'_> {
             return Ok(());
         }
         let cells = match slot {
-            RetSlot::Leaves(shape) => self
-                .new_flat_enum_cells(name, shape)?
+            RetSlot::Leaves(shape) => {
+                let owner = self
+                    .binding_ty(pb)
+                    .and_then(|ty| self.concrete_ty_id(ty));
+                self
+                .new_flat_enum_cells(name, shape, owner.as_deref())?
                 .unwrap_or_else(|| {
                     (0..slot.slot_count())
                         .map(|li| {
@@ -2479,7 +2506,8 @@ impl Builder<'_> {
                                 .new_cell(Some(Ustr::from(format!("{name}__{li}").as_str())))
                         })
                         .collect()
-                }),
+                })
+            }
             RetSlot::Nested(_) | RetSlot::Opaque => (0..slot.slot_count())
                 .map(|li| {
                     self.f

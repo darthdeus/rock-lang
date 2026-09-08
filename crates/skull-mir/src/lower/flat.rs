@@ -7,6 +7,7 @@ impl Builder<'_> {
         &mut self,
         name: Ustr,
         shape: &ValueShape,
+        owner: Option<&MonoTy>,
     ) -> Result<Option<Vec<Idx<Cell>>>, CompilerError> {
         let Some(flat) =
             EnumPlan::for_name(self.ws, shape.name).and_then(|plan| plan.flat().cloned())
@@ -19,10 +20,29 @@ impl Builder<'_> {
                 shape.name
             )));
         }
-        let owner = self.scx.interner().intern(MonoTy::App {
-            ctor: MonoCtor::Nominal(flat.name),
-            params: Vec::new(),
-        });
+        let owner = owner
+            .map(|owner| match owner {
+                MonoTy::Nullable(inner) => inner.as_ref(),
+                owner => owner,
+            })
+            .filter(|owner| {
+                matches!(
+                    owner,
+                    MonoTy::App {
+                        ctor: MonoCtor::Nominal(name),
+                        ..
+                    } if *name == flat.name
+                )
+            })
+            .ok_or_else(|| self.gap_here(format!(
+                "flat enum {} has no concrete owner type for native slots",
+                flat.name
+            )))?;
+        let owner = self.scx.interner().intern(owner.clone());
+        let tag_ty = self
+            .scx
+            .native_flat_enums
+            .then(|| self.scx.interner().intern(MonoTy::String));
         let tuple_width = flat.tuple_width();
         let mut native_slot_fields = vec![None; tuple_width];
         let mut offset = 0;
@@ -38,7 +58,9 @@ impl Builder<'_> {
             .map(|index| {
                 let cell_name = Ustr::from(format!("{name}__{index}").as_str());
                 if index == 0 {
-                    return self.f.new_cell(Some(cell_name));
+                    return self
+                        .f
+                        .new_cell_native_typed(Some(cell_name), None, tag_ty);
                 }
                 let slot = index - 1;
                 if let Some(field) = native_slot_fields.get(slot).and_then(|field| *field) {

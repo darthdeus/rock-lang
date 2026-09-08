@@ -284,8 +284,11 @@ impl Builder<'_> {
                             let shape = actual;
                             let leaves = self.repr_to_leaves_bundle(&r)?;
                             let bname = self.body.binding_arena[name].name;
+                            let owner = self
+                                .binding_ty(name)
+                                .and_then(|ty| self.concrete_ty_id(ty));
                             let cells = self
-                                .new_flat_enum_cells(bname, &shape)?
+                                .new_flat_enum_cells(bname, &shape, owner.as_deref())?
                                 .unwrap_or_else(|| {
                                     leaves
                                         .iter()

@@ -1028,7 +1028,10 @@ impl Builder<'_> {
         shape: ValueShape,
     ) -> Result<(), CompilerError> {
         let bname = self.body.binding_arena[b].name;
-        if let Some(cells) = self.new_flat_enum_cells(bname, &shape)? {
+        let owner = self
+            .binding_ty(b)
+            .and_then(|ty| self.concrete_ty_id(ty));
+        if let Some(cells) = self.new_flat_enum_cells(bname, &shape, owner.as_deref())? {
             if cells.len() != leaves.len() {
                 return Err(self.gap_here(format!(
                     "flat enum {} has {} binding cells for {} leaves",
