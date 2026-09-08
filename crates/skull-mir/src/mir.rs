@@ -1069,6 +1069,10 @@ pub struct MirFunc {
     /// it just has no graph-owned top-level instance to wrap in
     /// `BackendFnAbiPlan`.
     pub abi_representation: Option<crate::lower::FunctionRepPlan>,
+    /// The logical function type paired with `abi_representation` for a
+    /// hoisted nested function, which has no declaration `FuncRef` to recover
+    /// it from later.
+    pub abi_logical_type: Option<crate::monoty::MonoTy>,
     /// The owned result representation of an always-emitted global initializer.
     pub global_plan: Option<crate::lower::GlobalPlan>,
     /// `static` cells declared in this fn's body (in source order).
@@ -1251,6 +1255,7 @@ impl MirFunc {
             lower_attribution: Default::default(),
             abi_plan: None,
             abi_representation: None,
+            abi_logical_type: None,
             global_plan: None,
             statics: Vec::new(),
             comptime_reads: Vec::new(),

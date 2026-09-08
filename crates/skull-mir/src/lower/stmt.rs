@@ -80,10 +80,15 @@ impl Builder<'_> {
     ) -> Result<NestedFn, CompilerError> {
         let param_names: Vec<Ustr> =
             params.into_iter().map(|pb| self.body.binding_arena[pb].name).collect();
+        let fn_ty = self
+            .binding_ty(name)
+            .and_then(|ty| self.concrete_ty_id(ty))
+            .ok_or_else(|| gap("concrete nested function binding has no type plan"))?;
         let boxed = NestedFn {
             hoisted,
             param_names: param_names.clone(),
             representation: self.scx.rep_arena().boxed_function(self.scx.target, param_names.len()),
+            logical_type: (*fn_ty).clone(),
         };
         let taken_by_value = self
             .body
@@ -93,10 +98,6 @@ impl Builder<'_> {
         if self.scx.values_first_class {
             return Ok(boxed);
         }
-        let fn_ty = self
-            .binding_ty(name)
-            .and_then(|ty| self.concrete_ty_id(ty))
-            .ok_or_else(|| gap("concrete nested function binding has no type plan"))?;
         let representation = BackendFnAbiPlan::for_function_value_with_mode(
             self.ws,
             self.scx,
@@ -107,7 +108,12 @@ impl Builder<'_> {
             Some(span) => CompilerError::new_with_label(span, error.message),
             None => CompilerError::new_no_location(error.message),
         })?;
-        let abi = NestedFn { hoisted, param_names, representation };
+        let abi = NestedFn {
+            hoisted,
+            param_names,
+            representation,
+            logical_type: (*fn_ty).clone(),
+        };
         Ok(if abi.uses_scalar_abi() { abi } else { boxed })
     }
 
@@ -195,6 +201,7 @@ impl Builder<'_> {
         };
 
         child.f.abi_representation = Some(abi.representation.clone());
+        child.f.abi_logical_type = Some(abi.logical_type.clone());
         child.f.code_identity = nested_identity;
         child.f.code_abi_fingerprint = Some(
             abi.representation.logical_fingerprint(&self.scx.rep_arena()),

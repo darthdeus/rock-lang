@@ -446,6 +446,7 @@ pub fn convert_closures_framed(
             lower_attribution: mf.lower_attribution.clone(),
             abi_plan: None,
             abi_representation: mf.lambda_abi_representations.get(&lambda).cloned(),
+            abi_logical_type: None,
             rep_arena: mf.rep_arena.clone(),
             global_plan: mf.global_plan.clone(),
             statics: Vec::new(),

@@ -788,6 +788,7 @@ struct NestedFn {
     /// (`slotted_call_args`) exactly as a top-level callee's would be.
     param_names: Vec<Ustr>,
     representation: FunctionRepPlan,
+    logical_type: MonoTy,
 }
 
 impl NestedFn {
