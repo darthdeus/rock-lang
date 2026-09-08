@@ -554,6 +554,92 @@ fn main() {
 }
 
 #[test]
+fn c_imgui_image_button_links_against_actual_stone_artifact() {
+    let root = workspace_root();
+    let dir = tempfile::tempdir().expect("image button imgui fixture directory");
+    let source_path = dir.path().join("stone/engine/ui/imgui.rock");
+    std::fs::create_dir_all(source_path.parent().expect("image button fixture parent"))
+        .expect("create image button fixture parent");
+    let source = r###"
+@scalar_abi inline(lua) fn imgui_image_button_raw(
+    id: string,
+    image: Image,
+    size: Vec2,
+    uv1: Vec2,
+    uv2: Vec2,
+    bg_color: Color,
+    tint_color: Color
+) -> bool = """
+    local cache = __imgui_shared_image_packet()
+
+    cache.s.x, cache.s.y = size__x, size__y
+    cache.u1.x, cache.u1.y = uv1__x, uv1__y
+    cache.u2.x, cache.u2.y = uv2__x, uv2__y
+    cache.bg.x, cache.bg.y = bg_color__r, bg_color__g
+    cache.bg.z, cache.bg.w = bg_color__b, bg_color__a
+    cache.tint.x, cache.tint.y = tint_color__r, tint_color__g
+    cache.tint.z, cache.tint.w = tint_color__b, tint_color__a
+
+    local texture_id
+    if _G.__ROCK_RENDERER_BACKEND == 'wgpu' then
+        texture_id = image
+    else
+        texture_id = stone.stone_get_image_texture(image)
+    end
+    cache.tex._TexData = nil
+    cache.tex._TexID = texture_id
+    return imgui.C.igImageButton(id, cache.tex, cache.s, cache.u1, cache.u2, cache.bg, cache.tint)
+"""
+
+newtype Image(int)
+struct Color { r: float, g: float, b: float, a: float }
+
+fn main() {
+    let _ = imgui_image_button_raw("quest##17", Image(17), v(40.5, 22.25), v(0.1, 0.2), v(0.8, 0.9), Color { r: 0.3, g: 0.4, b: 0.5, a: 0.6 }, Color { r: 0.7, g: 0.8, b: 0.9, a: 1.0 })
+    print("image-button-imgui-ok")
+}
+"###;
+    std::fs::write(&source_path, source).expect("write image button imgui fixture");
+    let output = dir.path().join("image-button-imgui-consumer");
+    let compile = Command::new(env!("CARGO_BIN_EXE_rock"))
+        .args([
+            "compile",
+            source_path.to_str().expect("utf8 image button fixture"),
+            "--backend",
+            "c",
+            "--output",
+            output.to_str().expect("utf8 image button output"),
+        ])
+        .current_dir(&root)
+        .env_remove("ROCK_SKIP_ENGINE_BUILD")
+        .output()
+        .expect("spawn C image button compile");
+    assert!(
+        compile.status.success(),
+        "C image button consumer did not link against Stone:\nstdout:{}\nstderr:{}",
+        String::from_utf8_lossy(&compile.stdout),
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    let generated = std::fs::read_to_string(output.with_extension("c"))
+        .expect("read generated C image button consumer");
+    assert!(
+        generated.contains("stone_imgui_image_button"),
+        "generated consumer omitted stone_imgui_image_button"
+    );
+    let run = Command::new(&output)
+        .current_dir(&root)
+        .output()
+        .expect("run linked C image button consumer");
+    assert!(
+        run.status.success(),
+        "linked C image button consumer failed:\nstdout:{}\nstderr:{}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(run.stdout, b"image-button-imgui-ok\n");
+}
+
+#[test]
 fn c_compile_keeps_artifacts_and_invalidates_stale_defaults() {
     assert!(
         Command::new("clang")
