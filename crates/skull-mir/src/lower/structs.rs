@@ -977,6 +977,14 @@ impl Builder<'_> {
         let packet = uniform_values_return_shape(self.ws, block_name)
             .map_err(|m| reject(call_span, format!("`@uniform_values`: {m}")))?;
         let repr = self.lower_expr_repr(*u_e)?;
+        // An ordinary direct call returns one opaque value slot even when its
+        // concrete type is a value struct. This macro reads that value's fields,
+        // so attach the type's value plan without changing the carrier.
+        let repr = if self.scx.rep_arena().value_shape(repr.representation()).is_none() {
+            ValueBundle::new(self.nominal_value_representation(struct_name)?, repr.into_value())
+        } else {
+            repr
+        };
         let leaves = self.repr_to_leaves_bundle(&repr)?;
         let expected: Vec<crate::gpu_layout::WireKind> = members
             .iter()
