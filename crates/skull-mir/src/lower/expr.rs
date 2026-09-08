@@ -329,9 +329,10 @@ impl Builder<'_> {
                 // an unsubstituted generic (a nullable binding has no
                 // synthesizable node), so the type predicates below see nothing
                 // while the storage still has no element slot to name.
-                if self.value_struct_of(e).is_some()
-                    || self.nullable_place_value_of(e)?.is_some()
-                    || self.vec_column_elem_of(base)?.is_some()
+                if self.vec_column_elem_of(base)?.is_some()
+                    || (!self.scx.values_first_class
+                        && (self.value_struct_of(e).is_some()
+                            || self.nullable_place_value_of(e)?.is_some()))
                 {
                     let r = self.lower_expr_repr(e)?.into_value();
                     return Ok(self.pack(r)?);

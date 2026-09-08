@@ -10,8 +10,15 @@ impl Builder<'_> {
         field: Ustr,
         spliced: bool,
     ) -> Result<StructFieldPlan, CompilerError> {
-        crate::lower::struct_field_plan(self.ws, self.scx.target, sname, field, spliced)
-            .map_err(|e| self.gap_here(e.message))
+        let plan = crate::lower::struct_field_plan(self.ws, self.scx.target, sname, field, spliced)
+            .map_err(|e| self.gap_here(e.message))?;
+        // First-class targets store inline children as declared fields, not leaf keys.
+        if self.scx.values_first_class {
+            if let StructFieldPlan::Inline { child, nullable, flat: None } = plan {
+                return Ok(StructFieldPlan::Direct { child: Some(child), nullable });
+            }
+        }
+        Ok(plan)
     }
 
     // --- `embed` storage: a child's leaves ARE the parent's physical keys ---

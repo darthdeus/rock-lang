@@ -290,6 +290,10 @@ impl Builder<'_> {
                     let parent = self.lower_expr(base)?;
                     return Ok(ValueRepr::Scalar(self.materialize_flat(parent, field, &shape)));
                 }
+                if self.scx.values_first_class {
+                    let parent = self.lower_expr(base)?;
+                    return Ok(ValueRepr::Scalar(self.emit_cur(Inst::Field { base: parent, field })));
+                }
                 // An embedded field read as a WHOLE value re-materializes from
                 // its leaves. Projection-only keeps every such read transient
                 // (never bound, returned, captured or stored), so this is the
@@ -451,7 +455,8 @@ impl Builder<'_> {
             // store) rebuilds a fresh value instead of aliasing the array slot.
             // A `V?` element takes the same shape, gated on presence at the copy.
             Expr::Index { base, index }
-                if self.value_struct_of(e).is_some() || nullable_place_value.is_some() =>
+                if !self.scx.values_first_class
+                    && (self.value_struct_of(e).is_some() || nullable_place_value.is_some()) =>
             {
                 let nullable = self.value_struct_of(e).is_none();
                 let name = self
