@@ -265,6 +265,63 @@ fn main() {
 }
 
 #[test]
+fn c_imgui_begin_child_scroll_raw_links_against_actual_stone_artifact() {
+    let root = workspace_root();
+    let dir = tempfile::tempdir().expect("raw child imgui fixture directory");
+    let source_path = dir.path().join("stone/engine/ui/imgui.rock");
+    std::fs::create_dir_all(source_path.parent().expect("raw child fixture parent"))
+        .expect("create raw child fixture parent");
+    let source = r#"
+@scalar_abi inline(lua) fn __imgui_begin_child_scroll_raw(id: string, size: Vec2) -> bool = """
+    return imgui.BeginChild_Str(id, imgui.ImVec2_Float(size__x, size__y), 0, 0)
+"""
+
+fn main() {
+    if __imgui_begin_child_scroll_raw("HistoryTree", v(16.0, 24.0)) { print("child-open") }
+    print("raw-child-imgui-ok")
+}
+"#;
+    std::fs::write(&source_path, source).expect("write raw child imgui fixture");
+    let output = dir.path().join("raw-child-imgui-consumer");
+    let compile = Command::new(env!("CARGO_BIN_EXE_rock"))
+        .args([
+            "compile",
+            source_path.to_str().expect("utf8 raw child fixture"),
+            "--backend",
+            "c",
+            "--output",
+            output.to_str().expect("utf8 raw child output"),
+        ])
+        .current_dir(&root)
+        .env_remove("ROCK_SKIP_ENGINE_BUILD")
+        .output()
+        .expect("spawn C raw child compile");
+    assert!(
+        compile.status.success(),
+        "C raw child consumer did not link against Stone:\nstdout:{}\nstderr:{}",
+        String::from_utf8_lossy(&compile.stdout),
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    let generated = std::fs::read_to_string(output.with_extension("c"))
+        .expect("read generated C raw child consumer");
+    assert!(
+        generated.contains("stone_imgui_begin_child"),
+        "generated consumer omitted stone_imgui_begin_child"
+    );
+    let run = Command::new(&output)
+        .current_dir(&root)
+        .output()
+        .expect("run linked C raw child consumer");
+    assert!(
+        run.status.success(),
+        "linked C raw child consumer failed:\nstdout:{}\nstderr:{}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(run.stdout, b"raw-child-imgui-ok\n");
+}
+
+#[test]
 fn c_compile_keeps_artifacts_and_invalidates_stale_defaults() {
     assert!(
         Command::new("clang")
