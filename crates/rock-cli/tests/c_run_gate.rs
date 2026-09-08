@@ -207,6 +207,64 @@ fn main() {
 }
 
 #[test]
+fn c_imgui_menu_item_links_against_actual_stone_artifact() {
+    let root = workspace_root();
+    let dir = tempfile::tempdir().expect("menu item imgui fixture directory");
+    let source_path = dir.path().join("stone/engine/ui/imgui.rock");
+    std::fs::create_dir_all(source_path.parent().expect("menu item fixture parent"))
+        .expect("create menu item fixture parent");
+    let source = r#"
+inline(lua) fn imgui_menu_item(label: string, enabled: bool = true) -> bool = """
+    return imgui.MenuItem_Bool(label, nil, false, enabled)
+"""
+
+fn main() {
+    if imgui_menu_item("Duplicate") { print("menu-open") }
+    if imgui_menu_item("Disabled", false) { print("menu-open") }
+    print("menu-item-imgui-ok")
+}
+"#;
+    std::fs::write(&source_path, source).expect("write menu item imgui fixture");
+    let output = dir.path().join("menu-item-imgui-consumer");
+    let compile = Command::new(env!("CARGO_BIN_EXE_rock"))
+        .args([
+            "compile",
+            source_path.to_str().expect("utf8 menu item fixture"),
+            "--backend",
+            "c",
+            "--output",
+            output.to_str().expect("utf8 menu item output"),
+        ])
+        .current_dir(&root)
+        .env_remove("ROCK_SKIP_ENGINE_BUILD")
+        .output()
+        .expect("spawn C menu item compile");
+    assert!(
+        compile.status.success(),
+        "C menu item consumer did not link against Stone:\nstdout:{}\nstderr:{}",
+        String::from_utf8_lossy(&compile.stdout),
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    let generated = std::fs::read_to_string(output.with_extension("c"))
+        .expect("read generated C menu item consumer");
+    assert!(
+        generated.contains("stone_imgui_menu_item"),
+        "generated consumer omitted stone_imgui_menu_item"
+    );
+    let run = Command::new(&output)
+        .current_dir(&root)
+        .output()
+        .expect("run linked C menu item consumer");
+    assert!(
+        run.status.success(),
+        "linked C menu item consumer failed:\nstdout:{}\nstderr:{}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(run.stdout, b"menu-item-imgui-ok\n");
+}
+
+#[test]
 fn c_compile_keeps_artifacts_and_invalidates_stale_defaults() {
     assert!(
         Command::new("clang")
