@@ -322,6 +322,63 @@ fn main() {
 }
 
 #[test]
+fn c_imgui_set_window_pos_named_links_against_actual_stone_artifact() {
+    let root = workspace_root();
+    let dir = tempfile::tempdir().expect("window position imgui fixture directory");
+    let source_path = dir.path().join("stone/engine/ui/imgui.rock");
+    std::fs::create_dir_all(source_path.parent().expect("window position fixture parent"))
+        .expect("create window position fixture parent");
+    let source = r#"
+@scalar_abi inline(lua) fn imgui_set_window_pos_named(title: string, pos: Vec2) = """
+    imgui.C.igSetWindowPos_Str(title, imgui.ImVec2_Float(pos__x, pos__y), 0)
+"""
+
+fn main() {
+    imgui_set_window_pos_named("Quests##quest_editor", v(33.5, 44.25))
+    print("window-pos-imgui-ok")
+}
+"#;
+    std::fs::write(&source_path, source).expect("write window position imgui fixture");
+    let output = dir.path().join("window-pos-imgui-consumer");
+    let compile = Command::new(env!("CARGO_BIN_EXE_rock"))
+        .args([
+            "compile",
+            source_path.to_str().expect("utf8 window position fixture"),
+            "--backend",
+            "c",
+            "--output",
+            output.to_str().expect("utf8 window position output"),
+        ])
+        .current_dir(&root)
+        .env_remove("ROCK_SKIP_ENGINE_BUILD")
+        .output()
+        .expect("spawn C window position compile");
+    assert!(
+        compile.status.success(),
+        "C window position consumer did not link against Stone:\nstdout:{}\nstderr:{}",
+        String::from_utf8_lossy(&compile.stdout),
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    let generated = std::fs::read_to_string(output.with_extension("c"))
+        .expect("read generated C window position consumer");
+    assert!(
+        generated.contains("stone_imgui_set_window_pos_named"),
+        "generated consumer omitted stone_imgui_set_window_pos_named"
+    );
+    let run = Command::new(&output)
+        .current_dir(&root)
+        .output()
+        .expect("run linked C window position consumer");
+    assert!(
+        run.status.success(),
+        "linked C window position consumer failed:\nstdout:{}\nstderr:{}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(run.stdout, b"window-pos-imgui-ok\n");
+}
+
+#[test]
 fn c_compile_keeps_artifacts_and_invalidates_stale_defaults() {
     assert!(
         Command::new("clang")
