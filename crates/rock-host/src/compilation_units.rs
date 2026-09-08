@@ -206,10 +206,17 @@ pub fn load_sources_for_compilation_unit(unit: &CompilationUnit) -> Result<Sourc
             if let Some(first_file) = files.first() {
                 if let Some(project_dir) = first_file.parent() {
                     if let Some((stick_path, stick_config)) = crate::stick::StickConfig::find_from_dir(project_dir)? {
-                        // Load dependencies from stick.toml
+                        // Load dependencies from stick.toml. Channel-scoped
+                        // dependencies are filtered with the same predicate the
+                        // DependencyResolver uses, so the LSP's file set matches
+                        // a real compile on the same channel.
+                        let channel = crate::stick::resolved_channel_for(&stick_config);
                         let stick_dir = stick_path.parent().unwrap_or(&stick_path);
 
                         for (dep_name, dep) in &stick_config.dependencies {
+                            if !crate::stick::dependency_matches_channel(dep, &channel) {
+                                continue;
+                            }
                             // Resolve dependency path
                             let dep_path = match dep {
                                 crate::stick::Dependency::Path(path) => {

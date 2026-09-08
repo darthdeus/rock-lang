@@ -63,6 +63,12 @@ pub const OPTIONAL_ENGINE_LIBS: &[EngineLib] = &[
         src_stem: "stone_wgpu",
         dst_stem: "stone_wgpu",
     },
+    EngineLib {
+        need: "agent",
+        crate_name: "stone-agent",
+        src_stem: "stone_agent",
+        dst_stem: "stone_agent",
+    },
 ];
 
 /// Parse the game's stick.toml (if present), validate `[engine] needs` early so

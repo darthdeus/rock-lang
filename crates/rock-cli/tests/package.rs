@@ -85,6 +85,64 @@ fn content_revision(catalog: &Path) -> String {
     String::from_utf8(out.stdout).unwrap().trim().to_string()
 }
 
+/// The shipping package of the real game excludes the development agent
+/// bridge on every surface the package owns: emitted game code, the staged
+/// manifest, and staged assets. The development inclusion control is the
+/// channel-scoped fixture test below; this test pins the production artifact.
+#[test]
+fn shipping_package_of_mag_excludes_the_agent_bridge() {
+    let out_dir = tempfile::tempdir().expect("package output");
+    let out = Command::new(rock_bin())
+        .current_dir(repo_root())
+        .args([
+            "package",
+            "mag",
+            "--channel",
+            "steam",
+            "--output",
+            out_dir.path().to_str().unwrap(),
+        ])
+        .output()
+        .expect("spawn rock package");
+    assert!(
+        out.status.success(),
+        "rock package failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let build = out_dir.path();
+    let markers = [
+        "agent_bridge_poll_system",
+        "editor_ipc_dispatch",
+        "stone_ipc_listen",
+        "mag-agent",
+        "stone-agent",
+    ];
+    let lua = std::fs::read_to_string(build.join("main.lua")).expect("packaged main.lua");
+    for marker in markers {
+        assert!(!lua.contains(marker), "packaged game code contains agent marker {marker:?}");
+    }
+    let manifest = std::fs::read_to_string(build.join("package-manifest.json")).expect("manifest");
+    for marker in ["mag-agent", "stone-agent"] {
+        assert!(!manifest.contains(marker), "package manifest references {marker:?}");
+    }
+    let staged = walkdir::WalkDir::new(build.join("assets"))
+        .into_iter()
+        .filter_map(Result::ok)
+        .count();
+    assert!(staged > 0, "package staged no assets");
+    for entry in walkdir::WalkDir::new(build.join("assets"))
+        .into_iter()
+        .filter_map(Result::ok)
+    {
+        if entry.file_type().is_file() {
+            let name = entry.file_name().to_string_lossy();
+            assert!(!name.contains("stone_agent"), "staged asset carries the agent cdylib: {}", name);
+            assert!(!name.contains("mag-agent"), "staged asset carries the bridge package: {}", name);
+        }
+    }
+}
+
 #[test]
 fn package_manifest_is_the_secret_safe_metadata_boundary() {
     let out_dir = tempfile::tempdir().expect("package output");
@@ -813,4 +871,83 @@ fn packaged_sound_dependencies_survive_install_outside_source_tree() {
     assert!(installed.path().join("assets").join(
         manifest["artifacts"]["sound"]["bank"].as_str().unwrap()
     ).is_file());
+}
+
+/// The development-capability gate: a channel-scoped dependency compiles into
+/// development builds and is excluded from shipping builds entirely, so
+/// generated shipping code carries none of its symbols. The game references
+/// no dependency symbol (the MAG shape: production code never names the agent
+/// bridge), so the shipping arm must compile CLEANLY while excluding it. A
+/// compile failure on the shipping arm is the fail-closed direction and is
+/// covered by the resolver tests, not here.
+#[test]
+fn shipping_channel_excludes_a_channel_scoped_dependency_from_generated_code() {
+    let fixture_root = tempfile::tempdir_in(repo_root()).expect("package fixture");
+    let project = fixture_root.path().join("channel-gated");
+    let dep = fixture_root.path().join("dev-bridge-lib");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::create_dir_all(&dep).unwrap();
+    std::fs::write(
+        project.join("stick.toml"),
+        "[package]\nname = \"channel-gated\"\nversion = \"0.1.0\"\ntype = \"bin\"\n\n\
+         [build]\nchannels = [\"dev\", \"steam\"]\ndefault_channel = \"dev\"\n\n\
+         [dependencies]\ndev-bridge-lib = { path = \"../dev-bridge-lib\", channels = [\"dev\"] }\n",
+    )
+    .unwrap();
+    std::fs::write(project.join("main.rock"), "fn main() {\n    print(\"game-body-only\")\n}\n").unwrap();
+    std::fs::write(
+        dep.join("stick.toml"),
+        "[package]\nname = \"dev-bridge-lib\"\nversion = \"0.1.0\"\ntype = \"lib\"\n",
+    )
+    .unwrap();
+    // The global initializer is the emission witness: an uncalled fn in the
+    // dependency is dead-stripped, but a module-load effect is always emitted,
+    // so its presence in the output proves the package compiled into the build.
+    std::fs::write(
+        dep.join("bridge.rock"),
+        "global AGENT_BRIDGE_PRESENT: bool = false\n\nfn agent_bridge_marker() -> string {\n    return \"agent-bridge-marker\"\n}\n",
+    )
+    .unwrap();
+
+    let output_dir = tempfile::tempdir().expect("compile output");
+    let compile = |channel: &str, file: &str| {
+        let output = output_dir.path().join(file);
+        let result = Command::new(rock_bin())
+            .current_dir(repo_root())
+            .args([
+                "compile",
+                project.to_str().unwrap(),
+                "--channel",
+                channel,
+                "--output",
+                output.to_str().unwrap(),
+            ])
+            .output()
+            .expect("spawn compile");
+        (result, output)
+    };
+
+    let (shipping, shipping_path) = compile("steam", "steam.lua");
+    assert!(
+        shipping.status.success(),
+        "shipping compile must succeed without the scoped dependency: {}",
+        String::from_utf8_lossy(&shipping.stderr)
+    );
+    let shipping_lua = std::fs::read_to_string(&shipping_path).unwrap();
+    assert!(
+        !shipping_lua.contains("AGENT_BRIDGE_PRESENT"),
+        "generated shipping code must exclude the channel-scoped dependency"
+    );
+
+    let (development, dev_path) = compile("dev", "dev.lua");
+    assert!(
+        development.status.success(),
+        "development compile failed: {}",
+        String::from_utf8_lossy(&development.stderr)
+    );
+    let dev_lua = std::fs::read_to_string(&dev_path).unwrap();
+    assert!(
+        dev_lua.contains("AGENT_BRIDGE_PRESENT"),
+        "generated development code must include the channel-scoped dependency"
+    );
 }
