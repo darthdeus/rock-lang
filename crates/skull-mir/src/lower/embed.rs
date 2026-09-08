@@ -349,7 +349,7 @@ impl Builder<'_> {
         if let Some(shape) = self.nobox_embed_group_shape(cname)? {
             let paths = value_leaf_paths(&shape);
             let repr = self.lower_expr_repr(value)?;
-            let leaves = self.repr_to_leaves_bundle(&repr)?;
+            let leaves = self.repr_to_storage_leaves(&repr, &shape, "embedded value")?;
             return Self::pair_embed_leaves(paths, leaves);
         }
         let v = self.lower_expr(value)?;
