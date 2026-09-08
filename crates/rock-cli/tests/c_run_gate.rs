@@ -379,6 +379,63 @@ fn main() {
 }
 
 #[test]
+fn c_imgui_begin_window_raw_links_against_actual_stone_artifact() {
+    let root = workspace_root();
+    let dir = tempfile::tempdir().expect("window imgui fixture directory");
+    let source_path = dir.path().join("stone/engine/ui/imgui.rock");
+    std::fs::create_dir_all(source_path.parent().expect("window fixture parent"))
+        .expect("create window fixture parent");
+    let source = r#"
+inline(lua) fn __imgui_begin_window_raw(title: string, flags: int) -> bool = """
+    return imgui.Begin(title, nil, flags)
+"""
+
+fn main() {
+    if __imgui_begin_window_raw("Quests##quest_editor", 2048) { print("window-open") }
+    print("window-imgui-ok")
+}
+"#;
+    std::fs::write(&source_path, source).expect("write window imgui fixture");
+    let output = dir.path().join("window-imgui-consumer");
+    let compile = Command::new(env!("CARGO_BIN_EXE_rock"))
+        .args([
+            "compile",
+            source_path.to_str().expect("utf8 window fixture"),
+            "--backend",
+            "c",
+            "--output",
+            output.to_str().expect("utf8 window output"),
+        ])
+        .current_dir(&root)
+        .env_remove("ROCK_SKIP_ENGINE_BUILD")
+        .output()
+        .expect("spawn C window compile");
+    assert!(
+        compile.status.success(),
+        "C window consumer did not link against Stone:\nstdout:{}\nstderr:{}",
+        String::from_utf8_lossy(&compile.stdout),
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    let generated = std::fs::read_to_string(output.with_extension("c"))
+        .expect("read generated C window consumer");
+    assert!(
+        generated.contains("stone_imgui_begin_window"),
+        "generated consumer omitted stone_imgui_begin_window"
+    );
+    let run = Command::new(&output)
+        .current_dir(&root)
+        .output()
+        .expect("run linked C window consumer");
+    assert!(
+        run.status.success(),
+        "linked C window consumer failed:\nstdout:{}\nstderr:{}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(run.stdout, b"window-imgui-ok\n");
+}
+
+#[test]
 fn c_compile_keeps_artifacts_and_invalidates_stale_defaults() {
     assert!(
         Command::new("clang")
