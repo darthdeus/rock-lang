@@ -436,6 +436,69 @@ fn main() {
 }
 
 #[test]
+fn c_imgui_item_hover_queries_link_against_actual_stone_artifact() {
+    let root = workspace_root();
+    let dir = tempfile::tempdir().expect("item hover imgui fixture directory");
+    let source_path = dir.path().join("stone/engine/ui/imgui.rock");
+    std::fs::create_dir_all(source_path.parent().expect("item hover fixture parent"))
+        .expect("create item hover fixture parent");
+    let source = r#"
+inline(lua) fn imgui_is_item_hovered() -> bool = """
+    return imgui.IsItemHovered()
+"""
+inline(lua) fn imgui_is_item_hovered_allow_active() -> bool = """
+    return imgui.IsItemHovered(128)
+"""
+
+fn main() {
+    if imgui_is_item_hovered() { print("hovered") }
+    if imgui_is_item_hovered_allow_active() { print("hovered") }
+    print("item-hover-imgui-ok")
+}
+"#;
+    std::fs::write(&source_path, source).expect("write item hover imgui fixture");
+    let output = dir.path().join("item-hover-imgui-consumer");
+    let compile = Command::new(env!("CARGO_BIN_EXE_rock"))
+        .args([
+            "compile",
+            source_path.to_str().expect("utf8 item hover fixture"),
+            "--backend",
+            "c",
+            "--output",
+            output.to_str().expect("utf8 item hover output"),
+        ])
+        .current_dir(&root)
+        .env_remove("ROCK_SKIP_ENGINE_BUILD")
+        .output()
+        .expect("spawn C item hover compile");
+    assert!(
+        compile.status.success(),
+        "C item hover consumer did not link against Stone:\nstdout:{}\nstderr:{}",
+        String::from_utf8_lossy(&compile.stdout),
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    let generated = std::fs::read_to_string(output.with_extension("c"))
+        .expect("read generated C item hover consumer");
+    for flags in ["(int)(0)", "(int)(128)"] {
+        assert!(
+            generated.contains(&format!("stone_imgui_is_item_hovered({flags})")),
+            "generated consumer omitted item hover flags {flags}"
+        );
+    }
+    let run = Command::new(&output)
+        .current_dir(&root)
+        .output()
+        .expect("run linked C item hover consumer");
+    assert!(
+        run.status.success(),
+        "linked C item hover consumer failed:\nstdout:{}\nstderr:{}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(run.stdout, b"item-hover-imgui-ok\n");
+}
+
+#[test]
 fn c_compile_keeps_artifacts_and_invalidates_stale_defaults() {
     assert!(
         Command::new("clang")
