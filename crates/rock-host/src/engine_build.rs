@@ -9,7 +9,7 @@
 //! the FFI loader sees the same name on both layouts.
 
 use anyhow::Result;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 /// Run `cargo <args>` with inherited stdio, bailing with `fail_msg`
@@ -248,22 +248,23 @@ fn cargo_build_and_stage_lib(
 pub fn stage_cdylib(src_stem: &str, dst_stem: &str) -> Result<()> {
     fs_err::create_dir_all("tmp")?;
     let pid = std::process::id();
+    let target_debug = cargo_target_dir().join("debug");
 
     // Platform cdylib naming: Unix prefixes `lib`, Windows doesn't;
     // extension is .so / .dylib / .dll.
     #[cfg(target_os = "linux")]
     let (src, dst) = (
-        format!("target/debug/lib{src_stem}.so"),
+        target_debug.join(format!("lib{src_stem}.so")),
         format!("tmp/lib{dst_stem}.so"),
     );
     #[cfg(target_os = "macos")]
     let (src, dst) = (
-        format!("target/debug/lib{src_stem}.dylib"),
+        target_debug.join(format!("lib{src_stem}.dylib")),
         format!("tmp/lib{dst_stem}.dylib"),
     );
     #[cfg(target_os = "windows")]
     let (src, dst) = (
-        format!("target/debug/{src_stem}.dll"),
+        target_debug.join(format!("{src_stem}.dll")),
         format!("tmp/{dst_stem}.dll"),
     );
 
@@ -276,7 +277,7 @@ pub fn stage_cdylib(src_stem: &str, dst_stem: &str) -> Result<()> {
     // `fs_err::copy` then fails with a cryptic "No such file or
     // directory (os error 2)" that points at the *destination*, hiding
     // the real problem. Surface it.
-    if !Path::new(&src).exists() {
+    if !src.exists() {
         let pkg = src_stem.replace('_', "-");
         anyhow::bail!(
             "cargo build reported success but the cdylib was not produced at `{src}`.\n\
@@ -285,7 +286,7 @@ pub fn stage_cdylib(src_stem: &str, dst_stem: &str) -> Result<()> {
              touched dependents.\n\
              Recover: `cargo build -p {pkg}` from this worktree and confirm \
              `{src}` exists, then re-run.",
-            src = src,
+            src = src.display(),
             pkg = pkg,
         );
     }
@@ -315,6 +316,12 @@ pub fn stage_cdylib(src_stem: &str, dst_stem: &str) -> Result<()> {
 
     fs_err::rename(&staging, &dst)?;
     Ok(())
+}
+
+fn cargo_target_dir() -> PathBuf {
+    std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("target"))
 }
 
 #[cfg(target_os = "macos")]
