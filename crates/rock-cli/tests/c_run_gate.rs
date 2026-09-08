@@ -640,6 +640,69 @@ fn main() {
 }
 
 #[test]
+fn c_imgui_window_add_rect_filled_links_against_actual_stone_artifact() {
+    let root = workspace_root();
+    let dir = tempfile::tempdir().expect("window rectangle imgui fixture directory");
+    let source_path = dir.path().join("stone/engine/ui/imgui.rock");
+    std::fs::create_dir_all(source_path.parent().expect("window rectangle fixture parent"))
+        .expect("create window rectangle fixture parent");
+    let source = r#"
+@scalar_abi inline(lua) fn imgui_window_add_rect_filled(
+    p_min: Vec2, p_max: Vec2, col_abgr: int
+) = """
+    local dl = imgui.GetWindowDrawList()
+    if dl == nil then return end
+    dl:AddRectFilled(imgui.ImVec2_Float(p_min__x, p_min__y),
+                     imgui.ImVec2_Float(p_max__x, p_max__y),
+                     col_abgr)
+"""
+
+fn main() {
+    imgui_window_add_rect_filled(v(12.5, -4.25), v(90.75, 44.5), 16909060)
+    print("window-rect-imgui-ok")
+}
+"#;
+    std::fs::write(&source_path, source).expect("write window rectangle imgui fixture");
+    let output = dir.path().join("window-rect-imgui-consumer");
+    let compile = Command::new(env!("CARGO_BIN_EXE_rock"))
+        .args([
+            "compile",
+            source_path.to_str().expect("utf8 window rectangle fixture"),
+            "--backend",
+            "c",
+            "--output",
+            output.to_str().expect("utf8 window rectangle output"),
+        ])
+        .current_dir(&root)
+        .env_remove("ROCK_SKIP_ENGINE_BUILD")
+        .output()
+        .expect("spawn C window rectangle compile");
+    assert!(
+        compile.status.success(),
+        "C window rectangle consumer did not link against Stone:\nstdout:{}\nstderr:{}",
+        String::from_utf8_lossy(&compile.stdout),
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    let generated = std::fs::read_to_string(output.with_extension("c"))
+        .expect("read generated C window rectangle consumer");
+    assert!(
+        generated.contains("stone_imgui_window_add_rect_filled"),
+        "generated consumer omitted stone_imgui_window_add_rect_filled"
+    );
+    let run = Command::new(&output)
+        .current_dir(&root)
+        .output()
+        .expect("run linked C window rectangle consumer");
+    assert!(
+        run.status.success(),
+        "linked C window rectangle consumer failed:\nstdout:{}\nstderr:{}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(run.stdout, b"window-rect-imgui-ok\n");
+}
+
+#[test]
 fn c_compile_keeps_artifacts_and_invalidates_stale_defaults() {
     assert!(
         Command::new("clang")
