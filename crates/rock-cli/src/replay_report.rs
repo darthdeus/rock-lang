@@ -58,6 +58,14 @@ pub struct RecordedImageResources {
     pub paths: Vec<RecordedImagePath>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RecordedJobDecision {
+    pub(crate) tick: usize,
+    pub(crate) kind: String,
+    pub(crate) key: u64,
+    pub(crate) ready: bool,
+}
+
 #[derive(Debug)]
 pub struct ReplayReport {
     pub(crate) version: u32,
@@ -70,6 +78,7 @@ pub struct ReplayReport {
     pub(crate) timings: Vec<ReplayTiming>,
     pub(crate) profiles: HashMap<usize, RecordedProfile>,
     pub(crate) image_resources: HashMap<usize, RecordedImageResources>,
+    pub(crate) job_decisions: Vec<RecordedJobDecision>,
 }
 
 #[derive(Debug)]
@@ -136,6 +145,16 @@ fn parse_u64(value: &str, line: usize, field: &str) -> Result<u64> {
     value.parse::<u64>().with_context(|| format!("line {line}: invalid {field} `{value}`"))
 }
 
+const MAX_REPLAY_INTEGER: u64 = 9_007_199_254_740_991;
+
+fn parse_positive_key(value: &str, line: usize) -> Result<u64> {
+    let key = parse_u64(value, line, "job decision key")?;
+    if key == 0 || key > MAX_REPLAY_INTEGER {
+        bail!("line {line}: job decision key must be positive and at most {MAX_REPLAY_INTEGER}");
+    }
+    Ok(key)
+}
+
 fn decode_hex(value: &str, line: usize, field: &str) -> Result<String> {
     if value.is_empty() || value.len() % 2 != 0 || !value.bytes().all(|b| b.is_ascii_hexdigit()) {
         bail!("line {line}: malformed {field} encoding");
@@ -176,6 +195,7 @@ impl ReplayReport {
             timings: Vec::new(),
             profiles: HashMap::new(),
             image_resources: HashMap::new(),
+            job_decisions: Vec::new(),
         };
         let mut timing_ordinals = HashSet::new();
 
@@ -336,6 +356,35 @@ impl ReplayReport {
                     if report.image_resources.insert(ordinal, resources).is_some() {
                         bail!("line {line_number}: duplicate image resource row for observation {ordinal}");
                     }
+                }
+                "j" => {
+                    if report.version < 14 {
+                        bail!("line {line_number}: job decision rows require replay version 14");
+                    }
+                    if fields.len() != 5 {
+                        bail!("line {line_number}: malformed job decision row");
+                    }
+                    let tick = usize::try_from(parse_u64(fields[1], line_number, "job decision tick")?)
+                        .with_context(|| format!("line {line_number}: job decision tick does not fit usize"))?;
+                    if report.inputs.len().checked_sub(1) != Some(tick) {
+                        bail!("line {line_number}: job decision tick {tick} is not the current recorded observation");
+                    }
+                    let kind = fields[2];
+                    if kind.is_empty() || kind.chars().any(char::is_whitespace) {
+                        bail!("line {line_number}: job decision kind must be one token");
+                    }
+                    let key = parse_positive_key(fields[3], line_number)?;
+                    let ready = match fields[4] {
+                        "0" => false,
+                        "1" => true,
+                        value => bail!("line {line_number}: invalid job decision readiness `{value}`"),
+                    };
+                    report.job_decisions.push(RecordedJobDecision {
+                        tick,
+                        kind: kind.to_string(),
+                        key,
+                        ready,
+                    });
                 }
                 _ => {}
             }
