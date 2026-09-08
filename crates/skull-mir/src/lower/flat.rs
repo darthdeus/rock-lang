@@ -24,12 +24,12 @@ impl Builder<'_> {
             params: Vec::new(),
         });
         let tuple_width = flat.tuple_width();
-        let mut scalarized_fields = vec![None; tuple_width];
+        let mut native_slot_fields = vec![None; tuple_width];
         let mut offset = 0;
         for slot in &flat.slots {
-            if matches!(slot, FlatSlot::Leaves(_)) {
+            if self.scx.native_flat_enums || matches!(slot, FlatSlot::Leaves(_)) {
                 for index in offset..offset + slot.width() {
-                    scalarized_fields[index] = Some(Ustr::from(index.to_string().as_str()));
+                    native_slot_fields[index] = Some(Ustr::from(index.to_string().as_str()));
                 }
             }
             offset += slot.width();
@@ -41,7 +41,7 @@ impl Builder<'_> {
                     return self.f.new_cell(Some(cell_name));
                 }
                 let slot = index - 1;
-                if let Some(field) = scalarized_fields.get(slot).and_then(|field| *field) {
+                if let Some(field) = native_slot_fields.get(slot).and_then(|field| *field) {
                     self.f
                         .new_cell_native_flat_slot(Some(cell_name), owner, field)
                 } else {
