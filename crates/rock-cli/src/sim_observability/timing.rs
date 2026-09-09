@@ -153,17 +153,25 @@ impl TimingPolicy {
     }
 }
 
+/// The environment settings that describe what a sim costs. Settings that only
+/// steer where the recorder writes are excluded, because the whole host block
+/// is hashed into every timing identity.
+fn ambient_settings(
+    vars: impl Iterator<Item = (String, String)>,
+) -> std::collections::BTreeMap<String, String> {
+    vars.filter(|(key, _)| {
+        ["STONE_", "SIM_", "MAG_", "ROCK_", "SDL_"].iter().any(|prefix| key.starts_with(prefix))
+            && key != "ROCK_SIM_LOG_DIR" && !key.starts_with("ROCK_SIM_WARN_")
+    }).collect()
+}
+
 pub(super) fn host_context() -> Value {
     let machine = std::process::Command::new("uname").arg("-srmn").output().ok()
         .filter(|output| output.status.success())
         .and_then(|output| String::from_utf8(output.stdout).ok());
-    let ambient = std::env::vars().filter(|(key, _)| {
-        ["STONE_", "SIM_", "MAG_", "ROCK_", "SDL_"].iter().any(|prefix| key.starts_with(prefix))
-            && key != "ROCK_SIM_LOG_DIR" && !key.starts_with("ROCK_SIM_WARN_")
-    }).collect::<std::collections::BTreeMap<_, _>>();
     json!({ "machine": machine, "arch": std::env::consts::ARCH,
         "logical_cpus": std::thread::available_parallelism().ok().map(|n| n.get()),
-        "ambient": ambient })
+        "ambient": ambient_settings(std::env::vars()) })
 }
 
 type EntryKey = (u64, u64, usize);
@@ -456,6 +464,121 @@ mod tests {
         let mut different = recorder(root.path());
         enter(&mut different, true, 2560);
         assert!(end(&mut different, 3_000, true).is_empty());
+    }
+
+    /// One invocation of the same suite. Every field here is something that
+    /// moves between two ordinary `rock sim` runs of the identical selection:
+    /// `rock-log` stamps a fresh shared epoch into the environment, and the
+    /// scheduler packs the sim next to whichever siblings are still queued.
+    #[derive(Clone)]
+    struct Invocation {
+        epoch: u64,
+        before: Vec<&'static str>,
+        after: Vec<&'static str>,
+        jobs: u64,
+        machine: &'static str,
+        boot: Vec<(&'static str, &'static str)>,
+    }
+
+    impl Default for Invocation {
+        fn default() -> Self {
+            Self { epoch: 1_788_000_000_000, before: Vec::new(), after: vec!["sibling"],
+                jobs: 8, machine: "Darwin Mac 25.5.0 arm64\n",
+                boot: vec![("SIM_SKIP_RENDER", "1")] }
+        }
+    }
+
+    /// The host block a real invocation records, built through the same
+    /// projection production uses rather than a hand-written constant.
+    fn invocation_host(run: &Invocation) -> Value {
+        let ambient = ambient_settings([
+            ("ROCK_BUILD_COMMAND".to_string(), "sim".to_string()),
+            ("ROCK_LOG_EPOCH_MS".to_string(), run.epoch.to_string()),
+            ("ROCK_SIM_LOG_DIR".to_string(), "/tmp/history".to_string()),
+        ].into_iter());
+        json!({ "machine": run.machine, "arch": "aarch64", "logical_cpus": 14,
+            "ambient": ambient })
+    }
+
+    /// Drive one accepted invocation to completion and return the recorder
+    /// together with the warnings raised for the sim under observation.
+    fn invoke(root: &Path, run: &Invocation, duration: u64) -> (Timings, Vec<TimingWarning>) {
+        let mut entries = Vec::new();
+        for (index, name) in run.before.iter().enumerate() {
+            entries.push(json!({ "occurrence_id": 100 + index, "name": name }));
+        }
+        entries.push(json!({ "occurrence_id": 1, "name": "sim" }));
+        for (index, name) in run.after.iter().enumerate() {
+            entries.push(json!({ "occurrence_id": 200 + index, "name": name }));
+        }
+        let mut timing = Timings::new(root, policy(), invocation_host(run));
+        timing.observe("run_start", &json!({ "source": { "dirty": false }, "quiet": false }), 0);
+        timing.observe("run_config", &json!({ "project_path": "mag", "resolved_entries": ["sim"],
+            "effective_mode": "workers", "effective_jobs": run.jobs }), 0);
+        timing.observe("worker_spawn", &json!({ "worker_attempt": 1, "kind": "shared",
+            "entries": entries, "boot_signature": run.boot }), 0);
+        timing.observe("entry_runtime_context", &json!({ "worker_attempt": 1, "occurrence_id": 1,
+            "part": 0, "context": { "width": 1280, "height": 720, "wgpu": false, "jit": "on" } }), 0);
+        timing.observe("entry_start", &json!({ "worker_attempt": 1, "occurrence_id": 1, "part": 0,
+            "name": "sim" }), 0);
+        let warnings = timing.observe("entry_end",
+            &json!({ "worker_attempt": 1, "occurrence_id": 1, "part": 0 }), duration);
+        timing.observe("entry_result", &json!({ "worker_attempt": 1, "occurrence_id": 1,
+            "verdict": "PASS", "timed_out": false }), duration);
+        (timing, warnings)
+    }
+
+    /// Five accepted runs of one sim, differing only in the churn a repeat
+    /// invocation always produces, and then save each as history.
+    fn accepted_history(root: &Path) {
+        for index in 0..5u64 {
+            let dir = root.join(format!("{index:02}"));
+            std::fs::create_dir(&dir).unwrap();
+            let run = Invocation {
+                epoch: 1_788_000_000_000 + index * 263_772,
+                after: vec!["sibling"; index as usize + 1],
+                ..Invocation::default()
+            };
+            let (timing, _) = invoke(root, &run, 1_000);
+            timing.save(&dir.join("timings.json"),
+                &json!({ "complete": true, "status": "PASS" })).unwrap();
+        }
+    }
+
+    #[test]
+    fn repeated_runs_of_one_sim_accumulate_a_baseline() {
+        let root = tempfile::tempdir().unwrap();
+        accepted_history(root.path());
+        let (_, warnings) = invoke(root.path(),
+            &Invocation { epoch: 1_788_009_999_999, ..Invocation::default() }, 3_000);
+        assert_eq!(
+            warnings.iter().find_map(|warning| warning.baseline_ms),
+            Some(1_000.0),
+            "five accepted runs of the same sim must form a baseline; identity churn \
+             that has nothing to do with cost keeps the historical detector dead"
+        );
+    }
+
+    #[test]
+    fn a_baseline_still_refuses_samples_from_an_unlike_context() {
+        let root = tempfile::tempdir().unwrap();
+        accepted_history(root.path());
+        for (reason, unlike) in [
+            ("another machine", Invocation {
+                machine: "Darwin Jakubs-host-c.local 25.5.0 arm64\n", ..Invocation::default() }),
+            ("another parallelism", Invocation { jobs: 1, ..Invocation::default() }),
+            ("another boot signature", Invocation {
+                boot: vec![("SIM_SKIP_RENDER", "0")], ..Invocation::default() }),
+            ("a warm process rather than a cold one", Invocation {
+                before: vec!["sibling"], after: Vec::new(), ..Invocation::default() }),
+        ] {
+            let (_, warnings) = invoke(root.path(), &unlike, 3_000);
+            assert!(
+                warnings.iter().all(|warning| warning.kind != TimingWarningKind::Historical),
+                "a sample from {reason} is not comparable and must not be judged against \
+                 the baseline"
+            );
+        }
     }
 
     #[test]
