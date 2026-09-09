@@ -11,20 +11,26 @@ pub(super) struct TimingPolicy {
     pub(super) minimum_samples: Option<usize>,
 }
 
+/// What has to match before two samples of one sim describe the same cost.
+///
+/// Every field answers the same question: does it change what the sim costs,
+/// or only where the scheduler happened to put it? The worker's slot index and
+/// sibling composition answer the second, and they move on nearly every run,
+/// so they are not here. What they were standing in for is real and is kept as
+/// `worker_cold_start`: the first entry in a worker pays process startup, JIT
+/// warmup and first asset load, and the ones after it do not.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(super) struct TimingIdentity {
     pub(super) project: Option<String>,
     pub(super) workload: Option<String>,
     pub(super) runtime: Option<String>,
-    pub(super) worker_names: Option<Vec<String>>,
     pub(super) machine: Option<String>,
     pub(super) backend: Option<String>,
     pub(super) renderer: Option<String>,
     pub(super) mode: Option<String>,
     pub(super) jobs: Option<usize>,
     pub(super) worker_kind: Option<String>,
-    pub(super) worker_width: Option<usize>,
-    pub(super) worker_position: Option<usize>,
+    pub(super) worker_cold_start: Option<bool>,
     pub(super) boot_signature: Option<Vec<(String, String)>>,
 }
 
@@ -32,7 +38,6 @@ impl TimingIdentity {
     fn comparable(&self) -> bool {
         self.workload.is_some()
             && self.runtime.is_some()
-            && self.worker_names.is_some()
             && self.project.is_some()
             && self.machine.is_some()
             && self.backend.is_some()
@@ -40,8 +45,7 @@ impl TimingIdentity {
             && self.mode.is_some()
             && self.jobs.is_some()
             && self.worker_kind.is_some()
-            && self.worker_width.is_some()
-            && self.worker_position.is_some()
+            && self.worker_cold_start.is_some()
             && self.boot_signature.is_some()
     }
 }
@@ -162,6 +166,12 @@ fn ambient_settings(
     vars.filter(|(key, _)| {
         ["STONE_", "SIM_", "MAG_", "ROCK_", "SDL_"].iter().any(|prefix| key.starts_with(prefix))
             && key != "ROCK_SIM_LOG_DIR" && !key.starts_with("ROCK_SIM_WARN_")
+            // `rock-log` stamps a fresh wall-clock origin here at process
+            // entry so a driver and its respawned children share one log
+            // clock. It is different on every invocation and says nothing
+            // about cost; recorded, it would make every identity unique.
+            // `run_start` already carries `started_at_unix_ms`.
+            && key != "ROCK_LOG_EPOCH_MS"
     }).collect()
 }
 
@@ -243,13 +253,12 @@ impl Timings {
         let id = TimingIdentity {
             project: self.config["project_path"].as_str().map(str::to_owned),
             workload: Some(json!({ "config": self.config, "quiet": self.quiet }).to_string()), runtime: Some(json!({ "context": runtime, "part": key.2 }).to_string()),
-            worker_names: entries.iter().map(|entry| entry["name"].as_str().map(str::to_owned)).collect(),
             machine: Some(self.host.to_string()), backend: Some("skull".into()),
             renderer: Some(if runtime["wgpu"] == true { "wgpu" } else { "gl" }.into()),
             mode: self.config["effective_mode"].as_str().map(str::to_owned),
             jobs: self.config["effective_jobs"].as_u64().map(|n| n as usize),
             worker_kind: worker["kind"].as_str().map(str::to_owned),
-            worker_width: Some(entries.len()), worker_position: Some(position),
+            worker_cold_start: Some(position == 0),
             boot_signature: serde_json::from_value(worker["boot_signature"].clone()).ok(),
         };
         id.comparable().then_some(id)
@@ -357,15 +366,13 @@ mod tests {
             project: Some("mag".into()),
             workload: Some("routine".into()),
             runtime: Some("1280x720 GL JIT on".into()),
-            worker_names: Some(vec!["before".into(), "sim".into()]),
             machine: Some(machine.into()),
             backend: Some(backend.into()),
             renderer: Some("gl".into()),
             mode: Some("workers".into()),
             jobs: Some(4),
             worker_kind: Some("shared".into()),
-            worker_width: Some(2),
-            worker_position: Some(1),
+            worker_cold_start: Some(false),
             boot_signature: Some(vec![("SIM_SKIP_RENDER".into(), "1".into())]),
         }
     }
@@ -414,7 +421,7 @@ mod tests {
         }
 
         let mut unknown = expected;
-        unknown.worker_width = None;
+        unknown.worker_cold_start = None;
         assert!(!unknown.comparable());
         assert!(history.samples("sim", &unknown).is_empty());
     }
@@ -542,6 +549,26 @@ mod tests {
             let (timing, _) = invoke(root, &run, 1_000);
             timing.save(&dir.join("timings.json"),
                 &json!({ "complete": true, "status": "PASS" })).unwrap();
+        }
+    }
+
+    #[test]
+    fn the_recorded_host_keeps_cost_settings_and_drops_per_invocation_ones() {
+        let environment = |epoch: &str| {
+            [("ROCK_BUILD_COMMAND", "sim"), ("SIM_DT", "0.0333333333"),
+             ("ROCK_LOG_EPOCH_MS", epoch), ("ROCK_SIM_LOG_DIR", "/tmp/history"),
+             ("ROCK_SIM_WARN_SECS", "30"), ("PATH", "/usr/bin")]
+                .map(|(key, value)| (key.to_string(), value.to_string()))
+                .into_iter()
+        };
+        let first = ambient_settings(environment("1788822511117"));
+        assert_eq!(first, ambient_settings(environment("1788822774949")),
+            "two invocations on one machine must record the same ambient settings");
+        assert_eq!(first.get("SIM_DT").map(String::as_str), Some("0.0333333333"),
+            "settings that change what a sim costs stay recorded");
+        assert_eq!(first.get("ROCK_BUILD_COMMAND").map(String::as_str), Some("sim"));
+        for excluded in ["ROCK_LOG_EPOCH_MS", "ROCK_SIM_LOG_DIR", "ROCK_SIM_WARN_SECS", "PATH"] {
+            assert!(!first.contains_key(excluded), "{excluded} must stay out of the host");
         }
     }
 
