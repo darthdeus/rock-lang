@@ -114,3 +114,5 @@ mod iter_parse_cli;
 mod backend_stats_gate;
 #[path = "sim_observability.rs"]
 mod sim_observability;
+#[path = "sim_report_tests.rs"]
+mod sim_report_tests;

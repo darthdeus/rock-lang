@@ -11,20 +11,26 @@ pub(super) struct TimingPolicy {
     pub(super) minimum_samples: Option<usize>,
 }
 
+/// What has to match before two samples of one sim describe the same cost.
+///
+/// Every field answers the same question: does it change what the sim costs,
+/// or only where the scheduler happened to put it? The worker's slot index and
+/// sibling composition answer the second, and they move on nearly every run,
+/// so they are not here. What they were standing in for is real and is kept as
+/// `worker_cold_start`: the first entry in a worker pays process startup, JIT
+/// warmup and first asset load, and the ones after it do not.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(super) struct TimingIdentity {
     pub(super) project: Option<String>,
     pub(super) workload: Option<String>,
     pub(super) runtime: Option<String>,
-    pub(super) worker_names: Option<Vec<String>>,
     pub(super) machine: Option<String>,
     pub(super) backend: Option<String>,
     pub(super) renderer: Option<String>,
     pub(super) mode: Option<String>,
     pub(super) jobs: Option<usize>,
     pub(super) worker_kind: Option<String>,
-    pub(super) worker_width: Option<usize>,
-    pub(super) worker_position: Option<usize>,
+    pub(super) worker_cold_start: Option<bool>,
     pub(super) boot_signature: Option<Vec<(String, String)>>,
 }
 
@@ -32,7 +38,6 @@ impl TimingIdentity {
     fn comparable(&self) -> bool {
         self.workload.is_some()
             && self.runtime.is_some()
-            && self.worker_names.is_some()
             && self.project.is_some()
             && self.machine.is_some()
             && self.backend.is_some()
@@ -40,8 +45,7 @@ impl TimingIdentity {
             && self.mode.is_some()
             && self.jobs.is_some()
             && self.worker_kind.is_some()
-            && self.worker_width.is_some()
-            && self.worker_position.is_some()
+            && self.worker_cold_start.is_some()
             && self.boot_signature.is_some()
     }
 }
@@ -153,17 +157,31 @@ impl TimingPolicy {
     }
 }
 
+/// The environment settings that describe what a sim costs. Settings that only
+/// steer where the recorder writes are excluded, because the whole host block
+/// is hashed into every timing identity.
+fn ambient_settings(
+    vars: impl Iterator<Item = (String, String)>,
+) -> std::collections::BTreeMap<String, String> {
+    vars.filter(|(key, _)| {
+        ["STONE_", "SIM_", "MAG_", "ROCK_", "SDL_"].iter().any(|prefix| key.starts_with(prefix))
+            && key != "ROCK_SIM_LOG_DIR" && !key.starts_with("ROCK_SIM_WARN_")
+            // `rock-log` stamps a fresh wall-clock origin here at process
+            // entry so a driver and its respawned children share one log
+            // clock. It is different on every invocation and says nothing
+            // about cost; recorded, it would make every identity unique.
+            // `run_start` already carries `started_at_unix_ms`.
+            && key != "ROCK_LOG_EPOCH_MS"
+    }).collect()
+}
+
 pub(super) fn host_context() -> Value {
     let machine = std::process::Command::new("uname").arg("-srmn").output().ok()
         .filter(|output| output.status.success())
         .and_then(|output| String::from_utf8(output.stdout).ok());
-    let ambient = std::env::vars().filter(|(key, _)| {
-        ["STONE_", "SIM_", "MAG_", "ROCK_", "SDL_"].iter().any(|prefix| key.starts_with(prefix))
-            && key != "ROCK_SIM_LOG_DIR" && !key.starts_with("ROCK_SIM_WARN_")
-    }).collect::<std::collections::BTreeMap<_, _>>();
     json!({ "machine": machine, "arch": std::env::consts::ARCH,
         "logical_cpus": std::thread::available_parallelism().ok().map(|n| n.get()),
-        "ambient": ambient })
+        "ambient": ambient_settings(std::env::vars()) })
 }
 
 type EntryKey = (u64, u64, usize);
@@ -204,7 +222,13 @@ impl Timings {
                             Ok(value) => value,
                             Err(e) => { log::warn!(target: "SIM", "invalid timing history {}: {e}", path.display()); continue; }
                         };
-                        if value["schema_version"] != 1 || value["accepted"] != true { continue; }
+                        if value["schema_version"] != 1 { continue; }
+                        // Records written before per-entry acceptance have no
+                        // `baseline_eligible`; for them the old run-level
+                        // `accepted` is the only answer available, and it is
+                        // exactly the set they already contributed.
+                        if !value["baseline_eligible"].as_bool()
+                            .unwrap_or_else(|| value["accepted"] == true) { continue; }
                         for row in value["entries"].as_array().into_iter().flatten() {
                             if row["passed"] != true || row["completed"] != true { continue; }
                             if let (Some(name), Some(key), Some(ms)) =
@@ -235,13 +259,12 @@ impl Timings {
         let id = TimingIdentity {
             project: self.config["project_path"].as_str().map(str::to_owned),
             workload: Some(json!({ "config": self.config, "quiet": self.quiet }).to_string()), runtime: Some(json!({ "context": runtime, "part": key.2 }).to_string()),
-            worker_names: entries.iter().map(|entry| entry["name"].as_str().map(str::to_owned)).collect(),
             machine: Some(self.host.to_string()), backend: Some("skull".into()),
             renderer: Some(if runtime["wgpu"] == true { "wgpu" } else { "gl" }.into()),
             mode: self.config["effective_mode"].as_str().map(str::to_owned),
             jobs: self.config["effective_jobs"].as_u64().map(|n| n as usize),
             worker_kind: worker["kind"].as_str().map(str::to_owned),
-            worker_width: Some(entries.len()), worker_position: Some(position),
+            worker_cold_start: Some(position == 0),
             boot_signature: serde_json::from_value(worker["boot_signature"].clone()).ok(),
         };
         id.comparable().then_some(id)
@@ -291,6 +314,29 @@ impl Timings {
         Vec::new()
     }
 
+    /// Whether this run's passing, completed rows may become baseline samples.
+    ///
+    /// AUTHOR DECISION: SIM TIMING BASELINE ACCEPTANCE, resolved per entry. The
+    /// unit being measured is the entry, so the run's PASS/FAIL verdict - a
+    /// fact about the *other* entries - does not veto it. The two conditions
+    /// kept are not statements about siblings:
+    ///
+    /// * `source_clean`: a dirty tree may hold modified production code, so its
+    ///   durations belong to no commit and cannot be compared against one.
+    /// * `complete`: this is `planned == finalized`, so an incomplete run is one
+    ///   the driver never accounted for - a global deadline, a kill, an
+    ///   interrupt. Those causes press on the whole process, biasing every entry
+    ///   in the run the same way, and a median cannot average out a bias its
+    ///   samples share.
+    ///
+    /// `accepted` is left alone rather than expressed as `baseline_eligible &&
+    /// PASS`, which it happens to equal today: `rock sim-report` prints it and
+    /// 750 records already carry it, so a later change to baseline eligibility
+    /// must not silently move what those records meant.
+    fn baseline_eligible(&self, finished: &Value) -> bool {
+        self.source_clean && finished["complete"] == true
+    }
+
     pub(super) fn save(&self, path: &Path, finished: &Value) -> std::io::Result<()> {
         let entries = self.rows.iter().map(|row| {
             let mut row = row.clone();
@@ -303,6 +349,7 @@ impl Timings {
                 "regression_delta_ms": self.policy.regression_delta_ms,
                 "minimum_samples": self.policy.minimum_samples },
             "accepted": self.source_clean && finished["complete"] == true && finished["status"] == "PASS",
+            "baseline_eligible": self.baseline_eligible(finished),
             "entries": entries });
         let pending = path.with_extension("json.pending");
         std::fs::write(&pending, serde_json::to_vec(&summary)?)?;
@@ -349,15 +396,13 @@ mod tests {
             project: Some("mag".into()),
             workload: Some("routine".into()),
             runtime: Some("1280x720 GL JIT on".into()),
-            worker_names: Some(vec!["before".into(), "sim".into()]),
             machine: Some(machine.into()),
             backend: Some(backend.into()),
             renderer: Some("gl".into()),
             mode: Some("workers".into()),
             jobs: Some(4),
             worker_kind: Some("shared".into()),
-            worker_width: Some(2),
-            worker_position: Some(1),
+            worker_cold_start: Some(false),
             boot_signature: Some(vec![("SIM_SKIP_RENDER".into(), "1".into())]),
         }
     }
@@ -406,7 +451,7 @@ mod tests {
         }
 
         let mut unknown = expected;
-        unknown.worker_width = None;
+        unknown.worker_cold_start = None;
         assert!(!unknown.comparable());
         assert!(history.samples("sim", &unknown).is_empty());
     }
@@ -431,17 +476,22 @@ mod tests {
         warnings
     }
 
+    /// Runs 0-2 are each excluded for a different reason - a dirty tree, an
+    /// entry that failed, a run that was never fully accounted for - and each
+    /// is slow enough to be obvious in the median if it leaked in. The run's
+    /// PASS/FAIL verdict is deliberately not among them: per-entry acceptance
+    /// no longer vetoes on it, and the tests above cover it instead.
     #[test]
     fn persisted_baselines_exclude_bad_runs_and_never_follow_a_regression_upward() {
         let root = tempfile::tempdir().unwrap();
-        for index in 0..9 {
+        for index in 0..8 {
             let dir = root.path().join(format!("{index:02}"));
             std::fs::create_dir(&dir).unwrap();
             let mut timing = recorder(root.path());
             enter(&mut timing, index != 0, 1280);
-            end(&mut timing, if index < 4 { 100_000 } else { 1_000 }, index != 1);
-            timing.save(&dir.join("timings.json"), &json!({ "complete": index != 2,
-                "status": if index == 3 { "FAIL" } else { "PASS" } })).unwrap();
+            end(&mut timing, if index < 3 { 100_000 } else { 1_000 }, index != 1);
+            timing.save(&dir.join("timings.json"),
+                &json!({ "complete": index != 2, "status": "PASS" })).unwrap();
         }
         let mut candidate = recorder(root.path());
         enter(&mut candidate, true, 1280);
@@ -456,6 +506,257 @@ mod tests {
         let mut different = recorder(root.path());
         enter(&mut different, true, 2560);
         assert!(end(&mut different, 3_000, true).is_empty());
+    }
+
+    /// One invocation of the same suite. Every field here is something that
+    /// moves between two ordinary `rock sim` runs of the identical selection:
+    /// `rock-log` stamps a fresh shared epoch into the environment, and the
+    /// scheduler packs the sim next to whichever siblings are still queued.
+    #[derive(Clone)]
+    struct Invocation {
+        epoch: u64,
+        before: Vec<&'static str>,
+        after: Vec<&'static str>,
+        jobs: u64,
+        machine: &'static str,
+        boot: Vec<(&'static str, &'static str)>,
+        dirty: bool,
+    }
+
+    impl Default for Invocation {
+        fn default() -> Self {
+            Self { epoch: 1_788_000_000_000, before: Vec::new(), after: vec!["sibling"],
+                jobs: 8, machine: "Darwin Mac 25.5.0 arm64\n",
+                boot: vec![("SIM_SKIP_RENDER", "1")], dirty: false }
+        }
+    }
+
+    /// The host block a real invocation records, built through the same
+    /// projection production uses rather than a hand-written constant.
+    fn invocation_host(run: &Invocation) -> Value {
+        let ambient = ambient_settings([
+            ("ROCK_BUILD_COMMAND".to_string(), "sim".to_string()),
+            ("ROCK_LOG_EPOCH_MS".to_string(), run.epoch.to_string()),
+            ("ROCK_SIM_LOG_DIR".to_string(), "/tmp/history".to_string()),
+        ].into_iter());
+        json!({ "machine": run.machine, "arch": "aarch64", "logical_cpus": 14,
+            "ambient": ambient })
+    }
+
+    /// Drive one accepted invocation to completion and return the recorder
+    /// together with the warnings raised for the sim under observation.
+    fn invoke(root: &Path, run: &Invocation, duration: u64) -> (Timings, Vec<TimingWarning>) {
+        let mut entries = Vec::new();
+        for (index, name) in run.before.iter().enumerate() {
+            entries.push(json!({ "occurrence_id": 100 + index, "name": name }));
+        }
+        entries.push(json!({ "occurrence_id": 1, "name": "sim" }));
+        for (index, name) in run.after.iter().enumerate() {
+            entries.push(json!({ "occurrence_id": 200 + index, "name": name }));
+        }
+        let mut timing = Timings::new(root, policy(), invocation_host(run));
+        timing.observe("run_start", &json!({ "source": { "dirty": run.dirty }, "quiet": false }), 0);
+        timing.observe("run_config", &json!({ "project_path": "mag", "resolved_entries": ["sim"],
+            "effective_mode": "workers", "effective_jobs": run.jobs }), 0);
+        timing.observe("worker_spawn", &json!({ "worker_attempt": 1, "kind": "shared",
+            "entries": entries, "boot_signature": run.boot }), 0);
+        timing.observe("entry_runtime_context", &json!({ "worker_attempt": 1, "occurrence_id": 1,
+            "part": 0, "context": { "width": 1280, "height": 720, "wgpu": false, "jit": "on" } }), 0);
+        timing.observe("entry_start", &json!({ "worker_attempt": 1, "occurrence_id": 1, "part": 0,
+            "name": "sim" }), 0);
+        let warnings = timing.observe("entry_end",
+            &json!({ "worker_attempt": 1, "occurrence_id": 1, "part": 0 }), duration);
+        timing.observe("entry_result", &json!({ "worker_attempt": 1, "occurrence_id": 1,
+            "verdict": "PASS", "timed_out": false }), duration);
+        (timing, warnings)
+    }
+
+    /// Five runs of one sim, differing only in the churn a repeat invocation
+    /// always produces, each saved as history under the given terminal record.
+    fn history_of(root: &Path, template: &Invocation, finished: &Value) {
+        for index in 0..5u64 {
+            let dir = root.join(format!("{index:02}"));
+            std::fs::create_dir(&dir).unwrap();
+            let run = Invocation {
+                epoch: template.epoch + index * 263_772,
+                after: vec!["sibling"; index as usize + 1],
+                ..template.clone()
+            };
+            let (timing, _) = invoke(root, &run, 1_000);
+            timing.save(&dir.join("timings.json"), finished).unwrap();
+        }
+    }
+
+    /// The same five runs under a terminal record that passes outright.
+    fn accepted_history(root: &Path) {
+        history_of(root, &Invocation::default(),
+            &json!({ "complete": true, "status": "PASS" }));
+    }
+
+    /// A candidate run of the same sim, distinct from every history entry.
+    fn candidate(template: &Invocation) -> Invocation {
+        Invocation { epoch: 1_788_009_999_999, ..template.clone() }
+    }
+
+    #[test]
+    fn the_recorded_host_keeps_cost_settings_and_drops_per_invocation_ones() {
+        let environment = |epoch: &str| {
+            [("ROCK_BUILD_COMMAND", "sim"), ("SIM_DT", "0.0333333333"),
+             ("ROCK_LOG_EPOCH_MS", epoch), ("ROCK_SIM_LOG_DIR", "/tmp/history"),
+             ("ROCK_SIM_WARN_SECS", "30"), ("PATH", "/usr/bin")]
+                .map(|(key, value)| (key.to_string(), value.to_string()))
+                .into_iter()
+        };
+        let first = ambient_settings(environment("1788822511117"));
+        assert_eq!(first, ambient_settings(environment("1788822774949")),
+            "two invocations on one machine must record the same ambient settings");
+        assert_eq!(first.get("SIM_DT").map(String::as_str), Some("0.0333333333"),
+            "settings that change what a sim costs stay recorded");
+        assert_eq!(first.get("ROCK_BUILD_COMMAND").map(String::as_str), Some("sim"));
+        for excluded in ["ROCK_LOG_EPOCH_MS", "ROCK_SIM_LOG_DIR", "ROCK_SIM_WARN_SECS", "PATH"] {
+            assert!(!first.contains_key(excluded), "{excluded} must stay out of the host");
+        }
+    }
+
+    #[test]
+    fn repeated_runs_of_one_sim_accumulate_a_baseline() {
+        let root = tempfile::tempdir().unwrap();
+        accepted_history(root.path());
+        let (_, warnings) = invoke(root.path(), &candidate(&Invocation::default()), 3_000);
+        assert_eq!(
+            warnings.iter().find_map(|warning| warning.baseline_ms),
+            Some(1_000.0),
+            "five accepted runs of the same sim must form a baseline; identity churn \
+             that has nothing to do with cost keeps the historical detector dead"
+        );
+    }
+
+    /// AUTHOR DECISION: SIM TIMING BASELINE ACCEPTANCE - per-entry acceptance.
+    /// The MAG suite carries known failures, so its run status is permanently
+    /// `FAIL`. Under run-level acceptance that suite can never form a baseline,
+    /// which leaves the historical detector dead for exactly the long sims that
+    /// most need a regression guard.
+    #[test]
+    fn a_sim_that_passed_inside_a_failing_run_still_forms_a_baseline() {
+        let root = tempfile::tempdir().unwrap();
+        history_of(root.path(), &Invocation::default(),
+            &json!({ "complete": true, "status": "FAIL" }));
+        let (_, warnings) = invoke(root.path(), &candidate(&Invocation::default()), 3_000);
+        assert_eq!(
+            warnings.iter().find_map(|warning| warning.baseline_ms),
+            Some(1_000.0),
+            "a sim that passed contributes its own cost even when a sibling \
+             failed; the run verdict is a fact about the other entries"
+        );
+    }
+
+    /// The risk per-entry acceptance knowingly takes on: a run can fail because
+    /// the machine was disturbed, and the sims that passed in it may have been
+    /// slowed by the same disturbance. The median of at least five samples is
+    /// the mitigation the author relied on; this pins that it holds.
+    #[test]
+    fn one_inflated_sample_from_a_failing_run_does_not_move_the_median() {
+        let root = tempfile::tempdir().unwrap();
+        let template = Invocation::default();
+        for index in 0..5u64 {
+            let dir = root.path().join(format!("{index:02}"));
+            std::fs::create_dir(&dir).unwrap();
+            let run = Invocation {
+                epoch: template.epoch + index * 263_772,
+                after: vec!["sibling"; index as usize + 1],
+                ..template.clone()
+            };
+            // The first run failed on a loaded machine, and the sim that passed
+            // inside it took forty times its quiet-machine cost.
+            let (timing, _) = invoke(root.path(), &run,
+                if index == 0 { 40_000 } else { 1_000 });
+            timing.save(&dir.join("timings.json"), &json!({ "complete": true,
+                "status": if index == 0 { "FAIL" } else { "PASS" } })).unwrap();
+        }
+        let (_, warnings) = invoke(root.path(), &candidate(&template), 3_000);
+        assert_eq!(
+            warnings.iter().find_map(|warning| warning.baseline_ms),
+            Some(1_000.0),
+            "one sample inflated by a disturbed machine must not lift the \
+             baseline and mute the regressions it exists to catch"
+        );
+    }
+
+    /// The two run-level vetoes per-entry acceptance keeps. Neither is a
+    /// statement about sibling entries, so neither is what the decision drops.
+    #[test]
+    fn a_baseline_still_refuses_entries_from_a_dirty_or_unaccounted_run() {
+        for (reason, template, finished) in [
+            ("a working tree that may hold modified production code",
+                Invocation { dirty: true, ..Invocation::default() },
+                json!({ "complete": true, "status": "FAIL" })),
+            ("a run whose planned entries were never all accounted for",
+                Invocation::default(),
+                json!({ "complete": false, "status": "FAIL" })),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            history_of(root.path(), &template, &finished);
+            let (_, warnings) = invoke(root.path(), &candidate(&template), 3_000);
+            assert!(
+                warnings.iter().all(|warning| warning.kind != TimingWarningKind::Historical),
+                "per-entry acceptance must not admit samples from {reason}"
+            );
+        }
+    }
+
+    /// The 750 records written before this field existed carry no
+    /// `baseline_eligible`. They stay readable and contribute exactly the set
+    /// they always did - the ones the old run-level gate marked `accepted`.
+    #[test]
+    fn records_predating_the_new_field_fall_back_to_accepted() {
+        for (accepted, expected) in [(true, Some(1_000.0)), (false, None)] {
+            let root = tempfile::tempdir().unwrap();
+            accepted_history(root.path());
+            for index in 0..5u64 {
+                let path = root.path().join(format!("{index:02}")).join("timings.json");
+                let mut value: Value =
+                    serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                let object = value.as_object_mut().unwrap();
+                object.remove("baseline_eligible");
+                object.insert("accepted".into(), json!(accepted));
+                std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+            }
+            let (_, warnings) = invoke(root.path(), &candidate(&Invocation::default()), 3_000);
+            assert_eq!(
+                warnings.iter().find_map(|warning| warning.baseline_ms), expected,
+                "a record from before per-entry acceptance contributes exactly \
+                 when the old gate accepted it"
+            );
+        }
+    }
+
+    /// Run over both populations a baseline can now be built from: a suite that
+    /// passed outright, and one that failed while the sim under observation
+    /// passed. Per-entry acceptance widens what reaches the history, so the
+    /// identity has to keep refusing unlike contexts out of the wider set too.
+    #[test]
+    fn a_baseline_still_refuses_samples_from_an_unlike_context() {
+        for status in ["PASS", "FAIL"] {
+            let root = tempfile::tempdir().unwrap();
+            history_of(root.path(), &Invocation::default(),
+                &json!({ "complete": true, "status": status }));
+            for (reason, unlike) in [
+                ("another machine", Invocation {
+                    machine: "Darwin Jakubs-host-c.local 25.5.0 arm64\n", ..Invocation::default() }),
+                ("another parallelism", Invocation { jobs: 1, ..Invocation::default() }),
+                ("another boot signature", Invocation {
+                    boot: vec![("SIM_SKIP_RENDER", "0")], ..Invocation::default() }),
+                ("a warm process rather than a cold one", Invocation {
+                    before: vec!["sibling"], after: Vec::new(), ..Invocation::default() }),
+            ] {
+                let (_, warnings) = invoke(root.path(), &unlike, 3_000);
+                assert!(
+                    warnings.iter().all(|warning| warning.kind != TimingWarningKind::Historical),
+                    "a sample from {reason} is not comparable and must not be judged against \
+                     a baseline built from {status} runs"
+                );
+            }
+        }
     }
 
     #[test]

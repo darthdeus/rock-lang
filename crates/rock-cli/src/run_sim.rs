@@ -2354,11 +2354,12 @@ fn writes_live(buffered: bool) -> bool {
 /// `SIM_SKIP_RENDER` are read ONCE during boot (`runner_load_sim_entries`), so
 /// they are still boot signature until the worker applies them per entry.
 ///
-/// `ROCK_MASK_WALL_CLOCK` is owned outright: the runner publishes its own value
-/// after `preset_env`, so a declared one never reaches the child and cannot
-/// stand for a difference between two entries. Splitting a group on an inert
-/// value would isolate sims for nothing.
-const RUNNER_OWNED_ENV_KEYS: &[&str] = &["FRAME_COUNT", "ROCK_MASK_WALL_CLOCK", "SIM_MANUAL"];
+/// `ROCK_MASK_WALL_CLOCK` and `ROCK_DETERMINISTIC_IDS` are owned outright: the
+/// runner publishes its own value for both after `preset_env`, so a declared one
+/// never reaches the child and cannot stand for a difference between two
+/// entries. Splitting a group on an inert value would isolate sims for nothing.
+const RUNNER_OWNED_ENV_KEYS: &[&str] =
+    &["FRAME_COUNT", "ROCK_DETERMINISTIC_IDS", "ROCK_MASK_WALL_CLOCK", "SIM_MANUAL"];
 
 /// Fixed values the runner publishes to EVERY sim child, layered BEFORE
 /// `preset_env` so a declaration still wins.
@@ -2384,29 +2385,119 @@ const RUNNER_BASELINE_ENV: &[(&str, &str)] = &[
     ("STONE_HEADLESS", "1"),
 ];
 
-/// The part of a sim's `@sim_env` that is consumed during global init, engine
-/// init and `@init` -- what a shared process cannot vary between entries.
+/// The opt-in a fixture declares to move one of its own `@sim_env` keys off the
+/// boot signature and onto the per-entry channel the worker already uses for
+/// `OUT`, `ROCK_RUN_SIM` and `FRAME_COUNT`: a comma-separated list of key names,
+/// e.g. `@sim_env("SIM_WORKER_PER_ENTRY_ENV", "MAG_TELEMETRY_ROOT")`.
 ///
-/// Canonical (last-wins, then stable-sorted by key) so redundant declarations
-/// do not split a group: two sims agreeing on the same effective pairs share a
-/// signature however they spelled them. A different final value still refuses.
-fn boot_signature(env_pairs: &[(String, String)]) -> Vec<(String, String)> {
-    let mut effective = Vec::with_capacity(env_pairs.len());
+/// It exists because `$OUT` is per entry while a spawn environment is not, and
+/// the ONLY thing that decides whether republishing a value at the entry
+/// boundary is enough is whether the GAME reads that variable live or captures
+/// it into a global during boot. The runner cannot see which, so it must be
+/// told, and the default has to be the safe one: an undeclared `$OUT` key still
+/// isolates. A blanket "all `$OUT` keys are per-entry now" would make MAG's
+/// bindings/layout-history group shareable and silently wrong -- those are read
+/// into globals at boot (`mag/actions.rock:199`, `mag/spellbook.rock:94-95`),
+/// so a per-entry setenv would be accepted and ignored and the second entry
+/// would read and write the FIRST entry's file.
+///
+/// Symmetric to `SIM_WORKER_ISOLATED`, which is the opt-OUT declared the same
+/// way; both are properties of the fixture, stated at the fixture.
+const PER_ENTRY_ENV_DECL: &str = "SIM_WORKER_PER_ENTRY_ENV";
+
+/// What the boot signature carries in place of a per-entry key's value: the
+/// PRESENCE is kept and the value dropped.
+///
+/// Keeping the presence is what makes the per-entry channel dense within a
+/// lane, and that is the whole clearing story. `OUT` and `FRAME_COUNT` are safe
+/// because every entry sets them; a sparsely published key would let an entry
+/// that declares nothing inherit its predecessor's value. Because an entry that
+/// does not carry the key has a DIFFERENT signature, it lands in a different
+/// lane, so within one worker either every entry publishes the key or none
+/// does. Nothing has to be unset at the boundary because nothing is ever stale.
+const PER_ENTRY_ENV_MARK: &str = "<per-entry>";
+
+/// A sim's `@sim_env` reduced to its effective pairs: last declaration wins,
+/// in first-declaration order.
+fn effective_env(env_pairs: &[(String, String)]) -> Vec<(String, String)> {
+    let mut effective: Vec<(String, String)> = Vec::with_capacity(env_pairs.len());
     for (key, value) in env_pairs {
         if let Some(previous) = effective.iter().position(|(k, _)| k == key) {
             effective.remove(previous);
         }
         effective.push((key.clone(), value.clone()));
     }
+    effective
+}
+
+/// The keys this entry declares as per-entry, in declaration order.
+///
+/// Empty names are dropped rather than rejected so a trailing comma is not a
+/// hard error, but an unrecognized name is NOT an error either -- naming a key
+/// the fixture does not declare simply has no effect, because the signature
+/// records presence and there is nothing present to record.
+fn per_entry_env_keys(env_pairs: &[(String, String)]) -> Vec<String> {
+    effective_env(env_pairs)
+        .into_iter()
+        .find(|(k, _)| k == PER_ENTRY_ENV_DECL)
+        .map(|(_, v)| {
+            v.split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The part of a sim's `@sim_env` that is consumed during global init, engine
+/// init and `@init` -- what a shared process cannot vary between entries.
+///
+/// Canonical (last-wins, then stable-sorted by key) so redundant declarations
+/// do not split a group: two sims agreeing on the same effective pairs share a
+/// signature however they spelled them. A different final value still refuses.
+///
+/// A key the fixture declared per-entry keeps its place with its value replaced
+/// by `PER_ENTRY_ENV_MARK`: the value is republished at every entry boundary so
+/// it is not boot state, but whether the key is published AT ALL still has to
+/// split the group -- see `PER_ENTRY_ENV_MARK`.
+fn boot_signature(env_pairs: &[(String, String)]) -> Vec<(String, String)> {
+    let effective = effective_env(env_pairs);
+    let per_entry = per_entry_env_keys(env_pairs);
     let mut sig: Vec<(String, String)> = effective
         .into_iter()
         .filter(|(k, _)| !RUNNER_OWNED_ENV_KEYS.contains(&k.as_str()))
         .filter(|(k, v)| {
             !RUNNER_BASELINE_ENV.iter().any(|(bk, bv)| *bk == k.as_str() && *bv == v.as_str())
         })
+        .map(|(k, v)| {
+            if per_entry.iter().any(|p| *p == k) {
+                (k, PER_ENTRY_ENV_MARK.to_string())
+            } else {
+                (k, v)
+            }
+        })
         .collect();
     sig.sort_by(|a, b| a.0.cmp(&b.0));
     sig
+}
+
+/// The pairs this part publishes through setenv when its entry starts, with
+/// `$OUT` resolved against the part's OWN tempdir.
+///
+/// Effective values only, so a redeclared key publishes what the signature
+/// recorded rather than the first spelling.
+fn per_entry_env_pairs(part: &WorkerPart) -> Vec<(String, String)> {
+    let keys = per_entry_env_keys(&part.env);
+    if keys.is_empty() {
+        return Vec::new();
+    }
+    let out = part.out_dir.to_string_lossy().to_string();
+    effective_env(&part.env)
+        .into_iter()
+        .filter(|(k, _)| keys.iter().any(|p| p == k))
+        .map(|(k, v)| (k, v.replace("$OUT", &out)))
+        .collect()
 }
 
 /// How `rock sim` maps entries to processes.
@@ -2529,7 +2620,16 @@ fn worker_ineligibility(
         if env.iter().any(|(k, v)| k == "SIM_WORKER_ISOLATED" && v != "0") {
             return Some("declares @sim_env(SIM_WORKER_ISOLATED)".to_string());
         }
-        if let Some((k, v)) = env.iter().find(|(_, v)| v.contains("$OUT")) {
+        // `$OUT` is per entry and a spawn environment is not, so an
+        // interpolating key is boot state a shared worker cannot vary -- UNLESS
+        // the fixture declared it per-entry, in which case the worker
+        // republishes it at the boundary and the value is no longer fixed at
+        // spawn. Undeclared stays isolated: see `PER_ENTRY_ENV_DECL` for why
+        // the runner cannot decide this for itself.
+        let per_entry = per_entry_env_keys(env);
+        if let Some((k, v)) =
+            env.iter().find(|(k, v)| v.contains("$OUT") && !per_entry.iter().any(|p| p == k))
+        {
             return Some(format!(
                 "@sim_env(\"{k}\", \"{v}\") interpolates $OUT, which resolves before the process starts"
             ));
@@ -2890,7 +2990,14 @@ fn run_worker(
                 ));
             }
         }
-        if let Some((k, v)) = first.env.iter().find(|(_, v)| v.contains("$OUT")) {
+        // The same rule `worker_ineligibility` applies at planning time, restated
+        // where the process is actually spawned so a grouping bug is loud rather
+        // than a queue that is quietly wrong. A key the fixture declared
+        // per-entry is exempt because the child republishes it at each boundary.
+        let per_entry = per_entry_env_keys(&first.env);
+        if let Some((k, v)) =
+            first.env.iter().find(|(k, v)| v.contains("$OUT") && !per_entry.iter().any(|p| p == k))
+        {
             return Err(anyhow!(
                 "@sim_env(\"{k}\", \"{v}\") is resolved before the process starts, so it \
                  cannot follow a per-entry $OUT; sims using it stay on the isolated path"
@@ -2918,19 +3025,28 @@ fn run_worker(
 
     // The entry queue the child reads. Lives in the invocation-owned output
     // directory and stays alive for the child's whole run.
+    //
+    // `<name>\t<out>\t<budget>` and then a flat key, value, key, value tail of
+    // the pairs this entry publishes through setenv when it starts. Key and
+    // value take a TSV field each rather than sharing one as `K=V`, so a path
+    // containing `=` needs no escaping and the child needs no parser.
     let mut plan_file = tempfile::Builder::new()
         .prefix("entry-plan-")
         .suffix(".tsv")
         .tempfile_in(output)
         .context("creating the worker entry plan")?;
     for p in parts {
-        writeln!(
+        write!(
             plan_file,
             "{}\t{}\t{}",
             p.name,
             p.out_dir.to_string_lossy(),
             p.frame_budget
         )?;
+        for (k, v) in per_entry_env_pairs(p) {
+            write!(plan_file, "\t{k}\t{v}")?;
+        }
+        writeln!(plan_file)?;
     }
     plan_file.flush()?;
 
@@ -2990,6 +3106,22 @@ fn run_worker(
         // `wall_clock_ms` latches it into a `static` on first read, so a
         // per-entry override could not be honoured coherently anyway.
         .env("ROCK_MASK_WALL_CLOCK", if recording { "1" } else { "0" })
+        // Makes `stone-rs`'s telemetry identifiers reproducible, on the same
+        // terms and for the same reason: the session id and the consent
+        // generation are `Uuid::new_v4()`, so two runs of one sim wrote
+        // different artifact BYTES and the isolated reference was not
+        // reproducible against itself. Published from the same `recording`
+        // bool, after `preset_env` and as an explicit "0", and listed in
+        // `RUNNER_OWNED_ENV_KEYS` beside the mask -- a fixture must not be able
+        // to unmask a compared run, and an inherited value must not be able to
+        // mask an ordinary one. Telemetry is a shipping feature; an ordinary
+        // run keeps its real random ids.
+        //
+        // A separate key rather than a second meaning for the mask: that one
+        // REPLACES a rendered duration with `<ms>` in log text, this one DERIVES
+        // a value that must stay a parseable UUID. See `DETERMINISTIC_IDS_ENV`
+        // in `stone-rs/src/telemetry.rs`.
+        .env("ROCK_DETERMINISTIC_IDS", if recording { "1" } else { "0" })
         .env("FPS_LOG", "0")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -5781,6 +5913,134 @@ mod tests {
         );
         assert_eq!(isolated[2].0, 5);
         assert!(isolated[2].1.contains("SIM_WORKER_ISOLATED"), "{}", isolated[2].1);
+    }
+
+    /// The declared opt-in admits a `$OUT` key, and ONLY the declared one: an
+    /// entry naming one variable per-entry still isolates on a second
+    /// undeclared `$OUT` variable, which is what keeps the conservative
+    /// direction the default.
+    #[test]
+    fn a_declared_per_entry_key_is_admitted_and_an_undeclared_one_is_not() {
+        let wires = wires(&[
+            ("declared", &[("SIM_WORKER_PER_ENTRY_ENV", "ROOT"), ("ROOT", "$OUT/telemetry")]),
+            (
+                "partly",
+                &[
+                    ("SIM_WORKER_PER_ENTRY_ENV", "ROOT"),
+                    ("ROOT", "$OUT/telemetry"),
+                    ("BINDINGS", "$OUT/bindings.json"),
+                ],
+            ),
+            ("undeclared", &[("ROOT", "$OUT/telemetry")]),
+        ]);
+        let (groups, isolated) =
+            group_worker_specs(&specs(&["declared", "partly", "undeclared"]), &wires);
+
+        assert_eq!(groups, vec![vec![0]], "the fully declared entry is eligible");
+        assert_eq!(isolated.len(), 2);
+        assert_eq!(isolated[0].0, 1);
+        assert!(
+            isolated[0].1.contains("BINDINGS"),
+            "the refusal must name the UNDECLARED variable, not the declared one: {}",
+            isolated[0].1
+        );
+        assert_eq!(isolated[1].0, 2);
+        assert!(isolated[1].1.contains("ROOT"), "{}", isolated[1].1);
+    }
+
+    /// Two entries whose only difference is the VALUE of a declared per-entry
+    /// key share a worker; an entry that does not carry the key at all does
+    /// not. That second half is the clearing boundary: publication is dense
+    /// within a lane, so no entry can inherit a predecessor's value.
+    #[test]
+    fn a_per_entry_key_splits_on_presence_and_not_on_value() {
+        let decl = ("SIM_WORKER_PER_ENTRY_ENV", "ROOT");
+        let a = env(&[decl, ("ROOT", "$OUT/telemetry")]);
+        let b = env(&[decl, ("ROOT", "$OUT/menu-telemetry")]);
+        assert_eq!(
+            boot_signature(&a),
+            boot_signature(&b),
+            "the value is republished per entry, so it is not boot state"
+        );
+
+        let absent = env(&[decl]);
+        assert_ne!(
+            boot_signature(&a),
+            boot_signature(&absent),
+            "an entry that publishes nothing for the key must not share a worker with one \
+             that does, or it would inherit the predecessor's value"
+        );
+
+        let undeclared = env(&[("ROOT", "$OUT/telemetry")]);
+        assert_ne!(
+            boot_signature(&a),
+            boot_signature(&undeclared),
+            "without the declaration the key is ordinary boot state"
+        );
+    }
+
+    /// Each part resolves `$OUT` against its OWN directory -- the whole point,
+    /// since a shared spawn environment can only carry the first entry's.
+    #[test]
+    fn per_entry_pairs_resolve_out_against_the_parts_own_directory() {
+        let part = |name: &str, out: &str| WorkerPart {
+            name: name.to_string(),
+            out_dir: PathBuf::from(out),
+            frame_budget: 0,
+            env: env(&[
+                ("SIM_WORKER_PER_ENTRY_ENV", "ROOT"),
+                ("ROOT", "$OUT/telemetry"),
+                ("OTHER", "$OUT/ignored"),
+            ]),
+            occurrence_id: 0,
+            part_index: 0,
+        };
+        assert_eq!(
+            per_entry_env_pairs(&part("a", "/tmp/one")),
+            vec![("ROOT".to_string(), "/tmp/one/telemetry".to_string())],
+            "only the declared key is published, resolved against this part's $OUT"
+        );
+        assert_eq!(
+            per_entry_env_pairs(&part("b", "/tmp/two")),
+            vec![("ROOT".to_string(), "/tmp/two/telemetry".to_string())]
+        );
+
+        let plain = WorkerPart {
+            name: "plain".to_string(),
+            out_dir: PathBuf::from("/tmp/three"),
+            frame_budget: 0,
+            env: env(&[("ROOT", "/fixed")]),
+            occurrence_id: 0,
+            part_index: 0,
+        };
+        assert!(per_entry_env_pairs(&plain).is_empty(), "no declaration publishes nothing");
+    }
+
+    /// Last-wins applies to the declaration itself and to the value it names,
+    /// so the pair published matches the pair the signature recorded.
+    #[test]
+    fn per_entry_keys_and_values_use_effective_declarations() {
+        let e = env(&[
+            ("SIM_WORKER_PER_ENTRY_ENV", "STALE"),
+            ("SIM_WORKER_PER_ENTRY_ENV", " ROOT , OTHER ,"),
+            ("ROOT", "$OUT/first"),
+            ("ROOT", "$OUT/second"),
+        ]);
+        assert_eq!(per_entry_env_keys(&e), vec!["ROOT".to_string(), "OTHER".to_string()]);
+
+        let part = WorkerPart {
+            name: "p".to_string(),
+            out_dir: PathBuf::from("/tmp/out"),
+            frame_budget: 0,
+            env: e,
+            occurrence_id: 0,
+            part_index: 0,
+        };
+        assert_eq!(
+            per_entry_env_pairs(&part),
+            vec![("ROOT".to_string(), "/tmp/out/second".to_string())],
+            "the effective value is published; a named key that is absent publishes nothing"
+        );
     }
 
     /// A suite may name the same sim twice. Both occurrences are entries that

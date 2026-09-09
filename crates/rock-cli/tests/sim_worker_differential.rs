@@ -55,6 +55,16 @@ fn artifact_names(record: &SimRecord) -> Vec<String> {
 /// `hostile_parent` puts `ROCK_MASK_WALL_CLOCK=1` in the PARENT environment,
 /// which is the route an inherited value takes into a child the runner spawns.
 fn run_rock(args: &[&str], hostile_parent: bool) -> String {
+    let parent_env: &[(&str, &str)] =
+        if hostile_parent { &[("ROCK_MASK_WALL_CLOCK", "1")] } else { &[] };
+    run_rock_with_env(args, parent_env)
+}
+
+/// Same run, with an arbitrary PARENT environment -- the route an inherited
+/// value takes into a child the runner spawns. `run_rock` is this with the
+/// wall-clock mask, kept as its own spelling because most callers only ever
+/// want that one.
+fn run_rock_with_env(args: &[&str], parent_env: &[(&str, &str)]) -> String {
     let mut rock = std::env::current_exe().expect("test exe");
     rock.pop();
     if rock.ends_with("deps") {
@@ -70,10 +80,7 @@ fn run_rock(args: &[&str], hostile_parent: bool) -> String {
         .to_path_buf();
 
     let mut cmd = std::process::Command::new(&rock);
-    cmd.current_dir(&root).args(args);
-    if hostile_parent {
-        cmd.env("ROCK_MASK_WALL_CLOCK", "1");
-    }
+    cmd.current_dir(&root).args(args).envs(parent_env.iter().copied());
     let out = cmd.output().unwrap_or_else(|e| panic!("run rock {args:?}: {e}"));
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     assert!(out.status.success(), "{args:?} failed:\n{stderr}");
@@ -537,6 +544,150 @@ fn an_ordinary_run_keeps_its_measurements_when_the_parent_environment_masks() {
         "b0_wall_clock_probe",
         true,
     );
+}
+
+/// The identifier half of the same property the wall-clock family covers: an
+/// artifact a COMPARED run writes has to be reproducible, and a value drawn
+/// fresh from OS randomness per process defeats that exactly as thoroughly as a
+/// measured duration does.
+///
+/// A telemetry queue mints two such values, both `Uuid::new_v4()` in
+/// `stone-rs/src/telemetry.rs`: the consent generation in
+/// `reports/.telemetry-consent` and the session id on every event row. They are
+/// the reason `--multi-order`'s isolated reference was not reproducible against
+/// ITSELF -- two runs of the same two-sim selection produced identical file
+/// SIZES and four different content hashes. An isolated-only sim never gets a
+/// second process to compare with, which is why this never showed.
+///
+/// Both compared arms carry the ids here. `artifacts` is where the real defect
+/// lived; `entry_diagnostics` carries the logged line so a failure names WHICH
+/// id moved. The `artifacts` population assert is what stops this passing
+/// because the queue never opened.
+#[test]
+fn a_telemetry_id_does_not_diverge_across_the_entry_boundary() {
+    let (isolated, worker) = differential(&["b0_telemetry_ids_seed"], "b0_telemetry_ids_probe");
+    let c = compare(&isolated, &worker);
+    assert_equivalent("b0_telemetry_ids_probe", &c);
+
+    for (label, record) in [("isolated", &isolated), ("worker", &worker)] {
+        let (consent, session) = telemetry_ids(&record.entry_diagnostics)
+            .unwrap_or_else(|| panic!("{label}: no telemetry record line:\n{}", record.entry_diagnostics));
+        // Agreement over an id that was never minted is agreement over nothing.
+        assert!(
+            is_uuid(&consent) && is_uuid(&session),
+            "{label}: the reproducible ids must still be well-formed UUIDs, got consent={consent} session={session}"
+        );
+        // A reproducible SEQUENCE, not one constant: the two kinds are drawn at
+        // the same index and must not collide.
+        assert_ne!(consent, session, "{label}: the consent generation and the session id must differ");
+        // The undeclared control in the same record still compares.
+        assert!(
+            record.entry_diagnostics.contains("queue 1"),
+            "{label}: the control must survive: {}",
+            record.entry_diagnostics
+        );
+    }
+    assert!(
+        c.population("artifacts") > 0,
+        "the artifact arm compared nothing, so the telemetry files were never checked"
+    );
+}
+
+/// `ROCK_DETERMINISTIC_IDS` is the HARNESS's, and a compared run stays
+/// reproducible however loudly a fixture asks for real ids. Without this the
+/// gate could be talked out of checking the very fixtures it exists for: a sim
+/// could declare its way out of the comparison and the gate would report green
+/// on artifacts it had stopped looking at.
+///
+/// The declaring pair is the mutation subject -- with the runner publishing the
+/// flag before a sim's `@sim_env`, this fixture's `"0"` would win and both sides
+/// would mint fresh UUIDs the boundary cannot restore.
+#[test]
+fn a_fixture_cannot_ask_a_compared_run_for_real_telemetry_ids() {
+    let (isolated, worker) =
+        differential(&["b0_telemetry_ids_unmask_seed"], "b0_telemetry_ids_unmask_probe");
+    let c = compare(&isolated, &worker);
+    assert_equivalent("b0_telemetry_ids_unmask_probe", &c);
+    assert!(
+        c.population("artifacts") > 0,
+        "the artifact arm compared nothing, so the fixture's declaration was never tested"
+    );
+}
+
+/// The other direction, and the one that protects the shipping game: telemetry
+/// is a product feature, and a build that emitted a fixed session id would
+/// collapse every real player's sessions into one. An ordinary `rock sim` run
+/// is not compared with anything, so it must keep drawing real random ids --
+/// whatever the fixture or the parent environment asks for.
+///
+/// Proven by RUNNING TWICE and requiring the ids to differ, rather than by
+/// asserting against a known derived value: that is the property that actually
+/// matters, and it cannot be satisfied by a derivation that merely looks random.
+fn assert_ordinary_run_keeps_real_ids(seed: &str, probe: &str, parent_env: &[(&str, &str)]) {
+    for workers in [false, true] {
+        let args = if workers {
+            vec!["sim", "testbed", seed, probe, "--workers"]
+        } else {
+            vec!["sim", "testbed", probe]
+        };
+
+        let mut seen: Vec<(String, String)> = Vec::new();
+        for _ in 0..2 {
+            let stderr = run_rock_with_env(&args, parent_env);
+            let ids = telemetry_ids(&stderr)
+                .unwrap_or_else(|| panic!("{args:?} emitted no telemetry record line:\n{stderr}"));
+            assert!(
+                is_uuid(&ids.0) && is_uuid(&ids.1),
+                "{args:?} must emit well-formed UUIDs, got {ids:?}"
+            );
+            seen.push(ids);
+        }
+        assert_ne!(
+            seen[0], seen[1],
+            "{args:?} (parent_env={parent_env:?}) is not a compared run, so it must keep drawing \
+             REAL random telemetry ids; two runs produced the same pair"
+        );
+    }
+}
+
+#[test]
+fn an_ordinary_run_keeps_its_real_telemetry_ids() {
+    assert_ordinary_run_keeps_real_ids("b0_telemetry_ids_seed", "b0_telemetry_ids_probe", &[]);
+}
+
+#[test]
+fn an_ordinary_run_keeps_its_real_telemetry_ids_when_the_fixture_asks_for_reproducible_ones() {
+    assert_ordinary_run_keeps_real_ids(
+        "b0_telemetry_ids_mask_seed",
+        "b0_telemetry_ids_mask_probe",
+        &[],
+    );
+}
+
+#[test]
+fn an_ordinary_run_keeps_its_real_telemetry_ids_when_the_parent_environment_asks_otherwise() {
+    assert_ordinary_run_keeps_real_ids(
+        "b0_telemetry_ids_seed",
+        "b0_telemetry_ids_probe",
+        &[("ROCK_DETERMINISTIC_IDS", "1")],
+    );
+}
+
+/// Pull `consent` and `session` out of the fixture's one log line.
+fn telemetry_ids(text: &str) -> Option<(String, String)> {
+    let line = text.lines().find(|l| l.contains("b0 telemetry record:"))?;
+    let after = |key: &str| -> Option<String> {
+        let rest = line.split_once(key)?.1;
+        Some(rest.split(|c: char| c == ',').next()?.trim().to_string())
+    };
+    Some((after("consent on ")?, after("session ")?))
+}
+
+fn is_uuid(value: &str) -> bool {
+    let groups: Vec<&str> = value.split('-').collect();
+    groups.len() == 5
+        && [8usize, 4, 4, 4, 12] == groups.iter().map(|g| g.len()).collect::<Vec<_>>()[..]
+        && value.chars().all(|c| c == '-' || c.is_ascii_hexdigit())
 }
 
 /// The Session Arena registry crosses the REAL worker boundary intact.

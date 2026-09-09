@@ -649,6 +649,21 @@ impl CommandContext {
                 &self.args.perf_format,
             );
         }
+        if self.args.command == CliCommand::SimReport {
+            if self.args.files.len() > 1 {
+                anyhow::bail!(
+                    "usage: rock sim-report [<run-id>] [--sim-log-dir <root>] \
+                     [--sim-entry <name>] [--top N] [--format pretty|json]"
+                );
+            }
+            return crate::sim_report::run(
+                self.args.sim_log_dir.as_deref(),
+                self.args.files.first().map(String::as_str),
+                self.args.sim_entry.as_deref(),
+                self.args.top,
+                &self.args.perf_format,
+            );
+        }
         if self.args.command == CliCommand::ReplayProfileReport {
             if self.args.files.len() != 1 {
                 anyhow::bail!(
