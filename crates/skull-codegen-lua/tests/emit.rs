@@ -87,6 +87,87 @@ fn emit(src: &str, fn_name: &str) -> String {
     emit_dump(vec![ast], fn_name)
 }
 
+#[test]
+fn numeric_selection_uses_native_minmax() {
+    let lua = emit_clean("fn choose(a: float, b: float) -> float { return if a < b { a } else { b } }", "choose");
+    assert!(lua.contains("math.min("), "{lua}");
+    let lua = emit_clean("fn choose(a: float, b: float) -> float { return if a < b { b } else { a } }", "choose");
+    assert!(lua.contains("math.max("), "{lua}");
+    let lua = emit_clean("fn choose(a: int, b: int) -> int { return if a < b { a } else { b } }", "choose");
+    assert!(lua.contains("math.min("), "{lua}");
+    let lua = emit_clean("fn choose(a: int, b: int) -> int { if b > a { a = b }; return a }", "choose");
+    assert!(lua.contains("math.max("), "{lua}");
+}
+
+#[test]
+fn numeric_selection_rejects_effectful_and_inclusive_branches() {
+    for src in [
+        "fn choose(a: float, b: float) -> float { return if a <= b { a } else { b } }",
+        "fn choose(a: float, b: float) -> float { return if a < b { a + 1.0 } else { b } }",
+        "fn choose(a: float, b: float, log: [float]) -> float { return if a < b { log.push(a); a } else { b } }",
+        "fn choose(a: float, b: float) -> float { let smaller = a < b; a += 10.0; return if smaller { a } else { b } }",
+    ] {
+        let lua = emit_clean(src, "choose");
+        assert!(!lua.contains("math.min(") && !lua.contains("math.max("), "{lua}");
+    }
+}
+
+#[test]
+fn numeric_selection_preserves_special_values_and_guarded_assignment() {
+    for (condition, yes, no, native) in [
+        ("<", "a", "b", "min"),
+        ("<", "b", "a", "max"),
+        (">", "a", "b", "max"),
+        (">", "b", "a", "min"),
+    ] {
+        let lua = emit_clean(&format!("@nomangle fn choose(a: float, b: float) -> float {{ return if a {condition} b {{ {yes} }} else {{ {no} }} }}"), "choose");
+        assert!(lua.contains(&format!("math.{native}(")), "{lua}");
+        let driver = format!(r#"{lua}
+local values = {{0/0, math.huge, -math.huge, 0, -0.0, 1, -1, 1.5, -1.5}}
+local cases = {{}}
+for _,a in ipairs(values) do for _,b in ipairs(values) do
+  cases[#cases+1] = {{a,b,a {condition} b and {yes} or {no}}}
+end end
+for pass=1,2000 do for _,r in ipairs(cases) do
+  local a,b = r[1],r[2]
+  local got, expected = choose(a,b), r[3]
+  assert((got~=got and expected~=expected) or
+    (got==expected and (got~=0 or 1/got==1/expected)))
+end end
+print('selection-ok')
+"#);
+        let result = std::process::Command::new("luajit").args(["-e", &driver]).output().expect("LuaJIT semantic gate");
+        assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+        assert_eq!(String::from_utf8_lossy(&result.stdout).trim(), "selection-ok");
+    }
+    let lua = emit_clean("fn choose(a: float, b: float) -> float { if b > a { a = b }; return a }", "choose");
+    assert!(lua.contains("math.max("), "{lua}");
+}
+
+#[test]
+fn numeric_selection_preserves_writes_before_the_comparison() {
+    let lua = emit_clean(r#"
+struct Probe { value: float, writes: int }
+@nomangle fn choose(a: float, b: float, p: Probe) -> float {
+    p.value = b
+    p.writes += 1
+    return if a < b { a } else { b }
+}
+"#, "choose");
+    assert!(lua.contains("math.min("), "{lua}");
+    let driver = format!(r#"{lua}
+for i=1,2000 do
+  local p = {{value=i/10, writes=0}}
+  assert(choose(i/10,i/10+1,p)==i/10)
+  assert(p.value==i/10+1 and p.writes==1)
+end
+print('effects-ok')
+"#);
+    let result = std::process::Command::new("luajit").args(["-e", &driver]).output().expect("LuaJIT effect gate");
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(String::from_utf8_lossy(&result.stdout).trim(), "effects-ok");
+}
+
 /// Like [`emit_std`] but runs `skull_transform::cleanup` (copy-prop + DCE) before
 /// emitting -- the artifact the REAL pipeline ships (`mir_emit.rs`). Needed to
 /// assert allocation-shape claims (a dead `MakeTuple` left by the raw lowering is
