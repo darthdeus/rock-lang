@@ -627,6 +627,14 @@ impl CommandContext {
 
     /// Run command directly
     fn run_command(&self) -> Result<()> {
+        if self.args.command == CliCommand::SdkCheck {
+            if self.args.files.len() != 1 {
+                anyhow::bail!("usage: rock sdk-check <project>");
+            }
+            crate::sdk_check::check(&self.args.files[0], std::path::Path::new(&rock_host::rock_dir()))?;
+            println!("SDK manifest compatibility: OK");
+            return Ok(());
+        }
         if self.args.command == CliCommand::DocsIndex {
             return crate::docs_index::run(&self.args.files, self.args.output.as_deref());
         }

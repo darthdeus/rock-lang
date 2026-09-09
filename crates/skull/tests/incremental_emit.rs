@@ -39,6 +39,20 @@ fn check_edit(v1: &str, v2: &str, edited: &[&str]) {
     check_edit_with(ws_of, v1, v2, edited)
 }
 
+#[test]
+fn numeric_selection_updates_in_full_incremental_and_overlay_emission() {
+    let v1 = "@nomangle fn choose(a: float, b: float) -> float { return if a < b { a } else { b } }";
+    let v2 = v1.replace("a < b", "a > b");
+    let ws1 = ws_of(v1);
+    let (full, mut cache) = emit_full(&ws1, skull::user_module_id(&ws1).unwrap()).unwrap();
+    assert!(full.lua.contains("math.min("), "{}", full.lua);
+    let ws2 = ws_of(&v2);
+    let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "choose")]);
+    assert!(overlay.lua.contains("math.max("), "{}", overlay.lua);
+    assert!(!overlay.lua.contains("math.min("), "{}", overlay.lua);
+    check_edit(v1, &v2, &["choose"]);
+}
+
 /// [`check_edit`] over a chosen workspace builder. A fixture needing the stdlib
 /// (any `+`, any collection method) passes `common::ws_with_stdlib`; the bare
 /// `ws_of` keeps the cheap fixtures cheap.

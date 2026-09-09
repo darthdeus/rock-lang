@@ -2432,7 +2432,7 @@ impl Emitter<'_> {
                 return;
             }
         }
-        self.emit_term(out, &self.func.blocks[bb].term);
+        self.emit_term(out, &self.func.blocks[bb].term, bb);
     }
 
     fn emit_tail_forward(&self, out: &mut String, tail: &TailForward) {
@@ -3453,7 +3453,81 @@ impl Emitter<'_> {
         }
     }
 
-    fn emit_term(&self, out: &mut String, term: &Term) {
+    fn numeric_selection(&self, bb: Idx<Block>, cond: Idx<Inst>, yes: Idx<Block>, no: Idx<Block>)
+        -> Option<(Idx<Cell>, Idx<Inst>, Idx<Inst>, &'static str, Idx<Block>)>
+    {
+        if !self.inlinable[raw(cond) as usize] { return None; }
+        let (a, b, less) = match self.func.insts[cond] {
+            Inst::FloatLt(a, b) | Inst::IntLt(a, b) => (a, b, true),
+            Inst::FloatGt(a, b) | Inst::IntGt(a, b) => (a, b, false),
+            _ => return None,
+        };
+        // Reversing a selection's operands must not reorder deferred effects.
+        for id in [a, b] {
+            if self.inlinable[raw(id) as usize]
+                && !matches!(self.func.insts[id], Inst::Load(_) | Inst::Const(_))
+            { return None; }
+        }
+        let arm = |bb: Idx<Block>| -> Option<(Option<(Idx<Cell>, Idx<Inst>)>, Idx<Block>)> {
+            let block = &self.func.blocks[bb];
+            let Term::Goto(join) = block.term else { return None; };
+            let store = match block.insts.as_slice() {
+                [] => None,
+                [s] => match self.func.insts[*s] {
+                    Inst::Store { cell, value } => Some((cell, value)),
+                    _ => return None,
+                },
+                [l, s] if self.inlinable[raw(*l) as usize]
+                    && matches!(self.func.insts[*l], Inst::Load(_)) => {
+                    match self.func.insts[*s] {
+                        Inst::Store { cell, value } if value == *l => Some((cell, value)),
+                        _ => return None,
+                    }
+                },
+                _ => return None,
+            };
+            Some((store, join))
+        };
+        let (yes_store, join) = arm(yes)?;
+        let (no_store, no_join) = arm(no)?;
+        if join != no_join { return None; }
+        let cell = yes_store.or(no_store)?.0;
+        if yes_store.is_some_and(|s| s.0 != cell) || no_store.is_some_and(|s| s.0 != cell) {
+            return None;
+        }
+        let current_load = |id: Idx<Inst>| {
+            if self.inlinable[raw(id) as usize] { return true; }
+            let insts = &self.func.blocks[bb].insts;
+            let Some(pos) = insts.iter().rposition(|i| *i == id) else { return false; };
+            // A captured comparison operand may stand for the unchanged cell,
+            // but never carry that equivalence across a write or call.
+            insts[pos + 1..].iter().all(|i| *i == cond
+                || matches!(self.func.insts[*i], Inst::Load(_) | Inst::Const(_)))
+        };
+        let matches = |store: Option<(Idx<Cell>, Idx<Inst>)>, operand: Idx<Inst>| {
+            match store {
+                Some((_, value)) if value == operand => true,
+                Some((_, value)) => match (&self.func.insts[value], &self.func.insts[operand]) {
+                    (Inst::Load(x), Inst::Load(y)) => x == y
+                        && self.inlinable[raw(value) as usize]
+                        && current_load(operand),
+                    _ => false,
+                },
+                None => matches!(self.func.insts[operand], Inst::Load(c) if c == cell)
+                    && current_load(operand),
+            }
+        };
+        if matches(yes_store, a) && matches(no_store, b) {
+            Some((cell, a, b, if less { "min" } else { "max" }, join))
+        } else if matches(yes_store, b) && matches(no_store, a) {
+            // Native min/max choose the second operand on ties/unordered input.
+            Some((cell, b, a, if less { "max" } else { "min" }, join))
+        } else {
+            None
+        }
+    }
+
+    fn emit_term(&self, out: &mut String, term: &Term, bb: Idx<Block>) {
         match term {
             // luajit rule 2: `return` wrapped `do ... end` so it is never the
             // block's mid-sequence statement (and is legal as the last one too).
@@ -3475,6 +3549,20 @@ impl Emitter<'_> {
                 then_bb,
                 else_bb,
             } => {
+                if let Some((cell, a, b, op, join)) = self.numeric_selection(bb, *cond, *then_bb, *else_bb) {
+                    out.push_str("  ");
+                    write_cellname(out, self.func, self.frame, self.cell_colors, cell);
+                    out.push_str(" = math.");
+                    out.push_str(op);
+                    out.push('(');
+                    self.write_opnd(out, a);
+                    out.push_str(", ");
+                    self.write_opnd(out, b);
+                    out.push_str(")\n  goto bb");
+                    push_uint(out, self.func.emit_block_id(join));
+                    out.push('\n');
+                    return;
+                }
                 out.push_str("  if ");
                 self.write_opnd(out, *cond);
                 out.push_str(" then goto bb");
