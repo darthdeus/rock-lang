@@ -2354,11 +2354,12 @@ fn writes_live(buffered: bool) -> bool {
 /// `SIM_SKIP_RENDER` are read ONCE during boot (`runner_load_sim_entries`), so
 /// they are still boot signature until the worker applies them per entry.
 ///
-/// `ROCK_MASK_WALL_CLOCK` is owned outright: the runner publishes its own value
-/// after `preset_env`, so a declared one never reaches the child and cannot
-/// stand for a difference between two entries. Splitting a group on an inert
-/// value would isolate sims for nothing.
-const RUNNER_OWNED_ENV_KEYS: &[&str] = &["FRAME_COUNT", "ROCK_MASK_WALL_CLOCK", "SIM_MANUAL"];
+/// `ROCK_MASK_WALL_CLOCK` and `ROCK_DETERMINISTIC_IDS` are owned outright: the
+/// runner publishes its own value for both after `preset_env`, so a declared one
+/// never reaches the child and cannot stand for a difference between two
+/// entries. Splitting a group on an inert value would isolate sims for nothing.
+const RUNNER_OWNED_ENV_KEYS: &[&str] =
+    &["FRAME_COUNT", "ROCK_DETERMINISTIC_IDS", "ROCK_MASK_WALL_CLOCK", "SIM_MANUAL"];
 
 /// Fixed values the runner publishes to EVERY sim child, layered BEFORE
 /// `preset_env` so a declaration still wins.
@@ -3105,6 +3106,22 @@ fn run_worker(
         // `wall_clock_ms` latches it into a `static` on first read, so a
         // per-entry override could not be honoured coherently anyway.
         .env("ROCK_MASK_WALL_CLOCK", if recording { "1" } else { "0" })
+        // Makes `stone-rs`'s telemetry identifiers reproducible, on the same
+        // terms and for the same reason: the session id and the consent
+        // generation are `Uuid::new_v4()`, so two runs of one sim wrote
+        // different artifact BYTES and the isolated reference was not
+        // reproducible against itself. Published from the same `recording`
+        // bool, after `preset_env` and as an explicit "0", and listed in
+        // `RUNNER_OWNED_ENV_KEYS` beside the mask -- a fixture must not be able
+        // to unmask a compared run, and an inherited value must not be able to
+        // mask an ordinary one. Telemetry is a shipping feature; an ordinary
+        // run keeps its real random ids.
+        //
+        // A separate key rather than a second meaning for the mask: that one
+        // REPLACES a rendered duration with `<ms>` in log text, this one DERIVES
+        // a value that must stay a parseable UUID. See `DETERMINISTIC_IDS_ENV`
+        // in `stone-rs/src/telemetry.rs`.
+        .env("ROCK_DETERMINISTIC_IDS", if recording { "1" } else { "0" })
         .env("FPS_LOG", "0")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
