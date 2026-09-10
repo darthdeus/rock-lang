@@ -444,6 +444,19 @@ fn runtime_prelude() -> &'static str {
     //      ROCK_JIT_MCODE_KB overrides both, so the budget can be swept
     //      without a rebuild; this prelude runs at chunk load and beats any
     //      -O flag passed on the command line.
+    //      `hotexit` is raised from LuaJIT's default 10 to 100 because a side
+    //      trace that FAILS is never penalised or blacklisted
+    //      (lj_trace.c:596-606) and snap->count only saturates on success, so a
+    //      doomed exit is re-recorded ~245 times for nothing. MAG's hottest
+    //      exits are doomed: they die in asm_head_side and never appear as a
+    //      parent for any other trace. Measured -57% aborts and -22% mean frame
+    //      on two independent workloads (a scripted combat sim and a recorded
+    //      play session), both disjoint across interleaved arms.
+    //      NOT validated on a workload whose side traces mostly SUCCEED, where
+    //      a higher threshold would cost real compiled coverage; and 250 beat
+    //      100 on every metric without the curve flattening, so this is a
+    //      conservative pick rather than a tuned one. ROCK_JIT_HOTEXIT
+    //      overrides it, so a regression reverts without a rebuild.
     //   2. 32-bit RNG (stdlib `random_*` inline(lua) bodies call
     //      `__rock_rng_next`/`__rock_rng_seed` by name); seeded from
     //      ROCK_TEST_SEED for deterministic test runs.
@@ -475,7 +488,7 @@ fn runtime_prelude() -> &'static str {
 }
 
 const PRELUDE_TEMPLATE: &str =
-    r#"if jit and jit.opt then local __mc = tonumber(os.getenv("ROCK_JIT_MCODE_KB") or "") or (jit.arch == "arm64" and 16384 or 65536) local __he = tonumber(os.getenv("ROCK_JIT_HOTEXIT") or "") jit.opt.start("maxmcode=" .. __mc, "sizemcode=" .. __mc, "maxtrace=4000", "maxrecord=32000", "maxsnap=4000") if __he then jit.opt.start("hotexit=" .. __he) end end
+    r#"if jit and jit.opt then local __mc = tonumber(os.getenv("ROCK_JIT_MCODE_KB") or "") or (jit.arch == "arm64" and 16384 or 65536) local __he = tonumber(os.getenv("ROCK_JIT_HOTEXIT") or "") or 100 jit.opt.start("maxmcode=" .. __mc, "sizemcode=" .. __mc, "maxtrace=4000", "maxrecord=32000", "maxsnap=4000", "hotexit=" .. __he) end
 if not _G.ffi then _G.ffi = require("ffi") end
 if not _G.__ROCK_C_STRUCT then _G.__ROCK_C_STRUCT = {} end
 if not _G.__ROCK_TYPE_TABLE then _G.__ROCK_TYPE_TABLE = {} end
@@ -1858,6 +1871,24 @@ mod tests {
         assert!(
             prelude.contains("ROCK_JIT_MCODE_KB"),
             "the mcode budget must stay sweepable without a rebuild"
+        );
+        // A doomed side trace is never blacklisted, so LuaJIT's default 10
+        // re-records it ~245 times for nothing. Pin the floor and the override,
+        // not the value: the value is a measured pick that may move again.
+        assert!(
+            prelude.contains("ROCK_JIT_HOTEXIT"),
+            "the hot-exit threshold must stay sweepable without a rebuild"
+        );
+        let hotexit: u32 = prelude
+            .split("ROCK_JIT_HOTEXIT\") or \"\") or ")
+            .nth(1)
+            .and_then(|rest| rest.split_whitespace().next())
+            .expect("prelude no longer defaults the hot-exit threshold")
+            .parse()
+            .expect("hot-exit default is not a literal count");
+        assert!(
+            hotexit > 10,
+            "hot-exit default {hotexit} is back at or below LuaJIT's, which re-records doomed exits"
         );
         let picked = prelude
             .split("jit.arch == \"arm64\" and ")
