@@ -2406,6 +2406,13 @@ const RUNNER_BASELINE_ENV: &[(&str, &str)] = &[
 /// declare the keys here. The rule that made that a fixture-side declaration
 /// rather than a runner-side list is unchanged.
 ///
+/// Reading the variable live is NECESSARY but not SUFFICIENT, and a fixture
+/// declaring a key here is asserting the whole condition. The READER has to run
+/// per entry as well, and whatever it configures has to be reset per entry.
+/// `MAG_SCENE` is the recorded counter-example: read live, re-applied correctly
+/// at every entry, and still unshareable because two pieces of what its scene
+/// sets up survive the boundary (`docs/sim-boot-cost-analysis.md`, queue item 5).
+///
 /// Symmetric to `SIM_WORKER_ISOLATED`, which is the opt-OUT declared the same
 /// way; both are properties of the fixture, stated at the fixture.
 const PER_ENTRY_ENV_DECL: &str = "SIM_WORKER_PER_ENTRY_ENV";
