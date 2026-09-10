@@ -475,7 +475,7 @@ fn runtime_prelude() -> &'static str {
 }
 
 const PRELUDE_TEMPLATE: &str =
-    r#"if jit and jit.opt then local __mc = tonumber(os.getenv("ROCK_JIT_MCODE_KB") or "") or (jit.arch == "arm64" and 16384 or 65536) jit.opt.start("maxmcode=" .. __mc, "sizemcode=" .. __mc, "maxtrace=4000", "maxrecord=32000", "maxsnap=4000") end
+    r#"if jit and jit.opt then local __mc = tonumber(os.getenv("ROCK_JIT_MCODE_KB") or "") or (jit.arch == "arm64" and 16384 or 65536) local __he = tonumber(os.getenv("ROCK_JIT_HOTEXIT") or "") jit.opt.start("maxmcode=" .. __mc, "sizemcode=" .. __mc, "maxtrace=4000", "maxrecord=32000", "maxsnap=4000") if __he then jit.opt.start("hotexit=" .. __he) end end
 if not _G.ffi then _G.ffi = require("ffi") end
 if not _G.__ROCK_C_STRUCT then _G.__ROCK_C_STRUCT = {} end
 if not _G.__ROCK_TYPE_TABLE then _G.__ROCK_TYPE_TABLE = {} end
