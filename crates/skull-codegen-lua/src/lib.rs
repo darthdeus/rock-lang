@@ -2141,6 +2141,46 @@ fn render_scope(
         va = regalloc::color_values(func, rpo, &inlinable, &[]);
     }
     let regalloc::ValueAlloc { colors, color_scope } = va;
+    // Where each declared local dies, for the `<local> = nil` kills that keep
+    // dead slots out of LuaJIT exit snapshots (see `regalloc::nil_kills`). A
+    // coroutine `__step` keeps raw cell names and frame fields; it gets none.
+    let kills = if frame.is_some() || !nil_kill_enabled() {
+        regalloc::NilKills::none(func)
+    } else {
+        let mut emits_nothing = inlinable.clone();
+        for id in hoist.keys() {
+            emits_nothing[raw(*id) as usize] = true;
+        }
+        // A counted loop's header (compare) and latch (increment) are subsumed
+        // by the `for` line; their instructions never run as statements.
+        for (h, cl) in loops.iter() {
+            for &id in func.blocks[*h].insts.iter().chain(func.blocks[cl.latch].insts.iter()) {
+                emits_nothing[raw(id) as usize] = true;
+            }
+        }
+        // A loop-scoped register may be killed anywhere inside its `for` block:
+        // the body region and the latch label, not the header (rendered as the
+        // `for` line itself, outside the block).
+        let kill_scopes: Vec<regalloc::LoopScope> = loops
+            .iter()
+            .map(|(&h, cl)| regalloc::LoopScope {
+                header: h,
+                region: cl.region.iter().copied().chain(std::iter::once(cl.latch)).collect(),
+            })
+            .collect();
+        let pinned = regalloc::pinned_cells(func);
+        regalloc::nil_kills(
+            func,
+            rpo,
+            &emits_nothing,
+            &colors,
+            &color_scope,
+            &kill_scopes,
+            cell_colors,
+            &pinned,
+            params,
+        )
+    };
     REGALLOC_TIME.with(|c| c.set(c.get() + t_ra.elapsed()));
 
     // Param list `(a, b, c)` — written straight into the buffer (no Vec<String>).
@@ -2266,6 +2306,7 @@ fn render_scope(
         tail_forwards,
         call_arg_forwards,
         suppressed,
+        kills,
     };
     for &bb in rpo {
         em.emit_block(out, bb); // self-skips an already-emitted block (loop body)
@@ -2340,9 +2381,55 @@ struct Emitter<'a> {
     tail_forwards: &'a [Option<TailForward>],
     call_arg_forwards: &'a [Option<CallArgForward>],
     suppressed: &'a [bool],
+    /// Death point of every declared local, written as `<local> = nil`.
+    kills: regalloc::NilKills,
+}
+
+/// `ROCK_SKULL_NIL_KILL=0` turns the nil-kill emission off, so an abort census
+/// or a frame-time run can be compared against the same source without it.
+fn nil_kill_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("ROCK_SKULL_NIL_KILL").map_or(true, |v| v != "0"))
 }
 
 impl Emitter<'_> {
+    fn write_kills(&self, out: &mut String, locals: &[regalloc::KillLocal]) {
+        for local in locals {
+            out.push_str("  ");
+            match *local {
+                regalloc::KillLocal::Value(c) => {
+                    out.push('r');
+                    push_uint(out, c);
+                }
+                regalloc::KillLocal::Cell(c) => {
+                    out.push('c');
+                    push_uint(out, c);
+                }
+            }
+            out.push_str(" = nil\n");
+        }
+    }
+
+    /// The kills due before the next statement of `bb`: the block's entry kills
+    /// when no statement has been written yet, else the ones after `after`.
+    fn write_pending_kills(&self, out: &mut String, bb: Idx<Block>, at_entry: bool, after: Option<Idx<Inst>>) {
+        let locals: &[regalloc::KillLocal] = if at_entry {
+            &self.kills.at_entry[raw(bb) as usize]
+        } else {
+            match after {
+                Some(id) => &self.kills.after_inst[raw(id) as usize],
+                None => &[],
+            }
+        };
+        self.write_kills(out, locals);
+    }
+
+    /// Whether `emit_inst` writes a statement for `id` (kills attach after it).
+    fn emits_statement(&self, id: Idx<Inst>) -> bool {
+        !self.suppressed[raw(id) as usize]
+            && !self.inlinable[raw(id) as usize]
+            && !self.hoist.contains_key(&id)
+    }
     fn has_state_slot(&self, name: ustr::Ustr) -> bool {
         self.state_slots.contains_key(&name) || self.static_slots.contains_key(&name)
     }
@@ -2412,11 +2499,45 @@ impl Emitter<'_> {
         let insts: &[Idx<Inst>] = &self.func.blocks[bb].insts;
         let tail = self.tail_forwards[raw(bb) as usize].as_ref();
         let emitted_len = tail.map_or(insts.len(), |tail| tail.first_suppressed);
+        // Kills are written before the next statement, so the ones after the
+        // last statement of a returning block are dropped: `return` (and a
+        // tail call, which replaces the frame) drops every slot itself.
+        let returns = tail.is_some()
+            || matches!(self.func.blocks[bb].term, Term::Return(_) | Term::Unreachable);
+        // In a returning block, only a statement that may call can expose a
+        // stale slot to an exit; kills past the last such statement are dropped.
+        let last_impure = if returns {
+            insts[..emitted_len]
+                .iter()
+                .rposition(|&id| {
+                    self.emits_statement(id) && !regalloc::statement_is_pure(self.func, &self.inlinable, id)
+                })
+                .map(|i| insts[i])
+        } else {
+            None
+        };
+        let mut live_region = !returns || last_impure.is_some();
+        // Indexed rather than borrowed: `emit_inst` needs `&mut self`.
+        let mut pending: Option<Idx<Inst>> = None;
+        let mut first = true;
         for &id in &insts[..emitted_len] {
             if self.suppressed[raw(id) as usize] {
                 continue;
             }
+            if self.emits_statement(id) {
+                if live_region {
+                    self.write_pending_kills(out, bb, first, pending);
+                }
+                first = false;
+                pending = Some(id);
+            }
             self.emit_inst(out, id);
+            if Some(id) == last_impure {
+                live_region = !returns;
+            }
+        }
+        if live_region {
+            self.write_pending_kills(out, bb, first, pending);
         }
         if let Some(tail) = tail {
             self.emit_tail_forward(out, tail);
@@ -2480,6 +2601,9 @@ impl Emitter<'_> {
         let limit = if inclusive { hi } else { format!("{hi} - 1") };
 
         self.emitted[raw(header) as usize] = true;
+        // Dead on entry to the header is dead for the whole loop unless
+        // redefined, so the header's kills go once, above the `for`.
+        self.write_kills(out, &self.kills.at_entry[raw(header) as usize]);
         let _ = writeln!(out, "  for {slot_name} = {slot_name}, {limit} do");
         // Body-scoped temp registers: declared INSIDE the `for` block, above the
         // loop-control slots, so LuaJIT's snapshot liveness can prune them at
@@ -2517,6 +2641,7 @@ impl Emitter<'_> {
         out.push_str("  ::bb");
         push_uint(out, self.func.emit_block_id(latch));
         out.push_str("::\n");
+        self.write_kills(out, &self.kills.at_entry[raw(latch) as usize]);
         out.push_str("  end\n");
         out.push_str("  goto bb");
         push_uint(out, self.func.emit_block_id(exit));
@@ -3558,7 +3683,11 @@ impl Emitter<'_> {
                     self.write_opnd(out, a);
                     out.push_str(", ");
                     self.write_opnd(out, b);
-                    out.push_str(")\n  goto bb");
+                    out.push_str(")\n");
+                    // The arm blocks are skipped, so their entry kills are too;
+                    // what dies between here and the join is killed here.
+                    self.write_kills(out, &self.kills.on_edge(bb, join));
+                    out.push_str("  goto bb");
                     push_uint(out, self.func.emit_block_id(join));
                     out.push('\n');
                     return;

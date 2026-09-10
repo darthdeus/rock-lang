@@ -1149,3 +1149,68 @@ fn filter_take_while_mixed_chain_is_forl() {
         "filter+take_while chain must recover a numeric `for`:\n{lua}"
     );
 }
+
+/// A register or cell local is assigned `nil` right after its last use, so a
+/// LuaJIT exit snapshot taken later in the parent trace carries it as a
+/// constant instead of a parent SLOAD that needs a register at the side-trace
+/// head (`benchmarks/luajit/trace-aborts/calleekill.lua`). A local still live
+/// across the branch is untouched.
+#[test]
+fn dead_locals_are_nil_killed_after_their_last_use() {
+    let lua = emit_clean(
+        "fn probe(a: int, b: int) -> int { let s = a * b; let t = s + s; if t + 1 > 10 { return t }; return 0 }",
+        "probe",
+    );
+    let lines: Vec<&str> = lua.lines().map(str::trim).collect();
+    let at = |needle: &str| {
+        lines
+            .iter()
+            .position(|l| *l == needle)
+            .unwrap_or_else(|| panic!("missing `{needle}` in:\n{lua}"))
+    };
+    let product = at("r0 = c0 * c1");
+    let double = at("r0 = r0 + r0");
+    let branch = lines
+        .iter()
+        .position(|l| l.starts_with("if "))
+        .unwrap_or_else(|| panic!("missing branch in:\n{lua}"));
+    // `c1` (param `b`) dies at the product: killed before the next statement.
+    let kill_b = at("c1 = nil");
+    assert!(product < kill_b && kill_b < double, "{lua}");
+    // `r0` is live across the branch (`t`): no kill between its def and the `if`.
+    assert!(
+        !lines[double..branch].contains(&"r0 = nil"),
+        "live register killed before the branch:\n{lua}"
+    );
+    // A kill immediately before a plain `return` buys nothing (RET drops the
+    // frame): the load of `t` into the return register is followed by no kill.
+    let ret_load = at("r0 = c0");
+    assert_eq!(lines[ret_load + 1], "do return r0 end", "{lua}");
+}
+
+/// A register declared inside a `for` block (a loop-scoped color) is only ever
+/// killed inside that block: a kill at the loop's exit label would write a
+/// global of the same name.
+#[test]
+fn loop_scoped_registers_are_never_killed_outside_their_loop() {
+    let lua = emit_clean(
+        "fn probe(v: [int], target: int) -> int { let n = 0; for i in 0..v.len() { let x = v[i] * 2; let y = x + 1; n = n + y; if x > target { break } }; return n }",
+        "probe",
+    );
+    let lines: Vec<&str> = lua.lines().map(str::trim).collect();
+    let for_line = lines.iter().position(|l| l.starts_with("for ")).unwrap_or_else(|| panic!("no for:\n{lua}"));
+    let inner_decl = lines[for_line + 1];
+    assert!(inner_decl.starts_with("local r"), "loop-scoped registers expected right after the for:\n{lua}");
+    let end_line = lines.iter().rposition(|l| *l == "end").unwrap();
+    let end_line = lines[..end_line].iter().rposition(|l| *l == "end").unwrap_or_else(|| panic!("no loop end:\n{lua}"));
+    let scoped: Vec<&str> = inner_decl["local ".len()..].split(", ").collect();
+    for name in scoped {
+        let kill = format!("{name} = nil");
+        for (i, l) in lines.iter().enumerate() {
+            if *l == kill {
+                assert!(for_line < i && i < end_line, "loop-scoped `{kill}` outside its for block at line {i}:\n{lua}");
+            }
+        }
+    }
+    assert!(lines.iter().any(|l| l.ends_with(" = nil")), "no kills emitted at all:\n{lua}");
+}
