@@ -457,6 +457,19 @@ fn runtime_prelude() -> &'static str {
     //      100 on every metric without the curve flattening, so this is a
     //      conservative pick rather than a tuned one. ROCK_JIT_HOTEXIT
     //      overrides it, so a regression reverts without a rebuild.
+    //      `maxtrace` is 32000 (LuaJIT default 1000, previously 4000 here).
+    //      A MAG combat session compiles ~24,600 traces; at 4000 the trace
+    //      array filled six times per benchmark run and every fill flushed
+    //      the whole cache -- all compiled code, every side-exit counter and
+    //      every abort penalty -- so the working set was re-recorded from
+    //      scratch six times. At 32000 the benchmark never flushes: aborts
+    //      11.1-11.5k -> 3.9k, mean frame 7.1 -> 4.7-5.1 ms, frames over
+    //      16.7 ms 37-39 -> 3-4, two interleaved pairs, peak RSS unchanged.
+    //      The trace array is 16 bytes per slot, so the fixed cost is 512 KB.
+    //      ROCK_JIT_MAXTRACE overrides it. `maxirconst` stays at LuaJIT's 500
+    //      (ROCK_JIT_MAXIRCONST): every "trace too long" in the census is the
+    //      constant limit, not maxrecord, but raising it only converts the
+    //      aborts into tail-call unroll aborts at the same starts.
     //      `hotloop` and `loopunroll` stay at LuaJIT's defaults (56, 15) but
     //      are exposed as ROCK_JIT_HOTLOOP / ROCK_JIT_LOOPUNROLL: MAG's inner
     //      loops (glyphs per string, points per ribbon) run fewer than 56
@@ -494,7 +507,7 @@ fn runtime_prelude() -> &'static str {
 }
 
 const PRELUDE_TEMPLATE: &str =
-    r#"if jit and jit.opt then local __mc = tonumber(os.getenv("ROCK_JIT_MCODE_KB") or "") or (jit.arch == "arm64" and 16384 or 65536) local __he = tonumber(os.getenv("ROCK_JIT_HOTEXIT") or "") or 100 local __hl = tonumber(os.getenv("ROCK_JIT_HOTLOOP") or "") or 56 local __lu = tonumber(os.getenv("ROCK_JIT_LOOPUNROLL") or "") or 15 jit.opt.start("maxmcode=" .. __mc, "sizemcode=" .. __mc, "maxtrace=4000", "maxrecord=32000", "maxsnap=4000", "hotexit=" .. __he, "hotloop=" .. __hl, "loopunroll=" .. __lu) end
+    r#"if jit and jit.opt then local __mc = tonumber(os.getenv("ROCK_JIT_MCODE_KB") or "") or (jit.arch == "arm64" and 16384 or 65536) local __he = tonumber(os.getenv("ROCK_JIT_HOTEXIT") or "") or 100 local __hl = tonumber(os.getenv("ROCK_JIT_HOTLOOP") or "") or 56 local __lu = tonumber(os.getenv("ROCK_JIT_LOOPUNROLL") or "") or 15 local __mt = tonumber(os.getenv("ROCK_JIT_MAXTRACE") or "") or 32000 local __mk = tonumber(os.getenv("ROCK_JIT_MAXIRCONST") or "") or 500 jit.opt.start("maxmcode=" .. __mc, "sizemcode=" .. __mc, "maxtrace=" .. __mt, "maxrecord=32000", "maxsnap=4000", "maxirconst=" .. __mk, "hotexit=" .. __he, "hotloop=" .. __hl, "loopunroll=" .. __lu) end
 if not _G.ffi then _G.ffi = require("ffi") end
 if not _G.__ROCK_C_STRUCT then _G.__ROCK_C_STRUCT = {} end
 if not _G.__ROCK_TYPE_TABLE then _G.__ROCK_TYPE_TABLE = {} end
@@ -1864,7 +1877,7 @@ mod tests {
     #[test]
     fn runtime_prelude_keeps_the_mag_trace_working_set() {
         let prelude = super::runtime_prelude();
-        for knob in ["maxtrace=4000", "maxrecord=32000", "maxsnap=4000"] {
+        for knob in ["\"maxtrace=\" .. __mt", "maxrecord=32000", "maxsnap=4000", "\"maxirconst=\" .. __mk"] {
             assert!(prelude.contains(knob), "runtime prelude stopped setting {knob}");
         }
         // One block, not several: a trace must fit a single `sizemcode` area,
