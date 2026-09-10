@@ -734,6 +734,7 @@ fn do_run_named_sims_recorded(
     let (wire_names, env_by_wire, mut stone) = recorder.phase("compile_and_discover", || {
         compile_sims(backend, project_path.clone(), PathBuf::from(&output))
     })?;
+    emit_bytecode_image(Path::new(&output));
     let entry_ids = recorder.plan_entries(names);
     sim_spawn_barrier();
 
@@ -1000,6 +1001,7 @@ fn do_run_all_sims_recorded(
     let (wire_names, env_by_wire, mut stone) = recorder.phase("compile_and_discover", || {
         compile_sims(backend, project_path.clone(), PathBuf::from(&output))
     })?;
+    emit_bytecode_image(Path::new(&output));
     sim_spawn_barrier();
     if wire_names.is_empty() {
         return Err(anyhow!("no @sim coroutines found in project `{project}`"));
@@ -1361,6 +1363,7 @@ pub fn do_run_allocation_census(
     let output = out_dir.path().to_string_lossy().into_owned();
     let (wire_names, env_by_wire, mut stone) =
         compile_sims(backend, project_path, PathBuf::from(&output))?;
+    emit_bytecode_image(Path::new(&output));
     sim_spawn_barrier();
 
     let selected = if names.is_empty() {
@@ -2329,6 +2332,52 @@ fn resolve_jobs(requested: Option<usize>, update_snapshots: bool) -> usize {
     requested.unwrap_or(DEFAULT_SIM_JOBS).clamp(1, available.max(1))
 }
 
+/// Dump the compiled `main.lua` in `output` to a LuaJIT bytecode image beside
+/// it, once per invocation, so every worker skips the source parse.
+///
+/// Parsing the 48MB `main.lua` costs a child ~300ms of its ~1.1s boot, and a
+/// full run boots ~150 children from the same file; the dump costs the parent
+/// one parse (~0.4s). Best-effort by design: a failed dump is logged and the
+/// workers run the source file, which is exactly what they ran before. A
+/// partial image is removed so `worker_chunk_path` cannot pick it up.
+fn emit_bytecode_image(output: &Path) {
+    let lua_file = output.join(rock_host::project::MAIN_LUA_FILENAME);
+    let bytecode = output.join(rock_host::project::MAIN_BYTECODE_FILENAME);
+    let started = std::time::Instant::now();
+    let result = rock_host::project::build_luajit_bytecode_command(&lua_file, &bytecode).output();
+    let failure = match result {
+        Ok(out) if out.status.success() => None,
+        Ok(out) => Some(String::from_utf8_lossy(&out.stderr).trim().to_string()),
+        Err(e) => Some(e.to_string()),
+    };
+    match failure {
+        None => log::debug!(target: "SIM",
+            "bytecode image `{}` written in {}ms", bytecode.display(),
+            started.elapsed().as_millis()),
+        Some(why) => {
+            log::warn!(target: "SIM",
+                "bytecode image not written, workers boot from source `{}`: {}",
+                lua_file.display(), why);
+            let _ = std::fs::remove_file(&bytecode);
+        }
+    }
+}
+
+/// The chunk a child boots from: the bytecode image when one exists, except for
+/// the reload lane, which must keep the source file. `check_hot_reload`
+/// derives the overlay path by replacing `main.lua` in the running script's
+/// own path (`stone/engine/hot_reload.rock`), and `read_chunk_source_dir`
+/// reads line 1 of the chunk as text to decide whether it is this game's;
+/// neither question has an answer against a bytecode image.
+fn worker_chunk_path(output: &Path, reload: bool) -> PathBuf {
+    let main = output.join(rock_host::project::MAIN_LUA_FILENAME);
+    if reload {
+        return main;
+    }
+    let bytecode = output.join(rock_host::project::MAIN_BYTECODE_FILENAME);
+    if bytecode.is_file() { bytecode } else { main }
+}
+
 /// Whether a sim belongs to the exclusive reload lane.
 ///
 /// Reload sims drive `SkullStone::apply_edit` against the one live session and
@@ -3073,7 +3122,8 @@ fn run_worker(
         .map(|(k, v)| (k.clone(), v.replace("$OUT", &out_str)))
         .collect();
 
-    let lua_file = std::path::PathBuf::from(output).join(rock_host::project::MAIN_LUA_FILENAME);
+    let reload = parts.iter().any(|p| is_reload_lane(&p.env));
+    let lua_file = worker_chunk_path(Path::new(output), reload);
     let mut cmd = rock_host::project::build_luajit_command(&lua_file, &[]);
     // `ROCK_RUN_SIM` / `OUT` / `FRAME_COUNT` carry the FIRST entry: they are read
     // during boot (`sim_mode_active()` gates audio, the screenshot helper reads
@@ -5675,6 +5725,38 @@ mod tests {
         let mut mixed = pair("ROCK_TEST_SEED", "42");
         mixed.extend(pair("STONE_HOT_RELOAD", "1"));
         assert!(is_reload_lane(&mixed));
+    }
+
+    /// The reload lane's exclusion from the bytecode image is a correctness
+    /// requirement, not a tuning choice: `check_hot_reload` derives the overlay
+    /// path from the running script's own path by replacing `main.lua` with
+    /// `incremental.lua` (`stone/engine/hot_reload.rock:87`), and
+    /// `read_chunk_source_dir` (`:43`) reads line 1 of a chunk AS TEXT to decide
+    /// whether it belongs to this game. Both questions are unanswerable against
+    /// a bytecode image, so a reload child booted from one would silently stop
+    /// watching -- a reload sim would pass every assertion and observe nothing.
+    #[test]
+    fn only_a_non_reload_worker_boots_from_the_bytecode_image() {
+        let dir = std::env::temp_dir().join(format!("rock-chunk-path-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let main = dir.join(rock_host::project::MAIN_LUA_FILENAME);
+        let bytecode = dir.join(rock_host::project::MAIN_BYTECODE_FILENAME);
+        std::fs::write(&main, "-- source").unwrap();
+
+        // No image yet: both lanes run the source file. The fallback is what
+        // makes the dump best-effort rather than a new failure mode.
+        assert_eq!(worker_chunk_path(&dir, false), main);
+        assert_eq!(worker_chunk_path(&dir, true), main);
+
+        std::fs::write(&bytecode, "-- image").unwrap();
+        assert_eq!(worker_chunk_path(&dir, false), bytecode);
+        assert_eq!(
+            worker_chunk_path(&dir, true),
+            main,
+            "a reload child must keep the source path it derives the overlay from"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// The job count is a safety bound, not a preference: it must never exceed
