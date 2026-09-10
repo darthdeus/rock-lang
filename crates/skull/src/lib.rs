@@ -1837,10 +1837,45 @@ mod tests {
         compile_source(src).unwrap_or_else(|e| panic!("skull compile failed: {}", e.message))
     }
 
+    /// The budget itself is tuning and moves with measurement, so this pins the
+    /// shape and the floor rather than a literal. LuaJIT's own defaults (512 KB
+    /// total, 32 KB blocks) flush the trace arena thousands of times in a real
+    /// MAG session; 8 MB still flushed it 31 times in 60 s of play. Neither
+    /// architecture may regress below that. See docs/trace-pressure-work-plan.md.
     #[test]
     fn runtime_prelude_keeps_the_mag_trace_working_set() {
         let prelude = super::runtime_prelude();
-        assert!(prelude.contains("maxmcode=8192\", \"sizemcode=8192"));
+        for knob in ["maxtrace=4000", "maxrecord=32000", "maxsnap=4000"] {
+            assert!(prelude.contains(knob), "runtime prelude stopped setting {knob}");
+        }
+        // One block, not several: a trace must fit a single `sizemcode` area,
+        // and on arm64 macOS dyld only leaves room for the first one near the
+        // VM. Driving both from one value is what guarantees that.
+        assert!(
+            prelude.contains("\"maxmcode=\" .. __mc, \"sizemcode=\" .. __mc"),
+            "mcode max and size must come from one value"
+        );
+        assert!(
+            prelude.contains("ROCK_JIT_MCODE_KB"),
+            "the mcode budget must stay sweepable without a rebuild"
+        );
+        let picked = prelude
+            .split("jit.arch == \"arm64\" and ")
+            .nth(1)
+            .expect("prelude no longer selects an mcode budget by architecture");
+        let (arm64, rest) = picked
+            .split_once(" or ")
+            .expect("arch-selected mcode budget is not an `arm64 and A or B` pick");
+        let x64 = rest
+            .split(')')
+            .next()
+            .expect("arch-selected mcode budget has no x64 arm");
+        for (arch, kb) in [("arm64", arm64.trim()), ("x64", x64.trim())] {
+            let kb: u32 = kb
+                .parse()
+                .unwrap_or_else(|_| panic!("{arch} mcode budget is not a literal KB count: {kb:?}"));
+            assert!(kb >= 8192, "{arch} mcode budget {kb} KB is below the 8 MB floor");
+        }
     }
 
     #[test]
