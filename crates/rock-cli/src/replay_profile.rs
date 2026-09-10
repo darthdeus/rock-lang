@@ -33,6 +33,10 @@ struct PlaybackRow {
     stream_upload_bytes: u64,
     streamed_vertices: u64,
     sections: Vec<PlaybackSection>,
+    image_replay_wait_us: u64,
+    image_upload_calls: u64,
+    image_upload_bytes: u64,
+    image_load_calls: u64,
 }
 
 fn parse_usize(value: &str, field: &str) -> Result<usize> {
@@ -89,7 +93,11 @@ fn parse_wire_row(line: &str) -> Result<PlaybackRow> {
         bail!("malformed replay profile row");
     }
     let section_count = parse_usize(fields[16], "section count")?;
-    if section_count > 12 || fields.len() != 17 + section_count * 3 {
+    if section_count > 12 {
+        bail!("malformed replay profile section population");
+    }
+    let tail = 17 + section_count * 3;
+    if fields.len() != tail && fields.len() != tail + 4 {
         bail!("malformed replay profile section population");
     }
     let gc = match fields[9] {
@@ -99,7 +107,7 @@ fn parse_wire_row(line: &str) -> Result<PlaybackRow> {
     };
     let mut names = HashSet::new();
     let mut sections = Vec::with_capacity(section_count);
-    for section in fields[17..].chunks_exact(3) {
+    for section in fields[17..tail].chunks_exact(3) {
         let name = decode_hex(section[0], "section name")?;
         let calls = parse_u64(section[2], "section calls")?;
         if name.is_empty() || calls == 0 || !names.insert(name.clone()) {
@@ -128,6 +136,10 @@ fn parse_wire_row(line: &str) -> Result<PlaybackRow> {
         stream_upload_bytes: parse_u64(fields[14], "stream upload bytes")?,
         streamed_vertices: parse_u64(fields[15], "streamed vertices")?,
         sections,
+        image_replay_wait_us: if fields.len() > tail { parse_u64(fields[tail], "image replay wait")? } else { 0 },
+        image_upload_calls: if fields.len() > tail { parse_u64(fields[tail + 1], "image upload calls")? } else { 0 },
+        image_upload_bytes: if fields.len() > tail { parse_u64(fields[tail + 2], "image upload bytes")? } else { 0 },
+        image_load_calls: if fields.len() > tail { parse_u64(fields[tail + 3], "image load calls")? } else { 0 },
     })
 }
 
@@ -309,6 +321,10 @@ pub(crate) fn run(
                         "logic_us": row.logic_us,
                         "render_us": row.render_us,
                         "present_us": row.present_us,
+                        "image_replay_wait_us": row.image_replay_wait_us,
+                        "image_upload_calls": row.image_upload_calls,
+                        "image_upload_bytes": row.image_upload_bytes,
+                        "image_load_calls": row.image_load_calls,
                     },
                     "input": {
                         "pressed_keys": set_difference(&current.keys, previous_keys),
@@ -426,10 +442,22 @@ mod tests {
     }
 
     #[test]
+    fn wire_parser_preserves_image_work_and_wait_attribution() {
+        let legacy = "ROCK_REPLAY_PROFILE_ROW 2 616263 10 2 7 1 100 20 0 0 3 1 2 48 12 0";
+        assert_eq!(parse_wire_row(legacy).unwrap().image_replay_wait_us, 0);
+        let row = parse_wire_row(&format!("{legacy} 11 2 4096 3")).unwrap();
+        assert_eq!((row.image_replay_wait_us, row.image_upload_calls,
+            row.image_upload_bytes, row.image_load_calls), (11, 2, 4096, 3));
+        assert!(parse_wire_row(&format!("{legacy} 11 2 4096")).is_err());
+        assert!(parse_wire_row(&format!("{legacy} -1 2 4096 3")).is_err());
+    }
+
+    #[test]
     fn zero_runs_and_future_replay_versions_fail_closed() {
         assert!(validate_runs(0).is_err());
         assert!(validate_runs(1).is_ok());
-        assert!(ReplayReport::parse("STONE_REPLAY 15").is_err());
+        assert!(ReplayReport::parse("STONE_REPLAY 17").unwrap_err().to_string()
+            .contains("unsupported replay version 17"));
         assert!(parse_range("0-0", 0).is_err());
     }
 }

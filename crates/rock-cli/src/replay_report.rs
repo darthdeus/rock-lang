@@ -12,6 +12,73 @@ pub(crate) struct ReplayInput {
     pub(crate) buttons: Vec<i64>,
     pub(crate) pad_buttons: Vec<String>,
     pub(crate) pad_axes: Vec<(String, String)>,
+    pub(crate) input_details: Option<RecordedInputDetails>,
+    pub(crate) image_publications: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct RecordedInputDetails {
+    pressed_keys: Vec<String>,
+    repeated_keys: Vec<String>,
+    pressed_buttons: Vec<i64>,
+    released_buttons: Vec<i64>,
+}
+
+// Mirrors the runtime's v15 input projection schema; reject a corrupt field
+// before replay-profile can treat a partially decoded observation as complete.
+fn parse_input_details(fields: &[&str], line: usize) -> Result<RecordedInputDetails> {
+    if fields.len() != 14 || !matches!(fields[13], "0" | "1") {
+        bail!("line {line}: malformed input detail row");
+    }
+    let mut details = RecordedInputDetails::default();
+    for index in 1..=11 {
+        let field = fields[index + 1];
+        if field == "-" { continue; }
+        let mut seen = HashSet::new();
+        for entry in field.split(',') {
+            let (encoded, value) = entry.split_once('=').with_context(||
+                format!("line {line}: malformed input detail entry"))?;
+            let key = if index == 3 || index == 4 {
+                let key = parse_u64(encoded, line, "input mouse button")?;
+                if key == 0 || key > 255 || !encoded.bytes().all(|b| b.is_ascii_digit()) {
+                    bail!("line {line}: invalid input mouse button");
+                }
+                key.to_string()
+            } else {
+                let key = decode_hex(encoded, line, "input identity")?;
+                if key.is_empty() || key.bytes().any(|b| b == 0 || b.is_ascii_whitespace()) {
+                    bail!("line {line}: invalid input identity");
+                }
+                key
+            };
+            if !seen.insert(key.clone()) { bail!("line {line}: duplicate input identity"); }
+            match index {
+                8 => {
+                    let modifier = parse_u64(value, line, "input modifier")?;
+                    if modifier > 65535 || !value.bytes().all(|b| b.is_ascii_digit()) {
+                        bail!("line {line}: invalid input modifier");
+                    }
+                }
+                11 => {
+                    let motion: f64 = value.parse().with_context(||
+                        format!("line {line}: invalid input axis motion"))?;
+                    if !motion.is_finite() || !(-1.0..=1.0).contains(&motion) {
+                        bail!("line {line}: invalid input axis motion");
+                    }
+                }
+                _ if value != "1" => bail!("line {line}: invalid input edge flag"),
+                _ => {}
+            }
+            match index {
+                1 => details.pressed_keys.push(key),
+                2 => details.repeated_keys.push(key),
+                3 => details.pressed_buttons.push(key.parse().unwrap()),
+                4 => details.released_buttons.push(key.parse().unwrap()),
+                _ => {}
+            }
+        }
+    }
+    Ok(details)
 }
 
 #[derive(Debug, Clone)]
@@ -181,7 +248,7 @@ impl ReplayReport {
             .context("not a replay log")?
             .parse::<u32>()
             .context("malformed replay version")?;
-        if !(1..=14).contains(&version) {
+        if !(1..=16).contains(&version) {
             bail!("unsupported replay version {version}");
         }
         let mut report = Self {
@@ -232,6 +299,8 @@ impl ReplayReport {
                     let pad_buttons = fields.get(8).copied().unwrap_or("-");
                     let pad_axes = fields.get(9).copied().unwrap_or("-");
                     report.inputs.push(ReplayInput {
+                        input_details: None,
+                        image_publications: None,
                         mouse_x: fields[2].to_string(),
                         mouse_y: fields[3].to_string(),
                         wheel: fields[4].parse::<i64>().with_context(|| {
@@ -252,6 +321,35 @@ impl ReplayReport {
                             Ok((axis.to_string(), magnitude.to_string()))
                         })?,
                     });
+                }
+                "a" => {
+                    if report.version < 15 { bail!("line {line_number}: input details require v15"); }
+                    let details = parse_input_details(&fields, line_number)?;
+                    let tick = parse_u64(fields[1], line_number, "input detail tick")?;
+                    if !fields[1].bytes().all(|b| b.is_ascii_digit())
+                        || report.inputs.is_empty() || tick != (report.inputs.len() - 1) as u64 {
+                        bail!("line {line_number}: orphaned input detail row");
+                    }
+                    let input = report.inputs.last_mut().unwrap();
+                    if input.input_details.replace(details).is_some() {
+                        bail!("line {line_number}: duplicate input detail row");
+                    }
+                }
+                "u" => {
+                    if report.version < 16 || fields.len() != 3 {
+                        bail!("line {line_number}: malformed image publication row");
+                    }
+                    let tick = parse_u64(fields[1], line_number, "image publication tick")?;
+                    if !fields[1].bytes().all(|b| b.is_ascii_digit())
+                        || report.inputs.is_empty() || tick != (report.inputs.len() - 1) as u64 {
+                        bail!("line {line_number}: orphaned image publication row");
+                    }
+                    let data = decode_hex(fields[2], line_number, "image publications")?;
+                    rock_replay_protocol::validate_image_events(&data)
+                        .map_err(|e| anyhow::anyhow!("line {line_number}: {e}"))?;
+                    if report.inputs.last_mut().unwrap().image_publications.replace(data).is_some() {
+                        bail!("line {line_number}: duplicate image publication row");
+                    }
                 }
                 "p" => {
                     if fields.len() != 7 {
@@ -390,6 +488,12 @@ impl ReplayReport {
             }
         }
 
+        if report.version >= 16 && report.inputs.iter().any(|input| input.image_publications.is_none()) {
+            bail!("v16 replay is missing image publications");
+        }
+        if report.version >= 15 && report.inputs.iter().any(|input| input.input_details.is_none()) {
+            bail!("v15 replay is missing input details");
+        }
         if report.version >= 12 && report.source.is_empty() {
             bail!("v12+ replay is missing its project source");
         }
@@ -427,10 +531,22 @@ impl ReplayReport {
             let previous = row.ordinal.checked_sub(1).and_then(|i| self.inputs.get(i));
             let previous_keys = previous.map(|input| input.keys.as_slice()).unwrap_or(&[]);
             let previous_buttons = previous.map(|input| input.buttons.as_slice()).unwrap_or(&[]);
-            let pressed_keys = difference(&current.keys, previous_keys);
-            let released_keys = difference(previous_keys, &current.keys);
-            let pressed_buttons = difference(&current.buttons, previous_buttons);
-            let released_buttons = difference(previous_buttons, &current.buttons);
+            let mut pressed_keys = difference(&current.keys, previous_keys);
+            let mut released_keys = difference(previous_keys, &current.keys);
+            let mut pressed_buttons = difference(&current.buttons, previous_buttons);
+            let mut released_buttons = difference(previous_buttons, &current.buttons);
+            if let Some(details) = &current.input_details {
+                pressed_keys.retain(|key| !details.repeated_keys.contains(key));
+                pressed_keys.extend(details.pressed_keys.iter().cloned());
+                released_keys.extend(details.pressed_keys.iter()
+                    .filter(|key| !current.keys.contains(key)).cloned());
+                pressed_buttons.extend(&details.pressed_buttons);
+                released_buttons.extend(&details.released_buttons);
+                pressed_keys.sort(); pressed_keys.dedup();
+                released_keys.sort(); released_keys.dedup();
+                pressed_buttons.sort(); pressed_buttons.dedup();
+                released_buttons.sort(); released_buttons.dedup();
+            }
             let phases = [
                 ("logic", row.logic_us),
                 ("render", row.render_us),
