@@ -1965,76 +1965,21 @@ fn run_specs_worker_mode(
         }
     }
 
-    // The reload lane gets a PRIVATE copy of the compiled game. A reload sim
-    // drives `SkullStone::apply_edit`, which writes the overlay beside the
-    // `main.lua` it is handed and rewrites that `main.lua` outright for an edit
-    // that does not route body-only. Both files are per-invocation, so with the
-    // shared directory the lane could only run after every other child had
-    // exited. With its own directory the only thing it still serializes on is
-    // the one session, so it runs as one lane INSIDE the pool, from the start,
-    // instead of as a serial tail after the pool drains (measured: seven
-    // reload sims paying 7.9s of boot for 1.35s of work, single-file, at the
-    // end of every full run). Ordinary children never read the overlay:
-    // `check_hot_reload` returns before touching disk unless
-    // `STONE_HOT_RELOAD=1`, which only the reload lane declares.
-    let reload_output: Option<String> = if exclusive.is_empty() {
-        None
-    } else {
-        let dir = Path::new(output).join("reload");
-        fs_err::create_dir_all(&dir)?;
-        fs_err::copy(
-            Path::new(output).join(rock_host::project::MAIN_LUA_FILENAME),
-            dir.join(rock_host::project::MAIN_LUA_FILENAME),
-        )?;
-        Some(dir.to_string_lossy().into_owned())
-    };
-    let stone = Mutex::new(stone);
-
-    // One pool over three kinds of work: a recovering worker queue, an isolated
-    // entry that needs no session, and the reload lane, which holds the session
-    // for its whole serial run. The reload lane is queued FIRST so its serial
-    // run overlaps the pool's longest stretch rather than extending the end.
+    // One pool over both kinds of work: a recovering worker queue, and an
+    // isolated entry that needs no session.
     #[derive(Clone, Copy)]
     enum Lane<'a> {
-        Reload(&'a [(usize, String)]),
         Worker(&'a [usize]),
         Isolated(usize),
     }
-    let work: Vec<Lane> = (!exclusive.is_empty())
-        .then_some(Lane::Reload(exclusive.as_slice()))
-        .into_iter()
-        .chain(lanes.iter().map(|l| Lane::Worker(l.as_slice())))
+    let work: Vec<Lane> = lanes
+        .iter()
+        .map(|l| Lane::Worker(l.as_slice()))
         .chain(poolable.iter().map(|(i, _)| Lane::Isolated(*i)))
         .collect();
 
     let mut collected: Vec<(usize, SimSummary)> = Vec::new();
     for (_, r) in run_bounded(jobs, work.len(), |w| match work[w] {
-        Lane::Reload(entries) => {
-            let reload_output = reload_output
-                .as_deref()
-                .ok_or_else(|| anyhow!("reload lane scheduled without its private output"))?;
-            let mut stone = stone
-                .lock()
-                .map_err(|_| anyhow!("reload session lock poisoned"))?;
-            let mut results = Vec::with_capacity(entries.len());
-            for (i, _) in entries {
-                let (_, summary) = run_named_entry(
-                    project,
-                    &specs[*i],
-                    quiet,
-                    true,
-                    update_snapshots,
-                    reload_output,
-                    env_by_wire,
-                    Some(&mut **stone),
-                    None,
-                    recorder,
-                    entry_ids.and_then(|ids| ids.get(*i)).copied(),
-                )?;
-                results.push((*i, summary));
-            }
-            Ok(results)
-        }
         Lane::Worker(lane) => {
             let lane_specs: Vec<String> = lane.iter().map(|&i| specs[i].clone()).collect();
             // `run_specs_recovering` is positional, so its results line up with
@@ -2085,6 +2030,25 @@ fn run_specs_worker_mode(
         collected.extend(r?);
     }
     for (i, summary) in collected {
+        slots[i] = Some(summary);
+    }
+
+    // The hot-reload lane, strictly after the pool has drained: it mutates the
+    // one `SkullStone` session and the one `incremental.lua` overlay.
+    for &(i, _) in &exclusive {
+        let (_, summary) = run_named_entry(
+            project,
+            &specs[i],
+            quiet,
+            true,
+            update_snapshots,
+            output,
+            env_by_wire,
+            Some(&mut *stone),
+            None,
+            recorder,
+            entry_ids.and_then(|ids| ids.get(i)).copied(),
+        )?;
         slots[i] = Some(summary);
     }
 
@@ -2330,8 +2294,8 @@ fn revert_reload_edits(
 /// Whether a named entry belongs to the exclusive reload lane.
 ///
 /// An entry is a comma-chain of parts sharing one `$OUT`; if ANY part opts into
-/// the reload lane the whole entry belongs to it, because the parts run in one
-/// sequence and the session must not be driven by two children at once.
+/// the reload lane the whole entry is exclusive, because the parts run in one
+/// sequence and the session must not be live while another child exists.
 fn entry_is_reload_lane(
     chain_spec: &str,
     env_by_wire: &HashMap<String, Vec<(String, String)>>,
@@ -2416,9 +2380,9 @@ fn worker_chunk_path(output: &Path, reload: bool) -> PathBuf {
 
 /// Whether a sim belongs to the exclusive reload lane.
 ///
-/// Reload sims drive `SkullStone::apply_edit` against the one live session,
-/// so they run one at a time, in a lane with its own copy of the compiled
-/// output. Opting in is `@sim_env("STONE_HOT_RELOAD", "1")` -- the same switch
+/// Reload sims drive `SkullStone::apply_edit` against the one live session and
+/// the one `incremental.lua`, so they cannot share the runner with any other
+/// child. Opting in is `@sim_env("STONE_HOT_RELOAD", "1")` -- the same switch
 /// that makes the child's watcher poll the overlay at all, so a sim that could
 /// observe a reload is exactly a sim that declares this.
 pub fn is_reload_lane(env_pairs: &[(String, String)]) -> bool {
@@ -3104,10 +3068,11 @@ fn run_worker(
         }
     }
 
-    // Overlay handling belongs ONLY to the reload lane. The overlay lives beside
-    // the reload lane's private `main.lua`, ordinary children never read or
-    // write one, and the lane runs its entries one at a time and reverts its
-    // own edits, so nothing stale can survive into the next reload child.
+    // Overlay handling belongs ONLY to the reload lane. The overlay is one file
+    // shared by every child of this invocation, so wiping it here would be a
+    // cross-child mutation the moment ordinary sims run concurrently. Ordinary
+    // children never write it, and the reload lane is exclusive and reverts its
+    // own edits, so nothing stale can survive into an ordinary child.
     //
     // With STONE_HOT_RELOAD=1 the in-game watcher fires on the overlay's FIRST
     // appearance (baseline modtime 0), so a leftover would be dofile'd at
