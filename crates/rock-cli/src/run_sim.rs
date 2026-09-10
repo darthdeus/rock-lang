@@ -2435,16 +2435,18 @@ fn writes_live(buffered: bool) -> bool {
 /// signature two entries must agree on to share a process.
 ///
 /// `FRAME_COUNT` is the entry's runaway bound, carried in the entry plan and
-/// republished by `sim_start_entry` at every boundary. `SIM_DT` and
-/// `SIM_SKIP_RENDER` are read ONCE during boot (`runner_load_sim_entries`), so
-/// they are still boot signature until the worker applies them per entry.
+/// republished by `sim_start_entry` at every boundary. `SIM_DT` travels the
+/// same way, with an explicit empty value for an entry that declares nothing
+/// so the engine default is re-applied rather than a predecessor's value.
+/// `SIM_SKIP_RENDER` is read ONCE during boot (`runner_load_sim_entries`), so
+/// it is still boot signature until the worker applies it per entry.
 ///
 /// `ROCK_MASK_WALL_CLOCK` and `ROCK_DETERMINISTIC_IDS` are owned outright: the
 /// runner publishes its own value for both after `preset_env`, so a declared one
 /// never reaches the child and cannot stand for a difference between two
 /// entries. Splitting a group on an inert value would isolate sims for nothing.
 const RUNNER_OWNED_ENV_KEYS: &[&str] =
-    &["FRAME_COUNT", "ROCK_DETERMINISTIC_IDS", "ROCK_MASK_WALL_CLOCK", "SIM_MANUAL"];
+    &["FRAME_COUNT", "ROCK_DETERMINISTIC_IDS", "ROCK_MASK_WALL_CLOCK", "SIM_DT", "SIM_MANUAL"];
 
 /// Fixed values the runner publishes to EVERY sim child, layered BEFORE
 /// `preset_env` so a declaration still wins.
@@ -3142,6 +3144,16 @@ fn run_worker(
         for (k, v) in per_entry_env_pairs(p) {
             write!(plan_file, "\t{k}\t{v}")?;
         }
+        // Runner-owned, so it is carried for EVERY entry with an explicit
+        // empty value standing for the engine default: `sim_start_entry`
+        // re-applies it at each boundary, and an entry that declares nothing
+        // must not inherit the fixed dt its predecessor declared.
+        let sim_dt = effective_env(&p.env)
+            .into_iter()
+            .find(|(k, _)| k == "SIM_DT")
+            .map(|(_, v)| v)
+            .unwrap_or_default();
+        write!(plan_file, "\tSIM_DT\t{sim_dt}")?;
         writeln!(plan_file)?;
     }
     plan_file.flush()?;
@@ -5983,9 +5995,15 @@ mod tests {
 
         let c = env(&[("FRAME_COUNT", "90"), ("STONE_FX_OFF", "0")]);
         assert_ne!(boot_signature(&a), boot_signature(&c), "a boot-consumed value is not");
-        // SIM_DT and SIM_SKIP_RENDER are read once during boot, so they stay in.
+        // SIM_DT is carried in the entry plan and re-applied by
+        // `sim_start_entry`, so two entries that disagree on it share a boot.
         let d = env(&[("SIM_DT", "0.1")]);
-        assert_eq!(boot_signature(&d), d);
+        let e = env(&[("SIM_DT", "0")]);
+        assert_eq!(boot_signature(&d), boot_signature(&e), "the fixed dt is per entry");
+        assert_eq!(boot_signature(&d), env(&[]), "and an undeclared one shares too");
+        // SIM_SKIP_RENDER is read once during boot, so it stays in.
+        let f = env(&[("SIM_SKIP_RENDER", "0")]);
+        assert_eq!(boot_signature(&f), f);
     }
 
     #[test]
