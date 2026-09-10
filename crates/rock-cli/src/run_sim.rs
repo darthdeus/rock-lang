@@ -2395,11 +2395,16 @@ const RUNNER_BASELINE_ENV: &[(&str, &str)] = &[
 /// boundary is enough is whether the GAME reads that variable live or captures
 /// it into a global during boot. The runner cannot see which, so it must be
 /// told, and the default has to be the safe one: an undeclared `$OUT` key still
-/// isolates. A blanket "all `$OUT` keys are per-entry now" would make MAG's
-/// bindings/layout-history group shareable and silently wrong -- those are read
-/// into globals at boot (`mag/actions.rock:199`, `mag/spellbook.rock:94-95`),
-/// so a per-entry setenv would be accepted and ignored and the second entry
-/// would read and write the FIRST entry's file.
+/// isolates. A blanket "all `$OUT` keys are per-entry now" would still be wrong,
+/// because whether a game reads a variable live is a property of that game at
+/// that revision, not of the runner. MAG's bindings/layout-history group WAS the
+/// standing example of the unsafe half -- read into globals at boot, so a
+/// per-entry setenv was accepted and ignored and the second entry read and wrote
+/// the FIRST entry's file. Those three accessors now read the environment live
+/// (`mag/actions.rock`, `mag/spellbook.rock`), witnessed by
+/// `mag/tests/sims/bindings_path_per_entry.rock`, and the fifteen fixtures
+/// declare the keys here. The rule that made that a fixture-side declaration
+/// rather than a runner-side list is unchanged.
 ///
 /// Symmetric to `SIM_WORKER_ISOLATED`, which is the opt-OUT declared the same
 /// way; both are properties of the fixture, stated at the fixture.
