@@ -141,6 +141,9 @@ pub struct ReplayReport {
     pub(crate) source: String,
     pub(crate) revision: String,
     pub(crate) build: String,
+    /// Recorded desync-checkpoint cadence in ticks; 0 means the recording
+    /// carries no checkpoints, so a divergent playback cannot be detected.
+    pub(crate) checkpoint_interval: usize,
     pub(crate) inputs: Vec<ReplayInput>,
     pub(crate) timings: Vec<ReplayTiming>,
     pub(crate) profiles: HashMap<usize, RecordedProfile>,
@@ -258,6 +261,7 @@ impl ReplayReport {
             source: String::new(),
             revision: String::new(),
             build: String::new(),
+            checkpoint_interval: 0,
             inputs: Vec::new(),
             timings: Vec::new(),
             profiles: HashMap::new(),
@@ -287,6 +291,14 @@ impl ReplayReport {
                     report.revision = decode_hex(fields[1], line_number, "replay revision")?;
                 }
                 "build" if fields.len() == 2 => report.build = fields[1].to_string(),
+                "checkpoint" if fields.len() == 2 => {
+                    report.checkpoint_interval = usize::try_from(
+                        parse_u64(fields[1], line_number, "checkpoint interval")?,
+                    )
+                    .with_context(|| {
+                        format!("line {line_number}: checkpoint interval does not fit usize")
+                    })?;
+                }
                 "t" => {
                     if fields.len() < 8 || fields.len() > 10 {
                         bail!("line {line_number}: malformed replay observation");

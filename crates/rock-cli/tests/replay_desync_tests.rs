@@ -2,8 +2,10 @@
 //! every K ticks the engine hashes each registered global (canonical %a
 //! serialization) and writes per-global `c <tick> <name> <hash>` checkpoint
 //! lines into the replay log. On replay it recomputes and compares; the FIRST
-//! divergent tick + which global diverged is reported and the run exits
-//! nonzero (reject-don't-fall-back, same policy as the log-load errors).
+//! divergent tick + which global diverged is reported and the run CONTINUES.
+//! Divergence is the accepted default -- a replay is re-run to be measured,
+//! and aborting at the first drifted tick throws the measurement away -- so
+//! the tick and the global are the whole product of the detector.
 //!
 //! Heavy: spawns `rock frame` against a compiled game. Excluded from the
 //! default nextest profile (see `.config/nextest.toml`); runs under `-P full`.
@@ -79,7 +81,8 @@ fn clean_roundtrip_with_checkpoints_reports_no_divergence() {
 
 /// Injected divergence: record, flip one recorded checkpoint hash in the log,
 /// replay. The recomputed hash won't match the tampered one, so replay must
-/// exit nonzero and name the tick + global.
+/// name the tick + global -- and still finish, so the run's measurements
+/// survive the report.
 #[test]
 fn injected_checkpoint_divergence_is_detected_and_named() {
     let dir = tempfile::tempdir().expect("dir");
@@ -102,15 +105,20 @@ fn injected_checkpoint_divergence_is_detected_and_named() {
     std::fs::write(&log, lines.join("\n") + "\n").expect("rewrite log");
 
     let rep = run_frame_raw("bitgun", 30, &["--replay", &log_s]);
-    assert!(
-        !rep.status.success(),
-        "an injected checkpoint mismatch must abort the replay\nstderr:\n{}",
-        String::from_utf8_lossy(&rep.stderr)
-    );
     let stderr = String::from_utf8_lossy(&rep.stderr);
+    assert!(
+        rep.status.success(),
+        "an injected checkpoint mismatch must be reported, not abort the run\nstderr:\n{stderr}"
+    );
     assert!(
         stderr.contains("desync") && stderr.contains(&name) && stderr.contains(&format!("tick={tick}")),
         "desync report must name the tick ({tick}) and global ({name})\nstderr:\n{stderr}"
+    );
+    assert_eq!(
+        stderr.matches("desync at tick").count(),
+        1,
+        "only the FIRST divergent tick is reported; a drifted run diverges at every later \
+         checkpoint too and the repeats would bury the answer\nstderr:\n{stderr}"
     );
 }
 

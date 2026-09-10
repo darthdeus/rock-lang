@@ -583,9 +583,6 @@ fn build_all_for_game(game_path: &str) -> Result<()> {
 /// Flight recorder config: always-on record-from-boot for `rock stone`
 /// (docs/replay-scrub-plan.md P3.5). Each recording streams to a timestamped
 /// file in the per-user replay archive, with `last.replay` as a relative symlink.
-/// Checkpoints default OFF for the flight recorder --
-/// playback doesn't need them and each one serializes the whole state; the
-/// K=1..60 desync cadence stays a `rock frame --checkpoint-interval` setting.
 struct FlightRecorder {
     record_path: String,
     build_id: String,
@@ -594,6 +591,39 @@ struct FlightRecorder {
 }
 
 const REPLAY_USAGE_WARN_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+/// Live desync cadence for the flight recorder: one minute of play at 60fps.
+///
+/// A checkpoint canonically serializes and hashes every world-included global,
+/// and that is not cheap at MAG's scale: measured on this machine, one MAG
+/// checkpoint costs ~67ms 60 ticks into a session and ~270-330ms once the world
+/// has grown (900-tick headless recording, `p` rows at ticks 300 and 600 versus
+/// their neighbours). It is a real stall, and it lands in the recorded frame
+/// timing, so the cadence buys drift localization at the price of one visible
+/// hitch per interval. 3600 keeps that under ~0.5% of wall time while still
+/// stamping several checkpoints into any session long enough to benchmark;
+/// STONE_CHECKPOINT_INTERVAL overrides it (0 disables) for a session that must
+/// not be perturbed at all.
+const FLIGHT_CHECKPOINT_INTERVAL: usize = 3600;
+
+fn parse_checkpoint_interval(raw: Option<&str>) -> usize {
+    let Some(raw) = raw else { return FLIGHT_CHECKPOINT_INTERVAL };
+    match raw.trim().parse::<usize>() {
+        Ok(interval) => interval,
+        Err(error) => {
+            log::warn!(
+                target: "STONE",
+                "STONE_CHECKPOINT_INTERVAL is not a tick count ({error}); using {FLIGHT_CHECKPOINT_INTERVAL}"
+            );
+            FLIGHT_CHECKPOINT_INTERVAL
+        }
+    }
+}
+
+fn flight_checkpoint_interval() -> usize {
+    let raw = std::env::var("STONE_CHECKPOINT_INTERVAL").ok();
+    parse_checkpoint_interval(raw.as_deref())
+}
 
 fn replay_state_root() -> Option<std::path::PathBuf> {
     if let Some(root) = std::env::var_os("STONE_REPLAY_ROOT") {
@@ -702,7 +732,7 @@ fn prepare_flight_recorder(
         record_path: record_path.to_string_lossy().into_owned(),
         build_id: artifact_fingerprint.to_string(),
         source: source.to_string(),
-        checkpoint_interval: 0,
+        checkpoint_interval: flight_checkpoint_interval(),
     })
 }
 
@@ -1484,9 +1514,9 @@ mod tests {
     use super::{
         apply_perf_env, apply_run_env, consume_request_file, flight_recorder_for,
         frame_exit_result, frame_watchdog_config, full_reload_requires_restart,
-        prepare_flight_recorder, replay_usage, replay_usage_warning, session_usage,
-        session_usage_warning, FlightRecorder, REPLAY_USAGE_WARN_BYTES,
-        SESSION_USAGE_WARN_BYTES,
+        parse_checkpoint_interval, prepare_flight_recorder, replay_usage, replay_usage_warning,
+        session_usage, session_usage_warning, FlightRecorder, FLIGHT_CHECKPOINT_INTERVAL,
+        REPLAY_USAGE_WARN_BYTES, SESSION_USAGE_WARN_BYTES,
     };
     use crate::watch::is_compiler_source;
     use std::time::Duration;
@@ -1661,7 +1691,7 @@ mod tests {
             record_path: "bitgun/replays/last.replay".into(),
             build_id: "abc123".into(),
             source: "bitgun".into(),
-            checkpoint_interval: 0,
+            checkpoint_interval: FLIGHT_CHECKPOINT_INTERVAL,
         };
         let env_of = |replay: Option<&super::ReplayRequest>| -> std::collections::HashMap<String, String> {
             let mut cmd = std::process::Command::new("true");
@@ -1679,6 +1709,11 @@ mod tests {
         let recording = env_of(None);
         assert_eq!(recording.get("STONE_RECORD").map(String::as_str), Some("bitgun/replays/last.replay"));
         assert_eq!(recording.get("STONE_REPLAY_SOURCE").map(String::as_str), Some("bitgun"));
+        assert_eq!(
+            recording.get("STONE_CHECKPOINT_INTERVAL").map(String::as_str),
+            Some(FLIGHT_CHECKPOINT_INTERVAL.to_string().as_str()),
+            "a live recording must carry its desync cadence into the game process"
+        );
         assert!(!recording.contains_key("STONE_REPLAY"), "live run must not be in replay mode");
 
         // P6 shape-edit restart: a loop-carrying request sets STONE_LOOP_A/B so
@@ -1746,6 +1781,22 @@ mod tests {
         assert_ne!(first.record_path, second.record_path);
         assert_eq!(std::fs::read_link(&last).unwrap(), second_path.file_name().unwrap());
         assert_eq!(first_path.parent(), second_path.parent(), "one logical source owns one archive");
+    }
+
+    /// The flight recorder ships a desync oracle by default; an explicit
+    /// STONE_CHECKPOINT_INTERVAL still wins, including 0 for a session that
+    /// must not pay the checkpoint stall at all.
+    #[test]
+    fn flight_checkpoint_cadence_is_on_by_default_and_overridable() {
+        assert_eq!(parse_checkpoint_interval(None), FLIGHT_CHECKPOINT_INTERVAL);
+        assert!(FLIGHT_CHECKPOINT_INTERVAL > 0, "recordings must carry a desync oracle");
+        assert_eq!(parse_checkpoint_interval(Some("0")), 0);
+        assert_eq!(parse_checkpoint_interval(Some(" 120 ")), 120);
+        assert_eq!(
+            parse_checkpoint_interval(Some("often")),
+            FLIGHT_CHECKPOINT_INTERVAL,
+            "an unparseable cadence falls back to the default rather than disabling the oracle"
+        );
     }
 
     #[test]

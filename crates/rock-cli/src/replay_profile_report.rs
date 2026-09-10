@@ -50,6 +50,7 @@ struct Terminal {
     timed_out: bool,
     error: Value,
     stderr_tail: String,
+    divergence: Value,
 }
 
 #[derive(Debug)]
@@ -125,12 +126,16 @@ fn parse_identity(value: &Value) -> Result<Value> {
     }
     let replay_build = string_field(identity, "replay_build")?;
     let playback_build = string_field(identity, "playback_build")?;
-    if !bool_field(identity, "exact_artifact")? {
-        bail!("replay-profile report requires exact-Artifact rows");
-    }
+    // An inexact run is reportable -- divergence is the accepted default --
+    // but the label must be the truth, so a row cannot claim exactness its own
+    // two fingerprints contradict.
+    let exact = bool_field(identity, "exact_artifact")?;
     bool_field(identity, "same_revision")?;
-    if replay_build.is_empty() || replay_build != playback_build {
-        bail!("replay-profile identity does not contain one exact Artifact");
+    if exact && (replay_build.is_empty() || replay_build != playback_build) {
+        bail!("replay-profile row claims an exact Artifact but its fingerprints differ");
+    }
+    if !exact && !replay_build.is_empty() && replay_build == playback_build {
+        bail!("replay-profile row claims drift but its fingerprints are identical");
     }
     Ok(identity.clone())
 }
@@ -256,6 +261,9 @@ fn parse_terminal(value: &Value) -> Result<Terminal> {
         timed_out: bool_field(value, "timed_out")?,
         error: required(value, "error")?.clone(),
         stderr_tail: string_field(value, "stderr_tail")?,
+        // Older profile output predates the divergence block; absence means
+        // "not reported", which the report renders as unknown, not clean.
+        divergence: value.get("divergence").cloned().unwrap_or(Value::Null),
     })
 }
 
@@ -720,10 +728,35 @@ fn analyze(parsed: ParsedProfile, top: usize, source_file: &Path) -> Result<Valu
             })
         })
         .collect::<Vec<_>>();
+    // Divergence summary: the earliest tick any run drifted at, and whether
+    // the recording could detect drift at all. Without checkpoints an absent
+    // tick means unknown, so `detectable` is reported next to it.
+    let divergent_ticks = parsed
+        .terminals
+        .values()
+        .filter_map(|terminal| terminal.divergence["first_divergent_tick"].as_u64())
+        .collect::<Vec<_>>();
+    let detectable = parsed
+        .terminals
+        .values()
+        .any(|terminal| terminal.divergence["detectable"] == json!(true));
+    let checkpoint_interval = parsed
+        .terminals
+        .values()
+        .next()
+        .map_or(Value::Null, |terminal| terminal.divergence["checkpoint_interval"].clone());
+    let exact_artifact = parsed.identity["exact_artifact"] == json!(true);
     Ok(json!({
         "format": "rock.replay-profile-report.v1",
         "source_file": source_file.display().to_string(),
         "identity": parsed.identity,
+        "exact_artifact": exact_artifact,
+        "divergence": {
+            "detectable": detectable,
+            "checkpoint_interval": checkpoint_interval,
+            "first_divergent_tick": divergent_ticks.iter().copied().min(),
+            "runs_diverged": divergent_ticks.len(),
+        },
         "range": { "from": parsed.from, "to": parsed.to },
         "runs": {
             "total": parsed.terminals.len(),
@@ -770,15 +803,46 @@ fn input_summary(input: &Value) -> String {
     changes.join(" ")
 }
 
+/// The exactness banner. A reader must never take a drifted run's numbers for
+/// an exact run's, so it is printed both above the run summary and again
+/// immediately above the measurements.
+fn exactness_banner(report: &Value) -> String {
+    let identity = &report["identity"];
+    if report["exact_artifact"] == json!(true) {
+        return format!(
+            "Artifact: {} (exact)\n",
+            identity["replay_build"].as_str().unwrap_or("?"),
+        );
+    }
+    let divergence = &report["divergence"];
+    let located = match (
+        divergence["first_divergent_tick"].as_u64(),
+        divergence["detectable"] == json!(true),
+    ) {
+        (Some(tick), _) => format!(
+            "diverged at tick {tick} in {} run(s)",
+            divergence["runs_diverged"]
+        ),
+        (None, true) => "no divergence seen at the recorded checkpoints".to_string(),
+        (None, false) => "drift NOT detectable: the recording carries no checkpoints".to_string(),
+    };
+    format!(
+        "Artifact: NOT EXACT -- replay {} vs playback {}\n\
+         *** These numbers were measured against changed code; {located}. ***\n",
+        identity["replay_build"].as_str().unwrap_or("?"),
+        identity["playback_build"].as_str().unwrap_or("?"),
+    )
+}
+
 fn render_text(report: &Value) -> String {
     let runs = &report["runs"];
     let range = &report["range"];
     let identity = &report["identity"];
     let mut out = format!(
-        "Replay profile: {} / {}\nArtifact: {}\nRange: {}-{} ({} observations)\nRuns: {} complete, {} incomplete\n",
+        "Replay profile: {} / {}\n{}Range: {}-{} ({} observations)\nRuns: {} complete, {} incomplete\n",
         identity["game"].as_str().unwrap_or("?"),
         identity["source"].as_str().unwrap_or("?"),
-        identity["replay_build"].as_str().unwrap_or("?"),
+        exactness_banner(report),
         range["from"],
         range["to"],
         report["observations"],
@@ -795,7 +859,11 @@ fn render_text(report: &Value) -> String {
             terminal["error"].as_str().unwrap_or(""),
         ));
     }
-    out.push_str("\nSlowest playback observations:\n");
+    out.push('\n');
+    if report["exact_artifact"] != json!(true) {
+        out.push_str(&exactness_banner(report));
+    }
+    out.push_str("Slowest playback observations:\n");
     if report["top_frames"].as_array().unwrap().is_empty() {
         out.push_str("  none (no complete runs)\n");
         return out;
