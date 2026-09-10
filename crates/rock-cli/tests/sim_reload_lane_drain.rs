@@ -1,13 +1,17 @@
-//! Reload-lane sims run only after the worker pool has drained.
+//! Reload-lane sims serialize on the compile session, not on the pool.
 //!
-//! A reload sim drives `SkullStone::apply_edit` against the one live session
-//! and the one `incremental.lua`, so it must never overlap another child. The
-//! runner puts those entries in an exclusive lane that runs after every
-//! ordinary entry finishes.
+//! A reload sim drives `SkullStone::apply_edit` against the one live session,
+//! so two reload children must never be live at once. They used to run only
+//! after every ordinary child had exited, because the overlay and a full
+//! `main.lua` rewrite landed in the directory every child boots from. The
+//! runner now hands the lane a private copy of that directory and runs it as
+//! one serial lane inside the pool, so a reload child MAY overlap ordinary
+//! children -- and with enough ordinary work queued, it does.
 //!
 //! `ROCK_SIM_LIFECYCLE_LOG` records child start/end events in the parent. The
-//! test asserts directly that no ordinary child is live when reload starts;
-//! completion-order output is a secondary user-visible check.
+//! test asserts both halves from that trace: no reload child starts while
+//! another reload child is live, and at least one reload child is live while
+//! an ordinary child is -- the overlap this lane exists to allow.
 //!
 //! Gated (compiles + runs a game): excluded from the default nextest profile.
 
@@ -23,10 +27,10 @@ fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
-/// `reload_probe` opts into the lane via `@sim_env("STONE_HOT_RELOAD", "1")`.
-/// The others are ordinary and deliberately outnumber the workers, so the pool
-/// is still busy when the lane would otherwise be scheduled.
-const RELOAD_SIM: &str = "reload_probe";
+/// Both opt into the lane via `@sim_env("STONE_HOT_RELOAD", "1")`. The
+/// ordinary entries deliberately outnumber the workers, so the pool is still
+/// busy for the whole serial reload run.
+const RELOAD_SIMS: [&str; 2] = ["reload_probe", "sys_reload_update_body"];
 const ORDINARY: [&str; 5] = [
     "co_join2_tuple",
     "co_join3_tuple",
@@ -36,14 +40,13 @@ const ORDINARY: [&str; 5] = [
 ];
 
 #[test]
-fn reload_lane_records_land_after_the_pool_drains() {
+fn reload_lane_overlaps_the_pool_but_never_itself() {
     let root = workspace_root();
     let trace_dir = tempfile::tempdir().expect("trace tempdir");
     let trace_path = trace_dir.path().join("lifecycle.log");
 
-    // Reload entry FIRST on the command line, so a lane that was not exclusive
-    // would tend to START it early -- which the lifecycle trace below would see.
-    let mut args = vec!["sim", "testbed", RELOAD_SIM];
+    let mut args = vec!["sim", "testbed"];
+    args.extend_from_slice(&RELOAD_SIMS);
     args.extend_from_slice(&ORDINARY);
     args.extend_from_slice(&["-j", "4"]);
 
@@ -61,85 +64,80 @@ fn reload_lane_records_land_after_the_pool_drains() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    // Verdict lines in the order they were printed.
-    //
-    // A VERDICT, not any `[sim] <name>: ...` line. The runner reports why an
-    // entry is isolated (`[sim] reload_probe: isolated (hot-reload lane...)`)
-    // under the same prefix, and counting that as a record gives the reload sim
-    // two of them -- which fails the one-record-per-sim assertion while the
-    // property under test holds, and puts a non-verdict line last.
-    let order: Vec<&str> = combined
+    // Verdict lines only: the runner also prints why an entry is isolated
+    // under the same `[sim] <name>: ` prefix.
+    let records: Vec<&str> = combined
         .lines()
         .filter_map(|l| l.strip_prefix("[sim] "))
         .filter_map(|l| l.split_once(": "))
         .filter(|(_, rest)| rest.starts_with("PASS") || rest.starts_with("FAIL"))
         .map(|(name, _)| name)
-        .filter(|n| *n == RELOAD_SIM || ORDINARY.contains(n))
+        .filter(|n| RELOAD_SIMS.contains(n) || ORDINARY.contains(n))
         .collect();
-
     assert_eq!(
-        order.len(),
-        ORDINARY.len() + 1,
-        "expected one record per sim, got {order:?}\n{combined}"
+        records.len(),
+        RELOAD_SIMS.len() + ORDINARY.len(),
+        "expected one record per sim, got {records:?}\n{combined}"
     );
-
-    // Record ORDER is not asserted, because it cannot witness this property:
-    // records print in the order the entries were NAMED, whatever order they
-    // ran in -- deterministic output is what makes a suite diffable and is what
-    // `--multi-order` reorders under. Measured: with the reload entry named
-    // second of four it prints second and still runs last. The lifecycle trace
-    // below is the real oracle, and it asserts the exclusion directly rather
-    // than through a print-order proxy that agrees with it by coincidence.
 
     let trace = std::fs::read_to_string(&trace_path)
         .unwrap_or_else(|e| panic!("read lifecycle trace {}: {e}", trace_path.display()));
-    let mut active = HashSet::new();
-    let mut saw_reload = false;
-    let mut reload_active = false;
+    let mut ordinary_live: HashSet<String> = HashSet::new();
+    let mut reload_live: Option<String> = None;
+    let mut reload_starts = 0;
+    let mut overlapped = false;
     for line in trace.lines() {
         let (event, name) = line
             .split_once('\t')
             .unwrap_or_else(|| panic!("malformed lifecycle event `{line}`"));
+        let is_reload = RELOAD_SIMS.contains(&name);
         match event {
-            // Process granularity (`record_sim_lifecycle`); this property is
-            // about ENTRIES, and every entry here is its own process anyway.
+            // Process granularity; this property is about entries, and every
+            // entry here is its own process anyway.
             "proc_start" | "proc_end" => {}
-            "start" if name == RELOAD_SIM => {
+            "start" if is_reload => {
                 assert!(
-                    active.is_empty(),
-                    "reload child started while ordinary children were live: {active:?}\n{trace}"
+                    reload_live.is_none(),
+                    "reload child `{name}` started while `{}` was live\n{trace}",
+                    reload_live.as_deref().unwrap_or("")
                 );
-                saw_reload = true;
-                reload_active = true;
+                reload_live = Some(name.to_string());
+                reload_starts += 1;
+                overlapped |= !ordinary_live.is_empty();
             }
             "start" => {
                 assert!(
-                    !reload_active,
-                    "ordinary child `{name}` started while reload was live\n{trace}"
-                );
-                assert!(
-                    active.insert(name.to_string()),
+                    ordinary_live.insert(name.to_string()),
                     "duplicate start for `{name}`\n{trace}"
                 );
+                overlapped |= reload_live.is_some();
             }
-            "end" if name == RELOAD_SIM => {
-                assert!(reload_active, "reload ended without a start\n{trace}");
-                reload_active = false;
+            "end" if is_reload => {
+                assert_eq!(
+                    reload_live.as_deref(),
+                    Some(name),
+                    "reload child `{name}` ended out of order\n{trace}"
+                );
+                reload_live = None;
             }
             "end" => {
                 assert!(
-                    active.remove(name),
+                    ordinary_live.remove(name),
                     "end without start for `{name}`\n{trace}"
                 );
             }
             _ => panic!("unknown lifecycle event `{line}`"),
         }
     }
-    assert!(saw_reload, "reload child never started\n{trace}");
-    assert!(!reload_active, "reload child left active\n{trace}");
+    assert_eq!(reload_starts, RELOAD_SIMS.len(), "every reload child must start\n{trace}");
+    assert!(reload_live.is_none(), "reload child left active\n{trace}");
     assert!(
-        active.is_empty(),
-        "ordinary children left active: {active:?}\n{trace}"
+        ordinary_live.is_empty(),
+        "ordinary children left active: {ordinary_live:?}\n{trace}"
+    );
+    assert!(
+        overlapped,
+        "the reload lane never overlapped the pool; it is serializing on more than the session\n{trace}"
     );
     assert!(out.status.success(), "all sims should pass:\n{combined}");
 }
