@@ -98,6 +98,43 @@ fn run_frame_raw_env(
         .expect("failed to spawn rock frame")
 }
 
+/// Like `run_frame` but with environment variables set on the child.
+fn run_frame_env(
+    game: &str,
+    frames: u32,
+    extra: &[&str],
+    env: &[(&str, &str)],
+) -> serde_json::Value {
+    let rock_bin = env!("CARGO_BIN_EXE_rock");
+    let scratch = tempfile::tempdir().expect("scratch dir");
+    let scratch_path = scratch.path().to_string_lossy().into_owned();
+    let frames_s = frames.to_string();
+    let mut args: Vec<&str> = vec![
+        "frame", game, "-n", &frames_s, "--dump-state", "--output", &scratch_path,
+    ];
+    args.extend_from_slice(extra);
+
+    let output = Command::new(rock_bin)
+        .args(&args)
+        .env("ROCK_FRAME_TIMEOUT_SECS", "60")
+        .envs(env.iter().copied())
+        .current_dir(workspace_root())
+        .output()
+        .expect("failed to spawn rock frame");
+    assert!(
+        output.status.success(),
+        "rock frame {game} {extra:?} exited with {:?}\nstderr:\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).unwrap_or_else(|e| {
+        panic!(
+            "dump-state stdout was not valid JSON ({e})\nstdout:\n{}",
+            String::from_utf8_lossy(&output.stdout)
+        )
+    })
+}
+
 /// Remove the wall-clock diagnostics carve-out (see module docs). This is the
 /// BYTE-IDENTITY contract: record vs a RENDERED replay must match on everything
 /// except non-reproducible wall-clock diagnostics (PROFILER), INCLUDING all
@@ -331,6 +368,181 @@ fn replay_rejects_malformed_v6_pad_axis_records() {
     assert!(
         stderr.contains("malformed replay records"),
         "malformed v6 axis must use the replay load failure path\nstderr:\n{stderr}"
+    );
+}
+
+/// Job-publication rows are ordered observations, not optional diagnostics: a
+/// replay that never consumes one must stop at that tick instead of silently
+/// accepting a different scheduler path.
+#[test]
+fn replay_rejects_unconsumed_job_decision_records() {
+    let dir = tempfile::tempdir().expect("dir");
+    let log = dir.path().join("unconsumed-job-decision.replay");
+    let log_s = log.to_string_lossy().into_owned();
+    let _ = run_frame("bitgun", 2, &["--record", &log_s]);
+
+    let text = std::fs::read_to_string(&log).expect("read replay log");
+    let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+    let tick = lines
+        .iter()
+        .position(|line| line.starts_with("t "))
+        .expect("a tick line");
+    lines.insert(tick + 1, "j 0 flow 1 0".to_string());
+    std::fs::write(&log, lines.join("\n") + "\n").expect("rewrite replay log");
+
+    let out = run_frame_raw("bitgun", 2, &["--replay", &log_s]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "an unconsumed job decision must abort replay\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("job decision count mismatch") && stderr.contains("tick 0"),
+        "the rejection must name the observation and tick\nstderr:\n{stderr}"
+    );
+}
+
+fn write_job_decision_fixture() -> (tempfile::TempDir, String) {
+    let dir = tempfile::tempdir().expect("fixture dir");
+    let repo = workspace_root()
+        .parent()
+        .expect("repo root");
+    std::fs::write(
+        dir.path().join("stick.toml"),
+        format!(
+            "[package]\nname = \"replay_job_fixture\"\nversion = \"0.1.0\"\ntype = \"bin\"\n\n[dependencies]\nstone = {{ path = \"{}\" }}\n\n[build.vars]\nGIT_SHA = \"fixture\"\n",
+            repo.join("stone").display()
+        ),
+    )
+    .expect("write fixture stick.toml");
+    std::fs::write(
+        dir.path().join("main.rock"),
+        r#"
+global FLOW_CALLS: int = 0
+global FLOW_ACCEPTED: int = 0
+
+@update
+fn replay_job_probe() {
+    if FLOW_CALLS >= 8 { return }
+    FLOW_CALLS = FLOW_CALLS + 1
+    if replay_job_ready("fixture", current_tick + 1, os_getenv("FLOW_TEST_READY") == "1") {
+        FLOW_ACCEPTED = FLOW_ACCEPTED + 1
+    }
+    if FLOW_CALLS == 8 {
+        stone_diag_set("FLOW_TEST_CALLS", FLOW_CALLS)
+        stone_diag_set("FLOW_TEST_ACCEPTED", FLOW_ACCEPTED)
+        if FLOW_ACCEPTED != 8 { error("flow fixture accepted fewer than 8 decisions") }
+        stone_quit()
+    }
+}
+
+fn main() {
+    stone_run_game(GameConfig { title: "replay job fixture", width: 64, height: 64 })
+}
+"#,
+    )
+    .expect("write fixture main.rock");
+    let project = dir.path().to_string_lossy().into_owned();
+    (dir, project)
+}
+
+#[test]
+fn replay_roundtrips_produced_job_decision_rows() {
+    let (_fixture, project) = write_job_decision_fixture();
+    let dir = tempfile::tempdir().expect("dir");
+    let log = dir.path().join("job-decisions.replay");
+    let log_s = log.to_string_lossy().into_owned();
+
+    let recorded = run_frame_env(
+        &project,
+        20,
+        &["--record", &log_s],
+        &[("FLOW_TEST_READY", "1")],
+    );
+    assert_eq!(recorded["__stone_diag"]["FLOW_TEST_CALLS"], serde_json::json!(8));
+    assert_eq!(
+        recorded["__stone_diag"]["FLOW_TEST_ACCEPTED"],
+        serde_json::json!(8)
+    );
+
+    let text = std::fs::read_to_string(&log).expect("read recorded replay log");
+    let rows: Vec<Vec<&str>> = text
+        .lines()
+        .filter(|line| line.starts_with("j "))
+        .map(|line| line.split_whitespace().collect())
+        .collect();
+    assert_eq!(rows.len(), 8, "recording must contain one j row per update: {text}");
+    for row in &rows {
+        assert_eq!(row.len(), 5, "job row must have five fields: {row:?}");
+        assert_eq!(row[2], "fixture", "fixture kind must survive recording: {row:?}");
+        assert!(
+            row[3].parse::<u64>().expect("positive job key") > 0,
+            "job key must be positive: {row:?}"
+        );
+        assert_eq!(row[4], "1", "recorded readiness must be true: {row:?}");
+    }
+
+    let replayed = run_frame_env(
+        &project,
+        20,
+        &["--replay", &log_s],
+        &[("FLOW_TEST_READY", "0")],
+    );
+    assert_eq!(replayed["__stone_diag"]["FLOW_TEST_CALLS"], serde_json::json!(8));
+    assert_eq!(
+        replayed["__stone_diag"]["FLOW_TEST_ACCEPTED"],
+        serde_json::json!(8),
+        "replay must return the recorded ready=1 result even with the live flag disabled"
+    );
+
+    let first = text
+        .lines()
+        .position(|line| line.starts_with("j "))
+        .expect("a recorded job row");
+    let mut mismatch_lines: Vec<String> = text.lines().map(str::to_string).collect();
+    let mut mismatch_fields: Vec<String> = mismatch_lines[first]
+        .split_whitespace()
+        .map(str::to_string)
+        .collect();
+    mismatch_fields[3] = "9007199254740991".to_string();
+    if mismatch_fields[3] == rows[0][3] {
+        mismatch_fields[3] = "9007199254740990".to_string();
+    }
+    mismatch_lines[first] = mismatch_fields.join(" ");
+    let mismatch = dir.path().join("job-decisions-mismatch.replay");
+    let mismatch_s = mismatch.to_string_lossy().into_owned();
+    std::fs::write(&mismatch, mismatch_lines.join("\n") + "\n").expect("write mismatch log");
+    let out = run_frame_raw_env(
+        &project,
+        20,
+        &["--replay", &mismatch_s],
+        &[("FLOW_TEST_READY", "0")],
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success() && stderr.contains("job decision mismatch"),
+        "a changed key must reject replay\nstderr:\n{stderr}"
+    );
+
+    let missing = dir.path().join("job-decisions-missing.replay");
+    let missing_s = missing.to_string_lossy().into_owned();
+    let missing_text = text
+        .lines()
+        .enumerate()
+        .filter_map(|(index, line)| (index != first).then_some(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(&missing, missing_text + "\n").expect("write missing-row log");
+    let out = run_frame_raw_env(
+        &project,
+        20,
+        &["--replay", &missing_s],
+        &[("FLOW_TEST_READY", "0")],
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success() && stderr.contains("missing job decision"),
+        "a missing key row must reject replay\nstderr:\n{stderr}"
     );
 }
 

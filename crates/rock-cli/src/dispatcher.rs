@@ -627,6 +627,17 @@ impl CommandContext {
 
     /// Run command directly
     fn run_command(&self) -> Result<()> {
+        if self.args.command == CliCommand::SdkCheck {
+            if self.args.files.len() != 1 {
+                anyhow::bail!("usage: rock sdk-check <project>");
+            }
+            crate::sdk_check::check(&self.args.files[0], std::path::Path::new(&rock_host::rock_dir()))?;
+            println!("SDK manifest compatibility: OK");
+            return Ok(());
+        }
+        if self.args.command == CliCommand::DocsIndex {
+            return crate::docs_index::run(&self.args.files, self.args.output.as_deref());
+        }
         if self.args.command == CliCommand::ReplayReport {
             if self.args.files.len() != 1 {
                 anyhow::bail!("usage: rock replay-report <file.replay> [--top N] [--context N] [--format pretty|json]");
@@ -635,6 +646,21 @@ impl CommandContext {
                 std::path::Path::new(&self.args.files[0]),
                 self.args.top,
                 self.args.context,
+                &self.args.perf_format,
+            );
+        }
+        if self.args.command == CliCommand::SimReport {
+            if self.args.files.len() > 1 {
+                anyhow::bail!(
+                    "usage: rock sim-report [<run-id>] [--sim-log-dir <root>] \
+                     [--sim-entry <name>] [--top N] [--format pretty|json]"
+                );
+            }
+            return crate::sim_report::run(
+                self.args.sim_log_dir.as_deref(),
+                self.args.files.first().map(String::as_str),
+                self.args.sim_entry.as_deref(),
+                self.args.top,
                 &self.args.perf_format,
             );
         }

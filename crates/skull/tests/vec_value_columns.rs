@@ -548,3 +548,20 @@ fn nobox_column_sort_never_materializes_an_element() {
         "every column must permute in lockstep with the key's column"
     );
 }
+
+#[test]
+fn nobox_reference_elements_use_columns() {
+    let lua = emit_module(r#"
+nobox value ReferenceRow { payload: [int]?, position: int }
+fn fill_reference_rows(payload: [int]) -> int {
+    let rows: [ReferenceRow] = []
+    rows.push(ReferenceRow { payload, position: 7 })
+    return rows[0].position
+}
+fn main() { print(fill_reference_rows([3])) }
+"#);
+    let body = function_body(&lua, "fill_reference_rows");
+    assert!(body.contains(r#"["payload"] = {}"#), "{body}");
+    assert!(body.contains(r#"["position"] = {}"#), "{body}");
+    assert!(!body.contains("ReferenceRow_ct("), "{body}");
+}

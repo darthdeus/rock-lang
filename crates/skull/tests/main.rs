@@ -151,6 +151,8 @@ mod lambda_static;
 mod leaf_form_invariant;
 #[path = "loop_scoped_locals.rs"]
 mod loop_scoped_locals;
+#[path = "tail_calls.rs"]
+mod tail_calls;
 #[path = "mangle_rename_hot_reload.rs"]
 mod mangle_rename_hot_reload;
 #[path = "mem2reg_stats.rs"]

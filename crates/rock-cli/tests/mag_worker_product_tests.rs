@@ -3,6 +3,23 @@ use rock_cli::sim_record::compare;
 use rock_cli::Backend;
 
 #[test]
+fn mag_worker_reset_discards_unfinished_save() {
+    let entries = vec![
+        "async_save_worker_reset_seed".to_string(),
+        "async_save_worker_reset_probe".to_string(),
+    ];
+    let worker = run_worker_suite(Backend::Skull, "mag", &entries)
+        .expect("save reset worker queue must run");
+    assert_eq!(worker.len(), 2, "both save reset entries must run");
+    assert!(worker[1].1, "probe must cross the seed's live worker boundary");
+    for (entry, (record, _)) in entries.iter().zip(&worker) {
+        assert_eq!(record.verdict(), "PASS", "{entry}: {record:?}");
+        assert!(record.errors.is_empty(), "{entry}: {record:?}");
+        assert!(!record.expects_pass.is_empty(), "{entry} asserted nothing");
+    }
+}
+
+#[test]
 fn mag_bootimage_queue_isolates_scene_and_gameplay_entries() {
     let entries = vec![
         "boot_image_scene_registry_npcs_seed".to_string(),

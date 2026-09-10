@@ -39,6 +39,20 @@ fn check_edit(v1: &str, v2: &str, edited: &[&str]) {
     check_edit_with(ws_of, v1, v2, edited)
 }
 
+#[test]
+fn numeric_selection_updates_in_full_incremental_and_overlay_emission() {
+    let v1 = "@nomangle fn choose(a: float, b: float) -> float { return if a < b { a } else { b } }";
+    let v2 = v1.replace("a < b", "a > b");
+    let ws1 = ws_of(v1);
+    let (full, mut cache) = emit_full(&ws1, skull::user_module_id(&ws1).unwrap()).unwrap();
+    assert!(full.lua.contains("math.min("), "{}", full.lua);
+    let ws2 = ws_of(&v2);
+    let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "choose")]);
+    assert!(overlay.lua.contains("math.max("), "{}", overlay.lua);
+    assert!(!overlay.lua.contains("math.min("), "{}", overlay.lua);
+    check_edit(v1, &v2, &["choose"]);
+}
+
 /// [`check_edit`] over a chosen workspace builder. A fixture needing the stdlib
 /// (any `+`, any collection method) passes `common::ws_with_stdlib`; the bare
 /// `ws_of` keeps the cheap fixtures cheap.
@@ -103,6 +117,7 @@ fn exact_body_edit_has_no_full_concrete_or_artifact_rebuild() {
     );
     assert_eq!(stats.broad_owner_scans, 0, "body-only route scanned all owners: {stats:?}");
     assert_eq!(stats.broad_concrete_scans, 0, "body-only route scanned all concrete entries: {stats:?}");
+    assert_eq!(stats.artifact_scalar_context_builds, 0, "artifact repair rebuilt the maintained scalar context: {stats:?}");
     assert_eq!(stats.broad_artifact_scans, 0, "body-only route scanned all artifact chunks: {stats:?}");
     assert_eq!(stats.broad_candidate_scans, 0, "body-only route scanned all candidate keys: {stats:?}");
     assert!(stats.root_requests > 0, "root locality has no request denominator: {stats:?}");
@@ -1108,4 +1123,23 @@ fn an_edit_that_removes_the_last_call_to_an_instantiation_prunes_it() {
         surviving(&fresh_lua),
         "the surviving instance is not the one a fresh build keeps"
     );
+}
+
+#[test]
+fn changed_call_graph_reuses_the_maintained_scalar_context() {
+    let v1 = "fn helper() -> int { 3 }\ninline(lua) fn extra() -> int = \"return 7\"\nfn main() { let x = helper() }";
+    let v2 = v1.replace("{ 3 }", "{ extra() }");
+    let ws1 = ws_with_stdlib(v1);
+    let mid = skull::user_module_id(&ws1).unwrap();
+    let (_, mut cache) = emit_full(&ws1, mid).expect("initial emit");
+    let ws2 = ws_with_stdlib(&v2);
+    let incremental = emit_incremental(&ws2, &mut cache, &[body_id(&ws2, "helper")]).expect("incremental emit");
+    let stats = cache.repair_stats();
+    assert!(cache.lua_view().publisher_lanes.keys().any(|i|
+        ws2.module(i.func.module).functions[i.func.func].name.as_str() == "extra"),
+        "the changed call graph must reach a foreign publisher");
+    assert!(stats.artifact_index_rows_examined > 0, "no artifact repair: {stats:?}");
+    assert_eq!(stats.artifact_scalar_context_builds, 0, "artifact repair rescanned the workspace: {stats:?}");
+    let fresh = emit_full(&ws2, skull::user_module_id(&ws2).unwrap()).expect("fresh emit").0;
+    assert_eq!(incremental.lua, fresh.lua);
 }

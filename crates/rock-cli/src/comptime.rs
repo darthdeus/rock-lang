@@ -47,6 +47,9 @@ pub fn set_invocation_selection(
         };
         parsed.insert(name.to_string(), value.to_string());
     }
+    // rock-host consumers of the channel (dependency resolution, source
+    // loading) cannot read SELECTION; mirror the same values into rock-host.
+    rock_host::stick::set_invocation_channel(channel.clone(), implied_channel.clone());
     SELECTION
         .set(CliSelection { channel, implied_channel, target_os, overrides: parsed })
         .map_err(|_| anyhow::anyhow!("CLI invocation selection was already initialized"))?;

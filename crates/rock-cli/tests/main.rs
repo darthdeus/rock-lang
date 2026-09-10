@@ -26,6 +26,12 @@ mod backend_feature_gates;
 mod mag_build_vars;
 #[path = "asset_overlay_defaults.rs"]
 mod asset_overlay_defaults;
+#[path = "stone_root_resolution.rs"]
+mod stone_root_resolution;
+#[path = "docs_index.rs"]
+mod docs_index;
+#[path = "source_revision.rs"]
+mod source_revision;
 #[path = "cimgui_prelude.rs"]
 mod cimgui_prelude;
 #[path = "test_exit_status_gate.rs"]
@@ -106,3 +112,7 @@ mod watcher_tmp_project_path;
 mod iter_parse_cli;
 #[path = "backend_stats_gate.rs"]
 mod backend_stats_gate;
+#[path = "sim_observability.rs"]
+mod sim_observability;
+#[path = "sim_report_tests.rs"]
+mod sim_report_tests;

@@ -10,6 +10,7 @@
 //! op-specific fields. See `stone/engine/sim.rock`.
 
 use anyhow::{anyhow, Context, Result};
+use crate::sim_observability::SimRunRecorder;
 use std::collections::{BTreeMap, HashMap};
 use colored::Colorize;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -18,6 +19,9 @@ use std::process::{Child, ExitStatus, Stdio};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 use tempfile::TempDir;
+
+#[cfg(unix)]
+use std::os::unix::process::ExitStatusExt;
 
 /// Frame budget for a sim that declares none. Sims terminate naturally via the
 /// runner's `sim_done` check; this is the upper bound for a runaway / hung
@@ -32,12 +36,35 @@ const DEFAULT_FRAME_BUDGET: usize = 600;
 /// back -- a sim asking for a bound the runner silently replaces would be
 /// guarded by a number nobody wrote.
 fn frame_budget_for(sim_name: &str, env_pairs: &[(String, String)]) -> Result<usize> {
-    let Some((_, raw)) = env_pairs.iter().find(|(k, _)| k == "FRAME_COUNT") else {
+    let Some((_, raw)) = env_pairs.iter().rev().find(|(k, _)| k == "FRAME_COUNT") else {
         return Ok(DEFAULT_FRAME_BUDGET);
     };
     raw.parse::<usize>().ok().filter(|n| *n > 0).ok_or_else(|| {
         anyhow!("sim `{sim_name}` declares @sim_env(\"FRAME_COUNT\", \"{raw}\"), which is not a positive integer")
     })
+}
+
+fn sim_required_backend(env_pairs: &[(String, String)]) -> Option<&str> {
+    for (k, v) in env_pairs {
+        if k == "SIM_BACKEND"
+            || k == "STONE_RENDERER"
+            || k == "SIM_REQUIRES"
+            || k == "SIM_REQUIRED_RENDERER"
+        {
+            return Some(v.as_str());
+        }
+    }
+    None
+}
+
+fn active_sim_renderer(project_dir: &Path) -> &'static str {
+    match rock_host::stick::StickConfig::find_from_dir(project_dir) {
+        Ok(Some((_, cfg))) => match cfg.renderer_backend() {
+            Ok(rock_host::stick::RendererBackend::Wgpu) => "wgpu",
+            _ => "gl",
+        },
+        _ => "gl",
+    }
 }
 /// Wall-clock timeout. An INDEPENDENT bound, not a backstop for the frame
 /// budget: it is the only thing that catches a child which never advances a
@@ -288,14 +315,62 @@ pub fn do_list_sims(backend: crate::Backend, project: &str) -> Result<()> {
 }
 
 pub fn do_run_sim_opts(backend: crate::Backend, project: &str, sim_name: &str, quiet: bool, update_snapshots: bool) -> Result<()> {
-    rock_host::project::ensure_workspace_root()?;
+    do_run_sim_opts_with_request(backend, project, sim_name, quiet, update_snapshots, Some(1), "single")
+}
 
-    let project_path = rock_host::project::resolve_project_dir(project)?;
+fn do_run_sim_opts_with_request(
+    backend: crate::Backend,
+    project: &str,
+    sim_name: &str,
+    quiet: bool,
+    update_snapshots: bool,
+    requested_jobs: Option<usize>,
+    requested_mode: &str,
+) -> Result<()> {
+    rock_host::project::ensure_workspace_root()?;
+    let recorder = SimRunRecorder::begin(
+        project,
+        sim_name,
+        quiet,
+        requested_jobs,
+        requested_mode,
+    );
+    let result = do_run_sim_opts_recorded(
+        backend,
+        project,
+        sim_name,
+        quiet,
+        update_snapshots,
+        requested_jobs,
+        requested_mode,
+        &recorder,
+    );
+    let error = result.as_ref().err().map(ToString::to_string);
+    recorder.finish(result.is_ok(), error.as_deref());
+    result
+}
+
+fn do_run_sim_opts_recorded(
+    backend: crate::Backend,
+    project: &str,
+    sim_name: &str,
+    quiet: bool,
+    update_snapshots: bool,
+    requested_jobs: Option<usize>,
+    requested_mode: &str,
+    recorder: &SimRunRecorder,
+) -> Result<()> {
+
+    let project_path = recorder.phase("resolve_project", || {
+        rock_host::project::resolve_project_dir(project)
+    })?;
     // Thread the RESOLVED path everywhere the raw arg used to flow (engine libs,
     // sim-source lookup for snapshot baselines) so a bare name behaves exactly
     // like its expanded path.
     let project = project_path.to_string_lossy().into_owned();
-    rock_host::engine_build::build_engine_libs(&project)?;
+    recorder.phase("build_engine", || {
+        rock_host::engine_build::build_engine_libs(&project)
+    })?;
 
     let out_dir = sim_output_dir()?;
     let output = out_dir.path().to_string_lossy().into_owned();
@@ -305,7 +380,19 @@ pub fn do_run_sim_opts(backend: crate::Backend, project: &str, sim_name: &str, q
     // The runner applies them via `Command::env` before luajit spawns --
     // the in-process runtime `set_env()` runs after `@init`, so it can't
     // influence env-var-driven game config like `ANVIL_VIDEO`.
-    let (_, env_by_wire, mut stone) = compile_sims(backend, project_path, output_path)?;
+    let (wire_names, env_by_wire, mut stone) = recorder.phase("compile_and_discover", || {
+        compile_sims(backend, project_path.clone(), output_path)
+    })?;
+    let entry_ids = recorder.plan_entries(&[sim_name.to_string()]);
+    recorder.configure(
+        &project_path,
+        &wire_names,
+        requested_jobs,
+        1,
+        requested_mode,
+        "single",
+        update_snapshots,
+    );
     sim_spawn_barrier();
 
     let (display_name, summary) = run_named_entry(
@@ -318,11 +405,17 @@ pub fn do_run_sim_opts(backend: crate::Backend, project: &str, sim_name: &str, q
         &env_by_wire,
         Some(&mut stone),
         None,
+        Some(&recorder),
+        entry_ids.first().copied(),
     )?;
     let sim_name = display_name.as_str();
 
     if !quiet {
         summary.print(sim_name, true);
+    }
+
+    if summary.excluded.is_some() {
+        return Ok(());
     }
 
     if summary.timed_out {
@@ -435,6 +528,8 @@ fn run_named_entry(
     env_by_wire: &HashMap<String, Vec<(String, String)>>,
     stone: Option<&mut crate::skull_backend::SkullStone>,
     census_warmup_frames: Option<usize>,
+    recorder: Option<&SimRunRecorder>,
+    occurrence_id: Option<u64>,
 ) -> Result<(String, SimSummary)> {
     let artifacts = SimArtifacts::new()?;
     let out_path = artifacts.path().to_path_buf();
@@ -452,9 +547,24 @@ fn run_named_entry(
         chain_spec.to_string()
     };
 
+    let active_renderer = active_sim_renderer(Path::new(project));
+    for part in &parts {
+        let env_pairs = env_by_wire.get(*part).cloned().unwrap_or_default();
+        if let Some(req) = sim_required_backend(&env_pairs) {
+            if req != active_renderer {
+                let reason = format!("requires {req} renderer (active is {active_renderer})");
+                let mut s = SimSummary::default();
+                s.excluded = Some(reason);
+                s.saw_stop = true;
+                record_excluded_entry(recorder, occurrence_id);
+                return Ok((display_name, s));
+            }
+        }
+    }
+
     let mut combined = SimSummary::default();
     let mut stone = stone;
-    for part in &parts {
+    for (part_index, part) in parts.iter().enumerate() {
         let env_pairs = env_by_wire.get(*part).cloned().unwrap_or_default();
         // Parts of a chain run in order and share `$OUT`; only the parts that
         // opted into the reload lane may touch the session.
@@ -474,20 +584,60 @@ fn run_named_entry(
             &env_pairs,
             lane,
             census_warmup_frames,
+            recorder,
+            occurrence_id,
+            part_index,
         )?;
         combined.merge(part_summary);
     }
 
     // Video assertions after all parts run (they need ffprobe/ffmpeg
     // subprocesses, and a multi-start chain may assert in either part).
+    if let (Some(recorder), Some(occurrence_id)) = (recorder, occurrence_id) {
+        recorder.artifact_check_start(occurrence_id);
+    }
     artifacts.finish(&mut combined);
+    if let (Some(recorder), Some(occurrence_id)) = (recorder, occurrence_id) {
+        recorder.artifact_check_end(occurrence_id, !combined.has_failures());
+        recorder.entry_result(
+            occurrence_id,
+            combined.worker_attempt.unwrap_or(0),
+            verdict_word(&combined),
+            combined
+                .allocation_census
+                .as_ref()
+                .map(|c| c.frame_count),
+            combined.expects_pass.len(),
+            combined.timed_out,
+            combined.process_failure_code,
+        );
+    }
     Ok((display_name, combined))
+}
+
+fn manual_sim(env: &[(String, String)]) -> Result<bool> {
+    match env.iter().rev().find(|(key, _)| key == "SIM_MANUAL").map(|(_, value)| value.as_str()) {
+        None | Some("0") => Ok(false),
+        Some("1") => Ok(true),
+        Some(value) => Err(anyhow!("SIM_MANUAL must be 0 or 1, got `{value}`")),
+    }
+}
+
+fn record_excluded_entry(recorder: Option<&SimRunRecorder>, occurrence_id: Option<u64>) {
+    if let (Some(recorder), Some(id)) = (recorder, occurrence_id) {
+        recorder.entry_result(id, 0, "EXCLUDED", None, 0, false, None);
+    }
+}
+
+fn entry_excluded(summary: &SimSummary) -> bool {
+    summary.excluded.is_some()
 }
 
 /// Whether an entry's summary is a clean pass (no fail, no timeout, no
 /// process error, reached `stop_sim()`).
 fn entry_passed(summary: &SimSummary) -> bool {
-    !summary.timed_out
+    !entry_excluded(summary)
+        && !summary.timed_out
         && summary.process_failure_code.is_none()
         && summary.saw_stop
         && !summary.has_failures()
@@ -498,7 +648,9 @@ fn entry_passed(summary: &SimSummary) -> bool {
 /// used to be computed from `has_failures()` alone, which printed `PASS` for a
 /// sim that aborted mid-body (an abort fails no expect).
 fn verdict_word(summary: &SimSummary) -> &'static str {
-    if entry_passed(summary) {
+    if entry_excluded(summary) {
+        "EXCLUDED"
+    } else if entry_passed(summary) {
         "PASS"
     } else {
         "FAIL"
@@ -524,21 +676,79 @@ pub fn do_run_named_sims(
     // is nothing to overlap, so `--jobs` does not apply -- nor `--workers`,
     // since a one-entry queue takes no checkpoint either way.
     if names.len() == 1 {
-        return do_run_sim_opts(backend, project, &names[0], quiet, update_snapshots);
+        return do_run_sim_opts_with_request(
+            backend,
+            project,
+            &names[0],
+            quiet,
+            update_snapshots,
+            jobs,
+            sim_exec_mode_name(mode),
+        );
     }
 
     rock_host::project::ensure_workspace_root()?;
-    let project_path = rock_host::project::resolve_project_dir(project)?;
+    let recorder = SimRunRecorder::begin(
+        project,
+        &names.join(" "),
+        quiet,
+        jobs,
+        sim_exec_mode_name(mode),
+    );
+    let result = do_run_named_sims_recorded(
+        backend,
+        project,
+        names,
+        quiet,
+        update_snapshots,
+        jobs,
+        mode,
+        &recorder,
+    );
+    let error = result.as_ref().err().map(ToString::to_string);
+    recorder.finish(result.is_ok(), error.as_deref());
+    result
+}
+
+fn do_run_named_sims_recorded(
+    backend: crate::Backend,
+    project: &str,
+    names: &[String],
+    quiet: bool,
+    update_snapshots: bool,
+    jobs: Option<usize>,
+    mode: SimExecMode,
+    recorder: &SimRunRecorder,
+) -> Result<()> {
+
+    let project_path = recorder.phase("resolve_project", || {
+        rock_host::project::resolve_project_dir(project)
+    })?;
     let project = project_path.to_string_lossy().into_owned();
-    rock_host::engine_build::build_engine_libs(&project)?;
+    recorder.phase("build_engine", || {
+        rock_host::engine_build::build_engine_libs(&project)
+    })?;
 
     let out_dir = sim_output_dir()?;
     let output = out_dir.path().to_string_lossy().into_owned();
-    let (_, env_by_wire, mut stone) =
-        compile_sims(backend, project_path, PathBuf::from(&output))?;
+    let (wire_names, env_by_wire, mut stone) = recorder.phase("compile_and_discover", || {
+        compile_sims(backend, project_path.clone(), PathBuf::from(&output))
+    })?;
+    let entry_ids = recorder.plan_entries(names);
     sim_spawn_barrier();
 
+    let requested_mode = sim_exec_mode_name(mode);
     let mode = resolve_exec_mode(mode, update_snapshots, quiet)?;
+    let effective_jobs = resolve_jobs(jobs, update_snapshots);
+    recorder.configure(
+        &project_path,
+        &wire_names,
+        jobs,
+        effective_jobs,
+        requested_mode,
+        sim_exec_mode_name(mode),
+        update_snapshots,
+    );
     if mode != SimExecMode::Isolated {
         let results = run_specs_worker_mode(
             &project,
@@ -549,27 +759,38 @@ pub fn do_run_named_sims(
             update_snapshots,
             jobs,
             &mut stone,
+            Some(recorder),
+            Some(&entry_ids),
         )?;
         let mut passed = 0usize;
+        let mut excluded = 0usize;
         let mut failed: Vec<String> = Vec::new();
         for (name, summary) in &results {
-            if entry_passed(summary) {
+            if entry_excluded(summary) {
+                excluded += 1;
+            } else if entry_passed(summary) {
                 passed += 1;
             } else {
                 failed.push(name.clone());
             }
         }
+        let executed = names.len() - excluded;
+        let excl_suffix = if excluded > 0 {
+            format!(" (selected {}, {excluded} excluded)", names.len())
+        } else {
+            String::new()
+        };
         let suffix = if failed.is_empty() {
             String::new()
         } else {
             format!(" -- FAILED: {}", failed.join(", "))
         };
-        println!("[sim] {passed}/{} sims passed{suffix}", names.len());
+        println!("[sim] {passed}/{executed} sims passed{excl_suffix}{suffix}");
         if !failed.is_empty() {
             return Err(anyhow!(
                 "{} of {} named sims failed in `{project}`",
                 failed.len(),
-                names.len()
+                executed
             ));
         }
         return Ok(());
@@ -601,6 +822,8 @@ pub fn do_run_named_sims(
             &env_by_wire,
             stone,
             None,
+            Some(recorder),
+            Some(entry_ids[i]),
         )?;
         let _lock = report.lock().unwrap();
         if !quiet {
@@ -641,6 +864,7 @@ pub fn do_run_named_sims(
     // Accounting walks the order the user gave, so the failed list matches a
     // serial run's regardless of completion order.
     let mut passed = 0usize;
+    let mut excluded = 0usize;
     let mut failed: Vec<String> = Vec::new();
     for i in 0..names.len() {
         let (display_name, summary) = match results.remove(&i) {
@@ -648,7 +872,9 @@ pub fn do_run_named_sims(
             Some(Err(e)) => return Err(e),
             None => return Err(anyhow!("sim `{}` was never scheduled", names[i])),
         };
-        if entry_passed(&summary) {
+        if entry_excluded(&summary) {
+            excluded += 1;
+        } else if entry_passed(&summary) {
             passed += 1;
         } else {
             failed.push(display_name);
@@ -656,18 +882,24 @@ pub fn do_run_named_sims(
     }
 
     // Result output, NOT logging: the multi-run verdict, consumed by you/CI.
+    let executed = names.len() - excluded;
+    let excl_suffix = if excluded > 0 {
+        format!(" (selected {}, {excluded} excluded)", names.len())
+    } else {
+        String::new()
+    };
     let suffix = if failed.is_empty() {
         String::new()
     } else {
         format!(" -- FAILED: {}", failed.join(", "))
     };
-    println!("[sim] {passed}/{} sims passed{suffix}", names.len());
+    println!("[sim] {passed}/{executed} sims passed{excl_suffix}{suffix}");
 
     if !failed.is_empty() {
         return Err(anyhow!(
             "{} of {} named sims failed in `{project}`",
             failed.len(),
-            names.len()
+            executed
         ));
     }
     Ok(())
@@ -724,20 +956,83 @@ pub fn do_run_all_sims(
 ) -> Result<()> {
     rock_host::project::ensure_workspace_root()?;
 
-    let project_path = rock_host::project::resolve_project_dir(project)?;
+    let recorder = SimRunRecorder::begin(
+        project,
+        "<all>",
+        quiet,
+        jobs,
+        sim_exec_mode_name(mode),
+    );
+    let result = do_run_all_sims_recorded(
+        backend,
+        project,
+        quiet,
+        update_snapshots,
+        jobs,
+        mode,
+        &recorder,
+    );
+    let error = result.as_ref().err().map(ToString::to_string);
+    recorder.finish(result.is_ok(), error.as_deref());
+    result
+}
+
+fn do_run_all_sims_recorded(
+    backend: crate::Backend,
+    project: &str,
+    quiet: bool,
+    update_snapshots: bool,
+    jobs: Option<usize>,
+    mode: SimExecMode,
+    recorder: &SimRunRecorder,
+) -> Result<()> {
+
+    let project_path = recorder.phase("resolve_project", || {
+        rock_host::project::resolve_project_dir(project)
+    })?;
     let project = project_path.to_string_lossy().into_owned();
-    rock_host::engine_build::build_engine_libs(&project)?;
+    recorder.phase("build_engine", || {
+        rock_host::engine_build::build_engine_libs(&project)
+    })?;
 
     let out_dir = sim_output_dir()?;
     let output = out_dir.path().to_string_lossy().into_owned();
-    let (wire_names, env_by_wire, mut stone) =
-        compile_sims(backend, project_path, PathBuf::from(&output))?;
+    let (wire_names, env_by_wire, mut stone) = recorder.phase("compile_and_discover", || {
+        compile_sims(backend, project_path.clone(), PathBuf::from(&output))
+    })?;
     sim_spawn_barrier();
     if wire_names.is_empty() {
         return Err(anyhow!("no @sim coroutines found in project `{project}`"));
     }
 
+    let entry_ids = recorder.plan_entries(&wire_names);
+    let requested_mode = sim_exec_mode_name(mode);
     let mode = resolve_exec_mode(mode, update_snapshots, quiet)?;
+    let effective_jobs = resolve_jobs(jobs, update_snapshots);
+    recorder.configure(
+        &project_path,
+        &wire_names,
+        jobs,
+        effective_jobs,
+        requested_mode,
+        sim_exec_mode_name(mode),
+        update_snapshots,
+    );
+    let selected = wire_names.len();
+    let mut routine_names = Vec::new();
+    let mut routine_ids = Vec::new();
+    for (name, id) in wire_names.into_iter().zip(entry_ids) {
+        if manual_sim(env_by_wire.get(&name).map_or(&[][..], |v| v))? {
+            record_excluded_entry(Some(recorder), Some(id));
+            println!("[sim] {name}: EXCLUDED (manual; run by name)");
+        } else {
+            routine_names.push(name);
+            routine_ids.push(id);
+        }
+    }
+    let wire_names = routine_names;
+    let entry_ids = routine_ids;
+    let manual_excluded = selected - wire_names.len();
     if mode != SimExecMode::Isolated {
         let results = run_specs_worker_mode(
             &project,
@@ -748,41 +1043,71 @@ pub fn do_run_all_sims(
             update_snapshots,
             jobs,
             &mut stone,
+            Some(recorder),
+            Some(&entry_ids),
         )?;
         let mut passed = 0usize;
+        let mut excluded = manual_excluded;
         let mut failed: Vec<String> = Vec::new();
         for (name, summary) in &results {
-            if entry_passed(summary) {
+            if entry_excluded(summary) {
+                excluded += 1;
+            } else if entry_passed(summary) {
                 passed += 1;
             } else {
                 failed.push(name.clone());
             }
         }
+        let executed = selected - excluded;
+        let excl_suffix = if excluded > 0 {
+            format!(" (selected {selected}, {excluded} excluded)")
+        } else {
+            String::new()
+        };
         let suffix = if failed.is_empty() {
             String::new()
         } else {
             format!(" -- FAILED: {}", failed.join(", "))
         };
         println!(
-            "[sim] {project} suite: {passed}/{} sims passed{suffix}",
-            wire_names.len()
+            "[sim] {project} suite: {passed}/{executed} sims passed{excl_suffix}{suffix}"
         );
         if !failed.is_empty() {
             return Err(anyhow!(
                 "{} of {} sims failed in `{project}`",
                 failed.len(),
-                wire_names.len()
+                executed
             ));
         }
         return Ok(());
     }
 
     let jobs = resolve_jobs(jobs, update_snapshots);
+    let active_renderer = active_sim_renderer(&project_path);
+    let mut summaries: HashMap<usize, Result<SimSummary>> = HashMap::new();
+    let mut active_indices: Vec<usize> = Vec::new();
+
+    for i in 0..wire_names.len() {
+        let env_pairs = env_by_wire.get(&wire_names[i]).map_or(&[][..], |v| v);
+        if let Some(req) = sim_required_backend(env_pairs) {
+            if req != active_renderer {
+                let reason = format!("requires {req} renderer (active is {active_renderer})");
+                let mut s = SimSummary::default();
+                s.excluded = Some(reason);
+                s.saw_stop = true;
+                record_excluded_entry(Some(recorder), Some(entry_ids[i]));
+                summaries.insert(i, Ok(s));
+                continue;
+            }
+        }
+        active_indices.push(i);
+    }
 
     // Two lanes. Reload sims mutate the one session and the one overlay, so
     // they run alone with nothing else in flight; everything else is
     // independent once the compiled output is invocation-owned.
-    let (reload_idx, ordinary_idx): (Vec<usize>, Vec<usize>) = (0..wire_names.len())
+    let (reload_idx, ordinary_idx): (Vec<usize>, Vec<usize>) = active_indices
+        .into_iter()
         .partition(|&i| is_reload_lane(env_by_wire.get(&wire_names[i]).map_or(&[][..], |v| v)));
 
     // Concurrent children cannot stream: their progress lines would interleave
@@ -790,7 +1115,6 @@ pub fn do_run_all_sims(
     // registry order below, which is what the concise multi-run path already
     // does. Serial runs keep today's live stream.
     let streaming = jobs == 1 && !quiet;
-    let mut summaries: HashMap<usize, Result<SimSummary>> = HashMap::new();
 
     // A record is finished, printed, and accounted in ONE place, so a sim's
     // lines can never interleave with another's: everything after the child
@@ -799,25 +1123,21 @@ pub fn do_run_all_sims(
     // `--jobs` rather than fanning out on their own.
     let report = Mutex::new(());
     let run_at = |i: usize, stone: Option<&mut crate::skull_backend::SkullStone>| -> Result<SimSummary> {
-        // Fresh tempdir per sim -- distinct sims don't share OUT the way
-        // a comma-chain's parts do.
-        let artifacts = SimArtifacts::new()?;
-        let env_pairs = env_by_wire.get(&wire_names[i]).cloned().unwrap_or_default();
-        let mut summary = run_one_sim(
+        let (display_name, summary) = run_named_entry(
             &project,
             &wire_names[i],
             quiet,
             !streaming,
             update_snapshots,
-            artifacts.path(),
             &output,
-            &env_pairs,
+            &env_by_wire,
             stone,
             None,
+            Some(recorder),
+            Some(entry_ids[i]),
         )?;
 
         let _lock = report.lock().unwrap();
-        artifacts.finish(&mut summary);
         if !quiet {
             // Result output: the child's own retained stderr/stdout, emitted
             // here so it lands with its record instead of interleaving.
@@ -826,7 +1146,7 @@ pub fn do_run_all_sims(
             }
             // Concurrent runs never streamed the per-expect lines, so the
             // record must carry its own sited failures (`streamed = false`).
-            summary.print(&wire_names[i], streaming);
+            summary.print(&display_name, streaming);
         }
         Ok(summary)
     };
@@ -844,6 +1164,7 @@ pub fn do_run_all_sims(
     // Records printed in completion order; the ACCOUNTING is registry order, so
     // the failed list and tally are identical to a serial run's.
     let mut passed = 0usize;
+    let mut excluded = manual_excluded;
     let mut failed: Vec<String> = Vec::new();
     for (i, name) in wire_names.iter().enumerate() {
         let summary = match summaries.remove(&i) {
@@ -851,7 +1172,9 @@ pub fn do_run_all_sims(
             Some(Err(e)) => return Err(e),
             None => return Err(anyhow!("sim `{name}` was never scheduled")),
         };
-        if entry_passed(&summary) {
+        if entry_excluded(&summary) {
+            excluded += 1;
+        } else if entry_passed(&summary) {
             passed += 1;
         } else {
             failed.push(name.clone());
@@ -860,21 +1183,26 @@ pub fn do_run_all_sims(
 
     // Result output, NOT logging: the suite verdict is this command's
     // answer, consumed by the user / CI.
+    let executed = selected - excluded;
+    let excl_suffix = if excluded > 0 {
+        format!(" (selected {selected}, {excluded} excluded)")
+    } else {
+        String::new()
+    };
     let suffix = if failed.is_empty() {
         String::new()
     } else {
         format!(" -- FAILED: {}", failed.join(", "))
     };
     println!(
-        "[sim] {project} suite: {passed}/{} sims passed{suffix}",
-        wire_names.len()
+        "[sim] {project} suite: {passed}/{executed} sims passed{excl_suffix}{suffix}"
     );
 
     if !failed.is_empty() {
         return Err(anyhow!(
             "{} of {} sims failed in `{project}`",
             failed.len(),
-            wire_names.len()
+            executed
         ));
     }
     Ok(())
@@ -1075,6 +1403,8 @@ pub fn do_run_allocation_census(
             &env_by_wire,
             stone,
             Some(DEFAULT_SIM_ALLOCATION_WARMUP_FRAMES),
+            None,
+            None,
         )
     };
 
@@ -1342,6 +1672,8 @@ pub fn do_run_allocation_sites(
             &instrumented_env,
             None,
             None,
+            None,
+            None,
         )
     };
     let mut results = HashMap::new();
@@ -1507,40 +1839,108 @@ fn run_specs_worker_mode(
     update_snapshots: bool,
     jobs: Option<usize>,
     stone: &mut crate::skull_backend::SkullStone,
+    recorder: Option<&SimRunRecorder>,
+    entry_ids: Option<&[u64]>,
 ) -> Result<Vec<(String, SimSummary)>> {
 
     let jobs = resolve_jobs(jobs, update_snapshots);
-    let (groups, isolated) = group_worker_specs(specs, env_by_wire);
-    // One slot per spec POSITION: the same sim can be named twice, and each
-    // occurrence is its own entry with its own result.
+    let active_renderer = active_sim_renderer(Path::new(project));
     let mut slots: Vec<Option<SimSummary>> = specs.iter().map(|_| None).collect();
+    let mut active_specs: Vec<String> = Vec::new();
+    let mut active_indices: Vec<usize> = Vec::new();
 
-    // The lane plan. A group splits into contiguous blocks so the entries a
-    // worker serves stay in their requested order; splitting round-robin would
-    // reshuffle every predecessor for no gain.
-    let mut lanes: Vec<Vec<usize>> = Vec::new();
-    for group in &groups {
-        let blocks = jobs.min(group.len()).max(1);
-        for b in 0..blocks {
-            let lo = group.len() * b / blocks;
-            let hi = group.len() * (b + 1) / blocks;
-            if lo < hi {
-                lanes.push(group[lo..hi].to_vec());
+    for (i, spec) in specs.iter().enumerate() {
+        let mut excluded_reason = None;
+        for part in parse_sim_chain(spec) {
+            if let Some(req) = sim_required_backend(env_by_wire.get(part).map_or(&[][..], |v| v)) {
+                if req != active_renderer {
+                    excluded_reason = Some(format!("requires {req} renderer (active is {active_renderer})"));
+                    break;
+                }
             }
         }
+        if let Some(reason) = excluded_reason {
+            let mut s = SimSummary::default();
+            s.excluded = Some(reason);
+            s.saw_stop = true;
+            record_excluded_entry(recorder, entry_ids.and_then(|ids| ids.get(i)).copied());
+            slots[i] = Some(s);
+        } else {
+            active_specs.push(spec.clone());
+            active_indices.push(i);
+        }
     }
+
+    let (groups, isolated) = group_worker_specs(&active_specs, env_by_wire);
+
+    // A group splits into contiguous blocks so the entries a worker serves stay
+    // in their requested order; splitting round-robin would reshuffle every
+    // predecessor for no gain. Keep one boot for a group that fits in one
+    // scheduling quantum. A larger group gets the fewest lanes that keep each
+    // lane within that quantum, capped by the global pool size.
+    let lanes: Vec<Vec<usize>> = allocate_worker_lanes(&groups, jobs)
+        .into_iter()
+        .map(|lane| lane.into_iter().map(|idx| active_indices[idx]).collect())
+        .collect();
+
     // An isolated entry needs the compile SESSION only when it opted into the
     // hot-reload lane; everything else isolated is an ordinary fresh process
     // and can overlap. `worker_ineligibility` has other reasons (a `$OUT`-
     // interpolating env, disagreeing chain parts, `SIM_WORKER_ISOLATED`) and
     // none of them touch the session.
-    let (exclusive, poolable): (Vec<_>, Vec<_>) = isolated.into_iter().partition(|(i, _)| {
-        parse_sim_chain(&specs[*i])
-            .iter()
-            .any(|p| is_reload_lane(env_by_wire.get(*p).map_or(&[][..], |v| v)))
-    });
+    let (exclusive, poolable): (Vec<_>, Vec<_>) = isolated
+        .into_iter()
+        .map(|(idx, r)| (active_indices[idx], r))
+        .partition(|(i, _)| {
+            parse_sim_chain(&specs[*i])
+                .iter()
+                .any(|p| is_reload_lane(env_by_wire.get(*p).map_or(&[][..], |v| v)))
+        });
+
+    if let Some(recorder) = recorder {
+        for (lane_id, lane) in lanes.iter().enumerate() {
+            let entries: Vec<(u64, String)> = lane
+                .iter()
+                .map(|&i| {
+                    (
+                        entry_ids.and_then(|ids| ids.get(i)).copied().unwrap_or(0),
+                        specs[i].clone(),
+                    )
+                })
+                .collect();
+            let signature = parse_sim_chain(&specs[lane[0]])
+                .first()
+                .and_then(|name| env_by_wire.get(*name))
+                .map_or_else(Vec::new, |env| boot_signature(env));
+            recorder.lane_planned(lane_id, "shared", &entries, &signature, None);
+        }
+        for (offset, (i, reason)) in poolable.iter().chain(exclusive.iter()).enumerate() {
+            let entries = vec![(
+                entry_ids.and_then(|ids| ids.get(*i)).copied().unwrap_or(0),
+                specs[*i].clone(),
+            )];
+            let signature = parse_sim_chain(&specs[*i])
+                .first()
+                .and_then(|name| env_by_wire.get(*name))
+                .map_or_else(Vec::new, |env| boot_signature(env));
+            recorder.lane_planned(
+                offset + lanes.len(),
+                "isolated",
+                &entries,
+                &signature,
+                Some(reason),
+            );
+        }
+    }
 
     if !quiet {
+        for (i, slot) in slots.iter().enumerate() {
+            if let Some(s) = slot {
+                if let Some(reason) = &s.excluded {
+                    println!("[sim] {}: EXCLUDED ({reason})", specs[i]);
+                }
+            }
+        }
         // EVERY lane is a boot, so every lane reports one. A singleton lane
         // printed nothing, which made a sim that silently got its own process
         // indistinguishable in the log from one sharing a 46-way worker -- the
@@ -1581,6 +1981,9 @@ fn run_specs_worker_mode(
             let lane_specs: Vec<String> = lane.iter().map(|&i| specs[i].clone()).collect();
             // `run_specs_recovering` is positional, so its results line up with
             // `lane_specs` and therefore with `lane`'s indices.
+            let lane_entry_ids = entry_ids.map(|ids| {
+                lane.iter().map(|&i| ids[i]).collect::<Vec<_>>()
+            });
             let results = run_specs_recovering(
                 project,
                 output,
@@ -1588,6 +1991,8 @@ fn run_specs_worker_mode(
                 &lane_specs,
                 update_snapshots,
                 false,
+                recorder,
+                lane_entry_ids.as_deref(),
             )?;
             if results.len() != lane.len() {
                 return Err(anyhow!(
@@ -1613,6 +2018,8 @@ fn run_specs_worker_mode(
                 env_by_wire,
                 None,
                 None,
+                recorder,
+                entry_ids.and_then(|ids| ids.get(i)).copied(),
             )?;
             Ok(vec![(i, summary)])
         }
@@ -1636,6 +2043,8 @@ fn run_specs_worker_mode(
             env_by_wire,
             Some(&mut *stone),
             None,
+            recorder,
+            entry_ids.and_then(|ids| ids.get(i)).copied(),
         )?;
         slots[i] = Some(summary);
     }
@@ -1945,11 +2354,12 @@ fn writes_live(buffered: bool) -> bool {
 /// `SIM_SKIP_RENDER` are read ONCE during boot (`runner_load_sim_entries`), so
 /// they are still boot signature until the worker applies them per entry.
 ///
-/// `ROCK_MASK_WALL_CLOCK` is owned outright: the runner publishes its own value
-/// after `preset_env`, so a declared one never reaches the child and cannot
-/// stand for a difference between two entries. Splitting a group on an inert
-/// value would isolate sims for nothing.
-const RUNNER_OWNED_ENV_KEYS: &[&str] = &["FRAME_COUNT", "ROCK_MASK_WALL_CLOCK"];
+/// `ROCK_MASK_WALL_CLOCK` and `ROCK_DETERMINISTIC_IDS` are owned outright: the
+/// runner publishes its own value for both after `preset_env`, so a declared one
+/// never reaches the child and cannot stand for a difference between two
+/// entries. Splitting a group on an inert value would isolate sims for nothing.
+const RUNNER_OWNED_ENV_KEYS: &[&str] =
+    &["FRAME_COUNT", "ROCK_DETERMINISTIC_IDS", "ROCK_MASK_WALL_CLOCK", "SIM_MANUAL"];
 
 /// Fixed values the runner publishes to EVERY sim child, layered BEFORE
 /// `preset_env` so a declaration still wins.
@@ -1969,26 +2379,125 @@ const RUNNER_OWNED_ENV_KEYS: &[&str] = &["FRAME_COUNT", "ROCK_MASK_WALL_CLOCK"];
 /// Only fixed literals belong here. `STONE_ASSET_STUB` and `STONE_AUDIO_STUB`
 /// are computed from the group's own composition, so discounting them would be
 /// circular -- the value depends on the grouping this decides.
-const RUNNER_BASELINE_ENV: &[(&str, &str)] = &[("ROCK_TEST_SEED", "42"), ("STONE_HEADLESS", "1")];
+const RUNNER_BASELINE_ENV: &[(&str, &str)] = &[
+    ("ROCK_TEST_SEED", "42"),
+    ("SIM_SKIP_RENDER", "1"),
+    ("STONE_HEADLESS", "1"),
+];
+
+/// The opt-in a fixture declares to move one of its own `@sim_env` keys off the
+/// boot signature and onto the per-entry channel the worker already uses for
+/// `OUT`, `ROCK_RUN_SIM` and `FRAME_COUNT`: a comma-separated list of key names,
+/// e.g. `@sim_env("SIM_WORKER_PER_ENTRY_ENV", "MAG_TELEMETRY_ROOT")`.
+///
+/// It exists because `$OUT` is per entry while a spawn environment is not, and
+/// the ONLY thing that decides whether republishing a value at the entry
+/// boundary is enough is whether the GAME reads that variable live or captures
+/// it into a global during boot. The runner cannot see which, so it must be
+/// told, and the default has to be the safe one: an undeclared `$OUT` key still
+/// isolates. A blanket "all `$OUT` keys are per-entry now" would make MAG's
+/// bindings/layout-history group shareable and silently wrong -- those are read
+/// into globals at boot (`mag/actions.rock:199`, `mag/spellbook.rock:94-95`),
+/// so a per-entry setenv would be accepted and ignored and the second entry
+/// would read and write the FIRST entry's file.
+///
+/// Symmetric to `SIM_WORKER_ISOLATED`, which is the opt-OUT declared the same
+/// way; both are properties of the fixture, stated at the fixture.
+const PER_ENTRY_ENV_DECL: &str = "SIM_WORKER_PER_ENTRY_ENV";
+
+/// What the boot signature carries in place of a per-entry key's value: the
+/// PRESENCE is kept and the value dropped.
+///
+/// Keeping the presence is what makes the per-entry channel dense within a
+/// lane, and that is the whole clearing story. `OUT` and `FRAME_COUNT` are safe
+/// because every entry sets them; a sparsely published key would let an entry
+/// that declares nothing inherit its predecessor's value. Because an entry that
+/// does not carry the key has a DIFFERENT signature, it lands in a different
+/// lane, so within one worker either every entry publishes the key or none
+/// does. Nothing has to be unset at the boundary because nothing is ever stale.
+const PER_ENTRY_ENV_MARK: &str = "<per-entry>";
+
+/// A sim's `@sim_env` reduced to its effective pairs: last declaration wins,
+/// in first-declaration order.
+fn effective_env(env_pairs: &[(String, String)]) -> Vec<(String, String)> {
+    let mut effective: Vec<(String, String)> = Vec::with_capacity(env_pairs.len());
+    for (key, value) in env_pairs {
+        if let Some(previous) = effective.iter().position(|(k, _)| k == key) {
+            effective.remove(previous);
+        }
+        effective.push((key.clone(), value.clone()));
+    }
+    effective
+}
+
+/// The keys this entry declares as per-entry, in declaration order.
+///
+/// Empty names are dropped rather than rejected so a trailing comma is not a
+/// hard error, but an unrecognized name is NOT an error either -- naming a key
+/// the fixture does not declare simply has no effect, because the signature
+/// records presence and there is nothing present to record.
+fn per_entry_env_keys(env_pairs: &[(String, String)]) -> Vec<String> {
+    effective_env(env_pairs)
+        .into_iter()
+        .find(|(k, _)| k == PER_ENTRY_ENV_DECL)
+        .map(|(_, v)| {
+            v.split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
 
 /// The part of a sim's `@sim_env` that is consumed during global init, engine
 /// init and `@init` -- what a shared process cannot vary between entries.
 ///
-/// Canonical (stable-sorted by key) so declaration order does not split a
-/// group: two sims agreeing on the same pairs share a signature however they
-/// spelled them. The sort is stable, so a duplicated key keeps its last-wins
-/// application order and a genuine effective difference still refuses.
+/// Canonical (last-wins, then stable-sorted by key) so redundant declarations
+/// do not split a group: two sims agreeing on the same effective pairs share a
+/// signature however they spelled them. A different final value still refuses.
+///
+/// A key the fixture declared per-entry keeps its place with its value replaced
+/// by `PER_ENTRY_ENV_MARK`: the value is republished at every entry boundary so
+/// it is not boot state, but whether the key is published AT ALL still has to
+/// split the group -- see `PER_ENTRY_ENV_MARK`.
 fn boot_signature(env_pairs: &[(String, String)]) -> Vec<(String, String)> {
-    let mut sig: Vec<(String, String)> = env_pairs
-        .iter()
+    let effective = effective_env(env_pairs);
+    let per_entry = per_entry_env_keys(env_pairs);
+    let mut sig: Vec<(String, String)> = effective
+        .into_iter()
         .filter(|(k, _)| !RUNNER_OWNED_ENV_KEYS.contains(&k.as_str()))
         .filter(|(k, v)| {
             !RUNNER_BASELINE_ENV.iter().any(|(bk, bv)| *bk == k.as_str() && *bv == v.as_str())
         })
-        .cloned()
+        .map(|(k, v)| {
+            if per_entry.iter().any(|p| *p == k) {
+                (k, PER_ENTRY_ENV_MARK.to_string())
+            } else {
+                (k, v)
+            }
+        })
         .collect();
     sig.sort_by(|a, b| a.0.cmp(&b.0));
     sig
+}
+
+/// The pairs this part publishes through setenv when its entry starts, with
+/// `$OUT` resolved against the part's OWN tempdir.
+///
+/// Effective values only, so a redeclared key publishes what the signature
+/// recorded rather than the first spelling.
+fn per_entry_env_pairs(part: &WorkerPart) -> Vec<(String, String)> {
+    let keys = per_entry_env_keys(&part.env);
+    if keys.is_empty() {
+        return Vec::new();
+    }
+    let out = part.out_dir.to_string_lossy().to_string();
+    effective_env(&part.env)
+        .into_iter()
+        .filter(|(k, _)| keys.iter().any(|p| p == k))
+        .map(|(k, v)| (k, v.replace("$OUT", &out)))
+        .collect()
 }
 
 /// How `rock sim` maps entries to processes.
@@ -2023,6 +2532,14 @@ pub fn exec_mode(isolated: bool, workers: bool) -> SimExecMode {
         (true, _) => SimExecMode::Isolated,
         (_, true) => SimExecMode::Workers,
         _ => SimExecMode::Default,
+    }
+}
+
+fn sim_exec_mode_name(mode: SimExecMode) -> &'static str {
+    match mode {
+        SimExecMode::Isolated => "isolated",
+        SimExecMode::Workers => "workers",
+        SimExecMode::Default => "default",
     }
 }
 
@@ -2103,7 +2620,16 @@ fn worker_ineligibility(
         if env.iter().any(|(k, v)| k == "SIM_WORKER_ISOLATED" && v != "0") {
             return Some("declares @sim_env(SIM_WORKER_ISOLATED)".to_string());
         }
-        if let Some((k, v)) = env.iter().find(|(_, v)| v.contains("$OUT")) {
+        // `$OUT` is per entry and a spawn environment is not, so an
+        // interpolating key is boot state a shared worker cannot vary -- UNLESS
+        // the fixture declared it per-entry, in which case the worker
+        // republishes it at the boundary and the value is no longer fixed at
+        // spawn. Undeclared stays isolated: see `PER_ENTRY_ENV_DECL` for why
+        // the runner cannot decide this for itself.
+        let per_entry = per_entry_env_keys(env);
+        if let Some((k, v)) =
+            env.iter().find(|(k, v)| v.contains("$OUT") && !per_entry.iter().any(|p| p == k))
+        {
             return Some(format!(
                 "@sim_env(\"{k}\", \"{v}\") interpolates $OUT, which resolves before the process starts"
             ));
@@ -2155,6 +2681,31 @@ fn group_worker_specs(
     (groups.into_iter().map(|(_, members)| members).collect(), isolated)
 }
 
+fn worker_lane_count(group_len: usize, jobs: usize) -> usize {
+    if group_len == 0 {
+        return 0;
+    }
+    let jobs = jobs.max(1);
+    let full_lanes = group_len / jobs;
+    let partial_lane = usize::from(group_len % jobs != 0);
+    (full_lanes + partial_lane).min(jobs).max(1)
+}
+
+fn allocate_worker_lanes(groups: &[Vec<usize>], jobs: usize) -> Vec<Vec<usize>> {
+    let mut lanes = Vec::new();
+    for group in groups {
+        let blocks = worker_lane_count(group.len(), jobs);
+        for block in 0..blocks {
+            let lo = group.len() * block / blocks;
+            let hi = group.len() * (block + 1) / blocks;
+            if lo < hi {
+                lanes.push(group[lo..hi].to_vec());
+            }
+        }
+    }
+    lanes
+}
+
 /// One queued sim body. A worker child runs these in order in ONE process;
 /// the parts of a comma-chain share an `out_dir`, distinct entries do not.
 #[derive(Clone)]
@@ -2163,6 +2714,8 @@ struct WorkerPart {
     out_dir: PathBuf,
     frame_budget: usize,
     env: Vec<(String, String)>,
+    occurrence_id: u64,
+    part_index: usize,
 }
 
 /// One part's `__SIM__` and raw stderr lines, carved out of the worker's single
@@ -2252,6 +2805,7 @@ struct EnvelopeTracker {
 }
 
 /// What one observed line meant to the envelope.
+#[derive(Clone, Copy)]
 enum EnvelopeStep {
     /// A valid `entry_start` for the expected next entry -- the only step the
     /// deadline anchor may reset on.
@@ -2281,14 +2835,19 @@ impl DeadlineGuard {
     }
 
     /// True exactly when `line` must reset the deadline anchor.
+    #[cfg(test)]
     fn observe_resets(&mut self, line: &str) -> bool {
+        matches!(self.observe_boundary(line), Some(EnvelopeStep::Started(_)))
+    }
+
+    fn observe_boundary(&mut self, line: &str) -> Option<EnvelopeStep> {
         match self.envelope.as_mut().map(|t| t.observe(line)) {
-            Some(Ok(EnvelopeStep::Started(_))) => true,
+            Some(Ok(step)) => Some(step),
             Some(Err(_)) => {
                 self.envelope = None;
-                false
+                None
             }
-            _ => false,
+            None => None,
         }
     }
 }
@@ -2398,6 +2957,7 @@ fn run_worker(
     recording: bool,
     census_warmup_frames: Option<usize>,
     stone: Option<&mut crate::skull_backend::SkullStone>,
+    recorder: Option<&SimRunRecorder>,
 ) -> Result<Vec<SimSummary>> {
     let Some(first) = parts.first() else {
         return Err(anyhow!("worker got an empty entry queue"));
@@ -2430,7 +2990,14 @@ fn run_worker(
                 ));
             }
         }
-        if let Some((k, v)) = first.env.iter().find(|(_, v)| v.contains("$OUT")) {
+        // The same rule `worker_ineligibility` applies at planning time, restated
+        // where the process is actually spawned so a grouping bug is loud rather
+        // than a queue that is quietly wrong. A key the fixture declared
+        // per-entry is exempt because the child republishes it at each boundary.
+        let per_entry = per_entry_env_keys(&first.env);
+        if let Some((k, v)) =
+            first.env.iter().find(|(k, v)| v.contains("$OUT") && !per_entry.iter().any(|p| p == k))
+        {
             return Err(anyhow!(
                 "@sim_env(\"{k}\", \"{v}\") is resolved before the process starts, so it \
                  cannot follow a per-entry $OUT; sims using it stay on the isolated path"
@@ -2458,19 +3025,28 @@ fn run_worker(
 
     // The entry queue the child reads. Lives in the invocation-owned output
     // directory and stays alive for the child's whole run.
+    //
+    // `<name>\t<out>\t<budget>` and then a flat key, value, key, value tail of
+    // the pairs this entry publishes through setenv when it starts. Key and
+    // value take a TSV field each rather than sharing one as `K=V`, so a path
+    // containing `=` needs no escaping and the child needs no parser.
     let mut plan_file = tempfile::Builder::new()
         .prefix("entry-plan-")
         .suffix(".tsv")
         .tempfile_in(output)
         .context("creating the worker entry plan")?;
     for p in parts {
-        writeln!(
+        write!(
             plan_file,
             "{}\t{}\t{}",
             p.name,
             p.out_dir.to_string_lossy(),
             p.frame_budget
         )?;
+        for (k, v) in per_entry_env_pairs(p) {
+            write!(plan_file, "\t{k}\t{v}")?;
+        }
+        writeln!(plan_file)?;
     }
     plan_file.flush()?;
 
@@ -2530,6 +3106,22 @@ fn run_worker(
         // `wall_clock_ms` latches it into a `static` on first read, so a
         // per-entry override could not be honoured coherently anyway.
         .env("ROCK_MASK_WALL_CLOCK", if recording { "1" } else { "0" })
+        // Makes `stone-rs`'s telemetry identifiers reproducible, on the same
+        // terms and for the same reason: the session id and the consent
+        // generation are `Uuid::new_v4()`, so two runs of one sim wrote
+        // different artifact BYTES and the isolated reference was not
+        // reproducible against itself. Published from the same `recording`
+        // bool, after `preset_env` and as an explicit "0", and listed in
+        // `RUNNER_OWNED_ENV_KEYS` beside the mask -- a fixture must not be able
+        // to unmask a compared run, and an inherited value must not be able to
+        // mask an ordinary one. Telemetry is a shipping feature; an ordinary
+        // run keeps its real random ids.
+        //
+        // A separate key rather than a second meaning for the mask: that one
+        // REPLACES a rendered duration with `<ms>` in log text, this one DERIVES
+        // a value that must stay a parseable UUID. See `DETERMINISTIC_IDS_ENV`
+        // in `stone-rs/src/telemetry.rs`.
+        .env("ROCK_DETERMINISTIC_IDS", if recording { "1" } else { "0" })
         .env("FPS_LOG", "0")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -2558,8 +3150,34 @@ fn run_worker(
     }
 
     let label = parts.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(",");
-    let mut child = cmd.spawn()?;
+    let worker_attempt = recorder
+        .map(|recorder| {
+            let mut entries = Vec::new();
+            for part in parts {
+                if entries.last().map(|(id, _)| *id) != Some(part.occurrence_id) {
+                    entries.push((part.occurrence_id, part.name.clone()));
+                }
+            }
+            recorder.worker_spawn(
+                &entries,
+                &boot_signature(&first.env),
+                if parts.len() > 1 { "shared" } else { "isolated" },
+            )
+        })
+        .unwrap_or(0);
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            if let Some(recorder) = recorder {
+                recorder.worker_end(worker_attempt, "spawn_failed", None, None, false);
+            }
+            return Err(error.into());
+        }
+    };
     let process_id = child.id();
+    if let Some(recorder) = recorder {
+        recorder.worker_started(worker_attempt, process_id);
+    }
     record_sim_lifecycle("proc_start", &label);
     for p in parts {
         record_sim_lifecycle("start", &p.name);
@@ -2591,6 +3209,12 @@ fn run_worker(
         let lines = Arc::clone(&stderr_lines);
         let anchor = Arc::clone(&deadline_anchor);
         let reload_completion_tx = reload_completion_tx;
+        let recorder = recorder.cloned();
+        let entry_meta = parts
+            .iter()
+            .map(|part| (part.occurrence_id, part.name.clone(), part.part_index))
+            .collect::<Vec<_>>();
+        let mut first_entry_seen = false;
         let mut deadline_guard = DeadlineGuard::for_parts(parts);
         // Buffered runs must not write anything from this thread: several
         // children are live, so a direct write here interleaves into the middle
@@ -2605,8 +3229,49 @@ fn run_worker(
                     Ok(line) => line,
                     Err(e) => return Some(format!("error reading game stderr: {e}")),
                 };
-                if deadline_guard.observe_resets(&line) {
+                let boundary = deadline_guard.observe_boundary(&line);
+                if matches!(boundary, Some(EnvelopeStep::Started(_))) {
                     *anchor.lock().unwrap() = std::time::Instant::now();
+                }
+                if let Some(recorder) = recorder.as_ref() {
+                    match boundary {
+                        Some(EnvelopeStep::Started(seq)) => {
+                            if let Some((occurrence_id, name, part)) = entry_meta.get(seq) {
+                                if !first_entry_seen {
+                                    first_entry_seen = true;
+                                    recorder.worker_first_entry(
+                                        worker_attempt,
+                                        *occurrence_id,
+                                        name,
+                                        *part,
+                                    );
+                                }
+                                if let Some(context) = line.strip_prefix("__SIM__ ")
+                                    .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+                                    .and_then(|event| event.get("runtime").cloned())
+                                {
+                                    recorder.entry_runtime_context(worker_attempt, *occurrence_id, *part, context);
+                                }
+                                recorder.entry_start(
+                                    worker_attempt,
+                                    *occurrence_id,
+                                    name,
+                                    *part,
+                                );
+                            }
+                        }
+                        Some(EnvelopeStep::Ended(seq)) => {
+                            if let Some((occurrence_id, name, part)) = entry_meta.get(seq) {
+                                recorder.entry_end(
+                                    worker_attempt,
+                                    *occurrence_id,
+                                    name,
+                                    *part,
+                                );
+                            }
+                        }
+                        _ => {}
+                    }
                 }
                 if let Some(rest) = line.strip_prefix("__SIM__ ") {
                     let op = extract_str_field(rest, "op");
@@ -2724,7 +3389,15 @@ fn run_worker(
                         // silently dropping the request or reaching for the
                         // session from a parallel lane.
                         let serviced = match stone.as_deref_mut() {
-                            Some(st) => service_reload_edit(st, output, &mut pristine, &req),
+                            Some(st) => {
+                                let mut apply = || service_reload_edit(st, output, &mut pristine, &req);
+                                if let Some(recorder) = recorder {
+                                    let names = parts.iter().map(|part| part.name.as_str()).collect::<Vec<_>>().join(",");
+                                    recorder.phase(&format!("reload_apply:{names}"), apply)
+                                } else {
+                                    apply()
+                                }
+                            },
                             None => Err(anyhow!(
                                 "reload_edit is only available to sims that opt into the \
                                  reload lane with `@sim_env(\"STONE_HOT_RELOAD\", \"1\")`"
@@ -2790,6 +3463,25 @@ fn run_worker(
             }
         }
     };
+    if let Some(recorder) = recorder {
+        #[cfg(unix)]
+        let signal = status.signal();
+        #[cfg(not(unix))]
+        let signal = None;
+        recorder.worker_end(
+            worker_attempt,
+            if timed_out {
+                "timeout"
+            } else if status.success() {
+                "success"
+            } else {
+                "failure"
+            },
+            status.code(),
+            signal,
+            timed_out,
+        );
+    }
     // A request still queued here arrived after the child exited -- the sim
     // emitted reload_edit and stopped without waiting for the effect. That's
     // a sim-author bug; dropping it silently would hide the mis-ordering.
@@ -2886,6 +3578,9 @@ fn run_worker(
     for (i, (part, stream)) in parts.iter().zip(streams.iter()).enumerate() {
         let mut summary = SimSummary::from_stderr(&stream.sim.join("\n"));
         summary.process_id = Some(process_id);
+        if recorder.is_some() {
+            summary.worker_attempt = Some(worker_attempt);
+        }
         if !stream.started {
             summary.never_started = true;
             summary.errors.push(SiteMessage {
@@ -2976,7 +3671,18 @@ fn run_worker(
     // sim in the suite).
     if let Err(e) = stone
         .as_deref_mut()
-        .map(|st| revert_reload_edits(st, output, &mut pristine))
+        .map(|st| {
+            if pristine.is_empty() {
+                return revert_reload_edits(st, output, &mut pristine);
+            }
+            let mut restore = || revert_reload_edits(st, output, &mut pristine);
+            if let Some(recorder) = recorder {
+                let names = parts.iter().map(|part| part.name.as_str()).collect::<Vec<_>>().join(",");
+                recorder.phase(&format!("reload_restore:{names}"), restore)
+            } else {
+                restore()
+            }
+        })
         .unwrap_or(Ok(()))
     {
         summaries[blamed].errors.push(SiteMessage {
@@ -3017,12 +3723,17 @@ fn run_one_sim(
     env_pairs: &[(String, String)],
     stone: Option<&mut crate::skull_backend::SkullStone>,
     census_warmup_frames: Option<usize>,
+    recorder: Option<&SimRunRecorder>,
+    occurrence_id: Option<u64>,
+    part_index: usize,
 ) -> Result<SimSummary> {
     let part = WorkerPart {
         name: sim_part.to_string(),
         out_dir: out_path.to_path_buf(),
         frame_budget: frame_budget_for(sim_part, env_pairs)?,
         env: env_pairs.to_vec(),
+        occurrence_id: occurrence_id.unwrap_or(0),
+        part_index,
     };
     let mut summaries = run_worker(
         project,
@@ -3031,11 +3742,10 @@ fn run_one_sim(
         buffered,
         update_snapshots,
         output,
-        // Both callers build their `$OUT` from a non-recording `SimArtifacts`,
-        // so no record from here is ever compared.
         false,
         census_warmup_frames,
         stone,
+        recorder,
     )?;
     Ok(summaries.remove(0))
 }
@@ -3094,6 +3804,8 @@ fn run_entries(
                 out_dir: entry_artifacts.path().to_path_buf(),
                 frame_budget: frame_budget_for(name, &env)?,
                 env,
+                occurrence_id: 0,
+                part_index: parts.len(),
             });
         }
         artifacts.push(entry_artifacts);
@@ -3102,7 +3814,7 @@ fn run_entries(
     // Not quiet, but buffered: nothing is written live (several entries share
     // one stream), and every diagnostic is retained into its record instead.
     let summaries = match grouping {
-        Grouping::Shared => run_worker(project, &parts, false, true, false, output, true, None, None)?,
+        Grouping::Shared => run_worker(project, &parts, false, true, false, output, true, None, None, None)?,
         Grouping::PerPart => {
             let mut out = Vec::with_capacity(parts.len());
             for part in &parts {
@@ -3114,6 +3826,7 @@ fn run_entries(
                     false,
                     output,
                     true,
+                    None,
                     None,
                     None,
                 )?);
@@ -3159,23 +3872,32 @@ fn run_specs_recovering(
     entry_specs: &[String],
     update_snapshots: bool,
     record_manifest: bool,
+    recorder: Option<&SimRunRecorder>,
+    entry_ids: Option<&[u64]>,
 ) -> Result<Vec<(String, SimSummary, bool)>> {
     let mut plans = Vec::with_capacity(entry_specs.len());
-    for spec in entry_specs {
+    for (entry_index, spec) in entry_specs.iter().enumerate() {
         let artifacts = SimArtifacts::with_manifest(record_manifest)?;
         let chain = parse_sim_chain(spec);
         if chain.is_empty() {
             return Err(anyhow!("sim got an empty sim name"));
         }
+        let occurrence_id = entry_ids
+            .and_then(|ids| ids.get(entry_index))
+            .copied()
+            .unwrap_or(0);
         let parts = chain
             .iter()
-            .map(|name| {
+            .enumerate()
+            .map(|(part_index, name)| {
                 let env = env_by_wire.get(*name).cloned().unwrap_or_default();
                 Ok(WorkerPart {
                     name: name.to_string(),
                     out_dir: artifacts.path().to_path_buf(),
                     frame_budget: frame_budget_for(name, &env)?,
                     env,
+                    occurrence_id: occurrence_id,
+                    part_index,
                 })
             })
             .collect::<Result<Vec<_>>>()?;
@@ -3188,15 +3910,10 @@ fn run_specs_recovering(
     // offset 0. Only the round that produced the record knows.
     let mut done: Vec<(String, SimSummary, bool)> = Vec::new();
     let mut base = 0usize;
+    let mut recovery_round = 0usize;
     while base < plans.len() {
         let parts: Vec<WorkerPart> =
             plans[base..].iter().flat_map(|p| p.parts.iter().cloned()).collect();
-        // Every round past the first boots ANOTHER process, so it is a third
-        // source of boots beside the lane plan and the isolated entries -- and
-        // the only one decided at runtime, which no static grouping can predict.
-        // Without this line the boot count does not reconcile with the log:
-        // measured on testbed, 89 boots against 70 reported, the 19 missing
-        // being exactly the entries that ended their worker.
         if base > 0 {
             println!(
                 "[sim] worker: rebooting for {} unstarted entr{}",
@@ -3205,7 +3922,18 @@ fn run_specs_recovering(
             );
         }
         let summaries =
-            run_worker(project, &parts, false, true, update_snapshots, output, record_manifest, None, None)?;
+            run_worker(
+                project,
+                &parts,
+                false,
+                true,
+                update_snapshots,
+                output,
+                record_manifest,
+                None,
+                None,
+                recorder,
+            )?;
 
         // Reassemble per spec and decide how far this round got. Specs whose
         // parts all started are final; the first spec with an unstarted part is
@@ -3239,6 +3967,43 @@ fn run_specs_recovering(
         };
         debug_assert!(finals >= 1, "a recovery round must finalize at least one spec");
 
+        if finals < plans.len() - base {
+            let interrupted = merged
+                .iter()
+                .position(|(summary, _)| summary.never_started)
+                .unwrap_or_else(|| merged.len().saturating_sub(1));
+            let responsible_offset = if merged[interrupted].1 && interrupted > 0 {
+                interrupted - 1
+            } else {
+                interrupted
+            };
+            let responsible = &merged[responsible_offset].0;
+            let responsible_plan = &plans[base + responsible_offset];
+            let responsible_occurrence_id = responsible_plan
+                .parts
+                .first()
+                .map(|part| part.occurrence_id);
+            let successors = plans[base + finals..]
+                .iter()
+                .map(|plan| {
+                    (
+                        plan.parts.first().map(|part| part.occurrence_id).unwrap_or(0),
+                        plan.spec.clone(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            recovery_round += 1;
+            if let Some(recorder) = recorder {
+                recorder.recovery(
+                    recovery_round,
+                    &recovery_cause(responsible),
+                    responsible.worker_attempt,
+                    responsible_occurrence_id,
+                    &successors,
+                );
+            }
+        }
+
         for (offset, (mut summary, _)) in merged.into_iter().take(finals).enumerate() {
             let plan = &mut plans[base + offset];
             // An entry the native reset boundary could not return ENDS its
@@ -3250,7 +4015,7 @@ fn run_specs_recovering(
             // does for them. The reason is REPORTED so the entry is not a
             // silently slower one.
             let provenance = offset > 0;
-            if let Some(reason) = summary.worker_ineligible.take() {
+            if let Some(reason) = summary.worker_ineligible.as_deref() {
                 eprintln!(
                     "{} `{}` ended its worker: {}",
                     "[sim]".yellow(),
@@ -3262,12 +4027,48 @@ fn run_specs_recovering(
                 .artifacts
                 .take()
                 .expect("a spec is finalized exactly once");
+            let occurrence_id = plan.parts.first().map(|part| part.occurrence_id).unwrap_or(0);
+            if let Some(recorder) = recorder {
+                recorder.artifact_check_start(occurrence_id);
+            }
             artifacts.finish(&mut summary);
+            if let Some(recorder) = recorder {
+                recorder.artifact_check_end(occurrence_id, !summary.has_failures());
+                recorder.entry_result(
+                    occurrence_id,
+                    summary.worker_attempt.unwrap_or(0),
+                    verdict_word(&summary),
+                    summary
+                        .allocation_census
+                        .as_ref()
+                        .map(|c| c.frame_count),
+                    summary.expects_pass.len(),
+                    summary.timed_out,
+                    summary.process_failure_code,
+                );
+            }
             done.push((plan.spec.clone(), summary, provenance));
         }
         base += finals;
     }
     Ok(done)
+}
+
+fn recovery_cause(summary: &SimSummary) -> String {
+    if let Some(reason) = summary.worker_ineligible.as_deref() {
+        return reason.to_string();
+    }
+    if summary.timed_out {
+        return "worker timed out".to_string();
+    }
+    if let Some(code) = summary.process_failure_code {
+        return format!("worker process failed (exit_code={code})");
+    }
+    summary
+        .errors
+        .first()
+        .map(|error| error.message.clone())
+        .unwrap_or_else(|| "worker ended before successor entries".to_string())
 }
 
 /// Test-facing surface for the recovering worker queue: compile, run
@@ -3317,7 +4118,7 @@ fn run_worker_arm(
 
     for members in groups {
         let specs: Vec<String> = members.iter().map(|&i| ordered[i].clone()).collect();
-        let results = run_specs_recovering(project, output, env_by_wire, &specs, false, true)?;
+        let results = run_specs_recovering(project, output, env_by_wire, &specs, false, true, None, None)?;
         if results.len() != members.len() {
             return Err(anyhow!(
                 "worker group returned {} results for {} specs",
@@ -3644,7 +4445,7 @@ pub fn run_worker_suite(
     let (_, env_by_wire, _stone) = compile_sims(backend, project_path, PathBuf::from(&output))?;
 
     let results =
-        run_specs_recovering(&project, &output, &env_by_wire, entry_specs, false, true)?;
+        run_specs_recovering(&project, &output, &env_by_wire, entry_specs, false, true, None, None)?;
     Ok(results
         .into_iter()
         .enumerate()
@@ -4139,6 +4940,7 @@ struct SimSummary {
     errors: Vec<SiteMessage>,
     saw_stop: bool,
     process_id: Option<u32>,
+    worker_attempt: Option<u64>,
     allocation_census: Option<AllocationCensus>,
     snapshots: Vec<SnapshotOp>,
     image_snapshots: Vec<ImageSnapshotOp>,
@@ -4169,6 +4971,9 @@ struct SimSummary {
     /// Parent-side conservation evidence for the real watcher/publication
     /// completion path. None means this entry issued no reload request.
     reload_ledger: Option<ReloadLedgerSummary>,
+    /// Why this entry was excluded from execution by an admission check
+    /// (e.g. requires a different renderer backend like WGPU on an active GL suite).
+    excluded: Option<String>,
 }
 
 impl SimSummary {
@@ -4181,6 +4986,7 @@ impl SimSummary {
         // multi-start chain are expected to stop and respawn.
         self.saw_stop = other.saw_stop;
         self.process_id = other.process_id.or(self.process_id);
+        self.worker_attempt = other.worker_attempt.or(self.worker_attempt);
         if other.allocation_census.is_some() {
             self.allocation_census = other.allocation_census;
         }
@@ -4199,6 +5005,9 @@ impl SimSummary {
         self.never_started = self.never_started || other.never_started;
         if other.worker_ineligible.is_some() {
             self.worker_ineligible = other.worker_ineligible;
+        }
+        if other.excluded.is_some() {
+            self.excluded = other.excluded;
         }
         if let Some(other) = other.reload_ledger {
             let current = self.reload_ledger.get_or_insert_default();
@@ -4268,6 +5077,12 @@ impl SimSummary {
                     s.errors.push(SiteMessage { message, site });
                 }
                 "stop" => s.saw_stop = true,
+                "exclude" => {
+                    let reason = extract_str_field(rest, "reason")
+                        .unwrap_or_else(|| "unspecified".to_string());
+                    s.excluded = Some(reason);
+                    s.saw_stop = true;
+                }
                 "allocation_census" => match AllocationCensus::from_json(rest) {
                     Ok(census) if s.allocation_census.is_none() => {
                         s.allocation_census = Some(census)
@@ -4387,6 +5202,10 @@ impl SimSummary {
         // worse than either being wrong alone: a log reader and a shell `&&`
         // disagreed.
         let status = verdict_word(self);
+        if let Some(reason) = &self.excluded {
+            eprintln!("[sim] {sim_name}: {status} ({reason})");
+            return;
+        }
         let stop_note = if !self.saw_stop {
             " (no stop_sim() observed -- sim aborted early)"
         } else {
@@ -4554,6 +5373,8 @@ mod tests {
             out_dir: PathBuf::new(),
             frame_budget: 0,
             env: vec![("SIM_SKIP_RENDER".to_string(), if renders { "0" } else { "1" }.to_string())],
+            occurrence_id: 0,
+            part_index: 0,
         };
         // The inherited escape hatch is one-way: it can ask for real assets,
         // never for stubs. A stray "1" must not strip pixels out of a snapshot.
@@ -4577,6 +5398,8 @@ mod tests {
                 out_dir: PathBuf::new(),
                 frame_budget: 0,
                 env: vec![],
+                occurrence_id: 0,
+                part_index: 0,
             }]),
             "1",
             "declaring nothing takes the stubbed default"
@@ -4863,6 +5686,28 @@ mod tests {
         assert_eq!(resolve_jobs(Some(8), true), 1);
     }
 
+    #[test]
+    fn worker_lane_allocation_keeps_small_groups_intact() {
+        let groups = vec![vec![0, 1], vec![2, 3]];
+        assert_eq!(allocate_worker_lanes(&groups, 4), groups);
+    }
+
+    #[test]
+    fn worker_lane_allocation_uses_available_work_for_large_groups() {
+        let group: Vec<usize> = (0..16).collect();
+        assert_eq!(
+            allocate_worker_lanes(&[group], 4),
+            vec![
+                vec![0, 1, 2, 3],
+                vec![4, 5, 6, 7],
+                vec![8, 9, 10, 11],
+                vec![12, 13, 14, 15],
+            ]
+        );
+        assert_eq!(worker_lane_count(0, 4), 0);
+        assert_eq!(worker_lane_count(3, 0), 1);
+    }
+
     /// A comma-chain is scheduled as one entry, so ONE reload part makes the
     /// whole entry exclusive. Missing that would let the session go live while
     /// other children exist.
@@ -4959,6 +5804,49 @@ mod tests {
     }
 
     #[test]
+    fn a_frame_count_uses_the_last_declaration() {
+        assert_eq!(
+            frame_budget_for("s", &env(&[("FRAME_COUNT", "80"), ("FRAME_COUNT", "90")]))
+                .expect("last declaration is valid"),
+            90
+        );
+        assert_eq!(
+            frame_budget_for("s", &env(&[("FRAME_COUNT", "bad"), ("FRAME_COUNT", "90")]))
+                .expect("an overridden invalid declaration is inert"),
+            90
+        );
+        assert!(
+            frame_budget_for("s", &env(&[("FRAME_COUNT", "90"), ("FRAME_COUNT", "bad")]))
+                .is_err(),
+            "the effective last declaration is the one that must be validated"
+        );
+    }
+
+    #[test]
+    fn the_boot_signature_uses_effective_defaults_and_last_wins() {
+        assert_eq!(
+            sig(&[("SIM_SKIP_RENDER", "1")]),
+            sig(&[]),
+            "explicit skip-render default matches the runner-published default"
+        );
+        assert_eq!(
+            sig(&[("SIM_SKIP_RENDER", "0"), ("SIM_SKIP_RENDER", "1")]),
+            sig(&[]),
+            "an overridden render value does not split on its discarded value"
+        );
+        assert_ne!(
+            sig(&[("SIM_SKIP_RENDER", "1"), ("SIM_SKIP_RENDER", "0")]),
+            sig(&[]),
+            "the effective explicit render opt-in remains a boot difference"
+        );
+        assert_eq!(
+            sig(&[("OTHER", "old"), ("OTHER", "new")]),
+            sig(&[("OTHER", "new")]),
+            "ordinary environment declarations use last-wins semantics too"
+        );
+    }
+
+    #[test]
     fn the_boot_signature_excludes_only_runner_owned_keys() {
         let a = env(&[("FRAME_COUNT", "90"), ("STONE_FX_OFF", "1")]);
         let b = env(&[("FRAME_COUNT", "40"), ("STONE_FX_OFF", "1")]);
@@ -5025,6 +5913,134 @@ mod tests {
         );
         assert_eq!(isolated[2].0, 5);
         assert!(isolated[2].1.contains("SIM_WORKER_ISOLATED"), "{}", isolated[2].1);
+    }
+
+    /// The declared opt-in admits a `$OUT` key, and ONLY the declared one: an
+    /// entry naming one variable per-entry still isolates on a second
+    /// undeclared `$OUT` variable, which is what keeps the conservative
+    /// direction the default.
+    #[test]
+    fn a_declared_per_entry_key_is_admitted_and_an_undeclared_one_is_not() {
+        let wires = wires(&[
+            ("declared", &[("SIM_WORKER_PER_ENTRY_ENV", "ROOT"), ("ROOT", "$OUT/telemetry")]),
+            (
+                "partly",
+                &[
+                    ("SIM_WORKER_PER_ENTRY_ENV", "ROOT"),
+                    ("ROOT", "$OUT/telemetry"),
+                    ("BINDINGS", "$OUT/bindings.json"),
+                ],
+            ),
+            ("undeclared", &[("ROOT", "$OUT/telemetry")]),
+        ]);
+        let (groups, isolated) =
+            group_worker_specs(&specs(&["declared", "partly", "undeclared"]), &wires);
+
+        assert_eq!(groups, vec![vec![0]], "the fully declared entry is eligible");
+        assert_eq!(isolated.len(), 2);
+        assert_eq!(isolated[0].0, 1);
+        assert!(
+            isolated[0].1.contains("BINDINGS"),
+            "the refusal must name the UNDECLARED variable, not the declared one: {}",
+            isolated[0].1
+        );
+        assert_eq!(isolated[1].0, 2);
+        assert!(isolated[1].1.contains("ROOT"), "{}", isolated[1].1);
+    }
+
+    /// Two entries whose only difference is the VALUE of a declared per-entry
+    /// key share a worker; an entry that does not carry the key at all does
+    /// not. That second half is the clearing boundary: publication is dense
+    /// within a lane, so no entry can inherit a predecessor's value.
+    #[test]
+    fn a_per_entry_key_splits_on_presence_and_not_on_value() {
+        let decl = ("SIM_WORKER_PER_ENTRY_ENV", "ROOT");
+        let a = env(&[decl, ("ROOT", "$OUT/telemetry")]);
+        let b = env(&[decl, ("ROOT", "$OUT/menu-telemetry")]);
+        assert_eq!(
+            boot_signature(&a),
+            boot_signature(&b),
+            "the value is republished per entry, so it is not boot state"
+        );
+
+        let absent = env(&[decl]);
+        assert_ne!(
+            boot_signature(&a),
+            boot_signature(&absent),
+            "an entry that publishes nothing for the key must not share a worker with one \
+             that does, or it would inherit the predecessor's value"
+        );
+
+        let undeclared = env(&[("ROOT", "$OUT/telemetry")]);
+        assert_ne!(
+            boot_signature(&a),
+            boot_signature(&undeclared),
+            "without the declaration the key is ordinary boot state"
+        );
+    }
+
+    /// Each part resolves `$OUT` against its OWN directory -- the whole point,
+    /// since a shared spawn environment can only carry the first entry's.
+    #[test]
+    fn per_entry_pairs_resolve_out_against_the_parts_own_directory() {
+        let part = |name: &str, out: &str| WorkerPart {
+            name: name.to_string(),
+            out_dir: PathBuf::from(out),
+            frame_budget: 0,
+            env: env(&[
+                ("SIM_WORKER_PER_ENTRY_ENV", "ROOT"),
+                ("ROOT", "$OUT/telemetry"),
+                ("OTHER", "$OUT/ignored"),
+            ]),
+            occurrence_id: 0,
+            part_index: 0,
+        };
+        assert_eq!(
+            per_entry_env_pairs(&part("a", "/tmp/one")),
+            vec![("ROOT".to_string(), "/tmp/one/telemetry".to_string())],
+            "only the declared key is published, resolved against this part's $OUT"
+        );
+        assert_eq!(
+            per_entry_env_pairs(&part("b", "/tmp/two")),
+            vec![("ROOT".to_string(), "/tmp/two/telemetry".to_string())]
+        );
+
+        let plain = WorkerPart {
+            name: "plain".to_string(),
+            out_dir: PathBuf::from("/tmp/three"),
+            frame_budget: 0,
+            env: env(&[("ROOT", "/fixed")]),
+            occurrence_id: 0,
+            part_index: 0,
+        };
+        assert!(per_entry_env_pairs(&plain).is_empty(), "no declaration publishes nothing");
+    }
+
+    /// Last-wins applies to the declaration itself and to the value it names,
+    /// so the pair published matches the pair the signature recorded.
+    #[test]
+    fn per_entry_keys_and_values_use_effective_declarations() {
+        let e = env(&[
+            ("SIM_WORKER_PER_ENTRY_ENV", "STALE"),
+            ("SIM_WORKER_PER_ENTRY_ENV", " ROOT , OTHER ,"),
+            ("ROOT", "$OUT/first"),
+            ("ROOT", "$OUT/second"),
+        ]);
+        assert_eq!(per_entry_env_keys(&e), vec!["ROOT".to_string(), "OTHER".to_string()]);
+
+        let part = WorkerPart {
+            name: "p".to_string(),
+            out_dir: PathBuf::from("/tmp/out"),
+            frame_budget: 0,
+            env: e,
+            occurrence_id: 0,
+            part_index: 0,
+        };
+        assert_eq!(
+            per_entry_env_pairs(&part),
+            vec![("ROOT".to_string(), "/tmp/out/second".to_string())],
+            "the effective value is published; a named key that is absent publishes nothing"
+        );
     }
 
     /// A suite may name the same sim twice. Both occurrences are entries that
@@ -5115,6 +6131,8 @@ mod tests {
                 out_dir: PathBuf::from("/tmp/out"),
                 frame_budget: 600,
                 env: Vec::new(),
+                occurrence_id: 0,
+                part_index: 0,
             })
             .collect()
     }
@@ -5426,6 +6444,60 @@ mod tests {
         let mut died = SimSummary { saw_stop: true, ..SimSummary::default() };
         died.process_failure_code = Some(1);
         assert_eq!(verdict_word(&died), "FAIL");
+    }
+
+    #[test]
+    fn manual_gallery_selection_is_explicit_and_last_wins() {
+        assert!(manual_sim(&[("SIM_MANUAL".into(), "1".into())]).unwrap());
+        assert!(!manual_sim(&[]).unwrap());
+        assert!(!manual_sim(&[("SIM_MANUAL".into(), "1".into()),
+            ("SIM_MANUAL".into(), "0".into())]).unwrap());
+        assert!(manual_sim(&[("SIM_MANUAL".into(), "yes".into())]).is_err());
+    }
+
+    #[test]
+    fn excluded_named_entry_finalizes_history_without_spawning() {
+        let root = tempfile::tempdir().unwrap();
+        let recorder = SimRunRecorder::begin_at(root.path(), "testbed", "gpu_only", true, None, "single");
+        let ids = recorder.plan_entries(&specs(&["gpu_only"]));
+        let env = wires(&[("gpu_only", &[("SIM_BACKEND", "wgpu")])]);
+        let (_, summary) = run_named_entry("testbed", "gpu_only", true, false, false,
+            "", &env, None, None, Some(&recorder), Some(ids[0])).unwrap();
+        assert!(entry_excluded(&summary));
+        recorder.finish(true, None);
+        let records: Vec<serde_json::Value> = std::fs::read_to_string(recorder.events_path().unwrap())
+            .unwrap().lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+        assert_eq!(records.last().unwrap()["complete"], true);
+        let results: Vec<_> = records.iter().filter(|e| e["event"] == "entry_result").collect();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0]["verdict"], "EXCLUDED");
+        assert!(!records.iter().any(|e| e["event"] == "worker_spawn"));
+    }
+
+    #[test]
+    fn entry_excluded_is_not_passed_and_verdict_word_is_excluded() {
+        let mut s = SimSummary::default();
+        s.excluded = Some("requires wgpu".to_string());
+        s.saw_stop = true;
+        assert!(!entry_passed(&s));
+        assert!(entry_excluded(&s));
+        assert_eq!(verdict_word(&s), "EXCLUDED");
+    }
+
+    #[test]
+    fn sim_summary_from_stderr_parses_exclude_op() {
+        let stderr = "__SIM__ {\"op\":\"exclude\",\"reason\":\"requires wgpu\"}\n";
+        let s = SimSummary::from_stderr(stderr);
+        assert_eq!(s.excluded.as_deref(), Some("requires wgpu"));
+        assert!(s.saw_stop);
+    }
+
+    #[test]
+    fn sim_required_backend_parses_env_pairs() {
+        assert_eq!(sim_required_backend(&[("SIM_BACKEND".into(), "wgpu".into())]), Some("wgpu"));
+        assert_eq!(sim_required_backend(&[("STONE_RENDERER".into(), "wgpu".into())]), Some("wgpu"));
+        assert_eq!(sim_required_backend(&[("SIM_REQUIRES".into(), "wgpu".into())]), Some("wgpu"));
+        assert_eq!(sim_required_backend(&[("FRAME_COUNT".into(), "10".into())]), None);
     }
 
     #[test]

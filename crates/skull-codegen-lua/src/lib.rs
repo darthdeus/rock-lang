@@ -900,11 +900,36 @@ fn instruction_reference_counts(func: &MirFunc) -> Vec<u32> {
     counts
 }
 
-fn tail_forwards(func: &MirFunc) -> Vec<Option<TailForward>> {
+fn tail_forwards(ws: &Workspace, func: &MirFunc, direct: bool) -> Vec<Option<TailForward>> {
     let mut forwards = vec![None; func.blocks.len()];
     let cell_references = cell_reference_counts(func);
     for (block_id, block) in func.blocks.iter() {
         let Term::Return(values) = &block.term else { continue };
+        if direct && let Some(&call_id) = block.insts.last()
+            && let Inst::Call { func: callee_ref, args } = &func.insts[call_id]
+        {
+            let callee = func_of(ws, *callee_ref);
+            let exact_wire = func.call_abi_plans.get(&call_id).is_some_and(|abi| {
+                match abi.result_lanes() {
+                    0 => values.is_empty(),
+                    1 => values.as_slice() == [call_id],
+                    _ => false,
+                }
+            });
+            // Foreign bodies can return extra Lua values beyond their declared wire.
+            if exact_wire && callee.inline_body.is_none() && !callee.is_extern
+                && !callee.is_coroutine
+            {
+                forwards[raw(block_id) as usize] = Some(TailForward {
+                    first_suppressed: block.insts.len() - 1,
+                    suppressed: vec![call_id],
+                    call: TailForwardCall::Direct {
+                        call: call_id, func: *callee_ref, args: args.clone(),
+                    },
+                });
+                continue;
+            }
+        }
         if values.is_empty() || block.insts.len() < values.len() + 1 {
             continue;
         }
@@ -1223,7 +1248,7 @@ fn emit_named_framed_with_statics_impl(
     let entry = func.entry();
     let params = func.params.as_slice();
     let rpo = reverse_postorder(func, entry);
-    let tail_forwards = tail_forwards(func);
+    let tail_forwards = tail_forwards(ws, func, frame.is_none());
     let (call_arg_forwards, suppressed) = if frame.is_some() {
         // Coroutine lifting moves later uses into frame fields, outside the
         // ordinary cell reference count that proves a producer unobserved.
@@ -2407,13 +2432,22 @@ impl Emitter<'_> {
                 return;
             }
         }
-        self.emit_term(out, &self.func.blocks[bb].term);
+        self.emit_term(out, &self.func.blocks[bb].term, bb);
     }
 
     fn emit_tail_forward(&self, out: &mut String, tail: &TailForward) {
         out.push_str("  do return ");
-        match &tail.call {
+        self.write_forward_call(out, &tail.call);
+        out.push_str(" end\n");
+    }
+
+    fn write_forward_call(&self, out: &mut String, call: &TailForwardCall) {
+        match call {
             TailForwardCall::Direct { call, func, args } => {
+                if let Some(forward) = &self.call_arg_forwards[raw(*call) as usize] {
+                    self.write_call_arg_forward(out, forward);
+                    return;
+                }
                 out.push_str(&self.callee_name(*call, *func));
                 out.push('(');
                 self.write_csv(out, args);
@@ -2424,7 +2458,7 @@ impl Emitter<'_> {
                 self.write_csv(out, args);
             }
         }
-        out.push_str(") end\n");
+        out.push(')');
     }
 
     /// Emit a recognized counted loop as `for <slot> = <slot>, hi[-1] do .. end`.
@@ -2528,25 +2562,19 @@ impl Emitter<'_> {
         out.push_str("  ");
         write_vname(out, self.func, &self.colors, forward.consumer);
         out.push_str(" = ");
+        self.write_call_arg_forward(out, forward);
+        out.push('\n');
+    }
+
+    fn write_call_arg_forward(&self, out: &mut String, forward: &CallArgForward) {
         out.push_str(&self.callee_name(forward.consumer, forward.func));
         out.push('(');
         self.write_csv(out, &forward.prefix);
         if !forward.prefix.is_empty() {
             out.push_str(", ");
         }
-        match &forward.producer {
-            TailForwardCall::Direct { call, func, args } => {
-                out.push_str(&self.callee_name(*call, *func));
-                out.push('(');
-                self.write_csv(out, args);
-            }
-            TailForwardCall::Value { callee, args } => {
-                self.write_opnd(out, *callee);
-                out.push('(');
-                self.write_csv(out, args);
-            }
-        }
-        out.push_str("))\n");
+        self.write_forward_call(out, &forward.producer);
+        out.push(')');
     }
 
     /// Splice an `@inline inline(lua)` `Call` inline, if `id` is one. Returns
@@ -3425,7 +3453,81 @@ impl Emitter<'_> {
         }
     }
 
-    fn emit_term(&self, out: &mut String, term: &Term) {
+    fn numeric_selection(&self, bb: Idx<Block>, cond: Idx<Inst>, yes: Idx<Block>, no: Idx<Block>)
+        -> Option<(Idx<Cell>, Idx<Inst>, Idx<Inst>, &'static str, Idx<Block>)>
+    {
+        if !self.inlinable[raw(cond) as usize] { return None; }
+        let (a, b, less) = match self.func.insts[cond] {
+            Inst::FloatLt(a, b) | Inst::IntLt(a, b) => (a, b, true),
+            Inst::FloatGt(a, b) | Inst::IntGt(a, b) => (a, b, false),
+            _ => return None,
+        };
+        // Reversing a selection's operands must not reorder deferred effects.
+        for id in [a, b] {
+            if self.inlinable[raw(id) as usize]
+                && !matches!(self.func.insts[id], Inst::Load(_) | Inst::Const(_))
+            { return None; }
+        }
+        let arm = |bb: Idx<Block>| -> Option<(Option<(Idx<Cell>, Idx<Inst>)>, Idx<Block>)> {
+            let block = &self.func.blocks[bb];
+            let Term::Goto(join) = block.term else { return None; };
+            let store = match block.insts.as_slice() {
+                [] => None,
+                [s] => match self.func.insts[*s] {
+                    Inst::Store { cell, value } => Some((cell, value)),
+                    _ => return None,
+                },
+                [l, s] if self.inlinable[raw(*l) as usize]
+                    && matches!(self.func.insts[*l], Inst::Load(_)) => {
+                    match self.func.insts[*s] {
+                        Inst::Store { cell, value } if value == *l => Some((cell, value)),
+                        _ => return None,
+                    }
+                },
+                _ => return None,
+            };
+            Some((store, join))
+        };
+        let (yes_store, join) = arm(yes)?;
+        let (no_store, no_join) = arm(no)?;
+        if join != no_join { return None; }
+        let cell = yes_store.or(no_store)?.0;
+        if yes_store.is_some_and(|s| s.0 != cell) || no_store.is_some_and(|s| s.0 != cell) {
+            return None;
+        }
+        let current_load = |id: Idx<Inst>| {
+            if self.inlinable[raw(id) as usize] { return true; }
+            let insts = &self.func.blocks[bb].insts;
+            let Some(pos) = insts.iter().rposition(|i| *i == id) else { return false; };
+            // A captured comparison operand may stand for the unchanged cell,
+            // but never carry that equivalence across a write or call.
+            insts[pos + 1..].iter().all(|i| *i == cond
+                || matches!(self.func.insts[*i], Inst::Load(_) | Inst::Const(_)))
+        };
+        let matches = |store: Option<(Idx<Cell>, Idx<Inst>)>, operand: Idx<Inst>| {
+            match store {
+                Some((_, value)) if value == operand => true,
+                Some((_, value)) => match (&self.func.insts[value], &self.func.insts[operand]) {
+                    (Inst::Load(x), Inst::Load(y)) => x == y
+                        && self.inlinable[raw(value) as usize]
+                        && current_load(operand),
+                    _ => false,
+                },
+                None => matches!(self.func.insts[operand], Inst::Load(c) if c == cell)
+                    && current_load(operand),
+            }
+        };
+        if matches(yes_store, a) && matches(no_store, b) {
+            Some((cell, a, b, if less { "min" } else { "max" }, join))
+        } else if matches(yes_store, b) && matches(no_store, a) {
+            // Native min/max choose the second operand on ties/unordered input.
+            Some((cell, b, a, if less { "max" } else { "min" }, join))
+        } else {
+            None
+        }
+    }
+
+    fn emit_term(&self, out: &mut String, term: &Term, bb: Idx<Block>) {
         match term {
             // luajit rule 2: `return` wrapped `do ... end` so it is never the
             // block's mid-sequence statement (and is legal as the last one too).
@@ -3447,6 +3549,20 @@ impl Emitter<'_> {
                 then_bb,
                 else_bb,
             } => {
+                if let Some((cell, a, b, op, join)) = self.numeric_selection(bb, *cond, *then_bb, *else_bb) {
+                    out.push_str("  ");
+                    write_cellname(out, self.func, self.frame, self.cell_colors, cell);
+                    out.push_str(" = math.");
+                    out.push_str(op);
+                    out.push('(');
+                    self.write_opnd(out, a);
+                    out.push_str(", ");
+                    self.write_opnd(out, b);
+                    out.push_str(")\n  goto bb");
+                    push_uint(out, self.func.emit_block_id(join));
+                    out.push('\n');
+                    return;
+                }
                 out.push_str("  if ");
                 self.write_opnd(out, *cond);
                 out.push_str(" then goto bb");

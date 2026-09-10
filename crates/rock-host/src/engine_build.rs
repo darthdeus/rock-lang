@@ -9,7 +9,7 @@
 //! the FFI loader sees the same name on both layouts.
 
 use anyhow::Result;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 /// Run `cargo <args>` with inherited stdio, bailing with `fail_msg`
@@ -18,6 +18,7 @@ use std::process::{Command, Stdio};
 pub fn run_cargo(args: &[&str], fail_msg: &str) -> Result<()> {
     let status = Command::new("cargo")
         .args(args)
+        .current_dir(crate::rock_dir())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .status()?;
@@ -61,6 +62,12 @@ pub const OPTIONAL_ENGINE_LIBS: &[EngineLib] = &[
         crate_name: "stone-wgpu",
         src_stem: "stone_wgpu",
         dst_stem: "stone_wgpu",
+    },
+    EngineLib {
+        need: "agent",
+        crate_name: "stone-agent",
+        src_stem: "stone_agent",
+        dst_stem: "stone_agent",
     },
 ];
 
@@ -246,28 +253,31 @@ fn cargo_build_and_stage_lib(
 /// is atomic on macOS and Linux; concurrent dlopens see either the old
 /// or the new fully-signed file but never a torn or mid-resign one.
 pub fn stage_cdylib(src_stem: &str, dst_stem: &str) -> Result<()> {
-    fs_err::create_dir_all("tmp")?;
+    let rock_root = PathBuf::from(crate::rock_dir());
+    let target_debug = rock_root.join("target/debug");
+    let dev_tmp = rock_root.join("tmp");
+    fs_err::create_dir_all(&dev_tmp)?;
     let pid = std::process::id();
 
     // Platform cdylib naming: Unix prefixes `lib`, Windows doesn't;
     // extension is .so / .dylib / .dll.
     #[cfg(target_os = "linux")]
     let (src, dst) = (
-        format!("target/debug/lib{src_stem}.so"),
-        format!("tmp/lib{dst_stem}.so"),
+        target_debug.join(format!("lib{src_stem}.so")),
+        dev_tmp.join(format!("lib{dst_stem}.so")),
     );
     #[cfg(target_os = "macos")]
     let (src, dst) = (
-        format!("target/debug/lib{src_stem}.dylib"),
-        format!("tmp/lib{dst_stem}.dylib"),
+        target_debug.join(format!("lib{src_stem}.dylib")),
+        dev_tmp.join(format!("lib{dst_stem}.dylib")),
     );
     #[cfg(target_os = "windows")]
     let (src, dst) = (
-        format!("target/debug/{src_stem}.dll"),
-        format!("tmp/{dst_stem}.dll"),
+        target_debug.join(format!("{src_stem}.dll")),
+        dev_tmp.join(format!("{dst_stem}.dll")),
     );
 
-    let staging = format!("{dst}.{pid}");
+    let staging = format!("{}.{pid}", dst.display());
 
     // `cargo build -p <pkg>` can exit 0 without producing the cdylib at
     // `target/debug/lib<stem>.dylib`: a cleaned/foreign target dir
@@ -276,7 +286,7 @@ pub fn stage_cdylib(src_stem: &str, dst_stem: &str) -> Result<()> {
     // `fs_err::copy` then fails with a cryptic "No such file or
     // directory (os error 2)" that points at the *destination*, hiding
     // the real problem. Surface it.
-    if !Path::new(&src).exists() {
+    if !src.exists() {
         let pkg = src_stem.replace('_', "-");
         anyhow::bail!(
             "cargo build reported success but the cdylib was not produced at `{src}`.\n\
@@ -285,7 +295,7 @@ pub fn stage_cdylib(src_stem: &str, dst_stem: &str) -> Result<()> {
              touched dependents.\n\
              Recover: `cargo build -p {pkg}` from this worktree and confirm \
              `{src}` exists, then re-run.",
-            src = src,
+            src = src.display(),
             pkg = pkg,
         );
     }
@@ -350,7 +360,8 @@ pub fn build_optional_engine_lib(lib: &EngineLib) -> Result<()> {
     if crate::project::is_release_layout() {
         return Ok(());
     }
-    if !Path::new(lib.crate_name).exists() {
+    let crate_path = PathBuf::from(crate::rock_dir()).join(lib.crate_name);
+    if !crate_path.exists() {
         anyhow::bail!(
             "stick.toml declares `[engine] needs = [\"{}\"]`, but the crate \
              `{}` is not in this workspace.",

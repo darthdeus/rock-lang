@@ -31,6 +31,8 @@ pub use log::{debug, error, info, trace, warn};
 pub mod backend_stats;
 pub mod bone_backend;
 pub mod skull_backend;
+pub mod docs_index;
+pub mod sdk_check;
 pub mod common;
 mod compile_cmd;
 pub mod comptime;
@@ -73,6 +75,8 @@ mod replay_profile_report;
 mod image_video;
 pub mod run_sim;
 pub mod sim_record;
+pub mod sim_observability;
+pub mod sim_report;
 mod stone;
 pub mod stone_test;
 mod test;
@@ -134,6 +138,12 @@ pub enum CliCommand {
     /// `<name>` may be comma-separated for chained multi-start
     /// (`a,b` -> two luajit children sharing one `$OUT` tempdir).
     Sim,
+    /// `rock sim-report [<run-id>] [--sim-log-dir <root>]` -- read the
+    /// persistent `rock sim` history in `.sim-runs/<run-id>/` in aggregate:
+    /// wall/envelope/startup decomposition, boot amortization, the lane and
+    /// boot-signature census, and worker occupancy. Read-only over the
+    /// history; it never writes, prunes or mutates a run record.
+    SimReport,
     /// `rock lint <path>` -- run the lint catalog (`crates/bone-lints`) over a
     /// file or project and report the findings. The author-facing surface of the
     /// same engine the LSP and the build pass drive; exits non-zero only on an
@@ -313,6 +323,11 @@ pub enum CliCommand {
     /// `rock sound-inspect <game>` -- compile the game's declared sound
     /// project and open its runtime bank in the independent inspector.
     SoundInspect,
+    /// `rock docs-index <dir|file>... --output <file>` — generate a
+    /// deterministic declaration/signature index from Rock source.
+    DocsIndex,
+    /// Check SDK support for a project manifest and its native libraries without building.
+    SdkCheck,
 }
 
 impl clap::ValueEnum for CliCommand {
@@ -323,6 +338,7 @@ impl clap::ValueEnum for CliCommand {
             Self::Stone, Self::Replay, Self::ReplayReport, Self::ReplayProfile,
             Self::ReplayProfileReport, Self::Perf,
             Self::Sim,
+            Self::SimReport,
             Self::Completions,
             Self::Lint,
             Self::StoneTest,
@@ -352,6 +368,8 @@ impl clap::ValueEnum for CliCommand {
             Self::Web,
             Self::Package,
             Self::SoundInspect,
+            Self::DocsIndex,
+            Self::SdkCheck,
         ]
     }
     fn to_possible_value(&self) -> Option<clap::builder::PossibleValue> {
@@ -381,6 +399,7 @@ impl CliCommand {
             Self::StoneTest => "stone-test",
             Self::Perf => "perf",
             Self::Sim => "sim",
+            Self::SimReport => "sim-report",
             Self::Completions => "completions",
             Self::Lint => "lint",
             Self::IterCompile => "iter-compile",
@@ -409,6 +428,8 @@ impl CliCommand {
             Self::Web => "web",
             Self::Package => "package",
             Self::SoundInspect => "sound-inspect",
+            Self::DocsIndex => "docs-index",
+            Self::SdkCheck => "sdk-check",
         }
     }
 }
@@ -592,6 +613,10 @@ pub struct Args {
     pub top: usize,
     /// For `rock replay-report`: observations of context around suggested ranges.
     pub context: usize,
+    /// For `rock sim-report`: the sim history root to read.
+    pub sim_log_dir: Option<String>,
+    /// For `rock sim-report`: compare this named entry across retained runs.
+    pub sim_entry: Option<String>,
     /// For `rock replay-profile`: inclusive observation range `A-B`.
     pub replay_range: Option<String>,
     /// For `rock replay-profile`: fresh-process repetitions of the range.
@@ -795,6 +820,10 @@ impl Args {
             .arg(Arg::new("context").long("context").default_value("2")
                 .value_parser(clap::value_parser!(usize))
                 .help("For `rock replay-report`: pad suggested observation ranges by this many frames (default 2)."))
+            .arg(Arg::new("sim-log-dir").long("sim-log-dir")
+                .help("For `rock sim-report`: the persistent sim history root to read (default: $ROCK_SIM_LOG_DIR, else .sim-runs). Read-only."))
+            .arg(Arg::new("sim-entry").long("sim-entry")
+                .help("For `rock sim-report`: compare one named sim's entry envelope across every retained run instead of reporting one run."))
             .arg(Arg::new("replay-range").long("range")
                 .help("For `rock replay-profile`: inclusive observation range A-B."))
             .arg(Arg::new("runs").long("runs").default_value("1")
@@ -921,6 +950,8 @@ impl Args {
             perf_format: m.get_one::<String>("perf-format").cloned().unwrap_or_else(|| "pretty".to_string()),
             top: *m.get_one::<usize>("top").unwrap(),
             context: *m.get_one::<usize>("context").unwrap(),
+            sim_log_dir: m.get_one::<String>("sim-log-dir").cloned(),
+            sim_entry: m.get_one::<String>("sim-entry").cloned(),
             replay_range: m.get_one::<String>("replay-range").cloned(),
             runs: *m.get_one::<usize>("runs").unwrap(),
             type_validation: m.get_flag("type-validation"),

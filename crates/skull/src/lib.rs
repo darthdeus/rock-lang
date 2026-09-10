@@ -430,7 +430,20 @@ fn runtime_prelude() -> &'static str {
     //      and re-traces on a cliff/spiral (mag floors_walls: ~2.6 ms vs ~0.5
     //      with this). A trace must fit one `sizemcode` block. On arm64 macOS,
     //      dyld leaves room for the first block near the VM but later mappings
-    //      prevent a second one, so that first block must hold the hot set.
+    //      prevent a second one, so that first block must hold the hot set --
+    //      which is why size == max on both arches: one block, not several.
+    //      The budget is arch-split because the jump range is: x64 reaches
+    //      +/-2GB, arm64 only +/-128MB, so arm64 keeps the 16 MB figure from
+    //      the W1 decision in docs/luajit-mcode-flush-plan.md while x64 takes
+    //      64 MB. 8 MB was sized against `mag floors_walls` and is far too
+    //      small for the live game: a 60 s session of real play (summons,
+    //      combat, multiple spaces) flushed 31 times -- once every ~0.7 s --
+    //      and flush-plus-recovery accounted for 94% of all frame time over
+    //      budget. Evidence and the per-frame join are in
+    //      docs/trace-pressure-work-plan.md.
+    //      ROCK_JIT_MCODE_KB overrides both, so the budget can be swept
+    //      without a rebuild; this prelude runs at chunk load and beats any
+    //      -O flag passed on the command line.
     //   2. 32-bit RNG (stdlib `random_*` inline(lua) bodies call
     //      `__rock_rng_next`/`__rock_rng_seed` by name); seeded from
     //      ROCK_TEST_SEED for deterministic test runs.
@@ -462,7 +475,7 @@ fn runtime_prelude() -> &'static str {
 }
 
 const PRELUDE_TEMPLATE: &str =
-    r#"if jit and jit.opt then jit.opt.start("maxmcode=8192", "sizemcode=8192", "maxtrace=4000", "maxrecord=32000", "maxsnap=4000") end
+    r#"if jit and jit.opt then local __mc = tonumber(os.getenv("ROCK_JIT_MCODE_KB") or "") or (jit.arch == "arm64" and 16384 or 65536) jit.opt.start("maxmcode=" .. __mc, "sizemcode=" .. __mc, "maxtrace=4000", "maxrecord=32000", "maxsnap=4000") end
 if not _G.ffi then _G.ffi = require("ffi") end
 if not _G.__ROCK_C_STRUCT then _G.__ROCK_C_STRUCT = {} end
 if not _G.__ROCK_TYPE_TABLE then _G.__ROCK_TYPE_TABLE = {} end
