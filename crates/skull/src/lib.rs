@@ -1840,7 +1840,10 @@ mod tests {
     #[test]
     fn runtime_prelude_keeps_the_mag_trace_working_set() {
         let prelude = super::runtime_prelude();
-        assert!(prelude.contains("maxmcode=8192\", \"sizemcode=8192"));
+        // One block per arch, sized by jump range, overridable without a rebuild.
+        assert!(prelude.contains("os.getenv(\"ROCK_JIT_MCODE_KB\")"));
+        assert!(prelude.contains("jit.arch == \"arm64\" and 16384 or 65536"));
+        assert!(prelude.contains("\"maxmcode=\" .. __mc, \"sizemcode=\" .. __mc"));
     }
 
     #[test]
