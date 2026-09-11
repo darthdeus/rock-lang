@@ -1139,7 +1139,9 @@ pub(crate) fn statement_is_pure(func: &MirFunc, inline: &[bool], id: Idx<Inst>) 
 /// values, hoisted constants); their reads are attributed to the consumer, as
 /// the emitter renders them. `loops` supplies the blocks in which a loop-scoped
 /// register may be killed (its `for` body plus the latch label, both inside the
-/// `for` block).
+/// `for` block). `cell_excluded` is every cell this body does NOT render as a
+/// bare `c<color>` local, from the caller's own declaration predicate: a kill of
+/// one of those would assign a GLOBAL of that name.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn nil_kills(
     func: &MirFunc,
@@ -1149,7 +1151,7 @@ pub(crate) fn nil_kills(
     value_scope: &[Option<Idx<Block>>],
     loops: &[LoopScope],
     cell_colors: &[u32],
-    cell_pinned: &[bool],
+    cell_excluded: &[bool],
     params: &[Idx<Cell>],
 ) -> NilKills {
     let n = scope.len();
@@ -1163,13 +1165,15 @@ pub(crate) fn nil_kills(
         .map(|&c| c + 1)
         .max()
         .unwrap_or(0);
-    // Slot space: value colors first, then killable cell colors. A pinned cell
-    // owns its color alone, so excluding it by cell excludes the color.
+    // Slot space: value colors first, then killable cell colors. `cell_excluded`
+    // carries both reasons a cell is not killable: it is pinned (owning its color
+    // alone, so excluding it by cell excludes the color), or the emitter renders
+    // it as no local at all, in which case a kill would assign a global.
     let mut cell_slot = vec![u32::MAX; func.cells.len()];
     let mut cell_count = 0u32;
     for (id, _) in func.cells.iter() {
         let col = cell_colors[raw(id)];
-        if col != u32::MAX && !cell_pinned[raw(id)] {
+        if col != u32::MAX && !cell_excluded[raw(id)] {
             cell_slot[raw(id)] = value_count + col;
             cell_count = cell_count.max(col + 1);
         }

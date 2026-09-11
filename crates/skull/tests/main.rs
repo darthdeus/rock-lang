@@ -171,6 +171,8 @@ mod native_buffer_alloc;
 mod native_buffer_element_admission;
 #[path = "native_buffer_leaf_addressing.rs"]
 mod native_buffer_leaf_addressing;
+#[path = "nil_kill_scope.rs"]
+mod nil_kill_scope;
 #[path = "nobox_arena_random_sentinel.rs"]
 mod nobox_arena_random_sentinel;
 #[path = "nobox_column_threshold.rs"]
@@ -203,6 +205,8 @@ mod reserved_namespace;
 mod comptime_inputs;
 #[path = "shader_pipeline_register.rs"]
 mod shader_pipeline_register;
+#[path = "state_global_bridge.rs"]
+mod state_global_bridge;
 #[path = "static_hot_reload.rs"]
 mod static_hot_reload;
 #[path = "static_registration_coverage.rs"]

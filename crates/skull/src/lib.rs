@@ -744,16 +744,17 @@ _G.__rock_state_install_global_bridge = function()
     mt.__rock_state_original_index = old_index
     mt.__rock_state_original_newindex = old_newindex
   end
-  local function old_read(t, key)
-    if type(old_index) == "function" then return old_index(t, key) end
-    if type(old_index) == "table" then return old_index[key] end
-    return nil
-  end
-  local function old_write(t, key, value)
-    if type(old_newindex) == "function" then return old_newindex(t, key, value) end
-    if type(old_newindex) == "table" then old_newindex[key] = value; return end
-    rawset(t, key, value)
-  end
+  -- Which of the three pre-bridge fallback shapes applies is decided HERE, once,
+  -- rather than re-decided inside the metamethod on every miss. `_G` normally
+  -- carries no metatable at all, so both resolve to nil and the miss path is a
+  -- plain `return nil` / `rawset` with no Lua-level TAIL CALL -- and a miss is
+  -- the common case: a read of any global that is not a Rock state global and
+  -- holds nil (an unset feature flag, say) reaches `__index` every time, and
+  -- cannot be cached raw, because rawsetting nil leaves the key absent.
+  local index_fn = type(old_index) == "function" and old_index or nil
+  local index_tab = type(old_index) == "table" and old_index or nil
+  local newindex_fn = type(old_newindex) == "function" and old_newindex or nil
+  local newindex_tab = type(old_newindex) == "table" and old_newindex or nil
   local previous_physical = rawget(_G, "__rock_state_bridge_physical") or {}
   for _, physical in ipairs(previous_physical) do rawset(_G, physical, nil) end
   local current_physical = {}
@@ -769,12 +770,16 @@ _G.__rock_state_install_global_bridge = function()
   mt.__index = function(t, key)
     local entry = _G.__rock_state_entry_for_name(key)
     if entry and entry.kind == "global" then return _G.__rock_state_entry_get(entry) end
-    return old_read(t, key)
+    if index_fn then return index_fn(t, key) end
+    if index_tab then return index_tab[key] end
+    return nil
   end
   mt.__newindex = function(t, key, value)
     local entry = _G.__rock_state_entry_for_name(key)
     if entry and entry.kind == "global" then return _G.__rock_state_entry_set(entry, value) end
-    return old_write(t, key, value)
+    if newindex_fn then return newindex_fn(t, key, value) end
+    if newindex_tab then newindex_tab[key] = value; return end
+    rawset(t, key, value)
   end
   mt.__rock_state_bridge = true
   setmetatable(_G, mt)

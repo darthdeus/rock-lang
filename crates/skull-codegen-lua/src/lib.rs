@@ -2880,6 +2880,25 @@ fn render_scope(
         va = regalloc::color_values(func, rpo, &inlinable, &[]);
     }
     let regalloc::ValueAlloc { colors, color_scope } = va;
+    // Only cells this region actually references get a local (a hoisted lambda
+    // body is a full-arena clone; declaring the dead enclosing/sibling cells would
+    // blow LuaJIT's 200-local cap on a large co-fn step). Computed once per top
+    // scope; inline (non-`is_top`) renders declare nothing, so they skip it.
+    let referenced = if is_top {
+        referenced_cells_in_region(func, entry, tail_forwards, suppressed)
+    } else {
+        HashSet::default()
+    };
+    let param_cells: HashSet<Idx<Cell>> = params.iter().copied().collect();
+    let is_frame = |c: &Idx<Cell>| frame.is_some_and(|f| f.fields.contains(c));
+    // THE one answer to "does this cell render as a bare `c<..>` local here" --
+    // read by the nil-kill exclusion just below and by the declaration loop that
+    // emits those locals. A kill of a cell with no local assigns a GLOBAL of that
+    // name instead: a store the pass never intended, which under the `_G` state
+    // bridge costs a `__newindex` metamethod dispatch on every execution.
+    let cell_has_local = |cid: Idx<Cell>| -> bool {
+        param_cells.contains(&cid) || (is_top && !is_frame(&cid) && referenced.contains(&cid))
+    };
     // Where each declared local dies, for the `<local> = nil` kills that keep
     // dead slots out of LuaJIT exit snapshots (see `regalloc::nil_kills`). A
     // coroutine `__step` keeps raw cell names and frame fields; it gets none.
@@ -2907,7 +2926,14 @@ fn render_scope(
                 region: cl.region.iter().copied().chain(std::iter::once(cl.latch)).collect(),
             })
             .collect();
-        let pinned = regalloc::pinned_cells(func);
+        // A cell with no local of its own is excluded exactly like a pinned one:
+        // both mean "this cell is not a killable `c<color>` in this body".
+        let mut excluded = regalloc::pinned_cells(func);
+        for (cid, _) in func.cells.iter() {
+            if !cell_has_local(cid) {
+                excluded[raw(cid) as usize] = true;
+            }
+        }
         regalloc::nil_kills(
             func,
             rpo,
@@ -2916,7 +2942,7 @@ fn render_scope(
             &color_scope,
             &kill_scopes,
             cell_colors,
-            &pinned,
+            &excluded,
             params,
         )
     };
@@ -2970,18 +2996,7 @@ fn render_scope(
         out.push('r');
         push_uint(out, c);
     }
-    // Only cells this region actually references get a local (a hoisted lambda
-    // body is a full-arena clone; declaring the dead enclosing/sibling cells would
-    // blow LuaJIT's 200-local cap on a large co-fn step). Computed once per top
-    // scope; inline (non-`is_top`) renders declare nothing, so they skip it.
-    let referenced = if is_top {
-        referenced_cells_in_region(func, entry, tail_forwards, suppressed)
-    } else {
-        HashSet::default()
-    };
     if is_top {
-        let param_cells: HashSet<Idx<Cell>> = params.iter().copied().collect();
-        let is_frame = |c: &Idx<Cell>| frame.is_some_and(|f| f.fields.contains(c));
         // Declare each cell LOCAL exactly once. Colored cells collapse onto their
         // shared `c<color>` (deduped, and excluding any color already named by a
         // param); uncolored cells (coroutine `__step`) declare per raw id.
@@ -2992,7 +3007,7 @@ fn render_scope(
             .collect();
         let mut seen_color: HashSet<u32> = HashSet::default();
         for (cid, _) in func.cells.iter() {
-            if param_cells.contains(&cid) || is_frame(&cid) || !referenced.contains(&cid) {
+            if param_cells.contains(&cid) || !cell_has_local(cid) {
                 continue;
             }
             let (decl, col) = match cell_colors[raw(cid) as usize] {
