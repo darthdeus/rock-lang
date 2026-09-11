@@ -2679,7 +2679,15 @@ fn runner_owned_plan_pairs(env: &[(String, String)]) -> Vec<(String, String)> {
         .find(|(k, _)| k == "SIM_DT")
         .map(|(_, v)| v)
         .unwrap_or_default();
-    let skip_render = if entry_renders(env) { "0" } else { "1" };
+    // The raw effective value, not `entry_renders`: `submit` is a third
+    // value (draw phase on, GPU submission off) that the engine must see
+    // as itself, while the runner classifies it as non-rendering for the
+    // asset stub and the render cap.
+    let skip_render = effective_env(env)
+        .into_iter()
+        .find(|(k, _)| k == "SIM_SKIP_RENDER")
+        .map(|(_, v)| v)
+        .unwrap_or_else(|| "1".to_string());
     let fx_off = effective_env(env)
         .into_iter()
         .find(|(k, _)| k == "STONE_FX_OFF")
@@ -2687,7 +2695,7 @@ fn runner_owned_plan_pairs(env: &[(String, String)]) -> Vec<(String, String)> {
         .unwrap_or_default();
     vec![
         ("SIM_DT".to_string(), sim_dt),
-        ("SIM_SKIP_RENDER".to_string(), skip_render.to_string()),
+        ("SIM_SKIP_RENDER".to_string(), skip_render),
         ("STONE_FX_OFF".to_string(), fx_off),
     ]
 }
@@ -2762,7 +2770,10 @@ fn sim_exec_mode_name(mode: SimExecMode) -> &'static str {
 /// disagree with the value the child actually boots with.
 ///
 /// A sim declaring nothing does not render: draw systems are skipped by default
-/// under the harness.
+/// under the harness. `submit` (draw phase on, nothing submitted to the GPU)
+/// is NOT rendering here: its process needs no image pixels and holds no
+/// rendered frame, which is what this oracle decides (the asset stub, the
+/// render cap).
 fn entry_renders(env: &[(String, String)]) -> bool {
     env.iter()
         .filter(|(k, _)| k == "SIM_SKIP_RENDER")
@@ -5631,6 +5642,7 @@ mod tests {
         assert!(!entry_renders(&[]), "declaring nothing does not render");
         assert!(entry_renders(&[pair("SIM_SKIP_RENDER", "0")]), "@sim_render sugar");
         assert!(!entry_renders(&[pair("SIM_SKIP_RENDER", "1")]), "explicit skip");
+        assert!(!entry_renders(&[pair("SIM_SKIP_RENDER", "submit")]), "submit needs no GPU result");
         // `@sim_render` then an explicit override, in lowering order.
         assert!(
             !entry_renders(&[pair("SIM_SKIP_RENDER", "0"), pair("SIM_SKIP_RENDER", "1")]),
@@ -6179,6 +6191,11 @@ mod tests {
         assert_eq!(
             runner_owned_plan_pairs(&env(&[("SIM_SKIP_RENDER", "0"), ("SIM_SKIP_RENDER", "1")])),
             env(&[("SIM_DT", ""), ("SIM_SKIP_RENDER", "1"), ("STONE_FX_OFF", "")])
+        );
+        // The raw value travels: `submit` must reach the engine as itself.
+        assert_eq!(
+            runner_owned_plan_pairs(&env(&[("SIM_SKIP_RENDER", "submit")])),
+            env(&[("SIM_DT", ""), ("SIM_SKIP_RENDER", "submit"), ("STONE_FX_OFF", "")])
         );
     }
 
