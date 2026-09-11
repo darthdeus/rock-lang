@@ -367,9 +367,24 @@ enum ExternRet {
     /// A `value` struct returned BY VALUE; the C ABI is then
     /// `void f(T* out, ..)`, so the wrapper bridges an out-param.
     ValueStruct(String),
+    /// Rock `bool`. The C side declares the return `uint8_t`, not `bool`, so
+    /// the wrapper turns the byte into a Lua boolean -- the same coercion
+    /// principle as `Int`, applied to the other representation the declaration
+    /// promises but the C ABI does not hand back directly.
+    ///
+    /// The reason the `cdef` says `uint8_t` is LuaJIT, not the ABI: recording a
+    /// `bool`-returning C call needs a Lua frame INSIDE the trace above the call
+    /// (`crec_call` -> `crec_snap_caller`, `lj_crecord.c`), and a trace rooted
+    /// at this one-line wrapper has none, so it aborts `NYI: unsupported C
+    /// function type` every time the wrapper itself becomes a trace root. A
+    /// `uint8_t` return records unconditionally. Rust `extern "C" fn -> bool`
+    /// already returns one byte 0/1 in that register, so only the `cdef` and
+    /// this arm move -- and they MUST move together: `~= 0` over a `bool` cdef
+    /// compares a Lua boolean to 0 and is always true.
+    Bool,
     /// Everything else crosses as the callee produced it: LuaJIT already hands
-    /// back a Lua value for `bool`, `float`/`double` and a string, and a
-    /// pointer return is declared `Ptr<T>` and stays a cdata by design.
+    /// back a Lua value for `float`/`double` and a string, and a pointer return
+    /// is declared `Ptr<T>` and stays a cdata by design.
     AsIs,
 }
 
@@ -435,6 +450,7 @@ fn extern_ret(
         let (name, params) = match arena.get(cur) {
             MonoTy::Int => return Ok(ExternRet::Int),
             MonoTy::Uint => return Ok(ExternRet::Uint),
+            MonoTy::Bool => return Ok(ExternRet::Bool),
             MonoTy::App { ctor: MonoCtor::Nominal(name), params } => (*name, params.clone()),
             _ => return Ok(ExternRet::AsIs),
         };
@@ -5312,6 +5328,7 @@ fn assemble(
                         }
                         ExternRet::Int => format!("  return tonumber({lib}.{nm}({params}))"),
                         ExternRet::Uint => format!("  return tonumber({lib}.{nm}({params}))"),
+                        ExternRet::Bool => format!("  return {lib}.{nm}({params}) ~= 0"),
                         ExternRet::AsIs => format!("  return {lib}.{nm}({params})"),
                         ExternRet::None => format!("  {lib}.{nm}({params})"),
                     };
