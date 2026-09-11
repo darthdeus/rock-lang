@@ -111,6 +111,38 @@ fn a_mutually_recursive_pair_stays_a_global_lookup() {
     );
 }
 
+/// `MirEmit::emits_main` is the emitter's own answer to "does this artifact
+/// define the entry point", and the CLI appends `__rock_main_wrapper(main)` on
+/// it. It cannot be recovered from the text: under the bound shape `main`'s
+/// body lives in a factory and the string `function main(` appears nowhere, so
+/// the caller that used to search for it wrote a chunk that defined the whole
+/// game and then ran nothing.
+#[test]
+fn emits_main_is_reported_under_both_shapes() {
+    let ws = ws_with_stdlib(SRC);
+    let mid = skull::user_module_id(&ws).unwrap();
+    for binding in [CalleeBindingMode::Global, CalleeBindingMode::Upvalue] {
+        let emit = emit_full_with_callee_binding(&ws, mid, binding)
+            .expect("emit_full")
+            .0;
+        assert!(emit.emits_main, "`main` is defined, under {binding:?}");
+        if binding == CalleeBindingMode::Upvalue {
+            assert!(
+                !emit.lua.contains("function main("),
+                "the bound shape does not spell `function main(` -- which is why \
+                 searching the text for it is not the oracle"
+            );
+        }
+    }
+
+    let no_main = ws_with_stdlib("fn leaf(a: int) -> int { a + 1 }\n");
+    let mid = skull::user_module_id(&no_main).unwrap();
+    let emit = emit_full_with_callee_binding(&no_main, mid, CalleeBindingMode::Upvalue)
+        .expect("emit_full")
+        .0;
+    assert!(!emit.emits_main, "no `main` is defined");
+}
+
 /// THE hot-reload rule. An incremental overlay redefines one global function;
 /// a caller that captured it as an immutable upvalue holds the previous closure
 /// and would never see the edited body. Emitting the overlay anyway would make

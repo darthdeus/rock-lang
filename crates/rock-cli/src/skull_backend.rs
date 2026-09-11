@@ -25,8 +25,16 @@ use std::time::{Duration, Instant};
 /// Lua for the user module via skull. The stdlib module isn't emitted — its
 /// symbols are referenced by name (resolved at runtime by a real stdlib
 /// prelude, or simply not called under the load-only validity gate).
-fn skull_emit(file: &str, src: &str) -> std::result::Result<String, Vec<CompilerError>> {
-    Ok(skull_emit_full(file, src).map_err(EmitFullErr::into_errs)?.0)
+/// Returns the emitted Lua and the emitter's own `emits_main`, which decides
+/// whether the caller appends the entry call. Not recovered from the text: the
+/// emitted spelling of a definition is the emitter's business and changes with
+/// `ROCK_SKULL_CALLEE_BINDING`.
+fn skull_emit(
+    file: &str,
+    src: &str,
+) -> std::result::Result<(String, bool), Vec<CompilerError>> {
+    let (lua, _, emits_main) = skull_emit_full(file, src).map_err(EmitFullErr::into_errs)?;
+    Ok((lua, emits_main))
 }
 
 /// A [`skull_emit_full`] failure. `Discovery` (a malformed `@test` annotation on
@@ -48,12 +56,12 @@ impl EmitFullErr {
 }
 
 /// Emit the workspace and also discover the user module's `@test` functions
-/// (for execution). Returns `(lua, tests)`. `file` is stamped as the source-file
-/// id so spans (and `__SITE__`) carry the real path.
+/// (for execution). Returns `(lua, tests, emits_main)`. `file` is stamped as
+/// the source-file id so spans (and `__SITE__`) carry the real path.
 fn skull_emit_full(
     file: &str,
     src: &str,
-) -> std::result::Result<(String, Vec<skull::SkullTest>), EmitFullErr> {
+) -> std::result::Result<(String, Vec<skull::SkullTest>, bool), EmitFullErr> {
     let user = skull_parser::parse_module(src, ustr::Ustr::from(file))
         .map_err(|e| EmitFullErr::Compile(vec![e]))?;
     let user_file = user.file;
@@ -77,6 +85,7 @@ fn skull_emit_full(
     let user_mid = crate::bone_backend::entry_module_id(&ws, user_file);
     let emit = skull::mir_emit::emit_workspace_mir(&ws, user_mid)
         .map_err(|e| EmitFullErr::Compile(vec![e]))?;
+    let emits_main = emit.emits_main;
     let (lua, skipped) = (emit.lua, emit.skipped);
     if std::env::var("SKULL_DEBUG_SKIPPED").is_ok() && !skipped.is_empty() {
         eprintln!("skull: {} stdlib fns skipped", skipped.len());
@@ -85,7 +94,7 @@ fn skull_emit_full(
         }
     }
     let tests = skull::module_tests(&ws, user_mid).map_err(EmitFullErr::Discovery)?;
-    Ok((lua, tests))
+    Ok((lua, tests, emits_main))
 }
 
 /// Per-phase wall-clock for one skull run over a single source. `parse` and
@@ -599,7 +608,7 @@ enum SkullOutcome {
 fn skull_build(file: &str, src: &str) -> std::result::Result<SkullOutcome, SkullFailure> {
     // bone type-check + skull emit. Errors here are bone's (most files) or a
     // skull codegen gap; both carry a `CompilerError`.
-    let (lua, tests) = match skull_emit_full(file, src) {
+    let (lua, tests, _emits_main) = match skull_emit_full(file, src) {
         Ok(v) => v,
         Err(EmitFullErr::Compile(errs)) => {
             // A file whose `@test`s ALL expect failure is supposed to fail to
@@ -1158,7 +1167,7 @@ pub fn skull_compile_single(path: &str, output: Option<String>) -> Result<()> {
         }
     };
     match skull_emit(path, &src) {
-        Ok(lua) => {
+        Ok((lua, _emits_main)) => {
             match output {
                 Some(out) => {
                     rock_host::project::write_atomic(&out, &lua)?;
@@ -1385,14 +1394,14 @@ pub fn skull_run(path: &str) -> Result<()> {
             crate::ablation_report::exit_with_census(1);
         }
     };
-    let lua = match skull_emit(path, &src) {
+    let (lua, emits_main) = match skull_emit(path, &src) {
         Ok(l) => l,
         Err(errs) => {
             eprintln!("{}", render_file_errs(path, &src, &errs));
             crate::ablation_report::exit_with_census(1);
         }
     };
-    let program = if lua.contains("function main(") {
+    let program = if emits_main {
         format!("{lua}\nmain()\n")
     } else {
         lua
@@ -1457,8 +1466,9 @@ pub(crate) fn render_project_errs(sources: &SourceFiles, errs: &[CompilerError])
 /// <dir>` (the single-file forms share [`skull_emit_full`]); only the tail
 /// differs — `run` wraps `main()` and execs, `compile` writes the string out.
 /// Renders against the project sources and exits 1 on any discovery / type /
-/// emit failure.
-fn skull_emit_project(dir: &str) -> String {
+/// emit failure. The `bool` is the emitter's own `emits_main`, which decides
+/// whether the caller appends the `__rock_main_wrapper(main)` entry.
+fn skull_emit_project(dir: &str) -> (String, bool) {
     let inputs = match crate::comptime::inputs_for_project_dir(std::path::Path::new(dir)) {
         Ok(inputs) => inputs,
         Err(e) => {
@@ -1472,7 +1482,7 @@ fn skull_emit_project(dir: &str) -> String {
 fn skull_emit_project_with_inputs(
     dir: &str,
     inputs: bone_semantic::inference::ComptimeInputs,
-) -> String {
+) -> (String, bool) {
     use std::path::PathBuf;
     let renderer_target = match skull_renderer_target(dir) {
         Ok(target) => target,
@@ -1555,6 +1565,7 @@ fn skull_emit_project_with_inputs(
         log::error!(target: "SKULL", "cannot write allocation report for {}: {:#}", dir, e);
         crate::ablation_report::exit_with_census(1);
     }
+    let emits_main = emit.emits_main;
     let (lua, skipped) = (emit.lua, emit.skipped);
     let compile = t.elapsed();
     crate::bone_backend::log_compile_stats(&sources, &ws, compile, compile, None);
@@ -1583,7 +1594,7 @@ fn skull_emit_project_with_inputs(
     rayon::spawn(move || drop((ws, modules)));
     #[cfg(feature = "sequential")]
     drop((ws, modules));
-    lua
+    (lua, emits_main)
 }
 
 fn write_allocation_report(
@@ -1931,14 +1942,14 @@ pub fn skull_compile_project_with_inputs(
     inputs: bone_semantic::inference::ComptimeInputs,
 ) -> Result<()> {
     use std::path::PathBuf;
-    let emit = skull_emit_project_with_inputs(dir, inputs);
+    let (emit, emits_main) = skull_emit_project_with_inputs(dir, inputs);
     // A game's runnable main.lua is the same shape run/stone produce via
     // write_full_main: preamble (game source dir) + emit +
     // __rock_main_wrapper(main). Without the preamble game asset paths are
     // wrong; without the wrapper it never starts.
     let lua = if rock_host::project::is_game_project(&PathBuf::from(dir)).unwrap_or(false) {
-        skull_game_main(&skull_game_preamble(dir)?, &emit)
-    } else if emit.contains("function main(") {
+        skull_game_main(&skull_game_preamble(dir)?, &emit, emits_main)
+    } else if emits_main {
         format!("{emit}\n__rock_main_wrapper(main)\n")
     } else {
         emit
@@ -1960,7 +1971,7 @@ fn skull_run_project(dir: &str) -> Result<()> {
     if is_game {
         crate::package::prepare_sound_bank(dir)?;
     }
-    let lua = skull_emit_project(dir);
+    let (lua, emits_main) = skull_emit_project(dir);
 
     // Game projects need the rock backend's run recipe, not a bare stdin
     // pipe: stage libstone into tmp/ (build_engine_libs), run luajit on a
@@ -1983,6 +1994,7 @@ fn skull_run_project(dir: &str) -> Result<()> {
         if let Err(e) = write_full_main(
             &skull_game_preamble(dir)?,
             &lua,
+            emits_main,
             &lua_file,
             &lua_file.with_file_name("incremental.lua"),
         ) {
@@ -1994,7 +2006,7 @@ fn skull_run_project(dir: &str) -> Result<()> {
     }
 
     // Non-game: append the entry wrapper and pipe the captured output.
-    let program = if lua.contains("function main(") {
+    let program = if emits_main {
         format!("{lua}\n__rock_main_wrapper(main)\n")
     } else {
         lua
@@ -2997,10 +3009,16 @@ fn skull_renderer_target(dir: &str) -> Result<skull::mir_emit::RendererTarget> {
 }
 
 /// Game-shaped `main.lua`: preamble + emit + `__rock_main_wrapper(main)` entry.
-fn skull_game_main(preamble: &str, emit_lua: &str) -> String {
+///
+/// `emits_main` comes from the emitter, not from searching `emit_lua`: the
+/// emitted spelling of a definition is the emitter's business and has already
+/// changed once (`ROCK_SKULL_CALLEE_BINDING=upvalue` moves every body into a
+/// factory, so `function main(` appears nowhere), which left a chunk that
+/// defined the whole game and then ran nothing.
+fn skull_game_main(preamble: &str, emit_lua: &str, emits_main: bool) -> String {
     let mut full = String::from(preamble);
     full.push_str(emit_lua);
-    if emit_lua.contains("function main(") {
+    if emits_main {
         full.push_str("\n__rock_main_wrapper(main)\n");
     }
     full
@@ -3028,10 +3046,11 @@ pub(crate) fn wipe_overlay(incremental_path: &std::path::Path) -> Result<()> {
 fn write_full_main(
     preamble: &str,
     emit_lua: &str,
+    emits_main: bool,
     main_path: &std::path::Path,
     incremental_path: &std::path::Path,
 ) -> Result<usize> {
-    let main = skull_game_main(preamble, emit_lua);
+    let main = skull_game_main(preamble, emit_lua, emits_main);
     let bytes = main.len();
     rock_host::project::write_atomic(main_path, &main)?;
     wipe_overlay(incremental_path)?;
@@ -3228,7 +3247,7 @@ impl SkullStone {
     ) -> Result<SkullStone> {
         let renderer_target = skull_renderer_target(dir)?;
         let project = crate::live_project::LiveProject::init(dir, include_tests)?;
-        let (lua, cache, artifact_fingerprint) = {
+        let (lua, cache, artifact_fingerprint, emits_main) = {
             let ws = project.workspace();
             let mid = skull::user_module_id(ws)
                 .map_err(no_user_module)?;
@@ -3251,13 +3270,14 @@ impl SkullStone {
                 std::path::PathBuf::from(dir),
             );
             let artifact_fingerprint = emit.artifact_fingerprint.clone();
+            let emits_main = emit.emits_main;
             let mut lua = emit.lua;
             install_rock_state_metadata(&mut lua, ws, &spec)
                 .map_err(|e| anyhow::anyhow!(render_project_err(project.sources(), &e)))?;
-            (lua, c, artifact_fingerprint)
+            (lua, c, artifact_fingerprint, emits_main)
         };
         let preamble = skull_game_preamble(dir)?;
-        write_full_main(&preamble, &lua, main_path, incremental_path)?;
+        write_full_main(&preamble, &lua, emits_main, main_path, incremental_path)?;
         let shape_hashes = skull::type_shape_hashes(project.workspace())
             .map_err(|e| anyhow::anyhow!(e.message))?;
         Ok(SkullStone {
@@ -3552,16 +3572,18 @@ impl SkullStone {
                 // StateSchema metadata is regenerated on a structural edit.
                 let spec =
                     crate::unified_compile::SourceSpec::Directory(PathBuf::from(self.project.dir()));
+                let emits_main = emit.emits_main;
                 let mut lua = emit.lua;
                 install_rock_state_metadata(&mut lua, ws, &spec)
                     .map_err(|e| anyhow::anyhow!(render_project_err(self.project.sources(), &e)))?;
-                (lua, c)
+                ((lua, emits_main), c)
             };
             self.preamble = skull_game_preamble(self.project.dir())?;
             let emit_ms = t_emit.elapsed().as_secs_f64() * 1000.0;
             let t_write = Instant::now();
-            let (lua, staged_cache) = lua;
-            let bytes = write_full_main(&self.preamble, &lua, main_path, incremental_path)?;
+            let ((lua, emits_main), staged_cache) = lua;
+            let bytes =
+                write_full_main(&self.preamble, &lua, emits_main, main_path, incremental_path)?;
             self.cache = staged_cache;
             self.artifact_fingerprint = self
                 .cache
@@ -3668,7 +3690,7 @@ impl SkullStone {
         // mutated the session into the broken state, so the restart-path fold must
         // re-gate or it would write a partial `main.lua` to the respawned process.
         self.project.verdict("on restart fold")?;
-        let (lua, cache, artifact_fingerprint) = {
+        let (lua, cache, artifact_fingerprint, emits_main) = {
             let ws = self.project.workspace();
             let mid = skull::user_module_id(ws)
                 .map_err(no_user_module)?;
@@ -3680,6 +3702,7 @@ impl SkullStone {
             )
                 .map_err(|e| anyhow::anyhow!("skull force_full emit: {}", e.message))?;
             let artifact_fingerprint = emit.artifact_fingerprint.clone();
+            let emits_main = emit.emits_main;
             // Host package/description metadata is rebuilt with the StateSchema.
             let spec = crate::unified_compile::SourceSpec::Directory(
                 std::path::PathBuf::from(self.project.dir()),
@@ -3687,10 +3710,10 @@ impl SkullStone {
             let mut lua = emit.lua;
             install_rock_state_metadata(&mut lua, ws, &spec)
                 .map_err(|e| anyhow::anyhow!(e.message))?;
-            (lua, c, artifact_fingerprint)
+            (lua, c, artifact_fingerprint, emits_main)
         };
         self.preamble = skull_game_preamble(self.project.dir())?;
-        write_full_main(&self.preamble, &lua, main_path, incremental_path)?;
+        write_full_main(&self.preamble, &lua, emits_main, main_path, incremental_path)?;
         self.artifact_fingerprint = artifact_fingerprint;
         self.cache = cache; // resets changed_since_full -- the overlay is now folded in
         // This program is what the (re)spawned process loads -- re-baseline the

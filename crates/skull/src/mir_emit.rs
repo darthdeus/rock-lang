@@ -551,6 +551,15 @@ pub struct MirEmit {
     pub graph_census: crate::instance_graph::RunStats,
     /// Concrete-plan ownership and assembly populations from this emission.
     pub concrete_stats: crate::concrete_body::ConcreteBuildStats,
+    /// Whether this emission defines the game entry point `main`, so the caller
+    /// can append `__rock_main_wrapper(main)`.
+    ///
+    /// Reported by the emitter rather than recovered from the text: a caller
+    /// that searched `lua` for `function main(` silently stopped finding it the
+    /// moment `ROCK_SKULL_CALLEE_BINDING=upvalue` moved the body inside a
+    /// factory, and the game booted to a chunk that defined everything and ran
+    /// nothing.
+    pub emits_main: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -2522,10 +2531,20 @@ struct LuaDefinitionBuffer {
     definition_count: usize,
 }
 
+/// Whether `line` opens a top-level definition, in either emitted shape: the
+/// global-lookup `function <name>(..)` or the callee-bound factory
+/// `__rock_mk_<name> = function(..) return function(..)`. Both cost the
+/// enclosing LuaJIT proto one child proto, so both count against the split.
+fn opens_a_definition(line: &str) -> bool {
+    line.starts_with("function ")
+        || (line.starts_with(skull_codegen_lua::CALLEE_FACTORY_PREFIX)
+            && line.contains(" = function("))
+}
+
 impl LuaDefinitionBuffer {
     fn push_str(&mut self, lua: &str) {
         let start = self.lua.len();
-        let count = lua.lines().filter(|line| line.starts_with("function ")).count();
+        let count = lua.lines().filter(|line| opens_a_definition(line)).count();
         self.lua.push_str(lua);
         self.units.push((start, self.lua.len(), count));
         self.definition_count += count;
@@ -5401,6 +5420,7 @@ fn assemble(
     // definition and in ascending call-graph component rank, so each captured
     // callee is already its final closure. Empty under the global-lookup shape.
     let mut callee_binds: Vec<skull_codegen_lua::CalleeBindingPlan> = Vec::new();
+    let mut emits_main = false;
     let foreign_bindings: Vec<(FuncRef, String)> = ws
         .modules
         .iter()
@@ -5544,6 +5564,7 @@ fn assemble(
                     times.add(&chunk.times);
                     attribution.add_unit(&chunk.attribution);
                     if emit_def {
+                        emits_main |= key.as_str() == "main";
                         definitions.push_str(&chunk.lua);
                         callee_binds.extend(chunk.binds.iter().cloned());
                         allocation_bodies.extend(chunk.allocation_bodies.iter().cloned());
@@ -5863,6 +5884,7 @@ fn assemble(
             setup_lanes: SetupLaneAttribution::default(),
             graph_census: crate::instance_graph::RunStats::default(),
             concrete_stats: crate::concrete_body::ConcreteBuildStats::default(),
+            emits_main,
         },
         emitted_bodies,
         unit_reads,
@@ -8283,6 +8305,9 @@ fn assemble_overlay(
             setup_lanes: SetupLaneAttribution::default(),
             graph_census: crate::instance_graph::RunStats::default(),
             concrete_stats: crate::concrete_body::ConcreteBuildStats::default(),
+            // An overlay redefines changed bodies only; the entry point is
+            // already installed by the `main.lua` it loads over.
+            emits_main: false,
         },
         unit_reads,
     ))
