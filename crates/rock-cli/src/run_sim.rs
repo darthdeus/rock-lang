@@ -282,6 +282,19 @@ fn compile_sims_with_allocation(
     output_path: PathBuf,
     allocation_manifest: Option<&Path>,
 ) -> Result<(Vec<String>, HashMap<String, Vec<(String, String)>>, crate::skull_backend::SkullStone)> {
+    compile_sims_with(backend, project_path, output_path, allocation_manifest, None)
+}
+
+/// [`compile_sims`] under an explicit emitted callee shape. `None` reads the
+/// process shape; the hot-reload lane passes `Some(Global)` (see
+/// [`reload_lane_session`]).
+fn compile_sims_with(
+    backend: crate::Backend,
+    project_path: PathBuf,
+    output_path: PathBuf,
+    allocation_manifest: Option<&Path>,
+    callee_binding: Option<skull::CalleeBindingMode>,
+) -> Result<(Vec<String>, HashMap<String, Vec<(String, String)>>, crate::skull_backend::SkullStone)> {
     // Only skull serves sims now (bone has no codegen, rock is gone): build the
     // bone workspace once (a live Session, tests included), emit the game-shaped
     // main.lua with its `@sim` registry, and collect the wire/env list from the
@@ -294,6 +307,7 @@ fn compile_sims_with_allocation(
                 &project_path.to_string_lossy(),
                 &main_path,
                 allocation_manifest,
+                callee_binding,
             )
         }
         other => panic!(
@@ -301,6 +315,70 @@ fn compile_sims_with_allocation(
             other.name()
         ),
     }
+}
+
+/// The hot-reload lane's own compile session, and the output directory its
+/// children boot.
+///
+/// `reload_edit` injection (`docs/sim-reload-harness-plan.md`) republishes
+/// through `SkullStone::apply_edit`, which yields an `incremental.lua` overlay
+/// only under the GLOBAL callee shape: the shipped `upvalue` shape binds a
+/// caller's callees as immutable upvalues, and an overlay that redefines one
+/// global cannot rebind them. Every sim of one invocation boots ONE `main.lua`,
+/// so the lane cannot borrow the shared session -- it gets its own emit in its
+/// own directory, and the shared chunk keeps the shipped shape.
+pub struct ReloadLaneSession {
+    stone: crate::skull_backend::SkullStone,
+    output: String,
+    /// Alive for the lane's whole run; dropping it removes the directory.
+    _dir: TempDir,
+}
+
+/// The session (and output directory) the hot-reload lane must use, or `None`
+/// when the shared one already has the shape it needs.
+///
+/// Costs ONE extra whole-project emit, paid once per invocation and only when
+/// the selection actually contains a reload sim AND the shared session is bound.
+/// Under `ROCK_SKULL_CALLEE_BINDING=global` the shared session is already
+/// global-shaped and this returns `None`, so the fast path pays nothing.
+fn reload_lane_session(
+    backend: crate::Backend,
+    project_path: &Path,
+    shared: &crate::skull_backend::SkullStone,
+    lane_is_selected: bool,
+    quiet: bool,
+) -> Result<Option<ReloadLaneSession>> {
+    if !lane_is_selected || shared.callee_binding() == skull::CalleeBindingMode::Global {
+        return Ok(None);
+    }
+    let dir = sim_output_dir()?;
+    let output = dir.path().to_string_lossy().into_owned();
+    let started = std::time::Instant::now();
+    let (_, _, stone) = compile_sims_with(
+        backend,
+        project_path.to_path_buf(),
+        PathBuf::from(&output),
+        None,
+        Some(skull::CalleeBindingMode::Global),
+    )?;
+    let compile_ms = started.elapsed().as_secs_f64() * 1000.0;
+    emit_bytecode_image(Path::new(&output));
+    if !quiet {
+        // Result output: says which of the two chunks this invocation built and
+        // why, so a reload sim's shape is never inferred from the default.
+        println!(
+            "[sim] hot-reload lane: separate build with callee binding `global` ({compile_ms:.0}ms) -- an overlay cannot rebind an immutable upvalue"
+        );
+    }
+    Ok(Some(ReloadLaneSession { stone, output, _dir: dir }))
+}
+
+/// Whether any selected entry opted into the hot-reload lane.
+fn any_reload_lane_selected(
+    specs: &[String],
+    env_by_wire: &HashMap<String, Vec<(String, String)>>,
+) -> bool {
+    specs.iter().any(|spec| entry_is_reload_lane(spec, env_by_wire))
 }
 
 /// Compile the project and print each `@sim` wire name on stdout, one
@@ -761,6 +839,13 @@ fn do_run_named_sims_recorded(
         sim_exec_mode_name(mode),
         update_snapshots,
     );
+    let mut reload_lane = reload_lane_session(
+        backend,
+        &project_path,
+        &stone,
+        any_reload_lane_selected(names, &env_by_wire),
+        quiet,
+    )?;
     if mode != SimExecMode::Isolated {
         let results = run_specs_worker_mode(
             &project,
@@ -772,6 +857,7 @@ fn do_run_named_sims_recorded(
             jobs,
             render_jobs,
             &mut stone,
+            reload_lane.as_mut(),
             Some(recorder),
             Some(&entry_ids),
         )?;
@@ -818,9 +904,16 @@ fn do_run_named_sims_recorded(
         (0..names.len()).partition(|&i| entry_is_reload_lane(&names[i], &env_by_wire));
 
     let report = Mutex::new(());
+    // The hot-reload lane brings its OWN session and output directory when the
+    // shipped shape is bound (`reload_lane_session`); everything else runs
+    // against this invocation's shared chunk with no session at all.
     let run_at = |i: usize,
-                  stone: Option<&mut crate::skull_backend::SkullStone>|
+                  lane: Option<(&mut crate::skull_backend::SkullStone, &str)>|
      -> Result<(String, SimSummary)> {
+        let (stone, entry_output) = match lane {
+            Some((stone, out)) => (Some(stone), out),
+            None => (None, output.as_str()),
+        };
         // Buffered, not silenced: the per-expect stream is suppressed (it
         // would interleave), but the child's diagnostics are retained and
         // emitted with the record below, and `print` lists each sim's failing
@@ -831,7 +924,7 @@ fn do_run_named_sims_recorded(
             quiet,
             true,
             update_snapshots,
-            &output,
+            entry_output,
             &env_by_wire,
             stone,
             None,
@@ -870,8 +963,12 @@ fn do_run_named_sims_recorded(
             results.insert(i, run_at(i, None));
         }
     }
+    let (lane_stone, lane_output) = match reload_lane.as_mut() {
+        Some(lane) => (&mut lane.stone, lane.output.as_str()),
+        None => (&mut stone, output.as_str()),
+    };
     for &i in &reload_idx {
-        results.insert(i, run_at(i, Some(&mut stone)));
+        results.insert(i, run_at(i, Some((&mut *lane_stone, lane_output))));
     }
 
     // Accounting walks the order the user gave, so the failed list matches a
@@ -1121,6 +1218,13 @@ fn do_run_all_sims_recorded(
     let wire_names = routine_names;
     let entry_ids = routine_ids;
     let manual_excluded = selected - wire_names.len();
+    let mut reload_lane = reload_lane_session(
+        backend,
+        &project_path,
+        &stone,
+        any_reload_lane_selected(&wire_names, &env_by_wire),
+        quiet,
+    )?;
     if mode != SimExecMode::Isolated {
         let results = run_specs_worker_mode(
             &project,
@@ -1132,6 +1236,7 @@ fn do_run_all_sims_recorded(
             jobs,
             render_jobs,
             &mut stone,
+            reload_lane.as_mut(),
             Some(recorder),
             Some(&entry_ids),
         )?;
@@ -1211,14 +1316,20 @@ fn do_run_all_sims_recorded(
     // out to ffprobe/ffmpeg but ride the same pool, so they stay bounded by
     // `--jobs` rather than fanning out on their own.
     let report = Mutex::new(());
-    let run_at = |i: usize, stone: Option<&mut crate::skull_backend::SkullStone>| -> Result<SimSummary> {
+    // The hot-reload lane brings its OWN session and output directory when the
+    // shipped shape is bound (`reload_lane_session`).
+    let run_at = |i: usize, lane: Option<(&mut crate::skull_backend::SkullStone, &str)>| -> Result<SimSummary> {
+        let (stone, entry_output) = match lane {
+            Some((stone, out)) => (Some(stone), out),
+            None => (None, output.as_str()),
+        };
         let (display_name, summary) = run_named_entry(
             &project,
             &wire_names[i],
             quiet,
             !streaming,
             update_snapshots,
-            &output,
+            entry_output,
             &env_by_wire,
             stone,
             None,
@@ -1246,8 +1357,12 @@ fn do_run_all_sims_recorded(
     }
 
     // Reload lane, strictly after the pool has drained.
+    let (lane_stone, lane_output) = match reload_lane.as_mut() {
+        Some(lane) => (&mut lane.stone, lane.output.as_str()),
+        None => (&mut stone, output.as_str()),
+    };
     for &i in &reload_idx {
-        summaries.insert(i, run_at(i, Some(&mut stone)));
+        summaries.insert(i, run_at(i, Some((&mut *lane_stone, lane_output))));
     }
 
     // Records printed in completion order; the ACCOUNTING is registry order, so
@@ -1449,7 +1564,7 @@ pub fn do_run_allocation_census(
     let out_dir = sim_output_dir()?;
     let output = out_dir.path().to_string_lossy().into_owned();
     let (wire_names, env_by_wire, mut stone) =
-        compile_sims(backend, project_path, PathBuf::from(&output))?;
+        compile_sims(backend, project_path.clone(), PathBuf::from(&output))?;
     emit_bytecode_image(Path::new(&output));
     sim_spawn_barrier();
 
@@ -1482,14 +1597,27 @@ pub fn do_run_allocation_census(
         }
     }
     let jobs = resolve_jobs(jobs, false);
-    let run_at = |i: usize, stone: Option<&mut crate::skull_backend::SkullStone>| {
+    // The hot-reload lane brings its OWN session and output directory when the
+    // shipped shape is bound (`reload_lane_session`).
+    let mut reload_lane = reload_lane_session(
+        backend,
+        &project_path,
+        &stone,
+        !reload_idx.is_empty(),
+        false,
+    )?;
+    let run_at = |i: usize, lane: Option<(&mut crate::skull_backend::SkullStone, &str)>| {
+        let (stone, entry_output) = match lane {
+            Some((stone, out)) => (Some(stone), out),
+            None => (None, output.as_str()),
+        };
         run_named_entry(
             &project,
             &selected[i],
             true,
             true,
             false,
-            &output,
+            entry_output,
             &env_by_wire,
             stone,
             Some(DEFAULT_SIM_ALLOCATION_WARMUP_FRAMES),
@@ -1504,8 +1632,12 @@ pub fn do_run_allocation_census(
     }) {
         results.insert(ordinary_idx[slot], result);
     }
+    let (lane_stone, lane_output) = match reload_lane.as_mut() {
+        Some(lane) => (&mut lane.stone, lane.output.as_str()),
+        None => (&mut stone, output.as_str()),
+    };
     for &i in &reload_idx {
-        results.insert(i, run_at(i, Some(&mut stone)));
+        results.insert(i, run_at(i, Some((&mut *lane_stone, lane_output))));
     }
 
     let mut records = Vec::with_capacity(selected.len());
@@ -1930,11 +2062,19 @@ fn run_specs_worker_mode(
     jobs: Option<usize>,
     render_jobs: Option<usize>,
     stone: &mut crate::skull_backend::SkullStone,
+    reload_lane: Option<&mut ReloadLaneSession>,
     recorder: Option<&SimRunRecorder>,
     entry_ids: Option<&[u64]>,
 ) -> Result<Vec<(String, SimSummary)>> {
 
     let jobs = resolve_jobs(jobs, update_snapshots);
+    // The emitted callee shape the hot-reload lane's chunk carries: its own
+    // session is always global-shaped, and without one it shares this
+    // invocation's chunk.
+    let lane_shape = match (&reload_lane, stone.callee_binding()) {
+        (Some(_), _) | (None, skull::CalleeBindingMode::Global) => "global",
+        (None, skull::CalleeBindingMode::Upvalue) => "upvalue",
+    };
     let active_renderer = active_sim_renderer(Path::new(project));
     let mut slots: Vec<Option<SimSummary>> = specs.iter().map(|_| None).collect();
     let mut active_specs: Vec<String> = Vec::new();
@@ -2048,8 +2188,17 @@ fn run_specs_worker_mode(
                 n => println!("[sim] worker: {n} entries share one booted process"),
             }
         }
-        for (i, reason) in poolable.iter().chain(exclusive.iter()) {
+        for (i, reason) in poolable.iter() {
             println!("[sim] {}: isolated ({reason})", specs[*i]);
+        }
+        // The hot-reload lane also reports the SHAPE it compiled with. Its
+        // reload path only works under one of the two, and which chunk it got
+        // must not have to be inferred from the shipped default.
+        for (i, reason) in exclusive.iter() {
+            println!(
+                "[sim] {}: isolated ({reason}; callee binding `{lane_shape}`)",
+                specs[*i]
+            );
         }
     }
 
@@ -2142,8 +2291,15 @@ fn run_specs_worker_mode(
         slots[i] = Some(summary);
     }
 
-    // The hot-reload lane, strictly after the pool has drained: it mutates the
-    // one `SkullStone` session and the one `incremental.lua` overlay.
+    // The hot-reload lane, strictly after the pool has drained: it mutates one
+    // `SkullStone` session and one `incremental.lua` overlay. Which session
+    // depends on the shipped shape -- under `upvalue` the lane has its own
+    // global-shaped build in its own directory, because an overlay cannot
+    // rebind an immutable upvalue (`reload_lane_session`).
+    let (lane_stone, lane_output) = match reload_lane {
+        Some(lane) => (&mut lane.stone, lane.output.as_str()),
+        None => (&mut *stone, output),
+    };
     for &(i, _) in &exclusive {
         let (_, summary) = run_named_entry(
             project,
@@ -2151,9 +2307,9 @@ fn run_specs_worker_mode(
             quiet,
             true,
             update_snapshots,
-            output,
+            lane_output,
             env_by_wire,
-            Some(&mut *stone),
+            Some(&mut *lane_stone),
             None,
             recorder,
             entry_ids.and_then(|ids| ids.get(i)).copied(),

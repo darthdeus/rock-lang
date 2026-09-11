@@ -6398,6 +6398,24 @@ pub fn emit_full_in_for_renderer(
     project_root: Option<&str>,
     renderer_target: RendererTarget,
 ) -> Result<(MirEmit, SkullEmitCache), CompilerError> {
+    emit_full_in_for_renderer_with_callee_binding(ws, user_mid, project_root, renderer_target, None)
+}
+
+/// [`emit_full_in_for_renderer`] under an explicit emitted callee shape.
+///
+/// `None` reads the process shape (`ROCK_SKULL_CALLEE_BINDING`, the pin, the
+/// shipped default); `Some` overrides it for THIS emit and the cache it
+/// returns, without touching the one-way process pin. That is what lets one
+/// process hold two build sessions of different shapes -- the sim runner's
+/// hot-reload lane needs the global-lookup shape so its `incremental.lua`
+/// overlay can rebind, while every other sim boots the shipped shape.
+pub fn emit_full_in_for_renderer_with_callee_binding(
+    ws: &Workspace,
+    user_mid: ModuleId,
+    project_root: Option<&str>,
+    renderer_target: RendererTarget,
+    callee_binding: Option<skull_codegen_lua::CalleeBindingMode>,
+) -> Result<(MirEmit, SkullEmitCache), CompilerError> {
     let _allocation_environment = crate::allocation_report::environment_scope();
     emit_full_in_with_mutation(
         ws,
@@ -6405,7 +6423,7 @@ pub fn emit_full_in_for_renderer(
         project_root,
         BodyMutation::None,
         renderer_target,
-        None,
+        callee_binding,
     )
 }
 
@@ -6984,6 +7002,15 @@ fn comptime_reads_stale(
 impl SkullEmitCache {
     pub fn repair_stats(&self) -> IncrementalRepairStats {
         self.repair_stats
+    }
+
+    /// The emitted callee shape THIS cache's chunks were built with. Read it
+    /// rather than the process shape wherever a decision has to agree with the
+    /// bodies already on disk: a second build session in the same process can
+    /// hold the other shape (`emit_full_in_for_renderer_with_callee_binding`),
+    /// and the process pin is one-way and cannot describe both.
+    pub fn callee_binding(&self) -> skull_codegen_lua::CalleeBindingMode {
+        self.cg.callee_binding()
     }
 
     pub fn begin_body_edit_transaction(
