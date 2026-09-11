@@ -1075,7 +1075,29 @@ pub fn tail_call_shape() -> TailCallShape {
     })
 }
 
-fn tail_forwards(ws: &Workspace, func: &MirFunc, direct: bool) -> Vec<Option<TailForward>> {
+/// THE gate for the emitted tail-call shape. Returning false drops the forward,
+/// which leaves the ordinary emission path to write `r<N> = f(args)` followed by
+/// `do return r<N> end` -- the same statements a non-tail-position call already
+/// emits, so no new emitted form is introduced.
+fn keeps_tail_call(ctx: &CodegenCtx, call: &TailForwardCall) -> bool {
+    match ctx.tail_calls {
+        TailCallShape::All => true,
+        TailCallShape::None => false,
+        // A call through a function value has no statically known callee, so the
+        // call graph cannot prove it off every cycle.
+        TailCallShape::Cycles => match call {
+            TailForwardCall::Value { .. } => true,
+            TailForwardCall::Direct { func, .. } => ctx.is_recursive_callee(*func),
+        },
+    }
+}
+
+fn tail_forwards(
+    ws: &Workspace,
+    ctx: &CodegenCtx,
+    func: &MirFunc,
+    direct: bool,
+) -> Vec<Option<TailForward>> {
     let mut forwards = vec![None; func.blocks.len()];
     let cell_references = cell_reference_counts(func);
     for (block_id, block) in func.blocks.iter() {
@@ -1137,6 +1159,13 @@ fn tail_forwards(ws: &Workspace, func: &MirFunc, direct: bool) -> Vec<Option<Tai
             suppressed: block.insts[first..].to_vec(),
             call,
         });
+    }
+    if ctx.tail_calls != TailCallShape::All {
+        for forward in forwards.iter_mut() {
+            if forward.as_ref().is_some_and(|tail| !keeps_tail_call(ctx, &tail.call)) {
+                *forward = None;
+            }
+        }
     }
     forwards
 }
@@ -1423,7 +1452,7 @@ fn emit_named_framed_with_statics_impl(
     let entry = func.entry();
     let params = func.params.as_slice();
     let rpo = reverse_postorder(func, entry);
-    let tail_forwards = tail_forwards(ws, func, frame.is_none());
+    let tail_forwards = tail_forwards(ws, ctx, func, frame.is_none());
     let (call_arg_forwards, suppressed) = if frame.is_some() {
         // Coroutine lifting moves later uses into frame fields, outside the
         // ordinary cell reference count that proves a producer unobserved.
