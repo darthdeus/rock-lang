@@ -7,7 +7,7 @@
 
 mod common;
 
-use skull_codegen_lua::{emit_function, CalleeBindingMode, CodegenCtx, TailCallShape};
+use skull_codegen_lua::{emit_function, CalleeBindingMode, CodegenCtx, LoopShape, TailCallShape};
 use skull_mir::mir::FuncRef;
 
 #[test]
@@ -224,6 +224,11 @@ fn run_shaped(src: &str, driver: &str, shape: TailCallShape) -> String {
     run_shaped_bound(src, driver, shape, CalleeBindingMode::Global)
 }
 
+/// [`run`] under an explicit emitted loop shape.
+fn run_looped(src: &str, driver: &str, loops: LoopShape) -> String {
+    run_shaped_bound_looped(src, driver, TailCallShape::All, CalleeBindingMode::Global, loops)
+}
+
 /// [`run_shaped`] with an explicit callee-binding mode, assembled the way
 /// `skull::mir_emit::assemble` assembles a program: every definition first,
 /// then the binding pass in component-rank order.
@@ -232,6 +237,16 @@ fn run_shaped_bound(
     driver: &str,
     shape: TailCallShape,
     binding: CalleeBindingMode,
+) -> String {
+    run_shaped_bound_looped(src, driver, shape, binding, LoopShape::Goto)
+}
+
+fn run_shaped_bound_looped(
+    src: &str,
+    driver: &str,
+    shape: TailCallShape,
+    binding: CalleeBindingMode,
+    loops: LoopShape,
 ) -> String {
     use std::sync::LazyLock;
     static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
@@ -254,6 +269,7 @@ fn run_shaped_bound(
     let mut ctx = CodegenCtx::new(&ws);
     ctx.set_tail_call_shape(shape);
     ctx.set_callee_binding(binding);
+    ctx.set_loop_shape(loops);
     let roots = ws
         .module(mid)
         .functions
@@ -879,6 +895,11 @@ end
 /// `iter`/`next` is only spliced (and its cursor struct scalarized) once the
 /// inliner has run, which `emit_clean` does NOT do.
 fn emit_inlined(src: &str, fn_name: &str) -> String {
+    emit_inlined_shaped(src, fn_name, LoopShape::Goto)
+}
+
+/// [`emit_inlined`] under an explicit emitted loop shape.
+fn emit_inlined_shaped(src: &str, fn_name: &str, loops: LoopShape) -> String {
     use std::sync::LazyLock;
     static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
         rock_host::stdlib_loader::stdlib_files()
@@ -931,7 +952,8 @@ fn emit_inlined(src: &str, fn_name: &str) -> String {
     skull_transform::recover_counted_loops(&ws, &mut func);
     let name = skull_codegen_lua::mangle_fn(&ws, &ws.module(mid).functions[fid]);
     skull_transform::convert_closures(&mut func, &name);
-    let ctx = CodegenCtx::new(&ws);
+    let mut ctx = CodegenCtx::new(&ws);
+    ctx.set_loop_shape(loops);
     emit_function(&ws, &ctx, scx.interner(), self_ref, &func, None)
 }
 
@@ -1586,6 +1608,202 @@ fn callee_binding_upvalue_computes_what_global_computes() {
         assert_eq!(
             bound, global,
             "`{driver}` must not depend on the emitted callee shape"
+        );
+    }
+}
+
+/// `(line, target)` for every `goto <target>` in `lua`, terminator arms
+/// included -- a `Branch` renders as `if c then goto X else goto Y end`, so a
+/// line-prefix scan misses half of them.
+fn goto_refs(lua: &str) -> Vec<(usize, String)> {
+    let mut out = Vec::new();
+    for (i, line) in lua.lines().enumerate() {
+        let mut rest = line;
+        while let Some(at) = rest.find("goto ") {
+            rest = &rest[at + 5..];
+            let end = rest.find(|c: char| !c.is_alphanumeric() && c != '_').unwrap_or(rest.len());
+            out.push((i, rest[..end].to_string()));
+            rest = &rest[end..];
+        }
+    }
+    out
+}
+
+/// The line each `::label::` sits on.
+fn label_lines(lua: &str) -> std::collections::HashMap<String, usize> {
+    lua.lines()
+        .enumerate()
+        .filter_map(|(i, l)| {
+            let t = l.trim();
+            t.strip_prefix("::")?.strip_suffix("::").map(|n| (n.to_string(), i))
+        })
+        .collect()
+}
+
+/// Every `goto` that jumps BACKWARD -- the shape that makes LuaJIT emit a
+/// rangeless `BC_LOOP`.
+fn backward_gotos(lua: &str) -> Vec<String> {
+    let labels = label_lines(lua);
+    goto_refs(lua)
+        .into_iter()
+        .filter(|(at, t)| labels.get(t).is_some_and(|l| *l < *at))
+        .map(|(_, t)| t)
+        .collect()
+}
+
+// --- ROCK_SKULL_LOOP_SHAPE=structured: a natural loop is a Lua `while` ---
+//
+// LuaJIT's parser gives a backward `goto` a `BC_LOOP` with `bc_j == -1` and no
+// bytecode range, so `rec_setup_root` leaves `bc_min` unset and a root trace
+// started at such a loop records past the loop's exit. `while true do .. end`
+// gets a real range. These pin the emitted shape that buys it.
+
+/// One simple `while`: the header LABEL stays outside the block so an entering
+/// `goto` is still legal, the header's STATEMENTS are the first ones inside it,
+/// and the back edge is gone -- the body falls off the end.
+#[test]
+fn structured_while_is_a_lua_while_with_the_header_label_outside() {
+    let lua = emit_inlined_shaped(
+        "fn mysum(n: int) -> int { let t = 0; let i = 1; while i <= n { t = t + i; i = i + 1 }; t }",
+        "mysum",
+        LoopShape::Structured,
+    );
+    assert!(
+        lua.contains("  ::bb1::\n  while true do\n"),
+        "header label belongs outside the `while`:\n{lua}"
+    );
+    assert!(backward_gotos(&lua).is_empty(), "no back edge may remain:\n{lua}");
+    assert!(lua.contains("  ::lc1::\n  end\n"), "continue label closes the body:\n{lua}");
+}
+
+/// A `continue` is a second back edge. Both become FORWARD `goto`s to the
+/// continue label; a backward one would give LuaJIT a second, rangeless
+/// `BC_LOOP` inside the loop the `while` is there to close.
+#[test]
+fn structured_continue_is_a_forward_goto_to_the_continue_label() {
+    let lua = emit_inlined_shaped(
+        "fn f(n: int) -> int { let t = 0; let i = 0; while i < n { i = i + 1; if i % 3 == 0 { continue }; t = t + i }; t }",
+        "f",
+        LoopShape::Structured,
+    );
+    let labels = label_lines(&lua);
+    let jumps: Vec<(usize, String)> =
+        goto_refs(&lua).into_iter().filter(|(_, t)| t.starts_with("lc")).collect();
+    assert_eq!(jumps.len(), 1, "one explicit continue jump expected:\n{lua}");
+    let (at, target) = &jumps[0];
+    assert!(*at < labels[target], "a continue must jump FORWARD:\n{lua}");
+    assert!(backward_gotos(&lua).is_empty(), "no back edge may remain:\n{lua}");
+}
+
+/// Several exit targets need no dispatch: Lua forbids jumping INTO a block, not
+/// out of one, so each exit stays the plain `goto` it already was.
+#[test]
+fn structured_several_exits_stay_plain_gotos_out_of_the_block() {
+    let lua = emit_inlined_shaped(
+        "fn f(n: int) -> int { let t = 0; let i = 0; while true { i = i + 1; if i > n { break }; if t > 40 { return 0 - t }; t = t + i }; t }",
+        "f",
+        LoopShape::Structured,
+    );
+    let close = lua.lines().position(|l| l.trim() == "end").expect("the `while` closes");
+    let labels = label_lines(&lua);
+    let mut exits: Vec<String> = goto_refs(&lua)
+        .into_iter()
+        .filter(|(at, t)| *at < close && labels.get(t).is_some_and(|l| *l > close))
+        .map(|(_, t)| t)
+        .collect();
+    exits.sort();
+    exits.dedup();
+    assert!(exits.len() >= 2, "two distinct exit targets expected, got {exits:?}:\n{lua}");
+    assert!(backward_gotos(&lua).is_empty(), "no back edge may remain:\n{lua}");
+}
+
+/// An iterator loop nested inside another loop is the shape FORL recovery bails
+/// on (its preheader is reachable from its body through the enclosing back
+/// edge), so it stays a goto loop -- the largest census bucket. The structured
+/// shape must reach it.
+#[test]
+fn structured_reaches_the_nested_iterator_loop_forl_recovery_misses() {
+    let src = "\
+struct B { slot: int }\n\
+struct D { bindings: [B] }\n\
+fn f(ds: [D]) -> int { for d in ds { for b in d.bindings { if b.slot < 0 { return 1 } } }; 0 }";
+    let goto = emit_inlined_shaped(src, "f", LoopShape::Goto);
+    assert!(goto.contains("goto bb"), "sanity: the goto shape has gotos:\n{goto}");
+    assert_eq!(
+        backward_gotos(&goto).len(),
+        1,
+        "the nested iterator loop is one backward goto:\n{goto}"
+    );
+    let lua = emit_inlined_shaped(src, "f", LoopShape::Structured);
+    assert!(lua.contains("while true do"), "the nested loop must become a `while`:\n{lua}");
+    assert!(lua.contains("::lc"), "with a continue label:\n{lua}");
+    assert!(
+        backward_gotos(&lua).is_empty(),
+        "no backward goto may survive the structured shape:\n{lua}"
+    );
+}
+
+/// `expand_for` is untouched: a recognized counted loop prints as a Lua `for`
+/// under BOTH shapes, and the outer loop here is one.
+#[test]
+fn structured_preserves_the_counted_for_exactly() {
+    let src = "\
+struct B { slot: int }\n\
+struct D { bindings: [B] }\n\
+fn f(ds: [D]) -> int { for d in ds { for b in d.bindings { if b.slot < 0 { return 1 } } }; 0 }";
+    let goto = emit_inlined_shaped(src, "f", LoopShape::Goto);
+    let structured = emit_inlined_shaped(src, "f", LoopShape::Structured);
+    let fors = |s: &str| s.lines().filter(|l| l.trim_start().starts_with("for c")).count();
+    assert_eq!(fors(&goto), 1, "one counted `for` expected:\n{goto}");
+    assert_eq!(fors(&structured), fors(&goto), "the counted `for` must survive:\n{structured}");
+}
+
+/// The default shape emits the same BYTES it emitted before the switch existed.
+#[test]
+fn goto_shape_emission_is_byte_identical_to_the_default() {
+    for src in [
+        "fn a(n: int) -> int { let t = 0; let i = 1; while i <= n { t = t + i; i = i + 1 }; t }",
+        "fn b(n: int) -> int { let t = 0; let i = 0; while i < n { i = i + 1; if i % 3 == 0 { continue }; t = t + i }; t }",
+        "fn c(n: int) -> int { let t = 0; let i = 0; while true { i = i + 1; if i > n { break }; t = t + i }; t }",
+    ] {
+        let name = &src[3..4];
+        assert_eq!(
+            emit_inlined_shaped(src, name, LoopShape::Goto),
+            emit_inlined(src, name),
+            "the explicit `goto` shape must be the default's bytes"
+        );
+    }
+}
+
+/// The deeper oracle: real LuaJIT runs both shapes and agrees, over nested
+/// loops, `continue`, an early `break` and an early `return`.
+#[test]
+fn structured_and_goto_shapes_compute_the_same_under_luajit() {
+    let src = "\
+@nomangle fn probe(n: int) -> int {\n\
+    let total = 0\n\
+    let i = 0\n\
+    while i < n {\n\
+        i = i + 1\n\
+        if i % 4 == 0 { continue }\n\
+        let j = 0\n\
+        while true {\n\
+            j = j + 1\n\
+            if j > i { break }\n\
+            if j % 3 == 0 { continue }\n\
+            total = total + j\n\
+            if total > 900 { return total }\n\
+        }\n\
+        total = total + 1\n\
+    }\n\
+    total\n\
+}";
+    for n in ["3", "11", "40"] {
+        let driver = format!("probe({n})");
+        assert_eq!(
+            run_looped(src, &driver, LoopShape::Structured),
+            run_looped(src, &driver, LoopShape::Goto),
+            "the two shapes disagree at n={n}"
         );
     }
 }

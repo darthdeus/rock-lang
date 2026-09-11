@@ -677,6 +677,9 @@ pub struct CodegenCtx {
     /// The emitted shape for a call to another emitted function. Read from
     /// `ROCK_SKULL_CALLEE_BINDING` once per context, same as `tail_calls`.
     callee_binding: CalleeBindingMode,
+    /// The emitted shape for a natural loop that is not a counted `for`. Read
+    /// from `ROCK_SKULL_LOOP_SHAPE` once per context, same as `tail_calls`.
+    loops: LoopShape,
     /// Every function's strongly connected component number over the
     /// whole-program call graph, from [`call_sccs`]. Read ONLY by
     /// [`callee_binding_plan`]; empty on any path that never populated it,
@@ -693,6 +696,7 @@ impl Clone for CodegenCtx {
             recursive_callees: self.recursive_callees.clone(),
             tail_calls: self.tail_calls,
             callee_binding: self.callee_binding,
+            loops: self.loops,
             call_sccs: self.call_sccs.clone(),
         }
     }
@@ -769,6 +773,7 @@ impl CodegenCtx {
             recursive_callees: HashSet::default(),
             tail_calls: tail_call_shape(),
             callee_binding: callee_binding_mode(),
+            loops: loop_shape(),
             call_sccs: HashMap::default(),
         }
     }
@@ -795,6 +800,17 @@ impl CodegenCtx {
 
     pub fn callee_binding(&self) -> CalleeBindingMode {
         self.callee_binding
+    }
+
+    /// Override the emitted loop shape this context was built with. The
+    /// production path takes it from `ROCK_SKULL_LOOP_SHAPE`; a test uses this
+    /// so one process can emit both shapes.
+    pub fn set_loop_shape(&mut self, shape: LoopShape) {
+        self.loops = shape;
+    }
+
+    pub fn loop_shape(&self) -> LoopShape {
+        self.loops
     }
 
     /// Record every function's call-graph strongly connected component. The
@@ -1193,6 +1209,45 @@ pub fn callee_binding_mode() -> CalleeBindingMode {
         _ => DEFAULT_CALLEE_BINDING,
     })
 }
+
+/// How a natural loop that is NOT a counted `for` is spelled.
+///
+/// LuaJIT's parser turns a backward `goto` into `BC_LOOP` with `bc_j == -1`
+/// (`lj_parse.c`, `parse_goto`: "No BC range check"). `rec_setup_root` then
+/// leaves `bc_min`/`bc_extent` at their no-limit defaults, so a root trace
+/// started at such a loop keeps recording past the loop's exit through the rest
+/// of the function until it hits a compiled loop, the unroll limit or the
+/// constant limit; and `rec_loop_interp`'s interpreted-inner-loop check is
+/// skipped, because it is guarded on `bc_j(*pc) != -1`. A `while true do .. end`
+/// gets `BC_LOOP` with a real range (`parse_while` patches it with
+/// `jmp_patchins`), so both paths see a closed loop.
+/// `docs/trace-pressure-work-plan.md` carries the measurement.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum LoopShape {
+    /// Every non-counted loop stays labelled blocks plus a backward `goto`.
+    Goto,
+    /// Every natural loop the CFG can prove single-entry is wrapped in
+    /// `while true do .. end`, its back edges rewritten to a forward `goto` to a
+    /// continue label at the end of the loop body. Exits stay ordinary `goto`s
+    /// OUT of the block, which Lua allows; only jumping IN is forbidden, and the
+    /// single-entry proof is exactly what rules that out.
+    Structured,
+}
+
+/// `ROCK_SKULL_LOOP_SHAPE` selects the emitted shape for a natural loop that is
+/// not a counted `for`: `goto` or `structured`. An unset or unrecognized value
+/// is the shipped default, so the switch can only be entered deliberately.
+pub fn loop_shape() -> LoopShape {
+    static SHAPE: std::sync::OnceLock<LoopShape> = std::sync::OnceLock::new();
+    *SHAPE.get_or_init(|| match std::env::var("ROCK_SKULL_LOOP_SHAPE").as_deref() {
+        Ok("structured") => LoopShape::Structured,
+        Ok("goto") => LoopShape::Goto,
+        _ => DEFAULT_LOOP_SHAPE,
+    })
+}
+
+/// The shipped emitted loop shape. See **Loop shape** in `docs/backends.md`.
+pub const DEFAULT_LOOP_SHAPE: LoopShape = LoopShape::Goto;
 
 static FORCE_GLOBAL_CALLEE_BINDING: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
@@ -2424,6 +2479,127 @@ fn slot_sound(
     stores == 2
 }
 
+// A loop that is not one of the counted shapes above stays labelled blocks plus
+// a backward `goto`, which LuaJIT's parser turns into `BC_LOOP` with
+// `bc_j == -1` and NO bytecode range (`lj_parse.c`, `parse_goto`). Under
+// [`LoopShape::Structured`] every natural loop whose body the CFG proves is
+// single-entry is wrapped in `while true do .. end` instead, so the `BC_LOOP`
+// carries the range `parse_while` patches into it.
+
+/// A natural loop, before the emitability checks.
+struct NaturalLoop {
+    header: Idx<Block>,
+    /// Blocks of the loop EXCLUDING the header: everything that reaches a latch
+    /// without crossing the header. The header is emitted as the first
+    /// statements inside the `while`, so it is never in this set.
+    region: HashSet<Idx<Block>>,
+}
+
+/// A natural loop the emitter spells as `while true do .. end`, keyed by header.
+struct StructuredLoop {
+    region: HashSet<Idx<Block>>,
+}
+
+/// Every natural loop of `func`: one per header of a back edge (an edge whose
+/// target dominates its source), with the union of that header's back edges as
+/// the body. A header with several latches (a `continue`) is ONE loop.
+fn natural_loops(
+    func: &MirFunc,
+    entry: Idx<Block>,
+    rpo: &[Idx<Block>],
+    all_preds: &PredMap,
+) -> Vec<NaturalLoop> {
+    let idom = skull_mir::cfg::dominators(func, entry);
+    let reach: HashSet<Idx<Block>> = rpo.iter().copied().collect();
+    let mut latches: HashMap<Idx<Block>, Vec<Idx<Block>>> = HashMap::default();
+    for &b in rpo {
+        successors(&func.blocks[b].term, |s| {
+            if reach.contains(&s) && skull_mir::cfg::dominates(&idom, s, b) {
+                latches.entry(s).or_default().push(b);
+            }
+        });
+    }
+    let mut out = Vec::new();
+    for &h in rpo {
+        let Some(ls) = latches.get(&h) else { continue };
+        let mut region: HashSet<Idx<Block>> = HashSet::default();
+        let mut stack: Vec<Idx<Block>> = Vec::new();
+        for &l in ls {
+            if l != h && region.insert(l) {
+                stack.push(l);
+            }
+        }
+        while let Some(b) = stack.pop() {
+            if let Some(ps) = all_preds.get(&b) {
+                for &p in ps {
+                    if p != h && region.insert(p) {
+                        stack.push(p);
+                    }
+                }
+            }
+        }
+        out.push(NaturalLoop { header: h, region });
+    }
+    out
+}
+
+/// Every natural loop of `func` that may be emitted as `while true do .. end`.
+///
+/// The proof obligations are exactly Lua's two block rules. A body block may be
+/// entered only from inside the loop, because its label moves inside the `while`
+/// and a `goto` may not jump into a block; the HEADER may be entered from
+/// anywhere, because its label stays outside. And two loops must nest, because
+/// a Lua block cannot interleave with another.
+fn recognize_structured_loops(
+    func: &MirFunc,
+    entry: Idx<Block>,
+    rpo: &[Idx<Block>],
+    counted: &HashMap<Idx<Block>, CountedLoop>,
+) -> HashMap<Idx<Block>, StructuredLoop> {
+    let (all_preds, _) = predecessors(func, rpo);
+    let mut kept: Vec<NaturalLoop> = Vec::new();
+    for nl in natural_loops(func, entry, rpo, &all_preds) {
+        if counted.contains_key(&nl.header) {
+            continue;
+        }
+        let single_entry = nl.region.iter().all(|b| {
+            all_preds.get(b).is_none_or(|ps| {
+                ps.iter().all(|p| *p == nl.header || nl.region.contains(p))
+            })
+        });
+        if !single_entry {
+            continue;
+        }
+        kept.push(nl);
+    }
+    // Proper nesting, pairwise: the block sets (header included) are disjoint or
+    // one contains the other. A reducible CFG always satisfies this; an
+    // interleaving pair would put one body's blocks on both sides of the other's
+    // `end`, so BOTH are dropped rather than guessing which to keep.
+    let blocks = |nl: &NaturalLoop| -> HashSet<Idx<Block>> {
+        nl.region.iter().copied().chain([nl.header]).collect()
+    };
+    let sets: Vec<HashSet<Idx<Block>>> = kept.iter().map(blocks).collect();
+    let mut bad = vec![false; kept.len()];
+    for i in 0..kept.len() {
+        for j in (i + 1)..kept.len() {
+            let (a, b) = (&sets[i], &sets[j]);
+            let overlaps = a.iter().any(|x| b.contains(x));
+            if overlaps && !a.is_subset(b) && !b.is_subset(a) {
+                bad[i] = true;
+                bad[j] = true;
+            }
+        }
+    }
+    let mut loops: HashMap<Idx<Block>, StructuredLoop> = HashMap::default();
+    for (i, nl) in kept.into_iter().enumerate() {
+        if !bad[i] {
+            loops.insert(nl.header, StructuredLoop { region: nl.region });
+        }
+    }
+    loops
+}
+
 /// Whether a value-producing inst is ALWAYS safe to tree-fold into its single use
 /// site, regardless of what executes between def and use: a pure computation over
 /// value operands only (operands are SSA — immutable once computed) with no read
@@ -2683,6 +2859,12 @@ fn render_scope(
     // RPO drives both block layout (preheader-before-header, for the relooper)
     // and the reachable set the regalloc colors over.
     let loops = recognize_counted_loops(func, rpo, frame);
+    // Only under the non-default shape: `goto` must cost nothing and emit the
+    // same bytes, so the analysis does not run at all.
+    let structured = match ctx.loop_shape() {
+        LoopShape::Goto => HashMap::default(),
+        LoopShape::Structured => recognize_structured_loops(func, entry, rpo, &loops),
+    };
     let t_ra = std::time::Instant::now();
     // Counted-loop regions partition the coloring so loop-body temps get
     // body-scoped `local`s (see `ValueAlloc::color_scope`). Partitioning trades
@@ -2852,6 +3034,8 @@ fn render_scope(
         cell_colors,
         frame,
         loops: &loops,
+        structured: &structured,
+        open_loops: HashSet::default(),
         rpo,
         inlinable,
         emitted: vec![false; func.blocks.len()],
@@ -2917,6 +3101,13 @@ struct Emitter<'a> {
     /// Recognized counted loops, keyed by header — a goto into an un-emitted
     /// header expands a structured `for`.
     loops: &'a HashMap<Idx<Block>, CountedLoop>,
+    /// Natural loops emitted as `while true do .. end`, keyed by header. Empty
+    /// under [`LoopShape::Goto`], which is what makes that shape byte-identical.
+    structured: &'a HashMap<Idx<Block>, StructuredLoop>,
+    /// The headers of the `while` blocks currently open around the emission
+    /// point, innermost last. An edge to one of these is a back edge and must be
+    /// spelled as a FORWARD `goto` to that loop's continue label.
+    open_loops: HashSet<Idx<Block>>,
     /// Reverse-postorder block layout (loop bodies emit their region in RPO).
     rpo: &'a [Idx<Block>],
     /// Values tree-folded into their single use site (no register); referenced
@@ -3049,10 +3240,39 @@ impl Emitter<'_> {
         if self.emitted[raw(bb) as usize] {
             return; // already emitted (e.g. as a loop body block)
         }
+        if self.structured.contains_key(&bb) {
+            self.expand_while(out, bb);
+            return;
+        }
         self.emitted[raw(bb) as usize] = true;
+        self.write_block_label(out, bb);
+        self.emit_block_contents(out, bb);
+    }
+
+    fn write_block_label(&self, out: &mut String, bb: Idx<Block>) {
         out.push_str("  ::bb");
         push_uint(out, self.func.emit_block_id(bb));
         out.push_str("::\n");
+    }
+
+    /// The label an edge to `t` names: `t`'s own block label, or the continue
+    /// label of an enclosing `while` when `t` is that loop's header. The second
+    /// case is a back edge, and it MUST be a forward jump to the end of the loop
+    /// body: a backward `goto` would make LuaJIT emit its own rangeless
+    /// `BC_LOOP` inside the loop the `while` is there to close.
+    fn write_label_ref(&self, out: &mut String, t: Idx<Block>) {
+        out.push_str(if self.open_loops.contains(&t) { "lc" } else { "bb" });
+        push_uint(out, self.func.emit_block_id(t));
+    }
+
+    fn write_goto(&self, out: &mut String, t: Idx<Block>) {
+        out.push_str("  goto ");
+        self.write_label_ref(out, t);
+        out.push('\n');
+    }
+
+    /// The statements of `bb` and its terminator, without its label.
+    fn emit_block_contents(&mut self, out: &mut String, bb: Idx<Block>) {
         let insts: &[Idx<Inst>] = &self.func.blocks[bb].insts;
         let tail = self.tail_forwards[raw(bb) as usize].as_ref();
         let emitted_len = tail.map_or(insts.len(), |tail| tail.first_suppressed);
@@ -3105,9 +3325,19 @@ impl Emitter<'_> {
         let term = &self.func.blocks[bb].term;
         if let Term::Goto(t) = term {
             let t = *t;
-            if self.loops.contains_key(&t) && !self.emitted[raw(t) as usize] {
-                self.expand_for(out, t);
-                return;
+            if !self.emitted[raw(t) as usize] {
+                if self.loops.contains_key(&t) {
+                    self.expand_for(out, t);
+                    return;
+                }
+                // The preheader falls straight into the `while`, so the entering
+                // edge costs no jump. An edge that is NOT the fall-through (a
+                // second entry, or a back edge from a block emitted after the
+                // loop) still reaches the header label, which sits outside it.
+                if self.structured.contains_key(&t) {
+                    self.expand_while(out, t);
+                    return;
+                }
             }
         }
         self.emit_term(out, &self.func.blocks[bb].term, bb);
@@ -3200,9 +3430,46 @@ impl Emitter<'_> {
         out.push_str("::\n");
         self.write_kills(out, &self.kills.at_entry[raw(latch) as usize]);
         out.push_str("  end\n");
-        out.push_str("  goto bb");
-        push_uint(out, self.func.emit_block_id(exit));
-        out.push('\n');
+        self.write_goto(out, exit);
+    }
+
+    /// Emit a proven natural loop as `while true do <header> <body> ::lcN:: end`.
+    ///
+    /// The header's LABEL goes before the `while` and its STATEMENTS inside, so
+    /// an entering `goto` never jumps into the block (Lua forbids that) while the
+    /// loop-back edge still re-runs the condition. Every back edge is rewritten
+    /// to `goto lcN`, a forward jump to the continue label that closes the body;
+    /// exits stay ordinary `goto`s to labels outside, which Lua allows and the
+    /// single-entry proof in [`recognize_structured_loops`] is what makes safe.
+    fn expand_while(&mut self, out: &mut String, header: Idx<Block>) {
+        let region: HashSet<Idx<Block>> =
+            self.structured[&header].region.iter().copied().collect();
+        self.emitted[raw(header) as usize] = true;
+        self.write_block_label(out, header);
+        out.push_str("  while true do\n");
+        self.open_loops.insert(header);
+        self.emit_block_contents(out, header);
+        for &bb in self.rpo {
+            if region.contains(&bb) {
+                self.emit_block(out, bb); // self-skips already-emitted blocks
+            }
+        }
+        self.open_loops.remove(&header);
+        let mut label = String::from("  ::lc");
+        push_uint(&mut label, self.func.emit_block_id(header));
+        // The last block emitted usually IS a latch, and its back edge is then a
+        // jump to the very next instruction. Dropping it is a pure deletion:
+        // falling off the end of the body is the same back edge. Only a
+        // whole-statement suffix at the loop body's own nesting level can match,
+        // because `expand_for`/`expand_while` both close with `end` first.
+        let jump = format!("{}\n", label.replacen("  ::", "  goto ", 1));
+        if out.ends_with(&jump) {
+            let keep = out.len() - jump.len();
+            out.truncate(keep);
+        }
+        label.push_str("::\n");
+        out.push_str(&label);
+        out.push_str("  end\n");
     }
 
     fn emit_inst(&mut self, out: &mut String, id: Idx<Inst>) {
@@ -4219,9 +4486,7 @@ impl Emitter<'_> {
                 out.push_str("  do return end\n");
             }
             Term::Goto(b) => {
-                out.push_str("  goto bb");
-                push_uint(out, self.func.emit_block_id(*b));
-                out.push('\n');
+                self.write_goto(out, *b);
             }
             Term::Branch {
                 cond,
@@ -4241,17 +4506,15 @@ impl Emitter<'_> {
                     // The arm blocks are skipped, so their entry kills are too;
                     // what dies between here and the join is killed here.
                     self.write_kills(out, &self.kills.on_edge(bb, join));
-                    out.push_str("  goto bb");
-                    push_uint(out, self.func.emit_block_id(join));
-                    out.push('\n');
+                    self.write_goto(out, join);
                     return;
                 }
                 out.push_str("  if ");
                 self.write_opnd(out, *cond);
-                out.push_str(" then goto bb");
-                push_uint(out, self.func.emit_block_id(*then_bb));
-                out.push_str(" else goto bb");
-                push_uint(out, self.func.emit_block_id(*else_bb));
+                out.push_str(" then goto ");
+                self.write_label_ref(out, *then_bb);
+                out.push_str(" else goto ");
+                self.write_label_ref(out, *else_bb);
                 out.push_str(" end\n");
             }
             Term::Switch {
@@ -4267,17 +4530,15 @@ impl Emitter<'_> {
                     first = false;
                     let _ = write!(out, "  {kw} {d} == ");
                     write_lit(out, l);
-                    out.push_str(" then goto bb");
-                    push_uint(out, self.func.emit_block_id(*b));
+                    out.push_str(" then goto ");
+                    self.write_label_ref(out, *b);
                     out.push('\n');
                 }
                 if first {
-                    out.push_str("  goto bb");
-                    push_uint(out, self.func.emit_block_id(*default));
-                    out.push('\n');
+                    self.write_goto(out, *default);
                 } else {
-                    out.push_str("  else goto bb");
-                    push_uint(out, self.func.emit_block_id(*default));
+                    out.push_str("  else goto ");
+                    self.write_label_ref(out, *default);
                     out.push_str(" end\n");
                 }
             }
