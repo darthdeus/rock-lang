@@ -102,6 +102,8 @@ mod stone_test_comptime;
 mod stone_test_debounce;
 #[path = "stone_test_decorator_cleanup.rs"]
 mod stone_test_decorator_cleanup;
+#[path = "stone_full_reload_binding.rs"]
+mod stone_full_reload_binding;
 #[path = "stone_test_endtoend.rs"]
 mod stone_test_endtoend;
 #[path = "test_harness_truncation.rs"]
