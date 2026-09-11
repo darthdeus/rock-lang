@@ -53,3 +53,18 @@ pub fn cycle_callees(
             .map(|edge| (edge.from.func, edge.to.func)),
     )
 }
+
+/// Every function's call-graph component number in `graph`, spelled the way
+/// production spells it (`skull::mir_emit::call_sccs`).
+#[allow(dead_code)]
+pub fn call_sccs(
+    graph: &instance_graph::InstanceGraph,
+) -> bone_semantic::prelude::FxHashMap<FuncRef, u32> {
+    skull_codegen_lua::call_sccs(
+        graph
+            .contributions
+            .values()
+            .flat_map(|contribution| contribution.edges.iter())
+            .map(|edge| (edge.from.func, edge.to.func)),
+    )
+}

@@ -88,7 +88,7 @@ fn corpus_lowering_coverage() {
                 match common::lower_test_ref(&ws, mid, fid) {
                     Ok((func, interner)) => {
                         // Emit too — a lower-OK that panics at emit is not parity.
-                        let _ = emit_function(&ws, &ctx, &interner, FuncRef { module: mid, func: fid }, &func);
+                        let _ = emit_function(&ws, &ctx, &interner, FuncRef { module: mid, func: fid }, &func, None);
                         local_ok += 1;
                     }
                     Err(e) => local_gaps.push(gap_bucket(&e.message)),

@@ -1562,6 +1562,8 @@ fn emit_decorator_unit(
             }
             skull_codegen_lua::regalloc_time_reset();
             let te = Instant::now();
+            // A decorator / global-initializer body runs once at chunk load,
+            // outside the definitions section the binding pass covers.
             let emission = emit_named_with_allocation_report(
                 ws,
                 cg,
@@ -1569,6 +1571,7 @@ fn emit_decorator_unit(
                 &deco_name,
                 &mf,
                 &[],
+                None,
             );
             let mut lua = emission.lua;
             if let Some(body) = crate::allocation_report::collect_emitted_body(
@@ -1918,6 +1921,8 @@ fn emit_global_unit(
             let key = Ustr::from(&init_name);
             skull_codegen_lua::regalloc_time_reset();
             let te = Instant::now();
+            // A decorator / global-initializer body runs once at chunk load,
+            // outside the definitions section the binding pass covers.
             let emission = emit_named_with_allocation_report(
                 ws,
                 cg,
@@ -1925,6 +1930,7 @@ fn emit_global_unit(
                 &init_name,
                 &mf,
                 &[],
+                None,
             );
             let mut lua = emission.lua;
             if let Some(body) = crate::allocation_report::collect_emitted_body(
@@ -2425,6 +2431,12 @@ struct Chunk {
     specs: Vec<skull_mir::bound::SpecDemand>,
     /// Compiler-owned logical callable identities in this emitted body.
     code_artifact: skull_mir::code_identity::CodeArtifact,
+    /// Under `CalleeBindingMode::Upvalue`, the definitions in this chunk that
+    /// were emitted as factories, each with the second-pass line that binds it.
+    /// Empty under the global-lookup shape. [`assemble`] emits these in
+    /// ascending `rank` after EVERY definition, so each captured callee is
+    /// already its final closure.
+    binds: Vec<skull_codegen_lua::CalleeBindingPlan>,
 }
 
 fn chunk_dynamic_state_matches(left: &Chunk, right: &Chunk) -> bool {
@@ -2452,6 +2464,56 @@ fn chunk_dynamic_state_matches(left: &Chunk, right: &Chunk) -> bool {
 
 // Each global definition costs the enclosing LuaJIT proto a child proto and name.
 const LUA_DEFINITIONS_PER_SCOPE: usize = 4_096;
+
+// Every global a statement names is a constant of the enclosing LuaJIT proto,
+// whose constant index is 16 bits. The binding pass is nothing BUT global
+// names, so it is split by name count rather than by statement count.
+const LUA_NAMES_PER_BIND_SCOPE: usize = 16_384;
+
+/// The callee binding's SECOND PASS: one `<name> = __rock_mk_<name>(<callees>)`
+/// line per factory, emitted after every definition so a captured callee's
+/// global already holds its final closure.
+///
+/// Ordered by call-graph component rank, which [`skull_codegen_lua::call_sccs`]
+/// numbers in Tarjan completion order: a captured callee's component is
+/// strictly lower than its caller's (they are never equal -- a same-component
+/// callee stays a global lookup), so ascending rank binds callees first. Ties
+/// break on name so the emitted text is deterministic.
+fn callee_binding_pass_lua(plans: &mut [skull_codegen_lua::CalleeBindingPlan]) -> String {
+    if plans.is_empty() {
+        return String::new();
+    }
+    plans.sort_by(|a, b| a.rank.cmp(&b.rank).then_with(|| a.name.cmp(&b.name)));
+    let mut out = String::new();
+    let mut names_in_scope = 0usize;
+    for plan in plans.iter() {
+        if names_in_scope == 0 {
+            out.push_str("do\n(function()\n");
+        }
+        out.push_str(&plan.bind_line());
+        names_in_scope += plan.captures.len() + 2;
+        if names_in_scope >= LUA_NAMES_PER_BIND_SCOPE {
+            out.push_str("end)()\nend\n");
+            names_in_scope = 0;
+        }
+    }
+    if names_in_scope > 0 {
+        out.push_str("end)()\nend\n");
+    }
+    if std::env::var("SKULL_EMIT_PROFILE").is_ok() {
+        let capped = plans.iter().filter(|p| p.capped).count();
+        let captures: usize = plans.iter().map(|p| p.captures.len()).sum();
+        eprintln!(
+            "    callee binding: {} bound definitions, {} captures ({:.1} mean), {} capped at {}",
+            plans.len(),
+            captures,
+            captures as f64 / plans.len() as f64,
+            capped,
+            skull_codegen_lua::MAX_BOUND_CALLEES,
+        );
+    }
+    out
+}
 
 #[derive(Default)]
 struct LuaDefinitionBuffer {
@@ -3022,6 +3084,7 @@ fn emit_function_with_allocation_report(
     interner: &skull_mir::monoty::MonoInterner,
     self_ref: FuncRef,
     mf: &MirFunc,
+    bound: Option<&skull_codegen_lua::CalleeBindingPlan>,
 ) -> skull_codegen_lua::LuaEmission {
     if crate::allocation_report::enabled() {
         skull_codegen_lua::emit_function_with_allocation_sites(
@@ -3030,11 +3093,12 @@ fn emit_function_with_allocation_report(
             interner,
             self_ref,
             mf,
+            bound,
             crate::allocation_report::activation_enabled(),
         )
     } else {
         skull_codegen_lua::LuaEmission {
-            lua: emit_function(ws, cg, interner, self_ref, mf),
+            lua: emit_function(ws, cg, interner, self_ref, mf, bound),
             allocation_sites: Vec::new(),
         }
     }
@@ -3047,6 +3111,7 @@ fn emit_named_with_allocation_report(
     name: &str,
     mf: &MirFunc,
     inherited_statics: &[skull_mir::mir::StaticCell],
+    bound: Option<&skull_codegen_lua::CalleeBindingPlan>,
 ) -> skull_codegen_lua::LuaEmission {
     if crate::allocation_report::enabled() {
         skull_codegen_lua::emit_named_framed_with_allocation_sites(
@@ -3057,6 +3122,7 @@ fn emit_named_with_allocation_report(
             mf,
             None,
             inherited_statics,
+            bound,
             crate::allocation_report::activation_enabled(),
         )
     } else {
@@ -3068,6 +3134,7 @@ fn emit_named_with_allocation_report(
                 name,
                 mf,
                 inherited_statics,
+                bound,
             ),
             allocation_sites: Vec::new(),
         }
@@ -3156,6 +3223,9 @@ fn emit_coroutine_chunk(
         calls: skull_mir::reach::call_targets(mf),
         specs,
         code_artifact,
+        // A coroutine's emitted text is a constructor plus a `__step`, neither
+        // of which is the declaration's own body, so neither binds callees.
+        binds: Vec::new(),
     })
 }
 
@@ -3388,7 +3458,16 @@ fn emit_body_chunk_with_mutation(
     times.validation_work = true;
     skull_codegen_lua::regalloc_time_reset();
     let te = Instant::now();
-    let emission = emit_function_with_allocation_report(ws, cg, scx.interner(), self_ref, &mf);
+    let bind = skull_codegen_lua::callee_binding_plan(
+        ws,
+        cg,
+        scx.interner(),
+        &name,
+        self_ref,
+        &mf,
+    );
+    let emission =
+        emit_function_with_allocation_report(ws, cg, scx.interner(), self_ref, &mf, bind.as_ref());
     let mut lua = emission.lua;
     let mut allocation_bodies = Vec::new();
     if let Some(body) = crate::allocation_report::collect_emitted_body(
@@ -3438,6 +3517,7 @@ fn emit_body_chunk_with_mutation(
         code_artifact,
         attribution,
         comptime_reads: mf.comptime_reads.clone(),
+        binds: bind.into_iter().collect(),
     })
 }
 
@@ -3473,6 +3553,8 @@ pub(crate) fn emit_nested_fns(
         statics.extend(nf.statics.iter().cloned());
         skull_codegen_lua::regalloc_time_reset();
         let te = Instant::now();
+        // A hoisted nested fn has no declaration of its own, so no call-graph
+        // component and no callee binding.
         let emission = emit_named_with_allocation_report(
             ws,
             cg,
@@ -3480,6 +3562,7 @@ pub(crate) fn emit_nested_fns(
             nf.name.as_str(),
             nf,
             inherited_statics,
+            None,
         );
         out.push_str(&emission.lua);
         if let Some(body) = crate::allocation_report::collect_emitted_body(
@@ -3570,6 +3653,7 @@ fn emit_pass_nested_fns(
                 nf.name.as_str(),
                 nf,
                 inherited_statics,
+                None,
             );
             out.push_str(&emission.lua);
             if let Some(body) = crate::allocation_report::collect_emitted_body(
@@ -3590,6 +3674,7 @@ fn emit_pass_nested_fns(
                 nf.name.as_str(),
                 nf,
                 inherited_statics,
+                None,
             ));
         }
         let emit = te.elapsed();
@@ -3805,7 +3890,10 @@ fn emit_spec_chunk(
     code_artifact.set_body_names(&mf, name);
     skull_codegen_lua::regalloc_time_reset();
     let te = Instant::now();
-    let emission = emit_named_with_allocation_report(ws, cg, scx.interner(), name, &mf, &[]);
+    let bind =
+        skull_codegen_lua::callee_binding_plan(ws, cg, scx.interner(), name, fref, &mf);
+    let emission =
+        emit_named_with_allocation_report(ws, cg, scx.interner(), name, &mf, &[], bind.as_ref());
     let mut lua = emission.lua;
     let mut allocation_bodies = Vec::new();
     if let Some(body) = crate::allocation_report::collect_emitted_body(
@@ -3853,6 +3941,7 @@ fn emit_spec_chunk(
         calls: skull_mir::reach::call_targets(&mf),
         specs,
         code_artifact,
+        binds: bind.into_iter().collect(),
     })
 }
 
@@ -3876,6 +3965,7 @@ fn emit_specialized_callees(
     allocation_bodies: &mut Vec<crate::allocation_report::AllocationBody>,
     statics: &mut Vec<skull_mir::mir::StaticCell>,
     out: &mut LuaDefinitionBuffer,
+    binds: &mut Vec<skull_codegen_lua::CalleeBindingPlan>,
     attribution: &mut AttributionAccumulator,
     times: &mut PhaseTimes,
 ) -> Vec<CompilerError> {
@@ -3907,6 +3997,7 @@ fn emit_specialized_callees(
             continue;
         };
         out.push_str(&chunk.lua);
+        binds.extend(chunk.binds.iter().cloned());
         allocation_bodies.extend(chunk.allocation_bodies.iter().cloned());
         attribution.add_unit(&chunk.attribution);
         times.add(&chunk.times);
@@ -4593,6 +4684,23 @@ fn compute_programs(
 /// `EdgeKind::FnValue` included: a function taken as a value is reached by a
 /// call the direct-call edges cannot see, and its taker's edge is what closes
 /// the cycle through it.
+/// Every function's call-graph strongly connected component, from the same
+/// whole-program instance graph [`recursive_callees`] reads, projected onto
+/// declarations the same way. Projecting MERGES nodes, which can only merge
+/// components, so a callee this reports as separate from its caller really is:
+/// the binding pass never orders a capture after the closure that needs it.
+fn call_sccs(
+    graph: &crate::instance_graph::InstanceGraph,
+) -> bone_semantic::prelude::FxHashMap<skull_mir::mir::FuncRef, u32> {
+    skull_codegen_lua::call_sccs(
+        graph
+            .contributions
+            .values()
+            .flat_map(|contribution| contribution.edges.iter())
+            .map(|edge| (edge.from.func, edge.to.func)),
+    )
+}
+
 fn recursive_callees(
     graph: &crate::instance_graph::InstanceGraph,
 ) -> FxHashSet<skull_mir::mir::FuncRef> {
@@ -5288,6 +5396,11 @@ fn assemble(
         needed_foreign.extend(c.calls.iter().map(|f| shared(*f)));
     }
     let mut definitions = LuaDefinitionBuffer::default();
+    // Second pass of the callee binding (`docs/backends.md`): every factory's
+    // `<name> = __rock_mk_<name>(<callees>)` line, emitted after EVERY
+    // definition and in ascending call-graph component rank, so each captured
+    // callee is already its final closure. Empty under the global-lookup shape.
+    let mut callee_binds: Vec<skull_codegen_lua::CalleeBindingPlan> = Vec::new();
     let foreign_bindings: Vec<(FuncRef, String)> = ws
         .modules
         .iter()
@@ -5432,6 +5545,7 @@ fn assemble(
                     attribution.add_unit(&chunk.attribution);
                     if emit_def {
                         definitions.push_str(&chunk.lua);
+                        callee_binds.extend(chunk.binds.iter().cloned());
                         allocation_bodies.extend(chunk.allocation_bodies.iter().cloned());
                         code_artifact.merge_ref(&chunk.code_artifact);
                         // A dropped definition's `static` cells do not exist, so
@@ -5479,6 +5593,7 @@ fn assemble(
         &mut allocation_bodies,
         &mut all_statics,
         &mut definitions,
+        &mut callee_binds,
         &mut attribution,
         &mut times,
     ));
@@ -5498,6 +5613,7 @@ fn assemble(
         return Err(err);
     }
     definitions.append_to(&mut out);
+    out.push_str(&callee_binding_pass_lua(&mut callee_binds));
     mark_generated_code_values(ws, &mut code_artifact);
     let definition_plan = skull_mir::definition::collect(ws)?;
     if definition_plan.census.applications != definition_plan.census.admitted {
@@ -6195,6 +6311,27 @@ pub fn emit_full(
     emit_full_in_for_renderer(ws, user_mid, None, RendererTarget::Gl)
 }
 
+/// [`emit_full`] under an explicit emitted callee shape, overriding
+/// `ROCK_SKULL_CALLEE_BINDING`. The env var is read once per PROCESS, so this
+/// is the seam a test uses to drive both shapes in one test binary -- the same
+/// role [`skull_codegen_lua::CodegenCtx::set_tail_call_shape`] plays for the
+/// tail-call shape.
+pub fn emit_full_with_callee_binding(
+    ws: &Workspace,
+    user_mid: ModuleId,
+    binding: skull_codegen_lua::CalleeBindingMode,
+) -> Result<(MirEmit, SkullEmitCache), CompilerError> {
+    let _allocation_environment = crate::allocation_report::environment_scope();
+    emit_full_in_with_mutation(
+        ws,
+        user_mid,
+        None,
+        BodyMutation::None,
+        RendererTarget::Gl,
+        Some(binding),
+    )
+}
+
 /// Absolutize `project_root` so it can be prefix-matched against module file
 /// paths, which are absolute for a project build.
 ///
@@ -6246,6 +6383,7 @@ pub fn emit_full_in_for_renderer(
         project_root,
         BodyMutation::None,
         renderer_target,
+        None,
     )
 }
 
@@ -6255,7 +6393,7 @@ fn emit_full_in_with_test_mutation(
     user_mid: ModuleId,
     mutation: BodyMutation,
 ) -> Result<(MirEmit, SkullEmitCache), CompilerError> {
-    emit_full_in_with_mutation(ws, user_mid, None, mutation, RendererTarget::Gl)
+    emit_full_in_with_mutation(ws, user_mid, None, mutation, RendererTarget::Gl, None)
 }
 
 fn emit_full_in_with_mutation(
@@ -6264,6 +6402,7 @@ fn emit_full_in_with_mutation(
     project_root: Option<&str>,
     mutation: BodyMutation,
     renderer_target: RendererTarget,
+    callee_binding: Option<skull_codegen_lua::CalleeBindingMode>,
 ) -> Result<(MirEmit, SkullEmitCache), CompilerError> {
     let mut setup_phases = Vec::new();
     let t_setup = Instant::now();
@@ -6609,6 +6748,10 @@ fn emit_full_in_with_mutation(
     let state_slots = lua_global_state_slots(ws, &scx)?.into_iter().collect();
     let mut cg = CodegenCtx::new_with_state(ws, state_slots);
     cg.set_recursive_callees(recursive_callees(&graph));
+    cg.set_call_sccs(call_sccs(&graph));
+    if let Some(binding) = callee_binding {
+        cg.set_callee_binding(binding);
+    }
     let setup_lanes = SetupLaneAttribution {
         cpu_population: cpu_lane.population,
         shader_population: shader_lane.population,

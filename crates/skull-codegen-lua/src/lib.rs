@@ -674,6 +674,14 @@ pub struct CodegenCtx {
     /// `ROCK_SKULL_TAIL_CALLS` once per context rather than once per emitted
     /// block, so a test can drive all three shapes in one process.
     tail_calls: TailCallShape,
+    /// The emitted shape for a call to another emitted function. Read from
+    /// `ROCK_SKULL_CALLEE_BINDING` once per context, same as `tail_calls`.
+    callee_binding: CalleeBindingMode,
+    /// Every function's strongly connected component number over the
+    /// whole-program call graph, from [`call_sccs`]. Read ONLY by
+    /// [`callee_binding_plan`]; empty on any path that never populated it,
+    /// which binds nothing rather than binding unsoundly.
+    call_sccs: HashMap<FuncRef, u32>,
 }
 
 impl Clone for CodegenCtx {
@@ -684,6 +692,8 @@ impl Clone for CodegenCtx {
             state_slots: self.state_slots.clone(),
             recursive_callees: self.recursive_callees.clone(),
             tail_calls: self.tail_calls,
+            callee_binding: self.callee_binding,
+            call_sccs: self.call_sccs.clone(),
         }
     }
 }
@@ -758,6 +768,8 @@ impl CodegenCtx {
             state_slots,
             recursive_callees: HashSet::default(),
             tail_calls: tail_call_shape(),
+            callee_binding: callee_binding_mode(),
+            call_sccs: HashMap::default(),
         }
     }
 
@@ -770,6 +782,34 @@ impl CodegenCtx {
 
     pub fn tail_call_shape(&self) -> TailCallShape {
         self.tail_calls
+    }
+
+    /// Override the emitted callee-binding shape this context was built with.
+    /// The production path takes it from `ROCK_SKULL_CALLEE_BINDING`; `rock
+    /// stone` forces [`CalleeBindingMode::Global`] because the incremental
+    /// overlay redefines a global that bound callers would never re-read, and a
+    /// test uses this so one process can emit both shapes.
+    pub fn set_callee_binding(&mut self, mode: CalleeBindingMode) {
+        self.callee_binding = mode;
+    }
+
+    pub fn callee_binding(&self) -> CalleeBindingMode {
+        self.callee_binding
+    }
+
+    /// Record every function's call-graph strongly connected component. The
+    /// caller owns the graph this is derived from (`skull::mir_emit` projects
+    /// the whole-program instance graph onto declarations, which can only MERGE
+    /// components and so only ever binds less); codegen only reads the answer,
+    /// and only under [`CalleeBindingMode::Upvalue`].
+    pub fn set_call_sccs(&mut self, sccs: HashMap<FuncRef, u32>) {
+        self.call_sccs = sccs;
+    }
+
+    /// `func`'s strongly connected component number, or `None` when the graph
+    /// this context was given does not mention it.
+    pub fn scc_of(&self, func: FuncRef) -> Option<u32> {
+        self.call_sccs.get(&func).copied()
     }
 
     /// Record the functions that lie on a call cycle. The caller owns the graph
@@ -939,15 +979,25 @@ fn instruction_reference_counts(func: &MirFunc) -> Vec<u32> {
     counts
 }
 
-/// Every function that lies on a cycle of `edges`, the input
-/// `ROCK_SKULL_TAIL_CALLS=cycles` reads through
-/// [`CodegenCtx::set_recursive_callees`].
+/// The strongly connected components of a `(caller, callee)` call-edge stream,
+/// the one Tarjan run behind both [`callees_on_cycles`] and [`call_sccs`].
 ///
-/// `edges` is a `(caller, callee)` stream; a function is on a cycle when its
-/// strongly connected component has more than one member or it calls itself.
-/// The caller supplies the graph, so the emitter never has to know how the
-/// program's call edges were discovered.
-pub fn callees_on_cycles(edges: impl IntoIterator<Item = (FuncRef, FuncRef)>) -> HashSet<FuncRef> {
+/// Components are numbered in Tarjan COMPLETION order, which is a reverse
+/// topological order of the condensation: a component is closed only after
+/// every component it can reach, so `component[callee] < component[caller]`
+/// whenever the two differ. [`call_sccs`] hands that number out as the
+/// callee-binding rank, and the binding pass emits in ascending rank so every
+/// captured callee is already its final closure.
+struct CallComponents {
+    nodes: Vec<FuncRef>,
+    /// Node index -> component number.
+    component: Vec<u32>,
+    /// Component number -> whether it is a genuine cycle (more than one member,
+    /// or a self-edge).
+    is_cycle: Vec<bool>,
+}
+
+fn tarjan_components(edges: impl IntoIterator<Item = (FuncRef, FuncRef)>) -> CallComponents {
     fn intern(
         f: FuncRef,
         ids: &mut HashMap<FuncRef, usize>,
@@ -980,11 +1030,12 @@ pub fn callees_on_cycles(edges: impl IntoIterator<Item = (FuncRef, FuncRef)>) ->
     let mut index = vec![UNVISITED; n];
     let mut low = vec![0usize; n];
     let mut on_stack = vec![false; n];
-    let mut component: Vec<usize> = Vec::new();
+    let mut component = vec![u32::MAX; n];
+    let mut is_cycle: Vec<bool> = Vec::new();
+    let mut members: Vec<usize> = Vec::new();
     let mut stack: Vec<usize> = Vec::new();
     let mut work: Vec<(usize, usize)> = Vec::new();
     let mut next_index = 0usize;
-    let mut out: HashSet<FuncRef> = HashSet::default();
     for root in 0..n {
         if index[root] != UNVISITED {
             continue;
@@ -1017,18 +1068,20 @@ pub fn callees_on_cycles(edges: impl IntoIterator<Item = (FuncRef, FuncRef)>) ->
                 continue;
             }
             if low[v] == index[v] {
-                component.clear();
+                members.clear();
                 loop {
                     let w = stack.pop().expect("tarjan component stack");
                     on_stack[w] = false;
-                    component.push(w);
+                    members.push(w);
                     if w == v {
                         break;
                     }
                 }
+                let id = is_cycle.len() as u32;
                 // A one-node component is on a cycle only through a self-edge.
-                if component.len() > 1 || succ[v].contains(&v) {
-                    out.extend(component.iter().map(|&w| nodes[w]));
+                is_cycle.push(members.len() > 1 || succ[v].contains(&v));
+                for &w in &members {
+                    component[w] = id;
                 }
             }
             if let Some(&(parent, _)) = work.last() {
@@ -1036,7 +1089,35 @@ pub fn callees_on_cycles(edges: impl IntoIterator<Item = (FuncRef, FuncRef)>) ->
             }
         }
     }
-    out
+    CallComponents { nodes, component, is_cycle }
+}
+
+/// Every function that lies on a cycle of `edges`, the input
+/// `ROCK_SKULL_TAIL_CALLS=cycles` reads through
+/// [`CodegenCtx::set_recursive_callees`].
+///
+/// `edges` is a `(caller, callee)` stream; a function is on a cycle when its
+/// strongly connected component has more than one member or it calls itself.
+/// The caller supplies the graph, so the emitter never has to know how the
+/// program's call edges were discovered.
+pub fn callees_on_cycles(edges: impl IntoIterator<Item = (FuncRef, FuncRef)>) -> HashSet<FuncRef> {
+    let c = tarjan_components(edges);
+    c.nodes
+        .iter()
+        .zip(c.component.iter())
+        .filter(|(_, comp)| c.is_cycle[**comp as usize])
+        .map(|(f, _)| *f)
+        .collect()
+}
+
+/// Each function's strongly connected component number over `edges`, the input
+/// `ROCK_SKULL_CALLEE_BINDING=upvalue` reads through
+/// [`CodegenCtx::set_call_sccs`]. Two functions share a number exactly when
+/// they are mutually reachable, and a callee's number is strictly lower than
+/// its caller's whenever they differ -- see [`CallComponents`].
+pub fn call_sccs(edges: impl IntoIterator<Item = (FuncRef, FuncRef)>) -> HashMap<FuncRef, u32> {
+    let c = tarjan_components(edges);
+    c.nodes.iter().copied().zip(c.component.iter().copied()).collect()
 }
 
 /// Which calls in tail position keep Lua's `do return f(...) end` shape.
@@ -1074,6 +1155,217 @@ pub fn tail_call_shape() -> TailCallShape {
         _ => TailCallShape::All,
     })
 }
+
+/// How a call to another EMITTED function is spelled inside a function body.
+///
+/// A global lookup (`GGET`) costs a trace 5 constant-pool slots per distinct
+/// callee on GC64 -- the name string (a GC constant, 2 slots), its `KSLOT`
+/// hash slot, and the resolved function object (2 more) -- plus the guard that
+/// the global still holds that function. LuaJIT's `maxirconst` limit is 500
+/// SLOTS, and "trace too long" (the limit being hit) is the largest abort class
+/// in mag. An IMMUTABLE upvalue costs 2: only the function object, folded into
+/// the trace with no lookup and no guard. `docs/trace-pressure-work-plan.md`
+/// carries the per-shape measurement.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CalleeBindingMode {
+    /// Every call is a global lookup by the callee's emitted name.
+    Global,
+    /// A function that calls other emitted functions is defined as a FACTORY
+    /// (`__rock_mk_F = function(a, b) return function(..) .. end end`) whose
+    /// parameters are named exactly like the callees, so the body text is
+    /// unchanged and each call reads an immutable upvalue instead of a global.
+    /// A second pass binds `F = __rock_mk_F(a, b)` once every callee it
+    /// captures is final.
+    Upvalue,
+}
+
+/// `ROCK_SKULL_CALLEE_BINDING` selects the emitted shape for a call to another
+/// emitted function: `global` or `upvalue`. An unset or unrecognized value is
+/// the shipped default, so the switch can only be entered deliberately.
+pub fn callee_binding_mode() -> CalleeBindingMode {
+    if FORCE_GLOBAL_CALLEE_BINDING.load(std::sync::atomic::Ordering::Relaxed) {
+        return CalleeBindingMode::Global;
+    }
+    static MODE: std::sync::OnceLock<CalleeBindingMode> = std::sync::OnceLock::new();
+    *MODE.get_or_init(|| match std::env::var("ROCK_SKULL_CALLEE_BINDING").as_deref() {
+        Ok("upvalue") => CalleeBindingMode::Upvalue,
+        Ok("global") => CalleeBindingMode::Global,
+        _ => DEFAULT_CALLEE_BINDING,
+    })
+}
+
+static FORCE_GLOBAL_CALLEE_BINDING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Pin this PROCESS to [`CalleeBindingMode::Global`], whatever
+/// `ROCK_SKULL_CALLEE_BINDING` says.
+///
+/// THE hot-reload rule. An incremental overlay redefines one global `F`; a
+/// caller that captured `F` as an upvalue holds the previous closure and would
+/// never see the edited body, so a body edit would silently not reach its
+/// callers. The two shapes are therefore mutually exclusive for a whole build
+/// session, and every command that can emit an overlay (`rock stone`,
+/// `rock watch`, `rock stone-test`) calls this before its first build.
+/// `assemble_overlay` rejects rather than trusting the caller to have done so.
+pub fn force_global_callee_binding() {
+    FORCE_GLOBAL_CALLEE_BINDING.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// True once [`force_global_callee_binding`] has pinned this process.
+pub fn global_callee_binding_forced() -> bool {
+    FORCE_GLOBAL_CALLEE_BINDING.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The shipped emitted shape. See `docs/backends.md`.
+pub const DEFAULT_CALLEE_BINDING: CalleeBindingMode = CalleeBindingMode::Global;
+
+/// LuaJIT's hard limit on upvalues per function prototype (`LJ_MAX_UPVAL`).
+/// A body with more bindable callees than this binds the first
+/// `MAX_BOUND_CALLEES` in name order and leaves the rest global lookups.
+pub const MAX_BOUND_CALLEES: usize = 60;
+
+/// The factory holding the only copy of a bound function's body.
+pub const CALLEE_FACTORY_PREFIX: &str = "__rock_mk_";
+
+/// The callees one body binds as immutable upvalues, and the rank its binding
+/// line must sort at. Built by [`callee_binding_plan`]; consumed by the emitter
+/// (which names the factory parameters) and by the assembler (which emits the
+/// second pass).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CalleeBindingPlan {
+    /// The bound function's emitted Lua name.
+    pub name: String,
+    /// Its factory's name, minted through [`CodegenCtx::mint_synthetic`].
+    pub factory: String,
+    /// The callee names to capture, sorted, deduplicated, and truncated to
+    /// [`MAX_BOUND_CALLEES`]. Each is BOTH the factory parameter name and the
+    /// global read at bind time, so the body text never changes.
+    pub captures: Vec<String>,
+    /// Ascending emission order for the binding pass: the caller's strongly
+    /// connected component number, which is strictly greater than every
+    /// component it captures from (see [`call_sccs`]).
+    pub rank: u32,
+    /// True when this body had more bindable callees than [`MAX_BOUND_CALLEES`],
+    /// so the tail stayed global lookups.
+    pub capped: bool,
+}
+
+impl CalleeBindingPlan {
+    /// The second-pass line: `F = __rock_mk_F(a, b)`.
+    pub fn bind_line(&self) -> String {
+        let mut out = String::with_capacity(self.name.len() + self.factory.len() + 8);
+        out.push_str(&self.name);
+        out.push_str(" = ");
+        out.push_str(&self.factory);
+        out.push('(');
+        for (i, c) in self.captures.iter().enumerate() {
+            if i > 0 {
+                out.push_str(", ");
+            }
+            out.push_str(c);
+        }
+        out.push_str(")\n");
+        out
+    }
+}
+
+/// The emitted symbol a `Call`/`CallMulti` at `id` targets. THE derivation the
+/// body rendering uses ([`Emitter::callee_name`]), exported so the binding plan
+/// cannot drift from the call spelling: a call the lowerer gave a concrete
+/// instance targets that instance's definition, everything else its
+/// declaration's mangled name.
+pub fn call_target_symbol(
+    ws: &Workspace,
+    interner: &MonoInterner,
+    func: &MirFunc,
+    id: Idx<Inst>,
+    callee: FuncRef,
+) -> String {
+    match func.spec_bindings.get(&id) {
+        Some(inst) => inst.symbol(ws, interner),
+        None => mangle_fn(ws, func_of(ws, callee)),
+    }
+}
+
+/// The binding plan for `func`, emitted under `name` for declaration
+/// `self_ref`, or `None` when nothing is bound (the body then emits exactly as
+/// it does under [`CalleeBindingMode::Global`]).
+///
+/// A callee is bound only when the emitter can PROVE it is an ordinary emitted
+/// Lua function whose global is final by the time this body's binding line
+/// runs. Everything else stays a global lookup:
+///
+/// - a callee in the caller's own strongly connected component (including
+///   direct self-recursion): binding it would need its final closure before it
+///   exists, and the condensation rank cannot separate them;
+/// - a callee, or a caller, absent from the call graph the context was given:
+///   with no component number there is no proof of either fact;
+/// - an EXEMPT declaration (`extern`, `@nomangle`, `@test`, `main`, `test_*`):
+///   its bare global is a published name anything may rebind, and hot reload
+///   and the engine both look those up by name;
+/// - an `inline(lua)` body: the definition is hand-written text, and a splice
+///   may remove the call entirely;
+/// - an unspecialized generic or an `Iterator`-bounded declaration: neither has
+///   a standalone definition of its own.
+///
+/// A call THROUGH a function value (`CallValue`) has no statically known callee
+/// and is never bound.
+pub fn callee_binding_plan(
+    ws: &Workspace,
+    ctx: &CodegenCtx,
+    interner: &MonoInterner,
+    name: &str,
+    self_ref: FuncRef,
+    func: &MirFunc,
+) -> Option<CalleeBindingPlan> {
+    if ctx.callee_binding != CalleeBindingMode::Upvalue {
+        return None;
+    }
+    let rank = ctx.scc_of(self_ref)?;
+    let mut captures: Vec<String> = Vec::new();
+    for (id, inst) in func.insts.iter() {
+        let callee = match inst {
+            Inst::Call { func, .. } | Inst::CallMulti { func, .. } => *func,
+            _ => continue,
+        };
+        match ctx.scc_of(callee) {
+            Some(theirs) if theirs != rank => {}
+            _ => continue,
+        }
+        let decl = func_of(ws, callee);
+        if skull_mir::mangle::is_exempt(decl) || decl.inline_body.is_some() {
+            continue;
+        }
+        if decl.generic_bounds.iter().any(Option::is_some) {
+            continue;
+        }
+        if !decl.generics.is_empty() && !func.spec_bindings.contains_key(&id) {
+            continue;
+        }
+        let symbol = call_target_symbol(ws, interner, func, id, callee);
+        // A body that calls its own emitted name (a specialized instance
+        // recursing through the shared declaration) would capture itself.
+        if symbol == name {
+            continue;
+        }
+        captures.push(symbol);
+    }
+    captures.sort_unstable();
+    captures.dedup();
+    if captures.is_empty() {
+        return None;
+    }
+    let capped = captures.len() > MAX_BOUND_CALLEES;
+    captures.truncate(MAX_BOUND_CALLEES);
+    Some(CalleeBindingPlan {
+        factory: ctx.mint_synthetic(format!("{CALLEE_FACTORY_PREFIX}{name}")),
+        name: name.to_string(),
+        captures,
+        rank,
+        capped,
+    })
+}
+
 
 /// THE gate for the emitted tail-call shape. Returning false drops the forward,
 /// which leaves the ordinary emission path to write `r<N> = f(args)` followed by
@@ -1262,9 +1554,10 @@ pub fn emit_function(
     interner: &MonoInterner,
     self_ref: FuncRef,
     func: &MirFunc,
+    bound: Option<&CalleeBindingPlan>,
 ) -> String {
     let name = mangle_fn(ws, func_of(ws, self_ref));
-    emit_named(ws, ctx, interner, &name, func)
+    emit_named(ws, ctx, interner, &name, func, bound)
 }
 
 pub fn emit_function_with_allocation_sites(
@@ -1273,10 +1566,11 @@ pub fn emit_function_with_allocation_sites(
     interner: &MonoInterner,
     self_ref: FuncRef,
     func: &MirFunc,
+    bound: Option<&CalleeBindingPlan>,
     instrument: bool,
 ) -> LuaEmission {
     let name = mangle_fn(ws, func_of(ws, self_ref));
-    emit_named_with_allocation_sites(ws, ctx, interner, &name, func, instrument)
+    emit_named_with_allocation_sites(ws, ctx, interner, &name, func, bound, instrument)
 }
 
 /// Emit a MIR function under the EXACT Lua name `name` (no mangling) — for
@@ -1288,8 +1582,9 @@ pub fn emit_named(
     interner: &MonoInterner,
     name: &str,
     func: &MirFunc,
+    bound: Option<&CalleeBindingPlan>,
 ) -> String {
-    emit_named_with_statics(ws, ctx, interner, name, func, &[])
+    emit_named_with_statics(ws, ctx, interner, name, func, &[], bound)
 }
 
 pub fn emit_named_with_allocation_sites(
@@ -1298,6 +1593,7 @@ pub fn emit_named_with_allocation_sites(
     interner: &MonoInterner,
     name: &str,
     func: &MirFunc,
+    bound: Option<&CalleeBindingPlan>,
     instrument: bool,
 ) -> LuaEmission {
     emit_named_framed_with_allocation_sites(
@@ -1308,6 +1604,7 @@ pub fn emit_named_with_allocation_sites(
         func,
         None,
         &[],
+        bound,
         instrument,
     )
 }
@@ -1322,8 +1619,9 @@ pub fn emit_named_with_statics(
     name: &str,
     func: &MirFunc,
     inherited_statics: &[StaticCell],
+    bound: Option<&CalleeBindingPlan>,
 ) -> String {
-    emit_named_framed_with_statics(ws, ctx, interner, name, func, None, inherited_statics)
+    emit_named_framed_with_statics(ws, ctx, interner, name, func, None, inherited_statics, bound)
 }
 
 /// The coroutine state-table context: a `co fn`'s `__step` reads/writes its
@@ -1364,8 +1662,9 @@ pub fn emit_named_framed(
     name: &str,
     func: &MirFunc,
     frame: Option<&FrameCtx>,
+    bound: Option<&CalleeBindingPlan>,
 ) -> String {
-    emit_named_framed_with_statics(ws, ctx, interner, name, func, frame, &[])
+    emit_named_framed_with_statics(ws, ctx, interner, name, func, frame, &[], bound)
 }
 
 fn emit_named_framed_with_statics(
@@ -1376,6 +1675,7 @@ fn emit_named_framed_with_statics(
     func: &MirFunc,
     frame: Option<&FrameCtx>,
     inherited_statics: &[StaticCell],
+    bound: Option<&CalleeBindingPlan>,
 ) -> String {
     emit_named_framed_with_statics_impl(
         ws,
@@ -1385,8 +1685,10 @@ fn emit_named_framed_with_statics(
         func,
         frame,
         inherited_statics,
+        bound,
         None,
     )
+    .0
 }
 
 pub fn emit_named_framed_with_allocation_sites(
@@ -1397,10 +1699,14 @@ pub fn emit_named_framed_with_allocation_sites(
     func: &MirFunc,
     frame: Option<&FrameCtx>,
     inherited_statics: &[StaticCell],
+    bound: Option<&CalleeBindingPlan>,
     instrument: bool,
 ) -> LuaEmission {
     let sites = RefCell::new(Vec::new());
-    let lua = emit_named_framed_with_statics_impl(
+    // The header offset comes back from the emission rather than from a search
+    // for `function <name>`: under `CalleeBindingMode::Upvalue` the body's only
+    // copy sits inside a factory and that spelling does not appear at all.
+    let (lua, header_offset) = emit_named_framed_with_statics_impl(
         ws,
         ctx,
         interner,
@@ -1408,6 +1714,7 @@ pub fn emit_named_framed_with_allocation_sites(
         func,
         frame,
         inherited_statics,
+        bound,
         Some(AllocationEmission {
             body: name,
             sites: &sites,
@@ -1415,10 +1722,8 @@ pub fn emit_named_framed_with_allocation_sites(
         }),
     );
     let mut allocation_sites = sites.into_inner();
-    let function_line_offset = lua
-        .find(&format!("function {name}"))
-        .map(|offset| lua.as_bytes()[..offset].iter().filter(|byte| **byte == b'\n').count())
-        .unwrap_or(0) as u32;
+    let function_line_offset =
+        lua.as_bytes()[..header_offset].iter().filter(|byte| **byte == b'\n').count() as u32;
     allocation_sites.sort_by_key(|site| site.lua_byte_offset);
     let mut byte_cursor = 0;
     let mut line = 1;
@@ -1439,6 +1744,9 @@ pub fn emit_named_framed_with_allocation_sites(
     }
 }
 
+/// Returns the emitted definition and the byte offset of its header (the
+/// `function` keyword that opens the body), which the allocation-site reporter
+/// turns into a body-relative line number.
 fn emit_named_framed_with_statics_impl(
     ws: &Workspace,
     ctx: &CodegenCtx,
@@ -1447,8 +1755,9 @@ fn emit_named_framed_with_statics_impl(
     func: &MirFunc,
     frame: Option<&FrameCtx>,
     inherited_statics: &[StaticCell],
+    bound: Option<&CalleeBindingPlan>,
     allocation: Option<AllocationEmission<'_>>,
-) -> String {
+) -> (String, usize) {
     let entry = func.entry();
     let params = func.params.as_slice();
     let rpo = reverse_postorder(func, entry);
@@ -1503,7 +1812,32 @@ fn emit_named_framed_with_statics_impl(
     let mut out =
         String::with_capacity(hoist_defs.len() + name.len() + 64 + estimated_body_bytes);
     out.push_str(&hoist_defs);
-    let _ = write!(out, "function {}", name);
+    // Under `CalleeBindingMode::Upvalue` the definition becomes a factory whose
+    // parameters are named exactly like the callees they replace, so the body
+    // text below is byte-identical to the global-lookup shape and each call
+    // reads an immutable upvalue. `assemble` emits the matching
+    // `<name> = <factory>(<captures>)` line once every capture is final.
+    let header_offset = match bound {
+        Some(plan) => {
+            debug_assert_eq!(plan.name, name);
+            let _ = write!(out, "{} = function(", plan.factory);
+            for (i, capture) in plan.captures.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                out.push_str(capture);
+            }
+            out.push_str(") return ");
+            let offset = out.len();
+            out.push_str("function");
+            offset
+        }
+        None => {
+            let offset = out.len();
+            let _ = write!(out, "function {}", name);
+            offset
+        }
+    };
     render_scope(
         ws,
         ctx,
@@ -1526,8 +1860,11 @@ fn emit_named_framed_with_statics_impl(
         &suppressed,
         &mut out,
     );
+    if bound.is_some() {
+        out.push_str(" end");
+    }
     out.push('\n');
-    out
+    (out, header_offset)
 }
 
 fn static_slots_for(
@@ -2913,10 +3250,7 @@ impl Emitter<'_> {
     /// definition. The same instance object drives definition and call spelling,
     /// so the two cannot drift.
     fn callee_name(&self, id: Idx<Inst>, func: FuncRef) -> String {
-        match self.func.spec_bindings.get(&id) {
-            Some(inst) => inst.symbol(self.ws, self.interner),
-            None => mangle_fn(self.ws, func_of(self.ws, func)),
-        }
+        call_target_symbol(self.ws, self.interner, self.func, id, func)
     }
 
     fn try_emit_inline_lua_splice(&self, out: &mut String, id: Idx<Inst>) -> bool {
