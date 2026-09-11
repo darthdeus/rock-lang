@@ -7,7 +7,7 @@
 
 mod common;
 
-use skull_codegen_lua::{emit_function, CodegenCtx, TailCallShape};
+use skull_codegen_lua::{emit_function, CalleeBindingMode, CodegenCtx, TailCallShape};
 use skull_mir::mir::FuncRef;
 
 #[test]
@@ -78,7 +78,7 @@ fn emit_dump(mut modules: Vec<skull_parser::Ast>, fn_name: &str) -> String {
     let (func, interner) = common::lower_test_ref(&ws, mid, fid)
         .unwrap_or_else(|e| panic!("lower failed: {}", e.message));
     let ctx = CodegenCtx::new(&ws);
-    emit_function(&ws, &ctx, &interner, FuncRef { module: mid, func: fid }, &func)
+    emit_function(&ws, &ctx, &interner, FuncRef { module: mid, func: fid }, &func, None)
 }
 
 /// Stdlib-free: literals, vars, `let`, builtin comparisons, control flow.
@@ -204,7 +204,7 @@ fn emit_clean_shaped(src: &str, fn_name: &str, shape: TailCallShape) -> String {
     let mut ctx = CodegenCtx::new(&ws);
     ctx.set_tail_call_shape(shape);
     ctx.set_recursive_callees(common::cycle_callees(&graph));
-    emit_function(&ws, &ctx, &interner, FuncRef { module: mid, func: fid }, &func)
+    emit_function(&ws, &ctx, &interner, FuncRef { module: mid, func: fid }, &func, None)
 }
 
 /// Emit the graph-reached lowerable instances for the `<test>` module's user
@@ -221,6 +221,18 @@ fn run(src: &str, driver: &str) -> String {
 /// `skull::mir_emit` populates it from the whole-program one, so
 /// [`TailCallShape::Cycles`] is exercised against real call edges.
 fn run_shaped(src: &str, driver: &str, shape: TailCallShape) -> String {
+    run_shaped_bound(src, driver, shape, CalleeBindingMode::Global)
+}
+
+/// [`run_shaped`] with an explicit callee-binding mode, assembled the way
+/// `skull::mir_emit::assemble` assembles a program: every definition first,
+/// then the binding pass in component-rank order.
+fn run_shaped_bound(
+    src: &str,
+    driver: &str,
+    shape: TailCallShape,
+    binding: CalleeBindingMode,
+) -> String {
     use std::sync::LazyLock;
     static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
         rock_host::stdlib_loader::stdlib_files()
@@ -241,6 +253,7 @@ fn run_shaped(src: &str, driver: &str, shape: TailCallShape) -> String {
     let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("user module id");
     let mut ctx = CodegenCtx::new(&ws);
     ctx.set_tail_call_shape(shape);
+    ctx.set_callee_binding(binding);
     let roots = ws
         .module(mid)
         .functions
@@ -250,9 +263,14 @@ fn run_shaped(src: &str, driver: &str, shape: TailCallShape) -> String {
     let interner = std::sync::Arc::new(skull_mir::monoty::MonoInterner::new());
     let graph = skull_graph::instance_graph::build_in(&ws, roots, false, interner.clone());
     ctx.set_recursive_callees(common::cycle_callees(&graph));
+    ctx.set_call_sccs(common::call_sccs(&graph));
     let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(interner);
     let concrete = skull_graph::concrete_body::build(&ws, &graph);
     let mut code_artifact = skull_mir::code_identity::CodeArtifact::default();
+    // The binding pass, in ascending component rank -- the same order
+    // `skull::mir_emit::callee_binding_pass_lua` emits, and for the same
+    // reason: a captured callee must already be its final closure.
+    let mut binds: Vec<skull_codegen_lua::CalleeBindingPlan> = Vec::new();
     // Capturing lambdas lower to `setmetatable({..}, __rock_fn_mt)` env records
     // (docs/closure-env-records-plan.md); the record metatable lives in skull's
     // runtime prelude, which this bare harness does not emit -- pull in the
@@ -282,17 +300,27 @@ fn run_shaped(src: &str, driver: &str, shape: TailCallShape) -> String {
             let mut unit_artifact = skull_mir::code_identity::CodeArtifact::from_mir_tree(&func);
             unit_artifact.set_body_names(&func, &name);
             code_artifact.merge(unit_artifact);
+            let plan = skull_codegen_lua::callee_binding_plan(
+                &ws, &ctx, scx.interner(), &name, inst.func, &func,
+            );
             lua.push_str(&skull_codegen_lua::emit_named(
-                &ws, &ctx, scx.interner(), &name, &func,
+                &ws, &ctx, scx.interner(), &name, &func, plan.as_ref(),
             ));
+            if let Some(plan) = plan {
+                binds.push(plan);
+            }
             for nf in func.nested_fns[pre_nested..].iter_mut() {
                 skull_transform::cleanup_with_nobox(&ws, nf).unwrap();
                 skull_transform::recover_counted_loops(&ws, nf);
                 lua.push_str(&skull_codegen_lua::emit_named(
-                    &ws, &ctx, scx.interner(), nf.name.as_str(), nf,
+                    &ws, &ctx, scx.interner(), nf.name.as_str(), nf, None,
                 ));
             }
         }
+    }
+    binds.sort_by(|a, b| a.rank.cmp(&b.rank).then_with(|| a.name.cmp(&b.name)));
+    for plan in &binds {
+        lua.push_str(&plan.bind_line());
     }
     assert!(
         code_artifact.census.is_total(),
@@ -904,7 +932,7 @@ fn emit_inlined(src: &str, fn_name: &str) -> String {
     let name = skull_codegen_lua::mangle_fn(&ws, &ws.module(mid).functions[fid]);
     skull_transform::convert_closures(&mut func, &name);
     let ctx = CodegenCtx::new(&ws);
-    emit_function(&ws, &ctx, scx.interner(), self_ref, &func)
+    emit_function(&ws, &ctx, scx.interner(), self_ref, &func, None)
 }
 
 // --- Slice 4 acceptance gate: an @inline user iterator driven by `for`
@@ -1351,6 +1379,213 @@ fn a_multi_return_forward_delivers_the_same_values_under_every_shape() {
             run_shaped(src, "total(7)", shape),
             "708",
             "multi-return forwarding must not change with {shape:?}"
+        );
+    }
+}
+
+// --- Callee binding as immutable upvalues (docs/backends.md) ------------------
+//
+// `CalleeBindingMode::Upvalue` defines a function as a factory whose parameters
+// are named exactly like the callees they replace, so the body text is
+// unchanged and every call reads an immutable upvalue (2 constant-pool slots on
+// GC64) instead of a global (5, plus a guard). The assembler emits the
+// matching `<name> = __rock_mk_<name>(<callees>)` line after every definition.
+
+/// [`emit_clean`] under an explicit callee-binding mode, with the call-graph
+/// components populated from this harness's own instance graph exactly as
+/// `skull::mir_emit` populates them from the whole-program one.
+fn emit_clean_bound(src: &str, fn_name: &str, mode: CalleeBindingMode) -> String {
+    use std::sync::LazyLock;
+    static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
+        rock_host::stdlib_loader::stdlib_files()
+            .iter()
+            .map(|f| {
+                let id = ustr::Ustr::from(format!("<stdlib:{}>", f.name).as_str());
+                skull_parser::parse_module_clean(f.contents, id).expect("stdlib parse")
+            })
+            .collect()
+    });
+    let mut modules = STDLIB.clone();
+    modules.push(skull_parser::parse_module_clean(src, ustr::Ustr::from("<test>")).expect("parse"));
+    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
+    let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("user module id");
+    let (fid, _) = ws
+        .module(mid)
+        .functions
+        .iter()
+        .find(|(_, f)| f.name.as_str() == fn_name)
+        .expect("function by name");
+    let self_ref = FuncRef { module: mid, func: fid };
+    let (mut func, interner, graph) = common::lower_test_ref_with_graph(&ws, mid, fid)
+        .unwrap_or_else(|e| panic!("lower failed: {}", e.message));
+    skull_transform::cleanup(&mut func).unwrap();
+    let mut ctx = CodegenCtx::new(&ws);
+    ctx.set_callee_binding(mode);
+    ctx.set_recursive_callees(common::cycle_callees(&graph));
+    ctx.set_call_sccs(common::call_sccs(&graph));
+    let name = skull_codegen_lua::mangle_fn(&ws, &ws.module(mid).functions[fid]);
+    let plan =
+        skull_codegen_lua::callee_binding_plan(&ws, &ctx, &interner, &name, self_ref, &func);
+    let lua = skull_codegen_lua::emit_function(&ws, &ctx, &interner, self_ref, &func, plan.as_ref());
+    match plan {
+        Some(plan) => format!("{lua}{}", plan.bind_line()),
+        None => lua,
+    }
+}
+
+/// Under the global-lookup shape the emitted definition is a bare
+/// `function <name>(..)` and no factory exists. This is the shape every other
+/// test in this file pins, so binding must not reach it.
+#[test]
+fn callee_binding_global_mode_emits_no_factory() {
+    let src = "fn leaf(a: int) -> int { a + 1 }\nfn caller(a: int) -> int { leaf(a) + leaf(a + 1) }";
+    let lua = emit_clean_bound(src, "caller", CalleeBindingMode::Global);
+    assert!(
+        lua.starts_with("function caller_int_ret_int("),
+        "expected the unbound definition:\n{lua}"
+    );
+    assert!(
+        !lua.contains(skull_codegen_lua::CALLEE_FACTORY_PREFIX),
+        "expected no factory under Global:\n{lua}"
+    );
+}
+
+/// The bound shape: a factory named for the function, one parameter per
+/// distinct callee spelled exactly like the global it replaces, the body
+/// verbatim, and the binding line that calls the factory with those globals.
+#[test]
+fn callee_binding_upvalue_wraps_the_body_in_a_factory() {
+    let src = "fn leaf(a: int) -> int { a + 1 }\nfn caller(a: int) -> int { leaf(a) + leaf(a + 1) }";
+    let global = emit_clean_bound(src, "caller", CalleeBindingMode::Global);
+    let bound = emit_clean_bound(src, "caller", CalleeBindingMode::Upvalue);
+    assert!(
+        bound.starts_with(
+            "__rock_mk_caller_int_ret_int = function(leaf_int_ret_int) return function("
+        ),
+        "expected the factory header:\n{bound}"
+    );
+    assert!(
+        bound.contains("caller_int_ret_int = __rock_mk_caller_int_ret_int(leaf_int_ret_int)\n"),
+        "expected the binding line:\n{bound}"
+    );
+    // The body is the ONLY copy and is byte-identical to the unbound one: the
+    // factory parameter is named like the global, so no call site is rewritten.
+    let body = global
+        .strip_prefix("function caller_int_ret_int")
+        .expect("unbound definition")
+        .trim_end_matches('\n');
+    assert!(
+        bound.contains(&format!("return function{body} end\n")),
+        "expected the unchanged body inside the factory:\n{bound}\n--- body ---\n{body}"
+    );
+}
+
+/// A callee in the caller's own strongly connected component stays a global
+/// lookup: binding it would need its final closure before it exists.
+#[test]
+fn callee_binding_excludes_same_component_callees() {
+    let src = "fn leaf(a: int) -> int { a + 1 }\n\
+               fn is_even(n: int) -> bool { if n == 0 { return true }\n  is_odd(n - 1) }\n\
+               fn is_odd(n: int) -> bool { if n == 0 { return leaf(n) == 1 }\n  is_even(n - 1) }";
+    let bound = emit_clean_bound(src, "is_odd", CalleeBindingMode::Upvalue);
+    assert!(
+        bound.starts_with("__rock_mk_is_odd_int_ret_bool = function(leaf_int_ret_int) return "),
+        "expected only the off-component callee bound:\n{bound}"
+    );
+    assert!(
+        !bound.contains("function(is_even") && !bound.contains(", is_even"),
+        "expected the mutually recursive callee left global:\n{bound}"
+    );
+}
+
+/// Direct self-recursion is a one-node component with a self-edge, so the
+/// recursive call stays a global lookup too.
+#[test]
+fn callee_binding_excludes_self_recursion() {
+    let src = "fn leaf(a: int) -> int { a + 1 }\n\
+               fn down(n: int) -> int { if n == 0 { return leaf(0) }\n  down(n - 1) }";
+    let bound = emit_clean_bound(src, "down", CalleeBindingMode::Upvalue);
+    assert!(
+        bound.starts_with("__rock_mk_down_int_ret_int = function(leaf_int_ret_int) return "),
+        "expected the self-recursive call left global:\n{bound}"
+    );
+}
+
+/// A function with more bindable callees than LuaJIT allows upvalues binds the
+/// first [`skull_codegen_lua::MAX_BOUND_CALLEES`] in name order and leaves the
+/// rest global. Exceeding the limit is a parse error in the emitted Lua, so
+/// this cap is a correctness rule, not a tuning knob.
+#[test]
+fn callee_binding_caps_at_the_lua_upvalue_limit() {
+    let cap = skull_codegen_lua::MAX_BOUND_CALLEES;
+    let count = cap + 7;
+    let mut src = String::new();
+    for i in 0..count {
+        // Zero-padded so name order is call order and the cap is predictable.
+        src.push_str(&format!("fn leaf{i:03}(a: int) -> int {{ a + {i} }}\n"));
+    }
+    src.push_str("fn caller(a: int) -> int {\n  let t = 0\n");
+    for i in 0..count {
+        src.push_str(&format!("  t = t + leaf{i:03}(a)\n"));
+    }
+    src.push_str("  t\n}\n");
+    let bound = emit_clean_bound(&src, "caller", CalleeBindingMode::Upvalue);
+    let header = bound.lines().next().expect("factory header");
+    let params = header
+        .split_once("= function(")
+        .expect("factory header")
+        .1
+        .split_once(") return function")
+        .expect("factory header")
+        .0;
+    assert_eq!(
+        params.split(", ").count(),
+        cap,
+        "expected exactly {cap} bound callees:\n{header}"
+    );
+    assert!(
+        params.starts_with("leaf000_int_ret_int, ") && params.ends_with(&format!("leaf{:03}_int_ret_int", cap - 1)),
+        "expected the first {cap} callees in name order:\n{params}"
+    );
+    for i in cap..count {
+        assert!(
+            !params.contains(&format!("leaf{i:03}_int_ret_int")),
+            "expected `leaf{i:03}` left global:\n{params}"
+        );
+    }
+    // The cap is a correctness rule, not a tuning knob: LuaJIT refuses to parse
+    // a function with more than `MAX_BOUND_CALLEES` upvalues, so an uncapped
+    // binding would make this program fail to load at all.
+    let expected: i64 = (0..count as i64).map(|i| 7 + i).sum();
+    assert_eq!(
+        run_shaped_bound(&src, "caller(7)", TailCallShape::All, CalleeBindingMode::Upvalue),
+        expected.to_string(),
+        "a body with more bindable callees than LuaJIT allows upvalues must still load and run"
+    );
+}
+
+/// The bound program must COMPUTE the same results as the global one, through
+/// real LuaJIT, over the two shapes the binding rule is about: a mutually
+/// recursive pair (whose legs stay global lookups) and a call through a
+/// function value (which has no statically known callee at all).
+#[test]
+fn callee_binding_upvalue_computes_what_global_computes() {
+    let src = "fn leaf(a: int) -> int { a * 3 + 1 }\n\
+               fn is_even(n: int) -> bool { if n == 0 { return true }\n  is_odd(n - 1) }\n\
+               fn is_odd(n: int) -> bool { if n == 0 { return false }\n  is_even(n - 1) }\n\
+               fn apply(f: fn(int) -> int, a: int) -> int { f(a) + f(a + 1) }\n\
+               fn total(a: int) -> int {\n\
+                 let t = apply(leaf, a)\n\
+                 if is_even(a) { t = t + 100 }\n\
+                 if is_odd(a + 1) { t = t + 1000 }\n\
+                 t + leaf(a)\n\
+               }";
+    for driver in ["total(6)", "total(7)", "total(0)"] {
+        let global = run_shaped_bound(src, driver, TailCallShape::All, CalleeBindingMode::Global);
+        let bound = run_shaped_bound(src, driver, TailCallShape::All, CalleeBindingMode::Upvalue);
+        assert_eq!(
+            bound, global,
+            "`{driver}` must not depend on the emitted callee shape"
         );
     }
 }

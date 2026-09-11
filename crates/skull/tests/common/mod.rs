@@ -167,12 +167,44 @@ pub fn try_emit_module(src: &str) -> Result<String, skull_parser::CompilerError>
 /// `end`s, never column-0). A hoisted def (`<name>__lambda0`) shares the
 /// `function <name>` prefix, but the enclosing `<name>` is emitted first, so
 /// `.find` returns the enclosing body -- not the hoist.
+///
+/// Handles both emitted callee shapes: the global-lookup `function <name>(..)`
+/// and the callee-bound factory `__rock_mk_<name> = function(..) return
+/// function(..)`, whose body ends at the column-0 `end end` that closes the
+/// inner function and the factory together. The body TEXT is identical in both
+/// (the factory's parameters are named like the globals they replace), so a
+/// test asserting body shape reads the same either way.
 pub fn function_body<'a>(lua: &'a str, name: &str) -> &'a str {
-    let head = format!("function {name}");
-    let start = lua.find(&head).unwrap_or_else(|| panic!("no `{head}` in:\n{lua}"));
+    let (start, terminator) = match lua.find(&format!("function {name}")) {
+        Some(start) => (start, "\nend\n"),
+        None => {
+            let head = format!("{}{name} = function(", skull_codegen_lua::CALLEE_FACTORY_PREFIX);
+            let start = lua
+                .find(&head)
+                .unwrap_or_else(|| panic!("no `function {name}` or `{head}` in:\n{lua}"));
+            (start, "\nend end\n")
+        }
+    };
     let rest = &lua[start..];
-    let end = rest.find("\nend\n").map(|e| e + 5).unwrap_or(rest.len());
+    let end = rest.find(terminator).map(|e| e + terminator.len()).unwrap_or(rest.len());
     &rest[..end]
+}
+
+/// Every top-level definition's emitted name, in either shape.
+fn definition_names(lua: &str) -> Vec<&str> {
+    let globals = lua.match_indices("\nfunction ").map(|(i, m)| {
+        let rest = &lua[i + m.len()..];
+        &rest[..rest.find('(').expect("fn header has `(`")]
+    });
+    let factory_head = format!("\n{}", skull_codegen_lua::CALLEE_FACTORY_PREFIX);
+    let factories: Vec<&str> = lua
+        .match_indices(factory_head.as_str())
+        .filter_map(|(i, m)| {
+            let rest = &lua[i + m.len()..];
+            rest.find(" = function(").map(|e| &rest[..e])
+        })
+        .collect();
+    globals.chain(factories).collect()
 }
 
 /// The body of the single emitted function whose name contains `needle`.
@@ -181,12 +213,8 @@ pub fn function_body<'a>(lua: &'a str, name: &str) -> &'a str {
 /// than spelled out. Panics if it is not unique -- an ambiguous match would
 /// silently assert against the wrong body.
 pub fn body_of_synthetic<'a>(lua: &'a str, needle: &str) -> &'a str {
-    let names: Vec<&str> = lua
-        .match_indices("\nfunction ")
-        .map(|(i, m)| {
-            let rest = &lua[i + m.len()..];
-            &rest[..rest.find('(').expect("fn header has `(`")]
-        })
+    let names: Vec<&str> = definition_names(lua)
+        .into_iter()
         .filter(|n| n.contains(needle))
         .collect();
     assert_eq!(names.len(), 1, "expected exactly one fn containing `{needle}`, got {names:?}");
@@ -201,19 +229,11 @@ pub fn body_of_synthetic<'a>(lua: &'a str, needle: &str) -> &'a str {
 /// appears on the synthetic derivations, and for a `co fn` a `__step`/`__resume`
 /// header can emit before the constructor), so skip `__`-bearing candidates.
 pub fn mangled_name(lua: &str, src: &str) -> String {
-    let head = format!("function {src}");
-    let mut from = 0;
-    while let Some(p) = lua[from..].find(&head) {
-        let start = from + p + "function ".len();
-        let rest = &lua[start..];
-        let end = rest.find('(').expect("fn header has `(`");
-        let name = &rest[..end];
-        if !name.contains("__") {
-            return name.to_string();
-        }
-        from = start + end;
-    }
-    panic!("no non-synthetic `function {src}` in:\n{lua}");
+    definition_names(lua)
+        .into_iter()
+        .find(|name| name.starts_with(src) && !name.contains("__"))
+        .unwrap_or_else(|| panic!("no non-synthetic definition of `{src}` in:\n{lua}"))
+        .to_string()
 }
 
 /// Like [`try_emit_module`] but ALSO loads `lib` as an extra stdlib module. The

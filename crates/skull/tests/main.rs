@@ -33,6 +33,8 @@ mod coalesce_value_struct_literal_field;
 mod concrete_body;
 #[path = "concrete_coroutine_emission.rs"]
 mod concrete_coroutine_emission;
+#[path = "callee_binding.rs"]
+mod callee_binding;
 #[path = "const_hoist.rs"]
 mod const_hoist;
 #[path = "const_hot_reload.rs"]

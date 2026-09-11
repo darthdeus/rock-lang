@@ -349,12 +349,14 @@ fn emit_coroutine_body(
 ) -> CoroutineBodyEmission {
     if !crate::allocation_report::enabled() {
         return CoroutineBodyEmission {
-            lua: emit_named_framed(ws, ctx, interner, emitted_name, func, frame),
+            // A coroutine `__step` is not a declaration of its own, so it
+            // has no call-graph component and binds no callees.
+            lua: emit_named_framed(ws, ctx, interner, emitted_name, func, frame, None),
             body: None,
         };
     }
     let LuaEmission { lua, allocation_sites } = emit_named_framed_with_allocation_sites(
-        ws, ctx, interner, emitted_name, func, frame, &[],
+        ws, ctx, interner, emitted_name, func, frame, &[], None,
         crate::allocation_report::activation_enabled(),
     );
     let body = crate::allocation_report::collect_emitted_body(
