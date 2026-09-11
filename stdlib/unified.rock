@@ -1445,6 +1445,36 @@ inline(js) fn float_to_int(value: float) -> int = "return Math.floor(value);"
 
 @inline fn to_int(value: float) -> int { return float_to_int(value) }
 
+// The one answer to "which compiler-minted value cdata is this": the
+// `__ROCK_C_STRUCT` row whose ctype `x` (a cdata) has, or nil. The registry is
+// keyed by NAME, so the honest question is a linear `ffi.istype` scan over
+// every row (~150 in MAG, 27us a scan); the sim boundary restore asked it
+// ~1,300 times per crossing. The answer is a function of the ctype alone, so
+// it is memoized per CTypeID, negatives included (`false`; most asks are
+// negatives -- storage arrays and boxed scalars). The registry emitter resets
+// the memo whenever it (re)emits rows, so an entry never outlives its row.
+@nomangle inline(lua) fn __rock_c_struct_of(x: any) -> any = """
+    local reg = _G.__ROCK_C_STRUCT
+    if not reg then return nil end
+    local memo = _G.__ROCK_C_STRUCT_BY_CTYPE
+    if not memo then
+        memo = {}
+        _G.__ROCK_C_STRUCT_BY_CTYPE = memo
+    end
+    local id = tonumber(ffi.typeof(x))
+    local hit = memo[id]
+    if hit ~= nil then return hit or nil end
+    hit = false
+    for _, info in pairs(reg) do
+        if ffi.istype(info.name, x) then
+            hit = info
+            break
+        end
+    end
+    memo[id] = hit
+    return hit or nil
+"""
+
 // Aliasing-preserving, cycle-safe deep copy. `seen` maps each already-copied
 // source table to its copy; recording `seen[obj] = copy` BEFORE recursing
 // children makes two references to one table (or one shared capture box) copy
@@ -1453,12 +1483,9 @@ inline(js) fn float_to_int(value: float) -> int = "return Math.floor(value);"
 // so the wrapper doesn't allocate a fresh closure per copy; @nomangle because
 // it recurses by name and is called from deepcopy's body.
 @nomangle inline(lua) fn __rock_deepcopy_value(obj: any, seen: any) -> any = """
-    if type(obj) == "cdata" and _G.__ROCK_C_STRUCT then
-        for _, info in pairs(_G.__ROCK_C_STRUCT) do
-            if ffi.istype(info.name, obj) then
-                return info.copy(obj)
-            end
-        end
+    if type(obj) == "cdata" then
+        local info = __rock_c_struct_of(obj)
+        if info then return info.copy(obj) end
         return obj
     end
     if type(obj) ~= "table" then
@@ -2209,12 +2236,9 @@ const EPSILON: float = 0.0000001
 """
 
 @nomangle inline(lua) fn inspect(obj: any, cycle_detect: bool = true, precision: int = -1) -> string = """
-    if type(obj) == "cdata" and _G.__ROCK_C_STRUCT then
-        for _, info in pairs(_G.__ROCK_C_STRUCT) do
-            if ffi.istype(info.name, obj) then
-                return info.inspect(obj)
-            end
-        end
+    if type(obj) == "cdata" then
+        local info = __rock_c_struct_of(obj)
+        if info then return info.inspect(obj) end
         return tostring(obj)
     end
 
