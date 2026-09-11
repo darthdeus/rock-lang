@@ -677,6 +677,9 @@ pub struct CodegenCtx {
     /// The emitted shape for a call to another emitted function. Read from
     /// `ROCK_SKULL_CALLEE_BINDING` once per context, same as `tail_calls`.
     callee_binding: CalleeBindingMode,
+    /// The emitted shape for a natural loop that is not a counted `for`. Read
+    /// from `ROCK_SKULL_LOOP_SHAPE` once per context, same as `tail_calls`.
+    loops: LoopShape,
     /// Every function's strongly connected component number over the
     /// whole-program call graph, from [`call_sccs`]. Read ONLY by
     /// [`callee_binding_plan`]; empty on any path that never populated it,
@@ -693,6 +696,7 @@ impl Clone for CodegenCtx {
             recursive_callees: self.recursive_callees.clone(),
             tail_calls: self.tail_calls,
             callee_binding: self.callee_binding,
+            loops: self.loops,
             call_sccs: self.call_sccs.clone(),
         }
     }
@@ -769,6 +773,7 @@ impl CodegenCtx {
             recursive_callees: HashSet::default(),
             tail_calls: tail_call_shape(),
             callee_binding: callee_binding_mode(),
+            loops: loop_shape(),
             call_sccs: HashMap::default(),
         }
     }
@@ -795,6 +800,17 @@ impl CodegenCtx {
 
     pub fn callee_binding(&self) -> CalleeBindingMode {
         self.callee_binding
+    }
+
+    /// Override the emitted loop shape this context was built with. The
+    /// production path takes it from `ROCK_SKULL_LOOP_SHAPE`; a test uses this
+    /// so one process can emit both shapes.
+    pub fn set_loop_shape(&mut self, shape: LoopShape) {
+        self.loops = shape;
+    }
+
+    pub fn loop_shape(&self) -> LoopShape {
+        self.loops
     }
 
     /// Record every function's call-graph strongly connected component. The
@@ -1193,6 +1209,45 @@ pub fn callee_binding_mode() -> CalleeBindingMode {
         _ => DEFAULT_CALLEE_BINDING,
     })
 }
+
+/// How a natural loop that is NOT a counted `for` is spelled.
+///
+/// LuaJIT's parser turns a backward `goto` into `BC_LOOP` with `bc_j == -1`
+/// (`lj_parse.c`, `parse_goto`: "No BC range check"). `rec_setup_root` then
+/// leaves `bc_min`/`bc_extent` at their no-limit defaults, so a root trace
+/// started at such a loop keeps recording past the loop's exit through the rest
+/// of the function until it hits a compiled loop, the unroll limit or the
+/// constant limit; and `rec_loop_interp`'s interpreted-inner-loop check is
+/// skipped, because it is guarded on `bc_j(*pc) != -1`. A `while true do .. end`
+/// gets `BC_LOOP` with a real range (`parse_while` patches it with
+/// `jmp_patchins`), so both paths see a closed loop.
+/// `docs/trace-pressure-work-plan.md` carries the measurement.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum LoopShape {
+    /// Every non-counted loop stays labelled blocks plus a backward `goto`.
+    Goto,
+    /// Every natural loop the CFG can prove single-entry is wrapped in
+    /// `while true do .. end`, its back edges rewritten to a forward `goto` to a
+    /// continue label at the end of the loop body. Exits stay ordinary `goto`s
+    /// OUT of the block, which Lua allows; only jumping IN is forbidden, and the
+    /// single-entry proof is exactly what rules that out.
+    Structured,
+}
+
+/// `ROCK_SKULL_LOOP_SHAPE` selects the emitted shape for a natural loop that is
+/// not a counted `for`: `goto` or `structured`. An unset or unrecognized value
+/// is the shipped default, so the switch can only be entered deliberately.
+pub fn loop_shape() -> LoopShape {
+    static SHAPE: std::sync::OnceLock<LoopShape> = std::sync::OnceLock::new();
+    *SHAPE.get_or_init(|| match std::env::var("ROCK_SKULL_LOOP_SHAPE").as_deref() {
+        Ok("structured") => LoopShape::Structured,
+        Ok("goto") => LoopShape::Goto,
+        _ => DEFAULT_LOOP_SHAPE,
+    })
+}
+
+/// The shipped emitted loop shape. See **Loop shape** in `docs/backends.md`.
+pub const DEFAULT_LOOP_SHAPE: LoopShape = LoopShape::Goto;
 
 static FORCE_GLOBAL_CALLEE_BINDING: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
