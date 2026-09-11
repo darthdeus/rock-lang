@@ -664,6 +664,16 @@ pub struct CodegenCtx {
     rejections: Mutex<Vec<(String, CompilerError)>>,
     /// Compiler-assigned Session slots for mutable globals.
     state_slots: HashMap<ustr::Ustr, u32>,
+    /// Every function that lies on a call cycle, from the whole-program instance
+    /// graph projected onto declarations. Read ONLY by
+    /// [`TailCallShape::Cycles`]; empty on any path that never populated it,
+    /// which makes that shape degrade to [`TailCallShape::All`] rather than to
+    /// the unsafe direction.
+    recursive_callees: HashSet<FuncRef>,
+    /// The emitted shape for a call in tail position. Read from
+    /// `ROCK_SKULL_TAIL_CALLS` once per context rather than once per emitted
+    /// block, so a test can drive all three shapes in one process.
+    tail_calls: TailCallShape,
 }
 
 impl Clone for CodegenCtx {
@@ -672,6 +682,8 @@ impl Clone for CodegenCtx {
             reserved: self.reserved.clone(),
             rejections: Mutex::new(self.rejections.lock().expect("rejection sink").clone()),
             state_slots: self.state_slots.clone(),
+            recursive_callees: self.recursive_callees.clone(),
+            tail_calls: self.tail_calls,
         }
     }
 }
@@ -744,7 +756,34 @@ impl CodegenCtx {
             reserved,
             rejections: Mutex::new(collisions),
             state_slots,
+            recursive_callees: HashSet::default(),
+            tail_calls: tail_call_shape(),
         }
+    }
+
+    /// Override the emitted tail-call shape this context was built with. The
+    /// production path takes it from `ROCK_SKULL_TAIL_CALLS`; a test uses this
+    /// so one process can emit all three shapes.
+    pub fn set_tail_call_shape(&mut self, shape: TailCallShape) {
+        self.tail_calls = shape;
+    }
+
+    pub fn tail_call_shape(&self) -> TailCallShape {
+        self.tail_calls
+    }
+
+    /// Record the functions that lie on a call cycle. The caller owns the graph
+    /// this is derived from (`skull::mir_emit` projects the whole-program
+    /// instance graph onto declarations); codegen only reads the answer, and
+    /// only under `ROCK_SKULL_TAIL_CALLS=cycles`.
+    pub fn set_recursive_callees(&mut self, callees: HashSet<FuncRef>) {
+        self.recursive_callees = callees;
+    }
+
+    /// True if `func` lies on a call cycle, so a call to it can grow the Lua
+    /// stack without bound unless it stays a real tail call.
+    pub fn is_recursive_callee(&self, func: FuncRef) -> bool {
+        self.recursive_callees.contains(&func)
     }
 
     /// Mint a compiler-reserved synthetic top-level Lua name: a hoisted lambda
@@ -898,6 +937,142 @@ fn instruction_reference_counts(func: &MirFunc) -> Vec<u32> {
         });
     }
     counts
+}
+
+/// Every function that lies on a cycle of `edges`, the input
+/// `ROCK_SKULL_TAIL_CALLS=cycles` reads through
+/// [`CodegenCtx::set_recursive_callees`].
+///
+/// `edges` is a `(caller, callee)` stream; a function is on a cycle when its
+/// strongly connected component has more than one member or it calls itself.
+/// The caller supplies the graph, so the emitter never has to know how the
+/// program's call edges were discovered.
+pub fn callees_on_cycles(edges: impl IntoIterator<Item = (FuncRef, FuncRef)>) -> HashSet<FuncRef> {
+    fn intern(
+        f: FuncRef,
+        ids: &mut HashMap<FuncRef, usize>,
+        nodes: &mut Vec<FuncRef>,
+        succ: &mut Vec<Vec<usize>>,
+    ) -> usize {
+        if let Some(&i) = ids.get(&f) {
+            return i;
+        }
+        let i = nodes.len();
+        ids.insert(f, i);
+        nodes.push(f);
+        succ.push(Vec::new());
+        i
+    }
+
+    let mut ids: HashMap<FuncRef, usize> = HashMap::default();
+    let mut nodes: Vec<FuncRef> = Vec::new();
+    let mut succ: Vec<Vec<usize>> = Vec::new();
+    for (from, to) in edges {
+        let from = intern(from, &mut ids, &mut nodes, &mut succ);
+        let to = intern(to, &mut ids, &mut nodes, &mut succ);
+        succ[from].push(to);
+    }
+
+    // Iterative Tarjan: a program-sized call graph has chains deep enough to
+    // overflow a recursive DFS.
+    const UNVISITED: usize = usize::MAX;
+    let n = nodes.len();
+    let mut index = vec![UNVISITED; n];
+    let mut low = vec![0usize; n];
+    let mut on_stack = vec![false; n];
+    let mut component: Vec<usize> = Vec::new();
+    let mut stack: Vec<usize> = Vec::new();
+    let mut work: Vec<(usize, usize)> = Vec::new();
+    let mut next_index = 0usize;
+    let mut out: HashSet<FuncRef> = HashSet::default();
+    for root in 0..n {
+        if index[root] != UNVISITED {
+            continue;
+        }
+        work.push((root, 0));
+        while let Some((v, resume)) = work.pop() {
+            if resume == 0 {
+                index[v] = next_index;
+                low[v] = next_index;
+                next_index += 1;
+                stack.push(v);
+                on_stack[v] = true;
+            }
+            let mut descended = false;
+            let mut i = resume;
+            while i < succ[v].len() {
+                let w = succ[v][i];
+                i += 1;
+                if index[w] == UNVISITED {
+                    work.push((v, i));
+                    work.push((w, 0));
+                    descended = true;
+                    break;
+                }
+                if on_stack[w] {
+                    low[v] = low[v].min(index[w]);
+                }
+            }
+            if descended {
+                continue;
+            }
+            if low[v] == index[v] {
+                component.clear();
+                loop {
+                    let w = stack.pop().expect("tarjan component stack");
+                    on_stack[w] = false;
+                    component.push(w);
+                    if w == v {
+                        break;
+                    }
+                }
+                // A one-node component is on a cycle only through a self-edge.
+                if component.len() > 1 || succ[v].contains(&v) {
+                    out.extend(component.iter().map(|&w| nodes[w]));
+                }
+            }
+            if let Some(&(parent, _)) = work.last() {
+                low[parent] = low[parent].min(low[v]);
+            }
+        }
+    }
+    out
+}
+
+/// Which calls in tail position keep Lua's `do return f(...) end` shape.
+///
+/// `do return f(...) end` compiles to `CALLT`, and LuaJIT's recorder counts
+/// every recorded `CALLT` against `loopunroll` (default 15) in
+/// `lj_record_tailcall`, so a trace that walks through more than 15 of them
+/// aborts with "loop unroll limit reached". A plain call is inlined by the
+/// recorder too, so dropping the shape does not stop inlining -- it moves the
+/// limit the trace hits (`lj_record_call` grows `baseslot` instead and trips
+/// "trace too deep" at 250 slots) and costs a real interpreter frame.
+/// `docs/trace-pressure-work-plan.md` carries the measurement.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TailCallShape {
+    /// Every call in tail position is `do return f(...) end`.
+    All,
+    /// No call keeps the shape. MEASUREMENT ONLY: this drops tail-call
+    /// elimination for recursive calls too, so an unbounded tail recursion
+    /// overflows the Lua stack (measured between 10,000 and 60,000 frames).
+    None,
+    /// Only a callee that lies on a call cycle keeps the shape, so genuine
+    /// recursion keeps tail-call elimination and a straight-line accessor or
+    /// draw chain does not.
+    Cycles,
+}
+
+/// `ROCK_SKULL_TAIL_CALLS` selects the emitted shape for a call in tail
+/// position: `all` (the default), `none`, or `cycles`. An unset or unrecognized
+/// value is `all`, so the switch can only be entered deliberately.
+pub fn tail_call_shape() -> TailCallShape {
+    static SHAPE: std::sync::OnceLock<TailCallShape> = std::sync::OnceLock::new();
+    *SHAPE.get_or_init(|| match std::env::var("ROCK_SKULL_TAIL_CALLS").as_deref() {
+        Ok("none") => TailCallShape::None,
+        Ok("cycles") => TailCallShape::Cycles,
+        _ => TailCallShape::All,
+    })
 }
 
 fn tail_forwards(ws: &Workspace, func: &MirFunc, direct: bool) -> Vec<Option<TailForward>> {
