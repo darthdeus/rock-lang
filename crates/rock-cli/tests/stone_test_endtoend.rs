@@ -164,14 +164,22 @@ fn function_body_change_keeps_hot_reload_decision() {
 
 /// THE hot-reload half of the callee-binding rule (`docs/backends.md`).
 ///
-/// `ROCK_SKULL_CALLEE_BINDING=upvalue` defines each function inside a factory
-/// and binds its callees as immutable upvalues. An `incremental.lua` overlay
-/// redefines one global function, which a caller holding the previous closure
-/// would never see -- so a body edit would silently not reach its callers.
-/// `rock stone` / `rock stone-test` therefore pin the global-lookup shape for
-/// the whole session (`skull::force_global_callee_binding`), whatever the
-/// environment says. This drives a body edit through the real watcher WITH the
-/// switch set and proves the edit still reaches a caller.
+/// `upvalue` defines each function inside a factory and binds its callees as
+/// immutable upvalues. An `incremental.lua` overlay redefines one global
+/// function, which a caller holding the previous closure would never see -- so
+/// a body edit would silently not reach its callers.
+///
+/// It is now the shipped default, and the two commands that drive
+/// `emit_overlay` directly -- `rock stone-test` and `rock iter-incremental` --
+/// pin the global-lookup shape for the whole session
+/// (`skull::force_global_callee_binding`), whatever the environment says, so
+/// the overlay path keeps its coverage. `rock stone` no longer pins: it
+/// publishes a whole `main.lua` per edit instead, which
+/// `crates/rock-cli/tests/stone_full_reload_binding.rs` covers.
+///
+/// This drives a body edit through the real `stone-test` watcher WITH the
+/// switch set and proves the pin holds and the edit still reaches a caller
+/// through an overlay.
 #[test]
 fn a_body_edit_reaches_its_caller_even_with_callee_binding_requested() {
     let h = StoneHarness::spawn_with_env(
@@ -187,6 +195,8 @@ fn a_body_edit_reaches_its_caller_even_with_callee_binding_requested() {
     let before_lua = h.compiled_lua();
     // The pin is what makes the overlay sound: a factory in `main.lua` would
     // leave `bump` calling the pre-edit `leaf` for the rest of the session.
+    // `rock stone` takes the other branch -- it emits the factory and reloads
+    // the whole chunk -- so this assertion is about `stone-test` specifically.
     assert!(
         !before_lua.contains("__rock_mk_"),
         "rock stone-test must emit the global-lookup shape whatever \
