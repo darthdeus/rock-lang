@@ -6333,6 +6333,35 @@ pub fn emit_full(
     emit_full_in_for_renderer(ws, user_mid, None, RendererTarget::Gl)
 }
 
+/// Emitted-shape overrides for one emit. Every shape switch behind these is read
+/// once per PROCESS from its environment variable, so a test that must drive two
+/// shapes in one test binary sets them here instead. `Default` -- `None`
+/// everywhere -- is the production path.
+#[derive(Clone, Copy, Default)]
+pub struct ShapeOverrides {
+    pub callee_binding: Option<skull_codegen_lua::CalleeBindingMode>,
+    pub value_ctor: Option<skull_codegen_lua::ValueCtorShape>,
+}
+
+/// [`emit_full`] under an explicit emitted value-ctor shape, overriding
+/// `ROCK_SKULL_VALUE_CTOR`. The sibling of
+/// [`emit_full_with_callee_binding`], for the same reason.
+pub fn emit_full_with_value_ctor(
+    ws: &Workspace,
+    user_mid: ModuleId,
+    shape: skull_codegen_lua::ValueCtorShape,
+) -> Result<(MirEmit, SkullEmitCache), CompilerError> {
+    let _allocation_environment = crate::allocation_report::environment_scope();
+    emit_full_in_with_mutation(
+        ws,
+        user_mid,
+        None,
+        BodyMutation::None,
+        RendererTarget::Gl,
+        ShapeOverrides { value_ctor: Some(shape), ..ShapeOverrides::default() },
+    )
+}
+
 /// [`emit_full`] under an explicit emitted callee shape, overriding
 /// `ROCK_SKULL_CALLEE_BINDING`. The env var is read once per PROCESS, so this
 /// is the seam a test uses to drive both shapes in one test binary -- the same
@@ -6350,7 +6379,7 @@ pub fn emit_full_with_callee_binding(
         None,
         BodyMutation::None,
         RendererTarget::Gl,
-        Some(binding),
+        ShapeOverrides { callee_binding: Some(binding), ..ShapeOverrides::default() },
     )
 }
 
@@ -6423,7 +6452,7 @@ pub fn emit_full_in_for_renderer_with_callee_binding(
         project_root,
         BodyMutation::None,
         renderer_target,
-        callee_binding,
+        ShapeOverrides { callee_binding, ..ShapeOverrides::default() },
     )
 }
 
@@ -6433,7 +6462,7 @@ fn emit_full_in_with_test_mutation(
     user_mid: ModuleId,
     mutation: BodyMutation,
 ) -> Result<(MirEmit, SkullEmitCache), CompilerError> {
-    emit_full_in_with_mutation(ws, user_mid, None, mutation, RendererTarget::Gl, None)
+    emit_full_in_with_mutation(ws, user_mid, None, mutation, RendererTarget::Gl, ShapeOverrides::default())
 }
 
 fn emit_full_in_with_mutation(
@@ -6442,7 +6471,7 @@ fn emit_full_in_with_mutation(
     project_root: Option<&str>,
     mutation: BodyMutation,
     renderer_target: RendererTarget,
-    callee_binding: Option<skull_codegen_lua::CalleeBindingMode>,
+    shapes: ShapeOverrides,
 ) -> Result<(MirEmit, SkullEmitCache), CompilerError> {
     let mut setup_phases = Vec::new();
     let t_setup = Instant::now();
@@ -6789,8 +6818,11 @@ fn emit_full_in_with_mutation(
     let mut cg = CodegenCtx::new_with_state(ws, state_slots);
     cg.set_recursive_callees(recursive_callees(&graph));
     cg.set_call_sccs(call_sccs(&graph));
-    if let Some(binding) = callee_binding {
+    if let Some(binding) = shapes.callee_binding {
         cg.set_callee_binding(binding);
+    }
+    if let Some(shape) = shapes.value_ctor {
+        cg.set_value_ctor_shape(shape);
     }
     let setup_lanes = SetupLaneAttribution {
         cpu_population: cpu_lane.population,

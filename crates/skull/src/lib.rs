@@ -1109,7 +1109,7 @@ fn value_struct_gc_defs(
             continue;
         }
         let n = s.name;
-        let mt = format!("__rock_vt_{n}");
+        let mt = skull_codegen_lua::value_struct_metatable_name(n.as_str());
         out.push_str(&format!("{mt} = {mt} or {{}}\n"));
         // A leaf-table struct has no declared-field keys to compare or print, so
         // both metamethods and its ctor run off the leaf paths instead.

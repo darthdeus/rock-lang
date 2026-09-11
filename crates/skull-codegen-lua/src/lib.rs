@@ -680,6 +680,9 @@ pub struct CodegenCtx {
     /// The emitted shape for a natural loop that is not a counted `for`. Read
     /// from `ROCK_SKULL_LOOP_SHAPE` once per context, same as `tail_calls`.
     loops: LoopShape,
+    /// The emitted shape for a GC-tier `value` struct construction. Read from
+    /// `ROCK_SKULL_VALUE_CTOR` once per context, same as `tail_calls`.
+    value_ctor: ValueCtorShape,
     /// Every function's strongly connected component number over the
     /// whole-program call graph, from [`call_sccs`]. Read ONLY by
     /// [`callee_binding_plan`]; empty on any path that never populated it,
@@ -697,6 +700,7 @@ impl Clone for CodegenCtx {
             tail_calls: self.tail_calls,
             callee_binding: self.callee_binding,
             loops: self.loops,
+            value_ctor: self.value_ctor,
             call_sccs: self.call_sccs.clone(),
         }
     }
@@ -774,6 +778,7 @@ impl CodegenCtx {
             tail_calls: tail_call_shape(),
             callee_binding: callee_binding_mode(),
             loops: loop_shape(),
+            value_ctor: value_ctor_shape(),
             call_sccs: HashMap::default(),
         }
     }
@@ -811,6 +816,17 @@ impl CodegenCtx {
 
     pub fn loop_shape(&self) -> LoopShape {
         self.loops
+    }
+
+    /// Override the emitted value-ctor shape this context was built with. The
+    /// production path takes it from `ROCK_SKULL_VALUE_CTOR`; a test uses this
+    /// so one process can emit both shapes.
+    pub fn set_value_ctor_shape(&mut self, shape: ValueCtorShape) {
+        self.value_ctor = shape;
+    }
+
+    pub fn value_ctor_shape(&self) -> ValueCtorShape {
+        self.value_ctor
     }
 
     /// Record every function's call-graph strongly connected component. The
@@ -1248,6 +1264,51 @@ pub fn loop_shape() -> LoopShape {
 
 /// The shipped emitted loop shape. See **Loop shape** in `docs/backends.md`.
 pub const DEFAULT_LOOP_SHAPE: LoopShape = LoopShape::Goto;
+
+/// How a GC-tier `value` struct construction is spelled at its use site.
+///
+/// [`ValueCtorShape::Call`] calls the chunk-level `<Name>_vt(..)` ctor, whose
+/// whole body is `return setmetatable({ .. }, <mt>)`. That call frame is what
+/// makes a four-field constructor hot enough to become a `rec_ret` TRACE ROOT --
+/// `Entity_vt` is the largest single leaving-loop family on mag's combat bench,
+/// 106 aborts over three runs -- and its `return setmetatable(..)` is one
+/// `CALLT` against LuaJIT's 15-slot `loopunroll` budget in every trace that
+/// records it. [`ValueCtorShape::Splice`] writes the table constructor and the
+/// `setmetatable` at the use site instead, so there is no frame to root.
+/// `docs/trace-pressure-work-plan.md` carries the measurement.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ValueCtorShape {
+    /// Every construction is a call to the chunk-level `<Name>_vt` ctor.
+    Call,
+    /// A GC-table (`_vt`) construction with declared fields is spliced in place.
+    /// The cdata (`_ct`) and leaf-table (`_lct`) tiers are untouched: `_ct` is an
+    /// `ffi.typeof` ctor with no Lua body to splice, and `_lct` carries the leaf
+    /// plan's presence tagging, which belongs in one place.
+    Splice,
+}
+
+/// `ROCK_SKULL_VALUE_CTOR` selects the emitted shape for a GC-tier `value`
+/// struct construction: `call` or `splice`. An unset or unrecognized value is
+/// the shipped default, so the switch can only be entered deliberately.
+pub fn value_ctor_shape() -> ValueCtorShape {
+    static SHAPE: std::sync::OnceLock<ValueCtorShape> = std::sync::OnceLock::new();
+    *SHAPE.get_or_init(|| match std::env::var("ROCK_SKULL_VALUE_CTOR").as_deref() {
+        Ok("splice") => ValueCtorShape::Splice,
+        Ok("call") => ValueCtorShape::Call,
+        _ => DEFAULT_VALUE_CTOR_SHAPE,
+    })
+}
+
+/// The shipped emitted value-ctor shape.
+pub const DEFAULT_VALUE_CTOR_SHAPE: ValueCtorShape = ValueCtorShape::Call;
+
+/// The shared per-type metatable global of a GC-tier `value` struct -- the table
+/// every instance of `<name>` carries, so LuaJIT's `__eq` fires between any two
+/// of them. ONE spelling, read by the definition emitter
+/// (`skull::value_struct_gc_defs`) and by a spliced construction alike.
+pub fn value_struct_metatable_name(name: &str) -> String {
+    format!("__rock_vt_{name}")
+}
 
 static FORCE_GLOBAL_CALLEE_BINDING: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
@@ -2027,6 +2088,18 @@ fn const_hoist_uses_are_read_only(_ws: &Workspace, func: &MirFunc, cand: Idx<Ins
     })
 }
 
+
+/// Whether a construction may be written in place instead of called.
+///
+/// Only the GC-table tier (`_vt`), whose ctor body is exactly the table this
+/// splices; the cdata ctor is an `ffi.typeof` with no Lua body and the
+/// leaf-table ctor carries the plan's presence tagging, which stays in one
+/// place. A field literally named `__ty` would collide with the type tag the
+/// table carries, so that construction keeps its call rather than emit a table
+/// with a duplicate key.
+fn splice_is_admissible(suffix: &str, fields: &[(ustr::Ustr, Idx<Inst>)]) -> bool {
+    suffix == "_vt" && fields.iter().all(|(name, _)| name.as_str() != "__ty")
+}
 
 fn ctor_suffix(func: &MirFunc, representation: skull_mir::lower::RepId, form: ValueCtorForm) -> Option<&'static str> {
     let arena = func.rep_arena.as_ref()?;
@@ -3957,6 +4030,24 @@ impl Emitter<'_> {
                     );
                     return;
                 };
+                if self.ctx.value_ctor_shape() == ValueCtorShape::Splice
+                    && splice_is_admissible(suffix, fields)
+                {
+                    // The `<Name>_vt` body, written here: same table, same shared
+                    // metatable, same field ORDER (so an effectful operand still
+                    // evaluates where the argument list put it) -- without the
+                    // call frame that becomes a trace root.
+                    out.push_str("setmetatable({ ");
+                    for (field, id) in fields.iter() {
+                        write_table_key(out, field.as_str());
+                        self.write_opnd(out, *id);
+                        out.push_str(", ");
+                    }
+                    let _ = write!(out, "__ty = ");
+                    write_lua_string(out, name.as_str());
+                    let _ = write!(out, " }}, {})", value_struct_metatable_name(name.as_str()));
+                    return;
+                }
                 let _ = write!(out, "{name}{suffix}(");
                 for (i, (_, id)) in fields.iter().enumerate() {
                     if i > 0 {

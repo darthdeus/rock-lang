@@ -227,6 +227,8 @@ mod uniform_block_pack;
 mod uint_surface;
 #[path = "user_fn_emit_rejection.rs"]
 mod user_fn_emit_rejection;
+#[path = "value_ctor_splice.rs"]
+mod value_ctor_splice;
 #[path = "value_leaf_layout.rs"]
 mod value_leaf_layout;
 #[path = "value_push_generic_boundary.rs"]
