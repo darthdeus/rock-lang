@@ -23,9 +23,10 @@ pub mod site_join;
 pub mod mir_emit;
 
 /// THE hot-reload rule for the emitted callee shape, re-exported so the CLI
-/// pins it without depending on the Lua printer directly. See
-/// [`skull_codegen_lua::force_global_callee_binding`].
-pub use skull_codegen_lua::force_global_callee_binding;
+/// pins it and reads it without depending on the Lua printer directly. See
+/// [`skull_codegen_lua::force_global_callee_binding`] and
+/// [`skull_codegen_lua::callee_binding_is_bound`].
+pub use skull_codegen_lua::{callee_binding_is_bound, force_global_callee_binding};
 
 // The shared graph layer, re-exported under its original paths. It moved BELOW
 // the backends (`skull-graph`) so the JS and GLSL emitters can realize the same

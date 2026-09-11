@@ -2959,6 +2959,13 @@ fn skull_game_preamble(dir: &str) -> Result<String> {
         skull::mir_emit::RendererTarget::Wgpu => "wgpu",
     };
     let mut full = format!("__ROCK_GAME_SOURCE_DIR = \"{escaped}\"\n");
+    // The emitted callee shape, for the engine's one-line boot notice about
+    // reload granularity (`check_hot_reload` in `stone/engine/hot_reload.rock`).
+    // Line 1 stays the source dir -- `read_chunk_source_dir` reads exactly that
+    // line to decide whether a chunk may be loaded over the running game.
+    if skull::callee_binding_is_bound() {
+        full.push_str("__ROCK_CALLEE_BINDING = \"upvalue\"\n");
+    }
     if let Some(stone_dir) = configured_stone_dir(&abs)? {
         let escaped_stone = stone_dir.display().to_string().replace('\\', "\\\\").replace('"', "\\\"");
         full.push_str(&format!("__ROCK_STONE_DIR = \"{escaped_stone}\"\n"));
@@ -3065,8 +3072,13 @@ fn write_full_main(
 #[derive(Debug)]
 pub enum SkullReload {
     /// Full rebuild: `main.lua` rewritten, `incremental.lua` wiped (interface/
-    /// structural edit, or initial build).
-    Full { bytes: usize, cook_ms: f64, emit_ms: f64, write_ms: f64 },
+    /// structural edit, or initial build). `body_only` marks the one case the
+    /// running process can absorb WITHOUT a restart: a body-tier edit the bound
+    /// callee shape forced onto this path (see [`SkullStone::route_and_emit`]).
+    /// Nothing structural moved, so the engine's `check_hot_reload` full reload
+    /// keeps live state; an interface edit (`body_only: false`) still needs the
+    /// clean restart.
+    Full { bytes: usize, body_only: bool, cook_ms: f64, emit_ms: f64, write_ms: f64 },
     /// Body edit: only `incremental.lua` rewritten (the overlay). `reinferred` is
     /// the number of bodies this edit re-inferred (the edit's churn). `emit_ms` is
     /// pure `emit_overlay` (directly comparable to `iter-incremental`); `write_ms`
@@ -3485,7 +3497,7 @@ impl SkullStone {
         mut profile: Option<&mut SkullRouteProfile>,
     ) -> Result<SkullReload> {
         use std::path::PathBuf;
-        let (full, reinferred, span_edits, cook_ms) = match update {
+        let (mut full, reinferred, span_edits, cook_ms) = match update {
             crate::live_project::LiveUpdate::NoChange => return Ok(SkullReload::NoChange),
             crate::live_project::LiveUpdate::BodyOnly { reinferred, span_edits, cook_ms } => {
                 (false, reinferred, span_edits, cook_ms)
@@ -3494,6 +3506,16 @@ impl SkullStone {
                 (true, Vec::new(), Vec::new(), cook_ms)
             }
         };
+        // THE hot-reload rule under the shipped callee shape
+        // (`skull_codegen_lua::callee_binding_is_bound`). A bound caller holds
+        // its callee as an immutable upvalue, so an overlay that redefines the
+        // callee's GLOBAL would never reach it. Publish the whole chunk instead:
+        // both emission passes rerun, `write_full_main` wipes any overlay, and
+        // the engine sees a `main.lua` change -- its full reload, which keeps
+        // live state. Slower per edit; correct. `assemble_overlay` still
+        // rejects a bound body, and under this routing never sees one.
+        let bound_body_edit = !full && skull::callee_binding_is_bound();
+        full |= bound_body_edit;
 
         let t_emit = Instant::now();
         let shape_started = profile.is_some().then(Instant::now);
@@ -3591,7 +3613,7 @@ impl SkullStone {
                 .ok_or_else(|| anyhow::anyhow!("compiler did not publish an Artifact fingerprint"))?
                 .to_string();
             let write_ms = t_write.elapsed().as_secs_f64() * 1000.0;
-            Ok(SkullReload::Full { bytes, cook_ms, emit_ms, write_ms })
+            Ok(SkullReload::Full { bytes, body_only: bound_body_edit, cook_ms, emit_ms, write_ms })
         } else {
             if let (Some(started), Some(profile)) = (shape_started, profile.as_deref_mut()) {
                 profile.publication_shape_checks_ns += started.elapsed().as_nanos();

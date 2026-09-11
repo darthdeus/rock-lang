@@ -1204,8 +1204,10 @@ static FORCE_GLOBAL_CALLEE_BINDING: std::sync::atomic::AtomicBool =
 /// caller that captured `F` as an upvalue holds the previous closure and would
 /// never see the edited body, so a body edit would silently not reach its
 /// callers. The two shapes are therefore mutually exclusive for a whole build
-/// session, and every command that can emit an overlay (`rock stone`,
-/// `rock watch`, `rock stone-test`) calls this before its first build.
+/// session. `rock stone` no longer calls this: it publishes a full `main.lua`
+/// per edit instead (see `SkullStone::route_and_emit`). The commands that drive
+/// `emit_overlay` ITSELF -- `rock stone-test` and `rock iter-incremental` --
+/// still do, so the overlay path keeps its coverage and its profiler.
 /// `assemble_overlay` rejects rather than trusting the caller to have done so.
 pub fn force_global_callee_binding() {
     FORCE_GLOBAL_CALLEE_BINDING.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -1216,11 +1218,22 @@ pub fn global_callee_binding_forced() -> bool {
     FORCE_GLOBAL_CALLEE_BINDING.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Whether this process emits the BOUND shape, so a consumer that would
+/// otherwise redefine one global function (an `incremental.lua` overlay) has to
+/// take the full-chunk path instead. The one predicate every such consumer
+/// reads -- `callee_binding_mode()` already folds in
+/// [`force_global_callee_binding`] and `ROCK_SKULL_CALLEE_BINDING`.
+pub fn callee_binding_is_bound() -> bool {
+    callee_binding_mode() == CalleeBindingMode::Upvalue
+}
+
 /// The shipped emitted shape. See **Callee binding** in `docs/backends.md`:
-/// the measurement argues for [`CalleeBindingMode::Upvalue`], but making it the
-/// default is an open AUTHOR DECISION -- it splits the emitted shape between
-/// `rock stone` and everything else, and rewrites 68 emitted-text assertions.
-pub const DEFAULT_CALLEE_BINDING: CalleeBindingMode = CalleeBindingMode::Global;
+/// the measurement (mean frame 5.73 ms -> 4.99 ms, "trace too long" aborts
+/// 1339 -> 386) settled `AUTHOR DECISION -- CALLEE BINDING DEFAULT` in favour
+/// of [`CalleeBindingMode::Upvalue`] on 2026-09-11. `rock stone` keeps hot
+/// reload by publishing a full `main.lua` per edit instead of an overlay;
+/// `ROCK_SKULL_CALLEE_BINDING=global` restores the overlay shape.
+pub const DEFAULT_CALLEE_BINDING: CalleeBindingMode = CalleeBindingMode::Upvalue;
 
 /// LuaJIT's hard limit on upvalues per function prototype (`LJ_MAX_UPVAL`).
 /// A body with more bindable callees than this binds the first
