@@ -2997,9 +2997,13 @@ fn skull_game_preamble_for(
         full.push('"');
     }
     full.push_str("}\n");
-    if renderer == "wgpu" {
-        full.push_str("__ROCK_RENDERER_BACKEND = \"wgpu\"\n");
-    }
+    // Stamped for EVERY renderer, not only wgpu. The engine reads this global
+    // per draw (`stone_renderer_is_wgpu` and friends compare it to "wgpu"),
+    // and a global whose value is nil is ABSENT from `_G`, so every read of it
+    // fell through to the state bridge's `__index` metamethod: 5.5M dispatches
+    // per bench run, 98% of everything that reached the bridge. A present
+    // value is a raw hit that constant-folds on a trace.
+    full.push_str(&format!("__ROCK_RENDERER_BACKEND = \"{renderer}\"\n"));
     if !full.ends_with('\n') {
         full.push('\n');
     }
