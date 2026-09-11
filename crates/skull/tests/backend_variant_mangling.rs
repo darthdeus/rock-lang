@@ -34,13 +34,18 @@ fn dbl_int_name_is_decl_set_independent() {
         ("overload elsewhere", DBL_WITH_OVERLOAD),
     ] {
         let lua = emit_module(src);
+        // Read definition HEADERS, in whichever callee shape the build emits:
+        // the bound shape spells a definition `__rock_mk_dbl_int_ret_int =
+        // function(`, so a raw `function dbl` scan would report no bare `dbl`
+        // for the wrong reason.
+        let defs = crate::common::definitions_matching(&lua, "dbl");
         assert!(
-            lua.contains("function dbl_int_ret_int("),
-            "[{label}] dbl(int) must emit as `dbl_int_ret_int`:\n{lua}"
+            defs.contains(&"dbl_int_ret_int"),
+            "[{label}] dbl(int) must emit as `dbl_int_ret_int`, got {defs:?}:\n{lua}"
         );
         assert!(
-            !lua.contains("function dbl(") && !lua.contains("dbl__int_ret_int"),
-            "[{label}] no bare `dbl` and no `__` in the mangled name:\n{lua}"
+            !defs.contains(&"dbl") && !lua.contains("dbl__int_ret_int"),
+            "[{label}] no bare `dbl` and no `__` in the mangled name, got {defs:?}:\n{lua}"
         );
         // The call site agrees with the definition (same name): the mangled
         // name appears at least twice (the `function` header + the call in

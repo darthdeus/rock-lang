@@ -81,7 +81,10 @@ deco init tick(stage: int = 100) {}
 @tick fn defaulted() {}
 fn main() {}
 "#);
-    assert!(!emit.lua.contains("function __deco_tick("), "lifecycle declaration bodies are not executable registration code");
+    assert!(
+        crate::common::definitions_matching(&emit.lua, "__deco_tick").is_empty(),
+        "lifecycle declaration bodies are not executable registration code"
+    );
     assert!(!emit.lua.contains("__deco_tick({"), "lifecycle applications must not execute decorator side effects");
     let first = emit.lua.find("name = \"first\", stage = 7").expect("first plan entry");
     let second = emit.lua.find("name = \"second\", stage = 7").expect("second plan entry");
@@ -184,11 +187,10 @@ fn load() -> Scene<Room> {
 fn main() { ROOT = load() }
 "#);
     let key = "a_n4_Room_0_z";
-    let scene_create_body = emit
-        .lua
-        .split("\nfunction ")
-        .find(|part| part.starts_with("scene_create"))
-        .unwrap_or_else(|| panic!("no emitted scene_create specialization:\n{}", emit.lua));
+    // Through the shape-aware helper: under the bound callee shape the
+    // definition header is `__rock_mk_scene_create.. = function(`, so splitting
+    // on `\nfunction ` finds nothing.
+    let scene_create_body = crate::common::function_body(&emit.lua, "scene_create");
     assert!(
         scene_create_body.contains(key),
         "scene_create must receive the compiler's MonoTy-derived key: {scene_create_body}"
@@ -244,7 +246,10 @@ deco init widget(key: string) {}
 @widget(key="beta") fn make_beta() -> int { return 2 }
 fn main() {}
 "#);
-    assert!(!emit.lua.contains("function __deco_widget("), "definition roles are compiler-owned");
+    assert!(
+        crate::common::definitions_matching(&emit.lua, "__deco_widget").is_empty(),
+        "definition roles are compiler-owned"
+    );
     assert!(!emit.lua.contains("__deco_widget({"), "definition applications do not execute the decorator");
     assert!(emit.lua.contains("__rock_definition_plan_stage({"));
     let alpha = emit.lua.find("key = \"alpha\"").expect("alpha plan entry");
@@ -277,7 +282,7 @@ deco init empty(key: string) {}
 @widget(key="alpha") fn make_alpha() -> WidgetDef { return WidgetDef { value: 1 } }
 fn main() {}
 "#);
-    assert!(emit.lua.contains("function widget_definition_plan()"));
+    assert!(crate::common::definitions_matching(&emit.lua, "widget_definition_plan").len() == 1);
     assert!(emit.lua.contains("return __rock_definition_catalog(\"widgets\")"));
     assert!(!emit.lua.contains("__ROCK_DEFINITION_PLAN or {}"));
     let out = run_luajit(

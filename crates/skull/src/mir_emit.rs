@@ -9000,7 +9000,14 @@ fn main() {
             .module_ids
             .get(&Ustr::from("<artifact-handle-test>"))
             .unwrap();
-        let (_, mut cache) = emit_full(&ws1, mid).expect("full v1");
+        // The overlay path is the global shape's (see
+        // `an_overlay_is_refused_under_the_bound_shape_and_produced_under_global`).
+        let (_, mut cache) = emit_full_with_callee_binding(
+            &ws1,
+            mid,
+            skull_codegen_lua::CalleeBindingMode::Global,
+        )
+        .expect("full v1");
 
         let changed = SRC.replace("return x", "let y = x\n return y");
         let mut modules = vec![parse(&changed)];
@@ -9019,6 +9026,58 @@ fn main() {
         assert!(
             cache.repair_stats().code_artifact_assembly_reused,
             "overlay assembly duplicated the already-published replacement artifact"
+        );
+    }
+
+    /// THE overlay rule, both directions in one case.
+    ///
+    /// The shipped callee shape binds a caller's callees as immutable upvalues,
+    /// so an `incremental.lua` overlay that redefines the callee's GLOBAL would
+    /// never reach it. `assemble_overlay` refuses rather than emit an overlay
+    /// that cannot take effect, and the refusal names the escape hatch. Under
+    /// `global` the same edit produces an overlay. This is why `rock stone`
+    /// publishes a whole `main.lua` per edit
+    /// (`crates/rock-cli/tests/stone_full_reload_binding.rs`), and why
+    /// `stone-test` and `iter-incremental` pin `global`.
+    #[test]
+    fn an_overlay_is_refused_under_the_bound_shape_and_produced_under_global() {
+        let parse = |source: &str| {
+            skull_parser::parse_module_clean(source, Ustr::from("<overlay-binding-test>"))
+                .expect("parse")
+        };
+        let edit = SRC.replace("return wrap(7)", "return wrap(9)");
+        let overlay_for = |binding: skull_codegen_lua::CalleeBindingMode| {
+            let mut modules = vec![parse(SRC)];
+            let ws1 =
+                bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic v1");
+            let mid = *ws1.module_ids.get(&Ustr::from("<overlay-binding-test>")).unwrap();
+            let (_, mut cache) =
+                emit_full_with_callee_binding(&ws1, mid, binding).expect("full v1");
+
+            let mut modules = vec![parse(&edit)];
+            let ws2 =
+                bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic v2");
+            let top = ref_for(&ws2, "top");
+            emit_overlay(&ws2, &mut cache, &[(top.module, BodyOwner::Function(top.func))])
+        };
+
+        let refused = match overlay_for(skull_codegen_lua::CalleeBindingMode::Upvalue) {
+            Err(err) => err,
+            Ok(_) => panic!("a bound body must not be redefined by an overlay"),
+        };
+        assert!(
+            refused.message.contains("bound its callees as upvalues")
+                && refused.message.contains("ROCK_SKULL_CALLEE_BINDING=global"),
+            "the refusal must say what happened and how to get an overlay: {}",
+            refused.message
+        );
+
+        let produced = overlay_for(skull_codegen_lua::CalleeBindingMode::Global)
+            .expect("the global shape still produces an overlay");
+        assert!(
+            produced.lua.contains("function top_ret_int("),
+            "the overlay must redefine the edited body:\n{}",
+            produced.lua
         );
     }
 
@@ -9048,15 +9107,23 @@ fn main() {
         callee: FuncRef,
     ) {
         let symbol = concrete_symbol(ws, cache, callee);
+        // Definition headers in whichever callee shape the build emits: the
+        // bound shape spells one `__rock_mk_<symbol> = function(`, and names the
+        // symbol again as a factory parameter, which is a binding and not a
+        // call.
+        let factory = skull_codegen_lua::CALLEE_FACTORY_PREFIX;
         assert!(
-            emit.lua.contains(&format!("function {symbol}(")),
+            emit.lua.contains(&format!("function {symbol}("))
+                || emit.lua.contains(&format!("{factory}{symbol} = function(")),
             "the concrete residual definition is missing: {symbol}\n{}",
             emit.lua
         );
         assert!(
-            emit.lua
-                .lines()
-                .any(|line| !line.starts_with("function ") && line.contains(&format!("{symbol}("))),
+            emit.lua.lines().any(|line| {
+                !line.starts_with("function ")
+                    && !line.starts_with(factory)
+                    && line.contains(&format!("{symbol}("))
+            }),
             "the residual call does not name the concrete definition: {symbol}\n{}",
             emit.lua
         );
@@ -9785,8 +9852,16 @@ fn main() { let result = first() }
             .module_ids
             .get(&Ustr::from("<inline-census-incremental-test>"))
             .expect("module overlay base");
-        let (_full_overlay, mut overlay_cache) =
-            emit_full(&ws_overlay_base, mid_overlay).expect("full overlay base");
+        // The overlay leg only exists under the GLOBAL callee shape; the bound
+        // shape is refused by `assemble_overlay`, which
+        // `an_overlay_is_refused_under_the_bound_shape_and_produced_under_global`
+        // pins. The reassembly legs above stay on the shipped default.
+        let (_full_overlay, mut overlay_cache) = emit_full_with_callee_binding(
+            &ws_overlay_base,
+            mid_overlay,
+            skull_codegen_lua::CalleeBindingMode::Global,
+        )
+        .expect("full overlay base");
         let overlay = emit_overlay(&ws2, &mut overlay_cache, &reinferred)
             .expect("overlay canonical reuse");
         assert!(!overlay.lua.is_empty(), "overlay must emit the changed route");

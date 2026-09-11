@@ -20,11 +20,29 @@
 //! guard the correct behavior. History: docs/mangle-rename-hot-reload-investigation.md.
 use crate::common::ws_of;
 
-/// `src` -> full skull Lua program (stdlib-free: int/string/empty-main only).
+/// `src` -> full skull Lua program (stdlib-free: int/string/empty-main only),
+/// pinned to the GLOBAL callee shape.
+///
+/// The pin is the subject, not a convenience. What these cases demonstrate is
+/// that a surviving `GETGLOBAL <mangled>` caller reads the reloaded body, and a
+/// global lookup is the only spelling that has one. Under the shipped bound
+/// shape the caller holds its callee as an immutable upvalue, so a closure
+/// captured BEFORE the reload keeps calling the pre-edit body -- which is why
+/// `rock stone` publishes a whole `main.lua` and re-runs the binding pass
+/// instead of an overlay (`crates/rock-cli/tests/stone_full_reload_binding.rs`).
+/// The mangling property itself is shape-independent: the symbol is still
+/// `foo_int_ret_int` either way.
 fn emit_program(src: &str) -> String {
     let ws = ws_of(src);
     let mid = skull::user_module_id(&ws).unwrap();
-    skull::mir_emit::emit_workspace_mir(&ws, mid).expect("emit").lua
+    skull::mir_emit::emit_full_with_callee_binding(
+        &ws,
+        mid,
+        skull_codegen_lua::CalleeBindingMode::Global,
+    )
+    .expect("emit")
+    .0
+    .lua
 }
 
 fn run_luajit(test: &str, prog: &str) -> String {

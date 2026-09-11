@@ -9,7 +9,7 @@
 //! the divergence is visible as a skipped index rather than as a number that
 //! happens to agree.
 
-use crate::common::{bone_rejections, emit_module, run_luajit};
+use crate::common::{bone_rejections, emit_module, function_body, run_luajit};
 
 const CANONICAL_VALUES: &str = r#"
 value ProbeUniform {
@@ -77,10 +77,7 @@ fn main() {
 /// intrinsic's own dead Lua definition is still emitted (nothing calls it), so
 /// module-wide substring checks would match it and prove nothing.
 fn main_body(lua: &str) -> String {
-    let at = lua.find("\nfunction main()").expect("main is emitted");
-    let rest = &lua[at + 1..];
-    let end = rest.find("\nend").expect("main has an end");
-    rest[..end].to_string()
+    function_body(lua, "main").to_string()
 }
 
 /// The store indices are the std140 offsets divided by four, as literals.

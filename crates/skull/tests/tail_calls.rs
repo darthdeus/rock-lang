@@ -1,10 +1,7 @@
-use crate::common::{emit_module, mangled_name, run_luajit};
+use crate::common::{emit_module, function_body, mangled_name, run_luajit};
 
 fn body<'a>(lua: &'a str, name: &str) -> &'a str {
-    let name = mangled_name(lua, name);
-    let start = lua.find(&format!("function {name}(")).expect("function");
-    let rest = &lua[start..];
-    &rest[..rest.find("\nend").expect("function end")]
+    function_body(lua, name)
 }
 
 #[test]

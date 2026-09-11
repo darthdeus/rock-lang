@@ -793,12 +793,13 @@ fn main() {
 #[test]
 fn closure_capture_stores_nobox_leaves() {
     let lua = emit_module(NOBOX_CLOSURE_CAPTURE);
-    let start = lua.find("function capture").expect("capture definition");
-    let end = lua[start..]
-        .find("\nfunction main")
-        .map(|offset| start + offset)
-        .expect("main follows capture and its hoist");
-    let bodies = &lua[start..end];
+    // `capture` plus the lambda hoisted out of it. Read by NAME rather than as
+    // the text between two headers: the bound callee shape moves an enclosing
+    // definition into a factory, so the two are not adjacent in the chunk.
+    let names = crate::common::definitions_matching(&lua, "capture");
+    assert!(!names.is_empty(), "no `capture` definition in:\n{lua}");
+    let bodies: String =
+        names.iter().map(|name| crate::common::function_body(&lua, name)).collect();
     assert!(
         !bodies.contains("NV2_ct("),
         "closure capture materialized its nobox value:\n{bodies}"

@@ -43,16 +43,11 @@ fn main() {
 #[test]
 fn an_extern_value_return_does_not_hand_back_a_reference_into_its_out_param() {
     let lua = emit_module(EXTERN_VALUE_RETURN);
-    let wrapper = lua
-        .lines()
-        .skip_while(|l| !l.starts_with("function stone_probe_stats("))
-        .take_while(|l| *l != "end")
-        .collect::<Vec<_>>()
-        .join("\n");
     assert!(
-        !wrapper.is_empty(),
+        !crate::common::definitions_matching(&lua, "stone_probe_stats").is_empty(),
         "no `stone_probe_stats` wrapper was emitted:\n{lua}"
     );
+    let wrapper = crate::common::function_body(&lua, "stone_probe_stats");
     assert!(
         wrapper.contains("ffi.new(\"Stats[1]\")"),
         "the out-param shape changed; this test pins the wrapper:\n{wrapper}"

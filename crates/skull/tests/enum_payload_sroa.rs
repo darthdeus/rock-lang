@@ -40,11 +40,7 @@ fn main() { t() }
 #[test]
 fn nonescaping_payload_enum_does_not_allocate_table() {
     let lua = emit_module(SRC);
-    let body = lua
-        .split("\nfunction classify")
-        .nth(1)
-        .and_then(|s| s.split("\nfunction ").next())
-        .expect("classify body");
+    let body = crate::common::function_body(&lua, "classify");
     // The `MakeEnum` table literal must be GONE from the hot body. (`= "Circle"`
     // survives as a scalarized field-cell store; only the `{__variant = ` TABLE
     // construction is the allocation we remove.)

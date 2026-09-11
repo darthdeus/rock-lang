@@ -2538,14 +2538,32 @@ mod tests {
     /// assertion scope to one fn and ignore the always-emitted value-struct
     /// `copy = function(v) return V2_ct(...) end` metatype helpers.
     fn fn_body<'a>(lua: &'a str, name: &str) -> &'a str {
-        // Every non-exempt fn emits under its mangled name (`mk_ret_V2`), so match
-        // the `function <name>` PREFIX and scope from the header's `(` to the next
-        // top-level `function `.
-        let head = format!("function {name}");
-        let hpos = lua.find(&head).unwrap_or_else(|| panic!("no `{head}` in:\n{lua}"));
-        let rest = &lua[hpos..];
-        let paren = rest.find('(').expect("fn header has `(`");
-        rest[paren + 1..].split("\nfunction ").next().unwrap()
+        // Every non-exempt fn emits under its mangled name (`mk_ret_V2`), so
+        // match the `function <name>` PREFIX and scope from the header's `(` to
+        // the next top-level definition. Under the bound callee shape the
+        // definition reads `__rock_mk_<name> = function(<callees>) return
+        // function(..)`, so the body starts after the INNER header and the next
+        // definition can be a factory rather than a `function ` line.
+        let factory_prefix = skull_codegen_lua::CALLEE_FACTORY_PREFIX;
+        let inner = " return function(";
+        let (start, header_end) = match lua.find(&format!("function {name}")) {
+            Some(at) => (at, lua[at..].find('(').expect("fn header has `(`") + 1),
+            None => {
+                let head = format!("{factory_prefix}{name}");
+                let at = lua
+                    .find(&head)
+                    .unwrap_or_else(|| panic!("no `function {name}` or `{head}` in:\n{lua}"));
+                (at, lua[at..].find(inner).expect("a factory returns its body") + inner.len())
+            }
+        };
+        let rest = &lua[start + header_end..];
+        let factory_start = format!("\n{factory_prefix}");
+        let end = [rest.find("\nfunction "), rest.find(factory_start.as_str())]
+            .into_iter()
+            .flatten()
+            .min()
+            .unwrap_or(rest.len());
+        &rest[..end]
     }
 
     /// A defaulted flat-value param is scalarized like any other value param:
