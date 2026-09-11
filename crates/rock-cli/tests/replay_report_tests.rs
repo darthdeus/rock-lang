@@ -110,3 +110,58 @@ fn replay_report_rejects_malformed_v14_job_decision_rows() {
         );
     }
 }
+
+#[test]
+fn replay_report_preserves_v15_taps_and_rejects_corrupt_input_details() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("input.replay");
+    let row = "a 0 67=1 - 1=1 1=1 - 67=1 - - - - - 1";
+    let valid = REPLAY_V14_WITH_JOB_DECISIONS.replace("STONE_REPLAY 14", "STONE_REPLAY 15")
+        .replace("j 0 flow 42 1", &format!("{row}\nj 0 flow 42 1"));
+    let report = |text: &str| {
+        std::fs::write(&path, text).unwrap();
+        Command::new(env!("CARGO_BIN_EXE_rock"))
+            .args(["replay-report", path.to_str().unwrap(), "--format", "json"])
+            .output().unwrap()
+    };
+    let output = report(&valid);
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let input = &json["top_frames"][0]["input"];
+    assert_eq!(input["pressed_keys"], serde_json::json!(["g"]));
+    assert_eq!(input["released_keys"], serde_json::json!(["g"]));
+    assert_eq!(input["pressed_buttons"], serde_json::json!([1]));
+    assert_eq!(input["released_buttons"], serde_json::json!([1]));
+    for bad in [
+        String::new(),
+        format!("{row}\n{row}"),
+        row.replacen("a 0", "a 1", 1),
+        row.replacen("67=1", "67=2", 1),
+        row.replacen("67=1", "67=1,67=1", 1),
+        row.replacen("67=1", "zz=1", 1),
+        row.replacen("1=1", "0=1", 1),
+    ] {
+        let output = report(&valid.replace(row, &bad));
+        assert!(!output.status.success(), "accepted corrupt details: {bad}");
+    }
+}
+
+#[test]
+fn replay_report_validates_v16_image_publications() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("images.replay");
+    let row = "u 0 5b5b2270222c2270756d70222c302c5b5d5d5d";
+    let valid = REPLAY_V14_WITH_JOB_DECISIONS.replace("STONE_REPLAY 14", "STONE_REPLAY 16")
+        .replace("j 0 flow 42 1", &format!("a 0 - - - - - - - - - - - 0\n{row}\nj 0 flow 42 1"));
+    for (accepted, replacement) in [
+        (true, row.to_string()), (false, String::new()),
+        (false, format!("{row}\n{row}")), (false, row.replacen("u 0", "u 1", 1)),
+        (false, "u 0 7b7d".to_string()), (false, row.replacen("u 0", "u +0", 1)),
+    ] {
+        std::fs::write(&path, valid.replace(row, &replacement)).unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_rock"))
+            .args(["replay-report", path.to_str().unwrap(), "--format", "json"])
+            .output().unwrap();
+        assert_eq!(output.status.success(), accepted, "{}", String::from_utf8_lossy(&output.stderr));
+    }
+}

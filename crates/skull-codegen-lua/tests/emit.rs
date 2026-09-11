@@ -7,7 +7,7 @@
 
 mod common;
 
-use skull_codegen_lua::{emit_function, CodegenCtx};
+use skull_codegen_lua::{emit_function, CodegenCtx, TailCallShape};
 use skull_mir::mir::FuncRef;
 
 #[test]
@@ -173,6 +173,11 @@ print('effects-ok')
 /// assert allocation-shape claims (a dead `MakeTuple` left by the raw lowering is
 /// removed here, so `no table` assertions reflect what actually runs).
 fn emit_clean(src: &str, fn_name: &str) -> String {
+    emit_clean_shaped(src, fn_name, TailCallShape::All)
+}
+
+/// [`emit_clean`] with an explicit emitted tail-call shape.
+fn emit_clean_shaped(src: &str, fn_name: &str, shape: TailCallShape) -> String {
     use std::sync::LazyLock;
     static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
         rock_host::stdlib_loader::stdlib_files()
@@ -193,10 +198,12 @@ fn emit_clean(src: &str, fn_name: &str) -> String {
         .iter()
         .find(|(_, f)| f.name.as_str() == fn_name)
         .expect("function by name");
-    let (mut func, interner) = common::lower_test_ref(&ws, mid, fid)
+    let (mut func, interner, graph) = common::lower_test_ref_with_graph(&ws, mid, fid)
         .unwrap_or_else(|e| panic!("lower failed: {}", e.message));
     skull_transform::cleanup(&mut func).unwrap();
-    let ctx = CodegenCtx::new(&ws);
+    let mut ctx = CodegenCtx::new(&ws);
+    ctx.set_tail_call_shape(shape);
+    ctx.set_recursive_callees(common::cycle_callees(&graph));
     emit_function(&ws, &ctx, &interner, FuncRef { module: mid, func: fid }, &func)
 }
 
@@ -206,6 +213,14 @@ fn emit_clean(src: &str, fn_name: &str) -> String {
 /// residual stdlib instances instead of depending on a splice for completeness.
 /// Skips if luajit is absent so the suite still runs on a bare box.
 fn run(src: &str, driver: &str) -> String {
+    run_shaped(src, driver, TailCallShape::All)
+}
+
+/// [`run`] with an explicit emitted tail-call shape. `recursive_callees` is
+/// populated from this harness's own instance graph exactly as
+/// `skull::mir_emit` populates it from the whole-program one, so
+/// [`TailCallShape::Cycles`] is exercised against real call edges.
+fn run_shaped(src: &str, driver: &str, shape: TailCallShape) -> String {
     use std::sync::LazyLock;
     static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
         rock_host::stdlib_loader::stdlib_files()
@@ -224,7 +239,8 @@ fn run(src: &str, driver: &str) -> String {
     modules.push(skull_parser::parse_module_clean(src, ustr::Ustr::from("<test>")).expect("parse"));
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
     let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("user module id");
-    let ctx = CodegenCtx::new(&ws);
+    let mut ctx = CodegenCtx::new(&ws);
+    ctx.set_tail_call_shape(shape);
     let roots = ws
         .module(mid)
         .functions
@@ -233,6 +249,7 @@ fn run(src: &str, driver: &str) -> String {
         .collect();
     let interner = std::sync::Arc::new(skull_mir::monoty::MonoInterner::new());
     let graph = skull_graph::instance_graph::build_in(&ws, roots, false, interner.clone());
+    ctx.set_recursive_callees(common::cycle_callees(&graph));
     let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(interner);
     let concrete = skull_graph::concrete_body::build(&ws, &graph);
     let mut code_artifact = skull_mir::code_identity::CodeArtifact::default();
@@ -1148,4 +1165,192 @@ fn filter_take_while_mixed_chain_is_forl() {
         lua.contains("for "),
         "filter+take_while chain must recover a numeric `for`:\n{lua}"
     );
+}
+
+/// A register or cell local is assigned `nil` right after its last use, so a
+/// LuaJIT exit snapshot taken later in the parent trace carries it as a
+/// constant instead of a parent SLOAD that needs a register at the side-trace
+/// head (`benchmarks/luajit/trace-aborts/calleekill.lua`). A local still live
+/// across the branch is untouched.
+#[test]
+fn dead_locals_are_nil_killed_after_their_last_use() {
+    let lua = emit_clean(
+        "fn probe(a: int, b: int) -> int { let s = a * b; let t = s + s; if t + 1 > 10 { return t }; return 0 }",
+        "probe",
+    );
+    let lines: Vec<&str> = lua.lines().map(str::trim).collect();
+    let at = |needle: &str| {
+        lines
+            .iter()
+            .position(|l| *l == needle)
+            .unwrap_or_else(|| panic!("missing `{needle}` in:\n{lua}"))
+    };
+    let product = at("r0 = c0 * c1");
+    let double = at("r0 = r0 + r0");
+    let branch = lines
+        .iter()
+        .position(|l| l.starts_with("if "))
+        .unwrap_or_else(|| panic!("missing branch in:\n{lua}"));
+    // `c1` (param `b`) dies at the product: killed before the next statement.
+    let kill_b = at("c1 = nil");
+    assert!(product < kill_b && kill_b < double, "{lua}");
+    // `r0` is live across the branch (`t`): no kill between its def and the `if`.
+    assert!(
+        !lines[double..branch].contains(&"r0 = nil"),
+        "live register killed before the branch:\n{lua}"
+    );
+    // A kill immediately before a plain `return` buys nothing (RET drops the
+    // frame): the load of `t` into the return register is followed by no kill.
+    let ret_load = at("r0 = c0");
+    assert_eq!(lines[ret_load + 1], "do return r0 end", "{lua}");
+}
+
+/// A register declared inside a `for` block (a loop-scoped color) is only ever
+/// killed inside that block: a kill at the loop's exit label would write a
+/// global of the same name.
+#[test]
+fn loop_scoped_registers_are_never_killed_outside_their_loop() {
+    let lua = emit_clean(
+        "fn probe(v: [int], target: int) -> int { let n = 0; for i in 0..v.len() { let x = v[i] * 2; let y = x + 1; n = n + y; if x > target { break } }; return n }",
+        "probe",
+    );
+    let lines: Vec<&str> = lua.lines().map(str::trim).collect();
+    let for_line = lines.iter().position(|l| l.starts_with("for ")).unwrap_or_else(|| panic!("no for:\n{lua}"));
+    let inner_decl = lines[for_line + 1];
+    assert!(inner_decl.starts_with("local r"), "loop-scoped registers expected right after the for:\n{lua}");
+    let end_line = lines.iter().rposition(|l| *l == "end").unwrap();
+    let end_line = lines[..end_line].iter().rposition(|l| *l == "end").unwrap_or_else(|| panic!("no loop end:\n{lua}"));
+    let scoped: Vec<&str> = inner_decl["local ".len()..].split(", ").collect();
+    for name in scoped {
+        let kill = format!("{name} = nil");
+        for (i, l) in lines.iter().enumerate() {
+            if *l == kill {
+                assert!(for_line < i && i < end_line, "loop-scoped `{kill}` outside its for block at line {i}:\n{lua}");
+            }
+        }
+    }
+    assert!(lines.iter().any(|l| l.ends_with(" = nil")), "no kills emitted at all:\n{lua}");
+}
+
+// -- Emitted tail-call shape (ROCK_SKULL_TAIL_CALLS) ------------------------
+//
+// `do return f(...) end` compiles to `CALLT`, which LuaJIT's recorder counts
+// against `loopunroll` in `lj_record_tailcall`; the switch exists so the
+// alternative shapes can be measured on the trace-pressure benchmark. Dropping
+// the forward does not introduce an emitted form: it leaves the ordinary path
+// to write the same `r<N> = f(args)` / `do return r<N> end` a call outside tail
+// position already emits.
+
+/// A leaf call in tail position: `all` forwards it, `none` does not, and
+/// `cycles` does not either because the callee is on no call cycle.
+#[test]
+fn a_non_recursive_tail_call_follows_the_shape_switch() {
+    let src = "fn leaf(a: int) -> int { a + 1 }\nfn forward(a: int) -> int { return leaf(a) }";
+
+    let all = emit_clean_shaped(src, "forward", TailCallShape::All);
+    assert!(
+        all.contains("do return leaf_int_ret_int(c0) end"),
+        "expected the forwarded tail call:\n{all}"
+    );
+
+    for shape in [TailCallShape::None, TailCallShape::Cycles] {
+        let lua = emit_clean_shaped(src, "forward", shape);
+        assert!(
+            lua.contains("r0 = leaf_int_ret_int(c0)") && lua.contains("do return r0 end"),
+            "expected a non-tail call under {shape:?}:\n{lua}"
+        );
+        assert!(
+            !lua.contains("do return leaf_int_ret_int"),
+            "expected no forwarded tail call under {shape:?}:\n{lua}"
+        );
+    }
+}
+
+/// A self-recursive tail call keeps the shape under `cycles` -- that is the
+/// whole point of the shape, since losing it turns an unbounded tail recursion
+/// into a Lua stack overflow.
+#[test]
+fn a_self_recursive_tail_call_keeps_its_shape_under_cycles() {
+    let src = "fn down(n: int, acc: int) -> int { if n == 0 { return acc }\n  return down(n - 1, acc + 1) }";
+
+    for shape in [TailCallShape::All, TailCallShape::Cycles] {
+        let lua = emit_clean_shaped(src, "down", shape);
+        assert!(
+            lua.contains("do return down_int_int_ret_int("),
+            "expected the recursive tail call kept under {shape:?}:\n{lua}"
+        );
+    }
+    let none = emit_clean_shaped(src, "down", TailCallShape::None);
+    assert!(
+        !none.contains("do return down_int_int_ret_int("),
+        "expected no forwarded tail call under None:\n{none}"
+    );
+}
+
+/// Mutual recursion is a two-node component, so both legs stay tail calls under
+/// `cycles`. A single self-edge check would miss this.
+#[test]
+fn a_mutually_recursive_tail_call_keeps_its_shape_under_cycles() {
+    let src = "fn is_even(n: int) -> bool { if n == 0 { return true }\n  return is_odd(n - 1) }\n\
+               fn is_odd(n: int) -> bool { if n == 0 { return false }\n  return is_even(n - 1) }";
+
+    let even = emit_clean_shaped(src, "is_even", TailCallShape::Cycles);
+    assert!(
+        even.contains("do return is_odd_int_ret_bool("),
+        "expected the mutual-recursion leg kept under Cycles:\n{even}"
+    );
+    let odd = emit_clean_shaped(src, "is_odd", TailCallShape::Cycles);
+    assert!(
+        odd.contains("do return is_even_int_ret_bool("),
+        "expected the mutual-recursion leg kept under Cycles:\n{odd}"
+    );
+}
+
+/// The runtime obligation: a tail recursion deeper than the Lua stack survives
+/// under every shape that claims to preserve tail-call elimination. Measured on
+/// the shipped LuaJIT, a non-tail recursion overflows between 10,000 and 60,000
+/// frames, so 200,000 is a real witness rather than a margin.
+#[test]
+fn deep_tail_recursion_survives_the_tco_preserving_shapes() {
+    let src = "fn count_down(n: int, acc: int) -> int { if n == 0 { return acc }\n  return count_down(n - 1, acc + 1) }";
+    for shape in [TailCallShape::All, TailCallShape::Cycles] {
+        assert_eq!(
+            run_shaped(src, "count_down(200000, 0)", shape),
+            "200000",
+            "deep tail recursion must survive {shape:?}"
+        );
+    }
+}
+
+/// `None` is a measurement arm, not a shippable default: it drops the shape at
+/// the recursive call too. Pinned so the reason the default is not `None` stays
+/// visible in the suite rather than only in the plan document.
+#[test]
+fn deep_tail_recursion_overflows_under_the_measurement_only_shape() {
+    let src = "fn count_down(n: int, acc: int) -> int { if n == 0 { return acc }\n  return count_down(n - 1, acc + 1) }";
+    assert_eq!(
+        run_shaped(
+            src,
+            "(pcall(count_down, 200000, 0))",
+            TailCallShape::None
+        ),
+        "false",
+        "None must lose tail-call elimination -- otherwise the switch is not reaching the site"
+    );
+}
+
+/// Multiple-return forwarding is a value contract, not a tail-call one: it must
+/// deliver the same values under every shape.
+#[test]
+fn a_multi_return_forward_delivers_the_same_values_under_every_shape() {
+    let src = "fn pair(a: int) -> (int, int) { (a, a + 1) }\n\
+               fn forward_pair(a: int) -> (int, int) { return pair(a) }\n\
+               fn total(a: int) -> int { let (x, y) = forward_pair(a); x * 100 + y }";
+    for shape in [TailCallShape::All, TailCallShape::None, TailCallShape::Cycles] {
+        assert_eq!(
+            run_shaped(src, "total(7)", shape),
+            "708",
+            "multi-return forwarding must not change with {shape:?}"
+        );
+    }
 }

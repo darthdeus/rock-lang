@@ -664,6 +664,16 @@ pub struct CodegenCtx {
     rejections: Mutex<Vec<(String, CompilerError)>>,
     /// Compiler-assigned Session slots for mutable globals.
     state_slots: HashMap<ustr::Ustr, u32>,
+    /// Every function that lies on a call cycle, from the whole-program instance
+    /// graph projected onto declarations. Read ONLY by
+    /// [`TailCallShape::Cycles`]; empty on any path that never populated it,
+    /// which makes that shape degrade to [`TailCallShape::All`] rather than to
+    /// the unsafe direction.
+    recursive_callees: HashSet<FuncRef>,
+    /// The emitted shape for a call in tail position. Read from
+    /// `ROCK_SKULL_TAIL_CALLS` once per context rather than once per emitted
+    /// block, so a test can drive all three shapes in one process.
+    tail_calls: TailCallShape,
 }
 
 impl Clone for CodegenCtx {
@@ -672,6 +682,8 @@ impl Clone for CodegenCtx {
             reserved: self.reserved.clone(),
             rejections: Mutex::new(self.rejections.lock().expect("rejection sink").clone()),
             state_slots: self.state_slots.clone(),
+            recursive_callees: self.recursive_callees.clone(),
+            tail_calls: self.tail_calls,
         }
     }
 }
@@ -744,7 +756,34 @@ impl CodegenCtx {
             reserved,
             rejections: Mutex::new(collisions),
             state_slots,
+            recursive_callees: HashSet::default(),
+            tail_calls: tail_call_shape(),
         }
+    }
+
+    /// Override the emitted tail-call shape this context was built with. The
+    /// production path takes it from `ROCK_SKULL_TAIL_CALLS`; a test uses this
+    /// so one process can emit all three shapes.
+    pub fn set_tail_call_shape(&mut self, shape: TailCallShape) {
+        self.tail_calls = shape;
+    }
+
+    pub fn tail_call_shape(&self) -> TailCallShape {
+        self.tail_calls
+    }
+
+    /// Record the functions that lie on a call cycle. The caller owns the graph
+    /// this is derived from (`skull::mir_emit` projects the whole-program
+    /// instance graph onto declarations); codegen only reads the answer, and
+    /// only under `ROCK_SKULL_TAIL_CALLS=cycles`.
+    pub fn set_recursive_callees(&mut self, callees: HashSet<FuncRef>) {
+        self.recursive_callees = callees;
+    }
+
+    /// True if `func` lies on a call cycle, so a call to it can grow the Lua
+    /// stack without bound unless it stays a real tail call.
+    pub fn is_recursive_callee(&self, func: FuncRef) -> bool {
+        self.recursive_callees.contains(&func)
     }
 
     /// Mint a compiler-reserved synthetic top-level Lua name: a hoisted lambda
@@ -900,7 +939,165 @@ fn instruction_reference_counts(func: &MirFunc) -> Vec<u32> {
     counts
 }
 
-fn tail_forwards(ws: &Workspace, func: &MirFunc, direct: bool) -> Vec<Option<TailForward>> {
+/// Every function that lies on a cycle of `edges`, the input
+/// `ROCK_SKULL_TAIL_CALLS=cycles` reads through
+/// [`CodegenCtx::set_recursive_callees`].
+///
+/// `edges` is a `(caller, callee)` stream; a function is on a cycle when its
+/// strongly connected component has more than one member or it calls itself.
+/// The caller supplies the graph, so the emitter never has to know how the
+/// program's call edges were discovered.
+pub fn callees_on_cycles(edges: impl IntoIterator<Item = (FuncRef, FuncRef)>) -> HashSet<FuncRef> {
+    fn intern(
+        f: FuncRef,
+        ids: &mut HashMap<FuncRef, usize>,
+        nodes: &mut Vec<FuncRef>,
+        succ: &mut Vec<Vec<usize>>,
+    ) -> usize {
+        if let Some(&i) = ids.get(&f) {
+            return i;
+        }
+        let i = nodes.len();
+        ids.insert(f, i);
+        nodes.push(f);
+        succ.push(Vec::new());
+        i
+    }
+
+    let mut ids: HashMap<FuncRef, usize> = HashMap::default();
+    let mut nodes: Vec<FuncRef> = Vec::new();
+    let mut succ: Vec<Vec<usize>> = Vec::new();
+    for (from, to) in edges {
+        let from = intern(from, &mut ids, &mut nodes, &mut succ);
+        let to = intern(to, &mut ids, &mut nodes, &mut succ);
+        succ[from].push(to);
+    }
+
+    // Iterative Tarjan: a program-sized call graph has chains deep enough to
+    // overflow a recursive DFS.
+    const UNVISITED: usize = usize::MAX;
+    let n = nodes.len();
+    let mut index = vec![UNVISITED; n];
+    let mut low = vec![0usize; n];
+    let mut on_stack = vec![false; n];
+    let mut component: Vec<usize> = Vec::new();
+    let mut stack: Vec<usize> = Vec::new();
+    let mut work: Vec<(usize, usize)> = Vec::new();
+    let mut next_index = 0usize;
+    let mut out: HashSet<FuncRef> = HashSet::default();
+    for root in 0..n {
+        if index[root] != UNVISITED {
+            continue;
+        }
+        work.push((root, 0));
+        while let Some((v, resume)) = work.pop() {
+            if resume == 0 {
+                index[v] = next_index;
+                low[v] = next_index;
+                next_index += 1;
+                stack.push(v);
+                on_stack[v] = true;
+            }
+            let mut descended = false;
+            let mut i = resume;
+            while i < succ[v].len() {
+                let w = succ[v][i];
+                i += 1;
+                if index[w] == UNVISITED {
+                    work.push((v, i));
+                    work.push((w, 0));
+                    descended = true;
+                    break;
+                }
+                if on_stack[w] {
+                    low[v] = low[v].min(index[w]);
+                }
+            }
+            if descended {
+                continue;
+            }
+            if low[v] == index[v] {
+                component.clear();
+                loop {
+                    let w = stack.pop().expect("tarjan component stack");
+                    on_stack[w] = false;
+                    component.push(w);
+                    if w == v {
+                        break;
+                    }
+                }
+                // A one-node component is on a cycle only through a self-edge.
+                if component.len() > 1 || succ[v].contains(&v) {
+                    out.extend(component.iter().map(|&w| nodes[w]));
+                }
+            }
+            if let Some(&(parent, _)) = work.last() {
+                low[parent] = low[parent].min(low[v]);
+            }
+        }
+    }
+    out
+}
+
+/// Which calls in tail position keep Lua's `do return f(...) end` shape.
+///
+/// `do return f(...) end` compiles to `CALLT`, and LuaJIT's recorder counts
+/// every recorded `CALLT` against `loopunroll` (default 15) in
+/// `lj_record_tailcall`, so a trace that walks through more than 15 of them
+/// aborts with "loop unroll limit reached". A plain call is inlined by the
+/// recorder too, so dropping the shape does not stop inlining -- it moves the
+/// limit the trace hits (`lj_record_call` grows `baseslot` instead and trips
+/// "trace too deep" at 250 slots) and costs a real interpreter frame.
+/// `docs/trace-pressure-work-plan.md` carries the measurement.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TailCallShape {
+    /// Every call in tail position is `do return f(...) end`.
+    All,
+    /// No call keeps the shape. MEASUREMENT ONLY: this drops tail-call
+    /// elimination for recursive calls too, so an unbounded tail recursion
+    /// overflows the Lua stack (measured between 10,000 and 60,000 frames).
+    None,
+    /// Only a callee that lies on a call cycle keeps the shape, so genuine
+    /// recursion keeps tail-call elimination and a straight-line accessor or
+    /// draw chain does not.
+    Cycles,
+}
+
+/// `ROCK_SKULL_TAIL_CALLS` selects the emitted shape for a call in tail
+/// position: `all` (the default), `none`, or `cycles`. An unset or unrecognized
+/// value is `all`, so the switch can only be entered deliberately.
+pub fn tail_call_shape() -> TailCallShape {
+    static SHAPE: std::sync::OnceLock<TailCallShape> = std::sync::OnceLock::new();
+    *SHAPE.get_or_init(|| match std::env::var("ROCK_SKULL_TAIL_CALLS").as_deref() {
+        Ok("none") => TailCallShape::None,
+        Ok("cycles") => TailCallShape::Cycles,
+        _ => TailCallShape::All,
+    })
+}
+
+/// THE gate for the emitted tail-call shape. Returning false drops the forward,
+/// which leaves the ordinary emission path to write `r<N> = f(args)` followed by
+/// `do return r<N> end` -- the same statements a non-tail-position call already
+/// emits, so no new emitted form is introduced.
+fn keeps_tail_call(ctx: &CodegenCtx, call: &TailForwardCall) -> bool {
+    match ctx.tail_calls {
+        TailCallShape::All => true,
+        TailCallShape::None => false,
+        // A call through a function value has no statically known callee, so the
+        // call graph cannot prove it off every cycle.
+        TailCallShape::Cycles => match call {
+            TailForwardCall::Value { .. } => true,
+            TailForwardCall::Direct { func, .. } => ctx.is_recursive_callee(*func),
+        },
+    }
+}
+
+fn tail_forwards(
+    ws: &Workspace,
+    ctx: &CodegenCtx,
+    func: &MirFunc,
+    direct: bool,
+) -> Vec<Option<TailForward>> {
     let mut forwards = vec![None; func.blocks.len()];
     let cell_references = cell_reference_counts(func);
     for (block_id, block) in func.blocks.iter() {
@@ -962,6 +1159,13 @@ fn tail_forwards(ws: &Workspace, func: &MirFunc, direct: bool) -> Vec<Option<Tai
             suppressed: block.insts[first..].to_vec(),
             call,
         });
+    }
+    if ctx.tail_calls != TailCallShape::All {
+        for forward in forwards.iter_mut() {
+            if forward.as_ref().is_some_and(|tail| !keeps_tail_call(ctx, &tail.call)) {
+                *forward = None;
+            }
+        }
     }
     forwards
 }
@@ -1248,7 +1452,7 @@ fn emit_named_framed_with_statics_impl(
     let entry = func.entry();
     let params = func.params.as_slice();
     let rpo = reverse_postorder(func, entry);
-    let tail_forwards = tail_forwards(ws, func, frame.is_none());
+    let tail_forwards = tail_forwards(ws, ctx, func, frame.is_none());
     let (call_arg_forwards, suppressed) = if frame.is_some() {
         // Coroutine lifting moves later uses into frame fields, outside the
         // ordinary cell reference count that proves a producer unobserved.
@@ -2141,6 +2345,46 @@ fn render_scope(
         va = regalloc::color_values(func, rpo, &inlinable, &[]);
     }
     let regalloc::ValueAlloc { colors, color_scope } = va;
+    // Where each declared local dies, for the `<local> = nil` kills that keep
+    // dead slots out of LuaJIT exit snapshots (see `regalloc::nil_kills`). A
+    // coroutine `__step` keeps raw cell names and frame fields; it gets none.
+    let kills = if frame.is_some() || !nil_kill_enabled() {
+        regalloc::NilKills::none(func)
+    } else {
+        let mut emits_nothing = inlinable.clone();
+        for id in hoist.keys() {
+            emits_nothing[raw(*id) as usize] = true;
+        }
+        // A counted loop's header (compare) and latch (increment) are subsumed
+        // by the `for` line; their instructions never run as statements.
+        for (h, cl) in loops.iter() {
+            for &id in func.blocks[*h].insts.iter().chain(func.blocks[cl.latch].insts.iter()) {
+                emits_nothing[raw(id) as usize] = true;
+            }
+        }
+        // A loop-scoped register may be killed anywhere inside its `for` block:
+        // the body region and the latch label, not the header (rendered as the
+        // `for` line itself, outside the block).
+        let kill_scopes: Vec<regalloc::LoopScope> = loops
+            .iter()
+            .map(|(&h, cl)| regalloc::LoopScope {
+                header: h,
+                region: cl.region.iter().copied().chain(std::iter::once(cl.latch)).collect(),
+            })
+            .collect();
+        let pinned = regalloc::pinned_cells(func);
+        regalloc::nil_kills(
+            func,
+            rpo,
+            &emits_nothing,
+            &colors,
+            &color_scope,
+            &kill_scopes,
+            cell_colors,
+            &pinned,
+            params,
+        )
+    };
     REGALLOC_TIME.with(|c| c.set(c.get() + t_ra.elapsed()));
 
     // Param list `(a, b, c)` — written straight into the buffer (no Vec<String>).
@@ -2266,6 +2510,7 @@ fn render_scope(
         tail_forwards,
         call_arg_forwards,
         suppressed,
+        kills,
     };
     for &bb in rpo {
         em.emit_block(out, bb); // self-skips an already-emitted block (loop body)
@@ -2340,9 +2585,55 @@ struct Emitter<'a> {
     tail_forwards: &'a [Option<TailForward>],
     call_arg_forwards: &'a [Option<CallArgForward>],
     suppressed: &'a [bool],
+    /// Death point of every declared local, written as `<local> = nil`.
+    kills: regalloc::NilKills,
+}
+
+/// `ROCK_SKULL_NIL_KILL=0` turns the nil-kill emission off, so an abort census
+/// or a frame-time run can be compared against the same source without it.
+fn nil_kill_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("ROCK_SKULL_NIL_KILL").map_or(true, |v| v != "0"))
 }
 
 impl Emitter<'_> {
+    fn write_kills(&self, out: &mut String, locals: &[regalloc::KillLocal]) {
+        for local in locals {
+            out.push_str("  ");
+            match *local {
+                regalloc::KillLocal::Value(c) => {
+                    out.push('r');
+                    push_uint(out, c);
+                }
+                regalloc::KillLocal::Cell(c) => {
+                    out.push('c');
+                    push_uint(out, c);
+                }
+            }
+            out.push_str(" = nil\n");
+        }
+    }
+
+    /// The kills due before the next statement of `bb`: the block's entry kills
+    /// when no statement has been written yet, else the ones after `after`.
+    fn write_pending_kills(&self, out: &mut String, bb: Idx<Block>, at_entry: bool, after: Option<Idx<Inst>>) {
+        let locals: &[regalloc::KillLocal] = if at_entry {
+            &self.kills.at_entry[raw(bb) as usize]
+        } else {
+            match after {
+                Some(id) => &self.kills.after_inst[raw(id) as usize],
+                None => &[],
+            }
+        };
+        self.write_kills(out, locals);
+    }
+
+    /// Whether `emit_inst` writes a statement for `id` (kills attach after it).
+    fn emits_statement(&self, id: Idx<Inst>) -> bool {
+        !self.suppressed[raw(id) as usize]
+            && !self.inlinable[raw(id) as usize]
+            && !self.hoist.contains_key(&id)
+    }
     fn has_state_slot(&self, name: ustr::Ustr) -> bool {
         self.state_slots.contains_key(&name) || self.static_slots.contains_key(&name)
     }
@@ -2412,11 +2703,45 @@ impl Emitter<'_> {
         let insts: &[Idx<Inst>] = &self.func.blocks[bb].insts;
         let tail = self.tail_forwards[raw(bb) as usize].as_ref();
         let emitted_len = tail.map_or(insts.len(), |tail| tail.first_suppressed);
+        // Kills are written before the next statement, so the ones after the
+        // last statement of a returning block are dropped: `return` (and a
+        // tail call, which replaces the frame) drops every slot itself.
+        let returns = tail.is_some()
+            || matches!(self.func.blocks[bb].term, Term::Return(_) | Term::Unreachable);
+        // In a returning block, only a statement that may call can expose a
+        // stale slot to an exit; kills past the last such statement are dropped.
+        let last_impure = if returns {
+            insts[..emitted_len]
+                .iter()
+                .rposition(|&id| {
+                    self.emits_statement(id) && !regalloc::statement_is_pure(self.func, &self.inlinable, id)
+                })
+                .map(|i| insts[i])
+        } else {
+            None
+        };
+        let mut live_region = !returns || last_impure.is_some();
+        // Indexed rather than borrowed: `emit_inst` needs `&mut self`.
+        let mut pending: Option<Idx<Inst>> = None;
+        let mut first = true;
         for &id in &insts[..emitted_len] {
             if self.suppressed[raw(id) as usize] {
                 continue;
             }
+            if self.emits_statement(id) {
+                if live_region {
+                    self.write_pending_kills(out, bb, first, pending);
+                }
+                first = false;
+                pending = Some(id);
+            }
             self.emit_inst(out, id);
+            if Some(id) == last_impure {
+                live_region = !returns;
+            }
+        }
+        if live_region {
+            self.write_pending_kills(out, bb, first, pending);
         }
         if let Some(tail) = tail {
             self.emit_tail_forward(out, tail);
@@ -2480,6 +2805,9 @@ impl Emitter<'_> {
         let limit = if inclusive { hi } else { format!("{hi} - 1") };
 
         self.emitted[raw(header) as usize] = true;
+        // Dead on entry to the header is dead for the whole loop unless
+        // redefined, so the header's kills go once, above the `for`.
+        self.write_kills(out, &self.kills.at_entry[raw(header) as usize]);
         let _ = writeln!(out, "  for {slot_name} = {slot_name}, {limit} do");
         // Body-scoped temp registers: declared INSIDE the `for` block, above the
         // loop-control slots, so LuaJIT's snapshot liveness can prune them at
@@ -2517,6 +2845,7 @@ impl Emitter<'_> {
         out.push_str("  ::bb");
         push_uint(out, self.func.emit_block_id(latch));
         out.push_str("::\n");
+        self.write_kills(out, &self.kills.at_entry[raw(latch) as usize]);
         out.push_str("  end\n");
         out.push_str("  goto bb");
         push_uint(out, self.func.emit_block_id(exit));
@@ -3558,7 +3887,11 @@ impl Emitter<'_> {
                     self.write_opnd(out, a);
                     out.push_str(", ");
                     self.write_opnd(out, b);
-                    out.push_str(")\n  goto bb");
+                    out.push_str(")\n");
+                    // The arm blocks are skipped, so their entry kills are too;
+                    // what dies between here and the join is killed here.
+                    self.write_kills(out, &self.kills.on_edge(bb, join));
+                    out.push_str("  goto bb");
                     push_uint(out, self.func.emit_block_id(join));
                     out.push('\n');
                     return;

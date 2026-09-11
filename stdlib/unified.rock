@@ -726,6 +726,18 @@ deco init on_reload {
     end
 """
 
+// The first `n` elements of two NativeBuffers compared as bytes. Serves
+// __op_eq's FlatVec and NativeBuffer cases; see the caveat there.
+@nomangle inline(lua) fn __rock_native_buffer_prefix_eq(x: any, y: any, n: int) -> bool = """
+    if n <= 0 then return true end
+    if type(x) ~= "table" or type(y) ~= "table" then return false end
+    if x.ptr == nil or y.ptr == nil then return x.ptr == y.ptr end
+    if x.ptr == y.ptr then return true end
+    local esz = ffi.sizeof(x.ptr[0])
+    if esz ~= ffi.sizeof(y.ptr[0]) then return false end
+    return ffi.string(x.ptr, n * esz) == ffi.string(y.ptr, n * esz)
+"""
+
 // Generic operator functions using different names to avoid compiler conflicts
 @nomangle inline(lua) fn __op_eq(a: any, b: any) -> bool = """
     -- Primitive fast path
@@ -796,6 +808,26 @@ deco init on_reload {
             if not __op_eq(a._data[i], b._data[i]) then return false end
         end
         return true
+    end
+
+    -- FlatVec / NativeBuffer equality is over the first `len` elements'
+    -- BYTES: the elements are FFI-clean value structs (or primitives) living
+    -- inline in one C array, so byte equality is their value equality, with
+    -- the one caveat that a float compares bitwise here (0.0 ~= -0.0, NaN ==
+    -- NaN). Without this case the generic walk reached the NativeBuffer's
+    -- cdata pointer, which the primitive fast path compares by ADDRESS, so
+    -- two FlatVecs with equal contents were never equal.
+    if type_a == "FlatVec" or type_b == "FlatVec" then
+        if type_a ~= "FlatVec" or type_b ~= "FlatVec" or a.len ~= b.len then
+            return false
+        end
+        return __rock_native_buffer_prefix_eq(a.buf, b.buf, a.len)
+    end
+    if type_a == "NativeBuffer" or type_b == "NativeBuffer" then
+        if type_a ~= "NativeBuffer" or type_b ~= "NativeBuffer" or a.len ~= b.len then
+            return false
+        end
+        return __rock_native_buffer_prefix_eq(a, b, a.len)
     end
 
     -- A GC-carrying value struct (table repr) carries a per-type `__eq`

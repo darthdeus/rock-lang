@@ -883,12 +883,38 @@ impl Builder<'_> {
         let Some(struct_name) = self.value_struct_name_of(u_e) else {
             return Err(reject(u_span, uniform_expand_arg_msg(fname)));
         };
-        let repr = self.lower_expr_repr(u_e)?;
         let plan = uniform_block_checked(self.ws, struct_name)
             .map_err(|m| reject(u_span, format!("`@uniform_expand`: {m}")))?;
-
-        let leaves = self.repr_to_leaves_bundle(&repr)?;
         let stores = plan.leaf_stores();
+
+        // A block held in a GLOBAL is read one leaf at a time, each leaf
+        // loaded right before its own store, so at most the box and one leaf
+        // are live at any store. The whole-value read below loads every leaf
+        // into a register before the first store; inside a trace that keeps
+        // all of them (41 for the engine block) live in every exit snapshot
+        // taken during the pack, against a 16-register side-trace budget
+        // (docs/trace-pressure-work-plan.md).
+        if let Some(source) = self.global_uniform_source(u_e, struct_name)? {
+            let leaf_count = source.leaf_count();
+            if leaf_count != stores.len() {
+                return Err(reject(
+                    u_span,
+                    format!(
+                        "`@uniform_expand`: `{struct_name}` has {leaf_count} leaves but its std140 \
+                         plan has {} slots",
+                        stores.len()
+                    ),
+                ));
+            }
+            for (i, store) in stores.iter().enumerate() {
+                let leaf = self.global_uniform_leaf(&source, i);
+                self.emit_uniform_leaf_store(fv, iv, leaf, store);
+            }
+            return Ok(ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil))));
+        }
+
+        let repr = self.lower_expr_repr(u_e)?;
+        let leaves = self.repr_to_leaves_bundle(&repr)?;
         // `uniform_block_checked` already proved the two walkers agree on the
         // leaf PATH sequence, so this can only differ if the repr handed back a
         // different leaf count than the shape describes.
@@ -904,27 +930,79 @@ impl Builder<'_> {
             ));
         }
 
-        for (leaf, store) in leaves.iter().zip(stores) {
-            // `LeafStore.offset` is a BYTE offset; a leaf view indexes in units
-            // of its own primitive, and every std140 slot here is 4-byte.
-            let idx = self.emit_cur(Inst::Const(Lit::Int((store.offset / 4) as i64)));
-            let base = match store.view {
-                crate::gpu_layout::WireView::Float => fv,
-                crate::gpu_layout::WireView::Int => iv,
-                crate::gpu_layout::WireView::Uint => iv,
-            };
-            let leaf = match store.view {
-                crate::gpu_layout::WireView::Uint => self.emit_cur(Inst::UintBitcastInt(*leaf)),
-                _ => *leaf,
-            };
-            self.emit_cur(Inst::StoreIndex {
-                base,
-                index: idx,
-                value: leaf,
-                kind: ContainerKind::NativeBufferLeaf,
-            });
+        for (leaf, store) in leaves.iter().zip(&stores) {
+            self.emit_uniform_leaf_store(fv, iv, *leaf, store);
         }
         Ok(ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil))))
+    }
+
+    /// One std140 slot of a uniform block: a direct typed store of `leaf`
+    /// through the view its wire type selects.
+    fn emit_uniform_leaf_store(
+        &mut self,
+        fv: Idx<Inst>,
+        iv: Idx<Inst>,
+        leaf: Idx<Inst>,
+        store: &crate::gpu_layout::LeafStore,
+    ) {
+        // `LeafStore.offset` is a BYTE offset; a leaf view indexes in units
+        // of its own primitive, and every std140 slot here is 4-byte.
+        let idx = self.emit_cur(Inst::Const(Lit::Int((store.offset / 4) as i64)));
+        let base = match store.view {
+            crate::gpu_layout::WireView::Float => fv,
+            crate::gpu_layout::WireView::Int => iv,
+            crate::gpu_layout::WireView::Uint => iv,
+        };
+        let leaf = match store.view {
+            crate::gpu_layout::WireView::Uint => self.emit_cur(Inst::UintBitcastInt(leaf)),
+            _ => leaf,
+        };
+        self.emit_cur(Inst::StoreIndex {
+            base,
+            index: idx,
+            value: leaf,
+            kind: ContainerKind::NativeBufferLeaf,
+        });
+    }
+
+    /// `u` as a global place the packer can read leaf by leaf, or `None` when
+    /// `u` is anything else (a local group, a literal, a call result), which
+    /// takes the whole-value path. A global whose shape has a nullable or enum
+    /// child is left to that path too: those leaves need presence branches or
+    /// a tag spread, and no uniform block carries either.
+    fn global_uniform_source(
+        &mut self,
+        u_e: Idx<Expr>,
+        struct_name: Ustr,
+    ) -> Result<Option<GlobalUniformSource>, CompilerError> {
+        let Expr::Global(name) = self.body.expr_arena[u_e].clone() else {
+            return Ok(None);
+        };
+        if let Some((leaves, Some(_))) = self.nobox_global_place(u_e)? {
+            return Ok(Some(GlobalUniformSource::LeafGlobals(leaves)));
+        }
+        let shape = self.nominal_rep_shape_required(struct_name, false)?;
+        if !self.shape_is_plain_keys(&shape) {
+            return Ok(None);
+        }
+        // The key paths `cdata_leaves` reads a box with, one leaf at a time.
+        let paths = self.boxed_leaf_paths(&shape)?;
+        let boxed = self.emit_cur(Inst::Global(name));
+        Ok(Some(GlobalUniformSource::Boxed { boxed, paths }))
+    }
+
+    /// Load leaf `i` of a global uniform source, at the point of the call.
+    fn global_uniform_leaf(&mut self, source: &GlobalUniformSource, i: usize) -> Idx<Inst> {
+        match source {
+            GlobalUniformSource::LeafGlobals(leaves) => self.emit_cur(Inst::Global(leaves[i])),
+            GlobalUniformSource::Boxed { boxed, paths } => {
+                let mut v = *boxed;
+                for field in &paths[i] {
+                    v = self.emit_cur(Inst::Field { base: v, field: *field });
+                }
+                v
+            }
+        }
     }
 
     /// `@uniform_values` -> a typed packet of logical scalar leaves. The
@@ -1176,5 +1254,22 @@ impl Builder<'_> {
             })
             .collect();
         swizzle_group(parts)
+    }
+}
+
+/// Where a global uniform block's leaves are read from, leaf by leaf.
+enum GlobalUniformSource {
+    /// A `nobox` global: one scalar global per leaf.
+    LeafGlobals(Vec<Ustr>),
+    /// A boxed global: the box plus each leaf's field path into it.
+    Boxed { boxed: Idx<Inst>, paths: Vec<Vec<Ustr>> },
+}
+
+impl GlobalUniformSource {
+    fn leaf_count(&self) -> usize {
+        match self {
+            GlobalUniformSource::LeafGlobals(leaves) => leaves.len(),
+            GlobalUniformSource::Boxed { paths, .. } => paths.len(),
+        }
     }
 }

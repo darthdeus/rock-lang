@@ -177,7 +177,26 @@ fn __entity_arena<T>(entity: Entity<T>) -> Arena<T> {
     return Arena { _scene_id: entity._scene_id, _arena_id: entity._arena_id }
 }
 
-fn Entity<T>.get(entity) -> T? { return get(__entity_arena(entity), entity) }
+// Resolved here rather than through `get(__entity_arena(entity), entity)`.
+// The arena that walk builds is the entity's OWN, so `__arena_owns` compares a
+// pair of fields with themselves and `__arena_store`'s cast is already a
+// runtime no-op: four inlined frames whose only job is to be true. Dropping
+// them leaves the two oracles that decide the answer -- the registry lookup
+// and the occupancy+generation test -- reached from one frame instead of five.
+//
+// It is not spelled this way for elegance. LuaJIT charges a trace two IR
+// constants per distinct global name plus one per inlined function object, and
+// `Entity.get` is inlined into every trace that reads an entity; the four
+// frames cost 12 of the 500-constant budget and one of the 15 tail-call unroll
+// slots there. Text traces reach their glyph loop with both nearly spent
+// (docs/trace-pressure-work-plan.md).
+fn Entity<T>.get(entity) -> T? {
+    let boxed = __arena_store_any(entity._scene_id, entity._arena_id)
+    if is_null(boxed) { return null }
+    let store: ArenaStore<T> = cast(boxed.unwrap())
+    if !arena_slot_live(store, entity._slot, entity._generation) { return null }
+    return store.data[entity._slot]
+}
 
 fn Entity<T>.borrow(entity) -> (ref T)? { return borrow(__entity_arena(entity), entity) }
 

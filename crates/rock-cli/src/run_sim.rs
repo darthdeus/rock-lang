@@ -209,10 +209,18 @@ pub fn parse_sim_chain(name: &str) -> Vec<&str> {
 /// `rock_host::project::lib_path_value` puts on the library search path.
 fn sim_output_dir() -> Result<TempDir> {
     fs_err::create_dir_all("tmp").context("creating tmp/ for sim output")?;
-    tempfile::Builder::new()
+    let mut dir = tempfile::Builder::new()
         .prefix("sim-")
         .tempdir_in("tmp")
-        .context("creating sim output directory")
+        .context("creating sim output directory")?;
+    // A JIT abort census names `main.lua:<line>`, which is unreadable once the
+    // build that produced it is gone. Retaining it is opt-in because every
+    // ordinary sim run would otherwise leave a 20MB directory behind.
+    if std::env::var_os("ROCK_SIM_KEEP_BUILD").is_some() {
+        dir.disable_cleanup(true);
+        ::log::info!(target: "SIM", "retaining sim build at {}", dir.path().display());
+    }
+    Ok(dir)
 }
 
 fn sim_spawn_barrier() {
@@ -670,6 +678,7 @@ pub fn do_run_named_sims(
     quiet: bool,
     update_snapshots: bool,
     jobs: Option<usize>,
+    render_jobs: Option<usize>,
     mode: SimExecMode,
 ) -> Result<()> {
     // One name: identical to the classic single-run path (full detail). There
@@ -702,6 +711,7 @@ pub fn do_run_named_sims(
         quiet,
         update_snapshots,
         jobs,
+        render_jobs,
         mode,
         &recorder,
     );
@@ -717,6 +727,7 @@ fn do_run_named_sims_recorded(
     quiet: bool,
     update_snapshots: bool,
     jobs: Option<usize>,
+    render_jobs: Option<usize>,
     mode: SimExecMode,
     recorder: &SimRunRecorder,
 ) -> Result<()> {
@@ -734,6 +745,7 @@ fn do_run_named_sims_recorded(
     let (wire_names, env_by_wire, mut stone) = recorder.phase("compile_and_discover", || {
         compile_sims(backend, project_path.clone(), PathBuf::from(&output))
     })?;
+    emit_bytecode_image(Path::new(&output));
     let entry_ids = recorder.plan_entries(names);
     sim_spawn_barrier();
 
@@ -758,6 +770,7 @@ fn do_run_named_sims_recorded(
             quiet,
             update_snapshots,
             jobs,
+            render_jobs,
             &mut stone,
             Some(recorder),
             Some(&entry_ids),
@@ -946,12 +959,84 @@ where
     collected.into_inner().expect("no lane panicked while holding the results lock")
 }
 
+/// `run_bounded` with a second cap: at most `render_jobs` of the `jobs`
+/// threads may be inside a task whose `renders[i]` is true at any moment.
+///
+/// Rendering tasks are handed out in index order and non-rendering ones fill
+/// every slot the cap leaves free, so a full pool stays full whenever there
+/// is non-rendering work; a thread only waits when the cap is reached AND
+/// nothing else remains. With `render_jobs >= jobs` the schedule is the plain
+/// pool's, task order included, so the uncapped run is not a second policy.
+fn run_bounded_classed<T, F>(
+    jobs: usize,
+    render_jobs: usize,
+    renders: &[bool],
+    task: F,
+) -> Vec<(usize, Result<T>)>
+where
+    F: Fn(usize) -> Result<T> + Sync,
+    T: Send,
+{
+    let n = renders.len();
+    if jobs <= 1 || n <= 1 || render_jobs >= jobs {
+        return run_bounded(jobs, n, task);
+    }
+    struct Queue {
+        rendering: std::collections::VecDeque<usize>,
+        other: std::collections::VecDeque<usize>,
+        live_rendering: usize,
+    }
+    let queue = Mutex::new(Queue {
+        rendering: (0..n).filter(|&i| renders[i]).collect(),
+        other: (0..n).filter(|&i| !renders[i]).collect(),
+        live_rendering: 0,
+    });
+    let freed = std::sync::Condvar::new();
+    let collected: Mutex<Vec<(usize, Result<T>)>> = Mutex::new(Vec::new());
+    let lanes = jobs.min(n);
+    std::thread::scope(|scope| {
+        for _ in 0..lanes {
+            scope.spawn(|| loop {
+                let picked = {
+                    let mut q = queue.lock().unwrap();
+                    loop {
+                        if q.live_rendering < render_jobs {
+                            if let Some(i) = q.rendering.pop_front() {
+                                q.live_rendering += 1;
+                                break Some((i, true));
+                            }
+                        }
+                        if let Some(i) = q.other.pop_front() {
+                            break Some((i, false));
+                        }
+                        if q.rendering.is_empty() {
+                            break None;
+                        }
+                        // Only rendering work is left and the cap is reached:
+                        // wait for a rendering slot, never spin.
+                        q = freed.wait(q).unwrap();
+                    }
+                };
+                let Some((i, rendering)) = picked else { break };
+                let r = task(i);
+                collected.lock().unwrap().push((i, r));
+                if rendering {
+                    queue.lock().unwrap().live_rendering -= 1;
+                    freed.notify_all();
+                }
+            });
+        }
+    });
+    collected.into_inner().expect("no lane panicked while holding the results lock")
+}
+
 pub fn do_run_all_sims(
     backend: crate::Backend,
     project: &str,
     quiet: bool,
     update_snapshots: bool,
     jobs: Option<usize>,
+    render_jobs: Option<usize>,
     mode: SimExecMode,
 ) -> Result<()> {
     rock_host::project::ensure_workspace_root()?;
@@ -969,6 +1054,7 @@ pub fn do_run_all_sims(
         quiet,
         update_snapshots,
         jobs,
+        render_jobs,
         mode,
         &recorder,
     );
@@ -983,6 +1069,7 @@ fn do_run_all_sims_recorded(
     quiet: bool,
     update_snapshots: bool,
     jobs: Option<usize>,
+    render_jobs: Option<usize>,
     mode: SimExecMode,
     recorder: &SimRunRecorder,
 ) -> Result<()> {
@@ -1000,6 +1087,7 @@ fn do_run_all_sims_recorded(
     let (wire_names, env_by_wire, mut stone) = recorder.phase("compile_and_discover", || {
         compile_sims(backend, project_path.clone(), PathBuf::from(&output))
     })?;
+    emit_bytecode_image(Path::new(&output));
     sim_spawn_barrier();
     if wire_names.is_empty() {
         return Err(anyhow!("no @sim coroutines found in project `{project}`"));
@@ -1042,6 +1130,7 @@ fn do_run_all_sims_recorded(
             quiet,
             update_snapshots,
             jobs,
+            render_jobs,
             &mut stone,
             Some(recorder),
             Some(&entry_ids),
@@ -1361,6 +1450,7 @@ pub fn do_run_allocation_census(
     let output = out_dir.path().to_string_lossy().into_owned();
     let (wire_names, env_by_wire, mut stone) =
         compile_sims(backend, project_path, PathBuf::from(&output))?;
+    emit_bytecode_image(Path::new(&output));
     sim_spawn_barrier();
 
     let selected = if names.is_empty() {
@@ -1838,6 +1928,7 @@ fn run_specs_worker_mode(
     quiet: bool,
     update_snapshots: bool,
     jobs: Option<usize>,
+    render_jobs: Option<usize>,
     stone: &mut crate::skull_backend::SkullStone,
     recorder: Option<&SimRunRecorder>,
     entry_ids: Option<&[u64]>,
@@ -1975,8 +2066,29 @@ fn run_specs_worker_mode(
         .chain(poolable.iter().map(|(i, _)| Lane::Isolated(*i)))
         .collect();
 
+    let render_jobs = resolve_render_jobs(render_jobs, jobs);
+    let spec_renders = |i: usize| {
+        parse_sim_chain(&specs[i])
+            .iter()
+            .any(|p| entry_renders(env_by_wire.get(*p).map_or(&[][..], |v| v)))
+    };
+    let work_renders: Vec<bool> = work
+        .iter()
+        .map(|l| match l {
+            Lane::Worker(lane) => lane.iter().any(|&i| spec_renders(i)),
+            Lane::Isolated(i) => spec_renders(*i),
+        })
+        .collect();
+    if !quiet && render_jobs < jobs {
+        let rendering = work_renders.iter().filter(|r| **r).count();
+        println!(
+            "[sim] worker: at most {render_jobs} of {jobs} lanes render at once ({rendering} rendering lanes of {})",
+            work.len()
+        );
+    }
+
     let mut collected: Vec<(usize, SimSummary)> = Vec::new();
-    for (_, r) in run_bounded(jobs, work.len(), |w| match work[w] {
+    for (_, r) in run_bounded_classed(jobs, render_jobs, &work_renders, |w| match work[w] {
         Lane::Worker(lane) => {
             let lane_specs: Vec<String> = lane.iter().map(|&i| specs[i].clone()).collect();
             // `run_specs_recovering` is positional, so its results line up with
@@ -2311,6 +2423,16 @@ fn entry_is_reload_lane(
 /// measurement on more than one machine (`docs/sim-speed-plan.md`).
 const DEFAULT_SIM_JOBS: usize = 4;
 
+/// Resolve the cap on concurrently RENDERING children. A rendering child
+/// holds real image pixels and the scene target set on the GPU (a few GB on
+/// the measured host, against well under one for a non-rendering child), so
+/// on a card with a fixed budget the number of them alive at once is what
+/// overflows, not the job count. `None` is no separate cap; anything
+/// requested is clamped into `1..=jobs`.
+fn resolve_render_jobs(requested: Option<usize>, jobs: usize) -> usize {
+    requested.unwrap_or(jobs).clamp(1, jobs.max(1))
+}
+
 /// Resolve the requested job count. `--update-snapshots` pins to serial: it
 /// rewrites baseline files, and the runner does not yet prove every
 /// destination path is unique before spawning (several `@sim`s can share one
@@ -2327,6 +2449,52 @@ fn resolve_jobs(requested: Option<usize>, update_snapshots: bool) -> usize {
         .map(|n| n.get())
         .unwrap_or(1);
     requested.unwrap_or(DEFAULT_SIM_JOBS).clamp(1, available.max(1))
+}
+
+/// Dump the compiled `main.lua` in `output` to a LuaJIT bytecode image beside
+/// it, once per invocation, so every worker skips the source parse.
+///
+/// Parsing the 48MB `main.lua` costs a child ~300ms of its ~1.1s boot, and a
+/// full run boots ~150 children from the same file; the dump costs the parent
+/// one parse (~0.4s). Best-effort by design: a failed dump is logged and the
+/// workers run the source file, which is exactly what they ran before. A
+/// partial image is removed so `worker_chunk_path` cannot pick it up.
+fn emit_bytecode_image(output: &Path) {
+    let lua_file = output.join(rock_host::project::MAIN_LUA_FILENAME);
+    let bytecode = output.join(rock_host::project::MAIN_BYTECODE_FILENAME);
+    let started = std::time::Instant::now();
+    let result = rock_host::project::build_luajit_bytecode_command(&lua_file, &bytecode).output();
+    let failure = match result {
+        Ok(out) if out.status.success() => None,
+        Ok(out) => Some(String::from_utf8_lossy(&out.stderr).trim().to_string()),
+        Err(e) => Some(e.to_string()),
+    };
+    match failure {
+        None => log::debug!(target: "SIM",
+            "bytecode image `{}` written in {}ms", bytecode.display(),
+            started.elapsed().as_millis()),
+        Some(why) => {
+            log::warn!(target: "SIM",
+                "bytecode image not written, workers boot from source `{}`: {}",
+                lua_file.display(), why);
+            let _ = std::fs::remove_file(&bytecode);
+        }
+    }
+}
+
+/// The chunk a child boots from: the bytecode image when one exists, except for
+/// the reload lane, which must keep the source file. `check_hot_reload`
+/// derives the overlay path by replacing `main.lua` in the running script's
+/// own path (`stone/engine/hot_reload.rock`), and `read_chunk_source_dir`
+/// reads line 1 of the chunk as text to decide whether it is this game's;
+/// neither question has an answer against a bytecode image.
+fn worker_chunk_path(output: &Path, reload: bool) -> PathBuf {
+    let main = output.join(rock_host::project::MAIN_LUA_FILENAME);
+    if reload {
+        return main;
+    }
+    let bytecode = output.join(rock_host::project::MAIN_BYTECODE_FILENAME);
+    if bytecode.is_file() { bytecode } else { main }
 }
 
 /// Whether a sim belongs to the exclusive reload lane.
@@ -2350,16 +2518,22 @@ fn writes_live(buffered: bool) -> bool {
 /// signature two entries must agree on to share a process.
 ///
 /// `FRAME_COUNT` is the entry's runaway bound, carried in the entry plan and
-/// republished by `sim_start_entry` at every boundary. `SIM_DT` and
-/// `SIM_SKIP_RENDER` are read ONCE during boot (`runner_load_sim_entries`), so
-/// they are still boot signature until the worker applies them per entry.
+/// republished by `sim_start_entry` at every boundary. `SIM_DT` travels the
+/// same way, with an explicit empty value for an entry that declares nothing
+/// so the engine default is re-applied rather than a predecessor's value.
+/// `STONE_FX_OFF` travels like `SIM_DT`: every consumer is a per-frame gate
+/// (`fx_disabled`), so an entry that ablates the world draw or the screen UI
+/// shares a boot with one that does not. `SIM_SKIP_RENDER` is ALSO carried
+/// per entry (`runner_owned_plan_pairs`) and re-applied at every boundary,
+/// but it stays boot signature because `entry_renders` decides
+/// `STONE_ASSET_STUB` per process.
 ///
 /// `ROCK_MASK_WALL_CLOCK` and `ROCK_DETERMINISTIC_IDS` are owned outright: the
 /// runner publishes its own value for both after `preset_env`, so a declared one
 /// never reaches the child and cannot stand for a difference between two
 /// entries. Splitting a group on an inert value would isolate sims for nothing.
 const RUNNER_OWNED_ENV_KEYS: &[&str] =
-    &["FRAME_COUNT", "ROCK_DETERMINISTIC_IDS", "ROCK_MASK_WALL_CLOCK", "SIM_MANUAL"];
+    &["FRAME_COUNT", "ROCK_DETERMINISTIC_IDS", "ROCK_MASK_WALL_CLOCK", "SIM_DT", "SIM_MANUAL", "STONE_FX_OFF"];
 
 /// Fixed values the runner publishes to EVERY sim child, layered BEFORE
 /// `preset_env` so a declaration still wins.
@@ -2395,11 +2569,23 @@ const RUNNER_BASELINE_ENV: &[(&str, &str)] = &[
 /// boundary is enough is whether the GAME reads that variable live or captures
 /// it into a global during boot. The runner cannot see which, so it must be
 /// told, and the default has to be the safe one: an undeclared `$OUT` key still
-/// isolates. A blanket "all `$OUT` keys are per-entry now" would make MAG's
-/// bindings/layout-history group shareable and silently wrong -- those are read
-/// into globals at boot (`mag/actions.rock:199`, `mag/spellbook.rock:94-95`),
-/// so a per-entry setenv would be accepted and ignored and the second entry
-/// would read and write the FIRST entry's file.
+/// isolates. A blanket "all `$OUT` keys are per-entry now" would still be wrong,
+/// because whether a game reads a variable live is a property of that game at
+/// that revision, not of the runner. MAG's bindings/layout-history group WAS the
+/// standing example of the unsafe half -- read into globals at boot, so a
+/// per-entry setenv was accepted and ignored and the second entry read and wrote
+/// the FIRST entry's file. Those three accessors now read the environment live
+/// (`mag/actions.rock`, `mag/spellbook.rock`), witnessed by
+/// `mag/tests/sims/bindings_path_per_entry.rock`, and the fifteen fixtures
+/// declare the keys here. The rule that made that a fixture-side declaration
+/// rather than a runner-side list is unchanged.
+///
+/// Reading the variable live is NECESSARY but not SUFFICIENT, and a fixture
+/// declaring a key here is asserting the whole condition. The READER has to run
+/// per entry as well, and whatever it configures has to be reset per entry.
+/// `MAG_SCENE` is the recorded counter-example: read live, re-applied correctly
+/// at every entry, and still unshareable because two pieces of what its scene
+/// sets up survive the boundary (`docs/sim-boot-cost-analysis.md`, queue item 5).
 ///
 /// Symmetric to `SIM_WORKER_ISOLATED`, which is the opt-OUT declared the same
 /// way; both are properties of the fixture, stated at the fixture.
@@ -2482,6 +2668,46 @@ fn boot_signature(env_pairs: &[(String, String)]) -> Vec<(String, String)> {
     sig
 }
 
+/// The runner-owned pairs carried in the entry plan for EVERY entry, so that
+/// `sim_start_entry` re-applies each at the boundary and an entry inherits
+/// nothing from its predecessor.
+///
+/// `SIM_DT` and `STONE_FX_OFF` travel with an explicit empty value standing
+/// for the engine default: an entry that declares nothing must not run at
+/// the fixed dt, or with the ablation, its predecessor declared.
+/// `SIM_SKIP_RENDER` travels as the value the entry
+/// boots with (`entry_renders`, the one oracle): it is still boot signature,
+/// so two entries in one worker agree on it, but the global is
+/// `realization=runner_rebind` and the boundary restore never touches it, so
+/// a fixture that exits with the flag flipped would otherwise hand that value
+/// to the next entry.
+fn runner_owned_plan_pairs(env: &[(String, String)]) -> Vec<(String, String)> {
+    let sim_dt = effective_env(env)
+        .into_iter()
+        .find(|(k, _)| k == "SIM_DT")
+        .map(|(_, v)| v)
+        .unwrap_or_default();
+    // The raw effective value, not `entry_renders`: `submit` is a third
+    // value (draw phase on, GPU submission off) that the engine must see
+    // as itself, while the runner classifies it as non-rendering for the
+    // asset stub and the render cap.
+    let skip_render = effective_env(env)
+        .into_iter()
+        .find(|(k, _)| k == "SIM_SKIP_RENDER")
+        .map(|(_, v)| v)
+        .unwrap_or_else(|| "1".to_string());
+    let fx_off = effective_env(env)
+        .into_iter()
+        .find(|(k, _)| k == "STONE_FX_OFF")
+        .map(|(_, v)| v)
+        .unwrap_or_default();
+    vec![
+        ("SIM_DT".to_string(), sim_dt),
+        ("SIM_SKIP_RENDER".to_string(), skip_render),
+        ("STONE_FX_OFF".to_string(), fx_off),
+    ]
+}
+
 /// The pairs this part publishes through setenv when its entry starts, with
 /// `$OUT` resolved against the part's OWN tempdir.
 ///
@@ -2552,7 +2778,10 @@ fn sim_exec_mode_name(mode: SimExecMode) -> &'static str {
 /// disagree with the value the child actually boots with.
 ///
 /// A sim declaring nothing does not render: draw systems are skipped by default
-/// under the harness.
+/// under the harness. `submit` (draw phase on, nothing submitted to the GPU)
+/// is NOT rendering here: its process needs no image pixels and holds no
+/// rendered frame, which is what this oracle decides (the asset stub, the
+/// render cap).
 fn entry_renders(env: &[(String, String)]) -> bool {
     env.iter()
         .filter(|(k, _)| k == "SIM_SKIP_RENDER")
@@ -3046,6 +3275,9 @@ fn run_worker(
         for (k, v) in per_entry_env_pairs(p) {
             write!(plan_file, "\t{k}\t{v}")?;
         }
+        for (k, v) in runner_owned_plan_pairs(&p.env) {
+            write!(plan_file, "\t{k}\t{v}")?;
+        }
         writeln!(plan_file)?;
     }
     plan_file.flush()?;
@@ -3061,7 +3293,8 @@ fn run_worker(
         .map(|(k, v)| (k.clone(), v.replace("$OUT", &out_str)))
         .collect();
 
-    let lua_file = std::path::PathBuf::from(output).join(rock_host::project::MAIN_LUA_FILENAME);
+    let reload = parts.iter().any(|p| is_reload_lane(&p.env));
+    let lua_file = worker_chunk_path(Path::new(output), reload);
     let mut cmd = rock_host::project::build_luajit_command(&lua_file, &[]);
     // `ROCK_RUN_SIM` / `OUT` / `FRAME_COUNT` carry the FIRST entry: they are read
     // during boot (`sim_mode_active()` gates audio, the screenshot helper reads
@@ -5417,6 +5650,7 @@ mod tests {
         assert!(!entry_renders(&[]), "declaring nothing does not render");
         assert!(entry_renders(&[pair("SIM_SKIP_RENDER", "0")]), "@sim_render sugar");
         assert!(!entry_renders(&[pair("SIM_SKIP_RENDER", "1")]), "explicit skip");
+        assert!(!entry_renders(&[pair("SIM_SKIP_RENDER", "submit")]), "submit needs no GPU result");
         // `@sim_render` then an explicit override, in lowering order.
         assert!(
             !entry_renders(&[pair("SIM_SKIP_RENDER", "0"), pair("SIM_SKIP_RENDER", "1")]),
@@ -5665,10 +5899,85 @@ mod tests {
         assert!(is_reload_lane(&mixed));
     }
 
+    /// The reload lane's exclusion from the bytecode image is a correctness
+    /// requirement, not a tuning choice: `check_hot_reload` derives the overlay
+    /// path from the running script's own path by replacing `main.lua` with
+    /// `incremental.lua` (`stone/engine/hot_reload.rock:87`), and
+    /// `read_chunk_source_dir` (`:43`) reads line 1 of a chunk AS TEXT to decide
+    /// whether it belongs to this game. Both questions are unanswerable against
+    /// a bytecode image, so a reload child booted from one would silently stop
+    /// watching -- a reload sim would pass every assertion and observe nothing.
+    #[test]
+    fn only_a_non_reload_worker_boots_from_the_bytecode_image() {
+        let dir = std::env::temp_dir().join(format!("rock-chunk-path-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let main = dir.join(rock_host::project::MAIN_LUA_FILENAME);
+        let bytecode = dir.join(rock_host::project::MAIN_BYTECODE_FILENAME);
+        std::fs::write(&main, "-- source").unwrap();
+
+        // No image yet: both lanes run the source file. The fallback is what
+        // makes the dump best-effort rather than a new failure mode.
+        assert_eq!(worker_chunk_path(&dir, false), main);
+        assert_eq!(worker_chunk_path(&dir, true), main);
+
+        std::fs::write(&bytecode, "-- image").unwrap();
+        assert_eq!(worker_chunk_path(&dir, false), bytecode);
+        assert_eq!(
+            worker_chunk_path(&dir, true),
+            main,
+            "a reload child must keep the source path it derives the overlay from"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// The job count is a safety bound, not a preference: it must never exceed
     /// what the machine can run, and `--update-snapshots` must pin to serial
     /// because it writes baseline files whose destinations are not proven
     /// unique before spawning.
+    #[test]
+    fn resolve_render_jobs_is_bounded_by_jobs_and_defaults_to_no_cap() {
+        assert_eq!(resolve_render_jobs(None, 12), 12);
+        assert_eq!(resolve_render_jobs(Some(4), 12), 4);
+        assert_eq!(resolve_render_jobs(Some(40), 12), 12);
+        assert_eq!(resolve_render_jobs(Some(0), 12), 1);
+        assert_eq!(resolve_render_jobs(Some(3), 1), 1);
+    }
+
+    #[test]
+    fn the_classed_pool_caps_live_rendering_tasks_and_runs_everything_once() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let renders: Vec<bool> = (0..40).map(|i| i % 3 == 0).collect();
+        let live = AtomicUsize::new(0);
+        let peak = AtomicUsize::new(0);
+        let results = run_bounded_classed(8, 2, &renders, |i| {
+            if renders[i] {
+                let now = live.fetch_add(1, Ordering::SeqCst) + 1;
+                peak.fetch_max(now, Ordering::SeqCst);
+                std::thread::sleep(std::time::Duration::from_millis(3));
+                live.fetch_sub(1, Ordering::SeqCst);
+            } else {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            Ok::<usize, anyhow::Error>(i)
+        });
+        let mut seen: Vec<usize> = results.iter().map(|(i, _)| *i).collect();
+        seen.sort_unstable();
+        assert_eq!(seen, (0..40).collect::<Vec<_>>(), "every task exactly once");
+        assert!(results.iter().all(|(i, r)| r.as_ref().map(|v| v == i).unwrap_or(false)));
+        assert!(peak.load(Ordering::SeqCst) <= 2, "peak live rendering {}", peak.load(Ordering::SeqCst));
+        assert!(peak.load(Ordering::SeqCst) >= 1);
+    }
+
+    #[test]
+    fn the_classed_pool_with_no_cap_is_the_plain_pool() {
+        let renders = vec![true; 5];
+        let results = run_bounded_classed(4, 4, &renders, |i| Ok::<usize, anyhow::Error>(i * 2));
+        let mut got: Vec<(usize, usize)> = results.into_iter().map(|(i, r)| (i, r.unwrap())).collect();
+        got.sort_unstable();
+        assert_eq!(got, (0..5).map(|i| (i, i * 2)).collect::<Vec<_>>());
+    }
+
     #[test]
     fn resolve_jobs_is_bounded_and_serial_for_snapshot_updates() {
         let cpus = std::thread::available_parallelism()
@@ -5848,21 +6157,60 @@ mod tests {
 
     #[test]
     fn the_boot_signature_excludes_only_runner_owned_keys() {
-        let a = env(&[("FRAME_COUNT", "90"), ("STONE_FX_OFF", "1")]);
-        let b = env(&[("FRAME_COUNT", "40"), ("STONE_FX_OFF", "1")]);
+        let a = env(&[("FRAME_COUNT", "90"), ("STONE_WINDOW", "1280x720")]);
+        let b = env(&[("FRAME_COUNT", "40"), ("STONE_WINDOW", "1280x720")]);
         assert_eq!(boot_signature(&a), boot_signature(&b), "the budget is per entry");
 
-        let c = env(&[("FRAME_COUNT", "90"), ("STONE_FX_OFF", "0")]);
+        let c = env(&[("FRAME_COUNT", "90"), ("STONE_WINDOW", "640x360")]);
         assert_ne!(boot_signature(&a), boot_signature(&c), "a boot-consumed value is not");
-        // SIM_DT and SIM_SKIP_RENDER are read once during boot, so they stay in.
+        // STONE_FX_OFF is a per-frame gate re-applied at every boundary, so
+        // an ablating entry and a plain one share a boot.
+        let g = env(&[("STONE_FX_OFF", "draw")]);
+        assert_eq!(boot_signature(&g), env(&[]), "ablation is per entry");
+        // SIM_DT is carried in the entry plan and re-applied by
+        // `sim_start_entry`, so two entries that disagree on it share a boot.
         let d = env(&[("SIM_DT", "0.1")]);
-        assert_eq!(boot_signature(&d), d);
+        let e = env(&[("SIM_DT", "0")]);
+        assert_eq!(boot_signature(&d), boot_signature(&e), "the fixed dt is per entry");
+        assert_eq!(boot_signature(&d), env(&[]), "and an undeclared one shares too");
+        // SIM_SKIP_RENDER decides the process's asset stub, so it stays in
+        // even though it is also carried per entry.
+        let f = env(&[("SIM_SKIP_RENDER", "0")]);
+        assert_eq!(boot_signature(&f), f);
+    }
+
+    #[test]
+    fn the_plan_carries_the_runner_owned_pairs_for_every_entry() {
+        // An entry that declares nothing still carries both keys: the empty
+        // dt is the engine default, and the skip flag is the baseline.
+        assert_eq!(
+            runner_owned_plan_pairs(&env(&[])),
+            env(&[("SIM_DT", ""), ("SIM_SKIP_RENDER", "1"), ("STONE_FX_OFF", "")])
+        );
+        assert_eq!(
+            runner_owned_plan_pairs(&env(&[
+                ("SIM_DT", "0.5"),
+                ("SIM_SKIP_RENDER", "0"),
+                ("STONE_FX_OFF", "draw,ui")
+            ])),
+            env(&[("SIM_DT", "0.5"), ("SIM_SKIP_RENDER", "0"), ("STONE_FX_OFF", "draw,ui")])
+        );
+        // Last-wins, the same reading `entry_renders` and the child's env use.
+        assert_eq!(
+            runner_owned_plan_pairs(&env(&[("SIM_SKIP_RENDER", "0"), ("SIM_SKIP_RENDER", "1")])),
+            env(&[("SIM_DT", ""), ("SIM_SKIP_RENDER", "1"), ("STONE_FX_OFF", "")])
+        );
+        // The raw value travels: `submit` must reach the engine as itself.
+        assert_eq!(
+            runner_owned_plan_pairs(&env(&[("SIM_SKIP_RENDER", "submit")])),
+            env(&[("SIM_DT", ""), ("SIM_SKIP_RENDER", "submit"), ("STONE_FX_OFF", "")])
+        );
     }
 
     #[test]
     fn the_boot_signature_is_declaration_order_independent() {
-        let a = env(&[("STONE_FX_OFF", "1"), ("SIM_DT", "0.1")]);
-        let b = env(&[("SIM_DT", "0.1"), ("STONE_FX_OFF", "1")]);
+        let a = env(&[("STONE_WINDOW", "1280x720"), ("SIM_DT", "0.1")]);
+        let b = env(&[("SIM_DT", "0.1"), ("STONE_WINDOW", "1280x720")]);
         assert_eq!(boot_signature(&a), boot_signature(&b), "same pairs, either spelling");
 
         // The sort is stable, so a duplicated key keeps last-wins order and a
@@ -5888,13 +6236,13 @@ mod tests {
         let wires = wires(&[
             ("plain_a", &[]),
             ("plain_b", &[("FRAME_COUNT", "40")]),
-            ("fx_off", &[("STONE_FX_OFF", "1")]),
+            ("windowed", &[("STONE_WINDOW", "1280x720")]),
             ("reload", &[("STONE_HOT_RELOAD", "1")]),
             ("outref", &[("SESSION", "$OUT/resume.json")]),
             ("machinery", &[("SIM_WORKER_ISOLATED", "1")]),
         ]);
         let (groups, isolated) = group_worker_specs(
-            &specs(&["plain_a", "plain_b", "fx_off", "reload", "outref", "machinery"]),
+            &specs(&["plain_a", "plain_b", "windowed", "reload", "outref", "machinery"]),
             &wires);
 
         // FRAME_COUNT is runner-owned, so plain_a and plain_b share a group;
@@ -6065,9 +6413,9 @@ mod tests {
     #[test]
     fn a_chain_groups_by_its_parts_and_disagreeing_parts_isolate() {
         let wires = wires(&[
-            ("head", &[("STONE_FX_OFF", "1")]),
-            ("tail_same", &[("STONE_FX_OFF", "1"), ("FRAME_COUNT", "30")]),
-            ("tail_other", &[("STONE_FX_OFF", "0")]),
+            ("head", &[("STONE_WINDOW", "1280x720")]),
+            ("tail_same", &[("STONE_WINDOW", "1280x720"), ("FRAME_COUNT", "30")]),
+            ("tail_other", &[("STONE_WINDOW", "640x360")]),
             ("plain", &[]),
         ]);
 

@@ -109,6 +109,8 @@ fn mag_audio_and_vfx_projections_are_not_world_image_state() {
     let names = sim_state_names("mag", 3);
     assert!(!names.is_empty(), "the Mag checkpoint census must examine a nonzero population");
     assert!(names.contains("pad_down"), "the Mag census must include effective input state: {names:?}");
+    assert!(names.contains("tally"), "the Mag census must include gameplay tally state: {names:?}");
+    assert!(!names.contains("tally_perf"), "the frame histogram must remain runner diagnostic state: {names:?}");
     for name in [
         "SFX_SPELL_FLAMESTRIKE_HIT",
         "SFX_CAST_LIGHTNING",
@@ -642,7 +644,7 @@ fn mag_current_progress_with_recovery(measures: i64, last_observed_at: i64) -> s
 }
 
 #[test]
-fn mag_full_recovery_replay_uses_each_process_wall_clock_sentinel() {
+fn mag_full_recovery_replay_uses_recorded_session_clock() {
     let (recorded, replayed) =
         mag_recovery_record_replay_arms(&mag_current_progress_with_recovery(10, 100));
     let recorded_at = mag_recovery_last_observed_at(&recorded);
@@ -758,7 +760,7 @@ fn record_mode_stamps_the_real_clock_not_engine_time() {
     );
 }
 
-// Adversarial control for the sentinel above: an implementation that simply
+// Adversarial control for the recorded-clock test above: an implementation that simply
 // FREEZES the clock in replay (always returns the header's SESSION_START_UNIX,
 // ignoring `time`) also satisfies "replay matches the recording" when both are
 // sampled at the same tick. This test distinguishes reconstruction from
@@ -768,7 +770,7 @@ fn record_mode_stamps_the_real_clock_not_engine_time() {
 // the later tick, while a frozen clock would report the same header value
 // (2000) at both.
 //
-// The sentinel's spawn (crypt, grid [25, 8]) has no recovery-reservoir prop
+// The recorded-clock test's spawn (crypt, grid [25, 8]) has no recovery-reservoir prop
 // nearby, so the reservoir reconciles once at boot load and never again --
 // fine for a single-tick sample, useless for observing advancement. Spawning
 // in "recovery-gauntlet" at grid [27, 27] (one tile from the reservoir prop

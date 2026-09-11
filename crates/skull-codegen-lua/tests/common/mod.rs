@@ -11,6 +11,21 @@ pub fn lower_test_ref(
     mid: bone_semantic::prelude::ModuleId,
     fid: comfy_la_arena::Idx<bone_semantic::hir::Function>,
 ) -> Result<(MirFunc, Arc<MonoInterner>), skull_parser::CompilerError> {
+    lower_test_ref_with_graph(ws, mid, fid).map(|(func, interner, _)| (func, interner))
+}
+
+/// [`lower_test_ref`] plus the instance graph it lowered through, for a test
+/// that needs the call edges as well as the body (the tail-call shape reads
+/// them through `skull_codegen_lua::callees_on_cycles`).
+#[allow(dead_code)]
+pub fn lower_test_ref_with_graph(
+    ws: &bone_semantic::inference::Workspace,
+    mid: bone_semantic::prelude::ModuleId,
+    fid: comfy_la_arena::Idx<bone_semantic::hir::Function>,
+) -> Result<
+    (MirFunc, Arc<MonoInterner>, instance_graph::InstanceGraph),
+    skull_parser::CompilerError,
+> {
     let root = FuncRef { module: mid, func: fid };
     let interner = Arc::new(MonoInterner::new());
     let graph = instance_graph::build_in(ws, vec![root], false, Arc::clone(&interner));
@@ -21,5 +36,20 @@ pub fn lower_test_ref(
         .get(&Instance::base(FuncRef { module: mid, func: fid }))
         .ok_or_else(|| skull_parser::CompilerError::new_no_location("no concrete plan for test root"))?;
     let func = lower_instance_with_plans(ws, &scx, plan, &concrete.plans)?;
-    Ok((func, interner))
+    Ok((func, interner, graph))
+}
+
+/// The functions on a call cycle in `graph`, spelled the way production spells
+/// it (`skull::mir_emit::recursive_callees`).
+#[allow(dead_code)]
+pub fn cycle_callees(
+    graph: &instance_graph::InstanceGraph,
+) -> bone_semantic::prelude::FxHashSet<FuncRef> {
+    skull_codegen_lua::callees_on_cycles(
+        graph
+            .contributions
+            .values()
+            .flat_map(|contribution| contribution.edges.iter())
+            .map(|edge| (edge.from.func, edge.to.func)),
+    )
 }

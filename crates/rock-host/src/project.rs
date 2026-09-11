@@ -380,6 +380,35 @@ pub fn lua_path_value() -> String {
 /// Filename of the assembled Lua output inside an output directory.
 pub const MAIN_LUA_FILENAME: &str = "main.lua";
 
+/// Filename of the precompiled LuaJIT bytecode image of `main.lua`, beside it
+/// in the same output directory. Optional everywhere: a consumer that cannot
+/// find it runs the source file instead.
+pub const MAIN_BYTECODE_FILENAME: &str = "main.ljbc";
+
+/// Build a `Command` that dumps `lua_file` to LuaJIT bytecode at
+/// `bytecode_file`.
+///
+/// `-g` keeps debug info, which is not optional: the dumped chunk carries the
+/// SOURCE file's chunkname and line table, so a runtime error raised from the
+/// bytecode image renders the same `main.lua:1234:` text a source run renders.
+/// LuaJIT's `-b` default is `-s` (strip), which would renumber every traceback
+/// a sim or a game can print.
+///
+/// `-b` consumes the rest of the argument list, so this cannot go through
+/// `build_luajit_command` (which puts the script first). `LUA_PATH` is the same
+/// value, and it is required rather than incidental: `-b` is implemented by
+/// `jit/bcsave.lua` under `<prefix>/share/luajit-2.1/`.
+pub fn build_luajit_bytecode_command(lua_file: &Path, bytecode_file: &Path) -> std::process::Command {
+    let mut cmd = std::process::Command::new(luajit_path());
+    cmd.arg("-b")
+        .arg("-g")
+        .arg(lua_file)
+        .arg(bytecode_file)
+        .env("LUA_PATH", lua_path_value())
+        .env(lib_path_var(), lib_path_with_inherited());
+    cmd
+}
+
 /// Default output directory for compiled games (and most things).
 pub const DEFAULT_OUTPUT_DIR: &str = "tmp";
 

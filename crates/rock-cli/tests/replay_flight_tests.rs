@@ -153,18 +153,26 @@ fn legacy_v11_without_source_remains_playable() {
     replay_stderr("bitgun", &log, &[]);
 }
 
+/// A current-format log whose build has moved WARNS and plays. Replay records
+/// inputs so a session can be re-measured; refusing every moved build cost far
+/// more runs than the drift costs accuracy, so the identity mismatch is named
+/// and playback continues (the desync checkpoints locate any actual drift).
 #[test]
-fn new_format_rejects_a_build_mismatch_before_the_first_game_tick() {
-    let (_dir, log) = record_with_env("bitgun", 15, &[("STONE_BUILD_ID", "buildAAA")]);
+fn new_format_warns_on_a_build_mismatch_and_still_plays() {
+    let (_dir, log) = record_with_env("bitgun", 15, &[]);
     let text = std::fs::read_to_string(&log).expect("read log");
-    let new_text = with_header(&text, "8", Some("1111111111111111"));
-    std::fs::write(&log, new_text).expect("rewrite build id");
-    let out = replay_raw("bitgun", &log, &[("STONE_BUILD_ID", "2222222222222222")]);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(!out.status.success(), "a mismatched exact artifact must be rejected\n{stderr}");
+    let recorded = text
+        .lines()
+        .find(|line| line.starts_with("build "))
+        .expect("recorded build id")
+        .to_string();
+    std::fs::write(&log, text.replacen(&recorded, "build 1111111111111111", 1))
+        .expect("rewrite build id");
+    let stderr = replay_stderr("bitgun", &log, &[]);
     assert!(
-        stderr.contains("build mismatch") && stderr.contains("before first game tick"),
-        "the rejection must happen before any game tick and name the mismatch\n{stderr}"
+        stderr.contains("built against 1111111111111111")
+            && stderr.contains("state may diverge"),
+        "the warning must name both identities and say what it costs\n{stderr}"
     );
 }
 
@@ -190,16 +198,20 @@ fn new_format_rejects_a_degenerate_build_id() {
     assert!(stderr.contains("non-degenerate build id"), "the rejection must name the degenerate identity\n{stderr}");
 }
 
+/// A reload marker means code changed mid-recording, so the log is not exactly
+/// reproducible -- but it is still the only record of that session's inputs.
+/// New-format logs now get the same warning-and-play treatment legacy ones
+/// always had, on the same one mechanism.
 #[test]
-fn new_format_rejects_a_reload_marker_as_unstable() {
+fn new_format_warns_on_a_reload_marker_and_still_plays() {
     let (_dir, log) = record_with_env("bitgun", 15, &[("STONE_RELOAD_AT_FRAME", "5")]);
     let text = std::fs::read_to_string(&log).expect("read log");
     assert!(text.lines().any(|line| line.starts_with("reload ")), "fixture must contain a reload marker");
-    std::fs::write(&log, with_header(&text, "8", Some("0123456789abcdef"))).expect("rewrite format");
-    let out = replay_raw("bitgun", &log, &[]);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(!out.status.success(), "a reload-marked new-format replay must be rejected\n{stderr}");
-    assert!(stderr.contains("reload marker") && stderr.contains("stable"), "the rejection must explain instability\n{stderr}");
+    let stderr = replay_stderr("bitgun", &log, &[]);
+    assert!(
+        stderr.contains("hot-reload marker") && stderr.to_lowercase().contains("determinism"),
+        "the warning must explain what the marker costs\n{stderr}"
+    );
 }
 
 #[test]

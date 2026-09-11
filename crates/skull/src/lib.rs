@@ -444,6 +444,38 @@ fn runtime_prelude() -> &'static str {
     //      ROCK_JIT_MCODE_KB overrides both, so the budget can be swept
     //      without a rebuild; this prelude runs at chunk load and beats any
     //      -O flag passed on the command line.
+    //      `hotexit` is raised from LuaJIT's default 10 to 100 because a side
+    //      trace that FAILS is never penalised or blacklisted
+    //      (lj_trace.c:596-606) and snap->count only saturates on success, so a
+    //      doomed exit is re-recorded ~245 times for nothing. MAG's hottest
+    //      exits are doomed: they die in asm_head_side and never appear as a
+    //      parent for any other trace. Measured -57% aborts and -22% mean frame
+    //      on two independent workloads (a scripted combat sim and a recorded
+    //      play session), both disjoint across interleaved arms.
+    //      NOT validated on a workload whose side traces mostly SUCCEED, where
+    //      a higher threshold would cost real compiled coverage; and 250 beat
+    //      100 on every metric without the curve flattening, so this is a
+    //      conservative pick rather than a tuned one. ROCK_JIT_HOTEXIT
+    //      overrides it, so a regression reverts without a rebuild.
+    //      `maxtrace` is 32000 (LuaJIT default 1000, previously 4000 here).
+    //      A MAG combat session compiles ~24,600 traces; at 4000 the trace
+    //      array filled six times per benchmark run and every fill flushed
+    //      the whole cache -- all compiled code, every side-exit counter and
+    //      every abort penalty -- so the working set was re-recorded from
+    //      scratch six times. At 32000 the benchmark never flushes: aborts
+    //      11.1-11.5k -> 3.9k, mean frame 7.1 -> 4.7-5.1 ms, frames over
+    //      16.7 ms 37-39 -> 3-4, two interleaved pairs, peak RSS unchanged.
+    //      The trace array is 16 bytes per slot, so the fixed cost is 512 KB.
+    //      ROCK_JIT_MAXTRACE overrides it. `maxirconst` stays at LuaJIT's 500
+    //      (ROCK_JIT_MAXIRCONST): every "trace too long" in the census is the
+    //      constant limit, not maxrecord, but raising it only converts the
+    //      aborts into tail-call unroll aborts at the same starts.
+    //      `hotloop` and `loopunroll` stay at LuaJIT's defaults (56, 15) but
+    //      are exposed as ROCK_JIT_HOTLOOP / ROCK_JIT_LOOPUNROLL: MAG's inner
+    //      loops (glyphs per string, points per ribbon) run fewer than 56
+    //      iterations, so they never become loop traces and get unrolled by
+    //      whichever function-entry trace reaches them, which is where the
+    //      "trace too long" aborts come from. Sweepable without a rebuild.
     //   2. 32-bit RNG (stdlib `random_*` inline(lua) bodies call
     //      `__rock_rng_next`/`__rock_rng_seed` by name); seeded from
     //      ROCK_TEST_SEED for deterministic test runs.
@@ -475,7 +507,7 @@ fn runtime_prelude() -> &'static str {
 }
 
 const PRELUDE_TEMPLATE: &str =
-    r#"if jit and jit.opt then local __mc = tonumber(os.getenv("ROCK_JIT_MCODE_KB") or "") or (jit.arch == "arm64" and 16384 or 65536) jit.opt.start("maxmcode=" .. __mc, "sizemcode=" .. __mc, "maxtrace=4000", "maxrecord=32000", "maxsnap=4000") end
+    r#"if jit and jit.opt then local __mc = tonumber(os.getenv("ROCK_JIT_MCODE_KB") or "") or (jit.arch == "arm64" and 16384 or 65536) local __he = tonumber(os.getenv("ROCK_JIT_HOTEXIT") or "") or 100 local __hl = tonumber(os.getenv("ROCK_JIT_HOTLOOP") or "") or 56 local __lu = tonumber(os.getenv("ROCK_JIT_LOOPUNROLL") or "") or 15 local __mt = tonumber(os.getenv("ROCK_JIT_MAXTRACE") or "") or 32000 local __mk = tonumber(os.getenv("ROCK_JIT_MAXIRCONST") or "") or 500 jit.opt.start("maxmcode=" .. __mc, "sizemcode=" .. __mc, "maxtrace=" .. __mt, "maxrecord=32000", "maxsnap=4000", "maxirconst=" .. __mk, "hotexit=" .. __he, "hotloop=" .. __hl, "loopunroll=" .. __lu) end
 if not _G.ffi then _G.ffi = require("ffi") end
 if not _G.__ROCK_C_STRUCT then _G.__ROCK_C_STRUCT = {} end
 if not _G.__ROCK_TYPE_TABLE then _G.__ROCK_TYPE_TABLE = {} end
@@ -1837,10 +1869,63 @@ mod tests {
         compile_source(src).unwrap_or_else(|e| panic!("skull compile failed: {}", e.message))
     }
 
+    /// The budget itself is tuning and moves with measurement, so this pins the
+    /// shape and the floor rather than a literal. LuaJIT's own defaults (512 KB
+    /// total, 32 KB blocks) flush the trace arena thousands of times in a real
+    /// MAG session; 8 MB still flushed it 31 times in 60 s of play. Neither
+    /// architecture may regress below that. See docs/trace-pressure-work-plan.md.
     #[test]
     fn runtime_prelude_keeps_the_mag_trace_working_set() {
         let prelude = super::runtime_prelude();
-        assert!(prelude.contains("maxmcode=8192\", \"sizemcode=8192"));
+        for knob in ["\"maxtrace=\" .. __mt", "maxrecord=32000", "maxsnap=4000", "\"maxirconst=\" .. __mk"] {
+            assert!(prelude.contains(knob), "runtime prelude stopped setting {knob}");
+        }
+        // One block, not several: a trace must fit a single `sizemcode` area,
+        // and on arm64 macOS dyld only leaves room for the first one near the
+        // VM. Driving both from one value is what guarantees that.
+        assert!(
+            prelude.contains("\"maxmcode=\" .. __mc, \"sizemcode=\" .. __mc"),
+            "mcode max and size must come from one value"
+        );
+        assert!(
+            prelude.contains("ROCK_JIT_MCODE_KB"),
+            "the mcode budget must stay sweepable without a rebuild"
+        );
+        // A doomed side trace is never blacklisted, so LuaJIT's default 10
+        // re-records it ~245 times for nothing. Pin the floor and the override,
+        // not the value: the value is a measured pick that may move again.
+        assert!(
+            prelude.contains("ROCK_JIT_HOTEXIT"),
+            "the hot-exit threshold must stay sweepable without a rebuild"
+        );
+        let hotexit: u32 = prelude
+            .split("ROCK_JIT_HOTEXIT\") or \"\") or ")
+            .nth(1)
+            .and_then(|rest| rest.split_whitespace().next())
+            .expect("prelude no longer defaults the hot-exit threshold")
+            .parse()
+            .expect("hot-exit default is not a literal count");
+        assert!(
+            hotexit > 10,
+            "hot-exit default {hotexit} is back at or below LuaJIT's, which re-records doomed exits"
+        );
+        let picked = prelude
+            .split("jit.arch == \"arm64\" and ")
+            .nth(1)
+            .expect("prelude no longer selects an mcode budget by architecture");
+        let (arm64, rest) = picked
+            .split_once(" or ")
+            .expect("arch-selected mcode budget is not an `arm64 and A or B` pick");
+        let x64 = rest
+            .split(')')
+            .next()
+            .expect("arch-selected mcode budget has no x64 arm");
+        for (arch, kb) in [("arm64", arm64.trim()), ("x64", x64.trim())] {
+            let kb: u32 = kb
+                .parse()
+                .unwrap_or_else(|_| panic!("{arch} mcode budget is not a literal KB count: {kb:?}"));
+            assert!(kb >= 8192, "{arch} mcode budget {kb} KB is below the 8 MB floor");
+        }
     }
 
     #[test]
