@@ -4582,6 +4582,29 @@ fn compute_programs(
         .collect()
 }
 
+/// Every function that lies on a call cycle, read off the whole-program instance
+/// graph and projected onto declarations.
+///
+/// Consumed only by `ROCK_SKULL_TAIL_CALLS=cycles`, which keeps the
+/// `do return f(...) end` shape exactly at these callees so an unbounded
+/// recursion still gets tail-call elimination. Projecting instances onto their
+/// declaration MERGES nodes, which can only add cycles, never remove one, so a
+/// function that really recurses is never missed. Every edge kind counts,
+/// `EdgeKind::FnValue` included: a function taken as a value is reached by a
+/// call the direct-call edges cannot see, and its taker's edge is what closes
+/// the cycle through it.
+fn recursive_callees(
+    graph: &crate::instance_graph::InstanceGraph,
+) -> FxHashSet<skull_mir::mir::FuncRef> {
+    skull_codegen_lua::callees_on_cycles(
+        graph
+            .contributions
+            .values()
+            .flat_map(|contribution| contribution.edges.iter())
+            .map(|edge| (edge.from.func, edge.to.func)),
+    )
+}
+
 fn realize_shader_view(
     ws: &Workspace,
     graph: &crate::instance_graph::InstanceGraph,
@@ -6584,7 +6607,8 @@ fn emit_full_in_with_mutation(
     let (shader_view, shader_registrations) = shader_result?;
     scx.adopt_warmed_abi(abi_scx);
     let state_slots = lua_global_state_slots(ws, &scx)?.into_iter().collect();
-    let cg = CodegenCtx::new_with_state(ws, state_slots);
+    let mut cg = CodegenCtx::new_with_state(ws, state_slots);
+    cg.set_recursive_callees(recursive_callees(&graph));
     let setup_lanes = SetupLaneAttribution {
         cpu_population: cpu_lane.population,
         shader_population: shader_lane.population,
