@@ -209,10 +209,18 @@ pub fn parse_sim_chain(name: &str) -> Vec<&str> {
 /// `rock_host::project::lib_path_value` puts on the library search path.
 fn sim_output_dir() -> Result<TempDir> {
     fs_err::create_dir_all("tmp").context("creating tmp/ for sim output")?;
-    tempfile::Builder::new()
+    let mut dir = tempfile::Builder::new()
         .prefix("sim-")
         .tempdir_in("tmp")
-        .context("creating sim output directory")
+        .context("creating sim output directory")?;
+    // A JIT abort census names `main.lua:<line>`, which is unreadable once the
+    // build that produced it is gone. Retaining it is opt-in because every
+    // ordinary sim run would otherwise leave a 20MB directory behind.
+    if std::env::var_os("ROCK_SIM_KEEP_BUILD").is_some() {
+        dir.disable_cleanup(true);
+        ::log::info!(target: "SIM", "retaining sim build at {}", dir.path().display());
+    }
+    Ok(dir)
 }
 
 fn sim_spawn_barrier() {

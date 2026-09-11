@@ -1795,6 +1795,33 @@ impl Builder<'_> {
             self.cur = join;
             return Ok(cells.iter().map(|c| self.emit_cur(Inst::Load(*c))).collect());
         }
+        // A shape with no nullable and no enum child anywhere is a plain key
+        // walk: the paths come from the one rule the uniform packer reads a
+        // global with too (`boxed_leaf_paths`), so the two readers cannot drift.
+        // Each intermediate box is loaded ONCE and its children read off it
+        // (a whole-value read wants every leaf anyway); the packer walks the
+        // same paths but re-reads the parent per leaf, keeping one leaf live.
+        if self.shape_is_plain_keys(shape) {
+            let paths = self.boxed_leaf_paths(shape)?;
+            let mut loaded: Vec<(Vec<Ustr>, Idx<Inst>)> = Vec::new();
+            let mut out = Vec::with_capacity(paths.len());
+            for path in paths {
+                let mut cur = v;
+                for depth in 1..=path.len() {
+                    let prefix = &path[..depth];
+                    if let Some((_, inst)) = loaded.iter().find(|(p, _)| p.as_slice() == prefix) {
+                        cur = *inst;
+                        continue;
+                    }
+                    cur = self.emit_cur(Inst::Field { base: cur, field: path[depth - 1] });
+                    if depth < path.len() {
+                        loaded.push((prefix.to_vec(), cur));
+                    }
+                }
+                out.push(cur);
+            }
+            return Ok(out);
+        }
         // A leaf-table box stores one key per leaf, so the split IS the key
         // reads -- the exact inverse of the `<Name>_lct` ctor, including the
         // presence key at a nullable child's own name.
@@ -1861,6 +1888,63 @@ impl Builder<'_> {
             }
         }
         Ok(out)
+    }
+
+    /// Whether every leaf of `shape` is reached by a plain key walk: no
+    /// nullable child (presence branch) and no flat enum child (tag spread)
+    /// anywhere.
+    pub(crate) fn shape_is_plain_keys(&self, shape: &ValueShape) -> bool {
+        if shape.nullable || EnumPlan::for_name(self.ws, shape.name).is_some() {
+            return false;
+        }
+        shape.fields.iter().all(|(_, fs)| match fs {
+            FieldShape::Prim => true,
+            FieldShape::Nested(sub) => self.shape_is_plain_keys(sub),
+        })
+    }
+
+    /// The key path from a box of `shape` (no nullable child anywhere) to each
+    /// of its leaves, in `repr_to_leaves` order. A leaf-table box keys every
+    /// leaf by its dotted path at the top level; cdata and GC boxes nest, and
+    /// a nested child consults its own storage, so a leaf-table child inside a
+    /// GC parent keys by its dotted path under the parent's field.
+    pub(crate) fn boxed_leaf_paths(
+        &self,
+        shape: &ValueShape,
+    ) -> Result<Vec<Vec<Ustr>>, CompilerError> {
+        let mut out = Vec::new();
+        self.boxed_leaf_paths_into(shape, &mut Vec::new(), &mut out)?;
+        Ok(out)
+    }
+
+    fn boxed_leaf_paths_into(
+        &self,
+        shape: &ValueShape,
+        prefix: &mut Vec<Ustr>,
+        out: &mut Vec<Vec<Ustr>>,
+    ) -> Result<(), CompilerError> {
+        let storage = self
+            .scx
+            .rep_arena()
+            .nominal_value_storage_required(self.ws, self.scx.target, shape.name)
+            .map_err(|e| self.gap_here(e.message))?;
+        if storage == ValueStorage::LeafTable {
+            for path in value_leaf_paths(shape) {
+                let mut full = prefix.clone();
+                full.push(path);
+                out.push(full);
+            }
+            return Ok(());
+        }
+        for (fname, fs) in &shape.fields {
+            prefix.push(*fname);
+            match fs {
+                FieldShape::Prim => out.push(prefix.clone()),
+                FieldShape::Nested(sub) => self.boxed_leaf_paths_into(sub, prefix, out)?,
+            }
+            prefix.pop();
+        }
+        Ok(())
     }
 
     /// A whole-value read of value struct `name` out of a BOXED place (struct

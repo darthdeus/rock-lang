@@ -367,9 +367,24 @@ enum ExternRet {
     /// A `value` struct returned BY VALUE; the C ABI is then
     /// `void f(T* out, ..)`, so the wrapper bridges an out-param.
     ValueStruct(String),
+    /// Rock `bool`. The C side declares the return `uint8_t`, not `bool`, so
+    /// the wrapper turns the byte into a Lua boolean -- the same coercion
+    /// principle as `Int`, applied to the other representation the declaration
+    /// promises but the C ABI does not hand back directly.
+    ///
+    /// The reason the `cdef` says `uint8_t` is LuaJIT, not the ABI: recording a
+    /// `bool`-returning C call needs a Lua frame INSIDE the trace above the call
+    /// (`crec_call` -> `crec_snap_caller`, `lj_crecord.c`), and a trace rooted
+    /// at this one-line wrapper has none, so it aborts `NYI: unsupported C
+    /// function type` every time the wrapper itself becomes a trace root. A
+    /// `uint8_t` return records unconditionally. Rust `extern "C" fn -> bool`
+    /// already returns one byte 0/1 in that register, so only the `cdef` and
+    /// this arm move -- and they MUST move together: `~= 0` over a `bool` cdef
+    /// compares a Lua boolean to 0 and is always true.
+    Bool,
     /// Everything else crosses as the callee produced it: LuaJIT already hands
-    /// back a Lua value for `bool`, `float`/`double` and a string, and a
-    /// pointer return is declared `Ptr<T>` and stays a cdata by design.
+    /// back a Lua value for `float`/`double` and a string, and a pointer return
+    /// is declared `Ptr<T>` and stays a cdata by design.
     AsIs,
 }
 
@@ -435,6 +450,7 @@ fn extern_ret(
         let (name, params) = match arena.get(cur) {
             MonoTy::Int => return Ok(ExternRet::Int),
             MonoTy::Uint => return Ok(ExternRet::Uint),
+            MonoTy::Bool => return Ok(ExternRet::Bool),
             MonoTy::App { ctor: MonoCtor::Nominal(name), params } => (*name, params.clone()),
             _ => return Ok(ExternRet::AsIs),
         };
@@ -4566,6 +4582,29 @@ fn compute_programs(
         .collect()
 }
 
+/// Every function that lies on a call cycle, read off the whole-program instance
+/// graph and projected onto declarations.
+///
+/// Consumed only by `ROCK_SKULL_TAIL_CALLS=cycles`, which keeps the
+/// `do return f(...) end` shape exactly at these callees so an unbounded
+/// recursion still gets tail-call elimination. Projecting instances onto their
+/// declaration MERGES nodes, which can only add cycles, never remove one, so a
+/// function that really recurses is never missed. Every edge kind counts,
+/// `EdgeKind::FnValue` included: a function taken as a value is reached by a
+/// call the direct-call edges cannot see, and its taker's edge is what closes
+/// the cycle through it.
+fn recursive_callees(
+    graph: &crate::instance_graph::InstanceGraph,
+) -> FxHashSet<skull_mir::mir::FuncRef> {
+    skull_codegen_lua::callees_on_cycles(
+        graph
+            .contributions
+            .values()
+            .flat_map(|contribution| contribution.edges.iter())
+            .map(|edge| (edge.from.func, edge.to.func)),
+    )
+}
+
 fn realize_shader_view(
     ws: &Workspace,
     graph: &crate::instance_graph::InstanceGraph,
@@ -5312,6 +5351,7 @@ fn assemble(
                         }
                         ExternRet::Int => format!("  return tonumber({lib}.{nm}({params}))"),
                         ExternRet::Uint => format!("  return tonumber({lib}.{nm}({params}))"),
+                        ExternRet::Bool => format!("  return {lib}.{nm}({params}) ~= 0"),
                         ExternRet::AsIs => format!("  return {lib}.{nm}({params})"),
                         ExternRet::None => format!("  {lib}.{nm}({params})"),
                     };
@@ -6567,7 +6607,8 @@ fn emit_full_in_with_mutation(
     let (shader_view, shader_registrations) = shader_result?;
     scx.adopt_warmed_abi(abi_scx);
     let state_slots = lua_global_state_slots(ws, &scx)?.into_iter().collect();
-    let cg = CodegenCtx::new_with_state(ws, state_slots);
+    let mut cg = CodegenCtx::new_with_state(ws, state_slots);
+    cg.set_recursive_callees(recursive_callees(&graph));
     let setup_lanes = SetupLaneAttribution {
         cpu_population: cpu_lane.population,
         shader_population: shader_lane.population,
