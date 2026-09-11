@@ -1216,7 +1216,10 @@ pub fn global_callee_binding_forced() -> bool {
     FORCE_GLOBAL_CALLEE_BINDING.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// The shipped emitted shape. See `docs/backends.md`.
+/// The shipped emitted shape. See **Callee binding** in `docs/backends.md`:
+/// the measurement argues for [`CalleeBindingMode::Upvalue`], but making it the
+/// default is an open AUTHOR DECISION -- it splits the emitted shape between
+/// `rock stone` and everything else, and rewrites 68 emitted-text assertions.
 pub const DEFAULT_CALLEE_BINDING: CalleeBindingMode = CalleeBindingMode::Global;
 
 /// LuaJIT's hard limit on upvalues per function prototype (`LJ_MAX_UPVAL`).

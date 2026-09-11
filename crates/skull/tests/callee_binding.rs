@@ -9,7 +9,7 @@
 use skull::mir_emit::{emit_full_with_callee_binding, emit_overlay};
 use skull_codegen_lua::CalleeBindingMode;
 
-use crate::common::ws_with_stdlib;
+use crate::common::{function_body, ws_with_stdlib};
 
 /// A program whose call graph has a chain (`top` -> `mid` -> `leaf`), a
 /// mutually recursive pair, and a leaf with no callees at all.
@@ -89,6 +89,37 @@ fn binding_lines_are_ordered_callees_before_callers() {
         mid_bind < top_bind,
         "`mid` must bind before `top` captures it"
     );
+}
+
+/// The emitted BODY is byte-identical in both shapes: the factory's parameters
+/// are named exactly like the globals they replace, so no call site is
+/// rewritten and a test that asserts body shape reads the same either way.
+/// `common::function_body` reads both, which is what lets the suite run under
+/// the switch.
+#[test]
+fn the_bound_body_is_byte_identical_to_the_unbound_one() {
+    let ws = ws_with_stdlib(SRC);
+    let mid = skull::user_module_id(&ws).unwrap();
+    let global = emit_full_with_callee_binding(&ws, mid, CalleeBindingMode::Global)
+        .expect("emit_full")
+        .0
+        .lua;
+    let bound = emit_full_with_callee_binding(&ws, mid, CalleeBindingMode::Upvalue)
+        .expect("emit_full")
+        .0
+        .lua;
+    for name in ["mid_int_ret_int", "top_int_ret_int"] {
+        let unbound_body = function_body(&global, name);
+        let bound_body = function_body(&bound, name);
+        let inner = unbound_body
+            .strip_prefix(&format!("function {name}"))
+            .expect("unbound definition")
+            .trim_end_matches('\n');
+        assert!(
+            bound_body.contains(inner),
+            "`{name}`'s body changed under binding:\n--- unbound ---\n{unbound_body}\n--- bound ---\n{bound_body}"
+        );
+    }
 }
 
 /// A mutually recursive pair shares one call-graph component, so neither leg is
