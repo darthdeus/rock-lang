@@ -2402,8 +2402,9 @@ fn writes_live(buffered: bool) -> bool {
 /// republished by `sim_start_entry` at every boundary. `SIM_DT` travels the
 /// same way, with an explicit empty value for an entry that declares nothing
 /// so the engine default is re-applied rather than a predecessor's value.
-/// `SIM_SKIP_RENDER` is read ONCE during boot (`runner_load_sim_entries`), so
-/// it is still boot signature until the worker applies it per entry.
+/// `SIM_SKIP_RENDER` is ALSO carried per entry (`runner_owned_plan_pairs`)
+/// and re-applied at every boundary, but it stays boot signature because
+/// `entry_renders` decides `STONE_ASSET_STUB` per process.
 ///
 /// `ROCK_MASK_WALL_CLOCK` and `ROCK_DETERMINISTIC_IDS` are owned outright: the
 /// runner publishes its own value for both after `preset_env`, so a declared one
@@ -2543,6 +2544,31 @@ fn boot_signature(env_pairs: &[(String, String)]) -> Vec<(String, String)> {
         .collect();
     sig.sort_by(|a, b| a.0.cmp(&b.0));
     sig
+}
+
+/// The runner-owned pairs carried in the entry plan for EVERY entry, so that
+/// `sim_start_entry` re-applies each at the boundary and an entry inherits
+/// nothing from its predecessor.
+///
+/// `SIM_DT` travels with an explicit empty value standing for the engine
+/// default: an entry that declares nothing must not run at the fixed dt its
+/// predecessor declared. `SIM_SKIP_RENDER` travels as the value the entry
+/// boots with (`entry_renders`, the one oracle): it is still boot signature,
+/// so two entries in one worker agree on it, but the global is
+/// `realization=runner_rebind` and the boundary restore never touches it, so
+/// a fixture that exits with the flag flipped would otherwise hand that value
+/// to the next entry.
+fn runner_owned_plan_pairs(env: &[(String, String)]) -> Vec<(String, String)> {
+    let sim_dt = effective_env(env)
+        .into_iter()
+        .find(|(k, _)| k == "SIM_DT")
+        .map(|(_, v)| v)
+        .unwrap_or_default();
+    let skip_render = if entry_renders(env) { "0" } else { "1" };
+    vec![
+        ("SIM_DT".to_string(), sim_dt),
+        ("SIM_SKIP_RENDER".to_string(), skip_render.to_string()),
+    ]
 }
 
 /// The pairs this part publishes through setenv when its entry starts, with
@@ -3109,16 +3135,9 @@ fn run_worker(
         for (k, v) in per_entry_env_pairs(p) {
             write!(plan_file, "\t{k}\t{v}")?;
         }
-        // Runner-owned, so it is carried for EVERY entry with an explicit
-        // empty value standing for the engine default: `sim_start_entry`
-        // re-applies it at each boundary, and an entry that declares nothing
-        // must not inherit the fixed dt its predecessor declared.
-        let sim_dt = effective_env(&p.env)
-            .into_iter()
-            .find(|(k, _)| k == "SIM_DT")
-            .map(|(_, v)| v)
-            .unwrap_or_default();
-        write!(plan_file, "\tSIM_DT\t{sim_dt}")?;
+        for (k, v) in runner_owned_plan_pairs(&p.env) {
+            write!(plan_file, "\t{k}\t{v}")?;
+        }
         writeln!(plan_file)?;
     }
     plan_file.flush()?;
@@ -5966,9 +5985,29 @@ mod tests {
         let e = env(&[("SIM_DT", "0")]);
         assert_eq!(boot_signature(&d), boot_signature(&e), "the fixed dt is per entry");
         assert_eq!(boot_signature(&d), env(&[]), "and an undeclared one shares too");
-        // SIM_SKIP_RENDER is read once during boot, so it stays in.
+        // SIM_SKIP_RENDER decides the process's asset stub, so it stays in
+        // even though it is also carried per entry.
         let f = env(&[("SIM_SKIP_RENDER", "0")]);
         assert_eq!(boot_signature(&f), f);
+    }
+
+    #[test]
+    fn the_plan_carries_the_runner_owned_pairs_for_every_entry() {
+        // An entry that declares nothing still carries both keys: the empty
+        // dt is the engine default, and the skip flag is the baseline.
+        assert_eq!(
+            runner_owned_plan_pairs(&env(&[])),
+            env(&[("SIM_DT", ""), ("SIM_SKIP_RENDER", "1")])
+        );
+        assert_eq!(
+            runner_owned_plan_pairs(&env(&[("SIM_DT", "0.5"), ("SIM_SKIP_RENDER", "0")])),
+            env(&[("SIM_DT", "0.5"), ("SIM_SKIP_RENDER", "0")])
+        );
+        // Last-wins, the same reading `entry_renders` and the child's env use.
+        assert_eq!(
+            runner_owned_plan_pairs(&env(&[("SIM_SKIP_RENDER", "0"), ("SIM_SKIP_RENDER", "1")])),
+            env(&[("SIM_DT", ""), ("SIM_SKIP_RENDER", "1")])
+        );
     }
 
     #[test]
