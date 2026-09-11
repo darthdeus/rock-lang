@@ -670,6 +670,7 @@ pub fn do_run_named_sims(
     quiet: bool,
     update_snapshots: bool,
     jobs: Option<usize>,
+    render_jobs: Option<usize>,
     mode: SimExecMode,
 ) -> Result<()> {
     // One name: identical to the classic single-run path (full detail). There
@@ -702,6 +703,7 @@ pub fn do_run_named_sims(
         quiet,
         update_snapshots,
         jobs,
+        render_jobs,
         mode,
         &recorder,
     );
@@ -717,6 +719,7 @@ fn do_run_named_sims_recorded(
     quiet: bool,
     update_snapshots: bool,
     jobs: Option<usize>,
+    render_jobs: Option<usize>,
     mode: SimExecMode,
     recorder: &SimRunRecorder,
 ) -> Result<()> {
@@ -759,6 +762,7 @@ fn do_run_named_sims_recorded(
             quiet,
             update_snapshots,
             jobs,
+            render_jobs,
             &mut stone,
             Some(recorder),
             Some(&entry_ids),
@@ -947,12 +951,84 @@ where
     collected.into_inner().expect("no lane panicked while holding the results lock")
 }
 
+/// `run_bounded` with a second cap: at most `render_jobs` of the `jobs`
+/// threads may be inside a task whose `renders[i]` is true at any moment.
+///
+/// Rendering tasks are handed out in index order and non-rendering ones fill
+/// every slot the cap leaves free, so a full pool stays full whenever there
+/// is non-rendering work; a thread only waits when the cap is reached AND
+/// nothing else remains. With `render_jobs >= jobs` the schedule is the plain
+/// pool's, task order included, so the uncapped run is not a second policy.
+fn run_bounded_classed<T, F>(
+    jobs: usize,
+    render_jobs: usize,
+    renders: &[bool],
+    task: F,
+) -> Vec<(usize, Result<T>)>
+where
+    F: Fn(usize) -> Result<T> + Sync,
+    T: Send,
+{
+    let n = renders.len();
+    if jobs <= 1 || n <= 1 || render_jobs >= jobs {
+        return run_bounded(jobs, n, task);
+    }
+    struct Queue {
+        rendering: std::collections::VecDeque<usize>,
+        other: std::collections::VecDeque<usize>,
+        live_rendering: usize,
+    }
+    let queue = Mutex::new(Queue {
+        rendering: (0..n).filter(|&i| renders[i]).collect(),
+        other: (0..n).filter(|&i| !renders[i]).collect(),
+        live_rendering: 0,
+    });
+    let freed = std::sync::Condvar::new();
+    let collected: Mutex<Vec<(usize, Result<T>)>> = Mutex::new(Vec::new());
+    let lanes = jobs.min(n);
+    std::thread::scope(|scope| {
+        for _ in 0..lanes {
+            scope.spawn(|| loop {
+                let picked = {
+                    let mut q = queue.lock().unwrap();
+                    loop {
+                        if q.live_rendering < render_jobs {
+                            if let Some(i) = q.rendering.pop_front() {
+                                q.live_rendering += 1;
+                                break Some((i, true));
+                            }
+                        }
+                        if let Some(i) = q.other.pop_front() {
+                            break Some((i, false));
+                        }
+                        if q.rendering.is_empty() {
+                            break None;
+                        }
+                        // Only rendering work is left and the cap is reached:
+                        // wait for a rendering slot, never spin.
+                        q = freed.wait(q).unwrap();
+                    }
+                };
+                let Some((i, rendering)) = picked else { break };
+                let r = task(i);
+                collected.lock().unwrap().push((i, r));
+                if rendering {
+                    queue.lock().unwrap().live_rendering -= 1;
+                    freed.notify_all();
+                }
+            });
+        }
+    });
+    collected.into_inner().expect("no lane panicked while holding the results lock")
+}
+
 pub fn do_run_all_sims(
     backend: crate::Backend,
     project: &str,
     quiet: bool,
     update_snapshots: bool,
     jobs: Option<usize>,
+    render_jobs: Option<usize>,
     mode: SimExecMode,
 ) -> Result<()> {
     rock_host::project::ensure_workspace_root()?;
@@ -970,6 +1046,7 @@ pub fn do_run_all_sims(
         quiet,
         update_snapshots,
         jobs,
+        render_jobs,
         mode,
         &recorder,
     );
@@ -984,6 +1061,7 @@ fn do_run_all_sims_recorded(
     quiet: bool,
     update_snapshots: bool,
     jobs: Option<usize>,
+    render_jobs: Option<usize>,
     mode: SimExecMode,
     recorder: &SimRunRecorder,
 ) -> Result<()> {
@@ -1044,6 +1122,7 @@ fn do_run_all_sims_recorded(
             quiet,
             update_snapshots,
             jobs,
+            render_jobs,
             &mut stone,
             Some(recorder),
             Some(&entry_ids),
@@ -1841,6 +1920,7 @@ fn run_specs_worker_mode(
     quiet: bool,
     update_snapshots: bool,
     jobs: Option<usize>,
+    render_jobs: Option<usize>,
     stone: &mut crate::skull_backend::SkullStone,
     recorder: Option<&SimRunRecorder>,
     entry_ids: Option<&[u64]>,
@@ -1978,8 +2058,29 @@ fn run_specs_worker_mode(
         .chain(poolable.iter().map(|(i, _)| Lane::Isolated(*i)))
         .collect();
 
+    let render_jobs = resolve_render_jobs(render_jobs, jobs);
+    let spec_renders = |i: usize| {
+        parse_sim_chain(&specs[i])
+            .iter()
+            .any(|p| entry_renders(env_by_wire.get(*p).map_or(&[][..], |v| v)))
+    };
+    let work_renders: Vec<bool> = work
+        .iter()
+        .map(|l| match l {
+            Lane::Worker(lane) => lane.iter().any(|&i| spec_renders(i)),
+            Lane::Isolated(i) => spec_renders(*i),
+        })
+        .collect();
+    if !quiet && render_jobs < jobs {
+        let rendering = work_renders.iter().filter(|r| **r).count();
+        println!(
+            "[sim] worker: at most {render_jobs} of {jobs} lanes render at once ({rendering} rendering lanes of {})",
+            work.len()
+        );
+    }
+
     let mut collected: Vec<(usize, SimSummary)> = Vec::new();
-    for (_, r) in run_bounded(jobs, work.len(), |w| match work[w] {
+    for (_, r) in run_bounded_classed(jobs, render_jobs, &work_renders, |w| match work[w] {
         Lane::Worker(lane) => {
             let lane_specs: Vec<String> = lane.iter().map(|&i| specs[i].clone()).collect();
             // `run_specs_recovering` is positional, so its results line up with
@@ -2313,6 +2414,16 @@ fn entry_is_reload_lane(
 /// is not tuned for the best observed number and should only be raised from a
 /// measurement on more than one machine (`docs/sim-speed-plan.md`).
 const DEFAULT_SIM_JOBS: usize = 4;
+
+/// Resolve the cap on concurrently RENDERING children. A rendering child
+/// holds real image pixels and the scene target set on the GPU (a few GB on
+/// the measured host, against well under one for a non-rendering child), so
+/// on a card with a fixed budget the number of them alive at once is what
+/// overflows, not the job count. `None` is no separate cap; anything
+/// requested is clamped into `1..=jobs`.
+fn resolve_render_jobs(requested: Option<usize>, jobs: usize) -> usize {
+    requested.unwrap_or(jobs).clamp(1, jobs.max(1))
+}
 
 /// Resolve the requested job count. `--update-snapshots` pins to serial: it
 /// rewrites baseline files, and the runner does not yet prove every
@@ -5804,6 +5915,49 @@ mod tests {
     /// what the machine can run, and `--update-snapshots` must pin to serial
     /// because it writes baseline files whose destinations are not proven
     /// unique before spawning.
+    #[test]
+    fn resolve_render_jobs_is_bounded_by_jobs_and_defaults_to_no_cap() {
+        assert_eq!(resolve_render_jobs(None, 12), 12);
+        assert_eq!(resolve_render_jobs(Some(4), 12), 4);
+        assert_eq!(resolve_render_jobs(Some(40), 12), 12);
+        assert_eq!(resolve_render_jobs(Some(0), 12), 1);
+        assert_eq!(resolve_render_jobs(Some(3), 1), 1);
+    }
+
+    #[test]
+    fn the_classed_pool_caps_live_rendering_tasks_and_runs_everything_once() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let renders: Vec<bool> = (0..40).map(|i| i % 3 == 0).collect();
+        let live = AtomicUsize::new(0);
+        let peak = AtomicUsize::new(0);
+        let results = run_bounded_classed(8, 2, &renders, |i| {
+            if renders[i] {
+                let now = live.fetch_add(1, Ordering::SeqCst) + 1;
+                peak.fetch_max(now, Ordering::SeqCst);
+                std::thread::sleep(std::time::Duration::from_millis(3));
+                live.fetch_sub(1, Ordering::SeqCst);
+            } else {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            Ok::<usize, anyhow::Error>(i)
+        });
+        let mut seen: Vec<usize> = results.iter().map(|(i, _)| *i).collect();
+        seen.sort_unstable();
+        assert_eq!(seen, (0..40).collect::<Vec<_>>(), "every task exactly once");
+        assert!(results.iter().all(|(i, r)| r.as_ref().map(|v| v == i).unwrap_or(false)));
+        assert!(peak.load(Ordering::SeqCst) <= 2, "peak live rendering {}", peak.load(Ordering::SeqCst));
+        assert!(peak.load(Ordering::SeqCst) >= 1);
+    }
+
+    #[test]
+    fn the_classed_pool_with_no_cap_is_the_plain_pool() {
+        let renders = vec![true; 5];
+        let results = run_bounded_classed(4, 4, &renders, |i| Ok::<usize, anyhow::Error>(i * 2));
+        let mut got: Vec<(usize, usize)> = results.into_iter().map(|(i, r)| (i, r.unwrap())).collect();
+        got.sort_unstable();
+        assert_eq!(got, (0..5).map(|i| (i, i * 2)).collect::<Vec<_>>());
+    }
+
     #[test]
     fn resolve_jobs_is_bounded_and_serial_for_snapshot_updates() {
         let cpus = std::thread::available_parallelism()
