@@ -2402,16 +2402,19 @@ fn writes_live(buffered: bool) -> bool {
 /// republished by `sim_start_entry` at every boundary. `SIM_DT` travels the
 /// same way, with an explicit empty value for an entry that declares nothing
 /// so the engine default is re-applied rather than a predecessor's value.
-/// `SIM_SKIP_RENDER` is ALSO carried per entry (`runner_owned_plan_pairs`)
-/// and re-applied at every boundary, but it stays boot signature because
-/// `entry_renders` decides `STONE_ASSET_STUB` per process.
+/// `STONE_FX_OFF` travels like `SIM_DT`: every consumer is a per-frame gate
+/// (`fx_disabled`), so an entry that ablates the world draw or the screen UI
+/// shares a boot with one that does not. `SIM_SKIP_RENDER` is ALSO carried
+/// per entry (`runner_owned_plan_pairs`) and re-applied at every boundary,
+/// but it stays boot signature because `entry_renders` decides
+/// `STONE_ASSET_STUB` per process.
 ///
 /// `ROCK_MASK_WALL_CLOCK` and `ROCK_DETERMINISTIC_IDS` are owned outright: the
 /// runner publishes its own value for both after `preset_env`, so a declared one
 /// never reaches the child and cannot stand for a difference between two
 /// entries. Splitting a group on an inert value would isolate sims for nothing.
 const RUNNER_OWNED_ENV_KEYS: &[&str] =
-    &["FRAME_COUNT", "ROCK_DETERMINISTIC_IDS", "ROCK_MASK_WALL_CLOCK", "SIM_DT", "SIM_MANUAL"];
+    &["FRAME_COUNT", "ROCK_DETERMINISTIC_IDS", "ROCK_MASK_WALL_CLOCK", "SIM_DT", "SIM_MANUAL", "STONE_FX_OFF"];
 
 /// Fixed values the runner publishes to EVERY sim child, layered BEFORE
 /// `preset_env` so a declaration still wins.
@@ -2550,9 +2553,10 @@ fn boot_signature(env_pairs: &[(String, String)]) -> Vec<(String, String)> {
 /// `sim_start_entry` re-applies each at the boundary and an entry inherits
 /// nothing from its predecessor.
 ///
-/// `SIM_DT` travels with an explicit empty value standing for the engine
-/// default: an entry that declares nothing must not run at the fixed dt its
-/// predecessor declared. `SIM_SKIP_RENDER` travels as the value the entry
+/// `SIM_DT` and `STONE_FX_OFF` travel with an explicit empty value standing
+/// for the engine default: an entry that declares nothing must not run at
+/// the fixed dt, or with the ablation, its predecessor declared.
+/// `SIM_SKIP_RENDER` travels as the value the entry
 /// boots with (`entry_renders`, the one oracle): it is still boot signature,
 /// so two entries in one worker agree on it, but the global is
 /// `realization=runner_rebind` and the boundary restore never touches it, so
@@ -2565,9 +2569,15 @@ fn runner_owned_plan_pairs(env: &[(String, String)]) -> Vec<(String, String)> {
         .map(|(_, v)| v)
         .unwrap_or_default();
     let skip_render = if entry_renders(env) { "0" } else { "1" };
+    let fx_off = effective_env(env)
+        .into_iter()
+        .find(|(k, _)| k == "STONE_FX_OFF")
+        .map(|(_, v)| v)
+        .unwrap_or_default();
     vec![
         ("SIM_DT".to_string(), sim_dt),
         ("SIM_SKIP_RENDER".to_string(), skip_render.to_string()),
+        ("STONE_FX_OFF".to_string(), fx_off),
     ]
 }
 
@@ -5973,12 +5983,16 @@ mod tests {
 
     #[test]
     fn the_boot_signature_excludes_only_runner_owned_keys() {
-        let a = env(&[("FRAME_COUNT", "90"), ("STONE_FX_OFF", "1")]);
-        let b = env(&[("FRAME_COUNT", "40"), ("STONE_FX_OFF", "1")]);
+        let a = env(&[("FRAME_COUNT", "90"), ("STONE_WINDOW", "1280x720")]);
+        let b = env(&[("FRAME_COUNT", "40"), ("STONE_WINDOW", "1280x720")]);
         assert_eq!(boot_signature(&a), boot_signature(&b), "the budget is per entry");
 
-        let c = env(&[("FRAME_COUNT", "90"), ("STONE_FX_OFF", "0")]);
+        let c = env(&[("FRAME_COUNT", "90"), ("STONE_WINDOW", "640x360")]);
         assert_ne!(boot_signature(&a), boot_signature(&c), "a boot-consumed value is not");
+        // STONE_FX_OFF is a per-frame gate re-applied at every boundary, so
+        // an ablating entry and a plain one share a boot.
+        let g = env(&[("STONE_FX_OFF", "draw")]);
+        assert_eq!(boot_signature(&g), env(&[]), "ablation is per entry");
         // SIM_DT is carried in the entry plan and re-applied by
         // `sim_start_entry`, so two entries that disagree on it share a boot.
         let d = env(&[("SIM_DT", "0.1")]);
@@ -5997,23 +6011,27 @@ mod tests {
         // dt is the engine default, and the skip flag is the baseline.
         assert_eq!(
             runner_owned_plan_pairs(&env(&[])),
-            env(&[("SIM_DT", ""), ("SIM_SKIP_RENDER", "1")])
+            env(&[("SIM_DT", ""), ("SIM_SKIP_RENDER", "1"), ("STONE_FX_OFF", "")])
         );
         assert_eq!(
-            runner_owned_plan_pairs(&env(&[("SIM_DT", "0.5"), ("SIM_SKIP_RENDER", "0")])),
-            env(&[("SIM_DT", "0.5"), ("SIM_SKIP_RENDER", "0")])
+            runner_owned_plan_pairs(&env(&[
+                ("SIM_DT", "0.5"),
+                ("SIM_SKIP_RENDER", "0"),
+                ("STONE_FX_OFF", "draw,ui")
+            ])),
+            env(&[("SIM_DT", "0.5"), ("SIM_SKIP_RENDER", "0"), ("STONE_FX_OFF", "draw,ui")])
         );
         // Last-wins, the same reading `entry_renders` and the child's env use.
         assert_eq!(
             runner_owned_plan_pairs(&env(&[("SIM_SKIP_RENDER", "0"), ("SIM_SKIP_RENDER", "1")])),
-            env(&[("SIM_DT", ""), ("SIM_SKIP_RENDER", "1")])
+            env(&[("SIM_DT", ""), ("SIM_SKIP_RENDER", "1"), ("STONE_FX_OFF", "")])
         );
     }
 
     #[test]
     fn the_boot_signature_is_declaration_order_independent() {
-        let a = env(&[("STONE_FX_OFF", "1"), ("SIM_DT", "0.1")]);
-        let b = env(&[("SIM_DT", "0.1"), ("STONE_FX_OFF", "1")]);
+        let a = env(&[("STONE_WINDOW", "1280x720"), ("SIM_DT", "0.1")]);
+        let b = env(&[("SIM_DT", "0.1"), ("STONE_WINDOW", "1280x720")]);
         assert_eq!(boot_signature(&a), boot_signature(&b), "same pairs, either spelling");
 
         // The sort is stable, so a duplicated key keeps last-wins order and a
@@ -6039,13 +6057,13 @@ mod tests {
         let wires = wires(&[
             ("plain_a", &[]),
             ("plain_b", &[("FRAME_COUNT", "40")]),
-            ("fx_off", &[("STONE_FX_OFF", "1")]),
+            ("windowed", &[("STONE_WINDOW", "1280x720")]),
             ("reload", &[("STONE_HOT_RELOAD", "1")]),
             ("outref", &[("SESSION", "$OUT/resume.json")]),
             ("machinery", &[("SIM_WORKER_ISOLATED", "1")]),
         ]);
         let (groups, isolated) = group_worker_specs(
-            &specs(&["plain_a", "plain_b", "fx_off", "reload", "outref", "machinery"]),
+            &specs(&["plain_a", "plain_b", "windowed", "reload", "outref", "machinery"]),
             &wires);
 
         // FRAME_COUNT is runner-owned, so plain_a and plain_b share a group;
@@ -6216,9 +6234,9 @@ mod tests {
     #[test]
     fn a_chain_groups_by_its_parts_and_disagreeing_parts_isolate() {
         let wires = wires(&[
-            ("head", &[("STONE_FX_OFF", "1")]),
-            ("tail_same", &[("STONE_FX_OFF", "1"), ("FRAME_COUNT", "30")]),
-            ("tail_other", &[("STONE_FX_OFF", "0")]),
+            ("head", &[("STONE_WINDOW", "1280x720")]),
+            ("tail_same", &[("STONE_WINDOW", "1280x720"), ("FRAME_COUNT", "30")]),
+            ("tail_other", &[("STONE_WINDOW", "640x360")]),
             ("plain", &[]),
         ]);
 
