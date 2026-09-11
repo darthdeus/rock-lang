@@ -161,3 +161,79 @@ fn function_body_change_keeps_hot_reload_decision() {
         log,
     );
 }
+
+/// THE hot-reload half of the callee-binding rule (`docs/backends.md`).
+///
+/// `ROCK_SKULL_CALLEE_BINDING=upvalue` defines each function inside a factory
+/// and binds its callees as immutable upvalues. An `incremental.lua` overlay
+/// redefines one global function, which a caller holding the previous closure
+/// would never see -- so a body edit would silently not reach its callers.
+/// `rock stone` / `rock stone-test` therefore pin the global-lookup shape for
+/// the whole session (`skull::force_global_callee_binding`), whatever the
+/// environment says. This drives a body edit through the real watcher WITH the
+/// switch set and proves the edit still reaches a caller.
+#[test]
+fn a_body_edit_reaches_its_caller_even_with_callee_binding_requested() {
+    let h = StoneHarness::spawn_with_env(
+        &[(
+            "a.rock",
+            "global SCORE: int = 0\n\
+             fn leaf(a: int) -> int { a + 1 }\n\
+             @nomangle fn bump() { SCORE = leaf(SCORE) }\n",
+        )],
+        &[("ROCK_SKULL_CALLEE_BINDING", "upvalue")],
+    );
+    h.await_settled(QUIESCENT, SETTLE_TIMEOUT);
+    let before_lua = h.compiled_lua();
+    // The pin is what makes the overlay sound: a factory in `main.lua` would
+    // leave `bump` calling the pre-edit `leaf` for the rest of the session.
+    assert!(
+        !before_lua.contains("__rock_mk_"),
+        "rock stone-test must emit the global-lookup shape whatever \
+         ROCK_SKULL_CALLEE_BINDING says",
+    );
+
+    let baseline = h.event_count();
+    h.write_file(
+        "a.rock",
+        "global SCORE: int = 0\n\
+         fn leaf(a: int) -> int { a + 10 }\n\
+         @nomangle fn bump() { SCORE = leaf(SCORE) }\n",
+    );
+    let log = h.await_settled_after(baseline, QUIESCENT, SETTLE_TIMEOUT);
+    assert!(
+        log.len() >= 2,
+        "expected at least 2 reloads (seed + body change), got: {log:?}",
+    );
+    let after_lua = h.overlay_lua();
+    assert!(
+        !after_lua.trim().is_empty(),
+        "body change should have produced an incremental.lua overlay",
+    );
+
+    let script = format!(
+        "_G.HOT_RELOAD = false\n\
+         {before}\n\
+         bump()\n\
+         _G.HOT_RELOAD = true\n\
+         {after}\n\
+         _G.HOT_RELOAD = false\n\
+         bump()\n\
+         if _G.SCORE == 11 then\n\
+             print(\"PASS\")\n\
+         else\n\
+             print(\"FAIL: SCORE=\" .. tostring(_G.SCORE))\n\
+             os.exit(1)\n\
+         end\n",
+        before = before_lua,
+        after = after_lua,
+    );
+    let out = run_lua_code(&script).unwrap_or_else(|e| {
+        panic!("LuaJIT failed on watcher output:\n{}", e);
+    });
+    assert!(
+        out.stdout.trim().starts_with("PASS"),
+        "a body edit must reach its caller through the overlay:\n{}",
+        out.combined(),
+    );
+}

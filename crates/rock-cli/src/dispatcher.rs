@@ -38,6 +38,24 @@ impl CommandContext {
                 self.args.command.cli_name(),
             );
         }
+        // THE callee-binding hot-reload rule
+        // (`skull_codegen_lua::force_global_callee_binding`). A command that can
+        // emit an `incremental.lua` overlay redefines one global function; a
+        // caller that captured it as an immutable upvalue holds the previous
+        // closure and would never see the edited body. Those commands emit the
+        // global-lookup shape for the whole session, whatever
+        // `ROCK_SKULL_CALLEE_BINDING` says. `rock watch` is NOT here: it
+        // reassembles the whole chunk (`emit_incremental`), so both passes rerun.
+        // `assemble_overlay` rejects a bound body rather than trusting this list.
+        if matches!(
+            self.args.command,
+            CliCommand::Stone
+                | CliCommand::StoneTest
+                | CliCommand::SkullIncrementalProfile
+                | CliCommand::IterIncremental
+        ) {
+            skull::force_global_callee_binding();
+        }
         let _renderer_override = rock_host::stick::install_renderer_override(self.args.renderer);
         self.run_command()
     }

@@ -1,11 +1,12 @@
 //! The whole-program half of the callee binding (`docs/backends.md`): the
-//! assembled artifact's SECOND PASS.
+//! assembled artifact's SECOND PASS, and the hot-reload rule that keeps the
+//! shape out of the incremental overlay.
 //!
 //! The mode comes from `emit_full_with_callee_binding`, not the environment:
 //! `ROCK_SKULL_CALLEE_BINDING` is read once per PROCESS and these tests share a
 //! binary with every other skull test.
 
-use skull::mir_emit::emit_full_with_callee_binding;
+use skull::mir_emit::{emit_full_with_callee_binding, emit_overlay};
 use skull_codegen_lua::CalleeBindingMode;
 
 use crate::common::ws_with_stdlib;
@@ -108,4 +109,45 @@ fn a_mutually_recursive_pair_stays_a_global_lookup() {
         !header.contains("is_even"),
         "expected the mutually recursive callee left global:\n{header}"
     );
+}
+
+/// THE hot-reload rule. An incremental overlay redefines one global function;
+/// a caller that captured it as an immutable upvalue holds the previous closure
+/// and would never see the edited body. Emitting the overlay anyway would make
+/// a body edit SILENTLY not take effect, so the overlay rejects instead.
+/// `rock stone` avoids it by pinning the global-lookup shape for the session
+/// (`skull::force_global_callee_binding`).
+#[test]
+fn the_incremental_overlay_rejects_a_bound_body() {
+    let v1 = SRC;
+    let v2 = SRC.replace("a * 3 + 1", "a * 3 + 2");
+    let ws1 = ws_with_stdlib(v1);
+    let mid = skull::user_module_id(&ws1).unwrap();
+    let (_full, mut cache) =
+        emit_full_with_callee_binding(&ws1, mid, CalleeBindingMode::Upvalue).expect("emit_full");
+    let ws2 = ws_with_stdlib(&v2);
+    let edited = body_id(&ws2, "mid");
+    let Err(err) = emit_overlay(&ws2, &mut cache, &[edited]) else {
+        panic!("a bound body must not reach the overlay");
+    };
+    assert!(
+        err.message.contains("incremental overlay cannot redefine")
+            && err.message.contains("ROCK_SKULL_CALLEE_BINDING=global"),
+        "expected the hot-reload rule's diagnostic, got: {}",
+        err.message
+    );
+}
+
+fn body_id(
+    ws: &bone_semantic::inference::Workspace,
+    name: &str,
+) -> (bone_semantic::prelude::ModuleId, bone_semantic::hir::BodyOwner) {
+    for module in ws.modules.iter() {
+        for (fid, f) in module.functions.iter() {
+            if f.name.as_str() == name {
+                return (module.id, bone_semantic::hir::BodyOwner::Function(fid));
+            }
+        }
+    }
+    panic!("no fn named {name}");
 }

@@ -7992,7 +7992,23 @@ fn assemble_overlay(
     let mut definitions = LuaDefinitionBuffer::default();
     for body in &order {
         match cache.chunks.get(body) {
-            Some(Ok(chunk)) => definitions.push_str(&chunk.lua),
+            Some(Ok(chunk)) => {
+                // THE hot-reload rule (`skull_codegen_lua::force_global_callee_binding`).
+                // A bound definition's body lives in a factory, so redefining it
+                // here would leave the global `F` holding main.lua's stale
+                // closure -- the edit would silently not reach ANY caller.
+                // Reject; do not emit an overlay that does not take effect.
+                if let Some(plan) = chunk.binds.first() {
+                    return Err(CompilerError::new_no_location(format!(
+                        "incremental overlay cannot redefine `{}`: this build bound its \
+                         callees as upvalues (ROCK_SKULL_CALLEE_BINDING=upvalue), and a \
+                         caller holding the old closure would never see the edited body -- \
+                         rebuild with ROCK_SKULL_CALLEE_BINDING=global",
+                        plan.name
+                    )));
+                }
+                definitions.push_str(&chunk.lua)
+            }
             Some(Err(err)) => {
                 let fref = body.func;
                 let f = &ws.module(fref.module).functions[fref.func];
