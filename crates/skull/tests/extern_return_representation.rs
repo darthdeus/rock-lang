@@ -91,7 +91,7 @@ fn an_int_representation_is_coerced_through_every_alias_shape() {
     ] {
         let w = wrapper(&lua, name);
         assert!(
-            w.contains(&format!("return tonumber(m.{name}(")),
+            w.contains(&format!("local __rock_ret = tonumber(m.{name}(")) && w.contains("return __rock_ret"),
             "`{name}` bottoms out at an int representation, so its return must be a \
              Rock number and not whatever the C ABI handed back:\n{w}"
         );
@@ -104,7 +104,7 @@ fn an_int_representation_is_coerced_through_every_alias_shape() {
     for name in ["ret_ratio", "ret_boxed_float", "ret_outer_float"] {
         let w = wrapper(&lua, name);
         assert!(
-            w.contains(&format!("return m.{name}(")) && !w.contains("tonumber"),
+            w.contains(&format!("local __rock_ret = m.{name}(")) && !w.contains("tonumber"),
             "`{name}` bottoms out at a representation LuaJIT already hands back as a \
              Lua value; it must cross unchanged:\n{w}"
         );
@@ -205,4 +205,26 @@ fn main() { print("x") }
         "a generic cycle must be reported as a cycle rather than as an exhausted \
          alias chain, got:\n{msg}"
     );
+}
+
+/// A wrapper whose body is `return lib.f(..)` is a `CALLT` into C, and a root
+/// trace that leaves the function through it aborts `leaving loop in root
+/// trace` (`rec_ret` requires a real `RET`). Every value-returning wrapper
+/// binds the result to a local and returns that instead; measured 166 -> 0
+/// aborts on the shipped LuaJIT (docs/backends.md, "Wrapper return").
+#[test]
+fn every_value_returning_wrapper_returns_through_a_local() {
+    let lua = emit_module(SRC);
+    for name in [
+        "ret_int", "ret_handle", "ret_alias", "ret_boxed", "ret_deep", "ret_wrap",
+        "ret_outer", "ret_twice", "ret_ratio", "ret_boxed_float", "ret_outer_float",
+    ] {
+        let w = wrapper(&lua, name);
+        let tail = w.lines().any(|l| {
+            let t = l.trim_start();
+            t.starts_with("return m.") || t.starts_with("return tonumber(") || t.starts_with("return ffi.new(")
+        });
+        assert!(!tail, "`{name}` still returns through a tail call into C:\n{w}");
+        assert!(w.contains("return __rock_ret"), "`{name}` must return the bound local:\n{w}");
+    }
 }

@@ -87,6 +87,28 @@ fn emit(src: &str, fn_name: &str) -> String {
     emit_dump(vec![ast], fn_name)
 }
 
+/// [`emit`] under an explicit bounds-checked index shape.
+fn emit_indexed(src: &str, fn_name: &str, shape: skull_codegen_lua::IndexShape) -> String {
+    let ast = skull_parser::parse_module_clean(src, ustr::Ustr::from("<test>")).expect("parse");
+    let mut modules = vec![ast];
+    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
+    let mid = *ws
+        .module_ids
+        .get(&ustr::Ustr::from("<test>"))
+        .expect("user module id");
+    let m = ws.module(mid);
+    let (fid, _) = m
+        .functions
+        .iter()
+        .find(|(_, f)| f.name.as_str() == fn_name)
+        .expect("function by name");
+    let (func, interner) = common::lower_test_ref(&ws, mid, fid)
+        .unwrap_or_else(|e| panic!("lower failed: {}", e.message));
+    let mut ctx = CodegenCtx::new(&ws);
+    ctx.set_index_shape(shape);
+    emit_function(&ws, &ctx, &interner, FuncRef { module: mid, func: fid }, &func, None)
+}
+
 #[test]
 fn numeric_selection_uses_native_minmax() {
     let lua = emit_clean("fn choose(a: float, b: float) -> float { return if a < b { a } else { b } }", "choose");
@@ -1098,8 +1120,10 @@ fn for_vec_backed_iter_inline_emits_forl() {
         lua.contains("for "),
         "vec-backed desugared loop must print as a numeric `for` (bound hoisted):\n{lua}"
     );
+    // The element read's own bounds guard (`i >= v.len then __rock_vec_oob`)
+    // is the one `>=` the body may keep.
     assert!(
-        !lua.contains(">="),
+        !lua.lines().any(|l| l.contains(">=") && !l.contains("__rock_vec_oob(")),
         "the slot exit-compare must be absorbed into the `for` header:\n{lua}"
     );
 }
@@ -1759,34 +1783,29 @@ fn structured_several_exits_stay_plain_gotos_out_of_the_block() {
     assert!(backward_gotos(&lua).is_empty(), "no back edge may remain:\n{lua}");
 }
 
-/// An iterator loop nested inside another loop is the shape FORL recovery bails
-/// on (its preheader is reachable from its body through the enclosing back
-/// edge), so it stays a goto loop -- the largest census bucket. The structured
-/// shape must reach it.
+/// An iterator loop nested inside another loop: its preheader is reachable
+/// from its body through the enclosing back edge, which a body-reachability
+/// split read as a second back edge and bailed on. Back edges are the head's
+/// predecessors that the head DOMINATES; the preheader never is. Both loops
+/// print as counted `for`s and no backward goto survives, under either loop
+/// shape.
 #[test]
-fn structured_reaches_the_nested_iterator_loop_forl_recovery_misses() {
+fn nested_iterator_loop_is_recovered_as_a_counted_for() {
     let src = "\
 struct B { slot: int }\n\
 struct D { bindings: [B] }\n\
 fn f(ds: [D]) -> int { for d in ds { for b in d.bindings { if b.slot < 0 { return 1 } } }; 0 }";
-    let goto = emit_inlined_shaped(src, "f", LoopShape::Goto);
-    assert!(goto.contains("goto bb"), "sanity: the goto shape has gotos:\n{goto}");
-    assert_eq!(
-        backward_gotos(&goto).len(),
-        1,
-        "the nested iterator loop is one backward goto:\n{goto}"
-    );
-    let lua = emit_inlined_shaped(src, "f", LoopShape::Structured);
-    assert!(lua.contains("while true do"), "the nested loop must become a `while`:\n{lua}");
-    assert!(lua.contains("::lc"), "with a continue label:\n{lua}");
-    assert!(
-        backward_gotos(&lua).is_empty(),
-        "no backward goto may survive the structured shape:\n{lua}"
-    );
+    for shape in [LoopShape::Goto, LoopShape::Structured] {
+        let lua = emit_inlined_shaped(src, "f", shape);
+        let fors = lua.lines().filter(|l| l.trim_start().starts_with("for ")).count();
+        assert_eq!(fors, 2, "both iterator loops must print as counted `for`s ({shape:?}):\n{lua}");
+        assert!(backward_gotos(&lua).is_empty(), "no back edge may remain ({shape:?}):\n{lua}");
+        assert!(!lua.contains("while true do"), "nothing is left for the structured shape ({shape:?}):\n{lua}");
+    }
 }
 
 /// `expand_for` is untouched: a recognized counted loop prints as a Lua `for`
-/// under BOTH shapes, and the outer loop here is one.
+/// under BOTH shapes, and both loops here are recognized.
 #[test]
 fn structured_preserves_the_counted_for_exactly() {
     let src = "\
@@ -1796,7 +1815,7 @@ fn f(ds: [D]) -> int { for d in ds { for b in d.bindings { if b.slot < 0 { retur
     let goto = emit_inlined_shaped(src, "f", LoopShape::Goto);
     let structured = emit_inlined_shaped(src, "f", LoopShape::Structured);
     let fors = |s: &str| s.lines().filter(|l| l.trim_start().starts_with("for c")).count();
-    assert_eq!(fors(&goto), 1, "one counted `for` expected:\n{goto}");
+    assert_eq!(fors(&goto), 2, "two counted `for`s expected:\n{goto}");
     assert_eq!(fors(&structured), fors(&goto), "the counted `for` must survive:\n{structured}");
 }
 
@@ -1848,4 +1867,80 @@ fn structured_and_goto_shapes_compute_the_same_under_luajit() {
             "the two shapes disagree at n={n}"
         );
     }
+}
+
+/// The recovered nested iterator loop computes what the goto loop computed:
+/// every inner bound is re-read per outer iteration, an empty inner vec runs
+/// zero times, and an early `return` out of the inner loop still fires.
+#[test]
+fn recovered_nested_iterator_loop_computes_the_same_under_luajit() {
+    let src = "\
+struct B { slot: int }\n\
+struct D { bindings: [B] }\n\
+fn f(ds: [D], stop: int) -> int {\n\
+    let t = 0\n\
+    for d in ds { for b in d.bindings { if b.slot == stop { return t - 1000 }; t = t + b.slot } }\n\
+    t\n\
+}\n\
+fn probe(stop: int) -> int {\n\
+    let ds = [D { bindings: [B { slot: 1 }, B { slot: 2 }] }, D { bindings: [] }, D { bindings: [B { slot: 3 }, B { slot: 4 }, B { slot: 5 }] }]\n\
+    f(ds, stop)\n\
+}";
+    assert_eq!(run(src, "probe(99)"), "15");
+    assert_eq!(run(src, "probe(3)"), "-997");
+    assert_eq!(run(src, "probe(1)"), "-1000");
+}
+
+/// The shipped shape calls the stdlib helper: the inline shape measured as a
+/// redistribution of aborts on mag, not a reduction (docs/backends.md).
+#[test]
+fn vec_index_read_calls_the_checked_helper_by_default() {
+    let lua = emit("fn f(xs: [int], i: int) -> int { return xs[i] }", "f");
+    assert!(lua.contains("__vec_checked_get("), "{lua}");
+    assert!(!lua.contains("__rock_vec_oob("), "{lua}");
+}
+
+/// Under `ROCK_SKULL_INDEX_SHAPE=inline`, a Vec read whose operands are
+/// registers or cells spells its bounds check inline -- the guard, the cold
+/// out-of-line error call, then the raw `_data` read -- instead of calling
+/// `__vec_checked_get`.
+#[test]
+fn vec_index_read_inlines_the_bounds_check() {
+    let lua = emit_indexed(
+        "fn f(xs: [int], i: int) -> int { return xs[i] }",
+        "f",
+        skull_codegen_lua::IndexShape::Inline,
+    );
+    assert!(!lua.contains("__vec_checked_get("), "{lua}");
+    assert!(lua.contains("__rock_vec_oob("), "{lua}");
+    assert!(lua.contains("._data["), "{lua}");
+    assert!(lua.contains(".len then"), "{lua}");
+}
+
+/// A Vec store with register/cell base and index spells the same guard and
+/// then a raw `_data` store; the stored value is evaluated once.
+#[test]
+fn vec_index_store_inlines_the_bounds_check() {
+    let lua = emit_indexed(
+        "fn f(xs: [int], i: int, v: int) { xs[i] = v }",
+        "f",
+        skull_codegen_lua::IndexShape::Inline,
+    );
+    assert!(!lua.contains("__vec_checked_set("), "{lua}");
+    assert!(lua.contains("__rock_vec_oob("), "{lua}");
+    assert!(lua.contains("._data["), "{lua}");
+}
+
+/// The inline shape names each operand twice, so a base that renders as a
+/// folded expression (here an allocating vec literal) must keep the call:
+/// duplicating it would allocate twice.
+#[test]
+fn vec_index_with_folded_base_keeps_the_checked_call() {
+    let lua = emit_indexed(
+        "fn f(i: int) -> int { return [1, 2, 3][i] }",
+        "f",
+        skull_codegen_lua::IndexShape::Inline,
+    );
+    assert!(lua.contains("__vec_checked_get("), "{lua}");
+    assert!(!lua.contains("__rock_vec_oob("), "{lua}");
 }

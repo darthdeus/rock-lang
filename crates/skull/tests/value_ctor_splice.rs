@@ -118,3 +118,21 @@ fn the_two_shapes_differ_only_where_a_gc_table_value_is_built() {
     }
     assert!(differing > 0, "the two shapes emitted identical text");
 }
+
+/// The ctor DEFINITION binds its table to a local and returns that: a
+/// `return setmetatable(..)` body is a `CALLT` into C, which a root trace
+/// started at the ctor's entry cannot leave through (`rec_ret` needs a real
+/// `RET`), so every such root aborted `leaving loop in root trace`. Measured
+/// 166 -> 0 on the shipped LuaJIT (docs/backends.md, "Wrapper return").
+#[test]
+fn the_ctor_definition_returns_through_a_local_not_a_tail_call() {
+    let call = emit(ValueCtorShape::Call);
+    let def_start = call.find("Bag_vt = function(").expect("Bag_vt definition");
+    let def = &call[def_start..];
+    let def = &def[..def.find("\nend\n").expect("ctor end") + 5];
+    assert!(
+        def.contains("local __rock_ret = setmetatable(") && def.contains("\n  return __rock_ret\n"),
+        "the ctor body must bind then return, not tail-call setmetatable:\n{def}"
+    );
+    assert!(!def.contains("return setmetatable("), "{def}");
+}

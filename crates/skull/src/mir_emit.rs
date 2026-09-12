@@ -5507,13 +5507,18 @@ fn assemble(
                                 format!("__out, {params}")
                             };
                             format!(
-                                "  local __out = ffi.new(\"{sname}[1]\")\n  {lib}.{nm}({call_args})\n  return ffi.new(\"{sname}\", __out[0])"
+                                "  local __out = ffi.new(\"{sname}[1]\")\n  {lib}.{nm}({call_args})\n{}",
+                                skull_codegen_lua::wrapper_return(&format!("ffi.new(\"{sname}\", __out[0])"))
                             )
                         }
-                        ExternRet::Int => format!("  return tonumber({lib}.{nm}({params}))"),
-                        ExternRet::Uint => format!("  return tonumber({lib}.{nm}({params}))"),
+                        // `return <call>` is a `CALLT` into C, which a root trace
+                        // cannot leave through; the bound local makes it a `RET`
+                        // (`wrapper_return`). `Bool` ends in a compare, not a call.
+                        ExternRet::Int | ExternRet::Uint => {
+                            skull_codegen_lua::wrapper_return(&format!("tonumber({lib}.{nm}({params}))"))
+                        }
                         ExternRet::Bool => format!("  return {lib}.{nm}({params}) ~= 0"),
-                        ExternRet::AsIs => format!("  return {lib}.{nm}({params})"),
+                        ExternRet::AsIs => skull_codegen_lua::wrapper_return(&format!("{lib}.{nm}({params})")),
                         ExternRet::None => format!("  {lib}.{nm}({params})"),
                     };
                     // The rejection above runs for EVERY extern; only the WRITE
