@@ -85,6 +85,12 @@ fn main() {
     if args.jv {
         unsafe { std::env::set_var("STONE_JV", "1") };
     }
+    // `--agent-headless`, `--level`, `--daemon-sock` are sugar for the game's
+    // own environment variables in the same way; the spawned game inherits
+    // them. SAFETY: as above, still single-threaded here.
+    for (key, value) in args.agent_launch_env() {
+        unsafe { std::env::set_var(key, value) };
+    }
 
     // Cap rayon's global thread pool. Default rayon uses
     // available_parallelism (== logical core count), but on hybrid
