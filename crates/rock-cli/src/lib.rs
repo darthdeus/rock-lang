@@ -1056,6 +1056,15 @@ impl Args {
 }
 
 
+/// The `rock-agent-daemon` built next to this `rock`, if any. A source-run
+/// game resolves the daemon from its own executable (LuaJIT under
+/// `prebuilt/`), `ROCK_DIR`, or `PATH`, none of which point at the cargo
+/// target directory, so the launcher hands the sibling down explicitly.
+pub fn sibling_daemon_bin(rock_exe: &std::path::Path) -> Option<std::path::PathBuf> {
+    let candidate = rock_exe.parent()?.join("rock-agent-daemon");
+    candidate.is_file().then_some(candidate)
+}
+
 impl Args {
     /// The game-side environment the agent launch flags stand for. The game
     /// reads these variables itself (sims set them with `@sim_env`), so the
@@ -1083,6 +1092,19 @@ impl Args {
 #[cfg(test)]
 mod arg_tests {
     use super::{Args, Backend};
+
+    #[test]
+    fn sibling_daemon_bin_is_the_daemon_next_to_rock_or_nothing() {
+        let dir = std::env::temp_dir().join(format!("rock-sibling-daemon-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let rock = dir.join("rock");
+        std::fs::write(&rock, b"").unwrap();
+        assert_eq!(super::sibling_daemon_bin(&rock), None);
+        let daemon = dir.join("rock-agent-daemon");
+        std::fs::write(&daemon, b"").unwrap();
+        assert_eq!(super::sibling_daemon_bin(&rock), Some(daemon));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn agent_launch_flags_stand_for_the_game_env() {

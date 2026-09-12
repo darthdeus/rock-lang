@@ -91,6 +91,16 @@ fn main() {
     for (key, value) in args.agent_launch_env() {
         unsafe { std::env::set_var(key, value) };
     }
+    // A game started from a source checkout cannot find the daemon built
+    // beside this binary on its own (it resolves from luajit's directory,
+    // ROCK_DIR, or PATH); hand it down unless the user chose one.
+    if matches!(args.command, rock_cli::CliCommand::Run | rock_cli::CliCommand::Stone)
+        && std::env::var("ROCK_AGENT_DAEMON_BIN").map(|v| v.is_empty()).unwrap_or(true)
+    {
+        if let Some(daemon) = std::env::current_exe().ok().and_then(|exe| rock_cli::sibling_daemon_bin(&exe)) {
+            unsafe { std::env::set_var("ROCK_AGENT_DAEMON_BIN", daemon) };
+        }
+    }
 
     // Cap rayon's global thread pool. Default rayon uses
     // available_parallelism (== logical core count), but on hybrid
