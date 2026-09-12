@@ -2254,6 +2254,7 @@ fn run_specs_worker_mode(
                 false,
                 recorder,
                 lane_entry_ids.as_deref(),
+                None,
             )?;
             if results.len() != lane.len() {
                 return Err(anyhow!(
@@ -2300,7 +2301,33 @@ fn run_specs_worker_mode(
         Some(lane) => (&mut lane.stone, lane.output.as_str()),
         None => (&mut *stone, output),
     };
-    for &(i, _) in &exclusive {
+    // ONE child for the whole lane, entries in sequence. The lane was seven
+    // children because it was run one `run_named_entry` at a time, not because
+    // the entries disagree about anything: `FRAME_COUNT` is the only key they
+    // differ on and it is runner-owned, carried per entry in the plan, so all
+    // seven share the one boot signature `[("STONE_HOT_RELOAD", "1")]`.
+    //
+    // Boot was 7.1s of the lane's 9.1s, so chaining removes about 6.1s of a
+    // 12.3s serial tail. The lane stays strictly after the pool and strictly
+    // serial within itself, which is what the session and the overlay require,
+    // so the shared-asset-writer hazard that reverted the tenth pass's attempt
+    // to overlap it with the POOL does not arise here.
+    //
+    // Each reload sim restores the source it edited before it stops, so an
+    // entry cannot hand reloaded code to its successor; `revert_reload_edits`
+    // still runs once when the child exits, as the backstop it always was.
+    // A reload sim that asserts what BOOT did cannot follow another entry, and
+    // several do -- a chained successor restores the boot image instead of
+    // booting. Those declare `SIM_WORKER_ISOLATED` and run alone inside the
+    // lane; the rest chain. Same opt-out the pool honours, read here because
+    // `worker_ineligibility` reports the reload lane first.
+    let (lane_alone, lane_chained): (Vec<_>, Vec<_>) = exclusive.iter().partition(|(i, _)| {
+        parse_sim_chain(&specs[*i])
+            .iter()
+            .any(|p| declares_worker_isolated(env_by_wire.get(*p).map_or(&[][..], |v| v)))
+    });
+    for (i, _) in &lane_alone {
+        let i = *i;
         let (_, summary) = run_named_entry(
             project,
             &specs[i],
@@ -2315,6 +2342,33 @@ fn run_specs_worker_mode(
             entry_ids.and_then(|ids| ids.get(i)).copied(),
         )?;
         slots[i] = Some(summary);
+    }
+    if !lane_chained.is_empty() {
+        let exclusive = &lane_chained;
+        let lane_specs: Vec<String> = exclusive.iter().map(|(i, _)| specs[*i].clone()).collect();
+        let lane_entry_ids: Option<Vec<u64>> = entry_ids
+            .map(|ids| exclusive.iter().map(|(i, _)| ids[*i]).collect());
+        let results = run_specs_recovering(
+            project,
+            lane_output,
+            env_by_wire,
+            &lane_specs,
+            update_snapshots,
+            false,
+            recorder,
+            lane_entry_ids.as_deref(),
+            Some(&mut *lane_stone),
+        )?;
+        if results.len() != exclusive.len() {
+            return Err(anyhow!(
+                "reload lane returned {} results for {} entries",
+                results.len(),
+                exclusive.len()
+            ));
+        }
+        for ((i, _), (_, summary, _crossed)) in exclusive.iter().zip(results) {
+            slots[*i] = Some(summary);
+        }
     }
 
     // Records are emitted in SPEC order, whole. Completion order under a pool is
@@ -2664,6 +2718,19 @@ pub fn is_reload_lane(env_pairs: &[(String, String)]) -> bool {
     env_pairs
         .iter()
         .any(|(k, v)| k == "STONE_HOT_RELOAD" && v != "0")
+}
+
+/// The explicit per-fixture opt-out of sharing a process, read on its own so
+/// the reload lane can honour it too.
+///
+/// `worker_ineligibility` reports the reload lane FIRST, which is the right
+/// reason to print, but a reload sim can also be boot-scoped -- several assert
+/// what happened at boot, and a chained successor never boots. Those declare
+/// this and run alone inside the lane.
+pub fn declares_worker_isolated(env_pairs: &[(String, String)]) -> bool {
+    env_pairs
+        .iter()
+        .any(|(k, v)| k == "SIM_WORKER_ISOLATED" && v != "0")
 }
 
 fn writes_live(buffered: bool) -> bool {
@@ -4283,6 +4350,10 @@ struct SpecPlan {
 ///
 /// The caller has already grouped `entry_specs` by boot signature;
 /// `run_worker` still refuses a mixed queue, so a grouping bug is loud.
+/// `stone` is the live compile session, and it is `Some` only for the exclusive
+/// reload lane: those entries drive `apply_edit` mid-sim, so the worker that
+/// serves them has to hold the session the edits are published through. Every
+/// other lane passes `None` and cannot reload.
 fn run_specs_recovering(
     project: &str,
     output: &str,
@@ -4292,6 +4363,7 @@ fn run_specs_recovering(
     record_manifest: bool,
     recorder: Option<&SimRunRecorder>,
     entry_ids: Option<&[u64]>,
+    mut stone: Option<&mut crate::skull_backend::SkullStone>,
 ) -> Result<Vec<(String, SimSummary, bool)>> {
     let mut plans = Vec::with_capacity(entry_specs.len());
     for (entry_index, spec) in entry_specs.iter().enumerate() {
@@ -4349,7 +4421,7 @@ fn run_specs_recovering(
                 output,
                 record_manifest,
                 None,
-                None,
+                stone.as_deref_mut(),
                 recorder,
             )?;
 
@@ -4536,7 +4608,7 @@ fn run_worker_arm(
 
     for members in groups {
         let specs: Vec<String> = members.iter().map(|&i| ordered[i].clone()).collect();
-        let results = run_specs_recovering(project, output, env_by_wire, &specs, false, true, None, None)?;
+        let results = run_specs_recovering(project, output, env_by_wire, &specs, false, true, None, None, None)?;
         if results.len() != members.len() {
             return Err(anyhow!(
                 "worker group returned {} results for {} specs",
@@ -4863,7 +4935,7 @@ pub fn run_worker_suite(
     let (_, env_by_wire, _stone) = compile_sims(backend, project_path, PathBuf::from(&output))?;
 
     let results =
-        run_specs_recovering(&project, &output, &env_by_wire, entry_specs, false, true, None, None)?;
+        run_specs_recovering(&project, &output, &env_by_wire, entry_specs, false, true, None, None, None)?;
     Ok(results
         .into_iter()
         .enumerate()
