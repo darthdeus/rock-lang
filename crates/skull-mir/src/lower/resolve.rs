@@ -751,11 +751,22 @@ impl Builder<'_> {
             slots[pidx] = Some(v);
         }
         let hi = slots.iter().rposition(|s| s.is_some()).map_or(0, |i| i + 1);
+        // A gap or trailing param with a literal default is passed that literal;
+        // any other gap is the callee's default-fill to see as nil.
+        let defaults = self.literal_param_defaults(func);
+        let hi = defaults
+            .iter()
+            .take(slots.len())
+            .rposition(|d| d.is_some())
+            .map_or(hi, |i| hi.max(i + 1));
         let mut out = Vec::with_capacity(hi);
-        for s in slots.into_iter().take(hi) {
+        for (i, s) in slots.into_iter().take(hi).enumerate() {
             out.push(match s {
                 Some(v) => v,
-                None => self.emit_cur(Inst::Const(Lit::Nil)),
+                None => match defaults.get(i).cloned().flatten() {
+                    Some(lit) => self.emit_cur(Inst::Const(lit)),
+                    None => self.emit_cur(Inst::Const(Lit::Nil)),
+                },
             });
         }
         Ok(out)

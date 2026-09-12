@@ -637,6 +637,48 @@ fn exec_default_argument_filled_callee_side() {
     assert_eq!(run(src, "greet(\"World\", \"Hi\")"), "Hi, World!");
 }
 
+// --- Call-site default fill (docs/trace-pressure-work-plan.md, "Default fill") --
+//
+// The callee keeps its `if p == nil { p = default }` prologue for calls the
+// emitter cannot see (a function value), but every DIRECT call passes a
+// literal scalar default explicitly, so under the JIT the prologue's nil branch
+// is never the direction a trace takes and never a doomed side exit with the
+// caller's floats live.
+
+#[test]
+fn direct_calls_pass_literal_scalar_defaults_explicitly() {
+    let src = "
+fn f(a: int, b: int = 7, c: float = 0.5, d: string = \"x\", e: bool = true) -> int { a + b }
+fn go() -> int { f(1) }
+fn go_named() -> int { f(1, d: \"y\") }";
+    let lua = emit_clean(src, "go");
+    assert!(lua.contains("((1), (7), (0.5), (\"x\"), (true))"), "trailing defaults must be passed:\n{lua}");
+    let lua = emit_clean(src, "go_named");
+    assert!(
+        lua.contains("((1), (7), (0.5), (\"y\"), (true))"),
+        "a named-arg gap and the trailing default must both be passed:\n{lua}"
+    );
+}
+
+#[test]
+fn a_null_default_emits_no_callee_prologue_branch() {
+    let src = "fn g(a: int, b: int? = null) -> int { a }";
+    let lua = emit_clean(src, "g");
+    assert!(!lua.contains("(nil)"), "omitted IS null; no branch may test for it:\n{lua}");
+}
+
+#[test]
+fn a_non_literal_default_stays_callee_filled() {
+    let src = "
+global K: int = 3
+fn h(a: int, b: int = K) -> int { a + b }
+fn go() -> int { h(1) }";
+    let lua = emit_clean(src, "go");
+    assert!(lua.contains("((1))"), "a global-valued default is the callee's to evaluate:\n{lua}");
+    let callee = emit_clean(src, "h");
+    assert!(callee.contains("(nil)"), "the callee prologue must remain:\n{callee}");
+}
+
 #[test]
 fn exec_named_args_reorder() {
     // The named call is rock syntax, so it lives in a rock wrapper; the driver
