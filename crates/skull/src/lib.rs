@@ -1223,9 +1223,12 @@ fn value_struct_gc_defs(
                 })
                 .collect();
             out.push_str(&format!(
-                "{n}_lct = function({p})\n  return setmetatable({{ {b}__ty = \"{n}\" }}, {mt})\nend\n",
+                "{n}_lct = function({p})\n{r}\nend\n",
                 p = params.join(", "),
-                b = assigns.concat(),
+                r = skull_codegen_lua::wrapper_return(&format!(
+                    "setmetatable({{ {b}__ty = \"{n}\" }}, {mt})",
+                    b = assigns.concat(),
+                )),
             ));
             continue;
         }
@@ -1274,9 +1277,12 @@ fn value_struct_gc_defs(
             body.push_str(", ");
         }
         out.push_str(&format!(
-            "{n}_vt = function({p})\n  return setmetatable({{ {b}__ty = \"{n}\" }}, {mt})\nend\n",
+            "{n}_vt = function({p})\n{r}\nend\n",
             p = params.join(", "),
-            b = body,
+            r = skull_codegen_lua::wrapper_return(&format!(
+                "setmetatable({{ {b}__ty = \"{n}\" }}, {mt})",
+                b = body,
+            )),
         ));
     }
     Ok(out)

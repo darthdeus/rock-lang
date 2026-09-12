@@ -1403,6 +1403,46 @@ pub fn index_shape() -> IndexShape {
     })
 }
 
+/// How a one-expression wrapper -- an `extern(ffi)` binding, a value-struct
+/// `_vt`/`_lct` ctor -- hands its result back. `docs/backends.md` carries the
+/// rule; `docs/trace-pressure-work-plan.md` the measurement.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum WrapperRetShape {
+    /// `return lib.f(..)`: a `CALLT` into C. A root trace started at the
+    /// wrapper's entry cannot leave through it (`rec_ret` needs a real `RET`)
+    /// and aborts `leaving loop in root trace` every time it is tried.
+    Tail,
+    /// `local __rock_ret = lib.f(..)` then `return __rock_ret`: one bytecode
+    /// more, a real `RET`, and the root trace links out cleanly.
+    Local,
+}
+
+/// `ROCK_SKULL_WRAPPER_RET` selects the wrapper return shape: `tail` or
+/// `local`. An unset or unrecognized value is the shipped default, so the
+/// switch can only be entered deliberately.
+pub fn wrapper_ret_shape() -> WrapperRetShape {
+    static SHAPE: std::sync::OnceLock<WrapperRetShape> = std::sync::OnceLock::new();
+    *SHAPE.get_or_init(|| match std::env::var("ROCK_SKULL_WRAPPER_RET").as_deref() {
+        Ok("tail") => WrapperRetShape::Tail,
+        Ok("local") => WrapperRetShape::Local,
+        _ => DEFAULT_WRAPPER_RET_SHAPE,
+    })
+}
+
+/// The shipped wrapper return shape.
+pub const DEFAULT_WRAPPER_RET_SHAPE: WrapperRetShape = WrapperRetShape::Local;
+
+/// The return statement(s) of a wrapper whose whole result is `expr`, under
+/// [`wrapper_ret_shape`]. Two-space indented, no trailing newline. The local
+/// is a reserved `__rock` name so it can never shadow a wrapper parameter
+/// that `expr` reads.
+pub fn wrapper_return(expr: &str) -> String {
+    match wrapper_ret_shape() {
+        WrapperRetShape::Tail => format!("  return {expr}"),
+        WrapperRetShape::Local => format!("  local __rock_ret = {expr}\n  return __rock_ret"),
+    }
+}
+
 /// The shipped emitted index shape. `Inline` measured as a redistribution on
 /// mag, not a reduction: the aborts that started inside the helper reappeared
 /// as leaving-loop roots at the callers' own `for` headers, and the first
