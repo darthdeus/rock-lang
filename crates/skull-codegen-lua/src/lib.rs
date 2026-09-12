@@ -677,6 +677,12 @@ pub struct CodegenCtx {
     /// The emitted shape for a call to another emitted function. Read from
     /// `ROCK_SKULL_CALLEE_BINDING` once per context, same as `tail_calls`.
     callee_binding: CalleeBindingMode,
+    /// Whether a mutable-global access under the bound shape reads the Session
+    /// tables through chunk-level upvalue cells instead of walking
+    /// `_G.__rock_active_session.__rock_state`. Read from
+    /// `ROCK_SKULL_STATE_CELL` once per context; only effective under
+    /// [`CalleeBindingMode::Upvalue`], see [`CodegenCtx::state_cell`].
+    state_cell: bool,
     /// The emitted shape for a natural loop that is not a counted `for`. Read
     /// from `ROCK_SKULL_LOOP_SHAPE` once per context, same as `tail_calls`.
     loops: LoopShape,
@@ -699,6 +705,7 @@ impl Clone for CodegenCtx {
             recursive_callees: self.recursive_callees.clone(),
             tail_calls: self.tail_calls,
             callee_binding: self.callee_binding,
+            state_cell: self.state_cell,
             loops: self.loops,
             value_ctor: self.value_ctor,
             call_sccs: self.call_sccs.clone(),
@@ -777,6 +784,7 @@ impl CodegenCtx {
             recursive_callees: HashSet::default(),
             tail_calls: tail_call_shape(),
             callee_binding: callee_binding_mode(),
+            state_cell: state_cell_mode(),
             loops: loop_shape(),
             value_ctor: value_ctor_shape(),
             call_sccs: HashMap::default(),
@@ -805,6 +813,23 @@ impl CodegenCtx {
 
     pub fn callee_binding(&self) -> CalleeBindingMode {
         self.callee_binding
+    }
+
+    /// Override the Session-cell switch this context was built with. The
+    /// production path takes it from `ROCK_SKULL_STATE_CELL`; a test uses this
+    /// so one process can emit both shapes.
+    pub fn set_state_cell(&mut self, on: bool) {
+        self.state_cell = on;
+    }
+
+    /// Whether mutable-global accesses are emitted through the Session cells
+    /// (`__rock_state_cell[k]`) rather than the `_G` walk. Requires the bound
+    /// callee shape: an incremental overlay is a separate chunk that cannot see
+    /// main.lua's chunk-level locals, and the overlay path already pins
+    /// [`CalleeBindingMode::Global`], so tying the cell to that shape keeps the
+    /// two mutually exclusive by the same rule (`docs/backends.md`).
+    pub fn state_cell(&self) -> bool {
+        self.state_cell && self.callee_binding == CalleeBindingMode::Upvalue
     }
 
     /// Override the emitted loop shape this context was built with. The
@@ -1226,6 +1251,21 @@ pub fn callee_binding_mode() -> CalleeBindingMode {
     })
 }
 
+/// Chunk-level local that every emitted function reads a mutable global through
+/// under the bound shape: the active Session's `__rock_state` table. Declared
+/// at the top of the runtime prelude, assigned by `__rock_session_publish`.
+pub const STATE_CELL: &str = "__rock_state_cell";
+/// The sibling cell for the active Session's `__rock_initialized` table.
+pub const INITIALIZED_CELL: &str = "__rock_initialized_cell";
+
+/// `ROCK_SKULL_STATE_CELL=0` keeps the `_G.__rock_active_session.__rock_state`
+/// walk under the bound shape, for A/B measurement. Anything else is the
+/// shipped default: on.
+pub fn state_cell_mode() -> bool {
+    static MODE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *MODE.get_or_init(|| !matches!(std::env::var("ROCK_SKULL_STATE_CELL").as_deref(), Ok("0")))
+}
+
 /// How a natural loop that is NOT a counted `for` is spelled.
 ///
 /// LuaJIT's parser turns a backward `goto` into `BC_LOOP` with `bc_j == -1`
@@ -1487,8 +1527,18 @@ pub fn callee_binding_plan(
     if captures.is_empty() {
         return None;
     }
-    let capped = captures.len() > MAX_BOUND_CALLEES;
-    captures.truncate(MAX_BOUND_CALLEES);
+    // A body that touches a mutable global captures the two Session cells as
+    // upvalues too, against the same 60-upvalue limit the callees count toward.
+    let reserved = if ctx.state_cell()
+        && func.insts.iter().any(|(_, inst)| matches!(inst, Inst::Global(_) | Inst::StoreGlobal { .. }))
+    {
+        2
+    } else {
+        0
+    };
+    let limit = MAX_BOUND_CALLEES - reserved;
+    let capped = captures.len() > limit;
+    captures.truncate(limit);
     Some(CalleeBindingPlan {
         factory: ctx.mint_synthetic(format!("{CALLEE_FACTORY_PREFIX}{name}")),
         name: name.to_string(),
@@ -3270,6 +3320,24 @@ impl Emitter<'_> {
         self.state_slots.contains_key(&name) || self.static_slots.contains_key(&name)
     }
 
+    /// The table a mutable-global access indexes: the chunk-level cell under the
+    /// bound shape, else the `_G` walk an overlay chunk can also perform.
+    fn state_table_expr(&self) -> &'static str {
+        if self.ctx.state_cell() {
+            STATE_CELL
+        } else {
+            "__rock_active_session.__rock_state"
+        }
+    }
+
+    fn initialized_table_expr(&self) -> &'static str {
+        if self.ctx.state_cell() {
+            INITIALIZED_CELL
+        } else {
+            "__rock_active_session.__rock_initialized"
+        }
+    }
+
     fn write_state_slot(&self, out: &mut String, name: ustr::Ustr) {
         if let Some(&slot) = self.state_slots.get(&name) {
             push_uint(out, slot);
@@ -3766,7 +3834,8 @@ impl Emitter<'_> {
                     out.push_str(&lua_string(&identity.logical_key(self.ws, self.interner)));
                     out.push(')');
                 } else if self.has_state_slot(*g) {
-                    out.push_str("__rock_active_session.__rock_state[");
+                    out.push_str(self.state_table_expr());
+                    out.push('[');
                     self.write_state_slot(out, *g);
                     out.push(']');
                 } else {
@@ -4414,11 +4483,15 @@ impl Emitter<'_> {
             }
             Inst::StoreGlobal { name, value } => {
                 if self.has_state_slot(*name) {
-                    out.push_str("  __rock_active_session.__rock_state[");
+                    out.push_str("  ");
+                    out.push_str(self.state_table_expr());
+                    out.push('[');
                     self.write_state_slot(out, *name);
                     out.push_str("] = ");
                     self.write_opnd(out, *value);
-                    out.push_str("\n  __rock_active_session.__rock_initialized[");
+                    out.push_str("\n  ");
+                    out.push_str(self.initialized_table_expr());
+                    out.push('[');
                     self.write_state_slot(out, *name);
                     out.push_str("] = true\n");
                 } else {

@@ -5808,6 +5808,9 @@ fn assemble(
     if !has_state_publication {
         out.push_str("__rock_state_transaction_commit()\n");
     }
+    // Closes the block the runtime prelude opens (Session cells become closed
+    // upvalues here); anything appended after this line runs outside it.
+    out.push_str("end\n");
     t_scaffold += ts.elapsed();
 
     // `times.emit` brackets emit_function/emit_named/emit_coroutine; `times.regalloc`
@@ -6341,6 +6344,19 @@ pub fn emit_full(
 pub struct ShapeOverrides {
     pub callee_binding: Option<skull_codegen_lua::CalleeBindingMode>,
     pub value_ctor: Option<skull_codegen_lua::ValueCtorShape>,
+    pub state_cell: Option<bool>,
+}
+
+/// [`emit_full`] under explicit emitted shapes, overriding every
+/// `ROCK_SKULL_*` shape switch the overrides name. For tests that must emit
+/// several shapes in one process.
+pub fn emit_full_with_shapes(
+    ws: &Workspace,
+    user_mid: ModuleId,
+    shapes: ShapeOverrides,
+) -> Result<(MirEmit, SkullEmitCache), CompilerError> {
+    let _allocation_environment = crate::allocation_report::environment_scope();
+    emit_full_in_with_mutation(ws, user_mid, None, BodyMutation::None, RendererTarget::Gl, shapes)
 }
 
 /// [`emit_full`] under an explicit emitted value-ctor shape, overriding
@@ -6823,6 +6839,9 @@ fn emit_full_in_with_mutation(
     }
     if let Some(shape) = shapes.value_ctor {
         cg.set_value_ctor_shape(shape);
+    }
+    if let Some(on) = shapes.state_cell {
+        cg.set_state_cell(on);
     }
     let setup_lanes = SetupLaneAttribution {
         cpu_population: cpu_lane.population,
@@ -8086,6 +8105,17 @@ fn assemble_overlay(
                          caller holding the old closure would never see the edited body -- \
                          rebuild with ROCK_SKULL_CALLEE_BINDING=global",
                         plan.name
+                    )));
+                }
+                // Same rule, second witness: a Session cell is a chunk-level
+                // local of main.lua, invisible to the overlay chunk.
+                if chunk.lua.contains(skull_codegen_lua::STATE_CELL) {
+                    return Err(CompilerError::new_no_location(format!(
+                        "incremental overlay cannot redefine `{}`: this build reads mutable \
+                         globals through main.lua's Session cell (ROCK_SKULL_STATE_CELL), \
+                         which a separate chunk cannot see -- rebuild with \
+                         ROCK_SKULL_CALLEE_BINDING=global",
+                        ws.module(body.func.module).functions[body.func.func].name
                     )));
                 }
                 definitions.push_str(&chunk.lua)

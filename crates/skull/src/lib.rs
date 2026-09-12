@@ -517,6 +517,17 @@ fn runtime_prelude() -> &'static str {
 
 const PRELUDE_TEMPLATE: &str =
     r#"if jit and jit.opt then local __mc = tonumber(os.getenv("ROCK_JIT_MCODE_KB") or "") or (jit.arch == "arm64" and 16384 or 65536) local __he = tonumber(os.getenv("ROCK_JIT_HOTEXIT") or "") or 100 local __hl = tonumber(os.getenv("ROCK_JIT_HOTLOOP") or "") or 56 local __lu = tonumber(os.getenv("ROCK_JIT_LOOPUNROLL") or "") or 15 local __mt = tonumber(os.getenv("ROCK_JIT_MAXTRACE") or "") or 32000 local __mk = tonumber(os.getenv("ROCK_JIT_MAXIRCONST") or "") or 500 jit.opt.start("maxmcode=" .. __mc, "sizemcode=" .. __mc, "maxtrace=" .. __mt, "maxrecord=32000", "maxsnap=4000", "maxirconst=" .. __mk, "hotexit=" .. __he, "hotloop=" .. __hl, "loopunroll=" .. __lu) end
+-- Everything up to the entry call runs inside one block, so the block's locals
+-- -- the Session cells first of all -- are CLOSED upvalues (UREFC: one guard,
+-- no constant) by the time an emitted function runs under the JIT. Left open,
+-- every inlined frame reading a cell would intern its own 2-slot i64 guard
+-- constant (docs/trace-pressure-work-plan.md, "Session cells"). The matching
+-- `end` is the last line the full emitter writes; the entry call the CLI
+-- appends runs after it.
+do
+-- Chunk-level cells every bound function reads a mutable global through
+-- (docs/backends.md, "Session cells"). Seated by __rock_session_publish below.
+local __rock_state_cell, __rock_initialized_cell
 if not _G.ffi then _G.ffi = require("ffi") end
 if not _G.__ROCK_C_STRUCT then _G.__ROCK_C_STRUCT = {} end
 if not _G.__ROCK_TYPE_TABLE then _G.__ROCK_TYPE_TABLE = {} end
@@ -563,20 +574,6 @@ if not _G.__rock_session_new then
       __rock_rng_state = nil
     }
   end
-  _G.__rock_session_activate = function(session)
-    if type(session) ~= "table" or type(session.__rock_state) ~= "table"
-        or type(session.__rock_initialized) ~= "table" then
-      error("invalid Rock Session", 0)
-    end
-    local published = _G.__rock_state_schema_id
-    if published ~= nil and session.__rock_schema_id ~= published then
-      error("Rock StateSchema does not match the active Session", 0)
-    end
-    _G.__rock_active_session = session
-    _G.__rock_active_state = session.__rock_state
-    _G.__rock_active_initialized = session.__rock_initialized
-    return session
-  end
   _G.__rock_session_current = function()
     local session = _G.__rock_active_session
     if not session then error("no active Rock Session", 0) end
@@ -620,9 +617,45 @@ if not _G.__rock_session_new then
     rawset(_G, "__rock_state_name_index", nil)
   end
 end
+-- THE one writer of the active Session. Every swap -- activation, a state-image
+-- candidate or release, a transaction abort -- publishes through here so the
+-- chunk cells follow it; a function that read `_G.__rock_active_session` on
+-- every access would not need this, a function reading the cell does. Defined
+-- outside the define-once block above so a full reload with a newer artifact
+-- never leaves an older publisher in place that skips this chunk's cells.
+_G.__rock_session_publish = function(session)
+  rawset(_G, "__rock_active_session", session)
+  rawset(_G, "__rock_active_state", session and session.__rock_state or nil)
+  rawset(_G, "__rock_active_initialized", session and session.__rock_initialized or nil)
+  local sinks = rawget(_G, "__rock_state_cell_sinks")
+  if sinks then for i = 1, #sinks do sinks[i](session) end end
+  return session
+end
+_G.__rock_session_activate = function(session)
+  if type(session) ~= "table" or type(session.__rock_state) ~= "table"
+      or type(session.__rock_initialized) ~= "table" then
+    error("invalid Rock Session", 0)
+  end
+  local published = _G.__rock_state_schema_id
+  if published ~= nil and session.__rock_schema_id ~= published then
+    error("Rock StateSchema does not match the active Session", 0)
+  end
+  return _G.__rock_session_publish(session)
+end
+-- One sink per loaded chunk: after a full reload the previous chunk's closures
+-- may still be running, and they read their own cells.
+local __rock_state_cell_sinks = rawget(_G, "__rock_state_cell_sinks") or {}
+rawset(_G, "__rock_state_cell_sinks", __rock_state_cell_sinks)
+__rock_state_cell_sinks[#__rock_state_cell_sinks + 1] = function(session)
+  __rock_state_cell = session and session.__rock_state or nil
+  __rock_initialized_cell = session and session.__rock_initialized or nil
+end
 if not _G.__rock_active_session then
   _G.__rock_session_activate(_G.__rock_session_new(nil))
 end
+-- A reload with a live Session skips the activation above; seat the cells.
+__rock_state_cell = _G.__rock_active_session.__rock_state
+__rock_initialized_cell = _G.__rock_active_session.__rock_initialized
 _G.__rock_state_clear = function(key)
   local session = _G.__rock_session_current()
   session.__rock_state[key] = nil
@@ -654,9 +687,7 @@ _G.__rock_state_transaction_abort = function()
   local transaction = rawget(_G, "__rock_state_transaction")
   if not transaction then return end
   local session = transaction.session
-  rawset(_G, "__rock_active_session", session)
-  rawset(_G, "__rock_active_state", session.__rock_state)
-  rawset(_G, "__rock_active_initialized", session.__rock_initialized)
+  _G.__rock_session_publish(session)
   session.__rock_schema_id = transaction.schema_id
   for key in pairs(session.__rock_state) do session.__rock_state[key] = nil end
   for key, value in pairs(transaction.state) do session.__rock_state[key] = value end
