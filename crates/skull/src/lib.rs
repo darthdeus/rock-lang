@@ -1452,6 +1452,12 @@ fn enum_runtime_defs(ws: &Workspace) -> String {
 /// checkpoint census classifies it as `value_cdata` instead of refusing it as
 /// unmodelled. Mirrors rock-codegen/src/backend/lua/structs.rs.
 ///
+/// Every consumer asks through the stdlib's `__rock_c_struct_of`, which
+/// memoizes the `ffi.istype` scan per CTypeID in `__ROCK_C_STRUCT_BY_CTYPE`.
+/// The rows own that memo's lifetime: it is reset here, after the rows, so a
+/// re-emission (a hot reload that re-runs this scaffolding) can never serve a
+/// row that no longer exists or predates its replacement.
+///
 /// Two producers, one registry. `value` structs are gated by `emitted` — exactly
 /// the structs `value_struct_defs` declared a ctype for, so `ffi.istype` never
 /// names an undefined type. A cdata-eligible enum ([`enum_cdata_defs`]) is the
@@ -1505,6 +1511,7 @@ fn c_struct_inspect_defs(ws: &Workspace, emitted: &rustc_hash::FxHashSet<ustr::U
             ));
         }
     }
+    out.push_str("_G.__ROCK_C_STRUCT_BY_CTYPE = {}\n");
     out
 }
 
