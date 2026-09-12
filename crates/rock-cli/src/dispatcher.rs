@@ -1,5 +1,18 @@
 use crate::*;
 
+/// Special device files cannot serve as an input path: the compiler reads them
+/// more than once and a stream cannot be rewound.
+fn reject_device_path(path: &str) -> Result<()> {
+    if path == "/dev/stdin" || path == "/dev/stdout" || path == "/dev/stderr" {
+        anyhow::bail!(
+            "Cannot use {} as input path. Special device files are not supported.\n\
+             Please provide a regular file or directory path.",
+            path
+        );
+    }
+    Ok(())
+}
+
 pub struct CommandContext {
     pub args: Args,
 }
@@ -253,15 +266,25 @@ impl CommandContext {
             .cloned()
             .unwrap_or_else(|| ".".to_string());
 
-        if path == "/dev/stdin" || path == "/dev/stdout" || path == "/dev/stderr" {
-            anyhow::bail!(
-                "Cannot use {} as input path. Special device files are not supported.\n\
-                 Please provide a regular file or directory path.",
-                path
-            );
-        }
+        reject_device_path(&path)?;
 
         Ok(path)
+    }
+
+    /// Every path argument, for the commands that act on a list rather than on
+    /// one entry point. `get_path_or_current` drops everything after the first.
+    pub fn get_paths_or_current(&self) -> Result<Vec<String>> {
+        let paths = if self.args.files.is_empty() {
+            vec![".".to_string()]
+        } else {
+            self.args.files.clone()
+        };
+
+        for path in &paths {
+            reject_device_path(path)?;
+        }
+
+        Ok(paths)
     }
 
     pub fn get_output_or_default(&self, default: &str) -> Result<String> {
@@ -884,8 +907,8 @@ impl CommandContext {
         // Backend-agnostic kept commands: dispatched before the backend switch so
         // they never depend on a backend (the legacy rock execution arm is gone).
         if self.args.command == CliCommand::Fmt {
-            let path = self.get_path_or_current()?;
-            return match do_fmt(&path, !self.args.stdout, self.args.check) {
+            let paths = self.get_paths_or_current()?;
+            return match do_fmt(&paths, !self.args.stdout, self.args.check) {
                 Ok(_) => Ok(()),
                 Err(e) => {
                     log::error!(target: "FMT", "{}", e);
