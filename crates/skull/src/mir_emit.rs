@@ -1720,6 +1720,34 @@ pub fn lua_global_state_slots(
         .collect())
 }
 
+/// The Session table sizes the prelude reserves (`docs/backends.md`, "Session
+/// cells"): the array part at the rehash fixpoint of the highest compiler slot
+/// -- the next power of two, plus one for index 0, which is what LuaJIT's
+/// `rehashtab` settles on once more than half of that range is populated, so a
+/// later rehash cannot move it -- and a hash part with twice the schema's string
+/// keys, so no static's first store overflows it. Returns the capacity line and
+/// the reserve call, or `None` under `ROCK_SKULL_STATE_RESERVE=0`.
+fn state_capacity_lua(
+    schema: &skull_mir::state_schema::StateSchema,
+    cg: &CodegenCtx,
+) -> Option<(String, &'static str)> {
+    if !skull_codegen_lua::state_reserve_mode() {
+        return None;
+    }
+    let narr = cg.state_slot_max().next_power_of_two() + 1;
+    let string_keys: usize = schema
+        .entries
+        .iter()
+        .filter(|entry| entry.kind != skull_mir::state_schema::StateKind::Global)
+        .map(|entry| skull_mir::state_schema::entry_state_keys(entry).len())
+        .sum();
+    let nhash = (string_keys * 2).next_power_of_two().max(16);
+    Some((
+        format!("_G.__ROCK_STATE_CAPACITY = {{{narr}, {nhash}}}\n"),
+        "__rock_state_reserve_active()\n",
+    ))
+}
+
 fn state_schema_lua(
     schema: &skull_mir::state_schema::StateSchema,
     cg: &CodegenCtx,
@@ -5675,6 +5703,10 @@ fn assemble(
         || lifecycle_plan.census.declarations > 0;
     let has_state_publication = has_code_slot_publication || has_artifact_plans;
     out.push_str("__rock_state_transaction_begin()\n");
+    let state_capacity = state_capacity_lua(&state_schema, cg);
+    if let Some((line, _)) = &state_capacity {
+        out.push_str(line);
+    }
     out.push_str(&format!(
         "__rock_state_publish_schema({:?})\n",
         state_schema.schema_id
@@ -5684,6 +5716,9 @@ fn assemble(
         "__rock_state_schema_stage_part",
         &state_schema_stage,
     ));
+    if let Some((_, call)) = &state_capacity {
+        out.push_str(call);
+    }
 
     // Globals: an init fn + a dependency-ordered `<NAME> = __skull_ginit_<NAME>()`.
     // (Lowered above, so the walk could see their call edges; appended here, in

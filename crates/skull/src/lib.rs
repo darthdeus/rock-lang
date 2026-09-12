@@ -528,6 +528,7 @@ do
 -- Chunk-level cells every bound function reads a mutable global through
 -- (docs/backends.md, "Session cells"). Seated by __rock_session_publish below.
 local __rock_state_cell, __rock_initialized_cell
+local __rock_table_new = require("table.new")
 if not _G.ffi then _G.ffi = require("ffi") end
 if not _G.__ROCK_C_STRUCT then _G.__ROCK_C_STRUCT = {} end
 if not _G.__ROCK_TYPE_TABLE then _G.__ROCK_TYPE_TABLE = {} end
@@ -564,16 +565,51 @@ end
 _G.__rock_nb_storage = __rock_nb_storage
 {NB_PRIM_STORAGE}
 if not _G.__rock_on_hot_reload then _G.__rock_on_hot_reload = {} end
-if not _G.__rock_session_new then
-  _G.__rock_session_new = function(schema_id)
-    return {
-      __rock_schema_id = schema_id,
-      __rock_state = {},
-      __rock_initialized = {},
-      __rock_initializer_keys = {},
-      __rock_rng_state = nil
-    }
-  end
+-- A Session's state tables are sized to the schema's rehash fixpoint
+-- (`_G.__ROCK_STATE_CAPACITY`, emitted by the compiler; `__rock_state_reserve`
+-- below) so their array part never moves after load. LuaJIT specialises a
+-- constant-key read to the table's CURRENT array/hash split, and a table that
+-- grows lazily from `{}` rehashes once per hash-part overflow -- each time
+-- recomputing the array part from the keys populated so far -- which left
+-- every trace recorded before a move with a permanently failing guard
+-- (`docs/backends.md`, "Session cells"). Defined outside the define-once block
+-- so a reload with a newer artifact never keeps an older constructor.
+_G.__rock_session_new = function(schema_id)
+  local capacity = rawget(_G, "__ROCK_STATE_CAPACITY")
+  local narr, nhash = 0, 0
+  if capacity then narr, nhash = capacity[1], capacity[2] end
+  return {
+    __rock_schema_id = schema_id,
+    __rock_state = __rock_table_new(narr, nhash),
+    __rock_initialized = __rock_table_new(narr, nhash),
+    __rock_initializer_keys = {},
+    __rock_rng_state = nil,
+    __rock_state_capacity = { narr, nhash }
+  }
+end
+-- Grow a Session's tables to at least (narr, nhash) by rebuilding them at that
+-- size; values and keys are preserved. The first Session is created above
+-- before the compiler's capacity line runs, and a full reload may raise the
+-- capacity, so this is what seats the fixpoint on a live Session.
+_G.__rock_state_reserve = function(session, narr, nhash)
+  local have = session.__rock_state_capacity
+  if have and have[1] >= narr and have[2] >= nhash then return end
+  local state = __rock_table_new(narr, nhash)
+  for key, value in pairs(session.__rock_state) do state[key] = value end
+  local initialized = __rock_table_new(narr, nhash)
+  for key, value in pairs(session.__rock_initialized) do initialized[key] = value end
+  session.__rock_state = state
+  session.__rock_initialized = initialized
+  session.__rock_state_capacity = { narr, nhash }
+  if rawget(_G, "__rock_active_session") == session then _G.__rock_session_publish(session) end
+end
+_G.__rock_state_reserve_active = function()
+  local capacity = rawget(_G, "__ROCK_STATE_CAPACITY")
+  if not capacity then return end
+  _G.__rock_state_reserve(_G.__rock_active_session, capacity[1], capacity[2])
+end
+if not _G.__rock_session_new_defined_once then
+  _G.__rock_session_new_defined_once = true
   _G.__rock_session_current = function()
     local session = _G.__rock_active_session
     if not session then error("no active Rock Session", 0) end

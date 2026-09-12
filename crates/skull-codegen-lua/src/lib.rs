@@ -925,6 +925,12 @@ impl CodegenCtx {
     pub fn state_slot(&self, name: ustr::Ustr) -> Option<u32> {
         self.state_slots.get(&name).copied()
     }
+
+    /// The highest compiler-assigned Session slot, 0 when there is none. The
+    /// emitter sizes every Session's array part to this slot's rehash fixpoint.
+    pub fn state_slot_max(&self) -> u32 {
+        self.state_slots.values().copied().max().unwrap_or(0)
+    }
 }
 
 /// Cells REFERENCED (Load/Store/`MapNext` or multi-return dest) anywhere the top
@@ -1257,6 +1263,14 @@ pub fn callee_binding_mode() -> CalleeBindingMode {
 pub const STATE_CELL: &str = "__rock_state_cell";
 /// The sibling cell for the active Session's `__rock_initialized` table.
 pub const INITIALIZED_CELL: &str = "__rock_initialized_cell";
+
+/// `ROCK_SKULL_STATE_RESERVE=0` leaves every Session's tables to grow lazily
+/// from `{}` instead of sizing them to the schema's rehash fixpoint at load
+/// (`docs/backends.md`, "Session cells"), for A/B measurement. Default: on.
+pub fn state_reserve_mode() -> bool {
+    static MODE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *MODE.get_or_init(|| !matches!(std::env::var("ROCK_SKULL_STATE_RESERVE").as_deref(), Ok("0")))
+}
 
 /// `ROCK_SKULL_STATE_CELL=0` keeps the `_G.__rock_active_session.__rock_state`
 /// walk under the bound shape, for A/B measurement. Anything else is the

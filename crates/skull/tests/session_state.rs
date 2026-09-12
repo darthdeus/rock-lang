@@ -409,3 +409,66 @@ print({probe}())
     );
     assert_eq!(run_luajit(&program, "session_cells_mid_call"), "741");
 }
+
+// --- Session tables sized from the schema (docs/backends.md, "Session cells") --
+//
+// LuaJIT specialises a constant-key read to the table's CURRENT array/hash
+// split (`ULE asize` / `ABC` guard). `__rock_state` used to start as `{}` and
+// grow lazily, and every rehash (one per hash-part overflow as statics fill in)
+// recomputed the array part from the populated keys, so a trace recorded before
+// a move carried a permanently failing guard: a doomed side exit with the
+// caller's floats live, 468 aborts a run at one site, plus the interpreted
+// remainder of every execution after. The emitter now publishes the schema's
+// rehash fixpoint and the prelude sizes every Session's tables to it.
+
+#[test]
+fn the_emitter_publishes_a_state_capacity_and_reserves_it_before_initializing() {
+    let lua = emit_shaped(FIXTURE, CalleeBindingMode::Upvalue, None);
+    // COUNTER is slot 5 (`lua_global_session_slots_are_dense_numeric_realizations`):
+    // the array fixpoint is the next power of two above the highest slot, plus
+    // one for index 0; the hash part has a 16-node floor.
+    let line = lua
+        .lines()
+        .find(|l| l.starts_with("_G.__ROCK_STATE_CAPACITY = {"))
+        .expect("capacity line");
+    let nums: Vec<usize> = line
+        .trim_start_matches("_G.__ROCK_STATE_CAPACITY = {")
+        .trim_end_matches('}')
+        .split(", ")
+        .map(|n| n.parse().expect("capacity number"))
+        .collect();
+    assert_eq!(nums[0], 9, "array fixpoint of slot 5 is 8 + 1: {line}");
+    // The hash size counts the stdlib's own statics too, so pin its shape, not
+    // its value: a power of two no smaller than the 16-node floor.
+    assert!(nums[1] >= 16 && nums[1].is_power_of_two(), "hash capacity shape: {line}");
+    let cap = lua.find("_G.__ROCK_STATE_CAPACITY = ").expect("capacity line");
+    let reserve = lua.find("\n__rock_state_reserve_active()\n").expect("reserve call");
+    let init = lua.find("\n__rock_state_initialize()\n").expect("initialize call");
+    assert!(cap < reserve && reserve < init, "capacity, then reserve, then initialize");
+    assert!(
+        lua.contains("__rock_table_new(narr, nhash)"),
+        "sessions must be built with table.new, not `{{}}`"
+    );
+}
+
+#[test]
+fn every_session_carries_the_reserved_capacity_and_keeps_its_values() {
+    let lua = emit_shaped(FIXTURE, CalleeBindingMode::Upvalue, None);
+    let bump = mangled_name(&lua, "bump");
+    let program = format!(
+        "{lua}
+local a = __rock_active_session
+local schema = __rock_state_schema_id
+print({bump}())
+local b = __rock_session_new(schema)
+__rock_session_activate(b)
+__rock_state_initialize()
+print({bump}())
+__rock_session_activate(a)
+print({bump}())
+print(a.__rock_state_capacity[1], b.__rock_state_capacity[1],
+  a.__rock_state_capacity[2] == b.__rock_state_capacity[2] and a.__rock_state_capacity[2] >= 16)
+"
+    );
+    assert_eq!(run_luajit(&program, "session_capacity"), "1\n1\n2\n9\t9\ttrue");
+}
