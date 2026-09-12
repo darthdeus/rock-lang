@@ -514,6 +514,9 @@ end
 /// provides them (`stdlib/unified.rock`); stdlib-free test harnesses prepend
 /// this so emitted chunks stay self-contained.
 pub const VEC_CHECK_SHIMS: &str = "\
+function __rock_vec_oob(vec, i)\n\
+  error('Vec index out of bounds')\n\
+end\n\
 function __vec_checked_get(vec, i)\n\
   if i < 0 or i >= vec.len then error('Vec index out of bounds') end\n\
   return vec._data[i + 1]\n\
@@ -689,6 +692,9 @@ pub struct CodegenCtx {
     /// The emitted shape for a GC-tier `value` struct construction. Read from
     /// `ROCK_SKULL_VALUE_CTOR` once per context, same as `tail_calls`.
     value_ctor: ValueCtorShape,
+    /// The emitted shape for a bounds-checked Vec access. Read from
+    /// `ROCK_SKULL_INDEX_SHAPE` once per context, same as `tail_calls`.
+    index_shape: IndexShape,
     /// Every function's strongly connected component number over the
     /// whole-program call graph, from [`call_sccs`]. Read ONLY by
     /// [`callee_binding_plan`]; empty on any path that never populated it,
@@ -708,6 +714,7 @@ impl Clone for CodegenCtx {
             state_cell: self.state_cell,
             loops: self.loops,
             value_ctor: self.value_ctor,
+            index_shape: self.index_shape,
             call_sccs: self.call_sccs.clone(),
         }
     }
@@ -787,6 +794,7 @@ impl CodegenCtx {
             state_cell: state_cell_mode(),
             loops: loop_shape(),
             value_ctor: value_ctor_shape(),
+            index_shape: index_shape(),
             call_sccs: HashMap::default(),
         }
     }
@@ -852,6 +860,17 @@ impl CodegenCtx {
 
     pub fn value_ctor_shape(&self) -> ValueCtorShape {
         self.value_ctor
+    }
+
+    /// Override the emitted index shape this context was built with. The
+    /// production path takes it from `ROCK_SKULL_INDEX_SHAPE`; a test uses this
+    /// so one process can emit both shapes.
+    pub fn set_index_shape(&mut self, shape: IndexShape) {
+        self.index_shape = shape;
+    }
+
+    pub fn index_shape(&self) -> IndexShape {
+        self.index_shape
     }
 
     /// Record every function's call-graph strongly connected component. The
@@ -1355,6 +1374,41 @@ pub fn value_ctor_shape() -> ValueCtorShape {
 
 /// The shipped emitted value-ctor shape.
 pub const DEFAULT_VALUE_CTOR_SHAPE: ValueCtorShape = ValueCtorShape::Call;
+
+/// How a bounds-checked Vec element read, store or column index is spelled.
+/// `docs/backends.md` carries the rule; `docs/trace-pressure-work-plan.md` the
+/// measurement.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum IndexShape {
+    /// Every access calls the stdlib helper (`__vec_checked_get` and kin). In a
+    /// trace that is one callee constant per trace plus one frame-link constant
+    /// per site, and the helper's own entry is a trace root.
+    Call,
+    /// An access whose base and index render as bare names spells the check
+    /// itself: `if i < 0 or i >= v.len then __rock_vec_oob(v, i) end` and then
+    /// the raw `_data` access. An operand that is a folded expression keeps the
+    /// call, because the guard names each operand twice.
+    Inline,
+}
+
+/// `ROCK_SKULL_INDEX_SHAPE` selects the emitted shape for a bounds-checked Vec
+/// access: `call` or `inline`. An unset or unrecognized value is the shipped
+/// default, so the switch can only be entered deliberately.
+pub fn index_shape() -> IndexShape {
+    static SHAPE: std::sync::OnceLock<IndexShape> = std::sync::OnceLock::new();
+    *SHAPE.get_or_init(|| match std::env::var("ROCK_SKULL_INDEX_SHAPE").as_deref() {
+        Ok("call") => IndexShape::Call,
+        Ok("inline") => IndexShape::Inline,
+        _ => DEFAULT_INDEX_SHAPE,
+    })
+}
+
+/// The shipped emitted index shape. `Inline` measured as a redistribution on
+/// mag, not a reduction: the aborts that started inside the helper reappeared
+/// as leaving-loop roots at the callers' own `for` headers, and the first
+/// frames got no faster (`docs/trace-pressure-work-plan.md`, "Checked-index
+/// helpers inlined at the emitter").
+pub const DEFAULT_INDEX_SHAPE: IndexShape = IndexShape::Call;
 
 /// The shared per-type metatable global of a GC-tier `value` struct -- the table
 /// every instance of `<name>` carries, so LuaJIT's `__eq` fires between any two
@@ -3665,6 +3719,9 @@ impl Emitter<'_> {
         {
             return;
         }
+        if self.try_emit_inline_index(out, id) {
+            return;
+        }
         let inst = &self.func.insts[id];
         if inst.produces_value() {
             out.push_str("  ");
@@ -3765,6 +3822,77 @@ impl Emitter<'_> {
     /// Render a reference to value `id` as an operand directly into `out`: its
     /// register `r<color>`, or — if it was tree-folded — its expression in
     /// parentheses, recursively. Every value-operand reference goes through here.
+    /// True if `id` renders in operand position as a bare name or a literal --
+    /// a register, a cell, a hoisted module global or a constant -- so an inline
+    /// shape may spell it twice without re-evaluating an expression or
+    /// repeating an allocation (`MakeVec` and `StringConcat` fold too).
+    fn opnd_is_plain(&self, id: Idx<Inst>) -> bool {
+        if self.hoist.contains_key(&id) || !self.inlinable[raw(id) as usize] {
+            return true;
+        }
+        matches!(self.func.insts[id], Inst::Load(_) | Inst::Const(_))
+    }
+
+    /// The inline index shape is selected and both operands may be named twice.
+    fn inline_index_operands(&self, base: Idx<Inst>, index: Idx<Inst>) -> bool {
+        self.ctx.index_shape() == IndexShape::Inline
+            && self.opnd_is_plain(base)
+            && self.opnd_is_plain(index)
+    }
+
+    /// `if i < 0 or i >= v.len then __rock_vec_oob(v, i) end`. The failing
+    /// branch is never recorded, so the message text lives in the one cold
+    /// stdlib function rather than in every indexing function's constants.
+    fn write_vec_bounds_guard(&self, out: &mut String, base: Idx<Inst>, index: Idx<Inst>) {
+        out.push_str("  if ");
+        self.write_opnd(out, index);
+        out.push_str(" < 0 or ");
+        self.write_opnd(out, index);
+        out.push_str(" >= ");
+        self.write_opnd(out, base);
+        out.push_str(".len then __rock_vec_oob(");
+        self.write_opnd(out, base);
+        out.push_str(", ");
+        self.write_opnd(out, index);
+        out.push_str(") end\n");
+    }
+
+    /// Emit a bounds-checked Vec read (`Inst::Index { kind: Vec }`) or column
+    /// index (`Inst::VecCheckedIndex`) as the inline guard followed by ONE
+    /// assignment, when the shape is selected and the operands are plain.
+    /// Returns false to let the caller emit the helper call. The destination
+    /// register usually aliases an operand, so the guard must read both
+    /// operands before anything is assigned.
+    fn try_emit_inline_index(&self, out: &mut String, id: Idx<Inst>) -> bool {
+        match &self.func.insts[id] {
+            Inst::Index {
+                base,
+                index,
+                kind: ContainerKind::Vec,
+            } if self.inline_index_operands(*base, *index) => {
+                self.write_vec_bounds_guard(out, *base, *index);
+                out.push_str("  ");
+                write_vname(out, self.func, &self.colors, id);
+                out.push_str(" = ");
+                self.write_opnd(out, *base);
+                out.push_str("._data[");
+                self.write_opnd(out, *index);
+                out.push_str(" + 1]\n");
+                true
+            }
+            Inst::VecCheckedIndex { vec, index } if self.inline_index_operands(*vec, *index) => {
+                self.write_vec_bounds_guard(out, *vec, *index);
+                out.push_str("  ");
+                write_vname(out, self.func, &self.colors, id);
+                out.push_str(" = ");
+                self.write_opnd(out, *index);
+                out.push_str(" + 1\n");
+                true
+            }
+            _ => false,
+        }
+    }
+
     fn write_opnd(&self, out: &mut String, id: Idx<Inst>) {
         if self.inlinable[raw(id) as usize] {
             if let Inst::Load(cell) = self.func.insts[id] {
@@ -4463,13 +4591,24 @@ impl Emitter<'_> {
                         out.push_str(")\n");
                     }
                     ContainerKind::Vec => {
-                        out.push_str("  __vec_checked_set(");
-                        self.write_opnd(out, *base);
-                        out.push_str(", ");
-                        self.write_opnd(out, *index);
-                        out.push_str(", ");
-                        self.write_opnd(out, *value);
-                        out.push_str(")\n");
+                        if self.inline_index_operands(*base, *index) {
+                            self.write_vec_bounds_guard(out, *base, *index);
+                            out.push_str("  ");
+                            self.write_opnd(out, *base);
+                            out.push_str("._data[");
+                            self.write_opnd(out, *index);
+                            out.push_str(" + 1] = ");
+                            self.write_opnd(out, *value);
+                            out.push('\n');
+                        } else {
+                            out.push_str("  __vec_checked_set(");
+                            self.write_opnd(out, *base);
+                            out.push_str(", ");
+                            self.write_opnd(out, *index);
+                            out.push_str(", ");
+                            self.write_opnd(out, *value);
+                            out.push_str(")\n");
+                        }
                     }
                     // Raw 1-based write into one leaf column; the owning Vec's
                     // `len` was checked once by `VecCheckedIndex`.

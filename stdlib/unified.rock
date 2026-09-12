@@ -1185,6 +1185,17 @@ fn vec_set<T>(vec: [T], index: int, value: T) {
 // Bounds-checked indexing helpers, emitted by codegen for `xs[i]` reads and
 // stores (the __nb_checked_* pattern; release stripping is the same future
 // release-mode work). `.get(i)` above is the null-returning form.
+//
+// Under the inline index shape (`ROCK_SKULL_INDEX_SHAPE`, docs/backends.md)
+// codegen spells the check itself and calls only this cold function on the
+// failing path, so no indexing function carries the message text and no trace
+// records a helper frame. The `__vec_checked_*` calls remain for operands the
+// emitter cannot name twice.
+@nomangle inline(lua) fn __rock_vec_oob(vec: any, i: int) = """
+    error("Vec index out of bounds: index " .. tostring(i) ..
+          " is outside [0, " .. tostring(vec.len) .. ")")
+"""
+
 @nomangle inline(lua) fn __vec_checked_get(vec: any, i: int) -> any = """
     if i < 0 or i >= vec.len then
         error("Vec index out of bounds: index " .. tostring(i) ..

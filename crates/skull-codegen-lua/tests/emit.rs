@@ -87,6 +87,28 @@ fn emit(src: &str, fn_name: &str) -> String {
     emit_dump(vec![ast], fn_name)
 }
 
+/// [`emit`] under an explicit bounds-checked index shape.
+fn emit_indexed(src: &str, fn_name: &str, shape: skull_codegen_lua::IndexShape) -> String {
+    let ast = skull_parser::parse_module_clean(src, ustr::Ustr::from("<test>")).expect("parse");
+    let mut modules = vec![ast];
+    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
+    let mid = *ws
+        .module_ids
+        .get(&ustr::Ustr::from("<test>"))
+        .expect("user module id");
+    let m = ws.module(mid);
+    let (fid, _) = m
+        .functions
+        .iter()
+        .find(|(_, f)| f.name.as_str() == fn_name)
+        .expect("function by name");
+    let (func, interner) = common::lower_test_ref(&ws, mid, fid)
+        .unwrap_or_else(|e| panic!("lower failed: {}", e.message));
+    let mut ctx = CodegenCtx::new(&ws);
+    ctx.set_index_shape(shape);
+    emit_function(&ws, &ctx, &interner, FuncRef { module: mid, func: fid }, &func, None)
+}
+
 #[test]
 fn numeric_selection_uses_native_minmax() {
     let lua = emit_clean("fn choose(a: float, b: float) -> float { return if a < b { a } else { b } }", "choose");
@@ -1098,8 +1120,10 @@ fn for_vec_backed_iter_inline_emits_forl() {
         lua.contains("for "),
         "vec-backed desugared loop must print as a numeric `for` (bound hoisted):\n{lua}"
     );
+    // The element read's own bounds guard (`i >= v.len then __rock_vec_oob`)
+    // is the one `>=` the body may keep.
     assert!(
-        !lua.contains(">="),
+        !lua.lines().any(|l| l.contains(">=") && !l.contains("__rock_vec_oob(")),
         "the slot exit-compare must be absorbed into the `for` header:\n{lua}"
     );
 }
@@ -1848,4 +1872,58 @@ fn structured_and_goto_shapes_compute_the_same_under_luajit() {
             "the two shapes disagree at n={n}"
         );
     }
+}
+
+/// The shipped shape calls the stdlib helper: the inline shape measured as a
+/// redistribution of aborts on mag, not a reduction (docs/backends.md).
+#[test]
+fn vec_index_read_calls_the_checked_helper_by_default() {
+    let lua = emit("fn f(xs: [int], i: int) -> int { return xs[i] }", "f");
+    assert!(lua.contains("__vec_checked_get("), "{lua}");
+    assert!(!lua.contains("__rock_vec_oob("), "{lua}");
+}
+
+/// Under `ROCK_SKULL_INDEX_SHAPE=inline`, a Vec read whose operands are
+/// registers or cells spells its bounds check inline -- the guard, the cold
+/// out-of-line error call, then the raw `_data` read -- instead of calling
+/// `__vec_checked_get`.
+#[test]
+fn vec_index_read_inlines_the_bounds_check() {
+    let lua = emit_indexed(
+        "fn f(xs: [int], i: int) -> int { return xs[i] }",
+        "f",
+        skull_codegen_lua::IndexShape::Inline,
+    );
+    assert!(!lua.contains("__vec_checked_get("), "{lua}");
+    assert!(lua.contains("__rock_vec_oob("), "{lua}");
+    assert!(lua.contains("._data["), "{lua}");
+    assert!(lua.contains(".len then"), "{lua}");
+}
+
+/// A Vec store with register/cell base and index spells the same guard and
+/// then a raw `_data` store; the stored value is evaluated once.
+#[test]
+fn vec_index_store_inlines_the_bounds_check() {
+    let lua = emit_indexed(
+        "fn f(xs: [int], i: int, v: int) { xs[i] = v }",
+        "f",
+        skull_codegen_lua::IndexShape::Inline,
+    );
+    assert!(!lua.contains("__vec_checked_set("), "{lua}");
+    assert!(lua.contains("__rock_vec_oob("), "{lua}");
+    assert!(lua.contains("._data["), "{lua}");
+}
+
+/// The inline shape names each operand twice, so a base that renders as a
+/// folded expression (here an allocating vec literal) must keep the call:
+/// duplicating it would allocate twice.
+#[test]
+fn vec_index_with_folded_base_keeps_the_checked_call() {
+    let lua = emit_indexed(
+        "fn f(i: int) -> int { return [1, 2, 3][i] }",
+        "f",
+        skull_codegen_lua::IndexShape::Inline,
+    );
+    assert!(lua.contains("__vec_checked_get("), "{lua}");
+    assert!(!lua.contains("__rock_vec_oob("), "{lua}");
 }
