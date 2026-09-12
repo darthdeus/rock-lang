@@ -1783,34 +1783,29 @@ fn structured_several_exits_stay_plain_gotos_out_of_the_block() {
     assert!(backward_gotos(&lua).is_empty(), "no back edge may remain:\n{lua}");
 }
 
-/// An iterator loop nested inside another loop is the shape FORL recovery bails
-/// on (its preheader is reachable from its body through the enclosing back
-/// edge), so it stays a goto loop -- the largest census bucket. The structured
-/// shape must reach it.
+/// An iterator loop nested inside another loop: its preheader is reachable
+/// from its body through the enclosing back edge, which a body-reachability
+/// split read as a second back edge and bailed on. Back edges are the head's
+/// predecessors that the head DOMINATES; the preheader never is. Both loops
+/// print as counted `for`s and no backward goto survives, under either loop
+/// shape.
 #[test]
-fn structured_reaches_the_nested_iterator_loop_forl_recovery_misses() {
+fn nested_iterator_loop_is_recovered_as_a_counted_for() {
     let src = "\
 struct B { slot: int }\n\
 struct D { bindings: [B] }\n\
 fn f(ds: [D]) -> int { for d in ds { for b in d.bindings { if b.slot < 0 { return 1 } } }; 0 }";
-    let goto = emit_inlined_shaped(src, "f", LoopShape::Goto);
-    assert!(goto.contains("goto bb"), "sanity: the goto shape has gotos:\n{goto}");
-    assert_eq!(
-        backward_gotos(&goto).len(),
-        1,
-        "the nested iterator loop is one backward goto:\n{goto}"
-    );
-    let lua = emit_inlined_shaped(src, "f", LoopShape::Structured);
-    assert!(lua.contains("while true do"), "the nested loop must become a `while`:\n{lua}");
-    assert!(lua.contains("::lc"), "with a continue label:\n{lua}");
-    assert!(
-        backward_gotos(&lua).is_empty(),
-        "no backward goto may survive the structured shape:\n{lua}"
-    );
+    for shape in [LoopShape::Goto, LoopShape::Structured] {
+        let lua = emit_inlined_shaped(src, "f", shape);
+        let fors = lua.lines().filter(|l| l.trim_start().starts_with("for ")).count();
+        assert_eq!(fors, 2, "both iterator loops must print as counted `for`s ({shape:?}):\n{lua}");
+        assert!(backward_gotos(&lua).is_empty(), "no back edge may remain ({shape:?}):\n{lua}");
+        assert!(!lua.contains("while true do"), "nothing is left for the structured shape ({shape:?}):\n{lua}");
+    }
 }
 
 /// `expand_for` is untouched: a recognized counted loop prints as a Lua `for`
-/// under BOTH shapes, and the outer loop here is one.
+/// under BOTH shapes, and both loops here are recognized.
 #[test]
 fn structured_preserves_the_counted_for_exactly() {
     let src = "\
@@ -1820,7 +1815,7 @@ fn f(ds: [D]) -> int { for d in ds { for b in d.bindings { if b.slot < 0 { retur
     let goto = emit_inlined_shaped(src, "f", LoopShape::Goto);
     let structured = emit_inlined_shaped(src, "f", LoopShape::Structured);
     let fors = |s: &str| s.lines().filter(|l| l.trim_start().starts_with("for c")).count();
-    assert_eq!(fors(&goto), 1, "one counted `for` expected:\n{goto}");
+    assert_eq!(fors(&goto), 2, "two counted `for`s expected:\n{goto}");
     assert_eq!(fors(&structured), fors(&goto), "the counted `for` must survive:\n{structured}");
 }
 
@@ -1872,6 +1867,28 @@ fn structured_and_goto_shapes_compute_the_same_under_luajit() {
             "the two shapes disagree at n={n}"
         );
     }
+}
+
+/// The recovered nested iterator loop computes what the goto loop computed:
+/// every inner bound is re-read per outer iteration, an empty inner vec runs
+/// zero times, and an early `return` out of the inner loop still fires.
+#[test]
+fn recovered_nested_iterator_loop_computes_the_same_under_luajit() {
+    let src = "\
+struct B { slot: int }\n\
+struct D { bindings: [B] }\n\
+fn f(ds: [D], stop: int) -> int {\n\
+    let t = 0\n\
+    for d in ds { for b in d.bindings { if b.slot == stop { return t - 1000 }; t = t + b.slot } }\n\
+    t\n\
+}\n\
+fn probe(stop: int) -> int {\n\
+    let ds = [D { bindings: [B { slot: 1 }, B { slot: 2 }] }, D { bindings: [] }, D { bindings: [B { slot: 3 }, B { slot: 4 }, B { slot: 5 }] }]\n\
+    f(ds, stop)\n\
+}";
+    assert_eq!(run(src, "probe(99)"), "15");
+    assert_eq!(run(src, "probe(3)"), "-997");
+    assert_eq!(run(src, "probe(1)"), "-1000");
 }
 
 /// The shipped shape calls the stdlib helper: the inline shape measured as a
