@@ -2709,10 +2709,32 @@ const RUNNER_OWNED_ENV_KEYS: &[&str] =
 /// Only fixed literals belong here. `STONE_ASSET_STUB` and `STONE_AUDIO_STUB`
 /// are computed from the group's own composition, so discounting them would be
 /// circular -- the value depends on the grouping this decides.
+///
+/// `STONE_IMAGE_MAX_SIDE` holds every loaded image's GL storage to this many
+/// texels on the longer side while its LOGICAL size stays the file's own, so
+/// frame rects, sheet indices and UVs are unchanged and only sampling
+/// resolution drops. A rendering mag worker holds 3.2 GB of RGBA8 texture
+/// pixels without it, which is what stops a second suite fitting in this
+/// machine's memory (`docs/sim-audits-2026-09-11/headless-vram-report.md`). A
+/// sim whose assertion genuinely needs the file's own texels declares
+/// `@sim_env("STONE_IMAGE_MAX_SIDE", "0")`, which is a real boot difference and
+/// isolates it from the capped group. No production boot publishes it: `rock
+/// run`, `rock frame`, `rock perf` and `rock stone` build their own child
+/// environments and never read this table.
+///
+/// 1024 is the MEASURED value, not a chosen one. mag's rendered sims pass at
+/// 2048 and 1024 and fail at 512 and 256, deterministically and identically
+/// across repeats, with a Metal GPU hang on the first rendered frame rather
+/// than an assertion: `chain_lightning_look` alone was run twice at each of the
+/// four values. The cause is cumulative -- no single asset class reproduces it,
+/// and excluding either the in-repo assets or the vault's makes it go away --
+/// so pushing lower needs that hang root-caused first. See the report section
+/// dated 2026-09-12 in the file above.
 const RUNNER_BASELINE_ENV: &[(&str, &str)] = &[
     ("ROCK_TEST_SEED", "42"),
     ("SIM_SKIP_RENDER", "1"),
     ("STONE_HEADLESS", "1"),
+    ("STONE_IMAGE_MAX_SIDE", "1024"),
 ];
 
 /// The opt-in a fixture declares to move one of its own `@sim_env` keys off the

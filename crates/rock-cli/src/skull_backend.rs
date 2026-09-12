@@ -845,17 +845,54 @@ fn skull_build_package(dir: &str) -> std::result::Result<SkullOutcome, SkullFail
         reason: categorize(&e.message),
         rendered: render_project_err(&sources, &e),
     })?;
-    let lua = match configured_stone_dir(std::path::Path::new(dir)) {
-        Ok(Some(stone_dir)) => prepend_stone_root(lua, &stone_dir),
-        Ok(None) => lua,
-        Err(error) => {
-            return Err(SkullFailure {
-                reason: "Stone root resolution failed".to_string(),
-                rendered: error.to_string(),
-            })
-        }
-    };
+    let lua = prepend_package_preamble(lua, dir)?;
     run_emitted_tests(&lua, &tests)
+}
+
+/// The preamble a package's `@test`s run under.
+///
+/// A GAME package gets the game preamble -- the same `__ROCK_GAME_SOURCE_DIR`,
+/// asset overlays, stone root and renderer the game itself boots with -- and its
+/// engine cdylib staged, so a `@test` resolves an `asset_path` to the file the
+/// game would open and can load the engine library when it asks for a headless
+/// capability. Without the source dir, `asset_path("assets/x")` answered
+/// `"/assets/x"` here, and `stone_load_font` silently fell back to its embedded
+/// face: a measurement that is plausible, nonzero and wrong.
+///
+/// Anything else keeps the stone root alone. A lib or a test-only package has no
+/// game directory to point at and no engine to stage.
+fn prepend_package_preamble(lua: String, dir: &str) -> std::result::Result<String, SkullFailure> {
+    let path = std::path::Path::new(dir);
+    if rock_host::project::is_game_project(path).unwrap_or(false) {
+        // Core libstone only, not `build_engine_libs`: the test process loads
+        // the engine library for CPU-side capabilities and never asks for a
+        // game's optional cdylibs (video, wgpu, agent), so building them here
+        // would be time spent on libraries nothing in this process opens.
+        // A no-op in release layout, where the prebuilt libs are already in
+        // place.
+        rock_host::engine_build::build_libstone().map_err(|error| SkullFailure {
+            reason: "engine library staging failed".to_string(),
+            rendered: format!(
+                "`rock test {dir}` could not stage libstone for the test process: {error:#}"
+            ),
+        })?;
+        let preamble =
+            skull_game_preamble_for(dir, skull::callee_binding_mode()).map_err(|error| {
+                SkullFailure {
+                    reason: "game preamble resolution failed".to_string(),
+                    rendered: error.to_string(),
+                }
+            })?;
+        return Ok(format!("{preamble}{lua}"));
+    }
+    match configured_stone_dir(path) {
+        Ok(Some(stone_dir)) => Ok(prepend_stone_root(lua, &stone_dir)),
+        Ok(None) => Ok(lua),
+        Err(error) => Err(SkullFailure {
+            reason: "Stone root resolution failed".to_string(),
+            rendered: error.to_string(),
+        }),
+    }
 }
 
 /// The `@test` fns defined in the package rooted at `dir` -- its own source
