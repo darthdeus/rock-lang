@@ -62,6 +62,7 @@ mod lint_cmd;
 pub mod lint_union;
 pub mod lint_pass;
 pub mod ablation_report;
+pub mod child_lifetime;
 mod allocation_join;
 #[cfg(feature = "backend-js")]
 mod mono_manifest;

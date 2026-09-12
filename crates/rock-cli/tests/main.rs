@@ -4,6 +4,8 @@ mod stone_harness;
 
 #[path = "ablation_census_survives_failure.rs"]
 mod ablation_census_survives_failure;
+#[path = "child_lifetime.rs"]
+mod child_lifetime;
 #[path = "arena_reuse_alloc_gate.rs"]
 mod arena_reuse_alloc_gate;
 #[path = "allocation_jit_trace_gate.rs"]
