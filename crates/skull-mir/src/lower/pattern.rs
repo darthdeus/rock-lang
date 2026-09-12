@@ -7,8 +7,8 @@ impl Builder<'_> {
     /// `match scrut { pat => body, ... }` as a value. Each arm is a test block
     /// (branch to its body on match, else to the next arm) and a body block that
     /// binds, checks the guard, then stores its value into a result **cell** and
-    /// jumps to the join. Single-level patterns only: a sub-pattern that needs
-    /// its own test (nested enum) gaps rather than silently skipping the test.
+    /// jumps to the join. A sub-pattern that needs its own test (a nested enum)
+    /// emits it before any child read, so a parent tag gates every child slot.
     pub(crate) fn lower_match(
         &mut self,
         scrut: Idx<Expr>,
@@ -160,6 +160,19 @@ impl Builder<'_> {
                     EnumPlan::for_name(self.ws, e).is_some_and(|plan| plan.cdata().is_some())
                 });
                 for (i, sp) in sub.into_iter().enumerate() {
+                    // POSITION -> SLOT. They differ once any position ahead of
+                    // this one is widened: `V2(Vec2)` at position 0 spans two
+                    // slots, so a sibling `Vec4Array(buf, n)` finds `n` at slot 2.
+                    // Indexing by position read the widened value's second leaf
+                    // and handed `nil` to the count.
+                    let slot = en
+                        .and_then(|e| EnumPlan::for_name(self.ws, e).and_then(|plan| plan.flat().cloned()))
+                        .map_or(i, |s| s.slot_offset(i));
+                    // Thread the sub-pattern's enum (from this variant's payload
+                    // type) so a NESTED enum pattern (`L(J(x))`) tests its own tag
+                    // repr -- else an unqualified `J` defaults to the `.__variant`
+                    // table path and faults on a cdata inner enum.
+                    let sub_enum = en.and_then(|e| self.variant_payload_enum(e, variant, i));
                     // A payload position widened to a `nobox` value's leaves binds
                     // THE LEAVES -- rebuilding a box here to bind one cell is the
                     // materialization the widening exists to avoid.
@@ -169,21 +182,17 @@ impl Builder<'_> {
                             self.bind_leaves(b, &leaves, vs);
                             continue;
                         }
+                        // A position widened for a NESTED FLAT ENUM holds that
+                        // enum's own cells, not a value: the inner pattern has to
+                        // test the tag SLOT and read the payload SLOTS. Reading the
+                        // position as one value hands it the inner tag string, and
+                        // `.__variant` on a string matches no arm.
+                        if let Some(inner) = self.nested_flat_enum_scrut(scrut, slot, &vs)? {
+                            self.match_pattern(&inner, sp, fail, variants, false, sub_enum)?;
+                            continue;
+                        }
                     }
-                    // POSITION -> SLOT. They differ once any position ahead of
-                    // this one is widened: `V2(Vec2)` at position 0 spans two
-                    // slots, so a sibling `Vec4Array(buf, n)` finds `n` at slot 2.
-                    // Indexing by position read the widened value's second leaf
-                    // and handed `nil` to the count.
-                    let slot = en
-                        .and_then(|e| EnumPlan::for_name(self.ws, e).and_then(|plan| plan.flat().cloned()))
-                        .map_or(i, |s| s.slot_offset(i));
                     let payload = self.scrut_payload(scrut, slot, cdata);
-                    // Thread the sub-pattern's enum (from this variant's payload
-                    // type) so a NESTED enum pattern (`L(J(x))`) tests its own tag
-                    // repr -- else an unqualified `J` defaults to the `.__variant`
-                    // table path and faults on a cdata inner enum.
-                    let sub_enum = en.and_then(|e| self.variant_payload_enum(e, variant, i));
                     self.match_pattern(&Scrut::Val(payload), sp, fail, variants, false, sub_enum)?;
                 }
                 Ok(())
@@ -481,6 +490,53 @@ impl Builder<'_> {
         (0..vs.leaf_count())
             .map(|k| self.scrut_slot(scrut, off + k))
             .collect()
+    }
+
+    /// A widened payload position holding a nested FLAT enum, read as that enum's
+    /// own cells from the parent's slots starting at `slot`. `None` when the
+    /// position is widened for a value struct instead.
+    ///
+    /// The inner enum's OWN plan sizes the read, because that is the plan the
+    /// ctor's leaf bundle writes with (`lower_flat_value` -> `repr_to_leaves_bundle`
+    /// over the inner `Group`): `[__tag, _0.., <rec>..]`. `vs` is what the PARENT
+    /// reserved for the position, so a parent that reserved less than the inner
+    /// plan needs would read a neighbouring position's slot; that is a plan
+    /// disagreement, not something to paper over.
+    fn nested_flat_enum_scrut(
+        &mut self,
+        scrut: &Scrut,
+        slot: usize,
+        vs: &ValueShape,
+    ) -> Result<Option<Scrut>, CompilerError> {
+        let Some(plan) = EnumPlan::for_name(self.ws, vs.name) else {
+            return Ok(None);
+        };
+        let Some(shape) = plan.flat().cloned() else {
+            return Ok(None);
+        };
+        if vs.leaf_count() < shape.leaf_count() {
+            return Err(gap(format!(
+                "nested flat enum `{}` reads {} slots but position reserved {}",
+                shape.name,
+                shape.leaf_count(),
+                vs.leaf_count()
+            )));
+        }
+        let width = shape.tuple_width();
+        let leaves: Vec<Idx<Inst>> =
+            (0..shape.leaf_count()).map(|k| self.scrut_slot(scrut, slot + k)).collect();
+        let named = shape
+            .record_fields
+            .iter()
+            .enumerate()
+            .map(|(k, rf)| (*rf, leaves[1 + width + k]))
+            .collect();
+        Ok(Some(Scrut::Cells {
+            tag: leaves[0],
+            positional: leaves[1..1 + width].to_vec(),
+            named,
+            shape,
+        }))
     }
 
     /// One raw positional SLOT of the scrutinee (not a position -- a slot).
