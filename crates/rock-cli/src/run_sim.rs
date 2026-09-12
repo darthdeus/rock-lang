@@ -2680,9 +2680,11 @@ fn writes_live(buffered: bool) -> bool {
 /// `STONE_FX_OFF` travels like `SIM_DT`: every consumer is a per-frame gate
 /// (`fx_disabled`), so an entry that ablates the world draw or the screen UI
 /// shares a boot with one that does not. `SIM_SKIP_RENDER` is ALSO carried
-/// per entry (`runner_owned_plan_pairs`) and re-applied at every boundary,
-/// but it stays boot signature because `entry_renders` decides
-/// `STONE_ASSET_STUB` per process.
+/// per entry (`runner_owned_plan_pairs`) and re-applied at every boundary, and
+/// it stays boot signature conservatively: the asset stub no longer turns on it
+/// (every process is stubbed), but nothing has shown a rendering and a
+/// non-rendering entry to be interchangeable in one boot, and the render-lane
+/// throttle schedules whole lanes by it.
 ///
 /// `ROCK_MASK_WALL_CLOCK` and `ROCK_DETERMINISTIC_IDS` are owned outright: the
 /// runner publishes its own value for both after `preset_env`, so a declared one
@@ -2969,19 +2971,24 @@ fn entry_renders(env: &[(String, String)]) -> bool {
         .is_some_and(|(_, v)| v == "0")
 }
 
-/// `STONE_ASSET_STUB` for a child running `parts`: headers-only assets unless
-/// something in the process renders.
+/// `STONE_ASSET_STUB` for a sim child: headers-only assets, whether or not
+/// anything in the process renders.
 ///
-/// ANY rendering entry opts the WHOLE process in to real pixels. The parts of a
-/// comma-separated chain share one process and therefore one image cache, so a
-/// per-entry answer is not available to give -- the first entry's uploads are
-/// still resident when the second runs. Deciding it per process, off one
-/// `entry_renders` oracle, is what keeps a sim from counting as non-rendering
-/// here and rendering there.
-fn asset_stub_value(parts: &[WorkerPart]) -> &'static str {
-    if parts.iter().any(|p| entry_renders(&p.env)) {
-        return "0";
-    }
+/// A rendering sim gets ONE WHITE TEXEL per image and asserts on layout,
+/// silhouettes and gameplay all the same; decoding mag's sheets for it costs
+/// about 6 s of CPU and 456 MB of driver allocation per rendering process, and
+/// the probe over all 132 non-manual rendering sims found only 22 that read
+/// texels at all (`docs/sim-audits-2026-09-11/headless-vram-report.md`, the
+/// 2026-09-12 section). Those 22 and the manual texel readers declare
+/// `@sim_env("STONE_ASSET_STUB", "0")`, which wins because `preset_env` is
+/// layered after this.
+///
+/// It takes no entry at all, which is the point: the parts of a comma-separated
+/// chain share one process and therefore one image cache, so a per-entry answer
+/// was never available to give. A fixture's declaration is a boot-signature
+/// difference, so an unstubbed entry cannot silently share a worker with a
+/// stubbed one.
+fn asset_stub_value() -> &'static str {
     unstub_override("STONE_ASSET_STUB")
 }
 
@@ -3489,14 +3496,12 @@ fn run_worker(
         // for free is stated once. An explicit `@sim_env` still overrides,
         // because `preset_env` is layered after this.
         .envs(RUNNER_BASELINE_ENV.iter().copied())
-        // Headers-only assets unless something in this process renders. Decided
-        // by `entry_renders`, the one oracle for the question, so a sim cannot
-        // count as non-rendering here and rendering there. ANY rendering
-        // entry in a chain opts the whole process in: one process, one image
-        // cache, and the first entry's loads are still resident for the second.
-        // Layered before `preset_env` so an explicit
-        // `@sim_env("STONE_ASSET_STUB", "0")` still wins.
-        .env("STONE_ASSET_STUB", asset_stub_value(parts))
+        // Headers-only assets for EVERY entry, rendering included: a stubbed
+        // image is one white texel, and a sim asserts layout and gameplay
+        // rather than texel colour. The sims that do read texels declare
+        // `@sim_env("STONE_ASSET_STUB", "0")`, which wins because `preset_env`
+        // is layered after this.
+        .env("STONE_ASSET_STUB", asset_stub_value())
         // Audio is stubbed for EVERY entry, not just non-rendering ones: a
         // rendered snapshot wants pixels and no sound, so `entry_renders` says
         // nothing about it. The handful of sims that assert on voices, bus
@@ -5777,18 +5782,14 @@ mod tests {
         assert_eq!(sig(&[("SIM_SKIP_RENDER", "0")]).len(), 1);
     }
 
-    /// Assets are stubbed per PROCESS, not per entry: a chain shares one image
-    /// cache, so one rendering part means the whole child needs real pixels.
+    /// Assets are stubbed for EVERY sim child, rendering included: a stubbed
+    /// image is one white texel, which is what a sim's layout and gameplay
+    /// assertions sample. Only a declared or inherited "0" turns it off, and it
+    /// is decided per PROCESS because a chain shares one image cache. That a
+    /// rendering entry no longer opts its process in is structural -- the
+    /// decision cannot see an entry at all.
     #[test]
-    fn asset_stub_is_off_when_any_part_renders() {
-        let part = |renders: bool| WorkerPart {
-            name: "s".to_string(),
-            out_dir: PathBuf::new(),
-            frame_budget: 0,
-            env: vec![("SIM_SKIP_RENDER".to_string(), if renders { "0" } else { "1" }.to_string())],
-            occurrence_id: 0,
-            part_index: 0,
-        };
+    fn every_sim_child_stubs_its_assets_unless_asked_not_to() {
         // The inherited escape hatch is one-way: it can ask for real assets,
         // never for stubs. A stray "1" must not strip pixels out of a snapshot.
         assert_eq!(unstub_from(None), "1", "unset stays stubbed");
@@ -5796,27 +5797,12 @@ mod tests {
         assert_eq!(unstub_from(Some("1")), "1", "an inherited 1 is the default anyway");
         assert_eq!(unstub_from(Some("yes")), "1", "anything else is not an unstub request");
 
-        assert_eq!(asset_stub_value(&[]), "1", "nothing renders, nothing to load");
-        assert_eq!(asset_stub_value(&[part(false)]), "1", "a non-rendering entry stubs");
-        assert_eq!(asset_stub_value(&[part(true)]), "0", "a rendering entry needs pixels");
-        assert_eq!(
-            asset_stub_value(&[part(false), part(true)]),
-            "0",
-            "one rendering part in a chain opts the whole shared process in"
-        );
-        // A sim that declares nothing does not render, so the default is stub.
-        assert_eq!(
-            asset_stub_value(&[WorkerPart {
-                name: "s".to_string(),
-                out_dir: PathBuf::new(),
-                frame_budget: 0,
-                env: vec![],
-                occurrence_id: 0,
-                part_index: 0,
-            }]),
-            "1",
-            "declaring nothing takes the stubbed default"
-        );
+        // No ambient request, so the runner's own default, which every entry now
+        // takes. A fixture that needs the file's own texels declares
+        // `@sim_env("STONE_ASSET_STUB", "0")` and `preset_env` carries it.
+        if std::env::var("STONE_ASSET_STUB").is_err() {
+            assert_eq!(asset_stub_value(), "1", "the runner default is stubbed");
+        }
     }
 
     /// `entry_renders` reads the EFFECTIVE value, last-wins. `@sim_render` is
