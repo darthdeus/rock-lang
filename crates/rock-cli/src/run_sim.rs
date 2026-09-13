@@ -2254,6 +2254,7 @@ fn run_specs_worker_mode(
                 false,
                 recorder,
                 lane_entry_ids.as_deref(),
+                None,
             )?;
             if results.len() != lane.len() {
                 return Err(anyhow!(
@@ -2300,7 +2301,33 @@ fn run_specs_worker_mode(
         Some(lane) => (&mut lane.stone, lane.output.as_str()),
         None => (&mut *stone, output),
     };
-    for &(i, _) in &exclusive {
+    // ONE child for the whole lane, entries in sequence. The lane was seven
+    // children because it was run one `run_named_entry` at a time, not because
+    // the entries disagree about anything: `FRAME_COUNT` is the only key they
+    // differ on and it is runner-owned, carried per entry in the plan, so all
+    // seven share the one boot signature `[("STONE_HOT_RELOAD", "1")]`.
+    //
+    // Boot was 7.1s of the lane's 9.1s, so chaining removes about 6.1s of a
+    // 12.3s serial tail. The lane stays strictly after the pool and strictly
+    // serial within itself, which is what the session and the overlay require,
+    // so the shared-asset-writer hazard that reverted the tenth pass's attempt
+    // to overlap it with the POOL does not arise here.
+    //
+    // Each reload sim restores the source it edited before it stops, so an
+    // entry cannot hand reloaded code to its successor; `revert_reload_edits`
+    // still runs once when the child exits, as the backstop it always was.
+    // A reload sim that asserts what BOOT did cannot follow another entry, and
+    // several do -- a chained successor restores the boot image instead of
+    // booting. Those declare `SIM_WORKER_ISOLATED` and run alone inside the
+    // lane; the rest chain. Same opt-out the pool honours, read here because
+    // `worker_ineligibility` reports the reload lane first.
+    let (lane_alone, lane_chained): (Vec<_>, Vec<_>) = exclusive.iter().partition(|(i, _)| {
+        parse_sim_chain(&specs[*i])
+            .iter()
+            .any(|p| declares_worker_isolated(env_by_wire.get(*p).map_or(&[][..], |v| v)))
+    });
+    for (i, _) in &lane_alone {
+        let i = *i;
         let (_, summary) = run_named_entry(
             project,
             &specs[i],
@@ -2315,6 +2342,33 @@ fn run_specs_worker_mode(
             entry_ids.and_then(|ids| ids.get(i)).copied(),
         )?;
         slots[i] = Some(summary);
+    }
+    if !lane_chained.is_empty() {
+        let exclusive = &lane_chained;
+        let lane_specs: Vec<String> = exclusive.iter().map(|(i, _)| specs[*i].clone()).collect();
+        let lane_entry_ids: Option<Vec<u64>> = entry_ids
+            .map(|ids| exclusive.iter().map(|(i, _)| ids[*i]).collect());
+        let results = run_specs_recovering(
+            project,
+            lane_output,
+            env_by_wire,
+            &lane_specs,
+            update_snapshots,
+            false,
+            recorder,
+            lane_entry_ids.as_deref(),
+            Some(&mut *lane_stone),
+        )?;
+        if results.len() != exclusive.len() {
+            return Err(anyhow!(
+                "reload lane returned {} results for {} entries",
+                results.len(),
+                exclusive.len()
+            ));
+        }
+        for ((i, _), (_, summary, _crossed)) in exclusive.iter().zip(results) {
+            slots[*i] = Some(summary);
+        }
     }
 
     // Records are emitted in SPEC order, whole. Completion order under a pool is
@@ -2666,6 +2720,19 @@ pub fn is_reload_lane(env_pairs: &[(String, String)]) -> bool {
         .any(|(k, v)| k == "STONE_HOT_RELOAD" && v != "0")
 }
 
+/// The explicit per-fixture opt-out of sharing a process, read on its own so
+/// the reload lane can honour it too.
+///
+/// `worker_ineligibility` reports the reload lane FIRST, which is the right
+/// reason to print, but a reload sim can also be boot-scoped -- several assert
+/// what happened at boot, and a chained successor never boots. Those declare
+/// this and run alone inside the lane.
+pub fn declares_worker_isolated(env_pairs: &[(String, String)]) -> bool {
+    env_pairs
+        .iter()
+        .any(|(k, v)| k == "SIM_WORKER_ISOLATED" && v != "0")
+}
+
 fn writes_live(buffered: bool) -> bool {
     !buffered
 }
@@ -2680,9 +2747,11 @@ fn writes_live(buffered: bool) -> bool {
 /// `STONE_FX_OFF` travels like `SIM_DT`: every consumer is a per-frame gate
 /// (`fx_disabled`), so an entry that ablates the world draw or the screen UI
 /// shares a boot with one that does not. `SIM_SKIP_RENDER` is ALSO carried
-/// per entry (`runner_owned_plan_pairs`) and re-applied at every boundary,
-/// but it stays boot signature because `entry_renders` decides
-/// `STONE_ASSET_STUB` per process.
+/// per entry (`runner_owned_plan_pairs`) and re-applied at every boundary, and
+/// it stays boot signature conservatively: the asset stub no longer turns on it
+/// (every process is stubbed), but nothing has shown a rendering and a
+/// non-rendering entry to be interchangeable in one boot, and the render-lane
+/// throttle schedules whole lanes by it.
 ///
 /// `ROCK_MASK_WALL_CLOCK` and `ROCK_DETERMINISTIC_IDS` are owned outright: the
 /// runner publishes its own value for both after `preset_env`, so a declared one
@@ -2722,19 +2791,21 @@ const RUNNER_OWNED_ENV_KEYS: &[&str] =
 /// run`, `rock frame`, `rock perf` and `rock stone` build their own child
 /// environments and never read this table.
 ///
-/// 1024 is the MEASURED value, not a chosen one. mag's rendered sims pass at
-/// 2048 and 1024 and fail at 512 and 256, deterministically and identically
-/// across repeats, with a Metal GPU hang on the first rendered frame rather
-/// than an assertion: `chain_lightning_look` alone was run twice at each of the
-/// four values. The cause is cumulative -- no single asset class reproduces it,
-/// and excluding either the in-repo assets or the vault's makes it go away --
-/// so pushing lower needs that hang root-caused first. See the report section
-/// dated 2026-09-12 in the file above.
+/// 256 is the value the author asked for, and it is reachable because the one
+/// thing that refused it is now declared rather than resampled. mag's rendered
+/// sims used to pass at 2048 and 1024 and fail at 512 and 256 with a Metal GPU
+/// hang on the first rendered frame rather than an assertion. The cause was a
+/// single asset family: the relight caster bakes are a bounding-volume
+/// hierarchy packed into RGBA8, they are 768 texels wide, and any cap below
+/// that resampled an index structure into garbage. They now load with
+/// `exact_texels` and decline every cap, so the width of a bake no longer sets
+/// the floor for this constant. See the report section dated 2026-09-12 in the
+/// file above.
 const RUNNER_BASELINE_ENV: &[(&str, &str)] = &[
     ("ROCK_TEST_SEED", "42"),
     ("SIM_SKIP_RENDER", "1"),
     ("STONE_HEADLESS", "1"),
-    ("STONE_IMAGE_MAX_SIDE", "1024"),
+    ("STONE_IMAGE_MAX_SIDE", "256"),
 ];
 
 /// The opt-in a fixture declares to move one of its own `@sim_env` keys off the
@@ -2967,19 +3038,24 @@ fn entry_renders(env: &[(String, String)]) -> bool {
         .is_some_and(|(_, v)| v == "0")
 }
 
-/// `STONE_ASSET_STUB` for a child running `parts`: headers-only assets unless
-/// something in the process renders.
+/// `STONE_ASSET_STUB` for a sim child: headers-only assets, whether or not
+/// anything in the process renders.
 ///
-/// ANY rendering entry opts the WHOLE process in to real pixels. The parts of a
-/// comma-separated chain share one process and therefore one image cache, so a
-/// per-entry answer is not available to give -- the first entry's uploads are
-/// still resident when the second runs. Deciding it per process, off one
-/// `entry_renders` oracle, is what keeps a sim from counting as non-rendering
-/// here and rendering there.
-fn asset_stub_value(parts: &[WorkerPart]) -> &'static str {
-    if parts.iter().any(|p| entry_renders(&p.env)) {
-        return "0";
-    }
+/// A rendering sim gets ONE WHITE TEXEL per image and asserts on layout,
+/// silhouettes and gameplay all the same; decoding mag's sheets for it costs
+/// about 6 s of CPU and 456 MB of driver allocation per rendering process, and
+/// the probe over all 132 non-manual rendering sims found only 22 that read
+/// texels at all (`docs/sim-audits-2026-09-11/headless-vram-report.md`, the
+/// 2026-09-12 section). Those 22 and the manual texel readers declare
+/// `@sim_env("STONE_ASSET_STUB", "0")`, which wins because `preset_env` is
+/// layered after this.
+///
+/// It takes no entry at all, which is the point: the parts of a comma-separated
+/// chain share one process and therefore one image cache, so a per-entry answer
+/// was never available to give. A fixture's declaration is a boot-signature
+/// difference, so an unstubbed entry cannot silently share a worker with a
+/// stubbed one.
+fn asset_stub_value() -> &'static str {
     unstub_override("STONE_ASSET_STUB")
 }
 
@@ -3487,14 +3563,12 @@ fn run_worker(
         // for free is stated once. An explicit `@sim_env` still overrides,
         // because `preset_env` is layered after this.
         .envs(RUNNER_BASELINE_ENV.iter().copied())
-        // Headers-only assets unless something in this process renders. Decided
-        // by `entry_renders`, the one oracle for the question, so a sim cannot
-        // count as non-rendering here and rendering there. ANY rendering
-        // entry in a chain opts the whole process in: one process, one image
-        // cache, and the first entry's loads are still resident for the second.
-        // Layered before `preset_env` so an explicit
-        // `@sim_env("STONE_ASSET_STUB", "0")` still wins.
-        .env("STONE_ASSET_STUB", asset_stub_value(parts))
+        // Headers-only assets for EVERY entry, rendering included: a stubbed
+        // image is one white texel, and a sim asserts layout and gameplay
+        // rather than texel colour. The sims that do read texels declare
+        // `@sim_env("STONE_ASSET_STUB", "0")`, which wins because `preset_env`
+        // is layered after this.
+        .env("STONE_ASSET_STUB", asset_stub_value())
         // Audio is stubbed for EVERY entry, not just non-rendering ones: a
         // rendered snapshot wants pixels and no sound, so `entry_renders` says
         // nothing about it. The handful of sims that assert on voices, bus
@@ -4276,6 +4350,10 @@ struct SpecPlan {
 ///
 /// The caller has already grouped `entry_specs` by boot signature;
 /// `run_worker` still refuses a mixed queue, so a grouping bug is loud.
+/// `stone` is the live compile session, and it is `Some` only for the exclusive
+/// reload lane: those entries drive `apply_edit` mid-sim, so the worker that
+/// serves them has to hold the session the edits are published through. Every
+/// other lane passes `None` and cannot reload.
 fn run_specs_recovering(
     project: &str,
     output: &str,
@@ -4285,6 +4363,7 @@ fn run_specs_recovering(
     record_manifest: bool,
     recorder: Option<&SimRunRecorder>,
     entry_ids: Option<&[u64]>,
+    mut stone: Option<&mut crate::skull_backend::SkullStone>,
 ) -> Result<Vec<(String, SimSummary, bool)>> {
     let mut plans = Vec::with_capacity(entry_specs.len());
     for (entry_index, spec) in entry_specs.iter().enumerate() {
@@ -4342,7 +4421,7 @@ fn run_specs_recovering(
                 output,
                 record_manifest,
                 None,
-                None,
+                stone.as_deref_mut(),
                 recorder,
             )?;
 
@@ -4529,7 +4608,7 @@ fn run_worker_arm(
 
     for members in groups {
         let specs: Vec<String> = members.iter().map(|&i| ordered[i].clone()).collect();
-        let results = run_specs_recovering(project, output, env_by_wire, &specs, false, true, None, None)?;
+        let results = run_specs_recovering(project, output, env_by_wire, &specs, false, true, None, None, None)?;
         if results.len() != members.len() {
             return Err(anyhow!(
                 "worker group returned {} results for {} specs",
@@ -4856,7 +4935,7 @@ pub fn run_worker_suite(
     let (_, env_by_wire, _stone) = compile_sims(backend, project_path, PathBuf::from(&output))?;
 
     let results =
-        run_specs_recovering(&project, &output, &env_by_wire, entry_specs, false, true, None, None)?;
+        run_specs_recovering(&project, &output, &env_by_wire, entry_specs, false, true, None, None, None)?;
     Ok(results
         .into_iter()
         .enumerate()
@@ -5775,18 +5854,14 @@ mod tests {
         assert_eq!(sig(&[("SIM_SKIP_RENDER", "0")]).len(), 1);
     }
 
-    /// Assets are stubbed per PROCESS, not per entry: a chain shares one image
-    /// cache, so one rendering part means the whole child needs real pixels.
+    /// Assets are stubbed for EVERY sim child, rendering included: a stubbed
+    /// image is one white texel, which is what a sim's layout and gameplay
+    /// assertions sample. Only a declared or inherited "0" turns it off, and it
+    /// is decided per PROCESS because a chain shares one image cache. That a
+    /// rendering entry no longer opts its process in is structural -- the
+    /// decision cannot see an entry at all.
     #[test]
-    fn asset_stub_is_off_when_any_part_renders() {
-        let part = |renders: bool| WorkerPart {
-            name: "s".to_string(),
-            out_dir: PathBuf::new(),
-            frame_budget: 0,
-            env: vec![("SIM_SKIP_RENDER".to_string(), if renders { "0" } else { "1" }.to_string())],
-            occurrence_id: 0,
-            part_index: 0,
-        };
+    fn every_sim_child_stubs_its_assets_unless_asked_not_to() {
         // The inherited escape hatch is one-way: it can ask for real assets,
         // never for stubs. A stray "1" must not strip pixels out of a snapshot.
         assert_eq!(unstub_from(None), "1", "unset stays stubbed");
@@ -5794,27 +5869,12 @@ mod tests {
         assert_eq!(unstub_from(Some("1")), "1", "an inherited 1 is the default anyway");
         assert_eq!(unstub_from(Some("yes")), "1", "anything else is not an unstub request");
 
-        assert_eq!(asset_stub_value(&[]), "1", "nothing renders, nothing to load");
-        assert_eq!(asset_stub_value(&[part(false)]), "1", "a non-rendering entry stubs");
-        assert_eq!(asset_stub_value(&[part(true)]), "0", "a rendering entry needs pixels");
-        assert_eq!(
-            asset_stub_value(&[part(false), part(true)]),
-            "0",
-            "one rendering part in a chain opts the whole shared process in"
-        );
-        // A sim that declares nothing does not render, so the default is stub.
-        assert_eq!(
-            asset_stub_value(&[WorkerPart {
-                name: "s".to_string(),
-                out_dir: PathBuf::new(),
-                frame_budget: 0,
-                env: vec![],
-                occurrence_id: 0,
-                part_index: 0,
-            }]),
-            "1",
-            "declaring nothing takes the stubbed default"
-        );
+        // No ambient request, so the runner's own default, which every entry now
+        // takes. A fixture that needs the file's own texels declares
+        // `@sim_env("STONE_ASSET_STUB", "0")` and `preset_env` carries it.
+        if std::env::var("STONE_ASSET_STUB").is_err() {
+            assert_eq!(asset_stub_value(), "1", "the runner default is stubbed");
+        }
     }
 
     /// `entry_renders` reads the EFFECTIVE value, last-wins. `@sim_render` is
