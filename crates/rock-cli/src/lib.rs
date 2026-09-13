@@ -647,10 +647,10 @@ pub struct Args {
     /// For `rock sim`: how many sim children may run at once. `None` uses the
     /// conservative default in `run_sim::resolve_jobs`.
     pub jobs: Option<usize>,
-    /// For `rock sim`: how many of those children may be RENDERING ones at
-    /// once. `None` means no separate cap (`--jobs` bounds both). See
-    /// `run_sim::resolve_render_jobs`.
-    pub render_jobs: Option<usize>,
+    /// For `rock sim`: how many of those children may hold FULL-SIZE assets
+    /// at once (real assets with the image cap declined). `None` takes the
+    /// measured default in `run_sim::resolve_full_asset_jobs`.
+    pub full_asset_jobs: Option<usize>,
     /// For `rock sim`: force one fresh process per entry. This is the permanent
     /// fresh-process reference oracle; the ordinary default uses eligible
     /// boot-checkpoint workers, including rendered sims.
@@ -878,9 +878,9 @@ impl Args {
             .arg(Arg::new("jobs").long("jobs").short('j').value_name("N")
                 .value_parser(clap::value_parser!(usize))
                 .help("For `rock sim`: run up to N sim children concurrently (default 4, 1 = serial). Applies to the whole-suite and multi-name forms."))
-            .arg(Arg::new("render-jobs").long("render-jobs").value_name("R")
+            .arg(Arg::new("full-asset-jobs").long("full-asset-jobs").value_name("R")
                 .value_parser(clap::value_parser!(usize))
-                .help("For `rock sim`: allow at most R of the concurrent children to be rendering ones (SIM_SKIP_RENDER=0 lanes, which hold real assets and scene targets on the GPU); the remaining slots up to --jobs run non-rendering lanes. Default: no separate cap. Bounded by --jobs."))
+                .help("For `rock sim`: allow at most R of the concurrent children to hold full-size assets (STONE_ASSET_STUB=0 with STONE_IMAGE_MAX_SIDE=0, 2-4 GB of GPU memory each); the remaining slots up to --jobs run the other lanes. Default 2, sized for a 16 GB GPU budget. Bounded by --jobs."))
             .arg(Arg::new("isolated").long("isolated").action(ArgAction::SetTrue)
                 .conflicts_with("workers")
                 .help("For `rock sim`: force one fresh process per entry -- the permanent fresh-process reference oracle. The default uses eligible boot-checkpoint workers, including rendered sims."))
@@ -1002,7 +1002,7 @@ impl Args {
             dump_state: m.get_flag("dump-state"),
             update_snapshots: m.get_flag("update-snapshots"),
             jobs: m.get_one::<usize>("jobs").copied(),
-            render_jobs: m.get_one::<usize>("render-jobs").copied(),
+            full_asset_jobs: m.get_one::<usize>("full-asset-jobs").copied(),
             isolated: m.get_flag("isolated"),
             workers: m.get_flag("workers"),
             multi_order: m.get_flag("multi-order"),
