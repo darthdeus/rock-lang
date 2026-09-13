@@ -149,6 +149,10 @@ fn recovery_record_keeps_actual_worker_failure_and_occurrences() {
     assert_eq!(records.last().and_then(|event| event["complete"].as_bool()), Some(true));
 }
 
+/// The recovery record for a boot-owned native resource an entry destroyed.
+/// The fixture destroys a canvas it created itself at boot: the engine's scene
+/// target reallocation is a resize under stable handles now, so the identity
+/// contract cannot ride on it.
 #[test]
 fn native_refusal_recovery_keeps_cause_and_responsible_entry() {
     let root = tempfile::tempdir().expect("record root");
