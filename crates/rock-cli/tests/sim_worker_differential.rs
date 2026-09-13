@@ -1339,6 +1339,66 @@ fn a_predecessors_voice_on_a_boot_sound_does_not_reach_the_next_entry() {
     );
 }
 
+/// A game's OWN quit path does not end the worker: the engine, not the game,
+/// owns the lifetime of the native resources boot created.
+///
+/// MAG's nine hardware cursors are built in an `@init` and are boot-owned
+/// ledger handles. Three MAG sims drive the real quit lifecycle --
+/// `run_shutdown_systems()`, which is what both Quit buttons and the window
+/// close reach -- so any game `@shutdown` hook that frees a boot-owned native
+/// resource makes every one of those entries destroy boot's native world. The
+/// boundary then names what is missing and ends the worker, and the whole
+/// remaining queue reboots.
+///
+/// The load-bearing assertion is the SUCCESSOR's provenance, not either
+/// entry's verdict. Both sims pass in a fresh process and in a worker, so a
+/// pass says nothing; what separates a kept worker from an ended one is
+/// whether the successor FOLLOWED a predecessor in the same process.
+///
+/// A cursor SDL still points at must be freed before `SDL_Quit`, which is why
+/// the free exists at all. It belongs in `stone_destroy_window`, which owns
+/// the SDL context it has to precede -- and running there means an entry
+/// boundary, which destroys no window, never sees it.
+#[test]
+fn an_entry_that_runs_the_games_shutdown_systems_keeps_its_worker() {
+    let records = run_worker_suite(
+        Backend::Skull,
+        "mag",
+        &[
+            "telemetry_ordinary_session_survives_shutdown".to_string(),
+            "a_dry_caster_recovers".to_string(),
+        ],
+    )
+    .expect("the suite call itself must not error: ineligibility is a scheduling fact");
+    assert_eq!(records.len(), 2, "one record per entry spec");
+
+    let (seed, _) = &records[0];
+    assert_eq!(
+        seed.verdict(),
+        "PASS",
+        "the seed runs the real quit lifecycle and still passes: {seed:?}"
+    );
+
+    let (probe, probe_crossed) = &records[1];
+    assert!(
+        probe_crossed,
+        "the entry before this one ran the game's `@shutdown` systems and the \
+         worker CARRIED ON, so this entry followed a predecessor -- a game that \
+         freed boot-owned native resources there would have ended the worker and \
+         restarted this entry in a fresh process, and its own assertions would \
+         still pass"
+    );
+    assert_eq!(
+        probe.verdict(),
+        "PASS",
+        "the successor inherits boot's native world rather than a torn-down one: {probe:?}"
+    );
+    assert!(
+        !probe.expects_pass.is_empty(),
+        "the probe asserted nothing: {probe:?}"
+    );
+}
+
 /// Mutation guard for the comparator itself: every arm must be present, and
 /// every arm a fixture can populate must have compared a non-zero population
 /// in at least one fixture. Deleting an arm from `compare` makes `population`
