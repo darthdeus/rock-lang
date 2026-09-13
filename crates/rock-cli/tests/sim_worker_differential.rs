@@ -1231,11 +1231,16 @@ fn a_predecessors_shader_failure_is_not_charged_to_the_next_entry() {
 
 /// The other direction, which no teardown can fix: an entry that DESTROYED a
 /// boot-owned native resource leaves the restored globals naming a handle whose
-/// GL object is gone, and the first draw through one is a GL error. The
-/// boundary names what is missing and ends the worker -- but the entry itself
-/// ran to completion before that was knowable, so its record is kept (it
-/// followed a predecessor, which is what makes it evidence) and only its
-/// unstarted successors restart in a fresh worker.
+/// GL object is gone. The boundary names what is missing and ends the worker --
+/// but the entry itself ran to completion before that was knowable, so its
+/// record is kept (it followed a predecessor, which is what makes it evidence)
+/// and only its unstarted successors restart in a fresh worker.
+///
+/// The seed destroys a canvas the FIXTURE created at boot, not one an engine
+/// path happens to destroy. It used to drive `ensure_scene_capacity`, which
+/// destroyed the whole scene target set -- and that is now a resize under stable
+/// handles, so pinning the identity contract to it would have retired this test
+/// as a side effect of an unrelated change. The contract belongs to the ledger.
 #[test]
 fn an_entry_that_destroyed_boots_native_world_keeps_its_record_and_ends_its_worker() {
     // The head is not decoration. As entry ZERO the seed would have followed no
@@ -1293,12 +1298,67 @@ fn an_entry_that_destroyed_boots_native_world_keeps_its_record_and_ends_its_work
         "the successor renders through boot's canvases, not through destroyed ones: {probe:?}"
     );
     assert!(
-        !probe
-            .expects_fail
-            .iter()
-            .any(|m| m.message.contains("GL errors")),
-        "the worker-only GL error class is what this boundary closes: {:?}",
+        probe.expects_fail.is_empty(),
+        "the successor's own assertion is that its boot canvas is LIVE -- a worker \
+         that continued past the destroy would restore the global to a handle with \
+         no GL object behind it: {:?}",
         probe.expects_fail
+    );
+}
+
+/// The contents half of the same boundary, and the one the handle sets are
+/// structurally blind to: an entry changes the scene raster, every scene target
+/// is reallocated at the new capacity UNDER ITS BOOT HANDLE, and nothing is
+/// extra or missing while all nineteen textures moved.
+///
+/// The Lua checkpoint makes it worse rather than better. It restores
+/// `SCENE_CAPACITY` and each `Canvas` struct to boot's numbers, so
+/// `ensure_scene_capacity` reads the set as already correct and never looks at
+/// the storage -- the successor renders through a predecessor's texture sizes
+/// with nothing on the Rock side disagreeing. The canvas class's boot storage
+/// recipe is what closes it.
+///
+/// The load-bearing assertion is the SUCCESSOR'S PROVENANCE. The probe's own
+/// assertions pass either way: in a fresh process the storage trivially matches
+/// because boot allocated it, which is exactly the trap a boundary fixture falls
+/// into once a restart exists to hide behind.
+#[test]
+fn an_entry_that_resized_boots_scene_targets_keeps_its_worker() {
+    let records = run_worker_suite(
+        Backend::Skull,
+        "testbed",
+        &[
+            "b3_canvas_resize_head".to_string(),
+            "b3_canvas_resize_seed".to_string(),
+            "b3_canvas_resize_probe".to_string(),
+        ],
+    )
+    .expect("the suite call itself must not error");
+    assert_eq!(records.len(), 3, "one record per entry spec");
+
+    let (head, head_crossed) = &records[0];
+    assert_eq!(head.verdict(), "PASS", "the head runs normally: {head:?}");
+    assert!(!head_crossed, "entry zero follows nothing");
+
+    let (seed, seed_crossed) = &records[1];
+    assert!(seed_crossed, "the seed follows the head in one process");
+    assert_eq!(
+        seed.verdict(),
+        "PASS",
+        "the reallocation keeps every boot handle, so the entry is ordinary: {seed:?}"
+    );
+
+    let (probe, probe_crossed) = &records[2];
+    assert!(
+        probe_crossed,
+        "a scene target REALLOCATION moves storage under stable handles, so the \
+         worker survives it and the successor follows the seed in the same \
+         process -- a fresh worker here means the set was destroyed and recreated"
+    );
+    assert_eq!(
+        probe.verdict(),
+        "PASS",
+        "and the successor's scene targets are boot's storage, not the seed's: {probe:?}"
     );
 }
 
