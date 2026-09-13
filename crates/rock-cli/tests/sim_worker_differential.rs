@@ -174,6 +174,22 @@ fn a_predecessors_global_does_not_reach_the_next_entry() {
     assert_eq!(isolated.artifacts["count.txt"], worker.artifacts["count.txt"]);
 }
 
+/// A telemetry capture is what lets a game sim read its event stream while
+/// sharing a worker, so the capture must reset at the boundary: the seed leaves
+/// one open with an event in it, and the probe records what it sees in an expect
+/// and in an artifact.
+#[test]
+fn a_predecessors_telemetry_capture_does_not_reach_the_next_entry() {
+    let (isolated, worker) =
+        differential(&["b0_telemetry_capture_seed"], "b0_telemetry_capture_probe");
+    let c = compare(&isolated, &worker);
+    assert_equivalent("b0_telemetry_capture_probe", &c);
+
+    assert_eq!(isolated.verdict(), "PASS", "the probe passes in a fresh process");
+    assert!(c.population("expects_pass") > 0, "the fixture asserted nothing");
+    assert_eq!(isolated.artifacts["capture.txt"], worker.artifacts["capture.txt"]);
+}
+
 /// The same contract for a `rebuild_host_projection` global. Its declaration
 /// promises the boundary REBUILDS the projection, so a restored process is
 /// observationally identical to a fresh one -- but capture stored nothing for
