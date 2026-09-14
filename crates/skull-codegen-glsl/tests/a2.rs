@@ -1444,3 +1444,61 @@ fn a_program_without_an_engine_group_leaves_slot_zero_empty() {
     assert_eq!(bound, vec![(1, "UiVertU"), (2, "UiFragU")], "role -> binding");
     assert!(!em.abi.uniform_blocks.iter().any(|(b, _)| *b == 0), "slot 0 is the engine's");
 }
+
+#[test]
+fn builtin_dfdx_maps() {
+    let src = r#"
+        @shader(fragment)
+        fn f(tc: Vec2) -> Vec4 {
+            let w = dfdx(tc.x)
+            return Vec4 { x: w, y: 0.0, z: 0.0, w: 1.0 }
+        }
+    "#;
+    let glsl = emit_entry(src, "f").expect("emit");
+    assert!(glsl.contains("dFdx(tc.x)"), "got:\n{glsl}");
+}
+
+#[test]
+fn builtin_dfdy_maps() {
+    let src = r#"
+        @shader(fragment)
+        fn f(tc: Vec2) -> Vec4 {
+            let w = dfdy(tc.x)
+            return Vec4 { x: w, y: 0.0, z: 0.0, w: 1.0 }
+        }
+    "#;
+    let glsl = emit_entry(src, "f").expect("emit");
+    assert!(glsl.contains("dFdy(tc.x)"), "got:\n{glsl}");
+}
+
+#[test]
+fn reject_dfdx_in_vertex() {
+    let src = r#"
+        value QV { aPos: Vec2 }
+        value Vary { position: Vec4 }
+        @shader(vertex)
+        fn vt(@attr a: QV) -> Vary {
+            let w = dfdx(a.aPos.x)
+            return Vary { position: Vec4 { x: w, y: 0.0, z: 0.0, w: 1.0 } }
+        }
+        @shader(fragment)
+        fn fr(vary: Vary) -> Vec4 { return vary.position }
+    "#;
+    reject_pipeline(src, "vt", "fr", "fragment");
+}
+
+#[test]
+fn reject_dfdy_in_vertex() {
+    let src = r#"
+        value QV { aPos: Vec2 }
+        value Vary { position: Vec4 }
+        @shader(vertex)
+        fn vt(@attr a: QV) -> Vary {
+            let w = dfdy(a.aPos.x)
+            return Vary { position: Vec4 { x: w, y: 0.0, z: 0.0, w: 1.0 } }
+        }
+        @shader(fragment)
+        fn fr(vary: Vary) -> Vec4 { return vary.position }
+    "#;
+    reject_pipeline(src, "vt", "fr", "fragment");
+}

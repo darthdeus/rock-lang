@@ -513,6 +513,8 @@ const GLSL_INTRINSICS: &[(&str, usize, &str)] = &[
     // emit_block_effects). Fragment-stage gating lives in the pipeline emitter.
     ("frag_coord", 0, "gl_FragCoord"),
     ("fwidth", 1, "fwidth($1)"),
+    ("dfdx", 1, "dFdx($1)"),
+    ("dfdy", 1, "dFdy($1)"),
     ("discard", 0, "discard"),
     ("vertex_id", 0, "gl_VertexID"),
     // Uniform-array indexing (decision 3): `at(arr, i)` on an UniformArray<T>
