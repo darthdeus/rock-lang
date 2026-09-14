@@ -147,6 +147,7 @@ fn phase_rank(phase: Ustr) -> Option<u8> {
         "post_imgui_draw" => 8,
         "reset" => 9,
         "shutdown" => 10,
+        "window_resized" => 11,
         _ => return None,
     })
 }
