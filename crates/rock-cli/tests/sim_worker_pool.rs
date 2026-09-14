@@ -516,45 +516,48 @@ co fn gallery() -> Coroutine<Wait> {
     }
 }
 
-fn assert_shared_bank_edit_is_exclusive(name: &str) {
+/// A bank watcher sim runs beside ordinary entries, which is safe only because
+/// it edits a private copy: the tracked bank every booting sim reads must come
+/// out byte-identical and untouched, and the ordinary pair still shares a boot.
+fn assert_bank_writer_leaves_the_tracked_bank(name: &str, bank: &str) {
+    let tracked = workspace_root().join(bank);
+    let before = std::fs::read(&tracked).expect("read tracked bank");
+    let before_mtime = std::fs::metadata(&tracked).and_then(|m| m.modified()).expect("bank mtime");
     let run = run_project_workers("mag", &[name, "mob_attack_waits_for_arrival", "target_cycle_sim"], "2");
     assert!(run.success, "{}", run.combined());
+    assert_eq!(std::fs::read(&tracked).expect("reread tracked bank"), before,
+        "`{name}` changed the tracked {bank}");
+    assert_eq!(std::fs::metadata(&tracked).and_then(|m| m.modified()).expect("bank mtime"), before_mtime,
+        "`{name}` rewrote the tracked {bank} in place");
+
     let mut live = HashSet::new();
-    let mut writer_started = false;
-    let mut ordinary_finished = 0;
+    let mut overlapped = false;
     for line in run.trace.lines() {
         let (event, entry) = line.split_once('\t').expect("lifecycle event");
         match event {
-            "start" if entry == name => {
-                assert!(live.is_empty(), "shared bank writer overlapped {live:?}:\n{}", run.trace);
-                assert_eq!(ordinary_finished, 2, "shared bank writer must follow the pool:\n{}", run.trace);
-                writer_started = true;
-                live.insert(entry);
-            }
             "start" => {
-                assert!(!writer_started, "ordinary entry started after the shared bank writer:\n{}", run.trace);
+                overlapped |= live.iter().any(|other| (*other == name) != (entry == name));
                 live.insert(entry);
             }
             "end" => {
                 live.remove(entry);
-                if entry != name { ordinary_finished += 1; }
             }
-            "proc_start" | "proc_end" => {},
+            "proc_start" | "proc_end" => {}
             _ => panic!("unexpected lifecycle event: {line}"),
         }
     }
-    assert!(writer_started && live.is_empty(), "{}", run.trace);
+    assert!(overlapped, "`{name}` never ran beside an ordinary entry:\n{}", run.trace);
     assert_eq!(peak_procs(&run.trace).1, 2, "both ordinary entries must retain their shared boot:\n{}", run.trace);
 }
 
 #[test]
-fn shared_sound_bank_edits_follow_the_worker_pool() {
-    assert_shared_bank_edit_is_exclusive("sound_bank_transaction");
+fn a_sound_bank_writer_leaves_the_tracked_bank() {
+    assert_bank_writer_leaves_the_tracked_bank("sound_bank_transaction", "mag/assets/sound_bank.json");
 }
 
 #[test]
-fn shared_visual_bank_edits_follow_the_worker_pool() {
-    assert_shared_bank_edit_is_exclusive("visual_bank_worktree_watcher");
+fn a_visual_bank_writer_leaves_the_tracked_bank() {
+    assert_bank_writer_leaves_the_tracked_bank("visual_bank_worktree_watcher", "mag/assets/visual_bank.json");
 }
 
 #[test]
