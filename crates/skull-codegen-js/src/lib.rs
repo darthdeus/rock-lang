@@ -2846,15 +2846,22 @@ function stone_mesh_create(mode, verts, vc, stride, sizes, ac) {
 // (the shadowmap visibility fans + glow quads ride this). "fill" fans from
 // vertex 0; outline mode draws 1px-wide rotated line quads per edge.
 function stone_set_color_mask(r, g, b, a) { var gl = __SW.gl; if (gl) gl.colorMask(r, g, b, a); }
-// Draw-buffer list of the CURRENTLY BOUND FBO (per-FBO state in WebGL2, same
-// as GL): [A0, A1] during the MRT color pass, [A0] otherwise. Tracked on the
-// bound canvas so stone_clear_canvas knows when to narrow for the float clear.
-function stone_set_draw_buffers(count) {
+// Draw-buffer attachment BITMASK of the CURRENTLY BOUND FBO (per-FBO state in
+// WebGL2, same as GL): bit i enables COLOR_ATTACHMENT i and a clear bit below
+// the highest set one writes NONE there, so a batch can skip an attachment
+// rather than only truncate the list. 0b11 during the MRT color pass, 0b1
+// otherwise. The enabled COUNT is tracked on the bound canvas so
+// stone_clear_canvas knows when to narrow for the float clear. This tier still
+// attaches only color and id, so bits above the second are not reachable here.
+function stone_set_draw_buffer_mask(mask) {
   var gl = __SW.gl;
   var c = __SW.canvases[__SW.boundCanvas];
-  var n = count >= 2 ? 2 : 1;
-  gl.drawBuffers(n === 2 ? [gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1] : [gl.COLOR_ATTACHMENT0]);
-  if (c) c.drawBufs = n;
+  var bits = (mask & 3) || 1;
+  var list = [];
+  if (bits & 1) list.push(gl.COLOR_ATTACHMENT0); else if (bits > 1) list.push(gl.NONE);
+  if (bits & 2) list.push(gl.COLOR_ATTACHMENT1);
+  gl.drawBuffers(list);
+  if (c) c.drawBufs = (bits & 2) ? 2 : 1;
 }
 
 // The (format, type, view, convert) readPixels shape for one pixel of canvas

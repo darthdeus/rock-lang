@@ -713,10 +713,16 @@ fn world_damage_snapshot_bootstrap_survives_deleted_live_blob_without_writes() {
     let recorded = run_mag(2, Some(&replay), None, &env);
     let recorded_snapshot = std::fs::read(&snapshot).expect("read recorded snapshot");
     let log = std::fs::read_to_string(&replay).expect("read world damage replay");
+    // A chunk is two sidecars of one generation now, colour and material, so
+    // it contributes two bootstrap inputs. The fixture writes only the colour
+    // PNG, and the material one is captured as ABSENT -- which is what lets
+    // playback derive it instead of probing disk.
+    let material_key = format!("{snapshot_key}/m");
+    let material_wire_key = hex_bytes(&material_key);
     assert_eq!(
         log.lines().filter(|line| line.starts_with("boot ")).count(),
-        5,
-        "the sidecar adds one captured bootstrap input"
+        6,
+        "the colour and material sidecars add one captured bootstrap input each"
     );
     assert_eq!(
         log.lines()
@@ -724,6 +730,13 @@ fn world_damage_snapshot_bootstrap_survives_deleted_live_blob_without_writes() {
             .count(),
         1,
         "the snapshot identity has one collision-free bootstrap entry\n{log}"
+    );
+    assert_eq!(
+        log.lines()
+            .filter(|line| line.starts_with(&format!("boot {material_wire_key} ")))
+            .count(),
+        1,
+        "the material sidecar has its own collision-free bootstrap entry\n{log}"
     );
     assert_eq!(recorded["__stone_diag"]["MAG_REPLAY_WORLD_DAMAGE_GENERATION"], 1);
     assert_eq!(recorded["__stone_diag"]["MAG_REPLAY_WORLD_DAMAGE_TAIL"], 0);
