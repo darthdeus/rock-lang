@@ -306,7 +306,7 @@ pub fn lib_path_with_inherited() -> String {
 }
 
 #[cfg(target_os = "linux")]
-fn linux_vulkan_library_paths() -> Vec<PathBuf> {
+pub fn linux_vulkan_library_paths() -> Vec<PathBuf> {
     linux_vulkan_library_paths_from(
         Path::new("/nix/store"),
         Path::new("/run/opengl-driver/lib"),

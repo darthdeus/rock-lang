@@ -43,6 +43,14 @@ struct ISampler2D {
     error("fwidth() is GPU-only (fragment-stage builtin)")
 """
 
+@intrinsic @gpu_only inline(lua) fn dfdx(x: float) -> float = """
+    error("dfdx() is GPU-only (fragment-stage builtin)")
+"""
+
+@intrinsic @gpu_only inline(lua) fn dfdy(x: float) -> float = """
+    error("dfdy() is GPU-only (fragment-stage builtin)")
+"""
+
 @intrinsic @gpu_only inline(lua) fn discard() = """
     error("discard() is GPU-only (fragment-stage builtin)")
 """

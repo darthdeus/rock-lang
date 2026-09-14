@@ -2122,9 +2122,14 @@ impl FlatSlot {
 }
 
 impl EnumFlatShape {
+    /// Named physical columns shared by this enum's record variants.
+    pub fn record_fields(&self) -> &[Ustr] {
+        &self.record_fields
+    }
+
     /// Total positional SLOTS -- `_0 .. _{tuple_width-1}`. Distinct from the
     /// position count (`slots.len()`): a `nobox` position spans several.
-    pub(crate) fn tuple_width(&self) -> usize {
+    pub fn tuple_width(&self) -> usize {
         self.slots.iter().map(FlatSlot::width).sum()
     }
 

@@ -1444,3 +1444,73 @@ fn a_program_without_an_engine_group_leaves_slot_zero_empty() {
     assert_eq!(bound, vec![(1, "UiVertU"), (2, "UiFragU")], "role -> binding");
     assert!(!em.abi.uniform_blocks.iter().any(|(b, _)| *b == 0), "slot 0 is the engine's");
 }
+
+#[test]
+fn builtin_dfdx_maps() {
+    let src = r#"
+        @shader(fragment)
+        fn f(tc: Vec2) -> Vec4 {
+            let w = dfdx(tc.x)
+            return Vec4 { x: w, y: 0.0, z: 0.0, w: 1.0 }
+        }
+    "#;
+    let glsl = emit_entry(src, "f").expect("emit");
+    assert!(glsl.contains("dFdx(tc.x)"), "got:\n{glsl}");
+}
+
+#[test]
+fn builtin_dfdy_maps() {
+    let src = r#"
+        @shader(fragment)
+        fn f(tc: Vec2) -> Vec4 {
+            let w = dfdy(tc.x)
+            return Vec4 { x: w, y: 0.0, z: 0.0, w: 1.0 }
+        }
+    "#;
+    let glsl = emit_entry(src, "f").expect("emit");
+    assert!(glsl.contains("dFdy(tc.x)"), "got:\n{glsl}");
+}
+
+#[test]
+fn reject_dfdx_in_vertex() {
+    let src = r#"
+        value QV { aPos: Vec2 }
+        value Vary { position: Vec4 }
+        @shader(vertex)
+        fn vt(@attr a: QV) -> Vary {
+            let w = dfdx(a.aPos.x)
+            return Vary { position: Vec4 { x: w, y: 0.0, z: 0.0, w: 1.0 } }
+        }
+        @shader(fragment)
+        fn fr(vary: Vary) -> Vec4 { return vary.position }
+    "#;
+    reject_pipeline(src, "vt", "fr", "fragment");
+}
+
+#[test]
+fn reject_dfdy_in_vertex() {
+    let src = r#"
+        value QV { aPos: Vec2 }
+        value Vary { position: Vec4 }
+        @shader(vertex)
+        fn vt(@attr a: QV) -> Vary {
+            let w = dfdy(a.aPos.x)
+            return Vary { position: Vec4 { x: w, y: 0.0, z: 0.0, w: 1.0 } }
+        }
+        @shader(fragment)
+        fn fr(vary: Vary) -> Vec4 { return vary.position }
+    "#;
+    reject_pipeline(src, "vt", "fr", "fragment");
+}
+
+#[test]
+fn mrt_early_return_terminates_the_entry() {
+    let source = MRT_SRC.replace(
+        "let c = texture(uTexture, vary.TexCoord)",
+        "if vary.EntityId > 0.0 { return SpriteOut { FragColor: Vec4 { x: 1.0, y: 0.0, z: 0.0, w: 1.0 }, FragId: Vec4 { x: 1.0, y: 0.0, z: 0.0, w: 1.0 } } }\nlet c = texture(uTexture, vary.TexCoord)",
+    );
+    let glsl = emit_pipeline(&source, "vt", "fr").expect("emit");
+    let branch = glsl.split("if (").last().expect("conditional entry");
+    let end = branch.find('}').expect("branch end");
+    assert!(branch[..end].contains("return;"), "MRT branch must not fall through:\n{glsl}");
+}

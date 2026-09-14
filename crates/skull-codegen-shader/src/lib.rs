@@ -931,7 +931,7 @@ fn reject_stage_violations<'a>(
             };
             let name = ws.module(func.module).functions[func.func].name;
             match (stage, name.as_str()) {
-                (ShaderStage::Vertex, "fwidth" | "frag_coord" | "discard") => {
+                (ShaderStage::Vertex, "fwidth" | "dfdx" | "dfdy" | "frag_coord" | "discard") => {
                     return Err(err(
                         span,
                         format!(

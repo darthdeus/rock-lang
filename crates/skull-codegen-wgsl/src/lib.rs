@@ -110,6 +110,8 @@ const WGSL_BUILTINS: &[(&str, usize, &str, ResultKind)] = &[
     ("fract", 1, "fract", ResultKind::FirstArg),
     ("sign", 1, "sign", ResultKind::FirstArg),
     ("fwidth", 1, "fwidth", ResultKind::FirstArg),
+    ("dfdx", 1, "dpdx", ResultKind::FirstArg),
+    ("dfdy", 1, "dpdy", ResultKind::FirstArg),
     ("pow", 2, "pow", ResultKind::FirstArg),
     ("atan2", 2, "atan2", ResultKind::FirstArg),
     ("min", 2, "min", ResultKind::FirstArg),
