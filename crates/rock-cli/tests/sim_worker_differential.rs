@@ -214,6 +214,22 @@ fn a_predecessors_host_projection_does_not_reach_the_next_entry() {
     );
 }
 
+/// Engine diagnostics production draw code writes and reads back (text-art
+/// bucket hysteresis, emission probe slots, layout counters, render-order
+/// serials) are boot state to the next entry. They were `runner_rebind`, which
+/// carries the live value across the boundary; that realization is for state
+/// the runner itself owns and re-establishes.
+#[test]
+fn a_predecessors_engine_diagnostics_do_not_reach_the_next_entry() {
+    let (isolated, worker) =
+        differential(&["b0_engine_diagnostics_seed"], "b0_engine_diagnostics_probe");
+    let c = compare(&isolated, &worker);
+    assert_equivalent("b0_engine_diagnostics_probe", &c);
+
+    assert_eq!(isolated.verdict(), "PASS", "the probe passes in a fresh process");
+    assert!(c.population("expects_pass") > 0, "the fixture asserted nothing");
+}
+
 #[test]
 fn a_predecessors_live_scene_does_not_reach_the_next_entry() {
     let (isolated, worker) = differential(&["b0_scene_seed"], "b0_scene_probe");
