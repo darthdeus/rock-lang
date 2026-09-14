@@ -246,6 +246,27 @@ fn a_predecessors_window_resize_does_not_reach_the_next_entry() {
     assert!(c.population("expects_pass") > 0, "the fixture asserted nothing");
 }
 
+/// `STONE_WINDOW` is carried per entry, so entries of different sizes share a
+/// worker that booted at the first one's. Each target reads its own window,
+/// drawable, views, scene capacity and ImGui scale, before its first frame and
+/// after one, behind predecessors at the other sizes.
+#[test]
+fn an_entry_runs_in_its_own_window_behind_a_predecessor_at_another_size() {
+    for (predecessors, target) in [
+        (&["b0_entry_window_small"][..], "b0_entry_window_tall"),
+        (&["b0_entry_window_tall"][..], "b0_entry_window_small"),
+        (&["b0_entry_window_tall", "b0_entry_window_small"][..], "b0_entry_window_default"),
+        // Back at boot's size after a resized predecessor: nothing to apply.
+        (&["b0_entry_window_small", "b0_entry_window_tall"][..], "b0_entry_window_small"),
+    ] {
+        let (isolated, worker) = differential(predecessors, target);
+        let c = compare(&isolated, &worker);
+        assert_equivalent(target, &c);
+        assert_eq!(isolated.verdict(), "PASS", "{target} passes in a fresh process: {isolated:?}");
+        assert!(c.population("expects_pass") > 0, "{target} asserted nothing");
+    }
+}
+
 #[test]
 fn a_predecessors_live_scene_does_not_reach_the_next_entry() {
     let (isolated, worker) = differential(&["b0_scene_seed"], "b0_scene_probe");
