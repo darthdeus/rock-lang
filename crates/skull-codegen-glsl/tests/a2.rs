@@ -1502,3 +1502,15 @@ fn reject_dfdy_in_vertex() {
     "#;
     reject_pipeline(src, "vt", "fr", "fragment");
 }
+
+#[test]
+fn mrt_early_return_terminates_the_entry() {
+    let source = MRT_SRC.replace(
+        "let c = texture(uTexture, vary.TexCoord)",
+        "if vary.EntityId > 0.0 { return SpriteOut { FragColor: Vec4 { x: 1.0, y: 0.0, z: 0.0, w: 1.0 }, FragId: Vec4 { x: 1.0, y: 0.0, z: 0.0, w: 1.0 } } }\nlet c = texture(uTexture, vary.TexCoord)",
+    );
+    let glsl = emit_pipeline(&source, "vt", "fr").expect("emit");
+    let branch = glsl.split("if (").last().expect("conditional entry");
+    let end = branch.find('}').expect("branch end");
+    assert!(branch[..end].contains("return;"), "MRT branch must not fall through:\n{glsl}");
+}

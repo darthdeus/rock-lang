@@ -1932,6 +1932,7 @@ impl FnEmit<'_> {
                 let s = self.render_val_t(val, want)?;
                 self.push(&format!("{target} = {s};"));
             }
+            self.push("return;");
             return Ok(());
         }
         match vs {
