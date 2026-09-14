@@ -230,6 +230,22 @@ fn a_predecessors_engine_diagnostics_do_not_reach_the_next_entry() {
     assert!(c.population("expects_pass") > 0, "the fixture asserted nothing");
 }
 
+/// A window resize no longer ends the worker (scene targets resize under their
+/// boot handles), so the next entry in the same process must start in boot's
+/// window and still reach the scripted resize its boot signature declares.
+/// `resize_output_scale` behind `resize_native` read `1600 -> 1600`: the window
+/// was still the predecessor's, and the hook fired on a process frame the
+/// successor never saw.
+#[test]
+fn a_predecessors_window_resize_does_not_reach_the_next_entry() {
+    let (isolated, worker) = differential(&["resize_native"], "resize_output_scale");
+    let c = compare(&isolated, &worker);
+    assert_equivalent("resize_output_scale", &c);
+
+    assert_eq!(isolated.verdict(), "PASS", "the probe passes in a fresh process");
+    assert!(c.population("expects_pass") > 0, "the fixture asserted nothing");
+}
+
 #[test]
 fn a_predecessors_live_scene_does_not_reach_the_next_entry() {
     let (isolated, worker) = differential(&["b0_scene_seed"], "b0_scene_probe");
