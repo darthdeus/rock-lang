@@ -479,7 +479,7 @@ impl CommandContext {
                 self.args.quiet,
                 self.args.update_snapshots,
                 self.args.jobs,
-                self.args.render_jobs,
+                self.args.full_asset_jobs,
                 crate::run_sim::exec_mode(self.args.isolated, self.args.workers),
             )
         } else {
@@ -495,7 +495,7 @@ impl CommandContext {
                 self.args.quiet,
                 self.args.update_snapshots,
                 self.args.jobs,
-                self.args.render_jobs,
+                self.args.full_asset_jobs,
                 crate::run_sim::exec_mode(self.args.isolated, self.args.workers),
             )
         }

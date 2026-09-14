@@ -475,6 +475,8 @@ fn do_run_sim_opts_recorded(
         &wire_names,
         requested_jobs,
         1,
+        None,
+        1,
         requested_mode,
         "single",
         update_snapshots,
@@ -756,7 +758,7 @@ pub fn do_run_named_sims(
     quiet: bool,
     update_snapshots: bool,
     jobs: Option<usize>,
-    render_jobs: Option<usize>,
+    full_asset_jobs: Option<usize>,
     mode: SimExecMode,
 ) -> Result<()> {
     // One name: identical to the classic single-run path (full detail). There
@@ -789,7 +791,7 @@ pub fn do_run_named_sims(
         quiet,
         update_snapshots,
         jobs,
-        render_jobs,
+        full_asset_jobs,
         mode,
         &recorder,
     );
@@ -805,7 +807,7 @@ fn do_run_named_sims_recorded(
     quiet: bool,
     update_snapshots: bool,
     jobs: Option<usize>,
-    render_jobs: Option<usize>,
+    full_asset_jobs: Option<usize>,
     mode: SimExecMode,
     recorder: &SimRunRecorder,
 ) -> Result<()> {
@@ -830,11 +832,15 @@ fn do_run_named_sims_recorded(
     let requested_mode = sim_exec_mode_name(mode);
     let mode = resolve_exec_mode(mode, update_snapshots, quiet)?;
     let effective_jobs = resolve_jobs(jobs, update_snapshots);
+    let requested_full_asset_jobs = full_asset_jobs;
+    let full_asset_jobs = resolve_full_asset_jobs(full_asset_jobs, effective_jobs);
     recorder.configure(
         &project_path,
         &wire_names,
         jobs,
         effective_jobs,
+        requested_full_asset_jobs,
+        full_asset_jobs,
         requested_mode,
         sim_exec_mode_name(mode),
         update_snapshots,
@@ -855,7 +861,7 @@ fn do_run_named_sims_recorded(
             quiet,
             update_snapshots,
             jobs,
-            render_jobs,
+            full_asset_jobs,
             &mut stone,
             reload_lane.as_mut(),
             Some(recorder),
@@ -1056,37 +1062,37 @@ where
     collected.into_inner().expect("no lane panicked while holding the results lock")
 }
 
-/// `run_bounded` with a second cap: at most `render_jobs` of the `jobs`
-/// threads may be inside a task whose `renders[i]` is true at any moment.
+/// `run_bounded` with a second cap: at most `capped_jobs` of the `jobs`
+/// threads may be inside a task whose `capped[i]` is true at any moment.
 ///
-/// Rendering tasks are handed out in index order and non-rendering ones fill
-/// every slot the cap leaves free, so a full pool stays full whenever there
-/// is non-rendering work; a thread only waits when the cap is reached AND
-/// nothing else remains. With `render_jobs >= jobs` the schedule is the plain
-/// pool's, task order included, so the uncapped run is not a second policy.
+/// Capped tasks are handed out in index order and the others fill every slot
+/// the cap leaves free, so a full pool stays full whenever there is uncapped
+/// work; a thread only waits when the cap is reached AND nothing else
+/// remains. With `capped_jobs >= jobs` the schedule is the plain pool's, task
+/// order included, so the uncapped run is not a second policy.
 fn run_bounded_classed<T, F>(
     jobs: usize,
-    render_jobs: usize,
-    renders: &[bool],
+    capped_jobs: usize,
+    capped: &[bool],
     task: F,
 ) -> Vec<(usize, Result<T>)>
 where
     F: Fn(usize) -> Result<T> + Sync,
     T: Send,
 {
-    let n = renders.len();
-    if jobs <= 1 || n <= 1 || render_jobs >= jobs {
+    let n = capped.len();
+    if jobs <= 1 || n <= 1 || capped_jobs >= jobs {
         return run_bounded(jobs, n, task);
     }
     struct Queue {
-        rendering: std::collections::VecDeque<usize>,
+        capped: std::collections::VecDeque<usize>,
         other: std::collections::VecDeque<usize>,
-        live_rendering: usize,
+        live_capped: usize,
     }
     let queue = Mutex::new(Queue {
-        rendering: (0..n).filter(|&i| renders[i]).collect(),
-        other: (0..n).filter(|&i| !renders[i]).collect(),
-        live_rendering: 0,
+        capped: (0..n).filter(|&i| capped[i]).collect(),
+        other: (0..n).filter(|&i| !capped[i]).collect(),
+        live_capped: 0,
     });
     let freed = std::sync::Condvar::new();
     let collected: Mutex<Vec<(usize, Result<T>)>> = Mutex::new(Vec::new());
@@ -1097,28 +1103,28 @@ where
                 let picked = {
                     let mut q = queue.lock().unwrap();
                     loop {
-                        if q.live_rendering < render_jobs {
-                            if let Some(i) = q.rendering.pop_front() {
-                                q.live_rendering += 1;
+                        if q.live_capped < capped_jobs {
+                            if let Some(i) = q.capped.pop_front() {
+                                q.live_capped += 1;
                                 break Some((i, true));
                             }
                         }
                         if let Some(i) = q.other.pop_front() {
                             break Some((i, false));
                         }
-                        if q.rendering.is_empty() {
+                        if q.capped.is_empty() {
                             break None;
                         }
-                        // Only rendering work is left and the cap is reached:
-                        // wait for a rendering slot, never spin.
+                        // Only capped work is left and the cap is reached:
+                        // wait for a capped slot, never spin.
                         q = freed.wait(q).unwrap();
                     }
                 };
-                let Some((i, rendering)) = picked else { break };
+                let Some((i, is_capped)) = picked else { break };
                 let r = task(i);
                 collected.lock().unwrap().push((i, r));
-                if rendering {
-                    queue.lock().unwrap().live_rendering -= 1;
+                if is_capped {
+                    queue.lock().unwrap().live_capped -= 1;
                     freed.notify_all();
                 }
             });
@@ -1133,7 +1139,7 @@ pub fn do_run_all_sims(
     quiet: bool,
     update_snapshots: bool,
     jobs: Option<usize>,
-    render_jobs: Option<usize>,
+    full_asset_jobs: Option<usize>,
     mode: SimExecMode,
 ) -> Result<()> {
     rock_host::project::ensure_workspace_root()?;
@@ -1151,7 +1157,7 @@ pub fn do_run_all_sims(
         quiet,
         update_snapshots,
         jobs,
-        render_jobs,
+        full_asset_jobs,
         mode,
         &recorder,
     );
@@ -1166,7 +1172,7 @@ fn do_run_all_sims_recorded(
     quiet: bool,
     update_snapshots: bool,
     jobs: Option<usize>,
-    render_jobs: Option<usize>,
+    full_asset_jobs: Option<usize>,
     mode: SimExecMode,
     recorder: &SimRunRecorder,
 ) -> Result<()> {
@@ -1194,11 +1200,15 @@ fn do_run_all_sims_recorded(
     let requested_mode = sim_exec_mode_name(mode);
     let mode = resolve_exec_mode(mode, update_snapshots, quiet)?;
     let effective_jobs = resolve_jobs(jobs, update_snapshots);
+    let requested_full_asset_jobs = full_asset_jobs;
+    let full_asset_jobs = resolve_full_asset_jobs(full_asset_jobs, effective_jobs);
     recorder.configure(
         &project_path,
         &wire_names,
         jobs,
         effective_jobs,
+        requested_full_asset_jobs,
+        full_asset_jobs,
         requested_mode,
         sim_exec_mode_name(mode),
         update_snapshots,
@@ -1234,7 +1244,7 @@ fn do_run_all_sims_recorded(
             quiet,
             update_snapshots,
             jobs,
-            render_jobs,
+            full_asset_jobs,
             &mut stone,
             reload_lane.as_mut(),
             Some(recorder),
@@ -2060,7 +2070,7 @@ fn run_specs_worker_mode(
     quiet: bool,
     update_snapshots: bool,
     jobs: Option<usize>,
-    render_jobs: Option<usize>,
+    full_asset_jobs: usize,
     stone: &mut crate::skull_backend::SkullStone,
     reload_lane: Option<&mut ReloadLaneSession>,
     recorder: Option<&SimRunRecorder>,
@@ -2215,29 +2225,29 @@ fn run_specs_worker_mode(
         .chain(poolable.iter().map(|(i, _)| Lane::Isolated(*i)))
         .collect();
 
-    let render_jobs = resolve_render_jobs(render_jobs, jobs);
-    let spec_renders = |i: usize| {
-        parse_sim_chain(&specs[i])
-            .iter()
-            .any(|p| entry_renders(env_by_wire.get(*p).map_or(&[][..], |v| v)))
+    let default_stub = asset_stub_value();
+    let spec_full_assets = |i: usize| {
+        parse_sim_chain(&specs[i]).iter().any(|p| {
+            entry_full_assets(env_by_wire.get(*p).map_or(&[][..], |v| v), default_stub)
+        })
     };
-    let work_renders: Vec<bool> = work
+    let work_full_assets: Vec<bool> = work
         .iter()
         .map(|l| match l {
-            Lane::Worker(lane) => lane.iter().any(|&i| spec_renders(i)),
-            Lane::Isolated(i) => spec_renders(*i),
+            Lane::Worker(lane) => lane.iter().any(|&i| spec_full_assets(i)),
+            Lane::Isolated(i) => spec_full_assets(*i),
         })
         .collect();
-    if !quiet && render_jobs < jobs {
-        let rendering = work_renders.iter().filter(|r| **r).count();
+    if !quiet && full_asset_jobs < jobs {
+        let full = work_full_assets.iter().filter(|r| **r).count();
         println!(
-            "[sim] worker: at most {render_jobs} of {jobs} lanes render at once ({rendering} rendering lanes of {})",
+            "[sim] worker: at most {full_asset_jobs} of {jobs} lanes hold full-size assets at once ({full} full-asset lanes of {})",
             work.len()
         );
     }
 
     let mut collected: Vec<(usize, SimSummary)> = Vec::new();
-    for (_, r) in run_bounded_classed(jobs, render_jobs, &work_renders, |w| match work[w] {
+    for (_, r) in run_bounded_classed(jobs, full_asset_jobs, &work_full_assets, |w| match work[w] {
         Lane::Worker(lane) => {
             let lane_specs: Vec<String> = lane.iter().map(|&i| specs[i].clone()).collect();
             // `run_specs_recovering` is positional, so its results line up with
@@ -2624,24 +2634,43 @@ fn entry_is_reload_lane(
         .any(|part| env_by_wire.get(*part).is_some_and(|e| is_reload_lane(e)))
 }
 
-/// Conservative default for concurrent sim children.
+/// Default concurrency for sim children: the machine's core count.
 ///
-/// Deliberately well under the point where a machine starts failing: sim
-/// children each create a GL context, and oversubscribing the driver produces
-/// GL errors rather than slowdown. The suite only has to beat serial, so this
-/// is not tuned for the best observed number and should only be raised from a
-/// measurement on more than one machine (`docs/sim-speed-plan.md`).
-const DEFAULT_SIM_JOBS: usize = 4;
-
-/// Resolve the cap on concurrently RENDERING children. A rendering child
-/// holds real image pixels and the scene target set on the GPU (a few GB on
-/// the measured host, against well under one for a non-rendering child), so
-/// on a card with a fixed budget the number of them alive at once is what
-/// overflows, not the job count. `None` is no separate cap; anything
-/// requested is clamped into `1..=jobs`.
-fn resolve_render_jobs(requested: Option<usize>, jobs: usize) -> usize {
-    requested.unwrap_or(jobs).clamp(1, jobs.max(1))
+/// The earlier constant 4 was held by a rule that it only rises from a
+/// measurement on more than one machine; the author retired that rule on
+/// 2026-09-14 (`docs/sim-author-decisions.md`). GPU memory, which was the
+/// reason to stay low, is bounded separately by `--full-asset-jobs`, and the
+/// mag suite at the core count of the measured host (14) runs in under half
+/// the wall of `-j 8` with the same failing names except timing-sensitive
+/// allocation rotators (`docs/sim-boot-cost-analysis.md`, "Job count").
+fn default_sim_jobs() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
 }
+
+/// Resolve the cap on concurrently FULL-ASSET children (`entry_full_assets`).
+/// Such a child holds every image at the file's own size on the GPU (2-4 GB
+/// on the measured host, against 0.2-0.4 GB for any other child, rendering
+/// or not), so on a card with a fixed budget the number of them alive at
+/// once is what overflows, not the job count. `None` takes
+/// `DEFAULT_FULL_ASSET_JOBS`; anything requested is clamped into `1..=jobs`.
+fn resolve_full_asset_jobs(requested: Option<usize>, jobs: usize) -> usize {
+    requested.unwrap_or(DEFAULT_FULL_ASSET_JOBS).clamp(1, jobs.max(1))
+}
+
+/// How many full-asset lanes (`entry_full_assets`) may be live at once unless
+/// `--full-asset-jobs` says otherwise.
+///
+/// Measured 2026-09-13 on the mag suite at `-j 14` with `footprint -p` per
+/// worker (`IOAccelerator (graphics)`): a capped lane holds 0.2-0.4 GB of GPU
+/// memory whether or not it renders, and a full-asset lane 2.0-4.3 GB. With
+/// fourteen lanes the capped floor is ~5.6 GB, so two full-asset lanes peak
+/// near 14 GB and three near 18.5 GB. The author's budget is 16 GB: the Linux
+/// workstation's GPU has ~18 GB free and the machine degrades past 16.
+/// `SIM_SKIP_RENDER` is not the variable (the earlier `--render-jobs` cap
+/// serialised 49 lanes for 100 s of wall and changed no verdict).
+const DEFAULT_FULL_ASSET_JOBS: usize = 2;
 
 /// Resolve the requested job count. `--update-snapshots` pins to serial: it
 /// rewrites baseline files, and the runner does not yet prove every
@@ -2655,10 +2684,8 @@ fn resolve_jobs(requested: Option<usize>, update_snapshots: bool) -> usize {
         }
         return 1;
     }
-    let available = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1);
-    requested.unwrap_or(DEFAULT_SIM_JOBS).clamp(1, available.max(1))
+    let available = default_sim_jobs();
+    requested.unwrap_or(available).clamp(1, available.max(1))
 }
 
 /// Dump the compiled `main.lua` in `output` to a LuaJIT bytecode image beside
@@ -2939,7 +2966,7 @@ fn runner_owned_plan_pairs(env: &[(String, String)]) -> Vec<(String, String)> {
     // The raw effective value, not `entry_renders`: `submit` is a third
     // value (draw phase on, GPU submission off) that the engine must see
     // as itself, while the runner classifies it as non-rendering for the
-    // asset stub and the render cap.
+    // asset stub.
     let skip_render = effective_env(env)
         .into_iter()
         .find(|(k, _)| k == "SIM_SKIP_RENDER")
@@ -3029,13 +3056,36 @@ fn sim_exec_mode_name(mode: SimExecMode) -> &'static str {
 /// A sim declaring nothing does not render: draw systems are skipped by default
 /// under the harness. `submit` (draw phase on, nothing submitted to the GPU)
 /// is NOT rendering here: its process needs no image pixels and holds no
-/// rendered frame, which is what this oracle decides (the asset stub, the
-/// render cap).
+/// rendered frame, which is what this oracle decides (the asset stub).
 fn entry_renders(env: &[(String, String)]) -> bool {
     env.iter()
         .filter(|(k, _)| k == "SIM_SKIP_RENDER")
         .next_back()
         .is_some_and(|(_, v)| v == "0")
+}
+
+/// Whether this entry's process holds every image at the file's own size:
+/// real assets (`STONE_ASSET_STUB=0`) with the storage cap declined
+/// (`STONE_IMAGE_MAX_SIDE=0`). Either alone is cheap -- a stub image is one
+/// texel whatever the cap says, and a capped real image is at most 256 texels
+/// a side -- so only the pair marks the lanes the full-asset cap counts.
+///
+/// Read last-wins off the resolved pairs, like `entry_renders`, over the same
+/// defaults the child boots with: `default_stub` is the runner's asset-stub
+/// value for this invocation and the cap default is `RUNNER_BASELINE_ENV`'s.
+/// `SIM_SKIP_RENDER` is deliberately not consulted: a `submit` process with
+/// full assets holds them all the same (measured 2.0 GB against 2.4-4.3 GB
+/// for its rendering siblings).
+fn entry_full_assets(env: &[(String, String)], default_stub: &str) -> bool {
+    let last = |key: &str| env.iter().filter(|(k, _)| k == key).next_back().map(|(_, v)| v.as_str());
+    let stub = last("STONE_ASSET_STUB").unwrap_or(default_stub);
+    let cap_default = RUNNER_BASELINE_ENV
+        .iter()
+        .find(|(k, _)| *k == "STONE_IMAGE_MAX_SIDE")
+        .map(|(_, v)| *v)
+        .expect("the runner baseline declares the image cap");
+    let cap = last("STONE_IMAGE_MAX_SIDE").unwrap_or(cap_default);
+    stub == "0" && cap == "0"
 }
 
 /// `STONE_ASSET_STUB` for a sim child: headers-only assets, whether or not
@@ -6174,16 +6224,37 @@ mod tests {
     /// because it writes baseline files whose destinations are not proven
     /// unique before spawning.
     #[test]
-    fn resolve_render_jobs_is_bounded_by_jobs_and_defaults_to_no_cap() {
-        assert_eq!(resolve_render_jobs(None, 12), 12);
-        assert_eq!(resolve_render_jobs(Some(4), 12), 4);
-        assert_eq!(resolve_render_jobs(Some(40), 12), 12);
-        assert_eq!(resolve_render_jobs(Some(0), 12), 1);
-        assert_eq!(resolve_render_jobs(Some(3), 1), 1);
+    fn resolve_full_asset_jobs_is_bounded_by_jobs_and_defaults_to_two() {
+        assert_eq!(resolve_full_asset_jobs(None, 12), DEFAULT_FULL_ASSET_JOBS);
+        assert_eq!(resolve_full_asset_jobs(None, 1), 1);
+        assert_eq!(resolve_full_asset_jobs(Some(4), 12), 4);
+        assert_eq!(resolve_full_asset_jobs(Some(40), 12), 12);
+        assert_eq!(resolve_full_asset_jobs(Some(0), 12), 1);
+        assert_eq!(resolve_full_asset_jobs(Some(3), 1), 1);
+    }
+
+    /// Only the pair marks a lane: real assets with the cap declined. The
+    /// runner's stub default and the baseline cap stand in for what a fixture
+    /// does not say, last declaration wins, and the render flag is not read.
+    #[test]
+    fn entry_full_assets_needs_real_assets_and_no_image_cap() {
+        let pair = |k: &str, v: &str| (k.to_string(), v.to_string());
+        assert!(!entry_full_assets(&[], "1"), "declaring nothing is stubbed and capped");
+        assert!(!entry_full_assets(&[pair("STONE_ASSET_STUB", "0")], "1"), "real assets alone stay capped");
+        assert!(!entry_full_assets(&[pair("STONE_IMAGE_MAX_SIDE", "0")], "1"), "an uncapped stub is one texel");
+        assert!(entry_full_assets(&[pair("STONE_ASSET_STUB", "0"), pair("STONE_IMAGE_MAX_SIDE", "0")], "1"));
+        assert!(
+            entry_full_assets(&[pair("STONE_IMAGE_MAX_SIDE", "0"), pair("SIM_SKIP_RENDER", "submit")], "0"),
+            "an inherited STONE_ASSET_STUB=0 counts, and submit is not consulted"
+        );
+        assert!(
+            !entry_full_assets(&[pair("STONE_ASSET_STUB", "0"), pair("STONE_IMAGE_MAX_SIDE", "0"), pair("STONE_IMAGE_MAX_SIDE", "512")], "1"),
+            "last declaration wins"
+        );
     }
 
     #[test]
-    fn the_classed_pool_caps_live_rendering_tasks_and_runs_everything_once() {
+    fn the_classed_pool_caps_live_capped_tasks_and_runs_everything_once() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         let renders: Vec<bool> = (0..40).map(|i| i % 3 == 0).collect();
         let live = AtomicUsize::new(0);
@@ -6222,7 +6293,7 @@ mod tests {
             .map(|n| n.get())
             .unwrap_or(1);
 
-        assert_eq!(resolve_jobs(None, false), DEFAULT_SIM_JOBS.min(cpus));
+        assert_eq!(resolve_jobs(None, false), cpus, "no request means every core");
         assert_eq!(resolve_jobs(Some(1), false), 1);
         // Never above what the machine has, however large the request.
         assert_eq!(resolve_jobs(Some(usize::MAX), false), cpus);
