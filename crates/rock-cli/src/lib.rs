@@ -877,7 +877,7 @@ impl Args {
                 .help("For `rock sim`: rewrite snapshot baselines instead of diffing."))
             .arg(Arg::new("jobs").long("jobs").short('j').value_name("N")
                 .value_parser(clap::value_parser!(usize))
-                .help("For `rock sim`: run up to N sim children concurrently (default 4, 1 = serial). Applies to the whole-suite and multi-name forms."))
+                .help("For `rock sim`: run up to N sim children concurrently (default: the machine's core count, 1 = serial). Applies to the whole-suite and multi-name forms."))
             .arg(Arg::new("full-asset-jobs").long("full-asset-jobs").value_name("R")
                 .value_parser(clap::value_parser!(usize))
                 .help("For `rock sim`: allow at most R of the concurrent children to hold full-size assets (STONE_ASSET_STUB=0 with STONE_IMAGE_MAX_SIDE=0, 2-4 GB of GPU memory each); the remaining slots up to --jobs run the other lanes. Default 2, sized for a 16 GB GPU budget. Bounded by --jobs."))

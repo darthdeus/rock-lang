@@ -2634,14 +2634,20 @@ fn entry_is_reload_lane(
         .any(|part| env_by_wire.get(*part).is_some_and(|e| is_reload_lane(e)))
 }
 
-/// Conservative default for concurrent sim children.
+/// Default concurrency for sim children: the machine's core count.
 ///
-/// Deliberately well under the point where a machine starts failing: sim
-/// children each create a GL context, and oversubscribing the driver produces
-/// GL errors rather than slowdown. The suite only has to beat serial, so this
-/// is not tuned for the best observed number and should only be raised from a
-/// measurement on more than one machine (`docs/sim-speed-plan.md`).
-const DEFAULT_SIM_JOBS: usize = 4;
+/// The earlier constant 4 was held by a rule that it only rises from a
+/// measurement on more than one machine; the author retired that rule on
+/// 2026-09-14 (`docs/sim-author-decisions.md`). GPU memory, which was the
+/// reason to stay low, is bounded separately by `--full-asset-jobs`, and the
+/// mag suite at the core count of the measured host (14) runs in under half
+/// the wall of `-j 8` with the same failing names except timing-sensitive
+/// allocation rotators (`docs/sim-boot-cost-analysis.md`, "Job count").
+fn default_sim_jobs() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+}
 
 /// Resolve the cap on concurrently FULL-ASSET children (`entry_full_assets`).
 /// Such a child holds every image at the file's own size on the GPU (2-4 GB
@@ -2678,10 +2684,8 @@ fn resolve_jobs(requested: Option<usize>, update_snapshots: bool) -> usize {
         }
         return 1;
     }
-    let available = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1);
-    requested.unwrap_or(DEFAULT_SIM_JOBS).clamp(1, available.max(1))
+    let available = default_sim_jobs();
+    requested.unwrap_or(available).clamp(1, available.max(1))
 }
 
 /// Dump the compiled `main.lua` in `output` to a LuaJIT bytecode image beside
@@ -6289,7 +6293,7 @@ mod tests {
             .map(|n| n.get())
             .unwrap_or(1);
 
-        assert_eq!(resolve_jobs(None, false), DEFAULT_SIM_JOBS.min(cpus));
+        assert_eq!(resolve_jobs(None, false), cpus, "no request means every core");
         assert_eq!(resolve_jobs(Some(1), false), 1);
         // Never above what the machine has, however large the request.
         assert_eq!(resolve_jobs(Some(usize::MAX), false), cpus);
