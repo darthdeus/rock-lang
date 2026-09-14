@@ -228,3 +228,23 @@ fn every_value_returning_wrapper_returns_through_a_local() {
         assert!(w.contains("return __rock_ret"), "`{name}` must return the bound local:\n{w}");
     }
 }
+
+#[test]
+fn an_omitted_extern_literal_default_is_passed_and_filled_in_the_wrapper() {
+    let lua = emit_module(
+        r#"
+extern(ffi, "m") fn poll(id: int, wait: bool = false) -> int
+fn go() -> int { poll(-1) }
+"#,
+    );
+    let w = wrapper(&lua, "poll");
+    assert!(
+        w.contains("if wait == nil then wait = false end"),
+        "the FFI wrapper must fill an omitted literal default before the C call:\n{w}"
+    );
+    let go = crate::common::function_body(&lua, "go");
+    assert!(
+        go.contains("poll((-1), (false))"),
+        "a direct omitted call must pass the literal default:\n{go}"
+    );
+}
