@@ -793,12 +793,13 @@ fn main() {
 #[test]
 fn closure_capture_stores_nobox_leaves() {
     let lua = emit_module(NOBOX_CLOSURE_CAPTURE);
-    let start = lua.find("function capture").expect("capture definition");
-    let end = lua[start..]
-        .find("\nfunction main")
-        .map(|offset| start + offset)
-        .expect("main follows capture and its hoist");
-    let bodies = &lua[start..end];
+    // `capture` plus the lambda hoisted out of it. Read by NAME rather than as
+    // the text between two headers: the bound callee shape moves an enclosing
+    // definition into a factory, so the two are not adjacent in the chunk.
+    let names = crate::common::definitions_matching(&lua, "capture");
+    assert!(!names.is_empty(), "no `capture` definition in:\n{lua}");
+    let bodies: String =
+        names.iter().map(|name| crate::common::function_body(&lua, name)).collect();
     assert!(
         !bodies.contains("NV2_ct("),
         "closure capture materialized its nobox value:\n{bodies}"
@@ -863,7 +864,8 @@ fn global_of_a_nobox_value_stores_leaves() {
     let slots = global_session_slots(&lua, "SPOT");
     assert_eq!(slots.len(), 2, "the nobox global must own two Session leaves");
     assert!(
-        slots.iter().all(|slot| lua.contains(&format!("__rock_active_session.__rock_state[{slot}]"))),
+        slots.iter().all(|slot| lua.contains(&format!("__rock_state_cell[{slot}]")))
+            || slots.iter().all(|slot| lua.contains(&format!("__rock_active_session.__rock_state[{slot}]"))),
         "the global leaves were not bound through the active Session:\n{lua}"
     );
     for f in ["read", "main"] {

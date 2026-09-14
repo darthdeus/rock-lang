@@ -173,3 +173,20 @@ if not ok and _G.__rock_definition_plan_pending == nil
     let out = run_luajit(&format!("{lua}{driver}"), "definition_transaction");
     assert_eq!(out, "PASS", "failed staging must retain the old definition plan and clear pending state: {out}");
 }
+
+/// `__rock_c_struct_of` (stdlib) memoizes the `ffi.istype` scan over
+/// `__ROCK_C_STRUCT` per CTypeID in `__ROCK_C_STRUCT_BY_CTYPE`. The rows own
+/// that memo's lifetime: the emitter resets it AFTER the rows so a re-run of
+/// the scaffolding can never serve a memo entry built from rows it replaced.
+#[test]
+fn c_struct_registry_rows_reset_the_ctype_memo_after_themselves() {
+    let lua = emit_module("struct P { x: float, y: float }\nfn main() { let p = P { x: 1.0, y: 2.0 }; print(inspect(p)) }\n");
+    let last_row = lua
+        .rfind("_G.__ROCK_C_STRUCT[\"")
+        .expect("a value struct registers a __ROCK_C_STRUCT row");
+    let reset = lua
+        .find("_G.__ROCK_C_STRUCT_BY_CTYPE = {}\n")
+        .expect("the registry emitter resets the ctype memo");
+    assert!(reset > last_row, "the memo reset must follow the last registry row");
+    assert_eq!(lua.matches("_G.__ROCK_C_STRUCT_BY_CTYPE = {}\n").count(), 1);
+}

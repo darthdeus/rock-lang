@@ -33,6 +33,8 @@ mod coalesce_value_struct_literal_field;
 mod concrete_body;
 #[path = "concrete_coroutine_emission.rs"]
 mod concrete_coroutine_emission;
+#[path = "callee_binding.rs"]
+mod callee_binding;
 #[path = "const_hoist.rs"]
 mod const_hoist;
 #[path = "const_hot_reload.rs"]
@@ -151,6 +153,8 @@ mod lambda_static;
 mod leaf_form_invariant;
 #[path = "loop_scoped_locals.rs"]
 mod loop_scoped_locals;
+#[path = "tail_calls.rs"]
+mod tail_calls;
 #[path = "mangle_rename_hot_reload.rs"]
 mod mangle_rename_hot_reload;
 #[path = "mem2reg_stats.rs"]
@@ -167,6 +171,8 @@ mod native_buffer_alloc;
 mod native_buffer_element_admission;
 #[path = "native_buffer_leaf_addressing.rs"]
 mod native_buffer_leaf_addressing;
+#[path = "nil_kill_scope.rs"]
+mod nil_kill_scope;
 #[path = "nobox_arena_random_sentinel.rs"]
 mod nobox_arena_random_sentinel;
 #[path = "nobox_column_threshold.rs"]
@@ -199,6 +205,8 @@ mod reserved_namespace;
 mod comptime_inputs;
 #[path = "shader_pipeline_register.rs"]
 mod shader_pipeline_register;
+#[path = "state_global_bridge.rs"]
+mod state_global_bridge;
 #[path = "static_hot_reload.rs"]
 mod static_hot_reload;
 #[path = "static_registration_coverage.rs"]
@@ -219,6 +227,8 @@ mod uniform_block_pack;
 mod uint_surface;
 #[path = "user_fn_emit_rejection.rs"]
 mod user_fn_emit_rejection;
+#[path = "value_ctor_splice.rs"]
+mod value_ctor_splice;
 #[path = "value_leaf_layout.rs"]
 mod value_leaf_layout;
 #[path = "value_push_generic_boundary.rs"]

@@ -1,5 +1,18 @@
 use crate::*;
 
+/// Special device files cannot serve as an input path: the compiler reads them
+/// more than once and a stream cannot be rewound.
+fn reject_device_path(path: &str) -> Result<()> {
+    if path == "/dev/stdin" || path == "/dev/stdout" || path == "/dev/stderr" {
+        anyhow::bail!(
+            "Cannot use {} as input path. Special device files are not supported.\n\
+             Please provide a regular file or directory path.",
+            path
+        );
+    }
+    Ok(())
+}
+
 pub struct CommandContext {
     pub args: Args,
 }
@@ -37,6 +50,30 @@ impl CommandContext {
                  gates both profiles and takes no flag.",
                 self.args.command.cli_name(),
             );
+        }
+        // THE callee-binding hot-reload rule
+        // (`skull_codegen_lua::force_global_callee_binding`). An
+        // `incremental.lua` overlay redefines one global function; a caller that
+        // captured it as an immutable upvalue holds the previous closure and
+        // would never see the edited body. `upvalue` is the shipped default, so
+        // the two commands that drive `emit_overlay` DIRECTLY pin the
+        // global-lookup shape for the whole session, whatever
+        // `ROCK_SKULL_CALLEE_BINDING` says: `stone-test` is the overlay path's
+        // end-to-end harness, and `iter-incremental` is its profiler. Neither
+        // has another way to reach that path once the default binds.
+        //
+        // `rock stone` is NOT here any more: it ships the bound shape and
+        // publishes a full `main.lua` per edit instead of an overlay
+        // (`SkullStone::route_and_emit`), so the dev loop emits what the game
+        // ships. `rock watch` and `skull-incremental-profile` were never
+        // affected -- both reassemble the whole chunk (`emit_incremental`), so
+        // both emission passes rerun. `assemble_overlay` rejects a bound body
+        // rather than trusting this list.
+        if matches!(
+            self.args.command,
+            CliCommand::StoneTest | CliCommand::IterIncremental
+        ) {
+            skull::force_global_callee_binding();
         }
         let _renderer_override = rock_host::stick::install_renderer_override(self.args.renderer);
         self.run_command()
@@ -229,15 +266,25 @@ impl CommandContext {
             .cloned()
             .unwrap_or_else(|| ".".to_string());
 
-        if path == "/dev/stdin" || path == "/dev/stdout" || path == "/dev/stderr" {
-            anyhow::bail!(
-                "Cannot use {} as input path. Special device files are not supported.\n\
-                 Please provide a regular file or directory path.",
-                path
-            );
-        }
+        reject_device_path(&path)?;
 
         Ok(path)
+    }
+
+    /// Every path argument, for the commands that act on a list rather than on
+    /// one entry point. `get_path_or_current` drops everything after the first.
+    pub fn get_paths_or_current(&self) -> Result<Vec<String>> {
+        let paths = if self.args.files.is_empty() {
+            vec![".".to_string()]
+        } else {
+            self.args.files.clone()
+        };
+
+        for path in &paths {
+            reject_device_path(path)?;
+        }
+
+        Ok(paths)
     }
 
     pub fn get_output_or_default(&self, default: &str) -> Result<String> {
@@ -432,6 +479,7 @@ impl CommandContext {
                 self.args.quiet,
                 self.args.update_snapshots,
                 self.args.jobs,
+                self.args.render_jobs,
                 crate::run_sim::exec_mode(self.args.isolated, self.args.workers),
             )
         } else {
@@ -447,6 +495,7 @@ impl CommandContext {
                 self.args.quiet,
                 self.args.update_snapshots,
                 self.args.jobs,
+                self.args.render_jobs,
                 crate::run_sim::exec_mode(self.args.isolated, self.args.workers),
             )
         }
@@ -627,6 +676,17 @@ impl CommandContext {
 
     /// Run command directly
     fn run_command(&self) -> Result<()> {
+        if self.args.command == CliCommand::SdkCheck {
+            if self.args.files.len() != 1 {
+                anyhow::bail!("usage: rock sdk-check <project>");
+            }
+            crate::sdk_check::check(&self.args.files[0], std::path::Path::new(&rock_host::rock_dir()))?;
+            println!("SDK manifest compatibility: OK");
+            return Ok(());
+        }
+        if self.args.command == CliCommand::DocsIndex {
+            return crate::docs_index::run(&self.args.files, self.args.output.as_deref());
+        }
         if self.args.command == CliCommand::ReplayReport {
             if self.args.files.len() != 1 {
                 anyhow::bail!("usage: rock replay-report <file.replay> [--top N] [--context N] [--format pretty|json]");
@@ -635,6 +695,21 @@ impl CommandContext {
                 std::path::Path::new(&self.args.files[0]),
                 self.args.top,
                 self.args.context,
+                &self.args.perf_format,
+            );
+        }
+        if self.args.command == CliCommand::SimReport {
+            if self.args.files.len() > 1 {
+                anyhow::bail!(
+                    "usage: rock sim-report [<run-id>] [--sim-log-dir <root>] \
+                     [--sim-entry <name>] [--top N] [--format pretty|json]"
+                );
+            }
+            return crate::sim_report::run(
+                self.args.sim_log_dir.as_deref(),
+                self.args.files.first().map(String::as_str),
+                self.args.sim_entry.as_deref(),
+                self.args.top,
                 &self.args.perf_format,
             );
         }
@@ -832,8 +907,8 @@ impl CommandContext {
         // Backend-agnostic kept commands: dispatched before the backend switch so
         // they never depend on a backend (the legacy rock execution arm is gone).
         if self.args.command == CliCommand::Fmt {
-            let path = self.get_path_or_current()?;
-            return match do_fmt(&path, !self.args.stdout, self.args.check) {
+            let paths = self.get_paths_or_current()?;
+            return match do_fmt(&paths, !self.args.stdout, self.args.check) {
                 Ok(_) => Ok(()),
                 Err(e) => {
                     log::error!(target: "FMT", "{}", e);

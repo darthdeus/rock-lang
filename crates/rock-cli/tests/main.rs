@@ -4,6 +4,8 @@ mod stone_harness;
 
 #[path = "ablation_census_survives_failure.rs"]
 mod ablation_census_survives_failure;
+#[path = "child_lifetime.rs"]
+mod child_lifetime;
 #[path = "arena_reuse_alloc_gate.rs"]
 mod arena_reuse_alloc_gate;
 #[path = "allocation_jit_trace_gate.rs"]
@@ -26,6 +28,12 @@ mod backend_feature_gates;
 mod mag_build_vars;
 #[path = "asset_overlay_defaults.rs"]
 mod asset_overlay_defaults;
+#[path = "stone_root_resolution.rs"]
+mod stone_root_resolution;
+#[path = "docs_index.rs"]
+mod docs_index;
+#[path = "source_revision.rs"]
+mod source_revision;
 #[path = "cimgui_prelude.rs"]
 mod cimgui_prelude;
 #[path = "test_exit_status_gate.rs"]
@@ -96,6 +104,8 @@ mod stone_test_comptime;
 mod stone_test_debounce;
 #[path = "stone_test_decorator_cleanup.rs"]
 mod stone_test_decorator_cleanup;
+#[path = "stone_full_reload_binding.rs"]
+mod stone_full_reload_binding;
 #[path = "stone_test_endtoend.rs"]
 mod stone_test_endtoend;
 #[path = "test_harness_truncation.rs"]
@@ -106,3 +116,7 @@ mod watcher_tmp_project_path;
 mod iter_parse_cli;
 #[path = "backend_stats_gate.rs"]
 mod backend_stats_gate;
+#[path = "sim_observability.rs"]
+mod sim_observability;
+#[path = "sim_report_tests.rs"]
+mod sim_report_tests;

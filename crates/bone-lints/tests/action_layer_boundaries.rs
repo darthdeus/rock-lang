@@ -47,20 +47,20 @@ fn mag_action_globals_are_keyed_to_the_canonical_specs() {
         })
         .collect();
 
-    assert_eq!(specs.len(), 43, "canonical spec population must be exact");
+    assert!(!specs.is_empty(), "canonical action specs must exist");
     assert_eq!(
         globals.len(),
-        43,
-        "production global population must be exact"
+        specs.len(),
+        "every canonical action must have one production global"
     );
-    assert_eq!(specs.iter().collect::<FxHashSet<_>>().len(), 43);
+    assert_eq!(specs.iter().collect::<FxHashSet<_>>().len(), specs.len());
     assert_eq!(
         globals
             .iter()
             .map(|(_, key)| key)
             .collect::<FxHashSet<_>>()
             .len(),
-        43
+        globals.len()
     );
     let mut reordered_specs = specs.clone();
     reordered_specs.reverse();

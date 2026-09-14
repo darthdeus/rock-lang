@@ -633,7 +633,7 @@ impl Builder<'_> {
                     let g = self.emit_cur(Inst::Global(abi.hoisted));
                     let param_shapes = abi.param_slots(&self.scx.rep_arena());
                     let arg_vals =
-                        self.slotted_call_args(&abi.param_names, &param_shapes, &arg_idxs)?;
+                        self.slotted_call_args(&abi.param_names, &param_shapes, &arg_idxs, &[])?;
                     let Some(shape) = abi.result_shape(&self.scx.rep_arena()) else {
                         let v = self.emit_call_value(e, g, arg_vals)?;
                         return Ok(ValueRepr::Scalar(v));
@@ -863,7 +863,7 @@ impl Builder<'_> {
             let args = if any_named {
                 self.reorder_named_args(e, arg_idxs, func, Some(&dc.callee_inst))?
             } else {
-                arg_idxs
+                let mut args: Vec<Idx<Inst>> = arg_idxs
                     .iter()
                     .enumerate()
                     .map(|(i, &a)| {
@@ -873,7 +873,9 @@ impl Builder<'_> {
                         let v = self.lower_expr_with_expected(a, Some(t.as_ref()))?;
                         Ok(self.coerced_mono(v, a, t.as_ref()))
                     })
-                    .collect::<Result<_, CompilerError>>()?
+                    .collect::<Result<_, CompilerError>>()?;
+                args.extend(self.trailing_default_args(func, arg_idxs.len(), None)?);
+                args
             };
             // Above the tuple early return: the exemption is a property of the
             // CALLEE, so making it arity-dependent would be a guarantee hole the
@@ -1165,6 +1167,7 @@ impl Builder<'_> {
                 )?;
                 out.extend(self.arg_values_for_slot(&slot, a)?);
             }
+            out.extend(self.trailing_default_args(func, arg_idxs.len(), Some(param_shapes))?);
             return Ok(out);
         }
         let param_names: Vec<Ustr> = self.ws.module(func.module).functions[func.func]
@@ -1172,7 +1175,8 @@ impl Builder<'_> {
             .iter()
             .map(|pd| pd.name)
             .collect();
-        self.slotted_call_args(&param_names, param_shapes, arg_idxs)
+        let defaults = self.literal_param_defaults(func);
+        self.slotted_call_args(&param_names, param_shapes, arg_idxs, &defaults)
     }
 
     /// Build a call's argument list by placing each argument into its PARAM SLOT
@@ -1182,11 +1186,14 @@ impl Builder<'_> {
     /// calling convention that has param names -- a convention with its own
     /// positional-only arg loop silently miscompiles `f(b: 2, a: 1)`.
     /// `param_shapes` shorter than `param_names` (or all-`Opaque`) is the boxed ABI.
+    /// `defaults` is [`literal_param_defaults`] of the callee, or empty when the
+    /// callee is not a declaration the emitter can read (a nested fn value).
     pub(crate) fn slotted_call_args(
         &mut self,
         param_names: &[Ustr],
         param_shapes: &[RetSlot],
         arg_idxs: &[Idx<Expr>],
+        defaults: &[Option<Lit>],
     ) -> Result<Vec<Idx<Inst>>, CompilerError> {
         let mut slots: Vec<Option<ValueBundle>> = vec![None; param_names.len()];
         let mut next_pos = 0usize;
@@ -1223,6 +1230,12 @@ impl Builder<'_> {
             slots[pidx] = Some(r);
         }
         let hi = slots.iter().rposition(|s| s.is_some()).map_or(0, |i| i + 1);
+        // A trailing param with a literal default is passed explicitly too.
+        let hi = defaults
+            .iter()
+            .take(slots.len())
+            .rposition(|d| d.is_some())
+            .map_or(hi, |i| hi.max(i + 1));
         let mut out = Vec::new();
         for i in 0..hi {
             let slot = required_wire_slot(
@@ -1235,8 +1248,13 @@ impl Builder<'_> {
             )?;
             match slots[i].clone() {
                 Some(r) => out.extend(self.repr_to_slot_values_bundle(&r, &slot)?),
-                // An omitted param arrives as one nil PER WIRE VALUE, so the
-                // callee's default-fill sees a nil in every leaf it binds.
+                // A one-slot param with a literal default is passed that literal.
+                None if slot.slot_count() == 1 && defaults.get(i).is_some_and(Option::is_some) => {
+                    let lit = defaults[i].clone().expect("checked above");
+                    out.push(self.emit_cur(Inst::Const(lit)));
+                }
+                // Otherwise an omitted param arrives as one nil PER WIRE VALUE,
+                // so the callee's default-fill sees a nil in every leaf it binds.
                 None => {
                     for _ in 0..slot.slot_count() {
                         out.push(self.emit_cur(Inst::Const(Lit::Nil)));
@@ -1795,6 +1813,33 @@ impl Builder<'_> {
             self.cur = join;
             return Ok(cells.iter().map(|c| self.emit_cur(Inst::Load(*c))).collect());
         }
+        // A shape with no nullable and no enum child anywhere is a plain key
+        // walk: the paths come from the one rule the uniform packer reads a
+        // global with too (`boxed_leaf_paths`), so the two readers cannot drift.
+        // Each intermediate box is loaded ONCE and its children read off it
+        // (a whole-value read wants every leaf anyway); the packer walks the
+        // same paths but re-reads the parent per leaf, keeping one leaf live.
+        if self.shape_is_plain_keys(shape) {
+            let paths = self.boxed_leaf_paths(shape)?;
+            let mut loaded: Vec<(Vec<Ustr>, Idx<Inst>)> = Vec::new();
+            let mut out = Vec::with_capacity(paths.len());
+            for path in paths {
+                let mut cur = v;
+                for depth in 1..=path.len() {
+                    let prefix = &path[..depth];
+                    if let Some((_, inst)) = loaded.iter().find(|(p, _)| p.as_slice() == prefix) {
+                        cur = *inst;
+                        continue;
+                    }
+                    cur = self.emit_cur(Inst::Field { base: cur, field: path[depth - 1] });
+                    if depth < path.len() {
+                        loaded.push((prefix.to_vec(), cur));
+                    }
+                }
+                out.push(cur);
+            }
+            return Ok(out);
+        }
         // A leaf-table box stores one key per leaf, so the split IS the key
         // reads -- the exact inverse of the `<Name>_lct` ctor, including the
         // presence key at a nullable child's own name.
@@ -1861,6 +1906,63 @@ impl Builder<'_> {
             }
         }
         Ok(out)
+    }
+
+    /// Whether every leaf of `shape` is reached by a plain key walk: no
+    /// nullable child (presence branch) and no flat enum child (tag spread)
+    /// anywhere.
+    pub(crate) fn shape_is_plain_keys(&self, shape: &ValueShape) -> bool {
+        if shape.nullable || EnumPlan::for_name(self.ws, shape.name).is_some() {
+            return false;
+        }
+        shape.fields.iter().all(|(_, fs)| match fs {
+            FieldShape::Prim => true,
+            FieldShape::Nested(sub) => self.shape_is_plain_keys(sub),
+        })
+    }
+
+    /// The key path from a box of `shape` (no nullable child anywhere) to each
+    /// of its leaves, in `repr_to_leaves` order. A leaf-table box keys every
+    /// leaf by its dotted path at the top level; cdata and GC boxes nest, and
+    /// a nested child consults its own storage, so a leaf-table child inside a
+    /// GC parent keys by its dotted path under the parent's field.
+    pub(crate) fn boxed_leaf_paths(
+        &self,
+        shape: &ValueShape,
+    ) -> Result<Vec<Vec<Ustr>>, CompilerError> {
+        let mut out = Vec::new();
+        self.boxed_leaf_paths_into(shape, &mut Vec::new(), &mut out)?;
+        Ok(out)
+    }
+
+    fn boxed_leaf_paths_into(
+        &self,
+        shape: &ValueShape,
+        prefix: &mut Vec<Ustr>,
+        out: &mut Vec<Vec<Ustr>>,
+    ) -> Result<(), CompilerError> {
+        let storage = self
+            .scx
+            .rep_arena()
+            .nominal_value_storage_required(self.ws, self.scx.target, shape.name)
+            .map_err(|e| self.gap_here(e.message))?;
+        if storage == ValueStorage::LeafTable {
+            for path in value_leaf_paths(shape) {
+                let mut full = prefix.clone();
+                full.push(path);
+                out.push(full);
+            }
+            return Ok(());
+        }
+        for (fname, fs) in &shape.fields {
+            prefix.push(*fname);
+            match fs {
+                FieldShape::Prim => out.push(prefix.clone()),
+                FieldShape::Nested(sub) => self.boxed_leaf_paths_into(sub, prefix, out)?,
+            }
+            prefix.pop();
+        }
+        Ok(())
     }
 
     /// A whole-value read of value struct `name` out of a BOXED place (struct

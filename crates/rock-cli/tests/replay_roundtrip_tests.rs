@@ -35,7 +35,7 @@ fn run_frame(game: &str, frames: u32, extra: &[&str]) -> serde_json::Value {
     let scratch_path = scratch.path().to_string_lossy().into_owned();
     let frames_s = frames.to_string();
     let mut args: Vec<&str> = vec![
-        "frame", game, "-n", &frames_s, "--dump-state", "--output", &scratch_path,
+        "frame", game, "-n", &frames_s, "--headless", "--dump-state", "--output", &scratch_path,
     ];
     args.extend_from_slice(extra);
 
@@ -96,6 +96,43 @@ fn run_frame_raw_env(
         .current_dir(workspace_root())
         .output()
         .expect("failed to spawn rock frame")
+}
+
+/// Like `run_frame` but with environment variables set on the child.
+fn run_frame_env(
+    game: &str,
+    frames: u32,
+    extra: &[&str],
+    env: &[(&str, &str)],
+) -> serde_json::Value {
+    let rock_bin = env!("CARGO_BIN_EXE_rock");
+    let scratch = tempfile::tempdir().expect("scratch dir");
+    let scratch_path = scratch.path().to_string_lossy().into_owned();
+    let frames_s = frames.to_string();
+    let mut args: Vec<&str> = vec![
+        "frame", game, "-n", &frames_s, "--dump-state", "--output", &scratch_path,
+    ];
+    args.extend_from_slice(extra);
+
+    let output = Command::new(rock_bin)
+        .args(&args)
+        .env("ROCK_FRAME_TIMEOUT_SECS", "60")
+        .envs(env.iter().copied())
+        .current_dir(workspace_root())
+        .output()
+        .expect("failed to spawn rock frame");
+    assert!(
+        output.status.success(),
+        "rock frame {game} {extra:?} exited with {:?}\nstderr:\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).unwrap_or_else(|e| {
+        panic!(
+            "dump-state stdout was not valid JSON ({e})\nstdout:\n{}",
+            String::from_utf8_lossy(&output.stdout)
+        )
+    })
 }
 
 /// Remove the wall-clock diagnostics carve-out (see module docs). This is the
@@ -310,7 +347,7 @@ fn recording_and_branch_rewrite_use_the_v9_pad_record_renderer() {
 
     let _ = run_frame("bitgun", 2, &["--record", &log_s]);
     let text = std::fs::read_to_string(&log).expect("read v9 record");
-    assert!(text.starts_with("STONE_REPLAY 13\n"), "recording must use the v13 header: {text}");
+    assert!(text.starts_with("STONE_REPLAY 16\n"), "recording must use the v16 header: {text}");
     let tick = text.lines().find(|line| line.starts_with("t ")).expect("tick");
     assert_eq!(tick.split(' ').count(), 10, "v9 tick has nine payload fields");
     assert!(tick.ends_with(" - -"), "empty live pad state has explicit empty fields: {tick}");
@@ -331,6 +368,181 @@ fn replay_rejects_malformed_v6_pad_axis_records() {
     assert!(
         stderr.contains("malformed replay records"),
         "malformed v6 axis must use the replay load failure path\nstderr:\n{stderr}"
+    );
+}
+
+/// Job-publication rows are ordered observations, not optional diagnostics: a
+/// replay that never consumes one must stop at that tick instead of silently
+/// accepting a different scheduler path.
+#[test]
+fn replay_rejects_unconsumed_job_decision_records() {
+    let dir = tempfile::tempdir().expect("dir");
+    let log = dir.path().join("unconsumed-job-decision.replay");
+    let log_s = log.to_string_lossy().into_owned();
+    let _ = run_frame("bitgun", 2, &["--record", &log_s]);
+
+    let text = std::fs::read_to_string(&log).expect("read replay log");
+    let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+    let tick = lines
+        .iter()
+        .position(|line| line.starts_with("t "))
+        .expect("a tick line");
+    lines.insert(tick + 1, "j 0 flow 1 0".to_string());
+    std::fs::write(&log, lines.join("\n") + "\n").expect("rewrite replay log");
+
+    let out = run_frame_raw("bitgun", 2, &["--replay", &log_s]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "an unconsumed job decision must abort replay\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("job decision count mismatch") && stderr.contains("tick 0"),
+        "the rejection must name the observation and tick\nstderr:\n{stderr}"
+    );
+}
+
+fn write_job_decision_fixture() -> (tempfile::TempDir, String) {
+    let dir = tempfile::tempdir().expect("fixture dir");
+    let repo = workspace_root()
+        .parent()
+        .expect("repo root");
+    std::fs::write(
+        dir.path().join("stick.toml"),
+        format!(
+            "[package]\nname = \"replay_job_fixture\"\nversion = \"0.1.0\"\ntype = \"bin\"\n\n[dependencies]\nstone = {{ path = \"{}\" }}\n\n[build.vars]\nGIT_SHA = \"fixture\"\n",
+            repo.join("stone").display()
+        ),
+    )
+    .expect("write fixture stick.toml");
+    std::fs::write(
+        dir.path().join("main.rock"),
+        r#"
+global FLOW_CALLS: int = 0
+global FLOW_ACCEPTED: int = 0
+
+@update
+fn replay_job_probe() {
+    if FLOW_CALLS >= 8 { return }
+    FLOW_CALLS = FLOW_CALLS + 1
+    if replay_job_ready("fixture", current_tick + 1, os_getenv("FLOW_TEST_READY") == "1") {
+        FLOW_ACCEPTED = FLOW_ACCEPTED + 1
+    }
+    if FLOW_CALLS == 8 {
+        stone_diag_set("FLOW_TEST_CALLS", FLOW_CALLS)
+        stone_diag_set("FLOW_TEST_ACCEPTED", FLOW_ACCEPTED)
+        if FLOW_ACCEPTED != 8 { error("flow fixture accepted fewer than 8 decisions") }
+        stone_quit()
+    }
+}
+
+fn main() {
+    stone_run_game(GameConfig { title: "replay job fixture", width: 64, height: 64 })
+}
+"#,
+    )
+    .expect("write fixture main.rock");
+    let project = dir.path().to_string_lossy().into_owned();
+    (dir, project)
+}
+
+#[test]
+fn replay_roundtrips_produced_job_decision_rows() {
+    let (_fixture, project) = write_job_decision_fixture();
+    let dir = tempfile::tempdir().expect("dir");
+    let log = dir.path().join("job-decisions.replay");
+    let log_s = log.to_string_lossy().into_owned();
+
+    let recorded = run_frame_env(
+        &project,
+        20,
+        &["--record", &log_s],
+        &[("FLOW_TEST_READY", "1")],
+    );
+    assert_eq!(recorded["__stone_diag"]["FLOW_TEST_CALLS"], serde_json::json!(8));
+    assert_eq!(
+        recorded["__stone_diag"]["FLOW_TEST_ACCEPTED"],
+        serde_json::json!(8)
+    );
+
+    let text = std::fs::read_to_string(&log).expect("read recorded replay log");
+    let rows: Vec<Vec<&str>> = text
+        .lines()
+        .filter(|line| line.starts_with("j "))
+        .map(|line| line.split_whitespace().collect())
+        .collect();
+    assert_eq!(rows.len(), 8, "recording must contain one j row per update: {text}");
+    for row in &rows {
+        assert_eq!(row.len(), 5, "job row must have five fields: {row:?}");
+        assert_eq!(row[2], "fixture", "fixture kind must survive recording: {row:?}");
+        assert!(
+            row[3].parse::<u64>().expect("positive job key") > 0,
+            "job key must be positive: {row:?}"
+        );
+        assert_eq!(row[4], "1", "recorded readiness must be true: {row:?}");
+    }
+
+    let replayed = run_frame_env(
+        &project,
+        20,
+        &["--replay", &log_s],
+        &[("FLOW_TEST_READY", "0")],
+    );
+    assert_eq!(replayed["__stone_diag"]["FLOW_TEST_CALLS"], serde_json::json!(8));
+    assert_eq!(
+        replayed["__stone_diag"]["FLOW_TEST_ACCEPTED"],
+        serde_json::json!(8),
+        "replay must return the recorded ready=1 result even with the live flag disabled"
+    );
+
+    let first = text
+        .lines()
+        .position(|line| line.starts_with("j "))
+        .expect("a recorded job row");
+    let mut mismatch_lines: Vec<String> = text.lines().map(str::to_string).collect();
+    let mut mismatch_fields: Vec<String> = mismatch_lines[first]
+        .split_whitespace()
+        .map(str::to_string)
+        .collect();
+    mismatch_fields[3] = "9007199254740991".to_string();
+    if mismatch_fields[3] == rows[0][3] {
+        mismatch_fields[3] = "9007199254740990".to_string();
+    }
+    mismatch_lines[first] = mismatch_fields.join(" ");
+    let mismatch = dir.path().join("job-decisions-mismatch.replay");
+    let mismatch_s = mismatch.to_string_lossy().into_owned();
+    std::fs::write(&mismatch, mismatch_lines.join("\n") + "\n").expect("write mismatch log");
+    let out = run_frame_raw_env(
+        &project,
+        20,
+        &["--replay", &mismatch_s],
+        &[("FLOW_TEST_READY", "0")],
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success() && stderr.contains("job decision mismatch"),
+        "a changed key must reject replay\nstderr:\n{stderr}"
+    );
+
+    let missing = dir.path().join("job-decisions-missing.replay");
+    let missing_s = missing.to_string_lossy().into_owned();
+    let missing_text = text
+        .lines()
+        .enumerate()
+        .filter_map(|(index, line)| (index != first).then_some(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(&missing, missing_text + "\n").expect("write missing-row log");
+    let out = run_frame_raw_env(
+        &project,
+        20,
+        &["--replay", &missing_s],
+        &[("FLOW_TEST_READY", "0")],
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success() && stderr.contains("missing job decision"),
+        "a missing key row must reject replay\nstderr:\n{stderr}"
     );
 }
 
@@ -437,5 +649,216 @@ fn replay_preserves_v1_to_v5_load_compatibility() {
             "v{version} replay must remain loadable\nstderr:\n{}",
             String::from_utf8_lossy(&out.stderr)
         );
+    }
+}
+
+#[test]
+fn replay_preserves_a_physical_tap_completed_between_frames() {
+    let (fixture, project) = write_job_decision_fixture();
+    std::fs::write(fixture.path().join("main.rock"), r#"
+global TAP_OBSERVED: bool = false
+global MOUSE_TAP_OBSERVED: bool = false
+
+inline(lua) fn queue_mouse_tap() -> bool = """
+    local ffi = require("ffi")
+    ffi.cdef("int SDL_PushEvent(void *event);")
+    local sdl = ffi.load("SDL2")
+    local event = ffi.new("uint32_t[14]")
+    event[0] = 0x401
+    ffi.cast("uint8_t *", event)[16] = 1
+    ffi.cast("uint8_t *", event)[17] = 1
+    if sdl.SDL_PushEvent(event) ~= 1 then return false end
+    event[0] = 0x402
+    ffi.cast("uint8_t *", event)[17] = 0
+    if sdl.SDL_PushEvent(event) ~= 1 then return false end
+    ffi.fill(event, 56)
+    event[0] = 0x300
+    ffi.cast("uint8_t *", event)[12] = 1
+    ffi.cast("uint8_t *", event)[13] = 1
+    event[4] = 4
+    event[5] = 113
+    ffi.cast("uint16_t *", event)[12] = 1
+    return sdl.SDL_PushEvent(event) == 1
+"""
+
+@late_update
+fn enqueue_mouse_tap() {
+    if current_tick == 0 && replay_is_record() {
+        assert(queue_mouse_tap(), "enqueue SDL mouse tap")
+    }
+}
+
+@draw
+fn register_button() {
+    ui_mouse_item(12345, ui_full_screen())
+}
+
+@late_init
+fn enqueue_tap() {
+    if replay_is_record() {
+        assert(stone_test_push_key_event("right", true), "enqueue key down")
+        assert(stone_test_push_key_event("right", false), "enqueue key up")
+    }
+}
+
+@update
+fn consume_tap() {
+    if is_key_pressed("right") {
+        assert(!is_key_down("right"), "tap must finish before input capture")
+        assert(is_key_released("right"), "tap must preserve its release")
+        assert(is_scancode_pressed("right"), "physical binding must see the tap")
+        TAP_OBSERVED = replay_job_ready("tap", 1, true)
+    }
+    if is_mouse_pressed(MOUSE_BUTTON_LEFT) {
+        assert(!is_mouse_down(MOUSE_BUTTON_LEFT), "mouse tap must finish before capture")
+        assert(is_mouse_released(MOUSE_BUTTON_LEFT), "mouse tap release")
+        assert(UI_MOUSE.clicked == 12345, "UI must receive the recorded press latch")
+        MOUSE_TAP_OBSERVED = replay_job_ready("mouse-tap", 1, true)
+    }
+    if current_tick == 1 {
+        assert(is_key_down("q"), "repeat must preserve logical hold")
+        assert(!is_key_pressed("q"), "repeat must not become a fresh press")
+        assert(is_scancode_down("a"), "physical binding must retain its distinct identity")
+        assert(!is_scancode_pressed("a"), "physical repeat must not become a press")
+        assert(scancode_repeated("a"), "physical repeat survives replay")
+        assert(scancode_modifiers("a") == 2, "physical modifier survives replay")
+    }
+    if current_tick == 2 {
+        assert(MOUSE_TAP_OBSERVED, "recorded mouse tap must reach its consumer")
+        assert(TAP_OBSERVED, "recorded tap must reach its consumer")
+    }
+}
+
+fn main() {
+    stone_run_game(GameConfig { title: "replay tap", width: 64, height: 64 })
+}
+"#).expect("write tap fixture");
+    let log = fixture.path().join("tap.replay");
+    let recorded = run_frame_raw(&project, 3, &["--record", log.to_str().unwrap()]);
+    assert!(recorded.status.success(), "recording failed: {}",
+        String::from_utf8_lossy(&recorded.stderr));
+    let wire = std::fs::read_to_string(&log).unwrap();
+    assert_eq!(wire.lines().filter(|line| line.starts_with("j ")).count(), 2,
+        "the taps must reach a publication decision while recording");
+    let replayed = run_frame_raw(&project, 3, &["--replay", log.to_str().unwrap()]);
+    assert!(replayed.status.success(), "tap playback failed: {}",
+        String::from_utf8_lossy(&replayed.stderr));
+    let publication = wire.lines().find(|line| line.starts_with("u 0 ")).unwrap();
+    for (label, bad) in [
+        ("missing", String::new()),
+        ("duplicate", format!("{publication}\n{publication}")),
+        ("orphan", publication.replacen("u 0", "u 1", 1)),
+        ("malformed", "u 0 7b7d".to_string()),
+    ] {
+        let path = fixture.path().join(format!("image-{label}.replay"));
+        std::fs::write(&path, wire.replace(publication, &bad)).unwrap();
+        let rejected = run_frame_raw(&project, 3, &["--replay", path.to_str().unwrap()]);
+        assert!(!rejected.status.success(), "accepted {label} image journal");
+        assert!(String::from_utf8_lossy(&rejected.stderr).contains("malformed replay records"));
+    }
+    let detail = wire.lines().find(|line| line.starts_with("a 0 ")).unwrap();
+    for (name, replacement) in [
+        ("missing", String::new()),
+        ("duplicate", format!("{detail}\n{detail}")),
+        ("orphan", detail.replacen("a 0", "a 1", 1)),
+        ("flag", detail.replacen("=1", "=2", 1)),
+    ] {
+        let bad_log = fixture.path().join(format!("{name}.replay"));
+        std::fs::write(&bad_log, wire.replace(detail, &replacement)).unwrap();
+        let bad = run_frame_raw(&project, 3, &["--replay", bad_log.to_str().unwrap()]);
+        assert!(!bad.status.success() && String::from_utf8_lossy(&bad.stderr)
+            .contains("malformed replay records"), "must reject {name}: {}",
+            String::from_utf8_lossy(&bad.stderr));
+    }
+    let output_dir = fixture.path().join("profile");
+    let profiled = Command::new(env!("CARGO_BIN_EXE_rock"))
+        .args(["replay-profile", &project, log.to_str().unwrap(), "--range", "0-2",
+            "--runs", "2", "--output", output_dir.to_str().unwrap()])
+        .current_dir(workspace_root()).output().expect("profile taps");
+    assert!(profiled.status.success(), "tap profiling failed: {}",
+        String::from_utf8_lossy(&profiled.stderr));
+    let rows: Vec<serde_json::Value> = String::from_utf8(profiled.stdout).unwrap()
+        .lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+    assert_eq!(rows.iter().filter(|row| row["kind"] == "frame").count(), 6);
+    assert_eq!(rows.iter().filter(|row| row["kind"] == "run"
+        && row["status"] == "complete").count(), 2);
+}
+
+#[test]
+fn mag_replay_profiles_through_admission_after_a_short_splash_tap() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("mag.replay");
+    let settings = dir.path().join("settings.json");
+    let progress = dir.path().join("progress.json");
+    let bindings = dir.path().join("bindings.json");
+    let binding_history = dir.path().join("bindings-history.jsonl");
+    let layout_history = dir.path().join("layout-history.jsonl");
+    std::fs::write(&settings, r#"{"privacy":{"analytics":1,"analytics_version":3}}"#).unwrap();
+    let recorded = run_frame_env("mag", 3000, &["--headless", "--record", log.to_str().unwrap(),
+        "--checkpoint-interval", "0"], &[
+        ("PERF_MODE", "1"), ("STONE_WINDOW", "1280x720"),
+        ("MAG_SETTINGS_PATH_OVERRIDE", settings.to_str().unwrap()),
+        ("MAG_PROGRESS_PATH_OVERRIDE", progress.to_str().unwrap()),
+        ("MAG_BINDINGS_PATH_OVERRIDE", bindings.to_str().unwrap()),
+        ("MAG_BINDINGS_HISTORY_PATH_OVERRIDE", binding_history.to_str().unwrap()),
+        ("MAG_LAYOUT_HISTORY_PATH_OVERRIDE", layout_history.to_str().unwrap()),
+        ("STONE_PHYSICAL_MOUSE_PRESS_AT", "2"),
+        ("STONE_PHYSICAL_MOUSE_RELEASE_AT", "2"),
+        ("STONE_PHYSICAL_KEY_PRESS_AT", "100"),
+        ("STONE_PHYSICAL_KEY_RELEASE_AT", "101"),
+        ("STONE_PHYSICAL_KEY", "down"), ("STONE_PHYSICAL_SCANCODE", "down"),
+        ("STONE_PHYSICAL_KEY_PRESS_AT_2", "105"),
+        ("STONE_PHYSICAL_KEY_RELEASE_AT_2", "106"),
+        ("STONE_PHYSICAL_KEY_2", "return"), ("STONE_PHYSICAL_SCANCODE_2", "return"),
+    ]);
+    assert_eq!(recorded["mag"]["MAG_RUN_STARTS"], 1,
+        "fixture must enter gameplay: screen={} prep_ticks={} admission_ticks={} play_effects={}",
+        recorded["mag"]["SCREEN"], recorded["mag"]["MAG_RUN_PREPARE_ADVANCE_TICKS"],
+        recorded["mag"]["MAG_RUN_ADMISSION_TICKS"], recorded["__stone_diag"]["MAG_PLAY_EFFECT_COUNT"]);
+    let wire = std::fs::read_to_string(&log).unwrap();
+    assert!(wire.lines().any(|line| line.starts_with("j ") && line.contains(" flow ")),
+        "the run must exercise actual flow publication");
+    let output_dir = dir.path().join("profile");
+    let output = Command::new(env!("CARGO_BIN_EXE_rock"))
+        .args(["replay-profile", "mag", log.to_str().unwrap(), "--range", "0-2999",
+            "--runs", "2", "--output", output_dir.to_str().unwrap()])
+        .env("PERF_MODE", "1").env("ROCK_FRAME_TIMEOUT_SECS", "60")
+        .current_dir(workspace_root()).output().expect("profile MAG replay");
+    assert!(output.status.success(), "MAG profiling failed: {}\n{}",
+        String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    let rows: Vec<serde_json::Value> = String::from_utf8(output.stdout).unwrap()
+        .lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+    assert_eq!(rows.iter().filter(|row| row["kind"] == "frame").count(), 6000);
+    let mut image_work = std::collections::HashMap::new();
+    for line in wire.lines().filter(|line| line.starts_with("i ")) {
+        let f: Vec<_> = line.split_whitespace().collect();
+        image_work.insert(f[1].parse::<u64>().unwrap(), [
+            f[3].parse::<u64>().unwrap(), f[7].parse().unwrap(), f[8].parse().unwrap()]);
+    }
+    for row in rows.iter().filter(|row| row["kind"] == "frame") {
+        let tick = row["ordinal"].as_u64().unwrap();
+        let actual = &row["playback"];
+        assert_eq!([
+            actual["image_load_calls"].as_u64().unwrap(),
+            actual["image_upload_calls"].as_u64().unwrap(),
+            actual["image_upload_bytes"].as_u64().unwrap(),
+        ], *image_work.get(&tick).unwrap_or(&[0,0,0]), "image work at tick {tick}");
+    }
+    let rewound = run_frame_env("mag", 3000, &["--headless", "--replay", log.to_str().unwrap()], &[
+        ("STONE_KEYFRAME_INTERVAL", "30"),
+        ("STONE_TIMELINE_SEEK_AT_FRAME", "2950"),
+        ("STONE_TIMELINE_SEEK_TO_TICK", "75"),
+    ]);
+    assert_eq!(rewound["stone"]["current_tick"], 75);
+    assert!(rewound["__stone_diag"]["STONE_RESTORE_IMAGE_PENDING"].as_u64().unwrap() > 0,
+        "rewind must restore an outstanding image queue");
+    // Dump-state follows run_shutdown, which clears the admission flags.
+    assert!(rewound["__stone_diag"]["STONE_SEEK_RESIM_FRAMES"].as_u64().unwrap() > 0);
+    let runs: Vec<_> = rows.iter().filter(|row| row["kind"] == "run").collect();
+    assert_eq!(runs.len(), 2);
+    for run in runs {
+        assert_eq!(run["status"], "complete");
+        assert_eq!(run["observed_frames"], 3000);
+        assert_eq!(run["identity"]["exact_artifact"], true);
     }
 }

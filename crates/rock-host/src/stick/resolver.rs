@@ -25,12 +25,28 @@ impl DependencyResolver {
     }
 
     pub fn resolve(&mut self, config: &StickConfig) -> Result<Vec<ResolvedDependency>> {
+        self.resolve_with_channel(config, &super::resolved_channel_for(config))
+    }
+
+    /// Resolve with an explicit channel. Channel-scoped dependencies whose
+    /// list does not include `channel` are excluded from resolution entirely,
+    /// along with anything only they could reach. `resolve` is the CLI-path
+    /// wrapper that reads the invocation's recorded selection.
+    pub fn resolve_with_channel(
+        &mut self,
+        config: &StickConfig,
+        channel: &str,
+    ) -> Result<Vec<ResolvedDependency>> {
         // Start with direct dependencies. `config.dependencies` is a HashMap, so
         // iterate its keys sorted -- the resolution/concatenation order flows into
         // `ws.modules` (type_id numbering + function-chunk emission order), and an
         // unsorted HashMap walk makes the emitted `.lua` non-reproducible run-to-run
         // (per-process RandomState) and across builds (unfuck-backlog #58).
-        let mut direct: Vec<(&String, &Dependency)> = config.dependencies.iter().collect();
+        let mut direct: Vec<(&String, &Dependency)> = config
+            .dependencies
+            .iter()
+            .filter(|(_, dep)| super::dependency_matches_channel(dep, channel))
+            .collect();
         direct.sort_by(|a, b| a.0.cmp(b.0));
         for (name, dep) in direct {
             self.resolve_dependency(name.clone(), dep, false)?;

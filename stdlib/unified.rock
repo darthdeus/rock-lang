@@ -474,11 +474,11 @@ struct NativeBufferU16 { ptr: PtrU16, len: int }
 struct NativeBufferI16 { ptr: PtrI16, len: int }
 struct NativeBufferU32 { ptr: PtrU32, len: int }
 
-@intrinsic @native_required @nomangle inline(lua) fn __nb_alloc_u8(n: int)  -> PtrU8  = 'return ffi.new("uint8_t[?]", n)'
-@intrinsic @native_required @nomangle inline(lua) fn __nb_alloc_i8(n: int)  -> PtrI8  = 'return ffi.new("int8_t[?]", n)'
-@intrinsic @native_required @nomangle inline(lua) fn __nb_alloc_u16(n: int) -> PtrU16 = 'return ffi.new("uint16_t[?]", n)'
-@intrinsic @native_required @nomangle inline(lua) fn __nb_alloc_i16(n: int) -> PtrI16 = 'return ffi.new("int16_t[?]", n)'
-@intrinsic @native_required @nomangle inline(lua) fn __nb_alloc_u32(n: int) -> PtrU32 = 'return ffi.new("uint32_t[?]", n)'
+@intrinsic @native_required @nomangle inline(lua) fn __nb_alloc_u8(n: int)  -> PtrU8  = 'local r = ffi.new("uint8_t[?]", n); return r'
+@intrinsic @native_required @nomangle inline(lua) fn __nb_alloc_i8(n: int)  -> PtrI8  = 'local r = ffi.new("int8_t[?]", n); return r'
+@intrinsic @native_required @nomangle inline(lua) fn __nb_alloc_u16(n: int) -> PtrU16 = 'local r = ffi.new("uint16_t[?]", n); return r'
+@intrinsic @native_required @nomangle inline(lua) fn __nb_alloc_i16(n: int) -> PtrI16 = 'local r = ffi.new("int16_t[?]", n); return r'
+@intrinsic @native_required @nomangle inline(lua) fn __nb_alloc_u32(n: int) -> PtrU32 = 'local r = ffi.new("uint32_t[?]", n); return r'
 
 fn native_buffer_u8(n: int)  -> NativeBufferU8  { return NativeBufferU8  { ptr: __nb_alloc_u8(n),  len: n } }
 fn native_buffer_i8(n: int)  -> NativeBufferI8  { return NativeBufferI8  { ptr: __nb_alloc_i8(n),  len: n } }
@@ -726,6 +726,18 @@ deco init on_reload {
     end
 """
 
+// The first `n` elements of two NativeBuffers compared as bytes. Serves
+// __op_eq's FlatVec and NativeBuffer cases; see the caveat there.
+@nomangle inline(lua) fn __rock_native_buffer_prefix_eq(x: any, y: any, n: int) -> bool = """
+    if n <= 0 then return true end
+    if type(x) ~= "table" or type(y) ~= "table" then return false end
+    if x.ptr == nil or y.ptr == nil then return x.ptr == y.ptr end
+    if x.ptr == y.ptr then return true end
+    local esz = ffi.sizeof(x.ptr[0])
+    if esz ~= ffi.sizeof(y.ptr[0]) then return false end
+    return ffi.string(x.ptr, n * esz) == ffi.string(y.ptr, n * esz)
+"""
+
 // Generic operator functions using different names to avoid compiler conflicts
 @nomangle inline(lua) fn __op_eq(a: any, b: any) -> bool = """
     -- Primitive fast path
@@ -796,6 +808,26 @@ deco init on_reload {
             if not __op_eq(a._data[i], b._data[i]) then return false end
         end
         return true
+    end
+
+    -- FlatVec / NativeBuffer equality is over the first `len` elements'
+    -- BYTES: the elements are FFI-clean value structs (or primitives) living
+    -- inline in one C array, so byte equality is their value equality, with
+    -- the one caveat that a float compares bitwise here (0.0 ~= -0.0, NaN ==
+    -- NaN). Without this case the generic walk reached the NativeBuffer's
+    -- cdata pointer, which the primitive fast path compares by ADDRESS, so
+    -- two FlatVecs with equal contents were never equal.
+    if type_a == "FlatVec" or type_b == "FlatVec" then
+        if type_a ~= "FlatVec" or type_b ~= "FlatVec" or a.len ~= b.len then
+            return false
+        end
+        return __rock_native_buffer_prefix_eq(a.buf, b.buf, a.len)
+    end
+    if type_a == "NativeBuffer" or type_b == "NativeBuffer" then
+        if type_a ~= "NativeBuffer" or type_b ~= "NativeBuffer" or a.len ~= b.len then
+            return false
+        end
+        return __rock_native_buffer_prefix_eq(a, b, a.len)
     end
 
     -- A GC-carrying value struct (table repr) carries a per-type `__eq`
@@ -1153,6 +1185,17 @@ fn vec_set<T>(vec: [T], index: int, value: T) {
 // Bounds-checked indexing helpers, emitted by codegen for `xs[i]` reads and
 // stores (the __nb_checked_* pattern; release stripping is the same future
 // release-mode work). `.get(i)` above is the null-returning form.
+//
+// Under the inline index shape (`ROCK_SKULL_INDEX_SHAPE`, docs/backends.md)
+// codegen spells the check itself and calls only this cold function on the
+// failing path, so no indexing function carries the message text and no trace
+// records a helper frame. The `__vec_checked_*` calls remain for operands the
+// emitter cannot name twice.
+@nomangle inline(lua) fn __rock_vec_oob(vec: any, i: int) = """
+    error("Vec index out of bounds: index " .. tostring(i) ..
+          " is outside [0, " .. tostring(vec.len) .. ")")
+"""
+
 @nomangle inline(lua) fn __vec_checked_get(vec: any, i: int) -> any = """
     if i < 0 or i >= vec.len then
         error("Vec index out of bounds: index " .. tostring(i) ..
@@ -1407,11 +1450,42 @@ inline(lua) fn float_to_int(value: float) -> int = """
     if type(value) ~= "number" then
         error("Expected a number, got " .. type(value))
     end
-    return math.floor(value)
+    local r = math.floor(value)
+    return r
 """
 inline(js) fn float_to_int(value: float) -> int = "return Math.floor(value);"
 
 @inline fn to_int(value: float) -> int { return float_to_int(value) }
+
+// The one answer to "which compiler-minted value cdata is this": the
+// `__ROCK_C_STRUCT` row whose ctype `x` (a cdata) has, or nil. The registry is
+// keyed by NAME, so the honest question is a linear `ffi.istype` scan over
+// every row (~150 in MAG, 27us a scan); the sim boundary restore asked it
+// ~1,300 times per crossing. The answer is a function of the ctype alone, so
+// it is memoized per CTypeID, negatives included (`false`; most asks are
+// negatives -- storage arrays and boxed scalars). The registry emitter resets
+// the memo whenever it (re)emits rows, so an entry never outlives its row.
+@nomangle inline(lua) fn __rock_c_struct_of(x: any) -> any = """
+    local reg = _G.__ROCK_C_STRUCT
+    if not reg then return nil end
+    local memo = _G.__ROCK_C_STRUCT_BY_CTYPE
+    if not memo then
+        memo = {}
+        _G.__ROCK_C_STRUCT_BY_CTYPE = memo
+    end
+    local id = tonumber(ffi.typeof(x))
+    local hit = memo[id]
+    if hit ~= nil then return hit or nil end
+    hit = false
+    for _, info in pairs(reg) do
+        if ffi.istype(info.name, x) then
+            hit = info
+            break
+        end
+    end
+    memo[id] = hit
+    return hit or nil
+"""
 
 // Aliasing-preserving, cycle-safe deep copy. `seen` maps each already-copied
 // source table to its copy; recording `seen[obj] = copy` BEFORE recursing
@@ -1421,12 +1495,9 @@ inline(js) fn float_to_int(value: float) -> int = "return Math.floor(value);"
 // so the wrapper doesn't allocate a fresh closure per copy; @nomangle because
 // it recurses by name and is called from deepcopy's body.
 @nomangle inline(lua) fn __rock_deepcopy_value(obj: any, seen: any) -> any = """
-    if type(obj) == "cdata" and _G.__ROCK_C_STRUCT then
-        for _, info in pairs(_G.__ROCK_C_STRUCT) do
-            if ffi.istype(info.name, obj) then
-                return info.copy(obj)
-            end
-        end
+    if type(obj) == "cdata" then
+        local info = __rock_c_struct_of(obj)
+        if info then return info.copy(obj) end
         return obj
     end
     if type(obj) ~= "table" then
@@ -2177,12 +2248,9 @@ const EPSILON: float = 0.0000001
 """
 
 @nomangle inline(lua) fn inspect(obj: any, cycle_detect: bool = true, precision: int = -1) -> string = """
-    if type(obj) == "cdata" and _G.__ROCK_C_STRUCT then
-        for _, info in pairs(_G.__ROCK_C_STRUCT) do
-            if ffi.istype(info.name, obj) then
-                return info.inspect(obj)
-            end
-        end
+    if type(obj) == "cdata" then
+        local info = __rock_c_struct_of(obj)
+        if info then return info.inspect(obj) end
         return tostring(obj)
     end
 
@@ -2216,7 +2284,8 @@ const EPSILON: float = 0.0000001
 @nomangle inline(lua) fn __rock_format_float(v: float) -> string = """
     local av = math.abs(v)
     if av ~= 0 and (av < 0.0001 or av >= 1000000) then
-        return string.format("%.2g", v)
+        local r = string.format("%.2g", v)
+        return r
     else
         local s = string.format("%.4f", v)
         s = s:gsub("0+$", "")
@@ -2301,7 +2370,8 @@ fn char_to_byte(c: string) -> int { return unit_at(c, 0) }
 @inline inline(lua) fn ffi_new(ty: string) -> any = "ffi.new(ty)"
 
 inline(lua) fn ffi_new_array(ty: string, size: int) -> any = """
-    return ffi.new(ty .. "[" .. size .. "]")
+    local r = ffi.new(ty .. "[" .. size .. "]")
+    return r
 """
 
 @inline inline(lua) fn ffi_new_with_init(ty: string, init: any) -> any = "ffi.new(ty, init)"
@@ -2317,11 +2387,13 @@ inline(lua) fn ffi_null() -> any = """
 """
 
 inline(lua) fn ffi_string(ptr: any, len: int?) -> string = """
+    local r
     if len then
-        return ffi.string(ptr, len)
+        r = ffi.string(ptr, len)
     else
-        return ffi.string(ptr)
+        r = ffi.string(ptr)
     end
+    return r
 """
 
 inline(lua) fn ffi_copy(dst: any, src: any, len: int?) = """
@@ -3275,8 +3347,11 @@ fn Envelope.step_by(e, goal: float, step_dt: float) -> float {
 
 
 @intrinsic inline(lua) fn string.substring(s, start: int, end_idx: int) -> string = """
-    -- Rock uses 0-based indexing, Lua uses 1-based
-    return string.sub(s, start + 1, end_idx)
+    -- Rock uses 0-based indexing, Lua uses 1-based. Bound, then return: a
+    -- `return string.sub(..)` tail call into C is a CALLT no root trace can
+    -- leave through (docs/backends.md, "Wrapper return").
+    local r = string.sub(s, start + 1, end_idx)
+    return r
 """
 
 @inline inline(lua) fn string.upper(s) -> string = "string.upper(s)"
@@ -3340,7 +3415,7 @@ double strtod_l(const char *nptr, char **endptr, __rock_locale_t loc);
             local strtod_l = ffi.C.strtod_l
             local function probe(str) return strtod_l(cast("const char*", str), nil, loc) end
             if probe("1.5") == 1.5 and probe("-3.25e2") == -325 and probe("2.5E-2") == 0.025 then
-                f = function(str, a, b) return strtod_l(cast("const char*", str) + a, nil, loc) end
+                f = function(str, a, b) local r = strtod_l(cast("const char*", str) + a, nil, loc); return r end
             end
         end
     end
@@ -3351,7 +3426,7 @@ double strtod_l(const char *nptr, char **endptr, __rock_locale_t loc);
         local msg = "parse_float_at: no C-locale strtod_l on " .. tostring(ffi.os) .. "; using the portable path"
         local warn = _G.__stone_log
         if warn then warn(1, "STDLIB", msg) else io.stderr:write("[WARN] " .. msg .. "\\n") end
-        f = function(str, a, b) return tonumber(string.sub(str, a + 1, b)) end
+        f = function(str, a, b) local r = tonumber(string.sub(str, a + 1, b)); return r end
     end
     _G.__rock_parse_float_at = f
     return f
@@ -3395,7 +3470,7 @@ double strtod_l(const char *nptr, char **endptr, __rock_locale_t loc);
 struct StringBuilder {}
 @intrinsic inline(lua) fn sb_new() -> StringBuilder = "return {}"
 @intrinsic inline(lua) fn sb_push(sb: StringBuilder, s: string) = "sb[#sb + 1] = s"
-@intrinsic inline(lua) fn sb_build(sb: StringBuilder) -> string = "return table.concat(sb)"
+@intrinsic inline(lua) fn sb_build(sb: StringBuilder) -> string = "local r = table.concat(sb); return r"
 
 fn lt(a: string, b: string) -> bool { return le(a, b) && a != b }
 inline(lua) fn le(a: string, b: string) -> bool = "return a <= b"
@@ -3423,7 +3498,8 @@ inline(lua) fn string.pad_left(s, width: int) -> string = """
 // right-aligned in a field of `width` chars (use 0 to skip padding).
 // Wraps `string.format("%<width>.<decimals>f", v)`.
 inline(lua) fn format_float(v: float, width: int, decimals: int) -> string = """
-    return string.format("%" .. tostring(width) .. "." .. tostring(decimals) .. "f", v)
+    local r = string.format("%" .. tostring(width) .. "." .. tostring(decimals) .. "f", v)
+    return r
 """
 
 // Pattern-based string matching (Lua patterns, not regex)

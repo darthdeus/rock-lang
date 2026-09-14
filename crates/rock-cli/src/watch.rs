@@ -7,17 +7,34 @@ fn is_compiler_crate_dir(name: &str) -> bool {
         || name.starts_with("bone-")
 }
 
+fn resolve_stone_watch_path(project: &str) -> PathBuf {
+    let project_path = Path::new(project);
+    if let Ok(Some((config_path, config))) = rock_host::stick::StickConfig::find_from_dir(project_path) {
+        if config.dependencies.contains_key("stone") {
+            let root_path = config_path.parent().unwrap_or(&config_path).to_path_buf();
+            let mut resolver = rock_host::stick::resolver::DependencyResolver::new(root_path);
+            if let Ok(resolved) = resolver.resolve(&config) {
+                if let Some(stone_dep) = resolved.into_iter().find(|d| d.name == "stone") {
+                    return stone_dep.path;
+                }
+            }
+        }
+    }
+    PathBuf::from(rock_host::rock_dir()).join("stone")
+}
+
 pub(crate) fn project_engine_watch_paths(project: &str) -> Vec<PathBuf> {
     vec![
         PathBuf::from(project),
         rock_host::stdlib_loader::stdlib_dir(),
-        PathBuf::from("stone"),
+        resolve_stone_watch_path(project),
     ]
 }
 
 pub(crate) fn compiler_watch_paths() -> Vec<PathBuf> {
-    let mut paths = vec![PathBuf::from("Cargo.toml"), PathBuf::from("Cargo.lock")];
-    if let Ok(entries) = std::fs::read_dir("crates") {
+    let root = PathBuf::from(rock_host::rock_dir());
+    let mut paths = vec![root.join("Cargo.toml"), root.join("Cargo.lock")];
+    if let Ok(entries) = std::fs::read_dir(root.join("crates")) {
         for entry in entries.flatten() {
             if is_compiler_crate_dir(&entry.file_name().to_string_lossy()) {
                 let crate_dir = entry.path();

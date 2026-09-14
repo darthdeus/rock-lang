@@ -90,5 +90,9 @@ fn main() { print("{use_it(1)}") }
 #[test]
 fn stdlib_rock_prefixed_defs_compile() {
     let lua = emit_module(r#"fn main() { print("ok") }"#);
-    assert!(lua.contains("function main"), "stdlib compiles:\n{}", &lua[..lua.len().min(200)]);
+    assert!(
+        !crate::common::definitions_matching(&lua, "main").is_empty(),
+        "stdlib compiles:\n{}",
+        &lua[..lua.len().min(200)]
+    );
 }

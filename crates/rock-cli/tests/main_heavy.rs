@@ -61,6 +61,8 @@ mod mag_worker_product_tests;
 mod sim_reload_lane_drain;
 #[path = "sim_worker_pool.rs"]
 mod sim_worker_pool;
+#[path = "sim_observability_heavy.rs"]
+mod sim_observability_heavy;
 #[path = "shader_texture_census.rs"]
 mod shader_texture_census;
 #[path = "shader_corpus_oracle.rs"]

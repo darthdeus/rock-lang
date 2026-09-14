@@ -109,10 +109,19 @@ impl GameCompiler for SkullGameCompiler {
                 let changed_vec: Vec<PathBuf> = changed.iter().cloned().collect();
                 let reload = st.recompile(&changed_vec, &self.output_path, &self.incremental_path)?;
                 match reload {
-                    SkullReload::Full { bytes, cook_ms, emit_ms, write_ms } => {
+                    SkullReload::Full { bytes, body_only, cook_ms, emit_ms, write_ms } => {
                         log::info!(target: "STONE",
-                            "skull: full rebuild -> main.lua in {:.1}ms ({:.1} cook + {:.1} emit + {:.1} write, {} KB)",
+                            "skull: {} -> main.lua in {:.1}ms ({:.1} cook + {:.1} emit + {:.1} write, {} KB)",
+                            if body_only { "body edit, full chunk (callee binding)" } else { "full rebuild" },
                             cook_ms + emit_ms + write_ms, cook_ms, emit_ms, write_ms, bytes / 1024);
+                        // A body-tier edit the bound callee shape pushed onto
+                        // the full-chunk path moved nothing structural, so the
+                        // running process absorbs it through the engine's full
+                        // hot reload and keeps its live state. Only a genuine
+                        // interface/structural rebuild needs the clean restart.
+                        if body_only {
+                            return Ok(CompileOutcome::default());
+                        }
                         return Ok(CompileOutcome {
                             restart_reasons: vec![
                                 "full reload requires a clean process restart".to_string(),

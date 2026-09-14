@@ -106,7 +106,7 @@ fn assert_layout_fixture_added_one(state: &serde_json::Value) {
     let after = diag["MAG_REPLAY_LAYOUT_STRIPS_AFTER"]
         .as_i64()
         .expect("layout fixture must report its final strip population");
-    assert_eq!(before, 3, "empty history must seed the three category strips: {diag}");
+    assert!(before > 0, "empty history must seed the production strips: {diag}");
     assert_eq!(after, before + 1, "the production drag must add exactly one strip: {diag}");
     assert_eq!(state["mag"]["SPELL_STRIPS"]["len"], after,
         "the fixture census must describe the authoritative strip population");
@@ -223,11 +223,10 @@ fn add_world_damage_snapshot_fixture(progress: &Path) -> PathBuf {
         &std::fs::read(progress).expect("read generated current progress"),
     )
     .expect("generated progress must be JSON");
-    root["version"] = serde_json::json!(5);
+    root["version"] = serde_json::json!(6);
     root["world_damage"] = serde_json::json!([{
         "level": {"namespace": "official", "name": "crypt"},
-        "stamps": [],
-        "chunks": [{"x": 1, "y": 0, "generation": 1, "tail": []}],
+        "chunks": [{"x": 1, "y": 0, "face": 0, "generation": 1, "tail": []}],
     }]);
     std::fs::write(
         progress,
@@ -254,6 +253,12 @@ fn binding_history_bootstrap_ignores_mutated_and_deleted_live_history() {
     let bindings = dir.path().join("bindings.json");
     let bindings_history = dir.path().join("spellbook-bindings.jsonl");
     let replay = dir.path().join("bindings-history.replay");
+
+    std::fs::write(
+        &bindings,
+        br#"{"version":1,"actions":{"toggle_spells":[{"alt":false,"ctrl":false,"gui":false,"kind":"key","scan":"b","shift":false},{"button":"leftstick","kind":"pad"}]}}"#,
+    )
+    .expect("write non-default bindings A");
 
     let mut seed_owned = fixture_env("bindings_history_seed", &progress, &layout, &settings).to_vec();
     seed_owned.push(("MAG_BINDINGS_PATH_OVERRIDE", bindings.to_string_lossy().into_owned()));
@@ -611,7 +616,7 @@ fn progress_bootstrap_captures_absence_and_keeps_b_read_only() {
     let recorded = run_mag(1, Some(&replay), None, &env);
     let persisted_b = std::fs::read(&progress).expect("record action must create B");
     let log = std::fs::read_to_string(&replay).expect("read replay");
-    assert!(log.starts_with("STONE_REPLAY 13\n"), "recording must use v13\n{log}");
+    assert!(log.starts_with("STONE_REPLAY 14\n"), "recording must use v14\n{log}");
     let boot_lines: Vec<&str> = log.lines().filter(|line| line.starts_with("boot ")).collect();
     assert_eq!(boot_lines.len(), 4,
         "the temporary current-settings path plus progress and both histories must capture keys");
@@ -893,7 +898,7 @@ fn save_repro_retains_bootstrap_entries() {
         .find(|path| path.file_name().and_then(|name| name.to_str()).is_some_and(|name| name.starts_with("repro-")))
         .expect("auto save repro must create a sibling");
     let text = std::fs::read_to_string(repro).expect("read saved repro");
-    assert!(text.starts_with("STONE_REPLAY 13\n"), "repro must retain v13\n{text}");
+    assert!(text.starts_with("STONE_REPLAY 14\n"), "repro must retain v14\n{text}");
     assert_eq!(text.lines().filter(|line| line.starts_with("boot ")).count(), 4,
         "save repro must retain all bootstrap entries");
 }

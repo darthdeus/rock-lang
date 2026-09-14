@@ -514,6 +514,9 @@ end
 /// provides them (`stdlib/unified.rock`); stdlib-free test harnesses prepend
 /// this so emitted chunks stay self-contained.
 pub const VEC_CHECK_SHIMS: &str = "\
+function __rock_vec_oob(vec, i)\n\
+  error('Vec index out of bounds')\n\
+end\n\
 function __vec_checked_get(vec, i)\n\
   if i < 0 or i >= vec.len then error('Vec index out of bounds') end\n\
   return vec._data[i + 1]\n\
@@ -664,6 +667,39 @@ pub struct CodegenCtx {
     rejections: Mutex<Vec<(String, CompilerError)>>,
     /// Compiler-assigned Session slots for mutable globals.
     state_slots: HashMap<ustr::Ustr, u32>,
+    /// Every function that lies on a call cycle, from the whole-program instance
+    /// graph projected onto declarations. Read ONLY by
+    /// [`TailCallShape::Cycles`]; empty on any path that never populated it,
+    /// which makes that shape degrade to [`TailCallShape::All`] rather than to
+    /// the unsafe direction.
+    recursive_callees: HashSet<FuncRef>,
+    /// The emitted shape for a call in tail position. Read from
+    /// `ROCK_SKULL_TAIL_CALLS` once per context rather than once per emitted
+    /// block, so a test can drive all three shapes in one process.
+    tail_calls: TailCallShape,
+    /// The emitted shape for a call to another emitted function. Read from
+    /// `ROCK_SKULL_CALLEE_BINDING` once per context, same as `tail_calls`.
+    callee_binding: CalleeBindingMode,
+    /// Whether a mutable-global access under the bound shape reads the Session
+    /// tables through chunk-level upvalue cells instead of walking
+    /// `_G.__rock_active_session.__rock_state`. Read from
+    /// `ROCK_SKULL_STATE_CELL` once per context; only effective under
+    /// [`CalleeBindingMode::Upvalue`], see [`CodegenCtx::state_cell`].
+    state_cell: bool,
+    /// The emitted shape for a natural loop that is not a counted `for`. Read
+    /// from `ROCK_SKULL_LOOP_SHAPE` once per context, same as `tail_calls`.
+    loops: LoopShape,
+    /// The emitted shape for a GC-tier `value` struct construction. Read from
+    /// `ROCK_SKULL_VALUE_CTOR` once per context, same as `tail_calls`.
+    value_ctor: ValueCtorShape,
+    /// The emitted shape for a bounds-checked Vec access. Read from
+    /// `ROCK_SKULL_INDEX_SHAPE` once per context, same as `tail_calls`.
+    index_shape: IndexShape,
+    /// Every function's strongly connected component number over the
+    /// whole-program call graph, from [`call_sccs`]. Read ONLY by
+    /// [`callee_binding_plan`]; empty on any path that never populated it,
+    /// which binds nothing rather than binding unsoundly.
+    call_sccs: HashMap<FuncRef, u32>,
 }
 
 impl Clone for CodegenCtx {
@@ -672,6 +708,14 @@ impl Clone for CodegenCtx {
             reserved: self.reserved.clone(),
             rejections: Mutex::new(self.rejections.lock().expect("rejection sink").clone()),
             state_slots: self.state_slots.clone(),
+            recursive_callees: self.recursive_callees.clone(),
+            tail_calls: self.tail_calls,
+            callee_binding: self.callee_binding,
+            state_cell: self.state_cell,
+            loops: self.loops,
+            value_ctor: self.value_ctor,
+            index_shape: self.index_shape,
+            call_sccs: self.call_sccs.clone(),
         }
     }
 }
@@ -744,7 +788,118 @@ impl CodegenCtx {
             reserved,
             rejections: Mutex::new(collisions),
             state_slots,
+            recursive_callees: HashSet::default(),
+            tail_calls: tail_call_shape(),
+            callee_binding: callee_binding_mode(),
+            state_cell: state_cell_mode(),
+            loops: loop_shape(),
+            value_ctor: value_ctor_shape(),
+            index_shape: index_shape(),
+            call_sccs: HashMap::default(),
         }
+    }
+
+    /// Override the emitted tail-call shape this context was built with. The
+    /// production path takes it from `ROCK_SKULL_TAIL_CALLS`; a test uses this
+    /// so one process can emit all three shapes.
+    pub fn set_tail_call_shape(&mut self, shape: TailCallShape) {
+        self.tail_calls = shape;
+    }
+
+    pub fn tail_call_shape(&self) -> TailCallShape {
+        self.tail_calls
+    }
+
+    /// Override the emitted callee-binding shape this context was built with.
+    /// The production path takes it from `ROCK_SKULL_CALLEE_BINDING`; `rock
+    /// stone` forces [`CalleeBindingMode::Global`] because the incremental
+    /// overlay redefines a global that bound callers would never re-read, and a
+    /// test uses this so one process can emit both shapes.
+    pub fn set_callee_binding(&mut self, mode: CalleeBindingMode) {
+        self.callee_binding = mode;
+    }
+
+    pub fn callee_binding(&self) -> CalleeBindingMode {
+        self.callee_binding
+    }
+
+    /// Override the Session-cell switch this context was built with. The
+    /// production path takes it from `ROCK_SKULL_STATE_CELL`; a test uses this
+    /// so one process can emit both shapes.
+    pub fn set_state_cell(&mut self, on: bool) {
+        self.state_cell = on;
+    }
+
+    /// Whether mutable-global accesses are emitted through the Session cells
+    /// (`__rock_state_cell[k]`) rather than the `_G` walk. Requires the bound
+    /// callee shape: an incremental overlay is a separate chunk that cannot see
+    /// main.lua's chunk-level locals, and the overlay path already pins
+    /// [`CalleeBindingMode::Global`], so tying the cell to that shape keeps the
+    /// two mutually exclusive by the same rule (`docs/backends.md`).
+    pub fn state_cell(&self) -> bool {
+        self.state_cell && self.callee_binding == CalleeBindingMode::Upvalue
+    }
+
+    /// Override the emitted loop shape this context was built with. The
+    /// production path takes it from `ROCK_SKULL_LOOP_SHAPE`; a test uses this
+    /// so one process can emit both shapes.
+    pub fn set_loop_shape(&mut self, shape: LoopShape) {
+        self.loops = shape;
+    }
+
+    pub fn loop_shape(&self) -> LoopShape {
+        self.loops
+    }
+
+    /// Override the emitted value-ctor shape this context was built with. The
+    /// production path takes it from `ROCK_SKULL_VALUE_CTOR`; a test uses this
+    /// so one process can emit both shapes.
+    pub fn set_value_ctor_shape(&mut self, shape: ValueCtorShape) {
+        self.value_ctor = shape;
+    }
+
+    pub fn value_ctor_shape(&self) -> ValueCtorShape {
+        self.value_ctor
+    }
+
+    /// Override the emitted index shape this context was built with. The
+    /// production path takes it from `ROCK_SKULL_INDEX_SHAPE`; a test uses this
+    /// so one process can emit both shapes.
+    pub fn set_index_shape(&mut self, shape: IndexShape) {
+        self.index_shape = shape;
+    }
+
+    pub fn index_shape(&self) -> IndexShape {
+        self.index_shape
+    }
+
+    /// Record every function's call-graph strongly connected component. The
+    /// caller owns the graph this is derived from (`skull::mir_emit` projects
+    /// the whole-program instance graph onto declarations, which can only MERGE
+    /// components and so only ever binds less); codegen only reads the answer,
+    /// and only under [`CalleeBindingMode::Upvalue`].
+    pub fn set_call_sccs(&mut self, sccs: HashMap<FuncRef, u32>) {
+        self.call_sccs = sccs;
+    }
+
+    /// `func`'s strongly connected component number, or `None` when the graph
+    /// this context was given does not mention it.
+    pub fn scc_of(&self, func: FuncRef) -> Option<u32> {
+        self.call_sccs.get(&func).copied()
+    }
+
+    /// Record the functions that lie on a call cycle. The caller owns the graph
+    /// this is derived from (`skull::mir_emit` projects the whole-program
+    /// instance graph onto declarations); codegen only reads the answer, and
+    /// only under `ROCK_SKULL_TAIL_CALLS=cycles`.
+    pub fn set_recursive_callees(&mut self, callees: HashSet<FuncRef>) {
+        self.recursive_callees = callees;
+    }
+
+    /// True if `func` lies on a call cycle, so a call to it can grow the Lua
+    /// stack without bound unless it stays a real tail call.
+    pub fn is_recursive_callee(&self, func: FuncRef) -> bool {
+        self.recursive_callees.contains(&func)
     }
 
     /// Mint a compiler-reserved synthetic top-level Lua name: a hoisted lambda
@@ -788,6 +943,12 @@ impl CodegenCtx {
 
     pub fn state_slot(&self, name: ustr::Ustr) -> Option<u32> {
         self.state_slots.get(&name).copied()
+    }
+
+    /// The highest compiler-assigned Session slot, 0 when there is none. The
+    /// emitter sizes every Session's array part to this slot's rehash fixpoint.
+    pub fn state_slot_max(&self) -> u32 {
+        self.state_slots.values().copied().max().unwrap_or(0)
     }
 }
 
@@ -900,11 +1061,654 @@ fn instruction_reference_counts(func: &MirFunc) -> Vec<u32> {
     counts
 }
 
-fn tail_forwards(func: &MirFunc) -> Vec<Option<TailForward>> {
+/// The strongly connected components of a `(caller, callee)` call-edge stream,
+/// the one Tarjan run behind both [`callees_on_cycles`] and [`call_sccs`].
+///
+/// Components are numbered in Tarjan COMPLETION order, which is a reverse
+/// topological order of the condensation: a component is closed only after
+/// every component it can reach, so `component[callee] < component[caller]`
+/// whenever the two differ. [`call_sccs`] hands that number out as the
+/// callee-binding rank, and the binding pass emits in ascending rank so every
+/// captured callee is already its final closure.
+struct CallComponents {
+    nodes: Vec<FuncRef>,
+    /// Node index -> component number.
+    component: Vec<u32>,
+    /// Component number -> whether it is a genuine cycle (more than one member,
+    /// or a self-edge).
+    is_cycle: Vec<bool>,
+}
+
+fn tarjan_components(edges: impl IntoIterator<Item = (FuncRef, FuncRef)>) -> CallComponents {
+    fn intern(
+        f: FuncRef,
+        ids: &mut HashMap<FuncRef, usize>,
+        nodes: &mut Vec<FuncRef>,
+        succ: &mut Vec<Vec<usize>>,
+    ) -> usize {
+        if let Some(&i) = ids.get(&f) {
+            return i;
+        }
+        let i = nodes.len();
+        ids.insert(f, i);
+        nodes.push(f);
+        succ.push(Vec::new());
+        i
+    }
+
+    let mut ids: HashMap<FuncRef, usize> = HashMap::default();
+    let mut nodes: Vec<FuncRef> = Vec::new();
+    let mut succ: Vec<Vec<usize>> = Vec::new();
+    for (from, to) in edges {
+        let from = intern(from, &mut ids, &mut nodes, &mut succ);
+        let to = intern(to, &mut ids, &mut nodes, &mut succ);
+        succ[from].push(to);
+    }
+
+    // Iterative Tarjan: a program-sized call graph has chains deep enough to
+    // overflow a recursive DFS.
+    const UNVISITED: usize = usize::MAX;
+    let n = nodes.len();
+    let mut index = vec![UNVISITED; n];
+    let mut low = vec![0usize; n];
+    let mut on_stack = vec![false; n];
+    let mut component = vec![u32::MAX; n];
+    let mut is_cycle: Vec<bool> = Vec::new();
+    let mut members: Vec<usize> = Vec::new();
+    let mut stack: Vec<usize> = Vec::new();
+    let mut work: Vec<(usize, usize)> = Vec::new();
+    let mut next_index = 0usize;
+    for root in 0..n {
+        if index[root] != UNVISITED {
+            continue;
+        }
+        work.push((root, 0));
+        while let Some((v, resume)) = work.pop() {
+            if resume == 0 {
+                index[v] = next_index;
+                low[v] = next_index;
+                next_index += 1;
+                stack.push(v);
+                on_stack[v] = true;
+            }
+            let mut descended = false;
+            let mut i = resume;
+            while i < succ[v].len() {
+                let w = succ[v][i];
+                i += 1;
+                if index[w] == UNVISITED {
+                    work.push((v, i));
+                    work.push((w, 0));
+                    descended = true;
+                    break;
+                }
+                if on_stack[w] {
+                    low[v] = low[v].min(index[w]);
+                }
+            }
+            if descended {
+                continue;
+            }
+            if low[v] == index[v] {
+                members.clear();
+                loop {
+                    let w = stack.pop().expect("tarjan component stack");
+                    on_stack[w] = false;
+                    members.push(w);
+                    if w == v {
+                        break;
+                    }
+                }
+                let id = is_cycle.len() as u32;
+                // A one-node component is on a cycle only through a self-edge.
+                is_cycle.push(members.len() > 1 || succ[v].contains(&v));
+                for &w in &members {
+                    component[w] = id;
+                }
+            }
+            if let Some(&(parent, _)) = work.last() {
+                low[parent] = low[parent].min(low[v]);
+            }
+        }
+    }
+    CallComponents { nodes, component, is_cycle }
+}
+
+/// Every function that lies on a cycle of `edges`, the input
+/// `ROCK_SKULL_TAIL_CALLS=cycles` reads through
+/// [`CodegenCtx::set_recursive_callees`].
+///
+/// `edges` is a `(caller, callee)` stream; a function is on a cycle when its
+/// strongly connected component has more than one member or it calls itself.
+/// The caller supplies the graph, so the emitter never has to know how the
+/// program's call edges were discovered.
+pub fn callees_on_cycles(edges: impl IntoIterator<Item = (FuncRef, FuncRef)>) -> HashSet<FuncRef> {
+    let c = tarjan_components(edges);
+    c.nodes
+        .iter()
+        .zip(c.component.iter())
+        .filter(|(_, comp)| c.is_cycle[**comp as usize])
+        .map(|(f, _)| *f)
+        .collect()
+}
+
+/// Each function's strongly connected component number over `edges`, the input
+/// `ROCK_SKULL_CALLEE_BINDING=upvalue` reads through
+/// [`CodegenCtx::set_call_sccs`]. Two functions share a number exactly when
+/// they are mutually reachable, and a callee's number is strictly lower than
+/// its caller's whenever they differ -- see [`CallComponents`].
+pub fn call_sccs(edges: impl IntoIterator<Item = (FuncRef, FuncRef)>) -> HashMap<FuncRef, u32> {
+    let c = tarjan_components(edges);
+    c.nodes.iter().copied().zip(c.component.iter().copied()).collect()
+}
+
+/// Which calls in tail position keep Lua's `do return f(...) end` shape.
+///
+/// `do return f(...) end` compiles to `CALLT`, and LuaJIT's recorder counts
+/// every recorded `CALLT` against `loopunroll` (default 15) in
+/// `lj_record_tailcall`, so a trace that walks through more than 15 of them
+/// aborts with "loop unroll limit reached". A plain call is inlined by the
+/// recorder too, so dropping the shape does not stop inlining -- it moves the
+/// limit the trace hits (`lj_record_call` grows `baseslot` instead and trips
+/// "trace too deep" at 250 slots) and costs a real interpreter frame.
+/// `docs/trace-pressure-work-plan.md` carries the measurement.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TailCallShape {
+    /// Every call in tail position is `do return f(...) end`.
+    All,
+    /// No call keeps the shape. MEASUREMENT ONLY: this drops tail-call
+    /// elimination for recursive calls too, so an unbounded tail recursion
+    /// overflows the Lua stack (measured between 10,000 and 60,000 frames).
+    None,
+    /// Only a callee that lies on a call cycle keeps the shape, so genuine
+    /// recursion keeps tail-call elimination and a straight-line accessor or
+    /// draw chain does not.
+    Cycles,
+}
+
+/// `ROCK_SKULL_TAIL_CALLS` selects the emitted shape for a call in tail
+/// position: `all` (the default), `none`, or `cycles`. An unset or unrecognized
+/// value is `all`, so the switch can only be entered deliberately.
+pub fn tail_call_shape() -> TailCallShape {
+    static SHAPE: std::sync::OnceLock<TailCallShape> = std::sync::OnceLock::new();
+    *SHAPE.get_or_init(|| match std::env::var("ROCK_SKULL_TAIL_CALLS").as_deref() {
+        Ok("none") => TailCallShape::None,
+        Ok("cycles") => TailCallShape::Cycles,
+        _ => TailCallShape::All,
+    })
+}
+
+/// How a call to another EMITTED function is spelled inside a function body.
+///
+/// A global lookup (`GGET`) costs a trace 5 constant-pool slots per distinct
+/// callee on GC64 -- the name string (a GC constant, 2 slots), its `KSLOT`
+/// hash slot, and the resolved function object (2 more) -- plus the guard that
+/// the global still holds that function. LuaJIT's `maxirconst` limit is 500
+/// SLOTS, and "trace too long" (the limit being hit) is the largest abort class
+/// in mag. An IMMUTABLE upvalue costs 2: only the function object, folded into
+/// the trace with no lookup and no guard. `docs/trace-pressure-work-plan.md`
+/// carries the per-shape measurement.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CalleeBindingMode {
+    /// Every call is a global lookup by the callee's emitted name.
+    Global,
+    /// A function that calls other emitted functions is defined as a FACTORY
+    /// (`__rock_mk_F = function(a, b) return function(..) .. end end`) whose
+    /// parameters are named exactly like the callees, so the body text is
+    /// unchanged and each call reads an immutable upvalue instead of a global.
+    /// A second pass binds `F = __rock_mk_F(a, b)` once every callee it
+    /// captures is final.
+    Upvalue,
+}
+
+/// `ROCK_SKULL_CALLEE_BINDING` selects the emitted shape for a call to another
+/// emitted function: `global` or `upvalue`. An unset or unrecognized value is
+/// the shipped default, so the switch can only be entered deliberately.
+pub fn callee_binding_mode() -> CalleeBindingMode {
+    if FORCE_GLOBAL_CALLEE_BINDING.load(std::sync::atomic::Ordering::Relaxed) {
+        return CalleeBindingMode::Global;
+    }
+    static MODE: std::sync::OnceLock<CalleeBindingMode> = std::sync::OnceLock::new();
+    *MODE.get_or_init(|| match std::env::var("ROCK_SKULL_CALLEE_BINDING").as_deref() {
+        Ok("upvalue") => CalleeBindingMode::Upvalue,
+        Ok("global") => CalleeBindingMode::Global,
+        _ => DEFAULT_CALLEE_BINDING,
+    })
+}
+
+/// Chunk-level local that every emitted function reads a mutable global through
+/// under the bound shape: the active Session's `__rock_state` table. Declared
+/// at the top of the runtime prelude, assigned by `__rock_session_publish`.
+pub const STATE_CELL: &str = "__rock_state_cell";
+/// The sibling cell for the active Session's `__rock_initialized` table.
+pub const INITIALIZED_CELL: &str = "__rock_initialized_cell";
+
+/// `ROCK_SKULL_STATE_RESERVE=0` leaves every Session's tables to grow lazily
+/// from `{}` instead of sizing them to the schema's rehash fixpoint at load
+/// (`docs/backends.md`, "Session cells"), for A/B measurement. Default: on.
+pub fn state_reserve_mode() -> bool {
+    static MODE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *MODE.get_or_init(|| !matches!(std::env::var("ROCK_SKULL_STATE_RESERVE").as_deref(), Ok("0")))
+}
+
+/// `ROCK_SKULL_STATE_CELL=0` keeps the `_G.__rock_active_session.__rock_state`
+/// walk under the bound shape, for A/B measurement. Anything else is the
+/// shipped default: on.
+pub fn state_cell_mode() -> bool {
+    static MODE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *MODE.get_or_init(|| !matches!(std::env::var("ROCK_SKULL_STATE_CELL").as_deref(), Ok("0")))
+}
+
+/// How a natural loop that is NOT a counted `for` is spelled.
+///
+/// LuaJIT's parser turns a backward `goto` into `BC_LOOP` with `bc_j == -1`
+/// (`lj_parse.c`, `parse_goto`: "No BC range check"). `rec_setup_root` then
+/// leaves `bc_min`/`bc_extent` at their no-limit defaults, so a root trace
+/// started at such a loop keeps recording past the loop's exit through the rest
+/// of the function until it hits a compiled loop, the unroll limit or the
+/// constant limit; and `rec_loop_interp`'s interpreted-inner-loop check is
+/// skipped, because it is guarded on `bc_j(*pc) != -1`. A `while true do .. end`
+/// gets `BC_LOOP` with a real range (`parse_while` patches it with
+/// `jmp_patchins`), so both paths see a closed loop.
+/// `docs/trace-pressure-work-plan.md` carries the measurement.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum LoopShape {
+    /// Every non-counted loop stays labelled blocks plus a backward `goto`.
+    Goto,
+    /// Every natural loop the CFG can prove single-entry is wrapped in
+    /// `while true do .. end`, its back edges rewritten to a forward `goto` to a
+    /// continue label at the end of the loop body. Exits stay ordinary `goto`s
+    /// OUT of the block, which Lua allows; only jumping IN is forbidden, and the
+    /// single-entry proof is exactly what rules that out.
+    Structured,
+}
+
+/// `ROCK_SKULL_LOOP_SHAPE` selects the emitted shape for a natural loop that is
+/// not a counted `for`: `goto` or `structured`. An unset or unrecognized value
+/// is the shipped default, so the switch can only be entered deliberately.
+pub fn loop_shape() -> LoopShape {
+    static SHAPE: std::sync::OnceLock<LoopShape> = std::sync::OnceLock::new();
+    *SHAPE.get_or_init(|| match std::env::var("ROCK_SKULL_LOOP_SHAPE").as_deref() {
+        Ok("structured") => LoopShape::Structured,
+        Ok("goto") => LoopShape::Goto,
+        _ => DEFAULT_LOOP_SHAPE,
+    })
+}
+
+/// The shipped emitted loop shape. See **Loop shape** in `docs/backends.md`.
+pub const DEFAULT_LOOP_SHAPE: LoopShape = LoopShape::Goto;
+
+/// How a GC-tier `value` struct construction is spelled at its use site.
+///
+/// [`ValueCtorShape::Call`] calls the chunk-level `<Name>_vt(..)` ctor, whose
+/// whole body is `return setmetatable({ .. }, <mt>)`. That call frame is what
+/// makes a four-field constructor hot enough to become a `rec_ret` TRACE ROOT --
+/// `Entity_vt` is the largest single leaving-loop family on mag's combat bench,
+/// 106 aborts over three runs -- and its `return setmetatable(..)` is one
+/// `CALLT` against LuaJIT's 15-slot `loopunroll` budget in every trace that
+/// records it. [`ValueCtorShape::Splice`] writes the table constructor and the
+/// `setmetatable` at the use site instead, so there is no frame to root.
+/// `docs/trace-pressure-work-plan.md` carries the measurement.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ValueCtorShape {
+    /// Every construction is a call to the chunk-level `<Name>_vt` ctor.
+    Call,
+    /// A GC-table (`_vt`) construction with declared fields is spliced in place.
+    /// The cdata (`_ct`) and leaf-table (`_lct`) tiers are untouched: `_ct` is an
+    /// `ffi.typeof` ctor with no Lua body to splice, and `_lct` carries the leaf
+    /// plan's presence tagging, which belongs in one place.
+    Splice,
+}
+
+/// `ROCK_SKULL_VALUE_CTOR` selects the emitted shape for a GC-tier `value`
+/// struct construction: `call` or `splice`. An unset or unrecognized value is
+/// the shipped default, so the switch can only be entered deliberately.
+pub fn value_ctor_shape() -> ValueCtorShape {
+    static SHAPE: std::sync::OnceLock<ValueCtorShape> = std::sync::OnceLock::new();
+    *SHAPE.get_or_init(|| match std::env::var("ROCK_SKULL_VALUE_CTOR").as_deref() {
+        Ok("splice") => ValueCtorShape::Splice,
+        Ok("call") => ValueCtorShape::Call,
+        _ => DEFAULT_VALUE_CTOR_SHAPE,
+    })
+}
+
+/// The shipped emitted value-ctor shape.
+pub const DEFAULT_VALUE_CTOR_SHAPE: ValueCtorShape = ValueCtorShape::Call;
+
+/// How a bounds-checked Vec element read, store or column index is spelled.
+/// `docs/backends.md` carries the rule; `docs/trace-pressure-work-plan.md` the
+/// measurement.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum IndexShape {
+    /// Every access calls the stdlib helper (`__vec_checked_get` and kin). In a
+    /// trace that is one callee constant per trace plus one frame-link constant
+    /// per site, and the helper's own entry is a trace root.
+    Call,
+    /// An access whose base and index render as bare names spells the check
+    /// itself: `if i < 0 or i >= v.len then __rock_vec_oob(v, i) end` and then
+    /// the raw `_data` access. An operand that is a folded expression keeps the
+    /// call, because the guard names each operand twice.
+    Inline,
+}
+
+/// `ROCK_SKULL_INDEX_SHAPE` selects the emitted shape for a bounds-checked Vec
+/// access: `call` or `inline`. An unset or unrecognized value is the shipped
+/// default, so the switch can only be entered deliberately.
+pub fn index_shape() -> IndexShape {
+    static SHAPE: std::sync::OnceLock<IndexShape> = std::sync::OnceLock::new();
+    *SHAPE.get_or_init(|| match std::env::var("ROCK_SKULL_INDEX_SHAPE").as_deref() {
+        Ok("call") => IndexShape::Call,
+        Ok("inline") => IndexShape::Inline,
+        _ => DEFAULT_INDEX_SHAPE,
+    })
+}
+
+/// How a one-expression wrapper -- an `extern(ffi)` binding, a value-struct
+/// `_vt`/`_lct` ctor -- hands its result back. `docs/backends.md` carries the
+/// rule; `docs/trace-pressure-work-plan.md` the measurement.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum WrapperRetShape {
+    /// `return lib.f(..)`: a `CALLT` into C. A root trace started at the
+    /// wrapper's entry cannot leave through it (`rec_ret` needs a real `RET`)
+    /// and aborts `leaving loop in root trace` every time it is tried.
+    Tail,
+    /// `local __rock_ret = lib.f(..)` then `return __rock_ret`: one bytecode
+    /// more, a real `RET`, and the root trace links out cleanly.
+    Local,
+}
+
+/// `ROCK_SKULL_WRAPPER_RET` selects the wrapper return shape: `tail` or
+/// `local`. An unset or unrecognized value is the shipped default, so the
+/// switch can only be entered deliberately.
+pub fn wrapper_ret_shape() -> WrapperRetShape {
+    static SHAPE: std::sync::OnceLock<WrapperRetShape> = std::sync::OnceLock::new();
+    *SHAPE.get_or_init(|| match std::env::var("ROCK_SKULL_WRAPPER_RET").as_deref() {
+        Ok("tail") => WrapperRetShape::Tail,
+        Ok("local") => WrapperRetShape::Local,
+        _ => DEFAULT_WRAPPER_RET_SHAPE,
+    })
+}
+
+/// The shipped wrapper return shape.
+pub const DEFAULT_WRAPPER_RET_SHAPE: WrapperRetShape = WrapperRetShape::Local;
+
+/// The return statement(s) of a wrapper whose whole result is `expr`, under
+/// [`wrapper_ret_shape`]. Two-space indented, no trailing newline. The local
+/// is a reserved `__rock` name so it can never shadow a wrapper parameter
+/// that `expr` reads.
+pub fn wrapper_return(expr: &str) -> String {
+    match wrapper_ret_shape() {
+        WrapperRetShape::Tail => format!("  return {expr}"),
+        WrapperRetShape::Local => format!("  local __rock_ret = {expr}\n  return __rock_ret"),
+    }
+}
+
+/// The shipped emitted index shape. `Inline` measured as a redistribution on
+/// mag, not a reduction: the aborts that started inside the helper reappeared
+/// as leaving-loop roots at the callers' own `for` headers, and the first
+/// frames got no faster (`docs/trace-pressure-work-plan.md`, "Checked-index
+/// helpers inlined at the emitter").
+pub const DEFAULT_INDEX_SHAPE: IndexShape = IndexShape::Call;
+
+/// The shared per-type metatable global of a GC-tier `value` struct -- the table
+/// every instance of `<name>` carries, so LuaJIT's `__eq` fires between any two
+/// of them. ONE spelling, read by the definition emitter
+/// (`skull::value_struct_gc_defs`) and by a spliced construction alike.
+pub fn value_struct_metatable_name(name: &str) -> String {
+    format!("__rock_vt_{name}")
+}
+
+static FORCE_GLOBAL_CALLEE_BINDING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Pin this PROCESS to [`CalleeBindingMode::Global`], whatever
+/// `ROCK_SKULL_CALLEE_BINDING` says.
+///
+/// THE hot-reload rule. An incremental overlay redefines one global `F`; a
+/// caller that captured `F` as an upvalue holds the previous closure and would
+/// never see the edited body, so a body edit would silently not reach its
+/// callers. The two shapes are therefore mutually exclusive for a whole build
+/// session. `rock stone` no longer calls this: it publishes a full `main.lua`
+/// per edit instead (see `SkullStone::route_and_emit`). The commands that drive
+/// `emit_overlay` ITSELF -- `rock stone-test` and `rock iter-incremental` --
+/// still do, so the overlay path keeps its coverage and its profiler.
+/// `assemble_overlay` rejects rather than trusting the caller to have done so.
+pub fn force_global_callee_binding() {
+    FORCE_GLOBAL_CALLEE_BINDING.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// True once [`force_global_callee_binding`] has pinned this process.
+pub fn global_callee_binding_forced() -> bool {
+    FORCE_GLOBAL_CALLEE_BINDING.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Whether this process emits the BOUND shape, so a consumer that would
+/// otherwise redefine one global function (an `incremental.lua` overlay) has to
+/// take the full-chunk path instead. The one predicate every such consumer
+/// reads -- `callee_binding_mode()` already folds in
+/// [`force_global_callee_binding`] and `ROCK_SKULL_CALLEE_BINDING`.
+pub fn callee_binding_is_bound() -> bool {
+    callee_binding_mode() == CalleeBindingMode::Upvalue
+}
+
+/// The shipped emitted shape. See **Callee binding** in `docs/backends.md`:
+/// the measurement (mean frame 5.73 ms -> 4.99 ms, "trace too long" aborts
+/// 1339 -> 386) settled `AUTHOR DECISION -- CALLEE BINDING DEFAULT` in favour
+/// of [`CalleeBindingMode::Upvalue`] on 2026-09-11. `rock stone` keeps hot
+/// reload by publishing a full `main.lua` per edit instead of an overlay;
+/// `ROCK_SKULL_CALLEE_BINDING=global` restores the overlay shape.
+pub const DEFAULT_CALLEE_BINDING: CalleeBindingMode = CalleeBindingMode::Upvalue;
+
+/// LuaJIT's hard limit on upvalues per function prototype (`LJ_MAX_UPVAL`).
+/// A body with more bindable callees than this binds the first
+/// `MAX_BOUND_CALLEES` in name order and leaves the rest global lookups.
+pub const MAX_BOUND_CALLEES: usize = 60;
+
+/// The factory holding the only copy of a bound function's body.
+pub const CALLEE_FACTORY_PREFIX: &str = "__rock_mk_";
+
+/// The callees one body binds as immutable upvalues, and the rank its binding
+/// line must sort at. Built by [`callee_binding_plan`]; consumed by the emitter
+/// (which names the factory parameters) and by the assembler (which emits the
+/// second pass).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CalleeBindingPlan {
+    /// The bound function's emitted Lua name.
+    pub name: String,
+    /// Its factory's name, minted through [`CodegenCtx::mint_synthetic`].
+    pub factory: String,
+    /// The callee names to capture, sorted, deduplicated, and truncated to
+    /// [`MAX_BOUND_CALLEES`]. Each is BOTH the factory parameter name and the
+    /// global read at bind time, so the body text never changes.
+    pub captures: Vec<String>,
+    /// Ascending emission order for the binding pass: the caller's strongly
+    /// connected component number, which is strictly greater than every
+    /// component it captures from (see [`call_sccs`]).
+    pub rank: u32,
+    /// True when this body had more bindable callees than [`MAX_BOUND_CALLEES`],
+    /// so the tail stayed global lookups.
+    pub capped: bool,
+}
+
+impl CalleeBindingPlan {
+    /// The second-pass line: `F = __rock_mk_F(a, b)`.
+    pub fn bind_line(&self) -> String {
+        let mut out = String::with_capacity(self.name.len() + self.factory.len() + 8);
+        out.push_str(&self.name);
+        out.push_str(" = ");
+        out.push_str(&self.factory);
+        out.push('(');
+        for (i, c) in self.captures.iter().enumerate() {
+            if i > 0 {
+                out.push_str(", ");
+            }
+            out.push_str(c);
+        }
+        out.push_str(")\n");
+        out
+    }
+}
+
+/// The emitted symbol a `Call`/`CallMulti` at `id` targets. THE derivation the
+/// body rendering uses ([`Emitter::callee_name`]), exported so the binding plan
+/// cannot drift from the call spelling: a call the lowerer gave a concrete
+/// instance targets that instance's definition, everything else its
+/// declaration's mangled name.
+pub fn call_target_symbol(
+    ws: &Workspace,
+    interner: &MonoInterner,
+    func: &MirFunc,
+    id: Idx<Inst>,
+    callee: FuncRef,
+) -> String {
+    match func.spec_bindings.get(&id) {
+        Some(inst) => inst.symbol(ws, interner),
+        None => mangle_fn(ws, func_of(ws, callee)),
+    }
+}
+
+/// The binding plan for `func`, emitted under `name` for declaration
+/// `self_ref`, or `None` when nothing is bound (the body then emits exactly as
+/// it does under [`CalleeBindingMode::Global`]).
+///
+/// A callee is bound only when the emitter can PROVE it is an ordinary emitted
+/// Lua function whose global is final by the time this body's binding line
+/// runs. Everything else stays a global lookup:
+///
+/// - a callee in the caller's own strongly connected component (including
+///   direct self-recursion): binding it would need its final closure before it
+///   exists, and the condensation rank cannot separate them;
+/// - a callee, or a caller, absent from the call graph the context was given:
+///   with no component number there is no proof of either fact;
+/// - an EXEMPT declaration (`extern`, `@nomangle`, `@test`, `main`, `test_*`):
+///   its bare global is a published name anything may rebind, and hot reload
+///   and the engine both look those up by name;
+/// - an `inline(lua)` body: the definition is hand-written text, and a splice
+///   may remove the call entirely;
+/// - an unspecialized generic or an `Iterator`-bounded declaration: neither has
+///   a standalone definition of its own.
+///
+/// A call THROUGH a function value (`CallValue`) has no statically known callee
+/// and is never bound.
+pub fn callee_binding_plan(
+    ws: &Workspace,
+    ctx: &CodegenCtx,
+    interner: &MonoInterner,
+    name: &str,
+    self_ref: FuncRef,
+    func: &MirFunc,
+) -> Option<CalleeBindingPlan> {
+    if ctx.callee_binding != CalleeBindingMode::Upvalue {
+        return None;
+    }
+    let rank = ctx.scc_of(self_ref)?;
+    let mut captures: Vec<String> = Vec::new();
+    for (id, inst) in func.insts.iter() {
+        let callee = match inst {
+            Inst::Call { func, .. } | Inst::CallMulti { func, .. } => *func,
+            _ => continue,
+        };
+        match ctx.scc_of(callee) {
+            Some(theirs) if theirs != rank => {}
+            _ => continue,
+        }
+        let decl = func_of(ws, callee);
+        if skull_mir::mangle::is_exempt(decl) || decl.inline_body.is_some() {
+            continue;
+        }
+        if decl.generic_bounds.iter().any(Option::is_some) {
+            continue;
+        }
+        if !decl.generics.is_empty() && !func.spec_bindings.contains_key(&id) {
+            continue;
+        }
+        let symbol = call_target_symbol(ws, interner, func, id, callee);
+        // A body that calls its own emitted name (a specialized instance
+        // recursing through the shared declaration) would capture itself.
+        if symbol == name {
+            continue;
+        }
+        captures.push(symbol);
+    }
+    captures.sort_unstable();
+    captures.dedup();
+    if captures.is_empty() {
+        return None;
+    }
+    // A body that touches a mutable global captures the two Session cells as
+    // upvalues too, against the same 60-upvalue limit the callees count toward.
+    let reserved = if ctx.state_cell()
+        && func.insts.iter().any(|(_, inst)| matches!(inst, Inst::Global(_) | Inst::StoreGlobal { .. }))
+    {
+        2
+    } else {
+        0
+    };
+    let limit = MAX_BOUND_CALLEES - reserved;
+    let capped = captures.len() > limit;
+    captures.truncate(limit);
+    Some(CalleeBindingPlan {
+        factory: ctx.mint_synthetic(format!("{CALLEE_FACTORY_PREFIX}{name}")),
+        name: name.to_string(),
+        captures,
+        rank,
+        capped,
+    })
+}
+
+
+/// THE gate for the emitted tail-call shape. Returning false drops the forward,
+/// which leaves the ordinary emission path to write `r<N> = f(args)` followed by
+/// `do return r<N> end` -- the same statements a non-tail-position call already
+/// emits, so no new emitted form is introduced.
+fn keeps_tail_call(ctx: &CodegenCtx, call: &TailForwardCall) -> bool {
+    match ctx.tail_calls {
+        TailCallShape::All => true,
+        TailCallShape::None => false,
+        // A call through a function value has no statically known callee, so the
+        // call graph cannot prove it off every cycle.
+        TailCallShape::Cycles => match call {
+            TailForwardCall::Value { .. } => true,
+            TailForwardCall::Direct { func, .. } => ctx.is_recursive_callee(*func),
+        },
+    }
+}
+
+fn tail_forwards(
+    ws: &Workspace,
+    ctx: &CodegenCtx,
+    func: &MirFunc,
+    direct: bool,
+) -> Vec<Option<TailForward>> {
     let mut forwards = vec![None; func.blocks.len()];
     let cell_references = cell_reference_counts(func);
     for (block_id, block) in func.blocks.iter() {
         let Term::Return(values) = &block.term else { continue };
+        if direct && let Some(&call_id) = block.insts.last()
+            && let Inst::Call { func: callee_ref, args } = &func.insts[call_id]
+        {
+            let callee = func_of(ws, *callee_ref);
+            let exact_wire = func.call_abi_plans.get(&call_id).is_some_and(|abi| {
+                match abi.result_lanes() {
+                    0 => values.is_empty(),
+                    1 => values.as_slice() == [call_id],
+                    _ => false,
+                }
+            });
+            // Foreign bodies can return extra Lua values beyond their declared wire.
+            if exact_wire && callee.inline_body.is_none() && !callee.is_extern
+                && !callee.is_coroutine
+            {
+                forwards[raw(block_id) as usize] = Some(TailForward {
+                    first_suppressed: block.insts.len() - 1,
+                    suppressed: vec![call_id],
+                    call: TailForwardCall::Direct {
+                        call: call_id, func: *callee_ref, args: args.clone(),
+                    },
+                });
+                continue;
+            }
+        }
         if values.is_empty() || block.insts.len() < values.len() + 1 {
             continue;
         }
@@ -937,6 +1741,13 @@ fn tail_forwards(func: &MirFunc) -> Vec<Option<TailForward>> {
             suppressed: block.insts[first..].to_vec(),
             call,
         });
+    }
+    if ctx.tail_calls != TailCallShape::All {
+        for forward in forwards.iter_mut() {
+            if forward.as_ref().is_some_and(|tail| !keeps_tail_call(ctx, &tail.call)) {
+                *forward = None;
+            }
+        }
     }
     forwards
 }
@@ -1033,9 +1844,10 @@ pub fn emit_function(
     interner: &MonoInterner,
     self_ref: FuncRef,
     func: &MirFunc,
+    bound: Option<&CalleeBindingPlan>,
 ) -> String {
     let name = mangle_fn(ws, func_of(ws, self_ref));
-    emit_named(ws, ctx, interner, &name, func)
+    emit_named(ws, ctx, interner, &name, func, bound)
 }
 
 pub fn emit_function_with_allocation_sites(
@@ -1044,10 +1856,11 @@ pub fn emit_function_with_allocation_sites(
     interner: &MonoInterner,
     self_ref: FuncRef,
     func: &MirFunc,
+    bound: Option<&CalleeBindingPlan>,
     instrument: bool,
 ) -> LuaEmission {
     let name = mangle_fn(ws, func_of(ws, self_ref));
-    emit_named_with_allocation_sites(ws, ctx, interner, &name, func, instrument)
+    emit_named_with_allocation_sites(ws, ctx, interner, &name, func, bound, instrument)
 }
 
 /// Emit a MIR function under the EXACT Lua name `name` (no mangling) — for
@@ -1059,8 +1872,9 @@ pub fn emit_named(
     interner: &MonoInterner,
     name: &str,
     func: &MirFunc,
+    bound: Option<&CalleeBindingPlan>,
 ) -> String {
-    emit_named_with_statics(ws, ctx, interner, name, func, &[])
+    emit_named_with_statics(ws, ctx, interner, name, func, &[], bound)
 }
 
 pub fn emit_named_with_allocation_sites(
@@ -1069,6 +1883,7 @@ pub fn emit_named_with_allocation_sites(
     interner: &MonoInterner,
     name: &str,
     func: &MirFunc,
+    bound: Option<&CalleeBindingPlan>,
     instrument: bool,
 ) -> LuaEmission {
     emit_named_framed_with_allocation_sites(
@@ -1079,6 +1894,7 @@ pub fn emit_named_with_allocation_sites(
         func,
         None,
         &[],
+        bound,
         instrument,
     )
 }
@@ -1093,8 +1909,9 @@ pub fn emit_named_with_statics(
     name: &str,
     func: &MirFunc,
     inherited_statics: &[StaticCell],
+    bound: Option<&CalleeBindingPlan>,
 ) -> String {
-    emit_named_framed_with_statics(ws, ctx, interner, name, func, None, inherited_statics)
+    emit_named_framed_with_statics(ws, ctx, interner, name, func, None, inherited_statics, bound)
 }
 
 /// The coroutine state-table context: a `co fn`'s `__step` reads/writes its
@@ -1135,8 +1952,9 @@ pub fn emit_named_framed(
     name: &str,
     func: &MirFunc,
     frame: Option<&FrameCtx>,
+    bound: Option<&CalleeBindingPlan>,
 ) -> String {
-    emit_named_framed_with_statics(ws, ctx, interner, name, func, frame, &[])
+    emit_named_framed_with_statics(ws, ctx, interner, name, func, frame, &[], bound)
 }
 
 fn emit_named_framed_with_statics(
@@ -1147,6 +1965,7 @@ fn emit_named_framed_with_statics(
     func: &MirFunc,
     frame: Option<&FrameCtx>,
     inherited_statics: &[StaticCell],
+    bound: Option<&CalleeBindingPlan>,
 ) -> String {
     emit_named_framed_with_statics_impl(
         ws,
@@ -1156,8 +1975,10 @@ fn emit_named_framed_with_statics(
         func,
         frame,
         inherited_statics,
+        bound,
         None,
     )
+    .0
 }
 
 pub fn emit_named_framed_with_allocation_sites(
@@ -1168,10 +1989,14 @@ pub fn emit_named_framed_with_allocation_sites(
     func: &MirFunc,
     frame: Option<&FrameCtx>,
     inherited_statics: &[StaticCell],
+    bound: Option<&CalleeBindingPlan>,
     instrument: bool,
 ) -> LuaEmission {
     let sites = RefCell::new(Vec::new());
-    let lua = emit_named_framed_with_statics_impl(
+    // The header offset comes back from the emission rather than from a search
+    // for `function <name>`: under `CalleeBindingMode::Upvalue` the body's only
+    // copy sits inside a factory and that spelling does not appear at all.
+    let (lua, header_offset) = emit_named_framed_with_statics_impl(
         ws,
         ctx,
         interner,
@@ -1179,6 +2004,7 @@ pub fn emit_named_framed_with_allocation_sites(
         func,
         frame,
         inherited_statics,
+        bound,
         Some(AllocationEmission {
             body: name,
             sites: &sites,
@@ -1186,10 +2012,8 @@ pub fn emit_named_framed_with_allocation_sites(
         }),
     );
     let mut allocation_sites = sites.into_inner();
-    let function_line_offset = lua
-        .find(&format!("function {name}"))
-        .map(|offset| lua.as_bytes()[..offset].iter().filter(|byte| **byte == b'\n').count())
-        .unwrap_or(0) as u32;
+    let function_line_offset =
+        lua.as_bytes()[..header_offset].iter().filter(|byte| **byte == b'\n').count() as u32;
     allocation_sites.sort_by_key(|site| site.lua_byte_offset);
     let mut byte_cursor = 0;
     let mut line = 1;
@@ -1210,6 +2034,9 @@ pub fn emit_named_framed_with_allocation_sites(
     }
 }
 
+/// Returns the emitted definition and the byte offset of its header (the
+/// `function` keyword that opens the body), which the allocation-site reporter
+/// turns into a body-relative line number.
 fn emit_named_framed_with_statics_impl(
     ws: &Workspace,
     ctx: &CodegenCtx,
@@ -1218,12 +2045,13 @@ fn emit_named_framed_with_statics_impl(
     func: &MirFunc,
     frame: Option<&FrameCtx>,
     inherited_statics: &[StaticCell],
+    bound: Option<&CalleeBindingPlan>,
     allocation: Option<AllocationEmission<'_>>,
-) -> String {
+) -> (String, usize) {
     let entry = func.entry();
     let params = func.params.as_slice();
     let rpo = reverse_postorder(func, entry);
-    let tail_forwards = tail_forwards(func);
+    let tail_forwards = tail_forwards(ws, ctx, func, frame.is_none());
     let (call_arg_forwards, suppressed) = if frame.is_some() {
         // Coroutine lifting moves later uses into frame fields, outside the
         // ordinary cell reference count that proves a producer unobserved.
@@ -1274,7 +2102,32 @@ fn emit_named_framed_with_statics_impl(
     let mut out =
         String::with_capacity(hoist_defs.len() + name.len() + 64 + estimated_body_bytes);
     out.push_str(&hoist_defs);
-    let _ = write!(out, "function {}", name);
+    // Under `CalleeBindingMode::Upvalue` the definition becomes a factory whose
+    // parameters are named exactly like the callees they replace, so the body
+    // text below is byte-identical to the global-lookup shape and each call
+    // reads an immutable upvalue. `assemble` emits the matching
+    // `<name> = <factory>(<captures>)` line once every capture is final.
+    let header_offset = match bound {
+        Some(plan) => {
+            debug_assert_eq!(plan.name, name);
+            let _ = write!(out, "{} = function(", plan.factory);
+            for (i, capture) in plan.captures.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                out.push_str(capture);
+            }
+            out.push_str(") return ");
+            let offset = out.len();
+            out.push_str("function");
+            offset
+        }
+        None => {
+            let offset = out.len();
+            let _ = write!(out, "function {}", name);
+            offset
+        }
+    };
     render_scope(
         ws,
         ctx,
@@ -1297,8 +2150,11 @@ fn emit_named_framed_with_statics_impl(
         &suppressed,
         &mut out,
     );
+    if bound.is_some() {
+        out.push_str(" end");
+    }
     out.push('\n');
-    out
+    (out, header_offset)
 }
 
 fn static_slots_for(
@@ -1390,6 +2246,18 @@ fn const_hoist_uses_are_read_only(_ws: &Workspace, func: &MirFunc, cand: Idx<Ins
     })
 }
 
+
+/// Whether a construction may be written in place instead of called.
+///
+/// Only the GC-table tier (`_vt`), whose ctor body is exactly the table this
+/// splices; the cdata ctor is an `ffi.typeof` with no Lua body and the
+/// leaf-table ctor carries the plan's presence tagging, which stays in one
+/// place. A field literally named `__ty` would collide with the type tag the
+/// table carries, so that construction keeps its call rather than emit a table
+/// with a duplicate key.
+fn splice_is_admissible(suffix: &str, fields: &[(ustr::Ustr, Idx<Inst>)]) -> bool {
+    suffix == "_vt" && fields.iter().all(|(name, _)| name.as_str() != "__ty")
+}
 
 fn ctor_suffix(func: &MirFunc, representation: skull_mir::lower::RepId, form: ValueCtorForm) -> Option<&'static str> {
     let arena = func.rep_arena.as_ref()?;
@@ -1842,6 +2710,127 @@ fn slot_sound(
     stores == 2
 }
 
+// A loop that is not one of the counted shapes above stays labelled blocks plus
+// a backward `goto`, which LuaJIT's parser turns into `BC_LOOP` with
+// `bc_j == -1` and NO bytecode range (`lj_parse.c`, `parse_goto`). Under
+// [`LoopShape::Structured`] every natural loop whose body the CFG proves is
+// single-entry is wrapped in `while true do .. end` instead, so the `BC_LOOP`
+// carries the range `parse_while` patches into it.
+
+/// A natural loop, before the emitability checks.
+struct NaturalLoop {
+    header: Idx<Block>,
+    /// Blocks of the loop EXCLUDING the header: everything that reaches a latch
+    /// without crossing the header. The header is emitted as the first
+    /// statements inside the `while`, so it is never in this set.
+    region: HashSet<Idx<Block>>,
+}
+
+/// A natural loop the emitter spells as `while true do .. end`, keyed by header.
+struct StructuredLoop {
+    region: HashSet<Idx<Block>>,
+}
+
+/// Every natural loop of `func`: one per header of a back edge (an edge whose
+/// target dominates its source), with the union of that header's back edges as
+/// the body. A header with several latches (a `continue`) is ONE loop.
+fn natural_loops(
+    func: &MirFunc,
+    entry: Idx<Block>,
+    rpo: &[Idx<Block>],
+    all_preds: &PredMap,
+) -> Vec<NaturalLoop> {
+    let idom = skull_mir::cfg::dominators(func, entry);
+    let reach: HashSet<Idx<Block>> = rpo.iter().copied().collect();
+    let mut latches: HashMap<Idx<Block>, Vec<Idx<Block>>> = HashMap::default();
+    for &b in rpo {
+        successors(&func.blocks[b].term, |s| {
+            if reach.contains(&s) && skull_mir::cfg::dominates(&idom, s, b) {
+                latches.entry(s).or_default().push(b);
+            }
+        });
+    }
+    let mut out = Vec::new();
+    for &h in rpo {
+        let Some(ls) = latches.get(&h) else { continue };
+        let mut region: HashSet<Idx<Block>> = HashSet::default();
+        let mut stack: Vec<Idx<Block>> = Vec::new();
+        for &l in ls {
+            if l != h && region.insert(l) {
+                stack.push(l);
+            }
+        }
+        while let Some(b) = stack.pop() {
+            if let Some(ps) = all_preds.get(&b) {
+                for &p in ps {
+                    if p != h && region.insert(p) {
+                        stack.push(p);
+                    }
+                }
+            }
+        }
+        out.push(NaturalLoop { header: h, region });
+    }
+    out
+}
+
+/// Every natural loop of `func` that may be emitted as `while true do .. end`.
+///
+/// The proof obligations are exactly Lua's two block rules. A body block may be
+/// entered only from inside the loop, because its label moves inside the `while`
+/// and a `goto` may not jump into a block; the HEADER may be entered from
+/// anywhere, because its label stays outside. And two loops must nest, because
+/// a Lua block cannot interleave with another.
+fn recognize_structured_loops(
+    func: &MirFunc,
+    entry: Idx<Block>,
+    rpo: &[Idx<Block>],
+    counted: &HashMap<Idx<Block>, CountedLoop>,
+) -> HashMap<Idx<Block>, StructuredLoop> {
+    let (all_preds, _) = predecessors(func, rpo);
+    let mut kept: Vec<NaturalLoop> = Vec::new();
+    for nl in natural_loops(func, entry, rpo, &all_preds) {
+        if counted.contains_key(&nl.header) {
+            continue;
+        }
+        let single_entry = nl.region.iter().all(|b| {
+            all_preds.get(b).is_none_or(|ps| {
+                ps.iter().all(|p| *p == nl.header || nl.region.contains(p))
+            })
+        });
+        if !single_entry {
+            continue;
+        }
+        kept.push(nl);
+    }
+    // Proper nesting, pairwise: the block sets (header included) are disjoint or
+    // one contains the other. A reducible CFG always satisfies this; an
+    // interleaving pair would put one body's blocks on both sides of the other's
+    // `end`, so BOTH are dropped rather than guessing which to keep.
+    let blocks = |nl: &NaturalLoop| -> HashSet<Idx<Block>> {
+        nl.region.iter().copied().chain([nl.header]).collect()
+    };
+    let sets: Vec<HashSet<Idx<Block>>> = kept.iter().map(blocks).collect();
+    let mut bad = vec![false; kept.len()];
+    for i in 0..kept.len() {
+        for j in (i + 1)..kept.len() {
+            let (a, b) = (&sets[i], &sets[j]);
+            let overlaps = a.iter().any(|x| b.contains(x));
+            if overlaps && !a.is_subset(b) && !b.is_subset(a) {
+                bad[i] = true;
+                bad[j] = true;
+            }
+        }
+    }
+    let mut loops: HashMap<Idx<Block>, StructuredLoop> = HashMap::default();
+    for (i, nl) in kept.into_iter().enumerate() {
+        if !bad[i] {
+            loops.insert(nl.header, StructuredLoop { region: nl.region });
+        }
+    }
+    loops
+}
+
 /// Whether a value-producing inst is ALWAYS safe to tree-fold into its single use
 /// site, regardless of what executes between def and use: a pure computation over
 /// value operands only (operands are SSA — immutable once computed) with no read
@@ -2101,6 +3090,12 @@ fn render_scope(
     // RPO drives both block layout (preheader-before-header, for the relooper)
     // and the reachable set the regalloc colors over.
     let loops = recognize_counted_loops(func, rpo, frame);
+    // Only under the non-default shape: `goto` must cost nothing and emit the
+    // same bytes, so the analysis does not run at all.
+    let structured = match ctx.loop_shape() {
+        LoopShape::Goto => HashMap::default(),
+        LoopShape::Structured => recognize_structured_loops(func, entry, rpo, &loops),
+    };
     let t_ra = std::time::Instant::now();
     // Counted-loop regions partition the coloring so loop-body temps get
     // body-scoped `local`s (see `ValueAlloc::color_scope`). Partitioning trades
@@ -2116,6 +3111,72 @@ fn render_scope(
         va = regalloc::color_values(func, rpo, &inlinable, &[]);
     }
     let regalloc::ValueAlloc { colors, color_scope } = va;
+    // Only cells this region actually references get a local (a hoisted lambda
+    // body is a full-arena clone; declaring the dead enclosing/sibling cells would
+    // blow LuaJIT's 200-local cap on a large co-fn step). Computed once per top
+    // scope; inline (non-`is_top`) renders declare nothing, so they skip it.
+    let referenced = if is_top {
+        referenced_cells_in_region(func, entry, tail_forwards, suppressed)
+    } else {
+        HashSet::default()
+    };
+    let param_cells: HashSet<Idx<Cell>> = params.iter().copied().collect();
+    let is_frame = |c: &Idx<Cell>| frame.is_some_and(|f| f.fields.contains(c));
+    // THE one answer to "does this cell render as a bare `c<..>` local here" --
+    // read by the nil-kill exclusion just below and by the declaration loop that
+    // emits those locals. A kill of a cell with no local assigns a GLOBAL of that
+    // name instead: a store the pass never intended, which under the `_G` state
+    // bridge costs a `__newindex` metamethod dispatch on every execution.
+    let cell_has_local = |cid: Idx<Cell>| -> bool {
+        param_cells.contains(&cid) || (is_top && !is_frame(&cid) && referenced.contains(&cid))
+    };
+    // Where each declared local dies, for the `<local> = nil` kills that keep
+    // dead slots out of LuaJIT exit snapshots (see `regalloc::nil_kills`). A
+    // coroutine `__step` keeps raw cell names and frame fields; it gets none.
+    let kills = if frame.is_some() || !nil_kill_enabled() {
+        regalloc::NilKills::none(func)
+    } else {
+        let mut emits_nothing = inlinable.clone();
+        for id in hoist.keys() {
+            emits_nothing[raw(*id) as usize] = true;
+        }
+        // A counted loop's header (compare) and latch (increment) are subsumed
+        // by the `for` line; their instructions never run as statements.
+        for (h, cl) in loops.iter() {
+            for &id in func.blocks[*h].insts.iter().chain(func.blocks[cl.latch].insts.iter()) {
+                emits_nothing[raw(id) as usize] = true;
+            }
+        }
+        // A loop-scoped register may be killed anywhere inside its `for` block:
+        // the body region and the latch label, not the header (rendered as the
+        // `for` line itself, outside the block).
+        let kill_scopes: Vec<regalloc::LoopScope> = loops
+            .iter()
+            .map(|(&h, cl)| regalloc::LoopScope {
+                header: h,
+                region: cl.region.iter().copied().chain(std::iter::once(cl.latch)).collect(),
+            })
+            .collect();
+        // A cell with no local of its own is excluded exactly like a pinned one:
+        // both mean "this cell is not a killable `c<color>` in this body".
+        let mut excluded = regalloc::pinned_cells(func);
+        for (cid, _) in func.cells.iter() {
+            if !cell_has_local(cid) {
+                excluded[raw(cid) as usize] = true;
+            }
+        }
+        regalloc::nil_kills(
+            func,
+            rpo,
+            &emits_nothing,
+            &colors,
+            &color_scope,
+            &kill_scopes,
+            cell_colors,
+            &excluded,
+            params,
+        )
+    };
     REGALLOC_TIME.with(|c| c.set(c.get() + t_ra.elapsed()));
 
     // Param list `(a, b, c)` — written straight into the buffer (no Vec<String>).
@@ -2166,18 +3227,7 @@ fn render_scope(
         out.push('r');
         push_uint(out, c);
     }
-    // Only cells this region actually references get a local (a hoisted lambda
-    // body is a full-arena clone; declaring the dead enclosing/sibling cells would
-    // blow LuaJIT's 200-local cap on a large co-fn step). Computed once per top
-    // scope; inline (non-`is_top`) renders declare nothing, so they skip it.
-    let referenced = if is_top {
-        referenced_cells_in_region(func, entry, tail_forwards, suppressed)
-    } else {
-        HashSet::default()
-    };
     if is_top {
-        let param_cells: HashSet<Idx<Cell>> = params.iter().copied().collect();
-        let is_frame = |c: &Idx<Cell>| frame.is_some_and(|f| f.fields.contains(c));
         // Declare each cell LOCAL exactly once. Colored cells collapse onto their
         // shared `c<color>` (deduped, and excluding any color already named by a
         // param); uncolored cells (coroutine `__step`) declare per raw id.
@@ -2188,7 +3238,7 @@ fn render_scope(
             .collect();
         let mut seen_color: HashSet<u32> = HashSet::default();
         for (cid, _) in func.cells.iter() {
-            if param_cells.contains(&cid) || is_frame(&cid) || !referenced.contains(&cid) {
+            if param_cells.contains(&cid) || !cell_has_local(cid) {
                 continue;
             }
             let (decl, col) = match cell_colors[raw(cid) as usize] {
@@ -2230,6 +3280,8 @@ fn render_scope(
         cell_colors,
         frame,
         loops: &loops,
+        structured: &structured,
+        open_loops: HashSet::default(),
         rpo,
         inlinable,
         emitted: vec![false; func.blocks.len()],
@@ -2241,6 +3293,7 @@ fn render_scope(
         tail_forwards,
         call_arg_forwards,
         suppressed,
+        kills,
     };
     for &bb in rpo {
         em.emit_block(out, bb); // self-skips an already-emitted block (loop body)
@@ -2294,6 +3347,13 @@ struct Emitter<'a> {
     /// Recognized counted loops, keyed by header — a goto into an un-emitted
     /// header expands a structured `for`.
     loops: &'a HashMap<Idx<Block>, CountedLoop>,
+    /// Natural loops emitted as `while true do .. end`, keyed by header. Empty
+    /// under [`LoopShape::Goto`], which is what makes that shape byte-identical.
+    structured: &'a HashMap<Idx<Block>, StructuredLoop>,
+    /// The headers of the `while` blocks currently open around the emission
+    /// point, innermost last. An edge to one of these is a back edge and must be
+    /// spelled as a FORWARD `goto` to that loop's continue label.
+    open_loops: HashSet<Idx<Block>>,
     /// Reverse-postorder block layout (loop bodies emit their region in RPO).
     rpo: &'a [Idx<Block>],
     /// Values tree-folded into their single use site (no register); referenced
@@ -2315,11 +3375,75 @@ struct Emitter<'a> {
     tail_forwards: &'a [Option<TailForward>],
     call_arg_forwards: &'a [Option<CallArgForward>],
     suppressed: &'a [bool],
+    /// Death point of every declared local, written as `<local> = nil`.
+    kills: regalloc::NilKills,
+}
+
+/// `ROCK_SKULL_NIL_KILL=0` turns the nil-kill emission off, so an abort census
+/// or a frame-time run can be compared against the same source without it.
+fn nil_kill_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("ROCK_SKULL_NIL_KILL").map_or(true, |v| v != "0"))
 }
 
 impl Emitter<'_> {
+    fn write_kills(&self, out: &mut String, locals: &[regalloc::KillLocal]) {
+        for local in locals {
+            out.push_str("  ");
+            match *local {
+                regalloc::KillLocal::Value(c) => {
+                    out.push('r');
+                    push_uint(out, c);
+                }
+                regalloc::KillLocal::Cell(c) => {
+                    out.push('c');
+                    push_uint(out, c);
+                }
+            }
+            out.push_str(" = nil\n");
+        }
+    }
+
+    /// The kills due before the next statement of `bb`: the block's entry kills
+    /// when no statement has been written yet, else the ones after `after`.
+    fn write_pending_kills(&self, out: &mut String, bb: Idx<Block>, at_entry: bool, after: Option<Idx<Inst>>) {
+        let locals: &[regalloc::KillLocal] = if at_entry {
+            &self.kills.at_entry[raw(bb) as usize]
+        } else {
+            match after {
+                Some(id) => &self.kills.after_inst[raw(id) as usize],
+                None => &[],
+            }
+        };
+        self.write_kills(out, locals);
+    }
+
+    /// Whether `emit_inst` writes a statement for `id` (kills attach after it).
+    fn emits_statement(&self, id: Idx<Inst>) -> bool {
+        !self.suppressed[raw(id) as usize]
+            && !self.inlinable[raw(id) as usize]
+            && !self.hoist.contains_key(&id)
+    }
     fn has_state_slot(&self, name: ustr::Ustr) -> bool {
         self.state_slots.contains_key(&name) || self.static_slots.contains_key(&name)
+    }
+
+    /// The table a mutable-global access indexes: the chunk-level cell under the
+    /// bound shape, else the `_G` walk an overlay chunk can also perform.
+    fn state_table_expr(&self) -> &'static str {
+        if self.ctx.state_cell() {
+            STATE_CELL
+        } else {
+            "__rock_active_session.__rock_state"
+        }
+    }
+
+    fn initialized_table_expr(&self) -> &'static str {
+        if self.ctx.state_cell() {
+            INITIALIZED_CELL
+        } else {
+            "__rock_active_session.__rock_initialized"
+        }
     }
 
     fn write_state_slot(&self, out: &mut String, name: ustr::Ustr) {
@@ -2380,18 +3504,81 @@ impl Emitter<'_> {
         if self.emitted[raw(bb) as usize] {
             return; // already emitted (e.g. as a loop body block)
         }
+        if self.structured.contains_key(&bb) {
+            self.expand_while(out, bb);
+            return;
+        }
         self.emitted[raw(bb) as usize] = true;
+        self.write_block_label(out, bb);
+        self.emit_block_contents(out, bb);
+    }
+
+    fn write_block_label(&self, out: &mut String, bb: Idx<Block>) {
         out.push_str("  ::bb");
         push_uint(out, self.func.emit_block_id(bb));
         out.push_str("::\n");
+    }
+
+    /// The label an edge to `t` names: `t`'s own block label, or the continue
+    /// label of an enclosing `while` when `t` is that loop's header. The second
+    /// case is a back edge, and it MUST be a forward jump to the end of the loop
+    /// body: a backward `goto` would make LuaJIT emit its own rangeless
+    /// `BC_LOOP` inside the loop the `while` is there to close.
+    fn write_label_ref(&self, out: &mut String, t: Idx<Block>) {
+        out.push_str(if self.open_loops.contains(&t) { "lc" } else { "bb" });
+        push_uint(out, self.func.emit_block_id(t));
+    }
+
+    fn write_goto(&self, out: &mut String, t: Idx<Block>) {
+        out.push_str("  goto ");
+        self.write_label_ref(out, t);
+        out.push('\n');
+    }
+
+    /// The statements of `bb` and its terminator, without its label.
+    fn emit_block_contents(&mut self, out: &mut String, bb: Idx<Block>) {
         let insts: &[Idx<Inst>] = &self.func.blocks[bb].insts;
         let tail = self.tail_forwards[raw(bb) as usize].as_ref();
         let emitted_len = tail.map_or(insts.len(), |tail| tail.first_suppressed);
+        // Kills are written before the next statement, so the ones after the
+        // last statement of a returning block are dropped: `return` (and a
+        // tail call, which replaces the frame) drops every slot itself.
+        let returns = tail.is_some()
+            || matches!(self.func.blocks[bb].term, Term::Return(_) | Term::Unreachable);
+        // In a returning block, only a statement that may call can expose a
+        // stale slot to an exit; kills past the last such statement are dropped.
+        let last_impure = if returns {
+            insts[..emitted_len]
+                .iter()
+                .rposition(|&id| {
+                    self.emits_statement(id) && !regalloc::statement_is_pure(self.func, &self.inlinable, id)
+                })
+                .map(|i| insts[i])
+        } else {
+            None
+        };
+        let mut live_region = !returns || last_impure.is_some();
+        // Indexed rather than borrowed: `emit_inst` needs `&mut self`.
+        let mut pending: Option<Idx<Inst>> = None;
+        let mut first = true;
         for &id in &insts[..emitted_len] {
             if self.suppressed[raw(id) as usize] {
                 continue;
             }
+            if self.emits_statement(id) {
+                if live_region {
+                    self.write_pending_kills(out, bb, first, pending);
+                }
+                first = false;
+                pending = Some(id);
+            }
             self.emit_inst(out, id);
+            if Some(id) == last_impure {
+                live_region = !returns;
+            }
+        }
+        if live_region {
+            self.write_pending_kills(out, bb, first, pending);
         }
         if let Some(tail) = tail {
             self.emit_tail_forward(out, tail);
@@ -2402,18 +3589,37 @@ impl Emitter<'_> {
         let term = &self.func.blocks[bb].term;
         if let Term::Goto(t) = term {
             let t = *t;
-            if self.loops.contains_key(&t) && !self.emitted[raw(t) as usize] {
-                self.expand_for(out, t);
-                return;
+            if !self.emitted[raw(t) as usize] {
+                if self.loops.contains_key(&t) {
+                    self.expand_for(out, t);
+                    return;
+                }
+                // The preheader falls straight into the `while`, so the entering
+                // edge costs no jump. An edge that is NOT the fall-through (a
+                // second entry, or a back edge from a block emitted after the
+                // loop) still reaches the header label, which sits outside it.
+                if self.structured.contains_key(&t) {
+                    self.expand_while(out, t);
+                    return;
+                }
             }
         }
-        self.emit_term(out, &self.func.blocks[bb].term);
+        self.emit_term(out, &self.func.blocks[bb].term, bb);
     }
 
     fn emit_tail_forward(&self, out: &mut String, tail: &TailForward) {
         out.push_str("  do return ");
-        match &tail.call {
+        self.write_forward_call(out, &tail.call);
+        out.push_str(" end\n");
+    }
+
+    fn write_forward_call(&self, out: &mut String, call: &TailForwardCall) {
+        match call {
             TailForwardCall::Direct { call, func, args } => {
+                if let Some(forward) = &self.call_arg_forwards[raw(*call) as usize] {
+                    self.write_call_arg_forward(out, forward);
+                    return;
+                }
                 out.push_str(&self.callee_name(*call, *func));
                 out.push('(');
                 self.write_csv(out, args);
@@ -2424,7 +3630,7 @@ impl Emitter<'_> {
                 self.write_csv(out, args);
             }
         }
-        out.push_str(") end\n");
+        out.push(')');
     }
 
     /// Emit a recognized counted loop as `for <slot> = <slot>, hi[-1] do .. end`.
@@ -2446,6 +3652,9 @@ impl Emitter<'_> {
         let limit = if inclusive { hi } else { format!("{hi} - 1") };
 
         self.emitted[raw(header) as usize] = true;
+        // Dead on entry to the header is dead for the whole loop unless
+        // redefined, so the header's kills go once, above the `for`.
+        self.write_kills(out, &self.kills.at_entry[raw(header) as usize]);
         let _ = writeln!(out, "  for {slot_name} = {slot_name}, {limit} do");
         // Body-scoped temp registers: declared INSIDE the `for` block, above the
         // loop-control slots, so LuaJIT's snapshot liveness can prune them at
@@ -2483,10 +3692,48 @@ impl Emitter<'_> {
         out.push_str("  ::bb");
         push_uint(out, self.func.emit_block_id(latch));
         out.push_str("::\n");
+        self.write_kills(out, &self.kills.at_entry[raw(latch) as usize]);
         out.push_str("  end\n");
-        out.push_str("  goto bb");
-        push_uint(out, self.func.emit_block_id(exit));
-        out.push('\n');
+        self.write_goto(out, exit);
+    }
+
+    /// Emit a proven natural loop as `while true do <header> <body> ::lcN:: end`.
+    ///
+    /// The header's LABEL goes before the `while` and its STATEMENTS inside, so
+    /// an entering `goto` never jumps into the block (Lua forbids that) while the
+    /// loop-back edge still re-runs the condition. Every back edge is rewritten
+    /// to `goto lcN`, a forward jump to the continue label that closes the body;
+    /// exits stay ordinary `goto`s to labels outside, which Lua allows and the
+    /// single-entry proof in [`recognize_structured_loops`] is what makes safe.
+    fn expand_while(&mut self, out: &mut String, header: Idx<Block>) {
+        let region: HashSet<Idx<Block>> =
+            self.structured[&header].region.iter().copied().collect();
+        self.emitted[raw(header) as usize] = true;
+        self.write_block_label(out, header);
+        out.push_str("  while true do\n");
+        self.open_loops.insert(header);
+        self.emit_block_contents(out, header);
+        for &bb in self.rpo {
+            if region.contains(&bb) {
+                self.emit_block(out, bb); // self-skips already-emitted blocks
+            }
+        }
+        self.open_loops.remove(&header);
+        let mut label = String::from("  ::lc");
+        push_uint(&mut label, self.func.emit_block_id(header));
+        // The last block emitted usually IS a latch, and its back edge is then a
+        // jump to the very next instruction. Dropping it is a pure deletion:
+        // falling off the end of the body is the same back edge. Only a
+        // whole-statement suffix at the loop body's own nesting level can match,
+        // because `expand_for`/`expand_while` both close with `end` first.
+        let jump = format!("{}\n", label.replacen("  ::", "  goto ", 1));
+        if out.ends_with(&jump) {
+            let keep = out.len() - jump.len();
+            out.truncate(keep);
+        }
+        label.push_str("::\n");
+        out.push_str(&label);
+        out.push_str("  end\n");
     }
 
     fn emit_inst(&mut self, out: &mut String, id: Idx<Inst>) {
@@ -2512,6 +3759,9 @@ impl Emitter<'_> {
         {
             return;
         }
+        if self.try_emit_inline_index(out, id) {
+            return;
+        }
         let inst = &self.func.insts[id];
         if inst.produces_value() {
             out.push_str("  ");
@@ -2528,25 +3778,19 @@ impl Emitter<'_> {
         out.push_str("  ");
         write_vname(out, self.func, &self.colors, forward.consumer);
         out.push_str(" = ");
+        self.write_call_arg_forward(out, forward);
+        out.push('\n');
+    }
+
+    fn write_call_arg_forward(&self, out: &mut String, forward: &CallArgForward) {
         out.push_str(&self.callee_name(forward.consumer, forward.func));
         out.push('(');
         self.write_csv(out, &forward.prefix);
         if !forward.prefix.is_empty() {
             out.push_str(", ");
         }
-        match &forward.producer {
-            TailForwardCall::Direct { call, func, args } => {
-                out.push_str(&self.callee_name(*call, *func));
-                out.push('(');
-                self.write_csv(out, args);
-            }
-            TailForwardCall::Value { callee, args } => {
-                self.write_opnd(out, *callee);
-                out.push('(');
-                self.write_csv(out, args);
-            }
-        }
-        out.push_str("))\n");
+        self.write_forward_call(out, &forward.producer);
+        out.push(')');
     }
 
     /// Splice an `@inline inline(lua)` `Call` inline, if `id` is one. Returns
@@ -2556,10 +3800,7 @@ impl Emitter<'_> {
     /// definition. The same instance object drives definition and call spelling,
     /// so the two cannot drift.
     fn callee_name(&self, id: Idx<Inst>, func: FuncRef) -> String {
-        match self.func.spec_bindings.get(&id) {
-            Some(inst) => inst.symbol(self.ws, self.interner),
-            None => mangle_fn(self.ws, func_of(self.ws, func)),
-        }
+        call_target_symbol(self.ws, self.interner, self.func, id, func)
     }
 
     fn try_emit_inline_lua_splice(&self, out: &mut String, id: Idx<Inst>) -> bool {
@@ -2621,6 +3862,77 @@ impl Emitter<'_> {
     /// Render a reference to value `id` as an operand directly into `out`: its
     /// register `r<color>`, or — if it was tree-folded — its expression in
     /// parentheses, recursively. Every value-operand reference goes through here.
+    /// True if `id` renders in operand position as a bare name or a literal --
+    /// a register, a cell, a hoisted module global or a constant -- so an inline
+    /// shape may spell it twice without re-evaluating an expression or
+    /// repeating an allocation (`MakeVec` and `StringConcat` fold too).
+    fn opnd_is_plain(&self, id: Idx<Inst>) -> bool {
+        if self.hoist.contains_key(&id) || !self.inlinable[raw(id) as usize] {
+            return true;
+        }
+        matches!(self.func.insts[id], Inst::Load(_) | Inst::Const(_))
+    }
+
+    /// The inline index shape is selected and both operands may be named twice.
+    fn inline_index_operands(&self, base: Idx<Inst>, index: Idx<Inst>) -> bool {
+        self.ctx.index_shape() == IndexShape::Inline
+            && self.opnd_is_plain(base)
+            && self.opnd_is_plain(index)
+    }
+
+    /// `if i < 0 or i >= v.len then __rock_vec_oob(v, i) end`. The failing
+    /// branch is never recorded, so the message text lives in the one cold
+    /// stdlib function rather than in every indexing function's constants.
+    fn write_vec_bounds_guard(&self, out: &mut String, base: Idx<Inst>, index: Idx<Inst>) {
+        out.push_str("  if ");
+        self.write_opnd(out, index);
+        out.push_str(" < 0 or ");
+        self.write_opnd(out, index);
+        out.push_str(" >= ");
+        self.write_opnd(out, base);
+        out.push_str(".len then __rock_vec_oob(");
+        self.write_opnd(out, base);
+        out.push_str(", ");
+        self.write_opnd(out, index);
+        out.push_str(") end\n");
+    }
+
+    /// Emit a bounds-checked Vec read (`Inst::Index { kind: Vec }`) or column
+    /// index (`Inst::VecCheckedIndex`) as the inline guard followed by ONE
+    /// assignment, when the shape is selected and the operands are plain.
+    /// Returns false to let the caller emit the helper call. The destination
+    /// register usually aliases an operand, so the guard must read both
+    /// operands before anything is assigned.
+    fn try_emit_inline_index(&self, out: &mut String, id: Idx<Inst>) -> bool {
+        match &self.func.insts[id] {
+            Inst::Index {
+                base,
+                index,
+                kind: ContainerKind::Vec,
+            } if self.inline_index_operands(*base, *index) => {
+                self.write_vec_bounds_guard(out, *base, *index);
+                out.push_str("  ");
+                write_vname(out, self.func, &self.colors, id);
+                out.push_str(" = ");
+                self.write_opnd(out, *base);
+                out.push_str("._data[");
+                self.write_opnd(out, *index);
+                out.push_str(" + 1]\n");
+                true
+            }
+            Inst::VecCheckedIndex { vec, index } if self.inline_index_operands(*vec, *index) => {
+                self.write_vec_bounds_guard(out, *vec, *index);
+                out.push_str("  ");
+                write_vname(out, self.func, &self.colors, id);
+                out.push_str(" = ");
+                self.write_opnd(out, *index);
+                out.push_str(" + 1\n");
+                true
+            }
+            _ => false,
+        }
+    }
+
     fn write_opnd(&self, out: &mut String, id: Idx<Inst>) {
         if self.inlinable[raw(id) as usize] {
             if let Inst::Load(cell) = self.func.insts[id] {
@@ -2704,7 +4016,8 @@ impl Emitter<'_> {
                     out.push_str(&lua_string(&identity.logical_key(self.ws, self.interner)));
                     out.push(')');
                 } else if self.has_state_slot(*g) {
-                    out.push_str("__rock_active_session.__rock_state[");
+                    out.push_str(self.state_table_expr());
+                    out.push('[');
                     self.write_state_slot(out, *g);
                     out.push(']');
                 } else {
@@ -2968,6 +4281,24 @@ impl Emitter<'_> {
                     );
                     return;
                 };
+                if self.ctx.value_ctor_shape() == ValueCtorShape::Splice
+                    && splice_is_admissible(suffix, fields)
+                {
+                    // The `<Name>_vt` body, written here: same table, same shared
+                    // metatable, same field ORDER (so an effectful operand still
+                    // evaluates where the argument list put it) -- without the
+                    // call frame that becomes a trace root.
+                    out.push_str("setmetatable({ ");
+                    for (field, id) in fields.iter() {
+                        write_table_key(out, field.as_str());
+                        self.write_opnd(out, *id);
+                        out.push_str(", ");
+                    }
+                    let _ = write!(out, "__ty = ");
+                    write_lua_string(out, name.as_str());
+                    let _ = write!(out, " }}, {})", value_struct_metatable_name(name.as_str()));
+                    return;
+                }
                 let _ = write!(out, "{name}{suffix}(");
                 for (i, (_, id)) in fields.iter().enumerate() {
                     if i > 0 {
@@ -3300,13 +4631,24 @@ impl Emitter<'_> {
                         out.push_str(")\n");
                     }
                     ContainerKind::Vec => {
-                        out.push_str("  __vec_checked_set(");
-                        self.write_opnd(out, *base);
-                        out.push_str(", ");
-                        self.write_opnd(out, *index);
-                        out.push_str(", ");
-                        self.write_opnd(out, *value);
-                        out.push_str(")\n");
+                        if self.inline_index_operands(*base, *index) {
+                            self.write_vec_bounds_guard(out, *base, *index);
+                            out.push_str("  ");
+                            self.write_opnd(out, *base);
+                            out.push_str("._data[");
+                            self.write_opnd(out, *index);
+                            out.push_str(" + 1] = ");
+                            self.write_opnd(out, *value);
+                            out.push('\n');
+                        } else {
+                            out.push_str("  __vec_checked_set(");
+                            self.write_opnd(out, *base);
+                            out.push_str(", ");
+                            self.write_opnd(out, *index);
+                            out.push_str(", ");
+                            self.write_opnd(out, *value);
+                            out.push_str(")\n");
+                        }
                     }
                     // Raw 1-based write into one leaf column; the owning Vec's
                     // `len` was checked once by `VecCheckedIndex`.
@@ -3334,11 +4676,15 @@ impl Emitter<'_> {
             }
             Inst::StoreGlobal { name, value } => {
                 if self.has_state_slot(*name) {
-                    out.push_str("  __rock_active_session.__rock_state[");
+                    out.push_str("  ");
+                    out.push_str(self.state_table_expr());
+                    out.push('[');
                     self.write_state_slot(out, *name);
                     out.push_str("] = ");
                     self.write_opnd(out, *value);
-                    out.push_str("\n  __rock_active_session.__rock_initialized[");
+                    out.push_str("\n  ");
+                    out.push_str(self.initialized_table_expr());
+                    out.push('[');
                     self.write_state_slot(out, *name);
                     out.push_str("] = true\n");
                 } else {
@@ -3425,7 +4771,81 @@ impl Emitter<'_> {
         }
     }
 
-    fn emit_term(&self, out: &mut String, term: &Term) {
+    fn numeric_selection(&self, bb: Idx<Block>, cond: Idx<Inst>, yes: Idx<Block>, no: Idx<Block>)
+        -> Option<(Idx<Cell>, Idx<Inst>, Idx<Inst>, &'static str, Idx<Block>)>
+    {
+        if !self.inlinable[raw(cond) as usize] { return None; }
+        let (a, b, less) = match self.func.insts[cond] {
+            Inst::FloatLt(a, b) | Inst::IntLt(a, b) => (a, b, true),
+            Inst::FloatGt(a, b) | Inst::IntGt(a, b) => (a, b, false),
+            _ => return None,
+        };
+        // Reversing a selection's operands must not reorder deferred effects.
+        for id in [a, b] {
+            if self.inlinable[raw(id) as usize]
+                && !matches!(self.func.insts[id], Inst::Load(_) | Inst::Const(_))
+            { return None; }
+        }
+        let arm = |bb: Idx<Block>| -> Option<(Option<(Idx<Cell>, Idx<Inst>)>, Idx<Block>)> {
+            let block = &self.func.blocks[bb];
+            let Term::Goto(join) = block.term else { return None; };
+            let store = match block.insts.as_slice() {
+                [] => None,
+                [s] => match self.func.insts[*s] {
+                    Inst::Store { cell, value } => Some((cell, value)),
+                    _ => return None,
+                },
+                [l, s] if self.inlinable[raw(*l) as usize]
+                    && matches!(self.func.insts[*l], Inst::Load(_)) => {
+                    match self.func.insts[*s] {
+                        Inst::Store { cell, value } if value == *l => Some((cell, value)),
+                        _ => return None,
+                    }
+                },
+                _ => return None,
+            };
+            Some((store, join))
+        };
+        let (yes_store, join) = arm(yes)?;
+        let (no_store, no_join) = arm(no)?;
+        if join != no_join { return None; }
+        let cell = yes_store.or(no_store)?.0;
+        if yes_store.is_some_and(|s| s.0 != cell) || no_store.is_some_and(|s| s.0 != cell) {
+            return None;
+        }
+        let current_load = |id: Idx<Inst>| {
+            if self.inlinable[raw(id) as usize] { return true; }
+            let insts = &self.func.blocks[bb].insts;
+            let Some(pos) = insts.iter().rposition(|i| *i == id) else { return false; };
+            // A captured comparison operand may stand for the unchanged cell,
+            // but never carry that equivalence across a write or call.
+            insts[pos + 1..].iter().all(|i| *i == cond
+                || matches!(self.func.insts[*i], Inst::Load(_) | Inst::Const(_)))
+        };
+        let matches = |store: Option<(Idx<Cell>, Idx<Inst>)>, operand: Idx<Inst>| {
+            match store {
+                Some((_, value)) if value == operand => true,
+                Some((_, value)) => match (&self.func.insts[value], &self.func.insts[operand]) {
+                    (Inst::Load(x), Inst::Load(y)) => x == y
+                        && self.inlinable[raw(value) as usize]
+                        && current_load(operand),
+                    _ => false,
+                },
+                None => matches!(self.func.insts[operand], Inst::Load(c) if c == cell)
+                    && current_load(operand),
+            }
+        };
+        if matches(yes_store, a) && matches(no_store, b) {
+            Some((cell, a, b, if less { "min" } else { "max" }, join))
+        } else if matches(yes_store, b) && matches(no_store, a) {
+            // Native min/max choose the second operand on ties/unordered input.
+            Some((cell, b, a, if less { "max" } else { "min" }, join))
+        } else {
+            None
+        }
+    }
+
+    fn emit_term(&self, out: &mut String, term: &Term, bb: Idx<Block>) {
         match term {
             // luajit rule 2: `return` wrapped `do ... end` so it is never the
             // block's mid-sequence statement (and is legal as the last one too).
@@ -3438,21 +4858,35 @@ impl Emitter<'_> {
                 out.push_str("  do return end\n");
             }
             Term::Goto(b) => {
-                out.push_str("  goto bb");
-                push_uint(out, self.func.emit_block_id(*b));
-                out.push('\n');
+                self.write_goto(out, *b);
             }
             Term::Branch {
                 cond,
                 then_bb,
                 else_bb,
             } => {
+                if let Some((cell, a, b, op, join)) = self.numeric_selection(bb, *cond, *then_bb, *else_bb) {
+                    out.push_str("  ");
+                    write_cellname(out, self.func, self.frame, self.cell_colors, cell);
+                    out.push_str(" = math.");
+                    out.push_str(op);
+                    out.push('(');
+                    self.write_opnd(out, a);
+                    out.push_str(", ");
+                    self.write_opnd(out, b);
+                    out.push_str(")\n");
+                    // The arm blocks are skipped, so their entry kills are too;
+                    // what dies between here and the join is killed here.
+                    self.write_kills(out, &self.kills.on_edge(bb, join));
+                    self.write_goto(out, join);
+                    return;
+                }
                 out.push_str("  if ");
                 self.write_opnd(out, *cond);
-                out.push_str(" then goto bb");
-                push_uint(out, self.func.emit_block_id(*then_bb));
-                out.push_str(" else goto bb");
-                push_uint(out, self.func.emit_block_id(*else_bb));
+                out.push_str(" then goto ");
+                self.write_label_ref(out, *then_bb);
+                out.push_str(" else goto ");
+                self.write_label_ref(out, *else_bb);
                 out.push_str(" end\n");
             }
             Term::Switch {
@@ -3468,17 +4902,15 @@ impl Emitter<'_> {
                     first = false;
                     let _ = write!(out, "  {kw} {d} == ");
                     write_lit(out, l);
-                    out.push_str(" then goto bb");
-                    push_uint(out, self.func.emit_block_id(*b));
+                    out.push_str(" then goto ");
+                    self.write_label_ref(out, *b);
                     out.push('\n');
                 }
                 if first {
-                    out.push_str("  goto bb");
-                    push_uint(out, self.func.emit_block_id(*default));
-                    out.push('\n');
+                    self.write_goto(out, *default);
                 } else {
-                    out.push_str("  else goto bb");
-                    push_uint(out, self.func.emit_block_id(*default));
+                    out.push_str("  else goto ");
+                    self.write_label_ref(out, *default);
                     out.push_str(" end\n");
                 }
             }

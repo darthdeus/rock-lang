@@ -24,6 +24,7 @@ backend-js = ["dep:skull-codegen-js"]
 renderer-wgpu = ["skull/renderer-wgpu"]
 
 [dependencies]
+rock-replay-protocol = { path = "../rock-replay-protocol" }
 rock-host = { path = "../rock-host" }
 sound-core = { path = "../sound-core" }
 rock-log = { path = "../rock-log" }

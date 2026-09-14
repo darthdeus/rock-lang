@@ -1,39 +1,58 @@
 
 use crate::*;
-pub fn do_fmt(path: &str, in_place: bool, check: bool) -> Result<()> {
+
+/// Expand every argument into the `.rock` files it names: a file argument
+/// contributes itself, a directory argument everything under it. A file named
+/// by more than one argument is formatted once.
+///
+/// `rock fmt` used to take a single path, so a file list silently formatted
+/// (or `--check`ed) only its first entry and reported success for the rest.
+pub fn collect_rock_files(paths: &[String]) -> Result<Vec<String>> {
     use fs_err as fs;
 
-    let mut files_to_format = Vec::new();
-
-    // Determine if we're dealing with a file or directory
-    let metadata = fs::metadata(path)?;
-    if metadata.is_file() {
-        if path.ends_with(".rock") {
-            files_to_format.push(path.to_string());
-        } else {
-            eprintln!("File '{}' is not a Rock file (.rock)", path);
-            return Ok(());
+    let mut collected = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut push = |file: String, collected: &mut Vec<String>| {
+        if seen.insert(file.clone()) {
+            collected.push(file);
         }
-    } else if metadata.is_dir() {
-        // Walk the directory to find all .rock files
-        for entry in WalkDir::new(path) {
-            let entry = entry?;
-            if entry.file_type().is_file() {
-                let file_path = entry.path();
-                if let Some(ext) = file_path.extension() {
-                    if ext == "rock" {
-                        files_to_format.push(file_path.to_string_lossy().to_string());
+    };
+
+    for path in paths {
+        let metadata = fs::metadata(path)?;
+        if metadata.is_file() {
+            if path.ends_with(".rock") {
+                push(path.to_string(), &mut collected);
+            } else {
+                eprintln!("File '{}' is not a Rock file (.rock)", path);
+            }
+        } else if metadata.is_dir() {
+            for entry in WalkDir::new(path) {
+                let entry = entry?;
+                if entry.file_type().is_file() {
+                    let file_path = entry.path();
+                    if let Some(ext) = file_path.extension() {
+                        if ext == "rock" {
+                            push(file_path.to_string_lossy().to_string(), &mut collected);
+                        }
                     }
                 }
             }
+        } else {
+            eprintln!("Path '{}' is neither a file nor a directory", path);
         }
-    } else {
-        eprintln!("Path '{}' is neither a file nor a directory", path);
-        return Ok(());
     }
 
+    Ok(collected)
+}
+
+pub fn do_fmt(paths: &[String], in_place: bool, check: bool) -> Result<()> {
+    use fs_err as fs;
+
+    let files_to_format = collect_rock_files(paths)?;
+
     if files_to_format.is_empty() {
-        eprintln!("No Rock files found in '{}'", path);
+        eprintln!("No Rock files found in '{}'", paths.join("', '"));
         return Ok(());
     }
 
@@ -126,4 +145,91 @@ fn format_rock_file(file_path: &str) -> Result<String> {
     }
 
     Ok(formatted)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::collect_rock_files;
+    use std::fs;
+
+    fn write(dir: &std::path::Path, name: &str) -> String {
+        let path = dir.join(name);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(&path, "fn main() {}\n").unwrap();
+        path.to_string_lossy().to_string()
+    }
+
+    #[test]
+    fn every_named_file_is_collected_not_only_the_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = write(dir.path(), "a.rock");
+        let second = write(dir.path(), "b.rock");
+        let third = write(dir.path(), "c.rock");
+
+        let collected =
+            collect_rock_files(&[first.clone(), second.clone(), third.clone()]).unwrap();
+
+        assert_eq!(collected, vec![first, second, third]);
+    }
+
+    #[test]
+    fn a_directory_argument_contributes_every_rock_file_under_it() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "top.rock");
+        write(dir.path(), "nested/deep.rock");
+        write(dir.path(), "nested/notes.txt");
+
+        let collected =
+            collect_rock_files(&[dir.path().to_string_lossy().to_string()]).unwrap();
+
+        let mut names: Vec<_> = collected
+            .iter()
+            .map(|path| {
+                std::path::Path::new(path)
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .to_string()
+            })
+            .collect();
+        names.sort();
+        assert_eq!(names, vec!["deep.rock", "top.rock"]);
+    }
+
+    #[test]
+    fn a_file_named_twice_is_collected_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = write(dir.path(), "a.rock");
+
+        let collected = collect_rock_files(&[
+            file.clone(),
+            dir.path().to_string_lossy().to_string(),
+            file.clone(),
+        ])
+        .unwrap();
+
+        assert_eq!(collected, vec![file]);
+    }
+
+    #[test]
+    fn a_non_rock_file_is_skipped_without_dropping_the_rest() {
+        let dir = tempfile::tempdir().unwrap();
+        let text = write(dir.path(), "notes.txt");
+        let rock = write(dir.path(), "a.rock");
+
+        let collected = collect_rock_files(&[text, rock.clone()]).unwrap();
+
+        assert_eq!(collected, vec![rock]);
+    }
+
+    #[test]
+    fn a_missing_path_is_an_error_rather_than_a_silent_skip() {
+        let dir = tempfile::tempdir().unwrap();
+        let rock = write(dir.path(), "a.rock");
+        let missing = dir.path().join("gone.rock").to_string_lossy().to_string();
+
+        assert!(collect_rock_files(&[rock, missing]).is_err());
+    }
 }

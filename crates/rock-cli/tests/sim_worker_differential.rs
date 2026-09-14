@@ -55,6 +55,16 @@ fn artifact_names(record: &SimRecord) -> Vec<String> {
 /// `hostile_parent` puts `ROCK_MASK_WALL_CLOCK=1` in the PARENT environment,
 /// which is the route an inherited value takes into a child the runner spawns.
 fn run_rock(args: &[&str], hostile_parent: bool) -> String {
+    let parent_env: &[(&str, &str)] =
+        if hostile_parent { &[("ROCK_MASK_WALL_CLOCK", "1")] } else { &[] };
+    run_rock_with_env(args, parent_env)
+}
+
+/// Same run, with an arbitrary PARENT environment -- the route an inherited
+/// value takes into a child the runner spawns. `run_rock` is this with the
+/// wall-clock mask, kept as its own spelling because most callers only ever
+/// want that one.
+fn run_rock_with_env(args: &[&str], parent_env: &[(&str, &str)]) -> String {
     let mut rock = std::env::current_exe().expect("test exe");
     rock.pop();
     if rock.ends_with("deps") {
@@ -70,10 +80,7 @@ fn run_rock(args: &[&str], hostile_parent: bool) -> String {
         .to_path_buf();
 
     let mut cmd = std::process::Command::new(&rock);
-    cmd.current_dir(&root).args(args);
-    if hostile_parent {
-        cmd.env("ROCK_MASK_WALL_CLOCK", "1");
-    }
+    cmd.current_dir(&root).args(args).envs(parent_env.iter().copied());
     let out = cmd.output().unwrap_or_else(|e| panic!("run rock {args:?}: {e}"));
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     assert!(out.status.success(), "{args:?} failed:\n{stderr}");
@@ -165,6 +172,46 @@ fn a_predecessors_global_does_not_reach_the_next_entry() {
         "the counter is written as one digit"
     );
     assert_eq!(isolated.artifacts["count.txt"], worker.artifacts["count.txt"]);
+}
+
+/// A telemetry capture is what lets a game sim read its event stream while
+/// sharing a worker, so the capture must reset at the boundary: the seed leaves
+/// one open with an event in it, and the probe records what it sees in an expect
+/// and in an artifact.
+#[test]
+fn a_predecessors_telemetry_capture_does_not_reach_the_next_entry() {
+    let (isolated, worker) =
+        differential(&["b0_telemetry_capture_seed"], "b0_telemetry_capture_probe");
+    let c = compare(&isolated, &worker);
+    assert_equivalent("b0_telemetry_capture_probe", &c);
+
+    assert_eq!(isolated.verdict(), "PASS", "the probe passes in a fresh process");
+    assert!(c.population("expects_pass") > 0, "the fixture asserted nothing");
+    assert_eq!(isolated.artifacts["capture.txt"], worker.artifacts["capture.txt"]);
+}
+
+/// The same contract for a `rebuild_host_projection` global. Its declaration
+/// promises the boundary REBUILDS the projection, so a restored process is
+/// observationally identical to a fresh one -- but capture stored nothing for
+/// such an entry and materialization deep-copied the LIVE value, carrying a
+/// predecessor's mutation into the successor inside that copy. The fixture pins
+/// a table and a scalar, which take different paths through the deep copy.
+#[test]
+fn a_predecessors_host_projection_does_not_reach_the_next_entry() {
+    let (isolated, worker) = differential(&["b0_projection_seed"], "b0_projection_probe");
+    let c = compare(&isolated, &worker);
+    assert_equivalent("b0_projection_probe", &c);
+
+    assert_eq!(isolated.verdict(), "PASS", "the probe passes in a fresh process");
+    assert!(c.population("expects_pass") > 0, "the fixture asserted nothing");
+    assert_eq!(
+        worker.artifacts["projection.txt"].len, 3,
+        "the projection populations are written as `<keys>:<count>`"
+    );
+    assert_eq!(
+        isolated.artifacts["projection.txt"], worker.artifacts["projection.txt"],
+        "the probe read the same projection populations in a worker as alone"
+    );
 }
 
 #[test]
@@ -539,6 +586,150 @@ fn an_ordinary_run_keeps_its_measurements_when_the_parent_environment_masks() {
     );
 }
 
+/// The identifier half of the same property the wall-clock family covers: an
+/// artifact a COMPARED run writes has to be reproducible, and a value drawn
+/// fresh from OS randomness per process defeats that exactly as thoroughly as a
+/// measured duration does.
+///
+/// A telemetry queue mints two such values, both `Uuid::new_v4()` in
+/// `stone-rs/src/telemetry.rs`: the consent generation in
+/// `reports/.telemetry-consent` and the session id on every event row. They are
+/// the reason `--multi-order`'s isolated reference was not reproducible against
+/// ITSELF -- two runs of the same two-sim selection produced identical file
+/// SIZES and four different content hashes. An isolated-only sim never gets a
+/// second process to compare with, which is why this never showed.
+///
+/// Both compared arms carry the ids here. `artifacts` is where the real defect
+/// lived; `entry_diagnostics` carries the logged line so a failure names WHICH
+/// id moved. The `artifacts` population assert is what stops this passing
+/// because the queue never opened.
+#[test]
+fn a_telemetry_id_does_not_diverge_across_the_entry_boundary() {
+    let (isolated, worker) = differential(&["b0_telemetry_ids_seed"], "b0_telemetry_ids_probe");
+    let c = compare(&isolated, &worker);
+    assert_equivalent("b0_telemetry_ids_probe", &c);
+
+    for (label, record) in [("isolated", &isolated), ("worker", &worker)] {
+        let (consent, session) = telemetry_ids(&record.entry_diagnostics)
+            .unwrap_or_else(|| panic!("{label}: no telemetry record line:\n{}", record.entry_diagnostics));
+        // Agreement over an id that was never minted is agreement over nothing.
+        assert!(
+            is_uuid(&consent) && is_uuid(&session),
+            "{label}: the reproducible ids must still be well-formed UUIDs, got consent={consent} session={session}"
+        );
+        // A reproducible SEQUENCE, not one constant: the two kinds are drawn at
+        // the same index and must not collide.
+        assert_ne!(consent, session, "{label}: the consent generation and the session id must differ");
+        // The undeclared control in the same record still compares.
+        assert!(
+            record.entry_diagnostics.contains("queue 1"),
+            "{label}: the control must survive: {}",
+            record.entry_diagnostics
+        );
+    }
+    assert!(
+        c.population("artifacts") > 0,
+        "the artifact arm compared nothing, so the telemetry files were never checked"
+    );
+}
+
+/// `ROCK_DETERMINISTIC_IDS` is the HARNESS's, and a compared run stays
+/// reproducible however loudly a fixture asks for real ids. Without this the
+/// gate could be talked out of checking the very fixtures it exists for: a sim
+/// could declare its way out of the comparison and the gate would report green
+/// on artifacts it had stopped looking at.
+///
+/// The declaring pair is the mutation subject -- with the runner publishing the
+/// flag before a sim's `@sim_env`, this fixture's `"0"` would win and both sides
+/// would mint fresh UUIDs the boundary cannot restore.
+#[test]
+fn a_fixture_cannot_ask_a_compared_run_for_real_telemetry_ids() {
+    let (isolated, worker) =
+        differential(&["b0_telemetry_ids_unmask_seed"], "b0_telemetry_ids_unmask_probe");
+    let c = compare(&isolated, &worker);
+    assert_equivalent("b0_telemetry_ids_unmask_probe", &c);
+    assert!(
+        c.population("artifacts") > 0,
+        "the artifact arm compared nothing, so the fixture's declaration was never tested"
+    );
+}
+
+/// The other direction, and the one that protects the shipping game: telemetry
+/// is a product feature, and a build that emitted a fixed session id would
+/// collapse every real player's sessions into one. An ordinary `rock sim` run
+/// is not compared with anything, so it must keep drawing real random ids --
+/// whatever the fixture or the parent environment asks for.
+///
+/// Proven by RUNNING TWICE and requiring the ids to differ, rather than by
+/// asserting against a known derived value: that is the property that actually
+/// matters, and it cannot be satisfied by a derivation that merely looks random.
+fn assert_ordinary_run_keeps_real_ids(seed: &str, probe: &str, parent_env: &[(&str, &str)]) {
+    for workers in [false, true] {
+        let args = if workers {
+            vec!["sim", "testbed", seed, probe, "--workers"]
+        } else {
+            vec!["sim", "testbed", probe]
+        };
+
+        let mut seen: Vec<(String, String)> = Vec::new();
+        for _ in 0..2 {
+            let stderr = run_rock_with_env(&args, parent_env);
+            let ids = telemetry_ids(&stderr)
+                .unwrap_or_else(|| panic!("{args:?} emitted no telemetry record line:\n{stderr}"));
+            assert!(
+                is_uuid(&ids.0) && is_uuid(&ids.1),
+                "{args:?} must emit well-formed UUIDs, got {ids:?}"
+            );
+            seen.push(ids);
+        }
+        assert_ne!(
+            seen[0], seen[1],
+            "{args:?} (parent_env={parent_env:?}) is not a compared run, so it must keep drawing \
+             REAL random telemetry ids; two runs produced the same pair"
+        );
+    }
+}
+
+#[test]
+fn an_ordinary_run_keeps_its_real_telemetry_ids() {
+    assert_ordinary_run_keeps_real_ids("b0_telemetry_ids_seed", "b0_telemetry_ids_probe", &[]);
+}
+
+#[test]
+fn an_ordinary_run_keeps_its_real_telemetry_ids_when_the_fixture_asks_for_reproducible_ones() {
+    assert_ordinary_run_keeps_real_ids(
+        "b0_telemetry_ids_mask_seed",
+        "b0_telemetry_ids_mask_probe",
+        &[],
+    );
+}
+
+#[test]
+fn an_ordinary_run_keeps_its_real_telemetry_ids_when_the_parent_environment_asks_otherwise() {
+    assert_ordinary_run_keeps_real_ids(
+        "b0_telemetry_ids_seed",
+        "b0_telemetry_ids_probe",
+        &[("ROCK_DETERMINISTIC_IDS", "1")],
+    );
+}
+
+/// Pull `consent` and `session` out of the fixture's one log line.
+fn telemetry_ids(text: &str) -> Option<(String, String)> {
+    let line = text.lines().find(|l| l.contains("b0 telemetry record:"))?;
+    let after = |key: &str| -> Option<String> {
+        let rest = line.split_once(key)?.1;
+        Some(rest.split(|c: char| c == ',').next()?.trim().to_string())
+    };
+    Some((after("consent on ")?, after("session ")?))
+}
+
+fn is_uuid(value: &str) -> bool {
+    let groups: Vec<&str> = value.split('-').collect();
+    groups.len() == 5
+        && [8usize, 4, 4, 4, 12] == groups.iter().map(|g| g.len()).collect::<Vec<_>>()[..]
+        && value.chars().all(|c| c == '-' || c.is_ascii_hexdigit())
+}
+
 /// The Session Arena registry crosses the REAL worker boundary intact.
 ///
 /// The b1 fixtures call `sim_checkpoint_take`/`sim_checkpoint_restore` directly
@@ -843,6 +1034,77 @@ fn a_budget_cut_predecessor_still_restores_boot() {
         "the probe wrote the counter it read, so the fresh zero was measured"
     );
     assert_eq!(isolated.artifacts["count.txt"], worker.artifacts["count.txt"]);
+}
+
+/// An ordinary main-coroutine error is a finished entry, not a worker crash.
+/// The head is deliberately manual-only because its FAIL/no-stop record is the
+/// boundary under test. The update marker proves that the runner did not leave
+/// the errored raw handle live until its frame budget; the successor's crossing
+/// proves no recovery boot was inserted between the two entries.
+#[test]
+fn an_errored_main_closes_without_recovery_or_tail_updates() {
+    let records = run_worker_suite(
+        Backend::Skull,
+        "testbed",
+        &[
+            "b0_main_error_head".to_string(),
+            "b0_main_error_probe".to_string(),
+        ],
+    )
+    .expect("an ordinary main error must finalize its entry and keep the worker alive");
+    assert_eq!(records.len(), 2, "both entries must be finalized");
+
+    let boots = records
+        .iter()
+        .map(|(record, _)| record.diagnostics.as_str())
+        .collect::<Vec<_>>()
+        .join("\n")
+        .matches("[STONE] Initialized successfully")
+        .count();
+    assert_eq!(boots, 1, "the ordinary error must not trigger a recovery boot");
+
+    let (head, head_crossed) = &records[0];
+    assert!(!head_crossed, "the head follows no predecessor");
+    assert_eq!(head.verdict(), "FAIL", "the deliberate main error must remain visible");
+    assert!(!head.saw_stop, "the failed main never called stop_sim(): {head:?}");
+    assert!(
+        head.expects_pass
+            .iter()
+            .any(|message| message.message.contains("reached an actual game frame")),
+        "the head must perform its real fixture assertion before raising: {head:?}"
+    );
+    assert!(
+        head.entry_diagnostics.contains("b0-main-error-boundary"),
+        "the main coroutine error must be logged on the failed entry: {head:?}"
+    );
+    assert!(
+        !head.entry_diagnostics.contains("b0-main-error-tail-update"),
+        "the failed entry must not execute the post-error update witness: {head:?}"
+    );
+    assert!(
+        head.expects_fail.is_empty(),
+        "the update witness must report marker-write failures instead of hiding them: {head:?}"
+    );
+    assert!(
+        !head.artifacts.contains_key("post_error_update.txt"),
+        "an errored main must not burn its frame budget in update systems: {head:?}"
+    );
+
+    let (probe, probe_crossed) = &records[1];
+    assert!(
+        *probe_crossed,
+        "the successor must follow the failed entry in the same worker: {probe:?}"
+    );
+    assert_eq!(probe.verdict(), "PASS", "the successor must still complete: {probe:?}");
+    assert!(probe.saw_stop, "the successor must call stop_sim(): {probe:?}");
+    assert!(
+        probe
+            .expects_pass
+            .iter()
+            .any(|message| message.message.contains("successor ran")),
+        "the successor assertion must execute: {probe:?}"
+    );
+    assert!(probe.artifacts.contains_key("successor.txt"));
 }
 
 /// Failure containment (`docs/sim-speed-plan.md` B2): a worker that DIES

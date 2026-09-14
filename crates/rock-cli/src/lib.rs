@@ -31,6 +31,8 @@ pub use log::{debug, error, info, trace, warn};
 pub mod backend_stats;
 pub mod bone_backend;
 pub mod skull_backend;
+pub mod docs_index;
+pub mod sdk_check;
 pub mod common;
 mod compile_cmd;
 pub mod comptime;
@@ -60,6 +62,7 @@ mod lint_cmd;
 pub mod lint_union;
 pub mod lint_pass;
 pub mod ablation_report;
+pub mod child_lifetime;
 mod allocation_join;
 #[cfg(feature = "backend-js")]
 mod mono_manifest;
@@ -73,6 +76,8 @@ mod replay_profile_report;
 mod image_video;
 pub mod run_sim;
 pub mod sim_record;
+pub mod sim_observability;
+pub mod sim_report;
 mod stone;
 pub mod stone_test;
 mod test;
@@ -134,6 +139,12 @@ pub enum CliCommand {
     /// `<name>` may be comma-separated for chained multi-start
     /// (`a,b` -> two luajit children sharing one `$OUT` tempdir).
     Sim,
+    /// `rock sim-report [<run-id>] [--sim-log-dir <root>]` -- read the
+    /// persistent `rock sim` history in `.sim-runs/<run-id>/` in aggregate:
+    /// wall/envelope/startup decomposition, boot amortization, the lane and
+    /// boot-signature census, and worker occupancy. Read-only over the
+    /// history; it never writes, prunes or mutates a run record.
+    SimReport,
     /// `rock lint <path>` -- run the lint catalog (`crates/bone-lints`) over a
     /// file or project and report the findings. The author-facing surface of the
     /// same engine the LSP and the build pass drive; exits non-zero only on an
@@ -313,6 +324,11 @@ pub enum CliCommand {
     /// `rock sound-inspect <game>` -- compile the game's declared sound
     /// project and open its runtime bank in the independent inspector.
     SoundInspect,
+    /// `rock docs-index <dir|file>... --output <file>` — generate a
+    /// deterministic declaration/signature index from Rock source.
+    DocsIndex,
+    /// Check SDK support for a project manifest and its native libraries without building.
+    SdkCheck,
 }
 
 impl clap::ValueEnum for CliCommand {
@@ -323,6 +339,7 @@ impl clap::ValueEnum for CliCommand {
             Self::Stone, Self::Replay, Self::ReplayReport, Self::ReplayProfile,
             Self::ReplayProfileReport, Self::Perf,
             Self::Sim,
+            Self::SimReport,
             Self::Completions,
             Self::Lint,
             Self::StoneTest,
@@ -352,6 +369,8 @@ impl clap::ValueEnum for CliCommand {
             Self::Web,
             Self::Package,
             Self::SoundInspect,
+            Self::DocsIndex,
+            Self::SdkCheck,
         ]
     }
     fn to_possible_value(&self) -> Option<clap::builder::PossibleValue> {
@@ -381,6 +400,7 @@ impl CliCommand {
             Self::StoneTest => "stone-test",
             Self::Perf => "perf",
             Self::Sim => "sim",
+            Self::SimReport => "sim-report",
             Self::Completions => "completions",
             Self::Lint => "lint",
             Self::IterCompile => "iter-compile",
@@ -409,6 +429,8 @@ impl CliCommand {
             Self::Web => "web",
             Self::Package => "package",
             Self::SoundInspect => "sound-inspect",
+            Self::DocsIndex => "docs-index",
+            Self::SdkCheck => "sdk-check",
         }
     }
 }
@@ -592,6 +614,10 @@ pub struct Args {
     pub top: usize,
     /// For `rock replay-report`: observations of context around suggested ranges.
     pub context: usize,
+    /// For `rock sim-report`: the sim history root to read.
+    pub sim_log_dir: Option<String>,
+    /// For `rock sim-report`: compare this named entry across retained runs.
+    pub sim_entry: Option<String>,
     /// For `rock replay-profile`: inclusive observation range `A-B`.
     pub replay_range: Option<String>,
     /// For `rock replay-profile`: fresh-process repetitions of the range.
@@ -621,6 +647,10 @@ pub struct Args {
     /// For `rock sim`: how many sim children may run at once. `None` uses the
     /// conservative default in `run_sim::resolve_jobs`.
     pub jobs: Option<usize>,
+    /// For `rock sim`: how many of those children may be RENDERING ones at
+    /// once. `None` means no separate cap (`--jobs` bounds both). See
+    /// `run_sim::resolve_render_jobs`.
+    pub render_jobs: Option<usize>,
     /// For `rock sim`: force one fresh process per entry. This is the permanent
     /// fresh-process reference oracle; the ordinary default uses eligible
     /// boot-checkpoint workers, including rendered sims.
@@ -671,6 +701,16 @@ pub struct Args {
     /// Equivalent to setting `STONE_JV=1`; applies to any command that
     /// runs the game (`stone`, `frame`, `run`, `perf`, `sim`).
     pub jv: bool,
+    /// `rock run <game> --agent-headless`: boot straight into the editor with
+    /// no window, registered with the agent daemon, access still off.
+    pub agent_headless: bool,
+    /// `--agent-access`: enable agent control at boot instead of from the
+    /// editor's Agent Access window.
+    pub agent_access: bool,
+    /// `--level <name>`: the catalog level the editor opens at boot.
+    pub level: Option<String>,
+    /// `--daemon-sock <path>`: the agent daemon socket for this game.
+    pub daemon_sock: Option<String>,
 
     /// For `rock test`: re-run tests on every `.rock` file change in
     /// the given paths. Watches the same paths passed to `rock test`
@@ -795,6 +835,10 @@ impl Args {
             .arg(Arg::new("context").long("context").default_value("2")
                 .value_parser(clap::value_parser!(usize))
                 .help("For `rock replay-report`: pad suggested observation ranges by this many frames (default 2)."))
+            .arg(Arg::new("sim-log-dir").long("sim-log-dir")
+                .help("For `rock sim-report`: the persistent sim history root to read (default: $ROCK_SIM_LOG_DIR, else .sim-runs). Read-only."))
+            .arg(Arg::new("sim-entry").long("sim-entry")
+                .help("For `rock sim-report`: compare one named sim's entry envelope across every retained run instead of reporting one run."))
             .arg(Arg::new("replay-range").long("range")
                 .help("For `rock replay-profile`: inclusive observation range A-B."))
             .arg(Arg::new("runs").long("runs").default_value("1")
@@ -834,6 +878,9 @@ impl Args {
             .arg(Arg::new("jobs").long("jobs").short('j').value_name("N")
                 .value_parser(clap::value_parser!(usize))
                 .help("For `rock sim`: run up to N sim children concurrently (default 4, 1 = serial). Applies to the whole-suite and multi-name forms."))
+            .arg(Arg::new("render-jobs").long("render-jobs").value_name("R")
+                .value_parser(clap::value_parser!(usize))
+                .help("For `rock sim`: allow at most R of the concurrent children to be rendering ones (SIM_SKIP_RENDER=0 lanes, which hold real assets and scene targets on the GPU); the remaining slots up to --jobs run non-rendering lanes. Default: no separate cap. Bounded by --jobs."))
             .arg(Arg::new("isolated").long("isolated").action(ArgAction::SetTrue)
                 .conflicts_with("workers")
                 .help("For `rock sim`: force one fresh process per entry -- the permanent fresh-process reference oracle. The default uses eligible boot-checkpoint workers, including rendered sims."))
@@ -889,6 +936,14 @@ impl Args {
                 .help("Compiler backend: `skull` (default -- bone type-check + skull codegen, runs Lua), `bone` (type-check only, no codegen), `js` (test only -- JS-subset @test execution under node, SKIP(reason) outside the subset), or `glsl` (test only -- GLSL value-test execution on the GPU, both 330core+300es profiles). Can also be set via ROCK_BACKEND=bone|skull|js|glsl."))
             .arg(Arg::new("jv").long("jv").action(ArgAction::SetTrue)
                 .help("Run the game's luajit with -jv (verbose JIT trace log to stderr). Same as STONE_JV=1; works for stone/frame/run/perf/sim."))
+            .arg(Arg::new("agent-headless").long("agent-headless").action(ArgAction::SetTrue)
+                .help("For `rock run <game>`: boot into the editor with no window (MAG_EDITOR=1 MAG_BOOT_PLAYING=1 STONE_HEADLESS=1); the game registers with the agent daemon with access off."))
+            .arg(Arg::new("agent-access").long("agent-access").action(ArgAction::SetTrue)
+                .help("For `rock run <game>`: enable agent control at boot (MAG_AGENT_ACCESS=1) instead of from the editor's Agent Access window; with --agent-headless this is what `mag-cli launch` runs."))
+            .arg(Arg::new("level").long("level").value_name("NAME")
+                .help("For `rock run <game>`: the catalog level the editor opens at boot (MAG_EDITOR_LEVEL). Refuses to open a different one if the name is unknown."))
+            .arg(Arg::new("daemon-sock").long("daemon-sock").value_name("PATH")
+                .help("For `rock run <game>`: the agent daemon socket this game registers with (ROCK_AGENT_DAEMON_SOCK); default ~/tmp/rock-agent-daemon/daemon.sock."))
             .arg(Arg::new("app_args").last(true).num_args(0..)
                 .help("Arguments to pass through to the Rock app (everything after --)"))
     }
@@ -921,6 +976,8 @@ impl Args {
             perf_format: m.get_one::<String>("perf-format").cloned().unwrap_or_else(|| "pretty".to_string()),
             top: *m.get_one::<usize>("top").unwrap(),
             context: *m.get_one::<usize>("context").unwrap(),
+            sim_log_dir: m.get_one::<String>("sim-log-dir").cloned(),
+            sim_entry: m.get_one::<String>("sim-entry").cloned(),
             replay_range: m.get_one::<String>("replay-range").cloned(),
             runs: *m.get_one::<usize>("runs").unwrap(),
             type_validation: m.get_flag("type-validation"),
@@ -945,6 +1002,7 @@ impl Args {
             dump_state: m.get_flag("dump-state"),
             update_snapshots: m.get_flag("update-snapshots"),
             jobs: m.get_one::<usize>("jobs").copied(),
+            render_jobs: m.get_one::<usize>("render-jobs").copied(),
             isolated: m.get_flag("isolated"),
             workers: m.get_flag("workers"),
             multi_order: m.get_flag("multi-order"),
@@ -957,6 +1015,10 @@ impl Args {
             list: m.get_flag("list"),
             app_args: many_str("app_args"),
             jv: m.get_flag("jv"),
+            agent_headless: m.get_flag("agent-headless"),
+            agent_access: m.get_flag("agent-access"),
+            level: m.get_one::<String>("level").cloned(),
+            daemon_sock: m.get_one::<String>("daemon-sock").cloned(),
             watch: m.get_flag("watch"),
             port: *m.get_one::<u16>("port").unwrap(),
             single_file: m.get_flag("single-file"),
@@ -994,9 +1056,75 @@ impl Args {
 }
 
 
+/// The `rock-agent-daemon` built next to this `rock`, if any. A source-run
+/// game resolves the daemon from its own executable (LuaJIT under
+/// `prebuilt/`), `ROCK_DIR`, or `PATH`, none of which point at the cargo
+/// target directory, so the launcher hands the sibling down explicitly.
+pub fn sibling_daemon_bin(rock_exe: &std::path::Path) -> Option<std::path::PathBuf> {
+    let candidate = rock_exe.parent()?.join("rock-agent-daemon");
+    candidate.is_file().then_some(candidate)
+}
+
+impl Args {
+    /// The game-side environment the agent launch flags stand for. The game
+    /// reads these variables itself (sims set them with `@sim_env`), so the
+    /// flags are sugar that sets them in the launcher before the spawn.
+    pub fn agent_launch_env(&self) -> Vec<(&'static str, String)> {
+        let mut env = Vec::new();
+        if self.agent_headless {
+            env.push(("MAG_EDITOR", "1".to_string()));
+            env.push(("MAG_BOOT_PLAYING", "1".to_string()));
+            env.push(("STONE_HEADLESS", "1".to_string()));
+        }
+        if self.agent_access {
+            env.push(("MAG_AGENT_ACCESS", "1".to_string()));
+        }
+        if let Some(level) = &self.level {
+            env.push(("MAG_EDITOR_LEVEL", level.clone()));
+        }
+        if let Some(sock) = &self.daemon_sock {
+            env.push(("ROCK_AGENT_DAEMON_SOCK", sock.clone()));
+        }
+        env
+    }
+}
+
 #[cfg(test)]
 mod arg_tests {
     use super::{Args, Backend};
+
+    #[test]
+    fn sibling_daemon_bin_is_the_daemon_next_to_rock_or_nothing() {
+        let dir = std::env::temp_dir().join(format!("rock-sibling-daemon-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let rock = dir.join("rock");
+        std::fs::write(&rock, b"").unwrap();
+        assert_eq!(super::sibling_daemon_bin(&rock), None);
+        let daemon = dir.join("rock-agent-daemon");
+        std::fs::write(&daemon, b"").unwrap();
+        assert_eq!(super::sibling_daemon_bin(&rock), Some(daemon));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn agent_launch_flags_stand_for_the_game_env() {
+        let parse = |argv: &[&str]| {
+            Args::from_matches(Args::command().try_get_matches_from(argv).expect("parse"))
+        };
+        let plain = parse(&["rock", "run", "mag"]);
+        assert!(plain.agent_launch_env().is_empty());
+        let headless = parse(&["rock", "run", "mag", "--agent-headless"]);
+        assert!(headless.agent_launch_env().iter().all(|(k, _)| *k != "MAG_AGENT_ACCESS"),
+                "headless alone leaves agent access off");
+        let agent = parse(&["rock", "run", "mag", "--agent-headless", "--agent-access", "--level", "mcp-selftest",
+                            "--daemon-sock", "/tmp/d.sock"]);
+        let env = agent.agent_launch_env();
+        for (key, value) in [("MAG_EDITOR", "1"), ("MAG_BOOT_PLAYING", "1"), ("MAG_AGENT_ACCESS", "1"),
+                             ("STONE_HEADLESS", "1"), ("MAG_EDITOR_LEVEL", "mcp-selftest"),
+                             ("ROCK_AGENT_DAEMON_SOCK", "/tmp/d.sock")] {
+            assert_eq!(env.iter().find(|(k, _)| *k == key).map(|(_, v)| v.as_str()), Some(value), "{key}");
+        }
+    }
 
     #[test]
     fn no_record_flag_parses_and_defaults_off() {

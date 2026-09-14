@@ -54,6 +54,14 @@ impl StoneHarness {
     /// paths relative to tempdir root). Blocks until the child emits
     /// `ready`.
     pub fn spawn(seed: &[(&str, &str)]) -> Self {
+        Self::spawn_with_env(seed, &[])
+    }
+
+    /// [`Self::spawn`] with extra environment for the child `rock stone-test`.
+    /// Used to drive a process-scoped emission switch (which the parent test
+    /// binary must not set for itself -- it shares a process with every other
+    /// test here).
+    pub fn spawn_with_env(seed: &[(&str, &str)], env: &[(&str, &str)]) -> Self {
         let tempdir = tempfile::tempdir().expect("tempdir");
         for (path, content) in seed {
             let full = tempdir.path().join(path);
@@ -64,7 +72,11 @@ impl StoneHarness {
         }
 
         let exe = rock_binary_path();
-        let mut child = Command::new(&exe)
+        let mut command = Command::new(&exe);
+        for (key, value) in env {
+            command.env(key, value);
+        }
+        let mut child = command
             .arg("stone-test")
             .arg(tempdir.path())
             .stdin(Stdio::piped())

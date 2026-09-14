@@ -1,33 +1,32 @@
 # bone -- working agreement
 
-`bone/` is a from-scratch bidirectional typechecker (clean HIR + arena layout,
+The `bone-*` crates are a from-scratch bidirectional typechecker (clean HIR + arena layout,
 generics-aware). This file holds conventions specific to working in it.
 
-## Division of labor (HARD RULE)
+## Working in bone
 
-On `bone/`, Claude writes ONLY tests and gives design hints. The author writes
-all compiler code.
+Typechecker source is editable. Until 2026-09-09 Claude wrote only tests here and the
+author transcribed every `src` change by hand; that rule is lifted -- the author
+sanctions agent edits across the repository and reviews them in the diff.
 
-- Claude edits: `bone/tests/fixtures/*.rock` and the structural tests in
-  `bone/tests/structural.rs`. `bone/src/` holds no tests.
-- Claude does NOT edit `bone/src/{lower,inference,hir,query,...}.rs`. Propose
-  diffs in chat as hints; the author applies them. (`bone/src/query.rs` is
-  now just `type_at` -- the position->type primitive bone's `//^` fixtures
-  and LSP hover both read; still bone's.)
-- Reading, running (`cargo test -p bone`), and diagnosing src is fine and
-  expected. The line is *editing* compiler source, not touching it.
-- **The `bone-query/` crate is Claude-owned** (like `skull/`): the IDE/LSP
-  navigation queries (`definition_at`, `references`) and the `lsp_types`
-  facade (`BoneWorkspace`) built on bone. Edit it freely. The HARD RULE
-  above is about `bone/src/` only -- never `bone-query/`.
-- **Hand off `bone/src` changes as COMPLETE paste-able blocks, never
-  edit-fragments.** Since the author transcribes by hand, "change line N" /
-  "drop the binding" instructions get mis-applied. Each fragment-style hint in
-  the per-body re-inference arc cost a debug cycle: "drop the unused `let ids =`"
-  deleted the whole `lower_modules` call (stale module, hard to find);
-  `!errs.is_empty()` lost its `!` (dropped every diagnostic); name-keyed
-  `old_gens` collided overloaded fns. Give the full function/block; it has no
-  ambiguity. Same testing-loop as before, just no fragments.
+What the old rule was protecting is still true, so keep these habits:
+
+- **Lead with the fixture.** `crates/bone-semantic/tests/fixtures/*.rock` and
+  the structural tests in `crates/bone-semantic/tests/structural.rs` are the
+  contract. Write the failing case first, watch it fail, then change `src`.
+  The `src/` trees hold no tests.
+- **Change whole functions, not fragments.** This was originally a
+  transcription rule, but the failures it prevented were real bugs, not typos:
+  "drop the unused `let ids =`" deleted an entire `lower_modules` call and left
+  a stale module that was hard to find; a lost `!` in `!errs.is_empty()`
+  dropped every diagnostic; name-keyed `old_gens` collided overloaded fns. Edit
+  in coherent blocks and re-read the whole function afterwards.
+- **Run it.** `cargo test -p bone-semantic` after every change, and check failing names
+  against `docs/known-failing-tests.md` rather than totals.
+- `bone-query/` (IDE/LSP navigation -- `definition_at`, `references`, and the
+  `lsp_types` facade `BoneWorkspace`) was always freely editable and remains so.
+  `crates/bone-semantic/src/query.rs` is just `type_at`, the position->type primitive that
+  bone's `//^` fixtures and LSP hover both read.
 
 ## Verify against real rock before deciding bone's behavior
 
@@ -77,7 +76,7 @@ child `IdxRange` pointing at the source (Static) arena; a later
 `with_idx`/`resolve` reads `gamma.out` with a Static index -> out-of-bounds
 panic or a cyclic type -> stack overflow. Leaves (`Builtin`/`Generic`/`Infer`)
 are safe to shallow-copy. Helpers: `reify`/`reify_range`/`tuple_of`. Audit:
-`grep -n '\*gamma.get(' bone/src/inference.rs`.
+`grep -rn '\*gamma\.get(' crates/bone-inference/src/` (it spans ~10 files there).
 
 **Corollary (cost a detour): `reify` only copies a WELL-FORMED type.** When this
 bug crashes, fix every CREATION site (`*gamma.get` of a compound -> alloc), NOT

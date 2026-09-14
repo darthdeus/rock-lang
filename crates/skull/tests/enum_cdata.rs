@@ -233,11 +233,7 @@ fn main() { t() }
 #[test]
 fn matched_scalar_abi_enum_param_does_not_repack() {
     let lua = emit_module(PARAM_MATCH_SRC);
-    let body = lua
-        .split("\nfunction route")
-        .nth(1)
-        .and_then(|s| s.split("\nfunction ").next())
-        .expect("route body");
+    let body = crate::common::function_body(&lua, "route");
     assert!(
         !body.contains("Target_ct("),
         "a matched scalar-ABI enum param must not repack to a cdata:\n{body}"

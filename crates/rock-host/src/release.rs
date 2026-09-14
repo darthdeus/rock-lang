@@ -250,11 +250,87 @@ pub fn resolve_asset_with_overlays(
     Ok(None)
 }
 
+pub fn resolve_worktree_asset(
+    project_dir: &Path,
+    game_key: &str,
+    logical_key: &str,
+) -> Result<Option<ReleaseAsset>> {
+    validate_relative_key(logical_key, "asset key")?;
+    if !logical_key.starts_with("assets/") || logical_key.contains('\\') {
+        anyhow::bail!("asset key must be a canonical assets-relative key: {logical_key:?}");
+    }
+    let candidate = project_dir.join(logical_key);
+    if candidate.is_file() {
+        return Ok(Some(ReleaseAsset {
+            key: key_for(game_key, logical_key),
+            source: candidate,
+        }));
+    }
+    Ok(None)
+}
+
+#[cfg(test)]
+mod worktree_bank_tests {
+    use super::*;
+
+    #[test]
+    fn worktree_bank_resolution_prefers_the_project_over_an_overlay() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("mag");
+        let overlay = root.path().join("vault");
+        std::fs::create_dir_all(project.join("assets")).unwrap();
+        std::fs::create_dir_all(overlay.join("assets")).unwrap();
+        std::fs::write(project.join("assets/visual_bank.json"), "project").unwrap();
+        std::fs::write(overlay.join("assets/visual_bank.json"), "overlay").unwrap();
+
+        let selected = resolve_worktree_asset(&project, "mag", "assets/visual_bank.json")
+            .unwrap()
+            .unwrap();
+        assert_eq!(selected.source, project.join("assets/visual_bank.json"));
+
+        let ordinary = resolve_asset_with_overlays(
+            &project,
+            "mag",
+            &[overlay.clone()],
+            "assets/visual_bank.json",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(ordinary.source, overlay.join("assets/visual_bank.json"));
+    }
+
+    #[test]
+    fn missing_worktree_bank_does_not_fall_back_to_an_overlay() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("mag");
+        let overlay = root.path().join("vault");
+        std::fs::create_dir_all(project.join("assets")).unwrap();
+        std::fs::create_dir_all(overlay.join("assets")).unwrap();
+        std::fs::write(overlay.join("assets/visual_bank.json"), "overlay").unwrap();
+
+        let selected = resolve_worktree_asset(&project, "mag", "assets/visual_bank.json").unwrap();
+        assert!(selected.is_none());
+    }
+}
+
 pub fn include_release_asset(selection: &mut AssetSelection, asset: ReleaseAsset) {
     if selection.assets.iter().any(|existing| existing.key == asset.key) {
         return;
     }
     selection.assets.push(asset);
+    selection.assets.sort_by(|left, right| left.key.cmp(&right.key));
+}
+
+pub fn replace_release_asset(selection: &mut AssetSelection, asset: ReleaseAsset) {
+    if let Some(existing) = selection
+        .assets
+        .iter_mut()
+        .find(|existing| existing.key == asset.key)
+    {
+        *existing = asset;
+    } else {
+        selection.assets.push(asset);
+    }
     selection.assets.sort_by(|left, right| left.key.cmp(&right.key));
 }
 

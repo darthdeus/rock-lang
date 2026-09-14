@@ -22,6 +22,15 @@ pub mod shader_artifact;
 pub mod site_join;
 pub mod mir_emit;
 
+/// THE hot-reload rule for the emitted callee shape, re-exported so the CLI
+/// pins it, reads it, and names it per build SESSION without depending on the
+/// Lua printer directly. See [`skull_codegen_lua::force_global_callee_binding`],
+/// [`skull_codegen_lua::callee_binding_is_bound`] and
+/// [`skull_codegen_lua::CalleeBindingMode`].
+pub use skull_codegen_lua::{
+    callee_binding_is_bound, callee_binding_mode, force_global_callee_binding, CalleeBindingMode,
+};
+
 // The shared graph layer, re-exported under its original paths. It moved BELOW
 // the backends (`skull-graph`) so the JS and GLSL emitters can realize the same
 // graph the luajit driver does; consumers name it the same way either side of
@@ -430,7 +439,52 @@ fn runtime_prelude() -> &'static str {
     //      and re-traces on a cliff/spiral (mag floors_walls: ~2.6 ms vs ~0.5
     //      with this). A trace must fit one `sizemcode` block. On arm64 macOS,
     //      dyld leaves room for the first block near the VM but later mappings
-    //      prevent a second one, so that first block must hold the hot set.
+    //      prevent a second one, so that first block must hold the hot set --
+    //      which is why size == max on both arches: one block, not several.
+    //      The budget is arch-split because the jump range is: x64 reaches
+    //      +/-2GB, arm64 only +/-128MB, so arm64 keeps the 16 MB figure from
+    //      the W1 decision in docs/luajit-mcode-flush-plan.md while x64 takes
+    //      64 MB. 8 MB was sized against `mag floors_walls` and is far too
+    //      small for the live game: a 60 s session of real play (summons,
+    //      combat, multiple spaces) flushed 31 times -- once every ~0.7 s --
+    //      and flush-plus-recovery accounted for 94% of all frame time over
+    //      budget. Evidence and the per-frame join are in
+    //      docs/trace-pressure-work-plan.md.
+    //      ROCK_JIT_MCODE_KB overrides both, so the budget can be swept
+    //      without a rebuild; this prelude runs at chunk load and beats any
+    //      -O flag passed on the command line.
+    //      `hotexit` is raised from LuaJIT's default 10 to 100 because a side
+    //      trace that FAILS is never penalised or blacklisted
+    //      (lj_trace.c:596-606) and snap->count only saturates on success, so a
+    //      doomed exit is re-recorded ~245 times for nothing. MAG's hottest
+    //      exits are doomed: they die in asm_head_side and never appear as a
+    //      parent for any other trace. Measured -57% aborts and -22% mean frame
+    //      on two independent workloads (a scripted combat sim and a recorded
+    //      play session), both disjoint across interleaved arms.
+    //      NOT validated on a workload whose side traces mostly SUCCEED, where
+    //      a higher threshold would cost real compiled coverage; and 250 beat
+    //      100 on every metric without the curve flattening, so this is a
+    //      conservative pick rather than a tuned one. ROCK_JIT_HOTEXIT
+    //      overrides it, so a regression reverts without a rebuild.
+    //      `maxtrace` is 32000 (LuaJIT default 1000, previously 4000 here).
+    //      A MAG combat session compiles ~24,600 traces; at 4000 the trace
+    //      array filled six times per benchmark run and every fill flushed
+    //      the whole cache -- all compiled code, every side-exit counter and
+    //      every abort penalty -- so the working set was re-recorded from
+    //      scratch six times. At 32000 the benchmark never flushes: aborts
+    //      11.1-11.5k -> 3.9k, mean frame 7.1 -> 4.7-5.1 ms, frames over
+    //      16.7 ms 37-39 -> 3-4, two interleaved pairs, peak RSS unchanged.
+    //      The trace array is 16 bytes per slot, so the fixed cost is 512 KB.
+    //      ROCK_JIT_MAXTRACE overrides it. `maxirconst` stays at LuaJIT's 500
+    //      (ROCK_JIT_MAXIRCONST): every "trace too long" in the census is the
+    //      constant limit, not maxrecord, but raising it only converts the
+    //      aborts into tail-call unroll aborts at the same starts.
+    //      `hotloop` and `loopunroll` stay at LuaJIT's defaults (56, 15) but
+    //      are exposed as ROCK_JIT_HOTLOOP / ROCK_JIT_LOOPUNROLL: MAG's inner
+    //      loops (glyphs per string, points per ribbon) run fewer than 56
+    //      iterations, so they never become loop traces and get unrolled by
+    //      whichever function-entry trace reaches them, which is where the
+    //      "trace too long" aborts come from. Sweepable without a rebuild.
     //   2. 32-bit RNG (stdlib `random_*` inline(lua) bodies call
     //      `__rock_rng_next`/`__rock_rng_seed` by name); seeded from
     //      ROCK_TEST_SEED for deterministic test runs.
@@ -462,7 +516,19 @@ fn runtime_prelude() -> &'static str {
 }
 
 const PRELUDE_TEMPLATE: &str =
-    r#"if jit and jit.opt then jit.opt.start("maxmcode=8192", "sizemcode=8192", "maxtrace=4000", "maxrecord=32000", "maxsnap=4000") end
+    r#"if jit and jit.opt then local __mc = tonumber(os.getenv("ROCK_JIT_MCODE_KB") or "") or (jit.arch == "arm64" and 16384 or 65536) local __he = tonumber(os.getenv("ROCK_JIT_HOTEXIT") or "") or 100 local __hl = tonumber(os.getenv("ROCK_JIT_HOTLOOP") or "") or 56 local __lu = tonumber(os.getenv("ROCK_JIT_LOOPUNROLL") or "") or 15 local __mt = tonumber(os.getenv("ROCK_JIT_MAXTRACE") or "") or 32000 local __mk = tonumber(os.getenv("ROCK_JIT_MAXIRCONST") or "") or 500 jit.opt.start("maxmcode=" .. __mc, "sizemcode=" .. __mc, "maxtrace=" .. __mt, "maxrecord=32000", "maxsnap=4000", "maxirconst=" .. __mk, "hotexit=" .. __he, "hotloop=" .. __hl, "loopunroll=" .. __lu) end
+-- Everything up to the entry call runs inside one block, so the block's locals
+-- -- the Session cells first of all -- are CLOSED upvalues (UREFC: one guard,
+-- no constant) by the time an emitted function runs under the JIT. Left open,
+-- every inlined frame reading a cell would intern its own 2-slot i64 guard
+-- constant (docs/trace-pressure-work-plan.md, "Session cells"). The matching
+-- `end` is the last line the full emitter writes; the entry call the CLI
+-- appends runs after it.
+do
+-- Chunk-level cells every bound function reads a mutable global through
+-- (docs/backends.md, "Session cells"). Seated by __rock_session_publish below.
+local __rock_state_cell, __rock_initialized_cell
+local __rock_table_new = require("table.new")
 if not _G.ffi then _G.ffi = require("ffi") end
 if not _G.__ROCK_C_STRUCT then _G.__ROCK_C_STRUCT = {} end
 if not _G.__ROCK_TYPE_TABLE then _G.__ROCK_TYPE_TABLE = {} end
@@ -499,30 +565,51 @@ end
 _G.__rock_nb_storage = __rock_nb_storage
 {NB_PRIM_STORAGE}
 if not _G.__rock_on_hot_reload then _G.__rock_on_hot_reload = {} end
-if not _G.__rock_session_new then
-  _G.__rock_session_new = function(schema_id)
-    return {
-      __rock_schema_id = schema_id,
-      __rock_state = {},
-      __rock_initialized = {},
-      __rock_initializer_keys = {},
-      __rock_rng_state = nil
-    }
-  end
-  _G.__rock_session_activate = function(session)
-    if type(session) ~= "table" or type(session.__rock_state) ~= "table"
-        or type(session.__rock_initialized) ~= "table" then
-      error("invalid Rock Session", 0)
-    end
-    local published = _G.__rock_state_schema_id
-    if published ~= nil and session.__rock_schema_id ~= published then
-      error("Rock StateSchema does not match the active Session", 0)
-    end
-    _G.__rock_active_session = session
-    _G.__rock_active_state = session.__rock_state
-    _G.__rock_active_initialized = session.__rock_initialized
-    return session
-  end
+-- A Session's state tables are sized to the schema's rehash fixpoint
+-- (`_G.__ROCK_STATE_CAPACITY`, emitted by the compiler; `__rock_state_reserve`
+-- below) so their array part never moves after load. LuaJIT specialises a
+-- constant-key read to the table's CURRENT array/hash split, and a table that
+-- grows lazily from `{}` rehashes once per hash-part overflow -- each time
+-- recomputing the array part from the keys populated so far -- which left
+-- every trace recorded before a move with a permanently failing guard
+-- (`docs/backends.md`, "Session cells"). Defined outside the define-once block
+-- so a reload with a newer artifact never keeps an older constructor.
+_G.__rock_session_new = function(schema_id)
+  local capacity = rawget(_G, "__ROCK_STATE_CAPACITY")
+  local narr, nhash = 0, 0
+  if capacity then narr, nhash = capacity[1], capacity[2] end
+  return {
+    __rock_schema_id = schema_id,
+    __rock_state = __rock_table_new(narr, nhash),
+    __rock_initialized = __rock_table_new(narr, nhash),
+    __rock_initializer_keys = {},
+    __rock_rng_state = nil,
+    __rock_state_capacity = { narr, nhash }
+  }
+end
+-- Grow a Session's tables to at least (narr, nhash) by rebuilding them at that
+-- size; values and keys are preserved. The first Session is created above
+-- before the compiler's capacity line runs, and a full reload may raise the
+-- capacity, so this is what seats the fixpoint on a live Session.
+_G.__rock_state_reserve = function(session, narr, nhash)
+  local have = session.__rock_state_capacity
+  if have and have[1] >= narr and have[2] >= nhash then return end
+  local state = __rock_table_new(narr, nhash)
+  for key, value in pairs(session.__rock_state) do state[key] = value end
+  local initialized = __rock_table_new(narr, nhash)
+  for key, value in pairs(session.__rock_initialized) do initialized[key] = value end
+  session.__rock_state = state
+  session.__rock_initialized = initialized
+  session.__rock_state_capacity = { narr, nhash }
+  if rawget(_G, "__rock_active_session") == session then _G.__rock_session_publish(session) end
+end
+_G.__rock_state_reserve_active = function()
+  local capacity = rawget(_G, "__ROCK_STATE_CAPACITY")
+  if not capacity then return end
+  _G.__rock_state_reserve(_G.__rock_active_session, capacity[1], capacity[2])
+end
+if not _G.__rock_session_new_defined_once then
+  _G.__rock_session_new_defined_once = true
   _G.__rock_session_current = function()
     local session = _G.__rock_active_session
     if not session then error("no active Rock Session", 0) end
@@ -566,9 +653,45 @@ if not _G.__rock_session_new then
     rawset(_G, "__rock_state_name_index", nil)
   end
 end
+-- THE one writer of the active Session. Every swap -- activation, a state-image
+-- candidate or release, a transaction abort -- publishes through here so the
+-- chunk cells follow it; a function that read `_G.__rock_active_session` on
+-- every access would not need this, a function reading the cell does. Defined
+-- outside the define-once block above so a full reload with a newer artifact
+-- never leaves an older publisher in place that skips this chunk's cells.
+_G.__rock_session_publish = function(session)
+  rawset(_G, "__rock_active_session", session)
+  rawset(_G, "__rock_active_state", session and session.__rock_state or nil)
+  rawset(_G, "__rock_active_initialized", session and session.__rock_initialized or nil)
+  local sinks = rawget(_G, "__rock_state_cell_sinks")
+  if sinks then for i = 1, #sinks do sinks[i](session) end end
+  return session
+end
+_G.__rock_session_activate = function(session)
+  if type(session) ~= "table" or type(session.__rock_state) ~= "table"
+      or type(session.__rock_initialized) ~= "table" then
+    error("invalid Rock Session", 0)
+  end
+  local published = _G.__rock_state_schema_id
+  if published ~= nil and session.__rock_schema_id ~= published then
+    error("Rock StateSchema does not match the active Session", 0)
+  end
+  return _G.__rock_session_publish(session)
+end
+-- One sink per loaded chunk: after a full reload the previous chunk's closures
+-- may still be running, and they read their own cells.
+local __rock_state_cell_sinks = rawget(_G, "__rock_state_cell_sinks") or {}
+rawset(_G, "__rock_state_cell_sinks", __rock_state_cell_sinks)
+__rock_state_cell_sinks[#__rock_state_cell_sinks + 1] = function(session)
+  __rock_state_cell = session and session.__rock_state or nil
+  __rock_initialized_cell = session and session.__rock_initialized or nil
+end
 if not _G.__rock_active_session then
   _G.__rock_session_activate(_G.__rock_session_new(nil))
 end
+-- A reload with a live Session skips the activation above; seat the cells.
+__rock_state_cell = _G.__rock_active_session.__rock_state
+__rock_initialized_cell = _G.__rock_active_session.__rock_initialized
 _G.__rock_state_clear = function(key)
   local session = _G.__rock_session_current()
   session.__rock_state[key] = nil
@@ -600,9 +723,7 @@ _G.__rock_state_transaction_abort = function()
   local transaction = rawget(_G, "__rock_state_transaction")
   if not transaction then return end
   local session = transaction.session
-  rawset(_G, "__rock_active_session", session)
-  rawset(_G, "__rock_active_state", session.__rock_state)
-  rawset(_G, "__rock_active_initialized", session.__rock_initialized)
+  _G.__rock_session_publish(session)
   session.__rock_schema_id = transaction.schema_id
   for key in pairs(session.__rock_state) do session.__rock_state[key] = nil end
   for key, value in pairs(transaction.state) do session.__rock_state[key] = value end
@@ -690,16 +811,17 @@ _G.__rock_state_install_global_bridge = function()
     mt.__rock_state_original_index = old_index
     mt.__rock_state_original_newindex = old_newindex
   end
-  local function old_read(t, key)
-    if type(old_index) == "function" then return old_index(t, key) end
-    if type(old_index) == "table" then return old_index[key] end
-    return nil
-  end
-  local function old_write(t, key, value)
-    if type(old_newindex) == "function" then return old_newindex(t, key, value) end
-    if type(old_newindex) == "table" then old_newindex[key] = value; return end
-    rawset(t, key, value)
-  end
+  -- Which of the three pre-bridge fallback shapes applies is decided HERE, once,
+  -- rather than re-decided inside the metamethod on every miss. `_G` normally
+  -- carries no metatable at all, so both resolve to nil and the miss path is a
+  -- plain `return nil` / `rawset` with no Lua-level TAIL CALL -- and a miss is
+  -- the common case: a read of any global that is not a Rock state global and
+  -- holds nil (an unset feature flag, say) reaches `__index` every time, and
+  -- cannot be cached raw, because rawsetting nil leaves the key absent.
+  local index_fn = type(old_index) == "function" and old_index or nil
+  local index_tab = type(old_index) == "table" and old_index or nil
+  local newindex_fn = type(old_newindex) == "function" and old_newindex or nil
+  local newindex_tab = type(old_newindex) == "table" and old_newindex or nil
   local previous_physical = rawget(_G, "__rock_state_bridge_physical") or {}
   for _, physical in ipairs(previous_physical) do rawset(_G, physical, nil) end
   local current_physical = {}
@@ -715,12 +837,16 @@ _G.__rock_state_install_global_bridge = function()
   mt.__index = function(t, key)
     local entry = _G.__rock_state_entry_for_name(key)
     if entry and entry.kind == "global" then return _G.__rock_state_entry_get(entry) end
-    return old_read(t, key)
+    if index_fn then return index_fn(t, key) end
+    if index_tab then return index_tab[key] end
+    return nil
   end
   mt.__newindex = function(t, key, value)
     local entry = _G.__rock_state_entry_for_name(key)
     if entry and entry.kind == "global" then return _G.__rock_state_entry_set(entry, value) end
-    return old_write(t, key, value)
+    if newindex_fn then return newindex_fn(t, key, value) end
+    if newindex_tab then newindex_tab[key] = value; return end
+    rawset(t, key, value)
   end
   mt.__rock_state_bridge = true
   setmetatable(_G, mt)
@@ -1050,7 +1176,7 @@ fn value_struct_gc_defs(
             continue;
         }
         let n = s.name;
-        let mt = format!("__rock_vt_{n}");
+        let mt = skull_codegen_lua::value_struct_metatable_name(n.as_str());
         out.push_str(&format!("{mt} = {mt} or {{}}\n"));
         // A leaf-table struct has no declared-field keys to compare or print, so
         // both metamethods and its ctor run off the leaf paths instead.
@@ -1097,9 +1223,12 @@ fn value_struct_gc_defs(
                 })
                 .collect();
             out.push_str(&format!(
-                "{n}_lct = function({p})\n  return setmetatable({{ {b}__ty = \"{n}\" }}, {mt})\nend\n",
+                "{n}_lct = function({p})\n{r}\nend\n",
                 p = params.join(", "),
-                b = assigns.concat(),
+                r = skull_codegen_lua::wrapper_return(&format!(
+                    "setmetatable({{ {b}__ty = \"{n}\" }}, {mt})",
+                    b = assigns.concat(),
+                )),
             ));
             continue;
         }
@@ -1148,9 +1277,12 @@ fn value_struct_gc_defs(
             body.push_str(", ");
         }
         out.push_str(&format!(
-            "{n}_vt = function({p})\n  return setmetatable({{ {b}__ty = \"{n}\" }}, {mt})\nend\n",
+            "{n}_vt = function({p})\n{r}\nend\n",
             p = params.join(", "),
-            b = body,
+            r = skull_codegen_lua::wrapper_return(&format!(
+                "setmetatable({{ {b}__ty = \"{n}\" }}, {mt})",
+                b = body,
+            )),
         ));
     }
     Ok(out)
@@ -1393,6 +1525,12 @@ fn enum_runtime_defs(ws: &Workspace) -> String {
 /// checkpoint census classifies it as `value_cdata` instead of refusing it as
 /// unmodelled. Mirrors rock-codegen/src/backend/lua/structs.rs.
 ///
+/// Every consumer asks through the stdlib's `__rock_c_struct_of`, which
+/// memoizes the `ffi.istype` scan per CTypeID in `__ROCK_C_STRUCT_BY_CTYPE`.
+/// The rows own that memo's lifetime: it is reset here, after the rows, so a
+/// re-emission (a hot reload that re-runs this scaffolding) can never serve a
+/// row that no longer exists or predates its replacement.
+///
 /// Two producers, one registry. `value` structs are gated by `emitted` — exactly
 /// the structs `value_struct_defs` declared a ctype for, so `ffi.istype` never
 /// names an undefined type. A cdata-eligible enum ([`enum_cdata_defs`]) is the
@@ -1446,6 +1584,7 @@ fn c_struct_inspect_defs(ws: &Workspace, emitted: &rustc_hash::FxHashSet<ustr::U
             ));
         }
     }
+    out.push_str("_G.__ROCK_C_STRUCT_BY_CTYPE = {}\n");
     out
 }
 
@@ -1824,10 +1963,63 @@ mod tests {
         compile_source(src).unwrap_or_else(|e| panic!("skull compile failed: {}", e.message))
     }
 
+    /// The budget itself is tuning and moves with measurement, so this pins the
+    /// shape and the floor rather than a literal. LuaJIT's own defaults (512 KB
+    /// total, 32 KB blocks) flush the trace arena thousands of times in a real
+    /// MAG session; 8 MB still flushed it 31 times in 60 s of play. Neither
+    /// architecture may regress below that. See docs/trace-pressure-work-plan.md.
     #[test]
     fn runtime_prelude_keeps_the_mag_trace_working_set() {
         let prelude = super::runtime_prelude();
-        assert!(prelude.contains("maxmcode=8192\", \"sizemcode=8192"));
+        for knob in ["\"maxtrace=\" .. __mt", "maxrecord=32000", "maxsnap=4000", "\"maxirconst=\" .. __mk"] {
+            assert!(prelude.contains(knob), "runtime prelude stopped setting {knob}");
+        }
+        // One block, not several: a trace must fit a single `sizemcode` area,
+        // and on arm64 macOS dyld only leaves room for the first one near the
+        // VM. Driving both from one value is what guarantees that.
+        assert!(
+            prelude.contains("\"maxmcode=\" .. __mc, \"sizemcode=\" .. __mc"),
+            "mcode max and size must come from one value"
+        );
+        assert!(
+            prelude.contains("ROCK_JIT_MCODE_KB"),
+            "the mcode budget must stay sweepable without a rebuild"
+        );
+        // A doomed side trace is never blacklisted, so LuaJIT's default 10
+        // re-records it ~245 times for nothing. Pin the floor and the override,
+        // not the value: the value is a measured pick that may move again.
+        assert!(
+            prelude.contains("ROCK_JIT_HOTEXIT"),
+            "the hot-exit threshold must stay sweepable without a rebuild"
+        );
+        let hotexit: u32 = prelude
+            .split("ROCK_JIT_HOTEXIT\") or \"\") or ")
+            .nth(1)
+            .and_then(|rest| rest.split_whitespace().next())
+            .expect("prelude no longer defaults the hot-exit threshold")
+            .parse()
+            .expect("hot-exit default is not a literal count");
+        assert!(
+            hotexit > 10,
+            "hot-exit default {hotexit} is back at or below LuaJIT's, which re-records doomed exits"
+        );
+        let picked = prelude
+            .split("jit.arch == \"arm64\" and ")
+            .nth(1)
+            .expect("prelude no longer selects an mcode budget by architecture");
+        let (arm64, rest) = picked
+            .split_once(" or ")
+            .expect("arch-selected mcode budget is not an `arm64 and A or B` pick");
+        let x64 = rest
+            .split(')')
+            .next()
+            .expect("arch-selected mcode budget has no x64 arm");
+        for (arch, kb) in [("arm64", arm64.trim()), ("x64", x64.trim())] {
+            let kb: u32 = kb
+                .parse()
+                .unwrap_or_else(|_| panic!("{arch} mcode budget is not a literal KB count: {kb:?}"));
+            assert!(kb >= 8192, "{arch} mcode budget {kb} KB is below the 8 MB floor");
+        }
     }
 
     #[test]
@@ -2434,14 +2626,32 @@ mod tests {
     /// assertion scope to one fn and ignore the always-emitted value-struct
     /// `copy = function(v) return V2_ct(...) end` metatype helpers.
     fn fn_body<'a>(lua: &'a str, name: &str) -> &'a str {
-        // Every non-exempt fn emits under its mangled name (`mk_ret_V2`), so match
-        // the `function <name>` PREFIX and scope from the header's `(` to the next
-        // top-level `function `.
-        let head = format!("function {name}");
-        let hpos = lua.find(&head).unwrap_or_else(|| panic!("no `{head}` in:\n{lua}"));
-        let rest = &lua[hpos..];
-        let paren = rest.find('(').expect("fn header has `(`");
-        rest[paren + 1..].split("\nfunction ").next().unwrap()
+        // Every non-exempt fn emits under its mangled name (`mk_ret_V2`), so
+        // match the `function <name>` PREFIX and scope from the header's `(` to
+        // the next top-level definition. Under the bound callee shape the
+        // definition reads `__rock_mk_<name> = function(<callees>) return
+        // function(..)`, so the body starts after the INNER header and the next
+        // definition can be a factory rather than a `function ` line.
+        let factory_prefix = skull_codegen_lua::CALLEE_FACTORY_PREFIX;
+        let inner = " return function(";
+        let (start, header_end) = match lua.find(&format!("function {name}")) {
+            Some(at) => (at, lua[at..].find('(').expect("fn header has `(`") + 1),
+            None => {
+                let head = format!("{factory_prefix}{name}");
+                let at = lua
+                    .find(&head)
+                    .unwrap_or_else(|| panic!("no `function {name}` or `{head}` in:\n{lua}"));
+                (at, lua[at..].find(inner).expect("a factory returns its body") + inner.len())
+            }
+        };
+        let rest = &lua[start + header_end..];
+        let factory_start = format!("\n{factory_prefix}");
+        let end = [rest.find("\nfunction "), rest.find(factory_start.as_str())]
+            .into_iter()
+            .flatten()
+            .min()
+            .unwrap_or(rest.len());
+        &rest[..end]
     }
 
     /// A defaulted flat-value param is scalarized like any other value param:
