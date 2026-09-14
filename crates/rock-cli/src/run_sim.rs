@@ -324,9 +324,10 @@ fn compile_sims_with(
 /// through `SkullStone::apply_edit`, which yields an `incremental.lua` overlay
 /// only under the GLOBAL callee shape: the shipped `upvalue` shape binds a
 /// caller's callees as immutable upvalues, and an overlay that redefines one
-/// global cannot rebind them. Every sim of one invocation boots ONE `main.lua`,
-/// so the lane cannot borrow the shared session -- it gets its own emit in its
-/// own directory, and the shared chunk keeps the shipped shape.
+/// global cannot rebind them. Reload fixtures also rewrite the chunk they booted
+/// from, so the lane never borrows the shared session or its directory, even
+/// when the shared one is already global-shaped: that separation is what lets
+/// the lane run beside the pool (`beside_reload_lane`).
 pub struct ReloadLaneSession {
     stone: crate::skull_backend::SkullStone,
     output: String,
@@ -334,21 +335,18 @@ pub struct ReloadLaneSession {
     _dir: TempDir,
 }
 
-/// The session (and output directory) the hot-reload lane must use, or `None`
-/// when the shared one already has the shape it needs.
+/// The session (and output directory) the hot-reload lane uses, or `None` when
+/// the selection holds no reload sim.
 ///
 /// Costs ONE extra whole-project emit, paid once per invocation and only when
-/// the selection actually contains a reload sim AND the shared session is bound.
-/// Under `ROCK_SKULL_CALLEE_BINDING=global` the shared session is already
-/// global-shaped and this returns `None`, so the fast path pays nothing.
+/// the selection actually contains a reload sim.
 fn reload_lane_session(
     backend: crate::Backend,
     project_path: &Path,
-    shared: &crate::skull_backend::SkullStone,
     lane_is_selected: bool,
     quiet: bool,
 ) -> Result<Option<ReloadLaneSession>> {
-    if !lane_is_selected || shared.callee_binding() == skull::CalleeBindingMode::Global {
+    if !lane_is_selected {
         return Ok(None);
     }
     let dir = sim_output_dir()?;
@@ -367,7 +365,7 @@ fn reload_lane_session(
         // Result output: says which of the two chunks this invocation built and
         // why, so a reload sim's shape is never inferred from the default.
         println!(
-            "[sim] hot-reload lane: separate build with callee binding `global` ({compile_ms:.0}ms) -- an overlay cannot rebind an immutable upvalue"
+            "[sim] hot-reload lane: separate build with callee binding `global` ({compile_ms:.0}ms) -- its fixtures rewrite their own chunk"
         );
     }
     Ok(Some(ReloadLaneSession { stone, output, _dir: dir }))
@@ -822,7 +820,7 @@ fn do_run_named_sims_recorded(
 
     let out_dir = sim_output_dir()?;
     let output = out_dir.path().to_string_lossy().into_owned();
-    let (wire_names, env_by_wire, mut stone) = recorder.phase("compile_and_discover", || {
+    let (wire_names, env_by_wire, _stone) = recorder.phase("compile_and_discover", || {
         compile_sims(backend, project_path.clone(), PathBuf::from(&output))
     })?;
     emit_bytecode_image(Path::new(&output));
@@ -848,7 +846,6 @@ fn do_run_named_sims_recorded(
     let mut reload_lane = reload_lane_session(
         backend,
         &project_path,
-        &stone,
         any_reload_lane_selected(names, &env_by_wire),
         quiet,
     )?;
@@ -862,7 +859,6 @@ fn do_run_named_sims_recorded(
             update_snapshots,
             jobs,
             full_asset_jobs,
-            &mut stone,
             reload_lane.as_mut(),
             Some(recorder),
             Some(&entry_ids),
@@ -947,35 +943,17 @@ fn do_run_named_sims_recorded(
         Ok((display_name, summary))
     };
 
+    let (pool, lane) = beside_reload_lane(
+        jobs,
+        !reload_idx.is_empty(),
+        |jobs| run_bounded(jobs, ordinary_idx.len(), |slot| run_at(ordinary_idx[slot], None)),
+        || run_reload_lane_serially(reload_lane.as_mut(), &reload_idx, |i, lane| run_at(i, Some(lane))),
+    );
     let mut results: HashMap<usize, Result<(String, SimSummary)>> = HashMap::new();
-    if jobs > 1 && ordinary_idx.len() > 1 {
-        let next = std::sync::atomic::AtomicUsize::new(0);
-        let collected: Mutex<Vec<(usize, Result<(String, SimSummary)>)>> =
-            Mutex::new(Vec::new());
-        let workers = jobs.min(ordinary_idx.len());
-        std::thread::scope(|scope| {
-            for _ in 0..workers {
-                scope.spawn(|| loop {
-                    let slot = next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    let Some(&i) = ordinary_idx.get(slot) else { break };
-                    let r = run_at(i, None);
-                    collected.lock().unwrap().push((i, r));
-                });
-            }
-        });
-        results.extend(collected.into_inner().unwrap());
-    } else {
-        for &i in &ordinary_idx {
-            results.insert(i, run_at(i, None));
-        }
+    for (slot, r) in pool {
+        results.insert(ordinary_idx[slot], r);
     }
-    let (lane_stone, lane_output) = match reload_lane.as_mut() {
-        Some(lane) => (&mut lane.stone, lane.output.as_str()),
-        None => (&mut stone, output.as_str()),
-    };
-    for &i in &reload_idx {
-        results.insert(i, run_at(i, Some((&mut *lane_stone, lane_output))));
-    }
+    results.extend(lane);
 
     // Accounting walks the order the user gave, so the failed list matches a
     // serial run's regardless of completion order.
@@ -1060,6 +1038,52 @@ where
         }
     });
     collected.into_inner().expect("no lane panicked while holding the results lock")
+}
+
+/// Run the ordinary `pool` and the hot-reload `lane` at the same time.
+///
+/// The lane boots a chunk of its own from a session of its own
+/// (`reload_lane_session`), and no reload fixture writes a file an ordinary
+/// entry reads, so an ordinary child cannot observe it. The lane's entries stay
+/// serial among themselves because they share that one session. While the lane
+/// has work it holds one of the `jobs`, so the pool is handed the rest.
+fn beside_reload_lane<A, B>(
+    jobs: usize,
+    lane_has_work: bool,
+    pool: impl FnOnce(usize) -> A + Send,
+    lane: impl FnOnce() -> B,
+) -> (A, B)
+where
+    A: Send,
+{
+    if !lane_has_work {
+        return (pool(jobs), lane());
+    }
+    let pool_jobs = jobs.saturating_sub(1).max(1);
+    std::thread::scope(|scope| {
+        let pool = scope.spawn(move || pool(pool_jobs));
+        let lane = lane();
+        let pool = pool.join().unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+        (pool, lane)
+    })
+}
+
+/// Each reload entry at `indices`, one at a time through the lane's session.
+fn run_reload_lane_serially<T>(
+    lane: Option<&mut ReloadLaneSession>,
+    indices: &[usize],
+    mut run: impl FnMut(usize, (&mut crate::skull_backend::SkullStone, &str)) -> Result<T>,
+) -> Vec<(usize, Result<T>)> {
+    let Some(lane) = lane else {
+        return indices
+            .iter()
+            .map(|&i| (i, Err(anyhow!("reload entry {i} was selected without a lane session"))))
+            .collect();
+    };
+    indices
+        .iter()
+        .map(|&i| (i, run(i, (&mut lane.stone, lane.output.as_str()))))
+        .collect()
 }
 
 /// `run_bounded` with a second cap: at most `capped_jobs` of the `jobs`
@@ -1187,7 +1211,7 @@ fn do_run_all_sims_recorded(
 
     let out_dir = sim_output_dir()?;
     let output = out_dir.path().to_string_lossy().into_owned();
-    let (wire_names, env_by_wire, mut stone) = recorder.phase("compile_and_discover", || {
+    let (wire_names, env_by_wire, _stone) = recorder.phase("compile_and_discover", || {
         compile_sims(backend, project_path.clone(), PathBuf::from(&output))
     })?;
     emit_bytecode_image(Path::new(&output));
@@ -1231,7 +1255,6 @@ fn do_run_all_sims_recorded(
     let mut reload_lane = reload_lane_session(
         backend,
         &project_path,
-        &stone,
         any_reload_lane_selected(&wire_names, &env_by_wire),
         quiet,
     )?;
@@ -1245,7 +1268,6 @@ fn do_run_all_sims_recorded(
             update_snapshots,
             jobs,
             full_asset_jobs,
-            &mut stone,
             reload_lane.as_mut(),
             Some(recorder),
             Some(&entry_ids),
@@ -1307,8 +1329,8 @@ fn do_run_all_sims_recorded(
         active_indices.push(i);
     }
 
-    // Two lanes. Reload sims mutate the one session and the one overlay, so
-    // they run alone with nothing else in flight; everything else is
+    // Two lanes: reload sims share the lane's one session, so they run one at a
+    // time beside the pool (`beside_reload_lane`); everything else is
     // independent once the compiled output is invocation-owned.
     let (reload_idx, ordinary_idx): (Vec<usize>, Vec<usize>) = active_indices
         .into_iter()
@@ -1361,19 +1383,16 @@ fn do_run_all_sims_recorded(
         Ok(summary)
     };
 
-    for (slot, r) in run_bounded(jobs, ordinary_idx.len(), |slot| run_at(ordinary_idx[slot], None))
-    {
+    let (pool, lane) = beside_reload_lane(
+        jobs,
+        !reload_idx.is_empty(),
+        |jobs| run_bounded(jobs, ordinary_idx.len(), |slot| run_at(ordinary_idx[slot], None)),
+        || run_reload_lane_serially(reload_lane.as_mut(), &reload_idx, |i, lane| run_at(i, Some(lane))),
+    );
+    for (slot, r) in pool {
         summaries.insert(ordinary_idx[slot], r);
     }
-
-    // Reload lane, strictly after the pool has drained.
-    let (lane_stone, lane_output) = match reload_lane.as_mut() {
-        Some(lane) => (&mut lane.stone, lane.output.as_str()),
-        None => (&mut stone, output.as_str()),
-    };
-    for &i in &reload_idx {
-        summaries.insert(i, run_at(i, Some((&mut *lane_stone, lane_output))));
-    }
+    summaries.extend(lane);
 
     // Records printed in completion order; the ACCOUNTING is registry order, so
     // the failed list and tally are identical to a serial run's.
@@ -1573,7 +1592,7 @@ pub fn do_run_allocation_census(
 
     let out_dir = sim_output_dir()?;
     let output = out_dir.path().to_string_lossy().into_owned();
-    let (wire_names, env_by_wire, mut stone) =
+    let (wire_names, env_by_wire, _stone) =
         compile_sims(backend, project_path.clone(), PathBuf::from(&output))?;
     emit_bytecode_image(Path::new(&output));
     sim_spawn_barrier();
@@ -1612,7 +1631,6 @@ pub fn do_run_allocation_census(
     let mut reload_lane = reload_lane_session(
         backend,
         &project_path,
-        &stone,
         !reload_idx.is_empty(),
         false,
     )?;
@@ -1636,19 +1654,17 @@ pub fn do_run_allocation_census(
         )
     };
 
+    let (pool, lane) = beside_reload_lane(
+        jobs,
+        !reload_idx.is_empty(),
+        |jobs| run_bounded(jobs, ordinary_idx.len(), |slot| run_at(ordinary_idx[slot], None)),
+        || run_reload_lane_serially(reload_lane.as_mut(), &reload_idx, |i, lane| run_at(i, Some(lane))),
+    );
     let mut results: HashMap<usize, Result<(String, SimSummary)>> = HashMap::new();
-    for (slot, result) in run_bounded(jobs, ordinary_idx.len(), |slot| {
-        run_at(ordinary_idx[slot], None)
-    }) {
+    for (slot, result) in pool {
         results.insert(ordinary_idx[slot], result);
     }
-    let (lane_stone, lane_output) = match reload_lane.as_mut() {
-        Some(lane) => (&mut lane.stone, lane.output.as_str()),
-        None => (&mut stone, output.as_str()),
-    };
-    for &i in &reload_idx {
-        results.insert(i, run_at(i, Some((&mut *lane_stone, lane_output))));
-    }
+    results.extend(lane);
 
     let mut records = Vec::with_capacity(selected.len());
     let mut ranked = Vec::new();
@@ -2013,8 +2029,8 @@ pub fn do_run_allocation_sites(
 ///   part: a lane holds spec POSITIONS and `run_specs_recovering` expands each
 ///   into its parts in order, sharing one `$OUT`;
 /// - an isolated entry that does not need the compile session rides the same
-///   pool; the hot-reload lane runs strictly AFTER the pool drains, because it
-///   mutates the one session and the one overlay;
+///   pool; the hot-reload lane runs BESIDE the pool from its own session and
+///   chunk (`beside_reload_lane`), its entries serial among themselves;
 /// - reporting is deferred to spec order. Completion order is not
 ///   deterministic, and a record has to be emitted whole.
 ///
@@ -2071,20 +2087,12 @@ fn run_specs_worker_mode(
     update_snapshots: bool,
     jobs: Option<usize>,
     full_asset_jobs: usize,
-    stone: &mut crate::skull_backend::SkullStone,
     reload_lane: Option<&mut ReloadLaneSession>,
     recorder: Option<&SimRunRecorder>,
     entry_ids: Option<&[u64]>,
 ) -> Result<Vec<(String, SimSummary)>> {
 
     let jobs = resolve_jobs(jobs, update_snapshots);
-    // The emitted callee shape the hot-reload lane's chunk carries: its own
-    // session is always global-shaped, and without one it shares this
-    // invocation's chunk.
-    let lane_shape = match (&reload_lane, stone.callee_binding()) {
-        (Some(_), _) | (None, skull::CalleeBindingMode::Global) => "global",
-        (None, skull::CalleeBindingMode::Upvalue) => "upvalue",
-    };
     let active_renderer = active_sim_renderer(Path::new(project));
     let mut slots: Vec<Option<SimSummary>> = specs.iter().map(|_| None).collect();
     let mut active_specs: Vec<String> = Vec::new();
@@ -2201,14 +2209,10 @@ fn run_specs_worker_mode(
         for (i, reason) in poolable.iter() {
             println!("[sim] {}: isolated ({reason})", specs[*i]);
         }
-        // The hot-reload lane also reports the SHAPE it compiled with. Its
-        // reload path only works under one of the two, and which chunk it got
-        // must not have to be inferred from the shipped default.
+        // The hot-reload lane also reports the SHAPE its own chunk carries; its
+        // reload path only works under that one.
         for (i, reason) in exclusive.iter() {
-            println!(
-                "[sim] {}: isolated ({reason}; callee binding `{lane_shape}`)",
-                specs[*i]
-            );
+            println!("[sim] {}: isolated ({reason}; callee binding `global`)", specs[*i]);
         }
     }
 
@@ -2246,8 +2250,7 @@ fn run_specs_worker_mode(
         );
     }
 
-    let mut collected: Vec<(usize, SimSummary)> = Vec::new();
-    for (_, r) in run_bounded_classed(jobs, full_asset_jobs, &work_full_assets, |w| match work[w] {
+    let pool = |jobs: usize| run_bounded_classed(jobs, full_asset_jobs, &work_full_assets, |w| match work[w] {
         Lane::Worker(lane) => {
             let lane_specs: Vec<String> = lane.iter().map(|&i| specs[i].clone()).collect();
             // `run_specs_recovering` is positional, so its results line up with
@@ -2295,33 +2298,11 @@ fn run_specs_worker_mode(
             )?;
             Ok(vec![(i, summary)])
         }
-    }) {
-        collected.extend(r?);
-    }
-    for (i, summary) in collected {
-        slots[i] = Some(summary);
-    }
+    });
 
-    // The hot-reload lane, strictly after the pool has drained: it mutates one
-    // `SkullStone` session and one `incremental.lua` overlay. Which session
-    // depends on the shipped shape -- under `upvalue` the lane has its own
-    // global-shaped build in its own directory, because an overlay cannot
-    // rebind an immutable upvalue (`reload_lane_session`).
-    let (lane_stone, lane_output) = match reload_lane {
-        Some(lane) => (&mut lane.stone, lane.output.as_str()),
-        None => (&mut *stone, output),
-    };
-    // ONE child for the whole lane, entries in sequence. The lane was seven
-    // children because it was run one `run_named_entry` at a time, not because
-    // the entries disagree about anything: `FRAME_COUNT` is the only key they
-    // differ on and it is runner-owned, carried per entry in the plan, so all
-    // seven share the one boot signature `[("STONE_HOT_RELOAD", "1")]`.
-    //
-    // Boot was 7.1s of the lane's 9.1s, so chaining removes about 6.1s of a
-    // 12.3s serial tail. The lane stays strictly after the pool and strictly
-    // serial within itself, which is what the session and the overlay require,
-    // so the shared-asset-writer hazard that reverted the tenth pass's attempt
-    // to overlap it with the POOL does not arise here.
+    // ONE child for the whole lane, entries in sequence: `FRAME_COUNT` is the
+    // only key the reload sims differ on and it is runner-owned, so they share
+    // the boot signature `[("STONE_HOT_RELOAD", "1")]`.
     //
     // Each reload sim restores the source it edited before it stops, so an
     // entry cannot hand reloaded code to its successor; `revert_reload_edits`
@@ -2331,54 +2312,74 @@ fn run_specs_worker_mode(
     // booting. Those declare `SIM_WORKER_ISOLATED` and run alone inside the
     // lane; the rest chain. Same opt-out the pool honours, read here because
     // `worker_ineligibility` reports the reload lane first.
-    let (lane_alone, lane_chained): (Vec<_>, Vec<_>) = exclusive.iter().partition(|(i, _)| {
-        parse_sim_chain(&specs[*i])
-            .iter()
-            .any(|p| declares_worker_isolated(env_by_wire.get(*p).map_or(&[][..], |v| v)))
-    });
-    for (i, _) in &lane_alone {
-        let i = *i;
-        let (_, summary) = run_named_entry(
-            project,
-            &specs[i],
-            quiet,
-            true,
-            update_snapshots,
-            lane_output,
-            env_by_wire,
-            Some(&mut *lane_stone),
-            None,
-            recorder,
-            entry_ids.and_then(|ids| ids.get(i)).copied(),
-        )?;
-        slots[i] = Some(summary);
+    let run_lane = || -> Result<Vec<(usize, SimSummary)>> {
+        let mut done = Vec::new();
+        if exclusive.is_empty() {
+            return Ok(done);
+        }
+        let lane = reload_lane
+            .ok_or_else(|| anyhow!("reload sims were selected without a lane session"))?;
+        let (lane_stone, lane_output) = (&mut lane.stone, lane.output.as_str());
+        let (lane_alone, lane_chained): (Vec<_>, Vec<_>) = exclusive.iter().partition(|(i, _)| {
+            parse_sim_chain(&specs[*i])
+                .iter()
+                .any(|p| declares_worker_isolated(env_by_wire.get(*p).map_or(&[][..], |v| v)))
+        });
+        for (i, _) in &lane_alone {
+            let i = *i;
+            let (_, summary) = run_named_entry(
+                project,
+                &specs[i],
+                quiet,
+                true,
+                update_snapshots,
+                lane_output,
+                env_by_wire,
+                Some(&mut *lane_stone),
+                None,
+                recorder,
+                entry_ids.and_then(|ids| ids.get(i)).copied(),
+            )?;
+            done.push((i, summary));
+        }
+        if !lane_chained.is_empty() {
+            let lane_specs: Vec<String> =
+                lane_chained.iter().map(|(i, _)| specs[*i].clone()).collect();
+            let lane_entry_ids: Option<Vec<u64>> = entry_ids
+                .map(|ids| lane_chained.iter().map(|(i, _)| ids[*i]).collect());
+            let results = run_specs_recovering(
+                project,
+                lane_output,
+                env_by_wire,
+                &lane_specs,
+                update_snapshots,
+                false,
+                recorder,
+                lane_entry_ids.as_deref(),
+                Some(&mut *lane_stone),
+            )?;
+            if results.len() != lane_chained.len() {
+                return Err(anyhow!(
+                    "reload lane returned {} results for {} entries",
+                    results.len(),
+                    lane_chained.len()
+                ));
+            }
+            for ((i, _), (_, summary, _crossed)) in lane_chained.iter().zip(results) {
+                done.push((*i, summary));
+            }
+        }
+        Ok(done)
+    };
+
+    let (pool, lane) = beside_reload_lane(jobs, !exclusive.is_empty(), pool, run_lane);
+    for (_, r) in pool {
+        for (i, summary) in r? {
+            slots[i] = Some(summary);
+        }
     }
-    if !lane_chained.is_empty() {
-        let exclusive = &lane_chained;
-        let lane_specs: Vec<String> = exclusive.iter().map(|(i, _)| specs[*i].clone()).collect();
-        let lane_entry_ids: Option<Vec<u64>> = entry_ids
-            .map(|ids| exclusive.iter().map(|(i, _)| ids[*i]).collect());
-        let results = run_specs_recovering(
-            project,
-            lane_output,
-            env_by_wire,
-            &lane_specs,
-            update_snapshots,
-            false,
-            recorder,
-            lane_entry_ids.as_deref(),
-            Some(&mut *lane_stone),
-        )?;
-        if results.len() != exclusive.len() {
-            return Err(anyhow!(
-                "reload lane returned {} results for {} entries",
-                results.len(),
-                exclusive.len()
-            ));
-        }
-        for ((i, _), (_, summary, _crossed)) in exclusive.iter().zip(results) {
-            slots[*i] = Some(summary);
-        }
+    for (i, summary) in lane? {
+        slots[i] = Some(summary);
     }
 
     // Records are emitted in SPEC order, whole. Completion order under a pool is
@@ -3145,7 +3146,7 @@ fn worker_ineligibility(
     for part in &parts {
         let env = env_by_wire.get(*part).map_or(&[][..], |v| v);
         if is_reload_lane(env) {
-            return Some("hot-reload lane: mutates the one session and overlay".to_string());
+            return Some("hot-reload lane: drives its own compile session and overlay".to_string());
         }
         // The explicit opt-out, for sims that operate process-global machinery
         // a shared worker cannot fence -- the checkpoint-machinery fixtures

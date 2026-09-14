@@ -1598,7 +1598,7 @@ mod tests {
             "$OUT interpolation"
         );
         assert_eq!(
-            isolation_class(Some("hot-reload lane: mutates the one session and overlay")),
+            isolation_class(Some("hot-reload lane: drives its own compile session and overlay")),
             "hot-reload"
         );
     }

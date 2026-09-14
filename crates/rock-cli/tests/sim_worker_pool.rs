@@ -4,8 +4,8 @@
 //! booted process. B5 is both at once -- a bounded number of booted workers,
 //! each serving one canonical boot signature. What has to survive the
 //! composition is everything the two mechanisms already guarantee separately:
-//! entry-granular parallelism, per-lane recovery, the exclusive hot-reload
-//! lane, and positional result placement.
+//! entry-granular parallelism, per-lane recovery, a hot-reload lane that
+//! cannot reach an ordinary child, and positional result placement.
 //!
 //! Overlap is read off `ROCK_SIM_LIFECYCLE_LOG`, which the parent writes around
 //! each child spawn. A worker emits a `start` for every entry it was handed
@@ -101,7 +101,7 @@ fn peak_procs(trace: &str) -> (usize, usize) {
                 live -= 1;
                 assert!(live >= 0, "a process ended without starting\n{trace}");
             }
-            // Entry granularity; `the_reload_lane_runs_after_the_worker_pool_drains`
+            // Entry granularity; `the_reload_lane_runs_beside_the_worker_pool_in_its_own_chunk`
             // is what reads those.
             "start" | "end" => {}
             _ => panic!("unknown lifecycle event `{line}`"),
@@ -350,38 +350,58 @@ fn a_dead_worker_does_not_reach_another_lane() {
     assert!(peak > 1, "the lanes have to have actually overlapped\n{}", run.trace);
 }
 
-/// The hot-reload lane stays exclusive under the composed scheduler. It drives
-/// the one live compile session and the one `incremental.lua`, so it may not
-/// overlap a worker -- and `--workers` is precisely where a booted process
-/// could be left running beside it.
+/// The hot-reload lane runs BESIDE the pool, in a chunk of its own.
+///
+/// A reload fixture rewrites the chunk its child booted from and edits source
+/// the lane's session recompiles, so the lane may only overlap ordinary
+/// children when neither is theirs. Run under the global callee shape, where
+/// the shared session already has the shape a reload needs: the lane must
+/// still build separately, or a fixture rewriting its `main.lua` would rewrite
+/// the one every ordinary child boots.
 #[test]
-fn the_reload_lane_runs_after_the_worker_pool_drains() {
+fn the_reload_lane_runs_beside_the_worker_pool_in_its_own_chunk() {
     const RELOAD: &str = "reload_probe";
-    let mut specs = vec![RELOAD];
-    specs.extend_from_slice(&EIGHT);
-    let run = run_workers(&specs, "4");
-    assert!(run.success, "every sim here passes standalone:\n{}", run.combined());
+    let dir = tempfile::tempdir().expect("trace tempdir");
+    let trace_path = dir.path().join("lifecycle.log");
+    let mut args = vec!["sim", "testbed", RELOAD];
+    args.extend_from_slice(&EIGHT);
+    args.extend_from_slice(&["--workers", "-j", "4"]);
+    let out = Command::new(rock_bin())
+        .args(&args)
+        .current_dir(workspace_root())
+        .env("ROCK_SIM_TIMEOUT_SECS", "180")
+        .env("ROCK_SIM_LIFECYCLE_LOG", &trace_path)
+        .env("ROCK_SKULL_CALLEE_BINDING", "global")
+        .env_remove("SIM_SKIP_RENDER")
+        .output()
+        .expect("run rock sim --workers");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.status.success(), "every sim here passes standalone:\n{combined}");
+    assert!(
+        combined.contains("[sim] hot-reload lane: separate build"),
+        "the lane must not share the pool's chunk:\n{combined}"
+    );
 
+    let trace = std::fs::read_to_string(&trace_path).unwrap_or_default();
     let mut live: HashSet<&str> = HashSet::new();
     let mut reload_live = false;
     let mut saw_reload = false;
-    for line in run.trace.lines() {
+    let mut overlapped = false;
+    for line in trace.lines() {
         let (event, name) = line.split_once('\t').expect("lifecycle event");
-        if event == "proc_start" || event == "proc_end" {
-            continue; // process granularity; this property is about entries
-        }
         match (event, name == RELOAD) {
+            ("proc_start" | "proc_end", _) => {}
             ("start", true) => {
-                assert!(
-                    live.is_empty(),
-                    "the reload child started while worker entries were live: {live:?}\n{}",
-                    run.trace
-                );
+                overlapped |= !live.is_empty();
                 saw_reload = true;
                 reload_live = true;
             }
             ("start", false) => {
-                assert!(!reload_live, "`{name}` started while reload was live\n{}", run.trace);
+                overlapped |= reload_live;
                 live.insert(name);
             }
             ("end", true) => reload_live = false,
@@ -391,7 +411,8 @@ fn the_reload_lane_runs_after_the_worker_pool_drains() {
             _ => unreachable!(),
         }
     }
-    assert!(saw_reload, "the reload child never ran\n{}", run.trace);
+    assert!(saw_reload, "the reload child never ran\n{trace}");
+    assert!(overlapped, "the reload lane waited for the pool to drain\n{trace}");
 }
 
 /// Result PLACEMENT survives the pool. Naming one sim twice is two entries with
