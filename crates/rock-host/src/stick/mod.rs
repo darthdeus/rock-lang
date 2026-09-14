@@ -935,6 +935,14 @@ impl StickConfig {
     }
 
     pub fn asset_overlay_defaults(&self, project_dir: &Path) -> Result<Vec<PathBuf>> {
+        self.asset_overlay_defaults_with_vault(project_dir, &crate::art_vault::root)
+    }
+
+    fn asset_overlay_defaults_with_vault(
+        &self,
+        project_dir: &Path,
+        vault: &dyn Fn() -> Result<PathBuf>,
+    ) -> Result<Vec<PathBuf>> {
         let Some(assets) = &self.assets else {
             return Ok(Vec::new());
         };
@@ -952,7 +960,12 @@ impl StickConfig {
                 if raw.is_empty() {
                     anyhow::bail!("stick.toml: [assets].overlays entries must not be empty");
                 }
-                let expanded = if raw == "~" || raw.starts_with("~/") || raw.starts_with("~\\") {
+                let vault_path = crate::art_vault::expand_token(raw, vault).map_err(|e| {
+                    anyhow::anyhow!("stick.toml: cannot expand [assets].overlays entry {raw:?}: {e}")
+                })?;
+                let expanded = if let Some(path) = vault_path {
+                    path
+                } else if raw == "~" || raw.starts_with("~/") || raw.starts_with("~\\") {
                     let home = std::env::var_os("HOME")
                         .or_else(|| std::env::var_os("USERPROFILE"))
                         .ok_or_else(|| anyhow::anyhow!(
@@ -1551,6 +1564,24 @@ mod tests {
         assert_eq!(resolved[0], project.path().join("../shared"));
         let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).unwrap();
         assert_eq!(resolved[1], PathBuf::from(home).join("rock-assets"));
+    }
+
+    #[test]
+    fn asset_overlay_defaults_expand_the_vault_token() {
+        let project = tempfile::tempdir().unwrap();
+        let cfg = StickConfig::new_from_str(
+            "[package]\nname = \"x\"\n[assets]\noverlays = [\"$GAME_ART_VAULT/mag\"]\n",
+        )
+        .unwrap();
+        let resolved = cfg
+            .asset_overlay_defaults_with_vault(project.path(), &|| Ok(PathBuf::from("/machine/vault")))
+            .unwrap();
+        assert_eq!(resolved, vec![PathBuf::from("/machine/vault/mag")]);
+        let err = cfg
+            .asset_overlay_defaults_with_vault(project.path(), &|| anyhow::bail!("game-art vault not found"))
+            .unwrap_err();
+        // The CLI prints only the outermost message, so the cause must be in it.
+        assert!(err.to_string().contains("game-art vault not found"), "{err}");
     }
 
     #[test]
