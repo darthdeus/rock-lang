@@ -62,6 +62,7 @@ mod lint_cmd;
 pub mod lint_union;
 pub mod lint_pass;
 pub mod ablation_report;
+pub mod child_lifetime;
 mod allocation_join;
 #[cfg(feature = "backend-js")]
 mod mono_manifest;
@@ -700,6 +701,16 @@ pub struct Args {
     /// Equivalent to setting `STONE_JV=1`; applies to any command that
     /// runs the game (`stone`, `frame`, `run`, `perf`, `sim`).
     pub jv: bool,
+    /// `rock run <game> --agent-headless`: boot straight into the editor with
+    /// no window, registered with the agent daemon, access still off.
+    pub agent_headless: bool,
+    /// `--agent-access`: enable agent control at boot instead of from the
+    /// editor's Agent Access window.
+    pub agent_access: bool,
+    /// `--level <name>`: the catalog level the editor opens at boot.
+    pub level: Option<String>,
+    /// `--daemon-sock <path>`: the agent daemon socket for this game.
+    pub daemon_sock: Option<String>,
 
     /// For `rock test`: re-run tests on every `.rock` file change in
     /// the given paths. Watches the same paths passed to `rock test`
@@ -925,6 +936,14 @@ impl Args {
                 .help("Compiler backend: `skull` (default -- bone type-check + skull codegen, runs Lua), `bone` (type-check only, no codegen), `js` (test only -- JS-subset @test execution under node, SKIP(reason) outside the subset), or `glsl` (test only -- GLSL value-test execution on the GPU, both 330core+300es profiles). Can also be set via ROCK_BACKEND=bone|skull|js|glsl."))
             .arg(Arg::new("jv").long("jv").action(ArgAction::SetTrue)
                 .help("Run the game's luajit with -jv (verbose JIT trace log to stderr). Same as STONE_JV=1; works for stone/frame/run/perf/sim."))
+            .arg(Arg::new("agent-headless").long("agent-headless").action(ArgAction::SetTrue)
+                .help("For `rock run <game>`: boot into the editor with no window (MAG_EDITOR=1 MAG_BOOT_PLAYING=1 STONE_HEADLESS=1); the game registers with the agent daemon with access off."))
+            .arg(Arg::new("agent-access").long("agent-access").action(ArgAction::SetTrue)
+                .help("For `rock run <game>`: enable agent control at boot (MAG_AGENT_ACCESS=1) instead of from the editor's Agent Access window; with --agent-headless this is what `mag-cli launch` runs."))
+            .arg(Arg::new("level").long("level").value_name("NAME")
+                .help("For `rock run <game>`: the catalog level the editor opens at boot (MAG_EDITOR_LEVEL). Refuses to open a different one if the name is unknown."))
+            .arg(Arg::new("daemon-sock").long("daemon-sock").value_name("PATH")
+                .help("For `rock run <game>`: the agent daemon socket this game registers with (ROCK_AGENT_DAEMON_SOCK); default ~/tmp/rock-agent-daemon/daemon.sock."))
             .arg(Arg::new("app_args").last(true).num_args(0..)
                 .help("Arguments to pass through to the Rock app (everything after --)"))
     }
@@ -996,6 +1015,10 @@ impl Args {
             list: m.get_flag("list"),
             app_args: many_str("app_args"),
             jv: m.get_flag("jv"),
+            agent_headless: m.get_flag("agent-headless"),
+            agent_access: m.get_flag("agent-access"),
+            level: m.get_one::<String>("level").cloned(),
+            daemon_sock: m.get_one::<String>("daemon-sock").cloned(),
             watch: m.get_flag("watch"),
             port: *m.get_one::<u16>("port").unwrap(),
             single_file: m.get_flag("single-file"),
@@ -1033,9 +1056,75 @@ impl Args {
 }
 
 
+/// The `rock-agent-daemon` built next to this `rock`, if any. A source-run
+/// game resolves the daemon from its own executable (LuaJIT under
+/// `prebuilt/`), `ROCK_DIR`, or `PATH`, none of which point at the cargo
+/// target directory, so the launcher hands the sibling down explicitly.
+pub fn sibling_daemon_bin(rock_exe: &std::path::Path) -> Option<std::path::PathBuf> {
+    let candidate = rock_exe.parent()?.join("rock-agent-daemon");
+    candidate.is_file().then_some(candidate)
+}
+
+impl Args {
+    /// The game-side environment the agent launch flags stand for. The game
+    /// reads these variables itself (sims set them with `@sim_env`), so the
+    /// flags are sugar that sets them in the launcher before the spawn.
+    pub fn agent_launch_env(&self) -> Vec<(&'static str, String)> {
+        let mut env = Vec::new();
+        if self.agent_headless {
+            env.push(("MAG_EDITOR", "1".to_string()));
+            env.push(("MAG_BOOT_PLAYING", "1".to_string()));
+            env.push(("STONE_HEADLESS", "1".to_string()));
+        }
+        if self.agent_access {
+            env.push(("MAG_AGENT_ACCESS", "1".to_string()));
+        }
+        if let Some(level) = &self.level {
+            env.push(("MAG_EDITOR_LEVEL", level.clone()));
+        }
+        if let Some(sock) = &self.daemon_sock {
+            env.push(("ROCK_AGENT_DAEMON_SOCK", sock.clone()));
+        }
+        env
+    }
+}
+
 #[cfg(test)]
 mod arg_tests {
     use super::{Args, Backend};
+
+    #[test]
+    fn sibling_daemon_bin_is_the_daemon_next_to_rock_or_nothing() {
+        let dir = std::env::temp_dir().join(format!("rock-sibling-daemon-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let rock = dir.join("rock");
+        std::fs::write(&rock, b"").unwrap();
+        assert_eq!(super::sibling_daemon_bin(&rock), None);
+        let daemon = dir.join("rock-agent-daemon");
+        std::fs::write(&daemon, b"").unwrap();
+        assert_eq!(super::sibling_daemon_bin(&rock), Some(daemon));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn agent_launch_flags_stand_for_the_game_env() {
+        let parse = |argv: &[&str]| {
+            Args::from_matches(Args::command().try_get_matches_from(argv).expect("parse"))
+        };
+        let plain = parse(&["rock", "run", "mag"]);
+        assert!(plain.agent_launch_env().is_empty());
+        let headless = parse(&["rock", "run", "mag", "--agent-headless"]);
+        assert!(headless.agent_launch_env().iter().all(|(k, _)| *k != "MAG_AGENT_ACCESS"),
+                "headless alone leaves agent access off");
+        let agent = parse(&["rock", "run", "mag", "--agent-headless", "--agent-access", "--level", "mcp-selftest",
+                            "--daemon-sock", "/tmp/d.sock"]);
+        let env = agent.agent_launch_env();
+        for (key, value) in [("MAG_EDITOR", "1"), ("MAG_BOOT_PLAYING", "1"), ("MAG_AGENT_ACCESS", "1"),
+                             ("STONE_HEADLESS", "1"), ("MAG_EDITOR_LEVEL", "mcp-selftest"),
+                             ("ROCK_AGENT_DAEMON_SOCK", "/tmp/d.sock")] {
+            assert_eq!(env.iter().find(|(k, _)| *k == key).map(|(_, v)| v.as_str()), Some(value), "{key}");
+        }
+    }
 
     #[test]
     fn no_record_flag_parses_and_defaults_off() {

@@ -633,7 +633,7 @@ impl Builder<'_> {
                     let g = self.emit_cur(Inst::Global(abi.hoisted));
                     let param_shapes = abi.param_slots(&self.scx.rep_arena());
                     let arg_vals =
-                        self.slotted_call_args(&abi.param_names, &param_shapes, &arg_idxs)?;
+                        self.slotted_call_args(&abi.param_names, &param_shapes, &arg_idxs, &[])?;
                     let Some(shape) = abi.result_shape(&self.scx.rep_arena()) else {
                         let v = self.emit_call_value(e, g, arg_vals)?;
                         return Ok(ValueRepr::Scalar(v));
@@ -863,7 +863,7 @@ impl Builder<'_> {
             let args = if any_named {
                 self.reorder_named_args(e, arg_idxs, func, Some(&dc.callee_inst))?
             } else {
-                arg_idxs
+                let mut args: Vec<Idx<Inst>> = arg_idxs
                     .iter()
                     .enumerate()
                     .map(|(i, &a)| {
@@ -873,7 +873,9 @@ impl Builder<'_> {
                         let v = self.lower_expr_with_expected(a, Some(t.as_ref()))?;
                         Ok(self.coerced_mono(v, a, t.as_ref()))
                     })
-                    .collect::<Result<_, CompilerError>>()?
+                    .collect::<Result<_, CompilerError>>()?;
+                args.extend(self.trailing_default_args(func, arg_idxs.len(), None)?);
+                args
             };
             // Above the tuple early return: the exemption is a property of the
             // CALLEE, so making it arity-dependent would be a guarantee hole the
@@ -1165,6 +1167,7 @@ impl Builder<'_> {
                 )?;
                 out.extend(self.arg_values_for_slot(&slot, a)?);
             }
+            out.extend(self.trailing_default_args(func, arg_idxs.len(), Some(param_shapes))?);
             return Ok(out);
         }
         let param_names: Vec<Ustr> = self.ws.module(func.module).functions[func.func]
@@ -1172,7 +1175,8 @@ impl Builder<'_> {
             .iter()
             .map(|pd| pd.name)
             .collect();
-        self.slotted_call_args(&param_names, param_shapes, arg_idxs)
+        let defaults = self.literal_param_defaults(func);
+        self.slotted_call_args(&param_names, param_shapes, arg_idxs, &defaults)
     }
 
     /// Build a call's argument list by placing each argument into its PARAM SLOT
@@ -1182,11 +1186,14 @@ impl Builder<'_> {
     /// calling convention that has param names -- a convention with its own
     /// positional-only arg loop silently miscompiles `f(b: 2, a: 1)`.
     /// `param_shapes` shorter than `param_names` (or all-`Opaque`) is the boxed ABI.
+    /// `defaults` is [`literal_param_defaults`] of the callee, or empty when the
+    /// callee is not a declaration the emitter can read (a nested fn value).
     pub(crate) fn slotted_call_args(
         &mut self,
         param_names: &[Ustr],
         param_shapes: &[RetSlot],
         arg_idxs: &[Idx<Expr>],
+        defaults: &[Option<Lit>],
     ) -> Result<Vec<Idx<Inst>>, CompilerError> {
         let mut slots: Vec<Option<ValueBundle>> = vec![None; param_names.len()];
         let mut next_pos = 0usize;
@@ -1223,6 +1230,12 @@ impl Builder<'_> {
             slots[pidx] = Some(r);
         }
         let hi = slots.iter().rposition(|s| s.is_some()).map_or(0, |i| i + 1);
+        // A trailing param with a literal default is passed explicitly too.
+        let hi = defaults
+            .iter()
+            .take(slots.len())
+            .rposition(|d| d.is_some())
+            .map_or(hi, |i| hi.max(i + 1));
         let mut out = Vec::new();
         for i in 0..hi {
             let slot = required_wire_slot(
@@ -1235,8 +1248,13 @@ impl Builder<'_> {
             )?;
             match slots[i].clone() {
                 Some(r) => out.extend(self.repr_to_slot_values_bundle(&r, &slot)?),
-                // An omitted param arrives as one nil PER WIRE VALUE, so the
-                // callee's default-fill sees a nil in every leaf it binds.
+                // A one-slot param with a literal default is passed that literal.
+                None if slot.slot_count() == 1 && defaults.get(i).is_some_and(Option::is_some) => {
+                    let lit = defaults[i].clone().expect("checked above");
+                    out.push(self.emit_cur(Inst::Const(lit)));
+                }
+                // Otherwise an omitted param arrives as one nil PER WIRE VALUE,
+                // so the callee's default-fill sees a nil in every leaf it binds.
                 None => {
                     for _ in 0..slot.slot_count() {
                         out.push(self.emit_cur(Inst::Const(Lit::Nil)));

@@ -514,6 +514,9 @@ end
 /// provides them (`stdlib/unified.rock`); stdlib-free test harnesses prepend
 /// this so emitted chunks stay self-contained.
 pub const VEC_CHECK_SHIMS: &str = "\
+function __rock_vec_oob(vec, i)\n\
+  error('Vec index out of bounds')\n\
+end\n\
 function __vec_checked_get(vec, i)\n\
   if i < 0 or i >= vec.len then error('Vec index out of bounds') end\n\
   return vec._data[i + 1]\n\
@@ -677,12 +680,21 @@ pub struct CodegenCtx {
     /// The emitted shape for a call to another emitted function. Read from
     /// `ROCK_SKULL_CALLEE_BINDING` once per context, same as `tail_calls`.
     callee_binding: CalleeBindingMode,
+    /// Whether a mutable-global access under the bound shape reads the Session
+    /// tables through chunk-level upvalue cells instead of walking
+    /// `_G.__rock_active_session.__rock_state`. Read from
+    /// `ROCK_SKULL_STATE_CELL` once per context; only effective under
+    /// [`CalleeBindingMode::Upvalue`], see [`CodegenCtx::state_cell`].
+    state_cell: bool,
     /// The emitted shape for a natural loop that is not a counted `for`. Read
     /// from `ROCK_SKULL_LOOP_SHAPE` once per context, same as `tail_calls`.
     loops: LoopShape,
     /// The emitted shape for a GC-tier `value` struct construction. Read from
     /// `ROCK_SKULL_VALUE_CTOR` once per context, same as `tail_calls`.
     value_ctor: ValueCtorShape,
+    /// The emitted shape for a bounds-checked Vec access. Read from
+    /// `ROCK_SKULL_INDEX_SHAPE` once per context, same as `tail_calls`.
+    index_shape: IndexShape,
     /// Every function's strongly connected component number over the
     /// whole-program call graph, from [`call_sccs`]. Read ONLY by
     /// [`callee_binding_plan`]; empty on any path that never populated it,
@@ -699,8 +711,10 @@ impl Clone for CodegenCtx {
             recursive_callees: self.recursive_callees.clone(),
             tail_calls: self.tail_calls,
             callee_binding: self.callee_binding,
+            state_cell: self.state_cell,
             loops: self.loops,
             value_ctor: self.value_ctor,
+            index_shape: self.index_shape,
             call_sccs: self.call_sccs.clone(),
         }
     }
@@ -777,8 +791,10 @@ impl CodegenCtx {
             recursive_callees: HashSet::default(),
             tail_calls: tail_call_shape(),
             callee_binding: callee_binding_mode(),
+            state_cell: state_cell_mode(),
             loops: loop_shape(),
             value_ctor: value_ctor_shape(),
+            index_shape: index_shape(),
             call_sccs: HashMap::default(),
         }
     }
@@ -807,6 +823,23 @@ impl CodegenCtx {
         self.callee_binding
     }
 
+    /// Override the Session-cell switch this context was built with. The
+    /// production path takes it from `ROCK_SKULL_STATE_CELL`; a test uses this
+    /// so one process can emit both shapes.
+    pub fn set_state_cell(&mut self, on: bool) {
+        self.state_cell = on;
+    }
+
+    /// Whether mutable-global accesses are emitted through the Session cells
+    /// (`__rock_state_cell[k]`) rather than the `_G` walk. Requires the bound
+    /// callee shape: an incremental overlay is a separate chunk that cannot see
+    /// main.lua's chunk-level locals, and the overlay path already pins
+    /// [`CalleeBindingMode::Global`], so tying the cell to that shape keeps the
+    /// two mutually exclusive by the same rule (`docs/backends.md`).
+    pub fn state_cell(&self) -> bool {
+        self.state_cell && self.callee_binding == CalleeBindingMode::Upvalue
+    }
+
     /// Override the emitted loop shape this context was built with. The
     /// production path takes it from `ROCK_SKULL_LOOP_SHAPE`; a test uses this
     /// so one process can emit both shapes.
@@ -827,6 +860,17 @@ impl CodegenCtx {
 
     pub fn value_ctor_shape(&self) -> ValueCtorShape {
         self.value_ctor
+    }
+
+    /// Override the emitted index shape this context was built with. The
+    /// production path takes it from `ROCK_SKULL_INDEX_SHAPE`; a test uses this
+    /// so one process can emit both shapes.
+    pub fn set_index_shape(&mut self, shape: IndexShape) {
+        self.index_shape = shape;
+    }
+
+    pub fn index_shape(&self) -> IndexShape {
+        self.index_shape
     }
 
     /// Record every function's call-graph strongly connected component. The
@@ -899,6 +943,12 @@ impl CodegenCtx {
 
     pub fn state_slot(&self, name: ustr::Ustr) -> Option<u32> {
         self.state_slots.get(&name).copied()
+    }
+
+    /// The highest compiler-assigned Session slot, 0 when there is none. The
+    /// emitter sizes every Session's array part to this slot's rehash fixpoint.
+    pub fn state_slot_max(&self) -> u32 {
+        self.state_slots.values().copied().max().unwrap_or(0)
     }
 }
 
@@ -1226,6 +1276,29 @@ pub fn callee_binding_mode() -> CalleeBindingMode {
     })
 }
 
+/// Chunk-level local that every emitted function reads a mutable global through
+/// under the bound shape: the active Session's `__rock_state` table. Declared
+/// at the top of the runtime prelude, assigned by `__rock_session_publish`.
+pub const STATE_CELL: &str = "__rock_state_cell";
+/// The sibling cell for the active Session's `__rock_initialized` table.
+pub const INITIALIZED_CELL: &str = "__rock_initialized_cell";
+
+/// `ROCK_SKULL_STATE_RESERVE=0` leaves every Session's tables to grow lazily
+/// from `{}` instead of sizing them to the schema's rehash fixpoint at load
+/// (`docs/backends.md`, "Session cells"), for A/B measurement. Default: on.
+pub fn state_reserve_mode() -> bool {
+    static MODE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *MODE.get_or_init(|| !matches!(std::env::var("ROCK_SKULL_STATE_RESERVE").as_deref(), Ok("0")))
+}
+
+/// `ROCK_SKULL_STATE_CELL=0` keeps the `_G.__rock_active_session.__rock_state`
+/// walk under the bound shape, for A/B measurement. Anything else is the
+/// shipped default: on.
+pub fn state_cell_mode() -> bool {
+    static MODE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *MODE.get_or_init(|| !matches!(std::env::var("ROCK_SKULL_STATE_CELL").as_deref(), Ok("0")))
+}
+
 /// How a natural loop that is NOT a counted `for` is spelled.
 ///
 /// LuaJIT's parser turns a backward `goto` into `BC_LOOP` with `bc_j == -1`
@@ -1301,6 +1374,81 @@ pub fn value_ctor_shape() -> ValueCtorShape {
 
 /// The shipped emitted value-ctor shape.
 pub const DEFAULT_VALUE_CTOR_SHAPE: ValueCtorShape = ValueCtorShape::Call;
+
+/// How a bounds-checked Vec element read, store or column index is spelled.
+/// `docs/backends.md` carries the rule; `docs/trace-pressure-work-plan.md` the
+/// measurement.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum IndexShape {
+    /// Every access calls the stdlib helper (`__vec_checked_get` and kin). In a
+    /// trace that is one callee constant per trace plus one frame-link constant
+    /// per site, and the helper's own entry is a trace root.
+    Call,
+    /// An access whose base and index render as bare names spells the check
+    /// itself: `if i < 0 or i >= v.len then __rock_vec_oob(v, i) end` and then
+    /// the raw `_data` access. An operand that is a folded expression keeps the
+    /// call, because the guard names each operand twice.
+    Inline,
+}
+
+/// `ROCK_SKULL_INDEX_SHAPE` selects the emitted shape for a bounds-checked Vec
+/// access: `call` or `inline`. An unset or unrecognized value is the shipped
+/// default, so the switch can only be entered deliberately.
+pub fn index_shape() -> IndexShape {
+    static SHAPE: std::sync::OnceLock<IndexShape> = std::sync::OnceLock::new();
+    *SHAPE.get_or_init(|| match std::env::var("ROCK_SKULL_INDEX_SHAPE").as_deref() {
+        Ok("call") => IndexShape::Call,
+        Ok("inline") => IndexShape::Inline,
+        _ => DEFAULT_INDEX_SHAPE,
+    })
+}
+
+/// How a one-expression wrapper -- an `extern(ffi)` binding, a value-struct
+/// `_vt`/`_lct` ctor -- hands its result back. `docs/backends.md` carries the
+/// rule; `docs/trace-pressure-work-plan.md` the measurement.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum WrapperRetShape {
+    /// `return lib.f(..)`: a `CALLT` into C. A root trace started at the
+    /// wrapper's entry cannot leave through it (`rec_ret` needs a real `RET`)
+    /// and aborts `leaving loop in root trace` every time it is tried.
+    Tail,
+    /// `local __rock_ret = lib.f(..)` then `return __rock_ret`: one bytecode
+    /// more, a real `RET`, and the root trace links out cleanly.
+    Local,
+}
+
+/// `ROCK_SKULL_WRAPPER_RET` selects the wrapper return shape: `tail` or
+/// `local`. An unset or unrecognized value is the shipped default, so the
+/// switch can only be entered deliberately.
+pub fn wrapper_ret_shape() -> WrapperRetShape {
+    static SHAPE: std::sync::OnceLock<WrapperRetShape> = std::sync::OnceLock::new();
+    *SHAPE.get_or_init(|| match std::env::var("ROCK_SKULL_WRAPPER_RET").as_deref() {
+        Ok("tail") => WrapperRetShape::Tail,
+        Ok("local") => WrapperRetShape::Local,
+        _ => DEFAULT_WRAPPER_RET_SHAPE,
+    })
+}
+
+/// The shipped wrapper return shape.
+pub const DEFAULT_WRAPPER_RET_SHAPE: WrapperRetShape = WrapperRetShape::Local;
+
+/// The return statement(s) of a wrapper whose whole result is `expr`, under
+/// [`wrapper_ret_shape`]. Two-space indented, no trailing newline. The local
+/// is a reserved `__rock` name so it can never shadow a wrapper parameter
+/// that `expr` reads.
+pub fn wrapper_return(expr: &str) -> String {
+    match wrapper_ret_shape() {
+        WrapperRetShape::Tail => format!("  return {expr}"),
+        WrapperRetShape::Local => format!("  local __rock_ret = {expr}\n  return __rock_ret"),
+    }
+}
+
+/// The shipped emitted index shape. `Inline` measured as a redistribution on
+/// mag, not a reduction: the aborts that started inside the helper reappeared
+/// as leaving-loop roots at the callers' own `for` headers, and the first
+/// frames got no faster (`docs/trace-pressure-work-plan.md`, "Checked-index
+/// helpers inlined at the emitter").
+pub const DEFAULT_INDEX_SHAPE: IndexShape = IndexShape::Call;
 
 /// The shared per-type metatable global of a GC-tier `value` struct -- the table
 /// every instance of `<name>` carries, so LuaJIT's `__eq` fires between any two
@@ -1487,8 +1635,18 @@ pub fn callee_binding_plan(
     if captures.is_empty() {
         return None;
     }
-    let capped = captures.len() > MAX_BOUND_CALLEES;
-    captures.truncate(MAX_BOUND_CALLEES);
+    // A body that touches a mutable global captures the two Session cells as
+    // upvalues too, against the same 60-upvalue limit the callees count toward.
+    let reserved = if ctx.state_cell()
+        && func.insts.iter().any(|(_, inst)| matches!(inst, Inst::Global(_) | Inst::StoreGlobal { .. }))
+    {
+        2
+    } else {
+        0
+    };
+    let limit = MAX_BOUND_CALLEES - reserved;
+    let capped = captures.len() > limit;
+    captures.truncate(limit);
     Some(CalleeBindingPlan {
         factory: ctx.mint_synthetic(format!("{CALLEE_FACTORY_PREFIX}{name}")),
         name: name.to_string(),
@@ -3270,6 +3428,24 @@ impl Emitter<'_> {
         self.state_slots.contains_key(&name) || self.static_slots.contains_key(&name)
     }
 
+    /// The table a mutable-global access indexes: the chunk-level cell under the
+    /// bound shape, else the `_G` walk an overlay chunk can also perform.
+    fn state_table_expr(&self) -> &'static str {
+        if self.ctx.state_cell() {
+            STATE_CELL
+        } else {
+            "__rock_active_session.__rock_state"
+        }
+    }
+
+    fn initialized_table_expr(&self) -> &'static str {
+        if self.ctx.state_cell() {
+            INITIALIZED_CELL
+        } else {
+            "__rock_active_session.__rock_initialized"
+        }
+    }
+
     fn write_state_slot(&self, out: &mut String, name: ustr::Ustr) {
         if let Some(&slot) = self.state_slots.get(&name) {
             push_uint(out, slot);
@@ -3583,6 +3759,9 @@ impl Emitter<'_> {
         {
             return;
         }
+        if self.try_emit_inline_index(out, id) {
+            return;
+        }
         let inst = &self.func.insts[id];
         if inst.produces_value() {
             out.push_str("  ");
@@ -3683,6 +3862,77 @@ impl Emitter<'_> {
     /// Render a reference to value `id` as an operand directly into `out`: its
     /// register `r<color>`, or — if it was tree-folded — its expression in
     /// parentheses, recursively. Every value-operand reference goes through here.
+    /// True if `id` renders in operand position as a bare name or a literal --
+    /// a register, a cell, a hoisted module global or a constant -- so an inline
+    /// shape may spell it twice without re-evaluating an expression or
+    /// repeating an allocation (`MakeVec` and `StringConcat` fold too).
+    fn opnd_is_plain(&self, id: Idx<Inst>) -> bool {
+        if self.hoist.contains_key(&id) || !self.inlinable[raw(id) as usize] {
+            return true;
+        }
+        matches!(self.func.insts[id], Inst::Load(_) | Inst::Const(_))
+    }
+
+    /// The inline index shape is selected and both operands may be named twice.
+    fn inline_index_operands(&self, base: Idx<Inst>, index: Idx<Inst>) -> bool {
+        self.ctx.index_shape() == IndexShape::Inline
+            && self.opnd_is_plain(base)
+            && self.opnd_is_plain(index)
+    }
+
+    /// `if i < 0 or i >= v.len then __rock_vec_oob(v, i) end`. The failing
+    /// branch is never recorded, so the message text lives in the one cold
+    /// stdlib function rather than in every indexing function's constants.
+    fn write_vec_bounds_guard(&self, out: &mut String, base: Idx<Inst>, index: Idx<Inst>) {
+        out.push_str("  if ");
+        self.write_opnd(out, index);
+        out.push_str(" < 0 or ");
+        self.write_opnd(out, index);
+        out.push_str(" >= ");
+        self.write_opnd(out, base);
+        out.push_str(".len then __rock_vec_oob(");
+        self.write_opnd(out, base);
+        out.push_str(", ");
+        self.write_opnd(out, index);
+        out.push_str(") end\n");
+    }
+
+    /// Emit a bounds-checked Vec read (`Inst::Index { kind: Vec }`) or column
+    /// index (`Inst::VecCheckedIndex`) as the inline guard followed by ONE
+    /// assignment, when the shape is selected and the operands are plain.
+    /// Returns false to let the caller emit the helper call. The destination
+    /// register usually aliases an operand, so the guard must read both
+    /// operands before anything is assigned.
+    fn try_emit_inline_index(&self, out: &mut String, id: Idx<Inst>) -> bool {
+        match &self.func.insts[id] {
+            Inst::Index {
+                base,
+                index,
+                kind: ContainerKind::Vec,
+            } if self.inline_index_operands(*base, *index) => {
+                self.write_vec_bounds_guard(out, *base, *index);
+                out.push_str("  ");
+                write_vname(out, self.func, &self.colors, id);
+                out.push_str(" = ");
+                self.write_opnd(out, *base);
+                out.push_str("._data[");
+                self.write_opnd(out, *index);
+                out.push_str(" + 1]\n");
+                true
+            }
+            Inst::VecCheckedIndex { vec, index } if self.inline_index_operands(*vec, *index) => {
+                self.write_vec_bounds_guard(out, *vec, *index);
+                out.push_str("  ");
+                write_vname(out, self.func, &self.colors, id);
+                out.push_str(" = ");
+                self.write_opnd(out, *index);
+                out.push_str(" + 1\n");
+                true
+            }
+            _ => false,
+        }
+    }
+
     fn write_opnd(&self, out: &mut String, id: Idx<Inst>) {
         if self.inlinable[raw(id) as usize] {
             if let Inst::Load(cell) = self.func.insts[id] {
@@ -3766,7 +4016,8 @@ impl Emitter<'_> {
                     out.push_str(&lua_string(&identity.logical_key(self.ws, self.interner)));
                     out.push(')');
                 } else if self.has_state_slot(*g) {
-                    out.push_str("__rock_active_session.__rock_state[");
+                    out.push_str(self.state_table_expr());
+                    out.push('[');
                     self.write_state_slot(out, *g);
                     out.push(']');
                 } else {
@@ -4380,13 +4631,24 @@ impl Emitter<'_> {
                         out.push_str(")\n");
                     }
                     ContainerKind::Vec => {
-                        out.push_str("  __vec_checked_set(");
-                        self.write_opnd(out, *base);
-                        out.push_str(", ");
-                        self.write_opnd(out, *index);
-                        out.push_str(", ");
-                        self.write_opnd(out, *value);
-                        out.push_str(")\n");
+                        if self.inline_index_operands(*base, *index) {
+                            self.write_vec_bounds_guard(out, *base, *index);
+                            out.push_str("  ");
+                            self.write_opnd(out, *base);
+                            out.push_str("._data[");
+                            self.write_opnd(out, *index);
+                            out.push_str(" + 1] = ");
+                            self.write_opnd(out, *value);
+                            out.push('\n');
+                        } else {
+                            out.push_str("  __vec_checked_set(");
+                            self.write_opnd(out, *base);
+                            out.push_str(", ");
+                            self.write_opnd(out, *index);
+                            out.push_str(", ");
+                            self.write_opnd(out, *value);
+                            out.push_str(")\n");
+                        }
                     }
                     // Raw 1-based write into one leaf column; the owning Vec's
                     // `len` was checked once by `VecCheckedIndex`.
@@ -4414,11 +4676,15 @@ impl Emitter<'_> {
             }
             Inst::StoreGlobal { name, value } => {
                 if self.has_state_slot(*name) {
-                    out.push_str("  __rock_active_session.__rock_state[");
+                    out.push_str("  ");
+                    out.push_str(self.state_table_expr());
+                    out.push('[');
                     self.write_state_slot(out, *name);
                     out.push_str("] = ");
                     self.write_opnd(out, *value);
-                    out.push_str("\n  __rock_active_session.__rock_initialized[");
+                    out.push_str("\n  ");
+                    out.push_str(self.initialized_table_expr());
+                    out.push('[');
                     self.write_state_slot(out, *name);
                     out.push_str("] = true\n");
                 } else {

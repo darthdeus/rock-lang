@@ -864,7 +864,8 @@ fn global_of_a_nobox_value_stores_leaves() {
     let slots = global_session_slots(&lua, "SPOT");
     assert_eq!(slots.len(), 2, "the nobox global must own two Session leaves");
     assert!(
-        slots.iter().all(|slot| lua.contains(&format!("__rock_active_session.__rock_state[{slot}]"))),
+        slots.iter().all(|slot| lua.contains(&format!("__rock_state_cell[{slot}]")))
+            || slots.iter().all(|slot| lua.contains(&format!("__rock_active_session.__rock_state[{slot}]"))),
         "the global leaves were not bound through the active Session:\n{lua}"
     );
     for f in ["read", "main"] {

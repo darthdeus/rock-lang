@@ -474,11 +474,11 @@ struct NativeBufferU16 { ptr: PtrU16, len: int }
 struct NativeBufferI16 { ptr: PtrI16, len: int }
 struct NativeBufferU32 { ptr: PtrU32, len: int }
 
-@intrinsic @native_required @nomangle inline(lua) fn __nb_alloc_u8(n: int)  -> PtrU8  = 'return ffi.new("uint8_t[?]", n)'
-@intrinsic @native_required @nomangle inline(lua) fn __nb_alloc_i8(n: int)  -> PtrI8  = 'return ffi.new("int8_t[?]", n)'
-@intrinsic @native_required @nomangle inline(lua) fn __nb_alloc_u16(n: int) -> PtrU16 = 'return ffi.new("uint16_t[?]", n)'
-@intrinsic @native_required @nomangle inline(lua) fn __nb_alloc_i16(n: int) -> PtrI16 = 'return ffi.new("int16_t[?]", n)'
-@intrinsic @native_required @nomangle inline(lua) fn __nb_alloc_u32(n: int) -> PtrU32 = 'return ffi.new("uint32_t[?]", n)'
+@intrinsic @native_required @nomangle inline(lua) fn __nb_alloc_u8(n: int)  -> PtrU8  = 'local r = ffi.new("uint8_t[?]", n); return r'
+@intrinsic @native_required @nomangle inline(lua) fn __nb_alloc_i8(n: int)  -> PtrI8  = 'local r = ffi.new("int8_t[?]", n); return r'
+@intrinsic @native_required @nomangle inline(lua) fn __nb_alloc_u16(n: int) -> PtrU16 = 'local r = ffi.new("uint16_t[?]", n); return r'
+@intrinsic @native_required @nomangle inline(lua) fn __nb_alloc_i16(n: int) -> PtrI16 = 'local r = ffi.new("int16_t[?]", n); return r'
+@intrinsic @native_required @nomangle inline(lua) fn __nb_alloc_u32(n: int) -> PtrU32 = 'local r = ffi.new("uint32_t[?]", n); return r'
 
 fn native_buffer_u8(n: int)  -> NativeBufferU8  { return NativeBufferU8  { ptr: __nb_alloc_u8(n),  len: n } }
 fn native_buffer_i8(n: int)  -> NativeBufferI8  { return NativeBufferI8  { ptr: __nb_alloc_i8(n),  len: n } }
@@ -1185,6 +1185,17 @@ fn vec_set<T>(vec: [T], index: int, value: T) {
 // Bounds-checked indexing helpers, emitted by codegen for `xs[i]` reads and
 // stores (the __nb_checked_* pattern; release stripping is the same future
 // release-mode work). `.get(i)` above is the null-returning form.
+//
+// Under the inline index shape (`ROCK_SKULL_INDEX_SHAPE`, docs/backends.md)
+// codegen spells the check itself and calls only this cold function on the
+// failing path, so no indexing function carries the message text and no trace
+// records a helper frame. The `__vec_checked_*` calls remain for operands the
+// emitter cannot name twice.
+@nomangle inline(lua) fn __rock_vec_oob(vec: any, i: int) = """
+    error("Vec index out of bounds: index " .. tostring(i) ..
+          " is outside [0, " .. tostring(vec.len) .. ")")
+"""
+
 @nomangle inline(lua) fn __vec_checked_get(vec: any, i: int) -> any = """
     if i < 0 or i >= vec.len then
         error("Vec index out of bounds: index " .. tostring(i) ..
@@ -1439,7 +1450,8 @@ inline(lua) fn float_to_int(value: float) -> int = """
     if type(value) ~= "number" then
         error("Expected a number, got " .. type(value))
     end
-    return math.floor(value)
+    local r = math.floor(value)
+    return r
 """
 inline(js) fn float_to_int(value: float) -> int = "return Math.floor(value);"
 
@@ -2272,7 +2284,8 @@ const EPSILON: float = 0.0000001
 @nomangle inline(lua) fn __rock_format_float(v: float) -> string = """
     local av = math.abs(v)
     if av ~= 0 and (av < 0.0001 or av >= 1000000) then
-        return string.format("%.2g", v)
+        local r = string.format("%.2g", v)
+        return r
     else
         local s = string.format("%.4f", v)
         s = s:gsub("0+$", "")
@@ -2357,7 +2370,8 @@ fn char_to_byte(c: string) -> int { return unit_at(c, 0) }
 @inline inline(lua) fn ffi_new(ty: string) -> any = "ffi.new(ty)"
 
 inline(lua) fn ffi_new_array(ty: string, size: int) -> any = """
-    return ffi.new(ty .. "[" .. size .. "]")
+    local r = ffi.new(ty .. "[" .. size .. "]")
+    return r
 """
 
 @inline inline(lua) fn ffi_new_with_init(ty: string, init: any) -> any = "ffi.new(ty, init)"
@@ -2373,11 +2387,13 @@ inline(lua) fn ffi_null() -> any = """
 """
 
 inline(lua) fn ffi_string(ptr: any, len: int?) -> string = """
+    local r
     if len then
-        return ffi.string(ptr, len)
+        r = ffi.string(ptr, len)
     else
-        return ffi.string(ptr)
+        r = ffi.string(ptr)
     end
+    return r
 """
 
 inline(lua) fn ffi_copy(dst: any, src: any, len: int?) = """
@@ -3331,8 +3347,11 @@ fn Envelope.step_by(e, goal: float, step_dt: float) -> float {
 
 
 @intrinsic inline(lua) fn string.substring(s, start: int, end_idx: int) -> string = """
-    -- Rock uses 0-based indexing, Lua uses 1-based
-    return string.sub(s, start + 1, end_idx)
+    -- Rock uses 0-based indexing, Lua uses 1-based. Bound, then return: a
+    -- `return string.sub(..)` tail call into C is a CALLT no root trace can
+    -- leave through (docs/backends.md, "Wrapper return").
+    local r = string.sub(s, start + 1, end_idx)
+    return r
 """
 
 @inline inline(lua) fn string.upper(s) -> string = "string.upper(s)"
@@ -3396,7 +3415,7 @@ double strtod_l(const char *nptr, char **endptr, __rock_locale_t loc);
             local strtod_l = ffi.C.strtod_l
             local function probe(str) return strtod_l(cast("const char*", str), nil, loc) end
             if probe("1.5") == 1.5 and probe("-3.25e2") == -325 and probe("2.5E-2") == 0.025 then
-                f = function(str, a, b) return strtod_l(cast("const char*", str) + a, nil, loc) end
+                f = function(str, a, b) local r = strtod_l(cast("const char*", str) + a, nil, loc); return r end
             end
         end
     end
@@ -3407,7 +3426,7 @@ double strtod_l(const char *nptr, char **endptr, __rock_locale_t loc);
         local msg = "parse_float_at: no C-locale strtod_l on " .. tostring(ffi.os) .. "; using the portable path"
         local warn = _G.__stone_log
         if warn then warn(1, "STDLIB", msg) else io.stderr:write("[WARN] " .. msg .. "\\n") end
-        f = function(str, a, b) return tonumber(string.sub(str, a + 1, b)) end
+        f = function(str, a, b) local r = tonumber(string.sub(str, a + 1, b)); return r end
     end
     _G.__rock_parse_float_at = f
     return f
@@ -3451,7 +3470,7 @@ double strtod_l(const char *nptr, char **endptr, __rock_locale_t loc);
 struct StringBuilder {}
 @intrinsic inline(lua) fn sb_new() -> StringBuilder = "return {}"
 @intrinsic inline(lua) fn sb_push(sb: StringBuilder, s: string) = "sb[#sb + 1] = s"
-@intrinsic inline(lua) fn sb_build(sb: StringBuilder) -> string = "return table.concat(sb)"
+@intrinsic inline(lua) fn sb_build(sb: StringBuilder) -> string = "local r = table.concat(sb); return r"
 
 fn lt(a: string, b: string) -> bool { return le(a, b) && a != b }
 inline(lua) fn le(a: string, b: string) -> bool = "return a <= b"
@@ -3479,7 +3498,8 @@ inline(lua) fn string.pad_left(s, width: int) -> string = """
 // right-aligned in a field of `width` chars (use 0 to skip padding).
 // Wraps `string.format("%<width>.<decimals>f", v)`.
 inline(lua) fn format_float(v: float, width: int, decimals: int) -> string = """
-    return string.format("%" .. tostring(width) .. "." .. tostring(decimals) .. "f", v)
+    local r = string.format("%" .. tostring(width) .. "." .. tostring(decimals) .. "f", v)
+    return r
 """
 
 // Pattern-based string matching (Lua patterns, not regex)

@@ -62,6 +62,16 @@ pub fn run_lua_code_with_timeout(
     // the output string instead, and `rock run` printed it and returned Ok.
     cmd.arg("-")
         .env("LUA_PATH", crate::project::lua_path_value())
+        // The same library search path `build_luajit_command` gives a game or
+        // sim process. Inert on its own -- nothing here dlopens anything until
+        // a program asks -- but without it a `@test` that loads the engine
+        // cdylib for a headless capability (the metrics-only font the
+        // `rock test <game>` process uses to measure text) cannot find it, and
+        // neither can the prebuilt libs it links against.
+        .env(
+            crate::project::lib_path_var(),
+            crate::project::lib_path_with_inherited(),
+        )
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());

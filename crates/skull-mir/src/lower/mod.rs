@@ -2452,11 +2452,88 @@ impl Builder<'_> {
         }
     }
 
+    /// The callee's parameter defaults that are plain scalar literals, by param
+    /// index, read from the callee body's own arena. A DIRECT call passes these
+    /// explicitly (`trailing_default_args`, `slotted_call_args`,
+    /// `reorder_named_args`), so the callee's default-fill prologue below is
+    /// never the direction a trace takes: with the caller's floats live, that
+    /// nil branch was a doomed side exit at every float-heavy callee with a
+    /// defaulted param (`docs/trace-pressure-work-plan.md`, "Default fill").
+    /// `null` stays `None` -- omitted already IS null -- and a non-literal
+    /// default (a global, a ctor) stays the callee's to evaluate.
+    pub(crate) fn literal_param_defaults(&self, func: FuncRef) -> Vec<Option<Lit>> {
+        let module = self.ws.module(func.module);
+        let decl = &module.functions[func.func];
+        let Some(body) = module.bodies.get(&BodyOwner::Function(func.func)) else {
+            return Vec::new();
+        };
+        if decl.is_variadic {
+            return Vec::new();
+        }
+        body.param_defaults
+            .iter()
+            .enumerate()
+            .map(|(i, d)| {
+                let e = (*d)?;
+                let pd = decl.param_decls.get(i)?;
+                Some(match body.expr_arena[e] {
+                    Expr::Int(v) => {
+                        if pd.ty == self.ws.builtins.uint() {
+                            Lit::Uint(v as u32)
+                        } else {
+                            Lit::Int(v)
+                        }
+                    }
+                    Expr::Float(of) => Lit::Float(of.0),
+                    Expr::Bool(b) => Lit::Bool(b),
+                    Expr::String(s) => Lit::Str(s),
+                    _ => return None,
+                })
+            })
+            .collect()
+    }
+
+    /// Explicit values for the parameters a positional call left off the end:
+    /// a literal default becomes a constant, a parameter without one keeps its
+    /// nil (one per wire slot) so the callee fills it, and the trailing nils Lua
+    /// would supply anyway are dropped. `param_shapes` is the scalar ABI's slot
+    /// table; `None` is the boxed ABI (one slot each).
+    pub(crate) fn trailing_default_args(
+        &mut self,
+        func: FuncRef,
+        provided: usize,
+        param_shapes: Option<&[RetSlot]>,
+    ) -> Result<Vec<Idx<Inst>>, CompilerError> {
+        let defaults = self.literal_param_defaults(func);
+        let slots_of = |i: usize| param_shapes.and_then(|s| s.get(i)).map_or(1, |s| s.slot_count());
+        let last = (provided..defaults.len())
+            .rev()
+            .find(|&i| defaults[i].is_some() && slots_of(i) == 1);
+        let Some(last) = last else { return Ok(Vec::new()) };
+        let mut out = Vec::new();
+        for i in provided..=last {
+            match &defaults[i] {
+                Some(lit) if slots_of(i) == 1 => {
+                    let lit = lit.clone();
+                    out.push(self.emit_cur(Inst::Const(lit)));
+                }
+                _ => {
+                    for _ in 0..slots_of(i) {
+                        out.push(self.emit_cur(Inst::Const(Lit::Nil)));
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
+
     /// Callee-side default fill: an omitted argument arrives as Lua `nil`, so for
     /// each defaulted param emit `if cell == nil { cell = <default> }` at the top
     /// of the body (rock's convention — the default expr lives in THIS body's
-    /// arena). A trailing omitted arg is simply not passed (Lua nils it); a
-    /// named-arg gap is passed an explicit nil by the call site.
+    /// arena). A direct call passes a literal scalar default itself
+    /// (`literal_param_defaults`), so this prologue is reached with nil only from
+    /// a call the emitter could not see; a `null` default on a scalar cell emits
+    /// nothing, since omitted already is null.
     fn fill_param_defaults(&mut self) -> Result<(), CompilerError> {
         let pbs: Vec<Idx<BindingInfo>> = self.body.param_bindings.into_iter().collect();
         let defaults = self.body.param_defaults.clone();
@@ -2485,6 +2562,9 @@ impl Builder<'_> {
                 continue;
             }
             let Some(&cell) = self.binds.get(&raw(pb)) else { continue };
+            if matches!(self.body.expr_arena[*def], Expr::Null) {
+                continue;
+            }
             let cur = self.emit_cur(Inst::Load(cell));
             let nil = self.emit_cur(Inst::Const(Lit::Nil));
             let is_nil = self.emit_cur(Inst::Eq(cur, nil));

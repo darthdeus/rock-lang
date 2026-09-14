@@ -1720,6 +1720,34 @@ pub fn lua_global_state_slots(
         .collect())
 }
 
+/// The Session table sizes the prelude reserves (`docs/backends.md`, "Session
+/// cells"): the array part at the rehash fixpoint of the highest compiler slot
+/// -- the next power of two, plus one for index 0, which is what LuaJIT's
+/// `rehashtab` settles on once more than half of that range is populated, so a
+/// later rehash cannot move it -- and a hash part with twice the schema's string
+/// keys, so no static's first store overflows it. Returns the capacity line and
+/// the reserve call, or `None` under `ROCK_SKULL_STATE_RESERVE=0`.
+fn state_capacity_lua(
+    schema: &skull_mir::state_schema::StateSchema,
+    cg: &CodegenCtx,
+) -> Option<(String, &'static str)> {
+    if !skull_codegen_lua::state_reserve_mode() {
+        return None;
+    }
+    let narr = cg.state_slot_max().next_power_of_two() + 1;
+    let string_keys: usize = schema
+        .entries
+        .iter()
+        .filter(|entry| entry.kind != skull_mir::state_schema::StateKind::Global)
+        .map(|entry| skull_mir::state_schema::entry_state_keys(entry).len())
+        .sum();
+    let nhash = (string_keys * 2).next_power_of_two().max(16);
+    Some((
+        format!("_G.__ROCK_STATE_CAPACITY = {{{narr}, {nhash}}}\n"),
+        "__rock_state_reserve_active()\n",
+    ))
+}
+
 fn state_schema_lua(
     schema: &skull_mir::state_schema::StateSchema,
     cg: &CodegenCtx,
@@ -5479,13 +5507,18 @@ fn assemble(
                                 format!("__out, {params}")
                             };
                             format!(
-                                "  local __out = ffi.new(\"{sname}[1]\")\n  {lib}.{nm}({call_args})\n  return ffi.new(\"{sname}\", __out[0])"
+                                "  local __out = ffi.new(\"{sname}[1]\")\n  {lib}.{nm}({call_args})\n{}",
+                                skull_codegen_lua::wrapper_return(&format!("ffi.new(\"{sname}\", __out[0])"))
                             )
                         }
-                        ExternRet::Int => format!("  return tonumber({lib}.{nm}({params}))"),
-                        ExternRet::Uint => format!("  return tonumber({lib}.{nm}({params}))"),
+                        // `return <call>` is a `CALLT` into C, which a root trace
+                        // cannot leave through; the bound local makes it a `RET`
+                        // (`wrapper_return`). `Bool` ends in a compare, not a call.
+                        ExternRet::Int | ExternRet::Uint => {
+                            skull_codegen_lua::wrapper_return(&format!("tonumber({lib}.{nm}({params}))"))
+                        }
                         ExternRet::Bool => format!("  return {lib}.{nm}({params}) ~= 0"),
-                        ExternRet::AsIs => format!("  return {lib}.{nm}({params})"),
+                        ExternRet::AsIs => skull_codegen_lua::wrapper_return(&format!("{lib}.{nm}({params})")),
                         ExternRet::None => format!("  {lib}.{nm}({params})"),
                     };
                     // The rejection above runs for EVERY extern; only the WRITE
@@ -5675,6 +5708,10 @@ fn assemble(
         || lifecycle_plan.census.declarations > 0;
     let has_state_publication = has_code_slot_publication || has_artifact_plans;
     out.push_str("__rock_state_transaction_begin()\n");
+    let state_capacity = state_capacity_lua(&state_schema, cg);
+    if let Some((line, _)) = &state_capacity {
+        out.push_str(line);
+    }
     out.push_str(&format!(
         "__rock_state_publish_schema({:?})\n",
         state_schema.schema_id
@@ -5684,6 +5721,9 @@ fn assemble(
         "__rock_state_schema_stage_part",
         &state_schema_stage,
     ));
+    if let Some((_, call)) = &state_capacity {
+        out.push_str(call);
+    }
 
     // Globals: an init fn + a dependency-ordered `<NAME> = __skull_ginit_<NAME>()`.
     // (Lowered above, so the walk could see their call edges; appended here, in
@@ -5808,6 +5848,9 @@ fn assemble(
     if !has_state_publication {
         out.push_str("__rock_state_transaction_commit()\n");
     }
+    // Closes the block the runtime prelude opens (Session cells become closed
+    // upvalues here); anything appended after this line runs outside it.
+    out.push_str("end\n");
     t_scaffold += ts.elapsed();
 
     // `times.emit` brackets emit_function/emit_named/emit_coroutine; `times.regalloc`
@@ -6341,6 +6384,19 @@ pub fn emit_full(
 pub struct ShapeOverrides {
     pub callee_binding: Option<skull_codegen_lua::CalleeBindingMode>,
     pub value_ctor: Option<skull_codegen_lua::ValueCtorShape>,
+    pub state_cell: Option<bool>,
+}
+
+/// [`emit_full`] under explicit emitted shapes, overriding every
+/// `ROCK_SKULL_*` shape switch the overrides name. For tests that must emit
+/// several shapes in one process.
+pub fn emit_full_with_shapes(
+    ws: &Workspace,
+    user_mid: ModuleId,
+    shapes: ShapeOverrides,
+) -> Result<(MirEmit, SkullEmitCache), CompilerError> {
+    let _allocation_environment = crate::allocation_report::environment_scope();
+    emit_full_in_with_mutation(ws, user_mid, None, BodyMutation::None, RendererTarget::Gl, shapes)
 }
 
 /// [`emit_full`] under an explicit emitted value-ctor shape, overriding
@@ -6823,6 +6879,9 @@ fn emit_full_in_with_mutation(
     }
     if let Some(shape) = shapes.value_ctor {
         cg.set_value_ctor_shape(shape);
+    }
+    if let Some(on) = shapes.state_cell {
+        cg.set_state_cell(on);
     }
     let setup_lanes = SetupLaneAttribution {
         cpu_population: cpu_lane.population,
@@ -8086,6 +8145,17 @@ fn assemble_overlay(
                          caller holding the old closure would never see the edited body -- \
                          rebuild with ROCK_SKULL_CALLEE_BINDING=global",
                         plan.name
+                    )));
+                }
+                // Same rule, second witness: a Session cell is a chunk-level
+                // local of main.lua, invisible to the overlay chunk.
+                if chunk.lua.contains(skull_codegen_lua::STATE_CELL) {
+                    return Err(CompilerError::new_no_location(format!(
+                        "incremental overlay cannot redefine `{}`: this build reads mutable \
+                         globals through main.lua's Session cell (ROCK_SKULL_STATE_CELL), \
+                         which a separate chunk cannot see -- rebuild with \
+                         ROCK_SKULL_CALLEE_BINDING=global",
+                        ws.module(body.func.module).functions[body.func.func].name
                     )));
                 }
                 definitions.push_str(&chunk.lua)

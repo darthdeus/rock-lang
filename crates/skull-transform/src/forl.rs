@@ -629,19 +629,15 @@ fn try_match(ws: &Workspace, func: &MirFunc, h: Idx<Block>) -> Option<LoopMatch>
         }
     }
 
-    // Preds of the head: back-edges are reachable from BODY; the preheader is
-    // the single one that isn't, and must be a plain goto (it falls through
-    // into the emitted `for`).
-    let mut rb: HashSet<Idx<Block>> = HashSet::default();
-    rb.insert(body);
-    let mut stack = vec![body];
-    while let Some(bk) = stack.pop() {
-        targets(&func.blocks[bk].term, |s| {
-            if rb.insert(s) {
-                stack.push(s);
-            }
-        });
-    }
+    // Preds of the head: a back edge is a pred the head DOMINATES; the
+    // preheader is the single one it does not, and must be a plain goto (it
+    // falls through into the emitted `for`). Forward reachability from BODY is
+    // the wrong split: inside an enclosing loop the preheader is reachable
+    // from the body through the outer back edge, so every nested iterator
+    // loop read as having two preheaders and stayed a goto loop. A pred the
+    // entry cannot reach has no dominator entry and counts as a preheader,
+    // which bails the same way it always did.
+    let idom = skull_mir::cfg::dominators(func, func.entry());
     let mut back = Vec::new();
     let mut pre = Vec::new();
     for (bid, blk) in func.blocks.iter() {
@@ -652,7 +648,7 @@ fn try_match(ws: &Workspace, func: &MirFunc, h: Idx<Block>) -> Option<LoopMatch>
             }
         });
         if hits {
-            if rb.contains(&bid) {
+            if skull_mir::cfg::dominates(&idom, h, bid) {
                 back.push(bid);
             } else {
                 pre.push(bid);
