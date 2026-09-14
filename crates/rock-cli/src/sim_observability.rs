@@ -214,6 +214,13 @@ impl SimRunRecorder {
         }
     }
 
+    /// The most recent finished duration of the entry `name` in this run's
+    /// project, from any earlier record under the history root. `None` until
+    /// `configure` names the project.
+    pub fn recorded_duration_ms(&self, name: &str) -> Option<u64> {
+        self.inner.lock().ok()?.timings.latest_duration_ms(name)
+    }
+
     pub fn lane_planned(
         &self,
         lane_id: usize,
@@ -221,6 +228,7 @@ impl SimRunRecorder {
         entries: &[(u64, String)],
         signature: &[(String, String)],
         reason: Option<&str>,
+        estimated_ms: Option<u64>,
     ) {
         self.event(
             "lane_planned",
@@ -233,6 +241,7 @@ impl SimRunRecorder {
                 })).collect::<Vec<_>>(),
                 "boot_signature": signature,
                 "isolation_reason": reason,
+                "estimated_ms": estimated_ms,
             }),
         );
     }

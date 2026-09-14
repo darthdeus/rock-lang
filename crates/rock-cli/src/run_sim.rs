@@ -946,7 +946,7 @@ fn do_run_named_sims_recorded(
     let (pool, lane) = beside_reload_lane(
         jobs,
         !reload_idx.is_empty(),
-        |jobs| run_bounded(jobs, ordinary_idx.len(), |slot| run_at(ordinary_idx[slot], None)),
+        |width| run_bounded(width, ordinary_idx.len(), |slot| run_at(ordinary_idx[slot], None)),
         || run_reload_lane_serially(reload_lane.as_mut(), &reload_idx, |i, lane| run_at(i, Some(lane))),
     );
     let mut results: HashMap<usize, Result<(String, SimSummary)>> = HashMap::new();
@@ -1014,20 +1014,21 @@ fn do_run_named_sims_recorded(
 /// Both fan-outs go through here: Phase A's fresh-process children
 /// ([`do_run_all_sims`]) and Phase B's boot-checkpoint worker lanes
 /// ([`run_specs_worker_mode`]).
-fn run_bounded<T, F>(jobs: usize, n: usize, task: F) -> Vec<(usize, Result<T>)>
+fn run_bounded<T, F>(width: &PoolWidth, n: usize, task: F) -> Vec<(usize, Result<T>)>
 where
     F: Fn(usize) -> Result<T> + Sync,
     T: Send,
 {
-    if jobs <= 1 || n <= 1 {
+    if width.jobs <= 1 || n <= 1 {
         return (0..n).map(|i| (i, task(i))).collect();
     }
     let next = std::sync::atomic::AtomicUsize::new(0);
     let collected: Mutex<Vec<(usize, Result<T>)>> = Mutex::new(Vec::new());
-    let lanes = jobs.min(n);
+    let lanes = width.jobs.min(n);
     std::thread::scope(|scope| {
         for _ in 0..lanes {
             scope.spawn(|| loop {
+                let _slot = width.enter();
                 let i = next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 if i >= n {
                     break;
@@ -1040,29 +1041,89 @@ where
     collected.into_inner().expect("no lane panicked while holding the results lock")
 }
 
+/// How many of a pool's `jobs` threads may be inside a task at once. A pool
+/// spawns every thread up front; a thread takes a slot before it claims work,
+/// so a narrower width holds threads back without claiming anything for them.
+struct PoolWidth {
+    jobs: usize,
+    /// (width, live)
+    slots: Mutex<(usize, usize)>,
+    changed: std::sync::Condvar,
+}
+
+impl PoolWidth {
+    fn fixed(jobs: usize) -> Self {
+        Self::starting_at(jobs, jobs)
+    }
+
+    fn starting_at(jobs: usize, width: usize) -> Self {
+        let jobs = jobs.max(1);
+        Self { jobs, slots: Mutex::new((width.clamp(1, jobs), 0)), changed: std::sync::Condvar::new() }
+    }
+
+    fn widen_to_jobs(&self) {
+        self.slots.lock().unwrap().0 = self.jobs;
+        self.changed.notify_all();
+    }
+
+    fn enter(&self) -> PoolSlot<'_> {
+        let mut slots = self.slots.lock().unwrap();
+        while slots.1 >= slots.0 {
+            slots = self.changed.wait(slots).unwrap();
+        }
+        slots.1 += 1;
+        PoolSlot(self)
+    }
+}
+
+struct PoolSlot<'a>(&'a PoolWidth);
+
+impl Drop for PoolSlot<'_> {
+    fn drop(&mut self) {
+        // Poisoning means a task panicked, and that panic is re-raised when
+        // the scope joins; the count no longer matters then.
+        if let Ok(mut slots) = self.0.slots.lock() {
+            slots.1 -= 1;
+        }
+        self.0.changed.notify_all();
+    }
+}
+
+/// Pool dispatch order: longest recorded duration first, so the lanes that
+/// would set the suite's tail start while the pool is still full. The sort is
+/// stable, so equal and untimed lanes keep their planned order, after every
+/// timed one.
+fn longest_first(estimates: &[Option<u64>]) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..estimates.len()).collect();
+    order.sort_by_key(|&w| std::cmp::Reverse(estimates[w].unwrap_or(0)));
+    order
+}
+
 /// Run the ordinary `pool` and the hot-reload `lane` at the same time.
 ///
 /// The lane boots a chunk of its own from a session of its own
 /// (`reload_lane_session`), and no reload fixture writes a file an ordinary
 /// entry reads, so an ordinary child cannot observe it. The lane's entries stay
 /// serial among themselves because they share that one session. While the lane
-/// has work it holds one of the `jobs`, so the pool is handed the rest.
+/// has work it holds one of the `jobs`; when it finishes, the pool widens to
+/// all of them.
 fn beside_reload_lane<A, B>(
     jobs: usize,
     lane_has_work: bool,
-    pool: impl FnOnce(usize) -> A + Send,
+    pool: impl FnOnce(&PoolWidth) -> A + Send,
     lane: impl FnOnce() -> B,
 ) -> (A, B)
 where
     A: Send,
 {
     if !lane_has_work {
-        return (pool(jobs), lane());
+        return (pool(&PoolWidth::fixed(jobs)), lane());
     }
-    let pool_jobs = jobs.saturating_sub(1).max(1);
+    let width = PoolWidth::starting_at(jobs, jobs.saturating_sub(1));
     std::thread::scope(|scope| {
-        let pool = scope.spawn(move || pool(pool_jobs));
+        let pool = scope.spawn(|| pool(&width));
         let lane = lane();
+        width.widen_to_jobs();
         let pool = pool.join().unwrap_or_else(|panic| std::panic::resume_unwind(panic));
         (pool, lane)
     })
@@ -1095,7 +1156,7 @@ fn run_reload_lane_serially<T>(
 /// remains. With `capped_jobs >= jobs` the schedule is the plain pool's, task
 /// order included, so the uncapped run is not a second policy.
 fn run_bounded_classed<T, F>(
-    jobs: usize,
+    width: &PoolWidth,
     capped_jobs: usize,
     capped: &[bool],
     task: F,
@@ -1105,8 +1166,9 @@ where
     T: Send,
 {
     let n = capped.len();
+    let jobs = width.jobs;
     if jobs <= 1 || n <= 1 || capped_jobs >= jobs {
-        return run_bounded(jobs, n, task);
+        return run_bounded(width, n, task);
     }
     struct Queue {
         capped: std::collections::VecDeque<usize>,
@@ -1124,6 +1186,7 @@ where
     std::thread::scope(|scope| {
         for _ in 0..lanes {
             scope.spawn(|| loop {
+                let _slot = width.enter();
                 let picked = {
                     let mut q = queue.lock().unwrap();
                     loop {
@@ -1386,7 +1449,7 @@ fn do_run_all_sims_recorded(
     let (pool, lane) = beside_reload_lane(
         jobs,
         !reload_idx.is_empty(),
-        |jobs| run_bounded(jobs, ordinary_idx.len(), |slot| run_at(ordinary_idx[slot], None)),
+        |width| run_bounded(width, ordinary_idx.len(), |slot| run_at(ordinary_idx[slot], None)),
         || run_reload_lane_serially(reload_lane.as_mut(), &reload_idx, |i, lane| run_at(i, Some(lane))),
     );
     for (slot, r) in pool {
@@ -1657,7 +1720,7 @@ pub fn do_run_allocation_census(
     let (pool, lane) = beside_reload_lane(
         jobs,
         !reload_idx.is_empty(),
-        |jobs| run_bounded(jobs, ordinary_idx.len(), |slot| run_at(ordinary_idx[slot], None)),
+        |width| run_bounded(width, ordinary_idx.len(), |slot| run_at(ordinary_idx[slot], None)),
         || run_reload_lane_serially(reload_lane.as_mut(), &reload_idx, |i, lane| run_at(i, Some(lane))),
     );
     let mut results: HashMap<usize, Result<(String, SimSummary)>> = HashMap::new();
@@ -1925,7 +1988,7 @@ pub fn do_run_allocation_sites(
         )
     };
     let mut results = HashMap::new();
-    for (index, result) in run_bounded(jobs, selected.len(), run_at) {
+    for (index, result) in run_bounded(&PoolWidth::fixed(jobs), selected.len(), run_at) {
         results.insert(index, result);
     }
 
@@ -2146,6 +2209,16 @@ fn run_specs_worker_mode(
                 .any(|p| is_reload_lane(env_by_wire.get(*p).map_or(&[][..], |v| v)))
         });
 
+    let recorded_ms = |i: usize| -> Option<u64> {
+        let recorder = recorder?;
+        parse_sim_chain(&specs[i]).iter().filter_map(|p| recorder.recorded_duration_ms(p)).reduce(|a, b| a + b)
+    };
+    let lane_estimates: Vec<Option<u64>> = lanes
+        .iter()
+        .map(|lane| lane.iter().filter_map(|&i| recorded_ms(i)).reduce(|a, b| a + b))
+        .chain(poolable.iter().map(|(i, _)| recorded_ms(*i)))
+        .collect();
+
     if let Some(recorder) = recorder {
         for (lane_id, lane) in lanes.iter().enumerate() {
             let entries: Vec<(u64, String)> = lane
@@ -2161,7 +2234,7 @@ fn run_specs_worker_mode(
                 .first()
                 .and_then(|name| env_by_wire.get(*name))
                 .map_or_else(Vec::new, |env| boot_signature(env));
-            recorder.lane_planned(lane_id, "shared", &entries, &signature, None);
+            recorder.lane_planned(lane_id, "shared", &entries, &signature, None, lane_estimates[lane_id]);
         }
         for (offset, (i, reason)) in poolable.iter().chain(exclusive.iter()).enumerate() {
             let entries = vec![(
@@ -2178,6 +2251,7 @@ fn run_specs_worker_mode(
                 &entries,
                 &signature,
                 Some(reason),
+                recorded_ms(*i),
             );
         }
     }
@@ -2228,6 +2302,16 @@ fn run_specs_worker_mode(
         .map(|l| Lane::Worker(l.as_slice()))
         .chain(poolable.iter().map(|(i, _)| Lane::Isolated(*i)))
         .collect();
+    // A serial run gains nothing from reordering, so it keeps the plan's order.
+    let work: Vec<Lane> = if jobs > 1 {
+        if !quiet {
+            let timed = lane_estimates.iter().filter(|e| e.is_some()).count();
+            println!("[sim] worker: lanes start longest-first by recorded duration ({timed} of {} lanes timed)", work.len());
+        }
+        longest_first(&lane_estimates).into_iter().map(|w| work[w]).collect()
+    } else {
+        work
+    };
 
     let default_stub = asset_stub_value();
     let spec_full_assets = |i: usize| {
@@ -2250,7 +2334,7 @@ fn run_specs_worker_mode(
         );
     }
 
-    let pool = |jobs: usize| run_bounded_classed(jobs, full_asset_jobs, &work_full_assets, |w| match work[w] {
+    let pool = |width: &PoolWidth| run_bounded_classed(width, full_asset_jobs, &work_full_assets, |w| match work[w] {
         Lane::Worker(lane) => {
             let lane_specs: Vec<String> = lane.iter().map(|&i| specs[i].clone()).collect();
             // `run_specs_recovering` is positional, so its results line up with
@@ -6272,7 +6356,7 @@ mod tests {
         let renders: Vec<bool> = (0..40).map(|i| i % 3 == 0).collect();
         let live = AtomicUsize::new(0);
         let peak = AtomicUsize::new(0);
-        let results = run_bounded_classed(8, 2, &renders, |i| {
+        let results = run_bounded_classed(&PoolWidth::fixed(8), 2, &renders, |i| {
             if renders[i] {
                 let now = live.fetch_add(1, Ordering::SeqCst) + 1;
                 peak.fetch_max(now, Ordering::SeqCst);
@@ -6291,10 +6375,66 @@ mod tests {
         assert!(peak.load(Ordering::SeqCst) >= 1);
     }
 
+    /// Both pools the lane runs beside: the plain one and the worker-mode
+    /// pool with a capped class.
+    #[test]
+    fn the_pool_takes_the_reload_lanes_slot_back_when_the_lane_finishes() {
+        let capped: Vec<bool> = (0..60).map(|i| i % 4 == 0).collect();
+        reload_lane_slot_returns(|width, task| run_bounded(width, 60, task));
+        reload_lane_slot_returns(|width, task| run_bounded_classed(width, 1, &capped, task));
+    }
+
+    fn reload_lane_slot_returns(
+        pool: impl FnOnce(&PoolWidth, &(dyn Fn(usize) -> Result<usize> + Sync)) -> Vec<(usize, Result<usize>)> + Send,
+    ) {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        let live = AtomicUsize::new(0);
+        let peak_beside_lane = AtomicUsize::new(0);
+        let peak_after_lane = AtomicUsize::new(0);
+        let lane_done = AtomicBool::new(false);
+        let task = |i: usize| {
+            let now = live.fetch_add(1, Ordering::SeqCst) + 1;
+            if lane_done.load(Ordering::SeqCst) {
+                peak_after_lane.fetch_max(now, Ordering::SeqCst);
+            } else {
+                peak_beside_lane.fetch_max(now, Ordering::SeqCst);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(4));
+            live.fetch_sub(1, Ordering::SeqCst);
+            Ok::<usize, anyhow::Error>(i)
+        };
+        let (pool, ()) = beside_reload_lane(
+            3,
+            true,
+            |width| pool(width, &task),
+            || {
+                std::thread::sleep(std::time::Duration::from_millis(40));
+                lane_done.store(true, Ordering::SeqCst);
+            },
+        );
+        assert_eq!(pool.len(), 60, "every task exactly once");
+        assert!(
+            peak_beside_lane.load(Ordering::SeqCst) <= 2,
+            "the lane holds one of three jobs while it runs, peak {}",
+            peak_beside_lane.load(Ordering::SeqCst)
+        );
+        assert_eq!(
+            peak_after_lane.load(Ordering::SeqCst),
+            3,
+            "the pool widens to every job once the lane is done"
+        );
+    }
+
+    #[test]
+    fn lanes_dispatch_longest_first_with_untimed_lanes_last_in_plan_order() {
+        let estimates = [Some(1_000), None, Some(30_000), Some(1_000), None, Some(8_000)];
+        assert_eq!(longest_first(&estimates), vec![2, 5, 0, 3, 1, 4]);
+    }
+
     #[test]
     fn the_classed_pool_with_no_cap_is_the_plain_pool() {
         let renders = vec![true; 5];
-        let results = run_bounded_classed(4, 4, &renders, |i| Ok::<usize, anyhow::Error>(i * 2));
+        let results = run_bounded_classed(&PoolWidth::fixed(4), 4, &renders, |i| Ok::<usize, anyhow::Error>(i * 2));
         let mut got: Vec<(usize, usize)> = results.into_iter().map(|(i, r)| (i, r.unwrap())).collect();
         got.sort_unstable();
         assert_eq!(got, (0..5).map(|i| (i, i * 2)).collect::<Vec<_>>());

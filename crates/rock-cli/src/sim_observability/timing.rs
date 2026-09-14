@@ -189,6 +189,9 @@ type EntryKey = (u64, u64, usize);
 pub(super) struct Timings {
     policy: TimingPolicy,
     history: HistoricalTimings,
+    /// The most recent finished duration of each (project, entry name),
+    /// under any identity or verdict. Scheduling input, never a baseline.
+    latest: HashMap<(String, String), u64>,
     host: Value,
     config: Value,
     source_clean: bool,
@@ -204,46 +207,56 @@ pub(super) struct Timings {
 impl Timings {
     pub(super) fn new(root: &Path, policy: TimingPolicy, host: Value) -> Self {
         let mut history = HistoricalTimings::default();
-        if let Some(count) = policy.minimum_samples {
-            match std::fs::read_dir(root) {
-                Ok(dirs) => {
-                    let mut paths = dirs.filter_map(|dir| match dir {
-                        Ok(dir) => Some(dir.path().join("timings.json")),
-                        Err(error) => { log::warn!(target: "SIM", "cannot inspect timing history: {error}"); None }
-                    }).collect::<Vec<_>>();
-                    paths.sort();
-                    for path in paths {
-                        let data = match std::fs::read(&path) {
-                            Ok(data) => data,
-                            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-                            Err(e) => { log::warn!(target: "SIM", "cannot read {}: {e}", path.display()); continue; }
-                        };
-                        let value: Value = match serde_json::from_slice(&data) {
-                            Ok(value) => value,
-                            Err(e) => { log::warn!(target: "SIM", "invalid timing history {}: {e}", path.display()); continue; }
-                        };
-                        if value["schema_version"] != 1 { continue; }
-                        // Records written before per-entry acceptance have no
-                        // `baseline_eligible`; for them the old run-level
-                        // `accepted` is the only answer available, and it is
-                        // exactly the set they already contributed.
-                        if !value["baseline_eligible"].as_bool()
-                            .unwrap_or_else(|| value["accepted"] == true) { continue; }
+        let mut latest = HashMap::new();
+        match std::fs::read_dir(root) {
+            Ok(dirs) => {
+                let mut paths = dirs.filter_map(|dir| match dir {
+                    Ok(dir) => Some(dir.path().join("timings.json")),
+                    Err(error) => { log::warn!(target: "SIM", "cannot inspect timing history: {error}"); None }
+                }).collect::<Vec<_>>();
+                // Run ids start with a fixed-width millisecond stamp, so this is
+                // oldest first and a later record overwrites `latest`.
+                paths.sort();
+                for path in paths {
+                    let data = match std::fs::read(&path) {
+                        Ok(data) => data,
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                        Err(e) => { log::warn!(target: "SIM", "cannot read {}: {e}", path.display()); continue; }
+                    };
+                    let value: Value = match serde_json::from_slice(&data) {
+                        Ok(value) => value,
+                        Err(e) => { log::warn!(target: "SIM", "invalid timing history {}: {e}", path.display()); continue; }
+                    };
+                    if value["schema_version"] != 1 { continue; }
+                    if let Some(project) = value["project"].as_str() {
                         for row in value["entries"].as_array().into_iter().flatten() {
-                            if row["passed"] != true || row["completed"] != true { continue; }
-                            if let (Some(name), Some(key), Some(ms)) =
-                                (row["name"].as_str(), row["identity"].as_str(), row["duration_ms"].as_u64()) {
-                                let samples = history.samples.entry((name.into(), key.into())).or_default();
-                                if samples.len() < count { samples.push(ms); }
+                            if row["completed"] != true { continue; }
+                            if let (Some(name), Some(ms)) = (row["name"].as_str(), row["duration_ms"].as_u64()) {
+                                latest.insert((project.to_string(), name.to_string()), ms);
                             }
                         }
                     }
+                    let Some(count) = policy.minimum_samples else { continue };
+                    // Records written before per-entry acceptance have no
+                    // `baseline_eligible`; for them the old run-level
+                    // `accepted` is the only answer available, and it is
+                    // exactly the set they already contributed.
+                    if !value["baseline_eligible"].as_bool()
+                        .unwrap_or_else(|| value["accepted"] == true) { continue; }
+                    for row in value["entries"].as_array().into_iter().flatten() {
+                        if row["passed"] != true || row["completed"] != true { continue; }
+                        if let (Some(name), Some(key), Some(ms)) =
+                            (row["name"].as_str(), row["identity"].as_str(), row["duration_ms"].as_u64()) {
+                            let samples = history.samples.entry((name.into(), key.into())).or_default();
+                            if samples.len() < count { samples.push(ms); }
+                        }
+                    }
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {},
-                Err(e) => log::warn!(target: "SIM", "cannot inspect timing history: {e}"),
             }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {},
+            Err(e) => log::warn!(target: "SIM", "cannot inspect timing history: {e}"),
         }
-        Self { policy, history, host, config: Value::Null, source_clean: false, quiet: Value::Null,
+        Self { policy, history, latest, host, config: Value::Null, source_clean: false, quiet: Value::Null,
             workers: HashMap::new(), runtime: HashMap::new(), active: HashMap::new(),
             phases: HashMap::new(), results: HashMap::new(), rows: Vec::new() }
     }
@@ -344,6 +357,7 @@ impl Timings {
             row
         }).collect::<Vec<_>>();
         let summary = json!({ "schema_version": 1, "host": self.host,
+            "project": self.config["project_path"],
             "warning_policy": { "absolute_ms": self.policy.absolute_ms,
                 "regression_factor": self.policy.regression_factor,
                 "regression_delta_ms": self.policy.regression_delta_ms,
@@ -354,6 +368,11 @@ impl Timings {
         let pending = path.with_extension("json.pending");
         std::fs::write(&pending, serde_json::to_vec(&summary)?)?;
         std::fs::rename(pending, path)
+    }
+
+    pub(super) fn latest_duration_ms(&self, name: &str) -> Option<u64> {
+        let project = self.config["project_path"].as_str()?;
+        self.latest.get(&(project.to_string(), name.to_string())).copied()
     }
 
     pub(super) fn message(&self, warning: &TimingWarning) -> String {
@@ -372,6 +391,36 @@ impl Timings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Dispatch order reads what an entry cost most recently in this project,
+    /// whatever the tree or verdict was: a failing or dirty run still spent
+    /// that long. Only an entry that never finished has no cost to report.
+    #[test]
+    fn the_latest_finished_duration_per_project_is_kept_for_dispatch() {
+        let root = tempfile::tempdir().unwrap();
+        let record = |dir: &str, project: &str, duration: u64, finished: bool| {
+            let path = root.path().join(dir);
+            std::fs::create_dir(&path).unwrap();
+            let mut timing = recorder(root.path());
+            enter(&mut timing, false, 1280);
+            timing.observe("run_config", &json!({ "project_path": project, "effective_mode": "workers", "effective_jobs": 4 }), 0);
+            if finished {
+                end(&mut timing, duration, false);
+            } else {
+                timing.observe("entry_result", &json!({ "worker_attempt": 1, "occurrence_id": 1,
+                    "verdict": "FAIL", "timed_out": true }), duration);
+            }
+            timing.save(&path.join("timings.json"), &json!({ "complete": false, "status": "FAIL" })).unwrap();
+        };
+        record("01", "mag", 5_000, true);
+        record("02", "mag", 3_000, true);
+        record("03", "testbed", 9_000, true);
+        record("04", "mag", 60_000, false);
+        let mut next = recorder(root.path());
+        enter(&mut next, true, 1280);
+        assert_eq!(next.latest_duration_ms("sim"), Some(3_000));
+        assert_eq!(next.latest_duration_ms("never_ran"), None);
+    }
 
     #[test]
     fn warning_defaults_and_independent_overrides() {
