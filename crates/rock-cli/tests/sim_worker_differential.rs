@@ -1362,6 +1362,46 @@ fn an_entry_that_resized_boots_scene_targets_keeps_its_worker() {
     );
 }
 
+#[test]
+fn an_entry_that_shortened_a_boot_pyramid_keeps_its_worker() {
+    let records = run_worker_suite(
+        Backend::Skull,
+        "testbed",
+        &[
+            "b3_pyramid_shrink_head".to_string(),
+            "b3_pyramid_shrink_seed".to_string(),
+            "b3_pyramid_shrink_probe".to_string(),
+        ],
+    )
+    .expect("the suite call itself must not error");
+    assert_eq!(records.len(), 3, "one record per entry spec");
+
+    let (head, head_crossed) = &records[0];
+    assert_eq!(head.verdict(), "PASS", "the head runs normally: {head:?}");
+    assert!(!head_crossed, "entry zero follows nothing");
+
+    let (seed, seed_crossed) = &records[1];
+    assert!(seed_crossed, "the seed follows the head in one process");
+    assert_eq!(
+        seed.verdict(),
+        "PASS",
+        "a level the shorter chain no longer reaches is parked under its boot handle: {seed:?}"
+    );
+
+    let (probe, probe_crossed) = &records[2];
+    assert!(
+        probe_crossed,
+        "a pyramid that lost a level to a smaller capacity kept that level's \
+         handle alive, so the worker survives it and the successor follows the \
+         seed in the same process -- a fresh worker here means the level was destroyed"
+    );
+    assert_eq!(
+        probe.verdict(),
+        "PASS",
+        "and the successor's chain is boot's, at boot's storage: {probe:?}"
+    );
+}
+
 /// A voice on Bitgun's boot-owned sound, which cannot be covered by sound
 /// teardown and therefore exercises the voice destructor itself.
 ///
