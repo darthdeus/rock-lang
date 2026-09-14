@@ -6,6 +6,7 @@
 //! Leaf crate (no `rock-semantic`/`rock-codegen`/`rock` dep) so bone/skull can
 //! depend on it without the legacy pipeline. See `docs/cli-unification-plan.md`.
 
+pub mod art_vault;
 pub mod compilation_units;
 pub mod engine_build;
 pub mod js_runner;

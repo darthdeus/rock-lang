@@ -19,6 +19,45 @@ fn mag_worker_reset_discards_unfinished_save() {
     }
 }
 
+/// MAG session framing, gauges and counters gameplay code reads (telemetry run
+/// and shop edge, world-damage dirty and in-flight gauges, the replay reconcile
+/// flag) are boot state to the next entry, not a predecessor's live value.
+#[test]
+fn mag_worker_boundary_restores_game_diagnostics() {
+    let entries = vec![
+        "worker_boundary_game_diagnostics_seed".to_string(),
+        "worker_boundary_game_diagnostics_probe".to_string(),
+    ];
+    let worker = run_worker_suite(Backend::Skull, "mag", &entries)
+        .expect("game diagnostics worker queue must run");
+    assert_eq!(worker.len(), 2, "both entries must run");
+    assert!(worker[1].1, "probe must cross the seed's live worker boundary");
+    let isolated = run_differential(
+        Backend::Skull,
+        "mag",
+        &DifferentialPlan { predecessors: Vec::new(), target: entries[1].clone() },
+    )
+    .expect("fresh-process control must run")
+    .0;
+    let (probe, _) = &worker[1];
+    assert_eq!(isolated.verdict(), "PASS", "the probe passes in a fresh process: {isolated:?}");
+    // Verdicts and assertion populations rather than the whole comparison: the
+    // worker arm also carries process diagnostics (an absent agent daemon) that
+    // are the harness environment's, not the boundary's.
+    assert_eq!(probe.verdict(), "PASS", "the probe passes behind the seed: {probe:?}");
+    assert!(probe.errors.is_empty(), "the probe raised behind the seed: {probe:?}");
+    assert!(!isolated.expects_pass.is_empty(), "the probe asserted nothing");
+    assert_eq!(
+        probe.expects_pass.len(),
+        isolated.expects_pass.len(),
+        "the probe asserted the same population in a worker as alone"
+    );
+    assert_eq!(
+        isolated.artifacts["session.txt"], probe.artifacts["session.txt"],
+        "the probe read the same telemetry framing in a worker as alone"
+    );
+}
+
 #[test]
 fn mag_bootimage_queue_isolates_scene_and_gameplay_entries() {
     let entries = vec![

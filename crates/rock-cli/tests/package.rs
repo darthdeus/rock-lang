@@ -332,7 +332,9 @@ fn package_excludes_unrelated_external_asset_overlays() {
     std::fs::create_dir_all(source.parent().unwrap()).unwrap();
     std::fs::write(&source, "from-overlay").unwrap();
     let out_dir = tempfile::tempdir().expect("package output");
-    let canonical_overlay = repo_root().join("../game-art-vault/mag");
+    let canonical_overlay = rock_host::art_vault::root()
+        .expect("the game-art vault is required for this package control")
+        .join("mag");
     assert!(canonical_overlay.is_dir(), "the MAG audio overlay is required for this package control");
     let overlays = std::env::join_paths([overlay.path(), canonical_overlay.as_path()]).unwrap();
 

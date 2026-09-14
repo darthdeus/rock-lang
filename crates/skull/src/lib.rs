@@ -1815,7 +1815,7 @@ fn type_table_defs(
     ws: &Workspace,
     gc: &rustc_hash::FxHashSet<ustr::Ustr>,
 ) -> Result<String, CompilerError> {
-    let mut out = String::new();
+    let mut out = String::from("_G.__ROCK_ENUM_FLAT_LAYOUT = {}\n");
     let mut type_id = 100i64;
     for module in ws.modules.iter() {
         for (_, s) in module.structs.iter() {
@@ -1876,8 +1876,17 @@ fn type_table_defs(
         for (_, e) in module.enums.iter() {
             use bone_semantic::hir::VariantPayload;
 
-            let Some(shape) = skull_mir::lower::EnumPlan::for_name(ws, e.name)
-                .and_then(|plan| plan.cdata().cloned())
+            let plan = skull_mir::lower::EnumPlan::for_name(ws, e.name);
+            if let Some(flat) = plan.as_ref().and_then(|plan| plan.flat()) {
+                let names = flat.record_fields().iter()
+                    .map(|name| format!("\"{name}\""))
+                    .collect::<Vec<_>>().join(", ");
+                out.push_str(&format!(
+                    "_G.__ROCK_ENUM_FLAT_LAYOUT[\"{}\"] = {{ tuple_width = {}, record_fields = {{ {} }} }}\n",
+                    e.name, flat.tuple_width(), names,
+                ));
+            }
+            let Some(shape) = plan.and_then(|plan| plan.cdata().cloned())
             else {
                 // A BOXED enum has no value shape, and until now no reflection
                 // entry at all -- so a serializer reaching one had nothing to

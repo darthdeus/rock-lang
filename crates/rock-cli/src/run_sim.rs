@@ -324,9 +324,10 @@ fn compile_sims_with(
 /// through `SkullStone::apply_edit`, which yields an `incremental.lua` overlay
 /// only under the GLOBAL callee shape: the shipped `upvalue` shape binds a
 /// caller's callees as immutable upvalues, and an overlay that redefines one
-/// global cannot rebind them. Every sim of one invocation boots ONE `main.lua`,
-/// so the lane cannot borrow the shared session -- it gets its own emit in its
-/// own directory, and the shared chunk keeps the shipped shape.
+/// global cannot rebind them. Reload fixtures also rewrite the chunk they booted
+/// from, so the lane never borrows the shared session or its directory, even
+/// when the shared one is already global-shaped: that separation is what lets
+/// the lane run beside the pool (`beside_reload_lane`).
 pub struct ReloadLaneSession {
     stone: crate::skull_backend::SkullStone,
     output: String,
@@ -334,21 +335,18 @@ pub struct ReloadLaneSession {
     _dir: TempDir,
 }
 
-/// The session (and output directory) the hot-reload lane must use, or `None`
-/// when the shared one already has the shape it needs.
+/// The session (and output directory) the hot-reload lane uses, or `None` when
+/// the selection holds no reload sim.
 ///
 /// Costs ONE extra whole-project emit, paid once per invocation and only when
-/// the selection actually contains a reload sim AND the shared session is bound.
-/// Under `ROCK_SKULL_CALLEE_BINDING=global` the shared session is already
-/// global-shaped and this returns `None`, so the fast path pays nothing.
+/// the selection actually contains a reload sim.
 fn reload_lane_session(
     backend: crate::Backend,
     project_path: &Path,
-    shared: &crate::skull_backend::SkullStone,
     lane_is_selected: bool,
     quiet: bool,
 ) -> Result<Option<ReloadLaneSession>> {
-    if !lane_is_selected || shared.callee_binding() == skull::CalleeBindingMode::Global {
+    if !lane_is_selected {
         return Ok(None);
     }
     let dir = sim_output_dir()?;
@@ -367,7 +365,7 @@ fn reload_lane_session(
         // Result output: says which of the two chunks this invocation built and
         // why, so a reload sim's shape is never inferred from the default.
         println!(
-            "[sim] hot-reload lane: separate build with callee binding `global` ({compile_ms:.0}ms) -- an overlay cannot rebind an immutable upvalue"
+            "[sim] hot-reload lane: separate build with callee binding `global` ({compile_ms:.0}ms) -- its fixtures rewrite their own chunk"
         );
     }
     Ok(Some(ReloadLaneSession { stone, output, _dir: dir }))
@@ -474,6 +472,8 @@ fn do_run_sim_opts_recorded(
         &project_path,
         &wire_names,
         requested_jobs,
+        1,
+        None,
         1,
         requested_mode,
         "single",
@@ -756,7 +756,7 @@ pub fn do_run_named_sims(
     quiet: bool,
     update_snapshots: bool,
     jobs: Option<usize>,
-    render_jobs: Option<usize>,
+    full_asset_jobs: Option<usize>,
     mode: SimExecMode,
 ) -> Result<()> {
     // One name: identical to the classic single-run path (full detail). There
@@ -789,7 +789,7 @@ pub fn do_run_named_sims(
         quiet,
         update_snapshots,
         jobs,
-        render_jobs,
+        full_asset_jobs,
         mode,
         &recorder,
     );
@@ -805,7 +805,7 @@ fn do_run_named_sims_recorded(
     quiet: bool,
     update_snapshots: bool,
     jobs: Option<usize>,
-    render_jobs: Option<usize>,
+    full_asset_jobs: Option<usize>,
     mode: SimExecMode,
     recorder: &SimRunRecorder,
 ) -> Result<()> {
@@ -820,7 +820,7 @@ fn do_run_named_sims_recorded(
 
     let out_dir = sim_output_dir()?;
     let output = out_dir.path().to_string_lossy().into_owned();
-    let (wire_names, env_by_wire, mut stone) = recorder.phase("compile_and_discover", || {
+    let (wire_names, env_by_wire, _stone) = recorder.phase("compile_and_discover", || {
         compile_sims(backend, project_path.clone(), PathBuf::from(&output))
     })?;
     emit_bytecode_image(Path::new(&output));
@@ -830,11 +830,15 @@ fn do_run_named_sims_recorded(
     let requested_mode = sim_exec_mode_name(mode);
     let mode = resolve_exec_mode(mode, update_snapshots, quiet)?;
     let effective_jobs = resolve_jobs(jobs, update_snapshots);
+    let requested_full_asset_jobs = full_asset_jobs;
+    let full_asset_jobs = resolve_full_asset_jobs(full_asset_jobs, effective_jobs);
     recorder.configure(
         &project_path,
         &wire_names,
         jobs,
         effective_jobs,
+        requested_full_asset_jobs,
+        full_asset_jobs,
         requested_mode,
         sim_exec_mode_name(mode),
         update_snapshots,
@@ -842,7 +846,6 @@ fn do_run_named_sims_recorded(
     let mut reload_lane = reload_lane_session(
         backend,
         &project_path,
-        &stone,
         any_reload_lane_selected(names, &env_by_wire),
         quiet,
     )?;
@@ -855,8 +858,7 @@ fn do_run_named_sims_recorded(
             quiet,
             update_snapshots,
             jobs,
-            render_jobs,
-            &mut stone,
+            full_asset_jobs,
             reload_lane.as_mut(),
             Some(recorder),
             Some(&entry_ids),
@@ -941,35 +943,17 @@ fn do_run_named_sims_recorded(
         Ok((display_name, summary))
     };
 
+    let (pool, lane) = beside_reload_lane(
+        jobs,
+        !reload_idx.is_empty(),
+        |jobs| run_bounded(jobs, ordinary_idx.len(), |slot| run_at(ordinary_idx[slot], None)),
+        || run_reload_lane_serially(reload_lane.as_mut(), &reload_idx, |i, lane| run_at(i, Some(lane))),
+    );
     let mut results: HashMap<usize, Result<(String, SimSummary)>> = HashMap::new();
-    if jobs > 1 && ordinary_idx.len() > 1 {
-        let next = std::sync::atomic::AtomicUsize::new(0);
-        let collected: Mutex<Vec<(usize, Result<(String, SimSummary)>)>> =
-            Mutex::new(Vec::new());
-        let workers = jobs.min(ordinary_idx.len());
-        std::thread::scope(|scope| {
-            for _ in 0..workers {
-                scope.spawn(|| loop {
-                    let slot = next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    let Some(&i) = ordinary_idx.get(slot) else { break };
-                    let r = run_at(i, None);
-                    collected.lock().unwrap().push((i, r));
-                });
-            }
-        });
-        results.extend(collected.into_inner().unwrap());
-    } else {
-        for &i in &ordinary_idx {
-            results.insert(i, run_at(i, None));
-        }
+    for (slot, r) in pool {
+        results.insert(ordinary_idx[slot], r);
     }
-    let (lane_stone, lane_output) = match reload_lane.as_mut() {
-        Some(lane) => (&mut lane.stone, lane.output.as_str()),
-        None => (&mut stone, output.as_str()),
-    };
-    for &i in &reload_idx {
-        results.insert(i, run_at(i, Some((&mut *lane_stone, lane_output))));
-    }
+    results.extend(lane);
 
     // Accounting walks the order the user gave, so the failed list matches a
     // serial run's regardless of completion order.
@@ -1056,37 +1040,83 @@ where
     collected.into_inner().expect("no lane panicked while holding the results lock")
 }
 
-/// `run_bounded` with a second cap: at most `render_jobs` of the `jobs`
-/// threads may be inside a task whose `renders[i]` is true at any moment.
+/// Run the ordinary `pool` and the hot-reload `lane` at the same time.
 ///
-/// Rendering tasks are handed out in index order and non-rendering ones fill
-/// every slot the cap leaves free, so a full pool stays full whenever there
-/// is non-rendering work; a thread only waits when the cap is reached AND
-/// nothing else remains. With `render_jobs >= jobs` the schedule is the plain
-/// pool's, task order included, so the uncapped run is not a second policy.
+/// The lane boots a chunk of its own from a session of its own
+/// (`reload_lane_session`), and no reload fixture writes a file an ordinary
+/// entry reads, so an ordinary child cannot observe it. The lane's entries stay
+/// serial among themselves because they share that one session. While the lane
+/// has work it holds one of the `jobs`, so the pool is handed the rest.
+fn beside_reload_lane<A, B>(
+    jobs: usize,
+    lane_has_work: bool,
+    pool: impl FnOnce(usize) -> A + Send,
+    lane: impl FnOnce() -> B,
+) -> (A, B)
+where
+    A: Send,
+{
+    if !lane_has_work {
+        return (pool(jobs), lane());
+    }
+    let pool_jobs = jobs.saturating_sub(1).max(1);
+    std::thread::scope(|scope| {
+        let pool = scope.spawn(move || pool(pool_jobs));
+        let lane = lane();
+        let pool = pool.join().unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+        (pool, lane)
+    })
+}
+
+/// Each reload entry at `indices`, one at a time through the lane's session.
+fn run_reload_lane_serially<T>(
+    lane: Option<&mut ReloadLaneSession>,
+    indices: &[usize],
+    mut run: impl FnMut(usize, (&mut crate::skull_backend::SkullStone, &str)) -> Result<T>,
+) -> Vec<(usize, Result<T>)> {
+    let Some(lane) = lane else {
+        return indices
+            .iter()
+            .map(|&i| (i, Err(anyhow!("reload entry {i} was selected without a lane session"))))
+            .collect();
+    };
+    indices
+        .iter()
+        .map(|&i| (i, run(i, (&mut lane.stone, lane.output.as_str()))))
+        .collect()
+}
+
+/// `run_bounded` with a second cap: at most `capped_jobs` of the `jobs`
+/// threads may be inside a task whose `capped[i]` is true at any moment.
+///
+/// Capped tasks are handed out in index order and the others fill every slot
+/// the cap leaves free, so a full pool stays full whenever there is uncapped
+/// work; a thread only waits when the cap is reached AND nothing else
+/// remains. With `capped_jobs >= jobs` the schedule is the plain pool's, task
+/// order included, so the uncapped run is not a second policy.
 fn run_bounded_classed<T, F>(
     jobs: usize,
-    render_jobs: usize,
-    renders: &[bool],
+    capped_jobs: usize,
+    capped: &[bool],
     task: F,
 ) -> Vec<(usize, Result<T>)>
 where
     F: Fn(usize) -> Result<T> + Sync,
     T: Send,
 {
-    let n = renders.len();
-    if jobs <= 1 || n <= 1 || render_jobs >= jobs {
+    let n = capped.len();
+    if jobs <= 1 || n <= 1 || capped_jobs >= jobs {
         return run_bounded(jobs, n, task);
     }
     struct Queue {
-        rendering: std::collections::VecDeque<usize>,
+        capped: std::collections::VecDeque<usize>,
         other: std::collections::VecDeque<usize>,
-        live_rendering: usize,
+        live_capped: usize,
     }
     let queue = Mutex::new(Queue {
-        rendering: (0..n).filter(|&i| renders[i]).collect(),
-        other: (0..n).filter(|&i| !renders[i]).collect(),
-        live_rendering: 0,
+        capped: (0..n).filter(|&i| capped[i]).collect(),
+        other: (0..n).filter(|&i| !capped[i]).collect(),
+        live_capped: 0,
     });
     let freed = std::sync::Condvar::new();
     let collected: Mutex<Vec<(usize, Result<T>)>> = Mutex::new(Vec::new());
@@ -1097,28 +1127,28 @@ where
                 let picked = {
                     let mut q = queue.lock().unwrap();
                     loop {
-                        if q.live_rendering < render_jobs {
-                            if let Some(i) = q.rendering.pop_front() {
-                                q.live_rendering += 1;
+                        if q.live_capped < capped_jobs {
+                            if let Some(i) = q.capped.pop_front() {
+                                q.live_capped += 1;
                                 break Some((i, true));
                             }
                         }
                         if let Some(i) = q.other.pop_front() {
                             break Some((i, false));
                         }
-                        if q.rendering.is_empty() {
+                        if q.capped.is_empty() {
                             break None;
                         }
-                        // Only rendering work is left and the cap is reached:
-                        // wait for a rendering slot, never spin.
+                        // Only capped work is left and the cap is reached:
+                        // wait for a capped slot, never spin.
                         q = freed.wait(q).unwrap();
                     }
                 };
-                let Some((i, rendering)) = picked else { break };
+                let Some((i, is_capped)) = picked else { break };
                 let r = task(i);
                 collected.lock().unwrap().push((i, r));
-                if rendering {
-                    queue.lock().unwrap().live_rendering -= 1;
+                if is_capped {
+                    queue.lock().unwrap().live_capped -= 1;
                     freed.notify_all();
                 }
             });
@@ -1133,7 +1163,7 @@ pub fn do_run_all_sims(
     quiet: bool,
     update_snapshots: bool,
     jobs: Option<usize>,
-    render_jobs: Option<usize>,
+    full_asset_jobs: Option<usize>,
     mode: SimExecMode,
 ) -> Result<()> {
     rock_host::project::ensure_workspace_root()?;
@@ -1151,7 +1181,7 @@ pub fn do_run_all_sims(
         quiet,
         update_snapshots,
         jobs,
-        render_jobs,
+        full_asset_jobs,
         mode,
         &recorder,
     );
@@ -1166,7 +1196,7 @@ fn do_run_all_sims_recorded(
     quiet: bool,
     update_snapshots: bool,
     jobs: Option<usize>,
-    render_jobs: Option<usize>,
+    full_asset_jobs: Option<usize>,
     mode: SimExecMode,
     recorder: &SimRunRecorder,
 ) -> Result<()> {
@@ -1181,7 +1211,7 @@ fn do_run_all_sims_recorded(
 
     let out_dir = sim_output_dir()?;
     let output = out_dir.path().to_string_lossy().into_owned();
-    let (wire_names, env_by_wire, mut stone) = recorder.phase("compile_and_discover", || {
+    let (wire_names, env_by_wire, _stone) = recorder.phase("compile_and_discover", || {
         compile_sims(backend, project_path.clone(), PathBuf::from(&output))
     })?;
     emit_bytecode_image(Path::new(&output));
@@ -1194,11 +1224,15 @@ fn do_run_all_sims_recorded(
     let requested_mode = sim_exec_mode_name(mode);
     let mode = resolve_exec_mode(mode, update_snapshots, quiet)?;
     let effective_jobs = resolve_jobs(jobs, update_snapshots);
+    let requested_full_asset_jobs = full_asset_jobs;
+    let full_asset_jobs = resolve_full_asset_jobs(full_asset_jobs, effective_jobs);
     recorder.configure(
         &project_path,
         &wire_names,
         jobs,
         effective_jobs,
+        requested_full_asset_jobs,
+        full_asset_jobs,
         requested_mode,
         sim_exec_mode_name(mode),
         update_snapshots,
@@ -1221,7 +1255,6 @@ fn do_run_all_sims_recorded(
     let mut reload_lane = reload_lane_session(
         backend,
         &project_path,
-        &stone,
         any_reload_lane_selected(&wire_names, &env_by_wire),
         quiet,
     )?;
@@ -1234,8 +1267,7 @@ fn do_run_all_sims_recorded(
             quiet,
             update_snapshots,
             jobs,
-            render_jobs,
-            &mut stone,
+            full_asset_jobs,
             reload_lane.as_mut(),
             Some(recorder),
             Some(&entry_ids),
@@ -1297,8 +1329,8 @@ fn do_run_all_sims_recorded(
         active_indices.push(i);
     }
 
-    // Two lanes. Reload sims mutate the one session and the one overlay, so
-    // they run alone with nothing else in flight; everything else is
+    // Two lanes: reload sims share the lane's one session, so they run one at a
+    // time beside the pool (`beside_reload_lane`); everything else is
     // independent once the compiled output is invocation-owned.
     let (reload_idx, ordinary_idx): (Vec<usize>, Vec<usize>) = active_indices
         .into_iter()
@@ -1351,19 +1383,16 @@ fn do_run_all_sims_recorded(
         Ok(summary)
     };
 
-    for (slot, r) in run_bounded(jobs, ordinary_idx.len(), |slot| run_at(ordinary_idx[slot], None))
-    {
+    let (pool, lane) = beside_reload_lane(
+        jobs,
+        !reload_idx.is_empty(),
+        |jobs| run_bounded(jobs, ordinary_idx.len(), |slot| run_at(ordinary_idx[slot], None)),
+        || run_reload_lane_serially(reload_lane.as_mut(), &reload_idx, |i, lane| run_at(i, Some(lane))),
+    );
+    for (slot, r) in pool {
         summaries.insert(ordinary_idx[slot], r);
     }
-
-    // Reload lane, strictly after the pool has drained.
-    let (lane_stone, lane_output) = match reload_lane.as_mut() {
-        Some(lane) => (&mut lane.stone, lane.output.as_str()),
-        None => (&mut stone, output.as_str()),
-    };
-    for &i in &reload_idx {
-        summaries.insert(i, run_at(i, Some((&mut *lane_stone, lane_output))));
-    }
+    summaries.extend(lane);
 
     // Records printed in completion order; the ACCOUNTING is registry order, so
     // the failed list and tally are identical to a serial run's.
@@ -1563,7 +1592,7 @@ pub fn do_run_allocation_census(
 
     let out_dir = sim_output_dir()?;
     let output = out_dir.path().to_string_lossy().into_owned();
-    let (wire_names, env_by_wire, mut stone) =
+    let (wire_names, env_by_wire, _stone) =
         compile_sims(backend, project_path.clone(), PathBuf::from(&output))?;
     emit_bytecode_image(Path::new(&output));
     sim_spawn_barrier();
@@ -1602,7 +1631,6 @@ pub fn do_run_allocation_census(
     let mut reload_lane = reload_lane_session(
         backend,
         &project_path,
-        &stone,
         !reload_idx.is_empty(),
         false,
     )?;
@@ -1626,19 +1654,17 @@ pub fn do_run_allocation_census(
         )
     };
 
+    let (pool, lane) = beside_reload_lane(
+        jobs,
+        !reload_idx.is_empty(),
+        |jobs| run_bounded(jobs, ordinary_idx.len(), |slot| run_at(ordinary_idx[slot], None)),
+        || run_reload_lane_serially(reload_lane.as_mut(), &reload_idx, |i, lane| run_at(i, Some(lane))),
+    );
     let mut results: HashMap<usize, Result<(String, SimSummary)>> = HashMap::new();
-    for (slot, result) in run_bounded(jobs, ordinary_idx.len(), |slot| {
-        run_at(ordinary_idx[slot], None)
-    }) {
+    for (slot, result) in pool {
         results.insert(ordinary_idx[slot], result);
     }
-    let (lane_stone, lane_output) = match reload_lane.as_mut() {
-        Some(lane) => (&mut lane.stone, lane.output.as_str()),
-        None => (&mut stone, output.as_str()),
-    };
-    for &i in &reload_idx {
-        results.insert(i, run_at(i, Some((&mut *lane_stone, lane_output))));
-    }
+    results.extend(lane);
 
     let mut records = Vec::with_capacity(selected.len());
     let mut ranked = Vec::new();
@@ -2003,8 +2029,8 @@ pub fn do_run_allocation_sites(
 ///   part: a lane holds spec POSITIONS and `run_specs_recovering` expands each
 ///   into its parts in order, sharing one `$OUT`;
 /// - an isolated entry that does not need the compile session rides the same
-///   pool; the hot-reload lane runs strictly AFTER the pool drains, because it
-///   mutates the one session and the one overlay;
+///   pool; the hot-reload lane runs BESIDE the pool from its own session and
+///   chunk (`beside_reload_lane`), its entries serial among themselves;
 /// - reporting is deferred to spec order. Completion order is not
 ///   deterministic, and a record has to be emitted whole.
 ///
@@ -2060,21 +2086,13 @@ fn run_specs_worker_mode(
     quiet: bool,
     update_snapshots: bool,
     jobs: Option<usize>,
-    render_jobs: Option<usize>,
-    stone: &mut crate::skull_backend::SkullStone,
+    full_asset_jobs: usize,
     reload_lane: Option<&mut ReloadLaneSession>,
     recorder: Option<&SimRunRecorder>,
     entry_ids: Option<&[u64]>,
 ) -> Result<Vec<(String, SimSummary)>> {
 
     let jobs = resolve_jobs(jobs, update_snapshots);
-    // The emitted callee shape the hot-reload lane's chunk carries: its own
-    // session is always global-shaped, and without one it shares this
-    // invocation's chunk.
-    let lane_shape = match (&reload_lane, stone.callee_binding()) {
-        (Some(_), _) | (None, skull::CalleeBindingMode::Global) => "global",
-        (None, skull::CalleeBindingMode::Upvalue) => "upvalue",
-    };
     let active_renderer = active_sim_renderer(Path::new(project));
     let mut slots: Vec<Option<SimSummary>> = specs.iter().map(|_| None).collect();
     let mut active_specs: Vec<String> = Vec::new();
@@ -2191,14 +2209,10 @@ fn run_specs_worker_mode(
         for (i, reason) in poolable.iter() {
             println!("[sim] {}: isolated ({reason})", specs[*i]);
         }
-        // The hot-reload lane also reports the SHAPE it compiled with. Its
-        // reload path only works under one of the two, and which chunk it got
-        // must not have to be inferred from the shipped default.
+        // The hot-reload lane also reports the SHAPE its own chunk carries; its
+        // reload path only works under that one.
         for (i, reason) in exclusive.iter() {
-            println!(
-                "[sim] {}: isolated ({reason}; callee binding `{lane_shape}`)",
-                specs[*i]
-            );
+            println!("[sim] {}: isolated ({reason}; callee binding `global`)", specs[*i]);
         }
     }
 
@@ -2215,29 +2229,28 @@ fn run_specs_worker_mode(
         .chain(poolable.iter().map(|(i, _)| Lane::Isolated(*i)))
         .collect();
 
-    let render_jobs = resolve_render_jobs(render_jobs, jobs);
-    let spec_renders = |i: usize| {
-        parse_sim_chain(&specs[i])
-            .iter()
-            .any(|p| entry_renders(env_by_wire.get(*p).map_or(&[][..], |v| v)))
+    let default_stub = asset_stub_value();
+    let spec_full_assets = |i: usize| {
+        parse_sim_chain(&specs[i]).iter().any(|p| {
+            entry_full_assets(env_by_wire.get(*p).map_or(&[][..], |v| v), default_stub)
+        })
     };
-    let work_renders: Vec<bool> = work
+    let work_full_assets: Vec<bool> = work
         .iter()
         .map(|l| match l {
-            Lane::Worker(lane) => lane.iter().any(|&i| spec_renders(i)),
-            Lane::Isolated(i) => spec_renders(*i),
+            Lane::Worker(lane) => lane.iter().any(|&i| spec_full_assets(i)),
+            Lane::Isolated(i) => spec_full_assets(*i),
         })
         .collect();
-    if !quiet && render_jobs < jobs {
-        let rendering = work_renders.iter().filter(|r| **r).count();
+    if !quiet && full_asset_jobs < jobs {
+        let full = work_full_assets.iter().filter(|r| **r).count();
         println!(
-            "[sim] worker: at most {render_jobs} of {jobs} lanes render at once ({rendering} rendering lanes of {})",
+            "[sim] worker: at most {full_asset_jobs} of {jobs} lanes hold full-size assets at once ({full} full-asset lanes of {})",
             work.len()
         );
     }
 
-    let mut collected: Vec<(usize, SimSummary)> = Vec::new();
-    for (_, r) in run_bounded_classed(jobs, render_jobs, &work_renders, |w| match work[w] {
+    let pool = |jobs: usize| run_bounded_classed(jobs, full_asset_jobs, &work_full_assets, |w| match work[w] {
         Lane::Worker(lane) => {
             let lane_specs: Vec<String> = lane.iter().map(|&i| specs[i].clone()).collect();
             // `run_specs_recovering` is positional, so its results line up with
@@ -2285,33 +2298,11 @@ fn run_specs_worker_mode(
             )?;
             Ok(vec![(i, summary)])
         }
-    }) {
-        collected.extend(r?);
-    }
-    for (i, summary) in collected {
-        slots[i] = Some(summary);
-    }
+    });
 
-    // The hot-reload lane, strictly after the pool has drained: it mutates one
-    // `SkullStone` session and one `incremental.lua` overlay. Which session
-    // depends on the shipped shape -- under `upvalue` the lane has its own
-    // global-shaped build in its own directory, because an overlay cannot
-    // rebind an immutable upvalue (`reload_lane_session`).
-    let (lane_stone, lane_output) = match reload_lane {
-        Some(lane) => (&mut lane.stone, lane.output.as_str()),
-        None => (&mut *stone, output),
-    };
-    // ONE child for the whole lane, entries in sequence. The lane was seven
-    // children because it was run one `run_named_entry` at a time, not because
-    // the entries disagree about anything: `FRAME_COUNT` is the only key they
-    // differ on and it is runner-owned, carried per entry in the plan, so all
-    // seven share the one boot signature `[("STONE_HOT_RELOAD", "1")]`.
-    //
-    // Boot was 7.1s of the lane's 9.1s, so chaining removes about 6.1s of a
-    // 12.3s serial tail. The lane stays strictly after the pool and strictly
-    // serial within itself, which is what the session and the overlay require,
-    // so the shared-asset-writer hazard that reverted the tenth pass's attempt
-    // to overlap it with the POOL does not arise here.
+    // ONE child for the whole lane, entries in sequence: `FRAME_COUNT` is the
+    // only key the reload sims differ on and it is runner-owned, so they share
+    // the boot signature `[("STONE_HOT_RELOAD", "1")]`.
     //
     // Each reload sim restores the source it edited before it stops, so an
     // entry cannot hand reloaded code to its successor; `revert_reload_edits`
@@ -2321,54 +2312,74 @@ fn run_specs_worker_mode(
     // booting. Those declare `SIM_WORKER_ISOLATED` and run alone inside the
     // lane; the rest chain. Same opt-out the pool honours, read here because
     // `worker_ineligibility` reports the reload lane first.
-    let (lane_alone, lane_chained): (Vec<_>, Vec<_>) = exclusive.iter().partition(|(i, _)| {
-        parse_sim_chain(&specs[*i])
-            .iter()
-            .any(|p| declares_worker_isolated(env_by_wire.get(*p).map_or(&[][..], |v| v)))
-    });
-    for (i, _) in &lane_alone {
-        let i = *i;
-        let (_, summary) = run_named_entry(
-            project,
-            &specs[i],
-            quiet,
-            true,
-            update_snapshots,
-            lane_output,
-            env_by_wire,
-            Some(&mut *lane_stone),
-            None,
-            recorder,
-            entry_ids.and_then(|ids| ids.get(i)).copied(),
-        )?;
-        slots[i] = Some(summary);
+    let run_lane = || -> Result<Vec<(usize, SimSummary)>> {
+        let mut done = Vec::new();
+        if exclusive.is_empty() {
+            return Ok(done);
+        }
+        let lane = reload_lane
+            .ok_or_else(|| anyhow!("reload sims were selected without a lane session"))?;
+        let (lane_stone, lane_output) = (&mut lane.stone, lane.output.as_str());
+        let (lane_alone, lane_chained): (Vec<_>, Vec<_>) = exclusive.iter().partition(|(i, _)| {
+            parse_sim_chain(&specs[*i])
+                .iter()
+                .any(|p| declares_worker_isolated(env_by_wire.get(*p).map_or(&[][..], |v| v)))
+        });
+        for (i, _) in &lane_alone {
+            let i = *i;
+            let (_, summary) = run_named_entry(
+                project,
+                &specs[i],
+                quiet,
+                true,
+                update_snapshots,
+                lane_output,
+                env_by_wire,
+                Some(&mut *lane_stone),
+                None,
+                recorder,
+                entry_ids.and_then(|ids| ids.get(i)).copied(),
+            )?;
+            done.push((i, summary));
+        }
+        if !lane_chained.is_empty() {
+            let lane_specs: Vec<String> =
+                lane_chained.iter().map(|(i, _)| specs[*i].clone()).collect();
+            let lane_entry_ids: Option<Vec<u64>> = entry_ids
+                .map(|ids| lane_chained.iter().map(|(i, _)| ids[*i]).collect());
+            let results = run_specs_recovering(
+                project,
+                lane_output,
+                env_by_wire,
+                &lane_specs,
+                update_snapshots,
+                false,
+                recorder,
+                lane_entry_ids.as_deref(),
+                Some(&mut *lane_stone),
+            )?;
+            if results.len() != lane_chained.len() {
+                return Err(anyhow!(
+                    "reload lane returned {} results for {} entries",
+                    results.len(),
+                    lane_chained.len()
+                ));
+            }
+            for ((i, _), (_, summary, _crossed)) in lane_chained.iter().zip(results) {
+                done.push((*i, summary));
+            }
+        }
+        Ok(done)
+    };
+
+    let (pool, lane) = beside_reload_lane(jobs, !exclusive.is_empty(), pool, run_lane);
+    for (_, r) in pool {
+        for (i, summary) in r? {
+            slots[i] = Some(summary);
+        }
     }
-    if !lane_chained.is_empty() {
-        let exclusive = &lane_chained;
-        let lane_specs: Vec<String> = exclusive.iter().map(|(i, _)| specs[*i].clone()).collect();
-        let lane_entry_ids: Option<Vec<u64>> = entry_ids
-            .map(|ids| exclusive.iter().map(|(i, _)| ids[*i]).collect());
-        let results = run_specs_recovering(
-            project,
-            lane_output,
-            env_by_wire,
-            &lane_specs,
-            update_snapshots,
-            false,
-            recorder,
-            lane_entry_ids.as_deref(),
-            Some(&mut *lane_stone),
-        )?;
-        if results.len() != exclusive.len() {
-            return Err(anyhow!(
-                "reload lane returned {} results for {} entries",
-                results.len(),
-                exclusive.len()
-            ));
-        }
-        for ((i, _), (_, summary, _crossed)) in exclusive.iter().zip(results) {
-            slots[*i] = Some(summary);
-        }
+    for (i, summary) in lane? {
+        slots[i] = Some(summary);
     }
 
     // Records are emitted in SPEC order, whole. Completion order under a pool is
@@ -2624,24 +2635,43 @@ fn entry_is_reload_lane(
         .any(|part| env_by_wire.get(*part).is_some_and(|e| is_reload_lane(e)))
 }
 
-/// Conservative default for concurrent sim children.
+/// Default concurrency for sim children: the machine's core count.
 ///
-/// Deliberately well under the point where a machine starts failing: sim
-/// children each create a GL context, and oversubscribing the driver produces
-/// GL errors rather than slowdown. The suite only has to beat serial, so this
-/// is not tuned for the best observed number and should only be raised from a
-/// measurement on more than one machine (`docs/sim-speed-plan.md`).
-const DEFAULT_SIM_JOBS: usize = 4;
-
-/// Resolve the cap on concurrently RENDERING children. A rendering child
-/// holds real image pixels and the scene target set on the GPU (a few GB on
-/// the measured host, against well under one for a non-rendering child), so
-/// on a card with a fixed budget the number of them alive at once is what
-/// overflows, not the job count. `None` is no separate cap; anything
-/// requested is clamped into `1..=jobs`.
-fn resolve_render_jobs(requested: Option<usize>, jobs: usize) -> usize {
-    requested.unwrap_or(jobs).clamp(1, jobs.max(1))
+/// The earlier constant 4 was held by a rule that it only rises from a
+/// measurement on more than one machine; the author retired that rule on
+/// 2026-09-14 (`docs/sim-author-decisions.md`). GPU memory, which was the
+/// reason to stay low, is bounded separately by `--full-asset-jobs`, and the
+/// mag suite at the core count of the measured host (14) runs in under half
+/// the wall of `-j 8` with the same failing names except timing-sensitive
+/// allocation rotators (`docs/sim-boot-cost-analysis.md`, "Job count").
+fn default_sim_jobs() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
 }
+
+/// Resolve the cap on concurrently FULL-ASSET children (`entry_full_assets`).
+/// Such a child holds every image at the file's own size on the GPU (2-4 GB
+/// on the measured host, against 0.2-0.4 GB for any other child, rendering
+/// or not), so on a card with a fixed budget the number of them alive at
+/// once is what overflows, not the job count. `None` takes
+/// `DEFAULT_FULL_ASSET_JOBS`; anything requested is clamped into `1..=jobs`.
+fn resolve_full_asset_jobs(requested: Option<usize>, jobs: usize) -> usize {
+    requested.unwrap_or(DEFAULT_FULL_ASSET_JOBS).clamp(1, jobs.max(1))
+}
+
+/// How many full-asset lanes (`entry_full_assets`) may be live at once unless
+/// `--full-asset-jobs` says otherwise.
+///
+/// Measured 2026-09-13 on the mag suite at `-j 14` with `footprint -p` per
+/// worker (`IOAccelerator (graphics)`): a capped lane holds 0.2-0.4 GB of GPU
+/// memory whether or not it renders, and a full-asset lane 2.0-4.3 GB. With
+/// fourteen lanes the capped floor is ~5.6 GB, so two full-asset lanes peak
+/// near 14 GB and three near 18.5 GB. The author's budget is 16 GB: the Linux
+/// workstation's GPU has ~18 GB free and the machine degrades past 16.
+/// `SIM_SKIP_RENDER` is not the variable (the earlier `--render-jobs` cap
+/// serialised 49 lanes for 100 s of wall and changed no verdict).
+const DEFAULT_FULL_ASSET_JOBS: usize = 2;
 
 /// Resolve the requested job count. `--update-snapshots` pins to serial: it
 /// rewrites baseline files, and the runner does not yet prove every
@@ -2655,10 +2685,8 @@ fn resolve_jobs(requested: Option<usize>, update_snapshots: bool) -> usize {
         }
         return 1;
     }
-    let available = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1);
-    requested.unwrap_or(DEFAULT_SIM_JOBS).clamp(1, available.max(1))
+    let available = default_sim_jobs();
+    requested.unwrap_or(available).clamp(1, available.max(1))
 }
 
 /// Dump the compiled `main.lua` in `output` to a LuaJIT bytecode image beside
@@ -2753,12 +2781,17 @@ fn writes_live(buffered: bool) -> bool {
 /// non-rendering entry to be interchangeable in one boot, and the render-lane
 /// throttle schedules whole lanes by it.
 ///
+/// `STONE_WINDOW` travels like `STONE_FX_OFF`, with an empty value standing for
+/// the size the game asks for: a worker boots at its first entry's window and
+/// `sim_start_entry` sizes the window for each entry, re-deriving what boot
+/// derives from it (`sim_apply_window`).
+///
 /// `ROCK_MASK_WALL_CLOCK` and `ROCK_DETERMINISTIC_IDS` are owned outright: the
 /// runner publishes its own value for both after `preset_env`, so a declared one
 /// never reaches the child and cannot stand for a difference between two
 /// entries. Splitting a group on an inert value would isolate sims for nothing.
 const RUNNER_OWNED_ENV_KEYS: &[&str] =
-    &["FRAME_COUNT", "ROCK_DETERMINISTIC_IDS", "ROCK_MASK_WALL_CLOCK", "SIM_DT", "SIM_MANUAL", "STONE_FX_OFF"];
+    &["FRAME_COUNT", "ROCK_DETERMINISTIC_IDS", "ROCK_MASK_WALL_CLOCK", "SIM_DT", "SIM_MANUAL", "STONE_FX_OFF", "STONE_WINDOW"];
 
 /// Fixed values the runner publishes to EVERY sim child, layered BEFORE
 /// `preset_env` so a declaration still wins.
@@ -2921,9 +2954,10 @@ fn boot_signature(env_pairs: &[(String, String)]) -> Vec<(String, String)> {
 /// `sim_start_entry` re-applies each at the boundary and an entry inherits
 /// nothing from its predecessor.
 ///
-/// `SIM_DT` and `STONE_FX_OFF` travel with an explicit empty value standing
-/// for the engine default: an entry that declares nothing must not run at
-/// the fixed dt, or with the ablation, its predecessor declared.
+/// `SIM_DT`, `STONE_FX_OFF` and `STONE_WINDOW` travel with an explicit empty
+/// value standing for the engine default: an entry that declares nothing must
+/// not run at the fixed dt, with the ablation, or in the window its predecessor
+/// declared.
 /// `SIM_SKIP_RENDER` travels as the value the entry
 /// boots with (`entry_renders`, the one oracle): it is still boot signature,
 /// so two entries in one worker agree on it, but the global is
@@ -2939,7 +2973,7 @@ fn runner_owned_plan_pairs(env: &[(String, String)]) -> Vec<(String, String)> {
     // The raw effective value, not `entry_renders`: `submit` is a third
     // value (draw phase on, GPU submission off) that the engine must see
     // as itself, while the runner classifies it as non-rendering for the
-    // asset stub and the render cap.
+    // asset stub.
     let skip_render = effective_env(env)
         .into_iter()
         .find(|(k, _)| k == "SIM_SKIP_RENDER")
@@ -2950,10 +2984,16 @@ fn runner_owned_plan_pairs(env: &[(String, String)]) -> Vec<(String, String)> {
         .find(|(k, _)| k == "STONE_FX_OFF")
         .map(|(_, v)| v)
         .unwrap_or_default();
+    let window = effective_env(env)
+        .into_iter()
+        .find(|(k, _)| k == "STONE_WINDOW")
+        .map(|(_, v)| v)
+        .unwrap_or_default();
     vec![
         ("SIM_DT".to_string(), sim_dt),
         ("SIM_SKIP_RENDER".to_string(), skip_render),
         ("STONE_FX_OFF".to_string(), fx_off),
+        ("STONE_WINDOW".to_string(), window),
     ]
 }
 
@@ -3029,13 +3069,36 @@ fn sim_exec_mode_name(mode: SimExecMode) -> &'static str {
 /// A sim declaring nothing does not render: draw systems are skipped by default
 /// under the harness. `submit` (draw phase on, nothing submitted to the GPU)
 /// is NOT rendering here: its process needs no image pixels and holds no
-/// rendered frame, which is what this oracle decides (the asset stub, the
-/// render cap).
+/// rendered frame, which is what this oracle decides (the asset stub).
 fn entry_renders(env: &[(String, String)]) -> bool {
     env.iter()
         .filter(|(k, _)| k == "SIM_SKIP_RENDER")
         .next_back()
         .is_some_and(|(_, v)| v == "0")
+}
+
+/// Whether this entry's process holds every image at the file's own size:
+/// real assets (`STONE_ASSET_STUB=0`) with the storage cap declined
+/// (`STONE_IMAGE_MAX_SIDE=0`). Either alone is cheap -- a stub image is one
+/// texel whatever the cap says, and a capped real image is at most 256 texels
+/// a side -- so only the pair marks the lanes the full-asset cap counts.
+///
+/// Read last-wins off the resolved pairs, like `entry_renders`, over the same
+/// defaults the child boots with: `default_stub` is the runner's asset-stub
+/// value for this invocation and the cap default is `RUNNER_BASELINE_ENV`'s.
+/// `SIM_SKIP_RENDER` is deliberately not consulted: a `submit` process with
+/// full assets holds them all the same (measured 2.0 GB against 2.4-4.3 GB
+/// for its rendering siblings).
+fn entry_full_assets(env: &[(String, String)], default_stub: &str) -> bool {
+    let last = |key: &str| env.iter().filter(|(k, _)| k == key).next_back().map(|(_, v)| v.as_str());
+    let stub = last("STONE_ASSET_STUB").unwrap_or(default_stub);
+    let cap_default = RUNNER_BASELINE_ENV
+        .iter()
+        .find(|(k, _)| *k == "STONE_IMAGE_MAX_SIDE")
+        .map(|(_, v)| *v)
+        .expect("the runner baseline declares the image cap");
+    let cap = last("STONE_IMAGE_MAX_SIDE").unwrap_or(cap_default);
+    stub == "0" && cap == "0"
 }
 
 /// `STONE_ASSET_STUB` for a sim child: headers-only assets, whether or not
@@ -3095,7 +3158,7 @@ fn worker_ineligibility(
     for part in &parts {
         let env = env_by_wire.get(*part).map_or(&[][..], |v| v);
         if is_reload_lane(env) {
-            return Some("hot-reload lane: mutates the one session and overlay".to_string());
+            return Some("hot-reload lane: drives its own compile session and overlay".to_string());
         }
         // The explicit opt-out, for sims that operate process-global machinery
         // a shared worker cannot fence -- the checkpoint-machinery fixtures
@@ -6174,16 +6237,37 @@ mod tests {
     /// because it writes baseline files whose destinations are not proven
     /// unique before spawning.
     #[test]
-    fn resolve_render_jobs_is_bounded_by_jobs_and_defaults_to_no_cap() {
-        assert_eq!(resolve_render_jobs(None, 12), 12);
-        assert_eq!(resolve_render_jobs(Some(4), 12), 4);
-        assert_eq!(resolve_render_jobs(Some(40), 12), 12);
-        assert_eq!(resolve_render_jobs(Some(0), 12), 1);
-        assert_eq!(resolve_render_jobs(Some(3), 1), 1);
+    fn resolve_full_asset_jobs_is_bounded_by_jobs_and_defaults_to_two() {
+        assert_eq!(resolve_full_asset_jobs(None, 12), DEFAULT_FULL_ASSET_JOBS);
+        assert_eq!(resolve_full_asset_jobs(None, 1), 1);
+        assert_eq!(resolve_full_asset_jobs(Some(4), 12), 4);
+        assert_eq!(resolve_full_asset_jobs(Some(40), 12), 12);
+        assert_eq!(resolve_full_asset_jobs(Some(0), 12), 1);
+        assert_eq!(resolve_full_asset_jobs(Some(3), 1), 1);
+    }
+
+    /// Only the pair marks a lane: real assets with the cap declined. The
+    /// runner's stub default and the baseline cap stand in for what a fixture
+    /// does not say, last declaration wins, and the render flag is not read.
+    #[test]
+    fn entry_full_assets_needs_real_assets_and_no_image_cap() {
+        let pair = |k: &str, v: &str| (k.to_string(), v.to_string());
+        assert!(!entry_full_assets(&[], "1"), "declaring nothing is stubbed and capped");
+        assert!(!entry_full_assets(&[pair("STONE_ASSET_STUB", "0")], "1"), "real assets alone stay capped");
+        assert!(!entry_full_assets(&[pair("STONE_IMAGE_MAX_SIDE", "0")], "1"), "an uncapped stub is one texel");
+        assert!(entry_full_assets(&[pair("STONE_ASSET_STUB", "0"), pair("STONE_IMAGE_MAX_SIDE", "0")], "1"));
+        assert!(
+            entry_full_assets(&[pair("STONE_IMAGE_MAX_SIDE", "0"), pair("SIM_SKIP_RENDER", "submit")], "0"),
+            "an inherited STONE_ASSET_STUB=0 counts, and submit is not consulted"
+        );
+        assert!(
+            !entry_full_assets(&[pair("STONE_ASSET_STUB", "0"), pair("STONE_IMAGE_MAX_SIDE", "0"), pair("STONE_IMAGE_MAX_SIDE", "512")], "1"),
+            "last declaration wins"
+        );
     }
 
     #[test]
-    fn the_classed_pool_caps_live_rendering_tasks_and_runs_everything_once() {
+    fn the_classed_pool_caps_live_capped_tasks_and_runs_everything_once() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         let renders: Vec<bool> = (0..40).map(|i| i % 3 == 0).collect();
         let live = AtomicUsize::new(0);
@@ -6222,7 +6306,7 @@ mod tests {
             .map(|n| n.get())
             .unwrap_or(1);
 
-        assert_eq!(resolve_jobs(None, false), DEFAULT_SIM_JOBS.min(cpus));
+        assert_eq!(resolve_jobs(None, false), cpus, "no request means every core");
         assert_eq!(resolve_jobs(Some(1), false), 1);
         // Never above what the machine has, however large the request.
         assert_eq!(resolve_jobs(Some(usize::MAX), false), cpus);
@@ -6395,12 +6479,15 @@ mod tests {
 
     #[test]
     fn the_boot_signature_excludes_only_runner_owned_keys() {
-        let a = env(&[("FRAME_COUNT", "90"), ("STONE_WINDOW", "1280x720")]);
-        let b = env(&[("FRAME_COUNT", "40"), ("STONE_WINDOW", "1280x720")]);
+        let a = env(&[("FRAME_COUNT", "90"), ("MAG_SCENE", "arena")]);
+        let b = env(&[("FRAME_COUNT", "40"), ("MAG_SCENE", "arena")]);
         assert_eq!(boot_signature(&a), boot_signature(&b), "the budget is per entry");
 
-        let c = env(&[("FRAME_COUNT", "90"), ("STONE_WINDOW", "640x360")]);
+        let c = env(&[("FRAME_COUNT", "90"), ("MAG_SCENE", "chapel")]);
         assert_ne!(boot_signature(&a), boot_signature(&c), "a boot-consumed value is not");
+        // STONE_WINDOW is applied per entry by `sim_start_entry`.
+        let w = env(&[("STONE_WINDOW", "640x360")]);
+        assert_eq!(boot_signature(&w), env(&[]), "the window is per entry");
         // STONE_FX_OFF is a per-frame gate re-applied at every boundary, so
         // an ablating entry and a plain one share a boot.
         let g = env(&[("STONE_FX_OFF", "draw")]);
@@ -6423,32 +6510,38 @@ mod tests {
         // dt is the engine default, and the skip flag is the baseline.
         assert_eq!(
             runner_owned_plan_pairs(&env(&[])),
-            env(&[("SIM_DT", ""), ("SIM_SKIP_RENDER", "1"), ("STONE_FX_OFF", "")])
+            env(&[("SIM_DT", ""), ("SIM_SKIP_RENDER", "1"), ("STONE_FX_OFF", ""), ("STONE_WINDOW", "")])
         );
         assert_eq!(
             runner_owned_plan_pairs(&env(&[
                 ("SIM_DT", "0.5"),
                 ("SIM_SKIP_RENDER", "0"),
-                ("STONE_FX_OFF", "draw,ui")
+                ("STONE_FX_OFF", "draw,ui"),
+                ("STONE_WINDOW", "640x360")
             ])),
-            env(&[("SIM_DT", "0.5"), ("SIM_SKIP_RENDER", "0"), ("STONE_FX_OFF", "draw,ui")])
+            env(&[
+                ("SIM_DT", "0.5"),
+                ("SIM_SKIP_RENDER", "0"),
+                ("STONE_FX_OFF", "draw,ui"),
+                ("STONE_WINDOW", "640x360")
+            ])
         );
         // Last-wins, the same reading `entry_renders` and the child's env use.
         assert_eq!(
             runner_owned_plan_pairs(&env(&[("SIM_SKIP_RENDER", "0"), ("SIM_SKIP_RENDER", "1")])),
-            env(&[("SIM_DT", ""), ("SIM_SKIP_RENDER", "1"), ("STONE_FX_OFF", "")])
+            env(&[("SIM_DT", ""), ("SIM_SKIP_RENDER", "1"), ("STONE_FX_OFF", ""), ("STONE_WINDOW", "")])
         );
         // The raw value travels: `submit` must reach the engine as itself.
         assert_eq!(
             runner_owned_plan_pairs(&env(&[("SIM_SKIP_RENDER", "submit")])),
-            env(&[("SIM_DT", ""), ("SIM_SKIP_RENDER", "submit"), ("STONE_FX_OFF", "")])
+            env(&[("SIM_DT", ""), ("SIM_SKIP_RENDER", "submit"), ("STONE_FX_OFF", ""), ("STONE_WINDOW", "")])
         );
     }
 
     #[test]
     fn the_boot_signature_is_declaration_order_independent() {
-        let a = env(&[("STONE_WINDOW", "1280x720"), ("SIM_DT", "0.1")]);
-        let b = env(&[("SIM_DT", "0.1"), ("STONE_WINDOW", "1280x720")]);
+        let a = env(&[("MAG_SCENE", "arena"), ("SIM_DT", "0.1")]);
+        let b = env(&[("SIM_DT", "0.1"), ("MAG_SCENE", "arena")]);
         assert_eq!(boot_signature(&a), boot_signature(&b), "same pairs, either spelling");
 
         // The sort is stable, so a duplicated key keeps last-wins order and a
@@ -6474,13 +6567,13 @@ mod tests {
         let wires = wires(&[
             ("plain_a", &[]),
             ("plain_b", &[("FRAME_COUNT", "40")]),
-            ("windowed", &[("STONE_WINDOW", "1280x720")]),
+            ("scene", &[("MAG_SCENE", "arena")]),
             ("reload", &[("STONE_HOT_RELOAD", "1")]),
             ("outref", &[("SESSION", "$OUT/resume.json")]),
             ("machinery", &[("SIM_WORKER_ISOLATED", "1")]),
         ]);
         let (groups, isolated) = group_worker_specs(
-            &specs(&["plain_a", "plain_b", "windowed", "reload", "outref", "machinery"]),
+            &specs(&["plain_a", "plain_b", "scene", "reload", "outref", "machinery"]),
             &wires);
 
         // FRAME_COUNT is runner-owned, so plain_a and plain_b share a group;
@@ -6651,9 +6744,9 @@ mod tests {
     #[test]
     fn a_chain_groups_by_its_parts_and_disagreeing_parts_isolate() {
         let wires = wires(&[
-            ("head", &[("STONE_WINDOW", "1280x720")]),
-            ("tail_same", &[("STONE_WINDOW", "1280x720"), ("FRAME_COUNT", "30")]),
-            ("tail_other", &[("STONE_WINDOW", "640x360")]),
+            ("head", &[("MAG_SCENE", "arena")]),
+            ("tail_same", &[("MAG_SCENE", "arena"), ("FRAME_COUNT", "30")]),
+            ("tail_other", &[("MAG_SCENE", "chapel")]),
             ("plain", &[]),
         ]);
 

@@ -328,8 +328,8 @@ fn forward_reach(deps: &FxHashMap<Ustr, FxHashSet<Ustr>>, start: Ustr) -> FxHash
     seen
 }
 
-/// Render a literal default-value expression as Lua (for inline(lua) default
-/// fills). `None` for a non-literal default (skipped — uncommon for inline fns).
+/// Render a literal default-value expression as Lua (for inline(lua) and
+/// `extern(ffi)` default fills). `None` for a non-literal default.
 fn render_default_lit(body: &bone_semantic::hir::Body, e: Idx<Expr>) -> Option<String> {
     match body.expr_arena[e] {
         Expr::Null | Expr::Unit => Some("nil".to_string()),
@@ -340,6 +340,32 @@ fn render_default_lit(body: &bone_semantic::hir::Body, e: Idx<Expr>) -> Option<S
         Expr::UnaryMinus(inner) => render_default_lit(body, inner).map(|s| format!("-{}", s)),
         _ => None,
     }
+}
+
+/// Callee-side `if p == nil then p = <lit> end` fills for a generated Lua
+/// wrapper. A Rock direct call already passes a literal default at the site;
+/// this covers an indirect or Lua call that omitted it. `inline(lua)` and
+/// `extern(ffi)` share the same fill because both wrappers are the body the
+/// omitted argument actually arrives at.
+fn default_fill_prologue(
+    ws: &Workspace,
+    mid: ModuleId,
+    fid: Idx<bone_semantic::hir::Function>,
+    f: &bone_semantic::hir::Function,
+) -> String {
+    let mut prologue = String::new();
+    let Some(fbody) = ws.module(mid).bodies.get(&BodyOwner::Function(fid)) else {
+        return prologue;
+    };
+    for (i, def) in fbody.param_defaults.iter().enumerate() {
+        if let (Some(d), Some(pd)) = (def, f.param_decls.get(i)) {
+            if let Some(lit) = render_default_lit(fbody, *d) {
+                let p = pd.name.as_str();
+                let _ = writeln!(prologue, "if {p} == nil then {p} = {lit} end");
+            }
+        }
+    }
+    prologue
 }
 
 /// What an `extern(ffi)` wrapper does with the callee's return, decided ONCE
@@ -5527,7 +5553,10 @@ fn assemble(
                     // `extern_ret`'s unbound-generic rejection, whose subject is
                     // a generic declaration the view holds no base instance for.
                     if emit_def {
-                        definitions.push_str(&format!("function {nm}({params})\n{body}\nend\n"));
+                        let prologue = default_fill_prologue(ws, mid, fid, f);
+                        definitions.push_str(&format!(
+                            "function {nm}({params})\n{prologue}{body}\nend\n"
+                        ));
                     }
                 }
                 continue;
@@ -5562,17 +5591,7 @@ fn assemble(
                 } else {
                     body.to_string()
                 };
-                let mut prologue = String::new();
-                if let Some(fbody) = ws.module(mid).bodies.get(&BodyOwner::Function(fid)) {
-                    for (i, def) in fbody.param_defaults.iter().enumerate() {
-                        if let (Some(d), Some(pd)) = (def, f.param_decls.get(i)) {
-                            if let Some(lit) = render_default_lit(fbody, *d) {
-                                let p = pd.name.as_str();
-                                let _ = writeln!(prologue, "if {p} == nil then {p} = {lit} end");
-                            }
-                        }
-                    }
-                }
+                let prologue = default_fill_prologue(ws, mid, fid, f);
                 definitions.push_str(&format!(
                     "function {name}({params})\n{prologue}{body}\nend\n"
                 ));

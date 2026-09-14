@@ -1598,7 +1598,7 @@ mod tests {
             "$OUT interpolation"
         );
         assert_eq!(
-            isolation_class(Some("hot-reload lane: mutates the one session and overlay")),
+            isolation_class(Some("hot-reload lane: drives its own compile session and overlay")),
             "hot-reload"
         );
     }
@@ -1607,8 +1607,8 @@ mod tests {
     fn boot_signatures_render_as_their_environment_difference() {
         assert_eq!(render_signature(&json!([])), "<default>");
         assert_eq!(
-            render_signature(&json!([["SIM_SKIP_RENDER", "0"], ["STONE_WINDOW", "1440x900"]])),
-            "SIM_SKIP_RENDER=0,STONE_WINDOW=1440x900"
+            render_signature(&json!([["SIM_SKIP_RENDER", "0"], ["MAG_SCENE", "arena"]])),
+            "SIM_SKIP_RENDER=0,MAG_SCENE=arena"
         );
     }
 
