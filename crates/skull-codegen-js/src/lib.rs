@@ -813,24 +813,27 @@ function log_set_level(level) { __G.__stone_log_level = level; }
 var __stone_log_dedup = {};
 var __stone_log_counts = {};
 var __stone_log_sites = {};
+var __stone_log_site_levels = {};
 var __stone_log_summary_done = false;
 var __stone_log_throttle = {};
 var __stone_log_wall = {};
 var __stone_log_now_override = null;
-function _log_once_impl(category, msg, site) {
+function _log_once_impl(level, category, msg, site) {
   __stone_log_init();
-  if (0 > __G.__stone_log_level) return;
+  if (level > __G.__stone_log_level) return;
   var n = (__stone_log_dedup[site] || 0) + 1;
   __stone_log_dedup[site] = n;
   __stone_log_sites[site] = (category || "") + "|" + msg;
+  __stone_log_site_levels[site] = level;
   if (n > 1) return;
-  __stone_emit(0, category, msg, false);
+  __stone_emit(level, category, msg, false);
 }
-function _log_throttled_with_now_impl(now_sec, category, msg, interval_sec, site, wall_clock) {
+function _log_throttled_with_now_impl(now_sec, level, category, msg, interval_sec, site, wall_clock) {
   __stone_log_init();
-  if (0 > __G.__stone_log_level) return;
+  if (level > __G.__stone_log_level) return;
   __stone_log_counts[site] = (__stone_log_counts[site] || 0) + 1;
   __stone_log_sites[site] = (category || "") + "|" + msg;
+  __stone_log_site_levels[site] = level;
   // `= nil` in the luajit sibling, which removes the key; keep the two tables
   // the same shape rather than storing a false.
   if (wall_clock) __stone_log_wall[site] = true;
@@ -838,7 +841,7 @@ function _log_throttled_with_now_impl(now_sec, category, msg, interval_sec, site
   var last = __stone_log_throttle[site];
   if (last != null && (now_sec - last) < interval_sec) return;
   __stone_log_throttle[site] = now_sec;
-  __stone_emit(0, category, msg, wall_clock);
+  __stone_emit(level, category, msg, wall_clock);
 }
 // Ties order differently from the luajit sibling (JS sort is stable, table.sort
 // is not); the counts themselves match.
@@ -862,7 +865,9 @@ function log_suppression_summary() {
     var r = rows[i];
     var rec = __stone_log_sites[r.site] || "|";
     var bar = rec.indexOf("|");
-    __stone_emit(0, rec.slice(0, bar),
+    var level = __stone_log_site_levels[r.site] || 0;
+    if (level > __G.__stone_log_level) continue;
+    __stone_emit(level, rec.slice(0, bar),
       "suppressed x" + r.n + " at " + r.site + ": " + rec.slice(bar + 1),
       __stone_log_wall[r.site] === true);
   }
@@ -873,12 +878,13 @@ function __stone_log_now() {
   if (__stone_log_now_override != null) return __stone_log_now_override;
   return Date.now() / 1000;
 }
-function _log_throttled_impl(category, msg, interval_sec, site, wall_clock) {
-  _log_throttled_with_now_impl(__stone_log_now(), category, msg, interval_sec, site, wall_clock);
+function _log_throttled_impl(level, category, msg, interval_sec, site, wall_clock) {
+  _log_throttled_with_now_impl(__stone_log_now(), level, category, msg, interval_sec, site, wall_clock);
 }
 function log_reset_dedup() {
   __stone_log_dedup = {}; __stone_log_throttle = {}; __stone_log_wall = {};
-  __stone_log_counts = {}; __stone_log_sites = {}; __stone_log_summary_done = false;
+  __stone_log_counts = {}; __stone_log_sites = {}; __stone_log_site_levels = {};
+  __stone_log_summary_done = false;
 }
 function log_dedup_count() { return Object.keys(__stone_log_dedup).length; }
 "#;

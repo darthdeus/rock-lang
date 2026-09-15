@@ -230,8 +230,8 @@ impl log::Log for Logger {
 }
 
 fn emit(level: log::Level, target: &str, args: &std::fmt::Arguments, wall_clock: bool) {
-    if level == log::Level::Error {
-        ERRORS.lock().unwrap().record(target, &args.to_string(), elapsed_secs());
+    if let Some(table) = record_table(level) {
+        table.lock().unwrap().record(target, &args.to_string(), elapsed_secs());
     }
     let color = if *COLOR { level_color(level) } else { "" };
     let reset = if color.is_empty() { "" } else { SGR_RESET };
@@ -282,30 +282,30 @@ pub fn init() {
     log::set_max_level(level_to_log(level()));
 }
 
-// ---- error records: what an on-screen development badge reads ----
+// ---- error and warning records: what an on-screen development badge reads ----
 
-/// One distinct ERROR record: the target plus the message's first line, so a
-/// traceback or a varying tail does not split one fault into many rows.
+/// One distinct ERROR or WARN record: the target plus the message's first line,
+/// so a traceback or a varying tail does not split one fault into many rows.
 #[derive(Clone, Debug, PartialEq)]
-pub struct ErrorRecord {
+pub struct LogRecord {
     pub target: String,
     pub message: String,
     pub count: u64,
     pub last_seen_secs: f64,
 }
 
-/// Distinct records kept; past it the least recently seen is evicted and
-/// counted, so the table stays bounded without losing the fact of an error.
-pub const ERROR_RECORD_CAP: usize = 64;
+/// Distinct records kept per level; past it the least recently seen is evicted
+/// and counted, so the table stays bounded without losing the fact of a record.
+pub const RECORD_CAP: usize = 64;
 
 #[derive(Default)]
-pub struct ErrorTable {
-    rows: Vec<ErrorRecord>,
+pub struct RecordTable {
+    rows: Vec<LogRecord>,
     total: u64,
     evicted: u64,
 }
 
-impl ErrorTable {
+impl RecordTable {
     pub fn record(&mut self, target: &str, message: &str, now_secs: f64) {
         self.total += 1;
         let first_line = message.lines().next().unwrap_or("");
@@ -318,7 +318,7 @@ impl ErrorTable {
             row.last_seen_secs = now_secs;
             return;
         }
-        if self.rows.len() >= ERROR_RECORD_CAP {
+        if self.rows.len() >= RECORD_CAP {
             let stalest = self
                 .rows
                 .iter()
@@ -329,7 +329,7 @@ impl ErrorTable {
             self.rows.swap_remove(stalest);
             self.evicted += 1;
         }
-        self.rows.push(ErrorRecord {
+        self.rows.push(LogRecord {
             target: target.to_string(),
             message: first_line.to_string(),
             count: 1,
@@ -337,38 +337,48 @@ impl ErrorTable {
         });
     }
 
-    /// Every ERROR emitted, evicted rows included.
+    /// Every record emitted, evicted rows included.
     pub fn total(&self) -> u64 {
         self.total
     }
 
-    /// Distinct rows evicted to stay under `ERROR_RECORD_CAP`.
+    /// Distinct rows evicted to stay under `RECORD_CAP`.
     pub fn evicted(&self) -> u64 {
         self.evicted
     }
 
     /// Rows, most recently seen first.
-    pub fn rows(&self) -> Vec<ErrorRecord> {
+    pub fn rows(&self) -> Vec<LogRecord> {
         let mut rows = self.rows.clone();
         rows.sort_by(|a, b| b.last_seen_secs.total_cmp(&a.last_seen_secs));
         rows
     }
 }
 
-static ERRORS: Lazy<Mutex<ErrorTable>> = Lazy::new(|| Mutex::new(ErrorTable::default()));
+static ERRORS: Lazy<Mutex<RecordTable>> = Lazy::new(|| Mutex::new(RecordTable::default()));
+static WARNINGS: Lazy<Mutex<RecordTable>> = Lazy::new(|| Mutex::new(RecordTable::default()));
 
-/// Every ERROR record this process emitted, Rust and Rock alike.
-pub fn error_total() -> u64 {
-    ERRORS.lock().unwrap().total()
+fn record_table(level: log::Level) -> Option<&'static Mutex<RecordTable>> {
+    match level {
+        log::Level::Error => Some(&ERRORS),
+        log::Level::Warn => Some(&WARNINGS),
+        _ => None,
+    }
 }
 
-pub fn error_evicted() -> u64 {
-    ERRORS.lock().unwrap().evicted()
+/// Every record at `level` this process emitted, Rust and Rock alike. Only
+/// ERROR and WARN are kept; other levels read as zero.
+pub fn records_total(level: log::Level) -> u64 {
+    record_table(level).map_or(0, |t| t.lock().unwrap().total())
 }
 
-/// Distinct ERROR records, most recently seen first.
-pub fn error_records() -> Vec<ErrorRecord> {
-    ERRORS.lock().unwrap().rows()
+pub fn records_evicted(level: log::Level) -> u64 {
+    record_table(level).map_or(0, |t| t.lock().unwrap().evicted())
+}
+
+/// Distinct records at `level`, most recently seen first.
+pub fn records(level: log::Level) -> Vec<LogRecord> {
+    record_table(level).map_or_else(Vec::new, |t| t.lock().unwrap().rows())
 }
 
 // ---- log_once / log_throttled filter state (the one dedup/throttle) ----
@@ -563,8 +573,8 @@ mod tests {
     }
 
     #[test]
-    fn error_table_keys_on_target_and_first_line() {
-        let mut table = ErrorTable::default();
+    fn record_table_keys_on_target_and_first_line() {
+        let mut table = RecordTable::default();
         table.record("LEVEL", "rejected: floor\nstack traceback: a", 1.0);
         table.record("LEVEL", "rejected: floor\nstack traceback: b", 2.0);
         table.record("SAVE", "rejected: floor", 3.0);
@@ -578,33 +588,39 @@ mod tests {
     }
 
     #[test]
-    fn error_table_evicts_the_least_recently_seen_and_counts_it() {
-        let mut table = ErrorTable::default();
-        for i in 0..ERROR_RECORD_CAP {
+    fn record_table_evicts_the_least_recently_seen_and_counts_it() {
+        let mut table = RecordTable::default();
+        for i in 0..RECORD_CAP {
             table.record("T", &format!("fault {i}"), i as f64);
         }
         table.record("T", "fault 0", 100.0);
         table.record("T", "fresh", 101.0);
         let rows = table.rows();
-        assert_eq!(rows.len(), ERROR_RECORD_CAP);
+        assert_eq!(rows.len(), RECORD_CAP);
         assert_eq!(table.evicted(), 1);
-        assert_eq!(table.total(), ERROR_RECORD_CAP as u64 + 2);
+        assert_eq!(table.total(), RECORD_CAP as u64 + 2);
         assert!(rows.iter().any(|r| r.message == "fault 0"), "a repeat refreshes its row");
         assert!(!rows.iter().any(|r| r.message == "fault 1"), "the stalest row is evicted");
         assert!(rows.iter().any(|r| r.message == "fresh"));
     }
 
     #[test]
-    fn logged_errors_reach_the_error_records() {
+    fn logged_errors_and_warnings_reach_their_own_records() {
         init();
+        let warnings_before = records_total(log::Level::Warn);
         log::error!(target: "RLTEST_ERRORS", "error table witness {}", 7);
-        log::warn!(target: "RLTEST_ERRORS", "a warning is not an error");
-        let rows: Vec<_> = error_records()
-            .into_iter()
-            .filter(|r| r.target == "RLTEST_ERRORS")
-            .collect();
-        assert_eq!(rows.len(), 1, "{rows:?}");
-        assert_eq!(rows[0].message, "error table witness 7");
+        log::warn!(target: "RLTEST_ERRORS", "warning table witness {}", 8);
+        let witness = |level| -> Vec<LogRecord> {
+            records(level).into_iter().filter(|r| r.target == "RLTEST_ERRORS").collect()
+        };
+        let errors = witness(log::Level::Error);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(errors[0].message, "error table witness 7");
+        let warnings = witness(log::Level::Warn);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert_eq!(warnings[0].message, "warning table witness 8");
+        assert!(records_total(log::Level::Warn) > warnings_before);
+        assert!(records(log::Level::Info).is_empty(), "only errors and warnings are kept");
     }
 
     #[test]
