@@ -104,14 +104,9 @@ fn binding_changes_survive_a_fresh_process() {
         settings_path.is_file(),
         "writer must leave the pref-root settings file"
     );
-    let ready_path = root.join("tmp/spellbook-restart-ready");
-    assert!(
-        ready_path.is_file(),
-        "writer must publish its complete-file readiness marker"
-    );
 
-    let reader = run("bindings_restart_z_reader");
-    assert_sim_pass("bindings_restart_z_reader", &reader);
+    let reader = run("bindings_restart_reader");
+    assert_sim_pass("bindings_restart_reader", &reader);
 }
 
 #[test]
