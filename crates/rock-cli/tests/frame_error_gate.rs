@@ -31,6 +31,13 @@ fn repo_root() -> std::path::PathBuf {
 /// `rock frame games/match3` for 5 frames, optionally raising from frame 2 on.
 /// Returns (combined output, exit-status-success).
 fn run_frame(force_error_at: Option<i32>) -> (String, bool) {
+    match force_error_at {
+        Some(n) => run_frame_with(&[("STONE_FRAME_FORCE_ERROR", n.to_string())]),
+        None => run_frame_with(&[]),
+    }
+}
+
+fn run_frame_with(envs: &[(&str, String)]) -> (String, bool) {
     let out_dir = tempfile::tempdir().expect("tempdir");
     let mut cmd = Command::new(rock_bin());
     cmd.current_dir(repo_root())
@@ -38,8 +45,8 @@ fn run_frame(force_error_at: Option<i32>) -> (String, bool) {
         .arg("--output")
         .arg(out_dir.path().join("main.lua"))
         .env("ROCK_FRAME_TIMEOUT_SECS", "120");
-    if let Some(n) = force_error_at {
-        cmd.env("STONE_FRAME_FORCE_ERROR", n.to_string());
+    for (key, value) in envs {
+        cmd.env(key, value);
     }
     let out = cmd.output().expect("spawn rock frame");
     let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
@@ -106,6 +113,31 @@ fn a_repeating_frame_error_is_logged_once_with_its_total() {
         "the dedupe key is not derived from the error message:\n{text}"
     );
     assert!(!ok, "collapsing the log must not stop the run from failing:\n{text}");
+}
+
+/// A raised frame must still publish the image uploads it queued.
+///
+/// The upload pump runs between update and render, so a raise in update used to
+/// skip it. A fault whose condition is the queue itself then reproduced on every
+/// later frame: MAG's run admission asserted an empty queue and raised on each
+/// remaining frame of a session, with the queue never draining.
+#[test]
+fn a_frame_error_still_publishes_queued_image_uploads() {
+    let image = repo_root().join("games/match3/tests/sims/smoke.snap/boot.png");
+    let (text, ok) = run_frame_with(&[
+        ("STONE_TEST_IMAGE_LOAD_AT_FRAME", "2".to_string()),
+        ("STONE_TEST_IMAGE_LOAD_PATH", image.to_string_lossy().into_owned()),
+        ("STONE_FRAME_FORCE_ERROR_WHILE_UPLOADS_PENDING", "1".to_string()),
+    ]);
+    assert!(
+        text.contains("forced frame error while image uploads are pending"),
+        "the queued load did not reach the queue-conditioned raise:\n{text}"
+    );
+    assert!(
+        text.contains("1 frame(s) raised during run"),
+        "the raised frame did not drain the queue, so the fault repeated:\n{text}"
+    );
+    assert!(!ok, "the one raised frame must still fail the bounded run:\n{text}");
 }
 
 /// The control. Without the injection the same command must pass, so the test
