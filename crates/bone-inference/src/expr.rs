@@ -943,8 +943,14 @@ pub fn infer_expr_used(
                 }
                 let inner = peel_nullable(gamma, lhs_ty, expr_span);
                 let rhs_ty = infer_expr(c, gamma, *rhs)?;
+                let rhs_can_be_null = expr_can_produce_null(c, gamma, *rhs, expr_span);
+                let joined = join(gamma, inner, rhs_ty, expr_span)?;
 
-                join(gamma, inner, rhs_ty, expr_span)?
+                if rhs_can_be_null {
+                    nullable_of(gamma, joined, expr_span)
+                } else {
+                    joined
+                }
             }
         },
 
@@ -1736,6 +1742,46 @@ pub(crate) fn infer_range_bounds(
         unify(gamma, low_ty, int_ty, c.body.expr_spans[low])?;
         unify(gamma, high_ty, int_ty, c.body.expr_spans[high])?;
         Ok(int_ty)
+    }
+}
+
+/// Whether an expression can reach its result with `null`. Most expressions
+/// answer from their inferred type; an unannotated `if` needs its arms walked
+/// because its legacy inferred type is the then-arm type.
+fn expr_can_produce_null(
+    c: BodyCtx,
+    gamma: &mut Gamma,
+    e: Idx<Expr>,
+    span: Span,
+) -> bool {
+    match c.body.expr_arena[e] {
+        Expr::Null => true,
+        Expr::Block { tail, .. } => {
+            tail.is_some_and(|tail| expr_can_produce_null(c, gamma, tail, span))
+        }
+        Expr::If {
+            then_branch,
+            else_branch,
+            ..
+        }
+        | Expr::IfLet {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            expr_can_produce_null(c, gamma, then_branch, span)
+                || else_branch.is_some_and(|branch| expr_can_produce_null(c, gamma, branch, span))
+        }
+        Expr::Match { arms, .. } => arms.into_iter().any(|arm| {
+            expr_can_produce_null(c, gamma, c.body.match_arm_arena[arm].body, span)
+        }),
+        _ => {
+            let Some(ty) = gamma.out.expr_types.get(e).copied() else {
+                return false;
+            };
+            let ty = resolve(gamma, ty, span);
+            matches!(gamma.get(ty), TypeExpr::Nullable(_))
+        }
     }
 }
 
