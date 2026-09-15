@@ -635,7 +635,16 @@ impl Builder<'_> {
                 value,
                 then_branch,
                 else_branch,
-            } => self.lower_if_let(pattern, value, then_branch, else_branch),
+            } => {
+                let repr = self.lower_if_let(
+                    pattern,
+                    value,
+                    then_branch,
+                    else_branch,
+                    None,
+                )?;
+                self.pack(repr)
+            }
 
             Expr::IncDec { target, decrement, postfix } => {
                 self.lower_incdec(target, decrement, postfix)

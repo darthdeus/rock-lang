@@ -657,223 +657,172 @@ impl Builder<'_> {
         self.cur = cont;
     }
 
-    pub(crate) fn lower_if_let_repr(
-        &mut self,
-        pattern: Idx<Pattern>,
-        value: Idx<Expr>,
-        then_branch: Idx<Expr>,
-        else_branch: Option<Idx<Expr>>,
-        shape: RetSlot,
-    ) -> Result<ValueRepr, CompilerError> {
-        if let Pattern::Bind(b) = self.body.pattern_arena[pattern] {
-            if self.expr_is_nullable(value) && self.nobox_binding_shape(b)?.is_some() {
-                return self.lower_if_let_nobox_repr(
-                    b,
-                    value,
-                    then_branch,
-                    else_branch,
-                    shape,
-                );
-            }
-        }
-
-        let results: Vec<Idx<Cell>> =
-            (0..shape.slot_count()).map(|_| self.f.new_cell(None)).collect();
-        let scrut = self.lower_scrut(value)?;
-        let else_bb = self.f.new_block();
-        let join = self.f.new_block();
-        if self.expr_is_nullable(value) {
-            let val_v = self.scrut_value(&scrut);
-            let nil = self.emit_cur(Inst::Const(Lit::Nil));
-            let is_nil = self.emit_cur(Inst::Eq(val_v, nil));
-            let cont = self.f.new_block();
-            self.f.set_term(
-                self.cur,
-                Term::Branch { cond: is_nil, then_bb: else_bb, else_bb: cont },
-            );
-            self.cur = cont;
-        }
-        let variants = self.scrut_variants(value);
-        let scrut_enum = self.scrut_enum_name(value);
-        self.match_pattern(&scrut, pattern, else_bb, &variants, true, scrut_enum)?;
-
-        let tv = self.lower_expr_repr(then_branch)?;
-        self.store_bundle_and_join(&results, &shape, &tv, join)?;
-
-        self.cur = else_bb;
-        let ev = match else_branch {
-            Some(eb) => self.lower_expr_repr(eb)?,
-            None => ValueBundle::new(
-                tv.representation(),
-                ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil))),
-            ),
-        };
-        self.store_bundle_and_join(&results, &shape, &ev, join)?;
-
-        self.cur = join;
-        let slots: Vec<Idx<Inst>> =
-            results.iter().map(|&cell| self.emit_cur(Inst::Load(cell))).collect();
-        let mut idx = 0;
-        Ok(self.slot_repr(&shape, &slots, &mut idx))
-    }
-
-    fn lower_if_let_nobox_repr(
-        &mut self,
-        b: Idx<BindingInfo>,
-        value: Idx<Expr>,
-        then_branch: Idx<Expr>,
-        else_branch: Option<Idx<Expr>>,
-        shape: RetSlot,
-    ) -> Result<ValueRepr, CompilerError> {
-        let binding_shape = self
-            .nobox_binding_shape(b)?
-            .ok_or_else(|| gap("nullable nobox binding has no scalar shape"))?;
-        let mut scrut_shape = binding_shape.clone();
-        scrut_shape.nullable = true;
-
-        let bundle = self.lower_expr_repr(value)?;
-        let leaves = self.repr_to_slot_values_bundle(&bundle, &RetSlot::Leaves(scrut_shape))?;
-        let (present, values) = leaves
-            .split_first()
-            .expect("a nullable shape carries its presence leaf first");
-        let (present, values) = (*present, values.to_vec());
-
-        let results: Vec<Idx<Cell>> =
-            (0..shape.slot_count()).map(|_| self.f.new_cell(None)).collect();
-        let then_bb = self.f.new_block();
-        let else_bb = self.f.new_block();
-        let join = self.f.new_block();
-        self.f.set_term(self.cur, Term::Branch { cond: present, then_bb, else_bb });
-
-        self.cur = then_bb;
-        self.bind_leaves(b, &values, binding_shape);
-        let tv = self.lower_expr_repr(then_branch)?;
-        self.store_bundle_and_join(&results, &shape, &tv, join)?;
-
-        self.cur = else_bb;
-        let ev = match else_branch {
-            Some(eb) => self.lower_expr_repr(eb)?,
-            None => ValueBundle::new(
-                tv.representation(),
-                ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil))),
-            ),
-        };
-        self.store_bundle_and_join(&results, &shape, &ev, join)?;
-
-        self.cur = join;
-        let slots: Vec<Idx<Inst>> =
-            results.iter().map(|&cell| self.emit_cur(Inst::Load(cell))).collect();
-        let mut idx = 0;
-        Ok(self.slot_repr(&shape, &slots, &mut idx))
-    }
-
     pub(crate) fn lower_if_let(
         &mut self,
         pattern: Idx<Pattern>,
         value: Idx<Expr>,
         then_branch: Idx<Expr>,
         else_branch: Option<Idx<Expr>>,
-    ) -> Result<Idx<Inst>, CompilerError> {
-        if let Pattern::Bind(b) = self.body.pattern_arena[pattern] {
-            if self.expr_is_nullable(value) && self.nobox_binding_shape(b)?.is_some() {
-                return self.lower_if_let_nobox(b, value, then_branch, else_branch);
-            }
+        result_shape: Option<RetSlot>,
+    ) -> Result<ValueRepr, CompilerError> {
+        enum IfLetScrutinee {
+            Generic(Scrut),
+            Nobox {
+                binding: Idx<BindingInfo>,
+                values: Vec<Idx<Inst>>,
+                shape: ValueShape,
+                then_bb: Idx<Block>,
+            },
+            Tuple {
+                pattern: Idx<Pattern>,
+                slots: Vec<Idx<Inst>>,
+                shape: TupleRetShape,
+                then_bb: Idx<Block>,
+            },
         }
-        // Any name-only pattern, `Bind` included: the presence is a WIRE slot, so
-        // it has to be the branch condition. Falling through to the general path
-        // instead tests the PACKED tuple against nil -- and a `MakeTuple` is never
-        // nil, so the test const-folds to always-present and the else arm is
-        // deleted, which is the same shape the `??` consumer hit.
-        if self.pattern_is_names_only(pattern) {
-            if let Some(shape) = self.nullable_tuple_wire_shape(value)? {
-                return self.lower_if_let_nullable_tuple(
+
+        let shape = result_shape.unwrap_or(RetSlot::Opaque);
+        let results: Vec<Idx<Cell>> =
+            (0..shape.slot_count()).map(|_| self.f.new_cell(None)).collect();
+        let else_bb = self.f.new_block();
+        let join = self.f.new_block();
+
+        let scrutinee = if let Pattern::Bind(binding) = self.body.pattern_arena[pattern] {
+            if self.expr_is_nullable(value) {
+                if let Some(binding_shape) = self.nobox_binding_shape(binding)? {
+                    let mut scrut_shape = binding_shape.clone();
+                    scrut_shape.nullable = true;
+                    let bundle = self.lower_expr_repr(value)?;
+                    let leaves = self
+                        .repr_to_slot_values_bundle(&bundle, &RetSlot::Leaves(scrut_shape))?;
+                    let (present, values) = leaves
+                        .split_first()
+                        .expect("a nullable shape carries its presence leaf first");
+                    let then_bb = self.f.new_block();
+                    self.f.set_term(
+                        self.cur,
+                        Term::Branch { cond: *present, then_bb, else_bb },
+                    );
+                    Some(IfLetScrutinee::Nobox {
+                        binding,
+                        values: values.to_vec(),
+                        shape: binding_shape,
+                        then_bb,
+                    })
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let scrutinee = match scrutinee {
+            Some(scrutinee) => scrutinee,
+            None if self.pattern_is_names_only(pattern) => {
+                if let Some(tuple_shape) = self.nullable_tuple_wire_shape(value)? {
+                    let repr = self.lower_expr_repr(value)?.into_value();
+                    let ValueRepr::Tuple {
+                        parts,
+                        present: Some(present),
+                    } = repr
+                    else {
+                        return Err(gap(
+                            "a nullable tuple scrutinee arrived without its presence slot",
+                        ));
+                    };
+                    let bound_shape = TupleRetShape {
+                        slots: tuple_shape.slots.clone(),
+                        nullable: false,
+                    };
+                    let slots = self.tuple_repr_to_slots(
+                        ValueRepr::Tuple { parts, present: None },
+                        &bound_shape,
+                    )?;
+                    let then_bb = self.f.new_block();
+                    self.f.set_term(
+                        self.cur,
+                        Term::Branch { cond: present, then_bb, else_bb },
+                    );
+                    IfLetScrutinee::Tuple {
+                        pattern,
+                        slots,
+                        shape: bound_shape,
+                        then_bb,
+                    }
+                } else {
+                    IfLetScrutinee::Generic(self.lower_scrut(value)?)
+                }
+            }
+            None => IfLetScrutinee::Generic(self.lower_scrut(value)?),
+        };
+
+        match scrutinee {
+            IfLetScrutinee::Nobox {
+                binding,
+                values,
+                shape,
+                then_bb,
+            } => {
+                self.cur = then_bb;
+                self.bind_leaves(binding, &values, shape);
+            }
+            IfLetScrutinee::Tuple {
+                pattern,
+                slots,
+                shape,
+                then_bb,
+            } => {
+                self.cur = then_bb;
+                let mut idx = 0;
+                self.bind_names_slot(
                     pattern,
-                    value,
-                    &shape,
-                    then_branch,
-                    else_branch,
-                );
+                    &RetSlot::Nested(shape),
+                    &slots,
+                    &mut idx,
+                )?;
+            }
+            IfLetScrutinee::Generic(scrut) => {
+                // A nullable scrutinee (`if let v = some_opt`) fails the bind on
+                // nil. A flattened-enum-field scrutinee is never nullable, so
+                // `scrut_value` is always a plain value there.
+                if self.expr_is_nullable(value) {
+                    let val_v = self.scrut_value(&scrut);
+                    let nil = self.emit_cur(Inst::Const(Lit::Nil));
+                    let is_nil = self.emit_cur(Inst::Eq(val_v, nil));
+                    let cont = self.f.new_block();
+                    self.f.set_term(
+                        self.cur,
+                        Term::Branch { cond: is_nil, then_bb: else_bb, else_bb: cont },
+                    );
+                    self.cur = cont;
+                }
+                let variants = self.scrut_variants(value);
+                let scrut_enum = self.scrut_enum_name(value);
+                self.match_pattern(&scrut, pattern, else_bb, &variants, true, scrut_enum)?;
             }
         }
-        let result = self.f.new_cell(None);
-        let scrut = self.lower_scrut(value)?;
-        let else_bb = self.f.new_block();
-        let join = self.f.new_block();
-        // A nullable scrutinee (`if let v = some_opt`) fails the bind on nil ->
-        // else branch (the runtime value of a `T?` is the unwrapped value or nil).
-        // A flattened-enum-field scrutinee is never nullable (its type is a bare
-        // enum), so `scrut_value` here is always a plain `Val`.
-        if self.expr_is_nullable(value) {
-            let val_v = self.scrut_value(&scrut);
-            let nil = self.emit_cur(Inst::Const(Lit::Nil));
-            let is_nil = self.emit_cur(Inst::Eq(val_v, nil));
-            let cont = self.f.new_block();
-            self.f.set_term(self.cur, Term::Branch { cond: is_nil, then_bb: else_bb, else_bb: cont });
-            self.cur = cont;
-        }
-        // Match: failures jump to else_bb; on success `self.cur` holds the bindings.
-        let variants = self.scrut_variants(value);
-        let scrut_enum = self.scrut_enum_name(value);
-        self.match_pattern(&scrut, pattern, else_bb, &variants, true, scrut_enum)?;
-        let tv = self.lower_expr(then_branch)?;
-        self.store_and_join(result, tv, join);
+
+        let tv = self.lower_expr_repr(then_branch)?;
+        self.store_bundle_and_join(&results, &shape, &tv, join)?;
 
         self.cur = else_bb;
         let ev = match else_branch {
-            Some(eb) => self.lower_expr(eb)?,
-            None => self.emit_cur(Inst::Const(Lit::Nil)),
+            Some(eb) => self.lower_expr_repr(eb)?,
+            None => ValueBundle::new(
+                tv.representation(),
+                ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil))),
+            ),
         };
-        self.store_and_join(result, ev, join);
+        self.store_bundle_and_join(&results, &shape, &ev, join)?;
 
         self.cur = join;
-        Ok(self.emit_cur(Inst::Load(result)))
-    }
-
-    /// `if let q = p` binding a nullable `nobox` value: the scrutinee's presence
-    /// leaf IS the branch condition and `q` binds the remaining leaves as cells,
-    /// so nothing is packed to be tested and immediately unpacked again. Only a
-    /// plain `Bind` takes this path -- a destructuring pattern still matches
-    /// against the boxed scrutinee.
-    pub(crate) fn lower_if_let_nobox(
-        &mut self,
-        b: Idx<BindingInfo>,
-        value: Idx<Expr>,
-        then_branch: Idx<Expr>,
-        else_branch: Option<Idx<Expr>>,
-    ) -> Result<Idx<Inst>, CompilerError> {
-        let shape = self
-            .nobox_binding_shape(b)?
-            .ok_or_else(|| gap("nullable nobox binding has no scalar shape"))?;
-        let mut scrut_shape = shape.clone();
-        scrut_shape.nullable = true;
-
-        let result = self.f.new_cell(None);
-        let bundle = self.lower_expr_repr(value)?;
-        let leaves = self.repr_to_slot_values_bundle(&bundle, &RetSlot::Leaves(scrut_shape))?;
-        let (present, values) = leaves
-            .split_first()
-            .expect("a nullable shape carries its presence leaf first");
-        let (present, values) = (*present, values.to_vec());
-
-        let then_bb = self.f.new_block();
-        let else_bb = self.f.new_block();
-        let join = self.f.new_block();
-        self.f.set_term(self.cur, Term::Branch { cond: present, then_bb, else_bb });
-
-        self.cur = then_bb;
-        self.bind_leaves(b, &values, shape);
-        let tv = self.lower_expr(then_branch)?;
-        self.store_and_join(result, tv, join);
-
-        self.cur = else_bb;
-        let ev = match else_branch {
-            Some(eb) => self.lower_expr(eb)?,
-            None => self.emit_cur(Inst::Const(Lit::Nil)),
-        };
-        self.store_and_join(result, ev, join);
-
-        self.cur = join;
-        Ok(self.emit_cur(Inst::Load(result)))
+        let slots: Vec<Idx<Inst>> =
+            results.iter().map(|&cell| self.emit_cur(Inst::Load(cell))).collect();
+        let mut idx = 0;
+        Ok(self.slot_repr(&shape, &slots, &mut idx))
     }
 
     /// The DECLARED nullable-tuple shape of a call, without lowering it.
@@ -1005,60 +954,6 @@ impl Builder<'_> {
             _ => return Err(gap("bind_names_slot on a pattern that needs a test")),
         }
         Ok(())
-    }
-
-    /// `if let t = <call returning (..)?>` where an element splats: the presence
-    /// SLOT is the branch condition and the pattern binds the remaining slots as
-    /// cells, so nothing is packed to be tested and immediately unpacked again.
-    /// The tuple twin of [`Self::lower_if_let_nobox`].
-    pub(crate) fn lower_if_let_nullable_tuple(
-        &mut self,
-        pattern: Idx<Pattern>,
-        value: Idx<Expr>,
-        shape: &TupleRetShape,
-        then_branch: Idx<Expr>,
-        else_branch: Option<Idx<Expr>>,
-    ) -> Result<Idx<Inst>, CompilerError> {
-        let result = self.f.new_cell(None);
-        let repr = self.lower_expr_repr(value)?.into_value();
-        let ValueRepr::Tuple {
-            parts,
-            present: Some(present),
-        } = repr
-        else {
-            return Err(gap("a nullable tuple scrutinee arrived without its presence slot"));
-        };
-        // Presence is consumed by the branch, so what `t` holds is the plain tuple.
-        let bound_shape = TupleRetShape { slots: shape.slots.clone(), nullable: false };
-
-        let then_bb = self.f.new_block();
-        let else_bb = self.f.new_block();
-        let join = self.f.new_block();
-        self.f.set_term(self.cur, Term::Branch { cond: present, then_bb, else_bb });
-
-        self.cur = then_bb;
-        let slots = self.tuple_repr_to_slots(
-            ValueRepr::Tuple { parts, present: None },
-            &bound_shape,
-        )?;
-        // ONE dispatcher for every pattern shape: a single name takes the whole
-        // tuple's slot cells, a destructure takes each element's, and anything
-        // that does not line up packs -- which is where a whole-tuple use of a
-        // `nobox` element meets the guarantee's rejection.
-        let mut idx = 0;
-        self.bind_names_slot(pattern, &RetSlot::Nested(bound_shape), &slots, &mut idx)?;
-        let tv = self.lower_expr(then_branch)?;
-        self.store_and_join(result, tv, join);
-
-        self.cur = else_bb;
-        let ev = match else_branch {
-            Some(eb) => self.lower_expr(eb)?,
-            None => self.emit_cur(Inst::Const(Lit::Nil)),
-        };
-        self.store_and_join(result, ev, join);
-
-        self.cur = join;
-        Ok(self.emit_cur(Inst::Load(result)))
     }
 
     /// `while let pat = value { body }`: re-evaluate `value` each iteration in

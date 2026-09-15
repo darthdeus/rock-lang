@@ -207,34 +207,13 @@ impl Builder<'_> {
                 value,
                 then_branch,
                 else_branch,
-            } => {
-                // The old boxed path remains authoritative for ordinary if-let
-                // values. Only a nobox result needs the leaf join here.
-                if self.nobox_value_name(e).is_some() {
-                    match self.repr_join_slot(e)? {
-                        Some(shape) => self.lower_if_let_repr(
-                            pattern,
-                            value,
-                            then_branch,
-                            else_branch,
-                            shape,
-                        ),
-                        None => Ok(ValueRepr::Scalar(self.lower_if_let(
-                            pattern,
-                            value,
-                            then_branch,
-                            else_branch,
-                        )?)),
-                    }
-                } else {
-                    Ok(ValueRepr::Scalar(self.lower_if_let(
-                        pattern,
-                        value,
-                        then_branch,
-                        else_branch,
-                    )?))
-                }
-            },
+            } => self.lower_if_let(
+                pattern,
+                value,
+                then_branch,
+                else_branch,
+                self.repr_join_slot(e)?,
+            ),
             Expr::Match { scrutinee, arms } => match self.repr_join_slot(e)? {
                 Some(shape) => self.lower_match_repr(scrutinee, arms, shape),
                 None => Ok(ValueRepr::Scalar(self.lower_match(scrutinee, arms)?)),
