@@ -80,3 +80,18 @@ fn log_throttle_interval() {
         "[T] tick\n[T] tick",
     );
 }
+
+// A warning site obeys the level gate an error site ignores, summary included.
+#[test]
+fn log_warn_sites_obey_the_level_gate() {
+    eval_log(
+        "fn root() { log_reset_dedup(); log_set_level(0); \
+         log_warn_once(\"W\", \"dropped\", \"wq\"); \
+         log_warn_throttled_with_now(0.0, \"WT\", \"dropped\", 1.0, \"wt\"); \
+         log_once(\"E\", \"kept\", \"ek\"); \
+         log_reset_dedup(); log_set_level(1); \
+         log_warn_once(\"W\", \"shown\", \"wk\"); log_warn_once(\"W\", \"shown\", \"wk\"); \
+         log_suppression_summary() }",
+        "[E] kept\n[W] shown\n[W] suppressed x2 at wk: shown",
+    );
+}

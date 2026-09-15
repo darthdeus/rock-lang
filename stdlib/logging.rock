@@ -88,13 +88,17 @@ inline(lua) fn log_set_level(level: int) = """
 fn log_get_level() -> int { __stone_log_init(); return __stone_log_level }
 
 // ----------------------------------------------------------------------
-// log_once / log_throttled — error-level logging with per-call-site dedup
+// log_once / log_throttled — per-call-site dedup, at a declared level
 // ----------------------------------------------------------------------
 // log_once fires once per call site; subsequent calls from the same site
 // are silently dropped. log_throttled fires at most once per interval per
-// call site. Both use `__SITE__` (via macro shim) to derive a stable
-// per-site key — `__SITE__` resolves to "file:line" of the *user's* call,
-// even through wrappers and other macros.
+// call site. The plain names are ERROR and ignore the level gate (tests/
+// log_once.rock: log_set_level(0) must still fire); log_warn_once and
+// log_warn_throttled are WARN and obey it. Pick by what the record means, not
+// by the dedup it needs (docs/on-screen-errors-plan.md, Level policy).
+// Both use `__SITE__` (via macro shim) to derive a stable per-site key —
+// `__SITE__` resolves to "file:line" of the *user's* call, even through
+// wrappers and other macros.
 //
 // Two overloads each: the 2-arg form auto-injects __SITE__; the explicit
 // 3-arg form takes a user-supplied site key (used by tests to share a
@@ -114,30 +118,31 @@ fn log_get_level() -> int { __stone_log_init(); return __stone_log_level }
 //   __stone_log_throttle — site -> last-fire-timestamp (seconds)
 //   __stone_log_counts   — site -> occurrence count (log_throttled)
 //   __stone_log_sites    — site -> "CATEGORY|last message", for the summary
+//   __stone_log_site_levels — site -> level, for the summary
 //   __stone_log_wall     — site -> true for a declared wall-clock site
 
-@nomangle inline(lua) fn _log_once_impl(category: string, msg: string, site: string) = """
+@nomangle inline(lua) fn _log_once_impl(level: int, category: string, msg: string, site: string) = """
     __stone_log_init()
-    -- log_once is error-class / always-on by design (see the header
-    -- comment + tests/log_once.rock: log_set_level(0) must still
-    -- fire). Original gate semantics preserved: `0 > level` is never
-    -- true (min level 0), so it always fires; emit at level 0 so the
-    -- rock-log path doesn't gate it either.
-    if 0 > __stone_log_level then return end
+    -- Level 0 is never gated (the minimum level is 0), which is what keeps
+    -- log_once always-on.
+    if level > __stone_log_level then return end
     if __stone_log_dedup == nil then __stone_log_dedup = {} end
     if __stone_log_sites == nil then __stone_log_sites = {} end
+    if __stone_log_site_levels == nil then __stone_log_site_levels = {} end
     local n = (__stone_log_dedup[site] or 0) + 1
     __stone_log_dedup[site] = n
     __stone_log_sites[site] = (category or "") .. "|" .. msg
+    __stone_log_site_levels[site] = level
     if n > 1 then return end
-    __stone_emit(0, category, msg, false)
+    __stone_emit(level, category, msg, false)
 """
 
 // Report every deduped/throttled site that fired more than once, with its
 // total. This is the safety net that makes the suppression above safe: a
 // site that fired 38k times is a live bug, and without the total it looks
-// exactly like one that fired once. Emitted at error level (the same class
-// as the sites it reports) so no log level can hide it. Idempotent.
+// exactly like one that fired once. Emitted at each site's own level, so an
+// error site's total is never hidden and a warning site's obeys the gate.
+// Idempotent.
 @nomangle inline(lua) fn log_suppression_summary() = """
     __stone_log_init()
     if __stone_log_summary_done then return end
@@ -165,43 +170,59 @@ fn log_get_level() -> int { __stone_log_init(); return __stone_log_level }
         -- it fired; for a declared site both halves are wall-clock, so the
         -- summary inherits the declaration.
         local wall = (__stone_log_wall or {})[r.site] == true
-        __stone_emit(0, cat, "suppressed x" .. r.n .. " at " .. r.site .. ": " .. msg, wall)
+        local level = (__stone_log_site_levels or {})[r.site] or 0
+        if level <= __stone_log_level then
+            __stone_emit(level, cat, "suppressed x" .. r.n .. " at " .. r.site .. ": " .. msg, wall)
+        end
     end
 """
 
 macro log_once(category: expr, msg: expr) {
-    _log_once_impl(category, msg, __SITE__)
+    _log_once_impl(0, category, msg, __SITE__)
 }
 
 macro log_once(category: expr, msg: expr, site: expr) {
-    _log_once_impl(category, msg, site)
+    _log_once_impl(0, category, msg, site)
+}
+
+macro log_warn_once(category: expr, msg: expr) {
+    _log_once_impl(1, category, msg, __SITE__)
+}
+
+macro log_warn_once(category: expr, msg: expr, site: expr) {
+    _log_once_impl(1, category, msg, site)
 }
 
 // Mockable-now seam used by log_throttled and exposed for deterministic tests.
-@nomangle inline(lua) fn _log_throttled_with_now_impl(now_sec: float, category: string, msg: string, interval_sec: float, site: string, wall_clock: bool) = """
+@nomangle inline(lua) fn _log_throttled_with_now_impl(now_sec: float, level: int, category: string, msg: string, interval_sec: float, site: string, wall_clock: bool) = """
     __stone_log_init()
-    -- error-class / always-on, same as _log_once_impl (preserves the
-    -- original `0 > level` semantics + tests/log_once.rock contract).
-    if 0 > __stone_log_level then return end
+    -- Same gate as _log_once_impl: level 0 always fires.
+    if level > __stone_log_level then return end
     if __stone_log_throttle == nil then __stone_log_throttle = {} end
     if __stone_log_counts == nil then __stone_log_counts = {} end
     if __stone_log_sites == nil then __stone_log_sites = {} end
+    if __stone_log_site_levels == nil then __stone_log_site_levels = {} end
     if __stone_log_wall == nil then __stone_log_wall = {} end
     __stone_log_counts[site] = (__stone_log_counts[site] or 0) + 1
     __stone_log_sites[site] = (category or "") .. "|" .. msg
+    __stone_log_site_levels[site] = level
     __stone_log_wall[site] = wall_clock or nil
     local last = __stone_log_throttle[site]
     if last ~= nil and (now_sec - last) < interval_sec then return end
     __stone_log_throttle[site] = now_sec
-    __stone_emit(0, category, msg, wall_clock)
+    __stone_emit(level, category, msg, wall_clock)
 """
 
 macro log_throttled_with_now(now_sec: expr, category: expr, msg: expr, interval_sec: expr) {
-    _log_throttled_with_now_impl(now_sec, category, msg, interval_sec, __SITE__, false)
+    _log_throttled_with_now_impl(now_sec, 0, category, msg, interval_sec, __SITE__, false)
 }
 
 macro log_throttled_with_now(now_sec: expr, category: expr, msg: expr, interval_sec: expr, site: expr) {
-    _log_throttled_with_now_impl(now_sec, category, msg, interval_sec, site, false)
+    _log_throttled_with_now_impl(now_sec, 0, category, msg, interval_sec, site, false)
+}
+
+macro log_warn_throttled_with_now(now_sec: expr, category: expr, msg: expr, interval_sec: expr, site: expr) {
+    _log_throttled_with_now_impl(now_sec, 1, category, msg, interval_sec, site, false)
 }
 
 // Now-source seam for log_throttled. Stone's runner sets this each frame to
@@ -222,16 +243,24 @@ macro log_throttled_with_now(now_sec: expr, category: expr, msg: expr, interval_
 """
 
 // Wall-clock variant; thin wrapper around the mockable seam.
-@nomangle inline(lua) fn _log_throttled_impl(category: string, msg: string, interval_sec: float, site: string, wall_clock: bool) = """
-    _log_throttled_with_now_impl(__stone_log_now(), category, msg, interval_sec, site, wall_clock)
+@nomangle inline(lua) fn _log_throttled_impl(level: int, category: string, msg: string, interval_sec: float, site: string, wall_clock: bool) = """
+    _log_throttled_with_now_impl(__stone_log_now(), level, category, msg, interval_sec, site, wall_clock)
 """
 
 macro log_throttled(category: expr, msg: expr, interval_sec: expr) {
-    _log_throttled_impl(category, msg, interval_sec, __SITE__, false)
+    _log_throttled_impl(0, category, msg, interval_sec, __SITE__, false)
 }
 
 macro log_throttled(category: expr, msg: expr, interval_sec: expr, site: expr) {
-    _log_throttled_impl(category, msg, interval_sec, site, false)
+    _log_throttled_impl(0, category, msg, interval_sec, site, false)
+}
+
+macro log_warn_throttled(category: expr, msg: expr, interval_sec: expr) {
+    _log_throttled_impl(1, category, msg, interval_sec, __SITE__, false)
+}
+
+macro log_warn_throttled(category: expr, msg: expr, interval_sec: expr, site: expr) {
+    _log_throttled_impl(1, category, msg, interval_sec, site, false)
 }
 
 // A single DECLARED wall-clock value inside a record that also carries facts
@@ -252,8 +281,10 @@ fn wall_clock_ms(ms: float) -> string {
 
 // Throttled counterpart of `log_wall_clock`: the record is declared, and so is
 // the suppression summary line the site earns, which carries the same message.
+// WARN: a site throttles a measurement because it reports slowness, which is
+// worth attention and not a failure.
 macro log_wall_clock_throttled(category: expr, msg: expr, interval_sec: expr) {
-    _log_throttled_impl(category, msg, interval_sec, __SITE__, true)
+    _log_throttled_impl(1, category, msg, interval_sec, __SITE__, true)
 }
 
 // Clear EVERY record a suppression leaves: the dedup counts, the throttle
@@ -268,6 +299,7 @@ macro log_wall_clock_throttled(category: expr, msg: expr, interval_sec: expr) {
     __stone_log_throttle = {}
     __stone_log_counts = {}
     __stone_log_sites = {}
+    __stone_log_site_levels = {}
     __stone_log_wall = {}
     __stone_log_summary_done = false
 """
