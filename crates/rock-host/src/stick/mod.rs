@@ -1329,6 +1329,14 @@ mod tests {
     }
 
     #[test]
+    fn validate_engine_needs_accepts_3d() {
+        let cfg = StickConfig::new_from_str(
+            "[package]\nname = \"x\"\n[engine]\nneeds = [\"3d\"]\n",
+        ).unwrap();
+        cfg.validate_engine_needs().expect("3d is a known need");
+    }
+
+    #[test]
     fn validate_engine_needs_accepts_known_entry() {
         let cfg = StickConfig::new_from_str(
             "[package]\nname = \"x\"\n[engine]\nneeds = [\"video\"]\n",
