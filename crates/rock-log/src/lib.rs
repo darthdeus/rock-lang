@@ -230,6 +230,9 @@ impl log::Log for Logger {
 }
 
 fn emit(level: log::Level, target: &str, args: &std::fmt::Arguments, wall_clock: bool) {
+    if level == log::Level::Error {
+        ERRORS.lock().unwrap().record(target, &args.to_string(), elapsed_secs());
+    }
     let color = if *COLOR { level_color(level) } else { "" };
     let reset = if color.is_empty() { "" } else { SGR_RESET };
     eprintln!(
@@ -277,6 +280,95 @@ pub fn init() {
     // level. This final sync covers STONE_LOG-unset (set_level above
     // not called) and idempotent re-init.
     log::set_max_level(level_to_log(level()));
+}
+
+// ---- error records: what an on-screen development badge reads ----
+
+/// One distinct ERROR record: the target plus the message's first line, so a
+/// traceback or a varying tail does not split one fault into many rows.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ErrorRecord {
+    pub target: String,
+    pub message: String,
+    pub count: u64,
+    pub last_seen_secs: f64,
+}
+
+/// Distinct records kept; past it the least recently seen is evicted and
+/// counted, so the table stays bounded without losing the fact of an error.
+pub const ERROR_RECORD_CAP: usize = 64;
+
+#[derive(Default)]
+pub struct ErrorTable {
+    rows: Vec<ErrorRecord>,
+    total: u64,
+    evicted: u64,
+}
+
+impl ErrorTable {
+    pub fn record(&mut self, target: &str, message: &str, now_secs: f64) {
+        self.total += 1;
+        let first_line = message.lines().next().unwrap_or("");
+        if let Some(row) = self
+            .rows
+            .iter_mut()
+            .find(|r| r.target == target && r.message == first_line)
+        {
+            row.count += 1;
+            row.last_seen_secs = now_secs;
+            return;
+        }
+        if self.rows.len() >= ERROR_RECORD_CAP {
+            let stalest = self
+                .rows
+                .iter()
+                .enumerate()
+                .min_by(|a, b| a.1.last_seen_secs.total_cmp(&b.1.last_seen_secs))
+                .map(|(i, _)| i)
+                .expect("a full table has rows");
+            self.rows.swap_remove(stalest);
+            self.evicted += 1;
+        }
+        self.rows.push(ErrorRecord {
+            target: target.to_string(),
+            message: first_line.to_string(),
+            count: 1,
+            last_seen_secs: now_secs,
+        });
+    }
+
+    /// Every ERROR emitted, evicted rows included.
+    pub fn total(&self) -> u64 {
+        self.total
+    }
+
+    /// Distinct rows evicted to stay under `ERROR_RECORD_CAP`.
+    pub fn evicted(&self) -> u64 {
+        self.evicted
+    }
+
+    /// Rows, most recently seen first.
+    pub fn rows(&self) -> Vec<ErrorRecord> {
+        let mut rows = self.rows.clone();
+        rows.sort_by(|a, b| b.last_seen_secs.total_cmp(&a.last_seen_secs));
+        rows
+    }
+}
+
+static ERRORS: Lazy<Mutex<ErrorTable>> = Lazy::new(|| Mutex::new(ErrorTable::default()));
+
+/// Every ERROR record this process emitted, Rust and Rock alike.
+pub fn error_total() -> u64 {
+    ERRORS.lock().unwrap().total()
+}
+
+pub fn error_evicted() -> u64 {
+    ERRORS.lock().unwrap().evicted()
+}
+
+/// Distinct ERROR records, most recently seen first.
+pub fn error_records() -> Vec<ErrorRecord> {
+    ERRORS.lock().unwrap().rows()
 }
 
 // ---- log_once / log_throttled filter state (the one dedup/throttle) ----
@@ -468,6 +560,51 @@ mod tests {
             declared.len(),
             "the declaration must not shift the body column"
         );
+    }
+
+    #[test]
+    fn error_table_keys_on_target_and_first_line() {
+        let mut table = ErrorTable::default();
+        table.record("LEVEL", "rejected: floor\nstack traceback: a", 1.0);
+        table.record("LEVEL", "rejected: floor\nstack traceback: b", 2.0);
+        table.record("SAVE", "rejected: floor", 3.0);
+        assert_eq!(table.total(), 3);
+        let rows = table.rows();
+        assert_eq!(rows.len(), 2, "one fault with different tails is one row: {rows:?}");
+        assert_eq!(rows[0].target, "SAVE", "most recently seen first");
+        assert_eq!(rows[1].message, "rejected: floor");
+        assert_eq!(rows[1].count, 2);
+        assert_eq!(rows[1].last_seen_secs, 2.0);
+    }
+
+    #[test]
+    fn error_table_evicts_the_least_recently_seen_and_counts_it() {
+        let mut table = ErrorTable::default();
+        for i in 0..ERROR_RECORD_CAP {
+            table.record("T", &format!("fault {i}"), i as f64);
+        }
+        table.record("T", "fault 0", 100.0);
+        table.record("T", "fresh", 101.0);
+        let rows = table.rows();
+        assert_eq!(rows.len(), ERROR_RECORD_CAP);
+        assert_eq!(table.evicted(), 1);
+        assert_eq!(table.total(), ERROR_RECORD_CAP as u64 + 2);
+        assert!(rows.iter().any(|r| r.message == "fault 0"), "a repeat refreshes its row");
+        assert!(!rows.iter().any(|r| r.message == "fault 1"), "the stalest row is evicted");
+        assert!(rows.iter().any(|r| r.message == "fresh"));
+    }
+
+    #[test]
+    fn logged_errors_reach_the_error_records() {
+        init();
+        log::error!(target: "RLTEST_ERRORS", "error table witness {}", 7);
+        log::warn!(target: "RLTEST_ERRORS", "a warning is not an error");
+        let rows: Vec<_> = error_records()
+            .into_iter()
+            .filter(|r| r.target == "RLTEST_ERRORS")
+            .collect();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].message, "error table witness 7");
     }
 
     #[test]
