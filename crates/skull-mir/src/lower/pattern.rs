@@ -657,6 +657,116 @@ impl Builder<'_> {
         self.cur = cont;
     }
 
+    pub(crate) fn lower_if_let_repr(
+        &mut self,
+        pattern: Idx<Pattern>,
+        value: Idx<Expr>,
+        then_branch: Idx<Expr>,
+        else_branch: Option<Idx<Expr>>,
+        shape: RetSlot,
+    ) -> Result<ValueRepr, CompilerError> {
+        if let Pattern::Bind(b) = self.body.pattern_arena[pattern] {
+            if self.expr_is_nullable(value) && self.nobox_binding_shape(b)?.is_some() {
+                return self.lower_if_let_nobox_repr(
+                    b,
+                    value,
+                    then_branch,
+                    else_branch,
+                    shape,
+                );
+            }
+        }
+
+        let results: Vec<Idx<Cell>> =
+            (0..shape.slot_count()).map(|_| self.f.new_cell(None)).collect();
+        let scrut = self.lower_scrut(value)?;
+        let else_bb = self.f.new_block();
+        let join = self.f.new_block();
+        if self.expr_is_nullable(value) {
+            let val_v = self.scrut_value(&scrut);
+            let nil = self.emit_cur(Inst::Const(Lit::Nil));
+            let is_nil = self.emit_cur(Inst::Eq(val_v, nil));
+            let cont = self.f.new_block();
+            self.f.set_term(
+                self.cur,
+                Term::Branch { cond: is_nil, then_bb: else_bb, else_bb: cont },
+            );
+            self.cur = cont;
+        }
+        let variants = self.scrut_variants(value);
+        let scrut_enum = self.scrut_enum_name(value);
+        self.match_pattern(&scrut, pattern, else_bb, &variants, true, scrut_enum)?;
+
+        let tv = self.lower_expr_repr(then_branch)?;
+        self.store_bundle_and_join(&results, &shape, &tv, join)?;
+
+        self.cur = else_bb;
+        let ev = match else_branch {
+            Some(eb) => self.lower_expr_repr(eb)?,
+            None => ValueBundle::new(
+                tv.representation(),
+                ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil))),
+            ),
+        };
+        self.store_bundle_and_join(&results, &shape, &ev, join)?;
+
+        self.cur = join;
+        let slots: Vec<Idx<Inst>> =
+            results.iter().map(|&cell| self.emit_cur(Inst::Load(cell))).collect();
+        let mut idx = 0;
+        Ok(self.slot_repr(&shape, &slots, &mut idx))
+    }
+
+    fn lower_if_let_nobox_repr(
+        &mut self,
+        b: Idx<BindingInfo>,
+        value: Idx<Expr>,
+        then_branch: Idx<Expr>,
+        else_branch: Option<Idx<Expr>>,
+        shape: RetSlot,
+    ) -> Result<ValueRepr, CompilerError> {
+        let binding_shape = self
+            .nobox_binding_shape(b)?
+            .ok_or_else(|| gap("nullable nobox binding has no scalar shape"))?;
+        let mut scrut_shape = binding_shape.clone();
+        scrut_shape.nullable = true;
+
+        let bundle = self.lower_expr_repr(value)?;
+        let leaves = self.repr_to_slot_values_bundle(&bundle, &RetSlot::Leaves(scrut_shape))?;
+        let (present, values) = leaves
+            .split_first()
+            .expect("a nullable shape carries its presence leaf first");
+        let (present, values) = (*present, values.to_vec());
+
+        let results: Vec<Idx<Cell>> =
+            (0..shape.slot_count()).map(|_| self.f.new_cell(None)).collect();
+        let then_bb = self.f.new_block();
+        let else_bb = self.f.new_block();
+        let join = self.f.new_block();
+        self.f.set_term(self.cur, Term::Branch { cond: present, then_bb, else_bb });
+
+        self.cur = then_bb;
+        self.bind_leaves(b, &values, binding_shape);
+        let tv = self.lower_expr_repr(then_branch)?;
+        self.store_bundle_and_join(&results, &shape, &tv, join)?;
+
+        self.cur = else_bb;
+        let ev = match else_branch {
+            Some(eb) => self.lower_expr_repr(eb)?,
+            None => ValueBundle::new(
+                tv.representation(),
+                ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil))),
+            ),
+        };
+        self.store_bundle_and_join(&results, &shape, &ev, join)?;
+
+        self.cur = join;
+        let slots: Vec<Idx<Inst>> =
+            results.iter().map(|&cell| self.emit_cur(Inst::Load(cell))).collect();
+        let mut idx = 0;
+        Ok(self.slot_repr(&shape, &slots, &mut idx))
+    }
+
     pub(crate) fn lower_if_let(
         &mut self,
         pattern: Idx<Pattern>,

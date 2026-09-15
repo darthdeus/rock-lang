@@ -202,6 +202,39 @@ impl Builder<'_> {
                     self.lower_if(cond, then_branch, else_branch)?,
                 )),
             },
+            Expr::IfLet {
+                pattern,
+                value,
+                then_branch,
+                else_branch,
+            } => {
+                // The old boxed path remains authoritative for ordinary if-let
+                // values. Only a nobox result needs the leaf join here.
+                if self.nobox_value_name(e).is_some() {
+                    match self.repr_join_slot(e)? {
+                        Some(shape) => self.lower_if_let_repr(
+                            pattern,
+                            value,
+                            then_branch,
+                            else_branch,
+                            shape,
+                        ),
+                        None => Ok(ValueRepr::Scalar(self.lower_if_let(
+                            pattern,
+                            value,
+                            then_branch,
+                            else_branch,
+                        )?)),
+                    }
+                } else {
+                    Ok(ValueRepr::Scalar(self.lower_if_let(
+                        pattern,
+                        value,
+                        then_branch,
+                        else_branch,
+                    )?))
+                }
+            },
             Expr::Match { scrutinee, arms } => match self.repr_join_slot(e)? {
                 Some(shape) => self.lower_match_repr(scrutinee, arms, shape),
                 None => Ok(ValueRepr::Scalar(self.lower_match(scrutinee, arms)?)),
@@ -536,7 +569,7 @@ impl Builder<'_> {
             .expect("a nullable shape carries its presence leaf first");
         let (present, lhs_values) = (*present, lhs_values.to_vec());
 
-        let cells: Vec<Idx<Cell>> = lhs_values.iter().map(|_| self.f.new_cell(None)).collect();
+        let cells: Vec<Idx<Cell>> = (0..shape.leaf_count()).map(|_| self.f.new_cell(None)).collect();
         let lhs_bb = self.f.new_block();
         let rhs_bb = self.f.new_block();
         let join = self.f.new_block();
@@ -550,7 +583,12 @@ impl Builder<'_> {
         self.store_bundle_and_join(&cells, &RetSlot::Leaves(shape.clone()), &rhs_bundle, join)?;
 
         self.cur = lhs_bb;
-        self.store_slots_and_join(&cells, &lhs_values, join)?;
+        let mut lhs_slots = Vec::with_capacity(cells.len());
+        if shape.nullable {
+            lhs_slots.push(self.emit_cur(Inst::Const(Lit::Bool(true))));
+        }
+        lhs_slots.extend(lhs_values);
+        self.store_slots_and_join(&cells, &lhs_slots, join)?;
 
         self.cur = join;
         let loads: Vec<Idx<Inst>> = cells.iter().map(|&c| self.emit_cur(Inst::Load(c))).collect();

@@ -636,6 +636,9 @@ impl Builder<'_> {
             Expr::Match { arms, .. } => {
                 arms.clone().map(|a| self.body.match_arm_arena[a].body).collect()
             }
+            Expr::IfLet { then_branch, else_branch, .. } => {
+                std::iter::once(*then_branch).chain(*else_branch).collect()
+            }
             _ => return false,
         };
         arms.into_iter().any(|a| {
