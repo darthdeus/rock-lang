@@ -611,15 +611,12 @@ impl Builder<'_> {
                 shape
             }
         };
-        // A join's shape must represent every value that reaches it, and the
-        // arms are right here. `if c { P { .. } } else { null }` infers as plain
-        // `P` -- the `null` arm does not widen it -- so reading nullability off
-        // the join EXPRESSION alone plans a shape with no presence leaf, and the
-        // null arm then splits nil into fields and faults. Widening from the arms
-        // cannot manufacture a phantom presence slot the way keying on a foreign
-        // expression's nullability would: an arm that can be null is a value the
-        // join has to carry, and if the sink is non-nullable bone has already
-        // rejected the program.
+        // A join's shape must represent every value that reaches it. Bone's
+        // nullable coalesce/if-let paths normally carry this nullability; the
+        // arm scan is a defensive backstop when a representation query exposes
+        // only the payload shape. It cannot manufacture a phantom value: an arm
+        // that can be null is a value the join has to carry, and a non-nullable
+        // sink has already been rejected.
         if !shape.nullable && self.join_arm_is_nullable(e) {
             shape.nullable = true;
         }
