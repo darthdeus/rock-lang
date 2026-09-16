@@ -178,6 +178,31 @@ fn random_around(position: Vec2, min: float, max: float) -> Vec2 {
     return position + random_vec(min, max)
 }
 
+fn presentation_random_dir() -> Vec2 {
+    let angle = presentation_random_range(0.0, PI * 2.0)
+    return v(angle.cos(), angle.sin())
+}
+
+fn presentation_random_vec(min: float, max: float) -> Vec2 {
+    return presentation_random_dir() * presentation_random_range(min, max)
+}
+
+fn presentation_random_offset(radius: float) -> Vec2 {
+    return presentation_random_dir() * presentation_random_range(0.0, radius)
+}
+
+fn presentation_random_circle(radius: float) -> Vec2 {
+    return presentation_random_offset(radius)
+}
+
+fn presentation_random_box(center: Vec2, size: Vec2) -> Vec2 {
+    return center + v(presentation_random_range(-1 * size.x, size.x) / 2, presentation_random_range(-1 * size.y, size.y) / 2)
+}
+
+fn presentation_random_around(position: Vec2, min: float, max: float) -> Vec2 {
+    return position + presentation_random_vec(min, max)
+}
+
 @pure fn intersect_circle(center_a: Vec2, radius_a: float, center_b: Vec2, radius_b: float) -> bool {
     let dist = center_a.distance(center_b)
     return dist < (radius_a + radius_b)

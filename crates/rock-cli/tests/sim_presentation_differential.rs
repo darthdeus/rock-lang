@@ -18,7 +18,6 @@ fn workspace_root() -> PathBuf {
 }
 
 fn run_sim(name: &str) -> std::process::Output {
-    let _guard = SIM_LOCK.lock().unwrap();
     Command::new(env!("CARGO_BIN_EXE_rock"))
         .args(["sim", "mag", name])
         .current_dir(workspace_root())
@@ -26,6 +25,7 @@ fn run_sim(name: &str) -> std::process::Output {
         .output()
         .unwrap_or_else(|error| panic!("spawn {name}: {error}"))
 }
+
 
 fn assert_sim_pass(name: &str, output: &std::process::Output) {
     let text = format!(
@@ -67,6 +67,7 @@ fn extract_digest(name: &str, output: &std::process::Output) -> i64 {
 
 #[test]
 fn mag_simulation_repeatability() {
+    let _guard = SIM_LOCK.lock().unwrap();
     let out1 = run_sim("sim_repeatability_headless");
     assert_sim_pass("sim_repeatability_headless", &out1);
     let digest1 = extract_digest("sim_repeatability_headless", &out1);
@@ -81,6 +82,7 @@ fn mag_simulation_repeatability() {
 
 #[test]
 fn mag_simulation_presentation_independence() {
+    let _guard = SIM_LOCK.lock().unwrap();
     let out_headless = run_sim("sim_repeatability_headless");
     assert_sim_pass("sim_repeatability_headless", &out_headless);
     let headless_digest = extract_digest("sim_repeatability_headless", &out_headless);

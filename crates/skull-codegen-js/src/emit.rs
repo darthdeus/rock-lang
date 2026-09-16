@@ -7165,6 +7165,13 @@ fn host_fn_template(cf: &bone_semantic::hir::Function) -> Option<&'static str> {
         ("random", 0) => Some("__rock_random()"),
         ("random_int", 2) => Some("__rock_random_int($1, $2)"),
         ("random_seed", 1) => Some("__rock_rng_seed($1)"),
+        ("random_get_state", 0) => Some("__rock_rng_state_get()"),
+        ("random_set_state", 1) => Some("__rock_rng_state_set($1)"),
+        ("presentation_random", 0) => Some("__rock_presentation_random()"),
+        ("presentation_random_int", 2) => Some("__rock_presentation_random_int($1, $2)"),
+        ("presentation_random_seed", 1) => Some("__rock_presentation_rng_seed($1)"),
+        ("presentation_random_get_state", 0) => Some("__rock_presentation_rng_state_get()"),
+        ("presentation_random_set_state", 1) => Some("__rock_presentation_rng_state_set($1)"),
         ("env_var", 1) => Some("__rock_env_var($1)"),
         // `deepcopy(obj)` -> the recursive clone runtime (`JS_DEEPCOPY_RUNTIME`).
         ("deepcopy", 1) => Some("deepcopy($1)"),

@@ -1069,6 +1069,7 @@ fn assemble_web_program(
     // Deterministic default seed (a game re-seeds via random_seed() itself);
     // Date.now() matches the node path's non-deterministic default.
     p.push_str("__rock_rng_seed(Date.now());\n");
+    p.push_str("__rock_presentation_rng_seed(Date.now() + 10007);\n");
     p.push_str(&emitted.program);
     p.push_str(register_lines);
     let manifest: Vec<String> = preload.iter().map(|s| crate::js_test::js_str(s)).collect();

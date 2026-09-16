@@ -2317,6 +2317,37 @@ inline(lua) fn random_int(min: int, max: int) -> int = """
 inline(lua) fn random_seed(seed: int) = """
     __rock_rng_seed(seed)
 """
+inline(lua) fn random_get_state() -> int = """
+    return __rock_rng_state_get()
+"""
+inline(lua) fn random_set_state(state: int) = """
+    __rock_rng_state_set(state)
+"""
+
+// Presentation RNG
+// Independent stream for visual VFX, particles, audio detuning, and cosmetic UI.
+// Advances without shifting the authoritative gameplay RNG stream.
+inline(lua) fn presentation_random() -> float = """
+    return __rock_presentation_rng_next() * (1.0 / 4294967296.0)
+"""
+fn presentation_random_range(min: float, max: float) -> float { return presentation_random() * (max - min) + min }
+inline(lua) fn presentation_random_int(min: int, max: int) -> int = """
+    local r = max - min
+    if r <= 0 then return min end
+    if r <= 4294967296 then return __rock_presentation_rng_next() % r + min end
+    local hi = __rock_presentation_rng_next()
+    local lo = __rock_presentation_rng_next()
+    return (hi * 2097152 + math.floor(lo / 2048)) % r + min
+"""
+inline(lua) fn presentation_random_seed(seed: int) = """
+    __rock_presentation_rng_seed(seed)
+"""
+inline(lua) fn presentation_random_get_state() -> int = """
+    return __rock_presentation_rng_state_get()
+"""
+inline(lua) fn presentation_random_set_state(state: int) = """
+    __rock_presentation_rng_state_set(state)
+"""
 @intrinsic @pure @inline inline(lua) fn sin(x: float) -> float = "math.sin(x)"
 @intrinsic @pure @inline inline(lua) fn cos(x: float) -> float = "math.cos(x)"
 @intrinsic @pure @inline inline(lua) fn tan(x: float) -> float = "math.tan(x)"

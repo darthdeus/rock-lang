@@ -584,6 +584,7 @@ _G.__rock_session_new = function(schema_id)
     __rock_initialized = __rock_table_new(narr, nhash),
     __rock_initializer_keys = {},
     __rock_rng_state = nil,
+    __rock_presentation_rng_state = nil,
     __rock_state_capacity = { narr, nhash }
   }
 end
@@ -888,9 +889,45 @@ if not _G.__rock_rng_next then
     if output < 0 then return output + 4294967296 end
     return output
   end
+
+  local __rock_presentation_rng_state = 0
+  local function active_presentation_rng_state()
+    local session = _G.__rock_active_session
+    if session and session.__rock_presentation_rng_state ~= nil then return session.__rock_presentation_rng_state end
+    return __rock_presentation_rng_state
+  end
+  local function store_presentation_rng_state(state)
+    local session = _G.__rock_active_session
+    if session then session.__rock_presentation_rng_state = state else __rock_presentation_rng_state = state end
+  end
+  _G.__rock_presentation_rng_seed = function(s)
+    local state = __rock_bit.tobit(tonumber(s))
+    store_presentation_rng_state(state)
+  end
+  _G.__rock_presentation_rng_state_get = function() return active_presentation_rng_state() end
+  _G.__rock_presentation_rng_state_set = function(s)
+    local state = __rock_bit.tobit(tonumber(s))
+    store_presentation_rng_state(state)
+  end
+  _G.__rock_presentation_rng_next = function()
+    local state = __rock_bit.tobit(active_presentation_rng_state() + 0x9E3779B9)
+    state = __rock_bit.bxor(state, __rock_bit.lshift(state, 13))
+    state = __rock_bit.bxor(state, __rock_bit.rshift(state, 17))
+    state = __rock_bit.bxor(state, __rock_bit.lshift(state, 5))
+    store_presentation_rng_state(state)
+    local output = __rock_bit.bxor(state, __rock_bit.rshift(state, 16))
+    if output < 0 then return output + 4294967296 end
+    return output
+  end
+
   local __seed = tonumber(os.getenv("ROCK_TEST_SEED"))
-  if __seed then _G.__rock_rng_seed(__seed)
-  else _G.__rock_rng_seed(os.time()) end
+  if __seed then
+    _G.__rock_rng_seed(__seed)
+    _G.__rock_presentation_rng_seed(__seed + 10007)
+  else
+    _G.__rock_rng_seed(os.time())
+    _G.__rock_presentation_rng_seed(os.time() + 10007)
+  end
 end
 "#;
 

@@ -931,6 +931,35 @@ function __rock_random_int(min, max) {
   var hi = __rock_rng_next32(), lo = __rock_rng_next32();
   return min + ((hi * 2097152 + (lo >>> 11)) % r);
 }
+var __rock_presentation_rng_state = 0;
+function __rock_presentation_rng_current() {
+  if (typeof __rock_active_session !== "undefined" && __rock_active_session
+      && __rock_active_session.__rock_presentation_rng_state !== null) return __rock_active_session.__rock_presentation_rng_state;
+  return __rock_presentation_rng_state;
+}
+function __rock_presentation_rng_store(s) {
+  if (typeof __rock_active_session !== "undefined" && __rock_active_session) __rock_active_session.__rock_presentation_rng_state = s >>> 0;
+  else __rock_presentation_rng_state = s >>> 0;
+}
+function __rock_presentation_rng_seed(s) { __rock_presentation_rng_store(s); }
+function __rock_presentation_rng_state_get() { return __rock_presentation_rng_current(); }
+function __rock_presentation_rng_state_set(s) { __rock_presentation_rng_store(s); }
+function __rock_presentation_rng_next32() {
+  var state = (__rock_presentation_rng_current() + 0x6D2B79F5) >>> 0;
+  __rock_presentation_rng_store(state);
+  var t = state;
+  t = Math.imul(t ^ (t >>> 15), t | 1);
+  t = (t + Math.imul(t ^ (t >>> 7), t | 61)) ^ t;
+  return (t ^ (t >>> 14)) >>> 0;
+}
+function __rock_presentation_random() { return __rock_presentation_rng_next32() / 4294967296; }
+function __rock_presentation_random_int(min, max) {
+  var r = max - min;
+  if (r <= 0) return min;
+  if (r <= 4294967296) return min + (__rock_presentation_rng_next32() % r);
+  var hi = __rock_presentation_rng_next32(), lo = __rock_presentation_rng_next32();
+  return min + ((hi * 2097152 + (lo >>> 11)) % r);
+}
 "#;
 
 /// The static browser runtime prelude for `rock web` (stone-web Arc 2). A leaf
@@ -3195,7 +3224,7 @@ function __rock_web_arm_raf(frameFn) {
 /// `undefined` and `null` both count as nil, matching the subset's loose rule.
 pub const JS_SESSION_RUNTIME: &str = r#"
 function __rock_session_new(schema_id) {
-  return { __rock_schema_id: schema_id, __rock_state: Object.create(null), __rock_initialized: Object.create(null), __rock_initializer_keys: Object.create(null), __rock_rng_state: null };
+  return { __rock_schema_id: schema_id, __rock_state: Object.create(null), __rock_initialized: Object.create(null), __rock_initializer_keys: Object.create(null), __rock_rng_state: null, __rock_presentation_rng_state: null };
 }
 function __rock_session_activate(session) {
   if (!session || !session.__rock_state || !session.__rock_initialized) throw new Error("invalid Rock Session");
