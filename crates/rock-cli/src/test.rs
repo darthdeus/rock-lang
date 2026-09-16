@@ -26,12 +26,15 @@ pub(crate) fn find_test_functions_from_sources(sources: &SourceFiles) -> Vec<Tes
     let mut test_functions = Vec::new();
 
     for file in sources.files.iter() {
-        let (contents, file_label) = {
+        let (contents, file_label, dialect) = {
             let b = file.borrow();
-            (b.contents.clone(), b.file.to_id_path())
+            (b.contents.clone(), b.file.to_id_path(), b.dialect)
         };
-        let ast = match skull_parser::parse_module(&contents, ustr::Ustr::from(file_label.as_str()))
-        {
+        let ast = match skull_parser::parse_module_with_dialect(
+            &contents,
+            ustr::Ustr::from(file_label.as_str()),
+            dialect,
+        ) {
             Ok(ast) if ast.recovery_errors.is_empty() => ast,
             _ => continue,
         };

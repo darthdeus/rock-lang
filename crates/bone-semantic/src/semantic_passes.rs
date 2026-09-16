@@ -157,6 +157,8 @@ pub fn lower_modules(
                 ItemKind::Global(_) => AnnoPos::GlobalItem,
                 ItemKind::Decorator(_) => AnnoPos::DecoItem,
                 ItemKind::CompilerDirective(_) | ItemKind::Comment(_) | ItemKind::MacroInvocation { .. } => continue,
+                // Rejected earlier by reject_unscoped_module_items.
+                ItemKind::Use(_) | ItemKind::Module(_) => continue,
             };
             let lowered = lower_annotations(rock_mod, &item.annotations);
             validate_annotations(pos, &lowered, &ws.decorator_names)?;
@@ -666,10 +668,44 @@ pub fn semantic_pass(rock_modules: &mut [Ast]) -> Result<Workspace, CompilerErro
     let _span = tracing::info_span!("bone_semantic_pass").entered();
     let mut ws = Workspace::default();
 
+    reject_unscoped_module_items(rock_modules)?;
     expand_and_desugar(&mut ws, rock_modules)?;
     lower_and_infer(&mut ws, rock_modules)?;
 
     Ok(ws)
+}
+
+/// Modules-v1 item forms (`use`, inline `mod` blocks, block-level `use`)
+/// parse but carry no semantics until module resolution lands (plan M2).
+/// Reject them here rather than silently ignoring the declarations — a
+/// silent ignore would accept programs whose names resolve to nothing.
+fn reject_unscoped_module_items(rock_modules: &[Ast]) -> Result<(), CompilerError> {
+    for rock_mod in rock_modules.iter() {
+        if rock_mod.module_header.is_some() {
+            return Err(CompilerError::new_with_label(
+                rock_mod.module_header.as_ref().expect("checked").span,
+                "module file headers require module resolution (not yet implemented)".to_string(),
+            ));
+        }
+        for item in rock_mod.items.iter() {
+            match &item.kind {
+                ItemKind::Use(u) => {
+                    return Err(CompilerError::new_with_label(
+                        u.span,
+                        "`use` declarations require module resolution (not yet implemented)".to_string(),
+                    ));
+                }
+                ItemKind::Module(m) => {
+                    return Err(CompilerError::new_with_label(
+                        m.span,
+                        "inline `mod` blocks require module resolution (not yet implemented)".to_string(),
+                    ));
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(())
 }
 
 pub fn check_module_incremental(
@@ -952,6 +988,9 @@ pub fn pass_lower_functions(a: &Ast, ctx: &mut LowerCtx) -> Result<(), CompilerE
             | ItemKind::Struct(_)
             | ItemKind::Enum(_)
             | ItemKind::Newtype(_) => {}
+
+            // Rejected earlier by reject_unscoped_module_items.
+            ItemKind::Use(_) | ItemKind::Module(_) => {}
 
             ItemKind::Global(g) => {
                 lower_global(ctx, a, g, &item.annotations)?;

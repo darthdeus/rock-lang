@@ -395,6 +395,14 @@ fn expand_item_macro(ast: &mut Ast, name: Ident, args: &[MacroArg], reg: &Regist
     for it in &mut items {
         subst_in_item(ast, it, &ty_subs, &expr_subs);
     }
+    // Macro-generated module headers, `mod` declarations, and `use`
+    // declarations are rejected (spec 12.2): file/module/import selection is
+    // fixed before expansion, so generated ones would mis-scope output.
+    for it in &items {
+        if let ItemKind::Use(_) | ItemKind::Module(_) = &it.kind {
+            return None;
+        }
+    }
     Some(items)
 }
 
@@ -484,6 +492,18 @@ fn shadow_pattern(p: &Pattern, scope: &mut ShadowScope) {
             }
         }
         Pattern::Record { fields, .. } => {
+            for (_, sub) in fields {
+                shadow_pattern(sub, scope);
+            }
+        }
+        Pattern::PathVariant { args, .. } => {
+            if let Some(ps) = args {
+                for p in ps {
+                    shadow_pattern(p, scope);
+                }
+            }
+        }
+        Pattern::PathRecord { fields, .. } => {
             for (_, sub) in fields {
                 shadow_pattern(sub, scope);
             }
@@ -1416,6 +1436,18 @@ fn rename_pattern(p: &mut Pattern, callsite: u32, counter: &mut u32, scope: &mut
             }
         }
         Pattern::Record { fields, .. } => {
+            for (_, sub) in fields.iter_mut() {
+                rename_pattern(sub, callsite, counter, scope);
+            }
+        }
+        Pattern::PathVariant { args, .. } => {
+            if let Some(ps) = args {
+                for p in ps.iter_mut() {
+                    rename_pattern(p, callsite, counter, scope);
+                }
+            }
+        }
+        Pattern::PathRecord { fields, .. } => {
             for (_, sub) in fields.iter_mut() {
                 rename_pattern(sub, callsite, counter, scope);
             }

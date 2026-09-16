@@ -102,6 +102,31 @@ fn source_files_from_dir_impl<P: AsRef<Path>>(source_dir: P, preprocess: bool) -
     Ok(SourceFiles { files })
 }
 
+/// Scan a file's leading `//!` directives for `modules: v1` (spec 3.1:
+/// standalone test/script sources declare their dialect explicitly; package
+/// files take theirs from the manifest via the package graph). Only the first
+/// ten lines count, mirroring `parse_lib_directive`.
+pub fn parse_modules_directive(contents: &str) -> rock_core::source_code::Dialect {
+    for line in contents.lines().take(10) {
+        let trimmed = line.trim_start();
+        let Some(rest) = trimmed.strip_prefix("//!") else { continue };
+        let rest = rest.trim();
+        if let Some(value) = rest.strip_prefix("modules:") {
+            return match value.trim() {
+                "v1" => rock_core::source_code::Dialect::V1,
+                "legacy" | "" => rock_core::source_code::Dialect::Legacy,
+                other => {
+                    eprintln!(
+                        "rock: unknown `//! modules:` directive value `{other}` (known: legacy, v1); treating as legacy"
+                    );
+                    rock_core::source_code::Dialect::Legacy
+                }
+            };
+        }
+    }
+    rock_core::source_code::Dialect::Legacy
+}
+
 // Helper function to process content and extract directives.
 // The preprocessor always runs (to extract is_script/is_test/used_packages
 // flags), but `apply` controls whether its output replaces the raw contents.
@@ -140,6 +165,9 @@ fn create_source_file(
 ) -> SourceFile {
     let module_id = ModuleId::new(file.to_id_path().into());
 
+    // A `//! modules: v1` directive opts a standalone source into v1. Package
+    // loaders overwrite this with the manifest/graph fact afterwards.
+    let dialect = parse_modules_directive(&contents);
     SourceFile {
         module_id,
         file,
@@ -149,7 +177,7 @@ fn create_source_file(
         is_test_util,
         used_packages,
         package: None,
-        dialect: rock_core::source_code::Dialect::Legacy,
+        dialect,
     }
 }
 

@@ -289,6 +289,14 @@ pub fn item_prints(a: &Ast, text: &str) -> Vec<ItemPrint> {
                 (ItemKindTag::Other, name.name, None, None)
             }
 
+            // Modules-v1 forms: whole-item interface, no body to isolate. The
+            // semantic pass rejects these until module resolution lands, so
+            // this arm only keeps the interface hashing total.
+            ItemKind::Use(_) | ItemKind::Module(_) => {
+                text[start..stop].hash(&mut h);
+                (ItemKindTag::Other, Ustr::from(""), None, None)
+            }
+
             ItemKind::Comment(_) => continue,
         };
 

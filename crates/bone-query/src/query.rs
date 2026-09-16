@@ -2595,7 +2595,22 @@ fn render_type_expr(ast: &Ast, idx: skull_parser::Idx<skull_parser::TypeExprData
         K::Bool => "bool".to_string(),
         K::Ref(target) => format!("ref {}", render_type_expr(ast, *target)),
         K::Ident(id) => id.name.to_string(),
+        K::Path(path) => {
+            let root = if path.from_root { "::" } else { "" };
+            format!(
+                "{root}{}",
+                path.segments.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join("::")
+            )
+        }
         K::Array(el) => format!("[{}]", render_type_expr(ast, *el)),
+        K::AppPath { ctor, args } => {
+            let root = if ctor.from_root { "::" } else { "" };
+            format!(
+                "{root}{}<{}>",
+                ctor.segments.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join("::"),
+                join(args)
+            )
+        }
         K::App { ctor, args } => format!("{}<{}>", ctor.name, join(args)),
         K::Tuple(els) => format!("({})", join(els)),
         K::Function { params, ret } => {

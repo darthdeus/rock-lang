@@ -289,6 +289,19 @@ pub fn lower_type_expr_in(
         TypeExprKind::Unit => ctx.workspace.builtins.unit(),
         TypeExprKind::Any => ctx.workspace.builtins.any(),
 
+        // Modules-v1 qualified type paths resolve through the namespace tree
+        // (plan M2); until that lands they are rejected, never guessed.
+        TypeExprKind::Path(path) | TypeExprKind::AppPath { ctor: path, .. } => comp_error!(
+            te.span,
+            "qualified type path `{}` requires module resolution (not yet implemented)",
+            path
+                .segments
+                .iter()
+                .map(|s| s.name.as_str())
+                .collect::<Vec<_>>()
+                .join("::")
+        ),
+
         TypeExprKind::Ident(name) => {
             if name.name.as_str() == "_" {
                 let var = ctx.next_var_id();
@@ -638,6 +651,10 @@ pub fn lower_statement_value(
     s: &StatementData,
 ) -> Result<Statement, CompilerError> {
     let hir_s = match &s.kind {
+        StatementKind::Use(u) => comp_error!(
+            u.span,
+            "`use` declarations require module resolution (not yet implemented)"
+        ),
         StatementKind::Expression(expr) => {
             Statement::Expr(lower_expr(ctx, a, body, scope, a.e(expr))?)
         }
@@ -938,7 +955,27 @@ pub fn lower_expr_value(
     }
 
 
+    // Modules-v1 value-position paths resolve through the namespace tree
+    // (plan M2); until that lands they are rejected, never guessed.
+    if let ExprKind::Path { path, .. } | ExprKind::PathStructLiteral { path, .. } = &e.kind {
+        return Err(CompilerError::new_with_label(
+            e.span,
+            format!(
+                "qualified path `{}` requires module resolution (not yet implemented)",
+                path.segments.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join("::")
+            ),
+        ));
+    }
+
     let result = match &e.kind {
+        // Unreachable while the guard above rejects paths, but the match must
+        // stay exhaustive.
+        ExprKind::Path { .. } | ExprKind::PathStructLiteral { .. } => {
+            return Err(CompilerError::new_with_label(
+                e.span,
+                format!("qualified path requires module resolution (not yet implemented)"),
+            ));
+        }
         ExprKind::Null => Expr::Null,
         ExprKind::Unit => Expr::Unit,
         ExprKind::Bool(val) => Expr::Bool(*val),
@@ -1551,7 +1588,7 @@ pub fn lower_expr_value(
             }
         }
 
-        ExprKind::TypeAscription(inner, ty) => Expr::As {
+        ExprKind::TypeAscription(inner, ty) | ExprKind::ParenAscription(inner, ty) => Expr::As {
             value: lower_expr(ctx, a, body, scope, a.e(inner))?,
             target: lower_type_expr_local(ctx, a, body, a.te(ty))?,
             kind: AsKind::Ascribe,
@@ -2659,8 +2696,24 @@ fn lower_pattern_value(
     scope: Idx<Scope>,
     pat: &skull_parser::Pattern,
 ) -> Result<Pattern, CompilerError> {
+    if let skull_parser::Pattern::PathVariant { path, .. }
+    | skull_parser::Pattern::PathRecord { path, .. } = pat
+    {
+        return Err(CompilerError::new_no_location(format!(
+            "qualified pattern `{}` requires module resolution (not yet implemented)",
+            path.segments.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join("::")
+        )));
+    }
+
     Ok(match pat {
         skull_parser::Pattern::Wildcard => Pattern::Wildcard,
+        // Unreachable while the guard above rejects path patterns, but the
+        // match must stay exhaustive.
+        skull_parser::Pattern::PathVariant { .. } | skull_parser::Pattern::PathRecord { .. } => {
+            return Err(CompilerError::new_no_location(
+                "qualified pattern requires module resolution (not yet implemented)",
+            ));
+        }
 
         skull_parser::Pattern::Ident(id) => {
             let b = ctx.alloc_binding(
@@ -3113,7 +3166,8 @@ fn pl_chain(a: &Ast, e: &Idx<ExprData>) -> bool {
         | ExprKind::PostDecrement(i)
         | ExprKind::As(i, _)
         | ExprKind::Bitcast(i, _)
-        | ExprKind::TypeAscription(i, _) => pl_chain(a, i),
+        | ExprKind::TypeAscription(i, _)
+        | ExprKind::ParenAscription(i, _) => pl_chain(a, i),
 
         ExprKind::BinOp { left, right, .. } => pl_chain(a, left) || pl_chain(a, right),
 
@@ -3154,7 +3208,8 @@ fn is_placeholder_lambda(a: &Ast, e: &ExprData) -> bool {
         | ExprKind::BitNot(i)
         | ExprKind::QuestionMark(i)
         | ExprKind::As(i, _)
-        | ExprKind::TypeAscription(i, _) => pl_chain(a, i),
+        | ExprKind::TypeAscription(i, _)
+        | ExprKind::ParenAscription(i, _) => pl_chain(a, i),
 
         ExprKind::If { branches, .. } => branches.iter().any(|(c, _)| pl_is_us(a, c)),
 

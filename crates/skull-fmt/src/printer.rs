@@ -91,6 +91,9 @@ impl<'a> Printer<'a> {
     // ---- module -----------------------------------------------------------
 
     pub fn module(&self) -> Doc {
+        // The `mod a::b;` file header (v1) prints first, verbatim: it has no
+        // internal layout decisions.
+        let header = self.ast.module_header.as_ref().map(|h| self.raw(h.span));
         // Render every item, then preserve hand-aligned runs of adjacent items
         // verbatim (sfx.rock's aligned `global` declarations) before assembling.
         let item_spans: Vec<Span> = self.ast.items.iter().map(|it| it.span).collect();
@@ -128,6 +131,12 @@ impl<'a> Printer<'a> {
         }
 
         let mut parts = Vec::new();
+        if let Some(h) = header {
+            // The file header leads the output with one blank line after it.
+            parts.push(h);
+            parts.push(hardline());
+            parts.push(hardline());
+        }
         let mut prev_end: Option<usize> = None;
         let mut prev_was_comment = false;
         let mut prev_multiline = false;
@@ -312,7 +321,11 @@ impl<'a> Printer<'a> {
             // recover -- slice verbatim for now.
             ItemKind::Decorator(_)
             | ItemKind::CompilerDirective(_)
-            | ItemKind::MacroInvocation { .. } => self.raw(item.span),
+            | ItemKind::MacroInvocation { .. }
+            // `use` / inline `mod` print verbatim: the path/tree spelling is
+            // the source spelling (no internal layout decisions to re-flow).
+            | ItemKind::Use(_)
+            | ItemKind::Module(_) => self.raw(item.span),
         };
         parts.push(body);
         let mut doc = Doc::concat(parts);
@@ -1243,6 +1256,8 @@ impl<'a> Printer<'a> {
     fn stmt_structural(&self, s: Idx<StatementData>) -> Doc {
         match &self.ast.s(&s).kind {
             StatementKind::Expression(e) => self.expr(*e),
+            // `use` prints verbatim (no internal layout decisions).
+            StatementKind::Use(u) => self.raw(u.span),
             StatementKind::Let(l) => self.let_stmt(l),
             StatementKind::Static(st) => self.static_stmt(st),
             StatementKind::NestedFn(f) => {
@@ -1400,6 +1415,8 @@ impl<'a> Printer<'a> {
             | ExprKind::Bool(_)
             | ExprKind::SiblingFieldRef(_)
             | ExprKind::FunctionRef(_)
+            | ExprKind::Path { .. }
+            | ExprKind::PathStructLiteral { .. }
             | ExprKind::AnaphoricIdent(_) => self.raw(data.span),
 
             ExprKind::Paren(inner) => {
@@ -1428,6 +1445,15 @@ impl<'a> Printer<'a> {
             ExprKind::TypeAscription(x, ty) => {
                 Doc::concat([self.expr(*x), Doc::text(" :: "), self.type_expr(*ty)])
             }
+            // The modules-v1 spelling round-trips as the parenthesized form:
+            // an infix re-print would not re-parse in v1 sources.
+            ExprKind::ParenAscription(x, ty) => Doc::concat([
+                Doc::text("("),
+                self.expr(*x),
+                Doc::text(" : "),
+                self.type_expr(*ty),
+                Doc::text(")"),
+            ]),
 
             ExprKind::FieldAccess(x, field) => {
                 Doc::concat([self.expr(*x), Doc::text(format!(".{}", kw(field.name)))])
@@ -2385,6 +2411,8 @@ impl<'a> Printer<'a> {
                 }
             }
             TypeExprKind::Ident(id) => Doc::text(kw(id.name)),
+            // Paths print verbatim: no internal spacing decisions.
+            TypeExprKind::Path(_) | TypeExprKind::AppPath { .. } => self.raw(data.span),
             TypeExprKind::Array(el) => {
                 Doc::concat([Doc::text("["), self.type_expr(*el), Doc::text("]")])
             }
@@ -2470,6 +2498,57 @@ impl<'a> Printer<'a> {
                     ]),
                     None => Doc::text(head),
                 }
+            }
+            Pattern::PathVariant { path, args } => {
+                let root = if path.from_root { "::" } else { "" };
+                let head = format!(
+                    "{root}{}",
+                    path.segments
+                        .iter()
+                        .map(|s| kw(s.name))
+                        .collect::<Vec<_>>()
+                        .join("::")
+                );
+                match args {
+                    Some(args) => Doc::concat([
+                        Doc::text(head),
+                        Doc::text("("),
+                        Doc::join(Doc::text(", "), args.iter().map(|p| self.pattern(p))),
+                        Doc::text(")"),
+                    ]),
+                    None => Doc::text(head),
+                }
+            }
+            Pattern::PathRecord { path, fields, rest } => {
+                let root = if path.from_root { "::" } else { "" };
+                let head = format!(
+                    "{root}{} ",
+                    path.segments
+                        .iter()
+                        .map(|s| kw(s.name))
+                        .collect::<Vec<_>>()
+                        .join("::")
+                );
+                let mut entries: Vec<Doc> = fields
+                    .iter()
+                    .map(|(n, p)| {
+                        if let Pattern::Ident(id) = p {
+                            if id.name == n.name {
+                                return Doc::text(kw(n.name));
+                            }
+                        }
+                        Doc::concat([Doc::text(format!("{}: ", kw(n.name))), self.pattern(p)])
+                    })
+                    .collect();
+                if *rest {
+                    entries.push(Doc::text(".."));
+                }
+                Doc::concat([
+                    Doc::text(head),
+                    Doc::text("{ "),
+                    Doc::join(Doc::text(", "), entries.into_iter()),
+                    Doc::text(" }"),
+                ])
             }
             Pattern::Record {
                 enum_name,
