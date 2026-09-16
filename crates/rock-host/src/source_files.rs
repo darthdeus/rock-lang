@@ -148,6 +148,8 @@ fn create_source_file(
         is_test,
         is_test_util,
         used_packages,
+        package: None,
+        dialect: rock_core::source_code::Dialect::Legacy,
     }
 }
 

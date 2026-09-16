@@ -86,6 +86,10 @@ pub struct ComptimeInputs {
     /// Effective declared build channel for package metadata. Empty means a
     /// synthetic/type-only workspace did not come through CLI resolution.
     pub channel: String,
+    /// Source-language mode of the root package ("legacy" or "v1", plan M0).
+    /// Part of the Artifact fingerprint: the same sources under different
+    /// language modes are different builds.
+    pub modules_mode: String,
     /// FALLBACK root for `embed_string(path)`, used only when the calling
     /// module has no file on disk to resolve from (a synthetic module).
     /// Normally the path resolves against the nearest stick.toml at or above

@@ -21,7 +21,7 @@ pub use rock_host::process_management::*;
 pub use rock_host::source_files::{
     source_file_from_code, source_file_new_preprocessed, SourceFilesExt,
 };
-pub use rock_host::stick::{RendererBackend, StickConfig};
+pub use rock_host::stick::{graph::{PackageGraph, PackageId, PackageNode}, RendererBackend, StickConfig};
 pub use std::collections::{HashMap, HashSet};
 pub use std::sync::mpsc::channel;
 pub use std::time::Duration;

@@ -2970,14 +2970,16 @@ fn configured_stone_dir(path: &std::path::Path) -> Result<Option<std::path::Path
     if !config.dependencies.contains_key("stone") {
         return Ok(None);
     }
-    let root_path = config_path.parent().unwrap_or(&config_path).to_path_buf();
-    let mut resolver = rock_host::stick::resolver::DependencyResolver::new(root_path);
-    let resolved = resolver.resolve(&config)?;
-    let stone = resolved
-        .into_iter()
-        .find(|dependency| dependency.name == "stone")
+    let manifest_dir = config_path.parent().unwrap_or(&config_path);
+    let graph = rock_host::stick::graph::PackageGraph::build(manifest_dir)?;
+    let root_node = graph.package(graph.root());
+    let edge = root_node
+        .dependencies
+        .iter()
+        .find(|edge| edge.declared_key == "stone")
         .ok_or_else(|| anyhow::anyhow!("Stone dependency is declared but could not be resolved"))?;
-    Ok(Some(stone.path.canonicalize().unwrap_or(stone.path)))
+    let stone_root = graph.package(edge.target).root.clone();
+    Ok(Some(stone_root))
 }
 
 fn prepend_stone_root(lua: String, stone_dir: &std::path::Path) -> String {

@@ -60,6 +60,9 @@ mod replay_profile_tests;
 mod replay_profile_report_tests;
 #[path = "package.rs"]
 mod package;
+
+#[path = "modules_graph.rs"]
+mod modules_graph;
 #[path = "fire_manifest.rs"]
 mod fire_manifest;
 #[path = "c_run_gate.rs"]
