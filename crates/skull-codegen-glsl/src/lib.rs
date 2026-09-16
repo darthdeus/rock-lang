@@ -1131,7 +1131,19 @@ impl FnEmit<'_> {
     fn assign_cell_names(&mut self) {
         let mut used: HashSet<String> = HashSet::default();
         for (cid, cell) in self.f.cells.iter() {
-            let base = cell.name.map(|n| n.as_str().to_string()).unwrap_or_else(|| format!("t{}", cid.into_raw().into_u32()));
+            let base = cell
+                .name
+                .map(|n| {
+                    let s = n.as_str();
+                    if let Some(stripped) = s.strip_prefix("__rock_") {
+                        stripped.to_string()
+                    } else if s.contains("__") {
+                        s.replace("__", "_")
+                    } else {
+                        s.to_string()
+                    }
+                })
+                .unwrap_or_else(|| format!("t{}", cid.into_raw().into_u32()));
             let mut name = base.clone();
             let mut k = 0;
             while used.contains(&name) {
@@ -1544,8 +1556,8 @@ impl FnEmit<'_> {
                 self.render_val_t(*b, GlslTy::Float)?
             ),
             // GLSL int / and % are undefined on negatives -> floored helpers.
-            Inst::IntDiv(a, b) => format!("__rock_idiv({}, {})", self.render_val(*a)?, self.render_val(*b)?),
-            Inst::IntMod(a, b) => format!("__rock_imod({}, {})", self.render_val(*a)?, self.render_val(*b)?),
+            Inst::IntDiv(a, b) => format!("rock_idiv({}, {})", self.render_val(*a)?, self.render_val(*b)?),
+            Inst::IntMod(a, b) => format!("rock_imod({}, {})", self.render_val(*a)?, self.render_val(*b)?),
             Inst::IntLt(a, b) => bin(a, "<", b, self)?,
             Inst::FloatLt(a, b) => fbin(a, "<", b, self)?,
             Inst::IntLeq(a, b) => bin(a, "<=", b, self)?,
@@ -2124,12 +2136,12 @@ fn helper_prelude(uses_idiv: bool, uses_imod: bool) -> String {
     let mut s = String::new();
     if uses_idiv {
         s.push_str(
-            "int __rock_idiv(int a, int b) {\n  return int(floor(float(a) / float(b)));\n}\n",
+            "int rock_idiv(int a, int b) {\n  return int(floor(float(a) / float(b)));\n}\n",
         );
     }
     if uses_imod {
         s.push_str(
-            "int __rock_imod(int a, int b) {\n  return a - b * int(floor(float(a) / float(b)));\n}\n",
+            "int rock_imod(int a, int b) {\n  return a - b * int(floor(float(a) / float(b)));\n}\n",
         );
     }
     s
