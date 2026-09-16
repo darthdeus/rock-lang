@@ -58,10 +58,14 @@ fn replay_raw(game: &str, log: &str, env: &[(&str, &str)]) -> std::process::Outp
         .expect("spawn replay")
 }
 
-fn with_header(text: &str, version: &str, build: Option<&str>) -> String {
-    let mut lines: Vec<String> = text.lines().map(ToOwned::to_owned).collect();
+/// A log at `version` with `build` (or none), built by a real downgrade: a
+/// header rewrite alone leaves the rows the format gained since `version` in
+/// place and the loader calls the file corrupt before it reaches the build-id
+/// admission this exercises.
+fn with_header(text: &str, version: u32, build: Option<&str>) -> String {
+    let downgraded = crate::stone_harness::downgrade_replay(text, version);
+    let mut lines: Vec<String> = downgraded.lines().map(ToOwned::to_owned).collect();
     assert!(!lines.is_empty(), "replay has a header");
-    lines[0] = format!("STONE_REPLAY {version}");
     lines.retain(|line| !line.starts_with("build "));
     if let Some(build) = build {
         let tick = lines
@@ -77,7 +81,8 @@ fn with_header(text: &str, version: &str, build: Option<&str>) -> String {
 fn new_recordings_stamp_a_real_exact_artifact_identity() {
     let (_dir, log) = record_with_env("bitgun", 15, &[]);
     let text = std::fs::read_to_string(&log).expect("read log");
-    assert!(text.starts_with("STONE_REPLAY 14\n"), "new recordings must use v14\n{text}");
+    assert!(text.starts_with(&format!("{}\n", rock_replay_protocol::replay_header())),
+        "new recordings must use v{}\n{text}", rock_replay_protocol::REPLAY_VERSION);
     assert!(
         text.lines().any(|line| line == "source 62697467756e"),
         "the logical project source `bitgun` must be encoded in the header\n{text}"
@@ -140,13 +145,10 @@ fn new_format_rejects_a_missing_source_revision_before_the_first_game_tick() {
 #[test]
 fn legacy_v11_without_source_remains_playable() {
     let (_dir, log) = record_with_env("bitgun", 15, &[]);
-    let legacy = std::fs::read_to_string(&log)
-        .expect("read log")
+    let text = std::fs::read_to_string(&log).expect("read log");
+    let legacy = crate::stone_harness::downgrade_replay(&text, 11)
         .lines()
         .filter(|line| !line.starts_with("source "))
-        .map(|line| {
-            if line == "STONE_REPLAY 14" { "STONE_REPLAY 11" } else { line }
-        })
         .collect::<Vec<_>>()
         .join("\n");
     std::fs::write(&log, legacy).expect("write v11 replay");
@@ -180,7 +182,7 @@ fn new_format_warns_on_a_build_mismatch_and_still_plays() {
 fn new_format_rejects_a_missing_build_id() {
     let (_dir, log) = record_with_env("bitgun", 15, &[]);
     let text = std::fs::read_to_string(&log).expect("read log");
-    std::fs::write(&log, with_header(&text, "8", None)).expect("remove build id");
+    std::fs::write(&log, with_header(&text, 8, None)).expect("remove build id");
     let out = replay_raw("bitgun", &log, &[]);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(!out.status.success(), "a new-format replay without a build id must be rejected\n{stderr}");
@@ -191,7 +193,7 @@ fn new_format_rejects_a_missing_build_id() {
 fn new_format_rejects_a_degenerate_build_id() {
     let (_dir, log) = record_with_env("bitgun", 15, &[]);
     let text = std::fs::read_to_string(&log).expect("read log");
-    std::fs::write(&log, with_header(&text, "8", Some("dev"))).expect("degrade build id");
+    std::fs::write(&log, with_header(&text, 8, Some("dev"))).expect("degrade build id");
     let out = replay_raw("bitgun", &log, &[]);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(!out.status.success(), "a new-format dev build id must be rejected\n{stderr}");
@@ -238,7 +240,8 @@ fn record_stamps_build_id_and_reload_marker() {
         &[ ("STONE_RELOAD_AT_FRAME", "5")],
     );
     let text = std::fs::read_to_string(&log).expect("read log");
-    assert!(text.starts_with("STONE_REPLAY 14"), "must be a v14 log\n{text}");
+    assert!(text.starts_with(&rock_replay_protocol::replay_header()),
+        "must be a v{} log\n{text}", rock_replay_protocol::REPLAY_VERSION);
     let build = text.lines().find_map(|l| l.strip_prefix("build ")).expect("build header");
     assert!(build.len() == 16 && build.chars().all(|c| c.is_ascii_hexdigit()), "header must carry a real build id\n{text}");
     assert!(
@@ -252,7 +255,7 @@ fn record_stamps_build_id_and_reload_marker() {
 fn replay_warns_on_reload_marked_log() {
     let (_dir, log) = record_with_env("bitgun", 15, &[("STONE_RELOAD_AT_FRAME", "5")]);
     let text = std::fs::read_to_string(&log).expect("read log");
-    std::fs::write(&log, with_header(&text, "7", Some("buildAAA"))).expect("rewrite legacy log");
+    std::fs::write(&log, with_header(&text, 7, Some("buildAAA"))).expect("rewrite legacy log");
     let stderr = replay_stderr("bitgun", &log, &[]);
     assert!(
         stderr.contains("hot-reload marker") && stderr.to_lowercase().contains("determinism"),
@@ -314,7 +317,7 @@ fn f9_save_repro_writes_a_replayable_tick_stamped_file() {
 fn replay_warns_on_build_id_mismatch_only() {
     let (_dir, log) = record_with_env("bitgun", 15, &[]);
     let text = std::fs::read_to_string(&log).expect("read log");
-    std::fs::write(&log, with_header(&text, "7", Some("buildAAA"))).expect("rewrite legacy log");
+    std::fs::write(&log, with_header(&text, 7, Some("buildAAA"))).expect("rewrite legacy log");
 
     let mismatched = replay_stderr("bitgun", &log, &[]);
     assert!(
@@ -326,7 +329,7 @@ fn replay_warns_on_build_id_mismatch_only() {
         .lines()
         .find_map(|line| line.strip_prefix("build "))
         .expect("recorded build id");
-    std::fs::write(&log, with_header(&text, "7", Some(build))).expect("restore matching legacy log");
+    std::fs::write(&log, with_header(&text, 7, Some(build))).expect("restore matching legacy log");
     let matched = replay_stderr("bitgun", &log, &[]);
     assert!(
         !matched.contains("built against"),

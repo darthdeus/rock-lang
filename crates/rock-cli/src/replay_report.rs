@@ -251,7 +251,7 @@ impl ReplayReport {
             .context("not a replay log")?
             .parse::<u32>()
             .context("malformed replay version")?;
-        if !(1..=16).contains(&version) {
+        if !(1..=rock_replay_protocol::REPLAY_VERSION).contains(&version) {
             bail!("unsupported replay version {version}");
         }
         let mut report = Self {

@@ -616,7 +616,8 @@ fn progress_bootstrap_captures_absence_and_keeps_b_read_only() {
     let recorded = run_mag(1, Some(&replay), None, &env);
     let persisted_b = std::fs::read(&progress).expect("record action must create B");
     let log = std::fs::read_to_string(&replay).expect("read replay");
-    assert!(log.starts_with("STONE_REPLAY 14\n"), "recording must use v14\n{log}");
+    assert!(log.starts_with(&format!("{}\n", rock_replay_protocol::replay_header())),
+        "recording must use v{}\n{log}", rock_replay_protocol::REPLAY_VERSION);
     let boot_lines: Vec<&str> = log.lines().filter(|line| line.starts_with("boot ")).collect();
     assert_eq!(boot_lines.len(), 4,
         "the temporary current-settings path plus progress and both histories must capture keys");
@@ -911,7 +912,8 @@ fn save_repro_retains_bootstrap_entries() {
         .find(|path| path.file_name().and_then(|name| name.to_str()).is_some_and(|name| name.starts_with("repro-")))
         .expect("auto save repro must create a sibling");
     let text = std::fs::read_to_string(repro).expect("read saved repro");
-    assert!(text.starts_with("STONE_REPLAY 14\n"), "repro must retain v14\n{text}");
+    assert!(text.starts_with(&format!("{}\n", rock_replay_protocol::replay_header())),
+        "repro must retain v{}\n{text}", rock_replay_protocol::REPLAY_VERSION);
     assert_eq!(text.lines().filter(|line| line.starts_with("boot ")).count(), 4,
         "save repro must retain all bootstrap entries");
 }
