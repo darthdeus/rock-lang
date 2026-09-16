@@ -359,9 +359,9 @@ fn assert_sim_state_matches(
 ) {
     let mut compared = 0;
     let mut stripped = 0;
-    for (pkg, globals) in got.as_object().expect("dump object") {
+    for (pkg, globals) in crate::stone_harness::dump_packages(got) {
         let want_pkg = &want[pkg];
-        for (name, val) in globals.as_object().expect("pkg object") {
+        for (name, val) in globals {
             if !sim.contains(name) {
                 continue;
             }
@@ -388,9 +388,9 @@ fn assert_sim_state_matches_exact(
     label: &str,
 ) {
     let mut compared = 0;
-    for (pkg, globals) in got.as_object().expect("dump object") {
+    for (pkg, globals) in crate::stone_harness::dump_packages(got) {
         let want_pkg = &want[pkg];
-        for (name, val) in globals.as_object().expect("pkg object") {
+        for (name, val) in globals {
             if !sim.contains(name) {
                 continue;
             }

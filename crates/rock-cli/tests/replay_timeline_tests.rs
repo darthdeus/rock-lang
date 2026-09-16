@@ -222,9 +222,9 @@ fn seek_reaches_same_state_as_stepping() {
     // packages, restricted to the names the engine hashes.
     let sim = sim_state_names("bitgun", 30);
     let mut compared = 0;
-    for (pkg, globals) in seek.as_object().expect("dump is an object") {
+    for (pkg, globals) in crate::stone_harness::dump_packages(&seek) {
         let step_pkg = &step[pkg];
-        for (name, sv) in globals.as_object().expect("package is an object") {
+        for (name, sv) in globals {
             if !sim.contains(name) {
                 continue;
             }

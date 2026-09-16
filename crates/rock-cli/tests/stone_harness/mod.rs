@@ -526,3 +526,23 @@ pub fn strip_nonreproducible(v: &mut serde_json::Value) {
         root.remove("__stone_nonreproducible");
     }
 }
+
+/// The registered packages of a dump-state object, in dump order.
+///
+/// A dump is package keys plus the `__stone_`-prefixed envelope keys the
+/// runner splices on (`stone_dump_state_envelope`), and only the former hold
+/// globals. Every caller walking "every package" needs the same skip, and the
+/// one that open-coded it panicked the day the envelope gained a key whose
+/// value is not an object.
+pub fn dump_packages(
+    v: &serde_json::Value,
+) -> impl Iterator<Item = (&String, &serde_json::Map<String, serde_json::Value>)> {
+    v.as_object()
+        .expect("dump is an object")
+        .iter()
+        .filter(|(key, _)| !key.starts_with("__stone_"))
+        .map(|(key, value)| {
+            (key, value.as_object().unwrap_or_else(||
+                panic!("dump package {key} is an object, got {value}")))
+        })
+}
