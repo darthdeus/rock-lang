@@ -70,3 +70,6 @@ mod shader_corpus_oracle;
 
 #[path = "graph_update_projects.rs"]
 mod graph_update_projects;
+
+#[path = "sim_presentation_differential.rs"]
+mod sim_presentation_differential;
