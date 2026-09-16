@@ -872,11 +872,9 @@ fn legacy_replay_warns_about_each_missing_bootstrap_contract() {
     let _ = run_mag(1, Some(&replay), None, &env);
 
     let text = std::fs::read_to_string(&replay).expect("read replay");
-    let legacy = text
+    let legacy = crate::stone_harness::downgrade_replay(&text, 6)
         .lines()
         .filter(|line| !line.starts_with("boot "))
-        .enumerate()
-        .map(|(i, line)| if i == 0 { "STONE_REPLAY 6" } else { line })
         .collect::<Vec<_>>()
         .join("\n")
         + "\n";

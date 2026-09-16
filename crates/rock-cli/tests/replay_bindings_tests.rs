@@ -48,6 +48,8 @@ fn mag_record_stamps_a_nonempty_binding_overlay_before_ticks() {
 
 #[test]
 fn replay_uses_recorded_bindings_after_disk_changes() {
+    // Resolved before HOME is substituted below.
+    let vault = crate::stone_harness::art_vault_env();
     let home = tempfile::tempdir().expect("record home");
     let data = home.path().join("data");
     let dir = tempfile::tempdir().expect("record dir");
@@ -76,6 +78,7 @@ fn replay_uses_recorded_bindings_after_disk_changes() {
         .env("MAG_BINDINGS_PATH_OVERRIDE", &bindings_path)
         .env("HOME", home.path())
         .env("XDG_DATA_HOME", &data)
+        .env(vault.0, &vault.1)
         .current_dir(workspace_root())
         .output()
         .expect("spawn record");
@@ -116,6 +119,7 @@ fn replay_uses_recorded_bindings_after_disk_changes() {
         .env("MAG_BINDINGS_PATH_OVERRIDE", &bindings_path)
         .env("HOME", home.path())
         .env("XDG_DATA_HOME", &data)
+        .env(vault.0, &vault.1)
         .current_dir(workspace_root())
         .output()
         .expect("spawn changed replay");
@@ -134,6 +138,7 @@ fn replay_uses_recorded_bindings_after_disk_changes() {
         .env("MAG_BINDINGS_PATH_OVERRIDE", &bindings_path)
         .env("HOME", home.path())
         .env("XDG_DATA_HOME", &data)
+        .env(vault.0, &vault.1)
         .current_dir(workspace_root())
         .output()
         .expect("spawn clean replay");

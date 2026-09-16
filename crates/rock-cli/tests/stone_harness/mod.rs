@@ -546,3 +546,17 @@ pub fn dump_packages(
                 panic!("dump package {key} is an object, got {value}")))
         })
 }
+
+/// `("GAME_ART_VAULT", <root>)` for a fixture that substitutes `HOME`.
+///
+/// `rock_host::art_vault::root` reads `$GAME_ART_VAULT`, else
+/// `$HOME/projects/game-art-vault`. A fixture that points `HOME` at a temp
+/// directory to isolate the preferences dir therefore moves the art vault too,
+/// and every `$GAME_ART_VAULT` entry in a game's `[assets].overlays` stops
+/// expanding -- the game refuses to start, with a message about the vault
+/// rather than about the fixture. Resolve it from the REAL environment first
+/// and pass it through.
+pub fn art_vault_env() -> (&'static str, String) {
+    let root = rock_host::art_vault::root().expect("game-art vault");
+    (rock_host::art_vault::ENV, root.to_string_lossy().into_owned())
+}
