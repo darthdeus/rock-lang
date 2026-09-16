@@ -489,3 +489,40 @@ pub fn downgrade_replay(text: &str, to: u32) -> String {
     }
     out.join("\n") + "\n"
 }
+
+/// Drop the dump-state envelope keys and everything the engine names as
+/// non-reproducible, leaving a dump two runs of the same session must agree on.
+///
+/// The name set comes from the dump itself
+/// (`stone_dump_nonreproducible_json`, `stone/engine/stone_diag.rock`) rather
+/// than from a list kept here: the engine owns those globals, and the last time
+/// a test kept its own list the always-on hitch ledger landed as a registered
+/// global and turned `replay_reproduces_dump_state_byte_identical` red with
+/// JIT trace counters nobody had told the comparison about.
+pub fn strip_nonreproducible(v: &mut serde_json::Value) {
+    let names: Vec<String> = v
+        .get("__stone_nonreproducible")
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items.iter().filter_map(|n| n.as_str().map(str::to_string)).collect()
+        })
+        .unwrap_or_default();
+    assert!(
+        !names.is_empty(),
+        "the dump must publish __stone_nonreproducible; without it this \
+         comparison silently stops excluding wall-clock state"
+    );
+    for name in names {
+        let (package, field) = name.split_once('.').unwrap_or_else(||
+            panic!("__stone_nonreproducible names `package.field`, got {name:?}"));
+        if let Some(pkg) = v.get_mut(package).and_then(serde_json::Value::as_object_mut) {
+            pkg.remove(field);
+        }
+    }
+    if let Some(root) = v.as_object_mut() {
+        // The test-observability envelope: replay-only counters that
+        // legitimately differ between a record run and its replay.
+        root.remove("__stone_diag");
+        root.remove("__stone_nonreproducible");
+    }
+}

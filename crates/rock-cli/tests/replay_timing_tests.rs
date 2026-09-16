@@ -370,15 +370,7 @@ fn assert_load_rejected(out: &Output, label: &str) {
 }
 
 fn strip_observational_dump(v: &mut serde_json::Value) {
-    if let Some(root) = v.as_object_mut() {
-        root.remove("__stone_diag");
-    }
-    if let Some(stone) = v
-        .get_mut("stone")
-        .and_then(serde_json::Value::as_object_mut)
-    {
-        stone.remove("PROFILER");
-    }
+    crate::stone_harness::strip_nonreproducible(v);
 }
 
 #[test]

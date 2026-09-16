@@ -142,16 +142,7 @@ fn run_frame_env(
 /// the render-skipped seek test uses). Both runs render here, so render state
 /// is identical and must be compared.
 fn strip_diagnostics(v: &mut serde_json::Value) {
-    if let Some(obj) = v.as_object_mut() {
-        // The `__stone_diag` envelope is the non-dumped test-observability
-        // readout (`_G.__stone_diag`), not registered game/engine state. It
-        // carries replay-only counters (ghost draws, etc.) that legitimately
-        // differ between a record run and its replay -- drop it wholesale.
-        obj.remove("__stone_diag");
-    }
-    if let Some(stone) = v.get_mut("stone").and_then(|s| s.as_object_mut()) {
-        stone.remove("PROFILER");
-    }
+    crate::stone_harness::strip_nonreproducible(v);
 }
 
 /// Piece 2 of P3: a window resize during recording is captured as an `r`
