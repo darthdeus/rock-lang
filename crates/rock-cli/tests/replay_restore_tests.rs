@@ -3934,3 +3934,52 @@ fn bounded_keyframe_window_evicts_but_keeps_window_restorable() {
     let sim = sim_state_names(game, 100);
     assert_sim_state_matches(&bounded, &reference, &sim, "tick-55");
 }
+
+/// A keyframe taken while image publication is HELD carries the requests that
+/// were still outstanding, and restoring it puts them back.
+///
+/// Nothing else produces that state headlessly. A decode finishes inside the
+/// tick that asked for it, and MAG's admission waits for
+/// `stone_image_uploads_pending() == 0` before it proceeds, so no cadence
+/// keyframe in an ordinary run ever captures an outstanding queue --
+/// `mag_replay_profiles_through_admission_after_a_short_splash_tap` asks for
+/// one and measures zero at every keyframe of its recording.
+/// `STONE_IMAGE_HOLD_AT_FRAME` holds `select` off so the fixture can ask for
+/// the state it means to test, through the same
+/// `stone_image_publication_hold` production uses across a session activation.
+///
+/// The control arm is the denominator: without the hold the same snapshot and
+/// restore sees an EMPTY queue, so a green here is the hold's doing and not a
+/// queue that happened to be busy.
+#[test]
+fn a_restore_reinstalls_the_image_requests_that_were_still_outstanding() {
+    let dir = tempfile::tempdir().unwrap();
+    let progress = dir.path().join("progress.json").to_string_lossy().into_owned();
+    let settings = dir.path().join("settings.json").to_string_lossy().into_owned();
+    let common: Vec<(&str, &str)> = vec![
+        ("MAG_BOOT_PLAYING", "1"),
+        ("MAG_PROGRESS_PATH_OVERRIDE", &progress),
+        ("MAG_SETTINGS_PATH_OVERRIDE", &settings),
+        ("STONE_SNAPSHOT_AT_TICK", "3"),
+        ("STONE_RESTORE_AT_TICK", "6"),
+    ];
+
+    let mut held = common.clone();
+    held.push(("STONE_IMAGE_HOLD_AT_FRAME", "1"));
+    held.push(("STONE_IMAGE_RELEASE_AT_FRAME", "30"));
+    let held = run_plain_dump("mag", 40, &held);
+    assert_eq!(held["__stone_diag"]["STONE_LAST_RESTORE_TICK"], 3,
+        "the held arm must restore the keyframe it took");
+    let pending = held["__stone_diag"]["STONE_RESTORE_IMAGE_PENDING"]
+        .as_u64().expect("a restore reports the queue it reinstalled");
+    assert!(pending > 0,
+        "restoring a keyframe taken under a publication hold must reinstall its \
+         outstanding requests, got {pending}");
+
+    let plain = run_plain_dump("mag", 40, &common);
+    assert_eq!(plain["__stone_diag"]["STONE_LAST_RESTORE_TICK"], 3,
+        "the control arm must restore the same keyframe");
+    assert_eq!(plain["__stone_diag"]["STONE_RESTORE_IMAGE_PENDING"], 0,
+        "control: without the hold the same keyframe has nothing outstanding, \
+         so the assertion above is the hold's doing");
+}
