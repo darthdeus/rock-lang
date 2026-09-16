@@ -593,7 +593,7 @@ impl Builder<'_> {
         if let Some(shape) = self.nullable_tuple_wire_shape(e)? {
             return Ok(Some(RetSlot::Nested(shape)));
         }
-        let mut shape = match self.nobox_value_shape_of(e)? {
+        let shape = match self.nobox_value_shape_of(e)? {
             Some(shape) => shape,
             None => {
                 let Some(name) = self.value_struct_of(e) else { return Ok(None) };
@@ -611,45 +611,7 @@ impl Builder<'_> {
                 shape
             }
         };
-        // A join's shape must represent every value that reaches it. Bone's
-        // nullable coalesce/if-let paths normally carry this nullability; the
-        // arm scan is a defensive backstop when a representation query exposes
-        // only the payload shape. It cannot manufacture a phantom value: an arm
-        // that can be null is a value the join has to carry, and a non-nullable
-        // sink has already been rejected.
-        if !shape.nullable && self.join_arm_is_nullable(e) {
-            shape.nullable = true;
-        }
         Ok(Some(RetSlot::Leaves(shape)))
-    }
-
-    /// Whether any arm of a join expression can produce `null`. Arms are blocks,
-    /// so each is peeled to its tail value before asking.
-    fn join_arm_is_nullable(&self, e: Idx<Expr>) -> bool {
-        let arms: Vec<Idx<Expr>> = match &self.body.expr_arena[e] {
-            Expr::If { then_branch, else_branch, .. } => {
-                std::iter::once(*then_branch).chain(*else_branch).collect()
-            }
-            Expr::Match { arms, .. } => {
-                arms.clone().map(|a| self.body.match_arm_arena[a].body).collect()
-            }
-            Expr::IfLet { then_branch, else_branch, .. } => {
-                std::iter::once(*then_branch).chain(*else_branch).collect()
-            }
-            _ => return false,
-        };
-        arms.into_iter().any(|a| {
-            let v = self.peel_block_tail(a);
-            self.is_null_lit(v) || self.expr_is_nullable(v)
-        })
-    }
-
-    /// A block arm's value is its tail; anything else is its own value.
-    fn peel_block_tail(&self, e: Idx<Expr>) -> Idx<Expr> {
-        match &self.body.expr_arena[e] {
-            Expr::Block { tail: Some(t), .. } => self.peel_block_tail(*t),
-            _ => e,
-        }
     }
 
     /// The slot layout of a tuple's BOX: `Some` exactly when some element splats,
