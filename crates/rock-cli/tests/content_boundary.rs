@@ -1,14 +1,21 @@
 //! The mag-content layer boundary.
 //!
-//! `mag/content/` holds authored, runtime-neutral level data: the document
-//! codec that the simulation, the authoring tools, the lint and every external
-//! reader decode the same way (planning doc section 3, `mag-content`).
+//! `mag-content/` is a `type = "lib"` stick package holding authored,
+//! runtime-neutral level data: the document, its codec, and the catalogs the
+//! codec resolves ids against (planning doc section 3, `mag-content`).
 //!
-//! Rock has one namespace and no imports today -- the module system is at M4 --
-//! so nothing in the language stops a content file from reaching into the live
-//! world. Without this test the directory is a diagram, not a boundary, and it
-//! would rot within a month. When modules land this is replaced by real
-//! visibility rules and the boundary will already be known to hold.
+//! The direction of the layer is enforced by the package graph, not here.
+//! mag-content does not depend on mag, Rock resolves names over the dependency
+//! closure only, and a content file that names `player` or `world_mobs` fails
+//! to compile. What is left to this file is what the graph cannot say:
+//!
+//! 1. mag-content must keep NOT depending on mag. One line in a stick.toml
+//!    would dissolve the whole boundary silently, so the manifest is asserted.
+//! 2. mag-content does depend on stone, for IVec2, Color and math. That makes
+//!    stone's runtime surface -- drawing, audio, the filesystem -- reachable
+//!    again, so the subset of the old lint that covers it is kept.
+//!
+//! When the module system lands, 2 is replaced by real visibility rules.
 
 use std::path::{Path, PathBuf};
 
@@ -20,8 +27,12 @@ fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
+fn content_dir() -> PathBuf {
+    workspace_root().join("mag-content")
+}
+
 fn content_sources() -> Vec<(PathBuf, String)> {
-    let dir = workspace_root().join("mag").join("content");
+    let dir = content_dir();
     let mut out = Vec::new();
     let entries = std::fs::read_dir(&dir)
         .unwrap_or_else(|e| panic!("read {}: {e}", dir.display()));
@@ -33,6 +44,7 @@ fn content_sources() -> Vec<(PathBuf, String)> {
             out.push((path, text));
         }
     }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
     out
 }
 
@@ -43,32 +55,70 @@ fn is_code(line: &str) -> bool {
     !t.is_empty() && !t.starts_with("//")
 }
 
-fn word_hit(line: &str, word: &str) -> bool {
-    line.match_indices(word).any(|(i, _)| {
-        let before = line[..i].chars().next_back();
-        let after = line[i + word.len()..].chars().next();
-        let boundary = |c: Option<char>| !matches!(c, Some(c) if c.is_alphanumeric() || c == '_');
-        boundary(before) && boundary(after)
-    })
+/// The `[dependencies]` table of a stick manifest, as bare package names.
+fn stick_dependencies(manifest: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut in_deps = false;
+    for line in manifest.lines() {
+        let t = line.trim();
+        if t.starts_with('[') {
+            in_deps = t == "[dependencies]";
+            continue;
+        }
+        if !in_deps || t.is_empty() || t.starts_with('#') {
+            continue;
+        }
+        if let Some((name, _)) = t.split_once('=') {
+            names.push(name.trim().to_string());
+        }
+    }
+    names
 }
 
+/// The layer is a package, and its direction is the package graph. This is the
+/// one edit that would erase that without any other test noticing.
 #[test]
-fn mag_content_layer_stays_runtime_free() {
+fn mag_content_does_not_depend_on_the_game() {
+    let manifest_path = content_dir().join("stick.toml");
+    let manifest = std::fs::read_to_string(&manifest_path)
+        .unwrap_or_else(|e| panic!("read {}: {e}", manifest_path.display()));
+    let deps = stick_dependencies(&manifest);
+    assert!(
+        !deps.is_empty(),
+        "mag-content/stick.toml declares no dependencies at all -- this test would \
+         pass vacuously if the manifest moved or changed shape"
+    );
+    for banned in ["mag", "Mag", "mag-agent", "lighting3d"] {
+        assert!(
+            !deps.iter().any(|d| d == banned),
+            "mag-content must not depend on `{banned}`. The content layer is a leaf: \
+             the game depends on the document, never the other way round. Declared: {deps:?}"
+        );
+    }
+}
+
+/// mag-content depends on stone, so the package graph alone no longer keeps a
+/// window, a renderer, an audio device or the filesystem out of the layer.
+#[test]
+fn mag_content_stays_free_of_the_engine_runtime() {
     let sources = content_sources();
     assert!(
         !sources.is_empty(),
-        "mag/content/ has no .rock files -- this gate would pass vacuously"
+        "mag-content/ has no .rock files -- this gate would pass vacuously"
     );
 
-    // Whole words, so `player` is caught but `player_spawn_names` as part of a
-    // longer identifier is judged on its own.
-    const BANNED_WORDS: &[&str] = &["player", "camera", "drawable_size", "mag_world_state"];
-    // Substrings: prefixes that name a whole subsystem the content layer must
-    // not reach.
+    // Substrings: prefixes that name a whole subsystem of stone the content
+    // layer must not reach, plus the bank it must never load itself.
     const BANNED_PREFIXES: &[&str] = &[
-        "editor_", "EDITOR_", "world_mobs", "world_doors", "world_walls", "world_spaces",
-        "world_fuses", "world_corpses", "draw_", "sfx_", "vfx_", "presentation_random",
-        "read_file", "write_file", "file_read", "file_write",
+        "draw_", "sfx_", "vfx_", "audio_", "play_sound", "presentation_random",
+        "read_file", "write_file", "file_read", "file_write", "load_image",
+        // Loading a bank is the game's job; the catalog arrives installed.
+        "MAG_VISUAL_BANK", "VisualBankData",
+        // stone's live session state. `world_frozen()` is engine-side, so the
+        // package graph does not keep it out, and a document that branched on
+        // whether the game is paused would not be a document.
+        "WORLD_MODE", "world_frozen", "editor_mode_enabled", "game_paused",
+        "menu_active",
     ];
 
     let mut violations = Vec::new();
@@ -77,11 +127,6 @@ fn mag_content_layer_stays_runtime_free() {
         for (n, line) in text.lines().enumerate() {
             if !is_code(line) {
                 continue;
-            }
-            for w in BANNED_WORDS {
-                if word_hit(line, w) {
-                    violations.push(format!("{}:{}: {w} -- {}", rel.display(), n + 1, line.trim()));
-                }
             }
             for p in BANNED_PREFIXES {
                 if line.contains(p) {
@@ -93,63 +138,10 @@ fn mag_content_layer_stays_runtime_free() {
 
     assert!(
         violations.is_empty(),
-        "mag/content/ must stay decodable without a live world, a camera, an editor \
-         or the filesystem. Move the offending code to the layer that owns it rather \
-         than widening this list:\n{}",
+        "mag-content/ must stay decodable without a window, a renderer, an audio \
+         device or the filesystem. A catalog it needs is INSTALLED by whoever has \
+         one (mag_content_install_props / mag_content_install_floor_materials); it \
+         is never loaded here:\n{}",
         violations.join("\n")
-    );
-}
-
-/// A ratchet, not a ban. Decoding a tile still resolves a prop id through the
-/// catalog, and the catalog is filled from the compiled visual bank
-/// (`mag/props.rock`), so it only exists inside a running game. That is the one
-/// reason `mag/content/` cannot yet be read by an offline tool, and it is the
-/// next slice's work. This test fails if the debt grows rather than shrinks.
-#[test]
-fn mag_content_prop_catalog_dependency_does_not_grow() {
-    const KNOWN: &[&str] = &[
-        "prop_index_by_id",
-        "prop_def_at",
-        "prop_orient_wrap",
-        // Reads `def.wall_mount` off the catalog to re-derive a mounted prop's
-        // facing (mag/props.rock:334-340).
-        "prop_wall_mount_reorient_in_asset",
-    ];
-
-    let mut found = Vec::new();
-    for (path, text) in &content_sources() {
-        let rel = path.strip_prefix(workspace_root()).unwrap_or(path);
-        for (n, line) in text.lines().enumerate() {
-            if !is_code(line) {
-                continue;
-            }
-            // Calls and globals only. A local named `prop_id` is this layer's
-            // own business; reaching `prop_index_by_id(...)` or `PROP_DEFS` is
-            // the dependency being ratcheted.
-            for (i, _) in line.match_indices("prop_").chain(line.match_indices("PROP_")) {
-                let before = line[..i].chars().next_back();
-                if matches!(before, Some(c) if c.is_alphanumeric() || c == '_') {
-                    continue;
-                }
-                let rest = &line[i..];
-                let end = rest
-                    .find(|c: char| !(c.is_alphanumeric() || c == '_'))
-                    .unwrap_or(rest.len());
-                let name = &rest[..end];
-                let is_call = rest[end..].starts_with('(');
-                let is_global = name.starts_with("PROP_");
-                if (is_call || is_global) && !KNOWN.contains(&name) {
-                    found.push(format!("{}:{}: {name}", rel.display(), n + 1));
-                }
-            }
-        }
-    }
-
-    assert!(
-        found.is_empty(),
-        "mag/content/ reaches further into the prop catalog than the known debt {KNOWN:?}. \
-         The catalog comes from the compiled visual bank and does not exist outside a \
-         running game, so every addition here moves an offline reader further away:\n{}",
-        found.join("\n")
     );
 }
