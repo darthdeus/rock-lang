@@ -97,3 +97,53 @@ fn scales() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `rock test <dir>` walks the directory for `.rock` files and builds each one
+/// as its own unit. A file that belongs to a NESTED package is not a standalone
+/// unit: its manifest supplies its dialect and its dependencies, so compiling it
+/// alone parses a v1 source in the legacy dialect (`unsupported item start:
+/// Ident("pub")`) and reports an emit failure that says nothing about the
+/// package. Spec 6.3 says a nested manifest starts a different package and is
+/// not absorbed by its parent; discovery has to agree.
+#[test]
+fn a_nested_package_under_a_walked_dir_is_one_unit() {
+    let dir = scratch("nested_pkg");
+    write(
+        &dir.join("plain.rock"),
+        r#"
+@test
+fn a_loose_file_is_still_its_own_unit() {
+    assert(1 + 1 == 2)
+}
+"#,
+    );
+    write(&dir.join("pkg").join("stick.toml"), V1_TESTED_PKG);
+    write(
+        &dir.join("pkg").join("main.rock"),
+        r#"
+pub fn twice(n: int) -> int {
+    n * 2
+}
+
+fn main() {
+    print("ok")
+}
+
+@test
+fn the_nested_package_compiles_through_its_manifest() {
+    assert(twice(21) == 42)
+}
+"#,
+    );
+    let d = dir.to_string_lossy().into_owned();
+    let (stdout, stderr, ok) = rock(&["test", &d]);
+    assert!(
+        ok,
+        "rock test over a dir holding a nested package failed\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("2/2 @tests passed"),
+        "the loose file and the nested package are two units, both run\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -12,7 +12,7 @@
 //! goal is `rock test tests --backend skull` at 100%.
 
 use crate::Result;
-use crate::bone_backend::{categorize, collect_rock_files, short_path};
+use crate::bone_backend::{categorize, short_path};
 use colored::Colorize;
 use rock_core::CompilerError;
 use rock_core::SourceFiles;
@@ -791,7 +791,8 @@ fn run_emitted_tests(
 /// file-by-file. A `type=lib` split across files can only be tested this way:
 /// per-file, a file referencing a sibling's symbol fails to compile. Root
 /// `tests/` (no stick.toml, hundreds of independent colliding programs) is NOT
-/// a package and stays on the per-file path.
+/// a package and stays on the per-file path; a package NESTED under it is one,
+/// and [`walk_test_units`] finds it.
 fn is_test_package_dir(path: &str) -> bool {
     let p = std::path::Path::new(path);
     p.is_dir() && p.join("stick.toml").is_file()
@@ -814,6 +815,59 @@ pub(crate) fn is_package_tests_dir(path: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Split the `.rock` files under `path` into loose-file units and PACKAGE
+/// units. A directory holding a `stick.toml` is a package: it becomes one unit
+/// compiled through its own manifest, and the walk does not descend into it.
+///
+/// Building a package's sources as loose files drops the manifest that supplies
+/// their dialect and their dependencies, so a v1 source is parsed in the legacy
+/// dialect and fails with `unsupported item start` -- an emit failure that says
+/// nothing about the package it came from. Spec 6.3 makes this the ownership
+/// rule: a nested manifest starts a different package and is not absorbed as
+/// source of the tree above it.
+///
+/// A path naming a single file stays that one file, and the `~` and extension
+/// filters match `rock_host::project::find_rock_files_at_path`, which this
+/// replaces on the `rock test` route only.
+fn walk_test_units(
+    path: &str,
+    files: &mut Vec<String>,
+    package_dirs: &mut Vec<String>,
+) -> Result<()> {
+    let p = std::path::Path::new(path);
+    if !p.exists() {
+        anyhow::bail!("Path does not exist: {}", path);
+    }
+    if p.is_file() {
+        files.push(path.to_string());
+        return Ok(());
+    }
+    let base = fs_err::canonicalize(p)?;
+    let mut walk = walkdir::WalkDir::new(&base).sort_by_file_name().into_iter();
+    while let Some(entry) = walk.next() {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!("rock: skipping path under `{}` while scanning for tests: {e}", base.display());
+                continue;
+            }
+        };
+        let entry_path = entry.path();
+        if entry.file_type().is_dir() {
+            if entry_path != base && entry_path.join("stick.toml").is_file() {
+                package_dirs.push(entry_path.to_string_lossy().into_owned());
+                walk.skip_current_dir();
+            }
+            continue;
+        }
+        let name = entry_path.to_string_lossy();
+        if entry_path.extension().is_some_and(|e| e == "rock") && !name.ends_with('~') {
+            files.push(name.into_owned());
+        }
+    }
+    Ok(())
 }
 
 /// Assemble + type-check + emit a whole package (tests INCLUDED), then run its
@@ -2109,7 +2163,7 @@ pub(crate) fn collect_test_units(paths: &[String]) -> Result<(Vec<String>, Vec<S
         } else if let Some(pkg) = is_package_tests_dir(path) {
             package_dirs.push(pkg);
         } else {
-            files.extend(collect_rock_files(path)?);
+            walk_test_units(path, &mut files, &mut package_dirs)?;
         }
     }
     files.sort();
