@@ -666,7 +666,7 @@ pub fn infer_expr_used(
             // representative before deciding value-ness, exactly as the call
             // path does. Genuine overloads (different signatures) survive and
             // still reject below.
-            None => match collapse_backend_variants(gamma, &resolve_callee(gamma, *name)).as_slice()
+            None => match collapse_backend_variants(gamma, &resolve_callee(gamma, &CallFamily::from_name(*name))).as_slice()
             {
                 [(mid, fid)] => {
                     let function = gamma.workspace.module(*mid).functions[*fid].clone();
@@ -1544,7 +1544,7 @@ pub fn infer_expr_used(
             let unwrapped = peel_nullable(gamma, target_ty, expr_span);
             let value_ty = infer_expr(c, gamma, value)?;
 
-            let candidates = resolve_callee(gamma, op_fn);
+            let candidates = resolve_callee(gamma, &CallFamily::from_name(op_fn));
 
             if candidates.is_empty() {
                 comp_error!(expr_span, "Function `{}` doens't exist", op_fn);

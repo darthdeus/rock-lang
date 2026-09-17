@@ -1019,11 +1019,13 @@ fn register_items(
                                 }
                             }
                             skull_parser::UseSuffix::Operator(op) => {
-                                let local = ustr::Ustr::from(&format!("__op_{}", op.name));
+                                let local = op.name;
+                                let mut segs: Vec<Ident> = segments.clone();
+                                segs.push(op.clone());
                                 if u.vis.is_some() {
-                                    share_export(ws, pkg_id, path, local, to_ref(*from_root, segments), false, u, errs);
+                                    share_export(ws, pkg_id, path, local, to_ref(*from_root, &segs), false, u, errs);
                                 } else {
-                                    scope.named.insert(local, to_ref(*from_root, segments));
+                                    scope.named.insert(local, to_ref(*from_root, &segs));
                                 }
                             }
                             skull_parser::UseSuffix::Nested(trees) => {
@@ -1146,10 +1148,12 @@ fn flatten_use_tree(
             );
         }
         skull_parser::UseSuffix::Operator(op) => {
-            let local = ustr::Ustr::from(&format!("__op_{}", op.name));
+            let local = op.name;
+            let mut segs: Vec<Ustr> = full.iter().map(|i| i.name).collect();
+            segs.push(local);
             scope.named.insert(
                 local,
-                UsePathRef { from_root, segments: full.iter().map(|i| i.name).collect() },
+                UsePathRef { from_root, segments: segs },
             );
         }
         skull_parser::UseSuffix::Glob => {
@@ -1528,12 +1532,12 @@ pub fn pass_lower_functions(a: &Ast, ctx: &mut LowerCtx) -> Result<(), CompilerE
                     }
                 }
 
-                // Compiler operator families resolve through the operator
-                // pipeline without fragment context, so they keep their bare
-                // name as the registration key in v1 fragments as well. The
-                // key is chosen AFTER validation so `__op_*` cannot skip the
-                // non-overloadable-operator rejection.
-                let key = if fn_name.starts_with("__op_") {
+                // Compiler/stdlib operator families (synthetic desugar and
+                // primitive overloads) keep a bare `__op_*` key so the existing
+                // intrinsic pipeline still finds them. User-declared operators
+                // in v1 register under their DefKey and are selected through
+                // imports / `operator(+)` (spec 8.5) -- not global discovery.
+                let key = if fn_name.starts_with("__op_") && (f.is_synthetic || over_primitives) {
                     f.name.name
                 } else {
                     reg_key(&f.name.name, path)

@@ -1349,7 +1349,7 @@ pub fn lower_expr_value(
             let fields = alloc_contiguous(&mut body.struct_lit_field_arena, entries);
 
             Expr::StructLiteral {
-                name: name.name,
+                name: ctx.resolve_bare_key(name.name, name.span)?,
                 fields,
                 bases: base_range,
             }

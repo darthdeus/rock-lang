@@ -754,6 +754,37 @@ pub enum Callee {
     Value(Idx<Expr>),
 }
 
+/// Overload family selected by the resolver (plan 2.3 / M2 step 5).
+/// `resolve_callee` consumes this rather than a spelled last segment.
+#[derive(Clone, Debug)]
+pub enum CallFamily {
+    /// Legacy compilation unit: workspace-map lookup by bare name.
+    Legacy(Ustr),
+    /// v1: canonical DefKey plus hidden-origin keys from losing tiers
+    /// (spec 8.3).
+    Resolved { key: Ustr, hidden: Vec<Ustr> },
+}
+
+impl CallFamily {
+    pub fn key(&self) -> Ustr {
+        match self {
+            CallFamily::Legacy(n) => *n,
+            CallFamily::Resolved { key, .. } => *key,
+        }
+    }
+
+    pub fn hidden(&self) -> &[Ustr] {
+        match self {
+            CallFamily::Legacy(_) => &[],
+            CallFamily::Resolved { hidden, .. } => hidden,
+        }
+    }
+
+    pub fn from_name(name: Ustr) -> Self {
+        CallFamily::Legacy(name)
+    }
+}
+
 #[derive(Copy, Clone, Debug)]
 pub enum BinOp {
     Eq,

@@ -729,9 +729,12 @@ impl<'a> Parser<'a> {
             let glyph = self.kind();
             self.advance();
             self.expect(TokenKind::CloseParen)?;
+            let op_fn = glyph.overloadable_binop_fn().ok_or_else(|| {
+                self.err(format!("operator({:?}) is not an importable operator family", glyph))
+            })?;
             UseSuffix::Operator(Ident {
                 span: glyph_span,
-                name: Ustr::from(&glyph.to_string()),
+                name: Ustr::from(op_fn),
             })
         } else if self.kind() == TokenKind::As {
             self.advance();

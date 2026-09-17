@@ -149,7 +149,7 @@ fn retry_pending(gamma: &mut Gamma, p: Pending) -> Result<(), CompilerError> {
             if gamma.out.resolved_overload_calls.contains_key(&call_expr) {
                 return Ok(());
             }
-            let candidates = resolve_callee(gamma, name);
+            let candidates = resolve_callee(gamma, &CallFamily::from_name(name));
             match select_overload(
                 c, gamma, &candidates, recv_override, &args, &arg_ty, &arg_tys, name, span,
             ) {

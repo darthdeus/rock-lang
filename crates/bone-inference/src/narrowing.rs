@@ -17,7 +17,7 @@
 //! local).
 
 use bone_core::hir;
-use bone_core::hir::{BinOp, BindingInfo, Callee, Expr, Statement};
+use bone_core::hir::{BinOp, BindingInfo, CallFamily, Callee, Expr, Statement};
 use bone_core::prelude::*;
 
 use crate::{fn_has_anno, infer_expr_used, peel_nullable, resolve_callee, BodyCtx, Gamma, Use};
@@ -84,7 +84,7 @@ fn cond_has_effect(gamma: &Gamma, c: BodyCtx, e: Idx<Expr>) -> bool {
             args,
             ..
         } => {
-            let candidates = resolve_callee(gamma, name);
+            let candidates = resolve_callee(gamma, &CallFamily::from_name(name));
             let callee_pure = !candidates.is_empty()
                 && candidates.iter().all(|(mid, fid)| {
                     fn_has_anno(&gamma.workspace.module(*mid).functions[*fid], "pure")

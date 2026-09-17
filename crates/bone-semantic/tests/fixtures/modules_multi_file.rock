@@ -111,3 +111,45 @@ mod b;
 fn f() -> int {
     super::a::shown()
 }
+
+//- operator_import_selects_user_plus
+//-- geo.rock @pkg=geo,1 @v1
+pub struct Vec2 { pub x: int, pub y: int }
+pub operator +(a: Vec2, b: Vec2) -> Vec2 {
+    Vec2 { x: a.x, y: a.y }
+}
+
+//-- app.rock @pkg=app,2 @v1
+use geo::{Vec2, operator(+)};
+fn f() -> Vec2 {
+    let a = Vec2 { x: 1, y: 2 }
+    let b = Vec2 { x: 3, y: 4 }
+    a + b
+}
+
+//- operator_not_globally_discovered @fail
+//-- geo.rock @pkg=geo,1 @v1
+pub struct Vec2 { pub x: int, pub y: int }
+pub operator +(a: Vec2, b: Vec2) -> Vec2 {
+    Vec2 { x: a.x, y: a.y }
+}
+
+//-- app.rock @pkg=app,2 @v1
+use geo::Vec2;
+fn f() -> Vec2 {
+    let a = Vec2 { x: 1, y: 2 }
+    let b = Vec2 { x: 3, y: 4 }
+    a + b
+}
+
+//- pub_package_glob_is_glob_priority
+//-- util.rock @pkg=chess,1 @v1
+mod util;
+pub fn width() -> int { 1 }
+
+//-- root.rock @pkg=chess,1 @v1
+pub(package) use self::util::*;
+fn width() -> int { 2 }
+fn pick() -> int {
+    width()
+}

@@ -515,7 +515,7 @@ pub(crate) fn resolve_unary_by_recv(
     recv_ty: TyId,
     span: Span,
 ) -> Result<((ModuleId, Idx<Function>), TyId, FxHashMap<VarId, TyId>), CompilerError> {
-    let candidates = resolve_callee(gamma, name);
+    let candidates = resolve_callee(gamma, &CallFamily::from_name(name));
     if candidates.is_empty() {
         comp_error!(span, "no `{}` function in scope", name);
     }

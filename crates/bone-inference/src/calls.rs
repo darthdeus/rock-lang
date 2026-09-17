@@ -1,6 +1,7 @@
 use super::*;
 
-pub(crate) fn resolve_callee(gamma: &Gamma, name: Ustr) -> FnList {
+pub(crate) fn resolve_callee(gamma: &Gamma, family: &CallFamily) -> FnList {
+    let name = family.key();
     let _span = tracing::info_span!("resolve_callee", name = %name).entered();
 
     gamma.dep_acc.borrow_mut().insert(name);
@@ -1071,7 +1072,7 @@ pub(crate) fn resolve_named_call_inner(
     span: Span,
 ) -> Result<TyId, CompilerError> {
     let _span = tracing::info_span!("named_call", name = %name).entered();
-    let all_candidates = resolve_callee(gamma, name);
+    let all_candidates = resolve_callee(gamma, &CallFamily::from_name(name));
     let candidates: Vec<_> = if generic_args.is_empty() {
         all_candidates.to_vec()
     } else {
