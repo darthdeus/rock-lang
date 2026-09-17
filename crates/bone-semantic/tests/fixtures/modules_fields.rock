@@ -384,6 +384,3 @@ pub fn helper(s: Secret) -> Secret {
     s
 }
 
-
-
-

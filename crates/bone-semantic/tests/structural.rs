@@ -1998,4 +1998,3 @@ struct LegacyActor {
     assert!(field_access(&gamma, v1_key, ustr("secret"), v1_site, FieldAccessNeed::Read).is_ok());
     assert!(field_access(&gamma, v1_key, ustr("secret"), v1_site, FieldAccessNeed::Write).is_ok());
 }
-
