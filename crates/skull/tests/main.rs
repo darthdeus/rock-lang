@@ -163,6 +163,8 @@ mod mem2reg_stats;
 mod mir_execution_oracle;
 #[path = "modules_state_identity.rs"]
 mod modules_state_identity;
+#[path = "modules_type_emission.rs"]
+mod modules_type_emission;
 #[path = "multi_rejection.rs"]
 mod multi_rejection;
 #[path = "nb_storage_registry.rs"]
