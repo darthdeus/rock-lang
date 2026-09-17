@@ -18,7 +18,7 @@ pub use bone_core::modules::{AccessSite, NsVisibility, PackageId};
 pub use bone_core::workspace::{
     BodyInference, ComptimeInputs, ComptimeVarValue, InferenceResult, Substitutions, Workspace,
 };
-pub use fields::vec_swizzle_components;
+pub use fields::{field_access, vec_swizzle_components, AccessDenied, FieldAccessNeed};
 
 mod narrowing;
 

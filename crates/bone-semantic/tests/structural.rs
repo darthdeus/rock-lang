@@ -1909,3 +1909,93 @@ fn use_it() -> int {
         "a real overload as a value must stay ambiguous, got: {msgs:?}"
     );
 }
+
+#[test]
+fn legacy_caller_field_access_enforces_v1_visibility_and_allows_legacy() {
+    use bone_semantic::inference::{field_access, AccessDenied, AccessSite, FieldAccessNeed, Gamma};
+    use bone_semantic::semantic_passes::semantic_pass_with_aliases;
+    use skull_parser::{parse_module_with_dialect, Dialect};
+
+    let v1_src = r#"
+pub struct Actor {
+    pub health: int,
+    pub private(set) mana: int,
+    private secret: int,
+}
+"#;
+    let mut v1_mod = parse_module_with_dialect(v1_src, ustr("lib.rock"), Dialect::V1)
+        .expect("parse v1");
+    v1_mod.package = Some(rock_core::source_code::PackageTag {
+        id: 1,
+        self_name: "game".to_string(),
+    });
+
+    let legacy_src = r#"
+struct LegacyActor {
+    health: int,
+}
+"#;
+    let legacy_mod = parse_module_with_dialect(legacy_src, ustr("legacy.rock"), Dialect::Legacy)
+        .expect("parse legacy");
+
+    let mut aliases = bone_core::modules::NsAliases::default();
+    aliases.packages.push(bone_core::modules::PackageAliases {
+        id: 1,
+        self_name: ustr("game"),
+        aliases: vec![],
+    });
+
+    let mut modules = vec![v1_mod, legacy_mod];
+    let ws = semantic_pass_with_aliases(&mut modules, &aliases).expect("semantic pass");
+
+    let mid = ws.modules.iter().find(|m| m.file == ustr("lib.rock")).unwrap().id;
+    let body = bone_core::hir::Body::default();
+    let gamma = Gamma::new(&ws, &body, mid);
+
+    let v1_key = ustr("game::Actor");
+    let legacy_site = AccessSite {
+        package: None,
+        module_path: &[],
+    };
+
+    // Public field: legacy can read and write
+    assert!(field_access(&gamma, v1_key, ustr("health"), legacy_site, FieldAccessNeed::Read).is_ok());
+    assert!(field_access(&gamma, v1_key, ustr("health"), legacy_site, FieldAccessNeed::Write).is_ok());
+
+    // private(set) field: legacy can read
+    assert!(field_access(&gamma, v1_key, ustr("mana"), legacy_site, FieldAccessNeed::Read).is_ok());
+
+    // private(set) field: legacy write is denied
+    let write_mana = field_access(&gamma, v1_key, ustr("mana"), legacy_site, FieldAccessNeed::Write);
+    assert!(
+        matches!(write_mana, Err(AccessDenied::Privilege { need: FieldAccessNeed::Write, .. })),
+        "legacy caller writing private(set) field must be denied"
+    );
+
+    // private field: legacy read and write are both denied
+    let read_secret = field_access(&gamma, v1_key, ustr("secret"), legacy_site, FieldAccessNeed::Read);
+    assert!(
+        matches!(read_secret, Err(AccessDenied::Privilege { need: FieldAccessNeed::Read, .. })),
+        "legacy caller reading private field must be denied"
+    );
+    let write_secret = field_access(&gamma, v1_key, ustr("secret"), legacy_site, FieldAccessNeed::Write);
+    assert!(
+        matches!(write_secret, Err(AccessDenied::Privilege { need: FieldAccessNeed::Write, .. })),
+        "legacy caller writing private field must be denied"
+    );
+
+    // Legacy-owned struct: legacy caller has unrestricted read/write
+    let legacy_key = ustr("LegacyActor");
+    assert!(field_access(&gamma, legacy_key, ustr("health"), legacy_site, FieldAccessNeed::Read).is_ok());
+    assert!(field_access(&gamma, legacy_key, ustr("health"), legacy_site, FieldAccessNeed::Write).is_ok());
+
+    // v1 caller within game package: can access private and private(set) fields
+    let v1_site = AccessSite {
+        package: Some(1),
+        module_path: &[],
+    };
+    assert!(field_access(&gamma, v1_key, ustr("mana"), v1_site, FieldAccessNeed::Write).is_ok());
+    assert!(field_access(&gamma, v1_key, ustr("secret"), v1_site, FieldAccessNeed::Read).is_ok());
+    assert!(field_access(&gamma, v1_key, ustr("secret"), v1_site, FieldAccessNeed::Write).is_ok());
+}
+

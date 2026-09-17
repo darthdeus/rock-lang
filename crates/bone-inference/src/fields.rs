@@ -470,7 +470,7 @@ impl AccessDenied {
 }
 
 /// Single access predicate (plan 2.3; spec 10.2).
-pub(crate) fn field_access(
+pub fn field_access(
     gamma: &Gamma,
     struct_key: Ustr,
     field: Ustr,
