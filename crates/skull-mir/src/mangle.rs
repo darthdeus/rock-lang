@@ -103,6 +103,18 @@ pub fn ident_of_key(key: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
+/// [`ident_of_key`] for a name that is used as an emitted symbol: the Lua global
+/// a definition occupies, the `_G` key the state bridge installs under it, and
+/// the identifiers minted from it. The compiler's own maps stay keyed on the
+/// LOGICAL name (the DefKey), so this belongs where a name is WRITTEN into the
+/// artifact, never where one is looked up.
+pub fn symbol_of_key(name: ustr::Ustr) -> ustr::Ustr {
+    match ident_of_key(name.as_str()) {
+        std::borrow::Cow::Borrowed(_) => name,
+        std::borrow::Cow::Owned(owned) => ustr::Ustr::from(&owned),
+    }
+}
+
 /// The digest of a DefKey's `<package>::<module path>` prefix. Hashes the
 /// prefix BYTES with std's `DefaultHasher` (the `StaticCell.init_hash`
 /// precedent): stable across processes AND across compiler builds, unlike a

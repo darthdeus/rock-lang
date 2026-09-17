@@ -616,8 +616,12 @@ impl Builder<'_> {
                 let Some(shape) = plan.value_shape() else {
                     return Ok(None);
                 };
+                // Minted from the global's emitted SYMBOL, matching
+                // `state_schema::physical_leaf_names`: a v1 DefKey is not an
+                // identifier, and these leaves ARE emitted Lua globals.
+                let symbol = crate::mangle::symbol_of_key(name);
                 let leaves =
-                    (0..shape.leaf_count()).map(|i| nobox_global_leaf_name(name, i)).collect();
+                    (0..shape.leaf_count()).map(|i| nobox_global_leaf_name(symbol, i)).collect();
                 Ok(Some((leaves, Some(shape))))
             }
             Expr::FieldAccess { base, field } => {

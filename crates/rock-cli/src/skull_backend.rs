@@ -1760,12 +1760,15 @@ fn build_state_nobox_accessors(
             } = acc;
             let plan = skull_mir::lower::GlobalPlan::for_declared_type(ws, scx, g.ty)
                 .map_err(|e| CompilerError::new_no_location(e.message))?;
-            let all_leaves = plan.leaf_names(g.name).ok_or_else(|| {
-                CompilerError::new_no_location(format!(
-                    "nobox global `{}` has an accessor shape but no leaf-name plan",
-                    g.name
-                ))
-            })?;
+            // The leaves are emitted symbols, matching the Session slot map.
+            let all_leaves = plan
+                .leaf_names(skull_mir::mangle::symbol_of_key(g.name))
+                .ok_or_else(|| {
+                    CompilerError::new_no_location(format!(
+                        "nobox global `{}` has an accessor shape but no leaf-name plan",
+                        g.name
+                    ))
+                })?;
             // A nullable global leads with a presence leaf that has no path: it is
             // not a field, so it is branched on rather than read. Everything below
             // pairs the REMAINING leaves with the paths.

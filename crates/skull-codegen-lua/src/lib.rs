@@ -776,8 +776,9 @@ impl CodegenCtx {
                 reserved.insert(name, f.name_span);
             }
             for (_, g) in m.globals.iter() {
-                reserved_namespace_collision(g.name.as_str(), g.name_span, &mut collisions);
-                reserved.insert(g.name.as_str().to_string(), g.name_span);
+                let symbol = skull_mir::mangle::symbol_of_key(g.name);
+                reserved_namespace_collision(symbol.as_str(), g.name_span, &mut collisions);
+                reserved.insert(symbol.as_str().to_string(), g.name_span);
             }
         }
         // Permanent mangle-collision check (reject, don't fall back): two distinct
@@ -941,8 +942,13 @@ impl CodegenCtx {
         sink.drain(..).next().map(|(_, e)| e)
     }
 
+    /// The Session slot of `name`. The map is keyed on the emitted SYMBOL, so a
+    /// caller may hand over either spelling of a v1 global: its DefKey (what MIR
+    /// carries) or the symbol (what the schema publishes).
     pub fn state_slot(&self, name: ustr::Ustr) -> Option<u32> {
-        self.state_slots.get(&name).copied()
+        self.state_slots
+            .get(&skull_mir::mangle::symbol_of_key(name))
+            .copied()
     }
 
     /// The highest compiler-assigned Session slot, 0 when there is none. The
@@ -3425,7 +3431,8 @@ impl Emitter<'_> {
             && !self.hoist.contains_key(&id)
     }
     fn has_state_slot(&self, name: ustr::Ustr) -> bool {
-        self.state_slots.contains_key(&name) || self.static_slots.contains_key(&name)
+        let symbol = skull_mir::mangle::symbol_of_key(name);
+        self.state_slots.contains_key(&symbol) || self.static_slots.contains_key(&symbol)
     }
 
     /// The table a mutable-global access indexes: the chunk-level cell under the
@@ -3447,6 +3454,7 @@ impl Emitter<'_> {
     }
 
     fn write_state_slot(&self, out: &mut String, name: ustr::Ustr) {
+        let name = skull_mir::mangle::symbol_of_key(name);
         if let Some(&slot) = self.state_slots.get(&name) {
             push_uint(out, slot);
         } else if let Some(slot) = self.static_slots.get(&name) {
@@ -4021,7 +4029,7 @@ impl Emitter<'_> {
                     self.write_state_slot(out, *g);
                     out.push(']');
                 } else {
-                    out.push_str(g.as_str());
+                    out.push_str(skull_mir::mangle::symbol_of_key(*g).as_str());
                 }
             }
             Inst::Load(c) => write_cellname(out, self.func, self.frame, self.cell_colors, *c),
@@ -4688,7 +4696,7 @@ impl Emitter<'_> {
                     self.write_state_slot(out, *name);
                     out.push_str("] = true\n");
                 } else {
-                    let _ = write!(out, "  {name} = ");
+                    let _ = write!(out, "  {} = ", skull_mir::mangle::symbol_of_key(*name));
                     self.write_opnd(out, *value);
                     out.push('\n');
                 }

@@ -1666,8 +1666,11 @@ fn global_init_target(
 ) -> Result<String, CompilerError> {
     let plan = skull_mir::lower::GlobalPlan::for_declared_type(ws, scx, g.ty)
         .map_err(|e| CompilerError::new_no_location(e.message))?;
-    let Some(leaves) = plan.leaf_names(g.name) else {
-        return Ok(g.name.to_string());
+    // The LHS is an identifier, so it is the global's emitted symbol; a v1
+    // DefKey never reaches the artifact.
+    let symbol = skull_mir::mangle::symbol_of_key(g.name);
+    let Some(leaves) = plan.leaf_names(symbol) else {
+        return Ok(symbol.to_string());
     };
     Ok(leaves
         .iter()
@@ -1685,7 +1688,7 @@ fn global_init_session_line(
 ) -> Result<String, CompilerError> {
     let plan = skull_mir::lower::GlobalPlan::for_declared_type(ws, scx, g.ty)
         .map_err(|_| CompilerError::new_no_location(format!("no state plan for global `{}`", g.name)))?;
-    match plan.leaf_names(g.name) {
+    match plan.leaf_names(skull_mir::mangle::symbol_of_key(g.name)) {
         Some(leaves) => {
             let keys: Vec<u32> = leaves
                 .iter()
@@ -1905,7 +1908,7 @@ fn emit_global_unit(
 ) -> UnitOut {
     let mut out = UnitOut::default();
     let g = &ws.module(mid).globals[gid];
-    let init_name = crate::global_init_fn_name(g.name.as_str());
+    let init_name = crate::global_init_fn_name(skull_mir::mangle::symbol_of_key(g.name).as_str());
     out.attribution.owner = format!("m{}:global{}", mid.index(), u32::from(gid.into_raw()));
     let tl = Instant::now();
     let owner = skull_mir::concrete::ConcreteOwner::Global {
@@ -5801,7 +5804,10 @@ fn assemble(
         for (_, g) in module.globals.iter() {
             let plan = skull_mir::lower::GlobalPlan::for_declared_type(ws, &cache.scx, g.ty)
                 .map_err(|e| CompilerError::new_no_location(e.message))?;
-            if let Some(leaves) = plan.leaf_names(g.name) {
+            // Leaf names are the emitted symbols; the owner they resolve back
+            // to is the global's LOGICAL name, which is what an init line and a
+            // plain global read are keyed on.
+            if let Some(leaves) = plan.leaf_names(skull_mir::mangle::symbol_of_key(g.name)) {
                 for leaf in leaves {
                     leaf_owner.insert(leaf, g.name);
                 }
@@ -6187,9 +6193,8 @@ fn build_artifact_plans(
             if global.is_const {
                 let plan = skull_mir::lower::GlobalPlan::for_declared_type(ws, scx, global.ty)
                     .map_err(|error| CompilerError::new_no_location(error.message))?;
-                let physical = plan
-                    .leaf_names(global.name)
-                    .unwrap_or_else(|| vec![global.name]);
+                let physical =
+                    skull_mir::state_schema::physical_leaf_names(&plan, global.name);
                 for leaf in physical {
                     bindings.push(ArtifactBinding {
                         identity: identity.clone(),
@@ -8353,7 +8358,7 @@ fn assemble_overlay(
                 format!(
                     "{} = {}()\n",
                     target,
-                    crate::global_init_fn_name(a.name.as_str())
+                    crate::global_init_fn_name(skull_mir::mangle::symbol_of_key(a.name).as_str())
                 )
             };
             let edges: Vec<Ustr> = a
