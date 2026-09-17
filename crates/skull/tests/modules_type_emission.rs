@@ -121,3 +121,61 @@ fn v1_type_table_key_matches_the_emitted_constructor() {
         "`_G[<key> .. \"_ct\"]` must resolve to the constructor the cdef declared"
     );
 }
+
+const PAYLOAD_MAIN: &str = r#"
+fn main() {
+    let r = a::Rank(4)
+    print("{a::describe()} {a::rank_of(r)}")
+}
+"#;
+
+const PAYLOAD_MOD: &str = r#"
+mod a;
+
+pub enum Move {
+    Pass,
+    Step(int),
+    Jump { from: int, to: int },
+}
+
+pub newtype Rank(int)
+
+pub fn rank_of(r: Rank) -> int {
+    return r.0
+}
+
+pub fn describe() -> string {
+    let stepped = Move::Step(2)
+    let jumped = Move::Jump { from: 1, to: 3 }
+    let passed = Move::Pass
+    return "{tag(stepped)} {tag(jumped)} {tag(passed)}"
+}
+
+fn tag(m: Move) -> string {
+    match m {
+        Move::Step(d) => "step{d}",
+        Move::Jump { from, to } => "jump{from}{to}",
+        Move::Pass => "pass",
+    }
+}
+"#;
+
+/// A mixed enum's three variant forms, constructed and matched inside one v1
+/// module: the unit variant is an interned `__rock_enum_<E>_<V>` singleton
+/// (whose global name is minted from the enum's symbol), and the payload
+/// variants are tagged tables. It also pins the two call-position lowerings a
+/// v1 path needs: a path naming a tuple VARIANT must carry its arguments rather
+/// than lower as the unit form, and a path naming a NEWTYPE is called by name
+/// like its bare spelling, not as a value.
+#[test]
+fn v1_mixed_enum_variants_construct_and_match() {
+    let emitted = emit_v1_package(
+        "v1enum",
+        &[
+            V1Fragment { file: "main.rock", src: PAYLOAD_MAIN },
+            V1Fragment { file: "a.rock", src: PAYLOAD_MOD },
+        ],
+    );
+    let out = run_luajit(&format!("{}\nmain()\n", emitted.lua), "modules_v1_enum_payload");
+    assert_eq!(out, "step2 jump13 pass 4");
+}

@@ -203,3 +203,39 @@ fn f() -> int {
           //^ int
     m
 }
+
+//- qualified_variant_construction_carries_its_payload
+//-- lib.rock @pkg=chess,1 @v1
+pub enum Move {
+    Pass,
+    Step(int),
+    Jump { from: int, to: int },
+}
+
+//-- app.rock @pkg=app,2 @v1
+fn played() -> int {
+    let stepped = chess::Move::Step(2)
+    let echoed = stepped
+       //^ chess::Move
+    let jumped = chess::Move::Jump { from: 1, to: 3 }
+    let passed = chess::Move::Pass
+    let n = match echoed {
+        chess::Move::Step(d) => d,
+                             //^ int
+        chess::Move::Jump { from, to } => to,
+        chess::Move::Pass => 0,
+    }
+    n
+}
+
+//- qualified_newtype_construction_resolves_by_name
+//-- lib.rock @pkg=chess,1 @v1
+pub newtype Rank(int)
+
+//-- app.rock @pkg=app,2 @v1
+fn made() -> chess::Rank {
+    let r = chess::Rank(3)
+    let echoed = r
+       //^ chess::Rank
+    echoed
+}

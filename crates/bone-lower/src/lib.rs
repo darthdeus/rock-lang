@@ -82,10 +82,11 @@ impl<'a> LowerCtx<'a> {
         Ok(self.resolve_bare(name, span)?.key)
     }
 
-    /// The DefKey of a v1 path that names a CALLABLE family. `None` for a
-    /// legacy fragment, a path that does not resolve, or one that names a type,
-    /// global or enum variant -- those keep the general call route, where the
-    /// callee lowers as a value.
+    /// The DefKey of a v1 path that is CALLED BY NAME: a callable family, or a
+    /// newtype, whose constructor is a call on the type's own name and which the
+    /// bare-name route already resolves this way. `None` for a legacy fragment, a
+    /// path that does not resolve, or one that names a struct, enum, global or
+    /// enum variant -- those keep the general call route.
     fn v1_path_callable(&self, path: &skull_parser::Path) -> Option<Ustr> {
         let frag = self.v1_scope()?;
         let use_path = bone_core::modules::UsePathRef {
@@ -100,6 +101,31 @@ impl<'a> LowerCtx<'a> {
                 ) =>
             {
                 Some(key)
+            }
+            // `p::NT(x)`. As a VALUE the path is the type, and the call then
+            // lowers as a call of a value: inference reports the key as an
+            // undefined global, because a newtype constructor is resolved by
+            // name, exactly as `NT(x)` is inside the defining module.
+            Ok(resolve::MemberTarget::Type(key))
+                if self.workspace.newtypes_by_name.contains_key(&key) =>
+            {
+                Some(key)
+            }
+            _ => None,
+        }
+    }
+
+    /// The `(enum DefKey, variant)` of a v1 path that names an enum VARIANT.
+    /// `None` for a legacy fragment or a path that names anything else.
+    fn v1_path_variant(&self, path: &skull_parser::Path) -> Option<(Ustr, Ustr)> {
+        let frag = self.v1_scope()?;
+        let use_path = bone_core::modules::UsePathRef {
+            from_root: path.from_root,
+            segments: path.segments.iter().map(|i| i.name).collect(),
+        };
+        match resolve::resolve_member_path(self.workspace, frag, &use_path) {
+            Ok(resolve::MemberTarget::EnumVariant { enum_key, variant }) => {
+                Some((enum_key, variant))
             }
             _ => None,
         }
@@ -1241,6 +1267,30 @@ pub fn lower_expr_value(
                     args: args_range,
                     generic_args,
                     family: hir::CallFamily::resolved(key, &[]),
+                }
+            }
+
+            // `p::E::V(..)` in a v1 fragment: a TUPLE-payload variant
+            // constructor, which the legacy grammar spells `E::V(..)` and lowers
+            // through the `QualifiedIdent` arm below. Without this the callee
+            // takes the value-position path route, where EVERY variant lowers
+            // with `VariantArgs::Unit` -- right for `p::E::V`, but here it drops
+            // the payload and inference rejects the construction as a
+            // payload/argument mismatch.
+            ExprKind::Path { path, generic_args: path_generics }
+                if path_generics.is_empty() && ctx.v1_path_variant(path).is_some() =>
+            {
+                let (enum_key, variant) = ctx.v1_path_variant(path).expect("guard resolved it");
+                if !generic_args.is_empty() {
+                    comp_error!(e.span, "explicit type arguments are not supported on enum constructors");
+                }
+                let args_range = lower_exprs(ctx, a, body, scope, args.iter().map(|x| &x.value))?;
+                Expr::EnumVariant {
+                    enum_name: enum_key,
+                    enum_name_span: e.span,
+                    variant,
+                    variant_span: e.span,
+                    args: VariantArgs::Tuple(args_range),
                 }
             }
 
