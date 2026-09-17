@@ -2030,6 +2030,13 @@ pub(crate) fn check_expr(
                         }
                     }
                 }
+                if matches!(former.as_str(), "FieldRef" | "WriteFieldRef") {
+                    if let TypeExpr::App { ctor: TypeCtor::Nominal(tn), .. } = *gamma.get(t_r) {
+                        let site = gamma.access_site();
+                        field_access(gamma, tn, field, site, FieldAccessNeed::Write)
+                            .map_err(|e| e.to_compiler_error(span))?;
+                    }
+                }
 
                 let fty = struct_field_ty(gamma, t_r, field, span)?;
 

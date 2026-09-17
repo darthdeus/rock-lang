@@ -51,3 +51,138 @@ pub fn update(a: Actor) -> int {
               //^ int
     n
 }
+
+//- compound_assign_private_set_rejects @fail=field `health` on struct `Actor` is not writable from this module
+//-- actor.rock @pkg=game,1 @v1
+mod actor;
+pub struct Actor {
+    pub name: string,
+    private(set) health: int = 100,
+}
+
+//-- other.rock @pkg=game,1 @v1
+mod other;
+
+fn test(a: game::actor::Actor) {
+    a.health += 10
+}
+
+//- inc_dec_private_set_rejects @fail=field `health` on struct `Actor` is not writable from this module
+//-- actor.rock @pkg=game,1 @v1
+mod actor;
+pub struct Actor {
+    pub name: string,
+    private(set) health: int = 100,
+}
+
+//-- other.rock @pkg=game,1 @v1
+mod other;
+
+fn test(a: game::actor::Actor) {
+    a.health++
+}
+
+//- safe_nav_private_field_rejects @fail=field `secret` on struct `Actor` is not accessible from this module
+//-- actor.rock @pkg=game,1 @v1
+mod actor;
+pub struct Actor {
+    pub name: string,
+    private secret: int,
+}
+
+//-- other.rock @pkg=game,1 @v1
+mod other;
+
+fn test(a: game::actor::Actor?) -> int? {
+    a?.secret
+}
+
+//- pattern_destructure_private_field_rejects @fail=field `secret` on struct `Actor` is not accessible from this module
+//-- actor.rock @pkg=game,1 @v1
+mod actor;
+pub struct Actor {
+    pub name: string,
+    private secret: int,
+}
+
+//-- other.rock @pkg=game,1 @v1
+mod other;
+use game::actor::Actor;
+
+fn test(a: Actor) -> int {
+    match a {
+        Actor { secret } => secret,
+        _ => 0,
+    }
+}
+
+//- value_place_writeback_private_set_rejects @fail=field `pos` on struct `Actor` is not writable from this module
+//-- actor.rock @pkg=game,1 @v1
+mod actor;
+pub value Vec2 {
+    pub x: int,
+    pub y: int,
+}
+pub struct Actor {
+    pub name: string,
+    private(set) pos: Vec2,
+}
+
+//-- other.rock @pkg=game,1 @v1
+mod other;
+
+fn test(a: game::actor::Actor) {
+    a.pos.x = 10
+}
+
+//- embed_writeback_private_set_rejects @fail=field `pos` on struct `Actor` is not writable from this module
+//-- actor.rock @pkg=game,1 @v1
+mod actor;
+pub struct Pos {
+    pub x: int,
+    pub y: int,
+}
+pub struct Actor {
+    pub name: string,
+    private(set) embed pos: Pos,
+}
+
+//-- other.rock @pkg=game,1 @v1
+mod other;
+
+fn test(a: game::actor::Actor) {
+    a.pos.x = 10
+}
+
+//- field_ref_write_private_set_rejects @fail=field `health` on struct `Actor` is not writable from this module
+//-- actor.rock @pkg=game,1 @v1
+mod actor;
+pub struct Actor {
+    pub name: string,
+    private(set) health: int = 100,
+}
+
+//-- other.rock @pkg=game,1 @v1
+mod other;
+
+fn test() {
+    let r: FieldRef<game::actor::Actor, int> = .health
+}
+
+//- field_ref_read_private_set_allowed
+//-- actor.rock @pkg=game,1 @v1
+mod actor;
+pub struct Actor {
+    pub name: string,
+    private(set) health: int = 100,
+}
+
+//-- other.rock @pkg=game,1 @v1
+mod other;
+
+fn test() {
+    let r: ReadFieldRef<game::actor::Actor, int> = .health
+    let r2 = r
+             //^ ReadFieldRef<game::actor::Actor, int>
+}
+

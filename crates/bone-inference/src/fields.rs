@@ -557,11 +557,26 @@ pub(crate) fn check_field_write_access(
             .map_err(|e| e.to_compiler_error(span))?;
     }
 
-    // Value-place writeback: if `base_ty` is a value struct, writing to its field
-    // writes back into `base`. If `base` is itself a field access on an enclosing struct,
-    // that enclosing field must also be writable!
-    if ty_is_value_struct(gamma, base_ty).is_some() {
-        if let Expr::FieldAccess { base: parent, field: parent_field } = c.body.expr_arena[base] {
+    // Value-place and embed writeback: if `base_ty` is a value struct, or if `base` is an `embed`
+    // field on an enclosing struct, writing to this field writes into `base`'s storage.
+    // That enclosing field must also be writable (spec 10.3)!
+    if let Expr::FieldAccess { base: parent, field: parent_field } = c.body.expr_arena[base] {
+        let is_value = ty_is_value_struct(gamma, base_ty).is_some();
+        let mut is_embed = false;
+        let parent_ty = infer_expr(c, gamma, parent)?;
+        let mut p_ty = resolve(gamma, parent_ty, span);
+        if let TypeExpr::Nullable(inner) = *gamma.get(p_ty) {
+            p_ty = resolve(gamma, p_ty.with_idx(inner), span);
+        }
+        if let TypeExpr::App { ctor: TypeCtor::Nominal(p_name), .. } = *gamma.get(p_ty) {
+            if let Some(sid) = resolve_struct(gamma, p_name) {
+                is_embed = gamma.workspace.module(sid.module).structs[sid.def]
+                    .fields
+                    .iter()
+                    .any(|f| f.name == parent_field && f.is_embed);
+            }
+        }
+        if is_value || is_embed {
             check_field_write_access(c, gamma, parent, parent_field, span)?;
         }
     }
