@@ -50,9 +50,15 @@ fn check_modules_fixture(contents: &str) -> datatest_stable::Result<()> {
         return Ok(());
     }
     for section in sections {
-        let (name, expect_fail) = match section.name.strip_suffix(" @fail") {
-            Some(n) => (n.to_string(), true),
-            None => (section.name.to_string(), false),
+        // `@fail` expects any rejection; `@fail=<text>` also pins the reason,
+        // so a case cannot pass by failing for an unrelated reason.
+        let (name, expect_fail, want) = match section.name.split_once(" @fail") {
+            Some((n, rest)) => (
+                n.to_string(),
+                true,
+                rest.strip_prefix('=').map(|w| w.trim().to_string()),
+            ),
+            None => (section.name.to_string(), false, None),
         };
         let files = bone_semantic::test_support::parse_embedded_files(section.content);
         match (
@@ -61,6 +67,15 @@ fn check_modules_fixture(contents: &str) -> datatest_stable::Result<()> {
         ) {
             (Ok(_), true) => panic!("section `{name}` was marked @fail but passed"),
             (Err(e), false) => panic!("section `{name}` failed:\n{e}"),
+            (Err(e), true) => {
+                if let Some(want) = want {
+                    assert!(
+                        e.contains(&want),
+                        "section `{name}` failed for the wrong reason: \
+                         expected the error to contain `{want}`, got:\n{e}"
+                    );
+                }
+            }
             _ => {}
         }
     }

@@ -660,6 +660,10 @@ pub enum Expr {
         receiver: Idx<Expr>,
         method: Ustr,
         args: IdxRange<Expr>,
+        /// Resolver family for `method`, same shape as `Expr::Call` (spec 8.4:
+        /// UFCS and the bare call select the same family); `family.key()` is
+        /// `method`.
+        family: CallFamily,
     },
 
     TupleIndex {
@@ -696,6 +700,12 @@ pub enum Expr {
         /// Explicit type arguments from `f<A, B>(...)`; empty when generic
         /// inference supplies the callee's instance.
         generic_args: IdxRange<TypeExpr>,
+        /// Resolver family (plan 2.3). Legacy calls use `CallFamily::Legacy`;
+        /// v1 calls carry the DefKey plus the shadowed losing-tier origin.
+        /// `family.key()` is the same key as `Callee::Unresolved.name`, which
+        /// the MIR backend still reads; M4 moves backend identity onto the
+        /// family and drops the second copy.
+        family: CallFamily,
     },
 
     Array(IdxRange<Expr>),
@@ -756,13 +766,15 @@ pub enum Callee {
 
 /// Overload family selected by the resolver (plan 2.3 / M2 step 5).
 /// `resolve_callee` consumes this rather than a spelled last segment.
-#[derive(Clone, Debug)]
+#[derive(Copy, Clone, Debug)]
 pub enum CallFamily {
     /// Legacy compilation unit: workspace-map lookup by bare name.
     Legacy(Ustr),
-    /// v1: canonical DefKey plus hidden-origin keys from losing tiers
-    /// (spec 8.3).
-    Resolved { key: Ustr, hidden: Vec<Ustr> },
+    /// v1: canonical DefKey plus ONE hidden-origin key from a losing tier
+    /// (spec 8.3). `Expr` is `Copy`, so the family cannot carry a list; when
+    /// several candidates lose, the lowest key is kept so the diagnostic does
+    /// not depend on import order.
+    Resolved { key: Ustr, hidden: Option<Ustr> },
 }
 
 impl CallFamily {
@@ -773,15 +785,19 @@ impl CallFamily {
         }
     }
 
-    pub fn hidden(&self) -> &[Ustr] {
+    pub fn hidden(&self) -> Option<Ustr> {
         match self {
-            CallFamily::Legacy(_) => &[],
-            CallFamily::Resolved { hidden, .. } => hidden,
+            CallFamily::Legacy(_) => None,
+            CallFamily::Resolved { hidden, .. } => *hidden,
         }
     }
 
     pub fn from_name(name: Ustr) -> Self {
         CallFamily::Legacy(name)
+    }
+
+    pub fn resolved(key: Ustr, hidden: &[Ustr]) -> Self {
+        CallFamily::Resolved { key, hidden: hidden.iter().min_by_key(|k| k.as_str()).copied() }
     }
 }
 

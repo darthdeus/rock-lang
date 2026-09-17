@@ -153,3 +153,21 @@ fn width() -> int { 2 }
 fn pick() -> int {
     width()
 }
+
+//- shadowed_glob_candidate_is_named_in_the_call_error @fail=shadowed candidate `chess::util::width`
+//-- lib.rock @pkg=chess,1 @v1
+pub mod util;
+
+//-- lib_util.rock @pkg=chess,1 @v1
+mod util;
+
+pub fn width() -> int { 1 }
+
+//-- app.rock @pkg=app,2 @v1
+use chess::util::*;
+
+global width: int = 3
+
+fn f() -> int {
+    width()
+}

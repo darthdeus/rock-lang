@@ -363,7 +363,7 @@ pub fn infer_expr_used(
                 resolve_named_call(
                     gamma,
                     c,
-                    *NOT,
+                    CallFamily::from_name(*NOT),
                     None,
                     IdxRange::new_inclusive(*inner..=*inner),
                     e,
@@ -460,7 +460,7 @@ pub fn infer_expr_used(
                 _ => resolve_named_call(
                     gamma,
                     c,
-                    *UNM,
+                    CallFamily::from_name(*UNM),
                     None,
                     IdxRange::new_inclusive(*inner..=*inner),
                     e,
@@ -1056,15 +1056,15 @@ pub fn infer_expr_used(
             tuple_of(gamma, &tys, expr_span)
         }
 
-        Expr::Call { callee, args, generic_args } => {
+        Expr::Call { callee, args, generic_args, family } => {
             let args = *args;
 
             match callee {
-                hir::Callee::Unresolved { name, .. } => {
+                hir::Callee::Unresolved { .. } => {
                     resolve_named_call_with_generics(
                         gamma,
                         c,
-                        *name,
+                        *family,
                         None,
                         args,
                         *generic_args,
@@ -1231,10 +1231,11 @@ pub fn infer_expr_used(
 
         Expr::SafeNavCall {
             receiver,
-            method,
             args,
+            family,
+            ..
         } => {
-            let (receiver, method, args) = (*receiver, *method, *args);
+            let (receiver, args, family) = (*receiver, *args, *family);
             let recv_ty = infer_expr(c, gamma, receiver)?;
             if redundant_optional_on(gamma, recv_ty, expr_span) {
                 comp_error!(
@@ -1244,7 +1245,7 @@ pub fn infer_expr_used(
             }
             let inner = peel_nullable(gamma, recv_ty, expr_span);
 
-            let ret = resolve_named_call(gamma, c, method, Some(inner), args, e, expr_span)?;
+            let ret = resolve_named_call(gamma, c, family, Some(inner), args, e, expr_span)?;
 
             nullable_of(gamma, ret, expr_span)
         }

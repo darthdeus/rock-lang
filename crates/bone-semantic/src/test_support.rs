@@ -305,7 +305,7 @@ pub fn check_types_packages(files: &[PackageFixture<'_>]) -> Result<(), String> 
     }
 
     // Check `//^` markers in every file.
-    for (f, module) in files.iter().zip(modules.iter()) {
+    for f in files.iter() {
         let annotations = test_utils::extract_annotations(f.src);
         if annotations.is_empty() {
             continue;
@@ -319,7 +319,7 @@ pub fn check_types_packages(files: &[PackageFixture<'_>]) -> Result<(), String> 
         let inf = ws
             .inference(mid)
             .ok_or_else(|| format!("no inference for {}", f.file))?;
-        for ((start, end), expected) in &annotations {
+        for ((start, _end), expected) in &annotations {
             if expected == "?" {
                 return Err(format!("`?` dump markers are not supported in package fixtures"));
             }

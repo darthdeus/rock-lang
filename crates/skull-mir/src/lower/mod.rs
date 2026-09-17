@@ -1300,7 +1300,7 @@ fn hash_init_expr(body: &Body, e: Idx<Expr>, h: &mut std::collections::hash_map:
                 go!(x);
             }
         }
-        Expr::SafeNavCall { receiver, method, args } => {
+        Expr::SafeNavCall { receiver, method, args, .. } => {
             tag!(39);
             method.hash(h);
             go!(receiver);

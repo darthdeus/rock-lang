@@ -79,11 +79,22 @@ impl<'a> LowerCtx<'a> {
     }
 
     fn resolve_bare_key(&self, name: Ustr, span: Span) -> Result<Ustr, CompilerError> {
+        Ok(self.resolve_bare(name, span)?.key)
+    }
+
+    fn resolve_bare(
+        &self,
+        name: Ustr,
+        span: Span,
+    ) -> Result<resolve::Resolved, CompilerError> {
         match self.v1_scope() {
             Some(frag) => resolve::resolve_bare(self.workspace, Some(frag), name)
-                .map(|r| r.key)
                 .map_err(|msg| CompilerError::new_with_label(span, msg)),
-            None => Ok(name),
+            None => Ok(resolve::Resolved {
+                key: name,
+                kind: resolve::ResolvedKind::Binding,
+                hidden: Vec::new(),
+            }),
         }
     }
 
@@ -953,6 +964,7 @@ pub fn lower_statement_value(
                         },
                         args,
                         generic_args: IdxRange::new_empty(),
+                        family: hir::CallFamily::from_name(ustr(name)),
                     },
                     s.span,
                 );
@@ -1075,14 +1087,13 @@ pub fn lower_expr_value(
 
                 // A local fn-typed binding is called through its value, everything else
                 // resolves at a top-level by name. A v1 fragment resolves the
-                // name through the namespace tiers to its family's DefKey —
-                // the first tier that binds it decides (no fallthrough,
-                // spec 8.3); hidden candidates ride the resolver's result for
-                // the failing-match diagnostic.
-                let callee_key = if name.name.as_str() != "_" {
-                    ctx.resolve_bare_key(name.name, name.span)?
+                // name through the namespace tiers to CallFamily::Resolved
+                // (DefKey + hidden origins, spec 8.3).
+                let (callee_key, hidden) = if name.name.as_str() != "_" {
+                    let r = ctx.resolve_bare(name.name, name.span)?;
+                    (r.key, r.hidden)
                 } else {
-                    name.name
+                    (name.name, Vec::new())
                 };
                 let callee = match lookup_in_scope(ctx, body, scope, name)? {
                     Expr::Var(binding) => hir::Callee::Local(binding),
@@ -1091,11 +1102,17 @@ pub fn lower_expr_value(
                         name_span: name.span,
                     },
                 };
+                let family = if ctx.v1_scope().is_some() {
+                    hir::CallFamily::resolved(callee_key, &hidden)
+                } else {
+                    hir::CallFamily::from_name(callee_key)
+                };
 
                 Expr::Call {
                     callee,
                     args: args_range,
                     generic_args,
+                    family,
                 }
             }
 
@@ -1121,14 +1138,20 @@ pub fn lower_expr_value(
                 // UFCS and the bare call share one visible family: in a v1
                 // fragment the method name goes through the same tier
                 // resolution as `method(recv, ..)` would (spec 8.4).
-                let method_key = ctx.resolve_bare_key(method.name, method.span)?;
+                let r = ctx.resolve_bare(method.name, method.span)?;
+                let family = if ctx.v1_scope().is_some() {
+                    hir::CallFamily::resolved(r.key, &r.hidden)
+                } else {
+                    hir::CallFamily::from_name(r.key)
+                };
                 Expr::Call {
                     callee: Callee::Unresolved {
-                        name: method_key,
+                        name: r.key,
                         name_span: method.span,
                     },
                     args: args_range,
                     generic_args: IdxRange::new_empty(),
+                    family,
                 }
             }
 
@@ -1159,11 +1182,16 @@ pub fn lower_expr_value(
                     }
                 }
 
-                let method_key = ctx.resolve_bare_key(method.name, method.span)?;
+                let r = ctx.resolve_bare(method.name, method.span)?;
                 Expr::SafeNavCall {
                     receiver,
-                    method: method_key,
+                    method: r.key,
                     args: args_range,
+                    family: if ctx.v1_scope().is_some() {
+                        hir::CallFamily::resolved(r.key, &r.hidden)
+                    } else {
+                        hir::CallFamily::from_name(r.key)
+                    },
                 }
             }
 
@@ -1178,6 +1206,10 @@ pub fn lower_expr_value(
                     callee: hir::Callee::Value(callee),
                     args: args_range,
                     generic_args: IdxRange::new_empty(),
+                    // The callee is a value, so inference calls its type and
+                    // never asks the family for a name; the placeholder key is
+                    // not a resolvable spelling.
+                    family: hir::CallFamily::from_name(ustr("<value>")),
                 }
 
                 // comp_error!(
@@ -1286,6 +1318,12 @@ pub fn lower_expr_value(
                         },
                         args,
                         generic_args: IdxRange::new_empty(),
+                        family: if ctx.v1_scope().is_some() {
+                            let r = ctx.resolve_bare(ustr(op_fn), e.span)?;
+                            hir::CallFamily::resolved(r.key, &r.hidden)
+                        } else {
+                            hir::CallFamily::from_name(ustr(op_fn))
+                        },
                     },
                     e.span,
                 );

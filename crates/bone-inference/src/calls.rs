@@ -910,7 +910,7 @@ pub(crate) fn spread_constituents(
 pub(crate) fn resolve_named_call(
     gamma: &mut Gamma,
     c: BodyCtx,
-    name: Ustr,
+    family: CallFamily,
     recv_override: Option<TyId>,
     args: IdxRange<Expr>,
     call_expr: Idx<Expr>,
@@ -919,7 +919,7 @@ pub(crate) fn resolve_named_call(
     resolve_named_call_with_generics(
         gamma,
         c,
-        name,
+        family,
         recv_override,
         args,
         IdxRange::new_empty(),
@@ -931,17 +931,18 @@ pub(crate) fn resolve_named_call(
 pub(crate) fn resolve_named_call_with_generics(
     gamma: &mut Gamma,
     c: BodyCtx,
-    name: Ustr,
+    family: CallFamily,
     recv_override: Option<TyId>,
     args: IdxRange<Expr>,
     generic_args: IdxRange<TypeExpr>,
     call_expr: Idx<Expr>,
     span: Span,
 ) -> Result<TyId, CompilerError> {
+    let name = family.key();
     let res = resolve_named_call_inner(
         gamma,
         c,
-        name,
+        family,
         recv_override,
         args,
         generic_args,
@@ -1064,15 +1065,16 @@ pub(crate) fn eq_compared_generic_indices(
 pub(crate) fn resolve_named_call_inner(
     gamma: &mut Gamma,
     c: BodyCtx,
-    name: Ustr,
+    family: CallFamily,
     recv_override: Option<TyId>,
     args: IdxRange<Expr>,
     generic_args: IdxRange<TypeExpr>,
     call_expr: Idx<Expr>,
     span: Span,
 ) -> Result<TyId, CompilerError> {
+    let name = family.key();
     let _span = tracing::info_span!("named_call", name = %name).entered();
-    let all_candidates = resolve_callee(gamma, &CallFamily::from_name(name));
+    let all_candidates = resolve_callee(gamma, &family);
     let candidates: Vec<_> = if generic_args.is_empty() {
         all_candidates.to_vec()
     } else {
@@ -1214,7 +1216,23 @@ pub(crate) fn resolve_named_call_inner(
             );
         }
 
-        comp_error!(span, "Function `{}` doesn't exist", name);
+        // A v1 DefKey renders as its declared name (plan 2.1); legacy keys
+        // ARE the name. When a losing tier held a candidate of the same
+        // spelling, name it: spec 8.3 forbids the fallthrough, so the user
+        // has to import it explicitly.
+        let shown = gamma.workspace.defs.get(&name).map(|m| m.name).unwrap_or(name);
+        if let Some(hidden) = family.hidden() {
+            comp_error!(
+                span,
+                "Function `{}` doesn't exist -- `{}` binds to `{}` here, and a \
+                 shadowed candidate `{}` needs an explicit import to be called",
+                shown,
+                shown,
+                name,
+                hidden
+            );
+        }
+        comp_error!(span, "Function `{}` doesn't exist", shown);
     }
 
     // let (callee_mid, callee_fn) = resolve_callee(gamma, name).ok_or_else(|| {

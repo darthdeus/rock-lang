@@ -770,7 +770,6 @@ fn build_namespaces(
     rock_modules: &[Ast],
     aliases: &bone_core::modules::NsAliases,
 ) -> Result<(), CompilerError> {
-    let mut ws = ws;
     // The host graph's alias tables land on the tree first, so a package
     // resolves its dependencies under its manifest's names even when no v1
     // file of the provider is being lowered yet.
@@ -1127,10 +1126,10 @@ fn flatten_use_tree(
     decl: &skull_parser::UseDecl,
     errs: &mut Vec<CompilerError>,
 ) {
-    let skull_parser::UseTree::Path { from_root: sub_root, segments, kind } = tree else {
-        return;
-    };
-    let _ = sub_root;
+    // Subtrees parse with `allow_root = false` (`parse_use_tree`), so a nested
+    // tree never carries its own root anchor -- the declaration's anchor rides
+    // the `from_root` parameter.
+    let skull_parser::UseTree::Path { segments, kind, .. } = tree;
     let mut full: Vec<Ident> = prefix.to_vec();
     full.extend(segments.iter().cloned());
     match kind {

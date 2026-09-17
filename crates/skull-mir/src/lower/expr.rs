@@ -672,7 +672,7 @@ impl Builder<'_> {
                 Ok(self.emit_cur(Inst::Const(Lit::Nil)))
             }
 
-            Expr::SafeNavCall { receiver, method, args } => {
+            Expr::SafeNavCall { receiver, method, args, .. } => {
                 self.lower_safe_nav_call(e, receiver, method, args)
             }
             Expr::SafeNavLet { receiver, binding, body } => {
