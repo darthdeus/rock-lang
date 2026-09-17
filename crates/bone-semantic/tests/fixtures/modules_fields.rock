@@ -1,0 +1,7 @@
+//! Modules-v1 field access pairs and privacy (plan M3; spec 10).
+
+//- setter_on_private_field_rejects @fail=write audience must be within read audience
+//-- lib.rock @pkg=chess,1 @v1
+pub struct State {
+    private private(set) count: int,
+}

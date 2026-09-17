@@ -2458,6 +2458,28 @@ pub fn lower_struct_def(
             );
         }
 
+        let (read_vis, write_vis) = if a.dialect == skull_parser::Dialect::V1 {
+            let read_vis = match &field.vis {
+                Some(v) => bone_core::modules::NsVisibility::from_parser(v),
+                None => bone_core::modules::NsVisibility::Pub,
+            };
+            let write_vis = if field.set_private {
+                bone_core::modules::NsVisibility::Private
+            } else {
+                read_vis.clone()
+            };
+            if field.set_private && !bone_core::modules::is_setter_audience_within_getter(&write_vis, &read_vis) {
+                comp_error!(
+                    field.name.span,
+                    "write audience must be within read audience: field `{}` has `private(set)` but getter is already private",
+                    field.name.name
+                );
+            }
+            (read_vis, write_vis)
+        } else {
+            (bone_core::modules::NsVisibility::Pub, bone_core::modules::NsVisibility::Pub)
+        };
+
         let field_annotations = lower_annotations(a, &field.annotations);
         validate_annotations(AnnoPos::StructField, &field_annotations, &ctx.workspace.decorator_names)?;
         fields.push(hir::StructFieldDef {
@@ -2467,6 +2489,8 @@ pub fn lower_struct_def(
             has_default: field.default.is_some(),
             annotations: field_annotations,
             is_embed: field.is_embed,
+            read_vis,
+            write_vis,
         });
 
         if let Some(default) = default {
@@ -2533,6 +2557,8 @@ pub fn lower_enum_def(
                             has_default: false,
                             annotations: annos,
                             is_embed: false,
+                            read_vis: bone_core::modules::NsVisibility::Pub,
+                            write_vis: bone_core::modules::NsVisibility::Pub,
                         })
                     })
                     .try_vec()?;

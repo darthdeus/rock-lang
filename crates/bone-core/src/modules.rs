@@ -31,6 +31,33 @@ pub enum NsVisibility {
     Pub,
 }
 
+impl NsVisibility {
+    pub fn from_parser(vis: &skull_parser::Visibility) -> Self {
+        match vis {
+            skull_parser::Visibility::Private => NsVisibility::Private,
+            skull_parser::Visibility::Pub => NsVisibility::Pub,
+            skull_parser::Visibility::PubSuper => NsVisibility::Super,
+            skull_parser::Visibility::PubPackage => NsVisibility::Package,
+            skull_parser::Visibility::PubIn(path) => {
+                NsVisibility::In(path.iter().map(|i| i.name).collect())
+            }
+        }
+    }
+}
+
+/// Whether a restricted setter audience (`write_vis`) is strictly within (a proper subset of)
+/// the getter audience (`read_vis`).
+pub fn is_setter_audience_within_getter(write_vis: &NsVisibility, read_vis: &NsVisibility) -> bool {
+    match (write_vis, read_vis) {
+        (NsVisibility::Private, NsVisibility::Pub) => true,
+        (NsVisibility::Private, NsVisibility::Package) => true,
+        (NsVisibility::Private, NsVisibility::Super) => true,
+        (NsVisibility::Private, NsVisibility::In(_)) => true,
+        (NsVisibility::Private, NsVisibility::Private) => false,
+        _ => false,
+    }
+}
+
 /// One namespace node: a logical module within a package. Multi-file
 /// contributions coalesce here; the node owns visibility and the items
 /// declared in it (callables stay families in the workspace maps — the node

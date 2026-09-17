@@ -4,6 +4,7 @@ use rust_lapper::Interval;
 use skull_parser::Ident;
 pub use skull_parser::FnBackend;
 
+use crate::modules::NsVisibility;
 use crate::prelude::*;
 
 #[derive(Copy, Clone, Debug)]
@@ -973,6 +974,10 @@ pub struct StructFieldDef {
     /// (docs/scalarization-and-boxing-design.md S 6). Enum record variants
     /// cannot carry it -- always false there.
     pub is_embed: bool,
+    /// Getter visibility (spec 9/10). Default is public.
+    pub read_vis: NsVisibility,
+    /// Setter visibility (spec 10). `private(set)` restricts this to owner subtree.
+    pub write_vis: NsVisibility,
 }
 
 #[derive(Copy, Clone, Debug)]

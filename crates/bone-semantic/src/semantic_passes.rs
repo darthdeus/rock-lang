@@ -1214,15 +1214,7 @@ fn owned_name_and_kind(item: &ItemKind) -> Option<(ustr::Ustr, &'static str)> {
 }
 
 fn to_ns_vis(vis: &skull_parser::Visibility) -> NsVisibility {
-    match vis {
-        skull_parser::Visibility::Private => NsVisibility::Private,
-        skull_parser::Visibility::Pub => NsVisibility::Pub,
-        skull_parser::Visibility::PubSuper => NsVisibility::Super,
-        skull_parser::Visibility::PubPackage => NsVisibility::Package,
-        skull_parser::Visibility::PubIn(path) => {
-            NsVisibility::In(path.iter().map(|i| i.name).collect())
-        }
-    }
+    NsVisibility::from_parser(vis)
 }
 
 pub fn check_module_incremental(
