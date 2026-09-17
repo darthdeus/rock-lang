@@ -203,35 +203,7 @@ pub fn resolve_member_path(
     path: &UsePathRef,
 ) -> Result<MemberTarget, String> {
     let segments = &path.segments;
-    if segments.is_empty() {
-        return Err("empty path".to_string());
-    }
-
-    // Resolve the anchor (root / self / super / alias / lexical).
-    let first = segments[0];
-    let mut pkg_id = frag.package;
-    let mut cur: Vec<Ustr> = Vec::new();
-    let mut i = 0usize;
-    if path.from_root {
-        i = 0;
-    } else if first.as_str() == "self" {
-        cur = frag.module_path.clone();
-        i = 1;
-    } else if first.as_str() == "super" {
-        if frag.module_path.is_empty() {
-            return Err("`super::` at the package root has no parent".to_string());
-        }
-        cur = frag.module_path[..frag.module_path.len() - 1].to_vec();
-        i = 1;
-    } else {
-        let pkg = ws.ns.package(frag.package).ok_or("unknown package")?;
-        if first == pkg.self_name {
-            i = 1;
-        } else if let Some(&target) = pkg.aliases.get(&first) {
-            pkg_id = target;
-            i = 1;
-        }
-    }
+    let (pkg_id, mut cur, mut i) = resolve_anchor(ws, frag, path)?;
 
     while i < segments.len() {
         let seg = segments[i];
@@ -336,6 +308,48 @@ enum WalkMode {
     Module,
 }
 
+/// Shared first-segment anchor for `walk_path` and `resolve_member_path`.
+/// `::x` is root-anchored; `self`/`super`/package self-name/alias bind;
+/// any other first segment is relative to the current module (spec 4.3).
+fn resolve_anchor(
+    ws: &Workspace,
+    frag: &FragmentScope,
+    path: &UsePathRef,
+) -> Result<(u32, Vec<Ustr>, usize), String> {
+    let segments = &path.segments;
+    if segments.is_empty() {
+        return Err("empty path".to_string());
+    }
+    let first = segments[0];
+    if path.from_root {
+        return Ok((frag.package, Vec::new(), 0));
+    }
+    if first.as_str() == "self" {
+        return Ok((frag.package, frag.module_path.clone(), 1));
+    }
+    if first.as_str() == "super" {
+        if frag.module_path.is_empty() {
+            return Err("`super::` at the package root has no parent".to_string());
+        }
+        return Ok((
+            frag.package,
+            frag.module_path[..frag.module_path.len() - 1].to_vec(),
+            1,
+        ));
+    }
+    let pkg = ws
+        .ns
+        .package(frag.package)
+        .ok_or_else(|| "unknown package".to_string())?;
+    if first == pkg.self_name {
+        return Ok((frag.package, Vec::new(), 1));
+    }
+    if let Some(&target) = pkg.aliases.get(&first) {
+        return Ok((target, Vec::new(), 1));
+    }
+    Ok((frag.package, frag.module_path.clone(), 0))
+}
+
 fn walk_path(
     ws: &Workspace,
     frag: &FragmentScope,
@@ -344,46 +358,7 @@ fn walk_path(
     visited: &mut Vec<(u32, Ustr)>,
 ) -> Result<Landing, String> {
     let segments = &path.segments;
-    if segments.is_empty() {
-        return Err("empty path".to_string());
-    }
-    // Determine the anchor from the first segment.
-    let first = segments[0];
-    let mut pkg_id = frag.package;
-    let mut cur: Vec<Ustr>;
-    let rest_start;
-    if path.from_root {
-        // `::a::b` — the anchor is this package's root; `a` is treated like a
-        // root-anchored first segment (self name, alias, or root item).
-        cur = Vec::new();
-        rest_start = 0;
-    } else if first.as_str() == "self" {
-        cur = frag.module_path.clone();
-        rest_start = 1;
-    } else if first.as_str() == "super" {
-        if frag.module_path.is_empty() {
-            return Err("`super::` at the package root has no parent".to_string());
-        }
-        cur = frag.module_path[..frag.module_path.len() - 1].to_vec();
-        rest_start = 1;
-    } else {
-        // Alias, self name, or a reference relative to the current module.
-        let pkg = ws
-            .ns
-            .package(frag.package)
-            .ok_or_else(|| "unknown package".to_string())?;
-        if first == pkg.self_name {
-            cur = Vec::new();
-            rest_start = 1;
-        } else if let Some(&target) = pkg.aliases.get(&first) {
-            pkg_id = target;
-            cur = Vec::new();
-            rest_start = 1;
-        } else {
-            cur = frag.module_path.clone();
-            rest_start = 0;
-        }
-    }
+    let (pkg_id, mut cur, rest_start) = resolve_anchor(ws, frag, path)?;
 
     // Traverse module-by-module up to (and for Module mode, including) the
     // last segment.
