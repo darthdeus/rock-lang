@@ -120,3 +120,5 @@ mod backend_stats_gate;
 mod sim_observability;
 #[path = "sim_report_tests.rs"]
 mod sim_report_tests;
+#[path = "content_boundary.rs"]
+mod content_boundary;
