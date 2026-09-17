@@ -171,3 +171,55 @@ fn mag_simulation_presentation_independence() {
          so the rendered arm consumed no presentation randomness the headless arm did not"
     );
 }
+
+/// The presentation stream must not reach simulation state at all.
+///
+/// `mag_simulation_presentation_independence` above cannot prove this. Its two
+/// arms draw the same presentation numbers until the trial card at the end of
+/// the sequence, so every wisp mote gets the same seed in both arms and a
+/// dependency on that seed stays invisible. This arm runs the identical
+/// sequence off a different presentation seed, which is the only difference.
+///
+/// It went red when it was written: 1830265973 against the baseline
+/// 1648359392, through mote curl noise -> wisp position -> `wisp_gather` ->
+/// `Player.mana_per_sec` -> `player.mana_cur`. Wisp curl seeds are now a
+/// function of the wisp's index, which is what makes it green.
+#[test]
+fn mag_simulation_presentation_seed_does_not_steer_simulation() {
+    let _guard = SIM_LOCK.lock().unwrap();
+
+    let out_baseline = run_sim("sim_repeatability_headless");
+    assert_sim_pass("sim_repeatability_headless", &out_baseline);
+    let baseline_digest = extract_digest("sim_repeatability_headless", &out_baseline);
+    let baseline_rng = extract_marker(
+        "MAG_SIM_PRESENTATION_RNG",
+        "sim_repeatability_headless",
+        &out_baseline,
+    );
+
+    let out_reseeded = run_sim("sim_repeatability_presentation_reseeded");
+    assert_sim_pass("sim_repeatability_presentation_reseeded", &out_reseeded);
+    let reseeded_digest = extract_digest("sim_repeatability_presentation_reseeded", &out_reseeded);
+    let reseeded_rng = extract_marker(
+        "MAG_SIM_PRESENTATION_RNG",
+        "sim_repeatability_presentation_reseeded",
+        &out_reseeded,
+    );
+
+    eprintln!("BASELINE: digest {baseline_digest}, presentation rng {baseline_rng}");
+    eprintln!("RESEEDED: digest {reseeded_digest}, presentation rng {reseeded_rng}");
+
+    // Discrimination first: if the reseed stopped taking effect this test
+    // would pass while proving nothing.
+    assert_ne!(
+        baseline_rng, reseeded_rng,
+        "both arms ended at the same presentation RNG state ({baseline_rng}), so the \
+         reseed did not take and this test cannot fail"
+    );
+
+    assert_eq!(
+        baseline_digest, reseeded_digest,
+        "a presentation-stream draw reached simulation state: reseeding the presentation \
+         stream alone moved the authoritative digest ({baseline_digest} -> {reseeded_digest})"
+    );
+}

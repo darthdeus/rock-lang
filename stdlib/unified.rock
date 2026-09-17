@@ -3222,6 +3222,18 @@ fn Vec<T>.sample(vec) -> T? {
     return vec_get(vec, index)
 }
 
+// The presentation-stream twin, paired the way stdlib/vec.rock pairs
+// random_dir/presentation_random_dir. A decorative caller needs this one: a
+// generic helper spells no stream at its call site, so drawing gameplay
+// randomness for a visual effect is invisible in review and shifts every later
+// gameplay roll.
+fn Vec<T>.presentation_sample(vec) -> T? {
+    let len = vec_len(vec)
+    if len == 0 { return null }
+    let index = presentation_random_int(0, len)
+    return vec_get(vec, index)
+}
+
 @intrinsic @pure fn lerp(a: float, b: float, t: float) -> float { return a + (b - a) * t }
 
 @intrinsic @pure fn fract(x: float) -> float { return x - floor(x) }
