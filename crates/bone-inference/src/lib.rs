@@ -14,6 +14,7 @@ use ustr::ustr;
 
 // Compilation storage + inference result structs now live in bone-core; re-export
 // them through the historical `bone::inference::*` path so consumers don't churn.
+pub use bone_core::modules::{AccessSite, NsVisibility, PackageId};
 pub use bone_core::workspace::{
     BodyInference, ComptimeInputs, ComptimeVarValue, InferenceResult, Substitutions, Workspace,
 };
@@ -172,6 +173,21 @@ impl<'a> Gamma<'a> {
 
                 ..Default::default()
             },
+        }
+    }
+
+    pub fn access_site(&self) -> AccessSite<'_> {
+        let file = self.workspace.module(self.current_module_id).file;
+        if let Some(frag) = self.workspace.fragment_scopes.get(&file) {
+            AccessSite {
+                package: Some(frag.package),
+                module_path: &frag.module_path,
+            }
+        } else {
+            AccessSite {
+                package: None,
+                module_path: &[],
+            }
         }
     }
 

@@ -16,6 +16,20 @@ pub type PackageId = u32;
 /// Package-root-relative module path (`combat::casting`).
 pub type ModulePath = Vec<Ustr>;
 
+/// The source site performing an access check (spec 10.2; plan 2.3).
+/// None package indicates legacy callers (spec 3.3).
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct AccessSite<'a> {
+    pub package: Option<PackageId>,
+    pub module_path: &'a [Ustr],
+}
+
+impl<'a> AccessSite<'a> {
+    pub fn new(package: Option<PackageId>, module_path: &'a [Ustr]) -> Self {
+        Self { package, module_path }
+    }
+}
+
 /// Visibility of a namespace node or export binding (spec 9).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NsVisibility {

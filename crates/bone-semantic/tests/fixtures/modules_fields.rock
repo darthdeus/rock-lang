@@ -5,3 +5,49 @@
 pub struct State {
     private private(set) count: int,
 }
+
+//- direct_read_private_field_rejects @fail=field `secret` on struct `Actor` is not accessible from this module
+//-- actor.rock @pkg=game,1 @v1
+mod actor;
+pub struct Actor {
+    pub name: string,
+    private secret: int,
+}
+
+//-- other.rock @pkg=game,1 @v1
+mod other;
+
+fn test(a: game::actor::Actor) -> int {
+    a.secret
+}
+
+//- direct_write_private_set_field_rejects @fail=field `health` on struct `Actor` is not writable from this module
+//-- actor.rock @pkg=game,1 @v1
+mod actor;
+pub struct Actor {
+    pub name: string,
+    private(set) health: int = 100,
+}
+
+//-- other.rock @pkg=game,1 @v1
+mod other;
+
+fn test(a: game::actor::Actor) {
+    a.health = 50
+}
+
+//- direct_access_inside_owner_module_allowed
+//-- actor.rock @pkg=game,1 @v1
+mod actor;
+pub struct Actor {
+    pub name: string,
+    private secret: int,
+    private(set) health: int = 100,
+}
+
+pub fn update(a: Actor) -> int {
+    a.health = a.secret
+    let n = a.health
+              //^ int
+    n
+}

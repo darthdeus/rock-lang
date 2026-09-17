@@ -143,6 +143,10 @@ pub(crate) fn struct_field_ty(
         ));
     };
 
+    let site = gamma.access_site();
+    field_access(gamma, struct_name, field, site, FieldAccessNeed::Read)
+        .map_err(|e| e.to_compiler_error(span))?;
+
     substitute(gamma, field_ty, &subs, span)
 }
 
@@ -418,4 +422,149 @@ pub(crate) fn resolve_global(gamma: &Gamma, name: Ustr) -> Option<TyId> {
 pub(crate) fn resolve_newtype(gamma: &Gamma, name: Ustr) -> Option<NewtypeId> {
     gamma.dep_acc.borrow_mut().insert(name);
     gamma.workspace.newtypes_by_name.get(&name).copied()
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum FieldAccessNeed {
+    Read,
+    Write,
+}
+
+#[derive(Clone, Debug)]
+pub enum AccessDenied {
+    NoSuchField {
+        struct_name: Ustr,
+        field: Ustr,
+    },
+    Privilege {
+        struct_name: Ustr,
+        field: Ustr,
+        #[allow(dead_code)]
+        vis: NsVisibility,
+        need: FieldAccessNeed,
+    },
+}
+
+impl AccessDenied {
+    pub fn to_compiler_error(&self, span: Span) -> CompilerError {
+        match self {
+            AccessDenied::NoSuchField { struct_name, field } => {
+                CompilerError::new_with_label(
+                    span,
+                    format!("struct `{}` has no field `{}`", struct_name, field),
+                )
+            }
+            AccessDenied::Privilege { struct_name, field, vis: _, need } => {
+                let msg = match need {
+                    FieldAccessNeed::Read => {
+                        format!("field `{}` on struct `{}` is not accessible from this module", field, struct_name)
+                    }
+                    FieldAccessNeed::Write => {
+                        format!("field `{}` on struct `{}` is not writable from this module", field, struct_name)
+                    }
+                };
+                CompilerError::new_with_label(span, msg)
+            }
+        }
+    }
+}
+
+/// Single access predicate (plan 2.3; spec 10.2).
+pub(crate) fn field_access(
+    gamma: &Gamma,
+    struct_key: Ustr,
+    field: Ustr,
+    site: AccessSite,
+    need: FieldAccessNeed,
+) -> Result<(), AccessDenied> {
+    let Some(sid) = resolve_struct(gamma, struct_key) else {
+        return Ok(());
+    };
+    let Some(meta) = gamma.workspace.defs.get(&struct_key) else {
+        // Legacy-owned definitions keep their bare names as keys and have no entry
+        // in `workspace.defs`. Legacy fields are public read/write.
+        return Ok(());
+    };
+
+    let sdef = &gamma.workspace.module(sid.module).structs[sid.def];
+    let Some(fdef) = sdef.fields.iter().find(|f| f.name == field) else {
+        return Err(AccessDenied::NoSuchField {
+            struct_name: meta.name,
+            field,
+        });
+    };
+
+    let vis = match need {
+        FieldAccessNeed::Read => &fdef.read_vis,
+        FieldAccessNeed::Write => &fdef.write_vis,
+    };
+
+    let allowed = match site.package {
+        Some(caller_pkg) => gamma.workspace.ns.can_access(
+            vis,
+            meta.package,
+            &meta.module,
+            caller_pkg,
+            site.module_path,
+        ),
+        None => {
+            // Legacy callers targeting v1 definitions get the same checks (spec 3.3).
+            matches!(vis, NsVisibility::Pub)
+        }
+    };
+
+    if allowed {
+        Ok(())
+    } else {
+        Err(AccessDenied::Privilege {
+            struct_name: meta.name,
+            field,
+            vis: vis.clone(),
+            need,
+        })
+    }
+}
+
+pub(crate) fn check_field_write_access(
+    c: BodyCtx,
+    gamma: &mut Gamma,
+    base: Idx<Expr>,
+    field: Ustr,
+    span: Span,
+) -> Result<(), CompilerError> {
+    let base_ty = infer_expr(c, gamma, base)?;
+    let base_ty = resolve(gamma, base_ty, span);
+    let base_ty = match *gamma.get(base_ty) {
+        TypeExpr::App {
+            ctor: TypeCtor::Ref,
+            params,
+        } => {
+            let mut params = params;
+            if let Some(inner) = params.next() {
+                base_ty.with_idx(inner)
+            } else {
+                base_ty
+            }
+        }
+        _ => base_ty,
+    };
+    if let TypeExpr::App {
+        ctor: TypeCtor::Nominal(struct_key),
+        ..
+    } = *gamma.get(base_ty) {
+        let site = gamma.access_site();
+        field_access(gamma, struct_key, field, site, FieldAccessNeed::Write)
+            .map_err(|e| e.to_compiler_error(span))?;
+    }
+
+    // Value-place writeback: if `base_ty` is a value struct, writing to its field
+    // writes back into `base`. If `base` is itself a field access on an enclosing struct,
+    // that enclosing field must also be writable!
+    if ty_is_value_struct(gamma, base_ty).is_some() {
+        if let Expr::FieldAccess { base: parent, field: parent_field } = c.body.expr_arena[base] {
+            check_field_write_access(c, gamma, parent, parent_field, span)?;
+        }
+    }
+
+    Ok(())
 }
