@@ -179,3 +179,64 @@ fn v1_mixed_enum_variants_construct_and_match() {
     let out = run_luajit(&format!("{}\nmain()\n", emitted.lua), "modules_v1_enum_payload");
     assert_eq!(out, "step2 jump13 pass 4");
 }
+
+const SPEC_MAIN: &str = r#"
+fn main() {
+    print("total={a::total()}")
+}
+"#;
+
+/// A stdlib generic instantiated at a v1 nominal: `for m in moves` specializes
+/// `iter`/`next`/`len` at `Vec<v1spec::a::Step>`.
+const SPEC_MOD_A: &str = r#"
+mod a;
+
+pub struct Step {
+    cost: int,
+}
+
+pub fn total() -> int {
+    let steps: [Step] = []
+    steps.push(Step { cost: 3 })
+    steps.push(Step { cost: 4 })
+    let sum = 0
+    for s in steps {
+        sum = sum + s.cost
+    }
+    return sum + steps.len()
+}
+"#;
+
+/// A specialized body's emitted symbol is built from the instantiation's
+/// CANONICAL identity, and a v1 nominal's canonical name is its DefKey. The
+/// two roles were the same string, so the symbol came out as
+/// `iter_arr_T_ret_VecIter_T_spec_a_n18_v1spec::a::Step_0_z` -- `rock compile`
+/// exited 0 and wrote a chunk LuaJIT refused with `')' expected near '::'`.
+/// Converting `libs/chess-core` hit this on the first `for m in moves`.
+#[test]
+fn a_generic_specialized_at_a_v1_nominal_emits_runnable_lua() {
+    let emitted = emit_v1_package(
+        "v1spec",
+        &[
+            V1Fragment { file: "main.rock", src: SPEC_MAIN },
+            V1Fragment { file: "a.rock", src: SPEC_MOD_A },
+        ],
+    );
+    let digest = skull_mir::mangle::prefix_digest("v1spec::a");
+    let nominal = format!("Step_{digest}");
+    let encoded = format!("spec_a_n{}_{}_0_z", nominal.len(), nominal);
+    assert!(
+        !emitted.lua.contains("spec_a_n15_v1spec::a::Step_0_z"),
+        "a specialized body's SYMBOL must not carry a DefKey"
+    );
+    assert!(
+        emitted.lua.contains(&format!("function vec_len_arr_T_ret_int_{encoded}(")),
+        "the specialized definition takes the nominal's identifier form"
+    );
+    assert!(
+        emitted.lua.contains("identity = \"named:<stdlib:unified.rock>::vec_len<a_n15_v1spec::a::Step_0_z>\""),
+        "the instance's IDENTITY keeps the DefKey -- that is the half that must not move"
+    );
+    let out = run_luajit(&format!("{}\nmain()\n", emitted.lua), "modules_v1_spec");
+    assert_eq!(out, "total=9");
+}

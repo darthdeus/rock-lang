@@ -56,8 +56,13 @@ pub fn spec_fn_name(
 /// A specialized body's symbol IS the type's canonical identity
 /// ([`MonoTy::canonical`](crate::monoty::MonoTy::canonical)) -- one encoder, so
 /// a symbol and an instance identity cannot disagree about which type they name.
+///
+/// It is written in the SYMBOL spelling: this text lands in an identifier, and
+/// a v1 nominal's canonical name is its DefKey, which is not one. The identity
+/// keeps the key; only the emitted spelling of a nominal changes, exactly as
+/// [`encode_into`] already does for the signature suffix.
 fn encode_mono_type(ty: &crate::monoty::MonoTy, out: &mut String) {
-    ty.write_canonical(out);
+    ty.write_canonical_as(out, crate::monoty::NominalSpelling::Symbol);
 }
 
 /// True if `f` keeps its bare surface name (never mangled).
