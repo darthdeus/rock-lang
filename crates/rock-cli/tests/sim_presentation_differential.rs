@@ -1,7 +1,10 @@
 //! Phase 2 acceptance tests for MAG simulation core:
 //! 1. Repeatability: two runs of the same seeded headless sim yield identical gameplay digests.
 //! 2. Presentation Independence: running headless vs rendered yields identical gameplay digests.
-//!    (In Phase 2, this fails because presentation VFX/lighting consume from the shared RNG stream).
+//!
+//! Both compare `mag_world_digest()` at its full 1/64 quantization. Coarsening
+//! that scale to hide a divergence is how this pair first read green; see
+//! `docs/mag-simulation-slice-results.md` section 3.3.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -65,24 +68,34 @@ fn extract_digest(name: &str, output: &std::process::Output) -> i64 {
     panic!("could not find MAG_SIM_DIGEST in output of {name}:\n{text}");
 }
 
+/// Two runs only catch a coin-flip divergence half the time. The defect this
+/// pins (wall-clock-dependent native flow publication steering authoritative
+/// mana through the wisp motes, `mag/flow.rock` `flow_job_advance`) flipped
+/// about one run in two, so two samples agreed -- and read green -- as often
+/// as not. Four runs put that at roughly one in eight.
+const REPEATABILITY_RUNS: usize = 4;
+
 #[test]
 fn mag_simulation_repeatability() {
-    let _guard = SIM_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let out1 = run_sim("sim_repeatability_headless");
-    assert_sim_pass("sim_repeatability_headless", &out1);
-    let digest1 = extract_digest("sim_repeatability_headless", &out1);
+    let _guard = SIM_LOCK.lock().unwrap();
+    let digests: Vec<i64> = (0..REPEATABILITY_RUNS)
+        .map(|_| {
+            let out = run_sim("sim_repeatability_headless");
+            assert_sim_pass("sim_repeatability_headless", &out);
+            extract_digest("sim_repeatability_headless", &out)
+        })
+        .collect();
 
-    let out2 = run_sim("sim_repeatability_headless");
-    assert_sim_pass("sim_repeatability_headless", &out2);
-    let digest2 = extract_digest("sim_repeatability_headless", &out2);
-
-    assert_ne!(digest1, 0, "digest must be non-zero");
-    assert_eq!(digest1, digest2, "repeatability diverged across identical runs");
+    assert_ne!(digests[0], 0, "digest must be non-zero");
+    assert!(
+        digests.iter().all(|d| *d == digests[0]),
+        "repeatability diverged across {REPEATABILITY_RUNS} identical runs: {digests:?}"
+    );
 }
 
 #[test]
 fn mag_simulation_presentation_independence() {
-    let _guard = SIM_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = SIM_LOCK.lock().unwrap();
     let out_headless = run_sim("sim_repeatability_headless");
     assert_sim_pass("sim_repeatability_headless", &out_headless);
     let headless_digest = extract_digest("sim_repeatability_headless", &out_headless);
