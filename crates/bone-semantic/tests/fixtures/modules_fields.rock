@@ -327,5 +327,64 @@ pub struct Actor {
     private state: InternalState,
 }
 
+//- api_closure_private_type_in_public_fn_param_rejects @fail=type `Secret` in public API is not accessible (reason: public function)
+//-- lib.rock @pkg=game,1 @v1
+struct Secret { x: int }
+pub fn run(s: Secret) {}
+
+//- api_closure_private_type_in_public_fn_return_rejects @fail=type `Secret` in public API is not accessible (reason: public function)
+//-- lib.rock @pkg=game,1 @v1
+struct Secret { x: int }
+pub fn get_secret() -> Secret {
+    Secret { x: 1 }
+}
+
+//- api_closure_private_type_in_public_field_rejects @fail=type `Secret` in public API is not accessible (reason: field type of exported record)
+//-- lib.rock @pkg=game,1 @v1
+struct Secret { x: int }
+pub struct Player {
+    pub secret: Secret,
+}
+
+//- api_closure_private_type_in_public_enum_payload_rejects @fail=type `Secret` in public API is not accessible (reason: payload of exported enum)
+//-- lib.rock @pkg=game,1 @v1
+struct Secret { x: int }
+pub enum Event {
+    Received(Secret),
+}
+
+//- api_closure_private_type_in_public_newtype_payload_rejects @fail=type `Secret` in public API is not accessible (reason: payload of exported newtype)
+//-- lib.rock @pkg=game,1 @v1
+struct Secret { x: int }
+pub newtype MyId(Secret)
+
+//- api_closure_private_type_in_public_global_rejects @fail=type `Secret` in public API is not accessible (reason: type of exported global)
+//-- lib.rock @pkg=game,1 @v1
+struct Secret { x: int }
+pub global GLOBAL_SECRET: Secret;
+
+//- api_closure_reexported_type_in_public_fn_allowed
+//-- internal.rock @pkg=game,1 @v1
+mod internal;
+pub struct Exported { pub x: int }
+
+//-- lib.rock @pkg=game,1 @v1
+mod internal;
+pub use self::internal::Exported;
+
+pub fn make() -> Exported {
+    Exported { x: 10 }
+}
+
+//- api_closure_private_module_fn_not_rejected
+//-- internal.rock @pkg=game,1 @v1
+mod internal;
+struct Secret { x: int }
+pub fn helper(s: Secret) -> Secret {
+    s
+}
+
+
+
 
 

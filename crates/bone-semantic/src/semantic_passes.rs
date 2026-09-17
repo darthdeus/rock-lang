@@ -687,6 +687,253 @@ pub fn lower_and_infer(
     Ok(ids)
 }
 
+fn compute_export_reachability(
+    ws: &Workspace,
+    pkg_id: bone_core::modules::PackageId,
+) -> (FxHashSet<Ustr>, FxHashSet<Ustr>) {
+    let mut reachable_modules: FxHashSet<Ustr> = FxHashSet::default();
+    let mut reachable_defs: FxHashSet<Ustr> = FxHashSet::default();
+
+    let Some(pkg) = ws.ns.package(pkg_id) else {
+        return (reachable_modules, reachable_defs);
+    };
+
+    let root_key = Ustr::from("");
+    if pkg.node(root_key).is_some() {
+        reachable_modules.insert(root_key);
+    }
+
+    let mut queue = std::collections::VecDeque::new();
+    if reachable_modules.contains(&root_key) {
+        queue.push_back(root_key);
+    }
+
+    while let Some(mkey) = queue.pop_front() {
+        if let Some(node) = pkg.node(mkey) {
+            for (_, &child_key) in &node.children {
+                if let Some(child_node) = pkg.node(child_key) {
+                    if child_node.vis == Some(NsVisibility::Pub) {
+                        if reachable_modules.insert(child_key) {
+                            queue.push_back(child_key);
+                        }
+                    }
+                }
+            }
+            for binding in node.exports.values() {
+                if binding.vis == NsVisibility::Pub {
+                    let frag = FragmentScope {
+                        package: pkg_id,
+                        module_path: node.segments.clone(),
+                        ..Default::default()
+                    };
+                    if let Ok((target_pkg, target_path)) =
+                        bone_lower::resolve::resolve_path_to_module(ws, &frag, &binding.target)
+                    {
+                        if target_pkg == pkg_id {
+                            let target_key = pkg.key_of(&target_path);
+                            if reachable_modules.insert(target_key) {
+                                queue.push_back(target_key);
+                            }
+                        }
+                    } else if let Ok(resolved) =
+                        bone_lower::resolve::resolve_path(ws, &frag, &binding.target)
+                    {
+                        reachable_defs.insert(resolved.key);
+                    }
+                }
+            }
+        }
+    }
+
+    (reachable_modules, reachable_defs)
+}
+
+fn is_type_publicly_accessible(
+    ws: &Workspace,
+    pkg_id: bone_core::modules::PackageId,
+    type_name: Ustr,
+    reachable_modules: &FxHashSet<Ustr>,
+    reachable_defs: &FxHashSet<Ustr>,
+) -> bool {
+    let Some(meta) = ws.defs.get(&type_name) else {
+        return true;
+    };
+    if meta.package != pkg_id {
+        return matches!(meta.vis, NsVisibility::Pub);
+    }
+    if reachable_defs.contains(&type_name) {
+        return true;
+    }
+    if matches!(meta.vis, NsVisibility::Pub) {
+        if let Some(pkg) = ws.ns.package(pkg_id) {
+            let mod_key = pkg.key_of(&meta.module);
+            if reachable_modules.contains(&mod_key) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn check_type_closure(
+    ws: &Workspace,
+    ty: TyId,
+    pkg_id: bone_core::modules::PackageId,
+    reachable_modules: &FxHashSet<Ustr>,
+    reachable_defs: &FxHashSet<Ustr>,
+    span: Span,
+    reason: &str,
+) -> Result<(), CompilerError> {
+    match ty {
+        TyId::Static(m, idx) => {
+            let te = ws.module(m).ty_arena[idx];
+            check_type_expr_closure(ws, m, te, pkg_id, reachable_modules, reachable_defs, span, reason)?;
+        }
+        TyId::Local(_) => {}
+    }
+    Ok(())
+}
+
+fn check_type_expr_closure(
+    ws: &Workspace,
+    mid: ModuleId,
+    te: TypeExpr,
+    pkg_id: bone_core::modules::PackageId,
+    reachable_modules: &FxHashSet<Ustr>,
+    reachable_defs: &FxHashSet<Ustr>,
+    span: Span,
+    reason: &str,
+) -> Result<(), CompilerError> {
+    match te {
+        TypeExpr::App { ctor, params } => {
+            if let TypeCtor::Nominal(name) = ctor {
+                if !is_type_publicly_accessible(ws, pkg_id, name, reachable_modules, reachable_defs) {
+                    let display_name = ws.defs.get(&name).map(|m| m.name).unwrap_or(name);
+                    comp_error!(
+                        span,
+                        "type `{}` in public API is not accessible (reason: {})",
+                        display_name,
+                        reason
+                    );
+                }
+            }
+            for p in params {
+                let p_te = ws.module(mid).ty_arena[p];
+                check_type_expr_closure(ws, mid, p_te, pkg_id, reachable_modules, reachable_defs, span, reason)?;
+            }
+        }
+        TypeExpr::Nullable(inner) => {
+            let inner_te = ws.module(mid).ty_arena[inner];
+            check_type_expr_closure(ws, mid, inner_te, pkg_id, reachable_modules, reachable_defs, span, reason)?;
+        }
+        TypeExpr::Function { params, ret } => {
+            for p in params {
+                let p_te = ws.module(mid).ty_arena[p];
+                check_type_expr_closure(ws, mid, p_te, pkg_id, reachable_modules, reachable_defs, span, reason)?;
+            }
+            let ret_te = ws.module(mid).ty_arena[ret];
+            check_type_expr_closure(ws, mid, ret_te, pkg_id, reachable_modules, reachable_defs, span, reason)?;
+        }
+        TypeExpr::Tuple { elements } => {
+            for e in elements {
+                let e_te = ws.module(mid).ty_arena[e];
+                check_type_expr_closure(ws, mid, e_te, pkg_id, reachable_modules, reachable_defs, span, reason)?;
+            }
+        }
+        TypeExpr::Builtin(_) | TypeExpr::Generic(..) | TypeExpr::Infer(..) => {}
+    }
+    Ok(())
+}
+
+pub fn pass_validate_api_closure(ws: &Workspace) -> Result<(), CompilerError> {
+    if ws.ns.packages.is_empty() {
+        return Ok(());
+    }
+
+    let mut reachability: FxHashMap<bone_core::modules::PackageId, (FxHashSet<Ustr>, FxHashSet<Ustr>)> =
+        FxHashMap::default();
+    for &pkg_id in ws.ns.packages.keys() {
+        reachability.insert(pkg_id, compute_export_reachability(ws, pkg_id));
+    }
+
+    for (def_key, meta) in &ws.defs {
+        let pkg_id = meta.package;
+        let Some((reachable_modules, reachable_defs)) = reachability.get(&pkg_id) else {
+            continue;
+        };
+
+        let is_exported = reachable_defs.contains(def_key)
+            || (matches!(meta.vis, NsVisibility::Pub) && {
+                let pkg = ws.ns.package(pkg_id).unwrap();
+                let mod_key = pkg.key_of(&meta.module);
+                reachable_modules.contains(&mod_key)
+            });
+
+        if !is_exported {
+            continue;
+        }
+
+        match meta.kind {
+            bone_core::modules::DefKind::Callable => {
+                if let Some(fn_list) = ws.functions_by_name.get(def_key) {
+                    for &(mid, fid) in fn_list.iter() {
+                        let f = &ws.module(mid).functions[fid];
+                        for p in &f.param_decls {
+                            check_type_closure(ws, p.ty, pkg_id, reachable_modules, reachable_defs, f.span, "public function")?;
+                        }
+                        if let Some(ret) = f.return_ty {
+                            check_type_closure(ws, ret, pkg_id, reachable_modules, reachable_defs, f.span, "public function")?;
+                        }
+                        for b in &f.generic_bounds {
+                            if let Some(bound_ty) = b {
+                                check_type_closure(ws, *bound_ty, pkg_id, reachable_modules, reachable_defs, f.span, "generic bound")?;
+                            }
+                        }
+                    }
+                }
+            }
+            bone_core::modules::DefKind::Type => {
+                if let Some(sid) = ws.struct_by_name.get(def_key) {
+                    let s = &ws.module(sid.module).structs[sid.def];
+                    for f in &s.fields {
+                        if f.read_vis == NsVisibility::Pub {
+                            check_type_closure(ws, f.ty, pkg_id, reachable_modules, reachable_defs, f.span, "field type of exported record")?;
+                        }
+                    }
+                } else if let Some(eid) = ws.enums_by_name.get(def_key) {
+                    let e = &ws.module(eid.module).enums[eid.def];
+                    for v in &e.variants {
+                        match &v.payload {
+                            VariantPayload::Unit => {}
+                            VariantPayload::Tuple(tys) => {
+                                for ty in tys {
+                                    check_type_closure(ws, *ty, pkg_id, reachable_modules, reachable_defs, v.name_span, "payload of exported enum")?;
+                                }
+                            }
+                            VariantPayload::Record(fields) => {
+                                for f in fields {
+                                    check_type_closure(ws, f.ty, pkg_id, reachable_modules, reachable_defs, f.span, "payload of exported enum")?;
+                                }
+                            }
+                        }
+                    }
+                } else if let Some(nid) = ws.newtypes_by_name.get(def_key) {
+                    let nt = &ws.module(nid.module).newtypes[nid.def];
+                    check_type_closure(ws, nt.wrapped, pkg_id, reachable_modules, reachable_defs, nt.span, "payload of exported newtype")?;
+                }
+            }
+            bone_core::modules::DefKind::Global => {
+                if let Some(&ty) = ws.globals_by_name.get(&meta.name).or_else(|| ws.globals_by_name.get(def_key)) {
+                    check_type_closure(ws, ty, pkg_id, reachable_modules, reachable_defs, meta.span, "type of exported global")?;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Ok(())
+}
+
 pub fn semantic_pass(rock_modules: &mut [Ast]) -> Result<Workspace, CompilerError> {
     semantic_pass_with_aliases(rock_modules, &bone_core::modules::NsAliases::default())
 }
@@ -704,6 +951,7 @@ pub fn semantic_pass_with_aliases(
     build_namespaces(&mut ws, rock_modules, aliases)?;
     expand_and_desugar(&mut ws, rock_modules)?;
     lower_and_infer(&mut ws, rock_modules)?;
+    pass_validate_api_closure(&ws)?;
 
     Ok(ws)
 }
