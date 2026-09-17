@@ -169,7 +169,7 @@ impl Builder<'_> {
         name: Ustr,
         mut fields: Vec<(Ustr, Idx<Inst>)>,
     ) -> Result<Vec<(Ustr, Idx<Inst>)>, CompilerError> {
-        if name.as_str() != "NativeBuffer" {
+        if !bone_semantic::prelude::is_intrinsic_key(name, "NativeBuffer") {
             return Ok(fields);
         }
         // The element comes from the literal's own inferred type, the same

@@ -711,7 +711,7 @@ impl Builder<'_> {
                 "`native_buffer_alloc` must produce a `NativeBuffer<T>`".to_string(),
             ));
         };
-        if nb.as_str() != "NativeBuffer" {
+        if !bone_semantic::prelude::is_intrinsic_key(*nb, "NativeBuffer") {
             return Err(CompilerError::new_with_label(
                 span,
                 format!("`native_buffer_alloc` result is `{nb}`, expected `NativeBuffer<T>`"),
@@ -771,7 +771,7 @@ impl Builder<'_> {
         else {
             return None;
         };
-        if name.as_str() != "Coroutine" {
+        if !bone_semantic::prelude::is_intrinsic_key(*name, "Coroutine") {
             return None;
         }
         let Some(MonoTy::App {

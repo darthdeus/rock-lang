@@ -162,11 +162,14 @@ pub(crate) fn vec_swizzle_ty(
     field: Ustr,
     span: Span,
 ) -> Option<Result<TyId, CompilerError>> {
-    let arity = match struct_name.as_str() {
-        "Vec2" => 2,
-        "Vec3" => 3,
-        "Vec4" => 4,
-        _ => return None,
+    let arity = if bone_core::modules::is_intrinsic_key(struct_name, "Vec2") {
+        2
+    } else if bone_core::modules::is_intrinsic_key(struct_name, "Vec3") {
+        3
+    } else if bone_core::modules::is_intrinsic_key(struct_name, "Vec4") {
+        4
+    } else {
+        return None;
     };
     let s = field.as_str();
     if s.is_empty() || !s.chars().all(|ch| "xyzwrgba".contains(ch)) {
@@ -339,11 +342,14 @@ pub(crate) fn reject_value_struct_field_write(
 /// Callers (assignment rejection, MIR expansion) key off "would this read as a
 /// swizzle"; invalid shapes surface through the read-path diagnostics instead.
 pub fn vec_swizzle_components(struct_name: &str, field: &str) -> Option<Vec<usize>> {
-    let arity = match struct_name {
-        "Vec2" => 2,
-        "Vec3" => 3,
-        "Vec4" => 4,
-        _ => return None,
+    let arity = if bone_core::modules::is_intrinsic_key(Ustr::from(struct_name), "Vec2") {
+        2
+    } else if bone_core::modules::is_intrinsic_key(Ustr::from(struct_name), "Vec3") {
+        3
+    } else if bone_core::modules::is_intrinsic_key(Ustr::from(struct_name), "Vec4") {
+        4
+    } else {
+        return None;
     };
     if field.is_empty() || field.len() > 4 {
         return None;

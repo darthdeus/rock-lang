@@ -58,7 +58,7 @@ pub(crate) fn reject_cf_in_destructure_rhs(c: BodyCtx, value: Idx<Expr>) -> Resu
 
 /// Does function `f` carry annotation `@name`?
 pub(crate) fn fn_has_anno(f: &Function, name: &str) -> bool {
-    f.annotations.iter().any(|a| a.name.name == name)
+    f.annotations.iter().any(|a| a.is_builtin(name))
 }
 
 /// Verify a `@pure` function body: push an error at each construct that is not

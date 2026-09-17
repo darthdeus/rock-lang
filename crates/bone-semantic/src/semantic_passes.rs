@@ -1,8 +1,11 @@
 use skull_parser::{Ast, Ident, Item, ItemKind};
-use bone_core::modules::{FragmentScope, NsNode, NsPackage, NsVisibility, UsePathRef};
+use bone_core::modules::{
+    is_stdlib_module_file, DefKind, FragmentScope, LegacyProjection, NsNode, NsPackage,
+    NsVisibility, UsePathRef, STD_INTRINSIC_TYPES, STD_PACKAGE_ID, STD_PACKAGE_NAME,
+};
 
 use bone_core::annotations::{validate_annotations, AnnoPos};
-use bone_lower::lower_annotations;
+use bone_lower::{lower_annotations_with_ctx, LowerCtx};
 
 use crate::hir::{BuiltinTy, TypeCtor, TypeExpr, VariantPayload};
 use crate::{hir::Module, prelude::*};
@@ -164,14 +167,24 @@ pub fn lower_modules(
     // Annotation registry validation for NON-fn item positions
     // (docs/annotations-design.md). Fn items, params, and fields validate
     // during lowering (build_function + the field/variant loops), which also
-    // covers nested/grafted fns. Runs AFTER forward decls so the more
-    // specific rejections there (retired `@value`) fire first.
-    for rock_mod in rock_modules.iter() {
-        for item in rock_mod.items.iter() {
-            if item.annotations.is_empty() {
+    // covers nested/grafted fns. Resolve the raw name first so a v1 decorator
+    // that happens to share a compiler spelling cannot enter a builtin branch.
+    // Runs AFTER forward decls so the more specific rejections there (retired
+    // `@value`) fire first.
+    for lower_item in items.iter_mut() {
+        let ctx = LowerCtx {
+            workspace: ws,
+            module: lower_item.module,
+            generics_in_scope: Default::default(),
+            _next_var_id: 0,
+            placeholder_param: None,
+            placeholder_forbidden: false,
+        };
+        for ast_item in lower_item.rock_module.items.iter() {
+            if ast_item.annotations.is_empty() {
                 continue;
             }
-            let pos = match &item.kind {
+            let pos = match &ast_item.kind {
                 ItemKind::Function(_) => continue,
                 ItemKind::Struct(_) => AnnoPos::StructItem,
                 ItemKind::Enum(_) => AnnoPos::EnumItem,
@@ -183,7 +196,11 @@ pub fn lower_modules(
                 // blocks are walked via for_each_def_item, not as annotated items.
                 ItemKind::Use(_) | ItemKind::Module(_) => continue,
             };
-            let lowered = lower_annotations(rock_mod, &item.annotations);
+            let lowered = lower_annotations_with_ctx(
+                &ctx,
+                lower_item.rock_module,
+                &ast_item.annotations,
+            );
             validate_annotations(pos, &lowered, &ws.decorator_names)?;
         }
     }
@@ -956,9 +973,9 @@ pub fn semantic_pass_with_aliases(
     Ok(ws)
 }
 
-/// Legacy compilation units parse `use`/`mod` (contextual, additive) but must
-/// still reject them with a named diagnostic: v1 resolution does not apply,
-/// and silently accepting the item would drop the declaration with no effect.
+/// Legacy compilation units keep their flat grammar. Item-level `use` is
+/// handled as an additive compatibility import; module headers and inline
+/// `mod` blocks still need modules-v1 resolution.
 fn reject_legacy_unscoped_module_items(rock_mod: &Ast) -> Result<(), CompilerError> {
     if let Some(h) = &rock_mod.module_header {
         return Err(CompilerError::new_with_label(
@@ -968,12 +985,7 @@ fn reject_legacy_unscoped_module_items(rock_mod: &Ast) -> Result<(), CompilerErr
     }
     for item in rock_mod.items.iter() {
         match &item.kind {
-            ItemKind::Use(u) => {
-                return Err(CompilerError::new_with_label(
-                    u.span,
-                    "`use` declarations require module resolution (not yet implemented)".to_string(),
-                ));
-            }
+            ItemKind::Use(_) => {}
             ItemKind::Module(m) => {
                 return Err(CompilerError::new_with_label(
                     m.span,
@@ -1032,6 +1044,10 @@ fn build_namespaces(
         }
     }
     for rock_mod in rock_modules.iter() {
+        if is_stdlib_module_file(rock_mod.file.as_str()) {
+            register_stdlib_items(ws, rock_mod)?;
+            continue;
+        }
         let is_v1 = rock_mod.dialect == skull_parser::Dialect::V1;
         if !is_v1 {
             reject_legacy_unscoped_module_items(rock_mod)?;
@@ -1051,6 +1067,16 @@ fn build_namespaces(
             ));
         };
         let pkg_id = tag.id;
+        if tag.self_name == STD_PACKAGE_NAME {
+            return Err(CompilerError::new_with_label(
+                rock_mod
+                    .module_header
+                    .as_ref()
+                    .map(|h| h.span)
+                    .unwrap_or_else(crate::prelude::Span::unknown),
+                "user packages cannot use the compiler-owned package name `std`".to_string(),
+            ));
+        }
         // Ensure the package exists in the tree.
         ws.ns
             .packages
@@ -1066,6 +1092,16 @@ fn build_namespaces(
             .as_ref()
             .map(|h| h.path.iter().map(|i| i.name).collect())
             .unwrap_or_default();
+        if module_path.first().is_some_and(|name| name.as_str() == STD_PACKAGE_NAME) {
+            return Err(CompilerError::new_with_label(
+                rock_mod
+                    .module_header
+                    .as_ref()
+                    .map(|h| h.span)
+                    .unwrap_or_else(crate::prelude::Span::unknown),
+                "package-root module name `std` is reserved for the compiler-owned standard library".to_string(),
+            ));
+        }
 
         let mut scope = FragmentScope {
             package: pkg_id,
@@ -1115,7 +1151,310 @@ fn build_namespaces(
 
         ws.fragment_scopes.insert(file, scope);
     }
+    build_legacy_compatibility(ws, rock_modules)?;
     Ok(())
+}
+
+/// Build the compiler-owned `std` root from the trusted stdlib inputs. These
+/// definitions stay legacy in the lowering maps, so their namespace keys are
+/// their original bare names and no second implementation is introduced.
+fn register_stdlib_items(ws: &mut Workspace, rock_mod: &Ast) -> Result<(), CompilerError> {
+    let pkg = ws.ns.packages.entry(STD_PACKAGE_ID).or_insert_with(|| NsPackage {
+        id: STD_PACKAGE_ID,
+        self_name: ustr(STD_PACKAGE_NAME),
+        ..Default::default()
+    });
+    let root = pkg.nodes.entry(ustr("")).or_insert_with(|| NsNode {
+        path_key: ustr(""),
+        vis: Some(NsVisibility::Pub),
+        ..Default::default()
+    });
+    root.vis = Some(NsVisibility::Pub);
+
+    for item in &rock_mod.items {
+        let Some((name, kind)) = owned_name_and_kind(&item.kind) else {
+            continue;
+        };
+        let table = match kind {
+            "type" => &mut root.owned_types,
+            "global" => &mut root.owned_globals,
+            "callable" => &mut root.owned_callables,
+            _ => &mut root.owned_decorators,
+        };
+        if table.contains_key(&name) && kind != "callable" {
+            return Err(CompilerError::new_with_label(
+                item.span,
+                format!("duplicate standard-library export `{name}`"),
+            ));
+        }
+        table.entry(name).or_insert(name);
+    }
+
+    for name in STD_INTRINSIC_TYPES {
+        root.owned_types.entry(ustr(name)).or_insert_with(|| ustr(name));
+    }
+    Ok(())
+}
+
+/// Build the legacy compatibility views after every v1 fragment has supplied
+/// its namespace facts. A package-scoped legacy file sees the transitive v1
+/// packages reached through its manifest aliases; a package-less mixed test
+/// file sees the v1 packages explicitly present in that compilation unit.
+/// The result is stored per source file so lowering never scans `ws.defs` for
+/// each unresolved name.
+fn build_legacy_compatibility(
+    ws: &mut Workspace,
+    rock_modules: &[Ast],
+) -> Result<(), CompilerError> {
+    let v1_packages: FxHashSet<u32> = rock_modules
+        .iter()
+        .filter(|rock_mod| {
+            rock_mod.dialect == skull_parser::Dialect::V1
+                && !is_stdlib_module_file(rock_mod.file.as_str())
+        })
+        .filter_map(|rock_mod| rock_mod.package.as_ref().map(|tag| tag.id))
+        .collect();
+
+    for rock_mod in rock_modules {
+        if rock_mod.dialect != skull_parser::Dialect::Legacy
+            || is_stdlib_module_file(rock_mod.file.as_str())
+        {
+            continue;
+        }
+
+        let package = rock_mod.package.as_ref().map(|tag| tag.id);
+        let participating = legacy_participating_packages(ws, package, &v1_packages);
+        let mut projection = LegacyProjection::default();
+        let mut visited = FxHashSet::default();
+        for package in participating {
+            project_public_module(
+                ws,
+                package,
+                &[],
+                &mut projection,
+                &mut visited,
+            )?;
+        }
+        ws.legacy_projections.insert(rock_mod.file, projection);
+
+        let imports = build_legacy_imports(ws, rock_mod)?;
+        if !imports.by_name.is_empty() {
+            ws.legacy_imports.insert(rock_mod.file, imports);
+        }
+    }
+    Ok(())
+}
+
+fn legacy_participating_packages(
+    ws: &Workspace,
+    owner: Option<u32>,
+    v1_packages: &FxHashSet<u32>,
+) -> Vec<u32> {
+    let Some(owner) = owner else {
+        let mut packages: Vec<_> = v1_packages.iter().copied().collect();
+        packages.sort_unstable();
+        return packages;
+    };
+
+    let mut seen = FxHashSet::default();
+    let mut pending = vec![owner];
+    while let Some(package) = pending.pop() {
+        if !seen.insert(package) {
+            continue;
+        }
+        if let Some(node) = ws.ns.package(package) {
+            pending.extend(node.aliases.values().copied());
+        }
+    }
+    let mut packages: Vec<_> = seen
+        .into_iter()
+        .filter(|package| v1_packages.contains(package))
+        .collect();
+    packages.sort_unstable();
+    packages
+}
+
+/// Add all public definitions and public re-exports visible from one module
+/// into the projection. The visited module set makes two public glob paths
+/// idempotent while the per-name entry list keeps distinct collisions explicit.
+fn project_public_module(
+    ws: &Workspace,
+    package: u32,
+    path: &[ustr::Ustr],
+    projection: &mut LegacyProjection,
+    visited: &mut FxHashSet<(u32, ustr::Ustr)>,
+) -> Result<(), CompilerError> {
+    let package_node = ws
+        .ns
+        .package(package)
+        .ok_or_else(|| CompilerError::new_no_location(format!("legacy projection references unknown package {package}")))?;
+    let module_key = package_node.key_of(path);
+    if !visited.insert((package, module_key)) {
+        return Ok(());
+    }
+    let Some(node) = package_node.node(module_key) else {
+        return Ok(());
+    };
+    let mut owned = Vec::new();
+    owned.extend(node.owned_types.iter().map(|(&name, &key)| (name, key, DefKind::Type)));
+    owned.extend(node.owned_globals.iter().map(|(&name, &key)| (name, key, DefKind::Global)));
+    owned.extend(node.owned_callables.iter().map(|(&name, &key)| (name, key, DefKind::Callable)));
+    owned.extend(node.owned_decorators.iter().map(|(&name, &key)| (name, key, DefKind::Decorator)));
+    let exports: Vec<_> = node
+        .exports
+        .iter()
+        .filter(|(_, binding)| binding.vis == NsVisibility::Pub)
+        .map(|(&name, binding)| (name, binding.clone()))
+        .collect();
+
+    for (name, key, kind) in owned {
+        if ws.defs.get(&key).is_some_and(|meta| meta.vis == NsVisibility::Pub) {
+            projection.insert(name, key, kind);
+        }
+    }
+
+    let site = FragmentScope {
+        package,
+        package_name: package_node.self_name,
+        module_path: path.to_vec(),
+        ..Default::default()
+    };
+    for (name, binding) in exports {
+        if binding.is_glob {
+            let (target_package, target_path) = bone_lower::resolve::resolve_path_to_module(
+                ws,
+                &site,
+                &binding.target,
+            )
+            .map_err(|message| {
+                CompilerError::new_no_location(format!(
+                    "legacy projection cannot resolve public glob export `{name}`: {message}"
+                ))
+            })?;
+            project_public_module(ws, target_package, &target_path, projection, visited)?;
+        } else {
+            let resolved = bone_lower::resolve::resolve_path(ws, &site, &binding.target)
+                .map_err(|message| {
+                    CompilerError::new_no_location(format!(
+                        "legacy projection cannot resolve public export `{name}`: {message}"
+                    ))
+                })?;
+            let Some(kind) = projection_kind(resolved.kind) else { continue };
+            if ws
+                .defs
+                .get(&resolved.key)
+                .is_some_and(|meta| meta.vis == NsVisibility::Pub)
+            {
+                projection.insert(name, resolved.key, kind);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn projection_kind(kind: bone_lower::resolve::ResolvedKind) -> Option<DefKind> {
+    match kind {
+        bone_lower::resolve::ResolvedKind::Type => Some(DefKind::Type),
+        bone_lower::resolve::ResolvedKind::Global => Some(DefKind::Global),
+        bone_lower::resolve::ResolvedKind::Callable => Some(DefKind::Callable),
+        bone_lower::resolve::ResolvedKind::Decorator => Some(DefKind::Decorator),
+        bone_lower::resolve::ResolvedKind::Module
+        | bone_lower::resolve::ResolvedKind::Binding => None,
+    }
+}
+
+fn build_legacy_imports(
+    ws: &Workspace,
+    rock_mod: &Ast,
+) -> Result<LegacyProjection, CompilerError> {
+    let mut uses = Vec::new();
+    for item in &rock_mod.items {
+        if let ItemKind::Use(decl) = &item.kind {
+            collect_legacy_use_tree(&decl.tree, &[], false, &mut uses);
+        }
+    }
+    if uses.is_empty() {
+        return Ok(LegacyProjection::default());
+    }
+
+    let Some(tag) = rock_mod.package.as_ref() else {
+        return Err(CompilerError::new_no_location(
+            "legacy item-level `use` needs an owning package to resolve its path",
+        ));
+    };
+    let site = FragmentScope {
+        package: tag.id,
+        package_name: ustr::Ustr::from(&tag.self_name),
+        module_path: Vec::new(),
+        ..Default::default()
+    };
+    let mut imports = LegacyProjection::default();
+    for (local, path, is_glob) in uses {
+        if is_glob {
+            let (target_package, target_path) = bone_lower::resolve::resolve_path_to_module(
+                ws, &site, &path,
+            )
+            .map_err(|message| {
+                CompilerError::new_with_label(
+                    rock_mod.module_header.as_ref().map(|h| h.span).unwrap_or_else(Span::unknown),
+                    format!("legacy `use` glob could not be resolved: {message}"),
+                )
+            })?;
+            let mut view = LegacyProjection::default();
+            project_public_module(ws, target_package, &target_path, &mut view, &mut FxHashSet::default())?;
+            for (name, entries) in view.by_name {
+                for entry in entries {
+                    imports.insert(name, entry.key, entry.kind);
+                }
+            }
+        } else {
+            let resolved = bone_lower::resolve::resolve_path(ws, &site, &path).map_err(|message| {
+                CompilerError::new_no_location(format!("legacy `use` could not be resolved: {message}"))
+            })?;
+            let Some(kind) = projection_kind(resolved.kind) else {
+                return Err(CompilerError::new_no_location(format!(
+                    "legacy `use` name `{local}` resolves to a module"
+                )));
+            };
+            imports.insert(local, resolved.key, kind);
+        }
+    }
+    Ok(imports)
+}
+
+fn collect_legacy_use_tree(
+    tree: &skull_parser::UseTree,
+    prefix: &[ustr::Ustr],
+    from_root: bool,
+    out: &mut Vec<(ustr::Ustr, UsePathRef, bool)>,
+) {
+    let skull_parser::UseTree::Path { from_root: tree_root, segments, kind } = tree;
+    let path_root = if prefix.is_empty() { *tree_root } else { from_root };
+    let mut full = prefix.to_vec();
+    full.extend(segments.iter().map(|segment| segment.name));
+    match kind {
+        skull_parser::UseSuffix::Bind => {
+            if let Some(&local) = full.last() {
+                out.push((local, UsePathRef { from_root: path_root, segments: full }, false));
+            }
+        }
+        skull_parser::UseSuffix::BindAs(alias) => {
+            out.push((alias.name, UsePathRef { from_root: path_root, segments: full }, false));
+        }
+        skull_parser::UseSuffix::Operator(op) => {
+            let local = op.name;
+            full.push(local);
+            out.push((local, UsePathRef { from_root: path_root, segments: full }, false));
+        }
+        skull_parser::UseSuffix::Glob => {
+            out.push((ustr::Ustr::from("*"), UsePathRef { from_root: path_root, segments: full }, true));
+        }
+        skull_parser::UseSuffix::Nested(children) => {
+            for child in children {
+                collect_legacy_use_tree(child, &full, path_root, out);
+            }
+        }
+    }
 }
 
 /// Register one file's items into the namespace tree under `path`,
@@ -1159,6 +1498,13 @@ fn register_items(
             ItemKind::Module(m) => {
                 let mut child = path.to_vec();
                 child.push(m.name.name);
+                if path.is_empty() && m.name.name.as_str() == STD_PACKAGE_NAME {
+                    errs.push(CompilerError::new_with_label(
+                        item.span,
+                        "the package-root module name `std` is reserved for the compiler-owned standard library".to_string(),
+                    ));
+                    continue;
+                }
                 // Record the child on the parent node.
                 {
                     let parent_key = NsPackage::path_key(path);
@@ -1291,7 +1637,10 @@ fn register_items(
                 let Some((bare, kind)) = owned_name_and_kind(other) else { continue };
                 if path.is_empty() {
                     let pkg = ws.ns.packages.get(&pkg_id).expect("package");
-                    if bare == pkg.self_name || pkg.aliases.contains_key(&bare) {
+                    if bare.as_str() == STD_PACKAGE_NAME
+                        || bare == pkg.self_name
+                        || pkg.aliases.contains_key(&bare)
+                    {
                         errs.push(CompilerError::new_with_label(
                             item.span,
                             format!(
@@ -1313,9 +1662,12 @@ fn register_items(
                     path,
                     bare.as_str(),
                 );
+                let callable_overload =
+                    kind == "callable" && node.owned_callables.contains_key(&bare);
                 let taken = node.owned_types.contains_key(&bare)
                     || node.owned_globals.contains_key(&bare)
-                    || node.owned_callables.contains_key(&bare)
+                    || (node.owned_callables.contains_key(&bare)
+                        && !callable_overload)
                     || node.owned_decorators.contains_key(&bare)
                     || node.children.contains_key(&bare);
                 if taken {
@@ -1799,7 +2151,7 @@ pub fn pass_lower_functions(a: &Ast, ctx: &mut LowerCtx) -> Result<(), CompilerE
             }
 
             ItemKind::Decorator(d) => {
-                lower_decorator_def(ctx, a, d, &item.annotations)?;
+                lower_decorator_def(ctx, a, d, &item.annotations, reg_key(&d.name.name, path))?;
             }
 
             ItemKind::Comment(_)

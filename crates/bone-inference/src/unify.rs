@@ -714,16 +714,19 @@ pub fn coerce(gamma: &mut Gamma, from: TyId, to: TyId, span: Span) -> Result<(),
         TypeExpr::App { ctor: TypeCtor::Nominal(tname), params: tp },
     ) = (*gamma.get(from_r), *gamma.get(to_r))
     {
-        if fname.as_str() == "FieldRef"
-            && matches!(tname.as_str(), "ReadFieldRef" | "WriteFieldRef")
+        if bone_core::modules::is_intrinsic_key(fname, "FieldRef")
+            && bone_core::modules::is_intrinsic_key_in(
+                tname,
+                &["ReadFieldRef", "WriteFieldRef"],
+            )
         {
             let mut fi = fp.into_iter();
             let mut ti = tp.into_iter();
             let (ft, fv) = (from_r.with_idx(fi.next().unwrap()), from_r.with_idx(fi.next().unwrap()));
             let (tt, tv) = (to_r.with_idx(ti.next().unwrap()), to_r.with_idx(ti.next().unwrap()));
             unify(gamma, ft, tt, span)?;
-            return match tname.as_str() {
-                "WriteFieldRef" => unify(gamma, fv, tv, span),
+            return match bone_core::modules::is_intrinsic_key(tname, "WriteFieldRef") {
+                true => unify(gamma, fv, tv, span),
                 _ => coerce(gamma, fv, tv, span),
             };
         }

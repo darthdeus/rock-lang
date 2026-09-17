@@ -108,8 +108,11 @@ pub(crate) fn fit_cost(gamma: &mut Gamma, arg: TyId, param: TyId, span: Span) ->
                     TypeExpr::App { ctor: TypeCtor::Nominal(an), .. },
                     TypeExpr::App { ctor: TypeCtor::Nominal(pn), .. },
                 ) => {
-                    an.as_str() == "FieldRef"
-                        && matches!(pn.as_str(), "ReadFieldRef" | "WriteFieldRef")
+                    bone_core::modules::is_intrinsic_key(an, "FieldRef")
+                        && bone_core::modules::is_intrinsic_key_in(
+                            pn,
+                            &["ReadFieldRef", "WriteFieldRef"],
+                        )
                 }
                 _ => false,
             };

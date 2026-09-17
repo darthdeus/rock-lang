@@ -13,6 +13,42 @@ use crate::prelude::*;
 /// Dense package id from the host's package graph.
 pub type PackageId = u32;
 
+/// Reserved package id for the compiler-owned virtual standard library.
+/// Package graph ids are dense from zero, so the maximum value cannot be
+/// assigned by a host graph.
+pub const STD_PACKAGE_ID: PackageId = u32::MAX;
+pub const STD_PACKAGE_NAME: &str = "std";
+
+/// Compiler-known type formers that have no source declaration of their own.
+/// Their canonical keys are the bare spellings, just like legacy definitions.
+pub const STD_INTRINSIC_TYPES: &[&str] = &["FieldRef", "ReadFieldRef", "WriteFieldRef"];
+
+/// Whether a source file id uses an established stdlib file-id spelling.
+/// The loader owns these ids; do not infer stdlib ownership from linked files.
+pub fn is_stdlib_module_file(file: &str) -> bool {
+    file.starts_with("<bone-stdlib:")
+        || file.starts_with("<stdlib:")
+        || file.starts_with("<stdlib>/")
+}
+
+/// Intrinsic recognition is keyed by the canonical DefKey, not by a path's
+/// display tail. A v1 definition such as `other::FieldRef` therefore cannot
+/// enter an intrinsic branch merely because it has the same final segment.
+pub fn is_intrinsic_key(key: Ustr, spelling: &str) -> bool {
+    key == Ustr::from(spelling)
+}
+
+pub fn intrinsic_type_name(key: Ustr) -> Option<&'static str> {
+    STD_INTRINSIC_TYPES
+        .iter()
+        .copied()
+        .find(|name| is_intrinsic_key(key, name))
+}
+
+pub fn is_intrinsic_key_in(key: Ustr, spellings: &[&str]) -> bool {
+    spellings.iter().any(|spelling| is_intrinsic_key(key, spelling))
+}
+
 /// Package-root-relative module path (`combat::casting`).
 pub type ModulePath = Vec<Ustr>;
 
@@ -187,6 +223,33 @@ pub struct PackageAliases {
     pub aliases: Vec<(Ustr, PackageId)>,
 }
 
+/// One v1 definition made visible to a legacy compilation unit. The key stays
+/// canonical so calls and type lookups retain the definition site's identity.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LegacyProjectionEntry {
+    pub key: Ustr,
+    pub kind: DefKind,
+}
+
+/// The compatibility view built once for one legacy source file. A name can
+/// have several entries when participating v1 packages export distinct
+/// definitions with the same spelling; identical DefKeys are collapsed.
+#[derive(Clone, Debug, Default)]
+pub struct LegacyProjection {
+    pub by_name: FxHashMap<Ustr, Vec<LegacyProjectionEntry>>,
+}
+
+impl LegacyProjection {
+    pub fn insert(&mut self, name: Ustr, key: Ustr, kind: DefKind) {
+        let entries = self.by_name.entry(name).or_default();
+        if entries.iter().any(|entry| entry.key == key) {
+            return;
+        }
+        entries.push(LegacyProjectionEntry { key, kind });
+        entries.sort_by_key(|entry| entry.key.as_str().to_string());
+    }
+}
+
 /// Per-package scope facts the resolver needs, built by the semantic pass
 /// from the fragments plus the host's alias tables.
 #[derive(Clone, Debug, Default)]
@@ -223,6 +286,28 @@ impl NsPackage {
 impl NsTree {
     pub fn package(&self, id: PackageId) -> Option<&NsPackage> {
         self.packages.get(&id)
+    }
+
+    pub fn std_root(&self) -> Option<&NsNode> {
+        self.package(STD_PACKAGE_ID)?.node(Ustr::from(""))
+    }
+
+    /// Look up one member of the compiler-owned default export view.
+    pub fn std_definition(&self, name: Ustr) -> Option<(Ustr, DefKind)> {
+        let root = self.std_root()?;
+        if let Some(&key) = root.owned_types.get(&name) {
+            return Some((key, DefKind::Type));
+        }
+        if let Some(&key) = root.owned_globals.get(&name) {
+            return Some((key, DefKind::Global));
+        }
+        if let Some(&key) = root.owned_callables.get(&name) {
+            return Some((key, DefKind::Callable));
+        }
+        root.owned_decorators
+            .get(&name)
+            .copied()
+            .map(|key| (key, DefKind::Decorator))
     }
 
     /// Whether `vis` on a node in `owner_pkg` admits access FROM

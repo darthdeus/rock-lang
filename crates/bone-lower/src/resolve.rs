@@ -15,7 +15,7 @@
 //! Losers at earlier tiers are recorded as `hidden` so a failing overload
 //! match can name what it would have found (the hidden-origin diagnostic).
 
-use bone_core::modules::{FragmentScope, UsePathRef};
+use bone_core::modules::{FragmentScope, UsePathRef, STD_PACKAGE_ID};
 use bone_core::workspace::Workspace;
 use ustr::Ustr;
 
@@ -62,7 +62,7 @@ pub fn resolve_bare(
         return Ok(plain(name));
     };
     let Some(pkg) = ws.ns.package(frag.package) else {
-        return Ok(plain(name));
+        return std_bare(ws, name);
     };
     let here = pkg.key_of(&frag.module_path);
     let glob_hits = glob_candidates(ws, frag, pkg, here, name);
@@ -110,8 +110,30 @@ pub fn resolve_bare(
         return Ok(Resolved { key, kind, hidden: Vec::new() });
     }
 
-    // Tier 5: the workspace's bare-name maps (compiler stdlib surface).
-    Ok(plain(name))
+    // Tier 5: the compiler-owned std export view. There is no legacy
+    // workspace-map fall-through for v1 names.
+    std_bare(ws, name)
+}
+
+fn std_bare(ws: &Workspace, name: Ustr) -> Result<Resolved, String> {
+    if bone_core::modules::is_intrinsic_key_in(name, &["Map", "Coroutine", "Iterator"]) {
+        return Ok(Resolved {
+            key: name,
+            kind: ResolvedKind::Type,
+            hidden: Vec::new(),
+        });
+    }
+    let Some((key, kind)) = ws.ns.std_definition(name) else {
+        return Err(format!("`{name}` did not resolve to any definition"));
+    };
+    let kind = match kind {
+        bone_core::modules::DefKind::Type => ResolvedKind::Type,
+        bone_core::modules::DefKind::Global => ResolvedKind::Global,
+        bone_core::modules::DefKind::Callable => ResolvedKind::Callable,
+        bone_core::modules::DefKind::Decorator => ResolvedKind::Decorator,
+        bone_core::modules::DefKind::Module => ResolvedKind::Module,
+    };
+    Ok(Resolved { key, kind, hidden: Vec::new() })
 }
 
 fn glob_candidates(
@@ -349,6 +371,9 @@ fn resolve_anchor(
             frag.module_path[..frag.module_path.len() - 1].to_vec(),
             1,
         ));
+    }
+    if first.as_str() == "std" {
+        return Ok((STD_PACKAGE_ID, Vec::new(), 1));
     }
     let pkg = ws
         .ns

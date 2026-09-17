@@ -118,6 +118,50 @@ fn project(tag: &str, files: &[(&str, &str)]) -> PathBuf {
     dir
 }
 
+fn legacy_projection_project() -> PathBuf {
+    let root = std::env::temp_dir().join("rock_modules_emit_legacy_projection");
+    let _ = std::fs::remove_dir_all(&root);
+    let provider = root.join("provider");
+    let app = root.join("app");
+    std::fs::create_dir_all(&provider).unwrap();
+    std::fs::create_dir_all(&app).unwrap();
+    std::fs::write(
+        provider.join("stick.toml"),
+        r#"
+[package]
+name = "provider"
+type = "lib"
+
+[language]
+modules = "v1"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        provider.join("lib.rock"),
+        "pub fn answer() -> int { 7 }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        app.join("stick.toml"),
+        r#"
+[package]
+name = "legacyapp"
+type = "bin"
+
+[dependencies]
+provider = { path = "../provider" }
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        app.join("main.rock"),
+        "fn main() { print(\"answer={answer()}\") }\n",
+    )
+    .unwrap();
+    app
+}
+
 fn run(dir: &Path) -> (String, String, bool) {
     let out = Command::new(rock_bin())
         .arg("run")
@@ -190,6 +234,18 @@ fn v1_same_name_in_two_modules_emits_distinct_symbols() {
     assert!(
         stdout.contains("a=1 b=2"),
         "same-named fns in two modules must emit distinct symbols\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn legacy_root_can_call_a_v1_dependency_export() {
+    let dir = legacy_projection_project();
+    let (stdout, stderr, ok) = run(&dir);
+    assert!(ok, "legacy/v1 project failed\nstdout:\n{stdout}\nstderr:\n{stderr}");
+    assert!(
+        stdout.contains("answer=7"),
+        "legacy root should call the projected v1 export\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }

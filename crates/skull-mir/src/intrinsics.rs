@@ -152,7 +152,7 @@ fn has_luajit_mapping(f: &Function) -> bool {
 }
 
 fn has_anno(f: &Function, name: &str) -> bool {
-    f.annotations.iter().any(|a| a.name.name.as_str() == name)
+    f.annotations.iter().any(|a| a.is_builtin(name))
 }
 
 /// A backend's intrinsic mapping table (GLSL, JS, a future C runtime-lib table).

@@ -151,35 +151,51 @@ impl<'a> LowerCtx<'a> {
                         hidden: Vec::new(),
                     });
                 }
-                // Legacy caller accessing v1 definition (spec 3.2 / 3.3):
-                // projects public root exports of v1 packages.
-                let mut matches: Vec<(Ustr, resolve::ResolvedKind)> = Vec::new();
-                for (def_key, meta) in &self.workspace.defs {
-                    if meta.name == name
-                        && meta.vis == bone_core::modules::NsVisibility::Pub
-                        && meta.module.is_empty()
-                    {
-                        let kind = match meta.kind {
-                            bone_core::modules::DefKind::Type => resolve::ResolvedKind::Type,
-                            bone_core::modules::DefKind::Global => resolve::ResolvedKind::Global,
-                            bone_core::modules::DefKind::Callable => resolve::ResolvedKind::Callable,
-                            bone_core::modules::DefKind::Decorator => resolve::ResolvedKind::Decorator,
-                            bone_core::modules::DefKind::Module => resolve::ResolvedKind::Module,
-                        };
-                        matches.push((*def_key, kind));
-                    }
-                }
-                if matches.len() == 1 {
-                    let (key, kind) = matches[0];
+                // The compiler-owned stdlib is lowered in the same workspace
+                // as user packages, but its legacy bodies must not project
+                // user declarations into their old bare namespace.
+                if bone_core::modules::is_stdlib_module_file(self.module.file.as_str()) {
                     return Ok(resolve::Resolved {
-                        key,
-                        kind,
+                        key: name,
+                        kind: resolve::ResolvedKind::Binding,
                         hidden: Vec::new(),
                     });
-                } else if matches.len() > 1 {
+                }
+
+                // Legacy caller accessing v1 definitions (spec 3.2 / 3.3):
+                // semantic analysis built these views once per compilation
+                // unit. Explicit compatibility imports shadow the root
+                // projection, and every candidate keeps its canonical key.
+                if let Some(entries) = self
+                    .workspace
+                    .legacy_imports
+                    .get(&self.module.file)
+                    .and_then(|view| view.by_name.get(&name))
+                    .or_else(|| {
+                        self.workspace
+                            .legacy_projections
+                            .get(&self.module.file)
+                            .and_then(|view| view.by_name.get(&name))
+                    })
+                {
+                    if entries.len() == 1 {
+                        let entry = &entries[0];
+                        return Ok(resolve::Resolved {
+                            key: entry.key,
+                            kind: Self::legacy_resolved_kind(entry.kind),
+                            hidden: Vec::new(),
+                        });
+                    }
+                    let candidates = entries
+                        .iter()
+                        .map(|entry| entry.key.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ");
                     return Err(CompilerError::new_with_label(
                         span,
-                        format!("ambiguous legacy reference to `{name}` across v1 packages"),
+                        format!(
+                            "ambiguous legacy reference to `{name}`: candidates {candidates}"
+                        ),
                     ));
                 }
                 Ok(resolve::Resolved {
@@ -188,6 +204,16 @@ impl<'a> LowerCtx<'a> {
                     hidden: Vec::new(),
                 })
             }
+        }
+    }
+
+    fn legacy_resolved_kind(kind: bone_core::modules::DefKind) -> resolve::ResolvedKind {
+        match kind {
+            bone_core::modules::DefKind::Type => resolve::ResolvedKind::Type,
+            bone_core::modules::DefKind::Global => resolve::ResolvedKind::Global,
+            bone_core::modules::DefKind::Callable => resolve::ResolvedKind::Callable,
+            bone_core::modules::DefKind::Decorator => resolve::ResolvedKind::Decorator,
+            bone_core::modules::DefKind::Module => resolve::ResolvedKind::Module,
         }
     }
 
@@ -402,9 +428,11 @@ fn lower_resolved_type_name(
     te: &skull_parser::TypeExprData,
     key: &Ustr,
 ) -> Result<TyId, CompilerError> {
-    if !(ctx.workspace.struct_by_name.contains_key(key)
-        || ctx.workspace.enums_by_name.contains_key(key)
-        || ctx.workspace.newtypes_by_name.contains_key(key))
+    let is_intrinsic = bone_core::modules::intrinsic_type_name(*key).is_some();
+    if !is_intrinsic
+        && !(ctx.workspace.struct_by_name.contains_key(key)
+            || ctx.workspace.enums_by_name.contains_key(key)
+            || ctx.workspace.newtypes_by_name.contains_key(key))
     {
         let msg = format!("Unknown type name {}", key);
         match pos {
@@ -417,7 +445,13 @@ fn lower_resolved_type_name(
             TyPos::Body => return Err(CompilerError::new_with_label(te.span, msg)),
         }
     }
-    let generic_arity = ctx.workspace.type_generic_arity.get(key).copied().unwrap_or(0);
+    let generic_arity = ctx
+        .workspace
+        .type_generic_arity
+        .get(key)
+        .copied()
+        .or_else(|| is_intrinsic.then_some(2))
+        .unwrap_or(0);
     let defaults = generic_defaults(ctx.workspace, *key);
     let min_arity = generic_arity - defaults.len();
 
@@ -519,7 +553,7 @@ pub fn lower_type_expr_in(
                 body,
                 pos,
                 TypeExpr::App {
-                    ctor: hir::TypeCtor::Nominal(resolved.key),
+                    ctor: hir::TypeCtor::for_name(resolved.key),
                     params,
                 },
             )
@@ -573,120 +607,111 @@ pub fn lower_type_expr_in(
             )
         }
 
-        TypeExprKind::App { ctor, args } if ctor.name == "Map" => {
-            if args.len() != 2 {
-                comp_error!(te.span, "Map type must have exactly 2 type arguments");
-            }
-
-            let key = args[0];
-            let value = args[1];
-
-            let key_te = lower_type_expr_helper(ctx, a, body, pos, a.te(&key))?;
-            let value_te = lower_type_expr_helper(ctx, a, body, pos, a.te(&value))?;
-
-            let arr = alloc_tys_contiguous(ctx, body, pos, [key_te, value_te]);
-            alloc_ty(
-                ctx,
-                body,
-                pos,
-                hir::TypeExpr::App {
-                    ctor: hir::TypeCtor::Map,
-                    params: arr,
-                },
-            )
-        }
-
-        // `FieldRef<T, V>` (full field ref: read + write), `ReadFieldRef<T, V>`
-        // (read-only -- `field_get`, allows value structs) and `WriteFieldRef<T, V>`
-        // (write-only -- `field_set`, the selector an embedded field can satisfy)
-        // are name-recognized magic formers, not declared types; all lower to a
-        // 2-param Nominal.
-        TypeExprKind::App { ctor, args }
-            if matches!(ctor.name.as_str(), "FieldRef" | "ReadFieldRef" | "WriteFieldRef") =>
-        {
-            if args.len() != 2 {
-                comp_error!(
-                    te.span,
-                    "{} type must have exactly 2 type arguments (<Struct, FieldType>)",
-                    ctor.name
-                );
-            }
-
-            let t_te = lower_type_expr_helper(ctx, a, body, pos, a.te(&args[0]))?;
-            let v_te = lower_type_expr_helper(ctx, a, body, pos, a.te(&args[1]))?;
-
-            let arr = alloc_tys_contiguous(ctx, body, pos, [t_te, v_te]);
-
-            alloc_ty(
-                ctx,
-                body,
-                pos,
-                TypeExpr::App {
-                    ctor: TypeCtor::Nominal(ctor.name),
-                    params: arr,
-                },
-            )
-        }
-
         TypeExprKind::App { ctor, args } => {
-            let mut lowered = args
+            let resolved_ctor = if ctx.v1_scope().is_some() {
+                ctx.resolve_bare_key(ctor.name, ctor.span)?
+            } else {
+                ctor.name
+            };
+            let is_field_ref = ["FieldRef", "ReadFieldRef", "WriteFieldRef"]
                 .iter()
-                .map(|x| lower_type_expr_helper(ctx, a, body, pos, a.te(x)))
-                .try_vec()?;
+                .any(|name| bone_core::modules::is_intrinsic_key(resolved_ctor, name));
 
-            if ctor.name.as_str() == "Coroutine" {
-                // Builtin dual-arity Coroutine<Y[, R[, N]]>: same
-                // fill-from-right mechanism as user defaults, all slots Unit.
-                while lowered.len() < 3 {
-                    lowered.push(TypeExpr::Builtin(hir::BuiltinTy::Unit));
-                }
-            }
-
-            // Generic-argument count for a user nominal. Trailing defaulted
-            // params (workspace map, built pre-lowering) fill from the right:
-            // `Pair<string>` on `struct Pair<T, U = int>` pads to
-            // `Pair<string, int>`. Builtins (Coroutine, Map, Vec/Array) aren't
-            // in `type_generic_arity`, so they keep their own arity logic.
-            // Cross-module via the workspace map. The bare (0-arg) case is
-            // handled in the Ident arm.
-            if let Some(&arity) = ctx.workspace.type_generic_arity.get(&ctor.name) {
-                let defaults = generic_defaults(ctx.workspace, ctor.name);
-                let min = arity - defaults.len();
-                if args.len() < min || args.len() > arity {
-                    if defaults.is_empty() {
-                        comp_error!(
-                            te.span,
-                            "Generic type `{}` expects {} type argument(s), found {}",
-                            ctor.name,
-                            arity,
-                            args.len()
-                        );
-                    }
+            if is_field_ref {
+                if args.len() != 2 {
                     comp_error!(
                         te.span,
-                        "Generic type `{}` expects {} to {} type argument(s), found {}",
-                        ctor.name,
-                        min,
-                        arity,
-                        args.len()
+                        "{} type must have exactly 2 type arguments (<Struct, FieldType>)",
+                        ctor.name
                     );
                 }
-                while lowered.len() < arity {
-                    lowered.push(default_type_expr(defaults[lowered.len() - min]));
+
+                let t_te = lower_type_expr_helper(ctx, a, body, pos, a.te(&args[0]))?;
+                let v_te = lower_type_expr_helper(ctx, a, body, pos, a.te(&args[1]))?;
+
+                let arr = alloc_tys_contiguous(ctx, body, pos, [t_te, v_te]);
+
+                alloc_ty(
+                    ctx,
+                    body,
+                    pos,
+                    TypeExpr::App {
+                        ctor: TypeCtor::Nominal(resolved_ctor),
+                        params: arr,
+                    },
+                )
+            } else {
+                let type_key = resolved_ctor;
+                let mut lowered = args
+                    .iter()
+                    .map(|x| lower_type_expr_helper(ctx, a, body, pos, a.te(x)))
+                    .try_vec()?;
+
+                // An exact bare Map key is compiler-owned. In legacy source
+                // there is no namespace key to distinguish it from a user
+                // declaration, so a workspace-wide same-named type must not
+                // change stdlib lowering.
+                let is_map = bone_core::modules::is_intrinsic_key(type_key, "Map");
+                if is_map && args.len() != 2 {
+                    comp_error!(te.span, "Map type must have exactly 2 type arguments");
                 }
+
+                if bone_core::modules::is_intrinsic_key(type_key, "Coroutine") {
+                    // Builtin dual-arity Coroutine<Y[, R[, N]]>: same
+                    // fill-from-right mechanism as user defaults, all slots Unit.
+                    while lowered.len() < 3 {
+                        lowered.push(TypeExpr::Builtin(hir::BuiltinTy::Unit));
+                    }
+                }
+
+                // Generic-argument count for a user nominal. Trailing defaulted
+                // params (workspace map, built pre-lowering) fill from the right:
+                // `Pair<string>` on `struct Pair<T, U = int>` pads to
+                // `Pair<string, int>`. Builtins (Coroutine, Map, Vec/Array) aren't
+                // in `type_generic_arity`, so they keep their own arity logic.
+                // Cross-module via the workspace map. The bare (0-arg) case is
+                // handled in the Ident arm.
+                if !is_map {
+                    if let Some(&arity) = ctx.workspace.type_generic_arity.get(&type_key) {
+                        let defaults = generic_defaults(ctx.workspace, type_key);
+                        let min = arity - defaults.len();
+                        if args.len() < min || args.len() > arity {
+                            if defaults.is_empty() {
+                                comp_error!(
+                                    te.span,
+                                    "Generic type `{}` expects {} type argument(s), found {}",
+                                    type_key,
+                                    arity,
+                                    args.len()
+                                );
+                            }
+                            comp_error!(
+                                te.span,
+                                "Generic type `{}` expects {} to {} type argument(s), found {}",
+                                type_key,
+                                min,
+                                arity,
+                                args.len()
+                            );
+                        }
+                        while lowered.len() < arity {
+                            lowered.push(default_type_expr(defaults[lowered.len() - min]));
+                        }
+                    }
+                }
+
+                let params = alloc_tys_contiguous(ctx, body, pos, lowered);
+
+                alloc_ty(
+                    ctx,
+                    body,
+                    pos,
+                    TypeExpr::App {
+                        ctor: TypeCtor::for_name(type_key),
+                        params,
+                    },
+                )
             }
-
-            let params = alloc_tys_contiguous(ctx, body, pos, lowered);
-
-            alloc_ty(
-                ctx,
-                body,
-                pos,
-                TypeExpr::App {
-                    ctor: TypeCtor::for_name(ctor.name),
-                    params,
-                },
-            )
         }
 
         TypeExprKind::Function { params, ret } => {
@@ -2006,11 +2031,19 @@ fn lower_generic_bounds(
         let bte = a.te(&b);
         match &bte.kind {
             skull_parser::TypeExprKind::App { ctor, args }
-                if ctor.name.as_str() == "Iterator" && args.len() == 1 =>
+                if bone_core::modules::is_intrinsic_key(
+                    ctx.resolve_bare_key(ctor.name, ctor.span)?,
+                    "Iterator",
+                ) && args.len() == 1 =>
             {
                 out.push(Some(lower_type_expr(ctx, a, body, a.te(&args[0]))?));
             }
-            skull_parser::TypeExprKind::App { ctor, .. } if ctor.name.as_str() == "Iterator" => {
+            skull_parser::TypeExprKind::App { ctor, .. }
+                if bone_core::modules::is_intrinsic_key(
+                    ctx.resolve_bare_key(ctor.name, ctor.span)?,
+                    "Iterator",
+                ) =>
+            {
                 comp_error!(
                     bte.span,
                     "`Iterator` bound takes exactly one element type: `{}: Iterator<T>`",
@@ -2189,7 +2222,7 @@ pub fn build_function(
             name: p.name.name,
             ty: ty_ref,
             has_default: p.default.is_some(),
-            annotations: lower_annotations(a, &p.annotations),
+            annotations: lower_annotations_with_ctx(ctx, a, &p.annotations),
         });
     }
 
@@ -2197,7 +2230,7 @@ pub fn build_function(
     // rather than failing fast: the workspace must stay buildable while an
     // annotation is mid-typed (decorator completion runs on it), and
     // `body_errors()` already turns any lowering error into a hard verdict.
-    let annotations = lower_annotations(a, annotations);
+    let annotations = lower_annotations_with_ctx(ctx, a, annotations);
     let mut anno_errors = Vec::new();
     if let Err(e) = validate_annotations(AnnoPos::FnItem, &annotations, &ctx.workspace.decorator_names) {
         anno_errors.push(e);
@@ -2514,7 +2547,7 @@ pub fn relower_function_in_place(
     // Re-validate annotations on the body-only path too: the REPLACE below
     // would otherwise clear a still-present annotation violation recorded by
     // the last full lower.
-    let lowered_annos = lower_annotations(a, annotations);
+    let lowered_annos = lower_annotations_with_ctx(&ctx, a, annotations);
     if let Err(e) = validate_annotations(AnnoPos::FnItem, &lowered_annos, &ctx.workspace.decorator_names) {
         errors.push(e);
     }
@@ -2619,7 +2652,7 @@ pub fn lower_struct_def(
             (bone_core::modules::NsVisibility::Pub, bone_core::modules::NsVisibility::Pub)
         };
 
-        let field_annotations = lower_annotations(a, &field.annotations);
+        let field_annotations = lower_annotations_with_ctx(ctx, a, &field.annotations);
         validate_annotations(AnnoPos::StructField, &field_annotations, &ctx.workspace.decorator_names)?;
         fields.push(hir::StructFieldDef {
             name: field.name.name,
@@ -2680,7 +2713,7 @@ pub fn lower_enum_def(
                 let rec: Vec<hir::StructFieldDef> = fs
                     .iter()
                     .map(|f| {
-                        let annos = lower_annotations(a, &f.annotations);
+                        let annos = lower_annotations_with_ctx(ctx, a, &f.annotations);
                         validate_annotations(AnnoPos::EnumVariantField, &annos, &ctx.workspace.decorator_names)?;
                         if f.is_embed {
                             comp_error!(
@@ -2905,7 +2938,7 @@ pub fn lower_global(
 ) -> Result<(), CompilerError> {
     let name = reg_key;
     let mut body = Body::default();
-    let state_metadata = lower_state_metadata(a, annotations)?;
+    let state_metadata = lower_state_metadata(ctx, a, annotations)?;
 
     let ty = match &g.ty {
         Some(te) => lower_type_expr(ctx, a, &mut body, a.te(te))?,
@@ -2952,16 +2985,17 @@ pub fn lower_global(
 }
 
 fn lower_state_metadata(
+    ctx: &LowerCtx,
     ast: &Ast,
     annotations: &[skull_parser::Annotation],
 ) -> Result<StateMetadata, CompilerError> {
-    let annotations = lower_annotations(ast, annotations);
-    let Some(annotation) = annotations.iter().find(|annotation| annotation.name.name == "state") else {
+    let annotations = lower_annotations_with_ctx(ctx, ast, annotations);
+    let Some(annotation) = annotations.iter().find(|annotation| annotation.is_builtin("state")) else {
         return Ok(StateMetadata::default());
     };
     if annotations
         .iter()
-        .filter(|candidate| candidate.name.name == "state")
+        .filter(|candidate| candidate.is_builtin("state"))
         .count()
         != 1
     {
@@ -3381,6 +3415,7 @@ pub fn lower_decorator_def(
     a: &Ast,
     d: &skull_parser::DecoratorDef,
     annotations: &[skull_parser::Annotation],
+    def_key: Ustr,
 ) -> Result<Idx<DecoratorDef>, CompilerError> {
     ctx.generics_in_scope.clear();
     let mut body = Body::default();
@@ -3405,7 +3440,7 @@ pub fn lower_decorator_def(
 
         bindings.insert(p.name.name, b_idx);
         params.push(b_idx);
-        let deco_param_annotations = lower_annotations(a, &p.annotations);
+        let deco_param_annotations = lower_annotations_with_ctx(ctx, a, &p.annotations);
         validate_annotations(AnnoPos::DecoParam, &deco_param_annotations, &ctx.workspace.decorator_names)?;
         param_decls.push(ParamDecl {
             name: p.name.name,
@@ -3469,10 +3504,11 @@ pub fn lower_decorator_def(
 
     let idx = ctx.module.decorators.alloc(DecoratorDef {
         name: d.name.name,
+        def_key,
         span: d.span,
         param_decls,
         num_required,
-        annotations: lower_annotations(a, annotations),
+        annotations: lower_annotations_with_ctx(ctx, a, annotations),
     });
 
     ctx.module.insert_body(BodyOwner::Decorator(idx), body);
@@ -3499,8 +3535,61 @@ pub fn lower_annotations(ast: &Ast, anns: &[skull_parser::Annotation]) -> Vec<hi
                     value: classify_anno_value(ast, arg.value),
                 })
                 .collect(),
+            resolved_name: None,
+            resolved_ident_list: None,
         })
         .collect()
+}
+
+/// Lower annotation syntax and resolve v1 decorator names through the current
+/// fragment. Compiler-owned metadata intentionally stays unresolved so its
+/// raw spelling remains the source of builtin behavior.
+pub fn lower_annotations_with_ctx(
+    ctx: &LowerCtx,
+    ast: &Ast,
+    anns: &[skull_parser::Annotation],
+) -> Vec<hir::Annotation> {
+    let mut lowered = lower_annotations(ast, anns);
+    let Some(frag) = ctx.v1_scope() else {
+        return lowered;
+    };
+    for anno in &mut lowered {
+        if let Ok(resolved) = resolve::resolve_bare(ctx.workspace, Some(frag), anno.name.name) {
+            anno.resolved_name = Some(resolved.key);
+        }
+        let is_wire_role = anno.name.name.as_str() == "wire"
+            || anno.resolved_name.is_some_and(|key| {
+                ctx.workspace
+                    .defs
+                    .get(&key)
+                    .is_some_and(|meta| meta.kind == bone_core::modules::DefKind::Decorator && meta.name.as_str() == "wire")
+            });
+        if !is_wire_role {
+            continue;
+        }
+        let Some(names) = anno.args.iter().find_map(|arg| {
+            (arg.name.as_ref().is_some_and(|name| name.name.as_str() == "onchange"))
+                .then(|| match &arg.value {
+                    hir::AnnoValue::IdentList(names) => Some(names),
+                    _ => None,
+                })
+                .flatten()
+        }) else {
+            continue;
+        };
+        let mut resolved = Vec::with_capacity(names.len());
+        for name in names {
+            let Ok(identity) = resolve::resolve_bare(ctx.workspace, Some(frag), name.name) else {
+                resolved.clear();
+                break;
+            };
+            resolved.push(identity.key);
+        }
+        if resolved.len() == names.len() {
+            anno.resolved_ident_list = Some(resolved);
+        }
+    }
+    lowered
 }
 
 fn classify_anno_value(a: &Ast, e: Idx<ExprData>) -> hir::AnnoValue {

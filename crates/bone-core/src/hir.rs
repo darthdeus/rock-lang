@@ -115,11 +115,14 @@ pub enum TypeCtor {
 
 impl TypeCtor {
     pub fn for_name(name: Ustr) -> TypeCtor {
-        match name.as_str() {
-            "Vec" => TypeCtor::Array,
-            "Map" => TypeCtor::Map,
-            "Ref" => TypeCtor::Ref,
-            _ => TypeCtor::Nominal(name),
+        if crate::modules::is_intrinsic_key(name, "Vec") {
+            TypeCtor::Array
+        } else if crate::modules::is_intrinsic_key(name, "Map") {
+            TypeCtor::Map
+        } else if crate::modules::is_intrinsic_key(name, "Ref") {
+            TypeCtor::Ref
+        } else {
+            TypeCtor::Nominal(name)
         }
     }
 }
@@ -512,6 +515,20 @@ pub struct Annotation {
     pub span: Span,
     pub name: Ident,
     pub args: Vec<AnnoArg>,
+    /// Canonical v1 decorator identity when this name resolved through the
+    /// module namespace. `None` preserves legacy and compiler-owned names.
+    pub resolved_name: Option<Ustr>,
+    /// Canonical v1 identities for the identifiers in a builtin structured
+    /// argument such as `@wire(onchange=[CONST])`.
+    pub resolved_ident_list: Option<Vec<Ustr>>,
+}
+
+impl Annotation {
+    /// Compiler-owned behavior is attached only to an un-resolved spelling.
+    /// A user decorator may legally have the same source name as a builtin.
+    pub fn is_builtin(&self, name: &str) -> bool {
+        self.name.name.as_str() == name && self.resolved_name.is_none()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -944,6 +961,9 @@ pub enum Statement {
 #[derive(Clone, Debug)]
 pub struct DecoratorDef {
     pub name: Ustr,
+    /// Canonical v1 identity used by registries and generated wrappers. Bare
+    /// legacy decorators keep their source name here.
+    pub def_key: Ustr,
     pub span: Span,
     pub param_decls: Vec<ParamDecl>,
     pub num_required: usize,

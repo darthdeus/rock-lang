@@ -157,7 +157,7 @@ fn type_def_target_ty(ws: &Workspace, bi: &BodyInference, ty: TyId) -> Option<Sp
         hir::TypeExpr::App {
             ctor: hir::TypeCtor::Nominal(name),
             params,
-        } if name.as_str() == "Coroutine" => {
+        } if is_intrinsic_key(*name, "Coroutine") => {
             let yield_ty = params.into_iter().next()?;
             type_def_target_ty(ws, bi, ty.with_idx(yield_ty))
         }
@@ -257,10 +257,9 @@ fn pattern_field_def(ws: &Workspace, body: &Body, offset: usize) -> Option<Span>
 
 /// Stdlib landmark for a builtin type name with no nominal declaration.
 fn builtin_type_landmark(name: Ustr, ws: &Workspace) -> Option<Span> {
-    match name.as_str() {
-        "Coroutine" => def_of_name(ws, ustr("resume")),
-        _ => None,
-    }
+    is_intrinsic_key(name, "Coroutine")
+        .then(|| def_of_name(ws, ustr("resume")))
+        .flatten()
 }
 
 /// Hover content + highlight span at `offset`, formatted to rock's hover
@@ -1194,15 +1193,16 @@ fn decorator_at<'t>(
             &d.span,
         ) {
             if span_contains(&sp, offset) {
-                return Some(d.name);
+                return Some(d.def_key);
             }
         }
     }
 
     for f in module.functions.values() {
         for a in &f.annotations {
-            if span_contains(&a.name.span, offset) && decorator_declared(ws, a.name.name) {
-                return Some(a.name.name);
+            let key = a.resolved_name.unwrap_or(a.name.name);
+            if span_contains(&a.name.span, offset) && decorator_declared(ws, key) {
+                return Some(key);
             }
         }
     }
@@ -1213,7 +1213,7 @@ fn decorator_at<'t>(
 fn decorator_declared(ws: &Workspace, name: Ustr) -> bool {
     ws.modules
         .iter()
-        .any(|m| m.decorators.values().any(|d| d.name == name))
+        .any(|m| m.decorators.values().any(|d| d.def_key == name))
 }
 
 /// Every reference to decorator `name`: each `deco` declaration's name token
@@ -1231,7 +1231,7 @@ fn decorator_references<'t>(ws: &Workspace, name: Ustr, text_of: TextOf<'_, 't>)
 
     for m in ws.modules.iter() {
         for d in m.decorators.values() {
-            if d.name != name {
+            if d.def_key != name {
                 continue;
             }
             let Some(text) = text_of(d.span.file.as_str()) else { continue };
@@ -1239,7 +1239,7 @@ fn decorator_references<'t>(ws: &Workspace, name: Ustr, text_of: TextOf<'_, 't>)
                 text,
                 d.span.offset_range.0,
                 d.span.offset_range.1,
-                name.as_str(),
+                d.name.as_str(),
                 &d.span,
             ) {
                 push(sp);
@@ -1247,7 +1247,7 @@ fn decorator_references<'t>(ws: &Workspace, name: Ustr, text_of: TextOf<'_, 't>)
         }
         for f in m.functions.values() {
             for a in &f.annotations {
-                if a.name.name == name {
+                if a.resolved_name.unwrap_or(a.name.name) == name {
                     push(a.name.span);
                 }
             }
@@ -1551,7 +1551,10 @@ fn field_references(ws: &Workspace, sname: Ustr, field: Ustr) -> Vec<RefSite> {
                                     .copied()
                                     .and_then(|t| struct_app_args(ws, bi, t))
                                     .and_then(|(ctor, args)| {
-                                        matches!(ctor.as_str(), "FieldRef" | "ReadFieldRef" | "WriteFieldRef")
+                                        is_intrinsic_key_in(
+                                            ctor,
+                                            &["FieldRef", "ReadFieldRef", "WriteFieldRef"],
+                                        )
                                             .then(|| args.into_iter().next())
                                             .flatten()
                                     })
@@ -2922,7 +2925,7 @@ pub(crate) fn receiver_vec_elem(
 /// a `FieldRef` whose first arg isn't a nominal struct).
 fn field_ref_struct(ws: &Workspace, bi: &BodyInference, ty: TyId) -> Option<Ustr> {
     let (ctor, args) = struct_app_args(ws, bi, ty)?;
-    if !matches!(ctor.as_str(), "FieldRef" | "ReadFieldRef" | "WriteFieldRef") {
+    if !is_intrinsic_key_in(ctor, &["FieldRef", "ReadFieldRef", "WriteFieldRef"]) {
         return None;
     }
     let (sname, _) = struct_app_args(ws, bi, *args.first()?)?;

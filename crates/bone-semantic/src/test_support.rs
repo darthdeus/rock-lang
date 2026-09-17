@@ -246,9 +246,38 @@ pub struct PackageFixture<'a> {
 /// every `//^ ty` marker in every file must resolve. Cross-package alias
 /// tables default to "every package is reachable under its own self name".
 pub fn check_types_packages(files: &[PackageFixture<'_>]) -> Result<(), String> {
+    check_types_packages_inner(files, files)
+}
+
+/// Like [`check_types_packages`], but prepends trusted legacy stdlib sources
+/// without treating their internal `//^` comments as fixture assertions.
+pub fn check_types_packages_with_stdlib(
+    files: &[PackageFixture<'_>],
+    stdlib_sources: &[(&str, &str)],
+) -> Result<(), String> {
+    let mut all = Vec::with_capacity(stdlib_sources.len() + files.len());
+    all.extend(stdlib_sources.iter().map(|(file, src)| PackageFixture {
+        file,
+        package: None,
+        dialect: skull_parser::Dialect::Legacy,
+        src,
+    }));
+    all.extend(files.iter().map(|file| PackageFixture {
+        file: file.file,
+        package: file.package,
+        dialect: file.dialect,
+        src: file.src,
+    }));
+    check_types_packages_inner(&all, files)
+}
+
+fn check_types_packages_inner(
+    all_files: &[PackageFixture<'_>],
+    checked_files: &[PackageFixture<'_>],
+) -> Result<(), String> {
     let mut srcs: Vec<(&str, &str)> = Vec::new();
     let mut modules = Vec::new();
-    for f in files {
+    for f in all_files {
         srcs.push((f.file, f.src));
         let mut module = parse_module_with_dialect(f.src, ustr(f.file), f.dialect)
             .map_err(|e| render_err(&srcs, &e))?;
@@ -266,7 +295,7 @@ pub fn check_types_packages(files: &[PackageFixture<'_>]) -> Result<(), String> 
 
     // Default alias table: each package reachable under its own self name.
     let mut aliases = bone_core::modules::NsAliases::default();
-    let ids: Vec<(u32, &str)> = files
+    let ids: Vec<(u32, &str)> = all_files
         .iter()
         .filter_map(|f| f.package.map(|(name, id)| (id, name)))
         .collect();
@@ -305,7 +334,7 @@ pub fn check_types_packages(files: &[PackageFixture<'_>]) -> Result<(), String> 
     }
 
     // Check `//^` markers in every file.
-    for f in files.iter() {
+    for f in checked_files.iter() {
         let annotations = test_utils::extract_annotations(f.src);
         if annotations.is_empty() {
             continue;
@@ -407,4 +436,22 @@ pub fn check_types_embedded(files: &[EmbeddedFile<'_>]) -> Result<(), String> {
         })
         .collect();
     check_types_packages(&fixtures)
+}
+
+/// Check embedded modules with the compiler-owned stdlib export view
+/// available as the v1 default prelude.
+pub fn check_types_embedded_with_stdlib(
+    files: &[EmbeddedFile<'_>],
+    stdlib_sources: &[(&str, &str)],
+) -> Result<(), String> {
+    let fixtures: Vec<PackageFixture<'_>> = files
+        .iter()
+        .map(|f| PackageFixture {
+            file: f.file,
+            package: f.package,
+            dialect: f.dialect,
+            src: f.src,
+        })
+        .collect();
+    check_types_packages_with_stdlib(&fixtures, stdlib_sources)
 }

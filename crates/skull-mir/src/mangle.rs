@@ -127,7 +127,7 @@ pub fn prefix_digest(prefix: &str) -> String {
 }
 
 fn has_annotation(f: &Function, name: &str) -> bool {
-    f.annotations.iter().any(|a| a.name.name.as_str() == name)
+    f.annotations.iter().any(|a| a.is_builtin(name))
 }
 
 /// The emitted name for function `f`, identical for its definition and every

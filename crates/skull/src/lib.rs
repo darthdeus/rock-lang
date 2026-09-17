@@ -275,12 +275,12 @@ pub fn module_tests_with_ids(
     };
     let mut out = Vec::new();
     for (fid, f) in module.functions.iter() {
-        let Some(test_ann) = f.annotations.iter().find(|a| a.name.name.as_str() == "test") else {
+        let Some(test_ann) = f.annotations.iter().find(|a| a.is_builtin("test")) else {
             continue;
         };
         // Honor `@ignore` (same convention as rock-cli/src/test.rs): a test
         // marked ignored is not run.
-        if f.annotations.iter().any(|a| a.name.name.as_str() == "ignore") {
+        if f.annotations.iter().any(|a| a.is_builtin("ignore")) {
             continue;
         }
         let returns = match test_ann
@@ -380,7 +380,7 @@ pub fn global_init_fn_name(global: &str) -> String {
 
 /// Lua name for a decorator fn (`@register` -> `__deco_register`).
 pub fn decorator_fn_name(deco: &str) -> String {
-    format!("__deco_{}", deco)
+    format!("__deco_{}", skull_mir::mangle::symbol_of_key(ustr::Ustr::from(deco)))
 }
 
 /// A `@deco`-annotation argument (or `deco` param default) as a Lua literal.

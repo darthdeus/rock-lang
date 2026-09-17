@@ -456,10 +456,12 @@ fn registry_role(ws: &Workspace, ty: bone_semantic::prelude::TyId) -> Option<&'s
     if !params.is_empty() {
         return None;
     }
-    match name.as_str() {
-        "SceneRegistry" => Some("SceneRegistry"),
-        "ArenaRegistry" => Some("ArenaRegistry"),
-        _ => None,
+    if bone_semantic::prelude::is_intrinsic_key(name, "SceneRegistry") {
+        Some("SceneRegistry")
+    } else if bone_semantic::prelude::is_intrinsic_key(name, "ArenaRegistry") {
+        Some("ArenaRegistry")
+    } else {
+        None
     }
 }
 

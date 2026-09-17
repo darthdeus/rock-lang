@@ -586,8 +586,10 @@ pub fn infer_expr_used(
                         c.body.expr_spans[index],
                     )?;
 
-                    let elem = match name.as_str() {
-                        "NativeBuffer" | "FlatVec" => {
+                    let elem = if bone_core::modules::is_intrinsic_key_in(
+                        name,
+                        &["NativeBuffer", "FlatVec"],
+                    ) {
                             let p = params.into_iter().next().ok_or_else(|| {
                                 CompilerError::new_with_label(
                                     expr_span,
@@ -596,18 +598,24 @@ pub fn infer_expr_used(
                             })?;
 
                             base_ty.with_idx(p)
-                        }
-
-                        "NativeBufferU8" | "NativeBufferI8" | "NativeBufferU16"
-                        | "NativeBufferI16" | "NativeBufferU32" | "NativeBufferI32" => {
-                            gamma.workspace.builtins.int()
-                        }
-
-                        _ => comp_error!(
+                    } else if bone_core::modules::is_intrinsic_key_in(
+                        name,
+                        &[
+                            "NativeBufferU8",
+                            "NativeBufferI8",
+                            "NativeBufferU16",
+                            "NativeBufferU32",
+                            "NativeBufferI16",
+                            "NativeBufferI32",
+                        ],
+                    ) {
+                        gamma.workspace.builtins.int()
+                    } else {
+                        comp_error!(
                             expr_span,
                             "cannot index into type {}",
                             gamma.workspace.render(Some(&gamma.out), base_ty)
-                        ),
+                        )
                     };
 
                     resolve(gamma, elem, expr_span)
@@ -1130,9 +1138,10 @@ pub fn infer_expr_used(
 
             let what = format!("struct `{}`", name);
 
-            let ctor = match name.as_str() {
-                "Vec" => TypeCtor::Array,
-                _ => TypeCtor::Nominal(name),
+            let ctor = if bone_core::modules::is_intrinsic_key(name, "Vec") {
+                TypeCtor::Array
+            } else {
+                TypeCtor::Nominal(name)
             };
             let result_ty = gamma.app_with_ctor(ctor, &arg_tys, expr_span);
 
@@ -1981,7 +1990,13 @@ pub(crate) fn check_expr(
             params,
         } = *gamma.get(exp_r)
         {
-            if matches!(former.as_str(), "FieldRef" | "ReadFieldRef" | "WriteFieldRef") {
+            if bone_core::modules::is_intrinsic_key_in(
+                former,
+                &["FieldRef", "ReadFieldRef", "WriteFieldRef"],
+            ) {
+                let is_field_ref = bone_core::modules::is_intrinsic_key(former, "FieldRef");
+                let is_read_field_ref = bone_core::modules::is_intrinsic_key(former, "ReadFieldRef");
+                let is_write_field_ref = bone_core::modules::is_intrinsic_key(former, "WriteFieldRef");
                 let mut it = params.into_iter();
                 let t = exp_r.with_idx(it.next().unwrap());
                 let v = exp_r.with_idx(it.next().unwrap());
@@ -1992,7 +2007,7 @@ pub(crate) fn check_expr(
                 // `value` struct, whose fields are immutable. `ReadFieldRef`
                 // (read-only, `field_get`) allows it -- reading a value-struct
                 // field is fine. Lattice per docs/field-refs-plan.md.
-                if matches!(former.as_str(), "FieldRef" | "WriteFieldRef") {
+                if is_field_ref || is_write_field_ref {
                     if let TypeExpr::App { ctor: TypeCtor::Nominal(tn), .. } = *gamma.get(t_r) {
                         let is_value = resolve_struct(gamma, tn)
                             .is_some_and(|sid| gamma.workspace.module(sid.module).structs[sid.def].is_value);
@@ -2011,7 +2026,7 @@ pub(crate) fn check_expr(
                 // embedded field has no whole value to hand out, and `FieldRef`
                 // coerces onward to `ReadFieldRef`, so it re-opens the same
                 // extraction (docs/scalarization-and-boxing-design.md S 6).
-                if matches!(former.as_str(), "FieldRef" | "ReadFieldRef") {
+                if is_field_ref || is_read_field_ref {
                     if let TypeExpr::App { ctor: TypeCtor::Nominal(tn), .. } = *gamma.get(t_r) {
                         let is_embed = resolve_struct(gamma, tn).is_some_and(|sid| {
                             gamma.workspace.module(sid.module).structs[sid.def]
@@ -2030,7 +2045,7 @@ pub(crate) fn check_expr(
                         }
                     }
                 }
-                if matches!(former.as_str(), "FieldRef" | "WriteFieldRef") {
+                if is_field_ref || is_write_field_ref {
                     if let TypeExpr::App { ctor: TypeCtor::Nominal(tn), .. } = *gamma.get(t_r) {
                         let site = gamma.access_site();
                         field_access(gamma, tn, field, site, FieldAccessNeed::Write)
@@ -2046,7 +2061,7 @@ pub(crate) fn check_expr(
                 // out a `FieldRef<T, int?>` that `field_set(o, f, null)` writes
                 // nil through. A read-only `ReadFieldRef` keeps the widening --
                 // reading an `int` as `int?` is sound.
-                if matches!(former.as_str(), "FieldRef" | "WriteFieldRef") {
+                if is_field_ref || is_write_field_ref {
                     let (fty_r, v_r) = (resolve(gamma, fty, span), resolve(gamma, v, span));
                     let unbound_v = matches!(
                         gamma.get(v_r),
@@ -2365,7 +2380,7 @@ pub(crate) fn coroutine_yrn(
         TypeExpr::App {
             ctor: TypeCtor::Nominal(n),
             params,
-        } if n.as_str() == "Coroutine" => {
+        } if bone_core::modules::is_intrinsic_key(n, "Coroutine") => {
             let mut it = params.into_iter();
             let (y, rr, nn) = (it.next(), it.next(), it.next());
 

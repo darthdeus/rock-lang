@@ -852,7 +852,7 @@ impl Builder<'_> {
         let lua_opaque = self.scx.target() == bone_semantic::hir::FnBackend::Lua
             && callee.inline_body.is_some()
             && !callee.generics.is_empty()
-            && !callee.annotations.iter().any(|a| a.name.name.as_str() == "scalar_abi");
+            && !callee.annotations.iter().any(|a| a.is_builtin("scalar_abi"));
         let ret_tuple = (!lua_opaque).then_some(declared_ret_tuple).flatten();
         if !dc.plan.uses_scalar_abi() {
             self.reject_nobox_boxed_call_args(func, arg_idxs)?;

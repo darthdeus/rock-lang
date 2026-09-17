@@ -31,7 +31,10 @@ use lsp_types::{
 };
 
 use bone_semantic::inference::{self, Gamma};
-use bone_semantic::prelude::{BodyInference, FxHashMap, FxHashSet, InferenceResult, ModuleId, Span, TyId, Workspace};
+use bone_semantic::prelude::{
+    is_intrinsic_key_in, BodyInference, FxHashMap, FxHashSet, InferenceResult, ModuleId, Span,
+    TyId, Workspace,
+};
 use bone_incremental::session::{Session, UpdateTier};
 use skull_parser::CompilerError;
 use ustr::Ustr;
@@ -3490,7 +3493,7 @@ pub(crate) fn callee_slot_is_field_of(ws: &Workspace, callee: &str, arg_index: u
                 TyId::Static(pmid, idx) => ws.module(pmid).ty_arena[idx],
                 TyId::Local(_) => continue,
             };
-            if matches!(te, TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } if matches!(n.as_str(), "FieldRef" | "ReadFieldRef" | "WriteFieldRef"))
+            if matches!(te, TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } if is_intrinsic_key_in(n, &["FieldRef", "ReadFieldRef", "WriteFieldRef"]))
             {
                 found = true;
             }
@@ -3863,16 +3866,18 @@ pub(crate) fn is_iterable_ty(ws: &Workspace, body: Option<&BodyInference>, ty: T
     match ty_of(ws, body, ty) {
         TypeExpr::App { ctor: TypeCtor::Array, .. }
         | TypeExpr::App { ctor: TypeCtor::Map, .. } => true,
-        TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => matches!(
-            n.as_str(),
-            "Arena"
-                | "NativeBuffer"
-                | "NativeBufferU8"
-                | "NativeBufferI8"
-                | "NativeBufferU16"
-                | "NativeBufferI16"
-                | "NativeBufferU32"
-                | "NativeBufferI32"
+        TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => is_intrinsic_key_in(
+            n,
+            &[
+                "Arena",
+                "NativeBuffer",
+                "NativeBufferU8",
+                "NativeBufferI8",
+                "NativeBufferU16",
+                "NativeBufferI16",
+                "NativeBufferU32",
+                "NativeBufferI32",
+            ],
         ),
         _ => false,
     }

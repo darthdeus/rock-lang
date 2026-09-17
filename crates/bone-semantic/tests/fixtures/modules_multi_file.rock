@@ -138,6 +138,30 @@ fn f() -> Vec2 {
     a + b
 }
 
+//- qualified_user_fieldref_keeps_normal_nominal_identity
+//-- other.rock @pkg=app,1 @v1
+mod other;
+pub struct FieldRef<T, V> {
+    pub value: V,
+}
+
+//-- app.rock @pkg=app,1 @v1
+use app::other::FieldRef as FieldRef;
+
+fn read(r: FieldRef<int, int>) -> int {
+    r.value
+}
+
+//- user_std_package_name_is_reserved @fail=user packages cannot use the compiler-owned package name `std`
+//-- app.rock @pkg=std,3 @v1
+fn main() {}
+
+//- package_root_std_module_is_reserved @fail=package-root module name `std` is reserved
+//-- app.rock @pkg=app,3 @v1
+mod std;
+
+fn main() {}
+
 //- operator_not_globally_discovered @fail
 //-- geo.rock @pkg=geo,1 @v1
 pub struct Vec2 { pub x: int, pub y: int }
@@ -238,4 +262,104 @@ fn made() -> chess::Rank {
     let echoed = r
        //^ chess::Rank
     echoed
+}
+
+//- legacy_projection_resolves_public_root_export
+//-- lib.rock @pkg=lib,1 @v1
+pub struct Shared {
+    pub value: int,
+}
+
+//-- main.rock @pkg=app,2
+fn read(x: Shared) -> int {
+    let n = x.value
+            //^ int
+    n
+}
+
+//- legacy_projection_rejects_private_root_export @fail=Unknown type name Hidden
+//-- lib.rock @pkg=lib,1 @v1
+struct Hidden {
+    pub value: int,
+}
+
+//-- main.rock @pkg=app,2
+fn read(x: Hidden) -> int {
+    x.value
+}
+
+//- legacy_projection_reports_distinct_ambiguity @fail=ambiguous legacy reference to `Shared`: candidates lib_a::Shared, lib_b::Shared
+//-- a.rock @pkg=lib_a,1 @v1
+pub struct Shared {
+    pub value: int,
+}
+
+//-- b.rock @pkg=lib_b,2 @v1
+pub struct Shared {
+    pub value: int,
+}
+
+//-- main.rock @pkg=app,3
+fn read(x: Shared) -> int {
+    x.value
+}
+
+//- legacy_projection_deduplicates_reexport
+//-- provider.rock @pkg=provider,1 @v1
+pub struct Item {
+    pub value: int,
+}
+
+//-- facade.rock @pkg=facade,2 @v1
+pub use provider::Item;
+
+//-- main.rock @pkg=app,3
+fn read(x: Item) -> int {
+    let n = x.value
+            //^ int
+    n
+}
+
+//- legacy_item_use_is_additive
+//-- provider.rock @pkg=provider,1 @v1
+pub struct Imported {
+    pub value: int,
+}
+
+//-- main.rock @pkg=app,2
+use provider::Imported;
+
+fn read(x: Imported) -> int {
+    let y = 1 :: int
+    let n = x.value
+            //^ int
+    n
+}
+
+//- v1_does_not_see_legacy_consumer_names @fail=`ConsumerOnly` did not resolve to any definition
+//-- consumer.rock @pkg=consumer,1
+struct ConsumerOnly {
+    value: int,
+}
+
+//-- app.rock @pkg=app,2 @v1
+fn read(x: ConsumerOnly) -> int {
+    x.value
+}
+
+//- legacy_projection_retains_v1_callable_family
+//-- provider.rock @pkg=provider,1 @v1
+pub fn choose(x: int) -> int {
+    x
+}
+
+pub fn choose(x: string) -> string {
+    x
+}
+
+//-- main.rock @pkg=app,2
+fn read() -> int {
+    let n = choose(1)
+            //^ int
+    n
 }

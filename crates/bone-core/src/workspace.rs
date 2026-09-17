@@ -75,6 +75,13 @@ pub struct Workspace {
     /// Canonical definition metadata keyed by DefKey (plan 2.1). Legacy
     /// definitions keep their bare-name keys and gain no entry.
     pub defs: FxHashMap<Ustr, crate::modules::DefMeta>,
+    /// Per-legacy-file compatibility views over the public root exports of
+    /// participating v1 packages. Built once by the semantic pass; lowering
+    /// only reads the finished view.
+    pub legacy_projections: FxHashMap<Ustr, crate::modules::LegacyProjection>,
+    /// Contextual item-level `use` bindings in legacy files. These are
+    /// additive and do not change legacy `x :: T` ascription parsing.
+    pub legacy_imports: FxHashMap<Ustr, crate::modules::LegacyProjection>,
 
     /// Resolved compile-time inputs (docs/comptime-plan.md tier 1), set by the
     /// host once per session build before emission. bone itself never reads them
@@ -172,6 +179,8 @@ impl Workspace {
             ns: Default::default(),
             fragment_scopes: Default::default(),
             defs: Default::default(),
+            legacy_projections: Default::default(),
+            legacy_imports: Default::default(),
         };
 
         ws.module_ids.insert(ustr("$builtin"), ModuleId::builtin());

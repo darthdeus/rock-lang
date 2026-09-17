@@ -21,7 +21,7 @@
 
 use bone_semantic::hir::{BodyOwner, Expr};
 use bone_semantic::inference::Workspace;
-use bone_semantic::prelude::{Idx, ModuleId};
+use bone_semantic::prelude::{is_stdlib_module_file, Idx, ModuleId};
 use rustc_hash::{FxHashMap, FxHashSet};
 use skull_codegen_lua::{emit_function, mangle_fn, CodegenCtx};
 use skull_mir::instance::Instance;
@@ -1532,7 +1532,7 @@ fn emit_decorator_unit(
 ) -> UnitOut {
     let mut out = UnitOut::default();
     let d = &ws.module(mid).decorators[did];
-    let deco_name = crate::decorator_fn_name(d.name.as_str());
+    let deco_name = crate::decorator_fn_name(d.def_key.as_str());
     out.attribution.owner = format!("m{}:deco{}", mid.index(), u32::from(did.into_raw()));
     let tl = Instant::now();
     let owner = skull_mir::concrete::ConcreteOwner::Decorator {
@@ -2168,7 +2168,7 @@ pub(crate) fn is_emission_root(
     if f.name.as_str() == "main" {
         return true;
     }
-    let has = |n: &str| f.annotations.iter().any(|a| a.name.name.as_str() == n);
+    let has = |n: &str| f.annotations.iter().any(|a| a.is_builtin(n));
     if has("nomangle") || has("sim") || has("test") {
         return true;
     }
@@ -2176,7 +2176,10 @@ pub(crate) fn is_emission_root(
     if f.is_extern {
         return true;
     }
-    f.annotations.iter().any(|a| deco_map.contains_key(&a.name.name))
+    f.annotations.iter().any(|a| {
+        let key = a.resolved_name.unwrap_or(a.name.name);
+        deco_map.contains_key(&key)
+    })
 }
 
 /// The diagnostic for a demand clash, at the declaration whose specialization
@@ -3809,19 +3812,6 @@ fn fn_has_bounds(f: &bone_semantic::hir::Function) -> bool {
     f.generic_bounds.iter().any(Option::is_some)
 }
 
-/// Whether a module file id names a stdlib module (`<bone-stdlib:...>` from the
-/// CLI, `<stdlib:...>` from test harnesses). Stdlib emit gaps are the known
-/// parity list and stay lenient skips; a USER fn that cannot emit is a hard
-/// error — the lenient channel shipped callers of bounded fns as missing
-/// globals that died as runtime nil calls.
-///
-/// NOTE: this does NOT cover every way the stdlib gets loaded — `bone-query`
-/// warms it from its real filesystem path, which matches neither prefix. Do not
-/// reuse this as a general "is this the stdlib" oracle.
-fn is_stdlib_module_file(file: &str) -> bool {
-    file.starts_with("<bone-stdlib:") || file.starts_with("<stdlib")
-}
-
 /// Emit one top-level Lua function per distinct `(callee, instantiation)` a body
 /// asked for, under the name its call sites already target (`spec_fn_name`).
 ///
@@ -4461,7 +4451,7 @@ pub(crate) fn build_deco_map(ws: &Workspace) -> (DecoMap, Vec<(ModuleId, Idx<bon
     let mut deco_items: Vec<(ModuleId, Idx<bone_semantic::hir::DecoratorDef>)> = Vec::new();
     for module in ws.modules.iter() {
         for (did, d) in module.decorators.iter() {
-            deco_map.insert(d.name, (module.id, did));
+            deco_map.insert(d.def_key, (module.id, did));
             if !skull_mir::definition::is_compiler_owned_decorator(d) {
                 deco_items.push((module.id, did));
             }
@@ -4490,7 +4480,8 @@ fn decorator_application_lines(
                 continue;
             }
             for ann in &f.annotations {
-                let Some(&(dmid, did)) = deco_map.get(&ann.name.name) else {
+                let app_key = ann.resolved_name.unwrap_or(ann.name.name);
+                let Some(&(dmid, did)) = deco_map.get(&app_key) else {
                     continue;
                 };
                 let d = &ws.module(dmid).decorators[did];
@@ -4510,7 +4501,7 @@ fn decorator_application_lines(
                     Ok(args) => {
                         let mut call_args = vec![target];
                         call_args.extend(args);
-                        let _ = writeln!(deco_lines, "{}({})", crate::decorator_fn_name(ann.name.name.as_str()), call_args.join(", "));
+                        let _ = writeln!(deco_lines, "{}({})", crate::decorator_fn_name(app_key.as_str()), call_args.join(", "));
                     }
                     Err(e) => skipped.push((f.name.as_str().to_string(), e.message)),
                 }
@@ -6128,7 +6119,7 @@ fn mark_generated_code_values(
     let decorator_names: FxHashSet<Ustr> = ws
         .modules
         .iter()
-        .flat_map(|m| m.decorators.iter().map(|(_, d)| d.name))
+        .flat_map(|m| m.decorators.iter().map(|(_, d)| d.def_key))
         .collect();
     for module in ws.modules.iter() {
         if module.id == ModuleId::builtin() {
@@ -6139,8 +6130,8 @@ fn mark_generated_code_values(
                 continue;
             }
             let generated_value = f.annotations.iter().any(|ann| {
-                ann.name.name.as_str() == "sim"
-                    || decorator_names.contains(&ann.name.name)
+                ann.is_builtin("sim")
+                    || decorator_names.contains(&ann.resolved_name.unwrap_or(ann.name.name))
             });
             if generated_value {
                 artifact.mark_value(skull_mir::code_identity::CodeIdentity::Named(

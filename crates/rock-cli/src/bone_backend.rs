@@ -112,6 +112,74 @@ pub(crate) fn with_stdlib(
     modules
 }
 
+/// Convert the already-resolved host package graph into bone's namespace
+/// facts. Source files carry dense graph ids, so deriving this once from the
+/// root package's manifest keeps v1 alias lookup tied to the same graph that
+/// selected the files. Synthetic and legacy-only module sets intentionally use
+/// the empty table.
+pub(crate) fn aliases_for_modules(
+    modules: &[skull_parser::Ast],
+) -> std::result::Result<bone_core::modules::NsAliases, CompilerError> {
+    let has_v1 = modules.iter().any(|module| {
+        module.dialect == skull_parser::Dialect::V1 && module.package.is_some()
+    });
+    if !has_v1 {
+        return Ok(bone_core::modules::NsAliases::default());
+    }
+
+    let root = modules.iter().find(|module| {
+        module
+            .package
+            .as_ref()
+            .is_some_and(|package| package.id == 0)
+    });
+    let Some(root) = root else {
+        return Err(CompilerError::new_no_location(
+            "modules-v1 sources have no root package file from which to load dependency aliases",
+        ));
+    };
+    let mut manifest_dir = Path::new(root.file.as_str()).parent().map(Path::to_path_buf);
+    let manifest_dir = loop {
+        let Some(dir) = manifest_dir.as_ref() else {
+            return Err(CompilerError::new_no_location(format!(
+                "cannot find stick.toml for modules-v1 root source `{}`",
+                root.file
+            )));
+        };
+        if dir.join("stick.toml").is_file() {
+            break dir.clone();
+        }
+        let Some(parent) = dir.parent() else {
+            manifest_dir = None;
+            continue;
+        };
+        if parent == dir {
+            manifest_dir = None;
+        } else {
+            manifest_dir = Some(parent.to_path_buf());
+        }
+    };
+
+    let graph = rock_host::stick::graph::PackageGraph::build(&manifest_dir)
+        .map_err(|error| CompilerError::new_no_location(format!(
+            "cannot build package graph for modules-v1 aliases: {error}"
+        )))?;
+    let packages = graph
+        .packages()
+        .iter()
+        .map(|node| bone_core::modules::PackageAliases {
+            id: node.id.0,
+            self_name: ustr::Ustr::from(node.self_name.as_str()),
+            aliases: node
+                .dependencies
+                .iter()
+                .map(|edge| (ustr::Ustr::from(edge.alias.as_str()), edge.target.0))
+                .collect(),
+        })
+        .collect();
+    Ok(bone_core::modules::NsAliases { packages })
+}
+
 /// Run bone's front half over an already-assembled `modules` set and gate on the
 /// load-verdict: the one "modules -> verified Workspace" step. `Err` carries
 /// EVERY diagnostic (all syntax errors, else all type errors) so the CLI reports
@@ -136,7 +204,8 @@ pub(crate) fn check_modules(
     if !macro_labels.is_empty() {
         return Err(macro_labels);
     }
-    let ws = bone_semantic::semantic_passes::semantic_pass(modules);
+    let aliases = aliases_for_modules(modules).map_err(|error| vec![error])?;
+    let ws = bone_semantic::semantic_passes::semantic_pass_with_aliases(modules, &aliases);
     // Expansion RECOVERS: a macro that must not expand (item-macro `mod`/`use`)
     // records the reason on `recovery_errors` and leaves the call in place, so
     // the syntax gate runs again over the expanded trees. The pass's own
@@ -336,10 +405,14 @@ pub(crate) fn bone_workspace_timed(
     let t = Instant::now();
     modules.extend(user_modules);
     times.stdlib_extend = t.elapsed();
+    let aliases = match aliases_for_modules(&modules) {
+        Ok(aliases) => aliases,
+        Err(error) => return (Err(vec![error]), times),
+    };
     // Time the call from out here so bone's teardown (dropping the input ASTs at
     // fn return) is included — bone's internal phase timers stop before it.
     let t_call = Instant::now();
-    let res = bone_semantic::semantic_passes::semantic_pass(&mut modules);
+    let res = bone_semantic::semantic_passes::semantic_pass_with_aliases(&mut modules, &aliases);
     times.semantic_call = t_call.elapsed();
     times.semantic = t_sem.elapsed();
 
@@ -692,7 +765,14 @@ pub fn bone_iter_inference(path: &str, iters: usize, warmup: usize) -> Result<()
         // Bench harness: build the workspace once for the inference loop; no
         // load-verdict gate (we time inference, not acceptance).
         let mut modules = with_stdlib(user_modules);
-        match bone_semantic::semantic_passes::semantic_pass(&mut modules) {
+        let aliases = match aliases_for_modules(&modules) {
+            Ok(aliases) => aliases,
+            Err(e) => {
+                eprintln!("{}", e.render(&sources));
+                crate::ablation_report::exit_with_census(1);
+            }
+        };
+        match bone_semantic::semantic_passes::semantic_pass_with_aliases(&mut modules, &aliases) {
             Ok(ws) => ws,
             Err(e) => {
                 eprintln!("{}", e.render(&sources));

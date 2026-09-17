@@ -2458,7 +2458,7 @@ pub fn coroutine_yield_channel_mono(ws: &Workspace, ty: &MonoTy) -> Option<Yield
     else {
         return None;
     };
-    if name.as_str() != "Coroutine" {
+    if !bone_semantic::prelude::is_intrinsic_key(*name, "Coroutine") {
         return None;
     }
     let MonoTy::App {

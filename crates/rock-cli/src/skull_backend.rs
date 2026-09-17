@@ -157,7 +157,15 @@ pub fn skull_workspace_timed(sources: &SourceFiles) -> (bool, SkullPhaseTimes) {
     // call explicit here (the verdict is a bool, not a gate, and the timer must
     // bracket exactly this call).
     let mut modules = crate::bone_backend::with_stdlib(user_modules);
-    let mut ws = match bone_semantic::semantic_passes::semantic_pass(&mut modules) {
+    let aliases = match crate::bone_backend::aliases_for_modules(&modules) {
+        Ok(aliases) => aliases,
+        Err(error) => {
+            times.semantic = t.elapsed();
+            times.failure = Some(error);
+            return (false, times);
+        }
+    };
+    let mut ws = match bone_semantic::semantic_passes::semantic_pass_with_aliases(&mut modules, &aliases) {
         Ok(ws) => ws,
         Err(error) => {
             times.semantic = t.elapsed();
@@ -1904,11 +1912,11 @@ fn collect_skull_sims(
         .into_iter()
         .map(|(f, wire)| {
             let mut env_pairs = Vec::new();
-            if f.annotations.iter().any(|a| a.name.name.as_str() == "sim_render") {
+            if f.annotations.iter().any(|a| a.is_builtin("sim_render")) {
                 env_pairs.push(("SIM_SKIP_RENDER".to_string(), "0".to_string()));
             }
             for ann in &f.annotations {
-                if ann.name.name.as_str() != "sim_env" {
+                if !ann.is_builtin("sim_env") {
                     continue;
                 }
                 let (Some(AnnoValue::String(k)), Some(AnnoValue::String(v))) = (
