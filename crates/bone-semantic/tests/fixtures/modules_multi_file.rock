@@ -25,9 +25,10 @@ mod pieces;
 use chess::pieces::pawn_value;
 
 fn doubled() -> int {
-    pawn_value() * 2
+    let n = pawn_value()
+            //^ int
+    n
 }
-  //^ int
 
 //- cross_package_qualified_paths
 //-- lib.rock @pkg=chess,1 @v1
@@ -38,9 +39,10 @@ pub struct Board {
 //-- app.rock @pkg=app,2 @v1
 fn describe() -> int {
     let b = chess::Board { size: 8 }
-    b.size
+    let n = b.size
+            //^ int
+    n
 }
-  //^ int
 
 //- import_tiers_own_module_shadows_glob
 //-- lib.rock @pkg=chess,1 @v1
@@ -54,12 +56,58 @@ pub fn width() -> int {
 }
 
 pub fn outer_width() -> int {
-    width()
+    let n = width()
+            //^ int
+    n
 }
-  //^ int
 
-//- root_alias_collision_rejects
-//-- bad.rock @pkg=bad,3 @v1 @fail
+//- root_alias_collision_rejects @fail
+//-- bad.rock @pkg=chess,1 @v1
 struct chess { x: int }
 
 fn main() {}
+
+//- struct_and_fn_same_name_reject @fail
+//-- lib.rock @pkg=chess,1 @v1
+struct Foo { x: int }
+fn Foo() {}
+
+//- child_module_and_fn_same_name_reject @fail
+//-- lib.rock @pkg=chess,1 @v1
+pub mod util {
+}
+fn util() {}
+
+//- broken_import_does_not_fall_through_to_glob @fail
+//-- lib.rock @pkg=chess,1 @v1
+pub fn foo() -> int { 1 }
+
+//-- app.rock @pkg=app,2 @v1
+use chess::*;
+use chess::missing as foo;
+
+fn f() -> int {
+    foo()
+}
+
+//- private_fn_inaccessible_from_sibling @fail
+//-- a.rock @pkg=chess,1 @v1
+mod a;
+fn hidden() -> int { 1 }
+
+//-- b.rock @pkg=chess,1 @v1
+mod b;
+fn f() -> int {
+    super::a::hidden()
+}
+
+//- pub_fn_accessible_from_sibling
+//-- a.rock @pkg=chess,1 @v1
+mod a;
+pub fn shown() -> int { 1 }
+
+//-- b.rock @pkg=chess,1 @v1
+mod b;
+fn f() -> int {
+    super::a::shown()
+}

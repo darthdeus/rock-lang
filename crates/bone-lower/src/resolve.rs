@@ -51,46 +51,91 @@ enum Landing {
 
 /// Resolve a bare name in a v1 fragment through the tier policy. Legacy
 /// files (no fragment scope) return the bare name unchanged.
-pub fn resolve_bare(ws: &Workspace, frag: Option<&FragmentScope>, name: Ustr) -> Resolved {
+/// The first tier that binds the name decides; a bound-but-broken target
+/// is a diagnostic, never a fallthrough (spec 8.3).
+pub fn resolve_bare(
+    ws: &Workspace,
+    frag: Option<&FragmentScope>,
+    name: Ustr,
+) -> Result<Resolved, String> {
     let Some(frag) = frag else {
-        return plain(name);
+        return Ok(plain(name));
     };
     let Some(pkg) = ws.ns.package(frag.package) else {
-        return plain(name);
+        return Ok(plain(name));
     };
     let here = pkg.key_of(&frag.module_path);
-    let mut hidden = Vec::new();
+    let glob_hits = glob_candidates(ws, frag, pkg, here, name);
 
     // Tier 2: the current logical module's own definitions.
     if let Some(node) = pkg.node(here) {
         if let Some(kind) = owned_kind(node, name) {
             let key = first_owned(node, name).expect("kind implies key");
-            return Resolved { key, kind, hidden };
+            check_key_access(ws, frag, key)?;
+            let hidden: Vec<Ustr> = glob_hits.iter().map(|(k, _)| *k).collect();
+            return Ok(Resolved { key, kind, hidden });
         }
     }
 
-    // Tier 3: the fragment's explicit imports.
+    // Tier 3: the fragment's explicit imports. A bound name does not fall
+    // through, even if the target is missing or a module.
     if let Some(target) = frag.named.get(&name) {
-        match walk_path(ws, frag, target, WalkMode::Definition, &mut Vec::new()) {
+        let hidden: Vec<Ustr> = glob_hits.iter().map(|(k, _)| *k).collect();
+        return match walk_path(ws, frag, target, WalkMode::Definition, &mut Vec::new()) {
             Ok(Landing::Def(resolved)) => {
-                return Resolved { key: resolved.key, kind: resolved.kind, hidden }
+                check_key_access(ws, frag, resolved.key)?;
+                Ok(Resolved { key: resolved.key, kind: resolved.kind, hidden })
             }
-            Ok(Landing::Module(..)) => {}
-            Err(_) => {}
-        }
+            Ok(Landing::Module(..)) => {
+                Err(format!("`{name}` names a module, not a definition"))
+            }
+            Err(msg) => Err(msg),
+        };
     }
 
-    // Tier 4: glob bindings — fragment globs, then the module's shared glob
-    // exports. First glob that binds the name wins.
-    let module_node = pkg.node(here);
+    // Tier 4: glob bindings. Ambiguous globs diagnose rather than picking
+    // HashMap iteration order (spec 8.3 / 8.7).
+    if !glob_hits.is_empty() {
+        let mut keys: Vec<Ustr> = glob_hits.iter().map(|(k, _)| *k).collect();
+        keys.sort_by_key(|k| k.as_str().to_string());
+        keys.dedup();
+        if keys.len() > 1 {
+            return Err(format!(
+                "`{name}` is ambiguous between glob imports {}",
+                keys.iter().map(|k| k.as_str()).collect::<Vec<_>>().join(", ")
+            ));
+        }
+        let (key, kind) = glob_hits[0];
+        check_key_access(ws, frag, key)?;
+        return Ok(Resolved { key, kind, hidden: Vec::new() });
+    }
+
+    // Tier 5: the workspace's bare-name maps (compiler stdlib surface).
+    Ok(plain(name))
+}
+
+fn glob_candidates(
+    ws: &Workspace,
+    frag: &FragmentScope,
+    pkg: &bone_core::modules::NsPackage,
+    here: Ustr,
+    name: Ustr,
+) -> Vec<(Ustr, ResolvedKind)> {
     let mut glob_targets: Vec<UsePathRef> = frag.globs.clone();
-    if let Some(node) = module_node {
-        for binding in node.exports.values() {
-            if binding.is_glob {
-                glob_targets.push(binding.target.clone());
-            }
+    if let Some(node) = pkg.node(here) {
+        let mut exports: Vec<_> = node.exports.iter().filter(|(_, b)| b.is_glob).collect();
+        exports.sort_by_key(|(k, _)| k.as_str().to_string());
+        for (_, binding) in exports {
+            glob_targets.push(binding.target.clone());
         }
     }
+    glob_targets.sort_by(|a, b| {
+        (a.from_root, a.segments.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::")).cmp(&(
+            b.from_root,
+            b.segments.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::"),
+        ))
+    });
+    let mut hits = Vec::new();
     for glob in &glob_targets {
         if let Ok(Landing::Module(pkg_id, path)) =
             walk_path(ws, frag, glob, WalkMode::Module, &mut Vec::new())
@@ -100,15 +145,30 @@ pub fn resolve_bare(ws: &Workspace, frag: Option<&FragmentScope>, name: Ustr) ->
                 if let Some(node) = target_pkg.node(node_key) {
                     if let Some(kind) = owned_kind(node, name) {
                         let key = first_owned(node, name).expect("kind implies key");
-                        return Resolved { key, kind, hidden };
+                        hits.push((key, kind));
                     }
                 }
             }
         }
     }
+    hits
+}
 
-    // Tier 5: the workspace's bare-name maps (compiler stdlib surface).
-    plain(name)
+fn check_key_access(ws: &Workspace, frag: &FragmentScope, key: Ustr) -> Result<(), String> {
+    let Some(meta) = ws.defs.get(&key) else {
+        return Ok(());
+    };
+    if ws.ns.can_access(
+        &meta.vis,
+        meta.package,
+        &meta.module,
+        frag.package,
+        &frag.module_path,
+    ) {
+        Ok(())
+    } else {
+        Err(format!("`{}` is not accessible from this module", meta.name))
+    }
 }
 
 /// Resolve an explicit path (a use target or a qualified reference) in a v1
@@ -207,6 +267,7 @@ pub fn resolve_member_path(
             match kind {
                 ResolvedKind::Type => {
                     if is_last {
+                        check_key_access(ws, frag, key)?;
                         return Ok(MemberTarget::Type(key));
                     }
                     // `Type::Variant` — exactly one segment must remain.
@@ -218,6 +279,7 @@ pub fn resolve_member_path(
                                 key, variant
                             ));
                         }
+                        check_key_access(ws, frag, key)?;
                         return Ok(MemberTarget::EnumVariant { enum_key: key, variant });
                     }
                     return Err(format!("`{}` cannot be traversed further", key));
@@ -226,6 +288,7 @@ pub fn resolve_member_path(
                     if !is_last {
                         return Err(format!("`{}` cannot be traversed", key));
                     }
+                    check_key_access(ws, frag, key)?;
                     return Ok(MemberTarget::Global(key));
                 }
             }
@@ -374,6 +437,7 @@ fn walk_path(
     let name = last_of(segments);
     if let Some(kind) = owned_kind(node, name) {
         let key = first_owned(node, name).expect("kind implies key");
+        check_key_access(ws, frag, key)?;
         return Ok(Landing::Def(Resolved { key, kind, hidden: Vec::new() }));
     }
     if let Some(binding) = node.exports.get(&name) {

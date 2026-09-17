@@ -78,6 +78,15 @@ impl<'a> LowerCtx<'a> {
         self.workspace.fragment_scopes.get(&self.module.file)
     }
 
+    fn resolve_bare_key(&self, name: Ustr, span: Span) -> Result<Ustr, CompilerError> {
+        match self.v1_scope() {
+            Some(frag) => resolve::resolve_bare(self.workspace, Some(frag), name)
+                .map(|r| r.key)
+                .map_err(|msg| CompilerError::new_with_label(span, msg)),
+            None => Ok(name),
+        }
+    }
+
     pub fn next_var_id(&mut self) -> VarId {
         self._next_var_id += 1;
         VarId(self._next_var_id)
@@ -293,10 +302,16 @@ fn lower_resolved_type_name(
         || ctx.workspace.enums_by_name.contains_key(key)
         || ctx.workspace.newtypes_by_name.contains_key(key))
     {
-        return Err(CompilerError::new_with_label(
-            te.span,
-            format!("Unknown type name {}", key),
-        ));
+        let msg = format!("Unknown type name {}", key);
+        match pos {
+            TyPos::Iface => {
+                ctx.module
+                    .interface_errors
+                    .push(CompilerError::new_with_label(te.span, msg));
+                return Ok(ctx.workspace.builtins.error());
+            }
+            TyPos::Body => return Err(CompilerError::new_with_label(te.span, msg)),
+        }
     }
     let generic_arity = ctx.workspace.type_generic_arity.get(key).copied().unwrap_or(0);
     let defaults = generic_defaults(ctx.workspace, *key);
@@ -413,91 +428,8 @@ pub fn lower_type_expr_in(
             } else if let Some(g) = ctx.generics_in_scope.get(&name.name) {
                 *g
             } else {
-            // In a v1 fragment a bare name resolves through the tier policy
-            // to a canonical key (own module -> imports -> globs -> stdlib).
-            let bare_key = match ctx.v1_scope() {
-                Some(frag) => resolve::resolve_bare(ctx.workspace, Some(frag), name.name).key,
-                None => name.name,
-            };
-            if ctx.workspace.struct_by_name.contains_key(&bare_key)
-                | ctx.workspace.enums_by_name.contains_key(&bare_key)
-                | ctx.workspace.newtypes_by_name.contains_key(&bare_key)
-            {
-                // Arity comes from the workspace-wide `type_generic_arity` map
-                // (built from the raw AST in `lower_modules` before lowering),
-                // so this works cross-module -- a bare stdlib generic like
-                // `Entity` is caught too, not just same-module types.
-                let generic_arity = ctx
-                    .workspace
-                    .type_generic_arity
-                    .get(&bare_key)
-                    .copied()
-                    .unwrap_or(0);
-
-                // Fully-defaulted generics make the bare name legal
-                // (`Holder` == `Holder<Marker>`): synthesize every param from
-                // its default. A non-defaulted prefix still requires args.
-                let defaults = generic_defaults(ctx.workspace, bare_key);
-                let min_arity = generic_arity - defaults.len();
-
-                if min_arity > 0 {
-                    let msg = if defaults.is_empty() {
-                        format!(
-                            "Generic type `{}` requires {} type argument(s)",
-                            name.name, generic_arity
-                        )
-                    } else {
-                        format!(
-                            "Generic type `{}` requires at least {} type argument(s)",
-                            name.name, min_arity
-                        )
-                    };
-                    match pos {
-                        TyPos::Iface => {
-                            ctx.module
-                                .interface_errors
-                                .push(CompilerError::new_with_label(name.span, msg));
-
-                            return Ok(ctx.workspace.builtins.error());
-                        }
-
-                        TyPos::Body => {
-                            return Err(CompilerError::new_with_label(name.span, msg));
-                        }
-                    }
-                }
-
-                let params = alloc_tys_contiguous(
-                    ctx,
-                    body,
-                    pos,
-                    defaults.iter().map(|d| default_type_expr(*d)).collect::<Vec<_>>(),
-                );
-
-                alloc_ty(
-                    ctx,
-                    body,
-                    pos,
-                    TypeExpr::App {
-                        ctor: hir::TypeCtor::Nominal(bare_key),
-                        params,
-                    },
-                )
-            } else {
-                match pos {
-                    TyPos::Iface => {
-                        ctx.module
-                            .interface_errors
-                            .push(CompilerError::new_with_label(
-                                name.span,
-                                format!("Unknown type name {}", name.name),
-                            ));
-                        ctx.workspace.builtins.error()
-                    }
-
-                    TyPos::Body => comp_error!(name.span, "Unknown type name {}", name.name),
-                }
-            }
+                let bare_key = ctx.resolve_bare_key(name.name, name.span)?;
+                lower_resolved_type_name(ctx, body, pos, te, &bare_key)?
             }
         }
 
@@ -740,12 +672,7 @@ pub fn lookup_in_scope(
             // Tier 1 misses: a v1 fragment resolves through the namespace
             // tiers to a canonical key; legacy files keep the bare name.
             None => {
-                let key = match ctx.v1_scope() {
-                    Some(frag) => {
-                        resolve::resolve_bare(ctx.workspace, Some(frag), name.name).key
-                    }
-                    None => name.name,
-                };
+                let key = ctx.resolve_bare_key(name.name, name.span)?;
                 return Ok(Expr::Global(key));
             }
         }
@@ -1153,13 +1080,7 @@ pub fn lower_expr_value(
                 // spec 8.3); hidden candidates ride the resolver's result for
                 // the failing-match diagnostic.
                 let callee_key = if name.name.as_str() != "_" {
-                    match ctx.v1_scope() {
-                        Some(frag) => {
-                            let r = resolve::resolve_bare(ctx.workspace, Some(frag), name.name);
-                            r.key
-                        }
-                        None => name.name,
-                    }
+                    ctx.resolve_bare_key(name.name, name.span)?
                 } else {
                     name.name
                 };
@@ -1200,10 +1121,7 @@ pub fn lower_expr_value(
                 // UFCS and the bare call share one visible family: in a v1
                 // fragment the method name goes through the same tier
                 // resolution as `method(recv, ..)` would (spec 8.4).
-                let method_key = match ctx.v1_scope() {
-                    Some(frag) => resolve::resolve_bare(ctx.workspace, Some(frag), method.name).key,
-                    None => method.name,
-                };
+                let method_key = ctx.resolve_bare_key(method.name, method.span)?;
                 Expr::Call {
                     callee: Callee::Unresolved {
                         name: method_key,
@@ -1241,10 +1159,7 @@ pub fn lower_expr_value(
                     }
                 }
 
-                let method_key = match ctx.v1_scope() {
-                    Some(frag) => resolve::resolve_bare(ctx.workspace, Some(frag), method.name).key,
-                    None => method.name,
-                };
+                let method_key = ctx.resolve_bare_key(method.name, method.span)?;
                 Expr::SafeNavCall {
                     receiver,
                     method: method_key,
@@ -1459,7 +1374,13 @@ pub fn lower_expr_value(
         // Modules-v1 value-position paths: `p::f` (callable family/global),
         // `p::CONST`, `p::E::V`, or `p::Type` used as a value.
         ExprKind::Path { path, generic_args } => {
-            let _ = generic_args;
+            if !generic_args.is_empty() {
+                return Err(CompilerError::new_with_label(
+                    e.span,
+                    "generic arguments on a qualified path are not valid in value position"
+                        .to_string(),
+                ));
+            }
             let Some(frag) = ctx.v1_scope() else {
                 return Err(CompilerError::new_with_label(
                     e.span,
@@ -1845,10 +1766,7 @@ pub fn lower_expr_value(
         ExprKind::ContinueExpr => Expr::Continue,
 
         ExprKind::FunctionRef(ident) => {
-            let key = match ctx.v1_scope() {
-                Some(frag) => resolve::resolve_bare(ctx.workspace, Some(frag), ident.name).key,
-                None => ident.name,
-            };
+            let key = ctx.resolve_bare_key(ident.name, ident.span)?;
             Expr::Global(key)
         }
 

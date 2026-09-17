@@ -74,14 +74,27 @@ pub struct ExportBinding {
     pub vis: NsVisibility,
 }
 
+/// Kind of a canonical definition (plan 2.1). Callables are families;
+/// everything else is unique in the module's one item-name domain.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DefKind {
+    Type,
+    Global,
+    Callable,
+    Decorator,
+    Module,
+}
+
 /// Metadata for one canonical definition (plan 2.1). Diagnostics and the
 /// LSP render `name`/the shortest accessible path, never the raw key.
 #[derive(Clone, Debug)]
 pub struct DefMeta {
     pub package: PackageId,
     pub module: ModulePath,
+    pub kind: DefKind,
     pub name: Ustr,
     pub vis: NsVisibility,
+    pub span: crate::prelude::Span,
     pub dialect: skull_parser::Dialect,
 }
 

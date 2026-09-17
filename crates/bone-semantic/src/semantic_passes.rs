@@ -132,7 +132,8 @@ pub fn lower_modules(
             }
             Ok(())
         };
-        for_each_def_item(rock_mod.items.as_slice(), &[], &mut walk)?;
+        let start = scope.as_ref().map(|s| s.module_path.clone()).unwrap_or_default();
+        for_each_def_item(rock_mod.items.as_slice(), &start, &mut walk)?;
     }
 
     let mut items = modules
@@ -830,9 +831,39 @@ fn build_namespaces(
         // registering owned definitions and collecting use declarations.
         let file = rock_mod.file;
         let mut errs: Vec<CompilerError> = Vec::new();
+        if let Some(h) = &rock_mod.module_header {
+            if let Some(vis) = &h.vis {
+                let ns_vis = to_ns_vis(vis);
+                let pkg = ws.ns.packages.get_mut(&pkg_id).expect("package ensured");
+                let key = NsPackage::path_key(&module_path);
+                let node = pkg.nodes.entry(key).or_insert_with(|| NsNode {
+                    path_key: key,
+                    segments: module_path.clone(),
+                    ..Default::default()
+                });
+                if let Some(existing) = &node.vis {
+                    if *existing != ns_vis {
+                        return Err(CompilerError::new_with_label(
+                            h.span,
+                            format!(
+                                "conflicting visibility for module `{}`",
+                                module_path
+                                    .iter()
+                                    .map(|s| s.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join("::")
+                            ),
+                        ));
+                    }
+                }
+                node.vis = Some(ns_vis);
+            }
+        }
+
         register_items(ws, pkg_id, &module_path, &rock_mod.items, &mut scope, &mut errs);
-        if let Some(err) = errs.pop() {
-            return Err(err);
+        if !errs.is_empty() {
+            errs.sort_by_key(|e| e.location.offset);
+            return Err(errs.remove(0));
         }
 
         ws.fragment_scopes.insert(file, scope);
@@ -863,9 +894,17 @@ fn register_items(
         key
     };
 
-    // Ensure ancestors exist so mid-path traversal always lands.
+    // Ensure ancestors exist so mid-path traversal always lands, and
+    // record each segment as a child of its parent (file headers create
+    // nodes without an inline `mod` item).
     for i in 1..=path.len() {
-        ensure_node(ws, &path[..i]);
+        let child_key = ensure_node(ws, &path[..i]);
+        let parent_key = ensure_node(ws, &path[..i - 1]);
+        let seg = path[i - 1];
+        let pkg = ws.ns.packages.get_mut(&pkg_id).expect("package ensured");
+        if let Some(parent) = pkg.nodes.get_mut(&parent_key) {
+            parent.children.entry(seg).or_insert(child_key);
+        }
     }
 
     for item in items {
@@ -882,7 +921,26 @@ fn register_items(
                         segments: path.to_vec(),
                         ..Default::default()
                     });
-                    parent.children.insert(m.name.name, m.name.name);
+                    if parent.owned_types.contains_key(&m.name.name)
+                        || parent.owned_globals.contains_key(&m.name.name)
+                        || parent.owned_callables.contains_key(&m.name.name)
+                        || parent.owned_decorators.contains_key(&m.name.name)
+                    {
+                        errs.push(CompilerError::new_with_label(
+                            item.span,
+                            format!(
+                                "duplicate definition `{}` in module `{}`",
+                                m.name.name,
+                                if path.is_empty() {
+                                    scope.package_name.to_string()
+                                } else {
+                                    path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::")
+                                }
+                            ),
+                        ));
+                    } else {
+                        parent.children.insert(m.name.name, NsPackage::path_key(&child));
+                    }
                 }
                 // Child visibility from the block header (`pub mod x { .. }`).
                 if let Some(vis) = item.vis.clone() {
@@ -982,6 +1040,18 @@ fn register_items(
             other => {
                 // Ordinary definitions: register under the DefKey on the node.
                 let Some((bare, kind)) = owned_name_and_kind(other) else { continue };
+                if path.is_empty() {
+                    let pkg = ws.ns.packages.get(&pkg_id).expect("package");
+                    if bare == pkg.self_name || pkg.aliases.contains_key(&bare) {
+                        errs.push(CompilerError::new_with_label(
+                            item.span,
+                            format!(
+                                "root declaration `{bare}` collides with a package or dependency alias"
+                            ),
+                        ));
+                        continue;
+                    }
+                }
                 let pkg = ws.ns.packages.get_mut(&pkg_id).expect("package");
                 let key = NsPackage::path_key(path);
                 let node = pkg.nodes.entry(key).or_insert_with(|| NsNode {
@@ -994,18 +1064,16 @@ fn register_items(
                     path,
                     bare.as_str(),
                 );
-                let table = match kind {
-                    "type" => &mut node.owned_types,
-                    "global" => &mut node.owned_globals,
-                    "callable" => &mut node.owned_callables,
-                    _ => &mut node.owned_decorators,
-                };
-                if table.insert(bare, def_key).is_some() {
+                let taken = node.owned_types.contains_key(&bare)
+                    || node.owned_globals.contains_key(&bare)
+                    || node.owned_callables.contains_key(&bare)
+                    || node.owned_decorators.contains_key(&bare)
+                    || node.children.contains_key(&bare);
+                if taken {
                     errs.push(CompilerError::new_with_label(
                         item.span,
                         format!(
-                            "duplicate definition `{}` in module `{}`",
-                            bare,
+                            "duplicate definition `{bare}` in module `{}`",
                             if path.is_empty() {
                                 scope.package_name.to_string()
                             } else {
@@ -1015,13 +1083,28 @@ fn register_items(
                     ));
                     continue;
                 }
+                let table = match kind {
+                    "type" => &mut node.owned_types,
+                    "global" => &mut node.owned_globals,
+                    "callable" => &mut node.owned_callables,
+                    _ => &mut node.owned_decorators,
+                };
+                table.insert(bare, def_key);
+                let def_kind = match kind {
+                    "type" => bone_core::modules::DefKind::Type,
+                    "global" => bone_core::modules::DefKind::Global,
+                    "callable" => bone_core::modules::DefKind::Callable,
+                    _ => bone_core::modules::DefKind::Decorator,
+                };
                 ws.defs.insert(
                     def_key,
                     bone_core::modules::DefMeta {
                         package: pkg_id,
                         module: path.to_vec(),
+                        kind: def_kind,
                         name: bare,
                         vis: to_ns_vis(&item.vis.clone().unwrap_or(skull_parser::Visibility::Private)),
+                        span: item.span,
                         dialect: skull_parser::Dialect::V1,
                     },
                 );
@@ -1266,7 +1349,8 @@ pub fn pass_register_forward_decls(
     // DefKey, so per-logical-module duplicate checks fall out of the
     // workspace merge while same-named types in different modules stay
     // distinct.
-    for_each_def_item(rock_module.items.as_slice(), &[], &mut |item, path| {
+    let start = v1_scope.map(|s| s.module_path.clone()).unwrap_or_default();
+    for_each_def_item(rock_module.items.as_slice(), &start, &mut |item, path| {
         let def_key = |name: &ustr::Ustr| -> ustr::Ustr {
             match v1_scope {
                 Some(sc) => bone_core::modules::def_key(
@@ -1354,7 +1438,8 @@ pub fn pass_lower_fields(a: &Ast, ctx: &mut LowerCtx) -> Result<(), CompilerErro
             None => *name,
         }
     };
-    for_each_def_item(a.items.as_slice(), &[], &mut |item, path| {
+    let start = scope.as_ref().map(|s| s.module_path.clone()).unwrap_or_default();
+    for_each_def_item(a.items.as_slice(), &start, &mut |item, path| {
         match &item.kind {
             ItemKind::Struct(s) => lower_struct_def(ctx, a, s, reg_key(&s.name.name, path))?,
             ItemKind::Enum(e) => lower_enum_def(ctx, a, e, reg_key(&e.name.name, path))?,
@@ -1378,7 +1463,8 @@ pub fn pass_lower_functions(a: &Ast, ctx: &mut LowerCtx) -> Result<(), CompilerE
             None => *name,
         }
     };
-    for_each_def_item(a.items.as_slice(), &[], &mut |item, path| {
+    let start = scope.as_ref().map(|s| s.module_path.clone()).unwrap_or_default();
+    for_each_def_item(a.items.as_slice(), &start, &mut |item, path| {
         match &item.kind {
             ItemKind::Function(f) => {
                 if f.is_macro {
