@@ -1998,3 +1998,80 @@ struct LegacyActor {
     assert!(field_access(&gamma, v1_key, ustr("secret"), v1_site, FieldAccessNeed::Read).is_ok());
     assert!(field_access(&gamma, v1_key, ustr("secret"), v1_site, FieldAccessNeed::Write).is_ok());
 }
+
+#[test]
+fn structural_interface_conformance_rejects_private_set_field_for_writable_interface() {
+    use bone_semantic::inference::{coerce_to_interface, Gamma};
+    use bone_semantic::semantic_passes::semantic_pass_with_aliases;
+    use skull_parser::{parse_module_with_dialect, Dialect};
+
+    let lib_src = r#"
+pub struct Actor {
+    pub health: int,
+    pub private(set) mana: int,
+}
+"#;
+    let mut lib_mod = parse_module_with_dialect(lib_src, ustr("lib.rock"), Dialect::V1)
+        .expect("parse lib");
+    lib_mod.package = Some(rock_core::source_code::PackageTag {
+        id: 1,
+        self_name: "game".to_string(),
+    });
+
+    let consumer_src = r#"
+pub struct WritableMana {
+    pub mana: int,
+}
+pub struct WritableHealth {
+    pub health: int,
+}
+"#;
+    let mut consumer_mod = parse_module_with_dialect(consumer_src, ustr("consumer.rock"), Dialect::V1)
+        .expect("parse consumer");
+    consumer_mod.package = Some(rock_core::source_code::PackageTag {
+        id: 2,
+        self_name: "consumer".to_string(),
+    });
+
+    let mut aliases = bone_core::modules::NsAliases::default();
+    aliases.packages.push(bone_core::modules::PackageAliases {
+        id: 1,
+        self_name: ustr("game"),
+        aliases: vec![],
+    });
+    aliases.packages.push(bone_core::modules::PackageAliases {
+        id: 2,
+        self_name: ustr("consumer"),
+        aliases: vec![(ustr("game"), 1)],
+    });
+
+    let mut modules = vec![lib_mod, consumer_mod];
+    let mut ws = semantic_pass_with_aliases(&mut modules, &aliases).expect("semantic pass");
+
+    let iface_mana = ustr("consumer::WritableMana");
+    let iface_health = ustr("consumer::WritableHealth");
+    ws.interface_names.insert(iface_mana);
+    ws.interface_names.insert(iface_health);
+
+    let consumer_mid = ws.modules.iter().find(|m| m.file == ustr("consumer.rock")).unwrap().id;
+    let body = bone_core::hir::Body::default();
+    let mut gamma = Gamma::new(&ws, &body, consumer_mid);
+
+    let actor_ty = gamma.nominal_app(ustr("game::Actor"), &[], Span::unknown());
+
+    // Coercing Actor to WritableHealth is allowed: `health` is pub read/write
+    let ok_res = coerce_to_interface(&mut gamma, actor_ty, iface_health, Span::unknown());
+    assert!(ok_res.is_ok(), "coercing to interface with pub read/write field must succeed");
+
+    // Coercing Actor to WritableMana must fail: `mana` is pub private(set), not writable from consumer
+    let err_res = coerce_to_interface(&mut gamma, actor_ty, iface_mana, Span::unknown());
+    assert!(
+        err_res.is_err(),
+        "coercing Actor to WritableMana must fail because mana is private(set)"
+    );
+    let err = err_res.unwrap_err();
+    assert_eq!(
+        err.message,
+        "field `mana` on struct `Actor` is not writable from this module"
+    );
+}
