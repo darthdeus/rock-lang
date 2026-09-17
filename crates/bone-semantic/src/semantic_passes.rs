@@ -61,6 +61,11 @@ pub fn expand_and_desugar(ws: &mut Workspace, cooked: &mut [Ast]) -> Result<(), 
 
     let timer = Instant::now();
     skull_parser::macro_expand::expand_macros(cooked);
+    for ast in cooked.iter() {
+        if let Some(e) = ast.recovery_errors.first() {
+            return Err(e.clone());
+        }
+    }
     ws.log_time("macro_expand", timer);
 
     let timer = Instant::now();

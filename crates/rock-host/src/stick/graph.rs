@@ -85,7 +85,6 @@ impl Builder {
         &mut self,
         manifest_dir: &Path,
         config: &StickConfig,
-        allow_legacy: bool,
         channel: &str,
     ) -> Result<PackageId> {
         let root = fs_err::canonicalize(manifest_dir).map_err(|e| {
@@ -137,7 +136,7 @@ impl Builder {
                 ));
             }
             let dep_config = StickConfig::from_path(&dep_manifest)?;
-            let target = self.visit(&dep_manifest_dir, &dep_config, dep_allow_legacy, channel)?;
+            let target = self.visit(&dep_manifest_dir, &dep_config, channel)?;
             dependencies.push(PackageEdge {
                 alias: normalize_dep_key(key)?,
                 declared_key: key.clone(),
@@ -146,7 +145,7 @@ impl Builder {
             });
         }
         dependencies.sort_by(|a, b| a.declared_key.cmp(&b.declared_key));
-        self.validate_edges(&root, config, dialect, &dependencies, allow_legacy)?;
+        self.validate_edges(&root, config, dialect, &dependencies)?;
 
         self.stack.pop();
         self.load_order.push(id);
@@ -167,7 +166,6 @@ impl Builder {
         config: &StickConfig,
         dialect: Dialect,
         dependencies: &[PackageEdge],
-        _allow_legacy_declared: bool,
     ) -> Result<()> {
         // Normalized aliases must be unique within one package's dependency
         // table: `a-b` and `a_b` would otherwise be two indistinguishable
@@ -314,7 +312,7 @@ impl PackageGraph {
             stack: Vec::new(),
             load_order: Vec::new(),
         };
-        builder.visit(manifest_dir, config, false, channel)?;
+        builder.visit(manifest_dir, config, channel)?;
         builder.finish()
     }
 
@@ -541,8 +539,10 @@ mod tests {
         let err = PackageGraph::build(&a).expect_err("cycle must reject");
         let msg = err.to_string();
         assert!(msg.contains("circular"), "error names the cycle: {msg}");
-        assert!(msg.contains("a"), "chain includes a: {msg}");
-        assert!(msg.contains("b"), "chain includes b: {msg}");
+        assert!(
+            msg.contains("a -> b -> a"),
+            "chain is the edge path, not just the letter a: {msg}"
+        );
     }
 
     #[test]

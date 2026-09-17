@@ -127,7 +127,7 @@ pub fn build_package_map(source_spec: &SourceSpec) -> Vec<(String, PathBuf)> {
         }
     };
 
-let manifest_dir = config_path.parent().unwrap_or(&config_path).to_path_buf();
+    let manifest_dir = config_path.parent().unwrap_or(&config_path).to_path_buf();
     let graph = match PackageGraph::build(&manifest_dir) {
         Ok(graph) => graph,
         Err(e) => {

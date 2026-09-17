@@ -211,7 +211,10 @@ fn bone_check_case(files: &[(String, String)]) -> Option<bone_semantic::inferenc
     let mut user = Vec::with_capacity(files.len());
     for (name, code) in files {
         // A case may declare `//! modules: v1` to exercise the v1 grammar.
-        let dialect = rock_host::source_files::parse_modules_directive(code);
+        let dialect = match rock_host::source_files::parse_modules_directive(code) {
+            Ok(d) => d,
+            Err(_) => return None,
+        };
         match skull_parser::parse_module_with_dialect(code, ustr::Ustr::from(name.as_str()), dialect) {
             Ok(m) => user.push(m),
             Err(_) => return None, // hard tokenizer failure
