@@ -16,6 +16,8 @@ mod bone_incremental_timing;
 mod completions_cli;
 #[path = "modules_emit.rs"]
 mod modules_emit;
+#[path = "modules_witness.rs"]
+mod modules_witness;
 #[path = "sound_inspect_cli.rs"]
 mod sound_inspect_cli;
 #[path = "glsl_backend_ratchet.rs"]

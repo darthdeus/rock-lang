@@ -206,11 +206,19 @@ pub fn user_module_id(ws: &Workspace) -> Result<ModuleId, CompilerError> {
         .find(|m| *m != ModuleId::builtin())
         .ok_or_else(|| CompilerError::new_no_location("skull: no user module after semantic_pass"))
 }
-/// A `@test` function discovered in a module: the Lua name to call (a `@test`
-/// fn is never mangled) and the expected stdout of `@test(output = "...")`.
+/// A `@test` function discovered in a module: its LOGICAL name (the DefKey --
+/// what a report labels and what the value backends look the fn up by), the
+/// SYMBOL the artifact defines it under, and the expected stdout of
+/// `@test(output = "...")`.
+///
+/// The two differ for a v1 package. `@test` is mangling-exempt, so the emitted
+/// global is the key's declared segment, while the key itself (`pkg::mod::name`)
+/// is not an identifier in any backend's grammar. A harness that must CALL the
+/// test uses `symbol`; text a human reads uses `name`.
 #[derive(Clone, Debug)]
 pub struct SkullTest {
     pub name: String,
+    pub symbol: String,
     pub output: Option<String>,
     /// `@test(returns = <literal>)`: the fn's return value is captured by the
     /// backend harness and compared HOST-side against this pinned literal.
@@ -353,6 +361,9 @@ pub fn module_tests_with_ids(
             fid,
             SkullTest {
                 name: f.name.as_str().to_string(),
+                // The one emitted-name oracle, so the harness cannot drift from
+                // the definition the artifact actually writes.
+                symbol: skull_mir::mangle::mangle_fn(ws, f),
                 output,
                 returns,
             },

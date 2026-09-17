@@ -1178,7 +1178,9 @@ mod overlay_runtime_tests {
 
         let stub = stub_for(&full.lua);
         for t in &tests {
-            let call = format!("{}()", t.name);
+            // A Lua call site, so the EMITTED symbol (equal to the name for
+            // every legacy fn in this corpus, but not for a v1 one).
+            let call = format!("{}()", t.symbol);
             let composed = run_parts(&[&full.lua, stub, &overlay.lua, &call]);
             let fresh = run_parts(&[&full.lua, stub, &call]);
             match (composed, fresh) {

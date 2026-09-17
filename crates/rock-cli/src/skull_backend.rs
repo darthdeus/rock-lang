@@ -512,13 +512,15 @@ fn build_test_harness(tests: &[skull::SkullTest]) -> String {
             Some(s) => lua_str(s),
             None => "nil".to_string(),
         };
-        // `f` is the global test fn by name; `out` is the expected stdout (or nil).
-        // `name` labels the FAIL line (a package unit runs many tests together).
+        // `f` is the global test fn by its EMITTED symbol; `out` is the expected
+        // stdout (or nil). `name` labels the FAIL line and stays the logical
+        // DefKey, which is what a human reading the report wants (a package unit
+        // runs many tests together, and two modules may declare the same name).
         // `val` marks a `@test(returns = ...)` test: the harness emits a VALUE
         // line carrying the serialized return value; the HOST compares it.
         h.push_str(&format!(
             "  {{ f = {}, out = {}, name = {}, val = {} }},\n",
-            t.name,
+            t.symbol,
             out,
             lua_str(&t.name),
             t.returns.is_some()
