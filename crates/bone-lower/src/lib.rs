@@ -82,6 +82,29 @@ impl<'a> LowerCtx<'a> {
         Ok(self.resolve_bare(name, span)?.key)
     }
 
+    /// The DefKey of a v1 path that names a CALLABLE family. `None` for a
+    /// legacy fragment, a path that does not resolve, or one that names a type,
+    /// global or enum variant -- those keep the general call route, where the
+    /// callee lowers as a value.
+    fn v1_path_callable(&self, path: &skull_parser::Path) -> Option<Ustr> {
+        let frag = self.v1_scope()?;
+        let use_path = bone_core::modules::UsePathRef {
+            from_root: path.from_root,
+            segments: path.segments.iter().map(|i| i.name).collect(),
+        };
+        match resolve::resolve_member_path(self.workspace, frag, &use_path) {
+            Ok(resolve::MemberTarget::Global(key))
+                if matches!(
+                    self.workspace.defs.get(&key).map(|m| m.kind),
+                    Some(bone_core::modules::DefKind::Callable)
+                ) =>
+            {
+                Some(key)
+            }
+            _ => None,
+        }
+    }
+
     fn resolve_bare(
         &self,
         name: Ustr,
@@ -1196,6 +1219,28 @@ pub fn lower_expr_value(
                     args: args_range,
                     generic_args: IdxRange::new_empty(),
                     family,
+                }
+            }
+
+            // `a::b::f(..)` in a v1 fragment. Without this the path lowers as a
+            // VALUE (`Expr::Global`) and the call becomes `Callee::Value`, which
+            // MIR cannot give a callee identity -- a direct call must carry the
+            // family's DefKey exactly as the bare-name form does (plan 2.3).
+            ExprKind::Path { path, generic_args: path_generics }
+                if path_generics.is_empty() && ctx.v1_path_callable(path).is_some() =>
+            {
+                let key = ctx.v1_path_callable(path).expect("guard resolved it");
+                let args_range = lower_exprs(ctx, a, body, scope, args.iter().map(|x| &x.value))?;
+                for (arg_idx, ca) in args_range.into_iter().zip(args.iter()) {
+                    if let Some(nm) = &ca.name {
+                        body.arg_names.insert(arg_idx, nm.name);
+                    }
+                }
+                Expr::Call {
+                    callee: hir::Callee::Unresolved { name: key, name_span: e.span },
+                    args: args_range,
+                    generic_args,
+                    family: hir::CallFamily::resolved(key, &[]),
                 }
             }
 
