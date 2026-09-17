@@ -154,6 +154,44 @@ fn test(a: game::actor::Actor) {
     a.pos.x = 10
 }
 
+//- aliasing_mutation_through_ref_in_private_set_allowed
+//-- state.rock @pkg=game,1 @v1
+mod state;
+pub struct Inventory {
+    pub gold: int,
+}
+pub struct State {
+    pub private(set) inventory: Inventory,
+}
+
+//-- other.rock @pkg=game,1 @v1
+mod other;
+
+fn test(s: game::state::State) -> int {
+    s.inventory.gold = 50
+    let g = s.inventory.gold
+                       //^ int
+    g
+}
+
+//- aliasing_writeback_into_value_private_set_field_rejected @fail=field `position` on struct `State` is not writable from this module
+//-- state.rock @pkg=game,1 @v1
+mod state;
+pub value Vec2 {
+    pub x: int,
+    pub y: int,
+}
+pub struct State {
+    pub private(set) position: Vec2,
+}
+
+//-- other.rock @pkg=game,1 @v1
+mod other;
+
+fn test(s: game::state::State) {
+    s.position.x = 10
+}
+
 //- field_ref_write_private_set_rejects @fail=field `health` on struct `Actor` is not writable from this module
 //-- actor.rock @pkg=game,1 @v1
 mod actor;
