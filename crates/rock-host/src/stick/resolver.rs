@@ -48,8 +48,9 @@ impl DependencyResolver {
             .filter(|(_, dep)| super::dependency_matches_channel(dep, channel))
             .collect();
         direct.sort_by(|a, b| a.0.cmp(b.0));
+        let root = self.root_path.clone();
         for (name, dep) in direct {
-            self.resolve_dependency(name.clone(), dep, false)?;
+            self.resolve_dependency(name.clone(), dep, &root, channel)?;
         }
 
         // Collect all resolved dependencies in dependency order. Seed the DFS from
@@ -67,11 +68,16 @@ impl DependencyResolver {
         Ok(result)
     }
 
+    /// `base` is the directory the dependency's path is written relative to --
+    /// the root project for a direct dependency, and the DEPENDENT's own
+    /// directory for a transitive one. `libs/chess-game` naming `../chess-core`
+    /// means a sibling of itself, not of whoever is building.
     fn resolve_dependency(
         &mut self,
         name: String,
         dep: &Dependency,
-        _is_transitive: bool,
+        base: &Path,
+        channel: &str,
     ) -> Result<()> {
         if self.resolved.contains_key(&name) {
             // Already resolved
@@ -83,16 +89,40 @@ impl DependencyResolver {
             Dependency::Detailed(detailed) => detailed.path.as_str(),
         };
 
-        let resolved = self.resolve_path_dependency(&name, Path::new(path))?;
+        let (resolved, config) = self.resolve_path_dependency(&name, Path::new(path), base, channel)?;
+        let dep_dir = resolved.path.clone();
+        // Inserted BEFORE recursing, so a cycle terminates here and is reported
+        // by collect_ordered rather than recursing until the stack runs out.
         self.resolved.insert(name, resolved);
+
+        // Channel scoping applies at every hop: a dev-only package reached
+        // through a library must stay out of a release build exactly as it
+        // would if the consumer had named it directly.
+        let mut children: Vec<(&String, &Dependency)> = config
+            .dependencies
+            .iter()
+            .filter(|(_, d)| super::dependency_matches_channel(d, channel))
+            .collect();
+        children.sort_by(|a, b| a.0.cmp(b.0));
+        for (child_name, child) in children {
+            self.resolve_dependency(child_name.clone(), child, &dep_dir, channel)?;
+        }
         Ok(())
     }
 
-    fn resolve_path_dependency(&self, name: &str, path: &Path) -> Result<ResolvedDependency> {
+    /// Returns the resolved entry and the dependency's parsed manifest, so the
+    /// caller can walk its own dependencies without reading the file twice.
+    fn resolve_path_dependency(
+        &self,
+        name: &str,
+        path: &Path,
+        base: &Path,
+        channel: &str,
+    ) -> Result<(ResolvedDependency, StickConfig)> {
         let absolute_path = if path.is_absolute() {
             path.to_path_buf()
         } else {
-            self.root_path.join(path)
+            base.join(path)
         };
 
         // Check if the path exists and has a stick.toml
@@ -108,15 +138,26 @@ impl DependencyResolver {
         // Load the dependency's stick.toml to get its version and transitive deps
         let dep_config = StickConfig::from_path(&stick_path)?;
 
-        // TODO: Resolve transitive dependencies
-        let transitive_deps = dep_config.dependencies.keys().cloned().collect();
+        // Only the edges that survive channel scoping: collect_ordered orders
+        // against this list, and a name it cannot resolve would be dropped
+        // silently rather than ordered.
+        let mut transitive_deps: Vec<String> = dep_config
+            .dependencies
+            .iter()
+            .filter(|(_, d)| super::dependency_matches_channel(d, channel))
+            .map(|(n, _)| n.clone())
+            .collect();
+        transitive_deps.sort();
 
-        Ok(ResolvedDependency {
-            name: name.to_string(),
-            version: dep_config.package.version().to_string(),
-            path: absolute_path,
-            dependencies: transitive_deps,
-        })
+        Ok((
+            ResolvedDependency {
+                name: name.to_string(),
+                version: dep_config.package.version().to_string(),
+                path: absolute_path,
+                dependencies: transitive_deps,
+            },
+            dep_config,
+        ))
     }
 
     fn collect_ordered(

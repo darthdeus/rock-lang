@@ -1272,6 +1272,179 @@ mod tests {
         }
     }
 
+    /// A three-package chain, consumer -> mid -> leaf, where the consumer
+    /// declares only `mid`. Without transitive resolution `leaf` is silently
+    /// dropped from the module set and every symbol it defines is an undefined
+    /// name at type-check time, which is what made a shared core package
+    /// impossible without editing every consumer's manifest.
+    #[test]
+    fn a_transitive_dependency_resolves_through_its_parent() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let consumer = workspace.path().join("consumer");
+        let mid = workspace.path().join("mid");
+        let leaf = workspace.path().join("leaf");
+        for dir in [&consumer, &mid, &leaf] {
+            fs_err::create_dir_all(dir).unwrap();
+        }
+        fs_err::write(
+            consumer.join("stick.toml"),
+            "[package]\nname = \"consumer\"\n[dependencies]\nmid = \"../mid\"\n",
+        )
+        .unwrap();
+        fs_err::write(
+            mid.join("stick.toml"),
+            "[package]\nname = \"mid\"\ntype = \"lib\"\n[dependencies]\nleaf = \"../leaf\"\n",
+        )
+        .unwrap();
+        fs_err::write(
+            leaf.join("stick.toml"),
+            "[package]\nname = \"leaf\"\ntype = \"lib\"\n",
+        )
+        .unwrap();
+
+        let cfg = StickConfig::from_path(&consumer.join("stick.toml")).unwrap();
+        let mut resolver = DependencyResolver::new(consumer.clone());
+        let resolved = resolver.resolve_with_channel(&cfg, "dev").expect("resolve");
+        let names: Vec<&str> = resolved.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["leaf", "mid"],
+            "a transitive dependency is resolved, and before the package that needs it"
+        );
+    }
+
+    /// The path in a dependency's manifest is relative to THAT manifest, not to
+    /// the root project. A chain that only works when every package sits in one
+    /// flat directory would pass the test above and still break on the real
+    /// tree, where libs/ and games/ are nested at different depths.
+    #[test]
+    fn a_transitive_path_resolves_against_its_own_manifest() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let consumer = workspace.path().join("games").join("consumer");
+        let mid = workspace.path().join("libs").join("mid");
+        let leaf = workspace.path().join("leaf");
+        for dir in [&consumer, &mid, &leaf] {
+            fs_err::create_dir_all(dir).unwrap();
+        }
+        fs_err::write(
+            consumer.join("stick.toml"),
+            "[package]\nname = \"consumer\"\n[dependencies]\nmid = \"../../libs/mid\"\n",
+        )
+        .unwrap();
+        // "../../leaf" from libs/mid. Read against the root it would be wrong.
+        fs_err::write(
+            mid.join("stick.toml"),
+            "[package]\nname = \"mid\"\ntype = \"lib\"\n[dependencies]\nleaf = \"../../leaf\"\n",
+        )
+        .unwrap();
+        fs_err::write(
+            leaf.join("stick.toml"),
+            "[package]\nname = \"leaf\"\ntype = \"lib\"\n",
+        )
+        .unwrap();
+
+        let cfg = StickConfig::from_path(&consumer.join("stick.toml")).unwrap();
+        let mut resolver = DependencyResolver::new(consumer.clone());
+        let resolved = resolver.resolve_with_channel(&cfg, "dev").expect("resolve");
+        let found = resolved
+            .iter()
+            .find(|d| d.name == "leaf")
+            .expect("the transitive leaf resolves");
+        assert_eq!(
+            found.path.canonicalize().unwrap(),
+            leaf.canonicalize().unwrap(),
+            "the leaf resolves to the path its own manifest names"
+        );
+    }
+
+    /// Channel scoping has to survive the extra hop, or a dev-only package
+    /// reached through a library would ship in a release build.
+    #[test]
+    fn a_channel_scoped_transitive_dependency_keeps_its_scope() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let consumer = workspace.path().join("consumer");
+        let mid = workspace.path().join("mid");
+        let leaf = workspace.path().join("leaf");
+        for dir in [&consumer, &mid, &leaf] {
+            fs_err::create_dir_all(dir).unwrap();
+        }
+        fs_err::write(
+            consumer.join("stick.toml"),
+            "[package]\nname = \"consumer\"\n[dependencies]\nmid = \"../mid\"\n",
+        )
+        .unwrap();
+        fs_err::write(
+            mid.join("stick.toml"),
+            "[package]\nname = \"mid\"\ntype = \"lib\"\n[dependencies]\nleaf = { path = \"../leaf\", channels = [\"dev\"] }\n",
+        )
+        .unwrap();
+        fs_err::write(
+            leaf.join("stick.toml"),
+            "[package]\nname = \"leaf\"\ntype = \"lib\"\n",
+        )
+        .unwrap();
+
+        let cfg = StickConfig::from_path(&consumer.join("stick.toml")).unwrap();
+        let mut dev = DependencyResolver::new(consumer.clone());
+        let dev_names: Vec<String> = dev
+            .resolve_with_channel(&cfg, "dev")
+            .expect("dev resolve")
+            .iter()
+            .map(|d| d.name.clone())
+            .collect();
+        assert!(dev_names.contains(&"leaf".to_string()), "dev keeps the scoped leaf");
+
+        let mut steam = DependencyResolver::new(consumer.clone());
+        let steam_names: Vec<String> = steam
+            .resolve_with_channel(&cfg, "steam")
+            .expect("steam resolve")
+            .iter()
+            .map(|d| d.name.clone())
+            .collect();
+        assert!(
+            !steam_names.contains(&"leaf".to_string()),
+            "a dev-only package reached through a library stays out of a release build"
+        );
+        assert!(steam_names.contains(&"mid".to_string()), "the library itself still resolves");
+    }
+
+    /// A cycle through a transitive edge must be reported, not looped on.
+    #[test]
+    fn a_dependency_cycle_is_reported() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let consumer = workspace.path().join("consumer");
+        let a = workspace.path().join("a");
+        let b = workspace.path().join("b");
+        for dir in [&consumer, &a, &b] {
+            fs_err::create_dir_all(dir).unwrap();
+        }
+        fs_err::write(
+            consumer.join("stick.toml"),
+            "[package]\nname = \"consumer\"\n[dependencies]\na = \"../a\"\n",
+        )
+        .unwrap();
+        fs_err::write(
+            a.join("stick.toml"),
+            "[package]\nname = \"a\"\ntype = \"lib\"\n[dependencies]\nb = \"../b\"\n",
+        )
+        .unwrap();
+        fs_err::write(
+            b.join("stick.toml"),
+            "[package]\nname = \"b\"\ntype = \"lib\"\n[dependencies]\na = \"../a\"\n",
+        )
+        .unwrap();
+
+        let cfg = StickConfig::from_path(&consumer.join("stick.toml")).unwrap();
+        let mut resolver = DependencyResolver::new(consumer.clone());
+        let err = resolver
+            .resolve_with_channel(&cfg, "dev")
+            .expect_err("a cycle is an error, not a hang");
+        assert!(
+            err.to_string().contains("Circular dependency"),
+            "the error names the cycle, got: {err}"
+        );
+    }
+
     #[test]
     fn package_version_defaults_when_missing() {
         // Minimal stick.toml without a version field used to crash
