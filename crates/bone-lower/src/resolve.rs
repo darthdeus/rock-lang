@@ -203,6 +203,19 @@ pub fn resolve_member_path(
     path: &UsePathRef,
 ) -> Result<MemberTarget, String> {
     let segments = &path.segments;
+    if !path.from_root && segments.len() == 2 {
+        let first = segments[0];
+        if let Ok(resolved) = resolve_bare(ws, Some(frag), first) {
+            if resolved.kind == ResolvedKind::Type {
+                let key = resolved.key;
+                let variant = segments[1];
+                if ws.enums_by_name.contains_key(&key) {
+                    check_key_access(ws, frag, key)?;
+                    return Ok(MemberTarget::EnumVariant { enum_key: key, variant });
+                }
+            }
+        }
+    }
     let (pkg_id, mut cur, mut i) = resolve_anchor(ws, frag, path)?;
 
     while i < segments.len() {

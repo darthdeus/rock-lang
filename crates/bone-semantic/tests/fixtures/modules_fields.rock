@@ -270,4 +270,62 @@ fn test(a: Actor) -> Actor {
     Actor { ..a, name: "clone" }
 }
 
+//- newtype_public_payload_allowed
+//-- id.rock @pkg=game,1 @v1
+mod id;
+pub newtype UserId(int)
+
+//-- other.rock @pkg=game,1 @v1
+mod other;
+use game::id::UserId;
+
+fn test() -> int {
+    let u = UserId(42)
+    let n = u.0
+            //^ int
+    let UserId(inner) = u
+    let n2 = inner
+             //^ int
+    n2
+}
+
+//- newtype_private_rejected @fail=`SecretId` is not accessible from this module
+//-- id.rock @pkg=game,1 @v1
+mod id;
+newtype SecretId(int)
+
+//-- other.rock @pkg=game,1 @v1
+mod other;
+use game::id::SecretId;
+
+fn test() {
+    let s = SecretId(42)
+}
+
+//- enum_variants_inherit_visibility_allowed
+//-- status.rock @pkg=game,1 @v1
+mod status;
+pub enum Status { Active, Inactive }
+
+//-- other.rock @pkg=game,1 @v1
+mod other;
+use game::status::Status;
+
+fn test() -> Status {
+    let s = Status::Active
+    let s2 = s
+           //^ game::status::Status
+    s2
+}
+
+//- private_enum_behind_public_struct_field
+//-- actor.rock @pkg=game,1 @v1
+mod actor;
+enum InternalState { Stopped }
+pub struct Actor {
+    pub name: string,
+    private state: InternalState,
+}
+
+
 

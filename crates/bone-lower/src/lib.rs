@@ -791,10 +791,10 @@ pub fn lower_statement_value(
 
                 Binding::Newtype { name, binding } => {
                     let var = ctx.bind_let(body, binding.name, binding.span, scope);
+                    let key = ctx.resolve_bare_key(name.name, name.span)?;
 
                     Statement::LetNewtype {
-                        // TODO: binding.name or name.name
-                        newtype_name: name.name,
+                        newtype_name: key,
                         var,
                         value: value_idx,
                     }
