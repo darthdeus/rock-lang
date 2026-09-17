@@ -383,4 +383,3 @@ struct Secret { x: int }
 pub fn helper(s: Secret) -> Secret {
     s
 }
-
