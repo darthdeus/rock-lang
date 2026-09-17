@@ -198,8 +198,8 @@ mod incremental_watch_tests {
 
     use crate::bone_backend::bone_session;
 
-    fn files(src: &str) -> Vec<(String, String)> {
-        vec![("main.rock".to_string(), src.to_string())]
+    fn files(src: &str) -> Vec<bone_incremental::session::SessionFile> {
+        vec![bone_incremental::session::SessionFile::legacy("main.rock", src)]
     }
 
     #[test]
@@ -239,8 +239,8 @@ mod incremental_watch_tests {
         // inline dep — `deps` holds the callee's FuncRef across modules). Editing
         // a.rock re-infers only a's body, but skull must still re-emit b's caller.
         let mut session = bone_session(vec![
-            ("a.rock".into(), "@inline\nfn helper() -> int { 3 }".into()),
-            ("b.rock".into(), "fn caller() -> int { helper() }".into()),
+            bone_incremental::session::SessionFile::legacy("a.rock", "@inline\nfn helper() -> int { 3 }"),
+            bone_incremental::session::SessionFile::legacy("b.rock", "fn caller() -> int { helper() }"),
         ])
         .expect("session");
         let mid = skull::user_module_id(session.workspace()).unwrap();
@@ -534,8 +534,8 @@ mod overlay_runtime_tests {
         }
     }
 
-    fn files(src: &str) -> Vec<(String, String)> {
-        vec![("main.rock".to_string(), src.to_string())]
+    fn files(src: &str) -> Vec<bone_incremental::session::SessionFile> {
+        vec![bone_incremental::session::SessionFile::legacy("main.rock", src)]
     }
 
     #[test]
@@ -4164,18 +4164,11 @@ mod skull_stone_lint_snapshot_tests {
     fn direct_overlay(root: &str, target_suffix: &str, edited: &str) -> String {
         let spec = crate::unified_compile::SourceSpec::Directory(std::path::PathBuf::from(root));
         let sources = crate::unified_compile::discover_sources(&spec).expect("discover");
-        let files: Vec<(String, String)> = sources
-            .files
-            .iter()
-            .map(|file| {
-                let file = file.borrow();
-                (file.file.to_id_path(), file.contents.clone())
-            })
-            .collect();
+        let files = crate::bone_backend::session_files(&sources);
         let target = files
             .iter()
-            .find(|(path, _)| path.ends_with(target_suffix))
-            .map(|(path, _)| path.clone())
+            .find(|f| f.path.ends_with(target_suffix))
+            .map(|f| f.path.clone())
             .expect("main source");
         let mut session = crate::bone_backend::bone_session_for_emission(
             files,

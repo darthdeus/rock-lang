@@ -5,14 +5,14 @@
 // equivalent to never having applied it (text restored, variant items gone,
 // re-applying the original text is a NoChange).
 
-use bone_incremental::session::{Session, UpdateTier};
+use bone_incremental::session::{Session, SessionFile, UpdateTier};
 use bone_semantic::prelude::*;
 
-fn files(list: &[(&str, &str)]) -> Vec<(String, String)> {
-    list.iter().map(|(p, t)| (p.to_string(), t.to_string())).collect()
+fn files(list: &[(&str, &str)]) -> Vec<SessionFile> {
+    list.iter().map(|(p, t)| SessionFile::legacy(*p, *t)).collect()
 }
 
-fn fixture() -> Vec<(String, String)> {
+fn fixture() -> Vec<SessionFile> {
     files(&[
         (
             "a.rock",
@@ -32,7 +32,7 @@ fn has_fn(ws: &Workspace, name: &str) -> bool {
 
 #[test]
 fn variant_visible_inside_and_gone_after() {
-    let mut session = Session::new(vec![], fixture()).expect("session init");
+    let mut session = Session::new(vec![], fixture(), &bone_core::modules::NsAliases::default()).expect("session init");
     let original = session.files["b.rock"].text.clone();
 
     let variant = format!("{original}fn __variant_probe() -> int {{ return 2 }}\n");
@@ -55,7 +55,7 @@ fn broken_member_munge_still_infers_cross_file() {
     // The munge shape completion feeds: a mid-edit `f.<sentinel>` member access.
     // The variant module must still lower + infer (recovery), and the receiver's
     // cross-file type (Foo from a.rock) must be resolvable inside the closure.
-    let mut session = Session::new(vec![], fixture()).expect("session init");
+    let mut session = Session::new(vec![], fixture(), &bone_core::modules::NsAliases::default()).expect("session init");
     let original = session.files["b.rock"].text.clone();
 
     let variant = "fn use_foo() -> int {\n    let f = make_foo()\n    let x = f.__rock_completion__\n    return f.bar\n}\n";
@@ -74,7 +74,7 @@ fn untracked_path_is_added_then_removed() {
     // A file the session REFUSED (its live text never lowered clean) is still
     // completable: the variant is speculatively tracked, analyzed, and removed
     // again -- the session ends as untracked as it started.
-    let mut session = Session::new(vec![], fixture()).expect("session init");
+    let mut session = Session::new(vec![], fixture(), &bone_core::modules::NsAliases::default()).expect("session init");
     let seen = session
         .with_file_variant("c.rock", "fn __variant_probe() -> int { return 3 }\n", |ws| {
             has_fn(ws, "__variant_probe")

@@ -1025,7 +1025,7 @@ fn for_each_def_item<'a>(
 /// definition under its canonical DefKey, and records per-fragment import
 /// scopes for the resolver. Legacy files contribute nothing here and keep
 /// today's bare-name keys and diagnostics.
-fn build_namespaces(
+pub fn build_namespaces(
     ws: &mut Workspace,
     rock_modules: &[Ast],
     aliases: &bone_core::modules::NsAliases,

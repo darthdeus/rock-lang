@@ -80,6 +80,8 @@ pub fn parse_module_clean_with_dialect(
 /// just an edited item instead of the whole file: extract the item's text by its
 /// stored span, parse it here, and the resulting AST's spans line up with the
 /// rest of the file. `line`/`column` are 0-based (rock-core `Span` convention).
+/// `dialect` is the owning file's, so re-parsing one item of a v1 file does not
+/// quietly read it as legacy.
 /// `docs/skull-incremental-parse-plan.md`.
 pub fn parse_one_item(
     source: &str,
@@ -87,9 +89,10 @@ pub fn parse_one_item(
     offset: usize,
     line: usize,
     column: usize,
+    dialect: Dialect,
 ) -> Result<Ast, CompilerError> {
     let tokens = Tokenizer::new_with_offset(source, file, offset, line, column).tokenize()?;
-    let mut ast = Parser::new(tokens, source, offset).parse_single_item()?;
+    let mut ast = Parser::new_with_dialect(tokens, source, offset, dialect).parse_single_item()?;
     ast.file = file;
     // Total, like `parse_module`. The incremental fast path inspects
     // `recovery_errors` itself: a body-level recovery (e.g. a stray `)` inside the
@@ -185,8 +188,9 @@ mod tests {
         let (s, e) = item.span.offset_range;
         let sub = &src[s..e];
 
-        let mini = parse_one_item(sub, file, s, item.span.line_range.0, item.span.col_range.0)
-            .expect("parse_one_item");
+        let mini =
+            parse_one_item(sub, file, s, item.span.line_range.0, item.span.col_range.0, Dialect::Legacy)
+                .expect("parse_one_item");
         assert_eq!(mini.items.len(), 1, "exactly one item parsed");
         let m = &mini.items[0];
 
@@ -212,8 +216,15 @@ mod tests {
         let full = parse_module(src, file).expect("full parse");
         let item = &full.items[1];
         let (s, e) = item.span.offset_range;
-        let mini = parse_one_item(&src[s..e], file, s, item.span.line_range.0, item.span.col_range.0)
-            .expect("parse_one_item");
+        let mini = parse_one_item(
+            &src[s..e],
+            file,
+            s,
+            item.span.line_range.0,
+            item.span.col_range.0,
+            Dialect::Legacy,
+        )
+        .expect("parse_one_item");
         assert_eq!(mini.items[0].span.offset_range, item.span.offset_range, "annotated item span");
         assert_eq!(mini.items[0].annotations.len(), 1, "annotation preserved");
     }

@@ -35,7 +35,7 @@ use bone_semantic::prelude::{
     is_intrinsic_key_in, BodyInference, FxHashMap, FxHashSet, InferenceResult, ModuleId, Span,
     TyId, Workspace,
 };
-use bone_incremental::session::{Session, UpdateTier};
+use bone_incremental::session::{Session, SessionFile, UpdateTier};
 use skull_parser::CompilerError;
 use ustr::Ustr;
 
@@ -371,7 +371,11 @@ impl BoneWorkspace {
             .or_insert_with(|| BoneProject {
                 // Warm-only session is always valid even if the first file
                 // doesn't parse; the file is added by the update_file below.
-                session: Session::new(warm_stdlib(), Vec::new())
+                session: Session::new(
+                    warm_stdlib(),
+                    Vec::new(),
+                    &bone_core::modules::NsAliases::default(),
+                )
                     .expect("bone session warm-init (stdlib) must succeed"),
                 texts: stdlib_texts().into_iter().collect(),
                 freq: None, hole_cache: HashMap::new(), lint_cache: Default::default(),
@@ -445,10 +449,19 @@ impl BoneWorkspace {
             return; // couldn't resolve the unit; `update` still adds the one file
         };
         let is_bin = stick_is_bin(&root);
-        match Session::new(warm_stdlib(), files.clone()) {
+        let file_texts: Vec<(String, String)> =
+            files.iter().map(|f| (f.path.clone(), f.text.clone())).collect();
+        // The alias table the resolver needs comes from the same graph that
+        // selected these files, so a v1 package in the editor resolves its
+        // dependencies exactly as a compile does.
+        // `root` is the deepest enclosing `stick.toml` directory, or a scratch
+        // file's own parent -- where there is no manifest the graph build fails
+        // and the empty table is correct (a standalone source owns no package).
+        let aliases = crate::package_aliases::for_manifest_dir(&root).unwrap_or_default();
+        match Session::new(warm_stdlib(), files, &aliases) {
             Ok(session) => {
                 let texts: HashMap<String, String> =
-                    stdlib_texts().into_iter().chain(files).collect();
+                    stdlib_texts().into_iter().chain(file_texts).collect();
                 // Baseline every loaded file at load time, so `ago_ms` is
                 // meaningful for modules not yet re-inferred by an edit.
                 let now = std::time::Instant::now();
@@ -477,7 +490,7 @@ impl BoneWorkspace {
                     "batch load failed for `{}` ({e:?}); falling back to per-file indexing",
                     root.display()
                 );
-                for (p, src) in files {
+                for (p, src) in file_texts {
                     let _ = self.update(&p, src);
                 }
             }
@@ -489,7 +502,7 @@ impl BoneWorkspace {
     /// resolution `rock compile` performs. Paths are canonicalized so they match
     /// the canonical paths the LSP queries with (`root_for` / the CLI's
     /// `canonical`); a mismatch would leave the opened file's module unfindable.
-    fn project_sources(file_path: &str) -> Option<Vec<(String, String)>> {
+    fn project_sources(file_path: &str) -> Option<Vec<SessionFile>> {
         let unit =
             rock_host::compilation_units::determine_compilation_unit_for_file(file_path).ok()?;
         let sources = rock_host::compilation_units::load_sources_for_compilation_unit(&unit).ok()?;
@@ -497,7 +510,15 @@ impl BoneWorkspace {
         for f in &sources.files {
             let f = f.borrow();
             let raw = f.file.to_id_path();
-            out.push((canonicalize_lenient(&raw), f.contents.clone()));
+            // The loader already stamped each file's dialect and owning package
+            // from the package graph; carry both into the session so the LSP
+            // reads a v1 package the way a real compile does.
+            out.push(SessionFile {
+                path: canonicalize_lenient(&raw),
+                text: f.contents.clone(),
+                dialect: f.dialect,
+                package: f.package.clone(),
+            });
         }
         Some(out)
     }

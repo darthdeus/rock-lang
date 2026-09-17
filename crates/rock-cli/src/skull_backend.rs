@@ -1335,14 +1335,7 @@ pub fn skull_watch(path: &str, output: Option<String>) -> Result<()> {
         } else {
             sources
         };
-        let files: Vec<(String, String)> = sources
-            .files
-            .iter()
-            .map(|f| {
-                let f = f.borrow();
-                (f.file.to_id_path(), f.contents.clone())
-            })
-            .collect();
+        let files = crate::bone_backend::session_files(&sources);
 
         let t = Instant::now();
         let mut reinferred: Vec<(bone_semantic::prelude::ModuleId, bone_semantic::hir::BodyOwner)> = Vec::new();
@@ -1365,8 +1358,8 @@ pub fn skull_watch(path: &str, output: Option<String>) -> Result<()> {
                 }
             },
             Some(s) => {
-                for (file_path, text) in &files {
-                    match s.update_file(file_path, text) {
+                for f in &files {
+                    match s.update_file(&f.path, &f.text) {
                         Ok(result) => {
                             if matches!(result.tier, bone_incremental::session::UpdateTier::Interface | bone_incremental::session::UpdateTier::FullUser) {
                                 full = true;
@@ -1382,7 +1375,7 @@ pub fn skull_watch(path: &str, output: Option<String>) -> Result<()> {
                 let gone: Vec<String> = s
                     .tracked_paths()
                     .into_iter()
-                    .filter(|p| !files.iter().any(|(fp, _)| fp == p))
+                    .filter(|p| !files.iter().any(|f| f.path == *p))
                     .map(|p| p.to_string())
                     .collect();
                 for file_path in gone {
@@ -2466,14 +2459,7 @@ pub fn skull_incremental_profile(path: &str) -> Result<()> {
     let renderer_target = skull_renderer_target(path)?;
     let spec = crate::unified_compile::SourceSpec::Directory(PathBuf::from(path));
     let sources = crate::unified_compile::discover_sources(&spec)?;
-    let files: Vec<(String, String)> = sources
-        .files
-        .iter()
-        .map(|f| {
-            let f = f.borrow();
-            (f.file.to_id_path(), f.contents.clone())
-        })
-        .collect();
+    let files = crate::bone_backend::session_files(&sources);
 
     eprintln!("=== Skull Incremental Profile: {path} ===\n");
 
@@ -2517,7 +2503,8 @@ pub fn skull_incremental_profile(path: &str) -> Result<()> {
     let mut rows: Vec<SkullIncrRow> = Vec::new();
     let mut skipped = 0usize;
 
-    for (fpath, text) in &files {
+    for file in &files {
+        let (fpath, text) = (&file.path, &file.text);
         if !fpath.contains(&proj_dir) {
             continue;
         }
@@ -2651,14 +2638,7 @@ fn iter_incremental_sources(path: &str) -> Result<rock_core::SourceFiles> {
 pub fn skull_iter_incremental(path: &str, iters: usize, warmup: usize) -> Result<()> {
     let renderer_target = skull_renderer_target(path)?;
     let sources = iter_incremental_sources(path)?;
-    let files: Vec<(String, String)> = sources
-        .files
-        .iter()
-        .map(|f| {
-            let f = f.borrow();
-            (f.file.to_id_path(), f.contents.clone())
-        })
-        .collect();
+    let files = crate::bone_backend::session_files(&sources);
 
     let mut session =
         crate::bone_backend::bone_session_for_emission(files.clone(), std::path::Path::new(path))
@@ -2693,10 +2673,11 @@ pub fn skull_iter_incremental(path: &str, iters: usize, warmup: usize) -> Result
     // `SKULL_ITER_FN=update_mobs rock iter-incremental mag` flips `tick_anim(..,
     // 3, ..)` 3<->2. Else: auto-pick a file and inject whitespace (body_touch).
     let (target, mut state_a, mut state_b) = if let Ok(fname) = std::env::var("SKULL_ITER_FN") {
-        let (p, t) = files
+        let f = files
             .iter()
-            .find(|(p, t)| p.contains(&proj_dir) && t.contains(&format!("fn {fname}")))
+            .find(|f| f.path.contains(&proj_dir) && f.text.contains(&format!("fn {fname}")))
             .ok_or_else(|| anyhow::anyhow!("no project file with `fn {fname}` in {path}"))?;
+        let (p, t) = (&f.path, &f.text);
         let flipped = body_digit_flip(t, &fname)
             .ok_or_else(|| anyhow::anyhow!("no body digit to flip in `fn {fname}`"))?;
         // alternate flipped <-> original (a genuine 1-char body edit each pass)
@@ -2709,7 +2690,8 @@ pub fn skull_iter_incremental(path: &str, iters: usize, warmup: usize) -> Result
         // untouched). Profiling a 0-reinferred file would only measure reassembly.
         let want_file = std::env::var("SKULL_ITER_FILE").ok();
         let mut chosen: Option<(String, String)> = None;
-        for (p, t) in &files {
+        for file in &files {
+            let (p, t) = (&file.path, &file.text);
             if !p.contains(&proj_dir) {
                 continue;
             }

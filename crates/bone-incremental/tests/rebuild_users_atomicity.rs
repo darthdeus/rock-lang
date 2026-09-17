@@ -12,7 +12,7 @@
 //! query crashed (`bone-query/tests/repro_camera_crash.rs` is the end-to-end
 //! companion).
 
-use bone_incremental::session::Session;
+use bone_incremental::session::{Session, SessionFile};
 use bone_semantic::prelude::*;
 
 const WARM: &str = "
@@ -28,10 +28,10 @@ fn warm() -> Vec<skull_parser::Ast> {
 fn failed_rebuild_users_keeps_workspace_consistent() {
     // A valid multi-module program.
     let files = vec![
-        ("a.rock".to_string(), "struct S { v: int }\n".to_string()),
-        ("b.rock".to_string(), "fn use_s(s: S) -> int { s.v }\n".to_string()),
+        SessionFile::legacy("a.rock", "struct S { v: int }\n"),
+        SessionFile::legacy("b.rock", "fn use_s(s: S) -> int { s.v }\n"),
     ];
-    let mut session = Session::new(warm(), files).expect("clean program builds");
+    let mut session = Session::new(warm(), files, &bone_core::modules::NsAliases::default()).expect("clean program builds");
 
     assert_eq!(
         session.ws.modules.len(),

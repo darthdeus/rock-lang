@@ -1,6 +1,6 @@
 use skull_parser::{
-    Ast, FunctionBody, ItemKind, MacroRegistry, check_macro_call_labels, check_macro_name_uniqueness, collect_registry,
-    cook_one,
+    Ast, Dialect, FunctionBody, ItemKind, MacroRegistry, PackageTag, check_macro_call_labels,
+    check_macro_name_uniqueness, collect_registry, cook_one,
 };
 
 use bone_semantic::{
@@ -9,6 +9,11 @@ use bone_semantic::{
 };
 
 use crate::span_shift;
+
+/// Re-exported because it is part of [`Session::new`]'s signature: a caller
+/// that builds a session needs the alias table type without depending on
+/// `bone-core` directly.
+pub use bone_core::modules::NsAliases;
 
 /// Unique identifier of a Body across all modules.
 pub type BodyId = (ModuleId, BodyOwner);
@@ -99,6 +104,30 @@ pub struct Session {
     pub warm_macros: Vec<(Ustr, MacroDef)>,
 }
 
+/// A file entering a session, carrying the facts its package supplies.
+///
+/// A session RE-PARSES from stored text on every edit, so it has to keep the
+/// dialect and the owning package rather than take them stamped once from the
+/// caller -- plan 2.4's "dialect and package facts reach the parser and bone
+/// through the host", for the incremental route. A standalone source with no
+/// manifest is legacy and unowned, which is what [`SessionFile::legacy`]
+/// spells (spec 3.1: the loader supplies an explicit dialect, or a synthetic
+/// package, for a standalone source).
+#[derive(Clone, Debug)]
+pub struct SessionFile {
+    pub path: String,
+    pub text: String,
+    pub dialect: Dialect,
+    pub package: Option<PackageTag>,
+}
+
+impl SessionFile {
+    /// A source with no owning manifest: legacy dialect, no package.
+    pub fn legacy(path: impl Into<String>, text: impl Into<String>) -> Self {
+        Self { path: path.into(), text: text.into(), dialect: Dialect::Legacy, package: None }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct UserFile {
     pub text_hash: u64,
@@ -117,6 +146,12 @@ pub struct UserFile {
     /// Each def's `span` is shifted on the fast body-edit path, so its line stays
     /// accurate without a reparse.
     pub macros: Vec<MacroDef>,
+    /// The dialect this file parses in and the package that owns it, from the
+    /// package graph. Kept here because every re-parse -- a full file reparse,
+    /// a one-item fast edit, an O(workspace) rebuild -- needs them again, and
+    /// re-deriving them would mean re-reading manifests on the edit path.
+    pub dialect: Dialect,
+    pub package: Option<PackageTag>,
     /// Recovered syntax errors from this file's last parse. The parse is total
     /// (best-effort tree + recovery errors), so these are kept here and surfaced
     /// via `diagnostics()` -- a broken file still type-checks its valid parts AND
@@ -366,6 +401,22 @@ pub fn changed_names(old: &FxHashMap<Ustr, u64>, new: &FxHashMap<Ustr, u64>) -> 
         .collect()
 }
 
+/// Parse `text` in its file's dialect and tag the module with its owning
+/// package. Every session parse goes through here (or [`Session::parse_stored`],
+/// which reads the facts back off the file): a re-parse that forgot them would
+/// read a v1 file as legacy source, which is a parse error on `pub`/`mod` and
+/// an unresolved name on everything that still parsed.
+fn parse_with_facts(
+    text: &str,
+    file: Ustr,
+    dialect: Dialect,
+    package: Option<PackageTag>,
+) -> Result<Ast, CompilerError> {
+    let mut module = skull_parser::parse_module_with_dialect(text, file, dialect)?;
+    module.package = package;
+    Ok(module)
+}
+
 impl Session {
     /// Every macro visible in this session, user files AND stdlib, paired with
     /// its defining file. Macros are erased by expansion before bone lowering,
@@ -379,7 +430,14 @@ impl Session {
             .chain(self.warm_macros.iter().map(|(f, d)| (*f, d)))
     }
 
-    pub fn new(warm: Vec<Ast>, files: Vec<(String, String)>) -> Result<Self, CompilerError> {
+    /// `aliases` are the host package graph's dependency-alias tables, the same
+    /// input `semantic_pass_with_aliases` takes. A legacy-only session passes
+    /// the default (empty) table.
+    pub fn new(
+        warm: Vec<Ast>,
+        files: Vec<SessionFile>,
+        aliases: &bone_core::modules::NsAliases,
+    ) -> Result<Self, CompilerError> {
         let mut ws = Workspace::default();
 
         let warm_mids: FxHashSet<ModuleId> = warm
@@ -409,7 +467,7 @@ impl Session {
         // lowering directly -- avoids a second parse via `combined_unexpanded`,
         // which re-parses (the AST is transient and not persisted).
         let mut user_modules: Vec<Ast> = Vec::new();
-        for (path, text) in files {
+        for SessionFile { path, text, dialect, package } in files {
             if session.files.contains_key(&path) {
                 comp_error!(
                     Span::unknown(),
@@ -418,7 +476,7 @@ impl Session {
                 );
             }
 
-            let module = skull_parser::parse_module(&text, ustr(path.as_str()))?;
+            let module = parse_with_facts(&text, ustr(path.as_str()), dialect, package.clone())?;
 
             let mid = session.ws.intern_module(module.file);
             if session.warm_mids.contains(&mid) {
@@ -438,6 +496,8 @@ impl Session {
                     item_prints: prints,
                     text,
                     macros,
+                    dialect,
+                    package,
                     syntax_errors: module.recovery_errors.clone(),
                 },
             );
@@ -450,9 +510,20 @@ impl Session {
         expanded.extend(user_modules);
         session.registry = collect_registry(&expanded);
         reject_macro_name_collisions(&expanded)?;
+        // The namespace tree comes FIRST, exactly as in `semantic_pass`: it
+        // turns v1 headers, inline `mod` blocks and `use` declarations into
+        // `ws.ns` and the per-fragment scopes the resolver reads. A session
+        // that skipped it lowered every v1 file with no scope at all, so a
+        // qualified path reported "this file is legacy" and nothing resolved.
+        bone_semantic::semantic_passes::build_namespaces(&mut session.ws, &expanded, aliases)?;
         expand_and_desugar(&mut session.ws, &mut expanded)?;
 
         lower_and_infer(&mut session.ws, &expanded)?;
+        // The same whole-program gate the batch path runs, so an export whose
+        // type closure is not public fails in a session too rather than only
+        // under `rock compile`. It is a no-op for a workspace with no v1
+        // package.
+        bone_semantic::semantic_passes::pass_validate_api_closure(&session.ws)?;
         session.rebuild_dependents();
 
         Ok(session)
@@ -467,10 +538,26 @@ impl Session {
         let mut combined = self.warm.clone();
 
         for path in &self.paths {
-            combined.push(skull_parser::parse_module(&self.files[path].text, ustr(path))?);
+            combined.push(self.parse_stored(ustr(path))?);
         }
 
         Ok(combined)
+    }
+
+    /// The dialect and owning package recorded for `path`. A path the session
+    /// does not hold yet is a standalone source: legacy, unowned. A caller that
+    /// knows better supplies the facts up front through [`SessionFile`].
+    fn facts_of(&self, path: &str) -> (Dialect, Option<PackageTag>) {
+        match self.files.get(path) {
+            Some(f) => (f.dialect, f.package.clone()),
+            None => (Dialect::Legacy, None),
+        }
+    }
+
+    /// Re-parse `path` from its stored text with its own facts.
+    fn parse_stored(&self, path: Ustr) -> Result<Ast, CompilerError> {
+        let (dialect, package) = self.facts_of(path.as_str());
+        parse_with_facts(&self.files[path.as_str()].text, path, dialect, package)
     }
 
     pub fn workspace(&self) -> &Workspace {
@@ -544,7 +631,8 @@ impl Session {
             return Ok(result);
         }
 
-        let module = skull_parser::parse_module(text, ustr(path))?;
+        let (dialect, package) = self.facts_of(path);
+        let module = parse_with_facts(text, ustr(path), dialect, package.clone())?;
         let syntax_errors = module.recovery_errors.clone();
         let mid = self.ws.intern_module(module.file);
         if self.warm_mids.contains(&mid) {
@@ -595,6 +683,10 @@ impl Session {
                 item_prints: new_prints,
                 text: text.to_string(),
                 macros: new_macros,
+                // An edit never changes which package owns a file or which
+                // dialect it is written in; both come from its manifest.
+                dialect,
+                package,
                 syntax_errors,
             },
         );
@@ -759,7 +851,7 @@ impl Session {
         asts.push(edited);
         for &m in &to_relower {
             let path = self.ws.module(m).file;
-            let mut a = skull_parser::parse_module(&self.files[path.as_str()].text, path)?;
+            let mut a = self.parse_stored(path)?;
             cook_one(&mut a, &self.registry);
             asts.push(a);
         }
@@ -1199,7 +1291,7 @@ impl Session {
             return Ok(None);
         }
         // --- locate (non-mutating; releases the files borrow before any change) ---
-        let (es, oe, delta, idx, so, eo, line, col, old_iface, old_name, old_text, old_prints, old_macros, old_syntax_errors) = {
+        let (es, oe, delta, idx, so, eo, line, col, old_iface, old_name, old_text, old_prints, old_macros, old_syntax_errors, old_dialect, old_package) = {
             let Some(old) = self.files.get(path) else { return Ok(None) };
             let (es, oe, delta) = byte_diff(&old.text, new_text);
             let Some(idx) = locate_body_edit(&old.item_prints, es, oe) else { return Ok(None) };
@@ -1210,6 +1302,7 @@ impl Session {
                 p.item_span.line_range.0, p.item_span.col_range.0,
                 p.iface_hash, p.name,
                 old.text.clone(), old.item_prints.clone(), old.macros.clone(), old.syntax_errors.clone(),
+                old.dialect, old.package.clone(),
             )
         };
         let _ = (es, oe);
@@ -1220,7 +1313,9 @@ impl Session {
             return Ok(None);
         }
         let sub = &new_text[so..new_end];
-        let Ok(mut mini) = skull_parser::parse_one_item(sub, ustr(path), so, line, col) else {
+        let Ok(mut mini) =
+            skull_parser::parse_one_item(sub, ustr(path), so, line, col, self.facts_of(path).0)
+        else {
             return Ok(None); // a hard tokenizer error -> let the full path surface it
         };
         // The parse is total now; a recovered (partial) item must NOT be installed
@@ -1275,6 +1370,8 @@ impl Session {
                 item_prints: new_prints,
                 text: new_text.to_string(),
                 macros: new_macros,
+                dialect: old_dialect,
+                package: old_package,
                 // The fast path only re-parses ONE clean body (it bails to the
                 // full path on any recovery error), so the file's syntax errors
                 // are unchanged by this localized edit.
@@ -1414,13 +1511,13 @@ impl Session {
         let item = match edited.items.iter().find(|it| it.span.offset_range.0 == new_start) {
             Some(it) => it,
             None => {
-                let m = skull_parser::parse_module(&self.files[path].text, ustr(path))?;
+                let m = self.parse_stored(ustr(path))?;
                 return self.rebuild_module(path, m, &[changed_idx]);
             }
         };
 
         let ItemKind::Function(f) = &item.kind else {
-            let m = skull_parser::parse_module(&self.files[path].text, ustr(path))?;
+            let m = self.parse_stored(ustr(path))?;
             return self.rebuild_module(path, m, &[changed_idx]);
         };
 

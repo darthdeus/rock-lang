@@ -19,7 +19,7 @@
 use std::collections::BTreeSet;
 use std::sync::LazyLock;
 
-use bone_incremental::session::{Session, UpdateTier};
+use bone_incremental::session::{NsAliases, Session, SessionFile, UpdateTier};
 use bone_semantic::inference::Workspace;
 use skull::graph_snapshot::{canonical, instance_key};
 use skull::instance_graph::{self, Instance, InstanceGraph, RejectionKind, UpdateStats};
@@ -63,7 +63,8 @@ impl Case {
     fn new(main: &str, lib: &str) -> Self {
         let session = Session::new(
             STDLIB.clone(),
-            vec![(MAIN.to_string(), main.to_string()), (LIB.to_string(), lib.to_string())],
+            vec![SessionFile::legacy(MAIN, main), SessionFile::legacy(LIB, lib)],
+            &NsAliases::default(),
         )
         .expect("session");
         let graph = graph_of(session.workspace());
@@ -1154,7 +1155,8 @@ fn a_struct_enum_newtype_or_decorator_edit_is_interface_tier() {
     for (what, edited) in edits {
         let mut s = Session::new(
             STDLIB.clone(),
-            vec![(MAIN.to_string(), main.to_string()), (LIB.to_string(), base.to_string())],
+            vec![SessionFile::legacy(MAIN, main), SessionFile::legacy(LIB, base)],
+            &NsAliases::default(),
         )
         .expect("session");
         let r = s.update_file(LIB, &edited).expect("update");
@@ -1174,7 +1176,8 @@ fn editing_a_mutable_global_initializer_is_interface_tier() {
     let main = "global g: int = pick_a()\nfn main() { print(\"{g}\") }\n";
     let mut s = Session::new(
         STDLIB.clone(),
-        vec![(MAIN.to_string(), main.to_string()), (LIB.to_string(), PICK_LIB.to_string())],
+        vec![SessionFile::legacy(MAIN, main), SessionFile::legacy(LIB, PICK_LIB)],
+        &NsAliases::default(),
     )
     .expect("session");
     let r = s
