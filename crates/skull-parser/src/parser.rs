@@ -179,7 +179,8 @@ impl<'a> Parser<'a> {
     /// [`Parser::new`] with the file's source dialect selected.
     pub fn new_with_dialect(tokens: Vec<Token>, source: &'a str, base: usize, dialect: Dialect) -> Self {
         let eof_span = tokens.last().map(|t| t.span).unwrap_or_else(Span::unknown);
-        let ast = Ast::with_capacity(tokens.len());
+        let mut ast = Ast::with_capacity(tokens.len());
+        ast.dialect = dialect;
         Self {
             frames: vec![Frame::File { text: source, base }],
             tokens,

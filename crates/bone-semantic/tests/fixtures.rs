@@ -1,6 +1,10 @@
 use datatest_stable::Utf8Path;
 
 fn check_rock(_path: &Utf8Path, contents: String) -> datatest_stable::Result<()> {
+    // Modules-v1 multi-file fixtures: sections hold embedded `//--` files.
+    if _path.file_name().map_or(false, |n| n.starts_with("modules_")) {
+        return check_modules_fixture(&contents);
+    }
     let sections = test_utils::parse_sections(&contents);
 
     if sections.is_empty() {
@@ -30,6 +34,34 @@ fn check_rock(_path: &Utf8Path, contents: String) -> datatest_stable::Result<()>
                 ),
                 _ => {}
             }
+        }
+    }
+    Ok(())
+}
+
+fn check_modules_fixture(contents: &str) -> datatest_stable::Result<()> {
+    let sections = test_utils::parse_sections(contents);
+    if sections.is_empty() {
+        if let Err(e) = bone_semantic::test_support::check_types_embedded(
+            &bone_semantic::test_support::parse_embedded_files(contents),
+        ) {
+            panic!("{}", e);
+        }
+        return Ok(());
+    }
+    for section in sections {
+        let (name, expect_fail) = match section.name.strip_suffix(" @fail") {
+            Some(n) => (n.to_string(), true),
+            None => (section.name.to_string(), false),
+        };
+        let files = bone_semantic::test_support::parse_embedded_files(section.content);
+        match (
+            bone_semantic::test_support::check_types_embedded(&files),
+            expect_fail,
+        ) {
+            (Ok(_), true) => panic!("section `{name}` was marked @fail but passed"),
+            (Err(e), false) => panic!("section `{name}` failed:\n{e}"),
+            _ => {}
         }
     }
     Ok(())

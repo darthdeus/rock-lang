@@ -7,6 +7,7 @@
 
 use crate::OrderedFloat;
 pub use comfy_la_arena::{Arena, Idx};
+use rock_core::source_code::Dialect;
 use rock_core::{CompilerError, Span};
 use rock_tokenizer::TokenKind;
 use ustr::Ustr;
@@ -883,6 +884,12 @@ pub struct Ast {
     /// for the whole module -- independent of item spans (which macro expansion
     /// can retag) and defined even for an item-less module.
     pub file: Ustr,
+    /// The source dialect this file was parsed under (set by the parser).
+    pub dialect: Dialect,
+    /// The owning package (set by the loader from the package graph; `None`
+    /// for standalone/editor sources). Package loaders overwrite the
+    /// directive-derived dialect with the graph fact at the same time.
+    pub package: Option<rock_core::source_code::PackageTag>,
     /// The file's `mod a::b;` header (v1), if the first non-comment item was
     /// one. Selects the logical module this file's items contribute to.
     pub module_header: Option<ModuleHeader>,

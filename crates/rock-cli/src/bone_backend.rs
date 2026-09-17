@@ -241,9 +241,10 @@ pub(crate) fn parse_user_modules(
         .map(|file| {
             let f = file.borrow();
             let id = ustr::Ustr::from(f.file.to_id_path().as_str());
-            let module =
+            let mut module =
                 skull_parser::parse_module_with_dialect(&f.contents, id, f.dialect)
                     .map_err(|e| vec![e])?;
+            module.package = f.package.clone();
             Ok((module, id))
         })
         .collect::<std::result::Result<Vec<_>, Vec<CompilerError>>>()?;

@@ -1,4 +1,5 @@
-use skull_parser::{Ast, ItemKind};
+use skull_parser::{Ast, Ident, Item, ItemKind};
+use bone_core::modules::{FragmentScope, NsNode, NsPackage, NsVisibility, UsePathRef};
 
 use bone_core::annotations::{validate_annotations, AnnoPos};
 use bone_lower::lower_annotations;
@@ -9,6 +10,8 @@ use crate::{hir::Module, prelude::*};
 struct LowerItem<'a> {
     module: &'a mut Module,
     rock_module: &'a Ast,
+    /// This file's modules-v1 scope, when it is a v1 fragment.
+    v1_scope: Option<FragmentScope>,
 }
 
 /// Best-effort classification of a decl's trailing generic defaults for the
@@ -91,30 +94,45 @@ pub fn lower_modules(
     // parallel lowering; this map is). Insert (not clear) so the incremental
     // single-module re-lower augments rather than wipes other modules' entries.
     for rock_mod in rock_modules.iter() {
-        for item in rock_mod.items.iter() {
+        let scope = ws.fragment_scopes.get(&rock_mod.file).cloned();
+        let mut walk = |item: &Item, path: &[ustr::Ustr]| -> Result<(), CompilerError> {
+            // In v1 the workspace maps key by the canonical DefKey so two
+            // same-named types in different logical modules stay distinct.
+            let key = |name: &ustr::Ustr| -> ustr::Ustr {
+                match &scope {
+                    Some(sc) => bone_core::modules::def_key(
+                        &sc.package_name.to_string(),
+                        path,
+                        name.as_str(),
+                    ),
+                    None => *name,
+                }
+            };
             match &item.kind {
                 ItemKind::Struct(s) => {
-                    ws.type_generic_arity.insert(s.name.name, s.generics.len());
+                    ws.type_generic_arity.insert(key(&s.name.name), s.generics.len());
                     ws.type_generic_defaults
-                        .insert(s.name.name, trailing_generic_defaults(rock_mod, &s.generics));
+                        .insert(key(&s.name.name), trailing_generic_defaults(rock_mod, &s.generics));
                     ws.has_nobox_types |= s.is_nobox;
                 }
                 ItemKind::Enum(e) => {
-                    ws.type_generic_arity.insert(e.name.name, e.generics.len());
+                    ws.type_generic_arity.insert(key(&e.name.name), e.generics.len());
                     ws.type_generic_defaults
-                        .insert(e.name.name, trailing_generic_defaults(rock_mod, &e.generics));
+                        .insert(key(&e.name.name), trailing_generic_defaults(rock_mod, &e.generics));
                 }
                 ItemKind::Newtype(n) => {
-                    ws.type_generic_arity.insert(n.name.name, n.generics.len());
+                    ws.type_generic_arity.insert(key(&n.name.name), n.generics.len());
                     ws.type_generic_defaults
-                        .insert(n.name.name, trailing_generic_defaults(rock_mod, &n.generics));
+                        .insert(key(&n.name.name), trailing_generic_defaults(rock_mod, &n.generics));
                 }
                 ItemKind::Decorator(d) => {
-                    ws.decorator_names.insert(d.name.name);
+                    ws.decorator_names.insert(key(&d.name.name));
                 }
                 _ => {}
             }
-        }
+            Ok(())
+        };
+        for_each_def_item(rock_mod.items.as_slice(), &[], &mut walk)?;
     }
 
     let mut items = modules
@@ -123,6 +141,7 @@ pub fn lower_modules(
         .map(|(a, b)| LowerItem {
             module: a,
             rock_module: b,
+            v1_scope: ws.fragment_scopes.get(&b.file).cloned(),
         })
         .collect_vec();
 
@@ -133,7 +152,9 @@ pub fn lower_modules(
 
         items
             .par_iter_mut()
-            .map(|item| pass_register_forward_decls(item.rock_module, item.module))
+            .map(|item| {
+                pass_register_forward_decls(item.rock_module, item.module, item.v1_scope.as_ref())
+            })
             .collect::<Result<Vec<()>, CompilerError>>()?;
 
         ws.log_time("register decls", timer);
@@ -157,7 +178,8 @@ pub fn lower_modules(
                 ItemKind::Global(_) => AnnoPos::GlobalItem,
                 ItemKind::Decorator(_) => AnnoPos::DecoItem,
                 ItemKind::CompilerDirective(_) | ItemKind::Comment(_) | ItemKind::MacroInvocation { .. } => continue,
-                // Rejected earlier by reject_unscoped_module_items.
+                // Legacy use/mod are rejected in build_namespaces; v1 Module
+                // blocks are walked via for_each_def_item, not as annotated items.
                 ItemKind::Use(_) | ItemKind::Module(_) => continue,
             };
             let lowered = lower_annotations(rock_mod, &item.annotations);
@@ -665,47 +687,456 @@ pub fn lower_and_infer(
 }
 
 pub fn semantic_pass(rock_modules: &mut [Ast]) -> Result<Workspace, CompilerError> {
+    semantic_pass_with_aliases(rock_modules, &bone_core::modules::NsAliases::default())
+}
+
+/// [`semantic_pass`] with the host graph's dependency-alias tables, so a v1
+/// package resolves its dependencies under the names its manifest declared.
+/// Legacy-only workspaces pass the default (empty) input.
+pub fn semantic_pass_with_aliases(
+    rock_modules: &mut [Ast],
+    aliases: &bone_core::modules::NsAliases,
+) -> Result<Workspace, CompilerError> {
     let _span = tracing::info_span!("bone_semantic_pass").entered();
     let mut ws = Workspace::default();
 
-    reject_unscoped_module_items(rock_modules)?;
+    build_namespaces(&mut ws, rock_modules, aliases)?;
     expand_and_desugar(&mut ws, rock_modules)?;
     lower_and_infer(&mut ws, rock_modules)?;
 
     Ok(ws)
 }
 
-/// Modules-v1 item forms (`use`, inline `mod` blocks, block-level `use`)
-/// parse but carry no semantics until module resolution lands (plan M2).
-/// Reject them here rather than silently ignoring the declarations — a
-/// silent ignore would accept programs whose names resolve to nothing.
-fn reject_unscoped_module_items(rock_modules: &[Ast]) -> Result<(), CompilerError> {
-    for rock_mod in rock_modules.iter() {
-        if rock_mod.module_header.is_some() {
-            return Err(CompilerError::new_with_label(
-                rock_mod.module_header.as_ref().expect("checked").span,
-                "module file headers require module resolution (not yet implemented)".to_string(),
-            ));
-        }
-        for item in rock_mod.items.iter() {
-            match &item.kind {
-                ItemKind::Use(u) => {
-                    return Err(CompilerError::new_with_label(
-                        u.span,
-                        "`use` declarations require module resolution (not yet implemented)".to_string(),
-                    ));
-                }
-                ItemKind::Module(m) => {
-                    return Err(CompilerError::new_with_label(
-                        m.span,
-                        "inline `mod` blocks require module resolution (not yet implemented)".to_string(),
-                    ));
-                }
-                _ => {}
+/// Legacy compilation units parse `use`/`mod` (contextual, additive) but must
+/// still reject them with a named diagnostic: v1 resolution does not apply,
+/// and silently accepting the item would drop the declaration with no effect.
+fn reject_legacy_unscoped_module_items(rock_mod: &Ast) -> Result<(), CompilerError> {
+    if let Some(h) = &rock_mod.module_header {
+        return Err(CompilerError::new_with_label(
+            h.span,
+            "module file headers require module resolution (not yet implemented)".to_string(),
+        ));
+    }
+    for item in rock_mod.items.iter() {
+        match &item.kind {
+            ItemKind::Use(u) => {
+                return Err(CompilerError::new_with_label(
+                    u.span,
+                    "`use` declarations require module resolution (not yet implemented)".to_string(),
+                ));
             }
+            ItemKind::Module(m) => {
+                return Err(CompilerError::new_with_label(
+                    m.span,
+                    "inline `mod` blocks require module resolution (not yet implemented)".to_string(),
+                ));
+            }
+            _ => {}
         }
     }
     Ok(())
+}
+
+/// Walk every definition-bearing item, descending into inline mod blocks.
+/// `path` is the logical module path within the file's package; `in_v1`
+/// reports whether the containing file is a modules-v1 fragment.
+fn for_each_def_item<'a>(
+    items: &'a [Item],
+    path: &[ustr::Ustr],
+    f: &mut impl FnMut(&'a Item, &[ustr::Ustr]) -> Result<(), CompilerError>,
+) -> Result<(), CompilerError> {
+    for item in items {
+        match &item.kind {
+            ItemKind::Module(m) => {
+                let mut child = path.to_vec();
+                child.push(m.name.name);
+                for_each_def_item(&m.items, &child, f)?;
+            }
+            _ => f(item, path)?,
+        }
+    }
+    Ok(())
+}
+
+/// The modules-v1 namespace builder (plan M2). Runs before any lowering:
+/// it turns the v1 fragments' headers, inline mod blocks, and use
+/// declarations into the workspace's namespace tree, registers every v1
+/// definition under its canonical DefKey, and records per-fragment import
+/// scopes for the resolver. Legacy files contribute nothing here and keep
+/// today's bare-name keys and diagnostics.
+fn build_namespaces(
+    ws: &mut Workspace,
+    rock_modules: &[Ast],
+    aliases: &bone_core::modules::NsAliases,
+) -> Result<(), CompilerError> {
+    let mut ws = ws;
+    // The host graph's alias tables land on the tree first, so a package
+    // resolves its dependencies under its manifest's names even when no v1
+    // file of the provider is being lowered yet.
+    for input in &aliases.packages {
+        let pkg = ws.ns.packages.entry(input.id).or_insert_with(|| NsPackage {
+            id: input.id,
+            self_name: input.self_name,
+            ..Default::default()
+        });
+        for (alias, target) in &input.aliases {
+            pkg.aliases.insert(*alias, *target);
+        }
+    }
+    for rock_mod in rock_modules.iter() {
+        let is_v1 = rock_mod.dialect == skull_parser::Dialect::V1;
+        if !is_v1 {
+            reject_legacy_unscoped_module_items(rock_mod)?;
+            continue;
+        }
+        let Some(tag) = rock_mod.package.clone() else {
+            // A v1 file without a package tag: standalone sources must
+            // not silently become legacy — that would reinterpret their
+            // `::` ascriptions. Reject with the reason.
+            return Err(CompilerError::new_with_label(
+                rock_mod
+                    .module_header
+                    .as_ref()
+                    .map(|h| h.span)
+                    .unwrap_or_else(crate::prelude::Span::unknown),
+                "modules-v1 source has no owning package (standalone v1 sources need a package or script context)".to_string(),
+            ));
+        };
+        let pkg_id = tag.id;
+        // Ensure the package exists in the tree.
+        ws.ns
+            .packages
+            .entry(pkg_id)
+            .or_insert_with(|| NsPackage {
+                id: pkg_id,
+                self_name: ustr::Ustr::from(&tag.self_name),
+                ..Default::default()
+            });
+
+        let module_path: Vec<ustr::Ustr> = rock_mod
+            .module_header
+            .as_ref()
+            .map(|h| h.path.iter().map(|i| i.name).collect())
+            .unwrap_or_default();
+
+        let mut scope = FragmentScope {
+            package: pkg_id,
+            package_name: ustr::Ustr::from(&tag.self_name),
+            module_path: module_path.clone(),
+            ..Default::default()
+        };
+
+        // Walk the file's items (recursing into inline mod blocks),
+        // registering owned definitions and collecting use declarations.
+        let file = rock_mod.file;
+        let mut errs: Vec<CompilerError> = Vec::new();
+        register_items(ws, pkg_id, &module_path, &rock_mod.items, &mut scope, &mut errs);
+        if let Some(err) = errs.pop() {
+            return Err(err);
+        }
+
+        ws.fragment_scopes.insert(file, scope);
+    }
+    Ok(())
+}
+
+/// Register one file's items into the namespace tree under `path`,
+/// recursing into inline mod blocks. `scope` collects the fragment's own
+/// imports; shared (`pub`/`private`-prefixed) use declarations become node
+/// exports (spec 8.2).
+fn register_items(
+    ws: &mut Workspace,
+    pkg_id: u32,
+    path: &[ustr::Ustr],
+    items: &[Item],
+    scope: &mut FragmentScope,
+    errs: &mut Vec<CompilerError>,
+) {
+    let ensure_node = |ws: &mut Workspace, path: &[ustr::Ustr]| -> ustr::Ustr {
+        let pkg = ws.ns.packages.get_mut(&pkg_id).expect("package ensured");
+        let key = NsPackage::path_key(path);
+        pkg.nodes.entry(key).or_insert_with(|| NsNode {
+            path_key: key,
+            segments: path.to_vec(),
+            ..Default::default()
+        });
+        key
+    };
+
+    // Ensure ancestors exist so mid-path traversal always lands.
+    for i in 1..=path.len() {
+        ensure_node(ws, &path[..i]);
+    }
+
+    for item in items {
+        match &item.kind {
+            ItemKind::Module(m) => {
+                let mut child = path.to_vec();
+                child.push(m.name.name);
+                // Record the child on the parent node.
+                {
+                    let parent_key = NsPackage::path_key(path);
+                    let pkg = ws.ns.packages.get_mut(&pkg_id).expect("package");
+                    let parent = pkg.nodes.entry(parent_key).or_insert_with(|| NsNode {
+                        path_key: parent_key,
+                        segments: path.to_vec(),
+                        ..Default::default()
+                    });
+                    parent.children.insert(m.name.name, m.name.name);
+                }
+                // Child visibility from the block header (`pub mod x { .. }`).
+                if let Some(vis) = item.vis.clone() {
+                    let child_key = NsPackage::path_key(&child);
+                    let pkg = ws.ns.packages.get_mut(&pkg_id).expect("package");
+                    let node = pkg.nodes.entry(child_key).or_insert_with(|| NsNode {
+                        path_key: child_key,
+                        segments: child.clone(),
+                        ..Default::default()
+                    });
+                    let ns_vis = to_ns_vis(&vis);
+                    if let Some(existing) = &node.vis {
+                        if *existing != ns_vis {
+                            errs.push(CompilerError::new_with_label(
+                                item.span,
+                                format!(
+                                    "conflicting visibility for module `{}`",
+                                    m.name.name
+                                ),
+                            ));
+                            continue;
+                        }
+                    }
+                    node.vis = Some(ns_vis);
+                }
+                register_items(ws, pkg_id, &child, &m.items, scope, errs);
+            }
+            ItemKind::Use(u) => {
+                let to_ref = |from_root: bool, segments: &[Ident]| UsePathRef {
+                    from_root,
+                    segments: segments.iter().map(|i| i.name).collect(),
+                };
+                match &u.tree {
+                    skull_parser::UseTree::Path { from_root, segments, kind } => {
+                        match kind {
+                            skull_parser::UseSuffix::Bind => {
+                                // `use a::b;` binds the tail segment name.
+                                let local = segments
+                                    .last()
+                                    .map(|i| i.name)
+                                    .unwrap_or(ustr::Ustr::from(""));
+                                if u.vis.is_some() {
+                                    share_export(ws, pkg_id, path, local, to_ref(*from_root, segments), false, u, errs);
+                                } else {
+                                    scope.named.insert(local, to_ref(*from_root, segments));
+                                }
+                            }
+                            skull_parser::UseSuffix::BindAs(alias) => {
+                                if u.vis.is_some() {
+                                    share_export(ws, pkg_id, path, alias.name, to_ref(*from_root, segments), false, u, errs);
+                                } else {
+                                    scope.named.insert(alias.name, to_ref(*from_root, segments));
+                                }
+                            }
+                            skull_parser::UseSuffix::Glob => {
+                                let _ = to_ref;
+                                if u.vis.is_some() {
+                                    share_export(
+                                        ws,
+                                        pkg_id,
+                                        path,
+                                        ustr::Ustr::from("*"),
+                                        UsePathRef {
+                                            from_root: *from_root,
+                                            segments: segments.iter().map(|i| i.name).collect(),
+                                        },
+                                        true,
+                                        u,
+                                        errs,
+                                    );
+                                } else {
+                                    scope.globs.push(UsePathRef {
+                                        from_root: *from_root,
+                                        segments: segments.iter().map(|i| i.name).collect(),
+                                    });
+                                }
+                            }
+                            skull_parser::UseSuffix::Operator(op) => {
+                                let local = ustr::Ustr::from(&format!("__op_{}", op.name));
+                                if u.vis.is_some() {
+                                    share_export(ws, pkg_id, path, local, to_ref(*from_root, segments), false, u, errs);
+                                } else {
+                                    scope.named.insert(local, to_ref(*from_root, segments));
+                                }
+                            }
+                            skull_parser::UseSuffix::Nested(trees) => {
+                                // Flatten `use a::b::{ .. }` into per-subtree
+                                // fragment bindings/exports.
+                                for tree in trees {
+                                    flatten_use_tree(ws, pkg_id, path, *from_root, segments, tree, scope, u, errs);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            other => {
+                // Ordinary definitions: register under the DefKey on the node.
+                let Some((bare, kind)) = owned_name_and_kind(other) else { continue };
+                let pkg = ws.ns.packages.get_mut(&pkg_id).expect("package");
+                let key = NsPackage::path_key(path);
+                let node = pkg.nodes.entry(key).or_insert_with(|| NsNode {
+                    path_key: key,
+                    segments: path.to_vec(),
+                    ..Default::default()
+                });
+                let def_key = bone_core::modules::def_key(
+                    &scope.package_name.to_string(),
+                    path,
+                    bare.as_str(),
+                );
+                let table = match kind {
+                    "type" => &mut node.owned_types,
+                    "global" => &mut node.owned_globals,
+                    "callable" => &mut node.owned_callables,
+                    _ => &mut node.owned_decorators,
+                };
+                if table.insert(bare, def_key).is_some() {
+                    errs.push(CompilerError::new_with_label(
+                        item.span,
+                        format!(
+                            "duplicate definition `{}` in module `{}`",
+                            bare,
+                            if path.is_empty() {
+                                scope.package_name.to_string()
+                            } else {
+                                path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::")
+                            }
+                        ),
+                    ));
+                    continue;
+                }
+                ws.defs.insert(
+                    def_key,
+                    bone_core::modules::DefMeta {
+                        package: pkg_id,
+                        module: path.to_vec(),
+                        name: bare,
+                        vis: to_ns_vis(&item.vis.clone().unwrap_or(skull_parser::Visibility::Private)),
+                        dialect: skull_parser::Dialect::V1,
+                    },
+                );
+            }
+        }
+    }
+}
+
+/// Flatten one subtree of `use a::b::{ .. }` into fragment bindings/exports.
+fn flatten_use_tree(
+    ws: &mut Workspace,
+    pkg_id: u32,
+    path: &[ustr::Ustr],
+    from_root: bool,
+    prefix: &[Ident],
+    tree: &skull_parser::UseTree,
+    scope: &mut FragmentScope,
+    decl: &skull_parser::UseDecl,
+    errs: &mut Vec<CompilerError>,
+) {
+    let skull_parser::UseTree::Path { from_root: sub_root, segments, kind } = tree else {
+        return;
+    };
+    let _ = sub_root;
+    let mut full: Vec<Ident> = prefix.to_vec();
+    full.extend(segments.iter().cloned());
+    match kind {
+        skull_parser::UseSuffix::Bind => {
+            let local = full.last().map(|i| i.name).unwrap_or(ustr::Ustr::from(""));
+            scope.named.insert(
+                local,
+                UsePathRef { from_root, segments: full.iter().map(|i| i.name).collect() },
+            );
+        }
+        skull_parser::UseSuffix::BindAs(alias) => {
+            scope.named.insert(
+                alias.name,
+                UsePathRef { from_root, segments: full.iter().map(|i| i.name).collect() },
+            );
+        }
+        skull_parser::UseSuffix::Operator(op) => {
+            let local = ustr::Ustr::from(&format!("__op_{}", op.name));
+            scope.named.insert(
+                local,
+                UsePathRef { from_root, segments: full.iter().map(|i| i.name).collect() },
+            );
+        }
+        skull_parser::UseSuffix::Glob => {
+            scope.globs.push(UsePathRef {
+                from_root,
+                segments: full.iter().map(|i| i.name).collect(),
+            });
+        }
+        skull_parser::UseSuffix::Nested(trees) => {
+            for tree in trees {
+                flatten_use_tree(ws, pkg_id, path, from_root, &full, tree, scope, decl, errs);
+            }
+        }
+    }
+}
+
+/// Record a shared export binding on the fragment's module node.
+fn share_export(
+    ws: &mut Workspace,
+    pkg_id: u32,
+    path: &[ustr::Ustr],
+    local: ustr::Ustr,
+    target: UsePathRef,
+    is_glob: bool,
+    decl: &skull_parser::UseDecl,
+    errs: &mut Vec<CompilerError>,
+) {
+    let vis = decl.vis.clone();
+    let binding = bone_core::modules::ExportBinding {
+        target,
+        is_glob,
+        vis: to_ns_vis(&vis.unwrap_or(skull_parser::Visibility::Private)),
+    };
+    let pkg = ws.ns.packages.get_mut(&pkg_id).expect("package");
+    let key = NsPackage::path_key(path);
+    let node = pkg.nodes.entry(key).or_insert_with(|| NsNode {
+        path_key: key,
+        segments: path.to_vec(),
+        ..Default::default()
+    });
+    if node.exports.insert(local, binding).is_some() {
+        errs.push(CompilerError::new_with_label(
+            decl.span,
+            format!("duplicate export binding `{}`", local),
+        ));
+    }
+}
+
+fn owned_name_and_kind(item: &ItemKind) -> Option<(ustr::Ustr, &'static str)> {
+    match item {
+        ItemKind::Struct(s) => Some((s.name.name, "type")),
+        ItemKind::Enum(e) => Some((e.name.name, "type")),
+        ItemKind::Newtype(n) => Some((n.name.name, "type")),
+        ItemKind::Global(g) => Some((g.name.name, "global")),
+        ItemKind::Function(f) => Some((f.name.name, "callable")),
+        ItemKind::Decorator(d) => Some((d.name.name, "decorator")),
+        _ => None,
+    }
+}
+
+fn to_ns_vis(vis: &skull_parser::Visibility) -> NsVisibility {
+    match vis {
+        skull_parser::Visibility::Private => NsVisibility::Private,
+        skull_parser::Visibility::Pub => NsVisibility::Pub,
+        skull_parser::Visibility::PubSuper => NsVisibility::Super,
+        skull_parser::Visibility::PubPackage => NsVisibility::Package,
+        skull_parser::Visibility::PubIn(path) => {
+            NsVisibility::In(path.iter().map(|i| i.name).collect())
+        }
+    }
 }
 
 pub fn check_module_incremental(
@@ -828,9 +1259,24 @@ fn reuse_body(
 pub fn pass_register_forward_decls(
     rock_module: &Ast,
     module: &mut Module,
+    v1_scope: Option<&FragmentScope>,
 ) -> Result<(), CompilerError> {
-    // pass 1: register structs for forward decls
-    for item in rock_module.items.iter() {
+    // pass 1: register structs for forward decls. In a v1 fragment the
+    // registration key (and the HIR definition name) is the canonical
+    // DefKey, so per-logical-module duplicate checks fall out of the
+    // workspace merge while same-named types in different modules stay
+    // distinct.
+    for_each_def_item(rock_module.items.as_slice(), &[], &mut |item, path| {
+        let def_key = |name: &ustr::Ustr| -> ustr::Ustr {
+            match v1_scope {
+                Some(sc) => bone_core::modules::def_key(
+                    &sc.package_name.to_string(),
+                    path,
+                    name.as_str(),
+                ),
+                None => *name,
+            }
+        };
         if let ItemKind::Struct(s) = &item.kind {
             // `@value struct` is a retired form: the annotation set `is_value`
             // without `is_c_repr` (a codegen drift). Only the `value Foo { ... }`
@@ -841,8 +1287,9 @@ pub fn pass_register_forward_decls(
                     "`@value` annotation is retired -- declare a value struct with the `value` keyword instead"
                 );
             }
+            let reg_name = def_key(&s.name.name);
             let idx = module.structs.alloc(hir::StructDef {
-                name: s.name.name,
+                name: reg_name,
                 name_span: s.name.span,
                 is_value: s.is_value,
                 is_nobox: s.is_nobox,
@@ -851,19 +1298,24 @@ pub fn pass_register_forward_decls(
                 fields: Vec::new(),
             });
 
-            if module.struct_by_name.insert(s.name.name, idx).is_some() {
+            if module
+                .struct_by_name
+                .insert(reg_name, idx)
+                .is_some()
+            {
                 comp_error!(item.span, "duplicate struct definition: `{}`", s.name.name);
             }
         } else if let ItemKind::Enum(e) = &item.kind {
+            let reg_name = def_key(&e.name.name);
             let idx = module.enums.alloc(hir::EnumDef {
-                name: e.name.name,
+                name: reg_name,
                 name_span: e.name.span,
                 span: item.span,
                 generics: Vec::new(),
                 variants: Vec::new(),
             });
 
-            if module.enums_by_name.insert(e.name.name, idx).is_some() {
+            if module.enums_by_name.insert(reg_name, idx).is_some() {
                 comp_error!(item.span, "duplicate enum definition: `{}`", e.name.name);
             }
         } else if let ItemKind::Newtype(n) = &item.kind {
@@ -872,40 +1324,61 @@ pub fn pass_register_forward_decls(
                 .alloc(hir::TypeExpr::Builtin(hir::BuiltinTy::Unit));
             let wrapped = TyId::Static(module.module_id(), placeholder);
 
+            let reg_name = def_key(&n.name.name);
             let idx = module.newtypes.alloc(NewtypeDef {
-                name: n.name.name,
+                name: reg_name,
                 name_span: n.name.span,
                 span: item.span,
                 generics: Vec::new(),
                 wrapped,
             });
 
-            if module.newtypes_by_name.insert(n.name.name, idx).is_some() {
+            if module.newtypes_by_name.insert(reg_name, idx).is_some() {
                 comp_error!(item.span, "duplicate newtype definition: `{}`", n.name.name);
             }
         }
-    }
-
+        Ok(())
+        })?;
     Ok(())
 }
 
 pub fn pass_lower_fields(a: &Ast, ctx: &mut LowerCtx) -> Result<(), CompilerError> {
-    // pass 2: lower fields
-    for item in a.items.iter() {
+    // pass 2: lower fields. v1 fragments register under their DefKeys, so
+    // the walk carries each item's logical module path.
+    let scope = ctx.v1_scope().cloned();
+    let reg_key = |name: &ustr::Ustr, path: &[ustr::Ustr]| -> ustr::Ustr {
+        match &scope {
+            Some(sc) => {
+                bone_core::modules::def_key(&sc.package_name.to_string(), path, name.as_str())
+            }
+            None => *name,
+        }
+    };
+    for_each_def_item(a.items.as_slice(), &[], &mut |item, path| {
         match &item.kind {
-            ItemKind::Struct(s) => lower_struct_def(ctx, a, s)?,
-            ItemKind::Enum(e) => lower_enum_def(ctx, a, e)?,
-            ItemKind::Newtype(n) => lower_newtype_def(ctx, a, n)?,
+            ItemKind::Struct(s) => lower_struct_def(ctx, a, s, reg_key(&s.name.name, path))?,
+            ItemKind::Enum(e) => lower_enum_def(ctx, a, e, reg_key(&e.name.name, path))?,
+            ItemKind::Newtype(n) => lower_newtype_def(ctx, a, n, reg_key(&n.name.name, path))?,
             _ => {}
         }
-    }
+        Ok(())
+    })?;
 
     Ok(())
 }
 
 pub fn pass_lower_functions(a: &Ast, ctx: &mut LowerCtx) -> Result<(), CompilerError> {
     // pass 3: lower function defs
-    for item in a.items.iter() {
+    let scope = ctx.v1_scope().cloned();
+    let reg_key = |name: &ustr::Ustr, path: &[ustr::Ustr]| -> ustr::Ustr {
+        match &scope {
+            Some(sc) => {
+                bone_core::modules::def_key(&sc.package_name.to_string(), path, name.as_str())
+            }
+            None => *name,
+        }
+    };
+    for_each_def_item(a.items.as_slice(), &[], &mut |item, path| {
         match &item.kind {
             ItemKind::Function(f) => {
                 if f.is_macro {
@@ -969,12 +1442,29 @@ pub fn pass_lower_functions(a: &Ast, ctx: &mut LowerCtx) -> Result<(), CompilerE
                     }
                 }
 
-                let fn_id = lower_function_def(ctx, a, f, &item.annotations, item.span.offset_range.0)?;
+                // Compiler operator families resolve through the operator
+                // pipeline without fragment context, so they keep their bare
+                // name as the registration key in v1 fragments as well. The
+                // key is chosen AFTER validation so `__op_*` cannot skip the
+                // non-overloadable-operator rejection.
+                let key = if fn_name.starts_with("__op_") {
+                    f.name.name
+                } else {
+                    reg_key(&f.name.name, path)
+                };
+                let fn_id = lower_function_def(
+                    ctx,
+                    a,
+                    f,
+                    &item.annotations,
+                    item.span.offset_range.0,
+                    key,
+                )?;
                 let mid = ctx.module.module_id();
 
                 ctx.module
                     .functions_by_name
-                    .entry(f.name.name)
+                    .entry(key)
                     .or_default()
                     .push((mid, fn_id));
             }
@@ -989,18 +1479,19 @@ pub fn pass_lower_functions(a: &Ast, ctx: &mut LowerCtx) -> Result<(), CompilerE
             | ItemKind::Enum(_)
             | ItemKind::Newtype(_) => {}
 
-            // Rejected earlier by reject_unscoped_module_items.
+            // v1: registered in build_namespaces. Legacy: rejected there.
+            // Module items are walked by for_each_def_item, not passed here.
             ItemKind::Use(_) | ItemKind::Module(_) => {}
 
             ItemKind::Global(g) => {
-                lower_global(ctx, a, g, &item.annotations)?;
+                lower_global(ctx, a, g, &item.annotations, reg_key(&g.name.name, path))?;
             }
 
             ItemKind::CompilerDirective(_) => {
                 comp_error!(item.span, "Unsupported top level item {:?}", item);
             }
         }
-    }
-
+        Ok(())
+    })?;
     Ok(())
 }

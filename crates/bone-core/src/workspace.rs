@@ -65,6 +65,17 @@ pub struct Workspace {
     /// holds `&Workspace`) share one counter across threads.
     pub reinferred_body_count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 
+    /// Modules-v1 namespace scope (plan M2). Empty for legacy-only
+    /// workspaces — every legacy path behaves exactly as before when `ns`
+    /// has no packages and `fragment_scopes` is empty.
+    pub ns: crate::modules::NsTree,
+    /// Per-file v1 scope facts: package, logical module path, and the
+    /// fragment's own imports. Keyed by file id (`Module.file`).
+    pub fragment_scopes: FxHashMap<Ustr, crate::modules::FragmentScope>,
+    /// Canonical definition metadata keyed by DefKey (plan 2.1). Legacy
+    /// definitions keep their bare-name keys and gain no entry.
+    pub defs: FxHashMap<Ustr, crate::modules::DefMeta>,
+
     /// Resolved compile-time inputs (docs/comptime-plan.md tier 1), set by the
     /// host once per session build before emission. bone itself never reads them
     /// -- values don't affect types -- but they live here because every
@@ -158,6 +169,9 @@ impl Workspace {
 
             reinferred_body_count: Default::default(),
             comptime_inputs: Default::default(),
+            ns: Default::default(),
+            fragment_scopes: Default::default(),
+            defs: Default::default(),
         };
 
         ws.module_ids.insert(ustr("$builtin"), ModuleId::builtin());

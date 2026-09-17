@@ -1,0 +1,65 @@
+//! Modules-v1 namespace resolution (plan M2): multi-file logical modules,
+//! visibility, scope tiers, UFCS, operators, paths.
+//!
+//! Sections hold embedded files: `//-- <file> @pkg=<self_name>,<id> [@v1]`.
+//! `//^ ty` markers are checked in every embedded file.
+
+//- module_ownership_two_files_share_one_module
+//-- lib.rock @pkg=chess,1 @v1
+mod pieces;
+
+//-- lib_pieces_a.rock @pkg=chess,1 @v1
+mod pieces;
+
+pub fn pawn_value() -> int {
+    shared_base()
+}
+
+fn shared_base() -> int {
+    1
+}
+
+//-- lib_pieces_b.rock @pkg=chess,1 @v1
+mod pieces;
+
+use chess::pieces::pawn_value;
+
+fn doubled() -> int {
+    pawn_value() * 2
+}
+  //^ int
+
+//- cross_package_qualified_paths
+//-- lib.rock @pkg=chess,1 @v1
+pub struct Board {
+    pub size: int,
+}
+
+//-- app.rock @pkg=app,2 @v1
+fn describe() -> int {
+    let b = chess::Board { size: 8 }
+    b.size
+}
+  //^ int
+
+//- import_tiers_own_module_shadows_glob
+//-- lib.rock @pkg=chess,1 @v1
+pub mod util;
+
+//-- lib_util.rock @pkg=chess,1 @v1
+mod util;
+
+pub fn width() -> int {
+    10
+}
+
+pub fn outer_width() -> int {
+    width()
+}
+  //^ int
+
+//- root_alias_collision_rejects
+//-- bad.rock @pkg=bad,3 @v1 @fail
+struct chess { x: int }
+
+fn main() {}
