@@ -136,7 +136,17 @@ pub(crate) fn check_modules(
     if !macro_labels.is_empty() {
         return Err(macro_labels);
     }
-    let ws = bone_semantic::semantic_passes::semantic_pass(modules).map_err(|e| vec![e])?;
+    let ws = bone_semantic::semantic_passes::semantic_pass(modules);
+    // Expansion RECOVERS: a macro that must not expand (item-macro `mod`/`use`)
+    // records the reason on `recovery_errors` and leaves the call in place, so
+    // the syntax gate runs again over the expanded trees. The pass's own
+    // verdict comes second -- the expansion reason explains any type error the
+    // unexpanded call caused. `Session`/LSP still never run this gate.
+    let expanded_syntax = syntax_errors(modules);
+    if !expanded_syntax.is_empty() {
+        return Err(expanded_syntax);
+    }
+    let ws = ws.map_err(|e| vec![e])?;
     let errs = body_errors(&ws);
     if !errs.is_empty() {
         return Err(errs);

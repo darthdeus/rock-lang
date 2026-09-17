@@ -1579,10 +1579,20 @@ impl<'a> Parser<'a> {
     /// Does the current token start an item declaration valid inside a macro
     /// body? (`@anno` / `fn` / `co` / `extern` / `struct` / `enum` / `newtype` /
     /// `inline(lua) fn`.) Mirrors rock's `token_starts_macro_body_item`.
+    ///
+    /// `use`/`mod` are included so they parse as ITEMS and `macro_expand`
+    /// rejects them by name (plan M1: a macro must not change the module
+    /// graph). Left out, they fell through to `parse_statement` and a
+    /// `use a::b;` in a macro body compiled to nothing at all. Both are
+    /// contextual words, so the lookahead is what separates the declaration
+    /// from `mod(a, b)` or an assignment to a binding spelled `mod`.
     fn token_starts_macro_body_item(&self) -> bool {
         match self.kind() {
             TokenKind::At | TokenKind::Fn | TokenKind::Extern
             | TokenKind::Struct | TokenKind::Enum | TokenKind::Newtype => true,
+            TokenKind::Ident(name) if matches!(name.as_str(), "use" | "mod") => {
+                matches!(self.peek_kind(), TokenKind::Ident(_))
+            }
             TokenKind::Ident(name) if name.as_str() == "co" => {
                 matches!(self.peek_kind(), TokenKind::Fn)
             }

@@ -171,3 +171,24 @@ global width: int = 3
 fn f() -> int {
     width()
 }
+
+//- v1_infix_ascription_is_a_path_not_an_ascription @fail=`x::int` did not resolve to any definition
+//-- app.rock @pkg=app,1 @v1
+fn f() -> int {
+    let x = 5
+    let y = x :: int
+    y
+}
+
+//- inline_mod_block_members_resolve
+//-- app.rock @pkg=app,1 @v1
+pub mod util {
+    pub fn heal() -> int { 7 }
+}
+
+fn f() -> int {
+    let n = self::util::heal()
+    let m = n
+          //^ int
+    m
+}

@@ -25,6 +25,10 @@ struct ErrorTestCase {
     expected_error_kind: String,
     #[allow(dead_code)]
     expected_params: Option<String>,
+    /// `//! expect: <text>` lines: substrings the rejecting diagnostic must
+    /// contain. Empty means "any stage may reject, for any reason" -- the
+    /// original contract, kept for the cases that predate this.
+    expected_reasons: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -100,13 +104,28 @@ fn parse_error_test_cases(content: &str) -> Result<Vec<ErrorTestCase>> {
                 i += 1;
             }
 
-            let files = split_body_into_files(&input_lines);
+            // `//! expect:` is harness input, not source: strip it before the
+            // body becomes files, so it cannot reach the parser.
+            let mut expected_reasons = Vec::new();
+            let body: Vec<&str> = input_lines
+                .iter()
+                .filter(|l| match l.trim().strip_prefix("//! expect:") {
+                    Some(want) => {
+                        expected_reasons.push(want.trim().to_string());
+                        false
+                    }
+                    None => true,
+                })
+                .copied()
+                .collect();
+            let files = split_body_into_files(&body);
 
             test_cases.push(ErrorTestCase {
                 name: case_name,
                 files,
                 expected_error_kind,
                 expected_params,
+                expected_reasons,
             });
         } else {
             i += 1;
@@ -207,23 +226,44 @@ fn split_body_into_files(body_lines: &[&str]) -> Vec<(String, String)> {
 /// type error), the expected outcome for a front-end error-test. `Some(ws)` ==
 /// bone ACCEPTED; the workspace is returned so skull emission can run on it
 /// (below) WITHOUT a second semantic pass.
-fn bone_check_case(files: &[(String, String)]) -> Option<bone_semantic::inference::Workspace> {
+fn bone_check_case(
+    files: &[(String, String)],
+) -> Result<bone_semantic::inference::Workspace, String> {
     let mut user = Vec::with_capacity(files.len());
     for (name, code) in files {
         // A case may declare `//! modules: v1` to exercise the v1 grammar.
         let dialect = match rock_host::source_files::parse_modules_directive(code) {
             Ok(d) => d,
-            Err(_) => return None,
+            // anyhow error: an unknown `//! modules:` value is a load error.
+            Err(e) => return Err(e.to_string()),
         };
         match skull_parser::parse_module_with_dialect(code, ustr::Ustr::from(name.as_str()), dialect) {
             Ok(m) => user.push(m),
-            Err(_) => return None, // hard tokenizer failure
+            Err(e) => return Err(error_text(&[e])), // hard tokenizer failure
         }
     }
     // Total parse: a recoverable syntax error returns Ok with `recovery_errors`,
     // so the rejection is the downstream gate in `check_with_stdlib`
     // (`syntax_errors`), not the parse `match` above.
-    crate::bone_backend::check_with_stdlib(user).ok()
+    crate::bone_backend::check_with_stdlib(user).map_err(|errs| error_text(&errs))
+}
+
+/// Every message a rejection carries -- primary, labels, and the siblings a
+/// single-error return folded in. `//! expect:` matches against this text, so a
+/// case can pin the reason a stage rejected for, not merely that it rejected.
+fn error_text(errs: &[rock_core::errors::CompilerError]) -> String {
+    fn push(out: &mut Vec<String>, e: &rock_core::errors::CompilerError) {
+        out.push(e.message.clone());
+        out.extend(e.labels.iter().map(|l| l.message.clone()));
+        for sib in &e.siblings {
+            push(out, sib);
+        }
+    }
+    let mut out = Vec::new();
+    for e in errs {
+        push(&mut out, e);
+    }
+    out.join("\n")
 }
 
 /// Full-pipeline extension: does skull EMISSION reject this bone-accepted case?
@@ -234,12 +274,15 @@ fn bone_check_case(files: &[(String, String)]) -> Option<bone_semantic::inferenc
 /// as the case's rejection makes the suite STAGE-AGNOSTIC: a `.rock.err` says
 /// "this must be rejected", and either bone or skull-emit may be the stage that
 /// raises it. Only reached when bone already accepted, so it reuses `ws`.
-fn skull_emit_rejects(ws: &bone_semantic::inference::Workspace, files: &[(String, String)]) -> bool {
-    files.iter().any(|(name, _)| {
-        match ws.module_ids.get(&ustr::Ustr::from(name.as_str())) {
-            Some(&mid) => skull::mir_emit::emit_workspace_mir(ws, mid).is_err(),
-            None => false,
-        }
+fn skull_emit_rejects(
+    ws: &bone_semantic::inference::Workspace,
+    files: &[(String, String)],
+) -> Option<String> {
+    files.iter().find_map(|(name, _)| {
+        let mid = *ws.module_ids.get(&ustr::Ustr::from(name.as_str()))?;
+        skull::mir_emit::emit_workspace_mir(ws, mid)
+            .err()
+            .map(|e| error_text(&[e]))
     })
 }
 
@@ -254,7 +297,10 @@ fn skull_emit_rejects(ws: &bone_semantic::inference::Workspace, files: &[(String
 /// The DEFAULT tier is what runs, matching a build: an opt-in lint
 /// (`bone_lints::OPT_IN_LINTS`) is unreachable from any build, so a `.rock.err`
 /// must not be able to name one as its rejector.
-fn lint_rejects(ws: &bone_semantic::inference::Workspace, files: &[(String, String)]) -> bool {
+fn lint_rejects(
+    ws: &bone_semantic::inference::Workspace,
+    files: &[(String, String)],
+) -> Option<String> {
     let sources: rustc_hash::FxHashMap<ustr::Ustr, &str> =
         files.iter().map(|(n, c)| (ustr::Ustr::from(n.as_str()), c.as_str())).collect();
     // Same rule as the build pass (`lint_pass::warm_module_ids`): everything the
@@ -269,7 +315,8 @@ fn lint_rejects(ws: &bone_semantic::inference::Workspace, files: &[(String, Stri
         .collect();
     bone_lints::lint_workspace(ws, &warm, true, &sources, &bone_lints::LintOptions::default())
         .iter()
-        .any(|f| f.level() == rock_core::errors::CompilerErrorLevel::Error)
+        .find(|f| f.level() == rock_core::errors::CompilerErrorLevel::Error)
+        .map(|f| error_text(&[f.error.clone()]))
 }
 
 /// Error-test cases the skull/bone successor DELIBERATELY accepts -- documented
@@ -352,21 +399,32 @@ pub fn run_error_suite(
             let result = if error_test.is_todo {
                 ErrorTestResult::Todo("TODO".to_string())
             } else {
-                match bone_check_case(&tc.files) {
-                    None => ErrorTestResult::Pass, // bone rejected -- expected
-                    Some(ws) if skull_emit_rejects(&ws, &tc.files) => {
-                        ErrorTestResult::Pass // skull emission rejected -- expected
+                // bone, then skull emission, then an Error-severity lint: any
+                // of the three may be the rejecting stage.
+                let rejection = match bone_check_case(&tc.files) {
+                    Err(msg) => Some(msg),
+                    Ok(ws) => skull_emit_rejects(&ws, &tc.files)
+                        .or_else(|| lint_rejects(&ws, &tc.files)),
+                };
+                match rejection {
+                    Some(msg) => {
+                        match tc.expected_reasons.iter().find(|w| !msg.contains(w.as_str())) {
+                            // Rejected, but the rule that fired is not the rule
+                            // the case claims to pin.
+                            Some(missing) => ErrorTestResult::Fail(format!(
+                                "rejected, but not for the expected reason `{missing}`; got: {}",
+                                msg.replace('\n', " | ")
+                            )),
+                            None => ErrorTestResult::Pass,
+                        }
                     }
-                    Some(ws) if lint_rejects(&ws, &tc.files) => {
-                        ErrorTestResult::Pass // an Error-severity lint rejected -- expected
-                    }
-                    Some(_) if BONE_ERROR_DIVERGENCES.iter().any(|d| tc.name.contains(d)) => {
+                    None if BONE_ERROR_DIVERGENCES.iter().any(|d| tc.name.contains(d)) => {
                         ErrorTestResult::Todo(format!(
                             "divergence (successor accepts by design): {}",
                             tc.name
                         ))
                     }
-                    Some(_) => ErrorTestResult::Fail(format!(
+                    None => ErrorTestResult::Fail(format!(
                         "expected bone or skull-emit to reject ({}), but both accepted",
                         tc.expected_error_kind
                     )),
