@@ -1845,9 +1845,24 @@ fn reflect_field_type(ws: &Workspace, ty: bone_semantic::prelude::TyId) -> (Stri
 
 /// Register every struct + newtype into `_G.__ROCK_TYPE_TABLE`, so the stdlib
 /// reflection fns (`get_type_info`, `type_info_of`, `type_name`) can recover a
-/// value's metadata from its `__ty` tag. Mirrors
-/// rock-codegen/src/codegen_pass.rs. The prelude already seeds the table empty,
-/// so this only adds entries. No metatables: type tagging is the direct `__ty`.
+/// value's metadata from its `__ty` tag. The prelude already seeds the table
+/// empty, so this only adds entries. No metatables: type tagging is the direct
+/// `__ty`.
+///
+/// `type_id` below is WRITE-ONLY, and deliberately so. It is a counter over
+/// `ws.modules` in resolution order, so it renumbers whenever a declaration
+/// moves between files or a dependency is added -- it is not stable across
+/// builds, worktrees or manifest edits. Every consumer of this table keys by
+/// the type NAME (`serialization.rock`, `snapshot.rock`, `sim_checkpoint.rock`,
+/// `stdlib/unified.rock`) and reads `.kind`/`.fields`/`.variants`; nothing in
+/// the tree reads `.type_id`, and `docs/incremental-testing.md` already treats
+/// its variation as harmless.
+///
+/// It becomes load-bearing the moment anything reads it -- a `type_id<T>()`
+/// intrinsic, an entry in the canonical serializer's hash, a save, a wire
+/// message, an FFI tag. If that day comes, derive the number from a sorted,
+/// order-independent key the way `StateSchema` already does with
+/// `(kind, identity)`, rather than from module order.
 fn type_table_defs(
     ws: &Workspace,
     gc: &rustc_hash::FxHashSet<ustr::Ustr>,
