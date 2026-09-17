@@ -186,3 +186,88 @@ fn test() {
              //^ ReadFieldRef<game::actor::Actor, int>
 }
 
+//- struct_lit_explicit_private_set_rejects @fail=field `health` on struct `Actor` is not writable from this module
+//-- actor.rock @pkg=game,1 @v1
+mod actor;
+pub struct Actor {
+    pub name: string,
+    private(set) health: int = 100,
+}
+
+//-- other.rock @pkg=game,1 @v1
+mod other;
+use game::actor::Actor;
+
+fn test() -> Actor {
+    Actor { name: "hero", health: 200 }
+}
+
+//- struct_lit_explicit_private_rejects @fail=field `secret` on struct `Actor` is not writable from this module
+//-- actor.rock @pkg=game,1 @v1
+mod actor;
+pub struct Actor {
+    pub name: string,
+    private secret: int = 42,
+}
+
+//-- other.rock @pkg=game,1 @v1
+mod other;
+use game::actor::Actor;
+
+fn test() -> Actor {
+    Actor { name: "hero", secret: 99 }
+}
+
+//- struct_lit_omitted_default_allowed
+//-- actor.rock @pkg=game,1 @v1
+mod actor;
+pub struct Actor {
+    pub name: string,
+    private secret: int = 42,
+    private(set) health: int = 100,
+}
+
+//-- other.rock @pkg=game,1 @v1
+mod other;
+use game::actor::Actor;
+
+fn test() -> Actor {
+    let a = Actor { name: "hero" }
+    let a2 = a
+             //^ game::actor::Actor
+    a2
+}
+
+//- struct_lit_spread_private_set_rejects @fail=field `health` on struct `Actor` is not writable from this module
+//-- actor.rock @pkg=game,1 @v1
+mod actor;
+pub struct Actor {
+    pub name: string,
+    private(set) health: int = 100,
+}
+
+//-- other.rock @pkg=game,1 @v1
+mod other;
+use game::actor::Actor;
+
+fn test(a: Actor) -> Actor {
+    Actor { ..a, name: "clone" }
+}
+
+//- struct_lit_spread_private_rejects @fail=field `secret` on struct `Actor` is not accessible from this module
+//-- actor.rock @pkg=game,1 @v1
+mod actor;
+pub struct Actor {
+    pub name: string,
+    private secret: int = 42,
+}
+
+//-- other.rock @pkg=game,1 @v1
+mod other;
+use game::actor::Actor;
+
+fn test(a: Actor) -> Actor {
+    Actor { ..a, name: "clone" }
+}
+
+

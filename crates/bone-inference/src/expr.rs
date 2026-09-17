@@ -1152,7 +1152,7 @@ pub fn infer_expr_used(
             }
 
             check_named_fields(
-                c, gamma, &def.fields, &provided, &subs, expr_span, &what, has_base,
+                c, gamma, Some(name), &def.fields, &provided, &subs, expr_span, &what, has_base,
             )?;
 
             result_ty
@@ -1306,7 +1306,7 @@ pub fn infer_expr_used(
                         })
                         .collect();
 
-                    check_named_fields(c, gamma, fields, &provided, &subs, expr_span, &what, false)?;
+                    check_named_fields(c, gamma, None, fields, &provided, &subs, expr_span, &what, false)?;
                 }
 
                 _ => comp_error!(

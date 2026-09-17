@@ -427,6 +427,7 @@ pub(crate) fn check_positional_args(
 pub(crate) fn check_named_fields(
     c: BodyCtx,
     gamma: &mut Gamma,
+    struct_key: Option<Ustr>,
     fields: &[StructFieldDef],
     provided: &[(Ustr, Idx<Expr>)],
     subs: &FxHashMap<VarId, TyId>,
@@ -449,13 +450,31 @@ pub(crate) fn check_named_fields(
             comp_error!(vspan, "Duplicate field `{}` in {} literal", fname, what);
         }
 
+        if let Some(skey) = struct_key {
+            let site = gamma.access_site();
+            field_access(gamma, skey, *fname, site, FieldAccessNeed::Write)
+                .map_err(|e| e.to_compiler_error(vspan))?;
+        }
+
         seen.push(*fname);
 
         let fty = substitute(gamma, fdef.ty, subs, vspan)?;
         check_expr(c, gamma, *fvalue, fty, vspan)?
     }
 
-    if !base_covers_all {
+    if base_covers_all {
+        if let Some(skey) = struct_key {
+            let site = gamma.access_site();
+            for f in fields {
+                if !seen.contains(&f.name) {
+                    field_access(gamma, skey, f.name, site, FieldAccessNeed::Read)
+                        .map_err(|e| e.to_compiler_error(span))?;
+                    field_access(gamma, skey, f.name, site, FieldAccessNeed::Write)
+                        .map_err(|e| e.to_compiler_error(span))?;
+                }
+            }
+        }
+    } else {
         for f in fields {
             if !seen.contains(&f.name) && !f.has_default {
                 comp_error!(span, "Missing field `{}` in {} literal", f.name, what);
