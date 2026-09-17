@@ -15,7 +15,7 @@
 //! Losers at earlier tiers are recorded as `hidden` so a failing overload
 //! match can name what it would have found (the hidden-origin diagnostic).
 
-use bone_core::modules::{FragmentScope, UsePathRef, STD_PACKAGE_ID};
+use bone_core::modules::{FragmentScope, NsVisibility, UsePathRef, STD_PACKAGE_ID};
 use bone_core::workspace::Workspace;
 use ustr::Ustr;
 
@@ -193,6 +193,43 @@ fn check_key_access(ws: &Workspace, frag: &FragmentScope, key: Ustr) -> Result<(
     }
 }
 
+/// Spec 9 lists MODULES among the things visibility applies to, so traversing
+/// a path segment is an access, exactly like naming the definition at its end.
+///
+/// A module item is declared in its PARENT, so its audience is measured from
+/// the parent's path: an undeclared `mod x;` (or an explicit `private mod x;`)
+/// is private to the declaring module's subtree. At the package root that is
+/// the whole package and no consumer, which is spec 9's "private root items are
+/// effectively accessible throughout the package". The package root node itself
+/// has no declaring parent and is implicitly public.
+///
+/// Both walkers call this; neither carries its own policy. Without it a
+/// consumer could write `dep::private_module::pub_item` and reach straight
+/// through the closed door, because only the final segment was ever checked.
+fn check_module_access(
+    ws: &Workspace,
+    frag: &FragmentScope,
+    pkg_id: u32,
+    module_path: &[Ustr],
+) -> Result<(), String> {
+    let Some((name, declaring)) = module_path.split_last() else {
+        return Ok(());
+    };
+    let Some(pkg) = ws.ns.package(pkg_id) else {
+        return Ok(());
+    };
+    let Some(node) = pkg.node(pkg.key_of(module_path)) else {
+        return Ok(());
+    };
+    let default_vis = NsVisibility::Private;
+    let vis = node.vis.as_ref().unwrap_or(&default_vis);
+    if ws.ns.can_access(vis, pkg_id, declaring, frag.package, &frag.module_path) {
+        Ok(())
+    } else {
+        Err(format!("module `{}` is not accessible from this module", name))
+    }
+}
+
 /// Resolve an explicit path (a use target or a qualified reference) in a v1
 /// fragment. Legacy callers never reach this.
 pub fn resolve_path(
@@ -266,6 +303,7 @@ pub fn resolve_member_path(
         // cannot collide — the tree builder rejects that).
         if node.children.contains_key(&seg) {
             cur.push(seg);
+            check_module_access(ws, frag, pkg_id, &cur)?;
             i += 1;
             continue;
         }
@@ -424,6 +462,7 @@ fn walk_path(
         if pkg.node(key).is_none() {
             return Err(format!("no module `{}` in path", seg));
         }
+        check_module_access(ws, frag, pkg_id, &cur)?;
     }
 
     if let WalkMode::Module = mode {

@@ -363,3 +363,73 @@ fn read() -> int {
             //^ int
     n
 }
+
+//- a_pub_child_module_is_reachable_from_a_consumer
+//-- lib.rock @pkg=chess,1 @v1
+pub mod openings;
+
+//-- lib_openings.rock @pkg=chess,1 @v1
+mod openings;
+
+pub fn ply() -> int {
+    1
+}
+
+//-- app.rock @pkg=app,2 @v1
+fn f() -> int {
+    let n = chess::openings::ply()
+            //^ int
+    n
+}
+
+//- a_private_child_module_is_unreachable_from_a_consumer @fail=module `secret` is not accessible from this module
+//-- lib.rock @pkg=chess,1 @v1
+pub fn sauce() -> int {
+    secret::recipe()
+}
+
+//-- lib_secret.rock @pkg=chess,1 @v1
+private mod secret;
+
+pub fn recipe() -> int {
+    7
+}
+
+//-- app.rock @pkg=app,2 @v1
+fn f() -> int {
+    chess::secret::recipe()
+}
+
+//- an_undeclared_child_module_is_unreachable_from_a_consumer @fail=module `hidden` is not accessible from this module
+//-- lib.rock @pkg=chess,1 @v1
+pub fn exposed() -> int {
+    hidden::inner()
+}
+
+//-- lib_hidden.rock @pkg=chess,1 @v1
+mod hidden;
+
+pub fn inner() -> int {
+    3
+}
+
+//-- app.rock @pkg=app,2 @v1
+fn f() -> int {
+    chess::hidden::inner()
+}
+
+//- a_private_child_module_is_unreachable_through_a_use_import @fail=module `secret` is not accessible from this module
+//-- lib.rock @pkg=chess,1 @v1
+//-- lib_secret.rock @pkg=chess,1 @v1
+private mod secret;
+
+pub fn recipe() -> int {
+    7
+}
+
+//-- app.rock @pkg=app,2 @v1
+use chess::secret::recipe;
+
+fn f() -> int {
+    recipe()
+}
