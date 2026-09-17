@@ -1134,14 +1134,14 @@ impl FnEmit<'_> {
             let base = cell
                 .name
                 .map(|n| {
-                    let s = n.as_str();
+                    let mut s = n.as_str().to_string();
                     if let Some(stripped) = s.strip_prefix("__rock_") {
-                        stripped.to_string()
-                    } else if s.contains("__") {
-                        s.replace("__", "_")
-                    } else {
-                        s.to_string()
+                        s = stripped.to_string();
                     }
+                    while s.contains("__") {
+                        s = s.replace("__", "_");
+                    }
+                    s
                 })
                 .unwrap_or_else(|| format!("t{}", cid.into_raw().into_u32()));
             let mut name = base.clone();

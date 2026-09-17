@@ -892,10 +892,10 @@ function log_dedup_count() { return Object.keys(__stone_log_dedup).length; }
 /// The RNG runtime: mulberry32 over a single 32-bit state word (`>>> 0` keeps it
 /// unsigned; `Math.imul` for the 32-bit multiplies) -- zero allocation. The fn
 /// surface mirrors the Lua splitmix prelude (`crates/skull/src/lib.rs`):
-/// `__rock_rng_seed`, `__rock_rng_state_get`/`_set` (the single-word replay
-/// serialization surface), and the draw. Streams differ per backend by doctrine
+/// `__rock_rng_seed`, `__rock_rng_state_get`/`_set` for gameplay, and
+/// `__rock_presentation_rng_*` for presentation. Streams differ per backend by doctrine
 /// (Lua splitmix64, JS mulberry32) -- bit-parity is a non-goal; the SEMANTIC
-/// (seedable + deterministic + single serializable stream) is upheld. Engine-
+/// (seedable + deterministic + independent serializable streams) is upheld. Engine-
 /// agnostic: seeding is done by the driver glue (it reads `ROCK_TEST_SEED`), not
 /// here. `random()` draws one 32-bit word / 2^32 in [0,1); `random_int(min,max)`
 /// is `[min,max)` exclusive (`r=max-min`, `r<=0 -> min`), single draw for
@@ -3552,7 +3552,8 @@ function __rock_state_image_capture(kind, tick) {
   var id = ++__rock_state_image_next_id;
   var image = { id: id, kind: kind, tick: tick, schema_id: __rock_state_schema_id,
     layouts: Object.create(null), entries: Object.create(null), members: Object.create(null),
-    rng_state: __rock_active_session.__rock_rng_state };
+    rng_state: __rock_active_session.__rock_rng_state,
+    presentation_rng_state: __rock_active_session.__rock_presentation_rng_state };
   __ROCK_STATE_IMAGE_PLAN.entries.forEach(function (entry) { image.layouts[entry.identity] = entry.layout; });
   var seen = new Map();
   __ROCK_STATE_SCHEMA.forEach(function (entry) {
@@ -3597,6 +3598,7 @@ function __rock_state_image_materialize(image_id, kind) {
   __rock_state_image_validate_layouts(image);
   var candidate = __rock_session_new(image.schema_id);
   candidate.__rock_rng_state = image.rng_state;
+  candidate.__rock_presentation_rng_state = image.presentation_rng_state;
   var seen = new Map();
   var source = __rock_active_session;
   __ROCK_STATE_SCHEMA.forEach(function (entry) {
@@ -3681,6 +3683,8 @@ function __rock_state_image_session_commit(session_id) {
     __rock_session_activate(candidate);
     if (candidate.__rock_rng_state !== null && candidate.__rock_rng_state !== undefined
         && typeof __rock_rng_state_set === "function") __rock_rng_state_set(candidate.__rock_rng_state);
+    if (candidate.__rock_presentation_rng_state !== null && candidate.__rock_presentation_rng_state !== undefined
+        && typeof __rock_presentation_rng_state_set === "function") __rock_presentation_rng_state_set(candidate.__rock_presentation_rng_state);
     if (old_id >= 0 && old_id !== session_id) delete __rock_state_image_sessions[old_id];
     return true;
   } catch (e) {
@@ -3695,6 +3699,8 @@ function __rock_state_image_session_activate(session_id) {
   __rock_session_activate(session);
   if (session.__rock_rng_state !== null && session.__rock_rng_state !== undefined
       && typeof __rock_rng_state_set === "function") __rock_rng_state_set(session.__rock_rng_state);
+  if (session.__rock_presentation_rng_state !== null && session.__rock_presentation_rng_state !== undefined
+      && typeof __rock_presentation_rng_state_set === "function") __rock_presentation_rng_state_set(session.__rock_presentation_rng_state);
   return true;
 }
 function __rock_state_image_current_session() {

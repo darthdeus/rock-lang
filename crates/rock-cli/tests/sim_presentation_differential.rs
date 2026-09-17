@@ -67,7 +67,7 @@ fn extract_digest(name: &str, output: &std::process::Output) -> i64 {
 
 #[test]
 fn mag_simulation_repeatability() {
-    let _guard = SIM_LOCK.lock().unwrap();
+    let _guard = SIM_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let out1 = run_sim("sim_repeatability_headless");
     assert_sim_pass("sim_repeatability_headless", &out1);
     let digest1 = extract_digest("sim_repeatability_headless", &out1);
@@ -82,7 +82,7 @@ fn mag_simulation_repeatability() {
 
 #[test]
 fn mag_simulation_presentation_independence() {
-    let _guard = SIM_LOCK.lock().unwrap();
+    let _guard = SIM_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let out_headless = run_sim("sim_repeatability_headless");
     assert_sim_pass("sim_repeatability_headless", &out_headless);
     let headless_digest = extract_digest("sim_repeatability_headless", &out_headless);
