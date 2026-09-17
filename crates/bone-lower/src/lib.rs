@@ -90,11 +90,55 @@ impl<'a> LowerCtx<'a> {
         match self.v1_scope() {
             Some(frag) => resolve::resolve_bare(self.workspace, Some(frag), name)
                 .map_err(|msg| CompilerError::new_with_label(span, msg)),
-            None => Ok(resolve::Resolved {
-                key: name,
-                kind: resolve::ResolvedKind::Binding,
-                hidden: Vec::new(),
-            }),
+            None => {
+                if self.workspace.struct_by_name.contains_key(&name)
+                    || self.workspace.enums_by_name.contains_key(&name)
+                    || self.workspace.newtypes_by_name.contains_key(&name)
+                    || self.workspace.functions_by_name.contains_key(&name)
+                {
+                    return Ok(resolve::Resolved {
+                        key: name,
+                        kind: resolve::ResolvedKind::Binding,
+                        hidden: Vec::new(),
+                    });
+                }
+                // Legacy caller accessing v1 definition (spec 3.2 / 3.3):
+                // projects public root exports of v1 packages.
+                let mut matches: Vec<(Ustr, resolve::ResolvedKind)> = Vec::new();
+                for (def_key, meta) in &self.workspace.defs {
+                    if meta.name == name
+                        && meta.vis == bone_core::modules::NsVisibility::Pub
+                        && meta.module.is_empty()
+                    {
+                        let kind = match meta.kind {
+                            bone_core::modules::DefKind::Type => resolve::ResolvedKind::Type,
+                            bone_core::modules::DefKind::Global => resolve::ResolvedKind::Global,
+                            bone_core::modules::DefKind::Callable => resolve::ResolvedKind::Callable,
+                            bone_core::modules::DefKind::Decorator => resolve::ResolvedKind::Decorator,
+                            bone_core::modules::DefKind::Module => resolve::ResolvedKind::Module,
+                        };
+                        matches.push((*def_key, kind));
+                    }
+                }
+                if matches.len() == 1 {
+                    let (key, kind) = matches[0];
+                    return Ok(resolve::Resolved {
+                        key,
+                        kind,
+                        hidden: Vec::new(),
+                    });
+                } else if matches.len() > 1 {
+                    return Err(CompilerError::new_with_label(
+                        span,
+                        format!("ambiguous legacy reference to `{name}` across v1 packages"),
+                    ));
+                }
+                Ok(resolve::Resolved {
+                    key: name,
+                    kind: resolve::ResolvedKind::Binding,
+                    hidden: Vec::new(),
+                })
+            }
         }
     }
 

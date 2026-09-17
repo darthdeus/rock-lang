@@ -421,3 +421,41 @@ struct Secret { x: int }
 pub fn helper(s: Secret) -> Secret {
     s
 }
+
+//- legacy_caller_accesses_v1_struct_pub_allowed
+//-- actor.rock @pkg=game,1 @v1
+pub struct Actor {
+    pub name: string,
+    private secret: int,
+}
+
+//-- other.rock @pkg=game,1
+fn test(a: Actor) -> string {
+    let s = a.name
+            //^ string
+    s
+}
+
+//- legacy_caller_accesses_v1_struct_private_rejected @fail=field `secret` on struct `Actor` is not accessible from this module
+//-- actor.rock @pkg=game,1 @v1
+pub struct Actor {
+    pub name: string,
+    private secret: int,
+}
+
+//-- other.rock @pkg=game,1
+fn test(a: Actor) -> int {
+    a.secret
+}
+
+//- legacy_caller_writes_v1_private_set_field_rejected @fail=field `health` on struct `Actor` is not writable from this module
+//-- actor.rock @pkg=game,1 @v1
+pub struct Actor {
+    pub name: string,
+    pub private(set) health: int = 100,
+}
+
+//-- other.rock @pkg=game,1
+fn test(a: Actor) {
+    a.health = 50
+}
