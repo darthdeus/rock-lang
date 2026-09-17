@@ -2,7 +2,7 @@
 // keystone type family all backends share (game math and shader math),
 // including the v()/zero() constructors and the Vec2 helpers routed through
 // them. IVec2/Rect/Color and their constructors stay engine-side
-// (stone/engine/math/) because they touch engine-only types or globals.
+// (stone-core/) because they touch engine-only types or globals.
 
 nobox value Vec2 {
     x: float,

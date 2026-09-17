@@ -7,15 +7,15 @@
 //! The direction of the layer is enforced by the package graph, not here.
 //! mag-content does not depend on mag, Rock resolves names over the dependency
 //! closure only, and a content file that names `player` or `world_mobs` fails
-//! to compile. What is left to this file is what the graph cannot say:
+//! to compile. Its one dependency is stone-core -- the shared value types
+//! without the engine runtime -- so there is no window, renderer, audio device
+//! or filesystem in the closure either.
 //!
-//! 1. mag-content must keep NOT depending on mag. One line in a stick.toml
-//!    would dissolve the whole boundary silently, so the manifest is asserted.
-//! 2. mag-content does depend on stone, for IVec2, Color and math. That makes
-//!    stone's runtime surface -- drawing, audio, the filesystem -- reachable
-//!    again, so the subset of the old lint that covers it is kept.
-//!
-//! When the module system lands, 2 is replaced by real visibility rules.
+//! What is left to this file is what the graph cannot say: the two manifest
+//! edits that would dissolve the boundary without any other test noticing.
+//! Adding `mag` to mag-content reverses the layer. Swapping stone-core back for
+//! stone reopens the whole engine runtime, which is why stone-core carries the
+//! purity test the closure rests on.
 
 use std::path::{Path, PathBuf};
 
@@ -31,8 +31,11 @@ fn content_dir() -> PathBuf {
     workspace_root().join("mag-content")
 }
 
-fn content_sources() -> Vec<(PathBuf, String)> {
-    let dir = content_dir();
+fn stone_core_dir() -> PathBuf {
+    workspace_root().join("stone-core")
+}
+
+fn rock_sources(dir: PathBuf) -> Vec<(PathBuf, String)> {
     let mut out = Vec::new();
     let entries = std::fs::read_dir(&dir)
         .unwrap_or_else(|e| panic!("read {}: {e}", dir.display()));
@@ -95,30 +98,38 @@ fn mag_content_does_not_depend_on_the_game() {
              the game depends on the document, never the other way round. Declared: {deps:?}"
         );
     }
+    assert!(
+        !deps.iter().any(|d| d == "stone"),
+        "mag-content must depend on stone-core, not stone. stone brings the window, \
+         the renderer, the audio device and the filesystem back into the closure, and \
+         the layer would then rest on a lint again. Declared: {deps:?}"
+    );
+    assert!(
+        deps.iter().any(|d| d == "stone-core"),
+        "mag-content is expected to reach its value types through stone-core; if that \
+         edge is gone, the test above no longer means what it says. Declared: {deps:?}"
+    );
 }
 
-/// mag-content depends on stone, so the package graph alone no longer keeps a
-/// window, a renderer, an audio device or the filesystem out of the layer.
+/// The purity mag-content's closure rests on. stone-core is the shared value
+/// types -- IVec2, Color, the math over them -- and nothing that needs a
+/// session. Every package that wants those types without the engine depends on
+/// it, so runtime code landing here would reopen the door for all of them at
+/// once, silently.
 #[test]
-fn mag_content_stays_free_of_the_engine_runtime() {
-    let sources = content_sources();
+fn stone_core_stays_free_of_the_engine_runtime() {
+    let sources = rock_sources(stone_core_dir());
     assert!(
         !sources.is_empty(),
-        "mag-content/ has no .rock files -- this gate would pass vacuously"
+        "stone-core/ has no .rock files -- this gate would pass vacuously"
     );
 
-    // Substrings: prefixes that name a whole subsystem of stone the content
-    // layer must not reach, plus the bank it must never load itself.
+    // Substrings: prefixes that name a whole subsystem a value type must not
+    // reach, plus the FFI and session state that would drag one in.
     const BANNED_PREFIXES: &[&str] = &[
-        "draw_", "sfx_", "vfx_", "audio_", "play_sound", "presentation_random",
+        "draw_", "sfx_", "vfx_", "audio_", "play_sound", "_play_sound",
         "read_file", "write_file", "file_read", "file_write", "load_image",
-        // Loading a bank is the game's job; the catalog arrives installed.
-        "MAG_VISUAL_BANK", "VisualBankData",
-        // stone's live session state. `world_frozen()` is engine-side, so the
-        // package graph does not keep it out, and a document that branched on
-        // whether the game is paused would not be a document.
-        "WORLD_MODE", "world_frozen", "editor_mode_enabled", "game_paused",
-        "menu_active",
+        "@extern", "inline(c)", "WORLD_MODE", "world_frozen",
     ];
 
     let mut violations = Vec::new();
@@ -138,10 +149,9 @@ fn mag_content_stays_free_of_the_engine_runtime() {
 
     assert!(
         violations.is_empty(),
-        "mag-content/ must stay decodable without a window, a renderer, an audio \
-         device or the filesystem. A catalog it needs is INSTALLED by whoever has \
-         one (mag_content_install_props / mag_content_install_floor_materials); it \
-         is never loaded here:\n{}",
+        "stone-core must stay usable without a window, a renderer, an audio \
+         device or the filesystem. Code that needs a live session belongs in \
+         stone, which depends on this package:\n{}",
         violations.join("\n")
     );
 }
