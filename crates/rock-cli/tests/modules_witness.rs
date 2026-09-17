@@ -340,3 +340,70 @@ fn the_api_closure_demands_the_return_type_of_an_exported_fn() {
     );
     let _ = std::fs::remove_dir_all(&staged);
 }
+
+// --- The scoped consumer of the converted chess-core (plan M6.2) -----------
+
+/// `tests/modules/chess-scoped` is the V1 -> V1 row on real code: a v1 package
+/// consuming `libs/chess-core`, which M6.2 converted, through an import and
+/// through qualified paths. It builds where it lives (its dependency does not
+/// live under `tests/`, so only `rock test` reads it) and its `@test`s run the
+/// real movegen.
+#[test]
+fn the_scoped_chess_consumer_builds_and_tests_in_place() {
+    let dir = repo_root().join("tests").join("modules").join("chess-scoped");
+    let (stdout, stderr, ok) = rock(&["test", &dir.to_string_lossy()]);
+    assert!(ok, "rock test on the scoped consumer failed\nstdout:\n{stdout}\nstderr:\n{stderr}");
+    assert!(
+        stdout.contains("2/2 @tests passed"),
+        "the scoped consumer's @tests must run against the real chess-core\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+}
+
+/// The other half of the conversion: the 19 functions M6.2 left private are
+/// private to consumers too, including a v1 one. `ch_at` is a real chess-core
+/// helper, and `ch_king_square` in the same file is a real export -- so this
+/// rejects for its visibility, not because the name is missing.
+#[test]
+fn a_v1_consumer_of_chess_core_cannot_reach_a_private_helper() {
+    let dir = scratch("chess_private");
+    let core = repo_root().join("libs").join("chess-core");
+    write(
+        &dir.join("stick.toml"),
+        &format!(
+            r#"
+[package]
+name = "chess-private-probe"
+type = "lib"
+
+[language]
+modules = "v1"
+
+[dependencies]
+chess-core = {{ path = "{}" }}
+
+[build]
+channels = ["dev"]
+default_channel = "dev"
+"#,
+            core.display()
+        ),
+    );
+    write(
+        &dir.join("lib.rock"),
+        r#"
+use chess_core::Position;
+
+pub fn reach(pos: Position) -> int {
+    return chess_core::ch_at(pos, 0)
+}
+"#,
+    );
+    let (stdout, stderr, ok) = rock(&["test", &dir.to_string_lossy()]);
+    let all = format!("{stdout}{stderr}");
+    assert!(!ok, "reaching a private chess-core helper must be refused\nstdout:\n{stdout}\nstderr:\n{stderr}");
+    assert!(
+        all.contains("`ch_at` is not accessible from this module"),
+        "the rejection must name the helper and the reason\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
