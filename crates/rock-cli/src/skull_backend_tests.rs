@@ -2352,7 +2352,7 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
             return; // opt-in; the curated subset is the always-on gate
         }
         let root = std::env::var("SKULL_OVERLAY_ROOT").unwrap_or_else(|_| ws_path("tests"));
-        let files = super::super::collect_rock_files(&root).expect("collect");
+        let files = crate::bone_backend::collect_rock_files(&root).expect("collect");
         let files: Vec<String> = files.into_iter().filter(|f| !f.contains("/benches/")).collect();
         let t = sweep(&files);
         eprintln!(
