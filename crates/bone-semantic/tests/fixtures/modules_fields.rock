@@ -459,3 +459,31 @@ pub struct Actor {
 fn test(a: Actor) {
     a.health = 50
 }
+
+//- vis_tree_descendant_reads_ancestor_private_field_allowed
+//-- lib.rock @pkg=game,1 @v1
+pub struct Actor {
+    pub name: string,
+    private secret: int,
+}
+
+//-- lib_inner.rock @pkg=game,1 @v1
+mod inner;
+
+fn test(a: game::Actor) -> int {
+    a.secret
+}
+
+//- vis_tree_ancestor_reads_descendant_private_field_rejects @fail=field `secret` on struct `Actor` is not accessible from this module
+//-- lib.rock @pkg=game,1 @v1
+fn test(a: game::inner::Actor) -> int {
+    a.secret
+}
+
+//-- lib_inner.rock @pkg=game,1 @v1
+mod inner;
+
+pub struct Actor {
+    pub name: string,
+    private secret: int,
+}

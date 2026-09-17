@@ -48,13 +48,24 @@ fn describe() -> int {
 //-- lib.rock @pkg=chess,1 @v1
 pub mod util;
 
+//-- lib_other.rock @pkg=chess,1 @v1
+mod other;
+
+pub fn width() -> string {
+    "wide"
+}
+
 //-- lib_util.rock @pkg=chess,1 @v1
 mod util;
+
+use chess::other::*;
 
 pub fn width() -> int {
     10
 }
 
+// Tier 2 (this logical module's own definition) wins over the tier 4 glob:
+// the glob `width` returns string, so the marker below is the oracle.
 pub fn outer_width() -> int {
     let n = width()
             //^ int
