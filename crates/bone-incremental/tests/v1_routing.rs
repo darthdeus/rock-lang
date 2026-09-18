@@ -303,8 +303,8 @@ fn projected_callables_with_no_legacy_owner_merge_across_a_member_edit() {
 
 /// A second package's `pick` appearing turns the single projected definition
 /// into a family; removing it turns the family back. Each is a namespace
-/// input edit (full rebuild), and the caller's verdict matches a fresh
-/// session either way.
+/// edit (scope path: the caller looked `pick` up, so it re-lowers), and the
+/// caller's verdict matches a fresh session either way.
 #[test]
 fn a_second_projected_callable_added_or_removed_relowers_its_callers() {
     let other = "pub fn other() -> int {\n    1\n}\n";
@@ -317,11 +317,11 @@ fn a_second_projected_callable_added_or_removed_relowers_its_callers() {
     };
 
     let (tier, diags) = edit_with_diagnostics(files(other), "b.rock", PICK_STRING);
-    assert_eq!(tier, UpdateTier::FullUser);
+    assert_eq!(tier, UpdateTier::Scope);
     assert!(diags.is_empty(), "{diags:?}");
 
     let (tier, diags) = edit_with_diagnostics(files(PICK_STRING), "b.rock", other);
-    assert_eq!(tier, UpdateTier::FullUser);
+    assert_eq!(tier, UpdateTier::Scope);
     assert!(diags.iter().any(|d| d.contains("type mismatch")), "{diags:?}");
 }
 
@@ -425,7 +425,7 @@ const IMPORT_BOTH: &str = "use lib_a::pick;\nuse lib_b::pick;\n\n";
 
 /// Explicit imports of two different callables under one name compose into
 /// one family (spec 8.3), in a v1 and in a legacy file alike. Adding the
-/// second import composes it (a `use` edit: full rebuild); removing it
+/// second import composes it (a `use` edit: scope path); removing it
 /// splits the family again, and `pick("v1")` no longer has a member. Each
 /// edit agrees with a fresh session.
 #[test]
@@ -443,11 +443,11 @@ fn a_second_explicit_import_composes_and_removing_it_splits_the_family() {
         let one = format!("{IMPORT_A}{PICK_USE}");
 
         let (tier, diags) = edit_with_aliases(files(IMPORT_A), "use.rock", &both, &aliases);
-        assert_eq!(tier, UpdateTier::FullUser, "{dialect:?}");
+        assert_eq!(tier, UpdateTier::Scope, "{dialect:?}");
         assert!(diags.is_empty(), "{dialect:?}: {diags:?}");
 
         let (tier, diags) = edit_with_aliases(files(IMPORT_BOTH), "use.rock", &one, &aliases);
-        assert_eq!(tier, UpdateTier::FullUser, "{dialect:?}");
+        assert_eq!(tier, UpdateTier::Scope, "{dialect:?}");
         assert!(diags.iter().any(|d| d.contains("type mismatch")), "{dialect:?}: {diags:?}");
     }
 }

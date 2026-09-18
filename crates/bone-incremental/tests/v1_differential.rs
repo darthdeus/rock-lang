@@ -577,7 +577,7 @@ fn gate_g_visibility_narrowed_on_a_path_used_item() {
 
 /// Gate (h): a legacy definer adds a callable the v1 package also projects to
 /// legacy files, so a legacy caller's bare `bump` becomes one merged overload
-/// family (`CallFamily::LegacyMerged`), decided at lowering. The two members
+/// family (`CallFamily::Merged`), decided at lowering. The two members
 /// have the same signature, so the call is an overload tie at inference.
 ///
 /// legacy_def (edited, 2 bodies) and legacy_use (its bare `bump` read the
@@ -831,10 +831,10 @@ fn a_projected_name_added_resolves_a_legacy_caller() {
     assert_eq!(h.relowered_body_count(), 1, "legacy_use's use_it alone");
 }
 
-/// A merged legacy family (`CallFamily::LegacyMerged`) whose member set grows:
-/// the legacy caller lowers to the same merged callee before and after, and
-/// only its inference sees the new member, so the caller must still be
-/// found through its legacy probe.
+/// A merged legacy family (`CallFamily::Merged`) whose member set grows: the
+/// legacy caller's callee spelling is the same before and after, but its
+/// recorded member keys (`Module::call_families`) are not, so the caller
+/// must still be found through its legacy probe and re-lowered.
 #[test]
 fn a_merged_legacy_family_gains_a_member() {
     let a = "mod a;\n\npub fn bump(n: int, m: int) -> int {\n    n\n}\n";
