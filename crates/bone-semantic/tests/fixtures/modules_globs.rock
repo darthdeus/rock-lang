@@ -1,0 +1,168 @@
+//! Glob imports open only the members accessible from the importing
+//! fragment (spec 8.1, 8.3 tier 4, 9). An inaccessible member never enters
+//! tier selection: it neither shadows a lower tier nor makes a glob
+//! ambiguous.
+//!
+//! Sections hold embedded files: `//-- <file> @pkg=<self_name>,<id> [@v1]`.
+
+//- a_private_glob_member_does_not_shadow_std
+//-- lib_b.rock @pkg=chess,1 @v1
+mod b;
+
+fn is_nan(x: int) -> int {
+    x
+}
+
+//-- lib_c.rock @pkg=chess,1 @v1
+mod c;
+
+use super::b::*;
+
+fn check(v: float) -> bool {
+    let r = is_nan(v)
+            //^ bool
+    r
+}
+
+//- a_private_glob_member_does_not_make_another_glob_ambiguous
+//-- lib_a.rock @pkg=chess,1 @v1
+mod a;
+
+pub fn width() -> string {
+    "wide"
+}
+
+//-- lib_b.rock @pkg=chess,1 @v1
+mod b;
+
+fn width() -> int {
+    1
+}
+
+//-- lib_c.rock @pkg=chess,1 @v1
+mod c;
+
+use super::a::*;
+use super::b::*;
+
+fn pick() -> string {
+    let w = width()
+            //^ string
+    w
+}
+
+//- a_child_glob_of_its_parent_sees_the_parent_private_members
+//-- lib_p.rock @pkg=chess,1 @v1
+mod p;
+
+fn secret() -> int {
+    7
+}
+
+//-- lib_p_kid.rock @pkg=chess,1 @v1
+mod p::kid;
+
+use super::*;
+
+fn reveal() -> int {
+    let n = secret()
+            //^ int
+    n
+}
+
+//- a_pub_package_glob_member_is_visible_to_a_same_package_globber
+//-- lib_b.rock @pkg=chess,1 @v1
+mod b;
+
+pub(package) fn is_nan(x: int) -> int {
+    x
+}
+
+//-- lib_c.rock @pkg=chess,1 @v1
+mod c;
+
+use super::b::*;
+
+fn check() -> int {
+    let r = is_nan(1)
+            //^ int
+    r
+}
+
+//- a_pub_package_glob_member_is_not_visible_to_another_package_globber
+//-- lib.rock @pkg=chess,1 @v1
+pub mod b;
+
+//-- lib_b.rock @pkg=chess,1 @v1
+mod b;
+
+pub(package) fn is_nan(x: int) -> int {
+    x
+}
+
+//-- app.rock @pkg=app,2 @v1
+use chess::b::*;
+
+fn check(v: float) -> bool {
+    let r = is_nan(v)
+            //^ bool
+    r
+}
+
+//- a_private_glob_operator_does_not_make_another_glob_ambiguous
+//-- lib.rock @pkg=geo,1 @v1
+pub struct Vec2 { pub x: int, pub y: int }
+
+//-- lib_ops.rock @pkg=geo,1 @v1
+pub mod ops;
+
+pub operator +(a: super::Vec2, b: super::Vec2) -> super::Vec2 {
+    super::Vec2 { x: a.x, y: b.y }
+}
+
+//-- lib_extra.rock @pkg=geo,1 @v1
+pub mod extra;
+
+operator +(a: super::Vec2, b: int) -> super::Vec2 {
+    a
+}
+
+//-- app.rock @pkg=app,2 @v1
+use geo::Vec2;
+use geo::ops::*;
+use geo::extra::*;
+
+fn f() -> Vec2 {
+    let a = Vec2 { x: 1, y: 2 }
+    let b = Vec2 { x: 3, y: 4 }
+    a + b
+}
+
+//- sentinel_a_glob_does_not_open_its_target_modules_reexports @fail=`ply` did not resolve to any definition
+// SENTINEL (docs/test-sentinels.md). Spec 8.1/8.3 tier 4: a glob opens the
+// target module's accessible members, "including glob re-export candidates";
+// `facade::*` should therefore reach `ply` through `pub use chess::inner::ply`
+// (and through a `pub use chess::inner::*` alike). `glob_candidates` reads
+// only the target's OWNED names, so this fails to resolve today and passes
+// because the bug exists. When globs follow export bindings this section
+// fails: drop `@fail`, add a `//^ int` marker on the call, and add the
+// filtered-visibility twin (a `pub(package) use` export is not opened for
+// another package's globber).
+//-- lib_inner.rock @pkg=chess,1 @v1
+pub mod inner;
+
+pub fn ply() -> int {
+    1
+}
+
+//-- lib_facade.rock @pkg=chess,1 @v1
+pub mod facade;
+
+pub use chess::inner::ply;
+
+//-- app.rock @pkg=app,2 @v1
+use chess::facade::*;
+
+fn f() -> int {
+    ply()
+}

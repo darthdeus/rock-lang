@@ -179,6 +179,22 @@ fn sentinel_a_legacy_definer_edit_does_not_relower_callers_of_a_colliding_name()
     assert!(ambiguous(&removed), "PINNED BUG: the removed collision's ambiguity stays on the caller");
 }
 
+/// A glob opens only the members accessible from the importer (spec 8.1),
+/// so adding a private definition to a globbed module changes no other
+/// module's resolution: `c` still reaches `a::width` through its glob.
+#[test]
+fn a_private_definition_added_to_a_globbed_module_changes_no_globber() {
+    let files = vec![
+        v1("a.rock", "mod a;\n\npub fn width() -> string {\n    \"wide\"\n}\n"),
+        v1("b.rock", "mod b;\n\npub fn depth() -> int {\n    1\n}\n"),
+        v1("c.rock", "mod c;\n\nuse super::a::*;\nuse super::b::*;\n\nfn pick() -> string {\n    width()\n}\n"),
+    ];
+    let edit = "mod b;\n\npub fn depth() -> int {\n    1\n}\n\nfn width() -> int {\n    2\n}\n";
+    let (tier, diags) = edit_with_diagnostics(files, "b.rock", edit);
+    assert_eq!(tier, UpdateTier::FullUser);
+    assert!(diags.is_empty(), "{diags:?}");
+}
+
 /// A legacy file contributes no definitions to the namespace tree, so adding
 /// one stays on the interface path it always took.
 #[test]

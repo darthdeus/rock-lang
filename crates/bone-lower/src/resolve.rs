@@ -187,6 +187,11 @@ fn std_bare(ws: &Workspace, name: Ustr) -> Result<Resolved, String> {
     Ok(Resolved { key, kind, hidden: Vec::new() })
 }
 
+/// Tier 4 candidates for `name`: the members of every globbed module
+/// (the fragment's own globs and its module's glob exports) that are
+/// accessible from `frag`. A glob opens only accessible members (spec 8.1),
+/// so an inaccessible one never shadows a lower tier or makes a glob
+/// ambiguous (spec 8.3).
 fn glob_candidates(
     ws: &Workspace,
     frag: &FragmentScope,
@@ -218,7 +223,9 @@ fn glob_candidates(
                 if let Some(node) = target_pkg.node(node_key) {
                     if let Some(kind) = owned_kind(node, name) {
                         let key = first_owned(node, name).expect("kind implies key");
-                        hits.push((key, kind));
+                        if key_accessible(ws, frag, key) {
+                            hits.push((key, kind));
+                        }
                     }
                 }
             }
@@ -227,21 +234,20 @@ fn glob_candidates(
     hits
 }
 
+/// The spec 9 access predicate for a definition named from `frag`. A key
+/// with no recorded metadata is the stdlib or an intrinsic, which is public.
+fn key_accessible(ws: &Workspace, frag: &FragmentScope, key: Ustr) -> bool {
+    ws.defs.get(&key).is_none_or(|meta| {
+        ws.ns.can_access(&meta.vis, meta.package, &meta.module, frag.package, &frag.module_path)
+    })
+}
+
 fn check_key_access(ws: &Workspace, frag: &FragmentScope, key: Ustr) -> Result<(), String> {
-    let Some(meta) = ws.defs.get(&key) else {
+    if key_accessible(ws, frag, key) {
         return Ok(());
-    };
-    if ws.ns.can_access(
-        &meta.vis,
-        meta.package,
-        &meta.module,
-        frag.package,
-        &frag.module_path,
-    ) {
-        Ok(())
-    } else {
-        Err(format!("`{}` is not accessible from this module", meta.name))
     }
+    let name = ws.defs.get(&key).map_or(key, |meta| meta.name);
+    Err(format!("`{name}` is not accessible from this module"))
 }
 
 /// Spec 9 lists MODULES among the things visibility applies to, so traversing
