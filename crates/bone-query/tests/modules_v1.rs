@@ -478,3 +478,87 @@ fn bare_completion_of_a_bound_name_carries_no_import_edit() {
     let perimeter = items.iter().find(|c| c.label == "perimeter").expect("globbed name offered");
     assert!(perimeter.additional_text_edits.is_none(), "a glob already binds it");
 }
+
+// -- rename -------------------------------------------------------------------
+
+/// Every edit of a rename, as `(file name, line, covered old text, new text)`,
+/// sorted.
+fn rename_edits(bone: &BoneWorkspace, path: &str, pos: Position, new_name: &str) -> Vec<(String, u32, String, String)> {
+    let edit = bone.rename(path, pos, new_name).expect("renameable");
+    let mut out = Vec::new();
+    for (uri, edits) in edit.changes.unwrap_or_default() {
+        let file = uri.as_str().strip_prefix("file://").unwrap().to_string();
+        let text = std::fs::read_to_string(&file).unwrap();
+        let lines: Vec<&str> = text.split('\n').collect();
+        for e in edits {
+            let r = e.range;
+            assert_eq!(r.start.line, r.end.line);
+            let covered: String = lines[r.start.line as usize]
+                .chars()
+                .skip(r.start.character as usize)
+                .take((r.end.character - r.start.character) as usize)
+                .collect();
+            out.push((file_name(&file).to_string(), r.start.line, covered, e.new_text));
+        }
+    }
+    out.sort();
+    out
+}
+
+#[test]
+fn renaming_a_declaration_renames_its_paths_and_use_items_but_not_an_alias() {
+    let project = V1Project::new();
+    let bone = project.open();
+    let shapes = project.path("shapes.rock");
+    let edits = rename_edits(&bone, &shapes, pos_of(SHAPES, "area", 0, 1), "size");
+    let want: Vec<(String, u32, String, String)> = vec![
+        ("main.rock".into(), 0, "area".into(), "size".into()),
+        ("shapes.rock".into(), 2, "area".into(), "size".into()),
+    ];
+    assert_eq!(edits, want, "`surface` is the alias's own name and stays");
+}
+
+#[test]
+fn renaming_a_declaration_renames_qualified_paths_and_re_exports() {
+    let project = V1Project::new();
+    let bone = project.open();
+    let inner = project.path("shapes_inner.rock");
+    let edits = rename_edits(&bone, &inner, pos_of(INNER, "depth", 0, 1), "level");
+    let want: Vec<(String, u32, String, String)> = vec![
+        ("facade.rock".into(), 2, "depth".into(), "level".into()),
+        ("main.rock".into(), 5, "depth".into(), "level".into()),
+        ("main.rock".into(), 8, "depth".into(), "level".into()),
+        ("shapes_inner.rock".into(), 2, "depth".into(), "level".into()),
+    ];
+    assert_eq!(edits, want);
+}
+
+#[test]
+fn renaming_a_glob_imported_declaration_renames_its_bare_uses() {
+    let project = V1Project::new();
+    let bone = project.open();
+    let shapes = project.path("shapes.rock");
+    let edits = rename_edits(&bone, &shapes, pos_of(SHAPES, "perimeter", 0, 1), "outline");
+    let want: Vec<(String, u32, String, String)> = vec![
+        ("main.rock".into(), 7, "perimeter".into(), "outline".into()),
+        ("shapes.rock".into(), 6, "perimeter".into(), "outline".into()),
+    ];
+    assert_eq!(edits, want);
+}
+
+#[test]
+fn renaming_an_alias_renames_only_that_files_uses_of_it() {
+    let project = V1Project::new();
+    let bone = project.open();
+    let main = project.path("main.rock");
+    for (needle, into) in [("surface;", 1), ("surface(2)", 1)] {
+        let edits = rename_edits(&bone, &main, pos_of(MAIN, needle, 0, into), "surf");
+        let want: Vec<(String, u32, String, String)> = vec![
+            ("main.rock".into(), 0, "surface".into(), "surf".into()),
+            ("main.rock".into(), 6, "surface".into(), "surf".into()),
+        ];
+        assert_eq!(edits, want, "renaming at `{needle}`");
+        let range = bone.prepare_rename(&main, pos_of(MAIN, needle, 0, into)).expect("an alias is renameable");
+        assert_eq!(range.end.character - range.start.character, "surface".len() as u32);
+    }
+}

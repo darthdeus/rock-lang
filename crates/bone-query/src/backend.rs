@@ -293,6 +293,21 @@ fn v1_path_completions(ws: &Workspace, path: &str, src: &str, at: usize, prefix:
     Some(items)
 }
 
+/// The identifier at or ending at `offset` in `src`.
+fn ident_around(src: &str, offset: usize) -> &str {
+    let b = src.as_bytes();
+    let is_ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+    let mut start = offset.min(b.len());
+    while start > 0 && is_ident(b[start - 1]) {
+        start -= 1;
+    }
+    let mut end = offset.min(b.len());
+    while end < b.len() && is_ident(b[end]) {
+        end += 1;
+    }
+    &src[start..end]
+}
+
 /// Where a new `use` goes in a v1 fragment: the start of the line after its
 /// last top-level `use` item, else after its `mod` header, else the top.
 fn import_insertion_offset(c: &bone_semantic::semantic_passes::FragmentContribution, src: &str) -> usize {
@@ -1474,6 +1489,76 @@ impl BoneWorkspace {
         )
     }
 
+    /// The sites a rename at `offset` rewrites: [`Self::v1_rename_sites`]
+    /// for a modules-v1 definition or import alias, else every reference of
+    /// the symbol, all overloads of a function included.
+    fn rename_sites(&self, proj: &BoneProject, path: &str, offset: usize) -> Vec<crate::query::RefSite> {
+        self.v1_rename_sites(proj, path, offset).unwrap_or_else(|| {
+            self.all_reference_spans(proj, path, offset, crate::query::FnRefScope::AllOverloads)
+        })
+    }
+
+    /// Rename sites that tell a definition from an import alias (spec 15.3).
+    /// Renaming a modules-v1 definition rewrites every site that spells its
+    /// name -- its declaration, bare uses, the naming segment of each path,
+    /// `use` items and re-exports -- and not the local name an alias binds.
+    /// Renaming an alias (`use a::f as g`, at the `g` or at a use of it)
+    /// rewrites that alias and the uses of `g` in its own file. `None` when
+    /// the cursor is on neither.
+    fn v1_rename_sites(&self, proj: &BoneProject, path: &str, offset: usize) -> Option<Vec<crate::query::RefSite>> {
+        use bone_semantic::hir::{PathSegmentRef, SegmentTarget};
+        let ws = proj.session.workspace();
+        let mid = user_module_for_path(ws, path)?;
+        let text_at = |span: &Span| {
+            proj.texts
+                .get(span.file.as_str())
+                .and_then(|t| t.get(span.offset_range.0..span.offset_range.1))
+        };
+        let (key, alias) = match crate::query::path_segment_at(ws, mid, offset) {
+            Some(PathSegmentRef { target: SegmentTarget::Def(key), alias: true, span }) => {
+                (key, Some(text_at(&span)?.to_string()))
+            }
+            Some(PathSegmentRef { target: SegmentTarget::Def(key), .. }) => (key, None),
+            Some(_) => return None,
+            None => {
+                let key = crate::query::v1_def_named_at(ws, Ustr::from(path), offset).or_else(|| {
+                    let def = gaps::definition(ws, mid, ws.inference(mid)?, offset)?;
+                    crate::query::v1_def_declared_at(ws, &def)
+                })?;
+                let src = proj.texts.get(path)?;
+                let word = ident_around(src, offset);
+                let is_alias = word != ws.defs.get(&key)?.name.as_str()
+                    && crate::modules_scope::fragment(ws, Ustr::from(path))
+                        .is_some_and(|frag| frag.named.contains_key(&Ustr::from(word)));
+                (key, is_alias.then(|| word.to_string()))
+            }
+        };
+        let name = ws.defs.get(&key)?.name;
+        let decl = crate::query::segment_target_def(ws, SegmentTarget::Def(key))?;
+        // Every site of the definition: the reference walks from its
+        // declaration, then each recorded path segment naming it (a walk
+        // reports a qualified call by the whole path's span, which no site
+        // spelling check below keeps).
+        let mut sites: Vec<Span> = self
+            .all_reference_spans(proj, decl.file.as_str(), decl.offset_range.0, crate::query::FnRefScope::AllOverloads)
+            .into_iter()
+            .map(|site| site.span)
+            .collect();
+        sites.extend(
+            crate::query::segments_naming(ws, SegmentTarget::Def(key))
+                .into_iter()
+                .filter(|seg| alias.is_some() || !seg.alias)
+                .map(|seg| seg.span),
+        );
+        let spelling = alias.as_deref().unwrap_or(name.as_str());
+        sites.retain(|span| {
+            text_at(span) == Some(spelling) && (alias.is_none() || span.file.as_str() == path)
+        });
+        sites.sort_by_key(|span| (span.file.as_str().to_string(), span.offset_range));
+        sites.dedup_by_key(|span| (span.file, span.offset_range));
+        Some(sites.into_iter().map(|span| crate::query::RefSite { span, shorthand: None }).collect())
+    }
+
     // -- Feature: completion (stubbed: crate::query::completion) ---------------------
 
     pub fn completion(&mut self, path: &str, pos: Position) -> Vec<CompletionItem> {
@@ -2469,7 +2554,7 @@ impl BoneWorkspace {
         // at a declaration name ("nothing to rename" on `fn foo`), and the whole
         // enclosing `Call` span at a callee (prefilling `foo(args)`, not `foo`).
         let here = self
-            .all_reference_spans(proj, path, offset, crate::query::FnRefScope::AllOverloads)
+            .rename_sites(proj, path, offset)
             .into_iter()
             .map(|s| s.span)
             .find(|s| {
@@ -2487,7 +2572,7 @@ impl BoneWorkspace {
         let src = proj.texts.get(path)?;
         let offset = offset_at_line_col(src, pos.line, pos.character);
         // Rename rewrites the whole (shared) overloaded name, not one overload.
-        let sites = self.all_reference_spans(proj, path, offset, crate::query::FnRefScope::AllOverloads);
+        let sites = self.rename_sites(proj, path, offset);
         if sites.is_empty() {
             return None;
         }

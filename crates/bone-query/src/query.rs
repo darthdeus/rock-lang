@@ -825,6 +825,36 @@ pub fn segment_target_def(ws: &Workspace, target: hir::SegmentTarget) -> Option<
     }
 }
 
+/// Every recorded path segment, in every module and body, that resolved to
+/// `target` ([`hir::PathSegmentRef`]).
+pub fn segments_naming(ws: &Workspace, target: hir::SegmentTarget) -> Vec<hir::PathSegmentRef> {
+    let mut out = Vec::new();
+    for m in ws.modules.iter() {
+        out.extend(m.path_segments.iter().filter(|s| s.target == target));
+        for body in m.bodies.values() {
+            out.extend(body.path_segments.iter().filter(|s| s.target == target));
+        }
+    }
+    out
+}
+
+/// The modules-v1 definition whose declaration [`segment_target_def`]
+/// reports as `decl`: the definition a navigation landed on.
+pub fn v1_def_declared_at(ws: &Workspace, decl: &Span) -> Option<Ustr> {
+    ws.defs
+        .keys()
+        .copied()
+        .find(|key| segment_target_def(ws, hir::SegmentTarget::Def(*key)).is_some_and(|d| d == *decl))
+}
+
+/// The modules-v1 definition whose declared name covers `offset` of `file`.
+pub fn v1_def_named_at(ws: &Workspace, file: Ustr, offset: usize) -> Option<Ustr> {
+    ws.defs.keys().copied().find(|key| {
+        segment_target_def(ws, hir::SegmentTarget::Def(*key))
+            .is_some_and(|d| d.file == file && span_contains(&d, offset))
+    })
+}
+
 fn def_of_name(ws: &Workspace, name: Ustr) -> Option<Span> {
     for m in ws.modules.iter() {
         if let Some(g) = m.global_by_name.get(&name) {
