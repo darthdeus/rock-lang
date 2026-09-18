@@ -38,14 +38,14 @@ use bone_semantic::inference::Workspace;
 use rock_core::errors::CompilerError;
 use rock_core::source_code::{Dialect, FileContents};
 use rock_core::SourceFiles;
-use rock_host::stick::graph::{PackageGraph, PackageId};
+use rock_host::stick::graph::PackageId;
 use rock_host::stick::StickConfig;
 use serde_json::{json, Value};
 use ustr::Ustr;
 
 use crate::modules_analysis::{
-    self, apply_edits, declared_name, describe_change, map_offset, map_sites, short_path, sites, Edit, PopMode, Ref,
-    RefKind, SiteKey, Sites, Target,
+    self, apply_edits, declared_name, describe_change, load_ctx, map_offset, map_sites, short_path, sites, Ctx, Edit,
+    PopMode, Ref, RefKind, SiteKey, Sites, Target,
 };
 use crate::modules_audit::Format;
 
@@ -208,57 +208,6 @@ fn parse_defs(files: &[PkgFile]) -> Result<(Vec<Def>, Vec<Vec<modules_analysis::
 }
 
 // --- analysis contexts -------------------------------------------------------
-
-/// One compilation unit the package is analyzed in: the package itself or a
-/// named consumer, each with its tests (the `rock test` population). A
-/// consumer whose test population does not check is analyzed with its
-/// `rock compile` population instead, and its test uses are unknown.
-struct Ctx {
-    root: PathBuf,
-    mode: PopMode,
-    graph: PackageGraph,
-    sources: SourceFiles,
-    /// The migrated package's id in this graph.
-    p_id: u32,
-    file_pkg: HashMap<Ustr, u32>,
-}
-
-impl Ctx {
-    fn name(&self) -> &str {
-        &self.graph.package(self.graph.root()).manifest_name
-    }
-}
-
-fn load_ctx(root: &Path, p_root: &Path, mode: PopMode) -> std::result::Result<Ctx, String> {
-    let root = root.canonicalize().map_err(|e| format!("`{}`: {e}", root.display()))?;
-    let Some((config_path, config)) = StickConfig::find_from_dir(&root).map_err(|e| format!("{e:#}"))? else {
-        return Err(format!("no stick.toml at or above `{}`", root.display()));
-    };
-    let manifest_dir = config_path.parent().unwrap_or(&config_path).to_path_buf();
-    if manifest_dir.canonicalize().ok().as_deref() != Some(root.as_path()) {
-        return Err(format!(
-            "`{}` is not a package root (its nearest stick.toml is `{}`)",
-            root.display(),
-            config_path.display()
-        ));
-    }
-    let channel = rock_host::stick::resolved_channel_for(&config);
-    let graph = PackageGraph::build_with_channel(&manifest_dir, &config, &channel).map_err(|e| format!("{e:#}"))?;
-    let Some(p) = graph.packages().iter().find(|n| n.root == p_root) else {
-        return Err(format!(
-            "`{}` does not depend on the package being migrated (`{}`)",
-            graph.package(graph.root()).manifest_name,
-            p_root.display()
-        ));
-    };
-    let p_id = p.id.0;
-    let pop = modules_analysis::population(&root, &graph, Some(mode))?;
-    let (file_pkg, untagged) = modules_analysis::file_packages(&pop.analyzed);
-    if !untagged.is_empty() {
-        return Err(format!("{} analyzed file(s) carry no package tag: {}", untagged.len(), untagged.join(", ")));
-    }
-    Ok(Ctx { root, graph, sources: pop.analyzed, p_id, file_pkg, mode })
-}
 
 /// A checked context: its workspace and its reference list.
 struct Checked {

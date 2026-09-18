@@ -721,6 +721,24 @@ impl CommandContext {
             }
             return Ok(());
         }
+        if self.args.command == CliCommand::Fix {
+            let usage = "usage: rock fix --imports <package|file> [--check|--apply] [--format pretty|json]";
+            if !self.args.imports {
+                anyhow::bail!("rock fix: name the fix to run (`--imports` is the only one)\n{usage}");
+            }
+            let format = match self.args.perf_format.as_str() {
+                "pretty" => crate::modules_audit::Format::Pretty,
+                "json" => crate::modules_audit::Format::Json,
+                other => anyhow::bail!("rock fix: unknown --format `{other}` (pretty|json)\n{usage}"),
+            };
+            let [target] = self.args.files.as_slice() else { anyhow::bail!("{usage}") };
+            let mode = if self.args.apply { crate::modules_migrate::Mode::Apply } else { crate::modules_migrate::Mode::Check };
+            let code = crate::modules_fix::run(std::path::Path::new(target), mode, format)?;
+            if code != 0 {
+                std::process::exit(code);
+            }
+            return Ok(());
+        }
         if self.args.command == CliCommand::DocsIndex {
             return crate::docs_index::run(&self.args.files, self.args.output.as_deref());
         }

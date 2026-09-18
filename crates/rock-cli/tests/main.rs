@@ -20,6 +20,8 @@ mod modules_audit;
 mod modules_emit;
 #[path = "modules_migrate.rs"]
 mod modules_migrate;
+#[path = "modules_fix.rs"]
+mod modules_fix;
 #[path = "modules_witness.rs"]
 mod modules_witness;
 #[path = "sound_inspect_cli.rs"]

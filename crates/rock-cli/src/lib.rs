@@ -85,6 +85,7 @@ mod text_utils;
 pub mod unified_compile;
 mod modules_analysis;
 mod modules_audit;
+mod modules_fix;
 mod modules_migrate;
 mod watch;
 
@@ -339,6 +340,10 @@ pub enum CliCommand {
     /// -- convert a legacy package to modules-v1 (spec 15.2). See
     /// `modules_migrate::run`.
     Modules,
+    /// `rock fix --imports <package|file> [--check|--apply]` -- add the
+    /// imports a modules-v1 fragment's unresolved names need (spec 15.3).
+    /// See `modules_fix::run`.
+    Fix,
 }
 
 impl clap::ValueEnum for CliCommand {
@@ -382,6 +387,7 @@ impl clap::ValueEnum for CliCommand {
             Self::DocsIndex,
             Self::SdkCheck,
             Self::Modules,
+            Self::Fix,
         ]
     }
     fn to_possible_value(&self) -> Option<clap::builder::PossibleValue> {
@@ -443,6 +449,7 @@ impl CliCommand {
             Self::DocsIndex => "docs-index",
             Self::SdkCheck => "sdk-check",
             Self::Modules => "modules",
+            Self::Fix => "fix",
         }
     }
 }
@@ -776,6 +783,8 @@ pub struct Args {
     /// `rock modules migrate --export-test-uses`: also export what only a
     /// consumer's tests reference (spec 16 says not to by default).
     pub export_test_uses: bool,
+    /// `rock fix --imports`: the fix to run (the only one so far).
+    pub imports: bool,
     /// Where `--union` looks for consumers. Defaults to the lib's parent, which
     /// is right when the lib sits beside its consumers (`stone/`); a nested lib
     /// (`libs/chess-core`) needs the repo root passed explicitly.
@@ -959,6 +968,8 @@ impl Args {
                 .help("For `rock modules migrate`: write the planned edits after verifying them (without it, or with --check, only the plan is printed)."))
             .arg(Arg::new("consumer").long("consumer").value_name("DIR").action(ArgAction::Append)
                 .help("For `rock modules migrate`: a consumer package whose references decide what becomes `pub` (repeatable)."))
+            .arg(Arg::new("imports").long("imports").action(ArgAction::SetTrue)
+                .help("For `rock fix`: add the `use` items a modules-v1 fragment's unresolved names need, when one accessible candidate exists (plans by default; --apply writes)."))
             .arg(Arg::new("export-test-uses").long("export-test-uses").action(ArgAction::SetTrue)
                 .help("For `rock modules migrate`: also make `pub` what only a consumer's tests reference (by default that is a blocker: spec 16 prefers relocating the test)."))
             .arg(Arg::new("consumers").long("consumers")
@@ -1066,6 +1077,7 @@ impl Args {
             apply: m.get_flag("apply"),
             consumer: m.get_many::<String>("consumer").map(|v| v.cloned().collect()).unwrap_or_default(),
             export_test_uses: m.get_flag("export-test-uses"),
+            imports: m.get_flag("imports"),
             consumers: m.get_one::<String>("consumers").cloned(),
             // Backend selection. An explicit `--backend` flag wins; otherwise an
             // explicit `ROCK_BACKEND` env var; otherwise the implicit default is
