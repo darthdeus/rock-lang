@@ -184,6 +184,53 @@ fn f() -> int {
     n
 }
 
+//- a_glob_reexport_of_a_named_reexport_resolves
+//-- lib_inner.rock @pkg=chess,1 @v1
+pub mod inner;
+
+pub fn ply() -> int {
+    1
+}
+
+//-- lib_facade.rock @pkg=chess,1 @v1
+pub mod facade;
+
+pub use chess::inner::ply;
+
+//-- lib_hub.rock @pkg=chess,1 @v1
+pub mod hub;
+
+pub use chess::facade::*;
+
+//-- app.rock @pkg=app,2 @v1
+use chess::hub::*;
+
+fn f() -> int {
+    let n = ply()
+            //^ int
+    let m = chess::hub::ply()
+            //^ int
+    n + m
+}
+
+//- a_mixed_glob_and_named_reexport_cycle_is_diagnosed @fail=invalid `use` target: `chess::a::ply` did not resolve to any definition
+//-- lib_a.rock @pkg=chess,1 @v1
+pub mod a;
+
+pub use chess::b::*;
+
+//-- lib_b.rock @pkg=chess,1 @v1
+pub mod b;
+
+pub use chess::a::ply;
+
+//-- app.rock @pkg=app,2 @v1
+use chess::a::*;
+
+fn f() -> int {
+    ply()
+}
+
 //- a_reexport_target_resolves_from_the_exporting_module
 //-- lib_inner.rock @pkg=chess,1 @v1
 pub mod inner;

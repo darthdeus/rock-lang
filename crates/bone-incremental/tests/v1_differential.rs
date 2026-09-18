@@ -500,20 +500,16 @@ fn gate_e_module_header_changed() {
 
 /// Gate (f): a `pub use` re-export edited in `facade`, reaching `user`
 /// through a glob chain: user globs hub, hub glob-re-exports facade, and
-/// facade's glob re-export is re-pointed from `a` to `b`
+/// facade's named re-export is re-pointed from `a::bump` to `b::bump`
 /// (`resolve::members_of` follows the chain to a fixed point).
 ///
 /// PINNED OVER-INVALIDATION: 5 user + 2 warm bodies. Target, fragment-level:
 /// facade (edited, no bodies) and user (its bare `bump` walked hub -> facade,
 /// 1 body) -- 1; a, b, d and the warm stdlib 0. Per-body: the same 1.
-///
-/// The chain is glob-to-glob because a glob re-export of a module that binds
-/// the name by a NAMED re-export does not resolve today; see
-/// `sentinel_glob_reexport_of_a_named_reexport_reads_as_a_cycle`.
 #[test]
 fn gate_f_reexport_edit_reaches_a_globber_through_a_glob_chain() {
-    let facade0 = "mod facade;\n\npub use super::a::*;\n";
-    let facade1 = "mod facade;\n\npub use super::b::*;\n";
+    let facade0 = "mod facade;\n\npub use super::a::bump;\n";
+    let facade1 = "mod facade;\n\npub use super::b::bump;\n";
     let hub = "mod hub;\n\npub use super::facade::*;\n";
     let user = "mod user;\n\nuse super::hub::*;\n\nfn pick() -> int {\n    bump(1)\n}\n";
     let mut h = V1Harness::new(vec![
@@ -538,23 +534,13 @@ fn gate_f_reexport_edit_reaches_a_globber_through_a_glob_chain() {
     );
 }
 
-/// PINNED BUG (resolver, not incremental: a fresh build agrees). A glob
-/// re-export of a module that binds the name through a NAMED re-export does
-/// not resolve. `hub` has `pub use super::facade::*;` and `facade` has
-/// `pub use super::a::bump;`: `super::hub::bump` reports a cycle and a
-/// fragment globbing `hub` reports `bump` unresolved. A fragment globbing
-/// `facade` directly resolves it. Mechanism (read from
-/// `crates/bone-lower/src/resolve.rs`): `glob_export_members` pushes
-/// `(pkg, facade, bump)` onto `visiting` before `members_of(facade, bump)`,
-/// and `explicit_members` then keys facade's named export with the SAME
-/// tuple, finds it already visited and returns `cycle` with nothing found.
-/// The glob-opening guard and the export-binding guard share one key space.
-///
-/// This passes today because the bug exists. When the resolver is fixed,
-/// both lookups resolve to `livev1::a::bump` with no diagnostic: flip the
-/// assertions to that, and gate (f) may then use this named-export chain.
+/// A glob re-export of a module that binds the name through a NAMED
+/// re-export resolves, by path and through a glob of the hub. The glob
+/// guard and the export-binding guard used to share `(package, node, name)`
+/// visit keys, so facade's named export read as a cycle once the glob of
+/// hub had opened facade.
 #[test]
-fn sentinel_glob_reexport_of_a_named_reexport_reads_as_a_cycle() {
+fn a_glob_reexport_of_a_named_reexport_resolves() {
     let facade = "mod facade;\n\npub use super::a::bump;\n";
     let hub = "mod hub;\n\npub use super::facade::*;\n";
     let by_path = "mod user;\n\nfn pick() -> int {\n    super::hub::bump(1)\n}\n";
@@ -563,15 +549,11 @@ fn sentinel_glob_reexport_of_a_named_reexport_reads_as_a_cycle() {
     let build = |user: &str| {
         V1Harness::new(vec![v1("a.rock", A_BUMP), v1("facade.rock", facade), v1("hub.rock", hub), v1("user.rock", user)])
     };
-
-    let h = build(direct);
-    assert!(h.diagnostics().is_empty(), "{:?}", h.diagnostics());
-    assert_eq!(h.call_keys("user.rock"), vec![(key("a::bump"), None)]);
-
-    let h = build(by_path);
-    assert_eq!(h.diagnostics(), vec!["circular `use` binding with no defining target".to_string()], "BUG pinned");
-    let h = build(by_glob);
-    assert_eq!(h.diagnostics(), vec!["`bump` did not resolve to any definition".to_string()], "BUG pinned");
+    for user in [direct, by_path, by_glob] {
+        let h = build(user);
+        assert!(h.diagnostics().is_empty(), "{user}: {:?}", h.diagnostics());
+        assert_eq!(h.call_keys("user.rock"), vec![(key("a::bump"), None)], "{user}");
+    }
 }
 
 /// Gate (g): visibility narrowed on an item another module names by a

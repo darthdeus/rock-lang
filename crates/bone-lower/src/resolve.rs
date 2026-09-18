@@ -290,8 +290,18 @@ impl Members {
     }
 }
 
-/// (package, module key, name) bindings being followed, for cycle detection.
-type Visiting = Vec<(u32, Ustr, Ustr)>;
+/// Bindings being followed, for cycle detection: (package, module key, name)
+/// plus which guard pushed it. Opening a module's glob exports and following
+/// a module's named export binding of the same name are different steps, so
+/// they keep separate keys: a glob of `hub` that opens `facade` must still
+/// follow `facade`'s own `pub use a::bump`.
+type Visiting = Vec<(u32, Ustr, Ustr, Guard)>;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Guard {
+    ExportBinding,
+    GlobOpen,
+}
 
 /// The one member lookup: what module `path` of `pkg_id` offers under `name`
 /// to `viewers`. Owned definitions and named export bindings bind the name
@@ -353,7 +363,7 @@ fn explicit_members(
         out.denied = true;
         return Ok(Some(out));
     }
-    let visit = (pkg_id, node_key, name);
+    let visit = (pkg_id, node_key, name, Guard::ExportBinding);
     if visiting.contains(&visit) {
         out.cycle = true;
         return Ok(Some(out));
@@ -414,7 +424,7 @@ fn glob_export_members(
         let Some(target) = ws.ns.package(target_pkg) else { continue };
         // A glob chain that comes back to a module it is already opening
         // adds nothing new; that module's members are being collected.
-        let visit = (target_pkg, target.key_of(&target_path), name);
+        let visit = (target_pkg, target.key_of(&target_path), name, Guard::GlobOpen);
         if visiting.contains(&visit) {
             continue;
         }
