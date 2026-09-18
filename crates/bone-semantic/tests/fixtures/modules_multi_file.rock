@@ -1047,3 +1047,38 @@ fn f() -> int {
             //^ int
     n
 }
+
+//- pub_in_admits_the_named_ancestor_subtree
+//-- lib.rock @pkg=app,1 @v1
+pub fn root_fn() -> int {
+    0
+}
+
+//-- lib_a_b.rock @pkg=app,1 @v1
+pub mod a::b;
+
+pub(in a) fn f() -> int {
+    1
+}
+
+//-- lib_a_c.rock @pkg=app,1 @v1
+mod a::c;
+
+fn g() -> int {
+    let n = super::b::f()
+            //^ int
+    n
+}
+
+//- pub_in_rejects_outside_the_named_ancestor @fail=`f` is not accessible from this module
+//-- lib.rock @pkg=app,1 @v1
+fn h() -> int {
+    a::b::f()
+}
+
+//-- lib_a_b.rock @pkg=app,1 @v1
+pub mod a::b;
+
+pub(in a) fn f() -> int {
+    1
+}

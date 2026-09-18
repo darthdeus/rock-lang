@@ -1734,6 +1734,34 @@ mod modules_items_tests {
         }
     }
 
+    /// Visibility leads the item, annotations included (`parse_item` reads the
+    /// modifiers before the annotations), so an annotated item and a custom
+    /// decorator can be exported.
+    #[test]
+    fn visibility_leads_an_annotated_item_and_a_decorator() {
+        let spelled = |vis: &Option<Visibility>| match vis {
+            Some(Visibility::PubIn(path)) => {
+                let path: Vec<&str> = path.iter().map(|i| i.name.as_str()).collect();
+                format!("pub(in {})", path.join("::"))
+            }
+            other => format!("{other:?}"),
+        };
+        for (src, want) in [
+            ("pub @inline fn f() -> int { 1 }", "Some(Pub)"),
+            ("pub(package) @pure @inline\nfn f() -> int { 1 }", "Some(PubPackage)"),
+            ("private @nomangle inline(lua) fn f() -> int = \"\"\"return 1\"\"\"", "Some(Private)"),
+            ("pub deco traced(f: fn()) { }", "Some(Pub)"),
+            // `in` is a keyword token, so this form never parsed at item level.
+            ("pub(in combat::casting) fn f() -> int { 1 }", "pub(in combat::casting)"),
+        ] {
+            let ast = parse_v1(src).expect(src);
+            assert!(ast.recovery_errors.is_empty(), "{src}: {:?}", ast.recovery_errors);
+            assert_eq!(spelled(&ast.items[0].vis), want, "{src}");
+        }
+        let ast = parse_v1("pub @inline fn f() -> int { 1 }").expect("parse");
+        assert_eq!(ast.items[0].annotations.len(), 1);
+    }
+
     #[test]
     fn inline_mod_block_parses_in_v1() {
         let ast = parse_v1("pub mod combat {\n    pub fn heal() {}\n}\n").expect("parse");

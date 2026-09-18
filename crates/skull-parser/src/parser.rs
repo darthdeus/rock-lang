@@ -582,11 +582,15 @@ impl<'a> Parser<'a> {
                 .unwrap_or(TokenKind::EOF)
         };
         // The token kinds that can follow a committed visibility modifier: the
-        // item keywords, the contextual item words (Ident), a root-anchored
-        // use path, an inline mod block, or a qualifier paren.
+        // item keywords, the contextual item words (Ident), an item's leading
+        // annotation, a root-anchored use path, an inline mod block, or a
+        // qualifier paren. `macro` is absent on purpose: macros expand before
+        // the namespace tree exists, so a visibility on one would be inert.
         let starts_item_like = |k: &TokenKind| matches!(
             k,
             TokenKind::Ident(_)
+                | TokenKind::At
+                | TokenKind::Deco
                 | TokenKind::Fn
                 | TokenKind::Struct
                 | TokenKind::Enum
@@ -601,19 +605,30 @@ impl<'a> Parser<'a> {
         loop {
             let is_pub = matches!(self.kind(), TokenKind::Ident(n) if n.as_str() == "pub");
             let is_private = matches!(self.kind(), TokenKind::Ident(n) if n.as_str() == "private");
+            // `in` is a keyword token (for loops), not an Ident.
             let pub_follows = starts_item_like(&self.peek_kind())
                 || (self.peek_kind() == TokenKind::OpenParen
-                    && matches!(
-                        peek2(self),
-                        TokenKind::Ident(ref n) if n.as_str() == "package"
-                            || n.as_str() == "super" || n.as_str() == "in"
-                    ));
+                    && match peek2(self) {
+                        TokenKind::In => true,
+                        TokenKind::Ident(n) => n.as_str() == "package" || n.as_str() == "super",
+                        _ => false,
+                    });
             let private_follows = starts_item_like(&self.peek_kind())
                 || (self.peek_kind() == TokenKind::OpenParen
                     && matches!(peek2(self), TokenKind::Ident(ref n) if n.as_str() == "set"));
             if is_pub && pub_follows {
                 self.advance();
-                if self.kind() == TokenKind::OpenParen {
+                if self.kind() == TokenKind::OpenParen && self.peek_kind() == TokenKind::In {
+                    self.advance(); // `(`
+                    self.advance(); // `in`
+                    let mut segments = vec![self.expect_ident()?];
+                    while self.kind() == TokenKind::DoubleColon {
+                        self.advance();
+                        segments.push(self.expect_ident()?);
+                    }
+                    self.expect(TokenKind::CloseParen)?;
+                    mods.vis = Some(Visibility::PubIn(segments));
+                } else if self.kind() == TokenKind::OpenParen {
                     self.advance();
                     let q = self.expect_ident()?;
                     match q.name.as_str() {
@@ -624,15 +639,6 @@ impl<'a> Parser<'a> {
                         "super" => {
                             self.expect(TokenKind::CloseParen)?;
                             mods.vis = Some(Visibility::PubSuper);
-                        }
-                        "in" => {
-                            let mut segments = vec![self.expect_ident()?];
-                            while self.kind() == TokenKind::DoubleColon {
-                                self.advance();
-                                segments.push(self.expect_ident()?);
-                            }
-                            self.expect(TokenKind::CloseParen)?;
-                            mods.vis = Some(Visibility::PubIn(segments));
                         }
                         other => {
                             return Err(self.err(format!(
