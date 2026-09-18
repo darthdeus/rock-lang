@@ -300,6 +300,35 @@ fn read(x: Shared) -> int {
     n
 }
 
+//- legacy_projection_names_the_variants_of_a_projected_enum
+//-- lib.rock @pkg=sfx,1 @v1
+pub enum MoveSfx {
+    Silent,
+    Step(int),
+    Jump { to: int },
+}
+
+//-- game.rock @pkg=game,2
+fn pick(n: int) -> MoveSfx {
+    if n == 0 {
+        return MoveSfx::Silent
+    }
+    if n == 1 {
+        return MoveSfx::Jump { to: 3 }
+    }
+    MoveSfx::Step(n)
+}
+
+fn score(m: MoveSfx) -> int {
+    let n = match m {
+        MoveSfx::Silent => 0,
+        MoveSfx::Step(k) => k,
+                         //^ int
+        MoveSfx::Jump { to } => to,
+    }
+    n
+}
+
 //- legacy_projection_rejects_private_root_export @fail=Unknown type name Hidden
 //-- lib.rock @pkg=lib,1 @v1
 struct Hidden {

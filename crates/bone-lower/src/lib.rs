@@ -245,6 +245,16 @@ impl<'a> LowerCtx<'a> {
         Ok(self.resolve_bare(name, span)?.key)
     }
 
+    /// The enum the base of a qualified variant (`E::V`, `E::V(..)`,
+    /// `E::V { .. }`, and their patterns) names, by the key the workspace
+    /// maps use: the base resolves like any bare name, so a legacy file
+    /// reaches a projected v1 enum by its DefKey (spec 3.2). `None` when the
+    /// base names no enum.
+    fn variant_enum_key(&self, base: Ustr, span: Span) -> Result<Option<Ustr>, CompilerError> {
+        let key = self.resolve_bare_key(base, span)?;
+        Ok(self.workspace.enums_by_name.contains_key(&key).then_some(key))
+    }
+
     /// The DefKey of a v1 path that is CALLED BY NAME: a callable family, or a
     /// newtype, whose constructor is a call on the type's own name and which the
     /// bare-name route already resolves this way. `None` for a legacy fragment, a
@@ -1479,15 +1489,16 @@ pub fn lower_expr_value(
             }
 
             ExprKind::QualifiedIdent { base, member }
-                if ctx.workspace.enums_by_name.contains_key(&base.name) =>
+                if ctx.variant_enum_key(base.name, base.span).is_ok_and(|key| key.is_some()) =>
             {
                 if !generic_args.is_empty() {
                     comp_error!(e.span, "explicit type arguments are not supported on enum constructors");
                 }
+                let enum_key = ctx.variant_enum_key(base.name, base.span)?.expect("the guard found the enum");
                 let args_range = lower_exprs(ctx, a, body, scope, args.iter().map(|x| &x.value))?;
 
                 Expr::EnumVariant {
-                    enum_name: base.name,
+                    enum_name: enum_key,
                     enum_name_span: base.span,
                     variant: member.name,
                     variant_span: member.span,
@@ -1833,9 +1844,9 @@ pub fn lower_expr_value(
         ExprKind::SiblingFieldRef(ident) => Expr::SiblingRef(ident.name),
 
         ExprKind::QualifiedIdent { base, member } => {
-            if ctx.workspace.enums_by_name.contains_key(&base.name) {
+            if let Some(enum_key) = ctx.variant_enum_key(base.name, base.span)? {
                 Expr::EnumVariant {
-                    enum_name: base.name,
+                    enum_name: enum_key,
                     enum_name_span: base.span,
                     variant: member.name,
                     variant_span: member.span,
@@ -1870,7 +1881,7 @@ pub fn lower_expr_value(
             }
 
             Expr::EnumVariant {
-                enum_name: enum_name.name,
+                enum_name: ctx.variant_enum_key(enum_name.name, enum_name.span)?.unwrap_or(enum_name.name),
                 enum_name_span: enum_name.span,
                 variant: variant_name.name,
                 variant_span: variant_name.span,
@@ -3350,7 +3361,10 @@ fn lower_pattern_value(
             variant_name,
             args,
         } => {
-            let ename = enum_name.as_ref().map(|e| e.name);
+            let ename = match enum_name {
+                Some(e) => Some(ctx.variant_enum_key(e.name, e.span)?.unwrap_or(e.name)),
+                None => None,
+            };
 
             let sub = match args {
                 None => IdxRange::new_empty(),
@@ -3419,8 +3433,12 @@ fn lower_pattern_value(
 
             let fields = alloc_contiguous(&mut body.record_pat_field_arena, entries);
 
+            let enum_key = match enum_name {
+                Some(e) => Some(ctx.variant_enum_key(e.name, e.span)?.unwrap_or(e.name)),
+                None => None,
+            };
             Pattern::Record {
-                enum_name: enum_name.as_ref().map(|e| e.name),
+                enum_name: enum_key,
                 enum_name_span: enum_name.as_ref().map(|e| e.span),
                 name: name.as_ref().map(|n| n.name),
                 name_span: name.as_ref().map(|n| n.span),
