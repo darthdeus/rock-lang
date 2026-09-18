@@ -4,17 +4,24 @@ pub(crate) fn resolve_callee(gamma: &Gamma, family: &CallFamily) -> FnList {
     let name = family.key();
     let _span = tracing::info_span!("resolve_callee", name = %name).entered();
 
-    let CallFamily::LegacyMerged { file, .. } = *family else {
+    let CallFamily::Merged { file, .. } = *family else {
         gamma.dep_acc.borrow_mut().insert(name);
         return gamma.workspace.functions_by_name.get(&name).cloned().unwrap_or_default();
     };
-    // A merged legacy family (spec 3.2): the legacy overloads under the bare
-    // name plus every projected v1 member under its own DefKey. Each key is a
-    // dependency, so an overload added to any member re-infers this caller.
+    // A merged family: every member's overloads under its own key, as
+    // lowering recorded them for the module the call was lowered in. Each
+    // key is a dependency, so an overload added to any member re-infers this
+    // caller.
+    let ws = gamma.workspace;
+    let keys = ws
+        .module_ids
+        .get(&file)
+        .and_then(|mid| ws.module(*mid).call_families.get(&name))
+        .unwrap_or_else(|| panic!("merged family `{name}` of `{file}` was not recorded at lowering"));
     let mut out = FnList::default();
-    for key in bone_core::modules::legacy_family_keys(gamma.workspace, file, name) {
+    for &key in keys {
         gamma.dep_acc.borrow_mut().insert(key);
-        if let Some(fns) = gamma.workspace.functions_by_name.get(&key) {
+        if let Some(fns) = ws.functions_by_name.get(&key) {
             out.extend(fns.iter().copied());
         }
     }

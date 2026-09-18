@@ -375,6 +375,12 @@ pub struct Module {
     /// lowering replaces the set; the one-body fast path only adds to it, so
     /// a superset is kept and an extra re-lower is the worst it costs.
     pub scope_probes: FxHashSet<crate::modules::ScopeProbe>,
+
+    /// The member keys of every `CallFamily::Merged` this module's bodies
+    /// call, by bare name. A bare name's family is a fact of the file (its
+    /// imports and the namespace tree), so every body that calls it records
+    /// the same keys, and a body-only re-lower overwrites them in place.
+    pub call_families: FxHashMap<Ustr, Vec<Ustr>>,
 }
 
 impl Default for Module {
@@ -415,6 +421,8 @@ impl Default for Module {
             lowering_errors: Default::default(),
             interface_errors: Default::default(),
             scope_probes: Default::default(),
+
+            call_families: Default::default(),
         }
     }
 }
@@ -768,10 +776,16 @@ pub enum Expr {
         value: Idx<Expr>,
     },
 
+    /// `target op= value` where `target` has no single place to rewrite as
+    /// `target = target op value` (a safe-nav chain). `op_fn` is the
+    /// operator's glyph function, which scalar arithmetic reads; `family` is
+    /// the overload family `target op value` resolves through, decided at
+    /// lowering exactly as for the binary operator.
     CompoundAssign {
         target: Idx<Expr>,
         op_fn: Ustr,
         value: Idx<Expr>,
+        family: CallFamily,
     },
 
     Match {
@@ -798,28 +812,32 @@ pub enum CallFamily {
     /// several candidates lose, the lowest key is kept so the diagnostic does
     /// not depend on import order.
     Resolved { key: Ustr, hidden: Option<Ustr> },
-    /// A legacy bare name whose legacy callables and projected v1 callables
-    /// form one overload family (spec 3.2). The member keys are not stored:
-    /// `modules::legacy_family_keys(ws, file, name)` enumerates them from the
-    /// same facts lowering decided this family from.
-    LegacyMerged { name: Ustr, file: Ustr },
+    /// A bare name whose overload family spans several definitions, in
+    /// either dialect: legacy callables merged with projected or imported v1
+    /// ones (spec 3.2), v1 explicit imports of different callables (spec
+    /// 8.3), or a declared operator with the built-in operator family (spec
+    /// 8.5). Lowering decides the member keys and records them under `name`
+    /// in `Module::call_families` of the module lowered from `file`; `Expr`
+    /// is `Copy`, so the family carries only that address. `hidden` is as
+    /// for `Resolved`.
+    Merged { name: Ustr, file: Ustr, hidden: Option<Ustr> },
 }
 
 impl CallFamily {
     /// The family's spelling: its one key, or the bare name of a merged
-    /// legacy family (whose lookup also consults its v1 members).
+    /// family.
     pub fn key(&self) -> Ustr {
         match self {
             CallFamily::Legacy(n) => *n,
             CallFamily::Resolved { key, .. } => *key,
-            CallFamily::LegacyMerged { name, .. } => *name,
+            CallFamily::Merged { name, .. } => *name,
         }
     }
 
     pub fn hidden(&self) -> Option<Ustr> {
         match self {
-            CallFamily::Legacy(_) | CallFamily::LegacyMerged { .. } => None,
-            CallFamily::Resolved { hidden, .. } => *hidden,
+            CallFamily::Legacy(_) => None,
+            CallFamily::Resolved { hidden, .. } | CallFamily::Merged { hidden, .. } => *hidden,
         }
     }
 
@@ -828,8 +846,16 @@ impl CallFamily {
     }
 
     pub fn resolved(key: Ustr, hidden: &[Ustr]) -> Self {
-        CallFamily::Resolved { key, hidden: hidden.iter().min_by_key(|k| k.as_str()).copied() }
+        CallFamily::Resolved { key, hidden: lowest(hidden) }
     }
+
+    pub fn merged(name: Ustr, file: Ustr, hidden: &[Ustr]) -> Self {
+        CallFamily::Merged { name, file, hidden: lowest(hidden) }
+    }
+}
+
+fn lowest(keys: &[Ustr]) -> Option<Ustr> {
+    keys.iter().min_by_key(|k| k.as_str()).copied()
 }
 
 #[derive(Copy, Clone, Debug)]

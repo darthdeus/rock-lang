@@ -328,3 +328,85 @@ fn main() {
     );
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// A v1 manifest for a library package named `name`.
+fn v1_lib(dir: &Path, name: &str, lib: &str) {
+    std::fs::create_dir_all(dir).unwrap();
+    std::fs::write(
+        dir.join("stick.toml"),
+        format!("[package]\nname = \"{name}\"\ntype = \"lib\"\n\n[language]\nmodules = \"v1\"\n"),
+    )
+    .unwrap();
+    std::fs::write(dir.join("lib.rock"), lib).unwrap();
+}
+
+/// A v1 binary package depending on the sibling packages `deps`.
+fn v1_app(dir: &Path, deps: &[&str], main: &str) {
+    std::fs::create_dir_all(dir).unwrap();
+    let deps: String = deps.iter().map(|d| format!("{d} = {{ path = \"../{d}\" }}\n")).collect();
+    std::fs::write(
+        dir.join("stick.toml"),
+        format!(
+            "[package]\nname = \"v1app\"\ntype = \"bin\"\n\n[language]\nmodules = \"v1\"\n\n[dependencies]\n{deps}"
+        ),
+    )
+    .unwrap();
+    std::fs::write(dir.join("main.rock"), main).unwrap();
+}
+
+/// A v1 consumer of a v1 operator (spec 8.5): the provider's own
+/// `operator +` body adds ints with `+` (a module's operator family does not
+/// hide built-in arithmetic), and the consumer's `+`, `+=` and safe-nav
+/// `?.p +=` run that body (the `+ 100` marks it) while int and float `+`
+/// stay built-in.
+#[test]
+fn v1_operator_families_keep_builtins_and_run_the_declared_body() {
+    let root = std::env::temp_dir().join("rock_modules_emit_v1_operator");
+    let _ = std::fs::remove_dir_all(&root);
+    v1_lib(
+        &root.join("provider"),
+        "provider",
+        r#"pub struct Pt {
+    pub x: int,
+    pub y: int,
+}
+
+pub operator +(a: Pt, b: Pt) -> Pt {
+    Pt { x: a.x + b.x + 100, y: a.y + b.y }
+}
+
+pub struct Holder {
+    pub p: Pt,
+}
+"#,
+    );
+    let app = root.join("app");
+    v1_app(
+        &app,
+        &["provider"],
+        r#"use provider::{Pt, Holder, operator(+)};
+
+fn bump_held(h: Holder?) {
+    h?.p += Pt { x: 1, y: 1 }
+}
+
+fn main() {
+    let p = Pt { x: 1, y: 2 } + Pt { x: 3, y: 4 }
+    p += Pt { x: 10, y: 20 }
+    let h = Holder { p: Pt { x: 0, y: 0 } }
+    bump_held(h)
+    let n = 1 + 2
+    n += 4
+    let f = 1.5 + 2.0
+    print("p={p.x},{p.y} h={h.p.x},{h.p.y} n={n} f={f}")
+}
+"#,
+    );
+    let (stdout, stderr, ok) = run(&app);
+    assert!(ok, "v1 operator project failed\nstdout:\n{stdout}\nstderr:\n{stderr}");
+    assert!(
+        stdout.contains("p=214,26 h=101,1 n=7 f=3.5"),
+        "v1 operator syntax should run the declared body and keep built-in arithmetic\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}

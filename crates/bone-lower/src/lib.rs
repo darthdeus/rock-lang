@@ -174,26 +174,32 @@ impl<'a> LowerCtx<'a> {
 
     /// A bare name in callee position: the spelling the callee carries and
     /// its overload family. v1 goes through the tiers (spec 8.3); a legacy
-    /// name may be one family spanning legacy and projected v1 callables
-    /// (spec 3.2), whose callee spelling stays the bare name.
+    /// name goes through the one legacy lookup (spec 3.2). A family spanning
+    /// several definitions keeps the bare name as its spelling -- which is
+    /// also what lets scalar operands of a merged operator lower natively --
+    /// and records its member keys on the module for inference.
     fn resolve_callee_family(
-        &self,
+        &mut self,
         name: Ustr,
         span: Span,
     ) -> Result<(Ustr, hir::CallFamily), CompilerError> {
-        if let Some(frag) = self.v1_scope() {
-            let r = self
-                .probed(|| resolve::resolve_bare(self.workspace, Some(frag), name))
-                .map_err(|msg| CompilerError::new_with_label(span, msg))?;
-            return Ok((r.key, hir::CallFamily::resolved(r.key, &r.hidden)));
-        }
         let file = self.module.file;
-        self.probe_legacy(name);
-        match resolve::resolve_legacy_callee(self.workspace, file, name)
-            .map_err(|msg| CompilerError::new_with_label(span, msg))?
-        {
-            resolve::LegacyCallee::Single(r) => Ok((r.key, hir::CallFamily::from_name(r.key))),
-            resolve::LegacyCallee::Merged => Ok((name, hir::CallFamily::LegacyMerged { name, file })),
+        let resolved = match self.v1_scope() {
+            Some(frag) => self.probed(|| resolve::resolve_v1_callee(self.workspace, frag, name)),
+            None => {
+                self.probe_legacy(name);
+                resolve::resolve_legacy_callee(self.workspace, file, name)
+            }
+        }
+        .map_err(|msg| CompilerError::new_with_label(span, msg))?;
+        let v1 = self.v1_scope().is_some();
+        match resolved {
+            resolve::CalleeFamily::Single(r) if v1 => Ok((r.key, hir::CallFamily::resolved(r.key, &r.hidden))),
+            resolve::CalleeFamily::Single(r) => Ok((r.key, hir::CallFamily::from_name(r.key))),
+            resolve::CalleeFamily::Merged { keys, hidden } => {
+                self.module.call_families.insert(name, keys);
+                Ok((name, hir::CallFamily::merged(name, file, &hidden)))
+            }
         }
     }
 
@@ -1430,6 +1436,9 @@ pub fn lower_expr_value(
             };
 
             let target = lower_expr(ctx, a, body, scope, a.e(left))?;
+            // The same callee resolution as the binary operator call, so
+            // `a += b` sees what `a + b` sees (spec 3.2, 8.5).
+            let (callee_key, family) = ctx.resolve_callee_family(ustr(op_fn), e.span)?;
 
             if lvalue_has_safe_nav(a, left) {
                 let value = lower_expr(ctx, a, body, scope, a.e(right))?;
@@ -1437,14 +1446,11 @@ pub fn lower_expr_value(
                     target,
                     op_fn: ustr(op_fn),
                     value,
+                    family,
                 }
             } else {
                 let args = lower_exprs(ctx, a, body, scope, [left, right].into_iter())?;
 
-                // The same callee resolution as the binary operator call, so
-                // `a += b` sees what `a + b` sees -- in a legacy file, the
-                // family merging projected v1 overloads (spec 3.2, 8.5).
-                let (callee_key, family) = ctx.resolve_callee_family(ustr(op_fn), e.span)?;
                 let call = ctx.alloc_expr(
                     body,
                     Expr::Call {
@@ -1704,10 +1710,12 @@ pub fn lower_expr_value(
                     )
                 })?;
 
+                let (_, family) = ctx.resolve_callee_family(ustr(op_fn), e.span)?;
                 Expr::CompoundAssign {
                     target,
                     op_fn: ustr(op_fn),
                     value,
+                    family,
                 }
             } else {
                 Expr::Assign { target, value }

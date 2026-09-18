@@ -1,0 +1,148 @@
+//! Modules-v1 overload families that span more than one definition (spec 8.3,
+//! 8.5): a declared or imported operator keeps the built-in operator family,
+//! and compound assignment reads the family its binary operator reads.
+//!
+//! Sections hold embedded files: `//-- <file> @pkg=<self_name>,<id> [@v1]`.
+
+//- a_modules_own_operator_keeps_builtin_arithmetic
+//-- geo.rock @pkg=geo,1 @v1
+pub struct Pt {
+    pub x: int,
+    pub y: int,
+}
+
+pub operator +(a: Pt, b: Pt) -> Pt {
+    Pt { x: a.x + b.x, y: a.y + b.y }
+}
+
+fn sums() -> int {
+    let p = Pt { x: 1, y: 2 } + Pt { x: 3, y: 4 }
+            //^ geo::Pt
+    let n = 1 + 2
+            //^ int
+    let f = 1.5 + 2.0
+            //^ float
+    let v = Vec2 { x: 1.0, y: 2.0 } + Vec2 { x: 3.0, y: 4.0 }
+            //^ Vec2
+    let s = "a" + "b"
+            //^ string
+    p.x + n
+}
+
+//- a_modules_own_operator_does_not_admit_an_undeclared_operand @fail=No overload for `__op_add` with argument types (geo::Pt, int)
+//-- geo.rock @pkg=geo,1 @v1
+pub struct Pt {
+    pub x: int,
+    pub y: int,
+}
+
+pub operator +(a: Pt, b: Pt) -> Pt {
+    Pt { x: a.x + b.x, y: a.y + b.y }
+}
+
+fn bad() -> Pt {
+    Pt { x: 1, y: 2 } + 3
+}
+
+//- a_named_operator_import_keeps_builtin_arithmetic
+//-- geo.rock @pkg=geo,1 @v1
+pub struct Pt {
+    pub x: int,
+    pub y: int,
+}
+
+pub operator +(a: Pt, b: Pt) -> Pt {
+    Pt { x: a.x, y: b.y }
+}
+
+//-- app.rock @pkg=app,2 @v1
+use geo::{Pt, operator(+)};
+
+fn sums() -> int {
+    let p = Pt { x: 1, y: 2 } + Pt { x: 3, y: 4 }
+            //^ geo::Pt
+    let n = 1 + 2
+            //^ int
+    let f = 1.5 + 2.0
+            //^ float
+    p.x + n
+}
+
+//- a_glob_operator_import_keeps_builtin_arithmetic
+//-- geo.rock @pkg=geo,1 @v1
+pub struct Pt {
+    pub x: int,
+    pub y: int,
+}
+
+pub operator +(a: Pt, b: Pt) -> Pt {
+    Pt { x: a.x, y: b.y }
+}
+
+//-- app.rock @pkg=app,2 @v1
+use geo::*;
+
+fn sums() -> int {
+    let p = Pt { x: 1, y: 2 } + Pt { x: 3, y: 4 }
+            //^ geo::Pt
+    let n = 1 + 2
+            //^ int
+    p.x + n
+}
+
+//- compound_assignment_reads_the_operator_family
+//-- geo.rock @pkg=geo,1 @v1
+pub struct Pt {
+    pub x: int,
+    pub y: int,
+}
+
+pub operator +(a: Pt, b: Pt) -> Pt {
+    Pt { x: a.x + b.x, y: a.y + b.y }
+}
+
+pub struct Holder {
+    pub p: Pt,
+    pub n: int,
+}
+
+fn own(h: Holder?, g: Holder) {
+    h?.p += Pt { x: 1, y: 2 }
+    h?.n += 1
+    g.p += Pt { x: 1, y: 2 }
+    g.n += 1
+}
+
+//-- app.rock @pkg=app,2 @v1
+use geo::{Pt, Holder, operator(+)};
+
+fn imported(h: Holder?, g: Holder) {
+    h?.p += Pt { x: 1, y: 2 }
+    h?.n += 1
+    g.p += Pt { x: 1, y: 2 }
+    g.n += 1
+    let f = 1.5
+    f += 2.0
+}
+
+//- a_safe_nav_compound_assignment_without_the_operator_is_rejected @fail=No overload for `__op_add` with argument types (geo::Pt, geo::Pt)
+//-- geo.rock @pkg=geo,1 @v1
+pub struct Pt {
+    pub x: int,
+    pub y: int,
+}
+
+pub operator +(a: Pt, b: Pt) -> Pt {
+    Pt { x: a.x + b.x, y: a.y + b.y }
+}
+
+pub struct Holder {
+    pub p: Pt,
+}
+
+//-- app.rock @pkg=app,2 @v1
+use geo::{Pt, Holder};
+
+fn imported(h: Holder?) {
+    h?.p += Pt { x: 1, y: 2 }
+}

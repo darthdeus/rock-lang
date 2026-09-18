@@ -570,6 +570,7 @@ impl Builder<'_> {
                 target,
                 op_fn,
                 value,
+                ..
             } => self.lower_compound_assign_effect(e, target, op_fn, value),
             _ => {
                 self.lower_expr_repr(e)?;

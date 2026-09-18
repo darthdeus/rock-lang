@@ -383,6 +383,7 @@ impl Builder<'_> {
                 target,
                 op_fn,
                 value,
+                ..
             } => {
                 self.lower_compound_assign_effect(e, target, op_fn, value)?;
                 Ok(self.emit_cur(Inst::Const(Lit::Nil)))

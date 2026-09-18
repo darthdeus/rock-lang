@@ -1236,7 +1236,7 @@ fn hash_init_expr(body: &Body, e: Idx<Expr>, h: &mut std::collections::hash_map:
             go!(target);
             go!(value);
         }
-        Expr::CompoundAssign { target, op_fn, value } => {
+        Expr::CompoundAssign { target, op_fn, value, .. } => {
             tag!(32);
             op_fn.hash(h);
             go!(target);

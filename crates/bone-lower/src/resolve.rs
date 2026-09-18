@@ -118,32 +118,39 @@ pub fn resolve_legacy_bare(ws: &Workspace, file: Ustr, name: Ustr) -> Result<Res
     match legacy_name(ws, file, name) {
         LegacyName::Bare => Ok(plain(name)),
         LegacyName::Projected(entries) => projected(name, &entries),
-        LegacyName::Family(foreign) => {
-            let owners = ws.ns.legacy_owned.files_defining(name);
-            if owners.is_empty() {
-                Err(legacy_candidates(name, &foreign))
-            } else {
+        LegacyName::Family(keys) => {
+            // The legacy definitions take part exactly when the bare key is
+            // a member; named imports compose without them.
+            if keys.contains(&name) {
+                let owners = ws.ns.legacy_owned.files_defining(name);
+                let foreign: Vec<Ustr> = keys.into_iter().filter(|k| *k != name).collect();
                 Err(legacy_collision(name, &owners, &foreign))
+            } else {
+                Err(legacy_candidates(name, &keys))
             }
         }
         LegacyName::Collision { owners, foreign } => Err(legacy_collision(name, &owners, &foreign)),
     }
 }
 
-/// A legacy bare name in callee position (direct call, UFCS or safe-nav
-/// call): a single definition, or a family merging the legacy callables with
-/// the projected v1 callables of the same name (spec 3.2). Overload
-/// resolution then picks the member by argument types.
-pub enum LegacyCallee {
+/// A bare name in callee position (direct call, UFCS, safe-nav call or an
+/// operator), in either dialect: a single definition, or one overload family
+/// spanning several definitions, among which overload resolution picks by
+/// argument types. Legacy merges legacy callables with projected or imported
+/// v1 ones (spec 3.2); v1 composes explicit imports of different callables
+/// (spec 8.3) and keeps the built-in operator family beside a declared or
+/// imported operator (spec 8.5).
+pub enum CalleeFamily {
     Single(Resolved),
-    Merged,
+    /// Every member key, deduplicated, plus the losing tiers' candidates.
+    Merged { keys: Vec<Ustr>, hidden: Vec<Ustr> },
 }
 
-pub fn resolve_legacy_callee(ws: &Workspace, file: Ustr, name: Ustr) -> Result<LegacyCallee, String> {
+pub fn resolve_legacy_callee(ws: &Workspace, file: Ustr, name: Ustr) -> Result<CalleeFamily, String> {
     match legacy_name(ws, file, name) {
-        LegacyName::Family(_) => Ok(LegacyCallee::Merged),
-        LegacyName::Bare => Ok(LegacyCallee::Single(plain(name))),
-        LegacyName::Projected(entries) => projected(name, &entries).map(LegacyCallee::Single),
+        LegacyName::Family(keys) => Ok(CalleeFamily::Merged { keys, hidden: Vec::new() }),
+        LegacyName::Bare => Ok(CalleeFamily::Single(plain(name))),
+        LegacyName::Projected(entries) => projected(name, &entries).map(CalleeFamily::Single),
         LegacyName::Collision { owners, foreign } => Err(legacy_collision(name, &owners, &foreign)),
     }
 }
@@ -188,8 +195,45 @@ pub fn resolve_bare(
     let Some(frag) = frag else {
         return Ok(plain(name));
     };
+    bind_bare(ws, frag, name).map(|(resolved, _)| resolved)
+}
+
+/// A bare name in callee position in a v1 fragment (spec 8.5). A declared,
+/// imported or globbed operator keeps the std prelude's operator family
+/// beside it, so a module's own `operator +` does not hide built-in
+/// arithmetic.
+pub fn resolve_v1_callee(ws: &Workspace, frag: &FragmentScope, name: Ustr) -> Result<CalleeFamily, String> {
+    let operator = bone_core::hir::operator_entry(name.as_str()).is_some_and(|(_, overloadable)| overloadable);
+    let (mut keys, hidden) = match bind_bare(ws, frag, name)? {
+        (resolved, Tier::Std) => return Ok(CalleeFamily::Single(resolved)),
+        (resolved, Tier::Scope) if !operator => return Ok(CalleeFamily::Single(resolved)),
+        (resolved, Tier::Scope) => (vec![resolved.key], resolved.hidden),
+    };
+    if operator {
+        if let Some((key, bone_core::modules::DefKind::Callable)) = ws.ns.std_definition(name) {
+            keys.push(key);
+        }
+    }
+    keys.sort_by_key(|k| k.as_str().to_string());
+    keys.dedup();
+    if let [key] = keys[..] {
+        return Ok(CalleeFamily::Single(Resolved { key, kind: ResolvedKind::Callable, hidden }));
+    }
+    Ok(CalleeFamily::Merged { keys, hidden })
+}
+
+/// Which tier bound a name: the fragment's own scope (tiers 2-4) or the std
+/// prelude (tier 5).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Tier {
+    Scope,
+    Std,
+}
+
+/// What the tiers bind a bare name to in a v1 fragment, and which tier.
+fn bind_bare(ws: &Workspace, frag: &FragmentScope, name: Ustr) -> Result<(Resolved, Tier), String> {
     if ws.ns.package(frag.package).is_none() {
-        return std_bare(ws, name);
+        return std_bare(ws, name).map(|r| (r, Tier::Std));
     }
     let viewers = [Viewer::Fragment(frag)];
     let glob_hits = glob_candidates(ws, frag, name)?;
@@ -201,7 +245,7 @@ pub fn resolve_bare(
         let not_found = || format!("`{name}` did not resolve to any definition");
         let (key, kind) = collapse(own, name, not_found, "definitions")?;
         let hidden: Vec<Ustr> = glob_hits.iter().map(|(k, _)| *k).collect();
-        return Ok(Resolved { key, kind, hidden });
+        return Ok((Resolved { key, kind, hidden }, Tier::Scope));
     }
 
     // Tier 3: the fragment's explicit imports. A bound name does not fall
@@ -209,7 +253,7 @@ pub fn resolve_bare(
     if let Some(target) = frag.named.get(&name) {
         let hidden: Vec<Ustr> = glob_hits.iter().map(|(k, _)| *k).collect();
         return match walk_path(ws, frag, &[], target, WalkMode::Definition, &mut Vec::new())? {
-            Landing::Def(resolved) => Ok(Resolved { key: resolved.key, kind: resolved.kind, hidden }),
+            Landing::Def(resolved) => Ok((Resolved { key: resolved.key, kind: resolved.kind, hidden }, Tier::Scope)),
             Landing::Module(..) => Err(format!("`{name}` names a module, not a definition")),
         };
     }
@@ -224,12 +268,12 @@ pub fn resolve_bare(
             ));
         }
         let (key, kind) = glob_hits[0];
-        return Ok(Resolved { key, kind, hidden: Vec::new() });
+        return Ok((Resolved { key, kind, hidden: Vec::new() }, Tier::Scope));
     }
 
     // Tier 5: the compiler-owned std export view. There is no legacy
     // workspace-map fall-through for v1 names.
-    std_bare(ws, name)
+    std_bare(ws, name).map(|r| (r, Tier::Std))
 }
 
 fn std_bare(ws: &Workspace, name: Ustr) -> Result<Resolved, String> {

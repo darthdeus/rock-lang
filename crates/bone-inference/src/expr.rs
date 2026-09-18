@@ -1533,8 +1533,9 @@ pub fn infer_expr_used(
             target,
             op_fn,
             value,
+            family,
         } => {
-            let (target, op_fn, value) = (*target, *op_fn, *value);
+            let (target, op_fn, value, family) = (*target, *op_fn, *value, *family);
 
             // `const` globals are read-only (mirrors the `Expr::Assign` check).
             if let Expr::Global(name) = c.body.expr_arena[target] {
@@ -1557,16 +1558,6 @@ pub fn infer_expr_used(
             let unwrapped = peel_nullable(gamma, target_ty, expr_span);
             let value_ty = infer_expr(c, gamma, value)?;
 
-            // The HIR node carries no resolved family, so a legacy file asks
-            // the one legacy lookup here: its operator family merges the
-            // projected v1 overloads (spec 3.2), and is the bare family
-            // otherwise. A v1 file still reads the bare family.
-            let file = c.module.file;
-            let family = if gamma.workspace.fragment_scopes.contains_key(&file) {
-                CallFamily::from_name(op_fn)
-            } else {
-                CallFamily::LegacyMerged { name: op_fn, file }
-            };
             let candidates = resolve_callee(gamma, &family);
 
             if candidates.is_empty() {

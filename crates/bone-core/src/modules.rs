@@ -278,10 +278,10 @@ impl LegacyImports {
 }
 
 /// What a bare name in a legacy source file names (spec 3.2). The one
-/// decision behind every legacy lookup: lowering reads it to resolve a name,
-/// and inference reads it again to enumerate a merged overload family, so
-/// both always agree. Its inputs -- the per-file views and the legacy
-/// owned-name facts -- exist before any body lowers.
+/// decision behind every legacy lookup: lowering reads it to resolve a name
+/// and to record a merged overload family's members. Its inputs -- the
+/// per-file views and the legacy owned-name facts -- exist before any body
+/// lowers.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LegacyName {
     /// Nothing but (possibly) the legacy definition: the bare key.
@@ -289,9 +289,10 @@ pub enum LegacyName {
     /// v1 definitions reached through the file's imports or projection, with
     /// no legacy definition in the way. More than one entry is ambiguous.
     Projected(Vec<LegacyProjectionEntry>),
-    /// Callables under one name -- the legacy definitions, if any, and
-    /// these projected v1 keys: one overload family of the legacy bare key
-    /// plus the v1 keys, exactly as legacy overloading merges them.
+    /// Callables under one name forming one overload family, exactly as
+    /// legacy overloading merges them: every member key. The legacy bare key
+    /// comes first when the legacy definitions take part; the v1 keys follow
+    /// sorted.
     Family(Vec<Ustr>),
     /// A legacy definition and a v1 definition that cannot merge (not both
     /// callable): ambiguous at use.
@@ -343,19 +344,9 @@ pub fn legacy_name(ws: &crate::workspace::Workspace, file: Ustr, name: Ustr) -> 
         return LegacyName::Projected(entries);
     }
     if ws.ns.legacy_owned.all_callable(name) && foreign_callable {
-        return LegacyName::Family(foreign);
+        return LegacyName::Family(std::iter::once(name).chain(foreign).collect());
     }
     LegacyName::Collision { owners, foreign }
-}
-
-/// Every key a merged legacy family spans: the legacy bare key first, then
-/// its v1 members. A name that is not a merged family spans its bare key.
-pub fn legacy_family_keys(ws: &crate::workspace::Workspace, file: Ustr, name: Ustr) -> Vec<Ustr> {
-    let mut keys = vec![name];
-    if let LegacyName::Family(v1) = legacy_name(ws, file, name) {
-        keys.extend(v1);
-    }
-    keys
 }
 
 /// One namespace fact a lowering read (plan 2.6, scope epochs). A module's
