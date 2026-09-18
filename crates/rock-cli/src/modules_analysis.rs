@@ -399,3 +399,128 @@ pub(crate) fn ascriptions(ast: &skull_parser::Ast) -> Vec<Ascription> {
     out.sort_by_key(|a| a.node);
     out
 }
+
+/// One `inline(lua)` body for the raw-ABI census: its parameter names and
+/// source, wrapped as the Lua emitter wraps it (a value-returning body with no
+/// `return` is an expression).
+pub(crate) struct LuaBody {
+    pub params: Vec<Ustr>,
+    pub returns_value: bool,
+    pub src: Ustr,
+}
+
+/// What one inline Lua body references, as LuaJIT compiles it (spec 13: raw
+/// references to generated Rock names, `_G` accesses and reflection strings).
+/// Exact: a local, a parameter, a field, a table key, a comment or a string is
+/// not a free global, and the Lua compiler is the one deciding.
+#[derive(Debug, Default)]
+pub(crate) struct LuaRefs {
+    /// Free globals the body (or a function nested in it) reads or writes.
+    pub globals: Vec<String>,
+    /// String constants and constant field keys, when the body reaches `_G`:
+    /// a name it can look up there (`_G.x`, `_G["x"]`, `rawget(_G, "x")`).
+    pub via_g: Vec<String>,
+    /// The body does not compile as Lua; its references are unknown.
+    pub error: Option<String>,
+}
+
+/// Compile every body with the toolchain's LuaJIT and read its bytecode
+/// (`jit.bc`): GGET/GSET name the free globals, and a body that reads `_G`
+/// also reports its string constants. One LuaJIT process for all bodies. An
+/// `Err` means the census could not run at all.
+pub(crate) fn lua_references(bodies: &[LuaBody]) -> Result<Vec<LuaRefs>, String> {
+    if bodies.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut script = String::from("local bc = require(\"jit.bc\")\nlocal bodies = {\n");
+    for b in bodies {
+        let src = if b.returns_value && !b.src.as_str().contains("return") {
+            format!("return {}", b.src.as_str().trim())
+        } else {
+            b.src.to_string()
+        };
+        let params = b.params.iter().map(|p| p.as_str()).collect::<Vec<_>>().join(", ");
+        script.push_str(&format!("  {},\n", lua_quote(&format!("return function({params})\n{src}\nend"))));
+    }
+    script.push_str(
+        r#"}
+for i, text in ipairs(bodies) do
+  local chunk, err = loadstring(text, "=inline")
+  if not chunk then
+    io.write("E\t", i, "\t", (tostring(err):gsub("[\t\n]", " ")), "\n")
+  else
+    local out = {}
+    bc.dump(chunk(), { write = function(_, s) out[#out + 1] = s end, flush = function() end }, true)
+    for line in table.concat(out):gmatch("[^\n]+") do
+      io.write("L\t", i, "\t", line, "\n")
+    end
+  end
+end
+"#,
+    );
+    let run = rock_host::lua_runner::run_lua_code_with_timeout(&script, Some(std::time::Duration::from_secs(60)))
+        .map_err(|e| format!("the raw-ABI census could not run LuaJIT: {}", e.message))?;
+    if !run.success {
+        return Err(format!("the raw-ABI census failed in LuaJIT: {}", run.stderr.trim()));
+    }
+    let mut refs: Vec<LuaRefs> = bodies.iter().map(|_| LuaRefs::default()).collect();
+    let mut strings: Vec<Vec<String>> = bodies.iter().map(|_| Vec::new()).collect();
+    let mut reaches_g = vec![false; bodies.len()];
+    for line in run.stdout.lines() {
+        let mut parts = line.splitn(3, '\t');
+        let (Some(tag), Some(index), Some(rest)) = (parts.next(), parts.next(), parts.next()) else {
+            return Err(format!("unexpected raw-ABI census output: {line}"));
+        };
+        let i = index
+            .parse::<usize>()
+            .ok()
+            .and_then(|n| n.checked_sub(1))
+            .filter(|&n| n < bodies.len())
+            .ok_or_else(|| format!("unexpected raw-ABI census output: {line}"))?;
+        if tag == "E" {
+            refs[i].error = Some(rest.to_string());
+            continue;
+        }
+        // `0003    GGET     4   1      ; "x"`, a jump target as `0014 => OP`.
+        let mut words = rest.split_whitespace().skip(1).skip_while(|w| *w == "=>");
+        let Some(op) = words.next() else { continue };
+        let Some(constant) = rest.split_once("; \"").and_then(|(_, k)| k.strip_suffix('"')) else { continue };
+        match op {
+            "GGET" | "GSET" => {
+                if constant == "_G" {
+                    reaches_g[i] = true;
+                }
+                refs[i].globals.push(constant.to_string());
+            }
+            "KSTR" | "TGETS" | "TSETS" => strings[i].push(constant.to_string()),
+            _ => {}
+        }
+    }
+    for (i, r) in refs.iter_mut().enumerate() {
+        r.globals.sort();
+        r.globals.dedup();
+        if reaches_g[i] {
+            r.via_g = std::mem::take(&mut strings[i]);
+            r.via_g.sort();
+            r.via_g.dedup();
+        }
+    }
+    Ok(refs)
+}
+
+/// `text` as a Lua string literal.
+fn lua_quote(text: &str) -> String {
+    let mut out = String::from("\"");
+    for c in text.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            c if c.is_ascii_control() => out.push_str(&format!("\\{:03}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}

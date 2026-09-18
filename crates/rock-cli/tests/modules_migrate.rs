@@ -244,7 +244,9 @@ fn blockers_are_reported_and_nothing_is_written() {
     write(&dir.join("old/stick.toml"), &manifest("old-lib", ""));
     write(&dir.join("old/old.rock"), "fn old_value() -> int {\n    1\n}\n");
     write(&dir.join("lib/stick.toml"), &manifest("b-lib", "[dependencies]\nold-lib = { path = \"../old\" }\n"));
-    let lib_src = "fn b_value() -> int {\n    old_value()\n}\n\nfn b_internal() -> int {\n    2\n}\n\ninline(lua) fn b_raw() -> int = \"\"\"return b_value()\"\"\"\n";
+    let lib_src = "fn b_value() -> int {\n    old_value()\n}\n\nfn b_internal() -> int {\n    2\n}\n\nfn b_reflected() -> int {\n    3\n}\n\n\
+                   inline(lua) fn b_raw() -> int = \"\"\"return b_value()\"\"\"\n\n\
+                   inline(lua) fn b_by_name() -> int = \"\"\"return _G[\"b_reflected\"]()\"\"\"\n";
     write(&dir.join("lib/lib.rock"), lib_src);
     write(&dir.join("app/stick.toml"), &manifest("b-app", "[dependencies]\nb-lib = { path = \"../lib\" }\n"));
     write(&dir.join("app/app.rock"), "fn app_value() -> int {\n    b_value()\n}\n");
@@ -258,9 +260,41 @@ fn blockers_are_reported_and_nothing_is_written() {
     let has = |needle: &str| blockers.iter().any(|b| b.contains(needle));
     assert!(has("legacy dependency `old-lib`") && has("allow_legacy"), "{blockers:#?}");
     assert!(has("`b_internal`") && has("used only by consumer tests"), "{blockers:#?}");
-    assert!(has("raw ABI review [text-search estimate]") && has("`b_value`"), "{blockers:#?}");
+    assert!(has("raw ABI review [exact]") && has("`b_value`"), "{blockers:#?}");
+    assert!(has("`b_reflected`") && has("through `_G`"), "{blockers:#?}");
     assert_eq!(read(&dir.join("lib/lib.rock")), lib_src, "a blocked plan writes nothing");
     assert!(!read(&dir.join("lib/stick.toml")).contains("[language]"));
+}
+
+/// The raw-ABI census counts only an inline Lua body's real references to a
+/// renamed symbol, as LuaJIT compiles the body: a free global read or write,
+/// or a string naming it in a body that reaches `_G`. A local, a parameter,
+/// a field, a table key, a string in a body that never reaches `_G` and a
+/// comment spelling the name are not references (chess-render's `fn pc`
+/// against stone's Lua local `pc`).
+#[test]
+fn raw_abi_census_counts_only_real_references() {
+    let dir = scratch("raw_abi_exact");
+    write(&dir.join("lib/stick.toml"), &manifest("r-lib", ""));
+    write(&dir.join("lib/lib.rock"), "fn pc() -> int {\n    3\n}\n");
+    write(&dir.join("app/stick.toml"), &manifest("r-app", "[dependencies]\nr-lib = { path = \"../lib\" }\n"));
+    write(
+        &dir.join("app/app.rock"),
+        "fn app_value() -> int {\n    pc()\n}\n\n\
+         inline(lua) fn app_trace(func: int, pc: int) -> int = \"\"\"\n\
+             -- pc is the program counter\n\
+             local x = { pc = 1 }\n\
+             local s = \"pc\"\n\
+             local function inner(pc) return pc end\n\
+             return inner(x.pc) + pc\n\
+         \"\"\"\n",
+    );
+    let run = migrate(&dir, "lib", &["--check", "--consumer", "app", "--format", "json"]);
+    let v = json(&run);
+    let blockers: Vec<String> = v["blockers"].as_array().unwrap().iter().map(|b| b.as_str().unwrap().to_string()).collect();
+    assert!(blockers.is_empty(), "{blockers:#?}");
+    assert_eq!(v["verdict"], "migration_needed", "{v}");
+    assert_eq!(run.code, Some(3), "{}", shown(&run));
 }
 
 /// A package that does not check before migration is an analysis failure
