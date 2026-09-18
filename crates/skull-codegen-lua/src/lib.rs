@@ -2991,13 +2991,20 @@ fn always_inlinable(inst: &Inst) -> bool {
     )
 }
 
-/// Cells written exactly once in `scope`, as a multi-return destination, and
-/// read only after that call in the same block. A load of one is the call's
-/// result local itself, like a parameter load: without this every leaf of a
-/// wide value returned by a call occupied two locals (the result and a copy),
-/// which is what pushed functions holding a few wide values past LuaJIT's
-/// 250-slot frame limit. No later write can intervene, because the one write
-/// dominates every read.
+/// A receive this narrow keeps its copy into value locals: the copy costs at
+/// most four slots, and reading narrow receives in place made MAG's
+/// `damage_feedback_alloc_steady_state` allocate 1.4-5x its baseline in 4 of
+/// 21 runs (0 of 18 with only wider receives read in place). The wide case is
+/// the one the frame limit needs (`docs/nobox-wide-trace-plan.md`).
+const NARROW_RECEIVE_LANES: usize = 4;
+
+/// Cells written exactly once in `scope`, as a multi-return destination wider
+/// than [`NARROW_RECEIVE_LANES`], and read only after that call in the same
+/// block. A load of one is the call's result local itself, like a parameter
+/// load: without this every leaf of a wide value returned by a call occupied
+/// two locals (the result and a copy), which is what pushed functions holding
+/// a few wide values past LuaJIT's 250-slot frame limit. No later write can
+/// intervene, because the one write dominates every read.
 fn single_receive_cells(func: &MirFunc, scope: &[Idx<Block>]) -> HashSet<Idx<Cell>> {
     // cell -> (defs, the receiving call's block and position)
     let mut defs: rustc_hash::FxHashMap<Idx<Cell>, (u32, Option<(Idx<Block>, usize)>)> =
@@ -3006,9 +3013,10 @@ fn single_receive_cells(func: &MirFunc, scope: &[Idx<Block>]) -> HashSet<Idx<Cel
         for (pos, &id) in func.blocks[b].insts.iter().enumerate() {
             match &func.insts[id] {
                 Inst::CallMulti { dests, .. } | Inst::CallValueMulti { dests, .. } => {
+                    let wide = dests.len() > NARROW_RECEIVE_LANES;
                     for cell in dests {
                         let entry = defs.entry(*cell).or_insert((0, None));
-                        entry.0 += 1;
+                        entry.0 += if wide { 1 } else { 2 };
                         entry.1 = Some((b, pos));
                     }
                 }
