@@ -24,7 +24,7 @@ impl Builder<'_> {
             *c += 1;
             v
         };
-        let cell = Ustr::from(format!("__static_{}_{}_{}", self.static_owner, sname, ctr).as_str());
+        let cell = Ustr::from(format!("__static_{}_{}_{}", self.static_owner_symbol(), sname, ctr).as_str());
         let done_flag = Ustr::from(format!("{cell}__done").as_str());
         self.static_cells.insert(raw(name), cell);
 
@@ -111,6 +111,14 @@ impl Builder<'_> {
         Ok(if abi.uses_scalar_abi() { abi } else { boxed })
     }
 
+    /// The owner segment of a private global this body mints (a `static`
+    /// cell, a hoisted nested fn). A v1 owner is a DefKey, which is not an
+    /// identifier, so it takes the key's symbol form; a legacy owner is its
+    /// own symbol.
+    fn static_owner_symbol(&self) -> Ustr {
+        crate::mangle::symbol_of_key(self.static_owner)
+    }
+
     /// Hoist a nested `fn` to a private top-level [`MirFunc`] `__local_<owner>_
     /// <name>_<ctr>`. The name is registered in `nested_fn_globals` BEFORE the
     /// body is lowered so self-recursion resolves; the child inherits the
@@ -128,7 +136,7 @@ impl Builder<'_> {
             *c += 1;
             v
         };
-        let hoisted = Ustr::from(format!("__local_{}_{}_{}", self.static_owner, sname, ctr).as_str());
+        let hoisted = Ustr::from(format!("__local_{}_{}_{}", self.static_owner_symbol(), sname, ctr).as_str());
         let abi = self.nested_fn_abi(name, params, hoisted)?;
         self.nested_fn_globals.insert(raw(name), abi.clone());
 

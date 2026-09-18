@@ -203,3 +203,40 @@ fn v1_static_identity_is_keyed_on_its_owner_def_key() {
     let out = run_luajit(&format!("{}\nmain()\n", emitted.lua), "modules_v1_static");
     assert_eq!(out, "t=12", "the static must initialize once and keep its value");
 }
+
+const LOCALS_MAIN: &str = r#"
+fn main() {
+    print("{a::tick()} {a::tick()}")
+}
+"#;
+
+const LOCALS_MOD: &str = r#"
+mod a;
+
+pub fn tick() -> int {
+    static n = 0
+    n = n + 1
+    fn twice(x: int) -> int {
+        return x * 2
+    }
+    return twice(n)
+}
+"#;
+
+/// A `static` cell and a hoisted nested `fn` are private globals named after
+/// their owning function (`__static_<owner>_..`, `__local_<owner>_..`). The
+/// owner of a v1 function is its DefKey, which is not a Lua identifier: the
+/// chunk died with `'(' expected near '::'` (found by migrating
+/// `libs/match3-core`, whose test declares a nested fn).
+#[test]
+fn v1_static_cells_and_nested_fns_emit_identifiers() {
+    let emitted = emit_v1_package(
+        "v1loc",
+        &[
+            V1Fragment { file: "main.rock", src: LOCALS_MAIN },
+            V1Fragment { file: "a.rock", src: LOCALS_MOD },
+        ],
+    );
+    let out = run_luajit(&format!("{}\nmain()\n", emitted.lua), "modules_v1_locals");
+    assert_eq!(out, "2 4");
+}
