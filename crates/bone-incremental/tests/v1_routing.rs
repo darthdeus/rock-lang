@@ -599,3 +599,30 @@ fn a_held_file_refuses_different_facts() {
         .declare_file_facts("a.rock", Dialect::V1, Some(PackageTag { id: 1, self_name: "livev1".into() }))
         .is_ok());
 }
+
+/// A module alias of a dependency's module is a `use` edit (scope path):
+/// adding it anchors `s::pick`, and removing it leaves the path unresolved,
+/// each as a fresh session decides.
+#[test]
+fn a_dependency_module_alias_added_or_removed_takes_the_scope_path() {
+    let lib = "pub mod sub;\n";
+    let sub = "mod sub;\n\npub fn pick(n: int) -> int {\n    n\n}\n";
+    let without = "fn use_it() -> int {\n    s::pick(1)\n}\n";
+    let with = "use lib_a::sub as s;\n\nfn use_it() -> int {\n    s::pick(1)\n}\n";
+    let files = |user: &str| {
+        vec![
+            v1_in(1, "lib_a", "lib.rock", lib),
+            v1_in(1, "lib_a", "sub.rock", sub),
+            v1_in(2, "game", "use.rock", user),
+        ]
+    };
+    let aliases = aliases_of(&files(without));
+
+    let (tier, diags) = edit_with_aliases(files(without), "use.rock", with, &aliases);
+    assert_eq!(tier, UpdateTier::Scope);
+    assert!(diags.is_empty(), "{diags:?}");
+
+    let (tier, diags) = edit_with_aliases(files(with), "use.rock", without, &aliases);
+    assert_eq!(tier, UpdateTier::Scope);
+    assert!(diags.iter().any(|d| d.contains("did not resolve")), "{diags:?}");
+}

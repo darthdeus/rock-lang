@@ -590,3 +590,25 @@ fn no_completion_in_a_v1_file_spells_a_def_key() {
         );
     }
 }
+
+/// A module alias is a path anchor (spec 8.1): the alias segment of a path
+/// through it lands on the aliased module's header, and the member after it
+/// on the member's definition.
+#[test]
+fn a_module_alias_segment_lands_on_the_aliased_module() {
+    let project = V1Project::new();
+    let main_text = format!("use shapes::inner as deep;\n\n{MAIN}\nfn deeper() -> int {{\n    deep::depth()\n}}\n");
+    let main = project.path("main.rock");
+    std::fs::write(&main, &main_text).unwrap();
+    let mut bone = BoneWorkspace::new();
+    let diags = bone.update(&main, main_text.clone());
+    let errors: Vec<_> = diags
+        .iter()
+        .flat_map(|(_, d)| d.iter())
+        .filter(|d| d.severity == Some(lsp_types::DiagnosticSeverity::ERROR))
+        .collect();
+    assert!(errors.is_empty(), "{errors:#?}");
+    assert_eq!(definition_line(&bone, &main, &main_text, "deep::depth", 0, 1), ("shapes_inner.rock".into(), 0));
+    assert_eq!(definition_line(&bone, &main, &main_text, "as deep", 0, 4), ("shapes_inner.rock".into(), 0));
+    assert_eq!(definition_line(&bone, &main, &main_text, "deep::depth", 0, 7), ("shapes_inner.rock".into(), 2));
+}

@@ -1007,3 +1007,77 @@ fn a_user_type_named_like_a_warm_type_builds_like_a_fresh_build() {
     let rebuilt = session.rebuild_users().err().expect("rebuild_users refuses it too");
     assert_eq!(rebuilt.message, batch.message, "rebuild_users");
 }
+
+// ---------------------------------------------------------------------------
+// Module anchors (spec 8.1, 8.6): an import or a named re-export that lands
+// on a module is a path segment, and the walk through it is probed.
+// ---------------------------------------------------------------------------
+
+/// A module alias added to the fragment anchors `m::bump`, and removing it
+/// breaks the path again; the fragment's own scope changed, so only it
+/// re-lowers.
+#[test]
+fn a_module_alias_added_and_removed_moves_its_fragment() {
+    let c0 = "mod c;\n\nfn pick() -> int {\n    m::bump(1)\n}\n";
+    let c1 = "mod c;\n\nuse super::a as m;\n\nfn pick() -> int {\n    m::bump(1)\n}\n";
+    let mut h = V1Harness::new(vec![v1("a.rock", A_BUMP), v1("c.rock", c0), v1("d.rock", UNRELATED)]);
+    assert!(h.diagnostics().iter().any(|d| d.contains("did not resolve")), "{:?}", h.diagnostics());
+
+    let r = h.edit("c.rock", c1).expect("accepted");
+    assert!(h.diagnostics().is_empty(), "{:?}", h.diagnostics());
+    assert_eq!(h.call_keys("c.rock"), vec![(key("a::bump"), None)]);
+    assert_eq!(r.tier, UpdateTier::Scope);
+    assert_eq!(h.functions_per_file(&r.relowered), per_file(&[("c.rock", 1)]));
+
+    h.edit("c.rock", c0).expect("accepted");
+    assert!(h.diagnostics().iter().any(|d| d.contains("did not resolve")), "{:?}", h.diagnostics());
+}
+
+/// The module an alias names is edited in ANOTHER file: the aliasing
+/// fragment's walk through `m` probed `a`'s members, so it re-lowers and
+/// follows `bump` out of `a`.
+#[test]
+fn a_member_removed_from_an_aliased_module_relowers_the_alias_user() {
+    let a1 = "mod a;\n\npub fn other(n: int) -> int {\n    n\n}\n";
+    let c = "mod c;\n\nuse super::a as m;\n\nfn pick() -> int {\n    m::bump(1)\n}\n";
+    let mut h = V1Harness::new(vec![v1("a.rock", A_BUMP), v1("c.rock", c), v1("d.rock", UNRELATED)]);
+    assert_eq!(h.call_keys("c.rock"), vec![(key("a::bump"), None)]);
+
+    let r = h.edit("a.rock", a1).expect("accepted");
+    assert!(h.diagnostics().iter().any(|d| d.contains("did not resolve")), "{:?}", h.diagnostics());
+    assert_eq!(r.tier, UpdateTier::Scope);
+    assert_eq!(h.relowered_body_count(), 2, "a's `other` and c's `pick`");
+
+    h.edit("a.rock", A_BUMP).expect("accepted");
+    assert_eq!(h.call_keys("c.rock"), vec![(key("a::bump"), None)]);
+}
+
+/// A named re-export of a module added to a facade makes a path through it
+/// resolve in another fragment, and re-pointing it moves that path: the
+/// user's walk probed the facade's member `api`.
+#[test]
+fn a_module_reexport_added_and_repointed_moves_a_path_through_it() {
+    let facade0 = "mod facade;\n\npub fn keep() -> int {\n    1\n}\n";
+    let facade1 = "mod facade;\n\npub use super::a as api;\n\npub fn keep() -> int {\n    1\n}\n";
+    let facade2 = "mod facade;\n\npub use super::b as api;\n\npub fn keep() -> int {\n    1\n}\n";
+    let user = "mod user;\n\nfn pick() -> int {\n    super::facade::api::bump(1)\n}\n";
+    let mut h = V1Harness::new(vec![
+        v1("a.rock", A_BUMP),
+        v1("b.rock", B_BUMP),
+        v1("facade.rock", facade0),
+        v1("user.rock", user),
+        v1("d.rock", UNRELATED),
+    ]);
+    assert!(h.diagnostics().iter().any(|d| d.contains("did not resolve")), "{:?}", h.diagnostics());
+
+    let r = h.edit("facade.rock", facade1).expect("accepted");
+    assert!(h.diagnostics().is_empty(), "{:?}", h.diagnostics());
+    assert_eq!(h.call_keys("user.rock"), vec![(key("a::bump"), None)]);
+    assert_eq!(r.tier, UpdateTier::Scope);
+    assert_eq!(h.functions_per_file(&r.relowered), per_file(&[("facade.rock", 1), ("user.rock", 1)]));
+
+    let r = h.edit("facade.rock", facade2).expect("accepted");
+    assert_eq!(h.call_keys("user.rock"), vec![(key("b::bump"), None)]);
+    assert_eq!(r.tier, UpdateTier::Scope);
+    assert_eq!(h.functions_per_file(&r.relowered), per_file(&[("facade.rock", 1), ("user.rock", 1)]));
+}

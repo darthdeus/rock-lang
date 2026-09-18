@@ -1,4 +1,4 @@
-use skull_parser::{Ast, Ident, Item, ItemKind};
+use skull_parser::{Ast, Item, ItemKind};
 use bone_core::modules::{
     is_stdlib_module_file, DefKind, FragmentScope, LegacyImports, LegacyProjection, NsNode, NsPackage,
     NsVisibility, UsePathRef, STD_INTRINSIC_TYPES, STD_PACKAGE_ID, STD_PACKAGE_NAME,
@@ -1346,7 +1346,7 @@ fn validate_use_items(
             ScopeItem::Use(decl) => {
                 let mut leaves = Vec::new();
                 collect_use_leaves(&decl.tree, &[], false, &mut leaves);
-                for (_, target, glob) in leaves {
+                for (local, target, glob) in leaves {
                     let checked = if decl.vis.is_some() {
                         bone_lower::resolve::check_export_target(ws, frag.package, path, &target, glob)
                     } else {
@@ -1355,6 +1355,23 @@ fn validate_use_items(
                     checked.map_err(|message| {
                         CompilerError::new_with_label(decl.span, format!("invalid `use` target: {message}"))
                     })?;
+                    if glob {
+                        continue;
+                    }
+                    let exporter;
+                    let site = if decl.vis.is_some() {
+                        exporter = FragmentScope {
+                            package: frag.package,
+                            package_name: frag.package_name,
+                            module_path: path.to_vec(),
+                            ..Default::default()
+                        };
+                        &exporter
+                    } else {
+                        frag
+                    };
+                    bone_lower::resolve::check_use_binding(ws, site, local, &target)
+                        .map_err(|message| CompilerError::new_with_label(decl.span, message))?;
                 }
             }
             ScopeItem::Def { .. } => {}
@@ -1591,9 +1608,17 @@ fn collect_use_leaves(
     out: &mut Vec<(ustr::Ustr, UsePathRef, bool)>,
 ) {
     let skull_parser::UseTree::Path { from_root: tree_root, segments, kind } = tree;
-    let path_root = if prefix.is_empty() { *tree_root } else { from_root };
+    // Subtrees parse with `allow_root = false` (`parse_use_tree`), so only
+    // the declaration's own tree carries the root anchor; `from_root` hands
+    // it down.
+    let path_root = *tree_root || from_root;
     let mut full = prefix.to_vec();
     full.extend(segments.iter().map(|segment| segment.name));
+    // `p::m::{self}` / `{self as n}` binds the module `p::m` itself (spec 8.1).
+    let self_leaf = !prefix.is_empty() && segments.len() == 1 && segments[0].name.as_str() == "self";
+    if self_leaf {
+        full.pop();
+    }
     match kind {
         skull_parser::UseSuffix::Bind => {
             if let Some(&local) = full.last() {
@@ -1723,10 +1748,7 @@ fn register_items(
                 }
                 register_items(ws, pkg_id, &child, block_items, scope, errs);
             }
-            ScopeItem::Use(u) => {
-                let skull_parser::UseTree::Path { from_root, .. } = &u.tree;
-                flatten_use_tree(ws, pkg_id, path, *from_root, &[], &u.tree, scope, u, errs);
-            }
+            ScopeItem::Use(u) => flatten_use_decl(ws, pkg_id, path, scope, u, errs),
             ScopeItem::Def { name: bare, kind, vis: item_vis, span: item_span } => {
                 // Ordinary definitions: register under the DefKey on the node.
                 let (bare, kind) = (*bare, *kind);
@@ -1809,53 +1831,26 @@ fn register_items(
     }
 }
 
-/// Flatten one `use` tree into fragment bindings, or into shared export
-/// bindings when the declaration carries a visibility (spec 8.2). Every leaf
-/// of a nested `pub use a::{b, c::*}` shares the declaration's visibility.
-fn flatten_use_tree(
+/// Flatten one `use` declaration into fragment bindings, or into shared
+/// export bindings when it carries a visibility (spec 8.2). Every leaf of a
+/// nested `pub use a::{b, c::*}` shares the declaration's visibility.
+fn flatten_use_decl(
     ws: &mut Workspace,
     pkg_id: u32,
     path: &[ustr::Ustr],
-    from_root: bool,
-    prefix: &[Ident],
-    tree: &skull_parser::UseTree,
     scope: &mut FragmentScope,
     decl: &skull_parser::UseDecl,
     errs: &mut Vec<CompilerError>,
 ) {
-    // Subtrees parse with `allow_root = false` (`parse_use_tree`), so a nested
-    // tree never carries its own root anchor -- the declaration's anchor rides
-    // the `from_root` parameter.
-    let skull_parser::UseTree::Path { segments, kind, .. } = tree;
-    let mut full: Vec<Ustr> = prefix.iter().map(|i| i.name).collect();
-    full.extend(segments.iter().map(|i| i.name));
-    let (local, target) = match kind {
-        skull_parser::UseSuffix::Bind => {
-            let local = full.last().copied().unwrap_or(ustr::Ustr::from(""));
-            (Some(local), full)
+    let mut leaves = Vec::new();
+    collect_use_leaves(&decl.tree, &[], false, &mut leaves);
+    for (local, target, glob) in leaves {
+        let local = (!glob).then_some(local);
+        match (local, decl.vis.is_some()) {
+            (local, true) => share_export(ws, pkg_id, path, local, target, decl, errs),
+            (Some(local), false) => scope.named.entry(local).or_default().push(target),
+            (None, false) => scope.globs.push(target),
         }
-        skull_parser::UseSuffix::BindAs(alias) => (Some(alias.name), full),
-        skull_parser::UseSuffix::Operator { op, alias } => {
-            full.push(op.name);
-            (Some(alias.as_ref().map_or(op.name, |a| a.name)), full)
-        }
-        skull_parser::UseSuffix::Glob => (None, full),
-        skull_parser::UseSuffix::Nested(trees) => {
-            let prefix: Vec<Ident> = prefix.iter().chain(segments.iter()).cloned().collect();
-            for tree in trees {
-                flatten_use_tree(ws, pkg_id, path, from_root, &prefix, tree, scope, decl, errs);
-            }
-            return;
-        }
-    };
-    let target = UsePathRef { from_root, segments: target };
-    match (local, decl.vis.is_some()) {
-        (Some(local), true) => share_export(ws, pkg_id, path, Some(local), target, decl, errs),
-        (None, true) => share_export(ws, pkg_id, path, None, target, decl, errs),
-        (Some(local), false) => {
-            scope.named.entry(local).or_default().push(target);
-        }
-        (None, false) => scope.globs.push(target),
     }
 }
 
