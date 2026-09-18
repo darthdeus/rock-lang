@@ -1171,9 +1171,9 @@ fn hash_init_expr(body: &Body, e: Idx<Expr>, h: &mut std::collections::hash_map:
                 }
             }
         }
-        Expr::Not(i)
+        Expr::Not(i, _)
         | Expr::BitNot(i)
-        | Expr::UnaryMinus(i)
+        | Expr::UnaryMinus(i, _)
         | Expr::Spread(i)
         | Expr::YieldDelegate(i) => {
             tag!(14);
@@ -4034,7 +4034,7 @@ fn is_workgroup_array_type(ws: &Workspace, ty: TyId) -> bool {
 fn const_int(body: &Body, e: Idx<Expr>) -> Option<i64> {
     match body.expr_arena[e] {
         Expr::Int(v) => Some(v),
-        Expr::UnaryMinus(inner) => match body.expr_arena[inner] {
+        Expr::UnaryMinus(inner, _) => match body.expr_arena[inner] {
             Expr::Int(v) => Some(-v),
             _ => None,
         },

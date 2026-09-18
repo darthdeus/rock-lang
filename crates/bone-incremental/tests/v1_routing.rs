@@ -550,3 +550,23 @@ fn a_member_added_to_a_second_globbed_module_relowers_the_globber() {
     let (_, diags) = edit_with_aliases(files(PICK_STRING), "b.rock", other, &aliases);
     assert!(diags.iter().any(|d| d.contains("type mismatch")), "{diags:?}");
 }
+
+/// Unary `-x` reads a family lowering decided, so a globbed module gaining
+/// or losing `__unm` re-lowers the caller on the scope path, even when the
+/// caller's lookup found nothing before, as a fresh session decides.
+#[test]
+fn a_unary_operator_added_to_a_globbed_module_relowers_the_caller() {
+    let without = "pub struct Pt {\n    pub x: int,\n}\n";
+    let with = "pub struct Pt {\n    pub x: int,\n}\n\npub fn __unm(a: Pt) -> Pt {\n    a\n}\n";
+    let caller = "use geo::*;\n\nfn neg() -> int {\n    let p = -Pt { x: 1 }\n    -p.x\n}\n";
+    let files = |geo: &str| vec![v1_in(1, "geo", "geo.rock", geo), v1_in(2, "app", "app.rock", caller)];
+    let aliases = aliases_of(&files(without));
+
+    let (tier, diags) = edit_with_aliases(files(without), "geo.rock", with, &aliases);
+    assert_eq!(tier, UpdateTier::Scope);
+    assert!(diags.is_empty(), "{diags:?}");
+
+    let (tier, diags) = edit_with_aliases(files(with), "geo.rock", without, &aliases);
+    assert_eq!(tier, UpdateTier::Scope);
+    assert!(diags.iter().any(|d| d.contains("operator `-` is not defined for `geo::Pt`")), "{diags:?}");
+}

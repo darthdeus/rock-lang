@@ -176,9 +176,9 @@ pub(crate) fn reject_captures_expr(
         | Expr::Return(None)
         | Expr::Yield(None) => {}
 
-        Expr::Not(i)
+        Expr::Not(i, _)
         | Expr::BitNot(i)
-        | Expr::UnaryMinus(i)
+        | Expr::UnaryMinus(i, _)
         | Expr::Spread(i)
         | Expr::YieldDelegate(i)
         | Expr::Return(Some(i))
@@ -477,9 +477,9 @@ pub(crate) fn verify_pure_expr(
             go!(low);
             go!(high);
         }
-        Expr::Not(i)
+        Expr::Not(i, _)
         | Expr::BitNot(i)
-        | Expr::UnaryMinus(i)
+        | Expr::UnaryMinus(i, _)
         | Expr::Spread(i)
         | Expr::YieldDelegate(i)
         | Expr::Return(Some(i))

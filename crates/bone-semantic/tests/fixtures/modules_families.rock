@@ -2,7 +2,8 @@
 //! 8.5): a declared or imported operator keeps the built-in operator family,
 //! explicit imports of different callables compose at their tier, glob-tier
 //! callables of different modules compose at theirs, and
-//! compound assignment reads the family its binary operator reads.
+//! compound assignment reads the family its binary operator reads. Unary
+//! `-x` / `!x` (`__unm` / `__not`) read a family lowering decides the same way.
 //!
 //! Sections hold embedded files: `//-- <file> @pkg=<self_name>,<id> [@v1]`.
 
@@ -550,6 +551,132 @@ use clr::*;
 
 fn bad() -> Pt {
     Pt { x: 1, y: 2 } + Rgb { r: 1 }
+}
+
+//- a_modules_own_unary_operators_are_reached
+//-- geo.rock @pkg=geo,1 @v1
+pub struct Pt {
+    pub x: int,
+}
+
+pub fn __unm(a: Pt) -> Pt {
+    Pt { x: 0 - a.x }
+}
+
+pub fn __not(a: Pt) -> bool {
+    a.x == 0
+}
+
+fn neg() -> int {
+    let p = -Pt { x: 1 }
+            //^ geo::Pt
+    let z: bool = !Pt { x: 0 }
+    let n: int = -3
+    let f: float = -1.5
+    let b: bool = !true
+    p.x + n
+}
+
+//- globbed_unary_operators_of_two_modules_compose
+//-- geo.rock @pkg=geo,1 @v1
+pub struct Pt {
+    pub x: int,
+}
+
+pub fn __unm(a: Pt) -> Pt {
+    Pt { x: 0 - a.x }
+}
+
+//-- clr.rock @pkg=clr,2 @v1
+pub struct Rgb {
+    pub r: int,
+}
+
+pub fn __unm(a: Rgb) -> Rgb {
+    Rgb { r: 0 - a.r }
+}
+
+//-- app.rock @pkg=app,3 @v1
+use geo::*;
+use clr::*;
+
+fn neg() -> int {
+    let p = -Pt { x: 1 }
+            //^ geo::Pt
+    let c = -Rgb { r: 1 }
+            //^ clr::Rgb
+    let n: int = -2
+    p.x + c.r + n
+}
+
+//- a_named_unary_operator_import_is_reached
+//-- geo.rock @pkg=geo,1 @v1
+pub struct Pt {
+    pub x: int,
+}
+
+pub fn __not(a: Pt) -> bool {
+    a.x == 0
+}
+
+//-- app.rock @pkg=app,2 @v1
+use geo::{Pt, __not};
+
+fn neg() -> bool {
+    let z: bool = !Pt { x: 1 }
+    z && !false
+}
+
+//- an_unimported_unary_operator_is_not_reached @fail=operator `-` is not defined for `geo::Pt`
+//-- geo.rock @pkg=geo,1 @v1
+pub struct Pt {
+    pub x: int,
+}
+
+pub fn __unm(a: Pt) -> Pt {
+    Pt { x: 0 - a.x }
+}
+
+//-- app.rock @pkg=app,2 @v1
+use geo::Pt;
+
+fn neg() -> Pt {
+    -Pt { x: 1 }
+}
+
+//- a_private_unary_operator_is_not_reached_through_a_glob @fail=operator `!` is not defined for `geo::Pt`
+//-- geo.rock @pkg=geo,1 @v1
+pub struct Pt {
+    pub x: int,
+}
+
+fn __not(a: Pt) -> bool {
+    a.x == 0
+}
+
+//-- app.rock @pkg=app,2 @v1
+use geo::*;
+
+fn neg() -> bool {
+    !Pt { x: 1 }
+}
+
+//- legacy_unary_minus_reaches_a_projected_v1_operator
+//-- geo.rock @pkg=geo,1 @v1
+pub struct Pt {
+    pub x: int,
+}
+
+pub fn __unm(a: Pt) -> Pt {
+    Pt { x: 0 - a.x }
+}
+
+//-- main.rock @pkg=game,3
+fn neg() -> int {
+    let p = -Pt { x: 1 }
+            //^ geo::Pt
+    let n: int = -3
+    p.x + n
 }
 
 //- legacy_explicit_imports_of_two_callables_compose

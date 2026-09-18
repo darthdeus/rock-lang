@@ -207,7 +207,7 @@ fn string_arg(ann: &bone_semantic::hir::Annotation, name: &str) -> Option<Ustr> 
 fn int_expr(body: &bone_semantic::hir::Body, e: Idx<bone_semantic::hir::Expr>) -> Option<i64> {
     match body.expr_arena[e] {
         Expr::Int(n) => Some(n),
-        Expr::UnaryMinus(inner) => int_expr(body, inner)?.checked_neg(),
+        Expr::UnaryMinus(inner, _) => int_expr(body, inner)?.checked_neg(),
         _ => None,
     }
 }

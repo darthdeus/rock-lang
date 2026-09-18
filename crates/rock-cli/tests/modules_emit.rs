@@ -504,3 +504,50 @@ fn main() {
     );
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// v1 unary operators: `-p` and `!p` run the globbed `__unm` / `__not`
+/// bodies (the `- 100` and the `x == 7` mark them) while `-n` and `!b` on
+/// scalars stay native.
+#[test]
+fn v1_unary_operators_run_the_resolved_body() {
+    let root = std::env::temp_dir().join("rock_modules_emit_v1_unary");
+    let _ = std::fs::remove_dir_all(&root);
+    v1_lib(
+        &root.join("provider"),
+        "provider",
+        r#"pub struct Pt {
+    pub x: int,
+}
+
+pub fn __unm(a: Pt) -> Pt {
+    Pt { x: 0 - a.x - 100 }
+}
+
+pub fn __not(a: Pt) -> bool {
+    a.x == 7
+}
+"#,
+    );
+    let app = root.join("app");
+    v1_app(
+        &app,
+        &["provider"],
+        r#"use provider::*;
+
+fn main() {
+    let p = -Pt { x: 1 }
+    let z = !Pt { x: 7 }
+    let n = 5
+    let b = false
+    print("p={p.x} z={z} n={-n} b={!b}")
+}
+"#,
+    );
+    let (stdout, stderr, ok) = run(&app);
+    assert!(ok, "v1 unary operator project failed\nstdout:\n{stdout}\nstderr:\n{stderr}");
+    assert!(
+        stdout.contains("p=-101 z=true n=-5 b=true"),
+        "v1 unary operators should run the resolved body and keep scalars native\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}

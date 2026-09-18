@@ -157,7 +157,7 @@ pub fn resolve_legacy_callee(ws: &Workspace, file: Ustr, name: Ustr) -> Result<C
 
 fn projected(name: Ustr, entries: &[bone_core::modules::LegacyProjectionEntry]) -> Result<Resolved, String> {
     if let [entry] = entries {
-        return Ok(Resolved { key: entry.key, kind: legacy_resolved_kind(entry.kind), hidden: Vec::new() });
+        return Ok(Resolved { key: entry.key, kind: resolved_kind(entry.kind), hidden: Vec::new() });
     }
     Err(legacy_candidates(name, &entries.iter().map(|e| e.key).collect::<Vec<_>>()))
 }
@@ -173,7 +173,7 @@ fn legacy_collision(name: Ustr, owners: &[Ustr], foreign: &[Ustr]) -> String {
     format!("ambiguous legacy reference to `{name}`: legacy definition in {owners} and v1 definition {foreign}")
 }
 
-fn legacy_resolved_kind(kind: bone_core::modules::DefKind) -> ResolvedKind {
+fn resolved_kind(kind: bone_core::modules::DefKind) -> ResolvedKind {
     match kind {
         bone_core::modules::DefKind::Type => ResolvedKind::Type,
         bone_core::modules::DefKind::Global => ResolvedKind::Global,
@@ -200,6 +200,7 @@ pub fn resolve_bare(
     match bind_bare(ws, frag, name)? {
         Bound::One(resolved, _) => Ok(resolved),
         Bound::Several(hits, _, via) => Err(several(name, &hits, via)),
+        Bound::Unbound => Err(unbound(name)),
     }
 }
 
@@ -211,10 +212,22 @@ pub fn resolve_bare(
 /// beside it, so a module's own `operator +` does not hide built-in
 /// arithmetic.
 pub fn resolve_v1_callee(ws: &Workspace, frag: &FragmentScope, name: Ustr) -> Result<CalleeFamily, String> {
+    v1_callee(ws, frag, name)?.ok_or_else(|| unbound(name))
+}
+
+/// A unary operator's function (`-x` -> `__unm`, `!x` -> `__not`) in a v1
+/// fragment: its family, or `None` when no tier binds the name. That is not
+/// an error here: a scalar operand never consults the family.
+pub fn resolve_v1_unary(ws: &Workspace, frag: &FragmentScope, name: Ustr) -> Result<Option<CalleeFamily>, String> {
+    v1_callee(ws, frag, name)
+}
+
+fn v1_callee(ws: &Workspace, frag: &FragmentScope, name: Ustr) -> Result<Option<CalleeFamily>, String> {
     let operator = bone_core::hir::operator_entry(name.as_str()).is_some_and(|(_, overloadable)| overloadable);
     let (mut keys, hidden) = match bind_bare(ws, frag, name)? {
-        Bound::One(resolved, Tier::Std) => return Ok(CalleeFamily::Single(resolved)),
-        Bound::One(resolved, Tier::Scope) if !operator => return Ok(CalleeFamily::Single(resolved)),
+        Bound::Unbound => return Ok(None),
+        Bound::One(resolved, Tier::Std) => return Ok(Some(CalleeFamily::Single(resolved))),
+        Bound::One(resolved, Tier::Scope) if !operator => return Ok(Some(CalleeFamily::Single(resolved))),
         Bound::One(resolved, Tier::Scope) => (vec![resolved.key], resolved.hidden),
         Bound::Several(hits, hidden, via) => {
             if hits.iter().any(|(_, kind)| *kind != ResolvedKind::Callable) {
@@ -231,9 +244,9 @@ pub fn resolve_v1_callee(ws: &Workspace, frag: &FragmentScope, name: Ustr) -> Re
     keys.sort_by_key(|k| k.as_str().to_string());
     keys.dedup();
     if let [key] = keys[..] {
-        return Ok(CalleeFamily::Single(Resolved { key, kind: ResolvedKind::Callable, hidden }));
+        return Ok(Some(CalleeFamily::Single(Resolved { key, kind: ResolvedKind::Callable, hidden })));
     }
-    Ok(CalleeFamily::Merged { keys, hidden })
+    Ok(Some(CalleeFamily::Merged { keys, hidden }))
 }
 
 /// Which tier bound a name: the fragment's own scope (tiers 2-4) or the std
@@ -250,6 +263,8 @@ enum Bound {
     /// Several distinct definitions at one tier, sorted by key, the lower
     /// tier's candidates they hide, and which tier bound them.
     Several(Vec<(Ustr, ResolvedKind)>, Vec<Ustr>, Via),
+    /// No tier binds the name.
+    Unbound,
 }
 
 /// The tier that bound several definitions under one name.
@@ -261,7 +276,7 @@ enum Via {
 
 fn bind_bare(ws: &Workspace, frag: &FragmentScope, name: Ustr) -> Result<Bound, String> {
     if ws.ns.package(frag.package).is_none() {
-        return std_bare(ws, name).map(|r| Bound::One(r, Tier::Std));
+        return Ok(std_bound(ws, name));
     }
     let viewers = [Viewer::Fragment(frag)];
     let glob_hits = glob_candidates(ws, frag, name)?;
@@ -307,7 +322,15 @@ fn bind_bare(ws: &Workspace, frag: &FragmentScope, name: Ustr) -> Result<Bound, 
 
     // Tier 5: the compiler-owned std export view. There is no legacy
     // workspace-map fall-through for v1 names.
-    std_bare(ws, name).map(|r| Bound::One(r, Tier::Std))
+    Ok(std_bound(ws, name))
+}
+
+fn std_bound(ws: &Workspace, name: Ustr) -> Bound {
+    std_definition(ws, name).map_or(Bound::Unbound, |r| Bound::One(r, Tier::Std))
+}
+
+fn unbound(name: Ustr) -> String {
+    format!("`{name}` did not resolve to any definition")
 }
 
 /// Several imports or globs of `name` where one definition is wanted: a
@@ -330,25 +353,16 @@ fn several(name: Ustr, hits: &[(Ustr, ResolvedKind)], via: Via) -> String {
     }
 }
 
-fn std_bare(ws: &Workspace, name: Ustr) -> Result<Resolved, String> {
+fn std_definition(ws: &Workspace, name: Ustr) -> Option<Resolved> {
     if bone_core::modules::is_intrinsic_key_in(name, &["Map", "Coroutine", "Iterator"]) {
-        return Ok(Resolved {
+        return Some(Resolved {
             key: name,
             kind: ResolvedKind::Type,
             hidden: Vec::new(),
         });
     }
-    let Some((key, kind)) = ws.ns.std_definition(name) else {
-        return Err(format!("`{name}` did not resolve to any definition"));
-    };
-    let kind = match kind {
-        bone_core::modules::DefKind::Type => ResolvedKind::Type,
-        bone_core::modules::DefKind::Global => ResolvedKind::Global,
-        bone_core::modules::DefKind::Callable => ResolvedKind::Callable,
-        bone_core::modules::DefKind::Decorator => ResolvedKind::Decorator,
-        bone_core::modules::DefKind::Module => ResolvedKind::Module,
-    };
-    Ok(Resolved { key, kind, hidden: Vec::new() })
+    let (key, kind) = ws.ns.std_definition(name)?;
+    Some(Resolved { key, kind: resolved_kind(kind), hidden: Vec::new() })
 }
 
 /// Tier 4 candidates for `name`, deduplicated and sorted by key: what every

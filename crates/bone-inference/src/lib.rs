@@ -45,10 +45,6 @@ pub(crate) use fields::*;
 pub(crate) use patterns::*;
 pub(crate) use iter::*;
 
-static NOT: LazyLock<Ustr> = LazyLock::new(|| ustr("__not"));
-
-static UNM: LazyLock<Ustr> = LazyLock::new(|| ustr("__unm"));
-
 static NULL: LazyLock<Ustr> = LazyLock::new(|| ustr("null"));
 
 static Q_E: LazyLock<Ustr> = LazyLock::new(|| ustr("?E"));

@@ -192,13 +192,39 @@ impl<'a> LowerCtx<'a> {
             }
         }
         .map_err(|msg| CompilerError::new_with_label(span, msg))?;
-        let v1 = self.v1_scope().is_some();
+        Ok(self.record_family(name, resolved))
+    }
+
+    /// The family of a unary operator's function (`-x` -> `__unm`, `!x` ->
+    /// `__not`), resolved like a binary operator's callee. In v1 a name no
+    /// tier binds is a family with no members rather than an error: the
+    /// operand may be a scalar, which never consults it.
+    fn resolve_unary_family(&mut self, name: Ustr, span: Span) -> Result<hir::CallFamily, CompilerError> {
+        let file = self.module.file;
+        let resolved = match self.v1_scope() {
+            Some(frag) => self.probed(|| resolve::resolve_v1_unary(self.workspace, frag, name)),
+            None => {
+                self.probe_legacy(name);
+                resolve::resolve_legacy_callee(self.workspace, file, name).map(Some)
+            }
+        }
+        .map_err(|msg| CompilerError::new_with_label(span, msg))?;
+        let resolved = resolved.unwrap_or(resolve::CalleeFamily::Merged { keys: Vec::new(), hidden: Vec::new() });
+        Ok(self.record_family(name, resolved).1)
+    }
+
+    /// The spelling and `CallFamily` of a resolved callee; a merged family's
+    /// member keys go on the module for inference.
+    fn record_family(&mut self, name: Ustr, resolved: resolve::CalleeFamily) -> (Ustr, hir::CallFamily) {
+        let file = self.module.file;
         match resolved {
-            resolve::CalleeFamily::Single(r) if v1 => Ok((r.key, hir::CallFamily::resolved(r.key, &r.hidden))),
-            resolve::CalleeFamily::Single(r) => Ok((r.key, hir::CallFamily::from_name(r.key))),
+            resolve::CalleeFamily::Single(r) if self.v1_scope().is_some() => {
+                (r.key, hir::CallFamily::resolved(r.key, &r.hidden))
+            }
+            resolve::CalleeFamily::Single(r) => (r.key, hir::CallFamily::from_name(r.key)),
             resolve::CalleeFamily::Merged { keys, hidden } => {
                 self.module.call_families.insert(name, keys);
-                Ok((name, hir::CallFamily::merged(name, file, &hidden)))
+                (name, hir::CallFamily::merged(name, file, &hidden))
             }
         }
     }
@@ -1752,7 +1778,10 @@ pub fn lower_expr_value(
         }
 
         ExprKind::Paren(inner) => lower_expr_value(ctx, a, body, scope, a.e(inner))?,
-        ExprKind::Not(inner) => Expr::Not(lower_expr(ctx, a, body, scope, a.e(inner))?),
+        ExprKind::Not(inner) => {
+            let family = ctx.resolve_unary_family(ustr("__not"), e.span)?;
+            Expr::Not(lower_expr(ctx, a, body, scope, a.e(inner))?, family)
+        }
         ExprKind::BitNot(inner) => Expr::BitNot(lower_expr(ctx, a, body, scope, a.e(inner))?),
 
         ExprKind::As(inner, ty) => Expr::As {
@@ -1829,7 +1858,8 @@ pub fn lower_expr_value(
         }
 
         ExprKind::UnaryMinus(inner) => {
-            Expr::UnaryMinus(lower_expr(ctx, a, body, scope, a.e(inner))?)
+            let family = ctx.resolve_unary_family(ustr("__unm"), e.span)?;
+            Expr::UnaryMinus(lower_expr(ctx, a, body, scope, a.e(inner))?, family)
         }
 
         ExprKind::Yield(opt) => {

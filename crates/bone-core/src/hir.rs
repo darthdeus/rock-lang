@@ -639,10 +639,14 @@ pub enum Expr {
     Tuple(IdxRange<Expr>),
 
     InterpolatedString(IdxRange<InterpPart>),
-    Not(Idx<Expr>),
+    /// `!x`. The family is `__not`'s, decided at lowering like a binary
+    /// operator's; inference reads it only for a non-bool operand.
+    Not(Idx<Expr>, CallFamily),
     BitNot(Idx<Expr>),
 
-    UnaryMinus(Idx<Expr>),
+    /// `-x`. The family is `__unm`'s, decided at lowering; inference reads
+    /// it only for an operand that is not a number or a newtype.
+    UnaryMinus(Idx<Expr>, CallFamily),
 
     IncDec {
         target: Idx<Expr>,
@@ -819,7 +823,8 @@ pub enum CallFamily {
     /// 8.5). Lowering decides the member keys and records them under `name`
     /// in `Module::call_families` of the module lowered from `file`; `Expr`
     /// is `Copy`, so the family carries only that address. `hidden` is as
-    /// for `Resolved`.
+    /// for `Resolved`. A v1 unary operator no tier binds is a family with no
+    /// members: a scalar operand never reads it, any other has no overload.
     Merged { name: Ustr, file: Ustr, hidden: Option<Ustr> },
 }
 

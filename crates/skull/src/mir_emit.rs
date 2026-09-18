@@ -337,7 +337,7 @@ fn render_default_lit(body: &bone_semantic::hir::Body, e: Idx<Expr>) -> Option<S
         Expr::Float(f) => Some(format!("{:?}", f.0)),
         Expr::Bool(b) => Some(b.to_string()),
         Expr::String(s) => Some(skull_codegen_lua::lua_string(s.as_str())),
-        Expr::UnaryMinus(inner) => render_default_lit(body, inner).map(|s| format!("-{}", s)),
+        Expr::UnaryMinus(inner, _) => render_default_lit(body, inner).map(|s| format!("-{}", s)),
         _ => None,
     }
 }

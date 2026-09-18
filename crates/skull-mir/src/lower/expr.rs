@@ -214,7 +214,7 @@ impl Builder<'_> {
 
             // Unary `!`/`~`/`-`: a struct operand is an operator overload (bone
             // records the target on `e`); a scalar uses the native op.
-            Expr::Not(x) => {
+            Expr::Not(x, _) => {
                 let v = self.lower_expr(x)?;
                 match self.overload_target(e) {
                     Some(func) => Ok(self.emit_cur(Inst::Call { func, args: vec![v] })),
@@ -231,7 +231,7 @@ impl Builder<'_> {
                     None => Ok(self.emit_cur(Inst::BitNot(v))),
                 }
             }
-            Expr::UnaryMinus(x) => {
+            Expr::UnaryMinus(x, _) => {
                 let v = self.lower_expr(x)?;
                 match self.overload_target(e) {
                     Some(func) => Ok(self.emit_cur(Inst::Call { func, args: vec![v] })),

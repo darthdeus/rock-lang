@@ -100,7 +100,7 @@ fn cond_has_effect(gamma: &Gamma, c: BodyCtx, e: Idx<Expr>) -> bool {
         // Method / fn-value callee: opaque, can't prove purity.
         Expr::Call { .. } => true,
         Expr::Yield(_) | Expr::YieldDelegate(_) | Expr::Assign { .. } => true,
-        Expr::Not(i) => cond_has_effect(gamma, c, i),
+        Expr::Not(i, _) => cond_has_effect(gamma, c, i),
         Expr::BinOp { lhs, rhs, .. } => {
             cond_has_effect(gamma, c, lhs) || cond_has_effect(gamma, c, rhs)
         }
@@ -130,7 +130,7 @@ pub(crate) fn detect_null_narrow(
 
 fn detect_null_narrow_inner(c: BodyCtx, cond: Idx<Expr>) -> (Vec<Narrow>, Vec<Narrow>) {
     match c.body.expr_arena[cond] {
-        Expr::Not(inner) => {
+        Expr::Not(inner, _) => {
             let (t, e) = detect_null_narrow_inner(c, inner);
             (e, t)
         }

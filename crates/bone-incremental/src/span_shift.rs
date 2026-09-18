@@ -114,9 +114,9 @@ pub fn shift_module_after_edit(
                 | Expr::Var(_)
                 | Expr::Tuple(_)
                 | Expr::InterpolatedString(_)
-                | Expr::Not(_)
+                | Expr::Not(..)
                 | Expr::BitNot(_)
-                | Expr::UnaryMinus(_)
+                | Expr::UnaryMinus(..)
                 | Expr::IncDec { .. }
                 | Expr::Return(_)
                 | Expr::Break

@@ -353,7 +353,7 @@ pub fn infer_expr_used(
 
             gamma.workspace.builtins.string()
         }
-        Expr::Not(inner) => {
+        Expr::Not(inner, family) => {
             let inner_ty = infer_expr(c, gamma, *inner)?;
             let resolved = resolve(gamma, inner_ty, c.body.expr_spans[*inner]);
 
@@ -363,7 +363,7 @@ pub fn infer_expr_used(
                 resolve_named_call(
                     gamma,
                     c,
-                    CallFamily::from_name(*NOT),
+                    *family,
                     None,
                     IdxRange::new_inclusive(*inner..=*inner),
                     e,
@@ -440,7 +440,7 @@ pub fn infer_expr_used(
             inner_r
         }
 
-        Expr::UnaryMinus(inner) => {
+        Expr::UnaryMinus(inner, family) => {
             let inner_ty = infer_expr(c, gamma, *inner)?;
             // TODO: do we actually want to call resolve after every infer? shouldn't that be part
             // of infer? figure that out later
@@ -460,7 +460,7 @@ pub fn infer_expr_used(
                 _ => resolve_named_call(
                     gamma,
                     c,
-                    CallFamily::from_name(*UNM),
+                    *family,
                     None,
                     IdxRange::new_inclusive(*inner..=*inner),
                     e,
@@ -2295,7 +2295,7 @@ fn check_numeric_literal_cast(
 fn integer_literal_value(c: BodyCtx, e: Idx<Expr>) -> Option<i64> {
     match c.body.expr_arena[e] {
         Expr::Int(value) => Some(value),
-        Expr::UnaryMinus(inner) => integer_literal_value(c, inner)?.checked_neg(),
+        Expr::UnaryMinus(inner, _) => integer_literal_value(c, inner)?.checked_neg(),
         _ => None,
     }
 }
@@ -2303,7 +2303,7 @@ fn integer_literal_value(c: BodyCtx, e: Idx<Expr>) -> Option<i64> {
 fn float_literal_value(c: BodyCtx, e: Idx<Expr>) -> Option<f64> {
     match c.body.expr_arena[e] {
         Expr::Float(value) => Some(value.0),
-        Expr::UnaryMinus(inner) => Some(-float_literal_value(c, inner)?),
+        Expr::UnaryMinus(inner, _) => Some(-float_literal_value(c, inner)?),
         _ => None,
     }
 }
@@ -2344,7 +2344,7 @@ pub(crate) fn find_float_div_span_rec(c: BodyCtx, e: Idx<Expr>, depth: usize) ->
             }
             None
         }
-        Expr::UnaryMinus(x) => find_float_div_span_rec(c, *x, depth + 1),
+        Expr::UnaryMinus(x, _) => find_float_div_span_rec(c, *x, depth + 1),
         Expr::Var(b) => {
             let init = binding_initializer(c, *b)?;
             find_float_div_span_rec(c, init, depth + 1)
