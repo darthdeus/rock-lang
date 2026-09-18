@@ -362,6 +362,7 @@ pub fn lower_modules(
                 };
 
                 pass_lower_fields(item.rock_module, &mut ctx)?;
+                bone_lower::record_use_paths(item.rock_module, &mut ctx);
 
                 Ok::<_, CompilerError>((item.rock_module, ctx))
             })

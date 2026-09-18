@@ -796,6 +796,35 @@ fn render_struct_def(ws: &Workspace, name: Ustr) -> Option<String> {
     Some(out)
 }
 
+/// The modules-v1 path segment under `offset` in module `mid`, as lowering
+/// recorded it ([`hir::PathSegmentRef`]): the enclosing body's segments,
+/// then the module's own (`use` items, signatures, fields).
+pub fn path_segment_at(ws: &Workspace, mid: ModuleId, offset: usize) -> Option<hir::PathSegmentRef> {
+    let module = ws.modules.get(mid.index())?;
+    let hit = |seg: &&hir::PathSegmentRef| span_contains(&seg.span, offset);
+    module
+        .body_at(offset)
+        .and_then(|owner| module.bodies.get(&owner))
+        .and_then(|body| body.path_segments.iter().find(hit))
+        .or_else(|| module.path_segments.iter().find(hit))
+        .copied()
+}
+
+/// The declaration a path segment's definition target names. A module
+/// target has no declaration in the workspace (its headers live in the
+/// source), so it is `None` here.
+pub fn segment_target_def(ws: &Workspace, target: hir::SegmentTarget) -> Option<Span> {
+    match target {
+        // A callable lands on its (first overload's) name, like a call does.
+        hir::SegmentTarget::Def(key) => match ws.functions_by_name.get(&key).and_then(|l| l.first()) {
+            Some(&(fmid, fid)) => Some(ws.module(fmid).functions[fid].name_span),
+            None => def_of_name(ws, key),
+        },
+        hir::SegmentTarget::Variant { enum_key, variant } => variant_def_span(ws, Some(enum_key), variant),
+        hir::SegmentTarget::Module { .. } => None,
+    }
+}
+
 fn def_of_name(ws: &Workspace, name: Ustr) -> Option<Span> {
     for m in ws.modules.iter() {
         if let Some(g) = m.global_by_name.get(&name) {

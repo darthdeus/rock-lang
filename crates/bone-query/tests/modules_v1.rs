@@ -16,6 +16,7 @@ pub struct V1Project {
 pub const MAIN: &str = "\
 use shapes::area as surface;
 use shapes::*;
+use shapes::Box as Crate;
 
 fn main() {
     let a = shapes::inner::depth()
@@ -23,6 +24,11 @@ fn main() {
     let c = perimeter(3)
     let d = facade::depth()
     print(\"{a} {b} {c} {d}\")
+}
+
+fn sizes(b: shapes::Box, c: Crate) -> int {
+    let k = shapes::Kind::Round
+    b.w + c.w + shapes::LIMIT
 }
 ";
 
@@ -36,6 +42,17 @@ pub fn area(w: int) -> int {
 pub fn perimeter(w: int) -> int {
     w * 4
 }
+
+pub struct Box {
+    pub w: int,
+}
+
+pub enum Kind {
+    Round,
+    Square,
+}
+
+pub global LIMIT: int = 10
 ";
 
 pub const INNER: &str = "\
@@ -180,7 +197,7 @@ fn definition_of_a_qualified_path_lands_on_the_function() {
     let bone = project.open();
     let (file, covered) = definition_in_main(&bone, &project, "depth()", 0, 1);
     assert_eq!(file, "shapes_inner.rock");
-    assert!(covered.starts_with("pub fn depth") || covered == "depth", "landed on {covered:?}");
+    assert_eq!(covered, "depth");
 }
 
 #[test]
@@ -222,4 +239,136 @@ fn the_std_prelude_resolves_in_a_v1_file() {
     let diags = bone.update(&shapes, SHAPES.to_string());
     assert_eq!(errors_in(&diags, &shapes), Vec::<String>::new());
     assert_eq!(errors_in(&diags, &project.path("main.rock")), Vec::<String>::new());
+}
+
+// -- go-to-definition on each path segment ------------------------------------
+
+/// The line a definition landed on, with its file.
+fn definition_line(bone: &BoneWorkspace, path: &str, text: &str, needle: &str, nth: usize, into: usize) -> (String, u32) {
+    let loc = bone
+        .definition(path, pos_of(text, needle, nth, into))
+        .unwrap_or_else(|| panic!("no definition for `{needle}` #{nth}"));
+    let (file, _) = located_text(&loc);
+    (file_name(&file).to_string(), loc.range.start.line)
+}
+
+#[test]
+fn a_module_segment_lands_on_the_module_header() {
+    let project = V1Project::new();
+    let bone = project.open();
+    let main = project.path("main.rock");
+    assert_eq!(definition_line(&bone, &main, MAIN, "shapes::inner::depth", 0, 1), ("shapes.rock".into(), 0));
+    assert_eq!(definition_line(&bone, &main, MAIN, "inner::depth", 0, 1), ("shapes_inner.rock".into(), 0));
+    assert_eq!(definition_line(&bone, &main, MAIN, "facade::depth", 0, 1), ("facade.rock".into(), 0));
+}
+
+#[test]
+fn a_use_item_segment_lands_on_what_it_names() {
+    let project = V1Project::new();
+    let bone = project.open();
+    let (file, covered) = definition_in_main(&bone, &project, "area as surface", 0, 1);
+    assert_eq!(file, "shapes.rock");
+    assert!(covered.contains("area"), "landed on {covered:?}");
+    assert_eq!(
+        definition_line(&bone, &project.path("main.rock"), MAIN, "shapes::area as", 0, 1),
+        ("shapes.rock".into(), 0)
+    );
+}
+
+#[test]
+fn a_qualified_type_lands_on_the_type() {
+    let project = V1Project::new();
+    let bone = project.open();
+    let (file, covered) = definition_in_main(&bone, &project, "Box, c", 0, 1);
+    assert_eq!(file, "shapes.rock");
+    assert!(covered.contains("Box"), "landed on {covered:?}");
+}
+
+#[test]
+fn an_aliased_type_lands_on_the_original_type() {
+    let project = V1Project::new();
+    let bone = project.open();
+    let (file, covered) = definition_in_main(&bone, &project, "Crate)", 0, 1);
+    assert_eq!(file, "shapes.rock");
+    assert!(covered.contains("Box"), "landed on {covered:?}");
+}
+
+#[test]
+fn a_qualified_global_lands_on_the_global() {
+    let project = V1Project::new();
+    let bone = project.open();
+    let (file, covered) = definition_in_main(&bone, &project, "LIMIT", 0, 1);
+    assert_eq!(file, "shapes.rock");
+    assert!(covered.contains("LIMIT"), "landed on {covered:?}");
+}
+
+#[test]
+fn a_qualified_variant_lands_on_the_variant_and_its_enum() {
+    let project = V1Project::new();
+    let bone = project.open();
+    let (file, covered) = definition_in_main(&bone, &project, "Round", 0, 1);
+    assert_eq!(file, "shapes.rock");
+    assert!(covered.contains("Round"), "landed on {covered:?}");
+    let (file, covered) = definition_in_main(&bone, &project, "Kind::Round", 0, 1);
+    assert_eq!(file, "shapes.rock");
+    assert!(covered.contains("Kind"), "landed on {covered:?}");
+}
+
+/// A legacy package depending on the v1 package `geo`: the legacy file calls
+/// `area` through the compatibility projection (spec 3.2).
+fn legacy_consumer() -> (tempfile::TempDir, String, &'static str) {
+    let dir = tempfile::tempdir().unwrap();
+    let geo = dir.path().join("geo");
+    let app = dir.path().join("app");
+    std::fs::create_dir_all(&geo).unwrap();
+    std::fs::create_dir_all(&app).unwrap();
+    std::fs::write(
+        geo.join("stick.toml"),
+        "[package]\nname = \"geo\"\nversion = \"0.1.0\"\ntype = \"lib\"\n\n[language]\nmodules = \"v1\"\n",
+    )
+    .unwrap();
+    std::fs::write(geo.join("lib.rock"), "pub fn area(w: int) -> int {\n    w * w\n}\n").unwrap();
+    std::fs::write(
+        app.join("stick.toml"),
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\ntype = \"bin\"\n\n[dependencies]\ngeo = { path = \"../geo\" }\n",
+    )
+    .unwrap();
+    let main_text = "fn main() {\n    print(\"{area(2)}\")\n}\n";
+    std::fs::write(app.join("main.rock"), main_text).unwrap();
+    let main = bone_query::canonicalize_lenient(&app.join("main.rock").to_string_lossy());
+    (dir, main, main_text)
+}
+
+#[test]
+fn a_legacy_call_of_a_projected_name_lands_on_the_v1_definition() {
+    let (_dir, main, text) = legacy_consumer();
+    let mut bone = BoneWorkspace::new();
+    let diags = bone.update(&main, text.to_string());
+    assert_eq!(errors_in(&diags, &main), Vec::<String>::new());
+    let loc = bone.definition(&main, pos_of(text, "area", 0, 1)).expect("a projected call resolves");
+    let (path, covered) = located_text(&loc);
+    assert!(path.ends_with("geo/lib.rock"), "landed in {path}");
+    assert!(covered.contains("area"), "landed on {covered:?}");
+}
+
+/// A body edit keeps the other bodies' and the signatures' recorded
+/// segments, shifted with the text under them.
+#[test]
+fn segments_after_a_body_edit_still_navigate() {
+    let project = V1Project::new();
+    let mut bone = project.open();
+    let main = project.path("main.rock");
+    let edited = MAIN.replace("    let a = shapes::inner::depth()\n", "    let a = shapes::inner::depth()\n    let z = 1\n");
+    bone.update(&main, edited.clone());
+    let at = |needle: &str, into: usize| {
+        let loc = bone.definition(&main, pos_of(&edited, needle, 0, into)).unwrap_or_else(|| panic!("no definition for `{needle}`"));
+        let (path, covered) = located_text(&loc);
+        (file_name(&path).to_string(), covered)
+    };
+    let (file, covered) = at("Kind::Round", 1);
+    assert_eq!(file, "shapes.rock");
+    assert!(covered.contains("Kind"), "landed on {covered:?}");
+    let (file, covered) = at("Box, c", 1);
+    assert_eq!(file, "shapes.rock");
+    assert!(covered.contains("Box"), "landed on {covered:?}");
 }

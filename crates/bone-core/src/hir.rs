@@ -232,6 +232,35 @@ pub struct Body {
     pub node_index_cell: OnceLock<Lapper<usize, NodeRef>>,
 
     pub node_intervals: Vec<Interval<usize, NodeRef>>,
+
+    /// Each segment of every modules-v1 path this body spells, as the
+    /// resolver resolved it at lowering ([`PathSegmentRef`]).
+    pub path_segments: Vec<PathSegmentRef>,
+}
+
+/// One segment of a modules-v1 path as the resolver resolved it at lowering
+/// (plan 2.3: resolver outputs are recorded on the HIR; consumers do not
+/// re-resolve). The node the path lowered to carries its final target; this
+/// record adds where each segment is spelled and what the segments before
+/// the last walked through, so an editor can navigate and rename by segment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PathSegmentRef {
+    pub span: Span,
+    pub target: SegmentTarget,
+    /// The local name an import binds (`use a::f as g;` -- the `g`), not a
+    /// spelling of the target's own name.
+    pub alias: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SegmentTarget {
+    /// A module the path walked into: its package and node key (`""` for a
+    /// package root).
+    Module { package: crate::modules::PackageId, node: Ustr },
+    /// A definition, by DefKey.
+    Def(Ustr),
+    /// An enum variant, by its enum's DefKey.
+    Variant { enum_key: Ustr, variant: Ustr },
 }
 
 impl Default for Body {
@@ -276,6 +305,8 @@ impl Default for Body {
 
             node_index_cell: Default::default(),
             node_intervals: Default::default(),
+
+            path_segments: Default::default(),
         }
     }
 }
@@ -387,6 +418,11 @@ pub struct Module {
     /// imports and the namespace tree), so every body that calls it records
     /// the same keys, and a body-only re-lower overwrites them in place.
     pub call_families: FxHashMap<Ustr, Vec<Ustr>>,
+
+    /// Path segments spelled outside any body: `use` items and the
+    /// interface positions (signatures, fields, globals) of a v1 fragment
+    /// (see [`PathSegmentRef`]).
+    pub path_segments: Vec<PathSegmentRef>,
 }
 
 impl Default for Module {
@@ -429,6 +465,8 @@ impl Default for Module {
             scope_probes: Default::default(),
 
             call_families: Default::default(),
+
+            path_segments: Default::default(),
         }
     }
 }

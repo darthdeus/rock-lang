@@ -28,6 +28,32 @@ pub enum TyPos {
     Body,
 }
 
+/// Record how each segment of a v1 fragment's top-level `use` items resolved
+/// ([`hir::PathSegmentRef`]), on the module; `use a::f as g` also records
+/// `g` as an alias of what `f` names. The targets are checked where they are
+/// declared (`validate_v1_use_targets`), so a segment that does not resolve
+/// here records nothing rather than a second diagnostic. `use` items inside
+/// inline `mod` blocks are not recorded yet.
+pub fn record_use_paths(a: &Ast, ctx: &mut LowerCtx) {
+    let mut refs = Vec::new();
+    for item in &a.items {
+        if let skull_parser::ItemKind::Use(decl) = &item.kind {
+            ctx.use_tree_refs(&decl.tree, &[], false, &mut refs);
+        }
+    }
+    ctx.module.path_segments.extend(refs);
+}
+
+/// The segment record for what a member-wise path resolved to.
+fn member_segment_target(target: &resolve::MemberTarget) -> hir::SegmentTarget {
+    match *target {
+        resolve::MemberTarget::Global(key) | resolve::MemberTarget::Callable(key) | resolve::MemberTarget::Type(key) => {
+            hir::SegmentTarget::Def(key)
+        }
+        resolve::MemberTarget::EnumVariant { enum_key, variant } => hir::SegmentTarget::Variant { enum_key, variant },
+    }
+}
+
 pub fn alloc_ty(ctx: &mut LowerCtx, body: &mut Body, pos: TyPos, node: TypeExpr) -> TyId {
     match pos {
         TyPos::Iface => TyId::Static(ctx.module.module_id(), alloc_ty_raw(ctx, body, pos, node)),
@@ -102,6 +128,117 @@ impl<'a> LowerCtx<'a> {
     /// synthetic modules). Resolution tiering applies only when present.
     pub fn v1_scope(&self) -> Option<&bone_core::modules::FragmentScope> {
         self.workspace.fragment_scopes.get(&self.module.file)
+    }
+
+    /// How each segment of the v1 `path` resolved, `last` being what the
+    /// whole path resolved to ([`hir::PathSegmentRef`]). A segment before the
+    /// last is the module the resolver's own walk reaches through it -- or,
+    /// right before a variant, the variant's enum. A prefix that reaches no
+    /// module (a type) records nothing. The walks are probed like the lookup
+    /// itself, so a tree edit that moves a segment re-lowers this module.
+    fn path_segment_refs(
+        &self,
+        from_root: bool,
+        segments: &[skull_parser::Ident],
+        last: hir::SegmentTarget,
+    ) -> Vec<hir::PathSegmentRef> {
+        let Some(frag) = self.v1_scope() else { return Vec::new() };
+        let names: Vec<Ustr> = segments.iter().map(|i| i.name).collect();
+        let n = segments.len();
+        let mut out = Vec::with_capacity(n);
+        for (i, ident) in segments.iter().enumerate() {
+            let target = if i + 1 == n {
+                Some(last)
+            } else if let (hir::SegmentTarget::Variant { enum_key, .. }, true) = (last, i + 2 == n) {
+                Some(hir::SegmentTarget::Def(enum_key))
+            } else {
+                self.module_segment(frag, from_root, &names[..=i])
+            };
+            if let Some(target) = target {
+                out.push(hir::PathSegmentRef { span: ident.span, target, alias: false });
+            }
+        }
+        out
+    }
+
+    /// The module a path prefix walks to, as the resolver walks it.
+    fn module_segment(
+        &self,
+        frag: &bone_core::modules::FragmentScope,
+        from_root: bool,
+        prefix: &[Ustr],
+    ) -> Option<hir::SegmentTarget> {
+        let prefix = bone_core::modules::UsePathRef { from_root, segments: prefix.to_vec() };
+        self.probed(|| resolve::resolve_path_to_module(self.workspace, frag, &prefix))
+            .ok()
+            .map(|(package, path)| hir::SegmentTarget::Module {
+                package,
+                node: bone_core::modules::NsPackage::path_key(&path),
+            })
+    }
+
+    /// Record `path`'s segments in the body (a body position) or the module
+    /// (an interface position).
+    fn record_path(&mut self, body: &mut Body, pos: TyPos, path: &skull_parser::Path, last: hir::SegmentTarget) {
+        let refs = self.path_segment_refs(path.from_root, &path.segments, last);
+        match pos {
+            TyPos::Body => body.path_segments.extend(refs),
+            TyPos::Iface => self.module.path_segments.extend(refs),
+        }
+    }
+
+    /// [`record_use_paths`] for one use tree under `prefix`.
+    fn use_tree_refs(
+        &self,
+        tree: &skull_parser::UseTree,
+        prefix: &[Ustr],
+        from_root: bool,
+        out: &mut Vec<hir::PathSegmentRef>,
+    ) {
+        let Some(frag) = self.v1_scope() else { return };
+        let skull_parser::UseTree::Path { from_root: tree_root, segments, kind } = tree;
+        let root = if prefix.is_empty() { *tree_root } else { from_root };
+        let mut full = prefix.to_vec();
+        full.extend(segments.iter().map(|s| s.name));
+        let binds_item = matches!(kind, skull_parser::UseSuffix::Bind | skull_parser::UseSuffix::BindAs(_));
+        for (i, ident) in segments.iter().enumerate() {
+            let upto = prefix.len() + i + 1;
+            let target = if binds_item && upto == full.len() {
+                self.use_leaf_target(frag, root, &full)
+            } else {
+                self.module_segment(frag, root, &full[..upto])
+            };
+            if let Some(target) = target {
+                out.push(hir::PathSegmentRef { span: ident.span, target, alias: false });
+            }
+        }
+        match kind {
+            skull_parser::UseSuffix::BindAs(alias) => {
+                if let Some(target) = self.use_leaf_target(frag, root, &full) {
+                    out.push(hir::PathSegmentRef { span: alias.span, target, alias: true });
+                }
+            }
+            skull_parser::UseSuffix::Nested(children) => {
+                for child in children {
+                    self.use_tree_refs(child, &full, root, out);
+                }
+            }
+            skull_parser::UseSuffix::Bind | skull_parser::UseSuffix::Glob | skull_parser::UseSuffix::Operator { .. } => {}
+        }
+    }
+
+    /// What a `use` leaf binds: a definition, else a module (`use p;`).
+    fn use_leaf_target(
+        &self,
+        frag: &bone_core::modules::FragmentScope,
+        from_root: bool,
+        segments: &[Ustr],
+    ) -> Option<hir::SegmentTarget> {
+        let path = bone_core::modules::UsePathRef { from_root, segments: segments.to_vec() };
+        match self.probed(|| resolve::resolve_path(self.workspace, frag, &path)) {
+            Ok(resolved) => Some(hir::SegmentTarget::Def(resolved.key)),
+            Err(_) => self.module_segment(frag, from_root, segments),
+        }
     }
 
     fn resolve_bare_key(&self, name: Ustr, span: Span) -> Result<Ustr, CompilerError> {
@@ -551,6 +688,7 @@ pub fn lower_type_expr_in(
                 Ok(r) => r,
                 Err(msg) => return Err(CompilerError::new_with_label(te.span, msg)),
             };
+            ctx.record_path(body, pos, path, hir::SegmentTarget::Def(resolved.key));
             lower_resolved_type_name(ctx, body, pos, te, &resolved.key)?
         }
 
@@ -572,6 +710,7 @@ pub fn lower_type_expr_in(
                 Ok(r) => r,
                 Err(msg) => return Err(CompilerError::new_with_label(te.span, msg)),
             };
+            ctx.record_path(body, pos, path, hir::SegmentTarget::Def(resolved.key));
             let params = ctx.lower_type_exprs_to_range(a, body, pos, args, te.span)?;
             alloc_ty(
                 ctx,
@@ -1299,6 +1438,7 @@ pub fn lower_expr_value(
                 if path_generics.is_empty() && ctx.v1_path_callable(path).is_some() =>
             {
                 let key = ctx.v1_path_callable(path).expect("guard resolved it");
+                ctx.record_path(body, TyPos::Body, path, hir::SegmentTarget::Def(key));
                 let args_range = lower_exprs(ctx, a, body, scope, args.iter().map(|x| &x.value))?;
                 for (arg_idx, ca) in args_range.into_iter().zip(args.iter()) {
                     if let Some(nm) = &ca.name {
@@ -1324,6 +1464,7 @@ pub fn lower_expr_value(
                 if path_generics.is_empty() && ctx.v1_path_variant(path).is_some() =>
             {
                 let (enum_key, variant) = ctx.v1_path_variant(path).expect("guard resolved it");
+                ctx.record_path(body, TyPos::Body, path, hir::SegmentTarget::Variant { enum_key, variant });
                 if !generic_args.is_empty() {
                     comp_error!(e.span, "explicit type arguments are not supported on enum constructors");
                 }
@@ -1607,7 +1748,11 @@ pub fn lower_expr_value(
                 from_root: path.from_root,
                 segments: path.segments.iter().map(|i| i.name).collect(),
             };
-            match ctx.probed(|| resolve::resolve_member_path(ctx.workspace, frag, &use_path)) {
+            let target = ctx.probed(|| resolve::resolve_member_path(ctx.workspace, frag, &use_path));
+            if let Ok(t) = &target {
+                ctx.record_path(body, TyPos::Body, path, member_segment_target(t));
+            }
+            match target {
                 Ok(resolve::MemberTarget::Global(key) | resolve::MemberTarget::Callable(key)) => {
                     Expr::Global(key)
                 }
@@ -1641,6 +1786,7 @@ pub fn lower_expr_value(
                 Ok(t) => t,
                 Err(msg) => return Err(CompilerError::new_with_label(e.span, msg)),
             };
+            ctx.record_path(body, TyPos::Body, path, member_segment_target(&target));
             if !bases.is_empty() {
                 return Err(CompilerError::new_with_label(
                     e.span,
@@ -3122,6 +3268,7 @@ fn lower_pattern_value(
         };
         let (enum_key, variant) = ctx.probed(|| resolve::resolve_variant_pattern(ctx.workspace, frag, &use_path))
             .map_err(|msg| CompilerError::new_no_location(msg))?;
+        ctx.record_path(body, TyPos::Body, path, hir::SegmentTarget::Variant { enum_key, variant });
         let sub = match args {
             None => IdxRange::new_empty(),
             Some(pats) => {
@@ -3152,6 +3299,7 @@ fn lower_pattern_value(
         };
         let (enum_key, variant) = ctx.probed(|| resolve::resolve_variant_pattern(ctx.workspace, frag, &use_path))
             .map_err(|msg| CompilerError::new_no_location(msg))?;
+        ctx.record_path(body, TyPos::Body, path, hir::SegmentTarget::Variant { enum_key, variant });
         let mut entries = Vec::with_capacity(fields.len());
         for (fname, subpat) in fields.iter() {
             let p = lower_pattern_value(ctx, a, body, scope, subpat)?;

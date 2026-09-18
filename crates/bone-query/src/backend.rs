@@ -226,6 +226,49 @@ fn project_graph(root: &Path) -> Option<rock_host::stick::graph::PackageGraph> {
     }
 }
 
+/// Where module `node` of `package` is declared: a fragment's `mod` header
+/// naming it, else an inline `mod` block. `None` for a package root, which
+/// no item declares.
+fn module_declaration(session: &Session, package: u32, node: Ustr) -> Option<Span> {
+    fn inline_block(items: &[bone_semantic::semantic_passes::ScopeItem], path: &mut Vec<Ustr>, node: Ustr) -> Option<Span> {
+        for item in items {
+            if let bone_semantic::semantic_passes::ScopeItem::Module { name, item_span, items, .. } = item {
+                path.push(*name);
+                if bone_core::modules::NsPackage::path_key(path) == node {
+                    return Some(*item_span);
+                }
+                let found = inline_block(items, path, node);
+                path.pop();
+                if found.is_some() {
+                    return found;
+                }
+            }
+        }
+        None
+    }
+    if node.is_empty() {
+        return None;
+    }
+    let ours = session
+        .files
+        .values()
+        .map(|uf| &uf.contribution)
+        .filter(|c| c.package.as_ref().is_some_and(|p| p.id == package));
+    let mut block = None;
+    for c in ours {
+        let mut path: Vec<Ustr> = c.header.iter().flat_map(|h| h.path.iter().map(|i| i.name)).collect();
+        if let Some(h) = &c.header
+            && bone_core::modules::NsPackage::path_key(&path) == node
+        {
+            return Some(h.span);
+        }
+        if block.is_none() {
+            block = inline_block(&c.items, &mut path, node);
+        }
+    }
+    block
+}
+
 /// One module's row for the `rock/modules` snapshot: its id (file path) and how
 /// long ago it last (re)inferred, `None` if never touched this session.
 #[derive(Clone, Debug)]
@@ -1011,6 +1054,18 @@ impl BoneWorkspace {
             {
                 return self.location_from_span(proj, &span);
             }
+        }
+        // A modules-v1 path segment navigates by what the resolver recorded
+        // for that segment: a module to its header, a definition or variant
+        // to its declaration -- not to whatever the whole path lowered to.
+        if let Some(seg) = crate::query::path_segment_at(ws, mid, offset) {
+            let span = match seg.target {
+                bone_semantic::hir::SegmentTarget::Module { package, node } => {
+                    module_declaration(&proj.session, package, node)
+                }
+                target => crate::query::segment_target_def(ws, target),
+            }?;
+            return self.location_from_span(proj, &span);
         }
         let pat_def = raw
             .as_ref()
