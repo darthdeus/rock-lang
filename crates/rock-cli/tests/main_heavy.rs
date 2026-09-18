@@ -57,6 +57,8 @@ mod sim_allocation_census;
 mod sim_worker_differential;
 #[path = "mag_worker_product_tests.rs"]
 mod mag_worker_product_tests;
+#[path = "sim_memory_cap.rs"]
+mod sim_memory_cap;
 #[path = "sim_reload_lane.rs"]
 mod sim_reload_lane;
 #[path = "sim_worker_pool.rs"]
