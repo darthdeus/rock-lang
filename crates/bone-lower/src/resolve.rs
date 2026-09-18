@@ -7,9 +7,11 @@
 //!
 //! Tier policy for a BARE name in a v1 fragment (spec 8.3):
 //!   1. lexical locals — handled by `lookup_in_scope` before this runs;
-//!   2. the current logical module's own definitions;
+//!   2. the current logical module's own definitions and named export
+//!      bindings;
 //!   3. the fragment's explicit imports;
-//!   4. glob bindings visible to the fragment;
+//!   4. glob bindings visible to the fragment, including what the globbed
+//!      modules re-export;
 //!   5. the workspace's bare-name maps (compiler stdlib surface).
 //! There is no fallthrough: the first tier that binds the name decides.
 //! Losers at earlier tiers are recorded as `hidden` so a failing overload
@@ -112,52 +114,41 @@ pub fn resolve_bare(
     let Some(frag) = frag else {
         return Ok(plain(name));
     };
-    let Some(pkg) = ws.ns.package(frag.package) else {
+    if ws.ns.package(frag.package).is_none() {
         return std_bare(ws, name);
-    };
-    let here = pkg.key_of(&frag.module_path);
-    let glob_hits = glob_candidates(ws, frag, pkg, here, name);
+    }
+    let viewers = [Viewer::Fragment(frag)];
+    let glob_hits = glob_candidates(ws, frag, name)?;
 
-    // Tier 2: the current logical module's own definitions.
-    if let Some(node) = pkg.node(here) {
-        if let Some(kind) = owned_kind(node, name) {
-            let key = first_owned(node, name).expect("kind implies key");
-            check_key_access(ws, frag, key)?;
-            let hidden: Vec<Ustr> = glob_hits.iter().map(|(k, _)| *k).collect();
-            return Ok(Resolved { key, kind, hidden });
-        }
+    // Tier 2: the current logical module's own definitions and explicit
+    // export bindings.
+    let own = explicit_members(ws, &viewers, frag.package, &frag.module_path, name, &mut Vec::new())?;
+    if let Some(own) = own {
+        let (key, kind) = collapse(own, name, || name.to_string(), "definitions")?;
+        let hidden: Vec<Ustr> = glob_hits.iter().map(|(k, _)| *k).collect();
+        return Ok(Resolved { key, kind, hidden });
     }
 
     // Tier 3: the fragment's explicit imports. A bound name does not fall
     // through, even if the target is missing or a module.
     if let Some(target) = frag.named.get(&name) {
         let hidden: Vec<Ustr> = glob_hits.iter().map(|(k, _)| *k).collect();
-        return match walk_path(ws, frag, target, WalkMode::Definition, &mut Vec::new()) {
-            Ok(Landing::Def(resolved)) => {
-                check_key_access(ws, frag, resolved.key)?;
-                Ok(Resolved { key: resolved.key, kind: resolved.kind, hidden })
-            }
-            Ok(Landing::Module(..)) => {
-                Err(format!("`{name}` names a module, not a definition"))
-            }
-            Err(msg) => Err(msg),
+        return match walk_path(ws, frag, &[], target, WalkMode::Definition, &mut Vec::new())? {
+            Landing::Def(resolved) => Ok(Resolved { key: resolved.key, kind: resolved.kind, hidden }),
+            Landing::Module(..) => Err(format!("`{name}` names a module, not a definition")),
         };
     }
 
     // Tier 4: glob bindings. Ambiguous globs diagnose rather than picking
     // HashMap iteration order (spec 8.3 / 8.7).
     if !glob_hits.is_empty() {
-        let mut keys: Vec<Ustr> = glob_hits.iter().map(|(k, _)| *k).collect();
-        keys.sort_by_key(|k| k.as_str().to_string());
-        keys.dedup();
-        if keys.len() > 1 {
+        if glob_hits.len() > 1 {
             return Err(format!(
                 "`{name}` is ambiguous between glob imports {}",
-                keys.iter().map(|k| k.as_str()).collect::<Vec<_>>().join(", ")
+                glob_hits.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>().join(", ")
             ));
         }
         let (key, kind) = glob_hits[0];
-        check_key_access(ws, frag, key)?;
         return Ok(Resolved { key, kind, hidden: Vec::new() });
     }
 
@@ -187,59 +178,329 @@ fn std_bare(ws: &Workspace, name: Ustr) -> Result<Resolved, String> {
     Ok(Resolved { key, kind, hidden: Vec::new() })
 }
 
-/// Tier 4 candidates for `name`: the members of every globbed module
-/// (the fragment's own globs and its module's glob exports) that are
-/// accessible from `frag`. A glob opens only accessible members (spec 8.1),
-/// so an inaccessible one never shadows a lower tier or makes a glob
-/// ambiguous (spec 8.3).
+/// Tier 4 candidates for `name`, deduplicated and sorted by key: what every
+/// module the fragment globs offers under `name`, plus the current module's
+/// own glob export bindings. A glob opens only members accessible from
+/// `frag` (spec 8.1), so an inaccessible one never shadows a lower tier or
+/// makes a glob ambiguous (spec 8.3); it opens the target's export bindings
+/// as well as its owned names (spec 8.3 tier 4, 8.6).
 fn glob_candidates(
     ws: &Workspace,
     frag: &FragmentScope,
-    pkg: &bone_core::modules::NsPackage,
-    here: Ustr,
     name: Ustr,
-) -> Vec<(Ustr, ResolvedKind)> {
-    let mut glob_targets: Vec<UsePathRef> = frag.globs.clone();
-    if let Some(node) = pkg.node(here) {
-        let mut exports: Vec<_> = node.exports.iter().filter(|(_, b)| b.is_glob).collect();
-        exports.sort_by_key(|(k, _)| k.as_str().to_string());
-        for (_, binding) in exports {
-            glob_targets.push(binding.target.clone());
-        }
-    }
-    glob_targets.sort_by(|a, b| {
-        (a.from_root, a.segments.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::")).cmp(&(
-            b.from_root,
-            b.segments.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::"),
-        ))
-    });
-    let mut hits = Vec::new();
-    for glob in &glob_targets {
+) -> Result<Vec<(Ustr, ResolvedKind)>, String> {
+    let viewers = [Viewer::Fragment(frag)];
+    let mut visiting = Vec::new();
+    let mut hits =
+        glob_export_members(ws, &viewers, frag.package, &frag.module_path, name, &mut visiting)?.found;
+    let mut globs = frag.globs.clone();
+    globs.sort_by_key(path_sort_key);
+    for glob in &globs {
+        // An unresolvable fragment glob opens nothing: nothing validates a
+        // `use` target at its declaration yet (docs/parked/modules.md).
         if let Ok(Landing::Module(pkg_id, path)) =
-            walk_path(ws, frag, glob, WalkMode::Module, &mut Vec::new())
+            walk_path(ws, frag, &[], glob, WalkMode::Module, &mut visiting)
         {
-            if let Some(target_pkg) = ws.ns.package(pkg_id) {
-                let node_key = target_pkg.key_of(&path);
-                if let Some(node) = target_pkg.node(node_key) {
-                    if let Some(kind) = owned_kind(node, name) {
-                        let key = first_owned(node, name).expect("kind implies key");
-                        if key_accessible(ws, frag, key) {
-                            hits.push((key, kind));
-                        }
-                    }
-                }
-            }
+            hits.extend(members_of(ws, &viewers, pkg_id, &path, name, &mut visiting)?.found);
         }
     }
-    hits
+    hits.sort_by_key(|(k, _)| k.as_str().to_string());
+    hits.dedup_by_key(|(k, _)| *k);
+    Ok(hits)
+}
+
+fn path_sort_key(path: &UsePathRef) -> (bool, String) {
+    (path.from_root, path.segments.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::"))
+}
+
+/// Who names a module member. A lookup through an export binding is seen by
+/// every viewer along the chain: the path's author and each exporting module
+/// it passed through, so a re-export never widens what it re-exports
+/// (spec 8.6).
+#[derive(Clone, Copy)]
+pub enum Viewer<'a> {
+    /// A v1 fragment (or an exporting module standing in for one).
+    Fragment(&'a FragmentScope),
+    /// Any consumer at all: the legacy compatibility projection, which sees
+    /// only `pub` v1 definitions (spec 3.2).
+    Public,
+}
+
+impl Viewer<'_> {
+    fn admits(&self, ws: &Workspace, vis: &NsVisibility, owner_pkg: u32, owner_path: &[Ustr]) -> bool {
+        match self {
+            Viewer::Fragment(frag) => {
+                ws.ns.can_access(vis, owner_pkg, owner_path, frag.package, &frag.module_path)
+            }
+            Viewer::Public => *vis == NsVisibility::Pub,
+        }
+    }
+
+    /// A key with no recorded metadata is the stdlib or an intrinsic: public
+    /// to a fragment, and never part of the legacy projection, which carries
+    /// only v1 definitions.
+    fn admits_key(&self, ws: &Workspace, key: Ustr) -> bool {
+        match ws.defs.get(&key) {
+            Some(meta) => self.admits(ws, &meta.vis, meta.package, &meta.module),
+            None => matches!(self, Viewer::Fragment(_)),
+        }
+    }
+}
+
+fn all_admit_key(ws: &Workspace, viewers: &[Viewer], key: Ustr) -> bool {
+    viewers.iter().all(|v| v.admits_key(ws, key))
+}
+
+fn all_admit(ws: &Workspace, viewers: &[Viewer], vis: &NsVisibility, pkg: u32, path: &[Ustr]) -> bool {
+    viewers.iter().all(|v| v.admits(ws, vis, pkg, path))
+}
+
+/// What one module offers under one name to a chain of viewers.
+#[derive(Debug, Default)]
+pub struct Members {
+    /// Distinct definitions the viewers may name, sorted by key.
+    pub found: Vec<(Ustr, ResolvedKind)>,
+    /// Some binding of the name exists that a viewer may not name.
+    pub denied: bool,
+    /// An export chain came back to a binding it was already following.
+    pub cycle: bool,
+}
+
+impl Members {
+    fn absorb(&mut self, other: Members) {
+        self.found.extend(other.found);
+        self.denied |= other.denied;
+        self.cycle |= other.cycle;
+    }
+
+    fn finish(mut self) -> Self {
+        self.found.sort_by_key(|(k, _)| k.as_str().to_string());
+        self.found.dedup_by_key(|(k, _)| *k);
+        self
+    }
+}
+
+/// (package, module key, name) bindings being followed, for cycle detection.
+type Visiting = Vec<(u32, Ustr, Ustr)>;
+
+/// The one member lookup: what module `path` of `pkg_id` offers under `name`
+/// to `viewers`. Owned definitions and named export bindings bind the name
+/// explicitly and hide the module's glob export bindings; otherwise every
+/// glob export contributes (spec 8.6: overlapping globs are ambiguous at use
+/// unless the exporting module disambiguates). Export targets resolve from
+/// the exporting module, which must itself be permitted to name them, and are
+/// followed to a fixed point with canonical keys deduplicated.
+pub fn module_members(
+    ws: &Workspace,
+    viewers: &[Viewer],
+    pkg_id: u32,
+    path: &[Ustr],
+    name: Ustr,
+) -> Result<Members, String> {
+    members_of(ws, viewers, pkg_id, path, name, &mut Vec::new())
+}
+
+fn members_of(
+    ws: &Workspace,
+    viewers: &[Viewer],
+    pkg_id: u32,
+    path: &[Ustr],
+    name: Ustr,
+    visiting: &mut Visiting,
+) -> Result<Members, String> {
+    if let Some(explicit) = explicit_members(ws, viewers, pkg_id, path, name, visiting)? {
+        return Ok(explicit);
+    }
+    glob_export_members(ws, viewers, pkg_id, path, name, visiting)
+}
+
+/// The module's explicit binding of `name` -- an owned definition or a named
+/// export binding -- or `None` when the module binds `name` only through
+/// globs, if at all.
+fn explicit_members(
+    ws: &Workspace,
+    viewers: &[Viewer],
+    pkg_id: u32,
+    path: &[Ustr],
+    name: Ustr,
+    visiting: &mut Visiting,
+) -> Result<Option<Members>, String> {
+    let Some(pkg) = ws.ns.package(pkg_id) else { return Ok(None) };
+    let node_key = pkg.key_of(path);
+    let Some(node) = pkg.node(node_key) else { return Ok(None) };
+    let mut out = Members::default();
+    if let Some(kind) = owned_kind(node, name) {
+        let key = first_owned(node, name).expect("kind implies key");
+        if all_admit_key(ws, viewers, key) {
+            out.found.push((key, kind));
+        } else {
+            out.denied = true;
+        }
+        return Ok(Some(out));
+    }
+    let Some(binding) = node.exports.get(&name) else { return Ok(None) };
+    if !all_admit(ws, viewers, &binding.vis, pkg_id, path) {
+        out.denied = true;
+        return Ok(Some(out));
+    }
+    let visit = (pkg_id, node_key, name);
+    if visiting.contains(&visit) {
+        out.cycle = true;
+        return Ok(Some(out));
+    }
+    visiting.push(visit);
+    let exporter = exporter_scope(pkg, path);
+    let followed = walk_members(ws, &exporter, viewers, &binding.target, visiting);
+    visiting.pop();
+    let followed = followed?;
+    if followed.found.is_empty() && !followed.cycle {
+        let target = binding.target.segments.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
+        if !followed.denied {
+            return Err(format!("`{target}` did not resolve to any definition"));
+        }
+        // A viewer's denial is an omission; the exporter's own is a broken
+        // binding (spec 8.6: the exporter must be permitted to name it).
+        visiting.push(visit);
+        let for_exporter = walk_members(ws, &exporter, &[], &binding.target, visiting);
+        visiting.pop();
+        if for_exporter?.found.is_empty() {
+            return Err(format!("`{target}` is not accessible from the module that re-exports it"));
+        }
+    }
+    out.absorb(followed);
+    Ok(Some(out.finish()))
+}
+
+/// What the module's glob export bindings offer under `name`.
+fn glob_export_members(
+    ws: &Workspace,
+    viewers: &[Viewer],
+    pkg_id: u32,
+    path: &[Ustr],
+    name: Ustr,
+    visiting: &mut Visiting,
+) -> Result<Members, String> {
+    let mut out = Members::default();
+    let Some(pkg) = ws.ns.package(pkg_id) else { return Ok(out) };
+    let node_key = pkg.key_of(path);
+    let Some(node) = pkg.node(node_key) else { return Ok(out) };
+    if node.glob_exports.is_empty() {
+        return Ok(out);
+    }
+    let exporter = exporter_scope(pkg, path);
+    let mut chain = viewers.to_vec();
+    chain.push(Viewer::Fragment(&exporter));
+    let mut bindings: Vec<_> = node.glob_exports.iter().collect();
+    bindings.sort_by_key(|b| path_sort_key(&b.target));
+    for binding in bindings {
+        if !all_admit(ws, viewers, &binding.vis, pkg_id, path) {
+            continue;
+        }
+        let (target_pkg, target_path) =
+            match walk_path(ws, &exporter, &[], &binding.target, WalkMode::Module, visiting)? {
+                Landing::Module(target_pkg, target_path) => (target_pkg, target_path),
+                Landing::Def(_) => return Err("expected a module in use path".to_string()),
+            };
+        let Some(target) = ws.ns.package(target_pkg) else { continue };
+        // A glob chain that comes back to a module it is already opening
+        // adds nothing new; that module's members are being collected.
+        let visit = (target_pkg, target.key_of(&target_path), name);
+        if visiting.contains(&visit) {
+            continue;
+        }
+        visiting.push(visit);
+        let followed = members_of(ws, &chain, target_pkg, &target_path, name, visiting);
+        visiting.pop();
+        out.absorb(followed?);
+    }
+    Ok(out.finish())
+}
+
+/// An exporting module standing in as the site its export targets resolve
+/// from.
+fn exporter_scope(pkg: &bone_core::modules::NsPackage, path: &[Ustr]) -> FragmentScope {
+    FragmentScope {
+        package: pkg.id,
+        package_name: pkg.self_name,
+        module_path: path.to_vec(),
+        ..Default::default()
+    }
+}
+
+/// Every name module `path` offers to `viewers`, sorted: owned names, named
+/// export bindings, and the members of admitted glob export targets. Callers
+/// decide each name through `module_members`; this only enumerates.
+pub fn module_member_names(
+    ws: &Workspace,
+    viewers: &[Viewer],
+    pkg_id: u32,
+    path: &[Ustr],
+) -> Result<Vec<Ustr>, String> {
+    let mut names = Vec::new();
+    collect_member_names(ws, viewers, pkg_id, path, &mut names, &mut Vec::new())?;
+    names.sort_by_key(|n| n.as_str().to_string());
+    names.dedup();
+    Ok(names)
+}
+
+fn collect_member_names(
+    ws: &Workspace,
+    viewers: &[Viewer],
+    pkg_id: u32,
+    path: &[Ustr],
+    names: &mut Vec<Ustr>,
+    seen: &mut Vec<(u32, Ustr)>,
+) -> Result<(), String> {
+    let Some(pkg) = ws.ns.package(pkg_id) else { return Ok(()) };
+    let node_key = pkg.key_of(path);
+    if seen.contains(&(pkg_id, node_key)) {
+        return Ok(());
+    }
+    seen.push((pkg_id, node_key));
+    let Some(node) = pkg.node(node_key) else { return Ok(()) };
+    names.extend(node.owned_types.keys());
+    names.extend(node.owned_globals.keys());
+    names.extend(node.owned_callables.keys());
+    names.extend(node.owned_decorators.keys());
+    names.extend(node.exports.keys());
+    let exporter = exporter_scope(pkg, path);
+    for binding in &node.glob_exports {
+        if !all_admit(ws, viewers, &binding.vis, pkg_id, path) {
+            continue;
+        }
+        if let Landing::Module(target_pkg, target_path) =
+            walk_path(ws, &exporter, &[], &binding.target, WalkMode::Module, &mut Vec::new())?
+        {
+            collect_member_names(ws, viewers, target_pkg, &target_path, names, seen)?;
+        }
+    }
+    Ok(())
+}
+
+/// One definition out of a lookup of `name`, or the diagnostic for why there
+/// is none. `display` renders the reference as the author wrote it.
+fn collapse(
+    members: Members,
+    name: Ustr,
+    display: impl Fn() -> String,
+    what: &str,
+) -> Result<(Ustr, ResolvedKind), String> {
+    match members.found.as_slice() {
+        [single] => Ok(*single),
+        [] if members.cycle => Err("circular `use` binding with no defining target".to_string()),
+        [] if members.denied => Err(format!("`{name}` is not accessible from this module")),
+        [] => Err(format!("`{}` did not resolve to any definition", display())),
+        many => Err(format!(
+            "`{name}` is ambiguous between {what} {}",
+            many.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>().join(", ")
+        )),
+    }
 }
 
 /// The spec 9 access predicate for a definition named from `frag`. A key
 /// with no recorded metadata is the stdlib or an intrinsic, which is public.
 fn key_accessible(ws: &Workspace, frag: &FragmentScope, key: Ustr) -> bool {
-    ws.defs.get(&key).is_none_or(|meta| {
-        ws.ns.can_access(&meta.vis, meta.package, &meta.module, frag.package, &frag.module_path)
-    })
+    Viewer::Fragment(frag).admits_key(ws, key)
 }
 
 fn check_key_access(ws: &Workspace, frag: &FragmentScope, key: Ustr) -> Result<(), String> {
@@ -294,7 +555,7 @@ pub fn resolve_path(
     frag: &FragmentScope,
     path: &UsePathRef,
 ) -> Result<Resolved, String> {
-    match walk_path(ws, frag, path, WalkMode::Definition, &mut Vec::new())? {
+    match walk_path(ws, frag, &[], path, WalkMode::Definition, &mut Vec::new())? {
         Landing::Def(resolved) => Ok(resolved),
         Landing::Module(..) => Err("path names a module, not a definition".to_string()),
     }
@@ -364,55 +625,30 @@ pub fn resolve_member_path(
             i += 1;
             continue;
         }
-        if let Some(kind) = owned_kind(node, seg) {
-            let key = first_owned(node, seg).expect("kind implies key");
-            match kind {
-                ResolvedKind::Type => {
-                    if is_last {
-                        check_key_access(ws, frag, key)?;
-                        return Ok(MemberTarget::Type(key));
-                    }
-                    // `Type::Variant` — exactly one segment must remain.
-                    if i + 2 == segments.len() {
-                        let variant = segments[i + 1];
-                        if !ws.enums_by_name.contains_key(&key) {
-                            return Err(format!(
-                                "`{}` is not an enum; `{}` cannot be selected from it",
-                                key, variant
-                            ));
-                        }
-                        check_key_access(ws, frag, key)?;
-                        return Ok(MemberTarget::EnumVariant { enum_key: key, variant });
-                    }
-                    return Err(format!("`{}` cannot be traversed further", key));
-                }
-                _ => {
-                    if !is_last {
-                        return Err(format!("`{}` cannot be traversed", key));
-                    }
-                    check_key_access(ws, frag, key)?;
-                    return Ok(MemberTarget::Global(key));
-                }
+        let display = || segments.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
+        let members = module_members(ws, &[Viewer::Fragment(frag)], pkg_id, &cur, seg)?;
+        let (key, kind) = collapse(members, seg, display, "glob re-exports")?;
+        if kind == ResolvedKind::Type {
+            if is_last {
+                return Ok(MemberTarget::Type(key));
             }
+            // `Type::Variant` — exactly one segment must remain.
+            if i + 2 == segments.len() {
+                let variant = segments[i + 1];
+                if !ws.enums_by_name.contains_key(&key) {
+                    return Err(format!(
+                        "`{}` is not an enum; `{}` cannot be selected from it",
+                        key, variant
+                    ));
+                }
+                return Ok(MemberTarget::EnumVariant { enum_key: key, variant });
+            }
+            return Err(format!("`{}` cannot be traversed further", key));
         }
-        // Not owned here: an export binding, or unknown.
-        if let Some(binding) = node.exports.get(&seg) {
-            return match walk_path(ws, frag, &binding.target, WalkMode::Definition, &mut Vec::new())? {
-                Landing::Def(resolved) => match resolved.kind {
-                    ResolvedKind::Type => Ok(MemberTarget::Type(resolved.key)),
-                    _ => Ok(MemberTarget::Global(resolved.key)),
-                },
-                Landing::Module(..) => Err("use binding points at a module".to_string()),
-            };
+        if !is_last {
+            return Err(format!("`{}` cannot be traversed", key));
         }
-        return Err(format!(
-            "`{}` did not resolve to any definition",
-            segments
-                .iter()
-                .map(|s| s.as_str())
-                .collect::<Vec<_>>()
-                .join("::")
-        ));
+        return Ok(MemberTarget::Global(key));
     }
 
     // Walked to a module without hitting a definition.
@@ -425,7 +661,7 @@ pub fn resolve_path_to_module(
     frag: &FragmentScope,
     path: &UsePathRef,
 ) -> Result<(u32, Vec<Ustr>), String> {
-    match walk_path(ws, frag, path, WalkMode::Module, &mut Vec::new())? {
+    match walk_path(ws, frag, &[], path, WalkMode::Module, &mut Vec::new())? {
         Landing::Module(pkg_id, path) => Ok((pkg_id, path)),
         Landing::Def(_) => Err("expected a module in use path".to_string()),
     }
@@ -483,23 +719,63 @@ fn resolve_anchor(
     Ok((frag.package, frag.module_path.clone(), 0))
 }
 
+/// Walk `path` as written in `frag`: anchor and module segments are
+/// checked from `frag` alone (spec 8.6: a consumer checks the facade path it
+/// wrote, not the canonical parent path a second time), and the final
+/// member is seen by `frag` and every `outer` viewer.
 fn walk_path(
     ws: &Workspace,
     frag: &FragmentScope,
+    outer: &[Viewer],
     path: &UsePathRef,
     mode: WalkMode,
-    visited: &mut Vec<(u32, Ustr)>,
+    visiting: &mut Visiting,
 ) -> Result<Landing, String> {
+    match mode {
+        WalkMode::Module => {
+            let (pkg_id, cur) = walk_modules(ws, frag, path, path.segments.len())?;
+            Ok(Landing::Module(pkg_id, cur))
+        }
+        WalkMode::Definition => {
+            let members = walk_members(ws, frag, outer, path, visiting)?;
+            let display = || path.segments.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
+            let (key, kind) = collapse(members, last_of(&path.segments), display, "glob re-exports")?;
+            Ok(Landing::Def(Resolved { key, kind, hidden: Vec::new() }))
+        }
+    }
+}
+
+/// What the last segment of `path` names in the module the rest of it
+/// reaches, without collapsing to one definition.
+fn walk_members(
+    ws: &Workspace,
+    frag: &FragmentScope,
+    outer: &[Viewer],
+    path: &UsePathRef,
+    visiting: &mut Visiting,
+) -> Result<Members, String> {
+    let segments = &path.segments;
+    let (pkg_id, cur) = walk_modules(ws, frag, path, segments.len() - 1)?;
+    let mut viewers = vec![Viewer::Fragment(frag)];
+    viewers.extend_from_slice(outer);
+    members_of(ws, &viewers, pkg_id, &cur, last_of(segments), visiting)
+}
+
+/// Walk the anchor and then `segments[..stop]` as modules, checking each
+/// module segment's access from `frag`.
+fn walk_modules(
+    ws: &Workspace,
+    frag: &FragmentScope,
+    path: &UsePathRef,
+    stop: usize,
+) -> Result<(u32, Vec<Ustr>), String> {
     let segments = &path.segments;
     let (pkg_id, mut cur, rest_start) = resolve_anchor(ws, frag, path)?;
-
-    // Traverse module-by-module up to (and for Module mode, including) the
-    // last segment.
-    let def_stop = match mode {
-        WalkMode::Definition => segments.len() - 1,
-        WalkMode::Module => segments.len(),
-    };
-    for seg in &segments[rest_start..def_stop] {
+    let pkg = ws
+        .ns
+        .package(pkg_id)
+        .ok_or_else(|| "unknown package".to_string())?;
+    for seg in &segments[rest_start.min(stop)..stop] {
         if seg.as_str() == "self" {
             continue;
         }
@@ -511,59 +787,15 @@ fn walk_path(
             continue;
         }
         cur.push(*seg);
-        let pkg = ws
-            .ns
-            .package(pkg_id)
-            .ok_or_else(|| "unknown package".to_string())?;
-        let key = pkg.key_of(&cur);
-        if pkg.node(key).is_none() {
+        if pkg.node(pkg.key_of(&cur)).is_none() {
             return Err(format!("no module `{}` in path", seg));
         }
         check_module_access(ws, frag, pkg_id, &cur)?;
     }
-
-    if let WalkMode::Module = mode {
-        let pkg = ws
-            .ns
-            .package(pkg_id)
-            .ok_or_else(|| "unknown package".to_string())?;
-        if pkg.node(pkg.key_of(&cur)).is_none() {
-            return Err(format!("no module `{}` in path", last_of(segments)));
-        }
-        return Ok(Landing::Module(pkg_id, cur));
+    if pkg.node(pkg.key_of(&cur)).is_none() {
+        return Err(format!("no module `{}` in path", last_of(segments)));
     }
-
-    // The last segment names the definition: look in the node, then chase
-    // export bindings (cycle-guarded; a pure cycle is an error, spec 8.6).
-    let pkg = ws
-        .ns
-        .package(pkg_id)
-        .ok_or_else(|| "unknown package".to_string())?;
-    let node_key = pkg.key_of(&cur);
-    let node = pkg
-        .node(node_key)
-        .ok_or_else(|| format!("no module `{}` in path", last_of(segments)))?;
-    let name = last_of(segments);
-    if let Some(kind) = owned_kind(node, name) {
-        let key = first_owned(node, name).expect("kind implies key");
-        check_key_access(ws, frag, key)?;
-        return Ok(Landing::Def(Resolved { key, kind, hidden: Vec::new() }));
-    }
-    if let Some(binding) = node.exports.get(&name) {
-        let visit = (pkg_id, node_key);
-        if visited.contains(&visit) {
-            return Err("circular `use` binding with no defining target".to_string());
-        }
-        visited.push(visit);
-        return match walk_path(ws, frag, &binding.target, WalkMode::Definition, visited)? {
-            Landing::Def(resolved) => Ok(Landing::Def(resolved)),
-            Landing::Module(..) => Err("use binding points at a module".to_string()),
-        };
-    }
-    Err(format!(
-        "`{}` did not resolve to any definition",
-        segments.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::")
-    ))
+    Ok((pkg_id, cur))
 }
 
 /// Resolve a pattern path `prefix::Variant` where the LAST segment is the

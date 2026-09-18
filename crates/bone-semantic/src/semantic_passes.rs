@@ -741,7 +741,7 @@ fn compute_export_reachability(
                     }
                 }
             }
-            for binding in node.exports.values() {
+            for binding in node.exports.values().chain(node.glob_exports.iter()) {
                 if binding.vis == NsVisibility::Pub {
                     let frag = FragmentScope {
                         package: pkg_id,
@@ -1230,15 +1230,8 @@ fn build_legacy_compatibility(
         let package = rock_mod.package.as_ref().map(|tag| tag.id);
         let participating = legacy_participating_packages(ws, package, &v1_packages);
         let mut projection = LegacyProjection::default();
-        let mut visited = FxHashSet::default();
         for package in participating {
-            project_public_module(
-                ws,
-                package,
-                &[],
-                &mut projection,
-                &mut visited,
-            )?;
+            project_public_module(ws, package, &[], &mut projection)?;
         }
         ws.legacy_projections.insert(rock_mod.file, projection);
 
@@ -1279,78 +1272,34 @@ fn legacy_participating_packages(
     packages
 }
 
-/// Add all public definitions and public re-exports visible from one module
-/// into the projection. The visited module set makes two public glob paths
-/// idempotent while the per-name entry list keeps distinct collisions explicit.
+/// Add every name one module offers to any consumer -- its `pub`
+/// definitions and what its `pub` export bindings reach -- into the
+/// projection, through the resolver's one member lookup.
 fn project_public_module(
     ws: &Workspace,
     package: u32,
     path: &[ustr::Ustr],
     projection: &mut LegacyProjection,
-    visited: &mut FxHashSet<(u32, ustr::Ustr)>,
 ) -> Result<(), CompilerError> {
-    let package_node = ws
-        .ns
-        .package(package)
-        .ok_or_else(|| CompilerError::new_no_location(format!("legacy projection references unknown package {package}")))?;
-    let module_key = package_node.key_of(path);
-    if !visited.insert((package, module_key)) {
-        return Ok(());
+    use bone_lower::resolve::{module_member_names, module_members, Viewer};
+    if ws.ns.package(package).is_none() {
+        return Err(CompilerError::new_no_location(format!(
+            "legacy projection references unknown package {package}"
+        )));
     }
-    let Some(node) = package_node.node(module_key) else {
-        return Ok(());
-    };
-    let mut owned = Vec::new();
-    owned.extend(node.owned_types.iter().map(|(&name, &key)| (name, key, DefKind::Type)));
-    owned.extend(node.owned_globals.iter().map(|(&name, &key)| (name, key, DefKind::Global)));
-    owned.extend(node.owned_callables.iter().map(|(&name, &key)| (name, key, DefKind::Callable)));
-    owned.extend(node.owned_decorators.iter().map(|(&name, &key)| (name, key, DefKind::Decorator)));
-    let exports: Vec<_> = node
-        .exports
-        .iter()
-        .filter(|(_, binding)| binding.vis == NsVisibility::Pub)
-        .map(|(&name, binding)| (name, binding.clone()))
-        .collect();
-
-    for (name, key, kind) in owned {
-        if ws.defs.get(&key).is_some_and(|meta| meta.vis == NsVisibility::Pub) {
-            projection.insert(name, key, kind);
-        }
-    }
-
-    let site = FragmentScope {
-        package,
-        package_name: package_node.self_name,
-        module_path: path.to_vec(),
-        ..Default::default()
-    };
-    for (name, binding) in exports {
-        if binding.is_glob {
-            let (target_package, target_path) = bone_lower::resolve::resolve_path_to_module(
-                ws,
-                &site,
-                &binding.target,
-            )
-            .map_err(|message| {
-                CompilerError::new_no_location(format!(
-                    "legacy projection cannot resolve public glob export `{name}`: {message}"
-                ))
-            })?;
-            project_public_module(ws, target_package, &target_path, projection, visited)?;
-        } else {
-            let resolved = bone_lower::resolve::resolve_path(ws, &site, &binding.target)
-                .map_err(|message| {
-                    CompilerError::new_no_location(format!(
-                        "legacy projection cannot resolve public export `{name}`: {message}"
-                    ))
-                })?;
-            let Some(kind) = projection_kind(resolved.kind) else { continue };
-            if ws
-                .defs
-                .get(&resolved.key)
-                .is_some_and(|meta| meta.vis == NsVisibility::Pub)
-            {
-                projection.insert(name, resolved.key, kind);
+    let viewers = [Viewer::Public];
+    let names = module_member_names(ws, &viewers, package, path).map_err(|message| {
+        CompilerError::new_no_location(format!("legacy projection cannot resolve a public glob export: {message}"))
+    })?;
+    for name in names {
+        let members = module_members(ws, &viewers, package, path, name).map_err(|message| {
+            CompilerError::new_no_location(format!(
+                "legacy projection cannot resolve public export `{name}`: {message}"
+            ))
+        })?;
+        for (key, kind) in members.found {
+            if let Some(kind) = projection_kind(kind) {
+                projection.insert(name, key, kind);
             }
         }
     }
@@ -1406,7 +1355,7 @@ fn build_legacy_imports(
                 )
             })?;
             let mut view = LegacyProjection::default();
-            project_public_module(ws, target_package, &target_path, &mut view, &mut FxHashSet::default())?;
+            project_public_module(ws, target_package, &target_path, &mut view)?;
             for (name, entries) in view.by_name {
                 for entry in entries {
                     imports.insert(name, entry.key, entry.kind);
@@ -1567,75 +1516,8 @@ fn register_items(
                 register_items(ws, pkg_id, &child, &m.items, scope, errs);
             }
             ItemKind::Use(u) => {
-                let to_ref = |from_root: bool, segments: &[Ident]| UsePathRef {
-                    from_root,
-                    segments: segments.iter().map(|i| i.name).collect(),
-                };
-                match &u.tree {
-                    skull_parser::UseTree::Path { from_root, segments, kind } => {
-                        match kind {
-                            skull_parser::UseSuffix::Bind => {
-                                // `use a::b;` binds the tail segment name.
-                                let local = segments
-                                    .last()
-                                    .map(|i| i.name)
-                                    .unwrap_or(ustr::Ustr::from(""));
-                                if u.vis.is_some() {
-                                    share_export(ws, pkg_id, path, local, to_ref(*from_root, segments), false, u, errs);
-                                } else {
-                                    scope.named.insert(local, to_ref(*from_root, segments));
-                                }
-                            }
-                            skull_parser::UseSuffix::BindAs(alias) => {
-                                if u.vis.is_some() {
-                                    share_export(ws, pkg_id, path, alias.name, to_ref(*from_root, segments), false, u, errs);
-                                } else {
-                                    scope.named.insert(alias.name, to_ref(*from_root, segments));
-                                }
-                            }
-                            skull_parser::UseSuffix::Glob => {
-                                let _ = to_ref;
-                                if u.vis.is_some() {
-                                    share_export(
-                                        ws,
-                                        pkg_id,
-                                        path,
-                                        ustr::Ustr::from("*"),
-                                        UsePathRef {
-                                            from_root: *from_root,
-                                            segments: segments.iter().map(|i| i.name).collect(),
-                                        },
-                                        true,
-                                        u,
-                                        errs,
-                                    );
-                                } else {
-                                    scope.globs.push(UsePathRef {
-                                        from_root: *from_root,
-                                        segments: segments.iter().map(|i| i.name).collect(),
-                                    });
-                                }
-                            }
-                            skull_parser::UseSuffix::Operator(op) => {
-                                let local = op.name;
-                                let mut segs: Vec<Ident> = segments.clone();
-                                segs.push(op.clone());
-                                if u.vis.is_some() {
-                                    share_export(ws, pkg_id, path, local, to_ref(*from_root, &segs), false, u, errs);
-                                } else {
-                                    scope.named.insert(local, to_ref(*from_root, &segs));
-                                }
-                            }
-                            skull_parser::UseSuffix::Nested(trees) => {
-                                // Flatten `use a::b::{ .. }` into per-subtree
-                                // fragment bindings/exports.
-                                for tree in trees {
-                                    flatten_use_tree(ws, pkg_id, path, *from_root, segments, tree, scope, u, errs);
-                                }
-                            }
-                        }
-                    }
-                }
+                let skull_parser::UseTree::Path { from_root, .. } = &u.tree;
+                flatten_use_tree(ws, pkg_id, path, *from_root, &[], &u.tree, scope, u, errs);
             }
             other => {
                 // Ordinary definitions: register under the DefKey on the node.
@@ -1719,7 +1601,9 @@ fn register_items(
     }
 }
 
-/// Flatten one subtree of `use a::b::{ .. }` into fragment bindings/exports.
+/// Flatten one `use` tree into fragment bindings, or into shared export
+/// bindings when the declaration carries a visibility (spec 8.2). Every leaf
+/// of a nested `pub use a::{b, c::*}` shares the declaration's visibility.
 fn flatten_use_tree(
     ws: &mut Workspace,
     pkg_id: u32,
@@ -1735,60 +1619,52 @@ fn flatten_use_tree(
     // tree never carries its own root anchor -- the declaration's anchor rides
     // the `from_root` parameter.
     let skull_parser::UseTree::Path { segments, kind, .. } = tree;
-    let mut full: Vec<Ident> = prefix.to_vec();
-    full.extend(segments.iter().cloned());
-    match kind {
+    let mut full: Vec<Ustr> = prefix.iter().map(|i| i.name).collect();
+    full.extend(segments.iter().map(|i| i.name));
+    let (local, target) = match kind {
         skull_parser::UseSuffix::Bind => {
-            let local = full.last().map(|i| i.name).unwrap_or(ustr::Ustr::from(""));
-            scope.named.insert(
-                local,
-                UsePathRef { from_root, segments: full.iter().map(|i| i.name).collect() },
-            );
+            let local = full.last().copied().unwrap_or(ustr::Ustr::from(""));
+            (Some(local), full)
         }
-        skull_parser::UseSuffix::BindAs(alias) => {
-            scope.named.insert(
-                alias.name,
-                UsePathRef { from_root, segments: full.iter().map(|i| i.name).collect() },
-            );
-        }
+        skull_parser::UseSuffix::BindAs(alias) => (Some(alias.name), full),
         skull_parser::UseSuffix::Operator(op) => {
-            let local = op.name;
-            let mut segs: Vec<Ustr> = full.iter().map(|i| i.name).collect();
-            segs.push(local);
-            scope.named.insert(
-                local,
-                UsePathRef { from_root, segments: segs },
-            );
+            full.push(op.name);
+            (Some(op.name), full)
         }
-        skull_parser::UseSuffix::Glob => {
-            scope.globs.push(UsePathRef {
-                from_root,
-                segments: full.iter().map(|i| i.name).collect(),
-            });
-        }
+        skull_parser::UseSuffix::Glob => (None, full),
         skull_parser::UseSuffix::Nested(trees) => {
+            let prefix: Vec<Ident> = prefix.iter().chain(segments.iter()).cloned().collect();
             for tree in trees {
-                flatten_use_tree(ws, pkg_id, path, from_root, &full, tree, scope, decl, errs);
+                flatten_use_tree(ws, pkg_id, path, from_root, &prefix, tree, scope, decl, errs);
             }
+            return;
         }
+    };
+    let target = UsePathRef { from_root, segments: target };
+    match (local, decl.vis.is_some()) {
+        (Some(local), true) => share_export(ws, pkg_id, path, Some(local), target, decl, errs),
+        (None, true) => share_export(ws, pkg_id, path, None, target, decl, errs),
+        (Some(local), false) => {
+            scope.named.insert(local, target);
+        }
+        (None, false) => scope.globs.push(target),
     }
 }
 
-/// Record a shared export binding on the fragment's module node.
+/// Record a shared export binding on the fragment's module node: a named
+/// binding under `local`, or a glob binding when `local` is `None`.
 fn share_export(
     ws: &mut Workspace,
     pkg_id: u32,
     path: &[ustr::Ustr],
-    local: ustr::Ustr,
+    local: Option<ustr::Ustr>,
     target: UsePathRef,
-    is_glob: bool,
     decl: &skull_parser::UseDecl,
     errs: &mut Vec<CompilerError>,
 ) {
     let vis = decl.vis.clone();
     let binding = bone_core::modules::ExportBinding {
         target,
-        is_glob,
         vis: to_ns_vis(&vis.unwrap_or(skull_parser::Visibility::Private)),
     };
     let pkg = ws.ns.packages.get_mut(&pkg_id).expect("package");
@@ -1798,6 +1674,10 @@ fn share_export(
         segments: path.to_vec(),
         ..Default::default()
     });
+    let Some(local) = local else {
+        node.glob_exports.push(binding);
+        return;
+    };
     if node.exports.insert(local, binding).is_some() {
         errs.push(CompilerError::new_with_label(
             decl.span,

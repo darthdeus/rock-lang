@@ -133,21 +133,22 @@ pub struct NsNode {
     pub owned_decorators: FxHashMap<Ustr, Ustr>,
     /// Child modules by segment.
     pub children: FxHashMap<Ustr, Ustr>,
-    /// Shared export bindings from `pub use` / `private use` at module
-    /// scope — spec 8.2 distinguishes them from fragment-local imports,
-    /// which live on the fragment (file) in `FragmentScope`.
+    /// Shared named export bindings from `pub use` / `private use` at module
+    /// scope, by bound name — spec 8.2 distinguishes them from fragment-local
+    /// imports, which live on the fragment (file) in `FragmentScope`.
     pub exports: FxHashMap<Ustr, ExportBinding>,
+    /// Shared glob export bindings (`pub use a::*;`). A module may hold any
+    /// number; they sit below owned names and named exports (spec 8.3, 8.6).
+    pub glob_exports: Vec<ExportBinding>,
 }
 
 /// A shared export binding (spec 8.2): `pub use` / `private use` at module
-/// scope. The target stays UNRESOLVED — the resolver chases it lazily (with
-/// cycle rejection), so declaration order never matters and pure re-export
-/// cycles diagnose at use (spec 8.6). Glob bindings sit at a lower lookup
-/// tier than named ones (spec 8.3).
+/// scope. The target stays UNRESOLVED — the resolver chases it lazily from
+/// the exporting module (with cycle rejection), so declaration order never
+/// matters and pure re-export cycles diagnose at use (spec 8.6).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExportBinding {
     pub target: UsePathRef,
-    pub is_glob: bool,
     pub vis: NsVisibility,
 }
 

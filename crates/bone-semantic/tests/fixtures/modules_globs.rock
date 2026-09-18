@@ -1,7 +1,9 @@
 //! Glob imports open only the members accessible from the importing
 //! fragment (spec 8.1, 8.3 tier 4, 9). An inaccessible member never enters
 //! tier selection: it neither shadows a lower tier nor makes a glob
-//! ambiguous.
+//! ambiguous. A glob also opens its target's export bindings, explicit and
+//! glob, followed to a fixed point; a binding admits only the audience its
+//! own visibility and the original definition's both admit (spec 8.6).
 //!
 //! Sections hold embedded files: `//-- <file> @pkg=<self_name>,<id> [@v1]`.
 
@@ -138,20 +140,488 @@ fn f() -> Vec2 {
     a + b
 }
 
-//- sentinel_a_glob_does_not_open_its_target_modules_reexports @fail=`ply` did not resolve to any definition
-// SENTINEL (docs/test-sentinels.md). Spec 8.1/8.3 tier 4: a glob opens the
-// target module's accessible members, "including glob re-export candidates";
-// `facade::*` should therefore reach `ply` through `pub use chess::inner::ply`
-// (and through a `pub use chess::inner::*` alike). `glob_candidates` reads
-// only the target's OWNED names, so this fails to resolve today and passes
-// because the bug exists. When globs follow export bindings this section
-// fails: drop `@fail`, add a `//^ int` marker on the call, and add the
-// filtered-visibility twin (a `pub(package) use` export is not opened for
-// another package's globber).
+//- a_glob_opens_its_target_modules_named_reexport
 //-- lib_inner.rock @pkg=chess,1 @v1
 pub mod inner;
 
 pub fn ply() -> int {
+    1
+}
+
+//-- lib_facade.rock @pkg=chess,1 @v1
+pub mod facade;
+
+pub use chess::inner::ply;
+
+//-- app.rock @pkg=app,2 @v1
+use chess::facade::*;
+
+fn f() -> int {
+    let n = ply()
+            //^ int
+    n
+}
+
+//- a_glob_opens_its_target_modules_glob_reexport
+//-- lib_inner.rock @pkg=chess,1 @v1
+pub mod inner;
+
+pub fn ply() -> int {
+    1
+}
+
+//-- lib_facade.rock @pkg=chess,1 @v1
+pub mod facade;
+
+pub use chess::inner::*;
+
+//-- app.rock @pkg=app,2 @v1
+use chess::facade::*;
+
+fn f() -> int {
+    let n = ply()
+            //^ int
+    n
+}
+
+//- a_reexport_target_resolves_from_the_exporting_module
+//-- lib_inner.rock @pkg=chess,1 @v1
+pub mod inner;
+
+pub fn ply() -> int {
+    1
+}
+
+//-- lib_facade.rock @pkg=chess,1 @v1
+pub mod facade;
+
+pub use super::inner::ply;
+
+//-- app.rock @pkg=app,2 @v1
+use chess::facade::*;
+
+fn f() -> int {
+    let n = ply()
+            //^ int
+    n
+}
+
+//- a_glob_does_not_open_a_fragment_local_use_of_its_target @fail=`ply` did not resolve to any definition
+//-- lib_inner.rock @pkg=chess,1 @v1
+pub mod inner;
+
+pub fn ply() -> int {
+    1
+}
+
+//-- lib_facade.rock @pkg=chess,1 @v1
+pub mod facade;
+
+use chess::inner::ply;
+
+//-- app.rock @pkg=app,2 @v1
+use chess::facade::*;
+
+fn f() -> int {
+    ply()
+}
+
+//- a_glob_does_not_open_a_module_private_reexport_to_another_package @fail=`ply` did not resolve to any definition
+//-- lib_inner.rock @pkg=chess,1 @v1
+pub mod inner;
+
+pub fn ply() -> int {
+    1
+}
+
+//-- lib_facade.rock @pkg=chess,1 @v1
+pub mod facade;
+
+private use chess::inner::ply;
+
+//-- app.rock @pkg=app,2 @v1
+use chess::facade::*;
+
+fn f() -> int {
+    ply()
+}
+
+//- a_pub_package_reexport_is_opened_for_a_same_package_globber
+//-- lib_inner.rock @pkg=chess,1 @v1
+pub mod inner;
+
+pub fn ply() -> int {
+    1
+}
+
+//-- lib_facade.rock @pkg=chess,1 @v1
+pub mod facade;
+
+pub(package) use chess::inner::ply;
+
+//-- lib_c.rock @pkg=chess,1 @v1
+mod c;
+
+use super::facade::*;
+
+fn f() -> int {
+    let n = ply()
+            //^ int
+    n
+}
+
+//- a_pub_package_reexport_is_not_opened_for_another_package_globber @fail=`ply` did not resolve to any definition
+//-- lib_inner.rock @pkg=chess,1 @v1
+pub mod inner;
+
+pub fn ply() -> int {
+    1
+}
+
+//-- lib_facade.rock @pkg=chess,1 @v1
+pub mod facade;
+
+pub(package) use chess::inner::ply;
+
+//-- app.rock @pkg=app,2 @v1
+use chess::facade::*;
+
+fn f() -> int {
+    ply()
+}
+
+//- an_explicit_reexport_cannot_widen_the_original_visibility @fail=`ply` did not resolve to any definition
+//-- lib_inner.rock @pkg=chess,1 @v1
+pub mod inner;
+
+pub(package) fn ply() -> int {
+    1
+}
+
+//-- lib_facade.rock @pkg=chess,1 @v1
+pub mod facade;
+
+pub use chess::inner::ply;
+
+//-- app.rock @pkg=app,2 @v1
+use chess::facade::*;
+
+fn f() -> int {
+    ply()
+}
+
+//- a_glob_reexport_omits_members_the_audience_cannot_see @fail=`ply` did not resolve to any definition
+//-- lib_inner.rock @pkg=chess,1 @v1
+pub mod inner;
+
+pub(package) fn ply() -> int {
+    1
+}
+
+//-- lib_facade.rock @pkg=chess,1 @v1
+pub mod facade;
+
+pub use chess::inner::*;
+
+//-- app.rock @pkg=app,2 @v1
+use chess::facade::*;
+
+fn f() -> int {
+    ply()
+}
+
+//- a_narrow_member_of_a_glob_reexport_is_opened_for_its_own_audience
+//-- lib_inner.rock @pkg=chess,1 @v1
+pub mod inner;
+
+pub(package) fn ply() -> int {
+    1
+}
+
+//-- lib_facade.rock @pkg=chess,1 @v1
+pub mod facade;
+
+pub use chess::inner::*;
+
+//-- lib_c.rock @pkg=chess,1 @v1
+mod c;
+
+use super::facade::*;
+
+fn f() -> int {
+    let n = ply()
+            //^ int
+    n
+}
+
+//- a_glob_reexport_cycle_with_definitions_resolves
+//-- lib_a.rock @pkg=chess,1 @v1
+pub mod a;
+
+pub use chess::b::*;
+
+pub fn one() -> int {
+    1
+}
+
+//-- lib_b.rock @pkg=chess,1 @v1
+pub mod b;
+
+pub use chess::a::*;
+
+pub fn two() -> string {
+    "two"
+}
+
+//-- app.rock @pkg=app,2 @v1
+use chess::a::*;
+
+fn f() -> int {
+    let s = two()
+            //^ string
+    let n = one()
+            //^ int
+    n
+}
+
+//- a_pure_reexport_cycle_is_diagnosed @fail=circular `use` binding with no defining target
+//-- lib_a.rock @pkg=chess,1 @v1
+pub mod a;
+
+pub use chess::b::ply;
+
+//-- lib_b.rock @pkg=chess,1 @v1
+pub mod b;
+
+pub use chess::a::ply;
+
+//-- app.rock @pkg=app,2 @v1
+use chess::a::ply;
+
+fn f() -> int {
+    ply()
+}
+
+//- a_module_may_hold_several_glob_reexports
+//-- lib_a.rock @pkg=chess,1 @v1
+pub mod a;
+
+pub fn one() -> int {
+    1
+}
+
+//-- lib_b.rock @pkg=chess,1 @v1
+pub mod b;
+
+pub fn two() -> string {
+    "two"
+}
+
+//-- lib_facade.rock @pkg=chess,1 @v1
+pub mod facade;
+
+pub use chess::a::*;
+pub use chess::b::*;
+
+//-- app.rock @pkg=app,2 @v1
+use chess::facade::*;
+
+fn f() -> int {
+    let s = two()
+            //^ string
+    let n = one()
+            //^ int
+    n
+}
+
+//- a_nested_pub_use_exports_each_leaf
+//-- lib_a.rock @pkg=chess,1 @v1
+pub mod a;
+
+pub fn one() -> int {
+    1
+}
+
+//-- lib_b.rock @pkg=chess,1 @v1
+pub mod b;
+
+pub fn two() -> string {
+    "two"
+}
+
+//-- lib_facade.rock @pkg=chess,1 @v1
+pub mod facade;
+
+pub use chess::{a::one, b::two};
+
+//-- app.rock @pkg=app,2 @v1
+use chess::facade::*;
+
+fn f() -> int {
+    let s = two()
+            //^ string
+    let n = one()
+            //^ int
+    n
+}
+
+//- an_explicit_path_reaches_a_member_of_a_glob_reexport
+//-- lib_a.rock @pkg=chess,1 @v1
+pub mod a;
+
+pub fn one() -> int {
+    1
+}
+
+//-- lib_b.rock @pkg=chess,1 @v1
+pub mod b;
+
+pub fn two() -> string {
+    "two"
+}
+
+//-- lib_facade.rock @pkg=chess,1 @v1
+pub mod facade;
+
+pub use chess::a::*;
+
+//-- app.rock @pkg=app,2 @v1
+use chess::facade::one;
+
+fn f() -> int {
+    let n = one()
+            //^ int
+    n
+}
+
+//- an_explicit_path_does_not_reach_a_module_private_reexport @fail=`ply` is not accessible from this module
+//-- lib_inner.rock @pkg=chess,1 @v1
+pub mod inner;
+
+pub fn ply() -> int {
+    1
+}
+
+//-- lib_facade.rock @pkg=chess,1 @v1
+pub mod facade;
+
+private use chess::inner::ply;
+
+//-- app.rock @pkg=app,2 @v1
+use chess::facade::ply;
+
+fn f() -> int {
+    ply()
+}
+
+//- an_explicit_path_resolves_a_reexport_from_the_exporting_module
+//-- lib_inner.rock @pkg=chess,1 @v1
+pub mod inner;
+
+pub fn ply() -> int {
+    1
+}
+
+//-- lib_facade.rock @pkg=chess,1 @v1
+pub mod facade;
+
+pub use super::inner::ply;
+
+//-- app.rock @pkg=app,2 @v1
+use chess::facade::ply;
+
+fn f() -> int {
+    let n = ply()
+            //^ int
+    n
+}
+
+//- an_owned_name_disambiguates_a_colliding_glob_reexport
+//-- lib_a.rock @pkg=chess,1 @v1
+pub mod a;
+
+pub fn same() -> int {
+    1
+}
+
+//-- lib_b.rock @pkg=chess,1 @v1
+pub mod b;
+
+pub fn same() -> string {
+    "b"
+}
+
+//-- lib_facade.rock @pkg=chess,1 @v1
+pub mod facade;
+
+pub use chess::a::*;
+pub use chess::b::*;
+
+pub fn same() -> bool {
+    true
+}
+
+//-- app.rock @pkg=app,2 @v1
+use chess::facade::*;
+
+fn f() -> bool {
+    let v = same()
+            //^ bool
+    v
+}
+
+//- colliding_glob_reexports_are_ambiguous_at_use @fail=ambiguous
+//-- lib_a.rock @pkg=chess,1 @v1
+pub mod a;
+
+pub fn same() -> int {
+    1
+}
+
+//-- lib_b.rock @pkg=chess,1 @v1
+pub mod b;
+
+pub fn same() -> string {
+    "b"
+}
+
+//-- lib_facade.rock @pkg=chess,1 @v1
+pub mod facade;
+
+pub use chess::a::*;
+pub use chess::b::*;
+
+//-- app.rock @pkg=app,2 @v1
+use chess::facade::*;
+
+fn f() -> int {
+    same()
+}
+
+//- a_modules_own_reexport_binding_names_its_target_in_the_module
+//-- lib_inner.rock @pkg=chess,1 @v1
+pub mod inner;
+
+pub fn ply() -> int {
+    1
+}
+
+//-- lib_facade.rock @pkg=chess,1 @v1
+pub mod facade;
+
+pub use chess::inner::ply;
+
+fn f() -> int {
+    let n = ply()
+            //^ int
+    n
+}
+
+//- a_reexport_of_a_definition_its_module_cannot_name_is_diagnosed @fail=`chess::inner::ply` is not accessible from the module that re-exports it
+//-- lib_inner.rock @pkg=chess,1 @v1
+pub mod inner;
+
+fn ply() -> int {
     1
 }
 
