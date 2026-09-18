@@ -62,6 +62,8 @@ mod replay_profile_report_tests;
 mod package;
 #[path = "fire_manifest.rs"]
 mod fire_manifest;
+#[path = "fire_asset_archive.rs"]
+mod fire_asset_archive;
 #[path = "c_run_gate.rs"]
 mod c_run_gate;
 #[path = "json_serialize_tests.rs"]
