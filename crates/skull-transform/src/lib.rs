@@ -250,7 +250,8 @@ fn term_uses_each(term: &Term, push: &mut impl FnMut(Idx<Inst>)) {
 /// `Inst::VecCheckedIndex` for columns and strided rows -- "one call per
 /// ELEMENT access, not per column"). Each leaf read is then a raw pointer read
 /// carrying no error of its own, so reading one field of a K-leaf element would
-/// otherwise emit all K loads and discard K-1.
+/// otherwise emit all K loads and discard K-1. The shared check itself stays
+/// live, so an element read whose leaves are all unused still raises.
 ///
 /// Consulted by BOTH [`is_dead_rc`] (initial seeding) and [`is_dead_value`]
 /// (cascade). They must agree: a kind dead in one and live in the other either
@@ -268,6 +269,8 @@ fn is_dead_value(inst: &Inst) -> bool {
     match inst {
         Inst::Call { .. } | Inst::CallValue { .. } => false,
         Inst::Index { kind, .. } if index_read_is_checked(kind) => false,
+        // The shared bounds check of a flat element read raises on its own.
+        Inst::VecCheckedIndex { .. } => false,
         _ => inst.produces_value(),
     }
 }
@@ -1796,6 +1799,7 @@ fn is_dead_rc(inst: &Inst, i: Idx<Inst>, use_count: &[u32], load_count: &[u32]) 
     match inst {
         Inst::Call { .. } | Inst::CallValue { .. } => false,
         Inst::Index { kind, .. } if index_read_is_checked(kind) => false,
+        Inst::VecCheckedIndex { .. } => false,
         Inst::Store { cell, .. } => load_count[raw(*cell) as usize] == 0,
         _ if inst.produces_value() => use_count[raw(i) as usize] == 0,
         _ => false,
