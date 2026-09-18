@@ -759,8 +759,14 @@ fn plan(package: &Path, consumer_dirs: &[PathBuf], export_test_uses: bool) -> Ou
         return Outcome::Planned(Box::new(plan));
     }
 
-    // Candidate rounds: grow exports by the closure, add repairs, until the
-    // candidate checks clean with every site resolving as before.
+    verify_candidate(&mut plan, &ctxs, &baselines, &file_index);
+    Outcome::Planned(Box::new(plan))
+}
+
+/// Candidate rounds: grow the exports by the closure and add call repairs
+/// until the candidate checks clean in every unit with every site resolving
+/// as the baseline did, or record why it cannot.
+fn verify_candidate(plan: &mut Plan, ctxs: &[Ctx], baselines: &[Checked], file_index: &HashMap<Ustr, usize>) {
     // A site inside a rewritten ascription moves by an amount that depends on
     // whether it is the node or its operand, so it is compared by the
     // re-parse (`verify_ascriptions`) and the clean check instead.
@@ -769,7 +775,7 @@ fn plan(package: &Path, consumer_dirs: &[PathBuf], export_test_uses: bool) -> Ou
     };
     let base_sites: Vec<Sites> = ctxs
         .iter()
-        .zip(&baselines)
+        .zip(baselines)
         .map(|(c, b)| {
             let mut s = sites(b, &c.file_pkg, &HashMap::new());
             s.retain(|k, _| !inside_ascription(k));
@@ -894,7 +900,6 @@ fn plan(package: &Path, consumer_dirs: &[PathBuf], export_test_uses: bool) -> Ou
             ));
         }
     }
-    Outcome::Planned(Box::new(plan))
 }
 
 /// Package ids owning a target (std, builtins and untagged files excluded).
