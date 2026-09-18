@@ -737,7 +737,8 @@ impl Session {
         let scope_changed = self
             .files
             .get(path)
-            .is_some_and(|old| old.scope_hash != new_scope);
+            .is_some_and(|old| old.scope_hash != new_scope)
+            || (dialect == Dialect::Legacy && self.changes_a_projected_collision(path, &module));
 
         let diff = (self.files.contains_key(path) && !module.items.is_empty() && !scope_changed)
             .then(|| classify(&self.files[path].item_prints, &new_prints));
@@ -833,6 +834,28 @@ impl Session {
             };
         }
         Ok(result)
+    }
+
+    /// Whether a legacy file's edit adds or removes a definition whose bare
+    /// name some legacy compatibility view also projects. Legacy resolution
+    /// of that name is ambiguous exactly while both exist, and it is decided
+    /// when a caller LOWERS, so every caller has to re-lower -- which only the
+    /// full rebuild does.
+    fn changes_a_projected_collision(&self, path: &str, module: &Ast) -> bool {
+        if self.ws.legacy_projections.is_empty() && self.ws.legacy_imports.is_empty() {
+            return false;
+        }
+        let old: FxHashSet<Ustr> =
+            self.ws.ns.legacy_owned.names_defined_by(ustr(path)).iter().copied().collect();
+        let new: FxHashSet<Ustr> =
+            bone_semantic::semantic_passes::legacy_owned_names(module).into_iter().collect();
+        old.symmetric_difference(&new).any(|name| {
+            self.ws
+                .legacy_projections
+                .values()
+                .chain(self.ws.legacy_imports.values())
+                .any(|view| view.by_name.contains_key(name))
+        })
     }
 
     fn rebuild_interface(

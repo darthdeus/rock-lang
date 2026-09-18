@@ -137,21 +137,12 @@ fn a_legacy_name_that_is_also_projected_is_ambiguous_after_a_body_edit() {
     assert!(diags.iter().any(|d| d.contains(AMBIGUOUS_BUMP)), "{diags:?}");
 }
 
-/// SENTINEL (docs/test-sentinels.md). The same collision introduced or
-/// removed by an edit to the legacy DEFINER rather than the caller. The
-/// definer's edit takes the interface path, which re-infers but does not
-/// re-lower the callers, and the ambiguity is a lowering diagnostic: adding a
-/// colliding `bump` leaves the caller resolved to the projection with no
-/// diagnostic, and removing it leaves the caller's stale ambiguity behind.
-/// A fresh session reports the opposite in both cases. These assertions pass
-/// today because the session does not route such an edit to the full
-/// rebuild; the fix is that routing (`update_file` in
-/// `crates/bone-incremental/src/session.rs`: a legacy edit whose defined
-/// names change by a name some legacy compatibility view projects). When it
-/// lands this fails: replace both halves with `edit_with_diagnostics`, which
-/// asserts incremental == fresh.
+/// The same collision introduced or removed by an edit to the legacy DEFINER
+/// rather than the caller. The ambiguity is a lowering diagnostic, so the
+/// caller has to re-lower: adding a colliding `bump` must report it, and
+/// removing it must clear it, exactly as a fresh session does.
 #[test]
-fn sentinel_a_legacy_definer_edit_does_not_relower_callers_of_a_colliding_name() {
+fn a_legacy_definer_edit_that_changes_a_collision_relowers_its_callers() {
     let a = "mod a;\n\npub fn bump(n: int) -> int {\n    n\n}\n";
     let without = "fn other(n: int) -> int {\n    n\n}\n";
     let with = "fn other(n: int) -> int {\n    n\n}\n\nfn bump(n: int) -> int {\n    n\n}\n";
@@ -163,20 +154,12 @@ fn sentinel_a_legacy_definer_edit_does_not_relower_callers_of_a_colliding_name()
             SessionFile::legacy("legacy_use.rock", "fn use_it() -> int {\n    bump(1)\n}\n"),
         ]
     };
-    let ambiguous = |s: &Session| diagnostics(s).iter().any(|d| d.contains(AMBIGUOUS_BUMP));
 
-    let mut added = Session::new(vec![], files(without), &NsAliases::default()).expect("baseline builds");
-    let tier = added.update_file("legacy_def.rock", with).expect("the edit is accepted").tier;
-    assert_eq!(tier, UpdateTier::Interface);
-    let fresh_with = Session::new(vec![], files(with), &NsAliases::default()).expect("fresh build");
-    assert!(ambiguous(&fresh_with), "{:?}", diagnostics(&fresh_with));
-    assert!(!ambiguous(&added), "PINNED BUG: the added collision is not diagnosed until the caller re-lowers");
+    let (_, diags) = edit_with_diagnostics(files(without), "legacy_def.rock", with);
+    assert!(diags.iter().any(|d| d.contains(AMBIGUOUS_BUMP)), "{diags:?}");
 
-    let mut removed = Session::new(vec![], files(with), &NsAliases::default()).expect("baseline builds");
-    removed.update_file("legacy_def.rock", without).expect("the edit is accepted");
-    let fresh_without = Session::new(vec![], files(without), &NsAliases::default()).expect("fresh build");
-    assert!(diagnostics(&fresh_without).is_empty(), "{:?}", diagnostics(&fresh_without));
-    assert!(ambiguous(&removed), "PINNED BUG: the removed collision's ambiguity stays on the caller");
+    let (_, diags) = edit_with_diagnostics(files(with), "legacy_def.rock", without);
+    assert!(diags.is_empty(), "{diags:?}");
 }
 
 /// A glob opens only the members accessible from the importer (spec 8.1),

@@ -294,6 +294,11 @@ impl LegacyOwnedNames {
         }
     }
 
+    /// The names `file` defines, sorted.
+    pub fn names_defined_by(&self, file: Ustr) -> &[Ustr] {
+        self.by_file.get(&file).map(Vec::as_slice).unwrap_or(&[])
+    }
+
     /// The legacy files defining `name`, sorted.
     pub fn files_defining(&self, name: Ustr) -> &[Ustr] {
         self.by_name.get(&name).map(Vec::as_slice).unwrap_or(&[])

@@ -100,12 +100,7 @@ pub fn lower_modules(
         // A legacy lookup that could also reach a projected v1 name is
         // decided from this fact, so it is recorded before any body lowers.
         if rock_mod.dialect == skull_parser::Dialect::Legacy {
-            let names = rock_mod
-                .items
-                .iter()
-                .filter_map(|item| owned_name_and_kind(&item.kind).map(|(name, _)| name))
-                .collect();
-            ws.ns.legacy_owned.replace_file(rock_mod.file, names);
+            ws.ns.legacy_owned.replace_file(rock_mod.file, legacy_owned_names(rock_mod));
         }
         let scope = ws.fragment_scopes.get(&rock_mod.file).cloned();
         let mut walk = |item: &Item, path: &[ustr::Ustr]| -> Result<(), CompilerError> {
@@ -1809,6 +1804,16 @@ fn share_export(
             format!("duplicate export binding `{}`", local),
         ));
     }
+}
+
+/// The bare item names a legacy file defines, as recorded in
+/// `ws.ns.legacy_owned`. The incremental session compares them across an edit.
+pub fn legacy_owned_names(rock_mod: &Ast) -> Vec<ustr::Ustr> {
+    rock_mod
+        .items
+        .iter()
+        .filter_map(|item| owned_name_and_kind(&item.kind).map(|(name, _)| name))
+        .collect()
 }
 
 fn owned_name_and_kind(item: &ItemKind) -> Option<(ustr::Ustr, &'static str)> {
