@@ -1557,7 +1557,7 @@ fn render_pretty(outcome: &Outcome, mode: Mode, applied: Option<&std::result::Re
             let _ = writeln!(o, "\napply FAILED: {e}");
         }
         (Mode::Apply, Some(Ok(vs))) => {
-            let _ = writeln!(o, "\napplied; re-checked from disk:");
+            let _ = writeln!(o, "\napplied; re-checked from disk (typecheck and API closure; emission is not part of this check -- run `rock test` on the package and build each consumer):");
             for v in vs {
                 let _ = writeln!(o, "  {}: {} error(s), {} reference(s)", v.ctx, v.errors.len(), v.compared);
                 for e in &v.errors {
