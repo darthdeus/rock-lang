@@ -2365,9 +2365,15 @@ impl BoneWorkspace {
         // table, not the old per-root O(functions) `ufcs_methods` scan. Ranked
         // with the type-matching variables (rank 0), shortest paths first.
         let t_reach = std::time::Instant::now();
+        // The reach and call-through indexes spell every workspace function
+        // by its key, which in a modules-v1 fragment is a DefKey the file
+        // cannot write (`chess_core::ch_to_fen(pos)`), and they consult no
+        // tier or access. Until they spell what the fragment binds, a v1
+        // fragment gets neither synthesis -- no candidate beats a wrong one.
+        let synthesize = crate::modules_scope::fragment(ws, Ustr::from(path)).is_none();
         // A pattern head is not a value slot: a dotted reach path is not a
         // valid pattern, so the expansion is suppressed there.
-        if !expected_types.is_empty() && !pattern_pos {
+        if synthesize && !expected_types.is_empty() && !pattern_pos {
             let reach_owned;
             let reach = match &proj.reach {
                 Some(r) => r,
@@ -2456,7 +2462,7 @@ impl BoneWorkspace {
         // cap but is skipped here at a >=MAX short prefix; acceptable under the
         // `isIncomplete` contract (the user narrows and it reappears).
         // Suppressed in a pattern head like reach: `f(arg)` is not a pattern.
-        if expr_position && !pattern_pos && sink.len() < max_items {
+        if synthesize && expr_position && !pattern_pos && sink.len() < max_items {
             // reach (for local-arg expansion) + the precomputed call-through
             // index, both cached on the project and rebuilt only on non-BodyOnly
             // edits. The one-shot CLI path has neither cached -> build throwaways.

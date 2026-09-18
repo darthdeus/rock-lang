@@ -54,6 +54,10 @@ pub enum Kind {
 
 pub global LIMIT: int = 10
 
+pub fn box_area(b: Box) -> int {
+    b.w * b.w
+}
+
 fn hidden_helper() -> int {
     1
 }
@@ -410,7 +414,7 @@ fn labels(items: &[lsp_types::CompletionItem]) -> Vec<String> {
 #[test]
 fn completion_after_a_module_path_offers_its_accessible_members() {
     let items = complete_in_main("shapes::");
-    assert_eq!(labels(&items), ["Box", "Kind", "LIMIT", "area", "inner", "perimeter"]);
+    assert_eq!(labels(&items), ["Box", "Kind", "LIMIT", "area", "box_area", "inner", "perimeter"]);
 }
 
 #[test]
@@ -560,5 +564,29 @@ fn renaming_an_alias_renames_only_that_files_uses_of_it() {
         assert_eq!(edits, want, "renaming at `{needle}`");
         let range = bone.prepare_rename(&main, pos_of(MAIN, needle, 0, into)).expect("an alias is renameable");
         assert_eq!(range.end.character - range.start.character, "surface".len() as u32);
+    }
+}
+
+/// Type-directed synthesized items (call-throughs such as `f(pos)`, reach
+/// paths such as `pos.f()`) spell workspace function names too; in a v1
+/// file none may spell a DefKey. Pinned on the converted chess-core, where
+/// the prefix `ch_t` inside `ch_type(p)` reached `chess_core::ch_to_fen(pos)`.
+#[test]
+fn no_completion_in_a_v1_file_spells_a_def_key() {
+    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().parent().unwrap();
+    let file = bone_query::canonicalize_lenient(&repo.join("libs/chess-core/chess_moves.rock").to_string_lossy());
+    let text = std::fs::read_to_string(&file).unwrap();
+    let mut bone = BoneWorkspace::new();
+    bone.update(&file, text.clone());
+    let at = pos_of(&text, "ch_type(p)", 0, 4);
+    let items = bone.completion(&file, at);
+    assert!(!items.is_empty());
+    for item in items {
+        let insert = item.insert_text.clone().unwrap_or_default();
+        assert!(
+            !item.label.contains("chess_core::") && !insert.contains("chess_core::"),
+            "{} / {insert}",
+            item.label
+        );
     }
 }
