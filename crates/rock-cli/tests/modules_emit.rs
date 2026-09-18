@@ -249,3 +249,82 @@ fn legacy_root_can_call_a_v1_dependency_export() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A legacy root using operator syntax on a v1 dependency's type (spec 3.2,
+/// 8.5): `+`, `+=` and a safe-nav `?.p +=` select the projected v1
+/// `operator +` and run its body (the `+ 100` marks it), while the legacy
+/// root's own `operator +` for its own type and built-in int/float addition
+/// keep working in the same file.
+#[test]
+fn legacy_operator_syntax_runs_a_projected_v1_operator_body() {
+    let root = std::env::temp_dir().join("rock_modules_emit_legacy_operator");
+    let _ = std::fs::remove_dir_all(&root);
+    let provider = root.join("provider");
+    let app = root.join("app");
+    std::fs::create_dir_all(&provider).unwrap();
+    std::fs::create_dir_all(&app).unwrap();
+    std::fs::write(
+        provider.join("stick.toml"),
+        "[package]\nname = \"provider\"\ntype = \"lib\"\n\n[language]\nmodules = \"v1\"\n",
+    )
+    .unwrap();
+    // The operator body adds through a helper module: in the module that
+    // declares `operator +`, a v1 `int + int` currently resolves to that
+    // operator alone.
+    std::fs::write(
+        provider.join("lib.rock"),
+        "pub struct Pt {\n    pub x: int,\n    pub y: int,\n}\n\n\
+         pub operator +(a: Pt, b: Pt) -> Pt {\n    \
+         Pt { x: math::plus(math::plus(a.x, b.x), 100), y: math::plus(a.y, b.y) }\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        provider.join("math.rock"),
+        "pub mod math;\n\npub fn plus(a: int, b: int) -> int {\n    a + b\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        app.join("stick.toml"),
+        "[package]\nname = \"legacyapp\"\ntype = \"bin\"\n\n[dependencies]\nprovider = { path = \"../provider\" }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        app.join("main.rock"),
+        r#"struct Money {
+    cents: int,
+}
+
+operator +(a: Money, b: Money) -> Money {
+    Money { cents: a.cents + b.cents + 1000 }
+}
+
+struct Holder {
+    p: Pt,
+}
+
+fn bump_held(h: Holder?) {
+    h?.p += Pt { x: 1, y: 1 }
+}
+
+fn main() {
+    let p = Pt { x: 1, y: 2 } + Pt { x: 3, y: 4 }
+    p += Pt { x: 10, y: 20 }
+    let h = Holder { p: Pt { x: 0, y: 0 } }
+    bump_held(h)
+    let m = Money { cents: 1 } + Money { cents: 2 }
+    let n = 1 + 2
+    n += 4
+    let f = 1.5 + 2.0
+    print("p={p.x},{p.y} h={h.p.x},{h.p.y} m={m.cents} n={n} f={f}")
+}
+"#,
+    )
+    .unwrap();
+    let (stdout, stderr, ok) = run(&app);
+    assert!(ok, "legacy/v1 operator project failed\nstdout:\n{stdout}\nstderr:\n{stderr}");
+    assert!(
+        stdout.contains("p=214,26 h=101,1 m=1003 n=7 f=3.5"),
+        "legacy operator syntax should run the v1 operator body\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}

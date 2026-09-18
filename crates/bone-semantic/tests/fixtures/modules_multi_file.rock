@@ -817,6 +817,149 @@ fn use_it() {
     let f = pick
 }
 
+//- a_legacy_operator_reaches_a_projected_v1_overload
+//-- geo.rock @pkg=geo,1 @v1
+pub struct Pt {
+    pub x: int,
+    pub y: int,
+}
+
+pub operator +(a: Pt, b: Pt) -> Pt {
+    Pt { x: a.x, y: b.y }
+}
+
+//-- main.rock @pkg=game,2
+fn use_it() -> int {
+    let a = Pt { x: 1, y: 2 }
+    let c = a + a
+            //^ geo::Pt
+    let n = 1 + 2
+            //^ int
+    let f = 1.5 + 2.0
+            //^ float
+    c.x + n
+}
+
+//- a_legacy_compound_assignment_reaches_a_projected_v1_overload
+//-- geo.rock @pkg=geo,1 @v1
+pub struct Pt {
+    pub x: int,
+    pub y: int,
+}
+
+pub operator +(a: Pt, b: Pt) -> Pt {
+    Pt { x: a.x, y: b.y }
+}
+
+//-- main.rock @pkg=game,2
+fn use_it() -> int {
+    let c = Pt { x: 1, y: 2 }
+    c += Pt { x: 3, y: 4 }
+    let n = 1
+    n += 2
+    let f = 1.5
+    f += 2.0
+    c.x + n
+}
+
+//- a_legacy_safe_nav_compound_assignment_reaches_a_projected_v1_overload
+//-- geo.rock @pkg=geo,1 @v1
+pub struct Pt {
+    pub x: int,
+    pub y: int,
+}
+
+pub operator +(a: Pt, b: Pt) -> Pt {
+    Pt { x: a.x, y: b.y }
+}
+
+//-- main.rock @pkg=game,2
+struct Holder {
+    p: Pt,
+}
+
+fn use_it(h: Holder?) {
+    h?.p += Pt { x: 3, y: 4 }
+}
+
+//- a_legacy_operator_overload_and_a_projected_one_merge
+//-- geo.rock @pkg=geo,1 @v1
+pub struct Pt {
+    pub x: int,
+    pub y: int,
+}
+
+pub operator +(a: Pt, b: Pt) -> Pt {
+    Pt { x: a.x, y: b.y }
+}
+
+//-- money.rock @pkg=game,2
+struct Money {
+    cents: int,
+}
+
+operator +(a: Money, b: Money) -> Money {
+    Money { cents: a.cents + b.cents }
+}
+
+//-- main.rock @pkg=game,2
+fn use_it() -> int {
+    let p = Pt { x: 1, y: 2 } + Pt { x: 3, y: 4 }
+            //^ geo::Pt
+    let m = Money { cents: 1 } + Money { cents: 2 }
+            //^ Money
+    m += Money { cents: 3 }
+    p += Pt { x: 5, y: 6 }
+    let n = 1 + 2
+            //^ int
+    p.x + m.cents + n
+}
+
+//- a_same_signature_legacy_and_projected_operator_tie @fail=geo::__op_add(a: geo::Pt, b: geo::Pt) -> geo::Pt (v1 definition geo::__op_add)
+//-- geo.rock @pkg=geo,1 @v1
+pub struct Pt {
+    pub x: int,
+    pub y: int,
+}
+
+pub operator +(a: Pt, b: Pt) -> Pt {
+    Pt { x: a.x, y: b.y }
+}
+
+//-- defs.rock @pkg=game,2
+operator +(a: Pt, b: Pt) -> Pt {
+    a
+}
+
+//-- main.rock @pkg=game,2
+fn use_it() -> int {
+    let p = Pt { x: 1, y: 2 } + Pt { x: 3, y: 4 }
+    p.x
+}
+
+//- a_same_signature_compound_assignment_ties_too @fail=(legacy definition in defs.rock)
+//-- geo.rock @pkg=geo,1 @v1
+pub struct Pt {
+    pub x: int,
+    pub y: int,
+}
+
+pub operator +(a: Pt, b: Pt) -> Pt {
+    Pt { x: a.x, y: b.y }
+}
+
+//-- defs.rock @pkg=game,2
+operator +(a: Pt, b: Pt) -> Pt {
+    a
+}
+
+//-- main.rock @pkg=game,2
+fn use_it() -> int {
+    let p = Pt { x: 1, y: 2 }
+    p += Pt { x: 3, y: 4 }
+    p.x
+}
+
 //- a_pub_child_module_is_reachable_from_a_consumer
 //-- lib.rock @pkg=chess,1 @v1
 pub mod openings;

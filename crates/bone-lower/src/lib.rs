@@ -1441,21 +1441,20 @@ pub fn lower_expr_value(
             } else {
                 let args = lower_exprs(ctx, a, body, scope, [left, right].into_iter())?;
 
+                // The same callee resolution as the binary operator call, so
+                // `a += b` sees what `a + b` sees -- in a legacy file, the
+                // family merging projected v1 overloads (spec 3.2, 8.5).
+                let (callee_key, family) = ctx.resolve_callee_family(ustr(op_fn), e.span)?;
                 let call = ctx.alloc_expr(
                     body,
                     Expr::Call {
                         callee: Callee::Unresolved {
-                            name: ustr(op_fn),
+                            name: callee_key,
                             name_span: e.span,
                         },
                         args,
                         generic_args: IdxRange::new_empty(),
-                        family: if ctx.v1_scope().is_some() {
-                            let r = ctx.resolve_bare(ustr(op_fn), e.span)?;
-                            hir::CallFamily::resolved(r.key, &r.hidden)
-                        } else {
-                            hir::CallFamily::from_name(ustr(op_fn))
-                        },
+                        family,
                     },
                     e.span,
                 );

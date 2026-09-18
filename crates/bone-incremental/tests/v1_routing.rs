@@ -343,3 +343,38 @@ fn a_legacy_member_added_to_an_ownerless_family_relowers_its_callers() {
     let (_, diags) = edit_with_diagnostics(files(with), "legacy_def.rock", without);
     assert!(diags.is_empty(), "{diags:?}");
 }
+
+/// Legacy operator syntax reaches a projected v1 `operator +` (spec 3.2,
+/// 8.5), through `+` and `+=` alike, after a body edit of the caller; and a
+/// legacy definer adding a same-signature `operator +` ties both, as a fresh
+/// session does.
+#[test]
+fn legacy_operator_syntax_merges_a_projected_operator_across_edits() {
+    let geo = "pub struct Pt {\n    pub x: int,\n}\n\npub operator +(a: Pt, b: Pt) -> Pt {\n    a\n}\n";
+    let caller = "fn use_it() -> int {\n    let p = Pt { x: 1 } + Pt { x: 2 }\n    p.x\n}\n";
+    let edit = "fn use_it() -> int {\n    let p = Pt { x: 1 }\n    p += Pt { x: 2 }\n    p.x\n}\n";
+    let without = "fn other(n: int) -> int {\n    n\n}\n";
+    let with = "fn other(n: int) -> int {\n    n\n}\n\noperator +(a: Pt, b: Pt) -> Pt {\n    b\n}\n";
+    let files = |def: &str, use_text: &str| {
+        vec![
+            v1_in(1, "geo", "geo.rock", geo),
+            SessionFile::legacy("legacy_def.rock", def),
+            SessionFile::legacy("legacy_use.rock", use_text),
+        ]
+    };
+
+    let (tier, diags) = edit_with_diagnostics(files(without, caller), "legacy_use.rock", edit);
+    assert_eq!(tier, UpdateTier::BodyOnly);
+    assert!(diags.is_empty(), "{diags:?}");
+
+    let (_, diags) = edit_with_diagnostics(files(without, edit), "legacy_def.rock", with);
+    assert!(
+        diags.iter().any(|d| d.contains("Ambiguous overload for `__op_add`")
+            && d.contains("(legacy definition in legacy_def.rock)")
+            && d.contains("(v1 definition geo::__op_add)")),
+        "{diags:?}"
+    );
+
+    let (_, diags) = edit_with_diagnostics(files(with, edit), "legacy_def.rock", without);
+    assert!(diags.is_empty(), "{diags:?}");
+}
