@@ -102,6 +102,9 @@ pub struct Session {
     /// macro defs. Warm ASTs are fixed for the session's lifetime, so this is
     /// computed once at construction rather than walked per query.
     pub warm_macros: Vec<(Ustr, MacroDef)>,
+    /// The package graph's alias tables, kept because every O(workspace)
+    /// rebuild runs `build_namespaces` again and needs them.
+    pub aliases: bone_core::modules::NsAliases,
 }
 
 /// A file entering a session, carrying the facts its package supplies.
@@ -157,6 +160,10 @@ pub struct UserFile {
     /// via `diagnostics()` -- a broken file still type-checks its valid parts AND
     /// shows the parse error as a diagnostic (the compile path rejects on them).
     pub syntax_errors: Vec<CompilerError>,
+    /// Hash of what this file contributes to the namespace tree beyond its
+    /// item interfaces: the `mod` header and every `use`/`mod` item. The header
+    /// is not an item, so `item_prints` alone cannot see it change.
+    pub scope_hash: u64,
 }
 
 /// One parameter of a macro definition, rendered at parse time (the AST is
@@ -216,6 +223,12 @@ pub enum FileDiff {
     Interface,
 }
 
+impl FileDiff {
+    pub fn is_interface(&self) -> bool {
+        matches!(self, FileDiff::Interface)
+    }
+}
+
 /// Reject a macro name colliding with a function name (call-position ambiguity)
 /// and a macro call whose argument labels don't fit its parameters, cross-module,
 /// on the pre-expansion module set (macros still present). The same gates
@@ -230,6 +243,25 @@ fn reject_macro_name_collisions(modules: &[Ast]) -> Result<(), CompilerError> {
         Some(e) => Err(e),
         None => Ok(()),
     }
+}
+
+/// See [`UserFile::scope_hash`].
+pub fn scope_hash(a: &Ast, text: &str) -> u64 {
+    use skull_parser::ItemKind;
+    use std::hash::{Hash, Hasher};
+
+    let mut h = rustc_hash::FxHasher::default();
+    if let Some(header) = &a.module_header {
+        let (s, e) = header.span.offset_range;
+        text[s..e].hash(&mut h);
+    }
+    for item in a.items.iter() {
+        if matches!(item.kind, ItemKind::Use(_) | ItemKind::Module(_)) {
+            let (s, e) = item.span.offset_range;
+            text[s..e].hash(&mut h);
+        }
+    }
+    h.finish()
 }
 
 pub fn item_prints(a: &Ast, text: &str) -> Vec<ItemPrint> {
@@ -324,9 +356,8 @@ pub fn item_prints(a: &Ast, text: &str) -> Vec<ItemPrint> {
                 (ItemKindTag::Other, name.name, None, None)
             }
 
-            // Modules-v1 forms: whole-item interface, no body to isolate. The
-            // semantic pass rejects these until module resolution lands, so
-            // this arm only keeps the interface hashing total.
+            // Modules-v1 forms: whole-item interface, no body to isolate.
+            // `scope_hash` is what routes their edits to a namespace rebuild.
             ItemKind::Use(_) | ItemKind::Module(_) => {
                 text[start..stop].hash(&mut h);
                 (ItemKindTag::Other, Ustr::from(""), None, None)
@@ -461,6 +492,7 @@ impl Session {
             dependents_iface: Default::default(),
             registry: Default::default(),
             warm_macros,
+            aliases: aliases.clone(),
         };
 
         // Parse each file once for its prints/macros AND keep the module to feed
@@ -488,6 +520,7 @@ impl Session {
 
             let prints = item_prints(&module, &text);
             let macros = macro_defs(&module);
+            let scope = scope_hash(&module, &text);
 
             session.files.insert(
                 path.clone(),
@@ -499,6 +532,7 @@ impl Session {
                     dialect,
                     package,
                     syntax_errors: module.recovery_errors.clone(),
+                    scope_hash: scope,
                 },
             );
 
@@ -650,8 +684,20 @@ impl Session {
 
         let new_prints = item_prints(&module, text);
         let new_macros = macro_defs(&module);
+        let new_scope = scope_hash(&module, text);
 
-        let diff = (self.files.contains_key(path) && !module.items.is_empty())
+        // The namespace tree, the fragment scopes and the legacy projections are
+        // built from the whole module set by `build_namespaces`, and only the
+        // full rebuild runs it. So an edit that can change them -- a header or
+        // `use`/`mod` edit anywhere, or any interface edit in a v1 file, where
+        // declarations and their visibility live in the tree -- takes that path.
+        // This over-invalidates; plan 2.6's scope epochs are the narrowing.
+        let scope_changed = self.files.get(path).is_some_and(|old| {
+            old.scope_hash != new_scope
+                || (dialect == Dialect::V1 && classify(&old.item_prints, &new_prints).is_interface())
+        });
+
+        let diff = (self.files.contains_key(path) && !module.items.is_empty() && !scope_changed)
             .then(|| classify(&self.files[path].item_prints, &new_prints));
 
         let interfaces_changed = match &diff {
@@ -688,6 +734,7 @@ impl Session {
                 dialect,
                 package,
                 syntax_errors,
+                scope_hash: new_scope,
             },
         );
 
@@ -1086,9 +1133,12 @@ impl Session {
         let mut expanded = self.combined_unexpanded()?;
         let registry = collect_registry(&expanded);
         reject_macro_name_collisions(&expanded)?;
+        // The same pass order as `Session::new`.
+        bone_semantic::semantic_passes::build_namespaces(&mut ws, &expanded, &self.aliases)?;
         expand_and_desugar(&mut ws, &mut expanded)?;
 
         let all_mids = lower_and_infer(&mut ws, &expanded)?;
+        bone_semantic::semantic_passes::pass_validate_api_closure(&ws)?;
 
         // Commit -- past this point nothing fails, so `self.ws` never observes a
         // partially-interned workspace.
@@ -1291,7 +1341,7 @@ impl Session {
             return Ok(None);
         }
         // --- locate (non-mutating; releases the files borrow before any change) ---
-        let (es, oe, delta, idx, so, eo, line, col, old_iface, old_name, old_text, old_prints, old_macros, old_syntax_errors, old_dialect, old_package) = {
+        let (es, oe, delta, idx, so, eo, line, col, old_iface, old_name, old_text, old_prints, old_macros, old_syntax_errors, old_dialect, old_package, old_scope_hash) = {
             let Some(old) = self.files.get(path) else { return Ok(None) };
             let (es, oe, delta) = byte_diff(&old.text, new_text);
             let Some(idx) = locate_body_edit(&old.item_prints, es, oe) else { return Ok(None) };
@@ -1302,7 +1352,7 @@ impl Session {
                 p.item_span.line_range.0, p.item_span.col_range.0,
                 p.iface_hash, p.name,
                 old.text.clone(), old.item_prints.clone(), old.macros.clone(), old.syntax_errors.clone(),
-                old.dialect, old.package.clone(),
+                old.dialect, old.package.clone(), old.scope_hash,
             )
         };
         let _ = (es, oe);
@@ -1376,6 +1426,7 @@ impl Session {
                 // full path on any recovery error), so the file's syntax errors
                 // are unchanged by this localized edit.
                 syntax_errors: old_syntax_errors,
+                scope_hash: old_scope_hash,
             },
         );
         let restore = move |s: &mut Self| {

@@ -699,4 +699,72 @@ fn main() -> int { let _value: int = cast(always_int()) 3 }
             .apply_edit(&main, "fn main() {\n    print(\"n={a::bump(2)}\")\n}\n")
             .expect("a v1 edit must re-parse in its own dialect");
     }
+
+    fn v1_live_project() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf, LiveProject) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("stick.toml"),
+            "[package]\nname = \"livev1\"\ntype = \"bin\"\n\n[language]\nmodules = \"v1\"\n",
+        )
+        .unwrap();
+        let main = dir.path().join("main.rock");
+        std::fs::write(&main, "fn main() {\n    print(\"n={a::bump(1)}\")\n}\n").unwrap();
+        let a = dir.path().join("a.rock");
+        std::fs::write(&a, "mod a;\n\npub fn bump(n: int) -> int {\n    n + 1\n}\n").unwrap();
+        let project = LiveProject::init(dir.path().to_str().unwrap(), false)
+            .expect("a v1 package must build through a session");
+        (dir, main, a, project)
+    }
+
+    /// The namespace tree is built from the module set, so an edit that
+    /// changes what a v1 module declares has to reach it: a function added to
+    /// `a` is callable as `a::twice` from the next edit on.
+    #[test]
+    fn a_v1_definition_added_by_an_edit_is_resolvable() {
+        let (_dir, main, a, mut project) = v1_live_project();
+        project
+            .apply_edit(
+                &a,
+                "mod a;\n\npub fn bump(n: int) -> int {\n    n + 1\n}\n\npub fn twice(n: int) -> int {\n    n * 2\n}\n",
+            )
+            .expect("adding a pub fn to a v1 module is a valid edit");
+        project
+            .apply_edit(&main, "fn main() {\n    print(\"n={a::twice(3)}\")\n}\n")
+            .expect("a pub fn added by an earlier edit must resolve");
+    }
+
+    /// Visibility is read from the namespace tree too, so taking `pub` off a
+    /// definition must stop a consumer in another module reaching it.
+    #[test]
+    fn a_v1_visibility_narrowed_by_an_edit_is_enforced() {
+        let (_dir, _main, a, mut project) = v1_live_project();
+        // `apply_edit_inner` skips the rollback, so the rejecting diagnostics
+        // are still on the session to read.
+        project
+            .apply_edit_inner(&a, "mod a;\n\nfn bump(n: int) -> int {\n    n + 1\n}\n")
+            .expect_err("main still calls a::bump, which is now private to `a`");
+        let messages: Vec<String> =
+            project.session.diagnostics().iter().map(|d| d.message.clone()).collect();
+        assert!(
+            messages.iter().any(|m| m.contains("`bump` is not accessible from this module")),
+            "{messages:?}"
+        );
+    }
+
+    /// A file's `mod` header is not an item, so an edit to it alone changes
+    /// no item print. It still moves every definition in the file: `a::bump`
+    /// stops existing when `a.rock` becomes `mod b;`.
+    #[test]
+    fn a_v1_module_header_edit_moves_its_definitions() {
+        let (_dir, _main, a, mut project) = v1_live_project();
+        project
+            .apply_edit_inner(&a, "mod b;\n\npub fn bump(n: int) -> int {\n    n + 1\n}\n")
+            .expect_err("main still calls a::bump, and `a` no longer exists");
+        let messages: Vec<String> =
+            project.session.diagnostics().iter().map(|d| d.message.clone()).collect();
+        assert!(
+            messages.iter().any(|m| m.contains("`a::bump` did not resolve")),
+            "{messages:?}"
+        );
+    }
 }
