@@ -4,26 +4,21 @@ pub(crate) fn resolve_callee(gamma: &Gamma, family: &CallFamily) -> FnList {
     let name = family.key();
     let _span = tracing::info_span!("resolve_callee", name = %name).entered();
 
-    gamma.dep_acc.borrow_mut().insert(name);
-
-    gamma
-        .workspace
-        .functions_by_name
-        .get(&name)
-        .cloned()
-        .unwrap_or_default()
-
-    // gamma
-    //     .workspace
-    //     .modules
-    //     .iter()
-    //     .flat_map(|(mid, m)| {
-    //         m.functions
-    //             .iter()
-    //             .filter(|(_, f)| f.name == name)
-    //             .map(|(idx, _)| (*mid, idx))
-    //     })
-    //     .collect()
+    let CallFamily::LegacyMerged { file, .. } = *family else {
+        gamma.dep_acc.borrow_mut().insert(name);
+        return gamma.workspace.functions_by_name.get(&name).cloned().unwrap_or_default();
+    };
+    // A merged legacy family (spec 3.2): the legacy overloads under the bare
+    // name plus every projected v1 member under its own DefKey. Each key is a
+    // dependency, so an overload added to any member re-infers this caller.
+    let mut out = FnList::default();
+    for key in bone_core::modules::legacy_family_keys(gamma.workspace, file, name) {
+        gamma.dep_acc.borrow_mut().insert(key);
+        if let Some(fns) = gamma.workspace.functions_by_name.get(&key) {
+            out.extend(fns.iter().copied());
+        }
+    }
+    out
 }
 
 /// True if `ty` contains an unbound generic hole (an `Infer`/`Generic` node)
@@ -178,15 +173,28 @@ fn backend_rank(b: skull_parser::FnBackend) -> u8 {
 }
 
 /// The signature key two decls must share to be backend variants of one another:
-/// param types (rendered, inference-free) -- the same key `static_owner_tag`-class
-/// grouping uses. Return type is deliberately excluded (overload resolution keys
-/// on params).
+/// the family key plus param types (rendered, inference-free) -- the same key
+/// `static_owner_tag`-class grouping uses and skull's `backend_variant_group`
+/// applies. Return type is deliberately excluded (overload resolution keys on
+/// params). The key matters for a merged legacy family, whose members are
+/// unrelated definitions: identical signatures there are not backend siblings
+/// (spec 8.3) but a tie.
 fn signature_key(gamma: &Gamma, mid: ModuleId, fid: Idx<Function>) -> String {
     let f = &gamma.workspace.module(mid).functions[fid];
-    f.param_decls
-        .iter()
-        .map(|p| gamma.workspace.render(None, p.ty))
+    std::iter::once(f.name.to_string())
+        .chain(f.param_decls.iter().map(|p| gamma.workspace.render(None, p.ty)))
         .join("\u{1}")
+}
+
+/// Where a tied candidate comes from, when a tie spans unrelated definitions
+/// (a merged legacy family): the v1 DefKey, or the legacy defining file.
+fn candidate_origin(gamma: &Gamma, mid: ModuleId, fid: Idx<Function>) -> String {
+    let f = &gamma.workspace.module(mid).functions[fid];
+    if gamma.workspace.defs.contains_key(&f.name) {
+        format!("v1 definition {}", f.name)
+    } else {
+        format!("legacy definition in {}", gamma.workspace.module(mid).file)
+    }
 }
 
 /// See the call site in [`select_overload`]. Groups candidates by signature; a
@@ -350,9 +358,18 @@ pub(crate) fn select_overload_with_generics(
     match best_set.len() {
         1 => Ok(best_set[0]),
         n if n > 1 => {
+            let fn_name = |&(mid, fid): &(ModuleId, Idx<Function>)| gamma.workspace.module(mid).functions[fid].name;
+            let spans_families = best_set.iter().any(|c| fn_name(c) != fn_name(&best_set[0]));
             let tied = best_set
                 .iter()
-                .map(|&(mid, fid)| format!("  {}", render_candidate_sig(gamma, mid, fid)))
+                .map(|&(mid, fid)| {
+                    let sig = render_candidate_sig(gamma, mid, fid);
+                    if spans_families {
+                        format!("  {sig} ({})", candidate_origin(gamma, mid, fid))
+                    } else {
+                        format!("  {sig}")
+                    }
+                })
                 .join("\n");
             Err(SelectError::Tied(CompilerError::new_with_label(
                 span,
@@ -1330,7 +1347,7 @@ pub(crate) fn resolve_named_call_inner(
                                 gamma,
                                 v,
                                 Pending::Call {
-                                    name,
+                                    family,
                                     call_expr,
                                     recv_override,
                                     args: arg_list,

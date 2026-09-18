@@ -387,7 +387,7 @@ fn read() -> int {
     n
 }
 
-//- legacy_owned_fn_and_projected_fn_are_ambiguous @fail=ambiguous legacy reference to `bump`: legacy definition in defs.rock and v1 definition provider::bump
+//- same_signature_legacy_and_projected_fns_are_an_ambiguous_overload @fail=Ambiguous overload for `bump` with argument types (int)
 //-- provider.rock @pkg=provider,1 @v1
 pub fn bump(n: int) -> int {
     n
@@ -433,7 +433,7 @@ fn read() -> int {
     bump
 }
 
-//- legacy_owned_name_colliding_with_an_explicit_legacy_import_is_ambiguous @fail=ambiguous legacy reference to `Shared`: legacy definition in defs.rock and v1 definition provider::Shared
+//- an_explicit_legacy_import_replaces_a_legacy_type_in_its_file
 //-- provider.rock @pkg=provider,1 @v1
 pub struct Shared {
     pub value: int,
@@ -448,7 +448,9 @@ struct Shared {
 use provider::Shared;
 
 fn read(x: Shared) -> int {
-    x.value
+    let y = x
+      //^ provider::Shared
+    y.value
 }
 
 //- legacy_owned_generic_and_projected_generic_are_ambiguous @fail=ambiguous legacy reference to `Holder`: legacy definition in defs.rock and v1 definition provider::Holder
@@ -518,6 +520,198 @@ fn bump(n: int) -> int {
 //-- main.rock @pkg=game,2
 fn unrelated() -> int {
     1
+}
+
+//- legacy_and_projected_overloads_form_one_family
+//-- provider.rock @pkg=provider,1 @v1
+pub fn bump(n: string) -> string {
+    n
+}
+
+//-- defs.rock @pkg=game,2
+fn bump(n: int) -> int {
+    n
+}
+
+//-- main.rock @pkg=game,2
+fn use_it() -> int {
+    let s = bump("v1")
+            //^ string
+    let u = "ufcs".bump()
+                   //^ string
+    let n = bump(1)
+            //^ int
+    n
+}
+
+//- a_projected_overload_extends_a_stdlib_family
+//-- provider.rock @pkg=provider,1 @v1
+pub struct Color {
+    pub r: float,
+}
+
+pub fn lerp(a: Color, b: Color, t: float) -> Color {
+    Color { r: a.r }
+}
+
+//-- main.rock @pkg=game,2
+fn mix() -> float {
+    let c = lerp(Color { r: 0.0 }, Color { r: 1.0 }, 0.5)
+            //^ provider::Color
+    let f = lerp(0.0, 1.0, 0.5)
+            //^ float
+    f
+}
+
+//- a_merged_family_is_not_a_single_function_value @fail=ambiguous legacy reference to `bump`: legacy definition in defs.rock and v1 definition provider::bump
+//-- provider.rock @pkg=provider,1 @v1
+pub fn bump(n: string) -> string {
+    n
+}
+
+//-- defs.rock @pkg=game,2
+fn bump(n: int) -> int {
+    n
+}
+
+//-- main.rock @pkg=game,2
+fn use_it() {
+    let f = bump
+}
+
+//- an_alias_import_clears_a_type_collision_in_its_file
+//-- provider.rock @pkg=provider,1 @v1
+pub struct Shared {
+    pub value: int,
+}
+
+//-- defs.rock @pkg=game,2
+struct Shared {
+    value: int,
+}
+
+//-- main.rock @pkg=game,2
+use provider::Shared as PShared;
+
+fn read(x: Shared, p: PShared) -> int {
+    let y = x
+      //^ Shared
+    let q = p
+      //^ provider::Shared
+    y.value
+}
+
+//- an_alias_import_does_not_clear_a_type_collision_in_another_file @fail=ambiguous legacy reference to `Shared`: legacy definition in defs.rock and v1 definition provider::Shared
+//-- provider.rock @pkg=provider,1 @v1
+pub struct Shared {
+    pub value: int,
+}
+
+//-- defs.rock @pkg=game,2
+struct Shared {
+    value: int,
+}
+
+//-- main.rock @pkg=game,2
+use provider::Shared as PShared;
+
+fn read(x: Shared, p: PShared) -> int {
+    x.value
+}
+
+//-- other.rock @pkg=game,2
+fn other(x: Shared) -> int {
+    x.value
+}
+
+//- an_alias_import_clears_a_callable_collision_in_its_file
+//-- provider.rock @pkg=provider,1 @v1
+pub fn bump(n: int) -> string {
+    "v1"
+}
+
+//-- defs.rock @pkg=game,2
+fn bump(n: int) -> int {
+    n
+}
+
+//-- main.rock @pkg=game,2
+use provider::bump as vbump;
+
+fn use_it() -> int {
+    let s = vbump(1)
+            //^ string
+    let n = bump(1)
+            //^ int
+    n
+}
+
+//- an_alias_import_does_not_clear_a_callable_collision_in_another_file @fail=Ambiguous overload for `bump` with argument types (int)
+//-- provider.rock @pkg=provider,1 @v1
+pub fn bump(n: int) -> string {
+    "v1"
+}
+
+//-- defs.rock @pkg=game,2
+fn bump(n: int) -> int {
+    n
+}
+
+//-- main.rock @pkg=game,2
+use provider::bump as vbump;
+
+fn use_it() -> int {
+    bump(1)
+}
+
+//-- other.rock @pkg=game,2
+fn other() -> int {
+    bump(1)
+}
+
+//- an_unaliased_explicit_import_replaces_the_legacy_family_in_its_file
+//-- provider.rock @pkg=provider,1 @v1
+pub fn bump(n: string) -> string {
+    n
+}
+
+//-- defs.rock @pkg=game,2
+fn bump(n: int) -> int {
+    n
+}
+
+//-- main.rock @pkg=game,2
+use provider::bump;
+
+fn use_it() -> string {
+    let s = bump("v1")
+            //^ string
+    s
+}
+
+//-- other.rock @pkg=game,2
+fn other() -> int {
+    let n = bump(1)
+            //^ int
+    n
+}
+
+//- an_unaliased_explicit_import_hides_the_legacy_members_in_its_file @fail=type mismatch: expected `string`, found `int`
+//-- provider.rock @pkg=provider,1 @v1
+pub fn bump(n: string) -> string {
+    n
+}
+
+//-- defs.rock @pkg=game,2
+fn bump(n: int) -> int {
+    n
+}
+
+//-- main.rock @pkg=game,2
+use provider::bump;
+
+fn use_it() -> int {
+    bump(1)
 }
 
 //- a_pub_child_module_is_reachable_from_a_consumer

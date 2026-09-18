@@ -1,6 +1,6 @@
 use skull_parser::{Ast, Ident, Item, ItemKind};
 use bone_core::modules::{
-    is_stdlib_module_file, DefKind, FragmentScope, LegacyProjection, NsNode, NsPackage,
+    is_stdlib_module_file, DefKind, FragmentScope, LegacyImports, LegacyProjection, NsNode, NsPackage,
     NsVisibility, UsePathRef, STD_INTRINSIC_TYPES, STD_PACKAGE_ID, STD_PACKAGE_NAME,
 };
 
@@ -1236,7 +1236,7 @@ fn build_legacy_compatibility(
         ws.legacy_projections.insert(rock_mod.file, projection);
 
         let imports = build_legacy_imports(ws, rock_mod)?;
-        if !imports.by_name.is_empty() {
+        if !imports.is_empty() {
             ws.legacy_imports.insert(rock_mod.file, imports);
         }
     }
@@ -1320,15 +1320,15 @@ fn projection_kind(kind: bone_lower::resolve::ResolvedKind) -> Option<DefKind> {
 fn build_legacy_imports(
     ws: &Workspace,
     rock_mod: &Ast,
-) -> Result<LegacyProjection, CompilerError> {
+) -> Result<LegacyImports, CompilerError> {
     let mut uses = Vec::new();
     for item in &rock_mod.items {
         if let ItemKind::Use(decl) = &item.kind {
-            collect_legacy_use_tree(&decl.tree, &[], false, &mut uses);
+            collect_use_leaves(&decl.tree, &[], false, &mut uses);
         }
     }
     if uses.is_empty() {
-        return Ok(LegacyProjection::default());
+        return Ok(LegacyImports::default());
     }
 
     let Some(tag) = rock_mod.package.as_ref() else {
@@ -1342,7 +1342,7 @@ fn build_legacy_imports(
         module_path: Vec::new(),
         ..Default::default()
     };
-    let mut imports = LegacyProjection::default();
+    let mut imports = LegacyImports::default();
     for (local, path, is_glob) in uses {
         if is_glob {
             let (target_package, target_path) = bone_lower::resolve::resolve_path_to_module(
@@ -1358,7 +1358,7 @@ fn build_legacy_imports(
             project_public_module(ws, target_package, &target_path, &mut view)?;
             for (name, entries) in view.by_name {
                 for entry in entries {
-                    imports.insert(name, entry.key, entry.kind);
+                    imports.globs.insert(name, entry.key, entry.kind);
                 }
             }
         } else {
@@ -1370,13 +1370,17 @@ fn build_legacy_imports(
                     "legacy `use` name `{local}` resolves to a module"
                 )));
             };
-            imports.insert(local, resolved.key, kind);
+            imports.named.insert(local, resolved.key, kind);
+            let exported_as = *path.segments.last().expect("a named use has a last segment");
+            if exported_as != local {
+                imports.renamed.entry(exported_as).or_default().push(resolved.key);
+            }
         }
     }
     Ok(imports)
 }
 
-fn collect_legacy_use_tree(
+fn collect_use_leaves(
     tree: &skull_parser::UseTree,
     prefix: &[ustr::Ustr],
     from_root: bool,
@@ -1405,7 +1409,7 @@ fn collect_legacy_use_tree(
         }
         skull_parser::UseSuffix::Nested(children) => {
             for child in children {
-                collect_legacy_use_tree(child, &full, path_root, out);
+                collect_use_leaves(child, &full, path_root, out);
             }
         }
     }
@@ -1686,13 +1690,23 @@ fn share_export(
     }
 }
 
-/// The bare item names a legacy file defines, as recorded in
+/// The bare item names a legacy file defines and their kinds, as recorded in
 /// `ws.ns.legacy_owned`. The incremental session compares them across an edit.
-pub fn legacy_owned_names(rock_mod: &Ast) -> Vec<ustr::Ustr> {
+pub fn legacy_owned_names(rock_mod: &Ast) -> Vec<(ustr::Ustr, DefKind)> {
     rock_mod
         .items
         .iter()
-        .filter_map(|item| owned_name_and_kind(&item.kind).map(|(name, _)| name))
+        .filter_map(|item| {
+            owned_name_and_kind(&item.kind).map(|(name, kind)| {
+                let kind = match kind {
+                    "type" => DefKind::Type,
+                    "global" => DefKind::Global,
+                    "callable" => DefKind::Callable,
+                    _ => DefKind::Decorator,
+                };
+                (name, kind)
+            })
+        })
         .collect()
 }
 

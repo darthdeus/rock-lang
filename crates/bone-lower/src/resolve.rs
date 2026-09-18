@@ -17,7 +17,7 @@
 //! Losers at earlier tiers are recorded as `hidden` so a failing overload
 //! match can name what it would have found (the hidden-origin diagnostic).
 
-use bone_core::modules::{FragmentScope, NsVisibility, UsePathRef, STD_PACKAGE_ID};
+use bone_core::modules::{legacy_name, FragmentScope, LegacyName, NsVisibility, UsePathRef, STD_PACKAGE_ID};
 use bone_core::workspace::Workspace;
 use ustr::Ustr;
 
@@ -55,41 +55,52 @@ enum Landing {
 /// their bare keys; a name reached through the file's compatibility imports
 /// or its root projection resolves to the v1 definition's canonical key.
 /// When a legacy file of the compilation unit also defines the name, the
-/// reference is ambiguous: neither side wins. Both inputs exist before any
-/// body lowers, so a fresh build and an incremental re-lower decide alike.
+/// reference is ambiguous: neither side wins. A merged callable family
+/// (`LegacyName::Family`) is one only as a CALLEE (`resolve_legacy_callee`);
+/// anywhere else it names several definitions at once and is ambiguous too.
+/// Every input exists before any body lowers, so a fresh build and an
+/// incremental re-lower decide alike.
 pub fn resolve_legacy_bare(ws: &Workspace, file: Ustr, name: Ustr) -> Result<Resolved, String> {
-    // The compiler-owned stdlib is lowered in the same workspace as user
-    // packages, but its legacy bodies must not see user declarations.
-    if bone_core::modules::is_stdlib_module_file(file.as_str()) {
-        return Ok(plain(name));
+    match legacy_name(ws, file, name) {
+        LegacyName::Bare => Ok(plain(name)),
+        LegacyName::Projected(entries) => projected(name, &entries),
+        LegacyName::Family(foreign) => {
+            Err(legacy_collision(name, &ws.ns.legacy_owned.files_defining(name), &foreign))
+        }
+        LegacyName::Collision { owners, foreign } => Err(legacy_collision(name, &owners, &foreign)),
     }
-    // Explicit compatibility imports shadow the root projection.
-    let Some(entries) = ws
-        .legacy_imports
-        .get(&file)
-        .and_then(|view| view.by_name.get(&name))
-        .or_else(|| ws.legacy_projections.get(&file).and_then(|view| view.by_name.get(&name)))
-    else {
-        return Ok(plain(name));
-    };
+}
 
-    // A v1 re-export of a legacy definition keeps the bare key: it is the
-    // legacy definition itself, not a second candidate.
-    let foreign: Vec<Ustr> = entries.iter().map(|e| e.key).filter(|key| *key != name).collect();
-    let owners = ws.ns.legacy_owned.files_defining(name);
-    if !owners.is_empty() && !foreign.is_empty() {
-        let owners = owners.iter().map(|f| f.as_str()).collect::<Vec<_>>().join(", ");
-        let foreign = foreign.iter().map(|k| k.as_str()).collect::<Vec<_>>().join(", ");
-        return Err(format!(
-            "ambiguous legacy reference to `{name}`: legacy definition in {owners} \
-             and v1 definition {foreign}"
-        ));
+/// A legacy bare name in callee position (direct call, UFCS or safe-nav
+/// call): a single definition, or a family merging the legacy callables with
+/// the projected v1 callables of the same name (spec 3.2). Overload
+/// resolution then picks the member by argument types.
+pub enum LegacyCallee {
+    Single(Resolved),
+    Merged,
+}
+
+pub fn resolve_legacy_callee(ws: &Workspace, file: Ustr, name: Ustr) -> Result<LegacyCallee, String> {
+    match legacy_name(ws, file, name) {
+        LegacyName::Family(_) => Ok(LegacyCallee::Merged),
+        LegacyName::Bare => Ok(LegacyCallee::Single(plain(name))),
+        LegacyName::Projected(entries) => projected(name, &entries).map(LegacyCallee::Single),
+        LegacyName::Collision { owners, foreign } => Err(legacy_collision(name, &owners, &foreign)),
     }
-    if let [entry] = entries.as_slice() {
+}
+
+fn projected(name: Ustr, entries: &[bone_core::modules::LegacyProjectionEntry]) -> Result<Resolved, String> {
+    if let [entry] = entries {
         return Ok(Resolved { key: entry.key, kind: legacy_resolved_kind(entry.kind), hidden: Vec::new() });
     }
     let candidates = entries.iter().map(|e| e.key.as_str()).collect::<Vec<_>>().join(", ");
     Err(format!("ambiguous legacy reference to `{name}`: candidates {candidates}"))
+}
+
+fn legacy_collision(name: Ustr, owners: &[Ustr], foreign: &[Ustr]) -> String {
+    let owners = owners.iter().map(|f| f.as_str()).collect::<Vec<_>>().join(", ");
+    let foreign = foreign.iter().map(|k| k.as_str()).collect::<Vec<_>>().join(", ");
+    format!("ambiguous legacy reference to `{name}`: legacy definition in {owners} and v1 definition {foreign}")
 }
 
 fn legacy_resolved_kind(kind: bone_core::modules::DefKind) -> ResolvedKind {

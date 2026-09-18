@@ -81,7 +81,7 @@ pub struct Workspace {
     pub legacy_projections: FxHashMap<Ustr, crate::modules::LegacyProjection>,
     /// Contextual item-level `use` bindings in legacy files. These are
     /// additive and do not change legacy `x :: T` ascription parsing.
-    pub legacy_imports: FxHashMap<Ustr, crate::modules::LegacyProjection>,
+    pub legacy_imports: FxHashMap<Ustr, crate::modules::LegacyImports>,
 
     /// Resolved compile-time inputs (docs/comptime-plan.md tier 1), set by the
     /// host once per session build before emission. bone itself never reads them

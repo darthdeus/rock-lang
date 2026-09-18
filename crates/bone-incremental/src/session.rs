@@ -836,25 +836,22 @@ impl Session {
         Ok(result)
     }
 
-    /// Whether a legacy file's edit adds or removes a definition whose bare
-    /// name some legacy compatibility view also projects. Legacy resolution
-    /// of that name is ambiguous exactly while both exist, and it is decided
-    /// when a caller LOWERS, so every caller has to re-lower -- which only the
-    /// full rebuild does.
+    /// Whether a legacy file's edit adds or removes a definition -- or
+    /// changes its kind -- whose bare name some legacy compatibility view also
+    /// names. Legacy resolution of that name is decided when a caller LOWERS
+    /// (ambiguous, a merged callable family, or the v1 definition alone), so
+    /// every caller has to re-lower -- which only the full rebuild does.
     fn changes_a_projected_collision(&self, path: &str, module: &Ast) -> bool {
         if self.ws.legacy_projections.is_empty() && self.ws.legacy_imports.is_empty() {
             return false;
         }
-        let old: FxHashSet<Ustr> =
+        let old: FxHashSet<(Ustr, bone_core::modules::DefKind)> =
             self.ws.ns.legacy_owned.names_defined_by(ustr(path)).iter().copied().collect();
-        let new: FxHashSet<Ustr> =
+        let new: FxHashSet<(Ustr, bone_core::modules::DefKind)> =
             bone_semantic::semantic_passes::legacy_owned_names(module).into_iter().collect();
-        old.symmetric_difference(&new).any(|name| {
-            self.ws
-                .legacy_projections
-                .values()
-                .chain(self.ws.legacy_imports.values())
-                .any(|view| view.by_name.contains_key(name))
+        old.symmetric_difference(&new).any(|(name, _)| {
+            self.ws.legacy_projections.values().any(|view| view.by_name.contains_key(name))
+                || self.ws.legacy_imports.values().any(|imports| imports.mentions(*name))
         })
     }
 

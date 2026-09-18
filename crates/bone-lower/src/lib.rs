@@ -143,6 +143,29 @@ impl<'a> LowerCtx<'a> {
         .map_err(|msg| CompilerError::new_with_label(span, msg))
     }
 
+    /// A bare name in callee position: the spelling the callee carries and
+    /// its overload family. v1 goes through the tiers (spec 8.3); a legacy
+    /// name may be one family spanning legacy and projected v1 callables
+    /// (spec 3.2), whose callee spelling stays the bare name.
+    fn resolve_callee_family(
+        &self,
+        name: Ustr,
+        span: Span,
+    ) -> Result<(Ustr, hir::CallFamily), CompilerError> {
+        if let Some(frag) = self.v1_scope() {
+            let r = resolve::resolve_bare(self.workspace, Some(frag), name)
+                .map_err(|msg| CompilerError::new_with_label(span, msg))?;
+            return Ok((r.key, hir::CallFamily::resolved(r.key, &r.hidden)));
+        }
+        let file = self.module.file;
+        match resolve::resolve_legacy_callee(self.workspace, file, name)
+            .map_err(|msg| CompilerError::new_with_label(span, msg))?
+        {
+            resolve::LegacyCallee::Single(r) => Ok((r.key, hir::CallFamily::from_name(r.key))),
+            resolve::LegacyCallee::Merged => Ok((name, hir::CallFamily::LegacyMerged { name, file })),
+        }
+    }
+
     pub fn next_var_id(&mut self) -> VarId {
         self._next_var_id += 1;
         VarId(self._next_var_id)
@@ -711,22 +734,23 @@ pub fn lookup_in_scope(
     start_scope: Idx<Scope>,
     name: &skull_parser::Ident,
 ) -> Result<Expr, CompilerError> {
+    if let Some(binding) = lookup_local(body, start_scope, name.name) {
+        return Ok(Expr::Var(binding));
+    }
+    // Tier 1 misses: a v1 fragment resolves through the namespace tiers to a
+    // canonical key; legacy files keep the bare name.
+    let key = ctx.resolve_bare_key(name.name, name.span)?;
+    Ok(Expr::Global(key))
+}
+
+/// The lexical binding `name` names from `start_scope`, if any (tier 1).
+fn lookup_local(body: &Body, start_scope: Idx<Scope>, name: Ustr) -> Option<Idx<BindingInfo>> {
     let mut scope = start_scope;
-
     loop {
-        if let Some(&binding) = body.scope_arena[scope].bindings.get(&name.name) {
-            return Ok(Expr::Var(binding));
+        if let Some(&binding) = body.scope_arena[scope].bindings.get(&name) {
+            return Some(binding);
         }
-
-        match body.scope_arena[scope].parent {
-            Some(p) => scope = p,
-            // Tier 1 misses: a v1 fragment resolves through the namespace
-            // tiers to a canonical key; legacy files keep the bare name.
-            None => {
-                let key = ctx.resolve_bare_key(name.name, name.span)?;
-                return Ok(Expr::Global(key));
-            }
-        }
+        scope = body.scope_arena[scope].parent?;
     }
 }
 
@@ -1129,23 +1153,23 @@ pub fn lower_expr_value(
                 // resolves at a top-level by name. A v1 fragment resolves the
                 // name through the namespace tiers to CallFamily::Resolved
                 // (DefKey + hidden origins, spec 8.3).
-                let (callee_key, hidden) = if name.name.as_str() != "_" {
-                    let r = ctx.resolve_bare(name.name, name.span)?;
-                    (r.key, r.hidden)
+                // A local is called through its value, and inference never asks
+                // its family for a name, so a local resolves nothing further.
+                let local = lookup_local(body, scope, name.name);
+                let (callee_key, family) = if local.is_none() && name.name.as_str() != "_" {
+                    ctx.resolve_callee_family(name.name, name.span)?
+                } else if ctx.v1_scope().is_some() {
+                    (name.name, hir::CallFamily::resolved(name.name, &[]))
                 } else {
-                    (name.name, Vec::new())
+                    (name.name, hir::CallFamily::from_name(name.name))
                 };
-                let callee = match lookup_in_scope(ctx, body, scope, name)? {
-                    Expr::Var(binding) => hir::Callee::Local(binding),
-                    _ => hir::Callee::Unresolved {
-                        name: callee_key,
-                        name_span: name.span,
+                let callee = match local {
+                    Some(binding) => hir::Callee::Local(binding),
+                    None if name.name.as_str() == "_" => match lookup_in_scope(ctx, body, scope, name)? {
+                        Expr::Var(binding) => hir::Callee::Local(binding),
+                        _ => hir::Callee::Unresolved { name: callee_key, name_span: name.span },
                     },
-                };
-                let family = if ctx.v1_scope().is_some() {
-                    hir::CallFamily::resolved(callee_key, &hidden)
-                } else {
-                    hir::CallFamily::from_name(callee_key)
+                    None => hir::Callee::Unresolved { name: callee_key, name_span: name.span },
                 };
 
                 Expr::Call {
@@ -1178,15 +1202,10 @@ pub fn lower_expr_value(
                 // UFCS and the bare call share one visible family: in a v1
                 // fragment the method name goes through the same tier
                 // resolution as `method(recv, ..)` would (spec 8.4).
-                let r = ctx.resolve_bare(method.name, method.span)?;
-                let family = if ctx.v1_scope().is_some() {
-                    hir::CallFamily::resolved(r.key, &r.hidden)
-                } else {
-                    hir::CallFamily::from_name(r.key)
-                };
+                let (callee_key, family) = ctx.resolve_callee_family(method.name, method.span)?;
                 Expr::Call {
                     callee: Callee::Unresolved {
-                        name: r.key,
+                        name: callee_key,
                         name_span: method.span,
                     },
                     args: args_range,
@@ -1268,16 +1287,12 @@ pub fn lower_expr_value(
                     }
                 }
 
-                let r = ctx.resolve_bare(method.name, method.span)?;
+                let (callee_key, family) = ctx.resolve_callee_family(method.name, method.span)?;
                 Expr::SafeNavCall {
                     receiver,
-                    method: r.key,
+                    method: callee_key,
                     args: args_range,
-                    family: if ctx.v1_scope().is_some() {
-                        hir::CallFamily::resolved(r.key, &r.hidden)
-                    } else {
-                        hir::CallFamily::from_name(r.key)
-                    },
+                    family,
                 }
             }
 

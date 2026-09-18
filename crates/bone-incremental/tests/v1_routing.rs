@@ -111,21 +111,26 @@ fn a_signature_edit_that_exports_a_private_type_is_refused() {
     assert!(err.message.contains(expected), "{}", err.message);
 }
 
-const AMBIGUOUS_BUMP: &str =
-    "ambiguous legacy reference to `bump`: legacy definition in legacy_def.rock and v1 definition livev1::a::bump";
+/// A legacy `bump(int)` and the projected v1 `bump(int)` have the same
+/// signature: one merged family, and overload selection ties at the call,
+/// naming both origins -- what two same-signature legacy definitions do.
+const TIED_BUMP: &str = "Ambiguous overload for `bump` with argument types (int)\n\
+     tied candidates (equally-ranked matches):\n  \
+     bump(n: int) -> int (legacy definition in legacy_def.rock)\n  \
+     livev1::a::bump(n: int) -> int (v1 definition livev1::a::bump)";
 
-/// A legacy file defines `bump` and a v1 package projects `bump` to legacy
-/// files. A legacy `bump(..)` is ambiguous, and the verdict is the same in a
-/// fresh session and after a body-only edit of the caller. Legacy resolution
-/// once checked `ws.functions_by_name`, which is empty while a fresh build
-/// lowers bodies and populated during an incremental re-lower, so the fresh
-/// build took the projection and the edited session took the legacy `bump`.
+/// A legacy file defines `bump(int)` and a v1 package projects
+/// `bump(int, int)` to legacy files: one overload family (spec 3.2), so both
+/// arities resolve, and the verdict is the same in a fresh session and after a
+/// body-only edit of the caller. Legacy resolution once checked
+/// `ws.functions_by_name`, which is empty while a fresh build lowers bodies
+/// and populated during an incremental re-lower, so the two disagreed.
 #[test]
-fn a_legacy_name_that_is_also_projected_is_ambiguous_after_a_body_edit() {
+fn a_legacy_and_projected_family_merges_after_a_body_edit() {
     let a = "mod a;\n\npub fn bump(n: int, m: int) -> int {\n    n\n}\n";
     let root = "pub use a::bump;\n";
     let def = "fn bump(n: int) -> int {\n    n\n}\n";
-    let edit = "fn use_it() -> int {\n    bump(2)\n}\n";
+    let edit = "fn use_it() -> int {\n    bump(2, 3)\n}\n";
     let files = vec![
         v1("a.rock", a),
         v1("root.rock", root),
@@ -134,13 +139,14 @@ fn a_legacy_name_that_is_also_projected_is_ambiguous_after_a_body_edit() {
     ];
     let (tier, diags) = edit_with_diagnostics(files, "legacy_use.rock", edit);
     assert_eq!(tier, UpdateTier::BodyOnly);
-    assert!(diags.iter().any(|d| d.contains(AMBIGUOUS_BUMP)), "{diags:?}");
+    assert!(diags.is_empty(), "{diags:?}");
 }
 
-/// The same collision introduced or removed by an edit to the legacy DEFINER
-/// rather than the caller. The ambiguity is a lowering diagnostic, so the
-/// caller has to re-lower: adding a colliding `bump` must report it, and
-/// removing it must clear it, exactly as a fresh session does.
+/// The same family changed by an edit to the legacy DEFINER rather than the
+/// caller. Whether a legacy name is a merged family is decided when the
+/// caller LOWERS, so the caller has to re-lower and re-infer: adding a
+/// same-signature `bump` must report the tie, and removing it must clear it,
+/// exactly as a fresh session does.
 #[test]
 fn a_legacy_definer_edit_that_changes_a_collision_relowers_its_callers() {
     let a = "mod a;\n\npub fn bump(n: int) -> int {\n    n\n}\n";
@@ -156,9 +162,63 @@ fn a_legacy_definer_edit_that_changes_a_collision_relowers_its_callers() {
     };
 
     let (_, diags) = edit_with_diagnostics(files(without), "legacy_def.rock", with);
-    assert!(diags.iter().any(|d| d.contains(AMBIGUOUS_BUMP)), "{diags:?}");
+    assert!(diags.iter().any(|d| d.contains(TIED_BUMP)), "{diags:?}");
 
     let (_, diags) = edit_with_diagnostics(files(with), "legacy_def.rock", without);
+    assert!(diags.is_empty(), "{diags:?}");
+}
+
+/// A legacy definer that keeps the name but changes its KIND: a global
+/// `bump` collides with the projected callable (ambiguous), a function `bump`
+/// merges with it. The name set is unchanged, so only the kind tells the
+/// session the callers must re-lower.
+#[test]
+fn a_legacy_definer_kind_edit_relowers_its_callers() {
+    let a = "mod a;\n\npub fn bump(n: int) -> int {\n    n\n}\n";
+    let global = "global bump: string = \"g\"\n";
+    let function = "fn bump(n: string) -> string {\n    n\n}\n";
+    let files = |def: &str| {
+        vec![
+            v1("a.rock", a),
+            v1("root.rock", "pub use a::bump;\n"),
+            SessionFile::legacy("legacy_def.rock", def),
+            SessionFile::legacy("legacy_use.rock", "fn use_it() -> int {\n    bump(1)\n}\n"),
+        ]
+    };
+
+    let (_, diags) = edit_with_diagnostics(files(global), "legacy_def.rock", function);
+    assert!(diags.is_empty(), "{diags:?}");
+
+    let (_, diags) = edit_with_diagnostics(files(function), "legacy_def.rock", global);
+    assert!(
+        diags.iter().any(|d| d.contains("ambiguous legacy reference to `bump`")),
+        "{diags:?}"
+    );
+}
+
+/// A signature edit of the v1 member stays on the interface path, and the
+/// legacy caller of the merged family depends on that member's DefKey as well
+/// as on the bare name: narrowing `bump(int, int)` to `bump(int)` makes the
+/// caller's `bump(1)` tie, and widening it back clears the tie.
+#[test]
+fn a_v1_member_signature_edit_reinfers_a_merged_family_caller() {
+    let wide = "mod a;\n\npub fn bump(n: int, m: int) -> int {\n    n\n}\n";
+    let narrow = "mod a;\n\npub fn bump(n: int) -> int {\n    n\n}\n";
+    let files = |a: &str| {
+        vec![
+            v1("a.rock", a),
+            v1("root.rock", "pub use a::bump;\n"),
+            SessionFile::legacy("legacy_def.rock", "fn bump(n: int) -> int {\n    n\n}\n"),
+            SessionFile::legacy("legacy_use.rock", "fn use_it() -> int {\n    bump(1)\n}\n"),
+        ]
+    };
+
+    let (tier, diags) = edit_with_diagnostics(files(wide), "a.rock", narrow);
+    assert_eq!(tier, UpdateTier::Interface);
+    assert!(diags.iter().any(|d| d.contains(TIED_BUMP)), "{diags:?}");
+
+    let (tier, diags) = edit_with_diagnostics(files(narrow), "a.rock", wide);
+    assert_eq!(tier, UpdateTier::Interface);
     assert!(diags.is_empty(), "{diags:?}");
 }
 

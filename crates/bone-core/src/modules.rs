@@ -154,7 +154,7 @@ pub struct ExportBinding {
 
 /// Kind of a canonical definition (plan 2.1). Callables are families;
 /// everything else is unique in the module's one item-name domain.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum DefKind {
     Type,
     Global,
@@ -251,6 +251,103 @@ impl LegacyProjection {
     }
 }
 
+/// A legacy file's item-level `use` declarations (spec 3.2). A named import
+/// binds its local name explicitly, which replaces every other candidate for
+/// that name in the file; a glob import stands where the root projection
+/// would. `renamed` records what an import binds under a name other than
+/// the one it was exported as (`use p::x as y` is keyed `x`): that
+/// definition leaves the file's bare `x`.
+#[derive(Clone, Debug, Default)]
+pub struct LegacyImports {
+    pub named: LegacyProjection,
+    pub globs: LegacyProjection,
+    pub renamed: FxHashMap<Ustr, Vec<Ustr>>,
+}
+
+impl LegacyImports {
+    pub fn is_empty(&self) -> bool {
+        self.named.by_name.is_empty() && self.globs.by_name.is_empty()
+    }
+
+    /// Whether any import of this file can bear on the bare name `name`.
+    pub fn mentions(&self, name: Ustr) -> bool {
+        self.named.by_name.contains_key(&name)
+            || self.globs.by_name.contains_key(&name)
+            || self.renamed.contains_key(&name)
+    }
+}
+
+/// What a bare name in a legacy source file names (spec 3.2). The one
+/// decision behind every legacy lookup: lowering reads it to resolve a name,
+/// and inference reads it again to enumerate a merged overload family, so
+/// both always agree. Its inputs -- the per-file views and the legacy
+/// owned-name facts -- exist before any body lowers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LegacyName {
+    /// Nothing but (possibly) the legacy definition: the bare key.
+    Bare,
+    /// v1 definitions reached through the file's imports or projection, with
+    /// no legacy definition in the way. More than one entry is ambiguous.
+    Projected(Vec<LegacyProjectionEntry>),
+    /// Legacy callables and projected v1 callables under one name: one
+    /// overload family of the legacy bare key plus these v1 keys.
+    Family(Vec<Ustr>),
+    /// A legacy definition and a v1 definition that cannot merge (not both
+    /// callable): ambiguous at use.
+    Collision { owners: Vec<Ustr>, foreign: Vec<Ustr> },
+}
+
+pub fn legacy_name(ws: &crate::workspace::Workspace, file: Ustr, name: Ustr) -> LegacyName {
+    // The compiler-owned stdlib is lowered in the same workspace as user
+    // packages, but its legacy bodies must not see user declarations.
+    if is_stdlib_module_file(file.as_str()) {
+        return LegacyName::Bare;
+    }
+    let imports = ws.legacy_imports.get(&file);
+    // An explicit named import wins in its file (spec 3.2: explicit
+    // compatibility imports shadow the root projection, and they are how a
+    // legacy file resolves a collision).
+    if let Some(entries) = imports.and_then(|i| i.named.by_name.get(&name)) {
+        return LegacyName::Projected(entries.clone());
+    }
+    let Some(entries) = imports
+        .and_then(|i| i.globs.by_name.get(&name))
+        .or_else(|| ws.legacy_projections.get(&file).and_then(|view| view.by_name.get(&name)))
+    else {
+        return LegacyName::Bare;
+    };
+    let renamed = imports.and_then(|i| i.renamed.get(&name));
+    let entries: Vec<LegacyProjectionEntry> = entries
+        .iter()
+        .filter(|entry| !renamed.is_some_and(|keys| keys.contains(&entry.key)))
+        .cloned()
+        .collect();
+    if entries.is_empty() {
+        return LegacyName::Bare;
+    }
+    // A v1 re-export of a legacy definition keeps the bare key: it is the
+    // legacy definition itself, not a second candidate.
+    let foreign: Vec<&LegacyProjectionEntry> = entries.iter().filter(|e| e.key != name).collect();
+    let owners = ws.ns.legacy_owned.files_defining(name);
+    if owners.is_empty() || foreign.is_empty() {
+        return LegacyName::Projected(entries);
+    }
+    if ws.ns.legacy_owned.all_callable(name) && foreign.iter().all(|e| e.kind == DefKind::Callable) {
+        return LegacyName::Family(foreign.iter().map(|e| e.key).collect());
+    }
+    LegacyName::Collision { owners, foreign: foreign.iter().map(|e| e.key).collect() }
+}
+
+/// Every key a merged legacy family spans: the legacy bare key first, then
+/// its v1 members. A name that is not a merged family spans its bare key.
+pub fn legacy_family_keys(ws: &crate::workspace::Workspace, file: Ustr, name: Ustr) -> Vec<Ustr> {
+    let mut keys = vec![name];
+    if let LegacyName::Family(v1) = legacy_name(ws, file, name) {
+        keys.extend(v1);
+    }
+    keys
+}
+
 /// Per-package scope facts the resolver needs, built by the semantic pass
 /// from the fragments plus the host's alias tables.
 #[derive(Clone, Debug, Default)]
@@ -261,48 +358,68 @@ pub struct NsTree {
     pub legacy_owned: LegacyOwnedNames,
 }
 
-/// Which legacy files define each bare item name. Lowering replaces a file's
-/// entry before it lowers any body, in a fresh build and in an incremental
-/// re-lower alike, so a legacy lookup never depends on which maps have
-/// filled so far.
+/// Which legacy files define each bare item name, and as what. Lowering
+/// replaces a file's entry before it lowers any body, in a fresh build and in
+/// an incremental re-lower alike, so a legacy lookup never depends on which
+/// maps have filled so far.
 #[derive(Clone, Debug, Default)]
 pub struct LegacyOwnedNames {
-    by_file: FxHashMap<Ustr, Vec<Ustr>>,
-    by_name: FxHashMap<Ustr, Vec<Ustr>>,
+    by_file: FxHashMap<Ustr, Vec<(Ustr, DefKind)>>,
+    by_name: FxHashMap<Ustr, Vec<(Ustr, DefKind)>>,
 }
 
 impl LegacyOwnedNames {
-    pub fn replace_file(&mut self, file: Ustr, mut names: Vec<Ustr>) {
-        names.sort_unstable_by(|a, b| a.as_str().cmp(b.as_str()));
+    pub fn replace_file(&mut self, file: Ustr, mut names: Vec<(Ustr, DefKind)>) {
+        names.sort_unstable_by(|a, b| a.0.as_str().cmp(b.0.as_str()).then(kind_rank(a.1).cmp(&kind_rank(b.1))));
         names.dedup();
         if let Some(old) = self.by_file.remove(&file) {
-            for name in old {
+            for (name, _) in old {
                 if let Some(files) = self.by_name.get_mut(&name) {
-                    files.retain(|f| *f != file);
+                    files.retain(|(f, _)| *f != file);
                     if files.is_empty() {
                         self.by_name.remove(&name);
                     }
                 }
             }
         }
-        for &name in &names {
+        for &(name, kind) in &names {
             let files = self.by_name.entry(name).or_default();
-            files.push(file);
-            files.sort_unstable_by(|a, b| a.as_str().cmp(b.as_str()));
+            files.push((file, kind));
+            files.sort_unstable_by(|a, b| a.0.as_str().cmp(b.0.as_str()).then(kind_rank(a.1).cmp(&kind_rank(b.1))));
         }
         if !names.is_empty() {
             self.by_file.insert(file, names);
         }
     }
 
-    /// The names `file` defines, sorted.
-    pub fn names_defined_by(&self, file: Ustr) -> &[Ustr] {
+    /// The names `file` defines with their kinds, sorted.
+    pub fn names_defined_by(&self, file: Ustr) -> &[(Ustr, DefKind)] {
         self.by_file.get(&file).map(Vec::as_slice).unwrap_or(&[])
     }
 
     /// The legacy files defining `name`, sorted.
-    pub fn files_defining(&self, name: Ustr) -> &[Ustr] {
-        self.by_name.get(&name).map(Vec::as_slice).unwrap_or(&[])
+    pub fn files_defining(&self, name: Ustr) -> Vec<Ustr> {
+        let mut files: Vec<Ustr> =
+            self.by_name.get(&name).into_iter().flatten().map(|(file, _)| *file).collect();
+        files.dedup();
+        files
+    }
+
+    /// Whether every legacy definition of `name` is a function.
+    pub fn all_callable(&self, name: Ustr) -> bool {
+        self.by_name
+            .get(&name)
+            .is_some_and(|defs| defs.iter().all(|(_, kind)| *kind == DefKind::Callable))
+    }
+}
+
+fn kind_rank(kind: DefKind) -> u8 {
+    match kind {
+        DefKind::Type => 0,
+        DefKind::Global => 1,
+        DefKind::Callable => 2,
+        DefKind::Decorator => 3,
+        DefKind::Module => 4,
     }
 }
 

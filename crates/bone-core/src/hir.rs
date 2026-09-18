@@ -793,19 +793,27 @@ pub enum CallFamily {
     /// several candidates lose, the lowest key is kept so the diagnostic does
     /// not depend on import order.
     Resolved { key: Ustr, hidden: Option<Ustr> },
+    /// A legacy bare name whose legacy callables and projected v1 callables
+    /// form one overload family (spec 3.2). The member keys are not stored:
+    /// `modules::legacy_family_keys(ws, file, name)` enumerates them from the
+    /// same facts lowering decided this family from.
+    LegacyMerged { name: Ustr, file: Ustr },
 }
 
 impl CallFamily {
+    /// The family's spelling: its one key, or the bare name of a merged
+    /// legacy family (whose lookup also consults its v1 members).
     pub fn key(&self) -> Ustr {
         match self {
             CallFamily::Legacy(n) => *n,
             CallFamily::Resolved { key, .. } => *key,
+            CallFamily::LegacyMerged { name, .. } => *name,
         }
     }
 
     pub fn hidden(&self) -> Option<Ustr> {
         match self {
-            CallFamily::Legacy(_) => None,
+            CallFamily::Legacy(_) | CallFamily::LegacyMerged { .. } => None,
             CallFamily::Resolved { hidden, .. } => *hidden,
         }
     }
