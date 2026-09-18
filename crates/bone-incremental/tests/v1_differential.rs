@@ -935,6 +935,47 @@ fn a_function_named_like_a_macro_is_refused_like_a_fresh_build() {
     assert!(err.message.contains(expected), "{}", err.message);
 }
 
+/// A macro call whose argument label names no parameter: a fresh session
+/// refuses it (`check_macro_call_labels`), so an edit that introduces it is
+/// refused the same way on every update path -- a body edit, an interface
+/// edit and a scope edit alike -- rather than leaving the call unexpanded.
+#[test]
+fn a_bad_macro_argument_label_is_refused_like_a_fresh_build_on_every_path() {
+    let macros = "macro twice(e: expr) -> int {\n    e * 2\n}\n";
+    let user0 = "fn f() -> int {\n    twice(e: 1)\n}\n";
+    let expected = "macro `twice` has no parameter named `x`";
+    let edits = [
+        (UpdateTier::BodyOnly, "fn f() -> int {\n    twice(x: 2)\n}\n"),
+        (UpdateTier::Interface, "fn f(n: int) -> int {\n    twice(x: n)\n}\n"),
+        (UpdateTier::Scope, "fn f() -> int {\n    twice(x: 1)\n}\n\npub fn g() -> int {\n    2\n}\n"),
+    ];
+    for (tier, user1) in edits {
+        let files = |user: &str, dialect: fn(&str, &str) -> SessionFile| {
+            vec![legacy("macros.rock", macros), dialect("user.rock", user)]
+        };
+        let dialect: fn(&str, &str) -> SessionFile = if tier == UpdateTier::Scope { v1 } else { legacy };
+        let user0 = if tier == UpdateTier::Scope { format!("mod user;\n\n{user0}") } else { user0.to_string() };
+        let user1 = if tier == UpdateTier::Scope { format!("mod user;\n\n{user1}") } else { user1.to_string() };
+
+        let fresh = Session::new(warm(), files(&user1, dialect), &NsAliases::default())
+            .err()
+            .unwrap_or_else(|| panic!("{tier:?}: a fresh session refuses it"));
+        assert!(fresh.message.contains(expected), "{tier:?}: {}", fresh.message);
+
+        // The same edit with a good label pins which path it takes.
+        let mut control = Session::new(warm(), files(&user0, dialect), &NsAliases::default()).expect("baseline builds");
+        let good = control.update_file("user.rock", &user1.replace("x:", "e:")).expect("a good label is accepted");
+        assert_eq!(good.tier, tier);
+
+        let mut session = Session::new(warm(), files(&user0, dialect), &NsAliases::default()).expect("baseline builds");
+        let err = session
+            .update_file("user.rock", &user1)
+            .map(|r| r.tier)
+            .expect_err(&format!("{tier:?}: the session refuses the edit too"));
+        assert!(err.message.contains(expected), "{tier:?}: {}", err.message);
+    }
+}
+
 /// Warm and user files share the legacy bare-name maps: a user type named
 /// like a warm generic type overwrites its arity before the warm bodies lower
 /// in a fresh build, so the warm signature over it is refused there. A

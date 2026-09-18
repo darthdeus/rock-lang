@@ -1,6 +1,6 @@
 use skull_parser::{
     Ast, Dialect, FunctionBody, ItemKind, MacroRegistry, PackageTag, check_macro_call_labels,
-    check_macro_name_uniqueness, collect_registry, cook_one,
+    check_macro_call_labels_in, check_macro_name_uniqueness, collect_registry, cook_one,
 };
 
 use bone_semantic::{
@@ -1319,7 +1319,7 @@ impl Session {
         // uses the provided AST); cook + lower them together with the edited
         // module so intra-closure and closure->kept references resolve.
         let mut edited = module;
-        cook_one(&mut edited, &self.registry);
+        self.cook_edited(&mut edited)?;
         let mut asts: Vec<Ast> = Vec::with_capacity(to_relower.len() + 1);
         asts.push(edited);
         for &m in &to_relower {
@@ -1689,7 +1689,7 @@ impl Session {
         self.ws.phase_timings.clear();
 
         let mut edited = ast;
-        cook_one(&mut edited, &self.registry);
+        self.cook_edited(&mut edited)?;
         lower_modules(&mut self.ws, &[edited])?;
 
         let changed_owners: FxHashSet<BodyOwner> = {
@@ -1801,7 +1801,7 @@ impl Session {
         if !mini.recovery_errors.is_empty() {
             return Ok(None);
         }
-        skull_parser::cook_one(&mut mini, &self.registry);
+        self.cook_edited(&mut mini)?;
 
         // The re-parsed item must be exactly one function with the SAME name and
         // interface; otherwise the "body edit" actually moved the interface and
@@ -1981,7 +1981,7 @@ impl Session {
         let clone_dur = t_clone.elapsed();
 
         let t_cook = Instant::now();
-        cook_one(&mut edited, &self.registry);
+        self.cook_edited(&mut edited)?;
         let cook_dur = t_cook.elapsed();
 
         // Defensive: the edited item should survive cooking unchanged. If it
@@ -2049,6 +2049,20 @@ impl Session {
             relowered: body,
             ..UpdateResult::default()
         })
+    }
+
+    /// Cook the edited file against the cached registry, first refusing a
+    /// macro call whose argument labels do not fit (`check_macro_call_labels`,
+    /// which `Session::new` and `rebuild_users` run over every file). The
+    /// narrow paths that call this are taken only when no macro definition
+    /// changed, so the cached registry is current and every other file's
+    /// calls were checked against it already.
+    fn cook_edited(&self, ast: &mut Ast) -> Result<(), CompilerError> {
+        if let Some(e) = check_macro_call_labels_in(ast, &self.registry).into_iter().next() {
+            return Err(e);
+        }
+        cook_one(ast, &self.registry);
+        Ok(())
     }
 
     fn rebuild_or_revert(

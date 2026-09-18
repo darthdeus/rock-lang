@@ -152,53 +152,63 @@ pub fn check_macro_name_uniqueness(modules: &[Ast]) -> Vec<CompilerError> {
 /// "missing function `foo`" -- a true rejection naming the wrong cause.
 pub fn check_macro_call_labels(modules: &[Ast]) -> Vec<CompilerError> {
     let reg = build_registry(modules);
+    modules.iter().flat_map(|m| call_label_errors(m, &reg)).collect()
+}
+
+/// [`check_macro_call_labels`] for the calls of ONE module against a prebuilt
+/// `registry`: what an incremental driver runs on an edited file when no
+/// macro definition changed (every other file's calls were checked against
+/// the same registry already).
+pub fn check_macro_call_labels_in(m: &Ast, registry: &MacroRegistry) -> Vec<CompilerError> {
+    call_label_errors(m, &registry.0)
+}
+
+fn call_label_errors(m: &Ast, reg: &Registry) -> Vec<CompilerError> {
     if reg.is_empty() {
         return Vec::new();
     }
     let mut errs = Vec::new();
-    for m in modules {
-        for (e, data) in m.exprs.iter() {
-            let ExprKind::FunctionCall { func, args, .. } = &data.kind else {
-                continue;
-            };
-            // Labels can only appear inside the parens, so a call with none
-            // binds positionally and cannot fail this check.
-            if args.iter().all(|a| a.name.is_none()) {
-                continue;
-            }
-            let (name, extra) = match &m.exprs[*func].kind {
-                ExprKind::Ident(id) => (id.name, 0),
-                ExprKind::FieldAccess(_, member) => (member.name, 1),
-                _ => continue,
-            };
-            let Some(cands) = reg.get(&name) else { continue };
-            let Some(tmpl) = select_overload(cands, args.len() + extra) else {
-                continue;
-            };
-            let mut call_args: Vec<MacroArg> = Vec::with_capacity(args.len() + extra);
-            if extra == 1 {
-                call_args.push(MacroArg { label: None, value: e });
-            }
-            call_args
-                .extend(args.iter().map(|a| MacroArg { label: a.name.as_ref().map(|n| n.name), value: a.value }));
-            let Err(err) = bind_macro_args(&tmpl.params, &call_args) else {
-                continue;
-            };
-            let names: Vec<String> = tmpl.params.iter().map(|p| p.name.to_string()).collect();
-            let msg = match err {
-                BindErr::UnknownLabel(l) => format!(
-                    "macro `{name}` has no parameter named `{l}` -- its parameters are ({}). An argument label must name a parameter; it is not a positional argument.",
-                    names.join(", ")
-                ),
-                BindErr::AlreadyBound(l) => {
-                    format!("macro `{name}` got two values for parameter `{l}`")
-                }
-                BindErr::LabelOnVariadic(l) => format!(
-                    "macro `{name}`'s parameter `{l}` is variadic -- it captures the remaining arguments, so it cannot be named"
-                ),
-            };
-            errs.push(CompilerError::new_with_label(data.span, msg));
+    for (e, data) in m.exprs.iter() {
+        let ExprKind::FunctionCall { func, args, .. } = &data.kind else {
+            continue;
+        };
+        // Labels can only appear inside the parens, so a call with none
+        // binds positionally and cannot fail this check.
+        if args.iter().all(|a| a.name.is_none()) {
+            continue;
         }
+        let (name, extra) = match &m.exprs[*func].kind {
+            ExprKind::Ident(id) => (id.name, 0),
+            ExprKind::FieldAccess(_, member) => (member.name, 1),
+            _ => continue,
+        };
+        let Some(cands) = reg.get(&name) else { continue };
+        let Some(tmpl) = select_overload(cands, args.len() + extra) else {
+            continue;
+        };
+        let mut call_args: Vec<MacroArg> = Vec::with_capacity(args.len() + extra);
+        if extra == 1 {
+            call_args.push(MacroArg { label: None, value: e });
+        }
+        call_args
+            .extend(args.iter().map(|a| MacroArg { label: a.name.as_ref().map(|n| n.name), value: a.value }));
+        let Err(err) = bind_macro_args(&tmpl.params, &call_args) else {
+            continue;
+        };
+        let names: Vec<String> = tmpl.params.iter().map(|p| p.name.to_string()).collect();
+        let msg = match err {
+            BindErr::UnknownLabel(l) => format!(
+                "macro `{name}` has no parameter named `{l}` -- its parameters are ({}). An argument label must name a parameter; it is not a positional argument.",
+                names.join(", ")
+            ),
+            BindErr::AlreadyBound(l) => {
+                format!("macro `{name}` got two values for parameter `{l}`")
+            }
+            BindErr::LabelOnVariadic(l) => format!(
+                "macro `{name}`'s parameter `{l}` is variadic -- it captures the remaining arguments, so it cannot be named"
+            ),
+        };
+        errs.push(CompilerError::new_with_label(data.span, msg));
     }
     errs
 }
