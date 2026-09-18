@@ -605,16 +605,16 @@ fn gate_g_visibility_narrowed_on_a_path_used_item() {
     );
 }
 
-/// Gate (h): a legacy definer adds a name the v1 package also projects to
-/// legacy files, so a legacy caller's bare `bump` becomes ambiguous
-/// (`resolve::resolve_legacy_bare`). The ambiguity is decided at lowering.
+/// Gate (h): a legacy definer adds a callable the v1 package also projects to
+/// legacy files, so a legacy caller's bare `bump` becomes one merged overload
+/// family (`CallFamily::LegacyMerged`), decided at lowering. The two members
+/// have the same signature, so the call is an overload tie at inference.
 ///
-/// PINNED OVER-INVALIDATION: 5 user + 2 warm bodies re-infer (`use_it` now
-/// fails to LOWER with the ambiguity, so it is in neither count nor
-/// `relowered`). Target: legacy_def (edited, 2 bodies) and legacy_use (its
-/// bare `bump` read the projection; it must re-lower) -- 2 re-inferred; the
-/// v1 files, legacy_far and the warm stdlib 0. Per-body: the new `bump` plus
-/// `use_it`'s re-lower.
+/// PINNED OVER-INVALIDATION: 6 user + 2 warm bodies re-infer. Target:
+/// legacy_def (edited, 2 bodies) and legacy_use (its bare `bump` read the
+/// projection alone; it must re-lower into the merged family) -- 3
+/// re-inferred; the v1 files, legacy_far and the warm stdlib 0. Per-body: the
+/// new `bump` plus `use_it`'s re-lower.
 #[test]
 fn gate_h_legacy_definer_edit_collides_with_a_projected_name() {
     let without = "fn other(n: int) -> int {\n    n\n}\n";
@@ -630,16 +630,16 @@ fn gate_h_legacy_definer_edit_collides_with_a_projected_name() {
 
     let r = h.edit("legacy_def.rock", with).expect("accepted");
     assert!(
-        h.diagnostics().iter().any(|d| d.contains("ambiguous legacy reference to `bump`")),
+        h.diagnostics().iter().any(|d| d.contains("Ambiguous overload for `bump` with argument types (int)")),
         "{:?}",
         h.diagnostics()
     );
     assert_eq!(r.tier, UpdateTier::FullUser, "target: a scope-epoch tier, not the full rebuild");
-    assert_eq!(h.reinferred_body_count(), 5 + WARM_BODIES, "target: 2 (legacy_def; legacy_use fails to lower)");
+    assert_eq!(h.reinferred_body_count(), 6 + WARM_BODIES, "target: 3 (legacy_def and legacy_use)");
     assert_eq!(
         h.functions_per_file(&r.relowered),
-        per_file(&[("a.rock", 1), ("legacy_def.rock", 2), ("legacy_far.rock", 2)]),
-        "target: {{legacy_def.rock: 2}}, plus legacy_use's refreshed lowering error"
+        per_file(&[("a.rock", 1), ("legacy_def.rock", 2), ("legacy_far.rock", 2), ("legacy_use.rock", 1)]),
+        "target: {{legacy_def.rock: 2, legacy_use.rock: 1}}"
     );
 }
 
