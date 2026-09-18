@@ -73,3 +73,19 @@ fn failed_rebuild_users_keeps_workspace_consistent() {
         let _ = session.ws.module(mid);
     }
 }
+
+/// The host resolves build variables once, onto the session's workspace
+/// (`bone_session_for_emission`). A full rebuild replaces that workspace, so it
+/// has to carry them over or emission after the rebuild sees none.
+#[test]
+fn rebuild_users_keeps_the_comptime_inputs() {
+    let files = vec![SessionFile::legacy("a.rock", "fn f() -> int { 1 }\n")];
+    let mut session = Session::new(warm(), files, &bone_core::modules::NsAliases::default()).expect("clean program builds");
+    session.ws.comptime_inputs.channel = "dev".to_string();
+    session.ws.comptime_inputs.modules_mode = "v1".to_string();
+
+    session.rebuild_users().expect("an unchanged program rebuilds");
+
+    assert_eq!(session.ws.comptime_inputs.channel, "dev");
+    assert_eq!(session.ws.comptime_inputs.modules_mode, "v1");
+}

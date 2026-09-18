@@ -1129,6 +1129,9 @@ impl Session {
         // the last-good ws on any failure makes the session queryable after a failed
         // rebuild instead of crash-on-next-touch.
         let mut ws = Workspace::default();
+        // Host-resolved build variables, set once on the workspace when the
+        // session was made; nothing in this rebuild derives them again.
+        ws.comptime_inputs = self.ws.comptime_inputs.clone();
 
         let mut expanded = self.combined_unexpanded()?;
         let registry = collect_registry(&expanded);
