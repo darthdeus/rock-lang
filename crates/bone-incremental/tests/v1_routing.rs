@@ -2,9 +2,9 @@
 //! the path it takes reaches the same verdict a fresh session would.
 //!
 //! Only an edit to what the namespace tree is built from -- an item's name,
-//! kind or visibility, a `use`, a `mod` header -- needs the full rebuild. A
-//! signature, field or payload edit keeps its DefKey and stays on the
-//! interface path.
+//! kind or visibility, a `use`, a `mod` header -- takes the scope path, which
+//! re-assembles the tree (plan 2.6). A signature, field or payload edit keeps
+//! its DefKey and stays on the interface path.
 
 use bone_core::modules::NsAliases;
 use bone_incremental::session::{Session, SessionFile, UpdateTier};
@@ -82,14 +82,14 @@ fn a_field_visibility_edit_stays_on_the_interface_path() {
 fn an_item_visibility_edit_rebuilds_the_tree() {
     let edit = "mod a;\n\nfn bump(n: int) -> int {\n    n\n}\n\npub struct P {\n    pub x: int,\n}\n";
     let (tier, diags) = edit_with_diagnostics(package(), "a.rock", edit);
-    assert_eq!(tier, UpdateTier::FullUser);
+    assert_eq!(tier, UpdateTier::Scope);
     assert!(diags.iter().any(|d| d.contains("`bump` is not accessible from this module")), "{diags:?}");
 }
 
 #[test]
 fn an_added_definition_rebuilds_the_tree() {
     let edit = format!("{A}\npub fn twice(n: int) -> int {{\n    n\n}}\n");
-    assert_eq!(edit_matches_fresh(package(), "a.rock", &edit), UpdateTier::FullUser);
+    assert_eq!(edit_matches_fresh(package(), "a.rock", &edit), UpdateTier::Scope);
 }
 
 /// The public-API closure (spec 11) is a whole-program check that the full
@@ -234,7 +234,7 @@ fn a_private_definition_added_to_a_globbed_module_changes_no_globber() {
     ];
     let edit = "mod b;\n\npub fn depth() -> int {\n    1\n}\n\nfn width() -> int {\n    2\n}\n";
     let (tier, diags) = edit_with_diagnostics(files, "b.rock", edit);
-    assert_eq!(tier, UpdateTier::FullUser);
+    assert_eq!(tier, UpdateTier::Scope);
     assert!(diags.is_empty(), "{diags:?}");
 }
 

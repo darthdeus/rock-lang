@@ -489,6 +489,7 @@ impl LiveProject {
                     }
                 }
                 bone_incremental::session::UpdateTier::Interface
+                | bone_incremental::session::UpdateTier::Scope
                 | bone_incremental::session::UpdateTier::FullUser => {
                     changed = true;
                     full = true;

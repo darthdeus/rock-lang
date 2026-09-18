@@ -10,13 +10,11 @@
 //! type, which neither diagnostics nor types can see), and a refused build as
 //! a comparable outcome. The per-offset type reading is shared (`common`).
 //!
-//! The gates pin today's over-invalidation: every edit to a namespace-tree
-//! input takes the full user rebuild, which re-lowers and re-infers every
-//! user body (the warm stdlib is reused). Each is a sentinel
-//! (docs/test-sentinels.md) whose comment carries the scope-epoch target.
-//! When an epoch lands and a count drops, the gate goes red on purpose: move
-//! its assertion to the target, and keep the incremental == fresh check that
-//! `edit` runs.
+//! The gates pin the scope path's work (plan 2.6): an edit to a
+//! namespace-tree input re-assembles the tree, and re-lowers the edited file
+//! plus every file whose lowering read a changed fact, at fragment level.
+//! Each gate asserts its tier, the bodies re-inferred and re-lowered, and --
+//! through `edit` -- that the result equals a fresh build.
 
 mod common;
 
@@ -267,6 +265,12 @@ impl V1Harness {
         self.session.workspace().reinferred_body_count.load(Ordering::Relaxed)
     }
 
+    /// Function bodies the last update lowered, including one that failed to
+    /// lower (`Workspace.relowered_body_count`, reset per update).
+    fn relowered_body_count(&self) -> usize {
+        self.session.workspace().relowered_body_count.load(Ordering::Relaxed)
+    }
+
     /// Distinct function bodies in `ids`, per file (files with none omitted).
     fn functions_per_file(&self, ids: &[BodyId]) -> BTreeMap<String, usize> {
         let ws = self.session.workspace();
@@ -362,12 +366,9 @@ fn the_full_rebuild_reinfers_no_warm_body() {
 }
 
 // ---------------------------------------------------------------------------
-// M5 gates. Each pins today's count (the full user rebuild) as a sentinel and
-// names the scope-epoch target (plan 2.6). "Fragment-level" is the first
-// target: re-lower and re-infer whole fragments whose recorded lookups the
-// delta touches. "Per-body" needs rung 2 (per-body re-lower), which does not
-// exist yet. When a gate goes red because a count dropped, check the new
-// count against its target and flip the assertion to it.
+// M5 gates (plan 2.6). Fragment-level: whole fragments whose recorded
+// lookups the delta touches re-lower and re-infer. "Per-body" names the next
+// step, which needs rung 2 (per-body re-lower) and does not exist yet.
 // ---------------------------------------------------------------------------
 
 /// Control for the gate readings: on a gate fixture, an edit that is NOT a
@@ -383,15 +384,16 @@ fn control_a_body_edit_on_a_gate_fixture_reads_narrow() {
     let r = h.edit("d.rock", d1).expect("accepted");
     assert_eq!(r.tier, UpdateTier::BodyOnly);
     assert_eq!(h.reinferred_body_count(), 1);
+    assert_eq!(h.relowered_body_count(), 1);
     assert_eq!(h.functions_per_file(&r.relowered), per_file(&[("d.rock", 1)]));
 }
 
 /// Gate (a): an explicit `use` added to one fragment shadows the glob it
 /// used to resolve through (spec 8.3: tier 3 beats tier 4).
 ///
-/// PINNED OVER-INVALIDATION: all 6 user bodies re-infer. Target, fragment-level: c's 2 bodies re-lower and re-infer,
-/// nothing else (the import is fragment-local, spec 8.2). Per-body: only
-/// `pick`, the one body with a bare lookup of `bump`.
+/// c's 2 bodies re-lower and re-infer, nothing else: the import is
+/// fragment-local (spec 8.2), so only c's own fragment scope changed.
+/// Per-body: only `pick`, the one body with a bare lookup of `bump`.
 #[test]
 fn gate_a_use_added_to_one_fragment() {
     let c0 = "mod c;\n\nuse super::b::*;\n\nfn pick() -> int {\n    bump(1)\n}\n\nfn other() -> int {\n    2\n}\n";
@@ -401,21 +403,17 @@ fn gate_a_use_added_to_one_fragment() {
 
     let r = h.edit("c.rock", c1).expect("accepted");
     assert_eq!(h.call_keys("c.rock"), vec![(key("a::bump"), Some(key("b::bump")))]);
-    assert_eq!(r.tier, UpdateTier::FullUser, "target: a scope-epoch tier, not the full rebuild");
-    assert_eq!(h.reinferred_body_count(), 6, "target: 2 (c only); per-body: 1");
-    assert_eq!(
-        h.functions_per_file(&r.relowered),
-        per_file(&[("a.rock", 1), ("b.rock", 1), ("c.rock", 2), ("d.rock", 2)]),
-        "target: {{c.rock: 2}}"
-    );
+    assert_eq!(r.tier, UpdateTier::Scope);
+    assert_eq!(h.reinferred_body_count(), 2);
+    assert_eq!(h.relowered_body_count(), 2);
+    assert_eq!(h.functions_per_file(&r.relowered), per_file(&[("c.rock", 2)]));
 }
 
 /// Gate (b): the same `use` removed, exposing the lower-tier glob candidate
 /// it shadowed (spec 14.3: "removing an import may expose a previously
 /// shadowed lower-tier family").
 ///
-/// PINNED OVER-INVALIDATION: 6 user bodies. Target, fragment-level:
-/// c's 2 bodies. Per-body: `pick` only.
+/// c's 2 bodies re-lower and re-infer, nothing else. Per-body: `pick` only.
 #[test]
 fn gate_b_use_removed_from_one_fragment() {
     let c0 = "mod c;\n\nuse super::b::*;\nuse super::a::bump;\n\nfn pick() -> int {\n    bump(1)\n}\n\nfn other() -> int {\n    2\n}\n";
@@ -425,23 +423,19 @@ fn gate_b_use_removed_from_one_fragment() {
 
     let r = h.edit("c.rock", c1).expect("accepted");
     assert_eq!(h.call_keys("c.rock"), vec![(key("b::bump"), None)]);
-    assert_eq!(r.tier, UpdateTier::FullUser, "target: a scope-epoch tier, not the full rebuild");
-    assert_eq!(h.reinferred_body_count(), 6, "target: 2 (c only); per-body: 1");
-    assert_eq!(
-        h.functions_per_file(&r.relowered),
-        per_file(&[("a.rock", 1), ("b.rock", 1), ("c.rock", 2), ("d.rock", 2)]),
-        "target: {{c.rock: 2}}"
-    );
+    assert_eq!(r.tier, UpdateTier::Scope);
+    assert_eq!(h.reinferred_body_count(), 2);
+    assert_eq!(h.relowered_body_count(), 2);
+    assert_eq!(h.functions_per_file(&r.relowered), per_file(&[("c.rock", 2)]));
 }
 
 /// Gate (c): a `pub fn` added to a module another fragment globs. Here the
 /// new member shadows a prelude name the globber was already calling (spec
 /// 8.3: tier 4 beats tier 5), so the globber's resolution really moves.
 ///
-/// PINNED OVER-INVALIDATION: 5 user bodies. Target, fragment-level:
-/// b (edited, 2 bodies after the edit) and c (globs b, 1 body) -- 3; d and
-/// the warm stdlib 0. Per-body: b's new `warm_one` plus c's `pick`, whose bare
-/// lookup of `warm_one` missed b before the edit.
+/// b (edited, 2 bodies after the edit) and c (its bare lookup of `warm_one`
+/// probed b through the glob and missed) -- 3; d and the warm stdlib 0.
+/// Per-body: b's new `warm_one` plus c's `pick`.
 #[test]
 fn gate_c_glob_member_added() {
     let b0 = "mod b;\n\npub fn depth() -> int {\n    1\n}\n";
@@ -452,22 +446,18 @@ fn gate_c_glob_member_added() {
 
     let r = h.edit("b.rock", b1).expect("accepted");
     assert_eq!(h.call_keys("c.rock"), vec![(key("b::warm_one"), None)]);
-    assert_eq!(r.tier, UpdateTier::FullUser, "target: a scope-epoch tier, not the full rebuild");
-    assert_eq!(h.reinferred_body_count(), 5, "target: 3 (b and c); per-body: 2");
-    assert_eq!(
-        h.functions_per_file(&r.relowered),
-        per_file(&[("b.rock", 2), ("c.rock", 1), ("d.rock", 2)]),
-        "target: {{b.rock: 2, c.rock: 1}}"
-    );
+    assert_eq!(r.tier, UpdateTier::Scope);
+    assert_eq!(h.reinferred_body_count(), 3);
+    assert_eq!(h.relowered_body_count(), 3);
+    assert_eq!(h.functions_per_file(&r.relowered), per_file(&[("b.rock", 2), ("c.rock", 1)]));
 }
 
 /// Gate (d): a private helper added in a module nothing else names. A glob
 /// never opens an inaccessible member (`glob_candidates`), and no path
 /// reaches it, so no other fragment's resolution can change.
 ///
-/// PINNED OVER-INVALIDATION: 5 user bodies. Target: ZERO bodies
-/// outside d re-inferred; fragment-level d's 3, per-body only the new
-/// `helper`.
+/// ZERO bodies outside d: d's 3 re-lower and re-infer (per-body: only the
+/// new `helper`).
 #[test]
 fn gate_d_private_helper_added_in_an_unrelated_module() {
     let c = "mod c;\n\nfn pick() -> int {\n    super::a::bump(1)\n}\n";
@@ -475,23 +465,19 @@ fn gate_d_private_helper_added_in_an_unrelated_module() {
     let mut h = V1Harness::new(vec![v1("a.rock", A_BUMP), v1("c.rock", c), v1("d.rock", UNRELATED)]);
 
     let r = h.edit("d.rock", d1).expect("accepted");
-    assert_eq!(r.tier, UpdateTier::FullUser, "target: a scope-epoch tier, not the full rebuild");
-    assert_eq!(h.reinferred_body_count(), 5, "target: 3 (d only), 0 outside d; per-body: 1");
-    assert_eq!(
-        h.functions_per_file(&r.relowered),
-        per_file(&[("a.rock", 1), ("c.rock", 1), ("d.rock", 3)]),
-        "target: {{d.rock: 3}}"
-    );
+    assert_eq!(r.tier, UpdateTier::Scope);
+    assert_eq!(h.reinferred_body_count(), 3);
+    assert_eq!(h.relowered_body_count(), 3);
+    assert_eq!(h.functions_per_file(&r.relowered), per_file(&[("d.rock", 3)]));
 }
 
 /// Gate (e): a module header renamed. b's definitions change DefKey, and the
 /// fragment that named `super::b::depth` by path loses it.
 ///
-/// PINNED OVER-INVALIDATION: 3 user bodies re-infer (c's `pick`
-/// now fails to LOWER, so it is in neither count nor `relowered`). Target,
-/// fragment-level: b (its keys moved, 1 body) and c (its path walked node
-/// `b`; it must re-lower to report the miss) -- 1 re-inferred; d and the warm
-/// stdlib 0.
+/// b (its keys moved, 1 body) and c (its path walked node `b`; it must
+/// re-lower to report the miss) re-lower -- 2 lowered, 1 re-inferred, since
+/// c's `pick` now fails to LOWER and so is in neither the re-inferred count
+/// nor the `relowered` list; d and the warm stdlib 0.
 #[test]
 fn gate_e_module_header_changed() {
     let b0 = "mod b;\n\npub fn depth() -> int {\n    1\n}\n";
@@ -502,13 +488,10 @@ fn gate_e_module_header_changed() {
 
     let r = h.edit("b.rock", b1).expect("accepted");
     assert!(h.diagnostics().iter().any(|d| d.contains("did not resolve")), "{:?}", h.diagnostics());
-    assert_eq!(r.tier, UpdateTier::FullUser, "target: a scope-epoch tier, not the full rebuild");
-    assert_eq!(h.reinferred_body_count(), 3, "target: 1 (b; c fails to lower)");
-    assert_eq!(
-        h.functions_per_file(&r.relowered),
-        per_file(&[("b.rock", 1), ("d.rock", 2)]),
-        "target: {{b.rock: 1}}, plus c's refreshed lowering error"
-    );
+    assert_eq!(r.tier, UpdateTier::Scope);
+    assert_eq!(h.reinferred_body_count(), 1);
+    assert_eq!(h.relowered_body_count(), 2);
+    assert_eq!(h.functions_per_file(&r.relowered), per_file(&[("b.rock", 1)]));
 }
 
 /// Gate (f): a `pub use` re-export edited in `facade`, reaching `user`
@@ -516,9 +499,9 @@ fn gate_e_module_header_changed() {
 /// facade's named re-export is re-pointed from `a::bump` to `b::bump`
 /// (`resolve::members_of` follows the chain to a fixed point).
 ///
-/// PINNED OVER-INVALIDATION: 5 user bodies. Target, fragment-level:
-/// facade (edited, no bodies) and user (its bare `bump` walked hub -> facade,
-/// 1 body) -- 1; a, b, d and the warm stdlib 0. Per-body: the same 1.
+/// facade (edited, no bodies) and user (its bare `bump` walked hub ->
+/// facade, 1 body) re-lower -- 1; a, b, d and the warm stdlib 0. Per-body:
+/// the same 1.
 #[test]
 fn gate_f_reexport_edit_reaches_a_globber_through_a_glob_chain() {
     let facade0 = "mod facade;\n\npub use super::a::bump;\n";
@@ -538,13 +521,10 @@ fn gate_f_reexport_edit_reaches_a_globber_through_a_glob_chain() {
 
     let r = h.edit("facade.rock", facade1).expect("accepted");
     assert_eq!(h.call_keys("user.rock"), vec![(key("b::bump"), None)]);
-    assert_eq!(r.tier, UpdateTier::FullUser, "target: a scope-epoch tier, not the full rebuild");
-    assert_eq!(h.reinferred_body_count(), 5, "target: 1 (user only)");
-    assert_eq!(
-        h.functions_per_file(&r.relowered),
-        per_file(&[("a.rock", 1), ("b.rock", 1), ("d.rock", 2), ("user.rock", 1)]),
-        "target: {{user.rock: 1}}"
-    );
+    assert_eq!(r.tier, UpdateTier::Scope);
+    assert_eq!(h.reinferred_body_count(), 1);
+    assert_eq!(h.relowered_body_count(), 1);
+    assert_eq!(h.functions_per_file(&r.relowered), per_file(&[("user.rock", 1)]));
 }
 
 /// A glob re-export of a module that binds the name through a NAMED
@@ -573,11 +553,9 @@ fn a_glob_reexport_of_a_named_reexport_resolves() {
 /// qualified path. The access check is baked in at lowering, so the user
 /// must re-LOWER; re-inference alone would keep the stale verdict.
 ///
-/// PINNED OVER-INVALIDATION: 3 user bodies re-infer (c's `pick`
-/// now fails to LOWER with the access error, so it is in neither count nor
-/// `relowered`). Target, fragment-level: a (edited, 1 body) and c (its path
-/// resolved `a::bump`; it must re-lower) -- 1 re-inferred; d and the warm
-/// stdlib 0.
+/// a (edited, 1 body) and c (its path resolved `a::bump`; it must re-lower)
+/// re-lower -- 2 lowered, 1 re-inferred, since c's `pick` now fails to LOWER
+/// with the access error; d and the warm stdlib 0.
 #[test]
 fn gate_g_visibility_narrowed_on_a_path_used_item() {
     let a1 = "mod a;\n\nfn bump(n: int) -> int {\n    n\n}\n";
@@ -591,13 +569,10 @@ fn gate_g_visibility_narrowed_on_a_path_used_item() {
         "{:?}",
         h.diagnostics()
     );
-    assert_eq!(r.tier, UpdateTier::FullUser, "target: a scope-epoch tier, not the full rebuild");
-    assert_eq!(h.reinferred_body_count(), 3, "target: 1 (a; c fails to lower)");
-    assert_eq!(
-        h.functions_per_file(&r.relowered),
-        per_file(&[("a.rock", 1), ("d.rock", 2)]),
-        "target: {{a.rock: 1}}, plus c's refreshed lowering error"
-    );
+    assert_eq!(r.tier, UpdateTier::Scope);
+    assert_eq!(h.reinferred_body_count(), 1);
+    assert_eq!(h.relowered_body_count(), 2);
+    assert_eq!(h.functions_per_file(&r.relowered), per_file(&[("a.rock", 1)]));
 }
 
 /// Gate (h): a legacy definer adds a callable the v1 package also projects to
@@ -605,11 +580,10 @@ fn gate_g_visibility_narrowed_on_a_path_used_item() {
 /// family (`CallFamily::LegacyMerged`), decided at lowering. The two members
 /// have the same signature, so the call is an overload tie at inference.
 ///
-/// PINNED OVER-INVALIDATION: 6 user bodies re-infer. Target:
 /// legacy_def (edited, 2 bodies) and legacy_use (its bare `bump` read the
-/// projection alone; it must re-lower into the merged family) -- 3
-/// re-inferred; the v1 files, legacy_far and the warm stdlib 0. Per-body: the
-/// new `bump` plus `use_it`'s re-lower.
+/// projection alone; it must re-lower into the merged family) -- 3; the v1
+/// files, legacy_far and the warm stdlib 0. Per-body: the new `bump` plus
+/// `use_it`'s re-lower.
 #[test]
 fn gate_h_legacy_definer_edit_collides_with_a_projected_name() {
     let without = "fn other(n: int) -> int {\n    n\n}\n";
@@ -629,12 +603,334 @@ fn gate_h_legacy_definer_edit_collides_with_a_projected_name() {
         "{:?}",
         h.diagnostics()
     );
-    assert_eq!(r.tier, UpdateTier::FullUser, "target: a scope-epoch tier, not the full rebuild");
-    assert_eq!(h.reinferred_body_count(), 6, "target: 3 (legacy_def and legacy_use)");
+    assert_eq!(r.tier, UpdateTier::Scope);
+    assert_eq!(h.reinferred_body_count(), 3);
+    assert_eq!(h.relowered_body_count(), 3);
     assert_eq!(
         h.functions_per_file(&r.relowered),
-        per_file(&[("a.rock", 1), ("legacy_def.rock", 2), ("legacy_far.rock", 2), ("legacy_use.rock", 1)]),
-        "target: {{legacy_def.rock: 2, legacy_use.rock: 1}}"
+        per_file(&[("legacy_def.rock", 2), ("legacy_use.rock", 1)])
     );
 }
 
+
+// ---------------------------------------------------------------------------
+// Scope-epoch soundness cases beyond the gates. Each edit is checked
+// incremental == fresh by `edit` (diagnostics, resolved keys, overload
+// selections, signature keys, types, or the same refusal); the tier checks
+// that the case exercises the scope path rather than the full rebuild.
+// ---------------------------------------------------------------------------
+
+/// A glob member that shadowed a std name is removed again: the globber falls
+/// back to tier 5.
+#[test]
+fn a_glob_member_that_shadowed_std_is_removed() {
+    let b0 = "mod b;\n\npub fn depth() -> int {\n    1\n}\n\npub fn warm_one() -> int {\n    5\n}\n";
+    let b1 = "mod b;\n\npub fn depth() -> int {\n    1\n}\n";
+    let c = "mod c;\n\nuse super::b::*;\n\nfn pick() -> int {\n    warm_one()\n}\n";
+    let mut h = V1Harness::new(vec![v1("b.rock", b0), v1("c.rock", c), v1("d.rock", UNRELATED)]);
+    assert_eq!(h.call_keys("c.rock"), vec![(key("b::warm_one"), None)]);
+
+    let r = h.edit("b.rock", b1).expect("accepted");
+    assert_eq!(r.tier, UpdateTier::Scope);
+    assert_eq!(h.call_keys("c.rock"), vec![("warm_one".to_string(), None)]);
+    assert_eq!(h.relowered_body_count(), 2, "b's depth and c's pick");
+}
+
+/// A private member added to a globbed module never opens through the glob,
+/// so the globber's lookup keeps its std answer. The globber probed that
+/// member (a miss), so it still re-lowers: the design's replay refinement,
+/// which would skip it, is not implemented.
+#[test]
+fn a_private_member_added_to_a_globbed_module_keeps_the_std_answer() {
+    let b0 = "mod b;\n\npub fn depth() -> int {\n    1\n}\n";
+    let b1 = "mod b;\n\npub fn depth() -> int {\n    1\n}\n\nfn warm_one() -> int {\n    5\n}\n";
+    let c = "mod c;\n\nuse super::b::*;\n\nfn pick() -> int {\n    warm_one()\n}\n";
+    let mut h = V1Harness::new(vec![v1("b.rock", b0), v1("c.rock", c), v1("d.rock", UNRELATED)]);
+
+    let r = h.edit("b.rock", b1).expect("accepted");
+    assert_eq!(r.tier, UpdateTier::Scope);
+    assert_eq!(h.call_keys("c.rock"), vec![("warm_one".to_string(), None)]);
+    assert_eq!(h.relowered_body_count(), 3, "b's two bodies and c's pick");
+}
+
+/// Visibility widened on an item another module names by path: the user's
+/// body failed to lower with the access error and must re-lower clean.
+#[test]
+fn visibility_widened_on_a_path_used_item() {
+    let a0 = "mod a;\n\nfn bump(n: int) -> int {\n    n\n}\n";
+    let c = "mod c;\n\nfn pick() -> int {\n    super::a::bump(1)\n}\n";
+    let mut h = V1Harness::new(vec![v1("a.rock", a0), v1("c.rock", c), v1("d.rock", UNRELATED)]);
+    assert!(h.diagnostics().iter().any(|d| d.contains("not accessible")), "{:?}", h.diagnostics());
+
+    let r = h.edit("a.rock", A_BUMP).expect("accepted");
+    assert_eq!(r.tier, UpdateTier::Scope);
+    assert!(h.diagnostics().is_empty(), "{:?}", h.diagnostics());
+    assert_eq!(h.call_keys("c.rock"), vec![(key("a::bump"), None)]);
+    assert_eq!(h.relowered_body_count(), 2, "a's bump and c's pick");
+}
+
+/// A named export binding added to a module makes a path that did not
+/// resolve through it resolve, and removing it breaks the path again.
+#[test]
+fn a_reexport_added_makes_a_failed_path_resolve() {
+    let b0 = "mod b;\n\npub fn depth() -> int {\n    1\n}\n";
+    let b1 = "mod b;\n\npub use super::a::bump;\n\npub fn depth() -> int {\n    1\n}\n";
+    let c = "mod c;\n\nfn pick() -> int {\n    super::b::bump(1)\n}\n";
+    let mut h = V1Harness::new(vec![v1("a.rock", A_BUMP), v1("b.rock", b0), v1("c.rock", c), v1("d.rock", UNRELATED)]);
+    assert!(h.diagnostics().iter().any(|d| d.contains("did not resolve")), "{:?}", h.diagnostics());
+
+    let r = h.edit("b.rock", b1).expect("accepted");
+    assert_eq!(r.tier, UpdateTier::Scope);
+    assert!(h.diagnostics().is_empty(), "{:?}", h.diagnostics());
+    assert_eq!(h.call_keys("c.rock"), vec![(key("a::bump"), None)]);
+
+    let r = h.edit("b.rock", b0).expect("accepted");
+    assert_eq!(r.tier, UpdateTier::Scope);
+    assert!(h.diagnostics().iter().any(|d| d.contains("did not resolve")), "{:?}", h.diagnostics());
+}
+
+/// A `use` added to the fragment that failed to resolve a bare name.
+#[test]
+fn a_use_added_makes_an_unresolved_name_resolve() {
+    let c0 = "mod c;\n\nfn pick() -> int {\n    bump(1)\n}\n";
+    let c1 = "mod c;\n\nuse super::a::bump;\n\nfn pick() -> int {\n    bump(1)\n}\n";
+    let mut h = V1Harness::new(vec![v1("a.rock", A_BUMP), v1("c.rock", c0), v1("d.rock", UNRELATED)]);
+    assert!(h.diagnostics().iter().any(|d| d.contains("did not resolve")), "{:?}", h.diagnostics());
+
+    let r = h.edit("c.rock", c1).expect("accepted");
+    assert_eq!(r.tier, UpdateTier::Scope);
+    assert!(h.diagnostics().is_empty(), "{:?}", h.diagnostics());
+    assert_eq!(h.relowered_body_count(), 1, "c's pick alone");
+}
+
+/// A module header renamed away and back: the path user recovers.
+#[test]
+fn a_module_header_renamed_back_restores_the_path() {
+    let b0 = "mod b;\n\npub fn depth() -> int {\n    1\n}\n";
+    let b1 = "mod bee;\n\npub fn depth() -> int {\n    1\n}\n";
+    let c = "mod c;\n\nfn pick() -> int {\n    super::b::depth()\n}\n";
+    let mut h = V1Harness::new(vec![v1("b.rock", b0), v1("c.rock", c), v1("d.rock", UNRELATED)]);
+    h.edit("b.rock", b1).expect("accepted");
+    let r = h.edit("b.rock", b0).expect("accepted");
+    assert_eq!(r.tier, UpdateTier::Scope);
+    assert!(h.diagnostics().is_empty(), "{:?}", h.diagnostics());
+    assert_eq!(h.call_keys("c.rock"), vec![(key("b::depth"), None)]);
+}
+
+/// Two fragments of one logical module: a definition renamed in one moves
+/// the other's tier-2 lookup.
+#[test]
+fn a_definition_renamed_in_one_fragment_moves_its_sibling_fragment() {
+    let b1 = "mod b;\n\npub fn helper() -> int {\n    1\n}\n";
+    let b1_renamed = "mod b;\n\npub fn helper2() -> int {\n    1\n}\n";
+    let b2 = "mod b;\n\nfn user() -> int {\n    helper()\n}\n";
+    let mut h = V1Harness::new(vec![v1("b1.rock", b1), v1("b2.rock", b2), v1("d.rock", UNRELATED)]);
+    assert_eq!(h.call_keys("b2.rock"), vec![(key("b::helper"), None)]);
+
+    let r = h.edit("b1.rock", b1_renamed).expect("accepted");
+    assert_eq!(r.tier, UpdateTier::Scope);
+    assert!(h.diagnostics().iter().any(|d| d.contains("`helper` did not resolve")), "{:?}", h.diagnostics());
+    assert_eq!(h.relowered_body_count(), 2, "b1's helper2 and b2's user");
+}
+
+/// An inline `mod` block added: a path into it that did not resolve does.
+#[test]
+fn an_inline_module_added_makes_a_path_into_it_resolve() {
+    let d1 = "mod d;\n\npub mod inner {\n    pub fn f() -> int {\n        1\n    }\n}\n\nfn far() -> int {\n    2\n}\n\nfn farther() -> int {\n    3\n}\n";
+    let c = "mod c;\n\nfn pick() -> int {\n    super::d::inner::f()\n}\n";
+    let mut h = V1Harness::new(vec![v1("c.rock", c), v1("d.rock", UNRELATED)]);
+    assert!(!h.diagnostics().is_empty());
+
+    let r = h.edit("d.rock", d1).expect("accepted");
+    assert_eq!(r.tier, UpdateTier::Scope);
+    assert!(h.diagnostics().is_empty(), "{:?}", h.diagnostics());
+    assert_eq!(h.call_keys("c.rock"), vec![(key("d::inner::f"), None)]);
+}
+
+/// A module's own visibility widened: a path through it that was denied at
+/// the module segment resolves.
+#[test]
+fn a_module_visibility_widened_opens_a_path_through_it() {
+    let hidden0 = "mod outer::hidden;\n\npub fn f() -> int {\n    1\n}\n";
+    let hidden1 = "pub mod outer::hidden;\n\npub fn f() -> int {\n    1\n}\n";
+    let outer = "pub mod outer;\n\npub fn g() -> int {\n    1\n}\n";
+    let c = "mod c;\n\nfn pick() -> int {\n    super::outer::hidden::f()\n}\n";
+    let mut h = V1Harness::new(vec![v1("outer.rock", outer), v1("hidden.rock", hidden0), v1("c.rock", c), v1("d.rock", UNRELATED)]);
+    assert!(h.diagnostics().iter().any(|d| d.contains("module `hidden` is not accessible")), "{:?}", h.diagnostics());
+
+    let r = h.edit("hidden.rock", hidden1).expect("accepted");
+    assert_eq!(r.tier, UpdateTier::Scope);
+    assert!(h.diagnostics().is_empty(), "{:?}", h.diagnostics());
+    assert_eq!(h.call_keys("c.rock"), vec![(key("outer::hidden::f"), None)]);
+}
+
+/// A glob export added to the hub a fragment globs makes its bare name
+/// ambiguous.
+#[test]
+fn a_glob_reexport_added_makes_a_globbers_name_ambiguous() {
+    let hub0 = "mod hub;\n\npub use super::a::*;\n";
+    let hub1 = "mod hub;\n\npub use super::a::*;\npub use super::b::*;\n";
+    let user = "mod user;\n\nuse super::hub::*;\n\nfn pick() -> int {\n    bump(1)\n}\n";
+    let mut h = V1Harness::new(vec![v1("a.rock", A_BUMP), v1("b.rock", B_BUMP), v1("hub.rock", hub0), v1("user.rock", user)]);
+    assert!(h.diagnostics().is_empty(), "{:?}", h.diagnostics());
+
+    let r = h.edit("hub.rock", hub1).expect("accepted");
+    assert_eq!(r.tier, UpdateTier::Scope);
+    assert!(h.diagnostics().iter().any(|d| d.contains("ambiguous")), "{:?}", h.diagnostics());
+}
+
+/// The definition at the end of a re-export chain renamed: the chain's own
+/// `pub use` no longer resolves, which refuses the build where it is
+/// declared -- the session refuses it the same way and keeps its state.
+#[test]
+fn a_reexport_chain_target_renamed_is_refused_like_a_fresh_build() {
+    let facade = "mod facade;\n\npub use super::a::bump;\n";
+    let hub = "mod hub;\n\npub use super::facade::*;\n";
+    let user = "mod user;\n\nuse super::hub::*;\n\nfn pick() -> int {\n    bump(1)\n}\n";
+    let a1 = "mod a;\n\npub fn bumped(n: int) -> int {\n    n\n}\n";
+    let mut h = V1Harness::new(vec![v1("a.rock", A_BUMP), v1("facade.rock", facade), v1("hub.rock", hub), v1("user.rock", user)]);
+    let err = h.edit("a.rock", a1).expect_err("a dangling `pub use` refuses the build");
+    assert!(err.contains("invalid `use` target"), "{err}");
+}
+
+/// A v1 type's flavor changes from struct to enum under the same name, an
+/// interface-path edit: a body that lowered `b::E::V` against the struct
+/// (not an enum) must re-lower to see the variant.
+#[test]
+fn a_type_flavor_change_relowers_a_variant_path_user() {
+    let b0 = "mod b;\n\npub struct E {\n    pub x: int,\n}\n";
+    let b1 = "mod b;\n\npub enum E {\n    V,\n}\n";
+    let c = "mod c;\n\nfn pick() -> int {\n    let e = super::b::E::V\n    1\n}\n";
+    let mut h = V1Harness::new(vec![v1("b.rock", b0), v1("c.rock", c), v1("d.rock", UNRELATED)]);
+    assert!(!h.diagnostics().is_empty());
+
+    let r = h.edit("b.rock", b1).expect("accepted");
+    assert_eq!(r.tier, UpdateTier::Interface);
+    assert!(h.diagnostics().is_empty(), "{:?}", h.diagnostics());
+}
+
+/// A legacy file's projection gains a name: the root re-exports another v1
+/// function, and a legacy caller of that name that did not resolve does.
+#[test]
+fn a_projected_name_added_resolves_a_legacy_caller() {
+    let a = "mod a;\n\npub fn bump(n: int) -> int {\n    n\n}\n\npub fn twice(n: int) -> int {\n    n\n}\n";
+    let root0 = "pub use a::bump;\n";
+    let root1 = "pub use a::bump;\npub use a::twice;\n";
+    let mut h = V1Harness::new(vec![
+        v1("a.rock", a),
+        v1("root.rock", root0),
+        legacy("legacy_use.rock", "fn use_it() -> int {\n    twice(1)\n}\n"),
+        legacy("legacy_far.rock", "fn far() -> int {\n    2\n}\n"),
+    ]);
+    assert!(!h.diagnostics().is_empty());
+
+    let r = h.edit("root.rock", root1).expect("accepted");
+    assert_eq!(r.tier, UpdateTier::Scope);
+    assert!(h.diagnostics().is_empty(), "{:?}", h.diagnostics());
+    assert_eq!(h.call_keys("legacy_use.rock"), vec![(key("a::twice"), None)]);
+    assert_eq!(h.relowered_body_count(), 1, "legacy_use's use_it alone");
+}
+
+/// A merged legacy family (`CallFamily::LegacyMerged`) whose member set grows:
+/// the legacy caller lowers to the same merged callee before and after, and
+/// only its inference sees the new member, so the caller must still be
+/// found through its legacy probe.
+#[test]
+fn a_merged_legacy_family_gains_a_member() {
+    let a = "mod a;\n\npub fn bump(n: int, m: int) -> int {\n    n\n}\n";
+    let b = "mod b;\n\npub fn bump(n: int) -> int {\n    n\n}\n";
+    let root0 = "pub use a::*;\n";
+    let root1 = "pub use a::*;\npub use b::*;\n";
+    let mut h = V1Harness::new(vec![
+        v1("a.rock", a),
+        v1("b.rock", b),
+        v1("root.rock", root0),
+        legacy("legacy_def.rock", "fn bump(s: string) -> string {\n    s\n}\n"),
+        legacy("legacy_use.rock", "fn use_it() -> int {\n    bump(1)\n}\n"),
+    ]);
+    assert!(!h.diagnostics().is_empty(), "no member of the family takes one int");
+
+    let r = h.edit("root.rock", root1).expect("accepted");
+    assert_eq!(r.tier, UpdateTier::Scope);
+    assert!(h.diagnostics().is_empty(), "{:?}", h.diagnostics());
+}
+
+/// A legacy definer drops the collision again: the legacy caller leaves the
+/// merged family for the projection alone.
+#[test]
+fn a_legacy_definer_removes_a_colliding_name() {
+    let without = "fn other(n: int) -> int {\n    n\n}\n";
+    let with = "fn other(n: int) -> int {\n    n\n}\n\nfn bump(n: int) -> int {\n    n\n}\n";
+    let mut h = V1Harness::new(vec![
+        v1("a.rock", "mod a;\n\npub fn bump(n: int) -> int {\n    n\n}\n"),
+        v1("root.rock", "pub use a::bump;\n"),
+        legacy("legacy_def.rock", with),
+        legacy("legacy_use.rock", "fn use_it() -> int {\n    bump(1)\n}\n"),
+    ]);
+    assert!(!h.diagnostics().is_empty());
+
+    let r = h.edit("legacy_def.rock", without).expect("accepted");
+    assert_eq!(r.tier, UpdateTier::Scope);
+    assert!(h.diagnostics().is_empty(), "{:?}", h.diagnostics());
+    assert_eq!(h.call_keys("legacy_use.rock"), vec![(key("a::bump"), None)]);
+}
+
+/// A type removed from a module: a body that named it by path re-lowers into
+/// its error, and adding the type back clears it. A SIGNATURE naming it by
+/// path refuses the whole build instead, in a session as in a fresh build.
+#[test]
+fn a_type_removed_and_restored_relowers_its_users() {
+    let b0 = "mod b;\n\npub struct T {\n    pub x: int,\n}\n";
+    let b1 = "mod b;\n\npub fn keep() -> int {\n    1\n}\n";
+    let c = "mod c;\n\nfn body() -> int {\n    let t = super::b::T { x: 1 }\n    t.x\n}\n";
+    let mut h = V1Harness::new(vec![v1("b.rock", b0), v1("c.rock", c), v1("d.rock", UNRELATED)]);
+    assert!(h.diagnostics().is_empty(), "{:?}", h.diagnostics());
+
+    let r = h.edit("b.rock", b1).expect("accepted");
+    assert_eq!(r.tier, UpdateTier::Scope);
+    assert!(h.diagnostics().iter().any(|d| d.contains("did not resolve")), "{:?}", h.diagnostics());
+    let r = h.edit("b.rock", b0).expect("accepted");
+    assert_eq!(r.tier, UpdateTier::Scope);
+    assert!(h.diagnostics().is_empty(), "{:?}", h.diagnostics());
+
+    let sig = "mod c;\n\nfn sig(t: super::b::T) -> int {\n    t.x\n}\n";
+    let mut h = V1Harness::new(vec![v1("b.rock", b0), v1("c.rock", sig), v1("d.rock", UNRELATED)]);
+    let err = h.edit("b.rock", b1).expect_err("a signature path that does not resolve refuses the build");
+    assert!(err.contains("did not resolve"), "{err}");
+}
+
+/// The probes a lowering recorded are readable per file: c's path walk
+/// entered node `a` and asked it for `bump`.
+#[test]
+fn scope_probes_record_the_path_walk() {
+    use bone_core::modules::ScopeProbe;
+    let c = "mod c;\n\nfn pick() -> int {\n    super::a::bump(1)\n}\n";
+    let h = V1Harness::new(vec![v1("a.rock", A_BUMP), v1("c.rock", c)]);
+    let probes = h.session.scope_probes("c.rock").expect("c is held");
+    assert!(probes.contains(&ScopeProbe::Node { package: 1, node: Ustr::from("a") }), "{probes:?}");
+    assert!(
+        probes.contains(&ScopeProbe::Member { package: 1, node: Ustr::from("a"), name: Ustr::from("bump") }),
+        "{probes:?}"
+    );
+}
+
+/// A function added under a name a macro of another file already has: the
+/// whole-program macro/function collision check refuses it in a fresh
+/// session, so the session refuses the edit too rather than lowering it on a
+/// narrow path. (Outside the harness: the batch `semantic_pass` leaves that
+/// check to its CLI caller, so the harness's two fresh entries disagree.)
+#[test]
+fn a_function_named_like_a_macro_is_refused_like_a_fresh_build() {
+    let macros = "macro twice(e: expr) -> int {\n    e * 2\n}\n";
+    let user0 = "fn f() -> int {\n    1\n}\n";
+    let user1 = "fn f() -> int {\n    1\n}\n\nfn twice(n: int) -> int {\n    n\n}\n";
+    let files = |user: &str| vec![legacy("macros.rock", macros), legacy("user.rock", user)];
+    let expected = "macro `twice` collides with a function named `twice`";
+
+    let fresh = Session::new(warm(), files(user1), &NsAliases::default()).err().expect("a fresh session refuses it");
+    assert!(fresh.message.contains(expected), "{}", fresh.message);
+
+    let mut session = Session::new(warm(), files(user0), &NsAliases::default()).expect("baseline builds");
+    let err = session.update_file("user.rock", user1).expect_err("the session refuses the edit too");
+    assert!(err.message.contains(expected), "{}", err.message);
+}

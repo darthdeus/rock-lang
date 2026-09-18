@@ -17,9 +17,63 @@
 //! Losers at earlier tiers are recorded as `hidden` so a failing overload
 //! match can name what it would have found (the hidden-origin diagnostic).
 
-use bone_core::modules::{legacy_name, FragmentScope, LegacyName, NsVisibility, UsePathRef, STD_PACKAGE_ID};
+use bone_core::modules::{
+    legacy_name, FragmentScope, LegacyName, NsPackage, NsVisibility, ScopeProbe, UsePathRef, STD_PACKAGE_ID,
+};
 use bone_core::workspace::Workspace;
 use ustr::Ustr;
+
+std::thread_local! {
+    /// The probes of the lookup running on this thread, when one is being
+    /// recorded ([`with_probes`]). Thread-local rather than a parameter
+    /// because every resolver function takes `&Workspace` and a lookup is
+    /// one sequential call on one thread: the frame opens and closes around
+    /// it, so no parallel work can interleave with it.
+    static PROBES: std::cell::RefCell<Option<Vec<ScopeProbe>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Run `lookup` and return the namespace facts it read (plan 2.6): each
+/// module member asked for, hit or miss, and each module node entered as a
+/// path segment. A tier-5 lookup of the std root is not probed: the stdlib
+/// is immutable for a session's lifetime.
+pub fn with_probes<R>(lookup: impl FnOnce() -> R) -> (R, Vec<ScopeProbe>) {
+    /// Puts the enclosing frame back even if `lookup` unwinds.
+    struct Restore(Option<Option<Vec<ScopeProbe>>>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            if let Some(outer) = self.0.take() {
+                PROBES.with(|slot| slot.replace(outer));
+            }
+        }
+    }
+    let mut restore = Restore(Some(PROBES.with(|slot| slot.replace(Some(Vec::new())))));
+    let result = lookup();
+    let outer = restore.0.take().expect("the frame is restored once");
+    let probes = PROBES.with(|slot| slot.replace(outer)).unwrap_or_default();
+    // A nested recording's facts are the enclosing lookup's too.
+    PROBES.with(|slot| {
+        if let Some(outer) = slot.borrow_mut().as_mut() {
+            outer.extend(probes.iter().copied());
+        }
+    });
+    (result, probes)
+}
+
+fn probe(fact: ScopeProbe) {
+    PROBES.with(|slot| {
+        if let Some(probes) = slot.borrow_mut().as_mut() {
+            probes.push(fact);
+        }
+    });
+}
+
+fn probe_member(package: u32, path: &[Ustr], name: Ustr) {
+    probe(ScopeProbe::Member { package, node: NsPackage::path_key(path), name });
+}
+
+fn probe_node(package: u32, path: &[Ustr]) {
+    probe(ScopeProbe::Node { package, node: NsPackage::path_key(path) });
+}
 
 /// What a resolved name turned out to be.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -345,6 +399,7 @@ fn explicit_members(
     name: Ustr,
     visiting: &mut Visiting,
 ) -> Result<Option<Members>, String> {
+    probe_member(pkg_id, path, name);
     let Some(pkg) = ws.ns.package(pkg_id) else { return Ok(None) };
     let node_key = pkg.key_of(path);
     let Some(node) = pkg.node(node_key) else { return Ok(None) };
@@ -400,6 +455,7 @@ fn glob_export_members(
     name: Ustr,
     visiting: &mut Visiting,
 ) -> Result<Members, String> {
+    probe_member(pkg_id, path, name);
     let mut out = Members::default();
     let Some(pkg) = ws.ns.package(pkg_id) else { return Ok(out) };
     let node_key = pkg.key_of(path);
@@ -553,6 +609,7 @@ fn check_module_access(
     let Some((name, declaring)) = module_path.split_last() else {
         return Ok(());
     };
+    probe_node(pkg_id, module_path);
     let Some(pkg) = ws.ns.package(pkg_id) else {
         return Ok(());
     };
@@ -689,6 +746,8 @@ pub fn resolve_member_path(
             continue;
         }
 
+        probe_node(pkg_id, &cur);
+        probe_member(pkg_id, &cur, seg);
         let pkg = ws.ns.package(pkg_id).ok_or("unknown package")?;
         let node_key = pkg.key_of(&cur);
         let Some(node) = pkg.node(node_key) else {
@@ -889,11 +948,13 @@ fn walk_modules(
             continue;
         }
         cur.push(*seg);
+        probe_node(pkg_id, &cur);
         if pkg.node(pkg.key_of(&cur)).is_none() {
             return Err(format!("no module `{}` in path", seg));
         }
         check_module_access(ws, frag, pkg_id, &cur)?;
     }
+    probe_node(pkg_id, &cur);
     if pkg.node(pkg.key_of(&cur)).is_none() {
         return Err(format!("no module `{}` in path", last_of(segments)));
     }

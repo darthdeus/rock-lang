@@ -64,6 +64,13 @@ pub struct Workspace {
     /// keeps `Workspace: Clone` and lets the parallel dependent re-check (which
     /// holds `&Workspace`) share one counter across threads.
     pub reinferred_body_count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// Count of function bodies LOWERED since the last reset: every function
+    /// a full or partial module lowering builds, including one whose body
+    /// fails to lower, and the one function the body fast path re-lowers.
+    /// The lowering twin of `reinferred_body_count`, reset by the session per
+    /// update; `UpdateResult.relowered` is derived from inference keys, so a
+    /// body that re-lowers into a lowering error is only visible here.
+    pub relowered_body_count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 
     /// Modules-v1 namespace scope (plan M2). Empty for legacy-only
     /// workspaces — every legacy path behaves exactly as before when `ns`
@@ -175,6 +182,7 @@ impl Workspace {
             phase_timings: Default::default(),
 
             reinferred_body_count: Default::default(),
+            relowered_body_count: Default::default(),
             comptime_inputs: Default::default(),
             ns: Default::default(),
             fragment_scopes: Default::default(),

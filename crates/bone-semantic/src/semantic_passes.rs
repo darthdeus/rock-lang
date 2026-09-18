@@ -59,6 +59,66 @@ fn trailing_generic_defaults(
     out
 }
 
+/// The key the workspace maps use for a definition named `name` in module
+/// `path`: in a v1 fragment the canonical DefKey, so two same-named types in
+/// different logical modules stay distinct; in a legacy file the bare name.
+fn map_key(scope: Option<&FragmentScope>, path: &[ustr::Ustr], name: ustr::Ustr) -> ustr::Ustr {
+    match scope {
+        Some(sc) => bone_core::modules::def_key(&sc.package_name.to_string(), path, name.as_str()),
+        None => name,
+    }
+}
+
+/// Which kind of nominal type a definition is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NominalFlavor {
+    Struct,
+    Enum,
+    Newtype,
+}
+
+/// What lowering elsewhere reads about one nominal type besides its name:
+/// its flavor (`resolve_member_path` asks whether a key is an enum; a
+/// newtype path is called by name), its generic arity and its trailing
+/// generic defaults (`lower_type_expr` checks both at the use site).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NominalFacts {
+    pub flavor: NominalFlavor,
+    pub arity: usize,
+    pub defaults: Vec<bone_core::hir::GenericDefault>,
+}
+
+/// The nominal types `rock_mod` defines, keyed as the workspace maps key
+/// them (`scope` is the file's fragment scope, `None` for a legacy file),
+/// read from the un-expanded AST the way `lower_modules` records them.
+pub fn nominal_type_facts(
+    scope: Option<&FragmentScope>,
+    rock_mod: &Ast,
+) -> FxHashMap<ustr::Ustr, NominalFacts> {
+    let mut out = FxHashMap::default();
+    let start = scope.map(|s| s.module_path.clone()).unwrap_or_default();
+    let mut walk = |item: &Item, path: &[ustr::Ustr]| -> Result<(), CompilerError> {
+        let (name, flavor, generics) = match &item.kind {
+            ItemKind::Struct(s) => (s.name.name, NominalFlavor::Struct, &s.generics),
+            ItemKind::Enum(e) => (e.name.name, NominalFlavor::Enum, &e.generics),
+            ItemKind::Newtype(n) => (n.name.name, NominalFlavor::Newtype, &n.generics),
+            _ => return Ok(()),
+        };
+        out.insert(
+            map_key(scope, path, name),
+            NominalFacts {
+                flavor,
+                arity: generics.len(),
+                defaults: trailing_generic_defaults(rock_mod, generics),
+            },
+        );
+        Ok(())
+    };
+    for_each_def_item(rock_mod.items.as_slice(), &start, &mut walk)
+        .expect("collecting nominal facts cannot fail");
+    out
+}
+
 pub fn expand_and_desugar(ws: &mut Workspace, cooked: &mut [Ast]) -> Result<(), CompilerError> {
     let _span = tracing::info_span!("expand_and_desugar").entered();
 
@@ -104,18 +164,7 @@ pub fn lower_modules(
         }
         let scope = ws.fragment_scopes.get(&rock_mod.file).cloned();
         let mut walk = |item: &Item, path: &[ustr::Ustr]| -> Result<(), CompilerError> {
-            // In v1 the workspace maps key by the canonical DefKey so two
-            // same-named types in different logical modules stay distinct.
-            let key = |name: &ustr::Ustr| -> ustr::Ustr {
-                match &scope {
-                    Some(sc) => bone_core::modules::def_key(
-                        &sc.package_name.to_string(),
-                        path,
-                        name.as_str(),
-                    ),
-                    None => *name,
-                }
-            };
+            let key = |name: &ustr::Ustr| map_key(scope.as_ref(), path, *name);
             match &item.kind {
                 ItemKind::Struct(s) => {
                     ws.type_generic_arity.insert(key(&s.name.name), s.generics.len());
@@ -177,13 +226,14 @@ pub fn lower_modules(
     // Runs AFTER forward decls so the more specific rejections there (retired
     // `@value`) fire first.
     for lower_item in items.iter_mut() {
-        let ctx = LowerCtx {
+        let mut ctx = LowerCtx {
             workspace: ws,
             module: lower_item.module,
             generics_in_scope: Default::default(),
             _next_var_id: 0,
             placeholder_param: None,
             placeholder_forbidden: false,
+            scope_probes: Default::default(),
         };
         for ast_item in lower_item.rock_module.items.iter() {
             if ast_item.annotations.is_empty() {
@@ -208,6 +258,7 @@ pub fn lower_modules(
             );
             validate_annotations(pos, &lowered, &ws.decorator_names)?;
         }
+        ctx.flush_scope_probes();
     }
 
     {
@@ -307,6 +358,7 @@ pub fn lower_modules(
                     _next_var_id: 0,
                     placeholder_param: None,
                     placeholder_forbidden: false,
+                    scope_probes: Default::default(),
                 };
 
                 pass_lower_fields(item.rock_module, &mut ctx)?;
@@ -327,6 +379,7 @@ pub fn lower_modules(
             .into_par_iter()
             .map(|(rock_module, mut c)| {
                 pass_lower_functions(rock_module, &mut c)?;
+                c.flush_scope_probes();
 
                 c.module.lower_var_high_water = c._next_var_id;
 
@@ -981,23 +1034,19 @@ pub fn semantic_pass_with_aliases(
 /// Legacy compilation units keep their flat grammar. Item-level `use` is
 /// handled as an additive compatibility import; module headers and inline
 /// `mod` blocks still need modules-v1 resolution.
-fn reject_legacy_unscoped_module_items(rock_mod: &Ast) -> Result<(), CompilerError> {
-    if let Some(h) = &rock_mod.module_header {
+fn reject_legacy_unscoped_module_items(contribution: &FragmentContribution) -> Result<(), CompilerError> {
+    if let Some(h) = &contribution.header {
         return Err(CompilerError::new_with_label(
             h.span,
             "module file headers require module resolution (not yet implemented)".to_string(),
         ));
     }
-    for item in rock_mod.items.iter() {
-        match &item.kind {
-            ItemKind::Use(_) => {}
-            ItemKind::Module(m) => {
-                return Err(CompilerError::new_with_label(
-                    m.span,
-                    "inline `mod` blocks require module resolution (not yet implemented)".to_string(),
-                ));
-            }
-            _ => {}
+    for item in contribution.items.iter() {
+        if let ScopeItem::Module { block_span, .. } = item {
+            return Err(CompilerError::new_with_label(
+                *block_span,
+                "inline `mod` blocks require module resolution (not yet implemented)".to_string(),
+            ));
         }
     }
     Ok(())
@@ -1024,6 +1073,79 @@ fn for_each_def_item<'a>(
     Ok(())
 }
 
+/// What one source file contributes to the namespace tree, read from its
+/// un-expanded AST: its dialect and owning package, its `mod` header, and
+/// every item the tree is built from -- each `use`, each inline `mod` block
+/// with its own items, and each definition's name, kind, declared visibility
+/// and span. Signatures, fields and bodies are not part of it, so an edit to
+/// them keeps the contribution. The incremental session keeps one per file
+/// and re-assembles the tree from them after an edit, re-reading only the
+/// edited file.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FragmentContribution {
+    pub file: ustr::Ustr,
+    pub dialect: skull_parser::Dialect,
+    pub package: Option<skull_parser::PackageTag>,
+    pub header: Option<skull_parser::ModuleHeader>,
+    pub items: Vec<ScopeItem>,
+}
+
+/// One item of a [`FragmentContribution`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ScopeItem {
+    /// An inline `mod` block: the item's declared visibility and span, the
+    /// block's span, and the block's own items.
+    Module {
+        name: ustr::Ustr,
+        vis: Option<skull_parser::Visibility>,
+        item_span: Span,
+        block_span: Span,
+        items: Vec<ScopeItem>,
+    },
+    Use(skull_parser::UseDecl),
+    /// An owned definition: bare name, kind (`owned_name_and_kind`),
+    /// declared visibility, item span.
+    Def {
+        name: ustr::Ustr,
+        kind: &'static str,
+        vis: Option<skull_parser::Visibility>,
+        span: Span,
+    },
+}
+
+/// The file's [`FragmentContribution`].
+pub fn contribute(rock_mod: &Ast) -> FragmentContribution {
+    FragmentContribution {
+        file: rock_mod.file,
+        dialect: rock_mod.dialect,
+        package: rock_mod.package.clone(),
+        header: rock_mod.module_header.clone(),
+        items: scope_items(&rock_mod.items),
+    }
+}
+
+fn scope_items(items: &[Item]) -> Vec<ScopeItem> {
+    items
+        .iter()
+        .filter_map(|item| match &item.kind {
+            ItemKind::Module(m) => Some(ScopeItem::Module {
+                name: m.name.name,
+                vis: item.vis.clone(),
+                item_span: item.span,
+                block_span: m.span,
+                items: scope_items(&m.items),
+            }),
+            ItemKind::Use(u) => Some(ScopeItem::Use(u.clone())),
+            other => owned_name_and_kind(other).map(|(name, kind)| ScopeItem::Def {
+                name,
+                kind,
+                vis: item.vis.clone(),
+                span: item.span,
+            }),
+        })
+        .collect()
+}
+
 /// The modules-v1 namespace builder (plan M2). Runs before any lowering:
 /// it turns the v1 fragments' headers, inline mod blocks, and use
 /// declarations into the workspace's namespace tree, registers every v1
@@ -1033,6 +1155,19 @@ fn for_each_def_item<'a>(
 pub fn build_namespaces(
     ws: &mut Workspace,
     rock_modules: &[Ast],
+    aliases: &bone_core::modules::NsAliases,
+) -> Result<(), CompilerError> {
+    let contributions: Vec<FragmentContribution> = rock_modules.iter().map(contribute).collect();
+    assemble_namespaces(ws, &contributions.iter().collect_vec(), aliases)
+}
+
+/// [`build_namespaces`] from each file's [`FragmentContribution`], in module
+/// order. It writes `ws.ns.packages`, `ws.defs`, `ws.fragment_scopes`,
+/// `ws.legacy_projections` and `ws.legacy_imports`, which must start empty,
+/// and leaves `ws.ns.legacy_owned` (lowering fills it) alone.
+pub fn assemble_namespaces(
+    ws: &mut Workspace,
+    contributions: &[&FragmentContribution],
     aliases: &bone_core::modules::NsAliases,
 ) -> Result<(), CompilerError> {
     // The host graph's alias tables land on the tree first, so a package
@@ -1048,37 +1183,34 @@ pub fn build_namespaces(
             pkg.aliases.insert(*alias, *target);
         }
     }
-    for rock_mod in rock_modules.iter() {
-        if is_stdlib_module_file(rock_mod.file.as_str()) {
-            register_stdlib_items(ws, rock_mod)?;
+    for contribution in contributions.iter() {
+        if is_stdlib_module_file(contribution.file.as_str()) {
+            register_stdlib_items(ws, contribution)?;
             continue;
         }
-        let is_v1 = rock_mod.dialect == skull_parser::Dialect::V1;
+        let is_v1 = contribution.dialect == skull_parser::Dialect::V1;
         if !is_v1 {
-            reject_legacy_unscoped_module_items(rock_mod)?;
+            reject_legacy_unscoped_module_items(contribution)?;
             continue;
         }
-        let Some(tag) = rock_mod.package.clone() else {
+        let header_span = contribution
+            .header
+            .as_ref()
+            .map(|h| h.span)
+            .unwrap_or_else(crate::prelude::Span::unknown);
+        let Some(tag) = contribution.package.clone() else {
             // A v1 file without a package tag: standalone sources must
             // not silently become legacy — that would reinterpret their
             // `::` ascriptions. Reject with the reason.
             return Err(CompilerError::new_with_label(
-                rock_mod
-                    .module_header
-                    .as_ref()
-                    .map(|h| h.span)
-                    .unwrap_or_else(crate::prelude::Span::unknown),
+                header_span,
                 "modules-v1 source has no owning package (standalone v1 sources need a package or script context)".to_string(),
             ));
         };
         let pkg_id = tag.id;
         if tag.self_name == STD_PACKAGE_NAME {
             return Err(CompilerError::new_with_label(
-                rock_mod
-                    .module_header
-                    .as_ref()
-                    .map(|h| h.span)
-                    .unwrap_or_else(crate::prelude::Span::unknown),
+                header_span,
                 "user packages cannot use the compiler-owned package name `std`".to_string(),
             ));
         }
@@ -1092,18 +1224,14 @@ pub fn build_namespaces(
                 ..Default::default()
             });
 
-        let module_path: Vec<ustr::Ustr> = rock_mod
-            .module_header
+        let module_path: Vec<ustr::Ustr> = contribution
+            .header
             .as_ref()
             .map(|h| h.path.iter().map(|i| i.name).collect())
             .unwrap_or_default();
         if module_path.first().is_some_and(|name| name.as_str() == STD_PACKAGE_NAME) {
             return Err(CompilerError::new_with_label(
-                rock_mod
-                    .module_header
-                    .as_ref()
-                    .map(|h| h.span)
-                    .unwrap_or_else(crate::prelude::Span::unknown),
+                header_span,
                 "package-root module name `std` is reserved for the compiler-owned standard library".to_string(),
             ));
         }
@@ -1117,9 +1245,9 @@ pub fn build_namespaces(
 
         // Walk the file's items (recursing into inline mod blocks),
         // registering owned definitions and collecting use declarations.
-        let file = rock_mod.file;
+        let file = contribution.file;
         let mut errs: Vec<CompilerError> = Vec::new();
-        if let Some(h) = &rock_mod.module_header {
+        if let Some(h) = &contribution.header {
             if let Some(vis) = &h.vis {
                 let ns_vis = to_ns_vis(vis);
                 let pkg = ws.ns.packages.get_mut(&pkg_id).expect("package ensured");
@@ -1148,7 +1276,7 @@ pub fn build_namespaces(
             }
         }
 
-        register_items(ws, pkg_id, &module_path, &rock_mod.items, &mut scope, &mut errs);
+        register_items(ws, pkg_id, &module_path, &contribution.items, &mut scope, &mut errs);
         if !errs.is_empty() {
             errs.sort_by_key(|e| e.location.offset);
             return Err(errs.remove(0));
@@ -1156,8 +1284,8 @@ pub fn build_namespaces(
 
         ws.fragment_scopes.insert(file, scope);
     }
-    validate_v1_use_targets(ws, rock_modules)?;
-    build_legacy_compatibility(ws, rock_modules)?;
+    validate_v1_use_targets(ws, contributions)?;
+    build_legacy_compatibility(ws, contributions)?;
     Ok(())
 }
 
@@ -1166,13 +1294,13 @@ pub fn build_namespaces(
 /// Fragment-local imports resolve from the fragment's scope, exactly as the
 /// lazy lookup will; shared export bindings resolve from the module that
 /// records them.
-fn validate_v1_use_targets(ws: &Workspace, rock_modules: &[Ast]) -> Result<(), CompilerError> {
-    for rock_mod in rock_modules {
-        if rock_mod.dialect != skull_parser::Dialect::V1 || is_stdlib_module_file(rock_mod.file.as_str()) {
+fn validate_v1_use_targets(ws: &Workspace, contributions: &[&FragmentContribution]) -> Result<(), CompilerError> {
+    for contribution in contributions {
+        if contribution.dialect != skull_parser::Dialect::V1 || is_stdlib_module_file(contribution.file.as_str()) {
             continue;
         }
-        let Some(frag) = ws.fragment_scopes.get(&rock_mod.file) else { continue };
-        validate_use_items(ws, frag, &frag.module_path, &rock_mod.items)?;
+        let Some(frag) = ws.fragment_scopes.get(&contribution.file) else { continue };
+        validate_use_items(ws, frag, &frag.module_path, &contribution.items)?;
     }
     Ok(())
 }
@@ -1181,16 +1309,16 @@ fn validate_use_items(
     ws: &Workspace,
     frag: &FragmentScope,
     path: &[ustr::Ustr],
-    items: &[Item],
+    items: &[ScopeItem],
 ) -> Result<(), CompilerError> {
     for item in items {
-        match &item.kind {
-            ItemKind::Module(m) => {
+        match item {
+            ScopeItem::Module { name, items, .. } => {
                 let mut child = path.to_vec();
-                child.push(m.name.name);
-                validate_use_items(ws, frag, &child, &m.items)?;
+                child.push(*name);
+                validate_use_items(ws, frag, &child, items)?;
             }
-            ItemKind::Use(decl) => {
+            ScopeItem::Use(decl) => {
                 let mut leaves = Vec::new();
                 collect_use_leaves(&decl.tree, &[], false, &mut leaves);
                 for (_, target, glob) in leaves {
@@ -1204,7 +1332,7 @@ fn validate_use_items(
                     })?;
                 }
             }
-            _ => {}
+            ScopeItem::Def { .. } => {}
         }
     }
     Ok(())
@@ -1213,7 +1341,7 @@ fn validate_use_items(
 /// Build the compiler-owned `std` root from the trusted stdlib inputs. These
 /// definitions stay legacy in the lowering maps, so their namespace keys are
 /// their original bare names and no second implementation is introduced.
-fn register_stdlib_items(ws: &mut Workspace, rock_mod: &Ast) -> Result<(), CompilerError> {
+fn register_stdlib_items(ws: &mut Workspace, contribution: &FragmentContribution) -> Result<(), CompilerError> {
     let pkg = ws.ns.packages.entry(STD_PACKAGE_ID).or_insert_with(|| NsPackage {
         id: STD_PACKAGE_ID,
         self_name: ustr(STD_PACKAGE_NAME),
@@ -1226,10 +1354,11 @@ fn register_stdlib_items(ws: &mut Workspace, rock_mod: &Ast) -> Result<(), Compi
     });
     root.vis = Some(NsVisibility::Pub);
 
-    for item in &rock_mod.items {
-        let Some((name, kind)) = owned_name_and_kind(&item.kind) else {
+    for item in &contribution.items {
+        let ScopeItem::Def { name, kind, span, .. } = item else {
             continue;
         };
+        let (name, kind) = (*name, *kind);
         let table = match kind {
             "type" => &mut root.owned_types,
             "global" => &mut root.owned_globals,
@@ -1238,7 +1367,7 @@ fn register_stdlib_items(ws: &mut Workspace, rock_mod: &Ast) -> Result<(), Compi
         };
         if table.contains_key(&name) && kind != "callable" {
             return Err(CompilerError::new_with_label(
-                item.span,
+                *span,
                 format!("duplicate standard-library export `{name}`"),
             ));
         }
@@ -1259,35 +1388,35 @@ fn register_stdlib_items(ws: &mut Workspace, rock_mod: &Ast) -> Result<(), Compi
 /// each unresolved name.
 fn build_legacy_compatibility(
     ws: &mut Workspace,
-    rock_modules: &[Ast],
+    contributions: &[&FragmentContribution],
 ) -> Result<(), CompilerError> {
-    let v1_packages: FxHashSet<u32> = rock_modules
+    let v1_packages: FxHashSet<u32> = contributions
         .iter()
-        .filter(|rock_mod| {
-            rock_mod.dialect == skull_parser::Dialect::V1
-                && !is_stdlib_module_file(rock_mod.file.as_str())
+        .filter(|contribution| {
+            contribution.dialect == skull_parser::Dialect::V1
+                && !is_stdlib_module_file(contribution.file.as_str())
         })
-        .filter_map(|rock_mod| rock_mod.package.as_ref().map(|tag| tag.id))
+        .filter_map(|contribution| contribution.package.as_ref().map(|tag| tag.id))
         .collect();
 
-    for rock_mod in rock_modules {
-        if rock_mod.dialect != skull_parser::Dialect::Legacy
-            || is_stdlib_module_file(rock_mod.file.as_str())
+    for contribution in contributions {
+        if contribution.dialect != skull_parser::Dialect::Legacy
+            || is_stdlib_module_file(contribution.file.as_str())
         {
             continue;
         }
 
-        let package = rock_mod.package.as_ref().map(|tag| tag.id);
+        let package = contribution.package.as_ref().map(|tag| tag.id);
         let participating = legacy_participating_packages(ws, package, &v1_packages);
         let mut projection = LegacyProjection::default();
         for package in participating {
             project_public_module(ws, package, &[], &mut projection)?;
         }
-        ws.legacy_projections.insert(rock_mod.file, projection);
+        ws.legacy_projections.insert(contribution.file, projection);
 
-        let imports = build_legacy_imports(ws, rock_mod)?;
+        let imports = build_legacy_imports(ws, contribution)?;
         if !imports.is_empty() {
-            ws.legacy_imports.insert(rock_mod.file, imports);
+            ws.legacy_imports.insert(contribution.file, imports);
         }
     }
     Ok(())
@@ -1369,11 +1498,11 @@ fn projection_kind(kind: bone_lower::resolve::ResolvedKind) -> Option<DefKind> {
 
 fn build_legacy_imports(
     ws: &Workspace,
-    rock_mod: &Ast,
+    contribution: &FragmentContribution,
 ) -> Result<LegacyImports, CompilerError> {
     let mut uses = Vec::new();
-    for item in &rock_mod.items {
-        if let ItemKind::Use(decl) = &item.kind {
+    for item in &contribution.items {
+        if let ScopeItem::Use(decl) = item {
             collect_use_leaves(&decl.tree, &[], false, &mut uses);
         }
     }
@@ -1381,7 +1510,7 @@ fn build_legacy_imports(
         return Ok(LegacyImports::default());
     }
 
-    let Some(tag) = rock_mod.package.as_ref() else {
+    let Some(tag) = contribution.package.as_ref() else {
         return Err(CompilerError::new_no_location(
             "legacy item-level `use` needs an owning package to resolve its path",
         ));
@@ -1400,7 +1529,7 @@ fn build_legacy_imports(
             )
             .map_err(|message| {
                 CompilerError::new_with_label(
-                    rock_mod.module_header.as_ref().map(|h| h.span).unwrap_or_else(Span::unknown),
+                    contribution.header.as_ref().map(|h| h.span).unwrap_or_else(Span::unknown),
                     format!("legacy `use` glob could not be resolved: {message}"),
                 )
             })?;
@@ -1473,7 +1602,7 @@ fn register_items(
     ws: &mut Workspace,
     pkg_id: u32,
     path: &[ustr::Ustr],
-    items: &[Item],
+    items: &[ScopeItem],
     scope: &mut FragmentScope,
     errs: &mut Vec<CompilerError>,
 ) {
@@ -1502,13 +1631,13 @@ fn register_items(
     }
 
     for item in items {
-        match &item.kind {
-            ItemKind::Module(m) => {
+        match item {
+            ScopeItem::Module { name: block_name, vis: block_vis, item_span, items: block_items, .. } => {
                 let mut child = path.to_vec();
-                child.push(m.name.name);
-                if path.is_empty() && m.name.name.as_str() == STD_PACKAGE_NAME {
+                child.push(*block_name);
+                if path.is_empty() && block_name.as_str() == STD_PACKAGE_NAME {
                     errs.push(CompilerError::new_with_label(
-                        item.span,
+                        *item_span,
                         "the package-root module name `std` is reserved for the compiler-owned standard library".to_string(),
                     ));
                     continue;
@@ -1522,16 +1651,16 @@ fn register_items(
                         segments: path.to_vec(),
                         ..Default::default()
                     });
-                    if parent.owned_types.contains_key(&m.name.name)
-                        || parent.owned_globals.contains_key(&m.name.name)
-                        || parent.owned_callables.contains_key(&m.name.name)
-                        || parent.owned_decorators.contains_key(&m.name.name)
+                    if parent.owned_types.contains_key(block_name)
+                        || parent.owned_globals.contains_key(block_name)
+                        || parent.owned_callables.contains_key(block_name)
+                        || parent.owned_decorators.contains_key(block_name)
                     {
                         errs.push(CompilerError::new_with_label(
-                            item.span,
+                            *item_span,
                             format!(
                                 "duplicate definition `{}` in module `{}`",
-                                m.name.name,
+                                block_name,
                                 if path.is_empty() {
                                     scope.package_name.to_string()
                                 } else {
@@ -1540,11 +1669,11 @@ fn register_items(
                             ),
                         ));
                     } else {
-                        parent.children.insert(m.name.name, NsPackage::path_key(&child));
+                        parent.children.insert(*block_name, NsPackage::path_key(&child));
                     }
                 }
                 // Child visibility from the block header (`pub mod x { .. }`).
-                if let Some(vis) = item.vis.clone() {
+                if let Some(vis) = block_vis.clone() {
                     let child_key = NsPackage::path_key(&child);
                     let pkg = ws.ns.packages.get_mut(&pkg_id).expect("package");
                     let node = pkg.nodes.entry(child_key).or_insert_with(|| NsNode {
@@ -1556,10 +1685,10 @@ fn register_items(
                     if let Some(existing) = &node.vis {
                         if *existing != ns_vis {
                             errs.push(CompilerError::new_with_label(
-                                item.span,
+                                *item_span,
                                 format!(
                                     "conflicting visibility for module `{}`",
-                                    m.name.name
+                                    block_name
                                 ),
                             ));
                             continue;
@@ -1567,15 +1696,15 @@ fn register_items(
                     }
                     node.vis = Some(ns_vis);
                 }
-                register_items(ws, pkg_id, &child, &m.items, scope, errs);
+                register_items(ws, pkg_id, &child, block_items, scope, errs);
             }
-            ItemKind::Use(u) => {
+            ScopeItem::Use(u) => {
                 let skull_parser::UseTree::Path { from_root, .. } = &u.tree;
                 flatten_use_tree(ws, pkg_id, path, *from_root, &[], &u.tree, scope, u, errs);
             }
-            other => {
+            ScopeItem::Def { name: bare, kind, vis: item_vis, span: item_span } => {
                 // Ordinary definitions: register under the DefKey on the node.
-                let Some((bare, kind)) = owned_name_and_kind(other) else { continue };
+                let (bare, kind) = (*bare, *kind);
                 if path.is_empty() {
                     let pkg = ws.ns.packages.get(&pkg_id).expect("package");
                     if bare.as_str() == STD_PACKAGE_NAME
@@ -1583,7 +1712,7 @@ fn register_items(
                         || pkg.aliases.contains_key(&bare)
                     {
                         errs.push(CompilerError::new_with_label(
-                            item.span,
+                            *item_span,
                             format!(
                                 "root declaration `{bare}` collides with a package or dependency alias"
                             ),
@@ -1613,7 +1742,7 @@ fn register_items(
                     || node.children.contains_key(&bare);
                 if taken {
                     errs.push(CompilerError::new_with_label(
-                        item.span,
+                        *item_span,
                         format!(
                             "duplicate definition `{bare}` in module `{}`",
                             if path.is_empty() {
@@ -1645,8 +1774,8 @@ fn register_items(
                         module: path.to_vec(),
                         kind: def_kind,
                         name: bare,
-                        vis: to_ns_vis(&item.vis.clone().unwrap_or(skull_parser::Visibility::Private)),
-                        span: item.span,
+                        vis: to_ns_vis(&item_vis.clone().unwrap_or(skull_parser::Visibility::Private)),
+                        span: *item_span,
                         dialect: skull_parser::Dialect::V1,
                     },
                 );
@@ -2092,6 +2221,7 @@ pub fn pass_lower_functions(a: &Ast, ctx: &mut LowerCtx) -> Result<(), CompilerE
                 } else {
                     reg_key(&f.name.name, path)
                 };
+                ctx.workspace.relowered_body_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let fn_id = lower_function_def(
                     ctx,
                     a,

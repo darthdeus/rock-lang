@@ -603,7 +603,7 @@ impl BoneWorkspace {
                             });
                         }
                     }
-                    UpdateTier::Interface | UpdateTier::FullUser => lint_full = true,
+                    UpdateTier::Interface | UpdateTier::Scope | UpdateTier::FullUser => lint_full = true,
                     UpdateTier::NoChange => {}
                 }
             }

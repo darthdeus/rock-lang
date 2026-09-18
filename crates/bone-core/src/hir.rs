@@ -371,6 +371,10 @@ pub struct Module {
     /// a fresh module, so it is naturally correct either way.
     pub lowering_errors: FxHashMap<BodyOwner, Vec<CompilerError>>,
     pub interface_errors: Vec<CompilerError>,
+    /// Every namespace fact this module's lowering read (plan 2.6). A full
+    /// lowering replaces the set; the one-body fast path only adds to it, so
+    /// a superset is kept and an extra re-lower is the worst it costs.
+    pub scope_probes: FxHashSet<crate::modules::ScopeProbe>,
 }
 
 impl Default for Module {
@@ -410,6 +414,7 @@ impl Default for Module {
 
             lowering_errors: Default::default(),
             interface_errors: Default::default(),
+            scope_probes: Default::default(),
         }
     }
 }

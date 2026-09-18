@@ -348,6 +348,24 @@ pub fn legacy_family_keys(ws: &crate::workspace::Workspace, file: Ustr, name: Us
     keys
 }
 
+/// One namespace fact a lowering read (plan 2.6, scope epochs). A module's
+/// lowering records every probe its lookups made, hit or miss, so an edit to
+/// the namespace tree re-lowers exactly the modules that read a changed fact.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ScopeProbe {
+    /// What module `node` of `package` offers under `name`: its owned entry,
+    /// named export binding and child module of that name, the owned
+    /// definition's `DefMeta`, and -- through the node's glob export
+    /// bindings -- whatever they open. A glob target is probed in turn.
+    Member { package: PackageId, node: Ustr, name: Ustr },
+    /// Module `node` of `package` entered as a path segment: its presence and
+    /// its declared visibility.
+    Node { package: PackageId, node: Ustr },
+    /// A legacy file's lookup of the bare `name` (`legacy_name`): the file's
+    /// compatibility views and the legacy-owned facts for that name.
+    Legacy { name: Ustr },
+}
+
 /// Per-package scope facts the resolver needs, built by the semantic pass
 /// from the fragments plus the host's alias tables.
 #[derive(Clone, Debug, Default)]

@@ -69,9 +69,35 @@ pub struct LowerCtx<'a> {
 
     pub placeholder_param: Option<Idx<BindingInfo>>,
     pub placeholder_forbidden: bool,
+
+    /// The namespace facts this lowering's lookups read (plan 2.6), moved
+    /// into `Module.scope_probes` when the lowering finishes
+    /// ([`LowerCtx::flush_scope_probes`]). A cell because lookups run from
+    /// `&self` helpers.
+    pub scope_probes: std::cell::RefCell<Vec<bone_core::modules::ScopeProbe>>,
 }
 
 impl<'a> LowerCtx<'a> {
+    /// Run one resolver lookup and record what it read.
+    fn probed<R>(&self, lookup: impl FnOnce() -> R) -> R {
+        let (result, probes) = resolve::with_probes(lookup);
+        self.scope_probes.borrow_mut().extend(probes);
+        result
+    }
+
+    /// A legacy file's bare-name lookup reads `legacy_name(file, name)`.
+    fn probe_legacy(&self, name: Ustr) {
+        self.scope_probes
+            .borrow_mut()
+            .push(bone_core::modules::ScopeProbe::Legacy { name });
+    }
+
+    /// Move the recorded probes into the module being lowered.
+    pub fn flush_scope_probes(&mut self) {
+        let probes = std::mem::take(self.scope_probes.get_mut());
+        self.module.scope_probes.extend(probes);
+    }
+
     /// This file's modules-v1 fragment scope (None for legacy files and
     /// synthetic modules). Resolution tiering applies only when present.
     pub fn v1_scope(&self) -> Option<&bone_core::modules::FragmentScope> {
@@ -93,7 +119,7 @@ impl<'a> LowerCtx<'a> {
             from_root: path.from_root,
             segments: path.segments.iter().map(|i| i.name).collect(),
         };
-        match resolve::resolve_member_path(self.workspace, frag, &use_path) {
+        match self.probed(|| resolve::resolve_member_path(self.workspace, frag, &use_path)) {
             Ok(resolve::MemberTarget::Global(key))
                 if matches!(
                     self.workspace.defs.get(&key).map(|m| m.kind),
@@ -123,7 +149,7 @@ impl<'a> LowerCtx<'a> {
             from_root: path.from_root,
             segments: path.segments.iter().map(|i| i.name).collect(),
         };
-        match resolve::resolve_member_path(self.workspace, frag, &use_path) {
+        match self.probed(|| resolve::resolve_member_path(self.workspace, frag, &use_path)) {
             Ok(resolve::MemberTarget::EnumVariant { enum_key, variant }) => {
                 Some((enum_key, variant))
             }
@@ -137,8 +163,11 @@ impl<'a> LowerCtx<'a> {
         span: Span,
     ) -> Result<resolve::Resolved, CompilerError> {
         match self.v1_scope() {
-            Some(frag) => resolve::resolve_bare(self.workspace, Some(frag), name),
-            None => resolve::resolve_legacy_bare(self.workspace, self.module.file, name),
+            Some(frag) => self.probed(|| resolve::resolve_bare(self.workspace, Some(frag), name)),
+            None => {
+                self.probe_legacy(name);
+                resolve::resolve_legacy_bare(self.workspace, self.module.file, name)
+            }
         }
         .map_err(|msg| CompilerError::new_with_label(span, msg))
     }
@@ -153,11 +182,13 @@ impl<'a> LowerCtx<'a> {
         span: Span,
     ) -> Result<(Ustr, hir::CallFamily), CompilerError> {
         if let Some(frag) = self.v1_scope() {
-            let r = resolve::resolve_bare(self.workspace, Some(frag), name)
+            let r = self
+                .probed(|| resolve::resolve_bare(self.workspace, Some(frag), name))
                 .map_err(|msg| CompilerError::new_with_label(span, msg))?;
             return Ok((r.key, hir::CallFamily::resolved(r.key, &r.hidden)));
         }
         let file = self.module.file;
+        self.probe_legacy(name);
         match resolve::resolve_legacy_callee(self.workspace, file, name)
             .map_err(|msg| CompilerError::new_with_label(span, msg))?
         {
@@ -471,7 +502,7 @@ pub fn lower_type_expr_in(
                 from_root: path.from_root,
                 segments: path.segments.iter().map(|i| i.name).collect(),
             };
-            let resolved = match resolve::resolve_path(ctx.workspace, frag, &use_path) {
+            let resolved = match ctx.probed(|| resolve::resolve_path(ctx.workspace, frag, &use_path)) {
                 Ok(r) => r,
                 Err(msg) => return Err(CompilerError::new_with_label(te.span, msg)),
             };
@@ -492,7 +523,7 @@ pub fn lower_type_expr_in(
                 from_root: path.from_root,
                 segments: path.segments.iter().map(|i| i.name).collect(),
             };
-            let resolved = match resolve::resolve_path(ctx.workspace, frag, &use_path) {
+            let resolved = match ctx.probed(|| resolve::resolve_path(ctx.workspace, frag, &use_path)) {
                 Ok(r) => r,
                 Err(msg) => return Err(CompilerError::new_with_label(te.span, msg)),
             };
@@ -1530,7 +1561,7 @@ pub fn lower_expr_value(
                 from_root: path.from_root,
                 segments: path.segments.iter().map(|i| i.name).collect(),
             };
-            match resolve::resolve_member_path(ctx.workspace, frag, &use_path) {
+            match ctx.probed(|| resolve::resolve_member_path(ctx.workspace, frag, &use_path)) {
                 Ok(resolve::MemberTarget::Global(key)) => Expr::Global(key),
                 Ok(resolve::MemberTarget::EnumVariant { enum_key, variant }) => {
                     Expr::EnumVariant {
@@ -1558,7 +1589,7 @@ pub fn lower_expr_value(
                 from_root: path.from_root,
                 segments: path.segments.iter().map(|i| i.name).collect(),
             };
-            let target = match resolve::resolve_member_path(ctx.workspace, frag, &use_path) {
+            let target = match ctx.probed(|| resolve::resolve_member_path(ctx.workspace, frag, &use_path)) {
                 Ok(t) => t,
                 Err(msg) => return Err(CompilerError::new_with_label(e.span, msg)),
             };
@@ -2387,6 +2418,7 @@ pub fn relower_function_in_place(
     fid: Idx<Function>,
 ) -> Result<bool, CompilerError> {
     let owner = BodyOwner::Function(fid);
+    ws.relowered_body_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
     // Body-only fast path. The caller (`classify`) guarantees the signature TEXT
     // is unchanged, so REUSE the existing signature -- crucially its module
@@ -2410,9 +2442,11 @@ pub fn relower_function_in_place(
             _next_var_id: high_water,
             placeholder_param: None,
             placeholder_forbidden: false,
+            scope_probes: Default::default(),
         };
 
         let (func, body, errors) = build_function(&mut ctx, a, f, annotations)?;
+        ctx.flush_scope_probes();
 
         ctx.module.lower_var_high_water = ctx._next_var_id;
         ctx.module.functions[fid] = func;
@@ -2458,6 +2492,7 @@ pub fn relower_function_in_place(
         _next_var_id: high_water,
         placeholder_param: None,
         placeholder_forbidden: false,
+        scope_probes: Default::default(),
     };
 
     let mut body = Body::default();
@@ -2493,6 +2528,7 @@ pub fn relower_function_in_place(
             errors.push(e);
         }
     }
+    ctx.flush_scope_probes();
 
     // REPLACE this body's lowering errors (clears stale ones from a prior edit) --
     // the flat-Vec append was the lower-error-path leak + stale-diagnostic bug.
@@ -3030,7 +3066,7 @@ fn lower_pattern_value(
             from_root: path.from_root,
             segments: path.segments.iter().map(|i| i.name).collect(),
         };
-        let (enum_key, variant) = resolve::resolve_variant_pattern(ctx.workspace, frag, &use_path)
+        let (enum_key, variant) = ctx.probed(|| resolve::resolve_variant_pattern(ctx.workspace, frag, &use_path))
             .map_err(|msg| CompilerError::new_no_location(msg))?;
         let sub = match args {
             None => IdxRange::new_empty(),
@@ -3060,7 +3096,7 @@ fn lower_pattern_value(
             from_root: path.from_root,
             segments: path.segments.iter().map(|i| i.name).collect(),
         };
-        let (enum_key, variant) = resolve::resolve_variant_pattern(ctx.workspace, frag, &use_path)
+        let (enum_key, variant) = ctx.probed(|| resolve::resolve_variant_pattern(ctx.workspace, frag, &use_path))
             .map_err(|msg| CompilerError::new_no_location(msg))?;
         let mut entries = Vec::with_capacity(fields.len());
         for (fname, subpat) in fields.iter() {
@@ -3491,7 +3527,7 @@ pub fn lower_annotations_with_ctx(
         return lowered;
     };
     for anno in &mut lowered {
-        if let Ok(resolved) = resolve::resolve_bare(ctx.workspace, Some(frag), anno.name.name) {
+        if let Ok(resolved) = ctx.probed(|| resolve::resolve_bare(ctx.workspace, Some(frag), anno.name.name)) {
             anno.resolved_name = Some(resolved.key);
         }
         let is_wire_role = anno.name.name.as_str() == "wire"
@@ -3516,7 +3552,7 @@ pub fn lower_annotations_with_ctx(
         };
         let mut resolved = Vec::with_capacity(names.len());
         for name in names {
-            let Ok(identity) = resolve::resolve_bare(ctx.workspace, Some(frag), name.name) else {
+            let Ok(identity) = ctx.probed(|| resolve::resolve_bare(ctx.workspace, Some(frag), name.name)) else {
                 resolved.clear();
                 break;
             };

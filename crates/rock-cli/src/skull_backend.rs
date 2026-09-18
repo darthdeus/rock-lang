@@ -1361,7 +1361,7 @@ pub fn skull_watch(path: &str, output: Option<String>) -> Result<()> {
                 for f in &files {
                     match s.update_file(&f.path, &f.text) {
                         Ok(result) => {
-                            if matches!(result.tier, bone_incremental::session::UpdateTier::Interface | bone_incremental::session::UpdateTier::FullUser) {
+                            if matches!(result.tier, bone_incremental::session::UpdateTier::Interface | bone_incremental::session::UpdateTier::Scope | bone_incremental::session::UpdateTier::FullUser) {
                                 full = true;
                             }
                             reinferred.extend(result.reinferred);
