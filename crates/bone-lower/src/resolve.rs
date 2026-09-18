@@ -187,7 +187,7 @@ fn legacy_resolved_kind(kind: bone_core::modules::DefKind) -> ResolvedKind {
 /// files (no fragment scope) return the bare name unchanged.
 /// The first tier that binds the name decides; a bound-but-broken target
 /// is a diagnostic, never a fallthrough (spec 8.3). Several explicit imports
-/// of one name are one definition only in callee position
+/// (or glob candidates) of one name are one family only in callee position
 /// (`resolve_v1_callee`); anywhere else they are a diagnostic.
 pub fn resolve_bare(
     ws: &Workspace,
@@ -199,24 +199,26 @@ pub fn resolve_bare(
     };
     match bind_bare(ws, frag, name)? {
         Bound::One(resolved, _) => Ok(resolved),
-        Bound::Imports(hits, _) => Err(several_imports(name, &hits)),
+        Bound::Several(hits, _, via) => Err(several(name, &hits, via)),
     }
 }
 
 /// A bare name in callee position in a v1 fragment (spec 8.3, 8.5). Explicit
-/// imports of different callables compose into one family; a composition
-/// that is not all callables is a diagnostic. A declared, imported or
-/// globbed operator keeps the std prelude's operator family beside it, so a
-/// module's own `operator +` does not hide built-in arithmetic.
+/// imports of different callables compose into one family, and so do glob
+/// candidates of different callables when no higher tier binds the name; a
+/// composition that is not all callables is a diagnostic. A declared,
+/// imported or globbed operator keeps the std prelude's operator family
+/// beside it, so a module's own `operator +` does not hide built-in
+/// arithmetic.
 pub fn resolve_v1_callee(ws: &Workspace, frag: &FragmentScope, name: Ustr) -> Result<CalleeFamily, String> {
     let operator = bone_core::hir::operator_entry(name.as_str()).is_some_and(|(_, overloadable)| overloadable);
     let (mut keys, hidden) = match bind_bare(ws, frag, name)? {
         Bound::One(resolved, Tier::Std) => return Ok(CalleeFamily::Single(resolved)),
         Bound::One(resolved, Tier::Scope) if !operator => return Ok(CalleeFamily::Single(resolved)),
         Bound::One(resolved, Tier::Scope) => (vec![resolved.key], resolved.hidden),
-        Bound::Imports(hits, hidden) => {
+        Bound::Several(hits, hidden, via) => {
             if hits.iter().any(|(_, kind)| *kind != ResolvedKind::Callable) {
-                return Err(several_imports(name, &hits));
+                return Err(several(name, &hits, via));
             }
             (hits.into_iter().map(|(key, _)| key).collect(), hidden)
         }
@@ -245,9 +247,16 @@ enum Tier {
 /// What the tiers bind a bare name to in a v1 fragment.
 enum Bound {
     One(Resolved, Tier),
-    /// Explicit imports of several distinct definitions, sorted by key, and
-    /// the glob candidates they hide.
-    Imports(Vec<(Ustr, ResolvedKind)>, Vec<Ustr>),
+    /// Several distinct definitions at one tier, sorted by key, the lower
+    /// tier's candidates they hide, and which tier bound them.
+    Several(Vec<(Ustr, ResolvedKind)>, Vec<Ustr>, Via),
+}
+
+/// The tier that bound several definitions under one name.
+#[derive(Clone, Copy)]
+enum Via {
+    Imports,
+    Globs,
 }
 
 fn bind_bare(ws: &Workspace, frag: &FragmentScope, name: Ustr) -> Result<Bound, String> {
@@ -283,21 +292,17 @@ fn bind_bare(ws: &Workspace, frag: &FragmentScope, name: Ustr) -> Result<Bound, 
         hits.dedup_by_key(|(k, _)| *k);
         return Ok(match hits[..] {
             [(key, kind)] => Bound::One(Resolved { key, kind, hidden }, Tier::Scope),
-            _ => Bound::Imports(hits, hidden),
+            _ => Bound::Several(hits, hidden, Via::Imports),
         });
     }
 
-    // Tier 4: glob bindings. Ambiguous globs diagnose rather than picking
-    // HashMap iteration order (spec 8.3 / 8.7).
-    if !glob_hits.is_empty() {
-        if glob_hits.len() > 1 {
-            return Err(format!(
-                "`{name}` is ambiguous between glob imports {}",
-                glob_hits.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>().join(", ")
-            ));
-        }
-        let (key, kind) = glob_hits[0];
-        return Ok(Bound::One(Resolved { key, kind, hidden: Vec::new() }, Tier::Scope));
+    // Tier 4: glob bindings. Several candidates are one family only in
+    // callee position; anywhere else they are ambiguous at use, never a
+    // HashMap-order pick (spec 8.3 / 8.7).
+    match glob_hits[..] {
+        [] => {}
+        [(key, kind)] => return Ok(Bound::One(Resolved { key, kind, hidden: Vec::new() }, Tier::Scope)),
+        _ => return Ok(Bound::Several(glob_hits, Vec::new(), Via::Globs)),
     }
 
     // Tier 5: the compiler-owned std export view. There is no legacy
@@ -305,15 +310,23 @@ fn bind_bare(ws: &Workspace, frag: &FragmentScope, name: Ustr) -> Result<Bound, 
     std_bare(ws, name).map(|r| Bound::One(r, Tier::Std))
 }
 
-/// Several explicit imports of `name` where one definition is wanted: a
+/// Several imports or globs of `name` where one definition is wanted: a
 /// composed callable family used as a value, or definitions that cannot
 /// compose (spec 8.3).
-fn several_imports(name: Ustr, hits: &[(Ustr, ResolvedKind)]) -> String {
+fn several(name: Ustr, hits: &[(Ustr, ResolvedKind)], via: Via) -> String {
     let keys = hits.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>().join(", ");
-    if hits.iter().all(|(_, kind)| *kind == ResolvedKind::Callable) {
-        format!("`{name}` names an overload family of several imports ({keys}), not a single definition")
-    } else {
-        format!("`{name}` is imported from several definitions that do not form one overload family: {keys}")
+    let callables = hits.iter().all(|(_, kind)| *kind == ResolvedKind::Callable);
+    match (via, callables) {
+        (Via::Imports, true) => {
+            format!("`{name}` names an overload family of several imports ({keys}), not a single definition")
+        }
+        (Via::Imports, false) => {
+            format!("`{name}` is imported from several definitions that do not form one overload family: {keys}")
+        }
+        (Via::Globs, true) => {
+            format!("`{name}` names an overload family of several glob imports ({keys}), not a single definition")
+        }
+        (Via::Globs, false) => format!("`{name}` is ambiguous between glob imports {keys}"),
     }
 }
 

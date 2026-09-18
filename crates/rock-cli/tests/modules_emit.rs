@@ -439,3 +439,68 @@ fn main() {
     );
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// `use provider::*; use other::*;` compose `pick` and `operator +` across
+/// the two modules (spec 8.3, 8.5; author decision: merge): each call and
+/// each `+` runs the member its argument types select (`+ 1000`, `!`,
+/// `+ 100` and `+ 7` mark them), while int addition stays built-in.
+#[test]
+fn v1_glob_imports_compose_and_run_the_selected_member() {
+    let root = std::env::temp_dir().join("rock_modules_emit_v1_composed_globs");
+    let _ = std::fs::remove_dir_all(&root);
+    v1_lib(
+        &root.join("provider"),
+        "provider",
+        r#"pub fn pick(n: int) -> int {
+    n + 1000
+}
+
+pub struct Pt {
+    pub x: int,
+}
+
+pub operator +(a: Pt, b: Pt) -> Pt {
+    Pt { x: a.x + b.x + 100 }
+}
+"#,
+    );
+    v1_lib(
+        &root.join("other"),
+        "other",
+        r#"pub fn pick(s: string) -> string {
+    s + "!"
+}
+
+pub struct Rgb {
+    pub r: int,
+}
+
+pub operator +(a: Rgb, b: Rgb) -> Rgb {
+    Rgb { r: a.r + b.r + 7 }
+}
+"#,
+    );
+    let app = root.join("app");
+    v1_app(
+        &app,
+        &["provider", "other"],
+        r#"use provider::*;
+use other::*;
+
+fn main() {
+    let u = "u".pick()
+    let p = Pt { x: 1 } + Pt { x: 2 }
+    let c = Rgb { r: 1 } + Rgb { r: 2 }
+    let n = 1 + 2
+    print("i={pick(1)} s={pick("s")} u={u} p={p.x} c={c.r} n={n}")
+}
+"#,
+    );
+    let (stdout, stderr, ok) = run(&app);
+    assert!(ok, "v1 composed glob project failed\nstdout:\n{stdout}\nstderr:\n{stderr}");
+    assert!(
+        stdout.contains("i=1001 s=s! u=u! p=103 c=10 n=3"),
+        "composed globs should run the member each argument selects\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}

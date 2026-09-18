@@ -764,10 +764,10 @@ fn a_module_visibility_widened_opens_a_path_through_it() {
     assert_eq!(h.call_keys("c.rock"), vec![(key("outer::hidden::f"), None)]);
 }
 
-/// A glob export added to the hub a fragment globs makes its bare name
-/// ambiguous.
+/// A glob export added to the hub a fragment globs composes a second
+/// same-signature `bump` into the globber's family, so its call ties.
 #[test]
-fn a_glob_reexport_added_makes_a_globbers_name_ambiguous() {
+fn a_glob_reexport_added_ties_a_globbers_call() {
     let hub0 = "mod hub;\n\npub use super::a::*;\n";
     let hub1 = "mod hub;\n\npub use super::a::*;\npub use super::b::*;\n";
     let user = "mod user;\n\nuse super::hub::*;\n\nfn pick() -> int {\n    bump(1)\n}\n";
@@ -776,7 +776,7 @@ fn a_glob_reexport_added_makes_a_globbers_name_ambiguous() {
 
     let r = h.edit("hub.rock", hub1).expect("accepted");
     assert_eq!(r.tier, UpdateTier::Scope);
-    assert!(h.diagnostics().iter().any(|d| d.contains("ambiguous")), "{:?}", h.diagnostics());
+    assert!(h.diagnostics().iter().any(|d| d.contains("Ambiguous overload for `bump`")), "{:?}", h.diagnostics());
 }
 
 /// The definition at the end of a re-export chain renamed: the chain's own

@@ -617,19 +617,47 @@ fn f() -> bool {
     v
 }
 
-//- colliding_glob_reexports_are_ambiguous_at_use @fail=ambiguous
+//- colliding_glob_reexports_are_ambiguous_at_use @fail=`Same` is ambiguous between glob imports chess::a::Same, chess::b::Same
 //-- lib_a.rock @pkg=chess,1 @v1
 pub mod a;
 
-pub fn same() -> int {
-    1
+pub struct Same {
+    pub n: int,
 }
 
 //-- lib_b.rock @pkg=chess,1 @v1
 pub mod b;
 
-pub fn same() -> string {
-    "b"
+pub struct Same {
+    pub s: string,
+}
+
+//-- lib_facade.rock @pkg=chess,1 @v1
+pub mod facade;
+
+pub use chess::a::*;
+pub use chess::b::*;
+
+//-- app.rock @pkg=app,2 @v1
+use chess::facade::*;
+
+fn f(s: Same) -> int {
+    1
+}
+
+//- colliding_glob_reexported_callables_compose_at_use
+//-- lib_a.rock @pkg=chess,1 @v1
+pub mod a;
+
+pub fn same(n: int) -> int {
+    n
+}
+
+//-- lib_b.rock @pkg=chess,1 @v1
+pub mod b;
+
+pub fn same(s: string) -> string {
+    s
 }
 
 //-- lib_facade.rock @pkg=chess,1 @v1
@@ -642,7 +670,9 @@ pub use chess::b::*;
 use chess::facade::*;
 
 fn f() -> int {
-    same()
+    let s = same("b")
+            //^ string
+    same(1)
 }
 
 //- a_modules_own_reexport_binding_names_its_target_in_the_module

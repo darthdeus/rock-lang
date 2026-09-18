@@ -1,6 +1,7 @@
 //! Modules-v1 overload families that span more than one definition (spec 8.3,
 //! 8.5): a declared or imported operator keeps the built-in operator family,
-//! explicit imports of different callables compose at their tier, and
+//! explicit imports of different callables compose at their tier, glob-tier
+//! callables of different modules compose at theirs, and
 //! compound assignment reads the family its binary operator reads.
 //!
 //! Sections hold embedded files: `//-- <file> @pkg=<self_name>,<id> [@v1]`.
@@ -317,7 +318,7 @@ fn use_it() -> int {
     Pick(1)
 }
 
-//- glob_imported_callables_of_two_modules_stay_ambiguous @fail=`pick` is ambiguous between glob imports lib_a::pick, lib_b::pick
+//- glob_imported_callables_of_two_modules_compose
 //-- a.rock @pkg=lib_a,1 @v1
 pub fn pick(n: int) -> int {
     n
@@ -333,7 +334,222 @@ use lib_a::*;
 use lib_b::*;
 
 fn use_it() -> int {
+    let s = pick("v1")
+            //^ string
+    let u = "ufcs".pick()
+                   //^ string
+    let n = pick(1)
+            //^ int
+    n
+}
+
+//- same_signature_glob_callables_tie_at_the_call @fail=lib_b::pick(n: int) -> int (v1 definition lib_b::pick)
+//-- a.rock @pkg=lib_a,1 @v1
+pub fn pick(n: int) -> int {
+    n
+}
+
+//-- b.rock @pkg=lib_b,2 @v1
+pub fn pick(n: int) -> int {
+    n
+}
+
+//-- main.rock @pkg=game,3 @v1
+use lib_a::*;
+use lib_b::*;
+
+fn use_it() -> int {
     pick(1)
+}
+
+//- two_glob_routes_to_one_definition_deduplicate
+//-- a.rock @pkg=lib_a,1 @v1
+pub use self::inner::*;
+
+//-- a_inner.rock @pkg=lib_a,1 @v1
+pub mod inner;
+
+pub fn pick(n: int) -> int {
+    n
+}
+
+//-- main.rock @pkg=game,3 @v1
+use lib_a::*;
+use lib_a::inner::*;
+
+fn use_it() -> int {
+    let n = pick(1)
+            //^ int
+    let f = pick
+    n
+}
+
+//- a_composed_glob_family_is_not_a_single_value @fail=`pick` names an overload family of several glob imports (lib_a::pick, lib_b::pick), not a single definition
+//-- a.rock @pkg=lib_a,1 @v1
+pub fn pick(n: int) -> int {
+    n
+}
+
+//-- b.rock @pkg=lib_b,2 @v1
+pub fn pick(s: string) -> string {
+    s
+}
+
+//-- main.rock @pkg=game,3 @v1
+use lib_a::*;
+use lib_b::*;
+
+fn use_it() {
+    let f = pick
+}
+
+//- glob_imported_types_of_two_modules_stay_ambiguous @fail=`Pick` is ambiguous between glob imports lib_a::Pick, lib_b::Pick
+//-- a.rock @pkg=lib_a,1 @v1
+pub struct Pick {
+    pub n: int,
+}
+
+//-- b.rock @pkg=lib_b,2 @v1
+pub struct Pick {
+    pub s: string,
+}
+
+//-- main.rock @pkg=game,3 @v1
+use lib_a::*;
+use lib_b::*;
+
+fn use_it(p: Pick) -> int {
+    1
+}
+
+//- a_globbed_callable_and_type_stay_ambiguous_at_the_call @fail=`Pick` is ambiguous between glob imports lib_a::Pick, lib_b::Pick
+//-- a.rock @pkg=lib_a,1 @v1
+pub struct Pick {
+    pub n: int,
+}
+
+//-- b.rock @pkg=lib_b,2 @v1
+pub fn Pick(n: int) -> int {
+    n
+}
+
+//-- main.rock @pkg=game,3 @v1
+use lib_a::*;
+use lib_b::*;
+
+fn use_it() -> int {
+    Pick(1)
+}
+
+//- an_explicit_import_hides_the_composed_glob_family @fail=type mismatch: expected `int`, found `string`
+//-- a.rock @pkg=lib_a,1 @v1
+pub fn pick(n: int) -> int {
+    n
+}
+
+//-- b.rock @pkg=lib_b,2 @v1
+pub fn pick(s: string) -> string {
+    s
+}
+
+//-- main.rock @pkg=game,3 @v1
+use lib_a::pick;
+use lib_a::*;
+use lib_b::*;
+
+fn use_it() -> string {
+    pick("v1")
+}
+
+//- an_own_definition_hides_the_composed_glob_family @fail=type mismatch: expected `bool`, found `int`
+//-- a.rock @pkg=lib_a,1 @v1
+pub fn pick(n: int) -> int {
+    n
+}
+
+//-- b.rock @pkg=lib_b,2 @v1
+pub fn pick(s: string) -> string {
+    s
+}
+
+//-- main.rock @pkg=game,3 @v1
+use lib_a::*;
+use lib_b::*;
+
+fn pick(b: bool) -> bool {
+    b
+}
+
+fn use_it() -> int {
+    pick(1)
+}
+
+//- globbed_operators_of_two_modules_compose_with_builtin_arithmetic
+//-- geo.rock @pkg=geo,1 @v1
+pub struct Pt {
+    pub x: int,
+    pub y: int,
+}
+
+pub operator +(a: Pt, b: Pt) -> Pt {
+    Pt { x: a.x + b.x, y: a.y + b.y }
+}
+
+//-- clr.rock @pkg=clr,2 @v1
+pub struct Rgb {
+    pub r: int,
+}
+
+pub operator +(a: Rgb, b: Rgb) -> Rgb {
+    Rgb { r: a.r + b.r }
+}
+
+//-- app.rock @pkg=app,3 @v1
+use geo::*;
+use clr::*;
+
+fn sums() -> int {
+    let p = Pt { x: 1, y: 2 } + Pt { x: 3, y: 4 }
+            //^ geo::Pt
+    let c = Rgb { r: 1 } + Rgb { r: 2 }
+            //^ clr::Rgb
+    let n = 1 + 2
+            //^ int
+    let f = 1.5 + 2.0
+            //^ float
+    let s = "a" + "b"
+            //^ string
+    let q = Pt { x: 0, y: 0 }
+    q += Pt { x: 1, y: 1 }
+    p.x + c.r + n
+}
+
+//- globbed_operators_do_not_admit_an_undeclared_operand @fail=No overload for `__op_add` with argument types (geo::Pt, clr::Rgb)
+//-- geo.rock @pkg=geo,1 @v1
+pub struct Pt {
+    pub x: int,
+    pub y: int,
+}
+
+pub operator +(a: Pt, b: Pt) -> Pt {
+    Pt { x: a.x + b.x, y: a.y + b.y }
+}
+
+//-- clr.rock @pkg=clr,2 @v1
+pub struct Rgb {
+    pub r: int,
+}
+
+pub operator +(a: Rgb, b: Rgb) -> Rgb {
+    Rgb { r: a.r + b.r }
+}
+
+//-- app.rock @pkg=app,3 @v1
+use geo::*;
+use clr::*;
+
+fn bad() -> Pt {
+    Pt { x: 1, y: 2 } + Rgb { r: 1 }
 }
 
 //- legacy_explicit_imports_of_two_callables_compose

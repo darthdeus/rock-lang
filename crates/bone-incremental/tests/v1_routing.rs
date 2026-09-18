@@ -480,3 +480,73 @@ fn a_member_signature_edit_ties_a_composed_import_family() {
         assert!(diags.is_empty(), "{dialect:?}: {diags:?}");
     }
 }
+
+const GLOB_A: &str = "use lib_a::*;\n\n";
+const GLOB_BOTH: &str = "use lib_a::*;\nuse lib_b::*;\n\n";
+
+/// Glob candidates of two different callables compose into one family when
+/// no higher tier binds the name (spec 8.3, author decision: merge). Adding
+/// the second glob composes it (a `use` edit: scope path); removing it
+/// splits the family again, and `pick("v1")` no longer has a member. Each
+/// edit agrees with a fresh session.
+#[test]
+fn a_second_glob_composes_and_removing_it_splits_the_family() {
+    let files = |imports: &str| {
+        vec![
+            v1_in(1, "lib_a", "a.rock", PICK_INT),
+            v1_in(2, "lib_b", "b.rock", PICK_STRING),
+            v1_in(3, "game", "use.rock", &format!("{imports}{PICK_USE}")),
+        ]
+    };
+    let aliases = aliases_of(&files(""));
+    let both = format!("{GLOB_BOTH}{PICK_USE}");
+    let one = format!("{GLOB_A}{PICK_USE}");
+
+    let (tier, diags) = edit_with_aliases(files(GLOB_A), "use.rock", &both, &aliases);
+    assert_eq!(tier, UpdateTier::Scope);
+    assert!(diags.is_empty(), "{diags:?}");
+
+    let (tier, diags) = edit_with_aliases(files(GLOB_BOTH), "use.rock", &one, &aliases);
+    assert_eq!(tier, UpdateTier::Scope);
+    assert!(diags.iter().any(|d| d.contains("type mismatch")), "{diags:?}");
+}
+
+/// A globbed module gaining or losing a `pick` is an edit to ANOTHER file:
+/// the globber's recorded lookup of `pick` is dirty, so the scope path
+/// re-lowers it and its family gains or loses the member, as a fresh
+/// session decides.
+#[test]
+fn a_member_added_to_a_second_globbed_module_relowers_the_globber() {
+    let other = "pub fn other() -> int {\n    1\n}\n";
+    let files = |b: &str| {
+        vec![
+            v1_in(1, "lib_a", "a.rock", PICK_INT),
+            v1_in(2, "lib_b", "b.rock", b),
+            v1_in(3, "game", "use.rock", &format!("{GLOB_BOTH}{PICK_USE}")),
+        ]
+    };
+    let aliases = aliases_of(&files(other));
+    let relowers_the_globber = |b0: &str, b1: &str| {
+        let mut session = Session::new(vec![], files(b0), &aliases).expect("baseline builds");
+        let before = diagnostics(&session);
+        let tier = session.update_file("b.rock", b1).expect("the edit is accepted").tier;
+        let relowered =
+            session.workspace().relowered_body_count.load(std::sync::atomic::Ordering::Relaxed);
+        (tier, before, relowered)
+    };
+
+    let (tier, before, relowered) = relowers_the_globber(other, PICK_STRING);
+    assert_eq!(tier, UpdateTier::Scope);
+    assert!(before.iter().any(|d| d.contains("type mismatch")), "{before:?}");
+    // b.rock's `pick` and use.rock's `use_it`.
+    assert_eq!(relowered, 2);
+    let (_, diags) = edit_with_aliases(files(other), "b.rock", PICK_STRING, &aliases);
+    assert!(diags.is_empty(), "{diags:?}");
+
+    let (tier, before, relowered) = relowers_the_globber(PICK_STRING, other);
+    assert_eq!(tier, UpdateTier::Scope);
+    assert!(before.is_empty(), "{before:?}");
+    assert_eq!(relowered, 2);
+    let (_, diags) = edit_with_aliases(files(PICK_STRING), "b.rock", other, &aliases);
+    assert!(diags.iter().any(|d| d.contains("type mismatch")), "{diags:?}");
+}
