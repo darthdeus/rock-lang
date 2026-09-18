@@ -1721,6 +1721,18 @@ mod modules_items_tests {
     }
 
     #[test]
+    fn a_second_file_header_rejects_in_v1() {
+        for src in ["mod a;\nmod b;\n\nfn f() {}", "mod a;\n// between\npub mod a;\n"] {
+            let err = parse_v1(src).expect_err("a file has one header");
+            assert!(
+                err.message.contains("a file has one `mod path;` header"),
+                "got: {}",
+                err.message
+            );
+        }
+    }
+
+    #[test]
     fn inline_mod_block_parses_in_v1() {
         let ast = parse_v1("pub mod combat {\n    pub fn heal() {}\n}\n").expect("parse");
         assert!(ast.recovery_errors.is_empty(), "{:?}", ast.recovery_errors);

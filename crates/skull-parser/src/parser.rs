@@ -278,6 +278,11 @@ impl<'a> Parser<'a> {
                         return Err(self.err(
                             "expected `;` after the file header path (or `{` for an inline block)",
                         ));
+                    } else if self.ast.module_header.is_some() {
+                        return Err(CompilerError::new_with_label(
+                            span,
+                            "a file has one `mod path;` header; a second one would move the rest of the file to another module".to_string(),
+                        ));
                     } else {
                         self.advance(); // `;`
                         self.ast.module_header = Some(ModuleHeader { path, vis: mods.vis, span });
