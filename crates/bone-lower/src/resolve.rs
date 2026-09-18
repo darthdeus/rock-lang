@@ -208,11 +208,9 @@ fn glob_candidates(
     let mut globs = frag.globs.clone();
     globs.sort_by_key(path_sort_key);
     for glob in &globs {
-        // An unresolvable fragment glob opens nothing: nothing validates a
-        // `use` target at its declaration yet (docs/parked/modules.md).
-        if let Ok(Landing::Module(pkg_id, path)) =
-            walk_path(ws, frag, &[], glob, WalkMode::Module, &mut visiting)
-        {
+        // Every fragment glob was checked where it is declared
+        // (`check_use_target`), so a failure here is a real diagnostic.
+        if let Landing::Module(pkg_id, path) = walk_path(ws, frag, &[], glob, WalkMode::Module, &mut visiting)? {
             hits.extend(members_of(ws, &viewers, pkg_id, &path, name, &mut visiting)?.found);
         }
     }
@@ -570,6 +568,64 @@ pub fn resolve_path(
     match walk_path(ws, frag, &[], path, WalkMode::Definition, &mut Vec::new())? {
         Landing::Def(resolved) => Ok(resolved),
         Landing::Module(..) => Err("path names a module, not a definition".to_string()),
+    }
+}
+
+/// Check a fragment's own `use` target where it is declared (spec 4.3: an
+/// unresolved path is a diagnostic, never a silent no-op). A glob must land
+/// on a module; a named import must bind a definition, an export binding or a
+/// module (`use p;`, `use a::b as c;`). Ambiguity and pure export cycles stay
+/// diagnostics at use, where they are decided (spec 8.3, 8.6).
+pub fn check_use_target(
+    ws: &Workspace,
+    frag: &FragmentScope,
+    path: &UsePathRef,
+    glob: bool,
+) -> Result<(), String> {
+    check_target(ws, frag, path, glob, false)
+}
+
+/// `check_use_target` for a shared export binding (`pub use`, `private use`)
+/// recorded on module `module_path`: its target resolves from the exporting
+/// module, which must itself be permitted to name it (spec 8.6).
+pub fn check_export_target(
+    ws: &Workspace,
+    package: u32,
+    module_path: &[Ustr],
+    path: &UsePathRef,
+    glob: bool,
+) -> Result<(), String> {
+    let pkg = ws.ns.package(package).ok_or("unknown package")?;
+    let exporter = exporter_scope(pkg, module_path);
+    check_target(ws, &exporter, path, glob, true)
+}
+
+fn check_target(
+    ws: &Workspace,
+    frag: &FragmentScope,
+    path: &UsePathRef,
+    glob: bool,
+    export: bool,
+) -> Result<(), String> {
+    if glob {
+        return walk_modules(ws, frag, path, path.segments.len()).map(|_| ());
+    }
+    let members = walk_members(ws, frag, &[], path, &mut Vec::new());
+    if matches!(&members, Ok(m) if !m.found.is_empty() || m.cycle) {
+        return Ok(());
+    }
+    if walk_modules(ws, frag, path, path.segments.len()).is_ok() {
+        return Ok(());
+    }
+    // Denials read as the lookup's own do: a fragment names the member, an
+    // exporter the whole target it re-exports.
+    let target = joined(&path.segments);
+    match members? {
+        m if m.denied && export => {
+            Err(format!("`{target}` is not accessible from the module that re-exports it"))
+        }
+        m if m.denied => Err(format!("`{}` is not accessible from this module", last_of(&path.segments))),
+        _ => Err(format!("`{target}` did not resolve to any definition or module")),
     }
 }
 

@@ -636,3 +636,111 @@ use chess::facade::*;
 fn f() -> int {
     ply()
 }
+
+//- an_unresolvable_glob_use_is_diagnosed_at_the_use @fail=invalid `use` target: no module `nowhere` in path
+//-- lib.rock @pkg=chess,1 @v1
+use nowhere::*;
+
+fn f() -> int {
+    1
+}
+
+//- an_unresolvable_named_use_is_diagnosed_at_the_use @fail=invalid `use` target: `inner::missing` did not resolve to any definition or module
+//-- lib.rock @pkg=chess,1 @v1
+use inner::missing;
+
+fn f() -> int {
+    1
+}
+
+//-- lib_inner.rock @pkg=chess,1 @v1
+pub mod inner;
+
+pub fn ply() -> int {
+    1
+}
+
+//- a_named_use_through_a_missing_module_is_diagnosed_at_the_use @fail=invalid `use` target: no module `nowhere` in path
+//-- lib.rock @pkg=chess,1 @v1
+use nowhere::ply;
+
+fn f() -> int {
+    1
+}
+
+//- an_unresolvable_pub_use_is_diagnosed_at_the_use @fail=invalid `use` target: `inner::missing` did not resolve to any definition or module
+//-- lib.rock @pkg=chess,1 @v1
+pub use inner::missing;
+
+//-- lib_inner.rock @pkg=chess,1 @v1
+pub mod inner;
+
+pub fn ply() -> int {
+    1
+}
+
+//- an_unresolvable_pub_glob_use_is_diagnosed_at_the_use @fail=invalid `use` target: no module `nowhere` in path
+//-- lib.rock @pkg=chess,1 @v1
+pub use nowhere::*;
+
+//- a_nested_use_leaf_that_does_not_resolve_is_diagnosed @fail=invalid `use` target: `inner::missing` did not resolve to any definition or module
+//-- lib.rock @pkg=chess,1 @v1
+use inner::{ply, missing};
+
+fn f() -> int {
+    ply()
+}
+
+//-- lib_inner.rock @pkg=chess,1 @v1
+pub mod inner;
+
+pub fn ply() -> int {
+    1
+}
+
+//- valid_use_targets_are_accepted_where_they_are_declared
+//-- lib.rock @pkg=chess,1 @v1
+use inner::*;
+use inner::ply;
+use inner as renamed;
+use chess::inner::{self, ply as p2};
+
+fn f() -> int {
+    let n = ply() + p2() + inner::ply()
+            //^ int
+    n
+}
+
+//-- lib_inner.rock @pkg=chess,1 @v1
+pub mod inner;
+
+pub fn ply() -> int {
+    1
+}
+
+//- a_use_of_a_module_another_fragment_declares_is_accepted
+//-- lib.rock @pkg=chess,1 @v1
+use split::*;
+use split::helper;
+
+fn f() -> int {
+    let n = helper()
+            //^ int
+    n
+}
+
+//-- lib_split_a.rock @pkg=chess,1 @v1
+mod split;
+
+pub fn other() -> int {
+    2
+}
+
+//-- lib_split_b.rock @pkg=chess,1 @v1
+mod split;
+
+use self::helper as h;
+
+pub fn helper() -> int {
+    other()
+}

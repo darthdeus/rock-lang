@@ -407,7 +407,6 @@ mod internal;
 pub struct Exported { pub x: int }
 
 //-- lib.rock @pkg=game,1 @v1
-mod internal;
 pub use self::internal::Exported;
 
 pub fn make() -> Exported {

@@ -1156,7 +1156,57 @@ pub fn build_namespaces(
 
         ws.fragment_scopes.insert(file, scope);
     }
+    validate_v1_use_targets(ws, rock_modules)?;
     build_legacy_compatibility(ws, rock_modules)?;
+    Ok(())
+}
+
+/// Every `use` target in a v1 fragment resolves where it is declared, once
+/// the whole tree exists (spec 4.3: an unresolved path is a diagnostic).
+/// Fragment-local imports resolve from the fragment's scope, exactly as the
+/// lazy lookup will; shared export bindings resolve from the module that
+/// records them.
+fn validate_v1_use_targets(ws: &Workspace, rock_modules: &[Ast]) -> Result<(), CompilerError> {
+    for rock_mod in rock_modules {
+        if rock_mod.dialect != skull_parser::Dialect::V1 || is_stdlib_module_file(rock_mod.file.as_str()) {
+            continue;
+        }
+        let Some(frag) = ws.fragment_scopes.get(&rock_mod.file) else { continue };
+        validate_use_items(ws, frag, &frag.module_path, &rock_mod.items)?;
+    }
+    Ok(())
+}
+
+fn validate_use_items(
+    ws: &Workspace,
+    frag: &FragmentScope,
+    path: &[ustr::Ustr],
+    items: &[Item],
+) -> Result<(), CompilerError> {
+    for item in items {
+        match &item.kind {
+            ItemKind::Module(m) => {
+                let mut child = path.to_vec();
+                child.push(m.name.name);
+                validate_use_items(ws, frag, &child, &m.items)?;
+            }
+            ItemKind::Use(decl) => {
+                let mut leaves = Vec::new();
+                collect_use_leaves(&decl.tree, &[], false, &mut leaves);
+                for (_, target, glob) in leaves {
+                    let checked = if decl.vis.is_some() {
+                        bone_lower::resolve::check_export_target(ws, frag.package, path, &target, glob)
+                    } else {
+                        bone_lower::resolve::check_use_target(ws, frag, &target, glob)
+                    };
+                    checked.map_err(|message| {
+                        CompilerError::new_with_label(decl.span, format!("invalid `use` target: {message}"))
+                    })?;
+                }
+            }
+            _ => {}
+        }
+    }
     Ok(())
 }
 
