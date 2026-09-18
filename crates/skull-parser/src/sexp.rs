@@ -247,7 +247,8 @@ impl Ast {
                     UseSuffix::Bind => String::new(),
                     UseSuffix::BindAs(a) => format!(" as {}", a.name),
                     UseSuffix::Glob => "::*".to_string(),
-                    UseSuffix::Operator(op) => format!("::operator({})", op.name),
+                    UseSuffix::Operator { op, alias: None } => format!("::operator({})", op.name),
+                    UseSuffix::Operator { op, alias: Some(a) } => format!("::operator({}) as {}", op.name, a.name),
                     UseSuffix::Nested(trees) => {
                         let inner = trees
                             .iter()

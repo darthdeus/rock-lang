@@ -679,6 +679,85 @@ fn neg() -> int {
     p.x + n
 }
 
+//- an_aliased_operator_import_binds_the_alias
+//-- geo.rock @pkg=geo,1 @v1
+pub struct Pt {
+    pub x: int,
+}
+
+pub operator +(a: Pt, b: Pt) -> Pt {
+    Pt { x: a.x + b.x }
+}
+
+//-- app.rock @pkg=app,2 @v1
+use geo::Pt;
+use geo::operator(+) as add_pt;
+
+fn sums() -> int {
+    let p = add_pt(Pt { x: 1 }, Pt { x: 2 })
+            //^ geo::Pt
+    let u = Pt { x: 3 }.add_pt(Pt { x: 4 })
+                        //^ geo::Pt
+    let n = 1 + 2
+    p.x + n
+}
+
+//- a_nested_aliased_operator_import_binds_the_alias
+//-- geo.rock @pkg=geo,1 @v1
+pub struct Pt {
+    pub x: int,
+}
+
+pub operator +(a: Pt, b: Pt) -> Pt {
+    Pt { x: a.x + b.x }
+}
+
+//-- app.rock @pkg=app,2 @v1
+use geo::{Pt, operator(+) as add_pt};
+
+fn sums() -> int {
+    let p = add_pt(Pt { x: 1 }, Pt { x: 2 })
+            //^ geo::Pt
+    p.x
+}
+
+//- an_aliased_operator_import_does_not_expose_the_glyph @fail=No overload for `__op_add` with argument types (geo::Pt, geo::Pt)
+//-- geo.rock @pkg=geo,1 @v1
+pub struct Pt {
+    pub x: int,
+}
+
+pub operator +(a: Pt, b: Pt) -> Pt {
+    Pt { x: a.x + b.x }
+}
+
+//-- app.rock @pkg=app,2 @v1
+use geo::Pt;
+use geo::operator(+) as add_pt;
+
+fn sums() -> Pt {
+    Pt { x: 1 } + Pt { x: 2 }
+}
+
+//- legacy_aliased_operator_import_binds_the_alias
+//-- geo.rock @pkg=geo,1 @v1
+pub struct Pt {
+    pub x: int,
+}
+
+pub operator +(a: Pt, b: Pt) -> Pt {
+    Pt { x: a.x + b.x }
+}
+
+//-- main.rock @pkg=game,3
+use geo::operator(+) as add_pt;
+
+fn sums() -> int {
+    let p = add_pt(Pt { x: 1 }, Pt { x: 2 })
+            //^ geo::Pt
+    p.x
+}
+
 //- legacy_explicit_imports_of_two_callables_compose
 //-- a.rock @pkg=lib_a,1 @v1
 pub fn pick(n: int) -> int {

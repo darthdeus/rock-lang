@@ -551,3 +551,43 @@ fn main() {
     );
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// `use provider::operator(+) as add_pt;` (spec 8.5) binds `add_pt` to the
+/// declared `operator +` body (the `+ 100` marks it), by call and UFCS.
+#[test]
+fn v1_aliased_operator_import_runs_the_operator_body() {
+    let root = std::env::temp_dir().join("rock_modules_emit_v1_operator_alias");
+    let _ = std::fs::remove_dir_all(&root);
+    v1_lib(
+        &root.join("provider"),
+        "provider",
+        r#"pub struct Pt {
+    pub x: int,
+}
+
+pub operator +(a: Pt, b: Pt) -> Pt {
+    Pt { x: a.x + b.x + 100 }
+}
+"#,
+    );
+    let app = root.join("app");
+    v1_app(
+        &app,
+        &["provider"],
+        r#"use provider::{Pt, operator(+) as add_pt};
+
+fn main() {
+    let p = add_pt(Pt { x: 1 }, Pt { x: 2 })
+    let u = Pt { x: 3 }.add_pt(Pt { x: 4 })
+    print("p={p.x} u={u.x} n={1 + 2}")
+}
+"#,
+    );
+    let (stdout, stderr, ok) = run(&app);
+    assert!(ok, "v1 aliased operator project failed\nstdout:\n{stdout}\nstderr:\n{stderr}");
+    assert!(
+        stdout.contains("p=103 u=107 n=3"),
+        "an aliased operator import should run the declared body\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}

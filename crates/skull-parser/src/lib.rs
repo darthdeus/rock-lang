@@ -1751,6 +1751,8 @@ mod modules_items_tests {
             "use a::b::{Actor, heal as h};",
             "use a::b::{self, Actor};",
             "use geo::operator(+);",
+            "use geo::operator(+) as add_pt;",
+            "use geo::{Pt, operator(*) as scale};",
             "use ::rooted::a;",
             "pub use a::b::*;",
             "pub(package) use a::b::step;",
@@ -1765,6 +1767,8 @@ mod modules_items_tests {
             "use a::b::{Actor, heal as h};",
             "use a::b::{self, Actor};",
             "use geo::operator(+);",
+            "use geo::operator(+) as add_pt;",
+            "use geo::{Pt, operator(*) as scale};",
             "use ::rooted::a;",
         ];
         for src in cases {
@@ -1781,6 +1785,21 @@ mod modules_items_tests {
     #[test]
     fn use_as_underscore_rejects() {
         let err = parse_v1("use a::b as _;").expect_err("as _ must reject");
+        assert!(err.message.contains("as _"), "got: {}", err.message);
+    }
+
+    #[test]
+    fn an_operator_selector_takes_an_alias() {
+        let ast = parse_v1("use geo::operator(+) as add_pt;").expect("parse");
+        let ItemKind::Use(u) = &ast.items[0].kind else { panic!("expected use") };
+        let UseTree::Path { kind: UseSuffix::Operator { op, alias }, segments, .. } = &u.tree else {
+            panic!("expected an operator selector, got {:?}", u.tree);
+        };
+        assert_eq!(segments.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["geo"]);
+        assert_eq!(op.name, "__op_add");
+        assert_eq!(alias.as_ref().map(|a| a.name.as_str()), Some("add_pt"));
+
+        let err = parse_v1("use geo::operator(+) as _;").expect_err("as _ must reject");
         assert!(err.message.contains("as _"), "got: {}", err.message);
     }
 

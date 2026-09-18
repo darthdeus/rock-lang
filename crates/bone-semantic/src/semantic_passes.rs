@@ -1578,9 +1578,9 @@ fn collect_use_leaves(
         skull_parser::UseSuffix::BindAs(alias) => {
             out.push((alias.name, UsePathRef { from_root: path_root, segments: full }, false));
         }
-        skull_parser::UseSuffix::Operator(op) => {
-            let local = op.name;
-            full.push(local);
+        skull_parser::UseSuffix::Operator { op, alias } => {
+            full.push(op.name);
+            let local = alias.as_ref().map_or(op.name, |a| a.name);
             out.push((local, UsePathRef { from_root: path_root, segments: full }, false));
         }
         skull_parser::UseSuffix::Glob => {
@@ -1810,9 +1810,9 @@ fn flatten_use_tree(
             (Some(local), full)
         }
         skull_parser::UseSuffix::BindAs(alias) => (Some(alias.name), full),
-        skull_parser::UseSuffix::Operator(op) => {
+        skull_parser::UseSuffix::Operator { op, alias } => {
             full.push(op.name);
-            (Some(op.name), full)
+            (Some(alias.as_ref().map_or(op.name, |a| a.name)), full)
         }
         skull_parser::UseSuffix::Glob => (None, full),
         skull_parser::UseSuffix::Nested(trees) => {

@@ -817,8 +817,10 @@ pub enum UseSuffix {
     BindAs(Ident),
     /// `use a::*;` — immediate accessible members.
     Glob,
-    /// `use a::operator(+);` — the glyph family under a nameable selector.
-    Operator(Ident),
+    /// `use a::operator(+);` — the glyph family under a nameable selector;
+    /// `op` is its function name (`__op_add`). With `as add` (spec 8.5) the
+    /// import binds only `add`, not the glyph.
+    Operator { op: Ident, alias: Option<Ident> },
     /// `use a::b::{ .. }` — sub-trees, each relative (`c`, `d::e as f`,
     /// `self`, `operator(+)', nested braces).
     Nested(Vec<UseTree>),

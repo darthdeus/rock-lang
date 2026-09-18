@@ -666,7 +666,8 @@ impl<'a> Parser<'a> {
 
     /// `use` declaration after any `pub`/`private` prefix:
     /// `use <path><suffix>;` where suffix is nothing (bind the tail),
-    /// `as alias`, `*`, `operator(op)`, or `{ sub-trees }`.
+    /// `as alias`, `*`, `operator(op)` (optionally `as alias`), or
+    /// `{ sub-trees }`.
     /// `use ... as _` rejects (spec 8.1: no activation semantics).
     fn parse_use_decl(&mut self, start: Span, vis: Option<Visibility>) -> PResult<UseDecl> {
         debug_assert!(matches!(self.kind(), TokenKind::Ident(n) if n.as_str() == "use"));
@@ -737,22 +738,29 @@ impl<'a> Parser<'a> {
             let op_fn = glyph.overloadable_binop_fn().ok_or_else(|| {
                 self.err(format!("operator({:?}) is not an importable operator family", glyph))
             })?;
-            UseSuffix::Operator(Ident {
+            let op = Ident {
                 span: glyph_span,
                 name: Ustr::from(op_fn),
-            })
+            };
+            let alias = if self.kind() == TokenKind::As { Some(self.parse_use_alias()?) } else { None };
+            UseSuffix::Operator { op, alias }
         } else if self.kind() == TokenKind::As {
-            self.advance();
-            if matches!(self.kind(), TokenKind::Ident(n) if n.as_str() == "_") {
-                return Err(self.err(
-                    "`use ... as _` has no activation semantics in modules-v1 and is not supported",
-                ));
-            }
-            UseSuffix::BindAs(self.expect_ident()?)
+            UseSuffix::BindAs(self.parse_use_alias()?)
         } else {
             UseSuffix::Bind
         };
         Ok(UseTree::Path { from_root, segments, kind })
+    }
+
+    /// `as <ident>` ending a use tree. `use ... as _` rejects (spec 8.1).
+    fn parse_use_alias(&mut self) -> PResult<Ident> {
+        self.expect(TokenKind::As)?;
+        if matches!(self.kind(), TokenKind::Ident(n) if n.as_str() == "_") {
+            return Err(self.err(
+                "`use ... as _` has no activation semantics in modules-v1 and is not supported",
+            ));
+        }
+        self.expect_ident()
     }
 
     /// At `operator` + `(` in a use suffix position. `operator` is a keyword
