@@ -270,3 +270,41 @@ fn a_nobox_element_at_the_threshold_keeps_columns() {
     );
     assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "nobox_narrow_columns"), "4");
 }
+
+const NESTED_WRITE: &str = r#"
+nobox value Q2 { x: float, y: float }
+nobox value Wide { kind: int, at: Q2, a: int, b: int, c: int }
+nobox value Narrow { kind: int, at: Q2 }
+struct Obj { hp: int }
+nobox value Holds { o: Obj, a: int, b: int, c: int, d: int }
+
+fn main() {
+    let ws: [Wide] = []
+    ws.push(Wide { kind: 1, at: Q2 { x: 1.0, y: 2.0 }, a: 3, b: 4, c: 5 })
+    ws.push(Wide { kind: 6, at: Q2 { x: 7.0, y: 8.0 }, a: 9, b: 10, c: 11 })
+    ws[1].at.x = 70.0
+    ws[0].at.y += 0.5
+    let ns: [Narrow] = []
+    ns.push(Narrow { kind: 1, at: Q2 { x: 1.0, y: 2.0 } })
+    ns[0].at.y = 20.0
+    let hs: [Holds] = []
+    hs.push(Holds { o: Obj { hp: 1 }, a: 2, b: 3, c: 4, d: 5 })
+    hs[0].o.hp = 50
+    let w0 = ws[0]
+    let w1 = ws[1]
+    print("{w0.kind},{w0.at.x},{w0.at.y},{w0.a}|{w1.kind},{w1.at.x},{w1.at.y},{w1.c}|{ns[0].at.x},{ns[0].at.y}|{hs[0].o.hp}")
+}
+"#;
+
+#[test]
+fn a_nested_leaf_of_a_flat_stored_element_is_one_slot_write() {
+    let lua = try_emit_module(NESTED_WRITE).expect("emits");
+    assert!(
+        lua.contains(r#"repr = "strided""#) && lua.contains(r#"repr = "columns""#),
+        "fixture must exercise both flat tiers"
+    );
+    assert_eq!(
+        run_luajit(&format!("{lua}\nmain()\n"), "nobox_nested_leaf_write"),
+        "1,1,2.5,3|6,70,8,11|1,20|50"
+    );
+}

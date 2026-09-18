@@ -1369,6 +1369,41 @@ impl Builder<'_> {
         Ok(())
     }
 
+    /// `Some((xs[i], path))` iff `<base>.<field>` is a chain of field accesses
+    /// rooted at an element of a column-stored or strided container and the
+    /// chain names one leaf: `xs[i].at.x` -> (`xs[i]`, `"at.x"`), the key that
+    /// storage addresses the leaf by. A chain that goes past a leaf (`o.hp`
+    /// through a reference leaf `o`) is not one; the leaf is its place base.
+    pub(crate) fn flat_leaf_path(
+        &self,
+        base: Idx<Expr>,
+        field: Ustr,
+    ) -> Result<Option<(Idx<Expr>, Ustr)>, CompilerError> {
+        let mut segs = vec![field];
+        let mut cur = base;
+        while let Expr::FieldAccess { base: b, field: f } = self.body.expr_arena[cur] {
+            segs.push(f);
+            cur = b;
+        }
+        let Expr::Index { base: container, .. } = self.body.expr_arena[cur] else {
+            return Ok(None);
+        };
+        let elem = match self.vec_column_elem_of(container)? {
+            Some(elem) => Some(elem),
+            None => match self.vec_strided_elem_of(container)? {
+                Some(elem) => Some(elem),
+                None => self.map_column_value_of(container)?,
+            },
+        };
+        let Some(elem) = elem else {
+            return Ok(None);
+        };
+        segs.reverse();
+        let path = Ustr::from(&segs.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("."));
+        let shape = self.column_shape(elem)?;
+        Ok(value_leaf_paths(&shape).contains(&path).then_some((cur, path)))
+    }
+
     /// `Some((vec, slot, elem))` iff `e` is `xs[i]` over a
     /// column-stored Vec — the shape that has no element slot to serve as a
     /// place base.
@@ -1430,9 +1465,9 @@ impl Builder<'_> {
         })
     }
 
-    /// `xs[i].<field> = v` on a strided Vec: store into that leaf's slot of the
-    /// row. As with columns, `field` must name a primitive leaf; a nested value
-    /// field spans several slots and needs a whole-element store.
+    /// `xs[i].<path> = v` on a strided Vec: store into that leaf's slot of the
+    /// row. As with columns, `path` must name one primitive leaf (`at.x`); a
+    /// whole nested value field (`at`) spans several slots and is rejected.
     pub(crate) fn strided_leaf_store(
         &mut self,
         vec: Idx<Inst>,
@@ -1466,10 +1501,10 @@ impl Builder<'_> {
         Ok(())
     }
 
-    /// `xs[i].<field> = v` on a column-stored Vec: store into the column that
-    /// holds that leaf. `field` must name a PRIMITIVE leaf — a nested value
-    /// field (`xs[i].inner = ..`, `xs[i].inner.a = ..`) spans several columns
-    /// and is rejected rather than silently writing one.
+    /// `xs[i].<path> = v` on a column-stored Vec: store into the column that
+    /// holds that leaf. `path` must name a PRIMITIVE leaf (`inner.a`) -- a whole
+    /// nested value field (`xs[i].inner = ..`) spans several columns and is
+    /// rejected rather than silently writing one.
     pub(crate) fn column_leaf_store(
         &mut self,
         vec: Idx<Inst>,
