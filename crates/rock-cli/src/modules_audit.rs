@@ -184,11 +184,7 @@ pub fn run(project: &Path, closed: bool, format: Format) -> Result<i32> {
 
     match &report.graph {
         Err(e) => {
-            report.analysis = Analysis::Failed {
-                stage: "package graph",
-                diagnostics: vec![Diag { file: String::new(), line: 0, col: 0, message: e.clone() }],
-                rendered: e.clone(),
-            };
+            report.analysis = failed_msg("package graph", e.clone());
         }
         Ok(graph) => {
             report.revision = revision(&manifest_dir, graph);
@@ -217,17 +213,7 @@ fn analyze(project: &Path, graph: &PackageGraph) -> (Option<Population>, Analysi
     let spec = crate::unified_compile::SourceSpec::Directory(project.to_path_buf());
     let discovered = match crate::unified_compile::discover_sources(&spec) {
         Ok(s) => s,
-        Err(e) => {
-            let message = format!("{e:#}");
-            return (
-                None,
-                Analysis::Failed {
-                    stage: "source discovery",
-                    diagnostics: vec![Diag { file: String::new(), line: 0, col: 0, message: message.clone() }],
-                    rendered: message,
-                },
-            );
-        }
+        Err(e) => return (None, failed_msg("source discovery", format!("{e:#}"))),
     };
 
     // `rock compile` drops every file under a `tests/` path component; a root
@@ -273,18 +259,15 @@ fn analyze(project: &Path, graph: &PackageGraph) -> (Option<Population>, Analysi
         .map(|f| f.borrow().file.to_id_path())
         .collect();
 
+    let population = Population {
+        mode,
+        rows: rows.into_values().collect(),
+        std_modules: rock_host::stdlib_loader::stdlib_files().len(),
+    };
     let (mut modules, _entry) = match crate::skull_backend::skull_assemble_project(&analyzed) {
         Ok(v) => v,
-        Err(errs) => {
-            let population = Population { mode, rows: rows.into_values().collect(), std_modules: 0 };
-            return (Some(population), failed("parse", &analyzed, &errs));
-        }
+        Err(errs) => return (Some(population), failed("parse", &analyzed, &errs)),
     };
-    let std_modules = modules
-        .iter()
-        .filter(|m| is_stdlib_module_file(m.file.as_str()))
-        .count();
-    let population = Population { mode, rows: rows.into_values().collect(), std_modules };
 
     if !untagged.is_empty() {
         let message = format!(
@@ -292,14 +275,7 @@ fn analyze(project: &Path, graph: &PackageGraph) -> (Option<Population>, Analysi
             untagged.len(),
             untagged.join(", ")
         );
-        return (
-            Some(population),
-            Analysis::Failed {
-                stage: "package attribution",
-                diagnostics: vec![Diag { file: String::new(), line: 0, col: 0, message: message.clone() }],
-                rendered: message,
-            },
-        );
+        return (Some(population), failed_msg("package attribution", message));
     }
 
     let ws = match crate::bone_backend::check_modules(&mut modules) {
@@ -308,14 +284,16 @@ fn analyze(project: &Path, graph: &PackageGraph) -> (Option<Population>, Analysi
     };
     match count_references(&ws, &file_pkg) {
         Ok(table) => (Some(population), Analysis::Ok(table)),
-        Err(message) => (
-            Some(population),
-            Analysis::Failed {
-                stage: "package attribution",
-                diagnostics: vec![Diag { file: String::new(), line: 0, col: 0, message: message.clone() }],
-                rendered: message,
-            },
-        ),
+        Err(message) => (Some(population), failed_msg("package attribution", message)),
+    }
+}
+
+/// A failure carried as one message, with no source location.
+fn failed_msg(stage: &'static str, message: String) -> Analysis {
+    Analysis::Failed {
+        stage,
+        diagnostics: vec![Diag { file: String::new(), line: 0, col: 0, message: message.clone() }],
+        rendered: message,
     }
 }
 
@@ -960,7 +938,6 @@ fn render_pretty(report: &Report, verdict: &Verdict) -> String {
 }
 
 fn render_json(report: &Report, verdict: &Verdict) -> Value {
-    let analysis_ok = matches!(report.analysis, Analysis::Ok(_));
     let unknown_reason = "analysis failed";
 
     let revision = match &report.revision {
@@ -1146,6 +1123,5 @@ fn render_json(report: &Report, verdict: &Verdict) -> Value {
         "not_computed": NOT_COMPUTED.iter().map(|(item, missing)| json!({
             "item": item, "status": "not_computed", "missing": missing,
         })).collect::<Vec<_>>(),
-        "analysis_ok": analysis_ok,
     })
 }
