@@ -4506,6 +4506,113 @@ pub struct SignatureEntry {
 /// completion: in an expression slot a user enum is offered as its qualified
 /// `Enum::Variant` values (the bare name isn't a usable value); in a type slot
 /// the bare `Enum` name is offered instead. Mirrors rock-lsp.
+/// [`completion`]'s global candidates in a modules-v1 fragment: each name
+/// the fragment's tiers bind (`modules_scope::bound_names`), offered under
+/// that name with the entry shape of the definition it binds.
+fn v1_scope_entries(
+    ws: &Workspace,
+    frag: &bone_core::modules::FragmentScope,
+    expr_position: bool,
+    pfx: &[u8],
+    show_private: bool,
+    seen: &mut std::collections::HashSet<ustr::Ustr>,
+    out: &mut Vec<CompletionEntry>,
+) {
+    // A type name may match through its variants' names, so it passes here
+    // and `key_entries` filters per variant.
+    let admit = |name: &str| {
+        (!name.starts_with('_') || show_private)
+            && (crate::completion::match_policy::admit(name.as_bytes(), pfx)
+                || (expr_position && name.starts_with(|c: char| c.is_ascii_uppercase())))
+    };
+    for (name, key) in crate::modules_scope::bound_names(ws, frag, admit) {
+        for e in key_entries(ws, name, key, expr_position, pfx, show_private) {
+            if seen.insert(e.name) {
+                out.push(e);
+            }
+        }
+    }
+}
+
+/// The completion entries for the definition `key` spelled `name` in a
+/// modules-v1 fragment, in a value (`expr_position`) or type slot, that
+/// match `pfx`. An enum in a value slot is offered as its qualified
+/// variants (`name::V`), as a legacy enum is.
+pub(crate) fn key_entries(
+    ws: &Workspace,
+    name: ustr::Ustr,
+    key: ustr::Ustr,
+    expr_position: bool,
+    pfx: &[u8],
+    show_private: bool,
+) -> Vec<CompletionEntry> {
+    let visible = |n: &str| !n.starts_with('_') || show_private;
+    let matches = |n: &str| visible(n) && crate::completion::match_policy::admit(n.as_bytes(), pfx);
+    let file_of = |mid: ModuleId| ws.module(mid).file;
+    let entry = |name: ustr::Ustr, kind: SymCat, def_file: ustr::Ustr| CompletionEntry {
+        name,
+        kind,
+        detail: None,
+        ty: None,
+        takes_params: false,
+        variant_shape: None,
+        test_scoped: is_test_path(def_file.as_str()) || name.as_str().starts_with("test_"),
+        def_file,
+        rec: 0,
+    };
+    let mut out = Vec::new();
+    if let Some(&(fmid, fid)) = ws.functions_by_name.get(&key).and_then(|l| l.first()) {
+        if expr_position && matches(name.as_str()) {
+            out.push(CompletionEntry {
+                takes_params: !ws.module(fmid).functions[fid].param_decls.is_empty(),
+                ..entry(name, SymCat::Function, file_of(fmid))
+            });
+        }
+    } else if let Some(sid) = ws.struct_by_name.get(&key) {
+        if matches(name.as_str()) {
+            out.push(entry(name, SymCat::Struct, file_of(sid.module)));
+        }
+    } else if let Some(eid) = ws.enums_by_name.get(&key) {
+        let def_file = file_of(eid.module);
+        if expr_position && !def_file.as_str().starts_with('<') {
+            for v in ws.module(eid.module).enums[eid.def].variants.iter() {
+                let qualified = format!("{name}::{}", v.name);
+                let hit = pfx.is_empty()
+                    || crate::completion::match_policy::admit(v.name.as_bytes(), pfx)
+                    || crate::completion::match_policy::admit(qualified.as_bytes(), pfx);
+                if hit && visible(v.name.as_str()) {
+                    out.push(CompletionEntry {
+                        detail: Some(name.to_string()),
+                        variant_shape: Some(VariantShape::of(&v.payload)),
+                        ..entry(ustr::Ustr::from(qualified.as_str()), SymCat::Variant, def_file)
+                    });
+                }
+            }
+        } else if matches(name.as_str()) {
+            out.push(entry(name, SymCat::Enum, def_file));
+        }
+    } else if let Some(nid) = ws.newtypes_by_name.get(&key) {
+        if matches(name.as_str()) {
+            out.push(entry(name, SymCat::Newtype, file_of(nid.module)));
+        }
+    } else if let Some(&ty) = ws.globals_by_name.get(&key) {
+        if expr_position && matches(name.as_str()) {
+            let rendered = ws.render(None, ty);
+            let def_file = ws
+                .modules
+                .iter()
+                .find(|m| m.global_by_name.contains_key(&key))
+                .map_or_else(|| ustr::Ustr::from("<builtin>"), |m| m.file);
+            out.push(CompletionEntry {
+                detail: (!rendered.is_empty()).then_some(rendered),
+                ty: Some(ty),
+                ..entry(name, SymCat::Global, def_file)
+            });
+        }
+    }
+    out
+}
+
 pub fn completion(
     ws: &Workspace,
     mid: ModuleId,
@@ -4582,7 +4689,13 @@ pub fn completion(
         }
     }
 
-    for m in ws.modules.iter() {
+    // A modules-v1 fragment offers what its tiers bind, spelled by the name
+    // they bind it under -- not every definition of the workspace by key.
+    let v1 = crate::modules_scope::fragment(ws, req_file);
+    if let Some(frag) = v1 {
+        v1_scope_entries(ws, frag, expr_position, pfx, show_private, &mut seen, &mut out);
+    }
+    for m in ws.modules.iter().filter(|_| v1.is_none()) {
         // Test-scoped iff defined under a `tests/` path segment or
         // `test_`-named -- the facade demotes these outside test files.
         let m_test = is_test_path(m.file.as_str());

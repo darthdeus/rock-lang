@@ -226,6 +226,87 @@ fn project_graph(root: &Path) -> Option<rock_host::stick::graph::PackageGraph> {
     }
 }
 
+/// The `a::b::` path written right before `at` (the start of the identifier
+/// being typed), as `(::-anchored, segments)`. `None` when no `::` precedes.
+fn qualified_prefix_before(src: &str, at: usize) -> Option<(bool, Vec<Ustr>)> {
+    let b = src.as_bytes();
+    let mut end = at.min(b.len());
+    let mut segments = Vec::new();
+    while end >= 2 && &b[end - 2..end] == b"::" {
+        let colon = end - 2;
+        let mut start = colon;
+        while start > 0 && (b[start - 1].is_ascii_alphanumeric() || b[start - 1] == b'_') {
+            start -= 1;
+        }
+        if start == colon {
+            // A `::` with nothing before it anchors the path at the root.
+            segments.reverse();
+            return (!segments.is_empty()).then_some((true, segments));
+        }
+        segments.push(Ustr::from(&src[start..colon]));
+        end = start;
+    }
+    segments.reverse();
+    (!segments.is_empty()).then_some((false, segments))
+}
+
+/// Completion after a qualified path in a modules-v1 fragment
+/// (`modules_scope::path_members`). `None` for a legacy file or a prefix
+/// that names neither a module nor an enum, which leaves the legacy
+/// `Enum::` route to try.
+fn v1_path_completions(ws: &Workspace, path: &str, src: &str, at: usize, prefix: &str) -> Option<Vec<CompletionItem>> {
+    let frag = crate::modules_scope::fragment(ws, Ustr::from(path))?;
+    let (from_root, segments) = qualified_prefix_before(src, at)?;
+    let members = crate::modules_scope::path_members(ws, frag, from_root, &segments)?;
+    let pfx = prefix.as_bytes();
+    let mut items: Vec<CompletionItem> = members
+        .into_iter()
+        .filter(|(name, _)| prefix.is_empty() || crate::completion::match_policy::admit(name.as_bytes(), pfx))
+        .enumerate()
+        .map(|(i, (name, member))| {
+            let kind = match member {
+                crate::modules_scope::Member::Module => CompletionItemKind::MODULE,
+                crate::modules_scope::Member::Variant => CompletionItemKind::ENUM_MEMBER,
+                crate::modules_scope::Member::Def(key) => {
+                    if ws.functions_by_name.contains_key(&key) {
+                        CompletionItemKind::FUNCTION
+                    } else if ws.struct_by_name.contains_key(&key) {
+                        CompletionItemKind::STRUCT
+                    } else if ws.enums_by_name.contains_key(&key) {
+                        CompletionItemKind::ENUM
+                    } else if ws.newtypes_by_name.contains_key(&key) {
+                        CompletionItemKind::STRUCT
+                    } else {
+                        CompletionItemKind::VARIABLE
+                    }
+                }
+            };
+            CompletionItem {
+                sort_text: Some(closed_set_sort_text(name.as_str(), pfx, 0, i)),
+                label: name.to_string(),
+                kind: Some(kind),
+                ..Default::default()
+            }
+        })
+        .collect();
+    items.sort_by(|a, b| a.sort_text.cmp(&b.sort_text));
+    Some(items)
+}
+
+/// Where a new `use` goes in a v1 fragment: the start of the line after its
+/// last top-level `use` item, else after its `mod` header, else the top.
+fn import_insertion_offset(c: &bone_semantic::semantic_passes::FragmentContribution, src: &str) -> usize {
+    let last_use = c.items.iter().rev().find_map(|item| match item {
+        bone_semantic::semantic_passes::ScopeItem::Use(decl) => Some(decl.span.offset_range.1),
+        _ => None,
+    });
+    let Some(end) = last_use.or_else(|| c.header.as_ref().map(|h| h.span.offset_range.1)) else {
+        return 0;
+    };
+    let end = end.min(src.len());
+    src[end..].find('\n').map_or(src.len(), |nl| end + nl + 1)
+}
+
 /// Where module `node` of `package` is declared: a fragment's `mod` header
 /// naming it, else an inline `mod` block. `None` for a package root, which
 /// no item declares.
@@ -1594,6 +1675,20 @@ impl BoneWorkspace {
                 return items;
             }
         }
+        // `a::b::|` in a modules-v1 fragment: what the path names, as the
+        // resolver walks it -- a module's accessible members and child
+        // modules, or an enum's variants. Served from the live workspace:
+        // the half-typed path is in the buffer, not in the namespace tree.
+        if let Some(items) = v1_path_completions(
+            proj.session.workspace(),
+            path,
+            src,
+            offset - prefix_raw.len(),
+            &prefix,
+        ) {
+            path_ms("v1 path", items.len());
+            return items;
+        }
         if let Some(enum_name) = cx.qualified.clone() {
             let mut items = enum_qualified_completions(
                 &mut proj.session, path, src, offset, &enum_name, &prefix,
@@ -1784,6 +1879,37 @@ impl BoneWorkspace {
                     def_file,
                     rec: 0,
                 });
+            }
+        }
+        // Out-of-scope accessible definitions of a v1 fragment, each with the
+        // `use` that brings it in (spec 15.3). Only while a name is being
+        // typed: the empty-prefix list is what the file already binds.
+        let mut import_edits: HashMap<String, TextEdit> = HashMap::new();
+        if !prefix.is_empty() {
+            if let Some(frag) = crate::modules_scope::fragment(ws, Ustr::from(path)) {
+                let show_private = prefix.starts_with('_');
+                let pfx = prefix.as_bytes();
+                let admit = |name: &str| {
+                    (!name.starts_with('_') || show_private)
+                        && (crate::completion::match_policy::admit(name.as_bytes(), pfx)
+                            || (expr_position && name.starts_with(|c: char| c.is_ascii_uppercase())))
+                };
+                let at = proj.session.files.get(path).map_or(0, |uf| import_insertion_offset(&uf.contribution, src));
+                let at = offset_to_position(src, at);
+                let mut offered: std::collections::HashSet<Ustr> = cands.iter().map(|c| c.name).collect();
+                for cand in crate::modules_scope::import_candidates(ws, frag, admit) {
+                    let entries = crate::query::key_entries(ws, cand.name, cand.key, expr_position, pfx, show_private);
+                    for entry in entries {
+                        if !offered.insert(entry.name) {
+                            continue;
+                        }
+                        import_edits.insert(
+                            entry.name.to_string(),
+                            TextEdit { range: Range::new(at, at), new_text: format!("use {};\n", cand.path) },
+                        );
+                        cands.push(entry);
+                    }
+                }
             }
         }
         let cands_ms = t_cands.elapsed().as_secs_f64() * 1000.0;
@@ -2313,10 +2439,19 @@ impl BoneWorkspace {
         }
         sink.cands.sort_by(cand_cmp);
         sink.cands.truncate(max_items);
-        sink.cands
+        let mut items: Vec<CompletionItem> = sink
+            .cands
             .into_iter()
             .map(|c| materialize_cand(c, fn_sigs, next_is_open_paren, pattern_pos))
-            .collect()
+            .collect();
+        if !import_edits.is_empty() {
+            for item in &mut items {
+                if let Some(edit) = import_edits.get(&item.label) {
+                    item.additional_text_edits = Some(vec![edit.clone()]);
+                }
+            }
+        }
+        items
     }
 
     // -- Feature: rename + prepare-rename (stubbed: gaps::references) --------

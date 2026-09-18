@@ -53,6 +53,10 @@ pub enum Kind {
 }
 
 pub global LIMIT: int = 10
+
+fn hidden_helper() -> int {
+    1
+}
 ";
 
 pub const INNER: &str = "\
@@ -60,6 +64,10 @@ pub mod shapes::inner;
 
 pub fn depth() -> int {
     3
+}
+
+fn inner_secret() -> int {
+    4
 }
 ";
 
@@ -371,4 +379,102 @@ fn segments_after_a_body_edit_still_navigate() {
     let (file, covered) = at("Box, c", 1);
     assert_eq!(file, "shapes.rock");
     assert!(covered.contains("Box"), "landed on {covered:?}");
+}
+
+// -- completion ---------------------------------------------------------------
+
+/// Completion items at the end of `typed`, typed as a new line inside
+/// `main`'s body (the line after `let a = ...`).
+fn complete_in_main(typed: &str) -> Vec<lsp_types::CompletionItem> {
+    let project = V1Project::new();
+    let mut bone = project.open();
+    let main = project.path("main.rock");
+    let anchor = "    let a = shapes::inner::depth()\n";
+    let text = MAIN.replace(anchor, &format!("{anchor}    {typed}\n"));
+    bone.update(&main, text.clone());
+    let pos = pos_of(&text, typed, 0, typed.len());
+    let items = bone.completion(&main, pos);
+    let prefix: String = typed.chars().rev().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect::<Vec<_>>().into_iter().rev().collect();
+    let violations = bone_query::invariants::completion_response_violations(&items, &prefix);
+    assert!(violations.is_empty(), "response invariants violated after `{typed}`: {violations:?}");
+    items
+}
+
+fn labels(items: &[lsp_types::CompletionItem]) -> Vec<String> {
+    let mut out: Vec<String> = items.iter().map(|c| c.label.clone()).collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+#[test]
+fn completion_after_a_module_path_offers_its_accessible_members() {
+    let items = complete_in_main("shapes::");
+    assert_eq!(labels(&items), ["Box", "Kind", "LIMIT", "area", "inner", "perimeter"]);
+}
+
+#[test]
+fn completion_after_a_nested_module_path_offers_its_members() {
+    assert_eq!(labels(&complete_in_main("shapes::inner::")), ["depth"]);
+}
+
+#[test]
+fn completion_after_a_facade_offers_its_re_exports() {
+    assert_eq!(labels(&complete_in_main("facade::")), ["depth"]);
+}
+
+#[test]
+fn completion_after_a_module_path_filters_by_the_typed_prefix() {
+    assert_eq!(labels(&complete_in_main("shapes::per")), ["perimeter"]);
+}
+
+#[test]
+fn bare_completion_offers_what_the_tiers_bind_by_their_bound_names() {
+    // Each tier: an aliased import, a glob member (a function, a type, a
+    // global), an explicit type import by its alias, the std prelude, and
+    // the module's own items.
+    for (typed, bound) in [
+        ("surf", "surface"),
+        ("perim", "perimeter"),
+        ("are", "area"),
+        ("Crat", "Crate"),
+        ("Bo", "Box"),
+        ("LIM", "LIMIT"),
+        ("prin", "print"),
+        ("siz", "sizes"),
+    ] {
+        let got = labels(&complete_in_main(&format!("let q = {typed}")));
+        assert!(got.iter().any(|l| l == bound), "`{bound}` is bound in main.rock: {got:?}");
+        for key in got.iter().filter(|l| l.contains("::") && !l.contains("Kind::")) {
+            panic!("a DefKey leaked into completion: {key}");
+        }
+    }
+    // Private members of other modules are not callable API, bound through
+    // a glob or offered with an import.
+    let got = labels(&complete_in_main("let q = hidden"));
+    assert!(!got.iter().any(|l| l == "hidden_helper"), "{got:?}");
+    let got = labels(&complete_in_main("let q = inner_sec"));
+    assert!(!got.iter().any(|l| l == "inner_secret"), "{got:?}");
+}
+
+#[test]
+fn bare_completion_of_an_unimported_accessible_name_carries_an_import_edit() {
+    let items = complete_in_main("let q = dept");
+    let depth = items
+        .iter()
+        .find(|c| c.label == "depth")
+        .unwrap_or_else(|| panic!("`depth` is accessible and offered with an import: {:?}", labels(&items)));
+    let edits = depth.additional_text_edits.as_ref().expect("an unimported name carries its import");
+    assert_eq!(edits.len(), 1);
+    assert_eq!(edits[0].new_text, "use shapes::inner::depth;\n");
+    // After the file's last `use` item, at the start of the next line.
+    assert_eq!(edits[0].range.start, lsp_types::Position::new(3, 0));
+    assert_eq!(edits[0].range.end, lsp_types::Position::new(3, 0));
+}
+
+#[test]
+fn bare_completion_of_a_bound_name_carries_no_import_edit() {
+    let items = complete_in_main("let q = perim");
+    let perimeter = items.iter().find(|c| c.label == "perimeter").expect("globbed name offered");
+    assert!(perimeter.additional_text_edits.is_none(), "a glob already binds it");
 }
