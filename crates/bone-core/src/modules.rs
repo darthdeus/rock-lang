@@ -255,6 +255,49 @@ impl LegacyProjection {
 #[derive(Clone, Debug, Default)]
 pub struct NsTree {
     pub packages: FxHashMap<PackageId, NsPackage>,
+    /// Bare names defined by the legacy files of this compilation unit
+    /// (stdlib included), recorded before any body lowers.
+    pub legacy_owned: LegacyOwnedNames,
+}
+
+/// Which legacy files define each bare item name. Lowering replaces a file's
+/// entry before it lowers any body, in a fresh build and in an incremental
+/// re-lower alike, so a legacy lookup never depends on which maps have
+/// filled so far.
+#[derive(Clone, Debug, Default)]
+pub struct LegacyOwnedNames {
+    by_file: FxHashMap<Ustr, Vec<Ustr>>,
+    by_name: FxHashMap<Ustr, Vec<Ustr>>,
+}
+
+impl LegacyOwnedNames {
+    pub fn replace_file(&mut self, file: Ustr, mut names: Vec<Ustr>) {
+        names.sort_unstable_by(|a, b| a.as_str().cmp(b.as_str()));
+        names.dedup();
+        if let Some(old) = self.by_file.remove(&file) {
+            for name in old {
+                if let Some(files) = self.by_name.get_mut(&name) {
+                    files.retain(|f| *f != file);
+                    if files.is_empty() {
+                        self.by_name.remove(&name);
+                    }
+                }
+            }
+        }
+        for &name in &names {
+            let files = self.by_name.entry(name).or_default();
+            files.push(file);
+            files.sort_unstable_by(|a, b| a.as_str().cmp(b.as_str()));
+        }
+        if !names.is_empty() {
+            self.by_file.insert(file, names);
+        }
+    }
+
+    /// The legacy files defining `name`, sorted.
+    pub fn files_defining(&self, name: Ustr) -> &[Ustr] {
+        self.by_name.get(&name).map(Vec::as_slice).unwrap_or(&[])
+    }
 }
 
 #[derive(Clone, Debug, Default)]

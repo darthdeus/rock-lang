@@ -364,6 +364,139 @@ fn read() -> int {
     n
 }
 
+//- legacy_owned_fn_and_projected_fn_are_ambiguous @fail=ambiguous legacy reference to `bump`: legacy definition in defs.rock and v1 definition provider::bump
+//-- provider.rock @pkg=provider,1 @v1
+pub fn bump(n: int) -> int {
+    n
+}
+
+//-- defs.rock @pkg=game,2
+fn bump(n: int) -> int {
+    n
+}
+
+//-- main.rock @pkg=game,2
+fn use_it() -> int {
+    bump(1)
+}
+
+//- legacy_owned_type_and_projected_type_are_ambiguous @fail=ambiguous legacy reference to `Shared`: legacy definition in defs.rock and v1 definition provider::Shared
+//-- provider.rock @pkg=provider,1 @v1
+pub struct Shared {
+    pub value: int,
+}
+
+//-- defs.rock @pkg=game,2
+struct Shared {
+    value: int,
+}
+
+//-- main.rock @pkg=game,2
+fn read(x: Shared) -> int {
+    x.value
+}
+
+//- legacy_owned_global_and_projected_fn_are_ambiguous @fail=ambiguous legacy reference to `bump`: legacy definition in defs.rock and v1 definition provider::bump
+//-- provider.rock @pkg=provider,1 @v1
+pub fn bump(n: int) -> int {
+    n
+}
+
+//-- defs.rock @pkg=game,2
+global bump: int = 3
+
+//-- main.rock @pkg=game,2
+fn read() -> int {
+    bump
+}
+
+//- legacy_owned_name_colliding_with_an_explicit_legacy_import_is_ambiguous @fail=ambiguous legacy reference to `Shared`: legacy definition in defs.rock and v1 definition provider::Shared
+//-- provider.rock @pkg=provider,1 @v1
+pub struct Shared {
+    pub value: int,
+}
+
+//-- defs.rock @pkg=game,2
+struct Shared {
+    value: int,
+}
+
+//-- main.rock @pkg=game,2
+use provider::Shared;
+
+fn read(x: Shared) -> int {
+    x.value
+}
+
+//- legacy_owned_generic_and_projected_generic_are_ambiguous @fail=ambiguous legacy reference to `Holder`: legacy definition in defs.rock and v1 definition provider::Holder
+//-- provider.rock @pkg=provider,1 @v1
+pub struct Holder<T> {
+    pub value: T,
+}
+
+//-- defs.rock @pkg=game,2
+struct Holder<T> {
+    value: T,
+}
+
+//-- main.rock @pkg=game,2
+fn read(x: Holder<int>) -> int {
+    x.value
+}
+
+//- legacy_projection_resolves_a_generic_root_export
+//-- provider.rock @pkg=provider,1 @v1
+pub struct Holder<T> {
+    pub value: T,
+}
+
+//-- main.rock @pkg=game,2
+fn read(x: Holder<int>) -> int {
+    let n = x.value
+            //^ int
+    n
+}
+
+//- legacy_owned_and_projected_names_resolve_when_they_do_not_collide
+//-- provider.rock @pkg=provider,1 @v1
+pub fn projected_only() -> string {
+    "v1"
+}
+
+fn bump(n: string) -> string {
+    n
+}
+
+//-- defs.rock @pkg=game,2
+fn bump(n: int) -> int {
+    n
+}
+
+//-- main.rock @pkg=game,2
+fn use_it() -> int {
+    let s = projected_only()
+            //^ string
+    let n = bump(1)
+            //^ int
+    n
+}
+
+//- an_unused_legacy_and_projected_collision_is_not_diagnosed
+//-- provider.rock @pkg=provider,1 @v1
+pub fn bump(n: int) -> int {
+    n
+}
+
+//-- defs.rock @pkg=game,2
+fn bump(n: int) -> int {
+    n
+}
+
+//-- main.rock @pkg=game,2
+fn unrelated() -> int {
+    1
+}
+
 //- a_pub_child_module_is_reachable_from_a_consumer
 //-- lib.rock @pkg=chess,1 @v1
 pub mod openings;

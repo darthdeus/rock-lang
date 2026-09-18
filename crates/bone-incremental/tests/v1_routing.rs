@@ -111,41 +111,72 @@ fn a_signature_edit_that_exports_a_private_type_is_refused() {
     assert!(err.message.contains(expected), "{}", err.message);
 }
 
-/// SENTINEL (docs/test-sentinels.md). A legacy file defines `bump(n)` and a v1
-/// package projects `bump(n, m)` to legacy files by the same bare name. A
-/// fresh session resolves a legacy `bump(1)` to the projection (and reports
-/// the missing `m`); after a body-only edit of the caller the session resolves
-/// it to the legacy-owned `bump` and reports nothing. Legacy `resolve_bare`
-/// checks `ws.functions_by_name` first, which is empty while a fresh build
-/// lowers bodies and populated during an incremental re-lower, so the winner
-/// depends on lowering order. Which one should win is an open AUTHOR
-/// DECISION (legacy-owned vs projected name of the same spelling). When the
-/// fix lands this fails: flip it to assert the incremental and fresh
-/// diagnostics are equal.
+const AMBIGUOUS_BUMP: &str =
+    "ambiguous legacy reference to `bump`: legacy definition in legacy_def.rock and v1 definition livev1::a::bump";
+
+/// A legacy file defines `bump` and a v1 package projects `bump` to legacy
+/// files. A legacy `bump(..)` is ambiguous, and the verdict is the same in a
+/// fresh session and after a body-only edit of the caller. Legacy resolution
+/// once checked `ws.functions_by_name`, which is empty while a fresh build
+/// lowers bodies and populated during an incremental re-lower, so the fresh
+/// build took the projection and the edited session took the legacy `bump`.
 #[test]
-fn sentinel_legacy_resolution_of_a_projected_name_depends_on_lowering_order() {
+fn a_legacy_name_that_is_also_projected_is_ambiguous_after_a_body_edit() {
     let a = "mod a;\n\npub fn bump(n: int, m: int) -> int {\n    n\n}\n";
     let root = "pub use a::bump;\n";
     let def = "fn bump(n: int) -> int {\n    n\n}\n";
     let edit = "fn use_it() -> int {\n    bump(2)\n}\n";
-    let files = |use_text: &str| {
+    let files = vec![
+        v1("a.rock", a),
+        v1("root.rock", root),
+        SessionFile::legacy("legacy_def.rock", def),
+        SessionFile::legacy("legacy_use.rock", "fn use_it() -> int {\n    bump(1)\n}\n"),
+    ];
+    let (tier, diags) = edit_with_diagnostics(files, "legacy_use.rock", edit);
+    assert_eq!(tier, UpdateTier::BodyOnly);
+    assert!(diags.iter().any(|d| d.contains(AMBIGUOUS_BUMP)), "{diags:?}");
+}
+
+/// SENTINEL (docs/test-sentinels.md). The same collision introduced or
+/// removed by an edit to the legacy DEFINER rather than the caller. The
+/// definer's edit takes the interface path, which re-infers but does not
+/// re-lower the callers, and the ambiguity is a lowering diagnostic: adding a
+/// colliding `bump` leaves the caller resolved to the projection with no
+/// diagnostic, and removing it leaves the caller's stale ambiguity behind.
+/// A fresh session reports the opposite in both cases. These assertions pass
+/// today because the session does not route such an edit to the full
+/// rebuild; the fix is that routing (`update_file` in
+/// `crates/bone-incremental/src/session.rs`: a legacy edit whose defined
+/// names change by a name some legacy compatibility view projects). When it
+/// lands this fails: replace both halves with `edit_with_diagnostics`, which
+/// asserts incremental == fresh.
+#[test]
+fn sentinel_a_legacy_definer_edit_does_not_relower_callers_of_a_colliding_name() {
+    let a = "mod a;\n\npub fn bump(n: int) -> int {\n    n\n}\n";
+    let without = "fn other(n: int) -> int {\n    n\n}\n";
+    let with = "fn other(n: int) -> int {\n    n\n}\n\nfn bump(n: int) -> int {\n    n\n}\n";
+    let files = |def: &str| {
         vec![
             v1("a.rock", a),
-            v1("root.rock", root),
+            v1("root.rock", "pub use a::bump;\n"),
             SessionFile::legacy("legacy_def.rock", def),
-            SessionFile::legacy("legacy_use.rock", use_text),
+            SessionFile::legacy("legacy_use.rock", "fn use_it() -> int {\n    bump(1)\n}\n"),
         ]
     };
-    let mut session = Session::new(vec![], files("fn use_it() -> int {\n    bump(1)\n}\n"), &NsAliases::default())
-        .expect("baseline builds");
-    session.update_file("legacy_use.rock", edit).expect("a body edit is accepted");
-    let fresh = Session::new(vec![], files(edit), &NsAliases::default()).expect("fresh build");
+    let ambiguous = |s: &Session| diagnostics(s).iter().any(|d| d.contains(AMBIGUOUS_BUMP));
 
-    assert!(diagnostics(&session).is_empty(), "PINNED BUG: incremental resolves to the legacy-owned bump");
-    assert!(
-        diagnostics(&fresh).iter().any(|d| d.contains("Missing required argument for parameter `m`")),
-        "PINNED BUG: fresh resolves to the projected bump; if this changed, the fix landed -- flip the sentinel"
-    );
+    let mut added = Session::new(vec![], files(without), &NsAliases::default()).expect("baseline builds");
+    let tier = added.update_file("legacy_def.rock", with).expect("the edit is accepted").tier;
+    assert_eq!(tier, UpdateTier::Interface);
+    let fresh_with = Session::new(vec![], files(with), &NsAliases::default()).expect("fresh build");
+    assert!(ambiguous(&fresh_with), "{:?}", diagnostics(&fresh_with));
+    assert!(!ambiguous(&added), "PINNED BUG: the added collision is not diagnosed until the caller re-lowers");
+
+    let mut removed = Session::new(vec![], files(with), &NsAliases::default()).expect("baseline builds");
+    removed.update_file("legacy_def.rock", without).expect("the edit is accepted");
+    let fresh_without = Session::new(vec![], files(without), &NsAliases::default()).expect("fresh build");
+    assert!(diagnostics(&fresh_without).is_empty(), "{:?}", diagnostics(&fresh_without));
+    assert!(ambiguous(&removed), "PINNED BUG: the removed collision's ambiguity stays on the caller");
 }
 
 /// A legacy file contributes no definitions to the namespace tree, so adding

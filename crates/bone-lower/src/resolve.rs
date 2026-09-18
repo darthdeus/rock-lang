@@ -1,9 +1,9 @@
 //! Modules-v1 name resolution (plan M2; spec 4.3, 8.3, 8.6).
 //!
 //! The one lookup authority over the namespace tree in `Workspace.ns`.
-//! Legacy workspaces have an empty tree and no fragment scopes: every
-//! helper here short-circuits to the bare name, which is exactly today's
-//! behavior, so the v1 layer cannot move legacy resolution.
+//! Legacy files have no fragment scope: their bare names go through
+//! `resolve_legacy_bare`, which keeps the bare key unless a compatibility
+//! view names a v1 definition (spec 3.2).
 //!
 //! Tier policy for a BARE name in a v1 fragment (spec 8.3):
 //!   1. lexical locals — handled by `lookup_in_scope` before this runs;
@@ -47,6 +47,57 @@ enum Landing {
     Def(Resolved),
     /// A module node: (package, path).
     Module(u32, Vec<Ustr>),
+}
+
+/// Resolve a bare name in a legacy source file (spec 3.2). Legacy names keep
+/// their bare keys; a name reached through the file's compatibility imports
+/// or its root projection resolves to the v1 definition's canonical key.
+/// When a legacy file of the compilation unit also defines the name, the
+/// reference is ambiguous: neither side wins. Both inputs exist before any
+/// body lowers, so a fresh build and an incremental re-lower decide alike.
+pub fn resolve_legacy_bare(ws: &Workspace, file: Ustr, name: Ustr) -> Result<Resolved, String> {
+    // The compiler-owned stdlib is lowered in the same workspace as user
+    // packages, but its legacy bodies must not see user declarations.
+    if bone_core::modules::is_stdlib_module_file(file.as_str()) {
+        return Ok(plain(name));
+    }
+    // Explicit compatibility imports shadow the root projection.
+    let Some(entries) = ws
+        .legacy_imports
+        .get(&file)
+        .and_then(|view| view.by_name.get(&name))
+        .or_else(|| ws.legacy_projections.get(&file).and_then(|view| view.by_name.get(&name)))
+    else {
+        return Ok(plain(name));
+    };
+
+    // A v1 re-export of a legacy definition keeps the bare key: it is the
+    // legacy definition itself, not a second candidate.
+    let foreign: Vec<Ustr> = entries.iter().map(|e| e.key).filter(|key| *key != name).collect();
+    let owners = ws.ns.legacy_owned.files_defining(name);
+    if !owners.is_empty() && !foreign.is_empty() {
+        let owners = owners.iter().map(|f| f.as_str()).collect::<Vec<_>>().join(", ");
+        let foreign = foreign.iter().map(|k| k.as_str()).collect::<Vec<_>>().join(", ");
+        return Err(format!(
+            "ambiguous legacy reference to `{name}`: legacy definition in {owners} \
+             and v1 definition {foreign}"
+        ));
+    }
+    if let [entry] = entries.as_slice() {
+        return Ok(Resolved { key: entry.key, kind: legacy_resolved_kind(entry.kind), hidden: Vec::new() });
+    }
+    let candidates = entries.iter().map(|e| e.key.as_str()).collect::<Vec<_>>().join(", ");
+    Err(format!("ambiguous legacy reference to `{name}`: candidates {candidates}"))
+}
+
+fn legacy_resolved_kind(kind: bone_core::modules::DefKind) -> ResolvedKind {
+    match kind {
+        bone_core::modules::DefKind::Type => ResolvedKind::Type,
+        bone_core::modules::DefKind::Global => ResolvedKind::Global,
+        bone_core::modules::DefKind::Callable => ResolvedKind::Callable,
+        bone_core::modules::DefKind::Decorator => ResolvedKind::Decorator,
+        bone_core::modules::DefKind::Module => ResolvedKind::Module,
+    }
 }
 
 /// Resolve a bare name in a v1 fragment through the tier policy. Legacy

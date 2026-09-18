@@ -137,84 +137,10 @@ impl<'a> LowerCtx<'a> {
         span: Span,
     ) -> Result<resolve::Resolved, CompilerError> {
         match self.v1_scope() {
-            Some(frag) => resolve::resolve_bare(self.workspace, Some(frag), name)
-                .map_err(|msg| CompilerError::new_with_label(span, msg)),
-            None => {
-                if self.workspace.struct_by_name.contains_key(&name)
-                    || self.workspace.enums_by_name.contains_key(&name)
-                    || self.workspace.newtypes_by_name.contains_key(&name)
-                    || self.workspace.functions_by_name.contains_key(&name)
-                {
-                    return Ok(resolve::Resolved {
-                        key: name,
-                        kind: resolve::ResolvedKind::Binding,
-                        hidden: Vec::new(),
-                    });
-                }
-                // The compiler-owned stdlib is lowered in the same workspace
-                // as user packages, but its legacy bodies must not project
-                // user declarations into their old bare namespace.
-                if bone_core::modules::is_stdlib_module_file(self.module.file.as_str()) {
-                    return Ok(resolve::Resolved {
-                        key: name,
-                        kind: resolve::ResolvedKind::Binding,
-                        hidden: Vec::new(),
-                    });
-                }
-
-                // Legacy caller accessing v1 definitions (spec 3.2 / 3.3):
-                // semantic analysis built these views once per compilation
-                // unit. Explicit compatibility imports shadow the root
-                // projection, and every candidate keeps its canonical key.
-                if let Some(entries) = self
-                    .workspace
-                    .legacy_imports
-                    .get(&self.module.file)
-                    .and_then(|view| view.by_name.get(&name))
-                    .or_else(|| {
-                        self.workspace
-                            .legacy_projections
-                            .get(&self.module.file)
-                            .and_then(|view| view.by_name.get(&name))
-                    })
-                {
-                    if entries.len() == 1 {
-                        let entry = &entries[0];
-                        return Ok(resolve::Resolved {
-                            key: entry.key,
-                            kind: Self::legacy_resolved_kind(entry.kind),
-                            hidden: Vec::new(),
-                        });
-                    }
-                    let candidates = entries
-                        .iter()
-                        .map(|entry| entry.key.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    return Err(CompilerError::new_with_label(
-                        span,
-                        format!(
-                            "ambiguous legacy reference to `{name}`: candidates {candidates}"
-                        ),
-                    ));
-                }
-                Ok(resolve::Resolved {
-                    key: name,
-                    kind: resolve::ResolvedKind::Binding,
-                    hidden: Vec::new(),
-                })
-            }
+            Some(frag) => resolve::resolve_bare(self.workspace, Some(frag), name),
+            None => resolve::resolve_legacy_bare(self.workspace, self.module.file, name),
         }
-    }
-
-    fn legacy_resolved_kind(kind: bone_core::modules::DefKind) -> resolve::ResolvedKind {
-        match kind {
-            bone_core::modules::DefKind::Type => resolve::ResolvedKind::Type,
-            bone_core::modules::DefKind::Global => resolve::ResolvedKind::Global,
-            bone_core::modules::DefKind::Callable => resolve::ResolvedKind::Callable,
-            bone_core::modules::DefKind::Decorator => resolve::ResolvedKind::Decorator,
-            bone_core::modules::DefKind::Module => resolve::ResolvedKind::Module,
-        }
+        .map_err(|msg| CompilerError::new_with_label(span, msg))
     }
 
     pub fn next_var_id(&mut self) -> VarId {
@@ -608,11 +534,7 @@ pub fn lower_type_expr_in(
         }
 
         TypeExprKind::App { ctor, args } => {
-            let resolved_ctor = if ctx.v1_scope().is_some() {
-                ctx.resolve_bare_key(ctor.name, ctor.span)?
-            } else {
-                ctor.name
-            };
+            let resolved_ctor = ctx.resolve_bare_key(ctor.name, ctor.span)?;
             let is_field_ref = ["FieldRef", "ReadFieldRef", "WriteFieldRef"]
                 .iter()
                 .any(|name| bone_core::modules::is_intrinsic_key(resolved_ctor, name));

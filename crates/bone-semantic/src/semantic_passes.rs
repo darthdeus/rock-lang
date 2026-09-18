@@ -97,6 +97,16 @@ pub fn lower_modules(
     // parallel lowering; this map is). Insert (not clear) so the incremental
     // single-module re-lower augments rather than wipes other modules' entries.
     for rock_mod in rock_modules.iter() {
+        // A legacy lookup that could also reach a projected v1 name is
+        // decided from this fact, so it is recorded before any body lowers.
+        if rock_mod.dialect == skull_parser::Dialect::Legacy {
+            let names = rock_mod
+                .items
+                .iter()
+                .filter_map(|item| owned_name_and_kind(&item.kind).map(|(name, _)| name))
+                .collect();
+            ws.ns.legacy_owned.replace_file(rock_mod.file, names);
+        }
         let scope = ws.fragment_scopes.get(&rock_mod.file).cloned();
         let mut walk = |item: &Item, path: &[ustr::Ustr]| -> Result<(), CompilerError> {
             // In v1 the workspace maps key by the canonical DefKey so two
