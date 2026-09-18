@@ -609,6 +609,7 @@ fn plan(package: &Path, consumer_dirs: &[PathBuf], export_test_uses: bool) -> Ou
     let base = &baselines[0];
     let mut needs: BTreeMap<u32, BTreeMap<usize, usize>> = BTreeMap::new();
     let mut owner_blockers: BTreeSet<String> = BTreeSet::new();
+    let mut legacy_referenced: BTreeSet<u32> = BTreeSet::new();
     for r in &base.refs {
         let from_file = base.ws.module(r.from).file;
         let Some(&fi) = file_index.get(&from_file) else { continue };
@@ -630,6 +631,7 @@ fn plan(package: &Path, consumer_dirs: &[PathBuf], export_test_uses: bool) -> Ou
                 ));
             }
             Some(_) if node.dialect == Dialect::Legacy => {
+                legacy_referenced.insert(owner);
                 owner_blockers.insert(format!(
                     "the package references legacy dependency `{}` ({} reference(s)); a v1 package reaches a legacy one only through an `allow_legacy` edge (spec 3.2), and this compiler has no namespace view of a legacy provider yet (`{}::name` does not resolve), so its names cannot be imported",
                     node.manifest_name,
@@ -642,7 +644,7 @@ fn plan(package: &Path, consumer_dirs: &[PathBuf], export_test_uses: bool) -> Ou
     }
     for e in &p_node.dependencies {
         let target = pctx.graph.package(e.target);
-        if target.dialect == Dialect::Legacy && !e.allow_legacy && !plan.imports.iter().any(|i| i.package == target.manifest_name) {
+        if target.dialect == Dialect::Legacy && !e.allow_legacy && !legacy_referenced.contains(&e.target.0) {
             owner_blockers.insert(format!(
                 "dependency `{}` is legacy: a v1 package needs `allow_legacy = true` on that edge (spec 3.2); the migrator does not opt in on the author's behalf",
                 e.declared_key
