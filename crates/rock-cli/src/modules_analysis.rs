@@ -5,7 +5,7 @@
 //! sites (what a consumer uses, what a fragment needs imported, which call a
 //! candidate rebinds).
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 use bone_core::hir::{Callee, Expr, Function, Pattern, TypeCtor, TypeExpr};
@@ -523,4 +523,207 @@ fn lua_quote(text: &str) -> String {
     }
     out.push('"');
     out
+}
+
+// --- edits and site comparison (migrate and fix --imports) -------------------------------------------------------------------
+
+/// One span edit: replace `range` (empty for an insertion) with `text`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Edit {
+    pub range: (usize, usize),
+    pub text: String,
+}
+
+/// Apply non-overlapping edits. Overlap is refused (spec 15.2).
+pub(crate) fn apply_edits(text: &str, edits: &[Edit]) -> std::result::Result<String, String> {
+    let mut sorted: Vec<&Edit> = edits.iter().collect();
+    sorted.sort_by_key(|e| e.range);
+    let mut out = String::with_capacity(text.len() + 64);
+    let mut at = 0;
+    for e in sorted {
+        if e.range.0 < at {
+            return Err(format!("overlapping edits at byte {}", e.range.0));
+        }
+        if e.range.1 > text.len() || !text.is_char_boundary(e.range.0) || !text.is_char_boundary(e.range.1) {
+            return Err(format!("edit range {:?} is outside the file", e.range));
+        }
+        out.push_str(&text[at..e.range.0]);
+        out.push_str(&e.text);
+        at = e.range.1;
+    }
+    out.push_str(&text[at..]);
+    Ok(out)
+}
+
+/// Where a baseline byte offset lands after `edits`. An insertion AT an offset
+/// stays before it (a qualified call starts where its name started); a
+/// replaced range collapses onto its start.
+pub(crate) fn map_offset(edits: &[Edit], off: usize) -> usize {
+    let mut shift: isize = 0;
+    for e in edits {
+        let (a, b) = e.range;
+        if a == b {
+            if off > a {
+                shift += e.text.len() as isize;
+            }
+        } else if off >= b {
+            shift += e.text.len() as isize - (b - a) as isize;
+        } else if off > a {
+            shift -= (off - a) as isize;
+        }
+    }
+    (off as isize + shift) as usize
+}
+
+// --- identities used to compare a baseline with a candidate -------------------
+
+/// A resolved target, spelled so a legacy key and its v1 DefKey agree.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum TargetId {
+    Fn { file: Ustr, name: String, ordinal: usize },
+    Def { file: Ustr, name: String },
+    Family { files: Vec<Ustr>, name: String },
+    Unrecorded(String),
+}
+
+pub(crate) fn target_id(ws: &Workspace, t: &Target) -> TargetId {
+    match t {
+        Target::Fn(mid, fid) => {
+            let m = ws.module(*mid);
+            let name = declared_name(m.functions[*fid].name.as_str()).to_string();
+            let ordinal = m
+                .functions
+                .iter()
+                .filter(|(i, f)| u32::from(i.into_raw()) < u32::from(fid.into_raw()) && declared_name(f.name.as_str()) == name)
+                .count();
+            TargetId::Fn { file: m.file, name, ordinal }
+        }
+        Target::Key { key, modules } => {
+            let name = declared_name(key.as_str()).to_string();
+            let mut files: Vec<Ustr> = modules.iter().map(|m| ws.module(*m).file).collect();
+            files.sort();
+            files.dedup();
+            match files.as_slice() {
+                [one] => TargetId::Def { file: *one, name },
+                _ => TargetId::Family { files, name },
+            }
+        }
+        Target::Unrecorded(name) => TargetId::Unrecorded(name.to_string()),
+    }
+}
+
+/// A reference site, in the coordinates of the text it was checked in.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct SiteKey {
+    pub file: Ustr,
+    pub start: usize,
+    pub end: usize,
+    pub kind: RefKind,
+}
+
+pub(crate) type Sites = BTreeMap<SiteKey, Vec<TargetId>>;
+
+/// Every package-file reference site; `edits` maps a baseline site into
+/// candidate coordinates (empty for a candidate). Types and patterns are
+/// compared per file as a multiset rather than by site: a v1 signature type
+/// records no span (`span_recordable` tests the spelled name against maps
+/// keyed by DefKey), and a type name cannot be overloaded, so a per-file
+/// count is as strict.
+pub(crate) fn sites(ws: &Workspace, refs: &[Ref], file_pkg: &HashMap<Ustr, u32>, edits: &HashMap<Ustr, Vec<Edit>>) -> Sites {
+    let mut out: Sites = BTreeMap::new();
+    for r in refs {
+        let file = ws.module(r.from).file;
+        if !file_pkg.contains_key(&file) {
+            continue;
+        }
+        if matches!(r.kind, RefKind::Type | RefKind::Pattern) {
+            out.entry(SiteKey { file, start: 0, end: 0, kind: r.kind })
+                .or_default()
+                .push(target_id(ws, &r.target));
+            continue;
+        }
+        let Some(span) = r.span else { continue };
+        if span.file != file {
+            continue;
+        }
+        let (start, end) = match edits.get(&file) {
+            Some(e) => (map_offset(e, span.offset_range.0), map_offset(e, span.offset_range.1)),
+            None => span.offset_range,
+        };
+        out.entry(SiteKey { file, start, end, kind: r.kind })
+            .or_default()
+            .push(target_id(ws, &r.target));
+    }
+    for v in out.values_mut() {
+        v.sort();
+    }
+    out
+}
+
+pub(crate) fn map_sites(base: &Sites, edits: &HashMap<Ustr, Vec<Edit>>) -> Sites {
+    base.iter()
+        .map(|(k, v)| {
+            let key = match edits.get(&k.file) {
+                Some(_) if matches!(k.kind, RefKind::Type | RefKind::Pattern) => k.clone(),
+                Some(e) => SiteKey { file: k.file, start: map_offset(e, k.start), end: map_offset(e, k.end), kind: k.kind },
+                None => k.clone(),
+            };
+            (key, v.clone())
+        })
+        .collect()
+}
+
+pub(crate) fn describe_change(key: &SiteKey, before: &[TargetId], after: &[TargetId]) -> String {
+    let show = |v: &[TargetId]| {
+        if v.is_empty() {
+            return "nothing".to_string();
+        }
+        v.iter()
+            .map(|t| match t {
+                TargetId::Fn { file, name, ordinal } => format!("fn {name}#{ordinal} in {}", short_path(file)),
+                TargetId::Def { file, name } => format!("{name} in {}", short_path(file)),
+                TargetId::Family { files, name } => format!("{name} across {} file(s)", files.len()),
+                TargetId::Unrecorded(n) => format!("unrecorded {n}"),
+            })
+            .collect::<Vec<_>>()
+            .join(" + ")
+    };
+    format!(
+        "{} bytes {}..{} ({}): {} -> {}",
+        short_path(&key.file),
+        key.start,
+        key.end,
+        key.kind.as_str(),
+        show(before),
+        show(after)
+    )
+}
+
+pub(crate) fn short_path(id: &str) -> String {
+    let p = Path::new(id);
+    std::env::current_dir()
+        .ok()
+        .and_then(|cwd| cwd.canonicalize().ok())
+        .and_then(|cwd| p.strip_prefix(&cwd).ok().map(|r| r.display().to_string()))
+        .unwrap_or_else(|| id.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn offsets_map_through_insertions_and_replacements() {
+        let edits = vec![
+            Edit { range: (0, 0), text: "pub ".into() },
+            Edit { range: (10, 10), text: "std::".into() },
+            Edit { range: (20, 24), text: " : ".into() },
+        ];
+        assert_eq!(map_offset(&edits, 0), 0);
+        assert_eq!(map_offset(&edits, 5), 9);
+        assert_eq!(map_offset(&edits, 10), 14);
+        assert_eq!(map_offset(&edits, 11), 20);
+        assert_eq!(map_offset(&edits, 24), 32);
+        assert_eq!(apply_edits("0123456789abcdefghij::  xyz", &edits).unwrap(), "pub 0123456789std::abcdefghij : xyz");
+    }
 }
