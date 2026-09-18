@@ -274,6 +274,7 @@ fn modules_v1_forms_roundtrip() {
         "struct S {\n    name: string,\n    private(set) health: float = 100,\n    pub field: int,\n}\n",
         "pub mod combat {\n    pub fn heal() {}\n}\n",
         "use a::b::*;\nuse a::b::{Actor, heal as restore};\nuse geo::operator(+);\n\nfn f() {}\n",
+        "pub @inline fn a() -> int { 1 }\n\npub(package) @pure\nfn b() -> int {\n    2\n}\n",
     ];
     for src in sources {
         let cfg = skull_fmt::FormatConfig::default();
@@ -296,6 +297,17 @@ fn modules_v1_forms_roundtrip() {
             once
         );
     }
+}
+
+/// A visibility ahead of an item's annotations survives formatting.
+#[test]
+fn v1_visibility_on_an_annotated_item_is_kept() {
+    let cfg = skull_fmt::FormatConfig::default();
+    let src = "pub @inline fn a() -> int { 1 }\n\npub(package) @pure\nfn b() -> int {\n    2\n}\n";
+    let plain = "pub fn c() -> int {\n    3\n}\n\npub struct S {\n    x: int,\n    pub(package) y: int,\n    pub private(set) z: int = 0,\n}\n\nprivate global G: int = 1\n\npub(in a::b) @inline inline(lua) fn d() -> int = \"\"\"return 1\"\"\"\n";
+    assert_eq!(skull_fmt::try_format_with_dialect(plain, &cfg, Dialect::V1).expect("format"), plain);
+    let out = skull_fmt::try_format_with_dialect(src, &cfg, Dialect::V1).expect("format");
+    assert_eq!(out, src);
 }
 
 /// A v1 ascription must NOT print as the infix `::` form: that would not
