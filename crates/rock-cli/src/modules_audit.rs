@@ -116,6 +116,18 @@ struct RefTable {
     /// recorded.
     edges: BTreeMap<(u32, Owner), Counts>,
     unattributed: BTreeMap<u32, Unattributed>,
+    /// package -> fragment file -> other package -> references: the import
+    /// families each fragment needs (std, the prelude, is not listed).
+    fragments: BTreeMap<u32, BTreeMap<String, BTreeMap<u32, usize>>>,
+    /// legacy package -> (declared name, kind) -> referencing packages and
+    /// count: what projecting that package into a scoped root must export.
+    legacy_exports: BTreeMap<u32, BTreeMap<(String, &'static str), (BTreeSet<u32>, usize)>>,
+    /// v1 package -> required type -> (reason, exporter) pairs (spec 11).
+    closure: BTreeMap<u32, BTreeMap<String, BTreeSet<(&'static str, String)>>>,
+    /// package -> summed parse-tree census of its analyzed files.
+    census: BTreeMap<u32, modules_analysis::FileCensus>,
+    /// Declared names defined by more than one owner (std included).
+    collisions: BTreeMap<String, BTreeSet<Owner>>,
 }
 
 struct Diag {
@@ -255,7 +267,7 @@ fn analyze(project: &Path, graph: &PackageGraph) -> (Option<Population>, Analysi
         );
         return (Some(population), failed_msg("package attribution", message));
     }
-    let (ws, body_errors) = match modules_analysis::check(&pop.analyzed) {
+    let modules_analysis::Checked { ws, errors: body_errors, census } = match modules_analysis::check(&pop.analyzed) {
         Ok(v) => v,
         Err(f) => return (Some(population), failed(f.stage, &pop.analyzed, &f.errors)),
     };
@@ -267,7 +279,7 @@ fn analyze(project: &Path, graph: &PackageGraph) -> (Option<Population>, Analysi
     if let Err(e) = bone_semantic::semantic_passes::pass_validate_api_closure(&ws) {
         return (Some(population), failed("semantic pass", &pop.analyzed, &[e]));
     }
-    match count_references(&ws, &file_pkg) {
+    match count_references(&ws, &file_pkg, graph, &census) {
         Ok(table) => (Some(population), Analysis::Ok(table)),
         Err(message) => (Some(population), failed_msg("package attribution", message)),
     }
@@ -312,11 +324,56 @@ fn failed(stage: &'static str, sources: &SourceFiles, errs: &[CompilerError]) ->
 fn count_references(
     ws: &bone_semantic::inference::Workspace,
     file_pkg: &HashMap<ustr::Ustr, u32>,
+    graph: &PackageGraph,
+    census: &HashMap<ustr::Ustr, modules_analysis::FileCensus>,
 ) -> std::result::Result<RefTable, String> {
     let owner_of = |mid: ModuleId| owner_of(ws, file_pkg, mid);
     let mut table = RefTable::default();
     for r in modules_analysis::references(ws) {
         let Owner::Package(from) = owner_of(r.from)? else { continue };
+        let from_file = ws.module(r.from).file;
+        // Fragment import families and the legacy export seeds read the
+        // single package a target belongs to.
+        let mut target_pkgs: BTreeSet<u32> = BTreeSet::new();
+        match &r.target {
+            Target::Fn(mid, _) => {
+                if let Owner::Package(p) = owner_of(*mid)? {
+                    target_pkgs.insert(p);
+                }
+            }
+            Target::Key { modules, .. } => {
+                for m in modules {
+                    if let Owner::Package(p) = owner_of(*m)? {
+                        target_pkgs.insert(p);
+                    }
+                }
+            }
+            Target::Unrecorded(_) => {}
+        }
+        if target_pkgs.len() == 1 {
+            let to = *target_pkgs.iter().next().expect("one package");
+            if to != from {
+                *table
+                    .fragments
+                    .entry(from)
+                    .or_default()
+                    .entry(from_file.to_string())
+                    .or_default()
+                    .entry(to)
+                    .or_default() += 1;
+                if graph.package(PackageId(to)).dialect == Dialect::Legacy {
+                    let (name, kind) = match &r.target {
+                        Target::Fn(mid, fid) => (ws.module(*mid).functions[*fid].name.to_string(), "fn"),
+                        Target::Key { key, .. } => (key.to_string(), key_kind(ws, *key)),
+                        Target::Unrecorded(_) => unreachable!("an unrecorded call has no owner"),
+                    };
+                    let name = modules_analysis::declared_name(&name).to_string();
+                    let slot = table.legacy_exports.entry(to).or_default().entry((name, kind)).or_default();
+                    slot.0.insert(from);
+                    slot.1 += 1;
+                }
+            }
+        }
         let to = match &r.target {
             Target::Fn(mid, _) => owner_of(*mid)?,
             Target::Unrecorded(name) => {
@@ -348,7 +405,67 @@ fn count_references(
             *table.edges.entry((from, to)).or_default().by_kind.entry(r.kind).or_default() += 1;
         }
     }
+
+    for req in bone_semantic::semantic_passes::api_closure_requirements(ws) {
+        let Some(meta) = ws.defs.get(&req.exporter) else { continue };
+        table
+            .closure
+            .entry(meta.package)
+            .or_default()
+            .entry(req.required.to_string())
+            .or_default()
+            .insert((req.reason, modules_analysis::declared_name(req.exporter.as_str()).to_string()));
+    }
+
+    for (file, c) in census {
+        let Some(&p) = file_pkg.get(file) else { continue };
+        let sum = table.census.entry(p).or_default();
+        sum.legacy_ascriptions += c.legacy_ascriptions;
+        sum.paren_ascriptions += c.paren_ascriptions;
+        sum.inline_fns += c.inline_fns;
+        sum.extern_fns += c.extern_fns;
+        sum.nomangle_items += c.nomangle_items;
+    }
+
+    let mut defined: BTreeMap<String, BTreeSet<Owner>> = BTreeMap::new();
+    let mut define = |key: ustr::Ustr, mid: ModuleId| -> std::result::Result<(), String> {
+        let owner = owner_of(mid)?;
+        if owner != Owner::Builtin {
+            defined.entry(modules_analysis::declared_name(key.as_str()).to_string()).or_default().insert(owner);
+        }
+        Ok(())
+    };
+    for (key, fns) in ws.functions_by_name.iter() {
+        for (mid, _) in fns.iter() {
+            define(*key, *mid)?;
+        }
+    }
+    for (key, s) in ws.struct_by_name.iter() {
+        define(*key, s.module)?;
+    }
+    for (key, e) in ws.enums_by_name.iter() {
+        define(*key, e.module)?;
+    }
+    for (key, n) in ws.newtypes_by_name.iter() {
+        define(*key, n.module)?;
+    }
+    for m in &ws.modules {
+        for key in m.global_by_name.keys() {
+            define(*key, m.id)?;
+        }
+    }
+    table.collisions = defined.into_iter().filter(|(_, owners)| owners.len() > 1).collect();
     Ok(table)
+}
+
+fn key_kind(ws: &bone_semantic::inference::Workspace, key: ustr::Ustr) -> &'static str {
+    if ws.struct_by_name.contains_key(&key) || ws.enums_by_name.contains_key(&key) || ws.newtypes_by_name.contains_key(&key) {
+        "type"
+    } else if ws.functions_by_name.contains_key(&key) {
+        "fn"
+    } else {
+        "global"
+    }
 }
 
 fn owner_of(
@@ -508,48 +625,20 @@ fn closed_verdict(report: &Report) -> Verdict {
 /// Spec 15.1 items this version does not derive, and what is missing.
 const NOT_COMPUTED: &[(&str, &str)] = &[
     (
-        "references in type positions, field accesses, patterns and decorator uses",
-        "the counted kinds are calls, value references, constructions and enum variant constructions; nominals in signatures/annotations, `x.field` targets, match patterns and `@deco` uses need a walk over lowered types and inferred receiver types that this version does not do",
-    ),
-    (
-        "compiler-synthesized protocol calls (for-in iter/next, implicit iterator coercion)",
-        "recorded in BodyInference (`for_iter_protocol`, `implicit_iter_args`) but not counted as source references",
-    ),
-    (
-        "affected declarations when projecting a selected package into a scoped root",
-        "needs a projection planner over a migration candidate (`rock modules migrate`, not implemented)",
-    ),
-    (
-        "required public-export closure and its reasons",
-        "`pass_validate_api_closure` only rejects; there is no accessor returning the closure set with its reasons",
-    ),
-    (
-        "import families needed per fragment",
-        "resolution records the chosen key per site, not the import family that would have to be written",
-    ),
-    (
-        "contextual-ascription nodes",
-        "needs a parse-tree census of legacy `x :: T` ascriptions (planned for the migrate planner)",
-    ),
-    (
-        "raw backend/ABI review sites",
-        "no census of extern/inline(lua)/raw `_G` sites; raw `_G.X` reads appear only as unattributed value references",
+        "references through field accesses and decorator uses",
+        "a field has its owning type's member namespace and is public by default, so `x.field` names no definition to attribute; `@deco` uses are validated per item but not recorded as references",
     ),
     (
         "tests/sims relying on private internals",
-        "needs per-site access classification of test/sim fragments against the owner's visibility",
+        "the audit analyzes the `rock compile` population; `rock modules migrate` analyzes each named consumer with its tests and reports what only a test reaches",
     ),
     (
         "identity-string consumers",
         "no census of code that reads definition identity as a string",
     ),
     (
-        "name collisions",
-        "projection ambiguities are reported as diagnostics at use; no inventory of latent collisions",
-    ),
-    (
         "behavior-resolution changes against the legacy baseline",
-        "needs a migration candidate to compare (`rock modules migrate`, not implemented)",
+        "a property of a migration candidate: `rock modules migrate --check` compares every resolved site of its candidate with the legacy baseline",
     ),
 ];
 
@@ -835,6 +924,7 @@ fn render_pretty(report: &Report, verdict: &Verdict) -> String {
                     class.replace('_', " ")
                 );
             }
+            render_derived_pretty(&mut o, graph, table);
         }
         _ => {
             let _ = writeln!(o, "\ncross-package references by original owner {}\n  {unknown}", tag(Status::Unknown));
@@ -843,6 +933,9 @@ fn render_pretty(report: &Report, verdict: &Verdict) -> String {
                 "\nreferences to undeclared peers or back to consumers {}\n  {unknown}",
                 tag(Status::Unknown)
             );
+            for section in DERIVED_SECTIONS {
+                let _ = writeln!(o, "\n{section} {}\n  {unknown}", tag(Status::Unknown));
+            }
         }
     }
 
@@ -854,6 +947,183 @@ fn render_pretty(report: &Report, verdict: &Verdict) -> String {
         let _ = writeln!(o, "\nanalysis failed: derived sections are unknown, not zero");
     }
     o
+}
+
+/// The derived sections, in report order (their headings when unknown).
+const DERIVED_SECTIONS: [&str; 5] = [
+    "parse-tree census: contextual ascriptions and raw backend sites",
+    "import families per fragment",
+    "legacy packages: definitions other packages reference",
+    "public API closure of v1 packages",
+    "latent name collisions across packages",
+];
+
+/// Names listed per line before `... N more`; counts stay exact.
+const NAMES_LISTED: usize = 12;
+
+fn listed(names: impl IntoIterator<Item = String>) -> String {
+    let all: Vec<String> = names.into_iter().collect();
+    let mut out = all.iter().take(NAMES_LISTED).cloned().collect::<Vec<_>>().join(", ");
+    if all.len() > NAMES_LISTED {
+        out.push_str(&format!(", ... {} more", all.len() - NAMES_LISTED));
+    }
+    out
+}
+
+fn render_derived_pretty(o: &mut String, graph: &PackageGraph, table: &RefTable) {
+    use std::fmt::Write as _;
+    let name = |id: u32| graph.package(PackageId(id)).manifest_name.clone();
+    let exact = "[exact]";
+
+    let _ = writeln!(o, "\n{} {exact}", DERIVED_SECTIONS[0]);
+    let _ = writeln!(o, "  read from each analyzed file's parse tree before expansion");
+    for (&p, c) in &table.census {
+        let _ = writeln!(
+            o,
+            "  {}: legacy `x :: T` {}, v1 `(x : T)` {}, inline(backend) fns {}, extern fns {}, @nomangle items {}",
+            name(p),
+            c.legacy_ascriptions,
+            c.paren_ascriptions,
+            c.inline_fns,
+            c.extern_fns,
+            c.nomangle_items
+        );
+    }
+
+    let _ = writeln!(o, "\n{} {exact}", DERIVED_SECTIONS[1]);
+    let _ = writeln!(o, "  the other packages each fragment references (std, the prelude, is not listed); JSON has every fragment");
+    if table.fragments.is_empty() {
+        let _ = writeln!(o, "  none");
+    }
+    for (&p, files) in &table.fragments {
+        let mut by_target: BTreeMap<u32, usize> = BTreeMap::new();
+        for targets in files.values() {
+            for &t in targets.keys() {
+                *by_target.entry(t).or_default() += 1;
+            }
+        }
+        let parts: Vec<String> = by_target.iter().map(|(t, n)| format!("{n} reference {}", name(*t))).collect();
+        let _ = writeln!(o, "  {}: {} fragment(s); {}", name(p), files.len(), parts.join(", "));
+    }
+
+    let _ = writeln!(o, "\n{} {exact}", DERIVED_SECTIONS[2]);
+    let _ = writeln!(
+        o,
+        "  what a v1 conversion of each legacy package must export for these consumers (`rock modules migrate --check` adds the type closure)"
+    );
+    if table.legacy_exports.is_empty() {
+        let _ = writeln!(o, "  none");
+    }
+    for (&p, defs) in &table.legacy_exports {
+        let _ = writeln!(
+            o,
+            "  {}: {} definition(s): {}",
+            name(p),
+            defs.len(),
+            listed(defs.iter().map(|((n, k), (from, refs))| {
+                format!("{n} ({k}, {refs} from {})", from.iter().map(|f| name(*f)).collect::<Vec<_>>().join("/"))
+            }))
+        );
+    }
+
+    let _ = writeln!(o, "\n{} {exact}", DERIVED_SECTIONS[3]);
+    let _ = writeln!(o, "  every nominal an exported interface names, with its reason (spec 11)");
+    if table.closure.is_empty() {
+        let _ = writeln!(o, "  none");
+    }
+    for (&p, types) in &table.closure {
+        let _ = writeln!(o, "  {}: {} type(s)", name(p), types.len());
+        for (ty, why) in types {
+            let _ = writeln!(
+                o,
+                "    {ty}: {}",
+                listed(why.iter().map(|(reason, exporter)| format!("{reason} `{exporter}`")))
+            );
+        }
+    }
+
+    let _ = writeln!(o, "\n{} {exact}", DERIVED_SECTIONS[4]);
+    let _ = writeln!(
+        o,
+        "  {} declared name(s) defined by more than one owner (std included); legacy merges same-named callables, v1 globs make a non-callable ambiguous at use",
+        table.collisions.len()
+    );
+    if !table.collisions.is_empty() {
+        let _ = writeln!(
+            o,
+            "  {}",
+            listed(table.collisions.iter().map(|(n, owners)| {
+                format!("{n} ({})", owners.iter().map(|w| owner_name(graph, *w)).collect::<Vec<_>>().join(", "))
+            }))
+        );
+    }
+}
+
+fn derived_json(graph: &PackageGraph, table: &RefTable) -> serde_json::Map<String, Value> {
+    let name = |id: u32| graph.package(PackageId(id)).manifest_name.clone();
+    let mut out = serde_json::Map::new();
+    out.insert(
+        "census".into(),
+        json!({
+            "status": "exact",
+            "packages": table.census.iter().map(|(&p, c)| json!({
+                "package": name(p),
+                "legacy_ascriptions": c.legacy_ascriptions,
+                "paren_ascriptions": c.paren_ascriptions,
+                "inline_fns": c.inline_fns,
+                "extern_fns": c.extern_fns,
+                "nomangle_items": c.nomangle_items,
+            })).collect::<Vec<_>>(),
+        }),
+    );
+    out.insert(
+        "import_families".into(),
+        json!({
+            "status": "exact",
+            "fragments": table.fragments.iter().flat_map(|(&p, files)| files.iter().map(move |(f, targets)| (p, f, targets))).map(|(p, f, targets)| json!({
+                "package": name(p),
+                "file": display_path(Path::new(f)),
+                "references": targets.iter().map(|(t, n)| (name(*t), json!(n))).collect::<serde_json::Map<_, _>>(),
+            })).collect::<Vec<_>>(),
+        }),
+    );
+    out.insert(
+        "legacy_exports".into(),
+        json!({
+            "status": "exact",
+            "packages": table.legacy_exports.iter().map(|(&p, defs)| json!({
+                "package": name(p),
+                "definitions": defs.iter().map(|((n, k), (from, refs))| json!({
+                    "name": n, "kind": k, "references": refs,
+                    "from": from.iter().map(|f| name(*f)).collect::<Vec<_>>(),
+                })).collect::<Vec<_>>(),
+            })).collect::<Vec<_>>(),
+        }),
+    );
+    out.insert(
+        "api_closure".into(),
+        json!({
+            "status": "exact",
+            "packages": table.closure.iter().map(|(&p, types)| json!({
+                "package": name(p),
+                "types": types.iter().map(|(ty, why)| json!({
+                    "type": ty,
+                    "reasons": why.iter().map(|(r, e)| json!({ "reason": r, "exporter": e })).collect::<Vec<_>>(),
+                })).collect::<Vec<_>>(),
+            })).collect::<Vec<_>>(),
+        }),
+    );
+    out.insert(
+        "name_collisions".into(),
+        json!({
+            "status": "exact",
+            "names": table.collisions.iter().map(|(n, owners)| json!({
+                "name": n,
+                "owners": owners.iter().map(|w| owner_name(graph, *w)).collect::<Vec<_>>(),
+            })).collect::<Vec<_>>(),
+        }),
+    );
+    out
 }
 
 fn render_json(report: &Report, verdict: &Verdict) -> Value {
@@ -1025,7 +1295,14 @@ fn render_json(report: &Report, verdict: &Verdict) -> Value {
         ),
     };
 
-    json!({
+    let derived = match (&report.analysis, &report.graph) {
+        (Analysis::Ok(table), Ok(graph)) => derived_json(graph, table),
+        _ => ["census", "import_families", "legacy_exports", "api_closure", "name_collisions"]
+            .iter()
+            .map(|k| (k.to_string(), json!({ "status": "unknown", "reason": unknown_reason })))
+            .collect(),
+    };
+    let mut doc = json!({
         "project": report.project,
         "configuration": {
             "status": "exact",
@@ -1043,5 +1320,7 @@ fn render_json(report: &Report, verdict: &Verdict) -> Value {
         "not_computed": NOT_COMPUTED.iter().map(|(item, missing)| json!({
             "item": item, "status": "not_computed", "missing": missing,
         })).collect::<Vec<_>>(),
-    })
+    });
+    doc.as_object_mut().expect("object").extend(derived);
+    doc
 }

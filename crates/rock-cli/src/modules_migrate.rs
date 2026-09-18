@@ -247,7 +247,8 @@ struct Checked {
 }
 
 fn check_sources(sources: &SourceFiles) -> std::result::Result<Checked, (String, Vec<CompilerError>)> {
-    let (ws, errors) = modules_analysis::check(sources).map_err(|f| (f.stage.to_string(), f.errors))?;
+    let modules_analysis::Checked { ws, errors, .. } =
+        modules_analysis::check(sources).map_err(|f| (f.stage.to_string(), f.errors))?;
     let refs = modules_analysis::references(&ws);
     Ok(Checked { ws, refs, errors })
 }

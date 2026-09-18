@@ -78,14 +78,69 @@ pub(crate) struct CheckFailure {
     pub errors: Vec<CompilerError>,
 }
 
+/// Parse-tree facts about one file, read before expansion and desugaring
+/// rewrite the tree.
+#[derive(Default, Clone, Copy)]
+pub(crate) struct FileCensus {
+    /// Legacy infix `expr :: T` ascriptions (the nodes a v1 conversion
+    /// rewrites).
+    pub legacy_ascriptions: usize,
+    /// v1 `(expr : T)` ascriptions.
+    pub paren_ascriptions: usize,
+    /// `inline(<backend>) fn` bodies: raw backend source the compiler does
+    /// not resolve.
+    pub inline_fns: usize,
+    /// `extern` declarations (C, Lua, JS, FFI).
+    pub extern_fns: usize,
+    /// Items emitted under their declared name (`@nomangle`).
+    pub nomangle_items: usize,
+}
+
+pub(crate) struct Checked {
+    pub ws: Workspace,
+    /// Body errors; the workspace is kept beside them.
+    pub errors: Vec<CompilerError>,
+    /// By module file id; stdlib files included.
+    pub census: HashMap<Ustr, FileCensus>,
+}
+
 /// Parse and check `sources` the way `rock compile` does, but keep the
 /// workspace when bodies have errors (they come back beside it) and leave the
 /// spec 11 closure to the caller (`api_closure_requirements`).
-pub(crate) fn check(sources: &SourceFiles) -> Result<(Workspace, Vec<CompilerError>), CheckFailure> {
+pub(crate) fn check(sources: &SourceFiles) -> Result<Checked, CheckFailure> {
     let (mut modules, _entry) = crate::skull_backend::skull_assemble_project(sources)
         .map_err(|errors| CheckFailure { stage: "parse", errors })?;
-    crate::bone_backend::check_modules_for_tools(&mut modules)
-        .map_err(|errors| CheckFailure { stage: "semantic pass", errors })
+    let census = modules.iter().map(|m| (m.file, census(m))).collect();
+    let (ws, errors) = crate::bone_backend::check_modules_for_tools(&mut modules)
+        .map_err(|errors| CheckFailure { stage: "semantic pass", errors })?;
+    Ok(Checked { ws, errors, census })
+}
+
+fn census(ast: &skull_parser::Ast) -> FileCensus {
+    let mut c = FileCensus::default();
+    for (_, e) in ast.exprs.iter() {
+        match e.kind {
+            skull_parser::ExprKind::TypeAscription(..) => c.legacy_ascriptions += 1,
+            skull_parser::ExprKind::ParenAscription(..) => c.paren_ascriptions += 1,
+            _ => {}
+        }
+    }
+    let mut items: Vec<&skull_parser::Item> = ast.items.iter().collect();
+    while let Some(item) = items.pop() {
+        if item.annotations.iter().any(|a| a.name.name.as_str() == "nomangle") {
+            c.nomangle_items += 1;
+        }
+        match &item.kind {
+            skull_parser::ItemKind::Function(f) => match f.body {
+                skull_parser::FunctionBody::Rock(_) => {}
+                skull_parser::FunctionBody::Inline(..) => c.inline_fns += 1,
+                _ => c.extern_fns += 1,
+            },
+            skull_parser::ItemKind::Module(m) => items.extend(m.items.iter()),
+            _ => {}
+        }
+    }
+    c
 }
 
 /// What a reference site is.

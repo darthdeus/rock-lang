@@ -228,7 +228,18 @@ fn cross_package_references_are_exact_counts() {
 #[test]
 fn json_carries_a_status_for_every_section() {
     let v = json(&audit(&repo_root().join("libs/chess-core"), &["--format", "json"]));
-    for section in ["configuration", "package_graph", "legacy_boundaries", "cross_package_references", "undeclared_references"] {
+    for section in [
+        "configuration",
+        "package_graph",
+        "legacy_boundaries",
+        "cross_package_references",
+        "undeclared_references",
+        "census",
+        "import_families",
+        "legacy_exports",
+        "api_closure",
+        "name_collisions",
+    ] {
         let status = v[section]["status"].as_str().unwrap_or_else(|| panic!("{section} has no status: {v}"));
         assert!(["exact", "unknown", "not_computed"].contains(&status), "{section}: {status}");
     }
@@ -260,4 +271,74 @@ fn an_unresolved_graph_is_unknown_not_clean() {
     assert!(v["package_graph"]["reason"].as_str().unwrap().contains("allow_legacy"), "{v}");
     assert_eq!(v["legacy_boundaries"]["status"], "unknown");
     assert_eq!(v["closed"]["verdict"], "unknown");
+}
+
+/// The sections that used to be listed as not computed, each compiler-derived:
+/// the parse-tree census (ascriptions, raw backend sites), import families per
+/// fragment, what a legacy package's consumers need exported, the public API
+/// closure with its reasons, and latent name collisions.
+#[test]
+fn derived_sections_are_exact() {
+    let dir = scratch("derived");
+    write(&dir.join("lib/stick.toml"), &manifest("closure-lib", true, ""));
+    write(
+        &dir.join("lib/lib.rock"),
+        "pub struct Crate {\n    pub n: int,\n}\n\npub fn make_crate() -> Crate {\n    Crate { n: 1 }\n}\n",
+    );
+    write(&dir.join("old/stick.toml"), &manifest("census-old", false, "[dependencies]\nclosure-lib = { path = \"../lib\" }\n"));
+    write(
+        &dir.join("old/old.rock"),
+        "fn old_value() -> int {\n    make_crate().n :: int\n}\n\nfn abs(s: string) -> string {\n    s\n}\n\n@nomangle inline(lua) fn old_raw() -> int = \"\"\"return 1\"\"\"\n",
+    );
+    write(&dir.join("app/stick.toml"), &manifest("census-app", false, "[dependencies]\ncensus-old = { path = \"../old\" }\n"));
+    write(&dir.join("app/app.rock"), "fn app_value() -> int {\n    old_value() + old_value()\n}\n");
+
+    let run = audit(&dir.join("app"), &["--format", "json"]);
+    assert_eq!(run.code, Some(0), "stdout:\n{}\nstderr:\n{}", run.stdout, run.stderr);
+    let v = json(&run);
+    let pkg = |section: &str, name: &str| -> serde_json::Value {
+        v[section]["packages"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{section}: {v}"))
+            .iter()
+            .find(|p| p["package"] == name)
+            .unwrap_or_else(|| panic!("{section} has no {name}: {v}"))
+            .clone()
+    };
+
+    let census = pkg("census", "census-old");
+    assert_eq!(census["legacy_ascriptions"], 1, "{census}");
+    assert_eq!(census["inline_fns"], 1, "{census}");
+    assert_eq!(census["nomangle_items"], 1, "{census}");
+
+    let old_frag = v["import_families"]["fragments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["package"] == "census-old")
+        .unwrap_or_else(|| panic!("{v}"))
+        .clone();
+    // The call; the `.n` read names no definition (fields are not counted).
+    assert_eq!(old_frag["references"]["closure-lib"], 1, "{old_frag}");
+
+    let exports = pkg("legacy_exports", "census-old");
+    let defs = exports["definitions"].as_array().unwrap();
+    assert_eq!(defs.len(), 1, "{exports}");
+    assert_eq!(defs[0]["name"], "old_value");
+    assert_eq!(defs[0]["references"], 2);
+    assert_eq!(defs[0]["from"][0], "census-app");
+
+    let closure = pkg("api_closure", "closure-lib");
+    assert_eq!(closure["types"][0]["type"], "closure_lib::Crate", "{closure}");
+    assert_eq!(closure["types"][0]["reasons"][0]["reason"], "public function", "{closure}");
+    assert_eq!(closure["types"][0]["reasons"][0]["exporter"], "make_crate", "{closure}");
+
+    let abs = v["name_collisions"]["names"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["name"] == "abs")
+        .unwrap_or_else(|| panic!("{v}"))
+        .clone();
+    assert_eq!(abs["owners"], serde_json::json!(["census-old", "std"]), "{abs}");
 }
