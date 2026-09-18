@@ -3006,7 +3006,8 @@ const NARROW_RECEIVE_LANES: usize = 4;
 /// a few wide values past LuaJIT's 250-slot frame limit. No later write can
 /// intervene, because the one write dominates every read.
 fn single_receive_cells(func: &MirFunc, scope: &[Idx<Block>]) -> HashSet<Idx<Cell>> {
-    // cell -> (defs, the receiving call's block and position)
+    // cell -> (defs, the wide receive's block and position). Only a wide
+    // receive records a position, so a cell qualifies iff its one def is one.
     let mut defs: rustc_hash::FxHashMap<Idx<Cell>, (u32, Option<(Idx<Block>, usize)>)> =
         rustc_hash::FxHashMap::default();
     for &b in scope {
@@ -3016,14 +3017,16 @@ fn single_receive_cells(func: &MirFunc, scope: &[Idx<Block>]) -> HashSet<Idx<Cel
                     let wide = dests.len() > NARROW_RECEIVE_LANES;
                     for cell in dests {
                         let entry = defs.entry(*cell).or_insert((0, None));
-                        entry.0 += if wide { 1 } else { 2 };
-                        entry.1 = Some((b, pos));
+                        entry.0 += 1;
+                        if wide {
+                            entry.1 = Some((b, pos));
+                        }
                     }
                 }
                 // A placeholder the bound substitution replaces; never a receive.
                 Inst::CallBoundMulti { dests, .. } => {
                     for cell in dests {
-                        defs.entry(*cell).or_insert((0, None)).0 += 2;
+                        defs.entry(*cell).or_insert((0, None)).0 += 1;
                     }
                 }
                 other => regalloc::cell_defs(other, &mut |cell| {

@@ -308,3 +308,43 @@ fn a_nested_leaf_of_a_flat_stored_element_is_one_slot_write() {
         "1,1,2.5,3|6,70,8,11|1,20|50"
     );
 }
+
+const EMPTY_EDGES_MAIN: &str = r#"
+fn edges_strided() -> string {
+    let xs: [Ev] = []
+    let a = xs.pop() == null
+    xs.push(ev(1, Pay::Nothing))
+    let b = xs.pop().unwrap().kind
+    let c = xs.pop() == null
+    let d = xs.remove_at(0) == null
+    let e = xs.swap_remove(0) == null
+    xs.push(ev(2, Pay::Text("again")))
+    return "{a},{b},{c},{d},{e},{xs.len()},{xs[0].kind}"
+}
+
+fn edges_boxed() -> string {
+    let xs: [int] = []
+    let a = xs.pop() == null
+    xs.push(1)
+    let b = xs.pop().unwrap()
+    let c = xs.pop() == null
+    let d = xs.remove_at(0) == null
+    let e = xs.swap_remove(0) == null
+    xs.push(2)
+    return "{a},{b},{c},{d},{e},{xs.len()},{xs[0]}"
+}
+
+fn main() {
+    print("{edges_strided()}|{edges_boxed()}")
+}
+"#;
+
+#[test]
+fn an_emptied_strided_vec_answers_like_a_boxed_one() {
+    let lua = try_emit_module(&program(EMPTY_EDGES_MAIN)).expect("emits");
+    assert!(lua.contains(r#"repr = "strided""#), "fixture must exercise strided storage");
+    assert_eq!(
+        run_luajit(&format!("{lua}\nmain()\n"), "nobox_wide_strided_empty_edges"),
+        "true,1,true,true,true,1,2|true,1,true,true,true,1,2"
+    );
+}
