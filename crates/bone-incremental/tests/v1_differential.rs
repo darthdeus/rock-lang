@@ -934,3 +934,35 @@ fn a_function_named_like_a_macro_is_refused_like_a_fresh_build() {
     let err = session.update_file("user.rock", user1).expect_err("the session refuses the edit too");
     assert!(err.message.contains(expected), "{}", err.message);
 }
+
+/// Warm and user files share the legacy bare-name maps: a user type named
+/// like a warm generic type overwrites its arity before the warm bodies lower
+/// in a fresh build, so the warm signature over it is refused there. A
+/// session that lowered the warm modules alone would not see that, and its
+/// build -- first or rebuilt -- would differ from a fresh one. With such a
+/// collision the session lowers warm and user files together.
+#[test]
+fn a_user_type_named_like_a_warm_type_builds_like_a_fresh_build() {
+    let warm_text = "struct Box<T> {\n    v: T,\n}\n\nfn unbox<T>(b: Box<T>) -> T {\n    b.v\n}\n";
+    let warm = || {
+        vec![skull_parser::parse_module_with_dialect(warm_text, Ustr::from("<bone-stdlib:collide_warm>"), Dialect::Legacy)
+            .expect("warm parses")]
+    };
+    let apart = "struct Crate {\n    x: int,\n}\n\nfn f(b: Crate) -> int {\n    b.x\n}\n";
+    let collide = "struct Box {\n    x: int,\n}\n\nfn f(b: Box) -> int {\n    b.x\n}\n";
+
+    let mut modules = warm();
+    modules.extend(parse(&[legacy("user.rock", collide)]).expect("parses"));
+    let batch = semantic_pass_with_aliases(&mut modules, &NsAliases::default()).err().expect("the batch pass refuses it");
+    assert!(batch.message.contains("Generic type `Box` expects 0 type argument(s)"), "{}", batch.message);
+
+    let first = Session::new(warm(), vec![legacy("user.rock", collide)], &NsAliases::default())
+        .err()
+        .expect("Session::new refuses it too");
+    assert_eq!(first.message, batch.message, "Session::new");
+
+    let mut session = Session::new(warm(), vec![legacy("user.rock", apart)], &NsAliases::default()).expect("builds");
+    session.files.get_mut("user.rock").unwrap().text = collide.to_string();
+    let rebuilt = session.rebuild_users().err().expect("rebuild_users refuses it too");
+    assert_eq!(rebuilt.message, batch.message, "rebuild_users");
+}
