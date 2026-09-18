@@ -978,14 +978,18 @@ impl Session {
 
         // An edit that changes what the namespace tree, the fragment scopes
         // or the legacy projections are built from takes the scope path:
-        // `UserFile::scope_hash`, or a legacy definition whose name a legacy
+        // `UserFile::scope_hash`, a legacy definition whose name a legacy
         // compatibility view also names (a legacy lookup of that name reads
-        // the legacy-owned facts).
+        // the legacy-owned facts), or a legacy definition of a provider a v1
+        // package sees through its namespace view.
         let scope_changed = self
             .files
             .get(path)
             .is_some_and(|old| old.scope_hash != new_scope)
-            || (dialect == Dialect::Legacy && tracked && self.changes_a_projected_collision(path, &module));
+            || (dialect == Dialect::Legacy
+                && tracked
+                && (self.changes_a_projected_collision(path, &module)
+                    || self.changes_a_legacy_view(path, package.as_ref(), &module)));
 
         let diff = (tracked && !module.items.is_empty() && !scope_changed)
             .then(|| classify(&self.files[path].item_prints, &new_prints));
@@ -1091,6 +1095,23 @@ impl Session {
     /// the callers that looked it up have to re-lower: the scope path.
     fn changes_a_projected_collision(&self, path: &str, module: &Ast) -> bool {
         !self.projected_legacy_owned_changes(ustr(path), module).is_empty()
+    }
+
+    /// Whether a legacy file's edit adds, removes or re-kinds a definition of
+    /// a provider some v1 package depends on: its namespace view (spec 3.2)
+    /// holds what the provider's files define, and v1 lookups through it are
+    /// decided at lowering.
+    fn changes_a_legacy_view(&self, path: &str, package: Option<&PackageTag>, module: &Ast) -> bool {
+        let Some(tag) = package else { return false };
+        let viewed = self.ws.ns.package(tag.id).is_some_and(|pkg| pkg.node(ustr("")).is_some());
+        if !viewed {
+            return false;
+        }
+        let old: FxHashSet<(Ustr, bone_core::modules::DefKind)> =
+            self.ws.ns.legacy_owned.names_defined_by(ustr(path)).iter().copied().collect();
+        let new: FxHashSet<(Ustr, bone_core::modules::DefKind)> =
+            bone_semantic::semantic_passes::legacy_owned_names(module).into_iter().collect();
+        old != new
     }
 
     /// The bare names the legacy file `file` starts or stops defining (or

@@ -626,3 +626,48 @@ fn a_dependency_module_alias_added_or_removed_takes_the_scope_path() {
     assert_eq!(tier, UpdateTier::Scope);
     assert!(diags.iter().any(|d| d.contains("did not resolve")), "{diags:?}");
 }
+
+/// A v1 package reaches a legacy dependency through the view of what the
+/// provider's own files define (spec 3.2), so a legacy definer edit that
+/// adds or removes a name is a namespace edit: the scope path re-lowers the
+/// v1 users that looked the name up, as a fresh session decides.
+#[test]
+fn a_legacy_definition_added_or_removed_relowers_its_v1_users() {
+    let without = "fn other() -> int {\n    1\n}\n";
+    let with = "fn other() -> int {\n    1\n}\n\nfn pick(n: int) -> int {\n    n\n}\n";
+    let by_path = "fn use_it() -> int {\n    x_lib::pick(1)\n}\n";
+    let by_glob = "use x_lib::*;\n\nfn use_it() -> int {\n    pick(1)\n}\n";
+    for user in [by_path, by_glob] {
+        let files = |lib: &str| {
+            vec![in_package(Dialect::Legacy, 1, "x_lib", "xlib.rock", lib), v1_in(2, "app", "use.rock", user)]
+        };
+        let aliases = aliases_of(&files(without));
+
+        let (tier, diags) = edit_with_aliases(files(without), "xlib.rock", with, &aliases);
+        assert_eq!(tier, UpdateTier::Scope, "{user}");
+        assert!(diags.is_empty(), "{user}: {diags:?}");
+
+        let (tier, diags) = edit_with_aliases(files(with), "xlib.rock", without, &aliases);
+        assert_eq!(tier, UpdateTier::Scope, "{user}");
+        assert!(diags.iter().any(|d| d.contains("did not resolve")), "{user}: {diags:?}");
+    }
+}
+
+/// A legacy provider with no v1 dependent has no view, so its definer edits
+/// keep the legacy routing.
+#[test]
+fn a_legacy_definition_added_with_no_v1_dependent_stays_on_the_interface_path() {
+    let without = "fn other() -> int {\n    1\n}\n";
+    let with = "fn other() -> int {\n    1\n}\n\nfn pick(n: int) -> int {\n    n\n}\n";
+    let user = "fn use_it() -> int {\n    other()\n}\n";
+    let files = |lib: &str| {
+        vec![
+            in_package(Dialect::Legacy, 1, "x_lib", "xlib.rock", lib),
+            in_package(Dialect::Legacy, 2, "app", "use.rock", user),
+        ]
+    };
+    let aliases = aliases_of(&files(without));
+    let (tier, diags) = edit_with_aliases(files(without), "xlib.rock", with, &aliases);
+    assert_eq!(tier, UpdateTier::Interface);
+    assert!(diags.is_empty(), "{diags:?}");
+}

@@ -205,8 +205,37 @@ fn a_used_v1_dependency_is_imported_through_the_facade() {
     assert!(tests.stdout.contains("1/1 @tests passed"), "{}", shown(&tests));
 }
 
-/// Stop and report rather than write: a legacy dependency (no namespace view
-/// from v1 yet, and `allow_legacy` is the author's opt-in), a definition only
+/// A legacy dependency behind an `allow_legacy` edge (the author's opt-in)
+/// arrives like a v1 one: the migrated bodies reach it through the view of
+/// what its own files define (spec 3.2), so its alias gets a glob in
+/// `imports.rock`, and the migrated package's tests run.
+#[test]
+fn an_allow_legacy_dependency_is_imported_through_its_view() {
+    let dir = scratch("legacy_view");
+    write(&dir.join("old/stick.toml"), &manifest("old-lib", ""));
+    write(&dir.join("old/old.rock"), "fn old_value() -> int {\n    40\n}\n");
+    write(
+        &dir.join("lib/stick.toml"),
+        &manifest("mid-lib", "[dependencies]\nold-lib = { path = \"../old\", allow_legacy = true }\n"),
+    );
+    write(&dir.join("lib/lib.rock"), "fn mid_value() -> int {\n    old_value() + 2\n}\n");
+    write(&dir.join("lib/tests/t.rock"), "@test\nfn adds() {\n    assert(mid_value() == 42)\n}\n");
+
+    let v = json(&migrate(&dir, "lib", &["--check", "--format", "json"]));
+    assert_eq!(v["blockers"].as_array().map(Vec::len), Some(0), "{v}");
+    let globs = v["imports"]["globs"].as_array().expect("globs");
+    assert_eq!(globs.len(), 1, "{v}");
+    assert_eq!(globs[0]["alias"], "old_lib", "{v}");
+
+    let apply = migrate(&dir, "lib", &["--apply"]);
+    assert_eq!(apply.code, Some(0), "{}", shown(&apply));
+    assert!(read(&dir.join("lib/imports.rock")).contains("pub(package) use old_lib::*;\n"));
+    let tests = rock(&dir, &["test", "lib"]);
+    assert!(tests.stdout.contains("1/1 @tests passed"), "{}", shown(&tests));
+}
+
+/// Stop and report rather than write: a legacy dependency without an
+/// `allow_legacy` edge (the author's opt-in, which the migrator never adds), a definition only
 /// a consumer's tests use (spec 16), and inline Lua naming a symbol the
 /// conversion renames. Nothing is written.
 #[test]
@@ -227,7 +256,7 @@ fn blockers_are_reported_and_nothing_is_written() {
     assert_eq!(v["verdict"], "blocked", "{v}");
     let blockers: Vec<String> = v["blockers"].as_array().unwrap().iter().map(|b| b.as_str().unwrap().to_string()).collect();
     let has = |needle: &str| blockers.iter().any(|b| b.contains(needle));
-    assert!(has("legacy dependency `old-lib`"), "{blockers:#?}");
+    assert!(has("legacy dependency `old-lib`") && has("allow_legacy"), "{blockers:#?}");
     assert!(has("`b_internal`") && has("used only by consumer tests"), "{blockers:#?}");
     assert!(has("raw ABI review [text-search estimate]") && has("`b_value`"), "{blockers:#?}");
     assert_eq!(read(&dir.join("lib/lib.rock")), lib_src, "a blocked plan writes nothing");

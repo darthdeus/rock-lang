@@ -176,11 +176,16 @@ fn parse(files: &[SessionFile]) -> Result<Vec<Ast>, CompilerError> {
 /// through the batch entry `semantic_pass_with_aliases`. The two entries must
 /// agree before either is trusted as the reference.
 fn fresh(files: &[SessionFile]) -> Outcome {
-    let session = Session::new(warm(), files.to_vec(), &NsAliases::default());
+    fresh_with(files, &NsAliases::default())
+}
+
+/// [`fresh`] under an explicit package alias table.
+fn fresh_with(files: &[SessionFile], aliases: &NsAliases) -> Outcome {
+    let session = Session::new(warm(), files.to_vec(), aliases);
     let batch = parse(files).and_then(|asts| {
         let mut modules = warm();
         modules.extend(asts);
-        semantic_pass_with_aliases(&mut modules, &NsAliases::default())
+        semantic_pass_with_aliases(&mut modules, aliases)
     });
     match (session, batch) {
         (Ok(s), Ok(b)) => {
@@ -208,13 +213,19 @@ struct V1Harness {
     session: Session,
     /// The texts the session holds, in tracking order.
     files: Vec<SessionFile>,
+    aliases: NsAliases,
 }
 
 impl V1Harness {
     #[track_caller]
     fn new(files: Vec<SessionFile>) -> Self {
-        let session = Session::new(warm(), files.clone(), &NsAliases::default()).expect("baseline builds");
-        let h = V1Harness { session, files };
+        Self::with_aliases(files, NsAliases::default())
+    }
+
+    #[track_caller]
+    fn with_aliases(files: Vec<SessionFile>, aliases: NsAliases) -> Self {
+        let session = Session::new(warm(), files.clone(), &aliases).expect("baseline builds");
+        let h = V1Harness { session, files, aliases };
         h.assert_matches_fresh();
         h
     }
@@ -235,7 +246,7 @@ impl V1Harness {
             }
             Err(e) => {
                 assert_eq!(
-                    fresh(&edited),
+                    fresh_with(&edited, &self.aliases),
                     Outcome::Refused(e.message.clone()),
                     "the session refused an edit a fresh build does not refuse the same way"
                 );
@@ -247,7 +258,7 @@ impl V1Harness {
 
     #[track_caller]
     fn assert_matches_fresh(&self) {
-        let reference = fresh(&self.files);
+        let reference = fresh_with(&self.files, &self.aliases);
         let Outcome::Built(reference) = reference else {
             panic!("the session holds texts a fresh build refuses: {reference:?}");
         };
@@ -1080,4 +1091,51 @@ fn a_module_reexport_added_and_repointed_moves_a_path_through_it() {
     assert_eq!(h.call_keys("user.rock"), vec![(key("b::bump"), None)]);
     assert_eq!(r.tier, UpdateTier::Scope);
     assert_eq!(h.functions_per_file(&r.relowered), per_file(&[("facade.rock", 1), ("user.rock", 1)]));
+}
+
+// ---------------------------------------------------------------------------
+// A v1 package over a legacy provider (spec 3.2, V1 -> Legacy): the view of
+// what the provider's own files define.
+// ---------------------------------------------------------------------------
+
+fn in_package(dialect: Dialect, id: u32, name: &str, path: &str, text: &str) -> SessionFile {
+    SessionFile { path: path.into(), text: text.into(), dialect, package: Some(PackageTag { id, self_name: name.into() }) }
+}
+
+/// `app` (2) depends on the legacy `x_lib` (1).
+fn app_over_x_lib() -> NsAliases {
+    NsAliases {
+        packages: vec![
+            bone_core::modules::PackageAliases { id: 1, self_name: "x_lib".into(), aliases: vec![] },
+            bone_core::modules::PackageAliases { id: 2, self_name: "app".into(), aliases: vec![("x_lib".into(), 1)] },
+        ],
+    }
+}
+
+/// A legacy definer adds the name a v1 glob user was missing, then a second
+/// overload the user's call selects, then drops the name again: each step
+/// resolves and selects what a fresh build does.
+#[test]
+fn a_legacy_providers_family_grows_and_shrinks_under_a_v1_glob_user() {
+    let none = "fn other() -> int {\n    1\n}\n";
+    let int_only = "fn other() -> int {\n    1\n}\n\nfn mix(a: int) -> int {\n    a\n}\n";
+    let both = "fn other() -> int {\n    1\n}\n\nfn mix(a: int) -> int {\n    a\n}\n\nfn mix(a: string) -> string {\n    a\n}\n";
+    let user = "use x_lib::*;\n\nfn use_it() -> string {\n    mix(\"s\")\n}\n";
+    let mut h = V1Harness::with_aliases(
+        vec![in_package(Dialect::Legacy, 1, "x_lib", "xlib.rock", none), in_package(Dialect::V1, 2, "app", "use.rock", user)],
+        app_over_x_lib(),
+    );
+    assert!(h.diagnostics().iter().any(|d| d.contains("did not resolve")), "{:?}", h.diagnostics());
+
+    let r = h.edit("xlib.rock", int_only).expect("accepted");
+    assert_eq!(r.tier, UpdateTier::Scope);
+    assert_eq!(h.call_keys("use.rock"), vec![("mix".to_string(), None)]);
+    assert!(h.diagnostics().iter().any(|d| d.contains("type mismatch")), "{:?}", h.diagnostics());
+
+    h.edit("xlib.rock", both).expect("accepted");
+    assert!(h.diagnostics().is_empty(), "{:?}", h.diagnostics());
+
+    let r = h.edit("xlib.rock", none).expect("accepted");
+    assert_eq!(r.tier, UpdateTier::Scope);
+    assert!(h.diagnostics().iter().any(|d| d.contains("did not resolve")), "{:?}", h.diagnostics());
 }

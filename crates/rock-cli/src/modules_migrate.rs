@@ -630,13 +630,12 @@ fn plan(package: &Path, consumer_dirs: &[PathBuf], export_test_uses: bool) -> Ou
                     fragments.values().sum::<usize>()
                 ));
             }
-            Some(_) if node.dialect == Dialect::Legacy => {
+            Some(e) if node.dialect == Dialect::Legacy && !e.allow_legacy => {
                 legacy_referenced.insert(owner);
                 owner_blockers.insert(format!(
-                    "the package references legacy dependency `{}` ({} reference(s)); a v1 package reaches a legacy one only through an `allow_legacy` edge (spec 3.2), and this compiler has no namespace view of a legacy provider yet (`{}::name` does not resolve), so its names cannot be imported",
+                    "the package references legacy dependency `{}` ({} reference(s)); a v1 package reaches a legacy one only through an `allow_legacy = true` edge (spec 3.2), which the migrator does not add on the author's behalf",
                     node.manifest_name,
                     fragments.values().sum::<usize>(),
-                    node.self_name
                 ));
             }
             Some(e) => plan.imports.push(ImportNeed { alias: e.alias.clone(), package: node.manifest_name.clone(), fragments }),

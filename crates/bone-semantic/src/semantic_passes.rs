@@ -1309,9 +1309,63 @@ pub fn assemble_namespaces(
 
         ws.fragment_scopes.insert(file, scope);
     }
+    register_legacy_views(ws, contributions);
     validate_v1_use_targets(ws, contributions)?;
     build_legacy_compatibility(ws, contributions)?;
     Ok(())
+}
+
+/// The namespace view of each legacy package a v1 package depends on (spec
+/// 3.2, V1 -> Legacy): a root node holding the declarations the provider's
+/// own files define, under their bare legacy keys. Legacy declarations are
+/// public and record no `DefMeta`, so a v1 viewer admits them as it admits
+/// the stdlib, and the legacy projection (public v1 definitions only) never
+/// re-exports them. A name a provider's body only uses -- a game's, a
+/// sibling's, the stdlib's -- is not its declaration and is not in the view.
+/// Legacy packages no v1 package depends on get no view, so a legacy-only
+/// build assembles the tree it always did.
+fn register_legacy_views(ws: &mut Workspace, contributions: &[&FragmentContribution]) {
+    let packages_in = |dialect: skull_parser::Dialect| -> FxHashSet<u32> {
+        contributions
+            .iter()
+            .filter(|c| c.dialect == dialect && !is_stdlib_module_file(c.file.as_str()))
+            .filter_map(|c| c.package.as_ref().map(|tag| tag.id))
+            .collect()
+    };
+    let v1 = packages_in(skull_parser::Dialect::V1);
+    let legacy = packages_in(skull_parser::Dialect::Legacy);
+    let viewed: FxHashSet<u32> = v1
+        .iter()
+        .filter_map(|id| ws.ns.package(*id))
+        .flat_map(|pkg| pkg.aliases.values().copied())
+        .filter(|target| legacy.contains(target) && !v1.contains(target))
+        .collect();
+    for contribution in contributions {
+        let Some(tag) = contribution.package.as_ref() else { continue };
+        if contribution.dialect != skull_parser::Dialect::Legacy || !viewed.contains(&tag.id) {
+            continue;
+        }
+        let pkg = ws.ns.packages.entry(tag.id).or_insert_with(|| NsPackage {
+            id: tag.id,
+            self_name: ustr::Ustr::from(&tag.self_name),
+            ..Default::default()
+        });
+        let root = pkg.nodes.entry(ustr("")).or_insert_with(|| NsNode {
+            path_key: ustr(""),
+            vis: Some(NsVisibility::Pub),
+            ..Default::default()
+        });
+        for item in &contribution.items {
+            let ScopeItem::Def { name, kind, .. } = item else { continue };
+            let table = match *kind {
+                "type" => &mut root.owned_types,
+                "global" => &mut root.owned_globals,
+                "callable" => &mut root.owned_callables,
+                _ => &mut root.owned_decorators,
+            };
+            table.insert(*name, *name);
+        }
+    }
 }
 
 /// Every `use` target in a v1 fragment resolves where it is declared, once

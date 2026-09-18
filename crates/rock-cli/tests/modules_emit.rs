@@ -637,3 +637,102 @@ fn main() {
     );
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// A legacy library package named `name` with one `lib.rock`.
+fn legacy_lib(dir: &Path, name: &str, lib: &str) {
+    std::fs::create_dir_all(dir).unwrap();
+    std::fs::write(dir.join("stick.toml"), format!("[package]\nname = \"{name}\"\ntype = \"lib\"\n")).unwrap();
+    std::fs::write(dir.join("lib.rock"), lib).unwrap();
+}
+
+const LEGACY_XLIB: &str = r#"struct P {
+    x: int,
+}
+
+enum Dir {
+    Up,
+    Down(int),
+}
+
+global LIMIT: int = 3
+
+operator +(a: P, b: P) -> P {
+    P { x: a.x + b.x + 100 }
+}
+
+fn mix(a: int) -> int {
+    a + 1000
+}
+
+fn mix(a: string) -> string {
+    a + "!"
+}
+
+fn walk(d: Dir) -> int {
+    match d {
+        Dir::Up => LIMIT,
+        Dir::Down(n) => n,
+    }
+}
+"#;
+
+/// A v1 package over a legacy dependency (spec 3.2, V1 -> Legacy) with an
+/// `allow_legacy` edge: paths, a named import, a glob, an overloaded family
+/// (`+ 1000` and `!` mark the member each call selects), the provider's
+/// operator (`+ 100` marks it) beside built-in int addition, an enum
+/// variant, a pattern and a global all run the legacy definitions.
+#[test]
+fn v1_code_runs_a_legacy_dependency_through_its_view() {
+    let root = std::env::temp_dir().join("rock_modules_emit_v1_over_legacy");
+    let _ = std::fs::remove_dir_all(&root);
+    legacy_lib(&root.join("x_lib"), "x_lib", LEGACY_XLIB);
+    let app = root.join("app");
+    std::fs::create_dir_all(&app).unwrap();
+    std::fs::write(
+        app.join("stick.toml"),
+        "[package]\nname = \"v1app\"\ntype = \"bin\"\n\n[language]\nmodules = \"v1\"\n\n[dependencies]\nx_lib = { path = \"../x_lib\", allow_legacy = true }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        app.join("main.rock"),
+        r#"use x_lib::*;
+use x_lib::walk as stroll;
+
+fn down(d: x_lib::Dir) -> int {
+    match d {
+        x_lib::Dir::Down(n) => n,
+        x_lib::Dir::Up => x_lib::LIMIT,
+    }
+}
+
+fn main() {
+    let p = P { x: 1 } + x_lib::P { x: 2 }
+    let d = x_lib::Dir::Down(5)
+    print("p={p.x} i={mix(1)} s={x_lib::mix("s")} w={stroll(d)} u={walk(Dir::Up)} m={down(d)} n={1 + 2}")
+}
+"#,
+    )
+    .unwrap();
+    let (stdout, stderr, ok) = run(&app);
+    assert!(ok, "v1-over-legacy project failed\nstdout:\n{stdout}\nstderr:\n{stderr}");
+    assert!(
+        stdout.contains("p=103 i=1001 s=s! w=5 u=3 m=5 n=3"),
+        "v1 code should run the legacy definitions\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The same v1 package without `allow_legacy` on its legacy edge is refused
+/// by the package graph, naming the fix (spec 3.2).
+#[test]
+fn a_v1_package_needs_allow_legacy_to_reach_a_legacy_dependency() {
+    let root = std::env::temp_dir().join("rock_modules_emit_v1_over_legacy_unflagged");
+    let _ = std::fs::remove_dir_all(&root);
+    legacy_lib(&root.join("x_lib"), "x_lib", LEGACY_XLIB);
+    let app = root.join("app");
+    v1_app(&app, &["x_lib"], "fn main() {\n    print(\"i={x_lib::mix(1)}\")\n}\n");
+    let (stdout, stderr, ok) = run(&app);
+    assert!(!ok, "a v1 package with an unflagged legacy edge must not build\nstdout:\n{stdout}\nstderr:\n{stderr}");
+    assert!(stderr.contains("allow_legacy = true"), "the refusal should name the fix\nstdout:\n{stdout}\nstderr:\n{stderr}");
+    let _ = std::fs::remove_dir_all(&root);
+}
