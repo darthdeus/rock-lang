@@ -308,20 +308,6 @@ fn ident_around(src: &str, offset: usize) -> &str {
     &src[start..end]
 }
 
-/// Where a new `use` goes in a v1 fragment: the start of the line after its
-/// last top-level `use` item, else after its `mod` header, else the top.
-fn import_insertion_offset(c: &bone_semantic::semantic_passes::FragmentContribution, src: &str) -> usize {
-    let last_use = c.items.iter().rev().find_map(|item| match item {
-        bone_semantic::semantic_passes::ScopeItem::Use(decl) => Some(decl.span.offset_range.1),
-        _ => None,
-    });
-    let Some(end) = last_use.or_else(|| c.header.as_ref().map(|h| h.span.offset_range.1)) else {
-        return 0;
-    };
-    let end = end.min(src.len());
-    src[end..].find('\n').map_or(src.len(), |nl| end + nl + 1)
-}
-
 /// Where module `node` of `package` is declared: a fragment's `mod` header
 /// naming it, else an inline `mod` block. `None` for a package root, which
 /// no item declares.
@@ -1979,8 +1965,7 @@ impl BoneWorkspace {
                         && (crate::completion::match_policy::admit(name.as_bytes(), pfx)
                             || (expr_position && name.starts_with(|c: char| c.is_ascii_uppercase())))
                 };
-                let at = proj.session.files.get(path).map_or(0, |uf| import_insertion_offset(&uf.contribution, src));
-                let at = offset_to_position(src, at);
+                let contribution = proj.session.files.get(path).map(|uf| &uf.contribution);
                 let mut offered: std::collections::HashSet<Ustr> = cands.iter().map(|c| c.name).collect();
                 for cand in crate::modules_scope::import_candidates(ws, frag, admit) {
                     let entries = crate::query::key_entries(ws, cand.name, cand.key, expr_position, pfx, show_private);
@@ -1988,10 +1973,12 @@ impl BoneWorkspace {
                         if !offered.insert(entry.name) {
                             continue;
                         }
-                        import_edits.insert(
-                            entry.name.to_string(),
-                            TextEdit { range: Range::new(at, at), new_text: format!("use {};\n", cand.path) },
-                        );
+                        let (at, new_text) = match contribution {
+                            Some(c) => crate::modules_scope::use_insertion(c, src, &cand.path),
+                            None => (0, format!("use {};\n", cand.path)),
+                        };
+                        let at = offset_to_position(src, at);
+                        import_edits.insert(entry.name.to_string(), TextEdit { range: Range::new(at, at), new_text });
                         cands.push(entry);
                     }
                 }

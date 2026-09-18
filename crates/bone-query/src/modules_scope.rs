@@ -7,6 +7,7 @@
 use bone_core::modules::{DefKind, DefMeta, FragmentScope, UsePathRef};
 use bone_semantic::lower::resolve::{self, CalleeFamily, ResolvedKind, Viewer};
 use bone_semantic::prelude::*;
+use bone_semantic::semantic_passes::{FragmentContribution, ScopeItem};
 
 /// The fragment scope of the v1 file `file`, `None` for a legacy file.
 pub fn fragment(ws: &Workspace, file: Ustr) -> Option<&FragmentScope> {
@@ -125,47 +126,119 @@ pub fn path_members(
 }
 
 /// An accessible definition no tier of `frag` binds, with the `use` path
-/// that names it from `frag`.
+/// that names it from `frag`. `package` owns it: with the key it identifies
+/// the definition, since a legacy provider's key is a bare name.
 pub struct ImportCandidate {
     pub name: Ustr,
     pub key: Ustr,
+    pub package: u32,
+    /// The module holding it, as a `use` path prefix (empty at a package
+    /// root reached relatively).
+    pub module_path: Vec<Ustr>,
+    pub from_root: bool,
     pub path: String,
 }
 
 /// Definitions `frag` could name through a new `use` (spec 15.3:
 /// "completion may suggest out-of-scope public symbols with an import
-/// edit"), for names `admit` accepts. Only a name no tier binds qualifies --
-/// an explicit import of a bound name would rebind every use of it -- and
-/// only a definition of this package or a declared dependency, through a
-/// path the resolver resolves from `frag` to that very definition, which is
-/// also the access check. Sorted by name.
+/// edit"; `rock fix --imports`), for names `admit` accepts. Only a name no
+/// tier binds qualifies -- an explicit import of a bound name would rebind
+/// every use of it -- and only a definition of this package, of a declared
+/// dependency, or in the view of an `allow_legacy` dependency (spec 3.2),
+/// through a path the resolver resolves from `frag` to that very
+/// definition, which is also the access check. Sorted by name, then path.
 pub fn import_candidates(ws: &Workspace, frag: &FragmentScope, admit: impl Fn(&str) -> bool) -> Vec<ImportCandidate> {
     let mut out = Vec::new();
     let mut bound: Option<std::collections::HashSet<Ustr>> = None;
+    let mut unbound = |name: Ustr| {
+        admit(name.as_str())
+            && !bound.get_or_insert_with(|| tier_names(ws, frag).into_iter().collect()).contains(&name)
+    };
+    let mut offer = |name: Ustr, key: Ustr, package: u32, from_root: bool, segments: Vec<Ustr>| {
+        let path = UsePathRef { from_root, segments };
+        if !matches!(resolve::resolve_path(ws, frag, &path), Ok(r) if r.key == key) {
+            return;
+        }
+        let spelled = path.segments.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
+        let module_path = path.segments[..path.segments.len() - 1].to_vec();
+        out.push(ImportCandidate {
+            name,
+            key,
+            package,
+            module_path,
+            from_root,
+            path: if from_root { format!("::{spelled}") } else { spelled },
+        });
+    };
     for (key, meta) in ws.defs.iter() {
         if !matches!(meta.kind, DefKind::Type | DefKind::Global | DefKind::Callable)
             || (meta.package == frag.package && meta.module == frag.module_path)
-            || !admit(meta.name.as_str())
-            || bound
-                .get_or_insert_with(|| tier_names(ws, frag).into_iter().collect())
-                .contains(&meta.name)
+            || !unbound(meta.name)
         {
             continue;
         }
         let Some((from_root, segments)) = import_path(ws, frag, meta) else { continue };
-        let path = UsePathRef { from_root, segments };
-        if !matches!(resolve::resolve_path(ws, frag, &path), Ok(r) if r.key == *key) {
+        offer(meta.name, *key, meta.package, from_root, segments);
+    }
+    // A legacy provider's view: its root owns bare legacy keys with no
+    // `DefMeta`, reached through the fragment package's alias for it.
+    for (target, alias) in dependency_aliases(ws, frag) {
+        let Some(root) = ws.ns.package(target).filter(|p| !p.legacy_files.is_empty()).and_then(|p| p.node(Ustr::from(""))) else {
             continue;
+        };
+        let owned = root.owned_types.iter().chain(root.owned_globals.iter()).chain(root.owned_callables.iter());
+        for (&name, &key) in owned {
+            if unbound(name) {
+                offer(name, key, target, false, vec![alias, name]);
+            }
         }
-        let spelled = path.segments.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
-        out.push(ImportCandidate {
-            name: meta.name,
-            key: *key,
-            path: if from_root { format!("::{spelled}") } else { spelled },
-        });
     }
     out.sort_by(|a, b| a.name.as_str().cmp(b.name.as_str()).then(a.path.cmp(&b.path)));
     out
+}
+
+/// Each package the fragment's package names as a dependency, with the
+/// alphabetically first alias it uses for it.
+fn dependency_aliases(ws: &Workspace, frag: &FragmentScope) -> Vec<(u32, Ustr)> {
+    let Some(pkg) = ws.ns.package(frag.package) else { return Vec::new() };
+    let mut by_target: std::collections::BTreeMap<u32, Ustr> = std::collections::BTreeMap::new();
+    for (&alias, &target) in &pkg.aliases {
+        let slot = by_target.entry(target).or_insert(alias);
+        if alias.as_str() < slot.as_str() {
+            *slot = alias;
+        }
+    }
+    by_target.into_iter().collect()
+}
+
+/// The text and offset of a new `use <path>;` in a v1 fragment (spec 15.3:
+/// "keep import ordering stable and avoid repeated churn"): at the start of
+/// the line of the first top-level `use` item whose text sorts after it,
+/// else on the line after the last `use` item, else after the `mod` header,
+/// else at the top. Deterministic for a given file, so a second run inserts
+/// nothing new in a new place.
+pub fn use_insertion(contribution: &FragmentContribution, src: &str, path: &str) -> (usize, String) {
+    let line = format!("use {path};");
+    let line_start = |at: usize| src[..at.min(src.len())].rfind('\n').map_or(0, |nl| nl + 1);
+    let uses: Vec<(usize, usize)> = contribution
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            ScopeItem::Use(decl) => Some(decl.span.offset_range),
+            _ => None,
+        })
+        .collect();
+    let later = uses.iter().find(|(start, end)| src[line_start(*start)..(*end).min(src.len())] > *line.as_str());
+    let at = match (later, uses.last().map(|u| u.1).or_else(|| contribution.header.as_ref().map(|h| h.span.offset_range.1))) {
+        (Some(&(start, _)), _) => line_start(start),
+        (None, Some(end)) => {
+            let end = end.min(src.len());
+            src[end..].find('\n').map_or(src.len(), |nl| end + nl + 1)
+        }
+        (None, None) => 0,
+    };
+    let lead = if at == src.len() && !src.is_empty() && !src.ends_with('\n') { "\n" } else { "" };
+    (at, format!("{lead}{line}\n"))
 }
 
 /// The path a `use` in `frag` names `meta`'s definition by: relative from

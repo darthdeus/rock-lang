@@ -612,3 +612,54 @@ fn a_module_alias_segment_lands_on_the_aliased_module() {
     assert_eq!(definition_line(&bone, &main, &main_text, "as deep", 0, 4), ("shapes_inner.rock".into(), 0));
     assert_eq!(definition_line(&bone, &main, &main_text, "deep::depth", 0, 7), ("shapes_inner.rock".into(), 2));
 }
+
+#[test]
+fn an_import_edit_goes_in_sorted_position_among_the_uses() {
+    let project = V1Project::new();
+    let mut bone = project.open();
+    let main = project.path("main.rock");
+    let head = "use shapes::area as surface;\nuse shapes::*;\nuse shapes::Box as Crate;\n";
+    let sorted = "use shapes::*;\nuse shapes::Box as Crate;\nuse shapes::area as surface;\nuse shapes::perimeter;\n";
+    let anchor = "    let a = shapes::inner::depth()\n";
+    assert!(MAIN.contains(head));
+    let text = MAIN.replacen(head, sorted, 1).replace(anchor, &format!("{anchor}    let q = dept\n"));
+    bone.update(&main, text.clone());
+    let items = bone.completion(&main, pos_of(&text, "let q = dept", 0, "let q = dept".len()));
+    let depth = items.iter().find(|c| c.label == "depth").expect("`depth` is offered with an import");
+    let edits = depth.additional_text_edits.as_ref().expect("an unimported name carries its import");
+    assert_eq!(edits[0].new_text, "use shapes::inner::depth;\n");
+    // Before `use shapes::perimeter;`, the first `use` that sorts after it.
+    assert_eq!(edits[0].range.start, Position::new(3, 0));
+}
+
+/// A definition in the view of an `allow_legacy` dependency (spec 3.2) is an
+/// import candidate like a v1 dependency's.
+#[test]
+fn an_allow_legacy_providers_definition_is_offered_with_an_import() {
+    let dir = tempfile::tempdir().unwrap();
+    let lib = dir.path().join("x_lib");
+    let app = dir.path().join("app");
+    std::fs::create_dir_all(&lib).unwrap();
+    std::fs::create_dir_all(&app).unwrap();
+    std::fs::write(lib.join("stick.toml"), "[package]\nname = \"x_lib\"\nversion = \"0.1.0\"\ntype = \"lib\"\n").unwrap();
+    std::fs::write(lib.join("lib.rock"), "fn wander(n: int) -> int {\n    n\n}\n").unwrap();
+    std::fs::write(
+        app.join("stick.toml"),
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\ntype = \"bin\"\n\n[language]\nmodules = \"v1\"\n\n\
+         [dependencies]\nx_lib = { path = \"../x_lib\", allow_legacy = true }\n",
+    )
+    .unwrap();
+    let text = "fn main() {\n    let q = wand\n}\n";
+    std::fs::write(app.join("main.rock"), text).unwrap();
+    let main = bone_query::canonicalize_lenient(&app.join("main.rock").to_string_lossy());
+    let mut bone = BoneWorkspace::new();
+    bone.update(&main, text.to_string());
+    let items = bone.completion(&main, pos_of(text, "let q = wand", 0, "let q = wand".len()));
+    let wander = items
+        .iter()
+        .find(|c| c.label == "wander")
+        .unwrap_or_else(|| panic!("`wander` is offered: {:?}", labels(&items)));
+    let edits = wander.additional_text_edits.as_ref().expect("it carries its import");
+    assert_eq!(edits[0].new_text, "use x_lib::wander;\n");
+    assert_eq!(edits[0].range.start, Position::new(0, 0));
+}
