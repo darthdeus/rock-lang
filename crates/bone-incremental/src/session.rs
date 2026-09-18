@@ -105,6 +105,16 @@ pub struct Session {
     /// The package graph's alias tables, kept because every O(workspace)
     /// rebuild runs `build_namespaces` again and needs them.
     pub aliases: bone_core::modules::NsAliases,
+    /// The workspace holding the warm modules alone, lowered and inferred,
+    /// before any user file or namespace tree entered it. The full rebuild
+    /// starts from a copy instead of re-lowering the stdlib: warm ASTs are
+    /// immutable for the session's lifetime, and a stdlib file consults no
+    /// user scope (`legacy_name` answers `Bare` for it and it has no fragment
+    /// scope). Bare-name overload families are still shared with user
+    /// files, so a user overload of a stdlib name never re-infers a stdlib
+    /// body -- the same assumption every narrower tier already makes, since
+    /// `rebuild_dependents` never indexes a warm module.
+    warm_base: Workspace,
 }
 
 /// A file entering a session, carrying the facts its package supplies.
@@ -238,6 +248,32 @@ fn reject_macro_name_collisions(modules: &[Ast]) -> Result<(), CompilerError> {
         Some(e) => Err(e),
         None => Ok(()),
     }
+}
+
+/// Build every user module into `ws`, which already holds the warm modules
+/// lowered and inferred: the namespace tree over the whole un-expanded set
+/// (`unexpanded` is the warm modules followed by the user files), then
+/// expansion against `registry`, lowering and inference of the user files,
+/// and the whole-program API-closure gate. The one pass order `Session::new`
+/// and `rebuild_users` share with the batch `semantic_pass`: the tree comes
+/// FIRST, because it turns v1 headers, inline `mod` blocks and `use`
+/// declarations into the scopes lowering reads.
+fn build_user_modules(
+    ws: &mut Workspace,
+    mut unexpanded: Vec<Ast>,
+    warm_len: usize,
+    registry: &MacroRegistry,
+    aliases: &bone_core::modules::NsAliases,
+) -> Result<Vec<ModuleId>, CompilerError> {
+    bone_semantic::semantic_passes::build_namespaces(ws, &unexpanded, aliases)?;
+    let mut users = unexpanded.split_off(warm_len);
+    users.par_iter_mut().for_each(|ast| cook_one(ast, registry));
+    let user_mids = lower_and_infer(ws, &users)?;
+    // The same whole-program gate the batch path runs, so an export whose
+    // type closure is not public fails in a session too rather than only
+    // under `rock compile`. It is a no-op for a workspace with no v1 package.
+    bone_semantic::semantic_passes::pass_validate_api_closure(ws)?;
+    Ok(user_mids)
 }
 
 /// See [`UserFile::scope_hash`].
@@ -537,6 +573,7 @@ impl Session {
             registry: Default::default(),
             warm_macros,
             aliases: aliases.clone(),
+            warm_base: Workspace::default(),
         };
 
         // Parse each file once for its prints/macros AND keep the module to feed
@@ -554,8 +591,10 @@ impl Session {
 
             let module = parse_with_facts(&text, ustr(path.as_str()), dialect, package.clone())?;
 
-            let mid = session.ws.intern_module(module.file);
-            if session.warm_mids.contains(&mid) {
+            // Looked up, not interned: user modules take their ids when they
+            // lower, after the warm snapshot (`warm_base`) was taken, so that
+            // snapshot interns the warm modules alone.
+            if session.ws.module_ids.get(&module.file).is_some_and(|mid| session.warm_mids.contains(mid)) {
                 // A stdlib file present in the initial set IS the warm module --
                 // skip the user copy (adding it would self-collide on every
                 // stdlib type); the warm build already covers it.
@@ -584,24 +623,23 @@ impl Session {
             user_modules.push(module);
         }
 
-        let mut expanded = session.warm.clone();
-        expanded.extend(user_modules);
-        session.registry = collect_registry(&expanded);
-        reject_macro_name_collisions(&expanded)?;
-        // The namespace tree comes FIRST, exactly as in `semantic_pass`: it
-        // turns v1 headers, inline `mod` blocks and `use` declarations into
-        // `ws.ns` and the per-fragment scopes the resolver reads. A session
-        // that skipped it lowered every v1 file with no scope at all, so a
-        // qualified path reported "this file is legacy" and nothing resolved.
-        bone_semantic::semantic_passes::build_namespaces(&mut session.ws, &expanded, aliases)?;
-        expand_and_desugar(&mut session.ws, &mut expanded)?;
+        let mut unexpanded = session.warm.clone();
+        unexpanded.extend(user_modules);
+        session.registry = collect_registry(&unexpanded);
+        reject_macro_name_collisions(&unexpanded)?;
 
-        lower_and_infer(&mut session.ws, &expanded)?;
-        // The same whole-program gate the batch path runs, so an export whose
-        // type closure is not public fails in a session too rather than only
-        // under `rock compile`. It is a no-op for a workspace with no v1
-        // package.
-        bone_semantic::semantic_passes::pass_validate_api_closure(&session.ws)?;
+        // The warm modules lower and infer first, alone: they consult no user
+        // scope, and the snapshot taken here is what every full rebuild starts
+        // from (`warm_base`).
+        let mut warm_cooked = session.warm.clone();
+        warm_cooked.par_iter_mut().for_each(|ast| cook_one(ast, &session.registry));
+        lower_and_infer(&mut session.ws, &warm_cooked)?;
+        session.ws.phase_timings.clear();
+        session.warm_base = session.ws.clone();
+
+        let mut ws = std::mem::take(&mut session.ws);
+        build_user_modules(&mut ws, unexpanded, session.warm.len(), &session.registry, aliases)?;
+        session.ws = ws;
         session.rebuild_dependents();
 
         Ok(session)
@@ -1195,29 +1233,21 @@ impl Session {
         // failed too and the corrupted ws stuck around for every later query. Keeping
         // the last-good ws on any failure makes the session queryable after a failed
         // rebuild instead of crash-on-next-touch.
-        let mut ws = Workspace::default();
+        let mut ws = self.warm_base.clone();
         // Host-resolved build variables, set once on the workspace when the
         // session was made; nothing in this rebuild derives them again.
         ws.comptime_inputs = self.ws.comptime_inputs.clone();
 
-        let mut expanded = self.combined_unexpanded()?;
-        let registry = collect_registry(&expanded);
-        reject_macro_name_collisions(&expanded)?;
-        // The same pass order as `Session::new`.
-        bone_semantic::semantic_passes::build_namespaces(&mut ws, &expanded, &self.aliases)?;
-        expand_and_desugar(&mut ws, &mut expanded)?;
-
-        let all_mids = lower_and_infer(&mut ws, &expanded)?;
-        bone_semantic::semantic_passes::pass_validate_api_closure(&ws)?;
+        let unexpanded = self.combined_unexpanded()?;
+        let registry = collect_registry(&unexpanded);
+        reject_macro_name_collisions(&unexpanded)?;
+        let user_mids = build_user_modules(&mut ws, unexpanded, self.warm.len(), &registry, &self.aliases)?;
 
         // Commit -- past this point nothing fails, so `self.ws` never observes a
         // partially-interned workspace.
         self.ws = ws;
         self.registry = registry;
 
-        self.warm_mids = all_mids[..self.warm.len()].iter().copied().collect();
-
-        let user_mids: Vec<ModuleId> = all_mids[self.warm.len()..].to_vec();
         let reinferred = self.collect_reinferred(&user_mids);
         let relowered = reinferred.clone();
 

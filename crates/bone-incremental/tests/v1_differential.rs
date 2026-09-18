@@ -12,10 +12,11 @@
 //!
 //! The gates pin today's over-invalidation: every edit to a namespace-tree
 //! input takes the full user rebuild, which re-lowers and re-infers every
-//! user body AND the warm stdlib. Each is a sentinel (docs/test-sentinels.md)
-//! whose comment carries the scope-epoch target. When an epoch lands and a
-//! count drops, the gate goes red on purpose: move its assertion to the
-//! target, and keep the incremental == fresh check that `edit` runs.
+//! user body (the warm stdlib is reused). Each is a sentinel
+//! (docs/test-sentinels.md) whose comment carries the scope-epoch target.
+//! When an epoch lands and a count drops, the gate goes red on purpose: move
+//! its assertion to the target, and keep the incremental == fresh check that
+//! `edit` runs.
 
 mod common;
 
@@ -49,11 +50,10 @@ fn legacy(path: &str, text: &str) -> SessionFile {
 
 /// A two-function stand-in for the stdlib. It carries a stdlib file id, so it
 /// is the `std` package and its names are the v1 prelude (tier 5). Every gate
-/// builds with it so the count shows the full rebuild re-inferring the warm
-/// modules too (`combined_unexpanded` prepends them).
+/// builds with it so a count would show a rebuild that re-inferred the warm
+/// modules.
 const WARM_PATH: &str = "<bone-stdlib:epoch_warm>";
 const WARM: &str = "fn warm_one() -> int {\n    1\n}\n\nfn warm_two() -> int {\n    2\n}\n";
-const WARM_BODIES: usize = 2;
 
 fn warm() -> Vec<Ast> {
     vec![skull_parser::parse_module_with_dialect(WARM, Ustr::from(WARM_PATH), Dialect::Legacy).expect("warm parses")]
@@ -260,8 +260,9 @@ impl V1Harness {
         assert_eq!(incremental.types, reference.types, "incremental != fresh: types");
     }
 
-    /// Function bodies the last update re-inferred, warm stdlib included
-    /// (`Workspace.reinferred_body_count`, reset per update).
+    /// Function bodies the last update re-inferred, warm stdlib included if
+    /// it re-inferred any (`Workspace.reinferred_body_count`, reset per
+    /// update).
     fn reinferred_body_count(&self) -> usize {
         self.session.workspace().reinferred_body_count.load(Ordering::Relaxed)
     }
@@ -347,6 +348,19 @@ fn a_refused_build_is_a_comparable_outcome() {
     assert!(err.contains("type `Hidden` in public API is not accessible"), "{err}");
 }
 
+/// The full rebuild re-lowers and re-infers the user files only. The warm
+/// stdlib is immutable for the session's lifetime and consults no user scope
+/// (`legacy_name` answers `Bare` for a stdlib file, and a stdlib file has no
+/// fragment scope), so its lowered and inferred state is reused.
+#[test]
+fn the_full_rebuild_reinfers_no_warm_body() {
+    let mut h = V1Harness::new(vec![v1("a.rock", A_BUMP), v1("d.rock", UNRELATED)]);
+    h.session.ws.reinferred_body_count.store(0, Ordering::Relaxed);
+    h.session.rebuild_users().expect("an unchanged program rebuilds");
+    assert_eq!(h.reinferred_body_count(), 3, "a's bump and d's two bodies; no warm body");
+    h.assert_matches_fresh();
+}
+
 // ---------------------------------------------------------------------------
 // M5 gates. Each pins today's count (the full user rebuild) as a sentinel and
 // names the scope-epoch target (plan 2.6). "Fragment-level" is the first
@@ -375,8 +389,7 @@ fn control_a_body_edit_on_a_gate_fixture_reads_narrow() {
 /// Gate (a): an explicit `use` added to one fragment shadows the glob it
 /// used to resolve through (spec 8.3: tier 3 beats tier 4).
 ///
-/// PINNED OVER-INVALIDATION: all 6 user bodies and both warm bodies
-/// re-infer. Target, fragment-level: c's 2 bodies re-lower and re-infer,
+/// PINNED OVER-INVALIDATION: all 6 user bodies re-infer. Target, fragment-level: c's 2 bodies re-lower and re-infer,
 /// nothing else (the import is fragment-local, spec 8.2). Per-body: only
 /// `pick`, the one body with a bare lookup of `bump`.
 #[test]
@@ -389,7 +402,7 @@ fn gate_a_use_added_to_one_fragment() {
     let r = h.edit("c.rock", c1).expect("accepted");
     assert_eq!(h.call_keys("c.rock"), vec![(key("a::bump"), Some(key("b::bump")))]);
     assert_eq!(r.tier, UpdateTier::FullUser, "target: a scope-epoch tier, not the full rebuild");
-    assert_eq!(h.reinferred_body_count(), 6 + WARM_BODIES, "target: 2 (c only); per-body: 1");
+    assert_eq!(h.reinferred_body_count(), 6, "target: 2 (c only); per-body: 1");
     assert_eq!(
         h.functions_per_file(&r.relowered),
         per_file(&[("a.rock", 1), ("b.rock", 1), ("c.rock", 2), ("d.rock", 2)]),
@@ -401,7 +414,7 @@ fn gate_a_use_added_to_one_fragment() {
 /// it shadowed (spec 14.3: "removing an import may expose a previously
 /// shadowed lower-tier family").
 ///
-/// PINNED OVER-INVALIDATION: 6 user + 2 warm bodies. Target, fragment-level:
+/// PINNED OVER-INVALIDATION: 6 user bodies. Target, fragment-level:
 /// c's 2 bodies. Per-body: `pick` only.
 #[test]
 fn gate_b_use_removed_from_one_fragment() {
@@ -413,7 +426,7 @@ fn gate_b_use_removed_from_one_fragment() {
     let r = h.edit("c.rock", c1).expect("accepted");
     assert_eq!(h.call_keys("c.rock"), vec![(key("b::bump"), None)]);
     assert_eq!(r.tier, UpdateTier::FullUser, "target: a scope-epoch tier, not the full rebuild");
-    assert_eq!(h.reinferred_body_count(), 6 + WARM_BODIES, "target: 2 (c only); per-body: 1");
+    assert_eq!(h.reinferred_body_count(), 6, "target: 2 (c only); per-body: 1");
     assert_eq!(
         h.functions_per_file(&r.relowered),
         per_file(&[("a.rock", 1), ("b.rock", 1), ("c.rock", 2), ("d.rock", 2)]),
@@ -425,7 +438,7 @@ fn gate_b_use_removed_from_one_fragment() {
 /// new member shadows a prelude name the globber was already calling (spec
 /// 8.3: tier 4 beats tier 5), so the globber's resolution really moves.
 ///
-/// PINNED OVER-INVALIDATION: 5 user + 2 warm bodies. Target, fragment-level:
+/// PINNED OVER-INVALIDATION: 5 user bodies. Target, fragment-level:
 /// b (edited, 2 bodies after the edit) and c (globs b, 1 body) -- 3; d and
 /// the warm stdlib 0. Per-body: b's new `warm_one` plus c's `pick`, whose bare
 /// lookup of `warm_one` missed b before the edit.
@@ -440,7 +453,7 @@ fn gate_c_glob_member_added() {
     let r = h.edit("b.rock", b1).expect("accepted");
     assert_eq!(h.call_keys("c.rock"), vec![(key("b::warm_one"), None)]);
     assert_eq!(r.tier, UpdateTier::FullUser, "target: a scope-epoch tier, not the full rebuild");
-    assert_eq!(h.reinferred_body_count(), 5 + WARM_BODIES, "target: 3 (b and c); per-body: 2");
+    assert_eq!(h.reinferred_body_count(), 5, "target: 3 (b and c); per-body: 2");
     assert_eq!(
         h.functions_per_file(&r.relowered),
         per_file(&[("b.rock", 2), ("c.rock", 1), ("d.rock", 2)]),
@@ -452,7 +465,7 @@ fn gate_c_glob_member_added() {
 /// never opens an inaccessible member (`glob_candidates`), and no path
 /// reaches it, so no other fragment's resolution can change.
 ///
-/// PINNED OVER-INVALIDATION: 5 user + 2 warm bodies. Target: ZERO bodies
+/// PINNED OVER-INVALIDATION: 5 user bodies. Target: ZERO bodies
 /// outside d re-inferred; fragment-level d's 3, per-body only the new
 /// `helper`.
 #[test]
@@ -463,7 +476,7 @@ fn gate_d_private_helper_added_in_an_unrelated_module() {
 
     let r = h.edit("d.rock", d1).expect("accepted");
     assert_eq!(r.tier, UpdateTier::FullUser, "target: a scope-epoch tier, not the full rebuild");
-    assert_eq!(h.reinferred_body_count(), 5 + WARM_BODIES, "target: 3 (d only), 0 outside d; per-body: 1");
+    assert_eq!(h.reinferred_body_count(), 5, "target: 3 (d only), 0 outside d; per-body: 1");
     assert_eq!(
         h.functions_per_file(&r.relowered),
         per_file(&[("a.rock", 1), ("c.rock", 1), ("d.rock", 3)]),
@@ -474,7 +487,7 @@ fn gate_d_private_helper_added_in_an_unrelated_module() {
 /// Gate (e): a module header renamed. b's definitions change DefKey, and the
 /// fragment that named `super::b::depth` by path loses it.
 ///
-/// PINNED OVER-INVALIDATION: 3 user + 2 warm bodies re-infer (c's `pick`
+/// PINNED OVER-INVALIDATION: 3 user bodies re-infer (c's `pick`
 /// now fails to LOWER, so it is in neither count nor `relowered`). Target,
 /// fragment-level: b (its keys moved, 1 body) and c (its path walked node
 /// `b`; it must re-lower to report the miss) -- 1 re-inferred; d and the warm
@@ -490,7 +503,7 @@ fn gate_e_module_header_changed() {
     let r = h.edit("b.rock", b1).expect("accepted");
     assert!(h.diagnostics().iter().any(|d| d.contains("did not resolve")), "{:?}", h.diagnostics());
     assert_eq!(r.tier, UpdateTier::FullUser, "target: a scope-epoch tier, not the full rebuild");
-    assert_eq!(h.reinferred_body_count(), 3 + WARM_BODIES, "target: 1 (b; c fails to lower)");
+    assert_eq!(h.reinferred_body_count(), 3, "target: 1 (b; c fails to lower)");
     assert_eq!(
         h.functions_per_file(&r.relowered),
         per_file(&[("b.rock", 1), ("d.rock", 2)]),
@@ -503,7 +516,7 @@ fn gate_e_module_header_changed() {
 /// facade's named re-export is re-pointed from `a::bump` to `b::bump`
 /// (`resolve::members_of` follows the chain to a fixed point).
 ///
-/// PINNED OVER-INVALIDATION: 5 user + 2 warm bodies. Target, fragment-level:
+/// PINNED OVER-INVALIDATION: 5 user bodies. Target, fragment-level:
 /// facade (edited, no bodies) and user (its bare `bump` walked hub -> facade,
 /// 1 body) -- 1; a, b, d and the warm stdlib 0. Per-body: the same 1.
 #[test]
@@ -526,7 +539,7 @@ fn gate_f_reexport_edit_reaches_a_globber_through_a_glob_chain() {
     let r = h.edit("facade.rock", facade1).expect("accepted");
     assert_eq!(h.call_keys("user.rock"), vec![(key("b::bump"), None)]);
     assert_eq!(r.tier, UpdateTier::FullUser, "target: a scope-epoch tier, not the full rebuild");
-    assert_eq!(h.reinferred_body_count(), 5 + WARM_BODIES, "target: 1 (user only)");
+    assert_eq!(h.reinferred_body_count(), 5, "target: 1 (user only)");
     assert_eq!(
         h.functions_per_file(&r.relowered),
         per_file(&[("a.rock", 1), ("b.rock", 1), ("d.rock", 2), ("user.rock", 1)]),
@@ -560,7 +573,7 @@ fn a_glob_reexport_of_a_named_reexport_resolves() {
 /// qualified path. The access check is baked in at lowering, so the user
 /// must re-LOWER; re-inference alone would keep the stale verdict.
 ///
-/// PINNED OVER-INVALIDATION: 3 user + 2 warm bodies re-infer (c's `pick`
+/// PINNED OVER-INVALIDATION: 3 user bodies re-infer (c's `pick`
 /// now fails to LOWER with the access error, so it is in neither count nor
 /// `relowered`). Target, fragment-level: a (edited, 1 body) and c (its path
 /// resolved `a::bump`; it must re-lower) -- 1 re-inferred; d and the warm
@@ -579,7 +592,7 @@ fn gate_g_visibility_narrowed_on_a_path_used_item() {
         h.diagnostics()
     );
     assert_eq!(r.tier, UpdateTier::FullUser, "target: a scope-epoch tier, not the full rebuild");
-    assert_eq!(h.reinferred_body_count(), 3 + WARM_BODIES, "target: 1 (a; c fails to lower)");
+    assert_eq!(h.reinferred_body_count(), 3, "target: 1 (a; c fails to lower)");
     assert_eq!(
         h.functions_per_file(&r.relowered),
         per_file(&[("a.rock", 1), ("d.rock", 2)]),
@@ -592,7 +605,7 @@ fn gate_g_visibility_narrowed_on_a_path_used_item() {
 /// family (`CallFamily::LegacyMerged`), decided at lowering. The two members
 /// have the same signature, so the call is an overload tie at inference.
 ///
-/// PINNED OVER-INVALIDATION: 6 user + 2 warm bodies re-infer. Target:
+/// PINNED OVER-INVALIDATION: 6 user bodies re-infer. Target:
 /// legacy_def (edited, 2 bodies) and legacy_use (its bare `bump` read the
 /// projection alone; it must re-lower into the merged family) -- 3
 /// re-inferred; the v1 files, legacy_far and the warm stdlib 0. Per-body: the
@@ -617,7 +630,7 @@ fn gate_h_legacy_definer_edit_collides_with_a_projected_name() {
         h.diagnostics()
     );
     assert_eq!(r.tier, UpdateTier::FullUser, "target: a scope-epoch tier, not the full rebuild");
-    assert_eq!(h.reinferred_body_count(), 6 + WARM_BODIES, "target: 3 (legacy_def and legacy_use)");
+    assert_eq!(h.reinferred_body_count(), 6, "target: 3 (legacy_def and legacy_use)");
     assert_eq!(
         h.functions_per_file(&r.relowered),
         per_file(&[("a.rock", 1), ("legacy_def.rock", 2), ("legacy_far.rock", 2), ("legacy_use.rock", 1)]),
