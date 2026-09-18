@@ -4263,18 +4263,21 @@ fn inline_hoisted_bodies(
 /// location, and the process exit code depends on the caller. Rejecting here
 /// gives the same guarantee as a spanned `CompilerError`.
 fn validate_no_whole_element_column_access(mf: &skull_mir::mir::MirFunc) -> Result<(), String> {
-    use skull_mir::mir::{ContainerKind::VecValueColumns, Inst};
+    use skull_mir::mir::{
+        ContainerKind::{VecValueColumns, VecValueStrided},
+        Inst,
+    };
     for (_, block) in mf.blocks.iter() {
         for &iid in &block.insts {
             let elem = match &mf.insts[iid] {
-                Inst::Index { kind: VecValueColumns(e), .. }
-                | Inst::StoreIndex { kind: VecValueColumns(e), .. }
-                | Inst::ArrayPush { kind: VecValueColumns(e), .. } => e,
+                Inst::Index { kind: VecValueColumns(e) | VecValueStrided(e), .. }
+                | Inst::StoreIndex { kind: VecValueColumns(e) | VecValueStrided(e), .. }
+                | Inst::ArrayPush { kind: VecValueColumns(e) | VecValueStrided(e), .. } => e,
                 _ => continue,
             };
             return Err(format!(
-                "whole-element access to a column-stored `[{elem}]` survived lowering \
-                 (column storage has no element table, so there is no slot to name)"
+                "whole-element access to a flat-stored `[{elem}]` survived lowering \
+                 (column and strided storage have no element table, so there is no slot to name)"
             ));
         }
     }

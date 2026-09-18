@@ -247,16 +247,19 @@ fn term_uses_each(term: &Term, push: &mut impl FnMut(Idx<Inst>)) {
 ///
 /// LEAF reads are the exception: one ELEMENT access is decomposed into K leaf
 /// reads sharing ONE hoisted check (`__nb_checked_index` for a NativeBuffer;
-/// `Inst::VecCheckedIndex` for columns -- "one call per ELEMENT access, not per
-/// column"). Each leaf read is then a raw pointer read carrying no error of its
-/// own, so reading one field of a K-leaf element would otherwise emit all K
-/// loads and discard K-1.
+/// `Inst::VecCheckedIndex` for columns and strided rows -- "one call per
+/// ELEMENT access, not per column"). Each leaf read is then a raw pointer read
+/// carrying no error of its own, so reading one field of a K-leaf element would
+/// otherwise emit all K loads and discard K-1.
 ///
 /// Consulted by BOTH [`is_dead_rc`] (initial seeding) and [`is_dead_value`]
 /// (cascade). They must agree: a kind dead in one and live in the other either
 /// leaks the loads back or deletes a real bounds error.
 fn index_read_is_checked(kind: &ContainerKind) -> bool {
-    !matches!(kind, ContainerKind::NativeBufferLeaf | ContainerKind::VecColumn)
+    !matches!(
+        kind,
+        ContainerKind::NativeBufferLeaf | ContainerKind::VecColumn | ContainerKind::VecStrideSlot
+    )
 }
 
 /// Whether a value-producing inst is pure enough that an unused result is dead.

@@ -257,12 +257,16 @@ impl Builder<'_> {
                     {
                         self.f.struct_registry_roots.insert(name);
                     }
-                    if let Some(elem) = self.vec_column_elem_of(arg)? {
+                    let flat_elem = match self.vec_column_elem_of(arg)? {
+                        Some(elem) => Some(elem),
+                        None => self.vec_strided_elem_of(arg)?,
+                    };
+                    if let Some(elem) = flat_elem {
                         if elem.is_nobox() {
                             return Err(CompilerError::new_with_label(
                                 self.body.expr_spans[e],
                                 format!(
-                                    "cannot inspect a column-stored nobox value `{}`: \
+                                    "cannot inspect a flat-stored nobox value `{}`: \
                                      inspection requires implicit element materialization",
                                     elem.name
                                 ),

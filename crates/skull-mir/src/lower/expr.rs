@@ -812,6 +812,9 @@ impl Builder<'_> {
                 if let Some((vec, idx, elem)) = self.column_index_place(base)? {
                     return self.column_leaf_store(vec, idx, elem, field, value);
                 }
+                if let Some((vec, idx, elem)) = self.strided_index_place(base)? {
+                    return self.strided_leaf_store(vec, idx, elem, field, value);
+                }
                 // `buf[i].pos = v` / `buf[i].id = v` / `buf[i].lo.n = v` on a
                 // leaf-addressed NativeBuffer: there is no element slot to take a
                 // place base of, so the write lands in the leaves under this
@@ -1595,11 +1598,15 @@ impl Builder<'_> {
                     leaves.len()
                 )));
             }
-            values.extend(
-                leaves
-                    .into_iter()
-                    .map(|leaf| self.emit_cur(Inst::VecStrideNilToFalse(leaf))),
-            );
+            if self.strided_stores_raw(elem) {
+                values.extend(leaves);
+            } else {
+                values.extend(
+                    leaves
+                        .into_iter()
+                        .map(|leaf| self.emit_cur(Inst::VecStrideNilToFalse(leaf))),
+                );
+            }
         }
         let capacity = self.emit_cur(Inst::Const(Lit::Int(elems.len() as i64)));
         Ok(self.emit_cur(Inst::MakeVecStrided {

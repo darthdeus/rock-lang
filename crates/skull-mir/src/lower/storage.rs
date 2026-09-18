@@ -15,6 +15,7 @@ impl Builder<'_> {
     ) -> Result<ValueBundle, CompilerError> {
         let shape = self.column_shape(elem)?;
         let stride = shape.leaf_count();
+        let raw = self.strided_stores_raw(elem);
         let slot = self.checked_column_index(vec, index);
         let data = self.emit_cur(Inst::Field {
             base: vec,
@@ -23,12 +24,16 @@ impl Builder<'_> {
         let leaves = (0..stride)
             .map(|offset| {
                 let at = self.strided_slot_index(slot, stride, offset);
-                let raw = self.emit_cur(Inst::Index {
+                let stored = self.emit_cur(Inst::Index {
                     base: data,
                     index: at,
                     kind: ContainerKind::VecStrideSlot,
                 });
-                self.emit_cur(Inst::VecStrideFalseToNil(raw))
+                if raw {
+                    stored
+                } else {
+                    self.emit_cur(Inst::VecStrideFalseToNil(stored))
+                }
             })
             .collect::<Vec<_>>();
         let mut idx = 0;
@@ -67,24 +72,35 @@ impl Builder<'_> {
             )));
         }
         let slot = self.checked_column_index(vec, index);
-        self.strided_store_leaves_at(vec, slot, leaves, stride);
+        let row = self.strided_row_of(slot);
+        self.strided_store_leaves_at(vec, row, leaves, stride, elem);
         Ok(())
     }
 
+    /// Store one row, `row` counted from 0. Each slot is the previous slot
+    /// plus one rather than `base + offset`: a LuaJIT trace interns every
+    /// distinct offset as a constant, and a wide row's offsets alone used up the
+    /// trace's constant budget. The running index costs one shared constant.
     fn strided_store_leaves_at(
         &mut self,
         vec: Idx<Inst>,
-        slot: Idx<Inst>,
+        row: Idx<Inst>,
         leaves: Vec<Idx<Inst>>,
         stride: usize,
+        elem: ColumnElem,
     ) {
+        let raw = self.strided_stores_raw(elem);
         let data = self.emit_cur(Inst::Field {
             base: vec,
             field: Ustr::from("_data"),
         });
+        let mut at = self.strided_row_slot(row, stride, 0);
+        let one = self.emit_cur(Inst::Const(Lit::Int(1)));
         for (offset, leaf) in leaves.into_iter().enumerate() {
-            let at = self.strided_slot_index(slot, stride, offset);
-            let value = self.emit_cur(Inst::VecStrideNilToFalse(leaf));
+            if offset > 0 {
+                at = self.emit_cur(Inst::IntAdd(at, one));
+            }
+            let value = if raw { leaf } else { self.emit_cur(Inst::VecStrideNilToFalse(leaf)) };
             self.emit_cur(Inst::StoreIndex {
                 base: data,
                 index: at,
@@ -94,20 +110,37 @@ impl Builder<'_> {
         }
     }
 
+    /// A wide `nobox` struct row keeps every leaf as stored: its leaves may be
+    /// `false`, so the flat-enum tier's nil-to-false densifying would corrupt
+    /// them. Enum rows are numeric by eligibility and keep the sentinel.
+    pub(crate) fn strided_stores_raw(&self, elem: ColumnElem) -> bool {
+        self.ws.struct_by_name.contains_key(&elem.name)
+    }
+
+    /// The 0-based row a checked (backend-based) element index names.
+    fn strided_row_of(&mut self, checked: Idx<Inst>) -> Idx<Inst> {
+        if self.column_base_is_one() {
+            let one = self.emit_cur(Inst::Const(Lit::Int(1)));
+            self.emit_cur(Inst::IntSub(checked, one))
+        } else {
+            checked
+        }
+    }
+
     fn strided_slot_index(
         &mut self,
         checked: Idx<Inst>,
         stride: usize,
         offset: usize,
     ) -> Idx<Inst> {
-        let logical = if self.column_base_is_one() {
-            let one = self.emit_cur(Inst::Const(Lit::Int(1)));
-            self.emit_cur(Inst::IntSub(checked, one))
-        } else {
-            checked
-        };
+        let row = self.strided_row_of(checked);
+        self.strided_row_slot(row, stride, offset)
+    }
+
+    /// The backing slot of leaf `offset` in 0-based `row`.
+    fn strided_row_slot(&mut self, row: Idx<Inst>, stride: usize, offset: usize) -> Idx<Inst> {
         let width = self.emit_cur(Inst::Const(Lit::Int(stride as i64)));
-        let base = self.emit_cur(Inst::IntMul(logical, width));
+        let base = self.emit_cur(Inst::IntMul(row, width));
         let physical = offset + usize::from(self.column_base_is_one());
         if physical == 0 {
             base
@@ -149,13 +182,8 @@ impl Builder<'_> {
             base: vec,
             field: Ustr::from("len"),
         });
-        let slot = if self.column_base_is_one() {
-            let one = self.emit_cur(Inst::Const(Lit::Int(1)));
-            self.emit_cur(Inst::IntAdd(len, one))
-        } else {
-            len
-        };
-        self.strided_store_leaves_at(vec, slot, leaves, stride);
+        // The appended row is the old length, counted from 0.
+        self.strided_store_leaves_at(vec, len, leaves, stride, elem);
         let one = self.emit_cur(Inst::Const(Lit::Int(1)));
         let next = self.emit_cur(Inst::IntAdd(len, one));
         self.emit_cur(Inst::StoreField {
@@ -230,13 +258,21 @@ impl Builder<'_> {
                     return Ok(None);
                 };
                 let stride = self.column_shape(elem)?.leaf_count();
+                // A raw row only has something to release when it can hold a
+                // reference; stale scalars past `len` are never read.
+                let raw = self.strided_stores_raw(elem);
+                if raw && !self.column_contains_references(elem) {
+                    return Ok(Some(ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil)))));
+                }
                 let vec = self.lower_expr(*recv)?;
                 let index = self.lower_expr(*index)?;
                 let slot = self.checked_column_index(vec, index);
+                let row = self.strided_row_of(slot);
+                let vacated = if raw { Lit::Nil } else { Lit::Bool(false) };
                 let leaves = (0..stride)
-                    .map(|_| self.emit_cur(Inst::Const(Lit::Bool(false))))
+                    .map(|_| self.emit_cur(Inst::Const(vacated.clone())))
                     .collect();
-                self.strided_store_leaves_at(vec, slot, leaves, stride);
+                self.strided_store_leaves_at(vec, row, leaves, stride, elem);
                 Ok(Some(ValueRepr::Scalar(
                     self.emit_cur(Inst::Const(Lit::Nil)),
                 )))
@@ -252,12 +288,18 @@ impl Builder<'_> {
                     base: header,
                     field: Ustr::from("cap"),
                 });
-                let data = self.emit_cur(Inst::Field {
-                    base: vec,
-                    field: Ustr::from("_data"),
-                });
-                let physical = self.call_spine("table_len", vec![data])?;
                 let width = self.emit_cur(Inst::Const(Lit::Int(stride as i64)));
+                // A raw row may hold nil, so `#_data` is only some border.
+                let physical = if self.strided_stores_raw(elem) {
+                    let len = self.emit_cur(Inst::Field { base: vec, field: Ustr::from("len") });
+                    self.emit_cur(Inst::IntMul(len, width))
+                } else {
+                    let data = self.emit_cur(Inst::Field {
+                        base: vec,
+                        field: Ustr::from("_data"),
+                    });
+                    self.call_spine("table_len", vec![data])?
+                };
                 Ok(Some(ValueRepr::Scalar(self.call_spine(
                     "__rock_stride_capacity",
                     vec![reserved, physical, width],
@@ -283,13 +325,10 @@ impl Builder<'_> {
                 });
                 let width = self.emit_cur(Inst::Const(Lit::Int(stride as i64)));
                 self.call_spine("__rock_stride_insert", vec![data, index, len, width])?;
-                let slot = if self.column_base_is_one() {
-                    index
-                } else {
-                    let one = self.emit_cur(Inst::Const(Lit::Int(1)));
-                    self.emit_cur(Inst::IntSub(index, one))
-                };
-                self.strided_store_leaves_at(vec, slot, leaves, stride);
+                // `index` is the Lua-style (1-based) position on both backends.
+                let one = self.emit_cur(Inst::Const(Lit::Int(1)));
+                let row = self.emit_cur(Inst::IntSub(index, one));
+                self.strided_store_leaves_at(vec, row, leaves, stride, elem);
                 Ok(Some(ValueRepr::Scalar(
                     self.emit_cur(Inst::Const(Lit::Nil)),
                 )))
@@ -333,14 +372,28 @@ impl Builder<'_> {
                 let vec = self.lower_expr(*recv)?;
                 let key = self.lower_expr(*key_fn)?;
                 let width = self.emit_cur(Inst::Const(Lit::Int(stride as i64)));
-                Ok(Some(ValueRepr::Scalar(self.call_spine(
-                    "__rock_stride_sort",
-                    vec![vec, key, width],
-                )?)))
+                // A fn value taking a `nobox` element takes its leaves, which
+                // are the row, so the key applies without an element existing.
+                let helper = if elem.is_nobox() && self.strided_stores_raw(elem) {
+                    "__rock_stride_sort_leaves"
+                } else {
+                    "__rock_stride_sort"
+                };
+                Ok(Some(ValueRepr::Scalar(self.call_spine(helper, vec![vec, key, width])?)))
             }
             ("__rock_vec_to_lua_array", [recv]) => {
-                if self.vec_strided_elem_of(*recv)?.is_none() {
+                let Some(elem) = self.vec_strided_elem_of(*recv)? else {
                     return Ok(None);
+                };
+                if elem.is_nobox() && self.strided_stores_raw(elem) {
+                    return Err(CompilerError::new_with_label(
+                        self.body.expr_spans[*recv],
+                        format!(
+                            "cannot convert strided nobox value `{}` to a Lua array: \
+                             the bridge requires implicit element materialization",
+                            elem.name
+                        ),
+                    ));
                 }
                 let vec = self.lower_expr(*recv)?;
                 Ok(Some(ValueRepr::Scalar(
@@ -389,11 +442,15 @@ impl Builder<'_> {
             index: raw_index,
             kind: ContainerKind::VecStrideSlot,
         });
-        let shape = self.column_shape(elem)?;
-        let leaves = self.cdata_leaves(value, &shape)?;
-        let mut leaf = 0;
-        let unpacked = self.rebuild_from_leaves(&shape, &leaves, &mut leaf);
-        let bundle = ValueBundle::new(elem.representation(), unpacked);
+        let bundle = if self.strided_stores_raw(elem) {
+            ValueBundle::new(elem.representation(), ValueRepr::Scalar(value))
+        } else {
+            let shape = self.column_shape(elem)?;
+            let leaves = self.cdata_leaves(value, &shape)?;
+            let mut leaf = 0;
+            let unpacked = self.rebuild_from_leaves(&shape, &leaves, &mut leaf);
+            ValueBundle::new(elem.representation(), unpacked)
+        };
         self.strided_append_bundle(vec, &bundle, elem)?;
         let one = self.emit_cur(Inst::Const(Lit::Int(1)));
         let next = self.emit_cur(Inst::IntAdd(i, one));
@@ -1351,6 +1408,62 @@ impl Builder<'_> {
         let i = self.lower_expr(index)?;
         let slot = self.checked_column_index(vec, i);
         Ok(Some((vec, slot, elem)))
+    }
+
+    /// `Some((vec, slot, elem))` iff `e` is `xs[i]` over a strided Vec -- the
+    /// row has no element table to serve as a place base.
+    pub(crate) fn strided_index_place(
+        &mut self,
+        e: Idx<Expr>,
+    ) -> Result<Option<(Idx<Inst>, Idx<Inst>, ColumnElem)>, CompilerError> {
+        self.with_site_expr(e, |s| {
+            let Expr::Index { base, index } = s.body.expr_arena[e] else {
+                return Ok(None);
+            };
+            let Some(elem) = s.vec_strided_elem_of(base)? else {
+                return Ok(None);
+            };
+            let vec = s.lower_expr(base)?;
+            let i = s.lower_expr(index)?;
+            let slot = s.checked_column_index(vec, i);
+            Ok(Some((vec, slot, elem)))
+        })
+    }
+
+    /// `xs[i].<field> = v` on a strided Vec: store into that leaf's slot of the
+    /// row. As with columns, `field` must name a primitive leaf; a nested value
+    /// field spans several slots and needs a whole-element store.
+    pub(crate) fn strided_leaf_store(
+        &mut self,
+        vec: Idx<Inst>,
+        slot: Idx<Inst>,
+        elem: ColumnElem,
+        field: Ustr,
+        value: Idx<Expr>,
+    ) -> Result<(), CompilerError> {
+        let shape = self.column_shape(elem)?;
+        let Some(offset) = value_leaf_paths(&shape).iter().position(|p| *p == field) else {
+            return Err(gap(format!(
+                "`{field}` is not a scalar leaf of strided `[{}]`; a nested value \
+                 field spans several slots and needs a whole-element store",
+                elem.name
+            )));
+        };
+        let v = self.lower_expr(value)?;
+        let v = if self.strided_stores_raw(elem) {
+            v
+        } else {
+            self.emit_cur(Inst::VecStrideNilToFalse(v))
+        };
+        let data = self.emit_cur(Inst::Field { base: vec, field: Ustr::from("_data") });
+        let at = self.strided_slot_index(slot, shape.leaf_count(), offset);
+        self.emit_cur(Inst::StoreIndex {
+            base: data,
+            index: at,
+            value: v,
+            kind: ContainerKind::VecStrideSlot,
+        });
+        Ok(())
     }
 
     /// `xs[i].<field> = v` on a column-stored Vec: store into the column that

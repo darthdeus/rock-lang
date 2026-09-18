@@ -1867,10 +1867,27 @@ fn type_table_defs(
     ws: &Workspace,
     gc: &rustc_hash::FxHashSet<ustr::Ustr>,
 ) -> Result<String, CompilerError> {
-    let mut out = String::from("_G.__ROCK_ENUM_FLAT_LAYOUT = {}\n");
+    let mut out = String::from("_G.__ROCK_ENUM_FLAT_LAYOUT = {}\n_G.__ROCK_STRIDED_ROWS = {}\n");
     let mut type_id = 100i64;
     for module in ws.modules.iter() {
         for (_, s) in module.structs.iter() {
+            // Row offsets of a `[S]` stored as strided rows, so reflection
+            // reads a row by leaf path (`serialization.rock`).
+            if s.is_nobox
+                && s.generics.is_empty()
+                && let Some(offsets) = skull_mir::lower::ContainerPlan::strided_struct_row_offsets(
+                    ws,
+                    bone_semantic::hir::FnBackend::Lua,
+                    s.name,
+                )
+            {
+                let entries = offsets
+                    .iter()
+                    .map(|(path, offset)| format!("[\"{path}\"] = {offset}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                out.push_str(&format!("_G.__ROCK_STRIDED_ROWS[\"{}\"] = {{ {entries} }}\n", s.name));
+            }
             // Tier-distinguishing kind so reflection/inspect/serialize stay honest:
             // FFI-clean value structs are cdata (`c_struct`), GC-carrying ones are
             // immutable Lua tables (`value_table`).
