@@ -172,6 +172,34 @@ pub(crate) fn aliases_for_modules(
 pub(crate) fn check_modules(
     modules: &mut [skull_parser::Ast],
 ) -> std::result::Result<bone_semantic::inference::Workspace, Vec<CompilerError>> {
+    let (ws, errs) = check_modules_inner(modules, ClosureGate::Enforce)?;
+    if !errs.is_empty() {
+        return Err(errs);
+    }
+    Ok(ws)
+}
+
+/// [`check_modules`] for the modules tools, which must read a workspace whose
+/// bodies have errors (the migrate planner compares resolution site by site
+/// and repairs what changed) and which read the spec 11 closure themselves
+/// (`api_closure_requirements`). Every other gate is the same; the body
+/// errors come back beside the workspace instead of replacing it.
+pub(crate) fn check_modules_for_tools(
+    modules: &mut [skull_parser::Ast],
+) -> std::result::Result<(bone_semantic::inference::Workspace, Vec<CompilerError>), Vec<CompilerError>> {
+    check_modules_inner(modules, ClosureGate::LeaveToCaller)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ClosureGate {
+    Enforce,
+    LeaveToCaller,
+}
+
+fn check_modules_inner(
+    modules: &mut [skull_parser::Ast],
+    gate: ClosureGate,
+) -> std::result::Result<(bone_semantic::inference::Workspace, Vec<CompilerError>), Vec<CompilerError>> {
     let syntax = syntax_errors(modules);
     if !syntax.is_empty() {
         return Err(syntax);
@@ -189,7 +217,12 @@ pub(crate) fn check_modules(
         return Err(macro_labels);
     }
     let aliases = aliases_for_modules(modules).map_err(|error| vec![error])?;
-    let ws = bone_semantic::semantic_passes::semantic_pass_with_aliases(modules, &aliases);
+    let ws = match gate {
+        ClosureGate::Enforce => bone_semantic::semantic_passes::semantic_pass_with_aliases(modules, &aliases),
+        ClosureGate::LeaveToCaller => {
+            bone_semantic::semantic_passes::semantic_pass_without_closure_gate(modules, &aliases)
+        }
+    };
     // Expansion RECOVERS: a macro that must not expand (item-macro `mod`/`use`)
     // records the reason on `recovery_errors` and leaves the call in place, so
     // the syntax gate runs again over the expanded trees. The pass's own
@@ -201,10 +234,7 @@ pub(crate) fn check_modules(
     }
     let ws = ws.map_err(|e| vec![e])?;
     let errs = body_errors(&ws);
-    if !errs.is_empty() {
-        return Err(errs);
-    }
-    Ok(ws)
+    Ok((ws, errs))
 }
 
 /// Every recovered syntax error across `modules`, in module order. The

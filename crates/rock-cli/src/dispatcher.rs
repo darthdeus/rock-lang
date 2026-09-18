@@ -685,25 +685,41 @@ impl CommandContext {
             return Ok(());
         }
         if self.args.command == CliCommand::Modules {
-            let usage = "usage: rock modules audit <project> [--closed] [--format pretty|json]";
-            return match self.args.files.as_slice() {
+            let usage = "usage: rock modules audit <project> [--closed] [--format pretty|json]\n       rock modules migrate <package> --check|--apply [--consumer <dir>]... [--export-test-uses] [--format pretty|json]";
+            let format = match self.args.perf_format.as_str() {
+                "pretty" => crate::modules_audit::Format::Pretty,
+                "json" => crate::modules_audit::Format::Json,
+                other => anyhow::bail!("rock modules: unknown --format `{other}` (pretty|json)\n{usage}"),
+            };
+            let code = match self.args.files.as_slice() {
                 [sub, project] if sub == "audit" => {
-                    let format = match self.args.perf_format.as_str() {
-                        "pretty" => crate::modules_audit::Format::Pretty,
-                        "json" => crate::modules_audit::Format::Json,
-                        other => anyhow::bail!("rock modules audit: unknown --format `{other}` (pretty|json)\n{usage}"),
-                    };
-                    let code = crate::modules_audit::run(std::path::Path::new(project), self.args.closed, format)?;
-                    if code != 0 {
-                        std::process::exit(code);
-                    }
-                    Ok(())
+                    crate::modules_audit::run(std::path::Path::new(project), self.args.closed, format)?
                 }
-                [sub, ..] if sub != "audit" => {
-                    anyhow::bail!("rock modules: unknown subcommand `{sub}`; only `audit` exists\n{usage}")
+                [sub, package] if sub == "migrate" => {
+                    let mode = if self.args.apply {
+                        crate::modules_migrate::Mode::Apply
+                    } else {
+                        crate::modules_migrate::Mode::Check
+                    };
+                    let consumers: Vec<std::path::PathBuf> =
+                        self.args.consumer.iter().map(std::path::PathBuf::from).collect();
+                    crate::modules_migrate::run(
+                        std::path::Path::new(package),
+                        &consumers,
+                        self.args.export_test_uses,
+                        mode,
+                        format,
+                    )?
+                }
+                [sub, ..] if sub != "audit" && sub != "migrate" => {
+                    anyhow::bail!("rock modules: unknown subcommand `{sub}`; `audit` and `migrate` exist\n{usage}")
                 }
                 _ => anyhow::bail!("{usage}"),
             };
+            if code != 0 {
+                std::process::exit(code);
+            }
+            return Ok(());
         }
         if self.args.command == CliCommand::DocsIndex {
             return crate::docs_index::run(&self.args.files, self.args.output.as_deref());

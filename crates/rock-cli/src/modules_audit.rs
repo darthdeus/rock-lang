@@ -20,7 +20,6 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
-use bone_core::hir::Expr;
 use bone_core::modules::is_stdlib_module_file;
 use bone_core::prelude::ModuleId;
 use rock_core::errors::CompilerError;
@@ -29,6 +28,8 @@ use rock_core::SourceFiles;
 use rock_host::stick::graph::{PackageGraph, PackageId};
 use rock_host::stick::StickConfig;
 use serde_json::{json, Value};
+
+use crate::modules_analysis::{self, PopMode, RefKind, Target};
 
 pub enum Format {
     Pretty,
@@ -70,20 +71,31 @@ enum Owner {
     Builtin,
 }
 
-#[derive(Default, Clone, Copy)]
+#[derive(Default, Clone)]
 struct Counts {
-    calls: usize,
-    values: usize,
-    /// Struct literals and newtype constructor calls.
-    constructions: usize,
-    enum_variants: usize,
+    by_kind: BTreeMap<RefKind, usize>,
 }
 
 impl Counts {
+    fn get(&self, kind: RefKind) -> usize {
+        self.by_kind.get(&kind).copied().unwrap_or(0)
+    }
+
     fn total(&self) -> usize {
-        self.calls + self.values + self.constructions + self.enum_variants
+        self.by_kind.values().sum()
     }
 }
+
+/// The counted kinds, in report order.
+const KINDS: [RefKind; 7] = [
+    RefKind::Call,
+    RefKind::Value,
+    RefKind::Construction,
+    RefKind::EnumVariant,
+    RefKind::Protocol,
+    RefKind::Type,
+    RefKind::Pattern,
+];
 
 /// References whose target key the analysis cannot attribute to exactly one
 /// package: no definition at all (a raw `_G.X` Lua global), or a key defined in
@@ -120,12 +132,6 @@ enum Analysis {
         diagnostics: Vec<Diag>,
         rendered: String,
     },
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum PopMode {
-    Production,
-    Test,
 }
 
 struct PopRow {
@@ -210,65 +216,37 @@ pub fn run(project: &Path, closed: bool, format: Format) -> Result<i32> {
 }
 
 fn analyze(project: &Path, graph: &PackageGraph) -> (Option<Population>, Analysis) {
-    let spec = crate::unified_compile::SourceSpec::Directory(project.to_path_buf());
-    let discovered = match crate::unified_compile::discover_sources(&spec) {
-        Ok(s) => s,
-        Err(e) => return (None, failed_msg("source discovery", format!("{e:#}"))),
+    let pop = match modules_analysis::population(project, graph, None) {
+        Ok(p) => p,
+        Err(e) => return (None, failed_msg("source discovery", e)),
     };
-
-    // `rock compile` drops every file under a `tests/` path component; a root
-    // that itself lives under one would be analyzed empty, so it takes the
-    // population `rock test <dir>` builds instead.
-    let root_path = graph.package(graph.root()).root.to_string_lossy().into_owned();
-    let mode = if SourceFiles::is_test_only_path(&root_path) { PopMode::Test } else { PopMode::Production };
-    let analyzed = match mode {
-        PopMode::Production => discovered.production_only(),
-        PopMode::Test => discovered.clone(),
-    };
+    let mode = pop.mode;
+    let (file_pkg, untagged) = modules_analysis::file_packages(&pop.analyzed);
 
     let mut rows: BTreeMap<u32, PopRow> = graph
         .packages()
         .iter()
         .map(|n| (n.id.0, PopRow { package: n.id.0, included: 0, excluded_test_only: 0 }))
         .collect();
-    let mut file_pkg: HashMap<ustr::Ustr, u32> = HashMap::new();
-    for f in &analyzed.files {
-        let f = f.borrow();
-        if let Some(tag) = &f.package {
-            file_pkg.insert(ustr::Ustr::from(f.file.to_id_path().as_str()), tag.id);
-            if let Some(row) = rows.get_mut(&tag.id) {
-                row.included += 1;
+    for id in file_pkg.values() {
+        if let Some(row) = rows.get_mut(id) {
+            row.included += 1;
+        }
+    }
+    let (discovered_pkg, _) = modules_analysis::file_packages(&pop.discovered);
+    for (file, id) in &discovered_pkg {
+        if !file_pkg.contains_key(file) {
+            if let Some(row) = rows.get_mut(id) {
+                row.excluded_test_only += 1;
             }
         }
     }
-    for f in &discovered.files {
-        let f = f.borrow();
-        if let Some(tag) = &f.package {
-            if !file_pkg.contains_key(&ustr::Ustr::from(f.file.to_id_path().as_str())) {
-                if let Some(row) = rows.get_mut(&tag.id) {
-                    row.excluded_test_only += 1;
-                }
-            }
-        }
-    }
-
-    let untagged: Vec<String> = analyzed
-        .files
-        .iter()
-        .filter(|f| f.borrow().package.is_none())
-        .map(|f| f.borrow().file.to_id_path())
-        .collect();
 
     let population = Population {
         mode,
         rows: rows.into_values().collect(),
         std_modules: rock_host::stdlib_loader::stdlib_files().len(),
     };
-    let (mut modules, _entry) = match crate::skull_backend::skull_assemble_project(&analyzed) {
-        Ok(v) => v,
-        Err(errs) => return (Some(population), failed("parse", &analyzed, &errs)),
-    };
-
     if !untagged.is_empty() {
         let message = format!(
             "{} analyzed file(s) carry no package tag, so their references cannot be attributed: {}",
@@ -277,11 +255,18 @@ fn analyze(project: &Path, graph: &PackageGraph) -> (Option<Population>, Analysi
         );
         return (Some(population), failed_msg("package attribution", message));
     }
-
-    let ws = match crate::bone_backend::check_modules(&mut modules) {
-        Ok(ws) => ws,
-        Err(errs) => return (Some(population), failed("semantic pass", &analyzed, &errs)),
+    let (ws, body_errors) = match modules_analysis::check(&pop.analyzed) {
+        Ok(v) => v,
+        Err(f) => return (Some(population), failed(f.stage, &pop.analyzed, &f.errors)),
     };
+    // A body error or an unsatisfied API closure is what `rock compile`
+    // rejects; the audit of such a program is unknown, never clean.
+    if !body_errors.is_empty() {
+        return (Some(population), failed("semantic pass", &pop.analyzed, &body_errors));
+    }
+    if let Err(e) = bone_semantic::semantic_passes::pass_validate_api_closure(&ws) {
+        return (Some(population), failed("semantic pass", &pop.analyzed, &[e]));
+    }
     match count_references(&ws, &file_pkg) {
         Ok(table) => (Some(population), Analysis::Ok(table)),
         Err(message) => (Some(population), failed_msg("package attribution", message)),
@@ -316,137 +301,72 @@ fn failed(stage: &'static str, sources: &SourceFiles, errs: &[CompilerError]) ->
     }
 }
 
-/// Count every cross-package reference the analyzed bodies resolve, keyed by
-/// the package that owns the definition (the file that declares it).
+/// Count every cross-package reference the analyzed program resolves, keyed by
+/// the package that owns the definition (the file that declares it), over the
+/// shared reference walk (`modules_analysis::references`).
 ///
-/// Counted, per lowered body expression:
-/// - calls: every call inference bound to a function
-///   (`BodyInference::resolved_overload_calls`: named, UFCS, operator and
-///   compound-assignment calls);
-/// - values: `Expr::Global` -- a global, a function used as a value, or a type
-///   used as a value -- and calls through a fn-valued global, attributed by
-///   which modules define that key;
-/// - constructions (struct literals, newtype constructor calls) and enum
-///   variant constructions, by their nominal's key.
-///
-/// A named call with neither a recorded target nor a defining global/type is
-/// listed as unrecorded rather than dropped.
+/// A key defined in no module (a raw `_G.X` Lua global) or in several
+/// packages is unattributed rather than guessed; a named call with neither a
+/// recorded target nor a defining global/type is listed as unrecorded rather
+/// than dropped.
 fn count_references(
     ws: &bone_semantic::inference::Workspace,
     file_pkg: &HashMap<ustr::Ustr, u32>,
 ) -> std::result::Result<RefTable, String> {
-    let owner_of = |mid: ModuleId| -> std::result::Result<Owner, String> {
-        if mid == ModuleId::builtin() {
-            return Ok(Owner::Builtin);
-        }
-        let file = ws.module(mid).file;
-        if is_stdlib_module_file(file.as_str()) {
-            return Ok(Owner::Std);
-        }
-        file_pkg
-            .get(&file)
-            .map(|&p| Owner::Package(p))
-            .ok_or_else(|| format!("module `{file}` is neither stdlib nor an analyzed package file"))
-    };
-
-    let mut global_modules: HashMap<ustr::Ustr, Vec<ModuleId>> = HashMap::new();
-    for m in &ws.modules {
-        for key in m.global_by_name.keys() {
-            global_modules.entry(*key).or_default().push(m.id);
-        }
-    }
-    let type_modules = |key: ustr::Ustr| -> Vec<ModuleId> {
-        let mut out = Vec::new();
-        if let Some(s) = ws.struct_by_name.get(&key) {
-            out.push(s.module);
-        }
-        if let Some(e) = ws.enums_by_name.get(&key) {
-            out.push(e.module);
-        }
-        if let Some(n) = ws.newtypes_by_name.get(&key) {
-            out.push(n.module);
-        }
-        out
-    };
-    let owners = |mids: Vec<ModuleId>| -> std::result::Result<BTreeSet<Owner>, String> {
-        mids.into_iter().map(owner_of).collect()
-    };
-
+    let owner_of = |mid: ModuleId| owner_of(ws, file_pkg, mid);
     let mut table = RefTable::default();
-    for m in &ws.modules {
-        if m.id == ModuleId::builtin() {
-            continue;
-        }
-        let Owner::Package(from) = owner_of(m.id)? else { continue };
-        let inference = ws.inference(m.id);
-        for (body_owner, body) in &m.bodies {
-            let bi = inference.and_then(|inf| inf.per_fn.get(body_owner));
-            for (idx, expr) in body.expr_arena.iter() {
-                let (key, mids, kind) = match expr {
-                    Expr::Call { callee: bone_core::hir::Callee::Unresolved { name, .. }, .. } => {
-                        if bi.is_some_and(|bi| bi.resolved_overload_calls.contains_key(&idx)) {
-                            continue;
-                        }
-                        // Inference bound no function: a newtype constructor or
-                        // a call through a fn-valued global, attributed like the
-                        // definition it names.
-                        let types = type_modules(*name);
-                        let kind = if types.is_empty() { Kind::Value } else { Kind::Construction };
-                        let mut mids = global_modules.get(name).cloned().unwrap_or_default();
-                        mids.extend(types);
-                        if mids.is_empty() {
-                            let bucket = table.unattributed.entry(from).or_default();
-                            *bucket.unrecorded_calls.entry(name.to_string()).or_default() += 1;
-                            continue;
-                        }
-                        (*name, mids, kind)
-                    }
-                    Expr::Global(key) => {
-                        let mut mids = global_modules.get(key).cloned().unwrap_or_default();
-                        if let Some(fns) = ws.functions_by_name.get(key) {
-                            mids.extend(fns.iter().map(|(mid, _)| *mid));
-                        }
-                        mids.extend(type_modules(*key));
-                        (*key, mids, Kind::Value)
-                    }
-                    Expr::StructLiteral { name, .. } => (*name, type_modules(*name), Kind::Construction),
-                    Expr::EnumVariant { enum_name, .. } => (*enum_name, type_modules(*enum_name), Kind::EnumVariant),
-                    _ => continue,
-                };
-                let found = owners(mids)?;
+    for r in modules_analysis::references(ws) {
+        let Owner::Package(from) = owner_of(r.from)? else { continue };
+        let to = match &r.target {
+            Target::Fn(mid, _) => owner_of(*mid)?,
+            Target::Unrecorded(name) => {
+                let bucket = table.unattributed.entry(from).or_default();
+                *bucket.unrecorded_calls.entry(name.to_string()).or_default() += 1;
+                continue;
+            }
+            // A nominal the checker accepted with no defining module is a
+            // compiler-provided type (`FieldRef`, `Coroutine`).
+            Target::Key { key, modules } if modules.is_empty() && matches!(r.kind, RefKind::Type | RefKind::Pattern) => {
+                if bone_core::modules::STD_INTRINSIC_TYPES.contains(&key.as_str()) {
+                    Owner::Std
+                } else {
+                    Owner::Builtin
+                }
+            }
+            Target::Key { key, modules } => {
+                let found: BTreeSet<Owner> = modules.iter().map(|m| owner_of(*m)).collect::<Result<_, _>>()?;
                 if found.len() != 1 {
                     let bucket = table.unattributed.entry(from).or_default();
                     let map = if found.is_empty() { &mut bucket.no_definition } else { &mut bucket.several_owners };
                     *map.entry(key.to_string()).or_default() += 1;
                     continue;
                 }
-                let to = *found.iter().next().expect("one owner");
-                if to != Owner::Package(from) {
-                    let counts = table.edges.entry((from, to)).or_default();
-                    match kind {
-                        Kind::Value => counts.values += 1,
-                        Kind::Construction => counts.constructions += 1,
-                        Kind::EnumVariant => counts.enum_variants += 1,
-                    }
-                }
+                *found.iter().next().expect("one owner")
             }
-            let Some(bi) = bi else { continue };
-            for (callee_mid, _) in bi.resolved_overload_calls.values() {
-                let to = owner_of(*callee_mid)?;
-                if to != Owner::Package(from) {
-                    table.edges.entry((from, to)).or_default().calls += 1;
-                }
-            }
+        };
+        if to != Owner::Package(from) {
+            *table.edges.entry((from, to)).or_default().by_kind.entry(r.kind).or_default() += 1;
         }
     }
     Ok(table)
 }
 
-#[derive(Clone, Copy)]
-enum Kind {
-    Value,
-    Construction,
-    EnumVariant,
+fn owner_of(
+    ws: &bone_semantic::inference::Workspace,
+    file_pkg: &HashMap<ustr::Ustr, u32>,
+    mid: ModuleId,
+) -> std::result::Result<Owner, String> {
+    if mid == ModuleId::builtin() {
+        return Ok(Owner::Builtin);
+    }
+    let file = ws.module(mid).file;
+    if is_stdlib_module_file(file.as_str()) {
+        return Ok(Owner::Std);
+    }
+    file_pkg
+        .get(&file)
+        .map(|&p| Owner::Package(p))
+        .ok_or_else(|| format!("module `{file}` is neither stdlib nor an analyzed package file"))
 }
 
 fn revision(manifest_dir: &Path, graph: &PackageGraph) -> Revision {
@@ -866,22 +786,21 @@ fn render_pretty(report: &Report, verdict: &Verdict) -> String {
             let _ = writeln!(o, "\ncross-package references by original owner {}", tag(Status::Exact));
             let _ = writeln!(
                 o,
-                "  counted: calls, value references, constructions (struct literals, newtype constructors), enum variants in lowered bodies"
+                "  counted: calls, value references, constructions (struct literals, newtype constructors), enum variants, synthesized protocol calls (for-in iter/next, iterator coercions) in lowered bodies; nominal types in signatures, fields, annotations and casts; enum/record names in patterns"
             );
             if table.edges.is_empty() {
                 let _ = writeln!(o, "  none");
             }
             for (&(from, to), c) in &table.edges {
+                let kinds: Vec<String> =
+                    KINDS.iter().map(|k| format!("{} {}", k.as_str().replace('_', " "), c.get(*k))).collect();
                 let _ = writeln!(
                     o,
-                    "  {} -> {}: {} (calls {}, values {}, constructions {}, enum variants {})",
+                    "  {} -> {}: {} ({})",
                     graph.package(PackageId(from)).manifest_name,
                     owner_name(graph, to),
                     c.total(),
-                    c.calls,
-                    c.values,
-                    c.constructions,
-                    c.enum_variants
+                    kinds.join(", ")
                 );
             }
             for (&from, u) in &table.unattributed {
@@ -1060,15 +979,16 @@ fn render_json(report: &Report, verdict: &Verdict) -> Value {
             let edges: Vec<Value> = table
                 .edges
                 .iter()
-                .map(|(&(from, to), c)| json!({
-                    "from": graph.package(PackageId(from)).manifest_name,
-                    "to": owner_name(graph, to),
-                    "calls": c.calls,
-                    "values": c.values,
-                    "constructions": c.constructions,
-                    "enum_variants": c.enum_variants,
-                    "total": c.total(),
-                }))
+                .map(|(&(from, to), c)| {
+                    let mut row = serde_json::Map::new();
+                    row.insert("from".into(), json!(graph.package(PackageId(from)).manifest_name));
+                    row.insert("to".into(), json!(owner_name(graph, to)));
+                    for k in KINDS {
+                        row.insert(k.as_str().into(), json!(c.get(k)));
+                    }
+                    row.insert("total".into(), json!(c.total()));
+                    Value::Object(row)
+                })
                 .collect();
             let unattributed: Vec<Value> = table
                 .unattributed
@@ -1092,7 +1012,7 @@ fn render_json(report: &Report, verdict: &Verdict) -> Value {
             (
                 json!({
                     "status": "exact",
-                    "counted_kinds": ["calls", "values", "constructions", "enum_variants"],
+                    "counted_kinds": KINDS.iter().map(|k| k.as_str()).collect::<Vec<_>>(),
                     "edges": edges,
                     "unattributed": unattributed,
                 }),

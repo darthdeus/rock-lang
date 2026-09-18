@@ -211,6 +211,10 @@ fn cross_package_references_are_exact_counts() {
     assert_eq!(e["values"], 1, "{e}");
     assert_eq!(e["constructions"], 1, "{e}");
     assert_eq!(e["enum_variants"], 0, "{e}");
+    // `-> counted_lib::Box` in `boxed`'s signature.
+    assert_eq!(e["types"], 1, "{e}");
+    assert_eq!(e["patterns"], 0, "{e}");
+    assert_eq!(e["protocol"], 0, "{e}");
 
     let v = json(&audit(&dir.join("old"), &["--format", "json"]));
     let edges = v["cross_package_references"]["edges"].as_array().unwrap();

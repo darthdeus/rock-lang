@@ -1032,13 +1032,25 @@ pub fn semantic_pass_with_aliases(
     rock_modules: &mut [Ast],
     aliases: &bone_core::modules::NsAliases,
 ) -> Result<Workspace, CompilerError> {
+    let ws = semantic_pass_without_closure_gate(rock_modules, aliases)?;
+    pass_validate_api_closure(&ws)?;
+    Ok(ws)
+}
+
+/// [`semantic_pass_with_aliases`] without the spec 11 gate, for a tool that
+/// reads [`api_closure_requirements`] itself (the migrate planner grows an
+/// export set until the closure is satisfied). Every compile path takes the
+/// gated pass.
+pub fn semantic_pass_without_closure_gate(
+    rock_modules: &mut [Ast],
+    aliases: &bone_core::modules::NsAliases,
+) -> Result<Workspace, CompilerError> {
     let _span = tracing::info_span!("bone_semantic_pass").entered();
     let mut ws = Workspace::default();
 
     build_namespaces(&mut ws, rock_modules, aliases)?;
     expand_and_desugar(&mut ws, rock_modules)?;
     lower_and_infer(&mut ws, rock_modules)?;
-    pass_validate_api_closure(&ws)?;
 
     Ok(ws)
 }

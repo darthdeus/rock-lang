@@ -83,7 +83,9 @@ pub mod stone_test;
 mod test;
 mod text_utils;
 pub mod unified_compile;
+mod modules_analysis;
 mod modules_audit;
+mod modules_migrate;
 mod watch;
 
 pub use common::*;
@@ -333,6 +335,9 @@ pub enum CliCommand {
     /// `rock modules audit <project> [--closed] [--format pretty|json]` --
     /// read-only modules-v1 audit of one project's package graph and analyzed
     /// sources (spec 15.1). See `modules_audit::run`.
+    /// `rock modules migrate <package> --check|--apply [--consumer <dir>]...`
+    /// -- convert a legacy package to modules-v1 (spec 15.2). See
+    /// `modules_migrate::run`.
     Modules,
 }
 
@@ -762,6 +767,15 @@ pub struct Args {
     /// `rock modules audit --closed`: fail unless the selected root and every
     /// package it reaches, other than the compiler-owned std, is modules-v1.
     pub closed: bool,
+    /// `rock modules migrate --apply`: write the planned edits (the default,
+    /// and `--check`, only plan).
+    pub apply: bool,
+    /// `rock modules migrate --consumer <dir>` (repeatable): the consumer set
+    /// whose references decide the package's exports (spec 15.2).
+    pub consumer: Vec<String>,
+    /// `rock modules migrate --export-test-uses`: also export what only a
+    /// consumer's tests reference (spec 16 says not to by default).
+    pub export_test_uses: bool,
     /// Where `--union` looks for consumers. Defaults to the lib's parent, which
     /// is right when the lib sits beside its consumers (`stone/`); a nested lib
     /// (`libs/chess-core`) needs the repo root passed explicitly.
@@ -941,6 +955,12 @@ impl Args {
                 .help("For `rock lint <lib>`: judge a library's reachability against every consumer in the repo at once, reporting only functions that NONE of them reach. The only sound way to run unused_fn on a lib."))
             .arg(Arg::new("closed").long("closed").action(ArgAction::SetTrue)
                 .help("For `rock modules audit`: exit non-zero if the root or any package it reaches (other than the compiler-owned std) is legacy."))
+            .arg(Arg::new("apply").long("apply").action(ArgAction::SetTrue).conflicts_with("check")
+                .help("For `rock modules migrate`: write the planned edits after verifying them (without it, or with --check, only the plan is printed)."))
+            .arg(Arg::new("consumer").long("consumer").value_name("DIR").action(ArgAction::Append)
+                .help("For `rock modules migrate`: a consumer package whose references decide what becomes `pub` (repeatable)."))
+            .arg(Arg::new("export-test-uses").long("export-test-uses").action(ArgAction::SetTrue)
+                .help("For `rock modules migrate`: also make `pub` what only a consumer's tests reference (by default that is a blocker: spec 16 prefers relocating the test)."))
             .arg(Arg::new("consumers").long("consumers")
                 .help("For `rock lint --union`: directory to search for consumers (default: the lib's parent). Pass the repo root for a nested lib like `libs/chess-core`."))
             .arg(Arg::new("backend").long("backend")
@@ -1043,6 +1063,9 @@ impl Args {
             ignore_types: m.get_one::<String>("ignore-types").cloned(),
             union: m.get_flag("union"),
             closed: m.get_flag("closed"),
+            apply: m.get_flag("apply"),
+            consumer: m.get_many::<String>("consumer").map(|v| v.cloned().collect()).unwrap_or_default(),
+            export_test_uses: m.get_flag("export-test-uses"),
             consumers: m.get_one::<String>("consumers").cloned(),
             // Backend selection. An explicit `--backend` flag wins; otherwise an
             // explicit `ROCK_BACKEND` env var; otherwise the implicit default is
