@@ -249,3 +249,97 @@ fn a_legacy_added_definition_stays_on_the_interface_path() {
     let edit = "fn bump(n: int) -> int {\n    n\n}\n\nfn twice(n: int) -> int {\n    n\n}\n";
     assert_eq!(edit_matches_fresh(files, "a.rock", edit), UpdateTier::Interface);
 }
+
+fn v1_in(package: u32, name: &str, path: &str, text: &str) -> SessionFile {
+    SessionFile {
+        path: path.into(),
+        text: text.into(),
+        dialect: Dialect::V1,
+        package: Some(PackageTag { id: package, self_name: name.into() }),
+    }
+}
+
+const PICK_INT: &str = "pub fn pick(n: int) -> int {\n    n\n}\n";
+const PICK_STRING: &str = "pub fn pick(s: string) -> string {\n    s\n}\n";
+const PICK_USE: &str = "fn use_it() -> int {\n    let s = pick(\"v1\")\n    pick(1)\n}\n";
+
+/// Two v1 packages each project `pick` to a package-less legacy file that
+/// defines no `pick`: one overload family (spec 3.2), as legacy overloading
+/// merges them. Narrowing one member to the other's signature ties the call,
+/// naming both origins; widening it back clears the tie. Both edits stay on
+/// the interface path and agree with a fresh session.
+#[test]
+fn projected_callables_with_no_legacy_owner_merge_across_a_member_edit() {
+    const TIED_PICK: &str = "Ambiguous overload for `pick` with argument types (string)\n\
+         tied candidates (equally-ranked matches):\n  \
+         lib_a::pick(s: string) -> string (v1 definition lib_a::pick)\n  \
+         lib_b::pick(s: string) -> string (v1 definition lib_b::pick)";
+    let files = |b: &str| {
+        vec![
+            v1_in(1, "lib_a", "a.rock", PICK_STRING),
+            v1_in(2, "lib_b", "b.rock", b),
+            SessionFile::legacy("legacy_use.rock", PICK_USE),
+        ]
+    };
+
+    let (tier, diags) = edit_with_diagnostics(files(PICK_INT), "b.rock", PICK_STRING);
+    assert_eq!(tier, UpdateTier::Interface);
+    assert!(diags.iter().any(|d| d.contains(TIED_PICK)), "{diags:?}");
+
+    let (tier, diags) = edit_with_diagnostics(files(PICK_STRING), "b.rock", PICK_INT);
+    assert_eq!(tier, UpdateTier::Interface);
+    assert!(diags.is_empty(), "{diags:?}");
+}
+
+/// A second package's `pick` appearing turns the single projected definition
+/// into a family; removing it turns the family back. Each is a namespace
+/// input edit (full rebuild), and the caller's verdict matches a fresh
+/// session either way.
+#[test]
+fn a_second_projected_callable_added_or_removed_relowers_its_callers() {
+    let other = "pub fn other() -> int {\n    1\n}\n";
+    let files = |b: &str| {
+        vec![
+            v1_in(1, "lib_a", "a.rock", PICK_INT),
+            v1_in(2, "lib_b", "b.rock", b),
+            SessionFile::legacy("legacy_use.rock", PICK_USE),
+        ]
+    };
+
+    let (tier, diags) = edit_with_diagnostics(files(other), "b.rock", PICK_STRING);
+    assert_eq!(tier, UpdateTier::FullUser);
+    assert!(diags.is_empty(), "{diags:?}");
+
+    let (tier, diags) = edit_with_diagnostics(files(PICK_STRING), "b.rock", other);
+    assert_eq!(tier, UpdateTier::FullUser);
+    assert!(diags.iter().any(|d| d.contains("type mismatch")), "{diags:?}");
+}
+
+/// A legacy definer adding a `pick` to a family that had no legacy member,
+/// and removing it again. The family stays a family, but its member set
+/// changes, so the caller re-lowers and re-infers: a same-signature legacy
+/// `pick(int)` ties with `lib_a::pick`.
+#[test]
+fn a_legacy_member_added_to_an_ownerless_family_relowers_its_callers() {
+    let without = "fn other(n: int) -> int {\n    n\n}\n";
+    let with = "fn other(n: int) -> int {\n    n\n}\n\nfn pick(n: int) -> int {\n    n\n}\n";
+    let files = |def: &str| {
+        vec![
+            v1_in(1, "lib_a", "a.rock", PICK_INT),
+            v1_in(2, "lib_b", "b.rock", PICK_STRING),
+            SessionFile::legacy("legacy_def.rock", def),
+            SessionFile::legacy("legacy_use.rock", PICK_USE),
+        ]
+    };
+
+    let (_, diags) = edit_with_diagnostics(files(without), "legacy_def.rock", with);
+    assert!(
+        diags.iter().any(|d| d.contains("Ambiguous overload for `pick` with argument types (int)")
+            && d.contains("(legacy definition in legacy_def.rock)")
+            && d.contains("(v1 definition lib_a::pick)")),
+        "{diags:?}"
+    );
+
+    let (_, diags) = edit_with_diagnostics(files(with), "legacy_def.rock", without);
+    assert!(diags.is_empty(), "{diags:?}");
+}

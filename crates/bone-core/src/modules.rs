@@ -289,8 +289,9 @@ pub enum LegacyName {
     /// v1 definitions reached through the file's imports or projection, with
     /// no legacy definition in the way. More than one entry is ambiguous.
     Projected(Vec<LegacyProjectionEntry>),
-    /// Legacy callables and projected v1 callables under one name: one
-    /// overload family of the legacy bare key plus these v1 keys.
+    /// Callables under one name -- the legacy definitions, if any, and
+    /// these projected v1 keys: one overload family of the legacy bare key
+    /// plus the v1 keys, exactly as legacy overloading merges them.
     Family(Vec<Ustr>),
     /// A legacy definition and a v1 definition that cannot merge (not both
     /// callable): ambiguous at use.
@@ -327,15 +328,24 @@ pub fn legacy_name(ws: &crate::workspace::Workspace, file: Ustr, name: Ustr) -> 
     }
     // A v1 re-export of a legacy definition keeps the bare key: it is the
     // legacy definition itself, not a second candidate.
-    let foreign: Vec<&LegacyProjectionEntry> = entries.iter().filter(|e| e.key != name).collect();
+    let foreign: Vec<Ustr> = entries.iter().filter(|e| e.key != name).map(|e| e.key).collect();
+    let foreign_callable = entries.iter().all(|e| e.key == name || e.kind == DefKind::Callable);
     let owners = ws.ns.legacy_owned.files_defining(name);
-    if owners.is_empty() || foreign.is_empty() {
+    // Legacy overloading merges every same-named callable, so several
+    // projected v1 callables are one family even with no legacy member.
+    if owners.is_empty() {
+        if foreign.len() > 1 && foreign_callable {
+            return LegacyName::Family(foreign);
+        }
         return LegacyName::Projected(entries);
     }
-    if ws.ns.legacy_owned.all_callable(name) && foreign.iter().all(|e| e.kind == DefKind::Callable) {
-        return LegacyName::Family(foreign.iter().map(|e| e.key).collect());
+    if foreign.is_empty() {
+        return LegacyName::Projected(entries);
     }
-    LegacyName::Collision { owners, foreign: foreign.iter().map(|e| e.key).collect() }
+    if ws.ns.legacy_owned.all_callable(name) && foreign_callable {
+        return LegacyName::Family(foreign);
+    }
+    LegacyName::Collision { owners, foreign }
 }
 
 /// Every key a merged legacy family spans: the legacy bare key first, then

@@ -119,7 +119,12 @@ pub fn resolve_legacy_bare(ws: &Workspace, file: Ustr, name: Ustr) -> Result<Res
         LegacyName::Bare => Ok(plain(name)),
         LegacyName::Projected(entries) => projected(name, &entries),
         LegacyName::Family(foreign) => {
-            Err(legacy_collision(name, &ws.ns.legacy_owned.files_defining(name), &foreign))
+            let owners = ws.ns.legacy_owned.files_defining(name);
+            if owners.is_empty() {
+                Err(legacy_candidates(name, &foreign))
+            } else {
+                Err(legacy_collision(name, &owners, &foreign))
+            }
         }
         LegacyName::Collision { owners, foreign } => Err(legacy_collision(name, &owners, &foreign)),
     }
@@ -147,8 +152,12 @@ fn projected(name: Ustr, entries: &[bone_core::modules::LegacyProjectionEntry]) 
     if let [entry] = entries {
         return Ok(Resolved { key: entry.key, kind: legacy_resolved_kind(entry.kind), hidden: Vec::new() });
     }
-    let candidates = entries.iter().map(|e| e.key.as_str()).collect::<Vec<_>>().join(", ");
-    Err(format!("ambiguous legacy reference to `{name}`: candidates {candidates}"))
+    Err(legacy_candidates(name, &entries.iter().map(|e| e.key).collect::<Vec<_>>()))
+}
+
+fn legacy_candidates(name: Ustr, keys: &[Ustr]) -> String {
+    let candidates = keys.iter().map(|k| k.as_str()).collect::<Vec<_>>().join(", ");
+    format!("ambiguous legacy reference to `{name}`: candidates {candidates}")
 }
 
 fn legacy_collision(name: Ustr, owners: &[Ustr], foreign: &[Ustr]) -> String {

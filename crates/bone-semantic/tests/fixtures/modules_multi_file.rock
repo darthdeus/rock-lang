@@ -714,6 +714,109 @@ fn use_it() -> int {
     bump(1)
 }
 
+//- projected_callables_with_no_legacy_owner_form_one_family
+//-- a.rock @pkg=lib_a,1 @v1
+pub fn pick(n: int) -> int {
+    n
+}
+
+//-- b.rock @pkg=lib_b,2 @v1
+pub fn pick(s: string) -> string {
+    s
+}
+
+//-- main.rock @pkg=game,3
+fn use_it() -> int {
+    let s = pick("v1")
+            //^ string
+    let u = "ufcs".pick()
+                   //^ string
+    let n = pick(1)
+            //^ int
+    n
+}
+
+//- same_signature_projected_callables_tie_at_the_call @fail=lib_b::pick(n: int) -> int (v1 definition lib_b::pick)
+//-- a.rock @pkg=lib_a,1 @v1
+pub fn pick(n: int) -> int {
+    n
+}
+
+//-- b.rock @pkg=lib_b,2 @v1
+pub fn pick(n: int) -> int {
+    n
+}
+
+//-- main.rock @pkg=game,3
+fn use_it() -> int {
+    pick(1)
+}
+
+//- globbed_callables_with_no_legacy_owner_form_one_family
+//-- a.rock @pkg=lib_a,1 @v1
+pub mod inner;
+
+//-- a_inner.rock @pkg=lib_a,1 @v1
+mod inner;
+
+pub fn pick(n: int) -> int {
+    n
+}
+
+//-- b.rock @pkg=lib_b,2 @v1
+pub mod more;
+
+//-- b_more.rock @pkg=lib_b,2 @v1
+mod more;
+
+pub fn pick(s: string) -> string {
+    s
+}
+
+//-- main.rock @pkg=game,3
+use lib_a::inner::*;
+use lib_b::more::*;
+
+fn use_it() -> int {
+    let s = pick("v1")
+            //^ string
+    let n = pick(1)
+            //^ int
+    n
+}
+
+//- a_projected_type_and_callable_of_one_name_stay_ambiguous @fail=ambiguous legacy reference to `Pick`: candidates lib_a::Pick, lib_b::Pick
+//-- a.rock @pkg=lib_a,1 @v1
+pub struct Pick {
+    pub n: int,
+}
+
+//-- b.rock @pkg=lib_b,2 @v1
+pub fn Pick(n: int) -> int {
+    n
+}
+
+//-- main.rock @pkg=game,3
+fn use_it() -> int {
+    Pick(1)
+}
+
+//- a_projected_family_with_no_legacy_owner_is_not_a_single_function_value @fail=ambiguous legacy reference to `pick`: candidates lib_a::pick, lib_b::pick
+//-- a.rock @pkg=lib_a,1 @v1
+pub fn pick(n: int) -> int {
+    n
+}
+
+//-- b.rock @pkg=lib_b,2 @v1
+pub fn pick(s: string) -> string {
+    s
+}
+
+//-- main.rock @pkg=game,3
+fn use_it() {
+    let f = pick
+}
+
 //- a_pub_child_module_is_reachable_from_a_consumer
 //-- lib.rock @pkg=chess,1 @v1
 pub mod openings;
