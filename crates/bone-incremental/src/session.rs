@@ -297,6 +297,12 @@ pub struct Session {
     /// The warm modules' namespace contributions (the `std` root), computed
     /// once: warm ASTs are immutable. User files keep theirs on `UserFile`.
     warm_contributions: Vec<FragmentContribution>,
+    /// The dialect and owning package a host declared for a file that was
+    /// not in the initial set ([`Session::declare_file_facts`]). A held file
+    /// keeps its facts on its `UserFile`; these are read when the file enters
+    /// through `update_file` or `with_file_variant`, and survive a refused
+    /// entry, so the next attempt parses the same way.
+    declared_facts: FxHashMap<String, (Dialect, Option<PackageTag>)>,
 }
 
 /// A file entering a session, carrying the facts its package supplies.
@@ -735,6 +741,7 @@ impl Session {
             warm_base: WarmBase::Unbuilt,
             warm_names: FxHashSet::default(),
             warm_contributions: Vec::new(),
+            declared_facts: FxHashMap::default(),
         };
         session.warm_contributions = session.warm.iter().map(contribute).collect();
         session.warm_names = session
@@ -824,14 +831,45 @@ impl Session {
         Ok(combined)
     }
 
-    /// The dialect and owning package recorded for `path`. A path the session
-    /// does not hold yet is a standalone source: legacy, unowned. A caller that
-    /// knows better supplies the facts up front through [`SessionFile`].
+    /// The dialect and owning package recorded for `path`: a held file's own,
+    /// else what the host declared for it. A path nobody declared is a
+    /// standalone source: legacy, unowned. A caller that knows better supplies
+    /// the facts up front, through [`SessionFile`] or
+    /// [`Session::declare_file_facts`].
     fn facts_of(&self, path: &str) -> (Dialect, Option<PackageTag>) {
         match self.files.get(path) {
             Some(f) => (f.dialect, f.package.clone()),
-            None => (Dialect::Legacy, None),
+            None => self.declared_facts.get(path).cloned().unwrap_or((Dialect::Legacy, None)),
         }
+    }
+
+    /// Declare the dialect and owning package of a file that enters the
+    /// session after [`Session::new`] -- the editor opening a file the batch
+    /// load did not see. Its manifest decides both, exactly as for a file of
+    /// the initial set; without a declaration it would read as a standalone
+    /// legacy source. A held file's facts cannot change: its package's
+    /// manifest changed, which needs a new session.
+    pub fn declare_file_facts(
+        &mut self,
+        path: &str,
+        dialect: Dialect,
+        package: Option<PackageTag>,
+    ) -> Result<(), CompilerError> {
+        if let Some(held) = self.files.get(path)
+            && (held.dialect != dialect || held.package != package)
+        {
+            comp_error!(
+                Span::unknown(),
+                "bone session: `{}` is held as {:?} of {:?}; it cannot become {:?} of {:?} without a new session",
+                path,
+                held.dialect,
+                held.package,
+                dialect,
+                package
+            );
+        }
+        self.declared_facts.insert(path.to_string(), (dialect, package));
+        Ok(())
     }
 
     /// Re-parse `path` from its stored text with its own facts.

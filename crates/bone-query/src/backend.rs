@@ -200,6 +200,30 @@ struct BoneProject {
     /// `rock/modules` can render "how long ago did this recompile" -- the
     /// incremental-perf watch view. Modules never yet touched are absent.
     module_touched: HashMap<String, std::time::Instant>,
+    /// The package graph of this root's manifest, built once when the
+    /// project is created. It supplies the resolver's alias tables and the
+    /// dialect and package of a file that enters after the load (see
+    /// `update`). `None` for a root with no manifest, or one whose graph does
+    /// not build (logged): every file is then a standalone legacy source,
+    /// as in a compile.
+    graph: Option<rock_host::stick::graph::PackageGraph>,
+}
+
+/// The package graph for the project rooted at `root`, if it has a manifest.
+fn project_graph(root: &Path) -> Option<rock_host::stick::graph::PackageGraph> {
+    if !root.join("stick.toml").exists() {
+        return None;
+    }
+    match rock_host::stick::graph::PackageGraph::build(root) {
+        Ok(graph) => Some(graph),
+        Err(e) => {
+            log::warn!(
+                "bone LSP: package graph for `{}` does not build ({e}); its files read as legacy",
+                root.display()
+            );
+            None
+        }
+    }
 }
 
 /// One module's row for the `rock/modules` snapshot: its id (file path) and how
@@ -401,16 +425,16 @@ impl BoneWorkspace {
 
     fn project_mut(&mut self, root: &Path) -> &mut BoneProject {
         let is_bin = stick_is_bin(root);
-        self.projects
-            .entry(root.to_path_buf())
-            .or_insert_with(|| BoneProject {
+        self.projects.entry(root.to_path_buf()).or_insert_with(|| {
+            let graph = project_graph(root);
+            let aliases = graph
+                .as_ref()
+                .map(crate::package_aliases::from_graph)
+                .unwrap_or_default();
+            BoneProject {
                 // Warm-only session is always valid even if the first file
                 // doesn't parse; the file is added by the update_file below.
-                session: Session::new(
-                    warm_stdlib(),
-                    Vec::new(),
-                    &bone_core::modules::NsAliases::default(),
-                )
+                session: Session::new(warm_stdlib(), Vec::new(), &aliases)
                     .expect("bone session warm-init (stdlib) must succeed"),
                 texts: stdlib_texts().into_iter().collect(),
                 freq: None, hole_cache: HashMap::new(), lint_cache: Default::default(),
@@ -420,7 +444,9 @@ impl BoneWorkspace {
                 is_bin,
                 root: root.to_path_buf(),
                 module_touched: HashMap::new(),
-            })
+                graph,
+            }
+        })
     }
 
     fn project(&self, path: &str) -> Option<&BoneProject> {
@@ -492,7 +518,11 @@ impl BoneWorkspace {
         // `root` is the deepest enclosing `stick.toml` directory, or a scratch
         // file's own parent -- where there is no manifest the graph build fails
         // and the empty table is correct (a standalone source owns no package).
-        let aliases = crate::package_aliases::for_manifest_dir(&root).unwrap_or_default();
+        let graph = project_graph(&root);
+        let aliases = graph
+            .as_ref()
+            .map(crate::package_aliases::from_graph)
+            .unwrap_or_default();
         match Session::new(warm_stdlib(), files, &aliases) {
             Ok(session) => {
                 let texts: HashMap<String, String> =
@@ -513,6 +543,7 @@ impl BoneWorkspace {
                     is_bin,
                     root: root.clone(),
                     module_touched,
+                    graph,
                 };
                 prime_lint_cache(&mut project);
                 self.projects.insert(
@@ -608,6 +639,22 @@ impl BoneWorkspace {
         // change -- so rebuild only on a non-`BodyOnly` edit (or the very first
         // build), and reuse them across body keystrokes.
         let mut rebuild_type_caches = proj.reach.is_none() || proj.fn_sigs.is_none();
+        // A file the session does not hold yet (created after the batch load,
+        // or entering one by one after a failed batch) takes its dialect and
+        // package from the manifest, exactly as the batch load's files did.
+        if !proj.session.is_tracked(path) {
+            let facts = proj
+                .graph
+                .as_ref()
+                .and_then(|g| rock_host::compilation_units::source_facts(g, Path::new(path)));
+            let (package, dialect) = match facts {
+                Some((package, dialect)) => (Some(package), dialect),
+                None => (None, skull_parser::Dialect::Legacy),
+            };
+            if let Err(e) = proj.session.declare_file_facts(path, dialect, package) {
+                log::error!("bone LSP: {}", e.message);
+            }
+        }
         match proj.session.update_file(path, &text) {
             Ok(upd) => {
                 if !matches!(upd.tier, UpdateTier::BodyOnly | UpdateTier::NoChange) {

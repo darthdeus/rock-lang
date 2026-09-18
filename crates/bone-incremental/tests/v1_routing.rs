@@ -570,3 +570,32 @@ fn a_unary_operator_added_to_a_globbed_module_relowers_the_caller() {
     assert_eq!(tier, UpdateTier::Scope);
     assert!(diags.iter().any(|d| d.contains("operator `-` is not defined for `geo::Pt`")), "{diags:?}");
 }
+
+/// A file that enters after `Session::new` reads with the facts its host
+/// declared for it, and reaches the verdict a fresh session over the same
+/// files reaches. Undeclared, it would parse as a standalone legacy source.
+#[test]
+fn a_file_entering_after_new_reads_with_its_declared_facts() {
+    let extra = "mod extra;\n\npub fn more() -> int {\n    super::a::bump(2)\n}\n";
+    let mut session = Session::new(vec![], package(), &NsAliases::default()).expect("baseline builds");
+    session
+        .declare_file_facts("extra.rock", Dialect::V1, Some(PackageTag { id: 1, self_name: "livev1".into() }))
+        .expect("an unheld file takes declared facts");
+    session.update_file("extra.rock", extra).expect("a v1 fragment enters as v1");
+
+    let mut files = package();
+    files.push(v1("extra.rock", extra));
+    let fresh = Session::new(vec![], files, &NsAliases::default()).expect("fresh build");
+    assert_eq!(diagnostics(&session), diagnostics(&fresh));
+    assert_eq!(diagnostics(&session), Vec::<String>::new());
+}
+
+/// A held file's facts come from its manifest and cannot change under it.
+#[test]
+fn a_held_file_refuses_different_facts() {
+    let mut session = Session::new(vec![], package(), &NsAliases::default()).expect("baseline builds");
+    assert!(session.declare_file_facts("a.rock", Dialect::Legacy, None).is_err());
+    assert!(session
+        .declare_file_facts("a.rock", Dialect::V1, Some(PackageTag { id: 1, self_name: "livev1".into() }))
+        .is_ok());
+}

@@ -195,6 +195,22 @@ pub fn determine_compilation_unit_for_file(file_path: impl AsRef<Path>) -> Resul
     }
 }
 
+/// The owning package and dialect `graph` gives the file at the canonical
+/// `path`: what the loader stamps on every file it loads, and what a host
+/// declares for a file that enters an incremental session after its load
+/// (the editor opening a new file). `None` when no package owns the path: a
+/// standalone source, legacy and unowned.
+pub fn source_facts(
+    graph: &crate::stick::graph::PackageGraph,
+    path: &Path,
+) -> Option<(rock_core::source_code::PackageTag, rock_core::source_code::Dialect)> {
+    let node = graph.package(graph.package_of_file(path)?);
+    Some((
+        rock_core::source_code::PackageTag { id: node.id.0, self_name: node.self_name.clone() },
+        node.dialect,
+    ))
+}
+
 /// Load SourceFiles based on a compilation unit
 pub fn load_sources_for_compilation_unit(unit: &CompilationUnit) -> Result<SourceFiles> {
     match unit {
@@ -251,14 +267,10 @@ pub fn load_sources_for_compilation_unit(unit: &CompilationUnit) -> Result<Sourc
             if let Some(graph) = graph {
                 for file in &sources.files {
                     let path = file.borrow().file.to_id_path();
-                    if let Some(id) = graph.package_of_file(Path::new(&path)) {
-                        let node = graph.package(id);
+                    if let Some((package, dialect)) = source_facts(&graph, Path::new(&path)) {
                         let mut f = file.borrow_mut();
-                        f.package = Some(rock_core::source_code::PackageTag {
-                            id: node.id.0,
-                            self_name: node.self_name.clone(),
-                        });
-                        f.dialect = node.dialect;
+                        f.package = Some(package);
+                        f.dialect = dialect;
                     }
                 }
             }
