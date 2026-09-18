@@ -83,6 +83,7 @@ pub mod stone_test;
 mod test;
 mod text_utils;
 pub mod unified_compile;
+mod modules_audit;
 mod watch;
 
 pub use common::*;
@@ -329,6 +330,10 @@ pub enum CliCommand {
     DocsIndex,
     /// Check SDK support for a project manifest and its native libraries without building.
     SdkCheck,
+    /// `rock modules audit <project> [--closed] [--format pretty|json]` --
+    /// read-only modules-v1 audit of one project's package graph and analyzed
+    /// sources (spec 15.1). See `modules_audit::run`.
+    Modules,
 }
 
 impl clap::ValueEnum for CliCommand {
@@ -371,6 +376,7 @@ impl clap::ValueEnum for CliCommand {
             Self::SoundInspect,
             Self::DocsIndex,
             Self::SdkCheck,
+            Self::Modules,
         ]
     }
     fn to_possible_value(&self) -> Option<clap::builder::PossibleValue> {
@@ -431,6 +437,7 @@ impl CliCommand {
             Self::SoundInspect => "sound-inspect",
             Self::DocsIndex => "docs-index",
             Self::SdkCheck => "sdk-check",
+            Self::Modules => "modules",
         }
     }
 }
@@ -752,6 +759,9 @@ pub struct Args {
     /// `rock lint --union <lib>`: judge a library's reachability against every
     /// consumer in the repo at once, reporting only what none of them reach.
     pub union: bool,
+    /// `rock modules audit --closed`: fail unless the selected root and every
+    /// package it reaches, other than the compiler-owned std, is modules-v1.
+    pub closed: bool,
     /// Where `--union` looks for consumers. Defaults to the lib's parent, which
     /// is right when the lib sits beside its consumers (`stone/`); a nested lib
     /// (`libs/chess-core`) needs the repo root passed explicitly.
@@ -828,7 +838,7 @@ impl Args {
                 .value_parser(["stopped", "running"])
                 .help("`rock perf --gc-window` only: `stopped` isolates mutator allocation after a collection; `running` preserves the ordinary collector schedule. The mode is recorded in profiler output."))
             .arg(Arg::new("perf-format").long("format").default_value("pretty")
-                .help("Output format for `rock perf`, `rock replay-report`, or `rock replay-profile-report`: \"pretty\" (default) or \"json\"."))
+                .help("Output format for `rock perf`, `rock replay-report`, `rock replay-profile-report`, `rock sim-report`, or `rock modules audit`: \"pretty\" (default) or \"json\"."))
             .arg(Arg::new("top").long("top").default_value("20")
                 .value_parser(clap::value_parser!(usize))
                 .help("For replay reports: rank this many slow observations (default 20)."))
@@ -929,6 +939,8 @@ impl Args {
                 .help("For `rock lint --lints=method_syntax`: comma-separated type names to drop from the sweep (--ignore-types=Color,Vec2). A name that is no type in the project is reported."))
             .arg(Arg::new("union").long("union").action(ArgAction::SetTrue)
                 .help("For `rock lint <lib>`: judge a library's reachability against every consumer in the repo at once, reporting only functions that NONE of them reach. The only sound way to run unused_fn on a lib."))
+            .arg(Arg::new("closed").long("closed").action(ArgAction::SetTrue)
+                .help("For `rock modules audit`: exit non-zero if the root or any package it reaches (other than the compiler-owned std) is legacy."))
             .arg(Arg::new("consumers").long("consumers")
                 .help("For `rock lint --union`: directory to search for consumers (default: the lib's parent). Pass the repo root for a nested lib like `libs/chess-core`."))
             .arg(Arg::new("backend").long("backend")
@@ -1030,6 +1042,7 @@ impl Args {
             only_types: m.get_one::<String>("only-types").cloned(),
             ignore_types: m.get_one::<String>("ignore-types").cloned(),
             union: m.get_flag("union"),
+            closed: m.get_flag("closed"),
             consumers: m.get_one::<String>("consumers").cloned(),
             // Backend selection. An explicit `--backend` flag wins; otherwise an
             // explicit `ROCK_BACKEND` env var; otherwise the implicit default is

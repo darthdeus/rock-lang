@@ -14,6 +14,8 @@ mod allocation_jit_trace_gate;
 mod bone_incremental_timing;
 #[path = "completions_cli.rs"]
 mod completions_cli;
+#[path = "modules_audit.rs"]
+mod modules_audit;
 #[path = "modules_emit.rs"]
 mod modules_emit;
 #[path = "modules_witness.rs"]

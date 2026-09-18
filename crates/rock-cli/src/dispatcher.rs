@@ -684,6 +684,27 @@ impl CommandContext {
             println!("SDK manifest compatibility: OK");
             return Ok(());
         }
+        if self.args.command == CliCommand::Modules {
+            let usage = "usage: rock modules audit <project> [--closed] [--format pretty|json]";
+            return match self.args.files.as_slice() {
+                [sub, project] if sub == "audit" => {
+                    let format = match self.args.perf_format.as_str() {
+                        "pretty" => crate::modules_audit::Format::Pretty,
+                        "json" => crate::modules_audit::Format::Json,
+                        other => anyhow::bail!("rock modules audit: unknown --format `{other}` (pretty|json)\n{usage}"),
+                    };
+                    let code = crate::modules_audit::run(std::path::Path::new(project), self.args.closed, format)?;
+                    if code != 0 {
+                        std::process::exit(code);
+                    }
+                    Ok(())
+                }
+                [sub, ..] if sub != "audit" => {
+                    anyhow::bail!("rock modules: unknown subcommand `{sub}`; only `audit` exists\n{usage}")
+                }
+                _ => anyhow::bail!("{usage}"),
+            };
+        }
         if self.args.command == CliCommand::DocsIndex {
             return crate::docs_index::run(&self.args.files, self.args.output.as_deref());
         }
