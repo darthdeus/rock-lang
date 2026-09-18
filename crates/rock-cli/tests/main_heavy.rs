@@ -19,6 +19,8 @@ mod replay_flight_tests;
 mod artifact_fingerprint_replay_tests;
 #[path = "replay_bindings_tests.rs"]
 mod replay_bindings_tests;
+#[path = "telemetry_isolation_tests.rs"]
+mod telemetry_isolation_tests;
 #[path = "action_layer_v2_landing_gaps.rs"]
 mod action_layer_v2_landing_gaps;
 #[path = "replay_restore_tests.rs"]
