@@ -179,6 +179,8 @@ mod nobox_arena_random_sentinel;
 mod nobox_column_threshold;
 #[path = "nobox_wide_strided.rs"]
 mod nobox_wide_strided;
+#[path = "nobox_materialize_gc_tier_sentinel.rs"]
+mod nobox_materialize_gc_tier_sentinel;
 #[path = "wide_value_slot_budget.rs"]
 mod wide_value_slot_budget;
 #[path = "nobox_fn_value_nullable_return_sentinel.rs"]
