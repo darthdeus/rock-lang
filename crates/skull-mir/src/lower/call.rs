@@ -553,10 +553,10 @@ impl Builder<'_> {
         if let Callee::Unresolved { name, .. } = callee {
             if !any_named {
                 if let Some(&recv_expr) = arg_idxs.first() {
-                    if self.struct_field_is_fn(recv_expr, name) {
+                    if let Some(field) = self.fn_field_of_call(recv_expr, name) {
                         let arg_vals: Vec<Idx<Inst>> =
                             arg_idxs.iter().map(|&a| self.lower_expr(a)).collect::<Result<_, _>>()?;
-                        let fieldv = self.emit_cur(Inst::Field { base: arg_vals[0], field: name });
+                        let fieldv = self.emit_cur(Inst::Field { base: arg_vals[0], field });
                         let v = self.emit_call_value(e, fieldv, arg_vals[1..].to_vec())?;
                         return Ok(ValueRepr::Scalar(v));
                     }

@@ -1020,6 +1020,7 @@ pub(crate) fn resolve_named_call_with_generics(
     let err_span = e.labels.first().map(|l| l.span);
     let about_receiver = err_span == Some(span) || (recv_span.is_some() && err_span == recv_span);
     if about_receiver {
+        let name = written_method_name(c, recv_override, args, call_expr).unwrap_or(name);
         if let Ok(fty) = struct_field_ty(gamma, recv_ty, name, span) {
             let fty = resolve(gamma, fty, span);
             if !matches!(gamma.get(fty), TypeExpr::Function { .. }) {
@@ -1108,6 +1109,23 @@ pub(crate) fn eq_compared_generic_indices(
     out
 }
 
+/// The method name as written at a method-syntax call: the receiver is
+/// `args[0]` for `recv.name(..)` and the `SafeNavCall` receiver for
+/// `recv?.name(..)`. `None` for a call written by name.
+fn written_method_name(
+    c: BodyCtx,
+    recv_override: Option<TyId>,
+    args: IdxRange<Expr>,
+    call_expr: Idx<Expr>,
+) -> Option<Ustr> {
+    let receiver = match (recv_override, &c.body.expr_arena[call_expr]) {
+        (Some(_), Expr::SafeNavCall { receiver, .. }) => *receiver,
+        (None, _) if !args.is_empty() && c.body.method_call_recvs.contains(&args.start()) => args.start(),
+        _ => return None,
+    };
+    c.body.method_names.get(&receiver).copied()
+}
+
 pub(crate) fn resolve_named_call_inner(
     gamma: &mut Gamma,
     c: BodyCtx,
@@ -1146,7 +1164,8 @@ pub(crate) fn resolve_named_call_inner(
     };
 
     if let Some(recv_ty) = method_recv {
-        if let Ok(field_ty) = struct_field_ty(gamma, recv_ty, name, span) {
+        let field = written_method_name(c, recv_override, args, call_expr).unwrap_or(name);
+        if let Ok(field_ty) = struct_field_ty(gamma, recv_ty, field, span) {
             let field_ty = resolve(gamma, field_ty, span);
 
             if matches!(gamma.get(field_ty), TypeExpr::Function { .. }) {

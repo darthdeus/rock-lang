@@ -591,3 +591,49 @@ fn main() {
     );
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// Spec 8.4 keeps the field-call precedence: `a.stop()` calls a fn-typed
+/// field `stop` even when a same-named function is in scope, and with no such
+/// function at all. v1 used to reject the second (`stop` did not resolve to
+/// any definition) and silently call the free function in the first, because
+/// both inference and MIR looked the field up by the callee's DefKey. Found by
+/// migrating `libs/fm-core`.
+#[test]
+fn v1_method_syntax_calls_a_fn_typed_field_first() {
+    let root = std::env::temp_dir().join("rock_modules_emit_v1_field_call");
+    let _ = std::fs::remove_dir_all(&root);
+    let app = root.join("app");
+    v1_app(
+        &app,
+        &[],
+        r#"struct Api {
+    stop: fn() -> int,
+    go: fn(int) -> int,
+}
+
+fn stop(a: Api) -> int {
+    100
+}
+
+fn call_both(a: Api) -> int {
+    a.stop() + a.go(1)
+}
+
+fn maybe(a: Api?) -> int {
+    a?.stop() ?? -1
+}
+
+fn main() {
+    let a = Api { stop: () => 7, go: (n) => n + 20 }
+    print("both={call_both(a)} free={stop(a)} nav={maybe(a)} none={maybe(null)}")
+}
+"#,
+    );
+    let (stdout, stderr, ok) = run(&app);
+    assert!(ok, "v1 field-call project failed\nstdout:\n{stdout}\nstderr:\n{stderr}");
+    assert!(
+        stdout.contains("both=28 free=100 nav=7 none=-1"),
+        "a method call must reach the fn-typed field, the free fn only by name\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}

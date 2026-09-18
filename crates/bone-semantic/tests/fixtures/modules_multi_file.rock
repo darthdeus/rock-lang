@@ -1082,3 +1082,60 @@ pub mod a::b;
 pub(in a) fn f() -> int {
     1
 }
+
+//- a_method_call_reaches_a_fn_typed_field
+//-- app.rock @pkg=app,1 @v1
+struct Api {
+    stop: fn() -> int,
+}
+
+// Spec 8.4 keeps the field-call precedence: no tier binds `stop`, and the
+// call is the field's function, exactly as in legacy.
+fn run(a: Api) -> int {
+    let n = a.stop()
+    let m = n
+            //^ int
+    m
+}
+
+//- a_method_call_with_no_field_and_no_function_still_rejects @fail=stop
+//-- app.rock @pkg=app,1 @v1
+struct Api {
+    go: fn() -> int,
+}
+
+fn run(a: Api) -> int {
+    a.stop()
+}
+
+//- a_safe_nav_method_call_reaches_a_fn_typed_field
+//-- app.rock @pkg=app,1 @v1
+struct Api {
+    stop: fn() -> int,
+}
+
+fn run(a: Api?) -> int {
+    let n = a?.stop()
+    let m = n ?? 0
+            //^ int
+    m
+}
+
+//- a_fn_typed_field_wins_over_a_same_named_function
+//-- app.rock @pkg=app,1 @v1
+struct Api {
+    stop: fn() -> int,
+}
+
+fn stop(a: Api) -> string {
+    "free"
+}
+
+// Legacy calls the field here; so must v1 (spec 8.4). The free fn returns
+// string, so the marker catches a rebinding.
+fn run(a: Api) -> int {
+    let n = a.stop()
+    let m = n
+            //^ int
+    m
+}

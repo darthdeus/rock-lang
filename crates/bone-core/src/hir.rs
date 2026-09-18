@@ -200,6 +200,11 @@ pub struct Body {
     // TODO: make this IdxMap instead and A/B benchmark?
     pub arg_names: FxHashMap<Idx<Expr>, Ustr>,
     pub method_call_recvs: FxHashSet<Idx<Expr>>,
+    /// The method name as written at `recv.name(..)` / `recv?.name(..)`,
+    /// keyed by the receiver expr. A fn-typed FIELD of that name wins over the
+    /// callee family (spec 8.4), and in v1 the family's key is a DefKey or an
+    /// alias target, not the written name.
+    pub method_names: FxHashMap<Idx<Expr>, Ustr>,
     /// Call args written as a struct spread `..op` (keyed by the operand's expr
     /// Idx). The operand's fields expand into named args at this position;
     /// resolved in bone-inference, codegen'd in skull-mir. Never also in
@@ -256,6 +261,7 @@ impl Default for Body {
 
             arg_names: Default::default(),
             method_call_recvs: Default::default(),
+            method_names: Default::default(),
             spread_args: Default::default(),
 
             root: Default::default(),

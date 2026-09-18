@@ -348,6 +348,15 @@ impl Builder<'_> {
         )
     }
 
+    /// The fn-typed field a call with first argument `recv` goes through, if
+    /// any. The field is named as the method was WRITTEN (`Body::
+    /// method_names`): a v1 callee's name is a DefKey or an alias target,
+    /// never the field. A call written by name keeps its callee name.
+    pub(crate) fn fn_field_of_call(&self, recv: Idx<Expr>, callee: Ustr) -> Option<Ustr> {
+        let field = self.body.method_names.get(&recv).copied().unwrap_or(callee);
+        self.struct_field_is_fn(recv, field).then_some(field)
+    }
+
     /// Whether `recv`'s static type is a struct with a fn-typed field named
     /// `field` — recovers a `recv.field(args)` UFCS call that bone left as an
     /// unresolved call `field` (it's really an indirect call through the field).

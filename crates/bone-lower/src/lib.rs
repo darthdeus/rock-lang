@@ -201,6 +201,18 @@ impl<'a> LowerCtx<'a> {
     /// tier binds is a family with no members rather than an error: the
     /// operand may be a scalar, which never consults it.
     fn resolve_unary_family(&mut self, name: Ustr, span: Span) -> Result<hir::CallFamily, CompilerError> {
+        Ok(self.resolve_optional_family(name, span)?.1)
+    }
+
+    /// The family of `recv.name(..)`. In v1 a name no tier binds is a family
+    /// with no members rather than an error: a fn-typed field `name` on the
+    /// receiver is called first (spec 8.4 keeps that precedence), and
+    /// inference reports the call when there is neither.
+    fn resolve_method_family(&mut self, name: Ustr, span: Span) -> Result<(Ustr, hir::CallFamily), CompilerError> {
+        self.resolve_optional_family(name, span)
+    }
+
+    fn resolve_optional_family(&mut self, name: Ustr, span: Span) -> Result<(Ustr, hir::CallFamily), CompilerError> {
         let file = self.module.file;
         let resolved = match self.v1_scope() {
             Some(frag) => self.probed(|| resolve::resolve_v1_unary(self.workspace, frag, name)),
@@ -211,7 +223,7 @@ impl<'a> LowerCtx<'a> {
         }
         .map_err(|msg| CompilerError::new_with_label(span, msg))?;
         let resolved = resolved.unwrap_or(resolve::CalleeFamily::Merged { keys: Vec::new(), hidden: Vec::new() });
-        Ok(self.record_family(name, resolved).1)
+        Ok(self.record_family(name, resolved))
     }
 
     /// The spelling and `CallFamily` of a resolved callee; a merged family's
@@ -1262,11 +1274,12 @@ pub fn lower_expr_value(
                 }
 
                 body.method_call_recvs.insert(args_range.start());
+                body.method_names.insert(args_range.start(), method.name);
 
                 // UFCS and the bare call share one visible family: in a v1
                 // fragment the method name goes through the same tier
                 // resolution as `method(recv, ..)` would (spec 8.4).
-                let (callee_key, family) = ctx.resolve_callee_family(method.name, method.span)?;
+                let (callee_key, family) = ctx.resolve_method_family(method.name, method.span)?;
                 Expr::Call {
                     callee: Callee::Unresolved {
                         name: callee_key,
@@ -1351,7 +1364,8 @@ pub fn lower_expr_value(
                     }
                 }
 
-                let (callee_key, family) = ctx.resolve_callee_family(method.name, method.span)?;
+                body.method_names.insert(receiver, method.name);
+                let (callee_key, family) = ctx.resolve_method_family(method.name, method.span)?;
                 Expr::SafeNavCall {
                     receiver,
                     method: callee_key,

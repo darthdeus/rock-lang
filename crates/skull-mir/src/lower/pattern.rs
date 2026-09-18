@@ -884,7 +884,7 @@ impl Builder<'_> {
         if !any_named
             && arg_idxs
                 .first()
-                .is_some_and(|&recv| self.struct_field_is_fn(recv, name))
+                .is_some_and(|&recv| self.fn_field_of_call(recv, name).is_some())
         {
             return Ok(None);
         }

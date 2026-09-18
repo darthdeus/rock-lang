@@ -1172,10 +1172,10 @@ impl Builder<'_> {
         args: IdxRange<Expr>,
         recv: Idx<Inst>,
     ) -> Result<ValueBundle, CompilerError> {
-        let value = if self.struct_field_is_fn(receiver, method) {
+        let value = if let Some(field) = self.fn_field_of_call(receiver, method) {
             // `recv?.field(args)` on a fn-typed FIELD: nil-guarded indirect call
             // `(recv.field)(args)` — the field IS the callee, no receiver arg.
-            let fieldv = self.emit_cur(Inst::Field { base: recv, field: method });
+            let fieldv = self.emit_cur(Inst::Field { base: recv, field });
             let mut argv = Vec::new();
             for a in args {
                 argv.push(self.lower_expr(a)?);
