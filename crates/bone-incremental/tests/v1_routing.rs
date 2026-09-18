@@ -111,6 +111,43 @@ fn a_signature_edit_that_exports_a_private_type_is_refused() {
     assert!(err.message.contains(expected), "{}", err.message);
 }
 
+/// SENTINEL (docs/test-sentinels.md). A legacy file defines `bump(n)` and a v1
+/// package projects `bump(n, m)` to legacy files by the same bare name. A
+/// fresh session resolves a legacy `bump(1)` to the projection (and reports
+/// the missing `m`); after a body-only edit of the caller the session resolves
+/// it to the legacy-owned `bump` and reports nothing. Legacy `resolve_bare`
+/// checks `ws.functions_by_name` first, which is empty while a fresh build
+/// lowers bodies and populated during an incremental re-lower, so the winner
+/// depends on lowering order. Which one should win is an open AUTHOR
+/// DECISION (legacy-owned vs projected name of the same spelling). When the
+/// fix lands this fails: flip it to assert the incremental and fresh
+/// diagnostics are equal.
+#[test]
+fn sentinel_legacy_resolution_of_a_projected_name_depends_on_lowering_order() {
+    let a = "mod a;\n\npub fn bump(n: int, m: int) -> int {\n    n\n}\n";
+    let root = "pub use a::bump;\n";
+    let def = "fn bump(n: int) -> int {\n    n\n}\n";
+    let edit = "fn use_it() -> int {\n    bump(2)\n}\n";
+    let files = |use_text: &str| {
+        vec![
+            v1("a.rock", a),
+            v1("root.rock", root),
+            SessionFile::legacy("legacy_def.rock", def),
+            SessionFile::legacy("legacy_use.rock", use_text),
+        ]
+    };
+    let mut session = Session::new(vec![], files("fn use_it() -> int {\n    bump(1)\n}\n"), &NsAliases::default())
+        .expect("baseline builds");
+    session.update_file("legacy_use.rock", edit).expect("a body edit is accepted");
+    let fresh = Session::new(vec![], files(edit), &NsAliases::default()).expect("fresh build");
+
+    assert!(diagnostics(&session).is_empty(), "PINNED BUG: incremental resolves to the legacy-owned bump");
+    assert!(
+        diagnostics(&fresh).iter().any(|d| d.contains("Missing required argument for parameter `m`")),
+        "PINNED BUG: fresh resolves to the projected bump; if this changed, the fix landed -- flip the sentinel"
+    );
+}
+
 /// A legacy file contributes no definitions to the namespace tree, so adding
 /// one stays on the interface path it always took.
 #[test]
