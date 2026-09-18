@@ -1828,7 +1828,7 @@ fn flatten_use_tree(
         (Some(local), true) => share_export(ws, pkg_id, path, Some(local), target, decl, errs),
         (None, true) => share_export(ws, pkg_id, path, None, target, decl, errs),
         (Some(local), false) => {
-            scope.named.insert(local, target);
+            scope.named.entry(local).or_default().push(target);
         }
         (None, false) => scope.globs.push(target),
     }

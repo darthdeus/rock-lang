@@ -183,10 +183,11 @@ pub struct FragmentScope {
     pub package: PackageId,
     pub package_name: Ustr,
     pub module_path: ModulePath,
-    /// Plain `use` bindings local to this fragment: local name -> the
-    /// (unresolved) use path. Resolution is lazy so declaration order never
-    /// matters; pure cycles diagnose at use.
-    pub named: FxHashMap<Ustr, UsePathRef>,
+    /// Plain `use` bindings local to this fragment: local name -> every
+    /// (unresolved) use path bound under it, in source order. Resolution is
+    /// lazy so declaration order never matters; pure cycles diagnose at use,
+    /// and several paths compose or conflict there (spec 8.3).
+    pub named: FxHashMap<Ustr, Vec<UsePathRef>>,
     /// Module scopes this fragment globs (`use a::b::*;`), unresolved.
     pub globs: Vec<UsePathRef>,
 }
@@ -308,8 +309,12 @@ pub fn legacy_name(ws: &crate::workspace::Workspace, file: Ustr, name: Ustr) -> 
     let imports = ws.legacy_imports.get(&file);
     // An explicit named import wins in its file (spec 3.2: explicit
     // compatibility imports shadow the root projection, and they are how a
-    // legacy file resolves a collision).
+    // legacy file resolves a collision). Named imports of several callables
+    // compose into one family of those imports alone (spec 8.3).
     if let Some(entries) = imports.and_then(|i| i.named.by_name.get(&name)) {
+        if entries.len() > 1 && entries.iter().all(|e| e.kind == DefKind::Callable) {
+            return LegacyName::Family(entries.iter().map(|e| e.key).collect());
+        }
         return LegacyName::Projected(entries.clone());
     }
     let Some(entries) = imports

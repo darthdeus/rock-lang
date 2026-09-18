@@ -186,7 +186,9 @@ fn legacy_resolved_kind(kind: bone_core::modules::DefKind) -> ResolvedKind {
 /// Resolve a bare name in a v1 fragment through the tier policy. Legacy
 /// files (no fragment scope) return the bare name unchanged.
 /// The first tier that binds the name decides; a bound-but-broken target
-/// is a diagnostic, never a fallthrough (spec 8.3).
+/// is a diagnostic, never a fallthrough (spec 8.3). Several explicit imports
+/// of one name are one definition only in callee position
+/// (`resolve_v1_callee`); anywhere else they are a diagnostic.
 pub fn resolve_bare(
     ws: &Workspace,
     frag: Option<&FragmentScope>,
@@ -195,19 +197,29 @@ pub fn resolve_bare(
     let Some(frag) = frag else {
         return Ok(plain(name));
     };
-    bind_bare(ws, frag, name).map(|(resolved, _)| resolved)
+    match bind_bare(ws, frag, name)? {
+        Bound::One(resolved, _) => Ok(resolved),
+        Bound::Imports(hits, _) => Err(several_imports(name, &hits)),
+    }
 }
 
-/// A bare name in callee position in a v1 fragment (spec 8.5). A declared,
-/// imported or globbed operator keeps the std prelude's operator family
-/// beside it, so a module's own `operator +` does not hide built-in
-/// arithmetic.
+/// A bare name in callee position in a v1 fragment (spec 8.3, 8.5). Explicit
+/// imports of different callables compose into one family; a composition
+/// that is not all callables is a diagnostic. A declared, imported or
+/// globbed operator keeps the std prelude's operator family beside it, so a
+/// module's own `operator +` does not hide built-in arithmetic.
 pub fn resolve_v1_callee(ws: &Workspace, frag: &FragmentScope, name: Ustr) -> Result<CalleeFamily, String> {
     let operator = bone_core::hir::operator_entry(name.as_str()).is_some_and(|(_, overloadable)| overloadable);
     let (mut keys, hidden) = match bind_bare(ws, frag, name)? {
-        (resolved, Tier::Std) => return Ok(CalleeFamily::Single(resolved)),
-        (resolved, Tier::Scope) if !operator => return Ok(CalleeFamily::Single(resolved)),
-        (resolved, Tier::Scope) => (vec![resolved.key], resolved.hidden),
+        Bound::One(resolved, Tier::Std) => return Ok(CalleeFamily::Single(resolved)),
+        Bound::One(resolved, Tier::Scope) if !operator => return Ok(CalleeFamily::Single(resolved)),
+        Bound::One(resolved, Tier::Scope) => (vec![resolved.key], resolved.hidden),
+        Bound::Imports(hits, hidden) => {
+            if hits.iter().any(|(_, kind)| *kind != ResolvedKind::Callable) {
+                return Err(several_imports(name, &hits));
+            }
+            (hits.into_iter().map(|(key, _)| key).collect(), hidden)
+        }
     };
     if operator {
         if let Some((key, bone_core::modules::DefKind::Callable)) = ws.ns.std_definition(name) {
@@ -230,10 +242,17 @@ enum Tier {
     Std,
 }
 
-/// What the tiers bind a bare name to in a v1 fragment, and which tier.
-fn bind_bare(ws: &Workspace, frag: &FragmentScope, name: Ustr) -> Result<(Resolved, Tier), String> {
+/// What the tiers bind a bare name to in a v1 fragment.
+enum Bound {
+    One(Resolved, Tier),
+    /// Explicit imports of several distinct definitions, sorted by key, and
+    /// the glob candidates they hide.
+    Imports(Vec<(Ustr, ResolvedKind)>, Vec<Ustr>),
+}
+
+fn bind_bare(ws: &Workspace, frag: &FragmentScope, name: Ustr) -> Result<Bound, String> {
     if ws.ns.package(frag.package).is_none() {
-        return std_bare(ws, name).map(|r| (r, Tier::Std));
+        return std_bare(ws, name).map(|r| Bound::One(r, Tier::Std));
     }
     let viewers = [Viewer::Fragment(frag)];
     let glob_hits = glob_candidates(ws, frag, name)?;
@@ -245,17 +264,27 @@ fn bind_bare(ws: &Workspace, frag: &FragmentScope, name: Ustr) -> Result<(Resolv
         let not_found = || format!("`{name}` did not resolve to any definition");
         let (key, kind) = collapse(own, name, not_found, "definitions")?;
         let hidden: Vec<Ustr> = glob_hits.iter().map(|(k, _)| *k).collect();
-        return Ok((Resolved { key, kind, hidden }, Tier::Scope));
+        return Ok(Bound::One(Resolved { key, kind, hidden }, Tier::Scope));
     }
 
     // Tier 3: the fragment's explicit imports. A bound name does not fall
-    // through, even if the target is missing or a module.
-    if let Some(target) = frag.named.get(&name) {
+    // through, even if a target is missing or a module. Several routes to
+    // one definition are that definition once.
+    if let Some(targets) = frag.named.get(&name) {
         let hidden: Vec<Ustr> = glob_hits.iter().map(|(k, _)| *k).collect();
-        return match walk_path(ws, frag, &[], target, WalkMode::Definition, &mut Vec::new())? {
-            Landing::Def(resolved) => Ok((Resolved { key: resolved.key, kind: resolved.kind, hidden }, Tier::Scope)),
-            Landing::Module(..) => Err(format!("`{name}` names a module, not a definition")),
-        };
+        let mut hits: Vec<(Ustr, ResolvedKind)> = Vec::new();
+        for target in targets {
+            match walk_path(ws, frag, &[], target, WalkMode::Definition, &mut Vec::new())? {
+                Landing::Def(resolved) => hits.push((resolved.key, resolved.kind)),
+                Landing::Module(..) => return Err(format!("`{name}` names a module, not a definition")),
+            }
+        }
+        hits.sort_by_key(|(k, _)| k.as_str().to_string());
+        hits.dedup_by_key(|(k, _)| *k);
+        return Ok(match hits[..] {
+            [(key, kind)] => Bound::One(Resolved { key, kind, hidden }, Tier::Scope),
+            _ => Bound::Imports(hits, hidden),
+        });
     }
 
     // Tier 4: glob bindings. Ambiguous globs diagnose rather than picking
@@ -268,12 +297,24 @@ fn bind_bare(ws: &Workspace, frag: &FragmentScope, name: Ustr) -> Result<(Resolv
             ));
         }
         let (key, kind) = glob_hits[0];
-        return Ok((Resolved { key, kind, hidden: Vec::new() }, Tier::Scope));
+        return Ok(Bound::One(Resolved { key, kind, hidden: Vec::new() }, Tier::Scope));
     }
 
     // Tier 5: the compiler-owned std export view. There is no legacy
     // workspace-map fall-through for v1 names.
-    std_bare(ws, name).map(|r| (r, Tier::Std))
+    std_bare(ws, name).map(|r| Bound::One(r, Tier::Std))
+}
+
+/// Several explicit imports of `name` where one definition is wanted: a
+/// composed callable family used as a value, or definitions that cannot
+/// compose (spec 8.3).
+fn several_imports(name: Ustr, hits: &[(Ustr, ResolvedKind)]) -> String {
+    let keys = hits.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>().join(", ");
+    if hits.iter().all(|(_, kind)| *kind == ResolvedKind::Callable) {
+        format!("`{name}` names an overload family of several imports ({keys}), not a single definition")
+    } else {
+        format!("`{name}` is imported from several definitions that do not form one overload family: {keys}")
+    }
 }
 
 fn std_bare(ws: &Workspace, name: Ustr) -> Result<Resolved, String> {

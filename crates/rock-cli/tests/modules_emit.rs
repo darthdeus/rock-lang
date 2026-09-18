@@ -268,9 +268,6 @@ fn legacy_operator_syntax_runs_a_projected_v1_operator_body() {
         "[package]\nname = \"provider\"\ntype = \"lib\"\n\n[language]\nmodules = \"v1\"\n",
     )
     .unwrap();
-    // The operator body adds through a helper module: in the module that
-    // declares `operator +`, a v1 `int + int` currently resolves to that
-    // operator alone.
     std::fs::write(
         provider.join("lib.rock"),
         "pub struct Pt {\n    pub x: int,\n    pub y: int,\n}\n\n\
@@ -407,6 +404,38 @@ fn main() {
     assert!(
         stdout.contains("p=214,26 h=101,1 n=7 f=3.5"),
         "v1 operator syntax should run the declared body and keep built-in arithmetic\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// `use provider::pick; use other::pick;` in a v1 file compose into one
+/// overload family (spec 8.3); each call runs the member its argument type
+/// selects (the `+ 1000` and the `!` mark them), through the bare call and
+/// UFCS alike.
+#[test]
+fn v1_explicit_imports_compose_and_run_the_selected_member() {
+    let root = std::env::temp_dir().join("rock_modules_emit_v1_composed_imports");
+    let _ = std::fs::remove_dir_all(&root);
+    v1_lib(&root.join("provider"), "provider", "pub fn pick(n: int) -> int {\n    n + 1000\n}\n");
+    v1_lib(&root.join("other"), "other", "pub fn pick(s: string) -> string {\n    s + \"!\"\n}\n");
+    let app = root.join("app");
+    v1_app(
+        &app,
+        &["provider", "other"],
+        r#"use provider::pick;
+use other::pick;
+
+fn main() {
+    let u = "u".pick()
+    print("i={pick(1)} s={pick("s")} u={u}")
+}
+"#,
+    );
+    let (stdout, stderr, ok) = run(&app);
+    assert!(ok, "v1 composed import project failed\nstdout:\n{stdout}\nstderr:\n{stderr}");
+    assert!(
+        stdout.contains("i=1001 s=s! u=u!"),
+        "composed imports should run the member each argument selects\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
     let _ = std::fs::remove_dir_all(&root);
 }

@@ -29,7 +29,17 @@ fn diagnostics(session: &Session) -> Vec<String> {
 /// diagnostics against a fresh session over the edited texts, and return the
 /// tier and those diagnostics.
 fn edit_with_diagnostics(files: Vec<SessionFile>, path: &str, edit: &str) -> (UpdateTier, Vec<String>) {
-    let mut session = Session::new(vec![], files.clone(), &NsAliases::default()).expect("baseline builds");
+    edit_with_aliases(files, path, edit, &NsAliases::default())
+}
+
+/// `edit_with_diagnostics` under an explicit package alias table.
+fn edit_with_aliases(
+    files: Vec<SessionFile>,
+    path: &str,
+    edit: &str,
+    aliases: &NsAliases,
+) -> (UpdateTier, Vec<String>) {
+    let mut session = Session::new(vec![], files.clone(), aliases).expect("baseline builds");
     let tier = session.update_file(path, edit).expect("the edit is accepted").tier;
 
     let edited: Vec<SessionFile> = files
@@ -41,7 +51,7 @@ fn edit_with_diagnostics(files: Vec<SessionFile>, path: &str, edit: &str) -> (Up
             f
         })
         .collect();
-    let fresh = Session::new(vec![], edited, &NsAliases::default()).expect("fresh build");
+    let fresh = Session::new(vec![], edited, aliases).expect("fresh build");
     let diags = diagnostics(&session);
     assert_eq!(diags, diagnostics(&fresh), "incremental and fresh disagree");
     (tier, diags)
@@ -377,4 +387,96 @@ fn legacy_operator_syntax_merges_a_projected_operator_across_edits() {
 
     let (_, diags) = edit_with_diagnostics(files(with, edit), "legacy_def.rock", without);
     assert!(diags.is_empty(), "{diags:?}");
+}
+
+/// Every package of `files` names every other by its self name.
+fn aliases_of(files: &[SessionFile]) -> NsAliases {
+    let mut packages: Vec<(u32, String)> =
+        files.iter().filter_map(|f| f.package.as_ref().map(|p| (p.id, p.self_name.clone()))).collect();
+    packages.sort();
+    packages.dedup();
+    NsAliases {
+        packages: packages
+            .iter()
+            .map(|(id, name)| bone_core::modules::PackageAliases {
+                id: *id,
+                self_name: name.as_str().into(),
+                aliases: packages
+                    .iter()
+                    .filter(|(other, _)| other != id)
+                    .map(|(other, other_name)| (other_name.as_str().into(), *other))
+                    .collect(),
+            })
+            .collect(),
+    }
+}
+
+fn in_package(dialect: Dialect, package: u32, name: &str, path: &str, text: &str) -> SessionFile {
+    SessionFile {
+        path: path.into(),
+        text: text.into(),
+        dialect,
+        package: Some(PackageTag { id: package, self_name: name.into() }),
+    }
+}
+
+const IMPORT_A: &str = "use lib_a::pick;\n\n";
+const IMPORT_BOTH: &str = "use lib_a::pick;\nuse lib_b::pick;\n\n";
+
+/// Explicit imports of two different callables under one name compose into
+/// one family (spec 8.3), in a v1 and in a legacy file alike. Adding the
+/// second import composes it (a `use` edit: full rebuild); removing it
+/// splits the family again, and `pick("v1")` no longer has a member. Each
+/// edit agrees with a fresh session.
+#[test]
+fn a_second_explicit_import_composes_and_removing_it_splits_the_family() {
+    for dialect in [Dialect::V1, Dialect::Legacy] {
+        let files = |imports: &str| {
+            vec![
+                v1_in(1, "lib_a", "a.rock", PICK_INT),
+                v1_in(2, "lib_b", "b.rock", PICK_STRING),
+                in_package(dialect, 3, "game", "use.rock", &format!("{imports}{PICK_USE}")),
+            ]
+        };
+        let aliases = aliases_of(&files(""));
+        let both = format!("{IMPORT_BOTH}{PICK_USE}");
+        let one = format!("{IMPORT_A}{PICK_USE}");
+
+        let (tier, diags) = edit_with_aliases(files(IMPORT_A), "use.rock", &both, &aliases);
+        assert_eq!(tier, UpdateTier::FullUser, "{dialect:?}");
+        assert!(diags.is_empty(), "{dialect:?}: {diags:?}");
+
+        let (tier, diags) = edit_with_aliases(files(IMPORT_BOTH), "use.rock", &one, &aliases);
+        assert_eq!(tier, UpdateTier::FullUser, "{dialect:?}");
+        assert!(diags.iter().any(|d| d.contains("type mismatch")), "{dialect:?}: {diags:?}");
+    }
+}
+
+/// A member of a composed import family narrowed to the other member's
+/// signature ties the call, naming both origins, and widening it back clears
+/// the tie -- on the interface path, as a fresh session decides.
+#[test]
+fn a_member_signature_edit_ties_a_composed_import_family() {
+    const TIED_PICK: &str = "Ambiguous overload for `pick` with argument types (string)\n\
+         tied candidates (equally-ranked matches):\n  \
+         lib_a::pick(s: string) -> string (v1 definition lib_a::pick)\n  \
+         lib_b::pick(s: string) -> string (v1 definition lib_b::pick)";
+    for dialect in [Dialect::V1, Dialect::Legacy] {
+        let files = |b: &str| {
+            vec![
+                v1_in(1, "lib_a", "a.rock", PICK_STRING),
+                v1_in(2, "lib_b", "b.rock", b),
+                in_package(dialect, 3, "game", "use.rock", &format!("{IMPORT_BOTH}{PICK_USE}")),
+            ]
+        };
+        let aliases = aliases_of(&files(PICK_INT));
+
+        let (tier, diags) = edit_with_aliases(files(PICK_INT), "b.rock", PICK_STRING, &aliases);
+        assert_eq!(tier, UpdateTier::Interface, "{dialect:?}");
+        assert!(diags.iter().any(|d| d.contains(TIED_PICK)), "{dialect:?}: {diags:?}");
+
+        let (tier, diags) = edit_with_aliases(files(PICK_STRING), "b.rock", PICK_INT, &aliases);
+        assert_eq!(tier, UpdateTier::Interface, "{dialect:?}");
+        assert!(diags.is_empty(), "{dialect:?}: {diags:?}");
+    }
 }
