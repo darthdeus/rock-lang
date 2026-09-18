@@ -2991,6 +2991,68 @@ fn always_inlinable(inst: &Inst) -> bool {
     )
 }
 
+/// Cells written exactly once in `scope`, as a multi-return destination, and
+/// read only after that call in the same block. A load of one is the call's
+/// result local itself, like a parameter load: without this every leaf of a
+/// wide value returned by a call occupied two locals (the result and a copy),
+/// which is what pushed functions holding a few wide values past LuaJIT's
+/// 250-slot frame limit. No later write can intervene, because the one write
+/// dominates every read.
+fn single_receive_cells(func: &MirFunc, scope: &[Idx<Block>]) -> HashSet<Idx<Cell>> {
+    // cell -> (defs, the receiving call's block and position)
+    let mut defs: rustc_hash::FxHashMap<Idx<Cell>, (u32, Option<(Idx<Block>, usize)>)> =
+        rustc_hash::FxHashMap::default();
+    for &b in scope {
+        for (pos, &id) in func.blocks[b].insts.iter().enumerate() {
+            match &func.insts[id] {
+                Inst::CallMulti { dests, .. } | Inst::CallValueMulti { dests, .. } => {
+                    for cell in dests {
+                        let entry = defs.entry(*cell).or_insert((0, None));
+                        entry.0 += 1;
+                        entry.1 = Some((b, pos));
+                    }
+                }
+                // A placeholder the bound substitution replaces; never a receive.
+                Inst::CallBoundMulti { dests, .. } => {
+                    for cell in dests {
+                        defs.entry(*cell).or_insert((0, None)).0 += 2;
+                    }
+                }
+                other => regalloc::cell_defs(other, &mut |cell| {
+                    defs.entry(cell).or_insert((0, None)).0 += 1;
+                }),
+            }
+        }
+    }
+    let pinned = regalloc::pinned_cells(func);
+    let captured = |cell: Idx<Cell>| {
+        func.closure_env_plans
+            .values()
+            .any(|plan| plan.captures_cell(cell) || plan.env_cell() == Some(cell))
+    };
+    let mut out: HashSet<Idx<Cell>> = defs
+        .iter()
+        .filter(|(cell, (count, at))| {
+            *count == 1 && at.is_some() && !pinned[raw(**cell) as usize] && !captured(**cell)
+        })
+        .map(|(cell, _)| *cell)
+        .collect();
+    for &b in scope {
+        for (pos, &id) in func.blocks[b].insts.iter().enumerate() {
+            regalloc::cell_uses(&func.insts[id], &mut |cell| {
+                if !out.contains(&cell) {
+                    return;
+                }
+                let Some((_, Some((def_block, def_pos)))) = defs.get(&cell) else { return };
+                if *def_block != b || *def_pos >= pos || !matches!(func.insts[id], Inst::Load(_)) {
+                    out.remove(&cell);
+                }
+            });
+        }
+    }
+    out
+}
+
 /// The set of values to TREE-FOLD into their use site (no `local rN`). Pure
 /// expressions qualify at one same-block use. Loads of parameters never written
 /// in this scope qualify at every use: the Lua parameter is already their value.
@@ -3041,14 +3103,17 @@ fn compute_inlinable(func: &MirFunc, scope: &[Idx<Block>], params: &[Idx<Cell>])
             use_block[k] = br;
         });
     }
+    let received = single_receive_cells(func, scope);
     // Dense `raw(inst) -> bool` (no hashing); probed per operand in `write_opnd`
     // and per use in `color_values`'s liveness/interference loops.
     let mut inl = vec![false; ni];
     for &b in scope {
         for &id in &func.blocks[b].insts {
             let k = raw(id) as usize;
-            let parameter_load =
-                matches!(&func.insts[id], Inst::Load(cell) if immutable_params.contains(cell));
+            let parameter_load = matches!(
+                &func.insts[id],
+                Inst::Load(cell) if immutable_params.contains(cell) || received.contains(cell)
+            );
             if parameter_load
                 || (use_count[k] == 1
                     && def_block[k] != NONE

@@ -623,7 +623,7 @@ pub fn color_values(
 // 200-local parse cap (`update_mobs` in bitgun: 193 cells).
 
 /// Cells an instruction DEFINES (writes).
-fn cell_defs(inst: &Inst, push: &mut impl FnMut(Idx<Cell>)) {
+pub(crate) fn cell_defs(inst: &Inst, push: &mut impl FnMut(Idx<Cell>)) {
     match inst {
         Inst::Store { cell, .. } => push(*cell),
         Inst::CallMulti { dests, .. } => dests.iter().for_each(|d| push(*d)),
@@ -638,7 +638,7 @@ fn cell_defs(inst: &Inst, push: &mut impl FnMut(Idx<Cell>)) {
 
 /// Cells an instruction USES (reads). `MapNext` reads its key cell (the cursor)
 /// before writing it.
-fn cell_uses(inst: &Inst, push: &mut impl FnMut(Idx<Cell>)) {
+pub(crate) fn cell_uses(inst: &Inst, push: &mut impl FnMut(Idx<Cell>)) {
     match inst {
         Inst::Load(c) => push(*c),
         Inst::MapNext { key_cell, .. } => push(*key_cell),
