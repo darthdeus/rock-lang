@@ -1029,3 +1029,21 @@ use chess::secret::recipe;
 fn f() -> int {
     recipe()
 }
+
+//- a_std_qualified_call_selects_from_the_overload_family
+//-- app.rock @pkg=app,1 @v1
+struct Foo {
+    v: int,
+}
+
+// The own `min` hides the std family for the bare name (spec 8.3); the
+// qualified path reaches the std family and selects by argument type.
+fn min(a: Foo, b: Foo) -> Foo {
+    a
+}
+
+fn f() -> int {
+    let n = std::min(1, 2)
+            //^ int
+    n
+}

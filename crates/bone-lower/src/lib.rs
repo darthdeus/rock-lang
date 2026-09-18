@@ -120,6 +120,7 @@ impl<'a> LowerCtx<'a> {
             segments: path.segments.iter().map(|i| i.name).collect(),
         };
         match self.probed(|| resolve::resolve_member_path(self.workspace, frag, &use_path)) {
+            Ok(resolve::MemberTarget::Callable(key)) => Some(key),
             Ok(resolve::MemberTarget::Global(key))
                 if matches!(
                     self.workspace.defs.get(&key).map(|m| m.kind),
@@ -1593,7 +1594,9 @@ pub fn lower_expr_value(
                 segments: path.segments.iter().map(|i| i.name).collect(),
             };
             match ctx.probed(|| resolve::resolve_member_path(ctx.workspace, frag, &use_path)) {
-                Ok(resolve::MemberTarget::Global(key)) => Expr::Global(key),
+                Ok(resolve::MemberTarget::Global(key) | resolve::MemberTarget::Callable(key)) => {
+                    Expr::Global(key)
+                }
                 Ok(resolve::MemberTarget::EnumVariant { enum_key, variant }) => {
                     Expr::EnumVariant {
                         enum_name: enum_key,
@@ -1658,7 +1661,7 @@ pub fn lower_expr_value(
                         args: hir::VariantArgs::Record(fields_range),
                     }
                 }
-                resolve::MemberTarget::Global(key) => {
+                resolve::MemberTarget::Global(key) | resolve::MemberTarget::Callable(key) => {
                     return Err(CompilerError::new_with_label(
                         e.span,
                         format!("`{key}` names a value, not a record"),

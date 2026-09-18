@@ -819,8 +819,12 @@ fn check_target(
 
 /// What a member-wise value path (`p::E::V`, `p::f`, `p::Type`) resolved to.
 pub enum MemberTarget {
-    /// A global/constant/callable family: the DefKey.
+    /// A global or constant: the DefKey.
     Global(Ustr),
+    /// A callable family: the key the family is registered under. A std
+    /// family has no `DefMeta`, so the kind has to come from the member
+    /// lookup rather than `ws.defs`.
+    Callable(Ustr),
     /// `path::Type::Variant` — the enum's DefKey and the variant name.
     EnumVariant { enum_key: Ustr, variant: Ustr },
     /// A bare type name (for qualified struct literals).
@@ -905,6 +909,9 @@ pub fn resolve_member_path(
         }
         if !is_last {
             return Err(format!("`{}` cannot be traversed", key));
+        }
+        if kind == ResolvedKind::Callable {
+            return Ok(MemberTarget::Callable(key));
         }
         return Ok(MemberTarget::Global(key));
     }
@@ -1111,7 +1118,9 @@ pub fn resolve_variant_pattern(
                 Err("mismatched variant path".to_string())
             }
         }
-        MemberTarget::Global(key) => Err(format!("`{key}` is not an enum type")),
+        MemberTarget::Global(key) | MemberTarget::Callable(key) => {
+            Err(format!("`{key}` is not an enum type"))
+        }
     }
 }
 
