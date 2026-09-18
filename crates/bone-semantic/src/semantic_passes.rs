@@ -850,79 +850,31 @@ fn is_type_publicly_accessible(
     false
 }
 
-fn check_type_closure(
-    ws: &Workspace,
-    ty: TyId,
-    pkg_id: bone_core::modules::PackageId,
-    reachable_modules: &FxHashSet<Ustr>,
-    reachable_defs: &FxHashSet<Ustr>,
-    span: Span,
-    reason: &str,
-) -> Result<(), CompilerError> {
-    match ty {
-        TyId::Static(m, idx) => {
-            let te = ws.module(m).ty_arena[idx];
-            check_type_expr_closure(ws, m, te, pkg_id, reachable_modules, reachable_defs, span, reason)?;
-        }
-        TyId::Local(_) => {}
-    }
-    Ok(())
+/// One type an exported definition's interface names (spec 11): the exporter,
+/// the nominal it requires, why, and whether that nominal supports the
+/// exporter's public audience.
+#[derive(Clone, Debug)]
+pub struct ClosureRequirement {
+    /// The exported definition's key.
+    pub exporter: Ustr,
+    /// The nominal type's key.
+    pub required: Ustr,
+    /// `public function`, `generic bound`, `field type of exported record`,
+    /// `payload of exported enum`, `payload of exported newtype`, or
+    /// `type of exported global`.
+    pub reason: &'static str,
+    pub span: Span,
+    pub satisfied: bool,
 }
 
-fn check_type_expr_closure(
-    ws: &Workspace,
-    mid: ModuleId,
-    te: TypeExpr,
-    pkg_id: bone_core::modules::PackageId,
-    reachable_modules: &FxHashSet<Ustr>,
-    reachable_defs: &FxHashSet<Ustr>,
-    span: Span,
-    reason: &str,
-) -> Result<(), CompilerError> {
-    match te {
-        TypeExpr::App { ctor, params } => {
-            if let TypeCtor::Nominal(name) = ctor {
-                if !is_type_publicly_accessible(ws, pkg_id, name, reachable_modules, reachable_defs) {
-                    let display_name = ws.defs.get(&name).map(|m| m.name).unwrap_or(name);
-                    comp_error!(
-                        span,
-                        "type `{}` in public API is not accessible (reason: {})",
-                        display_name,
-                        reason
-                    );
-                }
-            }
-            for p in params {
-                let p_te = ws.module(mid).ty_arena[p];
-                check_type_expr_closure(ws, mid, p_te, pkg_id, reachable_modules, reachable_defs, span, reason)?;
-            }
-        }
-        TypeExpr::Nullable(inner) => {
-            let inner_te = ws.module(mid).ty_arena[inner];
-            check_type_expr_closure(ws, mid, inner_te, pkg_id, reachable_modules, reachable_defs, span, reason)?;
-        }
-        TypeExpr::Function { params, ret } => {
-            for p in params {
-                let p_te = ws.module(mid).ty_arena[p];
-                check_type_expr_closure(ws, mid, p_te, pkg_id, reachable_modules, reachable_defs, span, reason)?;
-            }
-            let ret_te = ws.module(mid).ty_arena[ret];
-            check_type_expr_closure(ws, mid, ret_te, pkg_id, reachable_modules, reachable_defs, span, reason)?;
-        }
-        TypeExpr::Tuple { elements } => {
-            for e in elements {
-                let e_te = ws.module(mid).ty_arena[e];
-                check_type_expr_closure(ws, mid, e_te, pkg_id, reachable_modules, reachable_defs, span, reason)?;
-            }
-        }
-        TypeExpr::Builtin(_) | TypeExpr::Generic(..) | TypeExpr::Infer(..) => {}
-    }
-    Ok(())
-}
-
-pub fn pass_validate_api_closure(ws: &Workspace) -> Result<(), CompilerError> {
+/// Every nominal named by the interface of a publicly exported definition
+/// (spec 11), in `ws.defs` order, satisfied or not. The one closure
+/// computation: the API-closure gate rejects the first unsatisfied entry, and
+/// `rock modules audit` / `migrate` read the whole list with its reasons.
+pub fn api_closure_requirements(ws: &Workspace) -> Vec<ClosureRequirement> {
+    let mut out = Vec::new();
     if ws.ns.packages.is_empty() {
-        return Ok(());
+        return out;
     }
 
     let mut reachability: FxHashMap<bone_core::modules::PackageId, (FxHashSet<Ustr>, FxHashSet<Ustr>)> =
@@ -948,20 +900,32 @@ pub fn pass_validate_api_closure(ws: &Workspace) -> Result<(), CompilerError> {
             continue;
         }
 
+        let mut need = |ty: TyId, span: Span, reason: &'static str| {
+            collect_type_closure(ws, ty, &mut |required| {
+                out.push(ClosureRequirement {
+                    exporter: *def_key,
+                    required,
+                    reason,
+                    span,
+                    satisfied: is_type_publicly_accessible(ws, pkg_id, required, reachable_modules, reachable_defs),
+                });
+            });
+        };
+
         match meta.kind {
             bone_core::modules::DefKind::Callable => {
                 if let Some(fn_list) = ws.functions_by_name.get(def_key) {
                     for &(mid, fid) in fn_list.iter() {
                         let f = &ws.module(mid).functions[fid];
                         for p in &f.param_decls {
-                            check_type_closure(ws, p.ty, pkg_id, reachable_modules, reachable_defs, f.span, "public function")?;
+                            need(p.ty, f.span, "public function");
                         }
                         if let Some(ret) = f.return_ty {
-                            check_type_closure(ws, ret, pkg_id, reachable_modules, reachable_defs, f.span, "public function")?;
+                            need(ret, f.span, "public function");
                         }
                         for b in &f.generic_bounds {
                             if let Some(bound_ty) = b {
-                                check_type_closure(ws, *bound_ty, pkg_id, reachable_modules, reachable_defs, f.span, "generic bound")?;
+                                need(*bound_ty, f.span, "generic bound");
                             }
                         }
                     }
@@ -972,7 +936,7 @@ pub fn pass_validate_api_closure(ws: &Workspace) -> Result<(), CompilerError> {
                     let s = &ws.module(sid.module).structs[sid.def];
                     for f in &s.fields {
                         if f.read_vis == NsVisibility::Pub {
-                            check_type_closure(ws, f.ty, pkg_id, reachable_modules, reachable_defs, f.span, "field type of exported record")?;
+                            need(f.ty, f.span, "field type of exported record");
                         }
                     }
                 } else if let Some(eid) = ws.enums_by_name.get(def_key) {
@@ -982,30 +946,78 @@ pub fn pass_validate_api_closure(ws: &Workspace) -> Result<(), CompilerError> {
                             VariantPayload::Unit => {}
                             VariantPayload::Tuple(tys) => {
                                 for ty in tys {
-                                    check_type_closure(ws, *ty, pkg_id, reachable_modules, reachable_defs, v.name_span, "payload of exported enum")?;
+                                    need(*ty, v.name_span, "payload of exported enum");
                                 }
                             }
                             VariantPayload::Record(fields) => {
                                 for f in fields {
-                                    check_type_closure(ws, f.ty, pkg_id, reachable_modules, reachable_defs, f.span, "payload of exported enum")?;
+                                    need(f.ty, f.span, "payload of exported enum");
                                 }
                             }
                         }
                     }
                 } else if let Some(nid) = ws.newtypes_by_name.get(def_key) {
                     let nt = &ws.module(nid.module).newtypes[nid.def];
-                    check_type_closure(ws, nt.wrapped, pkg_id, reachable_modules, reachable_defs, nt.span, "payload of exported newtype")?;
+                    need(nt.wrapped, nt.span, "payload of exported newtype");
                 }
             }
             bone_core::modules::DefKind::Global => {
                 if let Some(&ty) = ws.globals_by_name.get(&meta.name).or_else(|| ws.globals_by_name.get(def_key)) {
-                    check_type_closure(ws, ty, pkg_id, reachable_modules, reachable_defs, meta.span, "type of exported global")?;
+                    need(ty, meta.span, "type of exported global");
                 }
             }
             _ => {}
         }
     }
+    out
+}
 
+/// Every nominal constructor inside `ty`, outermost first.
+fn collect_type_closure(ws: &Workspace, ty: TyId, found: &mut impl FnMut(Ustr)) {
+    if let TyId::Static(m, idx) = ty {
+        collect_type_expr_closure(ws, m, ws.module(m).ty_arena[idx], found);
+    }
+}
+
+fn collect_type_expr_closure(ws: &Workspace, mid: ModuleId, te: TypeExpr, found: &mut impl FnMut(Ustr)) {
+    let arena = &ws.module(mid).ty_arena;
+    match te {
+        TypeExpr::App { ctor, params } => {
+            if let TypeCtor::Nominal(name) = ctor {
+                found(name);
+            }
+            for p in params {
+                collect_type_expr_closure(ws, mid, arena[p], found);
+            }
+        }
+        TypeExpr::Nullable(inner) => collect_type_expr_closure(ws, mid, arena[inner], found),
+        TypeExpr::Function { params, ret } => {
+            for p in params {
+                collect_type_expr_closure(ws, mid, arena[p], found);
+            }
+            collect_type_expr_closure(ws, mid, arena[ret], found);
+        }
+        TypeExpr::Tuple { elements } => {
+            for e in elements {
+                collect_type_expr_closure(ws, mid, arena[e], found);
+            }
+        }
+        TypeExpr::Builtin(_) | TypeExpr::Generic(..) | TypeExpr::Infer(..) => {}
+    }
+}
+
+/// Spec 11 gate: reject the first type a public interface names that does
+/// not support the interface's audience.
+pub fn pass_validate_api_closure(ws: &Workspace) -> Result<(), CompilerError> {
+    if let Some(r) = api_closure_requirements(ws).into_iter().find(|r| !r.satisfied) {
+        let display_name = ws.defs.get(&r.required).map(|m| m.name).unwrap_or(r.required);
+        comp_error!(
+            r.span,
+            "type `{}` in public API is not accessible (reason: {})",
+            display_name,
+            r.reason
+        );
+    }
     Ok(())
 }
 
