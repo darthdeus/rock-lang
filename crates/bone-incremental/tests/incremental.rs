@@ -13,6 +13,9 @@
 use bone_semantic::prelude::*;
 use bone_incremental::session::{changed_names, item_prints, name_shapes, Session, UpdateResult, UpdateTier};
 
+mod common;
+use common::{mid_for, type_profile};
+
 fn parse_rock_with_file(src: &str, file: &str) -> Result<skull_parser::Ast, CompilerError> {
     skull_parser::parse_module_clean(src, Ustr::from(file))
 }
@@ -27,16 +30,6 @@ fn files(list: &[(&str, &str)]) -> Files {
     list.iter()
         .map(|(p, t)| bone_incremental::session::SessionFile::legacy(*p, *t))
         .collect()
-}
-
-/// `ModuleId` for a file checked through this harness. `ModuleId` is now an
-/// opaque dense index assigned by the workspace's `module_ids` interner during
-/// `semantic_pass`, so the id is recovered by looking the file path up in `ws`
-/// (files are parsed with `parse_rock_with_file(text, path)`, so a module's
-/// file == `Ustr::from(path)`). Files with no items are rejected up front (see
-/// `parse_files`), so the lookup never misses for a tracked path.
-fn mid_for(ws: &Workspace, path: &str) -> ModuleId {
-    ws.module_ids[&Ustr::from(path)]
 }
 
 /// True if `mid` is a warm stdlib module. Stdlib files are stamped
@@ -91,24 +84,6 @@ fn diag_keys(ws: &Workspace) -> Vec<(String, usize, String)> {
         .collect();
     keys.sort();
     keys
-}
-
-/// Rendered type at every `stride`-th byte offset of `path` (None where
-/// `type_at` has no node). Text-anchored so it survives arena-index
-/// divergence between an incrementally updated workspace and a fresh batch
-/// one. Stride 1 = every offset; the real-project fuzz uses a coarser stride
-/// to keep wall time sane (files are tens of KB).
-fn type_profile(ws: &Workspace, path: &str, text: &str, stride: usize) -> Vec<Option<String>> {
-    let mid = mid_for(ws, path);
-    let Some(inf) = ws.inference(mid) else {
-        return vec![None; text.len().div_ceil(stride)];
-    };
-    (0..text.len())
-        .step_by(stride)
-        .map(|offset| {
-            bone_semantic::query::type_at(ws, mid, inf, offset).map(|ta| ws.render(ta.body, ta.ty))
-        })
-        .collect()
 }
 
 /// Structural equivalence of two checked workspaces over the same file set.
