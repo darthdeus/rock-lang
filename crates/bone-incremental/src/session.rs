@@ -160,9 +160,10 @@ pub struct UserFile {
     /// via `diagnostics()` -- a broken file still type-checks its valid parts AND
     /// shows the parse error as a diagnostic (the compile path rejects on them).
     pub syntax_errors: Vec<CompilerError>,
-    /// Hash of what this file contributes to the namespace tree beyond its
-    /// item interfaces: the `mod` header and every `use`/`mod` item. The header
-    /// is not an item, so `item_prints` alone cannot see it change.
+    /// Hash of what this file contributes to the namespace tree: the `mod`
+    /// header, every `use`, and each definition's name, kind and visibility
+    /// (see [`scope_hash`]). The header is not an item, so `item_prints` alone
+    /// cannot see it change.
     pub scope_hash: u64,
 }
 
@@ -223,12 +224,6 @@ pub enum FileDiff {
     Interface,
 }
 
-impl FileDiff {
-    pub fn is_interface(&self) -> bool {
-        matches!(self, FileDiff::Interface)
-    }
-}
-
 /// Reject a macro name colliding with a function name (call-position ambiguity)
 /// and a macro call whose argument labels don't fit its parameters, cross-module,
 /// on the pre-expansion module set (macros still present). The same gates
@@ -247,7 +242,6 @@ fn reject_macro_name_collisions(modules: &[Ast]) -> Result<(), CompilerError> {
 
 /// See [`UserFile::scope_hash`].
 pub fn scope_hash(a: &Ast, text: &str) -> u64 {
-    use skull_parser::ItemKind;
     use std::hash::{Hash, Hasher};
 
     let mut h = rustc_hash::FxHasher::default();
@@ -255,13 +249,63 @@ pub fn scope_hash(a: &Ast, text: &str) -> u64 {
         let (s, e) = header.span.offset_range;
         text[s..e].hash(&mut h);
     }
-    for item in a.items.iter() {
-        if matches!(item.kind, ItemKind::Use(_) | ItemKind::Module(_)) {
-            let (s, e) = item.span.offset_range;
-            text[s..e].hash(&mut h);
+    scope_items(&a.items, text, a.dialect == Dialect::V1, 0, &mut h);
+    h.finish()
+}
+
+/// What `build_namespaces` reads from items: every `use`, and in a v1 file
+/// each definition's name, kind and declared visibility and each inline `mod`
+/// block's name and visibility. A legacy file's definitions are not in the
+/// tree. Signatures, fields and bodies are left out -- an edit to them keeps
+/// every DefKey and stays on the interface path.
+fn scope_items(items: &[skull_parser::Item], text: &str, v1: bool, depth: usize, h: &mut rustc_hash::FxHasher) {
+    use skull_parser::ItemKind;
+    use std::hash::Hash;
+
+    for item in items {
+        let name = match &item.kind {
+            ItemKind::Use(_) => {
+                let (s, e) = item.span.offset_range;
+                text[s..e].hash(h);
+                continue;
+            }
+            _ if !v1 => continue,
+            ItemKind::Module(block) => {
+                (depth, "mod", block.name.name.as_str()).hash(h);
+                hash_visibility(block.vis.as_ref(), h);
+                scope_items(&block.items, text, v1, depth + 1, h);
+                continue;
+            }
+            ItemKind::Struct(s) => (s.name.name, "type"),
+            ItemKind::Enum(e) => (e.name.name, "type"),
+            ItemKind::Newtype(n) => (n.name.name, "type"),
+            ItemKind::Global(g) => (g.name.name, "global"),
+            ItemKind::Function(f) => (f.name.name, "callable"),
+            ItemKind::Decorator(d) => (d.name.name, "decorator"),
+            _ => continue,
+        };
+        (depth, name.1, name.0.as_str()).hash(h);
+        hash_visibility(item.vis.as_ref(), h);
+    }
+}
+
+fn hash_visibility(vis: Option<&skull_parser::Visibility>, h: &mut rustc_hash::FxHasher) {
+    use skull_parser::Visibility;
+    use std::hash::Hash;
+
+    match vis {
+        None => 0u8.hash(h),
+        Some(Visibility::Private) => 1u8.hash(h),
+        Some(Visibility::Pub) => 2u8.hash(h),
+        Some(Visibility::PubSuper) => 3u8.hash(h),
+        Some(Visibility::PubPackage) => 4u8.hash(h),
+        Some(Visibility::PubIn(path)) => {
+            5u8.hash(h);
+            for seg in path {
+                seg.name.as_str().hash(h);
+            }
         }
     }
-    h.finish()
 }
 
 pub fn item_prints(a: &Ast, text: &str) -> Vec<ItemPrint> {
@@ -688,14 +732,12 @@ impl Session {
 
         // The namespace tree, the fragment scopes and the legacy projections are
         // built from the whole module set by `build_namespaces`, and only the
-        // full rebuild runs it. So an edit that can change them -- a header or
-        // `use`/`mod` edit anywhere, or any interface edit in a v1 file, where
-        // declarations and their visibility live in the tree -- takes that path.
-        // This over-invalidates; plan 2.6's scope epochs are the narrowing.
-        let scope_changed = self.files.get(path).is_some_and(|old| {
-            old.scope_hash != new_scope
-                || (dialect == Dialect::V1 && classify(&old.item_prints, &new_prints).is_interface())
-        });
+        // full rebuild runs it. So an edit that changes what they are built
+        // from takes that path; plan 2.6's scope epochs are the narrowing.
+        let scope_changed = self
+            .files
+            .get(path)
+            .is_some_and(|old| old.scope_hash != new_scope);
 
         let diff = (self.files.contains_key(path) && !module.items.is_empty() && !scope_changed)
             .then(|| classify(&self.files[path].item_prints, &new_prints));
@@ -1011,6 +1053,11 @@ impl Session {
             self.ws.set_inference(id, inf);
         }
         let reinfer_ms = t_reinfer.elapsed().as_secs_f64() * 1000.0;
+
+        // The same whole-program gate `rebuild_users` runs: a signature edit
+        // alone can export a type whose closure is not public. It reads only
+        // definitions and their signatures, and is a no-op with no v1 package.
+        bone_semantic::semantic_passes::pass_validate_api_closure(&self.ws)?;
 
         let t_dep = Instant::now();
         self.rebuild_dependents();
