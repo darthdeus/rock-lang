@@ -207,11 +207,34 @@ fn f() -> int {
     width()
 }
 
-//- v1_infix_ascription_is_a_path_not_an_ascription @fail=`x::int` did not resolve to any definition
+//- v1_infix_ascription_is_a_path_not_an_ascription @fail=`x::int` did not resolve to any definition; `::` is a path separator in modules-v1, so a type ascription is written `(x : int)`
 //-- app.rock @pkg=app,1 @v1
 fn f() -> int {
     let x = 5
     let y = x :: int
+    y
+}
+
+//- v1_infix_ascription_to_a_type_in_scope_names_the_replacement @fail=a type ascription is written `(p : Point)`
+//-- app.rock @pkg=app,1 @v1
+struct Point { x: int }
+
+fn f() -> Point {
+    let p = Point { x: 1 }
+    p :: Point
+}
+
+//- an_unresolved_qualified_path_keeps_its_message @fail=`a::missing` did not resolve to any definition @not=ascription
+//-- app.rock @pkg=app,1 @v1
+fn f() -> int {
+    a::missing
+}
+
+//- the_contextual_ascription_resolves
+//-- app.rock @pkg=app,1 @v1
+fn f() -> int {
+    let x = 5
+    let y = (x : int)
     y
 }
 

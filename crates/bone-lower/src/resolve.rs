@@ -124,7 +124,8 @@ pub fn resolve_bare(
     // export bindings.
     let own = explicit_members(ws, &viewers, frag.package, &frag.module_path, name, &mut Vec::new())?;
     if let Some(own) = own {
-        let (key, kind) = collapse(own, name, || name.to_string(), "definitions")?;
+        let not_found = || format!("`{name}` did not resolve to any definition");
+        let (key, kind) = collapse(own, name, not_found, "definitions")?;
         let hidden: Vec<Ustr> = glob_hits.iter().map(|(k, _)| *k).collect();
         return Ok(Resolved { key, kind, hidden });
     }
@@ -478,18 +479,18 @@ fn collect_member_names(
 }
 
 /// One definition out of a lookup of `name`, or the diagnostic for why there
-/// is none. `display` renders the reference as the author wrote it.
+/// is none. `not_found` renders the diagnostic for a name nothing binds.
 fn collapse(
     members: Members,
     name: Ustr,
-    display: impl Fn() -> String,
+    not_found: impl Fn() -> String,
     what: &str,
 ) -> Result<(Ustr, ResolvedKind), String> {
     match members.found.as_slice() {
         [single] => Ok(*single),
         [] if members.cycle => Err("circular `use` binding with no defining target".to_string()),
         [] if members.denied => Err(format!("`{name}` is not accessible from this module")),
-        [] => Err(format!("`{}` did not resolve to any definition", display())),
+        [] => Err(not_found()),
         many => Err(format!(
             "`{name}` is ambiguous between {what} {}",
             many.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>().join(", ")
@@ -625,9 +626,9 @@ pub fn resolve_member_path(
             i += 1;
             continue;
         }
-        let display = || segments.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
         let members = module_members(ws, &[Viewer::Fragment(frag)], pkg_id, &cur, seg)?;
-        let (key, kind) = collapse(members, seg, display, "glob re-exports")?;
+        let not_found = || unresolved_value_path(ws, frag, segments);
+        let (key, kind) = collapse(members, seg, not_found, "glob re-exports")?;
         if kind == ResolvedKind::Type {
             if is_last {
                 return Ok(MemberTarget::Type(key));
@@ -653,6 +654,30 @@ pub fn resolve_member_path(
 
     // Walked to a module without hitting a definition.
     Err("path names a module, not a definition".to_string())
+}
+
+/// The diagnostic for a value path nothing binds. A v1 `x::T` whose last
+/// segment names a type is most likely a legacy infix ascription, which v1
+/// spells `(x : T)` (spec 7); name the replacement then, and only then.
+fn unresolved_value_path(ws: &Workspace, frag: &FragmentScope, segments: &[Ustr]) -> String {
+    let message = format!("`{}` did not resolve to any definition", joined(segments));
+    let Some((ty, prefix)) = segments.split_last() else { return message };
+    let names_a_type = BUILTIN_TYPE_NAMES.contains(&ty.as_str())
+        || resolve_bare(ws, Some(frag), *ty).is_ok_and(|r| r.kind == ResolvedKind::Type);
+    if prefix.is_empty() || !names_a_type {
+        return message;
+    }
+    format!(
+        "{message}; `::` is a path separator in modules-v1, so a type ascription is written `({} : {ty})`",
+        joined(prefix)
+    )
+}
+
+/// Type names the parser reads as builtins rather than as paths.
+const BUILTIN_TYPE_NAMES: &[&str] = &["any", "bool", "float", "int", "string", "uint"];
+
+fn joined(segments: &[Ustr]) -> String {
+    segments.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::")
 }
 
 /// Resolve a path whose FINAL segment is a module (glob targets, `use p;`).
@@ -738,8 +763,8 @@ fn walk_path(
         }
         WalkMode::Definition => {
             let members = walk_members(ws, frag, outer, path, visiting)?;
-            let display = || path.segments.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
-            let (key, kind) = collapse(members, last_of(&path.segments), display, "glob re-exports")?;
+            let not_found = || format!("`{}` did not resolve to any definition", joined(&path.segments));
+            let (key, kind) = collapse(members, last_of(&path.segments), not_found, "glob re-exports")?;
             Ok(Landing::Def(Resolved { key, kind, hidden: Vec::new() }))
         }
     }

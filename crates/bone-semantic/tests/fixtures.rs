@@ -160,14 +160,17 @@ fn check_modules_fixture(contents: &str) -> datatest_stable::Result<()> {
     }
     for section in sections {
         // `@fail` expects any rejection; `@fail=<text>` also pins the reason,
-        // so a case cannot pass by failing for an unrelated reason.
-        let (name, expect_fail, want) = match section.name.split_once(" @fail") {
-            Some((n, rest)) => (
-                n.to_string(),
-                true,
-                rest.strip_prefix('=').map(|w| w.trim().to_string()),
-            ),
-            None => (section.name.to_string(), false, None),
+        // so a case cannot pass by failing for an unrelated reason, and a
+        // trailing ` @not=<text>` pins text the rejection must not contain.
+        let (name, expect_fail, want, unwanted) = match section.name.split_once(" @fail") {
+            Some((n, rest)) => {
+                let (rest, unwanted) = match rest.split_once(" @not=") {
+                    Some((rest, unwanted)) => (rest, Some(unwanted.trim().to_string())),
+                    None => (rest, None),
+                };
+                (n.to_string(), true, rest.strip_prefix('=').map(|w| w.trim().to_string()), unwanted)
+            }
+            None => (section.name.to_string(), false, None, None),
         };
         let files = bone_semantic::test_support::parse_embedded_files(section.content);
         match (
@@ -182,6 +185,12 @@ fn check_modules_fixture(contents: &str) -> datatest_stable::Result<()> {
                         e.contains(&want),
                         "section `{name}` failed for the wrong reason: \
                          expected the error to contain `{want}`, got:\n{e}"
+                    );
+                }
+                if let Some(unwanted) = unwanted {
+                    assert!(
+                        !e.contains(&unwanted),
+                        "section `{name}` failed with text it must not contain: `{unwanted}`, got:\n{e}"
                     );
                 }
             }
