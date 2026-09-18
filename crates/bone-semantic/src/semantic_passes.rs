@@ -1323,7 +1323,9 @@ pub fn assemble_namespaces(
 /// re-exports them. A name a provider's body only uses -- a game's, a
 /// sibling's, the stdlib's -- is not its declaration and is not in the view.
 /// Legacy packages no v1 package depends on get no view, so a legacy-only
-/// build assembles the tree it always did.
+/// build assembles the tree it always did. The view records the provider's
+/// files: a legacy key is shared by every legacy file defining the name, and
+/// a v1 call through the view reaches only the provider's own overloads.
 fn register_legacy_views(ws: &mut Workspace, contributions: &[&FragmentContribution]) {
     let packages_in = |dialect: skull_parser::Dialect| -> FxHashSet<u32> {
         contributions
@@ -1350,6 +1352,7 @@ fn register_legacy_views(ws: &mut Workspace, contributions: &[&FragmentContribut
             self_name: ustr::Ustr::from(&tag.self_name),
             ..Default::default()
         });
+        pkg.legacy_files.insert(contribution.file);
         let root = pkg.nodes.entry(ustr("")).or_insert_with(|| NsNode {
             path_key: ustr(""),
             vis: Some(NsVisibility::Pub),
@@ -1572,9 +1575,11 @@ fn project_public_module(
                 "legacy projection cannot resolve public export `{name}`: {message}"
             ))
         })?;
-        for (key, kind) in members.found {
-            if let Some(kind) = projection_kind(kind) {
-                projection.insert(name, key, kind);
+        // The public viewer admits only v1 definitions, so no hit here is a
+        // view member with an owner.
+        for hit in members.found {
+            if let Some(kind) = projection_kind(hit.kind) {
+                projection.insert(name, hit.key, kind);
             }
         }
     }

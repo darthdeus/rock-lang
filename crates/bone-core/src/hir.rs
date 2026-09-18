@@ -210,6 +210,11 @@ pub struct Body {
     /// resolved in bone-inference, codegen'd in skull-mir. Never also in
     /// `arg_names`.
     pub spread_args: FxHashSet<Idx<Expr>>,
+    /// In a v1 fragment, an `Expr::Global` naming a legacy callable reached
+    /// through the std view or a legacy provider's view, taken as a value:
+    /// the view's package (`FamilyMember::owner`), since the bare key is
+    /// shared by every legacy file defining the name.
+    pub value_owners: FxHashMap<Idx<Expr>, crate::modules::PackageId>,
 
     // Owner's body expression:
     // - fn body (none for lua/extern)
@@ -292,6 +297,7 @@ impl Default for Body {
             method_call_recvs: Default::default(),
             method_names: Default::default(),
             spread_args: Default::default(),
+            value_owners: Default::default(),
 
             root: Default::default(),
             root_scope: None,
@@ -413,11 +419,11 @@ pub struct Module {
     /// a superset is kept and an extra re-lower is the worst it costs.
     pub scope_probes: FxHashSet<crate::modules::ScopeProbe>,
 
-    /// The member keys of every `CallFamily::Merged` this module's bodies
-    /// call, by bare name. A bare name's family is a fact of the file (its
-    /// imports and the namespace tree), so every body that calls it records
-    /// the same keys, and a body-only re-lower overwrites them in place.
-    pub call_families: FxHashMap<Ustr, Vec<Ustr>>,
+    /// The members of every `CallFamily::Merged` this module's bodies call,
+    /// by bare name. A bare name's family is a fact of the file (its imports
+    /// and the namespace tree), so every body that calls it records the same
+    /// members, and a body-only re-lower overwrites them in place.
+    pub call_families: FxHashMap<Ustr, Vec<FamilyMember>>,
 
     /// Path segments spelled outside any body: `use` items and the
     /// interface positions (signatures, fields, globals) of a v1 fragment
@@ -849,6 +855,19 @@ pub enum Callee {
     Value(Idx<Expr>),
 }
 
+/// One member of a v1 call family: the overloads registered under `key`.
+/// A legacy definition's key is its bare name, shared by every legacy file
+/// that defines the name and by the standard library, so a member a v1
+/// fragment reached through the std view or a legacy provider's view names
+/// that view's package in `owner`, and only the overloads its own files
+/// define belong to the member (spec 3.2, 5). `None` for a v1 DefKey, which
+/// only its definition carries.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct FamilyMember {
+    pub key: Ustr,
+    pub owner: Option<crate::modules::PackageId>,
+}
+
 /// Overload family selected by the resolver (plan 2.3 / M2 step 5).
 /// `resolve_callee` consumes this rather than a spelled last segment.
 #[derive(Copy, Clone, Debug)]
@@ -858,8 +877,8 @@ pub enum CallFamily {
     /// v1: canonical DefKey plus ONE hidden-origin key from a losing tier
     /// (spec 8.3). `Expr` is `Copy`, so the family cannot carry a list; when
     /// several candidates lose, the lowest key is kept so the diagnostic does
-    /// not depend on import order.
-    Resolved { key: Ustr, hidden: Option<Ustr> },
+    /// not depend on import order. `owner` is as for [`FamilyMember`].
+    Resolved { key: Ustr, owner: Option<crate::modules::PackageId>, hidden: Option<Ustr> },
     /// A bare name whose overload family spans several definitions, in
     /// either dialect: legacy callables merged with projected or imported v1
     /// ones (spec 3.2), v1 explicit imports of different callables (spec
@@ -894,8 +913,8 @@ impl CallFamily {
         CallFamily::Legacy(name)
     }
 
-    pub fn resolved(key: Ustr, hidden: &[Ustr]) -> Self {
-        CallFamily::Resolved { key, hidden: lowest(hidden) }
+    pub fn resolved(key: Ustr, owner: Option<crate::modules::PackageId>, hidden: &[Ustr]) -> Self {
+        CallFamily::Resolved { key, owner, hidden: lowest(hidden) }
     }
 
     pub fn merged(name: Ustr, file: Ustr, hidden: &[Ustr]) -> Self {

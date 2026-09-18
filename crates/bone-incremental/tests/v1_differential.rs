@@ -647,6 +647,30 @@ fn a_glob_member_that_shadowed_std_is_removed() {
     assert_eq!(h.relowered_body_count(), 2, "b's depth and c's pick");
 }
 
+/// A legacy file that starts defining a std-named function does not join the
+/// std family a v1 call reaches through tier 5 (spec 5): the call keeps
+/// selecting the std definition rather than tying with the legacy one, in
+/// the incremental session as in a fresh build.
+#[test]
+fn a_legacy_definition_of_a_std_name_added_leaves_the_v1_call_on_std() {
+    let without = "fn other() -> int {\n    2\n}\n";
+    let with = "fn other() -> int {\n    2\n}\n\nfn warm_one() -> int {\n    5\n}\n";
+    let c = "mod c;\n\nfn pick() -> int {\n    warm_one()\n}\n";
+    let mut h = V1Harness::new(vec![v1("c.rock", c), legacy("legacy_def.rock", without)]);
+    assert_eq!(h.call_keys("c.rock"), vec![("warm_one".to_string(), None)]);
+
+    h.edit("legacy_def.rock", with).expect("accepted");
+    assert!(h.diagnostics().is_empty(), "{:?}", h.diagnostics());
+    assert_eq!(h.call_keys("c.rock"), vec![("warm_one".to_string(), None)]);
+    let selected: Vec<String> = snapshot(h.session.workspace(), &h.files)
+        .references
+        .into_iter()
+        .filter(|r| r.0 == "c.rock" && r.3 == "selects")
+        .map(|r| r.4)
+        .collect();
+    assert!(selected.iter().all(|s| s.starts_with(WARM_PATH)), "{selected:?}");
+}
+
 /// A private member added to a globbed module never opens through the glob,
 /// so the globber's lookup keeps its std answer. The globber probed that
 /// member (a miss), so it still re-lowers: the design's replay refinement,

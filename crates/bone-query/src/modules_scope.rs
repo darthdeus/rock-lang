@@ -54,7 +54,7 @@ fn bound_key(ws: &Workspace, frag: &FragmentScope, name: Ustr) -> Option<Ustr> {
         Ok(r) if r.kind != ResolvedKind::Module => Some(r.key),
         Ok(_) => None,
         Err(_) => match resolve::resolve_v1_callee(ws, frag, name) {
-            Ok(CalleeFamily::Merged { keys, .. }) => keys.first().copied(),
+            Ok(CalleeFamily::Merged { members, .. }) => members.first().map(|m| m.key),
             Ok(CalleeFamily::Single(r)) => Some(r.key),
             Err(_) => None,
         },
@@ -85,9 +85,9 @@ pub fn path_members(
         let mut out = Vec::new();
         for name in resolve::module_member_names(ws, &viewers, package, &path).unwrap_or_default() {
             if let Ok(members) = resolve::module_members(ws, &viewers, package, &path, name)
-                && let [(key, _)] = members.found[..]
+                && let [hit] = members.found[..]
             {
-                out.push((name, Member::Def(key)));
+                out.push((name, Member::Def(hit.key)));
             }
         }
         let children = ws

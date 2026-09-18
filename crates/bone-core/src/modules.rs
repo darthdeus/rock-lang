@@ -454,6 +454,10 @@ pub struct NsPackage {
     pub nodes: FxHashMap<Ustr, NsNode>,
     /// Dependency aliases: alias -> target package id.
     pub aliases: FxHashMap<Ustr, PackageId>,
+    /// For the view of a legacy provider (spec 3.2): the provider's own
+    /// files, whose definitions are the only members of its view's callable
+    /// families. Empty for a v1 package.
+    pub legacy_files: FxHashSet<Ustr>,
 }
 
 impl NsPackage {
@@ -480,6 +484,16 @@ impl NsTree {
 
     pub fn std_root(&self) -> Option<&NsNode> {
         self.package(STD_PACKAGE_ID)?.node(Ustr::from(""))
+    }
+
+    /// Whether a function lowered from `file` belongs to a family member
+    /// owned by `owner` ([`crate::hir::FamilyMember`]): a stdlib file for the
+    /// std view, one of the provider's own files for a legacy view.
+    pub fn owns_file(&self, owner: PackageId, file: Ustr) -> bool {
+        if owner == STD_PACKAGE_ID {
+            return is_stdlib_module_file(file.as_str());
+        }
+        self.package(owner).is_some_and(|pkg| pkg.legacy_files.contains(&file))
     }
 
     /// Look up one member of the compiler-owned default export view.

@@ -1,31 +1,54 @@
 use super::*;
+use crate::hir::FamilyMember;
 
 pub(crate) fn resolve_callee(gamma: &Gamma, family: &CallFamily) -> FnList {
     let name = family.key();
     let _span = tracing::info_span!("resolve_callee", name = %name).entered();
 
-    let CallFamily::Merged { file, .. } = *family else {
-        gamma.dep_acc.borrow_mut().insert(name);
-        return gamma.workspace.functions_by_name.get(&name).cloned().unwrap_or_default();
-    };
-    // A merged family: every member's overloads under its own key, as
-    // lowering recorded them for the module the call was lowered in. Each
-    // key is a dependency, so an overload added to any member re-infers this
-    // caller.
     let ws = gamma.workspace;
-    let keys = ws
-        .module_ids
-        .get(&file)
-        .and_then(|mid| ws.module(*mid).call_families.get(&name))
-        .unwrap_or_else(|| panic!("merged family `{name}` of `{file}` was not recorded at lowering"));
-    let mut out = FnList::default();
-    for &key in keys {
-        gamma.dep_acc.borrow_mut().insert(key);
-        if let Some(fns) = ws.functions_by_name.get(&key) {
-            out.extend(fns.iter().copied());
+    match *family {
+        CallFamily::Legacy(_) => member_overloads(gamma, FamilyMember { key: name, owner: None }),
+        CallFamily::Resolved { key, owner, .. } => member_overloads(gamma, FamilyMember { key, owner }),
+        // A merged family: every member's overloads, as lowering recorded
+        // them for the module the call was lowered in.
+        CallFamily::Merged { file, .. } => {
+            let members = ws
+                .module_ids
+                .get(&file)
+                .and_then(|mid| ws.module(*mid).call_families.get(&name))
+                .unwrap_or_else(|| panic!("merged family `{name}` of `{file}` was not recorded at lowering"));
+            let mut out = FnList::default();
+            for &member in members {
+                out.extend(member_overloads(gamma, member));
+            }
+            out
         }
     }
-    out
+}
+
+/// The family a function taken as a value (`Expr::Global` at `e`) is looked
+/// up in: the view that owns it in a v1 fragment (`Body::value_owners`), the
+/// whole bare family otherwise.
+pub(crate) fn fn_value_family(c: BodyCtx, e: Idx<Expr>, name: Ustr) -> CallFamily {
+    match c.body.value_owners.get(&e) {
+        Some(&owner) => CallFamily::resolved(name, Some(owner), &[]),
+        None => CallFamily::from_name(name),
+    }
+}
+
+/// The overloads registered under a member's key, narrowed to the files of
+/// the view that owns it (`FamilyMember::owner`): a legacy key is shared by
+/// every legacy file defining the name, and a v1 fragment reaches only the
+/// std view's or one provider's. The key is a dependency either way, so an
+/// overload added under it re-infers this caller.
+fn member_overloads(gamma: &Gamma, member: FamilyMember) -> FnList {
+    gamma.dep_acc.borrow_mut().insert(member.key);
+    let ws = gamma.workspace;
+    let Some(fns) = ws.functions_by_name.get(&member.key) else { return FnList::default() };
+    match member.owner {
+        None => fns.clone(),
+        Some(owner) => fns.iter().copied().filter(|(mid, _)| ws.ns.owns_file(owner, ws.module(*mid).file)).collect(),
+    }
 }
 
 /// True if `ty` contains an unbound generic hole (an `Infer`/`Generic` node)

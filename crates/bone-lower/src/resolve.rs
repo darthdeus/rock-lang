@@ -12,13 +12,15 @@
 //!   3. the fragment's explicit imports;
 //!   4. glob bindings visible to the fragment, including what the globbed
 //!      modules re-export;
-//!   5. the workspace's bare-name maps (compiler stdlib surface).
+//!   5. the compiler-owned std view (the standard library's own members).
 //! There is no fallthrough: the first tier that binds the name decides.
 //! Losers at earlier tiers are recorded as `hidden` so a failing overload
 //! match can name what it would have found (the hidden-origin diagnostic).
 
+use bone_core::hir::FamilyMember;
 use bone_core::modules::{
-    legacy_name, FragmentScope, LegacyName, NsPackage, NsVisibility, ScopeProbe, UsePathRef, STD_PACKAGE_ID,
+    legacy_name, FragmentScope, LegacyName, NsPackage, NsVisibility, PackageId, ScopeProbe, UsePathRef,
+    STD_PACKAGE_ID,
 };
 use bone_core::workspace::Workspace;
 use ustr::Ustr;
@@ -89,12 +91,59 @@ pub enum ResolvedKind {
 }
 
 /// A resolution result: the canonical key every workspace map is keyed by,
+/// the view that owns a legacy callable's key ([`FamilyMember::owner`]),
 /// plus the origin tier's hidden candidates (spec 8.3 hidden-origin).
 #[derive(Debug, Clone)]
 pub struct Resolved {
     pub key: Ustr,
     pub kind: ResolvedKind,
+    pub owner: Option<PackageId>,
     pub hidden: Vec<Ustr>,
+}
+
+impl Resolved {
+    fn of(hit: Hit, hidden: Vec<Ustr>) -> Self {
+        Resolved { key: hit.key, kind: hit.kind, owner: hit.owner, hidden }
+    }
+}
+
+/// One definition a lookup found: its key, kind, and for a callable of the
+/// std view or a legacy provider's view, the view's package. A legacy key is
+/// the bare name every legacy file defining it shares, so the key alone
+/// does not say whose overloads a v1 fragment reached; two views offering
+/// one bare name are two definitions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Hit {
+    pub key: Ustr,
+    pub kind: ResolvedKind,
+    pub owner: Option<PackageId>,
+}
+
+impl Hit {
+    fn member(&self) -> FamilyMember {
+        FamilyMember { key: self.key, owner: self.owner }
+    }
+
+    fn sort_key(&self) -> (String, Option<PackageId>) {
+        (self.key.as_str().to_string(), self.owner)
+    }
+}
+
+/// How a diagnostic names a hit: a view member by its view's package, since
+/// its bare key alone does not say which.
+fn hit_display(ws: &Workspace, hit: &Hit) -> String {
+    match hit.owner.and_then(|owner| ws.ns.package(owner)) {
+        Some(pkg) => format!("{}::{}", pkg.self_name, hit.key),
+        None if hit.owner == Some(STD_PACKAGE_ID) => format!("std::{}", hit.key),
+        None => hit.key.to_string(),
+    }
+}
+
+/// The owner of a callable found in module node `pkg_id`: a definition with
+/// no `DefMeta` there is the std view's or a legacy provider's, keyed by its
+/// bare legacy name.
+fn view_owner(ws: &Workspace, pkg_id: PackageId, key: Ustr, kind: ResolvedKind) -> Option<PackageId> {
+    (kind == ResolvedKind::Callable && !ws.defs.contains_key(&key)).then_some(pkg_id)
 }
 
 /// Where a path walk landed.
@@ -142,13 +191,16 @@ pub fn resolve_legacy_bare(ws: &Workspace, file: Ustr, name: Ustr) -> Result<Res
 /// imported operator (spec 8.5).
 pub enum CalleeFamily {
     Single(Resolved),
-    /// Every member key, deduplicated, plus the losing tiers' candidates.
-    Merged { keys: Vec<Ustr>, hidden: Vec<Ustr> },
+    /// Every member, deduplicated, plus the losing tiers' candidates.
+    Merged { members: Vec<FamilyMember>, hidden: Vec<Ustr> },
 }
 
 pub fn resolve_legacy_callee(ws: &Workspace, file: Ustr, name: Ustr) -> Result<CalleeFamily, String> {
     match legacy_name(ws, file, name) {
-        LegacyName::Family(keys) => Ok(CalleeFamily::Merged { keys, hidden: Vec::new() }),
+        LegacyName::Family(keys) => Ok(CalleeFamily::Merged {
+            members: keys.into_iter().map(|key| FamilyMember { key, owner: None }).collect(),
+            hidden: Vec::new(),
+        }),
         LegacyName::Bare => Ok(CalleeFamily::Single(plain(name))),
         LegacyName::Projected(entries) => projected(name, &entries).map(CalleeFamily::Single),
         LegacyName::Collision { owners, foreign } => Err(legacy_collision(name, &owners, &foreign)),
@@ -157,7 +209,7 @@ pub fn resolve_legacy_callee(ws: &Workspace, file: Ustr, name: Ustr) -> Result<C
 
 fn projected(name: Ustr, entries: &[bone_core::modules::LegacyProjectionEntry]) -> Result<Resolved, String> {
     if let [entry] = entries {
-        return Ok(Resolved { key: entry.key, kind: resolved_kind(entry.kind), hidden: Vec::new() });
+        return Ok(Resolved { key: entry.key, kind: resolved_kind(entry.kind), owner: None, hidden: Vec::new() });
     }
     Err(legacy_candidates(name, &entries.iter().map(|e| e.key).collect::<Vec<_>>()))
 }
@@ -199,7 +251,7 @@ pub fn resolve_bare(
     };
     match bind_bare(ws, frag, name)? {
         Bound::One(resolved, _) => Ok(resolved),
-        Bound::Several(hits, _, via) => Err(several(name, &hits, via)),
+        Bound::Several(hits, _, via) => Err(several(ws, name, &hits, via)),
         Bound::Unbound => Err(unbound(name)),
     }
 }
@@ -224,29 +276,31 @@ pub fn resolve_v1_unary(ws: &Workspace, frag: &FragmentScope, name: Ustr) -> Res
 
 fn v1_callee(ws: &Workspace, frag: &FragmentScope, name: Ustr) -> Result<Option<CalleeFamily>, String> {
     let operator = bone_core::hir::operator_entry(name.as_str()).is_some_and(|(_, overloadable)| overloadable);
-    let (mut keys, hidden) = match bind_bare(ws, frag, name)? {
+    let (mut hits, hidden) = match bind_bare(ws, frag, name)? {
         Bound::Unbound => return Ok(None),
         Bound::One(resolved, Tier::Std) => return Ok(Some(CalleeFamily::Single(resolved))),
         Bound::One(resolved, Tier::Scope) if !operator => return Ok(Some(CalleeFamily::Single(resolved))),
-        Bound::One(resolved, Tier::Scope) => (vec![resolved.key], resolved.hidden),
+        Bound::One(resolved, Tier::Scope) => {
+            (vec![Hit { key: resolved.key, kind: resolved.kind, owner: resolved.owner }], resolved.hidden)
+        }
         Bound::Several(hits, hidden, via) => {
-            if hits.iter().any(|(_, kind)| *kind != ResolvedKind::Callable) {
-                return Err(several(name, &hits, via));
+            if hits.iter().any(|hit| hit.kind != ResolvedKind::Callable) {
+                return Err(several(ws, name, &hits, via));
             }
-            (hits.into_iter().map(|(key, _)| key).collect(), hidden)
+            (hits, hidden)
         }
     };
     if operator {
-        if let Some((key, bone_core::modules::DefKind::Callable)) = ws.ns.std_definition(name) {
-            keys.push(key);
+        if let Some(std) = std_definition(ws, name).filter(|r| r.kind == ResolvedKind::Callable) {
+            hits.push(Hit { key: std.key, kind: std.kind, owner: std.owner });
         }
     }
-    keys.sort_by_key(|k| k.as_str().to_string());
-    keys.dedup();
-    if let [key] = keys[..] {
-        return Ok(Some(CalleeFamily::Single(Resolved { key, kind: ResolvedKind::Callable, hidden })));
+    hits.sort_by_key(Hit::sort_key);
+    hits.dedup();
+    if let [hit] = hits[..] {
+        return Ok(Some(CalleeFamily::Single(Resolved::of(hit, hidden))));
     }
-    Ok(Some(CalleeFamily::Merged { keys, hidden }))
+    Ok(Some(CalleeFamily::Merged { members: hits.iter().map(Hit::member).collect(), hidden }))
 }
 
 /// Which tier bound a name: the fragment's own scope (tiers 2-4) or the std
@@ -262,7 +316,7 @@ enum Bound {
     One(Resolved, Tier),
     /// Several distinct definitions at one tier, sorted by key, the lower
     /// tier's candidates they hide, and which tier bound them.
-    Several(Vec<(Ustr, ResolvedKind)>, Vec<Ustr>, Via),
+    Several(Vec<Hit>, Vec<Ustr>, Via),
     /// No tier binds the name.
     Unbound,
 }
@@ -286,27 +340,27 @@ fn bind_bare(ws: &Workspace, frag: &FragmentScope, name: Ustr) -> Result<Bound, 
     let own = explicit_members(ws, &viewers, frag.package, &frag.module_path, name, &mut Vec::new())?;
     if let Some(own) = own {
         let not_found = || format!("`{name}` did not resolve to any definition");
-        let (key, kind) = collapse(own, name, not_found, "definitions")?;
-        let hidden: Vec<Ustr> = glob_hits.iter().map(|(k, _)| *k).collect();
-        return Ok(Bound::One(Resolved { key, kind, hidden }, Tier::Scope));
+        let hit = collapse(ws, own, name, not_found, "definitions")?;
+        let hidden: Vec<Ustr> = glob_hits.iter().map(|hit| hit.key).collect();
+        return Ok(Bound::One(Resolved::of(hit, hidden), Tier::Scope));
     }
 
     // Tier 3: the fragment's explicit imports. A bound name does not fall
     // through, even if a target is missing or a module. Several routes to
     // one definition are that definition once.
     if let Some(targets) = frag.named.get(&name) {
-        let hidden: Vec<Ustr> = glob_hits.iter().map(|(k, _)| *k).collect();
-        let mut hits: Vec<(Ustr, ResolvedKind)> = Vec::new();
+        let hidden: Vec<Ustr> = glob_hits.iter().map(|hit| hit.key).collect();
+        let mut hits: Vec<Hit> = Vec::new();
         for target in targets {
             match walk_path(ws, frag, &[], target, WalkMode::Definition, &mut Vec::new())? {
-                Landing::Def(resolved) => hits.push((resolved.key, resolved.kind)),
+                Landing::Def(r) => hits.push(Hit { key: r.key, kind: r.kind, owner: r.owner }),
                 Landing::Module(..) => return Err(format!("`{name}` names a module, not a definition")),
             }
         }
-        hits.sort_by_key(|(k, _)| k.as_str().to_string());
-        hits.dedup_by_key(|(k, _)| *k);
+        hits.sort_by_key(Hit::sort_key);
+        hits.dedup();
         return Ok(match hits[..] {
-            [(key, kind)] => Bound::One(Resolved { key, kind, hidden }, Tier::Scope),
+            [hit] => Bound::One(Resolved::of(hit, hidden), Tier::Scope),
             _ => Bound::Several(hits, hidden, Via::Imports),
         });
     }
@@ -316,7 +370,7 @@ fn bind_bare(ws: &Workspace, frag: &FragmentScope, name: Ustr) -> Result<Bound, 
     // HashMap-order pick (spec 8.3 / 8.7).
     match glob_hits[..] {
         [] => {}
-        [(key, kind)] => return Ok(Bound::One(Resolved { key, kind, hidden: Vec::new() }, Tier::Scope)),
+        [hit] => return Ok(Bound::One(Resolved::of(hit, Vec::new()), Tier::Scope)),
         _ => return Ok(Bound::Several(glob_hits, Vec::new(), Via::Globs)),
     }
 
@@ -336,9 +390,9 @@ fn unbound(name: Ustr) -> String {
 /// Several imports or globs of `name` where one definition is wanted: a
 /// composed callable family used as a value, or definitions that cannot
 /// compose (spec 8.3).
-fn several(name: Ustr, hits: &[(Ustr, ResolvedKind)], via: Via) -> String {
-    let keys = hits.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>().join(", ");
-    let callables = hits.iter().all(|(_, kind)| *kind == ResolvedKind::Callable);
+fn several(ws: &Workspace, name: Ustr, hits: &[Hit], via: Via) -> String {
+    let keys = hits.iter().map(|hit| hit_display(ws, hit)).collect::<Vec<_>>().join(", ");
+    let callables = hits.iter().all(|hit| hit.kind == ResolvedKind::Callable);
     match (via, callables) {
         (Via::Imports, true) => {
             format!("`{name}` names an overload family of several imports ({keys}), not a single definition")
@@ -353,16 +407,21 @@ fn several(name: Ustr, hits: &[(Ustr, ResolvedKind)], via: Via) -> String {
     }
 }
 
+/// A member of the std view. A std callable's key is the bare name legacy
+/// files share, so it is owned by the std view: only the standard library's
+/// own overloads belong to it (spec 5).
 fn std_definition(ws: &Workspace, name: Ustr) -> Option<Resolved> {
     if bone_core::modules::is_intrinsic_key_in(name, &["Map", "Coroutine", "Iterator"]) {
         return Some(Resolved {
             key: name,
             kind: ResolvedKind::Type,
+            owner: None,
             hidden: Vec::new(),
         });
     }
     let (key, kind) = ws.ns.std_definition(name)?;
-    Some(Resolved { key, kind: resolved_kind(kind), hidden: Vec::new() })
+    let kind = resolved_kind(kind);
+    Some(Resolved { key, kind, owner: view_owner(ws, STD_PACKAGE_ID, key, kind), hidden: Vec::new() })
 }
 
 /// Tier 4 candidates for `name`, deduplicated and sorted by key: what every
@@ -375,7 +434,7 @@ fn glob_candidates(
     ws: &Workspace,
     frag: &FragmentScope,
     name: Ustr,
-) -> Result<Vec<(Ustr, ResolvedKind)>, String> {
+) -> Result<Vec<Hit>, String> {
     let viewers = [Viewer::Fragment(frag)];
     let mut visiting = Vec::new();
     let mut hits =
@@ -389,8 +448,8 @@ fn glob_candidates(
             hits.extend(members_of(ws, &viewers, pkg_id, &path, name, &mut visiting)?.found);
         }
     }
-    hits.sort_by_key(|(k, _)| k.as_str().to_string());
-    hits.dedup_by_key(|(k, _)| *k);
+    hits.sort_by_key(Hit::sort_key);
+    hits.dedup();
     Ok(hits)
 }
 
@@ -444,7 +503,7 @@ fn all_admit(ws: &Workspace, viewers: &[Viewer], vis: &NsVisibility, pkg: u32, p
 #[derive(Debug, Default)]
 pub struct Members {
     /// Distinct definitions the viewers may name, sorted by key.
-    pub found: Vec<(Ustr, ResolvedKind)>,
+    pub found: Vec<Hit>,
     /// Some binding of the name exists that a viewer may not name.
     pub denied: bool,
     /// An export chain came back to a binding it was already following.
@@ -463,8 +522,8 @@ impl Members {
     }
 
     fn finish(mut self) -> Self {
-        self.found.sort_by_key(|(k, _)| k.as_str().to_string());
-        self.found.dedup_by_key(|(k, _)| *k);
+        self.found.sort_by_key(Hit::sort_key);
+        self.found.dedup();
         self
     }
 }
@@ -537,7 +596,7 @@ fn explicit_members(
     if let Some(kind) = owned_kind(node, name) {
         let key = first_owned(node, name).expect("kind implies key");
         if all_admit_key(ws, viewers, key) {
-            out.found.push((key, kind));
+            out.found.push(Hit { key, kind, owner: view_owner(ws, pkg_id, key, kind) });
         } else {
             out.denied = true;
         }
@@ -693,11 +752,12 @@ fn collect_member_names(
 /// One definition out of a lookup of `name`, or the diagnostic for why there
 /// is none. `not_found` renders the diagnostic for a name nothing binds.
 fn collapse(
+    ws: &Workspace,
     members: Members,
     name: Ustr,
     not_found: impl Fn() -> String,
     what: &str,
-) -> Result<(Ustr, ResolvedKind), String> {
+) -> Result<Hit, String> {
     match members.found.as_slice() {
         [single] => Ok(*single),
         [] if members.cycle => Err("circular `use` binding with no defining target".to_string()),
@@ -706,7 +766,7 @@ fn collapse(
         [] => Err(not_found()),
         many => Err(format!(
             "`{name}` is ambiguous between {what} {}",
-            many.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>().join(", ")
+            many.iter().map(|hit| hit_display(ws, hit)).collect::<Vec<_>>().join(", ")
         )),
     }
 }
@@ -883,10 +943,11 @@ fn module_display(ws: &Workspace, (package, path): &(u32, Vec<Ustr>)) -> String 
 pub enum MemberTarget {
     /// A global or constant: the DefKey.
     Global(Ustr),
-    /// A callable family: the key the family is registered under. A std
-    /// family has no `DefMeta`, so the kind has to come from the member
-    /// lookup rather than `ws.defs`.
-    Callable(Ustr),
+    /// A callable family: the key the family is registered under and the
+    /// view that owns a legacy key ([`Hit::owner`]). A std family has no
+    /// `DefMeta`, so the kind has to come from the member lookup rather than
+    /// `ws.defs`.
+    Callable { key: Ustr, owner: Option<PackageId> },
     /// `path::Type::Variant` — the enum's DefKey and the variant name.
     EnumVariant { enum_key: Ustr, variant: Ustr },
     /// A bare type name (for qualified struct literals).
@@ -950,7 +1011,7 @@ pub fn resolve_member_path(
         }
         let members = module_members(ws, &[Viewer::Fragment(frag)], pkg_id, &cur, seg)?;
         let not_found = || unresolved_value_path(ws, frag, segments);
-        let (key, kind) = collapse(members, seg, not_found, "glob re-exports")?;
+        let Hit { key, kind, owner } = collapse(ws, members, seg, not_found, "glob re-exports")?;
         if kind == ResolvedKind::Type {
             if is_last {
                 return Ok(MemberTarget::Type(key));
@@ -972,7 +1033,7 @@ pub fn resolve_member_path(
             return Err(format!("`{}` cannot be traversed", key));
         }
         if kind == ResolvedKind::Callable {
-            return Ok(MemberTarget::Callable(key));
+            return Ok(MemberTarget::Callable { key, owner });
         }
         return Ok(MemberTarget::Global(key));
     }
@@ -1192,8 +1253,8 @@ fn walk_path(
         WalkMode::Definition => {
             let members = walk_members(ws, frag, outer, path, visiting)?;
             let not_found = || format!("`{}` did not resolve to any definition", joined(&path.segments));
-            let (key, kind) = collapse(members, last_of(&path.segments), not_found, "glob re-exports")?;
-            Ok(Landing::Def(Resolved { key, kind, hidden: Vec::new() }))
+            let hit = collapse(ws, members, last_of(&path.segments), not_found, "glob re-exports")?;
+            Ok(Landing::Def(Resolved::of(hit, Vec::new())))
         }
     }
 }
@@ -1300,7 +1361,7 @@ pub fn resolve_variant_pattern(
                 Err("mismatched variant path".to_string())
             }
         }
-        MemberTarget::Global(key) | MemberTarget::Callable(key) => {
+        MemberTarget::Global(key) | MemberTarget::Callable { key, .. } => {
             Err(format!("`{key}` is not an enum type"))
         }
     }
@@ -1311,7 +1372,7 @@ fn last_of(segments: &[Ustr]) -> Ustr {
 }
 
 fn plain(name: Ustr) -> Resolved {
-    Resolved { key: name, kind: ResolvedKind::Binding, hidden: Vec::new() }
+    Resolved { key: name, kind: ResolvedKind::Binding, owner: None, hidden: Vec::new() }
 }
 
 fn owned_kind(node: &bone_core::modules::NsNode, name: Ustr) -> Option<ResolvedKind> {

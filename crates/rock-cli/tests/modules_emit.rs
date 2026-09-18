@@ -736,3 +736,67 @@ fn a_v1_package_needs_allow_legacy_to_reach_a_legacy_dependency() {
     assert!(stderr.contains("allow_legacy = true"), "the refusal should name the fix\nstdout:\n{stdout}\nstderr:\n{stderr}");
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// A legacy game's overload of a std-named function is not in the std
+/// family a v1 library reaches with no import (spec 5, 8.3): the library's
+/// `smoothstep(0, 10, 5)` runs the standard library's body, not the game's
+/// better-fitting int overload (`7777` marks it), and the library's
+/// `smoothstep` taken as a value is the std definition; the game's own call
+/// still reaches its overload.
+#[test]
+fn a_v1_library_does_not_reach_its_consumers_overload_of_a_std_function() {
+    let root = std::env::temp_dir().join("rock_modules_emit_std_isolation");
+    let _ = std::fs::remove_dir_all(&root);
+    v1_lib(
+        &root.join("geo"),
+        "geo",
+        "pub fn ease() -> float {\n    smoothstep(0, 10, 5)\n}\n\n\
+         pub fn ease_value() -> float {\n    let f = smoothstep\n    f(0.0, 10.0, 5.0)\n}\n",
+    );
+    let app = root.join("app");
+    std::fs::create_dir_all(&app).unwrap();
+    std::fs::write(
+        app.join("stick.toml"),
+        "[package]\nname = \"legacyapp\"\ntype = \"bin\"\n\n[dependencies]\ngeo = { path = \"../geo\" }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        app.join("main.rock"),
+        "fn smoothstep(a: int, b: int, t: int) -> int {\n    7777\n}\n\n\
+         fn main() {\n    print(\"lib={ease()} val={ease_value()} own={smoothstep(0, 10, 5)}\")\n}\n",
+    )
+    .unwrap();
+    let (stdout, stderr, ok) = run(&app);
+    assert!(ok, "the mixed build failed\nstdout:\n{stdout}\nstderr:\n{stderr}");
+    assert!(
+        stdout.contains("lib=0.5 val=0.5 own=7777"),
+        "the v1 library must run the std body and the game its own\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// `x_lib::mix` names the overloads x_lib's own files define (spec 3.2), not
+/// another legacy package's better-fitting `mix(int)` (`5000` marks it).
+#[test]
+fn a_legacy_providers_path_runs_only_the_providers_overloads() {
+    let root = std::env::temp_dir().join("rock_modules_emit_provider_isolation");
+    let _ = std::fs::remove_dir_all(&root);
+    legacy_lib(&root.join("x_lib"), "x_lib", "fn mix(a: float) -> float {\n    a + 0.25\n}\n");
+    legacy_lib(&root.join("y_lib"), "y_lib", "fn mix(a: int) -> int {\n    5000\n}\n");
+    let app = root.join("app");
+    std::fs::create_dir_all(&app).unwrap();
+    std::fs::write(
+        app.join("stick.toml"),
+        "[package]\nname = \"v1app\"\ntype = \"bin\"\n\n[language]\nmodules = \"v1\"\n\n[dependencies]\n\
+         x_lib = { path = \"../x_lib\", allow_legacy = true }\ny_lib = { path = \"../y_lib\", allow_legacy = true }\n",
+    )
+    .unwrap();
+    std::fs::write(app.join("main.rock"), "fn main() {\n    print(\"x={x_lib::mix(1)} y={y_lib::mix(1)}\")\n}\n").unwrap();
+    let (stdout, stderr, ok) = run(&app);
+    assert!(ok, "the v1-over-legacy build failed\nstdout:\n{stdout}\nstderr:\n{stderr}");
+    assert!(
+        stdout.contains("x=1.25 y=5000"),
+        "each provider path must run that provider's own body\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}

@@ -111,7 +111,9 @@ fn g(p: P, q: P) -> float {
             //^ int
     let r = lerp(p, q, 0.5)
             //^ P
-    let x = lerp(1.0, 2.0, 0.5)
+    // The glob binds `lerp` to x_lib's family, which hides the std one
+    // (modules_legacy_isolation.rock).
+    let x = std::lerp(1.0, 2.0, 0.5)
             //^ float
     r.x + x
 }

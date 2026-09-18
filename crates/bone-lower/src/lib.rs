@@ -47,9 +47,9 @@ pub fn record_use_paths(a: &Ast, ctx: &mut LowerCtx) {
 /// The segment record for what a member-wise path resolved to.
 fn member_segment_target(target: &resolve::MemberTarget) -> hir::SegmentTarget {
     match *target {
-        resolve::MemberTarget::Global(key) | resolve::MemberTarget::Callable(key) | resolve::MemberTarget::Type(key) => {
-            hir::SegmentTarget::Def(key)
-        }
+        resolve::MemberTarget::Global(key)
+        | resolve::MemberTarget::Callable { key, .. }
+        | resolve::MemberTarget::Type(key) => hir::SegmentTarget::Def(key),
         resolve::MemberTarget::EnumVariant { enum_key, variant } => hir::SegmentTarget::Variant { enum_key, variant },
     }
 }
@@ -255,26 +255,27 @@ impl<'a> LowerCtx<'a> {
         Ok(self.workspace.enums_by_name.contains_key(&key).then_some(key))
     }
 
-    /// The DefKey of a v1 path that is CALLED BY NAME: a callable family, or a
+    /// The DefKey of a v1 path that is CALLED BY NAME -- a callable family, or a
     /// newtype, whose constructor is a call on the type's own name and which the
-    /// bare-name route already resolves this way. `None` for a legacy fragment, a
-    /// path that does not resolve, or one that names a struct, enum, global or
-    /// enum variant -- those keep the general call route.
-    fn v1_path_callable(&self, path: &skull_parser::Path) -> Option<Ustr> {
+    /// bare-name route already resolves this way -- with the view owning a
+    /// legacy family's key. `None` for a legacy fragment, a path that does not
+    /// resolve, or one that names a struct, enum, global or enum variant --
+    /// those keep the general call route.
+    fn v1_path_callable(&self, path: &skull_parser::Path) -> Option<(Ustr, Option<bone_core::modules::PackageId>)> {
         let frag = self.v1_scope()?;
         let use_path = bone_core::modules::UsePathRef {
             from_root: path.from_root,
             segments: path.segments.iter().map(|i| i.name).collect(),
         };
         match self.probed(|| resolve::resolve_member_path(self.workspace, frag, &use_path)) {
-            Ok(resolve::MemberTarget::Callable(key)) => Some(key),
+            Ok(resolve::MemberTarget::Callable { key, owner }) => Some((key, owner)),
             Ok(resolve::MemberTarget::Global(key))
                 if matches!(
                     self.workspace.defs.get(&key).map(|m| m.kind),
                     Some(bone_core::modules::DefKind::Callable)
                 ) =>
             {
-                Some(key)
+                Some((key, None))
             }
             // `p::NT(x)`. As a VALUE the path is the type, and the call then
             // lowers as a call of a value: inference reports the key as an
@@ -283,7 +284,7 @@ impl<'a> LowerCtx<'a> {
             Ok(resolve::MemberTarget::Type(key))
                 if self.workspace.newtypes_by_name.contains_key(&key) =>
             {
-                Some(key)
+                Some((key, None))
             }
             _ => None,
         }
@@ -369,7 +370,7 @@ impl<'a> LowerCtx<'a> {
             }
         }
         .map_err(|msg| CompilerError::new_with_label(span, msg))?;
-        let resolved = resolved.unwrap_or(resolve::CalleeFamily::Merged { keys: Vec::new(), hidden: Vec::new() });
+        let resolved = resolved.unwrap_or(resolve::CalleeFamily::Merged { members: Vec::new(), hidden: Vec::new() });
         Ok(self.record_family(name, resolved))
     }
 
@@ -379,11 +380,11 @@ impl<'a> LowerCtx<'a> {
         let file = self.module.file;
         match resolved {
             resolve::CalleeFamily::Single(r) if self.v1_scope().is_some() => {
-                (r.key, hir::CallFamily::resolved(r.key, &r.hidden))
+                (r.key, hir::CallFamily::resolved(r.key, r.owner, &r.hidden))
             }
             resolve::CalleeFamily::Single(r) => (r.key, hir::CallFamily::from_name(r.key)),
-            resolve::CalleeFamily::Merged { keys, hidden } => {
-                self.module.call_families.insert(name, keys);
+            resolve::CalleeFamily::Merged { members, hidden } => {
+                self.module.call_families.insert(name, members);
                 (name, hir::CallFamily::merged(name, file, &hidden))
             }
         }
@@ -1384,7 +1385,7 @@ pub fn lower_expr_value(
                 let (callee_key, family) = if local.is_none() && name.name.as_str() != "_" {
                     ctx.resolve_callee_family(name.name, name.span)?
                 } else if ctx.v1_scope().is_some() {
-                    (name.name, hir::CallFamily::resolved(name.name, &[]))
+                    (name.name, hir::CallFamily::resolved(name.name, None, &[]))
                 } else {
                     (name.name, hir::CallFamily::from_name(name.name))
                 };
@@ -1447,7 +1448,7 @@ pub fn lower_expr_value(
             ExprKind::Path { path, generic_args: path_generics }
                 if path_generics.is_empty() && ctx.v1_path_callable(path).is_some() =>
             {
-                let key = ctx.v1_path_callable(path).expect("guard resolved it");
+                let (key, owner) = ctx.v1_path_callable(path).expect("guard resolved it");
                 ctx.record_path(body, TyPos::Body, path, hir::SegmentTarget::Def(key));
                 let args_range = lower_exprs(ctx, a, body, scope, args.iter().map(|x| &x.value))?;
                 for (arg_idx, ca) in args_range.into_iter().zip(args.iter()) {
@@ -1459,7 +1460,7 @@ pub fn lower_expr_value(
                     callee: hir::Callee::Unresolved { name: key, name_span: e.span },
                     args: args_range,
                     generic_args,
-                    family: hir::CallFamily::resolved(key, &[]),
+                    family: hir::CallFamily::resolved(key, owner, &[]),
                 }
             }
 
@@ -1764,7 +1765,7 @@ pub fn lower_expr_value(
                 ctx.record_path(body, TyPos::Body, path, member_segment_target(t));
             }
             match target {
-                Ok(resolve::MemberTarget::Global(key) | resolve::MemberTarget::Callable(key)) => {
+                Ok(resolve::MemberTarget::Global(key) | resolve::MemberTarget::Callable { key, .. }) => {
                     Expr::Global(key)
                 }
                 Ok(resolve::MemberTarget::EnumVariant { enum_key, variant }) => {
@@ -1832,7 +1833,7 @@ pub fn lower_expr_value(
                         args: hir::VariantArgs::Record(fields_range),
                     }
                 }
-                resolve::MemberTarget::Global(key) | resolve::MemberTarget::Callable(key) => {
+                resolve::MemberTarget::Global(key) | resolve::MemberTarget::Callable { key, .. } => {
                     return Err(CompilerError::new_with_label(
                         e.span,
                         format!("`{key}` names a value, not a record"),
@@ -2180,7 +2181,48 @@ pub fn lower_expr(
     }
 
     let hir_e = lower_expr_value(ctx, a, body, scope, e)?;
-    Ok(ctx.alloc_expr(body, hir_e, e.span))
+    Ok(alloc_value(ctx, a, body, e, hir_e))
+}
+
+/// Allocate `hir_e`, lowered from `e`. Every site that allocates a lowered
+/// expression next to its source goes through here, so a v1 function value
+/// records the view that owns it wherever it appears.
+fn alloc_value(ctx: &mut LowerCtx, a: &Ast, body: &mut Body, e: &skull_parser::ExprData, hir_e: Expr) -> Idx<Expr> {
+    let idx = ctx.alloc_expr(body, hir_e, e.span);
+    if let Expr::Global(key) = hir_e
+        && let Some(owner) = value_owner(ctx, a, e, key)
+    {
+        body.value_owners.insert(idx, owner);
+    }
+    idx
+}
+
+/// The view owning a legacy callable a v1 value expression names
+/// (`Body::value_owners`): the lookup that lowered `e` to
+/// `Expr::Global(key)`, asked again for its owner. Only a definition with no
+/// `DefMeta` can have one, so a v1 definition is not looked up twice.
+fn value_owner(ctx: &LowerCtx, a: &Ast, e: &skull_parser::ExprData, key: Ustr) -> Option<bone_core::modules::PackageId> {
+    let frag = ctx.v1_scope()?;
+    if ctx.workspace.defs.contains_key(&key) {
+        return None;
+    }
+    match &e.kind {
+        ExprKind::Paren(inner) => value_owner(ctx, a, a.e(inner), key),
+        ExprKind::Ident(name) | ExprKind::FunctionRef(name) | ExprKind::AnaphoricIdent(name) => {
+            ctx.probed(|| resolve::resolve_bare(ctx.workspace, Some(frag), name.name)).ok()?.owner
+        }
+        ExprKind::Path { path, .. } => {
+            let use_path = bone_core::modules::UsePathRef {
+                from_root: path.from_root,
+                segments: path.segments.iter().map(|i| i.name).collect(),
+            };
+            match ctx.probed(|| resolve::resolve_member_path(ctx.workspace, frag, &use_path)) {
+                Ok(resolve::MemberTarget::Callable { owner, .. }) => owner,
+                _ => None,
+            }
+        }
+        _ => None,
+    }
 }
 
 fn function_footprint_lo(annotations: &[Annotation], f: &FunctionDef) -> usize {
@@ -3032,15 +3074,15 @@ fn lower_exprs<'a>(
 
     for e in exprs {
         let e = a.e(e);
-        lowered_args.push((lower_expr_value(ctx, a, body, scope, e)?, e.span));
+        lowered_args.push((lower_expr_value(ctx, a, body, scope, e)?, e));
     }
 
     // TODO: lets also figure out this min/max thing as an abstraction maybe?
     let mut min = None;
     let mut max = None;
 
-    for (v, span) in lowered_args {
-        let id = ctx.alloc_expr(body, v, span);
+    for (v, e) in lowered_args {
+        let id = alloc_value(ctx, a, body, e, v);
         min = min.or(Some(id));
         max = Some(id);
     }
@@ -3081,7 +3123,7 @@ fn lower_statements(
         if Some(i) == tail_pos {
             if let skull_parser::StatementKind::Expression(e) = &s.kind {
                 let e = a.e(e);
-                tail = Some((lower_expr_value(ctx, a, body, scope, e)?, e.span));
+                tail = Some((lower_expr_value(ctx, a, body, scope, e)?, e));
             }
         } else {
             lowered.push((lower_statement_value(ctx, a, body, scope, s)?, s.span));
@@ -3092,8 +3134,8 @@ fn lower_statements(
     let mut min = None;
     let mut max = None;
 
-    let tail = if let Some((t, span)) = tail {
-        Some(ctx.alloc_expr(body, t, span))
+    let tail = if let Some((t, e)) = tail {
+        Some(alloc_value(ctx, a, body, e, t))
     } else {
         None
     };
@@ -3546,7 +3588,7 @@ fn lower_interp_parts(
             P::Expr(e, spec) => {
                 let e = a.e(e);
                 let val = lower_expr_value(ctx, a, body, scope, e)?;
-                let expr = ctx.alloc_expr(body, val, e.span);
+                let expr = alloc_value(ctx, a, body, e, val);
 
                 let spec = match spec {
                     Some(s) => {
@@ -3554,7 +3596,7 @@ fn lower_interp_parts(
                             Some(we) => {
                                 let we = a.e(&we);
                                 let v = lower_expr_value(ctx, a, body, scope, we)?;
-                                Some(ctx.alloc_expr(body, v, we.span))
+                                Some(alloc_value(ctx, a, body, we, v))
                             }
 
                             None => None,
@@ -3564,7 +3606,7 @@ fn lower_interp_parts(
                             Some(pe) => {
                                 let pe = a.e(&pe);
                                 let v = lower_expr_value(ctx, a, body, scope, pe)?;
-                                Some(ctx.alloc_expr(body, v, pe.span))
+                                Some(alloc_value(ctx, a, body, pe, v))
                             }
 
                             None => None,
@@ -3927,7 +3969,7 @@ fn lower_placeholder_lambda(
     let body_val = lower_expr_value(ctx, a, body, lambda_scope, e);
     ctx.placeholder_param = prev;
 
-    let body_idx = ctx.alloc_expr(body, body_val?, e.span);
+    let body_idx = alloc_value(ctx, a, body, e, body_val?);
 
     Ok(Expr::Lambda {
         params: IdxRange::new_inclusive(param..=param),
