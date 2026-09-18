@@ -59,6 +59,14 @@ pub fn stdlib_files() -> &'static [StdlibFile] {
     })
 }
 
+/// The source-file id the loaders give stdlib file `name`. Bone reads the
+/// compiler-owned `std` package and the std-only primitives from this
+/// spelling (`bone_core::modules::is_stdlib_module_file`), so every host that
+/// feeds bone the stdlib -- the CLI and the editor alike -- keys it this way.
+pub fn stdlib_file_id(name: &str) -> String {
+    format!("<stdlib>/{name}")
+}
+
 /// Load all stdlib files and apply preprocessing for the given backend name.
 pub fn load_stdlib_for_backend(backend: &str) -> Vec<(String, String, String)> {
     let mut result = Vec::new();
@@ -66,7 +74,7 @@ pub fn load_stdlib_for_backend(backend: &str) -> Vec<(String, String, String)> {
     let context = PreprocessorContext::new(backend);
 
     for stdlib_file in stdlib_files() {
-        let file_path = format!("<stdlib>/{}", stdlib_file.name);
+        let file_path = stdlib_file_id(stdlib_file.name);
 
         // Apply preprocessing to the file contents
         let processed_contents = match preprocess(stdlib_file.contents, &context) {

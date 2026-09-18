@@ -61,37 +61,70 @@ fn reparse_user_file(uf: &bone_incremental::session::UserFile, path: &str) -> Op
 // Warm stdlib (parsed once, cloned into every session)
 // ---------------------------------------------------------------------------
 
-/// Canonical on-disk path of a stdlib file, keyed exactly like a project file
-/// (`canon`/`root_for` produce the same form), so the warm module a user opens
-/// resolves to the SAME `ModuleId` -- no duplicate, no self-collision -- and
-/// source-based queries find the stdlib in `texts`.
-fn stdlib_path(name: &str) -> String {
-    canonicalize_lenient(&rock_host::stdlib_loader::stdlib_dir().join(name).to_string_lossy())
+/// Each stdlib file's session id and canonical on-disk path. Computed once:
+/// `canonicalize` is a syscall and the id <-> path translation below runs on
+/// every request.
+fn stdlib_paths() -> &'static [(String, String)] {
+    static PATHS: OnceLock<Vec<(String, String)>> = OnceLock::new();
+    PATHS.get_or_init(|| {
+        let dir = rock_host::stdlib_loader::stdlib_dir();
+        rock_host::stdlib_loader::stdlib_files()
+            .iter()
+            .map(|f| {
+                (
+                    rock_host::stdlib_loader::stdlib_file_id(f.name),
+                    canonicalize_lenient(&dir.join(f.name).to_string_lossy()),
+                )
+            })
+            .collect()
+    })
 }
 
-/// Stdlib sources keyed by canonical path, seeded into every project's `texts`
-/// so default-value slicing, `workspace_symbols`, and span->text see the stdlib
-/// like any other file.
+/// The session keys the stdlib by the loader's stdlib ids (`<stdlib>/name`,
+/// the CLI's spelling), because bone reads std ownership -- the v1 prelude,
+/// the std-only primitives -- from that spelling. The editor names the same
+/// files by their real paths. These two functions are the only translation
+/// between the two: every public entry maps an editor path in through
+/// [`session_file_id`] (via `canon`), and everything handed back to the editor
+/// -- a location, a diagnostic's file, a symbol -- goes out through
+/// [`editor_path`].
+fn session_file_id(canonical_path: String) -> String {
+    match stdlib_paths().iter().find(|(_, p)| *p == canonical_path) {
+        Some((id, _)) => id.clone(),
+        None => canonical_path,
+    }
+}
+
+/// The editor's path for a session file id (see [`session_file_id`]).
+pub fn editor_path(id: &str) -> Cow<'_, str> {
+    stdlib_paths()
+        .iter()
+        .find(|(sid, _)| sid == id)
+        .map_or(Cow::Borrowed(id), |(_, p)| Cow::Borrowed(p.as_str()))
+}
+
+/// Stdlib sources keyed by their session ids, seeded into every project's
+/// `texts` so default-value slicing, `workspace_symbols`, and span->text see
+/// the stdlib like any other file.
 fn stdlib_texts() -> Vec<(String, String)> {
     rock_host::stdlib_loader::stdlib_files()
         .iter()
-        .map(|f| (stdlib_path(f.name), f.contents.to_string()))
+        .map(|f| (rock_host::stdlib_loader::stdlib_file_id(f.name), f.contents.to_string()))
         .collect()
 }
 
-/// The real stdlib, parsed through skull-parser (bone's front end) keyed by each
-/// file's REAL canonical path. Opening a stdlib buffer then interns to the same
-/// `ModuleId` as the warm copy (`warm_mids` still distinguishes warm from user
-/// code for lints/ctags policy), so it's navigable and diagnosable without a
-/// second colliding module. Parsing with the path stamps every span, so bone's
-/// `ModuleId` (the first item's `span.file`) lands on it directly. Parsed once.
+/// The real stdlib, parsed through skull-parser (bone's front end) under its
+/// session ids. Opening a stdlib buffer maps its path to the same id and so
+/// interns to the same `ModuleId` as the warm copy (`warm_mids` still
+/// distinguishes warm from user code for lints/ctags policy), so it's
+/// navigable and diagnosable without a second colliding module. Parsed once.
 fn warm_stdlib() -> Vec<skull_parser::Ast> {
     static WARM: OnceLock<Vec<skull_parser::Ast>> = OnceLock::new();
     WARM.get_or_init(|| {
         rock_host::stdlib_loader::stdlib_files()
             .iter()
             .filter_map(|f| {
-                let id = Ustr::from(stdlib_path(f.name).as_str());
+                let id = Ustr::from(rock_host::stdlib_loader::stdlib_file_id(f.name).as_str());
                 match skull_parser::parse_module(f.contents, id) {
                     Ok(m) => Some(m),
                     Err(e) => {
@@ -311,7 +344,7 @@ impl BoneWorkspace {
     /// not-yet-saved buffer). Idempotent: discovery and `root_for`/`stick_root`
     /// already canonicalize, so re-canonicalizing here yields the same key.
     fn canon_str(path: &str) -> String {
-        canonicalize_lenient(path)
+        session_file_id(canonicalize_lenient(path))
     }
 
     /// `canon_str` with memoization -- for the `&mut self` mutators on the
@@ -337,7 +370,8 @@ impl BoneWorkspace {
     /// standalone file with no project. Determines whether `update` should
     /// batch-index siblings (real project) or stay single-file (scratch file).
     fn stick_root(path: &str) -> Option<PathBuf> {
-        let p = Path::new(path);
+        let on_disk = editor_path(path);
+        let p = Path::new(on_disk.as_ref());
         let canon = fs_err::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
         let mut cur = canon.parent();
         while let Some(dir) = cur {
@@ -356,7 +390,8 @@ impl BoneWorkspace {
         if let Some(root) = Self::stick_root(path) {
             return root;
         }
-        let p = Path::new(path);
+        let on_disk = editor_path(path);
+        let p = Path::new(on_disk.as_ref());
         let canon = fs_err::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
         canon
             .parent()
@@ -416,7 +451,7 @@ impl BoneWorkspace {
                     .texts
                     .keys()
                     .map(|id| ModuleRecency {
-                        id: id.clone(),
+                        id: editor_path(id).into_owned(),
                         ago_ms: proj
                             .module_touched
                             .get(id)
@@ -761,7 +796,10 @@ impl BoneWorkspace {
             );
         }
 
-        by_file.into_iter().collect()
+        by_file
+            .into_iter()
+            .map(|(file, diags)| (editor_path(&file).into_owned(), diags))
+            .collect()
     }
 
     /// Drop a closed/removed file from its session.
@@ -980,7 +1018,7 @@ impl BoneWorkspace {
     pub fn document_highlight(&self, path: &str, pos: Position) -> Vec<DocumentHighlight> {
         let path_c = self.canon(path);
         let path = path_c.as_str();
-        let want = format!("file://{path}");
+        let want = format!("file://{}", editor_path(path));
         self.references(path, pos)
             .into_iter()
             .filter(|loc| loc.uri.as_str() == want)
@@ -2302,7 +2340,7 @@ impl BoneWorkspace {
                 let Some(mid) = user_module_for_path(ws, file) else {
                     continue;
                 };
-                let Ok(uri) = <Uri as std::str::FromStr>::from_str(&format!("file://{file}")) else {
+                let Ok(uri) = <Uri as std::str::FromStr>::from_str(&format!("file://{}", editor_path(file))) else {
                     continue;
                 };
                 // Built lazily on the first match in this file: a Ctrl-T query
@@ -2377,14 +2415,14 @@ impl BoneWorkspace {
         // Iterating the workspace modules directly (vs `texts.keys()` +
         // `user_module_for_path`) can't silently drop a file on a path mismatch
         // and needs no canonicalization round-trip. The warm stdlib is included
-        // (its modules carry real canonical paths), so `vec_push` & co. are
+        // (written under its real path, `editor_path`), so `vec_push` & co. are
         // jump-to-by-name; only the builtin (pathless) module is excluded.
         for m in ws.modules.iter() {
             if m.id == ModuleId::builtin() {
                 continue;
             }
             let mid = m.id;
-            let file = m.file.as_str().to_string();
+            let file = editor_path(m.file.as_str()).into_owned();
             // Function `signature:`/`returns:` fields, looked up per function by
             // declaration-span start. Built once per file, not on the hot
             // `document_symbols` path.
@@ -2474,7 +2512,7 @@ impl BoneWorkspace {
             // each file's macro signatures at parse time (`UserFile.macros`), so
             // read them directly. No reparse; the recorded spans are shifted on
             // incremental edits, so the lines stay accurate.
-            if let Some(uf) = proj.session.files.get(&file) {
+            if let Some(uf) = proj.session.files.get(m.file.as_str()) {
                 for md in &uf.macros {
                     let params: Vec<String> = md
                         .params
@@ -2644,7 +2682,7 @@ impl BoneWorkspace {
         span: &Span,
     ) -> Option<(Uri, Cow<'a, str>)> {
         let file = span.file.as_str();
-        let uri = <Uri as std::str::FromStr>::from_str(&format!("file://{file}")).ok()?;
+        let uri = <Uri as std::str::FromStr>::from_str(&format!("file://{}", editor_path(file))).ok()?;
         match proj.texts.get(file) {
             Some(t) => Some((uri, Cow::Borrowed(t))),
             None => Some((uri, Cow::Owned(fs_err::read_to_string(file).ok()?))),
