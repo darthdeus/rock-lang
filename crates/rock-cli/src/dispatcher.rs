@@ -685,7 +685,7 @@ impl CommandContext {
             return Ok(());
         }
         if self.args.command == CliCommand::Modules {
-            let usage = "usage: rock modules audit <project> [--closed] [--format pretty|json]\n       rock modules migrate <package> --check|--apply [--consumer <dir>]... [--export-test-uses] [--format pretty|json]";
+            let usage = "usage: rock modules audit <project> [--closed] [--format pretty|json]\n       rock modules migrate <package> --check|--apply [--consumer <dir>]... [--format pretty|json]";
             let format = match self.args.perf_format.as_str() {
                 "pretty" => crate::modules_audit::Format::Pretty,
                 "json" => crate::modules_audit::Format::Json,
@@ -706,7 +706,6 @@ impl CommandContext {
                     crate::modules_migrate::run(
                         std::path::Path::new(package),
                         &consumers,
-                        self.args.export_test_uses,
                         mode,
                         format,
                     )?

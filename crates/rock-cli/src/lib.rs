@@ -780,9 +780,6 @@ pub struct Args {
     /// `rock modules migrate --consumer <dir>` (repeatable): the consumer set
     /// whose references decide the package's exports (spec 15.2).
     pub consumer: Vec<String>,
-    /// `rock modules migrate --export-test-uses`: also export what only a
-    /// consumer's tests reference (spec 16 says not to by default).
-    pub export_test_uses: bool,
     /// `rock fix --imports`: the fix to run (the only one so far).
     pub imports: bool,
     /// Where `--union` looks for consumers. Defaults to the lib's parent, which
@@ -970,8 +967,6 @@ impl Args {
                 .help("For `rock modules migrate`: a consumer package whose references decide what becomes `pub` (repeatable)."))
             .arg(Arg::new("imports").long("imports").action(ArgAction::SetTrue)
                 .help("For `rock fix`: add the `use` items a modules-v1 fragment's unresolved names need, when one accessible candidate exists (plans by default; --apply writes)."))
-            .arg(Arg::new("export-test-uses").long("export-test-uses").action(ArgAction::SetTrue)
-                .help("For `rock modules migrate`: also make `pub` what only a consumer's tests reference (by default that is a blocker: spec 16 prefers relocating the test)."))
             .arg(Arg::new("consumers").long("consumers")
                 .help("For `rock lint --union`: directory to search for consumers (default: the lib's parent). Pass the repo root for a nested lib like `libs/chess-core`."))
             .arg(Arg::new("backend").long("backend")
@@ -1076,7 +1071,6 @@ impl Args {
             closed: m.get_flag("closed"),
             apply: m.get_flag("apply"),
             consumer: m.get_many::<String>("consumer").map(|v| v.cloned().collect()).unwrap_or_default(),
-            export_test_uses: m.get_flag("export-test-uses"),
             imports: m.get_flag("imports"),
             consumers: m.get_one::<String>("consumers").cloned(),
             // Backend selection. An explicit `--backend` flag wins; otherwise an

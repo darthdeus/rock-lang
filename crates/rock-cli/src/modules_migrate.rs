@@ -292,8 +292,8 @@ enum Outcome {
 }
 
 /// Run the planner (and, with `--apply`, the writer). Returns the exit code.
-pub fn run(package: &Path, consumers: &[PathBuf], export_test_uses: bool, mode: Mode, format: Format) -> Result<i32> {
-    let outcome = plan(package, consumers, export_test_uses);
+pub fn run(package: &Path, consumers: &[PathBuf], mode: Mode, format: Format) -> Result<i32> {
+    let outcome = plan(package, consumers);
     let code = match &outcome {
         Outcome::AlreadyV1(_) => 0,
         Outcome::Failed { .. } => EXIT_ANALYSIS_FAILED,
@@ -320,7 +320,7 @@ pub fn run(package: &Path, consumers: &[PathBuf], export_test_uses: bool, mode: 
     Ok(code)
 }
 
-fn plan(package: &Path, consumer_dirs: &[PathBuf], export_test_uses: bool) -> Outcome {
+fn plan(package: &Path, consumer_dirs: &[PathBuf]) -> Outcome {
     let failed = |stage: &str, message: String| Outcome::Failed { stage: stage.to_string(), message };
     let p_root = match package.canonicalize() {
         Ok(p) => p,
@@ -527,31 +527,16 @@ fn plan(package: &Path, consumer_dirs: &[PathBuf], export_test_uses: bool) -> Ou
             }
         }
     }
-    // A definition only a consumer's tests reach: spec 16 says relocate the
-    // test or give the owner test support rather than widen the library, so
-    // exporting it is the author's explicit choice.
+    // A definition only a consumer's tests reach is exported like any other
+    // use (author decision, 2026-09-18: spec 16's relocate-the-test advice is
+    // not worth a library API split here); the report lists it as test-only.
     plan.test_uses.retain(|di, _| !plan.exports.contains_key(di));
     for (&di, uses) in &plan.test_uses {
-        let d = &plan.defs[di];
-        let who = uses
-            .iter()
-            .map(|(c, u)| format!("{c} ({}{})", kinds_text(&u.by_kind), u.example.as_ref().map(|e| format!("; first at {e}")).unwrap_or_default()))
-            .collect::<Vec<_>>()
-            .join("; ");
-        if export_test_uses {
-            let reasons = plan.exports.entry(di).or_default();
-            for (c, u) in uses {
-                let r = reasons.consumers.entry(format!("{c} tests")).or_default();
-                r.by_kind = u.by_kind.clone();
-                r.example = u.example.clone();
-            }
-        } else {
-            plan.blockers.push(format!(
-                "`{}` ({}:{}) is used only by consumer tests: {who}. Spec 16: relocate the test or give the owner test support rather than widen the library; pass --export-test-uses to export it anyway",
-                d.name,
-                short_path(&plan.files[d.file].id),
-                d.line
-            ));
+        let reasons = plan.exports.entry(di).or_default();
+        for (c, u) in uses {
+            let r = reasons.consumers.entry(format!("{c} tests")).or_default();
+            r.by_kind = u.by_kind.clone();
+            r.example = u.example.clone();
         }
     }
     for t in &tests_unknown {
@@ -1451,7 +1436,6 @@ fn render_json(outcome: &Outcome, mode: Mode, applied: Option<&std::result::Resu
         })).collect::<Vec<_>>(),
         "test_only_uses": plan.test_uses.iter().map(|(&di, uses)| json!({
             "name": plan.defs[di].name.as_str(),
-            "exported": plan.exports.contains_key(&di),
             "consumers": uses.iter().map(|(c, u)| json!({
                 "package": c,
                 "by_kind": u.by_kind.iter().map(|(k, n)| (k.as_str().to_string(), json!(n))).collect::<serde_json::Map<_, _>>(),

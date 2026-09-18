@@ -235,9 +235,10 @@ fn an_allow_legacy_dependency_is_imported_through_its_view() {
 }
 
 /// Stop and report rather than write: a legacy dependency without an
-/// `allow_legacy` edge (the author's opt-in, which the migrator never adds), a definition only
-/// a consumer's tests use (spec 16), and inline Lua naming a symbol the
-/// conversion renames. Nothing is written.
+/// `allow_legacy` edge (the author's opt-in, which the migrator never adds)
+/// and inline Lua naming a symbol the conversion renames. Nothing is written.
+/// A definition only a consumer's tests use is not a blocker: it is exported
+/// and listed as test-only.
 #[test]
 fn blockers_are_reported_and_nothing_is_written() {
     let dir = scratch("blocked");
@@ -259,7 +260,8 @@ fn blockers_are_reported_and_nothing_is_written() {
     let blockers: Vec<String> = v["blockers"].as_array().unwrap().iter().map(|b| b.as_str().unwrap().to_string()).collect();
     let has = |needle: &str| blockers.iter().any(|b| b.contains(needle));
     assert!(has("legacy dependency `old-lib`") && has("allow_legacy"), "{blockers:#?}");
-    assert!(has("`b_internal`") && has("used only by consumer tests"), "{blockers:#?}");
+    assert!(!has("`b_internal`"), "{blockers:#?}");
+    assert_eq!(v["test_only_uses"][0]["name"], "b_internal", "{v}");
     assert!(has("raw ABI review [exact]") && has("`b_value`"), "{blockers:#?}");
     assert!(has("`b_reflected`") && has("through `_G`"), "{blockers:#?}");
     assert_eq!(read(&dir.join("lib/lib.rock")), lib_src, "a blocked plan writes nothing");
@@ -336,8 +338,8 @@ fn copy_sources(from: &Path, to: &Path) {
 /// modifiers and `[language]` table to recover the legacy package, migrate it
 /// against its four consumers, and compare with the committed source. The
 /// hand conversion also exported `ch_is_black` and `ch_parse_square`, which
-/// only consumer tests and sims call; without `--export-test-uses` those are
-/// the plan's only blockers (spec 16).
+/// only consumer tests and sims call; a definition a consumer's tests use is
+/// exported like any other use (author decision), and reported as test-only.
 #[test]
 fn chess_core_migrates_to_the_committed_hand_conversion() {
     let dir = scratch("chess_core");
@@ -365,20 +367,15 @@ fn chess_core_migrates_to_the_committed_hand_conversion() {
     let mut args = vec!["--check", "--format", "json"];
     args.extend_from_slice(&consumers);
     let v = json(&migrate(&dir, "libs/chess-core", &args));
-    let mut blocked: Vec<&str> = v["blockers"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|b| {
-            let b = b.as_str().unwrap();
-            assert!(b.contains("used only by consumer tests"), "{b}");
-            b.split('`').nth(1).unwrap()
-        })
-        .collect();
-    blocked.sort();
-    assert_eq!(blocked, vec!["ch_is_black", "ch_parse_square"], "{v}");
+    assert_eq!(v["blockers"].as_array().unwrap().len(), 0, "{v}");
+    let mut test_only: Vec<&str> =
+        v["test_only_uses"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
+    test_only.sort();
+    assert_eq!(test_only, vec!["ch_is_black", "ch_parse_square"], "{v}");
+    let exported: Vec<&str> = v["exports"]["pub"].as_array().unwrap().iter().map(|e| e["name"].as_str().unwrap()).collect();
+    assert!(exported.contains(&"ch_is_black") && exported.contains(&"ch_parse_square"), "{v}");
 
-    let mut args = vec!["--apply", "--export-test-uses"];
+    let mut args = vec!["--apply"];
     args.extend_from_slice(&consumers);
     let apply = migrate(&dir, "libs/chess-core", &args);
     assert_eq!(apply.code, Some(0), "{}", shown(&apply));
