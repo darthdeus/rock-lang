@@ -1,5 +1,7 @@
 
 use crate::*;
+use rock_core::source_code::Dialect;
+use std::path::Path;
 
 /// Expand every argument into the `.rock` files it names: a file argument
 /// contributes itself, a directory argument everything under it. A file named
@@ -123,7 +125,20 @@ pub fn do_fmt(paths: &[String], in_place: bool, check: bool) -> Result<()> {
 
 fn format_rock_file(file_path: &str) -> Result<String> {
     let input = fs_err::read_to_string(file_path)?;
-    let formatted = skull_fmt::format_code(&input);
+    let dialect = dialect_for_file(Path::new(file_path))?;
+    let formatted = skull_fmt::try_format_with_dialect(
+        &input,
+        &skull_fmt::FormatConfig::default(),
+        dialect,
+    )
+    .map_err(|error| {
+        anyhow::anyhow!(
+            "failed to format {} as {:?}: {}",
+            file_path,
+            dialect,
+            error
+        )
+    })?;
 
     // Defensive reparse: never overwrite a source file with output that no
     // longer parses. skull-fmt returns the input unchanged on a parse
@@ -132,7 +147,7 @@ fn format_rock_file(file_path: &str) -> Result<String> {
     // silently produced unparseable output for stone/engine/lib.rock).
     if formatted != input {
         let file: ustr::Ustr = format!("<reparse:{file_path}>").into();
-        let ast = skull_parser::parse_module(&formatted, file).map_err(|e| {
+        let ast = skull_parser::parse_module_with_dialect(&formatted, file, dialect).map_err(|e| {
             anyhow::anyhow!("formatter produced unparseable output for {}: {:?}", file_path, e)
         })?;
         if !ast.recovery_errors.is_empty() {
@@ -145,6 +160,32 @@ fn format_rock_file(file_path: &str) -> Result<String> {
     }
 
     Ok(formatted)
+}
+
+/// Resolve the file's dialect through the same package graph used by source
+/// loading. Standalone files retain the host's `//! modules:` directive.
+fn dialect_for_file(file_path: &Path) -> Result<Dialect> {
+    let canonical = fs_err::canonicalize(file_path)?;
+    let start_dir = canonical.parent().unwrap_or(&canonical);
+    if let Some((manifest, config)) = rock_host::stick::StickConfig::find_from_dir(start_dir)? {
+        let manifest_dir = manifest.parent().unwrap_or(&manifest);
+        let channel = rock_host::stick::resolved_channel_for(&config);
+        let graph = rock_host::stick::graph::PackageGraph::build_with_channel(
+            manifest_dir,
+            &config,
+            &channel,
+        )?;
+        let owner = graph.package_of_file(&canonical).ok_or_else(|| {
+            anyhow::anyhow!(
+                "file {} is not owned by the package graph rooted at {}",
+                canonical.display(),
+                manifest_dir.display()
+            )
+        })?;
+        return Ok(graph.package(owner).dialect);
+    }
+
+    Ok(rock_host::source_files::source_file_new(&canonical)?.dialect)
 }
 
 #[cfg(test)]

@@ -214,7 +214,7 @@ impl Builder<'_> {
 
             // Unary `!`/`~`/`-`: a struct operand is an operator overload (bone
             // records the target on `e`); a scalar uses the native op.
-            Expr::Not(x) => {
+            Expr::Not(x, _) => {
                 let v = self.lower_expr(x)?;
                 match self.overload_target(e) {
                     Some(func) => Ok(self.emit_cur(Inst::Call { func, args: vec![v] })),
@@ -231,7 +231,7 @@ impl Builder<'_> {
                     None => Ok(self.emit_cur(Inst::BitNot(v))),
                 }
             }
-            Expr::UnaryMinus(x) => {
+            Expr::UnaryMinus(x, _) => {
                 let v = self.lower_expr(x)?;
                 match self.overload_target(e) {
                     Some(func) => Ok(self.emit_cur(Inst::Call { func, args: vec![v] })),
@@ -383,6 +383,7 @@ impl Builder<'_> {
                 target,
                 op_fn,
                 value,
+                ..
             } => {
                 self.lower_compound_assign_effect(e, target, op_fn, value)?;
                 Ok(self.emit_cur(Inst::Const(Lit::Nil)))
@@ -672,7 +673,7 @@ impl Builder<'_> {
                 Ok(self.emit_cur(Inst::Const(Lit::Nil)))
             }
 
-            Expr::SafeNavCall { receiver, method, args } => {
+            Expr::SafeNavCall { receiver, method, args, .. } => {
                 self.lower_safe_nav_call(e, receiver, method, args)
             }
             Expr::SafeNavLet { receiver, binding, body } => {
@@ -1181,10 +1182,10 @@ impl Builder<'_> {
         args: IdxRange<Expr>,
         recv: Idx<Inst>,
     ) -> Result<ValueBundle, CompilerError> {
-        let value = if self.struct_field_is_fn(receiver, method) {
+        let value = if let Some(field) = self.fn_field_of_call(receiver, method) {
             // `recv?.field(args)` on a fn-typed FIELD: nil-guarded indirect call
             // `(recv.field)(args)` — the field IS the callee, no receiver arg.
-            let fieldv = self.emit_cur(Inst::Field { base: recv, field: method });
+            let fieldv = self.emit_cur(Inst::Field { base: recv, field });
             let mut argv = Vec::new();
             for a in args {
                 argv.push(self.lower_expr(a)?);

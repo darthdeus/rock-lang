@@ -4,7 +4,60 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 pub mod build_vars;
-pub mod resolver;
+pub mod graph;
+
+/// The `[language]` manifest table. Absent, or `modules = "legacy"`, keeps
+/// today's flat compilation behavior; `modules = "v1"` opts the package into
+/// the modules-v1 grammar and scoping rules. Any other value is a load error
+/// rather than a silent legacy fallback.
+#[derive(Debug, Clone)]
+pub struct LanguageConfig {
+    pub modules: rock_core::source_code::Dialect,
+}
+
+impl Default for LanguageConfig {
+    fn default() -> Self {
+        Self { modules: rock_core::source_code::Dialect::Legacy }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for LanguageConfig {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct Vis;
+        impl<'de> serde::de::Visitor<'de> for Vis {
+            type Value = LanguageConfig;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                write!(f, "a table with a modules key (\"legacy\" or \"v1\")")
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<LanguageConfig, A::Error> {
+                let mut modules = rock_core::source_code::Dialect::Legacy;
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "modules" => {
+                            let value = map.next_value::<String>()?;
+                            modules = match value.as_str() {
+                                "legacy" => rock_core::source_code::Dialect::Legacy,
+                                "v1" => rock_core::source_code::Dialect::V1,
+                                other => {
+                                    return Err(serde::de::Error::custom(format!(
+                                        "unknown `[language] modules` value `{other}`; known values: \"legacy\", \"v1\""
+                                    )));
+                                }
+                            };
+                        }
+                        other => {
+                            return Err(serde::de::Error::custom(format!(
+                                "unknown key `{other}` in [language]; known keys: modules"
+                            )));
+                        }
+                    }
+                }
+                Ok(LanguageConfig { modules })
+            }
+        }
+        d.deserialize_map(Vis)
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct StickConfig {
@@ -33,7 +86,19 @@ pub struct StickConfig {
     pub assets: Option<AssetsConfig>,
     /// Optional compiler-owned sound project declaration.
     pub sound: Option<SoundConfig>,
+    /// Source-language selection for this package. `None` = legacy.
+    pub language: Option<LanguageConfig>,
     pub dependencies: HashMap<String, Dependency>,
+}
+
+impl StickConfig {
+    /// This package's source dialect. Missing `[language]` is legacy.
+    pub fn dialect(&self) -> rock_core::source_code::Dialect {
+        self.language
+            .as_ref()
+            .map(|l| l.modules)
+            .unwrap_or(rock_core::source_code::Dialect::Legacy)
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -277,6 +342,10 @@ pub struct DetailedDependency {
     /// a shipping channel excludes the package from the compile set entirely,
     /// so generated shipping code carries none of its symbols.
     pub channels: Vec<String>,
+    /// Authorizes a v1 consumer's dependency edge to a legacy provider
+    /// (modules spec 3.2). Rejected when the edge lacks it; a removable
+    /// warning when the provider is already v1.
+    pub allow_legacy: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -315,15 +384,21 @@ impl<'de> serde::Deserialize<'de> for DetailedDependency {
             fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<DetailedDependency, A::Error> {
                 let mut path: Option<String> = None;
                 let mut channels: Vec<String> = Vec::new();
+                let mut allow_legacy = false;
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
                         "path" => { path = Some(map.next_value()?); }
                         "channels" => { channels = map.next_value()?; }
-                        _ => { let _ = map.next_value::<serde::de::IgnoredAny>()?; }
+                        "allow_legacy" => { allow_legacy = map.next_value()?; }
+                        other => {
+                            return Err(serde::de::Error::custom(format!(
+                                "unknown key `{other}` in dependency; known keys: path, channels, allow_legacy"
+                            )));
+                        }
                     }
                 }
                 let path = path.ok_or_else(|| serde::de::Error::missing_field("path"))?;
-                Ok(DetailedDependency { path, channels })
+                Ok(DetailedDependency { path, channels, allow_legacy })
             }
         }
         d.deserialize_map(Vis)
@@ -347,15 +422,21 @@ impl<'de> serde::Deserialize<'de> for Dependency {
             fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Dependency, A::Error> {
                 let mut path: Option<String> = None;
                 let mut channels: Vec<String> = Vec::new();
+                let mut allow_legacy = false;
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
                         "path" => { path = Some(map.next_value()?); }
                         "channels" => { channels = map.next_value()?; }
-                        _ => { let _ = map.next_value::<serde::de::IgnoredAny>()?; }
+                        "allow_legacy" => { allow_legacy = map.next_value()?; }
+                        other => {
+                            return Err(serde::de::Error::custom(format!(
+                                "unknown key `{other}` in dependency; known keys: path, channels, allow_legacy"
+                            )));
+                        }
                     }
                 }
                 let path = path.ok_or_else(|| serde::de::Error::missing_field("path"))?;
-                Ok(Dependency::Detailed(DetailedDependency { path, channels }))
+                Ok(Dependency::Detailed(DetailedDependency { path, channels, allow_legacy }))
             }
         }
         d.deserialize_any(Vis)
@@ -612,6 +693,7 @@ impl<'de> serde::Deserialize<'de> for StickConfig {
                 let mut release: Option<ReleaseConfig> = None;
                 let mut assets: Option<AssetsConfig> = None;
                 let mut sound: Option<SoundConfig> = None;
+                let mut language: Option<LanguageConfig> = None;
                 let mut dependencies: HashMap<String, Dependency> = HashMap::new();
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
@@ -623,12 +705,13 @@ impl<'de> serde::Deserialize<'de> for StickConfig {
                         "engine" => { engine = map.next_value()?; }
                         "renderer" => { renderer = map.next_value()?; }
                         "ios" => { ios = map.next_value()?; }
+                        "language" => { language = map.next_value()?; }
                         "dependencies" => { dependencies = map.next_value()?; }
                         _ => { let _ = map.next_value::<serde::de::IgnoredAny>()?; }
                     }
                 }
                 let package = package.ok_or_else(|| serde::de::Error::missing_field("package"))?;
-                Ok(StickConfig { package, engine, renderer, ios, build, release, assets, sound, dependencies })
+                Ok(StickConfig { package, engine, renderer, ios, build, release, assets, sound, language, dependencies })
             }
         }
         d.deserialize_map(Vis)
@@ -1183,7 +1266,6 @@ pub fn get_compiler_sha1() -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::stick::resolver::DependencyResolver;
 
     #[test]
     fn sha1_hex_matches_known_vectors() {
@@ -1236,14 +1318,20 @@ mod tests {
         .unwrap();
 
         let cfg = StickConfig::from_path(&consumer.join("stick.toml")).unwrap();
-        let mut dev_resolver = DependencyResolver::new(consumer.clone());
-        let dev = dev_resolver.resolve_with_channel(&cfg, "dev").expect("dev resolve");
-        assert_eq!(dev.len(), 1, "matching channel includes the scoped dep");
-        assert_eq!(dev[0].name, "dev-only");
+        let dev = graph::PackageGraph::build_with_channel(&consumer, &cfg, "dev")
+            .expect("dev resolve");
+        assert_eq!(
+            dev.package(dev.root()).dependencies.len(),
+            1,
+            "matching channel includes the scoped dep"
+        );
 
-        let mut steam_resolver = DependencyResolver::new(consumer.clone());
-        let steam = steam_resolver.resolve_with_channel(&cfg, "steam").expect("steam resolve");
-        assert!(steam.is_empty(), "non-matching channel excludes the scoped dep");
+        let steam = graph::PackageGraph::build_with_channel(&consumer, &cfg, "steam")
+            .expect("steam resolve");
+        assert!(
+            steam.package(steam.root()).dependencies.is_empty(),
+            "non-matching channel excludes the scoped dep"
+        );
     }
 
     #[test]
@@ -1266,9 +1354,14 @@ mod tests {
 
         let cfg = StickConfig::from_path(&consumer.join("stick.toml")).unwrap();
         for channel in ["dev", "steam", "itch"] {
-            let mut resolver = DependencyResolver::new(consumer.clone());
-            let resolved = resolver.resolve_with_channel(&cfg, channel).expect("resolve");
-            assert_eq!(resolved.len(), 1, "unscoped dep resolves on {channel}");
+            let resolved =
+                graph::PackageGraph::build_with_channel(&consumer, &cfg, channel)
+                    .expect("resolve");
+            assert_eq!(
+                resolved.package(resolved.root()).dependencies.len(),
+                1,
+                "unscoped dep resolves on {channel}"
+            );
         }
     }
 
@@ -1303,9 +1396,13 @@ mod tests {
         .unwrap();
 
         let cfg = StickConfig::from_path(&consumer.join("stick.toml")).unwrap();
-        let mut resolver = DependencyResolver::new(consumer.clone());
-        let resolved = resolver.resolve_with_channel(&cfg, "dev").expect("resolve");
-        let names: Vec<&str> = resolved.iter().map(|d| d.name.as_str()).collect();
+        let graph = graph::PackageGraph::build_with_channel(&consumer, &cfg, "dev").expect("resolve");
+        let names: Vec<&str> = graph
+            .load_order()
+            .iter()
+            .filter(|id| **id != graph.root())
+            .map(|id| graph.package(*id).manifest_name.as_str())
+            .collect();
         assert_eq!(
             names,
             vec!["leaf", "mid"],
@@ -1344,14 +1441,14 @@ mod tests {
         .unwrap();
 
         let cfg = StickConfig::from_path(&consumer.join("stick.toml")).unwrap();
-        let mut resolver = DependencyResolver::new(consumer.clone());
-        let resolved = resolver.resolve_with_channel(&cfg, "dev").expect("resolve");
-        let found = resolved
+        let graph = graph::PackageGraph::build_with_channel(&consumer, &cfg, "dev").expect("resolve");
+        let found = graph
+            .packages()
             .iter()
-            .find(|d| d.name == "leaf")
+            .find(|p| p.manifest_name == "leaf")
             .expect("the transitive leaf resolves");
         assert_eq!(
-            found.path.canonicalize().unwrap(),
+            found.root.canonicalize().unwrap(),
             leaf.canonicalize().unwrap(),
             "the leaf resolves to the path its own manifest names"
         );
@@ -1385,22 +1482,14 @@ mod tests {
         .unwrap();
 
         let cfg = StickConfig::from_path(&consumer.join("stick.toml")).unwrap();
-        let mut dev = DependencyResolver::new(consumer.clone());
-        let dev_names: Vec<String> = dev
-            .resolve_with_channel(&cfg, "dev")
-            .expect("dev resolve")
-            .iter()
-            .map(|d| d.name.clone())
-            .collect();
+        let names_on = |channel: &str| -> Vec<String> {
+            let graph = graph::PackageGraph::build_with_channel(&consumer, &cfg, channel).expect("resolve");
+            graph.packages().iter().map(|p| p.manifest_name.clone()).collect()
+        };
+        let dev_names = names_on("dev");
         assert!(dev_names.contains(&"leaf".to_string()), "dev keeps the scoped leaf");
 
-        let mut steam = DependencyResolver::new(consumer.clone());
-        let steam_names: Vec<String> = steam
-            .resolve_with_channel(&cfg, "steam")
-            .expect("steam resolve")
-            .iter()
-            .map(|d| d.name.clone())
-            .collect();
+        let steam_names = names_on("steam");
         assert!(
             !steam_names.contains(&"leaf".to_string()),
             "a dev-only package reached through a library stays out of a release build"
@@ -1435,12 +1524,10 @@ mod tests {
         .unwrap();
 
         let cfg = StickConfig::from_path(&consumer.join("stick.toml")).unwrap();
-        let mut resolver = DependencyResolver::new(consumer.clone());
-        let err = resolver
-            .resolve_with_channel(&cfg, "dev")
+        let err = graph::PackageGraph::build_with_channel(&consumer, &cfg, "dev")
             .expect_err("a cycle is an error, not a hang");
         assert!(
-            err.to_string().contains("Circular dependency"),
+            err.to_string().contains("circular") && err.to_string().contains("a -> b -> a"),
             "the error names the cycle, got: {err}"
         );
     }

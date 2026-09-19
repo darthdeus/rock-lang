@@ -169,7 +169,7 @@ impl Builder<'_> {
         name: Ustr,
         mut fields: Vec<(Ustr, Idx<Inst>)>,
     ) -> Result<Vec<(Ustr, Idx<Inst>)>, CompilerError> {
-        if name.as_str() != "NativeBuffer" {
+        if !bone_semantic::prelude::is_intrinsic_key(name, "NativeBuffer") {
             return Ok(fields);
         }
         // The element comes from the literal's own inferred type, the same
@@ -346,6 +346,15 @@ impl Builder<'_> {
             self.ty_node(rt),
             Some(TypeExpr::App { ctor: TypeCtor::Nominal(name), .. }) if self.is_value_struct(name)
         )
+    }
+
+    /// The fn-typed field a call with first argument `recv` goes through, if
+    /// any. The field is named as the method was WRITTEN (`Body::
+    /// method_names`): a v1 callee's name is a DefKey or an alias target,
+    /// never the field. A call written by name keeps its callee name.
+    pub(crate) fn fn_field_of_call(&self, recv: Idx<Expr>, callee: Ustr) -> Option<Ustr> {
+        let field = self.body.method_names.get(&recv).copied().unwrap_or(callee);
+        self.struct_field_is_fn(recv, field).then_some(field)
     }
 
     /// Whether `recv`'s static type is a struct with a fn-typed field named
@@ -1168,7 +1177,9 @@ impl Builder<'_> {
             // INTERNED singleton table (emitted by `enum_runtime_defs`): the
             // enum still has payload variants, so its values stay tables, and the
             // singleton is reference-equal across uses + usable as a Map key.
-            let g = Ustr::from(format!("__rock_enum_{enum_name}_{variant}").as_str());
+            let g = Ustr::from(
+                format!("__rock_enum_{}_{variant}", crate::mangle::symbol_of_key(enum_name)).as_str(),
+            );
             return Ok(self.emit_cur(Inst::Global(g)));
         }
         let (positional, named) = match args {

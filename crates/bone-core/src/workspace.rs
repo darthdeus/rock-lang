@@ -64,6 +64,31 @@ pub struct Workspace {
     /// keeps `Workspace: Clone` and lets the parallel dependent re-check (which
     /// holds `&Workspace`) share one counter across threads.
     pub reinferred_body_count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// Count of function bodies LOWERED since the last reset: every function
+    /// a full or partial module lowering builds, including one whose body
+    /// fails to lower, and the one function the body fast path re-lowers.
+    /// The lowering twin of `reinferred_body_count`, reset by the session per
+    /// update; `UpdateResult.relowered` is derived from inference keys, so a
+    /// body that re-lowers into a lowering error is only visible here.
+    pub relowered_body_count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+
+    /// Modules-v1 namespace scope (plan M2). Empty for legacy-only
+    /// workspaces — every legacy path behaves exactly as before when `ns`
+    /// has no packages and `fragment_scopes` is empty.
+    pub ns: crate::modules::NsTree,
+    /// Per-file v1 scope facts: package, logical module path, and the
+    /// fragment's own imports. Keyed by file id (`Module.file`).
+    pub fragment_scopes: FxHashMap<Ustr, crate::modules::FragmentScope>,
+    /// Canonical definition metadata keyed by DefKey (plan 2.1). Legacy
+    /// definitions keep their bare-name keys and gain no entry.
+    pub defs: FxHashMap<Ustr, crate::modules::DefMeta>,
+    /// Per-legacy-file compatibility views over the public root exports of
+    /// participating v1 packages. Built once by the semantic pass; lowering
+    /// only reads the finished view.
+    pub legacy_projections: FxHashMap<Ustr, crate::modules::LegacyProjection>,
+    /// Contextual item-level `use` bindings in legacy files. These are
+    /// additive and do not change legacy `x :: T` ascription parsing.
+    pub legacy_imports: FxHashMap<Ustr, crate::modules::LegacyImports>,
 
     /// Resolved compile-time inputs (docs/comptime-plan.md tier 1), set by the
     /// host once per session build before emission. bone itself never reads them
@@ -86,6 +111,10 @@ pub struct ComptimeInputs {
     /// Effective declared build channel for package metadata. Empty means a
     /// synthetic/type-only workspace did not come through CLI resolution.
     pub channel: String,
+    /// Source-language mode of the root package ("legacy" or "v1", plan M0).
+    /// Part of the Artifact fingerprint: the same sources under different
+    /// language modes are different builds.
+    pub modules_mode: String,
     /// FALLBACK root for `embed_string(path)`, used only when the calling
     /// module has no file on disk to resolve from (a synthetic module).
     /// Normally the path resolves against the nearest stick.toml at or above
@@ -153,7 +182,13 @@ impl Workspace {
             phase_timings: Default::default(),
 
             reinferred_body_count: Default::default(),
+            relowered_body_count: Default::default(),
             comptime_inputs: Default::default(),
+            ns: Default::default(),
+            fragment_scopes: Default::default(),
+            defs: Default::default(),
+            legacy_projections: Default::default(),
+            legacy_imports: Default::default(),
         };
 
         ws.module_ids.insert(ustr("$builtin"), ModuleId::builtin());

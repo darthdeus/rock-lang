@@ -60,19 +60,20 @@ impl ContainerPlan {
                 crate::monoty::MonoTy::App {
                     ctor: crate::monoty::MonoCtor::Nominal(name), ..
                 },
-            ) if family == ContainerFamily::Arena && name.as_str() == "Arena" => true,
+            ) if family == ContainerFamily::Arena
+                && bone_semantic::prelude::is_intrinsic_key(*name, "Arena") => true,
             (
                 ContainerFamily::NativeBuffer,
                 crate::monoty::MonoTy::App {
                     ctor: crate::monoty::MonoCtor::Nominal(name), ..
                 },
-            ) if name.as_str() == "NativeBuffer" => true,
+            ) if bone_semantic::prelude::is_intrinsic_key(*name, "NativeBuffer") => true,
             (
                 ContainerFamily::FlatVec,
                 crate::monoty::MonoTy::App {
                     ctor: crate::monoty::MonoCtor::Nominal(name), ..
                 },
-            ) if name.as_str() == "FlatVec" => true,
+            ) if bone_semantic::prelude::is_intrinsic_key(*name, "FlatVec") => true,
             _ => false,
         }
     }
@@ -119,7 +120,7 @@ impl ContainerPlan {
                     ctor: crate::monoty::MonoCtor::Nominal(name),
                     params,
                 },
-            ) if name.as_str() == "Arena" => {
+            ) if bone_semantic::prelude::is_intrinsic_key(*name, "Arena") => {
                 let element = params.first().ok_or_else(|| RepError {
                     span: None,
                     message: "Arena has no element type".into(),
@@ -133,8 +134,10 @@ impl ContainerPlan {
                     ctor: crate::monoty::MonoCtor::Nominal(name),
                     params,
                 },
-            ) if (family == ContainerFamily::NativeBuffer && name.as_str() == "NativeBuffer")
-                || (family == ContainerFamily::FlatVec && name.as_str() == "FlatVec") => {
+            ) if (family == ContainerFamily::NativeBuffer
+                && bone_semantic::prelude::is_intrinsic_key(*name, "NativeBuffer"))
+                || (family == ContainerFamily::FlatVec
+                    && bone_semantic::prelude::is_intrinsic_key(*name, "FlatVec")) => {
                 let element = params.first().ok_or_else(|| RepError {
                     span: None,
                     message: "native buffer has no element type".into(),

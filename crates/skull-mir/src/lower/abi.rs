@@ -70,7 +70,7 @@ pub fn declared_boundary_class(f: &Function) -> Option<BoundaryClass> {
     if crate::intrinsics::expand_kind(f).is_some() {
         return Some(BoundaryClass::Intrinsic);
     }
-    if f.annotations.iter().any(|a| a.name.name.as_str() == "intrinsic") {
+    if f.annotations.iter().any(|a| a.is_builtin("intrinsic")) {
         let native_required = crate::intrinsics::is_native_required(f);
         let has_rock_body = f.inline_body.is_none() && !f.is_extern;
         return (native_required || !has_rock_body).then_some(BoundaryClass::Intrinsic);
@@ -85,7 +85,7 @@ pub fn boundary_requires_boxed_representation(f: &Function) -> bool {
     match declared_boundary_class(f) {
         Some(BoundaryClass::Extern) => true,
         Some(BoundaryClass::InlineBody) => {
-            !f.annotations.iter().any(|a| a.name.name.as_str() == "scalar_abi")
+            !f.annotations.iter().any(|a| a.is_builtin("scalar_abi"))
         }
         _ => false,
     }
@@ -2226,14 +2226,12 @@ fn abi_mode_spec(
     if f.is_extern {
         return None;
     }
-    let has_scalar_abi = f.annotations.iter().any(|a| a.name.name.as_str() == "scalar_abi");
+    let has_scalar_abi = f.annotations.iter().any(|a| a.is_builtin("scalar_abi"));
     let nobox_only = if has_scalar_abi {
         false
     } else {
-        let name_is_fixed = f.annotations.iter().any(|a| match a.name.name.as_str() {
-            "nomangle" => subst.is_empty(),
-            "test" => true,
-            _ => false,
+        let name_is_fixed = f.annotations.iter().any(|a| {
+            (a.is_builtin("nomangle") && subst.is_empty()) || a.is_builtin("test")
         });
         if f.inline_body.is_some() || f.name.as_str() == "main" || name_is_fixed {
             return None;

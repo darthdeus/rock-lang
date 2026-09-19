@@ -353,7 +353,7 @@ pub fn infer_expr_used(
 
             gamma.workspace.builtins.string()
         }
-        Expr::Not(inner) => {
+        Expr::Not(inner, family) => {
             let inner_ty = infer_expr(c, gamma, *inner)?;
             let resolved = resolve(gamma, inner_ty, c.body.expr_spans[*inner]);
 
@@ -363,7 +363,7 @@ pub fn infer_expr_used(
                 resolve_named_call(
                     gamma,
                     c,
-                    *NOT,
+                    *family,
                     None,
                     IdxRange::new_inclusive(*inner..=*inner),
                     e,
@@ -440,7 +440,7 @@ pub fn infer_expr_used(
             inner_r
         }
 
-        Expr::UnaryMinus(inner) => {
+        Expr::UnaryMinus(inner, family) => {
             let inner_ty = infer_expr(c, gamma, *inner)?;
             // TODO: do we actually want to call resolve after every infer? shouldn't that be part
             // of infer? figure that out later
@@ -460,7 +460,7 @@ pub fn infer_expr_used(
                 _ => resolve_named_call(
                     gamma,
                     c,
-                    *UNM,
+                    *family,
                     None,
                     IdxRange::new_inclusive(*inner..=*inner),
                     e,
@@ -473,6 +473,7 @@ pub fn infer_expr_used(
             if let Expr::FieldAccess { base, field } = c.body.expr_arena[*target] {
                 reject_swizzle_write(c, gamma, base, field, expr_span)?;
                 reject_value_struct_field_write(c, gamma, base, expr_span)?;
+                check_field_write_access(c, gamma, base, field, expr_span)?;
             }
             // Same const-rebind rejection as Expr::Assign/CompoundAssign;
             // `CONST++` is a write with extra steps.
@@ -585,8 +586,10 @@ pub fn infer_expr_used(
                         c.body.expr_spans[index],
                     )?;
 
-                    let elem = match name.as_str() {
-                        "NativeBuffer" | "FlatVec" => {
+                    let elem = if bone_core::modules::is_intrinsic_key_in(
+                        name,
+                        &["NativeBuffer", "FlatVec"],
+                    ) {
                             let p = params.into_iter().next().ok_or_else(|| {
                                 CompilerError::new_with_label(
                                     expr_span,
@@ -595,18 +598,24 @@ pub fn infer_expr_used(
                             })?;
 
                             base_ty.with_idx(p)
-                        }
-
-                        "NativeBufferU8" | "NativeBufferI8" | "NativeBufferU16"
-                        | "NativeBufferI16" | "NativeBufferU32" | "NativeBufferI32" => {
-                            gamma.workspace.builtins.int()
-                        }
-
-                        _ => comp_error!(
+                    } else if bone_core::modules::is_intrinsic_key_in(
+                        name,
+                        &[
+                            "NativeBufferU8",
+                            "NativeBufferI8",
+                            "NativeBufferU16",
+                            "NativeBufferU32",
+                            "NativeBufferI16",
+                            "NativeBufferI32",
+                        ],
+                    ) {
+                        gamma.workspace.builtins.int()
+                    } else {
+                        comp_error!(
                             expr_span,
                             "cannot index into type {}",
                             gamma.workspace.render(Some(&gamma.out), base_ty)
-                        ),
+                        )
                     };
 
                     resolve(gamma, elem, expr_span)
@@ -666,10 +675,15 @@ pub fn infer_expr_used(
             // representative before deciding value-ness, exactly as the call
             // path does. Genuine overloads (different signatures) survive and
             // still reject below.
-            None => match collapse_backend_variants(gamma, &resolve_callee(gamma, *name)).as_slice()
+            None => match collapse_backend_variants(gamma, &resolve_callee(gamma, &fn_value_family(c, e, *name))).as_slice()
             {
                 [(mid, fid)] => {
                     let function = gamma.workspace.module(*mid).functions[*fid].clone();
+                    // A view-owned value names one definition among the bare
+                    // key's overloads; the backend reads which from here.
+                    if c.body.value_owners.contains_key(&e) {
+                        gamma.out.resolved_overload_calls.insert(e, (*mid, *fid));
+                    }
 
                     // A bounded fn only exists monomorphized-by-inlining at its
                     // call sites; as a value it would need a runtime identity
@@ -1056,15 +1070,15 @@ pub fn infer_expr_used(
             tuple_of(gamma, &tys, expr_span)
         }
 
-        Expr::Call { callee, args, generic_args } => {
+        Expr::Call { callee, args, generic_args, family } => {
             let args = *args;
 
             match callee {
-                hir::Callee::Unresolved { name, .. } => {
+                hir::Callee::Unresolved { .. } => {
                     resolve_named_call_with_generics(
                         gamma,
                         c,
-                        *name,
+                        *family,
                         None,
                         args,
                         *generic_args,
@@ -1129,9 +1143,10 @@ pub fn infer_expr_used(
 
             let what = format!("struct `{}`", name);
 
-            let ctor = match name.as_str() {
-                "Vec" => TypeCtor::Array,
-                _ => TypeCtor::Nominal(name),
+            let ctor = if bone_core::modules::is_intrinsic_key(name, "Vec") {
+                TypeCtor::Array
+            } else {
+                TypeCtor::Nominal(name)
             };
             let result_ty = gamma.app_with_ctor(ctor, &arg_tys, expr_span);
 
@@ -1151,7 +1166,7 @@ pub fn infer_expr_used(
             }
 
             check_named_fields(
-                c, gamma, &def.fields, &provided, &subs, expr_span, &what, has_base,
+                c, gamma, Some(name), &def.fields, &provided, &subs, expr_span, &what, has_base,
             )?;
 
             result_ty
@@ -1231,10 +1246,11 @@ pub fn infer_expr_used(
 
         Expr::SafeNavCall {
             receiver,
-            method,
             args,
+            family,
+            ..
         } => {
-            let (receiver, method, args) = (*receiver, *method, *args);
+            let (receiver, args, family) = (*receiver, *args, *family);
             let recv_ty = infer_expr(c, gamma, receiver)?;
             if redundant_optional_on(gamma, recv_ty, expr_span) {
                 comp_error!(
@@ -1244,7 +1260,7 @@ pub fn infer_expr_used(
             }
             let inner = peel_nullable(gamma, recv_ty, expr_span);
 
-            let ret = resolve_named_call(gamma, c, method, Some(inner), args, e, expr_span)?;
+            let ret = resolve_named_call(gamma, c, family, Some(inner), args, e, expr_span)?;
 
             nullable_of(gamma, ret, expr_span)
         }
@@ -1304,7 +1320,7 @@ pub fn infer_expr_used(
                         })
                         .collect();
 
-                    check_named_fields(c, gamma, fields, &provided, &subs, expr_span, &what, false)?;
+                    check_named_fields(c, gamma, None, fields, &provided, &subs, expr_span, &what, false)?;
                 }
 
                 _ => comp_error!(
@@ -1334,6 +1350,7 @@ pub fn infer_expr_used(
             if let Expr::FieldAccess { base, field } = c.body.expr_arena[target] {
                 reject_swizzle_write(c, gamma, base, field, expr_span)?;
                 reject_value_struct_field_write(c, gamma, base, expr_span)?;
+                check_field_write_access(c, gamma, base, field, expr_span)?;
             }
             // Writing any refined path (local field, global, or global field)
             // drops its refinement; re-established below if the stored value is
@@ -1521,8 +1538,9 @@ pub fn infer_expr_used(
             target,
             op_fn,
             value,
+            family,
         } => {
-            let (target, op_fn, value) = (*target, *op_fn, *value);
+            let (target, op_fn, value, family) = (*target, *op_fn, *value, *family);
 
             // `const` globals are read-only (mirrors the `Expr::Assign` check).
             if let Expr::Global(name) = c.body.expr_arena[target] {
@@ -1538,13 +1556,14 @@ pub fn infer_expr_used(
             if let Expr::FieldAccess { base, field } = c.body.expr_arena[target] {
                 reject_swizzle_write(c, gamma, base, field, expr_span)?;
                 reject_value_struct_field_write(c, gamma, base, expr_span)?;
+                check_field_write_access(c, gamma, base, field, expr_span)?;
             }
 
             let target_ty = infer_expr(c, gamma, target)?;
             let unwrapped = peel_nullable(gamma, target_ty, expr_span);
             let value_ty = infer_expr(c, gamma, value)?;
 
-            let candidates = resolve_callee(gamma, op_fn);
+            let candidates = resolve_callee(gamma, &family);
 
             if candidates.is_empty() {
                 comp_error!(expr_span, "Function `{}` doens't exist", op_fn);
@@ -1977,7 +1996,13 @@ pub(crate) fn check_expr(
             params,
         } = *gamma.get(exp_r)
         {
-            if matches!(former.as_str(), "FieldRef" | "ReadFieldRef" | "WriteFieldRef") {
+            if bone_core::modules::is_intrinsic_key_in(
+                former,
+                &["FieldRef", "ReadFieldRef", "WriteFieldRef"],
+            ) {
+                let is_field_ref = bone_core::modules::is_intrinsic_key(former, "FieldRef");
+                let is_read_field_ref = bone_core::modules::is_intrinsic_key(former, "ReadFieldRef");
+                let is_write_field_ref = bone_core::modules::is_intrinsic_key(former, "WriteFieldRef");
                 let mut it = params.into_iter();
                 let t = exp_r.with_idx(it.next().unwrap());
                 let v = exp_r.with_idx(it.next().unwrap());
@@ -1988,7 +2013,7 @@ pub(crate) fn check_expr(
                 // `value` struct, whose fields are immutable. `ReadFieldRef`
                 // (read-only, `field_get`) allows it -- reading a value-struct
                 // field is fine. Lattice per docs/field-refs-plan.md.
-                if matches!(former.as_str(), "FieldRef" | "WriteFieldRef") {
+                if is_field_ref || is_write_field_ref {
                     if let TypeExpr::App { ctor: TypeCtor::Nominal(tn), .. } = *gamma.get(t_r) {
                         let is_value = resolve_struct(gamma, tn)
                             .is_some_and(|sid| gamma.workspace.module(sid.module).structs[sid.def].is_value);
@@ -2007,7 +2032,7 @@ pub(crate) fn check_expr(
                 // embedded field has no whole value to hand out, and `FieldRef`
                 // coerces onward to `ReadFieldRef`, so it re-opens the same
                 // extraction (docs/scalarization-and-boxing-design.md S 6).
-                if matches!(former.as_str(), "FieldRef" | "ReadFieldRef") {
+                if is_field_ref || is_read_field_ref {
                     if let TypeExpr::App { ctor: TypeCtor::Nominal(tn), .. } = *gamma.get(t_r) {
                         let is_embed = resolve_struct(gamma, tn).is_some_and(|sid| {
                             gamma.workspace.module(sid.module).structs[sid.def]
@@ -2026,6 +2051,13 @@ pub(crate) fn check_expr(
                         }
                     }
                 }
+                if is_field_ref || is_write_field_ref {
+                    if let TypeExpr::App { ctor: TypeCtor::Nominal(tn), .. } = *gamma.get(t_r) {
+                        let site = gamma.access_site();
+                        field_access(gamma, tn, field, site, FieldAccessNeed::Write)
+                            .map_err(|e| e.to_compiler_error(span))?;
+                    }
+                }
 
                 let fty = struct_field_ty(gamma, t_r, field, span)?;
 
@@ -2035,7 +2067,7 @@ pub(crate) fn check_expr(
                 // out a `FieldRef<T, int?>` that `field_set(o, f, null)` writes
                 // nil through. A read-only `ReadFieldRef` keeps the widening --
                 // reading an `int` as `int?` is sound.
-                if matches!(former.as_str(), "FieldRef" | "WriteFieldRef") {
+                if is_field_ref || is_write_field_ref {
                     let (fty_r, v_r) = (resolve(gamma, fty, span), resolve(gamma, v, span));
                     let unbound_v = matches!(
                         gamma.get(v_r),
@@ -2268,7 +2300,7 @@ fn check_numeric_literal_cast(
 fn integer_literal_value(c: BodyCtx, e: Idx<Expr>) -> Option<i64> {
     match c.body.expr_arena[e] {
         Expr::Int(value) => Some(value),
-        Expr::UnaryMinus(inner) => integer_literal_value(c, inner)?.checked_neg(),
+        Expr::UnaryMinus(inner, _) => integer_literal_value(c, inner)?.checked_neg(),
         _ => None,
     }
 }
@@ -2276,7 +2308,7 @@ fn integer_literal_value(c: BodyCtx, e: Idx<Expr>) -> Option<i64> {
 fn float_literal_value(c: BodyCtx, e: Idx<Expr>) -> Option<f64> {
     match c.body.expr_arena[e] {
         Expr::Float(value) => Some(value.0),
-        Expr::UnaryMinus(inner) => Some(-float_literal_value(c, inner)?),
+        Expr::UnaryMinus(inner, _) => Some(-float_literal_value(c, inner)?),
         _ => None,
     }
 }
@@ -2317,7 +2349,7 @@ pub(crate) fn find_float_div_span_rec(c: BodyCtx, e: Idx<Expr>, depth: usize) ->
             }
             None
         }
-        Expr::UnaryMinus(x) => find_float_div_span_rec(c, *x, depth + 1),
+        Expr::UnaryMinus(x, _) => find_float_div_span_rec(c, *x, depth + 1),
         Expr::Var(b) => {
             let init = binding_initializer(c, *b)?;
             find_float_div_span_rec(c, init, depth + 1)
@@ -2354,7 +2386,7 @@ pub(crate) fn coroutine_yrn(
         TypeExpr::App {
             ctor: TypeCtor::Nominal(n),
             params,
-        } if n.as_str() == "Coroutine" => {
+        } if bone_core::modules::is_intrinsic_key(n, "Coroutine") => {
             let mut it = params.into_iter();
             let (y, rr, nn) = (it.next(), it.next(), it.next());
 

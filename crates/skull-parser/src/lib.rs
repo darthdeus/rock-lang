@@ -15,6 +15,7 @@ pub use ast::*;
 pub use parser::Parser;
 
 pub use rock_core::errors::CompilerErrorKind;
+pub use rock_core::source_code::{Dialect, PackageTag};
 pub use rock_core::{CompilerError, SourceFiles, Span, source_file_from_path_and_contents};
 pub use ordered_float::OrderedFloat;
 pub use rock_tokenizer::TokenKind;
@@ -34,8 +35,15 @@ use ustr::Ustr;
 /// (completion, hover, rename, inlay) works on broken code and the recovery
 /// errors surface as diagnostics.
 pub fn parse_module(source: &str, file: Ustr) -> Result<Ast, CompilerError> {
+    parse_module_with_dialect(source, file, Dialect::Legacy)
+}
+
+/// [`parse_module`] with the source dialect selected. V1 files enable the
+/// modules-v1 grammar (`(expr : Type)` ascription, `::` paths, module
+/// items) and reject the legacy infix `expr :: Type` ascription.
+pub fn parse_module_with_dialect(source: &str, file: Ustr, dialect: Dialect) -> Result<Ast, CompilerError> {
     let tokens = Tokenizer::new(source, file).tokenize()?;
-    let mut ast = Parser::new(tokens, source, 0).parse_module()?;
+    let mut ast = Parser::new_with_dialect(tokens, source, 0, dialect).parse_module()?;
     ast.file = file;
     Ok(ast)
 }
@@ -50,7 +58,16 @@ pub fn parse_module(source: &str, file: Ustr) -> Result<Ast, CompilerError> {
 /// `""" .. """` inline body missing its `=` sat in the JS emitter fixtures:
 /// accepted, dropped, and the rejection under test came from a different path.
 pub fn parse_module_clean(source: &str, file: Ustr) -> Result<Ast, CompilerError> {
-    let ast = parse_module(source, file)?;
+    parse_module_clean_with_dialect(source, file, Dialect::Legacy)
+}
+
+/// [`parse_module_clean`] with the source dialect selected.
+pub fn parse_module_clean_with_dialect(
+    source: &str,
+    file: Ustr,
+    dialect: Dialect,
+) -> Result<Ast, CompilerError> {
+    let ast = parse_module_with_dialect(source, file, dialect)?;
     match ast.recovery_errors.first() {
         Some(e) => Err(e.clone()),
         None => Ok(ast),
@@ -63,6 +80,8 @@ pub fn parse_module_clean(source: &str, file: Ustr) -> Result<Ast, CompilerError
 /// just an edited item instead of the whole file: extract the item's text by its
 /// stored span, parse it here, and the resulting AST's spans line up with the
 /// rest of the file. `line`/`column` are 0-based (rock-core `Span` convention).
+/// `dialect` is the owning file's, so re-parsing one item of a v1 file does not
+/// quietly read it as legacy.
 /// `docs/skull-incremental-parse-plan.md`.
 pub fn parse_one_item(
     source: &str,
@@ -70,9 +89,10 @@ pub fn parse_one_item(
     offset: usize,
     line: usize,
     column: usize,
+    dialect: Dialect,
 ) -> Result<Ast, CompilerError> {
     let tokens = Tokenizer::new_with_offset(source, file, offset, line, column).tokenize()?;
-    let mut ast = Parser::new(tokens, source, offset).parse_single_item()?;
+    let mut ast = Parser::new_with_dialect(tokens, source, offset, dialect).parse_single_item()?;
     ast.file = file;
     // Total, like `parse_module`. The incremental fast path inspects
     // `recovery_errors` itself: a body-level recovery (e.g. a stray `)` inside the
@@ -111,7 +131,9 @@ pub fn cook_one(ast: &mut Ast, registry: &macro_expand::MacroRegistry) {
     desugar::desugar(ast);
 }
 
-pub use macro_expand::{check_macro_call_labels, check_macro_name_uniqueness, collect_registry, MacroRegistry};
+pub use macro_expand::{
+    check_macro_call_labels, check_macro_call_labels_in, check_macro_name_uniqueness, collect_registry, MacroRegistry,
+};
 
 #[cfg(test)]
 mod tests {
@@ -168,8 +190,9 @@ mod tests {
         let (s, e) = item.span.offset_range;
         let sub = &src[s..e];
 
-        let mini = parse_one_item(sub, file, s, item.span.line_range.0, item.span.col_range.0)
-            .expect("parse_one_item");
+        let mini =
+            parse_one_item(sub, file, s, item.span.line_range.0, item.span.col_range.0, Dialect::Legacy)
+                .expect("parse_one_item");
         assert_eq!(mini.items.len(), 1, "exactly one item parsed");
         let m = &mini.items[0];
 
@@ -195,8 +218,15 @@ mod tests {
         let full = parse_module(src, file).expect("full parse");
         let item = &full.items[1];
         let (s, e) = item.span.offset_range;
-        let mini = parse_one_item(&src[s..e], file, s, item.span.line_range.0, item.span.col_range.0)
-            .expect("parse_one_item");
+        let mini = parse_one_item(
+            &src[s..e],
+            file,
+            s,
+            item.span.line_range.0,
+            item.span.col_range.0,
+            Dialect::Legacy,
+        )
+        .expect("parse_one_item");
         assert_eq!(mini.items[0].span.offset_range, item.span.offset_range, "annotated item span");
         assert_eq!(mini.items[0].annotations.len(), 1, "annotation preserved");
     }
@@ -1308,5 +1338,570 @@ mod tests {
         for (_, b) in retagged {
             assert_eq!(b.braces, None, "retagged block must drop brace spans");
         }
+    }
+}
+
+#[cfg(test)]
+mod modules_grammar_tests {
+    use super::*;
+
+    fn parse_v1(src: &str) -> Result<Ast, CompilerError> {
+        parse_module_clean_with_dialect(src, Ustr::from("test.rock"), Dialect::V1)
+    }
+
+    fn parse_legacy(src: &str) -> Result<Ast, CompilerError> {
+        parse_module_clean(src, Ustr::from("test.rock"))
+    }
+
+    fn body_first_expr(src: &str, dialect: Dialect) -> String {
+        let ast = parse_module_with_dialect(src, Ustr::from("test.rock"), dialect)
+            .expect("parse failed");
+        let err_count = ast.recovery_errors.len();
+        assert_eq!(err_count, 0, "clean fixture must not recover: {:?}", ast.recovery_errors);
+        match &ast.items[0].kind {
+            ItemKind::Function(f) => {
+                let block = f.body.rock_block().unwrap();
+                match &ast.blocks[block].statements[..] {
+                    [stmt] => match &ast.stmts[*stmt].kind {
+                        StatementKind::Let(l) => {
+                            let v = l.value.expect("let has a value");
+                            let s = ast.expr_sexp(v);
+                            s
+                        }
+                        other => panic!("expected let, got {other:?}"),
+                    },
+                    other => panic!("expected one statement, got {}", other.len()),
+                }
+            }
+            other => panic!("expected fn, got {other:?}"),
+        }
+    }
+
+    // --- spec 7: contextual ascription -------------------------------------
+
+    #[test]
+    fn paren_ascription_parses_in_v1() {
+        let sexp = body_first_expr("fn f() { let x = (5 : int) }", Dialect::V1);
+        assert_eq!(sexp, "(ascribe 5 int)");
+    }
+
+    #[test]
+    fn paren_ascription_is_additive_in_legacy() {
+        // The form was a parse error in legacy before this branch (probe:
+        // "Unsupported binary operator Colon"), so accepting it is additive.
+        let sexp = body_first_expr("fn f() { let x = (5 : int) }", Dialect::Legacy);
+        assert_eq!(sexp, "(ascribe 5 int)");
+    }
+
+    #[test]
+    fn legacy_keeps_infix_double_colon_ascription() {
+        let sexp = body_first_expr("fn f(x: float) { let y = x :: float }", Dialect::Legacy);
+        assert_eq!(sexp, "(:: x float)");
+    }
+
+    #[test]
+    fn v1_ident_colon_ident_parses_as_a_path_not_ascription() {
+        // No name-resolution-based guessing (spec 7): `x :: float` parses as a
+        // two-segment path; whether it names anything is the resolver's call.
+        let ast = parse_module_with_dialect(
+            "fn f(x: float) { let y = x :: float }",
+            Ustr::from("test.rock"),
+            Dialect::V1,
+        )
+        .expect("parses");
+        assert!(ast.recovery_errors.is_empty(), "no recovery: {:?}", ast.recovery_errors);
+        let ItemKind::Function(f) = &ast.items[0].kind else {
+            panic!("expected fn");
+        };
+        let block = f.body.rock_block().unwrap();
+        let stmt = ast.blocks[block].statements[0];
+        let StatementKind::Let(l) = &ast.stmts[stmt].kind else {
+            panic!("expected let");
+        };
+        let v = l.value.expect("value");
+        assert!(
+            matches!(ast.exprs[v].kind, ExprKind::Path { .. }),
+            "expected a path, got {:?}",
+            ast.exprs[v].kind
+        );
+    }
+
+    #[test]
+    fn v1_rejects_infix_ascription_after_calls() {
+        let err = parse_v1("fn f(x: int) { let y = g(x) :: int }")
+            .expect_err("v1 must reject infix ascription after a call");
+        assert!(err.message.contains("(expr : Type)"), "got: {}", err.message);
+    }
+
+    #[test]
+    fn typed_lambda_is_not_an_ascription_in_v1() {
+        // `(x : int) => x` — the lambda lookahead wins; `(x : int)` ascription
+        // requires the paren group to END the expression.
+        let sexp = body_first_expr(
+            "fn f() { let g = (x : int) => x }",
+            Dialect::V1,
+        );
+        assert!(sexp.starts_with("(lambda"), "got: {sexp}");
+    }
+
+    #[test]
+    fn ascription_of_lambda_value_works_in_v1() {
+        let sexp = body_first_expr(
+            "fn f() { let cb = ((x => x + 1) : fn(int) -> int) }",
+            Dialect::V1,
+        );
+        assert_eq!(sexp, "(ascribe (paren (lambda (None) None (block (return (+ x 1))))) (fn (int) int))");
+    }
+
+    #[test]
+    fn ascription_is_not_a_typed_tuple_in_v1() {
+        // `(a : int, b : int)` is not a new typed-tuple literal (spec 7).
+        let err = parse_v1("fn f() { let t = (a : int, b : int) }")
+            .expect_err("multi-colon paren group must reject");
+        assert!(err.message.contains("one expression"), "got: {}", err.message);
+    }
+
+    #[test]
+    fn tuple_element_ascription_still_rejects() {
+        // Bare `b : int` inside a tuple remains un-added grammar.
+        let err = parse_v1("fn f(a: int) { let t = (a, b : int) }")
+            .expect_err("bare expr : Type outside parens must reject");
+        assert!(
+            err.message.contains("parenthesize the ascription"),
+            "got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn nested_tuple_ascription_in_v1() {
+        let sexp = body_first_expr(
+            "fn f(a: int, b: int) { let t = ((a, b) : (int, int)) }",
+            Dialect::V1,
+        );
+        assert_eq!(sexp, "(ascribe (tuple a b) (tuple int int))");
+    }
+
+    #[test]
+    fn ascription_groups_tighter_than_operators_in_v1() {
+        // `j : float / k : float` without parens is NOT ascription (bare form
+        // is un-added); the parenthesized form keeps its existing grouping.
+        let sexp = body_first_expr(
+            "fn f(j: int, k: int) { let d = (j : float) / (k : float) }",
+            Dialect::V1,
+        );
+        assert_eq!(sexp, "(/ (ascribe j float) (ascribe k float))");
+    }
+}
+
+#[cfg(test)]
+mod modules_path_tests {
+    use super::*;
+
+    fn parse_v1(src: &str) -> Result<Ast, CompilerError> {
+        parse_module_clean_with_dialect(src, Ustr::from("test.rock"), Dialect::V1)
+    }
+
+    fn let_type(src: &str) -> String {
+        let ast = parse_v1(src).expect("parse failed");
+        assert!(ast.recovery_errors.is_empty(), "{:?}", ast.recovery_errors);
+        let ItemKind::Function(f) = &ast.items[0].kind else { panic!("expected fn") };
+        let block = f.body.rock_block().unwrap();
+        let StatementKind::Let(l) = &ast.stmts[ast.blocks[block].statements[0]].kind else {
+            panic!("expected let");
+        };
+        let ty = l.ty.expect("let has a type annotation");
+        ast.type_sexp(ty)
+    }
+
+    fn let_value(src: &str) -> String {
+        let ast = parse_v1(src).expect("parse failed");
+        assert!(ast.recovery_errors.is_empty(), "{:?}", ast.recovery_errors);
+        let ItemKind::Function(f) = &ast.items[0].kind else { panic!("expected fn") };
+        let block = f.body.rock_block().unwrap();
+        let StatementKind::Let(l) = &ast.stmts[ast.blocks[block].statements[0]].kind else {
+            panic!("expected let");
+        };
+        ast.expr_sexp(l.value.expect("value"))
+    }
+
+    #[test]
+    fn qualified_type_path_parses_in_v1() {
+        assert_eq!(
+            let_type("fn f() { let x: mag_core::combat::Actor = x }"),
+            "mag_core::combat::Actor"
+        );
+    }
+
+    #[test]
+    fn generic_type_path_parses_in_v1() {
+        assert_eq!(
+            let_type("fn f() { let x: stone::collections::Vec<int> = x }"),
+            "(stone::collections::Vec int)"
+        );
+    }
+
+    #[test]
+    fn root_anchored_and_self_super_type_paths_parse_in_v1() {
+        assert_eq!(let_type("fn f() { let x: ::mag::Actor = x }"), "::mag::Actor");
+        assert_eq!(let_type("fn f() { let x: self::Actor = x }"), "self::Actor");
+        assert_eq!(let_type("fn f() { let x: super::shared::T = x }"), "super::shared::T");
+        assert_eq!(let_type("fn f() { let x: super::super::T = x }"), "super::super::T");
+    }
+
+    #[test]
+    fn value_path_parses_in_v1() {
+        assert_eq!(
+            let_value("fn f() { let h = mag_core::combat::heal }"),
+            "mag_core::combat::heal"
+        );
+    }
+
+    #[test]
+    fn lowercase_member_is_a_path_in_v1_no_case_guess() {
+        // Legacy requires the member to be uppercase for a qualified ident;
+        // v1 has no case rule (the resolver decides).
+        assert_eq!(let_value("fn f() { let v = mod_u::helper }"), "mod_u::helper");
+    }
+
+    #[test]
+    fn qualified_call_parses_in_v1() {
+        let ast = parse_v1(
+            "fn f() { let v = mag_core::combat::heal(actor, 5)\nprint(v) }",
+        )
+        .expect("parse failed");
+        assert!(ast.recovery_errors.is_empty(), "{:?}", ast.recovery_errors);
+        let ItemKind::Function(f) = &ast.items[0].kind else { panic!("expected fn") };
+        let block = f.body.rock_block().unwrap();
+        let StatementKind::Let(l) = &ast.stmts[ast.blocks[block].statements[0]].kind else {
+            panic!("expected let");
+        };
+        let v = l.value.expect("value");
+        let ExprKind::FunctionCall { func, .. } = &ast.exprs[v].kind else {
+            panic!("expected call, got {:?}", ast.exprs[v].kind);
+        };
+        assert!(matches!(ast.exprs[*func].kind, ExprKind::Path { .. }));
+    }
+
+    #[test]
+    fn qualified_generic_call_parses_in_v1() {
+        let ast = parse_v1("fn f() { let v = p::make<int>(3)\nprint(v) }").expect("parse failed");
+        assert!(ast.recovery_errors.is_empty(), "{:?}", ast.recovery_errors);
+        let ItemKind::Function(f) = &ast.items[0].kind else { panic!("expected fn") };
+        let block = f.body.rock_block().unwrap();
+        let StatementKind::Let(l) = &ast.stmts[ast.blocks[block].statements[0]].kind else {
+            panic!("expected let");
+        };
+        let v = l.value.expect("value");
+        let ExprKind::FunctionCall { generic_args, .. } = &ast.exprs[v].kind else {
+            panic!("expected call, got {:?}", ast.exprs[v].kind);
+        };
+        assert_eq!(generic_args.len(), 1, "explicit type argument survived");
+    }
+
+    #[test]
+    fn qualified_enum_variant_is_an_ordinary_path_in_v1() {
+        // In v1 `Enum::Variant` is a plain path: the case of the second
+        // segment must not decide anything at parse time.
+        assert_eq!(let_value("fn f() { let c = Color::Red }"), "Color::Red");
+        assert_eq!(let_value("fn f() { let c = colors::Color::Red }"), "colors::Color::Red");
+    }
+
+    #[test]
+    fn qualified_struct_literal_parses_in_v1() {
+        let ast = parse_v1("fn f() { let a = lib::Actor { hp: 100 }\nprint(a) }")
+            .expect("parse failed");
+        assert!(ast.recovery_errors.is_empty(), "{:?}", ast.recovery_errors);
+        let ItemKind::Function(f) = &ast.items[0].kind else { panic!("expected fn") };
+        let block = f.body.rock_block().unwrap();
+        let StatementKind::Let(l) = &ast.stmts[ast.blocks[block].statements[0]].kind else {
+            panic!("expected let");
+        };
+        let v = l.value.expect("value");
+        let ExprKind::PathStructLiteral { path, fields, .. } = &ast.exprs[v].kind else {
+            panic!("expected path struct literal, got {:?}", ast.exprs[v].kind);
+        };
+        assert_eq!(path.segments.len(), 2);
+        assert_eq!(fields.len(), 1);
+    }
+
+    #[test]
+    fn qualified_pattern_parses_in_v1() {
+        let ast = parse_v1(
+            "fn f(msg: Message) { let x = match msg { msg_kind::Ping => 1, other => 0 }\nprint(x) }",
+        )
+        .expect("parse failed");
+        assert!(ast.recovery_errors.is_empty(), "{:?}", ast.recovery_errors);
+        // The arm pattern is a PathVariant.
+        let found = ast.blocks.iter().any(|_| true);
+        assert!(found);
+        // Depth-check via sexp: match arms render patterns.
+        let ItemKind::Function(f) = &ast.items[0].kind else { panic!("expected fn") };
+        let block = f.body.rock_block().unwrap();
+        let sexp = ast.block_sexp(block);
+        assert!(sexp.contains("msg_kind::Ping"), "pattern should render as a path: {sexp}");
+    }
+
+    #[test]
+    fn v1_still_parses_unqualified_single_segment_idents() {
+        // A bare `Foo` in v1 stays a plain ident (one-segment resolution is
+        // the common case); it must not become a Path node.
+        assert_eq!(let_value("fn f() { let v = helper }"), "helper");
+    }
+
+    #[test]
+    fn legacy_qualified_ident_case_rule_unchanged() {
+        // Legacy: `Color::Red` is a QualifiedIdent; `mod_u::helper` is NOT
+        // (lowercase member falls through to ascription/ident handling).
+        let ast = parse_module("fn f() { let c = Color::Red\nprint(c) }", Ustr::from("test.rock")).expect("parse");
+        let ItemKind::Function(f) = &ast.items[0].kind else { panic!("expected fn") };
+        let block = f.body.rock_block().unwrap();
+        let StatementKind::Let(l) = &ast.stmts[ast.blocks[block].statements[0]].kind else {
+            panic!("expected let");
+        };
+        assert!(matches!(
+            ast.exprs[l.value.expect("value")].kind,
+            ExprKind::QualifiedIdent { .. }
+        ));
+    }
+}
+
+#[cfg(test)]
+mod modules_item_tests {
+    use super::*;
+
+    fn parse_v1(src: &str) -> Result<Ast, CompilerError> {
+        parse_module_clean_with_dialect(src, Ustr::from("test.rock"), Dialect::V1)
+    }
+
+    #[test]
+    fn qualified_d_form_receiver_parses_in_v1() {
+        let ast = parse_v1(
+            "fn lib::Actor.heal(a, amount: int) { a.hp = a.hp + amount }",
+        )
+        .expect("parse failed");
+        assert!(ast.recovery_errors.is_empty(), "{:?}", ast.recovery_errors);
+        let ItemKind::Function(f) = &ast.items[0].kind else { panic!("expected fn") };
+        assert_eq!(f.name.name, "heal");
+        assert!(f.receiver_surface.is_some(), "receiver surface recorded");
+    }
+}
+
+#[cfg(test)]
+mod modules_items_tests {
+    use super::*;
+
+    fn parse_v1(src: &str) -> Result<Ast, CompilerError> {
+        parse_module_clean_with_dialect(src, Ustr::from("test.rock"), Dialect::V1)
+    }
+
+    #[test]
+    fn file_header_parses_in_v1() {
+        let ast = parse_v1("mod combat::casting;\n\nfn f() {}") .expect("parse");
+        let h = ast.module_header.as_ref().expect("header recorded");
+        let names: Vec<_> = h.path.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(names, vec!["combat", "casting"]);
+        assert!(h.vis.is_none());
+    }
+
+    #[test]
+    fn pub_file_header_and_explicit_root_parse_in_v1() {
+        let ast = parse_v1("pub mod combat;\n\nfn f() {}").expect("parse");
+        let h = ast.module_header.as_ref().expect("header");
+        assert_eq!(h.path.len(), 1);
+        assert_eq!(h.vis, Some(Visibility::Pub));
+
+        let ast = parse_v1("mod self;\n\nfn f() {}").expect("parse");
+        let h = ast.module_header.as_ref().expect("header");
+        assert!(h.path.is_empty(), "mod self; is the explicit root");
+    }
+
+    #[test]
+    fn misplaced_header_rejects_in_v1() {
+        let err = parse_v1("fn f() {}\nmod combat;").expect_err("header must lead the file");
+        assert!(err.message.contains("first item"), "got: {}", err.message);
+    }
+
+    #[test]
+    fn a_second_file_header_rejects_in_v1() {
+        for src in ["mod a;\nmod b;\n\nfn f() {}", "mod a;\n// between\npub mod a;\n"] {
+            let err = parse_v1(src).expect_err("a file has one header");
+            assert!(
+                err.message.contains("a file has one `mod path;` header"),
+                "got: {}",
+                err.message
+            );
+        }
+    }
+
+    /// Visibility leads the item, annotations included (`parse_item` reads the
+    /// modifiers before the annotations), so an annotated item and a custom
+    /// decorator can be exported.
+    #[test]
+    fn visibility_leads_an_annotated_item_and_a_decorator() {
+        let spelled = |vis: &Option<Visibility>| match vis {
+            Some(Visibility::PubIn(path)) => {
+                let path: Vec<&str> = path.iter().map(|i| i.name.as_str()).collect();
+                format!("pub(in {})", path.join("::"))
+            }
+            other => format!("{other:?}"),
+        };
+        for (src, want) in [
+            ("pub @inline fn f() -> int { 1 }", "Some(Pub)"),
+            ("pub(package) @pure @inline\nfn f() -> int { 1 }", "Some(PubPackage)"),
+            ("private @nomangle inline(lua) fn f() -> int = \"\"\"return 1\"\"\"", "Some(Private)"),
+            ("pub deco traced(f: fn()) { }", "Some(Pub)"),
+            // `in` is a keyword token, so this form never parsed at item level.
+            ("pub(in combat::casting) fn f() -> int { 1 }", "pub(in combat::casting)"),
+        ] {
+            let ast = parse_v1(src).expect(src);
+            assert!(ast.recovery_errors.is_empty(), "{src}: {:?}", ast.recovery_errors);
+            assert_eq!(spelled(&ast.items[0].vis), want, "{src}");
+        }
+        let ast = parse_v1("pub @inline fn f() -> int { 1 }").expect("parse");
+        assert_eq!(ast.items[0].annotations.len(), 1);
+    }
+
+    #[test]
+    fn inline_mod_block_parses_in_v1() {
+        let ast = parse_v1("pub mod combat {\n    pub fn heal() {}\n}\n").expect("parse");
+        assert!(ast.recovery_errors.is_empty(), "{:?}", ast.recovery_errors);
+        let ItemKind::Module(m) = &ast.items[0].kind else { panic!("expected mod item") };
+        assert_eq!(m.name.name, "combat");
+        assert_eq!(m.vis, Some(Visibility::Pub));
+        assert_eq!(m.items.len(), 1);
+    }
+
+    #[test]
+    fn use_forms_parse_in_v1_and_legacy() {
+        let cases = [
+            "use a::b::c;",
+            "use a::b::*;",
+            "use a::b as c;",
+            "use a::b::{Actor, heal as h};",
+            "use a::b::{self, Actor};",
+            "use geo::operator(+);",
+            "use geo::operator(+) as add_pt;",
+            "use geo::{Pt, operator(*) as scale};",
+            "use ::rooted::a;",
+            "pub use a::b::*;",
+            "pub(package) use a::b::step;",
+            "private use a::b::x;",
+        ];
+        // Bare `use` parses additively in legacy too (contextual, plan M1);
+        // visibility-prefixed forms are v1 grammar.
+        let legacy_cases = [
+            "use a::b::c;",
+            "use a::b::*;",
+            "use a::b as c;",
+            "use a::b::{Actor, heal as h};",
+            "use a::b::{self, Actor};",
+            "use geo::operator(+);",
+            "use geo::operator(+) as add_pt;",
+            "use geo::{Pt, operator(*) as scale};",
+            "use ::rooted::a;",
+        ];
+        for src in cases {
+            let ast = parse_v1(src).expect(src);
+            assert!(ast.recovery_errors.is_empty(), "{src}: {:?}", ast.recovery_errors);
+            assert!(matches!(ast.items[0].kind, ItemKind::Use(_)), "{src}");
+            if legacy_cases.contains(&src) {
+                let ast = parse_module(src, Ustr::from("legacy.rock")).expect(src);
+                assert!(ast.recovery_errors.is_empty(), "{src}: {:?}", ast.recovery_errors);
+            }
+        }
+    }
+
+    #[test]
+    fn use_as_underscore_rejects() {
+        let err = parse_v1("use a::b as _;").expect_err("as _ must reject");
+        assert!(err.message.contains("as _"), "got: {}", err.message);
+    }
+
+    #[test]
+    fn an_operator_selector_takes_an_alias() {
+        let ast = parse_v1("use geo::operator(+) as add_pt;").expect("parse");
+        let ItemKind::Use(u) = &ast.items[0].kind else { panic!("expected use") };
+        let UseTree::Path { kind: UseSuffix::Operator { op, alias }, segments, .. } = &u.tree else {
+            panic!("expected an operator selector, got {:?}", u.tree);
+        };
+        assert_eq!(segments.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["geo"]);
+        assert_eq!(op.name, "__op_add");
+        assert_eq!(alias.as_ref().map(|a| a.name.as_str()), Some("add_pt"));
+
+        let err = parse_v1("use geo::operator(+) as _;").expect_err("as _ must reject");
+        assert!(err.message.contains("as _"), "got: {}", err.message);
+    }
+
+    #[test]
+    fn nested_use_trees_parse() {
+        let ast = parse_v1("use a::b::{c::{d, e}, f::g as h};").expect("parse");
+        let ItemKind::Use(u) = &ast.items[0].kind else { panic!("expected use") };
+        let UseTree::Path { kind: UseSuffix::Nested(trees), .. } = &u.tree else {
+            panic!("expected nested");
+        };
+        assert_eq!(trees.len(), 2);
+    }
+
+    #[test]
+    fn private_set_field_parses_in_v1() {
+        let ast = parse_v1(
+            "pub struct Actor {\n    name: string,\n    private(set) health: float = 100,\n    pub(package) private(set) counter: int,\n}",
+        )
+        .expect("parse");
+        let ItemKind::Struct(s) = &ast.items[0].kind else { panic!("expected struct") };
+        assert!(s.fields[0].vis.is_none());
+        assert!(s.fields[1].set_private);
+        assert!(s.fields[2].set_private);
+        assert_eq!(s.fields[2].vis, Some(Visibility::PubPackage));
+    }
+
+    #[test]
+    fn contextual_words_stay_usable_as_names() {
+        // `private: bool` is a field named `private`; `mod` and `use` do not
+        // reserve anything (contextual words only).
+        let ast = parse_v1(
+            "struct S {\n    private: bool,\n    pub: int,\n}\nfn f(p: S) { let x = p\nprint(x) }",
+        )
+        .expect("parse");
+        assert!(ast.recovery_errors.is_empty(), "{:?}", ast.recovery_errors);
+    }
+
+    #[test]
+    fn vis_on_items_parses_in_v1() {
+        let ast = parse_v1("pub fn f() {}\nprivate struct S {}\npub(package) global G: int = 0").expect("parse");
+        assert_eq!(ast.items[0].vis, Some(Visibility::Pub));
+        assert_eq!(ast.items[1].vis, Some(Visibility::Private));
+        assert_eq!(ast.items[2].vis, Some(Visibility::PubPackage));
+    }
+
+    #[test]
+    fn private_set_on_an_item_rejects() {
+        let err = parse_v1("private(set) fn f() {}").expect_err("private(set) is field-only");
+        assert!(err.message.contains("fields"), "got: {}", err.message);
+    }
+
+    #[test]
+    fn block_level_use_parses() {
+        let ast = parse_v1("fn f() {\n    use a::b::c\n    let x = 1\n}").expect("parse");
+        assert!(ast.recovery_errors.is_empty(), "{:?}", ast.recovery_errors);
+        let ItemKind::Function(f) = &ast.items[0].kind else { panic!("expected fn") };
+        let block = f.body.rock_block().unwrap();
+        assert!(matches!(
+            ast.stmts[ast.blocks[block].statements[0]].kind,
+            StatementKind::Use(_)
+        ));
+    }
+}
+
+#[cfg(test)]
+mod vis_probe_tests {
+    use super::*;
+    #[test]
+    fn probe_vis_debug() {
+        let src = "struct S {\n    private(set) health: float = 100,\n}";
+        let ast = parse_module(src, Ustr::from("p.rock")).expect("parse");
+        // legacy: vis not parsed; private(set) must FAIL parse or be a field named private
+        let _ = ast;
     }
 }

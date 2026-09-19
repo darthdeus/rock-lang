@@ -12,7 +12,7 @@
 //! query crashed (`bone-query/tests/repro_camera_crash.rs` is the end-to-end
 //! companion).
 
-use bone_incremental::session::Session;
+use bone_incremental::session::{Session, SessionFile};
 use bone_semantic::prelude::*;
 
 const WARM: &str = "
@@ -28,10 +28,10 @@ fn warm() -> Vec<skull_parser::Ast> {
 fn failed_rebuild_users_keeps_workspace_consistent() {
     // A valid multi-module program.
     let files = vec![
-        ("a.rock".to_string(), "struct S { v: int }\n".to_string()),
-        ("b.rock".to_string(), "fn use_s(s: S) -> int { s.v }\n".to_string()),
+        SessionFile::legacy("a.rock", "struct S { v: int }\n"),
+        SessionFile::legacy("b.rock", "fn use_s(s: S) -> int { s.v }\n"),
     ];
-    let mut session = Session::new(warm(), files).expect("clean program builds");
+    let mut session = Session::new(warm(), files, &bone_core::modules::NsAliases::default()).expect("clean program builds");
 
     assert_eq!(
         session.ws.modules.len(),
@@ -72,4 +72,20 @@ fn failed_rebuild_users_keeps_workspace_consistent() {
     for (_, &mid) in session.ws.module_ids.iter() {
         let _ = session.ws.module(mid);
     }
+}
+
+/// The host resolves build variables once, onto the session's workspace
+/// (`bone_session_for_emission`). A full rebuild replaces that workspace, so it
+/// has to carry them over or emission after the rebuild sees none.
+#[test]
+fn rebuild_users_keeps_the_comptime_inputs() {
+    let files = vec![SessionFile::legacy("a.rock", "fn f() -> int { 1 }\n")];
+    let mut session = Session::new(warm(), files, &bone_core::modules::NsAliases::default()).expect("clean program builds");
+    session.ws.comptime_inputs.channel = "dev".to_string();
+    session.ws.comptime_inputs.modules_mode = "v1".to_string();
+
+    session.rebuild_users().expect("an unchanged program rebuilds");
+
+    assert_eq!(session.ws.comptime_inputs.channel, "dev");
+    assert_eq!(session.ws.comptime_inputs.modules_mode, "v1");
 }

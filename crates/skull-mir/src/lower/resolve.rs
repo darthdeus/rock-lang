@@ -225,7 +225,7 @@ impl Builder<'_> {
                 Some(shape) => self.safe_nav_field_repr(e, base, field, shape),
                 None => Ok(ValueRepr::Scalar(self.lower_expr(e)?)),
             },
-            Expr::SafeNavCall { receiver, method, args } => match self.repr_join_slot(e)? {
+            Expr::SafeNavCall { receiver, method, args, .. } => match self.repr_join_slot(e)? {
                 Some(shape) => self.safe_nav_call_repr(e, receiver, method, args, shape),
                 None => Ok(ValueRepr::Scalar(self.lower_expr(e)?)),
             },
