@@ -11,9 +11,9 @@
 //! `games/survivors` is the fixture: it keeps three Arena globals (`MOBS`,
 //! `PROJECTILES`, `XP_GEMS`) and spawns into them within a few frames.
 //!
-//! Heavy: spawns `rock frame`. -P full tier, because a GPU process beside the
-//! other game-spawning tests aborts under contention rather than reporting on
-//! its subject.
+//! Heavy: spawns two `rock frame` processes. -P full tier, because a GPU process
+//! beside the other game-spawning tests aborts under contention rather than
+//! reporting on its subject.
 
 use std::path::Path;
 use std::process::Command;
@@ -22,9 +22,21 @@ fn workspace_root() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR")).parent().expect("workspace root")
 }
 
-fn dump_survivors_state() -> serde_json::Value {
+fn record_and_dump_survivors_state(log: &str, scratch: &Path) -> serde_json::Value {
     let out = Command::new(env!("CARGO_BIN_EXE_rock"))
-        .args(["frame", "games/survivors", "-n", "30", "--dump-state"])
+        .args([
+            "frame",
+            "games/survivors",
+            "-n",
+            "30",
+            "--dump-state",
+            "--record",
+            log,
+            "--checkpoint-interval",
+            "5",
+            "--output",
+            &scratch.to_string_lossy(),
+        ])
         .env("ROCK_TEST_SEED", "42")
         .env("ROCK_FRAME_TIMEOUT_SECS", "60")
         .current_dir(workspace_root())
@@ -40,8 +52,12 @@ fn dump_survivors_state() -> serde_json::Value {
 }
 
 #[test]
-fn arena_globals_dump_as_live_rows() {
-    let state = dump_survivors_state();
+fn arena_globals_project_as_live_rows_and_replay_deterministically() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("arena.replay");
+    let log_s = log.to_string_lossy().into_owned();
+    let scratch = tempfile::tempdir().unwrap();
+    let state = record_and_dump_survivors_state(&log_s, scratch.path());
     let pkg = &state["survivors"];
 
     for name in ["MOBS", "PROJECTILES", "XP_GEMS"] {
@@ -69,42 +85,10 @@ fn arena_globals_dump_as_live_rows() {
     for (i, r) in mobs.iter().enumerate() {
         assert!(r.is_object(), "MOBS[{i}] is a removed-slot hole, not a row: {r}");
     }
-}
 
-/// The Arena globals reach the canonical (`%a`) walker that feeds replay
-/// `c`-line hashes, and a recorded run replays clean through them.
-///
-/// This is a DETERMINISM arm, not a content one: record and replay share the
-/// walker, so a projection that dropped every row would still agree with
-/// itself. `arena_globals_dump_as_live_rows` is the content oracle -- verified
-/// by mutation, it reports the bare `{_scene_id, _arena_id}` handle.
-#[test]
-fn arena_globals_are_hashed_by_their_rows() {
-    let dir = tempfile::tempdir().unwrap();
-    let log = dir.path().join("arena.replay");
-    let log_s = log.to_string_lossy().into_owned();
-    let scratch = tempfile::tempdir().unwrap();
-
-    let rec = Command::new(env!("CARGO_BIN_EXE_rock"))
-        .args([
-            "frame",
-            "games/survivors",
-            "-n",
-            "30",
-            "--record",
-            &log_s,
-            "--checkpoint-interval",
-            "5",
-            "--output",
-            &scratch.path().to_string_lossy(),
-        ])
-        .env("ROCK_TEST_SEED", "42")
-        .env("ROCK_FRAME_TIMEOUT_SECS", "60")
-        .current_dir(workspace_root())
-        .output()
-        .expect("spawn record");
-    assert!(rec.status.success(), "record failed: {}", String::from_utf8_lossy(&rec.stderr));
-
+    // This is the determinism arm, while the dump assertions above are the
+    // content oracle. Record and replay sharing the walker could otherwise
+    // agree after silently dropping every row.
     let text = std::fs::read_to_string(&log).unwrap();
     let hashed: Vec<&str> = text
         .lines()
