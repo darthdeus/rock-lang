@@ -3036,16 +3036,8 @@ fn always_inlinable(inst: &Inst) -> bool {
 /// wide value returned by a call occupied two locals (the result and a copy),
 /// which is what pushed functions holding a few wide values past LuaJIT's
 /// 250-slot frame limit. No later write can intervene, because the one write
-/// dominates every read.
-///
-/// Every qualifying receive is read in place, narrow ones included. A
-/// four-lane threshold stood here from 2026-09-18 to 2026-09-19 because
-/// reading narrow receives in place appeared to make MAG's damage feedback
-/// allocate 4-6x in a minority of processes. It did not: that allocation was
-/// MAG's own, four per-event allocations LuaJIT only sometimes sank, and with
-/// them gone (`c381399ff`) 51 interleaved runs per arm from one build read no
-/// spike in any of the three -- every receive in place, the threshold, and no
-/// receive at all.
+/// dominates every read. Narrow receives qualify too; the evidence against a
+/// width threshold is in `docs/nobox-wide-trace-plan.md`.
 fn single_receive_cells(func: &MirFunc, scope: &[Idx<Block>]) -> HashSet<Idx<Cell>> {
     // cell -> (defs, the receive's block and position). Only a receive records
     // a position, so a cell qualifies iff its one def is one.
