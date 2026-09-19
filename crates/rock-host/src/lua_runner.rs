@@ -45,6 +45,14 @@ pub fn run_lua_code_with_timeout(
     timeout: Option<Duration>,
 ) -> Result<LuaRun, CompilerError> {
     let luajit_path = crate::project::luajit_path();
+    run_lua_code_with_timeout_at(&luajit_path, code, timeout)
+}
+
+fn run_lua_code_with_timeout_at(
+    luajit_path: &std::path::Path,
+    code: &str,
+    timeout: Option<Duration>,
+) -> Result<LuaRun, CompilerError> {
     let luajit_path_str = luajit_path.to_string_lossy().into_owned();
 
     if !luajit_path.exists() {
@@ -54,7 +62,7 @@ pub fn run_lua_code_with_timeout(
         )));
     }
 
-    let mut cmd = std::process::Command::new(&luajit_path_str);
+    let mut cmd = std::process::Command::new(luajit_path);
     // `-` = "run stdin as a script". WITHOUT it luajit treats piped stdin as an
     // INTERACTIVE session: it prints a fatal error and still exits 0. That is the
     // root of the whole "`rock run` exits 0 while printing a LuaJIT crash" trap --
@@ -80,23 +88,10 @@ pub fn run_lua_code_with_timeout(
     let pid = child.id();
     register_child_process(pid);
 
-    {
-        use std::io::Write;
-        let stdin = child.stdin.as_mut().expect("Failed to open stdin");
-        if let Err(e) = stdin.write_all(code.as_bytes()) {
-            let _ = child.kill();
-            let _ = child.wait();
-            unregister_child_process(pid);
-            return Err(CompilerError::new_no_location(format!(
-                "Failed to write test code to luajit process: {}.",
-                e
-            )));
-        }
-    }
-
     // Drain both pipes on threads BEFORE waiting. Waiting first deadlocks as
     // soon as the child fills a pipe buffer, which is the ~50k-line-script hang
     // recorded in `stone_test_decorator_cleanup.rs`.
+    let mut stdin = child.stdin.take().expect("stdin piped");
     let mut stdout_pipe = child.stdout.take().expect("stdout piped");
     let mut stderr_pipe = child.stderr.take().expect("stderr piped");
     // The read result is PROPAGATED, not dropped. Discarding it turned a failed
@@ -110,6 +105,16 @@ pub fn run_lua_code_with_timeout(
         let mut buf = Vec::new();
         std::io::Read::read_to_end(&mut stderr_pipe, &mut buf).map(|_| buf)
     });
+
+    // LuaJIT can report a load error and exit before the whole script has been
+    // written. Keep that write error until the child status and stderr are
+    // available so it cannot mask the load diagnostic.
+    let write_error = {
+        use std::io::Write;
+        let result = stdin.write_all(code.as_bytes());
+        drop(stdin);
+        result.err()
+    };
 
     // The status MUST come from whichever call reaped the child. `wait_timeout`
     // reaps it itself, so a following `wait`/`wait_with_output` cannot report the
@@ -158,6 +163,18 @@ pub fn run_lua_code_with_timeout(
     let stdout = drained(stdout_thread.join(), "stdout")?;
     let stderr = drained(stderr_thread.join(), "stderr")?;
 
+    if let Some(e) = write_error {
+        // A child load/runtime failure is the useful result even when it
+        // closed stdin before the host finished writing. A successful child
+        // has no load/runtime failure that can replace the write failure.
+        if status.success() {
+            return Err(CompilerError::new_no_location(format!(
+                "Failed to write test code to luajit process: {}.",
+                e
+            )));
+        }
+    }
+
     Ok(LuaRun {
         stdout: String::from_utf8_lossy(&stdout).to_string(),
         stderr: String::from_utf8_lossy(&stderr).to_string(),
@@ -167,4 +184,58 @@ pub fn run_lua_code_with_timeout(
 
 pub fn run_lua_code(code: &str) -> Result<LuaRun, CompilerError> {
     run_lua_code_with_timeout(code, Some(Duration::from_millis(1800)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn load_error_wins_over_stdin_broken_pipe() {
+        let mut code = "local = 1\n".to_string();
+        code.push_str(&"-- valid filler\n".repeat(1_000_000));
+
+        let run = run_lua_code_with_timeout(&code, Some(Duration::from_secs(5)))
+            .expect("LuaJIT load errors are child results, not runner failures");
+
+        assert!(!run.success, "invalid Lua unexpectedly loaded: {}", run.combined());
+        assert!(
+            run.stderr.contains("expected near") || run.stderr.contains("unexpected symbol"),
+            "LuaJIT's parse error was not reported: {}",
+            run.combined()
+        );
+        assert!(
+            !run.combined().contains("Broken pipe"),
+            "the stdin write error masked LuaJIT's parse error: {}",
+            run.combined()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn broken_pipe_without_a_child_error_is_reported() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let child_path = dir.path().join("close_stdin");
+        std::fs::write(&child_path, "#!/bin/sh\nexec </dev/null\nsleep 1\n")
+            .expect("child script");
+        let mut permissions = std::fs::metadata(&child_path)
+            .expect("child metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&child_path, permissions).expect("child permissions");
+
+        let mut code = "ignored by child\n".to_string();
+        code.push_str(&"-- valid filler\n".repeat(1_000_000));
+
+        let error = run_lua_code_with_timeout_at(&child_path, &code, Some(Duration::from_secs(5)))
+            .expect_err("a child with no diagnostic must not swallow the broken pipe");
+
+        assert!(
+            error.message.contains("Broken pipe"),
+            "the genuine write failure was not reported: {}",
+            error.message
+        );
+    }
 }
