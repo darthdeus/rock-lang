@@ -1160,6 +1160,30 @@ fn written_method_name(
     c.body.method_names.get(&receiver).copied()
 }
 
+fn unary_operator_symbol(name: Ustr) -> Option<&'static str> {
+    match name.as_str() {
+        "__not" => Some("!"),
+        "__unm" => Some("-"),
+        _ => None,
+    }
+}
+
+fn unary_operator_error(
+    gamma: &mut Gamma,
+    name: Ustr,
+    operand: Option<TyId>,
+    span: Span,
+) -> CompilerError {
+    let symbol = unary_operator_symbol(name).expect("unary operator name");
+    let operand = operand
+        .map(|t| {
+            let t = resolve(gamma, t, span);
+            gamma.workspace.render(Some(&gamma.out), t)
+        })
+        .unwrap_or_else(|| "<no operand>".to_string());
+    CompilerError::new_with_label(span, format!("operator `{symbol}` is not defined for `{operand}`"))
+}
+
 pub(crate) fn resolve_named_call_inner(
     gamma: &mut Gamma,
     c: BodyCtx,
@@ -1288,31 +1312,12 @@ pub(crate) fn resolve_named_call_inner(
             }
         }
 
-        // Unary-operator desugars (`!x` -> `__not`, `-x` -> `__unm`) with an
-        // empty overload set read as operator errors naming the operand type,
+        // Unary-operator desugars (`!x` -> `__not`, `-x` -> `__unm`) with no
+        // applicable overload read as operator errors naming the operand type,
         // not as a missing internal function.
-        let op_symbol = match name.as_str() {
-            "__not" => Some("!"),
-            "__unm" => Some("-"),
-            _ => None,
-        };
-        if let Some(sym) = op_symbol {
-            let operand = args
-                .into_iter()
-                .next()
-                .map(|a| -> Result<String, CompilerError> {
-                    let t = infer_expr(c, gamma, a)?;
-                    let t = resolve(gamma, t, span);
-                    Ok(gamma.workspace.render(Some(&gamma.out), t))
-                })
-                .transpose()?
-                .unwrap_or_else(|| "<no operand>".to_string());
-            comp_error!(
-                span,
-                "operator `{}` is not defined for `{}`",
-                sym,
-                operand
-            );
+        if unary_operator_symbol(name).is_some() {
+            let operand = args.into_iter().next().map(|a| infer_expr(c, gamma, a)).transpose()?;
+            return Err(unary_operator_error(gamma, name, operand, span));
         }
 
         // A v1 DefKey renders as its declared name (plan 2.1); legacy keys
@@ -1339,7 +1344,7 @@ pub(crate) fn resolve_named_call_inner(
 
     let mut preinferred: FxHashMap<Idx<Expr>, TyId> = FxHashMap::default();
 
-    let (callee_mid, callee_fn) = if candidates.len() == 1 {
+    let (callee_mid, callee_fn) = if candidates.len() == 1 && unary_operator_symbol(name).is_none() {
         candidates[0]
     } else {
         let mut arg_tys: Vec<TyId> = Vec::new();
@@ -1387,6 +1392,10 @@ pub(crate) fn resolve_named_call_inner(
             Ok(pick) => pick,
 
             Err(e) => {
+                if matches!(&e, SelectError::NoFit(_)) && unary_operator_symbol(name).is_some() {
+                    return Err(unary_operator_error(gamma, name, arg_tys.first().copied(), span));
+                }
+
                 // Defer-to-use: a cost tie whose operand is an unpinned
                 // lambda-param var re-resolves when a later use pins it
                 // (defer.rs). Wins over the `__op_*` fallback below -- the

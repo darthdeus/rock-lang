@@ -741,7 +741,10 @@ impl<'a> Parser<'a> {
             let glyph = self.kind();
             self.advance();
             self.expect(TokenKind::CloseParen)?;
-            let op_fn = glyph.overloadable_binop_fn().ok_or_else(|| {
+            let op_fn = glyph.overloadable_binop_fn().or_else(|| match glyph {
+                TokenKind::Bang => Some("__not"),
+                _ => None,
+            }).ok_or_else(|| {
                 self.err(format!("operator({:?}) is not an importable operator family", glyph))
             })?;
             let op = Ident {
@@ -1267,9 +1270,9 @@ impl<'a> Parser<'a> {
         self.finish_fn_def(name, start, false, is_coroutine, extern_body, inline_backend)
     }
 
-    /// `operator [(<backend>)] <sym>(params) -> ret { body }` folds to a
-    /// function named `__op_<sym>` (rock's `OperatorSymbol::function_name`),
-    /// so the body s-expr lines up with rock's.
+    /// `operator [(<backend>)] <sym>(params) -> ret { body }` folds to the
+    /// operator family name used by lowering. The `-` and `!` glyphs select
+    /// their prefix families when the declaration has one parameter.
     fn parse_operator(
         &mut self,
         is_coroutine: bool,
@@ -1291,7 +1294,8 @@ impl<'a> Parser<'a> {
         }
         self.skip_comments();
         let sym_span = self.span();
-        let op_name = match self.kind() {
+        let symbol = self.kind();
+        let op_name = match symbol {
             TokenKind::Plus => "__op_add",
             TokenKind::Minus => "__op_sub",
             TokenKind::Mul => "__op_mul",
@@ -1321,7 +1325,25 @@ impl<'a> Parser<'a> {
         };
         self.advance(); // the symbol token (or `]` for index)
         let name = Ident { span: sym_span, name: Ustr::from(op_name) };
-        self.finish_fn_def(name, start, false, is_coroutine, extern_body, inline_backend)
+        let mut item = self.finish_fn_def(name, start, false, is_coroutine, extern_body, inline_backend)?;
+        if let ItemKind::Function(function) = &mut item.kind {
+            if function.params.len() == 1 {
+                match symbol {
+                    TokenKind::Minus => function.name.name = Ustr::from("__unm"),
+                    TokenKind::Bang => function.name.name = Ustr::from("__not"),
+                    TokenKind::BitNot => {}
+                    _ => {
+                        return Err(CompilerError::new_with_label(
+                            sym_span,
+                            format!(
+                                "operator `{symbol}` takes two parameters; only `-` and `!` have a prefix (unary) form"
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(item)
     }
 
     /// Generic params + `(params)` + optional `-> ret` + body, shared by
