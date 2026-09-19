@@ -1002,6 +1002,7 @@ fn resume_live_here_drops_abandoned_timing_and_appends_fresh_branch_samples() {
             ("STONE_FRAME_DELAY_MS", "2"),
             ("STONE_REPLAY_SLOW_PROFILE_MS", "1"),
             ("STONE_LIVE_REWIND", "1"),
+            ("STONE_KEYFRAME_INTERVAL", "10"),
             ("STONE_TIMELINE_SEEK_AT_FRAME", "20"),
             ("STONE_TIMELINE_SEEK_TO_TICK", "10"),
             ("STONE_BRANCH_AT_FRAME", "40"),
