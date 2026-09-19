@@ -2793,7 +2793,7 @@ function stone_unload_sound(h) {
 // The web mixer has only sfx and music nodes, so music routes to musicGain and
 // every other bus shares sfxGain -- the topology is coarser than native, not
 // ignored.
-function stone_play_sound(h, bus, volume, speed, decay, looped) {
+function stone_play_sound(h, bus, volume, speed, decay, looped, spatial, pan) {
   var A = __SW.audio, s = A.sounds[h];
   if (!A.ctx || !s || !s.buffer) return;
   var src = A.ctx.createBufferSource();
@@ -2803,7 +2803,15 @@ function stone_play_sound(h, bus, volume, speed, decay, looped) {
   var g = A.ctx.createGain();
   var vol = Math.max(volume, 0);
   g.gain.value = vol;
-  src.connect(g); g.connect(bus === 2 ? A.musicGain : A.sfxGain); src.start();
+  src.connect(g);
+  var output = g;
+  if (spatial && A.ctx.createStereoPanner) {
+    var panner = A.ctx.createStereoPanner();
+    panner.pan.value = Math.min(Math.max(pan, -1), 1);
+    g.connect(panner);
+    output = panner;
+  }
+  output.connect(bus === 2 ? A.musicGain : A.sfxGain); src.start();
   if (decay > 0) {
     var t = A.ctx.currentTime;
     g.gain.setValueAtTime(vol, t);
