@@ -53,6 +53,37 @@ fn legacy_only_workspace_keeps_modules_v1_namespace_empty() {
     assert!(ws.fragment_scopes.is_empty());
 }
 
+#[test]
+fn legacy_only_workspace_keeps_the_std_namespace() {
+    use skull_parser::Dialect;
+
+    let std_module = skull_parser::parse_module_with_dialect(
+        "fn print() {}",
+        Ustr::from("<stdlib>/fixture.rock"),
+        Dialect::Legacy,
+    )
+    .expect("parse stdlib module");
+    let mut user_module = skull_parser::parse_module_with_dialect(
+        "fn main() {}",
+        Ustr::from("main.rock"),
+        Dialect::Legacy,
+    )
+    .expect("parse legacy module");
+    user_module.package = Some(rock_core::source_code::PackageTag {
+        id: 1,
+        self_name: "game".to_string(),
+    });
+
+    let ws = semantic_pass(&mut [std_module, user_module]).expect("semantic pass");
+    let std_root = ws
+        .ns
+        .package(u32::MAX)
+        .and_then(|package| package.node(Ustr::from("")))
+        .expect("stdlib namespace root");
+    assert!(std_root.owned_callables.contains_key(&Ustr::from("print")));
+    assert!(ws.fragment_scopes.is_empty());
+}
+
 /// Measurement harness, not a guard: runs `unified.rock` (or the file in
 /// `BONE_STDLIB_PROBE`) through `semantic_pass` and panics with the first
 /// strict-lowering wall. Run with `--ignored` to see the next stdlib gap.

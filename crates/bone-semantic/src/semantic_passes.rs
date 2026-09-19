@@ -1214,6 +1214,13 @@ pub fn build_namespaces(
         module.dialect == skull_parser::Dialect::V1
             && !is_stdlib_module_file(module.file.as_str())
     }) {
+        for module in rock_modules
+            .iter()
+            .filter(|module| is_stdlib_module_file(module.file.as_str()))
+        {
+            let contribution = contribute(module);
+            register_stdlib_items(ws, &contribution)?;
+        }
         for module in rock_modules.iter().filter(|module| {
             module.dialect == skull_parser::Dialect::Legacy
                 && !is_stdlib_module_file(module.file.as_str())
