@@ -19,7 +19,8 @@
 
 use bone_core::hir::FamilyMember;
 use bone_core::modules::{
-    legacy_name, FragmentScope, LegacyName, NsPackage, NsVisibility, PackageId, ScopeProbe, UsePathRef,
+    legacy_name, DefKind, FragmentScope, LegacyName, NsPackage, NsVisibility, PackageId, ScopeProbe,
+    UsePathRef,
     STD_PACKAGE_ID,
 };
 use bone_core::workspace::Workspace;
@@ -600,6 +601,14 @@ impl Viewer<'_> {
     /// only v1 definitions.
     fn admits_key(&self, ws: &Workspace, key: Ustr) -> bool {
         match ws.defs.get(&key) {
+            Some(meta) if meta.kind == DefKind::Callable => ws
+                .callable_family_members(key)
+                .map(|members| {
+                    members
+                        .iter()
+                        .any(|member| self.admits(ws, &member.vis, meta.package, &meta.module))
+                })
+                .unwrap_or_else(|| self.admits(ws, &meta.vis, meta.package, &meta.module)),
             Some(meta) => self.admits(ws, &meta.vis, meta.package, &meta.module),
             None => matches!(self, Viewer::Fragment(_)),
         }
@@ -607,6 +616,18 @@ impl Viewer<'_> {
 }
 
 fn all_admit_key(ws: &Workspace, viewers: &[Viewer], key: Ustr) -> bool {
+    if let Some(meta) = ws.defs.get(&key).filter(|meta| meta.kind == DefKind::Callable) {
+        if let Some(members) = ws.callable_family_members(key) {
+            // A re-export chain has several viewers. One member must survive
+            // every viewer; combining each viewer's independent `any` would
+            // incorrectly join two different overloads into one family.
+            return members.iter().any(|member| {
+                viewers
+                    .iter()
+                    .all(|viewer| viewer.admits(ws, &member.vis, meta.package, &meta.module))
+            });
+        }
+    }
     viewers.iter().all(|v| v.admits_key(ws, key))
 }
 

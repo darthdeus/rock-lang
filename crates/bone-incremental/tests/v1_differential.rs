@@ -704,6 +704,24 @@ fn visibility_widened_on_a_path_used_item() {
     assert_eq!(h.relowered_body_count(), 2, "a's bump and c's pick");
 }
 
+/// A visibility-only edit to one member of an overload family invalidates the
+/// external caller even though the family key and its public sibling remain.
+/// The incremental result must match a fresh build after the per-member table
+/// changes, rather than reusing the old selected overload.
+#[test]
+fn overload_member_visibility_edit_rechecks_external_callers() {
+    let a0 = "mod a;\n\npub fn f(n: int) -> int {\n    n\n}\n\npub fn f(s: string) -> string {\n    s\n}\n";
+    let a1 = "mod a;\n\nfn f(n: int) -> int {\n    n\n}\n\npub fn f(s: string) -> string {\n    s\n}\n";
+    let c = "mod c;\n\nuse super::a::f;\n\nfn pick() -> int {\n    f(1)\n}\n";
+    let mut h = V1Harness::new(vec![v1("a.rock", a0), v1("c.rock", c), v1("d.rock", UNRELATED)]);
+    assert_eq!(h.call_keys("c.rock"), vec![(key("a::f"), None)]);
+
+    let r = h.edit("a.rock", a1).expect("visibility edit is accepted");
+    assert_eq!(r.tier, UpdateTier::Scope);
+    assert!(h.diagnostics().iter().any(|d| d.contains("not accessible")), "{:?}", h.diagnostics());
+    assert_eq!(h.relowered_body_count(), 3, "a's two overloads and c's caller");
+}
+
 /// A named export binding added to a module makes a path that did not
 /// resolve through it resolve, and removing it breaks the path again.
 #[test]

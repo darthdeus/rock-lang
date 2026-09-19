@@ -4,7 +4,7 @@
 //! names, and a member is offered only if the resolver would let this
 //! fragment name it. Nothing here matches names against definitions itself.
 
-use bone_core::modules::{DefKind, DefMeta, FragmentScope, UsePathRef};
+use bone_core::modules::{AccessSite, DefKind, DefMeta, FragmentScope, UsePathRef};
 use bone_semantic::lower::resolve::{self, CalleeFamily, ResolvedKind, Viewer};
 use bone_semantic::prelude::*;
 use bone_semantic::semantic_passes::{FragmentContribution, ScopeItem};
@@ -12,6 +12,19 @@ use bone_semantic::semantic_passes::{FragmentContribution, ScopeItem};
 /// The fragment scope of the v1 file `file`, `None` for a legacy file.
 pub fn fragment(ws: &Workspace, file: Ustr) -> Option<&FragmentScope> {
     ws.fragment_scopes.get(&file)
+}
+
+/// Whether one callable family member is visible from a v1 query fragment.
+/// Query readers use the same per-member table as lowering; the family key's
+/// `DefMeta::vis` is only a compatibility anchor for non-callable definitions.
+pub fn callable_member_admitted(
+    ws: &Workspace,
+    frag: &FragmentScope,
+    key: Ustr,
+    mid: ModuleId,
+    fid: Idx<bone_semantic::hir::Function>,
+) -> bool {
+    ws.callable_member_admits(key, mid, fid, AccessSite::new(Some(frag.package), &frag.module_path))
 }
 
 /// Every name some tier of `frag` offers (spec 8.3), bound cleanly or not:

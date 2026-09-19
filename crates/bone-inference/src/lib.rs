@@ -122,6 +122,10 @@ pub struct Gamma<'a> {
     pub(crate) deferrable_vars: FxHashMap<VarId, DeferOrigin>,
     pub(crate) pending: Vec<Option<Pending>>,
     pub(crate) pending_by_var: FxHashMap<VarId, SmallVec<[usize; 2]>>,
+    /// Candidates removed by the per-member visibility filter for the current
+    /// call family. Selection uses this only to distinguish an inaccessible
+    /// matching overload from an ordinary no-fit error.
+    pub(crate) inaccessible_overloads: RefCell<FxHashMap<Ustr, FnList>>,
 
     pub(crate) allow_frame_ref_return_place: bool,
 
@@ -158,6 +162,7 @@ impl<'a> Gamma<'a> {
             deferrable_vars: Default::default(),
             pending: Vec::new(),
             pending_by_var: Default::default(),
+            inaccessible_overloads: Default::default(),
 
             allow_frame_ref_return_place: false,
 
