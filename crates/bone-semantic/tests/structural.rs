@@ -25,6 +25,34 @@ fn check(src: &str) -> Result<bone_semantic::inference::Workspace, CompilerError
     semantic_pass(&mut module)
 }
 
+#[test]
+fn legacy_only_workspace_keeps_modules_v1_namespace_empty() {
+    use bone_core::modules::{NsAliases, PackageAliases};
+    use skull_parser::{parse_module_with_dialect, Dialect};
+
+    let mut module = parse_module_with_dialect(
+        "fn main() { print(1) }",
+        Ustr::from("main.rock"),
+        Dialect::Legacy,
+    )
+    .expect("parse legacy module");
+    module.package = Some(rock_core::source_code::PackageTag {
+        id: 1,
+        self_name: "game".to_string(),
+    });
+    let aliases = NsAliases {
+        packages: vec![PackageAliases {
+            id: 1,
+            self_name: Ustr::from("game"),
+            aliases: vec![],
+        }],
+    };
+
+    let ws = semantic_pass_with_aliases(&mut [module], &aliases).expect("semantic pass");
+    assert!(ws.ns.packages.is_empty());
+    assert!(ws.fragment_scopes.is_empty());
+}
+
 /// Measurement harness, not a guard: runs `unified.rock` (or the file in
 /// `BONE_STDLIB_PROBE`) through `semantic_pass` and panics with the first
 /// strict-lowering wall. Run with `--ignored` to see the next stdlib gap.

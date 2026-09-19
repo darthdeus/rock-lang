@@ -1010,6 +1010,9 @@ fn collect_type_expr_closure(ws: &Workspace, mid: ModuleId, te: TypeExpr, found:
 /// Spec 11 gate: reject the first type a public interface names that does
 /// not support the interface's audience.
 pub fn pass_validate_api_closure(ws: &Workspace) -> Result<(), CompilerError> {
+    if ws.fragment_scopes.is_empty() {
+        return Ok(());
+    }
     if let Some(r) = api_closure_requirements(ws).into_iter().find(|r| !r.satisfied) {
         let display_name = ws.defs.get(&r.required).map(|m| m.name).unwrap_or(r.required);
         comp_error!(
@@ -1073,6 +1076,29 @@ fn reject_legacy_unscoped_module_items(contribution: &FragmentContribution) -> R
                 "inline `mod` blocks require module resolution (not yet implemented)".to_string(),
             ));
         }
+    }
+    Ok(())
+}
+
+fn reject_legacy_unscoped_ast_items(rock_module: &Ast) -> Result<(), CompilerError> {
+    if let Some(h) = &rock_module.module_header {
+        return Err(CompilerError::new_with_label(
+            h.span,
+            "module file headers require module resolution (not yet implemented)".to_string(),
+        ));
+    }
+    if let Some(item) = rock_module
+        .items
+        .iter()
+        .find(|item| matches!(item.kind, ItemKind::Module(_)))
+    {
+        let ItemKind::Module(module) = &item.kind else {
+            unreachable!()
+        };
+        return Err(CompilerError::new_with_label(
+            module.span,
+            "inline `mod` blocks require module resolution (not yet implemented)".to_string(),
+        ));
     }
     Ok(())
 }
@@ -1182,6 +1208,20 @@ pub fn build_namespaces(
     rock_modules: &[Ast],
     aliases: &bone_core::modules::NsAliases,
 ) -> Result<(), CompilerError> {
+    // Legacy workspaces do not consult the modules-v1 namespace. Avoid cloning
+    // every legacy item into FragmentContribution just to skip it again.
+    if !rock_modules.iter().any(|module| {
+        module.dialect == skull_parser::Dialect::V1
+            && !is_stdlib_module_file(module.file.as_str())
+    }) {
+        for module in rock_modules.iter().filter(|module| {
+            module.dialect == skull_parser::Dialect::Legacy
+                && !is_stdlib_module_file(module.file.as_str())
+        }) {
+            reject_legacy_unscoped_ast_items(module)?;
+        }
+        return Ok(());
+    }
     let contributions: Vec<FragmentContribution> = rock_modules.iter().map(contribute).collect();
     assemble_namespaces(ws, &contributions.iter().collect_vec(), aliases)
 }
