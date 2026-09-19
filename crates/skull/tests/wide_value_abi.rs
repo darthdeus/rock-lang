@@ -292,9 +292,12 @@ fn a_wide_nobox_value_keeps_its_scalar_lanes() {
 
 // --- gate 2: the per-signature lane budget --------------------------------
 
-/// Five 16-leaf ordinary values is 80 parameter lanes, every value AT the cut,
-/// so only the budget can catch it. The two widest box; the `nobox` member is
-/// never a candidate and keeps its lanes.
+/// Five 16-leaf ordinary values is 80 parameter lanes with every value UNDER
+/// the cut, so only the budget can catch it. The two widest box; the `nobox`
+/// member is never a candidate and keeps its lanes. These widths are fixed on
+/// purpose: they must stay under the cut for the budget to be the only actor,
+/// and a cut below 16 would be a different-in-kind policy (`UiRect` and
+/// `Entity` cross at 7 and 4) that this file would be rewritten for.
 const BUDGET_SRC: &str = r#"
 nobox value NB8 { a: float, b: float, c: float, d: float, e: float, f: float, g: float, h: float }
 nobox value NB20 {
@@ -391,50 +394,51 @@ fn the_budget_never_boxes_a_nobox_member() {
 
 // --- the wire is a property of the TYPE, so every call kind agrees ---------
 
+/// `value W` of one leaf MORE than the cut, with a constructor that puts `x` in
+/// `a0` and zero everywhere else. Derived from the constant so the fixture
+/// tracks the cut instead of pinning a width the cut can outgrow.
+fn over_cut_value() -> String {
+    let n = WIDE_VALUE_PAYLOAD_LEAF_CUT + 1;
+    let fields = (0..n).map(|k| format!("a{k}: float")).collect::<Vec<_>>().join(", ");
+    let inits = std::iter::once("a0: x".to_string())
+        .chain((1..n).map(|k| format!("a{k}: 0.0")))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("value W {{ {fields} }}\nfn mkw(x: float) -> W {{ return W {{ {inits} }} }}\n")
+}
+
 /// Direct calls, calls through a function value, closures, methods/UFCS,
 /// generic instantiations and a `co fn` all target the same boxed wire. Every
 /// one of them runs; a disagreement is a Lua arity mismatch, which shows up as
 /// a nil arithmetic error rather than a wrong number.
-const CALL_KINDS_SRC: &str = r#"
-value W17 {
-    a0: float, a1: float, a2: float, a3: float, a4: float, a5: float,
-    a6: float, a7: float, a8: float, a9: float, a10: float, a11: float,
-    a12: float, a13: float, a14: float, a15: float, a16: float
-}
+const CALL_KINDS_BODY: &str = r#"
+fn bump(w: W) -> W { return W { ..w, a0: w.a0 + 1.0 } }
+fn head(w: W) -> float { return w.a0 }
 
-fn w17(x: float) -> W17 {
-    return W17 { a0: x, a1: 0.0, a2: 0.0, a3: 0.0, a4: 0.0, a5: 0.0,
-                 a6: 0.0, a7: 0.0, a8: 0.0, a9: 0.0, a10: 0.0, a11: 0.0,
-                 a12: 0.0, a13: 0.0, a14: 0.0, a15: 0.0, a16: 0.0 }
-}
-
-fn bump(w: W17) -> W17 { return W17 { ..w, a0: w.a0 + 1.0 } }
-fn head(w: W17) -> float { return w.a0 }
-
-fn head_method(w: W17) -> float { return w.a0 * 10.0 }
+fn head_method(w: W) -> float { return w.a0 * 10.0 }
 
 fn thru_generic<T>(t: T) -> T { return t }
 
-fn apply(f: fn(W17) -> W17, w: W17) -> W17 { return f(w) }
+fn apply(f: fn(W) -> W, w: W) -> W { return f(w) }
 
-fn via_closure(w: W17) -> W17 {
-    let step = (v: W17) => bump(v)
+fn via_closure(w: W) -> W {
+    let step = (v: W) => bump(v)
     return step(w)
 }
 
-co fn pipeline(w: W17) -> Coroutine<W17, float> {
+co fn pipeline(w: W) -> Coroutine<W, float> {
     let a = bump(w)
     yield a
     let b = bump(a)
     return head(b)
 }
 
-fn two_wide(w: W17) -> (W17, W17) { return (bump(w), bump(bump(w))) }
+fn two_wide(w: W) -> (W, W) { return (bump(w), bump(bump(w))) }
 
-fn tail_forward(w: W17) -> W17 { return bump(w) }
+fn tail_forward(w: W) -> W { return bump(w) }
 
 fn main() {
-    let w = w17(0.0)
+    let w = mkw(0.0)
     let direct = head(bump(w))
     let indirect = head(apply(bump, w))
     let closed = head(via_closure(w))
@@ -452,13 +456,17 @@ fn main() {
 }
 "#;
 
+fn call_kinds_src() -> String {
+    format!("{}{CALL_KINDS_BODY}", over_cut_value())
+}
+
 #[test]
 fn every_call_kind_agrees_on_the_boxed_wire() {
-    let lua = try_emit_module(CALL_KINDS_SRC).expect("emits");
+    let lua = try_emit_module(&call_kinds_src()).expect("emits");
     assert_eq!(
         emitted_params(&lua, "bump").len(),
         1,
-        "the 17-leaf value must box:\n{}",
+        "a value one leaf over the cut must box:\n{}",
         function_body(&lua, "bump")
     );
     assert_eq!(
@@ -471,37 +479,36 @@ fn every_call_kind_agrees_on_the_boxed_wire() {
 /// boxed parameter must not be observable in the caller, and vice versa.
 #[test]
 fn a_boxed_parameter_does_not_alias_the_callers_value() {
-    let src = r#"
-value W17 {
-    a0: float, a1: float, a2: float, a3: float, a4: float, a5: float,
-    a6: float, a7: float, a8: float, a9: float, a10: float, a11: float,
-    a12: float, a13: float, a14: float, a15: float, a16: float
-}
-fn w17(x: float) -> W17 {
-    return W17 { a0: x, a1: 0.0, a2: 0.0, a3: 0.0, a4: 0.0, a5: 0.0,
-                 a6: 0.0, a7: 0.0, a8: 0.0, a9: 0.0, a10: 0.0, a11: 0.0,
-                 a12: 0.0, a13: 0.0, a14: 0.0, a15: 0.0, a16: 0.0 }
-}
-global CALLER: W17
-global CALLEE: W17
+    let src = format!(
+        "{}
+global CALLER: W
+global CALLEE: W
 // The callee keeps its boxed parameter in its own storage and then mutates it.
 // If the box were the caller's, `CALLER.a0` would move with it.
-fn keep_and_mutate(w: W17) -> float {
+fn keep_and_mutate(w: W) -> float {{
     CALLEE = w
     CALLEE.a0 = 99.0
     return CALLEE.a0
-}
+}}
 // And the other direction: the caller writes AFTER the call, which the copy the
 // callee kept must not see.
-fn main() {
-    CALLER = w17(1.0)
+fn main() {{
+    CALLER = mkw(1.0)
     let seen = keep_and_mutate(CALLER)
     let caller_after_callee_wrote = CALLER.a0
     CALLER.a0 = 7.0
-    print("{caller_after_callee_wrote} {seen} {CALLER.a0} {CALLEE.a0}")
-}
-"#;
-    let lua = try_emit_module(src).expect("emits");
+    print(\"{{caller_after_callee_wrote}} {{seen}} {{CALLER.a0}} {{CALLEE.a0}}\")
+}}
+",
+        over_cut_value()
+    );
+    let lua = try_emit_module(&src).expect("emits");
+    assert_eq!(
+        emitted_params(&lua, "keep_and_mutate").len(),
+        1,
+        "the fixture must exercise a BOXED parameter:\n{}",
+        function_body(&lua, "keep_and_mutate")
+    );
     assert_eq!(
         run_luajit(&format!("{lua}\nmain()\n"), "wide_value_abi_aliasing"),
         "1 99 7 99",
@@ -514,21 +521,11 @@ fn main() {
 /// constructor for the value.
 #[test]
 fn a_forwarding_callee_forwards_the_box() {
-    let src = r#"
-value W17 {
-    a0: float, a1: float, a2: float, a3: float, a4: float, a5: float,
-    a6: float, a7: float, a8: float, a9: float, a10: float, a11: float,
-    a12: float, a13: float, a14: float, a15: float, a16: float
-}
-fn w17(x: float) -> W17 {
-    return W17 { a0: x, a1: 0.0, a2: 0.0, a3: 0.0, a4: 0.0, a5: 0.0,
-                 a6: 0.0, a7: 0.0, a8: 0.0, a9: 0.0, a10: 0.0, a11: 0.0,
-                 a12: 0.0, a13: 0.0, a14: 0.0, a15: 0.0, a16: 0.0 }
-}
-fn forward(w: W17) -> W17 { return w }
-fn main() { print("{forward(w17(3.0)).a0}") }
-"#;
-    let lua = try_emit_module(src).expect("emits");
+    let src = format!(
+        "{}fn forward(w: W) -> W {{ return w }}\nfn main() {{ print(\"{{forward(mkw(3.0)).a0}}\") }}\n",
+        over_cut_value()
+    );
+    let lua = try_emit_module(&src).expect("emits");
     assert_eq!(
         emitted_params(&lua, "forward").len(),
         1,
@@ -536,8 +533,9 @@ fn main() { print("{forward(w17(3.0)).a0}") }
         function_body(&lua, "forward")
     );
     let body = function_body(&lua, "forward");
+    let last_leaf = format!("a{}", WIDE_VALUE_PAYLOAD_LEAF_CUT);
     assert!(
-        !body.contains("a16") && !body.contains("_ct("),
+        !body.contains(&last_leaf) && !body.contains("_ct("),
         "the forwarder unpacked and repacked the box:\n{body}"
     );
     assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "wide_value_abi_forward"), "3");
@@ -550,7 +548,7 @@ fn main() { print("{forward(w17(3.0)).a0}") }
 /// parameter arity for the boxed callee and its callers.
 #[test]
 fn the_boxed_wire_is_consistent_across_every_emitted_definition() {
-    let lua = try_emit_module(CALL_KINDS_SRC).expect("emits");
+    let lua = try_emit_module(&call_kinds_src()).expect("emits");
     let names = definition_names(&lua);
     for name in names {
         if !name.starts_with("bump") {

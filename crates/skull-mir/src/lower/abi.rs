@@ -958,16 +958,22 @@ fn mono_value_storage(
 /// call as ONE slot -- its existing boxed form -- instead of N scalar lanes.
 ///
 /// The PAYLOAD count is compared, not [`ValueShape::leaf_count`], which also
-/// counts the nullable presence flag: `T` and `T?` must take the same wire, or
-/// `Mat4?` would box while `Mat4` stayed scalar.
+/// counts the nullable presence flag, so `T` and `T?` take the same wire
+/// instead of `T?` boxing one leaf sooner than `T`.
 ///
 /// `nobox` values are exempt (decision 3): they keep scalar lanes at any width.
-pub const WIDE_VALUE_PAYLOAD_LEAF_CUT: usize = 16;
+///
+/// 32 comes from the K sweep in that document: the added allocation on
+/// canonical MAG is +186 calls per frame at 16 and +160 at 24, because the
+/// renderer's per-frame crossings are 17-28 leaves wide; at 32 it is +37. Above
+/// 32 this cut and [`SIGNATURE_SCALAR_LANE_BUDGET`] overlap, since a signature
+/// that passes and returns one value at the cut is `2 * K` lanes.
+pub const WIDE_VALUE_PAYLOAD_LEAF_CUT: usize = 32;
 
 /// The per-signature lane budget, decisions 1 and 2 of
 /// `docs/luajit-wide-value-abi.md`. Per-value `K` does not bound a signature's
-/// width -- five 16-leaf values are 80 lanes with every value at the cut -- so
-/// after the per-value cut a signature whose surviving lanes exceed this boxes
+/// width -- five values at the cut are `5 * K` lanes with every one of them
+/// legal -- so after the per-value cut a signature whose surviving lanes exceed this boxes
 /// its widest remaining ORDINARY values, widest first, until it fits.
 ///
 /// Lane accounting: the sum over every parameter of that parameter's
