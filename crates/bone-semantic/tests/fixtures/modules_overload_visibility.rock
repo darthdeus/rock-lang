@@ -1,0 +1,99 @@
+//! Overload-family visibility is per member, not last-writer-wins at the
+//! family key. The public member remains callable outside the package while
+//! the private member is available to the defining package.
+
+//- public_then_private_external_public_and_same_module
+//-- lib.rock @pkg=lib,1 @v1
+pub fn f(n: int) -> int { n }
+fn f(s: string) -> string { s }
+
+fn same_module() -> string {
+    let n = f(1)
+           //^ int
+    let s = f("same")
+           //^ string
+    s
+}
+
+//-- app.rock @pkg=app,2 @v1
+use lib::f;
+
+fn external() -> int {
+    let n = f(1)
+           //^ int
+    n
+}
+
+//- private_then_public_external_public_and_same_module
+//-- lib.rock @pkg=lib,1 @v1
+fn f(s: string) -> string { s }
+pub fn f(n: int) -> int { n }
+
+fn same_module() -> string {
+    let n = f(1)
+           //^ int
+    let s = f("same")
+           //^ string
+    s
+}
+
+//-- app.rock @pkg=app,2 @v1
+use lib::f;
+
+fn external() -> int {
+    let n = f(1)
+           //^ int
+    n
+}
+
+//- public_then_private_external_private_is_access_error @fail=not accessible
+//-- lib.rock @pkg=lib,1 @v1
+pub fn f(n: int) -> int { n }
+fn f(s: string) -> string { s }
+
+//-- app.rock @pkg=app,2 @v1
+use lib::f;
+
+fn external() -> string {
+    f("private")
+}
+
+//- private_then_public_external_private_is_access_error @fail=not accessible
+//-- lib.rock @pkg=lib,1 @v1
+fn f(s: string) -> string { s }
+pub fn f(n: int) -> int { n }
+
+//-- app.rock @pkg=app,2 @v1
+use lib::f;
+
+fn external() -> string {
+    f("private")
+}
+
+//- public_any_then_private_exact_external_keeps_public
+//-- lib.rock @pkg=lib,1 @v1
+pub fn choose(x: any) -> int { 1 }
+fn choose(x: int) -> string { "private" }
+
+//-- app.rock @pkg=app,2 @v1
+use lib::choose;
+
+fn external() -> int {
+    let result = choose(1)
+                 //^ int
+    result
+}
+
+//- private_exact_then_public_any_external_keeps_public
+//-- lib.rock @pkg=lib,1 @v1
+fn choose(x: int) -> string { "private" }
+pub fn choose(x: any) -> int { 1 }
+
+//-- app.rock @pkg=app,2 @v1
+use lib::choose;
+
+fn external() -> int {
+    let result = choose(1)
+                 //^ int
+    result
+}

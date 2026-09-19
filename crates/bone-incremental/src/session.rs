@@ -148,6 +148,9 @@ impl ScopeDelta {
                                 delta.members.insert((package, key, name));
                             }
                         }
+                        for name in changed_keys(&on.callable_members, &nn.callable_members) {
+                            delta.members.insert((package, key, name));
+                        }
                         for name in changed_keys(&on.exports, &nn.exports) {
                             delta.members.insert((package, key, name));
                         }

@@ -21,7 +21,7 @@ use ustr::Ustr;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum PopMode {
-    /// The `rock compile` set: files under a `tests/` path are dropped.
+    /// The `rock compile` set: each file is judged below its owning package root.
     Production,
     /// The whole-package set `rock test <dir>` builds.
     Test,
@@ -33,9 +33,8 @@ pub(crate) struct Population {
     pub analyzed: SourceFiles,
 }
 
-/// The sources `project` compiles as. A root that itself lives under a
-/// `tests/` path would be analyzed empty by the `rock compile` rule, so it
-/// takes the `rock test` set unless the caller names a mode.
+/// The sources `project` compiles as. The default is the production population;
+/// an explicit mode is used for migration/test-population analysis.
 pub(crate) fn population(
     project: &Path,
     graph: &PackageGraph,
@@ -43,14 +42,12 @@ pub(crate) fn population(
 ) -> Result<Population, String> {
     let spec = crate::unified_compile::SourceSpec::Directory(project.to_path_buf());
     let discovered = crate::unified_compile::discover_sources(&spec).map_err(|e| format!("{e:#}"))?;
-    let root_path = graph.package(graph.root()).root.to_string_lossy().into_owned();
-    let mode = mode.unwrap_or(if SourceFiles::is_test_only_path(&root_path) {
-        PopMode::Test
-    } else {
-        PopMode::Production
-    });
+    let root_path = &graph.package(graph.root()).root;
+    let mode = mode.unwrap_or(PopMode::Production);
     let analyzed = match mode {
-        PopMode::Production => discovered.production_only(),
+        PopMode::Production => discovered
+            .production_only(root_path)
+            .map_err(|error| error.to_string())?,
         PopMode::Test => discovered.clone(),
     };
     Ok(Population { mode, discovered, analyzed })

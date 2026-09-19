@@ -6,6 +6,7 @@ pub(crate) fn resolve_callee(gamma: &Gamma, family: &CallFamily) -> FnList {
     let _span = tracing::info_span!("resolve_callee", name = %name).entered();
 
     let ws = gamma.workspace;
+    gamma.inaccessible_overloads.borrow_mut().remove(&name);
     match *family {
         CallFamily::Legacy(_) => member_overloads(gamma, FamilyMember { key: name, owner: None }),
         CallFamily::Resolved { key, owner, .. } => member_overloads(gamma, FamilyMember { key, owner }),
@@ -18,8 +19,16 @@ pub(crate) fn resolve_callee(gamma: &Gamma, family: &CallFamily) -> FnList {
                 .and_then(|mid| ws.module(*mid).call_families.get(&name))
                 .unwrap_or_else(|| panic!("merged family `{name}` of `{file}` was not recorded at lowering"));
             let mut out = FnList::default();
+            let mut inaccessible = FnList::default();
             for &member in members {
+                gamma.inaccessible_overloads.borrow_mut().remove(&member.key);
                 out.extend(member_overloads(gamma, member));
+                if let Some(hidden) = gamma.inaccessible_overloads.borrow().get(&member.key) {
+                    inaccessible.extend(hidden.iter().copied());
+                }
+            }
+            if !inaccessible.is_empty() {
+                gamma.inaccessible_overloads.borrow_mut().insert(name, inaccessible);
             }
             out
         }
@@ -45,10 +54,31 @@ fn member_overloads(gamma: &Gamma, member: FamilyMember) -> FnList {
     gamma.dep_acc.borrow_mut().insert(member.key);
     let ws = gamma.workspace;
     let Some(fns) = ws.functions_by_name.get(&member.key) else { return FnList::default() };
-    match member.owner {
-        None => fns.clone(),
-        Some(owner) => fns.iter().copied().filter(|(mid, _)| ws.ns.owns_file(owner, ws.module(*mid).file)).collect(),
+    let site = gamma.access_site();
+    let mut visible = FnList::default();
+    let mut inaccessible = FnList::default();
+    for &(mid, fid) in fns {
+        let owned_by_view = member
+            .owner
+            .is_none_or(|owner| ws.ns.owns_file(owner, ws.module(mid).file));
+        if !owned_by_view {
+            continue;
+        }
+        if ws.callable_member_admits(member.key, mid, fid, site) {
+            visible.push((mid, fid));
+        } else {
+            inaccessible.push((mid, fid));
+        }
     }
+    if !inaccessible.is_empty() {
+        gamma
+            .inaccessible_overloads
+            .borrow_mut()
+            .entry(member.key)
+            .or_default()
+            .extend(inaccessible);
+    }
+    visible
 }
 
 /// True if `ty` contains an unbound generic hole (an `Infer`/`Generic` node)
@@ -187,6 +217,17 @@ fn render_candidate_sig(gamma: &Gamma, mid: ModuleId, fid: Idx<Function>) -> Str
         .map(|t| format!(" -> {}", gamma.workspace.render(None, t)))
         .unwrap_or_default();
     format!("{}({}){}", f.name, params, ret)
+}
+
+fn with_hidden_note<T>(family: CallFamily, result: Result<T, CompilerError>) -> Result<T, CompilerError> {
+    result.map_err(|mut error| {
+        if let Some(hidden) = family.hidden() {
+            error.message.push_str(&format!(
+                "; shadowed candidate `{hidden}` needs an explicit import to be called"
+            ));
+        }
+        error
+    })
 }
 
 /// Backend-selection rank: a lower rank is the preferred representative when a
@@ -422,9 +463,36 @@ pub(crate) fn select_overload_with_generics(
                 .iter()
                 .map(|&(mid, fid)| format!("  {}", render_candidate_sig(gamma, mid, fid)))
                 .join("\n");
+            let inaccessible = gamma
+                .inaccessible_overloads
+                .borrow()
+                .get(&name)
+                .cloned()
+                .unwrap_or_default();
+            let mut hidden_bound_fail = None;
+            let hidden_fit = inaccessible.iter().any(|&(mid, fid)| {
+                score_candidate_with_generics(
+                    c,
+                    gamma,
+                    mid,
+                    fid,
+                    recv_ty,
+                    args,
+                    arg_ty,
+                    generic_args,
+                    span,
+                    &mut hidden_bound_fail,
+                )
+                .is_some()
+            });
             Err(SelectError::NoFit(CompilerError::new_with_label(
                 span,
-                match bound_fail {
+                if hidden_fit {
+                    format!(
+                        "No accessible overload for `{name}` with argument types ({args_msg}); the matching overload is not accessible\navailable overloads:\n{overloads}"
+                    )
+                } else {
+                    match bound_fail {
                     Some(be) => format!(
                         "No overload for `{name}` with argument types ({args_msg}); the `Iterator`-bounded candidate was rejected: {}\navailable overloads:\n{overloads}",
                         be.message
@@ -432,6 +500,7 @@ pub(crate) fn select_overload_with_generics(
                     None => format!(
                         "No overload for `{name}` with argument types ({args_msg})\navailable overloads:\n{overloads}"
                     ),
+                    }
                 },
             )))
         }
@@ -1149,6 +1218,30 @@ fn written_method_name(
     c.body.method_names.get(&receiver).copied()
 }
 
+fn unary_operator_symbol(name: Ustr) -> Option<&'static str> {
+    match name.as_str() {
+        "__not" => Some("!"),
+        "__unm" => Some("-"),
+        _ => None,
+    }
+}
+
+fn unary_operator_error(
+    gamma: &mut Gamma,
+    name: Ustr,
+    operand: Option<TyId>,
+    span: Span,
+) -> CompilerError {
+    let symbol = unary_operator_symbol(name).expect("unary operator name");
+    let operand = operand
+        .map(|t| {
+            let t = resolve(gamma, t, span);
+            gamma.workspace.render(Some(&gamma.out), t)
+        })
+        .unwrap_or_else(|| "<no operand>".to_string());
+    CompilerError::new_with_label(span, format!("operator `{symbol}` is not defined for `{operand}`"))
+}
+
 pub(crate) fn resolve_named_call_inner(
     gamma: &mut Gamma,
     c: BodyCtx,
@@ -1277,31 +1370,12 @@ pub(crate) fn resolve_named_call_inner(
             }
         }
 
-        // Unary-operator desugars (`!x` -> `__not`, `-x` -> `__unm`) with an
-        // empty overload set read as operator errors naming the operand type,
+        // Unary-operator desugars (`!x` -> `__not`, `-x` -> `__unm`) with no
+        // applicable overload read as operator errors naming the operand type,
         // not as a missing internal function.
-        let op_symbol = match name.as_str() {
-            "__not" => Some("!"),
-            "__unm" => Some("-"),
-            _ => None,
-        };
-        if let Some(sym) = op_symbol {
-            let operand = args
-                .into_iter()
-                .next()
-                .map(|a| -> Result<String, CompilerError> {
-                    let t = infer_expr(c, gamma, a)?;
-                    let t = resolve(gamma, t, span);
-                    Ok(gamma.workspace.render(Some(&gamma.out), t))
-                })
-                .transpose()?
-                .unwrap_or_else(|| "<no operand>".to_string());
-            comp_error!(
-                span,
-                "operator `{}` is not defined for `{}`",
-                sym,
-                operand
-            );
+        if unary_operator_symbol(name).is_some() {
+            let operand = args.into_iter().next().map(|a| infer_expr(c, gamma, a)).transpose()?;
+            return Err(unary_operator_error(gamma, name, operand, span));
         }
 
         // A v1 DefKey renders as its declared name (plan 2.1); legacy keys
@@ -1309,18 +1383,14 @@ pub(crate) fn resolve_named_call_inner(
         // spelling, name it: spec 8.3 forbids the fallthrough, so the user
         // has to import it explicitly.
         let shown = gamma.workspace.defs.get(&name).map(|m| m.name).unwrap_or(name);
-        if let Some(hidden) = family.hidden() {
-            comp_error!(
-                span,
-                "Function `{}` doesn't exist -- `{}` binds to `{}` here, and a \
-                 shadowed candidate `{}` needs an explicit import to be called",
-                shown,
-                shown,
-                name,
-                hidden
-            );
-        }
-        comp_error!(span, "Function `{}` doesn't exist", shown);
+        let message = match family.hidden() {
+            Some(hidden) => format!(
+                "Function `{shown}` doesn't exist -- `{shown}` binds to `{name}` here, and a \
+                 shadowed candidate `{hidden}` needs an explicit import to be called"
+            ),
+            None => format!("Function `{shown}` doesn't exist"),
+        };
+        return Err(CompilerError::new_with_label(span, message));
     }
 
     // let (callee_mid, callee_fn) = resolve_callee(gamma, name).ok_or_else(|| {
@@ -1332,7 +1402,13 @@ pub(crate) fn resolve_named_call_inner(
 
     let mut preinferred: FxHashMap<Idx<Expr>, TyId> = FxHashMap::default();
 
-    let (callee_mid, callee_fn) = if candidates.len() == 1 {
+    let has_inaccessible_overloads = gamma
+        .inaccessible_overloads
+        .borrow()
+        .get(&name)
+        .is_some_and(|hidden| !hidden.is_empty());
+    let single = candidates.len() == 1 && !has_inaccessible_overloads && unary_operator_symbol(name).is_none();
+    let (callee_mid, callee_fn) = if single {
         candidates[0]
     } else {
         let mut arg_tys: Vec<TyId> = Vec::new();
@@ -1380,6 +1456,10 @@ pub(crate) fn resolve_named_call_inner(
             Ok(pick) => pick,
 
             Err(e) => {
+                if matches!(&e, SelectError::NoFit(_)) && unary_operator_symbol(name).is_some() {
+                    return Err(unary_operator_error(gamma, name, arg_tys.first().copied(), span));
+                }
+
                 // Defer-to-use: a cost tie whose operand is an unpinned
                 // lambda-param var re-resolves when a later use pins it
                 // (defer.rs). Wins over the `__op_*` fallback below -- the
@@ -1423,13 +1503,13 @@ pub(crate) fn resolve_named_call_inner(
                     }
                 }
 
-                return Err(e.into());
+                return with_hidden_note(family, Err(e.into()));
             }
         }
     };
 
     let arg_list: Vec<Idx<Expr>> = args.into_iter().collect();
-    commit_selected_call(
+    with_hidden_note(family, commit_selected_call(
         c,
         gamma,
         name,
@@ -1441,7 +1521,7 @@ pub(crate) fn resolve_named_call_inner(
         generic_args,
         call_expr,
         span,
-    )
+    ))
 }
 
 /// The post-selection half of a named call: record the callee, instantiate

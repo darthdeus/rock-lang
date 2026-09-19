@@ -558,6 +558,29 @@ fn aliased_callable_completion_carries_signature_detail() {
     assert!(detail.contains("(w: int) -> int"), "aliased callable detail: {detail:?}");
 }
 
+#[test]
+fn callable_completion_uses_the_accessible_overload_not_the_family_first() {
+    let project = V1Project::new();
+    let shapes = format!(
+        "{SHAPES}\nfn family(s: string) -> string {{\n    s\n}}\n\npub fn family(n: int) -> int {{\n    n\n}}\n"
+    );
+    std::fs::write(project.dir.path().join("shapes.rock"), shapes).unwrap();
+
+    let mut bone = project.open();
+    let main = project.path("main.rock");
+    let anchor = "    let a = shapes::inner::depth()\n";
+    let text = MAIN.replace(anchor, &format!("{anchor}    let q = family\n"));
+    bone.update(&main, text.clone());
+    let items = bone.completion(&main, pos_of(&text, "family", 0, "family".len()));
+    let family = items
+        .iter()
+        .find(|item| item.label == "family")
+        .expect("the public overload is offered");
+    let detail = family.detail.as_deref().unwrap_or("");
+    assert!(detail.contains("(n: int) -> int"), "accessible overload detail: {detail:?}");
+    assert!(!detail.contains("string"), "private overload leaked into completion: {detail:?}");
+}
+
 // -- rename -------------------------------------------------------------------
 
 /// Every edit of a rename, as `(file name, line, covered old text, new text)`,

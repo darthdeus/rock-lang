@@ -300,6 +300,104 @@ fn use_it(p: Pick) -> int {
     1
 }
 
+//- unary_operator_declarations_and_binary_minus_coexist
+//-- lib.rock @pkg=lib,1 @v1
+pub struct P {
+    pub x: int,
+}
+
+pub struct Q {
+    pub x: int,
+}
+
+pub operator -(a: P) -> P {
+    P { x: 0 - a.x }
+}
+
+pub operator -(a: P, b: P) -> P {
+    P { x: a.x - b.x }
+}
+
+pub operator !(a: P) -> bool {
+    a.x == 7
+}
+
+pub fn __unm(a: Q) -> Q {
+    Q { x: 0 - a.x }
+}
+
+pub fn __not(a: Q) -> bool {
+    a.x == 9
+}
+
+//-- explicit.rock @pkg=app,2 @v1
+use lib::{P, operator(-)};
+
+fn use_it(p: P, q: P) -> P {
+    let neg = -p
+            //^ lib::P
+    let diff = p - q
+             //^ lib::P
+    neg
+}
+
+//-- glob.rock @pkg=app_glob,3 @v1
+use lib::*;
+
+fn use_it(p: P, q: Q) -> bool {
+    let neg = -p
+            //^ lib::P
+    let not_p = !p
+              //^ bool
+    let neg_q = -q
+              //^ lib::Q
+    let not_q = !q
+              //^ bool
+    not_p && not_q
+}
+
+//-- alias.rock @pkg=app_alias,4 @v1
+use lib::{P, operator(-) as sub};
+
+fn use_it(p: P, q: P) -> P {
+    let neg = sub(p)
+             //^ lib::P
+    let diff = sub(p, q)
+              //^ lib::P
+    neg
+}
+
+//- one_parameter_binary_only_operator_is_rejected @fail=operator `+` takes two parameters; only `-` and `!` have a prefix (unary) form
+//-- main.rock @pkg=app,1 @v1
+pub struct P {
+    pub x: int,
+}
+
+pub operator +(a: P) -> P {
+    a
+}
+
+//- a_private_unary_operator_in_operator_selector_surfaces_privacy @fail=operator `-` is not accessible from this module
+//-- lib.rock @pkg=lib,1 @v1
+pub struct P {
+    pub x: int,
+}
+
+pub operator -(a: P, b: P) -> P {
+    P { x: a.x - b.x }
+}
+
+operator -(a: P) -> P {
+    P { x: 0 - a.x }
+}
+
+//-- app.rock @pkg=app,2 @v1
+use lib::{P, operator(-)};
+
+fn use_it(p: P) -> P {
+    -p
+}
+
 //- explicit_imports_of_a_callable_and_a_type_are_an_error @fail=`Pick` is imported from several definitions that do not form one overload family: lib_a::Pick, lib_b::Pick
 //-- a.rock @pkg=lib_a,1 @v1
 pub struct Pick {

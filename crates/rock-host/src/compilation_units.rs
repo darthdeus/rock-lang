@@ -259,15 +259,21 @@ pub fn load_sources_for_compilation_unit(unit: &CompilationUnit) -> Result<Sourc
             // ready before a consuming project's global initializers.
             all_files.extend(files.clone());
 
-            let sources = load_sources_from_paths(&all_files)?;
+            let mut sources = load_sources_from_paths(&all_files)?;
 
             // Stamp package and dialect facts from the graph onto every file
             // it owns, so downstream consumers (parser dialect selection,
             // module scoping) never infer ownership from inclusion order.
-            if let Some(graph) = graph {
+            if let Some(graph) = graph.as_ref() {
+                sources.set_package_roots(
+                    graph
+                        .packages()
+                        .iter()
+                        .map(|node| (node.id.0, node.root.clone())),
+                );
                 for file in &sources.files {
                     let path = file.borrow().file.to_id_path();
-                    if let Some((package, dialect)) = source_facts(&graph, Path::new(&path)) {
+                    if let Some((package, dialect)) = source_facts(graph, Path::new(&path)) {
                         let mut f = file.borrow_mut();
                         f.package = Some(package);
                         f.dialect = dialect;
@@ -358,7 +364,10 @@ fn load_sources_from_paths(paths: &[PathBuf]) -> Result<SourceFiles> {
         sources.push(Arc::new(AtomicRefCell::new(source_file)));
     }
 
-    Ok(SourceFiles { files: sources })
+    Ok(SourceFiles {
+        files: sources,
+        package_roots: Vec::new(),
+    })
 }
 
 /// True iff the file's first non-blank line is `//! @no_check`.

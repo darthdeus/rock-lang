@@ -552,6 +552,82 @@ fn main() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// An operator declaration uses the same `__unm` / `__not` families as an
+/// ordinary function declaration. An unaliased `operator(-)` import exposes
+/// both the prefix and binary arities, while a glob exposes all three
+/// operator declarations. Scalar prefix forms remain native.
+#[test]
+fn v1_operator_spelling_unary_and_binary_run_the_resolved_body() {
+    let root = std::env::temp_dir().join("rock_modules_emit_v1_operator_unary");
+    let _ = std::fs::remove_dir_all(&root);
+    v1_lib(
+        &root.join("provider"),
+        "provider",
+        r#"pub struct Pt {
+    pub x: int,
+}
+
+pub operator -(a: Pt) -> Pt {
+    Pt { x: 0 - a.x - 100 }
+}
+
+pub operator -(a: Pt, b: Pt) -> Pt {
+    Pt { x: a.x - b.x + 200 }
+}
+
+pub operator !(a: Pt) -> bool {
+    a.x == 7
+}
+"#,
+    );
+    let explicit = root.join("explicit");
+    v1_app(
+        &explicit,
+        &["provider"],
+        r#"use provider::{Pt, operator(-), operator(!)};
+
+fn main() {
+    let u = -Pt { x: 1 }
+    let d = Pt { x: 5 } - Pt { x: 2 }
+    let f = !Pt { x: 7 }
+    let i = -5
+    let r = -1.5
+    let n = !true
+    let b = ~5
+    print("u={u.x} d={d.x} f={f} i={i} r={r} n={n} b={b}")
+}
+"#,
+    );
+    let (stdout, stderr, ok) = run(&explicit);
+    assert!(ok, "explicit operator import project failed\nstdout:\n{stdout}\nstderr:\n{stderr}");
+    assert!(
+        stdout.contains("u=-101 d=203 f=true i=-5 r=-1.5 n=false b=-6"),
+        "operator spelling should run both arities and keep scalar prefixes native\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+
+    let glob = root.join("glob");
+    v1_app(
+        &glob,
+        &["provider"],
+        r#"use provider::*;
+
+fn main() {
+    let u = -Pt { x: 1 }
+    let d = Pt { x: 5 } - Pt { x: 2 }
+    let f = !Pt { x: 7 }
+    print("u={u.x} d={d.x} f={f}")
+}
+"#,
+    );
+    let (stdout, stderr, ok) = run(&glob);
+    assert!(ok, "glob operator import project failed\nstdout:\n{stdout}\nstderr:\n{stderr}");
+    assert!(
+        stdout.contains("u=-101 d=203 f=true"),
+        "globbed operator declarations should run both arities\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// `use provider::operator(+) as add_pt;` (spec 8.5) binds `add_pt` to the
 /// declared `operator +` body (the `+ 100` marks it), by call and UFCS.
 #[test]

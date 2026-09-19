@@ -818,7 +818,9 @@ pub enum UseSuffix {
     /// `use a::*;` — immediate accessible members.
     Glob,
     /// `use a::operator(+);` — the glyph family under a nameable selector;
-    /// `op` is its function name (`__op_add`). With `as add` (spec 8.5) the
+    /// `op` is its internal family name (`__op_add`, or the unary family
+    /// name for `!`). `-` uses its binary name as the selector anchor and the
+    /// resolver follows its unary sibling. With `as add` (spec 8.5) the
     /// import binds only `add`, not the glyph.
     Operator { op: Ident, alias: Option<Ident> },
     /// `use a::b::{ .. }` — sub-trees, each relative (`c`, `d::e as f`,
