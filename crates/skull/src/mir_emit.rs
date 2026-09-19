@@ -6407,6 +6407,12 @@ pub struct ShapeOverrides {
     pub callee_binding: Option<skull_codegen_lua::CalleeBindingMode>,
     pub value_ctor: Option<skull_codegen_lua::ValueCtorShape>,
     pub state_cell: Option<bool>,
+    /// `Some(false)` emits a body that breaks a LuaJIT parse-time frame cap
+    /// instead of rejecting it. Not a production switch and not readable from
+    /// the environment: the boundary-agreement test needs the Lua of a rejected
+    /// body so it can ask the bundled LuaJIT whether that Lua really fails to
+    /// load (`skull_codegen_lua::CodegenCtx::set_frame_limits`).
+    pub frame_limits: Option<bool>,
 }
 
 /// [`emit_full`] under explicit emitted shapes, overriding every
@@ -6904,6 +6910,9 @@ fn emit_full_in_with_mutation(
     }
     if let Some(on) = shapes.state_cell {
         cg.set_state_cell(on);
+    }
+    if let Some(on) = shapes.frame_limits {
+        cg.set_frame_limits(on);
     }
     let setup_lanes = SetupLaneAttribution {
         cpu_population: cpu_lane.population,
@@ -8123,6 +8132,16 @@ pub fn emit_incremental(
     let reassemble = t_asm.elapsed();
     emit.phases.push(("incr: re-emit affected bodies", reemit));
     emit.phases.push(("incr: reassemble full output", reassemble));
+    // A codegen rejection (a newly-colliding synthetic name, a body an edit
+    // pushed over a LuaJIT frame limit) is recorded on the shared `CodegenCtx`
+    // rather than returned by `emit_named`, so it only surfaces where the sink
+    // is drained. `emit_full` and `emit_overlay` both drain; without this the
+    // incremental path would publish the rejected body and the diagnostic would
+    // appear at some later, unrelated emit
+    // (`docs/compiler-hygiene-lessons.md`, "The re-emit paths are THREE").
+    if let Some(err) = cache.cg.take_rejection() {
+        return Err(err);
+    }
     Ok(emit)
 }
 
