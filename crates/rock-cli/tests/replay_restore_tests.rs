@@ -3534,9 +3534,8 @@ fn replay_reports_its_own_costs() {
     );
 
     // Keyframe BYTES are only honest where real memory was imaged. Bitgun and
-    // bopt hold game buffers in addition to Stone's unavoidable storage floor;
-    // a minimal game proves that floor is measured rather than reported as a
-    // fictitious zero.
+    // bopt hold game buffers; a minimal game with no buffer declarations is
+    // the zero control that proves we do not invent storage.
     let seek_diag = &seeked["__stone_diag"];
     let bitgun_bytes = seek_diag["STONE_KEYFRAME_STORAGE_BYTES"].as_i64().expect("bitgun storage bytes");
     assert!(
@@ -3551,7 +3550,7 @@ fn replay_reports_its_own_costs() {
             "[package]\nname = \"replay_storage_floor\"\nversion = \"0.1.0\"\ntype = \"bin\"\n\n\
              [dependencies]\nstone = {{ path = \"{}\" }}\n\n\
              [build.vars]\nGIT_SHA = \"test\"\n",
-            workspace_root().parent().expect("repo root").join("stone").display()
+            workspace_root().join("stone").display()
         ),
     )
     .unwrap();
@@ -3567,10 +3566,9 @@ fn replay_reports_its_own_costs() {
     let minimal_diag = &minimal["__stone_diag"];
     let engine_floor = minimal_diag["STONE_KEYFRAME_STORAGE_BYTES"]
         .as_i64().expect("minimal Stone storage bytes");
-    assert!(
-        engine_floor > 0 && bitgun_bytes > engine_floor,
-        "Bitgun storage must exceed the nonzero Stone engine floor: floor={engine_floor} \
-         bitgun={bitgun_bytes} diag={minimal_diag}"
+    assert_eq!(
+        engine_floor, 0,
+        "a game with no buffer declarations must report a real zero: {minimal_diag}"
     );
 
     let bopt_log = dir.path().join("bopt.replay").to_string_lossy().into_owned();
@@ -3588,11 +3586,11 @@ fn replay_reports_its_own_costs() {
     let bytes = bopt["__stone_diag"]["STONE_KEYFRAME_STORAGE_BYTES"].as_i64().expect("storage bytes");
     assert!(
         bytes > engine_floor,
-        "bopt buffer storage must exceed the Stone engine floor {engine_floor}: {}",
+        "bopt buffer storage must exceed the zero control {engine_floor}: {}",
         bopt["__stone_diag"]
     );
     println!(
-        "[replay-costs] keyframe buffer storage: engine floor {engine_floor}B, \
+        "[replay-costs] keyframe buffer storage: zero control {engine_floor}B, \
          bitgun {bitgun_bytes}B, bopt {bytes}B"
     );
 }
