@@ -96,7 +96,8 @@ fn runner_footer(tests: &[skull::SkullTest]) -> String {
             Some(s) => lua_str(s),
             None => "nil".to_string(),
         };
-        f.push_str(&format!("__run({}, {})\n", lua_str(&t.name), exp));
+        // `__run` looks the fn up in `_G`, so it takes the EMITTED symbol.
+        f.push_str(&format!("__run({}, {})\n", lua_str(&t.symbol), exp));
     }
     f
 }

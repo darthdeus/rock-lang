@@ -714,16 +714,19 @@ pub fn coerce(gamma: &mut Gamma, from: TyId, to: TyId, span: Span) -> Result<(),
         TypeExpr::App { ctor: TypeCtor::Nominal(tname), params: tp },
     ) = (*gamma.get(from_r), *gamma.get(to_r))
     {
-        if fname.as_str() == "FieldRef"
-            && matches!(tname.as_str(), "ReadFieldRef" | "WriteFieldRef")
+        if bone_core::modules::is_intrinsic_key(fname, "FieldRef")
+            && bone_core::modules::is_intrinsic_key_in(
+                tname,
+                &["ReadFieldRef", "WriteFieldRef"],
+            )
         {
             let mut fi = fp.into_iter();
             let mut ti = tp.into_iter();
             let (ft, fv) = (from_r.with_idx(fi.next().unwrap()), from_r.with_idx(fi.next().unwrap()));
             let (tt, tv) = (to_r.with_idx(ti.next().unwrap()), to_r.with_idx(ti.next().unwrap()));
             unify(gamma, ft, tt, span)?;
-            return match tname.as_str() {
-                "WriteFieldRef" => unify(gamma, fv, tv, span),
+            return match bone_core::modules::is_intrinsic_key(tname, "WriteFieldRef") {
+                true => unify(gamma, fv, tv, span),
                 _ => coerce(gamma, fv, tv, span),
             };
         }
@@ -904,7 +907,7 @@ pub(crate) fn tuple_of(gamma: &mut Gamma, elems: &[TyId], span: Span) -> TyId {
     TyId::Local(idx)
 }
 
-pub(crate) fn coerce_to_interface(
+pub fn coerce_to_interface(
     gamma: &mut Gamma,
     from: TyId,
     iname: Ustr,
@@ -914,24 +917,77 @@ pub(crate) fn coerce_to_interface(
         CompilerError::new_with_label(span, format!("unknown interface `{iname}`"))
     })?;
 
-    let ifields: Vec<(Ustr, TyId)> = gamma.workspace.module(isid.module).structs[isid.def]
+    let ifields: Vec<(Ustr, TyId, NsVisibility)> = gamma.workspace.module(isid.module).structs[isid.def]
         .fields
         .iter()
-        .map(|f| (f.name, f.ty))
+        .map(|f| (f.name, f.ty, f.write_vis.clone()))
         .collect();
 
-    for (fname, fty) in ifields {
-        let actual = struct_field_ty(gamma, from, fname, span).map_err(|_| {
-            CompilerError::new_with_label(
-                span,
-                format!(
-                    "type {} does not have required field `{}` of interface `{}`",
-                    gamma.workspace.render(Some(&gamma.out), from),
-                    fname,
-                    iname
-                ),
-            )
+    let from_peeled = match *gamma.get(from) {
+        TypeExpr::App {
+            ctor: TypeCtor::Ref,
+            params,
+        } => {
+            let mut params = params;
+            if let Some(inner) = params.next() {
+                from.with_idx(inner)
+            } else {
+                from
+            }
+        }
+        _ => from,
+    };
+    let from_key = match *gamma.get(from_peeled) {
+        TypeExpr::App {
+            ctor: TypeCtor::Nominal(name),
+            ..
+        } => Some(name),
+        _ => None,
+    };
+
+    for (fname, fty, fwrite_vis) in ifields {
+        let actual = struct_field_ty(gamma, from, fname, span).map_err(|e| {
+            if e.message.contains("has no field") || e.message.contains("no struct has a field") {
+                CompilerError::new_with_label(
+                    span,
+                    format!(
+                        "type {} does not have required field `{}` of interface `{}`",
+                        gamma.workspace.render(Some(&gamma.out), from),
+                        fname,
+                        iname
+                    ),
+                )
+            } else {
+                e
+            }
         })?;
+
+        // Structural interface conformance capability check (spec 10.6):
+        // An external conversion cannot use a public getter to satisfy a publicly writable interface field.
+        if fwrite_vis == NsVisibility::Pub {
+            if let Some(skey) = from_key {
+                if gamma.workspace.interface_names.contains(&skey) {
+                    let from_sid = resolve_struct(gamma, skey).ok_or_else(|| {
+                        CompilerError::new_with_label(span, format!("unknown interface `{skey}`"))
+                    })?;
+                    let from_def = &gamma.workspace.module(from_sid.module).structs[from_sid.def];
+                    if let Some(ff) = from_def.fields.iter().find(|f| f.name == fname) {
+                        if ff.write_vis != NsVisibility::Pub {
+                            comp_error!(
+                                span,
+                                "field `{}` on interface `{}` is not writable",
+                                fname,
+                                skey
+                            );
+                        }
+                    }
+                } else {
+                    let site = gamma.access_site();
+                    field_access(gamma, skey, fname, site, FieldAccessNeed::Write)
+                        .map_err(|e| e.to_compiler_error(span))?;
+                }
+            }
+        }
 
         coerce(gamma, actual, fty, span)?;
     }

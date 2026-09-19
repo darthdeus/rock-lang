@@ -269,7 +269,7 @@ fn fold_const_expr(
         Expr::Int(i) => Some(Lit::Int(i)),
         Expr::Float(f) => Some(Lit::Float(f.into_inner())),
         Expr::Bool(b) => Some(Lit::Bool(b)),
-        Expr::UnaryMinus(inner) => match fold_const_expr(ws, module, body, inner, depth)? {
+        Expr::UnaryMinus(inner, _) => match fold_const_expr(ws, module, body, inner, depth)? {
             Lit::Int(i) => Some(Lit::Int(-i)),
             Lit::Float(f) => Some(Lit::Float(-f)),
             _ => None,

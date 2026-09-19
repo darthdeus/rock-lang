@@ -188,30 +188,35 @@ impl Builder<'_> {
             }
             crate::monoty::MonoTy::App {
                 ctor: crate::monoty::MonoCtor::Nominal(name), ..
-            } => match name.as_str() {
-                "Arena" => Some(ContainerPlan::for_type(
-                    self.ws,
-                    self.scx.target,
-                    &arena,
-                    ContainerFamily::Arena,
-                    mono,
-                )),
-                "NativeBuffer" => Some(ContainerPlan::for_type(
-                    self.ws,
-                    self.scx.target,
-                    &arena,
-                    ContainerFamily::NativeBuffer,
-                    mono,
-                )),
-                "FlatVec" => Some(ContainerPlan::for_type(
-                    self.ws,
-                    self.scx.target,
-                    &arena,
-                    ContainerFamily::FlatVec,
-                    mono,
-                )),
-                _ => None,
-            },
+            } => {
+                if bone_semantic::prelude::is_intrinsic_key(*name, "Arena") {
+                    Some(ContainerPlan::for_type(
+                        self.ws,
+                        self.scx.target,
+                        &arena,
+                        ContainerFamily::Arena,
+                        mono,
+                    ))
+                } else if bone_semantic::prelude::is_intrinsic_key(*name, "NativeBuffer") {
+                    Some(ContainerPlan::for_type(
+                        self.ws,
+                        self.scx.target,
+                        &arena,
+                        ContainerFamily::NativeBuffer,
+                        mono,
+                    ))
+                } else if bone_semantic::prelude::is_intrinsic_key(*name, "FlatVec") {
+                    Some(ContainerPlan::for_type(
+                        self.ws,
+                        self.scx.target,
+                        &arena,
+                        ContainerFamily::FlatVec,
+                        mono,
+                    ))
+                } else {
+                    None
+                }
+            }
             _ => None,
         };
         let Some(plan) = plan else { return Ok(None) };
@@ -315,7 +320,7 @@ impl Builder<'_> {
         self.ws.module(func.module).functions[func.func]
             .param_decls
             .get(i)
-            .is_some_and(|pd| pd.annotations.iter().any(|a| a.name.name == "repr"))
+            .is_some_and(|pd| pd.annotations.iter().any(|a| a.is_builtin("repr")))
     }
 
 
@@ -616,8 +621,12 @@ impl Builder<'_> {
                 let Some(shape) = plan.value_shape() else {
                     return Ok(None);
                 };
+                // Minted from the global's emitted SYMBOL, matching
+                // `state_schema::physical_leaf_names`: a v1 DefKey is not an
+                // identifier, and these leaves ARE emitted Lua globals.
+                let symbol = crate::mangle::symbol_of_key(name);
                 let leaves =
-                    (0..shape.leaf_count()).map(|i| nobox_global_leaf_name(name, i)).collect();
+                    (0..shape.leaf_count()).map(|i| nobox_global_leaf_name(symbol, i)).collect();
                 Ok(Some((leaves, Some(shape))))
             }
             Expr::FieldAccess { base, field } => {

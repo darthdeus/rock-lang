@@ -45,6 +45,26 @@ fn run_luajit(prog: &str) -> String {
     stdout
 }
 
+/// Two in-process emits of the same string/int statics must be byte-identical.
+/// A process-seeded Ustr hash in the init key made consecutive `rock compile`
+/// runs reset live static cells on every hot reload.
+const STRING_STATIC: &str = "\
+global RESULT: string = \"\"
+fn probe() -> string {
+    static label = \"hello\"
+    static n = -1
+    return label
+}
+fn main() { RESULT = probe() }
+";
+
+#[test]
+fn static_initializer_hash_is_reproducible_across_two_emits() {
+    let a = emit_program(STRING_STATIC);
+    let b = emit_program(STRING_STATIC);
+    assert_eq!(a, b, "two in-process emits of the same static inits must be byte-identical");
+}
+
 /// `probe()` reads a static `n` (init 42); when the DO_SET global is set it
 /// overwrites `n` to 99. So after a reload we can tell PRESERVE (still 99) from
 /// RESET (back to the initializer).

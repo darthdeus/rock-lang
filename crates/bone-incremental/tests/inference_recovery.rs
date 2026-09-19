@@ -132,7 +132,7 @@ fn main() {
     let b: int = \"bad two\"
 }
 ";
-    let mut s = Session::new(vec![], vec![]).expect("session");
+    let mut s = Session::new(vec![], vec![], &bone_core::modules::NsAliases::default()).expect("session");
     let _ = s.update_file("c.rock", src);
     let diags = s.diagnostics();
     assert!(

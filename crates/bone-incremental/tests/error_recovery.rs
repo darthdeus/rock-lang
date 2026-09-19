@@ -124,7 +124,7 @@ fn interface_error_then_fix_converges() {
     let broken = "fn f(p: Nonexistent) -> int { 1 }\nfn g() -> int { 2 }";
     let fixed = "fn f(p: int) -> int { p }\nfn g() -> int { 2 }";
 
-    let mut s = Session::new(vec![], vec![]).expect("session");
+    let mut s = Session::new(vec![], vec![], &bone_core::modules::NsAliases::default()).expect("session");
     let _ = s.update_file("c.rock", broken);
     assert!(!s.diagnostics().is_empty(), "broken signature reports the error");
 
@@ -142,7 +142,7 @@ fn interface_error_then_fix_converges() {
 #[test]
 fn recovered_body_error_surfaces_and_commits() {
     let src = "fn f() -> int {\n    let v: Nonexistent = 0\n    1\n}";
-    let mut s = Session::new(vec![], vec![]).expect("session");
+    let mut s = Session::new(vec![], vec![], &bone_core::modules::NsAliases::default()).expect("session");
     let _ = s.update_file("c.rock", src);
 
     assert!(
@@ -170,7 +170,7 @@ fn body_error_then_fix_converges() {
     let broken = "fn f() -> int {\n    let v: Nonexistent = 0\n    1\n}\nfn g() -> int { 2 }";
     let fixed = "fn f() -> int { 1 }\nfn g() -> int { 2 }";
 
-    let mut s = Session::new(vec![], vec![]).expect("session");
+    let mut s = Session::new(vec![], vec![], &bone_core::modules::NsAliases::default()).expect("session");
     let _ = s.update_file("c.rock", broken);
     assert!(!s.diagnostics().is_empty(), "broken edit reports the error");
 

@@ -150,11 +150,15 @@ impl TextureSlots {
 
 fn sampler_kind(ws: &Workspace, ty: TyId) -> Option<SamplerKind> {
     match ty_expr(ws, ty) {
-        Some(TypeExpr::App { ctor: TypeCtor::Nominal(n), .. }) => match n.as_str() {
-            "Sampler2D" => Some(SamplerKind::Float),
-            "ISampler2D" => Some(SamplerKind::Int),
-            _ => None,
-        },
+        Some(TypeExpr::App { ctor: TypeCtor::Nominal(n), .. }) => {
+            if bone_semantic::prelude::is_intrinsic_key(n, "Sampler2D") {
+                Some(SamplerKind::Float)
+            } else if bone_semantic::prelude::is_intrinsic_key(n, "ISampler2D") {
+                Some(SamplerKind::Int)
+            } else {
+                None
+            }
+        }
         _ => None,
     }
 }
@@ -434,13 +438,19 @@ pub fn wire_kind(ws: &Workspace, ty: TyId) -> Option<WireKind> {
         Some(TypeExpr::Builtin(BuiltinTy::Int)) => Some(WireKind::I32),
         Some(TypeExpr::Builtin(BuiltinTy::Uint)) => Some(WireKind::U32),
         Some(TypeExpr::Builtin(BuiltinTy::Bool)) => Some(WireKind::Bool32),
-        Some(TypeExpr::App { ctor: TypeCtor::Nominal(n), .. }) => match n.as_str() {
-            "Vec2" => Some(WireKind::F32x2),
-            "Vec3" => Some(WireKind::F32x3),
-            "Vec4" => Some(WireKind::F32x4),
-            "Mat4" => Some(WireKind::Mat4),
-            _ => None,
-        },
+        Some(TypeExpr::App { ctor: TypeCtor::Nominal(n), .. }) => {
+            if bone_semantic::prelude::is_intrinsic_key(n, "Vec2") {
+                Some(WireKind::F32x2)
+            } else if bone_semantic::prelude::is_intrinsic_key(n, "Vec3") {
+                Some(WireKind::F32x3)
+            } else if bone_semantic::prelude::is_intrinsic_key(n, "Vec4") {
+                Some(WireKind::F32x4)
+            } else if bone_semantic::prelude::is_intrinsic_key(n, "Mat4") {
+                Some(WireKind::Mat4)
+            } else {
+                None
+            }
+        }
         _ => None,
     }
 }
@@ -503,7 +513,10 @@ pub fn uniform_group_members(
                 .unwrap_or_else(|| "that type".to_string());
             // A sampler is the one non-wire field with an obvious fix, and
             // putting the texture beside the scalars is a plausible mistake.
-            if matches!(ty_name.as_str(), "Sampler2D" | "ISampler2D") {
+            if bone_semantic::prelude::is_intrinsic_key_in(
+                Ustr::from(ty_name.as_str()),
+                &["Sampler2D", "ISampler2D"],
+            ) {
                 return Err(err(
                     fd.span,
                     format!(
@@ -778,12 +791,17 @@ fn attr_kind(ws: &Workspace, ty: TyId) -> Option<AttrKind> {
     match ty_expr(ws, ty) {
         Some(TypeExpr::Builtin(BuiltinTy::Float)) => Some(AttrKind::F32),
         Some(TypeExpr::Builtin(BuiltinTy::Int)) => Some(AttrKind::I32),
-        Some(TypeExpr::App { ctor: TypeCtor::Nominal(n), .. }) => match n.as_str() {
-            "Vec2" => Some(AttrKind::F32x2),
-            "Vec3" => Some(AttrKind::F32x3),
-            "Vec4" => Some(AttrKind::F32x4),
-            _ => None,
-        },
+        Some(TypeExpr::App { ctor: TypeCtor::Nominal(n), .. }) => {
+            if bone_semantic::prelude::is_intrinsic_key(n, "Vec2") {
+                Some(AttrKind::F32x2)
+            } else if bone_semantic::prelude::is_intrinsic_key(n, "Vec3") {
+                Some(AttrKind::F32x3)
+            } else if bone_semantic::prelude::is_intrinsic_key(n, "Vec4") {
+                Some(AttrKind::F32x4)
+            } else {
+                None
+            }
+        }
         _ => None,
     }
 }

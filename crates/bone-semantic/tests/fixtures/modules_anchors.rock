@@ -1,0 +1,386 @@
+//! A fragment's explicit import that lands on a module is a path anchor for
+//! that fragment (spec 8.1: `use p::m as m;`, `use p::m::{self, x};`), and a
+//! module's named export binding that lands on a module is a module member
+//! (spec 8.6). A path through either is checked as it is written: the
+//! import's own path from the fragment, then each later segment and the
+//! final member from the fragment, never the canonical parent path a second
+//! time. An imported module name that clashes with a child module, a
+//! dependency alias or the package's own name is a diagnostic, never a
+//! silent pick; `self`, `super` and `std` are reserved.
+//!
+//! Sections hold embedded files: `//-- <file> @pkg=<self_name>,<id> [@v1]`.
+
+//- an_alias_of_a_child_module_anchors_a_path
+//-- lib.rock @pkg=chess,1 @v1
+use inner as renamed;
+
+fn f() -> int {
+    let n = renamed::ply()
+            //^ int
+    n
+}
+
+//-- lib_inner.rock @pkg=chess,1 @v1
+pub mod inner;
+
+pub fn ply() -> int {
+    1
+}
+
+//- an_alias_of_a_dependency_module_anchors_types_variants_literals_and_patterns
+//-- lib.rock @pkg=geo,1 @v1
+pub mod shapes;
+
+//-- lib_shapes.rock @pkg=geo,1 @v1
+mod shapes;
+
+pub struct Pt {
+    pub x: int,
+}
+
+pub enum Kind {
+    Round,
+    Sharp(int),
+}
+
+pub fn origin() -> Pt {
+    Pt { x: 0 }
+}
+
+//-- app.rock @pkg=app,2 @v1
+use geo::shapes as s;
+
+fn describe(p: s::Pt, k: s::Kind) -> int {
+    let q = s::Pt { x: p.x }
+    let o = s::origin()
+    let kind = s::Kind::Sharp(2)
+    let echoed = kind
+       //^ geo::shapes::Kind
+    let n = match k {
+        s::Kind::Sharp(d) => d,
+                          //^ int
+        s::Kind::Round => q.x + o.x,
+    }
+    n
+}
+
+//- a_self_leaf_binds_the_module_under_its_last_segment
+//-- lib_inner.rock @pkg=chess,1 @v1
+mod inner;
+
+pub fn ply() -> int {
+    1
+}
+
+pub fn depth() -> string {
+    "deep"
+}
+
+//-- lib_c.rock @pkg=chess,1 @v1
+mod c;
+
+use super::inner::{self, ply};
+
+fn f() -> string {
+    let n = ply()
+            //^ int
+    let d = inner::depth()
+            //^ string
+    d
+}
+
+//- a_self_leaf_with_an_alias_binds_the_alias
+//-- lib_inner.rock @pkg=chess,1 @v1
+mod inner;
+
+pub fn depth() -> string {
+    "deep"
+}
+
+//-- lib_c.rock @pkg=chess,1 @v1
+mod c;
+
+use super::inner::{self as i};
+
+fn f() -> string {
+    let d = i::depth()
+            //^ string
+    d
+}
+
+//- a_use_and_a_glob_through_a_module_alias
+//-- lib.rock @pkg=chess,1 @v1
+use inner as r;
+use r::depth;
+use r::deeper::*;
+
+fn f() -> string {
+    let d = depth()
+            //^ string
+    let n = bottom()
+            //^ int
+    d
+}
+
+//-- lib_inner.rock @pkg=chess,1 @v1
+pub mod inner;
+
+pub fn depth() -> string {
+    "deep"
+}
+
+//-- lib_inner_deeper.rock @pkg=chess,1 @v1
+pub mod inner::deeper;
+
+pub fn bottom() -> int {
+    9
+}
+
+//- a_path_through_a_module_alias_checks_the_member_access @fail=`secret` is not accessible from this module
+//-- lib.rock @pkg=geo,1 @v1
+pub mod shapes;
+
+//-- lib_shapes.rock @pkg=geo,1 @v1
+mod shapes;
+
+fn secret() -> int {
+    1
+}
+
+//-- app.rock @pkg=app,2 @v1
+use geo::shapes as s;
+
+fn f() -> int {
+    s::secret()
+}
+
+//- an_alias_of_an_inaccessible_module_is_diagnosed_at_the_use @fail=invalid `use` target: module `hidden` is not accessible from this module
+//-- lib_hidden.rock @pkg=geo,1 @v1
+mod hidden;
+
+pub fn ply() -> int {
+    1
+}
+
+//-- app.rock @pkg=app,2 @v1
+use geo::hidden as h;
+
+fn f() -> int {
+    h::ply()
+}
+
+//- a_pub_use_of_a_module_is_a_module_member_of_its_facade
+//-- lib.rock @pkg=geo,1 @v1
+pub use self::inner as api;
+
+//-- lib_inner.rock @pkg=geo,1 @v1
+mod inner;
+
+pub fn ply() -> int {
+    1
+}
+
+pub enum Kind {
+    Round,
+}
+
+//-- app.rock @pkg=app,2 @v1
+use geo::api::*;
+use geo::api as a;
+
+fn f() -> int {
+    let n = geo::api::ply()
+            //^ int
+    let m = ply() + a::ply()
+            //^ int
+    let k = geo::api::Kind::Round
+    n
+}
+
+//- a_module_reexport_is_a_member_for_its_own_module_too
+//-- lib.rock @pkg=geo,1 @v1
+pub use inner as api;
+
+fn f() -> int {
+    let n = api::ply()
+            //^ int
+    n
+}
+
+//-- lib_inner.rock @pkg=geo,1 @v1
+mod inner;
+
+pub fn ply() -> int {
+    1
+}
+
+//- a_package_restricted_module_reexport_is_not_a_member_for_another_package @fail=module `api` is not accessible from this module
+//-- lib.rock @pkg=geo,1 @v1
+pub(package) use self::inner as api;
+
+//-- lib_inner.rock @pkg=geo,1 @v1
+mod inner;
+
+pub fn ply() -> int {
+    1
+}
+
+//-- app.rock @pkg=app,2 @v1
+fn f() -> int {
+    geo::api::ply()
+}
+
+//- a_module_import_that_repeats_its_own_child_is_not_a_clash
+//-- lib.rock @pkg=chess,1 @v1
+use inner;
+use chess::inner::{self};
+
+fn f() -> int {
+    inner::ply()
+}
+
+//-- lib_inner.rock @pkg=chess,1 @v1
+pub mod inner;
+
+pub fn ply() -> int {
+    1
+}
+
+//- a_module_alias_that_names_a_child_module_is_diagnosed @fail=`use` binds `other` to module `chess::inner`, but `other` is also a child module of this module
+//-- lib.rock @pkg=chess,1 @v1
+use inner as other;
+
+//-- lib_inner.rock @pkg=chess,1 @v1
+pub mod inner;
+
+pub fn ply() -> int {
+    1
+}
+
+//-- lib_other.rock @pkg=chess,1 @v1
+pub mod other;
+
+pub fn ply() -> int {
+    2
+}
+
+//- a_module_alias_that_names_a_dependency_is_diagnosed @fail=`use` binds `geo` to module `app::inner`, but `geo` is also a dependency alias
+//-- lib.rock @pkg=geo,1 @v1
+pub fn ply() -> int {
+    1
+}
+
+//-- app.rock @pkg=app,2 @v1
+use inner as geo;
+
+//-- app_inner.rock @pkg=app,2 @v1
+pub mod inner;
+
+pub fn ply() -> int {
+    2
+}
+
+//- a_module_alias_that_names_the_package_is_diagnosed @fail=`use` binds `app` to module `app::inner`, but `app` is also this package's name
+//-- app.rock @pkg=app,2 @v1
+use inner as app;
+
+//-- app_inner.rock @pkg=app,2 @v1
+pub mod inner;
+
+pub fn ply() -> int {
+    2
+}
+
+//- a_module_reexport_that_names_a_child_module_is_diagnosed @fail=`use` binds `other` to module `chess::inner`, but `other` is also a child module of this module
+//-- lib.rock @pkg=chess,1 @v1
+pub use inner as other;
+
+//-- lib_inner.rock @pkg=chess,1 @v1
+pub mod inner;
+
+pub fn ply() -> int {
+    1
+}
+
+//-- lib_other.rock @pkg=chess,1 @v1
+pub mod other;
+
+pub fn ply() -> int {
+    2
+}
+
+//- two_imports_of_different_modules_under_one_name_are_diagnosed @fail=`m` is imported from several modules
+//-- lib_a.rock @pkg=chess,1 @v1
+mod a;
+
+pub fn ply() -> int {
+    1
+}
+
+//-- lib_b.rock @pkg=chess,1 @v1
+mod b;
+
+pub fn ply() -> int {
+    2
+}
+
+//-- lib_c.rock @pkg=chess,1 @v1
+mod c;
+
+use super::a as m;
+use super::b as m;
+
+fn f() -> int {
+    m::ply()
+}
+
+//- self_is_reserved_as_an_import_alias @fail=`self` is a reserved path root and cannot name an import
+//-- lib.rock @pkg=chess,1 @v1
+use inner as self;
+
+//-- lib_inner.rock @pkg=chess,1 @v1
+pub mod inner;
+
+pub fn ply() -> int {
+    1
+}
+
+//- super_is_reserved_as_an_import_alias @fail=`super` is a reserved path root and cannot name an import
+//-- lib.rock @pkg=chess,1 @v1
+use inner::ply as super;
+
+//-- lib_inner.rock @pkg=chess,1 @v1
+pub mod inner;
+
+pub fn ply() -> int {
+    1
+}
+
+//- std_is_reserved_as_an_import_alias @fail=`std` is a reserved path root and cannot name an import
+//-- lib.rock @pkg=chess,1 @v1
+use inner as std;
+
+//-- lib_inner.rock @pkg=chess,1 @v1
+pub mod inner;
+
+pub fn ply() -> int {
+    1
+}
+
+//- an_import_alias_cycle_names_no_module @fail=invalid `use` target: `a` did not resolve to any definition or module
+//-- lib.rock @pkg=chess,1 @v1
+use a as b;
+use b as a;
+
+fn f() -> int {
+    a::ply()
+}
+
+//- a_module_reexport_cycle_is_diagnosed_at_use @fail=circular `use` binding with no defining target
+//-- lib.rock @pkg=chess,1 @v1
+pub use a as b;
+pub use b as a;
+
+fn f() -> int {
+    a::ply()
+}

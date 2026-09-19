@@ -46,6 +46,8 @@ mod line_index;
 mod macro_call_site_sentinel;
 #[path = "macro_goto_definition.rs"]
 mod macro_goto_definition;
+#[path = "modules_v1.rs"]
+mod modules_v1;
 #[path = "noncanonical_path.rs"]
 mod noncanonical_path;
 #[path = "phantom_block_sentinel.rs"]

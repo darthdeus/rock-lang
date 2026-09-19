@@ -81,6 +81,25 @@ pub enum MonoTy {
     Function { params: Vec<MonoTy>, ret: Box<MonoTy> },
 }
 
+/// How a nominal constructor's name is spelled inside a canonical encoding.
+///
+/// A v1 nominal's name is its DefKey (`<package>::<module path>::<Name>`).
+/// That IS the type's stable identity, and it is also the text a specialized
+/// body's emitted SYMBOL is built from -- two roles for one string, and a
+/// DefKey is not an identifier in any backend's grammar. One traversal serves
+/// both; this is the only thing the two spellings may disagree about, so a
+/// symbol and an identity can differ about a type's NAME but never about its
+/// shape.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum NominalSpelling {
+    /// The DefKey, for a stable identity.
+    Key,
+    /// The DefKey's identifier form (`<Name>_<digest>`), for an emitted symbol.
+    /// A legacy key has no prefix and passes through unchanged, so legacy
+    /// symbols are byte-identical under either spelling.
+    Symbol,
+}
+
 impl MonoTy {
     /// A readable spelling of the type, for manifests, censuses and messages.
     ///
@@ -190,7 +209,8 @@ impl MonoTy {
     ///
     /// This is also the encoding a specialized body's emitted symbol is built
     /// from ([`crate::mangle::spec_fn_name`]), so identity and symbol cannot
-    /// drift apart.
+    /// drift apart -- one traversal, with [`NominalSpelling`] the only thing
+    /// the two roles disagree about.
     pub fn canonical(&self) -> String {
         let mut s = String::new();
         self.write_canonical(&mut s);
@@ -198,6 +218,10 @@ impl MonoTy {
     }
 
     pub(crate) fn write_canonical(&self, out: &mut String) {
+        self.write_canonical_as(out, NominalSpelling::Key);
+    }
+
+    pub(crate) fn write_canonical_as(&self, out: &mut String, spelling: NominalSpelling) {
         let prim = |out: &mut String, name: &str| {
             out.push_str("p_");
             out.push_str(name);
@@ -216,7 +240,7 @@ impl MonoTy {
             // collide on one symbol.
             MonoTy::Nullable(inner) => {
                 out.push_str("o_");
-                inner.write_canonical(out);
+                inner.write_canonical_as(out, spelling);
             }
             // Length-prefixed and terminated like `App`, so `(A, B)` cannot
             // encode the same as a one-slot tuple of something that encodes as
@@ -226,7 +250,7 @@ impl MonoTy {
                 out.push_str(&parts.len().to_string());
                 for part in parts {
                     out.push('_');
-                    part.write_canonical(out);
+                    part.write_canonical_as(out, spelling);
                 }
                 out.push_str("_z");
             }
@@ -237,17 +261,24 @@ impl MonoTy {
                     MonoCtor::Map => out.push('m'),
                     MonoCtor::Ref => out.push('r'),
                     MonoCtor::Nominal(name) => {
+                        // A v1 nominal's name is its DefKey. The length prefix
+                        // measures the SPELLED text, so the encoding stays
+                        // self-delimiting under either spelling.
+                        let spelled = match spelling {
+                            NominalSpelling::Key => std::borrow::Cow::Borrowed(name.as_str()),
+                            NominalSpelling::Symbol => crate::mangle::ident_of_key(name.as_str()),
+                        };
                         out.push('n');
-                        out.push_str(&name.len().to_string());
+                        out.push_str(&spelled.len().to_string());
                         out.push('_');
-                        out.push_str(name.as_str());
+                        out.push_str(&spelled);
                     }
                 }
                 out.push('_');
                 out.push_str(&params.len().to_string());
                 for param in params {
                     out.push('_');
-                    param.write_canonical(out);
+                    param.write_canonical_as(out, spelling);
                 }
                 out.push_str("_z");
             }
@@ -259,10 +290,10 @@ impl MonoTy {
                 out.push_str(&params.len().to_string());
                 for param in params {
                     out.push('_');
-                    param.write_canonical(out);
+                    param.write_canonical_as(out, spelling);
                 }
                 out.push('_');
-                ret.write_canonical(out);
+                ret.write_canonical_as(out, spelling);
                 out.push_str("_z");
             }
         }

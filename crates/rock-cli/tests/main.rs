@@ -14,6 +14,16 @@ mod allocation_jit_trace_gate;
 mod bone_incremental_timing;
 #[path = "completions_cli.rs"]
 mod completions_cli;
+#[path = "modules_audit.rs"]
+mod modules_audit;
+#[path = "modules_emit.rs"]
+mod modules_emit;
+#[path = "modules_migrate.rs"]
+mod modules_migrate;
+#[path = "modules_fix.rs"]
+mod modules_fix;
+#[path = "modules_witness.rs"]
+mod modules_witness;
 #[path = "sound_inspect_cli.rs"]
 mod sound_inspect_cli;
 #[path = "glsl_backend_ratchet.rs"]
@@ -60,6 +70,9 @@ mod replay_profile_tests;
 mod replay_profile_report_tests;
 #[path = "package.rs"]
 mod package;
+
+#[path = "modules_graph.rs"]
+mod modules_graph;
 #[path = "fire_manifest.rs"]
 mod fire_manifest;
 #[path = "fire_asset_archive.rs"]

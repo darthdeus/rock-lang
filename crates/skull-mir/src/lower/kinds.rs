@@ -30,7 +30,7 @@ impl Builder<'_> {
                 payload,
                 MonoTy::App {
                     ctor: crate::monoty::MonoCtor::Nominal(n), ..
-                } if n.as_str() == "FlatVec"
+                } if bone_semantic::prelude::is_intrinsic_key(*n, "FlatVec")
             );
         }
         false
@@ -46,11 +46,15 @@ impl Builder<'_> {
         let family = match concrete.peel_nullable().0 {
             MonoTy::App {
                 ctor: crate::monoty::MonoCtor::Nominal(name), ..
-            } => match name.as_str() {
-                "NativeBuffer" => ContainerFamily::NativeBuffer,
-                "FlatVec" => ContainerFamily::FlatVec,
-                _ => return Ok(None),
-            },
+            } => {
+                if bone_semantic::prelude::is_intrinsic_key(*name, "NativeBuffer") {
+                    ContainerFamily::NativeBuffer
+                } else if bone_semantic::prelude::is_intrinsic_key(*name, "FlatVec") {
+                    ContainerFamily::FlatVec
+                } else {
+                    return Ok(None);
+                }
+            }
             _ => return Ok(None),
         };
         let arena = self.scx.rep_arena();
@@ -270,7 +274,7 @@ impl Builder<'_> {
                 MonoTy::App {
                     ctor: crate::monoty::MonoCtor::Nominal(name),
                     ..
-                } if is_native_buffer(name.as_str()) => Ok(self.nb_kind(base)?),
+                } if is_native_buffer(*name) => Ok(self.nb_kind(base)?),
                 _ => Err(self.gap_here("concrete type is not an indexable container")),
             };
         }

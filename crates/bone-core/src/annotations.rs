@@ -59,6 +59,12 @@ fn validate_one(
     deco_names: &FxHashSet<Ustr>,
 ) -> Result<(), CompilerError> {
     let name = anno.name.name;
+    if let Some(resolved_name) = anno.resolved_name {
+        if deco_names.contains(&resolved_name) {
+            return at(anno, pos, AnnoPos::FnItem);
+        }
+        comp_error!(anno.span, "unknown annotation `@{name}` (registry: docs/annotations-design.md)");
+    }
     match name.as_str() {
         "test" => {
             at(anno, pos, AnnoPos::FnItem)?;
@@ -333,7 +339,7 @@ pub fn validate_param_repr_against_body(
     }
     for pd in param_decls {
         for anno in &pd.annotations {
-            if anno.name.name == "repr" {
+            if anno.is_builtin("repr") {
                 comp_error!(
                     anno.span,
                     "`@repr(opaque)` applies to a parameter of an `inline(..)` or \

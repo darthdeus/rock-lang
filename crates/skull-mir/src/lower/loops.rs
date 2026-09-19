@@ -396,7 +396,7 @@ impl Builder<'_> {
                 .peel_nullable()
                 .0
                 .nominal()
-                .is_some_and(|name| name.as_str() == "Arena");
+                .is_some_and(|name| bone_semantic::prelude::is_intrinsic_key(name, "Arena"));
         }
         false
     }

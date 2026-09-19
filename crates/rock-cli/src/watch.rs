@@ -9,14 +9,19 @@ fn is_compiler_crate_dir(name: &str) -> bool {
 
 fn resolve_stone_watch_path(project: &str) -> PathBuf {
     let project_path = Path::new(project);
-    if let Ok(Some((config_path, config))) = rock_host::stick::StickConfig::find_from_dir(project_path) {
-        if config.dependencies.contains_key("stone") {
-            let root_path = config_path.parent().unwrap_or(&config_path).to_path_buf();
-            let mut resolver = rock_host::stick::resolver::DependencyResolver::new(root_path);
-            if let Ok(resolved) = resolver.resolve(&config) {
-                if let Some(stone_dep) = resolved.into_iter().find(|d| d.name == "stone") {
-                    return stone_dep.path;
-                }
+    if let Ok(Some((config_path, _config))) = rock_host::stick::StickConfig::find_from_dir(project_path) {
+        if let Ok(graph) = rock_host::stick::graph::PackageGraph::build(&
+            config_path.parent().unwrap_or(&config_path),
+        ) {
+            // The dependency key "stone" as written in this project's
+            // manifest, resolved through the same graph every loader uses.
+            if let Some(edge) = graph
+                .package(graph.root())
+                .dependencies
+                .iter()
+                .find(|e| e.declared_key == "stone")
+            {
+                return graph.package(edge.target).root.clone();
             }
         }
     }
